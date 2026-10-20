@@ -39,6 +39,11 @@ export interface ToolUseStep {
   template: string | null;
   /** Readable, secret-free description of the step with input values masked. */
   detail: string;
+  /**
+   * The whole page or inline script of a code step (secret-free, bounded): the evidence a Toolchain is built from. A selector in
+   * a Playwright script (getByRole, locator) is what the tool reproduces; a 500-character detail cannot carry it.
+   */
+  code?: string;
   count: number;
   error: boolean;
 }
@@ -156,7 +161,13 @@ const LOOK = new Set(["browser_snapshot", "browser_find", "browser_take_screensh
   "browser_console_messages", "browser_skill_list", "browser_handle_dialog"]);
 const NEUTRAL = new Set(["browser_tabs", "browser_resize", "browser_close", "browser_emulate_media"]);
 
-interface Shaped { op: StepOp; template: string | null; detail: string }
+interface Shaped { op: StepOp; template: string | null; detail: string; code?: string }
+
+/** A script kept as evidence: bounded, and dropped entirely when it holds a secret-shaped value. */
+function evidenceCode(code: string | null | undefined): { code?: string } {
+  if (!code || !code.trim() || looksSecret(code)) return {};
+  return { code: code.length > TOOL_USE_EPISODE_POLICY.maxScriptChars ? code.slice(0, TOOL_USE_EPISODE_POLICY.maxScriptChars) : code };
+}
 
 function browserStep(tool: string, args: Record<string, unknown> | null): Shaped | null {
   const a = args ?? {};
@@ -193,7 +204,7 @@ function browserStep(tool: string, args: Record<string, unknown> | null): Shaped
     case "browser_drag": return { op: "drag", template: null, detail: "drag" };
     case "browser_evaluate": case "browser_run_code_unsafe": case "browser_run_code": {
       const code = typeof a.function === "string" ? a.function : typeof a.code === "string" ? a.code : "";
-      return { op: "code", template: codeTemplate(code), detail: safeDetail(`run page script: ${code}`) };
+      return { op: "code", template: codeTemplate(code), detail: safeDetail(`run page script: ${code}`), ...evidenceCode(code) };
     }
     case "browser_skill_replay": {
       const name = typeof a.name === "string" ? a.name.slice(0, 80) : "?";
@@ -310,7 +321,7 @@ function shellSteps(command: string): Array<Shaped & { surface: string }> {
         const body = rest[flagIndex] === "-" ? heredoc : rest[flagIndex + 1] ?? null;
         // An inline script is its own tool: the surface carries the script's hash, so only the same script grouped together counts.
         const template = body === null ? null : codeTemplate(body);
-        if (template) steps.push({ surface: `inline:${program}#${template}`, op: "inline", template, detail: safeDetail(`run inline ${program} script: ${body}`) });
+        if (template) steps.push({ surface: `inline:${program}#${template}`, op: "inline", template, detail: safeDetail(`run inline ${program} script: ${body}`), ...evidenceCode(body) });
       }
       continue;
     }
@@ -341,7 +352,8 @@ export function buildToolUseEpisodes(run: { runId: string; chatId: string | null
     entry.total++; if (call.isError) entry.errors++;
     const last = entry.steps.at(-1);
     if (last && last.op === shaped.op && last.template === shaped.template) { last.count++; last.error = last.error || call.isError; return; }
-    if (entry.steps.length < TOOL_USE_EPISODE_POLICY.maxStepsPerEpisode) entry.steps.push({ op: shaped.op, template: shaped.template, detail: shaped.detail, count: 1, error: call.isError });
+    if (entry.steps.length < TOOL_USE_EPISODE_POLICY.maxStepsPerEpisode) entry.steps.push({ op: shaped.op, template: shaped.template, detail: shaped.detail,
+      ...(shaped.code ? { code: shaped.code } : {}), count: 1, error: call.isError });
   };
   for (const call of calls) {
     const tool = normalizeToolName(call.name);

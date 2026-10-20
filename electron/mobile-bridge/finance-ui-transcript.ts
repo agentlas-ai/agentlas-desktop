@@ -43,7 +43,9 @@ export async function mergeMobileInlineUiTranscript(chatId: string, history: rea
           if (!binding || binding.kind !== 'native-port' || binding.chatId !== chatId || binding.runId !== instance.turnId || binding.callId !== instance.callId
             || binding.ownerScope !== ownerScope || typeof binding.operationId !== 'string' || !/^finance\.[a-z.]+$/.test(binding.operationId)
             || typeof data.storedSha256 !== 'string' || !/^[a-f0-9]{64}$/.test(data.storedSha256) || typeof data.content !== 'string'
-            || typeof data.totalChars !== 'number' || !Number.isInteger(data.totalChars) || data.totalChars < 1 || data.totalChars > 256 * 1024) throw new Error('finance_result_binding_invalid');
+            || typeof data.totalChars !== 'number' || !Number.isInteger(data.totalChars) || data.totalChars < 1) throw new Error('finance_result_binding_invalid');
+          // A genuine result past the display budget gets the same line as one that runs out of budget while it is read, not silence.
+          if (data.totalChars > 256 * 1024) throw new Error('finance_result_budget');
           const nextStamp = JSON.stringify([binding, data.storedSha256, data.totalChars]);
           if (stamp && stamp !== nextStamp) throw new Error('finance_result_changed');
           stamp = nextStamp;

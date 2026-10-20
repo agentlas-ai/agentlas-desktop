@@ -37,6 +37,8 @@ const DENIED: Array<[RegExp, string, AppControlEffect]> = [
   // One's own run plumbing: it has dedicated tools for these.
   [/^(invoke|oneSupervisor|oneHarness|oneWindow|oneContext|workStart|oneTeamPreflight|attention)\./, "One's own conversation plumbing; use the one_supervisor_* / one_team_* tools", "write"],
   [/^chats\.appendOneUserMessage$/, "never write a message as the owner", "write"],
+  // A model saves a graph through one_graph_save, which checks that the work comes back and is not a tool or a copy.
+  [/^automations\.(createFromBlueprint|updateGraph)$/, "save graphs through one_graph_save, which checks the work comes back and is not a tool", "write"],
   [/^oneDiscussion\.(post|stop|setEnabled)$/, "the owner's own room screen opens, stops and configures a group discussion; never speak as the owner", "write"],
   [/^science\.composer\./, "use one_supervisor_start_science / one_supervisor_control to work in Science", "write"],
   // Views, live frames, watchers and leases belong to a screen that opened them.
@@ -103,7 +105,7 @@ const EXPLICIT_READ_PATHS: ReadonlySet<string> = new Set([
   // science-host/workbook-intake-ipc.ts
   "science.datasets.workbook",
   // toolchains/ipc.ts
-  "toolchains.assetHistory", "toolchains.assetRuns", "toolchains.logos",
+  "toolchains.assetHistory", "toolchains.assetRuns",
 ]);
 const EXPLICIT_WRITE_PATHS: ReadonlySet<string> = new Set([
   // agent-mail/ipc.ts
@@ -129,11 +131,11 @@ const EXPLICIT_WRITE_PATHS: ReadonlySet<string> = new Set([
   "agentRuntime.set", "agents.setBookmark", "appFactory.materializeAssets", "appFactory.openLaunchTarget", "appFactory.restore",
   "appFactory.runAutopilot", "appFactory.runProviderTasks", "appFactory.runSmoke", "appFactory.scaffold", "appFactory.syncCloudManifest",
   "appFactory.syncProviderBrowserResults", "automations.acknowledgeAttention", "automations.acknowledgeRun", "automations.applyBuildRecovery",
-  "automations.applyFix", "automations.applyGraphPatch", "automations.create", "automations.createFromBlueprint", "automations.interviewGraph",
+  "automations.applyFix", "automations.applyGraphPatch", "automations.create", "automations.interviewGraph",
   "automations.openAccessibilitySettings", "automations.planFix", "automations.proposeChecklistFromExample", "automations.proposeGraphPatch",
   "automations.reconcileGraph", "automations.reconcileTriggerEvent", "automations.recordEvalCorrection", "automations.requestGraphPatch",
   "automations.restoreGraphVersion", "automations.runNow", "automations.swapAgent", "automations.swapProvider", "automations.toggle",
-  "automations.update", "automations.updateGraph", "browser.markSession", "browser.saveSite", "chats.create", "chats.defineGoal", "chats.markViewed",
+  "automations.update", "browser.markSession", "browser.saveSite", "chats.create", "chats.defineGoal", "chats.markViewed",
   "chats.openOneMember", "chats.rename", "chats.requestGoalRuntimeSelection", "chats.reviseGoal", "chats.setContinuousMode", "chats.setGoalMode",
   "chats.setRuntimeSelection", "chats.setSwarmMode", "chats.unarchive", "cloudAgents.saveBuiltPrivate", "cloudAgents.savePrivate",
   "cloudAgents.saveRegisteredPrivate", "computerHistory.prepareDraft", "config.setCustomBaseUrl", "config.setTerminalProfiles", "document.exportPdf",
@@ -199,7 +201,7 @@ const EXPLICIT_WRITE_PATHS: ReadonlySet<string> = new Set([
   // science-host/workbook-intake-ipc.ts
   "science.datasets.projectWorkbook",
   // toolchains/ipc.ts
-  "toolchains.addVersion", "toolchains.createAsset", "toolchains.generateAsset", "toolchains.refresh", "toolchains.runAsset",
+  "toolchains.addVersion", "toolchains.createAsset", "toolchains.generateAsset", "toolchains.runAsset",
 ]);
 
 // Denied operations: the denial stays (see DENIED). These say what the operation does, so a denied read is not

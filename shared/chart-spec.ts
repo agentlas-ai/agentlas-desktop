@@ -430,7 +430,8 @@ function tightQuantitativeDomains(spec: Record<string, unknown>): Record<string,
       const stackable = (unit.mark === "bar" || unit.mark === "area")
         && !unit.encoding[channel === "y" ? "xOffset" : "yOffset"]
         && (unit.encoding.color || unit.encoding.detail) && d.stack !== null && d.stack !== false;
-      if (!unit.values || typeof d.field !== "string" || d.aggregate || d.bin || d.stack || stackable
+      // scale:null 채널은 값이 곧 화면 좌표다 — 계산한 domain 을 씌우지 않는다.
+      if (!unit.values || typeof d.field !== "string" || d.aggregate || d.bin || d.stack || stackable || d.scale === null
         || scale.domain !== undefined || scale.nice !== undefined || scale.domainMin !== undefined || scale.domainMax !== undefined
         || (scale.type !== undefined && scale.type !== "linear")
         || (axis && (axis.values !== undefined || axis.tickCount !== undefined))) { usable = false; break; }

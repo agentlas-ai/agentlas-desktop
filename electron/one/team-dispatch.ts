@@ -271,6 +271,24 @@ export function oneTeamDispatchAllowedFor(chatId: string | null | undefined): bo
   return oneTeamDispatchOwnerChat(chatId) !== null;
 }
 
+/**
+ * A teammate's own work: a session One handed work to, or a teammate's own conversation. This is where the hand work happens
+ * (chats that drive an app by hand are One rooms or teammate sessions),
+ * so a teammate uses callable Toolchains like a Work task does. It never gets One's authoring or dispatch tools.
+ */
+export function isOneTeammateChat(chatId: string | null | undefined): boolean {
+  if (!chatId || oneTeamDispatchOwnerChat(chatId) !== null) return false;
+  try {
+    const chat = runtime().chats.getChat(chatId);
+    if (!chat || chat.archivedAt || chat.originSurface !== "one") return false;
+    if (chat.agentId && memberAgentIds().has(chat.agentId)) return true;
+    ensureTable();
+    return Boolean(getDb().prepare("SELECT 1 FROM one_team_dispatches WHERE child_chat_id = ? LIMIT 1").get(chatId));
+  } catch {
+    return false;
+  }
+}
+
 function assertCaller(chatId: string | null): string {
   const owner = oneTeamDispatchOwnerChat(chatId);
   if (!owner) {
@@ -581,6 +599,10 @@ function parkedOnOwner(chatId: string): boolean {
 /** Not finished: running now, or accepted and waiting for the seat. */
 const isLive = (dispatch: OneDispatchRow): boolean => dispatch.status === "running" || dispatch.status === "queued";
 const QUEUED_CHAT_PREFIX = "queued:";
+/** A queued dispatch that asked for a new isolated session: the request waits in meta until the job starts (then the child itself is marked). */
+const ISOLATED_DISPATCH_KEY_PREFIX = "session-scope.isolated-dispatch:";
+/** The same key session-scope.ts reads (isolatedChildKey): written here as a literal so this file keeps its import set (some private gates load it with a fixed module list). */
+const isolatedChildKey = (chatId: string): string => `session-scope.isolated:${chatId}`;
 
 function view(dispatch: OneDispatchRow) {
   const running = isLive(dispatch);
@@ -1240,11 +1262,11 @@ export function oneTeamStartSession(caller: OneTeamCaller, input: { member?: unk
   const parentRunId = dispatchParentRunId(caller);
   if (blocker || reusedBusy) {
     return enqueueDispatch({ parentChatId, member, brief, hash, blocker, chatId: reused && !parked && !fresh ? reused.id : null, graphOwner, parentRunId,
-      delegationPermission: host?.delegationPermission });
+      delegationPermission: host?.delegationPermission, fresh });
   }
   const continuing = parked ? null : reused;
   const { created, createdHere } = launchDispatch({ parentChatId, member, brief, hash, title, continuing, graphOwner, parentRunId,
-    delegationPermission: host?.delegationPermission });
+    delegationPermission: host?.delegationPermission, isolated: fresh });
   return {
     ...view(created),
     confirmed: true,
@@ -1275,7 +1297,9 @@ function seatBlocker(parentChatId: string, member: OneOrgMember): OneDispatchRow
 function launchDispatch(input: { parentChatId: string; member: OneOrgMember; brief: string; hash: string; title: string;
   continuing: import("../../shared/types").Chat | null; queuedId?: string; graphOwner?: string | null;
   /** dispatchParentRunId(caller); a queued row keeps the one it was accepted with. */
-  parentRunId?: string | null; delegationPermission?: string | null }): { created: OneDispatchRow; createdHere: boolean } {
+  parentRunId?: string | null; delegationPermission?: string | null;
+  /** new_session: the child keeps its own journal and never joins the member's shared roster session (session-scope.ts isolatedChild). */
+  isolated?: boolean }): { created: OneDispatchRow; createdHere: boolean } {
   const { parentChatId, member, brief, hash, title, continuing } = input;
   const delegation = teamDelegationPermission(input.delegationPermission);
   const ownerScope = teamDispatchOwnerScope();
@@ -1284,6 +1308,12 @@ function launchDispatch(input: { parentChatId: string; member: OneOrgMember; bri
   const chat = continuing ?? chats.createChat({ agentId: member.installedAgentId, title, originSurface: "one", taskMode: "conversation",
     kind: "division", parentChatId });
   const createdHere = !continuing;
+  if (createdHere && input.isolated) {
+    // Before the child's first turn is admitted: the resolver reads this when it assigns the journal. The meta table always exists in the
+    // product; a store without it (a gate's stub) just keeps the old shared behaviour, said once.
+    try { getDb().prepare("INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)").run(isolatedChildKey(chat.id), "1"); }
+    catch (error) { console.warn("[one-team] new_session isolation mark unavailable:", error instanceof Error ? error.message : error); }
+  }
   installSettleListener();
   const id = input.queuedId ?? `dispatch-${randomUUID()}`;
   const runId = randomUUID();
@@ -1340,6 +1370,7 @@ function launchDispatch(input: { parentChatId: string; member: OneOrgMember; bri
     }
     throw startRefusal(error);
   }
+  if (input.queuedId) { try { getDb().prepare("DELETE FROM meta WHERE key = ?").run(`${ISOLATED_DISPATCH_KEY_PREFIX}${id}`); } catch { /* a stale mark is harmless */ } }
   const created = row(id)!;
   appendParentNotice(created, "link");
   return { created, createdHere };
@@ -1349,7 +1380,7 @@ function launchDispatch(input: { parentChatId: string; member: OneOrgMember; bri
  * Accept work for a teammate whose seat is busy. Nothing runs yet; the row is `queued` and the model gets an immediate,
  * non-error "queued behind <session>" answer. `chatId` is the session to continue (null = a new session when it starts).
  */
-function enqueueDispatch(input: { parentChatId: string; member: OneOrgMember; brief: string; hash: string; blocker: OneDispatchRow | null; chatId: string | null; graphOwner?: string | null; parentRunId?: string | null; delegationPermission?: string | null }) {
+function enqueueDispatch(input: { fresh?: boolean; parentChatId: string; member: OneOrgMember; brief: string; hash: string; blocker: OneDispatchRow | null; chatId: string | null; graphOwner?: string | null; parentRunId?: string | null; delegationPermission?: string | null }) {
   const { parentChatId, member, brief, hash, blocker } = input;
   const id = `dispatch-${randomUUID()}`;
   const now = new Date().toISOString();
@@ -1362,6 +1393,11 @@ function enqueueDispatch(input: { parentChatId: string; member: OneOrgMember; br
   `).run(id, parentChatId, parentRunId, member.id, member.installedAgentId, member.displayName,
     input.chatId ?? `${QUEUED_CHAT_PREFIX}${id}`, brief, hash, now, now,ownerScope, input.graphOwner ?? null,
     teamDelegationPermission(input.delegationPermission) === "write" ? "write" : null);
+  // A queued job that asked for a new isolated session keeps that request until it starts.
+  if (input.fresh) {
+    try { getDb().prepare("INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)").run(`${ISOLATED_DISPATCH_KEY_PREFIX}${id}`, "1"); }
+    catch (error) { console.warn("[one-team] new_session isolation mark unavailable:", error instanceof Error ? error.message : error); }
+  }
   installSettleListener();
   const queued = row(id)!;
   const ahead = (getDb().prepare(
@@ -1417,8 +1453,9 @@ export function startQueuedDispatches(): void {
         }
       }
       try {
+        const isolated = (() => { try { return getDb().prepare("SELECT 1 AS present FROM meta WHERE key = ?").get(`${ISOLATED_DISPATCH_KEY_PREFIX}${item.id}`) !== undefined; } catch { return false; } })();
         launchDispatch({ parentChatId: item.parent_chat_id, member, brief: item.brief, hash: item.brief_hash,
-          title: item.brief.split(/\r?\n/, 1)[0]!.slice(0, 120), continuing, queuedId: item.id, delegationPermission: item.delegation_permission });
+          title: item.brief.split(/\r?\n/, 1)[0]!.slice(0, 120), continuing, queuedId: item.id, delegationPermission: item.delegation_permission, isolated });
       } catch (error) {
         console.warn("[one-team] queued dispatch not started yet:", error instanceof Error ? error.message : error);
       }

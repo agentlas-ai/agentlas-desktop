@@ -7,7 +7,7 @@ import { queryPublicCommunity, queryFedNews, queryIsharesHoldings, queryIsharesN
 import { ISHARES_FUNDS, findIsharesFund, searchIsharesCatalog } from './providers/ishares-catalog';
 import { financeProviderKey as providerKey } from './provider-credentials';
 import { queryFinanceNews } from './dashboard-feeds';
-import { searchYahooFinanceAssets, queryYahooFinanceData, refreshYahooFinanceQuotes, queryYahooFinanceNews } from './providers/yahoo-market';
+import { searchYahooFinanceAssets, queryYahooFinanceData, refreshYahooFinanceQuotes, queryYahooFinanceNews, yahooRefreshLimit } from './providers/yahoo-market';
 import { resolveFinanceDataSource, type FinanceDataSelection } from '../../shared/finance-data-routing';
 import type { FinanceFeedId } from '../../shared/finance-feeds';
 
@@ -251,12 +251,13 @@ export async function queryFinanceData(input: FinanceDataRequest, assets: Financ
 }
 
 /** Source-derived proposals share the same renderer CAS path; no AI supplies these numbers. */
-export async function refreshFinanceQuotes(workspace: FinanceWorkspace, route?: FinanceDataRoute): Promise<FinanceAIResult> {
+export async function refreshFinanceQuotes(workspace: FinanceWorkspace, route?: FinanceDataRoute, options: { limit?: number } = {}): Promise<FinanceAIResult> {
   if(route)route={...route,sourceId:resolveFinanceDataSource(route,'market')};
-  if(route?.sourceId==='finance-yfinance')return refreshYahooFinanceQuotes(workspace,{signal:route.signal});
+  if(route?.sourceId==='finance-yfinance')return refreshYahooFinanceQuotes(workspace,{signal:route.signal,limit:options.limit});
   if(route?.sourceId.startsWith('toolchain:')){
     const operations:FinanceOperation[]=[],warnings:string[]=[];
-    for(const asset of workspace.watchlist.slice(0,5)){
+    const limit=yahooRefreshLimit(options.limit);
+    for(const asset of workspace.watchlist.slice(0,limit)){
       route.signal?.throwIfAborted();const result=await queryFinanceData({query:asset.symbol,assetIds:[asset.id],metrics:['price'],period:'current'},workspace.watchlist,route);
       const row=result.rows[0],column=(name:string)=>result.columns.indexOf(name),price=row?.[column('Price')],currency=row?.[column('Currency')],asOf=row?.[column('Observed at')];
       if(!['ok','partial'].includes(result.status)||result.rows.length!==1||row?.[column('Symbol')]!==asset.symbol||typeof price!=='number'||price<0||currency!==asset.currency||typeof asOf!=='string'||!/^\d{4}-\d\d-\d\dT.*(?:Z|[+-]\d\d:\d\d)$/.test(asOf)||!Number.isFinite(Date.parse(asOf))||!result.sourceUrls.length){warnings.push(`${asset.symbol}: finance_adapter_quote_schema_unsupported`);continue;}

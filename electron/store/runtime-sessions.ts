@@ -142,7 +142,16 @@ export function getRuntimeSession(
 ): RuntimeSession | null {
   const own = readOwnRuntimeSession(chatId, kind, agentId, options);
   const agent = normalizeAgentId(agentId);
-  if (!agent.startsWith(SHARED_OWNER_PREFIX)) return own;
+  if (!agent.startsWith(SHARED_OWNER_PREFIX)) {
+    // An isolated owner (a task-stage slot, e.g. a borrowed agent's shared worker session) is read from this process's memory first. A
+    // /clear in another process deleted the row but not this memory: a row written at or before the clear is not resumed here either.
+    if (own && options?.isolateOwner === true) {
+      try {
+        if ((own.updatedAt ?? "") <= clearedSince(chatId, kind, agent)) { memSessions.delete(memKey(chatId, kind, agent)); return null; }
+      } catch { /* the cached row stands */ }
+    }
+    return own;
+  }
   try {
     const row = sharedOwnerRow(chatId, kind, agent, own) ?? own;
     // The other process may have cleared this conversation's pointer (a failed resume, /clear) while this process still remembers the

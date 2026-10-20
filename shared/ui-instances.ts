@@ -56,6 +56,23 @@ export interface UiInstanceView extends UiInstanceRevision {
   updatedAt: string;
 }
 
+/** How many settled cards one answer shows before the older ones fold behind a button: a run may present many, the owner reads the newest. */
+export const UI_INSTANCE_FOLD_KEEP = 8;
+/** Folding fewer than this would save less room than the button that opens them takes. */
+export const UI_INSTANCE_FOLD_MIN = 4;
+const FOLDABLE: ReadonlySet<UiInstanceState> = new Set<UiInstanceState>(['ready', 'cancelled']);
+/**
+ * The cards of one answer, with the oldest settled ones folded when there are too many. A card that waits for the owner, is still running or failed is
+ * never folded; the newest settled cards stay; order is kept. Nothing is folded unless at least UI_INSTANCE_FOLD_MIN cards would be.
+ */
+export function foldUiInstances<T extends { instanceId: string; state: UiInstanceState }>(instances: readonly T[], keep = UI_INSTANCE_FOLD_KEEP, min = UI_INSTANCE_FOLD_MIN): { shown: T[]; folded: T[] } {
+  const settled = instances.filter(item => FOLDABLE.has(item.state));
+  const surplus = settled.length - keep;
+  if (surplus < min) return { shown: [...instances], folded: [] };
+  const hidden = new Set(settled.slice(0, surplus).map(item => item.instanceId));
+  return { shown: instances.filter(item => !hidden.has(item.instanceId)), folded: instances.filter(item => hidden.has(item.instanceId)) };
+}
+
 export type UiEventType = "presented" | "updated" | "closed" | "action" | "draft" | "followup" | "open-request";
 export interface UiInstanceEvent {
   cursor: number;

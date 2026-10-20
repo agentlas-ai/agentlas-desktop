@@ -14,6 +14,7 @@
 //    기다릴 사람이 없는데 기다리는 것은 멈춤이지 질문이 아니다.
 import { randomUUID } from "node:crypto";
 import type { AskUserRequestEvent } from "../../shared/types";
+import { reportOwnerAsk } from "../owner-ask-alerts";
 
 export interface AskUserOption {
   label: string;
@@ -155,6 +156,10 @@ export function askUser(
       settle({ status: "no-surface" });
       return;
     }
+    // The run is waiting live for this answer, so it will not settle (and ring) until the owner answers: tell the owner now
+    // (desktop alert, phone push) so a question asked while they look elsewhere is not silently left to time out
+    // (an ask is always a card that rings).
+    if (payload.chatId) reportOwnerAsk({ chatId: payload.chatId, source: "ask_user", key: `ask-user:${requestId}` });
     if (opts.signal) {
       abortListener = () => {
         settle({ status: "cancelled" });

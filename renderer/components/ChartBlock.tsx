@@ -133,6 +133,9 @@ export function ChartBlock({
           config,
         };
         if (size === "panel" && spec.height === undefined) spec.height = 300;
+        // 폭이 숫자로 정해진 스펙(지시선 라벨 도넛)은 좌표가 완성돼 있다 — 칸 폭을 따라 늘이지 않고, 좁은 칸에서는 CSS 가 통째로 줄인다.
+        const fixedSize = typeof spec.width === "number";
+        host.dataset.fixedSize = fixedSize ? "true" : "false";
         if (size === "thumb") {
           // 산출물 격자의 작은 미리보기 — 제목·범례 없이 모양만.
           spec.height = 84;
@@ -169,14 +172,16 @@ export function ChartBlock({
         setState("ready");
         // Vega-Lite 의 "container" 폭은 창 크기 변화만 듣는다. 오른쪽 패널이 열려 대화 칸이 좁아지면
         // 차트가 옛 폭으로 남아 CSS 로 쪼그라들었다(실측 2026-09-29) — 칸 폭을 직접 따라간다.
-        let lastWidth = host.clientWidth;
-        resize = new ResizeObserver(() => {
-          const next = host.clientWidth;
-          if (!view || next < 40 || Math.abs(next - lastWidth) < 2) return;
-          lastWidth = next;
-          void view.width(next).runAsync().catch(() => undefined);
-        });
-        resize.observe(host);
+        if (!fixedSize) {
+          let lastWidth = host.clientWidth;
+          resize = new ResizeObserver(() => {
+            const next = host.clientWidth;
+            if (!view || next < 40 || Math.abs(next - lastWidth) < 2) return;
+            lastWidth = next;
+            void view.width(next).runAsync().catch(() => undefined);
+          });
+          resize.observe(host);
+        }
       } catch {
         if (!cancelled) setState("error");
       }

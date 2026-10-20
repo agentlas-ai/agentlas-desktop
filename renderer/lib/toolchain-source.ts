@@ -1,28 +1,25 @@
 // Toolchain provenance for an answer's work block ("this answer used / published a
-// Toolchain"). Read only from typed fields the host itself writes into two tools'
-// results — the one_graph_run receipt's `invoked_as` and the toolchain_publish
-// receipt — and only when the row is one of those two tools, so a command that
-// merely prints a receipt can never claim a source. Never inferred from prose.
+// Toolchain"). Read only from typed fields the host itself writes into One Team
+// tool results — a tc_<toolchain> tool call, the toolchain_run receipt and the
+// toolchain_publish receipt — and only when the row is one of those tools, so a
+// command that merely prints a receipt can never claim a source. Never inferred
+// from prose. A graph is never a Toolchain, so a graph run is never a source.
 //
-// Runtimes cap a tool result near 12k characters before it reaches the renderer,
-// and a graph run's result carries up to 32k characters of node output after the
-// receipt fields. The receipt's own fields come first, so a cut result is read
-// field by field from its start instead of being dropped.
+// Runtimes cap a tool result near 12k characters before it reaches the renderer.
+// The receipt's own fields come first, so a cut result is read field by field
+// from its start instead of being dropped.
 
 import type { OneWorkCell } from "./one-turn-work";
 
 export interface ToolchainSourceRef {
   kind: "run" | "publish";
-  automationId: string | null;
-  toolchainId: string | null;
+  toolchainId: string;
   version: number | null;
   name: string | null;
   /** publish only: what the fresh-session test decided. */
   state: "callable" | "draft" | "deprecated" | null;
 }
 
-const RUN_RECEIPT = "agentlas.one-graph-receipt.v1";
-const PUBLISH_RECEIPT = "agentlas.toolchain-publish.v1";
 const MAX_RESULT_CHARS = 64_000;
 const ESCAPES: Record<string, string> = { n: "\n", t: "\t", r: "\r", b: "\b", f: "\f" };
 
@@ -168,22 +165,17 @@ function receiptsIn(raw: string): Array<Record<string, unknown>> {
 export function toolchainSourceOf(cell: OneWorkCell): ToolchainSourceRef | null {
   if (cell.kind !== "call" || cell.status === "failed" || !cell.result || cell.result.length > MAX_RESULT_CHARS) return null;
   const tool = oneTeamToolName(cell.toolName ?? cell.label, cell.origin);
-  if (tool !== "one_graph_run" && tool !== "toolchain_run" && tool !== "toolchain_publish") return null;
+  // A tc_<toolchain> tool on the One Team server (shared/toolchain-mcp-tools.ts names them); the server prefix is the proof.
+  const toolTool = tool !== null && tool.startsWith("tc_");
+  if (!toolTool && tool !== "toolchain_run" && tool !== "toolchain_publish") return null;
   for (const receipt of receiptsIn(cell.result)) {
     const toolchainId = typeof receipt.toolchainId === "string" && receipt.toolchainId.trim() ? receipt.toolchainId.trim() : null;
+    if (!toolchainId) continue;
     const version = typeof receipt.version === "number" ? receipt.version : null;
     const name = typeof receipt.name === "string" && receipt.name.trim() ? receipt.name.trim().slice(0, 120) : null;
-    if (toolchainId && receipt.schemaVersion === "agentlas.toolchain-call.v1" && receipt.ok === true && (tool === "toolchain_run" || tool === "one_graph_run")) return { kind: "run", toolchainId, version, automationId: null, name, state: null };
-    if (toolchainId && tool === "toolchain_publish" && receipt.schemaVersion === "agentlas.toolchain-publish.v2") return { kind: "publish", toolchainId, version, automationId: null, name, state: receipt.status === "callable" ? "callable" : "draft" };
-    const automationId = typeof receipt.graph_id === "string" && receipt.graph_id.trim() ? receipt.graph_id.trim() : null;
-    if (!automationId) continue;
-    if (tool === "one_graph_run" && receipt.schemaVersion === RUN_RECEIPT && receipt.invoked_as === "toolchain") {
-      return { kind: "run", automationId, toolchainId: null, version: null, name, state: null };
-    }
-    if (tool === "toolchain_publish" && receipt.schemaVersion === PUBLISH_RECEIPT) {
-      const state = receipt.state === "callable" || receipt.state === "draft" || receipt.state === "deprecated" ? receipt.state : null;
-      return { kind: "publish", automationId, toolchainId: null, version: null, name, state };
-    }
+    if (toolTool && receipt.schemaVersion === "agentlas.toolchain-tool-call.v1" && receipt.ok === true) return { kind: "run", toolchainId, version, name, state: null };
+    if (tool === "toolchain_run" && receipt.schemaVersion === "agentlas.toolchain-call.v1" && receipt.ok === true) return { kind: "run", toolchainId, version, name, state: null };
+    if (tool === "toolchain_publish" && receipt.schemaVersion === "agentlas.toolchain-publish.v2") return { kind: "publish", toolchainId, version, name, state: receipt.status === "callable" ? "callable" : "draft" };
   }
   return null;
 }
@@ -193,7 +185,7 @@ export function toolchainSourcesOf(cells: readonly OneWorkCell[]): ToolchainSour
   const sources = new Map<string, ToolchainSourceRef>();
   for (const cell of cells) {
     const source = toolchainSourceOf(cell);
-    if (source) sources.set(`${source.kind}:${source.toolchainId ?? source.automationId}:${source.version ?? "legacy"}`, source);
+    if (source) sources.set(`${source.kind}:${source.toolchainId}:${source.version ?? "any"}`, source);
   }
   return [...sources.values()];
 }

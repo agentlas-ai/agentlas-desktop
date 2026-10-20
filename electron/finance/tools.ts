@@ -8,6 +8,7 @@ import { FinanceComputeRequestSchema } from '../../shared/finance-compute';
 import { FINANCE_SOCIAL_SUPPORTED_PERIODS } from './providers/public-data';
 import { FinanceAnalystRefSchema } from '../../shared/finance-analysts';
 import { FINANCE_NATIVE_VIEW, FinanceNativeResultSchema, type FinanceNativeResult, type FinanceNativePresentation } from '../../shared/finance-native-ui';
+import type { UiInstanceView } from '../../shared/ui-instances';
 
 type Outcome = { status: 'ok'; financeReceipt?: FinanceReceiptReference; nativeUi?: FinanceNativePresentation; data: unknown } | { status: 'refused' | 'unavailable'; reason: string; next?: string; data?: unknown };
 type ToolContext = Pick<HarnessCallContext, 'chatId' | 'runId' | 'permission' | 'dryRun' | 'hostAccountBinding' | 'signal'>;
@@ -81,13 +82,23 @@ export function financeNativeView(action:string,raw:Record<string,unknown>,data:
   return null;
 }
 
-/** Only the newest proposal in a conversation can be saved; an open earlier one is closed so stale values are never the Save target. Order is the
- * card's sequence, so two proposals made at the same moment never close each other. */
+/** Only the newest proposal in a conversation can be saved; an open earlier one is closed so stale values are never the Save target. "Newest" is the
+ * card's sequence and then its id, so two proposals made at the same moment leave exactly one open card. A cancel that loses a race on the card's
+ * revision is tried again against the latest one. */
 export async function supersedeHoldingsProposals(ctx:Pick<ToolContext,'chatId'|'runId'>,newest:{instanceId:string;sequence:number}):Promise<void>{
   const {listUiInstances,uiUpdate}=await import('../harness/ui-instances');
-  for(const instance of await listUiInstances(ctx.chatId)){
-    if(instance.instanceId===newest.instanceId||instance.sequence>newest.sequence||instance.presentation.viewId!==FINANCE_NATIVE_VIEW||instance.state!=='awaiting-input'||instance.presentation.reason!=='decision')continue;
-    await uiUpdate({instanceId:instance.instanceId,expectedRevision:instance.revision,state:'cancelled',reason:'result'},ctx);
+  const openProposal=(instance:UiInstanceView)=>instance.presentation.viewId===FINANCE_NATIVE_VIEW&&instance.state==='awaiting-input'&&instance.presentation.reason==='decision'&&!instance.closedAt;
+  const newer=(instance:UiInstanceView)=>instance.sequence>newest.sequence||instance.sequence===newest.sequence&&instance.instanceId>newest.instanceId;
+  for(const listed of await listUiInstances(ctx.chatId)){
+    if(listed.instanceId===newest.instanceId||newer(listed)||!openProposal(listed))continue;
+    let instance=listed;
+    for(let attempt=0;attempt<3;attempt+=1){
+      const outcome=await uiUpdate({instanceId:instance.instanceId,expectedRevision:instance.revision,state:'cancelled',reason:'result'},ctx);
+      if(outcome.status==='ok'||(outcome as {reason?:string}).reason!=='stale_revision')break;
+      const latest=(await listUiInstances(ctx.chatId)).find(item=>item.instanceId===instance.instanceId);
+      if(!latest||!openProposal(latest))break;
+      instance=latest;
+    }
   }
 }
 
@@ -114,13 +125,25 @@ async function presentFinanceResult(action:Action,raw:Record<string,unknown>,dat
     if(shown.status!=='ok')return {status:'unavailable',reason:'finance_ui_not_presented'};
     const instance=(shown.data as {instance?:{instanceId?:string;sequence?:number}}).instance;
     if(!instance?.instanceId)return {status:'unavailable',reason:'finance_ui_not_presented'};
-    if(awaitingOwner&&typeof instance.sequence==='number')await supersedeHoldingsProposals(ctx,{instanceId:instance.instanceId,sequence:instance.sequence});
+    // The new card is already shown and is the newest; an older card that could not be closed is closed by the next proposal. It is not a reason to say nothing was proposed.
+    if(awaitingOwner&&typeof instance.sequence==='number')try{await supersedeHoldingsProposals(ctx,{instanceId:instance.instanceId,sequence:instance.sequence});}catch{/* see above */}
     return {status:'presented',...retained,instanceId:instance.instanceId};
   } catch { return {status:'unavailable',reason:'finance_ui_not_presented'}; }
 }
 
 /** Result sentence the host adds to a proposal: the card is the owner's, the save is never the model's. */
 const PORTFOLIO_PROPOSAL_NOTE = 'The review card is shown to the owner and nothing is saved. Tell the owner to check the values and press Save holdings in the card; rows in needsAttention cannot be saved until the owner fills them in. Confirm with finance.load before treating the holdings as saved.';
+
+/** A query that reached no provider data is not a success: the harness said "ok" while the failure sat one level down, where a model skims past it. */
+const DATA_FAILURE = {
+  error: { reason: 'finance_data_error', next: 'The data provider returned an error and no rows (see warnings). Tell the owner the data could not be retrieved. If another metric answers the question (rates: treasury_yields; company text: news or filings), try it; otherwise retry later. Do not present anything as retrieved Finance data.' },
+  unconnected: { reason: 'finance_data_unconnected', next: 'The data source for this metric is not connected, so no rows were returned. Tell the owner to connect it in Finance settings, or use another metric.' },
+} as const;
+export function financeDataFailure(data: unknown): { reason: string; next: string } | null {
+  const result = data && typeof data === 'object' ? data as { status?: unknown; rows?: unknown } : null;
+  if (!result || (result.status !== 'error' && result.status !== 'unconnected')) return null;
+  return Array.isArray(result.rows) && result.rows.length ? null : DATA_FAILURE[result.status];
+}
 
 /** No Electron import or provider-specific runner: the sealed host context and shared service own every effect. */
 export async function callFinanceTool(action: Action, raw: Record<string, unknown>, ctx: ToolContext): Promise<Outcome> {
@@ -182,6 +205,8 @@ export async function callFinanceTool(action: Action, raw: Record<string, unknow
     try { financeReceipt = financeReceiptStore().record(scope, ctx, `finance.${action}`, data, writes.has(action) ? 'saved-result' : ['load', 'report.read', 'monitor.runs', 'archives.read', 'archives.list'].includes(action) ? 'read-snapshot' : 'service-result'); }
     catch { scope.assertCurrent(); financeReceipt = { status: 'unavailable', reason: 'finance_receipt_not_recorded', operationOutcome: 'succeeded' }; }
     scope.assertCurrent();
+    const dataFailure=action==='query'?financeDataFailure(data):null;
+    if(dataFailure)return { status: 'unavailable', reason: dataFailure.reason, next: dataFailure.next, data };
     const nativeUi=await presentFinanceResult(action,raw,data,ctx,scope);
     // The card is the whole effect of a proposal: without it nothing reached the owner.
     if(action==='portfolio.propose'&&nativeUi?.status!=='presented')return { status: 'unavailable', reason: 'finance_ui_not_presented', next: 'No review card could be shown, so nothing was proposed. The owner can add holdings from the Finance screen (photo or manual entry).' };
@@ -206,8 +231,8 @@ const reportLanguage = {type:'string',minLength:2,maxLength:80,pattern:'^[A-Za-z
 const nullable = (type: string, extra: Record<string, unknown> = {}) => ({ type: [type, 'null'], ...extra });
 const holdingRow = schema(['name', 'symbol', 'currency', 'quantity'], {
   name: { type: 'string', maxLength: 300, description: 'Security name as shown. Never an account holder, account number or address.' },
-  symbol: nullable('string', { maxLength: 160, description: 'Ticker or plan identifier exactly as shown; null if not visible, never inferred from the name.' }),
-  exchange: nullable('string', { maxLength: 160, description: 'Listing venue as shown, else null.' }),
+  symbol: nullable('string', { maxLength: 80, description: 'Ticker or plan identifier exactly as shown; null if not visible, never inferred from the name.' }),
+  exchange: nullable('string', { maxLength: 80, description: 'Listing venue as shown, else null.' }),
   currency: nullable('string', { pattern: '^[A-Z]{3}$', description: 'ISO 4217 code as shown, else null; never inferred from locale.' }),
   quantity: nullable('number', { minimum: 0, description: 'Units or shares held, not money; null if unclear.' }),
   averageCost: nullable('number', { minimum: 0, description: 'Cost per unit, not total cost; null if not shown.' }),
@@ -267,7 +292,7 @@ const descriptors: { action: Action; purpose: string; required: string[]; inputS
   { action: 'monitor.pause', purpose: 'Pause future executions of the bound Finance monitor without requiring a view revision.', required: ['monitorId'], inputSchema: schema(['monitorId'], { monitorId: key }) },
 ];
 export const FINANCE_PORTS = descriptors.map(({ action, purpose, required, inputSchema }) => {
-  composeDeclaredPrompt([{ id: `tool.finance.${action}.schema`, revision: action==='query.save'?5:action==='query'?4:['calculate','apply','report.create'].includes(action)?2:1, stability: 'versioned-content', changeTriggers: ['release', 'output-schema'], text: JSON.stringify(inputSchema) }]);
+  composeDeclaredPrompt([{ id: `tool.finance.${action}.schema`, revision: action==='query.save'?5:action==='query'?4:['calculate','apply','report.create','portfolio.propose'].includes(action)?2:1, stability: 'versioned-content', changeTriggers: ['release', 'output-schema'], text: JSON.stringify(inputSchema) }]);
   return { operationId: `finance.${action}`, kind: writes.has(action) ? 'command' as const : 'query' as const, required, inputSchema,
     ...(action === 'monitor.pause' ? { terminalTargetKeys: ['monitorId'] as const } : {}),
     purpose: composeDeclaredPrompt([{ id: `tool.finance.${action}.description`, revision: action === 'query.save' ? 2 : action === 'query' ? 2 : 1, stability: 'fixed-policy', changeTriggers: ['release'], text: purpose }]),

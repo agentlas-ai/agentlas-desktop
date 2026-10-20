@@ -657,13 +657,6 @@ const api: AgentlasIpc = {
     assetHistory: (id: string) => ipcRenderer.invoke("toolchains:assets-history", id),
     assetRuns: (id: string) => ipcRenderer.invoke("toolchains:assets-history", id),
     generateAsset: (input) => ipcRenderer.invoke("toolchains:assets-generate", input),
-    overview: () => ipcRenderer.invoke("toolchains:overview"),
-    logos: () => ipcRenderer.invoke("toolchains:logos"),
-    history: (automationId: string) => ipcRenderer.invoke("toolchains:history", automationId),
-    refresh: (automationId?: string) => ipcRenderer.invoke("toolchains:refresh", automationId),
-    decide: (input) => ipcRenderer.invoke("toolchains:decide", input),
-    expose: (automationId: string) => ipcRenderer.invoke("toolchains:expose", automationId),
-    withdraw: (automationId: string) => ipcRenderer.invoke("toolchains:withdraw", automationId),
   },
   agentWorkspace: {
     getWorkspace: (agentId) => ipcRenderer.invoke("agentWorkspace:get", agentId),

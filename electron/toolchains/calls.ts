@@ -139,6 +139,7 @@ async function invoke(input: ToolchainCallInput, options: ToolchainCallOptions, 
         signal: options.signal, sink: options.sink, depth: (options.depth ?? 0) + 1,
         callChain: [...(options.callChain ?? []), marker], dryRun: options.dryRun,
         permissionCeiling: options.permission, immutableImplementation: true, strategyCycle: "defer",
+        ...(options.callerChatId ? { actingChatId: options.callerChatId } : {}),
       }));
       unconfirmedEffect = Object.values(result.nodeFailures ?? {}).some(failure => failure.code === "MUTATION_UNVERIFIED");
       publication?.check();

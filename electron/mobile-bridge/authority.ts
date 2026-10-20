@@ -69,7 +69,8 @@ import { latestOneArtifactBindingOfPath, readOneArtifactImagePreview } from "../
 import { MobileChatAttachmentUploads } from "./chat-attachment-upload";
 import { chatFilePrompt, chatFileImages, validateChatAttachmentSelection, readBoundChatMessageAttachment } from "../store/chat-message-attachments";
 import { performOneMobileSuggestionAction } from "../one/mobile-suggestions";
-import { invocationService } from "../invocation/service";
+import { invocationService, invocationEventRequestsDecision } from "../invocation/service";
+import { onOwnerAsk } from "../owner-ask-alerts";
 import { nativeGuiActiveChatIds, onNativeGuiActiveChats, onNativeGuiApprovalRequested, onNativeGuiInvocationEvent, onNativeGuiSettled } from "../invocation/native-gui-events";
 import type { InvocationCurrentTurnPort } from "../runtime/invocation-owner-router";
 import { readMobileBridgeHistoryPage } from "./history-page";
@@ -114,6 +115,7 @@ import {
 } from "../runtime/detect";
 import { listModelRoleMembers, pickModelRoleFromPool, setModelRoleMembers } from "../store/model-roles";
 import { listRuntimeCommands } from "../runtime/commands";
+import { releaseIdleAgentResidencyForChat } from "../runtime/agent-residency";
 import { installPublicHubRelease, listInstalledAgents } from "../mcp/registry";
 import { addOneOrgMember, getOneOrgState, markOneOrgMemberRead, openOneOrgMember } from "../one/org";
 import { readMobileOneAvatar } from "./one-avatar-preview";
@@ -1812,16 +1814,21 @@ export function observeMobilePushNotices(hostId: string, listener: (notice: Mobi
     if (event.agentId || event.kind !== "final") return;
     const message = projectOneMessageForPhone(event);
     if (!message) return; // quiet/check-in/worker answers have no saved root message
+    // A final that carries a decision card is a question waiting for the owner, not a finished result.
+    // Same category, destination, dedupe key and preference gate as the result
+    // push, so a released phone routes and gates it exactly as before; only the relay's lock-screen wording differs, and
+    // one turn still rings once.
+    const asksOwner = invocationEventRequestsDecision(event);
     if (isPersonalOneConversation(chatId)) {
       listener({ category: "oneMessage", destination: "personalOne", hostId,
         entityId: hostId, messageId: message.messageId, dedupeKey: `one-message:${hostId}:${message.messageId}`,
-        subject: "One", occurredAt: new Date().toISOString() });
+        subject: "One", occurredAt: new Date().toISOString(), ...(asksOwner ? { reason: "ownerAnswer" as const } : {}) });
       return;
     }
     if (!getChat(chatId)) return;
     listener({ category: "resultReady", destination: "thread", hostId,
       entityId: chatId, dedupeKey: `run-result:${hostId}:${runId}`,
-      subject: "Agentlas", occurredAt: new Date().toISOString() });
+      subject: "Agentlas", occurredAt: new Date().toISOString(), ...(asksOwner ? { reason: "ownerAnswer" as const } : {}) });
   };
   const stopMainMessages = invocationService.onEvent(onMessage);
   const stopNativeMessages = onNativeGuiInvocationEvent(onMessage);
@@ -1855,7 +1862,15 @@ export function observeMobilePushNotices(hostId: string, listener: (notice: Mobi
   const stopMainApprovals = onToolApprovalRequested(onApprovalRequested);
   const stopNativeApprovals = onNativeGuiApprovalRequested(onApprovalRequested);
   const stopApprovals = () => { stopMainApprovals(); stopNativeApprovals(); };
-  return () => { stopMessages(); stopFailures(); stopApprovals(); };
+  // A decision card the HOST wrote (the AGI monitor's ask) is not a run's final message, so it reaches the phone through the
+  // owner-ask seam as the same thread push with the question wording. The personal One chat is skipped: its push needs a
+  // message id the relay checks, and a host card there has none to give.
+  const stopOwnerAsk = onOwnerAsk((ask) => {
+    if (!getChat(ask.chatId) || isPersonalOneConversation(ask.chatId)) return;
+    listener({ category: "resultReady", destination: "thread", hostId, entityId: ask.chatId,
+      dedupeKey: `owner-ask:${hostId}:${ask.key}`, subject: "Agentlas", occurredAt: new Date().toISOString(), reason: "ownerAnswer" });
+  });
+  return () => { stopMessages(); stopFailures(); stopApprovals(); stopOwnerAsk(); };
 }
 
 function summarizeToolPayload(value: string | undefined): MobileBridgeToolPayloadSummaryDto | null {
@@ -3252,6 +3267,8 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
           throw new Error("This conversation is still running. Stop it before clearing it.");
         }
         clearChatContext(id);
+        // The stored session pointers are gone; an idle resident process of this chat would still hold the cleared conversation.
+        try { releaseIdleAgentResidencyForChat(id); } catch { /* the clear itself is done */ }
         const chat = requireChat(id);
         this.scheduleSnapshotUpdated(id);
         return asJsonValue(

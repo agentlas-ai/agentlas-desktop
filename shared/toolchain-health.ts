@@ -28,13 +28,22 @@ export type FailureKind = "environment" | "tool";
 
 /**
  * A failure that says nothing about the tool: the owner is signed out, the network or the runtime is down, the call was
- * cancelled or rate limited. Everything else points at the tool — the page changed, the output no longer fits its contract, the
- * command failed — and unknown errors are counted, because a quiet failure is worse than a repair that was not needed.
+ * cancelled or timed out, or a step waits for the owner's approval in that conversation. Decided from the machine codes the host
+ * and its tools write into the error (snake_case, kebab-case or upper-case tokens), never from the words of a message: an error
+ * that carries none of these codes counts against the tool, because a quiet failure is worse than a repair that was not needed.
  */
-const ENVIRONMENT = /(?:log(?:ged)?[ _-]?in|sign(?:ed)?[ _-]?(?:in|out)|auth(?:entication|orization)?|credential|permission|denied|forbidden|unauthori[sz]ed|\b40[13]\b|\b429\b|rate[ _-]?limit|quota|timeout|timed[ _-]?out|network|offline|unreachable|ECONN|ENOTFOUND|EAI_AGAIN|dns|runtime[ _-]?(?:unavailable|not)|no[ _-]?(?:model|runtime)|aborted|cancel|custody_changed|in_progress_or_interrupted|owner[ _-]?(?:input|action))/i;
+const ENVIRONMENT_CODES = new Set([
+  "toolchain_call_aborted", "toolchain_call_in_progress_or_interrupted", "graph_occurrence_custody_changed",
+  "approval_required", "APPROVAL_REQUIRED", "unattended-approval-required", "APPROVAL_TIMED_OUT", "browser_authority_unavailable",
+  "browser_login_required", "login_required", "LOGIN_REQUIRED", "auth_required", "credential_missing", "needs_input",
+  "rate_limited", "RATE_LIMITED", "automation_node_timeout", "NODE_TIMEOUT", "ETIMEDOUT", "ECONNRESET", "ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN",
+  "network_unavailable", "runtime_unavailable", "pinned-runtime-unavailable", "mcp-runtime-config-unavailable", "graph_mcp_catalog_unavailable",
+]);
+const CODE_TOKEN = /[A-Za-z][A-Za-z0-9]*(?:[_-][A-Za-z0-9]+)+|[A-Z][A-Z0-9]{3,}/g;
 
-export function classifyFailure(error: string | null | undefined): FailureKind {
-  return error && ENVIRONMENT.test(error) ? "environment" : "tool";
+export function failureKindOf(error: string | null | undefined): FailureKind {
+  for (const token of String(error ?? "").match(CODE_TOKEN) ?? []) if (ENVIRONMENT_CODES.has(token)) return "environment";
+  return "tool";
 }
 
 export interface HealthOutcome {
@@ -61,7 +70,7 @@ export function healthOutcomeFrom(receipt: Readonly<ToolchainCallReceipt>): Heal
   if (receipt.status === "running" || receipt.dryRun) return null;
   const failed = receipt.status !== "succeeded";
   return { callId: receipt.id, at: receipt.completedAt ?? receipt.startedAt, status: receipt.status as HealthOutcome["status"],
-    error: failed ? (receipt.error ?? receipt.status).slice(0, 300) : null, kind: failed ? classifyFailure(receipt.error ?? receipt.status) : null, chatId: receipt.callerChatId };
+    error: failed ? (receipt.error ?? receipt.status).slice(0, 300) : null, kind: failed ? failureKindOf(receipt.error ?? receipt.status) : null, chatId: receipt.callerChatId };
 }
 
 export interface HealthVerdict {

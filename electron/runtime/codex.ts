@@ -17,7 +17,7 @@ import { createRuntimePlanEmitter, planFromCodexTodoList, planFromCodexTurnPlan 
 import path from "node:path";
 import { assertScienceRecoveryRequest } from "../science-host/recovery-authority";
 import { RuntimeJudgmentRefusal } from "./judgment-refusal";
-import { runCodexNoTools, runCodexAliveNoTools, composeCodexHostInstructions } from "./codex-no-tools";
+import { runCodexNoTools, runCodexAliveNoTools, composeCodexHostInstructions, codexNoToolsModel } from "./codex-no-tools";
 import { runCodexAliveResidentTurn, closeCodexAliveResidentOwner,
   codexAliveResidentGeneration, consumeCodexAliveResidentResult } from "./codex-alive-session";
 import { aliveDecisionProfileForRequest } from "./alive-decision-context";
@@ -3395,11 +3395,13 @@ export const runCodex: Runner = async (
     throw preDispatchRefusal(new Error(tStatus(req.locale, "errCliMissingCodex")), "cli-discovery", "codex_cli_missing");
   }
   if (req.untrustedNoTools && req.judgmentOnly) {
+    const noToolsModel = codexNoToolsModel(req.model);
+    const noToolsReq = noToolsModel && noToolsModel !== req.model ? { ...req, model: noToolsModel } : req;
     const inventory = await readCodexModelInventory(accountCodexHome(req.env?.CODEX_HOME));
-    const effort = req.effort ? resolveCodexModelEffort(inventory, req.model, req.effort)
-      : defaultCodexModelEffort(inventory, req.model);
-    const capacities = [inventory.find(model => model.id === req.model)?.contextWindow,
-      resolveEffectiveContextWindow("codex", req.model, req.longContext === true).contextWindow]
+    const effort = req.effort ? resolveCodexModelEffort(inventory, noToolsReq.model, req.effort)
+      : defaultCodexModelEffort(inventory, noToolsReq.model);
+    const capacities = [inventory.find(model => model.id === noToolsReq.model)?.contextWindow,
+      resolveEffectiveContextWindow("codex", noToolsReq.model, req.longContext === true).contextWindow]
       .filter((value): value is number => typeof value === "number" && value > 0);
     const executeNoTools = async (args: string[], request: RunnerRequest): Promise<RunnerResult> => {
       const run = await runCodexProcess(bin, args, request.userPrompt, request, events,
@@ -3417,8 +3419,9 @@ export const runCodex: Runner = async (
         ...(run.observedUsage ? { observedUsage: run.observedUsage } : {}), ...(request.effort ? { appliedEffort: request.effort } : {}) };
     };
     const dependencies = { ...(capacities.length ? { contextWindowTokens: Math.min(...capacities) } : {}) };
-    if (!aliveAdmission) return runCodexNoTools({ ...req, effort: effort ?? undefined }, events, executeNoTools, dependencies);
-    const aliveRequest = { ...aliveAdmission, effort: effort ?? undefined };
+    if (!aliveAdmission) return runCodexNoTools({ ...noToolsReq, effort: effort ?? undefined }, events, executeNoTools, dependencies);
+    const aliveRequest = { ...aliveAdmission, ...(aliveAdmission.model?.trim() || !noToolsModel ? {} : { model: noToolsModel }),
+      effort: effort ?? undefined };
     const profile = aliveDecisionProfileForRequest(aliveRequest)!;
     // The daemon profile alone selects this lane. A native boundary failure
     // cannot retry through ordinary exec after input may have been delivered.

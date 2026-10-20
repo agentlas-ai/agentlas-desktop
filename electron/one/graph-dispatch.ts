@@ -26,13 +26,12 @@ import { oneTeamDispatchOwnerChat, type OneTeamCaller } from "./team-dispatch";
 import { searchToolchainAssets } from "../toolchains/search";
 import { recordToolchainSearchMiss } from "../toolchains/detector-observations";
 import { grantToolchainTrial, toolchainTrialGranted } from "../toolchains/trial";
-import { callableContractFor } from "../toolchains/interface";
 import { getToolchainAsset, listToolchainAssets, publishToolchainVersion } from "../toolchains/assets";
 import { callToolchain, getToolchainCall, listToolchainCalls } from "../toolchains/calls";
 import type { ToolchainAsset, ToolchainCallReceipt } from "../../shared/toolchain-asset";
 import { generateToolchain } from "../toolchains/generalizer";
 import { TOOLCHAIN_CONSUMER_TOOLS } from "../toolchains/consumer";
-import { recordToolchainRepair, toolchainRepairVerdict, reportToolchainAssetProblem, openToolchainAssetReports,
+import { reportToolchainAssetProblem, openToolchainAssetReports,
   preflightToolchainAssetRepair, withToolchainAssetRepairCommit, settleToolchainAssetRepair } from "../toolchains/reports";
 import { readToolchainState } from "../toolchains/store";
 import { recordToolchainAssetDiscovery, toolchainAssetUsage } from "../toolchains/usage";
@@ -42,6 +41,7 @@ import { resolveGraphOriginMessage, type GraphOriginBinding } from "./graph-orig
 import { ephemeralGraphSweptOff, markOneGraphEphemeral } from "./ephemeral-graphs";
 import { graphStructure } from "../../shared/graph-structure";
 import { occasionMarkers, sameWorkName } from "../../shared/graph-instance-advice";
+import { graphPurpose } from "../../shared/graph-purpose";
 
 /** A Work task's capability (team-control-server scope "toolchain-consumer"). */
 /**
@@ -53,14 +53,16 @@ function ownerOriginMessage(chatId: string, caller: OneTeamCaller): string | nul
   return resolveGraphOriginMessage(getDb(), chatId, caller as OneTeamCaller & GraphOriginBinding);
 }
 
+/** A Work task's or a teammate's capability (team-control-server scopes "toolchain-consumer" and "room-member"). */
 function isToolchainConsumer(caller: OneTeamCaller): boolean {
-  return (caller as { scope?: unknown }).scope === "toolchain-consumer";
+  const scope = (caller as { scope?: unknown }).scope;
+  return scope === "toolchain-consumer" || scope === "room-member";
 }
 function owner(caller: OneTeamCaller) {
   if (isToolchainConsumer(caller)) {
-    // The Work task itself is the requester; it never stands in for One's conversation.
+    // The Work task or teammate itself is the requester; it never stands in for One's conversation.
     const chat = caller.chatId ? getChat(caller.chatId) : null;
-    if (!chat || chat.archivedAt || chat.originSurface === "one") throw new Error("one_graph_owner_missing");
+    if (!chat || chat.archivedAt || oneTeamDispatchOwnerChat(chat.id) !== null) throw new Error("one_graph_owner_missing");
     return chat;
   }
   const chatId = oneTeamDispatchOwnerChat(caller.chatId);
@@ -147,15 +149,7 @@ function checkReferences(caller: OneTeamCaller, graph: WorkflowGraph, selfId?: s
  * gone away. The saved origin and saved grants, never payload fields, own scope. */
 export function validateOneGraphCommandScope(a: Automation): void {
   const chatId = a.monitor?.originChatId;
-  if (!chatId || !getChat(chatId)) {
-    // An owner-made graph has no origin conversation. When the owner made it a
-    // callable Toolchain (tested contract, current definition, enabled) and it
-    // references no other graph, there is no conversation scope to enlarge and it
-    // runs with its own saved permission — refusing it would make every graph built
-    // in the editor uncallable while its contract says otherwise.
-    if (callableContractFor(a.id) && !resolveAutomationGraph(a).nodes.some(node => node.type === "subgraph")) return;
-    throw new Error("one_graph_owner_missing");
-  }
+  if (!chatId || !getChat(chatId)) throw new Error("one_graph_owner_missing");
   checkReferences({ chatId, permission: a.executionPermission }, resolveAutomationGraph(a), a.id,
     a.executionPermission, a.hubMode ?? "local-only");
 }
@@ -317,7 +311,10 @@ async function dispatchToolchain(caller: OneTeamCaller, name: string, input: Rec
         : { report_id: outcome.reportId, state: outcome.state, delivered_to: outcome.deliveredTo }) };
   }
   if (name === "toolchain_run") {
-    writable(caller);
+    // A Toolchain that only reads runs under read permission; one that writes, posts or sends needs write (calls.ts caps the run
+    // at the caller's permission either way).
+    const target = getToolchainAsset(String(input.toolchain_id))?.versions.find(version => version.version === Number(input.version));
+    if (!target || requiredExecutionPermission(target.implementation.snapshot.graph) !== "read") writable(caller);
     if (chat.archivedAt) throw new Error("toolchain_caller_archived");
     const native = currentOneToolchainNativeInvocation(), original = native.assertCurrent(), execution = native.execution();
     if (caller.chatId !== original.chatId) throw new Error("toolchain_call_not_in_context");
@@ -531,6 +528,9 @@ export async function oneGraphDispatch(caller: OneTeamCaller, name: string, inpu
       // copy. A copy is refused only when its name differs by nothing but a date or number; any other look-alike is told to the author.
       const fingerprint = graphStructure(graph).fingerprint;
       const lookAlikes = existing ? [] : scoped(caller).filter(a => a.graph?.nodes?.length && graphStructure(resolveAutomationGraph(a)).fingerprint === fingerprint);
+      // A new input graph of fixed code or tool steps only is a tool, not a graph: done directly once, a Toolchain when it comes back.
+      if (!existing && graphPurpose(graph, bp.trigger.kind) === "tool") return { ok: false, code: "one_graph_is_a_tool",
+        next: "This graph only runs fixed code or tool steps on an input, so it is a tool, not a graph (a graph is recurring work where AIs act on results, or something on a schedule). Do these steps directly now. If the same operation keeps coming back, make it a Toolchain with toolchain_create: say what the steps do and include the code or commands." };
       const sameWork = lookAlikes.find(a => sameWorkName(a.name, bp.name));
       if (sameWork) return { ok: false, code: "one_graph_same_work_exists", graph_id: sameWork.id, name: sameWork.name, definition_revision: automationDefinitionDigest(sameWork),
         enabled: sameWork.enabled,
@@ -544,13 +544,9 @@ export async function oneGraphDispatch(caller: OneTeamCaller, name: string, inpu
           return receipt(same, { ok: true, action: "unchanged" });
         }
         editable(current, changedGraphNodes(resolveAutomationGraph(current), graph));
-        const repair = toolchainRepairVerdict(current, chat.id);
-        if (!repair.ok) return { ok: false, code: "toolchain_repair_budget_reached", graph_id: current.id, repairs_today: repair.repairs, retry_at: repair.retryAt,
-          next: "Leave the Toolchain as it is. The owner can allow another change by speaking in this conversation." };
         updateAutomationGraph(current.id, graph, { note: "One structured blueprint" });
-        recordToolchainRepair(current.id, chat.id);
-
-
+        // The monitor lives inside the trigger document: replacing the trigger without it dropped the origin binding,
+        // so every revision of a saved graph failed its own scope check.
         saved = updateAutomation(current.id, { name: bp.name, goal: bp.goal, promptTemplate: bp.goal,
           scheduleHuman: schedule, scheduleJson: null, triggerType, trigger: { kind: triggerType },
           // A later editor cannot establish the original command of an unbound graph.
@@ -622,11 +618,7 @@ export async function oneGraphDispatch(caller: OneTeamCaller, name: string, inpu
       recordOneGraphAuthority(current, chat.id);
       return receipt(current, { ok: true, action: "unchanged" });
     }
-    const repair = toolchainRepairVerdict(current, chat.id);
-    if (!repair.ok) return { ok: false, code: "toolchain_repair_budget_reached", graph_id: current.id, repairs_today: repair.repairs, retry_at: repair.retryAt,
-      next: "Leave the Toolchain as it is. The owner can allow another change by speaking in this conversation." };
     updateAutomationGraph(current.id, graph, { note: "One instruction patch" });
-    recordToolchainRepair(current.id, chat.id);
     const promptPatch = !current.graph?.nodes.length && edits.length === 1 && edits[0].node_id === "n1" ? { promptTemplate: edits[0].instruction } : {};
     const saved = input.goal === undefined && !Object.keys(promptPatch).length ? getAutomation(current.id)! : updateAutomation(current.id, { ...promptPatch, ...(input.goal === undefined ? {} : { goal: input.goal as string }) });
     recordOneGraphAuthority(saved, chat.id);

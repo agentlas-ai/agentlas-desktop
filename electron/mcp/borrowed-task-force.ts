@@ -1,7 +1,9 @@
 import { composeDeclaredPrompt, registerDeclaredPromptModule, type DeclaredPromptPart } from "../runtime/prompt-order";
 import { getMeta } from "../store/meta";
-import { borrowedSessionMode, borrowedWorkerSessionIsShared, borrowedWorkerSessionOwnerId, claimBorrowedWorkerSession, placeWorkerTurnContext, runClaimedWorkerTurn, splitWorkerSystemParts } from "./borrowed-worker-session";
+import { borrowedSessionMode, borrowedSessionOutgrewWindow, borrowedWorkerSessionIsShared, borrowedWorkerSessionSeed, planBorrowedWorkerTurn, releaseIdleSharedWorkerSession, placeWorkerTurnContext, runClaimedWorkerTurn, splitWorkerSystemParts } from "./borrowed-worker-session";
 import { dropOwnerNativeSession } from "../runtime/shared-session-drop";
+import { acpDisabledFor } from "../runtime/acp";
+import { runtimeContextWindow } from "../runtime/session-generation";
 import { toolObservationDigest } from "../automation-progress-guard";
 import { selectTaskForceConversationContext } from "./task-force-history";
 import { runObservedRunner, observedRunnerUsage, observedRunnerUsageEvidence, ObservedRunnerFailureError, copyObservedRunnerEvidence } from "../runtime/observed-runner";
@@ -60,6 +62,7 @@ import {
 } from "../memory/curator";
 import { runSemanticMemoryReview } from "../memory/semantic-curator";
 import { buildMemoryContext } from "../memory/context";
+import { currentMemoryForgetEpoch } from "../memory/revocations";
 import { bindAppMemoryRequest, appRunMemory, assertAppMemoryRun, appMemoryRunGuard } from "../memory/agent-app-memory";
 import { queryWorkingFolderOntologyContext } from "../ontology/project-runtime";
 import { parseMemoryEvents, stripAllMemoryEventBlocks } from "../memory/events";
@@ -1542,6 +1545,15 @@ function taskForceRunnerRequest(p: BorrowedTaskForceParams, request: RunnerReque
       request = { ...request, ...placed, ...(placedContext !== undefined ? { turnContext: placedContext } : {}),
         ...(placed.userPrompt !== request.userPrompt ? { surfaceUserPrompt: request.surfaceUserPrompt ?? request.userPrompt } : {}) };
     }
+  }
+  if (options.sharedSession) {
+    // Identity of the shared session (borrowed-worker-session.ts): the launch handles of this stage's tool lease are not part of it.
+    request = { ...request, sessionFingerprintSeed: borrowedWorkerSessionSeed({
+      systemPrompt: request.systemPrompt, locale: request.locale, permission: request.permission,
+      unattendedNoAsk: request.unattendedNoAsk, restrictedReadBoundary: request.restrictedReadBoundary, untrustedNoTools: request.untrustedNoTools,
+      browserOnly: request.browserOnly, isolatedMcpConfig: request.isolatedMcpConfig, mcpAllowedTools: request.mcpAllowedTools, cwd: request.cwd ?? null,
+      forgetEpoch: (() => { try { return currentMemoryForgetEpoch(); } catch { return Date.now(); } })(), chatId: request.chatId ?? null,
+    }) };
   }
   const workProjectId = p.chat.originSurface === "work" && p.chat.projectId ? p.chat.projectId : null;
   if (request.workProjectId !== workProjectId) request = { ...request, workProjectId };
@@ -5763,31 +5775,40 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
       const sharedCandidate = borrowedWorkerSessionIsShared({
         mode: borrowedSessionMode(getMeta), role, review: taskForcePacketIsReview(packet),
         runtimeKind: observedDirectRuntime.kind, agentAppMode: p.req.agentAppMode === true,
+        acpDisabled: acpDisabledFor(observedDirectRuntime.kind), acpAgentId: observedDirectRuntime.acpAgentId ?? null,
       });
       // One session takes one turn at a time: a second ready packet of the same agent keeps a session of its own (borrowed-worker-session.ts).
       const sharedSessionBase = taskForceSessionId(p, `borrow:${spec.slug}`);
-      const sharedSessionOwner = borrowedWorkerSessionOwnerId(sharedSessionBase, role, attempt, true);
-      const sharedSessionClaim = sharedCandidate ? claimBorrowedWorkerSession(sharedSessionOwner) : null;
-      const sharedWorkerSession = sharedCandidate && sharedSessionClaim !== null;
+      const turnPlan = planBorrowedWorkerTurn({ base: sharedSessionBase, role, attempt, candidate: sharedCandidate, invocationId });
+      const sharedSessionClaim = turnPlan.claim;
+      const sharedWorkerSession = turnPlan.shared;
       if (role === "orchestrator") {
         observedDirectReasonCodes = ["escalated-after-failure"];
         observedDirectEscalatedFromRole = "worker";
         observedDirectFailureCount = 2;
         observedDirectEscalationAttempt = 1;
+        // The worker kept breaking the handoff contract: its shared session holds those replies. Dropped while no parallel packet is in it.
+        if (borrowedWorkerSessionIsShared({ mode: borrowedSessionMode(getMeta), role: "worker", review: taskForcePacketIsReview(packet), runtimeKind: active.kind,
+          agentAppMode: p.req.agentAppMode === true, acpDisabled: acpDisabledFor(active.kind), acpAgentId: active.acpAgentId ?? null })) {
+          releaseIdleSharedWorkerSession(sharedSessionBase, (ownerId) => dropOwnerNativeSession({ chatId: p.chat.id, kind: active.kind, ownerId, acpAgentId: active.acpAgentId ?? null }));
+        }
       }
       // A failed or stopped shared turn leaves a session in an unknown state: drop it so the agent's next stage starts clean.
       const claimedRuntimeKind = observedDirectRuntime.kind;
-      const dropSharedSession = () => dropOwnerNativeSession({ chatId: p.chat.id, kind: claimedRuntimeKind, ownerId: sharedSessionOwner });
+      const claimedAcpAgentId = observedDirectRuntime.acpAgentId ?? null;
+      const dropSharedSession = () => dropOwnerNativeSession({ chatId: p.chat.id, kind: claimedRuntimeKind, ownerId: turnPlan.turnOwner, acpAgentId: claimedAcpAgentId });
+      // Set when the runner itself is entered: a failure before that (capability preparation, a cancelled lease) never touched the session.
+      let runnerEntered = false;
       const attemptResult = await runClaimedWorkerTurn(sharedSessionClaim, dropSharedSession, () => workerCapabilityRunner(p.prepareWorkerCapabilities, {
         workerId: id, attemptId: observedDirectInvocationId, agentId: installedAgent?.id ?? p.chat.agentId ?? undefined,
         agentName: spec.name, task: capabilityTask, runtime: observedDirectRuntime, ceiling: capabilityCeiling,
-      }, (request, events) => observeTaskForceModelCall(p, {
+      }, (request, events) => (runnerEntered = true, observeTaskForceModelCall(p, {
         nodeId: id,
         phase: role === "worker" ? "worker" : "worker-escalation",
         attempt,
         agentId: installedAgent?.id ?? p.chat.agentId,
         runtime: observedDirectRuntime,
-      }, () => runSettledTaskForceStep(p, id, observedDirectPicked.runner, taskForceWorkerRunnerRequest(p, request, { sharedSession: sharedWorkerSession, runtimeKind: observedDirectRuntime.kind }), events, true)).then(result => { result.text = taskForceWorkerOwnerAskText(result.text, taskForceWorkerHandoffText(result.text)); return result; }), capabilityEvidence(id, observedDirectInvocationId))(
+      }, () => runSettledTaskForceStep(p, id, observedDirectPicked.runner, taskForceWorkerRunnerRequest(p, request, { sharedSession: sharedWorkerSession, runtimeKind: observedDirectRuntime.kind }), events, true)).then(result => { result.text = taskForceWorkerOwnerAskText(result.text, taskForceWorkerHandoffText(result.text)); return result; })), capabilityEvidence(id, observedDirectInvocationId))(
         {
           ...taskForceSystemRequest([
 ...borrowedAgentSystemPromptParts(spec, packagePermission, materializedWorkerMcpTools),
@@ -5817,7 +5838,7 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
             ? p.workingFolder ?? undefined
             : taskForceStageCwd(p, "direct-worker", packageBoundary.mcpAllowedTools ?? []),
           chatId: p.chat.id,
-          runtimeSessionOwnerId: borrowedWorkerSessionOwnerId(sharedSessionBase, role, attempt, sharedWorkerSession, sharedCandidate && !sharedWorkerSession ? invocationId : undefined),
+          runtimeSessionOwnerId: turnPlan.turnOwner,
           agentId: installedAgent?.id ?? p.chat.agentId,
           locale: p.locale,
         },
@@ -5839,7 +5860,12 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
             }));
           },
         },
-      ));
+      ), {
+        entered: () => runnerEntered,
+        // A session only this packet will ever use (its owner string names the invocation): gone once the turn is over.
+        ephemeral: turnPlan.ephemeral,
+        rotate: (done) => borrowedSessionOutgrewWindow(claimedRuntimeKind, done, runtimeContextWindow(claimedRuntimeKind, observedDirectRuntime.model ?? null)),
+      });
       observedDirectResult = attemptResult;
       return requireTaskForceRunnerSuccess(attemptResult, observedDirectRuntime);
     });

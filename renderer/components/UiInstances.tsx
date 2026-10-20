@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
-import type { UiActionView, UiInstanceView } from "@shared/ui-instances";
+import { foldUiInstances, type UiActionView, type UiInstanceView } from "@shared/ui-instances";
 import { mergeInlineUiTranscript } from "@shared/inline-ui-transcript";
 import { validateInlineUiPresentationContent } from "@shared/inline-ui-presentation";
 import { FINANCE_NATIVE_VIEW, FinanceNativeResultSchema } from "@shared/finance-native-ui";
@@ -67,10 +67,19 @@ export function InlineUiInstances({ chatId, turnIds, locale, instances }: {
   chatId?: string; turnIds?: readonly string[]; locale: "ko" | "en"; instances?: readonly UiInstanceView[];
 }) {
   const loaded = useInlineUiInstances(instances ? undefined : chatId);
+  const [expanded, setExpanded] = useState(false);
   const visible = (instances ?? loaded).filter(instance => instance.chatId === chatId && instance.state !== "closed"
     && (!turnIds || turnIds.includes(instance.turnId)));
   if (visible.length === 0) return null;
-  return <>{visible.map(instance => <UiInstanceCard key={instance.instanceId} instance={instance} locale={locale} />)}</>;
+  // A run can present dozens of cards under one answer: the newest settled ones stay, the older ones open from a button. A card that waits for the owner never folds.
+  const { shown, folded } = foldUiInstances(visible);
+  const foldable = folded.length > 0, list = expanded ? visible : shown, ko = locale === "ko";
+  return <>
+    {foldable && <button type="button" className={styles.fold} aria-expanded={expanded} data-ui-fold={expanded ? "open" : "closed"} onClick={() => setExpanded(open => !open)}>
+      {expanded ? (ko ? "이전 카드 접기" : "Fold earlier cards") : (ko ? `이전 카드 ${folded.length}개 보기` : `Show ${folded.length} earlier cards`)}
+    </button>}
+    {list.map(instance => <UiInstanceCard key={instance.instanceId} instance={instance} locale={locale} />)}
+  </>;
 }
 
 const INTENT_ICON = { "host-action": IconBolt, "open-artifact": IconExpand, "prepare-input": IconEdit, "model-followup": IconSend, "local-state": IconCheck } as const;

@@ -1,4 +1,4 @@
-.report{width:min(100%,960px);margin:0 auto;padding:40px clamp(20px,5vw,56px) 56px;border:1px solid var(--paper-edge);border-radius:12px;background:var(--paper);color:var(--ink);min-width:0;-webkit-font-smoothing:antialiased}
+.report{width:min(100%,960px);margin:0 auto;padding:40px clamp(20px,5vw,56px) 56px;border:1px solid var(--paper-edge);border-radius:var(--radius-lg);background:var(--paper);color:var(--ink);box-shadow:0 1px 3px color-mix(in srgb,var(--ink) 6%,transparent),0 14px 34px -18px color-mix(in srgb,var(--ink) 14%,transparent);min-width:0;-webkit-font-smoothing:antialiased}
 .header{padding:26px 0;border-top:3px solid var(--accent);border-bottom:1px solid var(--paper-edge);margin-bottom:32px}
 .header h1{font-size:clamp(28px,3.5vw,40px);font-weight:600;letter-spacing:-.035em;line-height:1.35;margin:0;max-width:100%;text-wrap:balance;overflow-wrap:break-word;word-break:auto-phrase}
 .body{display:grid;gap:36px;min-width:0}
@@ -10,6 +10,12 @@
 .prose h3{font-size:17px;line-height:1.5;font-weight:600;margin:26px 0 12px;text-wrap:balance}
 .prose a{color:var(--accent);text-decoration:underline;text-underline-offset:3px}
 .prose strong{font-weight:600}
+.tableScroll{overflow-x:auto;max-width:100%;margin:20px 0;border:1px solid var(--paper-edge);border-radius:var(--radius-md)}
+.tableScroll:focus-visible{outline:2px solid var(--accent);outline-offset:4px}
+.proseTable{width:100%;border-collapse:collapse;font-size:14px;line-height:1.6;font-variant-numeric:tabular-nums}
+.proseTable th,.proseTable td{padding:11px 14px;border-bottom:1px solid var(--paper-edge);text-align:start;white-space:nowrap}.proseTable tbody tr:hover td{background:var(--paper-2)}.proseTable tbody tr:last-child td{border-bottom:0}
+.proseTable th{font-weight:600;font-size:12px;color:var(--ink-soft);background:var(--paper-3)}
+.proseTable .numeric{text-align:end}
 .prose blockquote{margin:22px 0;padding:14px 20px;border-inline-start:3px solid var(--accent);background:var(--paper-inset,var(--paper));color:var(--ink-soft);font-size:.95em}
 .lead .prose>p:first-of-type{font-size:19px;line-height:1.85}
 .report:lang(ko) .prose{word-break:keep-all;overflow-wrap:anywhere}

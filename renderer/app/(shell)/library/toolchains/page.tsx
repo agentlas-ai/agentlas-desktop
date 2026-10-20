@@ -1,4 +1,4 @@
-// Independent Toolchain assets. Source links resolve asset IDs; legacy graph links stay explicit.
+// Toolchain assets: MCP tools for apps and web pages once operated by hand. Source links resolve asset IDs.
 "use client";
 import { Suspense } from "react";
 import { useSearchParams } from "next/navigation";
@@ -11,7 +11,7 @@ function ToolchainsPageInner() {
   const { locale } = useT();
   const version = Number(searchParams.get("version"));
   const focusVersionNumber = Number.isSafeInteger(version) && version > 0 ? version : null;
-  return <ToolchainsManager api={ipc()?.toolchains} locale={locale} focusAssetId={searchParams.get("asset")} focusVersionNumber={focusVersionNumber} focusAutomationId={searchParams.get("automation")} />;
+  return <ToolchainsManager api={ipc()?.toolchains} locale={locale} focusAssetId={searchParams.get("asset")} focusVersionNumber={focusVersionNumber} />;
 }
 
 export default function LibraryToolchainsPage() {

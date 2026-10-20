@@ -12050,7 +12050,8 @@ button[data-toggle-state="on"] {
   /* 카드: 테두리 1px #E8E8E8, 넉넉한 패딩, 반경 18px, 약한 그림자. */
   --ask-card-radius: var(--popup-radius);
   --ask-card-bg: var(--popup-card-bg);
-  --ask-card-line: var(--line);
+  /* 예전에는 var(--line) 이었는데 그 토큰은 어디에도 정의돼 있지 않아 카드 테두리와 동작 줄 구분선이 그려지지 않았다. */
+  --ask-card-line: var(--paper-edge);
   --ask-card-shadow: var(--popup-shadow);
   --ask-heading-icon-size: 36px;
   --ask-card-pad-top: 12px;
@@ -12095,6 +12096,37 @@ button[data-toggle-state="on"] {
   --ask-skip-line: #e2e4e5;
   /* 키보드 초점 한 줄(1px) — 두 줄 검정 테두리 대신(오너 2026-09-27). */
   --ask-focus-ring: #9b9fa3;
+
+  /* 카드 높이 상한 — 보기가 많아도 대화 영역을 눌러 버리지 않는다. 넘치면 보기 목록만 스크롤한다. */
+  --ask-card-max-height: min(46dvh, 480px);
+  /* 고른 보기·입력 중인 "기타" 줄의 1px 윤곽. 배경 한 톤 차이만으로 선택을 알리지 않는다. */
+  --ask-selected-ring: color-mix(in srgb, var(--ask-title-ink) 58%, transparent);
+  /* "기타"(직접 입력) 줄의 점선 윤곽. */
+  --ask-other-line: color-mix(in srgb, var(--ask-title-ink) 20%, transparent);
+  /* 보낼 수 있는 상태의 주 단추 — 어두운 알약. */
+  --ask-primary-bg: var(--black);
+  --ask-primary-ink: var(--white);
+}
+
+/* 어두운 테마 — 위 값은 밝은 종이 위에 고정한 글자색(#191a1c 등)이라 어두운 카드(--paper #131419) 위에서는 보이지
+ * 않았다(보기 글자와 카드 색이 거의 같았다). 같은 이름을 테마 토큰으로 다시 매긴다.
+ * 주 단추는 어두운 카드 위에서 어두운 알약이 묻히므로 밝은 알약으로 뒤집는다. */
+:root[data-theme="dark"] {
+  --ask-title-ink: var(--ink);
+  --ask-option-title-ink: var(--ink);
+  --ask-option-note-ink: var(--muted);
+  --ask-index-bg: color-mix(in srgb, var(--ink) 9%, var(--paper));
+  --ask-index-bg-active: color-mix(in srgb, var(--ink) 17%, var(--paper));
+  --ask-index-ink: var(--ink-soft);
+  --ask-badge-bg: color-mix(in srgb, var(--ink) 12%, var(--paper));
+  --ask-badge-ink: var(--ink-soft);
+  --ask-footer-ink: var(--muted);
+  --ask-skip-ink: var(--ink-soft);
+  --ask-skip-line: var(--paper-edge);
+  --ask-focus-ring: var(--muted-deep);
+  --ask-card-shadow: var(--rd-shadow-2);
+  --ask-primary-bg: var(--ink);
+  --ask-primary-ink: var(--paper);
 }
 
 /* ── 팝업 크기 체계 — 오너 결정 2026-08-24 ────────────────────────────────

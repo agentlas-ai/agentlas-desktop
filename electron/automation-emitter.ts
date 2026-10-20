@@ -123,11 +123,11 @@ export interface ParseAutomationsResult {
 /** Native One needs stable tool guidance, not the entire text-emission grammar.
  * The detailed fallback can be fetched on demand for typed monitor sources. */
 export const ONE_GRAPH_PROTOCOL =
-  "Save a graph only for work that comes back with different inputs or on a schedule; one occasion is done directly, and a recurring graph takes the date or item as an input, never in its name. Search toolchain_search before repeating work. A queued or pending request is not a completed result.";
+  "Save a graph only for recurring work in which AIs act on what its steps return, or that runs on a schedule. A one-off job is done directly; a recurring graph takes the date or item as an input, never in its name. Fixed code or tool steps on an input (checks, conversions, operating an app or page) are a tool, not a graph: use a tc_ tool when one fits, otherwise toolchain_search, and toolchain_create when it keeps coming back. A queued or pending request is not a completed result.";
 
 /** A Work task that may use saved Toolchains but owns no graphs (electron/toolchains/consumer.ts). */
 export const TOOLCHAIN_CONSUMER_PROTOCOL =
-  "Before repeating work, call toolchain_search; an empty result means do the work normally.";
+  "Use a tc_ Toolchain tool when one fits; otherwise call toolchain_search before operating an app or page by hand. An empty result means do the work normally.";
 
 /**
  * The automation guidance for one turn. One's own conversation authors graphs with the One Team
@@ -156,7 +156,7 @@ export const AUTOMATION_PROTOCOL = [
   "Typed source polling uses no model while unchanged. If no supported scalar source exists, omit source and supply an explicit schedule: that mode re-runs the prompt and only exact duplicate results are suppressed; do not promise zero-model checks.",
   "Keep unchanged/non-actionable runs quiet in the saved prompt; notify on meaningful change, completion, failure or required user action. Use every_run only when explicitly requested.",
   'When editing an existing registration include its exact "automationId" from the receipt, never infer identity from a global name.',
-  "One owns the goal and strategy. When repeated execution is useful, use the built-in one_graph tools if available: save a structured blueprint, run by identity, inspect results and patch the changed instructions as strategy evolves. A graph may collect data for your own judgment or contain reasoning/check/code steps itself.",
+  "One owns the goal and strategy. For recurring work in which AIs act on step results, or that runs on a schedule, use the built-in one_graph tools if available: save a structured blueprint, run by identity, inspect results and patch the changed instructions as strategy evolves. A graph may collect data for your own judgment or contain reasoning/check/code steps alongside AI steps; fixed code or tool steps alone on an input are a tool, not a graph.",
   "Saved graph definitions stay in the host; pass revision, inputs and node patches instead of copying full instructions on every run. A returned queue identity proves a request, and only its execution result proves completion.",
   "For regular schedules without those built-in tools, end your reply with this registration block (omit it otherwise):",
   "",

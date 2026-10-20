@@ -1,0 +1,107 @@
+/* Holdings rows. Every holding is a small card with labelled fields (the chat, and the dialog when it is narrow). Where there is room (the dialog, layout "auto") the same rows are a table.
+   The layout follows the width of the editor, not of the window, so the chat card and the dialog share one set of rules. */
+.editor { display: grid; gap: 10px; min-width: 0; font-size: 13px; color: var(--ink); }
+.editor[data-layout="auto"] { container: hrows / inline-size; }
+
+.table, .table tbody { display: grid; gap: 10px; min-width: 0; }
+.table { border-collapse: collapse; }
+.table thead { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+.table thead tr { display: block; }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+.table tbody tr {
+  position: relative; display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 10px 8px; align-items: end;
+  padding: 12px 12px 12px; border: 1px solid var(--paper-edge); border-radius: var(--radius-md); background: var(--paper);
+}
+.table tbody tr[data-invalid="true"] { border-color: color-mix(in srgb, var(--danger) 45%, var(--paper-edge)); }
+.table td { display: block; min-width: 0; padding: 0; border: 0; }
+.table td[data-label]::before { content: attr(data-label); display: block; margin-bottom: 4px; font-size: 11px; line-height: 1.2; color: var(--ink-soft); letter-spacing: .01em; }
+
+/* row card: line 1 symbol + name (+ remove), line 2 the numbers, line 3 currency, exchange, date; then what is saved now and what needs a fix */
+.table td[data-field="symbol"] { grid-area: 1 / 1 / 2 / 6; }
+.table td[data-field="name"] { grid-area: 1 / 6 / 2 / 13; }
+.table td[data-field="remove"] { display: contents; }
+.table td[data-field="quantity"] { grid-area: 2 / 1 / 3 / 5; }
+.table td[data-field="averageCost"] { grid-area: 2 / 5 / 3 / 9; }
+.table td[data-field="price"] { grid-area: 2 / 9 / 3 / 13; }
+.table td[data-field="currency"] { grid-area: 3 / 1 / 4 / 4; }
+.table td[data-field="exchange"] { grid-area: 3 / 4 / 4 / 8; }
+.table td[data-field="asOf"] { grid-area: 3 / 8 / 4 / 13; }
+.table td[data-field="held"] { grid-area: 4 / 1 / 5 / 13; }
+.table td[data-field="held"]::before { display: inline; margin: 0 6px 0 0; }
+.table td[data-field="issues"] { grid-area: 5 / 1 / 6 / 13; }
+
+.editor input {
+  width: 100%; box-sizing: border-box; min-height: 34px; padding: 6px 9px; font: inherit; font-size: 13px; line-height: 1.3; color: var(--ink);
+  background: var(--paper-2); border: 1px solid var(--paper-edge-strong); border-radius: var(--radius-sm); text-overflow: ellipsis;
+  transition: border-color .12s ease, box-shadow .12s ease, background-color .12s ease;
+}
+.editor input::placeholder { color: color-mix(in srgb, var(--ink-soft) 55%, transparent); }
+.editor input:hover:not(:disabled) { border-color: color-mix(in srgb, var(--ink) 30%, var(--paper-edge-strong)); }
+/* Design rule (globals.css): a text input draws no ring or border on focus, the caret shows it. The cell only turns paper white. */
+.editor input:focus-visible { background: var(--paper); }
+.editor input:disabled { opacity: .55; }
+.editor input[aria-invalid="true"] { border-color: var(--danger); background: var(--danger-soft); }
+.table td[data-field="symbol"] input { font-weight: 600; letter-spacing: .01em; }
+.table td[data-field="quantity"] input, .table td[data-field="averageCost"] input, .table td[data-field="price"] input,
+.table td[data-field="asOf"] input { text-align: right; font-variant-numeric: tabular-nums; }
+.table td[data-field="currency"] input { text-align: center; text-transform: uppercase; letter-spacing: .06em; font-weight: 500; }
+.table td[data-field="exchange"] input { text-transform: uppercase; letter-spacing: .02em; }
+.editor input[type=number] { -moz-appearance: textfield; appearance: textfield; }
+.editor input[type=number]::-webkit-outer-spin-button, .editor input[type=number]::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+
+.held { display: inline-flex; align-items: baseline; gap: 6px; font-variant-numeric: tabular-nums; color: var(--ink); }
+.held small { font-size: 11px; color: var(--ink-soft); }
+.none { color: var(--ink-soft); }
+.table td[data-field="held"]:has(.none) { display: none; }
+.issues { display: flex !important; align-items: center; gap: 6px; font-size: 12px; line-height: 1.4; color: var(--danger); }
+.issues svg { flex: none; }
+
+.remove, .add {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 34px; font: inherit; font-size: 13px; color: var(--ink-soft);
+  background: transparent; border: 1px solid transparent; border-radius: var(--radius-sm); cursor: pointer; transition: background-color .12s ease, color .12s ease, border-color .12s ease;
+}
+.remove { width: 34px; padding: 0; }
+.remove:hover:not(:disabled) { color: var(--danger); background: var(--danger-soft); }
+/* in a row card the remove button is a small badge on the card's corner, so it never takes room from the fields */
+.table tbody tr .remove { position: absolute; top: -9px; right: -9px; z-index: 1; width: 26px; min-height: 0; height: 26px; color: var(--ink-soft); background: var(--paper); border: 1px solid var(--paper-edge-strong); border-radius: 50%; box-shadow: var(--rd-shadow-1, 0 1px 3px rgba(0,0,0,.08)); }
+.table tbody tr .remove:hover:not(:disabled) { color: var(--danger); background: var(--danger-soft); border-color: var(--danger); }
+.table tbody tr .remove svg { width: 14px; height: 14px; }
+.add { width: 100%; border: 1px dashed var(--paper-edge-strong); color: var(--ink); background: var(--paper); }
+.add:hover:not(:disabled) { background: var(--paper-3); border-color: color-mix(in srgb, var(--ink) 35%, var(--paper-edge-strong)); }
+.remove:disabled, .add:disabled { opacity: .45; cursor: default; }
+.remove:focus-visible, .add:focus-visible { outline: 2px solid var(--attention, var(--ink)); outline-offset: 2px; }
+.empty { margin: 0; padding: 14px; border: 1px dashed var(--paper-edge-strong); border-radius: var(--radius-md); color: var(--ink-soft); line-height: 1.6; text-align: center; }
+
+/* what keeps Save closed, one banner above the rows */
+.summary { display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; border-radius: var(--radius-sm); font-size: 12px; line-height: 1.55; color: var(--danger); background: var(--danger-soft); }
+.summary svg { flex: none; margin-top: 2px; }
+.summary strong { display: block; font-size: 13px; font-weight: 600; }
+.summary ul { margin: 4px 0 0; padding: 0; list-style: none; display: grid; gap: 2px; }
+.summary li button { padding: 0; min-height: 0; font: inherit; color: inherit; text-decoration: underline; text-underline-offset: 2px; background: none; border: 0; cursor: pointer; text-align: left; }
+.summary li button:focus-visible { outline: 2px solid var(--attention, var(--ink)); outline-offset: 2px; border-radius: 2px; }
+
+/* wide: the same rows as a table (the dialog); the chat card is never a container of this name, so it stays a list of cards */
+@container hrows (min-width: 880px) {
+  .table { display: table; width: 100%; }
+  .table thead { position: static; width: auto; height: auto; margin: 0; overflow: visible; clip: auto; display: table-header-group; }
+  .table thead tr { display: table-row; }
+  .table th { padding: 8px 6px; text-align: left; font-size: 12px; font-weight: 500; color: var(--ink-soft); white-space: nowrap; }
+  .table th[data-field="quantity"], .table th[data-field="averageCost"], .table th[data-field="price"], .table th[data-field="asOf"] { text-align: right; }
+  .table th[data-field="currency"] { text-align: center; }
+  .table tbody { display: table-row-group; }
+  .table tbody tr { display: table-row; padding: 0; border: 0; border-radius: 0; background: transparent; }
+  .table td { display: table-cell; padding: 6px; border-top: 1px solid var(--paper-edge); vertical-align: middle; grid-area: auto; }
+  .table td[data-label]::before { display: none; }
+  .table td[data-field="remove"] { display: table-cell; width: 44px; }
+  .table th[data-field="held"], .table td[data-field="held"], .table td[data-field="held"]:has(.none) { display: table-cell; text-align: right; white-space: nowrap; }
+  .table tbody tr .remove { position: static; width: 34px; height: auto; min-height: 34px; border: 1px solid transparent; border-radius: var(--radius-sm); box-shadow: none; background: transparent; }
+  .table tbody tr .remove svg { width: 16px; height: 16px; }
+  .table td[data-field="issues"] { display: none !important; }
+  .table td[data-field="name"] input { min-width: 140px; }
+  .table td[data-field="symbol"] input { min-width: 108px; }
+  .table td[data-field="exchange"] input { min-width: 76px; }
+  .table td[data-field="currency"] input { min-width: 60px; }
+  .table td[data-field="quantity"] input, .table td[data-field="averageCost"] input, .table td[data-field="price"] input { min-width: 80px; }
+  .table td[data-field="asOf"] input { min-width: 108px; }
+}

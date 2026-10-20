@@ -28,6 +28,8 @@ import { calculateFromFinanceSources } from './calculation-service';
 import type { FinanceArtifactPresentation } from './artifacts';
 import { writeFinanceBriefing } from "./briefing";
 import { pauseFinanceMonitor, readFinanceMonitor, rollbackFinanceMonitor, scheduleFinanceMonitor } from "./monitor";
+/** The most positions one valuation prices: a reviewed holdings draft carries up to 100, and a currency group is valued only when every position in it is priced. */
+const PORTFOLIO_REFRESH_LIMIT = 100;
 
 const lockfile = require("proper-lockfile") as { lock(target: string, options: unknown): Promise<() => Promise<void>> };
 const MONITOR_LOCK_OPTIONS = { realpath: false, stale: 240000, retries: 0 };
@@ -255,7 +257,8 @@ export class FinanceService {
   private async observedPortfolio(scope:FinanceScope,workspace:FinanceWorkspace,route:FinanceDataSelection & {signal?:AbortSignal;assertCurrent:()=>void},signal:AbortSignal,value:(payload:{workspace:FinanceWorkspace;refreshResult:FinanceAIResult})=>FinancePortfolioValuation):Promise<FinancePortfolioValuation>{
     scope.assertCurrent();signal.throwIfAborted();
     const owned=new Set(workspace.holdings.map(holding=>holding.assetId));
-    const refreshed=await refreshFinanceQuotes({...workspace,watchlist:workspace.watchlist.filter(asset=>owned.has(asset.id))},route);
+    // A currency group is valued only when every position in it is priced, so a valuation reads every held asset (a dashboard refresh keeps its five).
+    const refreshed=await refreshFinanceQuotes({...workspace,watchlist:workspace.watchlist.filter(asset=>owned.has(asset.id))},route,{limit:PORTFOLIO_REFRESH_LIMIT});
     scope.assertCurrent();signal.throwIfAborted();return value({workspace,refreshResult:refreshed});
   }
   /** Refresh observed holding prices once, then freeze only complete positive currency groups with CAS. */

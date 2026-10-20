@@ -172,6 +172,16 @@ function closedAcpObject(value: unknown, keys: readonly string[]): value is Reco
 }
 
 /** Closed setup metadata is not inference evidence. Unknown extensions stay conservative. */
+/** What a provider says when it refuses a request for usage: HTTP 429, a rate limit, exhausted free usage, a quota. */
+const ACP_QUOTA_REFUSAL = /\b429\b|rate.?limit|too many requests|usage.?exhausted|quota/i;
+/** An RPC failure in the agent's own words: the message, then the data (JSON-RPC carries the human-readable cause there). */
+function acpRpcErrorText(err: unknown): string {
+  const raw = err instanceof Error ? err.message : String(err);
+  const data = err instanceof AcpRpcError ? err.data : undefined;
+  const detail = data == null ? "" : (typeof data === "string" ? data : JSON.stringify(data));
+  return detail && !raw.includes(detail) ? `${raw}: ${detail}` : raw;
+}
+
 function isAcpSetupMetadata(params: unknown): boolean {
   let update = params;
   if (closedAcpObject(params, ["sessionId", "update"]) && typeof params.sessionId === "string") update = params.update;
@@ -1180,7 +1190,9 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
       // Model is selected and acknowledged on the held ACP session before every changed-model turn.
       .update(mode ? (req.permission ?? "") : "")
       .update(mode && req.planMode ? "\0plan-read-only" : "")
-      .update(nativeMcp ? `\0native-mcp\0${nativeMcp.fingerprint}` : "")
+      // The native-browser table carries a launch handle minted per lease. A borrowed worker's shared session (borrowed-worker-session.ts) is
+      // one conversation across its stages, each with its own lease: the table stays in the process identity (mode), not in the conversation.
+      .update(nativeMcp && !(!mode && req.sessionFingerprintSeed?.startsWith("borrowed-worker.v1:")) ? `\0native-mcp\0${nativeMcp.fingerprint}` : "")
       .update("\0executable\0")
       .update(executableFingerprint)
       .digest("hex");
@@ -1735,6 +1747,12 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
         return { text: client.text.trim(), sessionId: session?.acpSessionId ?? undefined, ownerControlTerminal: "uncertain",
           failure: runtimeSilentTimeoutFailure(spec.id, silence.trippedWith?.limitMs ?? cliToolSilenceWindowMs(req.env ?? process.env)) };
       }
+      // A provider that refuses the whole request for usage (HTTP 429, exhausted free usage) before the agent produced any text, tool call or
+      // request of its own: nothing ran, so this is a quota failure the host can cool the runtime down on, not a turn that "may have acted".
+      if (!effectTerminal && err instanceof AcpRpcError && ACP_QUOTA_REFUSAL.test(acpRpcErrorText(err))
+        && !client.text.trim() && client.turnToolCalls === 0 && !agentRequestObserved) {
+        return { text: "", failure: { kind: "quota", message: acpRpcErrorText(err), runtime: spec.id, source: "marker" } };
+      }
       // Preserve the effect ledger in finally; missing text is never no-effect proof.
       if (!effectTerminal && (promptDispatchAttempted || client.turnActivityObserved || agentRequestObserved)) {
         // The agent's own final error (e.g. a JSON-RPC "model at capacity") leads the message; replay stays off.
@@ -1773,15 +1791,15 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
         .join(" / ");
 
       if (err instanceof AcpRpcError || /auth_required|not authenticated|login/i.test(message)) {
-        
-
-
-
-
-
-
-
-        const quota = /\b429\b|rate.?limit|too many requests|usage.?exhausted|quota/i.test(message);
+        /*
+         * ★한도 소진은 인증 문제가 아니다.
+         *
+         * 로그인은 멀쩡한데 "로그인하라"고 말하면 틀린 처방이고, 사용자는 될 리 없는
+         * 일을 하게 된다. grok 은 429 와 "free-usage-exhausted", 리셋 창까지
+         * 그대로 실어 보낸다 — 그 원문이 이미 사용자가 알아야 할 전부다. 그래서 이
+         * 경우에는 authMethods 안내를 **붙이지 않는다**.
+         */
+        const quota = ACP_QUOTA_REFUSAL.test(message);
         const authish = /auth_required|not authenticated|login/i.test(message);
         const help = prescription && !quota
           ? (locale === "ko"

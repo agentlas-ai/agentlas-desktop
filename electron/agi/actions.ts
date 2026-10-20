@@ -38,6 +38,7 @@ import type { GoalEpisodeDisposition } from "../long-run/episode-disposition";
 import type Database from "better-sqlite3";
 import { MAX_SAME_MOVE_PER_CAUSE, PERSISTENCE_BOUNDARY_KINDS, isPersistenceBoundaryKind, type PersistenceBoundaryKind } from "../../shared/persistence-policy";
 import { AGI_ACTION_KINDS, AGI_NON_ALTERNATIVE_ACTIONS, agiHarnessCapability, type AgiActionKind } from "./blocker";
+import type { AgiOwnerAskCardKind } from "./owner-ask-card";
 import { AgiIncidentStore, type AgiIncident } from "./incident-store";
 import { applyDefectResolutions, ensureDefectResolutionColumns } from "./defect-resolutions";
 import { assertAgiDecisionControl, agiDecisionAbortSignal, retainAgiDecisionControl, AGI_DECISION_CONTROL_CHANGED } from "./decision-control";
@@ -212,8 +213,11 @@ export interface AgiExecutorDeps {
   runLoginRecovery?(input: { domain: string; goalId: string; runId: string; chatId: string | null }, control: AgiLoginRecoveryControl): AgiLoginRecoveryOutcome | AgiLoginRecoveryResult | Promise<AgiLoginRecoveryOutcome | AgiLoginRecoveryResult>;
   /** Agentlas Browser restart seam (D6: allowed without asking). */
   restartAgentlasBrowser?(control: AgiBrowserRestartControl): boolean | AgiBrowserRestartOutcome | Promise<boolean | AgiBrowserRestartOutcome>;
-  /** One owner-visible line in the goal chat (host-notice marker). Idempotent per actionId. */
-  announce?(input: { chatId: string; actionId: string; kind: "action" | "ask" | "defect"; text: { ko: string; en: string } }): void;
+  /**
+   * One owner-visible line in the goal chat (host-notice marker). Idempotent per actionId. An owner ask also names its
+   * typed card kind: the line explains, the card is how the owner answers (asks are always cards).
+   */
+  announce?(input: { chatId: string; actionId: string; kind: "action" | "ask" | "defect"; text: { ko: string; en: string }; card?: AgiOwnerAskCardKind }): void;
   /** A defect was filed: surface the chip (D5). */
   onDefectFiled?(input: { defectId: string; goalId: string; chatId: string | null; code: string }): void;
 }
@@ -516,7 +520,11 @@ export class AgiActionExecutor {
     const line = noticeLine(request.action, delivered);
     if (!line) return delivered;
     if (!goal.chatId || !this.deps.announce) return { ...delivered, ok: false, code: AGI_ASK_NOT_DELIVERED_CODE, detail: { ...(delivered.detail ?? {}), reason: !goal.chatId ? "no-room" : "no-announce-seam" } };
-    try { this.deps.announce({ chatId: goal.chatId, actionId: request.actionId, kind: "ask", text: line }); }
+    // The card follows the typed fact: a persistence boundary, or the app restart ask. No other ask has a card kind.
+    const boundary = (delivered.detail ?? {}).boundary;
+    const card: AgiOwnerAskCardKind | undefined = request.action === "request_app_restart" ? "app_restart"
+      : isPersistenceBoundaryKind(boundary) ? boundary : undefined;
+    try { this.deps.announce({ chatId: goal.chatId, actionId: request.actionId, kind: "ask", text: line, ...(card ? { card } : {}) }); }
     catch (error) { return { ...delivered, ok: false, code: AGI_ASK_NOT_DELIVERED_CODE, detail: { ...(delivered.detail ?? {}), reason: untypedReason(error) } }; }
     return delivered;
   }

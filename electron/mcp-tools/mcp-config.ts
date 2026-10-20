@@ -881,24 +881,25 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
     : false;
 
   const inboundMailRun = isAgentMailAutoRunChat(callerChatId);
-  // A Work task (not One's own conversation) gets One Team only as a Toolchain consumer: search,
-  // run callable Toolchains, read its own results (electron/toolchains/consumer.ts). Loaded lazily —
-  // the toolchain module reaches the judgment runners, which reach this file.
-  const toolchainConsumer = Boolean(callerChatId) && serializedServers.some((s) => s.catalogId === "one-team")
-    && !oneTeamDispatchAllowedFor(callerChatId)
-    ? (await import("../toolchains/consumer")).toolchainConsumerAllowedFor(callerChatId)
-    : false;
-
-  // A teammate working on a hand-off from a group room gets one tool, room_say, and nothing else of One Team.
-  const roomMember = Boolean(callerChatId) && !toolchainConsumer && serializedServers.some((s) => s.catalogId === "one-team")
-    && !oneTeamDispatchAllowedFor(callerChatId) && roomMemberContext(callerChatId) !== null;
-
   // Owner decision 2026-10-16: a room-saved graph's agent/action step gets that room's One Team, its grant's tools only.
-  // The grant is Main-minted for exactly this step's chat and re-checked here; a dry run or plan never gets it.
-  const graphTeamGrant = callerChatId && !toolchainConsumer && !roomMember && !oneTeamDispatchAllowedFor(callerChatId)
+  // The grant is Main-minted for exactly this step's chat and re-checked here; a dry run or plan never gets it. It is decided
+  // first: a graph step calls Toolchains through its pinned toolchain_call steps, never through the consumer tools.
+  const graphTeamGrant = callerChatId && !oneTeamDispatchAllowedFor(callerChatId)
     && opts?.graphTeamGrant && graphTeamGrantCurrent(opts.graphTeamGrant) && opts.graphTeamGrant.chatId === callerChatId
     && opts.toolGate?.simulation !== true && opts.toolGate?.planMode !== true && opts.toolGate?.oneTeamReport !== true
     ? opts.graphTeamGrant : null;
+
+  // A teammate working on a hand-off from a group room gets room_say (and the per-item effect tools of a graph step's dispatch).
+  const roomMember = Boolean(callerChatId) && !graphTeamGrant && serializedServers.some((s) => s.catalogId === "one-team")
+    && !oneTeamDispatchAllowedFor(callerChatId) && roomMemberContext(callerChatId) !== null;
+
+  // A Work task, or a teammate's session or own conversation, gets the Toolchain consumer subset: search, run and the callable
+  // Toolchains as tools, read its own results (electron/toolchains/consumer.ts). Teammates do the hand work a Toolchain replaces.
+  // Loaded lazily — the toolchain module reaches the judgment runners, which reach this file.
+  const toolchainConsumer = Boolean(callerChatId) && !graphTeamGrant && serializedServers.some((s) => s.catalogId === "one-team")
+    && !oneTeamDispatchAllowedFor(callerChatId)
+    ? (await import("../toolchains/consumer")).toolchainConsumerAllowedFor(callerChatId)
+    : false;
 
   try {
   for (const s of serializedServers) {
@@ -1150,11 +1151,14 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
                 tools: [...graphTeamGrant.tools, ...graphTeamGrant.effectTools], graphTeamGrant }
             : { chatId: callerChatId ?? null, permission: opts?.toolGate?.permission ?? "read",
               ...(opts?.supervisorReplyRunId ? { supervisorReplyRunId: opts.supervisorReplyRunId } : {}),
-              ...(toolchainConsumer ? { scope: "toolchain-consumer" as const,
+              ...(toolchainConsumer && !roomMember ? { scope: "toolchain-consumer" as const,
                 tools: (await import("../toolchains/consumer")).TOOLCHAIN_CONSUMER_TOOLS } : {}),
-              // A teammate on a dispatch a graph step owns also checks and records each item it publishes (graph-effect-items).
-              ...(roomMember ? { scope: "room-member" as const, tools: (await import("../one/graph-effect-items")).graphEffectScopeForTeammate(callerChatId)
-                ? [...ROOM_MEMBER_TOOL_NAMES, ...GRAPH_EFFECT_ITEM_TOOL_NAMES] : ROOM_MEMBER_TOOL_NAMES } : {}) },
+              // A teammate on a dispatch a graph step owns also checks and records each item it publishes (graph-effect-items);
+              // a teammate also uses callable Toolchains when there are any.
+              ...(roomMember ? { scope: "room-member" as const, tools: [
+                ...((await import("../one/graph-effect-items")).graphEffectScopeForTeammate(callerChatId)
+                  ? [...ROOM_MEMBER_TOOL_NAMES, ...GRAPH_EFFECT_ITEM_TOOL_NAMES] : ROOM_MEMBER_TOOL_NAMES),
+                ...(toolchainConsumer ? (await import("../toolchains/consumer")).TOOLCHAIN_CONSUMER_TOOLS : [])] } : {}) },
             capabilityConfigKey,
           );
           oneTeamCapabilityCleanup.push(() => removeOneTeamCapability(capabilityConfigKey, capability.binding.capabilityId));

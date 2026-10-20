@@ -85,3 +85,21 @@
   background: transparent;
   color-scheme: normal;
 }
+
+.fold {
+  justify-self: start;
+  margin: 8px 0 0;
+  padding: 5px 10px;
+  border: 1px dashed var(--paper-edge-strong, var(--paper-edge));
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ink-soft, inherit);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.fold:hover {
+  background: var(--paper-edge);
+  color: var(--ink);
+}

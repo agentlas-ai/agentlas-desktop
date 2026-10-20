@@ -58,7 +58,6 @@ import { buildSystemOptimizerPrompt } from "./system-agents/system-optimizer";
 import { runMcpInvocation } from "./mcp/client";
 import { automationRuntimePermission } from "../shared/graph-node-protocol";
 import { runGraph, type RunGraphResult } from "./workflow/run-graph";
-import { callableContractFor } from "./toolchains/interface";
 import { graphExecutionDigest } from "../shared/graph-execution-digest";
 import { AutomationWorkspaceError, automationWorkspaceOwnerText, captureAutomationWorkspace } from "./automation-workspace";
 import { sweepAutomationEffectObservations } from "./long-run/effect-observation";
@@ -2446,14 +2445,12 @@ export async function runAutomationFromTrigger(
   if (dispatchPaused()) return { accepted: false };
   const a = getAutomation(id);
   if (!a) return { accepted: false };
-  const command = decodeGraphCommandDelivery(a, ctx,
-    ctx.source === "one-mcp" || ctx.source === "toolchain" ? automationDefinitionDigest(a) : undefined);
+  // A graph is no longer called as a Toolchain (a Toolchain is its own MCP-shaped asset, toolchains/assets.ts);
+  // a request queued that way before is not run.
+  if (ctx.source === "toolchain") return { accepted: false, status: "blocked", error: "toolchain_not_callable" };
+  const command = decodeGraphCommandDelivery(a, ctx, ctx.source === "one-mcp" ? automationDefinitionDigest(a) : undefined);
   if (command && !command.ok) return { accepted: false, status: "blocked", error: command.code };
-  // Withdrawing a Toolchain or editing its automation stops calls already queued.
-  if (command?.ok && ctx.source === "toolchain" && !callableContractFor(a.id)) {
-    return { accepted: false, status: "blocked", error: "toolchain_not_callable" };
-  }
-  if (command?.ok && (ctx.source === "one-mcp" || ctx.source === "toolchain")) {
+  if (command?.ok && ctx.source === "one-mcp") {
     try { validateOneGraphCommandScope(a); }
     catch (error) { return { accepted: false, status: "blocked", error: error instanceof Error ? error.message : "one_graph_scope_invalid" }; }
   }

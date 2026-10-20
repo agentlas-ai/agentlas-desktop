@@ -1,6 +1,7 @@
 // Trial use: a detector-made Toolchain draft earns callability by working in real tasks, not by a staged test.
 //
-// The host promotes a generated draft after successful uses in real tasks. The existing tool interface carries
+// The host promotes a draft after successful uses in real tasks, whoever made it (detector, One's toolchain_create, the owner's
+// screen) — a draft that writes or posts cannot be validated by staged examples, and its output is never one fixed value. The existing tool interface carries
 // the trial without adding working-agent instructions. Concretely:
 //  · search — when nothing callable matches, at most one matching detector draft is returned with stage "trial";
 //    one chance per conversation per day, so a draft that does not fit never keeps coming back;
@@ -23,25 +24,15 @@ const AUTHORED = "toolchain.detector.verdict.v1:";
 
 const read = readTrialLedger, write = writeTrialLedger;
 
-/** Asset ids the repeated-work detector authored (its verdict rows); owner-made assets keep the owner's own flow. */
-export function detectorAuthoredToolchainIds(): Set<string> {
-  const rows = getDb().prepare("SELECT value FROM meta WHERE key >= ? AND key < ?").all(AUTHORED, `${AUTHORED}￿`) as Array<{ value: string }>;
-  const ids = new Set<string>();
-  for (const row of rows) {
-    try { const verdict = JSON.parse(row.value) as { generation?: { toolchainId?: string } | null }; if (verdict.generation?.toolchainId) ids.add(verdict.generation.toolchainId); }
-    catch { /* a corrupt verdict authors nothing */ }
-  }
-  return ids;
-}
-
 /** Called by toolchain_search only when nothing callable matched. Returns the granted draft, or null. Never throws. */
 export function grantToolchainTrial(task: string, chatId: string | null, assets: ToolchainAsset[], now = Date.now()): { asset: ToolchainAsset; version: number } | null {
   try {
     if (!chatId || !task.trim()) return null;
-    const authored = detectorAuthoredToolchainIds();
+    // Every untested draft earns callability the same way, whoever made it: a real use in a task that was going to do the work
+    // anyway (an effectful Toolchain cannot be validated by staged posts, and its output is never one fixed value).
     const candidates = assets.flatMap(asset => {
       const pulledBack = isToolchainPulledBack(asset);
-      const release = authored.has(asset.id) ? trialVersion(asset, pulledBack) : null;
+      const release = trialVersion(asset, pulledBack);
       return release && trialEligible(asset, read(asset.id, release.version), chatId, now, pulledBack) ? [{ id: asset.id, release }] : [];
     });
     const [hit] = rankToolchainAssetCandidates(task, candidates, 1);

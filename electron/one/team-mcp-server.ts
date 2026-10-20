@@ -37,14 +37,14 @@ export const GRAPH_EFFECT_ITEM_TOOL_NAMES = ["effect_item_check", "effect_item_r
 const INLINE_GRAPH_DESCRIPTIONS: Record<string, string> = {
   one_graph_schema: "Get canonical blueprint schema or installed MCP argument schema/digest by catalog_id. Include registration protocol only for typed monitor sources.",
   one_graph_inspect: "Inspect this conversation's saved graphs/revisions. Omit graph_id to list; node_ids, node_offset or offset/limit page large results. if_cache_key avoids unchanged instructions.",
-  one_graph_save: "For work that comes back with different inputs or on a schedule (find topics, then the team works on the result; monitor performance). Never for one occasion (episode 20, the 19th's report): do that directly, or pass the date or item as an input. Compile/save blueprint. Updating needs graph_id/current expected_revision. Identical creation reuses its receipt. Enables if ready unless enabled:false; no implicit Goal/workspace grant.",
+  one_graph_save: "For work that comes back with different inputs or on a schedule (find topics, then the team works on the result; monitor performance). Never for one occasion (episode 20, the 19th's report): do that directly, or pass the date or item as an input. Never for fixed code or tool steps alone: that is a tool (toolchain_create). Compile/save blueprint. Updating needs graph_id/current expected_revision. Identical creation reuses its receipt. Enables if ready unless enabled:false; no implicit Goal/workspace grant.",
   one_graph_patch: "Update exact node instructions/MCP arguments and purpose with current expected_revision; preserves topology, runtime, effects and grants. Revise code via one_graph_save, not patch.",
   one_graph_set_enabled: "Enable exact inspected revision after connection/effect checks, or disable and Stop. Stop works with read permission. Never replaces a job.",
   one_graph_run: "Execute enabled graph with current expected_revision/stable request_id and named string input. Retries reuse execution. Wait up to 50s (default20); retain event_id and read one_graph_result if running.",
   one_graph_result: "Read your exact graph event; reads never execute. Wait up to50s; outputs/failures bounded. Page longer node output with node_id/offset/limit.",
   toolchain_create: "A deterministic MCP-style tool for an app or page you keep operating by hand (a desktop app with no MCP such as Blender; a browser flow such as posting to Threads): one asset per capability, never per task/topic/version. Not for workflows or schedules (those are graphs) and not for one-off work. Delegate natural-language request to system orchestrator for generalized inputs/typed contracts/implementation/examples. It reuses existing capability or improves same ID; no task-graph migration. Stable request_id prevents retries duplicating assets.",
   toolchain_publish: "Validate draft version by real example executions and typed expected outputs. Only passed validation makes callable. Effectful validation needs explicit owner verification; never implicitly sends posts/payments.",
-  toolchain_search: "Call before repeating work. Find callable capabilities; returns independent toolchain_id/version, typed schemas/examples. Check when_not_to_use; empty means work normally. Call toolchain_run or compose native toolchain_call; graph/MCP IDs differ.",
+  toolchain_search: "Callable Toolchains are already tc_ tools. Before operating an app or page by hand where no tc_ tool fits, call this: it may find one not listed yet. Returns toolchain_id/version, typed schemas/examples; check when_not_to_use; empty means work normally. Run with toolchain_run or a graph's native toolchain_call; graph/MCP IDs differ.",
   toolchain_inspect: "Read independent asset contract/immutable versions, without source instructions. Omit version for stable release.",
   toolchain_run: "Run exact published asset/version with typed args/stable request_id. Identical retry returns receipt; changed args refused. Permissions cap implementation. Retain call_id/read toolchain_result if running.",
   toolchain_result: "Read your exact call's typed result/status by call_id; never executes, even after withdrawal. Unresolved effects are not success.",
@@ -93,6 +93,7 @@ function request(operation, input) {
   });
 }
 const text = (value) => ({ content: [{ type: "text", text: JSON.stringify(value) }] });
+const TOOLCHAIN_TOOL = /^tc_[a-z0-9_]{1,46}$/;
 const error = (message) => ({ content: [{ type: "text", text: message }], isError: true });
 const ro = { readOnlyHint: true, destructiveHint: false, openWorldHint: false };
 const act = { readOnlyHint: false, destructiveHint: false, openWorldHint: false };
@@ -118,15 +119,22 @@ function handle(requestValue) {
   if (requestValue.method === "initialize") {
     const consumer = allowedTools();
     return { protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "agentlas-one-team", version: "1.0.0" },
-      ...(consumer ? { instructions: "Toolchains are independent generalized capabilities with immutable versions. Before repeating work, call toolchain_search. If the returned contract fits (check when_not_to_use), use toolchain_run with toolchain_id, version, stable request_id and typed args matching input_schema. Read toolchain_result with call_id if running. An empty result means do the work normally. Graph ids and MCP tools are separate from Toolchain ids." } : {}) };
+      ...(consumer ? { instructions: "Tools named tc_... are Toolchains: deterministic tools for an app or web page that was operated by hand before. When one fits (check its Not for), call it instead of doing those steps yourself; if it fails, do the work your own way. Before operating an app or page by hand where no tc_ tool fits, call toolchain_search: it may find one not listed yet, run with toolchain_run (toolchain_id, version, stable request_id, args matching input_schema). Read toolchain_result with call_id while a call is running. An empty result means do the work normally. Graph ids and MCP tools are separate from Toolchain ids." } : {}) };
   }
   if (requestValue.method === "notifications/initialized" || requestValue.method === "ping") return requestValue.method === "ping" ? {} : undefined;
   const allowed = allowedTools();
-  if (requestValue.method === "tools/list") return { tools: allowed ? tools.filter((tool) => allowed.includes(tool.name)) : tools.filter((tool) => tool.name !== "room_say" && !tool.name.startsWith("effect_item_")) };
+  if (requestValue.method === "tools/list") {
+    const base = allowed ? tools.filter((tool) => allowed.includes(tool.name)) : tools.filter((tool) => tool.name !== "room_say" && !tool.name.startsWith("effect_item_"));
+    // Callable Toolchains are tools of their own; Main decides which this conversation sees. Without an answer the list is the base.
+    return Promise.resolve().then(() => request("toolchain_tools", {})).then((value) => ({ tools: base.concat(value && Array.isArray(value.tools)
+      ? value.tools.filter((tool) => tool && TOOLCHAIN_TOOL.test(String(tool.name)) && tool.inputSchema && typeof tool.inputSchema === "object") : []) }),
+      () => ({ tools: base }));
+  }
   if (requestValue.method !== "tools/call") throw new Error("Method not found");
   const name = requestValue.params && requestValue.params.name;
-  if (allowed && !allowed.includes(name)) return Promise.resolve(error("This One team tool is not available in this conversation."));
+  if (allowed && !allowed.includes(name) && !(typeof name === "string" && TOOLCHAIN_TOOL.test(name))) return Promise.resolve(error("This One team tool is not available in this conversation."));
   const args = requestValue.params && requestValue.params.arguments && typeof requestValue.params.arguments === "object" ? requestValue.params.arguments : {};
+  if (typeof name === "string" && TOOLCHAIN_TOOL.test(name)) return request("toolchain_tool", { name, input: args });
   if (name === "room_say") return request("room", { text: args.text, to: args.to, replyTo: args.reply_to });
   if (name === "effect_item_check" || name === "effect_item_record") return allowed ? request("effect", { name, input: args }) : Promise.resolve(error("This One team tool is not available in this conversation."));
   if (name === "one_team_list") return request("list", {});

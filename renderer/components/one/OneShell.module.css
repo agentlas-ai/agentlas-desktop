@@ -1532,6 +1532,12 @@
   box-shadow: none;
 }
 
+/* 묻는 카드는 닫기 단추도 스스로 갖는다(머리 오른쪽, 접기 단추 옆 — 같은 onDismiss). 래퍼의 겹쳐 얹는 ✕ 는 카드가 아닌
+   결정 모양에만 남긴다. 둘 다 두면 접기 단추 위에 ✕ 가 겹쳤다(실측 2026-10-20). */
+.decisionInline:has([data-ask-card="true"]) .decisionInlineClose {
+  display: none;
+}
+
 .decisionInlineClose {
   position: absolute;
   top: 5px;

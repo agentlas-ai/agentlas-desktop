@@ -28,7 +28,6 @@ import { parseGoalWaitIntent, type GoalWaitIntent } from "./wait-emitter";
 import { timerWaitAuthority } from "./goal-deadline";
 import { decideGoalWake, recordGoalWake } from "./wake-arbiter";
 import { getAutomation } from "../store/automations";
-import { readToolchainState } from "../toolchains/store";
 
 export interface GoalWaitSubscription {
   episodeCaptureId?: string; episodeRequestId?: string;
@@ -183,11 +182,9 @@ export function observeGoalWaitSubject(wait: Pick<GoalWaitSubscription, "chatId"
     return { digest: hash({ notBefore: subject.notBefore, due }), cursor: subject.notBefore, terminal: due, reason: due ? "ongoing_cycle_due" : null };
   }
   if (subject.kind === "automation") {
-    // Layer rule (PLAN.md §0): a Goal watches a tool its own room made, or a callable Toolchain — never
-    // another room's private graph.
+    // Layer rule (PLAN.md §0): a Goal watches a graph its own room made — never another room's private graph.
     const automation = getAutomation(subject.automationId);
-    const callable = readToolchainState(subject.automationId).interface?.state === "callable";
-    if (!automation || !automation.graph?.nodes.length || (automation.monitor?.originChatId !== chat.id && !callable)) {
+    if (!automation || !automation.graph?.nodes.length || automation.monitor?.originChatId !== chat.id) {
       throw new Error("goal_wait_automation_binding_invalid");
     }
     const latest = getDb().prepare(`SELECT id, checkpoint_json FROM automation_runs WHERE automation_id = ? AND status = 'ok'

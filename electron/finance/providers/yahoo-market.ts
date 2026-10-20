@@ -1,7 +1,11 @@
 import type { FinanceAIResult, FinanceAsset, FinanceDataRequest, FinanceDataResult, FinanceOperation, FinanceSearchResult, FinanceWorkspace } from '../../../shared/finance';
 import { findIsharesFund } from './ishares-catalog';
 
-export interface YahooMarketOptions { signal?: AbortSignal }
+export interface YahooMarketOptions {
+  signal?: AbortSignal;
+  /** How many selected assets one quote refresh reads. Five unless a caller that needs every position priced (portfolio valuation) asks for more; capped. */
+  limit?: number;
+}
 const DOC='https://ranaroussi.github.io/yfinance/';
 const RIGHTS='Yahoo public market data is intended for personal use. Public access and the open-source adapter do not grant exchange real-time entitlements or redistribution rights.';
 const COVERAGE='Selected Yahoo listing only. Provider-reported regular-market snapshot or bounded daily chart observations; no completeness, point-in-time vintage, corporate-action lineage or total-return guarantee.';
@@ -10,6 +14,9 @@ const RANGES:Record<string,string>={'1M':'1mo','3M':'3mo','1Y':'1y','5Y':'5y',al
 export const YAHOO_DISCOVERY_PRESETS=['undervalued_large_caps','undervalued_growth_stocks','growth_technology_stocks'] as const;
 export type YahooDiscoveryPreset=typeof YAHOO_DISCOVERY_PRESETS[number];
 const LIMIT=2*1024*1024,ROW_LIMIT=5000;
+const REFRESH_DEFAULT=5,REFRESH_MAX=100;
+/** A refresh reads at most this many assets: the caller's whole-number request within 1..100 (the most positions a reviewed holdings draft carries), otherwise five. */
+export function yahooRefreshLimit(value?:number):number{return typeof value==='number'&&Number.isInteger(value)&&value>=1?Math.min(value,REFRESH_MAX):REFRESH_DEFAULT;}
 let active=0,blockedUntil=0;
 type Obj=Record<string,unknown>;
 function object(value:unknown):Obj{if(!value||typeof value!=='object'||Array.isArray(value))throw new Error('finance_yahoo_source_shape');return value as Obj;}
@@ -45,6 +52,25 @@ function parseChart(value:unknown,symbol:string):{meta:Obj;quotes:Obj;timestamps
   const item=object(root.result[0]),meta=object(item.meta);if(meta.symbol!==symbol)throw new Error('finance_yahoo_identity_mismatch');if(meta.dataGranularity!==undefined&&meta.dataGranularity!=='1d')throw new Error('finance_yahoo_granularity_mismatch');
   const list=object(item.indicators).quote;if(!Array.isArray(list)||list.length!==1||!Array.isArray(item.timestamp))throw new Error('finance_yahoo_source_shape');if(item.timestamp.length>50000)throw new Error('finance_yahoo_output_too_large');return{meta,quotes:object(list[0]),timestamps:item.timestamp};
 }
+/** A holding's exchange is whatever the owner, a statement or a model wrote ("KRX", "KOSPI", "NASDAQ"); the provider names the same market "KSC"/"KSE", "NMS"/"NGM". Each row lists labels of one market and the groups they name; an umbrella label ("KRX") names every market under it. A label outside the table still has to equal or begin one of the provider's own names. */
+const VENUE_LABELS:ReadonlyArray<readonly [string[],string[]]>=[
+  [['NASDAQ','NAS','NMS','NGM','NCM','XNAS','XNMS','XNGS','XNCM','NASDAQGS','NASDAQGM','NASDAQCM','NASDAQGLOBALSELECT','NASDAQGLOBALSELECTMARKET','NASDAQGLOBALMARKET','NASDAQCAPITALMARKET'],['NASDAQ']],
+  [['NYSE','NYQ','XNYS','NEWYORKSTOCKEXCHANGE'],['NYSE']],
+  [['ARCA','NYSEARCA','PCX','ARCX'],['ARCA']],
+  [['AMEX','ASE','NYSEAMERICAN','NYSEMKT','XASE','AMERICANSTOCKEXCHANGE'],['AMEX']],
+  [['BATS','BTS','BZX','CBOE','CBOEUS','CBOEBZX'],['CBOE']],
+  [['KOSPI','KSC','KSE'],['KOSPI']],[['KOSDAQ','KOE'],['KOSDAQ']],[['KRX','XKRX'],['KOSPI','KOSDAQ']],
+  [['TYO','JPX','TOKYO','XTKS','TOKYOSTOCKEXCHANGE'],['TOKYO']],[['TOR','TSX','XTSE','TORONTO'],['TORONTO']],[['TSE'],['TOKYO','TORONTO']],
+  [['HKG','HKEX','HKSE','SEHK','XHKG'],['HKEX']],
+  [['LSE','LON','XLON','LONDON','LONDONSTOCKEXCHANGE'],['LSE']],
+  [['GER','XETRA','XETR','ETR'],['XETRA']],
+  [['PAR','EPA','XPAR','PARIS','EURONEXTPARIS'],['PARIS']],[['AMS','XAMS','AMSTERDAM','EURONEXTAMSTERDAM'],['AMSTERDAM']],
+  [['SHH','SSE','XSHG','SHANGHAI'],['SHANGHAI']],[['SHZ','SZSE','XSHE','SHENZHEN'],['SHENZHEN']],
+  [['TAI','TWSE','XTAI','TAIWAN'],['TAIWAN']],[['NSI','NSE','XNSE'],['NSE']],[['SES','SGX','XSES'],['SGX']],[['ASX','XASX'],['ASX']],
+];
+const VENUES=new Map<string,string[]>(VENUE_LABELS.flatMap(([labels,groups])=>labels.map(label=>[label,groups] as const)));
+const venueKey=(value:string)=>value.toUpperCase().replace(/[^A-Z0-9]/g,'');
+function sameVenue(label:string,provider:string):boolean{const wanted=venueKey(label),venue=venueKey(provider);if(!venue)return false;if(venue===wanted||venue.startsWith(wanted))return true;const groups=VENUES.get(venue);return !!groups&&(VENUES.get(wanted)??[]).some(group=>groups.includes(group));}
 function validateAsset(asset:FinanceAsset,meta:Obj):void{
   if(asset.symbol!==meta.symbol)throw new Error('finance_yahoo_identity_mismatch');
   const code=currency(meta.currency);if(asset.currency!=='XXX'&&code!==asset.currency)throw new Error('finance_yahoo_currency_mismatch');
@@ -52,7 +78,7 @@ function validateAsset(asset:FinanceAsset,meta:Obj):void{
   const issuer=findIsharesFund(asset.id);if(issuer){if(asset.symbol!==issuer.asset.symbol||asset.currency!==issuer.asset.currency||asset.kind!==issuer.asset.kind)throw new Error('finance_yahoo_identity_mismatch');return;}
   // Legacy region metadata is not a venue identifier. Do not relabel it as one.
   if(asset.id===`av:${asset.symbol}`)return;
-  if(asset.exchange){const normalize=(value:string)=>value.toUpperCase().replace(/[^A-Z0-9]/g,''),wanted=normalize(asset.exchange),venues=[normalize(text(meta.exchangeName)),normalize(text(meta.fullExchangeName))];if(!venues.some(venue=>venue&&(venue===wanted||venue.startsWith(wanted))))throw new Error('finance_yahoo_listing_mismatch');}
+  if(asset.exchange&&!sameVenue(asset.exchange,text(meta.exchangeName))&&!sameVenue(asset.exchange,text(meta.fullExchangeName)))throw new Error('finance_yahoo_listing_mismatch');
 }
 function date(stamp:unknown,timezone:unknown):string{
   if(typeof stamp!=='number'||!Number.isFinite(stamp)||!Number.isInteger(stamp)||stamp<=0||stamp>4102444800||typeof timezone!=='string'||timezone.length>100)throw new Error('finance_yahoo_observation_invalid');
@@ -84,10 +110,10 @@ export async function queryYahooFinanceData(input:FinanceDataRequest,assets:Fina
   }catch(error){abort(options.signal);return provenance({...result,status:'error',rows:[],asOf:null,warnings:[...result.warnings,failure(error)]});}
 }
 export async function refreshYahooFinanceQuotes(workspace:FinanceWorkspace,options:YahooMarketOptions={}):Promise<FinanceAIResult>{
-  const operations:FinanceOperation[]=[],warnings:string[]=[];for(const asset of workspace.watchlist.slice(0,5)){abort(options.signal);const result=await queryYahooFinanceData({query:asset.symbol,assetIds:[asset.id],metrics:['price'],period:'1M'},workspace.watchlist,options),row=result.rows[0];if(!row||typeof row[1]!=='number'||typeof row[2]!=='string'||row[2]!==asset.currency||typeof row[3]!=='string'){warnings.push(`${asset.symbol}: verified price, currency or observation timestamp unavailable.`);continue;}
+  const limit=yahooRefreshLimit(options.limit),operations:FinanceOperation[]=[],warnings:string[]=[];for(const asset of workspace.watchlist.slice(0,limit)){abort(options.signal);const result=await queryYahooFinanceData({query:asset.symbol,assetIds:[asset.id],metrics:['price'],period:'1M'},workspace.watchlist,options),row=result.rows[0];if(!row||typeof row[1]!=='number'||typeof row[2]!=='string'||row[2]!==asset.currency||typeof row[3]!=='string'){const why=result.warnings.find(warning=>/^finance_yahoo_[a-z_]+$/.test(warning));warnings.push(`${asset.symbol}: verified price, currency or observation timestamp unavailable${why?` (${why})`:''}.`);continue;}
     if(row[1]<0){warnings.push(`${asset.symbol}: negative provider price is preserved in query results; the nonnegative quote ledger cannot import this instrument observation.`);continue;}
     const sourceId=`yahoo-chart:${encodeURIComponent(asset.symbol)}`;operations.push({type:'source.upsert',source:{id:sourceId,name:`Yahoo chart · ${asset.symbol}`,kind:'provider',status:'connected',asOf:row[3],retrievedAt:result.retrievedAt,url:result.sourceUrls[0]??null,note:[...result.warnings,COVERAGE].join('\n')}},{type:'quotes.import',quotes:[{assetId:asset.id,price:row[1],currency:row[2],asOf:row[3],sourceId,priceBasis:'price'}]});
-  }abort(options.signal);if(workspace.watchlist.length>5)warnings.push('Refresh is bounded to the first five selected assets.');return{baseRevision:workspace.revision,status:operations.length?'ok':'unavailable',operations,message:`${operations.length/2} provider market snapshots retrieved. ${warnings.join(' ')}`.trim()};
+  }abort(options.signal);if(workspace.watchlist.length>limit)warnings.push(`Refresh is bounded to the first ${limit===5?'five':limit} selected assets.`);return{baseRevision:workspace.revision,status:operations.length?'ok':'unavailable',operations,message:`${operations.length/2} provider market snapshots retrieved. ${warnings.join(' ')}`.trim()};
 }
 
 function yahooArticleUrl(value:unknown):string|null{if(typeof value!=='string'||value.length>2000)return null;try{const url=new URL(value);return url.protocol==='https:'&&!url.username&&!url.password&&!url.port&&url.hostname.includes('.')&&!url.hostname.endsWith('.local')&&!/^[\d.]+$/.test(url.hostname)?url.href:null;}catch{return null;}}

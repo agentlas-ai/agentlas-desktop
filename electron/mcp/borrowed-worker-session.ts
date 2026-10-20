@@ -15,15 +15,24 @@
  * Switch (meta key `session-scope.borrowed`): unset or `shared` = this behaviour; any other value, or a failure to read it, = the old one.
  * This file imports no Electron.
  */
+import { createHash } from "node:crypto";
 import { composeDeclaredPrompt, type DeclaredPromptPart } from "../runtime/prompt-order";
 import { composeResumeTurnPrompt } from "../runtime/continuity";
 import type { RuntimeLocale } from "../runtime/status-i18n";
+import { WORK_PROJECT_RESIDENCY_BUSY_CODE, runnerRefusedBeforeDispatch, runnerResultRefusedBeforeDispatch } from "../runtime/runner-pre-dispatch";
+import { decideGeneration } from "../runtime/session-generation";
 
 export const BORROWED_SESSION_MODE_KEY = "session-scope.borrowed";
 export type BorrowedSessionMode = "shared" | "off";
 
-/** Runtimes that take a per-turn context apart from the system prompt (the same set the main conversation path uses). */
-const SESSION_CONTEXT_RUNTIMES: ReadonlySet<string> = new Set(["claude-code", "codex", "kimi", "antigravity"]);
+/**
+ * Runtimes that take a per-turn context apart from the system prompt. claude-code, codex, kimi and antigravity are the set the main
+ * conversation path uses; grok, cursor and the open ACP seats (github-copilot-cli) run through the same ACP runner as kimi, which hands the
+ * turn context over per turn for every spec. Their legacy hand drivers do not (grok bakes the context into a cold system text, cursor has no
+ * session), so grok and cursor share only while the ACP runner is the one in use.
+ */
+const SESSION_CONTEXT_RUNTIMES: ReadonlySet<string> = new Set(["claude-code", "codex", "kimi", "antigravity", "grok", "cursor", "acp"]);
+const ACP_ONLY_WHEN_ACTIVE: ReadonlySet<string> = new Set(["grok", "cursor"]);
 
 export function borrowedSessionMode(read: (key: string) => string | null): BorrowedSessionMode {
   try {
@@ -37,9 +46,16 @@ export function borrowedSessionMode(read: (key: string) => string | null): Borro
 /** Does this worker turn continue the agent's session? Never for a review step, a site agent app, or a runtime without a turn context. */
 export function borrowedWorkerSessionIsShared(input: {
   mode: BorrowedSessionMode; role: "worker" | "orchestrator"; review: boolean; runtimeKind: string; agentAppMode: boolean;
+  /** AGENTLAS_DISABLE_ACP restored this kind's legacy driver. */
+  acpDisabled?: boolean;
+  /** The open ACP seat's spec id (kind "acp"): without it the session cannot be named or dropped. */
+  acpAgentId?: string | null;
 }): boolean {
-  return input.mode === "shared" && input.role === "worker" && !input.review && !input.agentAppMode
-    && SESSION_CONTEXT_RUNTIMES.has(input.runtimeKind);
+  if (!(input.mode === "shared" && input.role === "worker" && !input.review && !input.agentAppMode
+    && SESSION_CONTEXT_RUNTIMES.has(input.runtimeKind))) return false;
+  if (ACP_ONLY_WHEN_ACTIVE.has(input.runtimeKind) && input.acpDisabled === true) return false;
+  if (input.runtimeKind === "acp" && !(input.acpAgentId && input.acpAgentId.trim())) return false;
+  return true;
 }
 
 /**
@@ -95,21 +111,133 @@ export function claimBorrowedWorkerSession(key: string): (() => void) | null {
 }
 
 /**
+ * Everything one worker turn needs to know about its session, decided in ONE place so the call site and the gate cannot disagree: whether it
+ * holds the shared session (the claim), which owner string its runner request carries, and whether that session is its own alone. The drop
+ * and the request MUST use `turnOwner`: a turn that lost the claim runs under a packet-specific owner, and dropping the shared owner instead
+ * would destroy the winner's session while leaving the loser's behind.
+ */
+export function planBorrowedWorkerTurn(input: { base: string; role: string; attempt: number; candidate: boolean; invocationId: string }): {
+  claim: (() => void) | null; shared: boolean; ephemeral: boolean; turnOwner: string;
+} {
+  const claim = input.candidate ? claimBorrowedWorkerSession(borrowedWorkerSessionOwnerId(input.base, input.role, input.attempt, true)) : null;
+  const shared = input.candidate && claim !== null;
+  const ephemeral = input.candidate && !shared;
+  return { claim, shared, ephemeral,
+    turnOwner: borrowedWorkerSessionOwnerId(input.base, input.role, input.attempt, shared, ephemeral ? input.invocationId : undefined) };
+}
+
+/**
+ * Failures that prove nothing about the session itself never drop it: another writer holds it, the project's slot is busy, a retired process
+ * has not exited yet, and in general a refusal the runner typed as not dispatched (`turnDelivery: "not-dispatched"`: claude's startup refusals
+ * such as session_held_by_background, which state "the binding stays", a codex turn/start refused while a compaction runs, ACP quota, auth and
+ * capacity refusals). Dropping the session for those loses a healthy conversation, and for session_held_by_background it starts a second one
+ * beside the one still running. Looked up through the whole `cause` chain, because the task force wraps every runner failure (returned or
+ * thrown) in a TaskForceRuntimeFailureError that carries the original only as its cause. A refusal that names the SESSION itself is the
+ * exception and still drops it: a refused resume, a missing session, and codex's own exec/turn-start refusals (their code does not say whether
+ * the thread is gone). The runners already clear a row they know is gone; this only decides what a refusal leaves behind.
+ */
+const SESSION_UNTOUCHED_CODES: ReadonlySet<string> = new Set([
+  "runtime_session_owner_busy", WORK_PROJECT_RESIDENCY_BUSY_CODE, "runtime_retired_cli_exit_timeout",
+  // Refused by the wrappers around the runner (invocation breaker, subscription gate) before it was reached.
+  "runtime_invocation_storm", "subscription_credits_disabled",
+]);
+const SESSION_NAMED_REFUSAL = /resume|session[_-](?:gone|missing|not[_-]found|lost)|conversation[_-](?:missing|not[_-]found)|rollout|codex_(?:exec_refused_before_turn|turn_start_refused)/i;
+export function failureLeavesSessionUntouched(value: unknown): boolean {
+  let current: unknown = value;
+  let notDispatched = false;
+  const codes: string[] = [];
+  for (let depth = 0; depth < 4 && current !== null && typeof current === "object"; depth += 1) {
+    const record = current as { code?: unknown; providerCode?: unknown; failure?: { providerCode?: unknown; code?: unknown } | null; cause?: unknown };
+    for (const code of [record.code, record.providerCode, record.failure?.providerCode, record.failure?.code]) if (typeof code === "string") codes.push(code);
+    if (runnerRefusedBeforeDispatch(current) || runnerResultRefusedBeforeDispatch(current as never)) notDispatched = true;
+    current = record.cause;
+  }
+  if (codes.some((code) => SESSION_UNTOUCHED_CODES.has(code))) return true;
+  return notDispatched && !codes.some((code) => SESSION_NAMED_REFUSAL.test(code));
+}
+
+/**
+ * When a worker that kept breaking the handoff contract is escalated, its shared session holds the bad replies. It is dropped, but only while
+ * nobody holds the claim: a parallel packet of the same agent may be mid-turn in it.
+ */
+export function releaseIdleSharedWorkerSession(base: string, drop: (ownerId: string) => void): boolean {
+  const owner = borrowedWorkerSessionOwnerId(base, "worker", 1, true);
+  const claim = claimBorrowedWorkerSession(owner);
+  if (!claim) return false;
+  try { drop(owner); } catch { /* the escalation goes on */ } finally { claim(); }
+  return true;
+}
+
+/**
+ * Runtimes whose runner has no window management of its own on this path (claude-code compacts natively at 80% of the window, and codex
+ * compacts natively too, model_auto_compact_token_limit): their sessions would otherwise grow with every stage of every run. After a successful turn that already used 80% of the
+ * model's window (the same rule the main conversation applies, session-generation.ts) the session is dropped, so the next stage starts a fresh
+ * one. Without a known window the provider's own behaviour stays in charge.
+ */
+const SESSIONS_WITHOUT_HOST_ROTATION: ReadonlySet<string> = new Set(["kimi", "grok", "cursor", "acp", "antigravity"]);
+export function borrowedSessionOutgrewWindow(
+  kind: string, usage: { contextInputTokens?: number; contextWindowTokens?: number } | null | undefined, fallbackWindow: number | null,
+): boolean {
+  if (!SESSIONS_WITHOUT_HOST_ROTATION.has(kind) || !usage) return false;
+  return decideGeneration({ kind, contextWindowTokens: usage.contextWindowTokens ?? fallbackWindow, lastInputTokens: usage.contextInputTokens ?? null })
+    .action === "new_generation";
+}
+
+/**
  * Runs one worker turn that holds a claim. A turn that failed, was refused or stopped leaves its session in an unknown state, so the session
- * is dropped and the next stage of this agent starts cleanly instead of resuming a damaged conversation. A turn without a claim runs in a
- * session of its own and never drops the shared one. The claim is released either way.
+ * is dropped and the next stage of this agent starts cleanly instead of resuming a damaged conversation, with three exceptions that never
+ * damage it: a failure that proves the session was not touched (`failureLeavesSessionUntouched`), a failure before the runner was entered
+ * at all (`entered` false: the capability preparation, a cancelled lease), and success. A successful turn still ends the session when
+ * `rotate` says its context is full. A turn without a claim runs in a session of its own and never drops the shared one; when that session is
+ * `ephemeral` (nobody will ever resume it, its owner string is unique to the turn) it is dropped once the turn is over, whatever the outcome.
+ * The claim is released either way, and a drop that itself throws changes nothing about the turn's own result.
  */
 export async function runClaimedWorkerTurn<T extends { failure?: unknown }>(
   claim: (() => void) | null, drop: () => void, run: () => Promise<T>,
+  options: { entered?: () => boolean; ephemeral?: boolean; rotate?: (result: T) => boolean } = {},
 ): Promise<T> {
+  const entered = options.entered ?? (() => true);
+  const dropSafely = (): void => { try { drop(); } catch { /* the turn's own outcome stays what it was */ } };
   try {
     const result = await run();
-    if (claim && result && (result as { failure?: unknown }).failure) drop();
+    if (claim && result && (result as { failure?: unknown }).failure) {
+      if (entered() && !failureLeavesSessionUntouched(result)) dropSafely();
+    } else if (claim && result && options.rotate) {
+      let rotate = false;
+      try { rotate = options.rotate(result); } catch { /* an unreadable size never ends a session */ }
+      if (rotate) dropSafely();
+    }
     return result;
   } catch (error) {
-    if (claim) drop();
+    if (claim && entered() && !failureLeavesSessionUntouched(error)) dropSafely();
     throw error;
   } finally {
+    if (options.ephemeral) dropSafely();
     claim?.();
   }
+}
+
+/**
+ * The identity a shared worker session is resumed under (`sessionFingerprintSeed`, which every runtime this module shares for takes). Without
+ * a seed codex hashes the raw MCP launch arguments into its fingerprint, and every worker stage's capability lease mints a new launch
+ * handle, so a stage never matched its predecessor and the shared session never resumed. The seed names what makes one conversation another: the agent's stable instructions, the host permission, the locale,
+ * the tool grant (sorted allowed tools, browser-only, isolated MCP config, restricted or untrusted boundaries) and the folder.
+ * A change in any of them opens a new session, never a silent resume with the old grant; the launch handles are left out on purpose, because
+ * each turn rebinds its own tool table.
+ */
+export function borrowedWorkerSessionSeed(input: {
+  systemPrompt: string; locale?: string | null; permission?: string | null; unattendedNoAsk?: boolean;
+  restrictedReadBoundary?: unknown; untrustedNoTools?: boolean; browserOnly?: boolean; isolatedMcpConfig?: boolean;
+  mcpAllowedTools?: readonly string[] | null; cwd?: string | null;
+  /** The conversation: codex and ACP key their approval and consent caches by the seed, which must not reach across chats. */
+  chatId?: string | null;
+  /** The owner's memory-forget counter: a forget ends the conversations that may still hold what was forgotten (the main path rotates on it too). */
+  forgetEpoch?: number | null;
+}): string {
+  const digest = createHash("sha256").update(JSON.stringify([
+    input.systemPrompt, input.locale ?? null, input.permission ?? null, input.unattendedNoAsk === true,
+    Boolean(input.restrictedReadBoundary), input.untrustedNoTools === true, input.browserOnly === true, input.isolatedMcpConfig === true,
+    [...(input.mcpAllowedTools ?? [])].sort(), input.cwd ?? null, input.forgetEpoch ?? 0, input.chatId ?? null,
+  ])).digest("hex");
+  return `borrowed-worker.v1:${digest}`;
 }

@@ -166,6 +166,7 @@ import { effectObservationTicket } from "../long-run/effect-observation-tickets"
 import { goalExecutionDirectivePromptBlock } from "../long-run/goal-execution-context";
 import { canonicalAskFenceText, extractAskFences } from "../../shared/ask-fence-flatten";
 import { AGENT_ASK_OPEN } from "../../shared/agent-control-blocks";
+import { withHostOwnerCard } from "../long-run/goal-owner-card";
 
 /**
 
@@ -7549,6 +7550,18 @@ async function runMcpInvocationInContext(
         passShouldContinue = false;
         tryRecordRunEvent({ runId: req.runId ?? `chat:${chat.id}`, chatId: chat.id, agentId: agent.id,
           kind: "goal_idle_pass_yield", payload: { pass, idlePasses: idleGoalPasses } });
+        // The host drove this Goal again and it still did nothing, with no typed way forward: nobody is told. The turn never
+        // ends on prose alone: the model's last words stay and the same card block a model writes is
+        // appended, so the Goal is held for the answer and the owner is alerted (desktop run alert, phone push). Only a
+        // turn someone can answer: not unattended, not an executionContext channel, not stopped.
+        if (!asksUser && !unattendedNoAsk && !executionContext && !signal?.aborted && !req.agentAppMode) {
+          const withCard = withHostOwnerCard(continuation.text, "goal_idle_stop", locale === "ko" ? "ko" : "en");
+          if (withCard !== continuation.text) {
+            continuation.text = withCard;
+            tryRecordRunEvent({ runId: req.runId ?? `chat:${chat.id}`, chatId: chat.id, agentId: agent.id,
+              kind: "goal_owner_card_added", payload: { source: "goal_idle_pass_yield", pass } });
+          }
+        }
       }
       // Wall-clock bound (long-run/goal-pass-budget.ts): at this pass boundary no runtime turn or tool is in
       // flight. End the invocation instead of starting another pass; Main continues the open Goal from its ledger

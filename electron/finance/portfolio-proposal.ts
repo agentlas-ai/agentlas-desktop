@@ -2,21 +2,23 @@ import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import type { FinanceWorkspace } from '../../shared/finance';
 import {
-  FinancePortfolioDraftSchema, FinancePortfolioRowSchema, financePortfolioHeldPosition, financePortfolioRowIssues,
+  FinancePortfolioDraftSchema, FinancePortfolioRowSchema, financePortfolioHeldPosition, financePortfolioLineText, financePortfolioRowIssues,
   type FinancePortfolioDraft, type FinancePortfolioRow, type FinancePortfolioRowIssue,
 } from '../../shared/finance-portfolio';
 import { financePortfolioOperations } from './portfolio';
 
-const optionalText = (max: number) => z.string().max(max).nullish().transform(value => value?.trim() || null);
+/** Free text the model read is one clean line before anyone reviews it: no line breaks, invisible characters or half surrogate pairs. */
+const optionalText = (max: number) => z.string().max(max).nullish().transform(value => financePortfolioLineText(value ?? '') || null);
 const optionalAmount = z.number().finite().min(0).max(1e12).nullish().transform(value => value ?? null);
 /** A position as the model reads it from a photo or pasted text. Unknown fields stay null; unrecognized keys are refused, never dropped. */
 const ProposalRowSchema = z.object({
-  name: z.string().max(300).nullish().transform(value => value?.trim() ?? ''),
+  name: z.string().max(300).nullish().transform(value => financePortfolioLineText(value ?? '')),
+  // The bound here is on what the model wrote; the row schema's 80 (what the saved asset holds) applies to the cleaned text.
   symbol: optionalText(160), exchange: optionalText(160),
-  currency: z.string().max(10).nullish().transform(value => value?.trim().toUpperCase() || null),
+  currency: z.string().max(10).nullish().transform(value => financePortfolioLineText(value ?? '').toUpperCase() || null),
   quantity: optionalAmount, averageCost: optionalAmount, price: optionalAmount,
   asOf: optionalText(40),
-  notes: z.array(z.string().max(300)).max(8).optional().transform(value => (value ?? []).map(note => note.trim()).filter(Boolean)),
+  notes: z.array(z.string().max(300)).max(8).optional().transform(value => (value ?? []).map(financePortfolioLineText).filter(Boolean)),
 }).strict();
 export const FinancePortfolioProposalInputSchema = z.object({
   rows: z.array(z.unknown()).min(1).max(100),
@@ -72,7 +74,7 @@ export function financePortfolioProposal(workspace: FinanceWorkspace, raw: unkno
     rows.push(strict.data);
   });
   if (problems.length) throw new FinancePortfolioProposalError(problems.slice(0, 8));
-  const warnings = [...new Set((input.warnings ?? []).map(warning => warning.trim()).filter(Boolean))].slice(0, 20);
+  const warnings = [...new Set((input.warnings ?? []).map(financePortfolioLineText).filter(Boolean))].slice(0, 20);
   const draft = FinancePortfolioDraftSchema.parse({ rows, warnings });
   const needsAttention = rows.flatMap((row, index) => {
     const issues = financePortfolioRowIssues(row);

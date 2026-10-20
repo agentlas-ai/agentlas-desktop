@@ -12,6 +12,12 @@ import { buildToolUseEpisodes, toolUseCallsFromEvents } from "../../shared/tool-
 import type { StoredToolUseEpisode } from "../../shared/tool-use-signals";
 
 export const TOOL_USE_EPISODE_PREFIX = "toolchain.detector.episode.v1:";
+/**
+ * The whole scripts of a surface's newest runs, kept apart from the compact episode rows: what the generalizer builds a Toolchain
+ * from. Keyed by surface first, so keeping the newest few per surface is one range read.
+ */
+const EPISODE_CODE_PREFIX = "toolchain.detector.episode-code.v1:";
+const CODE_EXEMPLARS_PER_SURFACE = 3;
 const RETIRED_GRAPH_PREFIX = "toolchain.detector.graph.v1:";
 const CURSOR_KEY = "toolchain.detector.episodes.cursor.v1";
 const RETENTION_DAYS = 30;
@@ -50,6 +56,8 @@ export function harvestToolUseEpisodes(now = new Date()): HarvestResult {
             steps: episode.steps.slice(0, MAX_STORED_STEPS).map(step => ({ op: step.op, template: step.template, detail: step.detail.slice(0, STORED_DETAIL_CHARS), count: step.count })) };
           put.run(`${TOOL_USE_EPISODE_PREFIX}${episode.startedAt}:${stored.id}`, JSON.stringify(stored));
           result.stored++;
+          const coded = episode.failed ? [] : episode.steps.filter(step => step.code);
+          if (coded.length) keepCodeExemplar(db, episode.surface, episode.runId, episode.startedAt, episode.steps);
         }
       }
       put.run(CURSOR_KEY, runs[runs.length - 1].last);
@@ -64,6 +72,23 @@ export function harvestToolUseEpisodes(now = new Date()): HarvestResult {
     console.warn("[toolchain-detector] episode harvest skipped:", error instanceof Error ? error.message : error);
   }
   return result;
+}
+
+interface CodeExemplar { surface: string; runId: string; at: string; steps: Array<{ op: string; detail: string; code?: string }> }
+
+function keepCodeExemplar(db: ReturnType<typeof getDb>, surface: string, runId: string, at: string, steps: ReadonlyArray<{ op: string; detail: string; code?: string }>): void {
+  const base = `${EPISODE_CODE_PREFIX}${surfaceId(surface)}:`;
+  db.prepare("INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)").run(`${base}${at}:${runId}`, JSON.stringify({ surface, runId, at,
+    steps: steps.slice(0, MAX_STORED_STEPS).map(step => ({ op: step.op, detail: step.detail.slice(0, STORED_DETAIL_CHARS), ...(step.code ? { code: step.code } : {}) })) } satisfies CodeExemplar));
+  const keys = db.prepare("SELECT key FROM meta WHERE key >= ? AND key < ? ORDER BY key DESC").all(base, `${base}\uffff`) as Array<{ key: string }>;
+  for (const row of keys.slice(CODE_EXEMPLARS_PER_SURFACE)) db.prepare("DELETE FROM meta WHERE key=?").run(row.key);
+}
+
+/** The newest successful runs of a surface with their whole scripts, newest first. */
+export function readCodeExemplars(surface: string, limit = CODE_EXEMPLARS_PER_SURFACE): CodeExemplar[] {
+  const base = `${EPISODE_CODE_PREFIX}${surfaceId(surface)}:`;
+  const rows = getDb().prepare("SELECT value FROM meta WHERE key >= ? AND key < ? ORDER BY key DESC LIMIT ?").all(base, `${base}\uffff`, limit) as Array<{ value: string }>;
+  return rows.flatMap(row => { try { const value = JSON.parse(row.value) as CodeExemplar; return value.surface === surface ? [value] : []; } catch { return []; } });
 }
 
 export function readToolUseEpisodes(since: string): StoredToolUseEpisode[] {

@@ -18,6 +18,9 @@ import { registerGoalWaitSubscription } from "../long-run/wait-subscriptions";
 import { getDb } from "../store/db";
 import { appendChatMessage } from "../store/chats";
 import { reportHostAlertToOne } from "../one/host-alerts";
+import { canonicalAskFenceText } from "../../shared/ask-fence-flatten";
+import { agiOwnerAskCard } from "./owner-ask-card";
+import { reportOwnerAsk } from "../owner-ask-alerts";
 import { emitDesktopStoreChange } from "../store/change-bus";
 import { getChatGoalRevision } from "../store/chat-goals";
 import { getLongRunByGoalId } from "../store/long-runs";
@@ -179,7 +182,7 @@ export function createAgiExecutor(): AgiActionExecutor {
     installedPaths: () => agiInstalledPaths(),
     runLoginRecovery: (input, control) => loginSeam ? loginSeam(input, control) : "unavailable",
     restartAgentlasBrowser: (control) => browserRestartSeam ? browserRestartSeam(control) : false,
-    announce: ({ chatId, actionId, text }) => {
+    announce: ({ chatId, actionId, text, card }) => {
       const runId = `agi-action:${actionId}`;
       const already = getDb().prepare("SELECT id FROM chat_messages WHERE chat_id = ? AND host_notice_json LIKE ? LIMIT 1")
         .get(chatId, `%"runId":${JSON.stringify(runId)}%`);
@@ -188,6 +191,14 @@ export function createAgiExecutor(): AgiActionExecutor {
       appendChatMessage(chatId, "system", currentUiLocale() === "ko" ? text.ko : text.en, {
         hostNotice: { purpose: "automation-report", runId, automationId: AGI_ACTION_NOTICE_AUTOMATION_ID },
       });
+      // An ask to the owner is a decision card, never a line alone.
+      // The line above explains; the card is how the owner answers, from the desktop or the phone, and it rings
+      // like a model-authored card (desktop run alert, phone push). Guarded by the line's own idempotency above.
+      if (card) {
+        // noGoalResult: a host-written card is not the Goal's answer, so it must never wait for a verification verdict.
+        appendChatMessage(chatId, "assistant", canonicalAskFenceText([agiOwnerAskCard(card, currentUiLocale() === "ko" ? "ko" : "en")]), { noGoalResult: true });
+        reportOwnerAsk({ chatId, source: "agi", key: runId });
+      }
       emitDesktopStoreChange({ entity: "chat", id: chatId });
     },
     onDefectFiled: (input) => {

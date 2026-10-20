@@ -1,8 +1,8 @@
 "use client";
 
-import { useRef, useState, type ReactNode } from "react";
+import { Children, useRef, useState, type ReactNode } from "react";
 import { askCardFooterLabel } from "@shared/ask-card-footer";
-import { IconChat, IconCheck, IconChevronRight, IconClose, IconEdit, IconSend } from "./Icon";
+import { IconChat, IconCheck, IconChevronDown, IconChevronRight, IconClose, IconEdit, IconSend } from "./Icon";
 import styles from "./AskCard.module.css";
 
 /**
@@ -60,10 +60,22 @@ export function AskCard({
   locale = "ko",
   subtitle,
   actionRow,
+  collapsible = false,
+  collapsed: collapsedProp,
+  onCollapsedChange,
   "data-testid": testId,
 }: {
   title: string;
   icon?: ReactNode;
+  /**
+   * 접을 수 있는 카드 — 머리 줄에 접기 단추가 생기고, 접으면 제목 줄만 남는다. 묻는 카드가 대화 영역을 통째로
+   * 가리거나(Finance 검토 카드의 Save 가 안 보이던 일) 답하지 않고는 아래를 볼 수 없는 일이 없게 한다.
+   * 접힌 카드도 답을 기다리는 중이다(닫기와 다르다: 닫기는 건너뜀이다).
+   */
+  collapsible?: boolean;
+  /** 접힘 상태를 밖에서 쥘 때. 없으면 카드가 스스로 쥔다. */
+  collapsed?: boolean;
+  onCollapsedChange?: (collapsed: boolean) => void;
   /** 제목 아래 한 줄 — 질문 본문. 제목이 짧은 머리말(header)일 때 무엇을 묻는지 보인다. */
   subtitle?: string;
   /** 아래 동작 줄. 있으면 footer 의 단일 단추 대신 이 줄이 답을 보내고 건너뛴다. */
@@ -120,29 +132,66 @@ export function AskCard({
     if (freeText === undefined) setInternalFreeText(value);
     onFreeTextChange?.(value);
   };
+  const [internalCollapsed, setInternalCollapsed] = useState(false);
+  const isCollapsed = collapsible && (collapsedProp ?? internalCollapsed);
+  const toggleCollapsed = () => {
+    const next = !isCollapsed;
+    if (collapsedProp === undefined) setInternalCollapsed(next);
+    onCollapsedChange?.(next);
+  };
+  const ko = locale === "ko";
+  /*
+   * 직접 입력은 보기 줄 하나다. 예전에는 "기타" 보기 줄과 입력 줄이 따로 있어(둘 다 같은 입력칸을 가리켰다) 카드가
+   * 한 줄 반 더 컸다. 입력 줄이 있으면 그 줄이 "기타"이고, 입력 줄이 없을 때만 "기타" 단추를 그린다.
+   */
+  const otherIsInputRow = Boolean(otherOption && footer && !footer.hideInput);
 
   return (
-    <section className={styles.card} role="group" aria-label={title} data-ask-card="true" data-testid={testId}>
+    <section
+      className={styles.card}
+      role="group"
+      aria-label={title}
+      data-ask-card="true"
+      data-collapsed={isCollapsed ? "true" : undefined}
+      data-testid={testId}
+    >
       <div className={styles.head}>
         <span className={styles.headingIcon} aria-hidden="true">{icon}</span>
         <div className={styles.titleBlock}>
           <p className={styles.title}>{title}</p>
-          {subtitle && subtitle !== title && <p className={styles.subtitle}>{subtitle}</p>}
+          {subtitle && subtitle !== title && !isCollapsed && <p className={styles.subtitle}>{subtitle}</p>}
         </div>
-        {onClose && (
-          <button
-            type="button"
-            className={styles.close}
-            aria-label={locale === "ko" ? "닫기" : "Close"}
-            onClick={onClose}
-          >
-            <IconClose size={16} />
-          </button>
+        {(collapsible || onClose) && (
+          <div className={styles.headActions}>
+            {collapsible && (
+              <button
+                type="button"
+                className={styles.collapse}
+                aria-expanded={!isCollapsed}
+                aria-label={isCollapsed ? (ko ? "펼치기" : "Expand") : (ko ? "접기" : "Collapse")}
+                title={isCollapsed ? (ko ? "펼치기" : "Expand") : (ko ? "접어서 대화 보기" : "Collapse to see the conversation")}
+                data-ask-collapse="true"
+                onClick={toggleCollapsed}
+              >
+                <IconChevronDown size={16} />
+              </button>
+            )}
+            {onClose && (
+              <button
+                type="button"
+                className={styles.close}
+                aria-label={ko ? "닫기" : "Close"}
+                onClick={onClose}
+              >
+                <IconClose size={16} />
+              </button>
+            )}
+          </div>
         )}
       </div>
 
-      {children}
-      <div className={styles.options}>
+      {!isCollapsed && Children.toArray(children).length > 0 && <div className={styles.body}>{children}</div>}
+      {!isCollapsed && <div className={styles.options}>
         {options.map((option, index) => (
           <button
             key={option.id}
@@ -167,7 +216,7 @@ export function AskCard({
               : option.active && <span className={styles.arrow} aria-hidden="true"><IconChevronRight size={16} /></span>}
           </button>
         ))}
-        {otherOption && (
+        {otherOption && !otherIsInputRow && (
           <button
             type="button"
             className={styles.option}
@@ -184,16 +233,23 @@ export function AskCard({
             {currentFreeText.trim() && <span className={styles.arrow} aria-hidden="true"><IconChevronRight size={16} /></span>}
           </button>
         )}
-      </div>
+      </div>}
 
-      {footer && (
-        <div className={styles.footer}>
+      {!isCollapsed && footer && (
+        <div
+          className={styles.footer}
+          data-ask-footer="true"
+          data-input={footer.hideInput ? "false" : "true"}
+          data-ask-other-option={otherIsInputRow ? "true" : undefined}
+          data-active={otherIsInputRow && currentFreeText.trim() ? "true" : undefined}
+        >
           <span className={styles.footerMark} aria-hidden="true"><IconEdit size={14} /></span>
           {!footer.hideInput && <input
               ref={footerInputRef}
               className={styles.footerInput}
               value={currentFreeText}
               placeholder={footer.placeholder}
+              aria-label={otherOption?.title ?? footer.placeholder}
               onChange={(event) => updateFreeText(event.target.value)}
               onKeyDown={(event) => {
                 if (event.key === "Enter" && !event.nativeEvent.isComposing && event.nativeEvent.keyCode !== 229) {
@@ -216,7 +272,7 @@ export function AskCard({
         </div>
       )}
 
-      {actionRow && (
+      {!isCollapsed && actionRow && (
         <div className={styles.actionRow} data-ask-action-row="true">
           {actionRow.notice && <p className={styles.actionNotice} role="status" data-ask-action-notice="true">{actionRow.notice}</p>}
           <div className={styles.actionButtons}>

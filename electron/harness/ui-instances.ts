@@ -679,11 +679,29 @@ export async function uiAction(args: Record<string, unknown>, ctx: UiCallContext
   }, binding);
 }
 
+/**
+ * Views the host draws from a result it retained itself. Their state belongs to the owner's own surface (a save settles the card, the close button
+ * closes it) and to the host (a newer proposal cancels an older one): a run that presents, updates or closes one through a port is refused, so a card
+ * never says "saved" for something nobody saved and a cancelled proposal is never opened again. The host's own bookkeeping calls the handlers below
+ * directly, not through a port.
+ */
+const HOST_OWNED_VIEWS: ReadonlySet<string> = new Set(["finance.result.v1"]);
+
+async function hostOwnedViewRefusal(operation: "present" | "update" | "close", args: Record<string, unknown>, ctx: UiCallContext): Promise<UiPortOutcome | null> {
+  if (ctx.chatId === "ui") return null;
+  const record = operation === "present" ? undefined : (await sync()).instances.get(str(args.instanceId));
+  const viewId = operation === "present" ? str(args.viewId) : record ? currentOf(record).presentation.viewId : "";
+  return HOST_OWNED_VIEWS.has(viewId) ? refused("owner_only", "this view belongs to the host: its state is moved by the owner's own save, a newer proposal or the close button") : null;
+}
+
+const ownerOnlyForHostViews = (operation: "present" | "update" | "close", handler: (args: Record<string, unknown>, ctx: UiCallContext) => Promise<UiPortOutcome>) =>
+  async (args: Record<string, unknown>, ctx: UiCallContext): Promise<UiPortOutcome> => (await hostOwnedViewRefusal(operation, args, ctx)) ?? handler(args, ctx);
+
 /** Port handlers for the parent to wire into capability-ports (ui.present ... ui.subscribe). */
 export const UI_PORT_HANDLERS: Record<string, (args: Record<string, unknown>, ctx: UiCallContext) => Promise<UiPortOutcome>> = {
-  "ui.present": uiPresent,
-  "ui.update": uiUpdate,
-  "ui.close": uiClose,
+  "ui.present": ownerOnlyForHostViews("present", uiPresent),
+  "ui.update": ownerOnlyForHostViews("update", uiUpdate),
+  "ui.close": ownerOnlyForHostViews("close", uiClose),
   "ui.action": uiAction,
   "ui.subscribe": uiSubscribe,
 };

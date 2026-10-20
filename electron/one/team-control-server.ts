@@ -211,11 +211,17 @@ async function handleOneTeamControlRequestUnchecked(request: Record<string, unkn
   if (!tokenMatches(request.token, serverToken)) throw new Error("one-team-capability-invalid");
   const binding = typeof request.capabilityId === "string" ? capabilities.get(request.capabilityId) : undefined;
   if (!binding) throw new Error("one-team-capability-invalid");
-  // A teammate working on a hand-off from a group room: room_say and nothing else, checked here, not in the child.
+  // Callable Toolchains are MCP tools of their own (tc_*); the list and each call are decided here, never in the child.
+  if (request.operation === "toolchain_tools" || request.operation === "toolchain_tool") return toolchainToolOperation(binding, request);
+  // A teammate working on a hand-off from a group room: room_say, and the Toolchain consumer tools when it was given them;
+  // checked here, not in the child.
   if (binding.scope === "room-member") {
     if (request.operation === "effect") return graphEffectOperation(binding, request);
-    if (request.operation !== "room" || !binding.tools?.includes("room_say")) throw new Error("one-team-room-member-scope");
-    return (await import("./room-chat")).roomChat().say(binding.chatId, { text: request.text, to: request.to, replyTo: request.replyTo });
+    if (request.operation === "room") {
+      if (!binding.tools?.includes("room_say")) throw new Error("one-team-room-member-scope");
+      return (await import("./room-chat")).roomChat().say(binding.chatId, { text: request.text, to: request.to, replyTo: request.replyTo });
+    }
+    if (request.operation !== "graph" || !binding.tools?.includes(String(request.name ?? ""))) throw new Error("one-team-room-member-scope");
   }
   if (request.operation === "room") throw new Error("one-team-room-member-scope");
   if (request.operation === "effect") {
@@ -285,7 +291,7 @@ async function handleOneTeamControlRequestUnchecked(request: Record<string, unkn
     return dispatchOneSupervisorTool(binding,String(request.name ?? ''),input);
   }
   // The child lists only the consumer tools, but the boundary is here, not in the child.
-  if (binding.scope === "toolchain-consumer"
+  if ((binding.scope === "toolchain-consumer" || binding.scope === "room-member")
     && (request.operation !== "graph" || !binding.tools?.includes(String(request.name ?? "")))) throw new Error("one-team-consumer-scope");
   switch (request.operation) {
     case "graph": {
@@ -304,6 +310,42 @@ async function handleOneTeamControlRequestUnchecked(request: Record<string, unkn
     case "compose_group": return oneTeamComposeGroup(binding, { members: request.members });
     default: throw new Error("one-team-unknown-operation");
   }
+}
+
+/**
+ * Callable Toolchains as MCP tools (shared/toolchain-mcp-tools.ts). `toolchain_tools` lists them for this capability;
+ * `toolchain_tool` runs one through the same toolchain_run path, so permission ceilings, idempotency, trial and health records
+ * are those of toolchain_run. A graph step calls Toolchains through its pinned toolchain_call steps and is offered none; a
+ * consumer (Work task or teammate) only when it was given toolchain_run.
+ */
+async function toolchainToolOperation(binding: OneTeamCapabilityBinding, request: Record<string, unknown>): Promise<unknown> {
+  const offered = binding.scope === "graph-step" ? false
+    : binding.scope === "room-member" || binding.scope === "toolchain-consumer" ? Boolean(binding.tools?.includes("toolchain_run")) : true;
+  const [{ listToolchainAssets }, { callableToolchainReleases }, tools, { requiredExecutionPermission }] = await Promise.all([
+    import("../toolchains/assets"), import("../toolchains/search"), import("../../shared/toolchain-mcp-tools"), import("../../shared/graph-node-protocol")]);
+  const rows = offered ? callableToolchainReleases(listToolchainAssets()).map(({ asset, release }) => ({ asset, release,
+    definition: tools.toolchainToolDefinition({ asset, contract: release.contract, readOnly: requiredExecutionPermission(release.implementation.snapshot.graph) === "read" }) }))
+    .sort((a, b) => a.definition.name.localeCompare(b.definition.name)).slice(0, tools.TOOLCHAIN_TOOLS_MAX) : [];
+  if (request.operation === "toolchain_tools") return { tools: rows.map(row => row.definition) };
+  const name = request.name;
+  if (!tools.isToolchainToolName(name)) throw new Error("toolchain_tool_name_invalid");
+  const row = rows.find(item => item.definition.name === name);
+  if (!row) return { ok: false, code: "toolchain_tool_unavailable",
+    next: "This Toolchain is not callable now (withdrawn, or pulled back for repair after failing). Do the work your own way." };
+  const args = request.input && typeof request.input === "object" && !Array.isArray(request.input) ? request.input as Record<string, unknown> : {};
+  // The same arguments in the same turn are one call: a lost response is answered from the first receipt, never re-sent.
+  const requestId = tools.toolchainToolRequestId(binding.capabilityId, row.asset.id, row.release.version, args);
+  const receipt = await withOneToolchainNativeInvocation(binding, () => oneGraphDispatch(binding, "toolchain_run",
+    { toolchain_id: row.asset.id, version: row.release.version, args, request_id: requestId, wait_seconds: 20 })) as Record<string, unknown>;
+  if (receipt && typeof receipt === "object" && receipt.ok === false && typeof receipt.code === "string") return receipt;
+  const status = receipt?.status, callId = receipt?.call_id;
+  // The leading typed fields let the answer's source chip name the Toolchain even when a runtime cuts a long result.
+  if (status === "succeeded") return { schemaVersion: "agentlas.toolchain-tool-call.v1", ok: true, toolchainId: row.asset.id,
+    version: row.release.version, name: row.asset.name, result: receipt.result, call_id: callId };
+  if (status === "running") return { ok: true, status: "running", call_id: callId, next: "Read toolchain_result with this call_id." };
+  return { ok: false, code: status === "uncertain" ? "toolchain_effect_unconfirmed" : "toolchain_call_failed", error: receipt?.error ?? null, call_id: callId,
+    next: status === "uncertain" ? "The outside effect was not confirmed. Check whether it happened before doing it again."
+      : "Do this work your own way; the failure is recorded, and a Toolchain that keeps failing is repaired." };
 }
 
 function dispose(): void {

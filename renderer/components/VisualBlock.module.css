@@ -35,6 +35,12 @@
   max-width: 100%;
   height: auto;
 }
+/* 크기가 정해진 차트는 칸이 넓어도 늘이지 않고 가운데에 둔다. 좌표가 왼쪽에서 오른쪽 기준이라, 오른쪽에서 왼쪽으로 쓰는 화면에서도 글자 기준점이 뒤집히지 않게 방향을 고정한다. */
+.chartHost[data-fixed-size="true"] :global(svg) {
+  display: block;
+  margin-inline: auto;
+  direction: ltr;
+}
 .frame {
   display: block;
   width: 100%;

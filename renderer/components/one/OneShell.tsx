@@ -11909,9 +11909,11 @@ function DecisionCard({ confirmation, taskId, locale, disabled, block = "none", 
   const [multiSelection, setMultiSelection] = useState<number[]>([]);
   const [chosenIndex, setChosenIndex] = useState<number | null>(null);
   const [answerText, setAnswerText] = useState("");
-  useEffect(() => { setMultiSelection([]); setChosenIndex(null); setAnswerText(""); }, [confirmation.sourceMessageId]);
-
-
+  // 접힌 질문 카드는 보기가 안 보인다 — 접힘 상태를 여기서 쥐어, 아래 document 키 처리가 접힌 동안 숫자·Enter 로 답하지 않게 한다.
+  const [questionFolded, setQuestionFolded] = useState(false);
+  useEffect(() => { setMultiSelection([]); setChosenIndex(null); setAnswerText(""); setQuestionFolded(false); }, [confirmation.sourceMessageId]);
+  // 숫자·Enter·Esc 는 document 에서 받는다(포커스를 못 받는 카드 div 의 onKeyDown 은 불리지 않는다 —
+  // ChatQuestionSheet 와 같은 이유). 핸들러는 렌더마다 최신 상태로 갈아 끼운다.
   const questionKeyRef = useRef<((event: KeyboardEvent) => void) | null>(null);
   const questionCardRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
@@ -12055,6 +12057,8 @@ function DecisionCard({ confirmation, taskId, locale, disabled, block = "none", 
         }
         // 작성창·다른 입력칸에서 친 숫자와 Enter 는 그 칸의 글이다.
         if (editable) return;
+        // 접힌 카드는 보이지 않는 보기에 답을 보내지 않는다(Escape 는 위에서 이미 처리).
+        if (questionFolded) return;
         const focused = document.activeElement as HTMLElement | null;
         if (focused?.closest("[data-ask-card]") && !questionCardRef.current?.contains(focused)) return;
         const n = Number(event.key);
@@ -12083,6 +12087,10 @@ function DecisionCard({ confirmation, taskId, locale, disabled, block = "none", 
             title={compactTitle || questionText}
             subtitle={questionText}
             locale={locale}
+            collapsible
+            collapsed={questionFolded}
+            onCollapsedChange={setQuestionFolded}
+            onClose={onDismiss}
             options={questionOptions.map((option) => ({
               id: `pick:${option.index}`,
               title: option.label,
@@ -12165,6 +12173,7 @@ function DecisionCard({ confirmation, taskId, locale, disabled, block = "none", 
       <AskCard
         title={compactTitle || compactSummary}
         locale={locale}
+        onClose={onDismiss}
         options={askOptions}
         onChoose={chooseAsk}
         data-testid="one-decision-ask-card"

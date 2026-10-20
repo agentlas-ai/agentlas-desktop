@@ -44,6 +44,7 @@ export function PersonalOneAskCard({ ask, locale, disabled, onAnswer, onDismiss 
         send([ask.options[index].label], typed);
       }}
       onClose={onDismiss}
+      collapsible
       footer={{
         placeholder: ko ? "직접 입력" : "Type your own answer",
         skipLabel: ko ? "닫기" : "Close",

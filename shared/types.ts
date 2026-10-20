@@ -7739,7 +7739,7 @@ export interface AgentlasIpc {
     /** Explicit review handoff; the passive history list remains path-free. */
     prepareDraft: (recommendationId: string, locale: "ko" | "en") => Promise<ComputerHistoryDraftPrompt>;
   };
-  /** Adaptive Toolchains: overlays learned from repeated graph runs, and owner-approved callable graphs. */
+  /** Toolchain assets: MCP-shaped tools for apps and web pages once operated by hand (never graphs). */
   toolchains: ToolchainsApi;
   /** 에이전트 폴더 파일 — 라이브러리 우측 패널의 파일 목록 + 에디터.
    *  폴더(userData/agents/<slug>/) 내부로만 접근 제한. system-prompt.md 편집은 즉시 적용. */

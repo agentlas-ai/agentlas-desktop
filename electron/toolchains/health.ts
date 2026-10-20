@@ -1,17 +1,15 @@
 // Health of callable Toolchains (shared/toolchain-health.ts decides; this file keeps the record and acts).
 //
 // Every real call of a callable Toolchain's stable version leaves an outcome. When failures that point at the tool — the page or
-// app changed — become frequent, a Toolchain the detector made is pulled back: it leaves search and cannot be called, and the
-// failures are sent to the generalizer as a repair request (detector.ts, once per version). The repaired version proves itself in
-// trial like any new draft and becomes the stable one. Until then the work goes back to the agent, which is where it came from.
-//
-// A Toolchain the owner made is not pulled back by the host: it keeps its record and the owner decides.
+// app changed — become frequent, the Toolchain is pulled back, whoever made it (owner scheme: "it breaks often → the Toolchain
+// is changed"): it leaves search and its tc_ tool, cannot be called, and the failures are sent to the generalizer as a repair
+// request (detector.ts, once per version). The repaired version proves itself in trial like any new draft and becomes the
+// stable one. Until then the work goes back to the agent, which is where it came from.
 
 import { getDb } from "../store/db";
 import type { ToolchainAsset, ToolchainCallReceipt } from "../../shared/toolchain-asset";
 import { TOOLCHAIN_HEALTH_POLICY, healthOutcomeFrom, healthVerdict, type HealthLedger, type HealthVerdict } from "../../shared/toolchain-health";
 import { getToolchainAsset } from "./assets";
-import { detectorAuthoredToolchainIds } from "./trial";
 import { isToolchainPulledBack, writeTrialLedger } from "./trial-ledger";
 
 const HEALTH = "toolchain.health.v1:";
@@ -52,7 +50,7 @@ export function recordToolchainHealthOutcome(receipt: Readonly<ToolchainCallRece
     const ledger: HealthLedger = { ...base, outcomes: [...base.outcomes, outcome].slice(-TOOLCHAIN_HEALTH_POLICY.keep), updatedAt: new Date().toISOString() };
     getDb().prepare("INSERT OR REPLACE INTO meta(key,value) VALUES(?,?)").run(key(asset.id, release.version), JSON.stringify(ledger));
     const verdict = healthVerdict(ledger.outcomes);
-    if (verdict.state !== "degraded" || isToolchainPulledBack(asset) || !detectorAuthoredToolchainIds().has(asset.id)) return;
+    if (verdict.state !== "degraded" || isToolchainPulledBack(asset)) return;
     // The failures become a retired ledger: the same record the repair request reads when a trial fails.
     writeTrialLedger({ schema: "agentlas.toolchain-trial.v1", toolchainId: asset.id, version: release.version, contentHash: release.contentHash,
       state: "retired", grants: [], updatedAt: "",

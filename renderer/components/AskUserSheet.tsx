@@ -163,46 +163,46 @@ export function AskUserSheet() {
       aria-label={ko ? "확인이 필요합니다" : "Your input is needed"}
       style={oneRoute ? ({ "--agentlas-composer-width": "720px" } as CSSProperties) : undefined}
     >
-      <div className="aus-card">
-        <AskCard
-          key={req.requestId}
-          title={req.askedBy ? `${req.askedBy} · ${req.question}` : req.question}
-          locale={ko ? "ko" : "en"}
-          options={req.options.map((option, index) => ({
-            id: option.label,
-            title: option.label,
-            note: option.description ?? undefined,
-            active: currentSubmission ? currentSubmission.value === option.label : index === 0,
-            disabled: currentSubmission?.pending,
-          }))}
-          otherOption={req.allowFreeText ? {
-            title: ko ? "기타" : "Other",
-            note: ko ? "직접 답변을 입력합니다." : "Type your own answer.",
-          } : undefined}
-          freeText={draftValue}
-          onFreeTextChange={updateDraft}
-          onChoose={(id) => { void answer(id); }}
-          onClose={dismiss}
-          footer={{
-            placeholder: ko ? "직접 답하기" : "Answer in your own words",
-            skipLabel: req.allowFreeText ? (ko ? `답하지 않음 · ${secondsLeft}초` : `Skip · ${secondsLeft}s`) : (ko ? "건너뛰기" : "Skip"),
-            submitLabel: req.allowFreeText ? (ko ? `이 답 보내기 · ${secondsLeft}초` : `Send answer · ${secondsLeft}s`) : (ko ? "건너뛰기" : "Skip"),
-            hideInput: !req.allowFreeText,
-            onSkip: (text) => { void answer(text ? text : null); },
-          }}
-        >
-          {currentSubmission?.pending && <p role="status">{currentSubmission.value === null
-            ? (ko ? "질문을 닫는 중…" : "Closing the question…")
-            : (ko ? "답변 전달 중…" : "Sending answer…")}</p>}
-          {currentSubmission?.error && <p role="alert">
-            {currentSubmission.error === "ended"
-              ? (ko ? "이 질문은 이미 종료되었거나 다른 곳에서 답변되었습니다. 입력은 남겨 두었습니다. 닫고 현재 질문을 확인해 주세요."
-                : "This question has ended or was answered elsewhere. Your draft is still here. Close it and check the current question.")
-              : (ko ? "답변을 전달했는지 확인하지 못했습니다. 선택하거나 입력한 답변을 다시 보내 주세요."
-                : "The answer was not acknowledged. Choose or submit your draft again to retry.")}
-          </p>}
-        </AskCard>
-      </div>
+      {/* 카드의 겉모양(테두리·그림자·여백)은 AskCard 하나가 정한다 — 예전에는 여기서 한 겹을 더 씌워 테두리가 둘이었다. */}
+      <AskCard
+        key={req.requestId}
+        title={req.askedBy ? `${req.askedBy} · ${req.question}` : req.question}
+        locale={ko ? "ko" : "en"}
+        options={req.options.map((option, index) => ({
+          id: option.label,
+          title: option.label,
+          note: option.description ?? undefined,
+          active: currentSubmission ? currentSubmission.value === option.label : index === 0,
+          disabled: currentSubmission?.pending,
+        }))}
+        otherOption={req.allowFreeText ? {
+          title: ko ? "기타" : "Other",
+          note: ko ? "직접 답변을 입력합니다." : "Type your own answer.",
+        } : undefined}
+        freeText={draftValue}
+        onFreeTextChange={updateDraft}
+        onChoose={(id) => { void answer(id); }}
+        onClose={dismiss}
+        collapsible
+        footer={{
+          placeholder: ko ? "직접 답하기" : "Answer in your own words",
+          skipLabel: req.allowFreeText ? (ko ? `답하지 않음 · ${secondsLeft}초` : `Skip · ${secondsLeft}s`) : (ko ? "건너뛰기" : "Skip"),
+          submitLabel: req.allowFreeText ? (ko ? `이 답 보내기 · ${secondsLeft}초` : `Send answer · ${secondsLeft}s`) : (ko ? "건너뛰기" : "Skip"),
+          hideInput: !req.allowFreeText,
+          onSkip: (text) => { void answer(text ? text : null); },
+        }}
+      >
+        {currentSubmission?.pending && <p role="status">{currentSubmission.value === null
+          ? (ko ? "질문을 닫는 중…" : "Closing the question…")
+          : (ko ? "답변 전달 중…" : "Sending answer…")}</p>}
+        {currentSubmission?.error && <p role="alert">
+          {currentSubmission.error === "ended"
+            ? (ko ? "이 질문은 이미 종료되었거나 다른 곳에서 답변되었습니다. 입력은 남겨 두었습니다. 닫고 현재 질문을 확인해 주세요."
+              : "This question has ended or was answered elsewhere. Your draft is still here. Close it and check the current question.")
+            : (ko ? "답변을 전달했는지 확인하지 못했습니다. 선택하거나 입력한 답변을 다시 보내 주세요."
+              : "The answer was not acknowledged. Choose or submit your draft again to retry.")}
+        </p>}
+      </AskCard>
       <style jsx>{`
         /* Without a composer slot (a chat-less question on a non-chat page) there is no
            composer to line up with; window-centred fell left of the content column. Sit in
@@ -218,18 +218,6 @@ export function AskUserSheet() {
         @media (max-width: 600px) {
           .aus { right: 16px; left: 16px; width: auto; }
         }
-        .aus-card {
-          padding: 14px 16px;
-          border-radius: 14px;
-          background: var(--paper);
-          color: var(--ink);
-          border: 1px solid var(--paper-edge);
-          box-shadow: 0 7px 20px rgba(25, 31, 36, .12);
-          display: flex;
-          flex-direction: column;
-          gap: 10px;
-        }
-        .aus-one .aus-card { background: var(--paper); color: var(--ink); }
         .aus-top {
           display: flex;
           align-items: center;

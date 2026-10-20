@@ -19,8 +19,8 @@
 import { getDb } from "../store/db";
 import { getAutomation, hasDurableActiveAutomationExecution, hasGraphLoginWait, isToolchainImplementationAutomation,
   listAutomations, toggleAutomation } from "../store/automations";
-import { readToolchainState } from "../toolchains/store";
 import type { Automation } from "../../shared/types";
+import { graphPurpose } from "../../shared/graph-purpose";
 
 const MARKER = "automation.ephemeral-graph.v1:";
 const MIGRATION = "migration:ephemeral-command-graphs:v1";
@@ -177,9 +177,10 @@ export function sweepEphemeralGraphs(now = new Date()): EphemeralSweepResult {
     }
     if (!reason) continue;
     const hold = isToolchainImplementationAutomation(automationId) ? "toolchain_implementation"
-      : readToolchainState(automationId).interface ? "toolchain_interface"
       : called.has(automationId) ? "called_by_enabled_graph"
-      : reusedWithDifferentInputs(automationId) ? "recurring_work"
+      // Recurring work stays: AIs act on results again and again. A tool-like graph (code and tool steps only) does not earn
+      // that by being reused; a reused tool is a Toolchain.
+      : graphPurpose(automation.graph!, "input") === "workflow" && reusedWithDifferentInputs(automationId) ? "recurring_work"
       : hasDurableActiveAutomationExecution(automationId, now) || hasGraphLoginWait(automationId) ? "running"
       : db.prepare("SELECT 1 FROM automation_trigger_events WHERE automation_id=? AND status IN ('pending','claimed') LIMIT 1").get(automationId) ? "queued"
       : null;

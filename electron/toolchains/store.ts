@@ -1,20 +1,14 @@
-// Adaptive Toolchain state — one small JSON document per automation in `meta`.
+// Per-Toolchain ledger — one small JSON document per Toolchain in `meta` (key `toolchain.v1:asset:<id>`):
+// caller reports, repairs and search exposure.
 //
-// Why not new tables: a ladder step (schema 128) would also require regenerating
-// the Terminal's bootstrap schema, which would make every Terminal user on a
-// 127 Desktop refuse to open the shared store until a Desktop release ships
-// (scripts/verify-desktop-release-order.cjs in agentlas_terminal). The state is
-// tiny (a handful of automations, a few overlays each) and episodes are derived
-// from run_events on demand, so `meta` — "small singletons that don't deserve
-// their own table" — is the honest home until a release can carry real tables.
+// Why not new tables: a ladder step would also require regenerating the Terminal's bootstrap schema, which
+// would make every Terminal user on an older Desktop refuse to open the shared store until a Desktop release
+// ships (scripts/verify-desktop-release-order.cjs in agentlas_terminal). The documents are tiny, so `meta` —
+// "small singletons that don't deserve their own table" — is the honest home until a release can carry tables.
 //
-// Every write is compare-and-set on `revision` inside one IMMEDIATE transaction:
-// the learner, the runtime overlay and owner decisions can race.
+// Every write is compare-and-set on `revision` inside one IMMEDIATE transaction: reports and repairs can race.
 
-import {
-  emptyToolchainState,
-  type ToolchainAutomationState,
-} from "../../shared/toolchain";
+import { emptyToolchainLedger, type ToolchainLedgerState } from "../../shared/toolchain";
 import { getDb } from "../store/db";
 import { emitDesktopStoreChange } from "../store/change-bus";
 
@@ -25,35 +19,23 @@ function keyOf(automationId: string): string {
   return `${KEY_PREFIX}${automationId}`;
 }
 
-function parse(automationId: string, raw: string | undefined): ToolchainAutomationState {
-  if (!raw) return emptyToolchainState(automationId);
+function parse(automationId: string, raw: string | undefined): ToolchainLedgerState {
+  if (!raw) return emptyToolchainLedger(automationId);
   try {
-    const value = JSON.parse(raw) as ToolchainAutomationState;
+    const value = JSON.parse(raw) as ToolchainLedgerState;
     if (value?.schemaVersion !== "agentlas.toolchain-state.v1" || value.automationId !== automationId) {
-      return emptyToolchainState(automationId);
+      return emptyToolchainLedger(automationId);
     }
-    return {
-      ...emptyToolchainState(automationId),
-      ...value,
-      observations: Array.isArray(value.observations) ? value.observations : [],
-      crystallizations: Array.isArray(value.crystallizations) ? value.crystallizations : [],
-      interface: value.interface ?? null,
-    };
+    return { ...emptyToolchainLedger(automationId), ...value };
   } catch {
     // A damaged document is not silently "empty forever": the next write replaces it.
-    return emptyToolchainState(automationId);
+    return emptyToolchainLedger(automationId);
   }
 }
 
-export function readToolchainState(automationId: string): ToolchainAutomationState {
+export function readToolchainState(automationId: string): ToolchainLedgerState {
   const row = getDb().prepare("SELECT value FROM meta WHERE key = ?").get(keyOf(automationId)) as { value: string } | undefined;
   return parse(automationId, row?.value);
-}
-
-export function listToolchainStates(): ToolchainAutomationState[] {
-  const rows = getDb().prepare("SELECT key, value FROM meta WHERE key >= ? AND key < ?")
-    .all(KEY_PREFIX, `${KEY_PREFIX}￿`) as Array<{ key: string; value: string }>;
-  return rows.map((row) => parse(row.key.slice(KEY_PREFIX.length), row.value));
 }
 
 export class ToolchainStateConflict extends Error {
@@ -66,11 +48,11 @@ export class ToolchainStateConflict extends Error {
  */
 export function mutateToolchainState(
   automationId: string,
-  update: (current: ToolchainAutomationState) => ToolchainAutomationState | null,
-): ToolchainAutomationState {
+  update: (current: ToolchainLedgerState) => ToolchainLedgerState | null,
+): ToolchainLedgerState {
   const db = getDb();
   const key = keyOf(automationId);
-  let result: ToolchainAutomationState | null = null;
+  let result: ToolchainLedgerState | null = null;
   let changed = false;
   db.transaction(() => {
     const row = db.prepare("SELECT value FROM meta WHERE key = ?").get(key) as { value: string } | undefined;
@@ -78,16 +60,12 @@ export function mutateToolchainState(
     const next = update(current);
     if (!next) { result = current; return; }
     if (next.revision !== current.revision) throw new ToolchainStateConflict();
-    const saved: ToolchainAutomationState = { ...next, revision: current.revision + 1 };
+    const saved: ToolchainLedgerState = { ...next, revision: current.revision + 1 };
     db.prepare("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
       .run(key, JSON.stringify(saved));
     result = saved;
     changed = true;
   }).immediate();
   if (changed) emitDesktopStoreChange({ entity: "automation", id: automationId });
-  return result as unknown as ToolchainAutomationState;
-}
-
-export function removeToolchainState(automationId: string): void {
-  getDb().prepare("DELETE FROM meta WHERE key = ?").run(keyOf(automationId));
+  return result as unknown as ToolchainLedgerState;
 }

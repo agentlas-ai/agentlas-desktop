@@ -8,12 +8,7 @@
 
 import { createHash } from "node:crypto";
 
-import {
-  acceptToolchainHits,
-  contractSearchText,
-  type ToolchainInterface,
-  type ToolchainSearchHit,
-} from "../../shared/toolchain";
+import { acceptToolchainHits } from "../../shared/toolchain";
 import { autoLocalEmbedding, LOCAL_HASHING_DIMENSIONS, rankHybridLocal } from "../memory/local-embedding";
 import type { ToolchainAsset, ToolchainAssetVersion } from "../../shared/toolchain-asset";
 import { isToolchainPulledBack } from "./trial-ledger";
@@ -31,22 +26,6 @@ function embeddingOf(text: string): readonly number[] {
   return vector;
 }
 
-/** Contracts must already be filtered to the ones the caller may see (callable, current, enabled). */
-export function searchToolchains(task: string, contracts: ToolchainInterface[], limit?: number): ToolchainSearchHit[] {
-  const query = String(task || "").trim();
-  if (!query || contracts.length === 0) return [];
-  const purpose = rankHybridLocal(query, contracts.map((contract) => {
-    const text = contractSearchText(contract);
-    return { id: contract.automationId, text, embedding: embeddingOf(text) };
-  }));
-  return acceptToolchainHits(purpose.map((entry) => ({
-    automationId: entry.item.id,
-    score: entry.score,
-    lexicalScore: entry.lexicalScore,
-    semanticEligible: entry.semanticEligible,
-  })), limit);
-}
-
 /** Ranker only: callers must supply native-permitted exact immutable candidates.
  * Accepting a draft here never changes validation, publication or grants. */
 export function rankToolchainAssetCandidates(task: string, candidates: Array<{ id: string; release: ToolchainAssetVersion }>, limit = 5): Array<{ id: string; release: ToolchainAssetVersion }> {
@@ -58,22 +37,28 @@ export function rankToolchainAssetCandidates(task: string, candidates: Array<{ i
       Object.keys((c.inputSchema.properties ?? {}) as Record<string, unknown>).join(" ")].join("\n");
     return { id: candidate.id, text, embedding: embeddingOf(text) };
   }));
-  const hits = acceptToolchainHits(ranked.map(entry => ({ automationId: entry.item.id, score: entry.score,
+  const hits = acceptToolchainHits(ranked.map(entry => ({ id: entry.item.id, score: entry.score,
     // Hash bucket collisions carry no semantic evidence for choosing a callable.
     // Keep the shared lexical floor and the verified model's semantic path.
     lexicalScore: entry.lexicalScore, semanticEligible: entry.semanticEligible
       && entry.item.embedding.length !== LOCAL_HASHING_DIMENSIONS })), limit);
-  return hits.flatMap(hit => { const candidate = candidates.find(c => c.id === hit.automationId); return candidate ? [candidate] : []; });
+  return hits.flatMap(hit => { const candidate = candidates.find(c => c.id === hit.id); return candidate ? [candidate] : []; });
+}
+
+/**
+ * The releases a caller may use now: the stable version of a callable asset whose validation passed. A Toolchain pulled back for
+ * failing in real use stays out until its repaired version is the stable one. Search and the per-Toolchain MCP tools share this.
+ */
+export function callableToolchainReleases(assets: readonly ToolchainAsset[]): Array<{ asset: ToolchainAsset; release: ToolchainAssetVersion }> {
+  return assets.flatMap(asset => {
+    const release = asset.versions.find(item => item.version === asset.stableVersion);
+    return asset.status === "callable" && release?.validation.state === "passed" && !isToolchainPulledBack(asset) ? [{ asset, release }] : [];
+  });
 }
 
 /** Normal eligibility is unchanged; the explicit draft ranker confers no callability. */
 export function searchToolchainAssets(task: string, assets: ToolchainAsset[], limit = 5): ToolchainAsset[] {
-  const candidates = assets.flatMap(asset => {
-    const version = asset.versions.find(item => item.version === asset.stableVersion);
-    // A Toolchain pulled back for failing in real use stays out of search until its repaired version is the stable one.
-    if (asset.status !== "callable" || version?.validation.state !== "passed" || isToolchainPulledBack(asset)) return [];
-    return [{ id: asset.id, release: version }];
-  });
+  const candidates = callableToolchainReleases(assets).map(({ asset, release }) => ({ id: asset.id, release }));
   return rankToolchainAssetCandidates(task, candidates, limit).flatMap(hit => {
     const asset = assets.find(item => item.id === hit.id); return asset ? [asset] : [];
   });

@@ -4,7 +4,7 @@ export type GoalWaitSubject =
   | { kind: "invocation"; invocationRunId: string; chatId: string }
   | { kind: "artifact"; artifactId: string }
   | { kind: "timer"; notBefore: string }
-  /** A saved graph (Toolchain) that reads a value on its own schedule; the Goal wakes when its output changes. */
+  /** A saved graph that reads a value on its own schedule; the Goal wakes when its output changes. */
   | { kind: "automation"; automationId: string };
 export interface GoalWaitIntent {
   schemaVersion: "agentlas.goal-wait-intent.v1";

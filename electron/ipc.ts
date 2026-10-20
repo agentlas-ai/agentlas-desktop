@@ -680,7 +680,7 @@ import {
 import { createOneTaskProjectionRuntime } from "./one/task-projection";
 import { loadOrCreateMobileBridgeHostIdentity } from "./mobile-bridge/pairing";
 import { getAgentConcurrencyInfo, setAgentConcurrency } from "./store/concurrency";
-import { enforceAgentResidencyBudget } from "./runtime/agent-residency";
+import { enforceAgentResidencyBudget, releaseIdleAgentResidencyForChat } from "./runtime/agent-residency";
 import { getInterviewMode, setInterviewMode, type InterviewMode } from "./store/interview-mode";
 import {
   createAutomation,
@@ -4612,6 +4612,7 @@ export function registerIpcHandlers(): { businessShipping: ReturnType<typeof reg
     if (goalId && goalRun && goalRun.rootChatId === id && goalRun.surface !== "science"
       && !["completed", "failed", "cancelled"].includes(goalRun.status)) invocationService.deleteGoal(id, goalId);
     removeChat(id);
+    try { releaseIdleAgentResidencyForChat(id); } catch { /* the chat is already gone */ }
     forgetOneRecoveryJudgment(id);
     closeWorkLiveViewsForTaskScope(id);
   });
@@ -7560,6 +7561,8 @@ export function registerIpcHandlers(): { businessShipping: ReturnType<typeof reg
       throw new Error("This conversation is still running. Stop it and wait for cancellation to finish before clearing it.");
     }
     clearChatContext(chatId);
+    // The stored session pointers are gone; an idle resident process of this chat would still hold the cleared conversation and be reused.
+    try { releaseIdleAgentResidencyForChat(chatId); } catch { /* the clear itself is done */ }
   });
 
   let hephaestusUpdateInFlight: ReturnType<typeof runHephaestusRuntimeUpdate> | null = null;

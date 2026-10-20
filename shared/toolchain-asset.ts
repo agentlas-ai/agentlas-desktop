@@ -1,5 +1,5 @@
 import type { Automation, RuntimeSelection } from "./types";
-import type { ToolchainInterface } from "./toolchain";
+import type { ToolchainColdStartResult } from "./toolchain";
 
 export const TOOLCHAIN_GENERATION_TIMEOUT_MS = 300_000;
 
@@ -18,7 +18,7 @@ export interface ToolchainAssetContract {
 }
 export interface ToolchainOutputBinding { nodeId: string; format: "json" | "text" }
 /** Actual fresh-session generation + search + selection; separate from example execution. */
-export interface ToolchainAssetColdStart extends NonNullable<ToolchainInterface["coldStart"]> {
+export interface ToolchainAssetColdStart extends ToolchainColdStartResult {
   schemaVersion: "agentlas.toolchain-asset-cold-start.v1";
   toolchainId: string; version: number; contentHash: string; nativeIntentId: string; catalogDigest: string;
   cases: Array<{ kind: "positive" | "negative"; task: string; found: boolean; selected: boolean; bound: boolean;

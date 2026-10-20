@@ -118,8 +118,6 @@ import {
 // 코드가 읽는 값의 판별은 이 정본 하나뿐이다(`vars.get("x")` 눈먼 지점의 수리).
 import { codeReferencedVars as codeReferencedVarsSync } from "../../shared/graph-code-vars";
 import { currentUiLocale } from "../ui-locale";
-import { beginNodeToolchain } from "../toolchains/runtime";
-import { scheduleToolchainRefresh } from "../toolchains/learner";
 
 const L = (ko: string, en: string): string => (currentUiLocale() === "ko" ? ko : en);
 
@@ -154,6 +152,11 @@ export interface RunGraphOptions {
   permissionCeiling?: "read" | "write";
   /** Immutable capability releases cannot silently rewrite code or add strategy overlays. */
   immutableImplementation?: boolean;
+  /**
+   * A Toolchain call runs for the conversation that called it: its native tool steps are judged with that conversation's grants
+   * (a browser page script runs without asking only where the owner set that conversation to always allow), never with wider ones.
+   */
+  actingChatId?: string;
   /** 지금까지 부른 그래프들 — 서로 부르는 고리를 사유와 함께 잡는다. */
   callChain?: string[];
   /**
@@ -5065,14 +5068,6 @@ export async function runGraph(
         let graphWorkerReceipt: GraphWorkerFailureReceipt | null = null;
         let modelInvocationFailed = false;
         let modelInvocationStarted = false;
-        // Adaptive Toolchain overlay (electron/toolchains/runtime.ts). Inert unless an
-        // owner-approved crystallization matches this node's definition digest; every
-        // guard failure falls back to the node exactly as it ran before.
-        const toolchainSession = nativeMcpCall || opts.immutableImplementation ? null : beginNodeToolchain({
-          runId, automationId: automation.id, node, dryRun: Boolean(dryRun),
-          workspaceBinding: automationWorkspace.binding,
-        });
-        let toolchainSettled = false;
         // Owner decision 2026-10-16: a step of a graph that a group room's One saved acts with that room's One Team for
         // this step only. Minted (authority re-checked) at step start, revoked when the step ends (graph-team-grant.ts).
         let graphTeamGrant: GraphTeamGrant | null = null;
@@ -5154,7 +5149,7 @@ export async function runGraph(
             ? async (_request, eventSink, signal, binding) => {
               if (!signal || !binding) throw new Error("graph_mcp_scope_required");
               const nativeResult = await runGraphMcpCall({ call: node.config.mcpCall, vars, runId, automationId: automation.id,
-                nodeId: node.id, chatId: nodeChat.id, effect, permission: effectivePermission, dryRun,
+                nodeId: node.id, chatId: opts.actingChatId ?? nodeChat.id, effect, permission: effectivePermission, dryRun,
                 workspaceBinding: binding, signal, sink: eventSink,
                 onAdmission: readOnly => {
                   nativeReadOnly = readOnly;
@@ -5231,7 +5226,7 @@ export async function runGraph(
               // beginNode's input digest so resume decisions are unchanged.
               // A re-run of this occurrence's team step starts from what it already published (host record,
               // graph-effect-items.ts); like the overlay it stays out of the node input digest.
-              userPrompt: executionPrompt + (toolchainSession?.promptBlock ?? "") + graphEffectItemsPromptBlock(graphTeamGrant),
+              userPrompt: executionPrompt + graphEffectItemsPromptBlock(graphTeamGrant),
               // ★오너에게 가는 보고의 언어 = 오너의 화면 언어. 요청에 locale 이 없으면 pickLocale 이
               //   "en" 으로 떨어져, 한국어 화면의 오너도 자동화 보고를 영어로 받았다(게시물 언어 규칙과 별개).
               locale: currentUiLocale(),
@@ -5300,7 +5295,6 @@ export async function runGraph(
               if (eventReadOnly && ev.tool?.id && typeof ev.tool.args === "string") {
                 readOnlyToolCallIds.set(ev.tool.id, ev.tool.name);
               }
-              if (ev.kind === "tool-use") toolchainSession?.observeTool(ev.tool);
               if (ev.kind === "tool-use" && ev.tool?.name) {
                 // A request can reach a mutating tool before its completion
                 // receipt arrives. Its absence must not become proof that no
@@ -5446,8 +5440,6 @@ export async function runGraph(
               ...(graphTeamGrant ? { graphTeamGrant } : {}),
             },
           )));
-          toolchainSettled = true;
-          toolchainSession?.finish({ resultFolder: result.resultFolder ?? null });
           if (restoredCommonOutput) {
             completeNode(node.id); status.set(node.id, "done"); return;
           }
@@ -5956,7 +5948,6 @@ export async function runGraph(
           clearTimeout(nodeTimer);
           runSignal.removeEventListener("abort", relayRunAbort);
           revokeGraphTeamGrant(graphTeamGrant);
-          if (!toolchainSettled) toolchainSession?.finish({ resultFolder: null });
         }
         return;
       }
@@ -6488,7 +6479,6 @@ export async function runGraph(
     }
     try {
       finishGraphRun(runId, !runSignal.aborted && Object.keys(checkpoint!.loginWaits).length ? "needs_input" : ok ? "ok" : "error");
-      if (!dryRun && !opts.immutableImplementation) scheduleToolchainRefresh(automation.id);
     } catch {
       /* 스냅샷 종료 실패는 다음 boot/periodic recovery가 닫는다 */
     }

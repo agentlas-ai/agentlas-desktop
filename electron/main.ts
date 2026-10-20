@@ -186,6 +186,7 @@ import { clearQuitIntent, currentQuitIntentCode, installQuitSignalHandlers, note
 import { planAfterQuitPrompt, planGuiQuit, QUIT_PROMPT_CHOICES, quitPromptText, quitWorkCount, type QuitPlan } from "./quit-policy";
 import { backgroundHoldActive, enterBackgroundHold, leaveBackgroundHold } from "./background-tray";
 import { decideRunAlert, fireRunAlert, getRunAlerts } from "./run-alerts";
+import { onOwnerAsk } from "./owner-ask-alerts";
 import { supervisorQuietRun } from "./one/supervisor-presentation";
 import { currentUiLocale, readUiLocaleCore, setCurrentUiLocale } from "./ui-locale";
 import { prepareMacRuntimeResourcesForExecution } from "./runtime/mac-resource-seal";
@@ -883,7 +884,7 @@ function supervisorQuietRunInStore(runId: string): boolean {
 }
 function startRunAlertBridge(): void {
   if (disposeRunAlertBridge) return;
-  disposeRunAlertBridge = invocationService.onSettled((envelope) => {
+  const stopSettled = invocationService.onSettled((envelope) => {
     try {
       const settings = getRunAlerts();
       const focused = Boolean(mainWindow && !mainWindow.isDestroyed() && mainWindow.isFocused() || getOneWindow()?.isFocused());
@@ -912,6 +913,26 @@ function startRunAlertBridge(): void {
       // 알람은 부가 기능이다 — 무슨 일이 있어도 실행 정산을 건드리지 않는다.
     }
   });
+  // A card the HOST wrote (the AGI monitor's ask) has no run settlement to ring from: it reports through the owner-ask seam
+  // and rings by the same rule as a model's question card — "Needs your input", whatever the length.
+  const stopOwnerAsk = onOwnerAsk((ask) => {
+    try {
+      const settings = getRunAlerts();
+      const focused = Boolean(mainWindow && !mainWindow.isDestroyed() && mainWindow.isFocused() || getOneWindow()?.isFocused());
+      const decision = decideRunAlert(settings, { status: "completed", focused, pendingQuestion: true });
+      if (!decision.alert) return;
+      fireRunAlert({
+        decision,
+        settings,
+        locale: app.getLocale().toLowerCase().startsWith("ko") ? "ko" : "en",
+        goal: getChat(ask.chatId)?.title ?? "",
+        onClick: () => { void openOneFromNotification({ chatId: ask.chatId }); },
+      });
+    } catch {
+      // 알람은 부가 기능이다 — AGI 의 질문 게시를 건드리지 않는다.
+    }
+  });
+  disposeRunAlertBridge = () => { stopSettled(); stopOwnerAsk(); };
 }
 
 function startOneTeamNotificationBridge(): void {
@@ -4789,18 +4810,6 @@ app.whenReady().then(async () => {
   }, 15_000).unref?.();
   startOneTeamNotificationBridge();
   startRunAlertBridge();
-  // Toolchain app icons are drawn by a real image model, so only the running app turns drawing on, after startup
-  // settles; Toolchains made before icons existed get theirs then (electron/toolchains/logo.ts).
-  setTimeout(() => {
-    if (quitServicesStopPromise || developmentEffectsSuppressed()) return;
-    void Promise.all([import("./toolchains/logo"), import("./toolchains/store"), import("./store/automations")])
-      .then(([logo, store, automations]) => logo.enableToolchainLogos(() => {
-        const names = new Map(automations.listAutomations().map((automation) => [automation.id, automation.name]));
-        return store.listToolchainStates().filter((state) => state.interface && state.interface.state !== "deprecated")
-          .map((state) => ({ automationId: state.automationId, name: state.interface!.name || names.get(state.automationId) || "", description: state.interface!.description }));
-      }))
-      .catch((error) => console.warn("[toolchains] icon drawing not started:", error instanceof Error ? error.message : error));
-  }, 90_000).unref?.();
   // Repeated-work detector (electron/toolchains/detector.ts): one model judgment a day at most, Main only, real app only.
   if (!developmentEffectsSuppressed()) {
     void import("./toolchains/detector")

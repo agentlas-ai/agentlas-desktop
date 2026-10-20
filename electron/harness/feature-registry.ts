@@ -123,7 +123,7 @@ export const FEATURE_MODULES: readonly FeatureModule[] = [
         turnTools: ["goal_wait", "goal_complete", "goal_tactic", "goal_plan_op", "goal_kpi"],
       },
       persistence: { tables: ["chat_goal_contracts", "chat_goal_revisions", "long_runs", "long_run_tasks", "long_run_events", "long_run_verification_receipts"] },
-      events: ["goal_wait_registered", "goal_wait_refused", "goal_idle_pass_yield", "goal_pass_budget_yield", "goal_native_episode_yield"],
+      events: ["goal_wait_registered", "goal_wait_refused", "goal_idle_pass_yield", "goal_owner_card_added", "goal_pass_budget_yield", "goal_native_episode_yield"],
       acceptance: [
         { gate: "goal-loop-contract.cjs", evidence: "fake" }, { gate: "goal-startup-continuity-contract.cjs", evidence: "fake" },
         { gate: "long-run-store-contract.cjs", evidence: "fake" }, { gate: "test-goal-wake-arbiter.cjs", evidence: "fake" },
@@ -170,18 +170,19 @@ export const FEATURE_MODULES: readonly FeatureModule[] = [
     },
     domain: {
       version: "1", dependencies: ["store", "invocation"],
-      // No periodic clock: one-shot logo enablement after startup and a debounced learner refresh after a graph run.
-      lifecycle: { host: "main", start: ["enableToolchainLogos", "startToolchainDetector"], clocks: ["logo enable one-shot 90s", "learner refresh debounce 5s", "repeated-work detector check 10m then 6h, a pass that calls a model at most once per 24h"] },
+      // A Toolchain is an MCP tool for an app or page once operated by hand (each callable one is also listed to agents as
+      // its own tc_<name> tool). The only clock is the repeated-work detector; repairs follow real-use failures.
+      lifecycle: { host: "main", start: ["startToolchainDetector"], clocks: ["repeated-work detector check 10m then 6h, a pass that calls a model at most once per 24h"] },
       operations: {
-        appControl: ["toolchains.overview", "toolchains.listAssets", "toolchains.getAsset", "toolchains.runAsset", "toolchains.decide", "toolchains.publishVersion", "toolchains.withdraw"],
-        ipc: ["toolchains:overview", "toolchains:assets-list", "toolchains:assets-run", "toolchains:decide"],
+        appControl: ["toolchains.listAssets", "toolchains.getAsset", "toolchains.runAsset", "toolchains.publishVersion", "toolchains.withdrawAsset"],
+        ipc: ["toolchains:assets-list", "toolchains:assets-run", "toolchains:assets-publish"],
         teamTools: ["toolchain_create", "toolchain_publish", "toolchain_search", "toolchain_inspect", "toolchain_run", "toolchain_result", "toolchain_report"],
       },
-      persistence: { metaPrefixes: ["toolchain.implementation.v1:", "toolchain.detector.miss.v1:", "toolchain.detector.verdict.v1:", "toolchain.detector.state.v1"], files: ["toolchain-icons"] },
-      events: ["toolchain_node_digest", "toolchain_shadow_compare", "toolchain_fallback", "toolchain_repair_budget_reached"],
+      persistence: { metaPrefixes: ["toolchain.asset.v1:", "toolchain.call.v1:", "toolchain.trial.v1:", "toolchain.detector.miss.v1:", "toolchain.detector.verdict.v1:", "toolchain.detector.state.v1"] },
+      events: [],
       acceptance: [
-        { gate: "test-toolchain-core.cjs", evidence: "fake" }, { gate: "test-toolchain-overlay.cjs", evidence: "fake" },
-        { gate: "test-toolchain-surfaces.cjs", evidence: "fake" },
+        { gate: "test-toolchain-mcp-tools.cjs", evidence: "fake" }, { gate: "test-toolchain-health.cjs", evidence: "fake" },
+        { gate: "test-toolchain-surfaces.cjs", evidence: "fake" }, { gate: "test-toolchain-detector.cjs", evidence: "fake" },
       ],
     },
   },

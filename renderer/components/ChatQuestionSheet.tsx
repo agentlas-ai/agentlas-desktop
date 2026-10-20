@@ -292,6 +292,8 @@ export function ChatQuestionSheet({
       return;
     }
     if (editable) return;
+    // 접힌 카드는 보기가 안 보인다 — 숫자 키·Enter 로 보이지 않는 답을 보내지 않는다(Escape 는 위에서 이미 처리).
+    if (collapsed) return;
     // 다른 묻는 카드(도구 승인 등)에 포커스가 있으면 그쪽 차례다.
     const focused = document.activeElement as HTMLElement | null;
     if (focused?.closest("[data-ask-card]") && !rootRef.current?.contains(focused)) return;
@@ -341,6 +343,10 @@ export function ChatQuestionSheet({
         subtitle={q.header?.trim() ? q.question : undefined}
         locale={ko ? "ko" : "en"}
         onClose={onDismiss}
+        // 접으면 제목 줄만 남아 아래 대화(예: Finance 검토 카드의 Save)가 다시 보인다. 접어도 답을 기다리는 중이다.
+        collapsible
+        collapsed={collapsed}
+        onCollapsedChange={setCollapsed}
         options={q.options.map((opt) => ({
           id: opt.label,
           title: opt.label,

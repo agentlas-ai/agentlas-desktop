@@ -260,6 +260,17 @@ function chooseRosterCandidates(db: Pick<Database.Database, "prepare">, ownerSco
 }
 
 /** An agent seated on the One org chart and not archived: the meaning of "roster member" for every rule here. */
+/**
+ * A dispatch child that was started as a NEW isolated session (one_team_start_session new_session): it keeps the conversation's own journal
+ * and never joins the member's shared roster session. The owner or the model asked for a session that does not know the earlier work (an
+ * independent check); sharing the member's session would hand it exactly what was meant to be withheld.
+ */
+export const ISOLATED_CHILD_KEY_PREFIX = "session-scope.isolated:";
+export function isolatedChildKey(chatId: string): string { return `${ISOLATED_CHILD_KEY_PREFIX}${chatId}`; }
+export function isolatedChild(db: Pick<Database.Database, "prepare">, chatId: string): boolean {
+  return db.prepare("SELECT 1 AS present FROM meta WHERE key=?").get(isolatedChildKey(chatId)) !== undefined;
+}
+
 export function isRosterMember(db: Pick<Database.Database, "prepare">, agentId: string): boolean {
   return !!db.prepare("SELECT 1 FROM one_org_members WHERE installed_agent_id=? AND archived_at IS NULL LIMIT 1").get(agentId);
 }
@@ -341,6 +352,7 @@ function resolveRosterChild(db: Database.Database, input: SessionScopeInput, mod
   const rosterMode = rosterScopeMode(db);
   if (rosterMode === "off") return null;
   if (!rosterShape({ agentId: row.agent_id, kind: row.kind, origin: row.origin_surface }, input)) return null;
+  if (isolatedChild(db, input.chatId)) return null; // started as a new isolated session: the old per-conversation journal
   const parent = db.prepare("SELECT kind,parent_chat_id,origin_surface,seat_kind,title FROM chats WHERE id=?").get(row.parent_chat_id) as ChannelRow | undefined;
   if (!parent || !isGroupRoom(parent) || !isRosterMember(db, input.agentId)) return null;
   const roomChatId = row.parent_chat_id as string, seatId = rosterMemberSoloSeatId(db, input.agentId, input.ownerScope);

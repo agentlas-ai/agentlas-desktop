@@ -1,1 +1,80 @@
-.backdrop{position:fixed;inset:0;z-index:145;background:#0005;display:grid;place-items:center;padding:24px}.dialog{width:min(1060px,100%);max-height:90dvh;display:flex;flex-direction:column;background:var(--paper);color:var(--ink);border:1px solid var(--paper-edge);border-radius:16px;box-shadow:var(--shadow-lg);font-size:13px;min-width:0}.dialog header,.dialog footer{display:flex;gap:16px;align-items:center;justify-content:space-between;padding:18px 22px}.dialog h2{margin:0;font-size:18px;font-weight:600}.dialog header{border-bottom:1px solid var(--paper-edge)}.dialog footer{border-top:1px solid var(--paper-edge);flex-wrap:wrap}.body{padding:18px 22px;overflow:auto;min-height:0}.actions{display:flex;align-items:center;gap:10px;margin-bottom:14px}.dialog button{display:inline-flex;align-items:center;justify-content:center;gap:7px;min-height:36px;background:var(--paper);border:1px solid var(--paper-edge);border-radius:8px;color:var(--ink);font:inherit;padding:7px 10px;cursor:pointer}.dialog button:disabled{opacity:.45;cursor:default}.dialog button.primary{background:var(--ink);color:var(--paper)}.dialog input,.dialog textarea{border:1px solid var(--paper-edge-strong);border-radius:6px;background:var(--paper);color:var(--ink);font:inherit;padding:8px;min-width:0}.dialog textarea{width:100%;min-height:90px;box-sizing:border-box;margin-top:10px;resize:vertical}.dialog footer label{display:flex;align-items:center;gap:8px;line-height:1.6}.dialog input[type=checkbox]{width:16px;height:16px}.dialog summary{cursor:pointer;margin:12px 0}.scroll{overflow:auto;max-height:340px}.scroll table{border-collapse:collapse;width:100%;min-width:880px}.scroll th{text-align:left;font-weight:500;color:var(--ink-soft);font-size:12px;white-space:nowrap;padding:8px 5px}.scroll td{border-top:1px solid var(--paper-edge);padding:6px 5px;white-space:nowrap}.scroll input{width:100%;box-sizing:border-box;min-width:78px;max-width:160px}.scroll td:first-child input{min-width:130px}.previews{display:flex;gap:12px;overflow:auto;margin-bottom:10px}.previews figure{position:relative;margin:0;flex-shrink:0}.previews img{display:block;max-width:230px;height:125px;object-fit:contain;border:1px solid var(--paper-edge);border-radius:8px}.previews button{position:absolute;top:4px;right:4px;min-height:28px;padding:4px}.hint{font-size:12px;color:var(--ink-soft);line-height:1.7}.error{font-size:12px;color:var(--danger);line-height:1.7}.dialog :focus-visible{outline:2px solid var(--attention,var(--ink));outline-offset:2px}@media(max-width:600px){.backdrop{padding:10px}.dialog{max-height:96dvh}.dialog header,.dialog footer,.body{padding:14px}.dialog footer{align-items:stretch}.dialog footer button{width:100%}.previews img{height:95px;max-width:160px}}
+/* Add holdings: a two-step sheet. 1 import a photo or text (optional), 2 review and edit the rows (FinanceHoldingsEditor), one action in the footer. */
+.backdrop { position: fixed; inset: 0; z-index: 145; display: grid; place-items: center; padding: 24px; background: rgba(0, 21, 25, .38); }
+.dialog {
+  width: min(980px, 100%); max-height: 90dvh; min-width: 0; display: flex; flex-direction: column; color: var(--ink); font-size: 13px;
+  background: var(--paper); border: 1px solid var(--paper-edge); border-radius: var(--radius-lg); box-shadow: var(--shadow-2);
+}
+.dialog header, .dialog footer { display: flex; gap: 16px; align-items: center; justify-content: space-between; padding: 18px 24px; }
+.dialog header { align-items: flex-start; border-bottom: 1px solid var(--paper-edge); }
+.dialog h2 { margin: 0; font-size: 17px; font-weight: 600; line-height: 1.4; }
+.dialog header p { margin: 3px 0 0; font-size: 12px; line-height: 1.5; color: var(--ink-soft); }
+
+.body { display: grid; gap: 14px; align-content: start; padding: 18px 24px; overflow: auto; min-height: 0; }
+.step { display: grid; gap: 12px; padding: 16px; border: 1px solid var(--paper-edge); border-radius: var(--radius-md); background: var(--paper); min-width: 0; }
+.step h3 { display: flex; align-items: center; gap: 10px; margin: 0; font-size: 14px; font-weight: 600; }
+.step h3 span { display: inline-grid; place-items: center; width: 20px; height: 20px; font-size: 11px; font-weight: 600; color: var(--paper); background: var(--ink); border-radius: 50%; }
+.step h3 small { margin-left: auto; padding: 1px 8px; font-size: 11px; font-weight: 500; color: var(--ink-soft); background: var(--paper-3); border-radius: 999px; }
+
+.drop { display: grid; gap: 10px; padding: 12px; border: 1px dashed var(--paper-edge-strong); border-radius: var(--radius-md); background: var(--paper-2); }
+.attach span { display: grid; gap: 2px; }
+.attach strong { font-size: 13px; font-weight: 600; }
+.attach small { font-size: 12px; font-weight: 400; color: var(--ink-soft); }
+.previews { display: flex; gap: 10px; overflow: auto; }
+.previews figure { position: relative; margin: 0; flex: none; }
+.previews img { display: block; max-width: 200px; height: 110px; object-fit: contain; background: var(--paper); border: 1px solid var(--paper-edge); border-radius: var(--radius-sm); }
+.extract { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+
+.dialog details { border-radius: var(--radius-sm); }
+.dialog summary { cursor: pointer; margin: 0; padding: 4px 0; font-size: 12px; color: var(--ink-soft); }
+.dialog summary:hover { color: var(--ink); }
+.dialog textarea { width: 100%; min-height: 96px; box-sizing: border-box; margin-top: 8px; padding: 10px 12px; font: inherit; line-height: 1.5; color: var(--ink); background: var(--paper-2); border: 1px solid var(--paper-edge-strong); border-radius: var(--radius-sm); resize: vertical; }
+
+.hint { margin: 0; font-size: 12px; line-height: 1.6; color: var(--ink-soft); }
+.callout, .notice { display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; border-radius: var(--radius-sm); font-size: 12px; line-height: 1.55; }
+.callout svg, .notice svg { flex: none; margin-top: 2px; }
+.callout { background: var(--warn-soft); }
+.callout svg { color: var(--warn); }
+.callout strong { display: block; font-weight: 600; }
+.callout ul { margin: 4px 0 0; padding: 0; list-style: none; display: grid; gap: 2px; color: var(--ink-soft); }
+.callout li b { color: var(--ink); font-weight: 600; }
+.notice { align-items: center; flex-wrap: wrap; }
+.notice span { flex: 1 1 160px; }
+.notice[data-tone="warn"] { background: var(--warn-soft); }
+.notice[data-tone="warn"] svg { color: var(--warn); }
+.notice[data-tone="danger"] { color: var(--danger); background: var(--danger-soft); }
+
+.dialog footer { flex-wrap: wrap; border-top: 1px solid var(--paper-edge); }
+.dialog footer .hint { flex: 1 1 220px; }
+.review { display: flex; align-items: center; gap: 10px; flex: 1 1 240px; padding: 9px 12px; line-height: 1.45; cursor: pointer; background: var(--paper-2); border: 1px solid var(--paper-edge); border-radius: var(--radius-sm); }
+.review input { flex: none; width: 16px; height: 16px; margin: 0; accent-color: var(--ink); }
+.save { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; margin-left: auto; min-width: 0; }
+.reason { margin: 0; max-width: 280px; font-size: 12px; line-height: 1.45; color: var(--ink-soft); text-align: right; }
+.buttons { display: flex; gap: 10px; }
+
+/* Only this dialog's own buttons; the rows editor draws its buttons itself, and a blanket "button" rule here once squeezed its remove icon to a dot. */
+.dialog :is(.close, .attach, .previews button, .notice button, .extract button, .buttons button) {
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 38px; padding: 0 14px; font: inherit; font-size: 13px; font-weight: 500;
+  color: var(--ink); background: var(--paper); border: 1px solid var(--paper-edge-strong); border-radius: var(--radius-sm); cursor: pointer; transition: background-color .12s ease, opacity .12s ease;
+}
+.dialog :is(.close, .attach, .previews button, .notice button, .extract button, .buttons button):hover:not(:disabled) { background: var(--paper-3); }
+.dialog :is(.close, .attach, .previews button, .notice button, .extract button, .buttons button):disabled { opacity: .45; cursor: default; }
+.dialog button.primary { font-weight: 600; color: var(--paper); background: var(--ink); border-color: var(--ink); }
+.dialog button.primary:hover:not(:disabled) { opacity: .9; background: var(--ink); }
+.dialog button.close { flex: none; width: 36px; padding: 0; color: var(--ink-soft); border-color: transparent; background: transparent; }
+.dialog button.close:hover:not(:disabled) { background: var(--paper-3); color: var(--ink); }
+.dialog button.attach { justify-content: flex-start; width: 100%; min-height: 56px; padding: 10px 14px; text-align: left; }
+.dialog .previews button { position: absolute; top: 4px; right: 4px; min-height: 28px; width: 28px; padding: 0; }
+.dialog :focus-visible { outline: 2px solid var(--attention, var(--ink)); outline-offset: 2px; }
+
+@media (max-width: 600px) {
+  .backdrop { padding: 10px; }
+  .dialog { max-height: 96dvh; border-radius: var(--radius-lg); }
+  .dialog header, .dialog footer { padding: 14px; }
+  .body { padding: 12px 14px; }
+  .step { padding: 12px; }
+  .save { width: 100%; align-items: stretch; margin-left: 0; }
+  .reason { max-width: none; text-align: left; }
+  .buttons { width: 100%; }
+  .buttons button { flex: 1; }
+  .previews img { height: 90px; max-width: 150px; }
+}

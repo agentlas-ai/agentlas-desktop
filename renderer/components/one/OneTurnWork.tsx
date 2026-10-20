@@ -173,7 +173,7 @@ function CellIcon({ cell }: { cell: OneWorkCell }) {
  */
 function ToolchainSourceChip({ source, locale }: { source: ToolchainSourceRef; locale: "ko" | "en" }) {
   const ko = locale === "ko";
-  const label = !source.toolchainId ? (ko ? "이전 호출형 그래프" : "Legacy callable graph") : source.kind === "run"
+  const label = source.kind === "run"
     ? (ko ? "툴체인 사용" : "Used toolchain")
     : source.state === "callable"
       ? (ko ? "툴체인으로 등록" : "Published as toolchain")
@@ -184,11 +184,10 @@ function ToolchainSourceChip({ source, locale }: { source: ToolchainSourceRef; l
       className={styles.toolchainSource}
       data-toolchain-source={source.kind}
       data-toolchain-state={source.state ?? undefined}
-      data-toolchain-id={source.toolchainId ?? undefined}
+      data-toolchain-id={source.toolchainId}
       data-toolchain-version={source.version ?? undefined}
-      data-automation-id={source.automationId ?? undefined}
       title={ko ? "툴체인 화면에서 열기" : "Open in Toolchains"}
-      onClick={() => navigate(source.toolchainId ? `/library/toolchains?asset=${encodeURIComponent(source.toolchainId)}${source.version ? `&version=${source.version}` : ""}` : `/automation/flow?id=${encodeURIComponent(source.automationId ?? "")}`)}
+      onClick={() => navigate(`/library/toolchains?asset=${encodeURIComponent(source.toolchainId)}${source.version ? `&version=${source.version}` : ""}`)}
     >
       <IconToolchain size={11} />
       <span>{label}{source.name ? ` · ${source.name}` : ""}{source.version ? ` · v${source.version}` : ""}</span>
@@ -837,7 +836,7 @@ export function OneTurnWork({
       {/* Outside the fold: where the answer came from stays visible after the block collapses. */}
       {toolchainSources.length > 0 && (
         <div className={styles.toolchainSources} data-one-toolchain-sources="true">
-          {toolchainSources.map((source) => <ToolchainSourceChip key={`${source.kind}:${source.automationId}`} source={source} locale={locale} />)}
+          {toolchainSources.map((source) => <ToolchainSourceChip key={`${source.kind}:${source.toolchainId}:${source.version ?? ""}`} source={source} locale={locale} />)}
         </div>
       )}
       {!active && expanded && hasPlan && <PlanChecklist entries={planEntries} active={false} locale={locale} />}

@@ -13,6 +13,19 @@ import { agentContextNoToolsPacketForRequest, agentContextSessionKey } from "./a
 import { createCodexNoToolsProviderSession, CodexNoToolsSessionError,
   type CodexNoToolsProviderSession, type CodexNoToolsProviderSessionOptions } from "./codex-no-tools-session";
 import { secretEquals } from "../security/secret-equals";
+import { cliConfiguredDefaultModel } from "./cli-default-model";
+
+/**
+ * The model a Codex no-tools judgment runs on: the request's, else the one the person's own Codex setting names.
+ * Every other Codex run with no model named lets the CLI read that setting. This lane starts the CLI with
+ * --ignore-user-config and checks that its request carries exactly the model it was started with, so it needs the
+ * name. A pool row nobody picked a model for (the default Codex row of a new profile) otherwise fails every
+ * judgment routed to it with codex_no_tools_model_required before any process starts.
+ */
+export function codexNoToolsModel(requested: string | null | undefined,
+  configuredDefault: () => string | undefined = () => cliConfiguredDefaultModel("codex")): string | undefined {
+  return requested?.trim() || configuredDefault();
+}
 
 /** Opaque complete host payload only; no inner producer lifetime or permission is inferred here. */
 export function composeCodexHostInstructions(req: Pick<RunnerRequest, "systemPrompt" | "outputSchema">): string {
