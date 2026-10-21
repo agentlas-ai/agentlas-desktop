@@ -3,7 +3,7 @@ import { Fragment, type ReactNode } from "react";
 import type { FinanceDataResult, FinanceReport, FinanceReportSection } from "@shared/finance";
 import { financeComputeSpec } from "./FinanceComputeView";
 import { financeDataVisual, financeMetricForColumns } from "./FinanceDataResultView";
-import { financeReportFinancialData, financeReportLocale, financeReportDirection, financeReportSectionTitle, financeReportTitle, selectFinanceReportSections, financeReportHtml, financeReportNumber, financeReportProseBlocks, financeReportSectionHeading, financeReportComputeMetrics, financeReportCompositionSpec, financeReportCompositionTitle } from "@shared/finance-report-presentation";
+import { financeReportFinancialData, financeReportLocale, financeReportDirection, financeReportSectionTitle, financeReportTitle, selectFinanceReportSections, financeReportHtml, financeReportNumber, financeReportProseBlocks, financeReportSectionHeading, financeReportComputeMetrics, financeReportCompositionSpec, financeReportCompositionTitle, financeReportSourceBlock, financeReportSourceMore, type FinanceReportSourceBlock, type FinanceReportSourceRecord } from "@shared/finance-report-presentation";
 import { sanitizeChartSpec } from "@/lib/chart-spec";
 import { ChartBlock } from "@/components/ChartBlock";
 import styles from "./FinanceReportView.module.css";
@@ -21,6 +21,16 @@ function inline(value:string):ReactNode[] {
 /** Preserve requested-language text; remove list syntax and evidence dumps, without creating numeric outlines. */
 export function FinanceReportProse({value,language="en"}:{value:string;language?:string}) {
  return <div className={styles.prose}>{financeReportProseBlocks(value).map((block,index)=>block.kind==="table"?<div key={index} className={styles.tableScroll} tabIndex={0} role="region" aria-label={financeReportLabel("Table",language)}><table className={styles.proseTable}><thead><tr>{block.columns.map((name,column)=><th key={column} scope="col" className={block.align[column]==="end"?styles.numeric:undefined}>{inline(name)}</th>)}</tr></thead><tbody>{block.rows.map((row,rowIndex)=><tr key={rowIndex}>{row.map((cell,column)=><td key={column} className={block.align[column]==="end"?styles.numeric:undefined}>{inline(cell)}</td>)}</tr>)}</tbody></table></div>:block.kind==="heading"?<h3 key={index}>{inline(block.text)}</h3>:block.kind==="quote"?<blockquote key={index}>{inline(block.text)}</blockquote>:<p key={index}>{inline(block.text)}</p>)}</div>;
+}
+/** Where the report's values came from and how old they are, read from the saved providers and dates; folded away so the report stays a document. */
+export function FinanceReportSources({block,dir}:{block:FinanceReportSourceBlock;dir:"ltr"|"rtl"}) {
+ return <details className={styles.sources} dir={dir}><summary>{block.title}</summary>
+  {block.entries.map(entry=><section key={entry.sectionId} className={styles.sourceEntry}><h3>{entry.title}</h3>
+   {entry.facts.length>0&&<dl className={styles.sourceFacts}>{entry.facts.map(fact=><div key={fact.label}><dt>{fact.label}</dt><dd>{fact.values.map((value,index)=><span key={index} dir="auto">{value}</span>)}</dd></div>)}</dl>}
+   {entry.table&&<><div className={styles.tableScroll} tabIndex={0} role="region" aria-label={entry.title}><table className={styles.proseTable}><thead><tr>{entry.table.columns.map((name,column)=><th key={column} scope="col" className={entry.table!.numeric.includes(column)?styles.numeric:undefined}>{name}</th>)}</tr></thead><tbody>{entry.table.rows.map((row,rowIndex)=><tr key={rowIndex}>{row.map((cell,column)=><td key={column} dir="auto" className={entry.table!.numeric.includes(column)?styles.numeric:undefined}>{cell}</td>)}</tr>)}</tbody></table></div>{entry.table.hidden>0&&<p className={styles.sourceMore}>{financeReportSourceMore(entry.table.hidden,block.language)}</p>}</>}
+  </section>)}
+  {block.hidden>0&&<p className={styles.sourceMore}>{financeReportSourceMore(block.hidden,block.language)}</p>}
+ </details>;
 }
 function data(section:FinanceReportSection):FinanceDataResult|null {const p=section.projection;return p?{status:p.status==="ready"?"ok":p.status==="partial"?"partial":"unconnected",columns:p.columns,rows:p.rows,warnings:p.warnings,asOf:p.asOf,retrievedAt:"",sourceUrls:[]}:null;}
 export function financeReportChartSpec(section:FinanceReportSection):Record<string,unknown>|null {
@@ -61,8 +71,8 @@ function FinanceReportComparison({section,language}:{section:FinanceReportSectio
 }
 function localizedSpec(value:unknown,language:string,key=""):unknown {if(Array.isArray(value))return value.map(item=>localizedSpec(item,language,key));if(value&&typeof value==="object")return Object.fromEntries(Object.entries(value).map(([name,item])=>[name,localizedSpec(item,language,name)]));if(typeof value==="string"&&(key==="title"||key==="series"))return financeReportLabel(value,language);return value;}
 export function financeLocalizedReportChartSpec(section:FinanceReportSection,language:string):Record<string,unknown>|null {const spec=financeReportCompositionTitle(section)?financeReportCompositionSpec(section,language):financeReportChartSpec(section);return spec?localizedSpec(spec,language) as Record<string,unknown>:null;}
-export function FinanceReportView({report,locale="en",explicitTableSectionIds=[]}:{report:FinanceReport;locale?:string;explicitTableSectionIds?:readonly string[]}) {
- const language=financeReportLocale(report,locale),tables=new Set([...explicitTableSectionIds,...report.sections.filter(section=>section.presentation==="comparison").map(section=>section.id)]);
+export function FinanceReportView({report,locale="en",explicitTableSectionIds=[],sources}:{report:FinanceReport;locale?:string;explicitTableSectionIds?:readonly string[];sources?:readonly FinanceReportSourceRecord[]}) {
+ const language=financeReportLocale(report,locale),sourceBlock=financeReportSourceBlock(report,sources,language),tables=new Set([...explicitTableSectionIds,...report.sections.filter(section=>section.presentation==="comparison").map(section=>section.id)]);
  const sections=selectFinanceReportSections(report).flatMap(section=>{
   const result=data(section),metric=result?financeMetricForColumns(result.columns):undefined;
   const spec=financeLocalizedReportChartSpec(section,language),computation=!!spec,metrics=tables.has(section.id)?[]:financeReportComputeMetrics(section,language);
@@ -80,11 +90,11 @@ export function FinanceReportView({report,locale="en",explicitTableSectionIds=[]
   {!chart&&!metrics.length&&section.narrative.trim()&&<FinanceReportProse value={section.narrative} language={language}/>}
   {metrics.length?<dl style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(min(100%,170px),1fr))",gap:12,margin:"0 0 24px"}}>{metrics.map((metric,index)=><div key={index} style={{minWidth:0,padding:"14px 16px",border:"1px solid var(--paper-edge)",borderRadius:12}}><dt style={{fontSize:12,lineHeight:1.5,color:"var(--ink-soft)",overflowWrap:"anywhere",marginBottom:8}}>{metric.label}</dt><dd style={{fontSize:22,lineHeight:1.4,fontWeight:500,fontVariantNumeric:"tabular-nums",margin:0,overflowWrap:"anywhere"}}>{metric.display}{metric.unit&&<> <small style={{fontSize:12,fontWeight:400,color:"var(--ink-soft)"}}>{metric.unit}</small></>}</dd></div>)}</dl>:chart&&spec?<><ChartBlock code={JSON.stringify(localizedSpec(spec,language))} blockId={`finance-report-chart-${section.id}`} size="panel" showMenu={false} showDiagnostics={false} fallback={<p>{financeReportLabel("Chart unavailable",language)||"Chart unavailable."}</p>}/>{section.widget?.metric==="compute:forecast:fan"&&<div className={styles.fanLegend}><span>5–95%</span><span>25–75%</span><span>{financeReportLabel("Median",language)||"Median"}</span></div>}</>:table?<FinanceReportComparison section={section} language={language}/>:null}
   {(chart||metrics.length>0)&&section.narrative.trim()&&<div style={chart?{marginTop:24}:undefined}><FinanceReportProse value={section.narrative} language={language}/></div>}
- </section>)}</div></article>;
+ </section>)}</div>{sourceBlock&&<FinanceReportSources block={sourceBlock} dir={financeReportDirection(report,locale)}/>}</article>;
 }
 
 /** Standalone local chart export: deny every loader route and always release each Vega view. */
-export async function financeReportExportHtml(report:FinanceReport,locale?:string,explicitTableSectionIds:readonly string[]=[]):Promise<string> {
+export async function financeReportExportHtml(report:FinanceReport,locale?:string,explicitTableSectionIds:readonly string[]=[],sources?:readonly FinanceReportSourceRecord[]):Promise<string> {
  if(explicitTableSectionIds.length){const tables=new Set(explicitTableSectionIds);report={...report,sections:report.sections.map(section=>tables.has(section.id)&&section.presentation!=="supporting"&&section.presentation!=="narrative"?{...section,presentation:"comparison"}:section)};}
  const language=financeReportLocale(report,locale),charts:Record<string,string>={},mobileCharts:Record<string,string>={},fixedCharts:string[]=[];
  const candidates=selectFinanceReportSections(report).filter(section=>section.presentation!=="narrative"&&section.presentation!=="comparison").map(section=>({section,spec:financeLocalizedReportChartSpec(section,language)})).filter(item=>!!item.spec);
@@ -101,5 +111,5 @@ export async function financeReportExportHtml(report:FinanceReport,locale?:strin
  await view!.runAsync();const svg=await view!.toSVG();const bytes=new TextEncoder().encode(svg);if(bytes.length>4*1024*1024)continue;
  let binary="";for(let i=0;i<bytes.length;i+=8192)binary+=String.fromCharCode(...bytes.subarray(i,i+8192));variant.target[section.id]=`data:image/svg+xml;base64,${btoa(binary)}`;
  }finally {view?.finalize();}
- }}}return financeReportHtml({report,locale:language,charts,mobileCharts,fixedCharts});
+ }}}return financeReportHtml({report,locale:language,charts,mobileCharts,fixedCharts,sources});
 }

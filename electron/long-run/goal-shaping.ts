@@ -483,6 +483,21 @@ export function buildGoalPlanTurnContext(plan: LiveGoalPlan, input: {
   ]);
 }
 
+/**
+ * A finite plan with nothing left for another pass: at least one tactic done, none active or proposed, none held by the
+ * owner. The tactic reports are the model's own typed `goal_tactic` calls that the host already applied at a pass boundary
+ * (applyGoalPlanMarkers), so this reads plan state, never words. It does not say the Goal is achieved — only the terminal
+ * verification can — it says the model has no further step to take, which is when a pass that does nothing is not
+ * "stuck" but "done and unclaimed". A mission tree (recurring work, KPIs) and a fallback plan are never "finished".
+ */
+export function goalPlanFinished(goalId: string): boolean {
+  const plan = readGoalPlan(goalId);
+  if (!plan || plan.fallback || plan.shape === "mission_tree" || !plan.tactics.length) return false;
+  if (ownerPausedOpen(plan).length) return false;
+  if (plan.tactics.some((tactic) => tactic.status === "active" || tactic.status === "proposed")) return false;
+  return plan.tactics.some((tactic) => tactic.status === "done");
+}
+
 /** 같은 턴 안의 다음 패스에 붙일 짧은 안내(방금 완료된 전술 뒤의 다음 전술). */
 export function goalPlanContinuationNote(goalId: string, nowMs = Date.now(), typedTools = false): string | null {
   const plan = readGoalPlan(goalId);

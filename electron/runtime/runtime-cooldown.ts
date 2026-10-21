@@ -42,6 +42,8 @@ const cooldowns = new Map<string, RuntimeCooldown>();
 
 /** 후보 동일성 열쇠 — 모델까지 포함한다(같은 CLI 의 다른 모델은 다른 한도를 갖는다). */
 export function runtimeCooldownKey(runtime: Pick<RuntimeStatus, "kind" | "backend" | "source" | "model">): string {
+  // Four parts on purpose: checkpoint selections, judgment receipts and the Science availability probe rebuild this identity without an agent id,
+  // so a fifth part would record a cooldown under one key and look it up under another (and runtimeCooldownForSelection reads exactly four).
   return JSON.stringify([runtime.kind, runtime.backend, runtime.source, runtime.model ?? null]);
 }
 

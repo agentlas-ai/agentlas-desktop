@@ -4868,7 +4868,7 @@ app.whenReady().then(async () => {
               if (bridge.available && controls.available && !native.configuredNativeGuiOwner()) initializeNativeGuiInvocationOwner(originalEnrollment, policy.NATIVE_MAIN_PREPARATION_POLICY);
             },
             currentChannel: () => native.nativeGuiEnrollmentChannel(originalEnrollment),
-            isQuitting: () => quitPlanCommitted || quitRelaunching || quitCleanupDone || automaticQuitInstaller.quitDisposition() !== "ordinary",
+            isQuitting: () => quitPlanCommitted || quitRelaunching || quitCleanupDone || automaticQuitInstaller.quitInProgress(),
             log: line => console.info(line),
           });
           const reattacher = nativeChannelReattacher;

@@ -5183,6 +5183,13 @@ export interface InvocationRuntimeFailure {
   source: "marker" | "exit" | "heuristic";
   providerCode?: string;
   retryAfterAt?: string;
+  /**
+   * Only on an unfinished turn (providerCode runtime_turn_unsettled, which every runner and observed-runner use for a turn that
+   * ended without its terminal receipt, so the kind above is `refused` whatever happened): the runner's own typed failure
+   * behind it, when it reported one of these four. The fields above stay the replay guard's; this says what the provider
+   * reported, so the transcript can name it (shared/run-failure-notice.ts). Optional; older readers ignore it.
+   */
+  cause?: Omit<InvocationRuntimeFailure, "cause">;
 }
 
 /** 워크플로우 그래프 노드의 라이브 실행 상태(설계 §5 P2 — 캔버스 오버레이). */

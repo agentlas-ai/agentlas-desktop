@@ -949,6 +949,22 @@ export function preDispatchRefusal(cause: unknown, stage: string, fallbackCode =
   return new PreDispatchRefusalError(refusalCode(cause) ?? fallbackCode, message, cause, stage);
 }
 
+/** The typed runner failure a cause carries: the failure of a returned RunnerResult, or the RunnerFailure itself. */
+function runnerFailureOfCause(cause: unknown): RunnerFailure | undefined {
+  return (cause && typeof cause === "object" && "failure" in cause ? (cause as { failure?: RunnerFailure }).failure : undefined)
+    ?? (cause && typeof cause === "object" && "kind" in cause && "message" in cause ? cause as RunnerFailure : undefined);
+}
+
+/**
+ * The runner's own typed failure behind an unfinished turn (unsettledTurnError keeps the returned result as the standard
+ * `cause`), when the error is one and its cause carries a failure. Facts only: nothing here reads a message.
+ */
+export function unsettledTurnCauseFailure(error: unknown): RunnerFailure | undefined {
+  if (!(error instanceof RuntimeTurnUnsettledError)) return undefined;
+  const failure = runnerFailureOfCause((error as { cause?: unknown }).cause);
+  return failure && typeof failure.kind === "string" ? failure : undefined;
+}
+
 /**
  * The one way a host wrapper reports a dispatched turn that ended without its terminal receipt. Unlike a bare
  * `new RuntimeTurnUnsettledError(kind)`, it keeps what the runner proved: the typed cause (standard `cause`, so its
@@ -963,8 +979,7 @@ export function unsettledTurnError(input: {
   turnDelivery?: RuntimeTurnDelivery;
 }): RuntimeTurnUnsettledError {
   const cause = input.cause;
-  const failure = (cause && typeof cause === "object" && "failure" in cause ? (cause as { failure?: RunnerFailure }).failure : undefined)
-    ?? (cause && typeof cause === "object" && "kind" in cause && "message" in cause ? cause as RunnerFailure : undefined);
+  const failure = runnerFailureOfCause(cause);
   const causeDelivery = cause && typeof cause === "object" ? (cause as { turnDelivery?: unknown }).turnDelivery : undefined;
   const delivery = input.turnDelivery ?? (causeDelivery === "accepted" || causeDelivery === "not-accepted" ? causeDelivery : undefined);
   const sessionId = input.sessionId ?? (cause && typeof cause === "object" ? (cause as { sessionId?: unknown }).sessionId : undefined);

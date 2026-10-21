@@ -8,6 +8,7 @@ import { FinanceComputeRequestSchema } from '../../shared/finance-compute';
 import { FINANCE_SOCIAL_SUPPORTED_PERIODS } from './providers/public-data';
 import { FinanceAnalystRefSchema } from '../../shared/finance-analysts';
 import { FINANCE_NATIVE_VIEW, FinanceNativeResultSchema, type FinanceNativeResult, type FinanceNativePresentation } from '../../shared/finance-native-ui';
+import { financeReportSourceRecords, type FinanceReportSourceRecord } from '../../shared/finance-report-presentation';
 import type { UiInstanceView } from '../../shared/ui-instances';
 
 type Outcome = { status: 'ok'; financeReceipt?: FinanceReceiptReference; nativeUi?: FinanceNativePresentation; data: unknown } | { status: 'refused' | 'unavailable'; reason: string; next?: string; data?: unknown };
@@ -60,7 +61,7 @@ export function financePluginOperations(values: unknown[]): FinanceOperation[] {
 }
 
 /** Deterministic view projection from an actual service outcome. No model prose selects a component. */
-export function financeNativeView(action:string,raw:Record<string,unknown>,data:unknown):FinanceNativeResult['view']|null {
+export function financeNativeView(action:string,raw:Record<string,unknown>,data:unknown,sources?:readonly FinanceReportSourceRecord[]):FinanceNativeResult['view']|null {
   const value=data&&typeof data==='object'&&!Array.isArray(data)?data as Record<string,unknown>:{};
   // A card shows something to read: an empty search or a query that returned no rows (failure, unconnected source) stays a tool result the model reports.
   if(action==='search')return (data as import('../../shared/finance').FinanceSearchResult).assets?.length?{kind:'search',query:String(raw.query??''),result:data as import('../../shared/finance').FinanceSearchResult}:null;
@@ -70,7 +71,9 @@ export function financeNativeView(action:string,raw:Record<string,unknown>,data:
   const report=value.report??workspace?.reports.find(report=>report.id===value.reportId);
   if(['calculate','portfolio.value','query.save','report.create','report.read'].includes(action)&&report){
     const computed=value.computed as {coverage?:{positions:number;pricedPositions:number;missingPositions:number}}|undefined;
-    return {kind:'report',report:report as import('../../shared/finance').FinanceReport,workspaceRevision:workspace?.revision??Number(value.workspaceRevision),...(computed?.coverage?{coverage:computed.coverage}:{})};
+    // The provider records the report was built from travel with the card (it has no workspace). A result that carries no workspace (a read) gets them from the caller.
+    const records=financeReportSourceRecords(report as import('../../shared/finance').FinanceReport,workspace?.sources??sources);
+    return {kind:'report',report:report as import('../../shared/finance').FinanceReport,workspaceRevision:workspace?.revision??Number(value.workspaceRevision),...(computed?.coverage?{coverage:computed.coverage}:{}),...(records.length?{sources:records}:{})};
   }
   if(action==='portfolio.value'){
     const computed=value.computed as {status:'ok'|'partial'|'unavailable';coverage:{positions:number;pricedPositions:number;missingPositions:number}}|undefined;
@@ -102,13 +105,20 @@ export async function supersedeHoldingsProposals(ctx:Pick<ToolContext,'chatId'|'
   }
 }
 
+async function reportReadSources(scope:import('./store').FinanceScope,data:unknown):Promise<FinanceReportSourceRecord[]|undefined>{
+  const value=data as {report?:import('../../shared/finance').FinanceReport;archiveId?:string}|null;
+  if(!value?.report)return undefined;
+  try{return await (await import('./service')).getFinanceService().reportSources(scope,value.report,value.archiveId);}catch{return undefined;}
+}
+
 async function presentFinanceResult(action:Action,raw:Record<string,unknown>,data:unknown,ctx:ToolContext,scope:import('./store').FinanceScope):Promise<FinanceNativePresentation|undefined>{
   if(ctx.dryRun||ctx.chatId==='ui'||!ctx.runId)return undefined;
   if(!['search','query','query.save','calculate','portfolio.value','report.create','report.read','portfolio.propose'].includes(action))return undefined;
   try {
     scope.assertCurrent();ctx.signal?.throwIfAborted();
     const {nativePortOwnerScope,retainNativePortResult}=await import('../harness/tool-dispatch');
-    const ownerScope=await nativePortOwnerScope(ctx),view=financeNativeView(action,raw,data);
+    // A read returns the report without its workspace: the provider records it names are looked up here, for the card only.
+    const ownerScope=await nativePortOwnerScope(ctx),view=financeNativeView(action,raw,data,action==='report.read'?await reportReadSources(scope,data):undefined);
     if(!view)return undefined;
     const original=FinanceNativeResultSchema.parse({schemaVersion:'finance.native-result.v1',ownerScope,operationId:`finance.${action}`,view,operationResult:data});
     const retained=await retainNativePortResult(ctx,`finance.${action}`,raw,original,ownerScope);

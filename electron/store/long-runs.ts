@@ -949,6 +949,9 @@ export function pendingBlockedGoalRetry(runId: string): BlockedGoalRetry | null 
   const run = getLongRun(runId);
   if (!run || !(run.status === "waiting_tool"
     || (run.status === "paused" && ["app_closed", "crash_recovery"].includes(run.pauseReason ?? "")))) return null;
+  // The owner-answer hold replaces the retry it was taken over (holdGoalForOwnerAnswer): nothing wakes a held Goal, so every
+  // reader (next-wake line, Alive, the wait poller, the sweep) sees what it saw for a Goal held from `running`.
+  if (goalHeldForOwnerAnswer(run)) return null;
   const row = getDb().prepare(`SELECT seq, payload_json FROM long_run_events WHERE run_id = ? AND kind = ?
     ORDER BY seq DESC LIMIT 1`).get(runId, BLOCKED_GOAL_SWEEP_EVENT_KIND) as { seq: number; payload_json: string } | undefined;
   if (!row) return null;
@@ -1047,21 +1050,44 @@ export function goalOwnerAnswerPendingSince(runId: string): string | null {
   return row?.at ?? null;
 }
 
-/** running -> waiting_tool holding for the owner's answer. A Goal the owner stopped is never moved (that hold is the owner's). */
+/** waiting_tool on a retry the HOST scheduled and nobody has started (no blocked_reason, a pending host retry). */
+function goalRestsOnHostRetry(run: Pick<LongRunRecord, "id" | "status" | "blockedReason">): boolean {
+  return run.status === "waiting_tool" && (run.blockedReason ?? null) === null && pendingBlockedGoalRetry(run.id) !== null;
+}
+
+/** A Goal the host can rest for the owner's answer: running, or resting on its own scheduled retry (holdGoalForOwnerAnswer). */
+export function goalHoldableForOwnerAnswer(run: Pick<LongRunRecord, "id" | "status" | "blockedReason">): boolean {
+  return run.status === "running" || goalRestsOnHostRetry(run);
+}
+
+/**
+ * running -> waiting_tool holding for the owner's answer. A Goal the owner stopped is never moved (that hold is the owner's).
+ *
+ * A Goal may also be taken from `waiting_tool` when the retry resting it there is one the HOST scheduled and nobody has
+ * started (no blocked_reason, a pending host retry): a turn end schedules its spaced follow-up before the terminal verifier
+ * answers (InvocationService verification_background), so by the time a verdict asks the owner the Goal is already waiting on
+ * that retry. The hold replaces it: only blocked_reason changes, the status stays, and every waker already checks the hold
+ * before it looks at a retry (sweep, startup checkpoints, wait poller, Alive).
+ */
 export function holdGoalForOwnerAnswer(input: { runId: string; expectedVersion?: number; invocationRunId?: string | null; appInstanceId?: string | null }): LongRunRecord {
   const db = getDb();
   db.transaction(() => {
     const current = getLongRun(input.runId);
-    if (!current || current.surface === "science" || current.status !== "running"
+    const hostRetryResting = current ? goalRestsOnHostRetry(current) : false;
+    if (!current || current.surface === "science" || (current.status !== "running" && !hostRetryResting)
       || (input.expectedVersion != null && current.version !== input.expectedVersion)) throw new Error("goal_owner_answer_hold_state_changed");
     if (longRunOwnerHold(input.runId)) throw new Error(LONG_RUN_OWNER_HOLD_CODE);
     if (liveLongRunAttemptCount(input.runId)) throw new Error("goal_owner_answer_hold_controller_live");
     const now = new Date().toISOString();
-    const changed = db.prepare(`UPDATE long_runs SET status='waiting_tool', pause_reason=NULL, blocked_reason=?, paused_at=NULL,
-      app_instance_id=COALESCE(?, app_instance_id), updated_at=?, version=version+1 WHERE id=? AND status='running' AND version=?`)
-      .run(GOAL_OWNER_ANSWER_REQUIRED, input.appInstanceId ?? null, now, current.id, current.version);
+    const changed = hostRetryResting
+      ? db.prepare(`UPDATE long_runs SET blocked_reason=?, app_instance_id=COALESCE(?, app_instance_id), updated_at=?, version=version+1
+          WHERE id=? AND status='waiting_tool' AND blocked_reason IS NULL AND version=?`)
+        .run(GOAL_OWNER_ANSWER_REQUIRED, input.appInstanceId ?? null, now, current.id, current.version)
+      : db.prepare(`UPDATE long_runs SET status='waiting_tool', pause_reason=NULL, blocked_reason=?, paused_at=NULL,
+          app_instance_id=COALESCE(?, app_instance_id), updated_at=?, version=version+1 WHERE id=? AND status='running' AND version=?`)
+        .run(GOAL_OWNER_ANSWER_REQUIRED, input.appInstanceId ?? null, now, current.id, current.version);
     if (changed.changes !== 1) throw new Error("goal_owner_answer_hold_state_changed");
-    appendEventInDb({ runId: current.id, kind: "run.status_changed", actorKind: "host",
+    if (!hostRetryResting) appendEventInDb({ runId: current.id, kind: "run.status_changed", actorKind: "host",
       payload: { from: "running", to: "waiting_tool", reason: GOAL_OWNER_ANSWER_REQUIRED }, at: now });
     appendEventInDb({ runId: current.id, kind: "run.owner_answer_pending", actorKind: "host",
       payload: { reason: GOAL_OWNER_ANSWER_REQUIRED, ...(input.invocationRunId ? { invocationRunId: input.invocationRunId } : {}) }, at: now });

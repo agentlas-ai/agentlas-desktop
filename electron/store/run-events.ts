@@ -2888,7 +2888,8 @@ function invocationSupersedingRunId(runId: string, chatId: string, startTs: stri
 /**
  * What Main's history read shows for a host-status line about a run (shared/chat-host-notice.ts): a failure whose
  * request a later run took over is "recovered" (quiet everywhere), and a failure whose code is inside the app
- * (shared/run-failure-cause.ts) is "app-failed" (reported, never an owner ask). Other runs are left as written.
+ * (shared/run-failure-cause.ts) is "app-failed" (reported, never an owner ask). The receipt's typed provider failure is read
+ * the same way the line was written: a provider's own outcome is never "app-failed". Other runs are left as written.
  */
 export function invocationFailureNoticeStatuses(chatId: string, runIds: readonly string[]): ReadonlyMap<string, "recovered" | "app-failed"> {
   const out = new Map<string, "recovered" | "app-failed">();
@@ -2898,7 +2899,7 @@ export function invocationFailureNoticeStatuses(chatId: string, runIds: readonly
     try { receipt = getInvocationRunReceipt(runId); } catch { continue; }
     if (!receipt || receipt.chatId !== chatId || (receipt.status !== "failed" && receipt.status !== "interrupted")) continue;
     if (receipt.supersededByRunId) out.set(runId, "recovered");
-    else if (receipt.status === "failed" && appSideRunFailure(receipt.errorCode)) out.set(runId, "app-failed");
+    else if (receipt.status === "failed" && appSideRunFailure(receipt.errorCode, receipt.runtimeFailure)) out.set(runId, "app-failed");
   }
   return out;
 }

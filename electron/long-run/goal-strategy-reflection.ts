@@ -25,6 +25,7 @@ import {
   type GoalStrategyStrategyDraftV1,
 } from "../../shared/goal-strategy";
 import { redactOperationalSecrets } from "../invocation/event-secret-redaction";
+import { withAdapterEffectContext } from "../invocation/adapter-effect-context";
 import type { InvocationEffectBoundary } from "../invocation/effect-boundary-reader";
 import { readInvocationEffectBoundary } from "../invocation/effect-boundary-reader";
 import {
@@ -619,6 +620,24 @@ function recordGoalStrategyReflectionRefusal(input: {
     console.warn(`[goal-strategy] reflection refusal not recorded stage=${stage} reason=${reason}:`, error);
     return null;
   }
+}
+
+/**
+ * Run the background reflection, and whatever it hands on, in an adapter-effect
+ * scope of its own. The verifier starts it inside the source invocation's async
+ * context, after that invocation's effect boundary was sealed into the
+ * checkpoint. Inheriting the invocation's ledger appended the reflection's
+ * no-tools judgment as late `runtime_adapter_effect_*` rows to the sealed run,
+ * which moved the boundary's snapshot digest: the proposal CAS refused itself
+ * (goal_strategy_effect_unsettled) and the Goal's own wait continuation was
+ * cancelled (checkpoint_effect_boundary_changed), so the Goal woke about six
+ * minutes later without its checkpoint.
+ * The scope keeps the parent's accounting and cancellation; it only stops this
+ * advisory work from writing into another invocation's effect ledger.
+ */
+export function withDetachedReflectionEffects<T>(checkpointId: string, action: () => T): T {
+  return withAdapterEffectContext({ runId: `goal-strategy-reflection:${checkpointId}`, chatId: "", rootAgentId: null,
+    begin: () => {}, finish: () => {} }, action);
 }
 
 /**

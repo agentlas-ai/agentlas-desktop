@@ -1,16 +1,23 @@
 import { isTransientSendRefusalCode } from "./transient-send-refusal";
+import { RUN_FAILURE_UNSETTLED_CODE, isTypedProviderRunFailure } from "./run-failure-notice";
+import type { RunFailureNoticeFacts } from "./run-failure-notice";
 
 /**
-
-
-
-
-
-
-
-
-
-
+ * Run failure codes whose cause is inside the app: Main's own custody, ledger, process or channel state. The owner has
+ * nothing to act on, so such a failure is never written or drawn as a "needs-owner" line (host status "app-failed").
+ *
+ * For example goal_episode_admission_missing (Main lost its own Goal-turn admission record): the room showed Hope saying
+ * "the run failed … check the run history" with a "확인 필요" status — the owner had no action, and the screen called the room broken.
+ *
+ * Codes are matched exactly or by one documented prefix family; prose is never inspected. An unknown code stays an
+ * owner-facing failure (conservative default). The transient send-refusal set (shared/transient-send-refusal.ts) is
+ * app-side by definition and is included as a whole.
+ *
+ * One code is in both worlds: `runtime_turn_unsettled` is a send refusal ("the previous turn of this chat has not settled
+ * yet", the chat is not ready) AND the terminal code of a provider turn that ended without its terminal receipt. The second
+ * carries the runner's typed failure (InvocationRuntimeFailure); the first never does. A run whose typed provider failure is
+ * known is the provider's outcome, not the app's: the owner can resend or pick another model (for example an
+ * antigravity turn blocked by the provider's content safety filters read "App problem").
  */
 export interface AppSideRunFailureFamily {
   readonly match: "exact" | "prefix";
@@ -38,9 +45,16 @@ export const APP_SIDE_RUN_FAILURE_FAMILIES: readonly AppSideRunFailureFamily[] =
 
 const CODE_RE = /^[A-Za-z][A-Za-z0-9_.:-]{0,95}$/;
 
-/** The app-side family a run failure code belongs to, or null when the owner may have something to do (or it is unknown). */
-export function appSideRunFailure(code: unknown): { code: string; reason: string } | null {
+/**
+ * The app-side family a run failure code belongs to, or null when the owner may have something to do (or it is unknown).
+ * `runtimeFailure` is the run's typed provider failure when it has one (event.error.runtimeFailure, receipt.runtimeFailure).
+ */
+export function appSideRunFailure(
+  code: unknown,
+  runtimeFailure?: RunFailureNoticeFacts["runtimeFailure"],
+): { code: string; reason: string } | null {
   if (typeof code !== "string" || !CODE_RE.test(code)) return null;
+  if (code === RUN_FAILURE_UNSETTLED_CODE && isTypedProviderRunFailure(runtimeFailure)) return null;
   if (isTransientSendRefusalCode(code)) {
     return { code, reason: "Transient: the chat or its channel was not ready yet (shared/transient-send-refusal.ts)." };
   }
@@ -49,6 +63,6 @@ export function appSideRunFailure(code: unknown): { code: string; reason: string
   return family ? { code, reason: family.reason } : null;
 }
 
-export function isAppSideRunFailureCode(code: unknown): boolean {
-  return appSideRunFailure(code) !== null;
+export function isAppSideRunFailureCode(code: unknown, runtimeFailure?: RunFailureNoticeFacts["runtimeFailure"]): boolean {
+  return appSideRunFailure(code, runtimeFailure) !== null;
 }

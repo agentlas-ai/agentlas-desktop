@@ -101,7 +101,7 @@ import {
 } from "./goal-ledger";
 import { getAgentById, listInstalledAgents } from "./registry";
 import { isAgentArchived, restoreAgentForUse } from "../archive/auto-archive";
-import { applyGoalPlanMarkers, bindGoalPlanDispatch, buildGoalPlanTurnContext, ensureGoalShapeBeforeTurn, goalPlanContinuationNote, recordGoalPlanPassStop } from "../long-run/goal-shaping";
+import { applyGoalPlanMarkers, bindGoalPlanDispatch, buildGoalPlanTurnContext, ensureGoalShapeBeforeTurn, goalPlanContinuationNote, goalPlanFinished, recordGoalPlanPassStop } from "../long-run/goal-shaping";
 import { readGoalPlan } from "../store/goal-plans";
 import { goalPassStopCause } from "../long-run/goal-pass-stop";
 import { goalPassBudgetStep, GOAL_PASS_WALL_CLOCK_BUDGET_MS } from "../long-run/goal-pass-budget";
@@ -166,7 +166,6 @@ import { effectObservationTicket } from "../long-run/effect-observation-tickets"
 import { goalExecutionDirectivePromptBlock } from "../long-run/goal-execution-context";
 import { canonicalAskFenceText, extractAskFences } from "../../shared/ask-fence-flatten";
 import { AGENT_ASK_OPEN } from "../../shared/agent-control-blocks";
-import { withHostOwnerCard } from "../long-run/goal-owner-card";
 
 /**
 
@@ -327,7 +326,7 @@ import {
   UNATTENDED_NO_ASK_DIRECTIVE,
   MOBILE_DURABLE_ASK_DIRECTIVE,
 } from "../runtime/runner";
-import { markRefusedBeforeDispatch, outwardFailureCode, refusalCode, unsettledTurnError, validatedRunnerNativeControlState } from "../runtime/runner";
+import { markRefusedBeforeDispatch, outwardFailureCode, refusalCode, unsettledTurnCauseFailure, unsettledTurnError, validatedRunnerNativeControlState } from "../runtime/runner";
 import { decideTurnSettlement, innermostTypedCode, isTypedCode, STORE_BUSY_CODE } from "../../shared/turn-settlement";
 import { WORK_PROJECT_RESIDENCY_BUSY_CODE } from "../runtime/project-residency";
 import {
@@ -873,9 +872,8 @@ class InvocationRunnerFailureError extends Error {
   }
 }
 
-function invocationRuntimeFailure(error: unknown, now = Date.now()): InvocationRuntimeFailure | null {
-  const failure = InvocationRunnerFailureError.providerFailure(error);
-  if (!failure || !["quota", "rate_limit", "auth", "refused"].includes(failure.kind)) return null;
+function runtimeFailureFacts(failure: RunnerFailure, now: number): Omit<InvocationRuntimeFailure, "cause"> | null {
+  if (!["quota", "rate_limit", "auth", "refused"].includes(failure.kind)) return null;
   const reset = failure.kind === "quota" || failure.kind === "rate_limit" ? parseRetryHint(failure.retryAfterHint, now) : null;
   return {
     kind: failure.kind as InvocationRuntimeFailure["kind"],
@@ -885,6 +883,18 @@ function invocationRuntimeFailure(error: unknown, now = Date.now()): InvocationR
     ...(reset !== null && reset > now && reset <= now + 30 * 24 * 60 * 60_000
       ? { retryAfterAt: new Date(reset).toISOString() } : {}),
   };
+}
+
+function invocationRuntimeFailure(error: unknown, now = Date.now()): InvocationRuntimeFailure | null {
+  const failure = InvocationRunnerFailureError.providerFailure(error);
+  const facts = failure ? runtimeFailureFacts(failure, now) : null;
+  if (!facts) return null;
+  // An unfinished turn (runtime_turn_unsettled) is reported as `refused` whatever happened; what the runner itself reported
+  // behind it (auth, quota, rate limit, a refusal) rides along as `cause`, so the transcript can name it. The replay guard
+  // keeps reading the fields above.
+  const behind = unsettledTurnCauseFailure(error);
+  const cause = behind ? runtimeFailureFacts(behind, now) : null;
+  return cause ? { ...facts, cause } : facts;
 }
 
 function invocationFailure(
@@ -1758,6 +1768,12 @@ export interface McpInvocationResult {
   goalEpisodeYield?: NativeGoalEpisodeBinding;
   /** A finite Goal turn ended with safe work left: Main wakes the Goal's next episode (no automation is created). */
   goalHostWakeRequested?: { goalId: string };
+  /**
+   * The host drove this Goal again and its passes did nothing (goal_idle_pass_yield: twice, once when the plan is done), on a turn
+   * someone can answer.
+   * Main verifies the terminal result first and asks the owner by card only if that does not close the Goal.
+   */
+  goalIdleYield?: { goalId: string };
   goalCompletionClaim?: { claimed: boolean; evidence: string | null; goalId: string | null };
   /** A failed goal pass stopped the loop with the goal still open (typed; see long-run/goal-pass-stop.ts). */
   goalPassStop?: GoalPassStop;
@@ -3188,16 +3204,17 @@ async function runMcpInvocationInContext(
     }
   }
   let controllerFallbackBeforeRun: RuntimeStatus | null = null;
-  
-
-
-
-
-
-
-
-
-
+  /** Why the selected runtime was stepped around before the run, when it was a cooldown (quota, rate limit, sign-in): the notice names a usage limit. */
+  let controllerFallbackCooldownKind: RunnerFailure["kind"] | undefined;
+  /*
+   * ★고른 런타임이 지금 한도에 걸려 있으면 **시작하기 전에** 비켜 간다.
+   *
+   * 한도인 채로 실행이 들어가면 실패를 낸 뒤에야 폴백이 돌아, 이미 아는 사실을 확인하느라 시간을 쓴다.
+   * 저장된 선택은 건드리지 않는다 — 시한이 지나면 다음 턴이 알아서 원래 모델로 간다.
+   */
+  // Work gets the same pre-run cooldown avoidance for a runtime it did not pin
+  // (long-run behaviour must match One). A Work composer pin
+  // stays the user's exact decision and is never swapped here.
   const workUnpinnedCooldownAvoidance = req.oneMode !== true && !runtimeResolution.pinHonored
     && chat?.originSurface === "work" && req.agentAppMode !== true;
   if (runtimeChoice && ((req.oneMode === true && runtimeResolution.pinHonored) || workUnpinnedCooldownAvoidance)
@@ -3209,6 +3226,7 @@ async function runMcpInvocationInContext(
       if (fallback && fallbackPicked) {
         runtimeChoice = { active: fallback, picked: fallbackPicked, override: null, unavailableOverride: null };
         controllerFallbackBeforeRun = fallback;
+        controllerFallbackCooldownKind = cooling.kind;
       } else {
         /*
          * 대신 갈 곳이 없다. 그러면 쿨다운을 **지키지 않는다** — 아무것도 안 하는 것보다
@@ -3402,6 +3420,7 @@ async function runMcpInvocationInContext(
   const emitControllerRuntimeFallback = (
     fallback: RuntimeStatus,
     failure: Pick<RunnerFailure, "kind" | "runtime" | "source" | "providerCode" | "exitCode" | "retryAfterHint"> | null,
+    cooldownKind?: RunnerFailure["kind"],
   ): void => {
     if (!oneControllerFallbackEligible) return;
     const nextSelection: RuntimeSelection = {
@@ -3442,13 +3461,14 @@ async function runMcpInvocationInContext(
     const fromLabel = `${previous.kind}${previous.model ? ` · ${previous.model}` : ""}`;
     const toLabel = `${nextSelection.kind}${nextSelection.model ? ` · ${nextSelection.model}` : ""}`;
     const contextLimited = failure && modelContextFailureReason(failure) === "context_capacity";
-    const reason = failure?.kind === "quota"
+    const usageLimited = failure?.kind === "quota" || cooldownKind === "quota";
+    const reason = usageLimited
       ? locale === "ko" ? "사용 한도에 걸려" : "hit its usage limit"
       : contextLimited
         ? locale === "ko" ? "요청이 모델의 문맥 한도를 넘어" : "exceeded its context limit"
         : locale === "ko" ? "실행할 수 없어" : "became unavailable";
     const koMessage = `One 모델 ${fromLabel}이 ${reason} 이번 실행만 ${toLabel}로 이어갑니다. 저장된 선택은 ${previous.kind}${previous.model ? ` · ${previous.model}` : ""} 그대로이고, 사용할 수 있게 되면 자동으로 돌아갑니다.`;
-    const enMessage = `One's ${fromLabel} ${failure?.kind === "quota" ? "hit its usage limit" : contextLimited ? "exceeded its context limit" : "became unavailable"}; continuing this run on ${toLabel}. Your saved selection is unchanged and will be used again as soon as it works.`;
+    const enMessage = `One's ${fromLabel} ${usageLimited ? "hit its usage limit" : contextLimited ? "exceeded its context limit" : "became unavailable"}; continuing this run on ${toLabel}. Your saved selection is unchanged and will be used again as soon as it works.`;
     const message = locale === "ko"
       ? koMessage
       : enMessage;
@@ -3466,6 +3486,7 @@ async function runMcpInvocationInContext(
           from: previous,
           to: nextSelection,
           reason: failure?.kind ?? "unavailable-before-run",
+          cooldown: cooldownKind ?? null,
           runtime: failure?.runtime ?? null,
           failureSource: failure?.source ?? null,
           providerCode: failure?.providerCode ?? null,
@@ -3478,7 +3499,7 @@ async function runMcpInvocationInContext(
     });
   };
   if (controllerFallbackBeforeRun) {
-    emitControllerRuntimeFallback(controllerFallbackBeforeRun, null);
+    emitControllerRuntimeFallback(controllerFallbackBeforeRun, null, controllerFallbackCooldownKind);
   }
   if (oneTeamExecutionPolicy) {
     const hostRunFacts: DeclaredPromptPart[] = [
@@ -6814,6 +6835,8 @@ async function runMcpInvocationInContext(
           onPlan: forward((...args: Parameters<NonNullable<RunnerEvents["onPlan"]>>) => {
             nativeActivity = true;
             recordTurnPlacement("output");
+            // A plan is model output like a thought: the request got past its first model call, so a paid replay or a graph-worker retry would repeat it.
+            creditRetryBlocked = true; noteGraphWorkerActivity(executionContext?.graphWorkerAttempt);
             runnerEvents.onPlan(...args);
           }),
         },
@@ -7461,6 +7484,7 @@ async function runMcpInvocationInContext(
     let lastPassToolCalls: number | null = null;
     let lastPassNovelObservations: number | null = null;
     let idleGoalPasses = 0;
+    let goalIdleYield: { goalId: string } | null = null;
     let passRecoveryNote: string | null = null;
     /**
      * Set when a failed pass stopped the loop while leaving the goal open and resumable. Returned to the
@@ -7538,29 +7562,27 @@ async function runMcpInvocationInContext(
       // keep its mandate after that verification; it does not justify asking
       // this same native turn to complete the claimed work again.
       if (passClaim.claimed) passShouldContinue = false;
-
-
-
-
-
-
-      const idleStep = idleGoalPassStep({ continuousMode, goalDrivenPass, passShouldContinue, lastPassToolCalls, lastPassNovelObservations, idlePasses: idleGoalPasses });
+      // A pass the Goal ledger alone keeps alive has to show host-observed work: a model that only paraphrases that nothing was
+      // done defeats the identical-output guard below, so
+      // the measure is the host's own count of completed tool calls. After GOAL_IDLE_PASS_LIMIT idle passes the
+      // invocation ends; Main's verification and wake schedule decide when the Goal is looked at again.
+      // A plan whose every tactic is done has already told the model what is left (verify the criteria and claim): one idle
+      // answer to that is enough. The plan is read only at a pass the Goal ledger alone keeps alive (one SQLite read).
+      const planFinishedAtBoundary = Boolean(activeGoalId && continuousMode && goalDrivenPass && passShouldContinue && goalPlanFinished(activeGoalId));
+      const idleStep = idleGoalPassStep({ continuousMode, goalDrivenPass, passShouldContinue, lastPassToolCalls, lastPassNovelObservations, idlePasses: idleGoalPasses,
+        planFinished: planFinishedAtBoundary });
       idleGoalPasses = idleStep.idlePasses;
       if (idleStep.yieldNow) {
         passShouldContinue = false;
         tryRecordRunEvent({ runId: req.runId ?? `chat:${chat.id}`, chatId: chat.id, agentId: agent.id,
-          kind: "goal_idle_pass_yield", payload: { pass, idlePasses: idleGoalPasses } });
-        // The host drove this Goal again and it still did nothing, with no typed way forward: nobody is told. The turn never
-        // ends on prose alone: the model's last words stay and the same card block a model writes is
-        // appended, so the Goal is held for the answer and the owner is alerted (desktop run alert, phone push). Only a
-        // turn someone can answer: not unattended, not an executionContext channel, not stopped.
-        if (!asksUser && !unattendedNoAsk && !executionContext && !signal?.aborted && !req.agentAppMode) {
-          const withCard = withHostOwnerCard(continuation.text, "goal_idle_stop", locale === "ko" ? "ko" : "en");
-          if (withCard !== continuation.text) {
-            continuation.text = withCard;
-            tryRecordRunEvent({ runId: req.runId ?? `chat:${chat.id}`, chatId: chat.id, agentId: agent.id,
-              kind: "goal_owner_card_added", payload: { source: "goal_idle_pass_yield", pass } });
-          }
+          kind: "goal_idle_pass_yield", payload: { pass, idlePasses: idleGoalPasses, ...(planFinishedAtBoundary ? { planFinished: true } : {}) } });
+        // The host drove this Goal again and it did nothing. That is not yet "nobody can go on": Main's turn end verifies the
+        // terminal result against the criteria first, and a Goal whose plan is done and whose answer was right simply
+        // closes (a card added here pre-empted that verification and held a finished Goal for the owner). Main
+        // asks the owner by card only if the verification does not close it. Reported only on a turn someone can answer:
+        // not unattended, not an executionContext channel, not stopped, not the owner's own question.
+        if (activeGoalId && !asksUser && !unattendedNoAsk && !executionContext && !signal?.aborted && !req.agentAppMode) {
+          goalIdleYield = { goalId: activeGoalId };
         }
       }
       // Wall-clock bound (long-run/goal-pass-budget.ts): at this pass boundary no runtime turn or tool is in
@@ -7980,7 +8002,10 @@ async function runMcpInvocationInContext(
     // .scheduleGoalContinuation → blocked-goal sweep → the Goal's resume turn in its own chat). Legacy rows are retired
     // at boot (store/goal-continuation-rows.ts). An ongoing Goal keeps its own wait cycle (registerOngoingGoalCycle).
     let goalHostWakeRequested: { goalId: string } | null = null;
-    if (!req.agentAppMode && stormbreakerContinueRequested && chat.kind !== "division" && canWrite
+    // A turn reported as an idle yield (goalIdleYield) asks Main for the terminal verification, not for another wake: its
+    // passes did nothing, so a blind wake only repeats them. A Work project's chat has no `record.automaticGoalId`, so this
+    // request was its idle path.
+    if (!req.agentAppMode && stormbreakerContinueRequested && !goalIdleYield && chat.kind !== "division" && canWrite
       && (!activeGoalId || getChatGoalRevision(activeGoalId)?.lifecycle !== "ongoing")) {
       if (activeGoalId) {
         try {
@@ -8803,6 +8828,7 @@ async function runMcpInvocationInContext(
         observedUsage: invocationObservedUsage,
         stormbreakerContinueRequested,
         ...(goalHostWakeRequested ? { goalHostWakeRequested } : {}),
+        ...(goalIdleYield ? { goalIdleYield } : {}),
         ...(goalWaitRequest ? { goalWaitRequest } : {}),
       ...(goalEpisodeYield ? { goalEpisodeYield } : {}),
         goalCompletionClaim: {
@@ -8840,6 +8866,7 @@ async function runMcpInvocationInContext(
       observedUsage: invocationObservedUsage,
       stormbreakerContinueRequested,
       ...(goalHostWakeRequested ? { goalHostWakeRequested } : {}),
+      ...(goalIdleYield ? { goalIdleYield } : {}),
       ...(goalWaitRequest ? { goalWaitRequest } : {}),
       ...(goalEpisodeYield ? { goalEpisodeYield } : {}),
       goalCompletionClaim: {

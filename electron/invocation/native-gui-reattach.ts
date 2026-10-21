@@ -26,7 +26,7 @@ export function createNativeChannelReattacher(ports: NativeChannelReattachPorts)
   const delay = () => Math.min(NATIVE_REATTACH_MAX_MS, NATIVE_REATTACH_BASE_MS * 2 ** Math.min(failures, 16));
   function schedule(reason: string): void {
     if (stopped || timer !== undefined || running) return;
-    if (ports.isQuitting()) { stop(); return; }
+    if (ports.isQuitting()) { ports.log(`[native-invocation] re-attach stopped for good: app quitting (${reason})`); stop(); return; }
     const ms = delay();
     ports.log(`[native-invocation] re-attach scheduled in ${ms}ms (${reason})`);
     timer = setTimer(() => { timer = undefined; void run(); }, ms);
@@ -67,7 +67,7 @@ export function createNativeChannelReattacher(ports: NativeChannelReattachPorts)
   }
   function trigger(reason = "requested"): void {
     if (stopped) return;
-    if (ports.isQuitting()) { stop(); return; }
+    if (ports.isQuitting()) { ports.log(`[native-invocation] re-attach stopped for good: app quitting (${reason})`); stop(); return; }
     // Availability can change after attach's final snapshot but before it
     // resolves. Preserve that source request; never overlap two attaches.
     if (running) { requestedWhileRunning = true; return; }

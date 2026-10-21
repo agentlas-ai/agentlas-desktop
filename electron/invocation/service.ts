@@ -66,6 +66,7 @@ import {
 } from "../runtime/invocation-lifecycle";
 import { invocationHostStopCause, invocationHostStopCopy, isOwnerGoalStopCause, isNonFailureInvocationStop } from "../../shared/invocation-host-stop";
 import { isAppSideRunFailureCode } from "../../shared/run-failure-cause";
+import { runFailureNoticeText } from "../../shared/run-failure-notice";
 import {
   appendLongRunEvent,
   bindCurrentGoalRevisionToLongRun,
@@ -80,7 +81,7 @@ import {
   settleLongRunWorkerAttempt,
   startLongRunWorkerAttempt,
   transitionLongRun, liveLongRunAttemptCount,
-  longRunOwnerHold, goalOwnerAnswerHold, holdGoalForOwnerAnswer, scheduleBlockedGoalRetry, pendingBlockedGoalRetry, consecutiveGoalTurnFollowUps, goalTurnFollowUpPlan } from "../store/long-runs";
+  longRunOwnerHold, goalOwnerAnswerHold, goalHoldableForOwnerAnswer, holdGoalForOwnerAnswer, releaseGoalOwnerAnswerHold, scheduleBlockedGoalRetry, pendingBlockedGoalRetry, consecutiveGoalTurnFollowUps, goalTurnFollowUpPlan } from "../store/long-runs";
 import { armChatGoalContract, completeChatGoalContract, defineChatGoalContract, getChatGoalRevision, getLegacyGoalLifecycleSnapshot, migrateLegacyGoalLifecycle } from "../store/chat-goals";
 import { automaticGoalReplayBlockerCode, prepareInvocationAutomaticGoal } from "./automatic-goal";
 import { classifyAndHandGoalIntakeToMain } from "./goal-intake-forward";
@@ -99,7 +100,7 @@ import { resolveDesktopRuntimeAdapter } from "../long-run/runtime-adapters";
 import { claimCheckpointContinuation, latestTaskCheckpoint } from "../long-run/checkpoint";
 import { inferWorkingFolderFromPrompt, runMcpInvocation, type InvocationExecutionContext } from "../mcp/client";
 import { applyFinalDisplayBackstop } from "../mcp/final-display-backstop";
-import { extractAskFences } from "../../shared/ask-fence-flatten";
+import { canonicalAskFenceText, extractAskFences } from "../../shared/ask-fence-flatten";
 import {
   committedQuestionContinuationIsCurrent,
   listCommittedQuestionAnswers,
@@ -115,6 +116,8 @@ import {
   type InvocationWorkspaceBinding,
 } from "./workspace-binding";
 import { pickLocale } from "../runtime/status-i18n";
+import { hostOwnerCardQuestions } from "../long-run/goal-owner-card";
+import { reportOwnerAsk } from "../owner-ask-alerts";
 import { emitDesktopStoreChange } from "../store/change-bus";
 import { permissionEscalationContinuationRequest } from "./permission-escalation-continuation";
 import { effectiveInvocationPermission } from "../../shared/invocation-permission";
@@ -3587,9 +3590,12 @@ export class InvocationService {
 
 
     let durableAssistantReplyBound = false;
-    
-
-    const persistEmptyFailureNotice = (terminalKind: string, errorCode?: string | null): void => {
+    // `errorCode` is the run's own terminal code. A cause inside the app (shared/run-failure-cause.ts) is reported as
+    // "app-failed", never as a needs-owner ask: the owner has nothing to do.
+    // `failure` is the run's error event when it has one: its typed provider failure (quota, rate limit, sign-in, refusal, an
+    // unfinished provider turn) is worded by shared/run-failure-notice.ts, and is the provider's outcome, never an app problem
+    // (a turn blocked by the provider's content safety filters used to read "The run failed …" + "App problem").
+    const persistEmptyFailureNotice = (terminalKind: string, errorCode?: string | null, failure?: McpInvocationEvent["error"]): void => {
       const abortReason = controller.signal.reason instanceof Error ? controller.signal.reason.message : null;
       if (record.background || emptyFailureNoticePersisted || durableAssistantReplyBound || record.partialText.trim() || runReq.agentAppMode || remoteWorkspaceBinding
         || runReq.promptOrigin === "system" || terminalKind === "invoke_cancelled"
@@ -3597,14 +3603,18 @@ export class InvocationService {
       try {
         const locale = pickLocale(runReq);
         const hostCause = invocationHostStopCause(abortReason);
+        const typedFailureText = hostCause || terminalKind === "invoke_interrupted" ? null : runFailureNoticeText({
+          locale, errorCode, runtimeFailure: failure?.runtimeFailure, turnDelivery: failure?.turnDelivery,
+          detail: failure?.message ? redactWorkAttachmentText(runReq, redactOneAttachmentText(runReq, failure.message)) : undefined,
+        });
         const message = hostCause ? invocationHostStopCopy(hostCause, locale).detail
           : terminalKind === "invoke_interrupted"
             ? locale === "ko" ? "실행이 중단되어 답변을 완료하지 못했습니다. 요청은 저장되어 있습니다. 실행 기록에서 중단 원인과 재개 상태를 확인할 수 있습니다."
               : "The run was interrupted before it could finish a reply. Your request is saved; run history shows the interruption and resume status."
-            : locale === "ko" ? "실행이 실패해 답변을 완료하지 못했습니다. 요청은 저장되어 있습니다. 실행 기록에서 실패 원인과 복구 상태를 확인할 수 있습니다."
-              : "The run failed before it could finish a reply. Your request is saved; run history shows the failure and recovery status.";
+            : typedFailureText ?? (locale === "ko" ? "실행이 실패해 답변을 완료하지 못했습니다. 요청은 저장되어 있습니다. 실행 기록에서 실패 원인과 복구 상태를 확인할 수 있습니다."
+              : "The run failed before it could finish a reply. Your request is saved; run history shows the failure and recovery status.");
         appendChatMessage(chat.id, "assistant", message,
-        { hostNotice: { purpose: "host-status", runId, status: hostCause ? "goal-paused" : isAppSideRunFailureCode(errorCode) ? "app-failed" : "needs-owner" } });
+        { hostNotice: { purpose: "host-status", runId, status: hostCause ? "goal-paused" : isAppSideRunFailureCode(errorCode, failure?.runtimeFailure) ? "app-failed" : "needs-owner" } });
         emptyFailureNoticePersisted = true;
       } catch { /* The failure ledger remains authoritative if the transcript write fails. */ }
     };
@@ -4884,7 +4894,7 @@ export class InvocationService {
           // bounded remote workspaces retain their stricter isolation rules.
           if (event.kind === "error") persistRecoverableAssistantPartial();
           const terminalKind = terminalDisposition!.terminalKind;
-          if (event.kind === "error" && !event.agentId) persistEmptyFailureNotice(terminalKind, event.error?.code);
+          if (event.kind === "error" && !event.agentId) persistEmptyFailureNotice(terminalKind, event.error?.code, event.error);
           settleGoalControllerAttempt(terminalKind === "invoke_completed");
           canonicalTask = projectTaskStatus(
             runReq.chatId,
@@ -5777,6 +5787,9 @@ export class InvocationService {
           }
           let retryCheckpointId: string | null = null;
           let episodeCheckpointId: string | null = null;
+          // Only a host-observed idle yield on the Goal being verified (never the model's own claim).
+          const idleYieldGoalId = !modelDeclaredCompletion && result.goalIdleYield?.goalId === completionClaim.goalId
+            ? result.goalIdleYield.goalId : null;
           // The client records only a verification request. The independent
           // judge starts here, after invoke_completed/mcp_final and the result
           // receipt are durable, so model prose can never outrun host evidence.
@@ -5861,7 +5874,12 @@ export class InvocationService {
               } else if (verification?.disposition === "retry_required") {
                 // The verifier owns its verdict transition. Inconclusive returns
                 // to running to gather evidence, never straight back to blocked.
-                retryCheckpointId = verification.checkpointId;
+                // A turn whose passes did nothing (client goal_idle_pass_yield) and that the verifier does not call done
+                // would only repeat itself on another wake: the owner is asked by card instead, and the Goal rests
+                // held for the answer. If the Goal cannot be held the verifier's own retry stands.
+                const askedOwner = idleYieldGoalId === verifiedGoalId && this.askOwnerAfterIdleYield({
+                  goalId: verifiedGoalId, chatId: chat.id, runId, record, locale: pickLocale(runReq) === "ko" ? "ko" : "en" });
+                if (!askedOwner) retryCheckpointId = verification.checkpointId;
               } else if (!verification) {
                 const current = getLongRunByGoalId(verifiedGoalId);
                 if (!result.goalEpisodeYield && current?.status === "verifying") transitionLongRun({ runId: current.id,
@@ -6302,6 +6320,40 @@ export class InvocationService {
       throw new Error("goal_wait_runtime_selection_changed");
     return this.start(input.request, undefined, undefined, undefined, "goal-continuation",
       admitMainInvocation(wait.chatId, input.invocationRunId));
+  }
+
+  /**
+   * The host drove this Goal again, its passes did nothing, and the terminal verification did not close it: another wake
+   * would repeat that (an ask is always a card that rings). The owner gets the same decision card a
+   * model writes (fixed host copy, no word judged), the Goal rests held for the answer — nothing wakes it, so it neither
+   * re-asks nor keeps the Work project's provider busy — and the desktop and the phone ring through the owner-ask seam.
+   * A card posted before the verification pre-empted it and held a Goal that was already done; this one only follows a
+   * verdict that did not close the Goal. Returns false when the Goal could not be held (nothing is left half-done: the
+   * caller then keeps the verifier's own retry).
+   */
+  private askOwnerAfterIdleYield(input: { goalId: string; chatId: string; runId: string; record: RunRecord; locale: "ko" | "en" }): boolean {
+    let heldVersion: number | null = null;
+    try {
+      const run = getLongRunByGoalId(input.goalId);
+      if (!run || run.surface === "science" || !goalHoldableForOwnerAnswer(run) || longRunOwnerHold(run.id)
+        || getChat(input.chatId)?.goalId !== input.goalId || input.record.controller.signal.aborted
+        || input.record.steeringInterruptRequested || this.steerQueues.get(input.chatId)?.length) return false;
+      heldVersion = holdGoalForOwnerAnswer({ runId: run.id, invocationRunId: input.runId, appInstanceId: desktopAppInstanceId() }).version;
+      // noGoalResult: a host-written card is not the Goal's answer, so it must never wait for a verification verdict.
+      appendChatMessage(input.chatId, "assistant", canonicalAskFenceText(hostOwnerCardQuestions("goal_idle_stop", input.locale)), { noGoalResult: true });
+      tryRecordRunEvent({ runId: input.runId, chatId: input.chatId, kind: "goal_owner_card_added",
+        payload: { source: "goal_idle_pass_yield", after: "verification" } });
+      reportOwnerAsk({ chatId: input.chatId, source: "goal", key: input.runId });
+      return true;
+    } catch (error) {
+      console.warn("[long-run] idle-yield owner card unavailable; the verifier's retry stands:", error);
+      // Held but no card written: never leave a Goal waiting for a question nobody can see.
+      if (heldVersion !== null) {
+        try { releaseGoalOwnerAnswerHold({ runId: getLongRunByGoalId(input.goalId)?.id ?? "", expectedVersion: heldVersion, reason: "owner_card_not_posted", appInstanceId: desktopAppInstanceId() }); }
+        catch (releaseError) { console.warn("[long-run] owner-answer hold could not be released:", releaseError); }
+      }
+      return false;
+    }
   }
 
   /** Durable continuation and read-only reconciliation have independent owners. */

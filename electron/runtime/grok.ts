@@ -518,7 +518,7 @@ export function grokEventRecognized(ev: unknown): boolean {
 export function isGrokQuotaExhausted(value: string): boolean {
   const text = String(value ?? "");
   return (
-    /usage balance exhausted|grok build[^\n]{0,120}balance exhausted|free-usage-exhausted|used all the included free usage/i.test(text) ||
+    /usage balance exhausted|grok build[^\n]{0,120}balance exhausted/i.test(text) ||
     (/\b402\b/.test(text) && /payment required|usage balance|balance exhausted/i.test(text))
   );
 }
@@ -728,8 +728,8 @@ async function runGrokTurn(req: RunnerRequest, events: RunnerEvents, dispatch: {
         message: [
           new RuntimeTurnUnsettledError(KIND, req.locale).message,
           quota ? (req.locale === "ko"
-            ? "Grok 사용량 한도 소진도 확인됐습니다. Grok Settings > Usage에서 확인해 주세요."
-            : "Grok usage-limit exhaustion was also observed. Check Grok Settings > Usage.") : "",
+            ? "Grok 사용량 잔액 소진(HTTP 402)도 확인됐습니다. Grok Settings > Usage에서 확인해 주세요."
+            : "Grok quota exhaustion (HTTP 402) was also observed. Check Grok Settings > Usage.") : "",
           stderr.slice(0, 500),
         ].filter(Boolean).join("\n"),
       },

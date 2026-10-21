@@ -1,7 +1,11 @@
 "use client";
 
-import { Children, useRef, useState, type ReactNode } from "react";
+import { Children, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { askCardFooterLabel } from "@shared/ask-card-footer";
+import {
+  ASK_CARD_FIXED_FALLBACK_PX, ASK_OPTION_PEEK_PX, askCardPlan, findAskCardColumn, measureAskCardColumn, measureAskCardParts,
+  sameAskCardPlan, type AskCardPlan,
+} from "@/lib/ask-card-room";
 import { IconChat, IconCheck, IconChevronDown, IconChevronRight, IconClose, IconEdit, IconSend } from "./Icon";
 import styles from "./AskCard.module.css";
 
@@ -45,6 +49,9 @@ export interface AskCardActionRow {
   primary?: { id: string; label: string; disabled?: boolean };
   onAction: (id: string, freeText: string) => void;
 }
+
+/** 서버 렌더에서는 레이아웃 효과가 없다 — 같은 모양의 효과로 물러난다. */
+const useIsoLayoutEffect = typeof window !== "undefined" ? useLayoutEffect : useEffect;
 
 export function AskCard({
   title,
@@ -134,11 +141,64 @@ export function AskCard({
   };
   const [internalCollapsed, setInternalCollapsed] = useState(false);
   const isCollapsed = collapsible && (collapsedProp ?? internalCollapsed);
-  const toggleCollapsed = () => {
-    const next = !isCollapsed;
+  const setCollapsedValue = (next: boolean) => {
     if (collapsedProp === undefined) setInternalCollapsed(next);
     onCollapsedChange?.(next);
   };
+  const toggleCollapsed = () => {
+    // 사람이 직접 접거나 편 뒤에는 카드가 스스로 접지도 펴지도 않는다.
+    userToggledRef.current = true;
+    setCollapsedValue(!isCollapsed);
+  };
+
+  /*
+   * 작성창 위 결정 슬롯에 앉은 카드는 자기가 앉은 대화 열의 높이를 본다: 열이 낮으면 카드 + 작성창이 열을 다 먹어
+   * 대화 영역(예: Finance 검토 카드의 Save)이 0px 로 잘렸다. 상한 = 열 − 다른 모든 것 − 대화 최소(ASK_THREAD_MIN_PX). 상한 안에서
+   * 보기 목록이 먼저 줄고(보기 한 줄은 늘 보인다), 그래도 모자라면 카드가 접힌 채로 시작한다. 슬롯 밖의 카드는 그대로다.
+   */
+  const cardRef = useRef<HTMLElement | null>(null);
+  const partsRef = useRef<{ fixed: number; shrinkable: number } | null>(null);
+  const userToggledRef = useRef(false);
+  const autoFoldedRef = useRef(false);
+  const [plan, setPlan] = useState<AskCardPlan | null>(null);
+  useIsoLayoutEffect(() => {
+    const card = cardRef.current;
+    const column = card ? findAskCardColumn(card) : null;
+    if (!card || !column) {
+      setPlan((current) => (current === null ? current : null));
+      return;
+    }
+    const measure = () => {
+      const parts = measureAskCardParts(card);
+      if (parts) partsRef.current = parts;
+      const known = partsRef.current ?? { fixed: ASK_CARD_FIXED_FALLBACK_PX, shrinkable: ASK_OPTION_PEEK_PX };
+      const next = askCardPlan({ ...measureAskCardColumn(card, column), cardFixedHeight: known.fixed, shrinkableHeight: known.shrinkable });
+      setPlan((current) => (sameAskCardPlan(current, next) ? current : next));
+    };
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    let frame = 0;
+    const observer = new ResizeObserver(() => {
+      if (!frame) frame = requestAnimationFrame(() => { frame = 0; measure(); });
+    });
+    observer.observe(column.element);
+    for (const child of Array.from(column.element.children)) observer.observe(child);
+    return () => {
+      observer.disconnect();
+      if (frame) cancelAnimationFrame(frame);
+    };
+  }, [isCollapsed, options.length, Children.count(children)]);
+  useIsoLayoutEffect(() => {
+    if (!collapsible || !plan || userToggledRef.current) return;
+    if (plan.tight && !isCollapsed) {
+      autoFoldedRef.current = true;
+      setCollapsedValue(true);
+    } else if (!plan.tight && isCollapsed && autoFoldedRef.current) {
+      autoFoldedRef.current = false;
+      setCollapsedValue(false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [collapsible, plan?.tight, isCollapsed]);
   const ko = locale === "ko";
   /*
    * 직접 입력은 보기 줄 하나다. 예전에는 "기타" 보기 줄과 입력 줄이 따로 있어(둘 다 같은 입력칸을 가리켰다) 카드가
@@ -148,11 +208,15 @@ export function AskCard({
 
   return (
     <section
+      ref={cardRef}
       className={styles.card}
       role="group"
       aria-label={title}
       data-ask-card="true"
       data-collapsed={isCollapsed ? "true" : undefined}
+      data-ask-room={plan ? plan.room : undefined}
+      data-ask-tight={plan?.tight ? "true" : undefined}
+      style={plan && !isCollapsed ? { maxHeight: `min(var(--ask-card-max-height), ${plan.maxHeight}px)` } : undefined}
       data-testid={testId}
     >
       <div className={styles.head}>
@@ -190,8 +254,8 @@ export function AskCard({
         )}
       </div>
 
-      {!isCollapsed && Children.toArray(children).length > 0 && <div className={styles.body}>{children}</div>}
-      {!isCollapsed && <div className={styles.options}>
+      {!isCollapsed && Children.toArray(children).length > 0 && <div className={styles.body} data-ask-body="true">{children}</div>}
+      {!isCollapsed && <div className={styles.options} data-ask-options="true">
         {options.map((option, index) => (
           <button
             key={option.id}

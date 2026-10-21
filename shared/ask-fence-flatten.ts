@@ -19,7 +19,10 @@ export interface AgentlasAskQuestion {
 }
 
 export interface ExtractedAskFences {
-  /** Model prose with every complete or partial wire fence removed. */
+  /**
+   * Model prose with every complete or partial wire fence removed. A complete fence that holds a real question
+   * but cannot become a card (no option, or a single one) keeps that question as plain prose.
+   */
   text: string;
   /** Only complete, bounded, user-answerable questions. */
   questions: AgentlasAskQuestion[];
@@ -28,8 +31,15 @@ export interface ExtractedAskFences {
 const MAX_QUESTIONS = 64;
 const MAX_OPTIONS = 8;
 
-/** Parse one fence body without granting it approval or execution authority. */
-export function parseAskFenceBody(body: string): AgentlasAskQuestion | null {
+interface ReadAskFence {
+  question: string;
+  header: string;
+  options: AgentlasAskQuestion["options"];
+  multiSelect: boolean;
+}
+
+/** Read one fence body's fields as written. Whether they make an answerable card is the caller's judgment. */
+function readAskFenceBody(body: string): ReadAskFence | null {
   const stripped = body.replace(/^```(?:json)?\s*/i, "").replace(/```$/i, "").trim();
   let value: unknown;
   try {
@@ -53,14 +63,44 @@ export function parseAskFenceBody(body: string): AgentlasAskQuestion | null {
         return [{ label, ...(description ? { description } : {}) }];
       }).slice(0, MAX_OPTIONS)
     : [];
-  if (!question || options.length < 2) return null;
-  if (isUnfilledQuestionTemplate({ question, ...(header ? { header } : {}), options })) return null;
+  if (!question) return null;
+  return { question, header, options, multiSelect: raw.multiSelect === true };
+}
+
+function isUnfilledRead(read: ReadAskFence): boolean {
+  return isUnfilledQuestionTemplate({
+    question: read.question,
+    ...(read.header ? { header: read.header } : {}),
+    options: read.options,
+  });
+}
+
+/** Parse one fence body without granting it approval or execution authority. */
+export function parseAskFenceBody(body: string): AgentlasAskQuestion | null {
+  const read = readAskFenceBody(body);
+  if (!read || read.options.length < 2) return null;
+  if (isUnfilledRead(read)) return null;
   return {
-    question,
-    ...(header ? { header } : {}),
-    options,
-    multiSelect: raw.multiSelect === true,
+    question: read.question,
+    ...(read.header ? { header: read.header } : {}),
+    options: read.options,
+    multiSelect: read.multiSelect,
   };
+}
+
+/**
+ * A closed fence with a real question that cannot become a card (no option, or a single one) is still a question the
+ * person has to see. Erasing it ended a turn whose only content was that question with nothing on screen. It stays as
+ * plain prose, the way the windowless surfaces already render it (ask-plaintext.ts). Placeholder text is not a question
+ * and stays hidden, and so does a body that is not a question object at all.
+ */
+function plainAskFenceProse(body: string): string {
+  const read = readAskFenceBody(body);
+  if (!read || read.options.length >= 2 || isUnfilledRead(read)) return "";
+  return [
+    read.question,
+    ...read.options.map((option) => `- ${option.label}${option.description ? ` — ${option.description}` : ""}`),
+  ].join("\n");
 }
 
 /**
@@ -97,9 +137,15 @@ function extractProseAskFences(input: string): ExtractedAskFences {
     const afterOpen = rest.slice(open + AGENT_ASK_OPEN.length);
     const close = afterOpen.indexOf(AGENT_ASK_CLOSE);
     if (close < 0) return { text: visible, questions };
-    const parsed = parseAskFenceBody(afterOpen.slice(0, close));
+    const body = afterOpen.slice(0, close);
+    const parsed = parseAskFenceBody(body);
     if (parsed && questions.length < MAX_QUESTIONS) questions.push(parsed);
+    const prose = parsed ? "" : plainAskFenceProse(body);
     rest = afterOpen.slice(close + AGENT_ASK_CLOSE.length);
+    if (prose) {
+      // Keep the question apart from prose it would otherwise be glued to on either side.
+      visible += `${visible && !/\s$/.test(visible) ? "\n\n" : ""}${prose}${rest && !/^\s/.test(rest) ? "\n\n" : ""}`;
+    }
   }
   // Adversarially many fences fail closed. No unparsed control payload reaches
   // a display surface from the truncated tail.

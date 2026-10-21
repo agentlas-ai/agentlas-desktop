@@ -9,6 +9,7 @@ import { FinanceExperience, requireFinanceMonitoringAccess } from './experience'
 import type { FinanceDataSelection } from '../../shared/finance-data-routing';
 import { findIsharesFund } from "./providers/ishares-catalog";
 import { FINANCE_MONITOR_RUN_TIMEOUT_MS } from "../../shared/finance";
+import { financeReportSourceRecords, type FinanceReportSourceRecord } from "../../shared/finance-report-presentation";
 import { FinanceArchives, FinanceArchiveRequestSchema, financeArchivePlan } from './archive';
 import { FinanceRunHistory } from './run-history';
 import { financeReportDashboardActions } from './evidence-actions';
@@ -131,6 +132,11 @@ export class FinanceService {
     if(active)return {dashboardActions:financeReportDashboardActions(workspace,active.id),report:active,workspaceRevision:workspace.revision};
     const archived=await this.archiveStore.read(scope,input),report=archived.workspaceSnapshot.reports.find(item=>item.id===input.reportId);
     if(!report)throw new Error('finance_report_not_found');return {report,workspaceRevision:workspace.revision,archiveId:archived.archiveId};
+  }
+  /** The provider records a report names, from the active workspace or, for a report read from an archive, from that archive's snapshot. Only a result card reads this; the model's result is unchanged. */
+  async reportSources(scope:FinanceScope,report:FinanceReport,archiveId?:string):Promise<FinanceReportSourceRecord[]>{
+    const sources=archiveId?(await this.archiveStore.read(scope,{archiveId})).workspaceSnapshot.sources:(await this.store.load(scope)).sources;scope.assertCurrent();
+    return financeReportSourceRecords(report,sources);
   }
   async load(scope: FinanceScope): Promise<FinanceWorkspace> {
     const workspace = await this.store.load(scope); scope.assertCurrent();

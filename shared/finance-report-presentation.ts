@@ -1,5 +1,6 @@
-import type { FinanceReport, FinanceReportSection } from './finance';
+import type { FinanceReport, FinanceReportSection, FinanceWidgetProjection } from './finance';
 import { COMPOSITION_CALLOUT_GEOMETRY, compositionCalloutLayout } from './finance-composition-callouts';
+import { financePortfolioLineText } from './finance-portfolio';
 
 type PresentedSection = FinanceReportSection & {presentation?:'narrative'|'chart'|'comparison'|'supporting'};
 type LocalizedReport = FinanceReport & {language?:string};
@@ -138,9 +139,11 @@ export function financeReportHasChart(section:FinanceReportSection):boolean {
  const currency=p!.columns.indexOf('Currency'),date=p!.columns.indexOf('Observed at'),price=p!.columns.indexOf('Price');
  const codes=new Set(p!.rows.map(row=>row[currency]));return codes.size===1&&[...codes].every(code=>typeof code==='string'&&/^[A-Z]{3}$/.test(code)&&code!=='XXX')&&p!.rows.every(row=>typeof row[date]==='string'&&Number.isFinite(Date.parse(row[date] as string))&&typeof row[price]==='number'&&Number.isFinite(row[price]));
 }
+/** Titles of the application's own "where this came from" sections: a plain list of URLs and times that repeats the data section before it. */
+const SCAFFOLD_TITLES:readonly string[]=['계산 입력','원출처와 조회 시각','가정과 방법','Calculation inputs','Source URLs and retrieval time','Assumptions and method'];
 export function selectFinanceReportSections(report:FinanceReport):FinanceReportSection[] {
  const hasComputeMain=report.sections.some(section=>section.kind!=='sources'&&section.presentation!=='supporting'&&/^compute:(allocation:weights|forecast:fan|option:value)$/.test(section.widget?.metric??'')&&financeReportHasChart(section));
- return report.sections.filter(raw=>{const section=raw as PresentedSection;if(section.presentation==='supporting')return false;if(section.presentation==='narrative')return !!section.narrative.trim();if(section.presentation)return ['chart','comparison'].includes(section.presentation)&&(section.kind!=='sources'||section.presentation==='chart'&&financeReportHasChart(section));if(hasComputeMain&&section.kind==='sources')return false;if(section.kind==='sources'&&['계산 입력','원출처와 조회 시각','가정과 방법','Calculation inputs','Source URLs and retrieval time','Assumptions and method'].includes(section.title))return false;if(financeReportHasChart(section)||financeReportComputeMetrics(section).length)return true;if(section.kind==='sources')return false;return !!section.narrative.trim();});}
+ return report.sections.filter(raw=>{const section=raw as PresentedSection;if(section.presentation==='supporting')return false;if(section.presentation==='narrative')return !!section.narrative.trim();if(section.presentation)return ['chart','comparison'].includes(section.presentation)&&(section.kind!=='sources'||section.presentation==='chart'&&financeReportHasChart(section));if(hasComputeMain&&section.kind==='sources')return false;if(section.kind==='sources'&&SCAFFOLD_TITLES.includes(section.title))return false;if(financeReportHasChart(section)||financeReportComputeMetrics(section).length)return true;if(section.kind==='sources')return false;return !!section.narrative.trim();});}
 export function financeReportNumber(value:number,locale='en'):string {if(!Number.isFinite(value))return '—';return new Intl.NumberFormat(canonical(locale)??'en',Math.abs(value)>=10000?{notation:'compact',maximumFractionDigits:2}:value!==0&&Math.abs(value)<.01?{maximumSignificantDigits:2}:{maximumFractionDigits:2}).format(value);}
 function escape(value:unknown):string {return String(value??'').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]!));}
 function link(value:string):string|null {try{const url=new URL(value);return url.protocol==='https:'&&!url.username&&!url.password&&value.length<=2000?url.href:null;}catch{return null;}}
@@ -215,6 +218,133 @@ export function financeReportSectionHeading(section:FinanceReportSection,report:
  if(section.title===report.title||/^(Summary|Sources and limitations|Sources|요약|계산 요약|가정과 방법|要約|概要|摘要|总结|總結|ملخص)$/i.test(section.title.trim()))return null;
  return financeReportSectionTitle(section,locale);
 }
+// ── Sources and as-of dates ──────────────────────────────────────────────────────────────────────────────────────────────────────
+// A saved report keeps, per section, the provider records it was built from, the as-of date and the provider's own limits. The reading surfaces draw
+// narrative and typed charts only, so this block is the one place the owner sees where a value came from and how old it is. It is built from those
+// stored fields alone: no model sentence, no guess, and a date the provider did not record stays "not recorded".
+/** What the block reads of a saved source record. A result card carries exactly these (it has no workspace); `note` is the first line of the provider's own statement of its limits. */
+export interface FinanceReportSourceRecord {id:string;name:string;asOf:string|null;retrievedAt:string;note:string}
+export interface FinanceReportSourceFact {label:string;values:string[]}
+/** `hidden`: rows the record held beyond the limit, counted so a surface can say so. */
+export interface FinanceReportSourceTable {columns:string[];rows:string[][];numeric:number[];hidden:number}
+export interface FinanceReportSourceEntry {sectionId:string;title:string;facts:FinanceReportSourceFact[];table:FinanceReportSourceTable|null}
+/** `hidden`: sections past the limit, counted. `language` is the one the labels are in, for `financeReportSourceMore`; `direction` is the report's, for a surface that cannot set it per value. */
+export interface FinanceReportSourceBlock {title:string;language:string;direction:'ltr'|'rtl';entries:FinanceReportSourceEntry[];hidden:number}
+/** The most any surface is given: the phone's document takes 100 table rows, 240 characters in a cell and 160 in a title. */
+export const FINANCE_REPORT_SOURCE_LIMITS={records:50,entries:40,providers:3,limitLines:3,rows:100,title:160,line:240,name:120,note:400} as const;
+const SOURCE_COPY:Record<string,readonly string[]>={
+ title:['Sources and as-of dates','출처·기준일','出典・基準日','来源与基准日','المصادر وتواريخ الاعتماد'],
+ provider:['Provider','제공처','提供元','数据提供方','المزوّد'],
+ asOf:['Data as of','기준일','基準日','数据基准日','تاريخ البيانات'],
+ retrieved:['Retrieved','조회 시각','取得日時','获取时间','وقت الجلب'],
+ limits:['Limits','한계','制約','局限','القيود'],
+ noAsOf:['No as-of date recorded','기록된 기준일 없음','基準日の記録なし','未记录基准日','لا يوجد تاريخ اعتماد مسجّل'],
+ differs:['differs by provider','제공처마다 다름','提供元ごとに異なる','因数据提供方而异','يختلف حسب المزوّد'],
+ noRecord:['No saved source record','저장된 출처 기록 없음','保存された出典記録なし','无已保存的来源记录','لا يوجد سجل مصدر محفوظ'],
+ snapshot:['Observed portfolio snapshot','관측 시점 포트폴리오 스냅숏','観測時点のポートフォリオ','观测时点投资组合快照','لقطة المحفظة المرصودة'],
+ asset:['Asset','종목','資産','资产','الأصل'],price:['Price','가격','価格','价格','السعر'],
+};
+/** The host's own machine codes in a saved projection's warnings, said in the report's language; any other warning is the provider's sentence and is shown as stored. */
+const SOURCE_CODES:Record<string,readonly string[]>={
+ finance_portfolio_mixed_observation_dates:['Holdings were priced on different observation dates; see each row.','보유 종목마다 가격 관측일이 다릅니다. 종목별 표를 확인하세요.','保有銘柄ごとに価格の観測日が異なります。銘柄別の表をご確認ください。','各持仓的价格观测日期不同，请查看逐项表格。','تختلف تواريخ رصد أسعار الأصول المملوكة؛ راجع الجدول لكل أصل.'],
+ finance_portfolio_currencies_not_aggregated:['Values in different currencies are neither converted nor added together.','통화가 다른 금액은 환산하거나 합산하지 않았습니다.','通貨が異なる金額は換算も合算もしていません。','不同币种的金额未换算，也未合计。','لم يتم تحويل المبالغ بعملات مختلفة ولا جمعها معًا.'],
+ finance_portfolio_refresh_coverage_partial:['Some holdings have no verified price, so they are left out of the values.','일부 보유 종목은 확인된 가격이 없어 평가에서 제외했습니다.','一部の保有銘柄は確認済みの価格がないため、評価から除外しました。','部分持仓没有已核实的价格，已从估值中排除。','لا يوجد سعر مؤكد لبعض الأصول المملوكة، لذلك استُبعدت من التقييم.'],
+ finance_portfolio_incomplete_currency_group:['A currency group is missing prices, so its total is not shown.','일부 통화 묶음은 가격이 빠져 있어 합계를 표시하지 않았습니다.','価格が欠けている通貨グループは、合計を表示していません。','部分币种组缺少价格，因此未显示其合计。','تفتقر مجموعة عملة إلى الأسعار، لذلك لم يُعرض إجماليها.'],
+ finance_portfolio_quote_conflict:['Conflicting prices were returned for a holding, so it is left out.','한 보유 종목에 서로 다른 가격이 와서 그 종목은 제외했습니다.','同じ銘柄に異なる価格が返されたため、その銘柄は除外しました。','同一持仓返回了相互冲突的价格，已将其排除。','وصلت أسعار متعارضة لأحد الأصول، لذلك استُبعد.'],
+ finance_portfolio_quote_incompatible:['A returned price did not match the holding (currency, basis or date), so it is left out.','받은 가격이 보유 종목과 맞지 않아(통화·기준·날짜) 제외했습니다.','受け取った価格が保有銘柄と一致しないため（通貨・基準・日付）、除外しました。','收到的价格与持仓不匹配（币种、口径或日期），已排除。','لم يتطابق السعر الوارد مع الأصل (العملة أو الأساس أو التاريخ)، لذلك استُبعد.'],
+ finance_portfolio_value_out_of_range:['A computed value was outside the supported range, so it is left out.','계산된 금액이 지원 범위를 벗어나 제외했습니다.','計算結果が対応範囲外のため、除外しました。','计算出的金额超出支持范围，已排除。','كانت القيمة المحسوبة خارج النطاق المدعوم، لذلك استُبعدت.'],
+ finance_portfolio_zero_total_weights_undefined:['The total is zero, so weights are not defined.','합계가 0이라 비중을 정의할 수 없습니다.','合計が0のため、比率は定義できません。','合计为 0，无法定义占比。','الإجمالي صفر، لذلك لا يمكن تحديد النسب.'],
+};
+const SOURCE_MORE:Record<string,(count:number)=>string>={en:count=>`+${count} more`,ko:count=>`외 ${count}건`,ja:count=>`ほか${count}件`,zh:count=>`另有 ${count} 项`,ar:count=>`+${count} أخرى`};
+function sourceLanguage(locale:string):typeof LANGUAGES[number] {const language=new Intl.Locale(canonical(locale)??'en').language as typeof LANGUAGES[number];return LANGUAGES.includes(language)?language:'en';}
+function sourceCopy(key:string,locale:string):string {return SOURCE_COPY[key]?.[LANGUAGES.indexOf(sourceLanguage(locale))]??key;}
+function sourceMore(count:number,locale:string):string {return SOURCE_MORE[sourceLanguage(locale)](count);}
+/** "N more" in the block's language, for the rows or sections it counted but did not keep. */
+export function financeReportSourceMore(count:number,locale:string):string {return sourceMore(count,locale);}
+/** One clean line of at most `limit` characters, never cut through a surrogate pair (the phone's table widget cannot draw half of one). */
+function sourceLine(value:string,limit:number):string {const line=financePortfolioLineText(value);if(line.length<=limit)return line;const end=limit-1;return line.slice(0,/[\uD800-\uDBFF]/.test(line[end-1]??'')?end-1:end)+'…';}
+/** A calendar date stays as it is; a moment is shown in UTC, so the same report reads the same on every surface and in every time zone. */
+function sourceTime(value:string|null|undefined):string|null {
+ if(!value)return null;if(/^\d{4}-\d{2}-\d{2}$/.test(value))return Number.isFinite(Date.parse(value))?value:null;
+ const at=Date.parse(value);return Number.isFinite(at)?new Date(at).toISOString().slice(0,16).replace('T',' ')+' UTC':null;
+}
+function sourceRange(values:readonly (string|null|undefined)[]):{first:string;last:string}|null {
+ const known=values.filter((value):value is string=>sourceTime(value)!==null).sort((a,b)=>Date.parse(a)-Date.parse(b));
+ return known.length?{first:sourceTime(known[0])!,last:sourceTime(known[known.length-1])!}:null;
+}
+function sourceSpan(values:readonly (string|null|undefined)[]):string|null {const range=sourceRange(values);return range?range.first===range.last?range.first:`${range.first} – ${range.last}`:null;}
+/** The section's own as-of date; with none, what its providers recorded; with none of that, the plain statement that nothing was recorded. */
+function sourceAsOf(p:FinanceWidgetProjection,providers:readonly FinanceReportSourceRecord[],locale:string):string {
+ const own=sourceTime(p.asOf);if(own)return own;
+ const range=sourceRange(providers.map(source=>source.asOf));if(!range)return sourceCopy('noAsOf',locale);
+ return range.first===range.last?range.first:`${range.first} – ${range.last} (${sourceCopy('differs',locale)})`;
+}
+/** A saved note is several lines (limits, rights, then URLs); the block reads the first, whether it is handed the workspace's record or the card's compact one. */
+function sourceFirstLine(note:string|undefined):string {return (note??'').split(/\r?\n/)[0];}
+/** The provider's first limit sentence per distinct provider note (when the section's warnings do not already say it), then the section's own warnings. */
+function sourceLimits(p:FinanceWidgetProjection,providers:readonly FinanceReportSourceRecord[],locale:string):string[] {
+ const warnings=p.warnings.map(raw=>({raw:financePortfolioLineText(raw),text:Object.prototype.hasOwnProperty.call(SOURCE_CODES,raw.trim())?SOURCE_CODES[raw.trim()][LANGUAGES.indexOf(sourceLanguage(locale))]:raw})).filter(item=>item.raw);
+ const notes=[...new Set(providers.map(source=>financePortfolioLineText(sourceFirstLine(source.note))).filter(Boolean))].filter(note=>!warnings.some(item=>item.raw.startsWith(note)||note.startsWith(item.raw)));
+ return [...new Set([...notes,...warnings.map(item=>item.text)].map(line=>sourceLine(line,FINANCE_REPORT_SOURCE_LIMITS.line)).filter(Boolean))];
+}
+function jsonObject(value:unknown):Record<string,unknown>|null {return value&&typeof value==='object'&&!Array.isArray(value)?value as Record<string,unknown>:null;}
+/** The host freezes a portfolio valuation as JSON split into numbered parts. Its prices, dates and providers are read back into a table; text that is not that record is never shown. */
+function portfolioSnapshot(p:FinanceWidgetProjection,locale:string):{retrieved:string|null;table:FinanceReportSourceTable}|null {
+ if(p.columns.length!==2||p.columns[0]!=='Part'||p.columns[1]!=='Observed record'||!p.rows.length||p.rows.some(row=>typeof row[0]!=='number'||typeof row[1]!=='string'))return null;
+ const parts=[...p.rows].sort((a,b)=>(a[0] as number)-(b[0] as number));if(parts.some((row,index)=>row[0]!==index+1))return null;
+ const json=parts.map(row=>row[1] as string).join('');if(json.length>2_000_000)return null;
+ let doc:unknown;try{doc=JSON.parse(json);}catch{return null;}
+ const root=jsonObject(doc),groups=root&&Array.isArray(root.groups)?root.groups:null,listed=root&&Array.isArray(root.sources)?root.sources:null;if(!root||!groups||!listed)return null;
+ const names=new Map<string,string>();for(const raw of listed){const source=jsonObject(raw);if(source&&typeof source.id==='string'&&typeof source.name==='string')names.set(source.id,source.name);}
+ const number=new Intl.NumberFormat(canonical(locale)??'en',{maximumFractionDigits:6}),rows:string[][]=[];
+ for(const rawGroup of groups){const group=jsonObject(rawGroup),items=group&&Array.isArray(group.items)?group.items:null;if(!group||!items||typeof group.currency!=='string')return null;
+  const currency=/^[A-Z]{3}$/.test(group.currency)?` ${group.currency}`:'';
+  for(const rawItem of items){const item=jsonObject(rawItem);if(!item||typeof item.symbol!=='string')return null;
+   const price=typeof item.price==='number'&&Number.isFinite(item.price)?number.format(item.price)+currency:'—',asOf=typeof item.asOf==='string'?sourceTime(item.asOf):null,provider=typeof item.sourceId==='string'?names.get(item.sourceId):undefined;
+   rows.push([sourceLine(item.symbol,80),price,asOf??'—',provider?sourceLine(provider,FINANCE_REPORT_SOURCE_LIMITS.name):'—']);}}
+ if(!rows.length)return null;const shown=FINANCE_REPORT_SOURCE_LIMITS.rows;
+ return {retrieved:sourceTime(typeof root.retrievedAt==='string'?root.retrievedAt:null),table:{columns:[sourceCopy('asset',locale),sourceCopy('price',locale),sourceCopy('asOf',locale),sourceCopy('provider',locale)],rows:rows.slice(0,shown),numeric:[1],hidden:Math.max(0,rows.length-shown)}};
+}
+function sourceEntry(section:FinanceReportSection,p:FinanceWidgetProjection,locale:string,byId:ReadonlyMap<string,FinanceReportSourceRecord>):FinanceReportSourceEntry {
+ const L=FINANCE_REPORT_SOURCE_LIMITS,facts:FinanceReportSourceFact[]=[],snapshot=portfolioSnapshot(p,locale),ids=[...new Set(p.sourceIds)],providers=snapshot?[]:ids.flatMap(id=>byId.get(id)??[]);
+ if(!snapshot&&ids.length){
+  const names=[...new Set(providers.map(source=>sourceLine(source.name,L.name)).filter(Boolean))],missing=ids.length-providers.length;
+  facts.push({label:sourceCopy('provider',locale),values:[...(names.length?[names.slice(0,L.providers).join(' / ')+(names.length>L.providers?' '+sourceMore(names.length-L.providers,locale):'')]:[]),...(missing?[`${sourceCopy('noRecord',locale)} (${missing})`]:[])]});
+ }
+ if(!snapshot)facts.push({label:sourceCopy('asOf',locale),values:[sourceAsOf(p,providers,locale)]});
+ const retrieved=snapshot?snapshot.retrieved:sourceSpan(providers.map(source=>source.retrievedAt));if(retrieved)facts.push({label:sourceCopy('retrieved',locale),values:[retrieved]});
+ const limits=sourceLimits(p,providers,locale);
+ if(limits.length){const shown=limits.slice(0,L.limitLines);if(limits.length>shown.length)shown.push(sourceMore(limits.length-shown.length,locale));facts.push({label:sourceCopy('limits',locale),values:shown});}
+ return {sectionId:section.id,title:snapshot?sourceCopy('snapshot',locale):sourceLine(financeReportSectionTitle(section,locale),L.title),facts,table:snapshot?snapshot.table:null};
+}
+/** The saved source records a report points at, in the order its sections first name them: the compact form a result card carries (a card has no workspace). */
+export function financeReportSourceRecords(report:FinanceReport,sources:readonly FinanceReportSourceRecord[]|undefined):FinanceReportSourceRecord[] {
+ if(!sources?.length)return [];
+ const byId=new Map(sources.map(source=>[source.id,source] as const)),seen=new Set<string>(),records:FinanceReportSourceRecord[]=[];
+ for(const section of report.sections)for(const id of section.projection?.sourceIds??[]){
+  if(seen.has(id)||records.length>=FINANCE_REPORT_SOURCE_LIMITS.records)continue;seen.add(id);
+  const source=byId.get(id);if(source)records.push({id,name:source.name,asOf:source.asOf,retrievedAt:source.retrievedAt,note:sourceLine(sourceFirstLine(source.note),FINANCE_REPORT_SOURCE_LIMITS.note)});
+ }
+ return records;
+}
+/** The host's own listing of a provider's URLs and retrieval time (columns `url`, `retrievedAt`): the model retitles it ("price sources and limits") but never changes its shape. */
+function urlTimeListing(p:FinanceWidgetProjection|null):boolean {return !!p&&p.columns.length===2&&p.columns[0]==='url'&&p.columns[1]==='retrievedAt';}
+/** The "sources and as-of dates" block of a report, or null when no section names a provider record or an as-of date. A section that only lists a provider's URLs and retrieval time (the host's scaffold, under whatever title the model gave it) is not repeated when every record it names is already listed by another section. */
+export function financeReportSourceBlock(report:FinanceReport,sources:readonly FinanceReportSourceRecord[]|undefined,locale?:string):FinanceReportSourceBlock|null {
+ const language=reportLanguage(report,locale),byId=new Map((sources??[]).map(source=>[source.id,source] as const));
+ const scaffold=(section:FinanceReportSection)=>section.kind==='sources'&&(SCAFFOLD_TITLES.includes(section.title)||urlTimeListing(section.projection));
+ const named=new Set(report.sections.filter(section=>!scaffold(section)).flatMap(section=>section.projection?.sourceIds??[]));
+ const entries:FinanceReportSourceEntry[]=[];
+ for(const section of report.sections){const p=section.projection;
+  if(!p||!p.sourceIds.length&&!p.asOf||scaffold(section)&&p.sourceIds.length>0&&p.sourceIds.every(id=>named.has(id)))continue;
+  entries.push(sourceEntry(section,p,language,byId));}
+ if(!entries.length)return null;
+ return {title:sourceCopy('title',language),language,direction:financeReportDirection(report,locale),entries:entries.slice(0,FINANCE_REPORT_SOURCE_LIMITS.entries),hidden:Math.max(0,entries.length-FINANCE_REPORT_SOURCE_LIMITS.entries)};
+}
+function sourcesHtml(block:FinanceReportSourceBlock):string {
+ const table=(item:FinanceReportSourceTable)=>'<div class="table-scroll" tabindex="0"><table><thead><tr>'+item.columns.map((name,index)=>'<th scope="col"'+(item.numeric.includes(index)?' class="numeric"':'')+'>'+escape(name)+'</th>').join('')+'</tr></thead><tbody>'+item.rows.map(row=>'<tr>'+row.map((text,index)=>'<td dir="auto"'+(item.numeric.includes(index)?' class="numeric"':'')+'>'+escape(text)+'</td>').join('')+'</tr>').join('')+'</tbody></table></div>'+(item.hidden?'<p class="muted">'+escape(sourceMore(item.hidden,block.language))+'</p>':'');
+ return '<details class="sources"><summary>'+escape(block.title)+'</summary>'+block.entries.map(entry=>'<section class="source-entry"><h3>'+escape(entry.title)+'</h3>'+(entry.facts.length?'<dl>'+entry.facts.map(fact=>'<div><dt>'+escape(fact.label)+'</dt><dd>'+fact.values.map(value=>'<span dir="auto">'+escape(value)+'</span>').join('')+'</dd></div>').join('')+'</dl>':'')+(entry.table?table(entry.table):'')+'</section>').join('')+(block.hidden?'<p class="muted">'+escape(sourceMore(block.hidden,block.language))+'</p>':'')+'</details>';
+}
 /** Image-only SVG context plus defense-in-depth rejection of active/external XML features. */
 export function financeReportChartImage(value:unknown):string|null {
  if(typeof value!=='string'||value.length>Math.ceil(4*1024*1024/3)*4+40)return null;
@@ -228,8 +358,8 @@ function comparison(section:FinanceReportSection,locale:string):string {const p=
  const cell=(value:unknown,name:string)=>typeof value==='number'?escape(compute&&['weight','riskShare','annualizedVolatility'].includes(name)?new Intl.NumberFormat(locale,{style:'percent',maximumFractionDigits:2}).format(value):financeReportNumber(value,locale)):escape(value===null||value===undefined?'—':value);
  return '<div class="table-scroll" tabindex="0" role="region" aria-label="'+escape(financeReportSectionTitle(section,locale))+'"><table><thead><tr>'+columns.map(name=>'<th scope="col">'+escape(Object.prototype.hasOwnProperty.call(COPY,name)?copy(name,locale):name)+'</th>').join('')+'</tr></thead><tbody>'+rows.map(row=>'<tr>'+columns.map((name,i)=>'<td'+(typeof row[i]==='number'?' class="numeric"':'')+'>'+cell(row[i],name)+'</td>').join('')+'</tr>').join('')+'</tbody></table></div>'+((p.rows.length>200||p.columns.length>20)?'<p class="muted">'+escape(copy('limited',locale))+'</p>':'');}
 /** `fixedCharts` names the sections whose chart has a drawn size of its own: it is shown at that size, centered, never stretched to the page. */
-export function financeReportHtml({report,locale,charts={},mobileCharts={},fixedCharts=[]}:{report:FinanceReport;locale?:string;charts?:Record<string,string>;mobileCharts?:Record<string,string>;fixedCharts?:readonly string[]}):string {
- const language=reportLanguage(report,locale),direction=financeReportDirection(report,locale),title=financeReportTitle(report,locale);
+export function financeReportHtml({report,locale,charts={},mobileCharts={},fixedCharts=[],sources}:{report:FinanceReport;locale?:string;charts?:Record<string,string>;mobileCharts?:Record<string,string>;fixedCharts?:readonly string[];sources?:readonly FinanceReportSourceRecord[]}):string {
+ const language=reportLanguage(report,locale),direction=financeReportDirection(report,locale),title=financeReportTitle(report,locale),sourceBlock=financeReportSourceBlock(report,sources,language);
  const isChartSection=(section:FinanceReportSection)=>section.presentation==='chart'||!section.presentation&&financeReportHasChart(section);
  const rank=(section:FinanceReportSection)=>isChartSection(section)?1:section.kind==='summary'?0:2;
  const sections=selectFinanceReportSections(report).sort((a,b)=>rank(a)-rank(b)).map(raw=>{const section=raw as PresentedSection,chart=financeReportChartImage(Object.prototype.hasOwnProperty.call(charts,section.id)?charts[section.id]:undefined),mobileChart=financeReportChartImage(Object.prototype.hasOwnProperty.call(mobileCharts,section.id)?mobileCharts[section.id]:undefined),isChart=isChartSection(section);
@@ -238,5 +368,5 @@ export function financeReportHtml({report,locale,charts={},mobileCharts={},fixed
   const visual=cards|| (section.presentation==='comparison'?comparison(section,language):isChart?(chart?'<figure>'+(mobileChart&&!fixedCharts.includes(section.id)?'<picture><source media="(max-width:600px)" srcset="'+escape(mobileChart)+'"/>':'')+'<img'+(fixedCharts.includes(section.id)?' class="fixed"':'')+' src="'+escape(chart)+'" alt="'+escape(financeReportSectionTitle(section,language))+'"/>'+(mobileChart&&!fixedCharts.includes(section.id)?'</picture>':'')+caption+'</figure>':section.narrative.trim()?'':'<p class="muted">'+escape(copy('unavailable',language))+'</p>'):'');
   const prose=financeReportProseHtml(section.narrative);if(!prose&&!visual)return '';const heading=financeReportSectionHeading(section,report,language);return '<section class="report-section'+(!isChart&&section.presentation!=='comparison'&&section.kind==='summary'?' lead':'')+'">'+(heading?'<h2>'+escape(heading)+'</h2>':'')+(isChart||cards?visual+'<div class="prose">'+prose+'</div>':'<div class="prose">'+prose+'</div>'+visual)+'</section>';
  }).join('');
- return '<!doctype html><html lang="'+escape(language)+'" dir="'+direction+'"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src &#39;none&#39;; img-src data:; style-src &#39;unsafe-inline&#39;; base-uri &#39;none&#39;; form-action &#39;none&#39;"><title>'+escape(title)+'</title><style>html{color-scheme:light}*{box-sizing:border-box}body{margin:0;background:#f5f6f8;color:#28343e;font:16px/1.85 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI","Hiragino Sans","PingFang SC",sans-serif;-webkit-font-smoothing:antialiased}main{max-width:960px;margin:32px auto;padding:56px 56px 64px;background:#fff;border:1px solid #e4e8ed;border-radius:12px}header{border-top:3px solid #3f6589;border-bottom:1px solid #e4e8ed;padding:28px 0;margin-bottom:32px}h1,h2,h3{color:#182e3e;line-height:1.35;font-weight:600;overflow-wrap:break-word;text-wrap:balance}h1{font-size:clamp(28px,3.5vw,40px);letter-spacing:-.035em;margin:0;max-width:100%;word-break:auto-phrase}h2{font-size:20px;letter-spacing:-.015em;margin:0 0 18px}h3{font-size:17px;margin:26px 0 12px}section{margin:0 0 36px;min-width:0}section:last-child{margin-bottom:0}.prose{max-width:72ch;overflow-wrap:anywhere;word-break:normal;text-wrap:pretty}.prose p{margin:0 0 18px}.prose p:last-child{margin-bottom:0}.lead .prose>p:first-of-type{font-size:19px;line-height:1.85;color:#253c4c}.prose strong{font-weight:600;color:#182e3e}.prose blockquote{margin:22px 0;padding:14px 20px;border-inline-start:3px solid #9cb2c7;background:#f5f8fb;color:#455563;font-size:.95em}a{color:#285f89;text-underline-offset:3px}a:focus-visible,.table-scroll:focus-visible{outline:2px solid #3f6589;outline-offset:4px}.metric-cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,170px),1fr));gap:12px;margin:0 0 24px}.metric-cards>div{min-width:0;padding:14px 16px;border:1px solid #e4e8ed;border-radius:12px;break-inside:avoid}.metric-cards dt{font-size:12px;line-height:1.5;color:#66717b;overflow-wrap:anywhere;margin-bottom:8px}.metric-cards dd{font-size:22px;line-height:1.4;font-weight:500;font-variant-numeric:tabular-nums;margin:0;overflow-wrap:anywhere}.metric-cards small{font-size:12px;font-weight:400;color:#66717b}figure+.prose{margin-top:24px}figure{margin:0;max-width:100%;break-inside:avoid}picture{display:block;max-width:100%}img{display:block;width:100%;height:auto;max-width:100%;border:0}img.fixed{width:auto;margin-inline:auto}.fan-legend{display:flex;flex-wrap:wrap;justify-content:center;gap:8px 18px;margin-top:12px;font-size:12px;line-height:1.6;color:#66717b}.fan-legend span{display:inline-flex;align-items:center;gap:7px}.fan-legend i{display:inline-block;width:22px;height:10px;background:#3965cb}.fan-legend .outer{background:rgba(57,101,203,.12)}.fan-legend .inner{background:rgba(57,101,203,.25)}.fan-legend .median{height:2px}.table-scroll{overflow-x:auto;max-width:100%;margin-top:20px}table{width:100%;border-collapse:collapse;font-size:14px;font-variant-numeric:tabular-nums}th,td{padding:11px 12px;border-bottom:1px solid #e4e8eb;text-align:start;white-space:nowrap}th{font-weight:600;background:#f4f6f7}th.numeric,td.numeric{text-align:end}.muted{color:#66717b;font-size:14px}:lang(ko) .prose{word-break:keep-all;overflow-wrap:anywhere}@media(max-width:600px){body{background:#fff}main{margin:0;padding:28px 22px 40px;border:0;border-radius:0}header{padding:22px 0;margin-bottom:26px}h1{font-size:29px}h2{font-size:19px}.lead .prose>p:first-of-type{font-size:17px}section{margin-bottom:30px}.prose{font-size:15px;line-height:1.9}.prose blockquote{padding:12px 16px}}@media print{body{background:#fff;font-size:11pt}main{max-width:none;margin:0;padding:8mm 4mm;border:0;border-radius:0}header{padding-top:6mm}h1{font-size:27pt}h2,h3{break-after:avoid}p,blockquote{orphans:3;widows:3}figure,tr{break-inside:avoid}a{color:inherit}}</style></head><body><main><header><h1>'+escape(title)+'</h1></header>'+sections+'</main></body></html>';
+ return '<!doctype html><html lang="'+escape(language)+'" dir="'+direction+'"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src &#39;none&#39;; img-src data:; style-src &#39;unsafe-inline&#39;; base-uri &#39;none&#39;; form-action &#39;none&#39;"><title>'+escape(title)+'</title><style>html{color-scheme:light}*{box-sizing:border-box}body{margin:0;background:#f5f6f8;color:#28343e;font:16px/1.85 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI","Hiragino Sans","PingFang SC",sans-serif;-webkit-font-smoothing:antialiased}main{max-width:960px;margin:32px auto;padding:56px 56px 64px;background:#fff;border:1px solid #e4e8ed;border-radius:12px}header{border-top:3px solid #3f6589;border-bottom:1px solid #e4e8ed;padding:28px 0;margin-bottom:32px}h1,h2,h3{color:#182e3e;line-height:1.35;font-weight:600;overflow-wrap:break-word;text-wrap:balance}h1{font-size:clamp(28px,3.5vw,40px);letter-spacing:-.035em;margin:0;max-width:100%;word-break:auto-phrase}h2{font-size:20px;letter-spacing:-.015em;margin:0 0 18px}h3{font-size:17px;margin:26px 0 12px}section{margin:0 0 36px;min-width:0}section:last-child{margin-bottom:0}.prose{max-width:72ch;overflow-wrap:anywhere;word-break:normal;text-wrap:pretty}.prose p{margin:0 0 18px}.prose p:last-child{margin-bottom:0}.lead .prose>p:first-of-type{font-size:19px;line-height:1.85;color:#253c4c}.prose strong{font-weight:600;color:#182e3e}.prose blockquote{margin:22px 0;padding:14px 20px;border-inline-start:3px solid #9cb2c7;background:#f5f8fb;color:#455563;font-size:.95em}a{color:#285f89;text-underline-offset:3px}a:focus-visible,.table-scroll:focus-visible{outline:2px solid #3f6589;outline-offset:4px}.metric-cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,170px),1fr));gap:12px;margin:0 0 24px}.metric-cards>div{min-width:0;padding:14px 16px;border:1px solid #e4e8ed;border-radius:12px;break-inside:avoid}.metric-cards dt{font-size:12px;line-height:1.5;color:#66717b;overflow-wrap:anywhere;margin-bottom:8px}.metric-cards dd{font-size:22px;line-height:1.4;font-weight:500;font-variant-numeric:tabular-nums;margin:0;overflow-wrap:anywhere}.metric-cards small{font-size:12px;font-weight:400;color:#66717b}figure+.prose{margin-top:24px}figure{margin:0;max-width:100%;break-inside:avoid}picture{display:block;max-width:100%}img{display:block;width:100%;height:auto;max-width:100%;border:0}img.fixed{width:auto;margin-inline:auto}.fan-legend{display:flex;flex-wrap:wrap;justify-content:center;gap:8px 18px;margin-top:12px;font-size:12px;line-height:1.6;color:#66717b}.fan-legend span{display:inline-flex;align-items:center;gap:7px}.fan-legend i{display:inline-block;width:22px;height:10px;background:#3965cb}.fan-legend .outer{background:rgba(57,101,203,.12)}.fan-legend .inner{background:rgba(57,101,203,.25)}.fan-legend .median{height:2px}.table-scroll{overflow-x:auto;max-width:100%;margin-top:20px}table{width:100%;border-collapse:collapse;font-size:14px;font-variant-numeric:tabular-nums}th,td{padding:11px 12px;border-bottom:1px solid #e4e8eb;text-align:start;white-space:nowrap}th{font-weight:600;background:#f4f6f7}th.numeric,td.numeric{text-align:end}.muted{color:#66717b;font-size:14px}:lang(ko) .prose{word-break:keep-all;overflow-wrap:anywhere}.sources{margin-top:40px;padding-top:8px;border-top:1px solid #e4e8ed;font-size:14px;line-height:1.7}.sources>summary{cursor:pointer;font-weight:600;color:#182e3e;padding:8px 0}.sources section{margin:18px 0 0}.sources h3{font-size:15px;margin:0 0 6px}.sources dl{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:3px 16px;margin:0}.sources dl>div{display:contents}.sources dt{color:#66717b}.sources dd{margin:0;min-width:0;overflow-wrap:anywhere}.sources dd span{display:block}@media(max-width:600px){.sources dl{grid-template-columns:minmax(0,1fr);gap:0}.sources dt{margin-top:6px}}@media(max-width:600px){body{background:#fff}main{margin:0;padding:28px 22px 40px;border:0;border-radius:0}header{padding:22px 0;margin-bottom:26px}h1{font-size:29px}h2{font-size:19px}.lead .prose>p:first-of-type{font-size:17px}section{margin-bottom:30px}.prose{font-size:15px;line-height:1.9}.prose blockquote{padding:12px 16px}}@media print{body{background:#fff;font-size:11pt}main{max-width:none;margin:0;padding:8mm 4mm;border:0;border-radius:0}header{padding-top:6mm}h1{font-size:27pt}h2,h3{break-after:avoid}p,blockquote{orphans:3;widows:3}figure,tr{break-inside:avoid}a{color:inherit}}</style></head><body><main><header><h1>'+escape(title)+'</h1></header>'+sections+(sourceBlock?sourcesHtml(sourceBlock):'')+'</main></body></html>';
 }

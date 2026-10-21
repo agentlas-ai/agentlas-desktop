@@ -22,7 +22,7 @@ export function FinanceNativeResult({ result, instanceId, revision, resultRef, l
   return <>
     {coverage && coverage.missingPositions > 0 && <p role="status">{ko ? `가격을 확인한 보유 항목 ${coverage.pricedPositions}/${coverage.positions} · ${coverage.missingPositions}개 항목 미확인` : `Priced holdings ${coverage.pricedPositions}/${coverage.positions} · ${coverage.missingPositions} unavailable`}</p>}
     {view.kind === "report" ? <FinanceInlineArtifact messageId={`${instanceId}-${revision}`} locale={locale} busy={false}
-      snapshot={{ report: view.report, ownerScope: result.ownerScope, revision: view.workspaceRevision }}/>
+      snapshot={{ report: view.report, ownerScope: result.ownerScope, revision: view.workspaceRevision, sources: view.sources }}/>
       : <p role="status">{ko ? "확인된 완전한 통화 그룹이 없어 비중을 표시하지 않았습니다." : "No complete verified currency group is available for an allocation chart."}</p>}
   </>;
 }

@@ -7,8 +7,11 @@
  */
 export interface OwnerAskAlert {
   chatId: string;
-  /** Who asked: the AGI monitor's host-written card, or a model's live ask_user question that holds its run open. */
-  source: "agi" | "ask_user";
+  /**
+   * Who asked: the AGI monitor's host-written card, a model's live ask_user question that holds its run open, or the Goal
+   * turn's host card after a verification that did not close an idle Goal (invocation service askOwnerAfterIdleYield).
+   */
+  source: "agi" | "ask_user" | "goal";
   /** Dedupe key for one card (the action that posted it). */
   key: string;
 }

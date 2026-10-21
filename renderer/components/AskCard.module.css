@@ -8,6 +8,9 @@
   flex-direction: column;
   gap: 0;
   max-height: var(--ask-card-max-height);
+  /* 열이 아주 낮아 상한이 줄어들지 않는 부분(머리·입력·동작 줄)보다 작아지면 카드가 통째로 스크롤한다 — 안 그러면 동작 줄이 작성창 위로 넘친다. */
+  overflow-x: hidden;
+  overflow-y: auto;
   padding: var(--ask-card-pad-top) var(--ask-card-pad-side) var(--ask-card-pad-bottom);
   border: 1px solid var(--ask-card-line);
   border-radius: var(--ask-card-radius);
@@ -128,7 +131,7 @@
   overflow-y: auto;
 }
 
-/* 보기 목록만 줄어든다 — 카드 상한 안에서 머리·직접 입력·동작 줄은 그대로 보인다. */
+/* 보기 목록만 줄어든다 — 카드 상한 안에서 머리·직접 입력·동작 줄은 그대로 보인다. 그래도 보기 한 줄은 남는다(그 아래는 카드가 접힌다). */
 .options {
   flex: 0 1 auto;
   min-height: 0;
@@ -137,6 +140,8 @@
   gap: var(--ask-option-gap);
   overflow-y: auto;
 }
+
+.options:not(:empty) { min-height: var(--ask-option-height); }
 
 .option {
   flex: none;

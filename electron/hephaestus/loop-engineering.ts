@@ -45,11 +45,17 @@ export function idleGoalPassStep(input: {
   lastPassToolCalls: number | null;
   lastPassNovelObservations?: number | null;
   idlePasses: number;
+  /**
+   * The Goal's plan has every tactic done (goal-shaping goalPlanFinished): the pass that just ended had been told what is
+   * left (verify the criteria and claim), so one idle answer is enough — the next typed step is the terminal verification,
+   * not a second pass of the same words.
+   */
+  planFinished?: boolean;
 }): { idlePasses: number; yieldNow: boolean } {
   const idle = input.lastPassToolCalls === 0 || (input.lastPassToolCalls !== null && input.lastPassNovelObservations === 0);
   if (input.continuousMode && input.goalDrivenPass && input.passShouldContinue && idle) {
     const idlePasses = input.idlePasses + 1;
-    return { idlePasses, yieldNow: idlePasses >= GOAL_IDLE_PASS_LIMIT };
+    return { idlePasses, yieldNow: idlePasses >= (input.planFinished ? 1 : GOAL_IDLE_PASS_LIMIT) };
   }
   return { idlePasses: idle ? input.idlePasses : 0, yieldNow: false };
 }

@@ -129,23 +129,42 @@ export async function queryPublicCommunity(query:string,search:boolean,period:st
  return result;
 }
 
+/**
+ * Dividend concepts are read as a series, not as the latest filings: a filer repeats every year's figure in each later filing, so the newest sixteen
+ * observations cover only about four years. One observation per period (the latest filed wins), the newest full years and the newest quarters.
+ */
+const DIVIDEND_CONCEPTS: ReadonlySet<string> = new Set(['CommonStockDividendsPerShareDeclared', 'CommonStockDividendsPerShareCashPaid', 'PaymentsOfDividends', 'PaymentsOfDividendsCommonStock']);
+const DIVIDEND_YEARS = 12, DIVIDEND_QUARTERS = 8;
+function periodDays(start: string | null, end: string | null): number | null {
+  if (!start || !end) return null;
+  const days = (Date.parse(`${end}T00:00:00Z`) - Date.parse(`${start}T00:00:00Z`)) / 86400000 + 1;
+  return Number.isFinite(days) ? days : null;
+}
+function dividendSeries(sortedByFiledDesc: Obj[]): Obj[] {
+  const latest = new Map<string, Obj>();
+  for (const row of sortedByFiledDesc) { const key = `${str(row.start)}|${str(row.end)}`; if (!latest.has(key)) latest.set(key, row); }
+  const periods = [...latest.values()];
+  const within = (row: Obj, low: number, high: number) => { const days = periodDays(date(row.start), date(row.end)); return days !== null && days >= low && days <= high; };
+  const newestFirst = (a: Obj, b: Obj) => str(b.end).localeCompare(str(a.end));
+  return [...periods.filter(row => within(row, 350, 380)).sort(newestFirst).slice(0, DIVIDEND_YEARS), ...periods.filter(row => within(row, 80, 100)).sort(newestFirst).slice(0, DIVIDEND_QUARTERS)];
+}
 export function parseCompanyFacts(value: unknown, cik: string): FinanceDataResult {
   const data = obj(value); if (String(data.cik).padStart(10, '0') !== cik) throw new Error('finance_source_identity_mismatch');
   const url = `https://data.sec.gov/api/xbrl/companyfacts/CIK${cik}.json`, result = base([url, 'https://www.sec.gov/search-filings/edgar-application-programming-interfaces']);
   const facts = obj(obj(data.facts)['us-gaap']);
-  const tags = ['RevenueFromContractWithCustomerExcludingAssessedTax','Revenues','SalesRevenueNet','NetIncomeLoss','OperatingIncomeLoss','Assets','Liabilities','CashAndCashEquivalentsAtCarryingValue','NetCashProvidedByUsedInOperatingActivities','PaymentsToAcquirePropertyPlantAndEquipment','EarningsPerShareDiluted'];
+  const tags = ['RevenueFromContractWithCustomerExcludingAssessedTax','Revenues','SalesRevenueNet','NetIncomeLoss','OperatingIncomeLoss','Assets','Liabilities','CashAndCashEquivalentsAtCarryingValue','NetCashProvidedByUsedInOperatingActivities','PaymentsToAcquirePropertyPlantAndEquipment','EarningsPerShareDiluted',...DIVIDEND_CONCEPTS];
   result.columns = ['Entity', 'Taxonomy concept', 'Value', 'Unit', 'Period start', 'Period end', 'Filed date', 'Form', 'Accession', 'Fiscal period', 'Original filing'];
   const rows: Row[] = [];
   for (const name of tags) {
     if (!facts[name]) continue; const units = obj(obj(facts[name]).units);
     for (const [unit, raw] of Object.entries(units)) { if (!Array.isArray(raw)) continue;
       const sorted = raw.map(obj).filter(row => date(row.end) && date(row.filed) && num(row.val) !== null).sort((a,b) => str(b.filed).localeCompare(str(a.filed)) || str(b.end).localeCompare(str(a.end)));
-      for (const row of sorted.slice(0, 16)) { const accession = str(row.accn), doc = /^\d{10}-\d{2}-\d{6}$/.test(accession) ? `https://www.sec.gov/Archives/edgar/data/${Number(cik)}/${accession.replace(/-/g,'')}/${accession}-index.html` : null;
+      for (const row of DIVIDEND_CONCEPTS.has(name) ? dividendSeries(sorted) : sorted.slice(0, 16)) { const accession = str(row.accn), doc = /^\d{10}-\d{2}-\d{6}$/.test(accession) ? `https://www.sec.gov/Archives/edgar/data/${Number(cik)}/${accession.replace(/-/g,'')}/${accession}-index.html` : null;
         rows.push([str(data.entityName), name, num(row.val), unit, date(row.start), date(row.end), date(row.filed), str(row.form), accession, str(row.fp), doc]); }
     }
   }
   result.rows = rows; result.asOf = null;
-  result.warnings = ['Selected standardized US-GAAP entity-wide concepts, at most 16 latest-filed observations per concept/unit. Missing concepts are omitted, never zero. Custom taxonomy and segment facts are not covered.', 'Raw reporting periods, units, forms and accessions are retained. Quarter/YTD/year and amended observations may coexist; no TTM, fiscal-period alignment, ratio, or comparable-quarter inference is made.', 'This is the current SEC companyfacts feed, not a historical point-in-time vintage. Filed dates are day precision, not availability timestamps. SEC access policy applies; filing exhibits can contain third-party copyrighted material.'];
+  result.warnings = ['Selected standardized US-GAAP entity-wide concepts, at most 16 latest-filed observations per concept/unit. Missing concepts are omitted, never zero. Custom taxonomy and segment facts are not covered.', 'Raw reporting periods, units, forms and accessions are retained. Quarter/YTD/year and amended observations may coexist; no TTM, fiscal-period alignment, ratio, or comparable-quarter inference is made.', 'This is the current SEC companyfacts feed, not a historical point-in-time vintage. Filed dates are day precision, not availability timestamps. SEC access policy applies; filing exhibits can contain third-party copyrighted material.', ...(rows.some(row => DIVIDEND_CONCEPTS.has(String(row[1]))) ? ['Dividend concepts list one observation per period, the latest filed: up to 12 full-year periods and 8 three-month periods, newest first. Year-to-date and other period lengths are left out, and a concept a filer stopped using may show only older periods.'] : [])];
   return result;
 }
 

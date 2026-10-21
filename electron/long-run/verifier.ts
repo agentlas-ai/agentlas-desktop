@@ -53,6 +53,7 @@ import {
   dispatchGoalStrategyAutomation,
   reflectGoalStrategyProposal,
   requestGoalStrategyReflection,
+  withDetachedReflectionEffects,
 } from "./goal-strategy-reflection";
 import { getChatGoalRevision } from "../store/chat-goals";
 import { readInvocationEffectBoundary } from "../invocation/effect-boundary-reader";
@@ -1622,7 +1623,8 @@ export async function verifyGoalCompletionClaim(input: {
         signal: controller.signal,
       } as const;
       const dispatch = requestGoalStrategyReflection(reflectionInput);
-      if (dispatch) void reflectGoalStrategyProposal(reflectionInput).then(async (result) => {
+      // Its own adapter-effect scope: the source invocation's boundary is already sealed (withDetachedReflectionEffects).
+      if (dispatch) withDetachedReflectionEffects(verificationResult.checkpointId, () => void reflectGoalStrategyProposal(reflectionInput).then(async (result) => {
         recordGoalStrategyReflectionOutcome(dispatch, result);
         if (result.status === "proposal") {
           // A Goal recommendation can only hand the exact, current
@@ -1641,7 +1643,7 @@ export async function verifyGoalCompletionClaim(input: {
         const unavailable = { status: "unavailable" as const, reason: "goal_strategy_failed" as const };
         try { recordGoalStrategyReflectionOutcome(dispatch, unavailable); } catch { /* The request receipt remains durable. */ }
         console.warn("[long-run-verifier] Goal strategy reflection failed after durable request:", error);
-      });
+      }));
     }
     return verificationResult;
   } catch (error) {

@@ -728,14 +728,17 @@ function sameRuntimeIdentity(left: RuntimeStatus, right: RuntimeStatus): boolean
     && left.acpAgentId === right.acpAgentId;
 }
 
-/** Quota/rate-limit/auth is provider-wide; other failures stay scoped to one runtime/model pair. */
+/** Quota/rate-limit/auth is provider-wide (for open ACP seats: seat-wide); other failures stay scoped to one runtime/model pair. */
 export function runtimeFailureSharesProviderDomain(
   candidate: RuntimeStatus,
   failed: RuntimeStatus,
   failure: Pick<RunnerFailure, "kind">,
 ): boolean {
   if (failure.kind === "auth" || failure.kind === "quota" || failure.kind === "rate_limit") {
-    return candidate.kind === failed.kind && candidate.backend === failed.backend;
+    // Open ACP seats share one kind but can be different accounts: a limit on one keeps the others as candidates. (A cooldown is keyed by executable and
+    // model, so two seats on the same executable and model still cool down together.)
+    return candidate.kind === failed.kind && candidate.backend === failed.backend
+      && (candidate.kind !== "acp" || candidate.acpAgentId === failed.acpAgentId);
   }
   // A transport/exit failure on one model must still allow the next model
   // configured on the same executable to run. Quota/auth remains provider-wide

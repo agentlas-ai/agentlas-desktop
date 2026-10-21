@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import type { FinanceAsset, FinanceWorkspace } from './finance';
+import type { FinanceAsset, FinanceQuote, FinanceSource, FinanceWorkspace } from './finance';
 
 const value = z.number().finite().min(0).max(1e12).nullable();
 /** The saved asset keeps a symbol and an exchange of at most 80 characters, so a row that says more can never be saved. */
@@ -88,6 +88,21 @@ export function financePortfolioRowUntouched(row: FinancePortfolioRow): boolean 
 /** The rows with a value Save refuses and the cells to fix in each. An untouched new row is not listed, so what a summary says and what the cells show agree. */
 export function financePortfolioProblems(rows: readonly FinancePortfolioRow[]): { index: number; fields: FinancePortfolioField[] }[] {
   return rows.flatMap((row, index) => { const fields = financePortfolioRowUntouched(row) ? [] : financePortfolioInvalidFields(row); return fields.length ? [{ index, fields }] : []; });
+}
+// ── whose price a value multiplies ─────────────────────────────────────────────────────────────────────────────────────────────────
+/** A price the owner typed or read from a photo is "entered"; only a connected provider's quote is "market" — the rule the observed valuation (finance.portfolio.value) applies. */
+export type FinancePriceBasis = 'entered' | 'market';
+export function financeQuoteBasis(sources: readonly Pick<FinanceSource, 'id' | 'kind' | 'status'>[], quote: Pick<FinanceQuote, 'sourceId'>): FinancePriceBasis {
+  const source = sources.find(item => item.id === quote.sourceId);
+  return source && source.kind === 'provider' && source.status === 'connected' ? 'market' : 'entered';
+}
+export interface FinancePortfolioPriceNote { basis: FinancePriceBasis | 'mixed'; from: string; to: string; entered: number; market: number }
+/** What the note under one currency's allocation says: whose prices the values multiply and from which dates. Positions without a price are not passed in. */
+export function financePortfolioPriceNote(rows: readonly { basis: FinancePriceBasis; asOf: string }[]): FinancePortfolioPriceNote | null {
+  if (!rows.length) return null;
+  const dates = rows.map(row => row.asOf.slice(0, 10)).sort();
+  const entered = rows.filter(row => row.basis === 'entered').length, market = rows.length - entered;
+  return { basis: entered && market ? 'mixed' : entered ? 'entered' : 'market', from: dates[0], to: dates[dates.length - 1], entered, market };
 }
 export type FinancePortfolioSaveFailure = 'revision_conflict' | 'duplicate_asset' | 'identity_ambiguous' | 'position_ambiguous' | 'other';
 /** The typed refusal inside an IPC error message, so the card can say what the host already knows. */

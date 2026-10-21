@@ -1,13 +1,17 @@
-import { canonicalAskFenceText, extractAskFences, type AgentlasAskQuestion } from "../../shared/ask-fence-flatten";
+import type { AgentlasAskQuestion } from "../../shared/ask-fence-flatten";
 
 /*
- * The decision card the host adds when a Goal stops with no typed way forward.
- * A Goal that the host drove again and again and that did nothing is not waiting on a timer or a
- * tool: it is waiting for someone. The model's own last words stay as they are; the host appends the same wire block a
- * model writes, so the card, the hold, the desktop alert and the phone read it with no second code path.
+ * The decision card the host posts when a Goal's passes did nothing and the terminal verification did not close it. An ask is always a card that rings:
+ * a Goal the host drove again and that did nothing, and that the
+ * independent verifier does not call done, is not waiting on a timer or a tool: it is waiting for someone. The invocation
+ * service posts this card as its own assistant message after that verdict (askOwnerAfterIdleYield), holds the Goal for the
+ * answer and rings the desktop and the phone; the card, the hold and the alerts read it with no second code path.
  *
- * No word is judged here: the trigger is the host's own count of idle passes (client goal_idle_pass_yield), the text is
- * fixed host copy. No electron import (the daemon loads shared fence code, and gates load this file directly).
+ * It is never added before the verification: a card in the turn's own text pre-empted the terminal verification and held a
+ * Goal whose plan was done and whose answer was right.
+ *
+ * No word is judged here: the trigger is the host's own count of idle passes (client goal_idle_pass_yield) followed by a
+ * verification verdict; the text is fixed host copy. No electron import (gates load this file directly).
  */
 export type HostOwnerCardKind = "goal_idle_stop";
 
@@ -40,14 +44,4 @@ const COPY: Record<HostOwnerCardKind, CardCopy> = {
 export function hostOwnerCardQuestions(kind: HostOwnerCardKind, locale: "ko" | "en"): AgentlasAskQuestion[] {
   const copy = COPY[kind][locale === "ko" ? "ko" : "en"];
   return [{ ...copy, options: copy.options.map((option) => ({ ...option })) }];
-}
-
-/**
- * The text with the host card appended. A turn that already carries a valid card is returned unchanged (the model asked
- * the right way), so a card is never doubled.
- */
-export function withHostOwnerCard(text: string, kind: HostOwnerCardKind, locale: "ko" | "en"): string {
-  if (extractAskFences(text).questions.length > 0) return text;
-  const block = canonicalAskFenceText(hostOwnerCardQuestions(kind, locale));
-  return text.trim() ? `${text.replace(/\s+$/, "")}\n\n${block}` : block;
 }

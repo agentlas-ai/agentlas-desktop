@@ -36,6 +36,15 @@ export interface AutomaticQuitInstaller {
    */
   quitDisposition(): "ordinary" | "defer-update" | "native-update";
   /**
+   * True only while a quit is actually under way for an update (deferred for the verified install, or the native
+   * handoff authorized). `quitDisposition()` is NOT this: it answers "defer-update" for the whole time a downloaded
+   * update merely waits for the next quit, and the app runs normally for hours in that state (a supervisor that read
+   * "defer-update" as "quitting" would stop for good there, so the conversation would vanish from Desktop and Mobile
+   * would lose its connection).
+   * Anything asking "is this app going away" must use this, never the disposition.
+   */
+  quitInProgress(): boolean;
+  /**
    * Returns true only when this quit must be deferred while the updater creates
    * its recovery copy and durable journal. The native updater's second quit is
    * allowed through because the controller has already moved to `installing`.
@@ -130,6 +139,9 @@ export function createAutomaticQuitInstaller(
       if (allowNextQuitWithoutUpdate) return "ordinary";
       if (quitDeferred || deps.getState().status === "downloaded") return "defer-update";
       return "ordinary";
+    },
+    quitInProgress(): boolean {
+      return nativeQuitAuthorized || quitDeferred || installAttemptInFlight;
     },
     authorizeNativeQuit(): void {
       // Ignore unrelated native events. A legitimate handoff is emitted only

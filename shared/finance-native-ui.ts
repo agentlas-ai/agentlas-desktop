@@ -12,6 +12,8 @@ const report = z.unknown().transform((value, ctx): FinanceReport => {
   try { const op = validateFinanceOperation({ type: "report.add", report: value }); if (op.type === "report.add") return op.report; } catch { /* Same canonical report validator as the service. */ }
   ctx.addIssue({ code: "custom", message: "Invalid Finance report" }); return z.NEVER;
 });
+/** The provider records a report card points at, in the compact form the "sources and as-of dates" block reads. A card has no workspace to look them up in. */
+const reportSource = z.object({ id: z.string().min(1).max(200), name: z.string().min(1).max(300), asOf: z.string().max(40).nullable(), retrievedAt: z.string().max(40), note: z.string().max(400) }).strict();
 const request = z.object({ query: z.string().max(2000), assetIds: z.array(z.string().min(1).max(200)).max(10), metrics: z.array(z.string().min(1).max(80)).min(1).max(10), period: z.string().min(1).max(80) }).strict();
 const dataResult = z.object({
   status: z.enum(["ok", "partial", "unconnected", "error"]), sourceUrls: z.array(z.string()), asOf: z.string().nullable(), retrievedAt: z.string(),
@@ -27,7 +29,7 @@ export const FinanceNativeResultSchema = z.object({
     z.object({ kind: z.literal("portfolio"), status: z.enum(["ok", "partial", "unavailable"]), coverage: z.object({ positions: z.number().int().nonnegative(), pricedPositions: z.number().int().nonnegative(), missingPositions: z.number().int().nonnegative() }).strict() }).strict(),
     /** Holdings the assistant read for the owner to edit and save. Nothing here is saved; the owner's Save in the card is the only write. */
     z.object({ kind: z.literal("holdings"), draft: FinancePortfolioDraftSchema, baseRevision: z.number().int().nonnegative() }).strict(),
-    z.object({ kind: z.literal("report"), report, workspaceRevision: z.number().int().nonnegative(), coverage: z.object({ positions: z.number().int().nonnegative(), pricedPositions: z.number().int().nonnegative(), missingPositions: z.number().int().nonnegative() }).strict().optional() }).strict(),
+    z.object({ kind: z.literal("report"), report, workspaceRevision: z.number().int().nonnegative(), coverage: z.object({ positions: z.number().int().nonnegative(), pricedPositions: z.number().int().nonnegative(), missingPositions: z.number().int().nonnegative() }).strict().optional(), sources: z.array(reportSource).max(50).optional() }).strict(),
   ]),
   /** Exact service outcome, retained for inspection; never used as renderer authority. */
   operationResult: z.unknown(),

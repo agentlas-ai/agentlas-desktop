@@ -271,6 +271,28 @@ async function servingHttpFailure(response: Response, locale: RunnerRequest["loc
       : "Could not reach the Agentlas model service. Try again shortly." };
 }
 
+/**
+ * The serving endpoint answers a request it refused before it reserved credits or called a model with a plain HTTP error
+ * (bad input, sign-in, 413, 402 credits, its own 503 "unavailable"): it opens its 200 stream only once the call is
+ * prepared, and every later failure is an SSE error frame or a broken stream. Such a refusal did no model work, so for the
+ * first request of a call it is the failure of a turn that was never delivered (RuntimeTurnDelivery "not-dispatched"), not
+ * an unfinished one: the typed kind then decides retry, next candidate or surfacing (shared/turn-settlement.ts) instead of
+ * every refusal reading "the request may have acted". A proxy's own 5xx is not the endpoint's word and stays unknown, and
+ * nothing after an earlier round of the same call (tool results, received text) is "not dispatched".
+ */
+function servingRefusalBeforeDispatch(response: Response, failure: RunnerFailure, firstRequest: boolean): boolean {
+  if (!firstRequest) return false;
+  const status = response.status;
+  return (status >= 400 && status < 500 && status !== 408) || (status === 503 && failure.providerCode === "serving_unavailable");
+}
+
+/** The endpoint's own fact about an error frame: it released the hold and says it never called a model. */
+function servingStreamErrorBeforeDispatch(data: unknown, firstRequest: boolean): boolean {
+  if (!firstRequest || !data || typeof data !== "object") return false;
+  const record = data as { providerDispatched?: unknown; settlement?: unknown };
+  return record.providerDispatched === false && record.settlement === "released";
+}
+
 function streamFailure(data: unknown, locale: RunnerRequest["locale"]): RunnerFailure {
   const record = data && typeof data === "object" ? data as { code?: unknown; message?: unknown } : {};
   const code = typeof record.code === "string" && /^[a-z0-9_]{1,64}$/.test(record.code) ? record.code : "serving_failed";
@@ -484,7 +506,14 @@ async function runAgentlasServingWithTools(
     reportModelEndpoint({ url: webBaseUrl() });
     const usageAttempt = usage.start();
     const response = await postServing(requestBody, cookie, req);
-    if (!response.ok) return assertCurrentHistoryRunnerResult({ text: accumulatedText, ownerControlTerminal: "uncertain", failure: await servingHttpFailure(response, req.locale), ...usage.settle() });
+    // The first request of the call: nothing earlier in it reached a model (no tool round, no cut reply continued).
+    const firstRequest = round === 0 && cutRounds === 0;
+    if (!response.ok) {
+      const failure = await servingHttpFailure(response, req.locale);
+      return assertCurrentHistoryRunnerResult({ text: accumulatedText, ownerControlTerminal: "uncertain",
+        ...(servingRefusalBeforeDispatch(response, failure, firstRequest) ? { turnDelivery: "not-dispatched" as const } : {}),
+        failure, ...usage.settle() });
+    }
     let text = "";
     let done: ServingDone | null = null;
     try {
@@ -498,7 +527,9 @@ async function runAgentlasServingWithTools(
         } else if (frame.event === "done") {
           done = frame.data && typeof frame.data === "object" ? frame.data as ServingDone : null;
         } else if (frame.event === "error") {
-          return assertCurrentHistoryRunnerResult({ text: accumulatedText, ownerControlTerminal: "uncertain", failure: streamFailure(frame.data, req.locale), ...usage.settle() });
+          return assertCurrentHistoryRunnerResult({ text: accumulatedText, ownerControlTerminal: "uncertain",
+            ...(!text && servingStreamErrorBeforeDispatch(frame.data, firstRequest) ? { turnDelivery: "not-dispatched" as const } : {}),
+            failure: streamFailure(frame.data, req.locale), ...usage.settle() });
         }
       }
     } catch {
@@ -645,7 +676,14 @@ export const runAgentlasServing: Runner = async (req, events): Promise<RunnerRes
       maxTokens: outputReserve,
       ...servingRequestFields(req),
     }), cookie, req);
-    if (!response.ok) return assertCurrentHistoryRunnerResult({ text: joined, ownerControlTerminal: "uncertain", failure: await servingHttpFailure(response, req.locale), ...(joined ? usage.settle() : {}) });
+    // The first request of the call: no cut reply was continued before it.
+    const firstRequest = cutRounds === 0;
+    if (!response.ok) {
+      const failure = await servingHttpFailure(response, req.locale);
+      return assertCurrentHistoryRunnerResult({ text: joined, ownerControlTerminal: "uncertain",
+        ...(servingRefusalBeforeDispatch(response, failure, firstRequest) ? { turnDelivery: "not-dispatched" as const } : {}),
+        failure, ...(joined ? usage.settle() : {}) });
+    }
 
     text = "";
     done = null;
@@ -662,7 +700,9 @@ export const runAgentlasServing: Runner = async (req, events): Promise<RunnerRes
           const final = done?.text;
           if (typeof final === "string" && final.length > text.length) text = final;
         } else if (frame.event === "error") {
-          return assertCurrentHistoryRunnerResult({ text: joined, ownerControlTerminal: "uncertain", failure: streamFailure(frame.data, req.locale), ...(joined ? usage.settle() : {}) });
+          return assertCurrentHistoryRunnerResult({ text: joined, ownerControlTerminal: "uncertain",
+            ...(!text && servingStreamErrorBeforeDispatch(frame.data, firstRequest) ? { turnDelivery: "not-dispatched" as const } : {}),
+            failure: streamFailure(frame.data, req.locale), ...(joined ? usage.settle() : {}) });
         }
       }
     } catch {

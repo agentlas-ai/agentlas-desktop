@@ -29,9 +29,17 @@ export interface CriterionProofContract { criterionId: string; criterionIndex: n
   /** Recorded classifier reason for a conditional criterion the request cannot produce (owner decision 2026-09-25). */
   notApplicableReason?: string }
 const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+/**
+ * `waiting_tool` is where the host's own spaced follow-up parks a Goal: InvocationService.scheduleGoalContinuation
+ * ("verification_background") runs BEFORE the background verifier starts, and a turn that claimed nothing is verified
+ * only that way. The Goal, its revision and its chat are unchanged, so its proof contracts bind exactly as in `running`.
+ * Admitting only running|verifying made every such verification inconclusive without a single model call (isolated app
+ * run, `criterion_proof_goal_unbound` every time), so a Goal whose plan was done never closed.
+ */
+const PROOF_BINDABLE_STATUSES: readonly string[] = ["running", "verifying", "waiting_tool"];
 function context(goalId: string, invocationRunId: string) {
   const goal = getChatGoalRevision(goalId), run = getLongRunByGoalId(goalId);
-  if (!goal || !run || !["running","verifying"].includes(run.status) || !run.rootChatId || run.rootChatId !== goal.chatId) throw new Error("criterion_proof_goal_unbound");
+  if (!goal || !run || !PROOF_BINDABLE_STATUSES.includes(run.status) || !run.rootChatId || run.rootChatId !== goal.chatId) throw new Error("criterion_proof_goal_unbound");
   const attempts = getDb().prepare(`SELECT a.id,a.runtime_selection_json FROM long_run_worker_attempts a JOIN long_run_workers w ON w.id=a.worker_id
     WHERE a.run_id=? AND a.invocation_run_id=? AND w.role='controller' ORDER BY a.rowid DESC`).all(run.id, invocationRunId) as {id:string;runtime_selection_json: string}[];
   const selections=attempts.map(row=>{

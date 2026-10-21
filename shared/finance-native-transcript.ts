@@ -1,8 +1,8 @@
 import { FinanceNativeResultSchema } from './finance-native-ui';
 import { financePortfolioLineText } from './finance-portfolio';
-import { financeReportCompositionSpec, financeReportComputeMetrics, financeReportLocale, financeReportProseBlocks, selectFinanceReportSections } from './finance-report-presentation';
+import { FINANCE_REPORT_SOURCE_LIMITS, financeReportCompositionSpec, financeReportComputeMetrics, financeReportLocale, financeReportProseBlocks, financeReportSourceBlock, financeReportSourceMore, selectFinanceReportSections, type FinanceReportSourceBlock, type FinanceReportSourceEntry } from './finance-report-presentation';
 import { validateInlineUiPresentationContent, type InlineUiPresentationContent } from './inline-ui-presentation';
-import type { IntellectUiNode } from './intellect-ui';
+import { INTELLECT_UI_LIMITS, type IntellectUiNode } from './intellect-ui';
 
 const text = (value: string): IntellectUiNode => ({ type: 'text', text: value });
 const native = (children: IntellectUiNode[], title?: string): InlineUiPresentationContent => ({ kind: 'native', document: { version: 1, ...(title ? { title } : {}), children } });
@@ -37,6 +37,38 @@ function seriesChart(columns: readonly string[], rows: readonly (string | number
   } } };
 }
 
+/** One clean line cut at `limit` characters, never through a surrogate pair: the phone's table widget cannot draw half of one. */
+const clipText = (value: string, limit: number) => {
+  const line = financePortfolioLineText(value);
+  if (line.length <= limit) return line;
+  const end = limit - 1;
+  return `${line.slice(0, /[\uD800-\uDBFF]/.test(line[end - 1] ?? '') ? end - 1 : end)}…`;
+};
+
+/**
+ * A report's sources and as-of dates as one phone card, a card per section: its facts as lines (a fact with several values lists them one per line), a portfolio snapshot as a two-column table (the phone's table
+ * widget draws fixed-width columns and shows the first two). It must never cost the report: tables that do not fit the document limits are thinned, then
+ * left off, and if the document is still not valid there is no card.
+ */
+function sourcesCard(block: FinanceReportSourceBlock): InlineUiPresentationContent | null {
+  const cell = (value: string) => clipText(value, INTELLECT_UI_LIMITS.inputChars);
+  // In a right-to-left report a value after the label is led by a left-to-right mark, so a date or an English sentence keeps its own order (digits after an Arabic letter would otherwise read back to front).
+  const ltr = (value: string) => block.direction === 'rtl' ? `\u200E${value}` : value;
+  const draw = (entries: FinanceReportSourceEntry[], rows: number): InlineUiPresentationContent => native(entries.map((entry): IntellectUiNode => {
+    const table = entry.table, shown = table && rows ? table.rows.slice(0, rows) : [];
+    return { type: 'card', title: clipText(entry.title, INTELLECT_UI_LIMITS.labelChars), children: [
+      ...(entry.facts.length ? [text(entry.facts.map(fact => fact.values.length > 1 ? [`${fact.label}:`, ...fact.values.map(value => `· ${ltr(value)}`)].join('\n') : `${fact.label}: ${ltr(fact.values[0])}`).join('\n'))] : []),
+      ...(table && shown.length ? [{ type: 'table' as const, columns: [cell(`${table.columns[0]} · ${table.columns[1]}`), cell(`${table.columns[2]} · ${table.columns[3]}`)], rows: shown.map(row => [cell(`${row[0]} · ${row[1]}`), cell(`${row[2]} · ${row[3]}`)]) }] : []),
+      ...(table && shown.length && table.hidden + table.rows.length - shown.length ? [text(financeReportSourceMore(table.hidden + table.rows.length - shown.length, block.language))] : []),
+    ] };
+  }).concat(block.hidden ? [text(financeReportSourceMore(block.hidden, block.language))] : []), clipText(block.title, INTELLECT_UI_LIMITS.labelChars));
+  // The tables thin out (all rows, 20, none) until the document is within the phone's limits; the facts of every section stay. The block's own caps keep it under them without tables.
+  for (const rows of [FINANCE_REPORT_SOURCE_LIMITS.rows, 20, 0]) {
+    const checked = validateInlineUiPresentationContent(draw(block.entries, rows));
+    if (checked.ok) return checked.content;
+  }
+  return null;
+}
 /** Read-only display projection. No raw operation result, provenance dump or executable action enters the document. */
 export function financeNativeTranscriptContents(value: unknown, options: { state?: string } = {}): readonly InlineUiPresentationContent[] {
   const checked = FinanceNativeResultSchema.safeParse(value);
@@ -67,13 +99,7 @@ export function financeNativeTranscriptContents(value: unknown, options: { state
     // its rows are no longer what is saved. Cells stay inside the contract's text limits.
     const open = !options.state || options.state === 'awaiting-input';
     // One clean line (an older retained proposal may still hold breaks or half surrogate pairs), cut at the contract's length and never through a surrogate pair.
-    const cell = (value: string | null, limit = 120) => {
-      if (value === null) return null;
-      const line = financePortfolioLineText(value);
-      if (line.length <= limit) return line;
-      const end = limit - 1;
-      return `${line.slice(0, /[\uD800-\uDBFF]/.test(line[end - 1] ?? '') ? end - 1 : end)}…`;
-    };
+    const cell = (value: string | null, limit = 120) => value === null ? null : clipText(value, limit);
     const rows = view.draft.rows.map(row => [cell(row.name || row.symbol), cell(row.symbol, 40), cell(row.currency, 8), row.quantity, row.averageCost, row.price, cell(row.asOf, 40)]);
     const status = open ? 'Proposed from your photo or text. Nothing is saved until you review and save it in the Agentlas desktop app.'
       : options.state === 'cancelled' ? 'Replaced by a newer proposal.'
@@ -97,6 +123,10 @@ export function financeNativeTranscriptContents(value: unknown, options: { state
       if (!chart && !metrics.length && section.projection?.rows.length && section.presentation !== 'narrative') children.unshift(text('This chart is not supported in this view.'));
       if (children.length) blocks.push(native(children, section.title));
     }
+    // The provider records and as-of dates travel as one more card after the report; with nothing else to show, or no room left, the answer is as it was.
+    const sources = blocks.length && blocks.length < 16 ? financeReportSourceBlock(view.report, view.sources, locale) : null;
+    const card = sources && sourcesCard(sources);
+    if (card) blocks.push(card);
   } else blocks.push(native([text('A complete priced currency group is not available for an allocation chart.')]));
   if (!blocks.length || blocks.length > 16) return unavailable();
   const validated = blocks.map(block => validateInlineUiPresentationContent(block));

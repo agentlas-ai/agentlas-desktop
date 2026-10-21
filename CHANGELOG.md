@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.3.86 — 2026-10-21
+
+- The native channel re-attach no longer stops for good while a downloaded update merely waits to be installed, so the supervisor conversation and the phone link come back after a channel loss instead of staying gone until the app restarts.
+- A Goal that has finished its plan is now verified instead of idling into a decision card: the first idle pass after the plan is done ends the passes, the host verifier can bind a Goal parked on its own follow-up, and the owner is asked only when the verifier asks for a retry. A host-claimed verification can now close a finished Goal, and each such turn end runs one verification call.
+- A background strategy reflection no longer breaks a waiting Goal: it runs outside the sealed run's effect ledger, so the wait is not cancelled and the Goal resumes from its checkpoint instead of restarting with a new context.
+- A usage limit on Grok or another open ACP agent is told apart from an unsettled turn: a refusal before the prompt is sent keeps its not-dispatched mark so the waiting message is re-queued and the next runtime is tried, a refusal after the prompt counts only when nothing ran, a limit that belongs to the request or the machine (context window, tokens, tools, seats) is not read as a spent allowance, a rate limit is told apart from an exhausted allowance, open ACP seats keep separate limit and sign-in verdicts, a plan no longer replays a paid turn, and the fallback notice says the usage limit was reached.
+- A saved Finance report shows where its values came from and how old they are: a sources block lists providers and as-of dates, skips scaffold sections and URL-and-time listings, the limits line reads a provider note's first line on every surface, the phone lists a fact's values one per line, and right-to-left reports keep each value's own direction.
+- The Finance portfolio panel and the watchlist say whose price each value is and from when: a price you entered is labelled as entered, not shown as a market quote.
+- SEC company facts carry the dividend concepts, read as a series.
+- A question card is sized by the chat column it sits in: in a short window the conversation and a review card's Save stay reachable, the card starts folded when it cannot fit, and its secondary text is darker (4.5:1 or better in both themes).
+- A real question in an ask fence that has no options is now shown as plain text instead of leaving an empty reply.
+- A run that ends without a reply now says why and what to do next, in the app language, and a provider's own outcome (a refusal, a limit or a sign-in problem) is no longer labelled an app problem.
+- When the Agentlas model service refuses a request before it reaches a model (out of credits, rate limited, signed out), the refusal is now read as a turn that was never delivered: the app says why, retries a rate-limited request after its Retry-After, shows the sign-in button, and can hand the request to the next model in the pool, instead of reporting that the request may already have run.
+
+This release binds Agentlas OS v1.2.67 at 704ce1ead2a5bac712cf835b290bde12053a5db1; public runtime asset `hephaestus-runtime-v1.2.67.tar.gz` is pinned at SHA-256 `c5ae6a2c8502c1eaee09f079e860e7f17886b9ef7d1880577c1655e6553a94a1`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.85 — 2026-10-20
 
 - Toolchains: every callable Toolchain is now its own tool for agents and for the teammates who do their work, a graph made only of fixed code or tool steps is refused as a graph and pointed at a Toolchain, the older crystallization of graphs into Toolchains is retired (the two callable-graph contracts that existed no longer reach agents), and the Toolchain screen and the instructions models read now say plainly which is which.

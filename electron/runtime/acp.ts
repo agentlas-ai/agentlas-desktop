@@ -171,17 +171,81 @@ function closedAcpObject(value: unknown, keys: readonly string[]): value is Reco
     && Object.keys(value).every(key => keys.includes(key));
 }
 
-/** Closed setup metadata is not inference evidence. Unknown extensions stay conservative. */
-/** What a provider says when it refuses a request for usage: HTTP 429, a rate limit, exhausted free usage, a quota. */
-const ACP_QUOTA_REFUSAL = /\b429\b|rate.?limit|too many requests|usage.?exhausted|quota/i;
+const NOT_ALLOWANCE_WORDS = "context|window|tokens?|images?|requests?|size|files?|messages?|prompt|rate";
+/** Words that name an account's allowance in "your <word> limit". A limit of anything else (steps, turns, sessions, uploads, seats) is not one. */
+const ALLOWANCE_WORDS = "weekly|daily|monthly|hourly|\\d+[- ]hours?|usage|plan|subscription|free|included|spending|session|credit";
+/**
+ * An allowance the provider says is used up, in its own refusal of the request: free usage, a usage, weekly, plan, hour or spending limit that was
+ * reached, a used-up quota, credits or balance, premium requests used up. Each form names the account's allowance being spent. A limit that belongs to
+ * the request or the machine (a context window, tokens, tool calls, memory, a size) or a disk or file quota is not one (ACP_NOT_ALLOWANCE).
+ */
+const ACP_USAGE_EXHAUSTED = new RegExp([
+  "free[ _-]?usage[ _-]?(?:exhausted|used up|limit)",
+  "used all the included free usage",
+  "usage[ _-]?limits?[ _-]?(?:has been |have been |is )?(?:reached|exceeded|hit)",
+  "usage[ _-]exhausted",
+  `(?:reached|exceeded|hit)\\s+(?:your\\s+|the\\s+)?(?:(?!${NOT_ALLOWANCE_WORDS})[a-z'-]+\\s+){0,3}usage\\s+limits?`,
+  `(?:(?:${ALLOWANCE_WORDS})\\s+){1,3}limits?\\s+(?:has been |have been |is |was )?(?:reached|exceeded|hit)`,
+  `(?:reached|exceeded|hit)\\s+(?:your\\s+|the\\s+|its\\s+)?(?:(?:${ALLOWANCE_WORDS})\\s+){1,3}limits?\\b(?!\\s+(?:of|for|on)\\s+\\d)`,
+  "(?:hit|reached|exceeded)\\s+your\\s+limits?\\b(?!\\s+(?:of|for|on)\\s+\\d)",
+  "(?:hit|reached|exceeded)\\s+your\\s+free\\s+requests?\\s+limits?\\b",
+  "usage\\s+limits?\\s+for\\s+the\\s+(?:month|week|day|period)\\s+(?:has been |have been |is )?(?:reached|exceeded|hit)",
+  "(?:usage|spending|billing|credit)\\s+(?:hard\\s+)?cap\\s+(?:has been |is )?(?:reached|exceeded|hit)",
+  "billing[ _]hard[ _]limit[ _]reached",
+  "(?<!disk |file |inode |storage )quota[ _]?(?:has been |is )?(?:exceeded|exhausted|reached|depleted)",
+  "(?:exceeded|exhausted|out of)[\\s_]+(?:(?:your|the)[\\s_]+)?(?:(?:current|monthly|weekly|daily|free|api)[\\s_]+)?(?<!disk )quota",
+  "no quota (?:left|remaining|available)",
+  "(?:credits?|balance)\\s+(?:exceeded|exhausted|depleted|used up)",
+  "insufficient[ _-]?(?:quota|credits?|balance)",
+  "balance (?:is )?insufficient",
+  "out of (?:remaining )?credits?\\b(?![\\s-]*card)",
+  "no (?:remaining )?credits? (?:left|remaining|available)",
+  "credit balance (?:is )?too low",
+  "used all (?:of )?(?:your |its |the )?(?:available |included )?(?:copilot )?(?:premium )?(?:credits|usage|requests)",
+  "(?:exceeded|reached|hit)\\s+your\\s+premium\\s+requests?\\b",
+  "premium\\s+requests?\\s+(?:limit|allowance)\\s+(?:has been |is )?(?:reached|exceeded|hit)",
+  "exhausted your capacity",
+  "free tier (?:is )?(?:exhausted|used up)",
+  "payment required",
+].join("|"), "i");
+/** What a refusal is about when it speaks of a limit that belongs to the request or the machine, not to the account. */
+const ACP_NOT_ALLOWANCE = new RegExp([
+  "context[ _-]?window", "context length", "per[ _-]?request", "images? per", "\\b\\d+\\s+(?:images?|files?)\\b",
+  "\\b(?:tokens?|context|tools?|memory|cpu|disk|output|input|steps?|turns?|uploads?|attachments?|characters?|lines?|pages?|projects?|workspaces?|seats?|connections?|calls?|subagents?|concurrent|parallel)\\s+(?:\\w+\\s+)?(?:usage\\s+)?limits?\\b",
+].join("|"), "i");
+/** A quota worded per minute, second or hour is a throttle that lifts by itself, not a spent allowance (also inside CamelCase or snake_case ids). */
+const ACP_PER_WINDOW = /per[ _-]?(?:minute|second|hour)/i;
+/**
+ * A throttle that lifts by itself: HTTP 429 named as a status or code (not any number 429, so "code at line 429" or "position 429" never match), too
+ * many requests, a rate limit.
+ */
+const ACP_THROTTLED = new RegExp([
+  "(?:status|http|error[ _]code|\\bcode)(?:[ _/-]?(?:status|code|error|\\d(?:\\.\\d)?))*[\"' :=]*(?<![\\d.])429(?![\\d.])",
+  "(?:failed with|returned|responded with|error:?)\\s*429(?![\\d.])",
+  "(?<![\\d.])429(?![\\d.])\\s+too many requests",
+  "too many requests",
+  "\\brate[ _-]?limit",
+].join("|"), "i");
+/** How much of an error is read for its wording: enough for a cause, never a whole echoed request. */
+const ACP_ERROR_MESSAGE_READ_CHARS = 800;
+const ACP_ERROR_DATA_READ_CHARS = 600;
 /** An RPC failure in the agent's own words: the message, then the data (JSON-RPC carries the human-readable cause there). */
 function acpRpcErrorText(err: unknown): string {
-  const raw = err instanceof Error ? err.message : String(err);
+  const raw = (err instanceof Error ? err.message : String(err)).slice(0, ACP_ERROR_MESSAGE_READ_CHARS);
   const data = err instanceof AcpRpcError ? err.data : undefined;
-  const detail = data == null ? "" : (typeof data === "string" ? data : JSON.stringify(data));
+  const detail = (data == null ? "" : (typeof data === "string" ? data : JSON.stringify(data) ?? "")).slice(0, ACP_ERROR_DATA_READ_CHARS);
   return detail && !raw.includes(detail) ? `${raw}: ${detail}` : raw;
 }
+/** The failure kind the host acts on for a provider's refusal of the whole request, read from its wording; null when it names no limit. */
+function acpUsageRefusalKind(text: string): "quota" | "rate_limit" | null {
+  if (ACP_USAGE_EXHAUSTED.test(text)) {
+    if (ACP_NOT_ALLOWANCE.test(text)) return null;
+    return ACP_PER_WINDOW.test(text) ? "rate_limit" : "quota";
+  }
+  return ACP_THROTTLED.test(text) ? "rate_limit" : null;
+}
 
+/** Closed setup metadata is not inference evidence. Unknown extensions stay conservative. */
 function isAcpSetupMetadata(params: unknown): boolean {
   let update = params;
   if (closedAcpObject(params, ["sessionId", "update"]) && typeof params.sessionId === "string") update = params.update;
@@ -192,7 +256,7 @@ function isAcpSetupMetadata(params: unknown): boolean {
   if (closedAcpObject(update, ["sessionUpdate", "availableCommands"]) && update.sessionUpdate === "available_commands_update") {
     return Array.isArray(update.availableCommands) && update.availableCommands.every(command =>
       closedAcpObject(command, ["name", "description", "input"]) && typeof command.name === "string"
-      && typeof command.description === "string" && (command.input === undefined
+      && typeof command.description === "string" && (command.input === undefined || command.input === null
         || (closedAcpObject(command.input, ["hint"]) && typeof command.input.hint === "string")));
   }
   if (closedAcpObject(update, ["sessionUpdate", "configOptions"]) && update.sessionUpdate === "config_option_update") {
@@ -216,6 +280,8 @@ export class AcpSessionClient {
   text = "";
   /** Non-metadata live activity makes execution uncertain, even without assistant text. */
   turnActivityObserved = false;
+  /** The agent produced something that can be work: any message chunk, a thought with text, a plan or todo list, any tool call or update, any update kind this client does not know. */
+  workObserved = false;
   contextUsed?: number;
   contextSize?: number;
   private readonly tools = new Map<string, ToolState>();
@@ -259,6 +325,7 @@ export class AcpSessionClient {
     this.replaying = false;
     this.text = "";
     this.turnActivityObserved = false;
+    this.workObserved = false;
     this.tools.clear();
     this.thinking = false;
   }
@@ -271,6 +338,7 @@ export class AcpSessionClient {
     const update = params?.update ?? params;
     switch (update?.sessionUpdate) {
       case "agent_message_chunk": {
+        this.workObserved = true;
         const chunk = textOf(update.content);
         if (chunk) {
           this.endThinking();
@@ -280,6 +348,10 @@ export class AcpSessionClient {
         break;
       }
       case "agent_thought_chunk": {
+        // An empty chunk is a placeholder, not a thought: no thinking row, and not work (a later refusal is still a refusal of the whole request).
+        const thought = textOf(update.content);
+        if (!thought) break;
+        this.workObserved = true;
         if (!this.thinking) {
           this.thinking = true;
           this.thinkingStartedAt = Date.now();
@@ -287,17 +359,19 @@ export class AcpSessionClient {
         }
         // 생각 텍스트는 자기 행으로 — 본문(partial)에 섞지 않는다. Gemini CLI는
         // "**주제**\n\n본문" 꼴로 오므로 첫 줄이 곧 진행 헤드라인이 된다.
-        const thought = textOf(update.content);
-        if (thought) this.events.onThinking?.("delta", undefined, thought);
+        this.events.onThinking?.("delta", undefined, thought);
         break;
       }
       case "plan": {
+        // A plan is model output: the agent got past its first model call, so a later refusal is not a refusal of the whole request.
+        this.workObserved = true;
         // The agent's own checklist, typed (runtime-plan.ts) — not a status sentence. Each update is the full list.
         this.emitPlan(planFromAcpPlanUpdate(update));
         break;
       }
       case "tool_call":
       case "tool_call_update": {
+        this.workObserved = true;
         this.endThinking();
         this.handleToolCall(update, update.sessionUpdate === "tool_call");
         break;
@@ -309,7 +383,14 @@ export class AcpSessionClient {
         if (used !== undefined && size !== undefined) { this.contextUsed = used; this.contextSize = size; }
         break;
       }
+      case "available_commands_update":
+      case "current_mode_update":
+      case "config_option_update":
+      case "session_info_update": // real grok sends it right after the prompt, whatever the outcome
+        break;
       default:
+        // A kind this client does not know may be work; only the kinds above are known not to be.
+        this.workObserved = true;
         break;
     }
   }
@@ -1242,8 +1323,12 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
           // Setup can produce live activity too; retain it without admitting replayed history.
           client.onUpdate(params, ensureEffectRun);
         } else if (method === "cursor/update_todos") {
-          // Cursor's checklist arrives as its documented vendor notification instead of an ACP plan update.
+          // Cursor's checklist arrives as its documented vendor notification instead of an ACP plan update; like a plan it is model output.
+          client.workObserved = true;
           client.cursorTodoUpdate(params);
+        } else if (method.startsWith("cursor/")) {
+          // Cursor's other vendor notifications (task, image generation) are work the agent did.
+          client.workObserved = true;
         }
       },
       onRequest: async (method, params) => {
@@ -1652,6 +1737,7 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
       const kimiTurn: KimiJournalCursor | null = spec.id === "kimi" || spec.registryId === "kimi"
         ? kimiJournalCursor(realCliHome("kimi", runEnv), sessionId) : null;
       // Mark before calling transport: an exception cannot prove nothing was sent.
+      client.workObserved = false;
       promptDispatchAttempted = true;
       {
         // 이 러너는 도구 시작/끝을 구분해 보고하지 않아, 긴 도구를 침묵으로 오인하지 않도록 한도를 도구 상한(90분)과 같게 둔다.
@@ -1747,11 +1833,14 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
         return { text: client.text.trim(), sessionId: session?.acpSessionId ?? undefined, ownerControlTerminal: "uncertain",
           failure: runtimeSilentTimeoutFailure(spec.id, silence.trippedWith?.limitMs ?? cliToolSilenceWindowMs(req.env ?? process.env)) };
       }
-      // A provider that refuses the whole request for usage (HTTP 429, exhausted free usage) before the agent produced any text, tool call or
-      // request of its own: nothing ran, so this is a quota failure the host can cool the runtime down on, not a turn that "may have acted".
-      if (!effectTerminal && err instanceof AcpRpcError && ACP_QUOTA_REFUSAL.test(acpRpcErrorText(err))
-        && !client.text.trim() && client.turnToolCalls === 0 && !agentRequestObserved) {
-        return { text: "", failure: { kind: "quota", message: acpRpcErrorText(err), runtime: spec.id, source: "marker" } };
+      // A provider that refuses the prompt it was just sent for usage (an exhausted allowance, or HTTP 429) before the agent produced any message,
+      // thought, plan, tool call, unknown update or request of its own: nothing ran, so the host can cool the runtime down instead of reading "may have acted".
+      // Before dispatch the branch below classifies the refusal and marks it not-dispatched; this one never sees that case.
+      const usageRefusal = promptDispatchAttempted && !effectTerminal && err instanceof AcpRpcError
+        && !client.workObserved && !client.text.trim() && client.turnToolCalls === 0 && !agentRequestObserved
+        ? acpUsageRefusalKind(acpRpcErrorText(err)) : null;
+      if (usageRefusal) {
+        return { text: "", failure: { kind: usageRefusal, message: acpRpcErrorText(err).slice(0, 2000), runtime: spec.id, source: "marker" } };
       }
       // Preserve the effect ledger in finally; missing text is never no-effect proof.
       if (!effectTerminal && (promptDispatchAttempted || client.turnActivityObserved || agentRequestObserved)) {
@@ -1799,18 +1888,20 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
          * 그대로 실어 보낸다 — 그 원문이 이미 사용자가 알아야 할 전부다. 그래서 이
          * 경우에는 authMethods 안내를 **붙이지 않는다**.
          */
-        const quota = ACP_QUOTA_REFUSAL.test(message);
+        // The same wording tables as a refusal of a dispatched prompt: a loose word match would type a throttle or a look-alike as a spent allowance.
+        const usageKind = acpUsageRefusalKind(acpRpcErrorText(err));
+        // A limit message the tables do not recognise is still not an auth problem: no sign-in help and no "auth" reading, but never a typed quota.
+        const limitish = usageKind !== null || /\b429\b|rate.?limit|too many requests|usage.?exhausted|quota/i.test(message);
         const authish = /auth_required|not authenticated|login/i.test(message);
-        const help = prescription && !quota
+        const help = prescription && !limitish
           ? (locale === "ko"
             ? ` — 이 런타임은 먼저 로그인이나 설정이 필요하다: ${prescription}`
             : ` — this runtime needs sign-in or setup first: ${prescription}`)
           : "";
         // 인증 수단을 광고한 채 실패했으면 auth. 원인을 모르면 단정하지 않되 사유는
         // 그대로 들고 나간다 — 지어낸 이름보다 원문이 낫다.
-        const kind = quota ? "quota" as const
-          : (prescription || authish) ? "auth" as const
-            : "exit" as const;
+        const kind = usageKind ?? ((!limitish && (prescription || authish)) ? "auth" as const
+            : "exit" as const);
         // Reached only when no prompt was dispatched and the agent showed no turn activity (the branch above throws
         // otherwise): a refusal before dispatch (RuntimeTurnDelivery), never an unsettled turn.
         return { text: "", failure: { kind, message: message + help, runtime: spec.id, source: "marker" },
