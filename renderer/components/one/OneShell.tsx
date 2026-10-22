@@ -1,5 +1,5 @@
 "use client";
-import { readAppUiPreference, writeAppUiPreference, subscribeAppUiPreference } from "@/lib/app-ui-preferences";
+import { writeAppUiPreference, subscribeAppUiPreference } from "@/lib/app-ui-preferences";
 import { MessageActions, MessageReplyPreview } from "../MessageActions";
 import { composeMessageReply, displayMessageReply, type MessageReply } from "@/lib/message-reply";
 
@@ -65,6 +65,7 @@ import {
 } from "@shared/ask-action-bar";
 import { OneDocumentCard } from "@/components/one/OneDocumentCard";
 import { runtimeModelDisplayLabel, runtimeModelFallbackLabel } from "@/components/dashboard/RuntimeModelPicker";
+import { chipRuntimeFor, composerModelLabel, useRunningComposerModel } from "@/lib/one-runtime-chip";
 import { readOneDocumentMark } from "@/lib/one-document-mark";
 import { OneSplitPane } from "@/components/one/OneSplitPane";
 import { LoadingEstimate } from "@/components/LoadingEstimate";
@@ -519,10 +520,6 @@ function readStoredBoolean(key: string, fallback: boolean): boolean {
   if (typeof window === "undefined") return fallback;
   const value = window.localStorage.getItem(key);
   return value === "true" ? true : value === "false" ? false : fallback;
-}
-
-function readStoredOneRuntimeSelection(): RuntimeSelection | null {
-  return readAppUiPreference("oneRuntimeSelection");
 }
 
 function writeStoredOneRuntimeSelection(selection: RuntimeSelection): void {
@@ -2127,9 +2124,6 @@ function OneSessionsShell() {
   const [oneModelOptions, setOneModelOptions] = useState<OneComposerModelOption[]>([]);
   const [oneRuntimeInventory, setOneRuntimeInventory] = useState<RuntimeStatus[]>([]);
   const [oneRuntimePreferenceRevision, setOneRuntimePreferenceRevision] = useState(0);
-  useEffect(() => subscribeAppUiPreference("oneRuntimeSelection", () => {
-    setOneRuntimePreferenceRevision((revision) => revision + 1);
-  }), []);
   // One is the owner's personal agent. Full access is the explicit product
   // default; the chip remains the per-turn authority control for narrowing it.
   const [onePermission, setOnePermissionState] = useState<OnePermissionMode>(readStoredOnePermission);
@@ -3579,6 +3573,7 @@ function OneSessionsShell() {
     let sessionListRefreshTimer: ReturnType<typeof setTimeout> | null = null;
     const unsubscribe = events.onStoreChanged((change) => {
       if (PROJECTION_DIRTY_ENTITIES.has(change.entity)) projectionReadRef.current.dirty = true;
+      if (change.entity === "runtime") setOneRuntimePreferenceRevision((revision) => revision + 1);
       const api = ipc();
       if (!api) return;
       if (change.entity === "one-org") {
@@ -4381,6 +4376,7 @@ function OneSessionsShell() {
   }, [projections, selectedTaskId]);
 
   const activeThreadChatId = selected?.chatId ?? conversation?.id ?? null;
+  const runningComposerModel = useRunningComposerModel(activeThreadChatId);
   const inlineUi = useInlineUiInstances(activeThreadChatId ?? undefined);
   const uiRunForMessage = (message: UiMessage): string | undefined => {
     if (message.continuationRunId) return message.continuationRunId;
@@ -5137,16 +5133,9 @@ function OneSessionsShell() {
       if (cancelled) return;
       // An open room shows its own durable pin; an unpinned room shows the
       // default orchestrator runtime, never another room's last choice. The
-      // stored last choice only seeds a room that does not exist yet.
-      const selection = chat?.runtimeSelection ?? (activeThreadChatId ? null : readStoredOneRuntimeSelection());
-      const matched = selection
-        ? runtimes.find((runtime) => runtimeMatchesSelection(runtime, selection))
-        : runtimes.find((runtime) => runtime.active);
-      setOneRuntime(matched ? withOneRuntimeSelection({
-        ...matched,
-        active: true,
-        longContextEnabled: selection?.longContext ?? matched.longContextEnabled,
-      }, selection?.model ?? matched.model ?? null, selection?.effort ?? (selection?.model ? undefined : matched.effort)) : null);
+      // current role setting initializes a room that does not exist yet.
+      const selection = chat?.runtimeSelection ?? null;
+      setOneRuntime(chipRuntimeFor(runtimes, selection));
       setOneRuntimePinned(Boolean(selection));
       setOneRuntimeInventory(runtimes);
     }).catch(() => {
@@ -11089,12 +11078,12 @@ function OneSessionsShell() {
                       aria-haspopup="dialog"
                       aria-controls={composerMenu === "model" ? "one-composer-popover" : undefined}
                       aria-label={appLocale === "ko"
-                        ? `모델: ${oneModelChipLabel(oneRuntime, oneModelOptions, "ko")}`
-                        : `Model: ${oneModelChipLabel(oneRuntime, oneModelOptions, "en")}`}
+                        ? `모델: ${composerModelLabel(oneModelChipLabel(oneRuntime, oneModelOptions, "ko"), runningComposerModel, "ko")}`
+                        : `Model: ${composerModelLabel(oneModelChipLabel(oneRuntime, oneModelOptions, "en"), runningComposerModel, "en")}`}
                       onClick={() => setComposerMenu((current) => current === "model" ? null : "model")}
                     >
                       <IconSparkles size={15} />
-                      <span>{oneModelChipLabel(oneRuntime, oneModelOptions, appLocale)}</span>
+                      <span>{composerModelLabel(oneModelChipLabel(oneRuntime, oneModelOptions, appLocale), runningComposerModel, appLocale)}</span>
                       <IconChevronDown size={12} />
                     </button>
                   )}

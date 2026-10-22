@@ -1,4 +1,5 @@
 import fs from 'node:fs/promises';
+import { companyDeviceSheet } from './native-approval-sheets';
 import path from 'node:path';
 import { createHash, createPrivateKey, generateKeyPairSync, randomBytes, randomUUID, sign } from 'node:crypto';
 import type { BrowserWindow, IpcMain, IpcMainInvokeEvent } from 'electron';
@@ -74,7 +75,8 @@ export function registerCompanyNativeOwnerMain(input: {
     try { for (;;) { const c = await reader.read(); if (c.done) break; size += c.value.byteLength; if (size > 1048576) { await reader.cancel(); fail('company_native_response_invalid'); } chunks.push(c.value); } } finally { reader.releaseLock(); }
     let value: unknown; try { value = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { fail('company_native_response_invalid'); }
     if (!response.ok) { const code = value && typeof value === 'object' && 'error' in value ? (value as { error: unknown }).error : null;
-      throw Object.assign(Error(typeof code === 'string' && /^[a-z0-9_]{1,100}$/.test(code) ? code : 'company_native_root_denied'), { status: response.status }); }
+      const machineCode = typeof code === 'string' && /^[a-z0-9_]{1,100}$/.test(code) ? code : 'company_native_root_denied';
+      throw Object.assign(Error(machineCode), { status: response.status, code: machineCode }); }
     return value;
   }
   async function sameBrowser(a: BusinessNativeAssociation) { const currentSession = await input.browser.currentSession(); refs(); if (!currentSession || digest(currentSession) !== digest(a.orgSession)) { invalidate(); fail('company_native_session_changed'); } }
@@ -99,7 +101,13 @@ export function registerCompanyNativeOwnerMain(input: {
     const proof: BusinessNativeRequestProof = { payload, signature: sign('sha256', Buffer.from(businessNativeSigningText('request', payload)), { key: createPrivateKey(h.value.privateKey), dsaEncoding: 'ieee-p1363' }).toString('base64url') };
     try { const result = await jsonRequest(target, method, body, { Authorization: 'Bearer ' + h.value.credential, 'x-agentlas-business-native-proof': Buffer.from(JSON.stringify(proof)).toString('base64url') });
       await sameBrowser(a); if (held !== h || digest(current()) !== digest(a)) fail('company_native_session_changed'); return result;
-    } catch (error) { if ((error as { status?: number }).status === 401 || (error as { status?: number }).status === 403) invalidate(); throw error; }
+    } catch (error) {
+      const denied = error as { status?: number; code?: string };
+      const recipientReadGrantMissing = denied.status === 403 && denied.code === 'grant_missing'
+        && (operation === 'transfers/receipt' || operation === 'transfers/package');
+      if (denied.status === 401 || denied.status === 403 && !recipientReadGrantMissing) invalidate();
+      throw error;
+    }
   }
   async function refresh() { const a = current(); if (!a) fail(); const result = await request('association'); if (!validAssociation(result) || digest(result) !== digest(a)) { invalidate(); fail('company_native_identity_changed'); } return current() ?? fail(); }
   function startMonitor() { if (!timer) { timer = setInterval(() => { if (current()) void refresh().catch(() => invalidate()); }, 60000); timer.unref(); } }
@@ -114,9 +122,7 @@ export function registerCompanyNativeOwnerMain(input: {
     if (connecting) fail('company_native_connection_pending'); connecting = true;
     try { const session = await input.browser.currentSession(); f.check(); if (!session || !isBusinessSession(session)) fail('company_native_sso_required');
       const ko = input.locale() === 'ko', electron = require('electron') as typeof import('electron');
-      const answer = await electron.dialog.showMessageBox(f.window, { type: 'question', title: ko ? '회사 기기 연결' : 'Connect company device',
-        message: ko ? '이 회사 계정으로 현재 기기를 연결합니다.' : 'Connect this device to the current company account.',
-        detail: `${session.organizationId}\n${session.principalId}\n${session.expiresAt}`, buttons: ko ? ['취소', '이 기기 연결'] : ['Cancel', 'Connect this device'], defaultId: 0, cancelId: 0, noLink: true });
+      const answer = await electron.dialog.showMessageBox(f.window, companyDeviceSheet(ko, session));
       f.check(); if (answer.response !== 1) fail('company_native_review_declined');
       if (digest(await input.browser.currentSession()) !== digest(session)) fail('company_native_session_changed'); f.check();
       const storage = electron.safeStorage;

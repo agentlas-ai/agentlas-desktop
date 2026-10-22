@@ -11,6 +11,51 @@ export function resolveGoalLifecycle(value: unknown): GoalLifecycle {
   throw new Error("goal_lifecycle_invalid");
 }
 
+/**
+ * A bounded series the owner asked for: the same work repeated at a stated interval, ending after a stated number of
+ * runs ("once an hour, ten in all"). Typed numbers the intake read from the owner's words; the host does the arithmetic
+ * (goalCadenceDeadlineAt) and never reads the words again. Only a finite Goal carries one.
+ */
+export interface GoalCadence {
+  everySeconds: number;
+  maxRuns: number;
+}
+
+export const GOAL_CADENCE_LIMITS = {
+  /** A timer wait closer than a minute is refused anyway (goal_wait_timer_invalid). */
+  minEverySeconds: 60,
+  maxEverySeconds: 7 * 86_400,
+  /** One run is not a series. */
+  minRuns: 2,
+  maxRuns: 1_000,
+  /** The wall-clock span of the whole series, last run plus one interval of slack. */
+  maxHorizonMs: 180 * 86_400_000,
+} as const;
+
+/** The whole series in milliseconds: every run plus one interval of slack after the last scheduled one. */
+export function goalCadenceHorizonMs(cadence: GoalCadence): number {
+  return cadence.everySeconds * 1_000 * (cadence.maxRuns + 1);
+}
+
+/** Absent stays absent; a present value is exactly two in-range integers or the Goal is not admitted (fails closed). */
+export function resolveGoalCadence(value: unknown): GoalCadence | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "object" || Array.isArray(value)) throw new Error("goal_cadence_invalid");
+  const { everySeconds, maxRuns } = value as Record<string, unknown>;
+  if (!Number.isSafeInteger(everySeconds) || !Number.isSafeInteger(maxRuns)) throw new Error("goal_cadence_invalid");
+  const every = everySeconds as number, runs = maxRuns as number;
+  if (every < GOAL_CADENCE_LIMITS.minEverySeconds || every > GOAL_CADENCE_LIMITS.maxEverySeconds
+    || runs < GOAL_CADENCE_LIMITS.minRuns || runs > GOAL_CADENCE_LIMITS.maxRuns
+    || goalCadenceHorizonMs({ everySeconds: every, maxRuns: runs }) > GOAL_CADENCE_LIMITS.maxHorizonMs) throw new Error("goal_cadence_invalid");
+  return { everySeconds: every, maxRuns: runs };
+}
+
+/** The end of a series that started at `createdAt`; timer waits are allowed up to it. Null when the start is unreadable. */
+export function goalCadenceDeadlineAt(createdAt: string, cadence: GoalCadence): string | null {
+  const start = Date.parse(createdAt);
+  return Number.isFinite(start) ? new Date(start + goalCadenceHorizonMs(cadence)).toISOString() : null;
+}
+
 export interface GoalSourceMessage {
   chatId: string;
   messageId: string;
@@ -25,13 +70,20 @@ export interface GoalIntakeDecision {
   commitment: "now" | "later" | "uncertain";
   /** New judged execution decisions supply this; absent legacy decisions are finite. */
   lifecycle?: GoalLifecycle;
-  /**
-   * Owner decision 2026-09-25: a finite request the assistant can finish in this one reply
-   * ("single") stays an ordinary turn with ordinary run receipts — no long-run, controller,
-   * verifier or sweep. Only "multi" (needs more than one turn, has an outward effect, or has
-   * acceptance criteria beyond the reply) becomes a Goal. Absent = legacy decision (treated as multi).
-   */
+     
+                                                                                           
+                                                                                            
+                                                                                             
+                                                                                                       
+     
   turnScope?: "single" | "multi";
+  /**
+   * A bounded series the intake read as typed numbers.
+   * Present only on a finite, multi-turn execution decision; the Goal then carries it on its revision, timer waits are
+   * allowed up to its end, and the service-turn follower hands the series to the host's own schedule instead of ending the
+   * Goal with the first run.
+   */
+  cadence?: GoalCadence;
 }
 
 export interface GoalCriterion {
@@ -62,6 +114,8 @@ export interface GoalRevision {
   reason: string;
   /** Missing only on legacy data. Ongoing criteria verify an episode, never end the goal. */
   lifecycle?: GoalLifecycle;
+  /** A bounded series (finite only): the interval and the number of runs the owner stated. Kept by every later revision. */
+  cadence?: GoalCadence;
   acceptanceCriteria: GoalCriterion[];
   /** References to existing host grants; this model cannot issue new grants. */
   authorityRefs: string[];
@@ -121,7 +175,8 @@ export function goalObjectiveText(text: string): string {
 /** Conservative admission: uncertainty never arms a background campaign. */
 export function admitsAutomaticGoal(source: GoalSourceMessage, decision: GoalIntakeDecision): boolean {
   validateSource(source);
-  resolveGoalLifecycle(decision.lifecycle);
+  const lifecycle = resolveGoalLifecycle(decision.lifecycle);
+  if (resolveGoalCadence(decision.cadence) && lifecycle !== "finite") throw new Error("goal_cadence_requires_finite");
   return decision.messageId === source.messageId && decision.intent === "execute" && decision.commitment === "now"
     && decision.turnScope !== "single";
 }
@@ -139,6 +194,7 @@ export function createAutomaticGoalRevision(input: {
   required(goalObjectiveText(input.source.text), "goal_objective_required");
   validateTime(input.createdAt);
   input.authorityRefs.forEach((ref) => required(ref, "goal_authority_ref_invalid"));
+  const cadence = resolveGoalCadence(input.decision.cadence);
   return {
     schemaVersion: AUTO_GOAL_SCHEMA,
     goalId: input.goalId,
@@ -150,6 +206,7 @@ export function createAutomaticGoalRevision(input: {
     objective: goalObjectiveText(input.source.text),
     reason: "initial_execution_request",
     lifecycle: resolveGoalLifecycle(input.decision.lifecycle),
+    ...(cadence ? { cadence } : {}),
     acceptanceCriteria: criteriaCopy(input.acceptanceCriteria),
     authorityRefs: [...new Set(input.authorityRefs)],
     createdAt: input.createdAt,

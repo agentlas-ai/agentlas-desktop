@@ -1,7 +1,8 @@
 "use client";
 import { useId, useState } from "react";
 import type { FinanceAIResult, FinanceConversationDataResult, FinanceDataResult } from "@shared/finance";
-import { IconChevronDown, IconChevronRight, IconChevronLeft } from "@/components/Icon";
+import { financeQueryScope } from "@shared/finance-query-scope";
+import { IconChevronDown, IconChevronRight, IconChevronLeft, IconExternalLink } from "@/components/Icon";
 import { FinanceDataResultView, financeDataVisual } from "./FinanceDataResultView";
 import { financeFeedLink } from "./FinanceDashboardFeed";
 import { financeCell, financeColumn } from "./FinanceMessage";
@@ -26,6 +27,8 @@ export function financeQuerySelection(entry: FinanceConversationDataResult): { s
 interface QueryItem { title: string; meta: { column: string; value: string }[]; href: string | null; row: (string | number | null)[]; value?: number | null; currency?: string | null; titleColumn?: number }
 export interface FinanceQueryPresentation { kind: "news" | "filings" | "social" | "feeds" | "quote" | "visual" | "records"; items: QueryItem[]; metric?: string; tooManyPoints?: boolean }
 const ADMIN_FIELDS = new Set(["URL", "Source", "Source ID", "Source URL", "Retrieved at", "Accession", "Document", "Original filing"]);
+/** In a row's details the value that is the row's own typed link is that link. Every other value stays text: only the typed item link can navigate. */
+export function financeQueryFieldLink(href: string | null, value: string | number | null): string | null { return href && typeof value === "string" && financeFeedLink(value) === href ? href : null; }
 /** Exact tool metric and provider column contracts choose a view; prose never chooses behavior. */
 export function financeQueryPresentation(entry: FinanceConversationDataResult): FinanceQueryPresentation {
   const { result } = entry, metric = entry.request?.metrics.length === 1 ? entry.request.metrics[0] : undefined;
@@ -76,6 +79,8 @@ export function financeQueryDate(value: string, ko: boolean, now = new Date(), t
     return new Intl.DateTimeFormat(ko ? "ko-KR" : "en-US", { ...(year !== currentYear ? { year: "numeric" as const } : {}), month: "short", day: "numeric", ...(instant ? { hour: "2-digit" as const, minute: "2-digit" as const } : {}), timeZone: instant ? timeZone : "UTC" }).format(date);
   } catch { return ""; }
 }
+/** Where a link goes, for its tooltip: the host without a leading www. */
+function financeLinkHost(href: string): string { try { return new URL(href).hostname.replace(/^www\./, ""); } catch { return ""; } }
 function Row({ item, result, kind, ko }: { item: QueryItem; result: FinanceDataResult; kind: FinanceQueryPresentation["kind"]; ko: boolean }) {
   const [expanded, setExpanded] = useState(false), id = useId();
   const money = item.value === undefined || item.value === null ? null : financeQueryNumber(item.value, ko);
@@ -85,9 +90,9 @@ function Row({ item, result, kind, ko }: { item: QueryItem; result: FinanceDataR
     {item.href ? <a className={styles.title} href={item.href} target="_blank" rel="noopener noreferrer" title={item.title}>{item.title}</a> : <strong className={styles.title} title={item.title}>{item.title}</strong>}
     {!!meta.length && <span className={styles.secondary} title={item.meta.map(item => item.value).join(" · ")}>{meta.join(" · ")}</span>}
     {kind === "quote" && <p className={styles.price}>{money ?? (ko ? "미확인" : "Unknown")} <small>{item.currency ?? (ko ? "통화 미확인" : "Currency unknown")}</small></p>}
-  </div><button type="button" className={styles.expand} aria-expanded={expanded} aria-controls={id} aria-label={`${ko ? "조회 상세" : "Result details"} · ${item.title}`} title={ko ? "상세 보기" : "View details"} onClick={() => setExpanded(value => !value)}>{expanded ? <IconChevronDown size={16}/> : <IconChevronRight size={16}/>}</button></div>
+  </div>{item.href && <a className={styles.open} href={item.href} target="_blank" rel="noopener noreferrer" aria-label={`${ko ? "원문 열기" : "Open original"} · ${item.title}`} title={`${ko ? "원문 열기" : "Open original"} · ${financeLinkHost(item.href)}`}><IconExternalLink size={16}/></a>}<button type="button" className={styles.expand} aria-expanded={expanded} aria-controls={id} aria-label={`${ko ? "조회 상세" : "Result details"} · ${item.title}`} title={ko ? "상세 보기" : "View details"} onClick={() => setExpanded(value => !value)}>{expanded ? <IconChevronDown size={16}/> : <IconChevronRight size={16}/>}</button></div>
     {kind === "records" && !expanded && <dl className={styles.values}>{fields.filter(field => field.index !== item.titleColumn).slice(0, 4).map((field, index) => <div key={index}><dt title={financeColumn(field.name, ko)}>{financeColumn(field.name, ko)}</dt><dd title={String(field.value ?? "")}>{typeof field.value === "number" ? financeQueryNumber(field.value, ko) : financeCell(field.value, field.name, ko)}</dd></div>)}</dl>}
-    {expanded && <div className={styles.rowDetail} id={id}><p>{item.title}</p><dl className={styles.values}>{fields.map((field, index) => <div key={index}><dt>{financeColumn(field.name, ko)}</dt><dd>{typeof field.value === "number" ? financeQueryNumber(field.value, ko) : financeCell(field.value, field.name, ko)}</dd></div>)}</dl></div>}
+    {expanded && <div className={styles.rowDetail} id={id}><p>{item.title}</p><dl className={styles.values}>{fields.map((field, index) => { const cell = typeof field.value === "number" ? financeQueryNumber(field.value, ko) : financeCell(field.value, field.name, ko), link = financeQueryFieldLink(item.href, field.value); return <div key={index}><dt>{financeColumn(field.name, ko)}</dt><dd>{link ? <a href={link} target="_blank" rel="noopener noreferrer" title={`${ko ? "원문 열기" : "Open original"} · ${financeLinkHost(link)}`}>{cell}</a> : cell}</dd></div>; })}</dl></div>}
   </li>;
 }
 /** Raw rows are explicit, paged text. Only the typed item link above can navigate. */
@@ -102,7 +107,7 @@ export function FinanceInlineQueryResult({ snapshot, messageId, locale }: { snap
   const displayed = showAll ? result : selection.result, presentation = financeQueryPresentation({ ...entry, result: displayed });
   const defaultTitle = entry.kind === "feeds" ? (ko ? "소식과 일정" : "Updates and calendar") : entry.kind === "discovery" ? (ko ? "종목 지표" : "Candidate metrics") : metricLabels[metric]?.[ko ? 0 : 1] ?? (ko ? "조회 결과" : "Query results");
   const title = !showAll && selection.status === "selected" && entry.presentation?.title?.trim() ? entry.presentation.title : defaultTitle;
-  const scope = entry.assets.length ? entry.assets.map(asset => asset.symbol).join(" · ") : entry.request?.query ?? "";
+  const scope = financeQueryScope(entry.request, entry.assets);
   const unavailable = result.status === "error" || result.status === "unconnected", invalid = !showAll && selection.status === "invalid", empty = !displayed.rows.length;
   const list = <ul className={styles.list}>{presentation.items.slice(0, visible).map((item, index) => <Row key={showAll ? index : selection.rowIndices[index]} item={item} result={displayed} kind={presentation.kind} ko={ko}/>)}</ul>;
   const more = presentation.kind !== "visual" && presentation.items.length > visible && <button type="button" className={styles.more} onClick={() => setVisible(count => count + 8)}>{ko ? "더 보기" : "Show more"} · {visible}/{presentation.items.length}</button>;

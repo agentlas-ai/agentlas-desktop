@@ -29,7 +29,7 @@ import { isRuntimeCredentialUnavailable, probeRuntimeCredentialAccess, type Runt
 import {
   AGENTLAS_SERVING_DEFAULT_MODEL,
   AGENTLAS_SERVING_MODELS,
-  AGENTLAS_SERVING_CONTEXT_WINDOW,
+  agentlasServingContextWindow,
 } from "../../shared/agentlas-serving";
 import { getDb } from "../store/db";
 import {
@@ -818,7 +818,7 @@ async function detectRuntimesUncached(observationOnly = false): Promise<RuntimeS
     });
   }
   if (managedLocal) list.push(managedLocal);
-  // kind "acp" — the open seat (PRD 2026-08-15 B-1): built-in ACP agents without a
+                                                                                   
   // dedicated kind (OpenCode, Goose, Copilot CLI) plus user profiles in ACP mode.
   // Presence = the command exists; models = ACP session/new (cached 10 min).
   // Detection is best-effort per spec: one broken agent never hides the others.
@@ -881,7 +881,7 @@ async function detectRuntimesUncached(observationOnly = false): Promise<RuntimeS
         model.id,
         {
           costTier: model.tier === "hard" ? "frontier" : model.tier === "normal" ? "balanced" : "economy",
-          contextWindow: AGENTLAS_SERVING_CONTEXT_WINDOW,
+          contextWindow: agentlasServingContextWindow(model.id),
           // The serving tool protocol runs Main's tool loop (agentlas-serving.ts runAgentlasServingWithTools).
           supportsTools: true,
           supportsMultimodal: false,

@@ -59,8 +59,9 @@ export type OneSettingsKey = "work" | "business" | "mcp" | "plugins" | "permissi
  * 여러 열로 늘어놓을 것이 있는 화면만 넓게 연다.
  */
 const SHEET_WIDTH: Record<OneSettingsKey, OneBottomSheetSize> = {
-  work: "compact",
-  business: "compact",
+  // 조직 공유·조직 업무 변경은 카드 여러 장(연결·공유·전달)과 입력 한 줄 + 주 버튼 배치를 쓰므로 넓게 연다.
+  work: "wide",
+  business: "wide",
   mcp: "compact",
   plugins: "compact",
   models: "wide",

@@ -1,9 +1,26 @@
 import { businessOnlyKeys as only, isBusinessId as id, isBusinessRevision as revision, isBusinessSession, type BusinessSession } from './context';
 import { isValidRuntimeSelectionInput as isRuntimeSelection } from '../runtime-selection';
-import type { RuntimeSelection } from '../types';
+import type { RuntimeBackend, RuntimeSelection } from '../types';
 export const COMPANY_WORK_SCHEMA = 'agentlas.business.company-work.v1' as const;
 export const COMPANY_WORK_PURPOSE = 'company.mail-work' as const;
 export const COMPANY_WORK_TOOLS = ['agent_mail_thread','agent_mail_read','agent_mail_reply','agent_mail_draft','company_file_read','company_file_write'] as const;
+/** One explicit provider capability for the company picker and focused Main. */
+export const COMPANY_WORK_BYOK_BACKENDS = ['anthropic','openai','google','glm','kimi','deepseek','minimax','xai','openrouter','upstage','custom'] as const;
+export function isCompanyWorkByokBackend(value: unknown): value is RuntimeBackend {
+ return typeof value==='string' && (COMPANY_WORK_BYOK_BACKENDS as readonly string[]).includes(value);
+}
+/** Match the ordinary Custom BYOK model-discovery URL boundary. The endpoint
+ * itself is shown during Native consent and only its digest enters Root policy. */
+export function normalizeCompanyWorkCustomEndpoint(value: unknown): string|null {
+ if(typeof value!=='string'||!value.trim()||value.length>2048)return null;
+ try{
+  const url=new URL(value.trim()),host=url.hostname.toLowerCase();
+  const loopback=['localhost','127.0.0.1','[::1]'].includes(host);
+  const privateLan=/^10\./.test(host)||/^192\.168\./.test(host)||/^172\.(1[6-9]|2\d|3[01])\./.test(host);
+  if((url.protocol!=='https:'&&!(url.protocol==='http:'&&(loopback||privateLan)))||url.username||url.password||url.search||url.hash)return null;
+  return url.href.replace(/\/$/,'');
+ }catch{return null}
+}
 export type CompanyWorkTool = typeof COMPANY_WORK_TOOLS[number];
 export interface CompanyWorkHost {
  readonly sourceKind: 'company-owned'|'host-consented';

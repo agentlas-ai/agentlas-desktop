@@ -321,6 +321,7 @@ function ChatInputComponent({
   modelOptions,
   onSelectModel,
   onSelectEffort,
+  runtimeControls,
   tokensUsage,
   activeAgentId,
   stopRequested = false,
@@ -373,6 +374,8 @@ function ChatInputComponent({
   onSelectModel?: (id: string) => void;
   /** 작업량 선택 — "" 이면 기본. claude-code 전용. */
   onSelectEffort?: (id: string) => void;
+  /** The chat-scoped cross-provider picker; supplied by the native Work surface. */
+  runtimeControls?: ReactNode;
   /** 화면에 복원된 대화 기록의 논리 토큰 추정치. 물리 모델 창 점유율이 아니다. */
   tokensUsage?: { current: number };
   /** 실행 모드 토글 노출 여부(division 챗은 숨김). + 메뉴에 "계속 라이브로"·"스웜"을 넣는다. */
@@ -1737,6 +1740,7 @@ function ChatInputComponent({
         {/* 하단 툴바 */}
         <div className="chat-input-toolbar">
           <div className="chat-input-tools-left">
+            {runtimeControls}
             {/* + 메뉴 */}
             <button
               type="button"

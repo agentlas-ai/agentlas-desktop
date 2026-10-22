@@ -26,6 +26,17 @@ function resultWasTruncated(value: unknown, depth = 3): boolean {
   if (record.truncated === true) return true;
   return Object.values(record).some(child => resultWasTruncated(child, depth - 1));
 }
+   
+                                                                                                                                     
+                                                                                                                                   
+                                                                                                                                      
+                                                                                                                                  
+                                                                                                                     
+   
+const FAILURE_MAX_CHARS = 2000;
+function clipFailure(text: string): string {
+  return text.length > FAILURE_MAX_CHARS ? `${text.slice(0, FAILURE_MAX_CHARS)} … [${text.length - FAILURE_MAX_CHARS} more characters left out]` : text;
+}
 type Dispatch = (byName: Map<string, ResolvedTool>, call: MainToolDispatchCall, events: RunnerEvents, approval: LocalToolApprovalContext) => Promise<MainToolDispatchResult>;
 const bootstrap = `
 const memory = new Map();
@@ -105,7 +116,7 @@ export async function runMainCodeMode(byName: Map<string, ResolvedTool>, input: 
     }});
     value = await engine.evaluate(`${bootstrap}\n${data.code}`, {timeoutMs: timeoutMs as number, signal: controller.signal});
   } catch (error) {
-    failure = error instanceof Error ? error.message : String(error);
+    failure = clipFailure(error instanceof Error ? error.message : String(error));
   } finally {
     controller.abort();
     engine?.dispose();
@@ -124,6 +135,11 @@ export async function runMainCodeMode(byName: Map<string, ResolvedTool>, input: 
     operations: {observed: operationCount, failed, pending: pending.size, peakConcurrency, ...(truncatedResults ? {truncatedResults} : {})},
     memory: {scope: "evaluation", durable: false, restartState: "unknown"}};
   const content = JSON.stringify(result);
-  if (content.length > 18000) return {content: "Error: code_mode_result_too_large; return a smaller summary.", isError: true, visionMessage: null};
+  if (content.length > 18000) {
+    // The reply names no part of the envelope; the host log does, so a "too large" answer for a small return can be traced to the
+    // field that made it so (the returned value, the failure text, or neither).
+    console.warn(`[code-mode] result too large: envelope ${content.length} chars, value ${JSON.stringify(value ?? null).length}, error ${failure?.length ?? 0}, operations observed ${operationCount} failed ${failed} pending ${pending.size}`);
+    return {content: "Error: code_mode_result_too_large; return a smaller summary.", isError: true, visionMessage: null};
+  }
   return {content, isError: failure !== null || failed > 0 || pending.size > 0, visionMessage: null};
 }

@@ -3,12 +3,15 @@ import { useAppUiPreference } from "@/lib/app-ui-preferences";
 
 import { useEffect, useState } from "react";
 import { taskTitleForDisplay } from "@/lib/task-title";
+import { isVisibleWorkTask, workTaskHref } from "@/lib/work-task-navigation";
 import { useSearchParams } from "next/navigation";
-import { ipc } from "@/lib/ipc";
+import { ipc, ipcEvents } from "@/lib/ipc";
+import { createCoalescedRefresh } from "@/lib/one-refresh-coordinator";
+import { createStoreChangeThrottle } from "@/lib/store-change-policy";
 import { navigate } from "@/lib/navigation";
 import { openProjectSettings } from "@/lib/project-settings";
 import { useT } from "@/lib/i18n";
-import { loadViewData, readViewData } from "@/lib/view-data-cache";
+import { invalidateViewDataForStoreChange, loadViewData, readViewData } from "@/lib/view-data-cache";
 import type { CanonicalTask, Project } from "@/lib/types";
 import { IconChevronDown, IconChevronRight, IconFolder, IconHome, IconPlus, IconSettings } from "./Icon";
 import { AttentionDot } from "./AttentionDot";
@@ -29,6 +32,7 @@ export function ProjectSidebar() {
   const [loadFailed, setLoadFailed] = useState(false);
   const [collapsedProjects, setCollapsedProjects] = useAppUiPreference("projectCollapsed");
   const sidebar = useWorkSidebarWidth();
+  const unassignedTasks = tasks.filter((task) => !task.projectId && isVisibleWorkTask(task));
 
   function toggleProjectChats(projectId: string) {
     setCollapsedProjects((current) => ({ ...current, [projectId]: !current[projectId] }));
@@ -41,20 +45,39 @@ export function ProjectSidebar() {
       return;
     }
     let cancelled = false;
-    const load = (force = false) => void Promise.all([
-      loadViewData("dashboard.projects", () => api.projects.list(), { maxAgeMs: 10_000, force }),
-      loadViewData("dashboard.tasks.200", () => api.tasks.list({ limit: 200, reconcile: false }), { maxAgeMs: 5_000, force }),
-    ]).then(([items, taskRows]) => {
-      if (!cancelled) { setProjects(items); setTasks(taskRows); setLoadFailed(false); }
-    }).catch(() => {
-      if (!cancelled) setLoadFailed(true);
-    });
-    load();
-    const onChanged = () => load(true);
+    let generation = 0;
+    const reader = createCoalescedRefresh<boolean>(async (force) => {
+      const ticket = generation;
+      try {
+        const [items, taskRows] = await Promise.all([
+          loadViewData("dashboard.projects", () => api.projects.list(), { maxAgeMs: 10_000, force }),
+          loadViewData("dashboard.tasks.200", () => api.tasks.list({ limit: 200, reconcile: false }), { maxAgeMs: 5_000, force }),
+        ]);
+        if (!cancelled && ticket === generation) { setProjects(items); setTasks(taskRows); setLoadFailed(false); }
+      } catch {
+        if (!cancelled && ticket === generation) setLoadFailed(true);
+      }
+    }, (previous, incoming) => previous || incoming);
+    const changes = createStoreChangeThrottle({ immediate: () => false, throttleMs: 500,
+      run: () => { void reader.request(true); } });
+    const onStoreChanged = (change: { entity: string }) => {
+      if (!["task", "chat", "project"].includes(change.entity)) return;
+      // Invalidate before requesting a read even on an older event bridge.
+      // A notice during a pending read must not repaint its obsolete rows.
+      ++generation;
+      invalidateViewDataForStoreChange(change);
+      changes.notify(change);
+    };
+    const off = ipcEvents()?.onStoreChanged?.(onStoreChanged);
+    void reader.request(false);
+    const onChanged = () => onStoreChanged({ entity: "project" });
     window.addEventListener("agentlas:projects-changed", onChanged);
     window.addEventListener("agentlas:tasks-changed", onChanged);
     return () => {
       cancelled = true;
+      changes.dispose();
+      reader.dispose();
+      off?.();
       window.removeEventListener("agentlas:projects-changed", onChanged);
       window.removeEventListener("agentlas:tasks-changed", onChanged);
     };
@@ -88,9 +111,13 @@ export function ProjectSidebar() {
               <button type="button" className="project-sidebar-collapse" onClick={() => openProjectSettings({ mode: "edit", projectId: project.id })} aria-label={ko ? `${project.name} 설정` : `Settings for ${project.name}`} title={ko ? "프로젝트 설정" : "Project settings"} aria-haspopup="dialog"><IconSettings size={14} /></button>
               {projectTasks.length > 0 ? <button type="button" className="project-sidebar-collapse" onClick={() => toggleProjectChats(project.id)} aria-label={chatsCollapsed ? (ko ? `${project.name}의 채팅 펼치기` : `Expand chats for ${project.name}`) : (ko ? `${project.name}의 채팅 접기` : `Collapse chats for ${project.name}`)} aria-expanded={!chatsCollapsed}>{chatsCollapsed ? <IconChevronRight size={14} /> : <IconChevronDown size={14} />}</button> : null}
             </div>
-            {!chatsCollapsed && projectTasks.map((task) => <button type="button" className="project-sidebar-task" key={task.id} data-chat-id={task.originChatId ?? undefined} onClick={() => navigate(`/workspace/task?id=${encodeURIComponent(task.originChatId ?? "")}&task=${encodeURIComponent(task.id)}&projectId=${encodeURIComponent(project.id)}`)}><span>{taskTitleForDisplay(task.title, ko)}</span><ChatRowAttentionDot chatId={task.originChatId} locale={ko ? "ko" : "en"} /></button>)}
+            {!chatsCollapsed && projectTasks.map((task) => <button type="button" className="project-sidebar-task" key={task.id} data-chat-id={task.originChatId ?? undefined} onClick={() => navigate(workTaskHref(task))}><span>{taskTitleForDisplay(task.title, ko)}</span><ChatRowAttentionDot chatId={task.originChatId} locale={ko ? "ko" : "en"} /></button>)}
           </div>;
         })}
+        {unassignedTasks.length > 0 ? <div className="project-sidebar-project" data-unassigned-work="true">
+          <div className="project-sidebar-label">{ko ? "프로젝트 없는 작업" : "Work without a project"}</div>
+          {unassignedTasks.map((task) => <button type="button" className="project-sidebar-task" key={task.id} data-chat-id={task.originChatId ?? undefined} onClick={() => navigate(workTaskHref(task))}><span>{taskTitleForDisplay(task.title, ko)}</span><ChatRowAttentionDot chatId={task.originChatId} locale={ko ? "ko" : "en"} /></button>)}
+        </div> : null}
         {loadFailed ? <div className="project-sidebar-empty" role="alert">{ko ? "프로젝트 목록을 불러오지 못했습니다" : "Projects are temporarily unavailable"}</div> : null}
         {!loadFailed && projects.length === 0 ? <button type="button" className="project-sidebar-empty" onClick={() => openProjectSettings()}>{ko ? "첫 프로젝트를 만들어 보세요" : "Create your first project"}</button> : null}
       </nav>

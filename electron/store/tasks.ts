@@ -20,6 +20,7 @@ interface TaskRow {
   updated_at: string;
   archived_at: string | null;
   origin_chat_id: string | null;
+  origin_surface?: string | null;
 }
 
 interface TaskChatRow {
@@ -250,6 +251,11 @@ function participantNeedsUpsert(
 }
 
 function toTask(row: TaskRow, participantsByTask?: Map<string, ParticipantRow[]>): CanonicalTask {
+  // Lists join this once for all rows. Single-task readers use the same source
+  // without promoting a conversation or changing its project ownership.
+  const surface = row.origin_surface !== undefined ? row.origin_surface : row.origin_chat_id && tableExists("chats")
+    ? (getDb().prepare("SELECT origin_surface FROM chats WHERE id = ?").get(row.origin_chat_id) as { origin_surface: string } | undefined)?.origin_surface
+    : undefined;
   return {
     id: row.id,
     version: canonicalVersion(row.updated_at),
@@ -258,6 +264,7 @@ function toTask(row: TaskRow, participantsByTask?: Map<string, ParticipantRow[]>
     firmId: row.firm_id,
     status: normalizeStatus(row.status),
     originChatId: row.origin_chat_id,
+    ...(surface === "one" || surface === "work" ? { originSurface: surface } : {}),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     archivedAt: row.archived_at,
@@ -505,15 +512,18 @@ export function listCanonicalTasks(input: {
   }
   const limit = Math.max(1, Math.min(200, Math.floor(input.limit ?? 50)));
   const statement = getDb().prepare(
-      `SELECT * FROM tasks
-       WHERE id NOT LIKE 'task_pairing_%'
-         ${input.includeArchived ? "" : "AND status <> 'archived'"}
+`SELECT tasks.*, source_chat.origin_surface AS origin_surface FROM tasks
+       LEFT JOIN (SELECT id, origin_surface FROM chats) source_chat ON source_chat.id = tasks.origin_chat_id
+       WHERE tasks.id NOT LIKE 'task_pairing_%'
+         AND NOT EXISTS (SELECT 1 FROM chats internal_root
+           WHERE internal_root.id = tasks.origin_chat_id AND internal_root.kind = 'division')
+         ${input.includeArchived ? "" : "AND tasks.status <> 'archived'"}
          ${projectId ? "AND project_id = ?" : ""}
-       ORDER BY updated_at DESC
+       ORDER BY tasks.updated_at DESC
        LIMIT ?`,
     );
   const rows = (projectId ? statement.all(projectId, limit) : statement.all(limit)) as TaskRow[];
-  // 참여자는 한 번에 — 행마다 쿼리하면 목록 하나에 문장 201개(2026-09-14 실측).
+                                                        
   const participantsByTask = new Map<string, ParticipantRow[]>();
   if (rows.length && tableExists("task_agent_participants")) {
     for (let i = 0; i < rows.length; i += 200) {

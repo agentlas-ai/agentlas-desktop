@@ -8,7 +8,7 @@ import {businessEmployeeAgentNativeDigest as digest} from './employee-agent-repo
 import {isBusinessSession,isBusinessRevision,businessOnlyKeys} from '../../shared/business/context';
 import type {BusinessNativeOrganizationAssociationOwner,BusinessNativeInstallationIdentity} from '../../shared/business/native-association';
 const base='/api/business/native/employee-agents/';
-function deny():never{throw Error('business_native_connection_unavailable')}
+function deny(code='business_native_connection_unavailable'):never{throw Object.assign(Error('business_native_connection_unavailable'),{code})}
 function association(value:unknown):value is BusinessNativeAssociation{
  if(!businessOnlyKeys(value,['associationId','associationRevision','orgSession','native','nativeAccountAuthEpoch','purpose','audiencePrincipalIds','sourceAuthorityId','commandAuthorityId','consentRevision','sourceRevision','state','expiresAt']))return false;
  const v=value as unknown as BusinessNativeAssociation;
@@ -17,7 +17,7 @@ function association(value:unknown):value is BusinessNativeAssociation{
 /** Existing first-party native credential + original host key. Construction is
  * inert; only explicit native actions invoke fetch/key reads. No new bearer. */
 export function createNativeEmployeeConnection(runtime:OneVaultRuntime,installationGeneration:()=>number){
- let closed=false,active:BusinessNativeAssociation|null=null;
+ let closed=false,active:BusinessNativeAssociation|null=null,associationUpdatePending=false;
  const capabilities=new WeakMap<object,string>();
  const db=runtime.sources.db,originalReferences=[runtime.currentNativeOwner,runtime.sources,runtime.trust,runtime.trust.currentHostMetadata,runtime.sources.oneId];
  function schema(){db.exec(`CREATE TABLE IF NOT EXISTS one_business_native_associations(
@@ -36,6 +36,7 @@ export function createNativeEmployeeConnection(runtime:OneVaultRuntime,installat
    return row?.record_json===JSON.stringify(active)?structuredClone(active):null;
   }catch{return null;}
  }
+ function beginAssociationUpdate(){if(associationUpdatePending)deny('business_native_connection_approval_in_progress');associationUpdatePending=true;return()=>{associationUpdatePending=false;};}
  function url(operation:string,query?:Record<string,string>){const root=new URL(webBaseUrl());if(root.protocol!=='https:'||root.username||root.password||root.search||root.hash)deny();const target=new URL(base+operation,root);for(const [k,v]of Object.entries(query??{}))target.searchParams.set(k,v);return target.toString();}
  async function fetchOriginal(target:string,method:string,body:string,proof?:BusinessNativeRequestProof,approval?:BusinessNativeApproval){
   const before=native(),auth=getAuthenticatedSessionBinding(),session=sessionForDaemonHandoff();if(!auth||!session?.cookieValue)deny();
@@ -57,24 +58,31 @@ export function createNativeEmployeeConnection(runtime:OneVaultRuntime,installat
   if(!isBusinessNativeChallenge(value)||value.challengeId!==challengeId||value.expiresAt<=Date.now()||digest(value.native)!==digest(native()))deny();return structuredClone(value);
  }
  async function complete(challenge:BusinessNativeChallenge,assertFocusedApproval:()=>void){
-  const exact=structuredClone(challenge);const check=()=>{assertFocusedApproval();if(!isBusinessNativeChallenge(exact)||exact.expiresAt<=Date.now()||digest(exact.native)!==digest(native()))deny()};check();schema();
+  if(current())deny('business_native_connection_already_active');const release=beginAssociationUpdate();try{
+  const exact=structuredClone(challenge);const check=()=>{assertFocusedApproval();if(current())deny('business_native_connection_already_active');if(!isBusinessNativeChallenge(exact)||exact.expiresAt<=Date.now()||digest(exact.native)!==digest(native()))deny()};check();schema();
   if(db.prepare('SELECT 1 FROM one_business_native_association_attempts WHERE challenge_id=?').get(exact.challengeId))throw Error('business_native_completion_use_receipt_lookup');
   const payload={challenge:exact,approvedAt:Date.now(),approvalReceiptId:randomUUID()},signature=await signPayload('association-approve',payload,check);check();
   const approval:BusinessNativeApproval={...payload,signature};db.transaction(()=>{check();db.prepare("INSERT INTO one_business_native_association_attempts VALUES(?,?,'attempted',?)").run(payload.approvalReceiptId,exact.challengeId,JSON.stringify(approval))}).immediate();
   const value=await fetchOriginal(url('complete'),'POST',JSON.stringify(approval));check();
   if(!association(value)||digest(value.native)!==digest(exact.native)||digest(value.orgSession)!==digest(exact.orgSession)||digest(value.audiencePrincipalIds)!==digest(exact.audiencePrincipalIds)||value.sourceAuthorityId!==exact.sourceAuthorityId||value.commandAuthorityId!==exact.commandAuthorityId)deny();
   db.transaction(()=>{check();db.prepare("INSERT INTO one_business_native_associations VALUES(?,'active',?,?,0)").run(value.associationId,JSON.stringify(value),JSON.stringify(approval));db.prepare("UPDATE one_business_native_association_attempts SET state='confirmed' WHERE approval_id=? AND state='attempted'").run(payload.approvalReceiptId)}).immediate();active=structuredClone(value);return current()??deny();
+  }finally{release();}
  }
  function pendingApproval(challengeId:string):string|null{try{const rows=db.prepare("SELECT approval_id,approval_json FROM one_business_native_association_attempts WHERE challenge_id=? AND state='attempted'").all(challengeId) as Array<{approval_id:string;approval_json:string}>;if(rows.length!==1)return null;const approval=JSON.parse(rows[0].approval_json) as BusinessNativeApproval;return digest(approval.challenge.native)===digest(native())?rows[0].approval_id:null}catch{return null}}
  async function reconcile(approvalReceiptId:string){
+  const release=beginAssociationUpdate();try{
   schema();const row=db.prepare('SELECT approval_json FROM one_business_native_association_attempts WHERE approval_id=?').get(approvalReceiptId) as {approval_json:string}|undefined;if(!row)deny();
   const approval=JSON.parse(row.approval_json) as BusinessNativeApproval;if(digest(approval.challenge.native)!==digest(native()))deny();
+  const before=current();if(before){const original=db.prepare('SELECT approval_json FROM one_business_native_associations WHERE association_id=?').get(before.associationId) as {approval_json:string}|undefined;
+   if(original?.approval_json!==row.approval_json)deny('business_native_connection_already_active');}
   const value=await fetchOriginal(url('complete',{challengeId:approval.challenge.challengeId,approvalReceiptId}),'GET','',undefined,approval);
   if(!association(value)||digest(value.native)!==digest(native())||digest(value.orgSession)!==digest(approval.challenge.orgSession)||digest(value.audiencePrincipalIds)!==digest(approval.challenge.audiencePrincipalIds)||value.sourceAuthorityId!==approval.challenge.sourceAuthorityId||value.commandAuthorityId!==approval.challenge.commandAuthorityId)deny();
+  if(before&&digest(value)!==digest(before))deny('business_native_connection_already_active');
   db.transaction(()=>{if(digest(value.native)!==digest(native()))deny();const existing=db.prepare('SELECT record_json FROM one_business_native_associations WHERE association_id=?').get(value.associationId) as {record_json:string}|undefined;
    if(existing&&existing.record_json!==JSON.stringify(value))deny();if(!existing)db.prepare("INSERT INTO one_business_native_associations VALUES(?,'active',?,?,0)").run(value.associationId,JSON.stringify(value),row.approval_json);
    db.prepare("UPDATE one_business_native_association_attempts SET state='confirmed' WHERE approval_id=?").run(approvalReceiptId);
   }).immediate();active=structuredClone(value);return current()??deny();
+  }finally{release();}
  }
  async function request(operation:'association'|'prepare'|'packet'|'receipt'|'revoke'|'publish'|'report'|'publication-receipt'|'publish-continue'|'transfers/prepare'|'transfers/commit'|'transfers/receipt'|'transfers/package'|'transfers/inbox'|'transfers/snapshot'|'transfers/install-ack'|'transfers/installation-receipt'|`company-work/${'admit'|'claim'|'refresh'|'settle'|'receipt'|'cancel'|'review'|'policies'}`,body:unknown=null,query?:Record<string,string>){
   const before=current();if(!before)deny();const method=operation==='association'||operation==='receipt'||operation==='report'?'GET':'POST',target=url(operation,query),bytes=method==='GET'?'':JSON.stringify(body);

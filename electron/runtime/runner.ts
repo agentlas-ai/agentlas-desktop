@@ -14,7 +14,7 @@ import type { ToolInvocationOrigin } from "../../shared/tool-invocation-origin";
 import type { RuntimeToolKind } from "../../shared/runtime-tool-kind";
 import type { InvocationPlan } from "../../shared/invocation-plan";
 import { tStatus, type RuntimeLocale } from "./status-i18n";
-import { composePrompt, ASK_LINE, type PluginCatalog } from "./prompt-modules";
+import { composePrompt, ASK_LINE_CHOICE, type PluginCatalog } from "./prompt-modules";
 import { installedPluginCatalog, explicitPluginRouterPrompt } from "../plugins/router-prompt";
 import { installedAgentlasCapabilityProviders } from "../plugins/plugin-candidates";
 import { preferredProviderPairs } from "../../shared/capability-priority";
@@ -400,10 +400,10 @@ function workforceObservationValueDigest(value: unknown): string {
 const WORKFORCE_SHA256_RE = /^sha256:[0-9a-f]{64}$/;
 const WORKFORCE_TOOL_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_.$:/@+~-]{0,127}$/;
 
-/** Check the measured inventory window separately from the native policy.
- * Host authority permits unrelated tools to connect; selected bindings must
- * be available with identical fingerprints at both observation boundaries.
- */
+                                                                          
+                                                                            
+                                                                           
+   
 function validWorkforceInventoryEvidence(
   observation: WorkforceHostObservation,
   grant: WorkforceRuntimeToolGrant,
@@ -522,11 +522,11 @@ export function workforceZeroToolsEnforcement(
   };
 }
 
-/**
- * Runtime-owned receipt for a host-authority row (policy `host`, 2026-09-05): the run
- * executed under the host's own permission mode and capability grants, not a sandbox.
- * Evidence is honest about that — nothing was made ephemeral or ignored.
- */
+   
+                                                                                      
+                                                                                      
+                                                                         
+   
 export function workforceHostAuthorityEnforcement(
   req: RunnerRequest,
   runtimeKind: string,
@@ -1422,10 +1422,12 @@ export function withNativeBrowserGuidance(runner: Runner, runtimeKind?: string):
 /* Ask counts are never stated in prose (they used to contradict each other: "multiple blocks" / "exactly one" / "one batch of 3-5").
  * The host parser decides: extractAskFences (shared/ask-fence-flatten.ts) keeps at most 64 questions per reply, each with 2-8 options,
  * and drops unfilled template placeholders (isUnfilledQuestionTemplate). Same for the Briefing gate. */
-/** 에이전트가 사용자에게 옵션 질문을 emit할 수 있는 프로토콜 — renderer/lib/ask-question.ts의 파서와 짝.
- *  로케일 무관, 영어로 — 모델은 항상 영어 docstring을 잘 따른다.
- *  토큰을 아끼기 위해 짧게. */
-const ASK_PROTOCOL = ASK_LINE;
+                                                                             
+                                             
+                  
+                                                                                                                                   
+                                                                                   
+const ASK_PROTOCOL = ASK_LINE_CHOICE;
 
 /**
 
@@ -1517,17 +1519,17 @@ export function measureBuildSystemPrompt(prompt: string): { chars: number; appro
 export const SURFACE_INTENT_MARKER = "<<surface-intent>>";
 
 
-/**
- * 서피스 게이트 입력 — **대화 누적**으로 판정한다(2026-08-18 캐시 수리, 러너 공통 규칙).
- *
- * system을 매 호출 재전송하는 러너(BYOK·Ollama·LM Studio·MLX·로컬 OpenAI 호환)와
- * 히스토리를 프롬프트에 매번 재렌더하는 CLI 러너(Antigravity·Cursor)에서, 이 게이트를
- * **이번 턴 입력만** 보고 켜면 SURFACE_PROTOCOL(~8KB)이 턴마다 붙었다 떨어져 프리픽스
- * 바이트가 흔들린다 — 프롬프트 캐시는 그 지점부터 전부 무효가 된다.
- *
- * 누적 판정은 단조라(한 번 켜지면 그 대화에서 유지) 프리픽스가 안정된다. 한 런타임에서
- * 배운 수리는 러너 공통으로 둔다 — 특례는 특례가 안 붙은 형제를 지뢰로 남긴다.
- */
+   
+                                                             
+  
+                                                                 
+                                                            
+                                                              
+                                         
+  
+                                                    
+                                                
+   
 export function cumulativeSurfaceGateText(
   history: RunnerRequest["history"],
   userPrompt: string,

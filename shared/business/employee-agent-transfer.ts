@@ -100,7 +100,7 @@ export interface EmployeeAgentTransferAPI {
   /** Employee opens the exact organization-issued request; Main opens a native
    * folder picker and shows every selected body before independent acceptance. */
   exportAgent(input: EmployeeAgentTransferPrepareRequest): Promise<{ acceptanceId: string; transferId: string; state: 'exported' | 'unknown' }>;
-  transferReceipt(input: { transferId: string }): Promise<EmployeeAgentTransferReceipt | null>;
+  transferReceipt(input: { transferId: string }): Promise<EmployeeAgentTransferReceipt | { transferId: string; state: 'recipient-renewal-required' } | null>;
   importAgent(input: { transferId: string }): Promise<EmployeeAgentTransferLocalReceipt>;
 }
 export function employeeAgentTransferPath(value: unknown, kind: EmployeeAgentTransferKind): value is string {

@@ -80,6 +80,7 @@ import { createNativeGmailPersonalSourceOwner, type GmailPersonalSourceOwner } f
 import { registerRoomDiscussionIpc } from './one/room-discussion-ipc';
 import { closeOnePersonalIntegrations, invalidateOnePersonalIntegrations, configureOnePersonalIntegrationPolicy } from './one/personal-integrations-runtime';
 import { configureDevelopmentEffectPolicy, developmentEffectPolicyRequested, developmentEffectsSuppressed, developmentIpcBoundary, developmentRendererRequestAllowed } from "./development-effect-policy";
+import { openRendererLink } from "./renderer-link-open";
 import { ScienceProjectFolderSelections, validateScienceProjectFolderPath } from "agentlas-science";
 import { installDesktopScienceHost } from "./science-host";
 import { createScienceDaemonClient, type ScienceDaemonClientOptions } from "./science-host/daemon-client";
@@ -417,11 +418,11 @@ const oneTeamNotificationKeys = new Set<string>();
  * the verifier; ordinary packaged launches never create this file.
  */
 const UPDATER_E2E_TRACE_PATH_ENV = "AGENTLAS_UPDATER_E2E_TRACE_PATH";
-/**
- * A remote Science rejection carries the daemon's machine code in `failure`;
- * logging only the Error printed a bare stack and hid the cause for days
- * (science_daemon_remote_rejected on every packaged boot, 2026-09-27~29).
- */
+   
+                                                                             
+                                                                         
+                                                                          
+   
 function scienceDaemonFailureForLog(error: unknown): unknown {
   const failure = (error as { failure?: unknown } | null)?.failure;
   return failure && typeof failure === "object" ? { ...failure } : error;
@@ -613,7 +614,7 @@ function initializeInstallIdentity(): InstallIdentity {
 
 const installIdentity = initializeInstallIdentity();
 traceUpdaterStartup("install-identity-ready");
-// Browser caches are bounded so the profile keeps only what automation needs (2026-10-16).
+                                                                                           
 capAppBrowserCache();
 
 /** A reopening GUI cannot migrate or boot-repair a store still owned by an
@@ -1000,7 +1001,7 @@ const UPDATE_RELAUNCH_LOCK_RETRY_MS = 250;
 const UPDATE_RELAUNCH_LOCK_TIMEOUT_MS = 60_000;
 traceUpdaterStartup("before-single-instance-lock");
 // A copy of the OLD build opened while ShipIt is replacing the bundle makes ShipIt abort ("App Still Running", 1.2.95 on
-// 2026-10-11). Yield before anything else starts; ShipIt relaunches the new build itself after a successful install.
+                                                                                                                     
 if (app.isPackaged && !allowMultiInstance && shouldYieldToNativeInstall({
   platform: process.platform, userDataPath: userDataDir(), runningVersion: app.getVersion(), uid: process.getuid?.() ?? null,
 })) {
@@ -1060,17 +1061,17 @@ void singleInstanceLockPromise.then((acquired) => {
   app.exit(0);
 });
 
-/*
- * ── agentlas:// 딥링크 ────────────────────────────────────────────────────────
- * 허브(웹)의 "설치" 버튼이 여는 주소다: agentlas://plugin/<family>/<slug>.
- * 등록하지 않으면 OS 가 이 스킴을 아무 앱에도 넘기지 않아 버튼이 조용히 죽는다
- * (2026-08-20 감사: 허브 상세가 설치 안내문만 띄우던 이유).
- *
- * 이 스킴은 렌더러가 내부적으로도 쓰지만(agentlas://app/index.html), 그건
- * protocol.handle 이 앱 안에서 처리하는 것이고 여기 등록은 **OS → 앱** 전달용이라
- * 서로 간섭하지 않는다. 링크는 항해가 아니라 라우팅 신호로만 소비한다 —
- * 바깥에서 온 URL 로 창을 항해시키지 않는다.
- */
+  
+                                                                              
+                                                             
+                                                
+                                          
+  
+                                                       
+                                                           
+                                           
+                             
+   
 const PLUGIN_DEEP_LINK_RE = /^agentlas:\/\/plugin\/([a-z0-9][a-z0-9-]{0,63})\/([a-z0-9][a-z0-9-]{0,79})\/?$/i;
 // A link that arrives before the main window shows a product document becomes that window's first screen,
 // ahead of the remembered one (mainWindowInitialRoute); delivered once, by whichever comes first.
@@ -1433,9 +1434,7 @@ async function createWindow(options: { startupPlaceholder?: boolean; initialRout
   // 외부 링크는 기본 브라우저로 — 데스크톱 안에서 임의 URL 열지 않는다 (PRD 6.2)
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     if (developmentEffectsSuppressed()) return { action: "deny" };
-    if (url.startsWith("http://") || url.startsWith("https://")) {
-      shell.openExternal(url);
-    }
+    openRendererLink(url, target => shell.openExternal(target));
     return { action: "deny" };
   });
 
@@ -1450,7 +1449,7 @@ async function createWindow(options: { startupPlaceholder?: boolean; initialRout
       || (isDev && startUrl ? url.startsWith(startUrl) : false);
     if (allowed) return;
     event.preventDefault();
-    if (!developmentEffectsSuppressed() && (url.startsWith("http://") || url.startsWith("https://"))) void shell.openExternal(url);
+    if (!developmentEffectsSuppressed()) openRendererLink(url, target => shell.openExternal(target));
   });
 
   mainWindow.webContents.on("did-fail-load", (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
@@ -2179,7 +2178,7 @@ app.whenReady().then(async () => {
 
   installGoogleSessionTrace("persist:agentlas-browser-default");
   void trimOversizedSessionCaches(["persist:agentlas-browser-default"]);
-  // 4-tier model catalog (PRD 2026-08-15 D-4): wire the context-window resolver
+                                                                                
   // so BYOK compaction stops assuming 128k, and refresh models.dev in the
   // background (TTL 24h; failure keeps the stale copy, never blocks startup).
   try {
@@ -4466,7 +4465,7 @@ app.whenReady().then(async () => {
     if (!input || typeof input !== "object") throw new Error("science-manuscript-proposal-input-invalid");
     return scienceStore().rejectManuscriptEditProposal(input as RejectScienceManuscriptEditProposalInput);
   });
-  // 공식 사이트가 죽었을 때의 화면 경로(2026-09-14): 규정 본문 붙여넣기 / 거울 페이지.
+                                                           
   ipcMain.handle("science:submissions:list", (event, input: unknown) => {
     assertScienceSender(event, input);
     const record = input && typeof input === "object" ? input as Record<string, unknown> : {};
@@ -5269,7 +5268,7 @@ app.whenReady().then(async () => {
   } catch (err) {
     console.error("[learning-proposer] start failed:", err);
   }
-  // 전면 영어 마이그레이션(기획 2026-09-23 데스크탑 절) — 한 번 큐를 채우고 유휴에서 끝까지 번역한다.
+                                                                   
   // dreaming 설정과 무관(별도 1회 작업), 하드 옵트아웃 meta 만 존중. 부팅 경로 밖(지연·유휴 타이머).
   try {
     const { startEnglishMemoryMigration } = await import("./memory/english-migration");

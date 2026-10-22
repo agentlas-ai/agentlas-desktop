@@ -61,7 +61,9 @@ export function autoHandoffGoalRuntimeAtWait(input: {
   if (cooling?.kind === "quota") {
     const fallback = rolePriorityRuntimes([...input.inventory], "orchestrator")
       .find(candidate => candidate.kind !== input.currentSelection.kind
-        || candidate.backend !== input.currentSelection.backend);
+        || candidate.backend !== input.currentSelection.backend
+        // Another open ACP seat is another account; only when the current selection names its own seat.
+        || (candidate.kind === "acp" && !!input.currentSelection.acpAgentId && candidate.acpAgentId !== input.currentSelection.acpAgentId));
     if (!fallback) return { state: "cooldown-wait", until: cooling.until };
     try {
       next = resolveRequestedGoalRuntimeSelection({ kind: fallback.kind, backend: fallback.backend,
@@ -79,7 +81,8 @@ export function autoHandoffGoalRuntimeAtWait(input: {
     catch { /* Keep using the working fallback until the preferred model is available. */ }
   }
   if (!next || (next.kind === input.currentSelection.kind && next.backend === input.currentSelection.backend
-    && next.source === input.currentSelection.source && next.model === input.currentSelection.model)) return { state: "unchanged" };
+    && next.source === input.currentSelection.source && next.model === input.currentSelection.model
+    && (next.acpAgentId ?? null) === (input.currentSelection.acpAgentId ?? null))) return { state: "unchanged" };
   appendLongRunEvent({ runId: run.id, kind: "run.goal_runtime_selection", actorKind: "host",
     payload: { goalId: run.goalId, goalRevision: revision.revision, chatId: run.rootChatId!,
       selectionRevision: (prior?.selectionRevision ?? 0) + 1, state: "pending",

@@ -27,6 +27,25 @@ export function financeSecDocumentUrl(cik: string, accession: string, primaryDoc
   if (segments.some(segment => segment === '.' || segment === '..' || !/^[A-Za-z0-9_.-]+$/.test(segment))) return null;
   return `https://www.sec.gov/Archives/edgar/data/${Number(cik)}/${accession.replace(/-/g, '')}/${segments.map(segment => encodeURIComponent(segment)).join('/')}`;
 }
+/**
+ * The names an issuer's EDGAR entity record lists before the current one, each with the day EDGAR stopped using it, as one sentence from the payload the filings query
+ * already fetched (null when the record lists none). The dates are the record's, not the legal effective dates of a name change.
+ */
+export function secNameHistory(submission: ObjectValue): string | null {
+  const line = (value: unknown, limit: number) => string(value).replace(/[\u0000-\u001f\u007f\u2028\u2029]+/g, ' ').replace(/"/g, "'").replace(/\s{2,}/g, ' ').trim().slice(0, limit);
+  const day = (value: unknown) => { const match = /^(\d{4}-\d{2}-\d{2})(?:$|T)/.exec(string(value)); return match && new Date(`${match[1]}T00:00:00Z`).toISOString().slice(0, 10) === match[1] ? match[1] : null; };
+  const earlier = new Map<string, { name: string; until: string | null }>();
+  for (const raw of Array.isArray(submission.formerNames) ? submission.formerNames.slice(0, 50) : []) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue;
+    const entry = raw as ObjectValue, name = line(entry.name, 160), until = day(entry.to);
+    const key = `${name.toLowerCase()}|${until ?? ''}`;
+    if (name && !earlier.has(key)) earlier.set(key, { name, until });
+  }
+  if (!earlier.size) return null;
+  const sorted = [...earlier.values()].sort((a, b) => (b.until ?? '').localeCompare(a.until ?? ''));
+  const shown = sorted.slice(0, 5).map(item => `"${item.name}"${item.until ? ` (until ${item.until})` : ''}`), current = line(submission.name, 160);
+  return `${current ? `SEC entity record: current name "${current}"; earlier names: ` : 'SEC entity record, earlier names: '}${shown.join(', ')}${sorted.length > 5 ? `, and ${sorted.length - 5} more` : ''}. These are EDGAR record dates, not legal effective dates.`;
+}
 async function avUrl(fn: string, params: Record<string, string>): Promise<URL | null> {
   const key = await providerKey(); if (!key) return null;
   const url = new URL('https://www.alphavantage.co/query');
@@ -160,7 +179,7 @@ async function queryFinanceDataRaw(input: FinanceDataRequest, assets: FinanceAss
         const link = financeSecDocumentUrl(cik!, string(accession), document);
         return [string((recent.form as unknown[])[i]), string((recent.filingDate as unknown[])[i]), string(accession), link];
       });
-      result.status = 'partial'; result.warnings = [`SEC issuer CIK ${cik}; exact directory ticker mapping where the selected listing was not already SEC-resolved. This is an issuer mapping, not a corporate-action or security-lineage guarantee.`, 'Latest 40 recent SEC filing records only; older filing archive pages are not exhausted. Filing date is day precision, not a market-price or availability timestamp. Current feed is not a historical point-in-time vintage.', 'SEC public API access is subject to fair-access policy. No blanket redistribution right to third-party filing exhibits is implied.']; return result;
+      result.status = 'partial'; result.warnings = [`SEC issuer CIK ${cik}; exact directory ticker mapping where the selected listing was not already SEC-resolved. This is an issuer mapping, not a corporate-action or security-lineage guarantee.`, 'Latest 40 recent SEC filing records only; older filing archive pages are not exhausted. Filing date is day precision, not a market-price or availability timestamp. Current feed is not a historical point-in-time vintage.', 'SEC public API access is subject to fair-access policy. No blanket redistribution right to third-party filing exhibits is implied.'];const nameHistory=secNameHistory(submission);if(nameHistory)result.warnings.push(nameHistory);return result;
     }
     if(route?.sourceId==='finance-yfinance')return{...result,warnings:['The selected free market engine does not supply this metric for this listing. No Alpha Vantage request or macro-news substitution was made.']};
     const functions: Record<string, string> = { price: 'GLOBAL_QUOTE', price_history: 'TIME_SERIES_DAILY', news: 'NEWS_SENTIMENT', etf_holdings: 'ETF_PROFILE' };

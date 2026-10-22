@@ -6,6 +6,7 @@ import { createHash } from 'node:crypto';
 import { chatFilePrompt, chatFileImages, validateChatAttachmentSelection } from "../store/chat-message-attachments";
 import { getDb, openedStoreMigrationRole } from "../store/db";
 import { getOneProfile, getOneProfileOrigin, updateOneProfile } from "../store/one-profile";
+import { oneFrontRuntimeSelection } from "./front";
 import { createChat, getChat, appendChatMessage, listChatMessages, normalizeChatRuntimeSelection, getChatWorkingFolder, setChatWorkingFolder } from "../store/chats";
 import { ensurePersonalOneWorkspace, exportPersonalSession } from "./personal-workspace";
 import { ensureCanonicalTaskForChat, listCanonicalTasks, getCanonicalTaskForChat, hasPassedTaskForceExecutionVerification } from "../store/tasks";
@@ -235,12 +236,12 @@ export function oneSupervisor():OneSupervisorService {
       while(nativeBudgetAdmissions.size>1000)nativeBudgetAdmissions.delete(nativeBudgetAdmissions.keys().next().value!);
       if(hostOptions){hostOptions.assertAuthority();return startSupervisorPreparedInvocation({store,owner,oneId:getOneProfile().oneId,request:req,purpose:hostNoticePurpose,epoch:hostOptions.ownerEpoch});}
       if(oneSupervisorNativeRuntime())return nativeRuntime!.start(req,hostNoticePurpose);
-      // A personal reply with no domain host and no native runtime (the background service is still attaching, or is
-      // down) takes the same admitted, prepared start as the service, owned by this process. The plain start wrote no
-      // admission row, so a computer-use reply was fenced by prepareSupervisorOsExecution and Hope's first personal
-      // message after launch failed (W7 8fe667af run b6d473f4: supervisor_os_source_fenced; AGENTLAS_DISABLE_DAEMON=1
-      // reproduced it every time). The epoch is this process's run-owner id, which that fence compares. Work keeps its start.
-      if(row.kind==="reply")return startSupervisorPreparedInvocation({store,owner,oneId:getOneProfile().oneId,request:req,purpose:hostNoticePurpose,epoch:invocationProcessOwner().ownerId});
+      // A local personal reply or delegated Work run without a domain host
+      // still needs the original Main preparation. Plain start has no durable
+      // invocation admission, so later native result custody cannot prove the
+      // exact input/owner epoch. The prepared path retains this process's
+      // original budget, owner and run identity for both command kinds.
+      if(row.kind==="reply"||row.kind==="work")return startSupervisorPreparedInvocation({store,owner,oneId:getOneProfile().oneId,request:req,purpose:hostNoticePurpose,epoch:invocationProcessOwner().ownerId});
       return invocationService.start(req,undefined,undefined,undefined,hostNoticePurpose,admitMainInvocation(req.chatId,req.runId));
     });
   };
@@ -264,7 +265,7 @@ export function oneSupervisor():OneSupervisorService {
       return {chatId:chat.id,taskId:task.id};
     },graphTasks:oneId=>personalGraphTasks(getDb(),oneId,{automations:listAutomations,
       liveRunId:id=>getAutomationLiveRunState(id)==="running" ? getAutomationLiveRunId(id) : null}),
-    alwaysApprove:chatId=>grantChatAlwaysApproval(chatId,"one-delegation"),quietRun:runId=>supervisorQuietRun(getDb(),runId),tasks:desktopTasks,locale:currentUiLocale,normalizeRuntimeSelection:normalizeChatRuntimeSelection,
+    alwaysApprove:chatId=>grantChatAlwaysApproval(chatId,"one-delegation"),quietRun:runId=>supervisorQuietRun(getDb(),runId),tasks:desktopTasks,locale:currentUiLocale,normalizeRuntimeSelection:normalizeChatRuntimeSelection,frontRuntime:oneFrontRuntimeSelection,
     turns:(chatId,requests)=>supervisorReplyTurns(getDb(),chatId,requests,invocationService.attach(chatId)),
     appearance:input=>{updateOneProfile({expectedVersion:input.expectedVersion,patch:{displayName:input.displayName,bubbleColor:input.bubbleColor}});},
     legacyHistory:(oneId,chatId)=>legacy.inventory(oneId,chatId,new Set(invocationService.activeChatIds()),['inherited','machine'].includes(getOneProfileOrigin())),
@@ -307,7 +308,7 @@ export function oneSupervisor():OneSupervisorService {
     },runtime:{start:startNative,attach,receipt,onSettled},
     onFailure:error=>console.warn("[one-supervisor] worker admission deferred",error instanceof Error ? error.message : "unknown"),
   });
-  // Dots parity (owner 2026-10-04): One speaks first on a check-in it was asked to run, or when a worker it
+                                                                                                            
   // delegated to is waiting for the owner. The listener is not an answer surface (it returns false).
   let checkinBusy=false;
   const fireCheckins=async()=>{if(checkinBusy)return;checkinBusy=true;try{
@@ -325,7 +326,7 @@ export function oneSupervisor():OneSupervisorService {
     }
     return false;
   });
-  // Host problems from other rooms reach the owner through One, not only as cards there (owner 2026-10-05).
+                                                                                                            
   const stopHostAlerts=registerOneHostAlertSink(alert=>supervisor?.hostNeedsOwner(alert) ?? false);
   // A teammate started by One's own message to a room reports back to One for review (docs native-harness 22 O1).
   const stopTeamResults=registerOneTeamResultSink(result=>{try{return supervisor?.teamResult(result) ?? false;}catch(error){console.warn("[one-supervisor] team result deferred",error instanceof Error ? error.message : "unknown");return false;}});

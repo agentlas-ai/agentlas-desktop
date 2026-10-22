@@ -8,6 +8,7 @@ import {
 import type { InvocationRunReceipt } from "@shared/types";
 import { ipc } from "./ipc";
 import type { OneActivityArtifact } from "./one-activity";
+import { projectLatestRunArtifacts } from "./one-chat-outputs";
 
 /**
  * The outputs earlier runs of a conversation saved, for the Outputs rail's "Earlier outputs" section.
@@ -116,6 +117,50 @@ export function newestTimelineRunId(runs: unknown): string | null {
   if (typeof fromReceipt === "string" && fromReceipt) return fromReceipt;
   const firstEvent = Array.isArray(latest?.events) ? (latest?.events as Array<{ runId?: unknown }>)[0] : undefined;
   return typeof firstEvent?.runId === "string" && firstEvent.runId ? firstEvent.runId : null;
+}
+
+/**
+ * The latest run's outputs, independently of the earlier-output history read.
+ * A folded pane reads once; callers that show the rail poll at their existing cadence.
+ * Late answers belong only to the chat/effect that requested them.
+ */
+export function useLatestRunOutputs(input: {
+  chatId: string | null | undefined;
+  poll: boolean;
+  pollIntervalMs: number;
+}): { artifacts: OneActivityArtifact[]; newestRunId: string | null } {
+  const { chatId, poll, pollIntervalMs } = input;
+  const [loaded, setLoaded] = useState<{
+    chatId: string; artifacts: OneActivityArtifact[]; newestRunId: string | null;
+  } | null>(null);
+  // Preserve the pane's chat-switch reset, including A -> pending B -> A.
+  useEffect(() => { setLoaded(null); }, [chatId]);
+  useEffect(() => {
+    if (!chatId) return;
+    let cancelled = false;
+    let loading = false;
+    const api = ipc();
+    if (!api) return;
+    const load = async () => {
+      if (cancelled || loading) return;
+      loading = true;
+      try {
+        const runs = await api.runLedger.chatTimeline(chatId, { maxRuns: 1, eventsPerRun: 500 });
+        if (cancelled || !Array.isArray(runs)) return;
+        const artifacts = await projectLatestRunArtifacts(api, runs);
+        if (!cancelled) setLoaded({ chatId, artifacts, newestRunId: newestTimelineRunId(runs) });
+      } catch {
+        if (!cancelled) setLoaded({ chatId, artifacts: [], newestRunId: null });
+      } finally { loading = false; }
+    };
+    void load();
+    if (!poll) return () => { cancelled = true; };
+    const timer = window.setInterval(() => {
+      if (document.visibilityState !== "hidden") void load();
+    }, pollIntervalMs);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, [chatId, poll, pollIntervalMs]);
+  return loaded && loaded.chatId === chatId ? loaded : { artifacts: [], newestRunId: null };
 }
 
 /** One entry of the section: the artifact the rail opens, plus what its row shows. */
@@ -261,4 +306,23 @@ export function useEarlierOutputs(input: {
     const selected = selectEarlierOutputs(loaded, newestItems, revealed);
     return selected ? { ...selected, loadingMore, showMore } : null;
   }, [loaded, newestItems, revealed, loadingMore, showMore, enabled, chatId]);
+}
+
+/** Current-run and saved-history projections share a chat, but neither read awaits the other. */
+export function useChatOutputs(input: {
+  chatId: string | null | undefined;
+  historyEnabled: boolean;
+  poll: boolean;
+  pollIntervalMs: number;
+}) {
+  const current = useLatestRunOutputs(input);
+  const earlierOutputs = useEarlierOutputs({
+    chatId: input.chatId,
+    // A known chat can retain sealed outputs even when its current run has no
+    // timeline yet. The host still validates every binding against that chat.
+    newestRunId: current.newestRunId ?? "outputs-without-current-run",
+    newestItems: current.artifacts,
+    enabled: input.historyEnabled,
+  });
+  return { ...current, earlierOutputs };
 }

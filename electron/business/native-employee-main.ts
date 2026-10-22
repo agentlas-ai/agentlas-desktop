@@ -1,4 +1,5 @@
 import {personalEmployeeAgentInstallation} from './employee-agent-personal-installation';
+import {sharingSheet} from './native-approval-sheets';
 import {registerEmployeeAgentTransferMain,type EmployeeAgentTransferOriginal} from './employee-agent-transfer-main';
 import type {BrowserWindow,IpcMain,IpcMainInvokeEvent} from 'electron';
 import {isAppControlEvent} from '../app-control/ipc-registry';
@@ -27,7 +28,7 @@ export interface NativeEmployeeMainInput {
 /** Register concrete trusted native actions, with no startup observation, DB, key
  * read, login, HTTP, timer or task. Every effect starts in a focused owner action. */
 export function registerNativeEmployeeMain(input:NativeEmployeeMainInput){
- let closed=false,personalClosed=false,retiredGeneration:number|null=null,cleanupUnknown=false,runtime:OneVaultRuntime|null=null,connection:ReturnType<typeof createNativeEmployeeConnection>|null=null,
+ let closed=false,personalClosed=false,retiredGeneration:number|null=null,cleanupUnknown=false,associationApprovalPending=false,runtime:OneVaultRuntime|null=null,connection:ReturnType<typeof createNativeEmployeeConnection>|null=null,
  source:ReturnType<typeof createNativeEmployeeResultSource>|null=null,journal:ReturnType<typeof createNativeEmployeeReportJournal>|null=null,startup:NativeEmployeeReportStartup|null=null;
  function deny():never{throw Error('business_native_focused_owner_required')}
  function owned(event:IpcMainInvokeEvent,retiredIdentity=false){input.assertTrustedSender(event);const window=electron().BrowserWindow.fromWebContents(event.sender);
@@ -47,7 +48,10 @@ export function registerNativeEmployeeMain(input:NativeEmployeeMainInput){
   const check=()=>{input.assertTrustedSender(event);identity.assertCurrent();if(closed||(input.hostSignal??input.signal).aborted||isAppControlEvent(event)||!window||window.isDestroyed()||!window.isFocused()||!input.isOwnerWindow(window)||electron().BrowserWindow.fromWebContents(event.sender)!==window||frame!==event.sender.mainFrame||event.senderFrame!==frame||frame?.url!==url||input.companyOriginal?.()?.identityOwner!==identity.identityOwner)deny();};check();return{window:window!,check};
  }});
  function attach(){const o=original();if(!startup)startup=Object.freeze({association:o.connection.association,organizationIdentity:Object.freeze({current:()=>o.connection.current()?.orgSession??null}),nativeCustodyReports:o.journal.owners});input.installStartup(startup);}
- async function review(window:BrowserWindow,check:()=>void,title:string,detail:string){check();const result=await electron().dialog.showMessageBox(window,{type:'question',title,message:title,detail,buttons:input.locale?.()==='ko'?['취소','이 내용만 조직에 공유']:['Cancel','Share only this with organization'],defaultId:0,cancelId:0,noLink:true});check();if(result.response!==1)throw Error('business_native_sharing_declined')}
+ // A cached startup pins its original association capability. Expiry/revocation
+ // cannot authorize replacing that capability inside the same generation.
+ function requireAssociationGeneration(){if(startup&&!connection?.current())throw Object.assign(Error('business_native_report_generation_retirement_required'),{code:'business_native_report_generation_retirement_required'});}
+ async function review(window:BrowserWindow,check:()=>void,title:string,detail:string){check();const result=await electron().dialog.showMessageBox(window,sharingSheet(input.locale?.()==='ko',title,detail));check();if(result.response!==1)throw Error('business_native_sharing_declined')}
  input.ipc.handle('businessNative:identity',(event:IpcMainInvokeEvent)=>{
   owned(event,true);return (async()=>{await input.prepareGeneration?.(event);owned(event,true);
   if(retiredGeneration!==null){if(!input.prepareGeneration||input.installationGeneration()<=retiredGeneration)deny();retiredGeneration=null;}
@@ -55,9 +59,13 @@ export function registerNativeEmployeeMain(input:NativeEmployeeMainInput){
  });
  input.ipc.handle('businessNative:completedWork',async(event:IpcMainInvokeEvent)=>{const action=owned(event),o=original();action.check();const items=await o.source.completedWork();action.check();return items});
  input.ipc.handle('businessNative:approveAssociation',async(event:IpcMainInvokeEvent,value:unknown)=>{
-  const action=owned(event);if(!businessEmployeeAgentOnly(value,['challengeId'])||!isBusinessId(value.challengeId))deny();const o=original(),challenge=await o.connection.challenge(value.challengeId);action.check();
-  await review(action.window,action.check,input.locale?.()==='ko'?'직원 에이전트 보고 공유 승인':'Approve employee agent report sharing',input.locale?.()==='ko'?`조직: ${challenge.orgSession.organizationId}\n직원: ${challenge.orgSession.principalId}\n호스트: ${challenge.native.nativeHostId}\nOne: ${challenge.native.oneId}\n받는 사람: ${challenge.audiencePrincipalIds.join(', ')}\n목적: ${challenge.purpose}\n완료된 원래 작업의 별도 검토한 요약만 공유합니다. 키 저장 승인은 공유 권한을 주지 않습니다. 개인 이력의 자동 수집은 시작하지 않습니다.`:`Organization: ${challenge.orgSession.organizationId}\nEmployee: ${challenge.orgSession.principalId}\nHost: ${challenge.native.nativeHostId}\nOne: ${challenge.native.oneId}\nAudience: ${challenge.audiencePrincipalIds.join(', ')}\nPurpose: ${challenge.purpose}\nOnly individually reviewed summaries of completed original work will be shared. Credential storage approval grants no sharing permission. Automatic personal history collection remains off.`);
-  try{const association=await o.connection.complete(challenge,action.check);action.check();attach();return{state:'associated' as const,associationId:association.associationId,associationRevision:association.associationRevision}}catch(error){const approvalReceiptId=o.connection.pendingApproval(challenge.challengeId);if(approvalReceiptId)return{state:'unknown' as const,approvalReceiptId};throw error}
+  const action=owned(event);if(!businessEmployeeAgentOnly(value,['challengeId'])||!isBusinessId(value.challengeId))deny();const o=original();
+  const check=()=>{action.check();if(o.connection.current())throw Object.assign(Error('business_native_connection_already_active'),{code:'business_native_connection_already_active'});requireAssociationGeneration();};check();
+  if(associationApprovalPending)throw Object.assign(Error('business_native_connection_approval_in_progress'),{code:'business_native_connection_approval_in_progress'});associationApprovalPending=true;
+  try{const challenge=await o.connection.challenge(value.challengeId);check();
+  await review(action.window,check,input.locale?.()==='ko'?'직원 에이전트 보고 공유 승인':'Approve employee agent report sharing',input.locale?.()==='ko'?`조직: ${challenge.orgSession.organizationId}\n직원: ${challenge.orgSession.principalId}\n호스트: ${challenge.native.nativeHostId}\nOne: ${challenge.native.oneId}\n받는 사람: ${challenge.audiencePrincipalIds.join(', ')}\n목적: ${challenge.purpose}\n\n• 완료된 원래 작업의 별도 검토한 요약만 공유합니다.\n• 키 저장 승인은 공유 권한을 주지 않습니다.\n• 개인 이력의 자동 수집은 시작하지 않습니다.`:`Organization: ${challenge.orgSession.organizationId}\nEmployee: ${challenge.orgSession.principalId}\nHost: ${challenge.native.nativeHostId}\nOne: ${challenge.native.oneId}\nAudience: ${challenge.audiencePrincipalIds.join(', ')}\nPurpose: ${challenge.purpose}\n\n• Only individually reviewed summaries of completed original work will be shared.\n• Credential storage approval grants no sharing permission.\n• Automatic personal history collection remains off.`);
+  try{const association=await o.connection.complete(challenge,check);action.check();attach();return{state:'associated' as const,associationId:association.associationId,associationRevision:association.associationRevision}}catch(error){const approvalReceiptId=o.connection.pendingApproval(challenge.challengeId);if(approvalReceiptId)return{state:'unknown' as const,approvalReceiptId};throw error}
+  }finally{associationApprovalPending=false;}
  });
  input.ipc.handle('businessNative:shareCompletedResult',async(event:IpcMainInvokeEvent,value:unknown)=>{
   const action=owned(event);if(!businessEmployeeAgentOnly(value,['commandId','agentResourceId','sourceResourceId','summary','expectedRevision'])||![value.commandId,value.agentResourceId,value.sourceResourceId].every(isBusinessId)||!businessEmployeeAgentText(value.summary)||value.expectedRevision!==null&&!isBusinessRevision(value.expectedRevision))deny();
@@ -94,7 +102,7 @@ export function registerNativeEmployeeMain(input:NativeEmployeeMainInput){
   const check=()=>{action.check();if(digest(o.connection.current())!==digest(association))throw Error('business_native_review_changed')};
   check();const publication=await o.journal.continuePublication(cap,check);check();return{publication};
  });
- input.ipc.handle('businessNative:reconcileAssociation',async(event:IpcMainInvokeEvent,value:unknown)=>{const action=owned(event);if(!businessEmployeeAgentOnly(value,['approvalReceiptId'])||!isBusinessId(value.approvalReceiptId))deny();const association=await original().connection.reconcile(value.approvalReceiptId);action.check();attach();return{state:'associated' as const,associationId:association.associationId}});
+ input.ipc.handle('businessNative:reconcileAssociation',async(event:IpcMainInvokeEvent,value:unknown)=>{const action=owned(event);if(!businessEmployeeAgentOnly(value,['approvalReceiptId'])||!isBusinessId(value.approvalReceiptId))deny();const o=original();requireAssociationGeneration();const association=await o.connection.reconcile(value.approvalReceiptId);action.check();requireAssociationGeneration();attach();return{state:'associated' as const,associationId:association.associationId}});
  input.ipc.handle('businessNative:revoke',async(event:IpcMainInvokeEvent)=>{
   owned(event);const o=original(),association=o.connection.current();if(!association)return{state:'unknown' as const};
   // Local source terminal fence precedes remote work and requires no current source

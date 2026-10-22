@@ -2,6 +2,7 @@
 "use client";
 import { useCallback, useEffect, useState } from "react";
 import { taskTitleForDisplay } from "@/lib/task-title";
+import { isVisibleWorkTask, workTaskHref } from "@/lib/work-task-navigation";
 import { ipc } from "@/lib/ipc";
 import { useVisibleInterval } from "@/lib/useVisibleInterval";
 import { useT } from "@/lib/i18n";
@@ -15,8 +16,8 @@ const DATA_MAX_AGE_MS = 15_000;
 
 function cachedRecentTasks(): CanonicalTask[] {
   return (readViewData<CanonicalTask[]>("dashboard.tasks.200")?.value ?? [])
-    .slice(0, 25)
-    .filter((task) => Boolean(task.projectId && task.originChatId));
+    .filter(isVisibleWorkTask)
+    .slice(0, 25);
 }
 
 function relTime(iso: string, ko: boolean): string {
@@ -68,7 +69,7 @@ export function DashboardActivity() {
         () => api.tasks.list({ limit: 200, reconcile: false }),
         { maxAgeMs: DATA_MAX_AGE_MS, force },
       );
-      setRecent(rows.slice(0, 25).filter((task) => Boolean(task.projectId && task.originChatId)));
+      setRecent(rows.filter(isVisibleWorkTask).slice(0, 25));
       setError("");
     } catch {
       // 폴링 중 일시 오류는 기존 목록을 비우지 않는다(깜빡임 방지).
@@ -104,7 +105,7 @@ export function DashboardActivity() {
         <div className="dashboard-module-empty">{error}</div>
       ) : recent.length === 0 ? (
         <div className="dashboard-module-empty">
-          {ko ? "아직 프로젝트 작업이 없습니다." : "No project tasks yet."}
+          {ko ? "아직 작업이 없습니다." : "No tasks yet."}
         </div>
       ) : (
         <>
@@ -113,7 +114,7 @@ export function DashboardActivity() {
             return (
               <button
                 key={c.id}
-                onClick={() => c.originChatId && navigate(`/workspace/task?id=${encodeURIComponent(c.originChatId)}&task=${encodeURIComponent(c.id)}&projectId=${encodeURIComponent(c.projectId ?? "")}`)}
+                onClick={() => c.originChatId && navigate(workTaskHref(c))}
                 className="dashboard-activity-row"
               >
                 {running ? <LiveDot /> : <span className="dashboard-muted-dot" />}

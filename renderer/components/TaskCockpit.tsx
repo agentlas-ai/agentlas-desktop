@@ -9,6 +9,8 @@ import { goalPlanOf } from "@/components/goal/GoalPlanSummary";
 import { useWorkStartHandoff } from "@/lib/work-start-intent";
 import { browserAnnotationDraftText } from "@shared/browser-annotation";
 import { selectionForRuntime } from "@shared/runtime-selection";
+import { chipRuntimeFor } from "@/lib/one-runtime-chip";
+import { OneRuntimeChips } from "@/components/one/OneRuntimeChips";
 import { isInterruptedPartial, isLivePartialCommitBoundary, markInterruptedPartial } from "@shared/interrupted-partial";
 import { subscribeOrderedRunEvents } from "@/lib/ordered-run-events";
 import { createFrameBatcher, isLiveStreamTick, type FrameBatcher } from "@/lib/frame-coalescer";
@@ -2473,7 +2475,7 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
     if (!api) return;
     void api.tasks.get(requestedTaskId).then((task) => {
       if (cancelled) return;
-      if (!task?.projectId) {
+      if (!task?.projectId && task?.originSurface !== "work") {
         setValidatedTaskTarget({ taskId: requestedTaskId, chatId: "" });
         router.replace(`/one?task=${encodeURIComponent(requestedTaskId)}`);
         return;
@@ -4171,30 +4173,8 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
       const requestGeneration = ++generation;
       void api.runtime.detect().then((list) => {
         if (requestGeneration !== generation) return;
-        const selection = chat?.runtimeSelection ?? null;
-        const matched = selection
-          ? list.find(
-              (runtime) =>
-                runtime.kind === selection.kind &&
-                (!selection.backend || runtime.backend === selection.backend) &&
-                (!selection.source || runtime.source === selection.source),
-            )
-          : list.find((runtime) => runtime.active);
-        // A dead pin is handled by the metadata hydration path on re-entry. Do not
-        // blank an already usable header when a transient probe returns no match.
-        if (selection && !matched) return;
-        setActiveRuntime(
-          matched
-            ? {
-                ...matched,
-                active: true,
-                model: selection?.model ?? matched.model,
-                effort: selection?.effort ?? matched.effort,
-                longContextEnabled:
-                  selection?.longContext ?? matched.longContextEnabled,
-              }
-            : null,
-        );
+        if (disposed || !isCurrentChat()) return;
+        setActiveRuntime(chipRuntimeFor(list, chat?.runtimeSelection ?? null));
       }).catch(() => undefined);
     };
     /*
@@ -4406,57 +4386,9 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
       // 역할 기본값 또는 이 채팅의 exact pin — 헤더 칩 표시용.
       void api.runtime.detect().then((list) => {
         if (cancelled) return;
-        const selection = c.runtimeSelection;
-        const matched = selection
-          ? list.find(
-              (runtime) =>
-                runtime.kind === selection.kind &&
-                (!selection.backend || runtime.backend === selection.backend) &&
-                (!selection.source || runtime.source === selection.source),
-            )
-          : list.find((runtime) => runtime.active);
-        // 고정된 런타임이 사라졌을 때(CLI 삭제/경로 변경, BYOK 키 제거) 예전에는 칩이 통째로
-        // 사라지고 applySelection이 activeRuntime null로 즉시 return → 핀을 지울 방법이 전혀
-        // 없어 채팅이 영구히 벽돌이 됐다(매 전송 pinned-runtime-unavailable). 죽은 핀은 여기서
-        // 스스로 풀고 현재 활성 런타임으로 되돌린다 — 모델 선택은 채팅을 못 쓰게 만드는
-        // 되돌릴 수 없는 결박이어서는 안 된다.
-        // 단, list가 비면 "설치된 게 없음"과 "탐지 실패"를 구분할 수 없으므로 핀을 건드리지 않는다.
-        if (selection && !matched && list.length > 0) {
-          const fallback = list.find((runtime) => runtime.active) ?? null;
-          void api.chats.setRuntimeSelection(chatId, null).then((updated) => {
-            if (cancelled) return;
-            if (!updated || updated.id !== chatId || updated.runtimeSelection !== null) {
-              throw new Error("Desktop did not acknowledge the cleared runtime pin");
-            }
-            setChat(updated);
-            setActiveRuntime(fallback ? { ...fallback, active: true } : null);
-            setSessionNotice(
-              locale === "ko"
-                ? `이 채팅에 고정돼 있던 실행 엔진(${selection.kind}${selection.model ? ` · ${selection.model}` : ""})을 더 이상 찾을 수 없어 고정을 해제했습니다. 현재 활성 엔진으로 계속 대화할 수 있습니다.`
-                : `The engine pinned to this chat (${selection.kind}${selection.model ? ` · ${selection.model}` : ""}) is no longer available, so the pin was released. This chat now uses the active engine.`,
-            );
-          }).catch(() => {
-            if (cancelled) return;
-            setSessionNotice(
-              locale === "ko"
-                ? `이 채팅의 사용할 수 없는 실행 엔진 고정을 해제하지 못했습니다. 기존 고정은 유지됩니다. Desktop 연결을 확인한 뒤 이 작업을 다시 여세요.`
-                : "The unavailable engine pin could not be released, so the existing pin remains. Check the Desktop connection and reopen this task to retry.",
-            );
-          });
-          return;
-        }
-        setActiveRuntime(
-          matched
-            ? {
-                ...matched,
-                active: true,
-                model: selection?.model ?? matched.model,
-                effort: selection?.effort ?? matched.effort,
-                longContextEnabled:
-                  selection?.longContext ?? matched.longContextEnabled,
-              }
-            : null,
-        );
+        // Inventory reads never clear or rewrite a durable session choice. The
+        // cross-provider picker can replace an unavailable pin explicitly.
+        setActiveRuntime(chipRuntimeFor(list, c.runtimeSelection ?? null));
       });
       // 패널 노출 결정: 사용자가 명시적으로 접고/편 선호값이 있으면 그것을 우선,
       // 없으면 working_folder가 저장돼 있을 때만 자동 노출.
@@ -7721,6 +7653,7 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
           </div>)}
         </div>}
         <ChatInput
+          runtimeControls={<OneRuntimeChips key={chat.id} chatId={chat.id} locale={locale === "ko" ? "ko" : "en"} disabled={busy || !agent} onSelectionConfirmed={setChat} />}
           onSend={handleChatInputSend}
           queuedCount={queuedSteers.length}
           prefillText={composerPrefill} appendDraftRequest={browserDraftRequest}

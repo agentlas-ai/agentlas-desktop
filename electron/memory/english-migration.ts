@@ -1,6 +1,6 @@
 // One-time English migration of desktop memory + translate-on-write worker.
-// Plan 2026-09-22-PLAN-memory-recall-repair.md, section
-// "전면 영어 마이그레이션 — 데스크탑 (2026-09-23)" (D-1..D-8).
+                                                        
+                                                 
 //
 // Rows keep their id; `content`/`summary` becomes the English search surface and
 // the original wording moves to a side table (native-text.ts). In-place, not
@@ -219,7 +219,7 @@ export interface MigrationRecord {
   completedAt: string | null;
   lastTranslator: string | null;
   lastError: string | null;
-  /** Last batch attempt (any outcome). Absent until the first one; starvation is measured from startedAt. */
+                                                                                                             
   lastBatchAt?: string | null;
 }
 
@@ -244,12 +244,12 @@ function today(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
-/*
- * ★The cap was 0 on every store that never set it: Number(null) is 0, finite and >= 0, so the
- * default never applied and every pass broke out of its loop before the first batch (owner's store
- * 2026-09-27: no cap key, 3,138 jobs attempts=0, budget meta never written). Unset means default;
- * an explicit "0" still pauses the job.
- */
+  
+                                                                                              
+                                                                                                   
+                                                                                                  
+                                        
+   
 function dailyCap(): number {
   const raw = getMeta(DAILY_CAP_KEY);
   if (raw == null || String(raw).trim() === "") return DEFAULT_DAILY_CAP;
@@ -917,6 +917,10 @@ async function tick(): Promise<void> {
  */
 export function startEnglishMemoryMigration(): void {
   if (timer) return;
+  // A test profile (AGENTLAS_E2E) does not start this worker by itself: with no local model ready its translator is the person's own
+  // Claude CLI, and an isolated test app must not spend that subscription. A test that wants the worker sets AGENTLAS_E2E_ENGLISH_MIGRATION=1;
+  // the passes below (runEnglishMigrationTick and under it) are unchanged and run with fakes.
+  if (process.env.AGENTLAS_E2E === "1" && process.env.AGENTLAS_E2E_ENGLISH_MIGRATION !== "1") return;
   const enqueue = setTimeout(() => {
     try {
       if (openedStoreMigrationRole() === "owner" && !englishMigrationOptedOut()) {

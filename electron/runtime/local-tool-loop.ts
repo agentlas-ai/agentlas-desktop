@@ -31,7 +31,7 @@ import { oneGraphToolTimeoutMs } from "../../shared/one-graph-tool-permission";
 import { readOnlyBrowserToolIsMutating } from "../../shared/read-only-browser-tools";
 import { mcpToolSchemaDigest } from "../mcp-tools/tool-schema";
 import { mcpToolSurfaceHides } from "../mcp-tools/hephaestus-tool-surface";
-import { installLazyToolMenu, invalidateToolMenu, isDirectEntryTool, isToolMenuTool, resolveToolMenu } from "./tool-menu";
+import { installLazyToolMenu, invalidateToolMenu, isDirectEntryTool, isToolMenuDeferred, isToolMenuTool, menuPathHint, resolveToolMenu } from "./tool-menu";
 import { CODE_MODE_TOOL, installMainCodeMode, runMainCodeMode } from "./code-mode";
 import { TOOL_RESULT_READ, foldRetainedToolResult, hasToolResultContext, installToolResultContext, projectToolResult, readToolResult, toolResultReadRequest } from "./tool-result-context";
 import { createHash, randomUUID } from "node:crypto";
@@ -56,7 +56,7 @@ import { assertMainWorkRecoveryContext, mainWorkToolSchema, type MainWorkRecover
 import type { InstalledMcpServer } from "../../shared/types";
 import { getRuntimeSession, saveRuntimeSession } from "../store/runtime-sessions";
 import { OUTPUT_LIMIT_CONTINUATION_MAX_ROUNDS, outputLimitContinuationTurn } from "./output-limit-continuation";
-import { resolveToolNameAlias, unknownToolMessage } from "./tool-name-alias";
+import { resolveShortToolName, resolveToolNameAlias, unknownToolMessage } from "./tool-name-alias";
 import {
   LOCAL_MODEL_UNLOADED_CODE, localModelResident, refineServerFailureCode, RUNTIME_SERVER_ERROR_CODE, serverFailure,
   serverFailureCodeForStatus, serverFailureResendable, serverFailureResendDelayMs, SERVER_FAILURE_RESENDS, waitForServerResend,
@@ -121,9 +121,9 @@ interface OpenAiToolCall {
   function: { name: string; arguments: string };
 }
 
-/** Provider-neutral tool invocation data. No caller may synthesize a provider
- * correlation ID: protocols without one carry their measured response part
- * location into the Main broker instead. */
+                                                                              
+                                                                           
+                                            
 export interface MainToolDispatchCall {
   providerCallId: string | null;
   providerCallLocation?: WorkforceBrokerProviderCallLocation | null;
@@ -232,8 +232,8 @@ export function createToolLoopProgress(runtimeKind: string, req: RunnerRequest, 
   };
 }
 
-/** Every actual HTTP model dispatch is a distinct measured scope. Missing
- * terminals stay unknown, including failed retries before a later success. */
+                                                                          
+                                                                              
 export function createToolLoopUsage(events: RunnerEvents) {
   const usage = createRuntimeUsageCollector();
   return {
@@ -475,7 +475,7 @@ export async function prepareMainToolLoop(
   // Under a Science / Alive-Science grant the server-side model must see that
   // grant's catalog only (it already bridges the Desktop tools it admits). An
   // ordinary One/Work run gets the same builtins as every host-loop runtime —
-  // before 2026-09-24 serving in Work had no file/shell tools at all.
+                                                                      
   // BYOK adapters use this same Main loop. A signed Science catalog is the
   // complete grant there too; API delivery must not add file/shell/download tools.
   const catalogMcpOnly = Boolean(req.mcpConfigPath) && req.mcpGrantCatalogOnly === true;
@@ -678,9 +678,11 @@ async function dispatchMainToolRaw(
   if (approval.beforeMcpToolResult) approval.mcpResultDeliveryState ??= { blocked: false, pending: new Set() };
   assertMcpResultDelivery(approval);
   // A name copied from another runtime's history ("codex_apps.google_calendar.search_events") resolves to the one
-  // registered tool it denotes (tool-name-alias.ts); the resolved name then goes through the same menu and approval.
+  // registered tool it denotes, and so does a server tool's own short name when no other tool has it ("harness_call" for
+  // "mcp__agentlas-turn__harness_call"; tool-name-alias.ts); the resolved name then goes through the same menu and approval.
   if (!byName.has(call.toolName)) {
-    const alias = resolveToolNameAlias(byName.keys(), call.toolName);
+    const alias = resolveToolNameAlias(byName.keys(), call.toolName)
+      ?? resolveShortToolName([...byName].map(([name, tool]) => ({ name, short: tool.kind === "mcp" && !isToolMenuDeferred(byName, name) ? tool.serverToolName : null })), call.toolName);
     if (alias) call = { ...call, toolName: alias };
   }
   let result:MainToolDispatchResult;
@@ -694,6 +696,8 @@ async function dispatchMainToolRaw(
   } catch (error) {
     if (effectSlot.ref) await settleMainEffect(effectSlot.ref, "uncertain");
     throw error;
+  } finally {
+    if (effectSlot.liveAction) approval.canonicalWorkRecovery?.endLive(effectSlot.liveAction);
   }
   if (effectSlot.ref) {
     await settleMainEffect(effectSlot.ref, result.isError ? "failed" : "settled", result.content);
@@ -743,7 +747,7 @@ async function awaitMcpResultDelivery(
   approval.assertCurrent?.();
 }
 
-interface MainEffectSlot { ref?: string; replayedRef?: string }
+interface MainEffectSlot { ref?: string; replayedRef?: string; liveAction?: string }
 
 async function settleMainEffect(ref: string, state: "settled" | "failed" | "uncertain", resultText?: string): Promise<void> {
   try { await (await companyOrOriginalEffectLedger()).settleEffect(ref, state, state === "settled" && resultText !== undefined ? { result: resultText } : undefined); } catch { /* the ledger never fails a tool result */ }
@@ -799,7 +803,7 @@ async function dispatchMainToolRawUnchecked(
     const menu = resolveToolMenu(byName, call.toolName, call.arguments);
     if (menu?.kind === "result") {
       // Menu listing/preparation is a host operation too; the effect reader needs start + result
-      // (live 2026-09-25, run 3834da2a: three agentlas_tools_* results alone kept the boundary pending).
+                                                                                                         
       (currentHistoryRuntimeFence()?.assertCurrent(), events.onTool?.(call.toolName, call.arguments, undefined, call.providerCallId ?? undefined, false, undefined, undefined, agentlasDispatchedOrigin(call.toolName)));
       (currentHistoryRuntimeFence()?.assertCurrent(), events.onTool?.(call.toolName, call.arguments, menu.content, call.providerCallId ?? undefined, false, undefined, undefined, agentlasDispatchedOrigin(call.toolName)));
       return { content: menu.content, visionMessage: null, isError: false };
@@ -822,7 +826,8 @@ async function dispatchMainToolRawUnchecked(
         : menu.arguments };
     }
   } catch (error) {
-    const content = `Error: ${error instanceof Error ? error.message : String(error)}`;
+    const message = error instanceof Error ? error.message : String(error);
+    const content = `Error: ${message}${message === "tool_menu_prepare_required" ? menuPathHint(byName, call.toolName) : ""}`;
     (currentHistoryRuntimeFence()?.assertCurrent(), events.onTool?.(call.toolName, call.arguments, content, call.providerCallId ?? undefined, true));
     return { content, visionMessage: null, isError: true };
   }
@@ -843,7 +848,7 @@ async function dispatchMainToolRawUnchecked(
     if (actionId) broker?.finishAction(actionId, "not_dispatched");
     (currentHistoryRuntimeFence()?.assertCurrent(), events.onTool?.(call.toolName, call.arguments, "unknown tool", eventCallId, true));
     return {
-      content: unknownToolMessage(call.toolName, byName.keys()),
+      content: unknownToolMessage(call.toolName, byName.keys()) + menuPathHint(byName, call.toolName),
       visionMessage: null,
       isError: true,
     };
@@ -942,16 +947,25 @@ async function dispatchMainToolRawUnchecked(
   // The effect-boundary reader requires start+result per operation (codex emits
   // item.started the same way). Without it every host-loop Goal turn (serving,
   // agentlas-local, BYOK) read "outcome-pending" and verification stayed inconclusive
-  // (isolated live run 2026-09-25, run_80dc1968: 12 inconclusive receipts).
+                                                                            
   let work:ReturnType<MainWorkRecoveryContext["admit"]>|undefined;
   try {
-    work=approval.canonicalWorkRecovery?.admit({reference:workReference,methodId:brokerToolId,arguments:args,observational:!planMutation});
+    work=approval.canonicalWorkRecovery?.admit({reference:workReference,methodId:brokerToolId,arguments:args,observational:!planMutation,live:true});
   } catch(error) {
     const code=error instanceof Error ? error.message : String(error);
     if(!/^main_work_(?:read_original_outcome|action_not_in_task|action_input_conflict|checkpoint_step_invalid|worker_liveness_unknown|outcome_unconfirmed|result_read_unavailable|read_regeneration_required|same_method_limit|same_method_limit_or_claim_changed)/.test(code))throw error;
     if(actionId)broker?.finishAction(actionId,"not_dispatched");
-    return {content:JSON.stringify({code,recovery:approval.canonicalWorkRecovery!.packet({always:true})}),visionMessage:null,isError:true};
+    // The refusal ends this call like every other refusal here, so the timeline gets its completion (the code only, never the recovery
+    // packet): a call refused at admission used to stay "started" with no end in the evidence, and a code-mode run that was refused twenty
+    // times showed twenty calls that never finished. A blocked step gets the compact view of what blocks it (refusalPacket).
+    (currentHistoryRuntimeFence()?.assertCurrent(), events.onTool?.(call.toolName, call.arguments, `Error: ${code.slice(0,300)}`, eventCallId, true));
+    const recovery=code.startsWith("main_work_read_original_outcome")
+      ? approval.canonicalWorkRecovery!.refusalPacket(workReference?.step_id) : approval.canonicalWorkRecovery!.packet({always:true});
+    return {content:JSON.stringify({code,recovery}),visionMessage:null,isError:true};
   }
+  // The admitted call is in flight in this run until the wrapper's finally says otherwise (no await between admit and here): a sibling
+  // call of the same code-mode program must not read it as a lost outcome, but an aborted one that never finished must.
+  if(work && "unit" in work && effectSlot) effectSlot.liveAction=work.action.actionId;
   if(work && "reused" in work) {
     // Original custody avoids another effect; delivery still belongs to this run.
     if (resolved.kind === "mcp") await awaitMcpResultDelivery(approval, {
@@ -1191,8 +1205,8 @@ export async function runOneToolCall(
   events: RunnerEvents,
   approval: LocalToolApprovalContext,
   broker?: MainWorkforceBroker,
-  /** Set when the host synthesized `call.id` for a local server that sent none: the broker gets the measured location,
-   * never a made-up provider correlation id (MainToolDispatchCall contract). The wire message still pairs by `call.id`. */
+                                                                                                                       
+                                                                                                                           
   synthesizedLocation?: WorkforceBrokerProviderCallLocation,
 ): Promise<{ toolMessage: Extract<ChatMessage, { role: "tool" }>; visionMessage: ChatMessage | null; isError: boolean; visionFromHarness?: true }> {
   const outcome = await runMainToolDispatch(
@@ -1478,6 +1492,8 @@ export interface RunLocalOpenAiChatOptions {
   chatEndpoint?: string;
   /** Provider display name for truthful HTTP error attribution. */
   providerLabel?: string;
+  /** Company provider permit fence; omitted by every ordinary runtime. */
+  beforeProviderCall?: () => Promise<void>;
   /** Ollama accepts this on its native API; OpenAI-compatible servers may ignore it. */
   keepAlive?: string;
   /** Owner-chosen DeepSeek Responses wire (byok-wire.ts): same loop, the request/stream converted by deepseek-responses.ts. */
@@ -1508,10 +1524,10 @@ export interface RunLocalOpenAiChatOptions {
   /** Managed local only: exact-tokenizer overflow may excerpt historical turns
    * and retry. The current request, instructions, tools and results stay intact. */
   dynamicHistoryCompaction?: true;
-  /**
-   * Same system prompt without the optional keyword-gated Surface protocol. Used once,
-   * only when the measured request does not fit; the swap is reported as a notice.
-   */
+     
+                                                                                       
+                                                                                   
+     
   systemPromptFallback?: string;
   /** Trusted caller re-renders declared contracts before the final boundary, preserving history offsets. */
   renderOutputSchemaSystem?: () => { system: string; fallback?: string };
@@ -1670,8 +1686,8 @@ async function runLocalOpenAiChatInner(
     historyBudgetTokens = statelessHistoryTokens(digest, rows);
   };
   if (generations?.seed) installGeneration(generations.seed.digest, generations.seed.rows);
-  /** The window the rotation rule reads: measured/loaded/requested or a catalog number; a labelled default never moves it.
-   * Ollama: the num_ctx this very request is sent with (the window that admits it), not the ceiling it may grow to. */
+                                                                                                                           
+                                                                                                                       
   const generationWindow = (window: number | undefined, ollamaPlan: { numCtx: number } | null): StatelessWindow | null => {
     if (opts.contextWindow !== undefined) return { tokens: opts.contextWindow, source: "measured", known: true };
     if (ollamaPlan) return { tokens: ollamaPlan.numCtx, source: "requested", known: true };
@@ -1681,7 +1697,7 @@ async function runLocalOpenAiChatInner(
     return { tokens: window, source: opts.capacitySource ?? "loaded", known };
   };
   let generationStep = 0, lastRequestTokens: number | null = null, lastObservedInput: number | null = null;
-  // The window the last request was actually admitted into (measured, loaded, or the num_ctx sent) — reported on the
+                                                                                                                     
   // result so the context detail shows the real local window instead of a catalog figure (native-harness notyet NH18).
   let admittedWindow: number | null = null;
   let stepExactInput: number | null = null, sentRequestTokens: number | null = null;
@@ -1861,7 +1877,7 @@ async function runLocalOpenAiChatInner(
             ...planRequestFields(cachePlan),
             ...(opts.keepAlive ? { keep_alive: opts.keepAlive } : {}),
             ...(opts.chatTemplateKwargs ? { chat_template_kwargs: opts.chatTemplateKwargs } : {}),
-            // A malformed tool call repeated identically 3 of 3 times (measured); a fresh seed makes the retry a new sample.
+                                                                                                                             
             ...(toolParseRetries > 0 ? { seed: Math.floor(Math.random() * 2_147_483_647) } : {}),
             ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
             ...(opts.estimatedContextWindow !== undefined
@@ -2024,6 +2040,7 @@ async function runLocalOpenAiChatInner(
       }
     }
     assertScienceRecoveryRequest(req, runtimeKind, opts.recoveryBackend);
+    if (opts.beforeProviderCall) await opts.beforeProviderCall();
     let resp: Response;
     reportModelPayload(() => ledgerFromApiBody(requestBody, { ledgerHints: req.ledgerHints, imageCount: req.images?.length ?? 0 }));
     reportModelEffort(effortApplication());
@@ -2074,6 +2091,7 @@ async function runLocalOpenAiChatInner(
         reportModelPayload(() => ledgerFromApiBody(requestBody, { ledgerHints: req.ledgerHints, imageCount: req.images?.length ?? 0 }));
         reportModelEffort(effortApplication());
         usageAttempt = usage.start();
+        if (opts.beforeProviderCall) await opts.beforeProviderCall();
         try {
           resp = await withCurrentHistoryProvider(()=>turnFetch(chatEndpoint, {
             method: "POST",
@@ -2134,6 +2152,7 @@ async function runLocalOpenAiChatInner(
           reportModelPayload(() => ledgerFromApiBody(Object.fromEntries(Object.entries(requestBody).filter(([key]) => key !== "tools")),
             { ledgerHints: req.ledgerHints, imageCount: req.images?.length ?? 0 }));
           usageAttempt = usage.start();
+          if (opts.beforeProviderCall) await opts.beforeProviderCall();
           const fallback = await withCurrentHistoryProvider(()=>turnFetch(chatEndpoint, {
             method: "POST",
             headers: { "content-type": "application/json", ...opts.headers },

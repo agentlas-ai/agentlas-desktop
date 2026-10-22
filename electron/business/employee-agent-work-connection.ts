@@ -12,7 +12,7 @@ type Operation='association'|'register'|'intent'|'result'|'receipt'|'revoke';
  * credentials, storage or network. No report association is consulted. */
 export function createEmployeeAgentWorkConnection(runtime:OneVaultRuntime,generation:()=>number){
  const db=runtime.sources.db,refs=[runtime.sources,runtime.trust,runtime.currentNativeOwner,runtime.trust.currentHostMetadata,runtime.sources.oneId];
- let closed=false,initialized=false,active:WorkNativeAssociation|null=null,lastState:'disconnected'|'expired'|'revoked'='disconnected';const caps=new WeakMap<object,string>();
+ let closed=false,initialized=false,active:WorkNativeAssociation|null=null,lastState:'disconnected'|'expired'|'revoked'='disconnected',associationUpdatePending=false;const caps=new WeakMap<object,string>();
  function schema(){if(initialized)return;db.exec(`CREATE TABLE IF NOT EXISTS one_business_work_connections(association_id TEXT PRIMARY KEY,state TEXT NOT NULL,record_json TEXT NOT NULL,approval_json TEXT NOT NULL,sequence INTEGER NOT NULL);
  CREATE TABLE IF NOT EXISTS one_business_work_connection_attempts(id TEXT PRIMARY KEY,challenge_id TEXT NOT NULL,approval_json TEXT NOT NULL,state TEXT NOT NULL);
  CREATE TABLE IF NOT EXISTS one_business_work_requests(request_id TEXT PRIMARY KEY,association_id TEXT NOT NULL,operation TEXT NOT NULL,body_json TEXT NOT NULL,state TEXT NOT NULL,result_json TEXT);`);initialized=true}
@@ -28,6 +28,7 @@ export function createEmployeeAgentWorkConnection(runtime:OneVaultRuntime,genera
   return row?.record_json===JSON.stringify(active)?workSnapshot(active):null;
  }catch{return null}}
  function requireCurrent(){const value=current();if(!value)workFail('work_consent_unavailable');return value}
+ function beginAssociationUpdate(){if(associationUpdatePending)workFail('connection_approval_in_progress');associationUpdatePending=true;return()=>{associationUpdatePending=false;};}
  function url(op:string,query?:Record<string,string>){const root=new URL(webBaseUrl());if(root.protocol!=='https:'||root.username||root.password||root.search||root.hash)workFail('root_endpoint_invalid');const target=new URL(WORK_NATIVE_BASE+op,root);for(const[k,v]of Object.entries(query??{}))target.searchParams.set(k,v);return target.toString()}
  async function fetchOriginal(target:string,method:string,body:string,proof?:WorkNativeProof,approval?:WorkNativeApproval){
   const n=native(),actor=getAuthenticatedSessionBinding(),session=sessionForDaemonHandoff();if(!actor||!session?.cookieValue)workFail('native_session_required');
@@ -43,12 +44,19 @@ export function createEmployeeAgentWorkConnection(runtime:OneVaultRuntime,genera
   if(!isWorkAssociation(value)||value.state!=='active'||value.expiresAt<=Date.now()||workDigest(value.native)!==workDigest(native())||workDigest(value.orgSession)!==workDigest(approval.challenge.orgSession))workFail('association_changed');
   db.transaction(()=>{const prior=db.prepare('SELECT record_json FROM one_business_work_connections WHERE association_id=?').get(value.associationId) as {record_json:string}|undefined;if(prior&&prior.record_json!==JSON.stringify(value))workFail('association_changed');if(!prior)db.prepare("INSERT INTO one_business_work_connections VALUES(?,'active',?,?,0)").run(value.associationId,JSON.stringify(value),JSON.stringify(approval));db.prepare("UPDATE one_business_work_connection_attempts SET state='confirmed' WHERE id=?").run(approval.approvalReceiptId)}).immediate();active=workSnapshot(value);return requireCurrent();
  }
- async function complete(value:unknown,focused:()=>void){if(!isWorkChallenge(value))workFail('challenge_required');const c=workSnapshot(value),check=()=>{focused();if(c.expiresAt<=Date.now()||workDigest(c.native)!==workDigest(native()))workFail('challenge_changed')};check();schema();
+ async function complete(value:unknown,focused:()=>void){if(current())workFail('connection_already_active');const release=beginAssociationUpdate();try{
+  if(!isWorkChallenge(value))workFail('challenge_required');const c=workSnapshot(value),check=()=>{focused();if(current())workFail('connection_already_active');if(c.expiresAt<=Date.now()||workDigest(c.native)!==workDigest(native()))workFail('challenge_changed')};check();schema();
   if(db.prepare('SELECT id FROM one_business_work_connection_attempts WHERE challenge_id=?').get(c.challengeId))workFail('receipt_lookup_required');
   const payload={challenge:c,approvedAt:Date.now(),approvalReceiptId:randomUUID()},signature=await signPayload('association-approve',payload,check);check();const approval={...payload,signature};db.prepare("INSERT INTO one_business_work_connection_attempts VALUES(?,?,?,'attempted')").run(payload.approvalReceiptId,c.challengeId,JSON.stringify(approval));
   const result=await fetchOriginal(url('complete'),'POST',JSON.stringify(approval));check();return install(result,approval);
+  }finally{release();}
  }
- async function reconcileApproval(id:string){schema();const row=db.prepare('SELECT approval_json FROM one_business_work_connection_attempts WHERE id=?').get(id) as {approval_json:string}|undefined;if(!row)workFail('receipt_unknown');const approval=JSON.parse(row.approval_json) as WorkNativeApproval;if(workDigest(approval.challenge.native)!==workDigest(native()))workFail('native_owner_changed');const value=await fetchOriginal(url('complete',{challengeId:approval.challenge.challengeId,approvalReceiptId:id}),'GET','',undefined,approval);return install(value,approval)}
+ async function reconcileApproval(id:string){const release=beginAssociationUpdate();try{
+  schema();const row=db.prepare('SELECT approval_json FROM one_business_work_connection_attempts WHERE id=?').get(id) as {approval_json:string}|undefined;if(!row)workFail('receipt_unknown');const approval=JSON.parse(row.approval_json) as WorkNativeApproval;if(workDigest(approval.challenge.native)!==workDigest(native()))workFail('native_owner_changed');
+  const before=current();if(before){const original=db.prepare('SELECT approval_json FROM one_business_work_connections WHERE association_id=?').get(before.associationId) as {approval_json:string}|undefined;if(original?.approval_json!==row.approval_json)workFail('connection_already_active');}
+  const value=await fetchOriginal(url('complete',{challengeId:approval.challenge.challengeId,approvalReceiptId:id}),'GET','',undefined,approval);
+  if(before&&workDigest(value)!==workDigest(before))workFail('connection_already_active');return install(value,approval);
+  }finally{release();}}
  function pendingApproval(id:string){if(!initialized)return null;const row=db.prepare("SELECT id FROM one_business_work_connection_attempts WHERE challenge_id=? AND state='attempted'").get(id) as {id:string}|undefined;return row?.id??null}
  async function request(op:Operation,body:unknown=null,query?:Record<string,string>,method:'GET'|'POST'=op==='association'||op==='receipt'?'GET':'POST',terminal?:WorkNativeAssociation){
   if(terminal&&op!=='revoke')workFail('terminal_operation_invalid');

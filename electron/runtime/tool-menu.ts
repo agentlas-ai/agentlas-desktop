@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { preparedMcpTransport } from "../mcp-tools/prepared-transport";
 import { mcpToolSchemaDigest } from "../mcp-tools/tool-schema";
 import { toolSchemaVariants, type ToolSchemaVariant } from "./tool-schema-selection";
-import { closestToolNames, resolveToolNameAlias } from "./tool-name-alias";
+import { closestToolNames, resolveToolNameAlias, toolNameKey } from "./tool-name-alias";
 import { closestNames } from "../../shared/did-you-mean";
 import type { OpenAiToolDef, ResolvedTool } from "./local-tool-loop";
 
@@ -14,6 +14,10 @@ const CALL = "agentlas_tools_call";
 const NAMES = new Set([LIST, PREPARE, VARIANTS, PREPARE_VARIANT, CALL]);
 export function isToolMenuTool(name: string): boolean {
   return NAMES.has(name);
+}
+/** Whether this run keeps the tool behind the lazy menu (it is called only after agentlas_tools_prepare). */
+export function isToolMenuDeferred(byName: Map<string, ResolvedTool>, name: string): boolean {
+  return menus.get(byName)?.descriptors.has(name) === true;
 }
 // Match tool-result-context's inline UTF-8 byte limit so ordinary metadata
 // pages retain complete JSON instead of becoming text-result references.
@@ -107,6 +111,24 @@ export function installLazyToolMenu(tools: OpenAiToolDef[], byName: Map<string, 
     eagerSchemaBytes: bytes(tools), initialSchemaBytes: bytes(exposed), loadedSchemaBytes: 0, preparedCount: 0,
   } });
   return exposed;
+}
+/** A tool that sits behind the menu, named directly, is not answered with a bare code: the reply names the two calls that reach it. The model
+ * names it by its exact name (the menu index prints the short form), by the short name a prompt line gives, or by a spelling the alias rule resolves.
+ * Text only: nothing is prepared or run, and a name the menu does not hold gets no hint. */
+export function menuPathHint(byName: Map<string, ResolvedTool>, requested: string): string {
+  const menu = menus.get(byName);
+  if (!menu || !requested) return "";
+  let exact: string | undefined = menu.descriptors.has(requested) ? requested : resolveToolNameAlias(menu.descriptors.keys(), requested) ?? undefined;
+  if (!exact) {
+    const key = toolNameKey(requested);
+    const shortMatches = [...menu.descriptors.keys()].filter(name => {
+      const resolved = byName.get(name);
+      return resolved?.kind === "mcp" && toolNameKey(resolved.serverToolName) === key;
+    });
+    if (shortMatches.length === 1) exact = shortMatches[0];
+  }
+  if (!exact) return "";
+  return ` "${exact}" is an MCP tool behind the tool menu, not a direct tool: call ${PREPARE} {"name":"${exact}"}, then ${CALL} with the token it returns and the tool's arguments.`;
 }
 export function toolMenuMetrics(byName: Map<string, ResolvedTool>): Readonly<Menu["metrics"]> | null {
   const menu = menus.get(byName); return menu ? { ...menu.metrics } : null;

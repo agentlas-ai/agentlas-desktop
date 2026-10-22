@@ -17,6 +17,7 @@ import { assertScienceRecoveryRequest } from "../science-host/recovery-authority
 //  - 1M 컨텍스트: Anthropic은 beta 헤더(opt-in), OpenAI/Google은 모델 내장(자동)
 //  - 압축: 모델 컨텍스트 윈도우 초과 시 compactHistory로 과거 대화를 다이제스트로 접음
 import { readApiKey } from "../secrets/vault";
+import { companyCustomByokEndpoint } from "../business/company-work-provider";
 import type { Runner, RunnerEvents, RunnerFailure, RunnerRequest, RunnerResult } from "./runner";
 import { cumulativeSurfaceGateText, markRefusedBeforeDispatch, RuntimeTurnUnsettledError, runtimeHttpFailure, workforceZeroToolsEnforcement, wrapSystemPrompt } from "./runner";
 import { applyPlannedMessageBreakpoints, cachedTokensFromGeminiUsage } from "./prompt-cache";
@@ -1036,6 +1037,7 @@ async function runOpenAiCompletionWithMainToolLoop(
   key: string,
   req: RunnerRequest,
   events: RunnerEvents,
+  beforeProviderCall?: () => Promise<void>,
 ): Promise<RunnerResult> {
   const noModel = byokNoModel(backend, req);
   if (noModel) return noModel;
@@ -1067,6 +1069,7 @@ async function runOpenAiCompletionWithMainToolLoop(
       // A cloud provider refuses an oversized request explicitly; an unknown window is not a reason to refuse first.
       ...(capacity.known ? {} : { unknownCapacityProviderEnforced: true as const }),
       unreachableMessage: `${providerLabel} API unreachable`,
+      ...(beforeProviderCall ? { beforeProviderCall } : {}),
     },
     openAiMessages(recent, system, req),
   );
@@ -1159,9 +1162,6 @@ export const runCustomByok: Runner = async (
   events: RunnerEvents,
 ): Promise<RunnerResult> => {
   assertScienceRecoveryRequest(req, "byok", "custom");
-  const key = await readApiKey("custom");
-  if (!key) return byokCredentialMissing("Custom API key missing (Settings → BYOK)");
-
   let baseUrl = "https://api.openai.com/v1";
   try {
     const row = getDb().prepare("SELECT value FROM meta WHERE key = 'custom_base_url'").get() as { value: string } | undefined;
@@ -1169,7 +1169,11 @@ export const runCustomByok: Runner = async (
       baseUrl = row.value.trim().replace(/\/$/, "");
     }
   } catch {}
-  return runOpenAiCompletionWithMainToolLoop("custom", baseUrl, "Custom", key, req, events);
+  const key = await readApiKey("custom");
+  if (!key) return byokCredentialMissing("Custom API key missing (Settings → BYOK)");
+  const reviewedEndpoint = await companyCustomByokEndpoint(baseUrl);
+  return runOpenAiCompletionWithMainToolLoop("custom", reviewedEndpoint, "Custom", key, req, events,
+    async () => { await companyCustomByokEndpoint(reviewedEndpoint); });
 };
 
 // ── Google Generative (Gemini) ───────────────────────────

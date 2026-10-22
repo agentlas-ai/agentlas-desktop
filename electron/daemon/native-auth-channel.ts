@@ -114,6 +114,18 @@ export async function startNativeAuthChannel(options: { address: string; binding
   let privateDir: string | null = null, bindAddress = options.address, identity: { dev: number; ino: number } | null = null;
   if (process.platform !== "win32") { if (Buffer.byteLength(path.join(path.dirname(options.address), ".n-XXXXXX", "s")) > 100) throw nativeAuthError("native_auth_socket_path_limit"); privateDir = fs.mkdtempSync(path.join(path.dirname(options.address), ".n-")); fs.chmodSync(privateDir, 0o700); bindAddress = path.join(privateDir, "s"); }
   const tasks = new Set<Promise<void>>();
+  /*
+   The daemon runs with its stdio discarded, so a connection it ends left no trace anywhere (a lost channel could only be
+   reported as "closed"). One line per ended connection, in <socket name>-close.log next to the socket, bounded:
+   a reason code only, never a payload.
+   */
+  const diag = (reason: string): void => {
+    try {
+      const file = `${options.address.replace(/\.sock$/u, "")}-close.log`;
+      try { if (fs.statSync(file).size > 131072) fs.writeFileSync(file, fs.readFileSync(file, "utf8").slice(-32768), { mode: 0o600 }); } catch { /* new file */ }
+      fs.appendFileSync(file, `${new Date().toISOString()} boot=${options.bootId.slice(0, 8)} ${reason.replace(/[^A-Za-z0-9_.:-]/g, "").slice(0, 80)} sockets=${sockets.size}\n`, { mode: 0o600 });
+    } catch { /* diagnostics only */ }
+  };
   type Reverse = { send(value: unknown): boolean; close(): void; pending: Map<string, { sequence: number; identity: NativeAuthenticatedIdentity; lane: "ordinary" | "terminal"; replyDomain: "agentlas.native.checkpointReply.v1" | "agentlas.native.terminalCheckpointReply.v1" | "agentlas.native.ingressNoStartReply.v1" | "agentlas.native.serviceObservationReply.v1"; ingressNoStart?: boolean; serviceObservation?: boolean; capability?: NativeTerminalCheckpointCapability; request?: NativePreparationWireRequest; resolve(value: unknown): void; reject(error: unknown): void; timer: ReturnType<typeof setTimeout>; expired?: boolean }> };
   const reversePeers = new WeakMap<ControlSocketPeer, Reverse>();
   const terminalPorts = new WeakMap<NativeTerminalCheckpointPort, { peer: ControlSocketPeer; identity: NativeAuthenticatedIdentity; start: NativeStartDescriptor; capability: NativeTerminalCheckpointCapability }>();
@@ -142,36 +154,38 @@ export async function startNativeAuthChannel(options: { address: string; binding
     });
   };
   const server = net.createServer(socket => {
-    if (sockets.size >= 64) { socket.destroy(); return; } sockets.add(socket); socket.setTimeout(30000, () => socket.destroy());
+    if (sockets.size >= 64) { diag("too_many_sockets"); socket.destroy(); return; } sockets.add(socket); socket.setTimeout(30000, () => { diag("preauth_idle_timeout"); socket.destroy(); });
     let buffer = "", inFlight = 0, cancelInFlight = 0; const decoder = new TextDecoder("utf-8", { fatal: true }); const closed = new Set<() => void>();
-    const send = (value: unknown) => { if (socket.destroyed) return false; const wire = nativeAuthCanonical(value) + "\n"; if (Buffer.byteLength(wire) - 1 > MAX_BYTES) { socket.destroy(); return false; } if (socket.writableLength + Buffer.byteLength(wire) > MAX_BYTES * 2) { socket.destroy(); return false; } socket.write(wire); return true; };
-    const peer: ControlSocketPeer = { notify: (method, params) => { let frame: unknown; try { frame = auth.event(peer, method, params); } catch { return false; } try { return send({ event: frame }); } catch { socket.destroy(); return false; } }, onClose: listener => { if (socket.destroyed) { listener(); return () => {}; } closed.add(listener); return () => { closed.delete(listener); }; } };
-    const reverse: Reverse = { send, close: () => socket.destroy(), pending: new Map() }; reversePeers.set(peer, reverse);
-    const retire = () => { auth.close(peer); reversePeers.delete(peer); for (const p of reverse.pending.values()) { clearTimeout(p.timer); p.reject(nativeAuthError("native_auth_channel_lost")); } reverse.pending.clear(); sockets.delete(socket); buffer = ""; for (const f of closed) { try { f(); } catch {} } closed.clear(); }; socket.once("close", retire); socket.once("end", () => { retire(); socket.destroy(); }); socket.on("error", () => socket.destroy());
+    let why = "";
+    const destroyFor = (reason: string) => { if (!why) { why = reason; diag(reason); } socket.destroy(); };
+    const send = (value: unknown) => { if (socket.destroyed) return false; const wire = nativeAuthCanonical(value) + "\n"; if (Buffer.byteLength(wire) - 1 > MAX_BYTES) { destroyFor("outbound_frame_too_large"); return false; } if (socket.writableLength + Buffer.byteLength(wire) > MAX_BYTES * 2) { destroyFor("outbound_backpressure"); return false; } socket.write(wire); return true; };
+    const peer: ControlSocketPeer = { notify: (method, params) => { let frame: unknown; try { frame = auth.event(peer, method, params); } catch { return false; } try { return send({ event: frame }); } catch { destroyFor("event_write_failed"); return false; } }, onClose: listener => { if (socket.destroyed) { listener(); return () => {}; } closed.add(listener); return () => { closed.delete(listener); }; } };
+    const reverse: Reverse = { send, close: () => destroyFor("callback_expired_limit"), pending: new Map() }; reversePeers.set(peer, reverse);
+    const retire = () => { auth.close(peer); reversePeers.delete(peer); for (const p of reverse.pending.values()) { clearTimeout(p.timer); p.reject(nativeAuthError("native_auth_channel_lost")); } reverse.pending.clear(); sockets.delete(socket); buffer = ""; for (const f of closed) { try { f(); } catch {} } closed.clear(); }; socket.once("close", retire); socket.once("end", () => { retire(); destroyFor("peer_end"); }); socket.on("error", (error: NodeJS.ErrnoException) => destroyFor(`socket_error:${String(error?.code ?? "unknown")}`));
     socket.on("data", chunk => {
-      try { buffer += decoder.decode(chunk, { stream: true }); } catch { socket.destroy(); return; }
+      try { buffer += decoder.decode(chunk, { stream: true }); } catch { destroyFor("frame_not_utf8"); return; }
       let newline: number;
       while ((newline = buffer.indexOf("\n")) >= 0) {
         const line = buffer.slice(0, newline); buffer = buffer.slice(newline + 1); let message: Record<string, unknown>;
-        try { const value = decodeNativeAuthLine(line); if (!value || typeof value !== "object" || Array.isArray(value)) throw nativeAuthError("native_auth_outer_frame_invalid"); message = value as Record<string, unknown>; } catch { socket.destroy(); return; }
+        try { const value = decodeNativeAuthLine(line); if (!value || typeof value !== "object" || Array.isArray(value)) throw nativeAuthError("native_auth_outer_frame_invalid"); message = value as Record<string, unknown>; } catch { destroyFor("frame_undecodable"); return; }
         if (exactKeys(message, ["completion"])) {
           const requestId = (message.completion as { body?: { requestId?: unknown } })?.body?.requestId;
           const waiting = typeof requestId === "string" ? reverse.pending.get(requestId) : undefined;
-          if (!waiting || auth.authenticatedPeerIdentity(peer) !== waiting.identity) { socket.destroy(); return; }
+          if (!waiting || auth.authenticatedPeerIdentity(peer) !== waiting.identity) { destroyFor("completion_unexpected"); return; }
           try { if ((message.completion as { body?: { domain?: unknown } })?.body?.domain !== waiting.replyDomain) throw nativeAuthError("native_auth_checkpoint_reply_invalid"); const result = waiting.serviceObservation ? auth.serviceObservationReply(peer, waiting.capability!, message.completion, requestId as string, waiting.sequence, waiting.request!) : waiting.ingressNoStart ? auth.ingressNoStartReply(peer, waiting.capability!, message.completion, requestId as string, waiting.sequence, waiting.request!) : waiting.lane === "terminal" ? auth.terminalCheckpointReply(peer, waiting.capability!, message.completion, requestId as string, waiting.sequence, waiting.request!) : auth.checkpointReply(peer, message.completion, requestId as string, waiting.sequence); reverse.pending.delete(requestId as string); clearTimeout(waiting.timer); waiting.resolve(result); }
-          catch (error) { reverse.pending.delete(requestId as string); clearTimeout(waiting.timer); waiting.reject(error); if (!auth.consumeCheckpointOperationError(error, peer, requestId as string, waiting.sequence)) { socket.destroy(); return; } }
+          catch (error) { reverse.pending.delete(requestId as string); clearTimeout(waiting.timer); waiting.reject(error); if (!auth.consumeCheckpointOperationError(error, peer, requestId as string, waiting.sequence)) { destroyFor("completion_invalid"); return; } }
           continue;
         }
-        if (!exactKeys(message, ["id", "method", "params"]) || !Number.isSafeInteger(message.id) || Number(message.id) < 1) { socket.destroy(); return; }
-        if (message.method === "native.auth.hello" || message.method === "native.auth.proof") { try { const result = message.method === "native.auth.hello" ? auth.challenge(peer, message.params) : auth.authenticate(peer, message.params); if (message.method === "native.auth.proof") socket.setTimeout(0); send({ id: message.id, result }); } catch (e) { send({ id: message.id, error: errorCode(e) }); socket.end(); } continue; }
+        if (!exactKeys(message, ["id", "method", "params"]) || !Number.isSafeInteger(message.id) || Number(message.id) < 1) { destroyFor("frame_bad_shape"); return; }
+        if (message.method === "native.auth.hello" || message.method === "native.auth.proof") { try { const result = message.method === "native.auth.hello" ? auth.challenge(peer, message.params) : auth.authenticate(peer, message.params); if (message.method === "native.auth.proof") socket.setTimeout(0); send({ id: message.id, result }); } catch (e) { diag(`handshake_rejected:${errorCode(e)}`); send({ id: message.id, error: errorCode(e) }); socket.end(); } continue; }
         let request: ReturnType<typeof auth.authorize>;
-        try { if (message.method !== "native.auth.request") throw nativeAuthError("native_auth_method_denied"); request = auth.authorize(peer, message.params); } catch (e) { send({ id: message.id, error: errorCode(e) }); socket.end(); continue; }
+        try { if (message.method !== "native.auth.request") throw nativeAuthError("native_auth_method_denied"); request = auth.authorize(peer, message.params); } catch (e) { diag(`request_rejected:${errorCode(e)}`); send({ id: message.id, error: errorCode(e) }); socket.end(); continue; }
         const cancel = request.method === "invoke.cancel";
         if (!methods.has(request.method) || (cancel ? cancelInFlight >= 2 : inFlight >= 8)) { send({ id: message.id, result: auth.reply(peer, request.sequence, null, "native_auth_dispatch_denied") }); continue; }
         cancel ? cancelInFlight++ : inFlight++;
         const task = Promise.resolve().then(() => options.handle(request.method, request.params, peer)).then(result => { if (!socket.destroyed) send({ id: message.id, result: auth.reply(peer, request.sequence, result ?? null) }); }).catch(e => { if (!socket.destroyed) send({ id: message.id, result: auth.reply(peer, request.sequence, null, errorCode(e)) }); }).finally(() => { cancel ? cancelInFlight-- : inFlight--; tasks.delete(task); }); tasks.add(task);
       }
-      if (Buffer.byteLength(buffer) > MAX_BYTES) socket.destroy();
+      if (Buffer.byteLength(buffer) > MAX_BYTES) destroyFor("frame_too_large_in");
     });
   });
   try { await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(bindAddress, resolve); }); if (privateDir) { fs.chmodSync(bindAddress, 0o600); const s = fs.lstatSync(bindAddress); identity = { dev: s.dev, ino: s.ino }; fs.linkSync(bindAddress, options.address); } } catch (e) { for (const s of sockets) s.destroy(); await new Promise<void>(r => server.close(() => r())); if (privateDir) { try { fs.rmdirSync(privateDir); } catch {} } throw e; }
@@ -220,12 +234,17 @@ export async function connectNativeGuiChannel(options: { address: string; bindin
   // Requests that timed out alone: their late signed reply is verified, then dropped (never "unknown id, close").
   const lateReplies = new Map<number, (result: unknown) => void>();
   let silentTimeouts = 0;
+  // Why this channel closed, for the one line logged when it does (every close path used to be silent).
+  let closeReason = "";
   const completions: Array<{ prepare: () => unknown; terminal: boolean }> = [];
   const close = () => {
-    if (done) return; done = true; auth.close(); socket.destroy(); buffer = ""; completions.length = 0; lateReplies.clear();
+    if (done) return;
+    console.info(`[native-invocation] channel closed reason=${closeReason || "unspecified"} pending=${pending.size} silentTimeouts=${silentTimeouts}`);
+    done = true; auth.close(); socket.destroy(); buffer = ""; completions.length = 0; lateReplies.clear();
     for (const p of pending.values()) { clearTimeout(p.timer); p.reject(nativeAuthError("native_auth_channel_lost")); } pending.clear(); ordinary = cancel = 0;
     for (const listener of closeListeners) { try { listener(); } catch {} } closeListeners.clear();
   };
+  const closeFor = (reason: string) => { if (!closeReason) closeReason = reason; close(); };
   const write = (value: unknown, callback?: () => void) => {
     if (done || socket.destroyed || !socket.writable) throw nativeAuthError("native_auth_channel_lost");
     const wire = nativeAuthCanonical(value) + "\n";
@@ -236,17 +255,18 @@ export async function connectNativeGuiChannel(options: { address: string; bindin
   const flushCompletions = () => {
     while (!done && completionWrites < 2 && completions.length) {
       const next = completions.shift()!; completionWrites++; next.terminal ? terminalCompletionWrites++ : ordinaryCompletionWrites++;
-      try { write({ completion: next.prepare() }, () => { completionWrites--; next.terminal ? terminalCompletionWrites-- : ordinaryCompletionWrites--; flushCompletions(); }); } catch { close(); return; }
+      try { write({ completion: next.prepare() }, () => { completionWrites--; next.terminal ? terminalCompletionWrites-- : ordinaryCompletionWrites--; flushCompletions(); }); } catch { closeFor("completion_write_failed"); return; }
     }
   };
-  socket.on("error", close); socket.on("close", close); socket.on("end", close); socket.on("data", chunk => {
-    try { buffer += decoder.decode(chunk, { stream: true }); } catch { close(); return; }
+  socket.on("error", (error: NodeJS.ErrnoException) => closeFor(`socket_error:${String(error?.code ?? error?.name ?? "unknown").replace(/[^A-Za-z0-9_.-]/g, "").slice(0, 40)}`));
+  socket.on("close", () => closeFor("socket_close")); socket.on("end", () => closeFor("socket_end")); socket.on("data", chunk => {
+    try { buffer += decoder.decode(chunk, { stream: true }); } catch { closeFor("frame_not_utf8"); return; }
     let n: number;
     while ((n = buffer.indexOf("\n")) >= 0) {
       const line = buffer.slice(0, n); buffer = buffer.slice(n + 1); let value: unknown;
-      try { value = decodeNativeAuthLine(line); } catch { close(); return; }
-      if (!value || typeof value !== "object" || Array.isArray(value)) { close(); return; } const message = value as Record<string, unknown>;
-      if (exactKeys(message, ["event"])) { try { const event = auth.event(message.event); silentTimeouts = 0; options.onEvent?.(event.method, event.params); } catch { close(); return; } continue; }
+      try { value = decodeNativeAuthLine(line); } catch { closeFor("frame_undecodable"); return; }
+      if (!value || typeof value !== "object" || Array.isArray(value)) { closeFor("frame_not_object"); return; } const message = value as Record<string, unknown>;
+      if (exactKeys(message, ["event"])) { try { const event = auth.event(message.event); silentTimeouts = 0; options.onEvent?.(event.method, event.params); } catch { closeFor("event_rejected"); return; } continue; }
       if (exactKeys(message, ["callback"])) {
         try {
           const incoming = auth.checkpoint(message.callback), captured = auth.authenticatedIdentity(); silentTimeouts = 0;
@@ -260,23 +280,23 @@ export async function connectNativeGuiChannel(options: { address: string; bindin
             if (done || auth.authenticatedIdentity() !== captured) return;
             completions.push({ prepare: () => incoming.complete(result ?? null), terminal }); flushCompletions();
           }, (reason) => { if (done || auth.authenticatedIdentity() !== captured) return; completions.push({ prepare: () => incoming.complete(null, errorCode(reason)), terminal }); flushCompletions(); }).finally(() => { if (incoming.params && typeof incoming.params === "object") guiIngressObservations.delete(incoming.params); if (incoming.params && typeof incoming.params === "object") guiServiceObservations.delete(incoming.params); terminal ? terminalCallbackCount-- : callbackCount--; });
-        } catch { close(); return; } continue;
+        } catch (error) { closeFor(`callback_${errorCode(error)}`); return; } continue;
       }
-      if (!Number.isSafeInteger(message.id) || Number(message.id) < 1) { close(); return; }
+      if (!Number.isSafeInteger(message.id) || Number(message.id) < 1) { closeFor("frame_bad_id"); return; }
       const requestId = Number(message.id), waiting = pending.get(requestId);
       if (!waiting) {
         const late = lateReplies.get(requestId);
-        if (!late || !exactKeys(message, ["id", "result"])) { close(); return; }
+        if (!late || !exactKeys(message, ["id", "result"])) { closeFor("unknown_reply_id"); return; }
         lateReplies.delete(requestId); silentTimeouts = 0;
-        try { late(message.result); } catch { close(); return; } // a forged or broken late reply still closes
+        try { late(message.result); } catch { closeFor("late_reply_invalid"); return; } // a forged or broken late reply still closes
         continue;
       }
       silentTimeouts = 0;
       pending.delete(requestId); clearTimeout(waiting.timer); waiting.lane === "cancel" ? cancel-- : ordinary--;
       if (exactKeys(message, ["id", "result"])) waiting.resolve(message.result);
-      else { waiting.reject(nativeAuthError("native_auth_unsigned_error")); close(); return; }
+      else { waiting.reject(nativeAuthError("native_auth_unsigned_error")); closeFor("unsigned_error"); return; }
     }
-    if (Buffer.byteLength(buffer) > MAX_BYTES) close();
+    if (Buffer.byteLength(buffer) > MAX_BYTES) closeFor("frame_too_large");
   });
   const call = (method: string, prepare: () => unknown, lane: "ordinary" | "cancel" = "ordinary", timeoutMs = 10000, verifyLate?: (result: unknown) => void): Promise<unknown> => {
     // Reserve before signing. Known local capacity refusal must not consume a signed sequence.
@@ -285,25 +305,25 @@ export async function connectNativeGuiChannel(options: { address: string; bindin
     return new Promise((resolve, reject) => {
       // The handshake (hello/proof) has no late path: without it there is no channel, so its timeout closes.
       const timer = setTimeout(() => {
-        if (!verifyLate) { close(); return; }
+        if (!verifyLate) { closeFor("handshake_timeout"); return; }
         if (pending.get(requestId)?.timer !== timer) return;
         pending.delete(requestId); lane === "cancel" ? cancel-- : ordinary--;
         lateReplies.set(requestId, verifyLate); if (lateReplies.size > MAX_LATE_REPLIES) lateReplies.delete(lateReplies.keys().next().value!);
         reject(nativeAuthError("native_auth_reply_timeout"));
-        if (++silentTimeouts >= NATIVE_SILENT_PEER_TIMEOUTS) close();
+        if (++silentTimeouts >= NATIVE_SILENT_PEER_TIMEOUTS) closeFor("silent_peer_timeouts");
       }, timeoutMs); pending.set(requestId, { resolve, reject, timer, lane });
       try { write({ id: requestId, method, params: prepare() }); }
-      catch (error) { pending.delete(requestId); clearTimeout(timer); lane === "cancel" ? cancel-- : ordinary--; reject(error); close(); } // Preserve the original diagnostic; signing/write uncertainty never rolls back or retries.
+      catch (error) { pending.delete(requestId); clearTimeout(timer); lane === "cancel" ? cancel-- : ordinary--; reject(error); closeFor("request_write_failed"); } // Preserve the original diagnostic; signing/write uncertainty never rolls back or retries.
     });
   };
-  try { const challenge = await call("native.auth.hello", () => auth.hello); auth.accept(await call("native.auth.proof", () => auth.proof(challenge))); } catch (error) { close(); throw error; }
+  try { const challenge = await call("native.auth.hello", () => auth.hello); auth.accept(await call("native.auth.proof", () => auth.proof(challenge))); } catch (error) { closeFor("handshake_failed"); throw error; }
   const channel = {
     /** Native-only; the integration must still validate captured admission/capsule authority. */
     async dispatch(method: string, params: unknown): Promise<unknown> {
       if (!methods.has(method)) throw nativeAuthError("native_auth_method_denied"); let sequence = 0;
       const result = await call("native.auth.request", () => { const frame = auth.request(method, params); sequence = frame.sequence; return frame.envelope; }, method === "invoke.cancel" ? "cancel" : "ordinary",
         nativeGuiReplyTimeoutMs(method), late => { try { auth.reply(late, sequence); } catch (error) { if (!auth.consumeReplyOperationError(error, sequence)) throw error; } });
-      try { return auth.reply(result, sequence); } catch (error) { if (!auth.consumeReplyOperationError(error, sequence)) close(); throw error; }
+      try { return auth.reply(result, sequence); } catch (error) { if (!auth.consumeReplyOperationError(error, sequence)) closeFor("reply_invalid"); throw error; }
     },
     onClose(listener: () => void): () => void { if (done) { listener(); return () => {}; } closeListeners.add(listener); return () => { closeListeners.delete(listener); }; }, close,
   };

@@ -308,7 +308,7 @@ export const FINANCE_PORTS = descriptors.map(({ action, purpose, required, input
     purpose: composeDeclaredPrompt([{ id: `tool.finance.${action}.description`, revision: action === 'query.save' ? 2 : action === 'query' ? 2 : 1, stability: 'fixed-policy', changeTriggers: ['release'], text: purpose }]),
     handler: (args: Record<string, unknown>, ctx: HarnessCallContext) => callFinanceTool(action, args, ctx) };
 });
-const FINANCE_SKILL_REVISION: Record<string, number> = { index: 4, research: 4, workspace: 3, monitor: 3 };
+const FINANCE_SKILL_REVISION: Record<string, number> = { index: 4, research: 5, workspace: 3, monitor: 3 };
 for (const workflow of ['index', 'research', 'workspace', 'monitor']) registerDeclaredPromptModule({ id: `plugin.finance.skill.${workflow}`, revision: FINANCE_SKILL_REVISION[workflow], stability: 'versioned-content', changeTriggers: ['release', 'skill-package'] });
 
 /** Preserve the installed bytes and their hash while declaring the actual skill tool-result channel. */

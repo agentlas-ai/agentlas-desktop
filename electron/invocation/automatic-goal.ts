@@ -23,19 +23,19 @@ import { createHash } from "node:crypto";
 import { stripStaffGuidance } from "../one/owner-prompt";
 import { isInterruptedPartial } from "../../shared/interrupted-partial";
 
-/** Bounded default, not a promise to finish inside it. Unfinished goals retain their criteria and
- * pause with their remaining budget intact. Money metering is unavailable here: null explicitly
- * means no monetary enforcement, never an invented $0 cost.
- *
- * The old pair -- 3 cycles, 10 minutes -- was not a budget, it was a stopwatch. Measured against a
- * real long-running orchestration on this machine: 189 turns over 25.9 hours, with a 75-minute gap
- * between two consecutive turns and four failed turns in the middle. Under 3-and-10 that work ends
- * during its first pause and looks to the person like the product gave up.
- *
- * A working day is the defensible automatic default: long enough that ordinary thinking, waiting and
- * retrying fit inside it, short enough that a request auto-admitted from a plain sentence cannot run
- * unattended forever. The explicit Goal path stays unbounded; that one the person asked for.
- */
+                                                                                                  
+                                                                                                
+                                                            
+  
+                                                                                                   
+                                                                                                   
+                                                                                                   
+                                                                           
+  
+                                                                                                     
+                                                                                                     
+                                                                                             
+   
 
 
 
@@ -90,8 +90,8 @@ export async function prepareInvocationAutomaticGoal(input: {
   userPrompt: string;
   permission: string;
   attachmentOnly?: boolean;
-  /** Daemon-run turns (2026-10-11): classify with the same resolver and stop before admission. A `bypass` whose decision
-   * satisfies isGoalAdmittingDecision is exactly the message this function would otherwise admit as a Goal. */
+                                                                                                                         
+                                                                                                               
   classifyOnly?: boolean;
   signal: AbortSignal;
   resolveIntent?: (
@@ -141,6 +141,9 @@ export async function prepareInvocationAutomaticGoal(input: {
       // Local classification can exceed a short network-style deadline. Keep a
       // finite bound while allowing the configured local runtime to answer.
       timeoutMs: AUTOMATIC_GOAL_INTENT_TIMEOUT_MS,
+      // A bounded series' interval and run count are read only when the Goal is really admitted; the classification-only
+      // pass of a background-service turn just decides whether to forward.
+      extractCadence: !input.classifyOnly,
     });
     if (input.signal.aborted) return { kind: "bypass", decision };
     if ("classification" in decision && decision.classification === "unavailable") {
@@ -170,6 +173,10 @@ export async function prepareInvocationAutomaticGoal(input: {
       sourceMessageId: source.messageId, intent: decision.intent, commitment: decision.commitment,
       ...(decision.intent === "execute" ? { lifecycle: resolveGoalLifecycle(decision.lifecycle) } : {}),
       ...(decision.turnScope ? { turnScope: decision.turnScope } : {}),
+      // Flat numbers: the run-event ledger keeps no nested payload objects.
+      ...(decision.cadence ? { cadenceEverySeconds: decision.cadence.everySeconds, cadenceMaxRuns: decision.cadence.maxRuns } : {}),
+      ...("series" in decision && decision.series ? { series: true } : {}),
+      ...("cadenceReason" in decision && decision.cadenceReason ? { cadenceReason: decision.cadenceReason } : {}),
       classified: true,
       ...("attempts" in decision && decision.attempts ? { attempts: decision.attempts } : {}),
     } });
@@ -304,11 +311,11 @@ export function unansweredOwnerMessage(chatId: string): string | null {
 
 /** Explicit UI resume reuses the same campaign and remaining budget. It never
  * reclassifies the synthetic continuation as a new user request. */
-/**
- * 재개 요청을 만든다 — 상태를 바꾸지 않는다(재시작 체크포인트 경로가 그 전제로 판번호를 다시 대조한다).
- * actor "user": 사람이 누른 재개. actor "host": 자동 재개.
- * 이전 시도의 바깥 효과 여부는 호스트가 판단하지 않는다 — 다음 턴의 모델이 직전 턴 메모와 파일을 보고 스스로 확인한다(오너 2026-10-12).
- */
+   
+                                                              
+                                                
+                                                                                      
+   
 export function automaticGoalResumeRequest(chatId: string, expectedVersion: number, actor: "user" | "host" = "host"): import("../../shared/types").McpInvocationRequest | null {
   const chat = getDb().prepare("SELECT goal_id FROM chats WHERE id = ?").get(chatId) as { goal_id: string | null } | undefined;
   if (!chat?.goal_id) return null;
@@ -327,7 +334,7 @@ export function automaticGoalResumeRequest(chatId: string, expectedVersion: numb
   if (!authority) throw new Error("auto_goal_resume_authority_missing");
   return { chatId, promptOrigin: "system", taskIntent: "task", permissions: authority[2] as "read" | "write" | "full",
     // Without a locale the run fell back to "en" and One answered a Korean owner in
-    // English on every goal resume (run_events invoke_started locale:"en", 2026-09-26).
+                                                                                        
     locale: currentUiLocale(),
     // One resolves permission from its explicit mode, not the generic field.
     // This is the stored user grant, not a new grant from a system prompt.

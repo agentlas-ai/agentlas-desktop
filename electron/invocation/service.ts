@@ -398,6 +398,8 @@ interface NativePreparingPending {
 }
 
 interface RunRecord {
+  /** Observed controller choice for live presentation only; never persisted as a chat pin. */
+  currentRuntimeSelection?: RuntimeSelection;
   /** Original immutable native choices, never effective mutable UI settings. */
   nativeOwnerTextChoices?: string;
   ownerLease?: InvocationRunOwner;
@@ -2405,6 +2407,14 @@ export class InvocationService {
    */
   activeChatIds(): string[] {
     return [...new Set([...this.turnChatIds(), ...this.processLeasedChatIds()])];
+  }
+
+  /** Actual observed controller, without guessing from requests or role defaults. */
+  activeRuntimeSelection(chatId: string): RuntimeSelection | null {
+    const records = [...new Map([...this.settlingRuns, ...this.activeRuns.entries()]).values()]
+      .filter(record => record.chatId === chatId && !record.background && !record.controller.signal.aborted);
+    return records.length === 1 && records[0].currentRuntimeSelection
+      ? { ...records[0].currentRuntimeSelection } : null;
   }
 
   /** Chats of the turns this service itself runs (live, preparing, settling, an episode awaiting its Goal check). */
@@ -7623,6 +7633,14 @@ export class InvocationService {
   }
 
   private publishRunEvent(record: RunRecord, envelope: InvocationEventEnvelope): void {
+    const observed = envelope.event;
+    if (!record.background && !observed.agentId && observed.runtimeSelection?.role !== "worker"
+      && (!observed.modelRole || observed.modelRole === "orchestrator")) {
+      if (observed.kind === "final" || observed.kind === "error") record.currentRuntimeSelection = undefined;
+      else if (observed.runtimeSelection) {
+        record.currentRuntimeSelection = { ...observed.runtimeSelection };
+      }
+    }
     const scienceDelivery = !record.background && record.executionSource === "science"
       ? recordScienceRuntimeOutboxEvent({ runId: envelope.runId, chatId: envelope.chatId, event: envelope.event })
       : undefined;

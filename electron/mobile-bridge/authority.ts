@@ -71,7 +71,7 @@ import { chatFilePrompt, chatFileImages, validateChatAttachmentSelection, readBo
 import { performOneMobileSuggestionAction } from "../one/mobile-suggestions";
 import { invocationService, invocationEventRequestsDecision } from "../invocation/service";
 import { onOwnerAsk } from "../owner-ask-alerts";
-import { nativeGuiActiveChatIds, onNativeGuiActiveChats, onNativeGuiApprovalRequested, onNativeGuiInvocationEvent, onNativeGuiSettled } from "../invocation/native-gui-events";
+import { nativeGuiActiveRuntimeSelection, nativeGuiActiveChatIds, onNativeGuiActiveChats, onNativeGuiApprovalRequested, onNativeGuiInvocationEvent, onNativeGuiSettled } from "../invocation/native-gui-events";
 import type { InvocationCurrentTurnPort } from "../runtime/invocation-owner-router";
 import { readMobileBridgeHistoryPage } from "./history-page";
 import { projectMobileBridgeContext } from "./context-snapshot";
@@ -114,6 +114,7 @@ import {
   setActiveRuntime,
 } from "../runtime/detect";
 import { listModelRoleMembers, pickModelRoleFromPool, setModelRoleMembers } from "../store/model-roles";
+import { oneFrontRuntimeSelection } from "../one/front";
 import { listRuntimeCommands } from "../runtime/commands";
 import { releaseIdleAgentResidencyForChat } from "../runtime/agent-residency";
 import { installPublicHubRelease, listInstalledAgents } from "../mcp/registry";
@@ -216,6 +217,7 @@ import {
   type MobileBridgeCloudUploadSaveDto,
   type MobileBridgeCloudUploadPreviewDto,
   type MobileBridgeInvocationEventDto,
+  type MobileBridgeChatDto,
   type MobileBridgeInvocationArtifactDto,
   type MobileBridgeBrowserApprovalDto,
   type MobileBridgeInvokeSteerParams,
@@ -1809,7 +1811,7 @@ export function durableMobileApprovalPending(id: string, chatId: string): boolea
 }
 
 export function observeMobilePushNotices(hostId: string, listener: (notice: MobilePushNotice, stillCurrent?: () => boolean) => void): () => void {
-  // Personal One turns run in the background service since 2026-10-12; its finals arrive through native-gui-events.
+                                                                                                                    
   const onMessage = ({ runId, chatId, event }: { runId: string; chatId: string; event: McpInvocationEvent }) => {
     if (event.agentId || event.kind !== "final") return;
     const message = projectOneMessageForPhone(event);
@@ -1928,6 +1930,21 @@ function mobileToolSourceUrls(value: unknown): string[] {
   return urls;
 }
 
+/** Main and daemon share one presentation path; these reads never change dispatch. */
+function mobileActiveChatIds(): string[] {
+  return [...new Set([...invocationService.activeChatIds(), ...nativeGuiActiveChatIds()])];
+}
+function mobileActiveRuntimeSelection(chatId: string): RuntimeSelection | null {
+  if (invocationService.activeChatIds().includes(chatId)) {
+    // Two host claims do not prove the same run. Unknown Main metadata must not borrow a daemon model.
+    return nativeGuiActiveChatIds().includes(chatId) ? null : invocationService.activeRuntimeSelection(chatId);
+  }
+  return nativeGuiActiveRuntimeSelection(chatId);
+}
+function mobileChatDto(chat: Chat): MobileBridgeChatDto {
+  return projectMobileBridgeChat(chat, mobileActiveChatIds().includes(chat.id), mobileActiveRuntimeSelection(chat.id));
+}
+
 export function projectMobileBridgeInvocationEvent(
   event: McpInvocationEvent,
   context?: { taskId?: string | null; chatId?: string | null; runId?: string | null; syncedAt?: string; cwd?: string | null;
@@ -1948,6 +1965,10 @@ export function projectMobileBridgeInvocationEvent(
     kind: event.kind === "plan" && context?.planChecklist ? "plan"
       : event.kind === "mcp-key-request" || event.kind === "lifecycle" || event.kind === "plan" ? "thinking" : event.kind,
   };
+  if (event.runtimeSelection && event.runtimeSelection.role !== "worker"
+    && !event.agentId && (!event.modelRole || event.modelRole === "orchestrator")) {
+    projected.runtimeSelection = projectMobileBridgeRuntimeSelection(event.runtimeSelection);
+  }
   if (projected.kind === "plan") {
     // The runner already bounded it (boundInvocationPlan); text is redacted again for the phone, ids stay home.
     const plan = boundInvocationPlan(event.plan) ?? { entries: [] };
@@ -2875,7 +2896,9 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         // The model Hope's next turn runs: the conversation's chip (room-chip-runtime.ts), else the
         // orchestrator default read from the same ordered role configuration as runtime detection, without
         // launching probes in a frequently polled snapshot. Not a claim about an old/current run's fallback.
-        const selected = getChat(snapshot.conversationChatId)?.runtimeSelection ?? pickModelRoleFromPool("orchestrator")?.selection;
+        // The owner's opt-in front (shared/one-front.ts) runs Hope's turns on the light model whatever the chip says, so it is the
+        // model the phone shows; the field keeps its shape (provider, model).
+        const selected = oneFrontRuntimeSelection() ?? getChat(snapshot.conversationChatId)?.runtimeSelection ?? pickModelRoleFromPool("orchestrator")?.selection;
         const orchestratorModel = selected ? { provider: selected.kind, model: selected.model ?? null } : null;
         return asJsonValue({...snapshot, orchestratorModel,
           displayName:boundedRedactedText(snapshot.displayName,240),
@@ -2936,10 +2959,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
           memberId: opened.memberId,
           memberRevision: opened.memberRevision,
           unreadGeneration: opened.unreadGeneration,
-          chat: projectMobileBridgeChat(
-            opened.chat,
-            invocationService.activeChatIds().includes(opened.chat.id),
-          ),
+          chat: mobileChatDto(opened.chat),
         }, request.method);
       }
       case "one.org.markRead": {
@@ -3131,9 +3151,8 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
       case "chats.listRecent": {
         const params = guardedParams(request, ["limit"]);
         const limit = optionalInteger(params, "limit", 1, 100) ?? 50;
-        const active = new Set(invocationService.activeChatIds());
         return asJsonValue(
-          listRecentChats(limit).map((chat) => projectMobileBridgeChat(chat, active.has(chat.id))),
+          listRecentChats(limit).map((chat) => mobileChatDto(chat)),
           request.method,
         );
       }
@@ -3141,7 +3160,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         const params = guardedParams(request, ["id"]);
         const chat = requireChat(requiredIdentifier(params, "id"));
         return asJsonValue(
-          projectMobileBridgeChat(chat, invocationService.activeChatIds().includes(chat.id)),
+          mobileChatDto(chat),
           request.method,
         );
       }
@@ -3174,7 +3193,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
             // Creation is already durable. Return the exact projected chat in
             // the same receipt so Mobile can open and recover the empty task
             // even when the following optional runtime-pin action is rejected.
-            chat: projectMobileBridgeChat(chat, false),
+            chat: mobileChatDto(chat),
           }, request.method);
         } catch (error) {
           removeChat(chat.id);
@@ -3188,7 +3207,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         const chat = renameChat(id, requiredBoundedString(params, "title", 200));
         this.scheduleSnapshotUpdated();
         return asJsonValue(
-          projectMobileBridgeChat(chat, invocationService.activeChatIds().includes(chat.id)),
+          mobileChatDto(chat),
           request.method,
         );
       }
@@ -3199,7 +3218,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         const chat = archiveChat(id);
         this.scheduleSnapshotUpdated();
         return asJsonValue(
-          projectMobileBridgeChat(chat, invocationService.activeChatIds().includes(chat.id)),
+          mobileChatDto(chat),
           request.method,
         );
       }
@@ -3210,7 +3229,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         const chat = unarchiveChat(id);
         this.scheduleSnapshotUpdated();
         return asJsonValue(
-          projectMobileBridgeChat(chat, invocationService.activeChatIds().includes(chat.id)),
+          mobileChatDto(chat),
           request.method,
         );
       }
@@ -3224,7 +3243,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         const chat = requireChat(id);
         this.scheduleSnapshotUpdated(id);
         return asJsonValue(
-          projectMobileBridgeChat(chat, invocationService.activeChatIds().includes(chat.id)),
+          mobileChatDto(chat),
           request.method,
         );
       }
@@ -3238,7 +3257,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         const chat = requireChat(id);
         this.scheduleSnapshotUpdated(id);
         return asJsonValue(
-          projectMobileBridgeChat(chat, invocationService.activeChatIds().includes(chat.id)),
+          mobileChatDto(chat),
           request.method,
         );
       }
@@ -3255,7 +3274,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         const chat = setChatRuntimeSelection(id, runtimeSelection, "mobile");
         this.scheduleSnapshotUpdated(id);
         return asJsonValue(
-          projectMobileBridgeChat(chat, invocationService.activeChatIds().includes(chat.id)),
+          mobileChatDto(chat),
           request.method,
         );
       }
@@ -3272,7 +3291,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         const chat = requireChat(id);
         this.scheduleSnapshotUpdated(id);
         return asJsonValue(
-          projectMobileBridgeChat(chat, false),
+          mobileChatDto(chat),
           request.method,
         );
       }
@@ -5584,7 +5603,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
     forceUsageRefresh: boolean,
     rowSkipVariant: boolean,
   ): Promise<{ snapshot: MobileBridgeSnapshot; rowSkip: MobileBridgeSnapshot | null }> {
-    const activeChatIds = invocationService.activeChatIds();
+    const activeChatIds = mobileActiveChatIds();
     const pendingBrowserApprovals = listPendingBrowserApprovals().map((approval) =>
       this.projectBrowserApproval(approval));
     // live 요청만 폰에 보낸다 — 사후 고지(post-denial)는 데스크탑에서도 카드가 아니다.
@@ -5648,6 +5667,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
       displayName: this.options.displayName,
       appVersion: this.options.appVersion,
       activeChatIds,
+      activeRuntimeSelections: Object.fromEntries(activeChatIds.map(chatId => [chatId, mobileActiveRuntimeSelection(chatId)])),
       includeMessagesForChatIds: activeChatIds,
       pendingBrowserApprovals,
       pendingToolApprovals,
@@ -5659,7 +5679,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
 
   private attachDesktopSubscriptions(): void {
     if (this.upstreamUnsubscribers.length > 0) return;
-    // One handler for Main-hosted and daemon-hosted runs (personal One runs in the daemon since 2026-10-12).
+                                                                                                             
     const forwardInvocationEvent = ({ runId, chatId, event }: { runId: string; chatId: string; event: McpInvocationEvent }) => {
       // A teammate's partial goes to the phone whole. Main-hosted: from this host's base (a daemon-hosted one already
       // arrives whole from native-gui-events.ts, and is returned unchanged).

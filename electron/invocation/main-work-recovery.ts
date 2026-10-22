@@ -49,8 +49,19 @@ function decodeAction(payload:string):Action {
  * identity. A provider call id and the broker's ephemeral action UUID never do. */
 export class MainWorkRecoveryContext {
   private readonly journal = new DesktopWorkRecoveryJournal();
+     
+                                                                                                                                      
+                                                                                                                                   
+                                                                                                                                
+                                                                                                                              
+                                                                                                                                    
+     
+  private readonly live = new Set<string>();
   constructor(private readonly chatId: string, private readonly invocationRunId: string,
     private readonly assertCurrent: () => void) { contexts.add(this); }
+
+  /** The dispatch of this action ended, whichever way: from here on an unresolved journal state means a lost outcome. */
+  endLive(actionId: string): void { this.live.delete(actionId); }
 
   private scope(): Scope {
     this.assertCurrent();
@@ -85,13 +96,33 @@ export class MainWorkRecoveryContext {
       instruction:"Use _agentlas_work.action_id for the same logical action after a model change or restart. Read its original outcome first. Only a confirmed completed observational action can request regenerate_read; its original identity and total-two method cap remain. Select a different canonical step for independent work. A provider call id is only transport correlation." });
   }
 
+     
+                                                                                                                                           
+                                                                                                                                        
+                                                                                                                                     
+                                                                                                                                          
+                                                                                                                                     
+                               
+     
+  refusalPacket(stepId?: string): string {
+    if (!findCanonicalTaskForChat(this.chatId)) return "";
+    const scope=this.scope(), actions=this.actions(scope), step=stepId ?? scope.defaultStepId;
+    const unresolved=actions.filter(item=>item.stepId===step && !this.live.has(item.actionId))
+      .map(action=>({action,state:this.journal.read(scope.runId,action.actionId)?.state ?? "held"}))
+      .filter(row=>!["succeeded","cancelled","failed"].includes(row.state));
+    return JSON.stringify({ schemaVersion:"agentlas.main-work-recovery.v1", taskId:scope.taskId, revision:scope.revision, stepIds:scope.stepIds,
+      stepId:step, totalActions:actions.length, unresolvedTotal:unresolved.length,
+      unresolved:unresolved.slice(-8).map(({action,state})=>({actionId:action.actionId,methodId:action.methodId,state,outcomeStored:false})),
+      instruction:"These actions have no stored outcome: the call ended before its answer arrived, so reading main-tool-outcome:<actionId> answers tool_result_reference_unknown. Do not repeat them blindly. Non-read tools stay paused for this step until their effect is verified: check it with a read-only tool, or tell the person what is unconfirmed and ask. Independent work can select another step_id from stepIds. After a model change or restart, pass _agentlas_work.action_id to continue the same logical action. A provider call id is only transport correlation." });
+  }
+
   private actions(scope: Scope): Action[] {
     return (getDb().prepare(`SELECT payload_json FROM run_events WHERE run_id=? AND kind='main_work_action'
       AND json_extract(payload_json,'$.taskId')=? AND json_extract(payload_json,'$.revision')=? ORDER BY seq`)
       .all(scope.runId,scope.taskId,scope.revision) as Array<{payload_json:string}>).map(row=>decodeAction(row.payload_json));
   }
 
-  admit(input: { reference?: MainWorkReference; methodId: string; arguments: Record<string,unknown>; observational: boolean }):
+  admit(input: { reference?: MainWorkReference; methodId: string; arguments: Record<string,unknown>; observational: boolean; live?: boolean }):
     { unit: WorkUnit; action: Action } | { reused: Result; action: Action } {
     assertMainWorkRecoveryContext(this);const scope=this.scope();
     return getDb().transaction(()=>{
@@ -103,8 +134,10 @@ export class MainWorkRecoveryContext {
         || action.inputDigest!==digest(input.arguments))) throw new Error("main_work_action_input_conflict");
       if (!action) {
         // Only an action whose outcome never came back (started across a restart, held after a lost call) blocks the
-        // next one. A returned error (failed) or a call that never left Main (cancelled) has a known end.
-        const unresolved=actions.filter(item=>item.stepId===stepId && !["succeeded","cancelled","failed"].includes(this.journal.read(scope.runId,item.actionId)?.state ?? "held"));
+        // next one. A returned error (failed) or a call that never left Main (cancelled) has a known end, and a call still in
+        // flight in this run (a sibling of a code-mode program, see `live`) has a pending one.
+        const unresolved=actions.filter(item=>item.stepId===stepId && !this.live.has(item.actionId)
+          && !["succeeded","cancelled","failed"].includes(this.journal.read(scope.runId,item.actionId)?.state ?? "held"));
         if (!input.observational && unresolved.length) throw new Error(`main_work_read_original_outcome:${unresolved.map(item=>item.actionId).join(",")}`);
         const ordinal=Number((getDb().prepare("SELECT count(*) n FROM run_events WHERE run_id=? AND kind='main_work_action'").get(scope.runId) as {n:number}).n)+1;
         const actionId=workUnitId({runId:scope.runId,taskId:scope.taskId,stepId:`${stepId}:action:${ordinal}`,revision:scope.revision});
@@ -150,6 +183,8 @@ export class MainWorkRecoveryContext {
       }
       const started=this.journal.transition(unit,"started",{reason:"main_canonical_tool_dispatch"});
       if (!started) throw new Error("main_work_same_method_limit_or_claim_changed");
+      // Registered in the same synchronous step as the transition, so no sibling's admit can see a started action that is not yet live.
+      if (input.live) this.live.add(action.actionId);
       return {unit:started,action};
     }).immediate();
   }

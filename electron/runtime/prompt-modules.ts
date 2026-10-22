@@ -3,17 +3,17 @@ import type { RuntimeLocale } from "./status-i18n";
 import { withSkillBodiesForNoReader } from "../agents/skill-bodies";
 import { orderPromptParts, registerDeclaredPromptModule, PROMPT_ORDER_REVISION, type DeclaredPromptPart, type PromptOrderingMetadata } from "./prompt-order";
 
-/*
- * PromptModule registry — every always-on line of the shared system prompt is one registered module
- * (docs/2026-10-13-native-harness/13 §5). Owner 2026-10-13: prompts become `key: value` one-liners; anything a
- * typed tool can do is a tool (ask_form, read_ui_schema, memory_note, goal_*), and catalogs (plugins, skills,
- * connectors) are name lists the model opens on its own.
- *
- * A module renders current host-owned facts (profile, locale, permission, runtime kind and versioned
- * catalogs/agent files). Update triggers are declared: versioned content is re-read, never frozen.
- * Explicit plugin mentions travel in turn context, never in the system inventory.
- * `describePromptModules` returns the per-module bytes and digests so delivery can be metered and shown.
- */
+  
+                                                                                                    
+                                                                                                               
+                                                                                                              
+                                                         
+  
+                                                                                                     
+                                                                                                   
+                                                                                  
+                                                                                                         
+   
 
 export type PromptProfile = "ordinary" | "restricted" | "science" | "host-judgment" | "untrusted";
 export type PromptLayer = "S1" | "S2";
@@ -88,8 +88,17 @@ export function promptModules(): readonly PromptModule[] {
   return registry;
 }
 
-/** `ask_form` (agentlas-turn) is the typed path; the fenced block stays for runtimes without the tool. */
+   
+                                                                                                      
+                                                                                                                               
+                                                                                                                                      
+                                                                                                                                       
+                                                                                                                               
+   
 export const ASK_LINE =
+  "ask: only if blocked on the owner (choice, fact, go-ahead) → call ask_form/ask_user, never prose; 2+ options (best guesses); safe default → take it; no tool → end with <<agentlas-ask>>{\"question\":\"…?\",\"options\":[{\"label\":\"…\"},{\"label\":\"…\"}]}<</agentlas-ask>>";
+                                                                                                                                                            
+export const ASK_LINE_CHOICE =
   "ask: call ask_form or ask_user for a real choice; no tool → end with <<agentlas-ask>>{\"question\":\"…?\",\"options\":[{\"label\":\"…\"}]}<</agentlas-ask>>";
 
 export const UI_LINE = "ui: call read_ui_schema before showing ui; surface: read_surface_protocol";
@@ -119,7 +128,7 @@ registerPromptModule({
 registerPromptModule({
   id: "core.locale", revision: 4, kind: "core", layer: "S1", profiles: ALL,
   stability: "configuration", changeTriggers: ["release", "locale"], order: 0,
-  // Owner 2026-10-14: the reply follows the language the user writes in; the app's language setting is for menus and
+                                                                                                                     
   // screens only ("입력언어무관 한국어답이 아니고 입력언어에따라 출력 … 세팅 영어 한국어는 메뉴나 그런거임"). Host-written
   // prompts (goal continuations, recoveries) are not the user's language, so those turns follow the user's last
   // message. The setting stays only as the fallback before the user has written anything.
@@ -161,12 +170,14 @@ registerPromptModule({
 });
 
 registerPromptModule({
-  id: "capability.ask", revision: 2, kind: "capability", layer: "S1", profiles: ["ordinary", "restricted"],
+  id: "capability.ask", revision: 3, kind: "capability", layer: "S1", profiles: ["ordinary", "restricted"],
   stability: "fixed-policy", changeTriggers: ["release", "profile"], order: 0,
-  
-
-
-  render: (ctx) => ctx.unattendedNoAsk ? null : ASK_LINE,
+  // An unattended run has no question channel (ask_form is not listed; the turn context closes with the
+  // unattended boundary). Offering the ask line there let the developer channel outrank that boundary
+                                                                                                        
+  // The restricted profile has no card channel at all (its final boundary ignores control blocks), so it keeps the choice-only
+  // form: "never ask in prose" would contradict it.
+  render: (ctx) => ctx.unattendedNoAsk ? null : ctx.profile === "restricted" ? ASK_LINE_CHOICE : ASK_LINE,
 });
 
 registerPromptModule({
@@ -252,7 +263,7 @@ const NO_READER_PROFILES: ReadonlySet<PromptProfile> = new Set<PromptProfile>(["
 registerPromptModule({
   id: "role.agent", revision: 2, kind: "role", layer: "S2", profiles: ALL,
   stability: "versioned-content", changeTriggers: ["agent-instructions", "skill-package", "locale"], order: 0,
-  // Runs that can read files keep the list (owner 2026-10-13); a no-reader run cannot open SKILL.md (native-harness NH04).
+                                                                                                                           
   render: (ctx) => `${ctx.agentSeparator}\n${NO_READER_PROFILES.has(ctx.profile) ? withSkillBodiesForNoReader(ctx.agentPrompt) : ctx.agentPrompt}`,
 });
 

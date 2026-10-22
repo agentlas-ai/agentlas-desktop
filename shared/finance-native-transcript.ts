@@ -1,4 +1,5 @@
 import { FinanceNativeResultSchema } from './finance-native-ui';
+import { financeQueryScope } from './finance-query-scope';
 import { financePortfolioLineText } from './finance-portfolio';
 import { FINANCE_REPORT_SOURCE_LIMITS, financeReportCompositionSpec, financeReportComputeMetrics, financeReportLocale, financeReportProseBlocks, financeReportSourceBlock, financeReportSourceMore, selectFinanceReportSections, type FinanceReportSourceBlock, type FinanceReportSourceEntry } from './finance-report-presentation';
 import { validateInlineUiPresentationContent, type InlineUiPresentationContent } from './inline-ui-presentation';
@@ -77,7 +78,7 @@ export function financeNativeTranscriptContents(value: unknown, options: { state
   const blocks: InlineUiPresentationContent[] = [];
   if (view.kind === 'search') {
     if (view.result.assets.length > 50) return unavailable();
-    blocks.push(native(view.result.assets.length ? view.result.assets.map(asset => ({ type: 'card', title: asset.symbol, children: [text([asset.name, asset.exchange, asset.currency !== 'XXX' ? asset.currency : null].filter(Boolean).join(' · '))] })) : [text('No candidates returned.')], view.query));
+    blocks.push(native(view.result.assets.length ? view.result.assets.map(asset => ({ type: 'card', title: asset.symbol, children: [text([asset.name, asset.exchange, asset.currency !== 'XXX' ? asset.currency : null].filter(Boolean).join(' · '))] })) : [text('No candidates returned.')], clipText(view.query, INTELLECT_UI_LIMITS.labelChars)));
   } else if (view.kind === 'query') {
     const { result } = view;
     if (result.status === 'error' || result.status === 'unconnected') return [native([text('Data could not be retrieved.')])];
@@ -92,7 +93,7 @@ export function financeNativeTranscriptContents(value: unknown, options: { state
       if (result.rows.length > 50) return unavailable();
       const visible = columns.map((name, index) => ({ name, index })).filter(column => !hidden.has(column.name.toLowerCase()));
       if (!visible.length || visible.length > 8) return unavailable();
-      blocks.push(native(result.rows.map(row => ({ type: 'card', children: [text(visible.map(column => `${column.name}: ${row[column.index] === null ? '—' : typeof row[column.index] === 'number' ? number(row[column.index] as number) : row[column.index] ?? '—'}`).join('\n'))] })), view.request.query));
+      blocks.push(native(result.rows.map(row => ({ type: 'card', children: [text(visible.map(column => `${column.name}: ${row[column.index] === null ? '—' : typeof row[column.index] === 'number' ? number(row[column.index] as number) : row[column.index] ?? '—'}`).join('\n'))] })), clipText(financeQueryScope(view.request), INTELLECT_UI_LIMITS.labelChars)));
     }
   } else if (view.kind === 'holdings') {
     // The phone shows the open proposal and where the decision is made; it cannot save. Once the owner has acted the table is dropped:

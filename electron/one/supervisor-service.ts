@@ -51,6 +51,12 @@ export interface SupervisorDependencies {
   runtime: SupervisorRuntime;
   locale(): "ko" | "en";
   normalizeRuntimeSelection(value:unknown):RuntimeSelection|null;
+  /**
+   * Where the personal conversation's reply turn runs when the owner's message named no runtime: the light front the owner
+   * opted into (shared/one-front.ts), or null for the owner's own lane (the conversation's chip, else the role pool).
+   * Read for the conversation's reply turn only; delegated Work, follow-ups and chat sends never ask it.
+   */
+  frontRuntime?():RuntimeSelection|null;
   turns?(chatId:string,requests:SupervisorRequestRow[]):SupervisorReplyTurn[];
   appearance?(input:{expectedVersion:number;displayName:string;bubbleColor:OneBubbleColor}):void;
   legacyHistory?(oneId:string,chatId:string):SupervisorLegacyHistory;
@@ -58,7 +64,7 @@ export interface SupervisorDependencies {
   budget?:OneBudgetStore;
   /** Whether this host-started One run ended with the quiet reply (nothing saved, no alert). */
   quietRun?(runId: string): boolean;
-  /** Marks a Work session One opened as Always allow (owner 2026-10-04), so the worker never stops to ask. */
+                                                                                                              
   alwaysApprove?(chatId: string): void;
   workIdentityMutable?: boolean;
   wakeWorkQueue?(): void;
@@ -467,10 +473,14 @@ export class OneSupervisorService {
       this.deps.store.update(row,{state:"dispatching"});
       this.observeDispatch(row, () => this.deps.runtime.start({runId:row.run_id!,chatId,userPrompt:payload.text,promptOrigin:"system",oneMode:true,
           taskIntent:"conversation",permissions:reportOnly ? "read" : "full",onePermissionMode:reportOnly ? "read" : "full",
-          ...(reportOnly ? {} : {toolMode:"computer-use" as const}),locale:this.deps.locale(),runtimeSelection:payload.runtimeSelection,
+          ...(reportOnly ? {} : {toolMode:"computer-use" as const}),locale:this.deps.locale(),runtimeSelection:payload.runtimeSelection ?? this.frontSelection(),
           images:payload.images,fileGroupId:payload.fileGroupId},
           isReview(row) ? (payload as {purpose?: SupervisorHostNoticePurpose}).purpose ?? "one-delegation-review" : undefined));
     } finally { this.draining = false; }
+  }
+  /** The opted-in light front for this reply turn; a damaged or throwing source is the owner's own lane, never a failed turn. */
+  private frontSelection():RuntimeSelection|undefined {
+    try {const front=this.deps.frontRuntime?.();return front ? this.deps.normalizeRuntimeSelection(front) ?? undefined : undefined;} catch {return undefined;}
   }
   /** Claims finished delegations into one host-started review turn. The claim and its request row commit together, so a
    * crash cannot strand a claimed result without the run that will close it (D06). */
@@ -674,11 +684,11 @@ export class OneSupervisorService {
     if (queued) this.drain();
     return queued;
   }
-  /**
-   * Something the app could not get past on its own in another conversation (one/host-alerts.ts): a browser that is
-   * really unavailable, a sign-in or human check, a Goal the AGI monitor found stuck. One is woken to tell the owner,
-   * once per room, code and key (owner 2026-10-05). In One's own conversation the live turn already saw it.
-   */
+     
+                                                                                                                    
+                                                                                                                      
+                                                                                                            
+     
   hostNeedsOwner(alert: {chatId: string; code: string; detail: string; key?: string}): boolean {
     if (this.closed) return false;
     const {oneId,chatId} = this.binding();
@@ -763,7 +773,7 @@ export class OneSupervisorService {
     this.deps.store.update(row,{state:"dispatching"});
     try {
       return this.observeDispatch(this.deps.store.get(row.command_id)!, () => this.deps.runtime.start({runId,chatId:delegated!.workerChatId!,userPrompt:input.text,taskIntent:"task",
-        // One's follow-up to its own delegation runs as the delegation does: full access (owner 2026-10-04).
+                                                                                                             
         permissions:originReplyRunId ? "full" : delegated!.permissions ?? "read",locale:this.deps.locale(),runtimeSelection:delegated!.runtimeSelection,
         ...(originReplyRunId ? {promptOrigin:"system" as const} : {})}, originReplyRunId ? "one-dispatch-brief" : undefined));
     } catch (error) {
@@ -771,12 +781,12 @@ export class OneSupervisorService {
       return current.state==='dispatching' ? this.deps.store.update(current,{state:"held",acknowledgement:"unknown",reason:error instanceof Error ? error.message.slice(0,240) : "follow_up_start_unconfirmed"}) : JSON.parse(current.receipt_json);
     }
   }
-  /**
-   * One writes into an existing Agentlas conversation (a Work session, a teammate's chat, a group room) as One
-   * (owner 2026-10-05: One must be able to message the app's threads). The conversation shows it as handed over by
-   * One, never as the owner's words. A conversation with a live run takes it as a queued direction; otherwise it
-   * starts that conversation's next turn with full access, as everything One hands off does (owner 2026-10-04).
-   */
+     
+                                                                                                               
+                                                                                                                   
+                                                                                                                 
+                                                                                                                
+     
   sendToChat(raw: {commandId:string;chatId:string;text:string;oneId?:string}, originReplyRunId?: string): SupervisorCommandReceipt {
     this.assertAutomaticWriteAllowed(originReplyRunId);
     const value=supervisorObject(raw,["commandId","chatId","text","oneId"]);
@@ -835,8 +845,8 @@ export class OneSupervisorService {
     this.assertAutomaticWriteAllowed(originReplyRunId);
     const value=supervisorObject(raw,["commandId","text","projectId","permissions","runtimeSelection","oneId","budgetId"]);
     if (value.permissions!==undefined && !["read","write","full"].includes(String(value.permissions))) throw supervisorError('supervisor_permission_invalid', true);
-    // One's own hand-offs pass "full" (owner 2026-10-04). A brief the owner starts keeps a permission they chose; with none
-    // given (the personal One panel no longer asks) it runs with full access too (owner 2026-10-05).
+                                                                                                                            
+                                                                                                     
     const permissions=value.permissions ?? "full";
     const runtimeSelection=this.deps.normalizeRuntimeSelection(value.runtimeSelection);
     const input: SupervisorWorkInput={commandId:supervisorIdentifier(value.commandId),text:supervisorText(value.text),permissions:permissions as SupervisorWorkInput["permissions"],

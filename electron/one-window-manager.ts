@@ -1,4 +1,5 @@
 import { app, BrowserWindow, globalShortcut, ipcMain, Menu, nativeImage, screen, shell, Tray } from "electron";
+import { openRendererLink } from "./renderer-link-open";
 import type { IpcMainInvokeEvent, Rectangle } from "electron";
 import fs from "node:fs";
 import path from "node:path";
@@ -109,7 +110,7 @@ export function assertOneWindowSender(event: IpcMainInvokeEvent): BrowserWindow 
 // The companion can reach only its controllers. Each controller still validates
 // its own arguments, grants, task ownership and user interaction requirements.
 const ONE_CHANNEL_PREFIXES = ["oneWindow:", "oneContext:", "oneHarness:", "oneSupervisor:", "onePersonalData:", "business:", "oneVault:", "oneProvider:", "oneOrg:", "oneTaskforces:", "oneSearch:", "oneAttachments:", "oneArtifacts:",
-  "oneProfile:", "oneFeatureIntro:", "oneActivation:", "oneMemory:", "oneSuggestions:", "oneHubDerivative:", "oneAutoRecovery:", "oneValueClosure:",
+  "oneProfile:", "oneFeatureIntro:", "oneFront:", "oneActivation:", "oneMemory:", "oneSuggestions:", "oneHubDerivative:", "oneAutoRecovery:", "oneValueClosure:",
   "oneWeeklyReflection:", "oneExperienceReuse:", "oneImprovementProof:", "oneBriefing:", "oneRequestIntent:", "oneTeamPreflight:", "auth:", "config:", "runtime:", "usage:",
   "fs:", "chatFiles:", "chats:", "tasks:", "projects:", "invoke:", "confirm:", "attention:", "menu:", "media:",
   "browserUi:", "browser:", "browserScopes:", "browserAutofill:", "browserAnnotation:", "agentScreen:", "computerUse:",
@@ -195,7 +196,7 @@ export async function openOneWindow(input: { taskId?: string; focus?: boolean } 
     window.on("close", persist);
     window.on("closed", () => { if (saveTimer) clearTimeout(saveTimer); saveTimer = null; if (one === window) one = null; });
     window.webContents.setWindowOpenHandler(({ url }) => {
-      if (host?.externalEffectsAllowed() && /^https?:/.test(url)) void shell.openExternal(url);
+      if (host?.externalEffectsAllowed()) openRendererLink(url, target => shell.openExternal(target));
       return { action: "deny" };
     });
     window.webContents.on("will-navigate", (event, url) => { if (!trustedUrl(url, "one")) event.preventDefault(); });

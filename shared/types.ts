@@ -50,6 +50,7 @@ import type {
   DeferOneFeatureIntroInput,
   OneFeatureIntroState,
 } from "./one-feature-intro";
+import type { AcknowledgeOneFrontNoticeInput, OneFrontView, SetOneFrontInput } from "./one-front";
 import type {
   GetOneActivationStateInput,
   OneActivationState,
@@ -267,6 +268,17 @@ export type {
   OneHubDerivativeState,
   OneHubDerivativeUnknownGate,
 } from "./one-hub-derivative";
+export type {
+  AcknowledgeOneFrontNoticeInput,
+  OneFrontFallback,
+  OneFrontFallbackCause,
+  OneFrontNoticeResolution,
+  OneFrontState,
+  OneFrontView,
+  PersonalAgentFront,
+  PersonalAgentFrontNotice,
+  SetOneFrontInput,
+} from "./one-front";
 export type {
   AcknowledgeOneFeatureIntroInput,
   DeferOneFeatureIntroInput,
@@ -708,13 +720,13 @@ export type {
   MultimodalSettings,
 } from "./multimodal";
 
-/**
- * "acp" is the open seat (PRD 2026-08-15 Phase B-1): any agent that speaks the
- * Agent Client Protocol — built-in specs (OpenCode, Goose, Copilot CLI, …) or a
- * user-registered TerminalProfile in ACP mode — is detected and dispatched
- * through the generic ACP runner without a new RuntimeKind per vendor. Which
- * agent a status row is: `RuntimeStatus.acpAgentId`; display name: `label`.
- */
+   
+                                                                               
+                                                                                
+                                                                           
+                                                                             
+                                                                            
+   
 export type RuntimeKind = "claude-code" | "codex" | "antigravity" | "kimi" | "grok" | "cursor" | "byok" | "ollama" | "lmstudio" | "mlx" | "agentlas-local" | "acp" | "agentlas";
 // 역할 목록·성격의 정본은 shared/runtime-roles.ts 하나다(손으로 쓴 배열 금지).
 import type { RuntimeRole } from "./runtime-roles";
@@ -733,11 +745,11 @@ export interface TerminalProfile {
   /** template 모드: 반드시 `{{{prompt}}}`를 포함(없으면 메시지가 실행 커맨드에 안 들어감). acp 모드에서는 비워도 된다. */
   template: string;
   enabled: boolean;
-  /**
-   * "acp": the profile is an Agent Client Protocol agent — `acp.command` +
-   * `acp.args` spawn it, and it shows up in the engine picker as kind "acp"
-   * (PRD 2026-08-15 B-1). Absent/"template" keeps the legacy save-only template.
-   */
+     
+                                                                           
+                                                                            
+                                                                                 
+     
   mode?: "template" | "acp";
   acp?: { command: string; args: string[] };
 }
@@ -954,13 +966,13 @@ export interface RuntimeStatus {
   model?: string | null;
   /** ollama가 로컬에 받아둔 모델 목록 (설정 화면의 모델 선택용). 그 외 LLM은 미설정 */
   availableModels?: string[];
-  /**
-   * How `availableModels` was obtained (PRD 2026-08-15 D-3). `failed` means the
-   * probe ran and yielded nothing usable — the picker may show a stale last-good
-   * list (`stale: true`), and the UI must say so instead of showing an empty
-   * menu that falsely implies an engine-level model fallback. `unsupported` is honest
-   * absence (no list concept, e.g. claude-code) — not an error.
-   */
+     
+                                                                                
+                                                                                 
+                                                                             
+                                                                                      
+                                                                
+     
   modelDiscovery?: import("./model-discovery").ModelDiscoverySummary;
   /**
    * Execution inventory for automatic allocation, built by the
@@ -2019,6 +2031,8 @@ export interface CanonicalTask {
   firmId: string | null;
   status: CanonicalTaskStatus;
   originChatId: string | null;
+  /** Read-only source of the linked chat; absent when that chat is unavailable or on older hosts. */
+  originSurface?: "one" | "work";
   createdAt: string;
   updatedAt: string;
   archivedAt: string | null;
@@ -4939,14 +4953,14 @@ export interface AgentMessageEvent {
   /** Host-enforced typed-handoff facts. Depth is 1..3; a pair may round-trip at most 4 times. */
   handoffDepth?: number;
   handoffRoundtrip?: number;
-  /**
-   * 이 발언을 만들며 **실제로 부른** 도구 이름들(중복 제거, 관측값).
-   *
-   * 시연 화면의 `Skill used: …` 줄은 호스트 인격의 라우터 템플릿이 본문으로 샌
-   * 것이라 막혔다(G-2/G-3, 2026-08-25). 사람이 보고 싶어 한 것 — "이 팀원이 무엇을
-   * 써서 일했나" — 은 정당하므로, 모델이 쓴 산문 대신 관측된 사실로 싣는다.
-   * 지어낼 수 없는 값이다.
-   */
+     
+                                             
+    
+                                                      
+                                                             
+                                                
+                  
+     
   usedTools?: string[];
   /** Explicit child grant minted by Main; it is never copied from the parent. */
   handoffPermission?: "read" | "write" | "full";
@@ -5179,15 +5193,16 @@ export interface McpInvocationEvent {
  * never inferred from the human-readable error message. */
 export interface InvocationRuntimeFailure {
   /** "rate_limit": transient throttling (retried after retryAfterAt); "quota": an exhausted plan or balance. */
-  kind: "quota" | "rate_limit" | "auth" | "refused";
+  kind: "quota" | "rate_limit" | "auth" | "refused" | "empty";
   source: "marker" | "exit" | "heuristic";
   providerCode?: string;
   retryAfterAt?: string;
   /**
    * Only on an unfinished turn (providerCode runtime_turn_unsettled, which every runner and observed-runner use for a turn that
    * ended without its terminal receipt, so the kind above is `refused` whatever happened): the runner's own typed failure
-   * behind it, when it reported one of these four. The fields above stay the replay guard's; this says what the provider
-   * reported, so the transcript can name it (shared/run-failure-notice.ts). Optional; older readers ignore it.
+   * behind it, when it reported one of these four, or `empty` (a turn with no text and no tool call, every runner types it).
+   * `empty` exists only here, never on the failure itself. The fields above stay the replay guard's; this says what the
+   * provider reported, so the transcript can name it (shared/run-failure-notice.ts). Optional; older readers ignore it.
    */
   cause?: Omit<InvocationRuntimeFailure, "cause">;
 }
@@ -5298,13 +5313,13 @@ export interface AuthSession {
   workspaceId?: string;
   /** 세션이 만료될 epoch ms — 알 수 없으면 미설정 */
   expiresAt?: number;
-  /**
-   * 로그인이 **실패로 끝난** 이유. signedIn:false 일 때만 실린다.
-   *
-   * ★왜 (2026-09-07): 브라우저 로그인을 마쳤는데 저장이 실패하면(키체인 잠김 등)
-   * 예전에는 아무도 그 사실을 말하지 않고 3분 타임아웃 뒤 그냥 "로그인 안 됨"이 됐다.
-   * 실패한 로그인은 왜 실패했는지 말할 수 있어야 한다.
-   */
+     
+                                                 
+    
+                                                       
+                                                      
+                                  
+     
   error?: string;
 }
 
@@ -6413,10 +6428,10 @@ export interface HubCreditBalance {
   error?: string;
 }
 
-/**
- * Agent-only mailbox entitlement. Not served yet (2026-09-25: no mail backend).
- * Clients feature-detect it: absence means "coming soon", never "connected".
- */
+   
+                                                                                
+                                                                             
+   
 export interface HubMailboxEntitlement {
   read?: boolean;
   send?: boolean;
@@ -7671,7 +7686,7 @@ export interface AgentlasIpc {
     getSettings: () => Promise<MultimodalSettings>;
     saveSettings: (settings: Partial<MultimodalSettings>) => Promise<MultimodalSettings>;
     status: () => Promise<MultimodalProviderStatus[]>;
-    /** 생성 엔진 — Oberon/T-rex 스튜디오에서 적출(2026-08-21). */
+                                                      
     generateImage: (payload: { model?: "codex" | "gemini" | "auto"; prompt: string }) => Promise<MultimodalImageResult>;
     imageProviders: () => Promise<{ codex: boolean; gemini: boolean }>;
     startVideo: (request: MultimodalVideoRequest) => Promise<MultimodalVideoJob>;
@@ -8287,6 +8302,16 @@ export interface AgentlasIpc {
     acknowledge: (input: AcknowledgeOneFeatureIntroInput) => Promise<OneFeatureIntroState>;
     defer: (input: DeferOneFeatureIntroInput) => Promise<OneFeatureIntroState>;
   };
+  /**
+   * Where the personal agent's (Hope's) conversation turns run: the owner's own lane (default) or Agentlas's light model.
+   * Opt-in, and effective only after the owner confirms the one-time notice. Main owns the state; the owner's own act
+   * changes it (app-control denies setFront and acknowledgeNotice to a model).
+   */
+  oneFront: {
+    getState: () => Promise<OneFrontView>;
+    setFront: (input: SetOneFrontInput) => Promise<OneFrontView>;
+    acknowledgeNotice: (input: AcknowledgeOneFrontNoticeInput) => Promise<OneFrontView>;
+  };
   /** Main-owned Desktop-first activation; renderer never owns completion. */
   oneActivation: {
     getState: (input: GetOneActivationStateInput) => Promise<OneActivationState>;
@@ -8301,11 +8326,11 @@ export interface AgentlasIpc {
     inspector?: DesktopMemoryInspectorAPI;
     getState: () => Promise<OneMemoryState>;
     getMap: () => Promise<OneMemoryMapSnapshot>;
-    /**
-     * What One actually remembers — the durable memory_entries the memory map is
-     * drawn from (same rows, same count), bounded and path-free. The sheet lists
-     * these so "기억" and the map never disagree (owner report 2026-08-16).
-     */
+       
+                                                                                 
+                                                                                 
+                                                                          
+       
     listEntries: (input?: { limit?: number }) => Promise<OneDurableMemoryEntryUi[]>;
     /** Durably forget one entry and remove its recall projections. */
     forgetEntry: (input: { memoryId: string }) => Promise<{ ok: boolean; memoryId: string; forgottenAt: string | null }>;
@@ -9208,7 +9233,7 @@ export function isUnfilledQuestionTemplate(input: {
   // 서식의 질문 자리를 그대로 낸 경우. 이 문장 자체가 "여기에 질문을 써라"는 안내문이라
   // 사용자에게는 뜻이 없다.
   if (question === "question text ending with ?") return true;
-  // The compact ask line (prompt-modules core ask, 2026-10-14) shows the shape with ellipses: {"question":"…?",
+                                                                                                                
   // "options":[{"label":"…"}]}. A question that is only that placeholder is just as unanswerable.
   const ellipsisOnly = (value: string) => /^(?:…|\.{3})\??$/.test(value);
   if (ellipsisOnly(question)) return true;

@@ -1,22 +1,22 @@
 import { portableServingStrictSchemaOrNull } from "./serving-output-schema";
 import { registerDeclaredPromptModule } from "./prompt-order";
 import { OUTPUT_LIMIT_CONTINUATION_MAX_ROUNDS, outputLimitContinuationTurn, type OutputLimitCut } from "./output-limit-continuation";
-/*
- * Agentlas 서빙 러너 — CLI 도 API 키도 없는 사람이 답을 받는 길.
- *
- * ── 왜 필요했나 ──
- * 지금까지 데스크탑에서 답을 받으려면 Claude Code·Codex 같은 CLI 를 이미 깔아 두었거나
- * 벤더 API 키가 있어야 했다. 둘 다 없는 사람에게 이 앱은 켜지기만 하는 껍데기였다.
- * 로그인만 되어 있으면 크레딧으로 바로 쓰게 한다(오너 지시 2026-08-23).
- *
- * ── 무엇을 모르나 ──
- * 이 파일은 세기(Light/Normal/Hard) 말고는 아무것도 모른다. 뒤에서 어떤 모델이 도는지는
- * 서버만 알고, 앱은 그 이름을 담지 않는다 — 설치본을 뜯어도 나오지 않아야 하기 때문이다.
- *
- * ── 크레딧 ──
- * 실행 1회가 크레딧을 쓴다. 잔액 판정·예약·정산은 전부 서버가 한다. 여기서 값을 지어내
- * 미리 보여 주지 않는다 — 앱이 계산한 값과 실제 청구가 어긋나면 그것이 곧 거짓말이 된다.
- */
+  
+                                                
+  
+               
+                                                            
+                                                    
+                                                
+  
+                
+                                                            
+                                                      
+  
+            
+                                                     
+                                                      
+   
 import { reportModelPayload, reportCachePlan, reportModelEndpoint, reportModelEffort, ledgerFromApiBody } from "./model-call-ledger";
 import { GENERATION_CONTEXT_RATIO } from "./session-generation";
 import { foldRetainedToolResult } from "./tool-result-context";
@@ -28,7 +28,7 @@ import { getSessionCookieHeader, webBaseUrl } from "../auth";
 import { managedOneHeaders, managedOneConfigured, managedOneAuthenticationEpoch } from "../managed-one/auth";
 import { createHash } from "node:crypto";
 import {
-  AGENTLAS_SERVING_CONTEXT_WINDOW,
+  agentlasServingContextWindow,
   AGENTLAS_SERVING_DEFAULT_MODEL,
   agentlasServingModel,
   isAgentlasServingModel,
@@ -95,7 +95,9 @@ function imageTokenEstimate(req: RunnerRequest, toolImageCount = 0): number {
 }
 
 /** The serving tier's transport ceiling is the window this endpoint admits; 80% of it is the rotation point. */
-const SERVING_GENERATION_WINDOW: StatelessWindow = { tokens: AGENTLAS_SERVING_CONTEXT_WINDOW, source: "host-ceiling", known: true };
+function servingGenerationWindow(model: string): StatelessWindow {
+  return { tokens: agentlasServingContextWindow(model), source: "host-ceiling", known: true };
+}
 
 /** `base`: the conversation's generation (handoff + rows after its frontier) in place of req.history. */
 function turnsFor(req: RunnerRequest, events: RunnerEvents, outputReserve: number,
@@ -127,7 +129,8 @@ function turnsFor(req: RunnerRequest, events: RunnerEvents, outputReserve: numbe
   // Images are counted as a bounded per-image estimate, not as their base64 length:
   // one ordinary screenshot's base64 alone is larger than the whole 128k window,
   // so counting it as text refused every image turn before it was sent.
-  let budget = AGENTLAS_SERVING_CONTEXT_WINDOW
+  const contextWindow = agentlasServingContextWindow(servingModelId(req));
+  let budget = contextWindow
     - servingAdmissionTokens(JSON.stringify({ system, current: req.userPrompt }))
     - imageTokenEstimate(req)
     - outputReserve - 256;
@@ -146,11 +149,11 @@ function turnsFor(req: RunnerRequest, events: RunnerEvents, outputReserve: numbe
     turns.push({ role: "user", text: req.userPrompt });
     const estimated = servingAdmissionTokens(JSON.stringify({ system, messages: turns, maxTokens: outputReserve }))
       + imageTokenEstimate(req);
-    if (estimated + outputReserve <= AGENTLAS_SERVING_CONTEXT_WINDOW) {
-      // History trimming is background work: nothing about it is shown to the user (owner 2026-10-13).
+    if (estimated + outputReserve <= contextWindow) {
+                                                                                                       
       return { turns, system };
     }
-    budget = Math.max(0, budget - (estimated + outputReserve - AGENTLAS_SERVING_CONTEXT_WINDOW) - 256);
+    budget = Math.max(0, budget - (estimated + outputReserve - contextWindow) - 256);
   }
   return null;
 }
@@ -209,7 +212,7 @@ function servingToolImages(message: { content: unknown } | null): ServingImage[]
 }
 type ServingDone = {
   text?: unknown; stopReason?: unknown; toolUses?: unknown;
-  /** Token counts the server measured for this call (not the model name). Absent on older servers. */
+                                                                                                      
   usage?: { inputTokens?: unknown; outputTokens?: unknown; cacheReadInputTokens?: unknown };
   /** How many attached images the server forwarded. Absent = the server did not accept images. */
   imagesAccepted?: unknown;
@@ -330,7 +333,7 @@ function servingRequestFields(req: RunnerRequest): Record<string, unknown> {
   };
 }
 
-/** Missing or invalid dispatch receipts never become measured zero. */
+                                                                       
 /**
  * The serving server (/api/one/serving/chat) places the Anthropic markers itself; the desktop sends none. The plan
  * therefore carries no breakpoints, only the stable-prefix digest (tools + system) and the expected-prefix size that
@@ -430,6 +433,7 @@ async function runAgentlasServingWithTools(
   const toolExchanges: ServingToolExchange[] = [];
   const seenCallIds = new Set<string>();
   const usage = new ServingUsage(events);
+  const contextWindow = agentlasServingContextWindow(model);
   const progress = createToolLoopProgress("agentlas", req, events);
   let accumulatedText = "";
   /** A reply cut by the output cap: its text so far, kept and continued on the same conversation (never a failed turn). */
@@ -444,7 +448,7 @@ async function runAgentlasServingWithTools(
       // After a tool round whose results are all in: the next request's input against 80% of the serving window.
       const pending = { model, system: context.system, messages: context.turns, maxTokens: outputReserve,
         toolProtocol: TOOL_PROTOCOL, tools: definitions, toolExchanges: toolExchanges.map(({ images: _images, ...exchange }) => exchange) };
-      const rotation = await generations.boundary({ boundary: "tool-step", step: round, window: SERVING_GENERATION_WINDOW,
+      const rotation = await generations.boundary({ boundary: "tool-step", step: round, window: servingGenerationWindow(model),
         requestTokens: servingAdmissionTokens(JSON.stringify(pending)), historyTokens: servingAdmissionTokens(JSON.stringify(context.turns.slice(0, -1))),
         observedLastInput: lastObservedInput, lastRequestTokens });
       if (rotation.action === "rotated") {
@@ -470,8 +474,8 @@ async function runAgentlasServingWithTools(
     // exchanges become durable read_tool_result references, oldest first, until the request is back under 80% of the
     // serving window and inside admission. The newest exchange and every call/result pair stay; images already go once.
     if (toolExchanges.length > 1) {
-      const target = Math.min(Math.floor(AGENTLAS_SERVING_CONTEXT_WINDOW * GENERATION_CONTEXT_RATIO),
-        AGENTLAS_SERVING_CONTEXT_WINDOW - outputReserve - 256 - imageTokenEstimate(req, toolImageCount));
+      const target = Math.min(Math.floor(contextWindow * GENERATION_CONTEXT_RATIO),
+        contextWindow - outputReserve - 256 - imageTokenEstimate(req, toolImageCount));
       const size = () => servingAdmissionTokens(JSON.stringify({ model, system: context.system, messages: wireTurns, maxTokens: outputReserve,
         toolProtocol: TOOL_PROTOCOL, tools: definitions, toolExchanges: wireExchanges.map(({ images: _images, ...exchange }) => exchange) }));
       for (const exchange of toolExchanges.slice(0, -1)) {
@@ -493,7 +497,7 @@ async function runAgentlasServingWithTools(
     // The serving tier exposes a conservative 128k window. Count the full
     // growing tool transcript and schemas before another charged model call.
     if (servingAdmissionTokens(JSON.stringify(admissionPayload)) + imageTokenEstimate(req, toolImageCount) + outputReserve + 256
-      > AGENTLAS_SERVING_CONTEXT_WINDOW) {
+      > contextWindow) {
       return assertCurrentHistoryRunnerResult({ text: accumulatedText, ownerControlTerminal: "uncertain", failure: { kind: "refused", runtime: "agentlas", source: "marker",
         providerCode: "model_context_capacity_exceeded",
         message: "The Agentlas serving tool transcript exceeds the conservative context budget." } });
@@ -634,7 +638,7 @@ export const runAgentlasServing: Runner = async (req, events): Promise<RunnerRes
     model, history: req.history, locale: req.locale, agentId: req.agentId ?? null });
   let context = turnsFor(req, events, outputReserve, generations.seed);
   if (context) {
-    const rotation = await generations.boundary({ boundary: "turn-start", step: 0, window: SERVING_GENERATION_WINDOW,
+    const rotation = await generations.boundary({ boundary: "turn-start", step: 0, window: servingGenerationWindow(model),
       requestTokens: servingAdmissionTokens(JSON.stringify({ system: context.system, messages: context.turns })) + imageTokenEstimate(req),
       historyTokens: servingAdmissionTokens(JSON.stringify(context.turns.slice(0, -1))) });
     if (rotation.action === "rotated") context = turnsFor(req, events, outputReserve, rotation) ?? context;

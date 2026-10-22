@@ -140,9 +140,10 @@ export function automationProtocolFor(oneTeamAttached: boolean, toolchainConsume
 }
 
 /** The only automation text a turn carries without One's graph tools: the full AUTOMATION_PROTOCOL is read on demand
- * through the agentlas-ui `read_automation_protocol` tool (ui-schema/mcp-server.ts). */
+ * through the agentlas-ui `read_automation_protocol` tool (ui-schema/mcp-server.ts). The line says when it applies: a smaller
+ * model that is told only to "call" the reader follows the line on every turn, including ones that have nothing to do with automation. */
 export const AUTOMATION_PROTOCOL_POINTER =
-  "automation: call read_automation_protocol, then emit its ## Automation block";
+  "automation (only when the user asks to schedule, watch or repeat work): call read_automation_protocol, then emit its ## Automation block";
 
 // Fallback for runtimes without the native host authoring tool.
 export const AUTOMATION_PROTOCOL = [
@@ -181,7 +182,7 @@ export const AUTOMATION_PROTOCOL = [
   "",
   'For irregular cadence use raw cron instead: "schedule": { "cron": "*/30 9-18 * * 1-5", "tz": "Asia/Seoul" }.',
   "",
-  // ★반복 × 고정 페이로드는 시한폭탄이다. 실측 2026-08-19: 매시 정각 X 댓글
+                                                     
   // 자동화가 "exactly this text, unchanged"로 지어졌고, 첫 성공이 X의 중복
   // 콘텐츠 차단을 깨워 이후 모든 실행이 막혔다. 메일 스팸 필터·커뮤니티 도배
   // 제한·API rate limit 도 같은 계열이다 — 반복 게시물은 변형이 기본값이어야 한다.
@@ -192,7 +193,7 @@ export const AUTOMATION_PROTOCOL = [
   "reply tailored to the post, always including <link> and <deadline>\" — not \"post exactly this text\".",
   "",
   // ★밖을 바꾸는 스텝은 어떤 도구로 바꾸는지 선언해야 한다. 선언이 없으면 강제도
-  // 검사도 불가능하고(실측: 도구 미배선 런타임에서 12연속 거짓 성공), 선언이 있으면
+                                                    
   // 프록시가 노드별로 관문을 세운다.
   "MUTATING STEPS MUST NAME THEIR TOOL. Any step that changes the world outside the chat (posts,",
   "sends, edits files, browses) must say which tool family does it — a tool step with its catalog id,",
@@ -202,7 +203,7 @@ export const AUTOMATION_PROTOCOL = [
   "THE BLOCK IS REGISTERED AFTER YOUR REPLY ENDS: you cannot list, read back or change the job in the same reply. When the user wants it confirmed or changed in this same reply, create, list and update it with the app's automation operations (harness_search \"automation\") instead of this block.",
   "Otherwise register the FINAL state they asked for in one block and say what you registered; the host reports the saved name, schedule and on/off state right after your reply. Never promise to check or edit it later in this conversation.",
   "Keep its name when refining the same job; do not register a duplicate under a new name.",
-  // ★말로만 받아들이면 자동화는 옛 프롬프트로 계속 돈다. 실측 2026-09-16: 오너가
+                                                      
   //   팔로우/게시/리플 하한을 새로 지시했는데 두 자동화 프롬프트 어느 쪽에도 반영되지
   //   않았다 — 수정 경로는 호스트에 있었지만(client.ts, action:"updated"), 이 대화가
   //   가진 id 목록은 pause/resume 전용이라 적혀 있어 모델이 그리로 갈 문장이 없었다.
@@ -303,12 +304,12 @@ function presetToLegacyToken(preset: SchedulePreset, time: string, o: EmittedSch
  * ordered steps[] → WorkflowGraph. 결정적 좌→우 레이아웃(x=i*280, y=120), 연속 노드마다 엣지 1개.
  * consumes가 상류 produces를 참조하면 엣지에 변수명을 라벨(sourceHandle)로 스탬프("wire=data").
  */
-/**
- * 등록 시점 구조 게이트 (정본 규칙 #3·#4) — 실측 2026-08-19의 두 치명 형태를 거절한다.
- * 판정은 구조뿐이다: 스케줄 유무, 80자 이상 고정 인용 스팬, 그래프 인접성.
- * 순수 함수로 둔 이유: client.ts 등록 루프와 테스트가 같은 코드 객체를 부른다 —
- * 하네스가 사본을 재면 사본만 초록이 된다(mock rot).
- */
+   
+                                                             
+                                               
+                                                     
+                                    
+   
 export function automationRegistrationGateProblems(a: ParsedAutomation): string[] {
   const recurring = Boolean(a.scheduleSpec || (a.schedule && a.schedule.trim()));
   const graphNodes = Array.isArray(a.graph?.nodes) ? a.graph.nodes : [];

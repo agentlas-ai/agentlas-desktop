@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import {
+  isOneValueClosureState,
   type CreateOneValueClosureInput,
   type OneTrustedOutcomeEvidence,
   type OneValueClosureMutationResult,
@@ -8,6 +9,7 @@ import {
 } from "../../shared/one-value-closure";
 import type { CanonicalTask, InvocationRunReceipt } from "../../shared/types";
 import { getInvocationRunReceipt } from "../store/run-events";
+import { getDb } from "../store/db";
 import { getCanonicalTask } from "../store/tasks";
 import {
   type OneVerifiedBoundArtifactSet,
@@ -15,6 +17,7 @@ import {
 } from "./artifact-preview";
 import { listOneDomainEvents } from "./domain-events";
 import {
+  ONE_VALUE_CLOSURE_META_KEY,
   createOneValueClosure,
   getOneValueClosureState,
 } from "./value-closure";
@@ -636,6 +639,52 @@ export function ensureAcceptedResultValueClosure(
     }
     throw error;
   }
+}
+
+/** Read-only custody proof for an explicitly accepted, exact Supervisor Work run.
+ * This reuses the original producer's complete semantic comparison; a completed
+ * Task or an arbitrary Value Closure is never sufficient by itself. */
+export function readExactAcceptedResultValueClosure(taskId: string, runId: string): {
+  record: OneValueClosureRecord;
+  trustedEvidence: OneTrustedOutcomeEvidence[];
+} | null {
+  assertSafeId(taskId, "taskId");
+  assertSafeId(runId, "runId");
+  const task = getCanonicalTask(taskId);
+  const run = getInvocationRunReceipt(runId);
+  if (!task || task.status !== "completed" || task.archivedAt || !task.originChatId
+    || !run || run.runId !== runId || run.chatId !== task.originChatId
+    || run.status !== "completed" || typeof run.finishedAt !== "string") return null;
+  const acceptance = exactAcceptanceEvent(task);
+  if (!acceptance) return null;
+  if (!listOneDomainEvents(runId, 500).some((event) =>
+    event.eventType === "run.started" && event.entityId === runId && event.taskId === taskId)) return null;
+  const priorVersions = [...new Set(listOneDomainEvents(taskId, 500)
+    .filter((event) => event.eventType === "task.state_changed"
+      && event.actor === "system" && event.taskId === taskId && event.entityId === taskId
+      && event.version < task.version
+      && eventEntries(event).get("to") === "partial"
+      && eventEntries(event).get("reason") === "authoritative invocation lifecycle"
+      && Date.parse(event.occurredAt) <= Date.parse(acceptance.occurredAt))
+    .map((event) => event.version))].sort((a, b) => b - a);
+  // The acceptance changed the then-current partial Task. Older partial
+  // events belong to other runs and must never consume or collide with this
+  // exact accepted-result binding.
+  const priorVersion = priorVersions[0];
+  if (!priorVersion || !exactResultReadyEvent(task, priorVersion)) return null;
+  // The producer's general getter initializes missing state. Source custody
+  // must remain a pure read: absence is denial, never a new meta row.
+  const row = getDb().prepare("SELECT value FROM meta WHERE key = ? LIMIT 1")
+    .get(ONE_VALUE_CLOSURE_META_KEY) as { value: string } | undefined;
+  if (!row) return null;
+  let parsed: unknown;
+  try { parsed = JSON.parse(row.value); } catch { throw new Error("Stored One Value Closure state is corrupt"); }
+  if (!isOneValueClosureState(parsed)) throw new Error("Stored One Value Closure state violates its closed contract");
+  const state = parsed;
+  const binding = bindingFor(taskId, priorVersion, task.version, runId);
+  const expected = buildCreateInput(state, task, run as InvocationRunReceipt & { finishedAt: string }, acceptance, binding);
+  const record = findExactExisting(state, expected, binding);
+  return record ? structuredClone({ record, trustedEvidence: expected.trustedHostEvidence }) : null;
 }
 
 /**

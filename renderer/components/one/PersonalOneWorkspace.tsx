@@ -24,7 +24,7 @@ import { PopupDetails } from "@/components/Popup";
 import { OneMemorySheet } from "./OneMemorySheet";
 import { OneCapabilitiesModal } from "./OneCapabilitiesModal";
 import { OneAgentPortrait } from "./OneAgentPortrait";
-import type { ChatHistoryEntry, OneMemoryState } from "@/lib/types";
+import type { ChatHistoryEntry, OneMemoryState, RuntimeSelection } from "@/lib/types";
 import { SupervisorOutbox, type PendingSupervisorWrite, type SupervisorWrite } from "@/lib/one-supervisor-outbox";
 import { personalOnePendingAsk, personalOneReplyPresentation, personalOneTranscript } from "@/lib/personal-one-transcript";
 import { PersonalOneAskCard } from "./PersonalOneAsk";
@@ -44,6 +44,7 @@ import { AgiDefectChip, AgiIncidentReportButton } from "../agi/AgiBugReport";
 import { PersonalOneCapabilities, type PersonalOneCapabilityTab } from "./PersonalOneCapabilities";
 import { OneVoiceInputHelp } from "./OneVoiceInputHelp";
 import { OneRuntimeChips } from "./OneRuntimeChips";
+import { OneFrontChip, OneFrontNote, OneFrontNotice, OneFrontSetting, useOneFront } from "./PersonalOneFront";
 import { personalOnePanelMaximum } from "@/lib/personal-one-result";
 import { registerRouter } from "@/lib/navigation";
 import { PersonalOneBudget, usePersonalOneBudgets, personalOneBudgetName } from "./PersonalOneBudget";
@@ -65,12 +66,15 @@ type PersonalOneConversationMessage = ChatHistoryEntry & {
   hasDurableAnswer?: boolean;
   pendingCommandId?: string;
 };
-// Personal One runs every turn with full access and Computer Use; Main decides that (owner 2026-10-05).
+                                                                                                        
 // Its model is the conversation's chip (OneRuntimeChips): a message names no runtime, and Main runs the chip's pin for
 // it as for every host-started or phone turn of this conversation (electron/runtime/room-chip-runtime.ts).
+// With the owner's opt-in front (shared/one-front.ts) Main runs the conversation on Agentlas's light model instead, and
+// the chip is a fixed label that opens the setting.
 export function PersonalOneWorkspace({ detached = false }: { detached?: boolean }) {
   const router=useRouter();const routeParams=useSearchParams();const requestedTaskId=routeParams.get("task");const consumedTask=useRef<string|null>(null);
   const {locale}=useT(); const ko=locale==="ko"; const copy=(a:string,b:string)=>ko?a:b;
+  const front=useOneFront();
   useEffect(()=>{registerRouter(router); return ()=>registerRouter(null);},[router]);
   const [checkinsOpen,setCheckinsOpen]=useState(false);
   const [budgetsOpen,setBudgetsOpen]=useState(false);const [budgetId,setBudgetId]=useState("");
@@ -124,7 +128,7 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
   const pickAttachments=async(files:File[])=>{
     if(attachmentBusy)return;const next=[...attachments];
     try{for(const original of files){
-      // A large photo or screenshot is shrunk to fit the image limit instead of refused (owner 2026-10-14).
+                                                                                                            
       const item=await fitImageUnder(original,ONE_ATTACHMENT_LIMITS.maxImageBytes);
       // A Finder file carries its path; a pasted screenshot, clip or generated file has none, so Main pins its bytes to
       // a private file and issues the same exact-file grant (the One composer's path).
@@ -154,6 +158,8 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
   const [scienceProject,setScienceProject]=useState(""); const [selected,setSelected]=useState<string|null>(null); const [direction,setDirection]=useState("");
   const [error,setError]=useState(false);const [savedRequestError,setSavedRequestError]=useState(false); const [receipt,setReceipt]=useState<SupervisorCommandReceipt|null>(null);
   const [stopPending,setStopPending]=useState<string|null>(null);
+  const [workRuntime,setWorkRuntime]=useState<RuntimeSelection|null>(null);
+  useEffect(()=>{setWorkRuntime(null);},[snapshot?.oneId]);
   const [workPending,setWorkPending]=useState(false); const [controlPending,setControlPending]=useState(false); const [tasksOpen,setTasksOpen]=useState(false);
   const [taskPreviewOnly,setTaskPreviewOnly]=useState(false); const [selectedHandoff,setSelectedHandoff]=useState<string|null>(null); const [file,setFile]=useState<PersonalOneFile|null>(null);
   const [requestedTaskUnavailable,setRequestedTaskUnavailable]=useState(false);
@@ -174,12 +180,23 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
   const composerDock=useRef<HTMLDivElement>(null);
   useEffect(()=>{const resize=()=>setViewportWidth(window.innerWidth);window.addEventListener('resize',resize);resize();return()=>window.removeEventListener('resize',resize);},[]);
   useLayoutEffect(()=>{
-    if(!text){setComposerExpanded(false);return;}
-    if(text.includes("\n")){setComposerExpanded(true);return;}
     const input=composerInput.current;if(!input)return;
-    input.style.height="auto";
-    if(input.scrollHeight>input.clientHeight+1&&input.scrollHeight>28)setComposerExpanded(true);
-  },[text]);
+    const resize=()=>{
+      // Reset before measuring so both soft-wrapped text and restored drafts can grow and shrink.
+      input.style.height="auto";
+      const height=input.scrollHeight;
+      input.style.height=Math.min(140,height)+"px";
+      input.style.overflowY=height>140?"auto":"hidden";
+      if(!text)setComposerExpanded(false);
+      else if(text.includes("\n")||height>28)setComposerExpanded(true);
+    };
+    resize();
+    // Moving the sidebar or result panel changes wrap points without changing the draft.
+    let width=input.clientWidth;
+    const observer=new ResizeObserver(()=>{if(input.clientWidth!==width){width=input.clientWidth;resize();}});
+    observer.observe(input);
+    return()=>observer.disconnect();
+  },[text,composerExpanded,attachments.length]);
   useLayoutEffect(()=>{const element=composerDock.current;if(!element)return;const measure=()=>{setComposerHeight(element.getBoundingClientRect().height);if(contextBar.current&&workspaceRoot.current)setContextBottom(contextBar.current.getBoundingClientRect().bottom-workspaceRoot.current.getBoundingClientRect().top);};measure();const observer=new ResizeObserver(measure);observer.observe(element);if(contextBar.current)observer.observe(contextBar.current);if(workspaceRoot.current)observer.observe(workspaceRoot.current);return()=>observer.disconnect();},[]);
   const panelMaxWidth=personalOnePanelMaximum(viewportWidth,detached);
   const shownPanelWidth=Math.min(panelMaxWidth,autoPanelWidth?Math.max(360,Math.round(viewportWidth*0.56)):panelWidth);
@@ -397,7 +414,7 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
   };
   const startWork=async(science=false)=>{
     if(!work.trim()||workPending||science&&!scienceProject||!science&&budgetSelectionUnconfirmed)return;setWorkPending(true);
-    try{showReceipt(await write(science?"startScience":"startWork",{text:work.trim(),...(science?{projectId:scienceProject}:budgetId?{budgetId}:{})}));setWork("");void sync();}
+    try{showReceipt(await write(science?"startScience":"startWork",{text:work.trim(),...(science?{projectId:scienceProject}:{...(budgetId?{budgetId}:{}),...(workRuntime?{runtimeSelection:workRuntime}:{})})}));setWork("");if(!science)setWorkRuntime(null);void sync();}
     catch{setError(true);}finally{setWorkPending(false);}
   };
   const control=async(task:SupervisorTask,action:"steer"|"cancel")=>{
@@ -454,7 +471,7 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
     :value.kind==="steer"?copy("이 작업의 다음 지시로 접수했습니다.","Saved as the next direction for this task.")
     :value.kind==="cancel"||value.kind==="stop-reply"?value.control?.phase==="stopped"||value.control?.phase==="settled"?copy("이 실행의 중지를 확인했습니다.","Stopping was confirmed for this run."):copy("중지 요청을접수했습니다. 실제 실행 정리는 관측에서 확인합니다.","Stop request received. Actual execution settling is checked in the observation.")
     :copy("작업을 맡겼습니다. 여기서 대화를 이어갈 수 있습니다.","Task handed off. You can keep talking here.");
-  // A hand-off reads as a link to the session One opened (owner 2026-10-04: icons, no filler text).
+                                                                                                    
   const delegation=(item:SupervisorDelegation)=>{
     const owned=snapshot?.tasks.find(task=>task.taskId===item.taskId); const state=owned?.state ?? item.state;
     return <button key={item.commandId} type="button" className={styles.delegation} data-handoff-command={item.commandId} data-state={state} data-hover="own" onClick={()=>openTask(item.taskId,item.commandId)}>
@@ -543,6 +560,7 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
       </div>
       </IntellectUiActions.Provider>
       <div ref={composerDock} className={styles.composerDock}>
+        <OneFrontNote view={front.view} locale={ko?"ko":"en"} onOpenSetting={()=>void appearance()}/>
         <div className={styles.decisionStack}>
           {pendingAsk&&pendingAsk.sourceMessageId!==dismissedAskId&&<PersonalOneAskCard key={pendingAsk.sourceMessageId} ask={pendingAsk} locale={ko?"ko":"en"} disabled={Boolean(activeReply)||attachmentBusy} onAnswer={answer=>void send(answer)} onDismiss={()=>setDismissedAskId(pendingAsk.sourceMessageId)} />}
           <ComposerDecisionSlot surface="one" />
@@ -581,7 +599,7 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
               <button type="button" role="menuitem" data-hover="own" onClick={()=>{setPlusOpen(false);void appearance();}}><span className={styles.plusIcon}><IconSettings size={15}/></span><strong>{copy("이름과 말풍선","Name and bubbles")}</strong></button>
             </div>}
           </div>
-          <textarea ref={composerInput} aria-label={ko?name+"에게 메시지":"Message "+name} value={text} onChange={event=>{if(draftIdentity.current===null)initialDraftEdit.current={edited:true,value:event.target.value};setText(event.target.value);event.currentTarget.style.height="auto";event.currentTarget.style.height=Math.min(140,event.currentTarget.scrollHeight)+"px";}} onCompositionUpdate={enter.onCompositionUpdate} onCompositionEnd={enter.onCompositionEnd} onKeyDown={event=>{enter.handleEnter(event);}} onPaste={event=>{
+          <textarea ref={composerInput} aria-label={ko?name+"에게 메시지":"Message "+name} value={text} onChange={event=>{if(draftIdentity.current===null)initialDraftEdit.current={edited:true,value:event.target.value};setText(event.target.value);}} onCompositionUpdate={enter.onCompositionUpdate} onCompositionEnd={enter.onCompositionEnd} onKeyDown={event=>{enter.handleEnter(event);}} onPaste={event=>{
             // Clipboard files (screenshots, Finder copies, audio, video, documents) become attachments; plain text pastes as text.
             const clipboard=event.clipboardData;if(!clipboard)return;const files:File[]=[];const seen=new Set<string>();
             const add=(file:File|null)=>{if(!file)return;const id=`${file.name}|${file.size}|${file.type}`;if(seen.has(id))return;seen.add(id);files.push(file);};
@@ -590,7 +608,7 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
             if(!files.length)return;event.preventDefault();void pickAttachments(files);
           }} maxLength={8000} rows={1} placeholder={copy("메시지 보내기","Send a message")}/>
           <div className={styles.trail}>
-            <OneRuntimeChips chatId={snapshot?.conversationChatId ?? null} locale={ko?"ko":"en"} disabled={!snapshot} adoptStoredSelection />
+            {front.view?.effective?<OneFrontChip locale={ko?"ko":"en"} onOpenSetting={()=>void appearance()}/>:<OneRuntimeChips chatId={snapshot?.conversationChatId ?? null} locale={ko?"ko":"en"} disabled={!snapshot} />}
             <div className={styles.voice}><OneVoiceInputHelp locale={ko?"ko":"en"} composerRef={composerInput} /></div>
           </div>
           <button className={styles.send} type="submit" aria-label={copy("보내기","Send")} disabled={!snapshot||savedRequestError||attachmentBusy||(!text.trim()&&!attachments.length)}><IconArrowUp size={16}/></button>
@@ -609,6 +627,10 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
         <div className={styles.taskContents} aria-label={copy("독립 작업","Independent tasks")}><header><h2 id="one-task-heading">{copy("작업과 결과","Tasks and results")}</h2>{viewportWidth>=860&&<button type="button" aria-label={shownPanelWidth>=panelMaxWidth-1?copy("결과 너비 자동 맞춤","Fit result width automatically"):copy("결과 펼치기","Expand result")} aria-pressed={shownPanelWidth>=panelMaxWidth-1} title={copy("같은 결과를 넓게 보기","Review the same result at full available width")} onClick={()=>shownPanelWidth>=panelMaxWidth-1?setAutoPanelWidth(true):resizePanel(panelMaxWidth)}><IconExpand size={16}/></button>}{taskPreviewOnly&&<button type="button" onClick={()=>setTaskPreviewOnly(false)}>{copy("모든 작업","All tasks")}</button>}<button type="button" aria-label={copy("작업 닫기","Close tasks")} onClick={()=>setTasksOpen(false)}><IconClose size={17}/></button></header>
       {!taskPreviewOnly&&<>
       <label>{copy("Work에 맡길 일","Hand work to Work")}<textarea value={work} onChange={event=>setWork(event.target.value)} maxLength={8000}/></label>
+      <div role="group" aria-label={copy("이 Work 업무의 실행 모델","Execution model for this Work task")} data-one-work-runtime="true">
+        <p>{copy("이 Work 업무의 실행 모델","Execution model for this Work task")}</p>
+        {taskDrawerVisible&&<OneRuntimeChips chatId={null} locale={ko?"ko":"en"} disabled={workPending||!snapshot} draftSelection={{value:workRuntime,onChange:setWorkRuntime}} />}
+      </div>
       <label>{copy("이 Work 업무에 사용할 실행 예산","Execution budget for this Work task")}<Select aria-label={copy("이 Work 업무에 사용할 실행 예산","Execution budget for this Work task")} value={budgetId} onChange={event=>setBudgetId(event.target.value)}><option value="">{copy("제한 없이 관측만 (기본)","Unrestricted observation (default)")}</option>{budgets.items.filter(item=>item.limitUsd!==null).map(item=><option key={item.budgetId} value={item.budgetId}>{personalOneBudgetName(item,ko?"ko":"en")}</option>)}{budgetSelectionUnconfirmed&&<option value={budgetId}>{copy("선택 예산 확인 필요","Selected budget needs review")}</option>}</Select></label>
       <p className={styles.feedback}>{budgetSelectionUnconfirmed?copy("선택한 예산의 최신 정책을 확인하지 못했습니다. 예산 관측을 확인하거나 기본 관측으로 직접 변경해 주세요.","The selected budget policy is unconfirmed. Review budget observations or explicitly choose the default observation mode."):budgetId?copy("이 업무의 후속 실행도 같은 예산에서 예약합니다. 공급자의 실제 청구 상한을 보장하지 않습니다.","Follow-up runs reserve from the same task budget. Actual provider charges are not capped."):copy("예산을 선택하지 않으면 제한 없이 관측합니다. 실제 청구가 미확정일 수 있습니다.","Without a selected budget, execution is unrestricted observation. Actual billing may remain unconfirmed.")}</p>
       <button type="button" onClick={()=>setBudgetsOpen(true)}>{copy("예산 설정과 비용 관측","Budget settings and billing observations")}</button>
@@ -632,8 +654,9 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
       <TaskSidePanel key={panelChatId ?? "one-files"} items={[]} locale={ko?'ko':'en'} visible={!!file||artifactOpen} onEmptyChange={setOutputPanelEmpty} screenChatId={panelChatId} browserScopeKey={panelChatId ?? 'personal-one-unbound'} width={shownPanelWidth} minWidth={280} maxWidth={panelMaxWidth} onResize={resizePanel} onRequestReadableWidth={resizePanel} onRequestOpen={()=>setArtifactOpen(true)} onClose={()=>{setFile(null);setArtifactOpen(false);}}/>
     </div>
     <OneBottomSheet open={appearanceOpen} onClose={()=>setAppearanceOpen(false)} closeLabel={copy("설정 닫기","Close appearance")} ariaLabel={copy("나의 One","Your One")} title={copy("나의 One","Your One")} icon={<IconSettings size={20} />} size="compact" footer={<button className={styles.saveAppearance} disabled={!profile||savingProfile||!profileName.trim()} onClick={()=>void saveAppearance()}>{copy("저장","Save")}</button>}>
-      <div className={styles.appearance}>{profileError&&<p role="status">{copy("저장을 확인하지 못했습니다. 최신 설정을 확인하고 다시 저장해 주세요.","The save could not be confirmed. Review the latest settings and save again.")}</p>}<label>{copy("이름","Name")}<input aria-label={copy("One 이름","One name")} value={profileName} onChange={event=>setProfileName(event.target.value)} maxLength={64}/></label><fieldset className={styles.bubbleChoices}><legend>{copy("말풍선 색","Bubble color")}</legend><div role="radiogroup" aria-label={copy("말풍선 색","Bubble color")}>{Object.keys(ONE_BUBBLE_COLORS).map(color=><button type="button" key={color} role="radio" aria-checked={bubbleColor===color} aria-label={({blue:copy("파랑","Blue"),green:copy("초록","Green"),purple:copy("보라","Purple"),rose:copy("장미","Rose"),amber:copy("호박","Amber"),slate:copy("회색","Slate")} as Record<string,string>)[color]} onClick={()=>setBubbleColor(color as OneBubbleColor)} style={{background:ONE_BUBBLE_COLORS[color as OneBubbleColor]}}>{bubbleColor===color&&<IconCheck size={18}/>}</button>)}</div></fieldset><p className={styles.preview} style={{background:ONE_BUBBLE_COLORS[bubbleColor]}}>{profileName||name}</p></div>
+      <div className={styles.appearance}>{profileError&&<p role="status">{copy("저장을 확인하지 못했습니다. 최신 설정을 확인하고 다시 저장해 주세요.","The save could not be confirmed. Review the latest settings and save again.")}</p>}<label>{copy("이름","Name")}<input aria-label={copy("One 이름","One name")} value={profileName} onChange={event=>setProfileName(event.target.value)} maxLength={64}/></label><fieldset className={styles.bubbleChoices}><legend>{copy("말풍선 색","Bubble color")}</legend><div role="radiogroup" aria-label={copy("말풍선 색","Bubble color")}>{Object.keys(ONE_BUBBLE_COLORS).map(color=><button type="button" key={color} role="radio" aria-checked={bubbleColor===color} aria-label={({blue:copy("파랑","Blue"),green:copy("초록","Green"),purple:copy("보라","Purple"),rose:copy("장미","Rose"),amber:copy("호박","Amber"),slate:copy("회색","Slate")} as Record<string,string>)[color]} onClick={()=>setBubbleColor(color as OneBubbleColor)} style={{background:ONE_BUBBLE_COLORS[color as OneBubbleColor]}}>{bubbleColor===color&&<IconCheck size={18}/>}</button>)}</div></fieldset><p className={styles.preview} style={{background:ONE_BUBBLE_COLORS[bubbleColor]}}>{profileName||name}</p><OneFrontSetting controller={front} locale={ko?"ko":"en"}/></div>
     </OneBottomSheet>
+    <OneFrontNotice controller={front} locale={ko?"ko":"en"}/>
     <PersonalOneBudget open={budgetsOpen} oneId={snapshot?.oneId} locale={ko?"ko":"en"} items={budgets.items} unconfirmed={budgets.unconfirmed} onRefresh={budgets.refresh} onClose={()=>setBudgetsOpen(false)}/>
     <PersonalOneCheckins open={checkinsOpen} oneId={snapshot?.oneId} locale={ko?"ko":"en"} onClose={()=>setCheckinsOpen(false)} onRefresh={()=>void sync()}/>
     <OneCapabilitiesModal open={capabilitiesModal} locale={ko?"ko":"en"} onClose={()=>setCapabilitiesModal(false)}/>

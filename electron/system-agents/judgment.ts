@@ -213,7 +213,7 @@ function noteJudgmentLatency(selection: JudgmentSelectionIdentity | undefined, o
   judgmentLatencies.set(key, samples);
 }
 
-/** Median of the measured attempts, or null when there are too few to call it measured. */
+                                                                                           
 export function measuredJudgmentP50(selection: JudgmentSelectionIdentity): number | null {
   const samples = judgmentLatencies.get(judgmentSelectionIdentity(selection));
   if (!samples || samples.length < JUDGMENT_LATENCY_MIN_SAMPLES) return null;
@@ -222,17 +222,17 @@ export function measuredJudgmentP50(selection: JudgmentSelectionIdentity): numbe
   return sorted.length % 2 ? sorted[mid]! : (sorted[mid - 1]! + sorted[mid]!) / 2;
 }
 
-/** Test seam only: seed or clear measured latencies. */
+                                                        
 export function __setJudgmentLatenciesForTest(entries: Array<{ selection: JudgmentSelectionIdentity; samples: number[] }> | null): void {
   judgmentLatencies.clear();
   for (const entry of entries ?? []) judgmentLatencies.set(judgmentSelectionIdentity(entry.selection), [...entry.samples]);
 }
 
-/**
- * Who may judge a no-tools selection when the invocation's own pin cannot.
- * Returns the pool member (in the owner's pool order) that is no-tools verified
- * with a measured p50 under `timeoutMs`, or null — then the caller skips judging.
- */
+   
+                                                                           
+                                                                                
+                                                                                  
+   
 export function noToolsJudgmentFallback(timeoutMs: number,
   readPool: () => { state: string; selections: RuntimeSelection[] } = readJudgmentPool): RuntimeSelection | null {
   const pool = readPool();
@@ -681,10 +681,10 @@ export async function callConnectedModelDetailed(opts: {
   requireNoTools?: true;
   /** Let the configured orchestrator pool back up (or lead) an explicit pin. */
   pinFallback?: JudgmentPinFallback;
-  /**
-   * Structured callers decide whether a text is a usable answer. A rejected text counts as that
-   * candidate's failure and the next pool member is tried (goal shape judgment, 2026-09-24).
-   */
+     
+                                                                                                
+                                                                                             
+     
   accept?: (text: string) => boolean;
   /** Final-answer contract enforced by runtimes that can (CLI flags, response_format, serving text.format). */
   outputSchema?: RunnerRequest["outputSchema"];
@@ -977,8 +977,12 @@ async function callJudgmentModelDetailed(opts: {
       const livePool = !opts.runtimeSelection || poolRoute
         ? readJudgmentPool(route === "worker_pool" ? "worker" : "orchestrator") : null;
       const receiptSelection = poolSelection ?? (workerFallback ? opts.runtimeSelection : undefined);
-      const workerIdentity = receiptSelection ? { role: receiptSelection.role, inherit: receiptSelection.inherit,
-        ...(receiptSelection.acpAgentId ? { acpAgentId: receiptSelection.acpAgentId } : {}) } : {};
+      const workerIdentity = {
+        ...(receiptSelection ? { role: receiptSelection.role, inherit: receiptSelection.inherit,
+          ...(receiptSelection.acpAgentId ? { acpAgentId: receiptSelection.acpAgentId } : {}) } : {}),
+        // Every route names an open ACP seat in its receipt, so a limit or sign-in failure is recorded for that seat only.
+        ...(runtime.kind === "acp" && runtime.acpAgentId ? { acpAgentId: runtime.acpAgentId } : {}),
+      };
       if (opts.selectionPolicy
         ? (livePool?.state !== "configured" || livePool.fingerprint !== opts.selectionPolicy.poolFingerprint)
         : poolRoute
@@ -1608,7 +1612,7 @@ export async function judgeRequiredBatch<V extends string>(
       ...spec,
       items,
       // Oversized single criteria remain complete. Ordinary batches were
-      // measured above and stay inside the caller's preferred packet size.
+                                                                           
       maxInputChars: fits(items) ? spec.maxInputChars : null,
     }));
   }

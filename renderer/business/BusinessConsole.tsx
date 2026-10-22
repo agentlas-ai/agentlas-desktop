@@ -65,6 +65,7 @@ function organizationExecutionDisplayPort(owner: BusinessOrganizationExecutionPa
 export interface BusinessConsoleProps {
   context: BusinessHistoryViewContext | null;
   account: BusinessAccountPanelPort | null;
+  organizationNames?: ReadonlyMap<string, string>;
   history: BusinessHistoryPanelPort | null;
   learning: BusinessLearningPanelPort | null;
   organizationExecution?: BusinessOrganizationExecutionPanelPort | null;
@@ -85,7 +86,7 @@ export interface BusinessConsoleProps {
 }
 /** One's existing owner mounts this surface and supplies actual current callbacks.
  * This component creates no transport, registrar, collector, account or queue. */
-export function BusinessConsole({ context, account, history, learning, organizationExecution = null, organizationExecutionSession, onClose, onSelectPersonal, onSessionChanged,
+export function BusinessConsole({ context, account, organizationNames, history, learning, organizationExecution = null, organizationExecutionSession, onClose, onSelectPersonal, onSessionChanged,
   onOpenDashboard, onReload, notice = null, displayClosed = false, showCompanyAgents = false, initialTab = 'history' }: BusinessConsoleProps) {
   const { copy } = useBusinessCopy();
   const [tab, setTab] = useState(initialTab);
@@ -144,7 +145,7 @@ export function BusinessConsole({ context, account, history, learning, organizat
     <a className={styles.skip} href="#business-desktop-content">{copy("본문으로 이동", "Skip to content")}</a>
     <aside className={styles.sidebar}>
       <div className={styles.brand}><strong>Agentlas</strong><span>Business</span></div>
-      <BusinessAccountPanel port={account} variant="selector" displayClosed={displayClosed} expectedSession={context?.session ?? organizationExecutionSession} onSessionChanged={sessionChanged} onSelectPersonal={onSelectPersonal} />
+      <BusinessAccountPanel port={account} organizationNames={organizationNames} variant="selector" displayClosed={displayClosed} expectedSession={context?.session ?? organizationExecutionSession} onSessionChanged={sessionChanged} onSelectPersonal={onSelectPersonal} />
       <nav className={styles.tabs} aria-label={copy("Business 관리", "Business management")}><div className={styles.navGroup}><small>{copy("내 작업 · Desktop", "My work · Desktop")}</small>
         {nativeLinks.map(item => <button key={item.id} type="button" aria-pressed={tab === item.id} aria-current={tab === item.id ? 'page' : undefined} disabled={item.id !== 'account' && !nativeAvailable[item.id] && (!onOpenDashboard || opening)}
           onClick={() => { if (item.id === 'account' || item.id === 'company-agents' || item.id === 'company-mail' || nativeAvailable[item.id]) setTab(item.id); else void openDashboard(item.id); }}>
@@ -169,7 +170,7 @@ export function BusinessConsole({ context, account, history, learning, organizat
       {(notice || navigationNotice) && <p className={styles.message} role="status">{notice ?? navigationNotice}</p>}
       <div id="business-desktop-content" className={styles.content} key={contextKey} tabIndex={-1}>
         <div className={styles.pageHeading}><span className={styles.eyebrow}>Business</span><h1 id="business-console-heading">{copy("조직 설정", "Organization settings")}</h1></div>
-        {tab === 'account' && <BusinessAccountPanel port={account} displayClosed={displayClosed} expectedSession={context?.session ?? organizationExecutionSession} onSessionChanged={sessionChanged} onSelectPersonal={onSelectPersonal} />}
+        {tab === 'account' && <BusinessAccountPanel port={account} organizationNames={organizationNames} displayClosed={displayClosed} expectedSession={context?.session ?? organizationExecutionSession} onSessionChanged={sessionChanged} onSelectPersonal={onSelectPersonal} />}
         {tab === 'company-mail' && showCompanyAgents && <BusinessCompanyMail key={organizationSessionKey} session={!displayClosed && !organizationFence.closed ? organizationExecutionSession ?? null : null} />}
         {tab === 'company-agents' && showCompanyAgents && <CompanyAgentsPanel key={organizationSessionKey} session={!displayClosed && !organizationFence.closed ? organizationExecutionSession ?? null : null} />}
         {tab === 'history' && <BusinessHistoryPanel port={currentHistory} displayClosed={displayClosed} expectedContext={context} />}

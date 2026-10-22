@@ -10,10 +10,8 @@ import { readOneChatHistoryPage, mergeOneChatHistory, oneChatHistoryCursor } fro
 import { isInterruptedPartial } from "@shared/interrupted-partial";
 import { oneHistoryWindowStart, revealOneHistoryPage } from "@/lib/one-history-window";
 import { parseChatFileMessage } from "@/lib/chat-files";
-import { projectLatestRunArtifacts } from "@/lib/one-chat-outputs";
-import { newestTimelineRunId, useEarlierOutputs } from "@/lib/one-earlier-outputs";
+import { useChatOutputs } from "@/lib/one-earlier-outputs";
 import { requestOneOperationalRecovery } from "@/lib/one-operational-recovery";
-import type { OneActivityArtifact } from "@/lib/one-activity";
 import { TaskSidePanel } from "../workspace/TaskSidePanel";
 import styles from "./OneShell.module.css";
 import { useComposerEnter } from "@/lib/use-composer-enter";
@@ -68,10 +66,9 @@ export function OneSplitPane({
   // Counts the person's presses that open the panel; a panel with nothing to show answers with its activity view
   // (TaskSidePanel openRequest), the same as the full One view's Outputs button.
   const [railOpenRequest, setRailOpenRequest] = useState(0);
-  const [artifacts, setArtifacts] = useState<OneActivityArtifact[]>([]);
-  // The run those outputs belong to: the earlier runs' outputs are everything else (the full view's "Earlier outputs").
-  const [newestRunId, setNewestRunId] = useState<string | null>(null);
-  const earlierOutputs = useEarlierOutputs({ chatId, newestRunId, newestItems: artifacts, enabled: railOpen });
+  const { artifacts, earlierOutputs } = useChatOutputs({
+    chatId, historyEnabled: railOpen, poll: railOpen, pollIntervalMs: running ? 8000 : 60000,
+  });
   const bodyRef = useRef<HTMLDivElement | null>(null);
   const chatIdRef = useRef(chatId);
   chatIdRef.current = chatId;
@@ -106,7 +103,7 @@ export function OneSplitPane({
     scrollAnchorRef.current = null;
     setMessages(null); setOldestVisibleId(null); setOlderCursor(null); setHasOlder(false);
     setLoadingOlder(false); setHistoryError(false); setDraft(""); setSending(false);
-    setRailOpen(false); setRailEmpty(false); setArtifacts([]); setNewestRunId(null);
+    setRailOpen(false); setRailEmpty(false);
   }, [chatId]);
 
   useEffect(() => {
@@ -183,42 +180,6 @@ export function OneSplitPane({
       if (chatIdRef.current === chatId && request === historyRequestRef.current) setLoadingOlder(false);
     }
   }, [chatId, hasOlder, historyStart, loadingOlder, messageIds, olderCursor]);
-
-  // 이 칸이 만든 것들. 옆 칸이 자기 사이드바를 가지려면 자기 대화의 원장을
-  // 스스로 읽어야 한다 — 지금 보고 있는 대화의 산출물을 빌려 쓰면 거짓이 된다.
-  // 전체 One 화면과 같은 것을 보인다: 그 대화의 가장 최근 run 하나(OneShell 이 latestReceipt 의 run 을 500개 이벤트로 투영하고,
-  // 창보다 긴 run 의 뒤쪽 산출물은 runLedger.outputsAfter 로 보탠다 — projectLatestRunArtifacts 가 같은 함수로 한다).
-  // 여러 run 의 이벤트를 이어 붙여 한 번에 투영하면 첫 종료 이벤트에서 봉인돼 가장 오래된 run 의 산출물만 남는다.
-  useEffect(() => {
-    let cancelled = false;
-    const api = ipc();
-    if (!api) return;
-    let loading = false;
-    const load = () => {
-      if (cancelled || loading) return;
-      loading = true;
-      void api.runLedger
-        .chatTimeline(chatId, { maxRuns: 1, eventsPerRun: 500 })
-        .then(async (runs: unknown) => {
-          if (cancelled || chatIdRef.current !== chatId || !Array.isArray(runs)) return;
-          const items = await projectLatestRunArtifacts(api, runs);
-          if (cancelled || chatIdRef.current !== chatId) return;
-          setArtifacts(items);
-          setNewestRunId(newestTimelineRunId(runs));
-        })
-        .catch(() => { if (!cancelled) { setArtifacts([]); setNewestRunId(null); } })
-        .finally(() => { loading = false; });
-    };
-    load();
-    // A folded panel reads once, not on a timer. The panel must already know whether this chat has outputs when the
-    // person presses Outputs: only a pane with nothing to show answers with its activity view (TaskSidePanel
-    // openRequest), as the full One view does with the outputs it already holds.
-    if (!railOpen) return () => { cancelled = true; };
-    const timer = window.setInterval(() => {
-      if (document.visibilityState !== "hidden") load();
-    }, running ? 8000 : 60000);
-    return () => { cancelled = true; window.clearInterval(timer); };
-  }, [chatId, running, railOpen]);
 
   const send = useCallback(async () => {
     const text = draft.trim();

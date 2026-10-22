@@ -30,7 +30,7 @@ export function createNativeEmployeeResultSource(runtime:OneVaultRuntime){
  function schema(){runtime.sources.db.exec(`CREATE TABLE IF NOT EXISTS one_business_native_accepted_results(
   acceptance_id TEXT PRIMARY KEY,association_id TEXT NOT NULL,state TEXT NOT NULL,record_json TEXT NOT NULL);`)}
  async function originalReaders(){
-  if(!readers)readers=Promise.all([import('../store/db'),import('../store/one-profile'),import('../store/tasks'),import('../store/run-events'),import('../store/one-surface-results'),import('../one/supervisor'),import('../store/invocation-run-owners'),import('../store/invocation-admissions')]).then(([store,profile,tasks,runs,surfaces,supervisor,owners,admissions])=>{const references=()=>[store.getDb,profile.getOneProfile,tasks.getCanonicalTask,tasks.hasPassedTaskForceExecutionVerification,runs.getInvocationRunReceipt,surfaces.getDurableOneSurfaceResult,supervisor.currentOneNativeWorkControl,owners.invocationRunOwners,owners.invocationRunOwners.getRunOwner,admissions.getInvocationAdmission];const originals=references();return {read(commandId:string){
+  if(!readers)readers=Promise.all([import('../store/db'),import('../store/one-profile'),import('../store/tasks'),import('../store/run-events'),import('../store/one-surface-results'),import('../one/accepted-result-value-closure'),import('../one/supervisor'),import('../store/invocation-run-owners'),import('../store/invocation-admissions')]).then(([store,profile,tasks,runs,surfaces,accepted,supervisor,owners,admissions])=>{const references=()=>[store.getDb,profile.getOneProfile,tasks.getCanonicalTask,tasks.hasPassedTaskForceExecutionVerification,runs.getInvocationRunReceipt,runs.ONE_SURFACE_SNAPSHOT_EVENT_KIND,surfaces.getDurableOneSurfaceResult,accepted.readExactAcceptedResultValueClosure,supervisor.currentOneNativeWorkControl,owners.invocationRunOwners,owners.invocationRunOwners.getRunOwner,admissions.getInvocationAdmission];const originals=references();return {read(commandId:string){
    if(references().some((v,i)=>v!==originals[i])||[runtime.currentNativeOwner,runtime.sources,runtime.sources.db,runtime.sources.oneId].some((v,i)=>v!==nativeReferences[i]))deny();
    if(closed||store.getDb()!==runtime.sources.db)deny();const owner=runtime.currentNativeOwner();if(!owner)deny();
    const one=profile.getOneProfile();if(one.oneId!==runtime.sources.oneId())deny();
@@ -44,11 +44,18 @@ export function createNativeEmployeeResultSource(runtime:OneVaultRuntime){
    const lease=owners.invocationRunOwners.getRunOwner(task.originChatId,row.run_id),input=admissions.getInvocationAdmission(row.run_id);
    if(lease?.state!=='released'||lease.chatId!==task.originChatId||lease.runId!==row.run_id||input?.runId!==row.run_id||input?.status!=='admitted'||input.chatId!==task.originChatId||input.ownerProcessEpoch!==lease.ownerId||input.digestVersion!=='main-canonical-json-v1'||!input.admittedAt)deny();
    const control=supervisor.currentOneNativeWorkControl(row,'result'),result=surfaces.getDurableOneSurfaceResult({taskId:task.id,chatId:task.originChatId,runId:row.run_id});
-   if(!control||!result||result.manifest.taskId!==task.id||!result.manifest.manifestId)deny();
+   if(!control)deny();
+   // A malformed existing OneSurface must not turn into an absent-Surface
+   // fallback. The original strict reader remains authoritative when present.
+   if(!result&&runtime.sources.db.prepare('SELECT 1 FROM run_events WHERE run_id=? AND kind=? LIMIT 1').get(row.run_id,runs.ONE_SURFACE_SNAPSHOT_EVENT_KIND))deny();
+   const exact=result?null:accepted.readExactAcceptedResultValueClosure(task.id,row.run_id);
+   if(result&&(!result.manifest.taskId||result.manifest.taskId!==task.id||!result.manifest.manifestId))deny();
+   if(!result&&!exact)deny();
    const next=runtime.currentNativeOwner();if(!next||digest(next)!==digest(owner))deny();
    return {nativeActor:{principalId:owner.principalId,sessionId:owner.sessionId,workspaceId:owner.workspaceId,hostId:owner.hostId,oneId:one.oneId},custodyGeneration:owner.custodyGeneration,
     commandId:row.command_id,taskId:task.id,runId:row.run_id,chatId:task.originChatId,originChatId:row.origin_chat_id,controlVersion:control,leaseId:lease.leaseId,payloadHash:row.payload_hash,nativeInputDigest:input.inputDigest,
-    inputRevision:input.admittedAt,resultReceiptId:result.manifest.manifestId,resultDigest:digest(result.manifest),profile:{oneId:one.oneId,version:one.version,displayName:one.displayName,role:one.role}};
+    inputRevision:input.admittedAt,resultReceiptId:result?result.manifest.manifestId:exact!.record.closure.valueClosureId,
+    resultDigest:result?digest(result.manifest):digest(exact),profile:{oneId:one.oneId,version:one.version,displayName:one.displayName,role:one.role}};
   },title(taskId:string){if(references().some((v,i)=>v!==originals[i]))deny();const title=tasks.getCanonicalTask(taskId)?.title;return businessEmployeeAgentText(title,120)?title:null;}}});return readers;
  }
  async function inspect(commandId:string){if(typeof commandId!=='string'||!commandId||commandId.length>256)deny();const original=await originalReaders();return runtime.sources.db.transaction(()=>structuredClone(original.read(commandId))).immediate();}

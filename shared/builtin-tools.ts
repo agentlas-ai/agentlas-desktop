@@ -104,6 +104,19 @@ function pathDenied(reason: string): never {
   throw new Error(`workspace path denied: ${reason}`);
 }
 
+/**
+ * A plugin's skills are not workspace files. The prompts name a plugin router by its install path
+ * (`.../plugins/<slug>/skills/<name>/SKILL.md`), which a CLI runtime opens wherever it is, but this loop's file tools stay inside the
+ * working folder and the harness is the way in. A refusal for such a path says which id to open instead of leaving the model to try
+ * relative guesses. Path text only: nothing is read and the folder boundary is unchanged.
+ */
+function pluginSkillHint(input: unknown): string {
+  if (typeof input !== "string") return "";
+  const found = /(?:^|[\\/])plugins[\\/]([a-z0-9][a-z0-9._-]*)[\\/]skills(?=[\\/]|$)(?:[\\/]([a-z0-9][a-z0-9._-]*))?/i.exec(input);
+  if (!found) return "";
+  return ` A plugin's skills are opened through the harness, not these file tools: harness_describe id "plugin:${found[1]}/${found[2] ?? "index"}" (the router is "plugin:${found[1]}/index").`;
+}
+
 function contained(root: string, target: string): boolean {
   const relative = path.relative(root, target);
   return (
@@ -142,10 +155,11 @@ function validateRelativePath(root: string, input: unknown): string {
   if (typeof input !== "string" || input.length === 0 || input.includes("\0")) {
     pathDenied("path must be a non-empty string");
   }
+  const pluginHint = pluginSkillHint(input);
   // path.resolve()가 정규화해 없애기 **전에** traversal을 거부한다. 지금 바깥으로
   // 나가는 것만이 아니라 `safe/../file` 자체를 거부하는 것이 의도다.
   if (input.split(/[\\/]+/u).some((segment) => segment === "..")) {
-    pathDenied("parent traversal is not allowed");
+    pathDenied(`parent traversal is not allowed${pluginHint}`);
   }
 
 
@@ -154,13 +168,13 @@ function validateRelativePath(root: string, input: unknown): string {
   if (path.isAbsolute(input)) {
     const lexical = path.resolve(input);
     const inside = contained(root, lexical) ? lexical : realPrefixPath(lexical);
-    if (!contained(root, inside)) pathDenied("absolute path is outside the working folder; use a path relative to it");
+    if (!contained(root, inside)) pathDenied(`absolute path is outside the working folder; use a path relative to it${pluginHint}`);
     return path.relative(root, inside) || ".";
   }
   // 두 방언 모두 검사한다. 다른 방언의 Windows 절대/UNC 경로(POSIX 호스트) 또는 POSIX 절대
   // 경로(Windows 호스트)는 여전히 무효다.
   if (path.posix.isAbsolute(input) || path.win32.isAbsolute(input) || /^[A-Za-z]:/.test(input)) {
-    pathDenied("absolute paths are not allowed");
+    pathDenied(`absolute paths are not allowed${pluginHint}`);
   }
   return input;
 }
@@ -195,7 +209,7 @@ function resolveExistingIn(cwd: string, input: unknown): string {
   try {
     real = fs.realpathSync(candidate);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException)?.code === "ENOENT" && error instanceof Error) error.message += nearEntriesHint(root, candidate);
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT" && error instanceof Error) error.message += nearEntriesHint(root, candidate) + pluginSkillHint(input);
     throw error;
   }
   if (!contained(root, real)) pathDenied("symbolic link leaves the working folder");

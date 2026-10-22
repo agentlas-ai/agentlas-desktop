@@ -1,4 +1,5 @@
 import {createCompanyAgentSourceCustody} from './company-agent-source-custody';
+import { transferPackageSheet, registerAgentSheet, prepareFilesSheet } from './native-approval-sheets';
 import fs from 'node:fs';
 import path from 'node:path';
 import {createHash,randomUUID} from 'node:crypto';
@@ -47,13 +48,7 @@ export function registerEmployeeAgentTransferMain(input: {
   }
   async function review(f: ReturnType<typeof input.focused>, value: EmployeeAgentTransferPackage, direction: 'export' | 'import') {
     const ko = input.locale() === 'ko', t = value.ticket; f.check();
-    const detail = [ko ? `조직: ${t.organizationId}\n보내는 직원: ${t.source.employeePrincipalId}\n받는 직원: ${t.target.employeePrincipalId}\n동작: ${t.mode === 'clone' ? '새 에이전트 복제' : '후임자 인계'}\n새 에이전트: ${t.target.displayName}`
-      : `Organization: ${t.organizationId}\nFrom: ${t.source.employeePrincipalId}\nTo: ${t.target.employeePrincipalId}\nAction: ${t.mode}\nNew agent: ${t.target.displayName}`,
-      ...value.files.map(file => `${file.path}\n${file.content}`)].join('\n\n');
-    const response = await (require('electron') as typeof import('electron')).dialog.showMessageBox(f.window, { type: 'question',
-      title: ko ? direction === 'export' ? '선택한 회사 에이전트 공유' : '회사 에이전트 사본 설치' : direction === 'export' ? 'Share selected company agent' : 'Install company agent copy',
-      message: ko ? '아래 선택한 정의·스킬·회사 기억·업무 자료를 검토하세요.' : 'Review the selected definition, skills, company memory and work files.',
-      detail, buttons: ko ? ['취소', '검토한 내용만 승인'] : ['Cancel', 'Approve reviewed content'], defaultId: 0, cancelId: 0, noLink: true });
+    const response = await (require('electron') as typeof import('electron')).dialog.showMessageBox(f.window, transferPackageSheet(ko, t, value.files, direction));
     f.check(); if (response.response !== 1) throw Error('employee_agent_transfer_review_declined');
     const until = Date.now() + 120000; return { receiptId: t.transferId, assertCurrent() { f.check(); if (Date.now() >= until) throw Error('employee_agent_transfer_review_expired'); } };
   }
@@ -82,7 +77,7 @@ export function registerEmployeeAgentTransferMain(input: {
       return { path: relative, kind, digest: createHash('sha256').update(bytes).digest('hex'), bytes: bytes.length, content };
     });
     const initial=read(),pin=employeeAgentTransferDigest(initial),association=o.connection.current();if(!association)fail();
-    const result=await electron.dialog.showMessageBox(f.window,{type:'question',title:ko?'새 회사 에이전트 등록':'Register company agent',message:raw.displayName,detail:initial.map(v=>`${v.path}\n${v.content}`).join('\n\n'),buttons:ko?['취소','회사 자료만 등록']:['Cancel','Register company files'],defaultId:0,cancelId:0,noLink:true});
+    const result=await electron.dialog.showMessageBox(f.window,registerAgentSheet(ko,{displayName:raw.displayName,role:raw.role},initial));
     f.check();if(result.response!==1)throw Error('employee_agent_transfer_review_declined');await o.connection.refresh();f.check();
     if(employeeAgentTransferDigest(read())!==pin||employeeAgentTransferDigest(o.connection.current())!==employeeAgentTransferDigest(association))fail();
     return (await sourceCustody(o)).propose(raw.displayName,raw.role,initial);
@@ -109,9 +104,7 @@ export function registerEmployeeAgentTransferMain(input: {
     if (initial.filter(v => v.kind === 'definition').length !== 1 || initial.reduce((n, v) => n + v.bytes, 0) > 196608
       || new Set(initial.map(v => v.path.toLowerCase())).size !== initial.length) throw Error('employee_agent_transfer_selection_invalid');
     const initialDigest = employeeAgentTransferDigest(initial), association = o.connection.current(); if (!association) fail();
-    const reviewed = await electron.dialog.showMessageBox(f.window, { type: 'question', title: ko ? '회사 에이전트 자료 준비' : 'Prepare company agent files',
-      message: source.displayName, detail: initial.map(file => `${file.path}\n${file.content}`).join('\n\n'),
-      buttons: ko ? ['취소', '선택한 회사 자료만 준비'] : ['Cancel', 'Prepare selected company files'], defaultId: 0, cancelId: 0, noLink: true });
+    const reviewed = await electron.dialog.showMessageBox(f.window, prepareFilesSheet(ko, source, initial));
     f.check(); if (reviewed.response !== 1) throw Error('employee_agent_transfer_review_declined'); await o.connection.refresh(); f.check();
     if (employeeAgentTransferDigest(o.connection.current()) !== employeeAgentTransferDigest(association) || employeeAgentTransferDigest(read()) !== initialDigest) throw Error('employee_agent_transfer_selected_source_changed');
     const snapshotId = randomUUID(), body = { snapshotId, sourceAgentResourceId: id, files: initial.map(({ content: _content, ...file }) => file), reviewReceiptId: randomUUID() };
@@ -146,7 +139,14 @@ export function registerEmployeeAgentTransferMain(input: {
   });
   input.ipc.handle('businessNative:transferReceipt', async (event: IpcMainInvokeEvent, raw: unknown) => {
     references(); const id = selector(raw), f = input.focused(event), o = input.original(event); await o.connection.refresh(); f.check();
-    const receipt = await o.connection.request('transfers/receipt', { transferId: id }); f.check();
+    let receipt: unknown;
+    try { receipt = await o.connection.request('transfers/receipt', { transferId: id }); }
+    catch (error) {
+      const denied = error as { status?: number; code?: string };
+      if (denied.status === 403 && denied.code === 'grant_missing' && (await custody(o)).installedTransfer(id)) { f.check(); return { transferId: id, state: 'recipient-renewal-required' as const }; }
+      throw error;
+    }
+    f.check();
     if (receipt === null) return null; if (!isEmployeeAgentTransferReceipt(receipt) || receipt.transferId !== id) fail();
     const owner = await custody(o);
     // Only the original source ledger can settle an exported package. A target

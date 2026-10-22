@@ -76,6 +76,8 @@ type Props = {
   localFilesConnected: boolean;
   /** Chat whose context window the "context" menu shows (harness context.inspect). */
   contextChatId?: string | null;
+  /** Optional exact trigger for a picker outside the conversation composer. */
+  anchor?: HTMLElement | null;
   onMenuChange: (menu: OneComposerMenuKey | null) => void;
   onAttach: () => void;
   onAddFolder: () => void;
@@ -109,6 +111,7 @@ export function OneComposerControls({
   turnOptions,
   localFilesConnected,
   contextChatId,
+  anchor,
   onMenuChange,
   onAttach,
   onAddFolder,
@@ -129,6 +132,7 @@ export function OneComposerControls({
     bottom: 156,
     width: 390,
     maxHeight: 420,
+    top: undefined as number | undefined,
   });
   useEffect(() => setQuery(""), [activeMenu]);
   useEffect(() => setPortalHost(document.body), []);
@@ -137,9 +141,9 @@ export function OneComposerControls({
 
     const updatePosition = () => {
       const triggerKey = activeMenu === "agents" ? "plus" : activeMenu;
-      const trigger = document.querySelector<HTMLElement>(`[data-one-composer-trigger="${triggerKey}"]`)
+      const trigger = anchor ?? document.querySelector<HTMLElement>(`[data-one-composer-trigger="${triggerKey}"]`)
         ?? document.querySelector<HTMLElement>('[data-one-composer-trigger="plus"]');
-      const composer = document.querySelector<HTMLElement>('[data-one-composer="true"]');
+      const composer = anchor ?? document.querySelector<HTMLElement>('[data-one-composer="true"]');
       if (!trigger || !composer) return;
 
       const composerRect = composer.getBoundingClientRect();
@@ -157,23 +161,31 @@ export function OneComposerControls({
         Math.max(viewportMargin, composerRect.left),
         Math.max(viewportMargin, window.innerWidth - viewportMargin - width),
       );
-      const bottom = Math.max(viewportMargin, window.innerHeight - composerRect.top + 10);
-      const maxHeight = Math.min(540, Math.max(180, composerRect.top - viewportMargin - 10));
-      setPopoverPosition({ left, bottom, width, maxHeight });
+      let bottom = Math.max(viewportMargin, window.innerHeight - composerRect.top + 10);
+      let maxHeight = Math.min(540, Math.max(180, composerRect.top - viewportMargin - 10));
+      let top: number | undefined;
+      if (anchor) {
+        const above = Math.max(0, composerRect.top - viewportMargin - 10);
+        const below = Math.max(0, window.innerHeight - composerRect.bottom - viewportMargin - 10);
+        const opensBelow = below > above;
+        if (opensBelow) { top = composerRect.bottom + 10; bottom = 0; }
+        maxHeight = Math.min(540, opensBelow ? below : above);
+      }
+      setPopoverPosition({ left, bottom, width, maxHeight, top });
     };
 
     updatePosition();
     window.addEventListener("resize", updatePosition);
     window.addEventListener("scroll", updatePosition, true);
     const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(updatePosition);
-    const composer = document.querySelector<HTMLElement>('[data-one-composer="true"]');
+    const composer = anchor ?? document.querySelector<HTMLElement>('[data-one-composer="true"]');
     if (composer) observer?.observe(composer);
     return () => {
       window.removeEventListener("resize", updatePosition);
       window.removeEventListener("scroll", updatePosition, true);
       observer?.disconnect();
     };
-  }, [activeMenu, portalHost]);
+  }, [activeMenu, portalHost, anchor]);
   useLayoutEffect(() => {
     if (!portalHost || activeMenu !== "permission") return;
     const option = document.querySelector<HTMLElement>(
@@ -217,6 +229,8 @@ export function OneComposerControls({
         "--one-composer-popover-bottom": `${popoverPosition.bottom}px`,
         "--one-composer-popover-width": `${popoverPosition.width}px`,
         "--one-composer-popover-max-height": `${popoverPosition.maxHeight}px`,
+        ...(anchor ? { top: popoverPosition.top, bottom: popoverPosition.top === undefined ? undefined : "auto",
+          maxHeight: popoverPosition.maxHeight, display: "flex", flexDirection: "column" } : {}),
       } as CSSProperties}
       aria-label={locale === "ko" ? "One 입력 설정" : "One composer settings"}
     >
@@ -307,7 +321,8 @@ export function OneComposerControls({
               <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={locale === "ko" ? "검색..." : "Search..."} autoFocus />
             </label>}
           <div className={styles.composerPopoverDivider} />
-          <div className={styles.composerPopoverScroll} data-one-composer-scroll={activeMenu}>
+          <div className={styles.composerPopoverScroll} data-one-composer-scroll={activeMenu}
+            style={anchor ? { minHeight: 0, maxHeight: "none", flex: "1 1 auto" } : undefined}>
             {activeMenu === "agents" && filteredAgents.map((item) => (
               <ComposerRow key={item.id} icon={<IconAtSign size={15} />} title={item.name} subtitle={item.tagline} compactDetails checked={item.selected} onClick={() => onToggleAgent(item.id)} />
             ))}

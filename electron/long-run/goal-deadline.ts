@@ -7,16 +7,24 @@
 
 
 
+import { goalCadenceDeadlineAt } from "../../shared/auto-goal";
 import { getChatGoalRevision } from "../store/chat-goals";
 import { readGoalPlan } from "../store/goal-plans";
 
-/** The current revision's host-resolved deadline, or null. A plan shaped for an older revision does not count. */
+/**
+ * The current revision's host-resolved deadline, or null. A plan shaped for an older revision does not count.
+ *
+ * A bounded series ("once an hour, ten in all") carries its interval and run count on the revision (shared/auto-goal.ts
+ * GoalCadence), so it has a deadline from admission on, before any plan exists: the end of its last scheduled run plus one
+ * interval. The owner's own stated deadline, when the plan has one, wins.
+ */
 export function goalDeadlineAt(goalId: string): string | null {
   const revision = getChatGoalRevision(goalId);
   if (!revision) return null;
+  const series = revision.cadence ? goalCadenceDeadlineAt(revision.createdAt, revision.cadence) : null;
   let plan: ReturnType<typeof readGoalPlan> = null;
-  try { plan = readGoalPlan(goalId, revision.revision); } catch { return null; }
-  if (!plan || plan.fallback || !plan.deadline_at || !Number.isFinite(Date.parse(plan.deadline_at))) return null;
+  try { plan = readGoalPlan(goalId, revision.revision); } catch { return series; }
+  if (!plan || plan.fallback || !plan.deadline_at || !Number.isFinite(Date.parse(plan.deadline_at))) return series;
   return plan.deadline_at;
 }
 

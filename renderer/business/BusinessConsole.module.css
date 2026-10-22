@@ -1,19 +1,24 @@
 /* Studio Console: Business-local aliases of the surrounding AppShell tokens. */
 .console {
-  --business-canvas: var(--paper-2, #fcfcfc);
-  --business-surface: var(--paper, #fff);
-  --business-ink: var(--ink, #242424);
-  --business-muted: var(--ink-soft, #666);
-  --business-line: var(--paper-edge, #eeeeec);
-  --business-accent: #5b65e9;
-  --business-nav: #22252b;
-  --business-nav-ink: #f4f4f7;
-  --business-nav-muted: #acadb7;
+  --business-canvas: var(--paper-2);
+  --business-surface: var(--paper);
+  --business-ink: var(--ink);
+  --business-muted: var(--ink-soft);
+  --business-line: var(--paper-edge);
+  --business-accent: var(--accent);
+  --business-nav: var(--black);
+  --business-nav-ink: var(--white);
+  --business-nav-line: color-mix(in srgb, var(--white) 14%, var(--black));
+  --business-nav-hover: color-mix(in srgb, var(--white) 8%, var(--black));
+  --business-nav-active: color-mix(in srgb, var(--white) 13%, var(--black));
+  --business-nav-muted: var(--white-faint);
   position: relative;
   display: grid;
   grid-template-columns: 240px minmax(0, 1fr);
-  height: 100%;
-  min-height: 100%;
+  /* The page is the window. `height: 100%` resolves to `auto` under <body> (html/body have no height), so on a short page the
+     console, and with it the dark sidebar, was only as tall as its content and the rest of the window stayed white. */
+  height: 100dvh;
+  min-height: 0;
   overflow: hidden;
   background: var(--business-canvas);
   color: var(--business-ink);
@@ -40,8 +45,8 @@
 .console button:disabled, .console select:disabled, .console input:disabled { opacity: .45; cursor: default; }
 .console button:focus-visible, .console select:focus-visible, .console input:focus-visible, .console textarea:focus-visible,
 .console summary:focus-visible, .console a:focus-visible, .content:focus-visible { outline: 2px solid var(--business-accent); outline-offset: 3px; }
-.console .primaryAction { background: var(--business-accent); color: #fff; border-color: var(--business-accent); font-weight: 550; }
-.console .primaryAction:hover:not(:disabled) { background: color-mix(in srgb, var(--business-accent) 88%, #111); }
+.console .primaryAction { background: var(--one-primary); color: var(--white); border-color: var(--one-primary); font-weight: 550; }
+.console .primaryAction:hover:not(:disabled) { background: var(--one-primary-hover); }
 .skip { position: absolute; top: 8px; left: 12px; z-index: 5; transform: translateY(-160%); padding: 12px; background: var(--business-surface); color: var(--business-ink); border-radius: 8px; }
 .skip:focus { transform: none; }
 .sidebar { position: sticky; top: 0; align-self: start; display: flex; flex-direction: column; gap: 20px; min-height: 100%; max-height: 100dvh; overflow: auto; padding: 24px 16px 20px; background: var(--business-nav); color: var(--business-nav-ink); scrollbar-width: thin; }
@@ -51,12 +56,12 @@
 .tabs { display: grid; gap: 20px; }
 .navGroup { display: grid; gap: 3px; }
 .navGroup > small { padding: 0 12px 7px; color: var(--business-nav-muted); font-size: 12px; line-height: 1.5; }
-.tabs button, .console .sidebarBack { position: relative; justify-content: flex-start; width: 100%; min-height: 44px; padding: 10px 12px; border-color: transparent; background: transparent; color: #d9dae2; text-align: left; font-size: 14px; }
+.tabs button, .console .sidebarBack { position: relative; justify-content: flex-start; width: 100%; min-height: 44px; padding: 10px 12px; border-color: transparent; background: transparent; color: var(--white-soft); text-align: left; font-size: 14px; }
 .tabs button > span { flex: 1; }
-.tabs button:hover:not(:disabled), .console .sidebarBack:hover { background: #2c3038; color: #fff; }
-.tabs button[aria-current=page], .entryNavigation { background: #303541; color: #aeb4ff; }
-.tabs button[aria-current=page]::before { content: ''; position: absolute; left: 0; top: 12px; bottom: 12px; width: 2px; border-radius: 2px; background: #8790ff; }
-.scope { display: flex; align-items: flex-start; gap: 8px; margin-top: auto; padding: 20px 12px 0; border-top: 1px solid #393d46; color: var(--business-nav-muted); font-size: 11px; overflow-wrap: anywhere; }
+.tabs button:hover:not(:disabled), .console .sidebarBack:hover { background: var(--business-nav-hover); color: var(--white); }
+.tabs button[aria-current=page], .entryNavigation { background: var(--business-nav-active); color: var(--white); }
+.tabs button[aria-current=page]::before { content: ''; position: absolute; left: 0; top: 12px; bottom: 12px; width: 2px; border-radius: 2px; background: var(--green); }
+.scope { display: flex; align-items: flex-start; gap: 8px; margin-top: auto; padding: 20px 12px 0; border-top: 1px solid var(--business-nav-line); color: var(--business-nav-muted); font-size: 11px; overflow-wrap: anywhere; }
 .scope svg { flex-shrink: 0; }
 .identity { padding: 0 12px; color: var(--business-nav-muted); font-size: 10px; }
 .identity summary { min-height: 32px; cursor: pointer; }
@@ -84,46 +89,22 @@
 .content ul { margin: 0; padding: 0; list-style: none; }
 .message { margin: 0; padding: 12px 40px; border-bottom: 1px solid var(--business-line); color: var(--business-muted); font-size: 12px; }
 .entryContent { max-width: 800px; padding-top: 56px; }
-.entryDescription { max-width: 500px; font-size: 16px; line-height: 1.7; }
-.entryActions { display: flex; align-items: center; gap: 8px; margin-top: 28px; }
 .entryNavigation { display: flex; align-items: center; gap: 10px; min-height: 44px; padding: 10px 12px; border-radius: 8px; font-size: 14px; }
 .console .sidebarBack { margin-top: auto; }
-.sidebar :global(.business-organization-selector) { display: flex; align-items: center; gap: 6px; min-width: 0; padding-bottom: 18px; border-bottom: 1px solid #393d46; }
+.sidebar :global(.business-organization-selector) { display: flex; align-items: center; gap: 6px; min-width: 0; padding-bottom: 18px; border-bottom: 1px solid var(--business-nav-line); }
 .sidebar :global(.business-organization-selector) > svg { flex-shrink: 0; color: var(--business-nav-muted); }
-.sidebar :global(.business-organization-selector select) { width: 100%; min-width: 0; padding: 8px; border-color: #414550; background: #2c3038; color: var(--business-nav-ink); font-size: 13px; color-scheme: dark; }
+.sidebar :global(.business-organization-selector select) { width: 100%; min-width: 0; padding: 8px; border-color: var(--business-nav-line); background: var(--business-nav-hover); color: var(--business-nav-ink); font-size: 13px; color-scheme: dark; }
 .sidebar :global(.business-organization-selector button) { flex-shrink: 0; width: 32px; min-width: 32px; padding: 0; border: 0; background: transparent; color: var(--business-nav-muted); }
 .console :global(.business-icon-button) { width: 44px; min-width: 44px; padding: 0; }
 .content :global(.business-section-header) { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 22px; }
 .content :global(.business-section-header h2) { margin: 0; }
-.content :global(.business-field) { display: grid; gap: 8px; min-width: 0; margin: 0 0 20px; color: var(--business-muted); font-size: 14px; }
-.content :global(.business-field select) { width: min(100%, 420px); color: var(--business-ink); }
 .content :global(.business-actions) { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 16px 0; }
-.content :global(.business-account-layout) { display: grid; grid-template-columns: minmax(0, 1fr); overflow: hidden; border: 1px solid var(--business-line); border-radius: 8px; background: var(--business-surface); }
-.content :global(.business-account-main) { min-width: 0; padding: 24px; }
-.content :global(.business-organization-rows) { margin: 4px -24px 0; }
-.content :global(.business-organization-rows > li) { display: flex; align-items: center; gap: 16px; min-height: 88px; padding: 20px 24px; border-top: 1px solid var(--business-line); }
-.content :global(.business-organization-rows > li[data-current=true]) { background: color-mix(in srgb, var(--business-accent) 6%, var(--business-surface)); }
-.content :global(.business-organization-rows > li > svg) { flex-shrink: 0; color: var(--business-muted); }
-.content :global(.business-organization-rows > li > div) { display: grid; gap: 4px; flex: 1; min-width: 0; }
-.content :global(.business-organization-rows strong) { overflow-wrap: anywhere; font-size: 16px; font-weight: 550; }
-.content :global(.business-organization-rows div > span) { color: var(--business-muted); font-size: 12px; }
-.content :global(.business-account-inspector) { min-width: 0; padding: 28px 24px; border-top: 1px solid var(--business-line); }
-.content :global(.business-inspector-icon) { display: inline-flex; align-items: center; justify-content: center; width: 56px; height: 56px; border: 1px solid var(--business-line); border-radius: 12px; background: var(--business-canvas); color: var(--business-muted); }
-.content :global(.business-account-inspector h3) { margin: 20px 0 24px; font-size: 24px; letter-spacing: -.03em; overflow-wrap: anywhere; }
-.content :global(.business-account-facts) { margin: 0; }
-.content :global(.business-account-facts > div) { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 16px 0; border-bottom: 1px solid var(--business-line); font-size: 14px; }
-.content :global(.business-account-facts dt) { color: var(--business-muted); }
-.content :global(.business-account-facts dd) { margin: 0; max-width: 60%; text-align: right; overflow-wrap: anywhere; }
-.content :global(.business-account-section) { margin-top: 28px; }
-.content :global(.business-account-section h3) { color: var(--business-muted); font-size: 12px; }
-.content :global(.business-account-section nav) { display: flex; flex-wrap: wrap; gap: 8px; }
-.content :global(.business-account-actions) { justify-content: flex-end; padding-top: 8px; }
 .content :global(.business-setting-row) { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; min-height: 64px; padding: 14px 0; border-bottom: 1px solid var(--business-line); }
 .content :global(.business-setting-row > :first-child) { flex: 1; min-width: 140px; }
 .content :global(.business-setting-row h3) { margin: 0; font-size: 13px; }
 .content :global(.business-status) { display: inline-flex; align-items: center; gap: 5px; padding: 4px 7px; border-radius: 5px; background: var(--business-canvas); color: var(--business-muted); font-size: 11px; }
-.content :global(.business-status[data-state=verified]), .content :global(.business-status[data-state=active]), .content :global(.business-status[data-state=passed]) { color: var(--ok, #347c4c); }
-.content :global(.business-status[data-state=failed]), .content :global(.business-status[data-state=revoked]) { color: var(--red-deep, #a94343); }
+.content :global(.business-status[data-state=verified]), .content :global(.business-status[data-state=active]), .content :global(.business-status[data-state=passed]) { color: var(--ok); }
+.content :global(.business-status[data-state=failed]), .content :global(.business-status[data-state=revoked]) { color: var(--red-deep); }
 .content :global(.business-details) { margin: 20px 0 0; color: var(--business-muted); font-size: 11px; }
 .content :global(.business-details summary) { min-height: 44px; padding: 12px 0; cursor: pointer; }
 .content :global(.business-details dl) { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px 16px; }
@@ -153,10 +134,6 @@
 .content :global(.business-learning-panel article summary) { overflow-wrap: anywhere; font-size: 13px; font-weight: 500; }
 .content :global(.business-receipt-list li) { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--business-line); font-size: 12px; }
 .content :global(.business-receipt-list li > span) { flex: 1; overflow-wrap: anywhere; }
-@media (min-width: 1200px) {
-  .content :global(.business-account-layout[data-inspector=true]) { grid-template-columns: minmax(0, 1fr) 320px; }
-  .content :global(.business-account-inspector) { border-top: 0; border-left: 1px solid var(--business-line); }
-}
 @media (max-width: 1000px) {
   .console { grid-template-columns: 210px minmax(0, 1fr); }
   .sidebar { padding: 20px 12px; }
@@ -186,13 +163,7 @@
   .pageHeading { margin-bottom: 24px; }
   .pageHeading h1 { font-size: 28px; }
   .entryContent { padding-top: 32px; }
-  .entryDescription { font-size: 14px; }
   .message { padding: 12px 16px; }
-  .content :global(.business-account-main), .content :global(.business-account-inspector) { padding: 20px 16px; }
-  .content :global(.business-organization-rows) { margin-inline: -16px; }
-  .content :global(.business-organization-rows > li) { flex-wrap: wrap; min-height: 80px; padding: 16px; gap: 12px; }
-  .content :global(.business-organization-rows > li > .business-status) { margin-left: 32px; }
-  .content :global(.business-account-actions) { justify-content: flex-start; }
   .content :global(.business-history-day ol > li) { grid-template-columns: minmax(0, 1fr); gap: 4px; }
   .content :global(.business-history-day time) { padding: 0; }
 }

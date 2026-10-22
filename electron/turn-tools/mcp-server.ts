@@ -4,18 +4,18 @@ import { BUILTIN_MCP_LAUNCH_ARGV_MAX_CHARS, defineBuiltinMcpLaunch } from "../mc
 import { MEMORY_KINDS, MEMORY_SCOPES } from "../architecture/manifest";
 import { FINANCE_MONITOR_RUN_TIMEOUT_MS } from "../../shared/finance";
 
-/*
- * agentlas-turn: per-run built-in MCP server holding the typed replacements for the text control blocks a model used
- * to append to its reply (owner 2026-10-13: "we do not depend on prompts"). The child holds no authority: each call is
- * forwarded to Main's loopback control server (control-server.ts), which re-checks the run capability and feeds the
- * SAME pipeline the parsed block fed. The text parsers stay as the fallback for runtimes without this tool.
- *
- * Tools now: memory_note (replaces the `## Memory Events` envelope; the per-turn receipt/turn_summary is host-built),
- * ask_form (replaces the `<<agentlas-ask>>` block; attended runs only).
- *
- * Must not import electron (the daemon loads it). The audited source launches through a file the child checks for its
- * exact length and hash before running it (same contract as every built-in, mcp-tools/builtin-mcp-launch.ts).
- */
+  
+                                                                                                                     
+                                                                                                                       
+                                                                                                                    
+                                                                                                            
+  
+                                                                                                                      
+                                                                        
+  
+                                                                                                                      
+                                                                                                              
+   
 export const AGENTLAS_TURN_CATALOG_ID = "agentlas-turn";
 export const AGENT_TURN_CONTROL_ENV = "AGENTLAS_TURN_CONTROL_FILE";
 export const AGENTLAS_TURN_TOOL_NAMES = ["memory_note", "goal_wait", "goal_complete", "goal_tactic", "goal_plan_op", "goal_kpi", "ask_form", "harness_search", "harness_describe", "harness_call"] as const;
@@ -41,7 +41,7 @@ export const GOAL_WAIT_CONDITIONS = ["terminal", "changed", "due"] as const;
 export const MEMORY_NOTE_SCOPES = MEMORY_SCOPES.filter((scope) => scope !== "agent_team");
 const idString = { type: "string", maxLength: 500 };
 
-// Tool definitions are prompt tokens too (owner 2026-10-13): the schema carries the enums, the host validates and
+                                                                                                                  
 // screens; the description says only what the schema cannot.
 export const MEMORY_NOTE_DESCRIPTION =
   "Save one durable learning to curated memory. content in English; owner wording in content_native; no secrets.";
@@ -512,7 +512,7 @@ export const AGENTLAS_TURN_TOOLS = ([
   {
     name: "ask_form",
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
-    description: "Show a choice card for a real fork with no safe default, then end the turn; the pick arrives as the next message.",
+    description: "Show a card for what only the owner can answer (choice, fact, go-ahead) with no safe default, then end the turn; 2+ options (best guesses), typed text works; the answer comes as the next message.",
     inputSchema: {
       type: "object",
       properties: {

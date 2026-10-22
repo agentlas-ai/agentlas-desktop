@@ -23,6 +23,9 @@ const DENIED: Array<[RegExp, string, AppControlEffect]> = [
   // The owner's consent boundary. One granting itself (or a worker) permission would be self-escalation.
   [/^(resolveToolApproval|grantChatAlwaysApproval|revokeChatAlwaysApproval|revokeCapabilityGrant)$/, "approvals and grants are the owner's decision", "consent"],
   [/^confirm\./, "the owner answers questions agents ask", "consent"],
+  // Where the personal agent's conversation is processed (Agentlas server and its model provider, or the owner's own CLI) is
+  // the owner's decision, and the one-time notice that makes it effective is the owner's to answer. getState is a read.
+  [/^oneFront\.(setFront|acknowledgeNotice)$/, "where the personal agent's replies are processed, and the notice that confirms it, are the owner's own act", "consent"],
   // The handler already refuses app.call (ipc.ts invoke:returnSteeringRecovery); the policy says so before the call.
   [/^invoke\.returnSteeringRecovery$/, "taking a held owner direction back into the composer is the owner's own act", "write"],
   [/^(surfaces\.(approve|revokeApproval)|automations\.decideNodeApproval|browser\.resolveApproval)$/, "approvals are the owner's decision", "consent"],
@@ -80,7 +83,7 @@ const DENIED: Array<[RegExp, string, AppControlEffect]> = [
 //   write  everything else that used to fall through to the default. Same effect class as before: callable on any One
 //          turn. Some of these look destructive or consent-like (fs.openPath, telegram.start, site.exportScreenCode,
 //          hephaestus.runUpdate, science.manuscripts.revertTransaction); they stay "write" so no operation changes what
-//          One may call. Tightening one is an owner decision, not a side effect of declaring it.
+                                                                                                 
 const EXPLICIT_READ_PATHS: ReadonlySet<string> = new Set([
   // agent-mail/ipc.ts
   "agentMail.contact", "agentMail.contacts", "agentMail.directoryLookup", "agentMail.directoryMe", "agentMail.directorySearch", "agentMail.drafts",

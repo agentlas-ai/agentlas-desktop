@@ -1,30 +1,30 @@
-/**
- * 에이전트 응답에 섞여 오는 **제어 블록**을 표시용 텍스트에서 제거하는 순수 함수.
- *
- * 호스트는 이 블록들을 구조화 데이터로 따로 소비한다(기억 티켓, 위임, 자동화 등록,
- * 질문, 후속 행동). 사용자에게는 절대 원문이 보이면 안 된다.
- *
- * WIRE FORMAT 정본은 각 파서다 — 여기서 규칙을 새로 만들지 않는다:
- *  - `## Memory Events` + ```json  → electron/memory/events.ts parseMemoryEvents
- *  - `## Delegate`     + ```json  → electron/mcp/delegate.ts parseDelegations
- *  - `## Automation`   + ```json  → electron/automation-emitter.ts parseAutomations
- *  - `<<agentlas-ask>>…<</agentlas-ask>>`             → renderer/lib/ask-question.ts
- *  - `<<agentlas-one-followups>>…<</…>>`              → shared/one-friendly-followups.ts
- *  - `<<agentlas-surface>>…<</agentlas-surface>>`     → electron/surface-emitter.ts parseSurfaces
- *  - `<<agentlas-goal-complete: …>>`                 → host goal-loop completion marker
- *
- * 이 파일은 **표시 전용**이다. 파싱·적용은 위 정본들이 계속 소유한다.
- * Mobile(Dart)에도 같은 규칙이 이식되어 있고, 공유 픽스처로 두 표면의 출력이
- * 바이트 단위로 같은지 게이트가 검사한다.
- *
- * ★2026-08-12 사용자 제보: followups와 surface 원문이 **동시에** 화면에 떴다.
- * 원인은 손코딩 스트리퍼 3벌이 서로 다른 마커만 알고 있었던 것 —
- * 이 파일(모바일 브리지·텔레그램)은 surface를 몰랐고, 반대로
- * electron/mcp/final-display-backstop.ts는 followups를 몰랐다. 마커 목록은
- * 여기 한 벌만 두고, 다른 표면은 상수를 **가져다 쓴다**(surface-emitter가
- * SURFACE_*_FENCE를 여기서 재수출). 표면마다 목록을 다시 적으면 또 한 표면만
- * 빠진다 — telegram/connect.ts에 같은 사고가 이미 기록돼 있다.
- */
+   
+                                                  
+  
+                                                  
+                                      
+  
+                                              
+                                                                                 
+                                                                              
+                                                                                    
+                                                                                     
+                                                                                         
+                                                                                                  
+                                                                                        
+  
+                                            
+                                                   
+                         
+  
+                                                             
+                                        
+                                        
+                                                                 
+                                                     
+                                                     
+                                               
+   
 
 import { mapInlineVisualProse } from "./inline-visual";
 import { KOREAN_WORD_START } from "./korean-boundary";
@@ -38,8 +38,60 @@ export const AGENT_CONTROL_HEADINGS = [
 export const AGENT_ASK_OPEN = "<<agentlas-ask>>";
 export const AGENT_ASK_CLOSE = "<</agentlas-ask>>";
 
-/** Close-marker misspellings seen from small models (`</<agentlas-ask>>`, `</agentlas-ask>>`, `<</agentlas-ask>`). */
-const ASK_CLOSE_VARIANTS = /<\/<agentlas-ask>>|(?<!<)<\/agentlas-ask>>|<<\/agentlas-ask>(?!>)/g;
+/**
+ * Close-marker misspellings seen from small models (`</<agentlas-ask>>`, `</agentlas-ask>>`, `<</agentlas-ask>`, `</</agentlas-ask>>`,
+ * `</<</agentlas-ask>>`, `<</ agentlas-ask>>`, a stray extra `>`, a missing `>`). A close-like marker starts with `<`, carries at least one `/`
+ * among the angle brackets, slashes and spaces before the name, and ends with up to three `>`. The canonical open marker has no `/`, so it is
+ * never matched, and the match must start with `<`, so a slash before an open marker (`path/<<agentlas-ask>>`) is not part of it.
+ */
+const ASK_CLOSE_VARIANTS = /(?<!<)<(?=[<\/ ]*\/)[<\/ ]{0,6}agentlas-ask(?![\w-])>{0,3}/g;
+
+/** Index of the `}` that closes the JSON object opening at `start`, string- and escape-aware; -1 when it never closes. */
+function endOfJsonObject(text: string, start: number): number {
+  let depth = 0;
+  let inString = false;
+  for (let index = start; index < text.length; index += 1) {
+    const char = text[index];
+    if (inString) {
+      if (char === "\\") index += 1;
+      else if (char === '"') inString = false;
+      continue;
+    }
+    if (char === '"') inString = true;
+    else if (char === "{") depth += 1;
+    else if (char === "}") {
+      depth -= 1;
+      if (depth === 0) return index;
+    }
+  }
+  return -1;
+}
+
+/**
+ * The last open marker has no close marker at all (or one too garbled to recognise): when what follows is one complete JSON object, that object
+ * is the question and the close marker is simply missing. A truncated object stays an unfinished tail and stays hidden.
+ */
+function closeCompleteAskObject(text: string): string {
+  const open = text.lastIndexOf(AGENT_ASK_OPEN);
+  if (open < 0) return text;
+  const afterOpen = text.slice(open + AGENT_ASK_OPEN.length);
+  if (afterOpen.includes(AGENT_ASK_CLOSE)) return text;
+  const start = afterOpen.indexOf("{");
+  if (start < 0 || afterOpen.slice(0, start).replace(/```(?:json)?/i, "").trim() !== "") return text;
+  const end = endOfJsonObject(afterOpen, start);
+  if (end < 0) return text;
+  try {
+    const value: unknown = JSON.parse(afterOpen.slice(start, end + 1));
+    if (!value || typeof value !== "object" || Array.isArray(value)) return text;
+  } catch {
+    return text;
+  }
+  // A garbled close marker after the object (and a code fence around it) is dropped; whitespace and prose after it stay as they were.
+  const rest = afterOpen.slice(end + 1);
+  const noise = /^\s*(?:```\s*)?(?:[<\/\] ]*agentlas[ -]?asks?[>\]]*)?/i.exec(rest)?.[0] ?? "";
+  const tail = rest.slice(/```|agentlas/i.test(noise) ? noise.length : 0);
+  return text.slice(0, open + AGENT_ASK_OPEN.length) + afterOpen.slice(0, end + 1) + AGENT_ASK_CLOSE + tail;
+}
 
 /**
 
@@ -48,8 +100,8 @@ const ASK_CLOSE_VARIANTS = /<\/<agentlas-ask>>|(?<!<)<\/agentlas-ask>>|<<\/agent
 
  */
 export function repairAskOpenMarkers(input: string): string {
-  const text = input.includes("agentlas-ask>") ? input.replace(ASK_CLOSE_VARIANTS, AGENT_ASK_CLOSE) : input;
-  if (!text.includes(AGENT_ASK_CLOSE)) return text;
+  const text = input.includes("agentlas-ask") ? input.replace(ASK_CLOSE_VARIANTS, AGENT_ASK_CLOSE) : input;
+  if (!text.includes(AGENT_ASK_CLOSE)) return closeCompleteAskObject(text);
   let out = "";
   let rest = text;
   let inFence = false;
@@ -74,7 +126,7 @@ export function repairAskOpenMarkers(input: string): string {
     }
     rest = after;
   }
-  return out + rest;
+  return closeCompleteAskObject(out + rest);
 }
 export const AGENT_FOLLOWUPS_OPEN = "<<agentlas-one-followups>>";
 export const AGENT_FOLLOWUPS_CLOSE = "<</agentlas-one-followups>>";

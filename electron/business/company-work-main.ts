@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto';
+import { companyProviderSheet } from './native-approval-sheets';
+import { currentUiLocale } from '../ui-locale';
 import type { BrowserWindow,IpcMain,IpcMainInvokeEvent } from 'electron';
 import { isAppControlEvent } from '../app-control/ipc-registry';
 import { businessOnlyKeys,isBusinessId } from '../../shared/business/context';
@@ -9,6 +11,8 @@ import type { CompanyAgentAssetOwner } from './employee-agent-transfer-custody';
 import { reviewHostCompanyProvider,companyProviderHost,revokeCompanyProvider } from './company-work-provider';
 import { installCompanyWorkPort } from './company-work-port';
 interface Input{ipc:Pick<IpcMain,'handle'>;assertTrustedSender(event:IpcMainInvokeEvent):void;isOwnerWindow(window:BrowserWindow):boolean;companyAgents():CompanyAgentAssetOwner;companyDb():OneVaultSqlite;companyDataPath(...segments:string[]):string;signal:AbortSignal}
+/** The limits shown by the native sheet are the limits in the original request. */
+const REVIEW_LIMITS={maxRuns:20,maxOutputTokens:2048,minutes:30} as const;
 /** Explicit Native dual-consent review. Renderer chooses a selector but cannot
  * mint an asset, provider permit, work policy, or run capability. */
 export function registerCompanyWorkMain(input:Input){
@@ -27,10 +31,10 @@ export function registerCompanyWorkMain(input:Input){
   const owner=input.companyAgents(),asset=await owner.capture(value.agentId);current(epoch,action.check);if(!asset)throw Error('company_work_source_required');const selected=owner.read(asset);if(!selected)throw Error('company_work_source_required');
   clearReviews();let provider:object|null=null,reviewId:string|null=null;
   try{
-   provider=await reviewHostCompanyProvider(value.runtime as RuntimeSelection,()=>current(epoch,action.check),async host=>{
-    const result=await electron().dialog.showMessageBox(action.window,{type:'question',buttons:['Cancel','Allow this company provider'],defaultId:0,cancelId:0,noLink:true,title:'Company work provider',message:'Review company work on this host',detail:`Organization: ${selected.organizationSession.organizationId}\nEmployee: ${selected.employeePrincipalId}\nAgent: ${selected.agentId}\nProvider: ${host.runtime.kind==='claude-code'?'Claude Code subscription':host.runtime.backend}\nModel: ${host.runtime.model}\n${host.runtime.kind==='claude-code'?`Original CLI: ${host.runtime.source}\nSubscription and binary fingerprint: ${host.configurationDigest}`:`Credential source: ${host.sourceKind}\nFingerprint: ${host.credential?.fingerprint??"Original provider metadata will be created after this approval."}`}\nMaximum 20 runs, 2048 output tokens per run, 30 minutes.\nCompany Mail and approved input files; bounded per-job company output files only. Company operator must separately approve this exact configuration. This does not share the key or personal context.`});current(epoch,action.check);return result.response===1;
+   provider=await reviewHostCompanyProvider(value.runtime as RuntimeSelection,()=>current(epoch,action.check),async(host,customEndpoint)=>{
+    const result=await electron().dialog.showMessageBox(action.window,companyProviderSheet(currentUiLocale()==='ko',{organizationId:selected.organizationSession.organizationId,employeePrincipalId:selected.employeePrincipalId,agentId:selected.agentId,host,customEndpoint,limits:REVIEW_LIMITS}));current(epoch,action.check);return result.response===1;
    });current(epoch,action.check);owner.assertCurrent(asset);const host=await companyProviderHost(provider);current(epoch,action.check);
-   const rootReview=await owner.request(asset,{operation:'review',payload:{host,maxRuns:20,maxOutputTokens:2048,expiresAt:new Date(Math.min(Date.now()+1800000,Date.parse(selected.organizationSession.expiresAt))).toISOString()}}) as {reviewId?:unknown};current(epoch,action.check);if(!rootReview||typeof rootReview.reviewId!=='string'||!isBusinessId(rootReview.reviewId))throw Error('company_work_review_receipt_invalid');reviewId=rootReview.reviewId;
+   const rootReview=await owner.request(asset,{operation:'review',payload:{host,maxRuns:REVIEW_LIMITS.maxRuns,maxOutputTokens:REVIEW_LIMITS.maxOutputTokens,expiresAt:new Date(Math.min(Date.now()+REVIEW_LIMITS.minutes*60000,Date.parse(selected.organizationSession.expiresAt))).toISOString()}}) as {reviewId?:unknown};current(epoch,action.check);if(!rootReview||typeof rootReview.reviewId!=='string'||!isBusinessId(rootReview.reviewId))throw Error('company_work_review_receipt_invalid');reviewId=rootReview.reviewId;
    reviews.set(reviewId,{window:action.window,owner,asset,provider,expiresAt:Date.now()+600000});
    return{reviewId,host,asset:{sourceKind:selected.sourceKind,registrationId:selected.registrationId,transferId:selected.transferId,agentId:selected.agentId,agentResourceId:selected.agentResourceId,packageDigest:selected.packageDigest,targetRevision:selected.targetRevision},associationId:selected.associationId,associationRevision:selected.associationRevision,organizationId:selected.organizationSession.organizationId};
   }catch(error){if(reviewId&&reviews.get(reviewId)?.provider===provider)reviews.delete(reviewId);if(provider)revokeCompanyProvider(provider);throw error}

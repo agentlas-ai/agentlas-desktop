@@ -4,9 +4,53 @@
 // when the turn names no runtime: the owner's message from the personal window, a host-started review, a phone message
 // (electron/runtime/room-chip-runtime.ts). Host selection only: nothing here reaches a model.
 import { readAppUiPreference } from "./app-ui-preferences";
+import { useEffect, useState } from "react";
+import { ipc, ipcEvents } from "./ipc";
+import { createTrailingDebounce } from "./store-change-policy";
 import { runtimeMatchesSelection } from "@shared/runtime-selection";
 import { runtimeSelectionReceiptMatches } from "@shared/runtime-selection-receipt";
-import type { RuntimeSelection, RuntimeStatus } from "@shared/types";
+import type { ChatContinuitySnapshot, RuntimeSelection, RuntimeStatus } from "@shared/types";
+
+/** A model observation is display-only: it cannot reconstruct an exact runtime pin. */
+export function runningComposerModel(snapshot: ChatContinuitySnapshot | null, chatId: string): string | null {
+  return snapshot?.chatId === chatId && snapshot.hostActiveChat && snapshot.invocation?.state === "active"
+    ? snapshot.invocation.model?.model?.trim() || null : null;
+}
+
+export function composerModelLabel(requested: string, running: string | null, locale: "ko" | "en"): string {
+  return running ? locale === "ko" ? `현재 실행 ${running} · 다음 요청 ${requested}` : `Running ${running} · Next request ${requested}` : requested;
+}
+
+/** Bounded Main observations; stale responses never paint another session or claim a model is still running. */
+export function useRunningComposerModel(chatId: string | null): string | null {
+  const [observation, setObservation] = useState<{ chatId: string; model: string | null } | null>(null);
+  useEffect(() => {
+    const api = ipc();
+    if (!chatId || !api?.chats?.getContinuitySnapshot) { setObservation(null); return; }
+    let disposed = false, reading = false, pending = false, generation = 0;
+    const refresh = async () => {
+      const request = ++generation;
+      if (reading) { pending = true; return; }
+      reading = true;
+      try {
+        const snapshot = await api.chats.getContinuitySnapshot(chatId);
+        if (!disposed && request === generation) setObservation({ chatId, model: runningComposerModel(snapshot, chatId) });
+      } catch { if (!disposed && request === generation) setObservation(null); }
+      finally { reading = false; if (!disposed && pending) { pending = false; void refresh(); } }
+    };
+    const update = createTrailingDebounce({ waitMs: 100, maxWaitMs: 500, run: () => { void refresh(); } });
+    const off = ipcEvents()?.onStoreChanged?.((change) => {
+      if (change.entity === "runtime" || change.entity === "run-event" || change.entity === "long-run"
+        || change.entity === "chat" && change.id === chatId) { generation += 1; setObservation(null); update.call(); }
+    });
+    const visible = () => { if (!document.hidden) void refresh(); };
+    document.addEventListener("visibilitychange", visible);
+    const timer = setInterval(visible, 10_000);
+    void refresh();
+    return () => { disposed = true; off?.(); update.cancel(); clearInterval(timer); document.removeEventListener("visibilitychange", visible); };
+  }, [chatId]);
+  return observation?.chatId === chatId ? observation.model : null;
+}
 
 export function oneEffortLabel(id: string): string {
   const known: Record<string, string> = {
@@ -45,10 +89,13 @@ export function chipRuntimeFor(runtimes: readonly RuntimeStatus[], pin: RuntimeS
     ? runtimes.find((runtime) => runtimeMatchesSelection(runtime, pin))
     : runtimes.find((runtime) => runtime.active);
   if (!matched) return null;
+  // A detected engine can remember another role's last model. The exact role
+  // selection, rather than inventory order or that remembered model, owns a new composer.
+  const selection = pin ?? matched.roleSelections?.orchestrator;
   return withOneRuntimeSelection(
-    { ...matched, active: true, longContextEnabled: pin?.longContext ?? matched.longContextEnabled },
-    pin?.model ?? matched.model ?? null,
-    pin?.effort ?? (pin?.model ? undefined : matched.effort),
+    { ...matched, active: true, longContextEnabled: selection?.longContext ?? matched.longContextEnabled },
+    selection ? selection.model ?? null : matched.model ?? null,
+    selection?.effort ?? (selection?.model ? undefined : matched.effort),
   );
 }
 

@@ -332,7 +332,9 @@ import type {
   OneOperatingPrincipleUpdateInput,
   OneProfileUpdateInput,
   AcknowledgeOneFeatureIntroInput,
+  AcknowledgeOneFrontNoticeInput,
   DeferOneFeatureIntroInput,
+  SetOneFrontInput,
   PrepareOneBriefingActionInput,
   OpenOneBriefingTaskInput,
   StartOneBriefingActionInput,
@@ -614,6 +616,7 @@ import {
   deferOneFeatureIntro,
   getOneFeatureIntroState,
 } from "./one/feature-intro";
+import { acknowledgeOneFrontNotice, getOneFrontView, setOneFront } from "./one/front";
 import {
   deleteOneMemoryAsset,
   deleteOneMemoryCandidate,
@@ -1227,10 +1230,10 @@ async function confirmNativeSiteAgentAppMcp(
   _win: BrowserWindow,
   _recommendation: SiteAgentAppMcpRecommendation,
 ): Promise<"approved" | "declined"> {
-  /* 승인 게이트 폐지(오너 이사회 결정 2026-08-10) — 빌드 전 MCP 연결 검토 모달은 더
-     이상 띄우지 않고, 예전 모달의 기본 버튼이던 "MCP 없이 계속"(= declined)을 자동
-     선택한다. 앱 생성·실행은 MCP 없이 계속되고, 어떤 MCP 도 자동으로 붙지 않는다 —
-     실행 직전 설치/키/연결/런타임 재검증과 안전 정책 차단은 그대로 남는다. */
+                                                           
+                                                          
+                                                       
+                                                 
   return "declined";
 }
 
@@ -2500,11 +2503,11 @@ export function registerIpcHandlers(): { businessShipping: ReturnType<typeof reg
       return { ok: false, reason: err instanceof Error ? err.message : String(err) };
     }
   });
-  /*
-   * 디자인 → 코드 내보내기(오너 정의 2026-08-20: Site 는 디자인 생성기다).
-   * 승인된 화면을 React/HTML(웹) 또는 Flutter/React Native(앱) 소스로 옮겨,
-   * 사용자가 고른 폴더에 파일 트리로 쓴다. 배포는 하지 않는다.
-   */
+    
+                                                      
+                                                             
+                                       
+     
   ipcMain.handle("site:exportScreenCode", async (e, payload: {
     projectId?: string;
     screenId?: string;
@@ -3944,23 +3947,23 @@ export function registerIpcHandlers(): { businessShipping: ReturnType<typeof reg
     return result;
   });
 
-  /*
-   * Core CLI 를 부르는 오래 걸리는 작업에 붙이는 옵션 두 가지.
-   *
-   * 1) `noOpen: true` — Core `publish` 는 `--no-open` 없이는 `interactive=True` 로 돌고
-   *    (`agentlas_cloud/cli.py:801`), 자기 토큰(`~/.agentlas/auth/<host>.json`)이 없으면
-   *    브라우저 PKCE 로그인을 띄워 최대 180초 블록한다. 데스크탑은 이미 자기 세션으로
-   *    로그인돼 있는데(safeStorage), 그 신원이 Core 로 전달되지 않는다. 그래서
-   *    "데스크탑에서만 로그인한" 기계에서 Publish 를 누르면 난데없이 브라우저 OAuth 창이
-   *    뜨거나 무응답 후 타임아웃했다(2026-07-28 확인). GUI 앱 안에서 CLI 가 제 브라우저를
-   *    여는 것은 어느 쪽이든 옳지 않다 — 막고, 인증이 없으면 Core 가 정직하게 실패하게 한다.
-   *
-   * 2) `onStdout`/`onStderr` — `runHephaestus` 는 이 콜백을 옵션으로 갖고 있었는데
-   *    **넘기는 호출부가 저장소 전체에 0곳**이었다. publish(300s)·securityScan(180s) 가
-   *    종료 전까지 아무 신호도 안 줘서, 사용자는 도는 작업과 죽은 작업을 구분할 수 없었다.
-   *    바로 위 업로드 진행(`cloudPublishProgressOptions`)이 같은 결함을 이미 한 번 겪었고
-   *    같은 방식으로 고쳤다. 여기도 같은 채널 규약을 쓴다.
-   */
+    
+                                           
+    
+                                                                                 
+                                                                                 
+                                                        
+                                                         
+                                                            
+                                                                
+                                                             
+    
+                                                                    
+                                                                      
+                                                         
+                                                                     
+                                      
+     
   const coreProgressOptions = (event: IpcMainInvokeEvent, progressId: string | undefined) => {
     if (!progressId) return {};
     const win = BrowserWindow.fromWebContents(event.sender);
@@ -4896,14 +4899,15 @@ export function registerIpcHandlers(): { businessShipping: ReturnType<typeof reg
   ipcMain.handle("tasks:openInWork", (_e, taskId: string): CanonicalTaskWorkTarget | null => {
     if (typeof taskId !== "string" || !taskId.trim()) return null;
     const task = getCanonicalTask(taskId);
-    // Work is project-first. A projectless One conversation may become a
-    // durable Task, but it must stay in One instead of reappearing as a global
-    // Work chat with no source, team, or project identity.
-    if (!task?.originChatId || !task.projectId) return null;
+    // A projectless One Task stays in One. Native Work tasks retain their
+    // canonical origin even when the owner has not assigned a project.
+    if (!task?.originChatId) return null;
     const chat = getChat(task.originChatId);
     // 대화가 지워졌으면 목적지가 없다. null 을 돌려 렌더러가 조용히 죽은 링크로
     // 보내지 않게 한다 — 없는 곳으로 이동시키는 것보다 못 여는 게 정직하다.
-    if (!chat || chat.projectId !== task.projectId || !getProject(task.projectId)) return null;
+    if (!chat || chat.projectId !== task.projectId) return null;
+    if (task.projectId ? !getProject(task.projectId)
+      : task.originSurface !== "work" || chat.originSurface !== "work") return null;
     return { taskId: task.id, chatId: chat.id, title: chat.title ?? task.title ?? "" };
   });
   registerAppControlDomainIpc(ipcMain, "tasks:findForChat", (chatId: string) => findCanonicalTaskForChat(chatId));
@@ -5106,6 +5110,10 @@ export function registerIpcHandlers(): { businessShipping: ReturnType<typeof reg
     acknowledgeOneFeatureIntro(input));
   registerAppControlDomainIpc(ipcMain, "oneFeatureIntro:defer", (input: DeferOneFeatureIntroInput) =>
     deferOneFeatureIntro(input));
+  registerAppControlDomainIpc(ipcMain, "oneFront:getState", () => getOneFrontView());
+  registerAppControlDomainIpc(ipcMain, "oneFront:setFront", (input: SetOneFrontInput) => setOneFront(input));
+  registerAppControlDomainIpc(ipcMain, "oneFront:acknowledgeNotice", (input: AcknowledgeOneFrontNoticeInput) =>
+    acknowledgeOneFrontNotice(input));
   registerAppControlDomainIpc(ipcMain, "oneActivation:getState", (input) => getOneActivationState(input));
   registerAppControlDomainIpc(ipcMain, "oneActivation:resolveConcern", (input) => resolveOneActivationConcern(input));
   registerAppControlDomainIpc(ipcMain, "oneActivation:resolveWork", (input) => resolveOneActivationWork(input));
@@ -5357,7 +5365,7 @@ export function registerIpcHandlers(): { businessShipping: ReturnType<typeof reg
     } catch (error) {
       if (error instanceof OneTeamPreflightError) {
         // Content-free machine trace: the renderer only sees the code, and a
-        // refusal that never reaches main.log cannot be diagnosed (2026-09-23).
+                                                                                
         console.warn("[one-team-preflight] refused", JSON.stringify({
           code: error.code,
           chatId: typeof input?.chatId === "string" ? input.chatId : null,

@@ -17,7 +17,7 @@ import { createCompanyAgentMailCapability,removeAgentMailCapability } from '../a
 import { companyAgentMailMcpLaunchArgs,AGENT_MAIL_CONTROL_ENV } from '../agent-mail/mcp-server';
 import { registerPreparedMcpConfig } from '../mcp-tools/prepared-transport';
 import { appendChatMessage,appendInvocationAssistantResult,getChat } from '../store/chats';
-const runners:Record<string,Runner>={anthropic:byok.runAnthropicByok,openai:byok.runOpenAIByok,google:byok.runGoogleByok,glm:byok.runGlmByok,kimi:byok.runKimiByok,deepseek:byok.runDeepseekByok,minimax:byok.runMinimaxByok,xai:byok.runXaiByok,openrouter:byok.runOpenRouterByok,upstage:byok.runUpstageByok};
+const runners:Record<string,Runner>={anthropic:byok.runAnthropicByok,openai:byok.runOpenAIByok,google:byok.runGoogleByok,glm:byok.runGlmByok,kimi:byok.runKimiByok,deepseek:byok.runDeepseekByok,minimax:byok.runMinimaxByok,xai:byok.runXaiByok,openrouter:byok.runOpenRouterByok,upstage:byok.runUpstageByok,custom:byok.runCustomByok};
 /** Entirely separate data preparation: no personal history/profile/preferences,
  * global MCP registry, recall, relay or implicit Work folder resolution. */
 async function runCompanyWorkInvocationInner(req:McpInvocationRequest,cap:object,sink:(event:McpInvocationEvent)=>void,signal?:AbortSignal):Promise<import('../mcp/client').McpInvocationResult>{

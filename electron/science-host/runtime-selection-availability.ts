@@ -7,8 +7,8 @@ export interface ScienceRuntimeSelectionAvailability {
   retryAfterAt?: string;
 }
 interface AvailabilityPorts {
-  cooldown(runtime: Pick<RuntimeStatus, "kind" | "backend" | "source" | "model">, now: number): { kind: string; until: number } | null;
-  signedOut(runtime: Pick<RuntimeStatus, "kind" | "backend" | "source" | "model">): unknown;
+  cooldown(runtime: Pick<RuntimeStatus, "kind" | "backend" | "source" | "model"> & { acpAgentId?: string | null }, now: number): { kind: string; until: number } | null;
+  signedOut(runtime: Pick<RuntimeStatus, "kind" | "backend" | "source" | "model"> & { acpAgentId?: string | null }): unknown;
   usedPercent(providerId: string, now: number, model?: string): number | null;
   quotaExhausted?(providerId: string, now: number, model?: string): boolean;
 }
@@ -28,7 +28,9 @@ export function scienceRuntimeSelectionAvailability(
   if (!matching.length) return { status: "unavailable", reason: "runtime" };
   if (matching.length !== 1) return { status: "unknown" };
   const runtime = matching[0];
-  const exact = { kind: runtime.kind, backend: runtime.backend, source: runtime.source, model: selection.model ?? runtime.model };
+  const exact = { kind: runtime.kind, backend: runtime.backend, source: runtime.source, model: selection.model ?? runtime.model,
+    // An open ACP seat is asked about by name: the cooldown and signed-out records are kept per seat.
+    ...(runtime.acpAgentId ? { acpAgentId: runtime.acpAgentId } : {}) };
   if (runtime.credentialAccess?.status === "unavailable" || runtime.signInRequired || ports.signedOut(exact))
     return { status: "unavailable", reason: "auth" };
   const cooling = ports.cooldown(exact, now);

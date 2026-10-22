@@ -133,6 +133,10 @@ export function createEmployeeAgentTransferCustody(input: EmployeeAgentTransferC
       package_json: string; acceptance_json: string | null; root_path: string | null; receipt_json: string | null;
     } | undefined;
   }
+  function installedTransfer(transferId: string) {
+    const row = readRow(transferId, 'import');
+    return row?.association_id === owner().associationId && row.state === 'installed' && !!row.receipt_json;
+  }
   function selectedPackage(ticket: EmployeeAgentTransferTicket, root: string) {
     sourceTicket(ticket); const pin = directory(root);
     const files = ticket.files.map(file => {
@@ -310,5 +314,5 @@ export function createEmployeeAgentTransferCustody(input: EmployeeAgentTransferC
     const held = capturedAssets.get(capability); if (!held || !readInstalledAgent(capability)) fail('installed_agent_changed');
     await input.refresh(); if (!employeeAgentTransferReceiptMatches(await confirm(held.value.ticket.transferId), held.value) || !readInstalledAgent(capability)) fail('installed_agent_changed');
   }
-  return Object.freeze({ acceptExport, originalExport, markAttempt, settleExport, importCommitted, captureInstalledAgent, readInstalledAgent, refreshInstalledAgent, installationAck, claimInstallationAck, settleInstallationAck });
+  return Object.freeze({ acceptExport, originalExport, markAttempt, settleExport, importCommitted, installedTransfer, captureInstalledAgent, readInstalledAgent, refreshInstalledAgent, installationAck, claimInstallationAck, settleInstallationAck });
 }

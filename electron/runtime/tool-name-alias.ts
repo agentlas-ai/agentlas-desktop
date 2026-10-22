@@ -26,8 +26,46 @@ export function resolveToolNameAlias(names: Iterable<string>, requested: string)
   return hit;
 }
 
+   
+                                                                                                                                 
+                                                                                                                                       
+                                                                                                                                        
+                                                                                                                                     
+                                                                                                                                      
+                                                                                                                                      
+                                                                                                                                    
+                                                                                     
+   
+export function resolveShortToolName(tools: Iterable<{ name: string; short: string | null }>, requested: string): string | null {
+  const key = toolNameKey(requested);
+  if (!key) return null;
+  let hit: string | null = null;
+  for (const { name, short } of tools) {
+    if (toolNameKey(name) === key) return null;
+    if (short === null || toolNameKey(short) !== key) continue;
+    if (hit !== null) return null;
+    hit = name;
+  }
+  return hit;
+}
+
+   
+                                                                                                                               
+                                                                                                                                    
+                                                                                                                                   
+                                                                                                                                       
+   
+export function bareToolFor(names: Iterable<string>, requested: string): string | null {
+  const parts = requested.split(/__|[./]/).filter(Boolean);
+  const bare = parts.length > 1 ? parts[parts.length - 1] : "";
+  if (!bare || bare === requested) return null;
+  for (const name of names) if (name === bare) return name;
+  return null;
+}
+
 export function closestToolNames(names: Iterable<string>, requested: string, limit = 5): string[] {
   const all = [...names];
+  const bare = bareToolFor(all, requested);
   const parts = toolNameKey(requested).split("_").filter((part) => part.length > 2);
   const byWords = parts.length === 0 ? [] : all
     .map((name) => {
@@ -43,10 +81,14 @@ export function closestToolNames(names: Iterable<string>, requested: string, lim
   // order, and adds looser typo matches last. It only orders and adds names in the refusal; nothing here resolves or runs a call.
   const close = closestNames(requested, all, limit);
   const near = close.filter((name) => nameSimilarity(requested, name) >= 0.85);
-  return [...near, ...byWords.filter((name) => !near.includes(name)), ...close.filter((name) => !near.includes(name) && !byWords.includes(name))].slice(0, limit);
+  const ordered = [...near, ...byWords.filter((name) => !near.includes(name)), ...close.filter((name) => !near.includes(name) && !byWords.includes(name))];
+  return (bare ? [bare, ...ordered.filter((name) => name !== bare)] : ordered).slice(0, limit);
 }
 
 export function unknownToolMessage(requested: string, names: Iterable<string>): string {
-  const near = closestToolNames(names, requested);
-  return `Error: unknown tool "${requested}"${near.length ? `. Exact names: ${near.join(", ")}` : ""}`;
+  const all = [...names];
+  const near = closestToolNames(all, requested);
+  const bare = bareToolFor(all, requested);
+  const note = bare ? ` ("${bare}" is a tool by itself: call it without the "${requested.slice(0, requested.length - bare.length)}" prefix.)` : "";
+  return `Error: unknown tool "${requested}"${near.length ? `. Exact names: ${near.join(", ")}` : ""}${note}`;
 }

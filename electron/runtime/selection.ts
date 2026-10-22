@@ -74,7 +74,7 @@ function withRuntimeAuthProbe(runner: Runner, runtimeKind: string): Runner {
     const now = Date.now();
     if ((runtimeAuthProbeStartedAt.get(probeKey) ?? -Infinity) + RUNTIME_AUTH_PROBE_INTERVAL_MS <= now) {
       runtimeAuthProbeStartedAt.set(probeKey, now);
-      // Only measured codes and command evidence: no credential values, stdout, account, source path or env.
+                                                                                                             
       void probeRuntimeAuthForRun(kind, { runtimeSource: req.runtimeSource, env: req.env, cwd: req.cwd }).then((probe) => {
         console.info("[runtime-auth-probe]", JSON.stringify({ schemaVersion: "agentlas.runtime-auth-before-run.v1", kind,
           state: probe.state, reason: probe.reason ?? probe.state, checkedAt: probe.checkedAt, latencyMs: probe.latencyMs, evidence: probe.evidence }));
@@ -187,7 +187,7 @@ function withLocalInferenceSlot(runner: Runner): Runner {
 const runClaudeCodeSlotted = withRunSlot(runClaudeCode, "claude-code");
 const runCodexSlotted = withRunSlot(runCodex, "codex");
 const runAntigravitySlotted = withRunSlot(runAntigravity, "antigravity");
-// B-grade runtimes route through the generic ACP runner (PRD 2026-08-15 D-5):
+                                                                              
 // cursor showed no tool calls, grok guessed tool kinds from `type` strings,
 // kimi was absent from the terminal. `AGENTLAS_DISABLE_ACP=1` (or a kind list)
 // restores the legacy hand drivers without a rebuild.
@@ -619,6 +619,28 @@ export function runtimeFailureBlocksReplay(failure: Pick<RunnerFailure, "provide
 }
 
 /**
+ * True when this failure must not be replayed on another runtime, whatever the candidates are. rolePriorityRuntimes returns
+ * nothing for it, and a caller that adds a candidate of its own (the light front's own lane) asks the same question first,
+ * so an empty pool that merely has nobody left is told apart from a replay guard.
+ */
+export function roleFallbackBlocked(options: {
+  failedRuntime?: RuntimeStatus;
+  failure?: Pick<RunnerFailure, "kind" | "providerCode">;
+}): boolean {
+  // The serving provider may already have generated billable tokens. An
+  // unresolved settlement must stop this invocation, not replay the prompt on
+  // another configured runtime.
+  if (runtimeFailureBlocksReplay(options.failure)) return true;
+  // The managed local runner has not processed these images. Team/controller
+  // recovery must not forward them to another provider as an outage retry.
+  if (options.failure?.kind === "unsupported"
+    && options.failure.providerCode === "local_model_image_input_unsupported") return true;
+  // Unavailable credential storage requires explicit recovery of the selected key.
+  // Do not turn its marker failure into a run on another provider.
+  return isRuntimeCredentialUnavailable(options.failedRuntime);
+}
+
+/**
  * Returns live runtimes in the exact order stored in model_role_members.
  *
  * `pickActive()` is intentionally a UI/legacy helper: it follows the detected
@@ -637,31 +659,21 @@ export function rolePriorityRuntimes(
     allowCreditFallback?: boolean;
   } = {},
 ): RuntimeStatus[] {
-  // The serving provider may already have generated billable tokens. An
-  // unresolved settlement must stop this invocation, not replay the prompt on
-  // another configured runtime.
-  if (runtimeFailureBlocksReplay(options.failure)) return [];
-  // The managed local runner has not processed these images. Team/controller
-  // recovery must not forward them to another provider as an outage retry.
-  if (options.failure?.kind === "unsupported"
-    && options.failure.providerCode === "local_model_image_input_unsupported") return [];
-  // Unavailable credential storage requires explicit recovery of the selected key.
-  // Do not turn its marker failure into a run on another provider.
-  if (isRuntimeCredentialUnavailable(options.failedRuntime)) return [];
+  if (roleFallbackBlocked(options)) return [];
   const ownMembers = listModelRoleMembers(role);
   const inherited = role === "worker" && ownMembers.length === 0;
   const members = inherited ? listModelRoleMembers("orchestrator") : ownMembers;
   const excluded = options.exclude ?? [];
   const blocked = (candidate: RuntimeStatus): boolean => {
     if (isRuntimeCredentialUnavailable(candidate)) return true;
-    /*
-     * ★이미 한도에 걸린 런타임으로 폴백하지 않는다 (실사용 실측 2026-09-07).
-     *
-     * 사용자가 제미나이를 골라 뒀는데 agy 가 한도로 실패했고, 폴백이 grok 을 골랐다.
-     * 그런데 grok 은 **그 시점에 이미 한도 초과였다**(524673/500000, 24시간 롤링).
-     * 죽은 것에서 죽은 것으로 넘어가느라 실패 두 번과 8분을 썼다. 후보 필터에
-     * "지금 막혀 있다"는 개념이 없었기 때문이다. 시한이 지나면 스스로 다시 후보가 된다.
-     */
+      
+                                                     
+      
+                                                        
+                                                               
+                                                 
+                                                       
+       
     if (runtimeCooldown(candidate)) return true;
     // An attempted entry identifies one executable/model pair. Excluding the
     // whole executable here silently removed the next configured model even
@@ -735,8 +747,7 @@ export function runtimeFailureSharesProviderDomain(
   failure: Pick<RunnerFailure, "kind">,
 ): boolean {
   if (failure.kind === "auth" || failure.kind === "quota" || failure.kind === "rate_limit") {
-    // Open ACP seats share one kind but can be different accounts: a limit on one keeps the others as candidates. (A cooldown is keyed by executable and
-    // model, so two seats on the same executable and model still cool down together.)
+    // Open ACP seats share one kind but can be different accounts: a limit on one keeps the others as candidates (records that name their seat are kept per seat).
     return candidate.kind === failed.kind && candidate.backend === failed.backend
       && (candidate.kind !== "acp" || candidate.acpAgentId === failed.acpAgentId);
   }

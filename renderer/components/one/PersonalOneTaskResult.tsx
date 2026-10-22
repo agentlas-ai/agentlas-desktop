@@ -8,7 +8,7 @@ import type { OneSurfaceSemanticAction } from "@shared/one-surface";
 import { Markdown, type LinkedFileArtifact } from "@/components/Markdown";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { OneAdaptiveResult } from "./OneAdaptiveResult";
-import { personalOneResultProjection, personalOneTextSelection, samePersonalOneResult } from "@/lib/personal-one-result";
+import { acceptPersonalOneResultReview, personalOneResultAcceptance, personalOneResultProjection, personalOneTextSelection, samePersonalOneResult } from "@/lib/personal-one-result";
 import styles from "./PersonalOneWorkspace.module.css";
 import { Select } from "@/components/Select";
 
@@ -27,6 +27,10 @@ export function PersonalOneTaskResult({oneId,task,requestedRunId,locale,fallback
   const [chartSeries,setChartSeries]=useState("");const [chartPoint,setChartPoint]=useState("");
   const actionKey=`agentlas.one.result.command.${oneId}.${task.taskId}`;
   const [actionStatus,setActionStatus]=useState<string|null>(null);
+  const [accepting,setAccepting]=useState(false);
+  const [acceptanceStatus,setAcceptanceStatus]=useState<string|null>(null);
+  const acceptingRef=useRef(false);
+  const acceptedResult=useRef<string|null>(null);
   const [needsResultReview,setNeedsResultReview]=useState(false);const [needsSelectionReview,setNeedsSelectionReview]=useState(false);
   const pendingAction=useRef<OneHarnessActionRequest|null>(null);
   // Editor ownership belongs to the original command, not its latest retry.
@@ -126,6 +130,33 @@ export function PersonalOneTaskResult({oneId,task,requestedRunId,locale,fallback
     return()=>{active.current=false;++generation.current;off?.();if(timer!==null)window.clearTimeout(timer);};
   },[load,requestedRunId,visible]);
   const resultActionable=(value:OneHarnessResult)=>value.state.freshness==="current"&&value.state.result!=="stale"&&value.scope.authorization==="local-owner"&&value.state.effect!=="uncertain"&&!value.task.archivedAt;
+  const acceptanceKey=shown?JSON.stringify([oneId,shown.taskId,shown.runId,shown.task.version]):null;
+  useEffect(()=>{setAcceptanceStatus(null);},[oneId,task.taskId,task.runId,requestedRunId,acceptanceKey]);
+  const acceptance=shown?personalOneResultAcceptance(shown,task.runId):null;
+  const acceptResult=async()=>{
+    const displayed=shownRef.current,api=ipc();
+    if(!displayed||!api||acceptingRef.current||sending||pendingAction.current||candidate)return;
+    const input=personalOneResultAcceptance(displayed,task.runId);
+    if(!input)return;
+    const key=JSON.stringify([oneId,displayed.taskId,displayed.runId,displayed.task.version]);
+    if(acceptedResult.current===key)return;
+    const expectedBinding=editorBindingRef.current;
+    const current=()=>mounted.current&&visibleRef.current&&editorBindingRef.current===expectedBinding;
+    acceptingRef.current=true;setAccepting(true);setAcceptanceStatus(null);
+    try{
+      const outcome=await acceptPersonalOneResultReview(displayed,task.runId,{getResult:value=>api.oneHarness.getResult(value),acceptResult:value=>api.tasks.acceptResult(value),stillCurrent:current});
+      if(outcome.state==="inactive")return;
+      if(outcome.state==="changed"){
+        setCandidate(outcome.result);setAcceptanceStatus(copy("결과가 바뀌었습니다. 최신 결과를 연 뒤 다시 검토해 주세요.","The result changed. Open and review the latest result first."));return;
+      }
+      acceptedResult.current=key;
+      if(current())setAcceptanceStatus(copy("검토한 결과를 수락했습니다.","The reviewed result was accepted."));
+      onRefresh();void load();
+    }catch{
+      if(current())setAcceptanceStatus(copy("수락 결과를 확인하지 못했습니다. 최신 작업 상태를 확인한 뒤 다시 검토해 주세요.","Acceptance could not be confirmed. Check the latest task state before reviewing again."));
+      if(mounted.current){onRefresh();void load();}
+    }finally{acceptingRef.current=false;if(mounted.current)setAccepting(false);}
+  };
   const select=(value:OneArtifactSelection|null)=>{++edits.current.selection;setSelection(value);setNeedsSelectionReview(false);};
   const reviewBinding=async()=>{const observed=await load();if(!observed)return;const current=shownRef.current;
     if(current&&observed.runId===current.runId&&observed.revision===current.revision&&resultActionable(observed)){setNeedsResultReview(false);setActionStatus(needsSelectionReview?copy("현재 결과를 관측했습니다. 선택 범위를 다시 고르거나 해제한 뒤 요청하세요.","The current result was observed. Reselect or clear the target before sending."):copy("현재 결과 연결을 관측했습니다. 보존된 지시로 새 요청을 보낼 수 있습니다.","The current result binding was observed. The preserved direction can now be sent as a new request."));}
@@ -135,7 +166,7 @@ export function PersonalOneTaskResult({oneId,task,requestedRunId,locale,fallback
   const projection=useMemo(()=>visible&&shown?personalOneResultProjection(shown):null,[shown,visible]);
   const captureSelection=()=>{if(root.current){const selected=personalOneTextSelection(root.current,window.getSelection());if(selected)select(selected);}};
   const action=async(retry=false,semanticText?:string)=>{
-    if(sending || (!retry&&(needsResultReview||needsSelectionReview)) || (!retry&&!shown) || (!retry&&pendingAction.current) || (!retry&&!(semanticText ?? direction).trim()))return;
+    if(sending || acceptingRef.current || (!retry&&(needsResultReview||needsSelectionReview)) || (!retry&&!shown) || (!retry&&pendingAction.current) || (!retry&&!(semanticText ?? direction).trim()))return;
     const api=ipc()?.oneHarness;if(!api){setProblem(true);return;}
     const request=retry?pendingAction.current:shown?{commandId:crypto.randomUUID(),oneId,taskId:shown.taskId,runId:shown.runId,expectedVersion:shown.controlVersion,revision:shown.revision,intent:"follow-up" as const,text:(semanticText ?? direction).trim(),...(shown.surface?{manifestId:shown.surface.manifestId}:{}),...(selection?{selection}:{}),...(selection?.kind==="media"?{artifactRef:selection.artifactRef}:{})}:null;
     if(!request)return;
@@ -193,10 +224,15 @@ export function PersonalOneTaskResult({oneId,task,requestedRunId,locale,fallback
     {shown&&<div className={styles.resultState}><span>{shown.scope.label}</span><span>{shown.state.result==="partial"?copy("부분 결과","Partial result"):shown.state.result==="stale"||shown.state.freshness==="stale"?copy("이전 관측","Previous observation"):shown.state.result==="ready"?copy("결과 준비","Result ready"):copy("결과 확인 중","Checking result")}</span><small>{new Date(shown.observedAt).toLocaleTimeString()}</small></div>}
     {shown?.effect.state!=="settled"&&shown&&<p role="status" className={styles.feedback}>{shown.effect.state==="uncertain"?copy("외부 실행 결과를 아직 확인하지 못했습니다. 재실행 전에 결과 관측이 필요합니다.","The external outcome has not been confirmed. Observe it before repeating the action."):copy("외부 실행 결과를 확인하고 있습니다.","Checking the external outcome.")}</p>}
     <div ref={root} onMouseUp={captureSelection} onKeyUp={captureSelection} onSeekedCapture={event=>captureMedia(event.target,"seeked")} onPauseCapture={event=>captureMedia(event.target,"pause")}>
-      {displayedText&&<ErrorBoundary resetKey={`text:${shown?.revision ?? boundRun.current}`}><Markdown text={displayedText} messageId={`one-result:${task.taskId}:${shown?.runId ?? boundRun.current}`} chatId={shown?.task.originChatId ?? task.chatId ?? undefined} onOpenLinkedFile={onOpenLinkedFile} uiActionsDisabled={sending||!!pendingAction.current||!shown||needsResultReview||needsSelectionReview} onUiFollowup={prompt=>{if(!shown||sending||pendingAction.current||needsResultReview||needsSelectionReview)return false;void action(false,prompt);return true;}}/></ErrorBoundary>}
-      {shown?.surface&&projection&&<ErrorBoundary resetKey={shown.revision}><OneAdaptiveResult manifest={shown.surface} projection={projection} receipt={shown.receipt} locale={locale} omitNarrative onSemanticAction={sending||pendingAction.current||needsResultReview||needsSelectionReview?undefined:semantic} inOutputRail/></ErrorBoundary>}
+      {displayedText&&<ErrorBoundary resetKey={`text:${shown?.revision ?? boundRun.current}`}><Markdown text={displayedText} messageId={`one-result:${task.taskId}:${shown?.runId ?? boundRun.current}`} chatId={shown?.task.originChatId ?? task.chatId ?? undefined} onOpenLinkedFile={onOpenLinkedFile} uiActionsDisabled={sending||accepting||!!pendingAction.current||!shown||needsResultReview||needsSelectionReview} onUiFollowup={prompt=>{if(!shown||sending||acceptingRef.current||pendingAction.current||needsResultReview||needsSelectionReview)return false;void action(false,prompt);return true;}}/></ErrorBoundary>}
+      {shown?.surface&&projection&&<ErrorBoundary resetKey={shown.revision}><OneAdaptiveResult manifest={shown.surface} projection={projection} receipt={shown.receipt} locale={locale} omitNarrative onSemanticAction={sending||accepting||pendingAction.current||needsResultReview||needsSelectionReview?undefined:semantic} inOutputRail/></ErrorBoundary>}
     </div>
-    {!shown&&pendingAction.current&&<button type="button" disabled={sending} onClick={()=>void action(true)}>{copy("저장된 요청 접수 확인","Check saved request reception")}</button>}
+    {!shown&&pendingAction.current&&<button type="button" disabled={sending||accepting} onClick={()=>void action(true)}>{copy("저장된 요청 접수 확인","Check saved request reception")}</button>}
+    {acceptance&&<details className={styles.rangePicker} data-one-result-review="true"><summary>{copy("검토한 결과 수락","Accept reviewed result")}</summary>
+      <p>{copy("검토한 결과를 수락하면 이 작업이 완료로 기록됩니다.","Accepting the reviewed result records this task as complete.")}</p>
+      <button type="button" disabled={accepting||sending||!!pendingAction.current||!!candidate||acceptedResult.current===acceptanceKey} onClick={()=>void acceptResult()}>{accepting?copy("수락 확인 중…","Confirming acceptance…"):copy("이 결과 수락","Accept this result")}</button>
+    </details>}
+    {acceptanceStatus&&<p role="status" className={styles.feedback}>{acceptanceStatus}</p>}
     {shown&&<form className={styles.resultDirection} onSubmit={event=>{event.preventDefault();void action();}}>
       {(shown.surface?.blocks.some(block=>block.type==="Table")||shown.charts.length>0)&&<details className={styles.rangePicker}><summary>{copy("표·차트 범위 선택","Select a table or chart range")}</summary>
         <label>{copy("대상 결과","Result target")}<Select aria-label={copy("대상 결과","Result target")} value={rangeBlock} onChange={event=>{setRangeBlock(event.target.value);setRangeRow("");setRangeColumn("");setChartSeries("");setChartPoint("");}}><option value="">{copy("대상 선택","Choose target")}</option>{shown.surface?.blocks.filter(block=>block.type==="Table").map(block=><option key={block.blockId} value={block.blockId}>{block.title}</option>)}{shown.charts.map(chart=><option key={chart.blockId} value={chart.blockId}>{chart.title}</option>)}</Select></label>
@@ -206,8 +242,8 @@ export function PersonalOneTaskResult({oneId,task,requestedRunId,locale,fallback
       {shown.surface?.blocks.filter(block=>block.type==="Media").map(block=>block.type==="Media"&&<label key={block.blockId}>{copy(`${block.title} · 수정할 시각 (초)`,`${block.title} · Edit time (seconds)`)}<input type="number" min={0} max={block.durationSeconds} step={0.1} placeholder="0" onChange={event=>{const value=Number(event.target.value);if(event.target.value&&Number.isFinite(value)&&value>=0&&(block.durationSeconds===undefined||value<=block.durationSeconds))select({kind:"media",artifactRef:block.primaryArtifactRef,timeSeconds:value});}}/></label>)}
       {selection&&<div className={styles.selectionChip}><span>{selection.kind==="text"?copy(`선택 문단: ${selection.text.slice(0,80)}`,`Selected text: ${selection.text.slice(0,80)}`):selection.kind==="media"?copy(`영상·음성 ${selection.timeSeconds.toFixed(1)}초`,`Media ${selection.timeSeconds.toFixed(1)}s`):copy("선택 범위","Selected range")}</span><button type="button" onClick={()=>select(null)} aria-label={copy("선택 해제","Clear selection")}>×</button></div>}
       <label>{copy("이 결과에 대한 지시","Direction for this result")}<textarea value={direction} onChange={event=>{++edits.current.direction;setDirection(event.target.value);}} maxLength={4000} rows={2} placeholder={copy("선택한 부분을 고치거나 다음 작업을 요청하세요.","Revise the selection or request the next step.")}/></label>
-      <button type="submit" disabled={sending||!direction.trim()||!!pendingAction.current||needsResultReview||needsSelectionReview}>{copy("이 결과에 적용 요청","Request revision")}</button>
-      {pendingAction.current&&<button type="button" disabled={sending} onClick={()=>void action(true)}>{copy("같은 요청 접수 확인","Check the same request")}</button>}
+      <button type="submit" disabled={sending||accepting||!direction.trim()||!!pendingAction.current||needsResultReview||needsSelectionReview}>{copy("이 결과에 적용 요청","Request revision")}</button>
+      {pendingAction.current&&<button type="button" disabled={sending||accepting} onClick={()=>void action(true)}>{copy("같은 요청 접수 확인","Check the same request")}</button>}
       {needsResultReview&&<button type="button" disabled={loading} onClick={()=>void reviewBinding()}>{copy("현재 결과 연결 다시 확인","Refresh current result binding")}</button>}
       {needsSelectionReview&&<p role="status">{copy("선택 범위를 다시 고르거나 해제한 뒤 요청할 수 있습니다.","Reselect or clear the target before sending a new request.")}</p>}
       {actionStatus&&<p role="status" className={styles.feedback}>{actionStatus}</p>}

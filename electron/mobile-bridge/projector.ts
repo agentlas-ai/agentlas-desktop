@@ -283,6 +283,8 @@ export interface MobileBridgeProjectionOptions {
   displayName: string;
   appVersion: string;
   activeChatIds?: readonly string[];
+  /** Live metadata only; durable chat pins remain unchanged. */
+  activeRuntimeSelections?: Readonly<Record<string, RuntimeSelection | null>>;
   includeMessagesForChatIds?: readonly string[];
   maxMessagesPerChat?: number;
   pendingBrowserApprovals?: readonly MobileBridgeBrowserApprovalDto[];
@@ -901,6 +903,7 @@ export function isMobileBridgeOneChat(
 export function projectMobileBridgeChat(
   chat: Chat,
   active = false,
+  activeRuntimeSelection: RuntimeSelection | null = null,
 ): MobileBridgeChatDto {
   let task: CanonicalTask | null = null;
   try {
@@ -944,13 +947,18 @@ export function projectMobileBridgeChat(
     runtimeSelection: chat.runtimeSelection
       ? projectMobileBridgeRuntimeSelection(chat.runtimeSelection)
       : null,
+    activeRuntimeSelection: active && activeRuntimeSelection
+      ? projectMobileBridgeRuntimeSelection(activeRuntimeSelection) : null,
     active,
   };
 }
 
-function chatsDto(activeChatIds: ReadonlySet<string>): MobileBridgeChatDto[] {
+function chatsDto(
+  activeChatIds: ReadonlySet<string>,
+  selections?: Readonly<Record<string, RuntimeSelection | null>>,
+): MobileBridgeChatDto[] {
   return listRecentChats(100).map((chat) =>
-    projectMobileBridgeChat(chat, activeChatIds.has(chat.id)),
+    projectMobileBridgeChat(chat, activeChatIds.has(chat.id), selections?.[chat.id] ?? null),
   );
 }
 
@@ -2204,7 +2212,7 @@ export async function projectMobileBridgeSnapshotVariants(
     agents: agentsDto(new Set(presentEnvKeys), cloudListings),
     firms: firmsDto(),
     projects: projectsDto(),
-    chats: chatsDto(activeSet),
+    chats: chatsDto(activeSet, options.activeRuntimeSelections),
     messages: {},
     pendingConfirmations: decisions.pendingConfirmations,
     pendingBrowserApprovals: [...(options.pendingBrowserApprovals ?? [])],

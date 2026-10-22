@@ -179,7 +179,7 @@ export const IconNetwork = (p: Props) =>
     p,
   );
 
-// One mailbox (2026-09-26): list toolbar, row hover actions, mini-nav.
+                                                                       
 export const IconArchive = (p: Props) =>
   svg("M3 3h18a1 1 0 0 1 1 1v3a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8 M10 12h4", p);
 export const IconMail = (p: Props) =>
@@ -195,3 +195,4 @@ export const IconFileText = (p: Props) =>
 export const IconClock = (p: Props) => svg("M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0z M12 6v6l4 2", p);
 export const IconReply = (p: Props) => svg("M9 17l-5-5 5-5 M20 18v-2a4 4 0 0 0-4-4H4", p);
 export const IconForward = (p: Props) => svg("M15 17l5-5-5-5 M4 18v-2a4 4 0 0 1 4-4h12", p);
+export const IconExternalLink = (p: Props) => svg("M15 3h6v6 M10 14L21 3 M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6", p);

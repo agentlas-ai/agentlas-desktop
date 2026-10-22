@@ -1,6 +1,6 @@
 {
   "name": "agentlas-desktop",
-  "version": "1.3.86",
+  "version": "1.3.87",
   "description": "Agentlas Desktop — local Apps OS for AI-native tools and agent teams. BYOC: 사용자 Claude/ChatGPT/Antigravity 구독 그대로.",
   "private": true,
   "license": "Apache-2.0",
@@ -33,7 +33,7 @@
     "build:renderer": "npm run --silent sync:renderer-assets && cd renderer && cross-env AGENTLAS_NEXT_DIST_DIR=.next-build next build && node -e \"require('fs').cpSync('.next-build','../dist/renderer',{recursive:true})\"",
     "generate:one-briefing-contract": "node scripts/generate-one-briefing-contract.cjs",
     "check:one-briefing-contract": "node scripts/generate-one-briefing-contract.cjs --check",
-    "build:electron": "npm run --silent check:one-briefing-contract && node scripts/build-macos-input-driver.cjs && tsc -p electron/tsconfig.json && node scripts/copy-builtin-plugins.cjs && node -e \"require('fs').copyFileSync('electron/memory/code-map-gen.mjs','dist/electron/memory/code-map-gen.mjs');require('fs').copyFileSync('electron/memory/curator-ruleset.json','dist/electron/memory/curator-ruleset.json');require('fs').copyFileSync('electron/mcp-tools/proxy-child.cjs','dist/electron/mcp-tools/proxy-child.cjs')\"",
+    "build:electron": "npm run --silent check:one-briefing-contract && npm run --silent check:app-screen-routes && node scripts/build-macos-input-driver.cjs && tsc -p electron/tsconfig.json && node scripts/copy-builtin-plugins.cjs && node -e \"require('fs').copyFileSync('electron/memory/code-map-gen.mjs','dist/electron/memory/code-map-gen.mjs');require('fs').copyFileSync('electron/memory/curator-ruleset.json','dist/electron/memory/curator-ruleset.json');require('fs').copyFileSync('electron/mcp-tools/proxy-child.cjs','dist/electron/mcp-tools/proxy-child.cjs')\"",
     "prebuild:renderer": "node -e \"const fs=require('fs');['dist/renderer','renderer/.next-build','renderer/out'].forEach(d=>fs.rmSync(d,{recursive:true,force:true,maxRetries:5,retryDelay:100}))\"",
     "postinstall": "electron-rebuild --force",
     "sync:renderer-assets": "npm run --silent sync:maplibre-worker && npm run --silent sync:file-viewer-assets",
@@ -62,7 +62,8 @@
     "typecheck": "tsc -p electron/tsconfig.json --noEmit && cd renderer && tsc --noEmit",
     "lint": "next lint --dir renderer",
     "clean": "node -e \"['dist','out','release','renderer/.next','renderer/out'].forEach(d=>require('fs').rmSync(d,{recursive:true,force:true}))\"",
-    "verify:packaging-completeness": "node scripts/verify-packaging-completeness.mjs"
+    "verify:packaging-completeness": "node scripts/verify-packaging-completeness.mjs",
+    "check:app-screen-routes": "node scripts/generate-app-screen-routes.cjs --check"
   },
   "dependencies": {
     "@file-viewer/preset-lite": "^2.3.0",
@@ -77,7 +78,7 @@
     "@playwright/mcp": "0.0.78",
     "@rive-app/canvas": "^2.40.1",
     "@xyflow/react": "^12.11.1",
-    "agentlas-science": "git+ssh://git@github.com/agentlas-ai/agentlas-science.git#c6c100306c76cd5527f2d777d9a50e4198d3bd7b",
+    "agentlas-science": "git+ssh://git@github.com/agentlas-ai/agentlas-science.git#bfb298fb43e0324e2691e4b9e759dcdd4c26db1f",
     "ajv": "8.20.0",
     "beautiful-mermaid": "^1.1.3",
     "better-sqlite3": "^12.11.1",
@@ -98,7 +99,7 @@
     "qrcode": "^1.5.4",
     "quickjs-emscripten-core": "0.32.0",
     "selfsigned": "^5.5.0",
-    "sharp": ">=0.35.4 <0.36.0",
+    "sharp": ">=0.35.5 <0.36.0",
     "simple-icons": "16.22.0",
     "styled-exceljs": "0.21.1",
     "three": "0.173.0",
@@ -136,7 +137,7 @@
     "vega": "6.4.0",
     "vega-interpreter": "2.3.2",
     "vega-lite": "6.4.3",
-    "vite": "8.2.2",
+    "vite": "8.2.4",
     "wait-on": "^8.0.1"
   },
   "engines": {
@@ -144,7 +145,7 @@
   },
   "overrides": {
     "postcss": "8.5.23",
-    "sharp": ">=0.35.4 <0.36.0",
+    "sharp": ">=0.35.5 <0.36.0",
     "fast-uri": "4.1.5",
     "brace-expansion": "5.0.12",
     "tar": "^7.5.22",

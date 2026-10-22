@@ -1,4 +1,5 @@
-import type { OneHarnessResult, OneArtifactSelection } from "@shared/one-harness";
+import type { OneHarnessResult, OneArtifactSelection, OneHarnessResultRequest } from "@shared/one-harness";
+import type { CanonicalTask, CanonicalTaskResultAcceptance } from "@shared/types";
 import type { OneTaskProjection } from "./one-task-adapter";
 
 /** Presentation adapter only: all authority and completion evidence come from Main. */
@@ -23,6 +24,38 @@ export function personalOneResultProjection(result: OneHarnessResult): OneTaskPr
 
 export function samePersonalOneResult(a: OneHarnessResult, b: OneHarnessResult): boolean {
   return a.oneId === b.oneId && a.taskId === b.taskId && a.runId === b.runId && a.revision === b.revision;
+}
+
+/** The owner's explicit review uses the existing exact Task acceptance contract. Main remains authoritative. */
+export function personalOneResultAcceptance(result: OneHarnessResult, currentRunId: string | null): CanonicalTaskResultAcceptance | null {
+  const { task, receipt, scope, state } = result;
+  if (!currentRunId || result.runId !== currentRunId || task.id !== result.taskId
+    || scope.oneIdentityRef !== result.oneId || scope.taskId !== task.id || scope.runId !== result.runId || scope.surface !== "work"
+    || scope.authorization !== "local-owner" || state.freshness !== "current" || state.process !== "settled"
+    || state.effect !== "settled" || result.effect.state !== "settled" || result.effect.pendingEffectRefs.length > 0
+    || !["ready", "partial"].includes(state.result) || task.archivedAt || task.status !== "partial"
+    || !Number.isSafeInteger(task.version) || task.version <= 0 || !task.originChatId
+    || receipt?.status !== "completed" || receipt.runId !== result.runId || receipt.chatId !== task.originChatId) return null;
+  return { taskId: task.id, expectedVersion: task.version, expectedRunId: receipt.runId };
+}
+
+/** Re-read the reviewed revision before sending the owner's exact acceptance. A lost reply is never retried here. */
+export async function acceptPersonalOneResultReview(displayed: OneHarnessResult, currentRunId: string | null, ports: {
+  getResult(input: OneHarnessResultRequest): Promise<OneHarnessResult>;
+  acceptResult(input: CanonicalTaskResultAcceptance): Promise<CanonicalTask>;
+  stillCurrent(): boolean;
+}): Promise<{ state: "accepted" } | { state: "changed"; result: OneHarnessResult } | { state: "inactive" }> {
+  const input = personalOneResultAcceptance(displayed, currentRunId);
+  if (!input || !ports.stillCurrent()) return { state: "inactive" };
+  const fresh = await ports.getResult({ oneId: displayed.oneId, taskId: displayed.taskId, runId: displayed.runId, expectedVersion: displayed.controlVersion });
+  if (!ports.stillCurrent()) return { state: "inactive" };
+  const exact = personalOneResultAcceptance(fresh, currentRunId);
+  if (fresh.oneId !== displayed.oneId || fresh.taskId !== displayed.taskId || fresh.task.id !== displayed.task.id || fresh.runId !== displayed.runId) throw new Error("result_binding_mismatch");
+  if (!exact || !samePersonalOneResult(displayed, fresh) || exact.expectedVersion !== input.expectedVersion) return { state: "changed", result: fresh };
+  const accepted = await ports.acceptResult(input);
+  if (accepted.id !== input.taskId || accepted.originChatId !== displayed.task.originChatId || accepted.status !== "completed"
+    || !Number.isSafeInteger(accepted.version) || accepted.version <= input.expectedVersion) throw new Error("result_acceptance_unconfirmed");
+  return { state: "accepted" };
 }
 
 /** DOM selection is evidence only. Main still validates task, revision and block IDs. */

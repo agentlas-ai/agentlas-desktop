@@ -1,5 +1,24 @@
 # Changelog
 
+## 1.3.87 — 2026-10-22
+
+- Work delegated by One remains visible without a project, and open Work lists refresh as tasks change. Reviewed results can be accepted explicitly against the latest task and run.
+- The personal One message box grows with longer drafts. Fast replies can use Agentlas after an explicit server-processing notice, with the feature off by default; delegated Work keeps its own execution environment.
+- One's split pane shares the current-run and earlier-output reader, so saved outputs remain available beyond the recent event window.
+- App navigation refuses screens that do not exist, and Work screens retain native menu and app-control navigation.
+- Finance query cards identify the query and provide a visible source link; SEC filings also show earlier issuer names when available.
+- Tool-name recovery points to callable tools, code-mode failures remain compact, and concurrent calls from one run no longer block each other as if their outcomes were lost.
+- Agentlas Light conversations rotate and admit against a 100K window, so a long conversation is folded before it reaches the model's long-context limit; Normal and Hard keep their 128K window.
+- Antigravity quota and sign-in failures are read from its typed error line instead of being taken for a refusal, and a safety block is told apart from a malformed call by Antigravity's own stop reason.
+- A question whose close marker was misspelled or left out is shown as the question instead of an empty reply.
+- A run that ended on an empty model answer, the Agentlas service being unavailable, or a context-limit refusal now says that first instead of a generic line.
+- When a team room's background run ends with work left, its Goal waits for you instead of being cancelled; saying continue picks it up.
+- The Desktop-to-daemon channel records why it closed (one reason line on each side), so a lost phone link can be traced.
+- A bounded repeating request such as "once an hour, ten in all" is read as typed numbers and runs on the host's schedule: the host computes the end, and the first service turn no longer ends the Goal; each round resumes as an ordinary Desktop Goal turn.
+- A bounded repeating request no longer loses a round to a failure: when the first run fails, hits a quota or a sign-in problem, or is interrupted by closing the app, the next slot is booked instead of the Goal being cancelled, and a first run that ends on a question waits for your answer.
+
+This release binds Agentlas OS v1.2.67 at 704ce1ead2a5bac712cf835b290bde12053a5db1; public runtime asset `hephaestus-runtime-v1.2.67.tar.gz` is pinned at SHA-256 `c5ae6a2c8502c1eaee09f079e860e7f17886b9ef7d1880577c1655e6553a94a1`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.86 — 2026-10-21
 
 - The native channel re-attach no longer stops for good while a downloaded update merely waits to be installed, so the supervisor conversation and the phone link come back after a channel loss instead of staying gone until the app restarts.

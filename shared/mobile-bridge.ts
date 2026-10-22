@@ -1112,6 +1112,8 @@ export interface MobileBridgeInvocationEventDto {
   noticeDisplay?: "row" | "divider";
   /** Closed machine identity for transient runtime-selection presentation. */
   noticeCode?: "runtime-selected";
+  /** Presentation only: the current controller selection, never a chat pin. */
+  runtimeSelection?: MobileBridgeRuntimeSelectionDto;
   /**
    * kind:"notice" only — the same sentence in both product locales.
    *
@@ -1386,6 +1388,8 @@ export interface MobileBridgeChatDto {
   swarmMode: boolean;
   /** Exact Desktop-owned model pin for this chat; null follows role defaults. */
   runtimeSelection: MobileBridgeRuntimeSelectionDto | null;
+  /** Live controller metadata; null clears it, absent supports older hosts. Never a request override. */
+  activeRuntimeSelection?: MobileBridgeRuntimeSelectionDto | null;
   active: boolean;
 }
 

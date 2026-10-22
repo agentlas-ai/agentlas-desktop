@@ -584,7 +584,7 @@ const api: AgentlasIpc = {
     getSettings: () => ipcRenderer.invoke("multimodal:getSettings"),
     saveSettings: (settings) => ipcRenderer.invoke("multimodal:saveSettings", settings),
     status: () => ipcRenderer.invoke("multimodal:status"),
-    // 생성 — Oberon/T-rex 스튜디오에서 적출한 실행 엔진(2026-08-21).
+                                                      
     generateImage: (payload: { model?: "codex" | "gemini" | "auto"; prompt: string }) =>
       ipcRenderer.invoke("multimodal:generateImage", payload),
     imageProviders: () => ipcRenderer.invoke("multimodal:imageProviders"),
@@ -1019,6 +1019,11 @@ const api: AgentlasIpc = {
     getState: () => ipcRenderer.invoke("oneFeatureIntro:getState"),
     acknowledge: (input) => ipcRenderer.invoke("oneFeatureIntro:acknowledge", input),
     defer: (input) => ipcRenderer.invoke("oneFeatureIntro:defer", input),
+  },
+  oneFront: {
+    getState: () => ipcRenderer.invoke("oneFront:getState"),
+    setFront: (input) => ipcRenderer.invoke("oneFront:setFront", input),
+    acknowledgeNotice: (input) => ipcRenderer.invoke("oneFront:acknowledgeNotice", input),
   },
   oneActivation: {
     getState: (input) => ipcRenderer.invoke("oneActivation:getState", input),

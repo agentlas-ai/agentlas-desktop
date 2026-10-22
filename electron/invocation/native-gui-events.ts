@@ -1,4 +1,4 @@
-import type { McpInvocationEvent, ToolApprovalRequestEvent } from "../../shared/types";
+import type { McpInvocationEvent, RuntimeSelection, ToolApprovalRequestEvent } from "../../shared/types";
 import type { NativePublicSettlement } from "./native-public-events";
 import type { RunEventReplay, RunEventReplayInput } from "../../shared/run-event-delivery";
 import { reassembleAgentLivePartial } from "../../shared/interrupted-partial";
@@ -35,6 +35,11 @@ export function nativeGuiActiveChatIds(): readonly string[] {
   return observedActiveChatIds;
 }
 
+/** Only a currently active, contiguous daemon stream can supply the current model. */
+export function nativeGuiActiveRuntimeSelection(chatId: string): RuntimeSelection | null {
+  return observedActiveChatIds.includes(chatId) ? hostedElsewhere.currentRuntimeSelection(chatId) : null;
+}
+
 export function publishNativeGuiInvocationEvent(envelope: NativeGuiInvocationEvent): void {
   hostedElsewhere.observe(envelope.runId, envelope.chatId, envelope.event);
   // Main-side readers get a daemon-hosted teammate's partial whole, as they always read it (createNativeTeammatePartialRelay).
@@ -61,6 +66,7 @@ export function onNativeGuiSettled(listener: (settlement: NativePublicSettlement
 }
 
 export function publishNativeGuiSettled(settlement: NativePublicSettlement): void {
+  hostedElsewhere.retireModel(settlement.runId);
   for (const listener of settledListeners) {
     try { listener(settlement); } catch (error) { console.warn("[native-invocation] settled listener failed", error); }
   }
@@ -78,6 +84,7 @@ export function publishNativeGuiApprovalRequested(request: ToolApprovalRequestEv
 }
 
 export function publishNativeGuiActiveChats(chatIds: readonly string[]): void {
+  hostedElsewhere.retireInactiveModels(new Set(chatIds));
   observedActiveChatIds = [...chatIds];
   for (const listener of activeChatListeners) {
     try { listener(observedActiveChatIds); } catch (error) { console.warn("[native-invocation] active-chat listener failed", error); }
@@ -142,7 +149,7 @@ export interface HostedElsewhereReplay {
  */
 export function createHostedElsewhereReplay(teammateTexts: (runId: string) => Record<string, string>) {
   const journal = new RunEventDeliveryJournal();
-  const runs = new Map<string, { chatId: string; ordinal: number; root: string; settled: boolean }>();
+  const runs = new Map<string, { chatId: string; ordinal: number; root: string; settled: boolean; modelRetired?: boolean; runtimeSelection?: RuntimeSelection }>();
   const forget = (runId: string): void => { runs.delete(runId); journal.forget(runId); };
   const observe = (runId: string, chatId: string, event: McpInvocationEvent): void => {
     // The mirror never fails the live channel that feeds it (a throw here would close the daemon projection).
@@ -170,6 +177,14 @@ export function createHostedElsewhereReplay(teammateTexts: (runId: string) => Re
     }
     journal.publish(runId, chatId, event, delivery.ordinal);
     run.ordinal = delivery.ordinal;
+    if (!event.agentId && (!event.modelRole || event.modelRole === "orchestrator") && event.runtimeSelection && event.runtimeSelection.role !== "worker") {
+      run.runtimeSelection = { ...event.runtimeSelection };
+    }
+    if (!event.agentId && event.runtimeSelection?.role !== "worker"
+      && (!event.modelRole || event.modelRole === "orchestrator")
+      && (event.kind === "final" || event.kind === "error")) {
+      run.modelRetired = true; run.runtimeSelection = undefined;
+    }
     if (!event.agentId && (event.kind === "final" || event.kind === "error")) { run.settled = true; run.root = ""; }
   };
   const replay = (input: RunEventReplayInput): HostedElsewhereReplay | null => {
@@ -179,7 +194,18 @@ export function createHostedElsewhereReplay(teammateTexts: (runId: string) => Re
     if (answer.status === "unavailable") { runs.delete(input.runId); return null; }
     return { replay: answer, ...(run.settled ? {} : { live: { partialText: run.root, agentPartialTexts: teammateTexts(input.runId) } }) };
   };
-  return { observe, replay, get runCount() { return runs.size; } };
+  const currentRuntimeSelection = (chatId: string): RuntimeSelection | null => {
+    const active = [...runs.values()].filter(run => run.chatId === chatId && !run.modelRetired);
+    return active.length === 1 && active[0].runtimeSelection ? { ...active[0].runtimeSelection } : null;
+  };
+  const retireModel = (runId: string): void => {
+    const run = runs.get(runId);
+    if (run) { run.modelRetired = true; run.runtimeSelection = undefined; }
+  };
+  const retireInactiveModels = (chatIds: ReadonlySet<string>): void => {
+    for (const [runId, run] of runs) if (!chatIds.has(run.chatId)) retireModel(runId);
+  };
+  return { observe, replay, currentRuntimeSelection, retireModel, retireInactiveModels, get runCount() { return runs.size; } };
 }
 /** Main's one mirror of daemon-hosted runs, fed from publishNativeGuiInvocationEvent. */
 const hostedElsewhere = createHostedElsewhereReplay((runId) => teammatePartials.textsOf(runId));

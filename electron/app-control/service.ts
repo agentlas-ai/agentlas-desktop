@@ -7,6 +7,7 @@ import { appControlEffectNeedsOwnerTurn, appControlPolicy, type AppControlEffect
 import { APP_CONTROL_ARGUMENT_SCHEMAS, APP_UI_PREFERENCE_VALUE_SCHEMAS } from "./argument-schemas.generated";
 import { describeCatalogOperation, describeHostOperation, type OperationDescriptor } from "./operation-descriptors";
 import type { AppControlRendererOperation, AppControlRendererReply } from "../../shared/app-control";
+import { resolveAppScreenRoute, unknownScreenMessage } from "../../shared/app-screen-routes";
 import { appUiPreferenceDefinitions, isAppUiPreferenceName, normalizeAppUiPreference } from "../../shared/app-ui-preferences";
 import { closestNames, invalidValueMessage, nameSimilarity, schemaArgumentHints, unknownArgumentMessage } from "../../shared/did-you-mean";
 import { decodeAppControlArguments } from "./argument-codec";
@@ -63,7 +64,7 @@ const HOST_OPERATIONS: Operation[] = [
   { path: "app.getState", surface: "app", params: [], signature: "()", effect: "read",
     doc: "Read the actual open screen, display language and theme, sidebar layout and image/video/audio display preferences." },
   { path: "app.navigate", surface: "app", params: ["route"], signature: "(route: string)", effect: "consent",
-    doc: "Open a screen in the owner's Agentlas window, e.g. \"/settings\", \"/automation\", \"/library\", \"/marketplace\", \"/local-models\", \"/one\". Moves the owner's view, so only when they ask." },
+    doc: "Open a screen in the owner's Agentlas window, e.g. \"/settings\", \"/automation\", \"/library\", \"/marketplace\", \"/local-models\", \"/one\". A path that is not a screen is refused with the list of screens. Moves the owner's view, so only when they ask." },
   { path: "app.setLanguage", surface: "app", params: ["locale"], signature: "(locale: \"ko\" | \"en\" | \"system\")", effect: "write",
     doc: "Set the app's display language, the same setting as Settings > Language." },
   { path: "app.setTheme", surface: "app", params: ["theme"], signature: "(theme: \"light\" | \"dark\" | \"system\")", effect: "write",
@@ -183,7 +184,7 @@ const words = (value: string) => value
   .replace(/([a-z0-9])([A-Z])/g, "$1 $2").toLowerCase().split(/[^a-z0-9가-힣]+/).filter(Boolean);
 
 // Search is deterministic over the operation's own words (path, doc, signature, keywords). No translation table:
-// the model writes the query in English (owner rule 2026-10-13: the host does not judge meaning by word lists).
+                                                                                                                
 function queryTerms(query: string): string[] {
   return [...new Set(words(query))];
 }
@@ -592,8 +593,14 @@ export async function appControlCallLocal(caller: AppControlCaller, input: AppCo
 
   if (operation.surface === "app") {
     if (path === "app.navigate") {
-      const route = typeof named.route === "string" ? named.route.trim() : "";
-      if (!/^\/[A-Za-z0-9/_\-?=&%.:~]*$/.test(route) || route.length > 300) throw new AppControlError("invalid-arguments", "route must be an app path such as /settings.");
+      const asked = typeof named.route === "string" ? named.route.trim() : "";
+      if (!/^\/[A-Za-z0-9/_\-?=&%.:~]*$/.test(asked) || asked.length > 300) throw new AppControlError("invalid-arguments", "route must be an app path such as /settings.");
+      // The renderer calls any well-formed path "applied" and Next answers an unknown one with its not-found page: a path that is
+      // not a screen is refused here, before the window moves, with the screens there are (shared/app-screen-routes.ts). A screen
+      // asked for as /settings/ or /settings.html is opened as /settings, the spelling the renderer can confirm.
+      const screen = resolveAppScreenRoute(asked);
+      if (!screen.known) throw new AppControlError("route-unknown", unknownScreenMessage(screen));
+      const route = screen.route;
       const presentation = await host?.showMain?.(route) ?? host?.mainWindow() ?? null;
       if (!presentation || presentation.isDestroyed()) throw new AppControlError("app-window-closed", "The Agentlas presentation window is closed.");
       if (presentation.isMinimized()) presentation.restore();

@@ -246,6 +246,130 @@ export function trackReportedToolCalls<E extends { onTool?: (...args: never[]) =
   return { events: wrapped, count: () => ids.size + anonymous };
 }
 
+   
+                                                                                                                     
+                                                                                                                        
+                                                                                                                         
+   
+export const EMPTY_AFTER_UNUSABLE_TOOLS_CODE = "empty_after_unusable_tools";
+
+const EMPTY_COLLECTION_TEXT_MAX = 8_192;
+const EMPTY_COLLECTION_DEPTH = 2;
+
+function isEmptyCollectionValue(value: unknown, depth: number): boolean {
+  if (Array.isArray(value)) return value.length === 0;
+  if (!value || typeof value !== "object") return false;
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record);
+  if (keys.length === 0) return false;
+  // An MCP text envelope ({ content: [{ type: "text", text }], isError?, structuredContent? }): every text block is an empty collection.
+  if (Array.isArray(record.content) && depth < EMPTY_COLLECTION_DEPTH) {
+    const blocks = record.content as unknown[];
+    const envelope = keys.every((key) => key === "content" || key === "isError" || key === "structuredContent");
+    if (envelope && record.isError !== true && blocks.length > 0 && blocks.every((block) => {
+      const entry = block && typeof block === "object" ? block as Record<string, unknown> : null;
+      return entry !== null && entry.type === "text" && toolResultIsEmptyCollection(entry.text, depth + 1);
+    })) {
+      return record.structuredContent === undefined || record.structuredContent === null || isEmptyCollectionValue(record.structuredContent, depth + 1);
+    }
+  }
+  // An object whose every value is null or an empty array, with at least one empty array ({"items":[]}).
+  let emptyArray = false;
+  for (const key of keys) {
+    const entry = record[key];
+    if (Array.isArray(entry) && entry.length === 0) emptyArray = true;
+    else if (entry !== null) return false;
+  }
+  return emptyArray;
+}
+
+/**
+ * Whether a tool result is, structurally, a collection with nothing in it: `[]`, `{"items":[]}`, or an MCP text envelope
+ * holding only such text. Parsed data only, never words. Quiet successes are NOT empty: an empty string, "ok", `{}`, `0`,
+ * `{"ok":true}` (a write, a shell command that prints nothing). Bounded: longer text is never parsed.
+ */
+export function toolResultIsEmptyCollection(result: unknown, depth = 0): boolean {
+  if (typeof result !== "string") return false;
+  const text = result.trim();
+  if (text.length < 2 || text.length > EMPTY_COLLECTION_TEXT_MAX || (text[0] !== "[" && text[0] !== "{")) return false;
+  let value: unknown;
+  try { value = JSON.parse(text); } catch { return false; }
+  return isEmptyCollectionValue(value, depth);
+}
+
+/** One `onTool` report as the host sees it (the shape of the runner's callback, reduced to the outcome facts). */
+export interface ToolOutcomeReport {
+  id?: string;
+  isError?: boolean;
+  result?: string;
+  /** The call left files or an image behind (artifactPaths / imageDataUrl): a usable outcome whatever its result text says. */
+  produced?: boolean;
+}
+
+/** How the calls of one invocation came back: failed or empty (`unusable`), anything else (`usable`), or no outcome seen yet (`pending`). */
+export interface ToolOutcomeSummary { unusable: number; usable: number; pending: number }
+
+const TOOL_OUTCOME_ID_LIMIT = 4_096;
+
+/**
+ * The host's own tally of the model's tool calls for one invocation, fed from the runner callback (`onTool`) only: host
+ * pseudo-rows (plugin routing, status lines) are not the model's calls and never reach it. A call is identified by its id
+ * (a start and its completion share one; a report without an id counts once). A call is `unusable` only when every
+ * completion it had failed (`isError`) or came back as an empty collection; any other completion makes it `usable`, and a
+ * call that was started and never completed is `pending`. Past the id limit the tally reports one usable call, so a very
+ * large turn is never judged on a partial count.
+ */
+export function createToolOutcomeTally(): { note: (report: ToolOutcomeReport) => void; summary: () => ToolOutcomeSummary } {
+  const started = new Set<string>();
+  const settled = new Map<string, "unusable" | "usable">();
+  let anonymousUnusable = 0;
+  let anonymousUsable = 0;
+  let overflow = false;
+  return {
+    note(report) {
+      const id = typeof report.id === "string" && report.id ? report.id : undefined;
+      const completed = report.produced === true || report.result !== undefined || report.isError === true;
+      if (id && !started.has(id)) {
+        if (started.size >= TOOL_OUTCOME_ID_LIMIT) { overflow = true; return; }
+        started.add(id);
+      }
+      if (!completed) return;
+      const outcome = report.isError === true ? "unusable"
+        : report.produced === true || !toolResultIsEmptyCollection(report.result) ? "usable" : "unusable";
+      if (!id) {
+        if (outcome === "unusable") anonymousUnusable += 1; else anonymousUsable += 1;
+        return;
+      }
+      settled.set(id, settled.get(id) === "usable" || outcome === "usable" ? "usable" : "unusable");
+    },
+    summary() {
+      let unusable = anonymousUnusable;
+      let usable = anonymousUsable + (overflow ? 1 : 0);
+      for (const outcome of settled.values()) { if (outcome === "usable") usable += 1; else unusable += 1; }
+      let pending = 0;
+      for (const id of started) if (!settled.has(id)) pending += 1;
+      return { unusable, usable, pending };
+    },
+  };
+}
+
+   
+                                                                                                                           
+                                                                                                                        
+                                                                                                                        
+                                                                                                                       
+                                         
+   
+export function endedWithoutAnswerAfterUnusableTools(facts: {
+  text: string; reportedToolCalls: number | undefined; outcomes: ToolOutcomeSummary;
+}): boolean {
+  if (facts.text.trim()) return false;
+  const reported = facts.reportedToolCalls;
+  if (typeof reported !== "number" || !Number.isSafeInteger(reported) || reported < 1) return false;
+  const { unusable, usable, pending } = facts.outcomes;
+  return unusable >= 1 && usable === 0 && pending === 0 && unusable >= reported;
+}
+
 /** A retry hint (ISO time) as milliseconds from `now`; undefined when absent or already past. */
 export function retryAfterMs(hintIso: string | null | undefined, now = Date.now()): number | undefined {
   const at = typeof hintIso === "string" ? Date.parse(hintIso) : NaN;
