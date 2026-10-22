@@ -429,7 +429,7 @@ async function runAnthropicMessages(
   // The size of the turn's LAST model request feeds the generation rule (session-generation.ts).
   const sink: { value?: number } = {};
   const result = await runAnthropicMessagesInner(backend, baseUrl, authHeaders, req, events, sink);
-  return sink.value && result.contextInputTokens === undefined ? { ...result, contextInputTokens: sink.value } : result;
+  return sink.value !== undefined && result.contextInputTokens === undefined ? { ...result, contextInputTokens: sink.value } : result;
 }
 
 /** Gemini BadRequest: true only when a structured field violation points at the tools / function declarations. */
@@ -633,10 +633,6 @@ async function runAnthropicMessagesInner(
     reportCachePlan(() => outgoingWire().plan);
     reportModelEndpoint({ url: baseUrl });
     const usageAttempt = measuredUsage.start();
-    const beforeInput = inputTokens + cacheRead + cacheWrite;
-    const beforeCacheRead = cacheRead;
-    const beforeCacheWrite = cacheWrite;
-    const beforeRawInput = inputTokens;
     if (req.signal?.aborted) throw abortReasonError(req);
     ownerControl.dispatched();
     const resp = await withCurrentHistoryProvider(()=>fetch(`${baseUrl}/v1/messages`, {
@@ -690,6 +686,7 @@ async function runAnthropicMessagesInner(
     let stopReason: string | null = null;
     let conflictingStopReason = false;
     let turnInputObserved = false;
+    let turnRawInput: number | undefined, turnCacheRead: number | undefined, turnCacheWrite: number | undefined;
     let turnCacheReadObserved = false;
     let turnOutputObserved = false;
     let turnOutputTokens = 0;
@@ -737,9 +734,13 @@ async function runAnthropicMessagesInner(
         } else if (event.type === "message_start" && event.message?.usage) {
           const usage = event.message.usage;
           reportModelEndpoint({ reportedModel: (event.message as { model?: string }).model });
-          turnInputObserved = Number.isSafeInteger(usage.input_tokens) && Number(usage.input_tokens) >= 0
-            && [usage.input_tokens, usage.cache_read_input_tokens, usage.cache_creation_input_tokens]
-              .every((value) => value == null || (Number.isSafeInteger(value) && value >= 0));
+          const count = (value: unknown): number | undefined =>
+            typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+          turnRawInput = count(usage.input_tokens);
+          turnCacheRead = count(usage.cache_read_input_tokens);
+          turnCacheWrite = count(usage.cache_creation_input_tokens);
+          turnInputObserved = turnRawInput !== undefined && turnCacheRead !== undefined && turnCacheWrite !== undefined
+            && Number.isSafeInteger(turnRawInput + turnCacheRead + turnCacheWrite);
           // ★누적한다. 왕복이 여러 번이면 각 턴의 입력이 전부 실제 비용이다 —
           // 마지막 턴만 싣던 방식은 도구를 쓸수록 영수증이 작아진다.
           turnCacheReadObserved = Number.isSafeInteger(usage.cache_read_input_tokens) && Number(usage.cache_read_input_tokens) >= 0;
@@ -764,13 +765,13 @@ async function runAnthropicMessagesInner(
       }
     }
     outputTokens += turnOutputTokens;
-    const turnInput = inputTokens + cacheRead + cacheWrite - beforeInput;
-    if (turnInputObserved && turnInput > 0 && sink) sink.value = turnInput;
+    const turnInput = turnInputObserved ? turnRawInput! + turnCacheRead! + turnCacheWrite! : null;
+    if (sink) sink.value = turnInput ?? undefined;
     // Anthropic bills raw input, cache reads and cache creation separately; the receipt carries only the total.
-    if (turnInputObserved) events.onModelUsageDetail?.(usageAttempt, { cacheCreationInputTokens: cacheWrite - beforeCacheWrite, rawInputTokens: inputTokens - beforeRawInput });
+    if (turnInputObserved) events.onModelUsageDetail?.(usageAttempt, { cacheCreationInputTokens: turnCacheWrite, rawInputTokens: turnRawInput });
     (measuredUsage.complete(usageAttempt, turnInputObserved && turnOutputObserved && messageStopped
-      ? { inputTokens: turnInput, outputTokens: turnOutputTokens,
-          ...(turnCacheReadObserved ? { cachedInputTokens: cacheRead - beforeCacheRead } : {}) }
+      ? { inputTokens: turnInput!, outputTokens: turnOutputTokens,
+          ...(turnCacheReadObserved ? { cachedInputTokens: turnCacheRead } : {}) }
       : undefined), currentHistoryRuntimeFence()?.assertCurrent());
 
     // Only complete client-tool groups or final answers admit further work.
@@ -815,8 +816,8 @@ async function runAnthropicMessagesInner(
     }
     if (req.signal?.aborted) throw abortReasonError(req);
     ownerControl.applied();
-    generations.completed(turn, turnInputObserved && turnInput > 0 ? turnInput : null);
-    lastObservedInput = turnInputObserved && turnInput > 0 ? turnInput : null;
+    generations.completed(turn, turnInput !== null && turnInput > 0 ? turnInput : null);
+    lastObservedInput = turnInput !== null && turnInput > 0 ? turnInput : null;
     lastRequestTokens = sentRequestTokens;
 
     if (req.scienceCollectionCapability && stopReason === "tool_use" && pendingToolUse.size === 0) {

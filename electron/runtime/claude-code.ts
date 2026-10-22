@@ -1084,9 +1084,9 @@ export function addClaudeResultUsage(prior: ClaudeUsageReceipt | undefined, usag
   if (!usage) return prior;
   const inputParts = [usage.input_tokens, usage.cache_read_input_tokens, usage.cache_creation_input_tokens];
   if (!inputParts.some((value) => value !== undefined && value !== null)
-    || !inputParts.every((value) => value == null || (Number.isSafeInteger(value) && value >= 0))
+    || !inputParts.every((value) => typeof value === "number" && Number.isSafeInteger(value) && value >= 0)
     || !Number.isSafeInteger(usage.output_tokens) || usage.output_tokens! < 0) return prior;
-  const inputNow = inputParts.reduce<number>((total, value) => total + (value ?? 0), 0);
+  const inputNow = inputParts.reduce<number>((total, value) => total + Number(value), 0);
   const inputTokens = (prior?.observed.inputTokens ?? 0) + inputNow;
   const outputTokens = (prior?.observed.outputTokens ?? 0) + usage.output_tokens!;
   if (!Number.isSafeInteger(inputTokens) || !Number.isSafeInteger(outputTokens) || !Number.isSafeInteger(inputTokens + outputTokens)) return prior;
@@ -2104,6 +2104,8 @@ const runClaudeTurn = async (
     let observedUsage: { inputTokens: number; outputTokens: number; cachedInputTokens?: number } | undefined;
     /** The runner turn's usage receipt: the sum of its own CLI results (addClaudeResultUsage). observedUsage is its logical half. */
     let usageReceipt: ClaudeUsageReceipt | undefined;
+    // One incomplete root result makes the turn total unknown; the separate output token meter stays measured.
+    let usageIncomplete = false;
     /** Usage of results this runner turn did not take as its own (background-attributed turns, sidechains): counted, never added. */
     const unattributedUsage = { results: 0, inputTokens: 0, outputTokens: 0 };
     /** Results that carried a `usage` block addClaudeResultUsage could not read (not exact non-negative integers): their spend is unknown, never added, and counted. */
@@ -2137,7 +2139,7 @@ const runClaudeTurn = async (
             + ` input=${unattributedUsage.inputTokens} output=${unattributedUsage.outputTokens}`);
         }
         if (unreadableUsage.results > 0) events.onStatus(`[runtime-session] result_usage_unreadable kind=${KIND} results=${unreadableUsage.results}`);
-        if (!usageReceipt) return;
+        if (!usageReceipt || usageIncomplete) return;
         events.onTerminalObservedUsage?.(usageReceipt.observed, runtimeAttemptId);
         events.onModelUsageDetail?.(runtimeAttemptId, usageReceipt.detail);
       } catch { /* accounting observers never decide the turn */ }
@@ -2730,9 +2732,12 @@ const runClaudeTurn = async (
         turnModel.observe(ev);
         if (!fromSubAgent) {
           const u = (ev.message as { usage?: { input_tokens?: unknown; cache_read_input_tokens?: unknown; cache_creation_input_tokens?: unknown } }).usage;
-          const part = (v: unknown) => (typeof v === "number" && Number.isSafeInteger(v) && v >= 0 ? v : 0);
-          const total = u ? part(u.input_tokens) + part(u.cache_read_input_tokens) + part(u.cache_creation_input_tokens) : 0;
-          if (total > 0) {
+          const part = (v: unknown) => (typeof v === "number" && Number.isSafeInteger(v) && v >= 0 ? v : undefined);
+          const raw = part(u?.input_tokens), read = part(u?.cache_read_input_tokens), write = part(u?.cache_creation_input_tokens);
+          const total = raw !== undefined && read !== undefined && write !== undefined ? raw + read + write : undefined;
+          contextInputTokens = undefined;
+          contextCachedInputTokens = undefined;
+          if (total !== undefined && Number.isSafeInteger(total) && total >= 0) {
             // One assistant message is one API request: its own usage is the window, unlike the result envelope's turn sum.
             contextInputTokens = total;
             contextCachedInputTokens = part(u?.cache_read_input_tokens);
@@ -2915,8 +2920,12 @@ const runClaudeTurn = async (
           // prior receipt back unchanged) is counted, not dropped silently, so the unknown spend stays visible.
           const receiptBefore = usageReceipt;
           usageReceipt = addClaudeResultUsage(usageReceipt, ev.usage);
-          if (ev.usage && usageReceipt === receiptBefore) noteUnreadableResultUsage();
+          if (usageReceipt === receiptBefore) {
+            usageIncomplete = true;
+            if (ev.usage) noteUnreadableResultUsage();
+          }
           observedUsage = usageReceipt?.observed;
+          if (usageIncomplete) observedUsage = undefined;
         } else noteUnattributedResultUsage(ev);
         // ★모든 is_error가 표식이다 — 예전에는 로그인 만료 한 케이스만 집고 나머지를
         //   버려서, 성공 분기(exit 0)가 거절문을 정상 답으로 내보냈다.
@@ -3048,7 +3057,7 @@ const runClaudeTurn = async (
           sessionId,
           tokens,
           observedUsage,
-          ...(contextInputTokens ? { contextInputTokens, ...(contextCachedInputTokens !== undefined && contextCachedInputTokens <= contextInputTokens ? { contextCachedInputTokens } : {}) } : {}),
+          ...(contextInputTokens !== undefined ? { contextInputTokens, ...(contextCachedInputTokens !== undefined && contextCachedInputTokens <= contextInputTokens ? { contextCachedInputTokens } : {}) } : {}),
           ...(turnDeliveryFact() ? { turnDelivery: turnDeliveryFact() } : {}),
           appliedEffort,
         });
@@ -3207,7 +3216,7 @@ const runClaudeTurn = async (
           sessionId,
           tokens,
           observedUsage,
-          ...(contextInputTokens ? { contextInputTokens, ...(contextCachedInputTokens !== undefined && contextCachedInputTokens <= contextInputTokens ? { contextCachedInputTokens } : {}) } : {}),
+          ...(contextInputTokens !== undefined ? { contextInputTokens, ...(contextCachedInputTokens !== undefined && contextCachedInputTokens <= contextInputTokens ? { contextCachedInputTokens } : {}) } : {}),
           ...(contextWindowTokens ? { contextWindowTokens } : {}),
           ...(observedModel ? { observedModel } : {}),
           ...(turnDeliveryFact() ? { turnDelivery: turnDeliveryFact() } : {}),
@@ -3239,7 +3248,7 @@ const runClaudeTurn = async (
             failure: runnerFailure,
             tokens,
             observedUsage,
-            ...(contextInputTokens ? { contextInputTokens, ...(contextCachedInputTokens !== undefined && contextCachedInputTokens <= contextInputTokens ? { contextCachedInputTokens } : {}) } : {}),
+            ...(contextInputTokens !== undefined ? { contextInputTokens, ...(contextCachedInputTokens !== undefined && contextCachedInputTokens <= contextInputTokens ? { contextCachedInputTokens } : {}) } : {}),
             ...(observedModel ? { observedModel } : {}),
             // A typed provider refusal of a turn the CLI took in: post-dispatch, with its provider code intact.
             ...(turnDeliveryFact() ? { turnDelivery: turnDeliveryFact() } : {}),

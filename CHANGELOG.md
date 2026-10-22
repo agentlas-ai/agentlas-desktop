@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.3.88 — 2026-10-23
+
+- Keep total input usage unknown when Claude does not report every cache component, while preserving independently reported output usage.
+
+This release binds Agentlas OS v1.2.67 at 704ce1ead2a5bac712cf835b290bde12053a5db1; public runtime asset `hephaestus-runtime-v1.2.67.tar.gz` is pinned at SHA-256 `c5ae6a2c8502c1eaee09f079e860e7f17886b9ef7d1880577c1655e6553a94a1`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.87 — 2026-10-22
 
 - Work delegated by One remains visible without a project, and open Work lists refresh as tasks change. Reviewed results can be accepted explicitly against the latest task and run.

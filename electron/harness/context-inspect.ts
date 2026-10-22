@@ -98,7 +98,7 @@ const isTurnAggregate = (p: Record<string, unknown>): boolean =>
 
 function windowObservation(p: Record<string, unknown>): { tokens: number; cachedTokens?: number } | null {
   const last = count(p.observedContextInput);
-  if (last !== null && last > 0) {
+  if (last !== null) {
     const cached = count(p.observedContextCachedInput);
     return { tokens: last, ...(cached !== null && cached <= last ? { cachedTokens: cached } : {}) };
   }

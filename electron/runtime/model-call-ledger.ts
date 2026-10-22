@@ -600,7 +600,7 @@ export function ledgerEventPayload(input: {
   } else out.usageStatus = "unknown";
   // The last single request is independent of the receipt: ACP reports only this (no tokens receipt at all).
   const contextInput = sanitizeCount(input.contextInput?.tokens);
-  if (contextInput !== undefined && contextInput > 0) {
+  if (contextInput !== undefined) {
     out.observedContextInput = contextInput;
     const cached = sanitizeCount(input.contextInput?.cached);
     if (cached !== undefined && cached <= contextInput) out.observedContextCachedInput = cached;
