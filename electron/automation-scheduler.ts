@@ -384,13 +384,13 @@ let startupTimer: ReturnType<typeof setTimeout> | null = null;
 let installQuiescing = false;
 let installQuiesceHolds = 0;
 let restartSchedulerAfterInstall = false;
-
-
-
-
-
-
-
+/*
+ * App quit closes dispatch for good. stopAutomationScheduler() only cleared the timers, so a tick
+ * already past its guard, a runOne parked on the goal-ledger await, or a read-only resume could
+ * still start work after Quit — and every write it made after closeStore() died as "Store not
+ * initialized" (measured 2026-09-24T00:55Z: markAutomationRun, the graph-reconciliation suspension
+ * and the dispatch all failed, so the interrupted Threads run's outcome was never recorded).
+ */
 let shutdownDispatchClosed = false;
 const running = new Set<string>();
 // Only the exact Main-created legacy retry object can override its unsaved
@@ -1940,15 +1940,15 @@ async function runOne(
           console.error("[automation] strategy cycle handoff failed:", strategyError);
         }
       }
-      
-
-
-
-
-
-
-
-
+      // ── 지속 정책(P0-2): 보류는 성공이 아니다 ────────────────────────────────
+      // 끝까지 돌았는데 바깥 효과가 0이고 판정이 목표 미충족으로 본 실행(자기 보류), 또는 도구 없이
+      // 했다고 주장한 실행은 호스트 사실로 원인을 걸고 다음 수를 원장에 남긴다. 다음 실행이 그 수를 소비한다:
+      // replan 은 계획 캡슐의 호스트 지시로, switch_runtime 은 실행 계획의 1회 핸드오프로(저장된 핀은 그대로).
+      // 실측 f7a61706: 19회 중 15회가 스스로 고른 무변경 보류였고 판정은 이를 수용·판정 불가로 받았다.
+      // 판정이 뒤에서 도는 완료 실행은 여기서 "unjudged"(판정 대기)일 뿐 "판정기에 닿지 못함"이 아니다. 그 실행의
+      // 보류 판단은 판정이 끝난 뒤 그 결과로 한다. 운영 2026-10-17: 읽기 전용 감시 자동화 2ce66bb9(에이전트가 만든
+      // 자동화라 워커 풀 1순위를 따른다)의 정상 회차 962번이 전부 self_hold 로 잡혀 replan → 오너가 정한 워커 풀
+      // 1순위(agentlas-light) 밖으로 런타임 전환(Sonnet) → 휴식을 10분마다 돌았고, 판정은 매번 ok 였다.
       let holdGateOpen = false;
       if (!graphLoginWait && !workspaceFailure && !shutdownDispatchClosed && runLedgerRecorded && !parentMissing && !leaseOwnershipLost && !opts?.dryRun && currentRunId
         && !controller.signal.aborted) {
@@ -2445,7 +2445,7 @@ export async function runAutomationFromTrigger(
   if (dispatchPaused()) return { accepted: false };
   const a = getAutomation(id);
   if (!a) return { accepted: false };
-  // A graph is no longer called as a Toolchain (a Toolchain is its own MCP-shaped asset, toolchains/assets.ts);
+  // A graph is no longer called as a Toolchain (2026-10-20: a Toolchain is its own MCP-shaped asset, toolchains/assets.ts);
   // a request queued that way before is not run.
   if (ctx.source === "toolchain") return { accepted: false, status: "blocked", error: "toolchain_not_callable" };
   const command = decodeGraphCommandDelivery(a, ctx, ctx.source === "one-mcp" ? automationDefinitionDigest(a) : undefined);

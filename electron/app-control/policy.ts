@@ -6,10 +6,21 @@ import type { AppControlCatalogEntry } from "./catalog.generated";
 //                         not the owner's word; deleting, installing, publishing, sending or answering waits for the owner.
 //   denied                never: the owner's own consent boundary (approvals, grants, credentials, payment), views and
 //                         streams that belong to a screen, and One's own run plumbing (it has dedicated tools).
+// A few denied operations are also left out of what the model can find at all (MODEL_CATALOG_OMITTED below).
 export type AppControlEffect = "read" | "write" | "destructive" | "consent";
 export type AppControlPolicy =
   | { allowed: true; effect: AppControlEffect }
   | { allowed: false; reason: string };
+
+// The Business console's controller (electron/business/shipping-console-ipc.ts): snapshot, eligibility, account selection and the
+// dashboard / admin windows. Owner 2026-10-21 ("비즈니스 조직관리 앱제어는 빼셈 카탈로그에서"): managing the organization (company)
+// account is the owner's own screen. The preload bridge, the IPC handlers and the screens are unchanged; only what the model can
+// find and call here changes.
+const BUSINESS_CONSOLE_OPERATIONS = /^business\./;
+// Settings → company server card (electron/enterprise-server/enterprise-server-ipc.ts): enrolling this device with a one-time code from
+// the company admin, pinning the company server's key, and forgetting the device key are the owner's own acts on their own machine,
+// in the same family as the organization console above. Denied and left out of the model's catalog, like the Business console.
+const ENTERPRISE_SERVER_OPERATIONS = /^enterpriseServer\./;
 
 const DENIED: Array<[RegExp, string, AppControlEffect]> = [
   [/^oneMemory\.inspector\./, "private memory inspection and correction belong to the owner renderer", "write"],
@@ -17,6 +28,8 @@ const DENIED: Array<[RegExp, string, AppControlEffect]> = [
   [/^businessNative\./, "organization sharing requires the focused native employee owner", "write"],
   [/^(companyNative|companyMail|businessCompanyWork)\./, "company identity, mail and work require the focused native company owner", "consent"],
   [/^business\.account\.(joinOrganization|logout|selectOrganization|selectPersonal|signIn)$/, "account and organization selection belong to the owner", "consent"],
+  [BUSINESS_CONSOLE_OPERATIONS, "organization (company) management is the owner's own screen, not an app-control operation", "write"],
+  [ENTERPRISE_SERVER_OPERATIONS, "the company server connection (enrollment code, pinned server key, this device's key) is the owner's own screen, not an app-control operation", "consent"],
   [/^oneVault\./, "credential input belongs to the dedicated native owner surface", "consent"],
   [/^oneProvider\./, "provider effects require the original native owner request", "consent"],
   [/^onePersonalData\./, "personal sources and Page changes require their current native grant", "write"],
@@ -26,6 +39,9 @@ const DENIED: Array<[RegExp, string, AppControlEffect]> = [
   // Where the personal agent's conversation is processed (Agentlas server and its model provider, or the owner's own CLI) is
   // the owner's decision, and the one-time notice that makes it effective is the owner's to answer. getState is a read.
   [/^oneFront\.(setFront|acknowledgeNotice)$/, "where the personal agent's replies are processed, and the notice that confirms it, are the owner's own act", "consent"],
+  // Agentlas Reach (owner 2026-10-23): the switch for exploring the owner's installed desktop apps in the background. reach.getExplore
+  // and reach.status are reads (segment rule); only the switch itself is the owner's.
+  [/^reach\.setExplore$/, "turning on background exploration of the owner's desktop apps (it downloads a driver and sends anonymous capability descriptions) is the owner's own switch", "consent"],
   // The handler already refuses app.call (ipc.ts invoke:returnSteeringRecovery); the policy says so before the call.
   [/^invoke\.returnSteeringRecovery$/, "taking a held owner direction back into the composer is the owner's own act", "write"],
   [/^(surfaces\.(approve|revokeApproval)|automations\.decideNodeApproval|browser\.resolveApproval)$/, "approvals are the owner's decision", "consent"],
@@ -83,7 +99,7 @@ const DENIED: Array<[RegExp, string, AppControlEffect]> = [
 //   write  everything else that used to fall through to the default. Same effect class as before: callable on any One
 //          turn. Some of these look destructive or consent-like (fs.openPath, telegram.start, site.exportScreenCode,
 //          hephaestus.runUpdate, science.manuscripts.revertTransaction); they stay "write" so no operation changes what
-                                                                                                 
+//          One may call. Tightening one is an owner decision, not a side effect of declaring it.
 const EXPLICIT_READ_PATHS: ReadonlySet<string> = new Set([
   // agent-mail/ipc.ts
   "agentMail.contact", "agentMail.contacts", "agentMail.directoryLookup", "agentMail.directoryMe", "agentMail.directorySearch", "agentMail.drafts",
@@ -99,7 +115,7 @@ const EXPLICIT_READ_PATHS: ReadonlySet<string> = new Set([
   "hephaestus.updateJournal", "migration.scan", "quests.claimStatus", "runLedger.chatTimeline", "site.agentAppMcpRecommendation",
   "site.agentAppRuntimeStatus", "site.agentAppThumbnail", "site.operationStatus", "site.prepareRender",
   // main.ts
-  "productExtensions.scienceStatus", "productExtensions.scienceSuiteStatus", "science.artifacts.resolveConversationRoute",
+  "productExtensions.scienceStatus", "productExtensions.scienceSuiteStatus", "productExtensions.scienceOutputScope", "science.artifacts.resolveConversationRoute",
   "science.manuscripts.blueprintAssessment", "science.manuscripts.coherenceAssessment", "science.manuscripts.scholarlyAssessment",
   // science-host/daemon-ipc.ts
   "science.researchLifecycle.revisions",
@@ -123,8 +139,6 @@ const EXPLICIT_WRITE_PATHS: ReadonlySet<string> = new Set([
   "archive.restore", "archive.setAuto",
   // automation-strategy-ipc.ts
   "automations.reviewStrategyProposal",
-  // business/shipping-console-ipc.ts
-  "business.account.openAdmin", "business.openDashboard",
   // capabilities/one-capabilities-ipc.ts
   "oneCapabilities.setEnabled", "oneCapabilities.setRole", "oneCapabilities.setSourceEnabled",
   // goal-panel-ipc.ts
@@ -215,14 +229,14 @@ const EXPLICIT_WRITE_PATHS: ReadonlySet<string> = new Set([
 const DENIED_READ_PATHS: ReadonlySet<string> = new Set([
   "oneMemory.inspector.query", "oneMemory.inspector.detail",
   "billing.checkoutReadiness", "billing.getCredits", "billing.getPlans", "browser.credentialConsent", "browserAutofill.snapshot",
-  "businessNative.completedWork", "businessWork.files", "businessWork.sources", "confirm.committedAnswers", "confirm.listPending",
+  "business.account.read", "business.readEligibility", "business.snapshot", "businessNative.completedWork", "businessWork.files", "businessWork.sources", "confirm.committedAnswers", "confirm.listPending",
   "credentialRecovery.list", "env.has", "env.list", "env.preview", "invoke.currentTurn", "invoke.currentTurnSteerReceipt", "invoke.steerReceipt",
   "oneContext.snapshot", "oneContext.targets", "oneHarness.getResult", "oneHarness.readiness", "onePersonalData.bootstrap",
   "onePersonalData.connectorCatalog", "onePersonalData.gmailCatalog", "onePersonalData.gmailSourceSettings", "onePersonalData.historySnapshot",
   "onePersonalData.historyWorkStatus", "onePersonalData.listTargets", "onePersonalData.snapshot", "oneProvider.bootstrap", "oneProvider.status",
   "oneSupervisor.budgets", "oneSupervisor.journal", "oneSupervisor.receipt", "oneSupervisor.snapshot", "oneVault.recoverableOperations",
   "oneWindow.getState", "workStart.get", "science.researchCapabilities.catalog", "runLedger.outputsAfter", "oneArtifacts.listEarlier", "runLedger.settleRowsAfter",
-  "liveDocument.snapshot", "liveDocument.entries", "liveDocument.list",
+  "liveDocument.snapshot", "liveDocument.entries", "liveDocument.list", "enterpriseServer.status",
 ]);
 const DENIED_DESTRUCTIVE_PATHS: ReadonlySet<string> = new Set([
   "oneMemory.inspector.forget", "liveDocument.close",
@@ -230,7 +244,7 @@ const DENIED_DESTRUCTIVE_PATHS: ReadonlySet<string> = new Set([
   "businessWork.cancel", "businessWork.revoke", "env.remove", "mcpTools.oauthDisconnect", "oneContext.revoke", "oneDiscussion.stop",
   "onePersonalData.cancelInference", "onePersonalData.cancelProposal", "onePersonalData.gmailRevoke", "onePersonalData.gmailRevokeSource",
   "onePersonalData.historyWorkRevoke", "oneSupervisor.stopReply", "oneSupervisor.stopTask", "revokeCapabilityGrant", "revokeChatAlwaysApproval",
-  "science.composer.cancel", "secrets.deleteApiKey", "site.removePublishProviderToken", "surfaces.revokeApproval",
+  "science.composer.cancel", "secrets.deleteApiKey", "site.removePublishProviderToken", "surfaces.revokeApproval", "enterpriseServer.disconnect",
 ]);
 
 const CONSENT_SEGMENT = /^(approve|answer|decide|accept|reject|attest|confirm|publish|send|submit|install|upload|unseal|transfer|reauthorize|setTokenLimit|setPrices|bugReportSend|purchase|resume)/;
@@ -255,6 +269,14 @@ export function appControlPolicy(entry: Pick<AppControlCatalogEntry, "path">): A
   return classifyAppControlPolicy(entry).policy;
 }
 
+// Operations the model's catalog does not carry at all (owner 2026-10-21): not callable, not listed as restricted either, and a
+// call by name is answered like any unknown operation. Declared, not inferred. Every one of them is denied above, so leaving a
+// name out only removes information, never grants anything; the generated catalog still mirrors the preload bridge.
+const MODEL_CATALOG_OMITTED: ReadonlyArray<RegExp> = [BUSINESS_CONSOLE_OPERATIONS, ENTERPRISE_SERVER_OPERATIONS];
+export function appControlOmittedFromModelCatalog(entry: Pick<AppControlCatalogEntry, "path">): boolean {
+  return MODEL_CATALOG_OMITTED.some((pattern) => pattern.test(entry.path));
+}
+
 export function classifyAppControlPolicy(entry: Pick<AppControlCatalogEntry, "path">): AppControlPolicyClassification {
   const explicit = (effect: AppControlEffect): AppControlPolicyClassification => ({ policy: { allowed: true, effect }, basis: "explicit-path" });
   const segmentRule = (effect: AppControlEffect): AppControlPolicyClassification => ({ policy: { allowed: true, effect }, basis: "segment-pattern" });
@@ -264,9 +286,9 @@ export function classifyAppControlPolicy(entry: Pick<AppControlCatalogEntry, "pa
   if (/^science\.composer\.(attach|receipt|steering)$/.test(entry.path)) return explicit("read");
   // Connection state and key presence contain no credential material. They are necessary to operate Settings.
   if (/^(secrets\.hasApiKey|auth\.getSession|runtime\.connectGet|mcpTools\.oauthStatus)$/.test(entry.path)) return explicit("read");
-
-
-
+  // Owner 2026-10-11 ("볼트 입력이나 저장된 것 중 있는지 AI가 찾고 물어보면 되지"): One looks for a stored key a tool can use
+  // and asks before using it. env.inventory is names and presence only (no value, no masked preview); a rename runs only
+  // on a turn the owner wrote. Setting or deleting a key value stays the owner's own act (DENIED below).
   if (entry.path === "env.inventory") return explicit("read");
   // One SELECT … GROUP BY over the run history (store countRunHistory); added after the policy baseline.
   if (entry.path === "automations.runCounts") return explicit("read");

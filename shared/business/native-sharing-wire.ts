@@ -42,7 +42,7 @@ export interface BusinessNativeCustodyReceipt {
  * It grants no publication permission; continuation rechecks current enrollment. */
 export interface BusinessNativePublicationDeferral {
  readonly schema:'agentlas.business.native-publication-deferral.v1';
- readonly state:'not-executed';readonly reason:'enrollment-required';readonly receiptId:string;
+ readonly state:'not-executed';readonly reason:'enrollment-required'|'publication-not-dispatched';readonly receiptId:string;
  readonly associationId:string;readonly associationRevision:number;readonly sourceRevision:number;readonly consentRevision:number;
  readonly request:import('./employee-agent-report').BusinessEmployeeAgentReportRequest;
  readonly nativePacketDigest:string;
@@ -50,10 +50,29 @@ export interface BusinessNativePublicationDeferral {
 export function isBusinessNativePublicationDeferral(v:unknown):v is BusinessNativePublicationDeferral {
  if(!employeeAgentOnly(v,['schema','state','reason','receiptId','associationId','associationRevision','sourceRevision','consentRevision','request','nativePacketDigest']))return false;
  const request=v.request;
- return v.schema==='agentlas.business.native-publication-deferral.v1'&&v.state==='not-executed'&&v.reason==='enrollment-required'
+ return v.schema==='agentlas.business.native-publication-deferral.v1'&&v.state==='not-executed'&&(v.reason==='enrollment-required'||v.reason==='publication-not-dispatched')
   &&isBusinessId(v.receiptId)&&isBusinessId(v.associationId)&&[v.associationRevision,v.sourceRevision,v.consentRevision].every(isRevision)&&employeeAgentHex(v.nativePacketDigest)
   &&employeeAgentOnly(request,['kind','agentResourceId','ownerReportId','expectedRevision','idempotencyKey'])&&request.kind==='report'
   &&[request.agentResourceId,request.ownerReportId,request.idempotencyKey].every(isBusinessId)&&(request.expectedRevision===null||isRevision(request.expectedRevision));
+}
+/** A distinct, current Root CAS receipt fences a lost old continuation. It is
+ * not a report receipt and cannot grant an enrollment or agent permission. */
+export interface BusinessNativePublicationRecovery {
+ readonly schema:'agentlas.business.native-publication-recovery.v1';readonly state:'recoverable';
+ readonly recoveryReceiptId:string;readonly deferralReceiptId:string;
+ readonly associationId:string;readonly associationRevision:number;readonly sourceRevision:number;readonly consentRevision:number;
+ readonly request:import('./employee-agent-report').BusinessEmployeeAgentReportRequest;readonly nativePacketDigest:string;
+}
+export function isBusinessNativePublicationRecovery(v:unknown):v is BusinessNativePublicationRecovery {
+ if(!employeeAgentOnly(v,['schema','state','recoveryReceiptId','deferralReceiptId','associationId','associationRevision','sourceRevision','consentRevision','request','nativePacketDigest']))return false;
+ const r=v as unknown as BusinessNativePublicationRecovery;
+ return r.schema==='agentlas.business.native-publication-recovery.v1'&&r.state==='recoverable'
+  &&[r.recoveryReceiptId,r.deferralReceiptId,r.associationId].every(isBusinessId)
+  &&[r.associationRevision,r.sourceRevision,r.consentRevision].every(isRevision)
+  &&employeeAgentHex(r.nativePacketDigest)
+  &&isBusinessNativePublicationDeferral({schema:'agentlas.business.native-publication-deferral.v1',state:'not-executed',reason:'enrollment-required',
+    receiptId:r.deferralReceiptId,associationId:r.associationId,associationRevision:r.associationRevision,
+    sourceRevision:r.sourceRevision,consentRevision:r.consentRevision,request:r.request,nativePacketDigest:r.nativePacketDigest});
 }
 /** Cross-runtime signature encoding. No getters, sparse arrays, undefined, secrets,
  * floats or coercions enter signed bytes. Object keys sort; array order is retained. */
@@ -73,7 +92,7 @@ function decode(v:unknown,size:number):boolean{
  const alphabet='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
  return typeof v==='string'&&((size===65&&/^[A-Za-z0-9_-]{87}$/.test(v)&&alphabet.indexOf(v.at(-1)!)%4===0)||(size===64&&/^[A-Za-z0-9_-]{86}$/.test(v)&&alphabet.indexOf(v.at(-1)!)%16===0));
 }
-export const businessNativeSigningText=(domain:'association-approve'|'request',payload:unknown):string=>businessNativeCanonical([BUSINESS_NATIVE_SHARING_SCHEMA,domain,payload]);
+export const businessNativeSigningText=(domain:'association-approve'|'request'|'device-register',payload:unknown):string=>businessNativeCanonical([BUSINESS_NATIVE_SHARING_SCHEMA,domain,payload]);
 export function isBusinessNativeIdentity(v: unknown): v is BusinessNativeIdentity {
   return employeeAgentOnly(v, ["nativeAccountId", "nativeWorkspaceId", "nativeSessionId", "nativeSessionRevision", "nativeHostId", "oneId",
     "hostKeyId", "hostPublicKey", "custodyGeneration", "installationGeneration", "trustGeneration"])

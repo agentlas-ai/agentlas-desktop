@@ -1,24 +1,24 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+// What a product Codex run inherits from the person's own Codex setup (owner decision 2026-10-11, all users):
+// nothing, except for One, and for One only the items the person switched on (capabilities/one-capabilities.ts).
+//
+// codex-product-home.ts decides what the run's home mirror links (memories, skills, hooks). This file decides the
+// per-run `-c` overrides for what the mirror cannot express. Measured on codex-cli 0.162.1 with a stand-in
+// Responses server capturing the real request body (2026-10-11):
+//   - `## Memory` block: ~4,100 tokens of the person's project notes on every request, and, once the memory folder
+//     is absent from the mirror, Codex runs its own memory-consolidation model calls over the shared state
+//     database. `features.memories=false` removes both.
+//   - Skills: Codex also reads `$HOME/.agents/skills` (a user-scope root, independent of CODEX_HOME;
+//     `skip_host_skill_discovery` does not stop it). HOME cannot be moved (git, ssh and every tool the agent runs
+//     read it), so each switched-off skill is disabled with `skills.config` (path + enabled=false).
+//     Skills of the agent's own folder (project scope) are not touched.
+//   - Plugins: `-c plugins.<id>.enabled=false` (unquoted id) removes a config-declared plugin's skills and MCP servers;
+//     `-c features.plugins=false` (== `--disable plugins`) removes every plugin, including account-synced remote ones.
+//   - MCP servers declared in the person's config.toml start late and add their tool schemas to every request
+//     from the second one on (measured +20,794 tokens). Closed with `-c mcp_servers.<name>.enabled=false`, except
+//     what the run itself bound (host), the Agentlas browser, user browser-automation servers (kept as the
+//     fallback by codex-desktop-surface.ts) and, on a Computer Use grant, the desktop-control servers. A product mirror's
+//     config declares no server of the person's (codex-product-home.ts allowlist), so this closes something only where
+//     a run keeps the person's own home (keyring sign-in, no links).
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -99,11 +99,11 @@ export function codexPersonalContextArgs(input: CodexPersonalContextInput = {}):
   const memoriesOn = personal?.memories === true;
   if (!memoriesOn) args.push("-c", "features.memories=false");
 
-  
-
-
-
-
+  // Codex's own thread goals stay off in every product run. A goal makes Codex start the next turn by itself the moment a
+  // turn ends with the goal open, so a run waiting on outside work re-reads its whole context in a loop. Dev replay r02
+  // (2026-10-17, TCIagent graph step1, owner's config.toml [features] goals = true): the step called create_goal, then
+  // four "Continue working toward the active thread goal" turns in two minutes (~1.45M input tokens) only re-checked
+  // teammates that were still working. Agentlas owns continuation (Goals, a graph team step waiting on its teammates).
   args.push("-c", "features.goals=false");
 
   // Skills: every Codex skill that is switched off, in each root this run's Codex will actually scan.
@@ -124,11 +124,11 @@ export function codexPersonalContextArgs(input: CodexPersonalContextInput = {}):
     args.push("-c", `skills.config=[${disabledSkills.map((file) => `{path=${JSON.stringify(file)},enabled=false}`).join(",")}]`);
   }
 
-  
-
-
-
-
+  // Plugins: with none switched on (every non-One run, and One before the person picks any), the whole plugin
+  // feature goes off. Per-plugin `plugins.<id>.enabled=false` only reaches plugins declared in config.toml; the
+  // account-synced openai-curated-remote ones (figma, data-analytics, notion, ... ) are not declared there and kept
+  // listing 15-30K chars of skills in every request, down to 2.4K-char judgment runs (measured 2026-10-13).
+  // Agentlas reaches its own tools through the MCP servers Main binds, not through Codex plugins.
   const codexPlugins = codexItems(selection, "plugin");
   const pluginsOn = codexPlugins.some((item) => item.enabled);
   const plugins = codexPlugins.filter((item) => !item.enabled && /^[A-Za-z0-9_@.-]+$/.test(item.name)).map((item) => item.name);

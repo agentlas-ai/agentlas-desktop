@@ -1,3 +1,3 @@
-import { BusinessDesktopEntry } from '@/business/BusinessDesktopEntry';
+import { BusinessRouteGate } from '@/business/BusinessRouteGate';
 
-export default function BusinessPage() { return <BusinessDesktopEntry />; }
+export default function BusinessPage() { return <BusinessRouteGate />; }

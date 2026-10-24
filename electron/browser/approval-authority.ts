@@ -12,13 +12,13 @@ type Authority = {
 const authorities = new Map<string, Authority>();
 
 /**
-
-
-
-
-
-
-
+ * Authorities are also recorded in the shared store, so the process that serves approvals can resolve one minted by
+ * another process. The approval server runs only in Main, but a run the daemon owns builds its MCP config, and so its
+ * browser authority, in the daemon. Resolved from Main's memory alone, every approval a daemon-owned run asked for came
+ * back "cancelled" without anyone seeing it: production 2026-10-15..17, Yotube room, every browser_evaluate /
+ * browser_run_code a teammate ran in a daemon-owned run (11 of 11) was cancelled, while the same teammate in a
+ * Main-owned run and One (325) ran theirs. Only a hash of the handle is stored; the handle stays in the minting
+ * process and the launcher's environment.
  */
 const TABLE = "browser_approval_authorities";
 const RETAIN_REVOKED_MS = 24 * 3_600_000;

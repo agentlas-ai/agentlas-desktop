@@ -16,6 +16,7 @@ import { navigate } from "@/lib/navigation";
 import { loadViewData, readViewData, writeViewData } from "@/lib/view-data-cache";
 import { LocalModelMiniCards, useLocalModelSnapshot } from "@/components/dashboard/LocalModelMiniCards";
 import { RUNTIME_CHIPS, RuntimeConnectPopup, connectCopy, useRuntimeAuth, type RuntimeChipSpec } from "@/components/connect/RuntimeConnect";
+import { manualSetupFor, manualSetupShellLabel, manualSetupText, setupOsFromNavigator, type ManualSetupRuntime } from "@shared/runtime-manual-setup";
 import { isPaidOverageUsageWindow, isSupportedProviderUsageWindow, providerHasUsableCredits } from "@shared/runtime-quota";
 import type { ByokBackend } from "@shared/models";
 import type {
@@ -49,7 +50,8 @@ interface EngineDef {
    * 우리가 대신 설치할 수 없는 CLI의 정확한 설치/인증 명령. 설치 경로가 없는데
    * "연결" 버튼만 두면 눌러도 아무 일이 없다 — 그럴 땐 명령을 그대로 보여준다.
    */
-  manualSetup?: string;
+  /** Hand setup for this OS (shared/runtime-manual-setup.ts), keyed by runtime. */
+  manualSetup?: ManualSetupRuntime;
   retryProviderId?: UsageRetryProviderId;
   keyEnv?: string;
   apiBackend?: ByokBackend;
@@ -76,8 +78,8 @@ const ENGINES: EngineDef[] = [
   { id: "kimi", label: "Kimi Code", auth: "cli", cliKind: "kimi", logoSrc: "/brand/llm/kimi.svg", logoAlt: "Kimi Code" },
   // 실행되는 런타임과 이 목록은 반드시 같아야 한다(오너 결정 2026-08-18). cursor와
   // Copilot CLI는 실제로 실행되는데 여기 없어서 대시보드에서 연결할 길이 없었다.
-  { id: "cursor", label: "Cursor", auth: "cli", detectKind: "cursor", manualSetup: "curl https://cursor.com/install -fsS | bash", logoSrc: "/brand/llm/cursor.svg", logoAlt: "Cursor" },
-  { id: "github-copilot-cli", label: "GitHub Copilot", auth: "cli", acpAgentId: "github-copilot-cli", manualSetup: "gh auth login", logoSrc: "/brand/llm/githubcopilot.svg", logoAlt: "GitHub Copilot" },
+  { id: "cursor", label: "Cursor", auth: "cli", detectKind: "cursor", manualSetup: "cursor", logoSrc: "/brand/llm/cursor.svg", logoAlt: "Cursor" },
+  { id: "github-copilot-cli", label: "GitHub Copilot", auth: "cli", acpAgentId: "github-copilot-cli", manualSetup: "github-copilot-cli", logoSrc: "/brand/llm/githubcopilot.svg", logoAlt: "GitHub Copilot" },
   { id: "agentlas-local", label: "Agentlas Local", auth: "local", logoSrc: "/brand/agentlas-mark.png", logoAlt: "Agentlas" },
 ];
 
@@ -301,7 +303,7 @@ export function EngineUsage() {
   const [usageLoadError, setUsageLoadError] = useState(false);
   const [creditPreferencePending, setCreditPreferencePending] = useState(false);
   const [creditPreferenceError, setCreditPreferenceError] = useState(false);
-  const [notice, setNotice] = useState<{ id: string; text: string; command?: string } | null>(null);
+  const [notice, setNotice] = useState<{ id: string; text: string; command?: string; commandLabel?: string; note?: string } | null>(null);
   const [keyFor, setKeyFor] = useState<string | null>(null);
   const [keyVal, setKeyVal] = useState("");
   // 접이식 그룹(구독형·CLI / API 키 / 로컬). 기본 펼침.
@@ -461,13 +463,16 @@ export function EngineUsage() {
     const api = ipc();
     if (!api || busy) return;
     if (e.manualSetup) {
-      // 설치 경로가 없는 CLI — 무반응 버튼 대신 실행할 명령을 그대로 보여준다.
+      // 설치 경로가 없는 CLI — 무반응 버튼 대신 이 OS에서 실행할 명령을 그대로 보여준다.
+      const setup = manualSetupFor(e.manualSetup, setupOsFromNavigator(typeof navigator === "undefined" ? undefined : navigator));
       setNotice({
         id: e.id,
         text: ko
           ? `${e.label}는 아래 명령으로 설치·인증한 뒤 자동으로 인식됩니다.`
           : `Install and sign in to ${e.label} with the command below; it is detected automatically.`,
-        command: e.manualSetup,
+        command: manualSetupText(setup),
+        commandLabel: manualSetupShellLabel(setup, ko),
+        ...(setup.note ? { note: ko ? setup.note.ko : setup.note.en } : {}),
       });
       return;
     }
@@ -665,7 +670,8 @@ export function EngineUsage() {
         {notice?.id === e.id && (
           <div role="alert" style={{ fontSize: 11, lineHeight: 1.5, color: "var(--dash-red)", background: "var(--paper)", border: "1px solid var(--paper-edge)", borderRadius: 8, padding: "6px 9px", overflowWrap: "anywhere" }}>
             {notice.text}
-            {notice.command && (<> {ko ? "터미널에서 직접 실행:" : "Run manually:"} <code>{notice.command}</code></>)}
+            {notice.command && (<> {notice.commandLabel ?? (ko ? "터미널에서 직접 실행:" : "Run manually:")} <code style={{ display: "block", whiteSpace: "pre-wrap", marginTop: 2 }}>{notice.command}</code></>)}
+            {notice.note && <><br />{notice.note}</>}
           </div>
         )}
       </div>

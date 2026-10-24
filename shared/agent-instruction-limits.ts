@@ -6,6 +6,8 @@
  *   32 KiB by default (https://developers.openai.com/codex/guides/agents-md). Text past it is not read there.
  * - softLines: Claude Code asks for instruction files under 200 lines because longer files consume
  *   context and reduce adherence (https://code.claude.com/docs/en/memory).
+ *
+ * Measured 2026-10-20 on the owner profile: no installed (non-builtin) agent exceeds hardBytes; five exceed softLines.
  */
 export const ALWAYS_ON_INSTRUCTION_LIMITS = { hardBytes: 32 * 1024, softLines: 200 } as const;
 

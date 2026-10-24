@@ -311,6 +311,7 @@ async function executeGate(gatePath: string, packageDir: string): Promise<{ code
       timeout: 30_000,
       env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
       maxBuffer: 4 * 1024 * 1024,
+      windowsHide: true,
     }, (error, stdout, stderr) => {
       const code = typeof error?.code === "number" ? error.code : error ? 1 : 0;
       resolve({ code, stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });

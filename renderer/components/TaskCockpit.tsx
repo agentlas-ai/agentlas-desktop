@@ -34,7 +34,9 @@ import { LoadingEstimate } from "@/components/LoadingEstimate";
 import { navigate } from "@/lib/navigation";
 import { isPlaceholderTaskTitle, taskTitleForDisplay } from "@/lib/task-title";
 import { detailForUser, failureCode, failureMessage, isChatBusyFailure, knownStartFailureHuman, looksLikeMachineText } from "@/lib/invocation-failure";
-import { createContext, useContext, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState, useMemo, type CSSProperties, type Dispatch, type SetStateAction } from "react";
+import { useContext, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState, useMemo, type CSSProperties, type Dispatch, type SetStateAction } from "react";
+import { WorkChatDraftContext } from "@/lib/work-chat-draft";
+export { WorkChatDraftContext, type WorkChatDraftRequest } from "@/lib/work-chat-draft";
 import { useRouter, useSearchParams } from "next/navigation";
 import { grantForPastedImage, ipc, ipcEvents } from "@/lib/ipc";
 import { readOneFollowupOutbox, saveOneFollowupIntent, removeOneFollowupIntent, pauseOneFollowupOutbox, resumeOneFollowupIntent, type OneFollowupIntent } from "@/lib/one-followup-outbox";
@@ -139,10 +141,10 @@ function clearWorkUncertainAdmission(chatId: string, runId: string): void {
 }
 
 /**
-
-
-
-
+ * The same rule One uses (OneShell absentAdmissionProvesNoStart). Main answers "absent" for a run with no admission
+ * row. That proves no start only when Main received the request and refused it before reserving, or when the record
+ * predates the Main process that answers. Work used to treat every "absent" as unresolved, so one lost send blocked
+ * every later send in that chat with nothing on screen able to clear it (2026-10-18 sweep).
  */
 function workAbsentAdmissionProvesNoStart(admission: InvocationAdmissionReceipt, pending: WorkUncertainAdmission): boolean {
   if (admission.status !== "absent" || admission.runId !== pending.runId) return false;
@@ -318,11 +320,11 @@ function uid(): string {
  *   "무엇을 하면 되는지"까지 담아 보낸다).
  */
 function startFailureText(cause: unknown, locale: string, hadImages: boolean): string {
-  
-
-
-
-
+  /*
+   * ★엔진 문구가 **식별자**일 수 있다 — 그러면 "이유: chat_invocation_not_started" 가
+   *   그대로 뜬다(실측 2026-09-08, 실제로 화면에 나왔다). 읽어도 할 일을 알 수 없다.
+   *   사람 문장일 때만 붙인다.
+   */
   const ko = locale === "ko";
   const raw = knownStartFailureHuman(cause, ko) ?? detailForUser(cause);
   const restored = ko
@@ -371,8 +373,8 @@ function receiptRecoveryMessage(
   }
   // Main 이 직접 끊은 실행(앱 종료·Goal 일시정지/삭제)은 실행 오류가 아니다 — 붉은 실패 줄 대신 이유를 적는다.
   const hostStop = receipt.hostStopCause ? invocationHostStopCopy(receipt.hostStopCause, locale) : null;
-
-
+  // Host stops (update, app quit, Goal pause), cancellations and interruptions without an error are internal states:
+  // nothing to draw (owner 2026-10-14). Real failures and sign-in waits stay, they need the owner.
   if (hostStop || receipt.status === "cancelled" || (receipt.status === "interrupted" && !receipt.errorMessage?.trim() && !receipt.errorCode?.trim())) return null;
   const isFailure = receipt.status === "failed" || receipt.status === "interrupted";
   const baseText = receipt.status === "waiting_input"
@@ -475,13 +477,13 @@ function workspacePreviewFromImageUrl(url: string, index: number): WorkspaceFile
  * 우리가 만든 것만이 아니다.
  */
 /**
-
-
-
-
-
-
-
+ * 실행 기록에서 "지금 돌고 있는 로컬 서버" 주소를 찾는다.
+ *
+ * 예전에는 답변 본문만 훑었다. 그래서 모델이 "서버를 띄웠습니다"라고만 하고 주소를 적지
+ * 않으면 — 주소는 `Serving HTTP on 127.0.0.1 port 8932` 처럼 도구 결과에만 있었다 —
+ * 우측 레일이 아예 열리지 않았고, 화면에는 떠 있는 컴퓨터-화면 카드의 "화면 연결 대기 중"만
+ * 남았다(2026-09-03 실측: 레일 탭 null, 라이브뷰 호출 0회).
+ * 파일 경로는 이미 도구 기록에서 모으고 있었다 — 주소도 같은 자리에서 모은다.
  */
 function normalizeLocalServerUrl(url: string): string {
   // 같은 서버가 본문에는 `…:8932`, 도구 결과에는 `…:8932/` 로 적힌다. 그대로 두면 프리뷰
@@ -528,28 +530,28 @@ function toolFilePathsFromSteps(
     } catch {
       continue;
     }
-    
-
-
-
-
-
-
-
-
-
-
+    /*
+     * ★셸로 만든 파일도 이 턴의 산출물이다.
+     *
+     * 쓰기 도구가 승인 거부되면 모델은 셸로 우회한다. 그렇게 만들어진 파일은 여기서 한 번도
+     * 안 잡혔고, 결과 레일은 "결과물 0"이라고 적었다 — 디스크에는 다섯 개가 있는데. 그 빈
+     * 자리를 답변 산문에서 주워 온 경로가 채웠고, 그건 만들어진 적 없는 파일이었다.
+     * 방향이 정확히 반대였다(QA 실측 2026-09-07).
+     *
+     * 명령이 **명시적으로** 쓴 곳만 읽는다. 결과 레일의 잘못된 항목은 없는 항목보다 나쁘다 —
+     * 사람을 있지도 않은 파일로 보낸다.
+     */
     if (detail.type === "shell") {
-      
-
-
-
-
-
-
-
-
-
+      /*
+       * ★실패한 명령이 쓰려던 곳은 산출물이 아니다 (QA 실측 2026-09-08).
+       *
+       * exit 1 로 죽은 명령의 리다이렉션 대상까지 결과 레일에 올리고 있었다. 그 명령은
+       * 파일을 만들지 못했는데 레일은 만들어졌다고 말한 셈이다 — 사람을 없는 파일로
+       * 보내는 것이라, 없는 항목보다 나쁘다.
+       *
+       * 종료 코드를 **모르는 경우**(undefined/null)는 그대로 수집한다. 모르는 것을
+       * 실패로 단정하면 종료 코드를 안 싣는 런타임에서 산출물이 통째로 사라진다.
+       */
       if (typeof detail.exitCode === "number" && detail.exitCode !== 0) continue;
       for (const written of shellWrittenPaths(detail.command)) {
         if (seen.has(written)) continue;
@@ -785,10 +787,10 @@ async function ensureSurfaceApproval(
       // Continue to explicit confirmation if the ledger is temporarily unavailable.
     }
   }
-  
-
-
-
+  /* ★오너 이사회 결정(2026-08-10): 사람이 기계적으로 누르기만 하는 확인은 없앤다.
+     AI 가 끝까지 리드하고, 결정은 **원장에 기록**으로 남는다(묻지 않을 뿐 감사는 유지).
+     단 하나 남긴 것: **실제 돈이 나가는 결제.** 그건 되돌릴 수 없고 법적 책임이 따르므로
+     "기계적으로 누르는 관문"의 범주가 아니다. */
   if (approval.kind === "payment") {
     const ok = await confirmPopup(approval.message, {
       locale, title: locale === "ko" ? "결제 확인" : "Confirm payment", tone: "warning",
@@ -808,11 +810,11 @@ async function ensureSurfaceApproval(
       metadata: approval.metadata,
     });
   } catch (cause) {
-    
-
-
-
-
+    /*
+     * ★"승인을 적용하지 못했습니다"만 뜨고 **왜인지는 없었다** (실측 2026-09-08).
+     *   막다른 문장이다 — 사용자가 다시 시도할지 다른 걸 할지 고를 근거가 없다.
+     *   엔진이 말한 이유를 그대로 붙인다.
+     */
     const reason = detailForUser(cause);
     await alertPopup(locale === "ko"
       ? `승인을 적용하지 못했습니다.${reason ? `\n\n이유: ${reason}` : ""}`
@@ -843,12 +845,12 @@ const RIGHT_PANEL_MAX_WIDTH = 1280;
 const RIGHT_PANEL_OVERLAY_MAX_VIEWPORT = 760;
 const RIGHT_PANEL_RESULT_RATIO = 0.432;
 /**
-
-
-
+ * 좌측 사이드바 폭 — 대화 열을 계산할 때 먼저 빼 둔다. 사이드바를 세지 않으면 최소 창(960px)에서
+ * 레일이 415px 까지 자라 채팅이 271px 로 눌렸다(2026-09-03 실측: 작성창 215px, 한 문장이 3줄).
+ * 오너가 폭을 바꿀 수 있게 된 뒤(2026-10-04)로는 상수(274)가 아니라 지금 보이는 폭을 잰다.
  */
 const chatSidebarWidth = () => currentWorkSidebarWidth();
-/** */
+/** 한국어 본문이 한 줄에 충분히 들어가는 최소 대화 열 폭(실측 기준). */
 const MIN_READABLE_CHAT_COLUMN = 520;
 // 세로 높이는 폭과 달리 기본이 '전체'다 — null 이면 키를 지워 창 크기를 그대로 따라간다.
 
@@ -1178,15 +1180,15 @@ function clampRightPanelWidth(width: number): number {
     ? RIGHT_PANEL_MAX_WIDTH
     : window.innerWidth <= RIGHT_PANEL_OVERLAY_MAX_VIEWPORT
       ? Math.max(RIGHT_PANEL_MIN_WIDTH, window.innerWidth - 40)
-      
-
-
-
-
-
-
-
-
+      /*
+       * ★남는 자리는 대화 몫부터 뗀다(2026-09-04 실측).
+       *
+       * 예전 식(innerWidth - 274 - 레일최소)은 **레일이 최소 320 을 받도록** 남겨 두고
+       * 나머지를 대화에 줬다. 그래서 1024px 창에서 레일 430 · 작성창 288 이 됐다 —
+       * 같은 폭에서 One 은 작성창 720 을 지킨다(레일이 224 로 줄어든다).
+       * 이제 대화가 읽을 수 있는 폭을 먼저 떼고, 그러고도 레일이 자기 최소보다 작아지면
+       * 레일 최소가 이긴다(둘 다는 못 지키는 폭에서의 마지막 방어선).
+       */
       : Math.max(RIGHT_PANEL_MIN_WIDTH, window.innerWidth - chatSidebarWidth() - MIN_READABLE_CHAT_COLUMN);
   return Math.min(RIGHT_PANEL_MAX_WIDTH, viewportMax, Math.max(RIGHT_PANEL_MIN_WIDTH, Math.round(width)));
 }
@@ -1197,14 +1199,14 @@ function preferredRichResultWidth(): number {
   // 흩어져 있어 한 곳만 고치면 반쪽만 착지했다.
   const requested = window.innerWidth <= RIGHT_PANEL_OVERLAY_MAX_VIEWPORT
     ? Math.round(window.innerWidth * 0.86)
-    
-
-
-
-
-
-
-
+    /*
+     * ★결과가 커도 대화가 읽을 수 있어야 한다(2026-09-04 실측).
+     *
+     * 비율(0.432)만 보고 넓히면 1240px 창에서 레일 536 · 작성창 398 이 됐다. 한국어 본문이
+     * 한 줄에 서른 자쯤에서 꺾이는 폭이다(같은 창에서 One 은 720). 그래서 비율은 그대로 두되
+     * **대화 열의 최소 폭을 먼저 떼어 놓고** 남는 만큼만 결과에 준다. 큰 화면에서는 예전처럼
+     * 비율이 이기고, 좁은 화면에서만 이 상한이 걸린다.
+     */
     : Math.min(
         Math.round(window.innerWidth * RIGHT_PANEL_RESULT_RATIO),
         window.innerWidth - chatSidebarWidth() - MIN_READABLE_CHAT_COLUMN,
@@ -1492,9 +1494,9 @@ function completePipeline(stages: PipelineStage[] | undefined): PipelineStage[] 
 }
 
 /**
-
-
-
+ * Interrupted answers (owner stop, host stop, update, restart) are internal states, not replies: the turn that follows
+ * answers instead. Work, the supervisor and graph chats hide them like One does (owner 2026-10-14: "이거 다 UI에
+ * 안보이게 해"). The stored row keeps its banner.
  */
 function withoutInterruptedAnswers<T extends { role: string; text: string }>(history: T[]): T[] {
   return history.filter((entry) => !(entry.role === "assistant" && isInterruptedPartial(entry.text)));
@@ -1823,9 +1825,9 @@ function preserveRichStepsBySignature(
 
 /** Convert redacted durable tool-use rows back into chat steps after reload. */
 /**
-
-
-
+ * 상태줄에 붙일 단계는 최근 것만 있으면 되지만, 재진입 복원은 다르다 — 여기서 자른 만큼
+ * 결과 탭의 산출물이 사라진다. 도구를 33번 넘게 쓴 실행을 다시 열면 앞쪽 산출물이
+ * 통째로 없어졌다(2026-09-03 실측: 40개 중 32개만 남고 step-01~08 소실).
  */
 function mcpStepsFromLedger(events: RunEventUi[], limit = 32): StreamStep[] {
   const steps: StreamStep[] = [];
@@ -1888,13 +1890,13 @@ function mcpStepsFromLedger(events: RunEventUi[], limit = 32): StreamStep[] {
 }
 
 /**
-
-
-
-
-
-
-
+ * 재진입 복원 — 지난 실행의 도구 기록을 각자 제자리로 돌려놓는다.
+ *
+ * 대화 메시지에는 본문만 저장된다(도구 기록 칸이 없다). 그래서 다시 열 때 실행 원장에서
+ * 되살리지 않으면, 파일 이름을 답변 글에 적지 않은 산출물은 결과 탭에서 통째로 사라진다.
+ * 예전에는 "마지막 실행 하나"만 되살려 마지막 답변에 붙였다 — 두 번 실행한 대화를 다시
+ * 열면 첫 실행에서 만든 파일이 없어졌다(2026-09-03 실측: 산출물 2개 중 1개만 남음).
+ * One 은 이미 같은 원장(runLedger.chatTimeline)으로 지난 턴을 되살린다.
  */
 /**
  * 추론 텍스트에서 상태줄에 실을 한 줄을 고른다.
@@ -2203,12 +2205,12 @@ function restoreAnsweredQuestions(
     const nextUser = i >= messages.length - 1
       ? undefined
       : messages.slice(i + 1).find((m) => m.role === "user");
-    
-
-
-
-
-
+    /*
+     * ★질문 뒤에 앱이 붙인 말풍선(아직 답을 기다린다 등)만 있고 사람 메시지가 없으면 질문은 살아 있다.
+     *   예전에는 "마지막 메시지가 아니면" 무조건 ✓ 로 잠가, 호스트 말풍선 한 줄에 Work 질문 시트가
+     *   사라졌다(격리 앱 실측 2026-09-27). Main 의 규칙(electron/confirm pendingQuestionMessage:
+     *   뒤에 사용자 메시지가 없고 확정 답이 없으면 산다)과 같게 맞춘다.
+     */
     if (!nextUser) return msg;
     const answerText = (nextUser?.text?.trim() ?? "") || committedReply;
     // 질문 시트 배치 스캐폴드("질문: …\n선택: …\n답변: …" 청크의 \n\n join —
@@ -2265,19 +2267,16 @@ function parseQuestionBatchReply(text: string): Array<{ question: string; answer
 
 
 /**
-
-
-
-
-
-
+ * ★IPC 목록은 배열로 못박고 들어온다.
+ *
+ * 실측(2026-08-08, 실렌더 검증): `pendingHubApprovals()` 가 null 을 돌려주자
+ * 렌더에서 `.filter` 가 던져 **ErrorBoundary 가 작업 화면을 통째로 대체**했다
+ * (전역 오류 폴백). `.catch()` 는 거절만 막고 null **반환**은 못 막는다.
+ * 목록 하나가 비었다고 채팅 전체가 사라지면 안 된다 — 그 부분만 비운다.
  */
 function asList<T>(value: T[] | null | undefined): T[] {
   return Array.isArray(value) ? value : [];
 }
-
-export interface WorkChatDraftRequest { id: string; text: string; onConsumed: () => void }
-export const WorkChatDraftContext = createContext<WorkChatDraftRequest | null>(null);
 
 export default function ChatPageWrapper() {
   // useSearchParams는 Suspense boundary를 요구함 (Next 15)
@@ -2439,13 +2438,13 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
       })
       .catch((cause) => {
         if (cancelled || version !== readVersion) return;
-        
-
-
-
-
-
-
+        /*
+         * ★"목표가 없다" 와 "목표를 못 읽었다" 는 다르다 (실측 2026-09-08).
+         *   예전에는 읽기가 실패해도 그냥 null 을 넣었다. 그러면 대화에 목표 번호가
+         *   붙어 있는데도 화면은 **목표가 없는 것처럼** 보인다 — 오너가 겪은
+         *   "goal 설정했는데 안 걸린다" 가 이 모습이다.
+         *   값은 그대로 비우되(모르는 것을 지어내지 않는다), 못 읽었다는 사실은 말한다.
+         */
         setGoalContext(null);
         setGoalContextStale(true);
         const raw = detailForUser(cause);
@@ -2862,14 +2861,14 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
     setRightPanelWidth(clampRightPanelWidth(rightPanelPreferredWidthRef.current));
   }, []);
   const readableRightPanelActive = rightPanelOpen && rightPanelTab === "panel" && Boolean(mediaPreview);
-  
-
-
-
-
-
-
-
+  /*
+   * ★창이 좁아지면 레일도 같이 줄어든다(2026-09-04 실측).
+   *
+   * 폭은 열 때 한 번만 계산했고 창 크기 변화에는 반응하지 않았다. 그래서 1240px 에서
+   * 결과를 연 뒤 1024px 로 줄이면 레일은 446 을 그대로 붙들고 작성창이 **272px** 로
+   * 눌렸다 — 고치기 전(398)보다 나빴다. 저장은 하지 않는다: 창 크기에 맞춰 줄어든 값은
+   * 사용자가 고른 폭이 아니라 지금 화면이 허용하는 폭이다.
+   */
   useEffect(() => {
     if (typeof window === "undefined") return;
     const onResize = () => setRightPanelWidth((current) => {
@@ -2898,14 +2897,14 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
   const [restoredFolder, setRestoredFolder] = useState<string | null>(null);
   // /clear 뒤에 메시지를 다시 적재하지 않고도 실제 컨텍스트 리셋이 끝났음을 알려준다.
   const [sessionNotice, setSessionNotice] = useState<string | null>(null);
-
-
+  // 이번 실행의 도구 기록에서 본 로컬 서버 주소. 모델이 답변 본문에 주소를 안 적어도
+  // 우측 레일이 열려야 한다(2026-09-03 실측: 주소가 도구 결과에만 있으면 레일이 안 열렸다).
   const runServerUrlsRef = useRef<string[]>([]);
   /**
-
-
-
- */
+   * 에이전트가 보고 있는 화면(브라우저·컴퓨터). 도구가 도는 동안 우측 레일 안에 그린다 —
+   * One 과 같은 자리다. 예전에는 떠 있는 카드만 이 사실을 들었고 레일은 열리지도 않았다
+   * (2026-09-03 실측: 브라우저 도구 실행 중 레일 없음, 카드만 창 한가운데).
+   */
   const [agentScreen, setAgentScreen] = useState<{ mode: "browser" | "computer" } | null>(null);
   const [questionCommitPending, setQuestionCommitPending] = useState(false);
   /** 누른 순간 닫힌 질문 묶음(확정 대기 중). 거절되면 null 로 풀려 시트가 되살아난다. */
@@ -3061,15 +3060,15 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
     setRightPanelOpen(true);
     writeRightPanelPreference(true, tab);
     if (tab === "panel") {
-      
-
-
-
-
-
-
-
-
+      /*
+       * ★자동으로 넓힌 폭은 사용자의 선택이 아니므로 저장하지 않는다(2026-09-03 실측).
+       *
+       * 예전에는 여기서 넓힌 값을 그대로 기록했고, 넓히기는 Math.max 라 줄어들지 않았다.
+       * 그래서 결과를 한 번 연 것만으로 레일이 1240px 창에서 536px 을 영구 점유했고,
+       * 이후 **모든 대화**가 작성창 398px 로 눌렸다(같은 창에서 One 은 레일 252 · 작성창 720).
+       * 빈 레일이 대화보다 넓은 화면은 그렇게 만들어졌다. 수리 뒤 새 대화는 레일 392 ·
+       * 작성창 542 로 돌아온다(실측). 손으로 끌어 정한 폭은 그대로 저장된다 — 그건 선택이다.
+       */
       requestReadableRightPanelWidth();
     }
   }, [requestReadableRightPanelWidth]);
@@ -3098,14 +3097,14 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
         fileUrl: fileUrlForToolPath(readablePath),
       };
     }
-    
-
-
-
-
-
-
-
+    /*
+     * ★자리를 **먼저** 연다. 내용은 읽히는 대로 채운다.
+     *
+     * 예전에는 파일을 다 읽은 뒤에야 패널을 열었다. 그래서 실행이 끝나는 순간 결과 레일이
+     * 사라졌다가 읽기가 끝나야 돌아왔다 — 사람이 결과를 보려는 바로 그 순간 결과창이
+     * 없어진다(2026-09-03 실측: 완료 직후 2.5초간 레일 소멸, 그 길이는 읽기 시간과 일치).
+     * 먼저 열면 빈 프레임이 잠깐 보이지만, 사라졌다 돌아오는 것보다 낫다.
+     */
     if (!isCurrentChat()) return;
     setSurface(null);
     setArtifact(null);
@@ -3131,16 +3130,16 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
           reason: text.reason,
         };
       } else {
-        
-
-
-
-
-
-
-
-
-
+        /*
+         * A persisted transcript link can outlive the file it referenced.
+         * Keep the tab and show an explicit unavailable state instead of an
+         * empty viewer that looks like a successfully opened blank document.
+         *
+         * ★사유도 함께 바꿔야 한다 (QA 실측 2026-09-08). 여기서 available 만 내리고
+         * reason 을 그대로 두면 자리표시 문장("아직 읽지 않았습니다. 외부 앱으로 열어
+         * 보세요")이 남는다. 파일이 없는데 사람을 파인더로 보내 없는 파일을 찾게 만든다.
+         * 읽기가 실패했다는 것은 최소한 "여기서 못 읽었다"이므로, 부재로 말한다.
+         */
         next = { ...next, content: "", available: false, reason: "missing" };
       }
     }
@@ -3289,7 +3288,7 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
       const pushWorkflow = (
         kind: NetTimelineItem["kind"],
         text: string,
-
+        // 영수증 실측 — 도구명/토큰. 단일 에이전트(fallback) 경로에서도 영수증을 채운다.
         receipt?: { toolName?: string; tokens?: number },
       ) => {
         const trimmed = text.trim();
@@ -3400,7 +3399,7 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
                 tier: ev.tier,
                 kind: ev.delegateTo ? "handoff" : ev.tool ? "tool" : "status",
                 text: ev.status?.trim() || label,
-
+                // 영수증 실측 — 이벤트가 줄 때만(없으면 undefined → 카드에서 생략)
                 toolName: ev.tool?.name,
                 tokens: ev.tokens,
                 delegateTo: ev.delegateTo,
@@ -3903,11 +3902,11 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
         const wasSteeringCancel = !wasUserCancel
           && failureCode.toLowerCase() === "cancelled"
           && steerQueueRef.current.length > 0;
-        
-
-
-
-
+        /*
+         * ★사유가 식별자면 화면에 올리지 않는다. 대괄호 안의 코드도 마찬가지다 —
+         *   사용자에게 `[runtime_error]` 는 아무 정보가 아니다(실측 2026-09-08).
+         *   코드는 진단에 필요하니 title 로 남긴다.
+         */
         const rawFailure = ev.error?.message?.trim() ?? "";
         const failureMessage = rawFailure && !looksLikeMachineText(rawFailure)
           ? rawFailure
@@ -4194,18 +4193,18 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
     } });
     const unsubscribe = events.onStoreChanged((change) => {
       if (change.entity === "runtime") { refresh(); return; }
-      
-
-
-
-
-
-
-
-
-
-
-
+      /*
+       * ★목표가 닫혀도 화면이 그 사실을 못 받던 자리 (QA 실측 2026-09-08).
+       *
+       * 목표가 완료되면 Main 은 계약을 닫고 대화의 목표 결속을 풀며 store 변경을
+       * 알린다. 원장은 정확했다 — 계약 completed, 대화의 목표 번호 null. 그런데 이
+       * 구독은 `entity === "runtime"` 만 보고 있어서 **chat 변경을 아무도 안 받았다.**
+       * 그래서 끝난 목표의 칩과 "목표 추진" 토글이 화면에 계속 떠 있었고, 다른 대화에
+       * 갔다 와야(=다시 읽어야) 그제야 사라졌다. 사용자에게는 "목표가 안 닫힌다"로 보인다.
+       *
+       * 이 대화가 바뀌었다고 알려 오면 대화를 다시 읽는다. 목표 결속·제목처럼 Main 이
+       * 소유한 값은 이 경로로만 화면에 도착한다.
+       */
       if (change.entity === "chat" && change.id === chatId) refreshOpenChat.call();
     });
     // Subscribe before catch-up so an append during initial hydration is read.
@@ -4368,11 +4367,11 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
         }).catch(() => {
           if (cancelled || !isCurrentChat()) return;
           setHydratedChatId(chatId);
-          
-
-
-
-
+          /*
+           * ★대화를 못 읽었는데 화면이 **아무 말도 안 했다** (실측 2026-09-08).
+           *   그러면 빈 대화와 구별되지 않아 사용자는 자기 기록이 사라진 줄 안다.
+           *   읽기 실패는 사실이 아니다 — 사실인 척하지 않는다.
+           */
           setSessionNotice(
             requestedFocusMessageId
               ? (locale === "ko"
@@ -4612,13 +4611,13 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
         }).catch(() => undefined);
         return;
       }
-
-
-
-
-
-
-
+      // Reconcile whenever THIS chat stops being active — not only when this
+      // view owns the run. runIdRef is set only for runs this renderer itself
+      // started, so a run begun by an automation, a schedule, the phone bridge,
+      // another window, or one already in flight when the view opened left this
+      // handler returning immediately: the answer sat in the database and the
+      // screen kept showing the old state until the user navigated away and
+      // back. Owner-reported 2026-08-03, across every session.
       if (!runIdRef.current && !wasActive) return;
       const endedRunId = runIdRef.current;
       streamTicksRef.current?.flush();
@@ -4764,18 +4763,18 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
     };
   }, [busy, chatId, locale, workFollowupOptimisticIds]);
 
-  
-
-
-
-
-
-
-
-
-
-
-
+  /*
+   * ★런타임이 바뀔 때마다 모델 목록을 실시간 조회해 **버리고 있었다** (실측 2026-09-08).
+   *
+   *   `modelOptions` 를 읽는 곳이 이 파일에 **한 곳도 없다**(선언 한 줄이 전부였다).
+   *   그런데 이 효과는 활성 런타임이 바뀔 때마다 `runtime.listModels` 를 부른다 —
+   *   BYOK 면 **제공자 API 를 네트워크로** 치고, ollama 면 로컬 서버를 친다.
+   *   보여 줄 화면이 없는데 매번 값을 치르고 있었다(요금·요청 한도까지).
+   *
+   *   조회를 지운다. 헤더에서 모델을 바꾸는 화면이 다시 필요해지면 그때 **그 화면과 함께**
+   *   되살리는 것이 맞다 — 반쪽만 살아 있는 배선은 비용만 내고 아무도 못 쓴다.
+   *   (되살릴 때 필요한 호출 모양은 이 커밋의 이력에 그대로 남는다.)
+   */
 
   const requestRunCancellation = useCallback((runId: string) => {
     const api = ipc();
@@ -4938,18 +4937,18 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
         // Define exactly once, before the run. `defineGoal` returns the
         // existing active contract instead of overwriting it, so a later
         // steering turn can never become the goal by accident.
-        
-
-
-
-
-
-
-
-
-
-
-
+        /*
+         * ★목표를 못 만들었으면 **그 자리에서 말한다** (오너 실사용 2026-09-08:
+         *   "goal 설정했는데 안 닫힌다. 진행도 안 된다").
+         *
+         *   예전에는 `.catch(() => null)` 이었다. 계약 생성이 실패해도 조용히 null 이 되고
+         *   실행은 **목표 없이** 그대로 진행됐다. 화면에는 목표 칩이 떠 있으니 사람은
+         *   목표가 걸린 줄 안다 — 그런데 닫을 대상이 없어 영원히 안 끝난다.
+         *   엔진·IPC·화면 세 곳이 모두 삼켜서 앱 로그에 "goal" 이 0줄이었다.
+         *
+         *   실행 자체는 막지 않는다(목표 없이라도 답은 나와야 한다). 다만 **목표가 안 걸렸다는
+         *   사실**은 반드시 보이게 한다.
+         */
         let defined = null;
         try {
           defined = await api.chats.defineGoal(chat.id, userPrompt, locale);
@@ -5070,14 +5069,14 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
         stormbreakerMode: opts?.stormbreakerMode,
         runtimeSelection: chat.runtimeSelection ?? undefined,
       };
-      
-
-
-
-
-
-
-
+      /*
+       * ★보낸 요청은 화면을 떠나도 실행된다 (오너 2026-09-29 "다른 메뉴 가도 워크나 원
+       *   정상적으로 알아서 돌아가고 있어야 한다").
+       *   예전에는 목표 정의·첨부 스냅샷·제목 변경을 기다리는 사이 오너가 설정으로 가면
+       *   `if (!isCurrentChat()) return false` 로 invoke.run 을 **부르지도 않고** 끝났다 —
+       *   누른 전송이 조용히 사라졌다. 이제 화면 갱신만 건너뛰고 실행은 메인에 그대로 넘긴다.
+       *   돌아오면 대화는 attach/history 로 메인이 가진 실행을 다시 붙인다.
+       */
       if (!isCurrentChat()) {
         if (opts?.decisionContinuation) {
           const continued = await api.confirm.continueAnswer({
@@ -5272,13 +5271,13 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
           lastRunIdRef.current = runId;
           return false;
         }
-        
-
-
-
-
-
-
+        /*
+         * ★오너 규칙 2026-09-23 — 진행 중인 목표·실행이 있는 대화에 보낸 새 지시는
+         *   "다시 보내세요"로 돌려보내지 않는다. 화면이 그 실행을 몰랐을 때(목표 스윕이
+         *   방금 다시 돌린 경우 등) Main 은 chat busy 로 거절한다. 그 말은 같은 대화의
+         *   기존 방향 전환(steer) 큐로 넘기고, 돌고 있는 실행에 다시 붙는다.
+         *   Main 이 이 runId 를 받아들인 적이 없다는 것이 확인된 때만(거절·미발송) 한다.
+         */
         if (isChatBusyFailure(cause) && (admissionStatus === "rejected" || !requestDispatched)) {
           const followupRequest: McpInvocationRequest = {
             chatId: chat.id,
@@ -5338,19 +5337,19 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
             return true;
           }
         }
-        
-
-
-
-
-
-
-
-
-
-
-
-
+        /*
+         * ★"입력 내용은 보존되었습니다" 가 사실이 아니었다 (오너 실사용 2026-09-07:
+         * "내가 보낸 메세지가 자꾸 없어진다 사진도 없어지고").
+         *
+         * 여기까지 왔다는 것은 실행이 **시작되지 않았다**는 뜻이고, 그러면 Main 은 그 턴을
+         * 저장한 적이 없다(저장은 mcp/client.ts 의 persistUserMessage 에서 일어난다).
+         * 화면의 낙관적 사용자 줄은 메모리에만 있어서 다음 기록 새로고침에 사라진다.
+         * 문구는 보존됐다고 말하는데 되돌리는 코드는 어디에도 없었다 —
+         * setComposerPrefill 은 다른 자리에서만 쓰였다.
+         *
+         * 이제 실제로 되돌린다. 그리고 기록에 없는 줄은 화면에서도 지운다 — 남겨 두면
+         * "보냈다"로 읽히고 새로고침 때 또 사라진다.
+         */
         setComposerPrefill(userPrompt);
         // The exact text is back in the composer; Main's answer for the fenced run decides the rest.
         settleWorkFirstSend();
@@ -5599,7 +5598,7 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
         effort: selection.effort ?? null,
         longContextEnabled: selection.longContext,
       });
-
+      // 실행 중 변경은 지금 도는 실행(연속 패스 포함)엔 안 붙고 다음 실행부터다 — 언제 적용되는지, 바로 바꾸려면 무엇을 하는지 말한다(오너 원칙 2026-09-14).
       setSessionNotice(busy
         ? (locale === "ko"
           ? "모델 변경을 저장했습니다. 현재 실행의 모델은 바뀌지 않습니다. 저장한 선택은 다음 새 실행부터 사용하며, Goal의 자동 재개 모델까지 바뀌었다는 뜻은 아닙니다."
@@ -5642,16 +5641,16 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
       questionCommitPendingRef.current = messageId;
       setQuestionCommitPending(true);
       setSessionNotice(null);
-      
-
-
-
-
-
+      /*
+       * 시트는 누른 순간 닫는다(오너 2026-09-27: "제출하면 바로 스무스하게 전달되야지").
+       * 예전에는 확정 IPC 와 후속 실행 시작을 기다리는 동안 시트가 "실행이 정리되면 전송"으로 남아
+       * 눌렀는지 알 수 없었다. 확정이 거절되면 아래에서 가림을 풀어 질문과 입력을 되살린다.
+       * (확정 → 전송은 전송이 확정 영수증의 continuationRunId 를 써야 해서 동시에 보낼 수 없다.)
+       */
       setOptimisticAnsweredQuestionId(messageId);
-      
-
-
+      // The answer's turn takes the same permission as any Work message. It used to be guessed from the answer's
+      // words ("read"/"읽기만" → read, "write"/"편집" → write), so "이미 read 했어" ran the follow-up read-only
+      // (2026-10-18). No question carries a typed permission choice, so nothing here may infer one from prose.
       const perms: PermissionLevel = DEFAULT_PERMISSION;
       try {
         let receipt: { chatId: string; sourceMessageId: string; continuationRunId: string } | null = null;
@@ -5914,7 +5913,7 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
         return;
       }
       if (action.type === "copy") {
-        
+        /* ★눌러도 아무 말이 없고 실패해도 조용했다 (실측 2026-09-08). */
         void navigator.clipboard.writeText(action.prompt || JSON.stringify(manifest, null, 2))
           .then(() => setSessionNotice(locale === "ko" ? "클립보드에 복사했습니다." : "Copied to the clipboard."))
           .catch(() => setSessionNotice(locale === "ko" ? "클립보드에 복사하지 못했습니다." : "Could not copy to the clipboard."));
@@ -6686,10 +6685,10 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
         setSessionNotice(failureMessage(cause));
       });
   }, [chat]);
-  
-
-
-
+  /*
+   * 재개 전 검토는 자동화 연결(automationOwnership·automationSetup)에만 쓴다. 멈춘 시도의 바깥 효과는
+   * 호스트가 판단하지 않는다(오너 2026-10-12) — 검토할 것이 없으면 getGoalResumeReview 는 null 이라 곧바로 재개한다.
+   */
   const [goalResumeReview, setGoalResumeReview] = useState<GoalResumeReview | null>(null);
   // A review names one exact Goal version; a new version or another chat invalidates it.
   useEffect(() => { setGoalResumeReview(null); }, [chat?.id, goalContext?.version]);
@@ -6713,12 +6712,12 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
         // A stale version means another surface changed the run. Re-read the
         // main-owned snapshot instead of guessing whether resume succeeded.
         void ipc()?.chats.getGoalContext(chat.id).then((context) => setGoalContext(context));
-        
-
-
-
-
-
+        /*
+         * ★이유를 통째로 버리고 있었다 (실측 2026-09-08).
+         *   "이어가기" 를 눌러 실패하면 화면은 상태만 다시 읽고 **아무 말도 안 했다** —
+         *   사람에게는 단추가 죽은 것으로 보인다. 오너: "goal 안 닫힌다, 진행도 안 된다".
+         *   엔진이 던지는 사유는 셋뿐이고 전부 기계 코드라, 뜻과 다음 할 일로 옮긴다.
+         */
         const raw = failureMessage(cause);
         const ko = locale === "ko";
         const explained = /automation_goal_execution_setup_required/.test(raw)
@@ -6872,17 +6871,17 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
     : liveWorkbenchSurface
       ? `surface:${liveWorkbenchSurface.id}`
       : mediaPreview
-        
-
-
-
-
-
-
-
-
-
-
+        /*
+         * ★키에 "읽었는가"가 들어가야 한다 (QA 실측 2026-09-08).
+         *
+         * 미리보기는 먼저 자리표시로 열리고(내용 없음, 사유 not-read) 그 다음 실제로 읽어
+         * 내용·사유·경로를 채운다. 그런데 키가 경로와 판번호뿐이라 채워져도 값이 같았고,
+         * 결과 레일은 **자리표시를 계속 그렸다.** 화면에는 "아직 읽지 않았습니다"가 남고,
+         * 패널을 껐다 켜야 비로소 읽힌 내용이 보인다.
+         *
+         * 사유와 내용 유무를 키에 넣으면 채워진 순간 한 번 다시 그린다. 읽기는 파일당
+         * 한 번이라 깜빡임이 늘지 않는다.
+         */
         ? `preview:${mediaPreview.path || mediaPreview.fileUrl}:${mediaPreview.revision ?? ""}`
           + `:${mediaPreview.reason ?? ""}:${mediaPreview.content ? "read" : "empty"}`
         : null;
@@ -7131,11 +7130,11 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
   if (!chat || (chatId && chat.id !== chatId)) {
     if (embeddedLoadFailed) return <div role="alert" style={{ padding: 24, color: "var(--ink-soft)" }}>{locale === "ko" ? "이 대화를 불러오지 못했습니다. 대화 목록에서 다시 선택해 주세요." : "Could not load this conversation. Select it again from the conversation list."}</div>;
     if (chatId) {
-      
-
-
-
-
+      /*
+       * ★대화를 여는 동안 화면이 **완전히 비어 있었다** (느린 브리지 실측 2026-09-08:
+       *   글자 0개). 저장소가 느린 기계에서는 그 하얀 화면이 몇 초씩 간다 — 사용자에게는
+       *   "고장" 과 구별되지 않는다. 기다리는 중이라는 것을 말한다.
+       */
       return (
         <div style={{ display: "flex", flex: 1, height: "100%", width: "100%", alignItems: "center", justifyContent: "center", padding: 24 }}>
           <div role="status" style={{ textAlign: "center", maxWidth: 420, display: "grid", gap: 10, justifyItems: "center" }}>
@@ -7151,13 +7150,13 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
       <div style={{ display: "flex", flex: 1, height: "100%", width: "100%", alignItems: "center", justifyContent: "center", padding: 24 }}>
         <div style={{ textAlign: "center", maxWidth: 440 }}>
           <div style={{ fontSize: 17, fontWeight: 700, color: "var(--ink)", marginBottom: 8 }}>{t("chat.empty.title")}</div>
-          {
-
-
-
-
-
-}
+          {/*
+            * ★안내가 **없는 단추**를 가리키고 있었다 (빈 상태 실측 2026-09-08):
+            *   "왼쪽 위 + 새 채팅 버튼" 이라고 했는데 이 상태의 화면에는 그 단추가 없다
+            *   (있는 것은 '대시보드로 돌아가기'와 '새 프로젝트' 둘뿐). 없는 것을 누르라고
+            *   하면 사용자는 자기가 못 찾는 줄 안다. 문구를 사실에 맞추고, 다음 걸음을
+            *   여기서 바로 누를 수 있게 둔다.
+            */}
           <div style={{ fontSize: 14, lineHeight: 1.6, color: "var(--ink-soft)" }}>{t("chat.empty.hint")}</div>
           <button
             type="button"
@@ -7188,10 +7187,10 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
         "--task-cockpit-output-width": `${rightPanelWidth}px`,
       } as CSSProperties}
     >
-      {
-
-
-}
+      {/* ★대화 영역은 One 과 같이 흰 면 위에 놓는다(2026-09-04 실측).
+          예전에는 이 열이 투명이라 페이지 배경(--paper-2)이 그대로 비쳤고, 작성창만 흰
+          카드로 떠 보였다. One 은 workspace 전체가 흰 면이라 대화가 한 장의 면 위에 앉는다.
+          같은 뜻의 토큰(--paper)을 쓴다 — 다크 테마에서도 함께 따라간다. */}
       <div
         className="task-cockpit-main"
         style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0, minHeight: 0, overflow: "hidden", boxSizing: "border-box", background: "var(--paper)",
@@ -7219,6 +7218,8 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
           data-work-dashboard-return="task-header"
           onClick={() => router.push(project ? `/project/detail?id=${project.id}` : "/dashboard")}
           aria-label={project ? (locale === "ko" ? "프로젝트 열기" : "Open project") : (locale === "ko" ? "대시보드로 돌아가기" : "Back to Dashboard")}
+          // The label is hidden in this header (icon only, beside the Files panel's folder icon), so say on hover where it goes.
+          title={project ? (locale === "ko" ? `프로젝트 열기: ${project.name}` : `Open project: ${project.name}`) : (locale === "ko" ? "대시보드로 돌아가기" : "Back to Dashboard")}
         >
           <IconFolder size={16} />
           <span>{project?.name || (locale === "ko" ? "대시보드" : "Dashboard")}</span>
@@ -7235,11 +7236,11 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
                 letterSpacing: 0.6,
               }}
             >
-              {
-
-
-
-}
+              {/*
+                * ★마우스로만 되던 자리 (실측 2026-09-08). 프로젝트로 가는 유일한 길인데
+                *   <span onClick> 이라 Tab 으로 닿지도, Enter 로 눌리지도 않았다.
+                *   진짜 단추로 바꾼다 — 모양은 그대로 두고 기본 단추 스타일만 지운다.
+                */}
               <button
                 type="button"
                 onClick={() => router.push(`/project/detail?id=${project.id}`)}
@@ -7476,9 +7477,9 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
           onDismiss={() => dismissQuestionBatch(pendingQuestionSheet.messageId)}
           block={pendingQuestionSheet.block}
           onResend={(text) => {
-
-
-
+            // 답을 새 메시지로 — 옛 질문은 접고, 작성창과 같은 전송 경로로 보낸다.
+            // 실행이 도는 중이면 Work 작성창은 새 메시지를 받지 않는다(실측 2026-09-27: 그대로 보내면
+            // 답이 조용히 사라졌다). 그때는 실행이 끝나는 순간 보내도록 맡아 두고, 그렇다고 말한다.
             dismissQuestionBatch(pendingQuestionSheet.messageId);
             if (busy || questionCommitPendingRef.current) {
               setPendingResendText({ chatId, text });
@@ -7505,8 +7506,8 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
         style={{
           width: "min(calc(100% - 32px), 740px)",
           margin: "0 auto",
-
-
+          // The folder chip starts on the composer's left edge like every box stacked under it (owner 2026-10-04:
+          // a chip 18px right of the Goal bar). Below it, the same 6px gap the stacked boxes keep.
           padding: "6px 0",
           display: "flex",
           alignItems: "center",
@@ -7523,17 +7524,17 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
           }}
         />
       </div>}
-      {
-}
+      {/* Everything stacked on the composer shares its width and side margins (owner 2026-10-04: "챗창과 그 위 박스들
+          좌우 간격 동일하게") — the same box as the folder row above and the composer's own footer padding. */}
       <div data-work-composer-stack="true" style={{
         width: `min(calc(100% - 32px), ${WORK_COMPOSER_WIDTH_PX}px)`, margin: "0 auto", display: "flex",
         flexDirection: "column", alignItems: "stretch", ["--one-composer-width" as string]: `${WORK_COMPOSER_WIDTH_PX}px`,
       }}>
-      {}
+      {/* 도구 승인은 이 대화 안에서, 묻는 순간에(오너 결정 2026-08-15) — 컴포저 스택의 첫 칸이라 Goal 줄·컴포저와 좌우가 같다 */}
       <ToolApprovalInline chatId={chat?.id ?? null} compact chip composerWidth={WORK_COMPOSER_WIDTH_PX} composerInset={WORK_COMPOSER_INSET_PX} />
       <AutomationMonitorStrip key={chatId} chatId={chatId || null} locale={locale} />
-      {
-}
+      {/* One Goal surface (owner 2026-10-04 "골 하나만 해라"): with a Goal, the bar above the conversation holds the
+          objective, its controls and next check, and folds the continuity detail; nothing is attached to the composer. */}
       {chat?.goalId
         ? <ComposerGoalBar placement="top" label={goalContext?.objective} criteria={goalContext?.acceptanceCriteria}
             plan={goalPlanOf(goalContext)} runStatus={goalContext?.runStatus} pauseReason={goalContext?.pauseReason}

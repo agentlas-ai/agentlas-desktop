@@ -1,4 +1,5 @@
-import type { LiveFormat, LiveFormatPatch, LiveShape, LiveSlide } from "../../../shared/live-document";
+import type { LiveFormat, LiveFormatPatch, LiveShape, LiveShapeLook, LiveSlide } from "../../../shared/live-document";
+import { chartLook, looksVisible, pictureLook, shapeLook, tableLook } from "./pptx-look";
 import { relsPathFor, resolvePartPath, ZipPackage } from "../zip";
 import {
   attr, createElement, elements, escapeXmlAttr, escapeXmlText, firstElement, localName, markDirty, markPath, parseXml,
@@ -236,6 +237,18 @@ function setShapeFormat(root: XmlElement, sp: XmlElement, delta: LiveFormatPatch
 
 function collectShapes(info: { pkg: ZipPackage; cx: number; cy: number; theme: Map<string, string> }, part: string, tree: XmlElement, slideId: string): ShapeRef[] {
   const out: ShapeRef[] = [];
+  // Ids are what document.apply and saved journals name, so the shapes this reader always listed keep their numbering (sh1, sh2,
+  // … in tree order). A shape only document.render draws (a line, a gradient card: no label, no solid fill) is numbered apart.
+  let listed = 0, drawnOnly = 0;
+  const lookOf = (element: XmlElement, name: string, tbl: XmlElement | undefined): LiveShapeLook | undefined => {
+    try {
+      const look = shapeLook(element, info.theme);
+      if (name === "pic") { const image = pictureLook(info.pkg, part, element); if (image) look.image = image; }
+      if (tbl) look.table = tableLook(tbl, info.cy, info.theme);
+      else if (name === "graphicFrame") { const chart = chartLook(info.pkg, part, element, info.theme); if (chart) look.chart = chart; }
+      return Object.keys(look).length ? look : undefined;
+    } catch { return undefined; }
+  };
   const walk = (container: XmlElement, map: (box: Box) => Box) => {
     for (const child of elements(container)) {
       const name = localName(child);
@@ -258,7 +271,6 @@ function collectShapes(info: { pkg: ZipPackage; cx: number; cy: number; theme: M
       if (!raw) continue;
       const box = map(raw);
       const frac = { x: box.x / info.cx, y: box.y / info.cy, w: box.w / info.cx, h: box.h / info.cy };
-      const id = `${slideId}.sh${out.length + 1}`;
       const txBody = name === "sp" ? firstElement(child, "p:txBody") : undefined;
       if (name === "sp" && (txBody || ph)) {
         const type = ph ? normType(ph.type) : "";
@@ -267,13 +279,19 @@ function collectShapes(info: { pkg: ZipPackage; cx: number; cy: number; theme: M
         const textFormat = shapeFormat(txBody, info.theme);
         const shapeFill = solidColor(spPr, info.theme);
         const format = shapeFill ? { ...(textFormat ?? {}), fill: shapeFill } : textFormat;
-        out.push({ element: child, shape: { id, role, text: pptxShapeText(txBody), ...frac, ...(format ? { format } : {}) } });
+        const look = lookOf(child, name, undefined);
+        out.push({ element: child, shape: { id: `${slideId}.sh${++listed}`, role, text: pptxShapeText(txBody), ...frac, ...(format ? { format } : {}), ...(look ? { look } : {}) } });
       } else {
         const tbl = name === "graphicFrame" ? findDeep(child, "tbl") : undefined;
         const label = name === "pic" ? "image" : name === "graphicFrame" ? (tbl ? "table" : findDeep(child, "chart") ? "chart" : "object") : undefined;
         const fill = solidColor(spPr, info.theme);
-        if (!label && !fill) continue;
-        out.push({ element: child, shape: { id, role: "object", text: "", ...frac, ...(label ? { label } : {}), ...(fill ? { fill } : {}), ...(tbl ? { rows: tableRows(tbl) } : {}) } });
+        const look = lookOf(child, name, tbl);
+        if (!label && !fill) {
+          if (!look || !looksVisible(look)) continue;
+          out.push({ element: child, shape: { id: `${slideId}.dr${++drawnOnly}`, role: "object", text: "", ...frac, look } });
+          continue;
+        }
+        out.push({ element: child, shape: { id: `${slideId}.sh${++listed}`, role: "object", text: "", ...frac, ...(label ? { label } : {}), ...(fill ? { fill } : {}), ...(tbl ? { rows: tableRows(tbl) } : {}), ...(look ? { look } : {}) } });
       }
     }
   };

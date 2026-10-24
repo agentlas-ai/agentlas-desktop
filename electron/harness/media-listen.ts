@@ -3,20 +3,20 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+/*
+ * media.listen — the host listens to a local audio/video file for a run whose model cannot take audio.
+ *
+ * Dev replay r04 of the daily TCIagent graph (2026-10-17): the team finished a 308 s long-form and a 35 s Short, and
+ * the step stopped before uploading with "audio content omitted because you do not support audio input": the owner's
+ * quality gate says the narration is listened to, and nothing in the product could do it, so every unattended run ended
+ * in a human-review request. The 15 videos of 10-14 went up marked "human listening not performed".
+ *
+ * What listening checks, measured: what is actually heard (a word-timed transcript through the owner's keyed speech
+ * provider, keyed-provider.ts transcribeFile; the key stays in Main), how it differs from the script (word error rate and
+ * the differing spans with their times), silences inside the speech, loudness and true peak (media-quality.ts), and
+ * subtitle cues against the heard words. The report is bound to the file's digest and, with outputDir, kept as a
+ * listening receipt next to the run's files. Thresholds are reported with each check; the caller judges.
+ */
 
 type Outcome = { status: "ok"; data: unknown } | { status: "refused" | "unavailable"; reason: string; next?: string; data?: unknown };
 const str = (v: unknown): string => (typeof v === "string" ? v.trim() : "");

@@ -36,7 +36,7 @@ import type { AgentMailStatus } from "@shared/agent-mail";
 import { openPricing } from "@/components/UpgradeCta";
 import { PLAN_CHANGED_EVENT } from "@/lib/plan-picker";
 import { agentMailOffer } from "@shared/agent-mail-offer";
-import { FIRST_RUN_LOCAL_MODEL_KINDS, agentlasServingReady } from "@shared/runtime-connect";
+import { agentlasServingReady, firstRunLocalModelReady } from "@shared/runtime-connect";
 import { CredentialImportDialog } from "@/components/connect/CredentialImportDialog";
 import { ChipGrid, ConnectChip, RUNTIME_CHIPS, RuntimeChip, RuntimeConnectPopup, connectCopy, useRuntimeAuth, type RuntimeChipSpec } from "@/components/connect/RuntimeConnect";
 import {
@@ -64,7 +64,6 @@ const LEGACY_WORK_TOUR_KEY = "agentlas.work.firstRunOnboarding.v3";
 const PROFILE_CONTEXT_MAX = 4_000;
 const PRINCIPLE_MAX = 500;
 const PRINCIPLES_MAX = 128;
-/** 로컬 모델로 치는 감지 종류(ollama 는 이관용 투영이라 제외 — RuntimeReadiness 와 같은 규칙). */
 
 /** Decide whether this account sees the flow, and keep that decision. */
 async function loadOrClassify(accountFingerprint: string | undefined): Promise<FirstRunRecord> {
@@ -346,7 +345,7 @@ export function FirstRunOnboarding({
     return () => window.removeEventListener(PLAN_CHANGED_EVENT, onPlan);
   }, [step, refreshAi]);
 
-  const localRuntimes = (runtimes ?? []).filter((r) => FIRST_RUN_LOCAL_MODEL_KINDS.has(r.kind) && (r.model || (r.availableModels?.length ?? 0) > 0));
+  const localRuntimes = (runtimes ?? []).filter(firstRunLocalModelReady);
   const apiRuntimes = (runtimes ?? []).filter((r) => r.kind === "byok"
     && r.credentialAccess?.status === "available" && Boolean(r.model?.trim()));
   const plan = credits?.authenticated && credits.plan && credits.plan.toLowerCase() !== "free" ? credits.plan : null;
@@ -357,7 +356,7 @@ export function FirstRunOnboarding({
     setLocalBusy(true); setLocalNote(null);
     const detected = await api.runtime.detect(true).catch(() => null);
     if (detected) setRuntimes(detected);
-    const found = (detected ?? []).some((r) => FIRST_RUN_LOCAL_MODEL_KINDS.has(r.kind) && (r.model || (r.availableModels?.length ?? 0) > 0));
+    const found = (detected ?? []).some(firstRunLocalModelReady);
     if (!found) setLocalNote(copy.localHint);
     setLocalBusy(false);
   };
@@ -522,8 +521,8 @@ export function FirstRunOnboarding({
                     onKeyDown={(event) => { if (event.key === "Enter" && !event.nativeEvent.isComposing && event.keyCode !== 229 && name.trim()) void saveName(); }}
                   />
                 </div>
-                {
-}
+                {/* The placeholder "루나" is an example, not a value: with no name typed the
+                    preview used it as if the agent were already called that (QA 2026-09-27). */}
                 <div className={styles.preview} aria-live="polite" data-empty={name.trim() ? undefined : "true"}>{name.trim() ? copy.namePreview(name.trim()) : copy.namePreviewEmpty}</div>
                 <details className={styles.help}><summary>{ko ? "이름 설정 안내" : "Name details"}</summary><p className={styles.hint}>{copy.nameHint}</p></details>
               </>

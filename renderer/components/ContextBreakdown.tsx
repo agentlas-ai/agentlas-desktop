@@ -46,9 +46,9 @@ const LABEL: Record<Category | "unattributed" | "overAttributed", { ko: string; 
   overAttributed: { ko: "추정 차이", en: "Estimate gap", color: "transparent" },
 };
 /**
-
-
-
+ * A continued CLI session (ledger mode resume/reopen) keeps the earlier conversation and tool results inside the
+ * provider, and Agentlas sends only the new input. Its residual is then mostly that held history, not runtime defaults.
+ * Yotube 2026-10-17: 236k of a 241k codex request; a fresh codex thread starts at 15-24k.
  */
 const HELD_SESSION_LABEL = { ko: "세션에 쌓인 기록·실행기 기본", en: "Session history + runtime base" };
 

@@ -42,6 +42,7 @@ import { ipc, grantForDroppedFile } from "@/lib/ipc";
 import { useChatAlwaysApproval, type ChatAlwaysApprovalControl } from "@/lib/use-chat-always-approval";
 import type { ChatFileDraft } from "@/lib/chat-files";
 import { useComposerEnter } from "@/lib/use-composer-enter";
+import { useToolbarFit } from "@/lib/use-toolbar-fit";
 
 type ModelOption = { id: string; label: string; tag?: string };
 
@@ -528,6 +529,9 @@ function ChatInputComponent({
   const [activeIndex, setActiveIndex] = useState(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  // 하단 툴바는 늘 한 줄이다 — 넘치면 칩 글자를 우선순위대로 접는다(globals.css [data-fit]).
+  const toolbarRef = useRef<HTMLDivElement>(null);
+  useToolbarFit(toolbarRef);
   const modelTriggerRef = useRef<HTMLButtonElement>(null);
   const dragDepthRef = useRef(0);
   const lastActiveAgentIdRef = useRef<string | null | undefined>(undefined);
@@ -1738,8 +1742,8 @@ function ChatInputComponent({
         />
 
         {/* 하단 툴바 */}
-        <div className="chat-input-toolbar">
-          <div className="chat-input-tools-left">
+        <div className="chat-input-toolbar" ref={toolbarRef}>
+          <div className="chat-input-tools-left" data-fit-box>
             {runtimeControls}
             {/* + 메뉴 */}
             <button
@@ -1824,6 +1828,7 @@ function ChatInputComponent({
             {/* 권한 칩 */}
             <button
               className="chat-input-chip"
+              data-fit-chip="permission"
               aria-label={`${locale === "ko" ? "권한" : "Permissions"}: ${permissionLabel}`}
               title={`${locale === "ko" ? "권한" : "Permissions"}: ${permissionLabel}`}
               data-chat-always-approved={alwaysApproval.enabled ? "true" : "false"}
@@ -1848,7 +1853,7 @@ function ChatInputComponent({
               }}
             >
               {alwaysApproval.enabled ? <IconCheck size={13} /> : <IconShield size={13} />}
-              <span className="chat-input-chip-label">
+              <span className="chat-input-chip-label" data-fit-label>
                 {permissionLabel}
               </span>
               <IconChevronDown size={11} style={{ opacity: 0.6, flexShrink: 0 }} />
@@ -1888,13 +1893,14 @@ function ChatInputComponent({
 
           </div>
 
-          <div className="chat-input-tools-right" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <div className="chat-input-tools-right" data-fit-box style={{ display: "flex", alignItems: "center", gap: 8 }}>
             {/* 컨텍스트 지표는 "Runtime" 상태표가 아니라 세션 전환/정리 진입점이다. */}
             {tokensUsage && (
               <div className="chat-input-context-control" style={{ flexShrink: 0 }}>
                 <button
                   type="button"
                   data-popover-trigger="context"
+                  data-fit-chip="context"
                   className="chat-input-context-pill"
                   title={`${t("chatinput.context.menu_title")} · ${contextTokenLabel}`}
                   aria-label={t("chatinput.context.menu_title")}
@@ -1968,18 +1974,20 @@ function ChatInputComponent({
                 {planMode && (
                   <button
                     className="chat-input-chip"
+                    data-fit-chip="mode"
                     onClick={() => setPlanMode(false)}
                     title={t("chatinput.plan_mode")}
                     aria-label={t("chatinput.plan_mode")}
                     style={activeModeChipStyle}
                   >
                     <IconRoute size={12} />
-                    <span className="chat-input-chip-label">{t("chatinput.plan_mode")}</span><IconClose size={10} />
+                    <span className="chat-input-chip-label" data-fit-label>{t("chatinput.plan_mode")}</span><IconClose size={10} />
                   </button>
                 )}
                 {effectiveGoalMode && (
                   <button
                     className="chat-input-chip"
+                    data-fit-chip="mode"
                     // controlled(영속 goal)일 때 이 ×는 단순 off가 아니라 명시적 목표 종료다.
                     onClick={() => toggleGoalMode(false)}
                     title={t("chatinput.goal_mode")}
@@ -1987,7 +1995,7 @@ function ChatInputComponent({
                     style={activeModeChipStyle}
                   >
                     <IconTarget size={12} />
-                    <span className="chat-input-chip-label">{t("chatinput.goal_mode")}</span><IconClose size={10} />
+                    <span className="chat-input-chip-label" data-fit-label>{t("chatinput.goal_mode")}</span><IconClose size={10} />
                   </button>
                 )}
               </div>
@@ -2042,7 +2050,9 @@ function ChatInputComponent({
                       />
                     </button>
                   )}
-                  <OneVoiceInputHelp locale={locale === "ko" ? "ko" : "en"} composerRef={textareaRef} disabled={disabled} surface="work" />
+                  <span className="chat-input-voice">
+                    <OneVoiceInputHelp locale={locale === "ko" ? "ko" : "en"} composerRef={textareaRef} disabled={disabled} surface="work" />
+                  </span>
                   <button
                     type="button"
                     className="chat-input-send-button"

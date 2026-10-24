@@ -63,6 +63,7 @@ function runCommand(
       shell: false,
       stdio: ["ignore", "pipe", "pipe"],
       env,
+      windowsHide: true,
     });
     let output = "";
     const collect = (chunk: Buffer | string) => {

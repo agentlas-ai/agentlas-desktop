@@ -103,11 +103,11 @@ import {
 // Picks the Korean or English human-readable string for the current UI locale.
 const L = (ko: string, en: string): string => (currentUiLocale() === "ko" ? ko : en);
 
-   
-                                                     
-                                             
-                                  
-   
+/**
+ * 중지 사유를 그대로 전한다. 중지는 사람이 누른 것 외에도 무활동 워치독·단계 시간 초과·
+ * 예산 소진으로 일어난다. 예전엔 전부 "사용자가 정지 버튼으로"라고 단정해,
+ * 누른 적 없는 사람이 거짓 사유를 받았다(실사용 실측).
+ */
 
 const ANTIGRAVITY_KIND = "antigravity";
 // `agy models` is a network-backed catalog. A cold 1.1.26 fetch can remain
@@ -170,7 +170,7 @@ export interface AntigravityProbe {
   version: string;
   /** Model ids to offer (last-good ids when discovery failed — see `discovery.stale`). */
   models: string[];
-                                                                                                      
+  /** DiscoveryOutcome contract (PRD 2026-08-15 D-1): ok / unsupported / failed, never a silent []. */
   discovery: DiscoveryOutcome;
 }
 
@@ -194,7 +194,7 @@ async function probeAgyModels(binary: string): Promise<DiscoveryOutcome> {
     let settled = false;
     let stdout = "";
     const probeDecoder = new StringDecoder("utf8");
-                                                                
+    // agy 1.1.12 실측(2026-08-14): 출력이 `<id>\t<사람용 이름>` 2열로 바뀌었다.
     //   gemini-3.7-flash-high\tGemini 3.7 Flash (High)
     // 줄 전체를 식별자로 검사하던 예전 파서는 탭·공백·괄호 때문에 14줄을 전부 버리고
     // 0개를 반환했다 — 예외도 로그도 없이 모델 선택기가 비어 Gemini 3.7이 보이지 않았다.
@@ -226,18 +226,18 @@ async function probeAgyModels(binary: string): Promise<DiscoveryOutcome> {
   });
 }
 
-  
-                                   
-  
-                                                              
-                                                            
-                                                                    
-                                                      
-                         
-                                                                   
-                                                         
-                                   
-   
+/*
+ * `agy models` 결과 캐시 (2026-09-27).
+ *
+ * detectRuntimes() 는 모든 런타임 탐지를 한꺼번에 기다리고, 그 캐시는 10초다. 그래서 실행
+ * 시작·런타임 선택 화면·자동화 스케줄러가 부를 때마다 `agy models`(네트워크 카탈로그)를 새로
+ * 띄웠고, 그게 12초 타임아웃에 걸리는 날(main.log 2026-09-20..26, 하루 한 번 꼴 — 매번 직전
+ * 성공 25~40초 뒤)에는 그 모든 호출자가 12초씩 함께 멈췄다. 목록은 거의 안 바뀐다.
+ *   - 성공: 10분 동안 그대로 쓴다.
+ *   - 실패: 1분 뒤에 다시 본다(지난 성공 목록은 settleDiscovery 가 stale 로 이미 채운다).
+ *   - 만료됐지만 값이 있으면 기다리지 않는다 — 그 값을 바로 주고 뒤에서 한 번만 새로 본다.
+ *   - 값이 없을 때(첫 탐지·바이너리 변경)만 기다린다.
+ */
 export const ANTIGRAVITY_MODEL_DISCOVERY_FRESH_MS = 10 * 60_000;
 export const ANTIGRAVITY_MODEL_DISCOVERY_FAILED_RETRY_MS = 60_000;
 let agyModelsCache: { binary: string; at: number; outcome: DiscoveryOutcome } | null = null;
@@ -361,48 +361,48 @@ export function buildAntigravityPrompt(req: RunnerRequest, maxPromptBytes = AGY_
 // transport boundary. Tests and diagnostics use the named export above.
 const buildPrompt = buildAntigravityPrompt;
 
-   
-                                      
-  
-                                                                    
-                                                                                 
-                                                    
-                                              
-  
-                                                       
-                                                                                       
-                                                                            
-  
-                                 
-                                
-                                           
-                                                                        
-  
-                                                                 
-                                    
-                                               
-  
-                                                      
-                                                                                   
-                                                                      
-                                                                       
-                                       
-                                                                 
-                                                
-                                                          
-                                                         
-   
+/**
+ * ★권한 칩 → agy 권한 플래그. 형제 러너와 같은 규칙이다.
+ *
+ * claude는 `--permission-mode acceptEdits|bypassPermissions`, codex는
+ * `--sandbox workspace-write|--dangerously-bypass-approvals-and-sandbox`를 권한에 맞춰
+ * 넘긴다. agy만 **아무 플래그도 넘기지 않아서**, 쓰기 권한 실행인데도 도구가 전부
+ * 자동 거부됐다 — 모델은 코드를 텍스트로 그려줄 뿐 파일 하나 만들지 못했다.
+ *
+ * agy 자신이 그 사실을 정확히 말해 준다(실측 1.1.13, 플래그 없이 파일 생성 요청):
+ *   `a tool required the "write_file" permission that headless mode cannot prompt for,
+ *    so it was auto-denied. ... re-run with --dangerously-skip-permissions`
+ *
+ * 실측(1.1.13, 임시 디렉터리에 실제 파일 생성):
+ * - 플래그 없음 → 파일 0개(auto-denied)
+ * - `--dangerously-skip-permissions` → 생성됨
+ * - `--dangerously-skip-permissions --sandbox` → **생성됨**(샌드박스는 터미널만 제한)
+ *
+ * 그래서 write는 codex의 workspace-write와 같은 자리에 `--sandbox`를 함께 준다 —
+ * 파일 작업은 되고 셸은 묶인다. full만 샌드박스를 푼다.
+ * read는 플래그를 주지 않는다(도구 없이 텍스트만 = 기존 격리 계약 유지).
+ *
+ * ★read 를 "읽기 도구는 살리고 변경만 막는" 모양으로 바꾸려는 시도는 이미 재 봤다 —
+ *   되지 않는다 (실측 2026-09-07, agy 1.1.27, scripts/probe-runtime-permission-bypass.mjs
+ *   --live --candidates). agy 에는 도구를 이름으로 빼는 플래그가 아예 없고(`--help` 전수),
+ *   유일한 후보였던 `--dangerously-skip-permissions --sandbox --mode plan` 은:
+ *     1차 측정 → 파일 안 생김. "쓰기를 막는다"로 보였다.
+ *     2차 측정(셸까지 명시적으로 시킴) → `run_command` 가 **그대로 통과**해 파일이 생겼다.
+ *   즉 plan 모드는 경계가 아니다. 1차는 모델이 셸을 안 써 본 것뿐이었다.
+ *   그래서 agy 의 read 는 "전부 열거나 전부 막거나" 둘뿐이고, 우리는 막는 쪽을 고른다.
+ *   대신 그 사실을 사용자에게 **말한다**(아래 read 전용 고지) — 조용한 빈 실행 금지.
+ */
 export function antigravityPermissionArgs(
   permission?: "read" | "write" | "full",
   browserOnly = false,
   /** The scoped-read browser profile (antigravityBrowserProfile): its project grants are the whole gate. */
   browserScopedRead = false,
 ): string[] {
-  
-
-
-
-
+  // Legacy browser profile (agy before 1.4.0, measured 2026-09-03): the headless CLI did not honor project allow-rules
+  // for MCP calls, so browser-only runs needed the CLI bypass to get past its MCP gate; `--sandbox` and the project's
+  // deny list (command/read/write/url) stay. agy 1.4.0 honors project allow-rules headlessly (measured 2026-10-16:
+  // `mcp(<server>/*)` authorizes the call, without it the call is auto-denied), so the scoped-read profile drops the
+  // bypass: workspace reads are allowed, reads outside the workspace are auto-denied, and its grants decide the rest.
   if (browserOnly) return browserScopedRead ? ["--sandbox"] : ["--dangerously-skip-permissions", "--sandbox"];
   if (permission === "full") return ["--dangerously-skip-permissions"];
   if (permission === "write") return ["--dangerously-skip-permissions", "--sandbox"];
@@ -477,38 +477,38 @@ export async function ensureAntigravityBrowserProjectPolicy(
   return { projectId: AGY_BROWSER_PROJECT_ID, workspace, configPath };
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+/*
+ * Scoped-read browser profile: an Antigravity browser-only run works in the step's own working folder and may read it.
+ *
+ * Root cause it replaces (YouTube graph cdf732ca, 1.3.49, 07:57Z run): the legacy profile ran agy in a private runtime
+ * home (~/.agentlas/runtime-homes/antigravity-browser-v1) and named that folder as the project's resource, while the
+ * step's files live in the step's working folder (the room's or agent-cwd). agy resolves a relative path against the
+ * project resource and its cwd (measured 1.4.0: with the resource elsewhere the model first stats
+ * <runtime-home>/outputs/..., exactly the production failure), and the project denied read_file(*), so a browser step
+ * could not read anything the room or an earlier step produced.
+ *
+ * Measured agy 1.4.0, 2026-10-16 (scratch HOME, tiny prompts, AGY2):
+ *   - no `--dangerously-skip-permissions`: a relative read in the cwd workspace is allowed without any grant; a read
+ *     outside the workspace is auto-denied (denied_actions read_file); `write_file(*)`/`command(*)`/`read_url(*)` deny
+ *     rules hold (agy's own read_url_content browser fallback is denied).
+ *   - MCP: `mcp(*)` authorizes call_mcp_tool for every configured server. The model reads the tool descriptor
+ *     <appData>/mcp/<server>/<tool>.json first and big tool outputs spill to <appData>/brain/<conversation>/
+ *     .system_generated/...; both are outside the workspace, so they need `read_file(<dir>)` grants. A grant is a
+ *     resolved-path prefix (`read_file(/private/tmp/x)`); `/**` globs match nothing; a deny always beats an allow.
+ *   - with the bypass flag every read is allowed (deny rules still hold), so the bypass profile cannot confine reads.
+ * The project file carries no per-run content (the workspace comes from cwd/--add-dir), so one Agentlas-owned file
+ * covers every run. `mcp(*)` keeps the MCP authority the bypass gave (the servers in the run's HOME config: the run's
+ * authorized ones, e.g. the room's One Team for a graph step, cafffb4d). The person's own conversation spill files
+ * (real HOME brain) are never granted.
+ */
 const AGY_BROWSER_READ_PROJECT_ID = "agentlas-browser-automation-v2";
 const AGY_BROWSER_READ_POLICY_MARKER = "agentlas.desktop.browser-read-policy.v2";
-                                                                                                   
+/** agy versions measured to honor project allow-rules headlessly (scoped-read browser profile). */
 const AGY_SCOPED_READ_MIN_VERSION = [1, 4, 0] as const;
 
 export type AntigravityBrowserProfile = "scoped-read" | "legacy";
 
-                                                                                                                          
+/** Which browser profile an agy executable gets: scoped-read on a measured version and a POSIX HOME, legacy otherwise. */
 export function antigravityBrowserProfile(version: string | null | undefined, platform: NodeJS.Platform = process.platform): AntigravityBrowserProfile {
   if (platform !== "darwin" && platform !== "linux") return "legacy";
   const match = /^(\d+)\.(\d+)\.(\d+)/u.exec(version?.trim() ?? "");
@@ -520,7 +520,7 @@ export function antigravityBrowserProfile(version: string | null | undefined, pl
   return "scoped-read";
 }
 
-                                                                                                                             
+/** A path as agy checks it: symlinks of its longest existing prefix resolved (measured: /tmp is matched as /private/tmp). */
 function agyResolvedPath(target: string): string {
   let head = path.resolve(target);
   const rest: string[] = [];
@@ -597,12 +597,12 @@ export function buildAntigravitySpawnArgs(
   prompt = "",
   addDirectories: string[] = [],
   permission?: "read" | "write" | "full",
-                                                                
+  /** 출력 형태 계약 — 실측 agy 1.1.14 `--json-schema`(문자열 또는 파일 경로). */
   outputSchema?: Record<string, unknown>,
-     
-                                                        
-                                                     
-     
+  /**
+   * 이어갈 대화 ID. 있으면 히스토리를 통째로 재전송하지 않는다 — 실측 2026-08-19:
+   * `--conversation <id>` 로 되돌린 턴이 이전 턴의 코드워드를 기억했다.
+   */
   resumeConversationId?: string,
   /** Browser-only project: a bare id is the legacy profile; `scopedRead` drops the CLI bypass (antigravityPermissionArgs). */
   browserProject?: string | { projectId: string; scopedRead: boolean },
@@ -615,15 +615,15 @@ export function buildAntigravitySpawnArgs(
   const browserScopedRead = typeof browserProject === "object" && browserProject.scopedRead === true;
   const directoryArgs = [...new Set(addDirectories.filter((value) => value.trim()))]
     .flatMap((value) => ["--add-dir", value]);
-    
-                                                                           
-                                                        
-                                                    
-     
-    
-                                                                
-                   
-     
+  /*
+   * ★agy도 stream-json으로 부른다(실측 1.1.10: step_update.text_delta + usage 지원).
+   * 평문 모드는 최종 답까지 stdout이 침묵해서, 긴 생성(체스 게임 8분+)이 스톨 워치독
+   * (480s 무응답)에 오폭됐다 — 실측 2026-08-06. 델타가 곧 생존 신호다.
+   */
+  /*
+   * agy 헤드리스: --print-timeout 기본 5분은 긴 생성(체스 게임)을 agy가 스스로 포기하게
+   * 만든다(실측) → 30분.
+   */
   return [
     ...modelArgs, ...directoryArgs,
     ...(browserProjectId ? ["--project", browserProjectId] : []),
@@ -766,51 +766,51 @@ export interface AntigravityDenial {
   reason: "approval" | "boundary";
 }
 
-   
-                                                          
-  
-                                                                               
-                                       
-  
-                                 
-                                                  
-                                                                                                         
-                                                                                                   
-                            
-                                                           
-                                                  
-                                                                                      
-                                                                                                           
-                                                                                                    
-                                     
-  
-                                                                  
-                                                                              
-                                                       
-                                                                
-                                                                              
-               
-  
-                                                         
-                                                 
-   
+/**
+ * ★거부 한 건의 **종류**를 가른다 — 이 구분이 없어서 Science 연구가 시작조차 못 했다.
+ *
+ * 실측 2026-09-14 (agy 1.2.2, 같은 플래그 `--dangerously-skip-permissions --sandbox`,
+ * 두 실행을 나란히 떠서 stream-json 을 그대로 읽었다):
+ *
+ * 1) 진짜 승인 거부 (플래그 없이 write 요청):
+ *      step tool_info.error = {type:"TOOL_ERROR",
+ *        message:'permission check failed for write_file "…": user denied permission for write_file(…)'}
+ *      result.denied_actions = [{"action":"write_file","display_name":"WriteToFile"}]   ← **채워진다**
+ *      result.response = ""
+ * 2) agy 자신의 보호 경계 (grep_search 가 agy 의 appDataDir 를 건드림):
+ *      step tool_info.error = {type:"TOOL_ERROR",
+ *        message:'permission check failed for read_file "/…/.gemini/antigravity-cli":
+ *                 Permission denied for read_file(…). Matches hardcoded system protection boundary rule.'}
+ *      result.denied_actions = null                                                     ← **비어 있다**
+ *      result.response = 627자(멀쩡한 답)
+ *
+ * 두 메시지 모두 "permission … denied" 를 담고 있어서 기존 문구 정규식이 2)를 1)로 읽었다.
+ * 그 결과 오너의 Science 실행은 "auto-denied for missing approval: grep_search" 로 죽었고,
+ * 안내는 **거짓 해결책**("권한을 올리세요")을 가리켰다 — 그 경계는 권한으로 안 열린다.
+ * agy 의 appDataDir 거부는 정상 동작이다(2026-08-15 로그에서도 같은 거부 뒤 실행이 그대로
+ * 이어졌다: ~/.gemini/antigravity-cli/log/cli-20260815_152041.log:153). 막을 일이 아니라
+ * **넘어갈 일**이다.
+ *
+ * 판정 순서: 구조 필드(denied_actions)가 정본이고, 여기 문구 판별은 그 필드가 없는
+ * 스텝 이벤트에만 쓰는 보조다. 보조가 정본과 같은 무게를 갖던 것이 이 결함이었다.
+ */
 export function antigravityDenialReason(message: string): AntigravityDenial["reason"] {
   return /\bhardcoded system protection boundary\b/i.test(message) ? "boundary" : "approval";
 }
 
-   
-                                                      
-  
-                                                             
-                                  
-  
-                                                           
-                                                              
-                                                                
-                                                        
-                                                                                      
-                                                   
-   
+/**
+ * 답이 비어 있는 agy 실행을 어떻게 판정할지 — 순수 함수라 계약이 실제로 부를 수 있다.
+ *
+ * 오너 방향(2026-09-14): "도구 하나가 막혔다고 실행 전체를 죽이지 마라. 넘어가고 계속하거나,
+ * 정 안 되면 사람이 읽을 수 있는 사유와 함께 멈춰라."
+ *
+ * - 답이 있으면 막힌 도구가 있어도 실패가 아니다(`undefined`). 넘어가고 계속한 실행이다.
+ * - 승인 거부(approval)로 답이 비었으면 그대로 `refused` — 사람이 권한을 올리면 풀린다.
+ * - 보호 경계(boundary)뿐이면 `empty` 로 돌린다. 권한으로 못 여는 경계라 `refused` 는
+ *   거짓 안내이고, Science 루프의 REFUSED_CODES 에 걸려 연구가 영구 차단된다
+ *   (agentlas-science/src/pass-failure-verdict.ts: refused=block, 그 외=bounded retry).
+ *   같은 턴을 다시 태우면 모델이 다른 경로를 고르는 일이 흔하므로 재시도 쪽이 옳다.
+ */
 export function antigravityEmptyRunOutcome(input: {
   answered: boolean;
   toolsAllowed: boolean;
@@ -839,9 +839,9 @@ export function antigravityEmptyRunOutcome(input: {
 }
 
 /**
-
-
-
+ * agy reports `step_type:"tool"` with its native `tool_name`, a fixed tool identifier rather than a display title. Known
+ * native tools map to the ACP tool kind (shared/runtime-tool-kind.ts); MCP calls, `finish`, image and browser tools are
+ * "other". Consumers read this kind, never the name (review 2026-10-16 H1).
  */
 const AGY_TOOL_KINDS: Readonly<Record<string, RuntimeToolKind>> = {
   run_command: "execute", send_command_input: "execute",
@@ -864,18 +864,18 @@ export function reduceAgyLine(
     usagePairObserved?: boolean;
     /** 승인이 없어 거부된 도구 호출 — 구조 신호로 모은다(문구 판별이 아니다). */
     deniedTools?: AntigravityDenial[];
-       
-                                                             
-                                                                    
-                                                         
-                                                
-       
+    /**
+     * ★agy 가 이 실행에 붙인 대화 ID. 실측 2026-08-19(agy 1.1.14): 최상위와
+     * `result`·`step_update` 어디에나 `conversation_id` 로 실려 온다. 이걸 저장해
+     * 다음 턴에 `--conversation` 으로 되돌리면 히스토리를 매 턴 통째로 재전송하지
+     * 않아도 된다 — 재개가 실제로 기억한다는 것은 코드워드 실측으로 확인했다.
+     */
     conversationId?: string;
-       
-                                                                                                                      
-                                                                                                                 
-                                                                               
-       
+    /**
+     * step_index of this run's first `user_input` step. agy numbers a conversation's steps across turns: measured agy
+     * 1.4.0, a new conversation starts its first turn at 0 and a resumed one with two earlier steps at 2 (result
+     * num_turns 2). So 0 on a resumed run means the conversation held nothing.
+     */
     firstUserInputStepIndex?: number;
     /** step_index of the newest `agent_response` step this run streamed: the answer attempt whose stop reason agy persisted. */
     lastAgentResponseStepIndex?: number;
@@ -886,13 +886,13 @@ export function reduceAgyLine(
     resultErrorCode?: string;
     resultRetryAfterHint?: string;
     /**
-
-
-
-
-
-
- */
+     * The run passed `--json-schema`. agy 1.4.0 (measured 2026-10-16) enforces the schema through its built-in `finish`
+     * tool: the model writes a draft as an agent_response, submits it as `finish` arguments, and a schema-invalid
+     * submission comes back as a `finish` tool step in ERROR ("invalid arguments: ...") after which the model writes the
+     * next draft. The accepted submission closes as a `finish` step and is carried by `result.structured_output`.
+     * `result.response` is the concatenation of every agent_response of the turn, i.e. all drafts (4 in the measured
+     * run: 3644+4172+4068+4048 = 15932 characters = response length; only the last draft was valid).
+     */
     schemaBound?: boolean;
     /** JSON of `result.structured_output`: the schema-accepted answer of a `--json-schema` run. */
     structuredOutput?: string;
@@ -901,19 +901,19 @@ export function reduceAgyLine(
   delta?: string;
   activity?: string;
   approvalDenied?: AntigravityDenial;
-    
-                                         
-    
-                                                                
-                                                     
-                                                         
-                            
-     
+  /*
+   * ★agy 가 무슨 도구를 썼는지 — 예전에는 여기서 그냥 버렸다.
+   *
+   * agy 스트림은 step_type:"tool" 과 tool_name 을 그대로 준다. 그런데 러너가 그것을
+   * 화면 이벤트로 올리지 않아, agy 실행은 활동 목록에도 출력 패널에도 아무것도 남기지
+   * 못했다(실측: 도구 이벤트 0건, 다른 런타임은 Write/Bash 가 보인다). 사용자에게는
+   * 일하는 동안 "작업 중" 한 줄만 보인다.
+   */
   tool?: {
     name: string;
     id: string;
     failed: boolean;
-                                                                                             
+    /** JSON of `tool_info.parameters` — 실측 1.1.13: list_dir {DirectoryPath}, view_file 등. */
     args?: string;
     /** `tool_info.output` — DONE 스텝에만 온다. */
     result?: string;
@@ -931,15 +931,15 @@ export function reduceAgyLine(
       status?: string;
       response?: string;
       conversation_id?: string;
-                                                                   
+      /** 실측 agy 1.1.27 — 이 실행에서 승인이 없어 거부된 행동. 문구가 아니라 **필드**다. */
       denied_actions?: Array<{ action?: string; display_name?: string }>;
-         
-                                                                  
-                                                            
-                                                                                                    
-                                                                  
-                                                
-         
+      /**
+       * ★런타임이 왜 못 했는지 **직접 말해 주는 칸** (실측 2026-09-07, agy 1.1.27):
+       *   {"event":"result","status":"ERROR","response":"",
+       *    "error":"Individual quota reached. Please upgrade your subscription… Resets in 25m37s."}
+       * 이 칸을 안 읽어서 사용자는 `Antigravity CLI exit 1` 만 봤다 — 언제 풀리는지도,
+       * 무엇이 문제인지도 없이. 런타임이 이유를 말했는데 우리가 버린 자리다.
+       */
       error?: string | {
         message?: unknown;
         code?: unknown;
@@ -953,7 +953,7 @@ export function reduceAgyLine(
       errorCode?: unknown;
       retry_after?: unknown;
       retryAfter?: unknown;
-                                                                                                          
+      /** `--json-schema` runs: the arguments of the accepted `finish` submission (measured agy 1.4.0). */
       structured_output?: unknown;
     };
     step_update?: {
@@ -977,17 +977,17 @@ export function reduceAgyLine(
   // 유효한 JSON 이지만 이벤트가 아닌 줄(`null`, 숫자, 배열)은 잡음이다. 이 함수는 stdout data 리스너 안에서 불리므로
   // 여기서 던지면 메인 프로세스의 uncaughtException 이 된다 — 아래 속성 접근 전에 모양부터 거른다.
   if (ev === null || typeof ev !== "object" || Array.isArray(ev)) return {};
-                                                        
+  // 대화 ID 는 세 자리 중 어디로든 온다(실측 agy 1.1.14). 처음 본 값을 붙든다.
   state.conversationId ??=
     ev.conversation_id ?? ev.result?.conversation_id ?? ev.step_update?.conversation_id;
-    
-                                                 
-                                                                    
-                                                    
-                                                        
-                                                        
-                                         
-     
+  /*
+   * ★본문은 최종 result.response에서 받는다 — 델타 접합은 오염된다.
+   * 실측(2026-08-06): agy가 text_delta를 **UTF-8 바이트 경계에서** 잘라 각 조각을 따로
+   * 인코딩한다. 한 글자(한글 3바이트)가 두 델타로 찢기며 양쪽 다 U+FFFD가 되어
+   * "완료되었습니다"가 "완���되었습니다"로 저장됐다(DB에 FFFD 10건). 원본 바이트는
+   * 이미 소실이라 접합 쪽에서 복원 불가 — 대신 마지막 result 이벤트의 response에
+   * 전문이 온전히 실려 온다(실측). 델타는 진행 표시용으로만 쓴다.
+   */
   if (ev.event === "result" && ev.result) {
     if (typeof ev.result.response === "string") state.finalResponse = ev.result.response;
     // The typed final answer of a `--json-schema` run (see schemaBound); `response` holds every draft of the turn.
@@ -1013,18 +1013,18 @@ export function reduceAgyLine(
     );
     if (errorCode) state.resultErrorCode = errorCode;
     if (retryAfterHint) state.resultRetryAfterHint = retryAfterHint;
-      
-                                                            
-      
-                                                                         
-                                                     
-                                                    
-                                                     
-                                                            
-                                                                              
-                                                   
-                                                 
-       
+    /*
+     * ★거부는 문구가 아니라 **필드**로 잡는다 (실측 2026-09-07, agy 1.1.27).
+     *
+     * 아래 tool 스텝 판별은 `tool_info.error.message` 안의 "denied permission" 같은
+     * 문장 모양에 걸려 있다. 그 문장은 벤더가 판을 올릴 때마다 바뀌는 것이고, 바뀌는
+     * 순간 이 실행은 다시 "성공했는데 답이 없다"로 조용히 지나간다 — 정확히 우리가
+     * 반복해 온 손해다. agy 는 같은 사실을 result 이벤트에 구조로 실어 준다:
+     *   {"event":"result","status":"SUCCESS","response":"",
+     *    "denied_actions":[{"action":"command","display_name":"RunCommand"}]}
+     * 이 필드는 문구와 무관하므로 이쪽을 정본으로 삼고, 문장 판별은 보조로 남긴다.
+     * 같은 도구가 양쪽에 잡혀도 아래에서 이름으로 합치므로 중복 보고되지 않는다.
+     */
     for (const denied of Array.isArray(ev.result.denied_actions) ? ev.result.denied_actions : []) {
       const tool = String(denied?.display_name || denied?.action || "").trim();
       if (!tool) continue;
@@ -1033,7 +1033,7 @@ export function reduceAgyLine(
       already.push({
         tool,
         detail: `Antigravity auto-denied "${tool}" because headless mode has nobody to approve it.`,
-                                                                          
+        // 이 칸에 실린 것만이 **진짜 승인 거부**다(실측 2026-09-14: 보호 경계 거부는 이 칸이 비어 온다).
         reason: "approval",
       });
     }
@@ -1054,28 +1054,28 @@ export function reduceAgyLine(
     return { activity: "finish" };
   }
 
-    
-                                                         
-                                                                  
-                                                                                
-                                                                          
-    
-                                                  
-                                                     
-                                           
-    
-                                                          
-                                    
-     
+  /*
+   * ★승인이 없어 거부된 도구 호출 — 실측(agy 1.1.13, 플래그 없이 파일 쓰기 요청):
+   *   step_type:"tool", state:"ERROR", tool_name:"write_to_file",
+   *   tool_info.error.message: "User denied permission for write_file(<path>)."
+   *   ...이어서 event:"result", status:"SUCCESS", response:"" 로 **성공 종료**한다.
+   *
+   * 사용자는 아무것도 거절한 적이 없다 — 헤드리스에는 물어볼 상대가 없어서 CLI가
+   * 자동으로 거부한 것이다. 그런데 최종 결과가 SUCCESS + 빈 응답이라, 이 실행은
+   * "성공했는데 답이 없다"로 처리되어 화면에 아무 표시도 남지 않았다.
+   *
+   * 문구가 아니라 **구조**(tool 스텝 + ERROR 상태 + 도구 이름)로 잡는다. 메시지는
+   * 사용자에게 무엇이 막혔는지 보여주기 위해서만 들고 간다.
+   */
   if (step.step_type === "tool" && step.state === "ERROR") {
     const message = step.tool_info?.error?.message ?? "";
     if (/\bdenied permission\b|\bpermission denied\b|\brequires? approval\b/i.test(message)) {
-        
-                                                          
-                                                      
-                                                                 
-                                                              
-         
+      /*
+       * ★여기는 **보조** 판별이다 — 정본은 위 result.denied_actions 다.
+       * 같은 정규식이 agy 자신의 보호 경계 오류까지 함께 건져 올렸고(두 메시지 모두
+       * "permission … denied"), 그것이 오너의 Science 실행을 죽였다. 종류를 붙여서
+       * 아래 판정이 둘을 다르게 다루게 한다(antigravityDenialReason 주석의 실측).
+       */
       const denial: AntigravityDenial = {
         tool: step.tool_name || step.tool_info?.name || "tool",
         detail: message,
@@ -1089,12 +1089,12 @@ export function reduceAgyLine(
   if (step.step_type === "tool") {
     const name = step.tool_name || step.tool_info?.name || "";
     if (name) {
-        
-                                                           
-                                                           
-                                                                                
-                                                      
-         
+      /*
+       * ★인자와 출력을 버리지 않는다(2026-08-15 실측). 예전엔 이름만 올려서 화면 행이
+       * "list_dir"뿐이었다 — 어느 폴더를 봤는지, 무엇이 나왔는지 없이. agy 스트림은
+       * ACTIVE에 parameters, DONE에 parameters+output을 준다. 같은 도구 호출의 ACTIVE→DONE은
+       * step_index로 이어진다(같은 id로 갱신되게 index를 id에 넣는다).
+       */
       let params = step.tool_info?.parameters;
       let displayName = name;
       let envelope: unknown = params;
@@ -1160,12 +1160,12 @@ export function reduceAgyLine(
   }
 
   if (step.step_type !== "agent_response") {
-      
-                                                            
-                                                           
-                                                                
-                                           
-       
+    /*
+     * ★본문이 아니어도 **생존 신호다.** 첫 판은 agent_response 델타만 통과시켰는데,
+     * agy는 긴 작업을 도구 스텝(view_file 등)으로 돌아서 8분간 델타가 0 — 워치독이
+     * 살아 있는 실행을 스톨로 오폭했다(실측 2026-08-06, 480s auto-abort 재현 2회).
+     * 활동은 활동대로 올린다 — 어떤 이벤트든 워치독 시계를 리셋한다.
+     */
     return { activity: step.step_type || "step" };
   }
   const responseIndex = (step as { step_index?: unknown }).step_index;
@@ -1238,9 +1238,9 @@ export function normalizeAntigravityRetryAfter(value: unknown): string | undefin
  * agy 1.4+ prints one typed line on stderr for an API-class failure of a turn:
  *   AGY_ERROR: {"short_error":"RESOURCE_EXHAUSTED (code 429): …","status":"RESOURCE_EXHAUSTED","error_code":429,
  *               "code_kind":"http","retryable":true,"error_id":"<uuid>-1"}
- while the result frame on stdout carries only the sentence (`error`, no code field). Observed on agy 1.4.3 (a real quota
- rejection, and HTTP 400/401/403/5xx from a fake model API): an API failure names `status` and `error_code` with
- `code_kind: "http"`; a safety block
+ * while the result frame on stdout carries only the sentence (`error`, no code field). Measured 2026-10-21 (agy 1.4.3,
+ * evidence/agy-quota-probe-20261021 for a real quota rejection, evidence f51-failure-notice/agy-marker for HTTP 400/401/
+ * 403/5xx from a fake model API): an API failure names `status` and `error_code` with `code_kind: "http"`; a safety block
  * and every other executor failure are the generic UNKNOWN / gRPC 2, which is why those keep going to the stop-reason
  * store (antigravityStopReasonCode). Only the typed keys are read: `short_error` and the `error` sentence are never
  * classified, and `retryable` is not read (a quota says true as well, so it cannot tell a quota from a brief throttle).
@@ -1376,15 +1376,15 @@ export function antigravityExitFailure(
   return refusal ? { kind: refusal.kind, message: refusal.message, runtime, source: "heuristic" } : undefined;
 }
 
-   
-                                                  
-  
-                                                                  
-                                                                      
-                                                                 
-                                                                  
-                                                                 
-   
+/**
+ * ★agy MCP 설정 실물 경로 — 실측 2026-08-18 (agy 1.1.14).
+ *
+ * 오랫동안 이 러너에는 MCP 배선이 없었고, shared/runtime-mcp.ts 는 "antigravity 는
+ * MCP 표면이 없다"고 적어 두었다. 그 근거가 반증됐다: `~/.gemini/config/mcp_config.json`
+ * 에 등록한 프로브 서버가 실행 시작 시 initialize → notifications/initialized →
+ * server/discover → tools/list 를 받았다(프로브 서버의 수신 로그로 확인). agy 의 내장
+ * 도구 목록에도 call_mcp_tool · list_resources · read_resource 가 실재한다.
+ */
 /**
  * 우리가 agy 설정 파일에 넣은 MCP 서버 키 → 지금 그 정확한 transport를 쓰는 실행 수.
  *
@@ -1515,15 +1515,15 @@ function requestedAgyMcpEntry(server: {
  */
 export type AgyBrowserEntryDisposition = "ignore" | "quarantine" | "reconcile";
 
-   
-                                                
-  
-                                                        
-                                                   
-                                                
-                                                        
-                                                   
-   
+/**
+ * 공용 agy 설정에 남아 있는 브라우저 항목을 이번 실행이 어떻게 다뤄야 하는가.
+ *
+ * agy 는 공용 설정에 적힌 서버를 전부 띄운다. 그래서 브라우저를 **요청하지 않은** 실행도
+ * 남아 있는 항목 때문에 다른 실행의 승인 통로를 물려받을 수 있다. 예전에는 그 위험을
+ * 실행 거절로 막았는데, 브라우저를 한 번이라도 쓴 기계에서는 그 항목이 계속 남아
+ * Science 의 agy 실행이 영영 시작되지 못했다(2026-09-12 실측). 거절이 아니라
+ * **이번 실행 동안만 격리하고 끝나면 되돌리는 것**이 위험도 막고 길도 막지 않는다.
+ */
 export function agyBrowserEntryDisposition(input: {
   owned: boolean; requested: boolean; heldByThisProcess: boolean;
 }): AgyBrowserEntryDisposition {
@@ -1533,15 +1533,15 @@ export function agyBrowserEntryDisposition(input: {
   return "quarantine";
 }
 
-   
-                        
-  
-                                                               
-                                                           
-                                                            
-                                                               
-                                               
-   
+/**
+ * 이 항목을 Agentlas 가 썼는가.
+ *
+ * 우리가 쓰는 모양은 한 가지가 아니다 — 브라우저 승인 프록시(proxy-child.cjs)도 우리 것이고,
+ * Science·Time 처럼 인라인 스크립트로 띄우는 내장 서버도 우리 것이다. 예전에는 프록시 모양
+ * 하나만 우리 것으로 알아봐서, **Science 가 지난 실행에 자기가 남긴 항목을 남의 것으로 오인해
+ * "다른 전송 범위" 라며 스스로를 거절했다**(2026-09-12 실측). 표식은 env 에 남는 우리 전용
+ * 키다 — 사용자가 직접 등록한 서버에는 없으므로 남의 항목을 뺏을 위험이 없다.
+ */
 export function isAgentlasWrittenMcpEntry(entry: AgyMcpServerEntry): boolean {
   if (isAgentlasOwnedBrowserMcpEntry(entry)) return true;
   return Object.keys(entry.env ?? {}).some(
@@ -1930,12 +1930,12 @@ async function reconcileAgyMcpServersUnderLease(
       // 거절하지 말고 아래에서 이번 실행의 항목으로 갈아 끼운다.
       if (isAgentlasWrittenMcpEntry(parsed.mcpServers[key] ?? {})) continue;
       if (!parsed.mcpServers[key] || isAgyMcpEntryEqual(parsed.mcpServers[key], requestedEntry ?? undefined)) continue;
-      
-
-
-
-
-
+      // A user's own Antigravity entry shares this key with a different
+      // transport. That entry is theirs; we neither overwrite nor borrow it.
+      // Refusing the whole run here made agy unusable for anyone whose global
+      // mcp_config.json had a same-named server (production, 2026-09-13:
+      // `opencrab` → every Work run fell back to another runtime). The run
+      // continues with the user's entry in place and without ours for that key.
       collidedWithUserEntry.push(key);
       continue;
     }
@@ -2184,21 +2184,21 @@ export type AgyPersonalMcpMigration =
   | { status: "migrated"; removed: string[]; backupPath: string };
 
 /**
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+ * One-time, gated cleanup of the MCP entries older builds wrote into the person's own ~/.gemini/config/mcp_config.json
+ * (R-101). Until the run's servers were staged into the product mirror's own file, every authorized agy run added its
+ * servers to the person's file and removed them when it ended; a run that never ended left them there, and the owner's
+ * personal agy then started them in every session of their own (2026-10-18: agentlas-browser, agentlas-science,
+ * agentlas-time, filesystem, shadcn, all with Agentlas's own env markers).
+ *
+ * Gates, all required: this process is a packaged install (configured install channel official or local-candidate;
+ * 2026-10-18 04:09Z a test host with the person's real HOME and the unnamed "Electron" userData ran it on the owner's file
+ * while the change was uncommitted: dev, QA and unconfigured hosts never run it), it spawns agy in a product mirror (the
+ * caller's branch), the kill switch
+ * AGENTLAS_AGY_PERSONAL_MCP_MIGRATION=0 is not set, no marker for this HOME exists yet (once per HOME), the person's
+ * file's cross-install lease is free within 2 s (an older Desktop staging into it holds that lease for its whole run),
+ * no run of this process stages into that file right now, and the file parses. Only entries isAgentlasWrittenMcpEntry
+ * recognises (Agentlas's own env marker keys, which a server the person registered never carries) are removed; the
+ * exact original bytes are first written to a private backup beside the file; every other entry and key is kept.
  */
 export async function migrateAgyPersonalMcpConfig(input: { realHome: string; markerDir?: string;
   /** Tests name the channel; production reads the configured install identity (Main and daemon configure it). */
@@ -2328,14 +2328,14 @@ function antigravityConversationLostFailure(locale: string | undefined): RunnerF
 }
 
 /**
-
-
-
-
-
-
-
-
+ * A stored agy conversation can disappear (the owner's 30-day deletion of unused CLI originals, agy's own pruning). agy
+ * then answers from a new, empty conversation (measured, antigravity-conversation-metadata.ts antigravityConversationGone);
+ * saving that conversation and returning its answer made the turn, and every later one, run without the chat's history
+ * (A3 live probe 2026-10-16: 33 of 49 agy bindings named missing conversations). The turn instead continues once in a
+ * fresh conversation that carries the conversation (unattended-session-turns.ts rule 4): the chat's own history for a
+ * per-chat binding, the agent-context journal for its native handle. The dead binding is replaced and one typed
+ * receipt is emitted. A turn that cannot be handed the conversation, or whose lost run already produced text or a tool
+ * step (rule 3), fails with the typed agy_conversation_lost and keeps nothing from that run.
  */
 async function runPreparedAntigravity(
   req: RunnerRequest,
@@ -2344,7 +2344,7 @@ async function runPreparedAntigravity(
   executableFingerprint: string,
   executableGeneration: string,
   agyAdditionalDirs: string[] = [],
-                                                                                                             
+  /** Pre-2026-10-16 executable fingerprint (it hashed st_dev); read-only, see cli-executable-identity.ts. */
   legacyExecutableFingerprint?: string,
   dispatch: AntigravityDispatchState = { attempted: false },
 ): Promise<RunnerResult> {
@@ -2435,11 +2435,11 @@ async function runPreparedAntigravityAttempt(
     runReq = { ...runReq, history: [...bootstrap.history], turnContext: bootstrap.turnContext };
     events.onStatus(`[runtime-session] cold kind=antigravity reason=${freshReason ?? "handle_unverified"}`);
   }
-    
-                                                                                                                    
-                                                                                                                   
-                                                                                      
-     
+  /*
+   * Effort (antigravity-effort.ts, measured agy 1.4.0): a suffixed model id fixes the thinking level and never gets
+   * `--effort` (agy refuses the pair before any model call); a base id gets the requested level when the installed
+   * CLI's help lists it. The ledger records the level applied, not the one requested.
+   */
   const effortLevels = antigravityEffortNeedsHelp(runReq.model, runReq.effort)
     ? await probeAntigravityEffortLevels(bin, executableGeneration) : null;
   const effortPlan = antigravityEffortPlan(runReq.model, runReq.effort, effortLevels);
@@ -2482,15 +2482,15 @@ async function runPreparedAntigravityAttempt(
     }
     if (agyToolsAllowed) events.onStatus("[agy-mcp-scope] target=personal-home reason=product-home-unavailable");
   } else if (agyRunEnv.AGENTLAS_AGY_REAL_HOME && isAgentlasProductHome(agyRunHome)) {
-    
-
+    // One-time, gated cleanup of entries older builds wrote into the person's file (migrateAgyPersonalMcpConfig), only for
+    // the home this run's product mirror was made from (2026-10-18: a run spawned in some other HOME took os.homedir()).
     void migrateAgyPersonalMcpConfig({ realHome: agyRunEnv.AGENTLAS_AGY_REAL_HOME }).catch(() => undefined);
   }
-    
-                                                                                                                  
-                                                                                                                       
-                                                                                                         
-     
+  /*
+   * Browser-only profile (see ensureAntigravityBrowserReadProjectPolicy): scoped-read on an agy measured to honor
+   * project grants headlessly (the project file is written before each spawn, in the HOME agy gets); the legacy bypass
+   * profile, whose project denies every file read, otherwise. Both run in the step's own working folder.
+   */
   const browserProfile: AntigravityBrowserProfile | null = runReq.browserOnly
     ? antigravityBrowserProfile(await probeCliVersion(bin))
     : null;
@@ -2509,14 +2509,14 @@ async function runPreparedAntigravityAttempt(
   // that ephemeral directory would make long Goal turns ineligible for reuse.
   let agyPromptDirectory: string | null = null;
   let spawnPrompt = prompt;
-    
-                                                     
-    
-                                                            
-                                                  
-                                                 
-                               
-     
+  /*
+   * ★작업 폴더를 워크스페이스로 **등록**한다 — cwd로 스폰하는 것만으로는 부족하다.
+   *
+   * 실측(1.1.13): 같은 플래그·같은 cwd라도 `--add-dir <작업폴더>`가 있으면 파일이
+   * 생성되고, 없으면 모델이 DONE이라고 답하는데 파일은 하나도 만들어지지 않는다.
+   * agy는 등록된 워크스페이스 밖의 쓰기를 조용히 버린다 — 실패 표식조차 없어서
+   * "했다고 말하는데 아무것도 없는" 상태가 된다.
+   */
   /*
    * ★스폰 cwd 와 등록 폴더는 **같은 값**이어야 한다 — 그래서 변수 하나로 둔다.
    *
@@ -2531,39 +2531,39 @@ async function runPreparedAntigravityAttempt(
   // used to run in the legacy profile's private runtime home and could not reach the step's files.
   const agyWorkDir = runReq.cwd ?? agentRunCwd();
   let agyReadDirs = [agyWorkDir, ...agyAdditionalDirs];
-    
-                                            
-    
-                                                        
-                                                                
-                                                                   
-                                                         
-                                                 
-     
-    
-                                           
-    
-                                                     
-                                                    
-                                            
-                                                 
-    
-                                                  
-                                           
-    
-                                                 
-                                                       
-                                                            
-                                                 
-                                              
-                            
-     
+  /*
+   * ★agy 프롬프트는 **argv 한계에 걸릴 때만** 파일로 우회한다.
+   *
+   * 파일 부트스트랩은 argv 길이 제한 회피용이었는데, 무조건 쓰면 agy가 파일을 읽기 위해
+   * 도구 호출(view_file)을 해야 하고, 헤드리스 승인 모드(request-review)에서 그 승인을
+   * 기다리다 갇힌다 — 실측 2026-08-06: 그래프 노드가 40초 만에 NODE_NO_RESULT(본문 0)로
+   * 죽거나 재현 프롬프트가 10분+ 행. 프롬프트를 argv로 직접 주면 도구가 아예 필요 없다.
+   * macOS ARG_MAX ~1MB — 100KB 이하는 직접, 그 이상만 파일.
+   */
+  /*
+   * ★세션 규칙은 이 실행이 실제로 도구를 쓸 수 있는지에 맞춰 말한다.
+   *
+   * 예전에는 권한과 무관하게 "도구를 시도하지 말고 파일로 저장하지 마라"를 항상 보냈다.
+   * 쓰기 권한 실행에서 그 문장은 **거짓이자 금지령**이 된다 — 모델은 지시받은 대로
+   * 코드를 화면에 그려주고 끝냈고, 프로젝트에는 파일 하나 생기지 않았다.
+   * 권한 칩이 "읽기 + 쓰기"인데 아무것도 쓰이지 않는 상태가 여기서 만들어졌다.
+   *
+   * 도구가 열린 실행에서는 반대로 **실제로 만들라**고 말해야 한다. 코드를 답변에
+   * 옮겨 적는 것으로 대신하는 것이 이 런타임의 기본 습관이기 때문이다.
+   *
+   * ★그리고 "끝나지 않는 명령"을 반드시 말해 준다. 도구를 열어 준 첫날 실측:
+   * 모델이 요청대로 dev 서버를 띄웠고 Vite는 실제로 :5173에서 200을 응답했는데,
+   * `npm run dev`를 **foreground로** 실행하는 바람에 그 명령이 끝나기를 기다리며
+   * 실행이 8분+ 멈췄다. 화면에는 "작업 경로를 준비하는 중"만 남아 사용자에게는
+   * 실패로 보인다 — 정작 결과물은 이미 떠 있는데도. 도구를 열어 주는 것과
+   * **되돌아오게 하는 것**은 다른 일이다.
+   */
   const sessionRules = [
     "Non-interactive session rules:",
     ...(runReq.browserOnly
       ? [
           "- tools: only the Agentlas Browser MCP, pre-approved; use it directly",
-          
+          // The scoped-read profile's grants allow reading the workspace and nothing else on disk (A/B 2026-10-17).
           ...(browserProject?.scopedRead
             ? ["- files: read-only, this workspace only",
               "- never: run_command, file writes, provider-native browser tools, another Playwright runtime"]
@@ -2641,17 +2641,17 @@ async function runPreparedAntigravityAttempt(
       spawnPrompt = process.platform === "win32"
         ? `${sessionRules}\n${buildAgyPromptBootstrap(agyPromptFile)}`
         : buildAgyPromptBootstrap(agyPromptFile);
-        
-                                      
-        
-                                                    
-                                                   
-                                                                    
-                                                
-        
-                                                                            
-                                                                               
-         
+      /*
+       * ★프롬프트 폴더를 **더한다**. 갈아치우지 않는다.
+       *
+       * 여기서 목록을 통째로 교체하면 바로 위에서 넣은 작업 폴더가 사라진다. 그러면
+       * agy 는 사용자의 폴더를 워크스페이스로 받지 못하고, 쓰기를 자기 스크래치
+       * (~/.gemini/antigravity-cli/scratch)로 돌린다 — 모델은 "만들었다"고 답하는데
+       * 사용자가 연 폴더에는 아무것도 없다. 실측으로 정확히 그 모습을 봤다.
+       *
+       * This is only the one-shot fallback. Resident stream-json turns send
+       * the same full prompt over stdin without adding an ephemeral directory.
+       */
       agyReadDirs = [agyPromptDirectory, agyWorkDir, ...agyAdditionalDirs];
       return oneShotWindowsBudgetFailure();
     } catch (error) {
@@ -2954,7 +2954,7 @@ async function runPreparedAntigravityAttempt(
 
     let stdout = "";
     let stderr = "";
-    // A resident process settles on the result frame, but agy writes its typed AGY_ERROR line to stderr, a separate pipe
+    // F55: a resident process settles on the result frame, but agy writes its typed AGY_ERROR line to stderr, a separate pipe
     // that can arrive just after it. An errored turn that named no machine code waits (bounded) for that one line.
     let residentErrorGraceTimer: ReturnType<typeof setTimeout> | undefined;
     let lastEmit = 0;
@@ -3022,14 +3022,14 @@ async function runPreparedAntigravityAttempt(
       let step: ReturnType<typeof reduceAgyLine>;
       try { step = reduceAgyLine(normalizedLine, agyState); }
       catch { events.onStatus("agy: ignored an event line with an unexpected shape"); step = {}; }
-        
-                                                                                                                         
-                                                                                                                         
-                                                                                                                        
-                                                                                                                           
-                                                                                                                           
-                                                                                                 
-         
+      /*
+       * Two typed protocol facts tell a process told to resume conversation X that X's turns are not there (measured agy
+       * 1.4.0): it reports another conversation id (its first `init` event: X was gone and agy opened a new one), or its
+       * first `user_input` step is step 0 (X's id was kept but X held no steps, e.g. an emptied store file). Stop it at
+       * once, before it answers or uses a tool from an empty context; the turn re-runs fresh with the conversation carried
+       * (runPreparedAntigravity). If the run already produced text or a tool step, it may have acted and is never replayed
+       * (unattended-session-turns.ts rule 3); it still ends as the typed loss, not as an answer.
+       */
       const lostSignal = !resumesStoredConversation || conversationLost ? null
         : agyState.conversationId && agyState.conversationId !== agyResumeId ? "conversation_id"
           : agyState.firstUserInputStepIndex === 0 ? "empty_conversation" : null;
@@ -3232,11 +3232,11 @@ async function runPreparedAntigravityAttempt(
       /*
        * ★A turn that ended on a reported error names no machine code on any stream surface: result.error is one sentence,
        * the error_message steps carry no field and AGY_ERROR on stderr is UNKNOWN / gRPC 2 for a safety block and for every
-       * other executor failure alike (agy 1.4.3, antigravity-conversation-metadata.ts). The typed reason is in the
+       * other executor failure alike (measured agy 1.4.3, antigravity-conversation-metadata.ts). The typed reason is in the
        * conversation store agy persists: the stop reason of the turn's last answer attempt (11 = CONTENT_FILTER). It is read
        * from that attempt's own step_index, never by words; any miss leaves the failure exactly as it was.
        */
-      // A typed AGY_ERROR line on stderr (quota, sign-in, brief outage) is the machine value the result
+      // F55 (2026-10-21): a typed AGY_ERROR line on stderr (quota, sign-in, brief outage) is the machine value the result
       // frame lacks. Order: the result frame's own code, then this line, then the stop-reason store below.
       if (agyState.resultError) {
         if (!agyState.resultErrorCode) {
@@ -3277,41 +3277,41 @@ async function runPreparedAntigravityAttempt(
         const trimmed = body.trim();
         // The drafts streamed as partials were not the answer; the last partial is (as Claude's StructuredOutput channel).
         if (structuredAnswer !== undefined && trimmed) events.onPartial(trimmed);
-          
-                                   
-          
-                                                                   
-                                                                     
-                                                     
-                         
-          
-                                                   
-                                                                
-           
+        /*
+         * ★승인 거부로 답이 비었으면 성공이 아니다.
+         *
+         * 실측(agy 1.1.13): 도구가 승인 없이 auto-deny되면 그 스텝만 ERROR로 지나가고,
+         * 최종 이벤트는 `status:"SUCCESS", response:""` 로 온다. 그대로 두면 이 실행은
+         * "성공했는데 답이 없다"가 되어 화면에 아무것도 남지 않는다 — 사용자에게는
+         * 그냥 멈춘 것처럼 보인다.
+         *
+         * 답이 없고 막힌 도구가 있으면 그 사실을 실패 표식으로 싣는다. 소비자는
+         * `failure` 칸으로 판정하므로(runtime-failure 계약) 조용히 지나갈 수 없다.
+         */
         const denied = agyState.deniedTools ?? [];
-          
-                                                        
-          
-                                                                          
-                                                      
-                                                       
-                                                         
-                                                    
-                                                  
-           
+        /*
+         * ★read 권한의 빈 실행은 사고가 아니라 **구조**다 — 그렇게 말해야 한다.
+         *
+         * read 는 agy 에 권한 플래그를 주지 않고(위 antigravityPermissionArgs 주석의 실측),
+         * 헤드리스에는 승인할 사람이 없으므로 agy 가 *모든* 도구를 자동 거부한다.
+         * `pwd` 조차 막힌다. "승인이 없어 거부됐다"는 문장은 맞지만, 사용자에게는
+         * 우연한 사고처럼 들려서 같은 실행을 다시 시키게 만든다. 다시 시켜도 결과는 같다.
+         * 이 런타임에서 읽기 권한으로 도구 작업을 시킬 방법은 없으므로, 그 사실과
+         * 푸는 길(권한을 올리거나 다른 런타임을 고르기)을 한 문장으로 말한다.
+         */
         // 판정 근거는 새로 만들지 않는다 — 도구를 열었는지는 이미 agyToolsAllowed 가 안다.
         const structural = !agyToolsAllowed;
-          
-                                                            
-          
-                                              
-                                                              
-                                                                      
-                                                               
-                                                              
-                                                      
-                                                                    
-           
+        /*
+         * ★런타임이 오류 필드를 보냈으면 실패다. 종류는 별도 machine code로만 고른다.
+         *
+         * 실측 2026-09-07 (agy 1.1.27, 할당량 소진):
+         *   {"event":"result","status":"ERROR","response":"",
+         *    "error":"Individual quota reached. … Resets in 25m37s."}
+         * 그리고 프로세스는 exit 1 로 끝나고 stderr 는 **비어 있다.** 이 칸을 안 읽던
+         * 동안 사용자가 본 것은 `Antigravity CLI exit 1` 한 줄뿐이었다 — 무엇이
+         * 문제인지도, 25분 뒤면 풀린다는 것도 없이. 다시 눌러도 같은 줄만 나온다.
+         * 오류 필드 자체는 marker다. code가 없으면 사유 문구를 추측하지 않고 refused로 남긴다.
+         */
         const resultFailure = antigravityResultFailure(agyState);
         const runtimeSaidWhy = resultFailure
           ? {
@@ -3324,12 +3324,12 @@ async function runPreparedAntigravityAttempt(
             exitCode: 0,
           }
           : undefined;
-          
-                                                                
-                                                                             
-                                                                             
-                                                                       
-           
+        /*
+         * ★막힌 도구가 실행 전체를 죽일지는 **거부의 종류**가 정한다 — 판정은 순수 함수로 꺼냈다.
+         * 오너 신고 2026-09-14: Science + agy 에서 grep_search 한 건이 agy 자신의 보호 경계에
+         * 막혔을 뿐인데 "auto-denied for missing approval" 로 실행 전체가 refused 로 죽었다.
+         * 계약(scripts/test-runtime-failure-contract.cjs)이 이 함수를 직접 부른다.
+         */
         // agy's own SUCCESS result is a normal end, settled by the shared rule (R-065): a tool-only run completed with an
         // empty text; only one with neither text nor a reported tool is the empty failure below.
         const agyEnd = settleNormalEnd({ text: trimmed, toolCalls: new Set([...reportedAgyTools].map((key) => key.replace(/:(?:active|done)$/u, ""))).size });
@@ -3348,19 +3348,19 @@ async function runPreparedAntigravityAttempt(
             source: deniedOutcome.kind === "empty" ? ("heuristic" as const) : ("marker" as const),
           }
           : antigravityExitFailure(body, stderr)
-            
-                                
-            
-                                                                        
-                                                           
-                                                         
-                                                            
-                                                            
-                                                                   
-            
-                                                                
-                                      
-             
+          /*
+           * ★답이 없는 성공은 성공이 아니다.
+           *
+           * agy 는 exit 0 + `status:"SUCCESS"` 로 끝나면서 응답이 비어 있을 수 있다(도구가
+           * 조용히 막혔거나 모델이 아무것도 내지 않은 경우). 그동안 이 자리는 실패를 만들지
+           * 않았고, 그래서 세 가지가 한꺼번에 일어났다: 화면에 아무 일도 일어나지 않고,
+           * 사유가 어디에도 안 남고, **빈 대화가 세션으로 저장됐다.** 다음 턴은 그 세션을
+           * 이어받아 히스토리 없이 새 한 줄만 보내므로, 사용자가 "d" 라고 치면 모델은 앞의
+           * 2,000자를 본 적 없는 채로 "무엇을 할까요" 라고 되묻는다(실측 보고 2026-09-07).
+           *
+           * 빈 답은 `empty` 로 표식을 단다: 실패한 턴은 저장되지 않고, 연속 실행은 이 종류를
+           * 일시적 실패로 보고 같은 턴을 다시 시도한다.
+           */
           ?? (agyEnd.outcome === "empty"
             ? {
               kind: "empty" as const,
@@ -3404,13 +3404,13 @@ async function runPreparedAntigravityAttempt(
             : {}),
         });
       } else if (antigravityResultFailure(agyState)) {
-          
-                                                  
-          
-                                                                  
-                                                               
-                                                               
-           
+        /*
+         * ★exit != 0 이어도 런타임이 이유를 말했으면 그 이유가 결과다.
+         *
+         * 실측(할당량 소진): exit 1 · stderr 비어 있음 · result.error 에만 사유.
+         * 예전에는 여기서 `Antigravity CLI exit 1` 로 던져 사유가 통째로 사라졌다.
+         * 실패 표식으로 돌려주되, 재시도 종류는 별도 provider code가 있을 때만 구체화한다.
+         */
         const resultFailure = antigravityResultFailure(agyState)!;
         resolve({
           text: "",
@@ -3534,9 +3534,10 @@ export const runAntigravity: Runner = async (
   // read permission without auto-approval is not a verified no-tools envelope.
   // Refuse before discovery, attachment staging, MCP reconciliation or spawn;
   // trusted invocations retain their existing permission and session contracts.
-  // Both refusals are the declared limits selectors filter on (shared/runtime-capabilities.ts RUNTIME_REQUEST_LIMITS).
+  // The refusal is the declared limit selectors filter on (shared/runtime-capabilities.ts RUNTIME_REQUEST_LIMITS). A read-only
+  // automation (restrictedReadBoundary) is not refused: it runs under its read permission, antigravityPermissionArgs(read).
   const declaredRefusal = runtimeRequestRefusal(ANTIGRAVITY_KIND, { untrustedNoTools: req.untrustedNoTools,
-    judgmentOnly: req.judgmentOnly, restrictedReadBoundary: req.restrictedReadBoundary });
+    judgmentOnly: req.judgmentOnly });
   if (req.untrustedNoTools && declaredRefusal === "untrusted_no_tools_unsupported") {
     throw new RuntimeJudgmentRefusal(
       "antigravity",
@@ -3544,11 +3545,6 @@ export const runAntigravity: Runner = async (
         ? "현재 Antigravity CLI에서 기본 도구와 기존 MCP 서버를 모두 차단하는 격리가 검증되지 않아 비신뢰 실행을 시작할 수 없습니다. 격리 실행을 지원하는 런타임이 필요합니다."
         : "Antigravity CLI has no verified isolation that disables all built-in tools and inherited MCP servers. This untrusted run cannot start; use a runtime with verified isolation.",
     );
-  }
-  if (declaredRefusal === "restricted_read_unsupported") {
-    throw markRefusedBeforeDispatch(new Error(
-      "Antigravity is not enabled for restricted read-only execution because its host filesystem boundary is not release-verified.",
-    ));
   }
   const readToolFailure = antigravityReadToolFailure(req);
   if (readToolFailure) return { text: "", ownerControlTerminal: "uncertain", turnDelivery: "not-dispatched", failure: readToolFailure };

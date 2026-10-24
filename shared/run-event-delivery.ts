@@ -11,10 +11,10 @@ export interface RunEventDelivery {
 export interface RunEventReplayInput {
   runId: string; chatId: string; afterOrdinal: number;
   /**
-
-
-
- */
+   * The viewer will rebuild from this answer (it dropped events it held), so the live texts must ride along. Main also
+   * attaches them for afterOrdinal 0 and for a replay that is not a complete tail; a complete tail applied event by
+   * event never needs them (perf review 2026-10-17, R-04 / H2).
+   */
   hydrate?: true;
 }
 export interface RunEventReplay {

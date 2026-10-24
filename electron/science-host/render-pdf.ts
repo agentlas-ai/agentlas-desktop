@@ -103,7 +103,7 @@ export function analyzeLatexCompileLog(log: string): LatexCompileDiagnostics {
 }
 
 function tectonicToolchainReceipt(executable: string): TectonicToolchainReceipt {
-  const versionRun = spawnSync(executable, ["--version"], { encoding: "utf8", timeout: 10_000 });
+  const versionRun = spawnSync(executable, ["--version"], { encoding: "utf8", timeout: 10_000, windowsHide: true });
   const version = `${versionRun.stdout ?? ""}\n${versionRun.stderr ?? ""}`.trim().split(/\r?\n/u)[0]?.trim() || "unknown";
   return {
     engine: "tectonic",
@@ -114,7 +114,7 @@ function tectonicToolchainReceipt(executable: string): TectonicToolchainReceipt 
 
 function runProcess(bin: string, args: string[], cwd: string, timeoutMs: number): Promise<{ code: number; stderr: string }> {
   return new Promise((resolve) => {
-    const child = spawn(bin, args, { cwd, stdio: ["ignore", "ignore", "pipe"], env: { ...process.env, HOME: process.env.HOME ?? os.homedir() } });
+    const child = spawn(bin, args, { cwd, stdio: ["ignore", "ignore", "pipe"], env: { ...process.env, HOME: process.env.HOME ?? os.homedir() }, windowsHide: true });
     let stderr = "";
     const timer = setTimeout(() => { try { child.kill("SIGKILL"); } catch { /* gone */ } }, timeoutMs);
     timer.unref?.();

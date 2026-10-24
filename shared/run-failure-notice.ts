@@ -2,45 +2,45 @@ import type { InvocationRuntimeFailure } from "./types";
 import { formatRuntimeQuotaReset } from "./runtime-quota";
 import { EMPTY_AFTER_UNUSABLE_TOOLS_CODE } from "./turn-settlement";
 
-   
-                                                                                                      
-                                                                                                   
-                                
-  
-                                                                                                                    
-                                                                                                                         
-                                                                             
-  
-                                                                                                                            
-                                                                                                                             
-                                                                                                                       
-                                                                                                                          
-                                                                               
-  
-                         
-                                                                                                                      
-                                                                                                    
-                                                                                                                            
-                                                                                                                           
-                                                                                                                          
-                                                                                               
-  
-                                                                                                                            
-                                                                                                                       
-                                                                                                                           
-                                                                                                                       
-                                                                                                                        
-  
-                                                                                                                               
-                                                                                                                     
-                                                                                                                              
-                                                                                                                            
-                                                                                                                       
-                                                                                                                          
-                                                                                                       
-  
-                                                                    
-   
+/**
+ * What the transcript says when a run ended without a reply, built from the run's typed failure only (F51, Finance 1008
+ * validation 2026-10-21). Pure, with no Electron, Node or renderer imports, so Main, the daemon and a re-vendored terminal
+ * core write the same sentence.
+ *
+ * Before this, every run that ended without a reply left one generic line ("The run failed before it could finish a
+ * reply …") whatever the cause. An antigravity turn blocked by the provider's content safety filters read exactly like a
+ * crash, as an "app problem", while the real cause lived only in run events.
+ *
+ * The facts are the host's own typed ones (InvocationRuntimeFailure: kind, source, providerCode, and for an unfinished turn
+ * the runner's `cause`; the terminal code; the delivery fact). The text never classifies prose. The failure's own message is
+ * quoted after the app-language sentence (bounded, one line) where the cause is not the kind itself, so the provider's
+ * reason stays visible: a runner that gave no machine code for a safety block (antigravityFailureKind keeps such an error
+ * "refused" and says why only in words) is still told in the provider's words.
+ *
+ * Two shapes reach here:
+ *  - a failure reported before anything was dispatched (HTTP 401/403/429 of an API, a local rejection): its own kind;
+ *  - an unfinished turn: mcp/client.ts ends every dispatched turn that has no completed terminal as
+ *    runtime_turn_unsettled, which every runner and runnerFailureFromError report as `refused`, so that kind proves nothing
+ *    about a refusal. What the runner itself reported behind it rides along as `cause`; the text names that class and adds
+ *    that tools may already have run (so it was not sent again). Without a usable cause it is worded as a turn that ended
+ *    without a completion receipt, and the reported reason follows in the failure's own words.
+ *
+ *  - quota / rate_limit / auth: the typed kind says everything; no quote. One exception: a quota with no machine reset time
+ *    (retryAfterAt) quotes the reported reason, because that sentence may be the only place the reset time is written.
+ *  - refused: only a provider-owned code (the closed list below) or no code is worded as the provider's refusal; any other
+ *    code is a host-owned limit (context capacity, a busy MCP scope, a Windows argv budget …) with its own message and
+ *    returns null for a direct failure (the caller keeps its previous sentence) or the neutral unfinished-turn wording.
+ *
+ *  - empty: only as the `cause` behind an unfinished turn (a turn that ended with no text and no tool call; every runner types
+ *    it). Named as the model's empty answer; the runner's own words are quoted only when it gave no code of its own.
+ *  - tools_unusable: an `empty` cause whose host-owned code (EMPTY_CAUSE_CODE_CLASSES) says the turn ended with no reply text
+ *    after tool calls that all failed or came back empty (H2, 2026-10-21). The code is the whole reason; nothing is quoted.
+ *  - capacity / unavailable: a host-owned machine code that names its class (HOST_FAILURE_CODE_CLASSES), read from the
+ *    failure's code or, when the event carries no typed failure (the serving 503 is kind `exit`), from the terminal code.
+ *    The code is the whole reason, so nothing is quoted. Any other host-owned code still returns null.
+ *
+ * `source: "heuristic"` is worded as a likelihood, never a verdict.
+ */
 
 export type RunFailureNoticeLocale = "ko" | "en";
 export type RunFailureNoticeCause = "quota" | "rate_limit" | "auth" | "refused" | "empty" | "tools_unusable" | "unavailable" | "capacity" | "unsettled";
@@ -64,8 +64,8 @@ export const PROVIDER_REFUSAL_CODES: ReadonlySet<string> = new Set([
 ]);
 
 /**
- Host-owned machine codes that name a class of their own, with the sentence that class gets. A closed table of codes, never of
- words: `capacity` is the input that does not fit the model's
+ * Host-owned machine codes that name a class of their own, with the sentence that class gets (F51 follow-up, Finance 1008
+ * validation 2026-10-21). A closed table of codes, never of words: `capacity` is the input that does not fit the model's
  * context window (the local pre-send check of BYOK / local models / Agentlas serving, the serving endpoint's 413, codex's
  * contextWindowExceeded: all `refused` with a host-owned code), `unavailable` is the Agentlas serving endpoint's own 503
  * (its failure carries kind `exit`, which the event does not carry, so the terminal code is the fact).
@@ -225,7 +225,7 @@ export function runFailureNoticeText(facts: RunFailureNoticeFacts): string | nul
   const hedged = resolved.failure.source === "heuristic";
   const reset = resolved.cause === "quota" ? formatRuntimeQuotaReset(resolved.failure.retryAfterAt, locale) : null;
   // A quota whose runner gave no machine reset time (Antigravity names it only inside its sentence: "Resets in 152h45m22s")
-  // quotes the reported reason instead, so the owner still sees when it lifts. The words are quoted, never read.
+  // quotes the reported reason instead, so the owner still sees when it lifts. The words are quoted, never read (F55).
   // An empty answer quotes only when the runner reported it in its own words (no host-owned code): Cursor's or Codex's stderr
   // tail says why it was empty, while Agentlas serving's own code already is the whole reason.
   const quoted = resolved.cause === "refused" || resolved.cause === "unsettled" || (resolved.cause === "quota" && reset === null)

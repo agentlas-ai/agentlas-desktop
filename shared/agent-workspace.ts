@@ -75,11 +75,11 @@ export interface AgentWorkspaceProposal {
   proposalDigest: string;
   changes: AgentWorkspaceChange[];
   memoryEntryIds: string[];
-  /** Size of the always-on entry file before and after, against host limits. Absent on proposals made before this field existed. */
+  /** Size of the always-on entry file before and after, against host limits. Absent on proposals made before 2026-10-20. */
   alwaysOn?: AlwaysOnInstructionChange;
   /** Owner-facing before/after explanation of a learning change, written from the cited memories. */
   card?: AgentWorkspaceLearningCard;
-  /** Files changed, counted by the host. Absent on proposals made before this field existed. */
+  /** Files changed, counted by the host. Absent on proposals made before 2026-10-20. */
   changeSummary?: AgentWorkspaceChangeSummary[];
   createdAt: string;
   appliedAt?: string;

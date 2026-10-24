@@ -125,6 +125,9 @@ asarUnpack:
   # auto-unpacks it as a detected native module, but the base config states this explicitly
   # and this duplicate must not depend on that autodetection staying true.
   - "**/node_modules/node-pty/**/*"
+  # document.deck.build runs a model-written pptxgenjs script in a child Node process (live-document/deck-run.ts), which reads
+  # real files, not app.asar. Same entry as electron-builder.yml (verify-packaging-completeness.mjs keeps the two in step).
+  - "**/node_modules/{pptxgenjs,jszip,pako,readable-stream,safe-buffer,string_decoder,image-size,queue,https,lie,immediate,inherits,isarray,core-util-is,process-nextick-args,setimmediate,util-deprecate}/**/*"
 
 electronFuses:
   resetAdHocDarwinSignature: true

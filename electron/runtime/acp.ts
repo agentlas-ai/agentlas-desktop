@@ -38,6 +38,7 @@ import {
   AcpRpcError,
   acpMcpServersFromConfig,
   chooseAuthMethod,
+  isAcpAuthRequired,
   legacyModelSelectionFromSession,
   modelConfigOptionFromSession,
   modeOptionsFromNewSession,
@@ -62,6 +63,7 @@ import { clearRuntimeSession, getRuntimeSession, saveRuntimeSession } from "../s
 import {
   getRuntimeToolPermissionArbiter,
   setRuntimeToolPermissionArbiter,
+  toolApprovalSessionKey,
   type RuntimeToolPermissionAsk,
   type RuntimeToolPermissionArbiter,
   type RuntimeToolPermissionDecision,
@@ -93,17 +95,17 @@ export interface AcpAgentSpec {
 
 export const ACP_AGENTS: Record<string, AcpAgentSpec> = {
   cursor: { id: "cursor", label: "Cursor Agent (ACP)", command: "cursor-agent", args: ["acp"], registryId: "cursor" },
-
-
+  // Grok Build 1.0.51, measured 2026-10-16 with a fake stdio MCP server: session/load and session/resume of the live
+  // session each stopped the previous server (stdin closed) and started the new table within ~60 ms, no model call.
   grok: { id: "grok", label: "Grok Build (ACP)", command: "grok", args: ["agent", "stdio"], registryId: "grok-build", mcpRebindOnResume: true },
-
-
+  // Kimi Code 0.28.0, measured 2026-10-16: session/load and session/resume of the live session keep its first servers
+  // (the new table never starts), so a changed MCP table opens a new process (acp-mcp-binding.ts).
   kimi: { id: "kimi", label: "Kimi CLI (ACP)", command: "kimi", args: ["acp"], registryId: "kimi" },
-
-
-
-
-
+  // 오너 결정(2026-08-18): 내장 제공은 **구독 인증 자산이 있는 CLI만** 둔다.
+  // OpenCode·Goose는 자체 모델도 구독도 없이 사용자의 API 키를 중개하는 껍데기라,
+  // 우리가 BYOK로 직접 부르는 것과 결과가 같으면서 러너 계약(캐시·세션·usage)만 하나
+  // 더 늘린다 — 내장 목록에서 제거했다. 사용자가 원하면 설정의 ACP 프로필로 직접
+  // 등록할 수 있다(그 자리는 "사용자가 추가한 것"이지 우리가 제공하는 것이 아니다).
   "github-copilot-cli": { id: "github-copilot-cli", label: "GitHub Copilot CLI (ACP)", command: "npx", args: ["-y", "@github/copilot@1.0.95", "--acp"], registryId: "github-copilot-cli" },
   // gemini는 레지스트리에 `gemini --acp`로 선언돼 있지만 **아직 내장하지 않는다 —
   // 보류이지 기각이 아니고, 판단은 오너 몫이다.** 위 기준("구독 인증 자산이 있는가")에
@@ -512,10 +514,10 @@ export class AcpSessionClient {
 }
 
 /**
-
-
-
-
+ * Kimi Code's AskUserQuestion bridge (measured 2026-10-16, Kimi Code 0.28.0 over ACP): session/request_permission with
+ * toolCall.title "AskUserQuestion", the question as the toolCall's text content, one allow_once option per answer
+ * (`q0_opt_<n>`, named by the answer label) and one reject_once `q0_skip`. Selecting `q0_skip` dismisses it (the model
+ * reads "User dismissed the question without answering"). Only that exact shape is read as a question.
  */
 function kimiPermissionQuestion(params: any, options: any[]): { skip: any; ask: AgentlasAskQuestion | null } | null {
   if (params?.toolCall?.title !== "AskUserQuestion" || options.length < 2) return null;
@@ -612,14 +614,14 @@ async function openAcp(
     /** Present only for a resident session; preserves its exact executable generation. */
     executableOwner?: AcpExecutableOwner;
     /**
-
-
-
-
-
-
-
- */
+     * grok 전용 도구 관문 — `grok agent --plugin-dir <DIR>`.
+     *
+     * ★실측 2026-08-19(grok 1.0.5): 이 플래그는 `grok agent` 하위 명령에만 있고
+     * ("Highest-priority plugin scope; always trusted — hooks and MCP servers
+     * activate without a prompt"), 최상위 `grok` 에 붙이면 실행이 아예 안 뜬다.
+     * 그리고 grok 은 ACP_PREFERRED_KINDS 라 실제 실행이 바로 이 `agent stdio`
+     * 경로다 — 레거시 헤드리스 러너가 아니라 여기가 관문을 걸 자리다.
+     */
     toolBrokerPluginDir?: string;
   },
 ): Promise<Session> {
@@ -677,15 +679,15 @@ async function openAcp(
       throw new Error(`ACP protocolVersion ${String(init?.protocolVersion)} unsupported (client speaks v${ACP_PROTOCOL_VERSION} only)`);
     }
     const authMethods: any[] = Array.isArray(init?.authMethods) ? init.authMethods : [];
-    if (authMethods.length > 0) {
-      const chosen = chooseAuthMethod(authMethods, opts.env);
-      if (chosen?.id) {
-        try {
-          await conn.request("authenticate", { methodId: chosen.id }, { timeoutMs: opts.timeoutMs });
-        } catch {
-          // Already-logged-in runtimes may reject authenticate yet accept
-          // session/new; if not, session/new fails loudly right after.
-        }
+    // Only a non-interactive method (a secret already in the env) is ever sent here: this path serves
+    // model listing, detection and turns, none of which may open a sign-in page (chooseAuthMethod).
+    const chosen = authMethods.length > 0 ? chooseAuthMethod(authMethods, opts.env) : undefined;
+    if (chosen?.id) {
+      try {
+        await conn.request("authenticate", { methodId: chosen.id }, { timeoutMs: opts.timeoutMs });
+      } catch {
+        // Already-logged-in runtimes may reject authenticate yet accept
+        // session/new; if not, session/new fails loudly right after.
       }
     }
     session.init = init;
@@ -780,12 +782,12 @@ export function acpSessionPool(): AcpSessionPool<Session> {
     sessionPool = new AcpSessionPool<Session>({
       alive: acpSessionAlive,
       close: closeAcpSession,
-      
-
-
-
-
-
+      /*
+       * ★유휴 상주가 호스트의 종료를 막으면 안 된다. 자식의 stdio 파이프는 부모의
+       * 이벤트 루프를 붙잡으므로, 붙들기만 하고 unref 하지 않으면 일을 끝낸 터미널·
+       * 스크립트가 영영 안 끝난다(실측: 기존 ACP 게이트가 정확히 그렇게 멈췄다).
+       * 창을 가진 앱/데몬은 어차피 계속 사는 프로세스라 차이가 없다.
+       */
       // 파이프는 런타임에 Socket 이라 ref/unref 를 갖지만 타입(Readable/Writable)에는 없다.
       unref: (session) => {
         releaseAttemptChild(session.child);
@@ -915,8 +917,10 @@ export async function probeAcpModels(
     const current = rows.find((r) => r.current)?.id;
     return { ...outcome, ...(current ? { defaultModel: current } : {}), init: session.init };
   } catch (err) {
-
-
+    // Not signed in is a state of the account, typed from ACP's error code: the listing never signs in (openAcp).
+    if (isAcpAuthRequired(err)) return { status: "failed", models: [], rawLineCount: 0, reason: "acp:auth-required", source: "acp" };
+    // 여기서도 사유는 data 에 있다 — `acp:Internal error` 만 남기면 모델 탐지 실패를
+    // 아무도 진단할 수 없다(실측: goose 의 provider 미설정이 정확히 그 모습이었다).
     const raw = err instanceof Error ? err.message : String(err);
     const data = err instanceof AcpRpcError ? err.data : undefined;
     const detail = data == null ? "" : (typeof data === "string" ? data : JSON.stringify(stableAcpErrorData(data)));
@@ -928,9 +932,9 @@ export async function probeAcpModels(
 }
 
 /**
-
-
-
+ * The error data minus per-request noise. Copilot CLI's 403 carries every response header (request ids, date),
+ * so the failure reason changed on every probe and "report once per change" logged an error each minute
+ * (1.2.84 production, 2026-10-10: 18 lines in 13 minutes).
  */
 function stableAcpErrorData(data: unknown): unknown {
   if (!data || typeof data !== "object" || Array.isArray(data)) return data;
@@ -971,6 +975,14 @@ export async function probeAcpModelsCached(
   }).finally(() => acpProbeInFlight.delete(key));
   acpProbeInFlight.set(key, probe);
   return probe;
+}
+
+/**
+ * Drop cached ACP listings that answered "not signed in" (acp:auth-required) so the next detection asks again.
+ * Called with every detect-cache clear, which includes the end of a Connect sign-in; other failures keep their backoff.
+ */
+export function forgetSignedOutAcpModelProbes(): void {
+  for (const [key, hit] of acpProbeCache) if (hit.outcome.reason === "acp:auth-required") acpProbeCache.delete(key);
 }
 
 /** Test hook. */
@@ -1140,11 +1152,11 @@ export function thoughtLevelConfigOptionFromSession(response: unknown): { config
 }
 
 /**
-
-
-
-
-
+ * Apply a requested effort through the agent's advertised thought_level option with session/set_config_option, only
+ * when the agent offers that exact level, and confirm the acknowledgement. Measured 2026-10-16: Grok Build 1.0.51
+ * advertises `reasoning_effort` (xhigh, high, medium, low; current high); Kimi Code 0.28.0 advertises `thinking`
+ * (off, on), which is not an effort level, so a requested level is recorded as unsupported, never mapped by guess.
+ * GitHub Copilot CLI (403 for this account) and Cursor (not installed) were not measured; the same rule applies.
  */
 export async function configureAcpSessionEffort(
   spec: AcpAgentSpec,
@@ -1233,7 +1245,7 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
       signal: approvalTurn.signal,
       ...(req.planMode ? { planMode: true as const } : {}),
       runtime: spec.id,
-      sessionKey: `${spec.id}:${req.sessionFingerprintSeed ?? req.cwd ?? "default"}`,
+      sessionKey: toolApprovalSessionKey(spec.id, req.sessionFingerprintSeed, req.cwd),
       cwd,
       chatId: req.approvalChatId ?? req.chatId,
       agentId: req.agentId,
@@ -1256,10 +1268,10 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
       generation: executableIdentity.generation,
     } : null;
     const retainExecutableOwner = executableOwner ? captureAcpExecutableOwner(executableOwner) : () => true;
-
-
-
-
+    // Model selection is a session operation; prompt still binds session identity.
+    // The conversation (which ACP session id this chat resumes) does not depend on the permission: a permission change opens a
+    // new process/session (the mode is chosen when a session is created or loaded) that loads the same conversation back
+    // (owner 2026-10-12: permission is the one exception, a new session that resumes), never a cold start.
     const identityHash = (mode: boolean, executableFingerprint = executableIdentity.fingerprint) => createHash("sha256")
       .update(mode ? "acp-session-v3\0" : "acp-conversation-v4\0")
       .update(spec.id)
@@ -1695,11 +1707,11 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
       const context = dedupeStableTurnContext({ chatId: contextChatId, runtimeKind: sessionKind,
         sessionId, contextFingerprint, turnContext: bootstrap?.turnContext ?? req.turnContext, stableBlocks: req.turnContextStable });
       stableContextDelivery = context.delivery;
-
-
-
-
-
+      // The output contract closes the ACP text on both paths: a declared final-boundary-adjacent exception to the lifetime
+      // order (ledger desktop.main.acp.session-prompt.fresh / .resume). ACP has no schema or system channel, so the contract
+      // shares one text with the owner's words. Measured 2026-10-15 with the real codex and claude CLIs on these exact
+      // texts (108 calls): plain tasks 18/18 either way; with a conflicting owner format request, last 36/36 and ahead of
+      // the owner text 31/36 (all five misses answered in the owner's format). Placement only; the declared module is unchanged.
       const promptText = resumed
         ? `${composeResumeTurnPrompt(userPrompt, composeDeclaredPrompt([
             { id: "transport.acp.resume.gap", revision: 1, stability: "turn-context", changeTriggers: ["owner-input", "checkpoint", "task"], order: 10, text: gapContext },
@@ -1852,16 +1864,16 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
         && (err instanceof StaleAcpSessionError || !acpSessionAlive(session))) {
         throw new StaleAcpSessionError(err);
       }
-      
-
-
-
-
-
-
-
-
-
+      /*
+       * ★사유는 `message` 가 아니라 `data` 에 온다.
+       *
+       * JSON-RPC 는 규격 코드에 규격 문구를 쓰라고 하므로, 에이전트는 -32603 에
+       * message="Internal error" 를 싣고 사람이 읽을 사유는 `data` 로 보낸다. 실측:
+       * goose 는 provider 미설정일 때 정확히 그렇게 답한다
+       * ("Failed to resolve provider: Configuration value not found: GOOSE_PROVIDER").
+       * `message` 만 읽으면 화면에 남는 말은 "Internal error" 한 마디뿐이고, 사용자는
+       * 자기가 무엇을 해야 하는지 알 방법이 없다.
+       */
       const raw = err instanceof Error ? err.message : String(err);
       const data = err instanceof AcpRpcError ? err.data : undefined;
       const detail = data == null ? "" : (typeof data === "string" ? data : JSON.stringify(data));
@@ -1884,7 +1896,7 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
          * ★한도 소진은 인증 문제가 아니다.
          *
          * 로그인은 멀쩡한데 "로그인하라"고 말하면 틀린 처방이고, 사용자는 될 리 없는
-         * 일을 하게 된다. grok 은 429 와 "free-usage-exhausted", 리셋 창까지
+         * 일을 하게 된다. 실측: grok 은 429 와 "free-usage-exhausted", 리셋 창까지
          * 그대로 실어 보낸다 — 그 원문이 이미 사용자가 알아야 할 전부다. 그래서 이
          * 경우에는 authMethods 안내를 **붙이지 않는다**.
          */
@@ -1951,15 +1963,15 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
  * disabled by env. The decision is per call so a setting change needs no restart.
  */
 /**
-
-
-
-
-
-
-
-
-
+ * A session/load refusal that proves the session no longer exists, from a typed marker or a host check, never from message
+ * text:
+ *  - ACP's own resource_not_found, -32002 (the official SDK's RequestError.resourceNotFound). GitHub Copilot CLI 1.0.95
+ *    answers session/load of a missing id with it (measured 2026-10-16: -32002, data {uri: "Session <id> not found"}).
+ *  - Grok Build 1.0.51 (measured 2026-10-16 offline, scratch HOME): -32603 with data.code "FS_NOT_FOUND".
+ *  - Kimi Code 0.28.0 (measured 2026-10-16, scratch KIMI_CODE_HOME): -32602 with data exactly {sessionId: <the id>}
+ *    (its harness maps session.not_found there), or no session directory in its store (kimi-journal.ts).
+ *  - GitHub Copilot CLI: no session-state/<id> folder in its product mirror or the account folder (copilotSessionGone).
+ *  - Cursor has no measured marker (cursor-agent is not installed here); only -32002 would count.
  */
 export function acpLoadedSessionGone(specId: string, error: unknown, env: NodeJS.ProcessEnv, sessionId: string): boolean {
   if (error instanceof AcpRpcError && error.code === -32002) return true;

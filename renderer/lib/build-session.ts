@@ -361,15 +361,15 @@ function commit() {
 }
 
 /**
-
-
-
-
-
-
-
-
-
+ * Reattach to a build that Main is still running (or just finished).
+ *
+ * The build lives in Main; this module only mirrors it. A full reload — app
+ * restart, refresh, crash of the window — drops the mirror while the build keeps
+ * going, and the user comes back to an empty page with no way to learn the
+ * outcome (measured 2026-08-16: rows 12 → 0, request gone, "멈춤"으로 보임).
+ * Main keeps a transcript for exactly this; replay it.
+ *
+ * Route changes do NOT need this — the module singleton already survives them.
  */
 let reattachInFlight: Promise<boolean> | null = null;
 /** How often a reattached view re-reads Main's transcript while the build runs. */
@@ -581,8 +581,8 @@ export function setBuildMcpSelection(ids: string[]): void {
 }
 
 function pushLog(kind: HephaestusBuildEvent["kind"], text: string) {
-  
-
+  // A row identical to the one just above it says nothing new. Long model output collapses to one fixed sentence in
+  // safeBuildProgressText, so a streaming turn used to stack that same sentence once per line (review 2026-10-16 H5).
   const last = state.log[state.log.length - 1];
   if (last && last.kind === kind && last.text === text) return;
   state.log = [...state.log, { kind, text, at: Date.now() }];
@@ -599,8 +599,8 @@ function safeBuildProgressText(raw: string, ko: boolean): string | null {
     || /(?:^|\s)(?:tool_call|function_call|exec_command|write_stdin|apply_patch|mcp__|BUILD_COMPLETE:)(?:\s|$)/i.test(clean)
     || /<\|(?:system|assistant|tool|end)[^>]*\|>/i.test(clean)
     || /"(?:type|role|content|message|arguments|command|tool|schemaVersion|event|payload|status|delta)"\s*:/i.test(clean)
-    
-
+    // `.test(clean)` was missing here since ebe4b777 (v0.9.31, 2026-07-31): a regex literal is truthy, so machineEnvelope was
+    // always true and every stage and log line of the Build page was hidden, live and after a reattach (found 2026-10-17).
     || /^\s*(?:\$|>|#)\s*(?:bash|zsh|sh|python\d*|node|npm|npx|pnpm|yarn|git|mkdir|cp|mv|rm)\b/im.test(clean)
   );
   if (machineEnvelope) return null;
@@ -776,15 +776,15 @@ async function performAutoRegister(workspace: string, readScope: FsReadScope, ge
 // 에러로 표면화. 어떤 경우에도 빈 질문 카드로 사용자를 붙잡지 않는다.
 const AUTO_CONTINUE_MAX = 3;
 /**
-
-
-
-
-
-
-
-
-
+ * How many extra rounds a build may take while it is still visibly closing
+ * blockers. Three rounds fit a strong model finishing a few leftovers; a local
+ * 30B model that scaffolded 32 files and left 45 placeholders open needs more
+ * than three passes, and cutting it off there throws away a package that was
+ * getting closer every round (measured 2026-08-17).
+ *
+ * This is not "try harder for longer": the counter only stops advancing while
+ * the blocker count keeps dropping, so a model that stalls still ends at
+ * AUTO_CONTINUE_MAX.
  */
 const AUTO_CONTINUE_MAX_WHILE_IMPROVING = 24;
 let autoContinues = 0;

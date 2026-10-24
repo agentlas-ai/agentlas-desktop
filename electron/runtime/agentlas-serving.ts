@@ -1,22 +1,22 @@
 import { portableServingStrictSchemaOrNull } from "./serving-output-schema";
 import { registerDeclaredPromptModule } from "./prompt-order";
 import { OUTPUT_LIMIT_CONTINUATION_MAX_ROUNDS, outputLimitContinuationTurn, type OutputLimitCut } from "./output-limit-continuation";
-  
-                                                
-  
-               
-                                                            
-                                                    
-                                                
-  
-                
-                                                            
-                                                      
-  
-            
-                                                     
-                                                      
-   
+/*
+ * Agentlas 서빙 러너 — CLI 도 API 키도 없는 사람이 답을 받는 길.
+ *
+ * ── 왜 필요했나 ──
+ * 지금까지 데스크탑에서 답을 받으려면 Claude Code·Codex 같은 CLI 를 이미 깔아 두었거나
+ * 벤더 API 키가 있어야 했다. 둘 다 없는 사람에게 이 앱은 켜지기만 하는 껍데기였다.
+ * 로그인만 되어 있으면 크레딧으로 바로 쓰게 한다(오너 지시 2026-08-23).
+ *
+ * ── 무엇을 모르나 ──
+ * 이 파일은 세기(Light/Normal/Hard) 말고는 아무것도 모른다. 뒤에서 어떤 모델이 도는지는
+ * 서버만 알고, 앱은 그 이름을 담지 않는다 — 설치본을 뜯어도 나오지 않아야 하기 때문이다.
+ *
+ * ── 크레딧 ──
+ * 실행 1회가 크레딧을 쓴다. 잔액 판정·예약·정산은 전부 서버가 한다. 여기서 값을 지어내
+ * 미리 보여 주지 않는다 — 앱이 계산한 값과 실제 청구가 어긋나면 그것이 곧 거짓말이 된다.
+ */
 import { reportModelPayload, reportCachePlan, reportModelEndpoint, reportModelEffort, ledgerFromApiBody } from "./model-call-ledger";
 import { GENERATION_CONTEXT_RATIO } from "./session-generation";
 import { foldRetainedToolResult } from "./tool-result-context";
@@ -150,7 +150,7 @@ function turnsFor(req: RunnerRequest, events: RunnerEvents, outputReserve: numbe
     const estimated = servingAdmissionTokens(JSON.stringify({ system, messages: turns, maxTokens: outputReserve }))
       + imageTokenEstimate(req);
     if (estimated + outputReserve <= contextWindow) {
-                                                                                                       
+      // History trimming is background work: nothing about it is shown to the user (owner 2026-10-13).
       return { turns, system };
     }
     budget = Math.max(0, budget - (estimated + outputReserve - contextWindow) - 256);
@@ -212,7 +212,7 @@ function servingToolImages(message: { content: unknown } | null): ServingImage[]
 }
 type ServingDone = {
   text?: unknown; stopReason?: unknown; toolUses?: unknown;
-                                                                                                      
+  /** Token counts the server measured for this call (not the model name). Absent on older servers. */
   usage?: { inputTokens?: unknown; outputTokens?: unknown; cacheReadInputTokens?: unknown };
   /** How many attached images the server forwarded. Absent = the server did not accept images. */
   imagesAccepted?: unknown;
@@ -226,10 +226,10 @@ function servingToolCalls(value: unknown): ServingToolCall[] {
   return value.map((raw: unknown) => {
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("invalid_serving_tool_frame");
     const call = raw as Partial<ServingToolCall>;
-    
-
-
-
+    // A name this request did not offer (copied from the conversation history: another runtime's tool name, or a tool the
+    // menu listed earlier) is not a broken frame. The dispatcher resolves it to the one tool it denotes or answers the
+    // model with the exact names, and never runs an unknown tool (tool-name-alias.ts). Refusing the reply ended the turn
+    // as "no completion receipt" (production 2026-10-16, Hope on Agentlas Light).
     if (typeof call.id !== "string" || !/^[A-Za-z0-9_.:-]{1,64}$/.test(call.id) || ids.has(call.id)
       || typeof call.name !== "string" || !call.name || call.name.length > 256
       || !call.input || typeof call.input !== "object" || Array.isArray(call.input))
@@ -333,7 +333,7 @@ function servingRequestFields(req: RunnerRequest): Record<string, unknown> {
   };
 }
 
-                                                                       
+/** Missing or invalid dispatch receipts never become measured zero. */
 /**
  * The serving server (/api/one/serving/chat) places the Anthropic markers itself; the desktop sends none. The plan
  * therefore carries no breakpoints, only the stable-prefix digest (tools + system) and the expected-prefix size that
@@ -356,8 +356,8 @@ class ServingUsage {
   add(id: string, done: ServingDone): void {
     const input = done.usage?.inputTokens;
     const output = done.usage?.outputTokens;
-    
-
+    // The server's inputTokens already include cache reads and writes; cacheReadInputTokens is the measured subset.
+    // Dropping it made every serving turn read as uncached (production 1.3.5: 27.6k/41.8k/45.2k input, cached blank).
     const cached = done.usage?.cacheReadInputTokens;
     const cachedInputTokens = typeof cached === "number" && Number.isSafeInteger(cached) && cached >= 0
       && typeof input === "number" && cached <= input ? cached : undefined;

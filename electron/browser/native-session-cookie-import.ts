@@ -29,11 +29,11 @@ import type { NativeBrowserCookieImportResult, NativeBrowserCookieImportCode } f
 export type { NativeBrowserCookieImportResult, NativeBrowserCookieImportCode } from "../../shared/types";
 
 /**
-
-
-
-
-
+ * What a receipt deserves in main.log. "partial" is ok:true (some cookies were intentionally
+ * skipped, e.g. partitioned ones), never a failure. With observed=0 it is only the remembered
+ * verdict of an earlier migration — every domain already completed, nothing ran in this call.
+ * main.log 2026-09-20..27: all 170 "import failed {code:partial}" lines were that no-op,
+ * repeated on every 15-minute credential refresh and every live-view open.
  */
 export function nativeSessionLogLevel(receipt: Pick<NativeBrowserCookieImportResult, "code" | "observed">): "none" | "info" | "warn" {
   if (receipt.code === "imported" || receipt.code === "already-migrated") return "none";

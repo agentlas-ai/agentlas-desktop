@@ -20,7 +20,7 @@ import {
   productExtensionSignedPayload,
   type ProductExtensionManifest,
 } from "../../shared/product-extension";
-import { ProductExtensionInstaller } from "./installer";
+import { ProductExtensionInstaller, ProductExtensionReadUnavailableError, productExtensionTransientReadCode } from "./installer";
 import { downloadAndInstallSciencePackage, type SciencePackageArchiveSpec } from "./downloader";
 import { fetchScienceReleaseCatalog } from "./science-catalog";
 import { ScienceRendererRegistry } from "agentlas-science";
@@ -448,17 +448,24 @@ function parseScienceSuiteActivation(value: unknown): ScienceSuiteActivation {
   };
 }
 
-function readScienceSuiteActivation(): ScienceSuiteActivation | null {
+function readScienceSuiteActivation(onRecovered?: () => void): ScienceSuiteActivation | null {
   const target = scienceSuiteActivationPath();
+  for (let attempt = 0; ; attempt += 1) {
   try {
     const stat = fs.lstatSync(target);
     if (stat.isSymbolicLink() || !stat.isFile() || stat.size < 32 || stat.size > 64 * 1024) {
       throw new Error("science-suite-activation-invalid");
     }
-    return parseScienceSuiteActivation(JSON.parse(fs.readFileSync(target, "utf8")));
+    const activation = parseScienceSuiteActivation(JSON.parse(fs.readFileSync(target, "utf8")));
+    if (attempt > 0) onRecovered?.();
+    return activation;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    const fsCode = productExtensionTransientReadCode(error);
+    if (fsCode && attempt === 0) continue;
+    if (fsCode) throw new ProductExtensionReadUnavailableError({ schema: "agentlas.product-extension-read-failure.v1", fsCode, phase: "suite-activation", attempts: 2 });
     throw error;
+  }
   }
 }
 
@@ -475,21 +482,16 @@ function writeScienceSuiteActivation(value: ScienceSuiteActivation | null): void
   }
   const normalized = parseScienceSuiteActivation(value);
   const temporary = path.join(path.dirname(target), `.${SCIENCE_SUITE_ACTIVATION_NAME}.${crypto.randomUUID()}.tmp`);
-  const backup = path.join(path.dirname(target), `.${SCIENCE_SUITE_ACTIVATION_NAME}.${crypto.randomUUID()}.backup`);
   fs.writeFileSync(temporary, `${JSON.stringify(normalized, null, 2)}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
-  let movedCurrent = false;
   try {
     if (fs.existsSync(target)) {
       const stat = fs.lstatSync(target);
       if (stat.isSymbolicLink() || !stat.isFile()) throw new Error("science-suite-activation-invalid");
-      fs.renameSync(target, backup);
-      movedCurrent = true;
     }
+    // Keep the verified current file readable until the single atomic replacement.
     fs.renameSync(temporary, target);
-    if (movedCurrent) fs.rmSync(backup);
   } catch (error) {
     try { if (fs.existsSync(temporary)) fs.rmSync(temporary); } catch {}
-    try { if (movedCurrent && !fs.existsSync(target) && fs.existsSync(backup)) fs.renameSync(backup, target); } catch {}
     throw error;
   }
 }
@@ -609,6 +611,8 @@ function installer(): ProductExtensionInstaller {
 
 export function scienceExtensionStatus(): ProductExtensionStatus {
   const status = installer().status(SCIENCE_EXTENSION_ID);
+  if (status.readFailure) return status;
+  try {
   if (remoteCatalogInstallEnabled() && status.installed && !remoteSuiteActivationMatches()) {
     return {
       ...status,
@@ -619,19 +623,26 @@ export function scienceExtensionStatus(): ProductExtensionStatus {
     };
   }
   return status;
+  } catch (error) {
+    if (!(error instanceof ProductExtensionReadUnavailableError)) throw error;
+    return { ...status, phase: "repair-required", enabled: false, errorCode: error.code, errorMessage: error.message, readFailure: error.readFailure };
+  }
 }
 
 function remoteSuiteActivationMatches(): boolean {
   if (!remoteCatalogInstallEnabled()) return true;
   try {
-    const activation = readScienceSuiteActivation();
+    let freshVerificationRequired = false;
+    const activation = readScienceSuiteActivation(() => { freshVerificationRequired = true; });
     if (!activation) return true;
     return SCIENCE_SUITE_SPECS.every((spec) => {
       const expected = activation.components.find((component) => component.id === spec.id);
-      const status = installer().status(spec.id);
+      const status = installer().status(spec.id, freshVerificationRequired);
+      if (status.readFailure) throw new ProductExtensionReadUnavailableError(status.readFailure);
       return Boolean(expected) && status.installed && status.version === expected!.version;
     });
-  } catch {
+  } catch (error) {
+    if (error instanceof ProductExtensionReadUnavailableError) throw error;
     return false;
   }
 }
@@ -644,7 +655,12 @@ export function scienceSuiteStatus(): ScienceSuiteStatus {
     packageBytes: spec.packageBytes,
     status: installer().status(spec.id),
   }));
-  const activationMatches = remoteSuiteActivationMatches();
+  let activationMatches: boolean;
+  try { activationMatches = remoteSuiteActivationMatches(); }
+  catch (error) {
+    if (!(error instanceof ProductExtensionReadUnavailableError)) throw error;
+    activationMatches = false;
+  }
   const installed = activationMatches && components.every((component) => component.status.installed);
   const enabled = installed && components.every((component) => component.status.enabled);
   const phase = !activationMatches || components.some((component) => component.status.phase === "repair-required")

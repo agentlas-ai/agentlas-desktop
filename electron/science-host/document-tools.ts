@@ -1,6 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { ToolPermission } from "../../shared/builtin-tools";
+import { recordRunProducedFiles } from "../harness/run-produced-files";
+import { registerDeclaredPromptModule, type PromptOrderingMetadata } from "../runtime/prompt-order";
 import {
   documentApply, documentCreate, documentList, documentOpen, documentRead, documentSave, LIVE_DOCUMENT_PORT_SCHEMAS,
 } from "../live-document/ports";
@@ -38,6 +40,17 @@ export interface ScienceDocumentToolContext {
 
 type PortOutcome = Awaited<ReturnType<typeof documentList>>;
 type Port = (args: Record<string, unknown>, ctx: { chatId: string; runId: string; permission: ToolPermission; dryRun: false }) => Promise<PortOutcome>;
+
+export const SCIENCE_DOCUMENT_PUBLIC_RESULT_MODULE = {
+  id: "science.document.public-result", revision: 1, stability: "turn-context",
+  changeTriggers: ["owner-input", "validation-result", "child-result"], order: 0,
+} as const satisfies PromptOrderingMetadata;
+
+export function serializeScienceDocumentResult(outcome: PortOutcome): string {
+  registerDeclaredPromptModule(SCIENCE_DOCUMENT_PUBLIC_RESULT_MODULE);
+  const { produced: _produced, ...result } = outcome as PortOutcome & { produced?: readonly string[] };
+  return JSON.stringify(result);
+}
 
 const PATH_PROPERTY = { type: "string", description: "file path inside the project folder (relative to it, or absolute)" };
 const withProjectPath = (schema: { properties: Record<string, unknown> }): Record<string, unknown> =>
@@ -120,5 +133,10 @@ export async function runScienceDocumentTool(name: string, args: Record<string, 
       outcome = { status: "unavailable", reason: "document_port_failed", next: "document_read shows the document's current state; check it before repeating the call" };
     }
   }
-  return { content: JSON.stringify(outcome), isError: outcome.status !== "ok" };
+  // The same host-produced-file ledger that One/Work consumes seals the saved
+  // bytes at the next outer tool completion. Producer metadata is never model
+  // text and a read/open or a refused save cannot manufacture an output.
+  const { produced } = outcome as PortOutcome & { produced?: readonly string[] };
+  if (outcome.status === "ok" && produced?.length) recordRunProducedFiles(ctx.runId, `document.${name.replace(/^document_/, "")}`, produced);
+  return { content: serializeScienceDocumentResult(outcome), isError: outcome.status !== "ok" };
 }

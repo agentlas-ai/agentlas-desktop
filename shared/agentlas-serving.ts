@@ -1,15 +1,15 @@
-  
-                                         
-  
-                 
-                                                      
-                                                          
-  
-                        
-                                                   
-                                                       
-                                       
-   
+/*
+ * Agentlas 서빙 모델 — 데스크탑이 고를 수 있는 세기 세 개.
+ *
+ * ── 왜 세기만 있나 ──
+ * CLI 도 API 키도 없는 사람에게 "어떤 모델을 쓰시겠습니까"는 답할 수 없는 질문이다.
+ * 고를 것은 **얼마나 세게 생각하게 할 것인가** 하나면 충분하다(오너 지시 2026-08-23).
+ *
+ * ── 모델 이름이 여기 없는 이유 ──
+ * 세기 뒤에 어떤 모델이 도는지는 언제든 바꿀 제품 결정이고, 사용자에게 알리지 않는다.
+ * 실제 모델 id 는 서버(웹) 한 곳에만 있고 데스크탑은 세기만 보낸다 — 앱 안에 적어 두면
+ * 설치본을 뜯는 것만으로 드러나므로, 앱은 아예 모르는 것이 옳다.
+ */
 
 export type AgentlasServingTier = "light" | "normal" | "hard";
 
@@ -54,10 +54,11 @@ export const AGENTLAS_SERVING_MODELS: AgentlasServingModel[] = [
 export const AGENTLAS_SERVING_DEFAULT_MODEL = "agentlas-normal";
 
 /**
- Light is served by a model whose price steps up for the WHOLE request once the input passes 100K tokens. Light therefore
- admits and rotates against 100K, which puts the generation boundary (80% of the window) at 80K, clear of that step even when
- the local token estimate is off by a fifth. Ordinary use never reaches it; this bounds a long conversation. Normal and Hard
- keep the 128K window.
+ * Light is served by a model whose price multiplies for the WHOLE request once the input passes 100K tokens (server
+ * serving-models.ts longContext rule: 5x on input and output). Light therefore admits and rotates against 100K, which puts
+ * the generation boundary (80% of the window) at 80K, clear of the cliff even when the local token estimate is off by a
+ * fifth (owner decision 2026-10-21). Measured 2026-10-20 (model_call_ledger, 195 Light turns): input p50 11K, max 27K,
+ * so ordinary use never reaches it; this bounds a long Hope conversation. Normal and Hard keep the 128K window.
  */
 export const AGENTLAS_SERVING_LIGHT_CONTEXT_WINDOW = 100_000;
 

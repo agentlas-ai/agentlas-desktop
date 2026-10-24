@@ -11,9 +11,10 @@ import { readMediaDisplayPreferences, writeMediaDisplayPreferences, type MediaDi
 import { readWorkSidebarWidth, clampWorkSidebarWidth, setWorkSidebarWidth } from "@/lib/work-sidebar-width";
 import type { AppControlRendererState } from "@shared/app-control";
 import { isAppUiPreferenceName } from "@shared/app-ui-preferences";
+import { COMPANY_ENTRY_ROUTE } from "@shared/business/visibility";
 import { readAppUiPreferences, writeAppUiPreference } from "@/lib/app-ui-preferences";
 import { PopupFrame } from "./Popup";
-import { IconApps, IconChat, IconClose, IconFolder, IconSettings, IconSidebar, IconStore } from "./Icon";
+import { IconApps, IconArrowLeft, IconChat, IconClose, IconFolder, IconSettings, IconSidebar, IconStore } from "./Icon";
 
 interface MenuBridge {
   onNavigate: (handler: (route: string) => void) => () => void;
@@ -81,13 +82,25 @@ export function MenuBridge() {
     if (typeof window === "undefined" || !window.agentlasMenu) return;
     const off = window.agentlasMenu.onNavigate((route) => {
       if (route === "__toggle_sidebar__") {
-        // 사이드바 컴포넌트의 localStorage 기반 토글을 flip + storage 이벤트로 알림
+        // Flip what is on screen, not only the stored preference: on a narrow window the panel shows as a rail while the
+        // preference still says "open", so flipping the preference closed an overlay that was not open and the first
+        // Ctrl+[ did nothing (Windows retest 2, 2026-10-24). The panel (SideNav or ProjectSidebar) marks its own state.
         try {
-          const curr = window.localStorage.getItem(SIDEBAR_COLLAPSE_KEY) === "1";
+          const panel = document.querySelector<HTMLElement>(".project-sidebar[data-collapsed], .sidenav[data-collapsed]");
+          const curr = panel
+            ? panel.getAttribute("data-collapsed") === "true"
+            : window.localStorage.getItem(SIDEBAR_COLLAPSE_KEY) === "1";
           setAppSidebarCollapsed(!curr);
         } catch {
           // ignore
         }
+        return;
+      }
+      if (route === "__navigate_back__") {
+        // View ▸ Back (Alt+Left on Windows/Linux). With no earlier page in this window, Back goes to the Dashboard.
+        const nav = (window as Window & { navigation?: { canGoBack?: boolean } }).navigation;
+        if (nav?.canGoBack) router.back();
+        else router.push("/dashboard");
         return;
       }
       if (route === "__show_shortcuts__") {
@@ -100,6 +113,8 @@ export function MenuBridge() {
         setLocalePref(locale as LocalePref);
         return;
       }
+      // 회사 링크 경로는 AuthGate 가 받는다(로그인 전에도 받아야 해서) — 여기서 또 받으면 두 번 이동한다.
+      if (route === COMPANY_ENTRY_ROUTE) return;
       if (route.startsWith("/")) {
         router.push(route);
       }
@@ -108,10 +123,13 @@ export function MenuBridge() {
   }, [router, setLocalePref]);
 
   const ko = locale === "ko";
-  const modifier = typeof navigator !== "undefined" && /mac/i.test(navigator.platform) ? "⌘" : "Ctrl";
+  const mac = typeof navigator !== "undefined" && /mac/i.test(navigator.platform);
+  const modifier = mac ? "⌘" : "Ctrl";
   const shortcuts = [
     { label: ko ? "새 프로젝트" : "New project", keys: [modifier, "N"], icon: <IconFolder size={18} /> },
     { label: ko ? "사이드바" : "Sidebar", keys: [modifier, "["], icon: <IconSidebar size={18} /> },
+    // Back follows the platform: Alt+Left on Windows/Linux. macOS's ⌘[ is this app's Sidebar, so Back has no key there.
+    ...(mac ? [] : [{ label: ko ? "뒤로" : "Back", keys: ["Alt", "←"], icon: <IconArrowLeft size={18} /> }]),
     { label: ko ? "설정" : "Settings", keys: [modifier, ","], icon: <IconSettings size={18} /> },
     { label: ko ? "메시지 보내기" : "Send message", keys: [modifier, "↵"], icon: <IconChat size={18} /> },
     { label: "Agent Hub", keys: ["⇧", modifier, "M"], icon: <IconStore size={18} /> },

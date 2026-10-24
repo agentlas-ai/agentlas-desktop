@@ -7,7 +7,7 @@ import { chatFilePrompt, chatFileImages, validateChatAttachmentSelection } from 
 import { getDb, openedStoreMigrationRole } from "../store/db";
 import { getOneProfile, getOneProfileOrigin, updateOneProfile } from "../store/one-profile";
 import { oneFrontRuntimeSelection } from "./front";
-import { createChat, getChat, appendChatMessage, listChatMessages, normalizeChatRuntimeSelection, getChatWorkingFolder, setChatWorkingFolder } from "../store/chats";
+import { createChat, createProjectWorkChat, getChat, appendChatMessage, listChatMessages, normalizeChatRuntimeSelection, getChatWorkingFolder, setChatWorkingFolder } from "../store/chats";
 import { ensurePersonalOneWorkspace, exportPersonalSession } from "./personal-workspace";
 import { ensureCanonicalTaskForChat, listCanonicalTasks, getCanonicalTaskForChat, hasPassedTaskForceExecutionVerification } from "../store/tasks";
 import { getProject } from "../store/projects";
@@ -57,11 +57,11 @@ export function closeOneSupervisorHostAdmission():void {
   hostOwner?.closeAdmission();workExecutor?.close();stopProactiveHost?.();stopBudgetHost?.();supervisor?.close();nativeRuntime?.close();
 }
 /**
-
-
-
-
-
+ * True while the background daemon holds the personal One domain, whether this Main handed it over or lost the race
+ * for it at start (the daemon adopted it first). Main must then neither build its own supervisor nor treat the
+ * unconfirmed ownership as a failure of an owner action (production 1.3.5, 2026-10-12T22:15Z: a question-card answer
+ * in a Goal room was refused supervisor_owner_unconfirmed). Only a live work-daemon row counts; a dead or released
+ * owner is taken over by oneSupervisor() as before.
  */
 export function personalDomainHeldByDaemon():boolean {
   if(domainHandedToDaemon)return true;
@@ -256,7 +256,8 @@ export function oneSupervisor():OneSupervisorService {
     },attachmentPrompt:chatFilePrompt,
     createWork:input=>{
       if (input.projectId && !getProject(input.projectId)) throw supervisorError('supervisor_work_project_missing');
-      const chat=createChat({originSurface:"work",taskMode:"task",projectId:input.projectId,title:input.text.split(/\r?\n/,1)[0].slice(0,120)});
+      const title=input.text.split(/\r?\n/,1)[0].slice(0,120);
+      const chat=input.projectId ? createProjectWorkChat({projectId:input.projectId,title}) : createChat({originSurface:"work",taskMode:"task",title});
       if (hostOptions?.executor === "agentlas-cloud") bindPersonalFolder(chat.id);
       const task=ensureCanonicalTaskForChat(chat.id);
       if (!task) throw supervisorError('supervisor_work_task_missing');
@@ -308,7 +309,7 @@ export function oneSupervisor():OneSupervisorService {
     },runtime:{start:startNative,attach,receipt,onSettled},
     onFailure:error=>console.warn("[one-supervisor] worker admission deferred",error instanceof Error ? error.message : "unknown"),
   });
-                                                                                                            
+  // Dots parity (owner 2026-10-04): One speaks first on a check-in it was asked to run, or when a worker it
   // delegated to is waiting for the owner. The listener is not an answer surface (it returns false).
   let checkinBusy=false;
   const fireCheckins=async()=>{if(checkinBusy)return;checkinBusy=true;try{
@@ -326,7 +327,7 @@ export function oneSupervisor():OneSupervisorService {
     }
     return false;
   });
-                                                                                                            
+  // Host problems from other rooms reach the owner through One, not only as cards there (owner 2026-10-05).
   const stopHostAlerts=registerOneHostAlertSink(alert=>supervisor?.hostNeedsOwner(alert) ?? false);
   // A teammate started by One's own message to a room reports back to One for review (docs native-harness 22 O1).
   const stopTeamResults=registerOneTeamResultSink(result=>{try{return supervisor?.teamResult(result) ?? false;}catch(error){console.warn("[one-supervisor] team result deferred",error instanceof Error ? error.message : "unknown");return false;}});

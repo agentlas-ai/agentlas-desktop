@@ -1,16 +1,16 @@
 import { fixedPurposePrompt, purposePrompt } from "../runtime/purpose-prompts";
-   
-                                                       
-                                                                        
-  
-                                                                           
-                                                                              
-                                                             
-                                                               
-                                                                                               
-                                                                                                        
-                                                                                                    
-   
+/**
+ * 골 구조 판단 → 계획 → 실행 연결(One·Work 공통, ownsHostGoalLoop).
+ * docs/2026-09-24-PLAN-persistent-autonomy-foundation.md "골 구조 판단" S-4.
+ *
+ * 1) 목표가 만들어지거나 목적이 개정되면(= 그 개정에 모양 판단이 없으면) **그 턴을 시작하기 전에** 가장 강한 계획 모델이
+ *    도구 없이 한 번 모양을 정한다(판정 풀, 풀 안 폴백). 호스트는 shared/goal-shape.ts 로 결정적으로 검증한다.
+ *    판단이 실패하면 목표를 막지 않는다 — 단일 전술 폴백으로 저장하고 다음 턴 시작에 다시 판단한다.
+ * 2) 턴 문맥에는 활성 전술만(R9) 넣고, 표식으로 전술 완료·막힘·계획 연산을 받는다(산문 파싱 없음).
+ * 3) 막힘은 지속 정책(shared/persistence-policy.ts)이 다음 수를 고른다. 단일 전술이 두 번 막히면 모양을 다시 판단한다(ADaPT 승격).
+ * 4) 트리는 review_every_hours 마다 전략 리뷰 절을 넣는다. 속도는 shared/mission-pace.ts, 센서는 Agent Strategy(KPI 표본 저장소,
+ *    long-run/agent-strategy.ts) — 표본이 없으면 "no_sensor" = 인프라 상태. KPI 상태가 바뀌면 시간과 무관하게 재계획 블록이 들어간다.
+ */
 import {
   callConnectedModelDetailed,
   configuredOrchestratorJudgmentPolicy,
@@ -79,11 +79,11 @@ export const SINGLE_TACTIC_PROMOTION_FAILURES = 2;
 export type GoalShapeModelCall = (opts: Parameters<typeof callConnectedModelDetailed>[0]) =>
   Promise<{ text: string | null; runtimeReceipt?: JudgmentRuntimeReceipt; attempts?: JudgmentRuntimeAttempt[]; failure?: { kind?: string; message?: string } }>;
 
-   
-                                                                                                           
-                                                                                                          
-                                                                                              
-   
+/**
+ * The language of every owner-visible text field of the plan tree. Owner 2026-09-28: the goal panel showed
+ * English strategic/sub-goal text, methods and done_when in Korean rooms because the planner always wrote
+ * English. Ids, enum values and JSON keys stay English (machine), owner quotes stay verbatim.
+ */
 export function goalPlanTextLanguageRule(locale: "ko" | "en"): string {
   const fields = "rationale, mission.objective, mission.diagnosis, key_results metric/unit, strategies hypothesis/kpi, tactics description/done_when, boundaries text";
   return locale === "ko"
@@ -125,7 +125,7 @@ export async function judgeGoalShape(input: {
   signal?: AbortSignal;
   timeoutMs?: number;
   callModel?: GoalShapeModelCall;
-                                             
+  /** 계약·실측용: 풀 정책을 주입(없으면 설정된 오케스트레이터 풀). */
   selectionPolicy?: ReturnType<typeof configuredOrchestratorJudgmentPolicy>;
   /**
    * The runtime this Goal's turn is about to use. With no configured orchestrator judgment pool the plan is
@@ -417,7 +417,7 @@ export function buildGoalPlanTurnContext(plan: LiveGoalPlan, input: {
       if (guidance) snapshot.push(`  Guidance: ${guidance}`);
     }
     // 목록은 순서가 이미 정해진 계획이다 — 남은 전술의 id 를 보여 줘야 같은 턴에 이어서 끝낸 전술도 표식할 수 있다.
-                                                                                   
+    // (실측 2026-09-24 E2E: 한 패스에 t1~t3 을 다 했는데 t1 만 알아서 t1 만 표식했다.) 트리는 활성 전술만(R9).
     if (plan.shape === "tactic_list") {
       const current = new Set(tactics.map((t) => t.id));
       const pausedStrategies = new Set(plan.strategies.filter((strategy) => strategy.ownerPaused).map((strategy) => strategy.id));
@@ -483,19 +483,19 @@ export function buildGoalPlanTurnContext(plan: LiveGoalPlan, input: {
   ]);
 }
 
-   
-                                                                                                                        
-                                                                                                                           
-                                                                                                                          
-                                                                                                                  
-                                                                                                                           
-                                                                                                                            
-                                                                                                                      
-                                                                                                                        
-                                                                                                                      
-                                                                                                                          
-                                                               
-   
+/**
+ * A finite plan with nothing left for another pass: at least one tactic done, none active or proposed, none held by the
+ * owner. The tactic reports are the model's own typed `goal_tactic` calls that the host already applied at a pass boundary
+ * (applyGoalPlanMarkers), so this reads plan state, never words. It does not say the Goal is achieved — only the terminal
+ * verification can — it says the model has no further step to take, which is when a pass that does nothing is not
+ * "stuck" but "done and unclaimed". A mission tree (recurring work, KPIs) is never "finished". A provisional fallback plan
+ * (the shape judgment was unavailable; fallbackGoalShape) is one tactic standing for the whole Goal and is finished exactly
+ * when the model has reported that tactic done, like any single-tactic plan: excluding it left every Goal whose shape
+ * judgment cannot run (antigravity, ACP, kimi, grok and cursor are not release-verified for no-tools judgments, so with
+ * no other capable pool member or with its quota spent they always fall back) on the slow two-idle-pass stop, and the
+ * Finance 1008 run f3-01 (HEAD 567b5e266, antigravity Claude, shape judgment refused by Claude quota) repeated its answer
+ * through two idle passes after reporting its one tactic done.
+ */
 export function goalPlanFinished(goalId: string): boolean {
   const plan = readGoalPlan(goalId);
   if (!plan || plan.shape === "mission_tree" || !plan.tactics.length) return false;

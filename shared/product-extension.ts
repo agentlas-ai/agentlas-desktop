@@ -47,6 +47,13 @@ export type ProductExtensionInstallPhase =
   | "disabled"
   | "repair-required";
 
+export interface ProductExtensionReadFailure {
+  schema: "agentlas.product-extension-read-failure.v1";
+  fsCode: "EMFILE" | "ENFILE" | "EAGAIN" | "EBUSY" | "EIO";
+  phase: "current-pointer" | "release-verification" | "suite-activation";
+  attempts: 2;
+}
+
 export interface ProductExtensionStatus {
   id: string;
   phase: ProductExtensionInstallPhase;
@@ -56,6 +63,8 @@ export interface ProductExtensionStatus {
   installedAt: string | null;
   errorCode: string | null;
   errorMessage: string | null;
+  /** Authority is unconfirmed; this does not admit an extension command. */
+  readFailure?: ProductExtensionReadFailure;
 }
 
 export interface ProductExtensionInstallReceipt {
@@ -137,6 +146,22 @@ export interface ProductExtensionViewStatus {
   errorCode?: string;
   errorMessage?: string;
 }
+
+/** Native presentation metadata; never an app-control operation or a runtime session. */
+export interface SciencePresentationScope {
+  projectId: string;
+  conversationId: string;
+}
+
+export interface SciencePresentationContext {
+  contextId: string;
+  leaseId: string;
+  documentEpoch: number;
+}
+
+export type SciencePresentationReply =
+  | { ok: true; generation: number }
+  | { ok: false; code: string };
 
 const ID_RE = /^[a-z][a-z0-9-]{2,63}$/;
 const VERSION_RE = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?$/;

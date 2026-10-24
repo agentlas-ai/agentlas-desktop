@@ -1491,12 +1491,12 @@ export class AgentlasMobileBridgeServer {
     this.send(state, this.eventEnvelope(state, event, payload, occurredAt));
   }
 
-  
-
-
-
-
-
+  /*
+   * One line per broken connection, then stop writing to it. When a phone's socket drops, every write already
+   * queued on it fails with its own EPIPE: 99 "[mobile-bridge] write EPIPE" lines in the same millisecond at
+   * 2026-10-05 20:21:44 UTC (17 at 12:38:19), each a write the bridge kept making to a dead socket. The phone
+   * reconnects and resynchronizes on its own (20:22:33 that time).
+   */
   private transportError(state: ConnectionState, error: unknown, origin: "socket" | "write"): void {
     if (state.transportFailed) return;
     state.transportFailed = true;

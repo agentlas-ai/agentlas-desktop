@@ -281,7 +281,7 @@ export function OneOrgChart({
   const candidates = installedAgents.filter((agent) => {
     if (usedIds.has(agent.id)) return false;
     // 좌석에는 이 Mac에 등록된 에이전트만 앉힌다. Hub·Cloud 에서 내려받은 사본은 로컬 에이전트다 —
-    // 소스 지시문이 없는 호출 전용 Hub 항목만 뺀다.
+    // 소스 지시문이 없는 호출 전용 Hub 항목만 뺀다(오너 결정 2026-10-19).
     if (isCallOnlyHubAgent(agent)) return false;
     // 팀 패키지의 내부 역할(Orchestrator·Memory Curator 등)은 앉힐 수 있는 사람이 아니다.
     // 팀은 팀으로 앉힌다 — 실측 2026-08-23: 팀 4개가 구성원 25명으로 풀려 목록을 뒤덮었다.
@@ -461,14 +461,14 @@ export function OneOrgChart({
         <div className={styles.rowCopy}>
           {/* 사람에게 보이는 호칭은 첫 설정/프로필에서 정한 이름. "One" 은 역할 이름으로만 남는다. */}
           <strong>{onePersonaName}</strong>
-          {
-
-
-
-
-
-
-}
+          {/*
+            * ★이 줄은 **어떤 창 크기에서도 늘 잘렸다** (실측 2026-09-08):
+            *   1440px 창에서도 100px 자리에 128px 를 요구했고, 1024px 에서는 72px 자리였다.
+            *   즉 아무도 이 문장을 끝까지 본 적이 없다. 레일 폭은 이 문장 때문에 넓힐 수
+            *   없으니 문장을 자리에 맞춘다 — 번역은 뜻만이 아니라 들어갈 폭까지 맞아야 한다.
+            *   "오케스트레이터"는 One 의 역할 설명에서 이미 말하고 있어 여기서는 뺀다.
+            *   그래도 잘리는 창이 있을 수 있으니 title 로 전문을 남긴다.
+            */}
           <span title={locale === "ko" ? "CEO 오케스트레이터 · 항상 켜짐" : "CEO orchestrator · Always on"}>
             {locale === "ko" ? "CEO · 항상 켜짐" : "CEO · Always on"}
           </span>

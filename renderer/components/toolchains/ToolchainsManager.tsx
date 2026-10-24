@@ -1,4 +1,5 @@
 "use client";
+import { useVisibleInterval } from "@/lib/useVisibleInterval";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ToolchainsApi } from "@shared/toolchain";
 import { isFinanceSourceCapability } from "@shared/finance-source-contract";
@@ -34,7 +35,7 @@ export function ToolchainsManager({ api, locale, focusAssetId = null, focusVersi
     try { setAssets(await api.listAssets()); setLoaded(true); }
     catch (cause) { setError(String(cause instanceof Error ? cause.message : cause)); }
   }, [api]);
-  useEffect(() => { void load(); const timer = setInterval(() => void load(), 60_000); return () => clearInterval(timer); }, [load]);
+  useVisibleInterval(load, 60_000, { initial: load });
   useEffect(() => { if (focusAssetId) { setOpenId(focusAssetId); setVersionNumber(focusVersionNumber); } }, [focusAssetId, focusVersionNumber]);
   const open = assets.find((asset) => asset.id === openId);
   const detailRef = useRef<HTMLDivElement>(null);

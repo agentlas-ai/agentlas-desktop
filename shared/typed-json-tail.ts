@@ -1,11 +1,11 @@
 /**
-
-
-
-
-
-
-
+ * A worker's typed result is its final message. Runners return the whole turn's text, so a worker that writes one line
+ * before its JSON (Codex "I'll prepare only the requested copy." then the handoff) reached the strict parser as
+ * "preamble + JSON" and the whole packet was thrown away as invalid (A/B T1, 2026-10-16: every room task failed).
+ *
+ * Accept exactly one shape besides a pure JSON document: a complete JSON object that ENDS the text (only whitespace or a
+ * closing code fence after it) and carries the expected schemaVersion at its top level. Nothing is salvaged from the
+ * middle of prose or from malformed JSON, and the caller still applies its full schema validation to the object.
  */
 export function trailingTypedJsonObject(text: string, schemaVersion: string): Record<string, unknown> | null {
   let body = text.trimEnd();

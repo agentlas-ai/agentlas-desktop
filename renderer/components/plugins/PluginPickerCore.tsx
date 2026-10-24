@@ -152,9 +152,9 @@ export function usePluginCatalog(options?: { enabled?: boolean }): PluginCatalog
 // ── 설치 실행 ─────────────────────────────────────────────────────────────────
 
 /**
-
-
-
+ * One connection's keys to ask for. `serverIds` names the installed rows the keys are for: a row that owns its keys
+ * (Hub-sourced since 30ef9c84, imported connectors) keeps them under its own Vault key, so the value is saved there and
+ * not under the global name the runtime would never read for that row (review 2026-10-16 HD1-a).
  */
 export interface KeyQueueEntry { slug: string; name: string; envKeys: string[]; serverIds?: string[] }
 

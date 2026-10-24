@@ -32,7 +32,7 @@ export async function approveCompanyWorkTool(resolved:unknown):Promise<"allow_on
  if(r.kind!=='mcp'||!r.server||!r.serverToolName||!g.job.policy.tools.includes(r.serverToolName as 'agent_mail_thread'))throw Error('company_work_tool_denied');
  const names=g.job.policy.tools;
  if(r.server.catalogId==='agent-mail'){
-  if(!(await import('../agent-mail/mcp-server')).isAuthenticCompanyAgentMailMcpLaunch(r.server.command,r.server.args,names.filter(n=>n.startsWith('agent_mail_'))))throw Error('company_work_tool_source_changed');
+  if(!(await import('../agent-mail/mcp-server')).isAuthenticCompanyAgentMailMcpLaunch(r.server.command,r.server.args,names.filter(n=>n.startsWith('agent_mail_')),g.job.policy.expiresAt))throw Error('company_work_tool_source_changed');
  }else if(r.server.catalogId==='company-files'){
   if(!(await import('./company-work-files')).isAuthenticCompanyFileMcpLaunch(r.server.command,r.server.args,names.filter(n=>n.startsWith('company_file_'))))throw Error('company_work_tool_source_changed');
  }else throw Error('company_work_tool_denied');

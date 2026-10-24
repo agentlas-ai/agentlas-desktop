@@ -117,10 +117,10 @@ export function createCurrentTurnSteerStore(ports: CurrentTurnSteerStorePorts) {
         const kind = (binding as Record<string, unknown>).deliveryKind;
         if (kind !== undefined && kind !== "current" && kind !== "queue") break;
         if (kind === "queue" && phase === "current-boundary") continue;
-        
-
-
-
+        // A current-turn direction the run could not take mid-turn is delivered at the episode end, like every other
+        // owner direction. It used to be refused here (native_control_current_boundary_expired) and nothing re-sent it:
+        // a daemon-owned claude-code or ACP run lost every follow-up while a Desktop-owned run delivered it (2026-10-17).
+        // Existing dispatching rows remain the same FIFO/CAS barrier; uncertain stays held.
         if (row.status !== "queued") {
           if (phase === "current-boundary") continue;
           break;

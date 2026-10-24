@@ -780,8 +780,8 @@ async function importLocalFolderOnce(
   //
   // 위의 두 조회(sameFolder·sameDefinition)는 둘 다 `agent-routes.json` 만 본다.
   // 라우트가 없어진 행은 어느 쪽에도 안 걸려 매번 새 행 + 새 slug 가 만들어졌다 —
-  // 라우트를 잃은 고아 행을 새로 만들면 같은 내용의 중복이 생길 수 있다.
-  // 고아 행은 실행 폴더가 없으므로,
+  // 실측 2026-09-14 오너 DB: `local-agentlas-startup-founder-studio-53` 까지,
+  // `Upload Gate Probe` 11행. 라우트를 잃은 고아 행은 실행 폴더가 없으므로,
   // 내용(종류·이름·프롬프트 전문·slug 밑동)이 같으면 새로 만들지 말고 되찾는다.
   // 되찾으면 아래 replaceRoute 가 그 행에 폴더를 다시 붙여 신원이 복구된다.
   if (!row) {

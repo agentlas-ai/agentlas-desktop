@@ -1,14 +1,14 @@
-
-
-
-
-
-
-
-
-
-
-
+// agentlasd idle exit — the safety net behind the GUI quit policy.
+//
+// A GUI quit with login continuity OFF asks the service to stop. This module
+// covers the paths where that request never arrives: the GUI crashed or was
+// killed (kill -9), or the owner chose "keep running in the background" and
+// the work has since finished. In those cases a detached service with nothing
+// to do must not live forever (measured 2026-09-30: seven QA daemons from the
+// night before, ppid 1, still alive).
+//
+// Pure logic only — no timers, no store, no Electron — so a plain-Node gate can
+// drive it (scripts/test-daemon-idle-exit.cjs).
 
 export interface DaemonResidencyInput {
   /** A live Desktop GUI is attached (daemon.attach, parent pid still alive). */
@@ -27,6 +27,8 @@ export interface DaemonResidencyInput {
   invocationRuns?: number;
   /** Authenticated durable One domain custody includes future check-ins. */
   supervisorDomain?: boolean;
+  /** Canonical durable Goal reservations retain custody independently of active carriers. */
+  hostGoalDomain?: boolean;
   /** NH21: this service holds the One/Work Alive domain and at least one life is on (its clock lives here). */
   aliveDomain?: boolean;
 }
@@ -54,6 +56,7 @@ export function daemonResidencyReasons(input: DaemonResidencyInput): string[] {
   if (input.desktopAttached) reasons.push("desktop-attached");
   if (input.loginContinuity) reasons.push("login-continuity");
   if (input.supervisorDomain) reasons.push("one-supervisor");
+  if (input.hostGoalDomain) reasons.push("host-goals");
   if (input.aliveDomain) reasons.push("alive-organisms");
   return [...reasons, ...daemonActiveWorkReasons(input)];
 }

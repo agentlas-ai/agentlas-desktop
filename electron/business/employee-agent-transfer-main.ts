@@ -1,5 +1,5 @@
 import {createCompanyAgentSourceCustody} from './company-agent-source-custody';
-import { transferPackageSheet, registerAgentSheet, prepareFilesSheet } from './native-approval-sheets';
+import type {createOnePortableDefinitionSource} from './one-portable-definition';
 import fs from 'node:fs';
 import path from 'node:path';
 import {createHash,randomUUID} from 'node:crypto';
@@ -10,6 +10,7 @@ import { createEmployeeAgentTransferCustody, employeeAgentTransferDigest, employ
 import { employeeAgentChangeObject as object } from '../../shared/business/employee-agent-change';
 import { isBusinessId } from '../../shared/business/context';
 import { employeeAgentTransferPath, employeeAgentTransferSafeText, isEmployeeAgentTransferReceipt, isEmployeeAgentInstallationReceipt, type EmployeeAgentTransferKind, type EmployeeAgentTransferInbox, type EmployeeAgentTransferPackage } from '../../shared/business/employee-agent-transfer';
+import { transferPackageSheet, registerAgentSheet, prepareDefinitionSheet, prepareFilesSheet } from './native-approval-sheets';
 function fail(): never { throw Error('employee_agent_transfer_original_owner_required'); }
 export interface EmployeeAgentInstallation {install(v:{agentId:string;displayName:string;definition:string},root:string):Promise<void>;installed(v:{agentId:string;displayName:string;definition:string},root:string):boolean}
 export interface EmployeeAgentTransferOriginal {identityOwner:object;db:OneVaultSqlite;userDataPath(...segments:string[]):string;assertCurrent():void;installation:EmployeeAgentInstallation;
@@ -18,11 +19,13 @@ export function registerEmployeeAgentTransferMain(input: {
   ipc: Pick<IpcMain, 'handle'>; locale(): 'ko' | 'en';
   original(event?:IpcMainInvokeEvent): EmployeeAgentTransferOriginal;
   focused(event: IpcMainInvokeEvent): { window: BrowserWindow; check(): void };
+  /** Personal One only; company-window and manual-folder owners return null. */
+  personalOneSource?(event:IpcMainInvokeEvent):ReturnType<typeof createOnePortableDefinitionSource>|null;
 }) {
   type Original = ReturnType<typeof input.original>;
   const custodians = new WeakMap<object, ReturnType<typeof createEmployeeAgentTransferCustody>>();
-  const captured = [input.ipc, input.locale, input.original, input.focused];
-  function references() { if ([input.ipc, input.locale, input.original, input.focused].some((v, i) => v !== captured[i])) fail(); }
+  const captured = [input.ipc, input.locale, input.original, input.focused, input.personalOneSource];
+  function references() { if ([input.ipc, input.locale, input.original, input.focused, input.personalOneSource].some((v, i) => v !== captured[i])) fail(); }
   async function custody(o: Original) {
     if (custodians.has(o.connection)) return custodians.get(o.connection)!;
     const refs=[o.installation,o.installation.install,o.installation.installed,o.db,o.userDataPath];
@@ -56,9 +59,48 @@ export function registerEmployeeAgentTransferMain(input: {
     o.db.exec(`CREATE TABLE IF NOT EXISTS one_business_agent_transfer_snapshots(
       snapshot_id TEXT PRIMARY KEY,association_id TEXT NOT NULL,state TEXT NOT NULL,root_path TEXT NOT NULL,manifest_json TEXT NOT NULL);`);
   }
+  async function reconcileOwnedPortableSnapshots(o:Original,inbox:EmployeeAgentTransferInbox,f:ReturnType<typeof input.focused>){
+    snapshotSchema(o);const association=o.connection.current();if(!association)fail();
+    const base=o.userDataPath('company-agent-transfer-snapshots');
+    const rows=o.db.prepare("SELECT snapshot_id,state,root_path,manifest_json FROM one_business_agent_transfer_snapshots WHERE association_id=? AND state IN ('attempted','prepared')").all(association.associationId) as Array<{snapshot_id:string;state:string;root_path:string;manifest_json:string}>;
+    for(const row of rows){const manifest=JSON.parse(row.manifest_json) as {snapshotId?:unknown;sourceAgentResourceId?:unknown;files?:unknown;ownedPortableOne?:unknown};
+      if(manifest.ownedPortableOne!==true)continue;
+      if(row.root_path!==path.join(base,row.snapshot_id)||manifest.snapshotId!==row.snapshot_id||!Array.isArray(manifest.files)||manifest.files.length!==1)fail();
+      const descriptor=manifest.files[0] as {path?:unknown;kind?:unknown;digest?:unknown;bytes?:unknown};
+      if(descriptor.path!=='AGENT.md'||descriptor.kind!=='definition'||typeof descriptor.digest!=='string'||typeof descriptor.bytes!=='number')fail();
+      const bytes=readEmployeeAgentTransferFile(row.root_path,'AGENT.md');
+      if(bytes.length!==descriptor.bytes||createHash('sha256').update(bytes).digest('hex')!==descriptor.digest)fail();
+      const matching=inbox.snapshots.filter(item=>item.snapshotId===row.snapshot_id);
+      if(matching.length>1)fail();
+      const listed=matching[0];
+      if(listed&&(listed.sourceAgentResourceId!==manifest.sourceAgentResourceId||listed.fileCount!==1||listed.expiresAt<=Date.now()))fail();
+      if(row.state==='prepared'&&listed)continue;
+      let original:unknown;
+      try{original=await o.connection.request('transfers/snapshot-receipt',{snapshotId:row.snapshot_id});}catch(error){
+        if((error as {status?:unknown}).status===404)continue;
+        throw error;
+      }
+      f.check();
+      if(!object(original,['snapshotId','sourceAgentResourceId','files','reviewReceiptId','fileCount','expiresAt','state'])
+        ||original.snapshotId!==row.snapshot_id||original.sourceAgentResourceId!==manifest.sourceAgentResourceId
+        ||original.reviewReceiptId!==(manifest as {reviewReceiptId?:unknown}).reviewReceiptId||original.fileCount!==1
+        ||typeof original.expiresAt!=='number'||!Array.isArray(original.files)||original.files.length!==1
+        ||employeeAgentTransferDigest(original.files)!==employeeAgentTransferDigest(manifest.files))fail();
+      if(original.state==='expired'&&original.expiresAt<=Date.now()&&!listed){
+        o.db.prepare("UPDATE one_business_agent_transfer_snapshots SET state='expired' WHERE snapshot_id=? AND association_id=? AND state IN ('attempted','prepared')").run(row.snapshot_id,association.associationId);
+        continue;
+      }
+      if(original.state==='prepared'&&original.expiresAt>Date.now()&&listed&&original.expiresAt===listed.expiresAt){
+        o.db.prepare("UPDATE one_business_agent_transfer_snapshots SET state='prepared' WHERE snapshot_id=? AND association_id=? AND state='attempted'").run(row.snapshot_id,association.associationId);
+        continue;
+      }
+      fail();
+    }
+  }
   input.ipc.handle('businessNative:transferInbox', async (event: IpcMainInvokeEvent) => {
     references(); const f = input.focused(event), o = input.original(event); await o.connection.refresh(); f.check();
-    await (await sourceCustody(o)).reconcilePending();f.check();const result = await o.connection.request('transfers/inbox', {}); f.check(); return result;
+    await (await sourceCustody(o)).reconcilePending();f.check();const result = await o.connection.request('transfers/inbox', {}) as EmployeeAgentTransferInbox; f.check();
+    await reconcileOwnedPortableSnapshots(o,result,f);f.check();return result;
   });
   input.ipc.handle('businessNative:registerCompanyAgent',async(event:IpcMainInvokeEvent,raw:unknown)=>{
     if(!object(raw,['displayName','role'])||!employeeAgentTransferSafeText(raw.displayName)||!raw.displayName.trim()||raw.displayName.length>100||!employeeAgentTransferSafeText(raw.role)||raw.role.length>100)fail();
@@ -86,8 +128,53 @@ export function registerEmployeeAgentTransferMain(input: {
     references(); if (!object(raw, ['sourceAgentResourceId']) || !isBusinessId(raw.sourceAgentResourceId)) fail();
     const id = raw.sourceAgentResourceId, f = input.focused(event), o = input.original(event); await o.connection.refresh(); f.check();
     const inbox = await o.connection.request('transfers/inbox', {}) as EmployeeAgentTransferInbox; f.check();
-    const source = inbox.sources.find(row => row.resourceId === id); if (!source) fail();
+    const matching = inbox.sources.filter(row => row.resourceId === id), source = matching[0]; if (matching.length !== 1 || !source) fail();
     const electron = require('electron') as typeof import('electron'), ko = input.locale() === 'ko';
+    const personal=input.personalOneSource?.(event);
+    if(personal?.ownsAgent(source.agentId)){
+      // A lost response may already have created the original snapshot. Only
+      // the signed inbox can settle it; never issue a second POST for the same
+      // personal resource while this association holds its original intent.
+      await reconcileOwnedPortableSnapshots(o,inbox,f);
+      const associationId=o.connection.current()?.associationId;if(!associationId)fail();
+      const priorRows=o.db.prepare("SELECT snapshot_id,state,manifest_json FROM one_business_agent_transfer_snapshots WHERE association_id=? AND state IN ('attempted','prepared')").all(associationId) as Array<{snapshot_id:string;state:string;manifest_json:string}>;
+      const prior=priorRows.filter(row=>{const manifest=JSON.parse(row.manifest_json) as {ownedPortableOne?:unknown;sourceAgentResourceId?:unknown};return manifest.ownedPortableOne===true&&manifest.sourceAgentResourceId===id});
+      if(prior.length>1)fail();
+      if(prior.length===1){const row=prior[0];if(row.state==='attempted')return{snapshotId:row.snapshot_id,fileCount:1,state:'unknown' as const};
+        if(inbox.snapshots.some(item=>item.snapshotId===row.snapshot_id&&item.sourceAgentResourceId===id&&item.fileCount===1&&item.expiresAt>Date.now()))return{snapshotId:row.snapshot_id,fileCount:1,state:'prepared' as const};fail();}
+      const selected=await personal.select(id);f.check();
+      if(selected.oneId!==source.agentId||selected.displayName!==source.displayName||selected.role!==source.role)fail();
+      const content=selected.content,bytes=Buffer.from(content,'utf8');
+      if(!employeeAgentTransferSafeText(content)||!bytes.equals(Buffer.from(content,'utf8')))fail();
+      const initial=[{path:'AGENT.md',kind:'definition' as const,digest:createHash('sha256').update(bytes).digest('hex'),bytes:bytes.length,content}],initialDigest=employeeAgentTransferDigest(initial),association=o.connection.current();if(!association)fail();
+      const reviewed=await electron.dialog.showMessageBox(f.window,prepareDefinitionSheet(ko,source,content));
+      f.check();if(reviewed.response!==1)throw Error('employee_agent_transfer_review_declined');await o.connection.refresh();f.check();await selected.assertCurrent();
+      if(employeeAgentTransferDigest(o.connection.current())!==employeeAgentTransferDigest(association)||employeeAgentTransferDigest(initial)!==initialDigest)fail();
+      const snapshotId=randomUUID(),base=o.userDataPath('company-agent-transfer-snapshots'),root=path.join(base,snapshotId),file=path.join(root,'AGENT.md');
+      const body={snapshotId,sourceAgentResourceId:id,files:initial.map(({content:_content,...part})=>part),reviewReceiptId:randomUUID()};
+      fs.mkdirSync(base,{recursive:true,mode:0o700});const baseStat=fs.lstatSync(base);
+      if(!baseStat.isDirectory()||baseStat.isSymbolicLink()||fs.realpathSync.native(base)!==base||fs.existsSync(root))fail();
+      fs.mkdirSync(root,{mode:0o700});const rootStat=fs.lstatSync(root);let fileStat:fs.Stats|null=null,dispatched=false,inserted=false;
+      const cleanup=()=>{const now=fs.lstatSync(root);if(!now.isDirectory()||now.isSymbolicLink()||now.dev!==rootStat.dev||now.ino!==rootStat.ino)fail();
+        if(fileStat){const current=fs.lstatSync(file);if(!current.isFile()||current.isSymbolicLink()||current.dev!==fileStat.dev||current.ino!==fileStat.ino)fail();fs.unlinkSync(file);}
+        fs.rmdirSync(root);};
+      try{
+        const fd=fs.openSync(file,fs.constants.O_CREAT|fs.constants.O_EXCL|fs.constants.O_WRONLY|(fs.constants.O_NOFOLLOW??0),0o600);
+        try{fileStat=fs.fstatSync(fd);fs.writeFileSync(fd,bytes);fs.fsyncSync(fd)}finally{fs.closeSync(fd)}
+        fileStat=fs.lstatSync(file);if(!fileStat.isFile()||fileStat.isSymbolicLink()||!readEmployeeAgentTransferFile(root,'AGENT.md').equals(bytes))fail();
+        await selected.assertCurrent();f.check();if(employeeAgentTransferDigest(o.connection.current())!==employeeAgentTransferDigest(association))fail();
+        snapshotSchema(o);o.db.prepare("INSERT INTO one_business_agent_transfer_snapshots VALUES(?,?,'attempted',?,?)").run(snapshotId,association.associationId,root,JSON.stringify({...body,ownedPortableOne:true}));inserted=true;
+        await selected.assertCurrent();f.check();dispatched=true;
+        const result=await o.connection.request('transfers/snapshot',body) as {snapshotId:string;fileCount:number;state:'prepared'};f.check();
+        if(result.snapshotId!==snapshotId||result.state!=='prepared'||result.fileCount!==1)fail();
+        o.db.prepare("UPDATE one_business_agent_transfer_snapshots SET state='prepared' WHERE snapshot_id=? AND association_id=?").run(snapshotId,association.associationId);
+        return result;
+      }catch(error){
+        if(dispatched)return{snapshotId,fileCount:1,state:'unknown' as const};
+        if(inserted)o.db.prepare("DELETE FROM one_business_agent_transfer_snapshots WHERE snapshot_id=? AND association_id=? AND state='attempted'").run(snapshotId,association.associationId);
+        cleanup();throw error;
+      }
+    }
     const folder = await electron.dialog.showOpenDialog(f.window, { title: ko ? '공유할 회사 에이전트 폴더' : 'Company agent folder', properties: ['openDirectory'] });
     f.check(); if (folder.canceled || folder.filePaths.length !== 1) throw Error('employee_agent_transfer_review_declined');
     const root = folder.filePaths[0], selected = await electron.dialog.showOpenDialog(f.window, { title: ko ? '공유할 파일만 선택하세요' : 'Select only files to share', defaultPath: root, properties: ['openFile', 'multiSelections'] });
@@ -121,8 +208,17 @@ export function registerEmployeeAgentTransferMain(input: {
     references(); const id = selector(raw), f = input.focused(event), o = input.original(event); await o.connection.refresh(); f.check();
     const ticket = await o.connection.request('transfers/prepare', { transferId: id }); f.check();
     if (!object(ticket) || typeof ticket.snapshotId !== 'string') fail(); snapshotSchema(o);
-    const snapshot = o.db.prepare("SELECT * FROM one_business_agent_transfer_snapshots WHERE snapshot_id=? AND state='prepared' AND association_id=?")
+    let snapshot = o.db.prepare("SELECT * FROM one_business_agent_transfer_snapshots WHERE snapshot_id=? AND state='prepared' AND association_id=?")
       .get(ticket.snapshotId, o.connection.current()?.associationId) as { root_path: string; manifest_json: string } | undefined;
+    if (!snapshot) {
+      const attempted=o.db.prepare("SELECT manifest_json FROM one_business_agent_transfer_snapshots WHERE snapshot_id=? AND state='attempted' AND association_id=?")
+        .get(ticket.snapshotId,o.connection.current()?.associationId) as {manifest_json:string}|undefined;
+      if (attempted && (JSON.parse(attempted.manifest_json) as {ownedPortableOne?:unknown}).ownedPortableOne===true) {
+        const inbox=await o.connection.request('transfers/inbox',{}) as EmployeeAgentTransferInbox;f.check();await reconcileOwnedPortableSnapshots(o,inbox,f);
+        snapshot=o.db.prepare("SELECT * FROM one_business_agent_transfer_snapshots WHERE snapshot_id=? AND state='prepared' AND association_id=?")
+          .get(ticket.snapshotId,o.connection.current()?.associationId) as {root_path:string;manifest_json:string}|undefined;
+      }
+    }
     if (!snapshot) throw Error('employee_agent_transfer_original_snapshot_required');
     const manifest = JSON.parse(snapshot.manifest_json) as { files: unknown[] };
     if (!Array.isArray(ticket.files) || employeeAgentTransferDigest(ticket.files.map(file => { const {source:_source,...descriptor}=file; return descriptor; })) !== employeeAgentTransferDigest(manifest.files)) fail();

@@ -219,16 +219,16 @@ export function WorkFirstRunOnboarding({ onVisibilityChange }: { onVisibilityCha
   }, []);
 
   /**
-
-
-
-
-
-
-
-
-
- */
+   * "나중에 보기" — 닫되 **완료로 표시하지 않는다**.
+   *
+   * ★왜 (QA 실측 2026-09-08): × 를 누르면 닫히지 않고 7단계로 넘어갔다
+   *   (`step < 7 ? setStep(7) : finish()`). 닫기라고 쓰여 있는 것이 닫지 않으면
+   *   사람은 자기가 잘못 눌렀다고 생각하고 다시 누른다.
+   *
+   * finish() 와 다른 점: finish 는 "다 봤다"고 기록해 다시 안 뜬다. × 의 라벨은
+   * "나중에 보기"이므로 다시 볼 수 있어야 한다. 진행 단계(PHASE_KEY)는 남겨
+   * 다음에 열 때 보던 자리에서 이어진다.
+   */
   const dismiss = useCallback(() => {
     setOpen(false);
   }, []);

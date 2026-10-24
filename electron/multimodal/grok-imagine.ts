@@ -149,14 +149,14 @@ export async function runGrokImagine(opts: GrokImagineOptions): Promise<string |
   }
 
   const sessionId = randomUUID();
-  
-
-
-
-
-
-
-
+  // A media run is a product run (foreign-cli-context.ts). Measured 2026-10-17 with grok 1.0.60 and this run's environment
+  // before: 127 personal permission rules, 5 Claude plugins, 13 hooks (the owner's Stop/SessionEnd reap-dev-instances.sh
+  // among them), 5 MCP servers, 147 personal skills and the personal Agents.md / CLAUDE.md loaded. It now gets the
+  // product HOME (no ~/.claude settings, plugins or subagents) and every Claude/Cursor/Codex compat cell and Grok memory
+  // off. GROK_HOME stays the person's own folder, named explicitly: `--sandbox strict` refuses a GROK_HOME whose entries
+  // are links (measured: "hooks-paths registry has wrong type (expected real file)" for trusted_folders.toml, then
+  // "Grok directory has wrong type (expected real directory)" for bundled/, then the linked policy lock is not
+  // accessible), so the product GROK_HOME mirror cannot hold this run.
   const childEnv = withGrokProductUserHome({ ...mediaChildEnv(), ...grokCompatEnv(undefined), GROK_HOME: realGrokHome(process.env) }, undefined);
   const promptFile = path.join(os.tmpdir(), `agentlas-grok-imagine-${sessionId}.txt`);
   const timeoutMs = opts.timeoutMs ?? (opts.kind === "video" ? 15 * 60_000 : 5 * 60_000);

@@ -156,7 +156,7 @@ export function backfillEntityKinds(): void {
 }
 
 export function listInstalledAgents(): InstalledAgent[] {
-  
+  // A read never throws on one slug's unrecoverable journal (review 2026-10-16, desktop-b-01); writers stay strict.
   recoverCloudRegistryTransactionsForRead();
   recoverRestoredTeamFirms();
   try {
@@ -252,19 +252,19 @@ export async function installAgent(slug: string): Promise<InstalledAgent> {
     throw new Error("This web-only agent is not available in Agentlas Desktop.");
   }
 
-
-
-
-
-
-
-
-
+  // Public call-only Hub cards deliberately omit source instructions. They must
+  // never fall through to local-prompt execution, but refusing them outright made
+  // it impossible to seat any public Hub agent in One Team (measured 2026-08-23:
+  // top live listings 6/6 refused). Instead we register a borrow seat: an empty
+  // prompt plus a hub route marker. Execution always goes through the Hub borrow
+  // path (OrchestrationTarget {source:"hub", slug} → borrowed task force) —
+  // discriminated by shared/call-only-agent.ts isCallOnlyHubAgent (hub asset with
+  // no local instructions). Owner package restore remains installMyAgent().
   if (typeof listing.systemPrompt !== "string" || !listing.systemPrompt.trim()) {
-
-
-
-
+    // The live manifest endpoint (marketplace.get_manifest) drops kind/callable
+    // (measured 2026-08-23: search row {kind:"cloud-callable", callable:true}
+    // vs manifest {} for the same slug), so the callable discrimination must
+    // fall back to the search row before concluding "corrupt package".
     let callableCard = listing.callable === true || listing.kind === "cloud-callable";
     if (!callableCard) {
       const rows = await getMarketSource().searchAgents(slug).catch(() => []);

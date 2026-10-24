@@ -1,15 +1,15 @@
 /**
-
-
-
-
-
-
-
-
-
-
-
+ * Files a shell command created or wrote, read from the command itself.
+ *
+ * The result rail collects what a turn produced from the typed write/edit tool calls. A model that
+ * is refused the write tool does the obvious thing and reaches for the shell instead — and every
+ * file it makes that way was invisible. Measured: five files on disk, the rail said "0 outputs", and
+ * the one thing it did show was a path taken from the answer's prose that had never been created.
+ * Prose won because nothing else was there.
+ *
+ * This reads only unambiguous, explicit destinations. It is deliberately conservative: a path that
+ * merely appears in a command is not a claim that the command wrote it, and a wrong entry in the
+ * result rail is worse than a missing one — it sends a person to a file that is not there.
  */
 
 /** A redirection or a writing tool's explicit destination. Never a glob, a variable, or a pipe. */

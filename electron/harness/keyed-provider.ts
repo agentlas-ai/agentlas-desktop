@@ -4,22 +4,22 @@ import os from "node:os";
 import path from "node:path";
 import { execFile } from "node:child_process";
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+/*
+ * Keyed providers through the host: the owner's saved key is read in Main and sent only to that provider's own API host;
+ * the model gets the result (a file, its digest, the provider's request id), never the key. One seam for every keyed
+ * media provider (docs/2026-10-13-native-harness/17 §4 "api-adapter" transport), used by the harness ports
+ * provider.request (any operation of an adapter) and speech.synthesize (typed narration).
+ *
+ * Why (dev replay r03 of the daily TCIagent graph, 2026-10-17): the Film teammate would not voice the long-form. The
+ * step says to use the owner's saved connection through the native secure path; the harness answered
+ * media.routes elevenlabs-audio = "adapter-required: no harness media job wired" and speech.synthesize = unknown
+ * operation, so the only way left was the key in the shell, which the step forbids reading. Owner correction 2026-10-13:
+ * this is the dead end of every tool that needs a key or a connection, not a voice problem, so the seam is generic.
+ *
+ * Access: the caller's run permission must allow spending (write/full) and the call is never made in a dry run; the
+ * provider must be one the owner connected (its key saved in the vault, or present in Main's environment). Every call
+ * appends a harness receipt without the key. The API host is fixed per adapter; a loopback override exists for gates only.
+ */
 
 export interface KeyedAdapter {
   routeId: string;
@@ -54,13 +54,13 @@ const sha = (value: string | Buffer): string => createHash("sha256").update(valu
 
 export interface KeyedCallContext { chatId: string; runId: string; dryRun?: boolean; permission?: "read" | "write" | "full" }
 
-
-
-
-
-
-
-
+/*
+ * A provider call can outlast one tool request: the agentlas-turn gateway gives a call 30 s (turn-tools/mcp-server.ts).
+ * Dev replay r04 (2026-10-17): a 4,901-character ElevenLabs narration took ~45 s; Main finished and wrote the file and
+ * its receipt, but the teammate was told "Turn tool request timed out." So a call answers within ANSWER_WINDOW_MS: done
+ * → the result; still running → state "running" and the same arguments again later return the finished result. The work
+ * keeps running in Main either way, and the same request never starts a second provider call (no double spend).
+ */
 export const ANSWER_WINDOW_MS = 25_000;
 const inflight = new Map<string, Promise<Outcome>>();
 const finished = new Map<string, { outcome: Outcome; at: number }>();
@@ -168,16 +168,16 @@ async function sendBody(adapter: KeyedAdapter, key: string, input: { pathAndQuer
 export interface TranscriptWord { text: string; start: number; end: number }
 export interface Transcript { routeId: string; modelId: string; text: string; words: TranscriptWord[]; language: string | null; requestId: string | null }
 
-
-
-
-
-
-
+/*
+ * A local media tool (ffmpeg, ffprobe) with spawnSync's { status, stdout, stderr } but without blocking the host's event
+ * loop. Perf review MP-02 (2026-10-17): media.listen ran ffmpeg with spawnSync in Main or the daemon, so IPC, the control
+ * socket and every timer froze for the whole run (a 7 min 1080p cut: 5.2 s per call, 8+ calls per film). Same timeout,
+ * kill signal, maxBuffer and closed stdin as spawnSync; a missing tool or a kill gives status null as before.
+ */
 /**
-
-
-
+ * ffmpeg/ffprobe the way media-quality and output-verification find them: PATH, then the usual install folders. The
+ * Dock-launched app's PATH is /usr/bin:/bin:/usr/sbin:/sbin, so a bare "ffmpeg" never ran there and every media.listen
+ * in the production app failed (reported as audio_track_unavailable, Yotube 2026-10-17: three refusals in one turn).
  */
 export function mediaEngineBin(name: "ffmpeg" | "ffprobe"): string | null {
   const dirs = [...(process.env.PATH ?? "").split(path.delimiter).filter(Boolean), path.join(os.homedir(), ".local", "bin"), "/opt/homebrew/bin", "/usr/local/bin"];
@@ -195,7 +195,7 @@ export function runTool(bin: string, args: string[], timeoutMs: number): Promise
     bin = resolved;
   }
   return new Promise((resolve) => {
-    const child = execFile(bin, args, { encoding: "utf8", timeout: timeoutMs, maxBuffer: 1024 * 1024 }, (error, stdout, stderr) => {
+    const child = execFile(bin, args, { encoding: "utf8", timeout: timeoutMs, maxBuffer: 1024 * 1024, windowsHide: true }, (error, stdout, stderr) => {
       const code: unknown = error ? (error as { code?: unknown }).code : 0;
       resolve({ status: typeof code === "number" ? code : null, stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
     });

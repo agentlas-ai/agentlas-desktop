@@ -1,6 +1,6 @@
 /** The rhythm of a bounded series, read once at Goal admission.
  *
- * A request that repeats the same work at a stated
+ * Owner decision 2026-10-21 (X marketing room, "1시간에 1회씩 최대 10개 올려"): a request that repeats the same work at a stated
  * interval and ends after a stated number of runs is a finite Goal whose runs cannot all happen in one turn. The intake judge
  * (judged-auto-goal-intent.ts) only names the meaning (`execute_series`); this call reads the two numbers, as typed fields in
  * a strict schema, and the host does the arithmetic on them (shared/auto-goal.ts goalCadenceDeadlineAt) -- timer waits are

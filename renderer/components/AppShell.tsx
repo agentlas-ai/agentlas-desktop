@@ -63,10 +63,10 @@ function TelegramDialogHost() {
   return useHasOpened(open) ? <TelegramOneDialog /> : null;
 }
 
-   
-                                                      
-                                                        
-   
+/**
+ * 오너가 부르지 않은 창(페이지 투어·Science 소개·에이전트 가져오기)을 저절로 여는가.
+ * 오너 2026-09-29 "시트 띄우지말고 …" — 끈다. 각 창은 오너가 여는 길로만 남는다.
+ */
 const UNINVITED_AUTO_OPEN = false;
 const GUIDE_FAB_HIDDEN_KEY = "agentlas.guideFab.hidden";
 
@@ -175,12 +175,12 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     };
   }, []);
 
-    
-                                                
-                                                       
-                                                             
-                                              
-     
+  /*
+   * ★저절로 뜨는 창은 없다 (오너 2026-09-29 "시트 띄우지말고 …").
+   *   예전에는 로컬 에이전트가 0개면 "내 에이전트 가져오기" 모달을 세션마다 한 번 저절로
+   *   띄웠다. 이제 이 모달은 오너가 여는 것만 남는다. 페이지 투어·Science 소개도 같은 이유로
+   *   저절로 열지 않는다(투어는 도움말 버튼의 "투어 다시 보기"로 연다).
+   */
   useEffect(() => {
     // 이 폴은 잡이 하나도 없어도 2초마다 새 배열로 setState 해 셸 전체(사이드바·
     // 투어·토스트 전부)를 상시 리렌더시키던 유일한 지점이다. 내용이 같으면 이전

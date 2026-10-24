@@ -173,10 +173,10 @@ export interface AgiBlockerDiagnosis {
 }
 
 /**
-
-
-
-
+ * Causes an app restart can actually clear: state that lives only in the running process and is rebuilt at launch.
+ * Production Yotube 2026-10-17: AGI asked the owner to restart because restarting was "the one path not tried yet" on
+ * goal_episode_admission_missing (a custody defect only new code fixes). The owner restarted at 12:49Z; the next retries
+ * failed the same way and the 14:38Z update fixed it. A restart ask needs one of these typed codes as its basis.
  */
 export const AGI_APP_RESTART_CAUSES: ReadonlyArray<{ readonly code: string; readonly reason: string }> = Object.freeze([
   { code: "invocation_native_fence_already_configured",
@@ -207,9 +207,9 @@ const STRANDABLE_SIGNALS: ReadonlySet<AgiBlockerSignalKind> = new Set(["run_fail
 export const AGI_NO_ADMISSIBLE_PATH = "no_admissible_path";
 
 /**
-
-
-
+ * Would the host admit this path for this goal at all? Mirrors the refusals the executor returns every time for the same
+ * shape (production 2026-10-16, auto-message goals: agi.turn.deferred for a queued goal, agi.move.no-continuation-automation
+ * for a goal without a continuation automation). Unknown facts (undefined) count as admissible.
  */
 function pathAdmissible(action: AgiActionKind, facts: AgiBlockerFacts, eligibleTactics: readonly string[]): boolean {
   switch (action) {
@@ -280,11 +280,11 @@ export function agiEligibleTactics(tactics: readonly AgiTacticFact[] | undefined
 }
 
 /**
-
-
-
-
-
+ * The Agentlas capability a diagnosis points at when the runtime's own tools can replace it (use_native_harness).
+ * Null when they cannot: a runtime that fails by itself (quota, auth, an unknown crash) needs another runtime, a login
+ * wall needs the owner, and a refused start never reaches a turn. The browser ladder also carries on-screen app control
+ * (production Yotube 2026-10-12: browser_cua_repl on the Agentlas app failed unified-cua-native-transport-unavailable in
+ * daemon-served turns, read as browser_unavailable 32 times a day).
  */
 export function agiHarnessCapability(d: Pick<AgiBlockerDiagnosis, "primarySignal" | "causeKind"> & Partial<Pick<AgiBlockerDiagnosis, "signalCode" | "defects">>): "browser" | "tool" | null {
   const capability = d.primarySignal === "browser_unavailable" ? "browser"
@@ -313,7 +313,8 @@ const HARNESS_VERDICT_CODE = /ownership|unverifiable|consent|approv|denied|forbi
 /**
  * May the runtime's own tools (shell, direct API, built-in web) answer this failure? Only a tool that BROKE (a crash, a missing
  * tool, a plain refusal by the Agentlas tool itself, a dead browser bridge); a verdict the host or the owner made is never bypassed
- * (the old rule handed every stop over, ownership-unverifiable included). An unknown code is not allowed.
+ * (production 2026-10-20: the only ladder stops were native-tool-failed 307, native-tab-limit 2, ownership-unverifiable 1, page-load-failed 1;
+ * the old rule handed all of them over, ownership-unverifiable included). An unknown code is not allowed.
  */
 export function agiHarnessBypassAllowed(capability: "browser" | "tool", code: string | null | undefined): boolean {
   if (!code) return false;
@@ -370,7 +371,7 @@ export function classifyAgiBlocker(facts: AgiBlockerFacts): AgiBlockerDiagnosis 
     if (ownerClass !== "human_only") boundary = null;
     // G1: an ask is admissible only after at least one alternative path; the classifier never lists it first.
     // A path the host refuses by this goal's structure every time is not proposed (switch_runtime without a live automation to move:
-    // the host wakes a Goal itself now, so there is nothing to switch). Unknown facts keep it (pathAdmissible).
+    // the host wakes a Goal itself since 034d8584e, so there is nothing to switch). Unknown facts keep it (pathAdmissible).
     let altPaths = rest.altPaths.filter((action, index, list) => list.indexOf(action) === index
       && (action !== "switch_runtime" || pathAdmissible(action, facts, eligibleTactics)));
     if (altPaths[0] === "ask_owner_once") altPaths = [...altPaths.slice(1), "ask_owner_once"];

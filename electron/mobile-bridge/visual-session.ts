@@ -49,9 +49,9 @@ interface VisualSessionState {
   sessionEpoch: string;
   deviceId: string;
   /**
-
-
- */
+   * The connection that created or last drove this session. One phone can hold a LAN and a relay connection at once;
+   * a session belongs to the connection that is using it, so closing the other one leaves it alone (review 2026-10-16 H2).
+   */
   connectionId: string;
   source: MobileBridgeVisualSourceDto;
   inputOwner: "desktop" | "mobile";

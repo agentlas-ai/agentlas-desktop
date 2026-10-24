@@ -24,9 +24,9 @@ export const STORMBREAKER_MAX_EXECUTION_PASSES = 24;
 /** Identical output this many passes running is a runaway, not progress. */
 export const STORMBREAKER_MAX_IDENTICAL_PASSES = 3;
 /**
-
-
-
+ * A continuous Goal pass kept alive only by the Goal ledger ("not reached yet") that completes no tool call is
+ * idle; this many in a row end the invocation. Paraphrased "nothing I can do" passes defeat the identical-output
+ * guard, so the measure is the host's own count of completed tool calls (production 2026-10-06: 273 such passes).
  */
 export const GOAL_IDLE_PASS_LIMIT = 2;
 

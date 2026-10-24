@@ -16,7 +16,7 @@ export interface MobilePushNotice {
   occurredAt: string;
   messageId?: string;
   /**
-   * An AI is waiting for the owner's answer on a decision card. Additive: the relay that knows it words
+   * An AI is waiting for the owner's answer on a decision card (owner 2026-10-20). Additive: the relay that knows it words
    * the lock-screen text for a question; a relay that does not know it ignores the field and shows the generic text, and
    * the category, destination and preference gate stay those of an ordinary result, so released phones route it unchanged.
    */

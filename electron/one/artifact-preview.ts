@@ -1,3 +1,4 @@
+import { resolveInvocationArtifactReadPath } from "../fs/invocation-workspace";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -21,7 +22,7 @@ import { getOneValueClosureState } from "./value-closure";
 import { getDb } from "../store/db";
 import { getDurableOneSurfaceResult } from "../store/one-surface-results";
 import { getInvocationRunReceipt } from "../store/run-events";
-import { getCanonicalTask } from "../store/tasks";
+import { getCanonicalTask, canonicalTaskOwnsChat } from "../store/tasks";
 import { chatImageAttachmentFromTrustedFile, persistChatMessageImages } from "../store/chat-message-attachments";
 import { ONE_ATTACHMENT_LIMITS } from "../../shared/one-attachments";
 
@@ -44,8 +45,8 @@ const MAX_VIDEO_BYTES = 192 * 1_024 * 1_024;
 const MAX_AUDIO_BYTES = 96 * 1_024 * 1_024;
 const MAX_DOCUMENT_BYTES = 64 * 1_024 * 1_024;
 const MAX_DATA_BYTES = 64 * 1_024 * 1_024;
-
-
+// One token per mounted preview (each settled run block's images, result cards, the output rail). A long room
+// holds more than 256 bindings (Yotube 2026-10-17: 382), and the cap dropped live previews without a trace.
 const MAX_ACTIVE_TOKENS = 2_048;
 const TOKEN_RE = /^[a-f0-9]{64}$/;
 // A Surface is emitted after the run begins, on the same host clock. Keep a
@@ -66,6 +67,7 @@ interface ArtifactSpec {
 }
 
 const ARTIFACT_BY_EXTENSION: Readonly<Record<string, ArtifactSpec>> = Object.freeze({
+  ".svg": { kind: "image", mimeType: "image/svg+xml", maxBytes: MAX_IMAGE_BYTES },
   ".png": { kind: "image", mimeType: "image/png", maxBytes: MAX_IMAGE_BYTES },
   ".jpg": { kind: "image", mimeType: "image/jpeg", maxBytes: MAX_IMAGE_BYTES },
   ".jpeg": { kind: "image", mimeType: "image/jpeg", maxBytes: MAX_IMAGE_BYTES },
@@ -108,6 +110,8 @@ const ARTIFACT_BY_EXTENSION: Readonly<Record<string, ArtifactSpec>> = Object.fre
   ".tsv": { kind: "spreadsheet", mimeType: "text/tab-separated-values", maxBytes: MAX_DATA_BYTES },
   ".ods": { kind: "spreadsheet", mimeType: "application/vnd.oasis.opendocument.spreadsheet", maxBytes: MAX_DATA_BYTES },
   ".numbers": { kind: "spreadsheet", mimeType: "application/vnd.apple.numbers", maxBytes: MAX_DATA_BYTES },
+  ".tex": { kind: "data", mimeType: "text/plain", maxBytes: MAX_DATA_BYTES },
+  ".bib": { kind: "data", mimeType: "text/plain", maxBytes: MAX_DATA_BYTES },
   ".json": { kind: "data", mimeType: "application/json", maxBytes: MAX_DATA_BYTES },
   ".zip": { kind: "archive", mimeType: "application/zip", maxBytes: MAX_DATA_BYTES },
   ".js": { kind: "data", mimeType: "text/javascript", maxBytes: MAX_DATA_BYTES },
@@ -366,8 +370,10 @@ function bindCandidate(input: {
   const spec = ARTIFACT_BY_EXTENSION[path.extname(input.candidate).toLowerCase()];
   if (!spec || spec.kind !== input.expectedKind) return null;
   let resolved: string;
+  let invocationWorkspace = false;
   try {
-    resolved = resolveFsReadPath(input.candidate, { kind: "chat-assets", chatId: input.chatId });
+    try { resolved = resolveFsReadPath(input.candidate, { kind: "chat-assets", chatId: input.chatId }); }
+    catch { resolved = resolveInvocationArtifactReadPath(input.candidate, {chatId:input.chatId,runId:input.runId}); invocationWorkspace = true; }
   } catch {
     return null;
   }
@@ -375,6 +381,10 @@ function bindCandidate(input: {
   // ancestor symlink, even when it happens to land back inside an allowed root.
   if (path.resolve(input.candidate) !== resolved || pathIsArchived(resolved)) return null;
   const opened = safeOpen(resolved, spec);
+  if (invocationWorkspace) {
+    try { resolveInvocationArtifactReadPath(resolved, {chatId:input.chatId,runId:input.runId}); }
+    catch { fs.closeSync(opened.fd); return null; }
+  }
   if (
     input.runStartedAtMs != null
     && opened.mtimeMs + ONE_ARTIFACT_OUTPUT_TIME_SKEW_MS < input.runStartedAtMs
@@ -515,7 +525,7 @@ export function bindOneSurfaceArtifacts(input: {
 }): number {
   if (!isDurableOneSurfaceManifestV1(input.surface, input.taskId)) return 0;
   const task = getCanonicalTask(input.taskId);
-  if (!task || task.originChatId !== input.chatId || task.status === "archived" || task.version !== input.taskVersion) return 0;
+  if (!task || !canonicalTaskOwnsChat(task, input.chatId) || task.status === "archived" || task.version !== input.taskVersion) return 0;
   const keys = orderedDataKeys(input.rawManifest);
   const workspace = chatWorkspace(input.chatId);
   const startedAtMs = typeof input.runStartedAt === "string" ? Date.parse(input.runStartedAt) : Number.NaN;
@@ -588,7 +598,7 @@ export function bindOneRuntimeToolArtifacts(input: {
   sizeBytes: number;
 }> {
   const task = getCanonicalTask(input.taskId);
-  if (!task || task.originChatId !== input.chatId || task.status === "archived" || task.version !== input.taskVersion) return [];
+  if (!task || !canonicalTaskOwnsChat(task, input.chatId) || task.status === "archived" || task.version !== input.taskVersion) return [];
   const manifestId = runtimeManifestId(input.runId);
   const uniquePaths = [...new Set(input.paths
     .filter((candidate): candidate is string => typeof candidate === "string" && path.isAbsolute(candidate))
@@ -748,7 +758,7 @@ function bindingVerdict(input: unknown): Verdict<BindingRow> {
   // of the same non-archived Task must not invalidate that exact run binding.
   // Durable surface artifacts retain the stricter exact-version/lifecycle gate.
   if (!task) return refuse("task_missing");
-  if (task.originChatId !== input.chatId) return refuse("task_chat_mismatch");
+  if (!canonicalTaskOwnsChat(task, input.chatId)) return refuse("task_chat_mismatch");
   if (task.status === "archived") return refuse("task_archived");
   if (runtimeBinding ? task.version < input.taskVersion : task.version !== input.taskVersion) {
     return refuse(runtimeBinding ? "task_version_ahead" : "task_version_mismatch");
@@ -782,8 +792,10 @@ function fileVerdict(input: unknown): Verdict<VerifiedFile> {
     return refuse("file_missing");
   }
   let resolved: string;
+  let invocationWorkspace = false;
   try {
-    resolved = resolveFsReadPath(row.source_path, { kind: "chat-assets", chatId: row.chat_id });
+    try { resolved = resolveFsReadPath(row.source_path, { kind: "chat-assets", chatId: row.chat_id }); }
+    catch { resolved = resolveInvocationArtifactReadPath(row.source_path, {chatId:row.chat_id,runId:row.run_id}); invocationWorkspace = true; }
   } catch {
     return refuse("path_out_of_scope");
   }
@@ -795,6 +807,10 @@ function fileVerdict(input: unknown): Verdict<VerifiedFile> {
   } catch (error) {
     return refuse(error instanceof Error && error.message.startsWith("One artifact file is not a supported bounded")
       ? "file_not_bounded" : "file_unreadable");
+  }
+  if (invocationWorkspace) {
+    try { resolveInvocationArtifactReadPath(resolved, {chatId:row.chat_id,runId:row.run_id}); }
+    catch { fs.closeSync(opened.fd); return refuse("path_out_of_scope"); }
   }
   // file_dev is recorded but not compared: the binding row outlives a reboot and macOS renumbers the volume at every
   // boot, which made every accepted One deliverable unviewable after one. Inode, timestamps, size and the full SHA-256
@@ -817,20 +833,20 @@ function verifiedFile(input: unknown): VerifiedFile | null {
 }
 
 /**
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+ * The newest save of the file an exact binding points at, in the same conversation.
+ *
+ * A run that writes a file again binds it again: new binding, new bytes, the same canonical path. The earlier run's
+ * entry then names bytes that no longer exist (its size, inode, timestamps and SHA-256 do not match the file), and it
+ * used to open nothing. Owner decision 2026-10-19: such an entry opens the newest save of its path in this chat, the
+ * most recently bound row of the same canonical path.
+ *
+ * Authority is not widened. The requested binding must itself pass the exact binding check (its Task, chat, run,
+ * version and row). The rows searched are this chat's own, with the same canonical path, so another chat never
+ * follows. The caller still verifies the returned binding in full before reading a byte (fileVerdict: its own Task,
+ * chat, run, version, path scope, O_NOFOLLOW, size, inode and SHA-256). Nothing falls back to the requested binding
+ * when the newest cannot be verified: a deleted or linked newest file opens nothing.
+ *
+ * Null when `input` is not a bound output, is already the newest save, or the newest has no valid request shape.
  */
 export function latestOneArtifactBindingOfPath(input: unknown): OneArtifactBindingRequestV1 | null {
   if (!isOneArtifactBindingRequestV1(input)) return null;
@@ -898,7 +914,7 @@ export function verifyOneAcceptedSurfaceArtifactSet(input: {
     !task
     || task.status !== "completed"
     || task.version !== input.taskVersion
-    || task.originChatId !== input.chatId
+    || !canonicalTaskOwnsChat(task, input.chatId)
   ) return null;
   const receipt = getInvocationRunReceipt(input.runId);
   if (

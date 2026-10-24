@@ -130,7 +130,8 @@ export function planBorrowedWorkerTurn(input: { base: string; role: string; atte
  * Failures that prove nothing about the session itself never drop it: another writer holds it, the project's slot is busy, a retired process
  * has not exited yet, and in general a refusal the runner typed as not dispatched (`turnDelivery: "not-dispatched"`: claude's startup refusals
  * such as session_held_by_background, which state "the binding stays", a codex turn/start refused while a compaction runs, ACP quota, auth and
- * capacity refusals). Dropping the session for those loses a healthy conversation, and for session_held_by_background it starts a second one
+ * capacity refusals raised before the prompt is sent; a refusal that comes back as the prompt's own answer is not marked and still drops it).
+ * Dropping the session for those loses a healthy conversation, and for session_held_by_background it starts a second one
  * beside the one still running. Looked up through the whole `cause` chain, because the task force wraps every runner failure (returned or
  * thrown) in a TaskForceRuntimeFailureError that carries the original only as its cause. A refusal that names the SESSION itself is the
  * exception and still drops it: a refused resume, a missing session, and codex's own exec/turn-start refusals (their code does not say whether
@@ -220,13 +221,15 @@ export async function runClaimedWorkerTurn<T extends { failure?: unknown }>(
 /**
  * The identity a shared worker session is resumed under (`sessionFingerprintSeed`, which every runtime this module shares for takes). Without
  * a seed codex hashes the raw MCP launch arguments into its fingerprint, and every worker stage's capability lease mints a new launch
- * handle, so a stage never matched its predecessor and the shared session never resumed. The seed names what makes one conversation another: the agent's stable instructions, the host permission, the locale,
+ * handle, so a stage never matched its predecessor and the shared session never resumed. The seed names what makes one conversation another: the agent's stable instructions, the locale,
  * the tool grant (sorted allowed tools, browser-only, isolated MCP config, restricted or untrusted boundaries) and the folder.
  * A change in any of them opens a new session, never a silent resume with the old grant; the launch handles are left out on purpose, because
- * each turn rebinds its own tool table.
+ * each turn rebinds its own tool table. The host permission is not in the seed: its value is the last line of every turn
+ * (taskforce.worker.user.authority), and each runtime applies the turn's permission itself (codex sends the sandbox policy with every turn,
+ * claude and ACP reopen their process under it), so a permission change continues the conversation.
  */
 export function borrowedWorkerSessionSeed(input: {
-  systemPrompt: string; locale?: string | null; permission?: string | null; unattendedNoAsk?: boolean;
+  systemPrompt: string; locale?: string | null; unattendedNoAsk?: boolean;
   restrictedReadBoundary?: unknown; untrustedNoTools?: boolean; browserOnly?: boolean; isolatedMcpConfig?: boolean;
   mcpAllowedTools?: readonly string[] | null; cwd?: string | null;
   /** The conversation: codex and ACP key their approval and consent caches by the seed, which must not reach across chats. */
@@ -235,7 +238,7 @@ export function borrowedWorkerSessionSeed(input: {
   forgetEpoch?: number | null;
 }): string {
   const digest = createHash("sha256").update(JSON.stringify([
-    input.systemPrompt, input.locale ?? null, input.permission ?? null, input.unattendedNoAsk === true,
+    input.systemPrompt, input.locale ?? null, input.unattendedNoAsk === true,
     Boolean(input.restrictedReadBoundary), input.untrustedNoTools === true, input.browserOnly === true, input.isolatedMcpConfig === true,
     [...(input.mcpAllowedTools ?? [])].sort(), input.cwd ?? null, input.forgetEpoch ?? 0, input.chatId ?? null,
   ])).digest("hex");

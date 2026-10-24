@@ -4,7 +4,7 @@
 // no MCP (Blender), a web page worked through the browser (posting to Threads). Sentences alone cannot see that; the
 // repeated thing is the tool use. This file turns a run's tool events into episodes the repeated-work detector can compare.
 //
-// The rules:
+// The rules, each from a measured fact (owner's store, 2026-10-20):
 //   · a tool call is two events — a start event with `toolArgs` and a completion event without them (claude-code) — joined
 //     by `toolId`;
 //   · browser calls after `browser_navigate` carry no URL, so the site is the last one navigated to in the run;

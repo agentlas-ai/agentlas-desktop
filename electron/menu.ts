@@ -37,7 +37,7 @@ async function checkUpdatesInteractive(parent: BrowserWindow | null, locale: Men
       detail = `v${state.version ?? "?"} — ${state.progress ?? 0}%`;
       break;
     case "downloaded":
-      
+      // The install button is the download icon at the bottom of the sidebar (2026-10-12: this said "top-right", in English).
       message = ko ? "업데이트 준비됨" : "Update ready";
       detail = ko
         ? `v${state.version}. 사이드바 아래 다운로드 아이콘을 누르면 설치하고 다시 시작합니다.`
@@ -68,16 +68,16 @@ async function checkUpdatesInteractive(parent: BrowserWindow | null, locale: Men
 }
 
 /**
-
-
-
-
-
-
-
-
-
-
+ * Zoom is a property of the window as the person sees it, not of one web contents inside it.
+ *
+ * Product extensions (Science, the Hub profile, the Work live view) are child views of the same
+ * window, each with its own zoom. Electron's built-in zoom roles act on the *focused* contents,
+ * so zooming while the pointer sat over Science and then reaching for "Actual Size" reset the
+ * shell and left Science enlarged -- and Chromium persists that factor per origin, so it came
+ * back on the next launch with no way to undo it. Measured: shell 1.5 -> 1, Science stuck at 1.5.
+ *
+ * Applying every zoom command to the window and all of its child views keeps them in step, which
+ * is what "the screen is too big" means to the person holding the mouse.
  */
 function everyContents(win: BrowserWindow | null) {
   if (!win) return [];
@@ -113,6 +113,26 @@ function send(win: BrowserWindow | null, route: string) {
 
 type MenuLocale = "ko" | "en";
 
+/**
+ * View ▸ Back. Windows and Linux use Alt+Left for Back (Explorer, file managers, browsers); a Work room at a small window
+ * had no other way back and testers pressed it (Windows retest 2, 2026-10-24). macOS's Back key is ⌘[, which this app
+ * already gives to Toggle Sidebar, and ⌘← moves the caret in text, so on macOS the item has no key.
+ */
+export function backMenuAccelerator(platform: NodeJS.Platform): string | undefined {
+  return platform === "darwin" ? undefined : "Alt+Left";
+}
+
+/**
+ * The quit item on Windows/Linux. macOS keeps "Quit Agentlas" (Cmd+Q) in its app menu; until 2026-10-24
+ * Windows had no Exit anywhere — the first real Windows run found closing the window was the only way out.
+ * Same intent code as Cmd+Q, so the quit policy (quit-policy.ts) treats it the same.
+ */
+export function nonMacQuitMenuItem(platform: NodeJS.Platform, locale: MenuLocale): { label: string; accelerator?: string } | null {
+  if (platform === "darwin") return null;
+  if (locale === "ko") return platform === "win32" ? { label: "끝내기" } : { label: "종료", accelerator: "Ctrl+Q" };
+  return platform === "win32" ? { label: "Exit" } : { label: "Quit", accelerator: "Ctrl+Q" };
+}
+
 /** 네이티브 메뉴 라벨 — 쉬운 한국어 우선. role 항목(undo/copy/minimize 등)은
  *  macOS가 OS 언어로 자동 번역하므로 여기서 다루지 않는다. */
 function menuLabels(locale: MenuLocale) {
@@ -134,6 +154,7 @@ function menuLabels(locale: MenuLocale) {
     edit: "Edit",
     view: "View",
     toggleSidebar: "Toggle Sidebar",
+    back: "Back",
     actualSize: "Actual Size",
     zoomIn: "Zoom In",
     zoomOut: "Zoom Out",
@@ -160,6 +181,7 @@ function menuLabels(locale: MenuLocale) {
     edit: "편집",
     view: "보기",
     toggleSidebar: "사이드바 보이기/숨기기",
+    back: "뒤로",
     actualSize: "원래 크기로",
     zoomIn: "크게",
     zoomOut: "작게",
@@ -177,6 +199,7 @@ export function buildAppMenu(
 ): Menu {
   const isMac = process.platform === "darwin";
   const L = menuLabels(locale);
+  const quitItem = nonMacQuitMenuItem(process.platform, locale);
 
   const template: Electron.MenuItemConstructorOptions[] = [
     // macOS 첫 번째는 App 메뉴 (앱 이름 자동 표시)
@@ -279,6 +302,19 @@ export function buildAppMenu(
           label: L.myAgentsWeb,
           click: () => void shell.openExternal(`${WEB_BASE}/cargo`),
         },
+        // Windows/Linux have no app menu, so this first menu carries Exit (File > Exit position).
+        ...(quitItem
+          ? [
+              { type: "separator" as const },
+              {
+                ...quitItem,
+                click: () => {
+                  noteQuitIntent("menu-quit");
+                  app.quit();
+                },
+              },
+            ]
+          : []),
       ],
     },
 
@@ -304,6 +340,11 @@ export function buildAppMenu(
           label: L.toggleSidebar,
           accelerator: "CmdOrCtrl+[",
           click: () => send(getWindow(), "__toggle_sidebar__"),
+        },
+        {
+          label: L.back,
+          ...(backMenuAccelerator(process.platform) ? { accelerator: backMenuAccelerator(process.platform) } : {}),
+          click: () => send(getWindow(), "__navigate_back__"),
         },
         { type: "separator" },
         { role: "reload" },

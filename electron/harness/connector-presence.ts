@@ -1,15 +1,15 @@
-
-
-
-
-
-
-
-
-
-
-
-
+/*
+ * A connection's credential state for discovery, from value-free presence metadata only (R-024).
+ *
+ * Discovery and readiness (harness connector.search / describe / status, auth.status, the canonical registry's
+ * readiness reader) used to call hasEnvVar / hasUsableMcpOAuthCredential, which read the secret value to measure its
+ * length: production 2026-10-16..17, `harness_describe connector:*` read keychain values four times inside unattended
+ * runs (daily graph run-cdf732ca, Yotube room). A keychain prompt in such a run has nobody to answer it. This module
+ * answers from vault.ts presence (this process's own observations and the durable presence ledger) and never reads,
+ * lists or prompts. A key nobody has observed yet is "unknown": the state is "unverified", never "credential_missing".
+ * Using a connection (auth.ensure, auth.login, connector.connect, a run's own configuration) still reads the value.
+ * No electron import: the background service loads this.
+ */
 import type { CredentialPresence } from "../secrets/vault";
 import { envVarPresence } from "../secrets/vault";
 import { credentialVaultKey } from "../mcp-tools/credential-refs";

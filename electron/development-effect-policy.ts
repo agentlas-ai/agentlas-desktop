@@ -10,7 +10,11 @@ import { encodeIpcErrorMessage, isIpcErrorCode } from "../shared/ipc-error-code"
 // Capture only the launch request. The environment cannot grant admission:
 // Main must supply the actual package state and validated install identity.
 const requestedAtLaunch = process.env.AGENTLAS_DEV_NO_EXTERNAL_EFFECTS === "1";
-let configured: Readonly<{ suppressed: boolean; channel: InstallIdentity["channel"]; packaged: boolean; requestedDir: string | null; userDataDir: string | null }> | null = null;
+// Test-only opt-in (owner decision 2026-10-24): so that the first upload of Agentlas Reach can be observed from a PACKAGED app. Only a launch request here;
+// it grants nothing by itself (see reachQaAdmission).
+const reachQaRequestedAtLaunch = process.env.AGENTLAS_REACH_QA_UPLOAD === "1";
+const reachQaBundlesAtLaunch = (process.env.AGENTLAS_REACH_QA_APPS ?? "").split(",").map((item) => item.trim()).filter(Boolean);
+let configured: Readonly<{ suppressed: boolean; channel: InstallIdentity["channel"]; packaged: boolean; requestedDir: string | null; userDataDir: string | null; reachQa: readonly string[] | null }> | null = null;
 
 /** May only suppress pre-configuration diagnostics; it never grants admission. */
 export function developmentEffectPolicyRequested(): boolean { return requestedAtLaunch; }
@@ -87,8 +91,18 @@ export function configureDevelopmentEffectPolicy(input: {
     }
     userDataDir = validateCandidateUserDataDir(requestedDir);
   }
-  configured = Object.freeze({ suppressed, packaged: input.packaged, channel: input.identity.channel, requestedDir, userDataDir });
+  // Agentlas Reach is never started in an isolated candidate (it maps the machine and sends to the server). The one exception is this opt-in, admitted only
+  // for a packaged local candidate that runs in its validated disposable profile with external effects suppressed, and only for one to three named apps
+  // (the only apps Reach will then look at or send about). Main supplies every one of those facts; the environment only asks.
+  const bundlesOk = reachQaBundlesAtLaunch.length >= 1 && reachQaBundlesAtLaunch.length <= 3 && reachQaBundlesAtLaunch.every((id) => /^[A-Za-z0-9][A-Za-z0-9.-]{2,119}$/.test(id));
+  const reachQa = reachQaRequestedAtLaunch && suppressed && packagedCandidate && userDataDir !== null && bundlesOk ? Object.freeze([...reachQaBundlesAtLaunch]) : null;
+  configured = Object.freeze({ suppressed, packaged: input.packaged, channel: input.identity.channel, requestedDir, userDataDir, reachQa });
   return userDataDir;
+}
+
+/** The apps Reach may look at and send about in this disposable packaged candidate, or null (the normal answer: Reach does not start here). */
+export function reachQaAdmission(): readonly string[] | null {
+  return configured?.reachQa ?? null;
 }
 
 /** No native imports or probing. A requested but unconfigured process fails closed. */

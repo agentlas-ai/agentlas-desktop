@@ -65,10 +65,10 @@ const RECOVERY_REASONS: readonly DurableQueuedSteerRecoveryReason[] = [
 ];
 
 /**
-
-
-
-
+ * The machine cause of every transition to `cancelled` or `failed`, written to recovery_reason in the same UPDATE.
+ * Production 1.3.67 (2026-10-18): 69 failed and 116 cancelled rows, every failed one with recovery_reason NULL; a
+ * teammate report that died on "database is locked" could not be told apart from one parked for a waiting Goal.
+ * A cause is a marker, never prose; the typed refusal code of a failed start goes to the log line next to it.
  */
 export type DurableQueuedSteerTerminalCause =
   /** The owner pulled it back from the queue strip (unsteer). */
@@ -331,13 +331,13 @@ const OWNER_STOP_CAUSES: ReadonlySet<DurableQueuedSteerTerminalCause> = new Set(
 const REPORT_DELIVERED_CAUSES: ReadonlySet<DurableQueuedSteerTerminalCause> = new Set(["parked-for-waiting-goal", "host-report-superseded", "held-returned-to-owner"]);
 
 /**
-
-
-
-
-
-
-
+ * A teammate report turn (oneTeamReportTurn) that ends failed or cancelled reverts the dispatch ledger in the SAME
+ * transaction (one/team-dispatch.ts revertQueuedOneTeamReport). The report's enqueue wrote reported_at, so before this a
+ * report that never ran stayed "reported": production 2026-10-18, Yotube room, steer a4d7b864 (Film Production Director,
+ * dispatch-1f9ca888) failed at 02:44:23Z ("database is locked") while the ledger kept reported_at 02:09:34.386Z, and
+ * nothing re-sent it. A failure cause is retried by the existing report retry; an owner stop is kept visible as
+ * `owner_stopped` and not carried again; a held report turn that may already have run (drained-*) is not re-sent.
+ * The revert never blocks the steer settlement: its error is logged with the steer id.
  */
 function revertTeamReportLedger(row: ReportLedgerRow | undefined, cause: DurableQueuedSteerTerminalCause): void {
   if (!row || REPORT_DELIVERED_CAUSES.has(cause)) return;
@@ -454,12 +454,12 @@ export function retireHeldQueuedSteer(id: string, cause: "held-system-retired" |
 export type HeldOwnerSteerReturn = InvocationSteerRecoveryOutcome;
 
 /**
-
-
-
-
-
-
+ * The owner's text of a held direction goes back to the owner, and the row is retired in the SAME transaction, so the
+ * text exists in exactly one place: the composer, never also a queued turn. Owner 2026-10-18: a held follow-up was a
+ * card nothing could resolve, and Main listed the row forever (only host-written held rows were ever retired).
+ * Idempotent: a repeated call for a row this route already retired answers "already-returned" with the same text and
+ * writes nothing. A host-written row (a teammate report, a relay) is not owner text and is refused; so is a row that is
+ * no longer held (released for delivery, delivered, withdrawn). Never starts a turn.
  */
 export function returnHeldOwnerSteer(id: string, expectedChatId?: string): HeldOwnerSteerReturn {
   const db = getDb();

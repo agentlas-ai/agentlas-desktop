@@ -36,7 +36,7 @@ export function harvestToolUseEpisodes(now = new Date()): HarvestResult {
   const result: HarvestResult = { runs: 0, stored: 0, pruned: 0 };
   try {
     const db = getDb();
-    // Graph-structure observations fed this detector until a recurring graph structure was understood to
+    // Graph-structure observations (2026-10-20, 17d46b11e) fed this detector until a recurring graph structure was understood to
     // be a Graph, not a Toolchain. Their rows are inert now.
     db.prepare("DELETE FROM meta WHERE key >= ? AND key < ?").run(RETIRED_GRAPH_PREFIX, `${RETIRED_GRAPH_PREFIX}\uffff`);
     const cursor = (db.prepare("SELECT value FROM meta WHERE key=?").get(CURSOR_KEY) as { value: string } | undefined)?.value

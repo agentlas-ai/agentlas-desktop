@@ -1,34 +1,34 @@
 /**
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+ * Unattended durable-session turns — who may resume a stored CLI session, and
+ * what an unattended run does when it cannot.
+ *
+ * Production 1.2.40 (Threads automation f7a61706, run 02:00Z 2026-09-24): the
+ * graph ran its `publish` and `measure` nodes in parallel. Both belong to the
+ * same automation ledger chat and agent, so both read the same stored Codex
+ * thread and both ran `codex exec resume <thread>`. Codex allows one writer per
+ * thread; the second process exited 1 before any turn started with
+ * "thread-store conflict: thread … already has an active writer" (reproduced on
+ * codex-cli 0.156.1). The runner then refused to create a fresh session, so the
+ * automation stopped with "restore the session before continuing" — a request
+ * nobody can answer in an unattended run.
+ *
+ * Rules kept here, in one place, for every CLI runner:
+ *   1. A stored session is resumed by at most one in-flight turn of this
+ *      process. A parallel sibling does not attempt the conflicting resume; it
+ *      runs in a fresh session and does not overwrite the durable one.
+ *   2. A resume that failed before the runtime started a turn has done nothing
+ *      external, so an unattended run continues in a fresh session. Continuity
+ *      comes from the host-recorded capsule the automation prompt already
+ *      carries (automation-progress-facts.ts), not from the provider thread.
+ *   3. A resume whose turn already started may have acted; it is never replayed
+ *      in a fresh session (that could repeat an external action).
+ *   4. An attended (owner) turn whose stored session the runtime itself reports
+ *      as gone also continues in a fresh session that replaces the binding
+ *      (attendedTurnStartsFresh). Refusing it was a dead end: the owner got the
+ *      same error on every later turn of that chat until something cleared the
+ *      binding (2026-10-16: 275 Codex bindings on the owner's Mac named rollouts
+ *      that no longer existed anywhere).
+ * Every fresh-session decision emits one machine-readable status receipt.
  */
 
 export type UnattendedFreshSessionReason =

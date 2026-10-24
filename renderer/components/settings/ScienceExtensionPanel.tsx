@@ -164,11 +164,11 @@ export function ScienceExtensionPanel() {
         </div>
 
         <div className={styles.actions}>
-          {
-
-
-
-}
+          {/*
+            * ★단추가 회색인데 **이유가 없었다** (마우스 실측 2026-09-08).
+            *   상태를 아직 못 읽었을 때도, 다른 작업이 도는 중일 때도 똑같이 회색이라
+            *   사용자는 기다려야 하는지 고장인지 구분할 수 없다.
+            */}
           {!status?.installed ? (
             <button type="button" className={styles.button} data-testid="science-settings-review-package" data-primary="true" disabled={busy !== null || status === null}
               title={busy !== null

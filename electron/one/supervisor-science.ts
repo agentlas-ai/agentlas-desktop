@@ -23,20 +23,20 @@ export class SupervisorScienceAdapter {
   }
   /** The last observation that answered, per project: a project whose service call misses its slot keeps its rows. */
   private lastProjectObservation=new Map<string,{tasks:SupervisorTask[];targets:Array<[string,{projectId:string;conversationId?:string;turnId?:string;loop?:Row}]>}>();
-  
-
-
-
-
-
-
-
+  /*
+   * One observation of every project, inside one deadline. Each project's chain (loop, conversations, the open turn
+   * and its messages) runs side by side with the others; before, up to 20 projects x (inspect + list + 4 x (attach +
+   * messages)) waited for each other in sequence, so one slow reply (the Main loop busy for ~1.1 s, measured
+   * 2026-10-05) used up the 2 s budget and the phone's supervisor status showed Science as unavailable. A project
+   * whose chain misses the deadline keeps the rows its last answered observation produced; a project the service no
+   * longer lists is dropped.
+   */
   async tasks():Promise<SupervisorTask[]> {
     const deadline=performance.now()+2_000;
-    
-
-
-
+    // At most SCIENCE_OBSERVATION_IN_FLIGHT service calls at once. Running every project side by side without a cap
+    // sent 19 science.command calls in the same millisecond when the phone connected, and all of them timed out
+    // together (production 2026-10-05 20:18:18 UTC, reported by the monitoring peer session). A call whose turn comes
+    // after the deadline is not sent; its project keeps its last answered rows.
     let inFlight=0;
     const waiting:Array<()=>void>=[];
     const observe=async(command:DaemonScienceCommand):Promise<unknown>=>{

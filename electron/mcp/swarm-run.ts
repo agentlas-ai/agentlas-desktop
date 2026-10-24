@@ -35,11 +35,7 @@ import {
 import { runtimeFailureBlocksReplay, pickActive, pickRunner, rolePriorityRuntimes } from "../runtime/selection";
 import { runnerFailureFromError, withoutMcpTransportEnv } from "../runtime/runner";
 import { ProjectResidencyBusyError, WORK_PROJECT_RESIDENCY_BUSY_CODE } from "../runtime/project-residency";
-import {
-  isMobileReadRuntimeAllowed,
-  MobileReadRuntimeBoundaryError,
-  revalidateInvocationWorkspaceBinding,
-} from "../invocation/workspace-binding";
+import { revalidateInvocationWorkspaceBinding } from "../invocation/workspace-binding";
 import { stripReplyMemoryEventsReadOnly } from "../memory/curator";
 import { buildProjectContextSlice } from "../memory/context-map";
 import { STORMBREAKER_LOOP_PROTOCOL } from "../hephaestus/loop-engineering";
@@ -370,11 +366,9 @@ export async function runSwarmInvocation(
     // 히스토리 조회 실패가 스웜 실행 자체를 막아선 안 된다 — 맥락 없이 진행.
   }
   const coreHarnessPrompt = p.stormbreakerMode ? p.stormbreakerHarness?.system_prompt : undefined;
-  if (p.restrictedReadBoundary && !isMobileReadRuntimeAllowed(p.active.kind)) {
-    throw new MobileReadRuntimeBoundaryError(
-      "This swarm runtime has no verified restricted read-only boundary. Select BYOK or Ollama on Desktop.",
-    );
-  }
+  // A read-only automation (restrictedReadBoundary) runs on every configured runtime under its read permission, each
+  // through its own read mechanism (shared/runtime-capabilities.ts readMechanism; owner rule 2026-10-23). It used to be
+  // allowed on BYOK and Ollama only.
   const sameRuntime = (left: typeof p.active, right: typeof p.active) => (
     left.kind === right.kind && left.backend === right.backend && left.source === right.source
   );
@@ -383,14 +377,7 @@ export async function runSwarmInvocation(
   const runnableRuntimes = availableRuntimes.filter((runtime, index, list) => (
     list.findIndex((candidate) => sameRuntime(candidate, runtime)) === index && Boolean(pickRunner(runtime))
   ));
-  const candidateRuntimes = p.restrictedReadBoundary
-    ? runnableRuntimes.filter((runtime) => isMobileReadRuntimeAllowed(runtime.kind))
-    : runnableRuntimes;
-  if (p.restrictedReadBoundary && candidateRuntimes.length === 0) {
-    throw new MobileReadRuntimeBoundaryError(
-      "This swarm has no verified restricted read-only runtime. Select BYOK or Ollama on Desktop.",
-    );
-  }
+  const candidateRuntimes = runnableRuntimes;
   if (candidateRuntimes.length === 0) candidateRuntimes.push(p.active);
   // A One room's chosen model serves its swarm workers too (owner 2026-10-16); only a room without a pin uses the pool.
   const roomPinnedWorker = roomPinnedTeammateRuntime(p);
@@ -608,11 +595,6 @@ export async function runSwarmInvocation(
       { signal: p.signal },
     );
     if (p.signal?.aborted) throw new Error("Swarm worker cancelled");
-    if (p.restrictedReadBoundary && !isMobileReadRuntimeAllowed(active.kind)) {
-      throw new MobileReadRuntimeBoundaryError(
-        "This swarm worker runtime has no verified restricted read-only boundary. Select BYOK or Ollama on Desktop.",
-      );
-    }
     if (p.workspaceBinding) revalidateInvocationWorkspaceBinding(p.workspaceBinding);
     // The canonical package prompt is authoritative, but the per-task
     // swarm protocol is invocation context. Passing both as the fallback
@@ -657,8 +639,8 @@ export async function runSwarmInvocation(
               void text;
             },
             onTool: (name, args, r, id, isError, artifactPaths, imageDataUrl, _origin, toolKind) => {
-              
-
+              // A successful completion seals what it produced (harness port files included) into the room's Outputs;
+              // before, a swarm worker's outputs never reached the binder (dev O9 2026-10-18 found the same gap in firms).
               const oneArtifacts = !isError && (r !== undefined || (id && artifactPaths?.length)) && p.bindOneRuntimeToolArtifacts
                 ? p.bindOneRuntimeToolArtifacts(id ?? "", artifactPaths ?? [], { name, ...(toolKind ? { kind: toolKind } : {}) })
                 : undefined;
@@ -825,11 +807,6 @@ export async function runSwarmInvocation(
       { signal: p.signal },
     );
     if (p.signal?.aborted) throw new Error("Swarm synthesis cancelled");
-    if (p.restrictedReadBoundary && !isMobileReadRuntimeAllowed(active.kind)) {
-      throw new MobileReadRuntimeBoundaryError(
-        "This swarm synthesis runtime has no verified restricted read-only boundary. Select BYOK or Ollama on Desktop.",
-      );
-    }
     if (p.workspaceBinding) revalidateInvocationWorkspaceBinding(p.workspaceBinding);
     const runSynthesisOn = async (
       targetRuntime: typeof active,

@@ -35,6 +35,22 @@
   overflow: hidden;
 }
 
+.workspace {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+}
+
+.workspace > .surface { flex: 1; }
+
+.outputs {
+  width: clamp(220px, 22vw, 320px);
+  min-width: 0;
+  overflow: auto;
+  border-left: 1px solid var(--science-border-default);
+  background: var(--science-surface-0);
+}
+
 .fallback {
   position: absolute;
   inset: 0;

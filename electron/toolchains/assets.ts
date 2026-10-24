@@ -13,10 +13,10 @@ const PREFIX = "toolchain.asset.v1:";
 const KEY_PREFIX = "toolchain.capability-key.v1:";
 const DEFINITION_PREFIX = "toolchain.definition.v1:";
 const IMPLEMENTATION_PREFIX = "toolchain.implementation-fingerprint.v1:";
-
-
-
-
+// Version-local schemas may retain the same $id across releases without polluting
+// a global schema registry. Unknown formats fail compilation instead of being ignored.
+// A union type (`type: ["number","string"]`) is valid JSON Schema that models write for mixed inputs; strict mode
+// stays on for everything else (NH07 A/B 2026-10-15: all 19 of 36 rejected proposals were union types).
 const ajv = new Ajv({ allErrors: true, strict: true, allowUnionTypes: true, addUsedSchema: false });
 const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value));
 export function toolchainSchemaProblems(schema: ToolchainJsonSchema, value: unknown): string[] {

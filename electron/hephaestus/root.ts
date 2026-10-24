@@ -89,22 +89,22 @@ export function compareHephaestusVersions(left: string | null, right: string | n
   return 0;
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+/*
+ * What counts as a usable Agentlas OS root.
+ *
+ * This checked one file. The Terminal's resolver
+ * (`engine/agentlas-core-harness.cjs` CORE_RUNTIME_MARKERS) requires three: the
+ * entry module plus both Workforce schemas. That asymmetry produced a
+ * split brain — verified 2026-07-28 by pointing both resolvers at a directory
+ * satisfying only the loose check: Desktop attached to it and reported v9.9.9
+ * while Terminal rejected it and stayed on 1.1.73. Two products, one machine,
+ * different engines.
+ *
+ * Tightened to match the strict side. The loose check was not "more
+ * forgiving" in any useful sense: a runtime missing its Workforce schemas
+ * cannot serve the Workforce contract, so attaching to it only defers the
+ * failure to a later, less legible point.
+ */
 const CORE_RUNTIME_MARKERS: string[][] = [
   ["agentlas_cloud", "__main__.py"],
   ["schemas", "workforce-work-order.schema.json"],
@@ -182,22 +182,22 @@ export function hephaestusContextRoot(): string | null {
  */
 export function hephaestusRootDetail(
   /**
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
- */
+   * `excludeRejected` skips roots that failed a **Workforce capability**
+   * preflight, so that preflight's retry lands on a different engine.
+   *
+   * It is opt-in, and that direction matters. It used to be the default, and
+   * the default was wrong: rejection records one narrow judgement — "this
+   * engine does not expose the Workforce tool set" — while `hephaestusRoot()`
+   * is what every Core feature resolves through. So a single Workforce
+   * preflight failure took Build, security scan, publish, context slice,
+   * career graph, project bootstrap, the ontology runtime and doctor down with
+   * it, for the rest of the process, with no way back — the reset function
+   * clears a different cache and nothing calls the clearing function at all.
+   * Measured 2026-07-28.
+   *
+   * An engine missing five Workforce tools builds and scans perfectly well.
+   * Only the caller that made the judgement should act on it.
+   */
   options?: { excludeRejected?: boolean; requiredMarkers?: string[][] },
 ): { root: string; kind: "managed" | "bundled" | "override" } | null {
   const isRejected = options?.excludeRejected ? isRejectedTarget : () => false;

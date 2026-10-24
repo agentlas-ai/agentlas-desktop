@@ -9,9 +9,9 @@ const FILE = "ui-locale.json";
 const RECHECK_MS = 2_000;
 
 /**
-
-
-
+ * The owner's language. Main sets it from the screen; a process that never receives that choice (the background service,
+ * which runs Hope's personal turns since the One domain moved there) reads the last value Main saved. Before, the
+ * service always answered "en", so Hope replied in English to a Korean owner (production 1.2.95, 2026-10-11).
  */
 export function currentUiLocale(): "ko" | "en" {
   const now = Date.now();

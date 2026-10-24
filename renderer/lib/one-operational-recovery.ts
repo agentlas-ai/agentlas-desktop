@@ -6,8 +6,8 @@ import { innermostTypedCode, isTypedCode, type TurnDelivery } from "@shared/turn
 export const ONE_OPERATIONAL_RECOVERY_EVENT = "agentlas:one-operational-recovery";
 
 /**
-
-
+ * What a recovery turn may know about a failure: machine facts only (docs 31 W1, audit A7 M19). The error's message and
+ * stack never reach the model: 10 recovery turns built from that prose finished 0 of 3 owner requests (2026-10-11..16).
  */
 export type OneOperationalRecoveryFacts = {
   /** The failure's machine code (IPC code marker, own code or innermost cause code); "uncoded" when it has none. */

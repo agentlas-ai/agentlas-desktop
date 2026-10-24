@@ -1,20 +1,12 @@
 // The detached screen follows the mounted, validated Work task, never the
 // newest active invocation elsewhere in the app.
-let chatId: string | null = null;
-let generation = 0;
-const listeners = new Set<() => void>();
-export const agentScreenChatId = (): string | null => chatId;
+import { createScopeSelection } from '../../shared/scope-selection';
+
+const selection = createScopeSelection<string>();
+export const agentScreenChatId = (): string | null => selection.read();
 export function subscribeAgentScreenScope(listener: () => void): () => void {
-  listeners.add(listener);
-  return () => { listeners.delete(listener); };
+  return selection.subscribe(listener);
 }
 export function bindAgentScreenScope(next: string | null): () => void {
-  const binding = ++generation;
-  chatId = next;
-  for (const listener of listeners) listener();
-  return () => {
-    if (generation !== binding) return;
-    chatId = null;
-    for (const listener of listeners) listener();
-  };
+  return selection.bind(next);
 }

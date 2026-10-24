@@ -7,16 +7,16 @@ interface Journal {
   terminalEvent: McpInvocationEvent | null;
 }
 /**
-
-
-
-
-
-
-
-
-
-
+ * Session-local wire replay. Durable receipts/history own recovery after eviction/restart.
+ *
+ * Retention (perf review 2026-10-17, R-11). Up to 32 journals of up to 8 MB were kept with no regard to whether their
+ * run was still live: finished runs (their history is durable) sat beside live ones for the 10-minute TTL, and a live
+ * run that went quiet was the "least recently touched" one evicted when finished runs piled up, sending its viewers
+ * to a ledger hydration. Finished journals now go first: at most `terminalRuns` of them stay. A live journal is never
+ * dropped for a finished one; background runs keep theirs (they get no push, so replay is their only live channel),
+ * and `runs` in all bounds only a host with that many live runs at once. (Holding each event as its JSON string
+ * instead of a parsed copy was measured and rejected: it saved nothing for code and English, and a JSON string with
+ * any Korean in it is stored two bytes per character, keys included, where a parsed copy keeps its keys one-byte.)
  */
 export class RunEventDeliveryJournal {
   private readonly runs = new Map<string, Journal>();

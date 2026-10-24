@@ -211,7 +211,8 @@ export async function runAutomationStrategyCycle(input: AutomationStrategyCycleI
   const current = () => !input.signal?.aborted && (!input.isCurrent || input.isCurrent());
   if (!current()) { unavailable(input, "reflection_source_changed"); return; }
   // A command automation is an on-demand work step that a chat or a Goal run invokes; it has no cadence or standing
-  // prompt to tune, so the generic post-run reflection only produces drafts nobody reviews. Only the generic post-run
+  // prompt to tune. Measured 2026-10-20 on the owner's store: 228 of 229 drafts in one day came from 16 command
+  // automations, 154 of them "keep the current strategy", none ever reviewed or applied. Only the generic post-run
   // loop is skipped; a Goal-recommended cycle and an episode preparation still run.
   if (!input.goalRecommendation && !input.episodePreparation
     && getAutomation(input.automationId)?.triggerType === "command") {

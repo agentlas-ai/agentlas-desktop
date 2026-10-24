@@ -1,7 +1,7 @@
 // Toolchain — shared pure rules (no Electron, no store).
 //
 // A Toolchain is an MCP-shaped deterministic tool for an app or web page the agents used to operate by hand
-// Blender with no MCP gets its own tool; a page posted by looking at it every
+// (owner definition, 2026-10-20): Blender with no MCP gets its own tool; a page posted by looking at it every
 // time gets a tool that follows the page's structure, and the tool is repaired when the page changes and
 // calls start failing. A Graph is a different thing — recurring work that orchestrates AIs or runs on a
 // schedule — and is never a Toolchain.

@@ -1,6 +1,6 @@
 // A callable Toolchain is an MCP tool. One Team lists each one as its own tool (name, description, input schema from the
 // asset's contract), so a runtime calls it like any other MCP tool instead of finding it first through toolchain_search.
-// A Toolchain is MCP-shaped: not a text skill but a tool that agents call.
+// Owner definition (2026-10-20): "a Toolchain is basically MCP-shaped — not a text skill but something made as an MCP tool".
 //
 // Names: `tc_<slug>_<6 hex of the asset id>`, at most 49 characters so `mcp__one-team__` + name stays within 64 (the
 // shortest tool-name limit among the runtimes' wires). The slug is readable when the contract name or capability key has

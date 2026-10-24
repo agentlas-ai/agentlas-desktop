@@ -41,8 +41,8 @@ const RUNTIME_LABEL: Record<string, string> = {
 };
 
 /**
-
-
+ * A tool as a person reads it. MCP calls arrive as "mcp__<server>__<tool>" (owner 2026-10-04 screenshot:
+ * "mcp__one-team__one_supervi…" in an approval chip); the server prefix and underscores are machine spelling.
  */
 export function toolDisplayName(tool: string): string {
   // The server part may itself contain underscores ("claude_ai_Notion"): it ends at the next "__" (mobile

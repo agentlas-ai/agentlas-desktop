@@ -2,11 +2,13 @@ import { createHash } from "node:crypto";
 import {
   scienceLongRunGoalId,
   scienceLongRunId,
-  type ScienceLoopLongRunProjection,
 } from "agentlas-science/dist/contracts/science-long-run";
 import { getDb } from "../store/db";
 import {
   applyScienceLongRunProjectionStatus,
+  applyScienceAuthorCompletionProjection,
+  scienceAuthorCompletionProjectionValid,
+  type ScienceLoopLongRunProjection,
   appendLongRunEvent,
   createLongRun,
   getLongRun,
@@ -167,6 +169,11 @@ function projectScienceLoopLongRunInTransaction(input: ScienceLoopLongRunProject
     return getLongRun(run.id)!;
   };
 
+  if (input.authorCompletion !== undefined) {
+    if (legacyProjection || !scienceAuthorCompletionProjectionValid(input)) return markProjectionError("science_projection_author_completion_invalid");
+    if (listLongRunTasks(run.id, true).some(task => task.id !== "task:bootstrap")) return markProjectionError("science_projection_author_completion_tasks_open");
+    return applyScienceAuthorCompletionProjection(input, owner ?? { hostOwnerKind: "desktop" });
+  }
   if (["completed", "failed", "cancelled"].includes(run.status)) return run;
   if (input.status === "queued") {
     return applyScienceLongRunProjectionStatus({
@@ -219,11 +226,14 @@ function projectScienceLoopLongRunInTransaction(input: ScienceLoopLongRunProject
         && receipt.criterionTextSha256 === sha256Text(criteria[index]!)
         && SHA256_RE.test(receipt.receiptSha256)
         && SHA256_RE.test(receipt.provenanceSha256)
-        && receipt.verifier?.method === "research-director-attestation"
+        && (receipt.verifier?.method === "research-director-attestation"
+          || (receipt.verifier?.method === "independent-review"
+            && UUID_RE.test(receipt.verifier.reviewRequestId)
+            && SHA256_RE.test(receipt.verifier.executionSha256)))
         && receipt.verifier.agentId.trim().length > 0
         && receipt.verifier.agentSlug.trim().length > 0
         && receipt.verifier.packageVersion.trim().length > 0
-        && SHA256_RE.test(receipt.verifier.packageDigest)
+        && /^sha256:[a-f0-9]{64}$/.test(receipt.verifier.packageDigest)
         && SHA256_RE.test(receipt.verifier.systemPromptSha256)
         && UUID_RE.test(receipt.verifier.invocationRunId))
       && sha256Json({

@@ -514,10 +514,10 @@ export function observeBrowserToolForHumanCheck(input: { toolName: string; chatI
 }
 
 /**
-
-
-
-
+ * The agent called browser_show_owner: the owner has to do a step in the open browser (a phone code, a consent
+ * screen). One card with Open browser; pressing it presents the page the agent acted on last and opens a closed
+ * panel. Before this an agent had no way to show the in-app browser and fell back to macOS window scripting
+ * (Yotube room 2026-10-13 22:50Z, YouTube phone verification: the owner asked where the screen was).
  */
 export function ownerBrowserStepNotice(input: { locale: "ko" | "en"; nativeGrant?: NativeBrowserRelayGrant | null }): Notice {
   const message = { ko: "브라우저에서 직접 하실 단계가 있어요", en: "There is a step for you in the browser" };
@@ -529,9 +529,9 @@ export function ownerBrowserStepNotice(input: { locale: "ko" | "en"; nativeGrant
 
 const droppedWires = new Map<string, { at: number; ladderId: string; chatId: string | null }>();
 /**
-
-
-
+ * Bridge wire cut under in-flight browser calls (production 2026-09-26..29: 11 calls "agentlas proxy
+ * reconnecting"). proxy-child reconnects by itself; this records the drop and whether the same handle came
+ * back within a minute, as ladder rung events a soak can count.
  */
 export function noteBrowserBridgeWire(event: "dropped" | "reopened", input: { chatId: string | null; handle: string; inflight: number }): void {
   const binding = input.chatId ? runs.get(input.chatId) : undefined;

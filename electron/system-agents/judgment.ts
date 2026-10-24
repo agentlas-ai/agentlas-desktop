@@ -77,20 +77,20 @@ export interface JudgmentSelectionPolicy {
 }
 
 /**
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+ * How an explicit pin may be joined by the owner's configured orchestrator pool.
+ *
+ * ★오너 2026-09-23 "판정기는 왜 안티그래비티지, 모델 지피티 루나 아닌가": 자동화 판정이
+ *   실행 핀(agy)에만 묶여 있었고 후보가 그 하나뿐이라, 핀이 한 번 45초를 넘기면
+ *   (실측 14:11Z timeout 45505ms) 곧바로 judgment_unavailable → 자동화 error 였다.
+ *   풀에는 codex gpt-6-luna(성공 p50 7.5s)와 claude opus 가 멀쩡히 있었다.
+ *
+ *   - pin_then_pool: 핀이 먼저, 핀이 한도·시간초과·거절·규격 불량이면 풀 순서대로.
+ *     (그래프 검증 노드처럼 사람이 그 단계의 모델을 고른 자리)
+ *   - pool_then_pin: 오너의 오케스트레이터 풀이 먼저, 풀이 없거나 전멸하면 핀.
+ *     (무인 자동화의 결과 판정 — 판정기는 오너가 역할 기본값으로 정한 모델이다)
+ *
+ *   풀 밖의 공급자로는 절대 가지 않는다. 어떤 후보가 판정했는지는 attempt 영수증
+ *   (route explicit_pin | orchestrator_pool)으로 남는다. 저장된 핀은 바꾸지 않는다.
  */
 // Graph authoring may opt into the configured Worker role without changing independent judgment policy.
 export type JudgmentPinFallback = "pin_then_pool" | "pool_then_pin" | "pin_then_worker_pool";
@@ -191,15 +191,15 @@ function readJudgmentPool(role: "orchestrator" | "worker" = "orchestrator"): Jud
   }
 }
 
-
-
-
-
-
-
-
-
-
+/*
+ * Measured judgment latency per runtime identity (in-process, last N attempts).
+ * Soak 1.2.50: the optional-tool judge is called with the invocation's codex pin,
+ * whose no-tools isolation is not release-verified, so it was never invoked and
+ * every codex run was "undecided". A pool fallback is allowed only to a runtime
+ * that is no-tools verified AND whose measured p50 fits the caller's deadline —
+ * an unmeasured or slow runtime would only add latency before the same undecided.
+ * Timeouts count at their elapsed time, so a runtime that keeps timing out is slow.
+ */
 const JUDGMENT_LATENCY_WINDOW = 20;
 const JUDGMENT_LATENCY_MIN_SAMPLES = 3;
 const judgmentLatencies = new Map<string, number[]>();
@@ -213,7 +213,7 @@ function noteJudgmentLatency(selection: JudgmentSelectionIdentity | undefined, o
   judgmentLatencies.set(key, samples);
 }
 
-                                                                                           
+/** Median of the measured attempts, or null when there are too few to call it measured. */
 export function measuredJudgmentP50(selection: JudgmentSelectionIdentity): number | null {
   const samples = judgmentLatencies.get(judgmentSelectionIdentity(selection));
   if (!samples || samples.length < JUDGMENT_LATENCY_MIN_SAMPLES) return null;
@@ -222,17 +222,17 @@ export function measuredJudgmentP50(selection: JudgmentSelectionIdentity): numbe
   return sorted.length % 2 ? sorted[mid]! : (sorted[mid - 1]! + sorted[mid]!) / 2;
 }
 
-                                                        
+/** Test seam only: seed or clear measured latencies. */
 export function __setJudgmentLatenciesForTest(entries: Array<{ selection: JudgmentSelectionIdentity; samples: number[] }> | null): void {
   judgmentLatencies.clear();
   for (const entry of entries ?? []) judgmentLatencies.set(judgmentSelectionIdentity(entry.selection), [...entry.samples]);
 }
 
-   
-                                                                           
-                                                                                
-                                                                                  
-   
+/**
+ * Who may judge a no-tools selection when the invocation's own pin cannot.
+ * Returns the pool member (in the owner's pool order) that is no-tools verified
+ * with a measured p50 under `timeoutMs`, or null — then the caller skips judging.
+ */
 export function noToolsJudgmentFallback(timeoutMs: number,
   readPool: () => { state: string; selections: RuntimeSelection[] } = readJudgmentPool): RuntimeSelection | null {
   const pool = readPool();
@@ -452,16 +452,16 @@ function intentSignature(text: string): string {
     .trim();
 }
 
-
-
-
-
-
-
-
-
-
-
+// ── ② 판정 영속 (durable verdicts) ────────────────────────────────────────
+// store 를 정적 import 하면 판정 모듈이 Electron 부팅 순서에 묶인다(테스트도 깨진다).
+// 실패는 조용히 삼키되 **캐시로만 취급**한다 — 기록이 없다고 판정을 지어내지 않는다.
+//
+// 저장 키는 서명의 sha256 이다. 정규화한 프롬프트 원문을 키로 두면 행이 평균 19.8KB(최대
+// 142KB)였고 PK 색인이 그 사본을 또 들었다(오너 Mac 2026-10-17: 2,602행, 표 29MB + 색인 31MB).
+// 같은 서명은 같은 해시라 정확 일치 의미는 그대로다. 예전 원문 키 행은 더 이상 맞지 않고,
+// 저장 정리(storage-maintenance)가 마지막 사용 30일 뒤 지운다.
+// 사용 기록(hits, last_hit_at)은 한 시간에 한 번만 쓴다 — 매 적중이 공유 DB 의 쓰기
+// 트랜잭션이었다.
 const DURABLE_HIT_WRITE_INTERVAL_MS = 3_600_000;
 
 function durableKey(signature: string): string {
@@ -681,10 +681,10 @@ export async function callConnectedModelDetailed(opts: {
   requireNoTools?: true;
   /** Let the configured orchestrator pool back up (or lead) an explicit pin. */
   pinFallback?: JudgmentPinFallback;
-     
-                                                                                                
-                                                                                             
-     
+  /**
+   * Structured callers decide whether a text is a usable answer. A rejected text counts as that
+   * candidate's failure and the next pool member is tried (goal shape judgment, 2026-09-24).
+   */
   accept?: (text: string) => boolean;
   /** Final-answer contract enforced by runtimes that can (CLI flags, response_format, serving text.format). */
   outputSchema?: RunnerRequest["outputSchema"];
@@ -760,29 +760,29 @@ async function callJudgmentModelDetailed(opts: {
   selectionPolicy?: JudgmentSelectionPolicy;
   onPartial?: (text: string) => void;
   /**
-
-
-
-
-
-
- */
+   * ★출력이 **쓸 만한가**를 이 콜백이 정한다. 판정은 텍스트가 왔다고 끝이 아니라
+   *   그 텍스트가 파싱돼야 답이다 — 채점표는 규격 JSON, 라벨 판정은 라벨 하나.
+   *   실측 2026-08-19: agy(Gemini)가 채점표 판정에서 텍스트는 냈지만 규격 JSON을 못 맞춰
+   *   parseChecklistJson이 null이 됐고, 그 순간 다음 런타임(claude)을 시도하지 않고
+   *   EVAL_UNAVAILABLE로 끝났다. 즉 실행은 agy로 되는데 판정만 죽어 자동화가 error가 났다.
+   *   accept가 false를 내면 그 런타임은 실패로 치고 다음 후보로 넘어간다.
+   */
   accept?: (text: string) => boolean;
   /** Final-answer contract enforced by runtimes that can; others get the runner's instruction floor. */
   outputSchema?: RunnerRequest["outputSchema"];
   /**
-
-
-
-
-
-
-
-
-
-
-
- */
+   * ★**짓는 일**은 판정이 아니다 — 이 통로를 열면 조회 도구와 이미 동의된 MCP 가 함께 간다.
+   *
+   * 배경(2026-08-20 실측): 그래프 빌더가 이 함수를 그대로 쓰고 있었다. 판정 호출은
+   * cwd와 명시적 MCP 설정을 주지 않지만, "순수 분류"라는 이유로 별도 격리 모드를
+   * 요구하지 않는다. 격리 증명이 없는 모델에서 목표 판정 자체가 사라졌기 때문이다.
+   * 그래프를 짓는 일은 authoring으로 구분해 조회 도구와 문맥을 받을 수 있다.
+   * 그래서 자기가 쓴 스크립트가 도는지도 모르고 403 짜리를 그대로 저장했다.
+   *
+   * 이 깃발은 **조회만** 연다(permission 은 계속 "read" — 만드는 중에 메일이 나가거나
+   * 글이 올라가면 안 된다). 판정 호출부는 이 깃발을 절대 켜지 않는다: 판정이 도구를
+   * 얻으면 자기가 판정할 대상을 스스로 만들어 낼 수 있다.
+   */
   authoring?: boolean;
   /** Optional metadata preparation must not dispatch a tool-capable model. */
   requireNoTools?: true;
@@ -1091,12 +1091,12 @@ async function callJudgmentModelDetailed(opts: {
       runtimeReceipt = { ...runtimeReceipt, execution: "invoked" };
       attemptBudgetMs = remainingMs;
       console.info("[judgment-runtime-attempt]", JSON.stringify(runtimeReceipt));
-
-
-
-
-
-
+      // Every attempt may use the whole remaining budget. A timeout ends the judgment (below: a timed-out
+      // runner's turn is unsettled, so no other runtime is started), which means time held back for a later
+      // candidate could never be spent after one. That reserve (half the budget, at most 30 s) is what failed:
+      // production 2026-10-05 14:31 UTC, a graph eval pinned to codex at xhigh effort ended "timed out after
+      // 23s" with 22 s of its 45 s budget unused, and 10-03 07:19 a 120 s call stopped at 30 s. Fast
+      // quota/auth/refusal failures still return early and leave their unused time to the next candidate.
       const attemptTimeoutMs = remainingMs;
       let toolObserved = false;
       let imageDeliveryFailed = false;
@@ -1159,11 +1159,11 @@ async function callJudgmentModelDetailed(opts: {
         return { text: null, failure: lastFailure, runtimeReceipt, attempts };
       }
         if (result.failure) {
-          
-
-
-
-
+          /*
+           * ★거절은 답이 아니다 — 다음 후보로 간다. 예전에는 첫 resolve가 무조건
+           * 승리해서, claude 한도 거절문이 판정 "답"이 되고 뒤의 멀쩡한 런타임은
+           * 한 번도 시도되지 않았다(실측 2026-08-06).
+           */
           lastFailure = result.failure;
           recordAttempt(startedAt, failedOutcome(lastFailure), lastFailure);
           /*
@@ -1180,8 +1180,8 @@ async function callJudgmentModelDetailed(opts: {
           continue;
         }
         const text = result.text ?? "";
-
-
+        // ★파싱 안 되는 출력도 답이 아니다 — 다음 후보로 간다. agy가 채점표 JSON을 못 맞추면
+        //   여기서 걸러 claude 등 규격을 지키는 런타임으로 넘어간다(실측 2026-08-19).
         if ((workerFallback && !text.trim()) || (opts.accept && !opts.accept(text))) {
           lastFailure = {
             kind: "exit",
@@ -1415,15 +1415,15 @@ export async function judgeRequired<V extends string>(
     locale: spec.locale,
     requireNoTools: spec.requireNoTools,
     accept: (text) => parseVerdict<V>(text, spec.labels) !== null,
-    
-
-
-
-
-
-
-
-
+    /*
+     * The same output contract the batch judge carries. Without it a CLI judge sees the
+     * judged text as the task: every automatic-goal intake on claude-code/codex answered
+     * the user's request instead of classifying it ("PARITY-OK", "I need write access …
+     * [[NEEDS-FULL-ACCESS]]") and was dropped as invalid_output, so no CLI turn could ever
+     * become a Goal, while serving classified the same messages (parity QA 2026-09-25).
+     * claude enforces it with --json-schema, codex with --output-schema, serving by
+     * constrained decoding; parseVerdict still tolerates prose around the object.
+     */
     outputSchema: { name: "agentlas_judgment_verdict", schema: {
       type: "object", additionalProperties: false, required: ["verdict", "confidence", "reason"],
       properties: {
@@ -1486,8 +1486,8 @@ async function judgeRequiredBatchOnce<V extends string>(
   const parse = (text: string): Array<{ id: string; verdict: V; confidence: number; reason: string; evidenceRefs?: string[] }> | null => {
     try {
       const body = text.trim().replace(/^```(?:json)?\s*\n?/, "").replace(/\n?```$/, "");
-
-
+      // Tolerate prose around the one JSON object (measured: agentlas-light, run_80dc1968
+      // invalid_output). The object itself is still validated field by field below.
       let value: any;
       try { value = JSON.parse(body); } catch {
         const start = body.indexOf("{"), end = body.lastIndexOf("}");
@@ -1612,7 +1612,7 @@ export async function judgeRequiredBatch<V extends string>(
       ...spec,
       items,
       // Oversized single criteria remain complete. Ordinary batches were
-                                                                           
+      // measured above and stay inside the caller's preferred packet size.
       maxInputChars: fits(items) ? spec.maxInputChars : null,
     }));
   }
@@ -1905,16 +1905,16 @@ export function peekSubsetJudgment<V extends string>(
   return hit as SubsetVerdict<V>;
 }
 
-
-
-
-
-
-
-
-
-
-
+// ── 채점표 판정 ────────────────────────────────────────────────────────────
+//
+// eval 노드의 항목별(yes/no) 판정. judgeRequired 와 별도인 이유:
+//   - judgeRequired 는 One·큐레이터·스케줄러 등 소비자가 많아 계약을 못 바꾼다.
+//   - 채점표는 항목마다 라벨이 필요하고, "추론 먼저, 마지막 줄에만 JSON"이라
+//     출력 계약 자체가 다르다 (CoT가 모든 모델에서 판정 품질을 올린다는 실측 —
+//     judgeRequired 의 "Return ONLY compact JSON"은 그걸 억제한다).
+//
+// 합산은 코드가 한다. 모델은 항목별 라벨(yes/no/unknown)만 고른다 — 점수를 모델에게
+// 물어보는 것은 불안정하다(라벨→점수 매핑은 코드 소관, Braintrust choice_scores 방식).
 
 export interface ChecklistItemSpec {
   id: string;
@@ -1953,7 +1953,7 @@ interface ChecklistJudgeSpec {
   items: ChecklistItemSpec[];
   /** 판정 대상(앞 단계 산출물). */
   subjectText: string;
-  /** */
+  /** 재조회 스텝이 가져온 근거가 있으면 함께 — 항목→근거→대상 순서(근거 배치 실측). */
   evidence?: string;
   guidance?: string;
   timeoutMs?: number;
@@ -1965,9 +1965,9 @@ interface ChecklistJudgeSpec {
   pinFallback?: JudgmentPinFallback;
   maxInputChars?: number;
   /**
-
-
- */
+   * 사람의 교정 기록 — "이런 결과를 판정이 틀리게 봤고, 사람은 이렇게 판단했다".
+   * few-shot으로 주입돼 판정이 그 그래프 주인의 기준에 맞춰진다(5건이면 유의미 실측).
+   */
   corrections?: Array<{ subjectPreview: string; correctedVerdict: "pass" | "fail"; note: string }>;
   /** 같은 입력을 일부러 다시 판정할 때 캐시를 가르는 소금 — 흔들림 측정용. */
   salt?: string;

@@ -1,8 +1,8 @@
 // What a graph's name says about the work it was made for.
 //
 // A graph is for work that comes back with different inputs: find topics, then let the team discuss; monitor performance. It is
-// not for one occasion — "make episode 20", "the report of the 19th" — which is done directly. Seen in practice:
-// trigger→code→code→eval graphs saved by one room's Goal turns, each renamed per episode, all still on.
+// not for one occasion — "make episode 20", "the report of the 19th" — which is done directly. Measured on the owner's store
+// (2026-10-13..19): 38 trigger→code→code→eval graphs saved by one room's Goal turns, each renamed per episode, 37 still on.
 // Names that carry a date or an episode number mark an occasion; two names that differ only by such a number are one piece of
 // work saved twice. Meaning stays with the model; this only finds the two shapes that are certain.
 

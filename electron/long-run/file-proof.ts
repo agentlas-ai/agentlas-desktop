@@ -23,14 +23,14 @@ export function withBuiltinFileProofContext<T>(scope: Scope, action: () => T): T
 const schemaVersion = "agentlas.builtin-file-proof.v1";
 const nativeSchemaVersion = "agentlas.native-file-proof.v1";
 const mcpSchemaVersion = "agentlas.mcp-file-proof.v1";
-
-
-
-
-
-
-
-
+/*
+ * MCP file tools whose effect Main can observe exactly like a builtin write: the official
+ * filesystem server (catalog id "filesystem", @modelcontextprotocol/server-filesystem). Identity
+ * is the sealed prepared binding's catalog id, never a tool name the model or a config key chose.
+ * Before this, a Goal that wrote through this server (any runtime; measured on Agentlas serving
+ * 2026-09-25, run d6716f25: mcp__filesystem__write_file) had no host file proof, so every file
+ * criterion stayed inconclusive.
+ */
 const MCP_FILE_ACTIONS: Record<string, Record<string, FileObservationAction>> = {
   filesystem: { write_file: "write", edit_file: "edit", read_text_file: "read", read_file: "read" },
 };

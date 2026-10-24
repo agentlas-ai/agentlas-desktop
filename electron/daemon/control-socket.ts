@@ -56,6 +56,27 @@ export interface ControlSocketHandle {
  * tmpdir 아래 해시 이름으로 폴백한다. 해시가 userData 에서 결정되므로 양쪽 계산이
  * 항상 같은 곳을 가리키고, 소켓 자체는 0600 이라 사용자 경계는 유지된다.
  */
+/** Bound both publication and the private staging socket, even with a long TMPDIR. */
+export function boundedUnixSocketPath(preferred: string, fallbackName: string): string {
+  const fits = (address: string) => Buffer.byteLength(address, "utf8") <= 100
+    && Buffer.byteLength(path.join(path.dirname(address), ".d-XXXXXX", "s"), "utf8") <= 100;
+  for (const address of [preferred, path.join(os.tmpdir(), fallbackName)]) {
+    if (fits(address)) return address;
+  }
+  const uid = typeof process.getuid === "function" ? process.getuid() : undefined;
+  if (typeof uid !== "number" || !Number.isSafeInteger(uid) || uid < 0) throw new Error("daemon_socket_owner_unavailable");
+  const directory = path.join("/tmp", `agentlas-${uid}`);
+  const address = path.join(directory, fallbackName);
+  if (!fits(address)) throw new Error("daemon_socket_path_limit");
+  try { fs.mkdirSync(directory, { mode: 0o700 }); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
+  const owner = fs.lstatSync(directory);
+  if (owner.isSymbolicLink() || !owner.isDirectory() || owner.uid !== uid || (owner.mode & 0o7777) !== 0o700) {
+    throw new Error("daemon_socket_directory_unsafe");
+  }
+  return address;
+}
+
 export function defaultControlSocketPath(userDataDir: string): string {
   if (process.platform === "win32") {
     // 파이프 이름에는 경로를 못 쓴다. userData 전체를 해시로 접어 넣어 인스턴스를 가른다.
@@ -65,9 +86,8 @@ export function defaultControlSocketPath(userDataDir: string): string {
     return `\\\\.\\pipe\\agentlas-daemon-${tag}`;
   }
   const preferred = path.join(userDataDir, "daemon.sock");
-  if (Buffer.byteLength(preferred, "utf8") <= 100) return preferred;
   const tag = createHash("sha256").update(userDataDir).digest("hex").slice(0, 16);
-  return path.join(os.tmpdir(), `agentlas-daemon-${tag}.sock`);
+  return boundedUnixSocketPath(preferred, `agentlas-daemon-${tag}.sock`);
 }
 
 function jsonLine(value: unknown): string {
@@ -112,14 +132,14 @@ async function probeSocketOwner(address: string): Promise<"live" | "stale" | "un
 const PRIVATE_SOCKET_DIR = /^\.[dn]-[A-Za-z0-9]{6}$/;
 
 /**
-
-
-
-
-
-
-
-
+ * 비정상 종료한 데몬이 남긴 비공개 bind 폴더(".d-XXXXXX/s", ".n-XXXXXX/s")를 치운다.
+ *
+ * 정상 close 만 이 폴더를 지운다. 충돌·SIGKILL·listen 뒤 exit 는 폴더를 남기고, 시작 경로는
+ * 공개 이름(daemon.sock)만 정리했다 — 2026-10-17 오너 앱 데이터 폴더에 376개가 쌓였다(perf MP-07).
+ * 지우는 것은 자기 소유의 실제 폴더(심볼릭 링크 아님)이고, 1분 넘게 지났고, 안이 비었거나
+ * 죽은 소켓 "s" 하나뿐일 때만이다. "s" 는 붙어 보고 거절/부재로 죽은 것이 확인되고 inode 가
+ * 그대로일 때만 unlink 한 뒤 rmdir 한다. 살아 있거나 판단이 안 서는 소켓, 다른 내용물은 그대로 둔다.
+ * 재귀 삭제는 하지 않는다.
  */
 export async function sweepStalePrivateSocketDirs(
   parent: string, prefix: ".d-" | ".n-", keep: string | null, minAgeMs = 60_000,

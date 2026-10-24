@@ -2,7 +2,7 @@
 //
 // The repeated-work detector (shared/toolchain-detector.ts) recognizes a graph that keeps being rebuilt by its
 // structure, never by its name. Names, prompts, code bodies, file paths and variable names change with every item
-// (for example trigger→code→code→eval check graphs, each renamed per episode), so none of them is
+// (2026-10-13..19, one room's Goal: 38 trigger→code→code→eval check graphs, each renamed per episode), so none of them is
 // part of the fingerprint. What stays is the shape: the trigger kind, each step's kind, language and declared effect,
 // the native tool or Toolchain it calls, and how the steps feed each other.
 

@@ -180,7 +180,7 @@ export class GoalAlivePlayground implements AlivePlaygroundPort {
     // continued by anyone but the owner's next message: say so instead of proposing a doomed continue.
     if (work === "paused" && !blockedBy && revision === null && !this.deps.explicitGrantRecorded(goalId)) blockedBy = "goal.owner-grant-missing";
     // Owner-only blockers are host facts: the old path left these blockedBy null, so the controller model was woken
-    // repeatedly for a host-known block instead of exposing its typed cause.
+    // hourly to re-read "blocked · goal_owner_answer_required" and answer "wait" (owner store 2026-09-27..28).
     if (run.status === "blocked" && GOAL_OWNER_BLOCKED_REASONS.has(run.blockedReason ?? "")) {
       blockedBy = GOAL_OWNER_BLOCKED_REASONS.get(run.blockedReason ?? "") ?? blockedBy;
     }

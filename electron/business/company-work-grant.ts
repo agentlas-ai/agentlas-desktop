@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { sameBusinessSession } from '../../shared/business/context';
 import { isCompanyWorkJob, isCompanyWorkPolicy, type CompanyWorkHost, type CompanyWorkJob } from '../../shared/business/company-work';
 import type { McpInvocationRequest } from '../../shared/types';
@@ -18,8 +19,10 @@ export interface CompanyWorkGrantInput {
  readonly beforeFirstRootEffect?: () => void;
 }
 type Held = { input: CompanyWorkGrantInput; asset: CompanyAgentAsset; job: CompanyWorkJob;
- workspace: InvocationWorkspaceBinding; closed: boolean; timer: ReturnType<typeof setInterval>; refreshing: Promise<void>|null };
+ workspace: InvocationWorkspaceBinding; closed: boolean; timer: ReturnType<typeof setInterval>; refreshing: Promise<void>|null;
+ mailLaneTail: Promise<void>; mailLaneActive: boolean };
 const grants = new WeakMap<object,Held>();
+const mailLaneContext = new AsyncLocalStorage<{cap:object;active:boolean}>();
 /** The Root answer is fetched here through the original signed Native receiver.
  * No DTO-returning caller can mint an admitted company run. */
 export async function issueCompanyWorkGrant(input: CompanyWorkGrantInput): Promise<object> {
@@ -40,9 +43,12 @@ export async function issueCompanyWorkGrant(input: CompanyWorkGrantInput): Promi
  if (!isCompanyWorkJob(claimed) || claimed.jobId!==raw.jobId || claimed.state!=='claimed' || !claimed.claimId
   || claimed.generation!==raw.generation+1 || digest(claimed.policy)!==digest(raw.policy)) fail('company_work_claim_unknown');
  const cap=Object.freeze({});
- const held: Held={input:Object.freeze({...input}),asset,job:claimed,workspace,closed:false,timer:null as unknown as ReturnType<typeof setInterval>,refreshing:null};
+ const held: Held={input:Object.freeze({...input}),asset,job:claimed,workspace,closed:false,timer:null as unknown as ReturnType<typeof setInterval>,refreshing:null,mailLaneTail:Promise.resolve(),mailLaneActive:false};
  grants.set(cap,held);
- held.timer=setInterval(()=>{ void refreshCompanyWorkGrant(cap).catch(()=>closeCompanyWorkGrant(cap)); },5000);
+ held.timer=setInterval(()=>{
+  if(held.mailLaneActive){try{assertCompanyWorkGrant(cap)}catch{closeCompanyWorkGrant(cap)}return}
+  void refreshCompanyWorkGrant(cap).catch(()=>closeCompanyWorkGrant(cap));
+ },5000);
  held.timer.unref?.();
  try { await refreshCompanyWorkGrant(cap); return cap; } catch(error) { closeCompanyWorkGrant(cap); throw error; }
 }
@@ -71,6 +77,23 @@ export async function refreshCompanyWorkGrant(cap: object): Promise<void> {
   h.job=current;assertCompanyWorkGrant(cap);
  })().catch(error=>{closeCompanyWorkGrant(cap);throw error}).finally(()=>{h.refreshing=null});return h.refreshing;
 }
+/** Serializes complete company Mail operations inside this opaque Main grant.
+ * Explicit pre/effect/post gates still force signed Root refreshes. Only the
+ * redundant timer refresh is withheld while an operation holds the lane. */
+export function withCompanyMailOperation<T>(cap: object, operation: () => Promise<T>): Promise<T> {
+ const h=held(cap);
+ const nested=mailLaneContext.getStore();
+ if(nested?.cap===cap&&nested.active){assertCompanyWorkGrant(cap);return operation()}
+ const run=h.mailLaneTail.then(async()=>{
+  if(h.refreshing)await h.refreshing;
+  assertCompanyWorkGrant(cap);
+  h.mailLaneActive=true;
+  const context={cap,active:true};
+  try{return await mailLaneContext.run(context,operation)}finally{context.active=false;h.mailLaneActive=false}
+ });
+ h.mailLaneTail=run.then(()=>{},()=>{});
+ return run;
+}
 /** Local stop is unconditional, even when revoked SSO prevents remote receipt. */
 export function closeCompanyWorkGrant(cap: object): void {
  const h=grants.get(cap);if(!h||h.closed)return;h.closed=true;clearInterval(h.timer);try{h.input.cancel()}catch{}
@@ -79,6 +102,10 @@ export async function settleCompanyWorkGrant(cap: object,state:'settled'|'unknow
  const h=grants.get(cap);if(!h)return null;
  // Withhold new effects first. A lost settlement response never reclaims the job.
  h.closed=true;clearInterval(h.timer);
+ // A heartbeat already in flight can advance the same Root job between the
+ // admission snapshot and settlement transaction. Drain that one finite
+ // request before signing the terminal intent; its failure cannot reopen cap.
+ if(h.refreshing)try{await h.refreshing}catch{}
  try {const value=await h.input.owner.request(h.input.assetCapability,{operation:'settle',payload:{jobId:h.job.jobId,claimId:h.job.claimId,generation:h.job.generation,state,resultDigest}});
   return isCompanyWorkJob(value)&&value.jobId===h.job.jobId?value:null;}catch{return null}
 }

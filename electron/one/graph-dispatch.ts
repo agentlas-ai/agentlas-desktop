@@ -546,7 +546,7 @@ export async function oneGraphDispatch(caller: OneTeamCaller, name: string, inpu
         editable(current, changedGraphNodes(resolveAutomationGraph(current), graph));
         updateAutomationGraph(current.id, graph, { note: "One structured blueprint" });
         // The monitor lives inside the trigger document: replacing the trigger without it dropped the origin binding,
-        // so every revision of a saved graph failed its own scope check.
+        // so every revision of a saved graph failed its own scope check (measured 2026-10-04, QA app, real model).
         saved = updateAutomation(current.id, { name: bp.name, goal: bp.goal, promptTemplate: bp.goal,
           scheduleHuman: schedule, scheduleJson: null, triggerType, trigger: { kind: triggerType },
           // A later editor cannot establish the original command of an unbound graph.

@@ -2,16 +2,16 @@ import type Database from "better-sqlite3";
 import { emitDesktopStoreChange } from "./change-bus";
 
 /**
-
-
-
-
-
-
-
-
-
-
+ * Chat rows another process committed (the background service hosts One, room and Goal turns since 2026-10-12) reach
+ * this process's change bus, so open windows and the phone bridge re-read them at once.
+ *
+ * The change bus is process-local. A daemon-hosted turn writes its answer, its Goal result presentation and teammate
+ * posts from the daemon, whose bus has no listener in any window; Main's `store:changed` never fired, and the open
+ * conversation only showed the answer after the owner left the screen and came back (owner 2026-10-14, room
+ * "X Marketing": "답변 없어서 다른데 갔다 오면 답이 생겨져있음").
+ *
+ * `PRAGMA data_version` changes only when another connection commits, so an idle poll is one pragma and Main's own
+ * writes (which already emit) are not read twice. Only ids cross the bus, never row content.
  */
 export function watchExternalChatChanges(currentDb: () => Database.Database, options: { intervalMs?: number } = {}): () => void {
   let watcher = createWatcher(currentDb());

@@ -14,6 +14,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync, type ChildProcess } from "node:child_process";
 import { detachedSpawnOpts, killCliTree, trackRunChild, withCliPath } from "../runtime/exec";
+import { survivingHiddenSpawn } from "../runtime/windows-hidden-detach";
 import { resolveManagedNodeRuntimeAsync } from "../runtime/managed-node";
 import { withPythonCacheBoundary, withPythonRuntimeBoundary } from "../runtime/python-cache";
 import { optionalElectronAppPath } from "../runtime-paths";
@@ -133,7 +134,7 @@ function probePython(candidate: string, env: NodeJS.ProcessEnv, signal?: AbortSi
     try {
       const probe = "import sys; sys.stdout.write('%d.%d.%d' % sys.version_info[:3]) if sys.version_info >= (3,9) else sys.exit(3)";
       const args = candidate === "py" ? ["-3", "-c", probe] : ["-c", probe];
-      const child = crossSpawn(candidate, args, { env, stdio: ["ignore", "pipe", "ignore"] });
+      const child = crossSpawn(candidate, args, { env, stdio: ["ignore", "pipe", "ignore"], windowsHide: true });
       onAbort = () => { try { child.kill(); } catch {} done(null); };
       signal?.addEventListener("abort", onAbort, { once: true });
       let out = "";
@@ -398,13 +399,14 @@ export async function startHephaestusRuntimeAutoUpdate(options: { signal?: Abort
   );
   if (!launch || options.signal?.aborted) return false;
   try {
-    const child = crossSpawn(launch.command, launch.args, {
-      cwd: safeCwd(),
-      env: withCliPath({ ...process.env, ...launch.env }),
-      stdio: "ignore",
-      detached: true,
-      windowsHide: true,
+    // It keeps running after Desktop quits (its lock and staged switch make that safe). On Windows `detached` alone
+    // meant DETACHED_PROCESS: no console, so each console program it started opened a new visible window (first
+    // Windows run, 2026-10-24). survivingHiddenSpawn keeps it running past Desktop with a hidden console instead.
+    const plan = survivingHiddenSpawn({
+      command: launch.command, args: launch.args, cwd: safeCwd(),
+      env: withCliPath({ ...process.env, ...launch.env }), stdio: "ignore",
     });
+    const child = crossSpawn(plan.command, plan.args, plan.options);
     child.once("error", (error) => {
       console.error("[hephaestus] Agentlas OS auto-update worker failed to start:", error.message);
     });

@@ -1,6 +1,7 @@
 import { bindRunnerTurnContext, carryRunnerTurnContext, renderRunnerTurnContext, replaceRunnerUserPrompt, runnerTurnContextSource } from "../runtime/runner-turn-context-binding";
 import { composeTracedPrompt } from "../runtime/prompt-composition-trace";
 import { CHANNEL_PRIVACY_RULE } from "../runtime/session-channel";
+import { toolApprovalSessionKey } from "../runtime/tool-approval";
 import { BUILTIN_ONE_AGENT_ID } from "../../shared/builtin-agent-ids";
 import { fixedPurposePrompt, purposePrompt } from "../runtime/purpose-prompts";
 import { captureNativeOsCuratorRun } from "../runtime/os-memory-curator-binding";
@@ -13,7 +14,7 @@ import { assertGraphWorkerAttempt, noteGraphWorkerDispatch, noteGraphWorkerRetur
 import { prepareWorkAttachmentContext, mainWorkAttachmentContext, redactWorkAttachmentText, isWorkAttachmentInput } from "../invocation/work-attachments";
 import { issueScienceCollectionCapability, assertScienceCollectionRuntimeSelection } from "../runtime/science-collection-boundary";
 import { readScienceCollectionAuthority } from "../science-host/collection-authority";
-import { resolveScienceRecoveryAuthority, freshScienceRecoveryRequest } from "../science-host/recovery-authority";
+import { resolveScienceRecoveryAuthority, freshScienceRecoveryRequest, bindScienceRecoveryGeneration } from "../science-host/recovery-authority";
 import { readScienceRecoveryAuthority } from "../science-host/recovery-mint";
 import { bindScienceAliveDesktopToolWake, bindScienceDesktopToolTurn,
   type ScienceAliveDesktopToolScope } from "../science-host/desktop-tool-bridge";
@@ -38,6 +39,8 @@ import { assertFiniteGoalLifecycleCurrent, isGoalDispatchRefusal } from "../auto
 import { selectionForRuntime } from "../../shared/runtime-selection";
 import { roomChipRuntimeSelection } from "../runtime/room-chip-runtime";
 import { officeTaskContextForInvocation } from "../office-task-context";
+import { readGoalWaitProposal, recordGoalWaitProposal } from "../long-run/goal-wait-proposal";
+import { assertInvocationRunOwner, invocationRunOwners } from "../store/invocation-run-owners";
 import { goalDeadlineWaitClause, goalWaitProtocol, parseGoalWaitIntent, stripGoalWaitDisplayText, type ParsedGoalWait } from "../long-run/wait-emitter";
 import { prepareCheckpointContinuation } from "../long-run/continuation";
 import { goalContinuationSessionIdentity } from "../long-run/goal-session-owner";
@@ -63,6 +66,7 @@ import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { createToolObservationNovelty } from "./tool-observation-novelty";
 import { bindInvocationAgentContext, conversationSharesSession } from "../runtime/agent-context-admission";
+import { deriveSessionChannel } from "../runtime/session-scope";
 import { invokeWithUnsettledContinuation, unsettledContinuationCarriesRequest, unsettledContinuationPrompt } from "../runtime/unsettled-continuation";
 import { agentContextHostBinding, agentContextUnsettledTurn, markAgentContextContinuationHandle, type AgentContextCapability } from "../runtime/agent-context";
 import { createMainHostControlSink, createMainHostOperationBridge, withAdapterEffectChildDispatch } from "../invocation/adapter-effect-context";
@@ -168,10 +172,10 @@ import { canonicalAskFenceText, extractAskFences } from "../../shared/ask-fence-
 import { AGENT_ASK_OPEN } from "../../shared/agent-control-blocks";
 
 /**
-
-
-
-
+ * A turn that opened an ask fence handed the next move to the owner — even when the fence body
+ * is not the JSON card the parser accepts. Production 2026-10-03 (X room): Codex closed the fence
+ * with `<<end-agentlas-ask>>` around a prose question, so no card was parsed, the loop counted
+ * "no question", and the same Goal run re-asked 143 times in 90 minutes.
  */
 function turnAsksOwner(text: string): boolean {
   return extractAskFences(text).questions.length > 0 || text.includes(AGENT_ASK_OPEN);
@@ -194,7 +198,7 @@ import {
 } from "./borrowed-task-force";
 import {
   emitWorkforceBenchmarkSelectionArtifacts,
-  isWorkforceLeaderRuntimeAllowed,
+  workforceLeaderRunnerBoundary,
   parseWorkforceCommand,
   preparedWorkforceSpecSource,
   runWorkforceSelection,
@@ -216,10 +220,10 @@ import { canReadActivatedFolderMemory, recordFolderVisit } from "../architecture
 import { ensureDesktopProjectBootstrap } from "../architecture/project-bootstrap";
 import { buildMemoryContext } from "../memory/context";
 import { orderPromptParts, registerDeclaredPromptModule, type DeclaredPromptPart, type PromptChangeTrigger, type PromptOrderingMetadata, type PromptStability } from "../runtime/prompt-order";
-import { renderControllerSurfaceMemory, bindSurfaceMemoryRequest } from "../memory/surface-recall";
+import { renderControllerSurfaceMemory, bindSurfaceMemoryRequest, bindAssignedTargetMemoryRequest } from "../memory/surface-recall";
 import { scienceAliveMemory, scienceAliveMemoryGuard } from "../memory/science-alive-memory";
 import { bindAppMemoryRequest, appRunMemory, appMemoryRunGuard } from "../memory/agent-app-memory";
-import { invocationMemoryScope } from "../memory/invocation-scope";
+import { invocationMemoryScope, captureAssignedTargetMemoryBoundary } from "../memory/invocation-scope";
 import { queryWorkingFolderOntologyContext } from "../ontology/project-runtime";
 import {
   curateReply,
@@ -248,6 +252,7 @@ import {
 import { buildOneSurfaceFromMarkdown, chooseOneSurfaceForDisplay, resolveOneMarkdownSurfaceIntent } from "../one/markdown-surface";
 import { bindOneRuntimeToolArtifacts, oneArtifactAlreadyBoundInChat, promoteBoundOneMarkdownImages } from "../one/artifact-preview";
 import { hasRunProducedFiles, openRunProducedFiles, takeRunProducedFiles } from "../harness/run-produced-files";
+import { missingRequestedFiles, requestedFileCorrection } from "./requested-file-check";
 import { classifyToolFailure, toolFailureCopy } from "../../shared/tool-failure";
 import { resolveToolInvocationOrigin } from "../invocation/tool-origin";
 import type { ToolInvocationOrigin } from "../../shared/tool-invocation-origin";
@@ -725,16 +730,16 @@ export function naturalLanguageRequiresImageGeneration(prompt: unknown): boolean
 }
 
 /**
-
-
-
-
-
-
-
-
-
-
+ * 사용자가 **화면을 찍어 보여 달라**고 했는가.
+ *
+ * `naturalLanguageRequiresImageGeneration` 과 일부러 나눠 둔다. 그쪽 깃발은 멀티모달
+ * 엔진으로 그림을 **생성**까지 하므로, 스크린샷 요청에 그 깃발을 켜면 python.org 를
+ * 찍는 대신 python.org 를 그려 버린다. 여기서 필요한 것은 생성이 아니라 **증거 요구**다.
+ *
+ * 배경(2026-09-04 실측): "파이썬 공식 사이트 화면 한 장 찍어서 보여줘" 에 모델이
+ * "캡처해 위에 표시했습니다" 라고 답했는데 채팅에 이미지가 없고 새 파일도 없었다.
+ * 그리기 요청에는 이미 증거 관문이 있었지만 어휘가 이미지·사진·그림뿐이라
+ * 화면·스크린샷·캡처는 통과했다.
  */
 export function naturalLanguageRequiresScreenCapture(prompt: unknown): boolean {
   if (typeof prompt !== "string") return false;
@@ -748,13 +753,13 @@ export function naturalLanguageRequiresScreenCapture(prompt: unknown): boolean {
     .map((clause) => clause.trim())
     .filter(Boolean);
   const surface = /(?:화면|스크린샷|스크린\s*샷|캡처|캡쳐|screenshot|screen\s*shot|screen\s*capture|screengrab)/iu;
-    
-                              
-    
-                                                       
-                                                    
-                                                        
-     
+  /*
+   * 명사를 지운 **뒤에** 동사가 남아야 한다.
+   *
+   * 캡처·screenshot 은 명사이자 동사라, 둘을 각각 찾으면 한 단어가 두 조건을 혼자
+   * 만족시킨다. 그래서 "캡처가 안 된 이유를 알려줘" 같은 **질문**이 캡처 요청으로
+   * 읽혔다(2026-09-04 게이트가 잡음). 오탐은 정상 대화를 오류로 끝내므로 값이 크다.
+   */
   const capture = /(?:찍|담아|떠\s*(?:줘|주|서)|take|grab|get|make)/iu;
   // 명사에 곧바로 붙은 동사형(캡처해줘 · 스크린샷 찍어)은 위 규칙으로는 명사만 남으므로
   // 따로 받는다. 일반 "해줘" 를 동사 목록에 넣으면 "설명해줘" 까지 잡힌다.
@@ -800,16 +805,16 @@ function stripDanglingLanguageFence(text: string): string {
 }
 
 /**
-
-
-
-
-
-
-
-
-
-
+ * 실행이 실패했을 때 사람에게 보여줄 것.
+ *
+ * ★한도는 고장이 아니라 **풀 수 있는 상태**다. 여기는 제공자가 준 문장을 그대로
+ * 실어 보냈고, 그래서 한국어 화면에 `claude runtime quota: You've hit your weekly
+ * limit · resets Aug 29 at 6pm` 이 떴다 — 읽어도 무엇을 하면 되는지 알 수 없다
+ * (라이브 실측 2026-08-26, 오너 지적). 팀 작업에서는 더 나빴다: **팀원은 답을
+ * 보내 왔는데** 그 뒤 정리 단계가 한도에 걸려, 사람은 도착한 답을 실패로 읽었다.
+ *
+ * 어느 런타임이 왜 멈췄고 무엇을 하면 되는지 먼저 말하고, 리셋 시각이 담긴 원문은
+ * 뒤에 그대로 붙인다(사실을 지우지 않는다).
  */
 class InvocationRunnerFailureError extends Error {
   readonly #failure: Readonly<RunnerFailure>;
@@ -931,12 +936,12 @@ function invocationFailure(
     ?? InvocationRunnerFailureError.readToolScopeFailure(error);
   if (capabilityFailure) return { ...capabilityFailure, ...(runtimeFailure ? { runtimeFailure } : {}) };
   const raw = error instanceof Error ? error.message : String(error);
-  
-
-
-
-
-
+  /*
+   * The outward code is the failure's innermost machine code (shared/turn-settlement.ts): the typed runner failure's
+   * provider code, else the thrown error's own code, its cause chain's, or a message that is itself a code. The caller's
+   * fallback code is used only when the failure carries none (docs 31 W1, audit A7 M11: the AGI monitor filed 58
+   * incidents of unknown cause because runner-failed replaced codes such as goal_episode_admission_missing).
+   */
   const typedCode = (isTypedCode(typedFailure?.providerCode) ? typedFailure!.providerCode : undefined) ?? outwardFailureCode(error);
   if (typedCode === STORE_BUSY_CODE) {
     // The local store stayed locked by another write (R-067): its own code, never runner-failed, and whether it can be sent again.
@@ -1049,23 +1054,23 @@ function cleanPathCandidate(raw: string | undefined): string | null {
 const REASONING_SPAN_TEXT_CAP = 6_000;
 
 /**
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+ * 사람이 쓴 요청에 **이미 있는 폴더의 절대 경로가 정확히 하나** 있으면 그 폴더를 잡는다(구조 판정).
+ * 2026-10-14: "작업 폴더/working folder" 같은 단어로 고르던 정규식을 뺐다 — 호스트는 단어로 의미를 판단하지
+ * 않는다(docs/2026-10-13-native-harness 04 §3). 폴더 경로가 둘 이상이면 어느 쪽인지 모르므로 잡지 않는다.
+ *
+ * ★두 가지를 못 박는다. 실측 2026-08-20 (E2E 캠페인 E1, 다운로드 폴더 정리 자동화):
+ *   사용자 폴더에 `IMG_9931/` 이라는 **없던 폴더**가 생기고 그 안에 `.agentlas`
+ *   프로젝트 뼈대 516KB(.env.example · .gitignore · credentials/ · signing/)가 깔렸다.
+ *
+ *   ① **추측한 경로를 만들지 않는다.** 예전에는 `mkdirSync(candidate, {recursive:true})`
+ *      로 없는 폴더를 **만들었다**. 추측이 틀렸을 때 흔적이 남는 쪽으로 틀린 것이다.
+ *      이미 있는 폴더만 잡는다 — 없으면 그건 작업 폴더 선언이 아니었다.
+ *
+ *   ② **기계가 쓴 문장에서는 추측하지 않는다.** 자동화 노드의 프롬프트에는 다루는
+ *      파일 경로가 데이터로 들어간다("group key IMG_9931 · target folder …/IMG_9931").
+ *      그 경로는 "여기서 일해"가 아니라 "이걸 처리해"다.
+ *      실측: 사용자가 쓴 원문은 이 정규식에 **안 걸렸고**, 제품이 스스로 만든 노드
+ *      프롬프트가 걸렸다. 즉 사용자가 쓰지도 않은 폴더가 사용자 폴더에 생긴다.
  */
 export function inferWorkingFolderFromPrompt(
   prompt: string,
@@ -1184,9 +1189,9 @@ function persistentGoalTurnContext(goal: GoalLedgerSnapshot, locale: "ko" | "en"
     return `${index + 1}. ${text}`;
   }).join("\n");
   void locale;
-
-
-
+  // Objective and criteria are data (kept verbatim); the rules around them are one line (owner 2026-10-13).
+  // Composition order (ledger desktop.main.turn-context.goal-contract): the fixed rules line, then the objective and its
+  // criteria (a criterion may say "the objective above", so the objective stays before the criteria), then the first-start line.
   return [
     "goal rules: later messages steer, never redefine (a new aim → a new Goal after this one); before reporting done, check every criterion and the original request/plan (and any spec or memory it points to) against the deliverables with evidence, missing first; games/apps/UI: graphic quality is a criterion (no placeholders or default shapes; make plan-matching art, judge real screen captures)",
     `goal (host-owned, objective immutable): ${goal.objective}`,
@@ -1603,11 +1608,11 @@ function automationPermissionRequiredText(locale: "ko" | "en"): string {
 }
 
 /**
-
-
-
-
-
+ * 호스트 고지 한 줄. **모델의 답과 절대 같은 칸을 쓰지 않는다.**
+ *
+ * 이 함수가 존재하는 이유(2026-08-08 실측): 호스트가 할 말이 생길 때마다 답변
+ * 문자열에 이어붙이거나 아예 대입해 버려서, 사용자는 "에이전트가 그렇게 말했다"고
+ * 읽었다. 서피스 원문 유출도 자동화 요약도 전부 이 한 칸을 공유한 결과였다.
  */
 function emitHostNotice(
   sink: (event: McpInvocationEvent) => void,
@@ -1710,6 +1715,8 @@ export interface InvocationExecutionContext {
   scienceRecovery?: object;
   /** Main-minted object identity; serialized fields cannot authorize a reviewer. */
   scienceReview?: object;
+  /** Host-minted custody of an immutable registered helper assignment. */
+  scienceSpecialist?: object;
   /** "agent-mail": a One run the inbound-mail loop started for one received message (no person to ask). */
   source: "company-work" | "automation" | "site-studio" | "telegram" | "trex" | "mobile" | "science" | "alive" | "agent-mail";
   /** An Alive wake's attached Science playground, not a Research Director turn. Main-only. */
@@ -1726,16 +1733,18 @@ export interface InvocationExecutionContext {
     researchDirectorPackageVersion: string;
     researchDirectorPackageDigest: string;
     researchDirectorSystemPromptSha256: string;
+    /** Current Science host bound the project's working range before dispatch. */
+    workingSessionScope?: boolean;
     /** Main-selected route hint for a bounded Science workflow. */
     workflowRoute?: "dinosaur-comparative-proxy";
   }>;
   /**
-
-
-
-
-
- */
+   * 표면이 붙이는 안내(방 정보·언어 규칙·모드 지시). **userPrompt 에 섞으면 안 된다** —
+   * userPrompt 는 "사람이 실제로 한 말"이고 goal 목표·수락 기준·대화 제목·기억이
+   * 전부 그걸 그대로 쓴다. 실측: 텔레그램이 스캐폴딩을 프롬프트에 이어 붙이자 goal
+   * objective 가 "Telegram chat: … language rule … 파일 만들어줘" 통째가 되어 완료
+   * 판정이 불가능해졌고, 28사이클을 돌다 no_progress_stall 로 막혔다.
+   */
   surfaceContext?: string;
   /** Main-owned workflow node identity; keeps Memory Tickets distinct within one parent run. */
   nodeId?: string;
@@ -1759,7 +1768,7 @@ export interface McpInvocationResult {
   browserLoginWait?: BrowserLoginWait;
   finalText?: string;
   tokens?: number;
-                                                                                                               
+  /** Sum of measured invocation attempts, including planning and workers; absent if any attempt is unknown. */
   observedUsage?: { inputTokens: number; outputTokens: number; cachedInputTokens?: number };
   /** Host-created structured quota marker; never inferred from error prose. */
   markedQuotaFailure?: true;
@@ -1834,7 +1843,6 @@ function parseDesktopWorkforceTurnDecision(
 function isUnattendedExecution(executionContext?: InvocationExecutionContext): boolean {
   return (
     executionContext?.source === "automation" ||
-    executionContext?.source === "science" ||
     executionContext?.source === "site-studio" ||
     executionContext?.source === "trex" ||
     executionContext?.source === "alive" ||
@@ -1865,7 +1873,7 @@ function automationBoundProject(chatProjectId: string | null | undefined, bindin
 }
 
 // ── One 태스크 Surface 레시피 — 선택은 판정기(LLM) 경유 ──────────────────────
-                                                         
+// 2026-08-20: 사용자 프롬프트를 6개 정규식(여행/풀이/문서/엑셀/미디어/조사)으로 분기해
 // 레시피를 확정하던 단어장 게이트를 제거했다. 어떤 레시피가 맞는지는 연결된 모델이
 // 뜻으로 판정한다(shared/one-request-intent.ts · mcp-tools/need-resolver.ts와 같은 계약).
 // 판정이 없으면 중립(레시피 없음)이다 — 단어장 폴백은 없다.
@@ -1901,7 +1909,7 @@ let oneTaskSurfaceJudgmentModule: typeof import("../system-agents/judgment") | n
 
 function oneTaskSurfaceRecipeCopy(kind: OneTaskSurfaceRecipeLabel, ko: boolean): string | null {
   void ko;
-
+  // One line per recipe (owner 2026-10-13); the Surface field shapes come from read_surface_protocol.
   switch (kind) {
     case "travel":
       return purposePrompt([{ id: `purpose.surface.recipe.${kind}`, revision: 3, stability: "task-context", changeTriggers: ["release", "task", "owner-input"], text: "recipe travel: data.schedule type=timeline + widgets.timeline; data.costs type=pricing(currency,limit,items) + widgets.cost-summary; data.checklist type=launch-checklist + widgets.launch-checklist; dates/prices evidenceIds or trust:'estimated'; data.routes/widgets.map verified coordinates only" }]);
@@ -1972,7 +1980,7 @@ function deterministicOneCompletionCopy(
       ? "요청한 결과와 파일을 준비했어요. 아래에서 바로 확인할 수 있어요."
       : "Your result and files are ready. You can review them below.";
   }
-                                                                                                         
+  // Dataset types only (docs/2026-10-13-native-harness 04 §3): no wording of the request picks the copy.
   if (types.has("timeline") || (types.has("pricing") && types.has("launch-checklist"))) {
     return locale === "ko"
       ? "일정과 비용, 준비할 내용을 한눈에 정리했어요."
@@ -2226,7 +2234,6 @@ async function runMcpInvocationInContext(
   // One question-channel decision for this run: nobody can answer (scheduled/background, not Alive's own controller).
   // It closes the turn context with UNATTENDED_NO_ASK_DIRECTIVE, withholds ask_form, skips the briefing ask contract
   // and makes every runtime omit the system `ask:` module (RunnerRequest.unattendedNoAsk), so no channel offers an ask.
-  const unattendedNoAsk = isUnattendedExecution(executionContext) && !isAliveControllerRun;
   const scienceRecovery = readScienceRecoveryAuthority(executionContext, req.runId!, req.chatId, req.runtimeSelection);
   if (scienceRecovery) {
     if (req.oneMode || req.agentAppMode || req.borrowAgents?.length || req.taskForceTargets !== undefined
@@ -2241,24 +2248,30 @@ async function runMcpInvocationInContext(
     }
     req = { ...req, permissions: "read", sessionRouting: false, planMode: false, taskIntent: "conversation" };
   }
+  const assertSpecialistCurrent = executionContext?.source === "science" || executionContext?.scienceSpecialist
+    ? () => require("../science-host/local-specialists").assertScienceSpecialistExecution(executionContext, req.runId!, req.chatId, req.permissions)
+    : undefined;
+  assertSpecialistCurrent?.();
   const scienceReview = executionContext?.scienceReview
     ? (await import("../science-host/criterion-review")).resolveScienceReviewAuthority(executionContext.scienceReview,req.runId!,req.chatId) : null;
   if (scienceReview && (executionContext?.source!=="science" || req.planMode!==true || req.permissions!=="read")) throw new Error("science-review-read-ceiling-required");
+  const unattendedNoAsk = (isUnattendedExecution(executionContext) && !isAliveControllerRun)
+    || Boolean(scienceRecovery || scienceCollectionCurrent || scienceReview);
   const planReadOnly = req.planMode === true;
   if (req.agentAppMode) {
-    
-
-
-
-
-
-
-
-
-
-
-
-
+    /*
+     * ★오너 결정 2026-08-20 — Site 축 전부 개방.
+     *
+     * 예전에는 이 자리에서 permissions 를 read 로 못박고 브라우저 프로필까지 지워
+     * Site 앱이 브라우저·MCP·셸을 하나도 쓸 수 없었다. 이제 Site 는 다른 축과 같은
+     * 도구 표면을 받는다: 권한은 **소유자가 앱에 설정한 값**(agent-app-runtime 이
+     * 프로젝트 계약에서 읽어 싣는다)이고, 경계는 정적 박탈이 아니라 행동 시점
+     * 승인(tool-approval 중재자 + capability_grants)이 지킨다.
+     *
+     * 여전히 지우는 것: **방문자의 브라우저 입력이 스스로 넓힐 수 있는 것들**.
+     * 편성(borrow/taskForce/pipeline/router)과 앱 조작 대상은 요청 본문에서 오면
+     * 안 된다 — 이건 권한 강등이 아니라 위조 방지다.
+     */
     req = {
       ...req,
       toolMode: req.toolMode ?? "auto",
@@ -2301,21 +2314,23 @@ async function runMcpInvocationInContext(
   const toolObservationNovelty = createToolObservationNovelty();
   let runtimeAgentId: string | undefined;
   let finalTextFromSink = "";
+  // Names, arguments and results of this invocation's tool calls that completed without error (requested-file-check.ts).
+  let successfulToolText = "";
   let resolvedResultFolder: string | undefined;
   let workforcePrepareReceipt: WorkforcePrepareCheckpointReceipt | undefined;
   let backstopSurfaceSeq = 0;
-  
-
-
-
-
-
-
-
-
-
-
-
+  /*
+   * After a successful browser call, read where the agent actually stands from its own browser surface; never
+   * blocks. A login wall runs the recovery ladder (owner 2026-09-28: a login wall is a product defect). A site's
+   * human check (CAPTCHA/anti-bot) is not solved or bypassed: browser in front, the owner told through One.
+   *
+   * Owner 2026-10-05 ("코덱스 클로드 agy … 키미도 세상 모든거 다 … api랑 로컬모델도"): every runtime. The call is
+   * observed at its result boundary (beforeMcpToolResult), which every runtime's agentlas-browser call passes with
+   * the same catalog id and server tool name: Claude, Codex, Antigravity, Kimi, Cursor and Grok through Main's MCP
+   * proxy, API keys and local models through the local tool loop. Matching runtime tool names instead had only
+   * known the codex spelling: on the owner's store 11,255 Antigravity and 412 Claude browser calls were never
+   * observed, and an isolated 1.2.58 app opened a reCAPTCHA page on Claude with no card and no report to One.
+   */
   let browserObservedAtBoundary = false;
   // The turn read the automation registration spec (agentlas-ui read_automation_protocol): a host-observed fact that lets a
   // headless registration block be validated as one (automation-emitter.ts parseAutomations headlessFence).
@@ -2389,6 +2404,9 @@ async function runMcpInvocationInContext(
       finalTextFromSink = ev.text.trim();
     }
     if (isCompletedToolEvent(ev)) completedToolCalls += 1;
+    if (ev.kind === "tool-use" && ev.tool && ev.tool.result !== undefined && ev.tool.isError !== true && successfulToolText.length < 262_144) {
+      successfulToolText += `\n${ev.tool.name}\n${ev.tool.args ?? ""}\n${ev.tool.result.slice(0, 16_384)}`;
+    }
     if (ev.kind === "tool-use" && ev.tool && toolObservationNovelty.note(ev.tool) && isCompletedToolEvent(ev)) novelToolObservations += 1;
     // Backstop for a run whose browser calls never reached the result boundary (beforeMcpToolResult below):
     // recognise the call by its runtime's name. Codex says `agentlas-browser.browser_x`; Claude, Antigravity
@@ -2430,9 +2448,9 @@ async function runMcpInvocationInContext(
         notify: card => sink({ kind: "notice", notice: ownerLoginCardNotice(card, pickLocale(req)) }),
       });
     } catch (error) {
-
-
-
+      // Looking for a login wall is best effort; failing to look must not cost the result the tool already produced.
+      // Production 1.3.3: all 26 daemon-run browser and computer-use calls were reset at this boundary (window runs: 0 of 794);
+      // 1.3.5 named the cause: the recovery module failed to load in the daemon (MODULE_NOT_FOUND).
       login.assertRunnable();
       const errorCode = (error as { code?: unknown } | null)?.code;
       const code = typeof errorCode === "string" && /^[A-Z0-9_]{2,40}$/.test(errorCode) ? errorCode
@@ -2497,12 +2515,12 @@ async function runMcpInvocationInContext(
       });
       return earlyResult();
     }
-      
-                                                      
-                                                            
-                                                       
-                                                   
-       
+    /*
+     * ★수리 2026-08-25 — 확정된 로스터의 Hub 대여 좌석을 여기서 다시 지우면
+     * service.ts 가 실은 borrowAgents 가 무효가 된다(같은 병의 두 번째 자리).
+     * 확정된 로스터 대상 중 hub 좌석의 slug 만 남긴다 — 렌더러가 임의 slug 를
+     * 넣을 수는 없다. 이 목록은 Main 이 설치 원장에서 만든 대상에서만 나온다.
+     */
     const confirmedRosterTargets = oneTeamExecutionPolicy === "confirmed_existing_roster"
       ? req.taskForceTargets
       : undefined;
@@ -2673,8 +2691,8 @@ async function runMcpInvocationInContext(
   } catch (error) {
     console.warn("[local-agent] freshness check unavailable:", error instanceof Error ? error.message : String(error));
   }
-
-
+  // Owner 2026-10-13: an archived agent is not called directly — only the Settings restore button or routing brings it back.
+  // Routing (One's roster pick, task-force targets) restores it; a direct call to it is refused with a typed code.
   for (const target of req.taskForceTargets ?? []) {
     if (target.source === "local" && target.entityKind === "agent") restoreAgentForUse(target.agentId);
   }
@@ -2798,12 +2816,12 @@ async function runMcpInvocationInContext(
     effectiveUserPromptParts.push(...parts);
     return composeCurrentUserPrompt(effectiveUserPromptParts);
   };
-  
-
-
-
-
-
+  /*
+   * What this turn was asked to do, as the agent's experience records it ("이 에이전트는 다음과 같은 요청을
+   * 수행한다: …"). A host-written prompt — a Goal continuation, an update resume, One's review of finished work — is
+   * not a request; it was saved as One's procedure memory word for word (QA 2026-10-04, "[Host: work you delegated
+   * has finished…]"). A brief One handed to a worker is a real task, so it stays.
+   */
   const hostWrotePrompt = () => promptIsSystemAuthored && hostNoticePurpose !== "one-dispatch-brief";
   if (oneTeamExecutionPolicy) {
     const taskSurfaceRecipe = oneTaskSurfaceRecipe(req.userPrompt, locale === "ko");
@@ -2825,13 +2843,13 @@ async function runMcpInvocationInContext(
     ];
     effectiveUserPrompt = addEffectiveUserParts(oneInvocationInstructions.map(part => closedCurrentUserPart(part, "one")));
   }
-
-
-
-
-
-
-
+  // 자동화 세션에서 온 사용자 채팅: 이 자동화의 실시간 수정 계약을 앞에 세운다.
+  // 오너 결정 2026-08-19: 채팅 리얼타임 수정이 본선이고 편집 버튼은 보조다. 실측:
+  // 사용자가 "view 10k 이상만" 지시 → 모델이 hephaestus graph CLI(터미널 저장소)를
+  // 만지고 "업데이트했다"고 답했지만 이 자동화의 graph_json은 그대로였다. 그래프
+  // 저장소가 둘인데 모델에게는 둘 다 "그래프 편집"으로 보인 것. 유일하게 이 자동화를
+  // 바꾸는 경로(## Automation 블록, 아래 소비부가 즉시 적용)를 이름·현재 그래프와
+  // 함께 명시하고, CLI는 이 목적에 금지한다.
   if (req.automationId && executionContext?.source !== "automation") {
     try {
       const target = listAutomations().find((a) => a.id === req.automationId);
@@ -2849,15 +2867,15 @@ async function runMcpInvocationInContext(
     }
   }
   if (executionContext?.source === "automation") {
-    
-
-
-
-
-
-
-
-
+    /*
+     * The project of an automation run is a host fact, never the model's pick. This boundary used to list every owner
+     * project and tell the model to choose one from that list, returning a short question when unclear, on every run,
+     * bound or not. An unattended run told to ask when unclear asks: production 2026-10-13..16, graph
+     * cdf732ca (YouTube daily, project_id NULL) step 1 ended 9+ times with "Which connected project and publishing
+     * account should I use…?" / blocker "Connected project selection required from available project list" while its
+     * real work (room, channel, files) needed no project. Now: a bound project is stated as the fact it is; an unbound
+     * run gets no list and no choice, and works in its own automation workspace as before.
+     */
     const boundProject = automationBoundProject(chat.projectId, workspaceBinding);
     const automationBoundary: DeclaredPromptPart[] = [
       closedCurrentUserPart({ id: "user.current.automation-run.guide", revision: 2, stability: "fixed-policy", changeTriggers: ["release"], order: 30, text: "automation run: start with the finished result; no routing/runtime reports" }, "automation-run"),
@@ -2865,8 +2883,8 @@ async function runMcpInvocationInContext(
     ];
     effectiveUserPrompt = addEffectiveUserParts(automationBoundary);
   }
-  
-
+  // Science is its own product with its own roster (Research Director, assistants, specialists): the Work "recruit via
+  // Workforce" policy sent Haiku to workforce_goal_context and the Hub in a research run (live run r1, 2026-10-17).
   if (req.sessionRouting && executionContext?.source !== "science") {
     const incumbentRoster = [agent.nameEn || agent.name || agent.slug].filter(Boolean);
     // Hub 자동 보강은 프로젝트에서 허용한 slug 로만 제한한다.
@@ -2988,14 +3006,14 @@ async function runMcpInvocationInContext(
     throwIfInvocationAborted(signal, locale);
   }
   // A pinned runtime missing from the cached inventory is re-probed once before the run fails: one slow probe under
-  // load can omit a pinned runtime from the cached inventory.
+  // load dropped codex and failed a Science turn with science-runtime-unavailable (dev app, 2026-09-27 00:23Z).
   if (req.runtimeSelection && !runtimes.some((runtime) => runtime.kind === req.runtimeSelection!.kind)) {
     runtimes = await detectRuntimes(true);
   }
   throwIfInvocationAborted(signal, locale);
-
-
-
+  // The same for the runtime a One team was confirmed on: a probe that ran out of time under load leaves the cached
+  // inventory with another spelling or an unknown version of the same executable (W7 2026-10-18, S-followup-during-team
+  // failed one-team-runtime-changed 6 s after the owner's message). Read the inventory again once before refusing.
   if (boundOneTeamRuntime && !oneTeamRuntimeBindingMatches(boundOneTeamRuntime, runtimes)) {
     runtimes = await detectRuntimes(true);
     throwIfInvocationAborted(signal, locale);
@@ -3064,8 +3082,8 @@ async function runMcpInvocationInContext(
     workspaceBinding || !canWrite || existingWorkingFolder || projectWorkingFolder
       ? null
       : inferWorkingFolderFromPrompt(req.userPrompt, {
-
-
+        // 자동화·사이트·트렉 실행의 프롬프트는 제품이 조립한 것이다. 거기 담긴 경로는
+        // 작업 폴더 선언이 아니라 처리 대상이다(위 주석의 실측 참고).
         authored: isUnattendedExecution(executionContext) ? "machine" : "human",
       });
   if (inferredWorkingFolder) setChatWorkingFolder(chat.id, inferredWorkingFolder);
@@ -3181,7 +3199,7 @@ async function runMcpInvocationInContext(
   // handoff requires a separate validated boundary, not the recovery pool.
   // An effect observation also starts as a goal-continuation run and now carries the Goal's exact runtime (2a85294b),
   // but it is one look, not a checkpoint successor: treating it as one demanded a checkpoint it never has
-                                                                                        
+  // (checkpoint_dispatch_context_missing on every codex/serving look, live 2026-09-25).
   // The room chip is not a producer binding: a Goal resume running it keeps the One fallback chain.
   const continuationRuntimePinned = hostNoticePurpose === "goal-continuation" && Boolean(explicitRuntimeSelection)
     && !effectObservationTicket(req.runId);
@@ -3210,10 +3228,8 @@ async function runMcpInvocationInContext(
     ? runtimeForOwnerSelection(runtimes, chat?.runtimeSelection) : null;
   const frontOwnLane = frontOwnLaneCandidate && frontOwnLaneCandidate.kind !== "agentlas" && pickRunner(frontOwnLaneCandidate) ? frontOwnLaneCandidate : null;
   const firstOwnLaneRuntime = (): RuntimeStatus | undefined => frontOwnLane ?? rolePriorityRuntimes(runtimes, "orchestrator")[0];
-  const directUserRuntimePinHonored = directUserRuntimePinRequested && runtimeResolution.pinHonored;
-  const directUserTeamControlAuthority = directUserRuntimePinHonored
-    && !restrictedOrchestrationBoundary
-    && req.agentAppMode !== true;
+  // Workforce leader turns run under this run's configured permission on the selected runtime, pinned or not
+  // (workforceLeaderRunnerBoundary); whether the pin was honored no longer decides their authority.
   let runtimeChoice = runtimeResolution.choice;
   if ((scienceRuntimePinned || aliveRuntimePinned || continuationRuntimePinned) && runtimeChoice) {
     // The selection policy knows which model lists can prove an exact pin is
@@ -3228,11 +3244,12 @@ async function runMcpInvocationInContext(
   /*
    * ★고른 런타임이 지금 한도에 걸려 있으면 **시작하기 전에** 비켜 간다.
    *
-   * 한도인 채로 실행이 들어가면 실패를 낸 뒤에야 폴백이 돌아, 이미 아는 사실을 확인하느라 시간을 쓴다.
+   * 실사용 실측 2026-09-07: agy 가 한도인 채로 실행이 들어가 `7m 4s 동안 작업 · 실패`
+   * 를 낸 뒤에야 폴백이 돌았다. 이미 아는 사실을 확인하려고 7분을 쓴 것이다.
    * 저장된 선택은 건드리지 않는다 — 시한이 지나면 다음 턴이 알아서 원래 모델로 간다.
    */
   // Work gets the same pre-run cooldown avoidance for a runtime it did not pin
-  // (long-run behaviour must match One). A Work composer pin
+  // (owner 2026-09-23: long-run behaviour must match One). A Work composer pin
   // stays the user's exact decision and is never swapped here.
   const workUnpinnedCooldownAvoidance = req.oneMode !== true && !runtimeResolution.pinHonored
     && chat?.originSurface === "work" && req.agentAppMode !== true;
@@ -3284,13 +3301,13 @@ async function runMcpInvocationInContext(
       controllerFallbackBeforeRun = fallback;
     }
   }
-  
-
-
-
-
-
-
+  /*
+   * ★A read-only observation must be able to call its read tools. Antigravity's headless read
+   * mode refuses any configured tool surface (antigravityReadToolFailure →
+   * agy_read_tools_unsupported), so an observation pinned there failed every retry (production
+   * 2026-09-23, automation observation on an agy-pinned automation). Start such a run on the
+   * next orchestrator runtime instead; the pin itself is not rewritten.
+   */
   if (runtimeChoice && readOnlyObservationRun && !continuationRuntimePinned
     && !OBSERVATION_READ_TOOL_CAPABLE(runtimeChoice.active.kind)) {
     const fallback = rolePriorityRuntimes(runtimes, "orchestrator")
@@ -3464,22 +3481,22 @@ async function runMcpInvocationInContext(
     controllerSelectionForFallback = nextSelection;
     req = { ...req, runtimeSelection: nextSelection };
     bindInvocationJudgmentRuntime(nextSelection);
-    
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+    /*
+     * ★폴백은 이번 실행의 우회로지 **사용자의 선택을 바꾸는 일이 아니다**.
+     *
+     * 실사용 실측 2026-09-07. 사용자가 제미나이를 골라 뒀는데 여기서
+     * `setChatRuntimeSelection(chat.id, nextSelection)` 으로 그 선택을 **영구히
+     * 덮어썼다.** agy 한도는 25분이면 풀리는데 대화는 영영 grok 에 남았고, 사용자는
+     * "제미나이로 했는데", "왜 자꾸 그록으로 바뀌냐", "자꾸 걍 그록만 호출된다" 를
+     * 반복해 겪었다. 매 턴 손으로 되돌려야 원래 모델로 돌아온다.
+     *
+     * 같은 자리의 Work 경로(아래 recovery 루프의 else 가지)는 처음부터 옳게 하고
+     * 있었다 — "저장된 선택은 변경하지 않았습니다". One 만 달랐다.
+     *
+     * 이제 선택은 사용자 것으로 두고, 대신 **고장 사실에 시한을 붙인다**
+     * (runtime-cooldown). 그래서 다음 턴은 죽은 런타임을 빠르게 건너뛰고, 한도가
+     * 풀리면 사용자가 아무것도 안 해도 원래 모델로 **스스로 돌아온다.**
+     */
     const fromLabel = `${previous.kind}${previous.model ? ` · ${previous.model}` : ""}`;
     const toLabel = `${nextSelection.kind}${nextSelection.model ? ` · ${nextSelection.model}` : ""}`;
     const contextLimited = failure && modelContextFailureReason(failure) === "context_capacity";
@@ -3537,18 +3554,13 @@ async function runMcpInvocationInContext(
     ];
     effectiveUserPrompt = addEffectiveUserParts(hostRunFacts);
   }
-  if (explicitWorkforceGoal && !isWorkforceLeaderRuntimeAllowed(active.kind)) {
-    sink({
-      kind: "error",
-      error: {
-        code: "workforce-leader-runtime-unsupported",
-        message: locale === "ko"
-          ? `선택한 ${active.kind} 런타임은 Workforce 리더의 로컬 무권한 경계가 검증되지 않았습니다. 다른 모델로 몰래 대체하지 않고 실행을 중단했습니다.`
-          : `The selected ${active.kind} runtime has no verified local no-authority boundary for the Workforce leader. Execution was stopped without a hidden model fallback.`,
-      },
-    });
-    return earlyResult();
-  }
+  // Every configured runtime may lead a Workforce run under its configured permission (workforceLeaderRunnerBoundary).
+  // The old "no verified no-authority boundary" stop is gone; an unrunnable runtime still stops with its typed reason.
+  const workforceLeaderBoundary = workforceLeaderRunnerBoundary({
+    configuredPermission: normalizedPermission,
+    workingFolder,
+    restrictedOrchestrationBoundary,
+  });
 
   // Legacy text aliases remain accepted for old deep links, but the Desktop
   // composer sends a typed per-turn preference and never rewrites user text.
@@ -3559,11 +3571,11 @@ async function runMcpInvocationInContext(
     ? req.userPrompt.replace(stormbreakerPrefix, "").trim() || req.userPrompt
     : req.userPrompt;
   const oneTeamAllowsStorm = !scienceRecovery && !isAliveControllerRun && !scienceCollectionCurrent && executionContext?.source !== "science" && (!oneTeamExecutionPolicy || oneTeamExecutionPolicy === "solo_locked" || oneTeamExecutionPolicy === "native_one_staffing");
-
-
-
-
-
+  // A Main-issued read-only effect observation is one look at the outside world,
+  // never a Goal cycle, Stormbreaker loop or multi-pass continuation.
+  // A teammate in a One room does its piece of work and answers One. The Goal/Stormbreaker/UltraCode protocol belongs to the
+  // controller turns only (One and AGI): production 2026-10-12, every Motiondirector room turn re-read it (owner: "모든
+  // 에이전트가 이걸 알아야 함? One만 알면 되는 거 아니냐").
   const roomMemberTurn = Boolean(req.oneMode && !req.agentAppMode && chat.id && roomMemberContext(chat.id));
   const stormbreakerEngaged = oneTeamAllowsStorm && !roomMemberTurn && !req.agentAppMode && !restrictedReadBoundary && !effectObservationRun && (
     chat.kind === "division" ||
@@ -3572,11 +3584,11 @@ async function runMcpInvocationInContext(
     structuredStormbreakerRequest ||
     isStormbreakerAutoEnabled()
   );
-  
-
-
-
-
+  /* 이번 턴을 얼마나 올릴 것인가 — 직전 턴의 관측으로 정한다.
+   *
+   * 요청 문장은 읽지 않는다. 실사용 558턴 실측에서 단어 신호의 재현율은 21.7%,
+   * 가벼운 턴 오탐은 130건 중 115건이었다. 같은 코퍼스에서 직전 턴 이어받기는
+   * 재현율 88.5%였고 전체 턴의 86%가 후속 턴이다. 첫 턴은 예측하지 않는다. */
   const previousTurn = previousTurnObservation(chat.id);
   const turnEscalation = classifyTurnEscalation({
     previousTurn,
@@ -3633,9 +3645,14 @@ async function runMcpInvocationInContext(
   // Goal turns that get goal_wait / goal_complete from agentlas-turn (same turns the wait/completion text is injected on).
   const turnGoalToolsOffered = Boolean(req.runId) && !scienceRecovery && !req.agentAppMode && chat.kind !== "division"
     && !effectObservationRun && !roomMemberTurn && !executionContext && (Boolean(getChatGoalId(chat.id)) || (req.goalMode === true && canWrite));
-  // ask_form is offered on attended runs only (not unattended, Mobile durable, app-mode or division runs).
+  // Presentation rows may be hidden divisions; the shared channel determines
+  // whether this actor speaks to the owner or reports to its dispatcher.
+  const questionChannel = deriveSessionChannel(getDb(), chat.id, isAliveControllerRun);
+  const ownerQuestionEligible = questionChannel.kind === "direct" || questionChannel.kind === "room";
+  // Science retains its single catalog and discovers shared ask_user through
+  // the Desktop bridge; this flag does not insert another MCP into that catalog.
   const turnAskToolOffered = Boolean(req.runId) && !unattendedNoAsk
-    && !usesMobileDurableDecision(executionContext) && !req.agentAppMode && chat.kind !== "division";
+    && !usesMobileDurableDecision(executionContext) && !req.agentAppMode && ownerQuestionEligible;
   // One Team attached to a Work task as a Toolchain consumer: it may search and run, not author.
   let mcpToolchainConsumer = false;
   let mcpAutoSelectionPrompt = "";
@@ -3719,26 +3736,26 @@ async function runMcpInvocationInContext(
   // as the visible One turn. Only a server-prepared external Workforce owns
   // capability binding through its validated WorkOrder receipt.
   const workforceOwnsCapabilityChoice = oneTeamExecutionPolicy === "confirmed_external_workforce";
-  
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+  /*
+   * ★읽기 실행도 MCP 를 받는다 — 오너 결정 2026-08-18.
+   *
+   * 예전에는 `canWrite` 가 이 관문에 걸려 있어 읽기 권한 실행은 MCP 설정 자체를 받지
+   * 못했다 — 브라우저 조회·시간 조회·온톨로지 읽기처럼 프로젝트 파일을 건드리지 않는
+   * 도구까지 전부. "읽기"는 **내 파일을 바꾸지 마라**는 뜻이지 **조회 도구를 쓰지
+   * 마라**가 아니다(2026-08-09 같은 병의 그래프 판이 이미 이 구분으로 수리됐다).
+   * 파일·셸 경계는 각 러너의 권한 플래그(claude READ_ONLY_DENIED_TOOLS 등)가 계속
+   * 지키고, 여기서는 승인된 MCP 서버만 전달한다.
+   */
+  // ★Site 도 같은 자동 선택을 지난다(오너 결정 2026-08-20). 예전에는 agentAppMode 가
+  // 여기서 통째로 빠져 JIT 인라인 grant 밖의 도구를 하나도 못 받았다.
+  // Science has one signed, turn-scoped tool catalog supplied by its execution
+  // owner below. A second generic One/Work MCP config is both redundant and
+  // can fail before the Science grant is even attempted in a headless daemon.
   if (runtimeCanUseMcp && executionContext?.source !== "science" && !isAliveControllerRun
     && !workforceOwnsCapabilityChoice && !explicitWorkforceGoal && !scienceReview) {
-
-
-
+    // Which preparation step was running when a failure escaped. A thrown plain Error used to
+    // log {stage:"unknown",code:"unknown"} (13x in production 2026-09-23) with no way to tell
+    // tool selection from the browser grant from config materialization. Fixed vocabulary only.
     let mcpPrepStage = "prepare";
     try {
       if (req.forceBrowserCredentialRefresh) {
@@ -3844,7 +3861,7 @@ async function runMcpInvocationInContext(
         resolveSelection: resolveOnePersonalNativeMcpSelection, isCurrent: isMcpConfigCurrent, runId: req.runId,
         gate: {
           beforeMcpToolResult, runtime: active.kind,
-          sessionKey: `${active.kind}:${req.chatId ?? workingFolder ?? "default"}`,
+          sessionKey: toolApprovalSessionKey(active.kind, req.chatId, workingFolder),
           permission: normalizedPermission,
           ...(planReadOnly ? { planMode: true as const } : {}),
           ...(req.simulation === true ? { simulation: true as const } : {}),
@@ -4102,8 +4119,8 @@ async function runMcpInvocationInContext(
           permission: normalizedPermission, signal: login?.ownerSignal ?? signal ?? new AbortController().signal });
       }
       mcpPrepStage = "config-build";
-
-
+      // Owner decision 2026-10-16: this exact graph step (run, chat, node) of a room-saved graph carries the room's
+      // One Team. The runner minted the grant at step start; it is re-checked here and again in mcp-config.ts.
       const graphTeamGrant = executionContext?.source === "automation" && req.simulation !== true && !planReadOnly
         && graphTeamGrantCurrent(executionContext.graphTeamGrant) && executionContext.graphTeamGrant.runId === req.runId
         && executionContext.graphTeamGrant.chatId === req.chatId && executionContext.graphTeamGrant.automationId === req.automationId
@@ -4145,8 +4162,8 @@ async function runMcpInvocationInContext(
         ...(req.requiredToolCatalogIds?.length
           ? { requiredToolCatalogIds: req.requiredToolCatalogIds }
           : {}),
-
-
+        // Owner 2026-10-17: an ordinary turn carries the work-core Hub tools (hephaestus-tool-surface.ts). A graph or
+        // owner that requires the network server by name gets every tool the engine lists.
         ...(req.requiredToolCatalogIds?.includes("hephaestus-network") ? {} : { hephaestusToolSurface: "work-core" as const }),
         /*
          * ★도구 관문을 이 실행에 붙인다 — 어느 런타임이든.
@@ -4162,7 +4179,7 @@ async function runMcpInvocationInContext(
           ...(planReadOnly ? { planMode: true as const } : {}),
           runtime: active.kind,
           // 승인 세션 키는 러너들과 같은 규칙이라야 "이번 세션 동안 허용"이 이어진다.
-          sessionKey: `${active.kind}:${req.chatId ?? workingFolder ?? "default"}`,
+          sessionKey: toolApprovalSessionKey(active.kind, req.chatId, workingFolder),
           permission: normalizedPermission,
           ...(req.simulation === true ? { simulation: true as const } : {}),
           ...(workingFolder ? { cwd: workingFolder } : {}),
@@ -4268,16 +4285,16 @@ async function runMcpInvocationInContext(
                   presentation: executionContext ? "background" : browserPresentation,
                   onScreenshot: (capture) => publishNativeCapture(capture) });
               }
-              
-
-
-
-
+              // agentlas-turn (harness_search/describe/call) binds to a chat and a run: without the run it is never written
+              // into the worker's config, and a worker whose selection includes it fails before it starts. Production
+              // 2026-10-18 05:48-05:57Z, Yotube room run ea52dcd9: 14 of 14 task-force and firm workers refused
+              // materialization-unavailable ["agentlas-turn"] on the first production run of this path. The worker's turn
+              // tools belong to the run that started it.
               childConfig = await buildMcpConfigFile({ configKey: `worker-${generation}-${randomUUID()}`,
                 ...(req.runId ? { turnRunId: req.runId } : {}),
                 skipDefaultSeed: true, catalogIds: ids, ...(grant ? { nativeBrowser: grant } : {}),
                 ...(workspacePreviewOwnerGrant ? { workspacePreviewOwnerGrant } : {}),
-                toolGate: { ...(planReadOnly ? { planMode: true as const } : {}), runtime: input.runtime.kind, sessionKey: `${input.runtime.kind}:${chat.id}`,
+                toolGate: { ...(planReadOnly ? { planMode: true as const } : {}), runtime: input.runtime.kind, sessionKey: toolApprovalSessionKey(input.runtime.kind, chat.id),
                   permission: input.permission!, ...(input.cwd ? { cwd: input.cwd } : {}), chatId: chat.id,
                   ...(browserApprovalScope ? { approvalScope: browserApprovalScope } : {}),
                   ...(readOnlyObservationRun ? { readOnlyObservation: true as const } : {}),
@@ -4344,6 +4361,9 @@ async function runMcpInvocationInContext(
     }
   }
 
+  let canonicalGoalWaitSource: ReturnType<(typeof import("../science-host/goal-wait"))["captureCanonicalGoalWaitSource"]> = null;
+  let canonicalGoalWaitSourceReader: (typeof import("../science-host/goal-wait"))["currentCanonicalGoalWaitSource"] | null = null;
+  let refreshCanonicalGoalWaitSource: (() => ReturnType<NonNullable<typeof canonicalGoalWaitSourceReader>>) | null = null;
   // Science computation is a daemon-owned, turn-scoped capability. It is not a
   // globally installed MCP row and is never selected from prompt text. The
   // short-lived bridge carries only a loopback endpoint and an opaque grant;
@@ -4379,10 +4399,34 @@ async function runMcpInvocationInContext(
     if (!scienceReview && !planReadOnly && !scienceCollectionCurrent && executionContext.science) {
       if (executionContext.science.invocationRunId !== req.runId || req.chatId !== chat.id)
         throw new Error("science_desktop_tool_run_binding_mismatch");
+      const waitHost = await import("../science-host/goal-wait");
+      canonicalGoalWaitSourceReader = waitHost.currentCanonicalGoalWaitSource;
+      // A formal loop may be joined by a tool later in this same source run.
+      // Refresh its snapshot only under the original invocation lease, before any durable wait proposal.
+      const sourceInvocationOwner = invocationRunOwners.getRunOwner(chat.id, req.runId!);
+      const readWaitSource = () => {
+        if (!sourceInvocationOwner) return null;
+        try { assertInvocationRunOwner(sourceInvocationOwner); } catch { return null; }
+        const current = canonicalGoalWaitSource ? canonicalGoalWaitSourceReader!(canonicalGoalWaitSource) : null;
+        if (current) return current;
+        if (canonicalGoalWaitSource && readGoalWaitProposal({ sourceInvocationId: req.runId!, chatId: chat.id })) return null;
+        canonicalGoalWaitSource = waitHost.captureCanonicalGoalWaitSource(executionContext, req.runId!, chat.id, normalizedPermission);
+        return canonicalGoalWaitSource ? canonicalGoalWaitSourceReader!(canonicalGoalWaitSource) : null;
+      };
+      refreshCanonicalGoalWaitSource = normalizedPermission === "full" ? readWaitSource : null;
+      refreshCanonicalGoalWaitSource?.();
       const releaseDesktopTools = bindScienceDesktopToolTurn(executionContext.science, {
+        ...(refreshCanonicalGoalWaitSource ? {
+          goalWaitCurrent: () => Boolean(readWaitSource()),
+          goalWaitResolver: async (source: Readonly<{ chatId: string; runId: string }>, _nowMs: number) => {
+            const current = readWaitSource();
+            return current && current.ref.chatId === source.chatId && current.ref.sourceInvocationId === source.runId
+              ? { goalId: current.goalId, timer: current.timer } : null;
+          },
+        } : {}),
         chatId: req.chatId, agentId: agent.id, runtimeKind: active.kind,
         permission: normalizedPermission, cwd: workingFolder ?? codexLaunch.cwd,
-        signal, approvalScope: browserApprovalScope,
+        signal, approvalScope: browserApprovalScope, ownerQuestionEligible: ownerQuestionEligible && !unattendedNoAsk,
       });
       const previousCleanup = mcpConfigCleanup;
       mcpConfigCleanup = () => { try { releaseDesktopTools(); } finally { previousCleanup?.(); } };
@@ -4392,13 +4436,13 @@ async function runMcpInvocationInContext(
     mcpAllowedTools = scienceGrant.allowedTools;
     mcpCodexConfigArgs = scienceGrant.codexConfigArgs;
     mcpRuntimeEnv = scienceGrant.runtimeEnv;
-      
-                                                                                                     
-                                                                                                         
-                                                                                                                       
-                                                                                                                       
-                                                                                                                              
-       
+    /*
+     * The daemon stays with the project (owner, 2026-09-21: "매번 턴마다 cli 리셋으로 초기화 띄우면 안 됨 … 런타임 변경 때만
+     * 데몬 죽이고, 앱 끄면 죽여야지"). A Science build that returns a SESSION grant keeps one token, config file and
+     * catalogue for the conversation on this runtime kind, so the CLI that carries it serves the next turn too and may
+     * stay resident like any other chat. Authority still ends with the turn: Science refuses calls made between turns.
+     * Plan mode, criterion review and older Science builds keep a per-run grant, and those processes still die with the turn.
+     */
     ephemeralToolGrant = (scienceGrant as { sessionScoped?: true }).sessionScoped !== true;
     mcpIncludedServers = [scienceGrant.includedServer];
     mcpAutoSelectionPrompt = purposePrompt([{
@@ -4523,9 +4567,9 @@ async function runMcpInvocationInContext(
         memberAgents: (req.taskForceTargets ?? []).flatMap((target) =>
           target.source === "local" && target.entityKind === "agent" ? [getAgentById(target.agentId)] : []),
       });
-
-
-
+  // A saved key that is only misnamed (ELEVENLABS_1 for ELEVENLABS_API_KEY) already reaches the tools under the read
+  // name (owner 2026-10-12: don't ask), so it is only recorded. Only a key that could not be aliased is offered to the
+  // owner, once, as one plain line. Nothing is renamed here.
   if (!req.agentAppMode) {
     for (const alias of runnerEnv.aliasedKeys ?? []) {
       tryRecordRunEvent({
@@ -4589,10 +4633,10 @@ async function runMcpInvocationInContext(
     && chat.kind !== "division"
     && !runtimeDrawsItself
     && naturalLanguageRequiresImageGeneration(req.userPrompt);
-  
-
-
-
+  /*
+   * ★찍어 달라고 했으면 찍은 것이 있어야 한다 — 그리라고는 하지 않았으므로 생성은 하지 않고
+   * 결과만 요구한다(위 판정기 주석의 실측 참고).
+   */
   const screenCaptureRequired = !req.agentAppMode
     && chat.kind !== "division"
     && !naturalLanguageRequiresImageGeneration(req.userPrompt)
@@ -4600,10 +4644,10 @@ async function runMcpInvocationInContext(
   let observedImageArtifactEvidence = false;
   const pendingWorkToolImages: Array<{ sourcePath: string; image: ImageAttachment }> = [];
   const generatedImageSourcePaths = new Set<string>();
-
-
-
-
+  // One seal for both sources of this run's outputs: the paths a runtime adapter structured for a tool event, and the
+  // files a harness port wrote for this run (harness/run-produced-files.ts). A/B 2026-10-18 (Haiku, GPT): document.save
+  // and media.image.generate answered a path, Outputs stayed empty and both answers said no file was linked. A port's
+  // file is this run's output whichever tool event carries it, so the read-observation rule covers the adapter's paths.
   const bindInvocationOneArtifacts = (
     toolId: string,
     paths: readonly string[],
@@ -4612,9 +4656,9 @@ async function runMcpInvocationInContext(
     onProducedPaths?: (taken: string[]) => void,
   ): NonNullable<McpInvocationEvent["oneArtifacts"]> => {
     const runId = req.runId;
-
-
-
+    // Only files the run produced are outputs. A file the model only read (Claude `Read` of an image, any typed
+    // `read` tool) is an observation: the Yotube QA contact sheets it inspected were bound as 15 "results"
+    // (2026-10-17) while the rendered videos were not.
     if (observedBy && (observedBy.kind === "read"
       || (!observedBy.kind && /^(?:Read|view_image|read_image|read_file|view_file)$/u.test(observedBy.name.trim())))) paths = [];
     // An adapter path binds under its tool's id; a port's file binds under its own record id, so a completion whose local
@@ -4786,15 +4830,10 @@ async function runMcpInvocationInContext(
             longContext: active.longContextEnabled ?? false,
             effort: active.effort ?? undefined,
             signal,
-            permission: directUserTeamControlAuthority ? normalizedPermission : "read",
-            restrictedReadBoundary: restrictedOrchestrationBoundary || undefined,
             env: orchestrationRunnerEnv,
-            // This is a bounded staffing decision, but an internal control
-            // label must not revoke authority the user already granted to an
-            // exact runtime. Unpinned/background/restricted callers retain the
-            // existing zero-tool path.
-            untrustedNoTools: !directUserTeamControlAuthority,
-            cwd: directUserTeamControlAuthority ? workingFolder ?? undefined : undefined,
+            // A bounded staffing decision is still a leader turn: it runs under this run's configured permission on
+            // the selected runtime (workforceLeaderRunnerBoundary), never a zero-tool label some runtimes refuse.
+            ...workforceLeaderBoundary,
             chatId: `workforce-goal-turn:${req.runId}`,
             locale,
           },
@@ -4884,11 +4923,11 @@ async function runMcpInvocationInContext(
       runtimes,
       picked,
       runtimeOverride: runtimeChoice.override,
-
-
-
-
-
+      // 사람이 방에서 고른 런타임이 실제로 존중됐는가. 단톡 오케스트레이터는
+      // 이것이 참이면 역할 정책보다 그 선택을 앞세운다 — 안 그러면 화면에 적힌
+      // 모델과 실제로 부르는 모델이 갈린다(실측 2026-08-26: 방은 gemini 인데
+      // Claude 를 불러 주간 한도에 걸렸고, 그 실패가 멀쩡한 팀원 답변에
+      // '전달 실패' 배지를 붙였다).
       runtimePinHonored: runtimeResolution.pinHonored,
       workingFolder,
       ...(workspaceBinding ? { workspaceBinding } : {}),
@@ -5009,11 +5048,8 @@ async function runMcpInvocationInContext(
               longContext: active.longContextEnabled ?? false,
               effort: active.effort ?? undefined,
               signal,
-              permission: directUserTeamControlAuthority ? normalizedPermission : "read",
-              restrictedReadBoundary: restrictedOrchestrationBoundary || undefined,
               env: orchestrationRunnerEnv,
-              untrustedNoTools: !directUserTeamControlAuthority,
-              cwd: directUserTeamControlAuthority ? workingFolder ?? undefined : undefined,
+              ...workforceLeaderBoundary,
               chatId: turn.invocationId,
               locale,
             },
@@ -5133,11 +5169,11 @@ async function runMcpInvocationInContext(
         runtimes,
         picked,
         runtimeOverride: runtimeChoice.override,
-
-
-
-
-
+      // 사람이 방에서 고른 런타임이 실제로 존중됐는가. 단톡 오케스트레이터는
+      // 이것이 참이면 역할 정책보다 그 선택을 앞세운다 — 안 그러면 화면에 적힌
+      // 모델과 실제로 부르는 모델이 갈린다(실측 2026-08-26: 방은 gemini 인데
+      // Claude 를 불러 주간 한도에 걸렸고, 그 실패가 멀쩡한 팀원 답변에
+      // '전달 실패' 배지를 붙였다).
       runtimePinHonored: runtimeResolution.pinHonored,
         workingFolder,
         ...(workspaceBinding ? { workspaceBinding } : {}),
@@ -5222,11 +5258,11 @@ async function runMcpInvocationInContext(
         runtimes,
         picked,
         runtimeOverride: runtimeChoice.override,
-
-
-
-
-
+      // 사람이 방에서 고른 런타임이 실제로 존중됐는가. 단톡 오케스트레이터는
+      // 이것이 참이면 역할 정책보다 그 선택을 앞세운다 — 안 그러면 화면에 적힌
+      // 모델과 실제로 부르는 모델이 갈린다(실측 2026-08-26: 방은 gemini 인데
+      // Claude 를 불러 주간 한도에 걸렸고, 그 실패가 멀쩡한 팀원 답변에
+      // '전달 실패' 배지를 붙였다).
       runtimePinHonored: runtimeResolution.pinHonored,
         workingFolder,
         ...(workspaceBinding ? { workspaceBinding } : {}),
@@ -5347,11 +5383,11 @@ async function runMcpInvocationInContext(
           runtimes,
           picked,
           runtimeOverride: runtimeChoice.override,
-
-
-
-
-
+      // 사람이 방에서 고른 런타임이 실제로 존중됐는가. 단톡 오케스트레이터는
+      // 이것이 참이면 역할 정책보다 그 선택을 앞세운다 — 안 그러면 화면에 적힌
+      // 모델과 실제로 부르는 모델이 갈린다(실측 2026-08-26: 방은 gemini 인데
+      // Claude 를 불러 주간 한도에 걸렸고, 그 실패가 멀쩡한 팀원 답변에
+      // '전달 실패' 배지를 붙였다).
       runtimePinHonored: runtimeResolution.pinHonored,
           workingFolder,
           ...(workspaceBinding ? { workspaceBinding } : {}),
@@ -5406,11 +5442,11 @@ async function runMcpInvocationInContext(
         runtimes,
         picked,
         runtimeOverride: runtimeChoice.override,
-
-
-
-
-
+      // 사람이 방에서 고른 런타임이 실제로 존중됐는가. 단톡 오케스트레이터는
+      // 이것이 참이면 역할 정책보다 그 선택을 앞세운다 — 안 그러면 화면에 적힌
+      // 모델과 실제로 부르는 모델이 갈린다(실측 2026-08-26: 방은 gemini 인데
+      // Claude 를 불러 주간 한도에 걸렸고, 그 실패가 멀쩡한 팀원 답변에
+      // '전달 실패' 배지를 붙였다).
       runtimePinHonored: runtimeResolution.pinHonored,
         workingFolder,
         ...(workspaceBinding ? { workspaceBinding } : {}),
@@ -5441,11 +5477,11 @@ async function runMcpInvocationInContext(
         runtimes,
         picked,
         runtimeOverride: runtimeChoice.override,
-
-
-
-
-
+      // 사람이 방에서 고른 런타임이 실제로 존중됐는가. 단톡 오케스트레이터는
+      // 이것이 참이면 역할 정책보다 그 선택을 앞세운다 — 안 그러면 화면에 적힌
+      // 모델과 실제로 부르는 모델이 갈린다(실측 2026-08-26: 방은 gemini 인데
+      // Claude 를 불러 주간 한도에 걸렸고, 그 실패가 멀쩡한 팀원 답변에
+      // '전달 실패' 배지를 붙였다).
       runtimePinHonored: runtimeResolution.pinHonored,
         workingFolder,
         ...(workspaceBinding ? { workspaceBinding } : {}),
@@ -5503,11 +5539,11 @@ async function runMcpInvocationInContext(
         runtimes,
         picked,
         runtimeOverride: runtimeChoice.override,
-
-
-
-
-
+      // 사람이 방에서 고른 런타임이 실제로 존중됐는가. 단톡 오케스트레이터는
+      // 이것이 참이면 역할 정책보다 그 선택을 앞세운다 — 안 그러면 화면에 적힌
+      // 모델과 실제로 부르는 모델이 갈린다(실측 2026-08-26: 방은 gemini 인데
+      // Claude 를 불러 주간 한도에 걸렸고, 그 실패가 멀쩡한 팀원 답변에
+      // '전달 실패' 배지를 붙였다).
       runtimePinHonored: runtimeResolution.pinHonored,
         workingFolder,
         ...(workspaceBinding ? { workspaceBinding } : {}),
@@ -5580,9 +5616,8 @@ async function runMcpInvocationInContext(
     }
   }
 
-  const persistentAgentContext = Boolean(req.runId && agent.id === chat.agentId && !req.agentAppMode && !scienceRecovery
-    && !scienceCollectionCurrent && executionContext?.source !== "science"
-    && !executionContext?.aliveScience && !effectObservationRun);
+  const persistentAgentContext = Boolean(req.runId && agent.id === chat.agentId && !req.agentAppMode
+    && !scienceCollectionCurrent && !effectObservationRun);
   // Agent instructions are stable; task-selected host context is transported per turn.
   let systemPrompt = effectivePromptFor(agent);
   const systemContextParts: DeclaredPromptPart[] = [mainHostSystemPart("agent-definition", "versioned-content",
@@ -5590,7 +5625,7 @@ async function runMcpInvocationInContext(
   // ── 턴 컨텍스트 — 사용자 프롬프트에 따라 매 턴 달라지는 주입(메모리 캡슐·온톨로지·
   // MCP 자동선택·브리핑 게이트·Experience/Taste)은 시스템 프롬프트가 아니라 여기 모은다.
   // 시스템 프롬프트를 턴마다 바꾸면 CLI 세션 지문이 매번 달라져 대화 연속성이 전멸한다
-                                                                     
+  // (2026-07-16 사고: 매 턴 fingerprint_changed → 세션 폐기 → "이전 세션을 보면~").
   // 세션 지원 러너는 새 세션이면 시스템 프롬프트 뒤에 붙이고, resume 턴이면 사용자
   // 메시지 앞에 싣는다. 세션 미지원 러너에는 기존처럼 시스템 프롬프트에 합쳐 전달한다.
   const turnContextParts: string[] = [];
@@ -5608,16 +5643,32 @@ async function runMcpInvocationInContext(
     stableTurnContextParts.push(last);
     declareLastTurnContext(id, stability, changeTriggers);
   };
+  // One registered producer per shared module; callers retain their existing positions and bytes.
+  const placeGoalWaitProtocol = (lifecycle: Parameters<typeof goalWaitProtocol>[0]): void => {
+    turnContextParts.push(goalWaitProtocol(lifecycle)); keepLastTurnContext("goal.wait", "configuration", ["goal-revision"]);
+  };
+  const placeGoalDeadlineContext = (text: string): void => {
+    turnContextParts.push(text); declareLastTurnContext("goal.deadline", "task-context", ["goal-revision"]);
+  };
   // Set when the Goal contract block carries the objective + criteria, so the checkpoint packet only references them.
   let goalContractInContext: { objective: string; criteria: readonly string[] } | null = null;
   // The typed goal_complete / goal_wait tools replaced the marker text on this run (set where the Goal turn context is built).
   let goalTypedToolsReplaceText = false;
-
-
-
-
+  if (refreshCanonicalGoalWaitSource) {
+    const source = refreshCanonicalGoalWaitSource();
+    if (source) {
+      placeGoalWaitProtocol(source.timer.ok ? null : "finite");
+      if (source.deadlineAt) {
+        placeGoalDeadlineContext(goalDeadlineWaitClause(source.deadlineAt));
+      }
+    }
+  }
+  // The language rule lives once, in the system text (prompt-modules core.locale): a resumed Codex thread keeps its first
+  // developer instructions and Claude re-reads the same system file every spawn, so a turn-context copy only repeated it.
+  // Removed 2026-10-14 after a real-model A/B: Korean → English → Korean turns followed the user's language 3/3 on Codex
+  // and 3/3 on Claude both with and without the copy. Stateless API/local turns send the system text every turn.
   if (req.oneMode && !req.agentAppMode) {
-    // One replies start with the requested content rather than skill-routing banners.
+    // The owner's global AGENTS.md asks for "사용 스킬: …" openers; they do not belong in One.
     turnContextParts.push("display: no \"Skills used:\" / \"사용 스킬:\" openers; start with what the user needs");
     keepLastTurnContext("reply.display", "fixed-policy", ["release"]);
   }
@@ -5643,12 +5694,12 @@ async function runMcpInvocationInContext(
   if (projectInstructions.snapshot.sources.length > 0) {
     turnContextParts.push(renderInstructionSnapshot(projectInstructions.snapshot)); keepLastTurnContext("project.instructions", "versioned-content", ["project-instructions"]);
   }
-  
-
-
-
-
-
+  /*
+   * 보고서로 낼지는 에이전트가 정한다(오너 지시 2026-08-24). 호스트는 글의
+   * 모양을 보고 문서인지 추측하지 않는다 — 그건 판정자를 하나 더 세우는 일이고,
+   * 같은 글이 그날 형식에 따라 문서가 되기도 안 되기도 한다. 대신 "이건
+   * 보고서다" 라고 스스로 밝히는 표식 하나를 알려 준다.
+   */
   if (req.oneMode && !req.agentAppMode) {
     turnContextParts.push("document: a document to keep (report, plan, proposal) starts with the lines `---`, `document: <title>`, `---`; never for short answers");
     // Same text every turn: a resumed native session already has it (runner dedupe, continuity.ts).
@@ -5662,6 +5713,11 @@ async function runMcpInvocationInContext(
   if (req.oneMode && !req.agentAppMode && persistentAgentContext && agent.id !== BUILTIN_ONE_AGENT_ID && conversationSharesSession(chat.id, agent.id)) {
     turnContextParts.push(CHANNEL_PRIVACY_RULE); keepLastTurnContext("reply.channels", "fixed-policy", ["release"]);
   }
+  /*
+   * 차트·시각물·agentlas-ui 계약은 더 이상 턴 맥락에 넣지 않는다(오너 2026-10-12: 사용자 프롬프트
+   * 단어장이 아니라 모델이 도구로 판단). 시스템 프롬프트의 한 줄 규칙이 read_ui_schema 호출을 지시하고,
+   * 그 도구(agentlas-ui 내장 MCP)가 스키마와 차트·시각물 안내를 돌려준다.
+   */
   // One output needs the exact contract even if this run cannot discover a reader.
   // In-process providers have lazy menus/unprobed tool capability; never rely on a nonexistent reader.
   if (oneTeamExecutionPolicy && (!mcpIncludedServers.some(row => row.catalogId === AGENTLAS_UI_CATALOG_ID)
@@ -5737,19 +5793,19 @@ async function runMcpInvocationInContext(
   // 모호한 실행형 요청이면 실행 전에 배치 질문(3-5)을 강제한다. 판단은 모델이 턴 안에서
   // 인라인으로 수행(추가 LLM 콜/지연 0). trivial 프롬프트는 주입 자체를 건너뛴다(하드 어서션:
   // 사소한 요청에 질문 0개). 기본 모드는 build-only라 챗에는 꺼져 있다.
-  
-
-
-
-
-
-
-
-
-
-
-
-
+  /* 브리핑 게이트 — 사소함 판정을 단어로 하지 않는다.
+   *
+   * 예전에는 이 주입 앞에 `isTrivialPrompt`가 서 있었다. 그 판정 전부는 "15자 미만",
+   * "/ 나 @ 로 시작", "물음표로 끝나고 120자 미만"이었다. 실사용 558턴에서 같은 계열
+   * 단어 신호의 재현율은 21.7%였고, "전체 검증해줘"(11자) 같은 무거운 요청이 사소함으로
+   * 잘렸다. 토큰 몇 개를 아끼려고 누구에게 물을지를 글자 수로 정한 셈이다.
+   *
+   * 판정은 이미 아래 지시문 안에 있다 — 모델이 조용히 판단하고, 분명하면 아무것도 묻지
+   * 않는다. 그러니 앞단에 두 번째 판정자를 세울 이유가 없다. 이제 모드가 켜져 있으면
+   * 언제나 주입하고, 유일한 판정자는 모델이다.
+   *
+   * 판단 차원은 Build 인터뷰(agentlas_cloud/interview/scorer.py)와 같은 것으로 맞춘다:
+   * 목표·제약·완료기준. 두 표면이 같은 것을 보고 판정해야 사용자가 같은 기준을 만난다. */
   if (
     !req.agentAppMode &&
     executionContext?.source !== "science" &&
@@ -5803,8 +5859,8 @@ async function runMcpInvocationInContext(
           : `- ${label} [${member.entityKind}; ${member.source}; ${member.releaseId ?? "local"}]`;
       }).join("\n");
       if (pool) {
-
-
+        // A call handle is the source's own identifier (measured 2026-09-26: guessed slugs failed). A successful call may
+        // report agd_/agr_ ids and "hub:<slug>" even for the owner's Cloud agent; that is not a substitute release.
         const poolRoster = `project tools (unordered, reusable; you decompose, staff, run and verify):\n${pool}\n`;
         const poolPolicy = "pool: a call handle → hephaestus_call with that exact handle (agd_/agr_/hub: ids in its result are normal, not a substitute); " +
           "a real gap → recruit the minimum role via Workforce (Local + Cloud + Hub), scoped to that work order, never into the saved team; never ask the user to type @";
@@ -5886,14 +5942,22 @@ async function runMcpInvocationInContext(
   )
     ? workingFolder
     : null;
-  const memoryScope = invocationMemoryScope(executionContext, agent.id, invocationProjectId);
+  const assignedTargetMemory = captureAssignedTargetMemoryBoundary(getDb(), { chatId: chat.id, agentId: agent.id,
+    ...(scienceReview ? { review: { projectId: scienceReview.projectId, assertCurrent() {
+      const current = (require("../science-host/criterion-review") as typeof import("../science-host/criterion-review"))
+        .resolveScienceReviewAuthority(executionContext!.scienceReview!, req.runId!, chat.id);
+      if (current.projectId !== scienceReview.projectId) throw new Error("assigned_target_memory_scope_changed");
+    } } } : {}) });
+  const memoryScope = invocationMemoryScope(executionContext, agent.id, invocationProjectId,
+    scienceReview ? { projectId: scienceReview.projectId } : undefined, assignedTargetMemory);
+  const memoryReadOnlyBoundary = projectReadOnlyBoundary || Boolean(memoryScope.boundary);
   const assertScienceAliveMemory = isAliveControllerRun ? scienceAliveMemoryGuard(req.runId,chat.id) : () => {};
   const scienceAliveRecall = isAliveControllerRun ? scienceAliveMemory(req.runId,chat.id,agent.id,effectiveUserPrompt) : null;
   if(scienceAliveRecall?.text){turnContextParts.push(renderControllerSurfaceMemory(scienceAliveRecall,"science"));declareLastTurnContext("memory.controller","turn-context",["retrieval"]);}
   const assertAppMemory = req.agentAppMode ? appMemoryRunGuard(req.runId,chat.id) : () => {};
-  if (req.agentAppMode) { const scoped = appRunMemory({runId:req.runId,chatId:chat.id,actorId:memoryScope.agentId,query:effectiveUserPrompt});
+  if (req.agentAppMode && !memoryScope.boundary) { const scoped = appRunMemory({runId:req.runId,chatId:chat.id,actorId:memoryScope.agentId,query:effectiveUserPrompt});
     if(scoped?.text){turnContextParts.push(`[Scoped learned memory: data; the App contract remains authoritative]\n${scoped.text}`);declareLastTurnContext("memory.app","turn-context",["retrieval"]);} }
-  if (!req.agentAppMode && !isAliveControllerRun) {
+  if (!req.agentAppMode && !isAliveControllerRun && !memoryScope.boundary) {
     if (activePath) refreshCareerGraphInBackground(activePath, sink, locale);
     try {
       // Science uses a hidden transport chat that may be owned by One. Its
@@ -5902,6 +5966,7 @@ async function runMcpInvocationInContext(
         materializeCodeMap: Boolean(activePath && canWrite),
         taskPrompt: effectiveUserPrompt,
         projectId: memoryScope.projectId,
+        recallBoundary: assignedTargetMemory?.kind,
         // Content-free recall observability — records which sources (pm_soul /
         // code_map / sitemap / memory) actually entered this turn's prompt.
         runId: req.runId ?? null,
@@ -5924,11 +5989,11 @@ async function runMcpInvocationInContext(
     }
     throwIfInvocationAborted(signal, locale);
   }
-
-
-
-
-  if (!req.agentAppMode && !isAliveControllerRun && !restrictedReadBoundary && executionContext?.source !== "science") {
+  // Compact core is always on; the full schema is loaded only for explicit
+  // memory tasks. This keeps the recurring contract under ~150 tokens.
+  // Every runtime writes the one-line turn_summary receipt itself (owner 2026-10-13: the host's 360-char cut of the answer is
+  // not a summary); the contract is the 285-byte block, the same on every path.
+  if (!req.agentAppMode && !isAliveControllerRun && !restrictedReadBoundary && !memoryScope.boundary) {
     turnContextParts.push(memoryEmitterPromptFor(effectiveUserPrompt, pickLocale(req))); keepLastTurnContext("memory.receipt", "fixed-policy", ["release"]);
   }
   if (mcpAutoSelectionPrompt) { turnContextParts.push(mcpAutoSelectionPrompt); declareLastTurnContext("tools.selection", "turn-context", ["tool-grant", "capability-inventory"]); }
@@ -5989,7 +6054,7 @@ async function runMcpInvocationInContext(
   }
   // 사용자 채팅에서만 자동화 생성 protocol 주입 (백그라운드 automation 실행 세션은 제외 → 재귀 방지)
   if (chat.kind !== "division" && canWrite) {
-                                                                       
+    // 2026-08-20: 단어장 게이트(isAutomationSetupRequest — ko/en AND 매칭) 제거.
     // 제3언어 자동화 요청은 그 게이트에 영구 미도달이었다. write 권한의 사용자 턴에는
     // 계약을 턴 컨텍스트로 무조건 전달한다 — read 권한으로 시작해 protocol 없이
     // 생성된 resume 세션에서도 계약이 이번 턴에 도달하고, 이 턴이 자동화 요청인지는
@@ -6023,8 +6088,8 @@ async function runMcpInvocationInContext(
   } else if (usesMobileDurableDecision(executionContext)) {
     turnContextParts.push(MOBILE_DURABLE_ASK_DIRECTIVE); declareLastTurnContext("ask.mobile", "final-boundary", ["profile"]);
   }
-  
-
+  // Attended runs need no turn-context ask line: the system `ask:` module already says call ask_form (or ask_user),
+  // else the <<agentlas-ask>> block (2026-10-14: the two lines said the same thing twice).
 
   // 사용자 메시지 영구화 + 첫 메시지면 제목 자동 생성
   persistUserMessage();
@@ -6099,7 +6164,7 @@ async function runMcpInvocationInContext(
           goalContractInContext = { objective: activeGoal.objective, criteria: activeGoal.acceptanceCriteria };
           turnContextParts.push(persistentGoalTurnContext(activeGoal, locale, !latestTaskCheckpoint(activeGoalId))); keepLastTurnContext("goal.contract", "task-context", ["goal-revision"]);
           // A room teammate gets the contract (what is wanted) but not the controller machinery: the completion/wait
-                                                                                                                          
+          // protocols, the plan-shape judgement and the tactic grammar are One's and the orchestrator's. Since 2026-10-01
           // no teammate or installed agent emitted a plan marker (1,941 + 607 tactic_status from the orchestrator and One).
           if (!roomMemberTurn) {
           // 계약을 주면서 그 계약을 끝내는 법도 같이 준다. 연속 프롬프트에만 적으면
@@ -6109,12 +6174,12 @@ async function runMcpInvocationInContext(
           const typedGoalText = goalToolsReplaceText ? typedGoalLifecycleProtocol(getChatGoalRevision(activeGoalId)?.lifecycle) : null;
           if (typedGoalText) { turnContextParts.push(typedGoalText); keepLastTurnContext("goal.lifecycle.typed", "configuration", ["tool-grant", "goal-revision"]); }
           if (!goalToolsReplaceText) { turnContextParts.push(goalCompletionProtocol(locale, getChatGoalRevision(activeGoalId)?.lifecycle)); keepLastTurnContext("goal.lifecycle.text", "configuration", ["goal-revision"]); }
-          if (!executionContext && !goalToolsReplaceText) { turnContextParts.push(goalWaitProtocol((() => { try { return getLegacyGoalLifecycleSnapshot(activeGoalId) ? null : getChatGoalRevision(activeGoalId)?.lifecycle; } catch { return null; } })())); keepLastTurnContext("goal.wait", "configuration", ["goal-revision"]); }
-            
-                                                                              
-                                                                         
-                                        
-             
+          if (!executionContext && !goalToolsReplaceText) { placeGoalWaitProtocol((() => { try { return getLegacyGoalLifecycleSnapshot(activeGoalId) ? null : getChatGoalRevision(activeGoalId)?.lifecycle; } catch { return null; } })()); }
+          /*
+           * 골 구조 판단(오너 최우선 2026-09-24): 이 목표 개정의 모양(단일 전술/전술 목록/대계-전략-전술 트리)이
+           * 없으면 이 턴을 시작하기 전에 정한다. 실패는 단일 전술 폴백 — 목표를 막지 않는다. 턴마다 바뀌는 절이라
+           * 세션 재사용 문맥(stable)에는 넣지 않는다.
+           */
           const goalPlan = await ensureGoalShapeBeforeTurn({ goalId: activeGoalId, objective: activeGoal.objective, signal,
             runtimeSelection: confirmedRuntime, locale,
             onJudging: () => sink({ kind: "tool-use", status: locale === "ko" ? "목표의 계획 구조를 먼저 정하는 중…" : "Deciding the goal's plan shape first…" }),
@@ -6127,14 +6192,14 @@ async function runMcpInvocationInContext(
               revision: activeGoalRevision ?? goalPlan.revision, reservedDecisionIds };
             turnContextParts.push(buildGoalPlanTurnContext(goalPlan, { runId: req.runId ?? null, locale, typedTools: goalToolsReplaceText,
               onDecisionRecorded: (id) => { reservedDecisionIds.add(id); } }));
-
-
+            // Measured 1.3.24: the 6,190-char plan was byte-identical on consecutive turns and resent each time.
+            // A refreshed slot no longer matches this copy, so a changed plan is still delivered.
             keepLastTurnContext("goal.plan", "task-context", ["goal-revision", "plan-revision"]);
           }
           // A finite Goal with a deadline may wait for its next cycle up to that deadline (goal-deadline.ts).
           if (!executionContext && getChatGoalRevision(activeGoalId)?.lifecycle === "finite") {
             const deadlineAt = goalDeadlineAt(activeGoalId);
-            if (deadlineAt && Date.parse(deadlineAt) > Date.now()) { turnContextParts.push(goalToolsReplaceText ? typedGoalDeadlineClause(deadlineAt) : goalDeadlineWaitClause(deadlineAt)); declareLastTurnContext("goal.deadline", "task-context", ["goal-revision"]); }
+            if (deadlineAt && Date.parse(deadlineAt) > Date.now()) { placeGoalDeadlineContext(goalToolsReplaceText ? typedGoalDeadlineClause(deadlineAt) : goalDeadlineWaitClause(deadlineAt)); }
           }
           }
         }
@@ -6180,8 +6245,8 @@ async function runMcpInvocationInContext(
       // covers the period before a Goal checkpoint can carry that state.
       history: scienceCollectionCurrent || isAliveControllerRun || (activeGoalId && goalCheckpoint) ? [] : history,
       // A Main-issued effect observation is one look, not a turn of this conversation. Resuming the
-      // chat's native session would carry accumulated context into every look. An observation uses
-      // a separate session instead. Its own isolated
+      // chat's native session carried its whole accumulated context into every look (measured
+      // 2026-09-24: 79k-500k input tokens per observation, growing with each retry). Its own isolated
       // session owner starts fresh and never replaces the conversation's stored session.
       ...(effectObservationRun && req.runId ? { runtimeSessionOwnerId: `effect-observation:${req.runId}` } : {}),
       // Alive decisions continue this controller's context. Work/run identity
@@ -6217,7 +6282,7 @@ async function runMcpInvocationInContext(
       ...(restrictedReadBoundary ? { restrictedReadBoundary: true as const } : {}),
       ...(isUnattendedExecution(executionContext) ? { unattended: true as const } : {}),
       ...(unattendedNoAsk ? { unattendedNoAsk: true as const } : {}),
-      ...(usesMobileDurableDecision(executionContext) ? { noSynchronousAsk: true as const } : {}),
+      ...(usesMobileDurableDecision(executionContext) || !ownerQuestionEligible ? { noSynchronousAsk: true as const } : {}),
       // 세션 지문 시드 — 인터랙티브 채팅은 모델·effort·권한·턴별 주입이 바뀌어도
       // 같은 CLI 세션을 이어간다. 단, 명시적으로 바꾼 UI 언어는 시스템 프롬프트를
       // 다시 심어야 하므로 세션 정체성에 포함한다. 그렇지 않으면 resume이 첫 턴의
@@ -6293,9 +6358,9 @@ async function runMcpInvocationInContext(
       // grok 은 같은 훅 스크립트를 자기 플러그인 디렉터리로 받는다(claude --settings 와 같은 자리).
       ...(toolBroker?.pluginDirPath ? { toolBrokerPluginDir: toolBroker.pluginDirPath } : {}),
       env: runnerEnv.env,
-
-
-
+      // ★오너 결정 2026-08-20 — Site 도 도구를 전부 쓴다. 예전에는 agentAppMode 가
+      // 곧 "내장 도구 0개"(--tools "")였다. 이제 도구는 배선되고, 무엇이 실제로
+      // 실행되는지는 행동 시점 승인 규칙(capability_grants)이 정한다.
       untrustedNoTools: false,
       untrustedAllowedMcpTools: undefined,
       onAgentAppMcpRuntimeUnavailable: req.agentAppMode
@@ -6320,6 +6385,7 @@ async function runMcpInvocationInContext(
     const persistentRunnerRequest = (request: RunnerRequest): RunnerRequest => {
       if (!persistentAgentContext || !req.runId || request.minimalObservation || request.judgmentOnly || request.untrustedNoTools) return request;
       const bound = bindInvocationAgentContext(request, { chatId: chat.id, agentId: agent.id, runId: req.runId,
+        workingScopeRequired: executionContext?.science?.workingSessionScope === true,
         attempt: ++agentContextAttempt, aliveController: isAliveControllerRun, hostAuthored: hostAuthoredNext, assertCurrent() {
           assertMcpGoalSelectionCurrent();
           if (activeGoalId && activeGoalRevision !== null) {
@@ -6329,6 +6395,7 @@ async function runMcpInvocationInContext(
             }
           }
         } });
+      if (scienceRecovery) bindScienceRecoveryGeneration(bound, scienceRecovery);
       lastJournalTurnId = agentContextHostBinding(bound.agentContext as AgentContextCapability).turnId;
       markAgentContextContinuationHandle(lastJournalTurnId, continuationHandleNext);
       return bound;
@@ -6344,10 +6411,11 @@ async function runMcpInvocationInContext(
       if (scienceRecovery) {
         if (signal?.aborted) throw new Error("science_recovery_dispatch_cancelled");
         resolveScienceRecoveryAuthority(executionContext, req.runId!, req.chatId, runtime);
-        return freshScienceRecoveryRequest({ ...runnerReq, backendLabel: runtimePicked.label,
+        return persistentRunnerRequest(freshScienceRecoveryRequest({ ...runnerReq, backendLabel: runtimePicked.label,
           runtimeSource: runtime.source ?? undefined,
-          model: runtime.model ?? undefined, effort: runtime.effort ?? undefined }, scienceRecovery);
+          model: runtime.model ?? undefined, effort: runtime.effort ?? undefined }, scienceRecovery));
       }
+      assertSpecialistCurrent?.();
       if (scienceCollectionCurrent) {
         scienceCollectionCurrent();
         assertScienceCollectionRuntimeSelection(runtime, req.runtimeSelection);
@@ -6518,8 +6586,8 @@ async function runMcpInvocationInContext(
     // 접두해 본문/앵커 좌표계를 패스 전체에 걸쳐 단조로 유지한다. (continuousMode는 패스마다
     // 별도 assistant 메시지를 남기므로 제외 — 접두하면 내용이 중복된다)
     let partialFloor = "";
-
-
+    // Memory events a continuous pass ended with. Each pass is saved as its own message below, so its block is taken
+    // out there and curated with the final answer (production 2026-10-05: X Marketing showed the raw envelope).
     const carriedPassMemoryEvents: RawMemoryEvent[] = [];
     const observedOneSourceUrls = new Set<string>();
     let observedOneToolEvidence = false;
@@ -6532,7 +6600,7 @@ async function runMcpInvocationInContext(
     let passToolSuccesses = 0;
     // How the model's own tool calls came back over the whole invocation (runner callback only; host pseudo-rows such as
     // the plugin routing lines go through the sink and are not the model's calls). Read once at the end of the pass loops
-                                          
+    // by the empty-reply rule (H2) below.
     const modelToolOutcomes = createToolOutcomeTally();
     const oneToolFailureBlocksCompletion = () => Boolean(oneTeamExecutionPolicy && observedOneToolFailure);
     const collectObservedSourceUrls = (value?: string): string[] => {
@@ -6624,7 +6692,7 @@ async function runMcpInvocationInContext(
       // A partial JSON fence cannot be safely sanitized. Restricted runs are
       // final-only so cancel/error can never persist an unfinished Memory block.
       onPartial: (text: string) => {
-        if (!projectReadOnlyBoundary) {
+        if (!memoryReadOnlyBoundary) {
           const visible = activeGoalId && !executionContext ? stripGoalWaitDisplayText(text) : text;
           sink({ kind: "partial", text: partialFloor ? `${partialFloor}\n${visible}` : visible });
         }
@@ -6666,13 +6734,13 @@ async function runMcpInvocationInContext(
           // the separate exact-result-folder filesystem seal below.
           if (oneTeamExecutionPolicy && name.trim()) observedOneToolEvidence = true;
         }
-
-
-
-
-
-
-
+        // ★오너 지시(2026-09-03): "사진/영상 증빙 렌더링을 전부 One과 동일하게 맞출 것.
+        // 애초에 다를 이유가 없음." One 은 아무 도구의 산출물이나 바인딩하는데 Work 만
+        // generate_image 한 도구로 막혀 있어, 브라우저 스크린샷이 화면에 아무것도 남기지
+        // 못했다(2026-09-03 실측: 산출물 0 · 레일 이미지 0 · 채팅 이미지 0).
+        // 도구 이름을 추측하는 대신 **우리 정본 폴더 안에 있는가**로 판정한다 —
+        // 아래 봉인이 fail-closed 라 남의 경로는 어차피 통과하지 못한다.
+        // A successful completion also carries the files a harness port wrote for this run (bindInvocationOneArtifacts).
         let producedPaths: string[] = [];
         const oneArtifacts = !isError && (result !== undefined || (id && artifactPaths?.length))
           ? bindInvocationOneArtifacts(id ?? "", artifactPaths ?? [], { name, ...(_toolKind ? { kind: _toolKind } : {}) }, (taken) => { producedPaths = taken; })
@@ -6741,9 +6809,9 @@ async function runMcpInvocationInContext(
       // 러너가 사용자에게 남겨야 하는 사실(첫 소비자: 컨텍스트 압축).
       // 상태줄과 달리 대화에 남는다.
       onNotice: (notice: NonNullable<McpInvocationEvent["notice"]>) => {
-
-
-
+        // 러너가 "이 모델은 화면을 볼 수 없어 컴퓨터 유즈·스크린샷 도구를 뺐다" 고 알렸으면, 그 실행에
+        // 캡처 산출을 요구하는 것은 성립하지 않는다 — 안내를 남기고도 끝에서 screen_capture_unavailable 로
+        // 실패시키던 것(3회 반복 실측 2026-09-13: 컴퓨터 유즈 과제 3/3 실패). 답은 정직한 텍스트로 끝난다.
         if (notice.code === "computer-use-needs-vision-model") blindVisionRuntime = true;
         sink({ kind: "notice", notice });
       },
@@ -7007,15 +7075,15 @@ async function runMcpInvocationInContext(
         });
         return result;
       };
-        
-                                                                                                     
-                                                                        
-                                                                                                                     
-                                                                                                                         
-                                                                                                                       
-                                                                                                                      
-                                                                          
-         
+      /*
+       * A store write refused this attempt before dispatch because another connection held the lock (R-067: production
+       * "database is locked" ×5 became runner-failed). Nothing reached the provider and another runtime would meet the
+       * same store, so the settlement's short bounded retry runs the same request on the same runtime, on every lane
+       * whose runtime choice is pinned too (a retry changes nothing about the choice). A graph worker attempt is left to
+       * its graph, which retries the step itself. An Alive wake is left as it was: each attempt opens a provider-usage
+       * marker its wake total must close (alive-runtime.ts measuredWakeUsage), so a second attempt would turn a known
+       * total unknown. True when the caller should run the attempt again.
+       */
       const retryStoreBusyBeforeDispatch = async (failure: unknown): Promise<boolean> => {
         if (signal?.aborted || executionContext?.graphWorkerAttempt || executionContext?.source === "alive"
           || innermostTypedCode(failure) !== STORE_BUSY_CODE) return false;
@@ -7118,8 +7186,8 @@ async function runMcpInvocationInContext(
           noteGraphWorkerDispatch(executionContext?.graphWorkerAttempt, selectionForRuntime(selectedRuntime));
           currentHistoryRuntimeFence()?.assertRuntimeCoverage(selectedRuntime.kind);
           // Binding the agent context is a host check: a refusal here is pre-dispatch, never an unsettled turn.
-          const boundRequest = bindAppMemoryRequest(bindSurfaceMemoryRequest(persistentRunnerRequest(requestForRuntime),scienceAliveRecall),
-            {runId:req.runId,chatId:chat.id,actorId:memoryScope.agentId});
+          const boundRequest = bindAssignedTargetMemoryRequest(bindAppMemoryRequest(bindSurfaceMemoryRequest(persistentRunnerRequest(requestForRuntime),scienceAliveRecall),
+            {runId:req.runId,chatId:chat.id,actorId:memoryScope.agentId}), memoryScope.boundary);
           runnerInvoked = true;
           result = await withCurrentHistoryProvider(async()=>{assertAppMemory();assertScienceAliveMemory();const returned=await selected.runner(boundRequest, attemptEvents.events);historyReturnedUsage=returned.observedUsage;assertAppMemory();assertScienceAliveMemory();return assertCurrentHistoryRunnerResult(returned);});
           runtimeTerminalEvidence.closedHttpRefusal = runtimeFailureIsClosedHttpRefusal(result.failure, {
@@ -7145,7 +7213,7 @@ async function runMcpInvocationInContext(
           result = { ...result, observedUsage: observedUsage ?? undefined };
           persistAttemptUsage(observedUsage,
             result.failure ? "failed" : "returned");
-                                                                               
+          // A transport may settle with success after abort. Keep its measured
           // usage, but never persist completion or enter recovery/verification.
           if (signal?.aborted) throw signal.reason ?? new Error(tStatus(locale, "aborted"));
         } catch (error) {
@@ -7153,8 +7221,8 @@ async function runMcpInvocationInContext(
           // The session acknowledged the turn before it went silent (RuntimeTurnUnsettledError turnDelivery "accepted").
           if ((error as { turnDelivery?: unknown } | null)?.turnDelivery === "accepted") recordTurnPlacement("terminal");
           attemptRefusedBeforeDispatch = !runnerInvoked || runnerRefusedBeforeDispatch(error);
-          
-
+          // A typed admission refusal raised before dispatch (the Work project's resident owner is busy) is that refusal,
+          // not an unknown dispatch: wrapping it made the one continuation replace the owner's question (2026-10-16).
           if (runnerInvoked && !signal?.aborted && !runnerRefusedBeforeDispatch(error)) {
             const observedUsage = attemptEvents.observedUsage(historyReturnedUsage??observedRunnerUsage(error));
             persistGoalUsage(observedUsage);
@@ -7204,7 +7272,7 @@ async function runMcpInvocationInContext(
         if (result.failure?.source === "marker" && runtimeFailureBlocksReplay(result.failure)) {
           throw new InvocationRunnerFailureError(result.failure);
         }
-                                                                                 
+        // A measured context refusal must retain the user's exact local binding.
         if (result.failure?.kind === "refused" && result.failure.runtime === "agentlas-local" && result.failure.source === "marker"
           && (result.failure.providerCode === "local_context_limit_exceeded" || result.failure.providerCode === "local_context_measurement_unavailable"
             || result.failure.providerCode === "local_model_remote_mcp_admission_refused")) return result;
@@ -7274,11 +7342,11 @@ async function runMcpInvocationInContext(
           await getBillingCredits();
           throwIfInvocationAborted(signal, locale);
         }
-          
-                                                      
-                                                       
-                                               
-           
+        /*
+         * ★"지금 못 쓴다"를 시한부 사실로 남긴다. 이게 없으면 다음 턴이 같은 죽은
+         * 런타임에 또 7분을 쓰고(실측), 폴백은 이미 한도 초과인 후보를 다시 고른다.
+         * 시한이 지나면 스스로 후보로 돌아오므로 사용자가 손댈 일이 없다.
+         */
         const poolFallbacks = rolePriorityRuntimes(runtimes, "orchestrator", {
           failedRuntime: active,
           failure: failed,
@@ -7366,7 +7434,7 @@ async function runMcpInvocationInContext(
         : STORMBREAKER_MAX_EXECUTION_PASSES;
     let restrictedDiscardedMemoryEvents = 0;
     const sanitizeRestrictedPass = (passResult: Awaited<ReturnType<Runner>>) => {
-      if (!projectReadOnlyBoundary) return passResult;
+      if (!memoryReadOnlyBoundary) return passResult;
       const parsed = stripAllMemoryEventBlocks(passResult.text);
       restrictedDiscardedMemoryEvents += parsed.events.length;
       return { ...passResult, text: parsed.cleanedText };
@@ -7422,7 +7490,7 @@ async function runMcpInvocationInContext(
       // goal_wait / goal_complete calls of this pass re-enter as the exact text blocks the unchanged parsers read.
       // When the typed tools replace the marker teaching, a completion marker the model wrote into its reply is not a
       // completion (docs native-harness 07 G02): only the goal_complete tool call closes the Goal on that run.
-      const withGoalSignals = turnGoalToolsOffered && req.chatId && req.runId
+      const withGoalSignals = (turnGoalToolsOffered || Boolean(refreshCanonicalGoalWaitSource)) && req.chatId && req.runId
         ? settled.then((res) => ({ ...res, text: applyGoalSignalsToText(
           goalTypedToolsReplaceText ? stripGoalCompleteMarker(res.text).text : res.text,
           takeGoalSignals(turnNotesKey(req.chatId!, req.runId!))) }))
@@ -7448,9 +7516,9 @@ async function runMcpInvocationInContext(
       return invokeWithUnsettledContinuation<RunnerRequest>({
         dispatch(r, purpose, handle) { lastJournalTurnId = null; return runCurrentRuntimeOnce(r, purpose, handle); },
         continuationRequest: (r, sessionId, delivery) => {
-
-
-
+          // The interrupted request rides along (with its images) unless the session acknowledged that turn: an accepted
+          // request is in the resumed transcript and is not re-sent (runner.ts RuntimeTurnDelivery; owner 2026-10-16:
+          // a follow-up that never reached the session was replaced by the fixed line and answered "nothing remains").
           const next = replaceRunnerUserPrompt(r, unsettledContinuationPrompt(runnerTurnContextSource(r)?.userPrompt ?? r.userPrompt, delivery),
             unsettledContinuationCarriesRequest(delivery) ? {} : { images: undefined });
           return carryRunnerTurnContext(next, { ...next, runtimeSessionId: sessionId });
@@ -7484,14 +7552,14 @@ async function runMcpInvocationInContext(
       // The result (typed failure, session, delivery) is the cause; the provider's words lead the message (audit A7 M5).
       throw unsettledTurnError({ runtimeKind: active.kind, locale, cause: result, turnDelivery: result.turnDelivery });
     }
-    
-
-
-
-
-
-
-
+    /*
+     * ★런타임이 표식으로 실패를 말했으면 그 text는 답이 아니다 — 거절 고지문이다.
+     * 여기서 막지 않으면 고지문이 assistant 챗 답변으로 영속되고(appendChatMessage),
+     * 그래프 agent 노드에서는 vars[produces]에 앉아 다음 단계의 입력이 된다
+     * (실측 2026-08-06: "You've hit your weekly limit"이 노드 산출물이 될 뻔한 경로).
+     * 이 한 관문이 One 챗과 그래프 노드 양쪽을 같이 지킨다 — throw는 기존 오류
+     * 경로(sink error → NODE_FAILED/챗 오류 카드)를 그대로 탄다.
+     */
     if (result.failure) {
       throw new InvocationRunnerFailureError(result.failure, true, result.turnDelivery);
     }
@@ -7540,11 +7608,11 @@ async function runMcpInvocationInContext(
     let idleGoalPasses = 0;
     let goalIdleYield: { goalId: string } | null = null;
     let passRecoveryNote: string | null = null;
-       
-                                                                                                         
-                                                                                          
-                                                                                                 
-       
+    /**
+     * Set when a failed pass stopped the loop while leaving the goal open and resumable. Returned to the
+     * invocation service, which writes it into the long-run ledger with a scheduled retry
+     * (long-run/goal-pass-stop.ts). Before 2026-09-24 nothing read it: the reset time died here.
+     */
     let goalPassStop: GoalPassStop | null = null;
     const needsAutomationRegistration = (text: string): boolean => hasAutomationRegistrationHandoff(text, {
       agentAppMode: req.agentAppMode === true, division: chat.kind === "division",
@@ -7569,12 +7637,12 @@ async function runMcpInvocationInContext(
       const continuation = { text: passClaim.text, shouldContinue: rawContinuation.shouldContinue };
       let passShouldContinue = continuation.shouldContinue;
       let goalDrivenPass = false;
-      
-
-
-
-
-
+      /*
+       * 질문을 냈으면 이 턴은 사람 차례다 — 목표가 미달이라도 다음 패스를 돌리지 않는다.
+       * 실측(페르소나 루프 2026-09-14, 오너 직접 지적): 목표 연속 실행이 질문 카드를 띄운 뒤에도 계속 돌아
+       * 대화가 '실행 중'으로 남았고, 질문 시트는 "실행이 정리되면 전송"만 보이며 고른 답을 보내지 못했다.
+       * 답이 오면 질문 연속 실행(questionContinuation)이 같은 목표를 이어간다.
+       */
       const asksUser = turnAsksOwner(continuation.text);
       if (asksUser) passShouldContinue = false;
       if (activeGoalId && continuousMode && !signal?.aborted && !asksUser) {
@@ -7616,8 +7684,10 @@ async function runMcpInvocationInContext(
       // keep its mandate after that verification; it does not justify asking
       // this same native turn to complete the claimed work again.
       if (passClaim.claimed) passShouldContinue = false;
-      // A pass the Goal ledger alone keeps alive has to show host-observed work: a model that only paraphrases that nothing was
-      // done defeats the identical-output guard below, so
+      // A pass the Goal ledger alone keeps alive has to show host-observed work. Production 2026-10-06, Youtube
+      // launch: 273 continuous passes about 25 s apart, each a paraphrase of "the plan's assignment limits block
+      // the remaining check; nothing done this turn", no tool call in any of them, the ledger answering "1 open
+      // task" every time, 17.5k fresh input tokens a pass. Paraphrase defeats the identical-output guard below, so
       // the measure is the host's own count of completed tool calls. After GOAL_IDLE_PASS_LIMIT idle passes the
       // invocation ends; Main's verification and wake schedule decide when the Goal is looked at again.
       // A plan whose every tactic is done has already told the model what is left (verify the criteria and claim): one idle
@@ -7632,7 +7702,7 @@ async function runMcpInvocationInContext(
           kind: "goal_idle_pass_yield", payload: { pass, idlePasses: idleGoalPasses, ...(planFinishedAtBoundary ? { planFinished: true } : {}) } });
         // The host drove this Goal again and it did nothing. That is not yet "nobody can go on": Main's turn end verifies the
         // terminal result against the criteria first, and a Goal whose plan is done and whose answer was right simply
-        // closes (a card added here pre-empted that verification and held a finished Goal for the owner). Main
+        // closes (a card added here pre-empted that verification and held a finished Goal for the owner, 2026-10-20). Main
         // asks the owner by card only if the verification does not close it. Reported only on a turn someone can answer:
         // not unattended, not an executionContext channel, not stopped, not the owner's own question.
         if (activeGoalId && !asksUser && !unattendedNoAsk && !executionContext && !signal?.aborted && !req.agentAppMode) {
@@ -7688,9 +7758,9 @@ async function runMcpInvocationInContext(
           passShouldContinue = true;
         }
       }
-
-
-
+      // The owner wrote while this run worked (production 2026-10-05, Thread Marketing: a direction queued behind a
+      // Goal's continuous run waited for the whole run). Stop at this pass boundary; Main then starts the owner's
+      // turn from the queue and the Goal continues from there.
       if (passShouldContinue && !signal?.aborted && hasQueuedOwnerSteer(chat.id)) {
         passShouldContinue = false;
         tryRecordRunEvent({ runId: req.runId ?? `chat:${chat.id}`, chatId: chat.id, agentId: agent.id,
@@ -7718,9 +7788,9 @@ async function runMcpInvocationInContext(
           goalId: activeGoalId,
           runId: req.runId,
         });
-
-
-
+        // 방금 저장한 본문은 더는 "흘러나오는 중"이 아니다 — Main 버퍼와 화면의 실시간 말풍선을
+        // 이 행 id에서 끊는다. 없으면 다음 턴 첫 글자 전에 끊긴 실행이 같은 본문을
+        // "중단된 답변"으로 또 저장했다(2026-09-27 X 마케팅 실측).
         sink(livePartialCommitBoundary(committedPass.id));
         // 세션 워터마크 전진 — 다음 resume 턴이 방금 자기 답변을 gap으로 재주입하지 않게.
         if (sessionCapableRuntime) touchRuntimeSession(chat.id, active.kind, agent.id);
@@ -7759,13 +7829,13 @@ async function runMcpInvocationInContext(
       activeRunnerReq = replaceRunnerUserPrompt(nextRunnerReq, explicitBorrowUserPreamble
         ? `${explicitBorrowUserPreamble}\n\nContinuation request:\n${continuationPrompt}`
         : continuationPrompt, { images: undefined });
-      
-
-
-
-
-
-
+      /*
+       * The previous pass completed. A next pass that never reached the model (refused before dispatch: a locked store, a
+       * session its previous process still held, a missing executable) does not turn the whole Goal turn into a failure:
+       * the turn ends with the completed pass (`result` keeps it) and the Goal continues on its own schedule. Production
+       * 2026-10-18 (Yotube Goal turn fd5f52e7): a turn whose earlier pass had completed ended red. What may have reached
+       * the model surfaces.
+       */
       const novelObservationsBeforePass = novelToolObservations;
       const toolCallsBeforePass = completedToolCalls;
       try {
@@ -7786,17 +7856,17 @@ async function runMcpInvocationInContext(
       lastPassToolCalls = result.failure ? null : completedToolCalls - toolCallsBeforePass;
       lastPassNovelObservations = result.failure ? null : novelToolObservations - novelObservationsBeforePass;
       if (result.failure) {
-        
-
-
-
-
-
-
-
-
-
-
+        /*
+         * A failed pass is not the end of the goal.
+         *
+         * Throwing here escaped the loop, and nothing downstream scheduled a successor -- so a goal
+         * meant to run for hours died on the first hiccup, and the person saw the product give up.
+         * Measured on a real 25.9-hour orchestration: four turns failed (a model at capacity, two
+         * rejected parameters, one usage limit) and the work continued past every one of them.
+         *
+         * The next move comes from the typed failure marker, never the wording, because vendor
+         * notices change on every release and a run must not start dying because a sentence moved.
+         */
         const verdict = passFailureVerdict(result.failure, passFailureTransientAttempts);
         tryRecordRunEvent({
           runId: req.runId ?? "",
@@ -7913,17 +7983,17 @@ async function runMcpInvocationInContext(
         if (oneRecoveryDecisionPending) partialFloor = "";
       }
     }
-      
-                                                                                                                               
-                                                                                                                          
-                                                                                                                            
-                                                                                                                           
-                                                                                                                           
-                                                                                                                            
-                                                                                                                              
-                                                                                                                           
-                                                                          
-       
+    /*
+     * H2 (Finance 1008 pilot, 2026-10-21): a turn the runtime ended normally with no reply text is complete when its tools did
+     * the work (R-065, shared/turn-settlement.ts settleNormalEnd). When every tool call it made failed or came back as an
+     * empty collection, nothing was done through them either, and the owner was left with a blank reply under a "completed"
+     * run (clsi09: list_dir and read_file failed, harness_search returned {"items":[]}; clsi12: finance.query refused nine
+     * times). That is the model's empty answer behind tools that gave nothing: the same typed `empty` cause a turn with no
+     * tool call at all gets (shared/run-failure-notice.ts words it), through the same unsettled-turn error, so the delivery
+     * fact stays "dispatched" and nothing is sent again. Owner-facing chat turns only: a Goal, an automation or graph node, a
+     * room member, a host-authored prompt and the continuous mode keep their own callers' rules for an empty text. It runs
+     * after the One recovery passes above, which can still fill the text.
+     */
     if (endedWithoutAnswerAfterUnusableTools({ text: result.text, reportedToolCalls: result.toolCalls, outcomes: modelToolOutcomes.summary() })
       && !executionContext && !hostNoticePurpose && !promptIsSystemAuthored && !activeGoalId && !continuousMode && !roomMemberTurn
       && !scienceRecovery && !effectObservationRun && !req.agentAppMode && chat.kind !== "division"
@@ -7934,8 +8004,14 @@ async function runMcpInvocationInContext(
         turnDelivery: result.turnDelivery });
     }
     const automationHandoff = needsAutomationRegistration(result.text);
-    const waitProposal = !executionContext && activeGoalId ? parseGoalWaitIntent(result.text) : { text: result.text, request: null };
+    const currentCanonicalGoalWaitSource = refreshCanonicalGoalWaitSource?.() ?? null;
+    const waitProposal = currentCanonicalGoalWaitSource || !executionContext && activeGoalId ? parseGoalWaitIntent(result.text) : { text: result.text, request: null };
     const goalWaitRequest = waitProposal.request;
+    // Commit the authority-free proposal before final publication, so a crash
+    // between the terminal event and the settled listener cannot lose the wait.
+    if (currentCanonicalGoalWaitSource && goalWaitRequest && req.runId && !signal?.aborted) {
+      recordGoalWaitProposal({ sourceInvocationId: req.runId, chatId: chat.id, proposal: goalWaitRequest });
+    }
     // Fast/single-pass Goal turns need the same terminal custody as live passes.
     if (nativeGoalEpisode && !goalEpisodeYield && !goalWaitRequest && !automationHandoff
       && !signal?.aborted && !turnAsksOwner(result.text)) {
@@ -8068,17 +8144,17 @@ async function runMcpInvocationInContext(
     }
     // continuousMode는 안전 상한(20,000턴)이 사실상 안 걸리므로 정상적으론 이 분기에 안 들어온다.
     // A finite Goal turn that ends with safe work left (wall-clock pass budget, idle yield with the ledger unmet, the
-    // pass cap) is continued by the host, never by an automation.
-    // Until then this wrote a hidden "Goal continuation · <chat>" prompt
-    // automation and the host treated an enabled one as owning the Goal's next step;
-    // such rows could be enabled with next_run_at NULL and wake nobody, and a chat could have two. The turn now returns a
+    // pass cap) is continued by the host, never by an automation (owner 2026-10-20: "스톰브레이커 롱런 goal 이 왜
+    // 그래프가 되나, 그건 그래프가 아니다"). Until then this wrote a hidden "Goal continuation · <chat>" prompt
+    // automation (74c75be3) and the host treated an enabled one as owning the Goal's next step; on the owner's store
+    // 4 of 5 such rows were enabled with next_run_at NULL and woke nobody, and one chat had two. The turn now returns a
     // typed request and Main's turn end schedules the Goal's own spaced follow-up (InvocationService
     // .scheduleGoalContinuation → blocked-goal sweep → the Goal's resume turn in its own chat). Legacy rows are retired
     // at boot (store/goal-continuation-rows.ts). An ongoing Goal keeps its own wait cycle (registerOngoingGoalCycle).
     let goalHostWakeRequested: { goalId: string } | null = null;
     // A turn reported as an idle yield (goalIdleYield) asks Main for the terminal verification, not for another wake: its
     // passes did nothing, so a blind wake only repeats them. A Work project's chat has no `record.automaticGoalId`, so this
-    // request was its idle path.
+    // request was its idle path (verified live 2026-10-20: the wake pre-empted the verification and the card).
     if (!req.agentAppMode && stormbreakerContinueRequested && !goalIdleYield && chat.kind !== "division" && canWrite
       && (!activeGoalId || getChatGoalRevision(activeGoalId)?.lifecycle !== "ongoing")) {
       if (activeGoalId) {
@@ -8102,7 +8178,7 @@ async function runMcpInvocationInContext(
           });
         } catch (error) {
           /*
-           * The lifecycle barrier refused a further dispatch (the long run was still
+           * The lifecycle barrier refused a further dispatch (independent review 2026-10-04: the long run was still
            * `verifying` its last effects). That refusal is about the NEXT pass; this turn's answer is already complete
            * and must not be failed by it. No wake is requested and Main's turn end verifies the Goal as for any turn
            * that asked for nothing. Every other error still throws.
@@ -8121,8 +8197,8 @@ async function runMcpInvocationInContext(
         }
       } else {
         // No Goal: there is no host ledger, stop control or budget to continue under, and the host never invents a
-        // Goal's authority. A hidden every-30m automation is the same "a conversation is not a graph"
-        // mistake, so the turn ends here and says how to keep going.
+        // Goal's authority. A hidden every-30m automation (897ed935) is the same "a conversation is not a graph"
+        // mistake, so the turn ends here and says how to keep going (the owner's store had none of these rows).
         sink({
           kind: "tool-use",
           tool: {
@@ -8154,9 +8230,9 @@ async function runMcpInvocationInContext(
     // 에이전트가 "## Automation" 블록을 넣었으면 → 현재 chat의 타깃(firm/agent)으로 자동화 등록 + 블록 제거.
     // (백그라운드 automation 실행 세션은 제외 → 자동화가 자동화를 만드는 재귀 방지)
     const automationRegistrations: AutomationRegistrationResult[] = [];
-
-
-
+    // 거부 사유. 모델의 본문은 이미 확정된 뒤에 게이트가 도는 구조라, 모델은 "바꿨다"고
+    // 써 놓고 호스트가 거부하는 조합이 나온다(실측 2026-08-19: 831자 고정 문구 교체 지시에
+    // 답변은 "replaced", graph_json은 무변경). 그러면 **호스트가 직접 말해야** 한다.
     const automationRefusals: string[] = [];
     let automationPermissionRequired = false;
     if (req.agentAppMode) {
@@ -8259,9 +8335,9 @@ async function runMcpInvocationInContext(
           }
           const monitoring = automationRegistrationMonitoring({parsed:a,chatId:chat.id,messageId:persistedUserMessageId,existing:dup});
           const registrationOperationId = `host-automation:${randomUUID()}`;
-
-
-
+          // A refused or failed registration answers its own started tool row and is said to the owner (refusal notice below).
+          // Measured 2026-10-17 (dev A/B4): a finite-Goal refusal threw out of this loop into a log-only catch, leaving
+          // "자동화 1개 설정 중" open, the reply's "등록 결과 대기" unanswered, and every later entry in the block unregistered.
           let startedTool: "automation.create" | "automation.update" | null = null;
           try {
             if (dup) {
@@ -8345,10 +8421,10 @@ async function runMcpInvocationInContext(
               // A failed finite binding must roll back creation, never leave an independent automation behind.
               const { created, unboundReason } = desktopStoreTransaction(getDb(), () => {
                 const finiteDeadline = finiteCreation && activeGoalId ? goalDeadlineAt(activeGoalId) : null;
-                
-
-
-
+                // A Goal-made automation ends at its finite Goal's deadline. A finite Goal with no host-resolved deadline
+                // (a single-tactic shape has none) was asked for standing work that outlives it, so that automation is
+                // created unbound (harness decision 2026-10-17; dev A/B4 O2 was refused here). Each refusal cause keeps
+                // its own code for the owner's refusal text.
                 const boundFinite = finiteCreation && finiteDeadline !== null;
                 const unboundReason = finiteCreation && !boundFinite ? "goal_automation_unbound_no_deadline" as const : null;
                 if (boundFinite && Date.parse(finiteDeadline!) <= Date.now()) throw new Error("goal_automation_finite_deadline_passed");
@@ -8559,11 +8635,11 @@ async function runMcpInvocationInContext(
             ? "실행 가능한 해결안을 안전하게 구성하지 못해 이 실행은 완료로 표시하지 않았습니다."
             : "This run is not marked complete because an executable solution could not be formed safely.";
         } else if (usedDeterministicOneSurface && deterministicOneSurface) {
-
-
-
-
-
+          // 모델이 쓴 결과 본문이 답이다 — 어느 채널이든(Codex 패리티, 오너 결정 2026-08-15).
+          // 예전에는 카드가 있는 화면에 "요청한 결과와 파일을 준비했어요. 아래에서 바로 확인할
+          // 수 있어요."라는 완료 문구를 **답변으로 저장**하고 진짜 답은 카드 안 Narrative에만
+          // 남겼다(실측: 카드는 마크다운을 평문으로 그려 링크·코드펜스가 깨졌고, 재방문
+          // 스레드에는 답이 없었다). 본문이 비었을 때만 완료 문구로 되돌아간다.
           const modelText = surfaceParse.cleanedText.trim();
           displayText = modelText
             || deterministicOneCompletionCopy(req.userPrompt, deterministicOneSurface, locale);
@@ -8584,7 +8660,7 @@ async function runMcpInvocationInContext(
       // retain or log the rejected model body because it may contain a local
       // path or another Main-private Surface transport value.
       //
-                                                    
+      // 호스트의 사과는 답변 본문이 아니라 고지 행으로 나간다(2026-08-08).
       emitHostNotice(sink, {
         level: "error",
         message: locale === "ko"
@@ -8596,7 +8672,7 @@ async function runMcpInvocationInContext(
       displayText = "";
       console.error("[surface] parseSurfaces failed");
     }
-    if (!req.agentAppMode || projectReadOnlyBoundary) {
+    if (!req.agentAppMode || memoryReadOnlyBoundary) {
       try {
         const curationContext = {
           turnId: memoryTurnId,
@@ -8624,7 +8700,7 @@ async function runMcpInvocationInContext(
         };
         // Notes the model recorded through the agentlas-turn memory_note tool join the parsed envelope's events.
         const toolMemoryNotes = takeTurnMemoryNotes(req.chatId && req.runId ? turnNotesKey(req.chatId, req.runId) : null);
-        const semanticOptions = projectReadOnlyBoundary
+        const semanticOptions = memoryReadOnlyBoundary
           ? {}
           : await runSemanticMemoryReview({
               extraEvents: toolMemoryNotes,
@@ -8640,7 +8716,7 @@ async function runMcpInvocationInContext(
               hasAgent: Boolean(agent.id),
               ...(isAutomationLedgerChat(curationContext.chatId) ? { sourceSurface: "automation-run" as const } : {}),
             });
-        const { cleanedText } = projectReadOnlyBoundary
+        const { cleanedText } = memoryReadOnlyBoundary
           ? stripReplyMemoryEventsReadOnly(
               displayText,
               curationContext,
@@ -8654,7 +8730,7 @@ async function runMcpInvocationInContext(
         const envelopeOnlySummary = !cleanedText.trim()
           ? (parseMemoryEvents(displayText).turnSummary?.trim() || /turn_summary\s*:\s*"([^"\n]{1,300})"/.exec(displayText)?.[1]?.trim() || "")
           : "";
-        displayText = projectReadOnlyBoundary ? cleanedText : cleanedText || envelopeOnlySummary || displayText;
+        displayText = memoryReadOnlyBoundary ? cleanedText : cleanedText || envelopeOnlySummary || displayText;
       } catch (err) {
         console.error("[architecture] curateReply failed:", err);
         try {
@@ -8711,7 +8787,7 @@ async function runMcpInvocationInContext(
     // 큐레이터 인테이크(session/hypothesis) 티어로만 흘려보낸다. 심사·승격은 Curator 에이전트 몫.
     // 실패-무해: 트랜스크립트가 없거나(다른 런타임) 요약이 없으면 조용히 0건.
     try {
-      if (!req.agentAppMode && !projectReadOnlyBoundary && result.sessionId) {
+      if (!req.agentAppMode && !memoryReadOnlyBoundary && result.sessionId) {
         harvestCompactionSummaries({
           sessionId: result.sessionId,
           cwd: workingFolder,
@@ -8758,7 +8834,7 @@ async function runMcpInvocationInContext(
           text: displayWithFloor, chatId: chat.id, runId: req.runId, images: pendingFinalImages,
         })
       : { text: displayWithFloor, images: pendingFinalImages };
-    const boundImageDisplayWithFloor = promotedImages.text;
+    let boundImageDisplayWithFloor = promotedImages.text;
     /*
      * 권한 승격 표식은 저장 본문에서 지운다 — 화면/승인칩 감지는 final 이벤트
      * (displayWithFloor 원문)를 받는 invocation service 가 맡는다. 히스토리 새로고침
@@ -8768,7 +8844,7 @@ async function runMcpInvocationInContext(
       locale: pickLocale(req),
       allowSurfaceRender: !req.agentAppMode,
     });
-    const persistedDisplay = stripStrayProtocolTokens(stripPermissionEscalationMarker(
+    let persistedDisplay = stripStrayProtocolTokens(stripPermissionEscalationMarker(
       effectObservationRun ? stripEffectObservationMarker(finalDisplay.durableText) : finalDisplay.durableText));
     const finalWorkImages = promotedImages.images;
     if (imageGenerationRequired && (!observedImageArtifactEvidence || finalWorkImages.length === 0) && !signal?.aborted) {
@@ -8778,15 +8854,31 @@ async function runMcpInvocationInContext(
     if (screenCaptureRequired && !blindVisionRuntime && !nativeCaptureBound && finalWorkImages.length === 0 && !signal?.aborted) {
       throw new Error("screen_capture_unavailable: the requested screen capture was never produced");
     }
+    // A file the owner asked for and the answer names must exist before the answer stands (requested-file-check.ts). The
+    // correction is saved with the answer, so neither the owner nor the next turn builds on a file that is not there.
+    const missingFiles = !effectObservationRun && !req.agentAppMode && !hostWrotePrompt() && !signal?.aborted
+      ? missingRequestedFiles({ userPrompt: req.userPrompt, answer: persistedDisplay, cwd: workingFolder ?? resolvedResultFolder ?? null,
+        successfulToolText })
+      : [];
+    if (missingFiles.length > 0) {
+      const correction = requestedFileCorrection(missingFiles, locale);
+      persistedDisplay = persistedDisplay.trim() ? `${persistedDisplay}\n\n${correction}` : correction;
+      boundImageDisplayWithFloor = boundImageDisplayWithFloor.trim() ? `${boundImageDisplayWithFloor}\n\n${correction}` : correction;
+      const names = missingFiles.map((file) => file.name).join(", ");
+      const i18n = { ko: `요청한 파일이 없습니다: ${names}`, en: `Requested file not found: ${names}` };
+      sink({ kind: "notice", notice: { level: "warning", code: "requested-file-missing", message: i18n[locale], i18n } });
+      tryRecordRunEvent({ runId: req.runId ?? `chat:${chat.id}`, kind: "requested_file_missing", chatId: chat.id, agentId: agent.id,
+        payload: { count: missingFiles.length, runtime: active.kind } });
+    }
     const finalImageOptions = finalWorkImages.length > 0 ? { images: finalWorkImages } : undefined;
     let durableAssistantEntry: ReturnType<typeof appendChatMessage> | null = null;
     if (!effectObservationRun && !req.agentAppMode) {
-      
-
-
-
-
-
+      /*
+       * ★빈 답은 빈 말풍선으로 남기지 않는다 — 대화창 하단에 아무것도 안 적힌 잔해만
+       * 쌓이고, 사용자는 그것을 "끝난 자리"로 읽는다(실측 2026-08-15: 다중 패스 루프의
+       * 중간 턴이 길이 0 assistant 메시지로 저장됨).
+       * 삼키지도 않는다 — 빈 답 자체가 진단 신호이므로 사실은 원장에 남긴다.
+       */
       if ((hostNoticePurpose === "one-delegation-review" || hostNoticePurpose === "one-checkin") && isOneQuietReply(persistedDisplay)) {
         // One decided the owner does not need to hear anything: nothing is saved and no alert fires (run-alerts).
         tryRecordRunEvent({ runId: req.runId ?? `chat:${chat.id}`, kind: "one_quiet_reply", chatId: chat.id, agentId: agent.id,
@@ -8815,24 +8907,24 @@ async function runMcpInvocationInContext(
       // gap-replay가 자기 답변을 중복 주입하지 않고, 스웜/다른 러너 턴만 메우게 된다.
       if (sessionCapableRuntime) touchRuntimeSession(chat.id, active.kind, agent.id);
     }
-    
-
-
-
-
-
-    
-
-
-
-
-
-
-
-
-
-
-
+    /*
+     * ★어느 세대가 실제로 돌았는지 기록한다 (오너 2026-09-07: "버전 바뀌어도 알아서
+     * 읽게 해라"). claude-code 는 모델 목록 명령이 없어 우리가 보낼 수 있는 것이 벤더
+     * 별칭(`opus`)뿐이고 화면에도 그것만 보였다. 실행 결과가 실제 id 를 싣고 오므로
+     * 그것을 남긴다 — 벤더가 세대를 올리면 다음 실행이 알아서 덮는다. 우리가 적는 값은 없다.
+     */
+    /*
+     * ★기본값으로 돌린 실행도 기록한다 (QA 실측 2026-09-08).
+     *
+     * 처음에는 `active.model` 이 있을 때만 기록했다. 그런데 오케스트레이터 행을
+     * **"엔진 설정 사용"**(모델 미지정)으로 두고 쓰는 것이 기본 사용법이고, 그 경우
+     * active.model 은 비어 있다. 그래서 claude-code 로 5번을 완주해도 화면은 계속
+     * "Anthropic · Claude Code" 였고 사용량 패널은 "모델 미상" 이었다 —
+     * **기본값으로 쓰는 사람은 영원히 못 보는 구조**였다.
+     *
+     * 모델 미지정 실행의 관측값은 빈 별칭("")에 기록한다. 그것이 곧 "이 런타임의
+     * 기본 선택이 실제로 무엇으로 풀렸는가" 이고, 피커의 "엔진 설정 사용" 행이 그걸 쓴다.
+     */
     if (result.observedModel) {
       const alias = active.model ?? "";
       if (result.observedModel !== alias) {
@@ -8862,16 +8954,16 @@ async function runMcpInvocationInContext(
           invocationId: memoryTurnId,
           modelRole: invocationModelRole,
           provider: active.backend ?? active.kind,
-          
-
-
-
-
-
-
-
-
-
+          /*
+           * ★실행이 알려준 모델이 있으면 그것을 적는다 (QA 실측 2026-09-08:
+           * 사용량 패널이 `Orch · anthropic · **모델 미상** · … · 3` — 실행 3건이
+           * 집계됐는데 모델이 미상이었다).
+           *
+           * 원인은 "모델 미지정으로 돌렸으니 적을 모델이 없다"였다. 하지만 우리는 실제로
+           * 무엇이 돌았는지 **알고 있다** — 러너가 result.observedModel 로 알려준다.
+           * 요청값(비어 있음)이 아니라 관측값을 적는다. Claude는 관측이 없으면
+           * 요청 별칭으로 추정하지 않고 미상으로 남긴다(재개 세션이 다른 모델일 수 있다).
+           */
           // Claude's requested alias is not proof of what a resumed native session ran.
           // If its per-turn assistant events supplied no unambiguous model, record unknown.
           model: result.observedModel ?? (active.kind === "claude-code" ? null : active.model ?? null),

@@ -1,20 +1,20 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+// Model discovery contract shared by every runtime probe (PRD 2026-08-15 D-1..D-3).
+//
+// Why: on 2026-08-14 `agy models` changed its line format inside a minor
+// version, the parser returned [] (rc=0, no exception, no log), the model
+// picker showed 0 models, and the empty catalog even switched model validation
+// OFF. Eleven parsers shared no contract, so "unsupported", "failed", and
+// "genuinely empty" were the same value: [].
+//
+// The contract:
+//   ok           — a non-empty, validated list (may carry a yield warning)
+//   unsupported  — this runtime has no list concept / no discovery path yet
+//   failed       — discovery ran and produced nothing usable; MUST be loud
+//
+// Yield rule (Spidermon ItemCountMonitor lineage): non-empty stdout with zero
+// parsed rows is `failed` ("yield regression"), never an empty `ok`. Exit
+// codes are not trusted — `agy models --json`, `grok`, `opencode` return 0 on
+// usage output (measured 2026-08-14).
 
 export type DiscoveryStatus = "ok" | "unsupported" | "failed";
 export type DiscoverySource = "acp" | "cli" | "file" | "http" | "none";
@@ -69,6 +69,17 @@ export function failedDiscovery(reason: string, rawLineCount = 0, source: Discov
 }
 
 /**
+ * The listing failed because nobody is signed in to this runtime: a state of the account, not a broken listing.
+ * `acp:auth-required` comes from ACP's typed refusal (error code -32000, acp-protocol.ts isAcpAuthRequired);
+ * `cli:auth-required` from a CLI's own listing command when its runtime module recognised the signed-out answer.
+ * Shown as "sign in required" with the Connect action, logged once at info (model-discovery-store.ts).
+ */
+export const DISCOVERY_SIGN_IN_REQUIRED_REASONS = ["acp:auth-required", "cli:auth-required"] as const;
+export function discoverySignInRequired(reason: string | null | undefined): boolean {
+  return typeof reason === "string" && (DISCOVERY_SIGN_IN_REQUIRED_REASONS as readonly string[]).includes(reason);
+}
+
+/**
  * Classify a finished discovery attempt. `models` must already be validated ids.
  * The classifier never invents rows; it only decides how loud to be.
  */
@@ -81,6 +92,8 @@ export function classifyDiscovery(input: {
   source?: DiscoverySource;
   /** 파서가 이미 통과시킨 표기를 다시 거르지 않도록, 그 파서의 허용 패턴을 넘긴다(기본 MODEL_ID_RE). */
   idRe?: RegExp;
+  /** The runtime module recognised its CLI's own "not signed in" answer in this output (e.g. grokListingSignedOut). */
+  signedOut?: boolean;
 }): DiscoveryOutcome {
   const source = input.source ?? "cli";
   const rawLineCount = countRawLines(input.stdout ?? "");
@@ -98,6 +111,9 @@ export function classifyDiscovery(input: {
     };
   }
   if (input.timedOut) return failedDiscovery("timeout", rawLineCount, source);
+  // Before the yield rule: "You are not authenticated." plus a header is 3 lines and 0 models, and it is not a
+  // changed format (Windows retest 2026-10-24 logged it as yield-regression:3-lines-0-models at [error]).
+  if (input.signedOut) return failedDiscovery(source === "acp" ? "acp:auth-required" : "cli:auth-required", rawLineCount, source);
   if (rawLineCount > 0) {
     // rc may be 0 (usage text, banner, changed format) — the yield is the truth.
     return failedDiscovery(`yield-regression:${rawLineCount}-lines-0-models`, rawLineCount, source);
@@ -144,6 +160,17 @@ export function parseAgyModels(stdout: string): string[] {
     if (!out.includes(id)) out.push(id);
   }
   return out.slice(0, 100);
+}
+
+/**
+ * `grok models`' answer when nobody is signed in. Measured on grok (Windows 11 ARM64,
+ * 2026-10-24): `grok models` signed out prints "You are not authenticated." then "Default model: …" and an empty
+ * "Available models:" list. One recogniser for every caller: the model listing (grok.ts) and the Connect chip's
+ * sign-in check (runtime-connect.ts interpretProbe) read the same answer the same way. Only consulted when the
+ * output yielded no model, so a signed-in listing that mentions signing in elsewhere is never read as signed out.
+ */
+export function grokListingSignedOut(stdout: string): boolean {
+  return /not authenticated|not logged in|sign in/i.test(stripAnsi(stdout));
 }
 
 /**

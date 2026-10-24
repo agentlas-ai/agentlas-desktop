@@ -910,19 +910,19 @@ function promptWithHandoffContract(
   branches.forEach((branch) => branchAt.set(branch.afterStep, branch));
   // ★한 단계 뒤에 검증 여럿 — "주가 재확인 + 형식 검사"를 검증 2개로 표현한다.
   const checkAt = new Map<number, BlueprintCheck[]>();
-  
-
-
-
-
-
-
-
-
-
-
-
-
+  /*
+   * ★검증은 **자기 근거를 만드는 단계 뒤**에 놓인다.
+   *
+   *   실측 2026-08-20 (캠페인 E3): "옮겼다고 한 파일이 정말 그 자리에 있는가"를 판정하는
+   *   검증이 근거로 `observed`(폴더 재확인 결과)를 선언했는데, 그 재확인 단계보다 **앞에**
+   *   놓였다. 파일 3건은 정확히 정리됐는데 실행은 5/8 에서 멈췄다:
+   *     NODE_INPUT_MISSING — 판정 근거로 선언된 "observed" 값을 앞 단계가 만들어 주지 않았습니다.
+   *   일은 다 해 놓고 "했다고 말하지 못하는" 모양이고, 사용자가 고칠 방법도 없다 —
+   *   순서는 사용자가 적은 것이 아니라 컴파일러가 정하는 것이기 때문이다.
+   *
+   *   afterStep 은 "무엇을 검증하는가"를 가리키고, 근거는 "무엇으로 검증하는가"다.
+   *   둘 다 있어야 판정이 서므로, 놓이는 자리는 **둘 중 뒤**다.
+   */
   const producerIndex = new Map<string, number>();
   bp.steps.forEach((step, index) => {
     const name = String(step.produces ?? "").trim();

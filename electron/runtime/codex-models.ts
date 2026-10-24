@@ -66,10 +66,10 @@ function sameFile(left: BigIntStats, right: BigIntStats): boolean {
 }
 
 /**
-
-
-
-
+ * Codex replaces models_cache.json atomically (new inode), so a read that straddles the swap sees a
+ * different inode/size between its lstat/fstat/lstat checks and was reported as "no-cache" 103 times in
+ * the Youtube room's log (2026-10-07..10). A swap settles within milliseconds: retry the whole stable read
+ * a few times before giving up. Genuinely absent/oversized/symlinked files still return null on the first pass.
  */
 async function readStableCache(cachePath: string): Promise<string | null> {
   for (let attempt = 0; attempt < 4; attempt += 1) {
@@ -377,9 +377,9 @@ export async function readCodexModelDiscovery(
   } catch {
     raw = "";
   }
-  
-
-
+  // One read decides both "present" and the list. Reading the file a second time raced Codex rewriting it: the
+  // first read saw the cache, the second an empty or half-written one, and discovery reported a false
+  // "yield-regression:1-lines-0-models" (production 2026-10-04 four times, 2026-10-06 10:33Z).
   const inventory = inventoryFromCacheText(raw || null);
   const discovery = settleDiscovery("codex", {
     stdout: raw ? "cache:present" : "",

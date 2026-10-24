@@ -46,17 +46,17 @@ interface PendingElicitation {
 const pendingByRunId = new Map<string, PendingElicitation>();
 
 /**
-
-
-
-
-
-
-
-
-
-
-
+ * Key requests of runs the background service hosts, as Main saw them (flow audit 2026-10-18, I-D2).
+ *
+ * A daemon-hosted interactive run keeps its pending request in the daemon's memory and sends its mcp-key-request
+ * event to the window over the native stream. Every answer path (mcp:supplyRunKeys, mcp:useStoredRunKey,
+ * oneVault:openRunKeyRequest / runKeyStatus) looked only in Main's memory, so a decline, a saved key or a renamed
+ * stored key never reached the run: it waited out its 120 s window and continued without the tool, "not provided in
+ * time" (the add14fc8 class: state held by the process that hosts the run, answers looked up in Main).
+ * Main now mirrors that request from the service's own event (value-free, the exact object the service holds) and
+ * hands each answer to the hosting service over the signed channel; the service settles only its exact pending
+ * request. Secret values never travel: "provided" is Main's receipt-gate verdict, and the service re-reads its own
+ * vault when it reselects the tools.
  */
 interface HostedElicitation { chatId: string; request: McpRunKeyRequest }
 const hostedByRunId = new Map<string, HostedElicitation>();

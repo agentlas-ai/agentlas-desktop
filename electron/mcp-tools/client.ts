@@ -146,19 +146,19 @@ function workforceToolProtocolMetadata(
  * digest shipped with this Desktop generation.
  */
 /**
-
-
-
-
-
-
-
-
-
-
-
-
-
+ * 워크포스 계약 대조 결과. **차단(blocking)과 경고(warning)를 가른다.**
+ *
+ * 오너 결정 2026-07-28: 예전에는 이 함수가 낸 항목이 **전부 차단**이었다. 그래서 Core 가
+ * 프로토콜 값 하나(예: `ontologyVersion`)만 올려도 이미 배포된 모든 데스크탑에서
+ * 워크포스가 멈췄다 — "엔진은 따로 오픈소스로 굴리고 셸은 최신을 문다"는 설계와 정면으로
+ * 부딪치는 성질이었다.
+ *
+ * 이제 **능력(도구가 있는가)만 차단**하고, 값 드리프트(입력 필드 집합, enum, 메타데이터,
+ * 다이제스트)는 경고로 내린다. 도구 이름도 **완전 일치가 아니라 부분집합**으로 본다 —
+ * Core 가 도구를 추가하는 것은 미노출일 뿐 결함이 아니라는 오너 규칙과 일치한다.
+ *
+ * ★경고는 조용히 버리지 않는다. 값 계약이 실제로 달라졌으면 나중에 런타임 오류로
+ *   나타나는데, 그때 이 경고가 로그에 없으면 원인을 찾을 수 없다.
  */
 export interface WorkforceContractVerdict {
   blocking: string[];
@@ -298,11 +298,16 @@ export class McpToolCallError extends Error {
     readonly boundary: "pre-request-error" | "ambiguous-transport" | "received-protocol-error",
     readonly mcpCode: number | null,
     message: string,
-    readonly reason: "response-too-large" | "connection-session-changed" | null = null,
+    readonly reason: "response-too-large" | "connection-session-changed" | "timeout" | null = null,
   ) {
     super(message);
     this.name = "McpToolCallError";
   }
+}
+
+/** The call's own time limit ran out (Main stopped waiting and closed the connection); the text is unchanged, the type is the marker. */
+class McpToolCallTimeoutError extends Error {
+  constructor(ms: number) { super(`timed out after ${Math.round(ms / 1000)}s`); }
 }
 
 export class McpToolResponseTooLargeError extends Error {
@@ -706,7 +711,7 @@ async function withTimeout<T>(p: Promise<T>, ms: number, onTimeout: () => void, 
     detach = () => signal?.removeEventListener("abort", onAbort);
     if (signal?.aborted) { onAbort(); return; }
     timer = setTimeout(() => {
-      reject(new Error(`timed out after ${Math.round(ms / 1000)}s`));
+      reject(new McpToolCallTimeoutError(ms));
       onTimeout();
     }, ms);
   });
@@ -906,21 +911,21 @@ export interface McpToolCallOptions {
 }
 
 /**
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+ * One MCP connection per server for the whole run, like a CLI runtime keeps.
+ *
+ * Host-loop runtimes (Agentlas serving, BYOK, local models) used to spawn and
+ * initialize a fresh stdio server for every tools/call and close it right after.
+ * The MCP lifecycle scopes server state to the connection (initialize → operation
+ * → shutdown; modelcontextprotocol.io/specification/2025-06-18/basic/lifecycle),
+ * so every stateful server lost its state between calls. Measured on serving
+ * (parity QA 2026-09-25): browser_navigate https://example.com succeeded, the next
+ * browser_snapshot saw "Page URL: about:blank", and an unsafe-code approval
+ * failed as unverified-site — multi-step browsing was impossible on serving while
+ * claude-code/codex (one server process per run) completed it.
+ *
+ * Calls to one server are serialized (one boundary state per connection); a
+ * failed, timed-out or closed connection is evicted and the next call reconnects.
+ * The session closes on the run's abort signal or after idleMs without a call.
  */
 export interface McpToolCallSession {
   readonly closed: boolean;
@@ -1086,7 +1091,14 @@ async function callServerToolContentInternal(
             : 2;
         for (let attempt = 0; attempt < maxRuntimeAttempts; attempt += 1) {
           if (session) {
-            releaseSession ??= await session.acquire(sessionKey);
+            if (!releaseSession) {
+              const release = await session.acquire(sessionKey);
+              // This call may have ended (its time limit, an abort) while it waited behind another call to this server: the
+              // finally below already ran with nothing to release, so the turn it just got is handed straight back. Otherwise
+              // the lock stayed taken and every later call to this server in the run waited out its own limit.
+              if (preparation.signal.aborted) release();
+              else releaseSession = release;
+            }
             preparation.signal.throwIfAborted();
             assertCurrentConnection();
             sessionEntry = session.take(sessionKey, server, options?.prepared, credentialDigest);
@@ -1258,7 +1270,8 @@ async function callServerToolContentInternal(
     const mcpCode = err instanceof McpError || ProtocolError.isInstance(err) ? err.code : null;
     const boundary = classifyMcpToolCallBoundary(err, boundaryState.phase);
     const reason = err instanceof McpToolResponseTooLargeError ? "response-too-large"
-      : err instanceof McpConnectionSessionChangedError ? "connection-session-changed" : null;
+      : err instanceof McpConnectionSessionChangedError ? "connection-session-changed"
+      : err instanceof McpToolCallTimeoutError ? "timeout" : null;
     throw new McpToolCallError(
       boundary,
       mcpCode,

@@ -11,7 +11,8 @@ import {
   onToolApprovalRequested,
   onToolApprovalResolved,
 } from "../runtime/tool-approval";
-import { productExtensionSignedPayload, type ProductExtensionPermission, type ProductExtensionViewBounds, type ProductExtensionViewStatus } from "../../shared/product-extension";
+import { productExtensionSignedPayload, type ProductExtensionPermission, type ProductExtensionViewBounds, type ProductExtensionViewStatus, type SciencePresentationScope, type SciencePresentationContext, type SciencePresentationReply } from "../../shared/product-extension";
+import { createScopeSelection } from "../../shared/scope-selection";
 import { activeScienceExtension, SCIENCE_EXTENSION_ID } from "./science";
 import {
   SCIENCE_RENDERER_REQUEST_SCHEMA,
@@ -82,6 +83,13 @@ interface ActiveScienceView {
   askUserRequestIds: Set<string>;
   toolApprovalWatchChatId: string | null;
   renderer: ActiveScienceRendererView | null;
+  presentation: ReturnType<typeof createScopeSelection<SciencePresentationScope>>;
+  presentationContext: SciencePresentationContext | null;
+  presentationDocumentEpoch: number;
+  presentationDocumentReady: boolean;
+  presentationSequence: number;
+  presentationScopeKey: string | null;
+  onPresentationChanged?: () => void;
 }
 
 const activeViews = new Map<number, ActiveScienceView>();
@@ -220,6 +228,7 @@ function closeScienceQuestionSurface(active: ActiveScienceView): void {
 function closeActive(active: ActiveScienceView, notify = true): void {
   if (activeViews.get(active.ownerId) !== active) return;
   activeViews.delete(active.ownerId);
+  clearSciencePresentation(active);
   closeScienceQuestionSurface(active);
   closeRenderer(active);
   try { active.window.contentView.removeChildView(active.view); } catch {}
@@ -294,11 +303,105 @@ export function assertScienceExtensionViewPermission(senderId: number, permissio
   if (!active.permissions.has(permission)) throw new Error("science-extension-permission-denied");
 }
 
+/** A bound native owner may only withdraw its current conversation's authority.
+ * Stop must not depend on a new filesystem read or grant any execution right. */
+export function assertScienceExtensionTerminalScope(senderId: number, scope: SciencePresentationScope): void {
+  const active = activeViewForSender(senderId);
+  if (!active || !active.presentationDocumentReady || !active.presentationContext
+    || active.presentationContext.leaseId !== active.leaseId
+    || active.presentationContext.documentEpoch !== active.presentationDocumentEpoch
+    || !insideRelease(active.releaseDir, active.view.webContents.getURL())) throw new Error("science-terminal-view-not-current");
+  if (!active.permissions.has("science:agent-runtime")) throw new Error("science-extension-permission-denied");
+  const selected = active.presentation.read();
+  if (!selected || selected.projectId !== scope.projectId || selected.conversationId !== scope.conversationId) {
+    throw new Error("science-terminal-scope-mismatch");
+  }
+}
+
 function activeViewForSender(senderId: number): ActiveScienceView | null {
   for (const active of activeViews.values()) {
     if (!active.view.webContents.isDestroyed() && active.view.webContents.id === senderId) return active;
   }
   return null;
+}
+
+// Selection belongs to the native owner/lease, independently of runtime watchers.
+function notifySciencePresentation(active: ActiveScienceView): void {
+  try { active.onPresentationChanged?.(); } catch { /* Closing owners cannot undo selection. */ }
+}
+function clearSciencePresentation(active: ActiveScienceView): void {
+  active.presentationDocumentReady = false;
+  active.presentationDocumentEpoch += 1;
+  active.presentationContext = null;
+  active.presentationSequence = 0;
+  active.presentationScopeKey = null;
+  active.presentation.bind(null);
+  notifySciencePresentation(active);
+}
+function presentationView(senderId: number): ActiveScienceView {
+  assertScienceExtensionViewPermission(senderId, "science:projects");
+  const active = activeViewForSender(senderId);
+  if (active && !active.presentationDocumentReady) throw new Error("science-presentation-document-pending");
+  if (!active || !insideRelease(active.releaseDir, active.view.webContents.getURL())) {
+    throw new Error("science-presentation-document-invalid");
+  }
+  return active;
+}
+export function bindSciencePresentation(senderId: number): SciencePresentationContext {
+  const active = presentationView(senderId);
+  if (!active.presentationContext) {
+    active.presentationContext = Object.freeze({
+      contextId: randomUUID(), leaseId: active.leaseId,
+      documentEpoch: active.presentationDocumentEpoch,
+    });
+  }
+  return active.presentationContext;
+}
+export function publishSciencePresentation(senderId: number, context: unknown, sequence: unknown, scope: unknown): SciencePresentationReply {
+  const active = presentationView(senderId);
+  const candidate = context as Partial<SciencePresentationContext> | null;
+  const current = active.presentationContext;
+  if (!current || !candidate || candidate.contextId !== current.contextId
+    || candidate.leaseId !== current.leaseId || candidate.documentEpoch !== current.documentEpoch) {
+    return { ok: false, code: "science-presentation-context-stale" };
+  }
+  if (typeof sequence !== "number" || !Number.isSafeInteger(sequence) || sequence < 1) {
+    return { ok: false, code: "science-presentation-sequence-invalid" };
+  }
+  let selected: SciencePresentationScope | null = null;
+  if (scope !== null) {
+    if (!scope || typeof scope !== "object" || Array.isArray(scope)) return { ok: false, code: "science-presentation-scope-invalid" };
+    const value = scope as Record<string, unknown>;
+    const validId = (id: unknown): id is string => typeof id === "string" && /^[a-zA-Z0-9._:-]{1,128}$/.test(id);
+    if (Object.keys(value).length !== 2 || !validId(value.projectId) || !validId(value.conversationId)) {
+      return { ok: false, code: "science-presentation-scope-invalid" };
+    }
+    selected = Object.freeze({ projectId: value.projectId, conversationId: value.conversationId });
+  }
+  const key = JSON.stringify(selected);
+  if (sequence === active.presentationSequence && key === active.presentationScopeKey) {
+    return { ok: true, generation: active.presentation.snapshot().generation };
+  }
+  if (sequence <= active.presentationSequence) return { ok: false, code: "science-presentation-sequence-stale" };
+  active.presentationSequence = sequence;
+  active.presentationScopeKey = key;
+  active.presentation.bind(selected);
+  notifySciencePresentation(active);
+  return { ok: true, generation: active.presentation.snapshot().generation };
+}
+/** Read-only document/lease/selection capture for a trusted native owner action. */
+export function captureSciencePresentationForSender(senderId: number) {
+  const active=presentationView(senderId), selected=active.presentation.snapshot();
+  return Object.freeze({scope:selected.value,generation:selected.generation,leaseId:active.leaseId,
+    documentEpoch:active.presentationDocumentEpoch,contextId:active.presentationContext?.contextId ?? null});
+}
+
+export function sciencePresentationScopeForOwner(ownerId: number): SciencePresentationScope | null {
+  const active = activeViews.get(ownerId);
+  if (!active || active.view.webContents.isDestroyed()) return null;
+  try { presentationView(active.view.webContents.id); }
+  catch { return null; }
+  return active.presentation.read();
 }
 
 function safeCaptureRect(value: unknown, active: ActiveScienceView): Rectangle {
@@ -898,6 +1001,7 @@ export async function openScienceExtensionView(input: {
   window: BrowserWindow;
   bounds: ProductExtensionViewBounds;
   send: (status: ProductExtensionViewStatus) => void;
+  onPresentationChanged?: () => void;
 }): Promise<ProductExtensionViewStatus> {
   const release = activeScienceExtension();
   if (!release) return { id: SCIENCE_EXTENSION_ID, leaseId: input.leaseId, state: "error", errorCode: "science-extension-not-active", errorMessage: "Agentlas Science is not installed and enabled." };
@@ -930,6 +1034,13 @@ export async function openScienceExtensionView(input: {
     askUserRequestIds: new Set(),
     toolApprovalWatchChatId: null,
     renderer: null,
+    presentation: createScopeSelection<SciencePresentationScope>(),
+    presentationContext: null,
+    presentationDocumentEpoch: 0,
+    presentationDocumentReady: false,
+    presentationSequence: 0,
+    presentationScopeKey: null,
+    onPresentationChanged: input.onPresentationChanged,
   };
   activeViews.set(input.ownerId, active);
   active.askUserDispose = onAskUserLifecycle((request) => {
@@ -956,18 +1067,30 @@ export async function openScienceExtensionView(input: {
     }
     callback({ cancel: !allowed });
   });
+  view.webContents.on("did-start-navigation", (_event, _url, isInPlace, isMainFrame) => {
+    if (isMainFrame && !isInPlace) clearSciencePresentation(active);
+  });
+  // Only a committed main-frame document may bind a new presentation context.
+  // A failed/aborted provisional load (including a late failure from an older
+  // navigation) never reopens this fence. A later real commit restores it.
+  view.webContents.on("did-navigate", (_event, url) => {
+    if (activeViews.get(active.ownerId) !== active || view.webContents.isDestroyed()) return;
+    active.presentationDocumentReady = insideRelease(active.releaseDir, url);
+  });
   view.webContents.on("will-navigate", (event, target) => {
     if (insideRelease(active.releaseDir, target)) return;
     event.preventDefault();
   });
   view.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
   view.webContents.on("render-process-gone", (_event, details) => {
+    clearSciencePresentation(active);
     active.send({ id: SCIENCE_EXTENSION_ID, leaseId: active.leaseId, state: "error", errorCode: "science-renderer-stopped", errorMessage: details.reason });
   });
   view.webContents.on("unresponsive", () => {
     active.send({ id: SCIENCE_EXTENSION_ID, leaseId: active.leaseId, state: "error", errorCode: "science-renderer-unresponsive", errorMessage: "The Science interface is not responding." });
   });
   view.webContents.once("destroyed", () => {
+    clearSciencePresentation(active);
     if (activeViews.get(active.ownerId) === active) activeViews.delete(active.ownerId);
     closeScienceQuestionSurface(active);
     if (active.renderer) closeRenderer(active, "failed", "science-extension-view-destroyed", "The Science interface was closed.");

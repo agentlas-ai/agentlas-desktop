@@ -11,6 +11,7 @@ import {
   type ProductExtensionInstallReceipt,
   type ProductExtensionManifest,
   type ProductExtensionStatus,
+  type ProductExtensionReadFailure,
   type ProductExtensionUninstallReceipt,
 } from "../../shared/product-extension";
 
@@ -18,6 +19,26 @@ const MANIFEST_NAME = "extension.json";
 const CURRENT_NAME = "current.json";
 const MAX_MANIFEST_BYTES = 1_048_576;
 const MAX_PACKAGE_BYTES = 8 * 1024 * 1024 * 1024;
+
+export function productExtensionTransientReadCode(error: unknown): ProductExtensionReadFailure["fsCode"] | null {
+  if (!error || typeof error !== "object") return null;
+  const code = (error as NodeJS.ErrnoException).code;
+  return code === "EMFILE" || code === "ENFILE" || code === "EAGAIN" || code === "EBUSY" || code === "EIO" ? code : null;
+}
+
+export class ProductExtensionReadUnavailableError extends Error {
+  readonly code = "extension-read-unavailable";
+  constructor(readonly readFailure: ProductExtensionReadFailure) {
+    super("extension-read-unavailable");
+    this.name = "ProductExtensionReadUnavailableError";
+  }
+}
+
+class ExtensionReadAttemptError extends Error {
+  constructor(readonly fsCode: ProductExtensionReadFailure["fsCode"], readonly phase: ProductExtensionReadFailure["phase"]) {
+    super("extension-read-attempt-unavailable");
+  }
+}
 
 export interface ProductExtensionInstallerOptions {
   rootDir: string;
@@ -224,32 +245,28 @@ function writeJsonAtomic(target: string, value: unknown): void {
   const parent = path.dirname(target);
   fs.mkdirSync(parent, { recursive: true, mode: 0o700 });
   const temporary = path.join(parent, `.${path.basename(target)}.${randomUUID()}.tmp`);
-  const backup = path.join(parent, `.${path.basename(target)}.${randomUUID()}.backup`);
   fs.writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
-  let movedCurrent = false;
   try {
     if (fs.existsSync(target)) {
       const stat = fs.lstatSync(target);
       if (stat.isSymbolicLink() || !stat.isFile()) throw new Error("atomic-target-must-be-real-file");
-      fs.renameSync(target, backup);
-      movedCurrent = true;
     }
+    // Keep the verified current file readable until the single atomic replacement.
     fs.renameSync(temporary, target);
-    if (movedCurrent) fs.rmSync(backup, { force: true });
   } catch (error) {
     try { if (fs.existsSync(temporary)) fs.rmSync(temporary, { force: true }); } catch {}
-    try { if (movedCurrent && !fs.existsSync(target) && fs.existsSync(backup)) fs.renameSync(backup, target); } catch {}
     throw error;
   }
 }
 
-function readCurrent(rootDir: string, id: string): CurrentPointer | null {
+function readCurrent(rootDir: string, id: string, classifyReadFailure = false): CurrentPointer | null {
   try {
     const value = readJsonFile(currentPath(rootDir, id)) as Partial<CurrentPointer>;
     if (value.schema !== PRODUCT_EXTENSION_INSTALL_SCHEMA || value.id !== id) return null;
     if (typeof value.version !== "string" || typeof value.manifestDigest !== "string" || typeof value.installedAt !== "string" || typeof value.enabled !== "boolean") return null;
     return value as CurrentPointer;
-  } catch {
+  } catch (error) {
+    if (classifyReadFailure && productExtensionTransientReadCode(error)) throw error;
     return null;
   }
 }
@@ -274,22 +291,27 @@ export class ProductExtensionInstaller {
     this.options = options;
   }
 
-  status(id: string): ProductExtensionStatus {
+  private inspectRelease(id: string, fresh: boolean): { status: ProductExtensionStatus; release: ActiveProductExtension | null } {
     if (!isProductExtensionId(id)) return {
-      ...emptyStatus(id),
+      status: { ...emptyStatus(id),
       phase: "repair-required",
       errorCode: "invalid-extension-id",
-      errorMessage: "invalid-extension-id",
+      errorMessage: "invalid-extension-id" }, release: null,
     };
-    const pointer = readCurrent(this.options.rootDir, id);
-    if (!pointer) return emptyStatus(id);
+    let pointer: CurrentPointer | null = null;
+    let phase: ProductExtensionReadFailure["phase"] = "current-pointer";
     try {
+      pointer = readCurrent(this.options.rootDir, id, true);
+      if (!pointer) return { status: emptyStatus(id), release: null };
+      phase = "release-verification";
       const release = exactChild(releasesRoot(this.options.rootDir, id), pointer.version);
       const manifest = readManifest(release);
       assertSignature(manifest, this.options.trustedPublicKeys);
+      if (fresh) verifiedPackageShapes.delete(release);
       verifyPackage(release, manifest);
       if (sha256Text(productExtensionSignedPayload(manifest)) !== pointer.manifestDigest) throw new Error("active-manifest-digest-mismatch");
       return {
+        status: {
         id,
         phase: pointer.enabled ? "installed" : "disabled",
         installed: true,
@@ -298,19 +320,42 @@ export class ProductExtensionInstaller {
         installedAt: pointer.installedAt,
         errorCode: null,
         errorMessage: null,
+        },
+        release: pointer.enabled ? { manifest, releaseDir: release, entryPath: exactChild(release, manifest.entry) } : null,
       };
     } catch (error) {
+      const fsCode = productExtensionTransientReadCode(error);
+      if (fsCode) throw new ExtensionReadAttemptError(fsCode, phase);
       return {
+        status: {
         id,
         phase: "repair-required",
-        installed: true,
+        installed: Boolean(pointer),
         enabled: false,
-        version: pointer.version,
-        installedAt: pointer.installedAt,
+        version: pointer?.version ?? null,
+        installedAt: pointer?.installedAt ?? null,
         errorCode: error instanceof Error ? error.message.split(":", 1)[0] : "extension-integrity-failed",
         errorMessage: error instanceof Error ? error.message : String(error),
+        }, release: null,
       };
     }
+  }
+
+  private inspectReleaseWithRetry(id: string, fresh = false): { status: ProductExtensionStatus; release: ActiveProductExtension | null } {
+    for (let attempt = 0; ; attempt += 1) {
+      try { return this.inspectRelease(id, fresh || attempt > 0); }
+      catch (error) {
+        if (!(error instanceof ExtensionReadAttemptError)) throw error;
+        if (attempt === 0) continue;
+        return { release: null, status: { ...emptyStatus(id), phase: "repair-required",
+          errorCode: "extension-read-unavailable", errorMessage: "Extension authority could not be read.",
+          readFailure: { schema: "agentlas.product-extension-read-failure.v1", fsCode: error.fsCode, phase: error.phase, attempts: 2 } } };
+      }
+    }
+  }
+
+  status(id: string, fresh = false): ProductExtensionStatus {
+    return this.inspectReleaseWithRetry(id, fresh).status;
   }
 
   listStatuses(prefix = ""): ProductExtensionStatus[] {
@@ -332,17 +377,9 @@ export class ProductExtensionInstaller {
   }
 
   activeRelease(id: string): ActiveProductExtension | null {
-    const status = this.status(id);
-    if (status.phase !== "installed" || !status.version) return null;
-    const releaseDir = exactChild(releasesRoot(this.options.rootDir, id), status.version);
-    const manifest = readManifest(releaseDir);
-    assertSignature(manifest, this.options.trustedPublicKeys);
-    verifyPackage(releaseDir, manifest);
-    return {
-      manifest,
-      releaseDir,
-      entryPath: exactChild(releaseDir, manifest.entry),
-    };
+    const result = this.inspectReleaseWithRetry(id);
+    if (result.status.readFailure) throw new ProductExtensionReadUnavailableError(result.status.readFailure);
+    return result.release;
   }
 
   captureActivationState(ids: readonly string[]): ProductExtensionActivationSnapshot[] {

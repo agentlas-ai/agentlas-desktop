@@ -6,8 +6,25 @@ export type ConnectableRuntime = "codex" | "claude-code" | "antigravity" | "grok
 
 export const CONNECTABLE_RUNTIMES: readonly ConnectableRuntime[] = ["codex", "claude-code", "antigravity", "grok", "kimi", "cursor"];
 
-/** 온보딩의 "로컬 모델" 칸이 세는 런타임 — 칸과 첫 역할 배정(first-run-roles)이 같은 목록을 읽는다. */
-export const FIRST_RUN_LOCAL_MODEL_KINDS: ReadonlySet<string> = new Set(["lmstudio", "mlx", "agentlas-local"]);
+/**
+ * 온보딩의 "로컬 모델" 칸이 세는 런타임 — 칸과 첫 역할 배정(first-run-roles)이 같은 목록을 읽는다.
+ * detect.ts 가 로컬 런타임으로 내는 네 종류 전부다. ollama 는 1.3.43(2026-10-15)부터 실제로 감지·실행되는
+ * 런타임인데 이 목록에는 옛 "이관용 투영" 시절 규칙대로 빠져 있어서, Windows 실측(1.3.88, 2026-10-23)에서
+ * Ollama 가 돌고 실행도 되는데 이 칸은 "모델 없음"이었다.
+ */
+export const FIRST_RUN_LOCAL_MODEL_KINDS: ReadonlySet<string> = new Set(["ollama", "lmstudio", "mlx", "agentlas-local"]);
+
+/** 이 감지 행이 온보딩 "로컬 모델" 칸을 켜는가: 로컬 종류 + 확인이 끝났고(pending 아님) 고를 모델이 있다. 칸·다시 확인·첫 역할이 같이 읽는다. */
+export function firstRunLocalModelReady(row: {
+  kind: string;
+  model?: string | null;
+  availableModels?: readonly string[];
+  localObservation?: { state?: string } | null;
+}): boolean {
+  return FIRST_RUN_LOCAL_MODEL_KINDS.has(row.kind)
+    && row.localObservation?.state !== "pending"
+    && Boolean(row.model || (row.availableModels?.length ?? 0) > 0);
+}
 
 /** 온보딩의 Agentlas 칸이 "사용 가능"을 켜는 조건(유료 플랜 + 남은 크레딧). 칸과 첫 역할 배정이 같이 읽는다. */
 export function agentlasServingReady(credits: { authenticated: boolean; plan?: string; remainingCredits?: number } | null | undefined): boolean {

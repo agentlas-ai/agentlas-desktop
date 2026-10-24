@@ -1,43 +1,43 @@
 /**
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+ * Claude Code's own browser surfaces — Agentlas browser first.
+ *
+ * Owner question (2026-09-24): "당근 내장브라우저에서 하겠지? 자꾸 외부크롬 켜지는거 같아서".
+ * Every Agentlas run already has an owned browser (the in-app guest for a watched
+ * chat, the dedicated Chrome for Testing profile otherwise). Claude Code, spawned
+ * with the owner's HOME and without --strict-mcp-config (native tools are kept on
+ * purpose), also loads the owner's own browser surfaces:
+ *
+ * Measured on claude 2.1.281 via the `system/init` event of `claude -p`:
+ *   - the user plugin `playwright@claude-plugins-official` adds 25 tools
+ *     (`mcp__plugin_playwright_playwright__*`); `@playwright/mcp` launches the
+ *     installed Google Chrome channel — an external window with another login.
+ *   - Claude in Chrome (`mcp__claude-in-chrome__*`, drives the owner's real
+ *     Chrome) is off in `-p` today even with `claudeInChromeDefaultEnabled`, and
+ *     `--chrome` turns it on (22 tools). `--no-chrome` pins it off so a CLI
+ *     default change cannot silently open it (codex did exactly that with plugins).
+ *   - `--disallowedTools "mcp__*playwright*"` removes every Playwright tool;
+ *     `mcp__<server>` removes a whole server; wildcards match the server part too.
+ *     A deny also beats `--allowedTools`, so a pattern that would match one of
+ *     Main's own bound servers is dropped instead of emitted.
+ *   - the engine plugin's `agentlas-browser` (`mcp__plugin_hephaestus_agentlas-browser`)
+ *     is a headless duplicate of the Agentlas browser on the same profile/port; it
+ *     is closed only when Main bound its own `agentlas-browser` for this run. It is
+ *     matched as `mcp__plugin_*_agentlas-browser__*`: a mid-name wildcard without
+ *     the trailing `__*` matches nothing.
+ *   - with `--chrome` forced, `mcp__claude-in-chrome` in the deny list still removes
+ *     all of its tools (init: chrome 0).
+ *
+ * Priority, not a ban (owner, 2026-09-24: "우선순위를 agentlas 플러그인을 우선으로
+ * 하자는거지"; shared/capability-priority.ts):
+ *   - Claude in Chrome drives the owner's own signed-in Chrome — desktop-control
+ *     class, pinned off (`--no-chrome` + deny) unless Main granted Computer Use.
+ *   - Browser-automation servers (Playwright …) are outside equivalents of the
+ *     Agentlas browser: hidden while an Agentlas browser is reachable in this run
+ *     (Main bound one, or the engine plugin's copy is enabled in the owner's
+ *     Claude settings), kept as the fallback otherwise so a turn that needs a
+ *     browser never dead-ends.
+ *
+ * Only an explicit Computer Use grant keeps every surface.
  */
 import fs from "node:fs";
 import os from "node:os";

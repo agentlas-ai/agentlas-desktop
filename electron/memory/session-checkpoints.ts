@@ -164,7 +164,12 @@ export function createSessionCheckpointStore(getDatabase: () => Database.Databas
   }): Promise<SessionCheckpoint | null> {
     input.signal?.throwIfAborted(); input.assertSourceCurrent();
     const db = getDatabase(); schema(db);
-    const key = namespace(input.identity), previous = read(input.identity);
+    const key = namespace(input.identity), retained = read(input.identity);
+    // A filtered journal may begin after an authorized replay barrier. Earlier
+    // checkpoint state stays retained evidence, but cannot acquire a new valid
+    // frontier by being copied into this projection (semantic or host-only).
+    const priorFrontier = retained && input.snapshot.entries.find(entry => entry.seq === retained.throughSeq);
+    const previous = retained && priorFrontier?.digest === retained.frontierDigest ? retained : null;
     const expectedRevision = Number((db.prepare("SELECT revision FROM memory_session_checkpoint_heads WHERE namespace=?").get(key) as { revision: number } | undefined)?.revision ?? 0);
     const sourceEpoch = epoch(db);
     if (input.expectedForgetEpoch !== undefined && sourceEpoch !== input.expectedForgetEpoch) return null;

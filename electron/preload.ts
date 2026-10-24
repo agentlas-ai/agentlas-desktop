@@ -257,6 +257,7 @@ const api: AgentlasIpc = {
   },
   productExtensions: {
     scienceStatus: () => ipcRenderer.invoke("productExtensions:scienceStatus"),
+    scienceOutputScope: () => ipcRenderer.invoke("productExtensions:scienceOutputScope"),
     scienceSuiteStatus: () => ipcRenderer.invoke("productExtensions:scienceSuiteStatus"),
     installScience: () => ipcRenderer.invoke("productExtensions:installScience"),
     installScienceSuite: () => ipcRenderer.invoke("productExtensions:installScienceSuite"),
@@ -584,7 +585,7 @@ const api: AgentlasIpc = {
     getSettings: () => ipcRenderer.invoke("multimodal:getSettings"),
     saveSettings: (settings) => ipcRenderer.invoke("multimodal:saveSettings", settings),
     status: () => ipcRenderer.invoke("multimodal:status"),
-                                                      
+    // 생성 — Oberon/T-rex 스튜디오에서 적출한 실행 엔진(2026-08-21).
     generateImage: (payload: { model?: "codex" | "gemini" | "auto"; prompt: string }) =>
       ipcRenderer.invoke("multimodal:generateImage", payload),
     imageProviders: () => ipcRenderer.invoke("multimodal:imageProviders"),
@@ -1128,6 +1129,17 @@ const api: AgentlasIpc = {
     state: () => ipcRenderer.invoke("archive:state"),
     setAuto: (enabled) => ipcRenderer.invoke("archive:setAuto", enabled),
     restore: (agentId) => ipcRenderer.invoke("archive:restore", agentId),
+  },
+  enterpriseServer: {
+    status: () => ipcRenderer.invoke("enterpriseServer:status"),
+    enroll: (input) => ipcRenderer.invoke("enterpriseServer:enroll", input),
+    recheck: () => ipcRenderer.invoke("enterpriseServer:recheck"),
+    disconnect: (input) => ipcRenderer.invoke("enterpriseServer:disconnect", input),
+  },
+  reach: {
+    getExplore: () => ipcRenderer.invoke("reach:getExplore"),
+    setExplore: (enabled, consent) => ipcRenderer.invoke("reach:setExplore", enabled, consent),
+    status: () => ipcRenderer.invoke("reach:status"),
   },
   oneCapabilities: {
     list: (input) => ipcRenderer.invoke("oneCapabilities:list", input),

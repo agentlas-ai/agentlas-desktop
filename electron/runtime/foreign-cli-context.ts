@@ -1,42 +1,42 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+// Personal context that a foreign CLI pulls in (owner decision 2026-10-11, all users): a product run carries none of
+// the person's own instructions, memory, skills, plugins, hooks or MCP servers; only One gets the items the person
+// switched on (capabilities/one-capabilities.ts).
+//
+// Grok has two separate leaks, closed in two ways (measured on grok 1.0.51 with `grok inspect --json`):
+//
+//  1. It scans OTHER tools' folders by default ("Claude compatibility ... enabled by default"):
+//     `~/.claude/Claude.md`, ~/.claude/settings(.local).json permissions, skills, `~/.claude.json` MCP servers,
+//     hooks, and the same for ~/.cursor and ~/.codex. Each scan has an env switch
+//     GROK_<CLAUDE|CURSOR|CODEX>_<SKILLS|RULES|AGENTS|MCPS|HOOKS|SESSIONS>_ENABLED. `AGENTS` is the one that
+//     governs Claude.md (RULES governs rules/*.md). With every cell false `grok inspect` marks all of them
+//     `[disabled]` and the Harness Compatibility table shows OFF (env).
+//
+//  2. Its OWN folder (GROK_HOME, default ~/.grok): Agents.md (global instructions), memory-v2, skills/, hooks/,
+//     hooks-paths, installed-plugins, sandbox.toml and the person's config.toml. No switch exists for the
+//     instructions file, so a product run points GROK_HOME at a mirror (config-home-mirror.ts) that links only the
+//     entries in GROK_LINKED_ENTRIES (sign-in, binaries, caches, org policy, folder trust: auth.json stays one and the
+//     same file, so the sign-in works; the session store is the mirror's own since 2026-10-12). config.toml and
+//     user-settings.json are the mirror's own files holding only an allowlist of the person's (productGrokConfig).
+//     Until 2026-10-17 every other entry was linked and config.toml was the person's minus five tables, so their
+//     `[permission]` rules, `[sandbox]`, `[shell_environment_policy] set` values, `[ui]` (always-approve, notification
+//     hook commands, status-line command), `[agent]`, `[paths]`, `[plugins]` and `[session] load_envrc` reached
+//     product runs, like the Codex copy did (owner 2026-10-06/10-11: the person's settings never drive product agents).
+//     Skills Grok also reads from the generic `~/.agents/skills` root are hidden with `[skills] ignore`.
+//     Memory is turned off with GROK_MEMORY=0.
+//
+//  3. HOME itself (closed 2026-10-17 by a HOME of its own, like Antigravity's). With every cell above off Grok still
+//     reads, straight from HOME, with no switch, ignoring CLAUDE_CONFIG_DIR (grok 1.0.60, a fake HOME of marker files and
+//     real product turns through the GROK_HOME mirror):
+//       - `~/.claude/settings.json` and `settings.local.json`: their permission rules (a personal deny rule denied `pwd`
+//         in a product write turn; the owner's files hold 127 rules) and their `env` (a personal value reached the
+//         product bash; the owner's carries APP_STORE_CONNECT_*, GOOGLE_APPLICATION_CREDENTIALS, GOOGLE_PLAY_KEY_FILE);
+//       - `~/.claude/plugins`: every installed Claude Code plugin with its hooks (SessionStart and UserPromptSubmit ran
+//         on a product turn), MCP servers (started) and subagents. `[plugins] disabled` drops a plugin's agents, skills
+//         and MCP servers but not its hooks;
+//       - `~/.claude/agents`: the person's own subagents.
+//     So a product run's HOME is a mirror (syncGrokProductUserHome) in which every entry of the person's HOME is a link
+//     (Library too, so the login keychain resolves as for the person; .gitconfig, .ssh and the rest stay the person's
+//     for the tools a turn runs) except `.claude`, `.claude.json`, `.agents` and `.grok`, see GROK_USER_HOME_OWN.
 import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";

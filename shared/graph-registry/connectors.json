@@ -543,7 +543,7 @@
       "envelope": "graph/1/envelope.toolcall",
       "status": "implemented",
       "spec": "06 §6 / 기획 스파이크 A7",
-      "note": "도구 호출 **직전**에 도는 관문(PreToolUse)으로 막는다. 샌드박스는 MCP 호출에 적용되지 않고 `--allowedTools` 류는 허용만 하므로 거절할 수 있는 지점은 여기뿐이다.\n★막을 수 없는 런타임에서는 막았다고 적지 않는다 — 등급 3칸(enforced/cooperative/observed)을 실행 결과에 그대로 싣고, 시뮬레이션의 약속 문장도 가장 약한 노드 등급에 맞춰 내린다. codex는 cooperative로 둔다.",
+      "note": "도구 호출 **직전**에 도는 관문(PreToolUse)으로 막는다. 샌드박스는 MCP 호출에 적용되지 않고 `--allowedTools` 류는 허용만 하므로 거절할 수 있는 지점은 여기뿐이다. 실측 2026-08-04(claude 2.1.220): PreToolUse deny가 bypassPermissions를 이기고 Bash 호출을 실제로 막았다.\n★막을 수 없는 런타임에서는 막았다고 적지 않는다 — 등급 3칸(enforced/cooperative/observed)을 실행 결과에 그대로 싣고, 시뮬레이션의 약속 문장도 가장 약한 노드 등급에 맞춰 내린다. codex는 심볼만 확인됐고 거절 실측이 무응답이라 cooperative로 둔다.",
       "phase": "run",
       "failures": [
         "TOOL_BROKER_TOOL_NOT_DECLARED",

@@ -134,6 +134,11 @@ asarUnpack:
   # complete package outside app.asar so both POSIX forkpty and Windows
   # ConPTY assets remain executable in the packaged app.
   - "**/node_modules/node-pty/**/*"
+  # document.deck.build runs a model-written pptxgenjs script in a child Node process (live-document/deck-run.ts), which reads
+  # real files, not app.asar. pptxgenjs and every package name it requires at runtime, by name: the packager re-hoists the
+  # tree, so jszip's own pako and string_decoder land at the top of node_modules (not under jszip) and readable-stream or
+  # safe-buffer may move the same way. A name missing here fails every build with "Cannot find module".
+  - "**/node_modules/{pptxgenjs,jszip,pako,readable-stream,safe-buffer,string_decoder,image-size,queue,https,lie,immediate,inherits,isarray,core-util-is,process-nextick-args,setimmediate,util-deprecate}/**/*"
 
 # Required workers still need the globally enabled ELECTRON_RUN_AS_NODE fuse;
 # their internal call sites exact-gate command/argv. The fuse itself is not

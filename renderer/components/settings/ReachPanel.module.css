@@ -1,0 +1,19 @@
+.panel { margin-top: 24px; }
+.title { font-family: var(--font-head); font-size: 15px; margin: 0 0 12px; word-break: keep-all; }
+.card { padding: 14px; border-radius: var(--radius-md); background: var(--paper); border: 1px solid var(--paper-edge); box-shadow: var(--shadow-1); display: grid; gap: 8px; }
+.head { position: relative; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 2px 4px; }
+.switchLabel { position: relative; display: inline-flex; align-items: center; gap: 8px; min-width: 0; }
+.rowTitle { font-size: 13px; color: var(--ink); word-break: keep-all; }
+.switch { width: 40px; height: 24px; position: relative; padding: 0; border: 0; border-radius: 999px; background: var(--paper-edge-strong); cursor: pointer; transition: background 140ms ease; flex: 0 0 auto; }
+.switch > span { position: absolute; top: 3px; left: 3px; width: 18px; height: 18px; border-radius: 50%; background: var(--white); box-shadow: 0 1px 3px color-mix(in srgb, var(--ink) 28%, transparent); transition: transform 140ms ease; }
+.switch[data-on="true"] { background: var(--accent); }
+.switch[data-on="true"] > span { transform: translateX(16px); }
+.switch:disabled { opacity: 0.6; cursor: default; }
+.switch:focus-visible, .helpButton:focus-visible { outline: 2px solid color-mix(in srgb, var(--accent) 42%, transparent); outline-offset: 2px; }
+.helpButton { position: relative; display: inline-grid; place-items: center; flex: 0 0 auto; width: 20px; height: 20px; padding: 0; box-sizing: border-box; border: 1px solid var(--paper-edge); border-radius: 50%; background: transparent; color: var(--muted-deep); font-size: 10px; font-weight: 700; line-height: 1; cursor: pointer; }
+.helpButton::before { content: ""; position: absolute; inset: -2px; /* a11y-hit-area: 24px */ }
+.helpButton:hover, .helpButton[aria-expanded="true"] { color: var(--ink); border-color: var(--paper-edge-strong); }
+.help { position: absolute; z-index: 20; top: calc(100% + 6px); left: 0; box-sizing: border-box; width: min(360px, calc(100vw - 96px)); padding: 12px 14px; border: 1px solid var(--paper-edge); border-radius: 12px; background: var(--popup-card-bg, var(--paper)); box-shadow: var(--popup-shadow); color: var(--ink); font-size: 12px; line-height: 1.6; word-break: keep-all; overflow-wrap: break-word; }
+.status, .hint, .notice { margin: 0; padding: 0 4px; font-size: 12px; line-height: 1.5; color: var(--muted-deep); font-variant-numeric: tabular-nums; word-break: keep-all; overflow-wrap: break-word; }
+.hint { font-variant-numeric: normal; }
+.notice { color: var(--ink); font-variant-numeric: normal; }

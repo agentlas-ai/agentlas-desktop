@@ -24,7 +24,14 @@ export function localContextFailure(code: LocalContextCode, runtime: string, loc
 export function localHttpFailureClass(text: string, status?: number): "context" | "tools" | "other" {
   if (status === 413) return "context";
   let error: Record<string, unknown>;
-  try { const value = JSON.parse(text); error = value?.error; if (!error || typeof error !== "object" || Array.isArray(error)) return "other"; } catch { return "other"; }
+  try {
+    const value = JSON.parse(text);
+    error = value?.error;
+    // Ollama relays its llama-server's JSON error as a string: {"error":"{\"error\":{\"type\":\"exceed_context_size_error\",…}}"}
+    // (0.31.1, /api/chat with truncate:false). Read the nested machine object; the string is never matched as prose.
+    if (typeof error === "string") { const nested = JSON.parse(error); error = nested?.error; }
+    if (!error || typeof error !== "object" || Array.isArray(error)) return "other";
+  } catch { return "other"; }
   if (["exceed_context_size_error", "context_length_exceeded"].includes(String(error.type))
     || error.code === "context_length_exceeded") return "context";
   if (error.code === "unsupported_parameter" && ["tools", "tool_choice"].includes(String(error.param))) return "tools";

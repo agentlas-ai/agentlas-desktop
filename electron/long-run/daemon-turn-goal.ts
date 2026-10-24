@@ -2,29 +2,30 @@
  *
  * Goal custody is Desktop-only, so a goal-free One turn that runs in the service (team rooms included) finishes there as an
  * ordinary turn and only its intake moves to Main (goal-intake-forward.ts). Main then admitted the Goal as `queued` and nothing
- ever moved it. In production the team runs executed and failed with task-force-verification-failed, yet the long_runs stayed
- queued with started_at empty, the contracts stayed active, and the rooms stayed bound, so the next owner message was attached
- to a Goal whose run had long ended and the AGI monitor reported a failed run for a Goal that "never started".
+ * ever moved it: production 2026-10-15T23:12Z, rooms fc53939f (AB-GPT) and a1ab9a72 (AB-Light). The team runs executed and
+ * failed with task-force-verification-failed, yet both long_runs stayed queued with started_at empty, both contracts stayed
+ * active, and the rooms stayed bound, so the next owner message was attached to a Goal whose run had long ended and the AGI
+ * monitor reported a failed run for a Goal that "never started".
  *
  * The turn is the Goal's only run, so the Goal follows it, in the existing vocabulary and only for a finite Goal (a continuous
  * Goal keeps its own episode loop):
  *  - the turn is live  -> running (the run started)
  *  - invoke_completed (team run: verifier passed) -> verifying -> completed, contract completed, room unbound
- *  - a bounded series ("once an hour, ten in all": the revision carries a cadence, shared/auto-goal.ts GoalCadence): the turn was the
+ *  - a bounded series ("1시간에 1회씩 최대 10개": the revision carries a cadence, shared/auto-goal.ts GoalCadence): the turn was the
  *    series' first run, not the Goal, so no outcome of that turn but the owner's own stop ends it. The Goal rests on a host-owned
  *    schedule (waiting_tool + a retry one interval after the turn ended, store/long-runs.ts scheduleBlockedGoalRetry) and the
  *    sweep resumes it as an ordinary Goal turn on Desktop, where timer waits are allowed up to the series' end
  *    (goal-deadline.ts). Contract and room binding stay. That holds when the turn finished, when the team left work, and when it
  *    FAILED for any typed cause (quota, login, a refusal, a provider or app failure) or was interrupted by the app closing: the
- *    run missed its slot and the next cycle tries again (failures and quota are held and
- *    retried next cycle, never cancelled). One exception: a turn that ended on a question card (invoke_completed with
+ *    run missed its slot and the next cycle tries again (owner 2026-10-21, X marketing room: "failures and quota are held and
+ *    retried next cycle, never cancelled"). One exception: a turn that ended on a question card (invoke_completed with
  *    decisionRequested) waits for the owner's answer instead, the same hold a question takes, because the next cycle must never
  *    act on a request nobody has approved (real posting on the owner's account starts only after the owner's approval).
  *  - a team run that did not verify (invoke_failed task-force-verification-failed, or invoke_completed with a failed team
  *    verifier): work is left, and the room already told the owner what and that saying "continue" picks it up
  *    (borrowed-task-force.ts taskForceIncompleteMessage) -> held for the owner's answer: the same hold a question card takes
  *    (waiting_tool + goal_owner_answer_required). Contract and room binding stay, nothing wakes the Goal, and the owner's next
- *    message, "continue" included, resumes THIS Goal (stoppedGoalMessageReopens). Before this the Goal
+ *    message, "continue" included, resumes THIS Goal (stoppedGoalMessageReopens). Owner 2026-10-21, X marketing room: the Goal
  *    used to be cancelled 31 s after such a turn and the room's promise ended up false.
  *  - invoke_failed / invoke_threw for any other cause (a refusal, a provider or app failure) of a Goal that is not a series ->
  *    cancelling -> cancelled, contract cancelled, room unbound (the service has no controller that could retry it; the owner's

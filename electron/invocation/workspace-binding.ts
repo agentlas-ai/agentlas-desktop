@@ -285,19 +285,3 @@ export function normalizeRemoteInvocationPermission(
   if (permission === "write" || permission === "full") return permission;
   return "read";
 }
-
-export function isMobileReadRuntimeAllowed(kind: string): boolean {
-  // This helper protects explicit restricted-read runtime consumers. Paired
-  // Mobile invocations use the normal Desktop permission contract and do not
-  // set that separate execution flag.
-  return kind === "byok" || kind === "ollama";
-}
-
-export class MobileReadRuntimeBoundaryError extends Error {
-  readonly code = "mobile-runtime-not-read-sandboxed";
-
-  constructor(message: string) {
-    super(message);
-    this.name = "MobileReadRuntimeBoundaryError";
-  }
-}

@@ -212,7 +212,7 @@ async function observeApp(body: Record<string, unknown>): Promise<Record<string,
   const maxNodes = boundedInteger(body.maxNodes, 1, 300, 200);
   if (!app) return { ok: false, error: "invalid-app", message: "app is required and must be under 160 characters." };
   if (maxDepth === null || maxNodes === null) {
-    
+    // Name the range: without it a model retried 1500, 1000, 500 and failed each time (production 2026-10-05 20:29 UTC).
     return { ok: false, error: "invalid-arguments", message: "maxDepth must be 1-32 and maxNodes 1-300 (omit them for 24 and 200)." };
   }
   const denied = await checkComputerUseWindowScope({ route: "observe", app });

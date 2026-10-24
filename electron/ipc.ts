@@ -19,7 +19,7 @@ import { registerOneContextIpc } from "./one/context-ipc";
 import { openOneContextPermissions } from "./one/context-platform";
 import { configureOneHarnessRuntimeClient } from "./one/harness";
 import { authorizeSupervisorNativeOrigin, supervisorNativeNoticePurpose, dispatchSupervisorNativeCommand,
-  configureOneSupervisorNativeRuntime, callOneSupervisorRuntime, supervisorRuntimeMode } from "./one/supervisor-native-runtime";
+  configureOneSupervisorNativeRuntime, callOneSupervisorRuntime } from "./one/supervisor-native-runtime";
 import { assertOneWindowChannel } from "./one-window-manager";
 import { registerOnePersonalDataIpc } from './one/personal-data-ipc';
 import { registerBusinessShippingIpc } from './business/shipping-console-ipc';
@@ -313,7 +313,7 @@ import { stripAutomationContinuityCapsule } from "./automation-continuity";
 import { buildChatRecap, markChatRecapViewed } from "./chat/recap";
 import { assertChatRemovalAllowed } from "./chat/removal-guard";
 import { startStudio, stopStudio } from "./hephaestus/studio";
-import { listPendingAskUserRequests, submitAskUserAnswer } from "./confirm/ask-user";
+import { listRuntimeAskUserRequests, submitRuntimeAskUserAnswer } from "./confirm/ask-user-runtime";
 import type {
   UpdaterInstallOptions,
   HephaestusBuildEvent,
@@ -492,6 +492,7 @@ import {
   archiveChat,
   clearChatContext,
   createChat,
+  createProjectWorkChat,
   createOrReplayPromptChat,
   getChat,
   getOrCreateOneMemberChat,
@@ -974,13 +975,13 @@ import { installHostToolPermissionPolicy } from "./runtime/host-tool-permission-
 // Hephaestus 빌더(hep-build) 진행 중 실행 — 취소용 AbortController 레지스트리.
 const activeBuilds = new Map<string, AbortController>();
 /**
-
-
-
-
-
-
-
+ * 실행 중(또는 마지막) 빌드의 전사(轉寫).
+ *
+ * 빌드는 main에서 돌지만 진행 상태는 렌더러 모듈 변수에만 있었다. 그래서 빌드 중에
+ * 다른 메뉴를 한 번 누르면 요청·로그·단계가 통째로 사라졌다(2026-08-16 실측:
+ * rows 10→0, request 소실, 화면상 "멈춤" — 실제로는 main에서 계속 돌고 있었다).
+ * 터미널 hep-build는 프로세스가 살아 있는 한 화면을 잃지 않으므로, 이건 GUI가
+ * 만들어 낸 차이다. 여기 전사를 남겨 두면 화면이 돌아왔을 때 그대로 복원된다.
  */
 const buildTranscripts = new Map<string, {
   runId: string;
@@ -1230,10 +1231,10 @@ async function confirmNativeSiteAgentAppMcp(
   _win: BrowserWindow,
   _recommendation: SiteAgentAppMcpRecommendation,
 ): Promise<"approved" | "declined"> {
-                                                           
-                                                          
-                                                       
-                                                 
+  /* 승인 게이트 폐지(오너 이사회 결정 2026-08-10) — 빌드 전 MCP 연결 검토 모달은 더
+     이상 띄우지 않고, 예전 모달의 기본 버튼이던 "MCP 없이 계속"(= declined)을 자동
+     선택한다. 앱 생성·실행은 MCP 없이 계속되고, 어떤 MCP 도 자동으로 붙지 않는다 —
+     실행 직전 설치/키/연결/런타임 재검증과 안전 정책 차단은 그대로 남는다. */
   return "declined";
 }
 
@@ -1655,12 +1656,12 @@ function durableOwnerTextRoutes() {
     isCaptured: runId => configuredNativeGuiOwner()?.inspect(runId).retained === true });
 }
 const rendererInvocationProcessEpoch = randomUUID();
-
-
-
-
-
-
+/*
+ * invoke:run runs synchronously from receipt to its durable admission reservation, so a run ID this process received
+ * that still has no admission row was refused before reservation and can never start. A request recorded before this
+ * process started cannot be in flight either. invoke:admission reports both, so a renderer is not left holding an
+ * "admission unknown" card that no receipt can ever resolve (1.2.89 refusals, Hope chat 2026-10-10).
+ */
 const invocationProcessStartedAt = Date.now();
 const invocationRunIdsReceived = new Set<string>();
 function noteInvocationRunReceived(runId: unknown): void {
@@ -2503,11 +2504,11 @@ export function registerIpcHandlers(): { businessShipping: ReturnType<typeof reg
       return { ok: false, reason: err instanceof Error ? err.message : String(err) };
     }
   });
-    
-                                                      
-                                                             
-                                       
-     
+  /*
+   * 디자인 → 코드 내보내기(오너 정의 2026-08-20: Site 는 디자인 생성기다).
+   * 승인된 화면을 React/HTML(웹) 또는 Flutter/React Native(앱) 소스로 옮겨,
+   * 사용자가 고른 폴더에 파일 트리로 쓴다. 배포는 하지 않는다.
+   */
   ipcMain.handle("site:exportScreenCode", async (e, payload: {
     projectId?: string;
     screenId?: string;
@@ -3211,7 +3212,7 @@ export function registerIpcHandlers(): { businessShipping: ReturnType<typeof reg
       return desktopRuntimeRolePoolState();
     },
   );
-
+  // 온보딩 AI 단계가 끝날 때 — 연결한 것으로 오케스트레이터·워커 풀을 처음 채운다(오너 2026-10-06).
   registerAppControlDomainIpc(ipcMain, "runtime:seedFirstRunRoles", async (apiChoice?: unknown) => {
     const seed = await seedFirstRunRoles(apiChoice);
     if (seed.seeded) emitDesktopStoreChange({ entity: "runtime" });
@@ -3228,7 +3229,7 @@ export function registerIpcHandlers(): { businessShipping: ReturnType<typeof reg
       ?? runtimes.find((runtime) => runtime.kind === kind);
     return openCliLogin(kind, selected?.source);
   });
-
+  // 연결 팝업(오너 2026-09-29): 확인 → 설치 → 로그인(브라우저) → 확인 → 완료. 초록불은 살아 있는 확인 뒤에만.
   setRuntimeConnectEmitter((snapshot) => {
     for (const win of BrowserWindow.getAllWindows()) {
       if (!win.isDestroyed()) win.webContents.send("runtime:connectEvent", snapshot);
@@ -3291,10 +3292,10 @@ export function registerIpcHandlers(): { businessShipping: ReturnType<typeof reg
     (sel: { kind: RuntimeKind; backend?: RuntimeBackend | null; availableModels?: string[] | null }) =>
       listRuntimeModels(sel.kind, sel.backend ?? null, sel.availableModels ?? null, Date.now()),
   );
-  
-
-
-
+  /*
+   * 실행 완료 알람(오너 2026-09-07). 값은 main 이 소유하고 렌더러는 패치만 보낸다 —
+   * 저장된 값이 곧 알림 판단의 입력이라, 렌더러가 임의 모양을 쓰게 두면 안 된다.
+   */
   registerAppControlDomainIpc(ipcMain, "runAlerts:get", () => getRunAlerts());
   registerAppControlDomainIpc(ipcMain, "runAlerts:set", (patch: unknown) => setRunAlerts(patch));
   ipcMain.handle("runAlerts:preview", () => {
@@ -3387,12 +3388,12 @@ export function registerIpcHandlers(): { businessShipping: ReturnType<typeof reg
   });
 
   // ── 에이전트 동시성(스웜 크기) — 사양 기반 추천 + 사용자 슬라이더 ─────────
-  
-
-
-
-
-
+  /*
+   * ★권한 안내는 문장이 아니라 버튼이어야 한다(오너 실판정 2026-08-06) — "시스템 설정 >
+   * 개인정보 보호…를 켜세요"는 모르는 사람에겐 없는 것과 같다. 상태 조회는 실행 중인
+   * **이 프로세스** 기준의 진실(isTrustedAccessibilityClient)이다 — 설치본에 켠 권한과
+   * 개발 실행은 macOS가 서로 다른 앱으로 취급한다(오너가 "이미 켰는데?"라고 한 실측 혼선의 뿌리).
+   */
   registerAppControlDomainIpc(ipcMain, "system:computerUsePermissions", () => checkComputerUsePermissions());
   ipcMain.handle("system:openAccessibilitySettings", async event => {
     assertTrustedSitePublishIpcSender(event);
@@ -3494,8 +3495,8 @@ export function registerIpcHandlers(): { businessShipping: ReturnType<typeof reg
   registerAppControlDomainIpc(ipcMain, "env:has", (key: string) => hasEnvVar(key));
   ipcMain.handle("env:preview", (_e, key: string) => previewEnvVar(key));
   registerAppControlDomainIpc(ipcMain, "env:remove", (key: string) => deleteEnvVar(key));
-
-
+  // One may rename a stored key after the owner says yes (owner 2026-10-11: "볼트 입력이나 저장된 것 중 있는지 AI가
+  // 찾고 물어보면 되지"); the value stays in Main. The inventory is value-free (no masked preview) for the same search.
   registerAppControlDomainIpc(ipcMain, "env:rename", (from: string, to: string) => renameEnvVar(from, to));
   registerAppControlDomainIpc(ipcMain, "env:inventory", async () => (await collectEnvStatus(envKnownRequirements(),
     { listKeys: listEnvKeys, hasValue: hasEnvVar, preview: async () => null },
@@ -3675,9 +3676,9 @@ export function registerIpcHandlers(): { businessShipping: ReturnType<typeof reg
     rollbackAgentEvolutionProposal(proposalId),
   );
 
-
-
-
+  // ── skills (주입 가능한 스킬 카탈로그 — 엔진 skills/ 디렉토리 실측) ──
+  // 하드코딩 목록이 아니라 디스크의 SKILL.md 프론트매터에서 name/description 을 읽는다.
+  // SKILL.md 가 없는 디렉토리는 카탈로그에서 제외(추측 금지, 실측 원칙).
   /*
    * 엔진 텍스트 자산 편집 — 스킬·호스트 훅·어댑터 매니페스트를 앱 안에서 고친다.
    * 경계와 "업데이트가 덮어쓴다"는 사실은 runtime-files.ts 가 들고 있다.
@@ -3865,10 +3866,10 @@ export function registerIpcHandlers(): { businessShipping: ReturnType<typeof reg
   registerAppControlDomainIpc(ipcMain, "mcpTools:test", (id: string) => testServerById(id));
   registerAppControlDomainIpc(ipcMain, "mcpTools:status", () => statusAllServers());
   registerAppControlDomainIpc(ipcMain, "mcpTools:recommendForBuild", (input) => recommendMcpBuildPlan(input));
-
-
-
-
+  // 실행 전 키 요청 시트의 완료 신호 — 비밀 값은 절대 이 채널로 오지 않는다(값은 env:set).
+  // 만료/미지의 runId는 { ok:false } 멱등 무시라 렌더러 재시도가 안전하다.
+  // A run the background service hosts keeps its key request there; its answers go to that service over the signed
+  // channel (flow audit 2026-10-18, I-D2). Main mirrors the request from the service's own mcp-key-request event.
   configureRunKeyOwnerHost({ deliver: async ({ chatId, runId, request }, outcome) => {
     const controls = configuredNativeGuiControls();
     if (!controls) throw new Error("native_gui_controls_unavailable");
@@ -3947,23 +3948,23 @@ export function registerIpcHandlers(): { businessShipping: ReturnType<typeof reg
     return result;
   });
 
-    
-                                           
-    
-                                                                                 
-                                                                                 
-                                                        
-                                                         
-                                                            
-                                                                
-                                                             
-    
-                                                                    
-                                                                      
-                                                         
-                                                                     
-                                      
-     
+  /*
+   * Core CLI 를 부르는 오래 걸리는 작업에 붙이는 옵션 두 가지.
+   *
+   * 1) `noOpen: true` — Core `publish` 는 `--no-open` 없이는 `interactive=True` 로 돌고
+   *    (`agentlas_cloud/cli.py:801`), 자기 토큰(`~/.agentlas/auth/<host>.json`)이 없으면
+   *    브라우저 PKCE 로그인을 띄워 최대 180초 블록한다. 데스크탑은 이미 자기 세션으로
+   *    로그인돼 있는데(safeStorage), 그 신원이 Core 로 전달되지 않는다. 그래서
+   *    "데스크탑에서만 로그인한" 기계에서 Publish 를 누르면 난데없이 브라우저 OAuth 창이
+   *    뜨거나 무응답 후 타임아웃했다(2026-07-28 확인). GUI 앱 안에서 CLI 가 제 브라우저를
+   *    여는 것은 어느 쪽이든 옳지 않다 — 막고, 인증이 없으면 Core 가 정직하게 실패하게 한다.
+   *
+   * 2) `onStdout`/`onStderr` — `runHephaestus` 는 이 콜백을 옵션으로 갖고 있었는데
+   *    **넘기는 호출부가 저장소 전체에 0곳**이었다. publish(300s)·securityScan(180s) 가
+   *    종료 전까지 아무 신호도 안 줘서, 사용자는 도는 작업과 죽은 작업을 구분할 수 없었다.
+   *    바로 위 업로드 진행(`cloudPublishProgressOptions`)이 같은 결함을 이미 한 번 겪었고
+   *    같은 방식으로 고쳤다. 여기도 같은 채널 규약을 쓴다.
+   */
   const coreProgressOptions = (event: IpcMainInvokeEvent, progressId: string | undefined) => {
     if (!progressId) return {};
     const win = BrowserWindow.fromWebContents(event.sender);
@@ -4160,22 +4161,12 @@ export function registerIpcHandlers(): { businessShipping: ReturnType<typeof reg
     // Pending question text is private: only the trusted Desktop top frame
     // may recover it after its event subscription (or renderer) restarts.
     assertTrustedSitePublishIpcSender(event);
-    const local = listPendingAskUserRequests();
-    const mode = supervisorRuntimeMode();
-    if (mode === 'handoff') throw new Error('supervisor_runtime_handoff');
-    if (mode !== 'daemon') return local;
-    const owned = await callOneSupervisorRuntime('questions.list');
-    if (!Array.isArray(owned)) throw new Error('supervisor_runtime_question_projection_invalid');
-    return [...local, ...owned.filter(question => !local.some(item => item.requestId === question.requestId))];
+    return listRuntimeAskUserRequests();
   });
   ipcMain.handle("confirm:submitAskUserAnswer", async (event, requestId: string, answer: string | null) => {
     assertTrustedSitePublishIpcSender(event);
     const id = String(requestId), value = typeof answer === 'string' ? answer : null;
-    if (listPendingAskUserRequests().some(question => question.requestId === id)) return submitAskUserAnswer(id, value);
-    const mode = supervisorRuntimeMode();
-    if (mode === 'handoff') throw new Error('supervisor_runtime_handoff');
-    if (mode === 'daemon') return callOneSupervisorRuntime('questions.answer', { requestId: id, answer: value });
-    return false;
+    return submitRuntimeAskUserAnswer(id, value);
   });
   registerAppControlDomainIpc(ipcMain, "browser:status", () => getBrowserStatus());
   registerAppControlDomainIpc(ipcMain, "browser:listSites", () => browserListSites());
@@ -4197,12 +4188,12 @@ export function registerIpcHandlers(): { businessShipping: ReturnType<typeof reg
     const consentRevision = browserCredentialConsentRevision();
     const result = await importBrowserCredentials(id, list);
     let importedDomains: string[] = [];
-
-
+    // 사용자가 실제로 가져온 그 선택이 곧 승인이다. 별도 동의 화면을 한 번 더 띄우지 않는다 —
+    // 승인은 "묻는 순간"에 한 번(오너결정 2026-08-15), 그 뒤로는 이 집합만 자동 갱신한다.
     if (result.ok && result.linkedSites.length > 0 && browserCredentialConsentRevision() === consentRevision) {
-
-
-
+      // linkedSites 는 정규화된 사이트 문자열이고 스킴이 없을 수 있다("x.com"). new URL 에
+      // 그대로 넣으면 던져서 승인 도메인이 통째로 빈 배열이 됐다 — 그러면 승인은 기록되는데
+      // 자동 갱신은 영영 아무것도 하지 않는 반쪽 배선이 된다(실측으로 잡음).
       const loginRequired = new Set(result.requiresLoginSites ?? []);
       const granted = result.linkedSites
         .filter((site) => !loginRequired.has(site))
@@ -4250,8 +4241,8 @@ export function registerIpcHandlers(): { businessShipping: ReturnType<typeof reg
    * 화면으로 나른다. 예전에는 어느 쪽도 화면에 도달하지 않아, 사용자는 파일 편집은 되는데
    * 셸 명령만 조용히 안 되는 상태를 원인 없이 겪었다.
    */
-
-
+  // 능력 규칙(capability grants) — "항상 허용"의 영구 원장. 대화 단위 "항상 승인"도
+  // 여기로 이관됐다(renderer localStorage 폐지, 오너 결정 2026-08-20).
   /*
    * 데몬 자동 시작 토글. 설정과 부팅 동작이 어긋난 채 남지 않도록, 값을 바꾼 **직후**
    * 파일시스템(launchd/시작프로그램/systemd)을 같은 턴에 정합시킨다.
@@ -4490,8 +4481,8 @@ export function registerIpcHandlers(): { businessShipping: ReturnType<typeof reg
   registerAppControlDomainIpc(ipcMain, "projects:remove", (id: string) => removeProject(id));
   ipcMain.handle("projects:connectGithub", async (event, repositoryUrl: string) =>
     connectGithubProject(BrowserWindow.fromWebContents(event.sender), repositoryUrl));
-
-
+  // Per-project rent consent (per-work-order RENT; owner decision 2026-08-18).
+  // Desktop-local only — the server never learns which projects allow whom.
   registerAppControlDomainIpc(ipcMain, "projects:listRentAllowed", (projectId: string) =>
     listRentAllowedSlugs(String(projectId || "")));
   registerAppControlDomainIpc(
@@ -4546,8 +4537,8 @@ export function registerIpcHandlers(): { businessShipping: ReturnType<typeof reg
         || !input.before.id || typeof input.before.createdAt !== "string" || !input.before.createdAt)) {
       throw new TypeError("Invalid chat history page");
     }
-
-
+    // A chat that is not stored (deleted, or a pending chat the window already shows) has no history: an empty page, not
+    // a thrown error (production 2026-10-12 20:55 KST: seven handler errors in nine seconds from one open chat).
     if (!getChat(input.chatId)) return { messages: [], hasOlder: false };
     return listChatMessagesPage(input.chatId, input.limit ?? 200, input.before);
   });
@@ -4608,8 +4599,8 @@ export function registerIpcHandlers(): { businessShipping: ReturnType<typeof reg
     // Renderer의 busy 표시는 투영일 뿐이다. 삭제 권위인 Main이 terminal event가 끝날
     // 때까지 채팅 행을 보존해, 실행 결과가 사라진 대화에 기록되는 race를 막는다.
     assertChatRemovalAllowed(id, invocationService.activeChatIds());
-    
-
+    // A deleted room ends its Goal: the run, its continuation automations and queued directions stop
+    // with it, instead of a paused Goal with no room (Youtube launch, deleted 2026-10-11).
     const goalId = getChat(id)?.goalId;
     const goalRun = goalId ? getLongRunByGoalId(goalId) : null;
     if (goalId && goalRun && goalRun.rootChatId === id && goalRun.surface !== "science"
@@ -4674,9 +4665,9 @@ export function registerIpcHandlers(): { businessShipping: ReturnType<typeof reg
   registerAppControlDomainIpc(ipcMain, "chats:getGoalContext", async (id: string) => {
     const chat = getChat(id);
     if (!chat?.goalId) return null;
-
-
-
+    // Look before asking (owner 2026-09-23): a Goal blocked only because an
+    // interrupted attempt's external outcome is unknown gets one read-only
+    // observation run before the person is asked. Idempotent per attempt set.
     try { maybeDispatchEffectObservation(invocationService, chat.goalId, "goal-context"); }
     catch (error) { console.warn("[effect-observation] dispatch failed:", error); }
     const loaded = await getGoalLedgerGoal(chat.goalId, getChatWorkingFolder(id));
@@ -4704,12 +4695,12 @@ export function registerIpcHandlers(): { businessShipping: ReturnType<typeof reg
     const locale = requestedLocale === "ko" || requestedLocale === "en"
       ? requestedLocale
       : currentUiLocale() === "ko" ? "ko" : "en";
-    
-
-
-
-
-
+    /*
+     * ★만들지 못했으면 **그렇게 말한다** (오너 실사용 2026-09-08: "goal 설정했는데
+     *   안 닫힌다. 진행도 안 된다"). 예전에는 이 반환값을 버렸다. 그래서 계약이 안 만들어져도
+     *   아래에서 null 을 돌려주고, 화면은 그것을 "목표 없음"과 구별하지 못했다.
+     *   목표 번호는 찍혀 있는데 계약 행이 없는 상태가 그렇게 만들어진다.
+     */
     const created = ensureGoalLedgerGoal({
       goalId: chat.goalId,
       objective: normalizedObjective,
@@ -4864,7 +4855,7 @@ export function registerIpcHandlers(): { businessShipping: ReturnType<typeof reg
     if (!project) throw new Error("Project is unavailable");
     const projectController = listInstalledAgents().find((agent) => agent.slug === "agentlas-orchestrator");
     if (!projectController) throw new Error("Project orchestrator is unavailable");
-    const chat = createChat({
+    const chat = createProjectWorkChat({
       projectId: project.id,
       // Project work is owned by the project and the built-in task
       // orchestrator. Saved agents and teams remain reusable tools in the
@@ -4873,8 +4864,6 @@ export function registerIpcHandlers(): { businessShipping: ReturnType<typeof reg
       title: typeof input.title === "string" && input.title.trim()
         ? input.title.trim().slice(0, 200)
         : "New task",
-      taskMode: "task",
-      originSurface: "work",
     });
     // A project task starts in the project's exact source context. The path was
     // already granted/validated by the Main-owned project source flow, so the
@@ -5365,7 +5354,7 @@ export function registerIpcHandlers(): { businessShipping: ReturnType<typeof reg
     } catch (error) {
       if (error instanceof OneTeamPreflightError) {
         // Content-free machine trace: the renderer only sees the code, and a
-                                                                                
+        // refusal that never reaches main.log cannot be diagnosed (2026-09-23).
         console.warn("[one-team-preflight] refused", JSON.stringify({
           code: error.code,
           chatId: typeof input?.chatId === "string" ? input.chatId : null,
@@ -5484,11 +5473,11 @@ export function registerIpcHandlers(): { businessShipping: ReturnType<typeof reg
     },
   );
   registerAppControlDomainIpc(ipcMain, "automations:toggle", async (id: string, enabled: boolean) => {
-
-
-
-
-
+    // ★켜기 게이트. 저장은 언제나 허용하되, **연결이 빠진 채로는 켜지 않는다.**
+    // 업계 합의(create-then-gate): Zapier "you will not be able to turn it on",
+    // n8n "Please resolve outstanding issues before you activate it",
+    // Power Automate `ConnectionAuthorizationFailed`.
+    // 이 검사가 없으면 사용자는 아무것도 모른 채 켜고 새벽에 조용히 죽는다(실사용 실측).
     if (enabled) {
       const automation = getAutomation(id);
       if (automation?.graph) {
@@ -5537,10 +5526,10 @@ export function registerIpcHandlers(): { businessShipping: ReturnType<typeof reg
   });
   registerAppControlDomainIpc(ipcMain, "automations:listRuns", (id: string, limit?: number) => listRunHistory(id, limit ?? 50));
   registerAppControlDomainIpc(ipcMain, "automations:runCounts", (id: string, since?: string | null, until?: string | null) => countRunHistory(id, since, until));
-
-
-
-
+  // ★실패의 물증 — 실행 창(ranAt±10분)에 cua-driver가 저장한 화면 캡처를 그 실행의
+  // 증거로 돌려준다. 실측 2026-08-19: 모델이 "글자수 초과"를 지어내는 동안 진짜
+  // 원인(중복 차단으로 비활성화된 Reply 버튼)은 이미 캡처에 찍혀 있었다 — 디스크에만
+  // 있고 화면엔 없었을 뿐이다. 지어낸 사유 대신 이 파일을 보여준다.
   ipcMain.handle("automations:runCaptures", (_e, ranAtIso: string, limit?: number) => {
     try {
       const dir = path.join(os.homedir(), ".agentlas", "captures", "screen");
@@ -5890,14 +5879,14 @@ export function registerIpcHandlers(): { businessShipping: ReturnType<typeof reg
       }
       const parsed = parseInterviewTurn(text, attempt);
       if (!parsed.ok) {
-        
-
-
-
-
-
-
-
+        /*
+         * ★모델이 형식을 틀린 것과 사람이 답을 안 준 것은 다르다.
+         *
+         * 출력이 JSON으로 안 읽히면 지금까지는 그 자리에서 인터뷰가 죽고 **사람이 준
+         * 답까지 전부 사라졌다.** 화면에는 "자동으로 돌릴 일을 한 문장으로 다시 적어
+         * 주세요"가 떴다 — 사람 문장이 틀린 것처럼(실측 2026-08-06, 연속 3회 재현).
+         * 형식 문제는 이미 스스로 고치게 하는 장치가 있다. 같은 예산 안에서 그쪽으로 보낸다.
+         */
         if (parsed.code !== "INTERVIEW_OUTPUT_UNREADABLE" || attempt.attempts.length >= MAX_SELF_CORRECTIONS) {
           return parsed;
         }
@@ -5958,8 +5947,8 @@ export function registerIpcHandlers(): { businessShipping: ReturnType<typeof reg
         const { listInstalledAgentsReadOnly } = await import("./mcp/registry");
         const { getSource } = await import("./marketplace");
         const installedAgents = listInstalledAgentsReadOnly();
-
-
+        // 특화도 Hub도 못 찾은 슬롯의 기본 러너 = 상주 오케스트레이터. 이게 없으면
+        // AGENT 노드가 no-runner로 멈춰 "만들었는데 안 도는" 그래프가 된다(실측).
         const orchestrator = installedAgents.find((a) => a.id === "builtin-agentlas-orchestrator");
         const staffingController = new AbortController();
         const staffingBudgetMs = Math.max(1, Math.min(8_000, interviewDeadline - Date.now()));
@@ -6017,16 +6006,16 @@ export function registerIpcHandlers(): { businessShipping: ReturnType<typeof reg
 
   // 인터뷰가 끝난 뒤 실제로 만든다. **꺼진 상태로** 들어온다 — 사람이 보고 켜야 돈다.
   /**
-
-
-
-
-
-
-
-
-
- */
+   * 저장 전에 한 번 돌려 보고, 안 되면 **이어갈 길을 함께 준다**.
+   *
+   * ★실측 2026-08-20: 저장 전 검증(verify-before-save)은 터미널에만 붙어 있었고
+   *   데스크탑 빌더는 아예 부르지 않았다 — 사람이 가장 많이 쓰는 표면에서 그 안전장치가
+   *   통째로 없었다. 그리고 터미널에서도 막히면 문장 한 줄로 끝났다. 오너 지시:
+   *   *"50% 정도 완성하다 실패했을 때도 이어갈 수 있어야지, 대안을 제시한다거나."*
+   *
+   *   그래서 이 문은 두 가지를 돌려준다: **무엇이 막혔는지(사실)** 와
+   *   **지금 무엇을 하면 이어갈 수 있는지(칩)**. 저장은 하지 않는다 — 사람이 고른다.
+   */
   ipcMain.handle("automations:checkBlueprintBeforeSave", async (_e, payload: unknown) => {
     const { beginGraphAuthoringRequest, GraphAuthoringError } = require("./workflow/graph-authoring-lifecycle") as typeof import("./workflow/graph-authoring-lifecycle");
     let authoring: ReturnType<typeof beginGraphAuthoringRequest> | undefined;
@@ -6161,16 +6150,16 @@ export function registerIpcHandlers(): { businessShipping: ReturnType<typeof reg
   });
 
   /**
-
-
-
-
-
-
-
-
-
- */
+   * 그래프를 고친 뒤 **이전 실패는 잊고 처음부터** 돌린다.
+   *
+   * ★실측 2026-08-20 (캠페인 E3): 실행이 실패한 뒤 사람이 채팅으로 그래프를 고쳤더니
+   *   재실행이 거부됐다 — 화면은 "이전 그래프를 복원하거나 새 자동화로 분리하라"고만
+   *   말했다. 커널에는 나갈 문(forgetStaleGraphCheckpoint)이 있었는데 **화면에 없었다.**
+   *   그래서 고친 그래프로는 영원히 못 돌린다. 내는 오류에는 푸는 길이 있어야 한다.
+   *
+   *   그래프가 **실제로 바뀐 경우에만** 응한다 — 안 바뀌었으면 이전 실패는 여전히
+   *   그 그래프의 실패이고, 잊는 것은 이중 실행의 문을 여는 짓이다.
+   */
   registerAppControlDomainIpc(ipcMain, "automations:forgetFailedRun", (id: unknown) => {
     const automationId = String(id ?? "").trim();
     if (!automationId) return { automationId, ok: false as const, forgot: false, reason: "no_automation" };
@@ -6202,9 +6191,9 @@ export function registerIpcHandlers(): { businessShipping: ReturnType<typeof reg
     const {getDb}=require("./store/db") as typeof import("./store/db");
     return desktopStoreTransaction(getDb(),()=>{
     const existing = listAutomations().find((a) => a.name === input.name!.trim());
-
-
-
+    // ★같은 이름 + 같은 그래프면 새로 만들지 않고 있는 것을 돌려준다.
+    //   실측(2026-08-05): 저장 버튼이 전환 피드백 없이 조용해서 사람이 여러 번 눌렀고,
+    //   같은 그래프가 "(2)" 사본 8개로 쌓였다. 중복 제거가 아니라 멱등이 정답이다.
     if (existing) {
       const prior = getAutomation(existing.id);
       if (prior?.graph && JSON.stringify(prior.graph) === JSON.stringify(input.graph)) {
@@ -6222,8 +6211,8 @@ export function registerIpcHandlers(): { businessShipping: ReturnType<typeof reg
       //   자기 청사진이 선언한 mutation 단계를 스스로 못 하는 자동화가 태어난다.
       executionPermission: requiredExecutionPermission(input.graph as never),
       graphJson: input.graph as never,
-
-
+      // ★확인 카드가 "꺼진 상태로 저장됩니다"라고 약속한다 — 그 상태로 **태어나야** 한다.
+      //   만들고 나서 끄는 두 걸음 사이에서 예외가 나면 켜진 채 남는다(실측).
       enabled: false,
       // ★목적 문장을 함께 저장한다 — 사라지면 AI가 이 그래프를 다시 이해할 수 없다.
       ...(input.goal?.trim() ? { goal: input.goal.trim() } : {}),
@@ -6356,7 +6345,7 @@ export function registerIpcHandlers(): { businessShipping: ReturnType<typeof reg
   registerAppControlDomainIpc(ipcMain, "automations:latestRun", (id: string) => getLatestGraphRun(id));
   // 대화에 딸린 자동화 — 실행 중 줄·보고 요약·오른쪽 "자동화" 탭. 원장(run_events)만 읽는다.
   registerAutomationChatActivityIpc(ipcMain);
-
+  // 목표 전용 패널(오른쪽 "목표" 탭) — 원장 읽기와 오너의 형식 있는 편집(오너 2026-09-28).
   registerGoalPanelIpc({ ipc: ipcMain, assertTrustedSender: assertTrustedSitePublishIpcSender });
   // 승인은 사람의 결정이라 판정 모델 가용성과 무관하게 동작해야 한다. 결정은 가장 최근
   // 실행의 occurrence에 묶는다 — 승인 하나가 다음 실행까지 조용히 재사용되면 안 된다.
@@ -6384,10 +6373,10 @@ export function registerIpcHandlers(): { businessShipping: ReturnType<typeof reg
         decision: decision === "always" ? "approved" : decision,
         ...(decision === "always" ? { scope: "always" as const } : {}),
       });
-
-
-
-
+      // ★승인 무한루프의 절반(실측 2026-08-08): 결정 뒤에도 스냅샷의
+      //   APPROVAL_REQUIRED가 남아 라이브 폴링이 승인 카드를 계속 되살렸다.
+      //   결정이 기록됐으니 카드의 근거를 스냅샷에서 지운다(거부 포함 —
+      //   거부도 결정이며, 카드가 계속 "결정하라"고 조르면 안 된다).
       clearGraphRunFailureForNode(id, nodeId);
       return { ok: true, occurrenceId, always: decision === "always" };
     },
@@ -7055,9 +7044,9 @@ export function registerIpcHandlers(): { businessShipping: ReturnType<typeof reg
     assertTrustedSitePublishIpcSender(_event);
     const configuredOwner = configuredNativeGuiOwner();
     if (configuredOwner && isAppControlEvent(_event)) throw new Error("native_gui_original_renderer_required");
-    
-
-
+    // The submission carries the epoch of the owner invoke:run will start this turn in; stamping the configured
+    // native owner while invoke:run started on Desktop refused every One message with one_preflight_submission_changed
+    // (1.2.89, 2026-10-10T21:05Z).
     const native = ownerTurnStarter(configuredOwner, input?.chatId);
     // Another live window is still preparing this exact send; it is never taken over under that window.
     if (typeof input?.submissionId === "string"
@@ -7394,9 +7383,9 @@ export function registerIpcHandlers(): { businessShipping: ReturnType<typeof reg
       if(owner?.activeAuthorityChatIds().includes(request.chatId)){const binding=owner.textInputBinding(_event,request);return controls.ownerText(_event,binding,intent,request.userPrompt,kind).then(r=>r.result);}
       return controls.recoveredTextBinding(_event,request).then(binding=>controls.ownerText(_event,binding,intent,request.userPrompt,kind)).then(r=>r.result);
     }
-
-
-
+    // A direction for an idle chat whose turns start in the daemon would start a turn here, and this process's
+    // resident Codex then holds the chat's thread, so the daemon's next turn is refused ("already has an active
+    // writer") until it exits (production 1.2.93, 2026-10-11 03:50Z). One's outbox sends it as a new message instead.
     if (request.oneMode === true && ownerTurnStarter(owner, request.chatId) && !invocationService.activeChatIds().includes(request.chatId)
       && !getPendingInvocationAdmissionForChat(request.chatId)) throw new Error("invocation_steer_native_turn_required");
     return invocationService.steerFromOwner(
@@ -7820,11 +7809,11 @@ export function registerIpcHandlers(): { businessShipping: ReturnType<typeof reg
     }
   });
 
-
-
-
-
-
+  // 화면이 돌아왔을 때 붙을 수 있게, main이 들고 있는 전사를 그대로 돌려준다.
+  // 렌더러는 이걸 재생해 로그·단계를 복원하고, 아직 running이면 같은 채널을 다시 구독한다.
+  // 완료 신호가 없어도 "계약이 통과했는가"는 물어볼 수 있어야 한다. 모델이 마지막
+  // 한 줄을 빠뜨렸다고 완성된 패키지를 실패로 통보하는 건 사실과 다르다
+  // (2026-08-17 실측: blockers 0인 패키지가 "최종 검증 완료 신호 미확인"으로 실패 처리).
   registerAppControlDomainIpc(
     ipcMain, "hephaestus:contractVerify",
     async (input: { folder: string; scope: FsReadScope; mode?: "single" | "team" | "package" }) => {

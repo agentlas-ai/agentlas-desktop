@@ -1,10 +1,10 @@
-
-
-
-
-
-
-
+// Newline-delimited JSON from a child or a file, split on "\n" only.
+//
+// node:readline also ends a line at U+2028 and U+2029, and JSON carries both unescaped inside strings. One Codex
+// thread whose history held 19 U+2028s (text a browser tool copied from Threads) had every thread/resume response
+// cut into fragments; each fragment failed JSON.parse, the reader dropped it as a non-JSON log line, and the
+// request timed out after 120 s — 17 times in the owner's "Thread Marketing" room (2026-10-03/04). Any
+// notification with such text was lost the same way.
 
 import type { Readable } from "node:stream";
 

@@ -27,9 +27,9 @@ function bundledPluginsRoot(): string {
   // dist/electron/dist/plugins does not exist -- so no dev app ever materialized a bundled plugin
   // ("bundled packages unreadable", persona apps 2026-09-14) and the Research Director pin drifted.
   if (path.basename(appPath) === "electron" && path.basename(path.dirname(appPath)) === "dist") {
-
-
-
+    // dist/plugins is a build product nobody refreshes on a source bump, so every service pin bump
+    // bricked every dev/QA app on the machine until someone rebuilt (rounds 3·5·6, 2026-09-14). A dev
+    // launch reads the source tree, which is what the Science service constant was written against.
     const repositoryRoot = path.dirname(path.dirname(appPath));
     const sourcePlugins = path.join(repositoryRoot, "plugins");
     if (fs.existsSync(path.join(sourcePlugins, RESEARCH_DIRECTOR_PLUGIN_SLUG, "plugin.json"))) return sourcePlugins;
@@ -41,11 +41,11 @@ function bundledPluginsRoot(): string {
 const RESEARCH_DIRECTOR_PLUGIN_SLUG = "agentlas-science-research-director";
 
 /**
-
-
-
-
-
+ * Official packaged apps share the machine root. Local candidates and dev/QA apps
+ * keep their own root under userData: two
+ * desktop builds on one machine pin different Research Director versions, and whichever
+ * materialized last would break the other's Science binding (production 1.2.6 vs a dev app
+ * bundling 1.24.5, 2026-09-14). Science reads the same root through its env override.
  */
 export function installedPluginsRoot(options: { configureScience?: boolean } = {}): string {
   if (!isPackagedRuntime() || process.env.AGENTLAS_QA_USER_DATA_DIR

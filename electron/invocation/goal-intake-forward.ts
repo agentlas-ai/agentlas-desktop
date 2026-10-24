@@ -1,25 +1,25 @@
-/**
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
- */
+/** Goal intake handover from the background service to the window process (Main).
+ *
+ * Goal custody is Desktop-only, so a daemon-run owner turn cannot admit a Goal itself. Until 2026-10-11 it skipped intake
+ * (`goal_custody_desktop_only`), which meant a One chat could never turn "do this every day" into a continuous Goal:
+ * production 2026-10-11 10:08Z, room chat 8f3e09ee-0ab7-4d6b-aa0a-8ae7d5e96549, run 97164057-c169-4868-89c0-53ebd22e9c8f,
+ * 1.2.96 -- the recurring long-form video brief logged the skip and nothing was created.
+ *
+ * Do NOT start such turns on Desktop instead (1c62fa88 / 1.2.89 did, and refused every One send). The turn finishes in the
+ * service; only the intake moves:
+ *  1. service: classify with the same resolver Desktop uses (prepareInvocationAutomaticGoal, classifyOnly). A message that
+ *     would not become a Goal forwards nothing.
+ *  2. service: ask Main over the device bridge (the existing service -> Main request path). Main is away: durable marker.
+ *     Both are run events (`automatic_goal_intake_forwarded` / `_deferred`) that carry what Main needs to redo the work.
+ *  3. Main: validate against durable rows (a real owner message of that chat, a daemon-owned run of that chat), answer at
+ *     once, then run prepareInvocationAutomaticGoal itself in the background (the native channel closes for good on a request
+ *     that outlives 10 s, and classification is a model call). `automatic_goal_intake_completed` ends a marker.
+ *  4. Main drains unfinished markers on every attach.
+ * Idempotent per source message: the Goal id is `goal:auto-message:<messageId>`, in-flight work is keyed by chat+message, and
+ * a terminal completed event ends the marker. Once the chat is bound to a live Goal, ownerTurnStartsOnDesktop routes the next
+ * owner turn to Desktop and the A2 chat host handover (runtime/chat-host-handover.ts) releases the service's resident session.
+ *
+ * No electron import: the background service loads this without Electron (test-daemon-loads-without-electron). */
 import { LONG_RUN_TERMINAL_STATUSES } from "../../shared/long-run";
 import { DeviceBridgeError, daemonDeviceBridge } from "../daemon/device-bridge";
 import { getDb } from "../store/db";
@@ -112,8 +112,8 @@ async function performIntake(input: GoalIntakeForward, text: string): Promise<vo
       userPrompt: text, permission: input.permission, signal: new AbortController().signal });
     if (prepared.kind === "admitted") {
       done("admitted", "classified_goal", { goalId: prepared.run.goalId });
-      
-
+      // The service turn is this Goal's run: start the Goal with it, or settle it when that turn already ended
+      // (production 2026-10-15T23:12Z: both team-room Goals stayed queued after their runs failed).
       try { followDaemonTurnGoal(prepared.run.goalId); } catch (error) { console.warn("[goal-intake] Goal could not follow its service turn:", error); }
       return;
     }

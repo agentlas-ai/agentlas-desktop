@@ -1,3 +1,4 @@
+import { workingTaskRootChatId, workingSessionScope } from "../runtime/session-scope";
 import { getDb } from "./db";
 import { emitTaskStoreChange } from "./change-bus";
 import { tryRecordOneDomainEvent } from "../one/domain-events";
@@ -202,6 +203,10 @@ function rootUserChat(startChatId: string): TaskChatRow | null {
     const row = chatRow(currentId);
     if (!row) return null;
     if (row.kind !== "division") return row;
+    // Work dispatch belongs to its exact parent Task even when its journal is project-shared.
+    if (row.parent_chat_id) { currentId = row.parent_chat_id; continue; }
+    const workingRoot = workingTaskRootChatId(getDb(), row.id);
+    if (workingRoot) return chatRow(workingRoot);
     currentId = row.parent_chat_id;
   }
   return null;
@@ -512,7 +517,7 @@ export function listCanonicalTasks(input: {
   }
   const limit = Math.max(1, Math.min(200, Math.floor(input.limit ?? 50)));
   const statement = getDb().prepare(
-`SELECT tasks.*, source_chat.origin_surface AS origin_surface FROM tasks
+      `SELECT tasks.*, source_chat.origin_surface AS origin_surface FROM tasks
        LEFT JOIN (SELECT id, origin_surface FROM chats) source_chat ON source_chat.id = tasks.origin_chat_id
        WHERE tasks.id NOT LIKE 'task_pairing_%'
          AND NOT EXISTS (SELECT 1 FROM chats internal_root
@@ -523,7 +528,7 @@ export function listCanonicalTasks(input: {
        LIMIT ?`,
     );
   const rows = (projectId ? statement.all(projectId, limit) : statement.all(limit)) as TaskRow[];
-                                                        
+  // 참여자는 한 번에 — 행마다 쿼리하면 목록 하나에 문장 201개(2026-09-14 실측).
   const participantsByTask = new Map<string, ParticipantRow[]>();
   if (rows.length && tableExists("task_agent_participants")) {
     for (let i = 0; i < rows.length; i += 200) {
@@ -616,6 +621,15 @@ export function findCanonicalTaskForChat(chatId: string): CanonicalTask | null {
   return row ? toTask(row) : null;
 }
 
+/** Exact-origin contracts remain unchanged; registered transports of the same
+ * working range also belong to its single canonical internal Task. */
+export function canonicalTaskOwnsChat(task: Pick<CanonicalTask, "originChatId">, chatId: string): boolean {
+  if (task.originChatId === chatId) return true;
+  if (task.originChatId === null) return false;
+  try { return workingSessionScope(getDb(), chatId) !== null && rootUserChat(chatId)?.id === task.originChatId; }
+  catch { return false; }
+}
+
 export function getCanonicalTaskForChat(chatId: string): CanonicalTask | null {
   return ensureCanonicalTaskForChat(chatId);
 }
@@ -699,8 +713,8 @@ export function acceptCanonicalTaskResult(
     ) {
       throw new Error("A matching verified completed run receipt is required");
     }
-    
-
+    // The exact run stays acceptable while no owner direction followed it; a host turn after it (a teammate's
+    // report, a Goal continuation) is not a newer request (flow audit ID-4).
     if (ownerDirectionAfterInvocationRun(input.expectedRunId, row.origin_chat_id)) {
       throw new Error("A newer message was sent after this run; review it before accepting this result");
     }

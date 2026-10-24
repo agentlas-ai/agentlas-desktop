@@ -1,10 +1,78 @@
+import { projectQuestionDecisionText } from "../shared/question-decision";
+import { composeQuestionReply } from "../shared/question-reply";
+import { askActionBarState, askSkipReply, askResendMessage } from "../shared/ask-action-bar";
 import { contextBridge, ipcRenderer } from "electron";
 import type { UpdateScienceProjectDeliverableInput, UpdateScienceProjectDeliverableResult } from "agentlas-science";
 import type { ScienceCapabilityCatalogInput, ScienceCapabilityManagerInput } from "../shared/science-capability-catalog";
+import type { SciencePresentationContext, SciencePresentationReply, SciencePresentationScope } from "../shared/product-extension";
 
 const extensionId = process.argv
   .find((argument) => argument.startsWith("--agentlas-extension-id="))
   ?.slice("--agentlas-extension-id=".length) ?? "";
+
+// Sandboxed preloads keep this document-bound transport local; Main owns the presentation authority.
+const sciencePresentation = (() => {
+  let latestRequest = 0;
+  let sequence = 0;
+  let binding: Promise<SciencePresentationContext> | null = null;
+  const failed = (code: string): SciencePresentationReply => ({ ok: false, code });
+  const begin = () => {
+    if (binding) return binding;
+    const pending: Promise<SciencePresentationContext> = ipcRenderer.invoke("sciencePresentation:bind", { extensionId })
+      .then((context: SciencePresentationContext) => {
+        if (!context || typeof context.contextId !== "string" || !context.contextId
+          || typeof context.leaseId !== "string" || !context.leaseId
+          || !Number.isSafeInteger(context.documentEpoch) || context.documentEpoch < 0) {
+          throw new Error("science-presentation-context-invalid");
+        }
+        return Object.freeze({ contextId: context.contextId, leaseId: context.leaseId, documentEpoch: context.documentEpoch });
+      }).catch((error: unknown) => {
+        if (binding === pending) binding = null;
+        throw error;
+      });
+    binding = pending;
+    return pending;
+  };
+  return Object.freeze({
+    async publish(scope: SciencePresentationScope | null): Promise<SciencePresentationReply> {
+      const request = ++latestRequest;
+      const publicationSequence = ++sequence;
+      if (scope !== null && (!scope || typeof scope.projectId !== "string" || !scope.projectId
+        || typeof scope.conversationId !== "string" || !scope.conversationId)) return failed("science-presentation-scope-invalid");
+      const publicationScope = scope === null ? null : Object.freeze({ projectId: scope.projectId, conversationId: scope.conversationId });
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        if (request !== latestRequest) return failed("science-presentation-superseded");
+        let pending: Promise<SciencePresentationContext>;
+        let context: SciencePresentationContext;
+        try { pending = begin(); context = await pending; }
+        catch { return failed(request === latestRequest ? "science-presentation-bind-failed" : "science-presentation-superseded"); }
+        if (request !== latestRequest) return failed("science-presentation-superseded");
+        let reply: SciencePresentationReply;
+        try {
+          reply = await ipcRenderer.invoke("sciencePresentation:publish", { extensionId, context, sequence: publicationSequence, scope: publicationScope });
+        } catch { return failed(request === latestRequest ? "science-presentation-publish-failed" : "science-presentation-superseded"); }
+        if (request !== latestRequest) return failed("science-presentation-superseded");
+        if (reply?.ok === true && Number.isSafeInteger(reply.generation)) return reply;
+        if (reply?.ok !== false || typeof reply.code !== "string") return failed("science-presentation-reply-invalid");
+        if (reply.code !== "science-presentation-context-stale") return reply;
+        if (binding === pending) binding = null;
+        if (attempt === 1) return reply;
+      }
+      return failed("science-presentation-context-stale");
+    },
+  });
+})();
+contextBridge.exposeInMainWorld("agentlasSciencePresentation", sciencePresentation);
+
+contextBridge.exposeInMainWorld("agentlasScienceQuestionDecisions",Object.freeze({
+  read:(input:unknown)=>ipcRenderer.invoke("science:questionDecisions:read",{extensionId,input}),
+  answer:(input:unknown)=>{
+    if(!navigator.userActivation?.isActive) return Promise.reject(new Error("science-question-user-gesture-required"));
+    return ipcRenderer.invoke("science:questionDecisions:answer",{extensionId,input});
+  },
+  projectText:projectQuestionDecisionText,composeReply:composeQuestionReply,
+  actionState:askActionBarState,skipReply:askSkipReply,resendMessage:askResendMessage,
+}));
 
 contextBridge.exposeInMainWorld("agentlasScience", Object.freeze({
   extensionId,

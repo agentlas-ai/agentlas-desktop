@@ -1,9 +1,9 @@
-// What a graph is for, from its structure.
+// What a graph is for, from its structure (owner definition, 2026-10-20).
 //
 // A graph is recurring work in which AIs act on results — find topics worth posting, then the AIs in a group chat work on what
 // came back — or work that runs on a schedule (monitor performance). A graph whose steps are only fixed code or tool calls on an
-// input is not that: it is a tool. In practice the input-triggered graphs One saved were almost always
-// made only of code steps and checks (verify these frames, recheck this post's status), and most of them ran once or twice.
+// input is not that: it is a tool. Measured on the owner's store the same day: 39 input-triggered graphs saved by One, every one
+// made only of code steps and checks (verify these frames, recheck this post's status), 37 of them run once or twice.
 // A deterministic tool the agents use again and again is a Toolchain (an MCP-shaped tool), not a saved graph; one used once is
 // done directly. Structure only: no step text is read.
 

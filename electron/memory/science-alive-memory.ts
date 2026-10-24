@@ -23,9 +23,12 @@ export function registerScienceAliveMemoryRun(input: {chatId:string;agentId:stri
   const principal = () => {
     const actual=lifetime.preparedToolPrincipal(authority,Date.now());
     if(typeof actual.scope.projectId!=="string"||typeof actual.scope.conversationId!=="string"
-      ||actual.agentId!==store.scienceAliveAgentId(actual.scope.projectId))fail();
+      ||actual.agentId!==store.scienceAliveAgentId(actual.scope.projectId))return fail();
+    const current=store.aliveResearchContinuationAuthority(actual.scope.projectId,actual.scope.conversationId);
+    if(current.stopped||!current.fullAutonomyStanding)fail();
     if(digest(normalizeChatRuntimeSelection(actual.runtimeBinding))!==selection)fail();
-    return digest([actual.agentId,actual.controlEpoch,actual.attachmentGeneration,actual.scope,actual.runtimeBinding]);
+    return digest([actual.agentId,actual.controlEpoch,actual.attachmentGeneration,actual.scope,actual.runtimeBinding,
+      current.conversationStopEpoch,current.approvalPolicySha256]);
   };
   const source = principal(), actorId = builtinAgentId(ALIVE_CONTROLLER_SLUG);
   let memory:SurfaceMemoryRecall|null=null;

@@ -24,16 +24,19 @@ import { closestNames, didYouMean, invalidValueMessage, unknownArgumentMessage }
 
 const MAX_REQUEST_BYTES = 768 * 1024;
 
-
-
-
-
-
+// The server outlives the turn that first starts it, and Node gives every later request the async context that was
+// live at listen() (one-team control server, same defect). Production 2026-10-18 (1.3.67, Yotube room): goal_wait's
+// lifecycle judgment ran with the first turn's runtime pin and its aborted signal, stopped before any model call, so
+// a daily /goal Goal stayed "finite" and its next-day wait was refused goal_wait_ongoing_authority_required.
+// So listen from the module-load context, and handle each request outside any invocation's judgment context.
 const hostRootContext = AsyncLocalStorage.snapshot();
 
 export interface TurnToolsCapabilityBinding {
   /** Main-only admission check. Never written to the child capability file. */
   admissionCurrent?: () => boolean;
+  /** Host-only resolver for this exact source run; never serialized to the MCP child.
+   * Does not grant Goal completion, plan mutation, or a Chat Goal revision. */
+  goalWaitResolver?: TurnScopedGoalWaitResolver;
   /** Host-only account captured at mint time; never serialized into the child capability file. */
   hostAccountBinding?: { workspaceId: string; userId: string; sessionId: string; expiresAt: number | null } | null;
   capabilityId: string;
@@ -50,8 +53,8 @@ export interface TurnToolsCapabilityBinding {
   /** Main-only: the sealed MCP config this capability was minted in. Harness ports dispatch the run's host-channel
    * built-ins through it (harness/tool-dispatch.ts runScopedBinding). Never written to the capability file. */
   mcpConfigPath?: string;
-  /**
- */
+  /** Main-only: the run's MCP client reads image content in a tool result (harnessResultWithImages). Measured 2026-10-18:
+   * codex 0.163 reads one; grok 1.0.62 stops answering after one (a text result in the same probe finishes). */
   imageResults?: boolean;
 }
 
@@ -60,6 +63,8 @@ export type TurnGoalTimerAuthority =
   | { ok: false; reason: string };
 /** Resolves the Goal bound to a chat and whether a timer wait is allowed for it (null: no Goal is bound). */
 export type TurnGoalResolver = (chatId: string, nowMs: number) => Promise<{ goalId: string; timer: TurnGoalTimerAuthority } | null>;
+export type TurnScopedGoalWaitResolver = (source: Readonly<{ chatId: string; runId: string }>, nowMs: number)
+  => Promise<{ goalId: string; timer: TurnGoalTimerAuthority } | null>;
 
 const defaultGoalResolver: TurnGoalResolver = async (chatId, nowMs) => {
   const { getChatGoalId } = await import("../store/chats");
@@ -135,13 +140,13 @@ function readJsonBody(req: http.IncomingMessage): Promise<Record<string, unknown
 }
 
 /**
-
-
-
-
-
-
-
+ * The typed code of a harness call that did not succeed, or null. The control server answered every harness result as
+ * {ok:true}, so the agentlas-turn child returned refused/unavailable results — and a tool.call whose connector tool
+ * failed — as an MCP success: production 2026-10-16 00:00Z (graph cdf732ca) recorded harness_call → one_team_list
+ * "One team tools are not connected in this run." as toolIsError 0 with the graph receipt succeeded:true, and the
+ * model and the receipts took failed calls for done ones. Failed here: status refused/unavailable (reason is the
+ * code), or a tool.call that settled tool-error/failed/cancelled. In flight or unknown effect (dispatching, running,
+ * dispatch-unsettled) is not failed: the effect may have happened, so it stays an effect, never "nothing happened".
  */
 /** The first non-empty string under these keys, in order. */
 export function harnessId(a: Record<string, unknown>, keys: readonly string[]): string {
@@ -254,12 +259,12 @@ const RESULT_IMAGE_LIMIT = 4;
 const RESULT_IMAGE_MAX_BYTES = 5 * 1024 * 1024;
 
 /**
-
-
-
-
-
-
+ * A harness_call whose app.call answer held images (app-control/service.ts saveResultImages saved each as a host capture
+ * and listed it under `images`) reaches the model as the same JSON plus each capture as an MCP image, so every runtime sees
+ * it the way it sees a tool's screenshot. Dev 2026-10-18 run30 O8: the firm QA's capturePreview image arrived as cut
+ * base64 text and the QA closed inconclusive. Only regular files directly in the host's observation-capture folder are read (at
+ * most four, each under 5 MB); the runtimes keep these as observations, not run outputs (codex.ts, local-tool-loop.ts).
+ * Only a run whose MCP client reads images gets them (TurnToolsCapabilityBinding.imageResults); the others keep the paths.
  */
 export function harnessResultWithImages(operation: unknown, result: unknown): unknown {
   if (operation !== "harness_call" || !result || typeof result !== "object") return result;
@@ -328,7 +333,17 @@ export async function handleTurnToolsControlRequest(request: Record<string, unkn
       if (!validated.ok) return refuse(validated.reason);
       if (binding.dryRun) return { recorded: false, reason: "dry_run" };
       const now = Date.now();
-      const goal = await goalResolver(binding.chatId, now);
+      const scopedResolver = binding.goalWaitResolver;
+      const scopedCurrent = () => {
+        try { return capabilities.get(binding.capabilityId) === binding && !lifetime.signal.aborted
+          && (!binding.admissionCurrent || binding.admissionCurrent()); }
+        catch { return false; }
+      };
+      if (scopedResolver && !scopedCurrent()) return refuse("goal_wait_owner_changed");
+      const goal = scopedResolver
+        ? await scopedResolver(Object.freeze({ chatId: binding.chatId, runId: binding.runId }), now)
+        : await goalResolver(binding.chatId, now);
+      if (scopedResolver && !scopedCurrent()) return refuse("goal_wait_owner_changed");
       if (!goal) return refuse("goal_wait_no_goal");
       if (validated.intent.deadline && Date.parse(validated.intent.deadline) <= now) return refuse("goal_wait_deadline_elapsed");
       if (validated.intent.subject.kind === "timer" && !goal.timer.ok) return refuse(goal.timer.reason);
@@ -423,10 +438,10 @@ export async function handleTurnToolsControlRequest(request: Record<string, unkn
         const badKind = typeof a.kind === "string" && a.kind !== "" && !(HARNESS_ITEM_KINDS as readonly string[]).includes(a.kind);
         return badKind ? { items, note: `${invalidValueMessage("kind", a.kind, HARNESS_ITEM_KINDS)} No item of that kind was searched.` } : { items };
       }
-      
-
-
-
+      // A model passes the id it just read under the key that result used: dev replay r09 (2026-10-17) Film sent
+      // harness_call {id:"media.listen",args} (harness_search items are {id}) and then {operationId:"media.listen",
+      // input:"{…}"} (harness_describe answers {operationId}); both were refused operation_unknown before it found
+      // `operation`. The id is the same under any of these keys, and arguments may arrive as an object or a JSON string.
       if (operation === "harness_describe") return harness.describeHarness(harnessId(a, ["id", "operationId", "operation", "name"]), ctx);
       // Cancellation crosses the host boundary; no signal or authority comes from model JSON.
       const checkAdmission = () => {

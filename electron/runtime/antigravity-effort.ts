@@ -1,15 +1,15 @@
-
-
-
-
-
-
-
-
-
-
-
-
+// Antigravity CLI (agy) reasoning effort: what the chip or an allocation asked for, what agy can be given, and what was
+// actually applied (reported to the model-call ledger; never the requested value presented as applied).
+//
+// Measured 2026-10-16 on agy 1.4.0 (`agy --help` on stderr, `agy models`, real calls with tiny prompts):
+//   - `--effort` takes low|medium|high|xhigh|max ("Reasoning effort for the current CLI session").
+//   - `agy models` lists effort-suffixed ids only (gemini-4-argon-high, claude-sonnet-5-5-low, gpt-oss-120b-medium):
+//     the selected model id already fixes the thinking level.
+//   - `--model gemini-3.8-flash-low --effort high` is refused before any model call: result status ERROR, exit 1,
+//     "--model gemini-3.8-flash-low conflicts with --effort=high", zero tokens. So a suffixed id never gets `--effort`.
+//   - `--model gemini-3.8-flash --effort high` (a base id) runs at that level (72 thinking tokens where flash-low used 0).
+//   - Without `--model`, agy uses its own saved default, which may be a suffixed id; `--effort` could then refuse the
+//     whole turn, so no flag is sent.
 import { spawnCli } from "./exec";
 import type { ModelEffortApplication } from "./model-call-ledger";
 

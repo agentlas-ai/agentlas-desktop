@@ -201,8 +201,8 @@ export function callAgiReadTool(deps: AgiReadDeps, ctx: AgiReadContext, tool: st
     }
     case "attempt_receipts": {
       if (!tableExists(db, "long_run_worker_attempts")) return capped(name, { runId: scope.runId }, []);
-      
-
+      // AGI asks for specific attempts by id ("the requested attempt filter returned unrelated truncated rows",
+      // defect filed 2026-10-05 14:13Z): the filter was ignored and the newest rows of the whole run came back.
       const wanted = Array.isArray(args.attemptIds)
         ? [...new Set((args.attemptIds as unknown[]).filter((id): id is string => typeof id === "string" && ID.test(id)))].slice(0, AGI_READ_CAPS[name].rows)
         : [];

@@ -11,6 +11,20 @@ export interface InstructionDelta {
   schemaVersion: "agentlas.instruction-delta.v1";
   from: string | null; to: string; changedRefs: string[];
 }
+/** Closed v1 host delta; generic diagnostic objects keep their existing bounds. */
+export function parseInstructionDelta(value: unknown): InstructionDelta | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const delta = value as Record<string, unknown>;
+  const fields = ["schemaVersion", "from", "to", "changedRefs"];
+  const revision = (value: unknown): value is string => typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
+  if (Object.keys(delta).length !== fields.length || !fields.every(field => Object.hasOwn(delta, field))
+    || delta.schemaVersion !== "agentlas.instruction-delta.v1" || !(delta.from === null || revision(delta.from))
+    || !revision(delta.to) || !Array.isArray(delta.changedRefs)
+    || delta.changedRefs.some(ref => typeof ref !== "string" || !ref)
+    || new Set(delta.changedRefs).size !== delta.changedRefs.length
+    || JSON.stringify([...delta.changedRefs].sort()) !== JSON.stringify(delta.changedRefs)) return null;
+  return { schemaVersion: "agentlas.instruction-delta.v1", from: delta.from, to: delta.to, changedRefs: [...delta.changedRefs] } as InstructionDelta;
+}
 /** Highest authority first, then deepest folder; data has no instruction rank. */
 export function orderInstructionSources(sources: readonly InstructionSource[]): InstructionSource[] {
   const rank: Record<InstructionAuthority, number> = { system: 4, developer: 3, user: 2, project: 1 };

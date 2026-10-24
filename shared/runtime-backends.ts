@@ -40,11 +40,11 @@ export function isRuntimeBackend(value: unknown): value is RuntimeBackend {
 }
 
 /**
-
-
-
-
-
+ * Kinds whose backend is fixed by the kind itself. A selection that arrives without the backend
+ * (older mirrors, mobile, IPC callers) must still land on the same stored keys the picker reads —
+ * measured 2026-09-25: active_runtime held {kind:"agentlas", backend:"", model:"agentlas-light"},
+ * the runner executed Light, but detect filtered on backend "agentlas", missed, and the composer
+ * chip showed the default "Agentlas Normal".
  */
 const FIXED_BACKEND: Partial<Record<string, RuntimeBackend>> = { agentlas: "agentlas" };
 

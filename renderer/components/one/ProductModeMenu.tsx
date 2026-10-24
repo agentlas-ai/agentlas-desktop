@@ -12,6 +12,7 @@ import { AttentionDot } from "@/components/AttentionDot";
 import { attentionLabel, openAttentionEntry, useAttention, type AttentionChatEntry } from "@/lib/attention";
 import styles from "./ProductModeMenu.module.css";
 import { useBusinessEligibility } from '@/business/use-business-eligibility';
+import { useOrganizationUiVisibility } from '@/business/organization-visibility';
 
 const ONE_RETURN_ROUTE_KEY = "agentlas.one.return-route.v1";
 
@@ -32,9 +33,9 @@ export function ProductModeMenu({
   compact?: boolean;
   darkText?: boolean;
   locale?: "ko" | "en";
-  /**
-
- */
+  /** Bottom edge of the open list in viewport pixels (0 when closed). A host that has a native view below the header
+   *  uses it to make room: native views paint above every renderer overlay, so a dropdown that reaches into the view's
+   *  area is invisible (Science, 2026-10-11). */
   onMenuExtentChange?: (bottom: number) => void;
   /** Close when the window loses focus, because clicks inside a native view never reach the renderer's outside-click handler. */
   closeOnWindowBlur?: boolean;
@@ -62,6 +63,7 @@ export function ProductModeMenu({
         : (activeLocale === "ko" ? "제목 없는 대화" : "Untitled conversation"));
   const [open, setOpen] = useState(false);
   const businessAccess = useBusinessEligibility({ enabled: open });
+  const organization = useOrganizationUiVisibility({ eligible: businessAccess.eligibility ? businessAccess.eligible : null }).management;
   const [oneHref, setOneHref] = useState("/one");
   const scienceSuite = useScienceSuiteStatus();
   const scienceAvailable = current === "science" || scienceCoreReady(scienceSuite);
@@ -169,7 +171,10 @@ export function ProductModeMenu({
             keyboardOpenRef.current = true;
           }
         }}
-        title={tFor(activeLocale, "one.mode.switch_title")}
+        // The hint for this title is drawn by TooltipHost below the trigger, right over the first item of the open
+        // list ("One" was hidden on Windows, 2026-10-24). TooltipHost takes it down when the trigger is pressed and
+        // never shows it while aria-expanded is true. The open trigger also asks for no title. aria-label keeps the name.
+        title={open ? undefined : tFor(activeLocale, "one.mode.switch_title")}
       >
         {compact && (current === "one" ? <OneBrandMark size="small" /> : current === "science" ? <span className={styles.mark} aria-hidden="true"><IconBrain size={16} /></span> : <span className={styles.mark} aria-hidden="true"><IconApps size={15} /></span>)}
         <span className={styles.copy}>
@@ -251,7 +256,7 @@ export function ProductModeMenu({
                 )}
             </button>
           )}
-          {businessAccess.eligible && <button id="agentlas-product-mode-business" className={styles.option} type="button" role="menuitem" data-business-entry="true"
+          {organization && <button id="agentlas-product-mode-business" className={styles.option} type="button" role="menuitem" data-business-entry="true"
             onClick={() => navigate('/business')} onKeyDown={event => handleOptionKeyDown(event, () => navigate('/business'))}>
             <span className={styles.optionIcon} aria-hidden="true"><IconBuilding size={18} /></span>
             <span className={styles.optionCopy}><strong>{activeLocale === 'ko' ? '조직 설정' : 'Organization settings'}</strong></span>

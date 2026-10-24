@@ -17,6 +17,9 @@ export function companyClaudeTimeBudget(policyExpiresAt:string,now=Date.now()):{
  if(!Number.isFinite(remaining)||remaining<=0)throw Error('company_work_policy_expired');
  return remaining<=600000?{milliseconds:remaining,reason:'company_work_policy_expired'}:{milliseconds:600000,reason:'company_work_claude_timeout'};
 }
+export function companyClaudeMcpToolTimeoutMs(policyExpiresAt:string,now=Date.now()):number{
+ return Math.min(210000,companyClaudeTimeBudget(policyExpiresAt,now).milliseconds);
+}
 type Auth={loggedIn:true;authMethod:'claude.ai';apiProvider:'firstParty';subscriptionType:string;accountDigest:string;accountMetadataPresent:boolean;accountMetadataAbsent:boolean};
 export type CompanyClaudePin={source:string;fingerprint:string;binarySha256:string;auth:Auth;credentialSourceContractDigest:string|null;configurationDigest:string};
 // The installed macOS CLI embeds this exact secure-storage key derivation and
@@ -106,12 +109,17 @@ export async function assertCompanyClaudePin(pin:CompanyClaudePin,signal?:AbortS
 export async function runCompanyClaude(req:RunnerRequest,events:RunnerEvents,pin:CompanyClaudePin,allowedTools:readonly string[],configDir:string,policyExpiresAt:string):Promise<RunnerResult>{
  if(!req.mcpConfigPath||!req.cwd||!allowedTools.length||new Set(allowedTools).size!==allowedTools.length||allowedTools.some(name=>!/^mcp__(?:company-agent-mail|company-files)__(?:agent_mail_(?:thread|read|reply|draft)|company_file_(?:read|write))$/.test(name)))throw Error('company_work_claude_tools_invalid');
  await assertCompanyClaudePin(pin,req.signal,true);fs.mkdirSync(configDir,{recursive:true,mode:0o700});
- const env=companyCliEnv(pin.source,configDir),args=['-p','--input-format','text','--system-prompt',req.systemPrompt,'--output-format','stream-json','--verbose','--no-session-persistence',
+ const startedAt=Date.now(),timeBudget=companyClaudeTimeBudget(policyExpiresAt,startedAt);
+ const env=companyCliEnv(pin.source,configDir);
+ // Only this isolated company process receives a finite MCP allowance above
+ // the child Mail control bound (180s); the original policy and run deadline
+ // still cap it. Personal Mail and other CLI processes keep their defaults.
+ env.MCP_TOOL_TIMEOUT=String(companyClaudeMcpToolTimeoutMs(policyExpiresAt,startedAt));
+ const args=['-p','--input-format','text','--system-prompt',req.systemPrompt,'--output-format','stream-json','--verbose','--no-session-persistence',
   '--setting-sources','','--strict-mcp-config','--restricted','--disable-slash-commands','--no-chrome','--tools','','--permission-mode','dontAsk',
   '--permission-prompts','none','--allowedTools',allowedTools.join(','),'--mcp-config',req.mcpConfigPath];
  if(req.model)args.push('--model',req.model);if(req.effort)args.push('--effort',req.effort);
  if(Buffer.byteLength(req.systemPrompt)+Buffer.byteLength(req.userPrompt)>150000)throw Error('company_work_claude_prompt_too_large');
- const timeBudget=companyClaudeTimeBudget(policyExpiresAt);
  return new Promise<RunnerResult>((resolve,reject)=>{const child=crossSpawn(pin.source,args,{cwd:configDir,env,stdio:['pipe','pipe','pipe'],windowsHide:true,...detachedSpawnOpts()});
   const pending=new Map<string,{name:string;args:string}>();let buffer='',outputBytes=0,stderrBytes=0,init=false,terminal:Record<string,unknown>|null=null,settled=false,fatal:Error|null=null;
   const violation=(code:string)=>{if(fatal)return;fatal=Error(code);killCliTree(child)};

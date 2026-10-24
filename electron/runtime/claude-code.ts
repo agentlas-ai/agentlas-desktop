@@ -169,9 +169,9 @@ export function claudeArtifactPathsFromToolResult(name: string, content: unknown
 }
 
 /**
-
-
-
+ * 중지 사유를 그대로 전한다. 중지는 사람이 누른 것 외에도 무활동 워치독·단계 시간 초과·
+ * 예산 소진으로 일어난다. 예전엔 전부 "사용자가 정지 버튼으로"라고 단정해,
+ * 누른 적 없는 사람이 거짓 사유를 받았다(실사용 실측).
  */
 
 /** Stop → protocol interrupt → tree kill if the CLI has not ended the turn by then (Paseo: 3s). */
@@ -250,16 +250,16 @@ const CLAUDE_WORKSPACE_SANDBOX_SETTINGS = {
 } as const;
 
 /**
-
-
-
-
-
-
-
-
-
-
+ * ★read 는 "플래그 없음"이 아니다.
+ *
+ * 예전에는 read 에 아무 인자도 주지 않고 "헤드리스면 위험한 도구는 알아서 거부된다"고
+ * 가정했다. 실측으로 그 가정이 깨졌다: 읽기 권한으로 파일 생성을 시켰더니 claude 는
+ * 그냥 만들었다(같은 요청에서 codex·antigravity·grok 은 셋 다 거절했다). 사용자가
+ * 읽기를 골랐다는 것은 "내 파일을 바꾸지 마라"는 뜻인데, 그 약속이 지켜지지 않았다.
+ *
+ * 그래서 변경 수단을 이름으로 막는다. Bash 까지 막는 이유는 그것으로 파일을 쓸 수
+ * 있기 때문이다 — Bash 를 열어 둔 채 "읽기 전용"이라고 말하면 그 경계는 거짓말이고,
+ * 이 제품은 지킬 수 없는 경계를 조용히 통과시키지 않기로 했다.
  */
 export const READ_ONLY_DENIED_TOOLS = ["Write", "Edit", "MultiEdit", "NotebookEdit", "Bash", "BashOutput", "KillShell"];
 // judgment-exempt: 관측된 이름을 **분류**하는 게 아니라, 이 런타임에 **줄 도구를
@@ -269,13 +269,13 @@ export const READ_ONLY_DENIED_TOOLS = ["Write", "Edit", "MultiEdit", "NotebookEd
 export const WRITE_MODE_PRE_ALLOWED_TOOLS = ["Bash", "BashOutput", "KillShell", "WebFetch", "WebSearch"];
 /** Read permits public web retrieval; headless CLI cannot answer its own permission prompt. */
 /**
-
-
-
-
-
-
-
+ * A read rule for the running agent's own package: its AGENTS.md, docs and references, i.e. the files its instructions
+ * point to. A write (acceptEdits) or read run reads only inside its working folders, and nobody answers a headless
+ * prompt. Production 2026-10-17, Yotube room: Motion Explainer Video Producer ran as a task-force write worker, and its
+ * Reads of ~/.agentlas/agentlas-agent/motion-explainer-video-producer/docs/stage-guide.md and AGENTS.md came back
+ * "requested permissions to read … but you haven't granted it yet". A codex worker at write reads them through its
+ * sandbox. The rule is read only: the package is never added as a working folder, so the run cannot edit it.
+ * POSIX absolute paths only (Claude's `//` rule form); a Windows run gets no rule (a remaining gap).
  */
 export function claudeAgentPackageReadRules(agentId: string | null | undefined): string[] {
   if (!agentId) return [];
@@ -313,19 +313,19 @@ export function claudeBuiltinPreAllowedTools(
  * 제품은 막히는 상태가 만들어진다. 프로브는 이 함수를 그대로 부른다.
  */
 /**
-
-
-
-
-
-
-
-
-
-
-
-
-
+ * result.modelUsage 의 세션 누적 집계를 읽는 진단용 순수 함수.
+ *
+ * ★왜 (오너 2026-09-07: "버전 바뀌어도 알아서 읽게 해라"). claude-code 에는 모델 목록
+ *   명령이 없어(detect.ts `no-list-concept:cli-aliases`) 우리가 보낼 수 있는 것은 벤더
+ *   별칭 `opus|sonnet|haiku|fable` 뿐이고, 화면에도 그것만 보였다. 버전을 코드에 적어
+ *   두면 벤더가 세대를 올리는 순간 거짓이 된다.
+ *
+ *   실측(2.1.263)한 result 이벤트:
+ *     "modelUsage": { "claude-opus-5[1m]": { …토큰… } }
+ *   대괄호 뒤는 컨텍스트 창 표식(1m)이라 잘라낸다. --resume 뒤 모델을 바꾸면
+ *   이전 모델의 캐시 토큰이 더 커서 이번 턴 모델로 잘못 선택될 수 있다.
+ *   이 집계는 실행 모델 영수증에 쓰지 않는다.
+ *
  * @returns 모델 id, 못 읽으면 null(짐작하지 않는다)
  */
 export function observedClaudeModelId(modelUsage: unknown): string | null {
@@ -343,16 +343,16 @@ export function observedClaudeModelId(modelUsage: unknown): string | null {
 }
 
 /**
-
-
-
-
-
-
-
-
-
-
+ * The context window Claude Code reported for this turn's model: `result.modelUsage[<model>].contextWindow`.
+ *
+ * Shape (SDK `ModelUsage`, embedded in the installed CLI 2.1.302 and claude-agent-sdk 0.3.293 sdk.d.ts):
+ *   { inputTokens, outputTokens, cacheReadInputTokens, cacheCreationInputTokens, webSearchRequests, costUSD,
+ *     contextWindow, maxOutputTokens, canonicalModel? } keyed by the model string the CLI used ("claude-opus-5[1m]").
+ * The CLI fills contextWindow per request from its own model table and the account's opt-ins, so it is the window that
+ * actually admits this session's requests (production 2026-10-17: autocompact at 967,014 tokens on "sonnet" = 1M).
+ * Only the turn's root model counts (subagent models share the map; the map also carries earlier models after --resume).
+ * null when the root model is unknown, not in the map, reported with two different windows, or 0 (crash/startup results
+ * carry zeroed values): never a guess.
  */
 export function claudeReportedContextWindow(modelUsage: unknown, turnModel: string | null): number | null {
   if (!turnModel || !modelUsage || typeof modelUsage !== "object" || Array.isArray(modelUsage)) return null;
@@ -408,8 +408,8 @@ export function claudePermissionArgs(
   if (opts.browserOnly || opts.untrustedNoTools) return [];
   if (permission === "full") return ["--permission-mode", "bypassPermissions"];
   if (permission === "write") {
-
-
+    // 쓰기 실행은 프로젝트 폴더 밖 임시 파일(/tmp/claude-<uid>/…, TMPDIR)을 쓰려다 "requested permissions
+    // to write … but you haven't granted it yet" 로 헤드리스 거절을 맞았다(Science 연구 실측 2026-09-13,
 
     return ["--permission-mode", "acceptEdits", ...claudeScratchDirArgs()];
   }
@@ -455,12 +455,12 @@ async function claudeExecutionSettings(req: RunnerRequest): Promise<string | nul
     hooks = parsed.hooks;
   }
 
-  
-
-
-
-
-
+  /*
+   * 런처 관문(2026-09-14, 페르소나 라운드 2 재시험): seatbelt 는 `open`·osascript·launchctl 같은 OS 런처가
+   * 샌드박스 밖에 프로세스를 만드는 것을 막지 못한다(실측: .command 를 open → 터미널 앱이 에뮬레이터를 띄움,
+   * 승격 0건). 쓰기 실행은 그런 Bash 호출을 실행 전에 거부하고, 거부문이 승격 요청으로 이어진다.
+   * 관문 스크립트가 없으면 쓰기 실행을 시작하지 않는다 — 관문 없이 "샌드박스"라고 부르는 것이 그 구멍이다.
+   */
   const launchGuard = writeSandboxLaunchGuardHook();
   if (!launchGuard) throw new Error("claude_write_sandbox_launch_guard_missing");
   const brokerHooks = hooks && typeof hooks === "object" && !Array.isArray(hooks) ? hooks as Record<string, unknown> : {};
@@ -477,18 +477,18 @@ async function claudeExecutionSettings(req: RunnerRequest): Promise<string | nul
 }
 
 /**
-
-
-
-
+ * 답변 언어는 사용자가 쓴 언어를 따른다(오너 2026-10-14, 화면 언어는 메뉴용). 그런데 Claude Code 사용자 설정
+ * `"language": "korean"` 은 CLI 가 시스템 수준에 넣어서 프롬프트를 이긴다(실측 2026-09-14, claude 2.1.270). 그래서
+ * 제품 실행은 그 값을 빈 문자열로 덮는다 — 2.1.296 실측: 덮지 않으면 영어 질문에도 한국어, "" 이면 질문 언어 그대로.
+ * --settings 는 두 번 주면 뒤의 것만 남으므로(위 claudeExecutionSettings 주석) 기존 설정 객체에 language 만 합친다.
  */
 /**
-
-
-
-
-
-
+ * The user's own Claude instruction files, left out of every product run (owner decision 2026-10-06, all users:
+ * personal coding rules must not drive product agents). `~/.claude/CLAUDE.md` and the user rules folder are the
+ * person's rules for their own sessions — on this machine they made product agents answer "**[Hope]**" and follow
+ * a git-commit policy. `claudeMdExcludes` drops only these files: the user's settings, plugins, hooks and sign-in
+ * stay, and a project's own CLAUDE.md still applies. Measured (claude 2.x, -p): with the default sources the model
+ * quotes the "**[Hope]**" prefix; with this exclusion it reports none. (Codex: codex-product-home.ts.)
  */
 export function personalClaudeInstructionFiles(env: NodeJS.ProcessEnv = process.env): string[] {
   const configDir = path.resolve(env.CLAUDE_CONFIG_DIR || path.join(env.HOME || os.homedir(), ".claude"));
@@ -502,9 +502,9 @@ export function withoutPersonalClaudeInstructions(settings: string, env: NodeJS.
 }
 
 export async function withProductReplyLanguage(settings: string | null, _locale?: RunnerRequest["locale"]): Promise<string> {
-
-
-
+  // Owner 2026-10-14: the reply follows the user's language; the app language is for menus. A personal
+  // "language": "korean" would still force Korean, so the product run clears it. Measured (claude 2.1.296, personal
+  // setting korean): unset → an English question answered in Korean; "" → English for English, Korean for Korean.
   const language = "";
   let base: Record<string, unknown> = {};
   if (settings) {
@@ -818,20 +818,20 @@ function flattenHistory(req: RunnerRequest): string {
  * 시드가 없는 레거시 호출만 시스템 프롬프트 전체 해시로 폴백한다.
  * Build처럼 runtimeSessionId를 직접 넘기는 표면은 호출자가 세션 수명을 관리한다.
  */
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+/*
+ * ★Owner decision 2026-09-07 — a conversation survives a model change.
+ *
+ * The model used to be part of session identity, on the reasoning that a session belongs to the
+ * model that created it. The reasoning is sound and the result was not: a usage limit that moved
+ * the run to another model, or the person simply picking a different one, threw the CLI session
+ * away. A fresh session receives only the conversation text, so everything the CLI actually held
+ * -- files it had read, what its tools returned, the plan it was working from -- was gone, while
+ * the transcript on screen stayed continuous and hid it.
+ *
+ * These CLIs take the model as a per-call argument; the thread is not bound to it. So the model
+ * leaves the identity. A different executable still starts a new session, because that genuinely
+ * is a different conversation.
+ */
 function systemFingerprint(req: RunnerRequest, executableFingerprint: string): string {
   // Model selection is per turn. The native conversation survives an in-process
   // set_model (verified against the installed stream-json CLI), and a dead
@@ -890,9 +890,9 @@ export function claudeStreamEventRecognized(ev: unknown): boolean {
 }
 
 /**
-
-
-
+ * claude stream-json 이벤트 하나에서 실패 표식을 읽는다 — 순수 함수(게이트가 픽스처 주입).
+ * 실측 스트림(2026-08-06): rate_limit_event(status:rejected) → assistant(error:"rate_limit")
+ * → result(is_error:true, api_error_status:429). 종료코드는 가변 — 이벤트가 진실.
  */
 /**
  * The assistant message's typed `error` (Agent SDK SDKAssistantMessageError, 2.1.301): provider-wide sign-in and quota
@@ -1060,19 +1060,20 @@ export interface ClaudeResultUsage {
 }
 
 /**
- * What a runner turn's own CLI results add up to, in the two scopes the model-call ledger requires to agree (ledger:
- * usage.inputTokens must equal rawInputTokens + cachedInputTokens + cacheCreationInputTokens).
+ * What a runner turn's own CLI results add up to, in the two scopes the model-call ledger requires to agree (flow audit
+ * 2026-10-18 AD-7; ledger: usage.inputTokens must equal rawInputTokens + cachedInputTokens + cacheCreationInputTokens).
  *
  * Usage contract (CLI 2.1.302):
  *  - A result's `usage` is the ROOT agent's own model requests of that one CLI turn, "a per-turn main-loop usage" (the
- *    SDK type's wording). It is not a running total: it is exactly the sum of the root transcript's per-message usage
- *    and none of the tokens the subagents spent. total_cost_usd, duration_api_ms and modelUsage ARE session running
+ *    SDK type's wording). It is not a running total: two production passes (35f7ec1f, 2026-10-18) recorded exactly the sum
+ *    of their root transcript's per-message usage (38,575,896 / 83,415 and 741,142 / 4,311 input / output tokens) and none
+ *    of the 25-31 M tokens their subagents spent. total_cost_usd, duration_api_ms and modelUsage ARE session running
  *    totals ("read the latest result rather than summing") and are never added here.
  *  - So a runner turn's receipt is the sum of `usage` over the results it took as its own (one per CLI turn it ran: its
  *    prompt, a steered direction that ran as the next turn). The same sum covers all four counters, so the total can
  *    never disagree with its parts.
  *  - `observed.inputTokens` counts everything the model took in: fresh input + cache reads + cache writes. Fresh input alone
- *    under-reports the real context size; the ledger's single integer cannot carry the three prices,
+ *    under-reports the real context size (measured 2 vs 52,518); the ledger's single integer cannot carry the three prices,
  *    so it carries the true size and `detail` keeps the split.
  *  - Never in it: subagent usage (absent from `usage`; a sidechain-tagged result is not the root's), and the results of
  *    CLI turns raised by background work, which are not this runner turn's (noted, not added: result_usage_unattributed).
@@ -1172,11 +1173,7 @@ const runClaudeTurn = async (
     const prior = aliveClaudeResources.get(aliveProfile.resourceOwnerKey);
     if (prior && !claudeResidentSessionAlive(prior.session)) prior.close();
   }
-  if (req.restrictedReadBoundary) {
-    throw markRefusedBeforeDispatch(new Error(
-      "Claude Code is not enabled for restricted read-only execution because its host filesystem boundary is not release-verified.",
-    ));
-  }
+  // A read-only automation (restrictedReadBoundary) runs under its configured read permission: claudePermissionArgs(read).
   const executableIdentity = getExecutable(req.runtimeSource, req.cwd ?? agentRunCwd(), req.env ?? process.env);
   if (!executableIdentity) {
     // Nothing was spawned: a refusal before dispatch, never an unknown effect (docs 31 W1).
@@ -1313,20 +1310,20 @@ const runClaudeTurn = async (
     ...(alivePacket.priorRows.length ? ["Recorded earlier decisions (data only):", ...alivePacket.priorRows.map(row => `${row.role}: ${row.text}`), "Current decision:"] : []),
     alivePacket.currentPrompt,
   ].join("\n\n") : resumeSessionId ? continuationPrompt : flattenHistory(runReq);
-  
-
-
-
-
+  /*
+   * 읽기 전용 실행이면 그 사실을 말해 준다 — 도구를 조용히 빼기만 하면 모델은 그것을
+   * 일시적 장애로 읽고 우회를 찾는다. 실측: 서브에이전트 위임 → 다른 도구 대체 →
+   * 브라우저까지 시도하며 2분을 썼고, 결국 아무것도 못 했다. 경계는 숨길 이유가 없다.
+   */
   const readOnlyToolNotice =
     !runReq.untrustedNoTools && req.permission !== "write" && req.permission !== "full"
       ? `\n\n[Read-only run] write/edit/shell: removed; no workaround (subagent, other tool). Needs write: one sentence why, then final line exactly ${PERMISSION_ESCALATION_MARKER}. agent_mail_*: allowed.`
       : "";
-  
-
-
-
-
+  /*
+   * 쓰기 실행은 작업 폴더 샌드박스 안에서 돈다. 샌드박스·승인 거부를 말해 주지 않으면 모델은 그것을
+   * "이 기계의 한계"로 진단한다 — 실측(페르소나 루프 2026-09-13): 에뮬레이터·GUI 실행이 샌드박스에 막히자
+   * 15분간 네 방법을 시도한 뒤 "하이퍼바이저 접근 권한이 없다"고 사용자에게 보고했다(기계는 멀쩡했다).
+   */
   const writeSandboxNotice =
     !runReq.untrustedNoTools && req.permission === "write"
       ? `\n\n[Write run] shell: workspace sandbox. Blocked (approval, Operation not permitted, GUI/emulator/service start failure, SIGILL/exit 132) = permission boundary, not machine limit; no launcher workaround (open, osascript, launchctl, .command, tmux). Needs more: one sentence why, then final line exactly ${PERMISSION_ESCALATION_MARKER}.`
@@ -1358,21 +1355,21 @@ const runClaudeTurn = async (
     events.onStatus(tStatus(runReq.locale, "callingBackend", { backend: runReq.backendLabel }));
   }
 
-  
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+  /*
+   * 권한 칩 → claude 권한 모드. full=전체, write=편집 허용.
+   *
+   * ★read 는 "플래그 없음"이 아니다.
+   *
+   * 예전에는 read 에 아무 인자도 주지 않고 "헤드리스면 위험한 도구는 알아서 거부된다"고
+   * 가정했다. 실측으로 그 가정이 깨졌다: 읽기 권한으로 파일 생성을 시켰더니 claude 는
+   * 그냥 만들었다(같은 요청에서 codex·antigravity·grok 은 셋 다 거절했다). 사용자가
+   * 읽기를 골랐다는 것은 "내 파일을 바꾸지 마라"는 뜻인데, 그 약속이 지켜지지 않았다.
+   *
+   * 그래서 변경 수단을 이름으로 막는다. Bash 까지 막는 이유는 그것으로 파일을 쓸 수
+   * 있기 때문이다 — Bash 를 열어 둔 채 "읽기 전용"이라고 말하면 그 경계는 거짓말이고,
+   * 이 제품은 지킬 수 없는 경계를 조용히 통과시키지 않기로 했다(kimi 는 플래그 자체가
+   * 없어서 강제 불가를 사용자에게 말한다). 읽기·검색·분석은 그대로 가능하다.
+   */
   const permArgs = claudePermissionArgs(req.permission, {
     browserOnly: Boolean(runReq.browserOnly),
     untrustedNoTools: Boolean(runReq.untrustedNoTools),
@@ -1393,7 +1390,7 @@ const runClaudeTurn = async (
   const modelArgs = req.model && req.model.trim() ? ["--model", req.model.trim()] : [];
   // 작업량(reasoning effort) — installed CLI가 노출한 값을 그대로 전달. 미지정이면 CLI 기본.
   const effortArgs = req.effort && req.effort.trim() ? ["--effort", req.effort.trim()] : [];
-
+  // 출력 형태 계약 — 실측 claude 2.1.234 `--json-schema <schema>`.
   const schemaArgs = req.outputSchema ? ["--json-schema", JSON.stringify(req.outputSchema.schema)] : [];
 
   // MCP 서버 구성 주입 — mcp/client.ts가 설치·활성 서버를 .mcp.json으로 직렬화해 경로를 넘긴다.
@@ -1413,8 +1410,8 @@ const runClaudeTurn = async (
       throw createUntrustedRuntimeFailure();
     }
   }
-
-
+  // A minimal observation keeps only the Agentlas browser server from Main's config: every other
+  // server's tool schemas are context the look does not need (measured: ~50k of a 57k look).
   if (runReq.minimalObservation && !runReq.untrustedNoTools && agentAppMcpConfigArg) {
     try {
       const parsed = JSON.parse(await fs.readFile(agentAppMcpConfigArg, "utf8")) as { mcpServers?: Record<string, unknown> };
@@ -1437,13 +1434,13 @@ const runClaudeTurn = async (
   // retained as metadata for audit/replay, but must not silently erase the
   // runtime's settings or plugins.
   const isolatedMcpArgs: string[] = [];
-  
-
-
-
-
-
-
+  /*
+   * 헤드리스에서 권한 프롬프트로 막히지 않도록 승인된 MCP 툴을 미리 허용한다.
+   * ★읽기 실행 포함 — 오너 결정 2026-08-18. 읽기의 경계는 위 READ_ONLY_DENIED_TOOLS
+   * (파일 변경·셸)이 이름으로 지키고, MCP 서버는 우리 승인 관문을 이미 통과한 것만
+   * 이 목록에 온다. 예전엔 write/full 전용이라, 읽기 실행이 MCP 설정은 받았는데
+   * 모든 호출이 승인 대기로 자동 거부되는 반배선 상태가 됐다.
+   */
   const mcpPreAllowed =
     runReq.mcpConfigPath &&
     runReq.mcpAllowedTools &&
@@ -1451,16 +1448,16 @@ const runClaudeTurn = async (
     (!runReq.untrustedNoTools || hasExactUntrustedMcpGrant)
       ? runReq.mcpAllowedTools
       : [];
-  
-
-
-
-
-
-
-
-
-
+  /*
+   * ★오너 결정(2026-08-15): 묻는 순간이 없는 헤드리스 실행은 **권한 범위 안의 도구를
+   * 처음부터 풀어 둔다.** `acceptEdits` 는 파일 편집만 자동 허용하고 Bash·웹은 여전히
+   * 물어보는데, `-p` 에는 답할 사람이 없어 런타임이 스스로 거부하고 지나갔다 — 그래서
+   * "파일 편집은 되는데 npm test 만 조용히 안 되는" 실행이 나왔고, 그 뒤에 "다음부터
+   * 허용?" 카드가 떴다. 사용자가 write 를 골랐다는 것은 프로젝트 안에서 일하라는 뜻이지
+   * 셸을 막으라는 뜻이 아니다. 거부를 사후에 알리는 대신 거부가 생길 이유를 없앤다.
+   * read 는 파일 변경·셸만 제거하고 웹 조회는 미리 허용한다. 정책 거절은 도구
+   * 브로커 PreToolUse 훅이 계속 맡는다 — 허용 깃발은 켜기만 하고 거절은 훅만 한다.
+   */
   const builtinPreAllowed = claudeBuiltinPreAllowedTools(req.permission, {
     browserOnly: runReq.browserOnly, untrustedNoTools: runReq.untrustedNoTools,
   });
@@ -1470,10 +1467,10 @@ const runClaudeTurn = async (
   recordClaudeCapabilityRequest({ permission: req.permission, browserOnly: Boolean(runReq.browserOnly),
     untrustedNoTools: Boolean(runReq.untrustedNoTools), allowedBuiltins: builtinPreAllowed });
   const allowedToolArgs = preAllowedTools.length > 0 ? ["--allowedTools", preAllowedTools.join(",")] : [];
-
-
-
-
+  // ★C38 — 도구 호출 직전 관문. 실측(2026-08-04, claude 2.1.220): PreToolUse deny가
+  // `--permission-mode bypassPermissions`를 이기고 Bash 호출을 실제로 막았다. 허용 깃발
+  // (`--allowedTools`)은 켜기만 하므로, 선언되지 않은 호출을 거절하는 곳은 여기뿐이다.
+  // Settings and the write-sandbox launch guard are checked before the CLI starts: their refusals precede dispatch.
   const executionSettings = await withProductReplyLanguage(await claudeExecutionSettings(runReq)
     .catch((error: unknown) => { throw markRefusedBeforeDispatch(error); }), runReq.locale);
   const productSettings = withoutPersonalClaudeInstructions(executionSettings, runReq.env ?? process.env);
@@ -1504,8 +1501,8 @@ const runClaudeTurn = async (
       ]
     : [];
   // A Main-issued effect observation looks only: read built-ins, the Main-selected MCP config and
-  // nothing from the user's CLI setup (settings, plugins, CLAUDE.md).
-  // Each observation uses isolated context rather than resuming the conversation history.
+  // nothing from the user's CLI setup (settings, plugins, CLAUDE.md). ~6k tokens per look instead of
+  // the full conversation context (isolated measurement 2026-09-24).
   const minimalObservationArgs = runReq.minimalObservation && !runReq.untrustedNoTools
     ? ["--setting-sources", "", "--strict-mcp-config", "--tools", "Read,Glob,Grep,LS",
         "--disable-slash-commands", "--no-session-persistence"]
@@ -1525,8 +1522,8 @@ const runClaudeTurn = async (
       : claudeEngineBrowserEnabled({ env: runReq.env ?? process.env, cwd: runReq.cwd ?? agentRunCwd() }),
   });
   if (browserSurface.receipt) events.onStatus(browserSurface.receipt);
-
-
+  // The person's user-scope MCP servers stay out of every product run (owner decision 2026-10-11): strict config, or
+  // a deny by name where strict would also drop a plugin server the run needs (claude-personal-context.ts).
   const mcpIsolation = claudeMcpIsolation(selectionFor(runReq.agentId, undefined, runReq.chatId), runReq.mcpAllowedTools ?? [], browserSurface.pluginBrowserNeeded);
   events.onStatus(mcpIsolation.receipt);
   const alreadyStrict = noToolsArgs.includes("--strict-mcp-config") || minimalObservationArgs.includes("--strict-mcp-config");
@@ -1535,19 +1532,19 @@ const runClaudeTurn = async (
     ...(mcpIsolation.strict && !alreadyStrict ? ["--strict-mcp-config"] : []),
   ];
 
-
-
-
-
-
-
-
-
-
-
-
-
-
+  // 시스템 프롬프트(Agentlas 헤더+스킬+프로토콜만 ~24KB)는 argv가 아니라 파일로 전달한다.
+  // Windows에서 claude는 `.cmd` 심 → cmd.exe로 실행되고 커맨드라인은 ~8191자 한계라,
+  // `--append-system-prompt`에 24KB를 실으면 잘려서 exit 1. `--append-system-prompt-file`은
+  // 경로만 넘기므로 안전. 사용자 프롬프트(+히스토리)는 stdin으로 보낸다(`-p`는 stdin을 읽음).
+  //
+  // 캐시 계약(2026-08-18 A/B 실측, run-e.sh):
+  //  - append를 턴1에만 보내면 재개 스폰의 요청 형상이 턴1과 달라져 세션 프리픽스가
+  //    매 턴 전액 재작성된다. **같은 바이트를 매 스폰 다시 보내야** 턴2부터 캐시가 읽힌다
+  //    (실측: no-fork+매 턴 동일 append = 턴2 write 373tok vs 현행 패턴 = 매 턴 26K+ 재작성).
+  //  - 그래서 파일 경로·내용을 세션 수명 동안 고정한다: 키는 chatId|KIND|fingerprint.
+  //    fingerprint가 바뀌면 storedSessionId도 함께 버려지므로(위 clearRuntimeSession)
+  //    낡은 내용이 재사용될 수 없다. 앱 재시작 등으로 파일이 사라졌으면 append 없이
+  //    재개한다(그 턴만 재작성, 다음 세션 생성 때 파일 재생성).
   const stableSysKey = contextChatId && fingerprint
     ? crypto.createHash("sha256").update(`${contextChatId}\0${KIND}\0${fingerprint}`).digest("hex").slice(0, 20)
     : null;
@@ -1591,10 +1588,10 @@ const runClaudeTurn = async (
     : "--append-system-prompt-file";
   // A minimal observation replaces the prompt too (its own 5 sentences are the whole prompt).
   const promptFileFlag = runReq.minimalObservation ? "--system-prompt-file" : systemPromptFileFlag;
-
-
-
-
+  // --fork-session 제거(2026-08-18 실측): fork는 재개 스폰마다 요청 프리픽스를 바꿔
+  // 세션 캐시를 영원히 못 잇게 한다(fork 재개 3턴 연속 write 8.6K+ vs no-fork 3턴째
+  // write 360). `-p` 재개는 fork 없이도 매 스폰 새 세션 파일을 만들므로(D실측: 재개마다
+  // 새 session_id 반환) 원본 세션 훼손·동시성 문제도 없다.
   const args = resumeSessionId
       ? [
           "--resume",
@@ -1640,19 +1637,19 @@ const runClaudeTurn = async (
           ...toolBrokerArgs,
         ];
 
-  
-
-
-
-
-
-
-
-
-
-
-
-
+  /*
+   * ★상주 — 이 턴이 끝나도 프로세스를 죽이지 않는다(Phase 5, 오너 최우선 요구).
+   *
+   * 예전에는 매 턴이 `-p`(단발)로 새 프로세스를 띄우고 `--resume` 으로 문맥만 이었다.
+   * `--input-format stream-json` 을 붙이면 같은 프로세스가 stdin 으로 여러 턴을 받는다
+   * (실측: 두 턴이 같은 pid·같은 session_id). 키가 있는(=대화에 속한) 실행만 풀에서
+   * 빌린다 — chatId 가 없는 일회성 실행은 이어 쓸 다음 턴이 정의상 없다.
+   *
+   * ★상주는 **속도·비용 최적화이지 연속성의 근거가 아니다**(오너 규칙 2026-08-20).
+   * 프로세스가 사라져도 손실이 아니다: 연속성은 지금 그대로 세션 id(`--resume`)와
+   * 대화 히스토리 재주입이 잇는다. 그래서 아래 모든 실패 경로가 조용히 1회성 경로로
+   * 떨어지고, 사용자 화면에는 아무 차이도 남지 않는다.
+   */
   const runCwd = req.cwd ?? agentRunCwd();
   // Product sessions live in Agentlas's own Claude config dir, never in the person's ~/.claude; the
   // person's keychain sign-in is reused unchanged (claude-product-home.ts). One keeps the user MCP servers it switched on.
@@ -1692,15 +1689,15 @@ const runClaudeTurn = async (
     !hostAuthorityWorkforce &&
     Boolean(aliveProfile || runReq.chatId) &&
     Boolean(fingerprint);
-  
-
-
-
-
-
-
-
-
+  /*
+   * Per-turn authority (a browser grant, an isolated MCP config, a per-run tool grant) keeps a process from being REUSED,
+   * not from taking the owner's directions mid-turn. Such a turn used to run one-shot `-p`, which has no input channel
+   * once started, so native steering never applied: production 1.3.67, Yotube room (every daily-production turn binds the
+   * Agentlas Browser, so isolatedMcpConfig): 0 of 6 claude-code steers applied while codex app-server applied 25 of 25;
+   * on 2026-10-18 the owner's 02:45Z/02:46Z directions waited for the 43-minute turn to end. An attended chat turn of
+   * that kind now opens a stream-json process of its own under a pool key no other turn can match, and the process is
+   * discarded when the turn ends (finally below), so the grant still dies with its turn.
+   */
   const turnScopedResidency = !residencyEligible &&
     allowResidency &&
     executableState.residencySupported &&
@@ -1739,14 +1736,14 @@ const runClaudeTurn = async (
   let modelHandoff: { retired: number; pending: number } | null = null;
   /** 이 세션을 풀에 되돌리면 안 되는가(취소·오류·프로토콜 파손). */
   let broken = false;
-  
-
-
-
-
-
-
-
+  /*
+   * Another process of this chat owner that holds the native session this turn resumes. Codex (claimCodexThreadWriter)
+   * and ACP (retireSupersededAcpSessions) hand a session over only after its previous process has exited and refuse
+   * while that process runs a turn; Claude marked a busy sibling "retire on release" and resumed the same session at
+   * once, and closed an idle one without waiting (flow audit 2026-10-18 AD-5). Both now follow the same contract: a
+   * sibling running a turn is a typed pre-dispatch refusal (runtime_session_owner_busy), and every retired one has
+   * exited before this turn spawns or reuses a process (runtime_retired_cli_exit_timeout otherwise).
+   */
   const handOverNativeSession = async (handoff: { busy: boolean; retired: ClaudeResidentSession[] }): Promise<number> => {
     if (handoff.busy) {
       cleanupSysFile();
@@ -1939,17 +1936,17 @@ const runClaudeTurn = async (
     }
   }
 
-  
-
-
-
-
-
-
-
-
-
-
+  /*
+   * A one-shot turn speaks the same uuid'd stream-json input as a resident one whenever this executable reads it.
+   * Measured offline on the installed 2.1.302: a uuid'd stream-json message is queued, run and answered before the CLI
+   * exits on stdin EOF, and that turn's init, assistant and result frames carry the uuid as user_message_uuid(s); the
+   * result of a plain-text prompt carries none. Production 2026-10-18 (Yotube Goal turn fd5f52e7, 1.3.67): a resumed
+   * one-shot first ran the task notifications the session had queued for its earlier background tasks, and the CLI joined
+   * the prompt into that turn, so the turn's result was attributed to the task notification. With no uuid to tell it was
+   * ours, the root result read as background work: the 5 s exit grace never started, the process lived until every
+   * background subagent finished (28 and 39 minutes), and the last result, a background one, left the pass "uncertain".
+   * Both passes went unsettled and the Goal turn failed red with runtime_turn_unsettled.
+   */
   const oneShotJson = !session && executableState.residencySupported;
   /** A process of this turn that may outlive its settlement (background work): ended and awaited in finally. */
   let lingeringChild: ChildProcess | null = null;
@@ -2154,11 +2151,11 @@ const runClaudeTurn = async (
     let stderr = "";
     let structuredRuntimeError: Error | null = null;
     /**
-
-
-
-
- */
+     * `--resume` named a session the CLI never wrote to disk: an error result with zero turns
+     * ("No conversation found with session ID"). Measured 2026-09-25: an owner pause that stopped
+     * the first turn while the CLI was starting stored the init session id; the owner's Resume then
+     * failed at once as "claude error", and the Goal blocked on checkpoint_producer_no_effects.
+     */
     let resumedConversationMissing = false;
     /** The typed cause of a zeroed startup-refusal result (claudeStartupRefusal): nothing ran and the binding stays. */
     let startupFailureReason: string | undefined;
@@ -2198,11 +2195,11 @@ const runClaudeTurn = async (
       lastEmit = now;
     };
 
-
-
-
+    // ── 라이브 토큰 카운트 — 상태줄 "{N}s · {tokens} tokens" 실시간 갱신용 ──
+    // message_delta의 usage.output_tokens(현재 메시지 누적 실측)를 우선하고, 실측이 아직
+    // 없는 스트리밍 구간은 델타 문자 수/4로 추정한다. 렌더러 표시는 단조 증가만 허용.
     let usageBase = 0; // 완결된 메시지들의 output_tokens 합
-    let curMsgUsage = 0; 
+    let curMsgUsage = 0; // 현재 메시지의 마지막 usage 실측
     let curMsgEstChars = 0; // 현재 메시지에서 스트리밍된 문자 수(텍스트+thinking) — 추정용
     let lastUsageEmit = 0;
     let lastUsageVal = 0;
@@ -2234,15 +2231,15 @@ const runClaudeTurn = async (
 
     /**
 
+     * Claude implements --json-schema as a synthetic "StructuredOutput" tool call: the answer channel,
 
+     * not an operation. Emitting it as a tool event made every schema-bound verifier judgment fail
 
+     * closed with verification_effects_tool_observed (isolated live run 2026-09-25, after batch
 
+     * judgments gained an output schema in 9353befb) and the Goal blocked on verification_unavailable.
 
-
-
-
-
- */
+     */
 
     const answerChannelToolIds = new Set<string>();
     /**
@@ -2261,14 +2258,14 @@ const runClaudeTurn = async (
       try { if (!isError) ticket?.complete(); }
       finally { nativeFileProofById.delete(toolId); }
     };
-    
-
-
-
-
-
-
-
+    /*
+     * ★무엇이 막혔는지는 거부 문구가 아니라 **그 호출**이 안다.
+     *
+     * claude 의 거부 tool_result 는 "This command requires approval" 한 줄이고 명령을
+     * 담지 않는다(실측). 그래서 이름 없이 "도구가 막혔다"고만 알리게 되는데, 그건
+     * 사용자에게 아무 정보가 아니다. tool_use 는 같은 id 로 먼저 지나가므로, 그때 무엇을
+     * 하려 했는지 적어 두면 거부가 왔을 때 정확히 이름을 붙일 수 있다 — 추측이 아니라 연결.
+     */
     const toolCallById = new Map<string, { name: string; detail?: string }>();
     const detailOfToolInput = (input: unknown): string | undefined => {
       if (!input || typeof input !== "object") return undefined;
@@ -2297,10 +2294,10 @@ const runClaudeTurn = async (
       if (!blocked) return;
       const call = toolId ? toolCallById.get(toolId) : undefined;
       const what0 = blocked.blocked ?? call?.detail;
-      
-
-
-
+      /*
+       * 같은 tool_result 가 assistant 메시지와 user 메시지 두 경로로 들어온다(실측: 같은
+       * 요청이 승인 카드에 두 번 떴다). 호출 id 를 열쇠에 넣어 한 호출은 한 번만 알린다.
+       */
       const key = `${toolId ?? ""}|${what0 ?? blocked.message.slice(0, 120)}`;
       if (announcedApprovalBlocks.has(key)) return;
       announcedApprovalBlocks.add(key);
@@ -2327,17 +2324,17 @@ const runClaudeTurn = async (
       });
     };
 
-    
-
-
-
-
-
+    /*
+     * 샌드박스 즉사(SIGILL·exit 132 등)는 권한 거절 문장이 없어 위 판별을 지나친다 — 라운드 2 실측:
+     * 에뮬레이터가 seatbelt 안에서 가상화 엔진을 올리다 132 로 죽었고 배너가 안 떠 사람이 누를 것이 없었다.
+     * 쓰기 샌드박스가 실제로 켜진 실행에서만, Bash 결과에 한해, 같은 approval-required 통로로 승격 칩을 띄운다.
+     * (전체 액세스에는 샌드박스가 없으니 거기서의 132 는 진짜 기계 문제다 — 부르지 않는다.)
+     */
     const sandboxActive = Boolean(executionSettings) && req.permission === "write";
-    
-
-
-
+    /*
+     * 끊긴 MCP 서버(실측: 컴퓨터 유즈 35건 "is not connected")는 이 턴 안에서 못 살린다 — 사람에게 한 번 말하고,
+     * 앱 로그에 남긴다. 모델 쪽은 시스템 프롬프트 꼬리(toolOutageGuidance)가 "반복하지 말고 끝내라"를 맡는다.
+     */
     const announcedOutages = new Set<string>();
     const announceMcpOutage = (resultText: string): void => {
       const outage = detectMcpServerDisconnected(resultText);
@@ -2502,9 +2499,9 @@ const runClaudeTurn = async (
       parent_tool_use_id?: string | null;
       isSidechain?: boolean;
       result?: unknown;
-
-
-
+      // `result` 이벤트는 입력·출력·캐시 토큰을 **전부** 싣는다(실측 확인 2026-07-28).
+      // 예전에는 output 만 읽고 나머지를 버려서, 할당 영수증의 `usage` 를 채울 수
+      // 없었다 — 스키마가 non-null 일 때 입력·출력 둘 다를 요구하기 때문이다.
       usage?: {
         output_tokens?: number;
         input_tokens?: number;
@@ -2599,7 +2596,7 @@ const runClaudeTurn = async (
             ...(session ? { retention: "native-compaction" as const } : {}) });
         }
         if (resumeContext?.delivery && ev.session_id !== resumeContext.delivery.identity.sessionId) {
-          invalidateStableTurnContext(resumeContext.delivery.identity);
+          invalidateStableTurnContext(resumeContext.delivery.identity, true);
         }
         sessionId = ev.session_id;
         if (session) session.nativeSessionId = ev.session_id;
@@ -2618,7 +2615,7 @@ const runClaudeTurn = async (
           compactionsThisTurn });
         if (!contextSessionId) initialSeedCompacted = true;
         else if (ev.session_id == null || ev.session_id === contextSessionId) {
-          invalidateStableTurnContext({ chatId: contextChatId, runtimeKind: KIND, sessionId: contextSessionId });
+          invalidateStableTurnContext({ chatId: contextChatId, runtimeKind: KIND, sessionId: contextSessionId }, true);
         }
       }
       if (ev.error === "authentication_failed") {
@@ -2886,9 +2883,9 @@ const runClaudeTurn = async (
         // this exact native terminal. Neither receipt asserts external quiescence.
         terminalSucceeded = completedResult;
         const resultShape = ev as { subtype?: unknown; num_turns?: unknown };
-        
-
-
+        // A zeroed result that names a typed startup refusal (session_held_by_background, cwd_unavailable, ...) is that
+        // refusal, never a missing conversation: the stored binding stays (flow audit AD-2). Only a zero-turn error with
+        // no typed cause keeps the measured "No conversation found" meaning.
         const startupRefusal = claudeStartupRefusal(ev as unknown as Record<string, unknown>);
         if (startupRefusal) startupFailureReason = startupRefusal;
         else if (resumeSessionId && ev.is_error === true && resultShape.subtype === "error_during_execution"
@@ -3100,13 +3097,13 @@ const runClaudeTurn = async (
         return;
       }
       if (startupFailureReason && !combined()) {
-        
-
-
-
-
-
-
+        /*
+         * The CLI refused to start and named why (claudeStartupRefusal): nothing ran, no model request was made, and the
+         * stored session is not missing. It used to read as "conversation missing" (any zero-turn resume error): the binding
+         * was deleted and a fresh session started, so a session still held by its previous process
+         * (session_held_by_background) split into two conversations (flow audit 2026-10-18 AD-2). The binding stays and the
+         * refusal is returned typed, pre-dispatch, with the CLI's reason as its provider code.
+         */
         broken = true;
         events.onStatus(`[runtime-session] startup_refused kind=${KIND} reason=${startupFailureReason}`);
         const failure: RunnerFailure = { ...(runnerFailure ?? { kind: "exit", message: startupFailureReason, runtime: "claude", source: "marker" }),
@@ -3209,8 +3206,8 @@ const runClaudeTurn = async (
         resolve({
           text: display.trim(),
           ownerControlTerminal: normalEnd?.outcome === "completed" ? "completed" : "uncertain",
-
-
+          // ★exit 0이어도 표식이 실패를 말했으면 그대로 싣는다 — 소비자는 이 칸으로 판정한다.
+          //   (실측: 한도 거절은 exit 1이었지만 종료코드는 버전·경로 따라 가변 — 이벤트가 진실.)
           ...(runnerFailure ? { failure: runnerFailure } : emptyFailure ? { failure: emptyFailure } : {}),
           ...(normalEnd ? normalEndToolEvidence(normalEnd) : {}),
           sessionId,

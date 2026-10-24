@@ -944,12 +944,12 @@ function reduceOneActivityInternal(
   } else if (event.kind === "partial") {
     items = closeRunning(items, observedAt, "completed", true, replay);
     activeReasoningId = undefined;
-    
-
-
-
-
-
+    // The answer is streaming. Without this the timeline sat on the run row's
+    // generic "Working" for the whole generation (measured: 45s of "Working"
+    // while 300 lines were visibly arriving underneath). Say what is happening
+    // and how far along, the way tool rows do; the row closes on final/error.
+    // Live partials are deltas: the size lives in `textLen`; replay/fallback
+    // partials still carry the accumulated `text`.
     const answerLength = typeof event.textLen === "number" && Number.isFinite(event.textLen)
       ? event.textLen
       : typeof event.text === "string"

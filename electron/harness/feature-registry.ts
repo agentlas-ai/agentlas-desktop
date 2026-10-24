@@ -13,6 +13,12 @@
  * Pure data + lookups; no electron import (the daemon and Terminal load it).
  */
 
+import { registerDeclaredPromptModule } from "../runtime/prompt-order";
+
+/** Selected host data returned by harness_describe feature:<id>; no execution authority. */
+export const HARNESS_FEATURE_DECLARATION_MODULE = {"id":"harness.feature.declaration","revision":1,"stability":"turn-context","changeTriggers":["owner-input","release"],"order":0} as const;
+export const HARNESS_FEATURE_DESCRIPTION_FORMULA = {"id":"desktop.harness.feature-description","channel":"tool-result","orderedModuleIds":["harness.feature.declaration"],module:HARNESS_FEATURE_DECLARATION_MODULE} as const;
+
 export type ConnectionMode = "native" | "host-equivalent" | "host-alternative" | "provider-only" | "unavailable";
 export type EvidenceStage = "source" | "fake" | "live";
 export type ExecutorFamily = "codex-app-server" | "claude-print" | "acp" | "antigravity" | "api-loop" | "local-loop";
@@ -33,6 +39,16 @@ export interface FeatureConnection {
  * moves; scripts/test-feature-modules-domain.cjs checks every name against the source (the start function is called by
  * the declared host and by no other, each operation id, table and event kind exists, each acceptance gate exists).
  */
+/** A consumer of the shared canonical wait partition, not another owner of the legacy Goal clocks. */
+export interface FeatureCanonicalOwnerConsumer {
+  host: "daemon";
+  start: "pollGoalWaitSubscriptions";
+  partition: "canonical-owner-waits";
+  ownerBinding: "explicit-kind-epoch";
+  currentness: "execution-owner-lease";
+  clock: { source: "serviceHeartbeat"; intervalMs: 500; minPollIntervalMs: 60000 };
+}
+
 export interface FeatureDomain {
   version: string;
   dependencies: readonly string[];
@@ -45,6 +61,8 @@ export interface FeatureDomain {
      * named owner row (one owner at a time, never a second clock for a life). `companionClocks` run there regardless,
      * because they belong to a domain that host owns (e.g. the AGI monitor beside Goal custody).
      */
+    /** Only this partition may be consumed by the other host, under its current explicit owner. */
+    canonicalOwnerConsumers?: readonly FeatureCanonicalOwnerConsumer[];
     standby?: { host: "main" | "daemon"; start: readonly string[]; stop?: readonly string[]; leaseTable: string; companionClocks: readonly string[] };
   };
   operations: {
@@ -116,7 +134,10 @@ export const FEATURE_MODULES: readonly FeatureModule[] = [
       version: "1", dependencies: ["store", "invocation"],
       // The wait poll rides the automation scheduler's 60 s tick; the blocked-goal sweep has its own 60 s interval.
       lifecycle: { host: "main", start: ["startAutomationScheduler", "sweepBlockedGoals", "pollGoalWaitSubscriptions"], stop: ["closeAutomationDispatchForShutdown"],
-        clocks: ["automation-scheduler 60s tick (goal waits)", "blocked-goal sweep 60s"] },
+        clocks: ["automation-scheduler 60s tick (goal waits)", "blocked-goal sweep 60s"],
+        canonicalOwnerConsumers: [{ host: "daemon", start: "pollGoalWaitSubscriptions", partition: "canonical-owner-waits",
+          ownerBinding: "explicit-kind-epoch", currentness: "execution-owner-lease",
+          clock: { source: "serviceHeartbeat", intervalMs: 500, minPollIntervalMs: 60000 } }] },
       operations: {
         ipc: ["goalPanel:view", "goalPanel:edit", "goalPanel:shape"],
         appControl: ["goalPanel.view", "goalPanel.edit", "goalPanel.shape"],
@@ -339,7 +360,9 @@ export const FEATURE_MODULES: readonly FeatureModule[] = [
 const BY_ID = new Map(FEATURE_MODULES.map((feature) => [feature.featureId, feature]));
 
 export function featureModule(featureId: string): FeatureModule | null {
-  return BY_ID.get(featureId) ?? null;
+  const feature = BY_ID.get(featureId) ?? null;
+  if (feature) registerDeclaredPromptModule(HARNESS_FEATURE_DESCRIPTION_FORMULA.module);
+  return feature;
 }
 
 /** How one feature connects for one runtime kind; null when the feature is not declared. */

@@ -6,6 +6,7 @@ import { configureMobileScienceChatClient } from "./mobile-bridge/science-chat";
 import { createScienceCapabilityCatalog, readScientificSkillCatalogMetadata, registerScienceCapabilityCatalogIpc } from "./science-host/capability-catalog";
 import { listRoutes as listScienceCapabilityAgentRoutes } from "./agents/routes";
 import { reviewScienceAnalysisPlanWithFreshness } from "agentlas-science";
+import * as ScienceSDK from "agentlas-science";
 // Electron 진입점.
 // dev:  ELECTRON_START_URL = http://localhost:3100 (Next.js dev server)
 // prod: file://dist/renderer/index.html (next export 결과)
@@ -29,6 +30,7 @@ import {
   Notification,
   powerMonitor,
   protocol,
+  screen,
   session,
   shell,
   webContents,
@@ -44,6 +46,9 @@ import { capAppBrowserCache, trimOversizedSessionCaches } from "./browser/sessio
 import { startStorageMaintenance } from "./storage/storage-maintenance";
 import { registerOneCapabilitiesIpc } from "./capabilities/one-capabilities-ipc";
 import { registerArchiveIpc } from "./archive/archive-ipc";
+import { registerReachIpc } from "./reach-host/reach-ipc";
+import { registerEnterpriseServerIpc } from "./enterprise-server/enterprise-server-ipc";
+import { startReach, stopReach } from "./reach-host/reach-main";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import {
@@ -79,12 +84,14 @@ import { registerOnePersonalIntegrationMainIpc } from './one/personal-integratio
 import { createNativeGmailPersonalSourceOwner, type GmailPersonalSourceOwner } from './one/gmail-personal-source-owner';
 import { registerRoomDiscussionIpc } from './one/room-discussion-ipc';
 import { closeOnePersonalIntegrations, invalidateOnePersonalIntegrations, configureOnePersonalIntegrationPolicy } from './one/personal-integrations-runtime';
-import { configureDevelopmentEffectPolicy, developmentEffectPolicyRequested, developmentEffectsSuppressed, developmentIpcBoundary, developmentRendererRequestAllowed } from "./development-effect-policy";
+import { configureDevelopmentEffectPolicy, developmentEffectPolicyRequested, developmentEffectsSuppressed, developmentIpcBoundary, developmentRendererRequestAllowed, reachQaAdmission } from "./development-effect-policy";
 import { openRendererLink } from "./renderer-link-open";
 import { ScienceProjectFolderSelections, validateScienceProjectFolderPath } from "agentlas-science";
 import { installDesktopScienceHost } from "./science-host";
 import { createScienceDaemonClient, type ScienceDaemonClientOptions } from "./science-host/daemon-client";
 import { registerScienceDaemonExecutionIpc } from "./science-host/daemon-ipc";
+import { registerScienceQuestionDecisionIpc } from "./science-host/question-ipc";
+import { scienceQuestionHost } from "./science-host/question-continuation";
 import { isScienceStoreFormatRefusal, scienceBootstrapFailure } from "./science-host/bootstrap-failure";
 import { createAgentlasWindowVisualSessionControl } from "./mobile-bridge/visual-session";
 import { listPendingAskUserRequests, submitAskUserAnswer } from "./confirm/ask-user";
@@ -95,6 +102,7 @@ import { storeIdentityDigest } from "./daemon/diagnostic-log";
 import { mainWindowDevToolsAllowed } from "./devtools-policy";
 import { rememberedMainWindowRoute, rememberMainWindowUrl } from "./main-route-memory";
 import { mainWindowInitialRoute } from "../shared/restorable-route";
+import { COMPANY_ENTRY_ROUTE, isCompanyDeepLink } from "../shared/business/visibility";
 import { startMemoryRevocationCleanup, stopMemoryRevocationCleanup } from "./memory/revocation-cleanup";
 import { emitDesktopStoreChange, onDesktopStoreChange } from "./store/change-bus";
 import { watchExternalChatChanges } from "./store/external-chat-changes";
@@ -186,6 +194,8 @@ import { shouldYieldToNativeInstall } from "./updater/yield-to-native-install";
 import { clearQuitIntent, currentQuitIntentCode, installQuitSignalHandlers, noteQuitIntent, noteSystemShutdown, rearmQuitSignalHandlers, recordImmediateExit, recordQuitStarted } from "./quit-reason";
 import { planAfterQuitPrompt, planGuiQuit, QUIT_PROMPT_CHOICES, quitPromptText, quitWorkCount, type QuitPlan } from "./quit-policy";
 import { backgroundHoldActive, enterBackgroundHold, leaveBackgroundHold } from "./background-tray";
+import { fitWindowToWorkArea, secondInstanceWindowAction, watchWindowForLastVisibleClose } from "./window-lifecycle";
+import { cleanupDoneExit, createQuitStepClock, createRelaunchAfterQuit, relaunchArgsForLaunchDuringQuit, relaunchExecPath, type QuitStepClock } from "./quit-exit";
 import { decideRunAlert, fireRunAlert, getRunAlerts } from "./run-alerts";
 import { onOwnerAsk } from "./owner-ask-alerts";
 import { supervisorQuietRun } from "./one/supervisor-presentation";
@@ -241,8 +251,13 @@ import {
   captureScienceExtensionViewRegion,
   assertScienceExtensionReleasePermission,
   assertScienceExtensionViewPermission,
+  assertScienceExtensionTerminalScope,
   isScienceExtensionViewSender,
   openScienceExtensionView,
+  bindSciencePresentation,
+  publishSciencePresentation,
+  sciencePresentationScopeForOwner,
+  captureSciencePresentationForSender,
   setScienceExtensionViewBounds,
   mountScienceRendererView,
   updateScienceRendererViewBounds,
@@ -366,11 +381,11 @@ import {
 
 export { currentUiLocale } from "./ui-locale";
 
-
-
-
-
-
+/*
+ * ★가장 먼저 — 죽은 stdout/stderr 파이프가 앱을 죽이지 못하게 한다.
+ * 파일 로깅은 app ready 이후에야 시작되는데, 그 전에도 console 로 쓰는 줄이 있다.
+ * 실측(2026-09-07): 그 구간에서 EPIPE 가 uncaughtException 으로 올라와 앱이 죽었다.
+ */
 installStdioErrorGuard();
 // An uncaught error is logged instead of opening Electron's modal error box, which blocks Main (see logging.ts).
 installMainProcessErrorSink();
@@ -418,11 +433,11 @@ const oneTeamNotificationKeys = new Set<string>();
  * the verifier; ordinary packaged launches never create this file.
  */
 const UPDATER_E2E_TRACE_PATH_ENV = "AGENTLAS_UPDATER_E2E_TRACE_PATH";
-   
-                                                                             
-                                                                         
-                                                                          
-   
+/**
+ * A remote Science rejection carries the daemon's machine code in `failure`;
+ * logging only the Error printed a bare stack and hid the cause for days
+ * (science_daemon_remote_rejected on every packaged boot, 2026-09-27~29).
+ */
 function scienceDaemonFailureForLog(error: unknown): unknown {
   const failure = (error as { failure?: unknown } | null)?.failure;
   return failure && typeof failure === "object" ? { ...failure } : error;
@@ -614,7 +629,7 @@ function initializeInstallIdentity(): InstallIdentity {
 
 const installIdentity = initializeInstallIdentity();
 traceUpdaterStartup("install-identity-ready");
-                                                                                           
+// Browser caches are bounded so the profile keeps only what automation needs (2026-10-16).
 capAppBrowserCache();
 
 /** A reopening GUI cannot migrate or boot-repair a store still owned by an
@@ -868,17 +883,17 @@ function checkOneBriefingDesktopNotification(): void {
  * durable settlement is the event boundary, so no polling or duplicate timer
  * can emit the same notification twice in this process.
  */
-
-
-
-
-
-
-
-
-
-
-
+/*
+ * 실행이 끝나면 알린다 — 소리·앱 흔들기 (오너 2026-09-07).
+ *
+ * 이 자리를 고른 이유: onSettled 는 One 과 Work 가 **같이 지나는 단 하나의 종료 지점**이다
+ * (invocation/service.ts publishSettled). 표면마다 따로 달면 한쪽만 울리고 그 차이는
+ * 화면에 안 보인다.
+ *
+ * 위 One 팀 브리지와는 다른 기능이다: 저쪽은 로그인한 사용자의 팀 알림이고 5분 이상
+ * 걸린 실행만 본다. 이쪽은 설정으로 켜고 끄는 개인 알람이라 문턱도 사용자가 정한다.
+ * 둘 다 켜져 있으면 알림이 두 번 뜰 수 있어, 저쪽이 이미 보낸 실행은 건너뛴다.
+ */
 let disposeRunAlertBridge: (() => void) | null = null;
 function supervisorQuietRunInStore(runId: string): boolean {
   try { return supervisorQuietRun(getDb(), runId); } catch { return false; }
@@ -915,7 +930,7 @@ function startRunAlertBridge(): void {
     }
   });
   // A card the HOST wrote (the AGI monitor's ask) has no run settlement to ring from: it reports through the owner-ask seam
-  // and rings by the same rule as a model's question card — "Needs your input", whatever the length.
+  // and rings by the same rule as a model's question card — "Needs your input", whatever the length (owner 2026-10-20).
   const stopOwnerAsk = onOwnerAsk((ask) => {
     try {
       const settings = getRunAlerts();
@@ -1001,7 +1016,7 @@ const UPDATE_RELAUNCH_LOCK_RETRY_MS = 250;
 const UPDATE_RELAUNCH_LOCK_TIMEOUT_MS = 60_000;
 traceUpdaterStartup("before-single-instance-lock");
 // A copy of the OLD build opened while ShipIt is replacing the bundle makes ShipIt abort ("App Still Running", 1.2.95 on
-                                                                                                                     
+// 2026-10-11). Yield before anything else starts; ShipIt relaunches the new build itself after a successful install.
 if (app.isPackaged && !allowMultiInstance && shouldYieldToNativeInstall({
   platform: process.platform, userDataPath: userDataDir(), runningVersion: app.getVersion(), uid: process.getuid?.() ?? null,
 })) {
@@ -1061,27 +1076,36 @@ void singleInstanceLockPromise.then((acquired) => {
   app.exit(0);
 });
 
-  
-                                                                              
-                                                             
-                                                
-                                          
-  
-                                                       
-                                                           
-                                           
-                             
-   
+/*
+ * ── agentlas:// 딥링크 ────────────────────────────────────────────────────────
+ * 허브(웹)의 "설치" 버튼이 여는 주소다: agentlas://plugin/<family>/<slug>.
+ * 등록하지 않으면 OS 가 이 스킴을 아무 앱에도 넘기지 않아 버튼이 조용히 죽는다
+ * (2026-08-20 감사: 허브 상세가 설치 안내문만 띄우던 이유).
+ *
+ * 이 스킴은 렌더러가 내부적으로도 쓰지만(agentlas://app/index.html), 그건
+ * protocol.handle 이 앱 안에서 처리하는 것이고 여기 등록은 **OS → 앱** 전달용이라
+ * 서로 간섭하지 않는다. 링크는 항해가 아니라 라우팅 신호로만 소비한다 —
+ * 바깥에서 온 URL 로 창을 항해시키지 않는다.
+ */
 const PLUGIN_DEEP_LINK_RE = /^agentlas:\/\/plugin\/([a-z0-9][a-z0-9-]{0,63})\/([a-z0-9][a-z0-9-]{0,79})\/?$/i;
 // A link that arrives before the main window shows a product document becomes that window's first screen,
 // ahead of the remembered one (mainWindowInitialRoute); delivered once, by whichever comes first.
 let pendingDeepLinkRoute: string | null = null;
 
+/*
+ * 회사 링크: agentlas://company/join (또는 /enter). 회사가 직원에게 건네는 진입 링크다 — 조직 계정이 아닌 사용자에게는 조직 화면이 하나도 보이지 않으므로,
+ * 회사 직원이 처음 들어오는 길은 이 링크가 연다(shared/business/visibility.ts). 링크 내용은 해석하지 않고 모양만 본다. 렌더러는 고정 경로
+ * COMPANY_ENTRY_ROUTE 만 받아 "회사 링크로 열렸다"는 흔적을 남기고 회사 로그인 화면으로 간다 — 링크 문자열은 렌더러로 가지 않는다.
+ */
 function routeAgentlasDeepLink(rawUrl: string): void {
   if (developmentEffectsSuppressed()) return;
-  const match = PLUGIN_DEEP_LINK_RE.exec(rawUrl.trim());
-  if (!match) return; // 모르는 모양은 무시한다 — 바깥 입력이 임의 경로를 열 수 없다.
-  const route = `/marketplace?install=${encodeURIComponent(match[2])}&family=${encodeURIComponent(match[1])}`;
+  const trimmed = rawUrl.trim();
+  const match = PLUGIN_DEEP_LINK_RE.exec(trimmed);
+  const company = !match && isCompanyDeepLink(trimmed);
+  if (!match && !company) return; // 모르는 모양은 무시한다 — 바깥 입력이 임의 경로를 열 수 없다.
+  const route = match
+    ? `/marketplace?install=${encodeURIComponent(match[2])}&family=${encodeURIComponent(match[1])}`
+    : COMPANY_ENTRY_ROUTE;
   pendingDeepLinkRoute = route;
   const deliver = (): void => {
     if (!mainWindow || mainWindow.isDestroyed()) return;
@@ -1121,10 +1145,32 @@ app.on("open-url", (event, url) => {
 app.on("second-instance", (_event, argv, _workingDirectory, additionalData) => {
   // Update lock retries must not repeatedly bring the old window to front.
   if ((additionalData as { startupIntent?: string } | undefined)?.startupIntent === "update-relaunch") return;
+  // A launch always ends with the main window on screen. Returning when the window had been closed left
+  // Windows with a running app the person could not reach (window-lifecycle.ts, 2026-10-24).
+  const action = secondInstanceWindowAction({
+    platform: process.platform,
+    shellReady: shellReadyForWindows,
+    quitCommitted: quitPlanCommitted,
+    relaunchPlanned: quitRelaunching || automaticQuitInstaller.quitDisposition() !== "ordinary",
+    mainWindowAlive: !!mainWindow && !mainWindow.isDestroyed(),
+  });
+  // Quitting (Windows/Linux): this launch opens a fresh Agentlas once this process has exited (quit-exit.ts).
+  // Before, it was ignored and the person's second click did nothing (Windows retest 2026-10-24).
+  if (action === "relaunch-after-quit") {
+    relaunchAfterQuit.request(relaunchArgsForLaunchDuringQuit({ defaultApp: process.defaultApp === true, currentArgv: process.argv, launchArgv: argv }));
+    console.info("[quit] a launch arrived while quitting; Agentlas starts again after this exit");
+    return;
+  }
   if (argv.includes("--one") || argv.includes("--one-only") || oneOnlyLaunch) { void openOneFromNotification(); return; }
   // Windows/Linux 는 두 번째 인스턴스의 argv 에 URL 을 실어 보낸다.
   const link = argv.find((arg) => typeof arg === "string" && arg.startsWith("agentlas://"));
   if (link) routeAgentlasDeepLink(link);
+  if (action === "ignore") return;
+  if (action === "create") {
+    leaveBackgroundHold();
+    void createWindow();
+    return;
+  }
   if (!mainWindow || mainWindow.isDestroyed()) return;
   if (mainWindow.isMinimized()) mainWindow.restore();
   mainWindow.show();
@@ -1332,11 +1378,15 @@ async function loadMainUrl(target: string): Promise<void> {
 }
 
 async function createWindow(options: { startupPlaceholder?: boolean; initialRoute?: string } = {}): Promise<void> {
+  // Never larger than the screen's work area: on 1024x768 the default size ran under the taskbar (window-lifecycle.ts).
+  let workArea: { width: number; height: number } | null = null;
+  try { workArea = screen.getPrimaryDisplay().workAreaSize; } catch { /* no display info: keep the default size */ }
+  const windowSize = fitWindowToWorkArea({ width: 1240, height: 820, minWidth: 960, minHeight: 640 }, workArea);
   mainWindow = new BrowserWindow({
-    width: 1240,
-    height: 820,
-    minWidth: 960,
-    minHeight: 640,
+    width: windowSize.width,
+    height: windowSize.height,
+    minWidth: windowSize.minWidth,
+    minHeight: windowSize.minHeight,
     title: "Agentlas",
     titleBarStyle: "hiddenInset", // macOS first — 윈도우 컨트롤은 좌상단에 흡수
     backgroundColor: "#ffffff",
@@ -1348,8 +1398,8 @@ async function createWindow(options: { startupPlaceholder?: boolean; initialRout
       sandbox: true,
       // Renderer가 외부 https만 띄울 수 있게
       webSecurity: true,
-
-
+      // The renderer console holds the owner's whole window.agentlas bridge. Product agents opened it through
+      // System Events and typed calls into it, landing keystrokes in the owner's composer (2026-10-14).
       devTools: mainWindowDevToolsAllowed({ packaged: app.isPackaged }),
     },
   });
@@ -1364,8 +1414,8 @@ async function createWindow(options: { startupPlaceholder?: boolean; initialRout
   // headless app the user cannot reach.
   const revealMainWindow = (): void => {
     if (!mainWindow || mainWindow.isDestroyed() || mainWindow.isVisible()) return;
-
-
+    // A quit into background mode hid the window on purpose; the startup reveal
+    // fallback must not bring it back (measured: fired after the hide, ended the mode).
     if (backgroundHoldActive()) return;
     mainWindow.show();
   };
@@ -1379,7 +1429,7 @@ async function createWindow(options: { startupPlaceholder?: boolean; initialRout
   });
   mainWindow.webContents.on("did-finish-load", () => armOsMaintenanceAfterProductLoad(startupWindow));
   // The personal agent view (/one?personal=1) may shrink to a phone-width messenger window.
-  // Every other route keeps the 960x640 minimum; the minimum is restored when leaving it.
+  // Every other route keeps the 960x640 minimum (capped by the work area); the minimum is restored when leaving it.
   const applyRouteMinimumSize = (url: string): void => {
     if (mainWindow !== startupWindow || startupWindow.isDestroyed()) return;
     let personal = false;
@@ -1387,7 +1437,7 @@ async function createWindow(options: { startupPlaceholder?: boolean; initialRout
       const parsed = new URL(url);
       personal = parsed.pathname.replace(/\/$/, "") === "/one" && parsed.searchParams.get("personal") === "1";
     } catch { /* keep the default minimum for unparseable URLs */ }
-    startupWindow.setMinimumSize(personal ? 380 : 960, personal ? 560 : 640);
+    startupWindow.setMinimumSize(personal ? 380 : windowSize.minWidth, personal ? 560 : windowSize.minHeight);
   };
   const developmentStartUrl = isDev ? process.env.ELECTRON_START_URL ?? null : null;
   mainWindow.webContents.on("did-navigate", (_event, url) => {
@@ -1496,6 +1546,24 @@ app.on("window-all-closed", () => {
   }
 });
 
+// Windows/Linux: `window-all-closed` never fires while a hidden helper window exists (the company
+// sign-in page, print/render helpers). Closing the last window a person can see and use runs the same
+// quit; hidden or non-focusable helpers never keep a closed app alive (window-lifecycle.ts).
+app.on("browser-window-created", (_event, window) => {
+  watchWindowForLastVisibleClose(window, {
+    platform: process.platform,
+    getAllWindows: () => BrowserWindow.getAllWindows(),
+    oneWindowShellActive,
+    backgroundHoldActive,
+    // Same "already quitting" facts the rest of Main uses (update installs and relaunches included), plus a prompt in flight.
+    quitInProgress: () => quitResolving || quitPlanCommitted || quitRelaunching || quitCleanupDone || automaticQuitInstaller.quitInProgress(),
+    quit: () => {
+      noteQuitIntent("window-all-closed");
+      app.quit();
+    },
+  });
+});
+
 app.on("activate", () => {
   if (!shellReadyForWindows) return;
   if (oneOnlyLaunch || getOneWindow()) { void openOneFromNotification(); return; }
@@ -1530,6 +1598,28 @@ let quitServicesStopPromise: Promise<void> | null = null;
 let quitCleanupDeadlineTimer: ReturnType<typeof setTimeout> | null = null;
 const QUIT_CLEANUP_DEADLINE_MS = 30_000;
 const QUIT_NATIVE_EXIT_GRACE_MS = 2_000;
+/**
+ * Closing the Agentlas browser at quit is not waited for longer than this. On Windows its ownership check spawns
+ * PowerShell (Get-NetTCPConnection + CIM) up to four times; on the Win11 ARM64 retest one cold PowerShell took more
+ * than 3 s (BROWSER_CDP_POWERSHELL_TIMEOUT_MS), which fits the 27–29 s each quit spent after the daemon was released.
+ * A browser left running is closed by the orphan sweep on the next start.
+ */
+const QUIT_BROWSER_CLOSE_BUDGET_MS = 8_000;
+/** Times every cleanup step of this quit (quit-exit.ts); created when cleanup starts. */
+let quitStepClock: QuitStepClock | null = null;
+function quitClock(): QuitStepClock {
+  quitStepClock ??= createQuitStepClock({ log: (level, message) => (level === "warn" ? console.warn(message) : console.info(message)) });
+  return quitStepClock;
+}
+/** A launch that arrived during a committed quit starts Agentlas again after this exit (quit-exit.ts). */
+const relaunchAfterQuit = createRelaunchAfterQuit(app, () => relaunchExecPath(process.platform, process.env.APPIMAGE));
+function applyRelaunchAfterQuit(): void {
+  try {
+    if (relaunchAfterQuit.apply()) console.info("[quit] relaunch arranged for the launch that arrived while quitting");
+  } catch (error) {
+    console.error("[quit] could not arrange the relaunch", error);
+  }
+}
 let legacyLearningTimer: NodeJS.Timeout | null = null;
 let legacyLearningController: AbortController | null = null;
 let legacyLearningJob: Promise<void> | null = null;
@@ -1585,8 +1675,8 @@ function stopQuitServices(): Promise<void> {
   try { closeAutomationDispatchForShutdown(); } catch {}
   try { stopOneBriefingScheduler(); } catch {}
   try { stopOneImport?.(); } catch {}
-
-
+  // Nothing stopped them before: their timers outlived closeStore, and the AGI bug-report flush threw "The database
+  // connection is not open" 11 s into a quit (2026-10-05 12:55 UTC; found by the monitoring peer session).
   try { stopAliveOrganismsOnQuit?.(); } catch {}
   try { stopBrowserOrphanSweep(); } catch {}
   try { stopBrowserApprovalServer(); } catch {}
@@ -1609,16 +1699,19 @@ function stopQuitServices(): Promise<void> {
   try { disposeMobileBridgeStateChange?.(); } catch {}
   disposeMobileBridgeStateChange = null;
 
-  const memoryCleanupStopped = stopMemoryRevocationCleanup();
+  const clock = quitClock();
+  const memoryCleanupStopped = clock.step("memory-revocation", () => stopMemoryRevocationCleanup());
+  // Each service is timed by name so main.log says which one a slow quit waited for (quit-exit.ts).
   quitServicesStopPromise = Promise.all([
-    nativeBrowserMainBroker?.then(broker => broker.close()),
-    localModelHubControl?.shutdown(),
-    localModelOwnerCleanup?.(),
-    legacyLearningJob?.catch(() => {}),
-    import("./triggers/manager").then((module) => { module.stopTriggerManager(); }).catch(() => {}),
-    import("./telegram/connect").then((module) => { module.stopTelegramWorkers(); }).catch(() => {}),
-    import("./agents/hephaestus-sync").then((module) => { module.stopHephaestusSync(); }).catch(() => {}),
-    stopDesktopOwnedMobileBridge()
+    clock.step("browser-broker", () => nativeBrowserMainBroker?.then(broker => broker.close())),
+    clock.step("local-model-hub", () => localModelHubControl?.shutdown()),
+    clock.step("local-model-owner", () => localModelOwnerCleanup?.()),
+    clock.step("legacy-learning", () => legacyLearningJob?.catch(() => {})),
+    clock.step("reach", () => stopReach().catch(() => {})),
+    clock.step("triggers", () => import("./triggers/manager").then((module) => { module.stopTriggerManager(); }).catch(() => {})),
+    clock.step("telegram", () => import("./telegram/connect").then((module) => { module.stopTelegramWorkers(); }).catch(() => {})),
+    clock.step("hephaestus-sync", () => import("./agents/hephaestus-sync").then((module) => { module.stopHephaestusSync(); }).catch(() => {})),
+    clock.step("mobile-bridge+daemon", () => stopDesktopOwnedMobileBridge()
       .then(() => import("./daemon/app-launcher"))
       .then(async (module) => {
         // Close observers first so no reconnect can respawn the service mid-stop.
@@ -1636,7 +1729,7 @@ function stopQuitServices(): Promise<void> {
           console.error("[daemon] service was not released on quit; its idle exit remains the safety net", released);
         }
       })
-      .catch((error) => console.error("[daemon] GUI quit release failed", error)),
+      .catch((error) => console.error("[daemon] GUI quit release failed", error))),
   ]).then(() => undefined).finally(() => {
     scienceExecutionIpc?.close();
     scienceDaemonClient?.close();
@@ -1809,6 +1902,7 @@ function finishQuitCleanup(options: { preserveUpdater?: boolean } = {}): Promise
     return quitCleanupPromise;
   }
   quitCleanupPromise = (async () => {
+    const clock = quitClock();
     // Detach synchronously before aborting GUI waits: the local-model client
     // marks detaching before returning, so abort cannot cancel daemon work.
     try { scienceExecutionIpc?.close(); } catch (error) { console.error("[science-daemon] IPC detach failed", error); }
@@ -1827,8 +1921,8 @@ function finishQuitCleanup(options: { preserveUpdater?: boolean } = {}): Promise
     try { interruptLongRunVerifiers(); } catch {}
     // All local admission gates are closed before awaiting the remote detach.
     // Neither that signal nor a window close is authority to stop daemon work.
-    await localModelDetach?.catch(error => console.error("[local-model] client detach failed", error));
-    try {
+    await clock.step("local-model-detach", () => localModelDetach?.catch(error => console.error("[local-model] client detach failed", error)));
+    await clock.step("app-runtime", async () => { try {
       const report = await shutdownAppRuntimeCoordinator(15_000);
       if (report.pausedRunIds.length > 0) {
         console.info(`[long-run] paused ${report.pausedRunIds.length} local run(s) for app close`);
@@ -1844,37 +1938,48 @@ function finishQuitCleanup(options: { preserveUpdater?: boolean } = {}): Promise
       }
     } catch (error) {
       console.error("[long-run] app runtime shutdown failed", error);
-    }
+    } });
     // ★호스트 공통 정리 — 실행 중인 CLI 자식 트리 킬이 여기 등록돼 있다.
     //   데몬(agentlasd)은 같은 함수를 SIGTERM/SIGINT 에서 부른다(host-lifecycle.ts).
-    try { runHostShutdownHooks(); } catch {}
+    await clock.step("host-shutdown-hooks", () => runHostShutdownHooks());
     try { stopCliRuntimeAutoUpdate(); } catch {}
-    await stopQuitServices().catch(() => {});
+    await clock.step("services", () => stopQuitServices());
     // GUI shutdown has released its own leases. A daemon or another client
     // may still be using this browser: never cancel their leases on Quit.
-    await closeBrowserCdpIfIdle().catch((error) => {
-      console.error("[agentlas-browser] quit cleanup failed", error);
-    });
+    // No process inventory when nothing shows a browser could be running (the orphan sweep's own rule): on
+    // Windows that inventory is PowerShell, and the quit waited ~27 s for it with no browser ever opened.
+    if (browserCdpOrphanSweepArmed()) {
+      await clock.step("browser-close", () => closeBrowserCdpIfIdle().catch((error) => {
+        console.error("[agentlas-browser] quit cleanup failed", error);
+      }), { budgetMs: QUIT_BROWSER_CLOSE_BUDGET_MS });
+    }
     // Child termination resolves through the invocation lifecycle. Do not
     // close SQLite underneath a terminal receipt that is still settling.
     // Automation runs, the System Optimizer and headless effect observations are not chats; their
     // settlement (run outcome, next run, reconciliation hold) must land before SQLite closes too.
     const settleDeadline = Date.now() + 15_000;
     const settling = (): boolean => invocationService.activeChatIds().length > 0 || automationWorkInFlight() > 0;
-    while (settling() && Date.now() < settleDeadline) {
-      await new Promise<void>((resolve) => setTimeout(resolve, 25));
-    }
+    await clock.step("settle", async () => {
+      while (settling() && Date.now() < settleDeadline) {
+        await new Promise<void>((resolve) => setTimeout(resolve, 25));
+      }
+    });
     if (settling()) {
       console.error("[shutdown] closing the store with work still settling", {
         chats: invocationService.activeChatIds().length, automations: automationWorkInFlight(),
       });
     }
-    try { await closeScienceStore(); } catch (error) { console.error("[science-store] close failed", error); }
-    try { closeStore(); } catch (error) { console.error("[store] close failed", error); }
+    await clock.step("science-store", async () => {
+      try { await closeScienceStore(); } catch (error) { console.error("[science-store] close failed", error); }
+    });
+    await clock.step("store", () => {
+      try { closeStore(); } catch (error) { console.error("[store] close failed", error); }
+    });
     if (!options.preserveUpdater) {
       try { disposeAutoUpdater(); } catch {}
     }
     quitCleanupDone = true;
+    console.info(`[shutdown] cleanup steps ${JSON.stringify(clock.summary())}`);
   })();
   return quitCleanupPromise;
 }
@@ -1913,6 +2018,8 @@ electronAutoUpdater.on("before-quit-for-update", () => {
 function forceQuitAfterContinuity(reason: string): void {
   quitCleanupDeadlineTimer = null;
   console.error(`[shutdown] ${reason}; forcing process exit after continuity deadlines`);
+  // Name what the quit was still waiting for, so the next slow quit is diagnosable from main.log alone.
+  if (quitStepClock) console.error(`[shutdown] cleanup steps at forced exit ${JSON.stringify(quitStepClock.summary())}`);
   recordImmediateExit("cleanup-deadline", 0, { reason });
   // Long-run and Science each had their bounded opportunity to checkpoint.
   // An OS credential prompt or native worker must not leave an invisible
@@ -1929,6 +2036,7 @@ function forceQuitAfterContinuity(reason: string): void {
   try { void Promise.resolve(closeScienceStore()).catch(() => {}); } catch {}
   try { closeStore(); } catch {}
   quitCleanupDone = true;
+  applyRelaunchAfterQuit();
   app.exit(0);
 }
 
@@ -1943,14 +2051,6 @@ function armQuitCleanupDeadline(): void {
 function disarmQuitCleanupDeadline(): void {
   if (quitCleanupDeadlineTimer) clearTimeout(quitCleanupDeadlineTimer);
   quitCleanupDeadlineTimer = null;
-}
-
-function armNativeExitDeadline(): void {
-  if (quitCleanupDeadlineTimer) clearTimeout(quitCleanupDeadlineTimer);
-  console.info(`[shutdown] native exit grace armed (${QUIT_NATIVE_EXIT_GRACE_MS}ms)`);
-  quitCleanupDeadlineTimer = setTimeout(() => {
-    forceQuitAfterContinuity(`native exit exceeded ${QUIT_NATIVE_EXIT_GRACE_MS}ms`);
-  }, QUIT_NATIVE_EXIT_GRACE_MS);
 }
 
 function armMacNativeExitWatchdog(): boolean {
@@ -2061,7 +2161,13 @@ async function resolveOrdinaryQuit(): Promise<void> {
     const answer = parent ? await dialog.showMessageBox(parent, options) : await dialog.showMessageBox(options);
     const choice = QUIT_PROMPT_CHOICES[answer.response] ?? "cancel";
     const next = planAfterQuitPrompt(choice, plan.activeWork);
-    if (!next) { clearQuitIntent(); return; }
+    if (!next) {
+      clearQuitIntent();
+      // Cancelling a quit that started by closing the last window (Windows/Linux) must not leave a
+      // running app with nothing on screen: bring the main window back.
+      if (intentCode === "window-all-closed" && (!mainWindow || mainWindow.isDestroyed())) void createWindow();
+      return;
+    }
     if (next.kind === "quit") { quitFullConfirmed = true; commitQuit(next); return; }
     holdInBackground(next);
   } catch (error) {
@@ -2114,27 +2220,33 @@ app.on("will-quit", (event) => {
   }
   armQuitCleanupDeadline();
   if (quitCleanupDone) {
-    // JS cleanup and continuity checkpoints are complete. Give Electron a
-    // short listener-settlement grace, then cut off native workers (for example
-    // a blocked macOS Keychain lookup) that can otherwise retain Main forever.
+    // JS cleanup and continuity checkpoints are complete.
     // macOS can stop servicing JS timers while a Security.framework worker is
     // still blocked. A detached watchdog permits normal exit first and only
     // kills us while it can still prove this exact process is its parent.
-    if (armMacNativeExitWatchdog()) {
+    if (cleanupDoneExit(process.platform, armMacNativeExitWatchdog()) === "mac-native-watchdog") {
       disarmQuitCleanupDeadline();
       return;
     }
-    // Other platforms keep the loop alive so the in-process boundary can run.
+    // Windows/Linux: nothing is left to settle, so exit now (quit-exit.ts). The old fixed 2 s grace made
+    // every quit end in "native exit exceeded 2000ms" and a forced exit. The remaining will-quit listeners
+    // (tray, shortcuts, studio) run in this same emit; the exit follows them. The cleanup deadline stays
+    // armed until then as the backstop.
     event.preventDefault();
-    armNativeExitDeadline();
+    setImmediate(() => {
+      disarmQuitCleanupDeadline();
+      console.info("[shutdown] cleanup complete; exiting");
+      applyRelaunchAfterQuit();
+      app.exit(0);
+    });
     return;
   }
   event.preventDefault();
+  // The deadline armed by this quit's first before-quit stays armed through the second pass below: that pass is the
+  // same quit, and the deadline is its backstop until the exit. Disarming here made before-quit arm (and log) it a
+  // second time on every quit (Windows retest 2, 2026-10-24).
   void finishQuitCleanup().finally(() => {
-    setImmediate(() => {
-      disarmQuitCleanupDeadline();
-      app.quit();
-    });
+    setImmediate(() => app.quit());
   });
 });
 
@@ -2175,10 +2287,10 @@ app.whenReady().then(async () => {
   };
   // Product sessions older installs wrote into the person's Codex/Claude/Copilot homes move to the product stores, once.
   if (!developmentEffectsSuppressed()) scheduleLegacyProductSessionMove();
-
+  // Records every change to the Agentlas browser's Google sign-in cookies (names and causes only) — owner 2026-10-13.
   installGoogleSessionTrace("persist:agentlas-browser-default");
   void trimOversizedSessionCaches(["persist:agentlas-browser-default"]);
-                                                                                
+  // 4-tier model catalog (PRD 2026-08-15 D-4): wire the context-window resolver
   // so BYOK compaction stops assuming 128k, and refresh models.dev in the
   // background (TTL 24h; failure keeps the stale copy, never blocks startup).
   try {
@@ -2189,12 +2301,12 @@ app.whenReady().then(async () => {
   } catch (err) {
     console.warn("[model-catalog] resolver not installed:", err instanceof Error ? err.message : String(err));
   }
-
-
-
-
-
-
+  // The official runtime seal below runs `codesign --verify --deep --strict`
+  // and `spctl` over the whole bundle: 3.4–5.8s measured on 1.2.44
+  // (2026-09-27), twice after an update. Nothing was on screen for that time,
+  // so the app looked dead. The placeholder is a read-only data: page with no
+  // IPC surface and starts no runtime, so it may appear before the seal. Only
+  // GUI launches get it; headless entries below never open a window.
   const headlessEntry = process.argv.includes("--graph-surface") || process.argv.includes("--headless-automations");
   let startupPlaceholderShown = false;
   if (!headlessEntry && !oneOnlyLaunch) {
@@ -2307,7 +2419,7 @@ app.whenReady().then(async () => {
   registerAgentlasProtocolClient();
   // 앱이 딥링크로 **처음** 켜진 경우(Windows/Linux 는 첫 argv 에 실려 온다).
   {
-    const initialLink = process.argv.find((arg) => typeof arg === "string" && arg.startsWith("agentlas://plugin/"));
+    const initialLink = process.argv.find((arg) => typeof arg === "string" && (arg.startsWith("agentlas://plugin/") || arg.startsWith("agentlas://company/")));
     if (initialLink) routeAgentlasDeepLink(initialLink);
   }
   // [보안] 권한 deny — 우리 렌더러가 실제로 쓰는 건 clipboard(복사 버튼)뿐. device/sensor 류
@@ -2338,7 +2450,7 @@ app.whenReady().then(async () => {
   if (!developmentEffectsSuppressed()) {
     const { initializeVideoJobs } = await import("./multimodal/video");
     initializeVideoJobs();
-
+    // Storage budget for every user (owner 2026-10-16): intermediates, run detail, CLI transcripts, low-disk notice.
     startStorageMaintenance({
       notifyLowDisk: ({ freeBytes, footprintBytes, freedBytes }) => {
         if (!Notification.isSupported()) return;
@@ -2352,6 +2464,14 @@ app.whenReady().then(async () => {
         }).show();
       },
     });
+    // Agentlas Reach: maps the installed apps in the background (the first map and every rebuild after a feature update are silent and do not
+    // depend on the Settings switch); the switch only turns on exploration and uploads. Never in an isolated development candidate.
+    void startReach({ busy: () => invocationService.activeChatIds().length > 0 }).catch((error) => console.warn("[reach] not started", error instanceof Error ? error.message : error));
+  } else {
+    // Test-only opt-in (development-effect-policy.ts reachQaAdmission): a packaged local candidate in its disposable profile, asked to, starts Reach for the
+    // named apps only. Nothing else of the suppressed startup changes.
+    const qa = reachQaAdmission();
+    if (qa) void startReach({ busy: () => false, qa }).catch((error) => console.warn("[reach] not started", error instanceof Error ? error.message : error));
   }
   try {
     const scrubbed = scrubLegacyRunEventSecrets();
@@ -2359,10 +2479,10 @@ app.whenReady().then(async () => {
   } catch (error) {
     console.error("[security] legacy run-event scrub failed:", error);
   }
-
-
-
-
+  // Quit can arrive while the store is still opening (measured 2026-09-24T12:46Z: Quit 2 s after
+  // launch). Its cleanup already ran against an unopened store and closed the runtime coordinator,
+  // so the next registration threw app_runtime_shutdown_in_progress and startup "failed". Starting
+  // services now would only run them past cleanup: stop here, close what we opened, let Quit finish.
   if (quitCleanupPromise) throw new StartupAbandonedForQuit();
   const longRunStartup = developmentEffectsSuppressed() ? null : initializeAppRuntimeCoordinator();
   if (developmentEffectsSuppressed()) {
@@ -2475,11 +2595,11 @@ app.whenReady().then(async () => {
       if (rebound.length) console.info("[startup] rebound chats to their live goals", rebound.map((row) => ({ chatId: row.chatId, goalId: row.goalId, reason: row.reason })));
     } catch (error) { console.error("[startup] goal binding repair failed", error); }
   }
-  
-
-
-
-
+  /*
+   * ★부팅 시점의 running Task는 전부 고아다 — 실행 권위인 activeRuns 맵이 방금 비어서
+   * 시작했다. 정산하지 않으면 화면이 영원히 "진행 중"을 말한다(실측: 나흘째 running).
+   * 조용히 completed로 덮지 않고 failed로 적어, 이어서 할지 다시 할지는 사용자가 정한다.
+   */
   try {
     const interrupted = settleInterruptedTasksOnBoot();
     if (interrupted.settled > 0) {
@@ -2604,9 +2724,9 @@ app.whenReady().then(async () => {
   nativeHistoryWorkOwner=await createNativeHistoryWorkOwner({source:nativeHistorySourceOwner,locale:()=>currentUiLocale()==='ko'?'ko':'en'});
   if(nativePersonalShutdown.signal.aborted||nativePersonalCleanupUnknown){nativeHistoryWorkOwner.close();throw Error('history_work_owner_changed')}
   configureOnePersonalIntegrationPolicy({gmail:nativeGmailPolicy,history:nativeHistoryWorkOwner.history,historyToolReference:nativeHistoryWorkOwner.toolReference,historyToolResources:nativeHistoryWorkOwner.toolResources,historyWorkTools:nativeHistoryWorkOwner.tools});
-
-
-
+  // Adaptive Toolchain native owner of this personal install (toolchain-personal-owner.ts). Its only binder was the
+  // organization startup, which a personal install never runs (production 10-08..18: 0 assets, create refused with
+  // toolchain_native_shipping_owner_ports_unbound). agentlasd binds its own copy for daemon-owned turns.
   try {
     installPersonalToolchainNativeOwner({host:"main",isOwnerIpcSender:event=>{
       try{const window=assertTrustedSitePublishIpcSender(event as Electron.IpcMainInvokeEvent);return window===mainWindow||window===getOneWindow();}catch{return false;}
@@ -2680,6 +2800,9 @@ app.whenReady().then(async () => {
   // One's capability inventory (skills, plugins, hooks, memories, connectors) with per-item switches.
   registerOneCapabilitiesIpc(ipcMain);
   registerArchiveIpc(ipcMain);
+  registerReachIpc(ipcMain);
+  // Settings → company server card (status, enrollment code, re-check, disconnect). Inert for a personal install.
+  registerEnterpriseServerIpc(ipcMain, { userDataDir: userDataDir(), appVersion: app.getVersion() });
   ipcMain.handle("mobileBridge:status", () => mobileBridgeRuntimeStatus());
   ipcMain.handle("mobileBridge:issuePairing", () => issueMobileBridgePairing());
   ipcMain.handle("mobileBridge:listDevices", () => listMobileBridgeDevices());
@@ -2728,6 +2851,13 @@ app.whenReady().then(async () => {
     catch (error) { console.warn("[science-extension] status refresh failed", error); }
   };
   ipcMain.handle("productExtensions:scienceStatus", () => scienceExtensionStatus());
+  ipcMain.handle("productExtensions:scienceOutputScope", (event) => {
+    if (isAppControlEvent(event) || !event.senderFrame || event.senderFrame !== event.sender.mainFrame) return null;
+    const scope = sciencePresentationScopeForOwner(event.sender.id);
+    if (!scope) return null;
+    const binding = scienceStore().getConversationRuntimeBinding(scope.projectId, scope.conversationId);
+    return binding ? { ...scope, chatId: binding.runtimeChatId } : null;
+  });
   ipcMain.handle("productExtensions:scienceSuiteStatus", () => scienceSuiteStatus());
   ipcMain.handle("productExtensions:installScience", async () => {
     try {
@@ -2754,7 +2884,9 @@ app.whenReady().then(async () => {
         try { event.sender.send("productExtensions:scienceSuiteProgress", progress); }
         catch (error) { console.warn("[science-extension] progress delivery failed", error); }
       });
-      refreshScienceExtensionViews(receipt.ok && receipt.action !== "unchanged");
+      // A renderer-only suite update does not replace the Science parent.
+      refreshScienceExtensionViews(receipt.ok && receipt.components.some(component => component.id === "agentlas-science"
+        && component.ok && (component.action === "installed" || component.action === "updated")));
       return receipt;
     } catch (error) {
       refreshScienceExtensionViews(false);
@@ -2799,6 +2931,9 @@ app.whenReady().then(async () => {
       send: (status) => {
         if (!event.sender.isDestroyed()) event.sender.send("productExtensions:viewStatus", status);
       },
+      onPresentationChanged: () => {
+        if (!event.sender.isDestroyed()) event.sender.send("productExtensions:changed", scienceExtensionStatus());
+      },
     });
   });
   ipcMain.handle("productExtensions:setScienceViewBounds", (event, bounds, rawLeaseId) => setScienceExtensionViewBounds(event.sender.id, scienceViewLeaseId(rawLeaseId), bounds));
@@ -2819,6 +2954,47 @@ app.whenReady().then(async () => {
     assertScienceExtensionViewPermission(event.sender.id, permission);
     return status;
   };
+  const assertSciencePresentationSender = (event: Electron.IpcMainInvokeEvent, input: unknown) => {
+    if (isAppControlEvent(event) || !event.senderFrame || event.senderFrame !== event.sender.mainFrame) {
+      throw new Error("science-presentation-native-main-frame-required");
+    }
+    assertScienceSender(event, input, "science:projects");
+  };
+  const assertScienceTerminalSender = (event: Electron.IpcMainInvokeEvent, envelope: unknown) => {
+    // App-control retains its ordinary fresh-release admission. Only the exact
+    // native frame can withdraw authority through the bound presentation lane.
+    if (isAppControlEvent(event)) return assertScienceSender(event, envelope, "science:agent-runtime");
+    const value = envelope && typeof envelope === "object" ? envelope as { extensionId?: unknown; input?: unknown } : null;
+    const payload = value?.input && typeof value.input === "object" && !Array.isArray(value.input)
+      ? value.input as { projectId?: unknown; conversationId?: unknown } : null;
+    if (value?.extensionId !== "agentlas-science" || event.sender.isDestroyed() || !event.senderFrame
+      || event.senderFrame !== event.sender.mainFrame || typeof payload?.projectId !== "string" || typeof payload.conversationId !== "string") {
+      throw new Error("science-terminal-native-owner-required");
+    }
+    assertScienceExtensionTerminalScope(event.sender.id, { projectId: payload.projectId, conversationId: payload.conversationId });
+  };
+  ipcMain.handle("sciencePresentation:bind", (event, input) => {
+    assertSciencePresentationSender(event, input);
+    return bindSciencePresentation(event.sender.id);
+  });
+  ipcMain.handle("sciencePresentation:publish", (event, input) => {
+    assertSciencePresentationSender(event, input);
+    return publishSciencePresentation(event.sender.id, input?.context, input?.sequence, input?.scope);
+  });
+  const captureQuestionDecisionOwner = (event: Electron.IpcMainInvokeEvent,envelope: unknown) => {
+        assertSciencePresentationSender(event,envelope);
+        assertScienceExtensionViewPermission(event.sender.id,"science:agent-runtime");
+        const held=captureSciencePresentationForSender(event.sender.id);
+        if(!held.scope) throw new Error("science-question-view-scope-changed");
+        return {...held.scope,assertCurrent:()=>{
+          assertSciencePresentationSender(event,envelope);
+          assertScienceExtensionViewPermission(event.sender.id,"science:agent-runtime");
+          const current=captureSciencePresentationForSender(event.sender.id);
+          if(current.generation!==held.generation || current.contextId!==held.contextId || current.leaseId!==held.leaseId
+            || current.documentEpoch!==held.documentEpoch || current.scope?.projectId!==held.scope?.projectId
+            || current.scope?.conversationId!==held.scope?.conversationId) throw new Error("science-question-view-scope-changed");
+        }};
+  };
   if (scienceDaemonClient) {
     scienceExecutionIpc = registerScienceDaemonExecutionIpc({
       ipcMain: {
@@ -2826,6 +3002,8 @@ app.whenReady().then(async () => {
         removeHandler: channel => electronIpcMain.removeHandler(channel),
       },
       assertScienceSender, client: scienceDaemonClient,
+      assertScienceTerminalSender,
+      captureQuestionDecisionOwner,
       assertScienceViewPermission: assertScienceExtensionViewPermission,
       assertHumanComputeSender: (event, envelope) => {
         if (isAppControlEvent(event) || !isScienceExtensionViewSender(event.sender.id) || event.sender.isDestroyed()) throw Error("science-human-compute-view-required");
@@ -2839,6 +3017,10 @@ app.whenReady().then(async () => {
         if (state.errorCode) console.warn("[science-runtime] observation disconnected", state);
       },
     });
+  } else {
+    registerScienceQuestionDecisionIpc({ipcMain,captureOwner:captureQuestionDecisionOwner,
+      read:input=>scienceQuestionHost().read(input),
+      answer:(input,requestId)=>scienceQuestionHost().answerFromOwner(input,{requestId})});
   }
   registerScienceCapabilityCatalogIpc({
     handle: (channel, listener) => ipcMain.handle(channel, listener),
@@ -2891,6 +3073,7 @@ app.whenReady().then(async () => {
       if (isScienceStoreFormatRefusal(error)) throw scienceBootstrapFailure({ code: error.message, locale: currentUiLocale() });
       throw error;
     }
+    const fullAutonomyReader = (ScienceSDK as unknown as { fullAutonomyPlatformSupported?: () => boolean }).fullAutonomyPlatformSupported;
     return {
       extensionId: status.id,
       extensionVersion: status.version ?? "0.0.0",
@@ -2898,6 +3081,7 @@ app.whenReady().then(async () => {
       locale: currentUiLocale(),
       projects,
       rendererPacks: scienceRendererPackStatuses(),
+      ...(typeof fullAutonomyReader === "function" ? { capabilities: { fullAutonomy: fullAutonomyReader() } } : {}),
     };
   });
   ipcMain.handle("science:rendererPacks:list", (event, input: unknown) => {
@@ -3073,8 +3257,8 @@ app.whenReady().then(async () => {
     if (error) throw new Error("science-project-folder-open-failed");
     return { opened: true };
   });
-
-
+  // Owner request 2026-09-24: a Data Table opens in the person's own spreadsheet app (Excel, Numbers, LibreOffice),
+  // not only in the in-app grid. The exact current version is written as a UTF-8 (BOM) CSV copy and handed to the OS.
   ipcMain.handle("science:artifacts:openTableExternally", async (event, envelope: unknown) => {
     const documentId = assertScienceProjectDocument(event, envelope);
     const active = await event.sender.executeJavaScriptInIsolatedWorld(1007, [{ code: "navigator.userActivation.isActive === true" }]);
@@ -3195,16 +3379,16 @@ app.whenReady().then(async () => {
       String(record.sourceVersionId ?? ""),
     );
   });
-  
-
-
-
-
-
-
-
-
-
+  /*
+   * 대화 하나를 여는 데 필요한 것을 **한 번에** 답한다: 말풍선마다의 블록·인용, 그리고 그
+   * 인용들이 가리키는 근거 구간.
+   *
+   * 예전에는 말풍선마다 블록 1회 + 인용 1회를 부르고, 그 안에서 인용 하나마다 근거를 또
+   * 불렀다. 85개짜리 대화에서 170회가 넘고 한 번이 약 180ms 다. 대화가 길수록 여는 시간이
+   * 길어져서, 오래 붙든 연구일수록 열기 힘들어지는 구조였다.
+   *
+   * 근거 구간은 중복을 제거해 담는다 -- 여러 인용이 같은 구간을 가리키는 일이 흔하다.
+   */
   ipcMain.handle("science:messages:evidenceMany", (event, input: unknown) => {
     assertScienceSender(event, input);
     const record = input && typeof input === "object" ? input as Record<string, unknown> : {};
@@ -3358,14 +3542,14 @@ app.whenReady().then(async () => {
     }
     return scienceStore().getSourceForProject(projectId, sourceId);
   });
-  
-
-
-
-
-
-
-
+  /*
+   * 화면이 목록을 받은 뒤 **한 건씩** 다시 읽어 확인하던 자리. 확인 자체는 옳다 — 목록 행은
+   * 투영이고, 프로젝트 범위 단건 읽기라야 그 출처가 지금 판으로도 이 프로젝트에 붙어 있음이
+   * 증명된다. 문제는 그 증명을 오가는 횟수였다.
+   *
+   * 실측(출처 188건): 목록 한 번 92ms, 그 뒤 단건 읽기 188번 47,134ms. 확인은 여기 안에서
+   * 그대로 하고, 오가는 것만 한 번으로 줄인다. 하는 일과 판정은 전과 같다.
+   */
   ipcMain.handle("science:sources:getMany", (event, input: unknown) => {
     assertScienceSender(event, input);
     const record = input && typeof input === "object" ? input as Record<string, unknown> : {};
@@ -3881,10 +4065,10 @@ app.whenReady().then(async () => {
       String(record.projectId ?? ""), String(record.conversationId ?? ""), String(record.messageId ?? ""),
     );
   });
-  
-
-
-
+  /*
+   * 대화를 열 때 말풍선 하나마다 물어보던 자리. 85개짜리 대화에서 한 건 181ms × 85 = 15.4초다.
+   * 대화가 길수록 여는 시간이 그만큼 길어진다 -- 오래 한 연구일수록 열기 힘들어지는 셈이었다.
+   */
   ipcMain.handle("science:artifacts:listForMessages", (event, input: unknown) => {
     assertScienceSender(event, input, "science:artifacts");
     const record = input && typeof input === "object" ? input as Record<string, unknown> : {};
@@ -4465,7 +4649,7 @@ app.whenReady().then(async () => {
     if (!input || typeof input !== "object") throw new Error("science-manuscript-proposal-input-invalid");
     return scienceStore().rejectManuscriptEditProposal(input as RejectScienceManuscriptEditProposalInput);
   });
-                                                           
+  // 공식 사이트가 죽었을 때의 화면 경로(2026-09-14): 규정 본문 붙여넣기 / 거울 페이지.
   ipcMain.handle("science:submissions:list", (event, input: unknown) => {
     assertScienceSender(event, input);
     const record = input && typeof input === "object" ? input as Record<string, unknown> : {};
@@ -4699,10 +4883,10 @@ app.whenReady().then(async () => {
   // 미룬다(runDeferredLegacyLearningReconciliation). 멱등이라 이번 실행에서
   // 못 돌면 다음 실행이 이어받는다.
   const runDeferredLegacyLearningReconciliation = async (signal: AbortSignal) => {
-
-
-
-
+    // ★ 단계마다 따로 감싼다. 예전에는 전부 한 try 안이었고 catch 가 삼켰다 — 앞 단계
+    //   하나가 던지면 그 뒤가 통째로 안 돌았다. 특히 `migrateRegisteredAgents` 는 업데이트가
+    //   등록된 모든 에이전트에 도달하는 유일한 통로라, 조용히 죽으면 새 아키텍처가 영영
+    //   닿지 않는다(실측 2026-08-26). 한 단계의 실패가 나머지를 막지 않아야 한다.
     const step = async <T,>(name: string, run: () => T | Promise<T>): Promise<T | null> => {
       signal.throwIfAborted();
       try {
@@ -4720,13 +4904,13 @@ app.whenReady().then(async () => {
         ?? { groups: 0, merged: 0 };
       const experience = await step("experience-reconcile", () => reconcileExistingCuratedMemoryCandidatesAtStartup(2_000, { signal }))
         ?? { scanned: 0, candidateCreated: 0, blocked: 0, skipped: 0, deferred: 0 };
-      
-
-
-
-
-
-
+      /*
+       * 등록된 모든 에이전트를 현재 아키텍처로 올린다.
+       *
+       * 업데이트는 새 아키텍처를 가져오지만 이미 등록된 에이전트는 옛 상태로 남는다 — 그래서
+       * 오래 쓴 에이전트일수록 새 기능이 비어 있었다(실측: 913회 실행에 경험 칩 0). 원장이
+       * (에이전트 × 단계)라 새 단계는 설치 시점과 무관하게 전원에게 한 번씩 돈다.
+       */
       const migrated = await step("architecture-migrations", migrateRegisteredAgents) ?? { stepsRun: 0 };
       if (migrated.stepsRun > 0) {
         console.log("[architecture] migrated registered agents", migrated);
@@ -4879,9 +5063,9 @@ app.whenReady().then(async () => {
             async onObservationReady() { await bridge.quiesce(); await controls.refresh(); return bridge.available && controls.available; },
             onAuthenticated(channel: Parameters<typeof bridge.bind>[0], identity: Parameters<typeof bridge.bind>[1]) {
               bridge.bind(channel, identity); controls.bind(channel, identity);
-              
-
-
+              // Once per process: this hook runs for every channel generation and the service refuses a second fence, which
+              // closed every re-attach (1.3.48, 2026-10-16: invocation_native_fence_already_configured until restart).
+              // The fence reads the live owner/controls/bridge, so the first installation stays current.
               if (!foreignNativeStartFenceInstalled) {
                 invocationService.setForeignNativeStartFence(chatId => !!native.configuredNativeGuiOwner()?.activeAuthorityChatIds().includes(chatId)
                   || controls.activeAuthorityChatIds().includes(chatId) || (bridge.activeChatIds().includes(chatId)
@@ -5087,13 +5271,13 @@ app.whenReady().then(async () => {
     void started.then(() => { if (explicitBridgeRestore === started) explicitBridgeRestore = null; },
       () => { if (explicitBridgeRestore === started) explicitBridgeRestore = null; });
   });
-  
-
-
-
-
-
-
+  /*
+   * A service that was not ready at boot is usually load, and nothing retried it: after an OS-update reboot on
+   * 2026-10-05 (load average 60) the service's ownership ping timed out (daemon_control_owner_unconfirmed), the
+   * bridge start failed once, and the phone had no listener until the owner pressed "연결 다시 열기" or relaunched.
+   * Take the same restore path as that button (it re-ensures the service first), a bounded number of times, and
+   * only while nothing listens and the last failure was the service not being ready.
+   */
   const MOBILE_BRIDGE_BOOT_RETRY_MS = [15_000, 45_000, 120_000, 300_000, 600_000];
   const retryMobileBridgeAfterBoot = (attempt = 0): void => {
     if (attempt >= MOBILE_BRIDGE_BOOT_RETRY_MS.length) return;
@@ -5237,8 +5421,8 @@ app.whenReady().then(async () => {
     }
   }
   startAutomationScheduler(); // 자동화 스케줄러 — 60초마다 due 자동화를 백그라운드로 실행
-
-
+  // A sign-in made outside Agentlas (terminal, the vendor's app) re-reads that provider's usage within 30 s instead of
+  // whenever a usage screen is next opened (owner 2026-10-16), and screens holding the old figures re-read too.
   void import("./usage")
     .then(({ startUsageAccountWatch }) => startUsageAccountWatch(() => {
       clearDetectCache();
@@ -5254,8 +5438,8 @@ app.whenReady().then(async () => {
   // 유휴 드리밍 큐레이션 — 옵트인(기본 OFF). 5분마다 조건만 확인(유휴/슬롯/쿨다운), 발화는 드묾.
   try {
     const { startDreamingScheduler, ensureDreamingDefault } = await import("./memory/dreaming");
-
-
+    // Measured 2026-08-11: default-OFF opt-in meant decay never ran anywhere.
+    // Recover installs that never chose; an explicit user choice is untouched.
     ensureDreamingDefault();
     startDreamingScheduler();
   } catch (err) {
@@ -5268,7 +5452,7 @@ app.whenReady().then(async () => {
   } catch (err) {
     console.error("[learning-proposer] start failed:", err);
   }
-                                                                   
+  // 전면 영어 마이그레이션(기획 2026-09-23 데스크탑 절) — 한 번 큐를 채우고 유휴에서 끝까지 번역한다.
   // dreaming 설정과 무관(별도 1회 작업), 하드 옵트아웃 meta 만 존중. 부팅 경로 밖(지연·유휴 타이머).
   try {
     const { startEnglishMemoryMigration } = await import("./memory/english-migration");
@@ -5304,8 +5488,8 @@ app.whenReady().then(async () => {
     const { runOneImportInBackground, startOneImportScheduler, stopOneImportScheduler } =
       await import("./memory/one-import");
     stopOneImport = stopOneImportScheduler;
-
-
+    // Boot-only import measured a 73-block backlog while the app stayed open —
+    // re-import when the soul file actually changes (cheap mtime watch).
     startOneImportScheduler();
     const daemonSettled = Promise.race([
       daemonStartupPromise.then(() => undefined, () => undefined),

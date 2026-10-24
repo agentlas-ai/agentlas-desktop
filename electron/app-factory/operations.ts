@@ -1,5 +1,6 @@
 import { execFile, spawn } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
+import { detachedSpawnOpts } from "../runtime/exec";
 import { createHmac, randomBytes } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -901,10 +902,13 @@ export async function launchProviderBrowserSession(
       try { prior.kill(); } catch {}
       activeLaunches.delete(connectorId);
     }
+    // Quit ends it (disposeAppFactoryLaunches), so it needs no life of its own on Windows: detachedSpawnOpts keeps
+    // the POSIX process group and gives Windows a hidden console its browser children inherit. `detached` there was
+    // DETACHED_PROCESS — no console, so each console child got a visible window (2026-10-24).
     const child = spawn(nodeExecPath(), [launcherPath], {
       cwd: rootPath,
-      detached: true,
       stdio: "ignore",
+      ...detachedSpawnOpts(),
     });
     child.unref();
     // unref로 분리하되 핸들은 추적 — 교체/종료 정리(disposeAppFactoryLaunches)가 도달하도록.
@@ -4288,6 +4292,7 @@ async function runAction(args) {
       cwd: root,
       detached: true,
       stdio: "ignore",
+      windowsHide: true,
       // Provider launchers are scripts, even when the host executable is
       // Electron. Keep this detached child headless and do not relaunch the
       // Agentlas GUI for every provider session.
@@ -4631,7 +4636,7 @@ function execNode(
   timeoutMs: number,
 ): Promise<{ exitCode: number | null; stdout: string; stderr: string }> {
   return new Promise((resolve) => {
-    execFile(nodeExecPath(), args, { cwd, timeout: timeoutMs }, (error, stdout, stderr) => {
+    execFile(nodeExecPath(), args, { cwd, timeout: timeoutMs, windowsHide: true }, (error, stdout, stderr) => {
       const errorCode = (error as (Error & { code?: unknown }) | null)?.code;
       const exitCode = typeof errorCode === "number" ? errorCode : error ? 1 : 0;
       resolve({ exitCode, stdout, stderr });

@@ -1,14 +1,14 @@
 /**
-
-
-
-
-
-
-
-
-
-
+ * Which refusals of an owner's message are TRANSIENT: nothing is wrong, the chat (or the channel to the process that
+ * runs it) is simply not ready yet. The owner typed something; the message is accepted, shown once, and run as soon as
+ * the chat is free. A transient refusal must never reach the screen as text, a red color, a card or a synthetic reply.
+ * Main owns the retry; the renderer only reads this to know it does not have to react.
+ *
+ * Production 1.2.96, 2026-10-11 10:21-10:23Z (room "Yotube", chat 8f3e09ee): every code below was thrown to the
+ * renderer within two minutes of a daemon-owned run settling, and each became a red banner, a "pending reception" card
+ * or a synthetic assistant message.
+ *
+ * Codes are matched exactly (or by the one documented prefix). Localized prose is never inspected.
  */
 
 const TRANSIENT_CODES: ReadonlySet<string> = new Set([
@@ -22,6 +22,8 @@ const TRANSIENT_CODES: ReadonlySet<string> = new Set([
   "invocation_admission_chat_pending",
   "invocation_steer_parent_pending",
   "chat_invocation_active",
+  "science-turn-already-active",
+  "science-steering-target-stale",
   // Another run of this same process holds the chat's lease: a graph agent node or a doctor run on that chat (W5). It is
   // busy, not broken; the start waits for the release like invocation_chat_busy (store/invocation-run-owners.ts).
   "invocation_chat_owned_by_other_run",
@@ -99,3 +101,16 @@ export function transientSendBackoffMs(attempt: number): number {
 
 /** A message that has waited this long without ever starting is given up on (the row stays in the transcript). */
 export const TRANSIENT_SEND_DEADLINE_MS = 2 * 60 * 60 * 1000;
+
+/** Start once; only the caller's typed refusal admission may turn a rejection into a durable acceptance. */
+export async function startOwnerSendOrAcceptRefusal<Started, Accepted>(
+  start: () => Started | Promise<Started>,
+  acceptRefusal: (cause: unknown) => Accepted | null | Promise<Accepted | null>,
+): Promise<Started | Accepted> {
+  try { return await start(); }
+  catch (cause) {
+    const accepted = await acceptRefusal(cause);
+    if (accepted !== null) return accepted;
+    throw cause;
+  }
+}

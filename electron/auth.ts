@@ -41,7 +41,10 @@ const COOKIE_NAME = "agentlas_session";
 const AUTH_PARTITION = "persist:agentlas-auth";
 const USE_MEMORY_AUTH = process.env.AGENTLAS_E2E === "1" && process.env.AGENTLAS_E2E_KEYCHAIN !== "1";
 const USE_E2E_SESSION = USE_MEMORY_AUTH && process.env.AGENTLAS_E2E_AUTH === "1";
-let memoryAuthCookie: string | null = null;
+// Test rigs only: a signed-cookie-shaped value (never a real credential) may seed the in-memory store, so an isolated
+// run can be signed in against a local stand-in for the web service. It is read only in the memory-auth test mode and
+// still has to pass the same shape and expiry check as any stored cookie.
+let memoryAuthCookie: string | null = USE_MEMORY_AUTH ? (process.env.AGENTLAS_E2E_SESSION_COOKIE?.trim() || null) : null;
 
 function rendererAccountFingerprint(userId: string | undefined): string | undefined {
   if (!userId) return undefined;

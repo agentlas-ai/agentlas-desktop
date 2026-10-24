@@ -49,17 +49,17 @@ export function antigravityConversationHome(env: NodeJS.ProcessEnv, platform: No
 }
 
 /**
-
-
-
-
-
-
-
-
-
-
-
+ * Whether agy no longer holds a conversation, from the filesystem only (never from its output text).
+ *
+ * agy keeps every conversation in <HOME>/.gemini/antigravity-cli/conversations/<id>.db (the store
+ * attestAntigravityMetadataSteps reads). Measured 2026-10-16 on agy 1.4.0 with a scratch product HOME:
+ * `--conversation <id>` for an id it has no file for writes a stderr warning, exits 0 and runs the turn in a NEW
+ * conversation (another conversation_id from the first `init` event on) that holds none of the earlier turns.
+ * The owner's storage policy deletes CLI originals unused for 30 days and agy prunes its own store, so this is routine.
+ *
+ * Gone means: the store folder exists and holds neither `<id>.db` nor an `<id>` entry. An id of another shape, a
+ * missing or unreadable store (a layout this build does not know, a HOME agy never ran in) answers false: the turn
+ * then still checks the conversation id agy reports for the run.
  */
 export function antigravityConversationGone(home: string, conversationId: string): boolean {
   if (!AGY_CONVERSATION_ID_RE.test(conversationId)) return false;
@@ -102,7 +102,7 @@ export function attestAntigravityMetadataSteps(conversationId: string, indices: 
 /**
  * agy's StopReason (exa.codeium_common_pb.StopReason): the typed reason it persists on every answer attempt of a turn, in the
  * planner-response step (step_type 15, payload field 20, whose field 12 is the stop reason). The enum is read from the
- * descriptor embedded in the agy binary; the values below were observed on agy 1.4.3 against the real CLI behind
+ * descriptor embedded in the agy binary; the values below are measured on agy 1.4.3 (2026-10-21) against the real CLI behind
  * its documented GEMINI_API_KEY + GOOGLE_GEMINI_BASE_URL switch with a local fake model API: every safety-class finish of the
  * model API (SAFETY, PROHIBITED_CONTENT, BLOCKLIST, SPII, RECITATION, IMAGE_SAFETY) is stored as 11 (CONTENT_FILTER), a
  * malformed function call as 14 (IMPROPER_FORMAT), a normal reply as 2 (STOP_PATTERN). Nothing else tells a safety block
@@ -204,7 +204,7 @@ function readStopReasonFrom(home: string, conversationId: string, stepIndex: num
 
 /**
  * The stop reason agy persisted on one answer step of a conversation, read after the turn's result (the store is current
- * right after the result frame even while a resident process is alive). `stepIndex` is the step_index of the
+ * 20 ms after the result frame even while a resident process is alive; measured). `stepIndex` is the step_index of the
  * turn's own last agent_response frame, so a step of an earlier turn is never read for this one, and the attempt must be where
  * the conversation ended (at most its own error step follows), so an attempt the turn went on from is never taken for its
  * cause. Read-only and bounded like attestAntigravityMetadataSteps; a missing store, another layout, another step type or an

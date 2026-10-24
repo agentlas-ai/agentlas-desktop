@@ -1,19 +1,19 @@
 /**
- * Desktop Alive lifetime store — generalized port of agentlas-science/src/alive/lifetime-store.ts.
+ * Canonical Alive lifetime store shared by host organisms, including Science.
  *
- * Differences from the Science copy (which another session owns and which stays unchanged):
+ * Shared host contracts:
  *  - Action validation and claim use the action registry (./action-registry) instead of the single
  *    science.continue_research shape; the claimed packet must carry exactly the proposal's fence.
  *  - An optional agent scope predicate lets two organisms (work-organism, one-organism) share these side
  *    tables in the desktop DB without reconciling, dispatching, or listing each other's lives.
- *  - Science's per-wake MCP tool principal is not ported: One/Work wakes receive no tool grant.
+ *  - Tool principals are optional reads of a current wake and attachment; they grant no domain effect.
  *
  * Tables are side tables created idempotently (like goal_plan_nodes); the schema ladder is not bumped.
  * Main is the single writer.
  */
 import type Database from "better-sqlite3";
 import { createHash, randomUUID } from "node:crypto";
-import type { AliveActionPacket, AliveActionProposal, AliveActionResult, AliveAgent, AliveAttachment, AliveBudget, AliveRuntimeReceipt } from "./contracts";
+import type { AliveActionPacket, AliveActionProposal, AliveActionResult, AliveAgent, AliveAttachment, AliveBudget, AliveRuntimeReceipt, AliveToolPrincipal } from "./contracts";
 import { validAliveAction } from "./action-registry";
 import type { AliveResumeBarrier } from "../../shared/alive";
 import { readAliveResumeBarrier, aliveResumeMatches, aliveResumeAuthorized, type AliveResumeAuthorization } from "./owner-resume";
@@ -137,6 +137,39 @@ export class AliveLifetimeStore {
   attachments(agentId: string): AliveAttachment[] {
     return (this.db.prepare("SELECT * FROM alive_attachments WHERE agent_id=? ORDER BY attachment_id").all(agentId) as Row[])
       .map((r) => ({ attachmentId: r.attachment_id, agentId, domain: r.domain, scope: JSON.parse(r.scope_json), status: r.status }));
+  }
+  /** Transport preparation can inspect a reserved wake; tool calls require a running wake. */
+  preparedToolPrincipal(input: { agentId: string; wakeId: string; controlEpoch: number;
+    attachmentId: string; domain: string }, nowMs: number): AliveToolPrincipal {
+    return this.toolPrincipal(input, nowMs, true);
+  }
+  activeToolPrincipal(input: { agentId: string; wakeId: string; controlEpoch: number;
+    attachmentId: string; domain: string }, nowMs: number): AliveToolPrincipal {
+    return this.toolPrincipal(input, nowMs, false);
+  }
+  private toolPrincipal(input: { agentId: string; wakeId: string; controlEpoch: number;
+    attachmentId: string; domain: string }, nowMs: number, allowReserved: boolean): AliveToolPrincipal {
+    if (!this.owns(input.agentId) || !Number.isSafeInteger(nowMs) || nowMs < 0) throw new Error("alive-tool-wake-authority-missing");
+    const wake = this.db.prepare("SELECT agent_id,control_epoch,status,runtime_binding_json FROM alive_wakes WHERE wake_id=?").get(input.wakeId) as Row | undefined;
+    const agent = this.get(input.agentId);
+    if (!wake || (wake.status !== "running" && !(allowReserved && wake.status === "reserved")) || wake.agent_id !== input.agentId
+      || wake.control_epoch !== input.controlEpoch || !agent || agent.status !== "enabled" || agent.controlEpoch !== input.controlEpoch
+      || (agent.budget.deadlineMs !== null && nowMs >= agent.budget.deadlineMs)
+      || (agent.budget.tokenLimit !== null && (agent.budget.tokensUsed >= agent.budget.tokenLimit || agent.state.usageUnknown === true)))
+      throw new Error("alive-tool-wake-authority-missing");
+    const attachment = this.db.prepare("SELECT agent_id,domain,scope_json,status FROM alive_attachments WHERE attachment_id=?")
+      .get(input.attachmentId) as Row | undefined;
+    if (!attachment || attachment.status !== "attached" || attachment.agent_id !== input.agentId || attachment.domain !== input.domain)
+      throw new Error("alive-tool-attachment-authority-missing");
+    const generation = this.db.prepare(`SELECT sequence FROM alive_events WHERE agent_id=?
+      AND kind IN ('attachment.attached','attachment.detached')
+      AND json_extract(payload_json,'$.attachmentId')=? ORDER BY sequence DESC LIMIT 1`)
+      .get(input.agentId, input.attachmentId) as { sequence: number } | undefined;
+    if (!generation) throw new Error("alive-tool-attachment-generation-missing");
+    return Object.freeze({ kind: "alive", agentId: input.agentId, wakeId: input.wakeId, controlEpoch: input.controlEpoch,
+      attachmentId: input.attachmentId, attachmentGeneration: generation.sequence, domain: input.domain,
+      scope: Object.freeze(JSON.parse(attachment.scope_json) as Record<string, unknown>),
+      runtimeBinding: JSON.parse(wake.runtime_binding_json) as unknown });
   }
   event(agentId: string, kind: string, payload: unknown, nowMs: number): number {
     const row = this.db.prepare("INSERT INTO alive_events(event_id,agent_id,sequence,kind,payload_json,created_at_ms) SELECT ?,?,COALESCE(MAX(sequence),0)+1,?,?,? FROM alive_events WHERE agent_id=? RETURNING sequence")
@@ -290,12 +323,12 @@ export class AliveLifetimeStore {
   }
   markRunning(wakeId: string): void { this.db.prepare("UPDATE alive_wakes SET status='running' WHERE wake_id=? AND status='reserved'").run(wakeId); }
   /**
-
-
-
-
-
- */
+   * usageUnknown stays fail-closed: an unmeasured charge could overrun the grant. It was also permanent -- nothing ever
+   * cleared it -- so one wake whose runtime reported no usage ended a token-bounded agent for good (live QA 2026-09-24:
+   * a wake that failed before any provider call left the agent on grant.usage-unavailable forever). Ask the runtime
+   * again for exactly the settled wakes whose receipt carried no count. Only when every one of them now reports a
+   * measured count are those counts charged and the flag cleared; any still-unknown wake keeps the agent waiting.
+   */
   recoverUnknownUsage(agentId: string, readReceipt: (wakeId: string) => AliveRuntimeReceipt | null, nowMs: number): boolean {
     const agent = this.get(agentId);
     if (!agent || agent.state.usageUnknown !== true) return false;
@@ -325,7 +358,7 @@ export class AliveLifetimeStore {
     return true;
   }
   /**
-   * The owner's way out of a permanently unknown charge (desktop addition; Science keeps its own rule).
+   * The owner's way out of a permanently unknown charge, shared by every host organism.
    * A wake killed after its provider attempt started (crash, force quit) can never report usage, so
    * recoverUnknownUsage alone would keep a token-bounded life waiting forever. Only an explicit owner
    * re-grant (setting the token limit) calls this: those exact wakes are stamped acknowledged (their charge

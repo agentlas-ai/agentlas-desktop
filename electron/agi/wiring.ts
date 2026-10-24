@@ -191,8 +191,8 @@ export function createAgiExecutor(): AgiActionExecutor {
       appendChatMessage(chatId, "system", currentUiLocale() === "ko" ? text.ko : text.en, {
         hostNotice: { purpose: "automation-report", runId, automationId: AGI_ACTION_NOTICE_AUTOMATION_ID },
       });
-      // An ask to the owner is a decision card, never a line alone.
-      // The line above explains; the card is how the owner answers, from the desktop or the phone, and it rings
+      // An ask to the owner is a decision card, never a line alone (owner 2026-10-20: "묻는건 무조건 카드로 주고 알림
+      // 울리게해"). The line above explains; the card is how the owner answers, from the desktop or the phone, and it rings
       // like a model-authored card (desktop run alert, phone push). Guarded by the line's own idempotency above.
       if (card) {
         // noGoalResult: a host-written card is not the Goal's answer, so it must never wait for a verification verdict.
@@ -228,7 +228,7 @@ export function agiInstalledPaths(): string[] {
  *  - switch_runtime is recorded exactly as the scheduler's own persistence decision on a live automation of the goal
  *    (surface automation, ownerLayer scheduler, sourceRunId = its latest run_history row), which
  *    planAutomationRuntimeForRun → persistenceSwitchFor already reads and turns into a handoff to the next pool
- *    member. A Goal's own next turn is woken by the host and no continuation row exists (the legacy rows
+ *    member. Since 034d8584e a Goal's own next turn is woken by the host and no continuation row exists (the legacy rows
  *    are retired history, never a target), so for a Goal there is normally nothing to switch: refused with a typed code,
  *    and the classifier does not propose it (goal-facts goalRuntimeSwitchTarget → continuationAutomation false).
  *  - switch_tool writes the chosen installed path into the tactic's guidance, which buildGoalPlanTurnContext puts in
@@ -258,7 +258,7 @@ export function recordAgiMove(goalId: string, runId: string, move: "switch_runti
     return { ok: true };
   }
   // The only thing a switch_runtime can move is a live (non-retired) automation of the Goal with a recorded run. A Goal's
-  // own next turn is woken by the host and its runtime comes from the runner's cooldown plus the goal-pass-stop
+  // own next turn is woken by the host (034d8584e) and its runtime comes from the runner's cooldown plus the goal-pass-stop
   // persistence decision, neither of which reads an AGI move: there is no target, so the move is refused, typed.
   const target = goalRuntimeSwitchTarget(getDb(), goalId);
   if (!target) return { ok: false, code: "agi.move.no-continuation-automation" };

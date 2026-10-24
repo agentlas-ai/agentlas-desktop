@@ -10,11 +10,11 @@ import type { AgentContextUnsettledTurn } from "./agent-context";
 export const UNSETTLED_CONTINUATION_PROMPT = "previous turn: no completion signal. Check history, finish what remains, repeat nothing done.";
 
 /**
-
-
-
-
-
+ * Whether the continuation carries the interrupted turn's own request (and its images). The session holds that request
+ * only when it acknowledged the turn ("accepted", a protocol receipt): then the original contract stands, the request is
+ * not re-sent and the model finishes from its history. Without that receipt ("not-accepted", or a runner that cannot
+ * tell) the request may never have reached the resumed conversation: the fixed line alone then made the model report
+ * "nothing remains" for a question it never saw (owner 2026-10-16, every follow-up of one Work chat), so it rides along.
  */
 export function unsettledContinuationCarriesRequest(delivery: RuntimeTurnDelivery | undefined): boolean {
   // The one settlement decision (shared/turn-settlement.ts) owns this rule; a resumable unsettled turn continues in its

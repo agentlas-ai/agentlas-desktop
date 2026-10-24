@@ -1,3 +1,5 @@
+import { scienceQuestionHost } from "../science-host/question-continuation";
+import type { ScienceQuestionReadInput, ScienceQuestionAnswerInput } from "../science-host/question-ipc";
 /**
  * One daemon owns the complete Science execution graph. The caller must publish
  * its exclusive control socket/store lease before start(), and keep that lease
@@ -5,7 +7,9 @@
  * Importing this module does not load Science, open a database, or recover work.
  */
 import type { ToolApprovalDecision, ToolApprovalRequestEvent, AskUserRequestEvent } from "../../shared/types";
+import { sendRefusalCode, startOwnerSendOrAcceptRefusal } from "../../shared/transient-send-refusal";
 import { randomUUID } from "node:crypto";
+import { captureScienceAliveOwnerControl, recordScienceAliveOwnerControl, recordScienceHostGoalOwnerControl, readScienceHostGoalWake } from "../science-host/goal-wake";
 import { toolApprovalActionId } from "../../shared/tool-approval-action";
 import { dispatchSciencePublicationCommand, type DaemonSciencePublicationCommand } from "./science-publication-commands";
 type Science = typeof import("agentlas-science");
@@ -70,7 +74,7 @@ type CapabilityUiApi = {
 };
 
 /** Native, authenticated control operations, NOT an agent-callable tool surface. */
-export type DaemonScienceCommand =
+export type DaemonScienceCommand = (
   | DaemonSciencePublicationCommand
   | { op: "space.inspect"; input: { projectId: string; options?: Parameters<ReturnType<Science["scienceProjectSpaceService"]>["inspect"]>[1] } }
   | { op: "space.snapshot"; input: { projectId: string } }
@@ -96,17 +100,21 @@ export type DaemonScienceCommand =
   | { op: "loops.inspect"; input: { projectId: string } }
   | { op: "loops.start"; input: Parameters<Store["startLoopSession"]>[0] }
   | { op: "loops.transition"; input: Parameters<Store["transitionLoopSession"]>[0] }
-  | { op: "composer.start"; input: Parameters<Conversations["start"]>[0] }
+  | { op: "composer.start"; input: Parameters<Conversations["start"]>[0] & { acceptSteeringOnBusy?: true } }
   | { op: "composer.runStatus"; input: Parameters<Conversations["getRunStatus"]>[0] }
-  | { op: "composer.steer"; input: Parameters<Conversations["steer"]>[0] }
+  | { op: "composer.steer"; input: Parameters<Conversations["steer"]>[0] & { acceptSteeringOnBusy?: true } }
   | { op: "composer.reconcile" | "composer.cancel" | "composer.receipt"; input: TurnScope }
-  | { op: "composer.attach" | "composer.steering" | "questions.list" | "messages.list"; input: Scope }
+  | { op: "composer.steering"; input: Scope & { requestId?: string } }
+  | { op: "composer.steeringCapability"; input: Scope }
+  | { op: "composer.attach" | "questions.list" | "messages.list"; input: Scope }
   | { op: "questions.register" }
   | { op: "questions.answer"; input: Omit<Parameters<Questions["answer"]>[0], "source"> }
   | { op: "toolApprovals.state"; input: { projectId: string; chatId: string } }
   | { op: "toolApprovals.setAlwaysApproved"; input: { projectId: string; chatId: string; enabled: boolean } }
   | { op: "toolApprovals.resolve"; input: { projectId: string; chatId: string; requestId: string; decision: ToolApprovalDecision } }
   | { op: "toolApprovals.receipt"; input: { projectId: string; chatId: string; requestId: string } }
+  | { op: "questionDecisions.read"; input:ScienceQuestionReadInput }
+  | { op: "questionDecisions.answer"; input:ScienceQuestionAnswerInput }
   | { op: "askUser.list" }
   | { op: "askUser.answer"; input: { requestId: string; answer: string | null } }
   | { op: "lifecycle.get"; input: { projectId: string } }
@@ -127,7 +135,12 @@ export type DaemonScienceCommand =
   | { op: "styles.rename"; input: { sha256: string; name: string } }
   | { op: "styles.delete" | "styles.saveEdited"; input: { sha256: string } }
   | { op: "styles.applyToProject"; input: { sha256: string; projectId: string } }
-  | { op: "styles.samplePreview" | "styles.openForEditing"; input: { sha256: string; lang: "ko" | "en" } };
+  | { op: "styles.samplePreview" | "styles.openForEditing"; input: { sha256: string; lang: "ko" | "en" } }) & {
+  /** Main's validated native view or authenticated mobile owner producer only; never read from input. */
+  nativeOwnerIntent?: true;
+  /** Stable authenticated native/Mobile human request; never copied from model command fields. */
+  ownerRequestId?: string;
+};
 
 export interface DaemonScienceStatus {
   schema: "agentlas.science-daemon-status.v1";
@@ -137,6 +150,7 @@ export interface DaemonScienceStatus {
   errorCode: string | null;
   settled: boolean;
   activeToolRequests: number | null;
+  hostGoalWakePending?: boolean;
 }
 
 export interface DaemonScienceEvent {
@@ -182,6 +196,8 @@ export function createDaemonScienceService(options: {
   let startPromise: Promise<DaemonScienceStatus> | null = null;
   let closePromise: Promise<void> | null = null;
   let runtimeOpened = false;
+  let terminalStore: Store | null = null;
+  let terminalConversations: Conversations | null = null;
   let activeToolCount: (() => number) | null = null;
   const commands = new Set<Promise<unknown>>();
   const unsubscribe: Array<() => void> = [];
@@ -199,9 +215,11 @@ export function createDaemonScienceService(options: {
     catch { return false; /* A disconnected GUI cannot fail research. */ }
   };
   const questionProjection = (request: AskUserRequestEvent) => {
-    if (request.askedBy !== "agentlas-science" || !request.chatId || !science || !runtimeOpened) return null;
+    if (!request.chatId || !science || !runtimeOpened) return null;
     const scope = science.scienceStore().getConversationScopeForRuntimeChat(request.chatId);
-    return scope ? { ...request, ...scope, chatId: scope.conversationId } : null;
+    // The canonical transport binding proves the audience. Provider labels
+    // (codex/claude/byok) never decide whether an owner's card is reachable.
+    return scope ? { ...request, ...scope, askedBy: "agentlas-science", chatId: scope.conversationId } : null;
   };
   const approvalProjection = (request: ToolApprovalRequestEvent) => {
     if (!request.chatId || !science || !runtimeOpened) return null;
@@ -214,9 +232,16 @@ export function createDaemonScienceService(options: {
     return { ...request, ...scope, chatId: scope.conversationId };
   };
   const settled = () => adapter ? adapter.isSettled() : state !== "starting" && !runtimeOpened;
+  const hostGoalWakePending = (): boolean => {
+    if(!runtimeOpened)return false;
+    try{options.assertOwner();}catch{return false;}
+    const read=(science as {scienceHasDeferredHostGoalWake?:()=>boolean}|null)?.scienceHasDeferredHostGoalWake;
+    if(!read)return false; // Older SDKs retain their existing residency contract.
+    try{return read()===true;}catch{return true;} // Read failure is not proof of idleness.
+  };
   const status = (): DaemonScienceStatus => ({
     schema: "agentlas.science-daemon-status.v1", ownerEpoch: options.ownerEpoch, state,
-    extensionVersion, errorCode: lastError, settled: settled(),
+    extensionVersion, errorCode: lastError, settled: settled(), hostGoalWakePending:hostGoalWakePending(),
     activeToolRequests: runtimeOpened && activeToolCount ? activeToolCount() : null,
   });
 
@@ -257,7 +282,7 @@ export function createDaemonScienceService(options: {
       assertExecution();
       // Opening the store is not recovery. Adoption must precede every startup
       // reconciliation/projection and only changes proven Science-owned rows.
-      science.scienceStore();
+      terminalStore = science.scienceStore();
       runtimeOpened = true;
       [approvals, grants, questionsUi] = await Promise.all([
         import("../runtime/tool-approval"), import("../store/capability-grants"), import("../confirm/ask-user"),
@@ -287,7 +312,8 @@ export function createDaemonScienceService(options: {
       activeToolCount = () => gateway.activeRequestCount();
       projection.adoptScienceLongRunOwnership({ appInstanceId: options.ownerEpoch, assertOwner: options.assertOwner });
       adapter = science.createScienceDesktopLongRunAdapter({ project: host.project }, { shutdownTimeoutMs: options.shutdownTimeoutMs });
-      unsubscribe.push(science.scienceConversationService().onEvent(event => emit("turn", event)));
+      terminalConversations = science.scienceConversationService();
+      unsubscribe.push(terminalConversations.onEvent(event => emit("turn", event)));
       unsubscribe.push(science.scienceStore().onResearchLifecycleChanged(event => emit("lifecycle", event)));
       assertExecution();
       await adapter.recoverAndProjectAtStartup();
@@ -306,12 +332,17 @@ export function createDaemonScienceService(options: {
     return startPromise;
   }
 
-  const ready = () => {
+  const ready = (terminal = false) => {
     options.assertOwner();
     if (state !== "ready" || !science || !host) throw new Error("science_daemon_not_ready");
     // Runtime/model discovery crosses awaits. Recheck admission at the actual
     // store access so a late discovery result cannot mutate a closed runtime.
-    const store = new Proxy(science.scienceStore(), {
+    // Only withdrawal may use already-open resources. It must neither reload
+    // the extension nor re-enter its fresh-availability gate to stop an owner.
+    const sourceStore = terminal ? terminalStore : science.scienceStore();
+    const conversations = terminal ? terminalConversations : science.scienceConversationService();
+    if (!sourceStore || !conversations) throw new Error("science_daemon_not_ready");
+    const store = new Proxy(sourceStore, {
       get(target, key, receiver) {
         const value = Reflect.get(target, key, receiver);
         return typeof value === "function" ? (...args: unknown[]) => {
@@ -320,7 +351,7 @@ export function createDaemonScienceService(options: {
         } : value;
       },
     });
-    return { api: science, store, conversations: science.scienceConversationService(), host };
+    return { api: science, store, conversations, host };
   };
   const page = (input: { afterSequence?: number; limit?: number }) => {
     const after = input.afterSequence ?? 0;
@@ -343,6 +374,10 @@ export function createDaemonScienceService(options: {
       alwaysApproved: Boolean(scope.runtimeChatId && grants!.isChatAlwaysApproved(scope.runtimeChatId)),
       pending: approvals!.listPendingToolApprovals().filter(request => request.chatId === scope.runtimeChatId)
         .map(request => approvalProjection(request)).filter(request => request !== null) };
+  };
+  const recordAcceptedAliveOwnerControl = (input: Parameters<typeof recordScienceAliveOwnerControl>[0]) => {
+    try { assertExecution(); recordScienceAliveOwnerControl(input); }
+    catch (error) { console.error("[science-daemon] alive owner control withheld", errorCode(error)); }
   };
   async function runCommand(command: DaemonScienceCommand): Promise<unknown> {
     if (!command || typeof command !== "object" || Array.isArray(command) || typeof command.op !== "string") throw new Error("science_daemon_command_invalid");
@@ -396,7 +431,89 @@ export function createDaemonScienceService(options: {
         return row.has_work === 1;
       } finally { db.close(); }
     }
-    const { api, store, conversations, host: activeHost } = ready();
+    const terminal = command.op === "composer.cancel" || command.op === "composer.steer" && command.input.intent === "stop";
+    const { api, store, conversations, host: activeHost } = ready(terminal);
+    const ownerIntent = command.nativeOwnerIntent === true;
+    const currentLife = (scope: Scope) => {
+      try { return store.aliveLifetime().get(store.scienceAliveAgentId(scope.projectId)); }
+      catch (error) { if ((error as { code?: string })?.code === "science_alive_core_unavailable") return null; throw error; }
+    };
+    const assertNonOwnerControl = (scope: Scope) => {
+      if (store.scienceConversationStopped(scope.conversationId)) throw Error("science-steering-user-stopped");
+      const life = currentLife(scope);
+      if (life && life.status !== "enabled") throw Error("science-alive-owner-resume-required");
+    };
+    const lookupSteering = (store as Store & { getSteeringByRequestId?: (requestId: string) => ReturnType<Store["listSteering"]>[number] | null }).getSteeringByRequestId;
+    const acceptedOwnerText = (input: Scope & { requestId: string; content?: unknown }, allowed: boolean) => {
+      const priorSteering = typeof lookupSteering === "function" ? lookupSteering.call(store, input.requestId) : null;
+      if (!priorSteering) return null;
+      if (!allowed) throw Error("science-idempotency-input-conflict");
+      // A receipt replay is read-only: it never restarts its target or grants a new owner intent.
+      const target = store.getTurnForProject(input.projectId, priorSteering.targetTurnId);
+      const message = store.getMessageForProject(input.projectId, input.conversationId, priorSteering.messageId);
+      if (priorSteering.projectId !== input.projectId || priorSteering.conversationId !== input.conversationId
+        || priorSteering.content !== (typeof input.content === "string" ? input.content.replace(/\r\n/g, "\n").trim() : "")
+        || priorSteering.intent !== "steer" || priorSteering.runtimeSelection != null
+        || !target || target.projectId !== input.projectId || target.conversationId !== input.conversationId
+        || !message || message.role !== "user" || message.visibility !== "visible" || message.content !== priorSteering.content)
+        throw Error("science-idempotency-input-conflict");
+      const consumedStart = store.getTurnByRequestId(input.requestId);
+      if (consumedStart && (priorSteering.status !== "applied" || consumedStart.id !== priorSteering.successorTurnId
+        || consumedStart.projectId !== input.projectId || consumedStart.conversationId !== input.conversationId
+        || consumedStart.parentTurnId !== target.id || consumedStart.origin !== "loop-continuation"
+        || consumedStart.continuationBasis?.schema !== "agentlas.science-steering-continuation.v1"
+        || !Array.isArray(consumedStart.continuationBasis.requestIds)
+        || !consumedStart.continuationBasis.requestIds.includes(priorSteering.requestId)))
+        throw Error("science-idempotency-input-conflict");
+      // The opt-in queued branch reads the accepted owner text, not a new model-selection request.
+      // Its target may have been retargeted at a later boundary; no selection or run is applied here.
+      return { accepted: true, queued: true, steering: priorSteering };
+    };
+    const currentOwnerTextTarget = (input: Scope, selection?: unknown) => {
+      const target = store.getActiveTurn(input.projectId, input.conversationId) ?? store.getLatestTurn(input.projectId, input.conversationId);
+      if (!target || target.projectId !== input.projectId || target.conversationId !== input.conversationId
+        || !["queued", "running", "cancelling", "completed", "failed", "cancelled", "interrupted"].includes(target.status))
+        throw Error("science-steering-target-mismatch");
+      // The approved revision governs future work; a historical target may have run a different model.
+      const currentPin = api.normalizeScienceRuntimeSelection(store.executionRevision(input.projectId, input.conversationId).runtimeSelection
+        ?? target.runtimeSelection);
+      if (!currentPin?.model || selection !== undefined && JSON.stringify(selection) !== JSON.stringify(currentPin))
+        throw Error("science-turn-runtime-selection-conflict");
+      return target;
+    };
+    const assertOwnerTextCurrent = (input: Scope, epoch: number, lifeEpoch: number | null) => {
+      assertExecution();
+      const life = currentLife(input);
+      if (store.scienceConversationControlState(input.conversationId).epoch !== epoch
+        || (life?.controlEpoch ?? null) !== lifeEpoch || store.scienceConversationStopped(input.conversationId))
+        throw Error("science-steering-user-stopped");
+      if (life && life.status !== "enabled") throw Error("science-alive-owner-resume-required");
+    };
+    const steerOwnerInput = async (input: Parameters<Conversations["steer"]>[0] & { acceptSteeringOnBusy?: true },
+      observation?: Parameters<typeof recordScienceAliveOwnerControl>[0]["observation"]) => {
+      const ownerObservation = observation ?? (ownerIntent && input.intent !== "stop" ? captureScienceAliveOwnerControl({ ...input, control: "message" }) : undefined);
+      const ownerStopEpoch = input.intent === "stop" ? null : store.scienceConversationControlState(input.conversationId).epoch;
+      const lifetimeEpoch = input.intent === "stop" ? null : currentLife(input)?.controlEpoch ?? null;
+      if (!ownerIntent && input.intent !== "stop") assertNonOwnerControl(input);
+      // The opt-in belongs to host admission, never the domain steering digest or model input.
+      const { acceptSteeringOnBusy: _acceptSteeringOnBusy, ...domainInput } = input;
+      const result=await conversations.steer(domainInput);
+      // Keep the accepted receipt; stale ownership or a later Stop/Pause withholds authority.
+      let ownerControlCurrent = true;
+      if (input.intent !== "stop") {
+        try {
+          assertExecution();
+          ownerControlCurrent = store.scienceConversationControlState(input.conversationId).epoch === ownerStopEpoch
+            && (currentLife(input)?.controlEpoch ?? null) === lifetimeEpoch;
+        } catch (error) { ownerControlCurrent = false; console.error("[science-daemon] owner control withheld", errorCode(error)); }
+      }
+      if(ownerIntent&&input.intent!=="stop"&&ownerControlCurrent)recordScienceHostGoalOwnerControl({projectId:input.projectId,
+        conversationId:input.conversationId,loopSessionId:store.getActiveLoopSession(input.projectId)?.id??null,
+        requestId:input.requestId,control:"message"});
+      if(ownerIntent&&input.intent!=="stop"&&ownerControlCurrent && ["accepted","applied"].includes(result.status)) recordAcceptedAliveOwnerControl({
+        projectId:input.projectId,conversationId:input.conversationId,requestId:input.requestId,control:"message",observation:ownerObservation!});
+      return result;
+    };
     switch (command.op) {
       case "compute.beginSession":
       case "compute.runSession":
@@ -512,6 +629,30 @@ export function createDaemonScienceService(options: {
       case "loops.transition": {
         const record = command.input;
         const prior = store.getLoopSessionForProject(record.projectId, record.loopSessionId);
+        const ownerConversation = ownerIntent && record.action === "resume" && prior ? store.listConversations(record.projectId).find(candidate =>
+          store.getConversationRuntimeBinding(record.projectId, candidate.id)?.runtimeChatId === prior.runtimeChatId) : null;
+        const ownerObservation = ownerConversation ? captureScienceAliveOwnerControl({ projectId: record.projectId,
+          conversationId: ownerConversation.id, requestId: record.requestId, control: "resume" }) : undefined;
+        if (record.action === "resume" && !ownerIntent && prior) {
+          const conversation = store.listConversations(record.projectId).find(candidate =>
+            store.getConversationRuntimeBinding(record.projectId, candidate.id)?.runtimeChatId === prior.runtimeChatId);
+          if (!conversation) throw Error("science-loop-resume-conversation-missing");
+          assertNonOwnerControl({ projectId: record.projectId, conversationId: conversation.id });
+        }
+        if(record.action==="resume"&&prior?.status==="queued"){
+          if(prior.version!==record.expectedLoopVersion||prior.stateSha256!==record.expectedLoopStateSha256)throw new Error("science-loop-version-conflict");
+          const conversation=store.listConversations(record.projectId).find(candidate=>store.getConversationRuntimeBinding(record.projectId,candidate.id)?.runtimeChatId===prior.runtimeChatId);
+          const turn=conversation?store.getActiveTurn(record.projectId,conversation.id):null;
+          if(turn&&readScienceHostGoalWake({projectId:record.projectId,conversationId:turn.conversationId,turnId:turn.id,
+            invocationRunId:turn.invocationRunId,loopSessionId:prior.id})){
+            if (ownerIntent) recordScienceHostGoalOwnerControl({projectId:record.projectId,conversationId:turn.conversationId,loopSessionId:prior.id,requestId:record.requestId,control:"resume"});
+            const accepted = conversations.resumeLoop({requestId:record.requestId,projectId:record.projectId,conversationId:turn.conversationId,
+              loopSessionId:prior.id,expectedLoopVersion:prior.version,expectedLoopStateSha256:prior.stateSha256,locale:record.locale,clearUserStop:ownerIntent});
+            if (ownerIntent && accepted.accepted === true) recordAcceptedAliveOwnerControl({projectId:record.projectId,conversationId:turn.conversationId,
+              requestId:record.requestId,control:"resume",resumeLoopSessionId:prior.id,observation:ownerObservation!});
+            return {session:store.getLoopSessionForProject(record.projectId,prior.id)??prior,replayed:true,proceed:true as const,advisories:[]};
+          }
+        }
         const result = store.transitionLoopSession(record);
         if ((record.action === "pause" || record.action === "cancel") && prior?.activeRunId) {
           const turn = store.getTurnByInvocationRunId(prior.activeRunId);
@@ -526,9 +667,13 @@ export function createDaemonScienceService(options: {
           const conversation = store.listConversations(record.projectId).find(candidate =>
             store.getConversationRuntimeBinding(record.projectId, candidate.id)?.runtimeChatId === result.session.runtimeChatId);
           if (!conversation) throw new Error("science-loop-resume-conversation-missing");
-          conversations.resumeLoop({ requestId: record.requestId, projectId: record.projectId, conversationId: conversation.id,
+          if (ownerIntent) recordScienceHostGoalOwnerControl({projectId:record.projectId,conversationId:conversation.id,
+            loopSessionId:result.session.id,requestId:record.requestId,control:"resume"});
+          const accepted = conversations.resumeLoop({ requestId: record.requestId, projectId: record.projectId, conversationId: conversation.id,
             loopSessionId: result.session.id, expectedLoopVersion: result.session.version,
-            expectedLoopStateSha256: result.session.stateSha256, locale: record.locale });
+            expectedLoopStateSha256: result.session.stateSha256, locale: record.locale, clearUserStop:ownerIntent });
+          if (ownerIntent && accepted.accepted === true) recordAcceptedAliveOwnerControl({projectId:record.projectId,conversationId:conversation.id,
+            requestId:record.requestId,control:"resume",resumeLoopSessionId:result.session.id,observation:ownerObservation!});
           return { ...result, session: store.getLoopSessionForProject(record.projectId, result.session.id) ?? result.session };
         } catch (error) {
           const current = store.getLoopSessionForProject(record.projectId, result.session.id);
@@ -541,21 +686,101 @@ export function createDaemonScienceService(options: {
         }
       }
       case "composer.start": {
+        const input = command.input;
+        const canSteer = ownerIntent && input.acceptSteeringOnBusy === true && input.mode === "append-user-message"
+          && input.parentTurnId == null;
+        if (canSteer && typeof lookupSteering !== "function") throw Error("science-steering-admission-unavailable");
+        const priorSteering = acceptedOwnerText(input, canSteer);
+        if (priorSteering) return priorSteering;
+        const ownerObservation = ownerIntent ? captureScienceAliveOwnerControl({ ...command.input, control: "message" }) : undefined;
+        const ownerStopEpoch = store.scienceConversationControlState(command.input.conversationId).epoch;
+        const lifetimeEpoch = currentLife(command.input)?.controlEpoch ?? null;
+        if (!ownerIntent) assertNonOwnerControl(command.input);
         const runtimeSelection = api.normalizeScienceRuntimeSelection(command.input.runtimeSelection
           ?? await api.resolveScienceRuntimeSelection(store, command.input));
+        // Another delivery of this same owner text may have been accepted/applied during model discovery.
+        const acceptedDuringDiscovery = acceptedOwnerText(input, canSteer);
+        if (acceptedDuringDiscovery) return acceptedDuringDiscovery;
         assertExecution();
+        if (store.scienceConversationControlState(command.input.conversationId).epoch !== ownerStopEpoch
+          || (currentLife(command.input)?.controlEpoch ?? null) !== lifetimeEpoch) throw Error("science-steering-user-stopped");
+        if (!ownerIntent) assertNonOwnerControl(command.input);
         if (!runtimeSelection?.model) throw new Error("science-runtime-selection-required");
-        return typeof conversations.acceptResearcherRun === "function"
-          ? conversations.acceptResearcherRun({ ...command.input, runtimeSelection })
-          : conversations.start({ ...command.input, runtimeSelection });
+        const binding=store.getConversationRuntimeBinding(command.input.projectId,command.input.conversationId);
+        if(ownerIntent&&binding)recordScienceHostGoalOwnerControl({projectId:command.input.projectId,conversationId:command.input.conversationId,
+          loopSessionId:store.getActiveLoopSession(command.input.projectId)?.id??null,requestId:command.input.requestId,control:"message"});
+        const acceptBusy = async () => {
+          const accepted = acceptedOwnerText(input, canSteer);
+          if (accepted) return accepted;
+          assertOwnerTextCurrent(input, ownerStopEpoch, lifetimeEpoch);
+          // A committed start must always keep its original run/message receipt.
+          if (store.getTurnByRequestId(input.requestId)) throw Error("science-turn-request-already-started");
+          const target = currentOwnerTextTarget(input, runtimeSelection);
+          const steering = await steerOwnerInput({ requestId: input.requestId, projectId: input.projectId,
+            conversationId: input.conversationId, targetTurnId: target.id,
+            content: input.mode === "append-user-message" ? input.content : "", intent: "steer" }, ownerObservation);
+          return { accepted: true as const, queued: true as const, steering };
+        };
+        return startOwnerSendOrAcceptRefusal(() => {
+          const accepted = typeof conversations.acceptResearcherRun === "function"
+            ? conversations.acceptResearcherRun({ ...input, runtimeSelection })
+            : conversations.start({ ...input, runtimeSelection });
+          if (ownerIntent && accepted.accepted === true) recordAcceptedAliveOwnerControl({projectId:input.projectId,
+            conversationId:input.conversationId,requestId:input.requestId,control:"message",observation:ownerObservation!});
+          return accepted;
+        }, cause => canSteer && sendRefusalCode(cause) === "science-turn-already-active" ? acceptBusy() : null);
       }
-      case "composer.steer": return conversations.steer(command.input);
+      case "composer.steer": {
+        const input = command.input;
+        const canSteer = ownerIntent && input.intent === "steer" && input.acceptSteeringOnBusy === true;
+        if (!canSteer) return steerOwnerInput(input);
+        if (typeof lookupSteering !== "function") throw Error("science-steering-admission-unavailable");
+        const accepted = acceptedOwnerText(input, true);
+        if (accepted) return accepted;
+        const original = store.getTurnForProject(input.projectId, input.targetTurnId);
+        if (!original || original.projectId !== input.projectId || original.conversationId !== input.conversationId)
+          throw Error("science-steering-target-mismatch");
+        const observation = captureScienceAliveOwnerControl({ ...input, control: "message" });
+        const epoch = store.scienceConversationControlState(input.conversationId).epoch;
+        const lifeEpoch = currentLife(input)?.controlEpoch ?? null;
+        return startOwnerSendOrAcceptRefusal(() => steerOwnerInput(input, observation), async cause => {
+          if (sendRefusalCode(cause) !== "science-steering-target-stale") return null;
+          const prior = acceptedOwnerText(input, true);
+          if (prior) return prior;
+          assertOwnerTextCurrent(input, epoch, lifeEpoch);
+          if (store.getTurnByRequestId(input.requestId)) throw Error("science-turn-request-already-started");
+          const target = currentOwnerTextTarget(input);
+          const steering = await steerOwnerInput({ ...input, targetTurnId: target.id }, observation);
+          return { accepted: true, queued: true, steering };
+        });
+      }
       case "composer.reconcile": return conversations.reconcileSteering(command.input);
       case "composer.cancel": return conversations.cancel(command.input);
       case "composer.receipt": return conversations.receipt(command.input);
       case "composer.runStatus": return conversations.getRunStatus(command.input);
       case "composer.attach": return conversations.attach(command.input);
-      case "composer.steering": return store.listSteering(command.input.projectId, command.input.conversationId);
+      case "composer.steeringCapability": {
+        if (!store.listConversations(command.input.projectId, { includeReferee: true }).some(item => item.id === command.input.conversationId))
+          throw Error("science-conversation-not-found");
+        return { supported: typeof (store as Store & { getSteeringByRequestId?: unknown }).getSteeringByRequestId === "function" };
+      }
+      case "composer.steering": {
+        const input = command.input;
+        if (input.requestId === undefined) return store.listSteering(input.projectId, input.conversationId);
+        if (typeof input.requestId !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(input.requestId))
+          throw Error("science-steering-request-id-required");
+        const lookup = (store as Store & { getSteeringByRequestId?: (requestId: string) => ReturnType<Store["listSteering"]>[number] | null }).getSteeringByRequestId;
+        if (typeof lookup !== "function") throw Error("science-steering-admission-unavailable");
+        const receipt = lookup.call(store, input.requestId);
+        if (!receipt) return [];
+        const target = store.getTurnForProject(input.projectId, receipt.targetTurnId);
+        const message = store.getMessageForProject(input.projectId, input.conversationId, receipt.messageId);
+        if (receipt.projectId !== input.projectId || receipt.conversationId !== input.conversationId
+          || !target || target.projectId !== input.projectId || target.conversationId !== input.conversationId
+          || !message || message.role !== "user" || message.visibility !== "visible" || message.content !== receipt.content)
+          throw Error("science-steering-target-mismatch");
+        return [receipt];
+      }
       case "questions.register": return activeHost.registerQuestionUi();
       case "questions.list": return store.researcherQuestions().list(command.input.projectId, command.input.conversationId);
       case "questions.answer": {
@@ -612,6 +837,12 @@ export function createDaemonScienceService(options: {
           return approvals!.resolveToolApproval(requestId, command.input.decision, toolApprovalActionId(requestId, command.input.decision));
         }
         return receipt;
+      }
+      case "questionDecisions.read": return scienceQuestionHost().read(command.input);
+      case "questionDecisions.answer": {
+        assertExecution();
+        if(!ownerIntent || !command.ownerRequestId) throw new Error("science-question-owner-intent-required");
+        return scienceQuestionHost().answerFromOwner(command.input,{requestId:command.ownerRequestId});
       }
       case "askUser.list": return questionsUi!.listPendingAskUserRequests().map(questionProjection).filter(question => question !== null);
       case "askUser.answer": {
@@ -726,6 +957,8 @@ export function createDaemonScienceService(options: {
       for (const release of unsubscribe.splice(0)) release();
       if (runtimeOpened && science) await science.closeScienceStore();
       runtimeOpened = false;
+      terminalStore = null;
+      terminalConversations = null;
       adapter = null;
       state = "closed";
     })().catch(error => { lastError = errorCode(error); state = "failed"; throw error; });

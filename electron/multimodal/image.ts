@@ -33,9 +33,9 @@ export interface ImageAdmission {
 type ImageEngine = "codex" | "gemini" | "grok";
 
 /**
-
-
-
+ * Every engine run goes through the same model-call ledger and invocation breaker as a runtime turn (R-078,
+ * runtime/direct-cli-ledger.ts). Production 2026-10-13..17: nine generate_image runs (five for the Yotube room on 10-17)
+ * spawned `agy --dangerously-skip-permissions --print` directly; none was in the ledger, none counted by the breaker.
  */
 const IMAGE_ENGINE_RUNTIME: Record<ImageEngine, DirectCliRuntime> = {
   codex: { ...DIRECT_CLI_RUNTIMES.codex, label: "Codex image" },

@@ -1,17 +1,17 @@
 import type { RuntimeSelection } from "./types";
 
-   
-                                                                                                                        
-                                                                                                                       
-                       
-  
-                                                                                                                     
-                  
-                                                                                                                       
-                                                                                                                       
-                                                                                                                   
-                                                                                                                
-   
+/**
+ * Where the personal agent's (Hope's) conversation turns are processed: the owner's own lane, or Agentlas's light model
+ * (owner decision 2026-10-21). Pure, with no Electron, Node or renderer imports, so Main, the daemon and the renderers
+ * read the same rules.
+ *
+ * - "own-lane" is the default and changes nothing: Hope runs the runtime the owner chose (subscription CLI, API key,
+ *   local model).
+ * - "agentlas" runs Hope's conversation turns on the Agentlas serving endpoint at the light tier. It takes effect only
+ *   after the owner has confirmed the one-time notice (`notice === "confirmed"`), because it sends the conversation to
+ *   the Agentlas server and its model provider for the first time for an owner who only used a CLI. Work sessions,
+ *   teammates and every other surface are not affected: only the personal conversation's reply turn reads this.
+ */
 export const ONE_FRONT_CONTRACT_VERSION = "1.0.0" as const;
 
 export const PERSONAL_AGENT_FRONTS = ["own-lane", "agentlas"] as const;

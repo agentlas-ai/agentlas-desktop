@@ -2,32 +2,32 @@ import fs from "node:fs";
 import path from "node:path";
 
 /**
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+ * Removes agent intermediates from the Agentlas agent workspace once the work
+ * is done. On 2026-10-16 the workspace held 44,338 rendered PNG frames (23 GB)
+ * beside the videos they had been encoded into.
+ *
+ * An intermediate is one of two things:
+ * - a frame sequence: a folder of numbered images, inside a project (up to
+ *   three folders up) that holds a video written after the last frame (the
+ *   frames were encoded). It needs at least 120 images, or at least 24 in a
+ *   folder whose path names frames, renders, samples, QA, stills or evidence.
+ *   A smaller numbered set (30 slides beside an explainer video) can be the
+ *   deliverable itself.
+ * - a temp file: .tmp, .part, .partial, .crdownload
+ *
+ * "Done" means nothing in the project was written for a quiet period:
+ * - `idleMs` when the project records a verified finish written after the
+ *   last frame (verification.json or .agentlas-complete)
+ * - `unverifiedIdleMs` otherwise. A render waiting for review keeps its
+ *   frames; deleting them would force a full re-render.
+ *
+ * Never touched:
+ * - anything under a folder named `inputs` (owner-supplied originals)
+ * - images under a delivery, deliverables, export(s), publish(ed) or release
+ *   folder (the delivered work itself)
+ * - folders marked with `.agentlas-keep`
+ * - symlink targets
+ * - any path outside the workspace root
  */
 
 const IMAGE = /\.(png|jpe?g|exr|tiff?|webp|bmp|dpx)$/i;

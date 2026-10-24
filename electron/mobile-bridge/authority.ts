@@ -1,3 +1,5 @@
+import { answerMobileCanonicalQuestion } from "./canonical-question";
+import { MOBILE_CANONICAL_QUESTION_CONTRACT, type MobileCanonicalQuestionAnswerParams } from "../../shared/mobile-question-decision";
 import { createMobileBuildInterviewWitnessSource } from "../hephaestus/mobile-interview-witness";
 import { purposePrompt } from "../runtime/purpose-prompts";
 import type { ToolApprovalDecision, ToolApprovalRequestEvent, ToolApprovalResolutionReceipt } from "../../shared/types";
@@ -32,10 +34,9 @@ import {
   resolveToolApproval,
 } from "../runtime/tool-approval";
 import {
-  listPendingAskUserRequests,
   onAskUserLifecycle,
-  submitAskUserAnswer,
 } from "../confirm/ask-user";
+import { listRuntimeAskUserRequests, submitRuntimeAskUserAnswer } from "../confirm/ask-user-runtime";
 import {
   browserResolveApproval,
   listPendingBrowserApprovals,
@@ -51,6 +52,7 @@ import {
   ensurePairingVerificationTask,
   findCanonicalTaskForChat,
   getCanonicalTask,
+  canonicalTaskOwnsChat,
   getCanonicalTaskForChat,
   hasPassedTaskForceExecutionVerification,
 } from "../store/tasks";
@@ -138,6 +140,7 @@ import {
   archiveChat,
   clearChatContext,
   createChat,
+  createProjectWorkChat,
   getChat,
   getChatWorkingFolder,
   listRecentChats,
@@ -1643,16 +1646,16 @@ function cleanToolDisplayValue(value: string | undefined, maxBytes: number): str
 }
 
 /**
-
-
-
-
-
-
-
-
-
-
+ * 도구 행의 **의미**를 폰으로 넘긴다.
+ *
+ * 판별은 shared/tool-call-detail.ts 한 벌이 소유한다 — 폰이 러너별 도구 이름을
+ * 보고 다시 추측하면 두 표면이 갈라진다(2026-08-08 실측 사고: 렌더러가 Claude Code
+ * 도구명만 알아 codex/antigravity/ollama/MCP를 전부 "기타"로 그렸고, bash는 실제 명령을
+ * 버렸다).
+ *
+ * 이름과 사실(`exit 0`, `+23 −1`, `8 files · 31 matches`)은 집계값이라 늘 안전하다.
+ * 식별값(summary)은 cleanToolDisplayValue 를 통과한다. args·result 본문은
+ * 별도 소유자 전용 본문 투영에서 자격 증명과 로컬 경로를 마스킹한다.
  */
 function projectToolCallDisplay(
   tool: NonNullable<McpInvocationEvent["tool"]>,
@@ -1767,9 +1770,9 @@ function isPersonalOneConversation(chatId: string): boolean {
 }
 
 /**
-
-
-
+ * What the phone shows in its notification bar when One left the owner a message (owner 2026-10-05: "주인에게 줄
+ * 메세지있으면 폰에 알람떠야하는데 알림표시줄에"). Only a saved root answer counts: a quiet check-in or review saves
+ * nothing, so it carries no durable message id and never reaches the phone as a message.
  */
 export function projectOneMessageForPhone(
   event: Pick<McpInvocationEvent, "kind" | "agentId" | "durableMessageId" | "text">,
@@ -1783,12 +1786,12 @@ export function projectOneMessageForPhone(
 }
 
 /**
-
-
-
-
-
-
+ * A teammate's live partial as phones read it: its accumulated `text` (perf review 2026-10-17, R-03).
+ *
+ * Old and current phone apps rebuild only the run's own answer from deltas; a teammate row (agentId) shows the event's
+ * `text`. Main now sends teammate partials as `delta` + `textLen`, so a partial of a run this process hosts is
+ * projected whole from the host's base for that teammate. The listener runs synchronously inside the publish that
+ * advanced the base, and `textLen` proves the match; otherwise the length alone goes (the phone's "N characters").
  */
 export function hostedTeammatePartialForPhone(
   runId: string,
@@ -1811,13 +1814,13 @@ export function durableMobileApprovalPending(id: string, chatId: string): boolea
 }
 
 export function observeMobilePushNotices(hostId: string, listener: (notice: MobilePushNotice, stillCurrent?: () => boolean) => void): () => void {
-                                                                                                                    
+  // Personal One turns run in the background service since 2026-10-12; its finals arrive through native-gui-events.
   const onMessage = ({ runId, chatId, event }: { runId: string; chatId: string; event: McpInvocationEvent }) => {
     if (event.agentId || event.kind !== "final") return;
     const message = projectOneMessageForPhone(event);
     if (!message) return; // quiet/check-in/worker answers have no saved root message
-    // A final that carries a decision card is a question waiting for the owner, not a finished result.
-    // Same category, destination, dedupe key and preference gate as the result
+    // A final that carries a decision card is a question waiting for the owner, not a finished result (owner 2026-10-20:
+    // "묻는건 무조건 카드로 주고 알림 울리게해"). Same category, destination, dedupe key and preference gate as the result
     // push, so a released phone routes and gates it exactly as before; only the relay's lock-screen wording differs, and
     // one turn still rings once.
     const asksOwner = invocationEventRequestsDecision(event);
@@ -1835,11 +1838,11 @@ export function observeMobilePushNotices(hostId: string, listener: (notice: Mobi
   const stopMainMessages = invocationService.onEvent(onMessage);
   const stopNativeMessages = onNativeGuiInvocationEvent(onMessage);
   const stopMessages = () => { stopMainMessages(); stopNativeMessages(); };
-  
-
-
-
-
+  // A raw error can precede a successful provider fallback. Only the durable
+  // terminal receipt can establish failure; input/approval/cancel waits cannot.
+  // Runs the background service hosts settle on the native stream, not in Main's own service (flow audit
+  // 2026-10-18, I-D4): both feed the same rule and the same dedupe key, so the phone hears a daemon run's failure
+  // while the window holds the bridge. A replayed settlement repeats the key and is dropped by the push sender.
   const onSettledFailure = ({ runId, chatId, agentId, receipt, pendingQuestion, browserLoginWaiting, userDecisionRequest }:
     { runId: string; chatId: string; agentId?: string; receipt: { status: string }; pendingQuestion?: boolean; browserLoginWaiting?: boolean; userDecisionRequest?: unknown }) => {
     if (agentId || receipt.status !== "failed" || pendingQuestion || browserLoginWaiting || userDecisionRequest ||
@@ -2169,10 +2172,10 @@ function projectMobileBridgeOneArtifacts(
     const projectedSha256 = typeof candidate.contentSha256 === "string" && /^[a-f0-9]{64}$/u.test(candidate.contentSha256)
       ? candidate.contentSha256
       : undefined;
-
-
-
-
+    // Dev O8/O9 2026-10-18: a run that saves the same file again binds it again (new ref, new bytes). The desktop rail
+    // merges both into one entry that opens the newest bytes; the phone keys rows by binding, keeps the first it gets and
+    // cannot drop a row it already holds. So a later save of an output is sent as that output's first binding in the run
+    // (the row the phone holds or gets once), and one.artifact.imagePreview follows that binding to the newest save.
     const first = outputsOf(runId).first({ taskId, chatId, type, label });
     const replaced = first && oneArtifactIdentityKey(first.artifact) !== oneArtifactIdentityKey({
       taskId, taskVersion: Number(taskVersion), chatId, runId, manifestId, artifactRef,
@@ -2223,9 +2226,13 @@ function projectMobileBridgeOneArtifacts(
  * (agentlas_screen.dart: the sha256 key wins when present). No phone reports a capability for either field (the closed
  * list is shared/mobile-bridge.ts MOBILE_CLIENT_CAPABILITIES); a phone that admits them reports one there first.
  */
-function mobileRecentOneArtifactRow(item: MobileBridgeInvocationArtifactDto): MobileBridgeInvocationArtifactDto {
-  const { occurredAt: _occurredAt, contentSha256: _contentSha256, ...row } = item;
-  return row;
+function mobileRecentOneArtifactRow(
+  item: MobileBridgeInvocationArtifactDto,
+  /** The phone reported thread.composition.v1: it reads `occurredAt` and places the output at its run, not at the chat's tail. */
+  withTime = false,
+): MobileBridgeInvocationArtifactDto {
+  const { occurredAt, contentSha256: _contentSha256, ...row } = item;
+  return withTime && occurredAt ? { ...row, occurredAt } : row;
 }
 
 export function projectMobileBridgeRecentOneArtifacts(
@@ -3173,11 +3180,9 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         if (!project.folderPath) throw new Error("The selected project has no connected working folder");
         const canonicalProjectFolder = captureInvocationWorkspaceBinding(project.folderPath).canonicalPath;
         if (!canonicalProjectFolder) throw new Error("The selected project has no connected working folder");
-        const chat = createChat({
+        const chat = createProjectWorkChat({
           projectId: project.id,
           title,
-          taskMode: "task",
-          originSurface: "work",
         });
         try {
           setChatWorkingFolder(chat.id, canonicalProjectFolder);
@@ -3407,7 +3412,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         const task = getCanonicalTask(taskId);
         if (
           !task ||
-          task.originChatId !== chatId ||
+          !canonicalTaskOwnsChat(task, chatId) ||
           task.version !== expectedVersion ||
           (task.status !== "partial" && task.status !== "completed")
         ) {
@@ -3490,7 +3495,8 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
           ? undefined
           : requiredIdentifier(params, "cursor", MOBILE_ONE_ARTIFACT_CURSOR_RE);
         const page = listRecentOneArtifactsForMobile({ chatId, limit, cursor });
-        return asJsonValue({ ...page, items: page.items.map(mobileRecentOneArtifactRow) }, request.method);
+        const withTime = this.clientHasCapability(context.deviceId, "thread.composition.v1");
+        return asJsonValue({ ...page, items: page.items.map((item) => mobileRecentOneArtifactRow(item, withTime)) }, request.method);
       }
       case "chat.attachments.begin": {
         const params=guardedParams(request,["chatId","files"]);
@@ -3663,7 +3669,9 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         const limit = optionalInteger(params, "limit", 1, 200) ?? 200;
         const cursor = params.cursor === undefined || params.cursor === null
           ? undefined : requiredBoundedString(params, "cursor", 1024);
-        return asJsonValue(await readMobileBridgeHistoryPage(chatId, limit, cursor), request.method);
+        return asJsonValue(await readMobileBridgeHistoryPage(chatId, limit, cursor, {
+          automationReportNotice: this.clientHasCapability(context.deviceId, "thread.composition.v1"),
+        }), request.method);
       }
       case "context.inspect": {
         // Read-only: reads the model-call ledger rows of one existing chat — never calls a model, logs in, compacts or
@@ -3751,6 +3759,20 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         return asJsonValue(receipt, request.method);
       }
       case "invoke.start": {
+        if (request.params.expectedDecisionContractVersion === MOBILE_CANONICAL_QUESTION_CONTRACT) {
+          assertMobileOneDeviceAuthority(context);
+          const result=await answerMobileCanonicalQuestion(request.params as unknown as MobileCanonicalQuestionAnswerParams,{
+            idempotencyKey:request.idempotencyKey,
+            assertAccount:()=>{
+              this.assertAvailable();
+              const verdict=this.options.mailAccountGuard?.(context.deviceId);
+              if(verdict==="signed-out")throw new Error("sign_in_required");
+              if(verdict!=="ok")throw new Error("account_mismatch");
+            },
+          });
+          this.scheduleSnapshotUpdated();
+          return asJsonValue(result,request.method);
+        }
         const { invocation, decisionAnswer } = invocationParams(request, false);
         if(invocation.fileGroupId) this.attachmentUploads.bind(context.deviceId,invocation.fileGroupId,invocation.chatId);
         validateChatAttachmentSelection(invocation.chatId,invocation.fileGroupId,invocation.images);
@@ -4187,7 +4209,10 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
           answer = requiredText(params, "answer", 4_000).trim();
           if (!answer) throw new TypeError("answer must be non-empty text or null");
         }
-        const resolved = submitAskUserAnswer(requestId, answer);
+        const pending=(await listRuntimeAskUserRequests()).find(question=>question.requestId===requestId);
+        const chat=pending?.chatId?getChat(pending.chatId):null;
+        const resolved=!!pending&&pending.expiresAt>Date.now()&&!!chat&&!chat.archivedAt
+          ?await submitRuntimeAskUserAnswer(requestId,answer):false;
         this.scheduleSnapshotUpdated();
         return asJsonValue({
           resolved,
@@ -4284,9 +4309,9 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
             // Detailed scheduler errors can contain local paths. Desktop owns
             // the full run log; Mobile receives only a stable failure marker.
             error: run.error ? "automation_failed" : null,
-
-
-
+            // "그래프가 끝까지 돌았는가"(status)와 "나온 결과가 쓸 만한가"(outcome)는
+            // 다른 질문이다. outcome 을 빼고 보내면 폰은 실패한 실행 옆에 이유를
+            // 하나도 못 보여준다 — 실측 스크린샷 5번이 그 상태였다.
             outcome: run.outcome ?? null,
             // A graph can fail before result judgment, leaving outcomeReason
             // empty while run.error contains the only actionable explanation.
@@ -4563,19 +4588,19 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         const option = this.registeredUploadOptionForAgent(agentLocalId);
         const sessionRefusal = this.cloudSessionRefusal();
         if (sessionRefusal) return asJsonValue({ refusal: sessionRefusal }, request.method);
-
-
-
-
-
-
-
-
-
-
-
-
-
+        // ★ A REFUSAL MUST NOT LEAVE HERE AS AN EXCEPTION. Measured 2026-08-17.
+        //
+        //   Registration throws on a server refusal, and nothing caught it, so
+        //   the server's every "no" arrived at the phone as the bridge's fixed
+        //   "Desktop rejected the request". That generic string is correct
+        //   redaction for an unexpected crash and completely wrong for a
+        //   decision: a full seat plan and a forked package each have one thing
+        //   for the person to do, and neither of them was ever said.
+        //
+        //   Only typed refusals are converted — `cloudRefusalOf` returns null
+        //   for anything else, and that still rethrows into the generic path,
+        //   so an unexpected error cannot smuggle a local path out through this
+        //   branch. Same shape the delete case below already used.
         let result: Awaited<ReturnType<typeof this.cloudAgentActions.saveRegisteredPrivate>>;
         try {
           result = await this.cloudAgentActions.saveRegisteredPrivate(
@@ -5633,11 +5658,12 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
           ...(approval.agentId ? { agentId: approval.agentId } : {}),
         };
       });
-    const pendingUserInputs: MobileBridgeUserInputDto[] = listPendingAskUserRequests()
+    const pendingUserInputs: MobileBridgeUserInputDto[] = (await listRuntimeAskUserRequests())
       .flatMap((request) => {
-        // Only a live One/Work chat-bound request is a Mobile surface. Generic
+        // Only a live canonical chat-bound request is a Mobile surface. Generic
         // Desktop prompts stay local, and an expired row never becomes a card.
-        if (!request.chatId || !getChat(request.chatId) || request.expiresAt <= Date.now()) return [];
+        const chat=request.chatId?getChat(request.chatId):null;
+        if (!request.chatId || !chat || chat.archivedAt || request.expiresAt <= Date.now()) return [];
         const question = boundedRedactedText(request.question, 1_200);
         if (!question) return [];
         const options = request.options.flatMap((option) => {
@@ -5679,7 +5705,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
 
   private attachDesktopSubscriptions(): void {
     if (this.upstreamUnsubscribers.length > 0) return;
-                                                                                                             
+    // One handler for Main-hosted and daemon-hosted runs (personal One runs in the daemon since 2026-10-12).
     const forwardInvocationEvent = ({ runId, chatId, event }: { runId: string; chatId: string; event: McpInvocationEvent }) => {
       // A teammate's partial goes to the phone whole. Main-hosted: from this host's base (a daemon-hosted one already
       // arrives whole from native-gui-events.ts, and is returned unchanged).

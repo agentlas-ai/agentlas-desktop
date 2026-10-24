@@ -163,10 +163,10 @@ export function tryAcquireRuntimeMaintenance(): (() => void) | null {
 
 /** 진단/표시용 스냅샷. queued 는 두 대기열 합계(기존 소비자 계약 유지). */
 /**
-
-
-
-
+ * How long no run has held a slot — "this app is quiet", independent of system HID idle. Measured
+ * 2026-09-27: Codex Computer Use and a remote-desktop tool assert UserIsActive on this machine
+ * (pmset log: 217 SkyComputerUseService + 259 remoting tickles in 7 days), so system idle stops
+ * meaning "the owner is away" and idle-gated maintenance starved. 0 while any run holds or awaits one.
  */
 export function runSlotsQuietForMs(now = Date.now()): number {
   if (inUse > 0 || queuedCount() > 0) return 0;

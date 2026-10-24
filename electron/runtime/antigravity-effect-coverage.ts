@@ -23,10 +23,10 @@ export class AntigravityEffectCoverage {
     private readonly unmatchedMcpEffects?: () => number,
     private readonly attestMetadataSteps?: (conversationId: string, indices: readonly number[]) => boolean,
     /**
-
-
-
- */
+     * structuredAnswerChannel: the run passed `--json-schema`. agy 1.4.0 (measured 2026-10-16) takes the answer through its
+     * built-in `finish` tool: a schema-invalid submission is a `finish` tool step in ERROR, the accepted one closes as a
+     * `finish` step (DONE, no payload). Both are the answer protocol, never an operation on the outside world.
+     */
     private readonly options: { structuredAnswerChannel?: boolean } = {}) {}
   toolId(id: string): string { return `${this.scopeId}:${id}`; }
   private frame(kind: string): void {

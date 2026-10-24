@@ -1,18 +1,18 @@
 import { composeDeclaredPrompt, type DeclaredPromptPart } from "./runtime/prompt-order";
 /**
-
-
-
-
-
-
-
-
-
-
-
-
-
+ * Host-measured progress facts for an unattended automation (2026-09-24).
+ *
+ * Measured on the owner's store (Threads automation f7a61706): every node was
+ * prefixed with the last four assistant/system messages (up to 1,200 chars
+ * each) and told to "continue from prior outcomes". Those messages were the
+ * previous runs' own postures ("zero-mutation strategic hold enforced"), so
+ * one run's tactical hold became the next run's momentum - 8+ hourly runs in a
+ * row did nothing external while each reported success.
+ *
+ * The capsule now carries what the host itself recorded - run status, outcome
+ * and tool-call counts - and at most one prior narrative, explicitly labelled
+ * as an untrusted summary. Tool identities come from run_events (host
+ * receipts), never from the prose.
  */
 import { getDb } from "./store/db";
 import { channelPublishReceiptsPromptBlockFor } from "./publish-receipts";

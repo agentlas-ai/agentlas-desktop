@@ -1,18 +1,18 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+// Personal-scope owner of the Adaptive Toolchain native layer, bound once per process at personal startup in Desktop
+// Main (main.ts) and in agentlasd (daemon/main.ts). Production 2026-10-08..18 (installed 1.3.67): toolchain_search
+// returned [] 319/319 times, the one toolchain_create refused with toolchain_native_shipping_owner_ports_unbound, and
+// meta held 0 toolchain.asset.v1 rows. The native owner ports were bound only by the organization startup
+// (native-startup-installer.ts), which a personal install never runs; the publication resolver and the repair evidence
+// ports had no caller at all; and the original-work check required a Supervisor command row that 209 of the 210
+// calling runs did not have.
+//
+// The design is unchanged: the registration core (toolchain-native-registration.ts) still owns original-work custody,
+// release/call/report binding and every refusal. This module supplies what an organization's Business composition
+// supplies there, for a single local owner: a canonical registry of produced releases and their calls (shared meta rows,
+// so Main and the daemon see one registry), the conversation audience, report intents, the serialized effect domain
+// (SQLite IMMEDIATE), the original run's lifetime and cancellation, the publication authority and the repair evidence.
+// Each process binds its own copy because the original run's lease lives in the process that runs it: a daemon-owned
+// turn is checked in the daemon, a Main-owned turn in Main. Nothing here is routed between processes.
 import { randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
 import { sha256Value } from "../../shared/graph-execution-digest";

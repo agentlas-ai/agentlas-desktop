@@ -1,4 +1,6 @@
 import { createDaemonOneSupervisorHost } from "./one-supervisor-host";
+import { createOwnedAskUserHost } from "../confirm/owned-ask-user-host";
+import { mergePendingAskUserRequests } from "../confirm/ask-user";
 import { ALIVE_DECISION_PROTOCOL, createDaemonAliveDecisionPort } from "./alive-decision-port";
 import { ALIVE_RUNTIME_PROTOCOL } from "../alive-organisms/runtime-protocol";
 import { getDb } from "../store/db";
@@ -97,6 +99,12 @@ export async function createNativeInvocationRuntime(options: NativeInvocationRun
     createSubscriptions(notify: (method: string, params: unknown, sourceMode?: "live" | "post-denial") => boolean): {publisher: ReturnType<typeof createNativeInvocationPublicPublisher>; approvals: ReturnType<typeof createNativeInvocationApprovalChannel>};
     activateObservation?: () => Array<{method: string; params: unknown; mode?: "live" | "post-denial"}> } ;
   const attached = new Map<ControlSocketPeer, Attached>();
+  const questionActivity=new Set<(chatIds:string[])=>void>();
+  const questions=createOwnedAskUserHost({ownerId:options.bootId,assertOwner:options.assertOwner,
+    ownerKey:()=>JSON.stringify(agentContextOwnerBinding()),personalSource:(chatId,runId)=>!!supervisor.runBinding(chatId,runId),
+    notify:()=>{if(!questionActivity.size)return false;
+      for(const listener of questionActivity)listener(options.service.activeChatIds());
+      return [...attached.keys()].some(peer=>{try{return current(peer).publisher.available;}catch{return false;}});}});
   const owned = new Map<string, Captured>(), known = new Map<string, Captured>();
   let server!: Awaited<ReturnType<typeof startNativeAuthChannel>>;
   const current = (peer: ControlSocketPeer) => {
@@ -207,7 +215,25 @@ export async function createNativeInvocationRuntime(options: NativeInvocationRun
       }
       if(params && typeof params==='object' && (params as {version?:unknown}).version===ONE_SUPERVISOR_RUNTIME_PROTOCOL) {
         const attachment=current(peer);
-        const observed=await supervisor.dispatch(params);options.assertOwner();current(peer);
+        const wire=params as Record<string,unknown>;
+        let observed:unknown;
+        if(wire.op==="questions.list"&&exact(wire,["version","op"])){
+          const shared=questions.list();
+          const personal=supervisor.active?await supervisor.dispatch(params) as import("../../shared/types").AskUserRequestEvent[]:[];
+          observed=mergePendingAskUserRequests(personal.filter(question=>shared.some(item=>item.requestId===question.requestId)),shared);
+        }else if(wire.op==="questions.answer"&&exact(wire,["version","op","input"])){
+          const input=wire.input;
+          if(!exact(input,["requestId","answer"])||typeof input.requestId!=="string"
+            ||!(input.answer===null||typeof input.answer==="string"&&input.answer.length<=100000))fail("supervisor_question_answer_invalid");
+          const binding=questions.binding(input.requestId);
+          if(binding&&binding.personal!==!!supervisor.runBinding(binding.chatId,binding.runId))fail("supervisor_question_source_fenced");
+          // One retains its existing durable answer/replay contract. Other
+          // admitted invocations use the same live broker and native channel.
+          observed=binding&&!binding.personal
+            ?questions.answer(input.requestId,input.answer as string|null)
+            :supervisor.active?await supervisor.dispatch(params):false;
+        }else observed=await supervisor.dispatch(params);
+        options.assertOwner();current(peer);
         const snapshot={descriptor:undefined as unknown as NativeJsonTransferDescriptor,complete:false};
         const slot=randomUUID();attachment.recoveryRecords.set(slot,snapshot);
         try{snapshot.descriptor=attachment.recovery.issue(snapshot,'checkpoint-value',observed ?? null,NATIVE_PUBLIC_EVENT_POLICY.maxRetainedBytes);}
@@ -301,7 +327,11 @@ export async function createNativeInvocationRuntime(options: NativeInvocationRun
           return !!active && !!daemonOwnedObservation(chatId, active.runId);
         };
         const createSubscriptions = (notify: (method: string, params: unknown, sourceMode?: "live" | "post-denial") => boolean) => {
-        const publisher = createNativeInvocationPublicPublisher({ service: options.service, identity, getIdentity,
+        const questionAwareService={
+          onEvent:options.service.onEvent.bind(options.service),onSettled:options.service.onSettled.bind(options.service),activeChatIds:()=>options.service.activeChatIds(),
+          onActiveChats(listener:(chatIds:string[])=>void){questionActivity.add(listener);const stop=options.service.onActiveChats(listener);
+            return()=>{questionActivity.delete(listener);stop();};}};
+        const publisher = createNativeInvocationPublicPublisher({ service: questionAwareService, identity, getIdentity,
           notify, acceptsRun: observesRun,
           acceptsChat: observesChat,
           acceptsKind: kind => publicKinds.has(kind),
@@ -413,11 +443,12 @@ export async function createNativeInvocationRuntime(options: NativeInvocationRun
   }
   // The service asks the window process (device bridge reverse path) before it runs a chat Desktop ran last.
   const unregisterHandoverPeer = registerChatHandoverPeer("desktop", (chatId, deadlineMs) => daemonDeviceBridge().releaseChatSessions(chatId, deadlineMs));
-  server = await startNativeAuthChannel({ address: options.address, binding: options.binding, credential: options.credential,
+  try { server = await startNativeAuthChannel({ address: options.address, binding: options.binding, credential: options.credential,
     bootId: options.bootId, consumeIngressNoStartProof: (peer, start, wire, proof) => {
       if (!host) return fail("native_invocation_host_not_ready"); return host.consumeIngressNoStartProof(peer, start, wire, proof); },
     consumeServiceObservationProof: (peer, start, wire, proof) => {
-      if (!host) return fail("native_invocation_host_not_ready"); return host.consumeServiceObservationProof(peer, start, wire, proof); }, handle: dispatch });
+      if (!host) return fail("native_invocation_host_not_ready"); return host.consumeServiceObservationProof(peer, start, wire, proof); }, handle: dispatch }); }
+  catch(error){questions.close();unregisterHandoverPeer();throw error;}
   try { options.assertOwner(); host = createDaemonNativeInvocationHost({ binding: options.binding, bootId: options.bootId,
     service: options.service, transport: server, assertSocketFence: options.assertOwner, ...options.resources,
     onCustodyReleased: start => { const record = owned.get(start.handle) ?? known.get(start.binding.runId);
@@ -425,10 +456,10 @@ export async function createNativeInvocationRuntime(options: NativeInvocationRun
       if (record.start.handle !== start.handle || record.start.binding.runId !== start.binding.runId || record.start.binding.chatId !== start.binding.chatId
         || record.start.binding.inputDigest !== start.binding.inputDigest) throw new Error("native_invocation_release_binding_changed");
       record.released = true; owned.delete(start.handle); } }); }
-  catch (error) { unregisterHandoverPeer(); await server.close(); throw error; }
+  catch (error) { questions.close(); unregisterHandoverPeer(); await server.close(); throw error; }
   try{await supervisor.recover();}catch(error){console.warn("[one-supervisor] domain recovery held",(error as Error).message);}
   return { address: server.address, status, get supervisorActive(){return supervisor.active;}, closeAdmission() { accepting = false; supervisor.closeAdmission(); },
     get pendingCount() { return host?.retainedRecordCount ?? 0; },
-    async close() { accepting = false; unregisterHandoverPeer(); alive?.close(); for (const peer of [...attached.keys()]) disposeAttachment(peer); await server.close(); },
+    async close() { accepting = false; questions.close(); unregisterHandoverPeer(); alive?.close(); for (const peer of [...attached.keys()]) disposeAttachment(peer); await server.close(); },
     settleDispatched: () => server.settleDispatched() };
 }

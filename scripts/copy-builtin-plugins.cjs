@@ -18,6 +18,7 @@ const to = path.resolve(__dirname, "..", "dist", "plugins");
 // they are never copied into the signed application payload.
 const RELEASE_TOP_LEVEL = Object.freeze({
   "agentlas-academic-search": ["README.md", "plugin.json", "skills"],
+  "agentlas-reach": ["README.md", "plugin.json", "skills"],
   "agentlas-astronomy": ["README.md", "assets", "capabilities.json", "plugin.json", "runtime", "schemas", "skills"],
   "agentlas-comparative-genomics": ["README.md", "assets", "capabilities.json", "plugin.json", "runtime", "schemas", "skills"],
   "agentlas-browser": ["plugin.json"],

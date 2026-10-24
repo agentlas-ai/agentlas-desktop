@@ -4,18 +4,18 @@ import { appendLongRunEvent, getLongRunByGoalId } from "../store/long-runs";
 import type { GoalLifecycle } from "../../shared/auto-goal";
 
 /**
-
-
-
-
-
-
-
-
-
-
-
-
+ * The lifecycle of a Goal adopted from the owner's /goal turn, judged once.
+ *
+ * explicit-goal-authority.ts stores revision 1 of such a Goal with lifecycle "finite" because nothing had judged it
+ * (resolveGoalLifecycle(undefined)). A finite Goal without a deadline may not wait on a timer, so a daily Goal could
+ * not wait for its next day: production 2026-10-17 17:45:10Z, Yotube room, "/goal … 매일 … 올려", the model called
+ * goal_wait not_before 2026-10-18T15:00Z (the next day's 00:00 KST) and was refused goal_wait_ongoing_authority_required;
+ * the host's continuation pass then had it start the next day's batch at once. The same refusal hit four waits on
+ * 10-13/10-14.
+ *
+ * The owner's original /goal message is judged with the automatic Goal intake (the same judgment every other Goal gets).
+ * The verdict is recorded on the Goal's run; "ongoing" corrects the unjudged default. An unavailable judge decides
+ * nothing (null), and no lifecycle is ever invented.
  */
 export const GOAL_LIFECYCLE_JUDGED_KIND = "run.goal_lifecycle_judged";
 

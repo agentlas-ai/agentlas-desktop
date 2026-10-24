@@ -1346,17 +1346,17 @@ function lightCurvePeriodogramTable(periodogram, metadata) {
 }
 
 /**
-
-
-
-
-
-
-
-
-
-
-
+ * The scale for an axis that carries a measurement rather than a count.
+ *
+ * Vega-Lite anchors a quantitative scale at zero by default. That is right for a count and wrong
+ * for a measurement: a radial velocity near -21.5 km/s, a magnitude near 12, a normalized flux near
+ * 1.0 all collapse to a flat line once the axis is padded down to zero, and the figure stops
+ * showing the one thing it exists to show. Measured on the rendered panels, the folded transit
+ * filled 5% of its own height and the Keplerian orbit 4% -- the discovery and the fit were both
+ * invisible while every number in the table was correct.
+ *
+ * `magnitude` additionally runs brighter-upward, which is a display convention and not a scale
+ * choice, so it travels with the same helper rather than being remembered separately at each site.
  */
 function measurementScale(valueKind, extra) {
   return { zero: false, nice: true, ...(valueKind === "magnitude" ? { reverse: true } : {}), ...(extra ?? {}) };

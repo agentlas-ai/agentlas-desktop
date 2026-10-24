@@ -1,30 +1,30 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+// One-time move of product sessions that older installs wrote into the person's own CLI homes.
+//
+// Owner decision 2026-10-13 ("제품 저장소로 이동"): product sessions live only on the Agentlas side. New runs already stay
+// out (Codex since the product store, Claude/Copilot/Kimi/Cursor since claude-product-home.ts / cli-product-homes.ts), but
+// sessions written before that still filled the person's apps.
+//
+// v2 (2026-10-17). The first pass (marker legacy-product-sessions.v1.json) found Codex product sessions through the rows of
+// Codex's own index and moved the file a row named only when that path was lexically inside ~/.codex. Every product row
+// on the owner's Mac named its file through the product mirror's link (codex-product-home/<hash>/sessions/... -> the
+// person's ~/.codex/sessions), so all 7,333 row paths were moved but the ~700 files behind mirror paths stayed: the rows
+// were deleted, the files were not, and Codex rebuilt rows for them from the files on disk (36 came back into the
+// person's Codex app, 2026-10-16). The index is derived; the file is the session. v2 therefore decides from each session
+// file's own typed metadata, never from an index row and never from conversation text:
+//   - Codex: the rollout's session_meta header (first line, also inside .jsonl.zst): originator "agentlas-desktop"
+//     (the product app-server's clientInfo name, codex-session.ts), or originator "codex_exec" with a cwd inside
+//     Agentlas's app data (the product's one-shot runs). An interactive session the person opened there (originator
+//     Codex Desktop / codex-tui) is the person's own and stays;
+//   - Claude: the session file's own records: a cwd inside Agentlas's app data, an SDK entrypoint ("sdk-*", how the
+//     product drives Claude Code), and the project folder Claude derives from exactly that cwd. The folder name alone
+//     is lossy ("Agentlas/agent-cwd" and "Agentlas-Dev/agent-cwd" name the same folder prefix) and never decides;
+//   - Copilot: the session folder's workspace.yaml (cwd inside Agentlas's app data, or client_name agentlas-desktop).
+// Each file MOVES into the product store (the product can still resume it). Nothing is deleted: a destination that
+// already holds that name keeps both (the arriving one under legacy-kept/), a cross-device move unlinks the source only
+// after a size-checked copy, and only empty folders are removed. The index rows the person's app lists for moved
+// sessions are removed after a backup copy of that index is written under Agentlas's app data. The receipt holds counts
+// only. Runs once per install (marker legacy-product-sessions.v2.json), in the background, and never fails a launch: a
+// store that is locked or unreadable is left for the next launch.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -159,10 +159,10 @@ function removeIfEmpty(dir: string): void {
 // ---------------------------------------------------------------------------------------------------------------------
 
 /**
-
-
-
-
+ * Delete rows of `parent` with these ids, and first every row that references them — found from the database's own
+ * foreign-key metadata, never from a hard-coded table list (Copilot added `turns` and `forge_trajectory_events` after this
+ * code was written and the fixed list hit FOREIGN KEY constraint failed on the owner's store, 2026-10-13). Tables that
+ * point at the parent by naming convention without a declared key are listed by the caller in `alsoByColumn`.
  */
 function deleteWithDependents(db: Database.Database, parent: string, ids: readonly string[], alsoByColumn: ReadonlyArray<readonly [string, string]> = []): number {
   const dependents: Array<[string, string]> = [];

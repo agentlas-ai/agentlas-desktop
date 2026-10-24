@@ -22,6 +22,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { observeLocalProcessIdentity } from "../local-model-hub/platform";
 import { commandLineShellSpawn, killCliTree } from "../runtime/exec";
+import { survivingHiddenSpawn } from "../runtime/windows-hidden-detach";
 
 export type BackgroundTaskStatus = "running" | "completed" | "failed" | "stopped" | "lost";
 
@@ -182,13 +183,16 @@ export class BackgroundTaskRegistry {
     delete env.ELECTRON_RUN_AS_NODE;
     let child: ChildProcess;
     try {
-      // Its own process group, so stop() ends the whole command line (pipes, subshells), not only the shell.
-      // On Windows, detached keeps the task out of the service's job object, so it outlives the service as on POSIX.
+      // Its own process group, so stop() ends the whole command line (pipes, subshells), not only the shell, and it
+      // outlives the service. On Windows a detached cmd.exe had no console, so every console program the command ran
+      // opened its own visible window; survivingHiddenSpawn starts it from a detached launcher with a hidden console
+      // instead (still outside the service's job; stop()'s tree kill on the launcher reaches the command).
       const shell = commandLineShellSpawn(command, this.opts.shell);
-      child = spawn(shell.file, shell.args, {
-        cwd, env, detached: true, stdio: ["ignore", out, out],
-        windowsHide: true, windowsVerbatimArguments: shell.windowsVerbatimArguments,
+      const plan = survivingHiddenSpawn({
+        command: shell.file, args: shell.args, cwd, env, stdio: ["ignore", out, out],
+        windowsVerbatimArguments: shell.windowsVerbatimArguments,
       });
+      child = spawn(plan.command, plan.args, plan.options);
     } finally {
       fs.closeSync(out);
     }

@@ -79,14 +79,14 @@ export function isLiveRunStatus(status: InvocationRunReceipt["status"] | undefin
 }
 
 /**
-
-
-
-
-
-
-
-
+ * Thread blocks whose durable reading may be stale because no live projection on this screen owns them.
+ *
+ * The chat timeline is a ledger read: a run with a start row and no terminal row reads `interrupted` there, and only Main's
+ * live registry (invoke:receipt) can say it is still running. Production Yotube 2026-10-17: Goal turn bb73a150 (started by
+ * the update restart's sweep, never by this screen) was working, yet the room drew it as a finished "명령 22개 실행함"
+ * block with no time and a still dot, and the owner concluded the room was dead. These are the blocks to ask Main about:
+ * a live receipt, or an interruption the ledger cannot explain (no terminal row, no steering, no host stop).
+ * `checked` holds `${runId}:${status}` pairs Main already confirmed, so a genuinely dead run is asked once.
  */
 export function unattachedOpenThreadRuns(
   runs: readonly OneThreadRunBlock[],
@@ -185,16 +185,16 @@ export function planOneThreadWork(input: {
         }
       }
     }
-
-
-
-
-
-
-
-
-
-
+    // 3) Rows without a timestamp (optimistic turns of a session-only
+    //    conversation): the last prompt row in the list started this run.
+    //
+    //    ★ Only when *no* row carries a timestamp. A timestamped list that has
+    //    no row at or before this run means the run is older than the loaded
+    //    window (history reads the latest 200 rows, the ledger the latest 40
+    //    runs) — its prompt is simply not on screen, so it leads the list.
+    //    Owner 2026-09-28, Thread Marketing: 20 runs older than the window were
+    //    all hung under the newest prompt, so the "계속" just sent sat 20 work
+    //    blocks above the bottom and the screen showed old runs instead of it.
     if (!anchor && durable.length === 0) {
       for (let index = input.messages.length - 1; index >= 0; index -= 1) {
         const message = input.messages[index];
@@ -216,16 +216,16 @@ export function planOneThreadWork(input: {
 }
 
 /**
-
-
-
-
-
-
-
-
-
-
+ * May the settlement of a run in `settleChatId` repaint the screen's live Activity?
+ *
+ * ★ 오너 신고 2026-09-28 — "X 자동화 결과가 Thread Marketing 단톡에 뜬다".
+ * DB·원장에는 X 대화 행이 Thread 대화에 한 줄도 없었다(표시 전용 결함). X Marketing 의
+ * 실행(484f24f2, 22:54:43Z 종료)이 끝난 직후 오너가 Thread Marketing 으로 옮겼고
+ * (last_viewed 22:54:47Z), 끝난 실행의 정산(settleRun)이 refreshAll·영수증·원장 읽기를
+ * 기다린 뒤 **어느 대화가 화면에 있는지 보지 않고** 그 실행의 Activity 를 화면에 칠했다.
+ * 화면은 "방금 끝난 실행 = 이 대화의 마지막 블록"으로 그리므로(threadWorkPlan), X 의
+ * 작업 블록과 단톡 대화가 Thread 대화 끝에 붙었다. 대화 전환은 runChatIdRef 를 새 대화로
+ * 동기적으로 바꾸므로, 정산이 칠해도 되는지는 그 값 하나로 가른다.
  */
 export function settledRunMayPaintScreen(input: {
   settleChatId: string;

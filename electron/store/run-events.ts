@@ -1,3 +1,6 @@
+import {parseCanonicalGoalWaitRecord,type CanonicalGoalWaitRecord} from "../long-run/canonical-wait-record";
+import { parseInstructionDelta } from "../../shared/runtime-instructions";
+import { parseGoalWaitProposal, type ParsedGoalWait } from "../long-run/wait-emitter";
 import { getLongRunAttemptGoalRevision } from "./long-runs";
 import { diagnosticSummaryBoundary, runtimeFallbackDiagnosticKey, statusOnlyDiagnosticKey, isStatusOnlyDiagnosticPayload } from "./runtime-fallback-diagnostic";
 import { parseEffectMetadata, type MainHostControlObservation } from "../invocation/effect-metadata";
@@ -172,12 +175,12 @@ function stableUuid(value: string): string {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-8${hex.slice(13, 16)}-${((Number.parseInt(hex[16], 16) & 0x3) | 0x8).toString(16)}${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
 }
 
-
-
-
-
-
-
+/*
+ * 사이언스 챗의 작업 블록이 "실행함 명령"만 반복하던 이유 — 이 직렬화가 도구 이름만 보내고
+ * 인자를 통째로 뺐다(오너 지적 2026-09-13). 인자 원문과 결과는 계속 보내지 않는다.
+ * One/Work 와 같은 해석기로 "무엇에 썼는가" 한 줄만 만들어, 비밀 마스킹을 거쳐 160자로
+ * 잘라 보낸다 — 사이언스 저장소에 남는 것은 그 한 줄뿐이다.
+ */
 const SCIENCE_TOOL_SUMMARY_MAX = 160;
 
 const SCIENCE_TOOL_SUMMARY_KEYS = [
@@ -443,12 +446,12 @@ function canonicalAdapterToolId(input: Record<string, unknown>, context?: SafePa
   return admittedAdapterScope(scopeId, context) ? input.toolId : undefined;
 }
 
-/**
-
-
-
-
- */
+/** The host-minted inference-accounting source id (long-run/accounting-context.ts beginAccountedInference):
+ * "<judgment|automation>:<this row's run id>:<UUID>", written by Main, never model text. The same Telegram-shaped false
+ * positive masked it whenever the run id ends in digits only (a UUID's last group, about 1 run in 280; an automation run's
+ * 8-hex suffix, about 1 in 43), and recordLongRunInferenceStarted could no longer match its own row. Production 1.3.57,
+ * 2026-10-17 05:40:15: goal wake a126635e-…-512552977274 failed at tool selection; 606 of 6,690 stored usage rows were masked.
+ * Only the two accounting kinds, their schema and an id bound to this row's own run qualify. */
 const INFERENCE_ACCOUNTING_KINDS = new Set(["runtime_usage_started", "runtime_usage_recorded"]);
 const MINTED_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 function canonicalInferenceSourceId(input: Record<string, unknown>, context?: SafePayloadContext): string | undefined {
@@ -461,10 +464,10 @@ function canonicalInferenceSourceId(input: Record<string, unknown>, context?: Sa
   return undefined;
 }
 
-/**
-
-
- */
+/** A graph occurrence id the host mints (run-graph.ts sealCheckpoint, automation-scheduler.ts scheduledOccurrenceIdForDueRun):
+ * "<occurrence|schedule>:<automation id>:<UUID>". Readers match it exactly (graph-terminal-close.ts, automation-workspace.ts,
+ * strategy-episode.ts, automations.ts attempt counts); masked, every run of an automation whose id ends in twelve digits (about
+ * 1 automation in 280) would miss its own close, workspace and attempt records. Production: 736 graph runs used this shape. */
 const OCCURRENCE_ID_RE = /^(?:occurrence|schedule):[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 /** Host-minted identities kept exactly at every ledger boundary: write (safePayload), read (parsePayload), startup scrub. */
@@ -671,6 +674,27 @@ function canonicalQuestionContinuationReply(
   return encoded;
 }
 
+/** Exact closed proposal fields survive the shared ledger; no generic nested-payload relaxation. */
+export function canonicalGoalWaitProposal(value: unknown): ParsedGoalWait | null {
+  const proposal = parseGoalWaitProposal(value);
+  if (!proposal || proposal.status === "invalid") return proposal;
+  const subject = Object.fromEntries(Object.entries(proposal.intent.subject).map(([key, text]) =>
+    [key, typeof text === "string" ? redactRunEventSensitiveText(text) : text]));
+  return parseGoalWaitProposal({ status: "requested", intent: { ...proposal.intent, subject,
+    nextAction: redactRunEventSensitiveText(proposal.intent.nextAction) } });
+}
+
+/** Typed host-only wait snapshot, with existing secret redaction preserved. */
+export function canonicalGoalWaitSnapshot(value:unknown):CanonicalGoalWaitRecord|null {
+  const wait=parseCanonicalGoalWaitRecord(value);if(!wait)return null;
+  const proposal=canonicalGoalWaitProposal({status:"requested",intent:wait.intent});
+  if(proposal?.status!=="requested")return null;
+  return parseCanonicalGoalWaitRecord({...wait,intent:proposal.intent,readyObservation:wait.readyObservation?{
+    ...wait.readyObservation,
+    ...(wait.readyObservation.summary!==undefined?{summary:redactRunEventSensitiveText(wait.readyObservation.summary)}:{}),
+  }:null});
+}
+
 function safePayload(
   input: Record<string, unknown> | undefined,
   context?: SafePayloadContext,
@@ -691,6 +715,16 @@ function safePayload(
   const out: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(input ?? {})) {
     if (value == null) continue;
+    if (key === "canonicalGoalWait") {
+      const wait=context?.kind==="goal_wait_subscription"?canonicalGoalWaitSnapshot(value):null;
+      if(wait)out.canonicalGoalWait=wait;
+      continue;
+    }
+    if (key === "goalWaitProposal") {
+      const proposal = context?.kind === "goal_wait_proposed" ? canonicalGoalWaitProposal(value) : null;
+      if (proposal) out.goalWaitProposal = proposal;
+      continue;
+    }
     if (key === "wait") {
       // Exact host-owned browser identity is a checkpoint, not tool log prose.
       // Keep only the closed run/chat contract; UI/mobile never receive it.
@@ -715,6 +749,11 @@ function safePayload(
     if (key === "toolHostControl" && context?.kind === "mcp_tool-use") {
       const exact = parseEffectMetadata("runtime_host_control_observed", value, context.runId);
       if (exact) out[key] = exact;
+      continue;
+    }
+    if (key === "instructionDelta" && context?.kind === "instruction_snapshot") {
+      const delta = parseInstructionDelta(value);
+      if (delta) out[key] = delta;
       continue;
     }
     if (key === "instructionSnapshot") {
@@ -962,6 +1001,7 @@ function parsePayload(json: string, context?: SafePayloadContext): Record<string
     const parsed = JSON.parse(json);
     if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
       delete parsed.workerReportJson;
+      delete parsed.canonicalGoalWait;
       // Legacy rows may be read before startup maintenance reaches them.
       // JSON-string arguments/previews need the same field-aware protection
       // as their write boundary, not just token-shaped string matching.
@@ -971,6 +1011,10 @@ function parsePayload(json: string, context?: SafePayloadContext): Record<string
     const result = parsed && typeof parsed === "object" && !Array.isArray(parsed)
       ? redactPayloadValue(parsed) as Record<string, unknown>
       : {};
+    if (context?.kind === "goal_wait_proposed" && parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      const proposal = canonicalGoalWaitProposal(parsed.goalWaitProposal);
+      if (proposal) result.goalWaitProposal = proposal; else delete result.goalWaitProposal;
+    }
     const canonicalToolId = parsed && typeof parsed === "object" && !Array.isArray(parsed)
       ? canonicalAdapterToolId(parsed, context) : undefined;
     if (canonicalToolId !== undefined) result.toolId = canonicalToolId;
@@ -1210,11 +1254,11 @@ export interface OneArtifactRunOutputs {
 }
 
 /**
-
-
-
-
-
+ * Dev O8/O9 2026-10-18: a run that saves the same file twice (a repair round) binds it twice, with different bytes and
+ * artifact refs. The desktop rail shows one entry that opens the newest bytes; the phone keyed its rows by binding and
+ * showed two, the first refusing to open (identity_changed / content_changed). Grouping is per run, as the rail is (the
+ * rail shows the latest run's outputs; each settled run block on both screens keeps its own). Read fresh on every call:
+ * the ledger row of an output is written before its event is published, its binding row before that.
  */
 export function readOneArtifactRunOutputs(chatId: string, runId: string): OneArtifactRunOutputs {
   const groups = new Map<string, OneArtifactRunOutput[]>();
@@ -1273,24 +1317,24 @@ const RUN_OUTPUT_ROWS_MAX_GROUPS = 400;
 const RUN_OUTPUT_ROWS_MAX_SCANNED = 50_000;
 
 /**
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+ * The outputs a run's ledger names after the event window the screen read.
+ *
+ * runLedger:events answers the first `limit` rows of a run (500 at most), and the One output rail is projected from those
+ * rows alone (renderer/lib/one-activity.ts projectOneActivityFromLedger). A run longer than the window lost every output it
+ * wrote after it: on a copy of the production profile 29 runs have output rows past seq 500 (156 outputs that appear nowhere
+ * else on the rail; AB-Light's run 622f33e7 has 584 events and two of its 15 outputs lie past the 500th). This is the rest
+ * of that run's outputs, as ledger rows the same projector reads, so the rail does not depend on how long the run is.
+ *
+ * What it returns, and no more than runLedger:events already shows the renderer:
+ * - only rows after `afterSeq` that carry `oneArtifacts` of THIS run and chat, each row as runLedger:events builds it
+ *   (same redaction, same fields);
+ * - only the items whose binding is still sealed in one_artifact_bindings with the Task version, kind and size the row
+ *   names (the check the phone's output list applies: mobileOneArtifactLedgerItem), so a row that names nothing sealed
+ *   returns nothing;
+ * - per rail entry (shared/one-artifacts.ts oneArtifactRailMergeKey) its first and its newest save: the rail keeps an
+ *   entry where it first appeared and shows its newest binding, so the rows between change nothing. A run that rewrote
+ *   one file a thousand times returns two rows for it.
+ * Read-only. No path and no file content leaves here; previews still go through the exact binding check.
  */
 export function listRunOutputEventsAfter(runId: string, afterSeq: number): RunEventUi[] {
   if (typeof runId !== "string" || runId.length < 1 || runId.length > 256 || /[\u0000-\u001f]/.test(runId)) return [];
@@ -1346,11 +1390,11 @@ export function listRunOutputEventsAfter(runId: string, afterSeq: number): RunEv
   }
 }
 
-/** Most sealed bindings of one conversation one call reads. Bindings past it are not read. */
+/** Most sealed bindings of one conversation one call reads (the largest conversation measured has 754). Bindings past it are not read. */
 const EARLIER_OUTPUT_MAX_BINDINGS_SCANNED = 20_000;
-/** Most ledger rows of the newest run one call reads for the rail's own list (rows that name an output). */
+/** Most ledger rows of the newest run one call reads for the rail's own list (rows that name an output: the largest run measured has 26). */
 const EARLIER_OUTPUT_MAX_RUN_ROWS = 5_000;
-/** Most distinct entries one call keeps. Entries past it are not counted. */
+/** Most distinct entries one call keeps (the largest conversation measured has fewer than 400). Entries past it are not counted. */
 const EARLIER_OUTPUT_MAX_ENTRIES = 2_000;
 const EARLIER_OUTPUT_PAGE_DEFAULT = 100;
 const EARLIER_OUTPUT_PAGE_MAX = 200;
@@ -1364,7 +1408,7 @@ const EARLIER_OUTPUT_PAGE_MAX = 200;
  * rather than the ledger (the phone's list, listRecentOneArtifactsForMobile, reads them too): the ledger rows that name a run's
  * outputs (mcp_tool-use, mcp_notice) are trimmed from settled chat runs after 3 days (storage/run-detail-retention.ts), and a
  * ledger-driven list reaches back 3 days where the bindings reach back 90. It also costs one indexed read of the conversation's
- * bindings instead of reading its ledger payloads.
+ * bindings (754 rows in the largest) instead of reading its ledger payloads.
  *
  * - Everything sealed for the chat that the newest run's own list does not hold, newest save first. An entry is named by the file
  *   name its binding was sealed for (bindOneRuntimeToolArtifacts labels an output with the base name of its sealed path, which is
@@ -1498,10 +1542,10 @@ const RUN_SETTLE_ROWS_MAX = 16;
  * The rows that settle a run, after the event window the screen read.
  *
  * runLedger:events and runLedger:chatTimeline answer the first rows of a run (400 or 500), and the screens project a run from
- * them. A run longer than the window can have its terminal rows past it. A window-only projection can
- * draw work without its answer anchor, leave tool rows open, or omit the run's tokens and failure reason.
- * The answer anchor is `mcp_final.durableMessageId`; replay reads the later typed terminal or stop events.
- * These are the
+ * them. A run longer than the window has its terminal rows past it, so its projection never saw the run end. On a copy of a real
+ * profile every one of the 30 runs that filled the 400-row window had its ending past it: Work drew 23 of them as a row of
+ * its own instead of on their answer (the anchor, `mcp_final.durableMessageId`, is the ending), tool rows whose result lies
+ * past the window read as still running on finished runs, and the tokens and the failure reason were missing. These are the
  * rows the activity reducer reads as a run ending, as ledger rows the same projector replays after the window
  * (renderer/lib/one-activity.ts ledgerWithSettleRows).
  *
@@ -1536,9 +1580,10 @@ export function listRunSettleRowsAfter(runId: string, afterSeq: number): RunEven
 const MOBILE_RECENT_OUTPUT_BATCH = 500;
 /**
  * Sealed bindings one page request reads before it hands back what it has and a cursor to go on from (the phone walks the
- * cursor to the end, so nothing is hidden by this). A page is 100 entries at most and the entries it skips are a run's later
- * saves of a name, so this is reached only by a conversation of tens of thousands of saves. Until a page holds an entry the
- * read does not stop: the shipped phone refuses an empty page that has a cursor.
+ * cursor to the end, so nothing is hidden by this). The largest conversation measured seals 856, and 1,706 are sealed in
+ * all; a page is 100 entries at most and the entries it skips are a run's later saves of a name, so this is reached only by
+ * a conversation of tens of thousands of saves. Until a page holds an entry the read does not stop: the shipped phone
+ * refuses an empty page that has a cursor.
  */
 const MOBILE_RECENT_OUTPUT_SCAN_MAX = 20_000;
 /** Most characters of a label the shipped phone admits (web_socket_desktop_transport.dart _safeOneArtifacts); a longer one drops the row and, with it, the whole page. */
@@ -1572,8 +1617,10 @@ function mobileOneArtifactBindingItem(
  * (one_artifact_bindings: the exact Main-side record of an output, kept 90 days).
  *
  * This used to read the run ledger, whose rows that name an output (mcp_tool-use, mcp_notice) are trimmed from a settled chat
- * run after 3 days (storage/run-detail-retention.ts), so outputs older than that were missing from the list (the desktop lists
- * them with listEarlierOneOutputs). It also read every ledger payload of the conversation.
+ * run after 3 days (storage/run-detail-retention.ts). On a copy of the production profile 545 of the 1,706 sealed outputs had
+ * no ledger row left (all older than 3 days), 71 of the 74 conversations with outputs had lost some, and a conversation without
+ * a Goal listed none of what it made last week; the desktop lists them (listEarlierOneOutputs). It also read every ledger
+ * payload of the conversation: 4.6 s for the 856-output room.
  *
  * What a page is, unchanged for the phone:
  * - rows in seal order (oldest first, the order the ledger gave), at most `limit` (1..100) per page, `nextCursor` null on the
@@ -1582,7 +1629,7 @@ function mobileOneArtifactBindingItem(
  * - a row is the binding's identity (Task version, Task, chat, run, manifest, artifact) plus label, type, size, and (for a
  *   desktop that negotiates them) content hash and time; the bridge sends only the keys the shipped phone admits
  *   (authority.ts mobileRecentOneArtifactRow). The label is the base name of the file the binding was sealed for, which is what
- *   bindOneRuntimeToolArtifacts labels an output with and so what the ledger rows carried;
+ *   bindOneRuntimeToolArtifacts labels an output with and so what the ledger rows carried (all 1,161 on the production copy);
  *   a Surface artifact's manifest label can differ from its file name and then the phone shows the file name;
  * - every row passes the check the phone's preview path relies on (mobileOneArtifactLedgerItem): opaque exact identifiers of
  *   this chat, and a binding that is still sealed with the Task version, kind and size the row names;
@@ -1876,11 +1923,11 @@ function bumpAgentUsage(agentId: string, runId: string, ts: string): void {
 }
 
 /**
-
-
-
-
-
+ * The long-run attempt an invocation's events belong to. One invocation can carry several attempts: task-force
+ * specialists run under the controller's invocation id. A producer that names its own attempt gets it when that attempt
+ * is bound to this invocation; otherwise the controller attempt, newest first. `invocation_run_id = ? LIMIT 1` took
+ * whichever row the index returned first (flow audit ID-6, production Yotube ea52dcd9: one controller and two
+ * specialist attempts on one invocation).
  */
 export function invocationAttemptBinding(invocationRunId: string, attemptId?: string | null):
   { id: string; worker_id: string; task_id: string | null; run_id: string; goal_id: string } | undefined {
@@ -1896,10 +1943,10 @@ export function invocationAttemptBinding(invocationRunId: string, attemptId?: st
 export function recordRunEvent(input: RecordRunEventInput): RunEventUi {
   let committedDiagnostic: { key: string; stats: FallbackDiagnosticStats } | undefined;
   const terminal = ["invoke_completed", "invoke_waiting", "invoke_failed", "invoke_cancelled", "invoke_interrupted", "mcp_final", "mcp_error"].includes(input.kind);
-  
-
-
-
+  // Read then write in one transaction, on a WAL shared with the daemon and the terminal. Deferred, the first read pins a
+  // snapshot and the INSERT's upgrade fails at once with SQLITE_BUSY_SNAPSHOT ("database is locked") if another process
+  // committed in between; busy_timeout cannot help. Live 2026-10-04: that throw at an invocation start wedged the chat.
+  // IMMEDIATE takes the write lock first and waits its turn under busy_timeout (a nested call stays a savepoint).
   const result = getDb().transaction(() => {
     const id = input.sourceEventId ? `evt_${stableUuid(`${input.runId}:${input.sourceEventId}`)}` : `evt_${randomUUID()}`;
     const existing = getDb().prepare("SELECT * FROM run_events WHERE id = ?").get(id) as RunEventRow | undefined;
@@ -2233,8 +2280,8 @@ export function recordMcpInvocationEvent(runId: string, req: McpInvocationReques
     toolIsError: ev.tool?.isError,
     toolCompleted: isCompletedToolEvent(ev),
     toolFailureCode,
-
-
+    // 재방문 시에도 "무엇을 어디에" 했는지 남는다 — 이름만 남기면 과거 턴의 행이
+    // "Bash"·"Read"로만 보인다(2026-08-15 실측). 상한·마스킹은 safePayload가 건다.
     toolArgs: ev.tool?.args,
     toolResultPreview: ev.tool?.result,
     toolObservationDigest: typeof ev.tool?.observationDigest === "string"
@@ -2559,16 +2606,16 @@ export function observedToolActivity(runId: string): ObservedToolActivity {
         raw.push("graph:code-file-write");
         continue;
       }
-
+      // 실측 payload 는 {"eventKind":"tool-use","toolName":…} — toolName 이 정본, 옛 모양은 폴백.
       const name = payload?.toolName ?? payload?.tool?.name ?? payload?.name;
       if (typeof name === "string" && name.trim()) raw.push(name.trim().slice(0, 120));
     } catch {
       /* payload 가 깨졌어도 이름 없는 이벤트는 근거가 못 된다 — 세지 않는다 */
     }
   }
-
-
-
+  // ★호스트 자신의 예비 조회는 "일했다"의 근거가 아니다. 2026-08-19 실측: 게시 0건인 실행이
+  //   Agentlas Plugins · universe/auto-select/Hub bridge 6건만 남겼는데 판정이 그걸 근거로
+  //   "3건 모두 게시했고 도구 활동이 뒷받침한다"고 확인해 줬다. 판단은 shared/tool-activity 정본.
   const external = externalToolNames(raw);
   // Read recent results independently of the older call-name window, so an
   // approval refusal after many progress events is still visible to the judge.
@@ -2851,13 +2898,13 @@ function daemonOwnsLiveRun(runId: string, chatId: string): boolean {
 const supersessionObject = (alias: string) =>
   `CASE WHEN json_valid(${alias}.payload_json) THEN CASE WHEN json_type(${alias}.payload_json) = 'object' THEN ${alias}.payload_json ELSE '{}' END ELSE '{}' END`;
 /**
-
-
-
-
-
-
-
+ * The later run of this chat that took this run's request over, from durable rows only (no prose, no clock):
+ *  - a host-started run (no prompt row bound to it) whose newest owner message at start (`latestUserMessageRowId`) is this
+ *    run's own prompt row (or, for a host-started failed run, the same newest owner message), or
+ *  - a run bound to the same prompt row again.
+ * A run the owner started with a NEW message binds that message instead and never supersedes. Background observations
+ * never count. Production Yotube 2026-10-17: d85e262f bound row 19140 and failed; bb73a150 (Goal resume after the
+ * 1.3.64 restart) started with latestUserMessageRowId 19140 — the room kept the old red failure and a needs-owner line.
  */
 function invocationSupersedingRunId(runId: string, chatId: string, startTs: string, startPayload: Record<string, unknown>): string | undefined {
   if (!chatId) return undefined;
@@ -2988,15 +3035,15 @@ function invocationRunReceiptSnapshot(runId: string): InvocationRunReceipt | nul
   }
   const failure = invocationReceiptStatement("SELECT * FROM failure_events WHERE run_id = ? ORDER BY datetime(ts) DESC, rowid DESC LIMIT 1")
     .get(runId) as FailureEventRow | undefined;
-
-
-
-
-
-
-
-
-
+  // Tool/runtime attempts may fail and recover inside a successful run. Keep
+  // those rows in failure_events for diagnostics and learning, but never
+  // project the most recent non-terminal attempt as the completed run's
+  // terminal error. A receipt carries failure copy only when the run itself
+  // did not complete.
+  // An interrupted/cancelled run ended by a stop (app close, owner stop, steering), not by the
+  // tool refusal that happened to be its last in-turn failure — that refusal was answered and
+  // the turn went on. Measured 2026-09-27: 12 Science turns cut by a dev-app restart were
+  // reported `tool_failed` with a stale claim-ledger refusal as their cause.
   const terminalFailure = status === "completed" || status === "waiting_input"
     || (status !== "failed" && failure?.source === "tool") ? undefined : failure;
 
@@ -3094,11 +3141,11 @@ export function getLatestInvocationRunReceipt(chatId: string): InvocationRunRece
 }
 
 /**
-
-
-
-
-
+ * The owner wrote to the room after this run started: a person's message that is neither this run's own prompt nor a
+ * direction the run took in as its current-turn steer. Host-written turns (a teammate's report, a Goal continuation, a
+ * recovery) store their prompt as a system row and never count. An exact run id the caller holds is current until
+ * this is true; "is it still the room's newest run" refused it as soon as any host turn followed (flow audit ID-4,
+ * production Yotube 10-14..10-18: 86-94% of the room's foreground runs were host turns).
  */
 export function ownerDirectionAfterInvocationRun(runId: string, chatId: string): boolean {
   if (!runId || !chatId) return true;
@@ -3166,18 +3213,18 @@ export function isMobileOneInvocationChat(chatId: string): boolean {
 }
 
 /**
-
-
-
-
-
-
-
-
-
-
-
-
+ * 직전 턴이 실제로 얼마나 무거웠는가 — 관측치.
+ *
+ * 이 값이 이번 턴 편성의 근거다. 요청 문장을 해석하지 않는다. 실사용 558턴 실측에서
+ * 단어 신호로 무거운 턴을 맞힌 비율은 21.7%였고(가벼운 턴 130건 중 115건은 잘못
+ * 올렸다), 같은 코퍼스에서 "직전 턴이 무거웠으면 이번 턴도 무겁다"는 재현율 88.5%
+ * 정밀도 87.2%였다. 전체 턴의 86%가 후속 턴이므로 이 신호 하나가 거의 전부를 덮는다.
+ *
+ * 라벨과 예측이 같은 턴의 같은 변수에서 나오면 그것은 성능이 아니라 산수다. 여기서는
+ * **직전 턴**을 보고 **이번 턴**을 정하므로 서로 다른 관측이다.
+ *
+ * 임계값을 여기서 정하지 않는다 — 원자료만 돌려주고, 무겁다는 판정은 호출자가 자기
+ * 정책으로 내린다. 나중에 이 판정이 학습된 값으로 바뀔 자리다.
  */
 export interface PreviousTurnObservation {
   /** 직전 완료 턴에서 실제로 호출된 도구 수. */

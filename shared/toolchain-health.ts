@@ -1,8 +1,8 @@
 // Health of a callable Toolchain: when real uses start failing, it is pulled back and repaired.
 //
-// Scheme: a Toolchain for an app or page is built on the assumption that the app's or page's structure stays
+// Owner scheme (2026-10-20): a Toolchain for an app or page is built on the assumption that the app's or page's structure stays
 // the same. Later the structure changes, errors become frequent, and the Toolchain is changed. This file decides, from the
-// outcomes of real calls only, when "errors become frequent". Common circuit-breaker practice gives the
+// outcomes of real calls only, when "errors become frequent". Research (docs/2026-10-19-agent-learning-lifecycle §15) gives the
 // shape: classify failures so that a lost login or a timeout does not trip the breaker, count only what points at the tool,
 // and keep the repair bounded.
 //

@@ -617,13 +617,13 @@ export function curateEvents(
       continue;
     }
 
-    
-
-
-
-
-
-
+    // Unattended automation runs (2026-09-24). Nobody reviews these turns, and
+    // measured on the owner's store their decisions/procedures were the run's
+    // own tactical choices (hold, pause, quota met, keep a gate) written as
+    // portable agent_repo rules with empty evidence - the next run recalled and
+    // obeyed them. A run's own decision/procedure, or any unevidenced claim,
+    // stays in that run's session log; nothing from it crosses into agent_repo
+    // or user_identity. The surface is a host fact, not a reading of the text.
     const unattended = ctx.sourceSurface === "automation-run" || isAutomationLedgerChat(ctx.chatId);
     const hostObserved = (ev as RawMemoryEvent & { source?: string }).source === "host-observed";
     if (unattended && !hostObserved && (
@@ -960,20 +960,20 @@ export function curateReply(
       ? "policy_fallback"
       : "semantic"
     : "policy";
-  
-
-
-
-
-
-
-
-
-
-
-
-
-
+  /*
+   * ★모델이 침묵해도 그 턴은 일어났다 — 호스트가 사실을 남긴다(오너 결정 2026-08-16).
+   *
+   * 기억 방출은 지금까지 순전히 프롬프트 계약이었다. 지시를 따르는 런타임에서는 잘
+   * 돌지만(One 813건), 같은 지시를 받고도 한 건도 내지 않는 에이전트가 있었다 —
+   * 실측: Pitch Deck Architect 913회 실행에 기억 0, 큐레이션 영수증은
+   * memoryEventCount 0 / discarded 0. 버려진 게 아니라 애초에 후보가 없었다.
+   * 기억이 0이면 경험 후보도 0이고 칩도 0이라, 사용자에게는 제품이 고장난 것과
+   * 구분되지 않는다.
+   *
+   * 그래서 모델이 아무것도 내지 않은 턴에서는 호스트가 **검증 가능한 사실 한 줄**을
+   * 대신 만든다. 내용을 지어내지 않는다: 무엇을 요청받았고 어느 실행이었는지만 적고,
+   * 출처를 host-observed 로 표시해 모델이 스스로 남긴 배움과 섞이지 않게 한다.
+   */
   const hostObserved = modelEvents.length === 0 ? hostObservedTurnEvents(ctx) : [];
   const effectiveEvents = modelEvents.length > 0 ? modelEvents : hostObserved;
   const attemptedReport = effectiveEvents.length > 0

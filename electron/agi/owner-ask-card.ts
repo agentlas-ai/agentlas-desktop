@@ -3,7 +3,7 @@ import type { PersistenceBoundaryKind } from "../../shared/persistence-policy";
 
 /*
  * What the owner sees when the AGI monitor must ask (ask_owner_once, request_app_restart): a decision card, never prose
- * alone (an ask is always a card that rings). The host line (agi/actions.ts noticeLine) stays above
+ * alone (owner 2026-10-20: "묻는건 무조건 카드로 주고 알림 울리게해"). The host line (agi/actions.ts noticeLine) stays above
  * the card as the explanation; this is the card itself. Fixed host copy keyed by the typed boundary, no model words.
  * No electron import (gates load this file directly).
  */

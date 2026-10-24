@@ -36,14 +36,14 @@ export function prepareSupervisorOsExecution(input:{runId?:string;chatId?:string
   const rows=supervisorRequestRows(input.runId);
   if(!rows.length)return null;
   if(rows.length!==1)throw supervisorError("supervisor_os_original_command_required");
-  
-
-
-
-
-
-
-
+  // The background service never hosts the screen: the window process owns the input driver, the OS lease broker and
+  // the computer-use control server. Hope's personal turns run in the service since the One domain moved there, and
+  // this refusal failed every one of them that picked computer use, and every later turn of that chat, which asked
+  // for it again (production 1.2.95, 2026-10-11: supervisor_os_host_unavailable). Such a run uses the window's control
+  // server through the shared control file, like any other run with computer use. A process that has a broker but
+  // whose host is down (locked screen, server stopped) still refuses.
+  // 1.3.0 device bridge: the service now asks the window process to prepare the scoped execution (remoteDaemon), see
+  // prepareSupervisorOsExecutionAsync. Without a broker and without a remote source nothing is prepared here.
   if(!configuredOneOsLeaseBroker()){
     if(input.remoteDaemon)throw supervisorError("supervisor_os_host_unavailable");
     return null;

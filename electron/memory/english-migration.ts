@@ -1,6 +1,6 @@
 // One-time English migration of desktop memory + translate-on-write worker.
-                                                        
-                                                 
+// Plan 2026-09-22-PLAN-memory-recall-repair.md, section
+// "전면 영어 마이그레이션 — 데스크탑 (2026-09-23)" (D-1..D-8).
 //
 // Rows keep their id; `content`/`summary` becomes the English search surface and
 // the original wording moves to a side table (native-text.ts). In-place, not
@@ -52,12 +52,12 @@ const CALL_TIMEOUT_MS = 180_000;
 export const BACK_CHECK_FLOOR = 0.25;
 const ENGLISH_MAX_CHARS = 4_000;
 
-
-
-
-
-
-
+// ── pure checks (exported for the contract) ─────────────────────────────────
+// Atoms, not compound tokens: a translation legitimately re-joins ASCII pieces
+// ("49~58" → "49-58", "2인용" → "2-player", "Base64/URL/로컬파일" →
+// "Base64/URL/local files"). Measured on the owner's store copy: comparing
+// compound tokens rejected 12 of 40 real translations that had every
+// identifier. Every atom of a path/identifier is still required.
 const ASCII_ATOM_RE = /[A-Za-z0-9_]+/g;
 const NUMBER_WORDS: Record<string, RegExp> = {
   "1": /\b(one|once|single)\b/i,
@@ -219,7 +219,7 @@ export interface MigrationRecord {
   completedAt: string | null;
   lastTranslator: string | null;
   lastError: string | null;
-                                                                                                             
+  /** Last batch attempt (any outcome). Absent until the first one; starvation is measured from startedAt. */
   lastBatchAt?: string | null;
 }
 
@@ -244,12 +244,12 @@ function today(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
-  
-                                                                                              
-                                                                                                   
-                                                                                                  
-                                        
-   
+/*
+ * ★The cap was 0 on every store that never set it: Number(null) is 0, finite and >= 0, so the
+ * default never applied and every pass broke out of its loop before the first batch (owner's store
+ * 2026-09-27: no cap key, 3,138 jobs attempts=0, budget meta never written). Unset means default;
+ * an explicit "0" still pauses the job.
+ */
 function dailyCap(): number {
   const raw = getMeta(DAILY_CAP_KEY);
   if (raw == null || String(raw).trim() === "") return DEFAULT_DAILY_CAP;
@@ -755,16 +755,16 @@ let running = false;
 let lastSweepAt = 0;
 let lastGateLogAt = 0;
 
-
-
-
-
-
-
-
-
-
-
+/*
+ * ★Starvation (measured 2026-09-27 on the owner's machine): 3,138 jobs, every one attempts=0 since
+ * 2026-09-23. The pass needed 10 minutes of *system* HID idle, but Codex Computer Use and a
+ * remote-desktop tool assert UserIsActive (pmset log), so "the owner is away" was never observed
+ * while agents drove the machine — and no gate said so. Two changes, both still yield to runs:
+ *  - every blocked tick names its gate in one log line, at most once an hour;
+ *  - after STARVED_AFTER_MS without a batch, a quiet-window pass may run when this app has had no
+ *    run in a slot for APP_QUIET_MS: one small batch, aborted the moment any run takes a slot.
+ * Run slots in use or queued always block, in both modes — this job never contends with a run.
+ */
 const STARVED_AFTER_MS = 6 * 60 * 60 * 1000;
 const APP_QUIET_MS = 10 * 60 * 1000;
 const QUIET_WINDOW_MAX_ITEMS = 10;

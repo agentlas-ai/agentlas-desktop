@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.3.89 — 2026-10-24
+
+- Windows: closing the last window with X or choosing Exit (Ctrl+Q on Linux) quits the app instead of leaving it running without a window, quitting takes a second or two instead of about 30, launching the app again reopens it (also when the launch arrives while it is quitting), and the app no longer opens blank console windows while it works.
+- Windows uninstaller: removing the app keeps your data by default; two clearly labelled options remove app data as well. Updates and silent uninstalls never delete data, and a protocol registration that belongs to another installation is left alone.
+- Small windows (1024×768): the Work room keeps a way back to the sidebar, View > Toggle Sidebar works in Work, and View > Back (Alt+Left) returns to the previous screen. The Work composer toolbar stays on one line and folds its chips to icons when space runs out.
+- Sign-in states: a runtime that is signed out (for example Grok or another ACP agent) shows "sign in required" with a Connect button instead of a generic error, and model listing, detection and turns never start a sign-in on their own. A saved Agentlas engine sign-in is shown as signed in after an update instead of as signed out.
+- Cursor and GitHub Copilot setup shows the official install command for your operating system, and Cursor installed with its Windows installer is found without restarting Agentlas.
+- Local models: first-run setup counts a running Ollama, every Ollama request asks for a context window that fits the prompt and tells the server not to cut it, and LM Studio's on-demand window is read back. A prompt that is too large for the model stops with a clear message instead of being silently truncated.
+- An answer that names a file you asked for is checked before it stands: if that file does not exist, the answer says so and a warning is shown.
+- Presentations: `document.deck.build` designs a new PowerPoint deck in code, then renders and lints it, and `document.render` draws a deck as the file actually looks (shapes, table colours, native charts, pictures). The installed app ships everything the deck builder needs.
+- Company server: Settings shows whether this Desktop is connected to a company Agentlas Enterprise Server and lets you enroll with the one-time code from your admin, re-check, or disconnect. Managed configuration, seat tokens and the company update feed are supported, and company-server requests trust the operating system's certificate store. A personal install does not see this card.
+- Organization screens are shown only to organization accounts or after opening a company link. An approved employee connection resumes after a restart or a new sign-in, and a device signed in with the same personal account is registered automatically.
+- Workforce and automations: every configured runtime can lead a Workforce run under the permission you configured for it, and read-only automations run on every runtime through that runtime's own read mode instead of stopping before the first stage.
+- A tool call that times out or is aborted is closed in the Work journal with how it ended and no longer blocks the rest of its step; only an identical repeat of that call waits.
+- Agentlas Reach (opt-in): a new Settings switch, "Explore this desktop's apps", is off by default and asks for your agreement before it turns on. When on, agents can use the apps installed on this computer through Reach on macOS, Windows and Linux, and only anonymous descriptions of what an app can do are shared; nothing about you or your content.
+- Science runs share Work's sessions, approvals, question cards and Goal waits, so a Science question, wait or saved output continues the same way after a restart.
+- A failed ontology check says why (which sources are stale and for what reason, write access, schema), and the dashboard's "sign in required" line sits inside its card.
+
+This release binds Agentlas OS v1.2.68 at bc8826ffbe6ed35503cb73fcd992325aa4fda1aa; public runtime asset `hephaestus-runtime-v1.2.68.tar.gz` is pinned at SHA-256 `78bb93d01544a78e8c34223b6fd40710468a1f16d136e39e2dbaaaf1a1bd4937`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.88 — 2026-10-23
 
 - Keep total input usage unknown when Claude does not report every cache component, while preserving independently reported output usage.

@@ -286,7 +286,7 @@ export function NodeCard(props: {
             style={{ ...handleStyle, left: "34%", background: "var(--danger, var(--danger))" }}
             isConnectable={connectable}
           />
-          {}
+          {/* ★이름표에 설명을 단다 — "실패, 정리가 뭐지"가 실측 첫 반응이었다(항목 2). */}
           <span
             title={props.outcomeStrings?.failHint ?? outcomeFallback.failHint}
             style={{ ...outcomeLabelStyle("34%", "var(--danger, var(--danger))"), pointerEvents: "auto", cursor: "help" }}

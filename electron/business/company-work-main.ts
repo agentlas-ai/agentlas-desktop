@@ -1,6 +1,4 @@
 import { randomUUID } from 'node:crypto';
-import { companyProviderSheet } from './native-approval-sheets';
-import { currentUiLocale } from '../ui-locale';
 import type { BrowserWindow,IpcMain,IpcMainInvokeEvent } from 'electron';
 import { isAppControlEvent } from '../app-control/ipc-registry';
 import { businessOnlyKeys,isBusinessId } from '../../shared/business/context';
@@ -10,8 +8,10 @@ import type { OneVaultSqlite } from '../secrets/one-vault-journal';
 import type { CompanyAgentAssetOwner } from './employee-agent-transfer-custody';
 import { reviewHostCompanyProvider,companyProviderHost,revokeCompanyProvider } from './company-work-provider';
 import { installCompanyWorkPort } from './company-work-port';
+import { companyProviderSheet } from './native-approval-sheets';
+import { currentUiLocale } from '../ui-locale';
 interface Input{ipc:Pick<IpcMain,'handle'>;assertTrustedSender(event:IpcMainInvokeEvent):void;isOwnerWindow(window:BrowserWindow):boolean;companyAgents():CompanyAgentAssetOwner;companyDb():OneVaultSqlite;companyDataPath(...segments:string[]):string;signal:AbortSignal}
-/** The limits shown by the native sheet are the limits in the original request. */
+/** The limits the reviewer is shown are the limits the request carries: one definition, so the sheet cannot drift from the payload. */
 const REVIEW_LIMITS={maxRuns:20,maxOutputTokens:2048,minutes:30} as const;
 /** Explicit Native dual-consent review. Renderer chooses a selector but cannot
  * mint an asset, provider permit, work policy, or run capability. */

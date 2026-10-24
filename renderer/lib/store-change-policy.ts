@@ -1,7 +1,7 @@
 /**
-
-
-
+ * How a screen answers Main's `store:changed {entity,id}` notices without re-reading on every one of them
+ * (perf review 2026-10-17). The viewed entity refreshes at once; everything else refreshes at most once per window;
+ * no notice is dropped; unchanged content does not re-render. Pure: timers and clocks are injectable for tests.
  */
 
 export interface StoreChangeNotice { entity: string; id?: string; projectId?: string | null }

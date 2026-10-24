@@ -1,17 +1,17 @@
 /**
-
-
-
-
-
-
-
-
-
-
-
-
-
+ * AGI goal manager, P1 — the deterministic monitor (plan §3.1 "Monitor", R15 Kubernetes-style reconcile).
+ *
+ * Every beat it reads each goal's typed facts, classifies them (blocker.ts), keeps the incident record, and when an
+ * incident is due it hands one claimed attempt to the installed handler, with durable backoff for unchanged state. It never
+ * calls a model. Owner decisions 2026-09-28:
+ *   D3 — it watches ALL One/Work goals, not only goals with AGI switched on (the YouTube goal never had a life);
+ *   D7 (corrected) — no elapsed-time trigger at all; only typed signals open an incident.
+ *
+ * The Alive decision point unblock_attempt_due (commit 6fdcf31b) and this monitor converge on the same attempt
+ * function, which dedupes by (goal, digest): whichever claims the due attempt first owns it, the other finds
+ * the receipt. Blocked goals therefore never need a light (no-tools) model wake to be looked at.
+ *
+ * An attempt with no handler installed yet is recorded as no-handler and retried for the same state once one exists.
  */
 import type { AgiDecisionControl } from "./decision-control";
 import type Database from "better-sqlite3";
@@ -193,7 +193,7 @@ export class AgiGoalMonitor {
     }
     // A Goal that left the monitored list (finished, cancelled, deleted, moved off this desktop) leaves nothing behind: its wake timer
     // and its open incidents are closed too. Only its in-memory state was dropped before, so a cancelled Goal's incident stayed open
-    // indefinitely and its due timer could still fire a reconcile.
+    // (production: open since 2026-09-29, 21 days) and its due timer could still fire a reconcile.
     for (const goalId of [...this.states.keys()]) if (!seen.has(goalId)) { this.states.delete(goalId); this.sources.delete(goalId); }
     for (const [goalId, timer] of [...this.dueTimers]) if (!seen.has(goalId)) { clearTimeout(timer); this.dueTimers.delete(goalId); }
     const nowMs = this.deps.now();
@@ -283,7 +283,8 @@ export class AgiGoalMonitor {
           prior.at_ms = nowMs;
         }
         // A goal that flips between stalled and running opens a new digest each time, so the per-digest retry delay below never
-        // applies. Back off per goal and cause instead: the streak of recent attempts for the same reason
+        // applies (production 2026-10-19: 157 digests for 190 attempts in 24 h on one room, every ~5 min, 2.7M input tokens, only
+        // 23 of them changed anything). Back off per goal and cause instead: the streak of recent attempts for the same reason
         // code, restarted by an attempt that changed state, waits the same doubling delay a repeated digest would.
         if (!prior && this.goalCauseBackoff(goalId, incident!.reasonCode, incident!.id, nowMs)) return false;
         const retryable = prior && ["failed", "rested", "needs-human"].includes(prior.outcome)
@@ -353,7 +354,7 @@ export class AgiGoalMonitor {
     // Every real attempt of this cause in the window counts, including the attempts this same incident made under an earlier digest
     // (an incident carries on across digests, incident-store.ts open). No code resets the streak: "agi.action.state-changed" is the
     // refusal of an attempt whose fence moved (nothing was done), and an "acted" attempt is exactly what a flapping goal
-    // repeats without getting anywhere. The window is what lets the delay shrink again.
+    // repeats without getting anywhere (production: 95 acted of 190). The window is what lets the delay shrink again.
     const rows = this.deps.db.prepare(`SELECT a.at_ms AS at_ms FROM agi_unblock_attempts a
       JOIN agi_incidents i ON i.id = a.incident_id
       WHERE a.goal_id = ? AND (i.reason_code = ? OR a.incident_id = ?) AND a.at_ms > ? AND a.at_ms <= ?

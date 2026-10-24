@@ -1,15 +1,15 @@
 /**
-
-
-
-
-
-
-
-
-
-
-
+ * The owner's exact words versus the execution prompt.
+ *
+ * Main appends a bounded standing-staff block (collaboration preferences and
+ * historical handover notes) to the model's execution prompt and keeps the exact
+ * person-authored text in `oneUserAuthoredPrompt` (the typed signal). Only the
+ * model's prompt may carry the block. The stored user row, the title, Goal
+ * intake and the Goal objective are the owner's text, and a planner or worker
+ * must read the block as background, never as the request: production 1.3.4
+ * (2026-10-12, room chat 8f3e09ee, run 8722779b) stored the block in the owner's
+ * message and Goal objective, and the task-force planner briefed a teammate on
+ * the handover note's old work instead of the new instruction.
  */
 export const ONE_STAFF_GUIDANCE_OPEN = "<agentlas-one-staff-preferences>";
 export const ONE_STAFF_GUIDANCE_CLOSE = "</agentlas-one-staff-preferences>";

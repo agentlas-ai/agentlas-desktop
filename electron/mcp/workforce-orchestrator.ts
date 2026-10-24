@@ -2,7 +2,6 @@ import { composeDeclaredPrompt, registerDeclaredPromptModule, type DeclaredPromp
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import type {
   McpInvocationEvent,
-  RuntimeKind,
   RuntimeStatus,
 } from "../../shared/types";
 import { callServerTool, createMcpRuntimePin, McpToolCallError } from "../mcp-tools/client";
@@ -96,16 +95,16 @@ export const WORKFORCE_CORE_COVERAGE_GAP_CODES = [
   "gap:requirement-vocabulary-unsupported:skill",
   "gap:requirement-vocabulary-unsupported:knowledge",
   "gap:requirement-vocabulary-unsupported:tool",
-  
-
-
-
-
-
-
-
-
-
+  // Core declares its full gap vocabulary to Hub/Cloud and forwards whatever
+  // they emit, so this list must stay a superset of Core's — an unknown code
+  // here throws away the ENTIRE candidate set (requireCoreCoverageGapCodes),
+  // which reads as "the source is down" when the source answered fine. These
+  // seven had already joined Core's vocabulary (community 2026-07-28; artifact/
+  // runtime/language/modality with the rank-not-exclude repair; contract-
+  // invalid reporting) and this list silently fell behind. `authority` joined
+  // on 2026-07-30 when its always-hard gate was measured inverted (it excluded
+  // every relevant candidate; prepare-time permission pins are the real
+  // enforcement).
   "gap:candidate-contract-invalid",
   "gap:requirement-vocabulary-unsupported:consumed-artifact",
   "gap:requirement-vocabulary-unsupported:produced-artifact",
@@ -233,21 +232,44 @@ const EXECUTION_CONTEXT_SLOT_KEYS = [...WORK_ORDER_SLOT_KEYS, "minimumEvidenceLe
 const EXECUTION_CONTEXT_ASSIGNMENT_KEYS = ["slotId", "agentReleaseId", "reasonCodes"] as const;
 export const WORKFORCE_ONTOLOGY_VERSION = workforceProtocolContract.protocolMetadata.ontologyVersion;
 export const WORKFORCE_ONTOLOGY_SNAPSHOT_SHA256 = workforceProtocolContract.protocolMetadata.ontologySnapshotSha256;
-const WORKFORCE_LEADER_SAFE_RUNTIME_KINDS = new Set<RuntimeKind>([
-  "claude-code",
-  "codex",
-  "byok",
-  "ollama",
-  "lmstudio",
-  "mlx",
-]);
+/** The runner fields a Workforce leader-side turn (staffing decision, work order, selection) is dispatched with. */
+export interface WorkforceLeaderRunnerBoundary {
+  permission: "read" | "write" | "full";
+  untrustedNoTools: false;
+  restrictedReadBoundary?: true;
+  cwd?: string;
+}
 
 /**
- * The Workforce leader must be the exact active BYOM, never a hidden fallback.
- * CLI runtimes with no verified stateless/no-authority boundary fail closed.
+ * The one rule for where a Workforce leader turn runs (owner decision, repeated 2026-10-23).
+ *
+ * The leader is the exact active runtime the user configured, never a hidden fallback, and it carries no authority of
+ * its own: the permission that applies is the one configured for this run on that runtime. Every runtime kind the user
+ * can configure (the seven subscription CLIs incl. ACP, BYOK, Agentlas serving, agentlas-local, ollama, lmstudio, mlx)
+ * is therefore a leader. None is refused because a "no-authority" sandbox cannot be proven for it — that refusal used
+ * to stop antigravity, grok, kimi, cursor, ACP and Agentlas serving outright, and stopped codex whenever the runtime was
+ * not pinned on the composer (its no-tools path admits judgment turns only). Workers already run this way
+ * (borrowed-task-force.ts packageToolBoundary, host-authority rows).
+ *
+ * The only narrowing kept is the run's own read-only automation boundary, which belongs to the run, not to the leader;
+ * it is passed exactly as every task-force stage receives it. A runtime that cannot run at all (not installed, not
+ * signed in, a missing pin) still stops with its typed runner reason before or at dispatch.
  */
-export function isWorkforceLeaderRuntimeAllowed(kind: RuntimeKind): boolean {
-  return WORKFORCE_LEADER_SAFE_RUNTIME_KINDS.has(kind);
+export function workforceLeaderRunnerBoundary(input: {
+  configuredPermission: "read" | "write" | "full";
+  workingFolder?: string | null;
+  restrictedOrchestrationBoundary: boolean;
+}): WorkforceLeaderRunnerBoundary {
+  // A read-only automation's leader turn reads in the project folder like its task-force stages (taskForceStageCwd).
+  if (input.restrictedOrchestrationBoundary) {
+    return { permission: input.configuredPermission, untrustedNoTools: false, restrictedReadBoundary: true,
+      ...(input.workingFolder ? { cwd: input.workingFolder } : {}) };
+  }
+  return {
+    permission: input.configuredPermission,
+    untrustedNoTools: false,
+    ...(input.workingFolder ? { cwd: input.workingFolder } : {}),
+  };
 }
 const WORKFORCE_ONTOLOGY_GUIDE = [
   "Semantic IDs are open English namespaces (community:research, role:researcher, skill:verification, knowledge:domain, tool:browser); examples are anchors, not an allowlist. payment => community:payments-engineering; security => community:security-engineering.",

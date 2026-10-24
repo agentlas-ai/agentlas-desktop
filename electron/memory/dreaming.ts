@@ -152,10 +152,10 @@ function recordDreamingFailure(cause: DreamingFailureCause, stage: "consolidatio
   return record;
 }
 /**
-
-
-
-
+ * Same route as the other background judgments (criterion-proof classificationRoute, strategy reflection): the
+ * configured orchestrator judgment pool, else the active orchestrator runtime as an exact pin. Either way the call
+ * carries the selection's model and effort. Production 1.3.43-1.3.48 (2026-10-15 23:05Z on): the raw active runner got
+ * no model, so the Codex no-tools judgment lane refused it (codex_no_tools_model_required) before any process started.
  */
 async function dreamingJudgmentRoute(): Promise<{ selectionPolicy: JudgmentSelectionPolicy } | { runtimeSelection: RuntimeSelection } | null> {
   const selectionPolicy = configuredOrchestratorJudgmentPolicy();
@@ -497,7 +497,7 @@ function parseDreamingResult(text: string, entryCount: number): { rules: Dreamin
   if (!parsed || !Array.isArray(parsed.rules) || parsed.rules.length > 5) return null;
   const inRange = (n: unknown) => Number.isInteger(n) && Number(n) >= 1 && Number(n) <= entryCount;
   // The top-level list is the union of the rules' own lists; when a model gives only the per-rule lists the host
-  // derives it.
+  // derives it (measured 2026-10-20: one of two Sonnet answers omitted it).
   const ruleLists = parsed.rules.map((rule) => rule && typeof rule === "object" && !Array.isArray(rule) ? (rule as Record<string, unknown>).absorbed : undefined);
   const topLevel = Array.isArray(parsed.absorbed) ? parsed.absorbed
     : parsed.absorbed === undefined && ruleLists.every(Array.isArray) ? [...new Set(ruleLists.flatMap((list) => list as unknown[]))] : null;

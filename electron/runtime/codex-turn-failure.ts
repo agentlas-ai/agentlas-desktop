@@ -1,22 +1,22 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+/*
+ * Codex turn failures as typed RunnerFailures (audit 31 A1 C8.1/C3.5, A5 idea 6; plan R-058 AS, R-007, R-070).
+ *
+ * The app-server names why a turn failed in `turn.error.codexErrorInfo` (and in the `error` notification). Until
+ * 1.3.53 only six literals were read and folded into quota/auth/refused/exit with no providerCode, so rate limits,
+ * overload, stream disconnects and context overflow were all "exit" and nothing downstream could key a recovery on them.
+ * Every value of the 0.163.0 schema (`codex app-server generate-json-schema`: 15 enum values + 5 structured variants)
+ * now maps to a kind and a stable lower-case providerCode (`codex_<snake_case>`), from a table the compiler checks for
+ * exhaustiveness. A value a newer CLI adds keeps its own code (`codex_<snake_case>`, kind exit), never a guessed one.
+ *
+ * Two causes have no codexErrorInfo of their own and are read from the protocol's fixed rendering of a typed error,
+ * exact template only (never a prose search):
+ *   - ResponseIncompleteError: codex-rs protocol/src/error.rs `#[error("Incomplete response returned, reason: {reason}")]`;
+ *     `to_codex_protocol_error` maps it to `other`, and `codex exec --json` carries no code at all. Reason
+ *     `max_output_tokens` is the output-token cap (production 1.3.49 run 5d37e4cc: a teammate cut at 128,000 output
+ *     tokens after 62 minutes).
+ *   - ContextWindowExceeded on `codex exec --json` (no codexErrorInfo on exec): its Display prefix is the one Codex's own
+ *     input-limit classifier matches (error.rs comment "The iOS input-limit classifier matches this message's ASCII prefix").
+ */
 import type { RunnerFailure, RunnerFailureKind } from "./runner";
 
 /** The output-token cap cut this reply. Matches team-step-settlement isOutputLimitCode (`…_output_limit_…`). */

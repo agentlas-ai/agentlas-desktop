@@ -1,15 +1,15 @@
-
-
-
-
-
-
-
-
-
-
-
-
+// Every runtime-generated image lands in the run's working folder.
+//
+// ★Why (2026-09-23 audit): a Codex/Antigravity/host image lived only in the
+// runtime's own store (~/.codex/generated_images, userData/multimodal-images,
+// ~/.gemini/.../brain). The Agentlas browser can upload only from its output
+// folder and the run folder, so "generate a banner and post it" failed at
+// browser_file_upload with "outside allowed roots", and the host tool returned
+// only base64 so the model never learned a path at all.
+//
+// The fix is to copy into `<cwd>/assets/`, not to widen the browser's roots:
+// the run folder is already an allowed upload root and an artifact root, and a
+// copy keeps the runtime's private store private. Read-only runs never write.
 import { randomBytes } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";

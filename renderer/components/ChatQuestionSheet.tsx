@@ -20,33 +20,8 @@ import {
   type AskActionBlock,
 } from "@shared/ask-action-bar";
 
-export interface QuestionSheetAnswer {
-  questionId: string;
-  answers: string[];
-}
-
-export function composeQuestionReply(
-  questions: ChatQuestion[],
-  selected: Record<string, string[]>,
-  notes: Record<string, string>,
-  ko: boolean,
-): { reply: string; perQuestion: QuestionSheetAnswer[] } {
-  const chunks: string[] = [];
-  const perQuestion: QuestionSheetAnswer[] = [];
-  for (const q of questions) {
-    const picks = selected[q.id] ?? [];
-    const note = (notes[q.id] ?? "").trim();
-    if (!picks.length && !note) continue;
-    const canonicalPicks = !q.multiSelect && note ? [] : picks;
-    const combined = [...canonicalPicks, ...(note ? [note] : [])];
-    perQuestion.push({ questionId: q.id, answers: combined });
-    const lines = [`${ko ? "질문" : "Question"}: ${q.question}`];
-    if (canonicalPicks.length) lines.push(`${ko ? "선택" : "Selected"}: ${canonicalPicks.join(", ")}`);
-    if (note) lines.push(`${ko ? "답변" : "Answer"}: ${note}`);
-    chunks.push(lines.join("\n"));
-  }
-  return { reply: chunks.join("\n\n"), perQuestion };
-}
+export { composeQuestionReply, type QuestionSheetAnswer } from "@shared/question-reply";
+import { composeQuestionReply, type QuestionSheetAnswer } from "@shared/question-reply";
 
 export function ChatQuestionSheet({
   questions,

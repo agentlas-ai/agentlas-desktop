@@ -1,3 +1,4 @@
+import { MOBILE_CANONICAL_QUESTION_CONTRACT, validateMobileCanonicalQuestionAnswer, type MobileCanonicalQuestionDecisionDto } from "./mobile-question-decision";
 import type {OneVaultErrorCode} from "./one-vault";
 import type {OneProviderRemoteErrorCode} from "./one-provider-remote";
 import { MOBILE_GOAL_CONTROL_METHODS, MOBILE_GOAL_CONTROL_WRITE_METHODS, isMobileGoalControlMethod, validateMobileGoalControlParams } from "./mobile-goal-control";
@@ -255,8 +256,19 @@ export const MOBILE_BRIDGE_METHODS = [
  *   (mobileBridgeDecisionTextUnchanged) is no longer needed for that phone.
  * - "plan.checklist.v1": the phone draws kind:"plan" invocation events (the runtime's own checklist, 50a63a5d).
  *   Only such a phone receives them; an older one would read the unknown kind as an empty row.
+ * - "thread.composition.v1": the phone orders and fills its conversation the way the desktop screen does. Only such a
+ *   phone receives (a) `occurredAt` on every one.artifacts.recent row — the shipped decoder refuses a page with a key it
+ *   does not know, so the time was withheld (authority.ts mobileRecentOneArtifactRow) and every restored output group
+ *   landed at the chat's updatedAt, a pile under the newest messages — and (b) `hostNotice` of purpose
+ *   "automation-report" on the system rows of invoke.historyPage, so a scheduled run's report is drawn instead of
+ *   hidden as an unmarked system row.
  */
-export const MOBILE_CLIENT_CAPABILITIES = ["decision.rowSkip.v1", "text.sanitize.v3", "plan.checklist.v1"] as const;
+export const MOBILE_CLIENT_CAPABILITIES = [
+  "decision.rowSkip.v1",
+  "text.sanitize.v3",
+  "plan.checklist.v1",
+  "thread.composition.v1",
+] as const;
 export type MobileClientCapability = (typeof MOBILE_CLIENT_CAPABILITIES)[number];
 
 /** Accepted only to give installed Mobile clients a terminal retirement response. */
@@ -286,11 +298,11 @@ export function validateMobilePushParams(method: string, params: Record<string, 
 }
 
 /**
-
-
-
-
-
+ * The fields each One supervisor method accepts from the phone. The request validator here and the Desktop authority
+ * (electron/mobile-bridge/authority.ts) both read this one table. Two hand-kept lists drifted: the validator accepted
+ * `permissions` (and `oneId`) on one.supervisor.send while the authority refused them, so every phone message to the
+ * personal One stopped at "접수 확인 중" (production 2026-10-05 12:39 UTC, "one.supervisor.send contains unsupported
+ * field: permissions"; found by the monitoring peer session).
  */
 export const ONE_SUPERVISOR_PARAM_KEYS = {
   "one.supervisor.send": ["commandId", "text", "runtimeSelection", "permissions", "oneId", "images", "fileGroupId"],
@@ -304,8 +316,8 @@ export const ONE_SUPERVISOR_PARAM_KEYS = {
 /** Existing Science author conversations only; the phone cannot create a runtime or change its grants. */
 export const MOBILE_SCIENCE_CHAT_PARAM_KEYS = {
   "science.chat.list": ["schemaVersion", "projectId", "limit"],
-  "science.chat.read": ["schemaVersion", "projectId", "conversationId", "limit"],
-  "science.chat.send": ["schemaVersion", "projectId", "conversationId", "requestId", "text", "locale"],
+  "science.chat.read": ["schemaVersion", "projectId", "conversationId", "limit", "supportsQueuedSteering", "ownerRequestId"],
+  "science.chat.send": ["schemaVersion", "projectId", "conversationId", "requestId", "text", "locale", "supportsQueuedSteering"],
   "science.chat.cancel": ["schemaVersion", "projectId", "conversationId", "turnId"],
 } as const;
 export type MobileScienceChatMethod = keyof typeof MOBILE_SCIENCE_CHAT_PARAM_KEYS;
@@ -358,6 +370,34 @@ export interface MobileScienceChatReadDto extends MobileScienceChatIdentityDto {
   messages: MobileScienceMessageDto[];
   turn: MobileScienceTurnDto | null;
   hasMore: boolean;
+  /** Only an opted-in reader receives the capability and exact requested owner receipt. */
+  supportsQueuedSteering?: boolean;
+  ownerRequests?: MobileScienceOwnerRequestDto[];
+}
+export interface MobileScienceSteeringDto {
+  requestId: string;
+  projectId: string;
+  conversationId: string;
+  targetTurnId: string;
+  messageId: string;
+  intent: "steer";
+  contentSha256: string;
+  epoch: number;
+  status: "accepted" | "needs-decision" | "applied" | "superseded" | "cancelled";
+  code: string | null;
+  successorTurnId: string | null;
+  createdAt: string;
+}
+export interface MobileScienceOwnerRequestDto {
+  steering: MobileScienceSteeringDto;
+  userMessage: MobileScienceMessageDto;
+}
+export interface MobileScienceChatQueuedSendDto extends MobileScienceChatIdentityDto, MobileScienceOwnerRequestDto {
+  ok: true;
+  conversationId: string;
+  requestId: string;
+  accepted: true;
+  queued: true;
 }
 export interface MobileScienceChatSendDto extends MobileScienceChatIdentityDto {
   ok: true;
@@ -388,13 +428,16 @@ export interface MobileScienceChatRefusalDto {
   turnId?: string;
 }
 export type MobileScienceChatResultDto = MobileScienceChatListDto | MobileScienceChatReadDto
-  | MobileScienceChatSendDto | MobileScienceChatCancelDto | MobileScienceChatRefusalDto;
+  | MobileScienceChatSendDto | MobileScienceChatQueuedSendDto | MobileScienceChatCancelDto | MobileScienceChatRefusalDto;
 
 export function validateMobileScienceChatParams(method: MobileScienceChatMethod, params: Record<string, unknown>): string | null {
   if (!hasOnlyKeys(params, MOBILE_SCIENCE_CHAT_PARAM_KEYS[method]) || params.schemaVersion !== 1) return "science_chat_params_invalid";
   const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
   if (typeof params.projectId !== "string" || !uuid.test(params.projectId)) return "science_chat_project_invalid";
   if (method !== "science.chat.list" && (typeof params.conversationId !== "string" || !uuid.test(params.conversationId))) return "science_chat_conversation_invalid";
+  if (params.supportsQueuedSteering !== undefined && typeof params.supportsQueuedSteering !== "boolean") return "science_chat_params_invalid";
+  if (params.ownerRequestId !== undefined && (method !== "science.chat.read" || params.supportsQueuedSteering !== true
+    || typeof params.ownerRequestId !== "string" || !uuid.test(params.ownerRequestId))) return "science_chat_request_invalid";
   if (method === "science.chat.list" || method === "science.chat.read") return optionalInteger(params, "limit", 1, method === "science.chat.list" ? 50 : 200);
   if (method === "science.chat.cancel") return typeof params.turnId === "string" && uuid.test(params.turnId) ? null : "science_chat_turn_invalid";
   if (typeof params.requestId !== "string" || !uuid.test(params.requestId)) return "science_chat_request_invalid";
@@ -1206,14 +1249,14 @@ export interface MobileBridgeAgentDto {
   agentDefinitionId?: string;
   agentReleaseId?: string;
   /**
-
-
-
-
-
-
-
- */
+   * Agent Cloud shelf identity — a DIFFERENT thing from the Hub binding above.
+   *
+   * `cargo.search_agents` returns cloudId/manifestId/revision and never a
+   * definition/release pair, so requiring a Hub binding to show a cloud row hid
+   * the owner's entire shelf (measured: 50 rows, 1 shown). Fabricating
+   * `agentDefinitionId` from these values would break the rule directly above,
+   * so cloud identity gets its own field instead.
+   */
   cloudEntity?: {
     cloudId?: string;
     manifestId?: string;
@@ -1466,7 +1509,9 @@ export interface MobileBridgeChatMessageDto {
   /** Exact installed assistant author when persisted by Main; absent on older rows. */
   speakerAgentId?: string;
   /** Existing room receipt enriched from an exact internal delegation; never a prompt run binding. */
-  hostNotice?: Extract<import("./types").ChatHostNotice, { purpose: "one-dispatch-link" | "one-dispatch-result" }>;
+  hostNotice?: Extract<import("./types").ChatHostNotice, { purpose: "one-dispatch-link" | "one-dispatch-result" }>
+    /** Only to a phone that reported thread.composition.v1; never carries `withdrawn` (such rows are not sent). */
+    | { purpose: "automation-report"; runId: string; automationId: string };
   text: string;
   createdAt: string;
   /** Exact prompt-owning run from invoke_prompt_bound; absent on older Desktop builds. */
@@ -2010,9 +2055,9 @@ export interface MobileBridgeBrowserApprovalDto {
   status: "pending";
   requestId: string;
   /**
-
-
- */
+   * The Desktop chat whose run asked (Main-minted owner), or null for a run without one. The phone answers a request
+   * in that conversation's sheet; without this field no browser approval could be found there (2026-10-05).
+   */
   chatId: string | null;
   site: string;
   actionType: string;
@@ -2702,6 +2747,8 @@ export interface MobileBridgeSnapshot {
    * is no current safe Decision so Mobile can clear stale approval UI.
    */
   oneDecisions?: MobileBridgeOneDecisionDto[];
+  /** Opt-in complete canonical question banks; legacy rows remain unchanged. */
+  canonicalQuestionDecisionsV1?: MobileCanonicalQuestionDecisionDto[];
   /** Additive closed multi-select overlays, each bound to a row in oneDecisions. */
   oneDecisionMultiSelectionsV2?: MobileBridgeOneDecisionMultiSelectionV2Dto[];
   /** Additive, exact-bound non-authorizing Other-answer overlays. */
@@ -3755,6 +3802,7 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
     case "invoke.currentTurnSteerReceipt":
       return validateMobileCurrentTurnParams(method, params);
     case "invoke.start":
+      if (params.expectedDecisionContractVersion === MOBILE_CANONICAL_QUESTION_CONTRACT) return validateMobileCanonicalQuestionAnswer(params);
       if (!hasOnlyKeys(params, ["runId", "chatId", "userPrompt", "locale", "permissions", "planMode", "goalMode", "networkMode", "appsGenerateMode", "stormbreakerMode", "taskForceTargets", "images", "fileGroupId", "runtimeSelection", "expectedQuestionMessageId", "expectedTaskId", "expectedTaskVersion", "expectedDecisionContractVersion", "expectedAuthoritativeHostRef", "expectedDecisionCreatedAt", "expectedDecisionOptionLabels", "expectedDecisionSelectionIndexes", "expectedDecisionOtherText", "expectedDecisionBindingDigest", "expectedDecisionOwnerConfirmed"])) {
         return "invoke.start contains unsupported fields";
       }

@@ -1,0 +1,10 @@
+.backdrop { position: fixed; inset: 0; z-index: 1300; display: grid; place-items: center; padding: 16px; background: var(--popup-backdrop); backdrop-filter: blur(5px); }
+.dialog { width: min(420px, 100%); min-width: 0; padding: 22px; border: 1px solid var(--paper-edge); border-radius: 20px; background: var(--paper); color: var(--ink); box-shadow: var(--popup-shadow); }
+.title { margin: 0 0 12px; font-size: 15px; font-weight: 650; word-break: keep-all; }
+.body { margin: 0 0 8px; font-size: 13px; line-height: 1.6; color: var(--ink); word-break: keep-all; overflow-wrap: break-word; }
+.note { margin: 0; font-size: 12px; line-height: 1.5; color: var(--muted-deep); word-break: keep-all; overflow-wrap: break-word; }
+.actions { display: flex; justify-content: flex-end; gap: 8px; padding-top: 16px; }
+.actions button { min-height: 38px; min-width: 64px; padding: 8px 14px; border-radius: 10px; border: 1px solid var(--paper-edge); background: transparent; color: var(--ink); font-size: 13px; cursor: pointer; }
+.actions button:last-child { background: var(--ink); color: var(--paper); border-color: var(--ink); }
+.actions button:disabled { opacity: 0.45; cursor: default; }
+.actions button:focus-visible { outline: 2px solid color-mix(in srgb, var(--accent) 42%, transparent); outline-offset: 2px; }

@@ -147,8 +147,8 @@ const LOCAL: Record<string, Record<Locale, string>> = {
 };
 
 /**
-
-
+ * Bare HTTP refusals (no server code). "Try again in a moment" is the wrong advice
+ * for a 403, and a 429/5xx should say it is the server, not the owner (QA 2026-09-27).
  */
 const HTTP: Record<string, Record<Locale, string>> = {
   http_403: {

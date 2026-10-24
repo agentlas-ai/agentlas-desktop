@@ -1,14 +1,14 @@
 /**
-
-
-
-
-
-
-
-
-
-
+ * Which `hephaestus-network` tools an ordinary Work turn carries (owner decision 2026-10-17, "B: work-core").
+ *
+ * The engine lists 36 tools (~42.7KB for Codex, ~47.4KB for Claude Code, measured) and every request re-sends them.
+ * An ordinary turn's calls (7,879 product Codex rollouts) were workforce continuity, the Context Map gate and the
+ * plugin resolver; staffing (preflight/search/prepare ...), the legacy Hub router, memory/auth/admin tools are called
+ * by the host orchestrator or by an explicit owner request. The surface is one declaration here; each runtime binds it
+ * with its own knob (Codex `enabled_tools`, Claude Code `--disallowedTools`, the proxied runtimes a Main proxy allow list,
+ * the in-process tool loop its inventory filter).
+ *
+ * No Electron import: the daemon and the terminal engine load this too.
  */
 
 /** `full` is every tool the engine lists (isolated builders, Workforce grants, an explicit owner/graph requirement). */

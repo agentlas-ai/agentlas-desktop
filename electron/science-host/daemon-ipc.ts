@@ -1,3 +1,6 @@
+import { registerScienceQuestionDecisionIpc, type ScienceQuestionOwnerCapture } from "./question-ipc";
+import type { QuestionDecisionView } from "../../shared/question-decision";
+import { isAppControlEvent } from "../app-control/ipc-registry";
 import { randomUUID } from "node:crypto";
 import { performance } from "node:perf_hooks";
 import type { IpcMain, IpcMainInvokeEvent, WebContents } from "electron";
@@ -37,6 +40,8 @@ export interface ScienceDaemonObservation {
 export interface ScienceDaemonExecutionIpc {
   /** Observation only: never starts a daemon, a Science runtime, or a turn. */
   reconnect(): Promise<ScienceDaemonObservation>;
+  /** Selected signed view scope only; observing it never wakes the service. */
+  outputScope(): Scope | null;
   /** Detaches the GUI only. It must not cancel daemon-owned work. */
   close(): void;
 }
@@ -56,6 +61,7 @@ const CORE_CHANNELS = [
   "science:researcherQuestions:register", "science:researcherQuestions:list", "science:researcherQuestions:answer",
   "science:toolApprovals:state", "science:toolApprovals:setAlwaysApproved", "science:toolApprovals:resolve",
   "science:askUser:list", "science:askUser:answer",
+  "science:questionDecisions:read", "science:questionDecisions:answer",
   "science:projectSpace:inspect", "science:projectSpace:snapshot", "science:projectSpace:link",
   "science:projects:updateDeliverable",
   "science:workspace:get", "science:workspace:updateNavigation", "science:workspace:replaceTabs",
@@ -96,11 +102,14 @@ function failureCode(error: unknown): string {
 export function registerScienceDaemonExecutionIpc(options: {
   ipcMain: Pick<IpcMain, "handle" | "removeHandler">;
   assertScienceSender(event: IpcMainInvokeEvent, envelope: unknown, permission?: ProductExtensionPermission): unknown;
+  /** Native owner-bound cancel/stop only; does not authorize execution or app-control. */
+  assertScienceTerminalSender?(event: IpcMainInvokeEvent, envelope: unknown): unknown;
   /** Revalidates the active signed release at every event delivery. */
   assertScienceViewPermission(senderId: number, permission: ProductExtensionPermission): unknown;
   /** Explicit actual signed view only; must deny app-control even when it holds a recorded view event. */
   assertHumanComputeSender?(event: IpcMainInvokeEvent, envelope: unknown): { releaseId: string };
   client: ScienceDaemonClient;
+  captureQuestionDecisionOwner?(event:IpcMainInvokeEvent,envelope:unknown):ScienceQuestionOwnerCapture;
   onConnectionState?(state: ScienceDaemonObservation): void;
 }): ScienceDaemonExecutionIpc {
   const { ipcMain, client } = options;
@@ -383,8 +392,14 @@ export function registerScienceDaemonExecutionIpc(options: {
     await reconnect();
     admit(event, envelope);
   };
-  const dispatch = (op: DaemonScienceCommand["op"], payload: Row, observed = true) => {
-    const command = { op, input: payload } as DaemonScienceCommand;
+  const nativeOwnerIntent = (event: IpcMainInvokeEvent, envelope: unknown): boolean => {
+    if (isAppControlEvent(event) || !options.assertHumanComputeSender) return false;
+    admit(event, envelope);
+    options.assertHumanComputeSender(event, envelope);
+    return true;
+  };
+  const dispatch = (op: DaemonScienceCommand["op"], payload: Row, observed = true, ownerIntent = false) => {
+    const command = { op, input: payload, ...(ownerIntent ? { nativeOwnerIntent: true as const } : {}) } as DaemonScienceCommand;
     return observed ? client.commandObserved(command) : client.command(command);
   };
   const register = (channel: string, handler: (event: IpcMainInvokeEvent, envelope: unknown) => unknown,
@@ -600,16 +615,17 @@ export function registerScienceDaemonExecutionIpc(options: {
   }, "science:projects");
   register("science:researchLoops:inspect", (_event, envelope) => dispatch("loops.inspect", { projectId: id(row(envelope)?.projectId) }), "science:projects");
   register("science:researchLoops:start", (_event, envelope) => dispatch("loops.start", input(envelope), false));
-  register("science:researchLoops:transition", (_event, envelope) => {
+  register("science:researchLoops:transition", (event, envelope) => {
     const payload = input(envelope);
-    return dispatch("loops.transition", payload, payload.action !== "resume");
+    return dispatch("loops.transition", payload, payload.action !== "resume", payload.action === "resume" && nativeOwnerIntent(event, envelope));
   });
   for (const action of ["start", "attach"] as const) register(`science:composer:${action}`, async (event, envelope) => {
     const payload = input(envelope), watched = scope(payload), viewer = viewerFor(event);
     watch(viewer, watched);
     await connectForIntent(event, envelope, action === "start");
     try {
-      return await dispatch(`composer.${action}`, action === "attach" ? watched : payload, true);
+      return await dispatch(`composer.${action}`, action === "attach" ? watched : payload, true,
+        action === "start" && nativeOwnerIntent(event, envelope));
     } catch (error) {
       // Only this store refusal proves that the existing message was already bound.
       // Keep every other remote failure as a transport failure with uncertain effects.
@@ -623,7 +639,15 @@ export function registerScienceDaemonExecutionIpc(options: {
   for (const [channel, op] of [
     ["steer", "composer.steer"], ["reconcileSteering", "composer.reconcile"], ["steering", "composer.steering"],
     ["cancel", "composer.cancel"], ["receipt", "composer.receipt"],
-  ] as const) register(`science:composer:${channel}`, (_event, envelope) => dispatch(op, input(envelope)));
+  ] as const) ipcMain.handle(`science:composer:${channel}`, (event, envelope: unknown) => {
+    const payload = input(envelope);
+    if ((op === "composer.cancel" || op === "composer.steer" && payload.intent === "stop") && options.assertScienceTerminalSender) {
+      if (closed) throw new Error("science-daemon-ipc-closed");
+      options.assertScienceTerminalSender(event, envelope);
+      if (!event.senderFrame || event.senderFrame !== event.sender.mainFrame) throw new Error("science-extension-subframe-denied");
+    } else admit(event, envelope);
+    return dispatch(op, payload, true, op === "composer.steer" && payload.intent !== "stop" && nativeOwnerIntent(event, envelope));
+  });
   register("science:conversations:list", (_event, envelope) => dispatch("conversations.list", { projectId: id(row(envelope)?.projectId) }), "science:projects");
   register("science:messages:list", (_event, envelope) => dispatch("messages.list", scope(row(envelope) ?? {})), "science:projects");
   for (const action of ["get", "revisions"] as const) register(`science:researchLifecycle:${action}`, async (event, envelope) => {
@@ -685,10 +709,23 @@ export function registerScienceDaemonExecutionIpc(options: {
   registerScienceStyleLibraryIpc({ ipc: ipcMain, client, assertScienceSender: (event, envelope, permission) => admit(event, envelope, permission) });
   // Science lists models and runs turns in the daemon, which cannot restore the session itself; hand it over now and on
   // every restore/invalidation so Agentlas serving (credits) is available to Science like it is to Work.
+  registerScienceQuestionDecisionIpc({ipcMain,
+    captureOwner:(event,envelope)=>{
+      admit(event,envelope);
+      if(!options.captureQuestionDecisionOwner) throw new Error("science-question-native-owner-unavailable");
+      return options.captureQuestionDecisionOwner(event,envelope);
+    },
+    read:async scope=>await client.commandObserved({op:"questionDecisions.read",input:scope}) as QuestionDecisionView|null,
+    answer:(scope,requestId)=>client.commandObserved({op:"questionDecisions.answer",input:scope,nativeOwnerIntent:true,ownerRequestId:requestId}),
+  });
   handOverSession();
   const stopSessionRestored = onAuthSessionRestored(() => handOverSession());
   const stopSessionInvalidated = onAuthSessionInvalidated(() => handOverSession());
-  return { reconnect, close() {
+  return { reconnect, outputScope() {
+    const scopes = [...viewers.values()].filter(live).flatMap(viewer => viewer.scope ? [viewer.scope] : []);
+    if (!scopes.length || scopes.some(scope => !matches(scope, scopes[0]))) return null;
+    return { ...scopes[0] };
+  }, close() {
     if (closed) return;
     closed = true;
     stopSessionRestored(); stopSessionInvalidated();

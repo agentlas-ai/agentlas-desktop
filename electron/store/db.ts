@@ -905,12 +905,12 @@ export function reclaimUnreachableAgentMemory(db: Database.Database): number {
  * **팩이 하나 더 생긴다**. 그때부터 새 경험은 새 팩에, 옛 경험은 옛 팩에 쌓인다.
  *
  * 사용자에게 보이는 피해는 숨는 것에서 끝나지 않았다. 새 팩에는 같은 기억이 처음부터
- * 다시 들어오면 **이미 승급한 칩을 또 검토하라고 물을 수 있다.**
- * 같은 좌표의 팩을 함께 다뤄 중복된 재검토 요청을 없앤다.
+ * 다시 들어오므로, **이미 승급한 칩을 또 검토하라고 묻는다.** 실측(이 기기): 좌표 2곳이
+ * 팩 6개로 갈렸고, 그 안에서 이미 승급된 기억에 대한 재검토 요청이 18건 있었다.
  *
- * 지킴이는 "가장 오래된 팩"이 아니라 **승급이 가장 많은 팩**이다.
- * 사용자가 작업한 팩의 승급 상태를 유지하는 쪽으로 선택하고,
- * 나머지는 아래의 행 수 보존 규칙에 따라 옮기거나 보관한다.
+ * 지킴이는 "가장 오래된 팩"이 아니라 **승급이 가장 많은 팩**이다. 실측에서 승급 12건이
+ * 전부 형제 쪽에 있었다 — 오래된 순으로 골랐다면 사용자가 실제로 작업한 팩을 보관함으로
+ * 보낼 뻔했다.
  *
  * 행 수는 어느 쪽도 줄지 않는다. `experience_packs` 와 `experience_candidates` 는 둘 다
  * 업데이트 연속성 보호 표라, 행이 하나라도 줄면 다음 업데이트가 fail-closed 로 막힌다
@@ -1056,20 +1056,20 @@ export function managedMigrationBackupsOverCap(source: string): boolean {
     .filter((name) => name.startsWith(prefix) && name.endsWith(".bak")).length > MAX_MANAGED_MIGRATION_BACKUPS;
 }
 
-/**
-
-
-
-
-
-
-
-
-
-
-
-
- */
+/** Only future, explicitly managed copies participate. Legacy .bak files are
+ * recovery evidence, not candidates inferred from their age or filename.
+ * `currentBackup` is the copy a migration just took (its rollback material), or
+ * null after open, when the newest copy simply counts toward the cap.
+ *
+ * Never call this on the Main thread or during store open. Its integrity checks
+ * are proportional to the database size (about 29 s on a 1.9 GB store with
+ * seven copies, measured 2026-10-17). The storage pass runs it in a short-lived
+ * child process (migration-backup-check.ts, started by
+ * migration-backup-retention.ts). It used to run inside initStore, where an
+ * update launch's install journal or a follower open always stopped it, so the
+ * cap of three never held (7 copies, 8.3 GB). The install journal is not a
+ * reason to keep these copies: the updater restores from updater/recovery and
+ * never reads them, and the newest three always stay. */
 export function pruneManagedMigrationBackups(db: Database.Database, currentBackup: string | null): ManagedMigrationBackupPruneOutcome {
   const result: ManagedMigrationBackupPruneOutcome = { removed: 0, bytes: 0, skipped: "none" };
   const skip = (skipped: ManagedMigrationBackupSkip): ManagedMigrationBackupPruneOutcome => ({ ...result, skipped });
@@ -1120,17 +1120,17 @@ export function pruneManagedMigrationBackups(db: Database.Database, currentBacku
       .slice(currentBackup ? MAX_MANAGED_MIGRATION_BACKUPS - 1 : MAX_MANAGED_MIGRATION_BACKUPS);
     if (candidates.length === 0) return result;
     const kept = copies.filter((copy) => !candidates.includes(copy));
-    
-
-
-
-
-
-
-
-
-
-
+    // Complete preflight before deleting anything. Read failures or corruption
+    // preserve the whole set, even above cap. A copy's file name appearing in
+    // free text (an agent's `ls` of userData in run_events) is not a reference:
+    // that scan pinned every copy forever (7 copies, 8.3 GB on 2026-10-16), and
+    // backup paths are persisted nowhere in typed form.
+    // The integrity checks are read-only and run before the write lock: each
+    // takes ~4 s per 1.6 GB copy (measured 2026-10-16), so inside .immediate()
+    // the first real prune would have blocked every other writer for ~40 s.
+    // Only the copies that stay are checked: they are the rollback material
+    // that remains, and checking copies about to go only cost time.
+    // The fingerprint re-check under the lock still catches a copy that changed.
     if (String(db.pragma("quick_check", { simple: true })) !== "ok") return skip("integrity");
     if ((db.pragma("foreign_key_check") as unknown[]).length > 0) return skip("integrity");
     for (const copy of kept) {
@@ -1564,20 +1564,20 @@ export function runPostContinuityStoreRepairs(): void {
 }
 
 /**
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+ * 이 프로세스가 열어도 되는 저장소 경로.
+ *
+ * ★스크립트로 띄운 Electron 은 사람의 실제 데이터를 열지 않는다(2026-08-11).
+ * 게이트 51개가 `userData` 를 격리하지 않은 채 라이브 `agentlas.sqlite` 를 직접 열고
+ * 있었고, 앱이 켜진 상태에서 게이트를 돌리자 동시 접근으로 `run_events` 와 그 인덱스
+ * 4개가 malformed 가 됐다 — 앱이 아예 시작하지 못했다(복구는 `.recover` 로 손실 0,
+ * 사용자 데이터 81개 테이블 중 깨진 것은 그 하나뿐이었다).
+ *
+ * 패키징되지 않은 Electron은 스크립트와 GUI를 가리지 않고 격리한다. 예전에는
+ * `scripts/` 엔트리만 막아서 `electron .`로 띄운 개발 창이 실행 중인 설치 앱의 WAL을
+ * 함께 열 수 있었다. 실제 One QA에서 이 경로가 SQLITE_CORRUPT를 만들었다. 명시적
+ * 경로가 없으면 **조용히 라이브로 떨어지지 않고** 프로세스별 임시 저장소로 돌린다.
+ * 라이브 복제본으로 QA하려면 `AGENTLAS_STORE_PATH`를 별도 복사본에 명시해야 한다 —
+ * 실수로 되는 일과 적어서 되는 일은 달라야 한다.
  */
 export function resolveStorePath(): string {
   const explicit = process.env.AGENTLAS_STORE_PATH?.trim();
@@ -5689,6 +5689,12 @@ export function initStore(options: StoreInitOptions = {}): void {
       DELETE FROM one_artifact_bindings
        WHERE chat_id NOT IN (SELECT id FROM chats)
           OR created_at < datetime('now', '-90 days');
+      DELETE FROM meta
+       WHERE key GLOB 'invocation-artifact-workspace:*'
+         AND CASE WHEN json_valid(value) THEN
+           julianday(json_extract(value, '$.expiresAt')) <= julianday('now')
+           OR json_extract(value, '$.chatId') NOT IN (SELECT id FROM chats)
+         ELSE 0 END;
     `);
   } catch {
     // 정리는 베스트에포트다 — 기동을 막지 않는다.

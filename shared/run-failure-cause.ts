@@ -6,8 +6,9 @@ import type { RunFailureNoticeFacts } from "./run-failure-notice";
  * Run failure codes whose cause is inside the app: Main's own custody, ledger, process or channel state. The owner has
  * nothing to act on, so such a failure is never written or drawn as a "needs-owner" line (host status "app-failed").
  *
- * For example goal_episode_admission_missing (Main lost its own Goal-turn admission record): the room showed Hope saying
- * "the run failed … check the run history" with a "확인 필요" status — the owner had no action, and the screen called the room broken.
+ * Production Yotube, 2026-10-17: run d85e262f failed at 11:51Z with goal_episode_admission_missing (Main lost its own
+ * Goal-turn admission record) and the room showed Hope saying "the run failed … check the run history" with a
+ * "확인 필요" status — the owner had no action, and the screen called the room broken.
  *
  * Codes are matched exactly or by one documented prefix family; prose is never inspected. An unknown code stays an
  * owner-facing failure (conservative default). The transient send-refusal set (shared/transient-send-refusal.ts) is
@@ -16,7 +17,7 @@ import type { RunFailureNoticeFacts } from "./run-failure-notice";
  * One code is in both worlds: `runtime_turn_unsettled` is a send refusal ("the previous turn of this chat has not settled
  * yet", the chat is not ready) AND the terminal code of a provider turn that ended without its terminal receipt. The second
  * carries the runner's typed failure (InvocationRuntimeFailure); the first never does. A run whose typed provider failure is
- * known is the provider's outcome, not the app's: the owner can resend or pick another model (for example an
+ * known is the provider's outcome, not the app's: the owner can resend or pick another model (F51, 2026-10-21: an
  * antigravity turn blocked by the provider's content safety filters read "App problem").
  */
 export interface AppSideRunFailureFamily {

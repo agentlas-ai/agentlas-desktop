@@ -332,11 +332,11 @@ export interface OneImportOptions {
 const yieldToEventLoop = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
 
 /**
-
-
-
-
-
+ * The same import in bounded slices. Measured 2026-09-27 (1.2.44/1.2.45 smoke,
+ * fresh store, ~2,300 blocks): the synchronous pass held Main for 32–36s, so
+ * the first screen took 38–42s and the daemon ensure's control-socket ping
+ * timed out (`daemon_control_owner_unconfirmed`). Each block is its own
+ * committed row, so yielding between blocks changes no data outcome.
  */
 export async function importOneDurableMemoryInSlices(options: OneImportOptions = {}): Promise<OneImportResult> {
   const root = options.rootOverride ?? oneWorkspaceRoot();

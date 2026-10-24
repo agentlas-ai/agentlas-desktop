@@ -100,10 +100,10 @@ interface AutomationSessionPanelProps {
   /** 바깥 공용 입력이 세션 전송을 부를 수 있는 손잡이. */
   sendHandleRef?: React.MutableRefObject<((text: string, files?: File[], onAccepted?: () => void) => void) | null>;
   /**
-
-
-
- */
+   * Whether the panel is on screen. A parent that keeps it mounted under display:none passes false: the 5 s poll
+   * (200 messages, up to 1.9 MB) pauses and one read runs when it is shown again. display:none leaves
+   * document.visibilityState "visible", so the interval cannot see it by itself (perf review 2026-10-17, R-06).
+   */
   active?: boolean;
 }
 
@@ -158,11 +158,22 @@ export function AutomationSessionPanel({
   const chatIdRef = useRef<string | null>(null);
   chatIdRef.current = chatId;
 
+  const loadRequest = useRef(0);
+  const loadOwner = useRef(automationId);
+  loadOwner.current = automationId;
+  const mounted = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; ++loadRequest.current; };
+  }, []);
   const load = useCallback(async () => {
+    const request = ++loadRequest.current;
+    const isCurrent = () => mounted.current && loadOwner.current === automationId && request === loadRequest.current;
     const api = ipc();
     if (!api) return;
     try {
       const session = await api.automations.getSession(automationId);
+      if (!isCurrent()) return;
       const visible = session.messages.filter((message) => (
         message.role !== "system" || isVisibleAutomationSystemNotice(message)
       ));
@@ -173,23 +184,14 @@ export function AutomationSessionPanel({
       setRuntimeSelection((current) => selection && sameSnapshotIgnoring(current, selection, []) ? current : selection);
       setUnavailable(false);
     } catch {
-      setUnavailable(true);
+      if (isCurrent()) setUnavailable(true);
     }
   }, [automationId]);
 
-  useEffect(() => {
-    void load();
-  }, [load]);
-  const activeRef = useRef(active);
-  useEffect(() => {
-    const wasActive = activeRef.current;
-    activeRef.current = active;
-    if (active && !wasActive) void load();
-  }, [active, load]);
   useVisibleInterval(() => {
-    if (busyRef.current || !activeRef.current) return;
-    void load();
-  }, 5_000);
+    if (busyRef.current) return;
+    return load();
+  }, 5_000, { initial: load, enabled: active });
 
   // 새 메시지/스트리밍 델타마다 하단 고정.
   useEffect(() => {
@@ -232,8 +234,8 @@ export function AutomationSessionPanel({
       busyRef.current = true;
       setStatus(ko ? "자동화가 실행 중이에요…" : "The automation is running…");
       let accumulated = "";
-      
-
+      // Main sends a teammate's partial as a delta (perf review 2026-10-17, R-03); this view read its whole text.
+      // The attach buffer holds each teammate's latest whole text: the base for the deltas that follow.
       const teammateTexts = new Map<string, string>();
       for (const event of attached.events) {
         if (event.kind === "partial" && event.agentId && typeof event.text === "string") teammateTexts.set(event.agentId, event.text);
@@ -364,7 +366,7 @@ export function AutomationSessionPanel({
       function subscribeToRun(targetRunId: string) {
         if (!events) return;
         unsubRef.current?.();
-        
+        // Main sends a teammate's partial as a delta (perf review 2026-10-17, R-03); this view read its whole text.
         const teammateTexts = new Map<string, string>();
         unsubRef.current = events.on(api!.invoke.eventChannel(targetRunId), (delivered: McpInvocationEvent) => {
           const ev = reassembleAgentLivePartial(teammateTexts, delivered.agentId ?? "", delivered);

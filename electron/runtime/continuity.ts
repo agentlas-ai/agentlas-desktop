@@ -153,6 +153,8 @@ const stableSent = new Map<string, { turn: number; sent: Map<string, number>; ac
 const stableInvalidations = new Map<string, number>();
 let stableInvalidationSerial = 0;
 let forgottenInvalidationGeneration = 0;
+const nativeRetentionEpochs = new Map<string, number>();
+let nativeRetentionSerial = 0;
 
 export interface StableTurnContextIdentity {
   chatId?: string | null;
@@ -173,6 +175,16 @@ function stableContextKey(input: StableTurnContextIdentity): string {
 }
 function stableContextScope(input: Omit<StableTurnContextIdentity, "contextFingerprint">): string {
   return JSON.stringify([input.chatId ?? "", input.runtimeKind, input.sessionId]);
+}
+/** Only adapters with typed context-loss observation may confirm host ACK reuse. */
+export function nativeStableTurnContextEpoch(input: Omit<StableTurnContextIdentity, "contextFingerprint">, establish = false): number | undefined {
+  if (!input.sessionId || (input.runtimeKind !== "codex" && input.runtimeKind !== "claude-code")) return undefined;
+  const scope = stableContextScope(input);
+  if (establish && !nativeRetentionEpochs.has(scope)) {
+    nativeRetentionEpochs.set(scope, ++nativeRetentionSerial);
+    while (nativeRetentionEpochs.size > STABLE_SESSIONS_MAX) nativeRetentionEpochs.delete(nativeRetentionEpochs.keys().next().value as string);
+  }
+  return nativeRetentionEpochs.get(scope);
 }
 function stableContextGeneration(input: Omit<StableTurnContextIdentity, "contextFingerprint">): number {
   return stableInvalidations.get(stableContextScope(input)) ?? forgottenInvalidationGeneration;
@@ -229,8 +241,11 @@ export function acknowledgeStableTurnContext(delivery: StableTurnContextDelivery
 }
 
 /** Typed compaction/replacement invalidates every config view of this native identity. */
-export function invalidateStableTurnContext(input: Omit<StableTurnContextIdentity, "contextFingerprint">): void {
+export function invalidateStableTurnContext(input: Omit<StableTurnContextIdentity, "contextFingerprint">, nativeContextLost = false): void {
   const scope = stableContextScope(input);
+  if (nativeContextLost) {
+    nativeRetentionEpochs.delete(scope);
+  }
   if (!stableInvalidations.has(scope) && stableInvalidations.size >= STABLE_SESSIONS_MAX) {
     const oldest = stableInvalidations.keys().next();
     if (!oldest.done) stableInvalidations.delete(oldest.value);

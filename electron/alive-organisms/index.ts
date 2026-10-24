@@ -134,7 +134,8 @@ function runView(goalId: string): GoalRunView | null {
 /**
  * The Goal's own controller turn, read live by the exact invocation its newest controller attempt ran: what the
  * controller model is shown as "the Goal's last run". The room's newest foreground run is not that (a teammate's report
- * turn, an owner's side question, or a relay the waiting Goal refused).
+ * turn, an owner's side question, a relay the waiting Goal refused: flow audit ID-2; Yotube 10-14..10-18, 73 of 108
+ * foreground runs bound a controller attempt).
  */
 export function goalOwnTurnReceipt(run: GoalRunView): { status: string; errorCode: string | null; finishedAt: string | null } | null {
   const runId = goalControllerAttempt(getDb(), run.id)?.invocationRunId;
@@ -298,7 +299,7 @@ function agiLeaseHoldsChat(chatId: string): boolean {
  */
 export function startAliveOrganisms(): AliveOrganismHost | null {
   if (participant) return host;
-
+  // D3 (owner 2026-09-28): every One/Work goal is monitored, with or without an AGI life. No model calls.
   agiMonitor = new AgiGoalMonitor({
     db: getDb(),
     now: Date.now,
@@ -553,8 +554,8 @@ export async function readAliveState(input: unknown): Promise<AliveState> {
   const local = host;
   if (!local || !local.isRunning()) return notLocal();
   await local.refreshPlanAccess();
-
-
+  // Startup hands the domain to the background service; when that lands during the await, the local host is gone
+  // (production 1.3.67 first launch, 2026-10-18 00:11:03Z: "Cannot read properties of null (reading 'getState')").
   if (host !== local || !local.isRunning()) return notLocal();
   return local.getState(row.surface as AliveSurface, row.chatId as string);
 }

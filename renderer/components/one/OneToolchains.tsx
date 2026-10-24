@@ -12,8 +12,8 @@ export const toolchainStackClassName = styles.stack;
 type Asset = Awaited<ReturnType<ToolchainsApi["listAssets"]>>[number];
 
 /**
- * A Toolchain is an MCP tool the agents call for an app or web page they used to operate by hand
- * The rail lists them with where each stands: callable, in trial, being repaired, or failing often.
+ * A Toolchain is an MCP tool the agents call for an app or web page they used to operate by hand (owner definition,
+ * 2026-10-20). The rail lists them with where each stands: callable, in trial, being repaired, or failing often.
  */
 function stateLabel(asset: Asset, ko: boolean): string {
   if (asset.health?.state === "pulled_back") return ko ? "수리 중" : "Under repair";

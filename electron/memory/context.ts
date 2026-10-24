@@ -423,15 +423,15 @@ function summarizeCareerGraph(projectPath: string): string | null {
 }
 
 /**
-
-
-
-
-
-
-
-
-
+ * Recall provenance frame (2026-09-24). Two host facts decide a label; the
+ * memory text is never read for it:
+ *  - the memory was written from an unattended automation's ledger chat, or
+ *  - this recall feeds an unattended automation run, and the memory is an
+ *    agent-authored rule (decision/procedure outside user_identity).
+ * Measured on the owner's store: ~30 self-imposed hold/quota rules were
+ * injected before every automation node as bare `[procedure]` lines, which the
+ * run obeyed over the owner's declared growth targets. Labelled, they read as
+ * what they are; in automation recall they are also ranked lower.
  */
 interface RecallFrame {
   automationRecall: boolean;
@@ -490,13 +490,13 @@ function selectMemoryEntries(entries: MemoryEntry[], taskPrompt?: string, frame?
   nativeSource?: ReturnType<typeof nativeRecallFor>, tokenBudget = MEMORY_SELECTED_MAX_APPROX_TOKENS): MemoryEntry[] {
   const query = String(taskPrompt ?? "").trim();
   if (!query || localEmbeddingTokens(query).length === 0) return entries.slice(0, MAX_ENTRIES);
-  
-
-
-
-
-
-
+  // English is the search/capsule surface; the original wording is a second
+  // channel (better of the two, lexical and vector) so a question in the user's
+  // language still finds a translated memory (plan §9-8 condition B — English
+  // storage with a native query — measured median rank 1,476). Measured on the
+  // owner's store copy: concatenating both into one text diluted the original's
+  // lexical match (Korean top-1 17→13 of 20); max-of-two keeps it. The capsule
+  // stays English.
   const natives = nativeSource ?? nativeRecallFor("memory_entry", entries.map((entry) => entry.id));
   const ranked = rankHybridLocal(query, entries.map((entry) => ({
     id: entry.id,
@@ -849,9 +849,10 @@ export async function buildMemoryContext(
     /** Exact host domain when available; chat-id segregation always remains. */
     visibilityDomain?: string;
     signal?: AbortSignal;
+    recallBoundary?: "assigned-target";
   } = {},
 ): Promise<string> {
-  if (options.signal?.aborted) return "";
+  if (options.signal?.aborted || options.recallBoundary === "assigned-target") return "";
   const custody = getMemoryStoreInfo();
   const stillCurrent = (): boolean => !options.signal?.aborted && sameMemoryCustody(custody, getMemoryStoreInfo());
   const sections: string[] = [];

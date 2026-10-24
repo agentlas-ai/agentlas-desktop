@@ -64,28 +64,28 @@ const ROUTING_CARD_CAPABILITY_RE = /^[a-z][a-z0-9]*(_[a-z0-9]+)+$/;
 const ROUTING_CARD_STATUSES = new Set(["draft", "searchable", "candidate", "routing_ready", "trusted"]);
 
 /**
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+ * ★ WHAT THE PRODUCT ITSELF CALLS PRIVATE MUST NOT SHIP IN A PACKAGE.
+ *
+ * The product writes a `.gitignore` into every user project declaring these
+ * files machine-local: "per-machine outputs of features each user runs on their
+ * own files — nobody else consumes another person's copy — and publishing one
+ * leaks the shape of a private working tree" (project-files.ts). The upload
+ * scanner shipped almost all of them anyway. Measured 2026-08-18 on Quant
+ * Research Desk: the live Hub listing is 56 files / 287KB while the local
+ * folder had grown to 62 files / 732KB — the delta was exactly this local
+ * state, `ontology-runtime.sqlite` alone 316KB (43% of the folder).
+ *
+ * The list mirrors hep-upload's `GENERATED_RUNTIME_PATHS` +
+ * `UPLOAD_DERIVED_EVIDENCE_PATHS` (Agentlas-OS agentlas_cloud) plus the
+ * private-memory files both channels missed. Keeping the two channels'
+ * exclusion sets identical keeps the packageHash of one folder identical no
+ * matter which product uploads it. Installers lose nothing: first contact
+ * regenerates every one of these through the project bootstrap.
+ *
+ * Deliberately NOT here: `memory-tickets.jsonl` + `ticket-slugs.json` (teams
+ * ship authored seed memories — measured: qrd-mem-seed-001 — and One's
+ * memory-map consumes them) and `.agentlas/pm/learnings/` (the cross-host
+ * shared learning layer, part of the runtime-bundle contract).
  */
 const MACHINE_LOCAL_STATE_FILES = new Set([
   // rebuildable runtime indexes (hep-upload: GENERATED_RUNTIME_PATHS)
@@ -116,25 +116,25 @@ const MACHINE_LOCAL_STATE_FILE_PREFIXES = [
 ];
 
 /**
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+ * ★ A RESULT IS NOT A CAPABILITY. Owner decision 2026-08-18.
+ *
+ * What an agent PRODUCES while it works — the rendered page, the screenshot it
+ * took to check itself, the deck it exported, the page dump its browser tool
+ * left behind — is an output of one run on one person's machine. It is not what
+ * the agent can DO. The thing that must ship is the script/prompt/preset that
+ * produces it again on the installer's machine.
+ *
+ * Measured 2026-08-18 across the published teams: every folder over the 3 MB
+ * ceiling was over it because of outputs, never because of knowledge.
+ * no-slop-seeder carried 3.0 MB of captures, logs and chat attachments;
+ * agentlas-startup-founder-studio 1.1 MB of `.studio-runtime` productions;
+ * Web_master 0.6 MB of report screenshots; browser-driving teams carry
+ * `.playwright-mcp/page-*.yml` dumps at 286 KB each. Not one of those files is
+ * read by the agent that shipped it.
+ *
+ * `.agentlas/work/` is the declared home for run outputs, so an agent author has
+ * somewhere correct to write. Everything here regenerates on first run; leaving
+ * it out costs the installer nothing.
  */
 /**
  * Cleaning drops these on sight and nobody needs to be told: build output,
@@ -174,17 +174,17 @@ export function isRegeneratedWorkOutputPath(value: string): boolean {
 }
 
 /**
-
-
-
-
-
-
-
-
-
-
-
+ * ★ WHAT THE PRODUCT REFUSES TO COMMIT, THE PRODUCT MUST REFUSE TO PUBLISH.
+ *
+ * `ensureAgentlasCredentialIgnore` (memory/project-files.ts) writes
+ * `signing/*` and `credentials/*` into every project's .gitignore, keeping only
+ * each folder's README. Upload knew nothing about it: it screened FILE NAMES
+ * (`credentials.*`, `*.key`, `*.pem`) and let `credentials/google-services.json`
+ * or `signing/anything.txt` straight through. Measured 2026-08-18 — both
+ * returned "included".
+ *
+ * Mirrored here folder-for-folder, README exempted exactly as the .gitignore
+ * exempts it, so the installer still reads "put your config here".
  */
 const PRODUCT_PRIVATE_DIRS = ["credentials/", "signing/"];
 const PRODUCT_PRIVATE_KEPT_FILES = new Set(["readme.md"]);
@@ -224,11 +224,11 @@ const AGENT_DEF_FILES = new Set<string>(UPLOAD_AGENT_DEFINITION_FILES);
 const SKIP_DIRS = new Set<string>(UPLOAD_SKIP_DIRECTORIES);
 
 const BLOCKED_FILE_PATTERNS = [
-  
-
-
-
-
+  // `.env.example` / `.env.sample` / `.env.template` are documentation: they
+  // name the variables an installer must set and hold no values. The cleaning
+  // pass has always kept them (publish-autofix SECRET_FILE_PATTERNS); the scan
+  // did not, so a package that documented its own configuration had that file
+  // deleted by the repair pass. Measured on agentlas-startup-founder-studio.
   /^\.env(?:\.(?!example$|sample$|template$).*)?$/i,
   /^id_rsa(?:\.pub)?$/i,
   /^credentials(?:\..*)?$/i,
@@ -251,9 +251,9 @@ const SECRET_PATTERNS: Array<{ id: string; re: RegExp; label: string }> = [
 ];
 
 /**
-
-
-
+ * The id of the first canonical secret pattern in `text`, or null. Site publish scans app source with the same
+ * patterns as Agent Cloud packaging (review 2026-10-16, desktop-b-09: its own single regex had drifted and missed
+ * Stripe, GitHub, Slack, AWS and npm keys).
  */
 export function scanTextForSecrets(text: string): string | null {
   for (const pattern of SECRET_PATTERNS) if (pattern.re.test(text)) return pattern.id;
@@ -447,19 +447,19 @@ export function trimPackageToLimits(
   };
   if (!overLimit()) return actions;
 
-  
-
-
-
-
-
-
-
-
-
-
-
-
+  // ★ TRIMMING MUST NOT COST THE AGENT ITS ABILITIES. Owner decision 2026-08-18.
+  //
+  //   The old ranking knew file SIZE and file TYPE and nothing about what the
+  //   agent needs. Two consequences, both measured on shipped teams:
+  //     - `knowledge/`, `skills/`, `prompts/`, `presets/` were ordinary content
+  //       (rank 5), so the biggest knowledge file went before any build output.
+  //     - `samples/` was rank 3 — dropped early as "examples" — while
+  //       photo-studio-agent-team's shotplans name `/samples/angle-frontal.jpg`
+  //       on every single cut. Those samples ARE the capability.
+  //
+  //   So: capability directories are rank 0, and any file another packaged file
+  //   actually names is rank 0 regardless of where it sits. What nobody reads
+  //   can go; what something reads stays.
   const CAPABILITY_DIR_RE = /(^|\/)(knowledge|skills?|prompts?|presets?|agents|workers|contracts|shotplans|playbooks|templates)\//;
   const referencedNames = collectReferencedFileNames(root);
   const rankOf = (rel: string, bytes: number): number => {
@@ -837,17 +837,17 @@ ${tagline || "Portable Agentlas cloud agent package."}
 
 /** Friendly one-line breakdown of what the publish auto-fix did, for the user. */
 /**
-
-
-
-
-
-
-
-
-
-
-
+ * ★ A FILE THAT LEFT THE PACKAGE MUST BE NAMED. Owner decision 2026-08-18.
+ *
+ * Auto-fix ends every publish at zero blockers, and its last resort is deleting
+ * the offending file from the scan copy. That is a change to what the agent can
+ * do, so it cannot be reported as a count buried in a sentence — and until now
+ * it was not reported at all outside `status: "registered"`. Measured: a 600 KB
+ * `knowledge.md` vanished under `Private Agent Cloud package ready`, verdict
+ * "pass", zero findings.
+ *
+ * Excluded files are named (up to three, then "+N"). hep-upload does the same
+ * thing through its omission receipts; this is Desktop saying it out loud.
  */
 function summarizeRemediation(actions: RemediationAction[], locale: "ko" | "en"): string {
   if (actions.length === 0) return "";
@@ -1075,17 +1075,17 @@ export async function packageAndReviewCloudAgent(
       });
     }
   }
-  
-
-
-
-
-
-
-
-
-
-
+  // ★ THE PUBLISHING SLUG IS THE PACKAGE'S OWN, NOT THE LOCAL REGISTRY ROW'S.
+  //   Uploading a registered agent/team passed the registry slug through, and a
+  //   locally imported team is stored as `firm-local-<folder>` (its CEO as
+  //   `local-<folder>`, with a `-2` suffix on re-import). The same folder chosen
+  //   through "Choose an agent folder" derived `quant-research-desk` from its
+  //   agent-card, so ONE asset had two identities depending on which control the
+  //   user clicked — and the second one is exactly what the server rejects as
+  //   `slug_identity_conflict`. Measured 2026-08-18 on Quant Research Desk.
+  // sanitizeSlug("")는 빈 문자열이 아니라 "agentlas-cloud-agent" 폴백을 돌려준다 —
+  // 빈 후보를 먼저 걸러야 우선순위 체인이 산다. (dry-run e2e가 잡은 결함:
+  // 모든 무명 업로드가 폴백 이름으로 발행될 뻔했다.)
   const callerSlug = input.slug?.trim() ? sanitizeSlug(input.slug) : "";
   const stableSlug = readStableSlug(finalSnapshot);
   const packageSlug = stableSlug ? sanitizeSlug(stableSlug) : "";

@@ -148,10 +148,24 @@ export interface RunnerEnvOptions {
   memberAgents?: ReadonlyArray<Pick<InstalledAgent, "envRequirements"> | null | undefined>;
 }
 
-// Restricted runs are BYOK/Ollama protocol calls, not local CLI processes.
-// Their runner implementations ignore `env`, so inherit nothing at all.
-export function restrictedRunnerEnv(): NodeJS.ProcessEnv {
-  return {};
+// A read-only automation's stages (restrictedReadBoundary) used to be BYOK/Ollama
+// protocol calls only, so they inherited nothing. Since every runtime runs them
+// through its own read mechanism (owner rule 2026-10-23), the local CLIs need the
+// host coordinates of their own subscription login: with an empty env a real
+// Claude Code stage answered "Not logged in". They receive exactly the Agent App
+// coordinate allowlist below and nothing else: no dotenv/credential files, vault
+// keys, proxy credentials, preload hooks or arbitrary process env.
+export function restrictedRunnerEnv(source: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  return hostCoordinateEnv(source);
+}
+
+function hostCoordinateEnv(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const key of AGENT_APP_RUNNER_ENV_ALLOWLIST) {
+    const value = source[key];
+    if (typeof value === "string" && value) env[key] = value;
+  }
+  return env;
 }
 
 // Browser-originated Agent App input is untrusted. Its model process receives
@@ -198,11 +212,7 @@ export function buildAgentAppRunnerEnv(
   source: NodeJS.ProcessEnv = process.env,
   mainOwnedCapabilityEnv?: NodeJS.ProcessEnv,
 ): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = {};
-  for (const key of AGENT_APP_RUNNER_ENV_ALLOWLIST) {
-    const value = source[key];
-    if (typeof value === "string" && value) env[key] = value;
-  }
+  const env = hostCoordinateEnv(source);
   // Only the main-owned MCP config builder can mint these opaque aliases.
   // Never copy a raw key name/value from process.env or renderer-shaped input.
   for (const [key, value] of Object.entries(mainOwnedCapabilityEnv ?? {})) {

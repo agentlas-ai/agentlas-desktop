@@ -1,18 +1,18 @@
 import { KEYED_ADAPTERS } from "./keyed-provider";
 
 /**
-
-
-
-
-
-
-
-
-
-
-
-
+ * The keyed host route that serves the same provider as an installed connector.
+ * The route counts only when the owner's saved key for it is present.
+ *
+ * Production 2026-10-17, Yotube room. ElevenLabs was installed as its remote
+ * MCP (api.us.elevenlabs.io, OAuth only, no declared env keys). The owner's
+ * ElevenLabs key was in the Vault, and every run already received it. Even so,
+ * auth.ensure saw only the missing OAuth sign-in and pointed to auth.login, so
+ * the room asked the owner to re-authenticate a service their key already
+ * served.
+ *
+ * Matching is by registrable domain: the connector host equals the provider
+ * domain or is a subdomain of it, never a look-alike name.
  */
 export async function keyedRouteForConnectorUrl(
   url: string | null | undefined,

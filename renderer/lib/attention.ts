@@ -389,10 +389,10 @@ export function attentionLabel(counts: { approvals: number; results: number }, l
 }
 
 /**
-
-
-
-
+ * 점 또는 점 찍힌 항목을 눌렀다 — 그 대화(또는 목적지)로 간다. 카드는 거기서 편다.
+ * `push` 는 부르는 화면의 App Router(soft navigation). One·Science 는 AppShell 밖이라
+ * lib/navigation 의 등록 라우터가 없을 수 있고, 그러면 hard navigation 이 되어 정적 export
+ * 에서 문서를 통째로 다시 띄운다(실측: QA 에서 대기열이 비었다).
  */
 export async function openAttentionEntry(
   entry: Pick<AttentionChatEntry, "chatId" | "href" | "orphan">,

@@ -3,14 +3,14 @@ import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-
-
-
-
-
-
-
-
+// `xcrun stapler validate` looks the ticket up online (CloudKit, api.apple-cloudkit.com) even when the ticket is
+// already stapled. From GitHub's macOS runners that lookup drops for minutes at a time ("The network connection was
+// lost", Error 68). 1.3.56 stapled its arm64 DMG five times in eight minutes, and the validate run right after each
+// staple failed every time. Half of the failed release runs on 2026-10-13..17 died on a lookup like this. Waiting and
+// retrying cannot outlast it.
+// A lost connection says nothing about the artifact, so only that verdict is decided offline. Two things must hold:
+// the Apple ticket ("s8ch") is stapled in the artifact itself, and Gatekeeper calls the artifact "Notarized Developer
+// ID". A missing ticket, or any other stapler verdict, still fails.
 
 const TICKET_MAGIC = "s8ch";
 const CSMAGIC_EMBEDDED_SIGNATURE = 0xfade0cc0;

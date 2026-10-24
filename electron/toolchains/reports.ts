@@ -1,10 +1,10 @@
-// Result → repair loop for Toolchain assets.
+// Result → repair loop for Toolchain assets (owner 2026-10-04: "AI가 자동화 결과 받고 직접 수정").
 //
 // Layer rule: a Toolchain is a leaf tool. Whoever calls it never changes it — a Work task, a teammate, or another of One's
 // conversations reports "this call was wrong for this input" and the event travels up to the conversation that made it. A
 // report never starts a turn by itself (commands go down, events go up). A repair is a new version, budgeted per day.
 // Repeated real-use failures are also counted by the host (health.ts) and pull a Toolchain back for repair on their own.
-// (The earlier reports and budgets for graphs called as Toolchains are retired: a graph is not a Toolchain.)
+// (The 2026-10-04 reports and budgets for graphs called as Toolchains are retired: a graph is not a Toolchain.)
 
 import { createHash } from "node:crypto";
 import { getToolchainAsset } from "./assets";

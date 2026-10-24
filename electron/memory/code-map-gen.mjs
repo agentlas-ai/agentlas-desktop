@@ -61,7 +61,7 @@ function gitFiles(dir) {
   if (_gitCache.has(dir)) return _gitCache.get(dir);
   let res = null;
   try {
-    const out = execSync("git ls-files --cached --others --exclude-standard -z", { cwd: dir, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], maxBuffer: 512 * 1024 * 1024 });
+    const out = execSync("git ls-files --cached --others --exclude-standard -z", { cwd: dir, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], maxBuffer: 512 * 1024 * 1024, windowsHide: true });
     res = out.split("\0").filter(Boolean);
   } catch { res = null; }
   _gitCache.set(dir, res); return res;

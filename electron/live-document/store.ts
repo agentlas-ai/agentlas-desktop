@@ -136,8 +136,8 @@ export async function openLiveDocument(input: { chatId: string; path: string }):
   const format = inferLiveDocumentFormat(target);
   if (!format) throw new LiveDocumentError("format_unsupported", "xlsx, docx, pptx, hwpx or hwp");
   let stat: fs.Stats;
-  
-
+  // A path with nothing at it is a document to create (dev 2026-10-18 F9 A/B: a brief had the worker open a new
+  // reports/*.docx, the refusal named only the path, and the worker stopped). The mirror of create's file_exists.
   try { stat = fs.statSync(target); } catch { throw new LiveDocumentError("file_missing", `${target} does not exist; ${format === "hwp" ? "document.create makes a new Hangul document with the same name as .hwpx" : "document.create makes a new file at this path"}`); }
   if (!stat.isFile()) throw new LiveDocumentError("file_missing", target);
   if (stat.size > MAX_FILE_BYTES) throw new LiveDocumentError("file_too_large", `${stat.size} bytes`);
@@ -206,7 +206,7 @@ export async function liveDocumentDelta(sessionId: string, sinceRevision: number
   return { sessionId, revision, entries: state.entries.slice(sinceRevision) };
 }
 
-/** */
+/** A slide body placeholder draws its own bullets; a typed "• " in front of each line would show two (real run 2026-10-17). */
 function withoutTypedBullets(model: LiveDocumentModel, ops: LiveDocumentOp[]): LiveDocumentOp[] {
   if (model.kind !== "slides") return ops;
   const bodies = new Set(model.slides.flatMap((slide) => slide.shapes.filter((shape) => shape.role === "body").map((shape) => shape.id)));
@@ -333,6 +333,19 @@ export async function closeLiveDocument(sessionId: string): Promise<boolean> {
     cache.delete(sessionId);
     return true;
   });
+}
+
+/**
+ * Named parts of a session's original file (source.bin, the file as opened), each at most `maxBytes` uncompressed: document.render
+ * draws a deck's pictures from here. Only the requested names are inflated; a missing or larger part is simply absent.
+ */
+export async function liveDocumentSourceParts(sessionId: string, names: readonly string[], maxBytes: number): Promise<Map<string, Uint8Array>> {
+  const wanted = new Set(names);
+  if (!wanted.size) return new Map();
+  const dir = await sessionDir(sessionId);
+  const { unzipSync } = await import("fflate");
+  const files = unzipSync(fs.readFileSync(path.join(dir, "source.bin")), { filter: (file) => wanted.has(file.name) && file.originalSize <= maxBytes });
+  return new Map(Object.entries(files));
 }
 
 export async function liveDocumentRoot(): Promise<string> {

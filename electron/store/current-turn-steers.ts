@@ -21,11 +21,11 @@ export const countPendingCurrentTurnSteers = store.countPendingCurrentTurnSteers
 export const CURRENT_TURN_RUN_STOPPED_CODE = "owner_control_run_stopped";
 
 /**
-
-
-
-
-
+ * The owner stopped the run: the directions it had not dispatched yet (`queued`) are settled `rejected` with the stop's
+ * code, in the caller's transaction, instead of staying `queued` forever (production chat 89bc5018: two rows queued
+ * since 2026-10-10 23:53Z, the run was stopped at 23:54:22Z; no cause, no carry, no exit). The owner's message rows stay
+ * in the chat. An interrupt-mode owner text (requestedMode "interrupt") is the stop itself and keeps its own
+ * held/uncertain settlement (InvocationService.nativeOwnerText). Returns the settled count.
  */
 export function rejectQueuedCurrentTurnSteersForStop(chatId: string, runId: string): number {
   if (!chatId || !runId) return 0;

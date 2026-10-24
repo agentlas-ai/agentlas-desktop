@@ -38,7 +38,7 @@
 }
 .editor input::placeholder { color: color-mix(in srgb, var(--ink-soft) 55%, transparent); }
 .editor input:hover:not(:disabled) { border-color: color-mix(in srgb, var(--ink) 30%, var(--paper-edge-strong)); }
-/* Design rule (globals.css): a text input draws no ring or border on focus, the caret shows it. The cell only turns paper white. */
+/* Owner decision 2026-10-04 (globals.css): a text input draws no ring or border on focus, the caret shows it. The cell only turns paper white. */
 .editor input:focus-visible { background: var(--paper); }
 .editor input:disabled { opacity: .55; }
 .editor input[aria-invalid="true"] { border-color: var(--danger); background: var(--danger-soft); }

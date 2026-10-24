@@ -101,8 +101,8 @@ export interface OneToolchainOriginalWorkPorts {
   /** Personal installation only; absent (organization) means only a Supervisor command is original work. */
   turns?:OneToolchainPersonalTurnPorts|null;
 }
-/**
- */
+/** Personal-scope original work without a Supervisor command row (production 2026-10-08..18: 209 of the 210 runs that
+ * called toolchain_* had none). The personal composition supplies these; they mint no command, queue or grant. */
 export interface OneToolchainPersonalTurnPorts {
   /** The live invocation record THIS process holds for the run (InvocationService.liveRunOwner), never a stored row. */
   liveRunOwner(runId:string):InvocationRunOwner|null;
@@ -445,9 +445,9 @@ export async function createDefaultOneToolchainNativeRegistration(input:{owners:
   if(!input.owners||!input.business)fail('toolchain_native_shipping_owner_ports_unbound');
   const [db,auth,profile,host,tasks,owners,supervisor,admissions]=await Promise.all([import('../store/db'),import('../auth'),import('../store/one-profile'),import('./host-identity'),import('../store/tasks'),import('../store/invocation-run-owners'),import('./supervisor'),import('../store/invocation-admissions')]);
   const turns=input.turns??null;
-  
-
-
+  // A personal installation has no budget policy (production one_budget_policies: 0 rows) and its reservations carry
+  // budget_id NULL. There the command's own run is the budget authority, exactly as for a personal turn; a configured
+  // policy keeps the reservation path and turnBudget answers null.
   const personalBudget=(row:Readonly<SupervisorRequestRow>)=>turns&&row.run_id?turns.turnBudget({oneId:row.one_id,runId:row.run_id,chatId:row.origin_chat_id}):null;
   return createOneToolchainNativeRegistration({owners:input.owners,business:input.business,turns,db:db.getDb(),
     actor:()=>{const s=auth.getAuthenticatedSessionBinding();if(!s||s.expiresAt!==null&&s.expiresAt<=Date.now())fail('toolchain_native_session_required');return {principalId:s.userId,sessionId:s.sessionId,workspaceId:s.workspaceId,oneId:profile.getOneProfile().oneId,hostId:host.oneNativeHostIdentity().hostId};},

@@ -3,17 +3,17 @@ import path from "node:path";
 import { DAY_MS } from "./storage-policy";
 
 /**
-
-
-
-
-
-
-
-
-
-
-
+ * Cloud agent package folders: cloud-agents/package.ts writes
+ * cloud-agent-packages/<slug>-<ISO stamp>/ (package.manifest.json and
+ * package.bundle.json, a full JSON copy of the agent's files) on every save or
+ * publish, and reads it back only while that same call registers it. Nothing
+ * reads a folder afterwards. On the owner's Mac 2026-10-17: 3,971 folders,
+ * 960 MB. They are intermediates under the owner's storage budget (2026-10-16).
+ *
+ * A folder goes when its name stamp and everything in it are older than
+ * `keepDays`, and a newer folder of the same slug exists: the newest package
+ * of each slug always stays. Names that do not match the packager's layout,
+ * symlinks, and files are never touched; removal does not follow links.
  */
 const PACKAGE_DIR = /^(.+)-(\d{4}-\d{2}-\d{2})T(\d{2})-(\d{2})-(\d{2})-(\d{3})Z$/;
 

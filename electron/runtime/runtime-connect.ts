@@ -29,7 +29,8 @@ import type {
   RuntimeConnectSnapshot,
 } from "../../shared/runtime-connect";
 import { CONNECTABLE_RUNTIMES, maskAccount } from "../../shared/runtime-connect";
-import { parseAgyModels } from "../../shared/model-discovery";
+import { grokListingSignedOut, parseAgyModels } from "../../shared/model-discovery";
+import { manualSetupFor, manualSetupText, setupOsFromNodePlatform } from "../../shared/runtime-manual-setup";
 
 interface RuntimeConnectPlan {
   /** 우리가 설치할 수 있나(install-cli 고정 목록). */
@@ -53,7 +54,9 @@ const PLANS: Record<ConnectableRuntime, RuntimeConnectPlan> = {
   kimi: { installable: true, probeArgs: null, loginArgs: ["login"], openUrlFromOutput: false },
   // Antigravity 로그인은 인자 없이 띄운 TUI 안에서만 된다 → 터미널 로그인. 확인은 agy models.
   antigravity: { installable: false, probeArgs: ["models"], loginArgs: null, openUrlFromOutput: false, manualInstall: "https://antigravity.google" },
-  cursor: { installable: false, probeArgs: ["status"], loginArgs: ["login"], openUrlFromOutput: false, manualInstall: "curl https://cursor.com/install -fsS | bash" },
+  // Cursor ships its own installer script, per OS (shared/runtime-manual-setup.ts): bash on macOS/Linux, PowerShell on Windows.
+  cursor: { installable: false, probeArgs: ["status"], loginArgs: ["login"], openUrlFromOutput: false,
+    manualInstall: manualSetupText(manualSetupFor("cursor", setupOsFromNodePlatform(process.platform))) },
 };
 
 const PROBE_TIMEOUT_MS = 20_000;
@@ -164,7 +167,7 @@ export function interpretProbe(
     case "grok": {
       const who = /logged in with\s+([^\s.]+(?:\.[^\s.]+)*)/i.exec(out);
       if (who) return { state: "signed-in", account: null, method: who[1] };
-      if (/not authenticated|not logged in|sign in/i.test(out)) return { state: "signed-out", account: null, method: null };
+      if (grokListingSignedOut(out)) return { state: "signed-out", account: null, method: null };
       return { state: "unknown", account: null, method: null };
     }
     case "antigravity":

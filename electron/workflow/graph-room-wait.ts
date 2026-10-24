@@ -1,18 +1,18 @@
-
-
-
-
-
-
-
-
-
-
-
+/*
+ * A graph agent step whose room is busy with another run waits for the room instead of failing.
+ *
+ * Since 2026-10-17 the YouTube room carries two owner-made daily producers: the daily graph (cdf732ca, its steps run in the
+ * room) and the owner's /goal Goal (09:32Z, its turns run in the same room and the sweep resumes it between turns). A step
+ * claims the room's run ownership before its work unit begins (run-graph.ts), so a step that found a Goal turn running was
+ * refused invocation_chat_owned_by_other_run and the step failed: the night's run ended at step 1 with "the room is busy".
+ * An owner message to a busy room waits in the send queue (renderer-send-queue.ts); a graph step now waits the same way,
+ * polling the claim, for at most ROOM_WAIT_MAX_MS. While it waits the node's deadline is held (graphRoomWaitHold, read by the
+ * node timer and the run watchdog like graphTeamStepHold): waiting for a room is not a stalled node.
+ */
 
 /** The refusals that mean "another run holds this room right now" (store/invocation-run-owners.ts). */
 const ROOM_BUSY_CODES = new Set(["invocation_chat_owned_by_other_run", "invocation_chat_busy_other_host"]);
-/** */
+/** Longest wait for a busy room: a Goal turn of the daily production ran 93 minutes (2026-10-17). */
 export const ROOM_WAIT_MAX_MS = 3 * 60 * 60_000;
 export const ROOM_WAIT_POLL_MS = 15_000;
 

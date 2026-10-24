@@ -64,7 +64,7 @@ export interface SupervisorDependencies {
   budget?:OneBudgetStore;
   /** Whether this host-started One run ended with the quiet reply (nothing saved, no alert). */
   quietRun?(runId: string): boolean;
-                                                                                                              
+  /** Marks a Work session One opened as Always allow (owner 2026-10-04), so the worker never stops to ask. */
   alwaysApprove?(chatId: string): void;
   workIdentityMutable?: boolean;
   wakeWorkQueue?(): void;
@@ -80,10 +80,10 @@ export interface SupervisorDependencies {
 
 const settled = (receipt: InvocationRunReceipt | null) => !!receipt && ["completed","failed","cancelled","interrupted"].includes(receipt.status);
 /**
-
-
-
-
+ * A failed run's request names the run's own machine cause (receipt.errorCode), never NULL: production 2026-10-10..17,
+ * 22 failed One replies and chat sends carried reason NULL while their runs had task-force-verification-failed,
+ * mcp-runtime-config-unavailable, runtime_turn_unsettled or runner-failed (D10, flow audit 2026-10-18). A receipt without
+ * a typed code is "unattributed", like a steer row's terminal cause.
  */
 const failedRunReason = (receipt: InvocationRunReceipt): string => isTypedCode(receipt.errorCode) ? receipt.errorCode : "unattributed";
 const clip = (value: unknown, max: number) => {
@@ -111,9 +111,9 @@ const ordinaryNativeMarker = (row: SupervisorRequestRow): boolean => Object.prot
 export class OneSupervisorService {
   private readonly ordinaryNativeTurns = new Map<string, { source: OrdinaryOneTurnSource; observation: OrdinaryNativeTurnObservation }>();
   private draining = false;
-  /**
-
- */
+  /** Commands this process is dispatching now (command id -> start time). A dispatch whose start has not answered yet
+   * has no receipt, which recover() must not read as a lost start: the personal window reads a snapshot (and so runs
+   * recover) right after a send, which held every Hope message before its run began (production 1.2.93, 2026-10-11). */
   private readonly dispatchInFlight = new Map<string, number>();
   private closed = false;
   private readonly unsubscribe: () => void;
@@ -616,8 +616,8 @@ export class OneSupervisorService {
       ...(checks.length ? [
         "- For a check-in: do the check now with your tools, then follow its \"tell the owner\" rule.",
       ] : []),
-      
-
+      // Only a check-in the owner asked to hear about "only when it matters" may end silently. A finished delegation
+      // or a worker waiting for the owner is always reported (QA 2026-10-04: One went quiet on the very count the owner asked for).
       ...(quietAllowed
         ? [`If the check finds nothing the owner should know, reply with exactly ${ONE_QUIET_REPLY} and nothing else: nothing is shown and no alert fires.`]
         : ["Always send the owner a message this turn."]),
@@ -684,11 +684,11 @@ export class OneSupervisorService {
     if (queued) this.drain();
     return queued;
   }
-     
-                                                                                                                    
-                                                                                                                      
-                                                                                                            
-     
+  /**
+   * Something the app could not get past on its own in another conversation (one/host-alerts.ts): a browser that is
+   * really unavailable, a sign-in or human check, a Goal the AGI monitor found stuck. One is woken to tell the owner,
+   * once per room, code and key (owner 2026-10-05). In One's own conversation the live turn already saw it.
+   */
   hostNeedsOwner(alert: {chatId: string; code: string; detail: string; key?: string}): boolean {
     if (this.closed) return false;
     const {oneId,chatId} = this.binding();
@@ -773,7 +773,7 @@ export class OneSupervisorService {
     this.deps.store.update(row,{state:"dispatching"});
     try {
       return this.observeDispatch(this.deps.store.get(row.command_id)!, () => this.deps.runtime.start({runId,chatId:delegated!.workerChatId!,userPrompt:input.text,taskIntent:"task",
-                                                                                                             
+        // One's follow-up to its own delegation runs as the delegation does: full access (owner 2026-10-04).
         permissions:originReplyRunId ? "full" : delegated!.permissions ?? "read",locale:this.deps.locale(),runtimeSelection:delegated!.runtimeSelection,
         ...(originReplyRunId ? {promptOrigin:"system" as const} : {})}, originReplyRunId ? "one-dispatch-brief" : undefined));
     } catch (error) {
@@ -781,12 +781,12 @@ export class OneSupervisorService {
       return current.state==='dispatching' ? this.deps.store.update(current,{state:"held",acknowledgement:"unknown",reason:error instanceof Error ? error.message.slice(0,240) : "follow_up_start_unconfirmed"}) : JSON.parse(current.receipt_json);
     }
   }
-     
-                                                                                                               
-                                                                                                                   
-                                                                                                                 
-                                                                                                                
-     
+  /**
+   * One writes into an existing Agentlas conversation (a Work session, a teammate's chat, a group room) as One
+   * (owner 2026-10-05: One must be able to message the app's threads). The conversation shows it as handed over by
+   * One, never as the owner's words. A conversation with a live run takes it as a queued direction; otherwise it
+   * starts that conversation's next turn with full access, as everything One hands off does (owner 2026-10-04).
+   */
   sendToChat(raw: {commandId:string;chatId:string;text:string;oneId?:string}, originReplyRunId?: string): SupervisorCommandReceipt {
     this.assertAutomaticWriteAllowed(originReplyRunId);
     const value=supervisorObject(raw,["commandId","chatId","text","oneId"]);
@@ -845,8 +845,8 @@ export class OneSupervisorService {
     this.assertAutomaticWriteAllowed(originReplyRunId);
     const value=supervisorObject(raw,["commandId","text","projectId","permissions","runtimeSelection","oneId","budgetId"]);
     if (value.permissions!==undefined && !["read","write","full"].includes(String(value.permissions))) throw supervisorError('supervisor_permission_invalid', true);
-                                                                                                                            
-                                                                                                     
+    // One's own hand-offs pass "full" (owner 2026-10-04). A brief the owner starts keeps a permission they chose; with none
+    // given (the personal One panel no longer asks) it runs with full access too (owner 2026-10-05).
     const permissions=value.permissions ?? "full";
     const runtimeSelection=this.deps.normalizeRuntimeSelection(value.runtimeSelection);
     const input: SupervisorWorkInput={commandId:supervisorIdentifier(value.commandId),text:supervisorText(value.text),permissions:permissions as SupervisorWorkInput["permissions"],

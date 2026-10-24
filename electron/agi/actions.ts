@@ -53,8 +53,9 @@ export const AGI_ACTION_SCHEMA = "agentlas.agi-unblock.v1" as const;
 export const AGI_REPEAT_IN_ATTEMPT_CODE = "agi.action.repeat-in-attempt";
 
 /**
- * The same tactic is handed to a teammate at most this many times per Goal in any 24 hours. Re-briefing the same work again and
- * again does not move it; other tactics, other moves and the next day stay open, so this is not a dead end.
+ * The same tactic is handed to a teammate at most this many times per Goal in any 24 hours. Production 2026-10-19, one Yotube room
+ * Goal: 96 of 99 teammate dispatches were the AGI's, 76 of them tactic t9 (62 to the same teammate). Re-briefing the work again does
+ * not move it; other tactics, other moves and the next day stay open, so this is not a dead end.
  */
 export const AGI_TACTIC_DISPATCHES_PER_DAY = 3;
 /** An action whose product path threw something that is not a typed code. */
@@ -215,7 +216,7 @@ export interface AgiExecutorDeps {
   restartAgentlasBrowser?(control: AgiBrowserRestartControl): boolean | AgiBrowserRestartOutcome | Promise<boolean | AgiBrowserRestartOutcome>;
   /**
    * One owner-visible line in the goal chat (host-notice marker). Idempotent per actionId. An owner ask also names its
-   * typed card kind: the line explains, the card is how the owner answers (asks are always cards).
+   * typed card kind: the line explains, the card is how the owner answers (owner 2026-10-20: asks are always cards).
    */
   announce?(input: { chatId: string; actionId: string; kind: "action" | "ask" | "defect"; text: { ko: string; en: string }; card?: AgiOwnerAskCardKind }): void;
   /** A defect was filed: surface the chip (D5). */
@@ -436,8 +437,8 @@ export class AgiActionExecutor {
         AND json_extract(result_json, '$.detail.repeatDigest') = ? LIMIT 1`).get(incident.id, request.attempt, repeatDigest)) {
       return refuse(AGI_REPEAT_IN_ATTEMPT_CODE);
     }
-    
-
+    // Owner 2026-10-12: a repeat is not refused. It used to be (agi.action.circuit-open 2,376 times in production, almost
+    // all of them a rest), which left the goal where it was; the next deterministic move runs instead.
     const repeated = history.filter((entry) => entry.action === request.action).length >= MAX_SAME_MOVE_PER_CAUSE;
     const failedHere = this.incidents.ruledOut(incident.id).has(request.action);
     if ((repeated || failedHere) && !NEVER_ESCALATED.has(request.action)) {
@@ -493,7 +494,8 @@ export class AgiActionExecutor {
     } catch (error) {
       // A typed code thrown by a product path is kept. Anything else is an untyped exception: its reason stays in the receipt
       // (redacted, 120 chars) instead of vanishing into a generic code, and its code (agi.action.threw) is neither "failed" for the
-      // ruled-out rule below nor an executed move for repeat escalation, so a reason nobody knows does not pick the next move.
+      // ruled-out rule below nor an executed move for repeat escalation, so a reason nobody knows does not pick the next move
+      // (production: dispatch_teammate agi.action.failed 48 times, reason lost).
       const typed = error instanceof Error && /^[a-z][a-z0-9._:-]{2,120}$/.test(error.message) ? error.message : null;
       result = typed ? { actionId: request.actionId, action: request.action, ok: false, code: typed }
         : { actionId: request.actionId, action: request.action, ok: false, code: AGI_ACTION_THREW_CODE, detail: { reason: untypedReason(error) } };
@@ -505,7 +507,7 @@ export class AgiActionExecutor {
       evidenceRefs: Array.isArray(settled.detail?.evidenceRefs) ? settled.detail!.evidenceRefs as string[] : [],
       // A failed effect is ruled out for this incident (R2); a refused precondition is not an attempt.
       ruledOut: !settled.ok && /\.failed$|-failed$|unavailable$/.test(settled.code) });
-    // The room is One's. AGI's own
+    // The room is One's (owner 2026-10-12: "AGI · Motiondirector에게 t5 작업을 맡겼어요 같은 거 쓰지 마라"). AGI's own
     // actions are host bookkeeping: they stay in the receipts and the Goal panel (goal-panel.ts) and never become room
     // messages. Only an ask the owner must answer is posted, and it is posted BEFORE its receipt settles ok (deliverOwnerAsk).
     return settled;
@@ -758,8 +760,8 @@ export class AgiActionExecutor {
         return ok("agi.browser.restart-dispatched");
       }
       case "request_app_restart": {
-        
-
+        // The owner pays for a restart; ask only when the incident's typed cause is one a restart clears
+        // (AGI_APP_RESTART_CAUSES). "Not tried yet" is not a basis (Yotube 2026-10-17: the restart changed nothing).
         const indicated = this.incidents.get(incidentId)?.diagnosis.appRestart;
         if (!indicated) return no("agi.app-restart.not-indicated");
         const asked = this.deps.db.prepare("SELECT 1 FROM agi_action_receipts WHERE incident_id = ? AND action = 'request_app_restart' AND ok = 1").get(incidentId);
@@ -772,10 +774,10 @@ export class AgiActionExecutor {
         const evidenceRefs = Array.isArray(args.evidenceRefs) ? args.evidenceRefs.filter((ref): ref is string => typeof ref === "string").slice(0, 12) : [];
         if (!evidenceRefs.length) return no("agi.defect.evidence-required");
         const category = ["crash", "stall", "wrong-result", "ui", "login", "other"].includes(String(args.category)) ? String(args.category) : "other";
-        
-
-
-
+        // A defect's identity is host-typed: one of the incident's own defect findings, or else the incident's reason code
+        // and category. A model names the same defect differently every time (production 2026-10-12: 65 reports with 65
+        // spellings from run_failed_unknown incidents, 44 from boundary_payment), so its name never matched
+        // UNIQUE(goal_id, code) and each attempt filed a new report. The incident and evidence refs carry the specifics.
         const incident = this.incidents.get(incidentId);
         const typed = incident?.diagnosis.defects?.some((finding) => finding.code === named) === true;
         const code = typed || !incident ? named : `${incident.reasonCode}:${category}`;

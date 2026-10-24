@@ -218,8 +218,8 @@ async function runModel(request: AutomaticMemoryModelInput, runtime: AutomaticMe
   const execute = async (): Promise<string | null> => {
     if (controller.signal.aborted) return null;
     if (runtime?.judge) return runtime.judge({ ...request, timeoutMs, signal: controller.signal });
-    
-
+    // R-090: an inherited turn runtime whose declared limits refuse this request is never called (production
+    // 2026-10-14..16: Antigravity refused all 69 calls, 2.7 s each); the judgment pool below takes it directly.
     const inheritedKind = pickedRunnerKind(runtime?.runner);
     const inheritedRefuses = Boolean(inheritedKind && runtimeRequestRefusal(inheritedKind,
       { untrustedNoTools: true, judgmentOnly: true, permission: "read" }));

@@ -2,14 +2,14 @@ import type { McpInvocationEvent } from "@shared/types";
 import type { RunEventReplay, RunEventReplayInput } from "@shared/run-event-delivery";
 import { isLivePartialCommitBoundary, reassembleAgentLivePartial } from "@shared/interrupted-partial";
 
-
-
-
-
-
-
-
-
+/*
+ * When the subscriber asks Main to replay (perf review 2026-10-17, R-04). Push is the live channel; replay is the
+ * safety net. The net polled every second whatever push did, and asked from the painted cursor, which stops while a
+ * hidden window has no animation frames, so Main re-sent the whole retained backlog each second. For a run Main does
+ * not host (the daemon's), every quiet poll also re-read the run's ledger. These pure rules keep the net but cast it
+ * only for a hole, a failed request, a hydration need, or a silent push. They live in this file because the
+ * existing gates load it alone (a new import would not resolve there).
+ */
 
 /** No push for this long and the tick asks Main once (then backs off). */
 export const RUN_EVENT_QUIET_MS = 2_000;
@@ -102,8 +102,8 @@ export function subscribeOrderedRunEvents(options: Options): () => void {
   let projectionRevision = 0;
   const pending = new Map<number, McpInvocationEvent>();
   const sizes = new Map<number, number>();
-  
-
+  // Each teammate's accumulated live text. Main sends teammate partials as deltas (perf review 2026-10-17, R-03);
+  // every projection below still receives the teammate's whole `text`, in delivery order.
   const teammateTexts = new Map<string, string>();
   let pendingBytes = 0, needsHydration = false;
   // Safety-poll state: push health, the last replay request, and the current quiet backoff.
@@ -173,8 +173,8 @@ export function subscribeOrderedRunEvents(options: Options): () => void {
       // asking from the painted cursor made Main re-send the whole retained backlog every poll. These ordinals came
       // from Main, so the request is never ahead of its journal; recovery below still checkpoints on `cursor`.
       const afterOrdinal = receivedThroughOrdinal(queryCursor, pending);
-      
-
+      // Main attaches the live texts only to an answer the view rebuilds from (perf review 2026-10-17, H2): this one is,
+      // when held events were dropped or a rebuild is owed; a complete tail from a later cursor is not.
       const snapshot = await options.replay({ runId: options.runId, chatId: options.chatId, afterOrdinal,
         ...(forceHydration || needsHydration ? { hydrate: true as const } : {}) });
       retryDue = false;
@@ -226,8 +226,8 @@ export function subscribeOrderedRunEvents(options: Options): () => void {
       }
     } catch (error) {
       retryDue = true;
-      
-
+      // A permanent refusal must not be retried every second for as long as the screen stays open (81 calls in 80 s,
+      // 2026-10-12 1.3.4). Anything else keeps the cursor and pending state and the poll retries; Stop never waits here.
       if (/run-event-replay-owner-mismatch/.test(String((error as { message?: unknown } | null)?.message ?? error))) {
         refused = true;
         if (poll !== undefined) clearInterval(poll);

@@ -23,29 +23,29 @@ import { createHash } from "node:crypto";
 import { stripStaffGuidance } from "../one/owner-prompt";
 import { isInterruptedPartial } from "../../shared/interrupted-partial";
 
-                                                                                                  
-                                                                                                
-                                                            
-  
-                                                                                                   
-                                                                                                   
-                                                                                                   
-                                                                           
-  
-                                                                                                     
-                                                                                                     
-                                                                                             
-   
-
-
-
-
-
-
-
-
-
-
+/** Bounded default, not a promise to finish inside it. Unfinished goals retain their criteria and
+ * pause with their remaining budget intact. Money metering is unavailable here: null explicitly
+ * means no monetary enforcement, never an invented $0 cost.
+ *
+ * The old pair -- 3 cycles, 10 minutes -- was not a budget, it was a stopwatch. Measured against a
+ * real long-running orchestration on this machine: 189 turns over 25.9 hours, with a 75-minute gap
+ * between two consecutive turns and four failed turns in the middle. Under 3-and-10 that work ends
+ * during its first pause and looks to the person like the product gave up.
+ *
+ * A working day is the defensible automatic default: long enough that ordinary thinking, waiting and
+ * retrying fit inside it, short enough that a request auto-admitted from a plain sentence cannot run
+ * unattended forever. The explicit Goal path stays unbounded; that one the person asked for.
+ */
+/*
+ * ★오너 지시 2026-09-08: "주기 시간 무제한해라".
+ *
+ * 자동으로 승인된 목표도 사람이 멈추기 전까지 이어간다. null 은 원장이 이미 아는 표현이고
+ * (cyclesSpent/deadlinePassed 판정이 null 을 건너뛴다), 무한 반복은 예산이 아니라 진전
+ * 없음(stall)·실패 반복·사용자 정지로 멈춘다 — 그쪽이 원래 멈춤의 정본이다.
+ *
+ * 실측이 이 결정을 뒷받침한다: 오너 저장소의 자동 목표는 maxCycles=3 으로 만들어져
+ * reason:"budget" 으로 10분 만에 끝났다. 코덱스가 같은 자리에서 189턴 25.9시간을 돈다.
+ */
 export const AUTOMATIC_GOAL_CYCLE_LIMIT: number | null = null;
 export const AUTOMATIC_GOAL_TIME_LIMIT_MS: number | null = null;
 
@@ -90,8 +90,8 @@ export async function prepareInvocationAutomaticGoal(input: {
   userPrompt: string;
   permission: string;
   attachmentOnly?: boolean;
-                                                                                                                         
-                                                                                                               
+  /** Daemon-run turns (2026-10-11): classify with the same resolver and stop before admission. A `bypass` whose decision
+   * satisfies isGoalAdmittingDecision is exactly the message this function would otherwise admit as a Goal. */
   classifyOnly?: boolean;
   signal: AbortSignal;
   resolveIntent?: (
@@ -181,32 +181,32 @@ export async function prepareInvocationAutomaticGoal(input: {
       ...("attempts" in decision && decision.attempts ? { attempts: decision.attempts } : {}),
     } });
     if (decision.intent !== "execute" || decision.commitment !== "now") return { kind: "bypass", decision };
-    
-
+    // A one-reply request stays an ordinary turn (owner 2026-09-25). Measured before: a one-line file
+    // write became a Goal with 17 invocations and 7 verifier attempts for work done in invocation 1.
     if (decision.turnScope === "single") return { kind: "bypass", decision };
     if (input.classifyOnly) return { kind: "bypass", decision };
     stage = "admission";
     const run = admitJudgedAutomaticGoal({
       goalId: `goal:auto-message:${source.messageId}`, chatId: source.chatId, sourceMessageId: source.messageId, decision,
-      
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+      /*
+       * A criterion the verifier cannot check is a criterion that fails forever.
+       *
+       * Measured 2026-09-08: a run built the requested Flutter app, passed
+       * `flutter test` 6/6 and `flutter analyze` with zero issues, and still ended
+       * `blocked`. Two of these three criteria came back `inconclusive` because they
+       * asked the judge about things it had no way to enumerate:
+       *   - "every deliverable requested in user message <id>" -- the judge sees the
+       *     run's evidence, not that message, so it answered "the full set of
+       *     requested deliverables ... is not enumerable from the evidence".
+       *   - "the original request's constraints, exclusions and permission
+       *     boundaries" -- it answered "not concretely verifiable ... with no
+       *     explicit constraint list to check against". When the user states no
+       *     constraints, there IS no list, so this can never be satisfied.
+       *
+       * So each criterion now names something the host actually carries into the
+       * observation: the request text itself, and the declared working folder plus
+       * granted permission from the run receipt.
+       */
       acceptanceCriteria: buildAutomaticGoalCriteria({ sourceText: source.text, permission: input.permission,
         lifecycle: resolveGoalLifecycle(decision.lifecycle) }),
       authorityRefs: [`invocation:${input.runId}:permission:${input.permission}`],
@@ -289,13 +289,13 @@ export function automaticGoalReplayBlockerCode(runId: string): string | null {
 }
 
 /**
-
-
-
-
-
-
-
+ * The owner's newest message that no finished answer followed, if any. A message the owner sent mid-turn interrupts
+ * that turn; the resume then carried only the plan, so the owner's request sat in history below a "preserve every
+ * original constraint" instruction and the run went on with the old plan (Thread Marketing, 2026-10-14 12:08Z: "쓰레드
+ * 전략을 찾아보고 바꾸던지"). Interrupted fragments and host/system rows do not count as an answer. The app's own notices
+ * are assistant rows with a host notice ("the run failed, your request is saved", "retrying in 5 minutes"); counting them
+ * dropped the owner's answer from the resume (Yotube 2026-10-17 11:51Z "문장 삭제 후 오디오 재생성", followed by two
+ * host-status rows), so they are left out in the query, where they also cannot crowd the owner out of the window.
  */
 export function unansweredOwnerMessage(chatId: string): string | null {
   const rows = getDb().prepare(`SELECT role, text FROM chat_messages WHERE chat_id = ? AND role IN ('user', 'assistant')
@@ -311,11 +311,11 @@ export function unansweredOwnerMessage(chatId: string): string | null {
 
 /** Explicit UI resume reuses the same campaign and remaining budget. It never
  * reclassifies the synthetic continuation as a new user request. */
-   
-                                                              
-                                                
-                                                                                      
-   
+/**
+ * 재개 요청을 만든다 — 상태를 바꾸지 않는다(재시작 체크포인트 경로가 그 전제로 판번호를 다시 대조한다).
+ * actor "user": 사람이 누른 재개. actor "host": 자동 재개.
+ * 이전 시도의 바깥 효과 여부는 호스트가 판단하지 않는다 — 다음 턴의 모델이 직전 턴 메모와 파일을 보고 스스로 확인한다(오너 2026-10-12).
+ */
 export function automaticGoalResumeRequest(chatId: string, expectedVersion: number, actor: "user" | "host" = "host"): import("../../shared/types").McpInvocationRequest | null {
   const chat = getDb().prepare("SELECT goal_id FROM chats WHERE id = ?").get(chatId) as { goal_id: string | null } | undefined;
   if (!chat?.goal_id) return null;
@@ -334,7 +334,7 @@ export function automaticGoalResumeRequest(chatId: string, expectedVersion: numb
   if (!authority) throw new Error("auto_goal_resume_authority_missing");
   return { chatId, promptOrigin: "system", taskIntent: "task", permissions: authority[2] as "read" | "write" | "full",
     // Without a locale the run fell back to "en" and One answered a Korean owner in
-                                                                                        
+    // English on every goal resume (run_events invoke_started locale:"en", 2026-09-26).
     locale: currentUiLocale(),
     // One resolves permission from its explicit mode, not the generic field.
     // This is the stored user grant, not a new grant from a system prompt.

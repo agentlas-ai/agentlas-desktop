@@ -5,18 +5,18 @@ import { PRODUCT_HOME_ROOTS } from "../runtime/product-home-identity";
 import { DAY_MS } from "./storage-policy";
 
 /**
-
-
-
-
-
-
-
-
-
-
-
-
+ * Product-home mirrors that mirror another mirror. Before 2026-10-17 a process that inherited a product run's
+ * environment took the product home for the person's own CLI folder and mirrored it again (product-home-identity.ts).
+ * Owner Mac, 2026-10-14: codex-product-home/10161a503527{,-isolated} = sha256("<root>/c183d58fa429-isolated")[:12], with its
+ * own 609 MB state_5.sqlite and 75 MB thread history, 1.48 GB in all. The resolvers no longer select such a mirror, so
+ * nothing reads it again.
+ *
+ * A mirror goes only when all of these hold:
+ * - its folder name is sha256(<a sibling mirror's path>)[:12], plus that root's -isolated/-one suffix (nested by
+ *   construction; a mirror of a person's real folder can never match);
+ * - nothing anywhere inside it changed for `keepDays` (owner storage decision 2026-10-16: CLI originals unused for 30 days).
+ * Removal never follows links: a codex mirror's sessions link points into the shared store. Other names, files and links
+ * are never touched.
  */
 const MIRROR_LEAF = /^([0-9a-f]{12})(-isolated|-one)?$/;
 

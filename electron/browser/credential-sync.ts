@@ -81,8 +81,8 @@ export function recordBrowserCredentialConsent(profileId: string, domains: strin
   // 두 번째 가져오기는 범위를 **넓힌다**(사용자가 또 골랐으므로). 줄이지는 않는다 —
   // 이전에 승인한 도메인을 조용히 갱신 대상에서 빼면 그 사이트만 며칠 뒤 로그아웃된다.
   const merged = [...new Set([...prev.domains, ...domains.map((d) => d.trim().toLowerCase())])].filter(Boolean);
-
-
+  // ★도메인이 하나도 없는 "승인"은 자동 갱신이 영영 아무것도 하지 않는 상태다 — 사용자는
+  //   승인했다고 믿는데 며칠 뒤 다시 로그아웃된다. 그런 기록은 남기지 않는다(실측으로 한 번 겪음).
   if (merged.length === 0) {
     console.warn("[browser-credentials] refusing to record consent with no domains");
     return prev;
@@ -217,15 +217,15 @@ export function refreshBrowserCredentialsIfDue(opts?: { force?: boolean }): Prom
 }
 
 /**
-
-
-
-
-
-
-
-
-
+ * 자동화·그래프 실행 앞의 갱신은 **주기(3일)를 지킨다**. 강제하지 않는다.
+ *
+ * ★오너 신고 2026-09-28 "왜 자꾸 로그아웃되냐 — 크롬 본판이나 브라우저나 다".
+ *   브라우저 모드 그래프가 실행마다 `force: true` 로 전체 가져오기를 돌렸다. 가져오기는 유지보수
+ *   잠금 안에서 전용 브라우저를 **닫고**(쓰던 창·탭·임대 전부) 평소 크롬의 쿠키를 다시 넣는다.
+ *   실측(main.log): 승인 범위가 3개→127개 사이트(google.com·youtube.com·x.com·naver.com 포함)로
+ *   넓어진 2026-09-27T10:59Z 부터 자동화 발생마다 "refreshed 127 site(s), +5xx cookies" 가 찍혀
+ *   09-27 하루 82회. 주기 규칙(REFRESH_INTERVAL_MS)은 이 길에서 한 번도 적용되지 않았다.
+ *   지금 갱신이 필요하면 사용자가 Connect 의 "지금 갱신" 을 누른다(그 길만 force).
  */
 export function refreshBrowserCredentialsBeforeAutomatedRun(): Promise<BrowserCredentialRefreshReport> {
   return refreshBrowserCredentialsIfDue();

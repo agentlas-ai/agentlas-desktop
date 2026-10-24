@@ -1,21 +1,21 @@
 /**
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+ * Update while work is running: ask once, pause the work for the update, continue it once after.
+ *
+ * Owner request 2026-09-28: "GPT 앱이나 Claude 는 업데이트 누르면 '현재 작업을 중단하겠냐'고
+ * 묻고, 확인하면 업데이트하고 껐다 켜지면서 자동으로 이어서 시작하던데".
+ *
+ * Measured before this (isolated app, fake CLI, 2026-09-28):
+ * - the update button refused while a turn ran ("현재 작업이 끝나면 업데이트할 수 있어요"); it
+ *   counted chat turns only, so automations/Alive/Science never blocked it;
+ * - the owner's way out was to stop the turn, which cancelled a running Goal outright;
+ * - a turn cut by the quit landed as `invoke_failed` / `invoke-threw` with no cause (reads as a
+ *   crash), and nothing continued a plain chat turn after the restart.
+ *
+ * This module owns the parts that are not Electron wiring: the one-line description of the running
+ * work, the resume ledger (armed before the handoff, consumed exactly once at the next launch), the
+ * per-entry resume decision, and the continuation prompt. Main supplies census, checkpoint, install
+ * and dispatch. The ledger is one-shot by construction: startup renames it away BEFORE any turn is
+ * dispatched, so a crash during or after resume can never replay it.
  */
 import fs from "node:fs";
 import path from "node:path";

@@ -13,7 +13,7 @@ export function resolveGoalLifecycle(value: unknown): GoalLifecycle {
 
 /**
  * A bounded series the owner asked for: the same work repeated at a stated interval, ending after a stated number of
- * runs ("once an hour, ten in all"). Typed numbers the intake read from the owner's words; the host does the arithmetic
+ * runs ("1시간에 1회씩 최대 10개"). Typed numbers the intake read from the owner's words; the host does the arithmetic
  * (goalCadenceDeadlineAt) and never reads the words again. Only a finite Goal carries one.
  */
 export interface GoalCadence {
@@ -70,15 +70,15 @@ export interface GoalIntakeDecision {
   commitment: "now" | "later" | "uncertain";
   /** New judged execution decisions supply this; absent legacy decisions are finite. */
   lifecycle?: GoalLifecycle;
-     
-                                                                                           
-                                                                                            
-                                                                                             
-                                                                                                       
-     
+  /**
+   * Owner decision 2026-09-25: a finite request the assistant can finish in this one reply
+   * ("single") stays an ordinary turn with ordinary run receipts — no long-run, controller,
+   * verifier or sweep. Only "multi" (needs more than one turn, has an outward effect, or has
+   * acceptance criteria beyond the reply) becomes a Goal. Absent = legacy decision (treated as multi).
+   */
   turnScope?: "single" | "multi";
   /**
-   * A bounded series the intake read as typed numbers.
+   * Owner decision 2026-10-21 (X marketing room, "1시간에 1회씩 최대 10개"): a bounded series the intake read as typed numbers.
    * Present only on a finite, multi-turn execution decision; the Goal then carries it on its revision, timer waits are
    * allowed up to its end, and the service-turn follower hands the series to the host's own schedule instead of ending the
    * Goal with the first run.

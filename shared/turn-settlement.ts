@@ -1,10 +1,10 @@
 /**
-
-
-
-
-
-
+ * Turn settlement (docs/2026-10-13-native-harness/31 W1; audit A7 §6): one typed answer to "what happened to this
+ * turn". Pure, with no Electron, Node or renderer imports, so Main, the daemon and the renderer read the same rules.
+ *
+ * The outward code of a failure is the innermost machine code in its cause chain. A wrapper adds a layer; it never
+ * replaces the code, and prose is never classified into one (production 2026-10-14..16: the same daemon start refusal
+ * reached the owner as `runtime_turn_unsettled` while Main kept its real code).
  */
 
 /** The same values as runtime/runner.ts RuntimeTurnDelivery. Absent means the runner could not tell. */
@@ -246,11 +246,11 @@ export function trackReportedToolCalls<E extends { onTool?: (...args: never[]) =
   return { events: wrapped, count: () => ids.size + anonymous };
 }
 
-   
-                                                                                                                     
-                                                                                                                        
-                                                                                                                         
-   
+/**
+ * The `empty` cause a chat turn gets when it ended normally with no reply text and every tool call it made came back
+ * unusable (H2, Finance 1008 pilot 2026-10-21). A host-owned machine code on kind `empty`: shared/run-failure-notice.ts
+ * words it, so the owner is told the tools produced nothing instead of looking at a blank reply under a "completed" run.
+ */
 export const EMPTY_AFTER_UNUSABLE_TOOLS_CODE = "empty_after_unusable_tools";
 
 const EMPTY_COLLECTION_TEXT_MAX = 8_192;
@@ -353,13 +353,13 @@ export function createToolOutcomeTally(): { note: (report: ToolOutcomeReport) =>
   };
 }
 
-   
-                                                                                                                           
-                                                                                                                        
-                                                                                                                        
-                                                                                                                       
-                                         
-   
+/**
+ * A chat turn that ended normally with no reply text after tool calls, none of which gave anything back (H2): at least one
+ * call, every call the runner reported has an unusable outcome the host saw, none usable, none still pending. The R-065
+ * rule above keeps a tool-only turn complete because the work happened through its tools; here nothing did. Facts only;
+ * `reportedToolCalls` is the runner's own count (RunnerResult.toolCalls), so a runner that reports more calls than the
+ * host saw outcomes for is never judged.
+ */
 export function endedWithoutAnswerAfterUnusableTools(facts: {
   text: string; reportedToolCalls: number | undefined; outcomes: ToolOutcomeSummary;
 }): boolean {

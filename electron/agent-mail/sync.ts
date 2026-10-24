@@ -1,16 +1,16 @@
 import type { DeclaredPromptPart } from "../runtime/prompt-order";
 import { fixedPurposePrompt, purposePrompt } from "../runtime/purpose-prompts";
-
-
-
-
-
-
-
-
-
-
-
+// One mail sync loop (Main). While the owner is signed in and the mailbox is
+// active, it follows the server's change feed (GET /api/agent-mail/changes),
+// tells the renderer and the mobile bridge what changed, shows one OS
+// notification for new mail (briefing notification choice + quiet hours), and
+// runs the inbound handling mode the owner chose on the server:
+//   notify → nothing more; draft → One writes a reply draft; reply → One replies.
+// Loop guards are mail standards, not limits: no answer to automated/bulk/list
+// mail (server `automated`), to no-reply senders, or to our own addresses; one
+// run per received message, recorded before the run starts (so a restart never
+// runs it twice). There is no daily cap — the monthly recipient allowance on the
+// server is the only ceiling (owner decision 2026-09-26).
 import fs from "node:fs";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
@@ -70,11 +70,11 @@ const HANDLED_KEEP = 500;
 /** Offline: double the wait per failed pass, never longer than this. */
 const MAX_BACKOFF_MS = 5 * 60_000;
 /**
-
-
-
-
-
+ * The server says this account has no mailbox (none, deleted, or provisioning failed): check again this rarely.
+ * Perf review MP-10 (2026-10-17): every signed-in Desktop asked every 60 s, 1,440 GETs a day per install, though
+ * none of those states turns active without the owner issuing a mailbox (afterChange → sync now) or a status read
+ * that sees it active (the mailbox screen, a run, the phone: onAgentMailMailboxKnown → sync now) or a sign-in
+ * (onAuthSessionRestored → sync now).
  */
 const NO_MAILBOX_POLL_MS = 6 * 60 * 60_000;
 /** A received message whose details could not be read is retried this many passes. */
@@ -675,6 +675,20 @@ function rememberPending(item: { messageId: string; threadId: string | null }, c
   saveState();
 }
 
+/** Keep this message pending without spending one of its retries: it waits on something that is not a failure of the message itself. */
+function deferPending(item: { messageId: string; threadId: string | null }): void {
+  const saved = loadState();
+  const list = saved.pending ?? [];
+  if (list.some((entry) => entry.messageId === item.messageId)) return;
+  saved.pending = [...list, { messageId: item.messageId, threadId: item.threadId, attempts: 0 }].slice(-PENDING_KEEP);
+  saveState();
+}
+
+/** Company mail is answered through the company-work port, which exists only while this window holds a current company session. */
+function organizationPortReady(scope: AgentMailExecutionScope): boolean {
+  return scope.kind !== "organization" || (organizationWork !== null && organizationWork.currentKey() === scope.key);
+}
+
 function forgetPending(messageId: string): void {
   const saved = loadState();
   if (!saved.pending?.some((entry) => entry.messageId === messageId)) return;
@@ -692,6 +706,12 @@ async function handleScopedInbound(received: Array<{ messageId: string; threadId
   const mailbox = agentMailLastKnownMailbox();
   if (!mailbox || mailbox.status !== "active" || !mailboxBelongsToScope(mailbox, scope)) return;
   const own = new Set([mailbox.address, ...(mailbox.aliases ?? [])].map((value) => value.toLowerCase()));
+  // With no company-work port nothing can start, and a run that cannot start must never be recorded as handled — that mail would
+  // never be answered. Keep it pending (no fetch, no retry spent) until the port is back; the next change pass drains it.
+  if (!organizationPortReady(scope)) {
+    for (const item of received) deferPending(item);
+    return;
+  }
   const saved = loadState();
   // Earlier failures first, then this pass's new mail (each id once).
   const queue = [...(saved.pending ?? []).map(({ messageId, threadId }) => ({ messageId, threadId })), ...received]
@@ -721,6 +741,8 @@ async function handleScopedInbound(received: Array<{ messageId: string; threadId
       continue;
     }
     if (!scopeStillSelected(scope)) return;
+    // The port can vanish between the check above and here (the session ended mid-pass): the run cannot start, so do not record it.
+    if (!organizationPortReady(scope)) { deferPending(item); continue; }
     // Recorded BEFORE the run starts: a crash or restart can lose a run, never double it.
     markHandled(item.messageId, null);
     try {

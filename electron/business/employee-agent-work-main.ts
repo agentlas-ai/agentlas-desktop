@@ -1,5 +1,4 @@
 import type { BrowserWindow,IpcMainInvokeEvent } from 'electron';
-import {workOriginalSheet,workConnectionSheet} from './native-approval-sheets';
 import { randomUUID } from 'node:crypto';
 import { isAppControlEvent } from '../app-control/ipc-registry';
 import { workFail,EMPLOYEE_AGENT_WORK_PURPOSE } from '../../shared/business/employee-agent-work';
@@ -38,6 +37,7 @@ import {validateWorkOracle} from './employee-agent-work-evaluator';
 import type {IpcMain} from 'electron';
 import {isBusinessId,isBusinessRevision,isBusinessResource} from '../../shared/business/context';
 import type {OneVaultRuntime} from '../secrets/one-vault-runtime';
+import {workOriginalSheet,workConnectionSheet} from './native-approval-sheets';
 type WorkEntryInput={ipc:Pick<IpcMain,'handle'>;sources:NonNullable<ReturnType<typeof import('../secrets/one-vault-main').oneVaultMainMobileSources>>;
  signal:AbortSignal;locale(): 'ko'|'en';assertTrustedSender(event:IpcMainInvokeEvent):void;isOwnerWindow(window:BrowserWindow):boolean;installationGeneration():number;prepareGeneration?(event:IpcMainInvokeEvent):Promise<void>};
 type UiRow={selection:string;association_id:string;asset_acceptance:string|null;oracle_id:string|null;registration_json:string|null;request_json:string|null;intent_json:string|null;state:string;receipt_json:string|null;label:string};

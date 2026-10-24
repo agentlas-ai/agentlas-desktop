@@ -129,13 +129,13 @@ function optionModelLabel(option: RuntimeModelPickerOption, locale: "ko" | "en")
   return label;
 }
 
-
-
-
-
-
-
-
+/*
+ * 모델을 비워 둔(엔진 설정을 따르는) 선택이 **실제로 돌 모델의 id**.
+ * 명시한 모델이 있으면 그것, 없으면 CLI 가 자기 설정 파일에 적어 둔 모델(cliDefaultModel),
+ * 그것도 없으면 마지막 실행이 알려준 모델(observedDefaultModel)을 목록 행에서 찾아 그 id 를 준다.
+ * 모르면 undefined — 짐작해서 채우지 않는다. 런타임 마지막 선택(runtime.model)은 설정 파일과
+ * 다를 수 있어서 비어 있을 때의 근거로 쓰지 않는다(오너 2026-10-16: 낡은 gpt-5.6-sol 이 보였다).
+ */
 export function runtimeEffectiveModelId(
   runtime: Pick<RuntimeStatus, "kind" | "model" | "cliDefaultModel" | "observedDefaultModel">,
   models: ReadonlyArray<{ id: string; resolvedId?: string }> = [],
@@ -395,21 +395,21 @@ export function RuntimeModelPicker({
     setActiveIndex((current) => (current + delta + visibleOptions.length) % visibleOptions.length);
   };
 
-  
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+  /*
+   * ★키는 **고른 자리(root)에서** 받는다 (QA 실측 2026-09-08: "방향키로 목록이
+   *   스크롤되지 않는다", "Esc 가 가끔 안 닫힌다").
+   *
+   *   증상은 둘이었지만 원인은 하나다. 예전에는 방향키·Escape 를 **항목(option)** 에서만
+   *   처리했다. 그래서 열린 뒤 포커스가 항목까지 못 갔을 때 — 포커스는 트리거에 남는다 —
+   *     · ArrowDown → 트리거 핸들러가 잡아 activeIndex 를 **선택값으로 되돌리고** 다시 연다
+   *       → 목록이 한 칸도 안 움직인다("스크롤이 안 된다"로 보인다)
+   *     · Escape    → 트리거 핸들러가 아예 안 보는 키라 아무 일도 안 일어난다
+   *   "가끔"인 이유가 이것이다: 포커스가 항목에 닿았는지에 따라 갈렸다.
+   *
+   *   그래서 root 에서 한 번만 처리한다. 포커스가 트리거에 있든 항목에 있든 같은 답이 된다.
+   *   (측정: focus() 자체는 목록을 스크롤시킨다 — 0 → 560px. 스크롤 배관이 아니라
+   *    포커스가 도달하지 못한 것이 원인이었다.)
+   */
   const onPickerKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
     if (disabled || visibleOptions.length === 0) return;
     if (!open) {

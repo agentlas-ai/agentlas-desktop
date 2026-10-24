@@ -173,7 +173,6 @@ export function AgentWorkspace({ agent, name, locale, initialView = "files", onT
     setSnapshot(next); setFiles(next.files);
     onMemoryCountChange?.(agent.id, next.memoryCandidates.filter(candidate => candidate.state === "eligible").length);
     setMemorySelection((previous) => new Set([...previous].filter((id) => next.memoryCandidates.some((candidate) => candidate.id === id && candidate.state === "eligible"))));
-    setTargetPath((current) => current || next.canonicalEntry || "");
     return next;
   }, [agent.id, ko, onMemoryCountChange]);
   useEffect(() => { setView(initialView); }, [initialView]);
@@ -331,6 +330,11 @@ export function AgentWorkspace({ agent, name, locale, initialView = "files", onT
   const rows = useMemo(() => treeEntries(files, expanded), [files, expanded]);
   const lineCount = Math.max(1, content.split("\n").length);
   const instructionFiles = files.filter((file) => file.kind === "file" && ["instruction", "skill", "knowledge"].includes(file.role));
+  // The footer prepares a change from lessons that are "Ready for review". With none (or on an agent that cannot be written) its button could never be pressed.
+  const canPrepare = Boolean(snapshot?.writable);
+  const showPrepare = canPrepare && (snapshot?.memoryCandidates ?? []).some((candidate) => candidate.state === "eligible");
+  // The entry file unless the owner picked another; the picker only appears when there is another file to pick.
+  const prepareTarget = instructionFiles.some((file) => file.path === targetPath) ? targetPath : snapshot?.canonicalEntry ?? instructionFiles[0]?.path ?? "";
   const pendingCount = snapshot?.proposals.filter((proposal) => proposal.status === "review_ready").length ?? 0;
   const eligibleCount = new Set((snapshot?.memoryCandidates ?? []).filter((candidate) => candidate.state === "eligible" || candidate.state === "proposed").map((candidate) => candidate.groupId ?? candidate.id)).size;
   const toggleDirectory = async (entry: TreeEntry) => {
@@ -365,12 +369,12 @@ export function AgentWorkspace({ agent, name, locale, initialView = "files", onT
           </div>; })}
         {!memoryCandidates.length && <div className={styles.empty}>{ko ? "메모리 없음" : "No memories"}</div>}
       </div>
-      <div className={styles.footerActions}>
-        <Select value={targetPath} aria-label={ko ? "반영할 파일" : "File to update"} onChange={(event) => setTargetPath(event.target.value)}><option value="">{ko ? "정식 지침 파일" : "Canonical instruction file"}</option>{instructionFiles.map((file) => <option value={file.path} key={file.path}>{file.path}</option>)}</Select>
-        <button className={`${styles.button} ${styles.primary}`} disabled={!memorySelection.size || !snapshot?.writable || Boolean(busy) || snapshot.activation === "recovery_required"} onClick={() => void run("prepare-memory", async () => { let proposal; try { proposal = await api().prepareFromMemory({ agentId: agent.id, memoryEntryIds: [...memorySelection], ...(targetPath ? { targetPath } : {}) }); } catch (failure) { setMemorySelection(new Set()); await refresh().catch(() => undefined); throw failure; } await refresh(); setMemorySelection(new Set()); await openReview(proposal.id); })}>{busy === "prepare-memory" && <span className={styles.loading} />}{ko ? `변경안 만들기${memorySelection.size ? ` (${memorySelection.size})` : ""}` : `Prepare change${memorySelection.size ? ` (${memorySelection.size})` : ""}`}</button>
-      </div>
+      {showPrepare && <div className={styles.footerActions}>
+        {instructionFiles.length > 1 && <Select value={prepareTarget} aria-label={ko ? "반영할 파일" : "File to update"} onChange={(event) => setTargetPath(event.target.value)}>{instructionFiles.map((file) => <option value={file.path} key={file.path}>{file.path}</option>)}</Select>}
+        <button className={`${styles.button} ${styles.primary}`} disabled={!memorySelection.size || !snapshot?.writable || Boolean(busy) || snapshot.activation === "recovery_required"} onClick={() => void run("prepare-memory", async () => { let proposal; try { proposal = await api().prepareFromMemory({ agentId: agent.id, memoryEntryIds: [...memorySelection], ...(prepareTarget ? { targetPath: prepareTarget } : {}) }); } catch (failure) { setMemorySelection(new Set()); await refresh().catch(() => undefined); throw failure; } await refresh(); setMemorySelection(new Set()); await openReview(proposal.id); })}>{busy === "prepare-memory" && <span className={styles.loading} />}{ko ? `변경안 만들기${memorySelection.size ? ` (${memorySelection.size})` : ""}` : `Prepare change${memorySelection.size ? ` (${memorySelection.size})` : ""}`}</button>
+      </div>}
     </aside>
-    {selectedMemory ? <MemoryDetail candidate={selectedMemory} group={selectedGroup} locale={locale} agentName={name} agentRole={agent.tagline} proposal={(snapshot?.proposals ?? []).find((proposal) => proposal.memoryEntryIds.includes(selectedMemory.id))} onOpenProposal={(id) => void openReview(id)} /> : <div className={styles.empty}><IconBrain size={35} /><strong>{ko ? "에이전트가 일하며 배운 내용이 여기에 쌓입니다" : "What the agent learns while working collects here"}</strong></div>}
+    {selectedMemory ? <MemoryDetail candidate={selectedMemory} group={selectedGroup} locale={locale} agentName={name} agentRole={agent.tagline} canPrepare={canPrepare} proposal={(snapshot?.proposals ?? []).find((proposal) => proposal.memoryEntryIds.includes(selectedMemory.id))} onOpenProposal={(id) => void openReview(id)} /> : <div className={styles.empty}><IconBrain size={35} /><strong>{ko ? "에이전트가 일하며 배운 내용이 여기에 쌓입니다" : "What the agent learns while working collects here"}</strong></div>}
   </>;
   const renderChanges = () => <>
     <aside className={styles.listPane}><div className={styles.paneHeader}><IconLayers size={14} /><strong>{ko ? "변경" : "Changes"}</strong><span>{snapshot?.proposals.length ?? 0}</span></div><div className={styles.listRows}>
@@ -538,7 +542,7 @@ function supportSentence(group: AgentWorkspaceMemoryCandidate[], ko: boolean): s
       promotion?.ownerCorrections ? `You corrected course ${promotion.ownerCorrections} time(s) while those runs worked.` : "", promotion?.failures ? `${promotion.failures} tool errors or failures were recorded in the same runs (not necessarily because of this lesson).` : ""];
   return parts.filter(Boolean).join(" ");
 }
-function MemoryDetail({ candidate, group, locale, agentName, agentRole, proposal, onOpenProposal }: { candidate: AgentWorkspaceMemoryCandidate; group: AgentWorkspaceMemoryCandidate[]; locale: string; agentName: string; agentRole?: string; proposal?: AgentWorkspaceProposal; onOpenProposal: (id: string) => void }) {
+function MemoryDetail({ candidate, group, locale, agentName, agentRole, canPrepare, proposal, onOpenProposal }: { candidate: AgentWorkspaceMemoryCandidate; group: AgentWorkspaceMemoryCandidate[]; locale: string; agentName: string; agentRole?: string; canPrepare: boolean; proposal?: AgentWorkspaceProposal; onOpenProposal: (id: string) => void }) {
   const ko = locale === "ko";
   const learned = plainMemoryText(candidate.contentNative || candidate.content, ko);
   const technical = candidate.evidence.filter(isTechnicalEvidence);
@@ -553,8 +557,8 @@ function MemoryDetail({ candidate, group, locale, agentName, agentRole, proposal
     <p className={styles.detailContent}>{role && role !== "One Team teammate" ? `${agentName} — ${role}` : agentName}</p>
     <h3>{ko ? "일하면서 배운 것" : "What it learned"}</h3>
     <p className={styles.detailContent}>{learned}</p>
-    <h3>{ko ? "지침에 반영하면" : "If you add it to its instructions"}</h3>
-    {proposal?.card ? <LearningCardView card={proposal.card} ko={ko} /> : <p className={styles.detailContent}>{ko ? "변경안을 만들면 실제 기록을 바탕으로, 어떤 상황에서 지금과 무엇이 달라지는지 보여 드립니다. 근거가 부족하면 아무것도 바꾸지 않는 것이 정상 결과입니다. 승인하기 전에는 아무것도 바뀌지 않습니다." : "Prepare a change to see, from the actual records, when it applies and what changes from today. When the records do not support a change, no change is the normal result. Nothing changes until you approve."}</p>}
+    {(proposal?.card || (canPrepare && candidate.state === "eligible")) && <><h3>{ko ? "지침에 반영하면" : "If you add it to its instructions"}</h3>
+    {proposal?.card ? <LearningCardView card={proposal.card} ko={ko} /> : <p className={styles.detailContent}>{ko ? "변경안을 만들면 실제 기록을 바탕으로, 어떤 상황에서 지금과 무엇이 달라지는지 보여 드립니다. 근거가 부족하면 아무것도 바꾸지 않는 것이 정상 결과입니다. 승인하기 전에는 아무것도 바뀌지 않습니다." : "Prepare a change to see, from the actual records, when it applies and what changes from today. When the records do not support a change, no change is the normal result. Nothing changes until you approve."}</p>}</>}
     {(group.length > 1 || candidate.support) && <><h3>{ko ? "얼마나 반복됐나" : "How often it came up"}</h3>
       <p className={styles.detailContent}>{supportSentence(group, ko)}</p>
       {group.length > 1 && <ul className={styles.evidence}>{group.filter((member) => member.id !== candidate.id).map((member) => <li key={member.id}>{plainMemoryTitle(member.contentNative || member.content || member.title, ko, 120)}</li>)}</ul>}</>}

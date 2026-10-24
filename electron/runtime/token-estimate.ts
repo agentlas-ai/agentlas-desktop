@@ -1,27 +1,27 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+// Tokenizer-grade token estimate for admission checks (no dependency, one linear pass).
+//
+// Admission used UTF-8 bytes as tokens (estimateTransportTokens) or bytes / 2.5 (serving). Real BPE
+// text costs 0.25-0.35 tokens per byte, so a 24 KB system prompt that is ~6k real tokens counted as
+// 24k, and a 16k-window local model refused even a plain turn after a few tool calls.
+//
+// The estimate is a per-script linear model fitted against tiktoken o200k_base (non-negative least
+// squares, relative-error weighted) on ~2,000 windows of repo prose (EN, KO, mixed), TypeScript/TSX,
+// compact and pretty JSON, logs and the real system prompts; coefficients and the held-out error
+// are recorded in output/qa/token-measure-20261011/TOKEN-ESTIMATE.md. Held-out p95 error per
+// category is 8-14%, and whole-request totals land within a few percent.
+//
+// Features (spaces are free, they attach to the next token):
+//   W   ASCII alphanumeric words (runs of letters/digits/_)       1.00 each
+//   LX  word characters beyond the 8th of a word                  0.19 each (hashes, base64, long ids)
+//   D   ASCII digits                                              0.45 each
+//   P   ASCII punctuation                                         0.46 each
+//   N   newline (with the indentation that follows it)            2.0  each
+//   H   Hangul syllable                                           0.87 each
+//   C   CJK ideograph                                             0.75 each
+//   K   kana                                                      0.80 each
+//   OL  other non-ASCII letters (Latin accents, Cyrillic, Arabic) 0.30 each
+//   OS  other non-ASCII symbols (dashes, arrows, box drawing)     0.55 each
+//   E   astral code points (emoji)                                2.5  each
 
 /** Bump whenever the coefficients below change; recorded in every model-call ledger event (G15). */
 export const TOKEN_ESTIMATE_REVISION = "o200k-linear-2026-10-11";

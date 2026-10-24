@@ -1,3 +1,4 @@
+import { stableScienceRuntimeChatId } from "../runtime/science-transport-identity";
 // Chat CRUD + chat_messages.
 // 사이드바 "최근 채팅" 섹션은 listRecent로 채운다.
 // 프로젝트 페이지는 listByProject로, 회사 페이지는 listByFirm으로 채운다.
@@ -15,7 +16,8 @@ import { repairAskOpenMarkers } from "../../shared/agent-control-blocks";
 import { emitDesktopStoreChange, emitTaskStoreChange } from "./change-bus";
 import { getFirm } from "./firms";
 import { evictRuntimeSessionsForChat, recordRuntimeSessionsCleared } from "./runtime-sessions";
-import { touchProject } from "./projects";
+import { inheritWorkingSessionScope, bindManagedWorkingSessionScope, bindWorkingSessionScope, workingSessionScope, type WorkingSessionScope } from "../runtime/session-scope";
+import { getProject, touchProject } from "./projects";
 import {
   listChatMessageImageUrls,
   persistChatMessageImages,
@@ -441,6 +443,12 @@ export function createChat(input: {
   /** 어느 표면이 시작한 대화인지 — One 홈과 Work 사이드바를 durable하게 분리한다. */
   originSurface?: "one" | "work";
 }): Chat {
+  // Explicit New and its durable isolation marker must commit together.
+  const db = getDb();
+  if (input.originSurface !== "one" && input.projectId && input.continueFromChatId
+    && input.kind !== "division" && !db.inTransaction) {
+    return db.transaction(() => createChat(input)).immediate();
+  }
   const ko = currentUiLocale() === "ko";
   const originSurface = input.originSurface === "one" ? "one" : "work";
   let resolvedAgentId = input.agentId;
@@ -533,16 +541,39 @@ export function createChat(input: {
   // default unless they explicitly request conversation mode.
   const shouldCreateTask = originSurface === "work" && input.taskMode !== "conversation";
   if (shouldCreateTask) ensureCanonicalTaskForChat(id);
+  // A future explicit New keeps a durable range, rather than an unstored UI hint.
+  if (originSurface === "work" && input.projectId && input.continueFromChatId && input.kind !== "division" && getProject(input.projectId)) {
+    bindManagedWorkingSessionScope(getDb(), id, { projectId: input.projectId, subSessionId: id }, {kind:"desktop-project"});
+  }
   const chat = getChat(id) as Chat;
   emitDesktopStoreChange({ entity: "chat", id });
   return chat;
 }
 
-function stableScienceRuntimeChatId(conversationId: string): string {
-  if (!CHAT_UUID_RE.test(conversationId)) throw new Error("Invalid Science conversation id");
-  const hex = createHash("sha256").update(`agentlas:science-runtime-chat:v1:${conversationId}`, "utf8").digest("hex");
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-8${hex.slice(13, 16)}-${((Number.parseInt(hex[16], 16) & 0x3) | 0x8).toString(16)}${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
+/** Host-owned project-work entry. Generic chats:create/new-context does not expose scope metadata. */
+export function createProjectWorkChat(input: { projectId: string; title?: string; agentId?: string }): Chat {
+  if (!input || typeof input !== "object" || Array.isArray(input)
+    || Object.keys(input).some(key => !["projectId", "title", "agentId"].includes(key))
+    || typeof input.projectId !== "string"
+    || (input.title !== undefined && typeof input.title !== "string")
+    || (input.agentId !== undefined && typeof input.agentId !== "string")) throw new Error("work_project_session_input_invalid");
+  const project = getProject(input.projectId);
+  if (!project) throw new Error("work_project_session_project_unavailable");
+  return getDb().transaction(() => {
+    const chat = createChat({ projectId: project.id, title: input.title, agentId: input.agentId,
+      taskMode: "task", originSurface: "work" });
+    bindManagedWorkingSessionScope(getDb(), chat.id, { projectId: project.id, subSessionId: null }, {kind:"desktop-project"});
+    return chat;
+  }).immediate();
 }
+
+/** Persistent dispatch identity remains local to its actual registered parent. */
+function inheritWorkingDispatchScope(chat: Chat, parent: Chat | null): Chat {
+  if(parent)inheritWorkingSessionScope(getDb(),chat.id,parent.id);
+  return chat;
+}
+
+
 
 /**
  * Main-only deterministic hidden chat for one Science conversation.
@@ -554,6 +585,7 @@ function stableScienceRuntimeChatId(conversationId: string): string {
 export function ensureScienceRuntimeChat(input: {
   conversationId: string;
   title: string;
+  workingScope?: WorkingSessionScope;
 }): Chat {
   const chatId = stableScienceRuntimeChatId(input.conversationId);
   const marker = `⟦science⟧${input.conversationId}`;
@@ -561,6 +593,10 @@ export function ensureScienceRuntimeChat(input: {
   if (existing) {
     if (existing.kind !== "division" || existing.originSurface !== "work" || existing.title !== marker) {
       throw new Error("Science runtime chat binding conflict");
+    }
+    if (input.workingScope) {
+      bindManagedWorkingSessionScope(getDb(), existing.id, input.workingScope, {kind:"external-logical",logicalId:input.conversationId});
+      ensureCanonicalTaskForChat(existing.id);
     }
     return existing;
   }
@@ -575,6 +611,10 @@ export function ensureScienceRuntimeChat(input: {
   });
   if (chat.id !== chatId || chat.kind !== "division" || chat.title !== marker) {
     throw new Error("Science runtime chat create receipt mismatch");
+  }
+  if (input.workingScope) {
+    bindManagedWorkingSessionScope(getDb(), chat.id, input.workingScope, {kind:"external-logical",logicalId:input.conversationId});
+    ensureCanonicalTaskForChat(chat.id);
   }
   return chat;
 }
@@ -763,16 +803,16 @@ export function getOrCreateDivisionSession(
       "SELECT * FROM chats WHERE parent_chat_id = ? AND kind = 'division' AND title = ? LIMIT 1",
     )
     .get(parentChatId, marker) as ChatRow | undefined;
-  if (existing) return toChat(existing);
   const parent = getChat(parentChatId);
-  return createChat({
+  if (existing) return inheritWorkingDispatchScope(toChat(existing), parent);
+  return inheritWorkingDispatchScope(createChat({
     agentId: fkAgentId,
     firmId: parent?.firmId ?? null,
     projectId: parent?.projectId ?? null,
     title: marker,
     kind: "division",
     parentChatId,
-  });
+  }), parent);
 }
 
 /** Hidden persistent session for a complete Team/Firm nested under a parent TF.
@@ -790,16 +830,16 @@ export function getOrCreateFirmSession(
       "SELECT * FROM chats WHERE parent_chat_id = ? AND kind = 'division' AND title = ? LIMIT 1",
     )
     .get(parentChatId, marker) as ChatRow | undefined;
-  if (existing) return toChat(existing);
   const parent = getChat(parentChatId);
-  return createChat({
+  if (existing) return inheritWorkingDispatchScope(toChat(existing), parent);
+  return inheritWorkingDispatchScope(createChat({
     agentId: ceoAgentId,
     firmId,
     projectId: parent?.projectId ?? null,
     title: marker,
     kind: "division",
     parentChatId,
-  });
+  }), parent);
 }
 
 /** 사이트 디자인 스튜디오의 프로젝트별 숨김 지속 세션(division).
@@ -951,8 +991,8 @@ export function setChatSwarmMode(chatId: string, enabled: boolean): void {
 }
 
 /**
-
-
+ * Who changed a chat's model chip. 2026-10-17: the production Yotube room's chip moved from codex gpt-6.1-sol xhigh to
+ * claude-code sonnet low between 00:25Z and 01:05Z, and nothing recorded who did it (the release peer read every log).
  */
 export type ChatRuntimeSelectionActor =
   | "desktop-ui" | "mobile" | "work-start" | "external-cli-import" | "science" | "runtime-handoff" | "host";
@@ -1508,11 +1548,11 @@ function closedAgiRestartAskIds(actionIds: readonly string[]): ReadonlySet<strin
 }
 
 /**
-
-
-
-
-
+ * Host lines whose truth moved after they were written, read from durable state (owner Yotube 2026-10-17). The stored row
+ * is never rewritten; every history reader (One, Work, split pane, phone, thread read) gets the same projection:
+ *  - a run failure line whose request a later run took over reads "recovered" (quiet on every surface);
+ *  - a "needs-owner" run failure whose code is inside the app reads "app-failed" (shared/run-failure-cause.ts);
+ *  - an AGI "restart the app" ask whose incident has closed is withdrawn (drawn nowhere).
  */
 function createSettledHostNoticeProjector(chatId: string, notices: ReadonlyArray<ChatHostNotice | undefined>): (notice: ChatHostNotice | undefined) => ChatHostNotice | undefined {
   const failureRunIds: string[] = [], askIds: string[] = [];

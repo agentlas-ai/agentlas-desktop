@@ -51,7 +51,7 @@ import { AGENT_MAIL_CONTROL_ENV, isAuthenticAgentMailMcpLaunch } from "../agent-
 import { AGENT_MAIL_AUTO_RUN_MCP, createAgentMailCapability, isAgentMailAutoRunChat, removeAgentMailCapability } from "../agent-mail/control-server";
 import { agentMailToolsOfferedForRun } from "../agent-mail/client";
 import { AGENT_TURN_CONTROL_ENV, turnToolsFor, isAuthenticTurnToolsMcpLaunch } from "../turn-tools/mcp-server";
-import { createTurnToolsCapability, removeTurnToolsCapability } from "../turn-tools/control-server";
+import { createTurnToolsCapability, removeTurnToolsCapability, type TurnScopedGoalWaitResolver } from "../turn-tools/control-server";
 import { GRAPH_EFFECT_ITEM_TOOL_NAMES, ONE_TEAM_CONTROL_ENV, ROOM_MEMBER_TOOL_NAMES, isAuthenticOneTeamMcpLaunch } from "../one/team-mcp-server";
 import { createOneTeamCapability, removeOneTeamCapability } from "../one/team-control-server";
 import { oneTeamDispatchAllowedFor } from "../one/team-dispatch";
@@ -228,6 +228,9 @@ export interface McpConfigBuildOptions {
   turnRunId?: string;
   /** Goal turns: also offer goal_wait / goal_complete from agentlas-turn. */
   turnGoalTools?: true;
+  /** Host-only condition wait capability for a canonical owner outside Chat Goal state.
+   * The resolver remains in Main memory; the child receives only goal_wait. */
+  turnGoalWaitOnly?: { resolveGoalWait: TurnScopedGoalWaitResolver };
   /** Attended runs (a person can answer): also offer ask_form. Never set for unattended or mobile-durable runs. */
   turnAskTool?: true;
   /** Main-minted owner-full evidence for a worker's bounded preview tool. */
@@ -272,14 +275,14 @@ export interface McpConfigBuildOptions {
 }
 
 /**
-
-
-
-
-
-
-
-
+ * Whether this run's agentlas-browser is bound in the Main-enforced read-only
+ * profile (proxy-server.ts readOnlyBrowserToolIsMutating). Codex read runs have
+ * approval_policy "never" and refused every non-readOnlyHint MCP call, including
+ * browser_navigate and browser_tabs (production 2026-09-23, codex-cli 0.156.1:
+ * "MCP tool call requires approval, but approval policy is never"), so an
+ * observation could never refresh the page. Codex already refused every mutating
+ * browser call there, so this profile removes no capability from codex read runs;
+ * other runtimes get it only for Main-issued observation runs.
  */
 export function agentlasBrowserReadOnlyProfile(gate: McpConfigBuildOptions["toolGate"]): boolean {
   if (!gate || gate.planMode || gate.simulation === true) return false;
@@ -288,18 +291,18 @@ export function agentlasBrowserReadOnlyProfile(gate: McpConfigBuildOptions["tool
 }
 
 /**
-
-
-
-
-
-
-
-
-
-
-
-
+ * Whether a codex write/full run binds agentlas-browser through the Main proxy
+ * with the vendor approval layer pre-approved. `codex exec` has approval_policy
+ * "never" and no interactive approval loop, so it refused every agentlas-browser
+ * tool without readOnlyHint — browser_navigate, browser_tabs, browser_cua_repl —
+ * with "MCP tool call requires approval, but approval policy is never", even for
+ * an automation the owner configured as tool_mode=browser + write (production
+ * 1.2.40, Threads automation f7a61706, runs 02:00Z/02:15Z 2026-09-24). Nobody can
+ * answer that refusal. Main's proxy becomes the one gate instead: the runtime
+ * tool arbiter (saved deny rules, permission level, simulation) and the browser
+ * launcher's own always-ask actions (payment, unsafe code) still apply to every
+ * call. Plan runs keep their stricter Plan policy; read runs keep the read-only
+ * profile above.
  */
 export function agentlasBrowserCodexMainGated(gate: McpConfigBuildOptions["toolGate"]): boolean {
   if (!gate || gate.planMode || gate.runtime !== "codex") return false;
@@ -495,7 +498,9 @@ for (const [targetKey, alias] of Object.entries(mapping)) {
   env[targetKey] = value;
 }
 
-const child = crossSpawn(command, args, { stdio: "inherit", env });
+// windowsHide: this wrapper runs under the GUI Agentlas executable, which has no console, so a console MCP
+// server (python agentlas_cloud mcp serve, node) would otherwise open a blank terminal window on Windows.
+const child = crossSpawn(command, args, { stdio: "inherit", env, windowsHide: true });
 for (const signal of ["SIGINT", "SIGTERM"]) {
   process.on(signal, () => {
     if (!child.killed) child.kill(signal);
@@ -693,9 +698,9 @@ function argsWithToolGateWorkingFolder(
  * Playwright가 설치돼 있어도 config/allowedTools에 싣지 않아 브라우저 우회를 막는다.
  */
 /**
-
-
-
+ * Runtimes whose MCP client takes an image in a tool result (turn-tools/control-server.ts harnessResultWithImages): Claude
+ * Code and codex 0.163 read it (probe 2026-10-18); the API-class lanes pass it on only to a model declared to read images
+ * (local-tool-loop.ts visionFromHarness). grok 1.0.62 stops answering after one; antigravity and the ACP agents are unmeasured.
  */
 const TURN_TOOL_IMAGE_RUNTIMES: ReadonlySet<string> = new Set(["claude-code", "codex", "byok", "agentlas", "agentlas-local", "ollama", "lmstudio", "mlx"]);
 
@@ -1126,7 +1131,8 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
         try {
           const capabilityConfigKey = opts?.configKey ?? key;
           const capability = await createTurnToolsCapability(
-            { chatId: callerChatId, runId: opts.turnRunId, tools: turnToolsFor(opts.turnGoalTools === true, opts.turnAskTool === true), dryRun: opts?.toolGate?.simulation === true || opts?.toolGate?.planMode === true,
+            { chatId: callerChatId, runId: opts.turnRunId, tools: turnToolsFor(opts.turnGoalTools === true, opts.turnAskTool === true, Boolean(opts.turnGoalWaitOnly)),
+              ...(opts.turnGoalWaitOnly ? { goalWaitResolver: opts.turnGoalWaitOnly.resolveGoalWait } : {}), dryRun: opts?.toolGate?.simulation === true || opts?.toolGate?.planMode === true,
               permission: opts?.toolGate?.permission ?? "read",
               admissionCurrent: opts?.admissionCurrent,
               graphAuthoring: serializedServers.some((server) => server.catalogId === "one-team") && !toolchainConsumer && !roomMember && !graphTeamGrant,
@@ -1508,7 +1514,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
   writePrivateFile(configPath, JSON.stringify({ mcpServers }, null, 2));
   const configurations = preparedRows.map(({ server }) => [server.id, mcpServerConfigurationDigest(server)] as const);
   // graphTeamGrant is an object identity: a delegated host never inherits it (it would not be current there anyway).
-  const { osMemoryCuratorRun: _osMemoryCuratorRun, admissionCurrent: _admissionCurrent, nativeScopedSelection: _nativeScopedSelection,
+  const { turnGoalWaitOnly: _turnGoalWaitOnly, osMemoryCuratorRun: _osMemoryCuratorRun, admissionCurrent: _admissionCurrent, nativeScopedSelection: _nativeScopedSelection,
     nativeScopedSelectionForServer: _nativeScopedSelectionForServer, graphTeamGrant: _graphTeamGrant, ...delegationBuildOptions } = opts ?? {};
   for (const row of preparedRows) {
     const entry = mcpServers[row.configKey] as { env?: Record<string, string> };
@@ -1532,8 +1538,10 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
     ...(opts.nativeBrowser.nativeComputerUse ? { nativeComputerUse: opts.nativeBrowser.nativeComputerUse } : {}),
   };
   releaseToolSurfaceDenial = registerMcpToolSurface(configPath, toolSurface);
+  // A turn wait resolver belongs to this host's admitted source run. Keep it
+  // local; serializing a rebuild intent would either clone a closure or lose its scope.
   releasePrepared = registerPreparedMcpConfig({ path: configPath, servers: preparedRows, runtimeEnv,
-    buildOptions: delegationBuildOptions, isCurrent: () => {
+    buildOptions: opts?.turnGoalWaitOnly ? undefined : delegationBuildOptions, isCurrent: () => {
     if (opts?.admissionCurrent && !opts.admissionCurrent()) return false;
     const current = new Map(listInstalledServers().map((server) => [server.id, mcpServerConfigurationDigest(server)]));
     return configurations.every(([id, digest]) => current.get(id) === digest);

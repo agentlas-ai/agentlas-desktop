@@ -263,6 +263,9 @@ export function spawnCli(
     } else suppressedSelfSpawnDiagnostics += 1;
   }
   const child = crossSpawn(command, args, {
+    // A GUI parent on Windows gives every console child (CLI .cmd shims via cmd.exe, node, python) its own
+    // visible console window unless hidden. Callers that need a console must pass windowsHide: false.
+    windowsHide: true,
     ...options,
     env: {
       ...env,
@@ -370,10 +373,10 @@ export async function firstExistingCli(
       // bare 커맨드명 — PATH(+Windows PATHEXT)로 해석. .cmd 심 포함.
       const probe = await probeCliVersionOutcome(candidate, timeout);
       if (probe.version !== null) return candidate;
-      
-
-
-
+      // A probe that ran out of time is not absence. Under load (W7 2026-10-18, load average 47) the bare name's
+      // `--version` took over 2 s, the next candidate (the absolute ~/.local/bin path) won, and the same executable got
+      // a second spelling: the team binding's source digest no longer matched (one-team-runtime-changed) and the
+      // judgment fingerprint changed. When the name is an executable on the CLI PATH, it is still this candidate.
       if (probe.timedOut && bareCliOnPath(candidate)) return candidate;
       continue;
     }
@@ -470,6 +473,7 @@ function runProbeCliVersion(command: string, timeoutMs: number): Promise<CliVers
         stdio: ["ignore", "pipe", "pipe"],
         env: envForCli(command),
         detached: process.platform !== "win32",
+        windowsHide: true,
       });
     } catch {
       finish(null);
@@ -531,9 +535,13 @@ export function commandLineShellSpawn(command: string, preferred?: string): {
   return { file, args: ["-lc", command], windowsVerbatimArguments: false };
 }
 
-/** POSIX에서 프로세스 그룹 킬이 가능하도록 detached 스폰 옵션(런 자식용). Windows는 미지원. */
-export function detachedSpawnOpts(): { detached?: boolean } {
-  return process.platform !== "win32" ? { detached: true } : {};
+/**
+ * 런 자식 스폰 옵션. POSIX는 프로세스 그룹 킬이 가능하도록 detached. Windows는 detached 미지원이고,
+ * 콘솔 프로그램(python·node·cmd 심)을 GUI 프로세스가 띄우면 빈 콘솔 창(Windows 11 은 Windows Terminal)이
+ * 하나씩 뜬다(2026-10-24 첫 Windows 실측) — 런 자식은 모두 파이프로 말하므로 창을 숨긴다(windowsHide).
+ */
+export function detachedSpawnOpts(): { detached?: boolean; windowsHide?: boolean } {
+  return process.platform !== "win32" ? { detached: true, windowsHide: true } : { windowsHide: true };
 }
 
 /**
@@ -698,10 +706,10 @@ let quitHookInstalled = false;
 
 const idleResidentProbes = new WeakMap<ChildProcess, () => boolean>();
 /**
-
-
-
-
+ * A pooled resident (the Codex app-server kept between turns) that is waiting for its next turn is not work.
+ * Counting it made the daemon report "run-children" forever, so an automatic update on quit was refused
+ * (automatic_update_active_work) and the install button looked dead (production 1.2.95, 2026-10-11).
+ * A resident mid-turn answers false and still counts.
  */
 export function markRunChildResident(child: ChildProcess, isIdle: () => boolean): void {
   idleResidentProbes.set(child, isIdle);

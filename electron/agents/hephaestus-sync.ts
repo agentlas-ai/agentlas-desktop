@@ -217,10 +217,10 @@ async function drainOnce(): Promise<HephaestusSyncResult> {
   const result: HephaestusSyncResult = { imported: [], skipped: 0, failed: [] };
   for (const item of collectItems()) {
     try {
-      
-
-
-
+      // A pending entry is the engine saying this card changed (it re-queues only on a new content_hash), so an
+      // already-registered folder is imported again: same row and seats, new instructions. Skipping it left the
+      // Yotube room's Motiondirector on its 2026-10-08 AGENTS.md after the owner's 10-13 21:46Z edit, while the
+      // queue entry still moved to done/ as "imported". Card-store scans (no entry) keep skipping known folders.
       if (alreadyImported(item.ref) && !item.pendingFile) {
         result.skipped += 1;
       } else {

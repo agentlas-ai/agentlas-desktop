@@ -27,12 +27,12 @@ import { createRuntimeUsageCollector } from "../../shared/observed-usage";
 import type { AliveDecisionBinding, AliveDecisionTransport } from "../daemon/alive-decision-port";
 
 /**
-
-
-
-
-
-
+ * What a light wake taught about a runtime (durable, keyed by kind + source + CLI version so an upgrade re-tests):
+ *  - cannot-judge: the runner refused the no-tools boundary before spawning (typed RuntimeJudgmentRefusal),
+ *    e.g. Antigravity ("no verified isolation") — measured 2026-09-24;
+ *  - usage-unmeasured: it answered but reported no token usage (grok 4.7, measured 2026-09-24), which would
+ *    leave every token-bounded wake "usage unknown".
+ * Alive's pool order skips such a member with a coded reason instead of falling back to a heavy path.
  */
 export type AliveRuntimeFact = "cannot-judge" | "usage-unmeasured";
 export function aliveRuntimeFactKey(status: Pick<RuntimeStatus, "kind" | "source" | "version">): string {
@@ -42,10 +42,10 @@ export function aliveRuntimeFactKey(status: Pick<RuntimeStatus, "kind" | "source
 /** alive-core/lifetime-store.ts keeps a receipt errorCode only in this shape (else it records null). */
 const WAKE_ERROR_CODE = /^[a-z][a-z0-9._-]{2,119}$/;
 /**
-
-
-
-
+ * A wake's own typed cause, as observed-runner.ts keeps it for every other caller: a provider's or host's typed marker
+ * refusal (a no-tools wake has no tool that could have acted), a refusal proven before dispatch, or a typed code thrown
+ * before any native activity. Everything else stays runtime_turn_unsettled. Production 2026-10-16..17: three codex
+ * wakes settled runtime_turn_unsettled with 0 tokens in 9-24 ms, so the refusal that ended them was never recorded.
  */
 function ownWakeFailureCode(code: string | undefined): string | null {
   return code && WAKE_ERROR_CODE.test(code) ? code : null;
@@ -162,8 +162,8 @@ export class LightWakeRunner {
       longContext: false, permission: "read", untrustedNoTools: true, judgmentOnly: true, surfaceGate: "exclude",
       maxOutputTokens: 600, outputSchema: { name: "agentlas_alive_goal_decision_v2", schema: input.schema },
       signal: controller.signal, locale: "en",
-      
-
+      // Codex keeps provider-global config (plugins, MCP servers) unless told to ignore it: 29.5k → 22.6k input
+      // tokens per wake measured 2026-09-24. Other runners already exclude user config on this path.
       ...(input.status.kind === "codex" ? { isolatedMcpConfig: true as const } : {}),
     };
     void Promise.resolve().then(() => runner(request, {

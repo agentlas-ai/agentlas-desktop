@@ -631,7 +631,8 @@ function recordGoalStrategyReflectionRefusal(input: {
  * which moved the boundary's snapshot digest: the proposal CAS refused itself
  * (goal_strategy_effect_unsettled) and the Goal's own wait continuation was
  * cancelled (checkpoint_effect_boundary_changed), so the Goal woke about six
- * minutes later without its checkpoint.
+ * minutes later without its checkpoint. Owner DB 2026-10-18..20: 5 of 5
+ * reflections, Yotube run_a4d70cc2 14:33Z and 14:53Z.
  * The scope keeps the parent's accounting and cancellation; it only stops this
  * advisory work from writing into another invocation's effect ledger.
  */

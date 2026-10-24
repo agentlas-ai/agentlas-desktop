@@ -48,9 +48,9 @@ function accountSubjectFor(authBindingId: string | null): string | null {
 }
 const curatorOwners = new Set<AbortController>();
 /**
-
-
-
+ * Core children started with a binding's environment: lease -> the revision it was issued for. Together with the
+ * curator owners these are the only reason to renew. With neither, nothing renews the binding: it runs out within TTL
+ * and its file is removed (2026-10-17: the renewal ran every 5 s for the life of the process after the first Core launch).
  */
 const childLeases = new Map<object, string>();
 let renewal: NodeJS.Timeout | null = null;
@@ -178,13 +178,13 @@ const TOMBSTONE_FILE = new RegExp(`^((?:desktop|terminal)-${UUID}\\.json)\\.revo
 const TEMPORARY_FILE = new RegExp(`^(?:desktop|terminal)-${UUID}\\.json\\.${UUID}\\.tmp$`);
 
 /**
-
-
-
-
-
-
-
+ * Remove binding files left by Desktop and Terminal processes that ended without removing theirs: a crash, a kill, or an
+ * older version that never removed them (2026-10-17: 154 files and 13 tombstones under runtime-bindings). Only names
+ * this protocol writes are considered, and only when no reader can accept them any more:
+ * - a binding whose expiry passed more than DEAD_BINDING_GRACE_MS ago and whose file has not changed for as long;
+ * - a tombstone, unless its binding file is still active, unexpired and of the tombstone's revision;
+ * - an atomic-write temporary file older than DEAD_BINDING_GRACE_MS.
+ * This process's own binding is never touched. A file a Windows reader holds open stays until a later sweep.
  */
 export function sweepDeadMemoryOwnerBindings(directory = path.join(memoryRoot(), "runtime-bindings"), now = Date.now()): number {
   for (let component = directory; ; component = path.dirname(component)) {

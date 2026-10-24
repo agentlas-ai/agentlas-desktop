@@ -1,18 +1,18 @@
 /**
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+ * 오너에게 보이는 활동 문구의 단일 층 — One 과 Work 가 같은 함수를 쓴다.
+ *
+ * 실측 2026-10-16(그룹 방 fc53939f·a1ab9a72): 실행 원장(run_events)에는 진단용 문구가 그대로 남고,
+ * 화면에는 그중 일부가 새어 나왔다 — "Codex CLI 호출 중...", "CLI 프로세스 대기 중", "codex: Reconnecting... 2/5",
+ * "[cache] read=…", "Agentlas One → installed:no-ai-slop-copywriter 메시지 전송", "TF 미완료 — …".
+ * 개발자 용어라 오너가 읽을 수 없다.
+ *
+ * 규칙:
+ *   1. 배관(CLI 프로세스 상태·전송/재연결·CLI stderr·대괄호 진단·출력 형식 안내·모델 확인 잡담)은 null — 화면에서 뺀다.
+ *      원장과 로그에는 그대로 남는다(이 함수는 표시만 바꾼다).
+ *   2. 내부 에이전트 id(installed:·firm:·borrow:·team-mem…)는 이벤트가 준 표시 이름(또는 명단)으로 바꾼다.
+ *      못 풀면 슬러그를 보이지 않는다.
+ *   3. 팀 단계 문구는 짧은 평문으로 바꾼다.
+ * 이 파일은 의존성이 없다 — renderer·electron(모바일 투영)이 모두 가져다 쓴다.
  */
 
 export type OwnerActivityLocale = "ko" | "en";
@@ -192,16 +192,16 @@ export function collapseOwnerActivityLines(lines: readonly string[]): string[] {
   return out;
 }
 
-
-
-
-
-
-
-
-
-
-
+/* ───────────────────────── 그래프 노드 실패 문구 ─────────────────────────
+ *
+ * 실측 2026-10-15~16(운영 1.3.44): 노드가 실패하면 화면이 `invocation_chat_owned_by_other_run` 같은 기계 코드와
+ * 영어 안내문을 그대로 보였다 — run-graph 가 예상 못 한 오류를 `{code:"NODE_FAILED", reason: err.message}` 로 담고,
+ * 화면이 reason/nextAction 을 그대로 그렸기 때문이다. 기계 코드는 run_events·실패 상세에 남고, 오너에게는
+ * 이 함수가 만든 평문만 간다(실행 로그·카드·알림·텔레그램·실행 기록이 모두 같은 함수를 쓴다).
+ *
+ * 규칙: ① 아는 코드 → 무슨 일이었고 무엇을 할 수 있는지 한두 문장. ② 모르는 snake/dotted 코드 → 일반 평문.
+ * ③ 사용자 언어로 쓴 사람 문장 → 그대로(뒤에 붙은 "원문: …"·남은 코드 조각만 뗀다). ④ 다른 언어로 쓴 문장은 일반 평문.
+ */
 
 export interface OwnerFailureInput {
   code?: string | null;
@@ -243,8 +243,8 @@ const KNOWN_FAILURES: readonly KnownFailure[] = [
     action: FAILURE_RETRY,
   },
   {
-    
-
+    // Send-time refusals the composer used to print raw (W7 ca1724ea, 2026-10-17: "보내지 못했습니다:
+    // native_gui_activation_prerequisites_missing" while the background service re-attached).
     match: /native_gui_activation_prerequisites_missing|native_gui_daemon_discovery_unavailable|supervisor_native_channel_unavailable/i,
     reason: {
       ko: "백그라운드 서비스와 다시 연결하는 중이었어요.",

@@ -1,7 +1,7 @@
 /**
- * Desktop Alive lifetime contracts — a generalized port of agentlas-science/src/alive/contracts.ts.
+ * Canonical Alive lifetime contracts used by host organisms, including Science.
  *
- * The Science copy hard-codes one action kind (science.continue_research). Here an action is any kind a
+ * Science registers its domain action (science.continue_research). An action is any kind a
  * playground registered in ./action-registry ("<family>.<verb>", e.g. goal.continue), with an `expected`
  * fence whose exact keys and value shapes that registration validates. Nothing in this directory knows
  * about One, Work, goals or model providers; the host glue lives in electron/alive-organisms/.
@@ -9,6 +9,12 @@
 export interface AliveBudget { tokenLimit: number | null; tokensUsed: number; deadlineMs: number | null }
 export interface AliveAttachment {
   attachmentId: string; agentId: string; domain: string; scope: Record<string, unknown>; status: "attached" | "detached";
+}
+/** A host-verified tool identity, re-read from the current wake and attachment. */
+export interface AliveToolPrincipal {
+  kind: "alive"; agentId: string; wakeId: string; controlEpoch: number;
+  attachmentId: string; attachmentGeneration: number; domain: string; scope: Readonly<Record<string, unknown>>;
+  runtimeBinding: unknown;
 }
 export interface AliveAgent {
   agentId: string; purpose: string; status: "enabled" | "suspended" | "retired"; controlEpoch: number;

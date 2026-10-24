@@ -597,7 +597,7 @@ export function listTriggerEventAttention(automationId: string): AutomationTrigg
  *   dedupe_key) is what stops a chain-receipt reconcile, a poll, a folder
  *   rescan or a webhook replay from delivering the same event again. Deleting
  *   it made the every-minute chain reconciler re-enqueue month-old deliveries
- *   so rows are never deleted here.
+ *   (desktop-w2-01, 2026-10-17), so rows are never deleted here.
  * - Pending, claimed and parked rows are never touched: they are work or attention.
  * - A row whose bound run is still `running` keeps its payload.
  * - `source` and `ownerChatId` survive compaction, so who ran each command run stays readable.

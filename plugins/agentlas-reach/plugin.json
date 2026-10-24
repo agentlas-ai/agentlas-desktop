@@ -1,0 +1,50 @@
+{
+  "schema": "agentlas.plugin/v2",
+  "slug": "agentlas-reach",
+  "name": "Agentlas Reach",
+  "version": "0.1.0",
+  "builtin": true,
+  "publisher": {
+    "name": "Agentlas",
+    "url": "https://agentlas.cloud"
+  },
+  "surface": {
+    "displayName": "Reach",
+    "displayNameKo": "앱 연결",
+    "tagline": "Use the apps installed on this computer, mapped by what each app publishes about itself",
+    "taglineKo": "이 컴퓨터에 설치된 앱을 그 앱이 스스로 공개한 정보로 지도에 그리고 바로 씁니다",
+    "description": "Maps the apps installed on this computer in the background (green: scriptable, amber: partly known, gray: not yet mapped), reads what each app publishes about itself first, and carries out one capability of one app with typed parameters. With app exploration on, partly known apps are opened dialog by dialog, read and closed again until their menus and dialogs become capabilities that work like the scripted ones.",
+    "descriptionKo": "이 컴퓨터에 설치된 앱을 백그라운드에서 지도에 그립니다(초록: 스크립트 가능, 호박: 일부 파악, 회색: 아직 미파악). 앱이 스스로 공개한 정보를 먼저 읽고, 앱 하나의 기능 하나를 타입이 있는 값으로 실행합니다. 앱 탐색을 켜면 일부만 파악된 앱의 메뉴와 대화상자를 하나씩 열어 읽고 닫아, 스크립트가 되는 앱처럼 쓸 수 있는 기능으로 바꿉니다.",
+    "category": "productivity",
+    "brandColor": "#0E7C66",
+    "defaultPrompts": [
+      "@reach 이 컴퓨터에서 내가 쓸 수 있는 앱을 지도로 보여줘",
+      "@reach Numbers 에서 이 표를 PDF 로 내보내줘",
+      "@reach 지금 열려 있는 앱의 인쇄 대화상자를 읽어서 쓸 수 있게 만들어줘"
+    ]
+  },
+  "invocation": {
+    "mention": "@reach",
+    "implicit": "router",
+    "standalone": true
+  },
+  "provides": {
+    "skills": {
+      "router": "skills/index/SKILL.md",
+      "workflows": ["operate", "explore"]
+    }
+  },
+  "requires": {
+    "prereq": [],
+    "os": ["darwin", "win32", "linux"]
+  },
+  "permissions": {
+    "fileWrite": "none",
+    "network": "none",
+    "shell": "deny"
+  },
+  "state": {
+    "files": [],
+    "assets": false
+  }
+}

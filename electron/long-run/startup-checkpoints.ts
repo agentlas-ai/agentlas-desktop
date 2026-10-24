@@ -145,11 +145,11 @@ function startupReplayRefusal(reason: string): never {
 }
 
 /**
-
-
-
-
-
+ * The producer's user-message cursor including its own prompt row (ID-1): the value invoke_prompt_bound records
+ * (InvocationService promptBoundUserCursor), else, for a run recorded before that field, the same rule applied to its
+ * bound prompt row, else invoke_started's admission-time cursor. The admission-time cursor is read before the run writes
+ * the owner's own prompt, so an owner-started producer always looked older than its own prompt and every restart refused
+ * the resume as newer_user_direction (Yotube run_d627367a, 2026-10-14 00:25Z and 05:32Z).
  */
 export function producerUserCursor(invocationRunId: string, chatId: string, startCursor: unknown): number | undefined {
   const start = typeof startCursor === "number" && Number.isSafeInteger(startCursor) ? startCursor : null;

@@ -30,6 +30,9 @@ import {
   repairMacInstalledAppGeneratedPythonCaches,
 } from "./updater/mac-app-trust";
 import { userDataDir, userDataPath } from "./runtime-paths";
+import { enterpriseFeedUrl, enterpriseReleaseMetadataUrl, usesCompanyUpdates } from "./enterprise-server/connection";
+import { enterpriseAuthorizationHeader, enterpriseConnection, noteEnterpriseFeedCheck, startEnterpriseServerConnection } from "./enterprise-server/runtime";
+import { enterpriseServerFetch } from "./enterprise-server/os-trust-fetch";
 
 // electron-updater is CommonJS in the main process bundle.
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -100,9 +103,12 @@ async function readDesktopReleaseMetadata(): Promise<DesktopReleaseMetadataSnaps
       clearTimeout(timer);
       resolve(value);
     };
+    // A company-managed Desktop (managed config file present, updates: "company") reads the same-shaped registry
+    // from its Enterprise Server. Without that file this is the official URL, exactly as before.
+    const company = enterpriseConnection();
     const request = net.request({
       method: "GET",
-      url: OFFICIAL_DESKTOP_RELEASE_METADATA_URL,
+      url: usesCompanyUpdates(company) ? enterpriseReleaseMetadataUrl(company) : OFFICIAL_DESKTOP_RELEASE_METADATA_URL,
       redirect: "follow",
     });
     const timer = setTimeout(() => {
@@ -112,6 +118,7 @@ async function readDesktopReleaseMetadata(): Promise<DesktopReleaseMetadataSnaps
     timer.unref?.();
     request.setHeader("Accept", "application/json");
     request.setHeader("User-Agent", "Agentlas-Desktop-update-check");
+    if (usesCompanyUpdates(company)) for (const [k, v] of Object.entries(enterpriseAuthorizationHeader())) request.setHeader(k, v);
     request.on("response", (response) => {
       if (response.statusCode !== 200) {
         response.on("data", () => undefined);
@@ -150,7 +157,16 @@ async function readDesktopReleaseMetadata(): Promise<DesktopReleaseMetadataSnaps
 async function configureDesktopReleaseFeed(): Promise<void> {
   const metadata = await readDesktopReleaseMetadata();
   const tag = validatedDesktopReleaseTag(metadata);
+  noteEnterpriseFeedCheck(tag); // Settings → company server: time and result of the last registry read (no URL, no token)
   if (!tag) return;
+  const company = enterpriseConnection();
+  if (usesCompanyUpdates(company)) {
+    // Company mirror (04-UPDATE-CHAIN.md): same signed installers, served from the Enterprise Server. electron-updater
+    // still verifies the OS code signature, so a compromised mirror cannot install an unsigned build.
+    autoUpdater.requestHeaders = { ...enterpriseAuthorizationHeader() };
+    autoUpdater.setFeedURL({ provider: "generic", url: enterpriseFeedUrl(company, tag) });
+    return;
+  }
   autoUpdater.setFeedURL({
     provider: "generic",
     url: `https://github.com/${OFFICIAL_DESKTOP_RELEASE_REPOSITORY}/releases/download/${tag}/`,
@@ -429,6 +445,9 @@ export async function initAutoUpdater(options: AutoUpdaterInitOptions = {}): Pro
     return;
   }
   installDesktopFeedResolver();
+  // Inert without a managed company-server config (personal installs): returns false and starts nothing.
+  // Company-server requests go through net.fetch (OS trust store, corporate CA) — enterpriseServerFetch.
+  startEnterpriseServerConnection({ userDataDir: userDataDir(), appVersion: app.getVersion(), fetchImpl: enterpriseServerFetch });
   const hasUpdateConfig = hasBundledUpdateConfig();
   if (!hasUpdateConfig) console.warn(`[updater] app-update.yml missing — automatic checks are disabled (${updateConfigPath()})`);
   const dispatchDeferredAuthRestore = () => {

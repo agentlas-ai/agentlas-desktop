@@ -865,25 +865,25 @@ ${AGENTLAS_PRIVATE_PROJECT_STATE_IGNORE.join("\n")}
 }
 
 /**
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+ * Project-local credential *index* only — never secret-bearing folders.
+ *
+ * ★Measured 2026-09-24 (isolated goal-shape E2E): a read-only One turn left
+ * `credentials/`, `signing/` and a Google Play `.env.example` in the scratch
+ * project. Nothing asked for them: reading the project ontology status (One
+ * workspace projection at run start, the project detail screen) reaches
+ * ensureProjectMemory, which used to scaffold these folders into every folder
+ * it touched. Folders named for signing keys and credentials invite people and
+ * agents to drop secrets into a user's working tree, and a store-specific env
+ * template is a guess about a project nobody described. The Desktop fallback
+ * bootstrap already refuses to create them (test-project-bootstrap-desktop).
+ * The Core `project ensure` templates (env.example / signing / credentials
+ * READMEs) are a separate writer owned by Agentlas-OS and need the same fix there.
+ *
+ * So provisioning writes only the private `.agentlas/` map and the protective
+ * ignore block (which keeps secrets out of git if the person later creates
+ * those folders themselves). Creating secret-bearing folders in a user's
+ * project requires an explicit request by the person, not a side effect.
+ * Contract: scripts/test-project-memory-no-secret-scaffold.cjs
  */
 function ensureLocalCredentialStore(identity: ProjectFsIdentity, projectName: string, now: string): void {
   const projectPath = identity.root;

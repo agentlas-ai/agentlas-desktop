@@ -24,7 +24,7 @@ import { clearProviderHealth, recordProviderHealth } from "../usage/provider-hea
 import { invalidateUsage } from "../usage";
 import { getRuntimeSession, saveRuntimeSession } from "../store/runtime-sessions";
 import { StringDecoder } from "node:string_decoder";
-import { parseGrokModels, type DiscoveryOutcome } from "../../shared/model-discovery";
+import { grokListingSignedOut, parseGrokModels, type DiscoveryOutcome } from "../../shared/model-discovery";
 import { settleDiscovery } from "./model-discovery-store";
 import { normalEndToolEvidence, settleNormalEnd, trackReportedToolCalls } from "../../shared/turn-settlement";
 
@@ -184,17 +184,17 @@ async function runGrokMcpCli(
 }
 
 /**
-
-
-
-
-
-
-
-
-
-
-
+ * Claude Code의 `--mcp-config <path>`와 달리 grok CLI는 MCP 서버를 `$GROK_HOME/config.toml`(user) 또는
+ * `./.grok/config.toml`(project)에 등록하는 방식이다(`grok mcp add/remove`). Legacy driver only: the default grok path is
+ * ACP (acp.ts ACP_PREFERRED_KINDS), which hands the servers over session/new and writes no file.
+ *
+ * The run's servers go into the product GROK_HOME mirror (foreign-cli-context.ts), user scope, never the run's working
+ * folder (2026-10-18: project scope wrote `<cwd>/.grok/config.toml`, i.e. into the owner's project, server env included,
+ * for the length of every legacy run). Measured grok 1.0.62 with a scratch GROK_HOME: `mcp add --scope user` writes only
+ * `$GROK_HOME/config.toml`, `mcp remove --scope user` takes it out, the working folder is untouched. Without a product
+ * mirror (no file sign-in, links refused) the person's ~/.grok would be the target, so the run is refused before spawn.
+ * Runs sharing the mirror share an exact entry (a registry beside config.toml counts them and the mirror sync keeps the
+ * registered tables); a different entry under a busy key is refused, never swapped under the other run.
  */
 interface GrokRunMcpRegistry { [key: string]: { runs: number; digest: string } }
 let grokMcpMutationTail: Promise<void> = Promise.resolve();
@@ -314,7 +314,8 @@ function listGrokModels(bin: string): Promise<DiscoveryOutcome> {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      resolve(settleDiscovery("grok", { stdout: out, models: parseGrokModels(out), source: "cli", ...input }));
+      // Signed out is typed (cli:auth-required), not a yield regression: "You are not authenticated." (2026-10-24).
+      resolve(settleDiscovery("grok", { stdout: out, models: parseGrokModels(out), source: "cli", signedOut: grokListingSignedOut(out), ...input }));
     };
     let child: ReturnType<typeof spawnCli>;
     try {
@@ -352,14 +353,14 @@ export interface GrokProbe {
   discovery: DiscoveryOutcome;
 }
 
-
-
-
-
-
-
-
-
+/*
+ * `grok models` the same way as `agy models` (antigravity.ts cachedAgyModelDiscovery). detectRuntimes() caches for
+ * 10 seconds only, so every runtime list the app needed started a `grok models` process: production 2026-10-12,
+ * 27 of them from Main in 15 minutes (procmon). The list changes with a CLI update or a new sign-in.
+ *   - success: kept 10 minutes; failure: looked at again after 1 minute;
+ *   - an expired value is returned at once and refreshed once in the background;
+ *   - only the first detection (or a changed binary) waits.
+ */
 export const GROK_MODEL_DISCOVERY_FRESH_MS = 10 * 60_000;
 export const GROK_MODEL_DISCOVERY_FAILED_RETRY_MS = 60_000;
 let grokModelsCache: { binary: string; at: number; outcome: DiscoveryOutcome; version: string } | null = null;
@@ -574,11 +575,7 @@ async function runGrokTurn(req: RunnerRequest, events: RunnerEvents, dispatch: {
         : "Grok CLI automatically persists conversation history, so it cannot be used for Agent App's stateless isolation. Select Claude Code, Ollama, or an API runtime.",
     );
   }
-  if (req.restrictedReadBoundary) {
-    throw new Error(
-      "Grok is not enabled for restricted read-only execution because its host filesystem boundary is not release-verified.",
-    );
-  }
+  // A read-only automation (restrictedReadBoundary) runs under its configured read permission: grokPermissionArgs(read).
   const bin = await getBin();
   if (!bin) throw new Error(tStatus(req.locale, "errCliMissingGrok"));
   // Nested function declarations don't inherit outer const-narrowing in TS —

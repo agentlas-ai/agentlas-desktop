@@ -12,14 +12,14 @@
  * ★ 두 가지를 절대 하지 않는다.
  *
  * 1. **`installed_agents.id` 를 바꾸지 않는다.** 그 id 를 부모로 삼는 FK 가 16곳이고
- *    12곳이 ON DELETE CASCADE 다. 신원은 옆으로 얹고 양방향으로 답한다.
- *
+ *    12곳이 ON DELETE CASCADE 다(경험칩 44 · 후보 746 · 승급영수증 360 ·
+ *    자동수집영수증 2,045 — 이 기기 실측). 신원은 옆으로 얹고 양방향으로 답한다.
  *
  * 2. **사용자 패키지 폴더에 쓰지 않는다.** `updater/continuity.ts:981-983` 이 업데이트
  *    전후로 `userData/agents` 아래 **모든 파일의 해시**를 대조하고, 하나라도 다르면
  *    fail-closed 로 사용자를 데이터 복구 화면으로 보낸다(`controller.ts:1385`).
- *    패키지 원본에 신원을 써넣으면 연속성 검사의 파일 해시가 달라진다.
- *    클라우드 packageHash 는 `agentlas.json` 을 **포함**하므로
+ *    한때 여기서 `agentlas.json` 에 agentId 를 써넣었는데, 그러면 이 기기 기준 233대가
+ *    전부 위반이 된다. 게다가 클라우드 packageHash 는 `agentlas.json` 을 **포함**하므로
  *    (엔진 `upload.py:3010 hash_upload_files`·데스크탑 `cloud-agents/package.ts:3142`,
  *    양쪽 다 제외 목록이 없다) 릴리스 신원까지 갈라진다.
  *    엔진도 같은 결론에 도달해 있다 — `upload.py:1551` "without writing it to source".
@@ -61,8 +61,8 @@ export function readPackageAgentId(localId: string, slug: string): string | null
 }
 
 /**
- * 빌트인은 패키지가 없어서 읽을 agentId 가 없다. 연결된 경험 데이터가 신원을 잃지 않도록
- * 빌트인도 같은 신원 체계에 포함한다.
+ * 빌트인은 패키지가 없어서 읽을 agentId 가 없다. 그런데 이 기기 실측으로 빌트인 8행이
+ * 경험칩의 41%, 후보의 89% 를 갖고 있다 — 조용히 빼면 그 데이터가 신원 없는 상태가 된다.
  * 그래서 예약 네임스페이스로 **명시 등재**한다.
  */
 export function reservedBuiltinAgentId(slug: string): string {

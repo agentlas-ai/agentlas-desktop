@@ -3,24 +3,24 @@ import { getAutomation } from "../store/automations";
 import { getChat } from "../store/chats";
 import { currentOneGraphAuthority } from "./graph-ownership";
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+/*
+ * Owner decision 2026-10-16 ("방 범위 권한 허용"): an agent/action step of a graph that a group room's One saved gets
+ * that room's One Team for the step's run, and nothing wider.
+ *
+ * Before this, a graph step never had One Team: only One's own conversation and a One Goal's continuation automation
+ * do (team-dispatch.ts continuationOwnerChat), and the graph authority receipt (graph-ownership.ts) was honoured only
+ * by fixed mcp_call steps. The daily "TCIagent YouTube" graph (saved by the Yotube room's One, step prompts that call
+ * one_team_list / one_team_start_session / one_team_steer / one_team_session_status) therefore could never produce.
+ *
+ * Scope, all of it checked by the host, none of it read from the model or a payload:
+ *   - only a step whose automation carries a CURRENT one_graph_authority (receipt digest = the definition now) owned by a
+ *     group room; re-checked when the step starts (mint), when its MCP config is built, and on every One Team call;
+ *   - the room-owned capability (chatId = the room), permission = the step's (mutation -> write, else read) capped at the
+ *     automation's executionPermission;
+ *   - tools: the room's list minus the graph/Toolchain control surface (ONE_GRAPH_TOOL_NAMES), i.e. the seven below; a
+ *     read step gets one_team_list and one_team_session_status only;
+ *   - never for a dry run, never for an mcp_call step (it already has its own authority path), revoked when the step ends.
+ */
 
 export const GRAPH_STEP_TEAM_TOOLS = Object.freeze([
   "one_team_list", "one_team_start_session", "one_team_steer", "one_team_session_status",

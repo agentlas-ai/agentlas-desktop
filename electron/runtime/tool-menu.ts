@@ -59,8 +59,8 @@ const MENU_TOOLS = [
 
 /** Stable provider schemas work with adapters that snapshot their wire menu once.
  * Workforce uses its exact eager broker inventory until it supports menu handles. */
-/**
- */
+/** Smaller sets used to ship every schema eagerly. Measured 2026-10-11: 12 browser tools cost ~2.4k tokens on every request
+ * of every step; the menu plus its server index costs well under half of that and a single prepare round trip. */
 const LAZY_MIN_TOOLS = 8;
 const LAZY_MIN_SCHEMA_BYTES = 6_144;
 const INDEX_NAMES_PER_SERVER = 12;
@@ -82,17 +82,17 @@ export function toolMenuServerIndex(tools: OpenAiToolDef[], byName: Map<string, 
   }).join("; ");
 }
 
-/**
-
- */
+/** The harness entry is how a run reaches the app's own operations (automations, media.listen, documents). CLI runtimes
+ * list these names directly; behind the menu an API-lane team worker never opened it (dev 2026-10-18 O6: Haiku workers
+ * used only file/shell built-ins and wrote a launchd template, while codex workers registered the automation). */
 const DIRECT_ENTRY_TOOLS = new Set(["harness_search", "harness_describe", "harness_call"]);
 export function isDirectEntryTool(resolved: ResolvedTool | undefined): boolean {
   return resolved?.kind === "mcp" && resolved.server.catalogId === "agentlas-turn" && DIRECT_ENTRY_TOOLS.has(resolved.serverToolName);
 }
 
-/**
-
- */
+/** `earlyDeferral`: API-class models (Agentlas serving, BYOK) defer a mid-size MCP set too. Small local models keep the old
+ * thresholds on purpose: measured 2026-09 they went wrong behind an indirect surface (5 agentlas_code calls, never reaching
+ * the browser) and were exact when handed the tools directly. The harness entry always stays direct. */
 export function installLazyToolMenu(tools: OpenAiToolDef[], byName: Map<string, ResolvedTool>, enabled: boolean, oversizedOnly = false, earlyDeferral = false): OpenAiToolDef[] {
   const descriptors = new Map(tools.filter(tool => byName.get(tool.function.name)?.kind === "mcp"
     && !isDirectEntryTool(byName.get(tool.function.name))
@@ -112,9 +112,21 @@ export function installLazyToolMenu(tools: OpenAiToolDef[], byName: Map<string, 
   } });
   return exposed;
 }
-/** A tool that sits behind the menu, named directly, is not answered with a bare code: the reply names the two calls that reach it. The model
- * names it by its exact name (the menu index prints the short form), by the short name a prompt line gives, or by a spelling the alias rule resolves.
- * Text only: nothing is prepared or run, and a name the menu does not hold gets no hint. */
+interface ToolMenuPathObservation {
+  schemaVersion: "agentlas.tool-menu-path.v1";
+  requestedToolName: string;
+  resolvedToolName: string;
+  prepared: false;
+  dispatched: false;
+  permissionStatus: "unchanged";
+  prepare: { toolName: typeof PREPARE; arguments: { name: string } };
+  call: { toolName: typeof CALL; argumentSources: {
+    token: { toolName: typeof PREPARE; resultField: "token" };
+    arguments: "original-call.arguments";
+  } };
+}
+/** Structured recovery metadata only. Name resolution grants no preparation,
+ * dispatch or permission; argument sources are references, never issued tokens. */
 export function menuPathHint(byName: Map<string, ResolvedTool>, requested: string): string {
   const menu = menus.get(byName);
   if (!menu || !requested) return "";
@@ -128,7 +140,15 @@ export function menuPathHint(byName: Map<string, ResolvedTool>, requested: strin
     if (shortMatches.length === 1) exact = shortMatches[0];
   }
   if (!exact) return "";
-  return ` "${exact}" is an MCP tool behind the tool menu, not a direct tool: call ${PREPARE} {"name":"${exact}"}, then ${CALL} with the token it returns and the tool's arguments.`;
+  const observation: ToolMenuPathObservation = {
+    schemaVersion: "agentlas.tool-menu-path.v1", requestedToolName: requested, resolvedToolName: exact,
+    prepared: false, dispatched: false, permissionStatus: "unchanged",
+    prepare: { toolName: PREPARE, arguments: { name: exact } },
+    call: { toolName: CALL, argumentSources: {
+      token: { toolName: PREPARE, resultField: "token" }, arguments: "original-call.arguments",
+    } },
+  };
+  return ` ${JSON.stringify(observation)}`;
 }
 export function toolMenuMetrics(byName: Map<string, ResolvedTool>): Readonly<Menu["metrics"]> | null {
   const menu = menus.get(byName); return menu ? { ...menu.metrics } : null;

@@ -409,7 +409,8 @@ async function runKimiTurn(req: RunnerRequest, events: RunnerEvents, dispatch: {
   }
 
   // Kimi prompt mode exposes built-in file/shell tools and currently has no
-  // verified zero-tool switch. Do not widen browser or restricted-read authority.
+  // verified zero-tool switch. Do not widen browser authority. A read-only automation (restrictedReadBoundary) runs like
+  // any read run of this legacy driver (the permission-not-enforceable notice below); the default ACP path enforces read.
   if (req.browserOnly) {
     throw new Error(
       req.locale === "ko"
@@ -417,7 +418,7 @@ async function runKimiTurn(req: RunnerRequest, events: RunnerEvents, dispatch: {
         : "Kimi Code cannot enforce the Agentlas Browser-only boundary; select another runtime safely.",
     );
   }
-  if (req.untrustedNoTools || req.restrictedReadBoundary) {
+  if (req.untrustedNoTools) {
     // 표식을 단다 — 판정이 전멸했을 때 "기다리면 풀리는 사유"와 구분되어야 한다.
     throw new RuntimeJudgmentRefusal("kimi", req.locale === "ko"
       ? "Kimi Code는 현재 검증된 무도구 격리 모드를 지원하지 않습니다. Claude Code, Ollama 또는 API 런타임을 선택하세요."
@@ -443,12 +444,12 @@ async function runKimiTurn(req: RunnerRequest, events: RunnerEvents, dispatch: {
   const storedSessionId = saved && fingerprint && saved.fingerprint === fingerprint ? saved.sessionId : null;
   // The same folder the spawn below uses (its product mirror), read for the session store.
   const runEnv = withForeignCliContext("kimi", runReq.env ?? process.env, selectionFor(runReq.agentId, undefined, runReq.chatId));
-  
-
-
-
-
-
+  /*
+   * A session Kimi no longer holds (no session directory in its store: kimi-journal.ts; measured on Kimi Code 0.28.0,
+   * whose `--session <missing>` exits 1 before any turn) failed this turn and every later turn of the chat. It continues
+   * once in a fresh session that carries the chat history (unattended-session-turns.ts rules 2 and 4). An attended
+   * caller-managed session id carries no history, so it keeps its refusal.
+   */
   const candidateResume = runReq.runtimeSessionId ?? storedSessionId;
   const goneFresh = Boolean(candidateResume && kimiSessionGone(realCliHome("kimi", runEnv), candidateResume)
     && (runReq.unattended || attendedTurnStartsFresh("session_not_found", !runReq.runtimeSessionId)));

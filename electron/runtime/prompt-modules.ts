@@ -1,19 +1,20 @@
 import { createHash } from "node:crypto";
 import type { RuntimeLocale } from "./status-i18n";
 import { withSkillBodiesForNoReader } from "../agents/skill-bodies";
+import { deckRoute } from "../../shared/deck-capability";
 import { orderPromptParts, registerDeclaredPromptModule, PROMPT_ORDER_REVISION, type DeclaredPromptPart, type PromptOrderingMetadata } from "./prompt-order";
 
-  
-                                                                                                    
-                                                                                                               
-                                                                                                              
-                                                         
-  
-                                                                                                     
-                                                                                                   
-                                                                                  
-                                                                                                         
-   
+/*
+ * PromptModule registry — every always-on line of the shared system prompt is one registered module
+ * (docs/2026-10-13-native-harness/13 §5). Owner 2026-10-13: prompts become `key: value` one-liners; anything a
+ * typed tool can do is a tool (ask_form, read_ui_schema, memory_note, goal_*), and catalogs (plugins, skills,
+ * connectors) are name lists the model opens on its own.
+ *
+ * A module renders current host-owned facts (profile, locale, permission, runtime kind and versioned
+ * catalogs/agent files). Update triggers are declared: versioned content is re-read, never frozen.
+ * Explicit plugin mentions travel in turn context, never in the system inventory.
+ * `describePromptModules` returns the per-module bytes and digests so delivery can be metered and shown.
+ */
 
 export type PromptProfile = "ordinary" | "restricted" | "science" | "host-judgment" | "untrusted";
 export type PromptLayer = "S1" | "S2";
@@ -88,30 +89,37 @@ export function promptModules(): readonly PromptModule[] {
   return registry;
 }
 
-   
-                                                                                                      
-                                                                                                                               
-                                                                                                                                      
-                                                                                                                                       
-                                                                                                                               
-   
+/**
+ * `ask_form` (agentlas-turn) is the typed path; the fenced block stays for runtimes without the tool.
+ * Owner 2026-10-20 "묻는건 무조건 카드로": whatever only the owner can answer goes through the card, not a prose question. A card needs
+ * 2+ options (the host keeps a fence with fewer as plain prose: no card, no hold, no alert), so an open question offers best guesses;
+ * the card always takes typed text. The template shows two options for the same reason: the one-option template was copied as written.
+ * "only if blocked" keeps courtesy questions out: without it, forbidding prose turned closing questions into cards on gpt-oss.
+ */
 export const ASK_LINE =
   "ask: only if blocked on the owner (choice, fact, go-ahead) → call ask_form/ask_user, never prose; 2+ options (best guesses); safe default → take it; no tool → end with <<agentlas-ask>>{\"question\":\"…?\",\"options\":[{\"label\":\"…\"},{\"label\":\"…\"}]}<</agentlas-ask>>";
-                                                                                                                                                            
+/** The choice-only form (r2) for the profiles the widened rule was not measured on: restricted (no tools, control blocks ignored) and the Build wrapper. */
 export const ASK_LINE_CHOICE =
   "ask: call ask_form or ask_user for a real choice; no tool → end with <<agentlas-ask>>{\"question\":\"…?\",\"options\":[{\"label\":\"…\"}]}<</agentlas-ask>>";
 
 export const UI_LINE = "ui: call read_ui_schema before showing ui; surface: read_surface_protocol";
 /**
-
-
-
-
-
-
+ * The live document ports (document.*, live-document/ports.ts) are reachable only through harness_call, and both
+ * Claude Code and Codex list MCP tools behind a search, so a run asked to change a docx rewrote it with a script and the
+ * owner never saw the edit in the Document tab. Real-model A/B (2026-10-17, real agentlas-turn server and ports,
+ * /tmp/prompt-audit/doc-ab/real, task "change paragraph 2 of report.docx and save", 6 runs per arm): document.* called
+ * claude 0/6 and codex 0/6 without a system line, claude 6/6 and codex 6/6 with this line alone; the MCP server
+ * instructions line alone gave claude 6/6 and codex 0/6; dedicated document_* tools gave claude 6/6 and codex 0/6.
+ *
+ * Revision 2 (2026-10-23): the ban is about an EXISTING file. A new deck is not an edit: the ops path made plain white
+ * title-and-bullet slides (codex 3/3, 0 of 15 slides with a shape, card or chart; the owner's two real decks the same), while a
+ * model that designs the deck in code made designed decks (claude 3/3, codex 2/2). New decks on a runtime the capability table
+ * (shared/deck-capability.ts) marks "code" get DECK_LINE below.
  */
 export const DOCUMENTS_LINE =
-  "documents: to change a local xlsx/docx/pptx/hwpx/hwp file, use the agentlas-turn harness_call document.open → document.apply → document.save so the owner watches the edit typed in the Document tab; never rewrite the file with a script.";
+  "documents: to change an existing local xlsx/docx/pptx/hwpx/hwp file, use the agentlas-turn harness_call document.open → document.apply → document.save so the owner watches the edit typed in the Document tab; never rewrite that file with a script.";
+export const DECK_LINE =
+  "deck: a NEW pptx is designed in code, not typed in: harness_call document.deck.build {path, script} (the app's pptxgenjs runs your script), then document.render and document.deck.lint, fix, build again; read the $slides skill first for the design rules. An existing deck: document.apply.";
 export const CONNECTIONS_LINE =
   [
     "connections: connector, browser or API, never \"no API\"; keys = env vars by tool name, never printed; logged-in browser/Vault first; auth.ensure before auth.login (missing or reauth only)",
@@ -128,7 +136,7 @@ registerPromptModule({
 registerPromptModule({
   id: "core.locale", revision: 4, kind: "core", layer: "S1", profiles: ALL,
   stability: "configuration", changeTriggers: ["release", "locale"], order: 0,
-                                                                                                                     
+  // Owner 2026-10-14: the reply follows the language the user writes in; the app's language setting is for menus and
   // screens only ("입력언어무관 한국어답이 아니고 입력언어에따라 출력 … 세팅 영어 한국어는 메뉴나 그런거임"). Host-written
   // prompts (goal continuations, recoveries) are not the user's language, so those turns follow the user's last
   // message. The setting stays only as the fallback before the user has written anything.
@@ -149,8 +157,8 @@ registerPromptModule({
 registerPromptModule({
   id: "core.loop", revision: 3, kind: "core", layer: "S1", profiles: ["ordinary"],
   stability: "configuration", changeTriggers: ["release", "profile", "permission"], order: 0,
-  
-
+  // Measured 2026-10-14: without "any topic" qwen3 refused a tweet and a science question as outside a Motion agent's
+  // specialty (the old prompt said "everything else the user asks for, you complete"); with it 4/4 on qwen3 and gpt-oss.
   render: (ctx) => ctx.permission === "read" ? null
     : "loop: do what the user asks (any topic, not only your specialty) → verify → report how; failed → another tool; stop only at a named outside blocker; no leaks or attacks",
 });
@@ -174,7 +182,7 @@ registerPromptModule({
   stability: "fixed-policy", changeTriggers: ["release", "profile"], order: 0,
   // An unattended run has no question channel (ask_form is not listed; the turn context closes with the
   // unattended boundary). Offering the ask line there let the developer channel outrank that boundary
-                                                                                                        
+  // (2026-10-15 Codex V2 fixture, old/new 2/2 asked an absent owner). Attended and Mobile runs keep it.
   // The restricted profile has no card channel at all (its final boundary ignores control blocks), so it keeps the choice-only
   // form: "never ask in prose" would contradict it.
   render: (ctx) => ctx.unattendedNoAsk ? null : ctx.profile === "restricted" ? ASK_LINE_CHOICE : ASK_LINE,
@@ -189,9 +197,15 @@ registerPromptModule({
 });
 
 registerPromptModule({
-  id: "capability.documents", revision: 1, kind: "capability", layer: "S1", profiles: ["ordinary"],
+  id: "capability.documents", revision: 2, kind: "capability", layer: "S1", profiles: ["ordinary"],
   stability: "fixed-policy", changeTriggers: ["release", "profile"], order: 0,
   render: () => DOCUMENTS_LINE,
+});
+
+registerPromptModule({
+  id: "capability.documents.deck", revision: 1, kind: "capability", layer: "S1", profiles: ["ordinary"],
+  stability: "configuration", changeTriggers: ["release", "profile", "runtime", "permission"], order: 0,
+  render: (ctx) => (deckRoute(ctx.runtimeKind, ctx.permission) === "code" ? DECK_LINE : null),
 });
 
 registerPromptModule({
@@ -215,10 +229,26 @@ registerPromptModule({
 });
 
 
+/*
+ * The restricted profile is a read-only automation stage (RunnerRequest.restrictedReadBoundary: Main sets it only on an
+ * unattended automation whose configured permission is read). Owner rule 2026-10-23: the runtime's configured permission
+ * applies, so the stage reads and searches the project through the runtime's own read mechanism (claude
+ * --disallowed-tools, codex read-only sandbox, ACP read mode + host arbiter, read built-ins on the host loops) in the
+ * project folder (taskForceStageCwd). r1 said "text and attached images only / no files or tools": with read tools
+ * present a real codex stage asked the owner to attach the file instead of reading it. A genuinely no-tools run
+ * (Agent App, inherited untrustedNoTools, host-action model step) never reaches this profile: untrustedNoTools wins in
+ * wrapSystemPrompt and renders boundary.untrusted. Codex reads through shell commands inside its read-only sandbox, so
+ * the line forbids changes, not commands.
+ */
+export const RESTRICTED_READ_LINE =
+  "allowlist: read only: read and search files in the working folder yourself (read tools or read-only commands) and report only what you read; never ask to attach; never write, edit, delete or change anything; no control blocks";
+export const RESTRICTED_READ_FINAL_LINE =
+  "host boundary (final): read permission: reading and searching files is allowed; no writes, edits, deletes or other changes; control blocks are ignored";
+
 registerPromptModule({
-  id: "boundary.restricted", revision: 1, kind: "core", layer: "S1", profiles: ["restricted"],
+  id: "boundary.restricted", revision: 2, kind: "core", layer: "S1", profiles: ["restricted"],
   stability: "fixed-policy", changeTriggers: ["release", "profile"], order: 0,
-  render: () => "allowlist: none: text and attached images only; never claim a file, tool or search; missing contents → ask to attach; no control blocks",
+  render: () => RESTRICTED_READ_LINE,
 });
 
 registerPromptModule({
@@ -257,20 +287,21 @@ registerPromptModule({
   ].join("\n"),
 });
 
-/** Profiles whose run has no file reader: a package's skill list is followed by the exact bodies of that revision. */
+/** Profiles whose run has no file reader: a package's skill list is followed by the exact bodies of that revision.
+ * restricted (a read automation stage) reads the project folder, not the agent package's folder, so it keeps the bodies. */
 const NO_READER_PROFILES: ReadonlySet<PromptProfile> = new Set<PromptProfile>(["untrusted", "restricted", "host-judgment"]);
 
 registerPromptModule({
   id: "role.agent", revision: 2, kind: "role", layer: "S2", profiles: ALL,
   stability: "versioned-content", changeTriggers: ["agent-instructions", "skill-package", "locale"], order: 0,
-                                                                                                                           
+  // Runs that can read files keep the list (owner 2026-10-13); a no-reader run cannot open SKILL.md (native-harness NH04).
   render: (ctx) => `${ctx.agentSeparator}\n${NO_READER_PROFILES.has(ctx.profile) ? withSkillBodiesForNoReader(ctx.agentPrompt) : ctx.agentPrompt}`,
 });
 
 registerPromptModule({
-  id: "boundary.restricted.final", revision: 1, kind: "core", layer: "S2", profiles: ["restricted"],
+  id: "boundary.restricted.final", revision: 2, kind: "core", layer: "S2", profiles: ["restricted"],
   stability: "final-boundary", changeTriggers: ["release", "profile"], order: 0,
-  render: () => "host boundary (final): no files, shell, web, browser, MCP or tools; control blocks are ignored",
+  render: () => RESTRICTED_READ_FINAL_LINE,
 });
 
 export interface RenderedPromptModule extends PromptOrderingMetadata { revision: number; orderRevision: number; layer: PromptLayer; bytes: number; sha256: string }

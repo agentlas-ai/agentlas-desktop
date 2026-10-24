@@ -932,16 +932,16 @@ export async function captureUpdaterContinuity(input: {
   let source: Database.Database | null = null;
   try {
     source = new Database(input.databasePath, { readonly: true, fileMustExist: true });
-    
-
-
-
+    // Read the reference facts and copy the pages from ONE read snapshot. Each autocommit SELECT used to see its own
+    // snapshot and the backup a later one, so a single commit to a protected table in between (a judgment ledger row
+    // 248 ms into the capture, production 1.3.44 -> 1.3.47, 2026-10-16) dropped the recovery copy. sqlite3_backup_step
+    // copies the read transaction already open on its source connection; WAL writers keep committing meanwhile.
     source.exec("BEGIN");
     const before = databaseFacts(source);
-    
-
-
-
+    // Copy every page in ONE step. The default is 100 pages per step, and SQLite restarts a backup from page 1
+    // whenever another connection (the daemon, or Main's own store handle) commits between two steps. On a busy
+    // 1.4 GB store that never finished: Main sat at ~98% CPU for 12+ minutes inside sqlite3_backup_step while the
+    // install button looked dead (production 1.2.95, 2026-10-11). One step holds a single read snapshot.
     await source.backup(backupPath, { progress: () => 0x7fffffff });
     source.exec("COMMIT");
     if (!fs.existsSync(backupPath) || fs.statSync(backupPath).size <= 0 || !quickCheck(backupPath)) {

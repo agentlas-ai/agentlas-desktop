@@ -1,5 +1,4 @@
 import fs from 'node:fs/promises';
-import { companyDeviceSheet } from './native-approval-sheets';
 import path from 'node:path';
 import { createHash, createPrivateKey, generateKeyPairSync, randomBytes, randomUUID, sign } from 'node:crypto';
 import type { BrowserWindow, IpcMain, IpcMainInvokeEvent } from 'electron';
@@ -14,11 +13,12 @@ import type { CompanyNativeBrowserPort } from './company-native-browser';
 import { businessEmployeeAgentNativeDigest as digest } from './employee-agent-report-adapter';
 import { isAppControlEvent } from '../app-control/ipc-registry';
 
+import { companyDeviceSheet } from './native-approval-sheets';
 function fail(code = 'company_native_owner_required'): never { throw Error(code); }
 const hash = (s: string) => createHash('sha256').update(s).digest('hex');
 type Stored = { schema: 'agentlas.company-native-private.v1'; credential: string; privateKey: string; association: BusinessNativeAssociation; installationId: string };
 type Held = { value: Stored; path: string; generation: number; db: OneVaultSqlite; root: string };
-const allowed = new Set(['association', 'revoke', 'transfers/inbox', 'transfers/snapshot', 'transfers/prepare', 'transfers/commit', 'transfers/receipt', 'transfers/package', 'transfers/install-ack', 'transfers/installation-receipt', 'transfers/source-register', 'transfers/source-receipt', 'company-work/admit', 'company-work/claim', 'company-work/refresh', 'company-work/settle', 'company-work/receipt', 'company-work/cancel', 'company-work/review', 'company-work/policies']);
+const allowed = new Set(['association', 'revoke', 'transfers/inbox', 'transfers/snapshot', 'transfers/snapshot-receipt', 'transfers/prepare', 'transfers/commit', 'transfers/receipt', 'transfers/package', 'transfers/install-ack', 'transfers/installation-receipt', 'transfers/source-register', 'transfers/source-receipt', 'company-work/admit', 'company-work/claim', 'company-work/refresh', 'company-work/settle', 'company-work/receipt', 'company-work/cancel', 'company-work/review', 'company-work/policies']);
 function validAssociation(value: unknown): value is BusinessNativeAssociation {
   if (!businessOnlyKeys(value, ['associationId', 'associationRevision', 'orgSession', 'native', 'nativeAccountAuthEpoch', 'purpose', 'audiencePrincipalIds', 'sourceAuthorityId', 'commandAuthorityId', 'consentRevision', 'sourceRevision', 'state', 'expiresAt'])) return false;
   const a = value as unknown as BusinessNativeAssociation;

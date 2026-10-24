@@ -19,8 +19,8 @@ export function useComposerEnter<T extends HTMLElement = HTMLTextAreaElement>(se
   const compositionText = useRef("");
   const lastEnd = useRef<number | null>(null);
   const sendAfterCommit = useRef(false);
-  
-
+  // The commit's send is scheduled: Chromium on macOS follows a composing Enter with a second, plain Enter keydown, and
+  // sending on it too made one Enter two sends (owner 2026-10-14, One room: the second, empty one paused the run).
   const commitSendScheduled = useRef(false);
   return {
     onCompositionUpdate: (event) => { compositionText.current = event.data ?? ""; },

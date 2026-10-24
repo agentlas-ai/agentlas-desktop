@@ -1,16 +1,17 @@
 import {personalEmployeeAgentInstallation} from './employee-agent-personal-installation';
-import {sharingSheet} from './native-approval-sheets';
 import {registerEmployeeAgentTransferMain,type EmployeeAgentTransferOriginal} from './employee-agent-transfer-main';
 import type {BrowserWindow,IpcMain,IpcMainInvokeEvent} from 'electron';
 import {isAppControlEvent} from '../app-control/ipc-registry';
 import {createNativeEmployeeConnection} from './native-employee-connection';
 import {createNativeEmployeeResultSource} from './native-employee-source';
+import {createOnePortableDefinitionSource} from './one-portable-definition';
 import {createNativeEmployeeReportJournal,type NativeEmployeeRootExpectations} from './native-employee-journal';
 import {businessEmployeeAgentNativeDigest as digest} from './employee-agent-report-adapter';
 import {businessEmployeeAgentOnly,businessEmployeeAgentText} from '../../shared/business/employee-agent-report';
 import {isBusinessId,isBusinessRevision} from '../../shared/business/context';
 import type {OneNativeStartupOwners} from '../one/native-startup-installer';
 import type {OneVaultRuntime} from '../secrets/one-vault-runtime';
+import {sharingSheet} from './native-approval-sheets';
 const electron=():typeof import('electron')=>require('electron') as typeof import('electron');
 export type NativeEmployeeReportStartup=Omit<OneNativeStartupOwners,'signal'|'assertMainOwner'|'currentNativeInstallation'>;
 export interface NativeEmployeeMainInput {
@@ -29,24 +30,34 @@ export interface NativeEmployeeMainInput {
  * read, login, HTTP, timer or task. Every effect starts in a focused owner action. */
 export function registerNativeEmployeeMain(input:NativeEmployeeMainInput){
  let closed=false,personalClosed=false,retiredGeneration:number|null=null,cleanupUnknown=false,associationApprovalPending=false,runtime:OneVaultRuntime|null=null,connection:ReturnType<typeof createNativeEmployeeConnection>|null=null,
- source:ReturnType<typeof createNativeEmployeeResultSource>|null=null,journal:ReturnType<typeof createNativeEmployeeReportJournal>|null=null,startup:NativeEmployeeReportStartup|null=null;
+ source:ReturnType<typeof createNativeEmployeeResultSource>|null=null,journal:ReturnType<typeof createNativeEmployeeReportJournal>|null=null,portable:ReturnType<typeof createOnePortableDefinitionSource>|null=null,startup:NativeEmployeeReportStartup|null=null;
  function deny():never{throw Error('business_native_focused_owner_required')}
  function owned(event:IpcMainInvokeEvent,retiredIdentity=false){input.assertTrustedSender(event);const window=electron().BrowserWindow.fromWebContents(event.sender);
   if(closed||personalClosed||cleanupUnknown||retiredGeneration!==null&&!retiredIdentity||input.signal.aborted||isAppControlEvent(event)||!window||window.isDestroyed()||!window.isFocused()||!input.isOwnerWindow(window)||event.senderFrame!==event.sender.mainFrame)deny();
   const frame=event.senderFrame,url=frame?.url,epoch=input.installationGeneration();return{window,check(){input.assertTrustedSender(event);if(closed||personalClosed||cleanupUnknown||retiredGeneration!==null&&!retiredIdentity||input.signal.aborted||window.isDestroyed()||!window.isFocused()||!input.isOwnerWindow(window)||electron().BrowserWindow.fromWebContents(event.sender)!==window||event.senderFrame!==frame||frame?.url!==url||input.installationGeneration()!==epoch||isAppControlEvent(event))deny()}};
  }
  function original(){if(closed||personalClosed||input.signal.aborted)deny();const current=input.sources?.runtime()??input.sources?.prepareRuntime();if(!current||runtime&&current!==runtime||!current.currentNativeOwner())deny();
-  if(!runtime){runtime=current;connection=createNativeEmployeeConnection(current,input.installationGeneration);source=createNativeEmployeeResultSource(current);journal=createNativeEmployeeReportJournal(current,source,connection);}
+  if(!runtime){runtime=current;connection=createNativeEmployeeConnection(current,input.installationGeneration);source=createNativeEmployeeResultSource(current);journal=createNativeEmployeeReportJournal(current,source,connection);portable=createOnePortableDefinitionSource({runtime:current,connection,source,journal});}
   return{runtime:runtime!,connection:connection!,source:source!,journal:journal!};
  }
  function currentStartup(){return startup&&connection?.current()?startup:null}
+ /** A focused owner action may resume the persisted approved pair (restart, re-login, org switch): the server re-checks membership, licence and
+  * the live company login and re-binds it to the current identity. Never inside a generation that already attached a startup (its pinned capability
+  * cannot be replaced there), and a refusal only means "not connected": the explicit approval flow is unchanged. */
+ async function ensureAssociation(o:{connection:ReturnType<typeof createNativeEmployeeConnection>}){
+  if(o.connection.current()||startup)return;
+  try{await o.connection.resume();
+   // Nothing of this device's own was stored (a new device): join the pairs this account already has approved. Never after a refusal or a missing company login.
+   if(!o.connection.current()&&o.connection.resumeState()==='none')await o.connection.registerDevice();
+  }catch{/* not connected: the explicit connect flow remains */}
+ }
  let personalTransferOriginal:EmployeeAgentTransferOriginal|null=null;
  const employeeTransfers=registerEmployeeAgentTransferMain({ipc:input.ipc,locale:()=>input.locale?.()??'en',original:event=>{const company=input.companyOriginal?.(),companyWindow=event&&electron().BrowserWindow.fromWebContents(event.sender);if(event&&companyWindow&&input.isCompanyWindow?.(companyWindow)){if(!company)deny();company.assertCurrent();return company;}if(!event&&company){company.assertCurrent();return company;}const o=original();if(personalTransferOriginal)return personalTransferOriginal;return personalTransferOriginal={identityOwner:o.runtime,db:o.runtime.sources.db,userDataPath:require('../runtime-paths').userDataPath,assertCurrent:()=>{if(original().runtime!==o.runtime)deny();},installation:personalEmployeeAgentInstallation(o.runtime,()=>{if(original().runtime!==o.runtime)deny();}),connection:{current:o.connection.current,refresh:o.connection.refresh,request:(operation:string,value:unknown)=>o.connection.request(operation as Parameters<typeof o.connection.request>[0],value)}};},focused:event=>{
   const target=electron().BrowserWindow.fromWebContents(event.sender);if(!target||!input.isCompanyWindow?.(target))return owned(event);
   if(!input.companyOriginal?.())deny();
   input.assertTrustedSender(event);const window=electron().BrowserWindow.fromWebContents(event.sender),frame=event.senderFrame,url=frame?.url,identity=input.companyOriginal()!;
   const check=()=>{input.assertTrustedSender(event);identity.assertCurrent();if(closed||(input.hostSignal??input.signal).aborted||isAppControlEvent(event)||!window||window.isDestroyed()||!window.isFocused()||!input.isOwnerWindow(window)||electron().BrowserWindow.fromWebContents(event.sender)!==window||frame!==event.sender.mainFrame||event.senderFrame!==frame||frame?.url!==url||input.companyOriginal?.()?.identityOwner!==identity.identityOwner)deny();};check();return{window:window!,check};
- }});
+ },personalOneSource:event=>{const window=electron().BrowserWindow.fromWebContents(event.sender);if(window&&input.isCompanyWindow?.(window))return null;original();return portable;}});
  function attach(){const o=original();if(!startup)startup=Object.freeze({association:o.connection.association,organizationIdentity:Object.freeze({current:()=>o.connection.current()?.orgSession??null}),nativeCustodyReports:o.journal.owners});input.installStartup(startup);}
  // A cached startup pins its original association capability. Expiry/revocation
  // cannot authorize replacing that capability inside the same generation.
@@ -55,7 +66,7 @@ export function registerNativeEmployeeMain(input:NativeEmployeeMainInput){
  input.ipc.handle('businessNative:identity',(event:IpcMainInvokeEvent)=>{
   owned(event,true);return (async()=>{await input.prepareGeneration?.(event);owned(event,true);
   if(retiredGeneration!==null){if(!input.prepareGeneration||input.installationGeneration()<=retiredGeneration)deny();retiredGeneration=null;}
-  const action=owned(event),o=original();action.check();return o.connection.native();})();
+  const action=owned(event),o=original();action.check();const identity=o.connection.native();await ensureAssociation(o);action.check();return identity;})();
  });
  input.ipc.handle('businessNative:completedWork',async(event:IpcMainInvokeEvent)=>{const action=owned(event),o=original();action.check();const items=await o.source.completedWork();action.check();return items});
  input.ipc.handle('businessNative:approveAssociation',async(event:IpcMainInvokeEvent,value:unknown)=>{
@@ -69,10 +80,20 @@ export function registerNativeEmployeeMain(input:NativeEmployeeMainInput){
  });
  input.ipc.handle('businessNative:shareCompletedResult',async(event:IpcMainInvokeEvent,value:unknown)=>{
   const action=owned(event);if(!businessEmployeeAgentOnly(value,['commandId','agentResourceId','sourceResourceId','summary','expectedRevision'])||![value.commandId,value.agentResourceId,value.sourceResourceId].every(isBusinessId)||!businessEmployeeAgentText(value.summary)||value.expectedRevision!==null&&!isBusinessRevision(value.expectedRevision))deny();
-  const v=value as unknown as {commandId:string;agentResourceId:string;sourceResourceId:string;summary:string;expectedRevision:number|null},o=original(),association=await o.connection.refresh(),resultOriginal=await o.source.inspect(v.commandId);action.check();
-  const preparation={agentResourceId:v.agentResourceId,sourceResourceIds:[v.sourceResourceId]},expectations=await o.connection.request('prepare',preparation) as NativeEmployeeRootExpectations;action.check();
+  const v=value as unknown as {commandId:string;agentResourceId:string;sourceResourceId:string;summary:string;expectedRevision:number|null},o=original(),association=await (async()=>{await ensureAssociation(o);return o.connection.refresh()})(),resultOriginal=await o.source.inspect(v.commandId);action.check();
+  const preparation={agentResourceId:v.agentResourceId,sourceResourceIds:[v.sourceResourceId]};
+  let expectations:NativeEmployeeRootExpectations;
+  try{expectations=await o.connection.request('prepare',preparation) as NativeEmployeeRootExpectations}
+  catch(error){
+   // A transport failure may have committed the original expectation. The
+   // connection's durable selector guard permits only its signed GET now.
+   const name=error&&typeof error==='object'&&'name'in error?String(error.name):'';
+   if(!['TimeoutError','AbortError','TypeError'].includes(name))throw error;
+   expectations=await o.connection.lookupPrepare(preparation) as NativeEmployeeRootExpectations;
+  }
+  action.check();
   await review(action.window,action.check,input.locale?.()==='ko'?'완료된 One 작업 요약 공유':'Share completed One work summary',input.locale?.()==='ko'?`조직: ${association.orgSession.organizationId}\n받는 사람: ${association.audiencePrincipalIds.join(', ')}\n원래 작업: ${resultOriginal.taskId}\n실행: ${resultOriginal.runId}\n결과 영수증: ${resultOriginal.resultReceiptId}\n이름: ${resultOriginal.profile.displayName}\n역할: ${resultOriginal.profile.role}\n\n공유할 요약:\n${v.summary}`:`Organization: ${association.orgSession.organizationId}\nAudience: ${association.audiencePrincipalIds.join(', ')}\nOriginal task: ${resultOriginal.taskId}\nRun: ${resultOriginal.runId}\nResult receipt: ${resultOriginal.resultReceiptId}\nName: ${resultOriginal.profile.displayName}\nRole: ${resultOriginal.profile.role}\n\nSummary to share:\n${v.summary}`);
-  const current=await o.connection.refresh(),currentExpectations=await o.connection.request('prepare',preparation);action.check();
+  const current=await o.connection.refresh(),currentExpectations=await o.connection.lookupPrepare(preparation);action.check();
   if(digest(current)!==digest(association)||digest(currentExpectations)!==digest(expectations))throw Error('business_native_review_changed');
   const approved=()=>{action.check();if(digest(o.connection.current())!==digest(association))throw Error('business_native_review_changed')};approved();o.journal.initialize();attach();
   const cap=await o.source.accept({original:resultOriginal,summary:v.summary,associationId:association.associationId,associationRevision:association.associationRevision,sourceRevision:`source:${association.sourceRevision}`,consentRevision:`consent:${association.consentRevision}`},approved,record=>o.journal.checkpoint(record,expectations,v));
@@ -81,26 +102,32 @@ export function registerNativeEmployeeMain(input:NativeEmployeeMainInput){
  input.ipc.handle('businessNative:receipt',async(event:IpcMainInvokeEvent,value:unknown)=>{
   const action=owned(event);if(!businessEmployeeAgentOnly(value,['acceptanceId'])||!isBusinessId(value.acceptanceId))deny();const o=original(),cap=await o.source.restore(value.acceptanceId),delivery=await o.journal.owners.inspect(cap);action.check();
   if(!delivery)return{state:'unknown' as const};if(delivery.state==='ready')return{state:'accepted' as const,delivery:'not-dispatched' as const};
-  const result=await o.journal.owners.lookup(cap,delivery.packet);action.check();if(!await o.journal.owners.currentResult(cap,result)||!await o.journal.owners.settle(cap,result))return{state:'unknown' as const};
+  const result=await o.journal.owners.lookup(cap,delivery.packet);action.check();if(!await o.journal.owners.settle(cap,result))return{state:'unknown' as const};
   const publication=await o.journal.reconcilePublication(cap);action.check();
   // Copy only the original durable packet selection after a fresh current read.
   // This metadata is not registration, approval, or a publication grant.
   if(!await o.journal.owners.currentResult(cap,result))return{state:'unknown' as const};action.check();
   const selector=delivery.packet.approved.selector;
-  const registrationSelector=publication!=='unknown'&&businessEmployeeAgentOnly(selector,['packetId','packetRevision'])&&isBusinessId(selector.packetId)&&isBusinessId(selector.packetRevision)
+  // Registration must be possible before publication can finish. A confirmed
+  // original packet supplies only opaque review selectors, even when a lost
+  // publication reply still needs later focused recovery after enrollment.
+  const registrationSelector=businessEmployeeAgentOnly(selector,['packetId','packetRevision'])&&isBusinessId(selector.packetId)&&isBusinessId(selector.packetRevision)
    ?{packetId:selector.packetId,packetRevision:selector.packetRevision}:undefined;
   return{state:'custody-confirmed' as const,receipt:result,publication,...(registrationSelector?{registrationSelector}:{})};
  });
  input.ipc.handle('businessNative:continuePublication',async(event:IpcMainInvokeEvent,value:unknown)=>{
   const action=owned(event);if(!businessEmployeeAgentOnly(value,['acceptanceId'])||!isBusinessId(value.acceptanceId))deny();
   const o=original(),cap=await o.source.restore(value.acceptanceId);action.check();
-  // A read cannot initiate publication or promote an unknown attempt into a
-  // retryable state. Only the stored original no-effect receipt enables review.
-  if(await o.journal.reconcilePublication(cap)!=='awaiting-enrollment')return{publication:'unknown' as const};
-  const record=await o.source.withCurrent(cap,r=>structuredClone(r)),association=await o.connection.refresh();action.check();
+  // A passive read cannot promote an uncertain attempt. This focused action
+  // first obtains a new Root CAS recovery receipt for the exact old deferral.
+  const before=await o.journal.reconcilePublication(cap);
+  action.check();if(before==='published')return{publication:'published' as const};
+  await ensureAssociation(o);const record=await o.source.withCurrent(cap,r=>structuredClone(r)),association=await o.connection.refresh();action.check();
   await review(action.window,action.check,input.locale?.()==='ko'?'원래 요약의 조직 보고 발행 계속':'Continue publication of the original summary',input.locale?.()==='ko'?`조직: ${association.orgSession.organizationId}\n받는 사람: ${association.audiencePrincipalIds.join(', ')}\n원래 작업: ${record.original.taskId}\n원래 공유 승인: ${record.acceptanceId}\n\n원래 승인한 요약:\n${record.summary}\n\n직원 등록과 현재 권한을 다시 확인한 뒤 이 원래 요청의 발행만 계속합니다.`:`Organization: ${association.orgSession.organizationId}\nAudience: ${association.audiencePrincipalIds.join(', ')}\nOriginal task: ${record.original.taskId}\nOriginal sharing approval: ${record.acceptanceId}\n\nOriginally approved summary:\n${record.summary}\n\nContinue only this original publication after checking employee enrollment and current permission again.`);
   const check=()=>{action.check();if(digest(o.connection.current())!==digest(association))throw Error('business_native_review_changed')};
-  check();const publication=await o.journal.continuePublication(cap,check);check();return{publication};
+  check();if(before!=='awaiting-enrollment'&&await o.journal.recoverPublication(cap,check)!=='awaiting-enrollment')
+    return{publication:'unknown' as const};
+  const publication=await o.journal.continuePublication(cap,check);check();return{publication};
  });
  input.ipc.handle('businessNative:reconcileAssociation',async(event:IpcMainInvokeEvent,value:unknown)=>{const action=owned(event);if(!businessEmployeeAgentOnly(value,['approvalReceiptId'])||!isBusinessId(value.approvalReceiptId))deny();const o=original();requireAssociationGeneration();const association=await o.connection.reconcile(value.approvalReceiptId);action.check();requireAssociationGeneration();attach();return{state:'associated' as const,associationId:association.associationId}});
  input.ipc.handle('businessNative:revoke',async(event:IpcMainInvokeEvent)=>{

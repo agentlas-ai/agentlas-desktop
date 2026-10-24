@@ -3,15 +3,15 @@ import fs from "node:fs";
 import path from "node:path";
 
 /**
-
-
-
-
-
-
-
-
-
+ * A second copy of the OLD app opened while macOS ShipIt is still replacing the bundle makes ShipIt give up
+ * ("Aborting update attempt because there are 1 running instances of the target app", Code=-9) and leaves the new
+ * instance stuck on stale ShipIt state. Production 1.2.95, 2026-10-11 18:43: the app quit for the update, something
+ * reopened it three seconds later, and the update was lost.
+ *
+ * Such a launch must not start. It is recognised by durable facts, never by guessing who launched it:
+ *   - a fresh install-requested journal,
+ *   - this process still being the SOURCE version (ShipIt's own relaunch runs the TARGET version and must start),
+ *   - the ShipIt launchd job still being present.
  */
 export const YIELD_TO_NATIVE_INSTALL_WINDOW_MS = 90_000;
 const SHIPIT_SERVICE = "com.agentlas.desktop.ShipIt";

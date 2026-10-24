@@ -1019,7 +1019,7 @@ export class LocalModelHubManager {
    * An engine that dies on its own (an unload, an idle reap and a shutdown clear ownership first, so they never get here) is started
    * again with the same model and the context the owner asked for (`contextTokens` is the REQUEST, 0 = auto; never the n_ctx the
    * engine measured). Runs in flight at the exit are aborted with LocalEngineExitedError as their reason. Without it a crash
-   * (for example a llama-server crash in its output parser) left every later turn on "no model" until the owner reloaded it
+   * (llama-server SIGBUS in its output parser, measured 2026-10-19) left every later turn on "no model" until the owner reloaded it
    * by hand. This never sets unavailableReason: that latch blocks every mutation, including the owner's own reload.
    */
   private recoverAfterEngineExit(installationId: string, contextTokens: number, exited?: { endpoint: string; reasonCode: string }): void {
@@ -1332,9 +1332,9 @@ export class LocalModelHubManager {
       if (strictJson === "failed") reasonCodes.push("strict_json_probe_failed");
     }
     if (selection.toolUse) {
-
-
-
+      // 강제(tool_choice)로 한 도구를 부르게 하면 0.6B 도 "확인됨"이 된다 — 실측 2026-09-13 에서 그 모델은
+      // 실제 과제 4개 중 2개에서 엉뚱한 도구를 골랐다(4B 는 4/4). 그래서 강제 없이 도구 여러 개를 주고
+      // 과제에 맞는 도구를 올바른 인자로 고르는지 본다. 이것이 채팅에서 실제로 겪는 일이다.
       try {
         const passed = await Promise.all(TOOL_USE_PROBES.map(async (probe) => {
           const response = await complete({

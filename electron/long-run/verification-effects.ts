@@ -165,13 +165,13 @@ class EffectSession implements VerificationSession {
   }
 
   /**
-
-
-
-
-
-
- */
+   * A stage whose own work failed (its judgment threw, the model answered with an error, it made no dispatch) is that
+   * stage's failure, not an effect. Latching it poisoned every later stage: at 06:26Z (production 1.3.33) the
+   * criterion-proof stage threw with no dispatch, and the judgment stage then refused to start, so the whole Goal
+   * verification failed and looped (owner 2026-10-14: closure must not hang on settlement bookkeeping). The caller
+   * still sees the throw. Effect-safety failures (tool observed, untracked or late dispatch, non-empty native
+   * report, invalid scope, ledger) stay latched, and so does anything while one of this stage's dispatches is open.
+   */
   private releaseStageLocalFailures(startCount: number, failuresBefore: ReadonlySet<string>): void {
     const added = [...this.failures].filter(reason => !failuresBefore.has(reason));
     const stageDispatches = this.dispatches.slice(startCount);
@@ -262,8 +262,8 @@ class EffectSession implements VerificationSession {
   }
 
   private emptyReport(kind: string, report: AdapterEffectReport | null): boolean {
-    
-
+    // Codex reports its exec child or resident turn closing; quiesced is the confirmed terminal. Without this arm no
+    // Codex verifier could ever pass (production 2026-10-14: 2 of 2 failed native_not_empty_complete on a clean report).
     const successfulTerminal = kind === "antigravity" ? report?.terminal === "SUCCESS"
       : kind === "acp" ? report?.terminal === "end_turn"
       : kind === "codex" ? (report?.terminal === "process_closed" || report?.terminal === "resident_turn_closed") && report.quiesced === true

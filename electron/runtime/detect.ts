@@ -8,12 +8,12 @@ import { byokDiscoveryIdentity, fetchByokModelDiscovery } from "./providers";
 import { allocationAdvertisement } from "./model-advertisement";
 import { clearCodexBinCache, probeCodex } from "./codex";
 import { readCodexModelDiscovery } from "./codex-models";
-import { summarizeDiscovery, unsupportedDiscovery, type DiscoveryOutcome } from "../../shared/model-discovery";
+import { discoverySignInRequired, summarizeDiscovery, unsupportedDiscovery, type DiscoveryOutcome } from "../../shared/model-discovery";
 import { POOL_AUTOPICK_ROLES, RUNTIME_ROLES, type RuntimeRole } from "../../shared/runtime-roles";
 import { reportDiscoveryLoudly , storedResolvedAliases } from "./model-discovery-store";
 import { cliConfiguredDefaultModel } from "./cli-default-model";
 import { registerProbeModels } from "./model-catalog";
-import { ACP_AGENTS, acpDisabledFor, probeAcpModelsCached } from "./acp";
+import { ACP_AGENTS, acpDisabledFor, forgetSignedOutAcpModelProbes, probeAcpModelsCached } from "./acp";
 import { listAcpKindSpecs, resolveAcpCommand } from "./acp-agents";
 import { withForeignCliContext } from "./foreign-cli-context";
 import { invalidateAntigravityModelDiscovery, probeAntigravity } from "./antigravity";
@@ -163,6 +163,8 @@ export function clearDetectCache(): void {
   clearCliVersionProbeCache();
   invalidateAntigravityModelDiscovery();
   invalidateGrokModelDiscovery();
+  // A sign-in (Connect) is one of the reasons this runs: a cached "not signed in" ACP listing must not outlive it.
+  forgetSignedOutAcpModelProbes();
   // `codex.ts` keeps the executable path separately for invocation; clearing
   // only the dashboard snapshot would pin a moved binary until app restart.
   clearCodexBinCache();
@@ -355,14 +357,14 @@ export async function detectRuntimes(force = false): Promise<RuntimeStatus[]> {
   }
 
   const requestGeneration = detectGeneration;
-  
-
-
-
-
-
-
-
+  /*
+   * 모델 미지정("엔진 설정 사용") 실행에서 실제로 쓰인 모델을 각 런타임에 실어 보낸다.
+   * 레지스트리는 main 에만 있고 그 행은 렌더러가 만들기 때문에, 여기서 붙이지 않으면
+   * 기본값으로 쓰는 사람은 실제 모델을 영영 못 본다(QA 실측 2026-09-08).
+   * ★장식은 비행(flight) 안에서 한다 — 예전엔 처음 부른 쪽만 장식하고, 진행 중 비행에
+   *   합류한 동시 호출자는 cliDefaultModel·observedDefaultModel 이 빠진 목록을 받았다
+   *   (Alive 격리 실측 2026-09-24: 두 생명체가 동시에 감지 → 기본 모델 "opus"가 번갈아 사라짐).
+   */
   const flight = detectRuntimesUncached().then((raw) => markSignedOutRuntimes(raw).map((runtime) => {
     const observed = resolvedCliModelAlias(runtime.kind, "");
     const configured = cliConfiguredDefaultModel(runtime.kind);
@@ -494,6 +496,20 @@ function hasAgentlasServingAccess(): boolean {
   }
 }
 
+/**
+ * Both listings failed: which failure the runtime row carries. The CLI's own failure used to win always, so ACP's typed
+ * "not signed in" (acp:auth-required) was dropped and a signed-out grok showed as a generic listing error
+ * (yield-regression:3-lines-0-models at [error], Windows retest 2026-10-24). A typed sign-in state now wins over an
+ * untyped failure; the CLI's last-good models (stale) stay on the row so the picker is not emptied.
+ */
+export function preferTypedSignIn(current: DiscoveryOutcome | undefined, viaAcp: DiscoveryOutcome): DiscoveryOutcome {
+  if (!current) return viaAcp;
+  if (!discoverySignInRequired(viaAcp.reason) || discoverySignInRequired(current.reason)) return current;
+  return current.stale
+    ? { ...viaAcp, models: [...current.models], stale: true, ...(current.previousCount !== undefined ? { previousCount: current.previousCount } : {}), ...(current.at ? { at: current.at } : {}) }
+    : viaAcp;
+}
+
 async function detectRuntimesUncached(observationOnly = false): Promise<RuntimeStatus[]> {
   const db = getDb();
   const activeRow = db
@@ -591,11 +607,11 @@ async function detectRuntimesUncached(observationOnly = false): Promise<RuntimeS
   const acpDiscovery = async (kind: "cursor" | "grok" | "kimi", command: string, current?: DiscoveryOutcome): Promise<DiscoveryOutcome> => {
     if (current && current.status === "ok") return current;
     if (acpDisabledFor(kind)) return current ?? unsupportedDiscovery("acp-disabled", "acp");
-    
-
+    // The probe opens a real ACP session (session/new). It runs in the product's CLI home like every product run, so the
+    // empty probe session never lands in the person's own folder (2026-10-17: the owner's ~/.copilot held 23 of them).
     const viaAcp = await probeAcpModelsCached(ACP_AGENTS[kind], { command, env: withForeignCliContext(kind, process.env, undefined) });
     if (viaAcp.status === "ok") return viaAcp;
-    return current ?? viaAcp;
+    return preferTypedSignIn(current, viaAcp);
   };
   const codexHostCatalog = new Map(cliModels("codex").map((model) => [model.id, model]));
   const codexModelProfiles: NonNullable<RuntimeStatus["allocationModelProfiles"]> =
@@ -629,8 +645,8 @@ async function detectRuntimesUncached(observationOnly = false): Promise<RuntimeS
       model: selectedClaudeModel,
       availableModels: claudeHostCatalog.map((m) => m.id),
       modelDiscovery: discoveryOf("claude-code", unsupportedDiscovery("no-list-concept:cli-aliases")),
-
-
+      // 디스커버리 개념이 없는 CLI라 카탈로그 별칭이 곧 광고다 — 선택 모델 1개만 광고하면
+      // 부모 플래너가 워커 티어를 낮출 수 없다(2026-08-18 실측: economy 배정 0건의 원인).
       ...allocationAdvertisement({
         catalogKind: "claude-code",
         selected: selectedClaudeModel,
@@ -818,7 +834,7 @@ async function detectRuntimesUncached(observationOnly = false): Promise<RuntimeS
     });
   }
   if (managedLocal) list.push(managedLocal);
-                                                                                   
+  // kind "acp" — the open seat (PRD 2026-08-15 B-1): built-in ACP agents without a
   // dedicated kind (OpenCode, Goose, Copilot CLI) plus user profiles in ACP mode.
   // Presence = the command exists; models = ACP session/new (cached 10 min).
   // Detection is best-effort per spec: one broken agent never hides the others.
@@ -1009,15 +1025,15 @@ function rolePoolGates(list: RuntimeStatus[]): {
       return Boolean(runtime) && runtime?.localObservation?.state !== "pending" && !isRuntimeCredentialUnavailable(runtime);
     },
     /**
-
-
-
-
-
-
-
-
- */
+     * 이 런타임이 실제로 가진 모델인가. **런타임이 광고한 인벤토리가 있을 때만**
+     * 부재를 판정한다(로컬 inference의 설치 모델 조회 결과).
+     * CLI 목록은 숨김 모델이나 별칭을 생략할 수 있고, BYOK는 정적 호스트
+     * 카탈로그다. 둘 다 명시 모델의 부재를 증명하지 못한다.
+     * 하드코딩 폴백 카탈로그로는 판정하지 않는다 — 계정이 새 모델을 받으면
+     * 폴백이 곧바로 낡아 유효 모델을 차단하게 된다(실측: claude-code 폴백에
+     * 없는 `fable`이 실제로는 정상 실행됨). 증명 못 하면 통과시키고 실패는
+     * 호출 지점에서 정직하게 드러낸다. 모델 미지정(엔진 설정 사용)도 항상 통과.
+     */
     isModelUnavailable: (selection) => {
       const model = selection.model?.trim();
       if (!model) return false;

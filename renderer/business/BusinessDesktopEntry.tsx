@@ -4,6 +4,7 @@ import { useRouter } from 'next/navigation';
 import { ipc } from '../lib/ipc';
 import { BusinessConsole } from './BusinessConsole';
 import { useBusinessEligibility } from './use-business-eligibility';
+import { useOrganizationUiVisibility } from './organization-visibility';
 import { isBusinessEligibility, type BusinessEligibility } from '../../shared/business/eligibility';
 import { IconBuilding, IconRefresh, IconArrowLeft } from '../components/Icon';
 import styles from './BusinessConsole.module.css';
@@ -19,6 +20,8 @@ export function BusinessDesktopEntry({ suppliedBridge }: { suppliedBridge?: Busi
   const { copy } = useBusinessCopy();
   const bridge = useMemo(() => suppliedBridge === undefined ? currentBusinessRendererBridge() : captureBusinessRendererBridge(suppliedBridge), [suppliedBridge]);
   const access = useBusinessEligibility({ suppliedBridge: bridge });
+  // 회사 로그인이 끝나 적격성이 읽히면 같은 계정의 기억으로 남는다 — 그 뒤 설정 목록 등이 서버를 읽지 않고도 조직 항목을 보인다.
+  useOrganizationUiVisibility({ eligible: access.eligibility ? access.eligible : null });
   const organizationNames = useMemo(() => new Map(access.eligibility?.organizations.map(row => [row.organizationId, row.name])), [access.eligibility]);
   const currentAccess = useRef<BusinessEligibility | null>(null);
   currentAccess.current = access.eligibility;

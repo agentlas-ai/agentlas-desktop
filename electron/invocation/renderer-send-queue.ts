@@ -17,7 +17,7 @@ import {
   type PendingChatSends,
   type PendingSendRecord,
 } from "./pending-chat-sends";
-import { isTransientSendRefusal } from "../../shared/transient-send-refusal";
+import { isTransientSendRefusal, startOwnerSendOrAcceptRefusal } from "../../shared/transient-send-refusal";
 import { liveAppControlRendererEvent } from "../app-control/ipc-registry";
 import { getInvocationRunReceipt } from "../store/run-events";
 import { readRunTurnPlacement } from "./turn-placement";
@@ -201,14 +201,9 @@ export function createRendererSendQueue(startNow: RendererStartNow): {
         // Earlier messages of this chat are still waiting: this one goes behind them, in the order it was typed.
         return queuedAnswer(accept(event, req, undefined));
       }
-      try {
-        return await startNow(event, req);
-      } catch (cause) {
-        if (canQueuePendingSend(req) && isTransientSendRefusal(cause)) {
-          return queuedAnswer(accept(event, req, undefined, cause));
-        }
-        throw cause;
-      }
+      return startOwnerSendOrAcceptRefusal(() => startNow(event, req), (cause) =>
+        canQueuePendingSend(req) && isTransientSendRefusal(cause)
+          ? queuedAnswer(accept(event, req, undefined, cause)) : null);
     },
     acceptRefusedSteer(event, req, intentId, cause) {
       if (!canQueuePendingSend(req) || !isTransientSendRefusal(cause)) return null;

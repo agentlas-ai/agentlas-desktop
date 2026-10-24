@@ -6,6 +6,8 @@ import { BrowserActionApprovalSheet } from "@/components/BrowserActionApprovalSh
 import { ipc, ipcEvents } from "@/lib/ipc";
 import { navigate } from "@/lib/navigation";
 import { useT } from "@/lib/i18n";
+import { TaskSidePanel } from "@/components/workspace/TaskSidePanel";
+import { useChatOutputs } from "@/lib/one-earlier-outputs";
 import styles from "./ScienceHost.module.css";
 
 function elementBounds(element: HTMLElement): ProductExtensionViewBounds {
@@ -23,11 +25,49 @@ export default function ScienceHostPage() {
   const ko = locale !== "en";
   const surfaceRef = useRef<HTMLDivElement>(null);
   const openedRef = useRef(false);
-  const openedVersionRef = useRef<string | null>(null);
+  const openedActivationRef = useRef<string | null>(null);
   const mountEpochRef = useRef(0);
   const [extension, setExtension] = useState<ProductExtensionStatus | null>(null);
   const [view, setView] = useState<ProductExtensionViewStatus | null>(null);
   const [approvalHeight, setApprovalHeight] = useState(0);
+  const [outputScope, setOutputScope] = useState<{ chatId: string } | null>(null);
+  const [outputWidth, setOutputWidth] = useState(324);
+  const [outputEmpty, setOutputEmpty] = useState(false);
+  const { artifacts, earlierOutputs: earlier } = useChatOutputs({
+    chatId: outputScope?.chatId, historyEnabled: Boolean(outputScope), poll: true, pollIntervalMs: 1500,
+  });
+
+  useEffect(() => {
+    let disposed = false;
+    let reading = false;
+    let generation = 0;
+    let pendingRefresh = false;
+    setOutputScope(null);
+    const refresh = async () => {
+      if (reading) { pendingRefresh = true; return; }
+      reading = true;
+      const requestGeneration = generation;
+      const current = () => !disposed && requestGeneration === generation;
+      try {
+        const scope = await ipc()?.productExtensions.scienceOutputScope();
+        if (current()) setOutputScope(previous => !scope ? null
+          : previous?.chatId === scope.chatId ? previous : { chatId: scope.chatId });
+      } catch { if (current()) setOutputScope(null); }
+      finally {
+        reading = false;
+        if (!disposed && pendingRefresh) { pendingRefresh = false; void refresh(); }
+      }
+    };
+    const offSelection = ipcEvents()?.onProductExtensionChanged?.((status) => {
+      if (status.id !== "agentlas-science") return;
+      generation += 1;
+      setOutputScope(null);
+      void refresh();
+    });
+    void refresh();
+    const timer = window.setInterval(() => { void refresh(); }, 1500);
+    return () => { disposed = true; generation += 1; offSelection?.(); window.clearInterval(timer); };
+  }, [view?.leaseId]);
 
   useEffect(() => {
     const surface = surfaceRef.current;
@@ -36,72 +76,100 @@ export default function ScienceHostPage() {
     const epoch = ++mountEpochRef.current;
     const leaseId = crypto.randomUUID();
     let disposed = false;
+    let requested = 0;
+    let chain: Promise<void> = Promise.resolve();
+    let checkedForUpdate = false;
+    let observedView: ProductExtensionViewStatus | null = null;
     const isCurrent = () => !disposed && mountEpochRef.current === epoch;
-    const openView = async () => {
-      openedRef.current = true;
-      const nextView = await api.productExtensions.openScienceView(elementBounds(surface), leaseId).catch((): ProductExtensionViewStatus => ({
-        id: "agentlas-science",
-        leaseId,
-        state: "error",
-        errorCode: "science-host-open-failed",
-        errorMessage: "The Science interface could not be opened.",
-      }));
-      if (isCurrent()) setView(nextView);
+    const activation = (status: ProductExtensionStatus) => JSON.stringify([status.version ?? null, status.installedAt ?? null]);
+    const closeView = () => api.productExtensions.closeScienceView(leaseId).catch(() => undefined);
+    // Installed timestamps identify same-version repairs too. Events only
+    // invalidate the read: delayed payloads cannot close a newer activation.
+    const refresh = () => {
+      const request = ++requested;
+      const current = () => isCurrent() && request === requested;
+      const run = async () => {
+        if (!current()) return;
+        const failed: ProductExtensionViewStatus = {
+          id: "agentlas-science", leaseId, state: "error", errorCode: "science-host-open-failed",
+          errorMessage: "The Science interface could not be opened.",
+        };
+        const readStatus = async () => {
+          const status = await api.productExtensions.scienceStatus().catch(() => null);
+          // Main may have retired the child before this invalidation. Keep
+          // any live lease, but expose a retryable fallback beneath it.
+          if (!status && current()) setView(failed);
+          return status;
+        };
+        let status = await readStatus();
+        if (!current() || !status) return;
+        if (status.readFailure) {
+          // An unavailable authority read cannot grant a command or replace an
+          // existing document. Main still checks every effect independently.
+          if (!openedRef.current || observedView?.leaseId !== leaseId || observedView.state !== "ready") setView(failed);
+          return;
+        }
+        setExtension(status);
+        if (status.phase !== "installed" || !status.enabled) {
+          openedRef.current = false;
+          openedActivationRef.current = null;
+          await closeView();
+          return;
+        }
+        if (openedRef.current && activation(status) === openedActivationRef.current) {
+          if (observedView) setView(observedView);
+          return;
+        }
+        if (openedRef.current) {
+          openedRef.current = false;
+          await closeView();
+        }
+        if (!current()) return;
+        // Closing yields to Main; revalidate the actual active package before
+        // acquiring this lease instead of trusting the earlier event/read.
+        status = await readStatus();
+        if (!current() || !status) return;
+        if (status.readFailure) { setView(failed); return; }
+        setExtension(status);
+        if (status.phase !== "installed" || !status.enabled) return;
+        openedRef.current = true;
+        openedActivationRef.current = activation(status);
+        const nextView = await api.productExtensions.openScienceView(elementBounds(surface), leaseId).catch(() => failed);
+        if (!isCurrent()) {
+          await closeView(); // A late old open may release only its own lease.
+          return;
+        }
+        if (nextView.state === "error" || nextView.state === "closed") openedRef.current = false;
+        if (current()) { observedView = nextView; setView(nextView); }
+        // Check once on entry, without blocking the installed interface. A
+        // resulting unchanged broadcast must never create an open/install loop.
+        if (!checkedForUpdate && nextView.state === "ready") {
+          checkedForUpdate = true;
+          if (api.productExtensions.installScienceSuite) void api.productExtensions.installScienceSuite().catch(() => undefined);
+        }
+      };
+      // As on the Hub's native embed, serialize this lease's opens/closes.
+      chain = chain.then(run, run).catch(() => undefined);
+      return chain;
     };
-    /*
-     * ★들어올 때마다 새 판이 있는지 묻는다 (2026-09-08 실측으로 없던 것을 넣음).
-     *   이 자리는 설치 여부만 보고 바로 열었고, 카탈로그를 읽는 경로는 설정 화면의
-     *   "받기" 단추 하나뿐이었다. 그래서 한 번 설치한 사용자는 손으로 다시 누르기
-     *   전까지 영원히 그 판을 썼다.
-     *
-     *   두 가지를 지킨다:
-     *   - **여는 것을 막지 않는다.** 확인은 뒤에서 돌고 화면은 설치된 판으로 즉시 열린다.
-     *     네트워크가 느리거나 끊겨 있어도 사용자는 기다리지 않는다.
-     *   - **갱신되면 새 판을 잡는다.** 설치기가 판을 바꾸면 productExtensions:changed 가
-     *     오고, 아래 구독이 그때 창을 닫았다 다시 연다.
-     */
-    const checkForUpdate = () => {
-      if (!api.productExtensions.installScienceSuite) return;
-      void api.productExtensions.installScienceSuite().catch(() => undefined);
-    };
-    const open = async () => {
-      const status = await api.productExtensions.scienceStatus().catch(() => null);
-      if (!isCurrent()) return;
-      setExtension(status);
-      if (!status || status.phase !== "installed" || !status.enabled) return;
-      openedVersionRef.current = status.version ?? null;
-      await openView();
-      if (isCurrent()) checkForUpdate();
-    };
-    void open();
+    void refresh();
     let frame = 0;
     const resize = new ResizeObserver(() => {
       window.cancelAnimationFrame(frame);
       frame = window.requestAnimationFrame(() => {
-        if (openedRef.current) void api.productExtensions.setScienceViewBounds(elementBounds(surface), leaseId);
+        if (isCurrent() && openedRef.current) void api.productExtensions.setScienceViewBounds(elementBounds(surface), leaseId);
       });
     });
     resize.observe(surface);
     const offView = ipcEvents()?.onProductExtensionViewStatus?.((status) => {
-      if (status.leaseId === leaseId) setView(status);
+      if (isCurrent() && status.leaseId === leaseId) {
+        if (status.state === "closed" || status.state === "error") openedRef.current = false;
+        observedView = status;
+        setView(status);
+      }
     });
     const offExtension = ipcEvents()?.onProductExtensionChanged?.((status) => {
-      if (status.id !== "agentlas-science") return;
-      setExtension(status);
-      // 갱신이 끝나 판이 바뀌었으면, 옛 판을 띄워 둔 창을 닫고 새 판으로 다시 연다.
-      if (status.phase === "installed" && status.enabled && openedRef.current
-        && (status.version ?? null) !== openedVersionRef.current) {
-        openedVersionRef.current = status.version ?? null;
-        openedRef.current = false;
-        void api.productExtensions.closeScienceView(leaseId).then(() => {
-          if (isCurrent()) void openView();
-        });
-        return;
-      }
-      if (status.phase !== "installed" || !status.enabled) {
-        openedRef.current = false;
-        void api.productExtensions.closeScienceView(leaseId);
-      }
+      if (status.id === "agentlas-science") void refresh();
     });
     return () => {
       disposed = true;
@@ -111,7 +179,9 @@ export default function ScienceHostPage() {
       offView?.();
       offExtension?.();
       openedRef.current = false;
-      void api.productExtensions.closeScienceView(leaseId);
+      // Cleanup never waits for a potentially stalled open. Its late result
+      // also releases this exact lease, leaving any newer mount untouched.
+      void closeView();
     };
   }, []);
 
@@ -124,6 +194,7 @@ export default function ScienceHostPage() {
         // actual host-owned area; the surface observer updates native bounds.
         gridTemplateRows: `minmax(0, 1fr) ${approvalHeight}px`,
       } : undefined}>
+        <div className={styles.workspace}>
         <div ref={surfaceRef} className={styles.surface}>
           {(unavailable || failed) && (
             <div className={styles.fallback}>
@@ -134,6 +205,13 @@ export default function ScienceHostPage() {
               </div>
             </div>
           )}
+        </div>
+        {outputScope && (artifacts.length > 0 || Boolean(earlier?.count)) && <aside className={styles.outputs}
+          style={{ width: outputEmpty ? 0 : outputWidth }} aria-label={ko ? "결과" : "Outputs"}>
+          <TaskSidePanel screenChatId={outputScope.chatId} locale={ko ? "ko" : "en"} items={artifacts}
+            earlierOutputs={earlier} visible width={outputWidth} onResize={setOutputWidth} onEmptyChange={setOutputEmpty}
+            onRequestReadableWidth={setOutputWidth} onRestorePreferredWidth={() => setOutputWidth(324)} />
+        </aside>}
         </div>
       </div>
       <BrowserActionApprovalSheet onStandaloneHeightChange={setApprovalHeight} />

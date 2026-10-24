@@ -46,6 +46,8 @@ function resolveViewerType(name: string, mimeType?: string, signature?: Uint8Arr
   const extension = name.trim().toLowerCase().match(/\.([a-z0-9]+)$/)?.[1];
   const office = resolveOfficeFormat(name, mimeType, signature);
   if (office.format) return office.format;
+  // BibTeX is a plain-text source; the viewer registry has no bib renderer.
+  if (extension === "bib") return "txt";
   if (extension && !["pdf", "docx", "xlsx", "pptx", "hwp", "hwpx"].includes(extension)) return extension;
   const mimeFallbacks: Record<string, string> = {
     "application/zip": "zip",

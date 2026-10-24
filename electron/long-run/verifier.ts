@@ -145,22 +145,22 @@ function boundedJson(value: unknown, limit = 1_800): string {
 }
 
 /**
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+ * Serialize the judge's observation so that it is ALWAYS valid JSON and so that
+ * host-observed evidence never loses its place to model prose.
+ *
+ * The previous version stringified `{receipt, durableAssistantResult, concreteEvents}`
+ * and then sliced the resulting string at the limit. Measured on a real 8-minute run:
+ * the object was 27,087 chars against a 24,000 cap, the slice landed inside the
+ * `concreteEvents` array, and the judge received malformed JSON. It answered
+ * "durable evidence shows only the assistant's completion message" for all three
+ * criteria and the run went to `blocked` with `verification_inconclusive` -- even
+ * though 44 concrete tool events and 179 written files existed on disk.
+ *
+ * Two rules follow from that:
+ *   1. Never slice serialized JSON. Drop or shrink *fields*, then re-serialize.
+ *   2. Model prose is a claim, not evidence (see the doc comment below), so it is
+ *      the first thing to shrink and the first thing to drop. Concrete events keep
+ *      their budget.
  */
 function digestEvents(events: Array<Record<string, unknown>>): Record<string, unknown> {
   /*
@@ -186,19 +186,19 @@ function digestEvents(events: Array<Record<string, unknown>>): Record<string, un
   const top = (map: Map<string, number>, keep: number) => Object.fromEntries(
     [...map.entries()].sort((a, b) => b[1] - a[1]).slice(0, keep),
   );
-  
-
-
-
-
-
-
-
-
-
-
-
-
+  /*
+   * The last thing each command said, at a FIXED cost.
+   *
+   * Measured 2026-09-08: with only counts plus a shared preview budget, a run with
+   * 300 events leaves ~60 chars per event, so `All tests passed!` and
+   * `No issues found!` -- the lines that actually settle "did it work" -- cannot
+   * fit no matter how the budget is split. The judge said exactly that:
+   * "result previews are truncated without observable pass/no-issues output".
+   *
+   * So the closing lines get their own reserved, bounded slot instead of competing
+   * with 300 other events. Cost is constant (<= 6 * 240 chars) whether the run
+   * produced 10 events or a million.
+   */
   const outcomes: Array<Record<string, string>> = [];
   for (let i = events.length - 1; i >= 0 && outcomes.length < 6; i -= 1) {
     const payload = (events[i].payload ?? {}) as Record<string, unknown>;
@@ -220,18 +220,18 @@ function digestEvents(events: Array<Record<string, unknown>>): Record<string, un
 }
 
 /**
-
-
-
-
-
-
-
-
-
-
-
-
+ * Keep BOTH ends of a long value, not just the head.
+ *
+ * Measured on the 2026-09-08 re-run: with head-only clamping the judge saw the
+ * tool events but still answered `inconclusive` on one criterion --
+ * "result previews are truncated without observable pass/no-issues output".
+ * A command proves itself at its TAIL: `All tests passed!` and `No issues found!`
+ * are the last lines of `flutter test && flutter analyze`, and head-only clamping
+ * throws away exactly the part that settles the question while keeping the banner.
+ *
+ * So split the budget: enough head to identify what ran, and the tail that says
+ * how it ended. The omitted middle is stated, so a reader is never misled into
+ * thinking the value was short.
  */
 function clampText(value: string, previewChars: number): string {
   if (value.length <= previewChars) return value;
@@ -260,17 +260,17 @@ function windowsPathCandidate(raw: string): string {
 }
 
 /**
-
-
-
-
-
-
-
-
-
-
-
+ * 폴더 경계를 **호스트가 사실로 적는다.** 판정자가 추론하게 두지 않는다.
+ *
+ * 2026-09-08 3회차 실측: 경계 기준이 `inconclusive` 로 남았고 사유가 정확했다 —
+ * *"an FS allowlist limited to that folder, but ... no durable audit of write targets
+ * (git status failed; only a directory listing) proves no out-of-folder writes occurred."*
+ * 실제로는 폴더 밖 변경이 0건이었다(같은 시각 파일시스템 실측). 즉 사실은 맞는데
+ * **그 사실을 아무도 적어 주지 않아서** 판정자가 확인할 수 없었다.
+ *
+ * 한편 경로가 인자에 나왔다는 사실은 쓰기 증거가 아니다. 호스트가 아는 typed
+ * write/edit target과 명시적 shell destination만 쓰기로 기록하고, read reference와
+ * generic shell/unknown reference는 서로 다른 필드에 둔다.
  */
 function outsideAbsolutePaths(value: unknown, root: string): string[] {
   let text: string;
@@ -743,16 +743,16 @@ export function exactRunAssistantResult(chatId: string, runId: string): {
 }
 
 /**
-
-
-
-
-
-
-
-
-
-
+ * The Goal's own conversation, read from the host ledger: every reply this Goal's controller invocations delivered in
+ * its chat (same revision, exact mcp_final -> durable message) and the owner's messages since the Goal's original
+ * request. For a reply-type deliverable the delivered reply IS the result, so each earlier reply is a citable
+ * `chat-message:` reference (the same ref kind the current run's reply already has; verificationReferencesResolve
+ * accepts it because the run belongs to this Goal revision). Owner messages are context only, never a ref.
+ *
+ * Measured (1.2.43 E2E, serving One automatic goal run_df235d8e): the Goal asked the owner, the owner answered, the
+ * resumed turn replied — but the verifier saw only that last reply. A sub-goal like "ask the owner which season" had
+ * no admissible host evidence (the question lived in an earlier invocation), verification stayed inconclusive, the
+ * retry turn found nothing to do and the Goal cycled ask -> block -> sweep resume -> ask without ever completing.
  */
 export type GoalConversationEntry = { ref: string | null; role: "assistant" | "owner"; createdAt: string; text: string };
 const GOAL_CONVERSATION_MAX_ENTRIES = 12;
@@ -1179,22 +1179,22 @@ export async function verifyGoalCompletionClaim(input: {
   const durableEvidence = verificationBoundary
     ? collectDurableGoalVerificationEvidence(input.invocationRunId, priorInvocationRunIds, {goalId: input.goalId, revision: verificationBoundary.goalRevision})
     : {ready: false, refs: [], observation: "The current Goal, source, artifacts or effect boundary could not be pinned.", reason: "verification_boundary_unconfirmed"};
-  
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+  /*
+   * Evidence goes FIRST and the claim goes last.
+   *
+   * Measured on a real 8-minute run (2026-09-08): the prompt led with
+   * `CLAIMED OUTCOME` capped at 6,000 chars plus a 1,000-char note, and
+   * `judgeRequired` truncates its input at MAX_INPUT_CHARS = 8,000. The model's
+   * own prose therefore consumed the whole budget and the host observation --
+   * 44 concrete tool events proving the files, analyze, test and build -- was cut
+   * off before the judge ever saw it. All three criteria came back
+   * `inconclusive` ("durable evidence shows only the assistant's completion
+   * message") and the run went to `blocked`, while 179 files sat on disk.
+   *
+   * So: order by trust (host evidence, then references, then the claim), keep the
+   * claim short because it is a claim, and raise the judge's input ceiling to fit
+   * the observation the host worked to collect.
+   */
   // This verification task owns a pinned evidence snapshot. Keep host facts before
   // untrusted result text; metadata must not change the judge's existing byte budget.
   const observationParts: DeclaredPromptPart[] = [

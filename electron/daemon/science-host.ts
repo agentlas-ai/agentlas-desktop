@@ -1,3 +1,7 @@
+import { createScienceQuestionHost } from "../science-host/question-continuation";
+import { scienceAliveCoreHost } from "../science-host/alive-core";
+import { withHostInvocationAdmission } from "../invocation/host-admission";
+import { scienceLocalSpecialistHost } from "../science-host/local-specialists";
 import { scienceLocalEmbeddingHost } from "../science-host/local-embedding";
 import { ScienceQuestionRecoveryPresenter } from "../science-host/work-recovery";
 import { inspectScienceRuntimeSelectionAvailability } from "../science-host/runtime-selection-availability";
@@ -15,6 +19,10 @@ import { inspectLegacyForwardRecoveryBoundary, reconcileScienceBoundary, type Sc
 import { projectScienceLoopLongRun } from "../long-run/science-projection";
 import { projectResearchState } from "../science-host/research-state-projection";
 import { scienceCodexProductConfig } from "../science-host/codex-product-config";
+import { bindScienceCodexProductSessionStore } from "../science-host/codex-session-store";
+import { scienceHostGoalWake, readScienceHostGoalWake, cancelScienceHostGoalWake, recordScienceHostGoalOwnerControl } from "../science-host/goal-wake";
+import { recordSciencePublicationHostOutputs } from "../science-host/publication-outputs";
+import { recordScienceArtifactHostOutputs } from "../science-host/artifact-outputs";
 import { detachedSpawnOpts, killCliTree, probeCliVersion, spawnCli, withCliPath } from "../runtime/exec";
 import { resolveManagedNodeRuntime } from "../runtime/managed-node";
 import { isPackagedRuntime, runtimeResourcesPath, userDataPath } from "../runtime-paths";
@@ -40,6 +48,10 @@ import { configureScienceMathPython } from "../science-host/math-python";
 import { listScienceTypesetProfileCatalog } from "../science-host/typeset-profile-catalog";
 import { renderManuscriptPdf, resolveTectonic } from "../science-host/render-pdf";
 
+import { scienceRuntimeRole } from "agentlas-science";
+import { createScienceCanonicalGoalWaitOwner, installScienceCanonicalGoalWaitOwner } from "../science-host/goal-wait";
+import { readCanonicalGoalWait, holdCanonicalGoalWait, cancelCanonicalGoalWaitScope, setCanonicalGoalWaitOwnerProvider } from "../long-run/canonical-owner-waits";
+
 interface PreparedRegistration {
   path: string; configKey: string; command: string; args: string[];
   env: Record<string, string>; isCurrent: () => boolean;
@@ -53,6 +65,18 @@ export function installDaemonScienceHost(input: {
   presentQuestion(question: unknown): void;
 }) {
   configureScienceMathPython();
+  let goalWaitClosed = false;
+  const goalWait = createScienceCanonicalGoalWaitOwner({
+    owner: () => goalWaitClosed || scienceRuntimeRole() !== "execution-owner" ? null : { kind: "daemon", epoch: input.ownerEpoch },
+    assertExecution: () => { if (goalWaitClosed) throw new Error("science_goal_wait_host_closed"); input.assertExecution(); },
+    assertCurrentOwner: expected => {
+      if (goalWaitClosed || scienceRuntimeRole() !== "execution-owner" || expected.kind !== "daemon"
+        || expected.epoch !== input.ownerEpoch) throw new Error("science_goal_wait_owner_changed");
+      input.assertExecution();
+    },
+    intake: { read: readCanonicalGoalWait, hold: holdCanonicalGoalWait },
+    cancelScope: cancelCanonicalGoalWaitScope,
+  });
   let questionUiRelease: string | null = null;
   const releases = new Set<() => void>();
   const currentRelease = () => {
@@ -95,7 +119,8 @@ export function installDaemonScienceHost(input: {
   };
   // Invocation owns provider sessions and the prepared MCP registry in this same
   // process. Cancels/settlement stay callable after execution admission closes.
-  const fencedInvocation = new Proxy(invocationService, {
+  const admittedInvocation = withHostInvocationAdmission(invocationService, input.assertExecution);
+  const fencedInvocation = new Proxy(admittedInvocation, {
     get(target, key, receiver) {
       const value = Reflect.get(target, key, receiver);
       if (typeof value !== "function") return value;
@@ -122,6 +147,7 @@ export function installDaemonScienceHost(input: {
   const workbook = () => require("../science-host/workbook-intake-ipc") as typeof import("../science-host/workbook-intake-ipc");
   input.assertOwner();
   const compatibility = installScienceHost({
+    ...{ aliveCore: scienceAliveCoreHost },
     aliveRuntime, aliveClock,
     spawnCli: (...args: Parameters<typeof spawnCli>) => { input.assertExecution(); return spawnCli(...args); },
     killCliTree, probeCliVersion: (...args: Parameters<typeof probeCliVersion>) => { input.assertExecution(); return probeCliVersion(...args); },
@@ -161,7 +187,34 @@ export function installDaemonScienceHost(input: {
   } as never, {
     contractVersion: SCIENCE_HOST_CONTRACT_VERSION, capabilities: SCIENCE_HOST_REQUIRED_CAPABILITIES,
     execution: {
+      ...{ decisions: createScienceQuestionHost(input.assertExecution).port },
+      ...{ goalWait: goalWait.sdkHost },
+      ...{ recordArtifactOutputs: (scope: Parameters<typeof recordScienceArtifactHostOutputs>[0]) => {
+        input.assertExecution(); return recordScienceArtifactHostOutputs(scope);
+      } },
+      ...{ recordPublicationOutputs: (scope: Parameters<typeof recordSciencePublicationHostOutputs>[0]) => {
+        input.assertExecution(); return recordSciencePublicationHostOutputs(scope);
+      } },
+      ...{ readHostGoalWake: (scope: Parameters<typeof readScienceHostGoalWake>[0]) => {
+        input.assertOwner(); return readScienceHostGoalWake(scope);
+      }, cancelHostGoalWake: (scope: Parameters<typeof cancelScienceHostGoalWake>[0]) => {
+        input.assertOwner(); return cancelScienceHostGoalWake(scope);
+      }, recordHostGoalOwnerControl: (scope: Parameters<typeof recordScienceHostGoalOwnerControl>[0]) => {
+        input.assertExecution(); return recordScienceHostGoalOwnerControl(scope);
+      } },
+      ...{ hostGoalWake: <T extends { runId: string }>(scope: Parameters<typeof scienceHostGoalWake>[0], start: () => T) => {
+        input.assertExecution(); return scienceHostGoalWake(scope, () => { input.assertExecution(); return start(); });
+      } },
+      localSpecialists: {
+        list: scope => { input.assertExecution(); return scienceLocalSpecialistHost.list(scope); },
+        prepare: scope => { input.assertExecution(); return scienceLocalSpecialistHost.prepare(scope); },
+        bind: scope => { input.assertExecution(); return scienceLocalSpecialistHost.bind(scope); },
+        assertCurrent: (...args) => { input.assertExecution(); return scienceLocalSpecialistHost.assertCurrent(...args); },
+        assertTurnScope: scope => { input.assertExecution(); return scienceLocalSpecialistHost.assertTurnScope(scope); },
+        verifyReturn: scope => { input.assertExecution(); return scienceLocalSpecialistHost.verifyReturn(scope); },
+      },
       ...{ codexProductConfig: scienceCodexProductConfig },
+      ...{ bindCodexProductSessionStore: (home: string) => { input.assertExecution(); bindScienceCodexProductSessionStore(home); } },
       ...{ projectResearchState: async (projectionInput: Parameters<typeof projectResearchState>[0]) => {
         try {
           input.assertExecution();
@@ -207,6 +260,8 @@ export function installDaemonScienceHost(input: {
   if (compatibility.status !== "compatible") throw new Error(compatibility.code);
   // Science turns run here, so the pre-dispatch schema-rejection proof is read here too (Main installs the same reader).
   installScienceStoreSchemaRejectionReader(scienceStore);
+  installScienceCanonicalGoalWaitOwner(goalWait);
+  setCanonicalGoalWaitOwnerProvider(goalWait.provider);
   return {
     project,
     registerQuestionUi() {
@@ -216,6 +271,13 @@ export function installDaemonScienceHost(input: {
       questionRecovery.restore();
       return { releaseSha256: questionUiRelease };
     },
-    stopClock() { questionRecovery.stop(); for (const release of [...releases]) release(); },
+    stopClock() {
+      if (!goalWaitClosed) {
+        goalWaitClosed = true;
+        installScienceCanonicalGoalWaitOwner(null);
+        setCanonicalGoalWaitOwnerProvider(null);
+      }
+      questionRecovery.stop(); for (const release of [...releases]) release();
+    },
   };
 }

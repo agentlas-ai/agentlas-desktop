@@ -10,8 +10,8 @@ import { stripEffectObservationMarker } from "./effect-observation";
 // 라운드 3 실측: <<stormbreaker-continue>> 도 채팅·기억란에 그대로 보였다 — agentlas- 접두가 없는 표식까지 포함.
 const STRAY_TOKEN_RE = /[ \t]*<<(?:agentlas-(?:goal-wait|goal-complete|continue)|stormbreaker-(?:continue|long-run))(?::[^>\n]*)?>>[ \t]*(?!\s*\{)/g;
 
-
-
+// A memory ticket written as a tag block (`<<agentlas-memory>>…<</agentlas-memory>>`) instead of the `## Memory Events`
+// heading: no parser reads it, so its JSON reached the owner's chat whole (dev 2026-10-17 run8, room synthesis on Haiku).
 const MEMORY_TAG_BLOCK_RE = /[ \t]*<<agentlas-memory>>[\s\S]*?<<\/agentlas-memory>>[ \t]*/g;
 
 export function stripStrayProtocolTokens<T extends string | null | undefined>(text: T): T | string {

@@ -107,7 +107,7 @@ export function recordTaskCheckpoint(input: {
       && producer.invocation_run_id === input.invocationRunId
       && producer.state === "completed"
       && producerWorkspace !== undefined && producerWorkspace === workspacePath
-
+      // Finished is enough (owner 2026-10-05, 2026-10-12): the host does not judge outside effects; the next turn checks.
       && boundary?.terminal === true);
     const pathHash = createHash("sha256").update(workspacePath ?? "").digest("hex");
     const eventCursor = getLongRunByGoalId(input.goalId)!.lastEventSeq;

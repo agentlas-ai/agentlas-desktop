@@ -17,6 +17,7 @@ import type {
   RuntimeConnectSnapshot,
   RuntimeConnectStep,
 } from "@shared/runtime-connect";
+import { manualSetupFor, manualSetupText, setupOsFromNavigator } from "@shared/runtime-manual-setup";
 import styles from "./ConnectChips.module.css";
 
 export interface RuntimeChipSpec {
@@ -64,6 +65,7 @@ export function connectCopy(ko: boolean) {
       cancelled: "취소했어요.",
     } as Record<RuntimeConnectReasonCode, string>,
     ms: (n: number) => `${n}ms 확인`,
+    manualShell: (shell: "powershell" | "terminal") => (shell === "powershell" ? "PowerShell에서 실행:" : "터미널에서 실행:"),
   } : {
     installed: "Installed", available: "Available", connect: "Connect", upgrade: "Upgrade", checking: "Checking…",
     notInstalled: "Not installed", signedOut: "Sign-in needed", unverified: "Sign-in unverified",
@@ -92,6 +94,7 @@ export function connectCopy(ko: boolean) {
       cancelled: "Cancelled.",
     } as Record<RuntimeConnectReasonCode, string>,
     ms: (n: number) => `checked in ${n}ms`,
+    manualShell: (shell: "powershell" | "terminal") => (shell === "powershell" ? "Run in PowerShell:" : "Run in Terminal:"),
   };
 }
 
@@ -204,6 +207,13 @@ const STEP_ORDER: RuntimeConnectStep[] = ["checking", "installing", "login", "ve
  * 세션은 main 이 들고 있으므로 팝업을 닫아도 취소를 누르지 않은 한 진행은 계속된다 — 그래서
  * 닫기 버튼은 없고, 나가는 길은 [취소] 하나다(진행을 멈추고 반쯤 남긴 것을 말한다).
  */
+/** "Run in PowerShell/Terminal:" when the manual step is this OS's install command (shared/runtime-manual-setup.ts); a URL gets no label. */
+function manualShellFor(kind: ConnectableRuntime, manualInstall: string, copy: ConnectCopy): string | null {
+  if (kind !== "cursor") return null;
+  const setup = manualSetupFor("cursor", setupOsFromNavigator(typeof navigator === "undefined" ? undefined : navigator));
+  return manualInstall === manualSetupText(setup) ? `${copy.manualShell(setup.shell)} ` : null;
+}
+
 export function RuntimeConnectPopup({
   spec, copy, onClose, onDone,
 }: {
@@ -315,7 +325,7 @@ export function RuntimeConnectPopup({
           <p className={styles.note} data-tone={failed ? "error" : undefined} role="alert">
             {cancelled ? (snap?.partialInstall ? copy.partial : copy.cancelled) : reasonText}
             {failed && snap?.reasonCode && <> <span className={styles.code}>({snap.reasonCode})</span></>}
-            {failed && snap?.manualInstall && <><br /><span className={styles.code}>{snap.manualInstall}</span></>}
+            {failed && snap?.manualInstall && <><br />{manualShellFor(spec.kind, snap.manualInstall, copy)}<span className={styles.code}>{snap.manualInstall}</span></>}
           </p>
         )}
         {(failed || cancelled) && logTail.length > 0 && (

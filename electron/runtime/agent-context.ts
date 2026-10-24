@@ -15,7 +15,7 @@ import { markRefusedBeforeDispatch, runnerRefusedBeforeDispatch } from "./runner
 import type { ChatHistoryEntry, RuntimeSelection } from "../../shared/types";
 import { redactOperationalSecrets } from "../invocation/event-secret-redaction";
 import { redactSecrets } from "../../shared/secret-patterns";
-import { composeResumeTurnPrompt } from "./continuity";
+import { composeResumeTurnPrompt, nativeStableTurnContextEpoch } from "./continuity";
 import { parseMemoryEvents, stripAllMemoryEventBlocks } from "../memory/events";
 import { decideGeneration, runtimeContextWindow, runtimeContextWindowProvenance } from "./session-generation";
 import { stripGoalWaitDisplayText } from "../long-run/wait-emitter";
@@ -63,12 +63,12 @@ function refuseBeforeDispatch(code: string): never { throw markRefusedBeforeDisp
 // Process-local high-water marks of allocated turn ordinals: two binds of one [chat, run] that have not appended yet.
 const reservedTurnOrdinals = new Map<string, number>();
 /**
-
-
-
-
-
-
+ * The ordinal for the next agent-context turn of one invocation run on one chat. Every runMcpInvocation counts its own
+ * attempts from 1, but one run can invoke the same chat's agent again: graph agent steps share their automation chat and
+ * run id (run-graph.ts claimInvocationRunOwner reopenReleased). The second step then bound step1's turn id, its first
+ * journal append collided with step1's recorded event (agent_context_event_collision) and the refusal was reported as
+ * "antigravity ... may have acted" (production 1.3.49, 2026-10-16 08:02:17Z, run-cdf732ca-…-56680954). The ordinal is
+ * the caller's attempt or the next one after every turn this conversation's journal (and this process) already holds.
  */
 export function nextAgentContextTurnOrdinal(identity: AgentContextIdentity, chatId: string, runId: string, floor: number): number {
   const prefix = `agent-context-turn:${JSON.stringify([chatId, runId]).slice(0, -1)},`;
@@ -126,17 +126,17 @@ function firstReport(mark: string): boolean {
   if (reportedAdoptions.size > 4096) reportedAdoptions.delete(reportedAdoptions.values().next().value!);
   return true;
 }
-
-
-
-
-
-
-
-
-
-
-
+/*
+ * G09: adoption is a typed outcome, never a silent catch. Production 2026-10-12..18 kept five pairs of heads of one agent in
+ * one conversation (Yotube One chat 8f3e09ee: old rev 1,598 beside the live rev 23,981); a failure here was swallowed, so
+ * nobody could tell a failed move from a kept older journal. Each outcome other than an unchanged head is one run event:
+ *  - adopted: the newest earlier head moved under this identity (native handles, cursors and deliveries with it), naming
+ *    the cause of a failed attempt before it when there was one;
+ *  - retained: older heads of the same conversation that stay where they are;
+ *  - failed: the cause code. A busy store refuses this turn before dispatch: the next turn adopts the same journal, where
+ *    starting another head would fork the conversation for good. Any other cause keeps the turn going on this identity's
+ *    own head (no dead end), loudly.
+ */
 function adoptPriorJournal(identity: AgentContextIdentity, turnId: string): void {
   const key = agentContextKey(identity), event = (payload: Record<string, unknown>) => recordAgentContextRunEvent(turnId, identity.agentId,
     AGENT_CONTEXT_ADOPTION_EVENT_KIND, { schemaVersion: "agentlas.agent-context-adoption.v1", contextRef: contextRef(key), ...payload });
@@ -270,6 +270,10 @@ export const SHARED_IMPORT_MAX_CHARS = 60_000;
 export function importSharedChatHistory(capability: AgentContextCapability, chatId: string, history: readonly ChatHistoryEntry[]): number {
   const value = current(capability), marker = `scope-import:${chatId}`;
   if (!history.length || store.readHead(value.identity).throughSeq === 0) return 0;
+  // A late chat projection cannot reintroduce pre-quarantine bytes after a
+  // forward-only generation; its actual next input is journaled normally.
+  const recorded = store.readRange(value.identity);
+  if (recorded.entries.some(entry => entry.kind === "checkpoint-reference" && entry.payload.schema === FORWARD_BARRIER_SCHEMA)) return 0;
   if (store.hasEvent(value.identity, marker) || store.chatTookTurn(value.identity, chatId)) return 0;
   const rows: Array<{ row: ChatHistoryEntry; images: readonly string[] | undefined }> = [];
   let chars = 0;
@@ -319,6 +323,51 @@ function sanitizeEvent(event:AgentContextEvent):AgentContextEvent {
   }
   return {...event,payload:clean(event.payload) as Record<string,unknown>};
 }
+/** Main-only forward inspection: a new native generation in the existing journal.
+ * The opaque authority keeps its domain-specific effect/current-state checks. */
+const forwardGenerations = new WeakMap<object, { id: string; assertCurrent(): void; memoryBoundaryKey?: string }>();
+export function markAgentContextForwardGeneration(capability: AgentContextCapability, input: { id: string; assertCurrent(): void }): void {
+  current(capability);
+  if (!input.id?.trim() || typeof input.assertCurrent !== "function") fail("agent_context_forward_authority_required");
+  input.assertCurrent();
+  forwardGenerations.set(capability, Object.freeze({ ...input }));
+}
+export function copyAgentContextForwardGeneration(from: AgentContextCapability, to: AgentContextCapability): void {
+  const held = forwardGenerations.get(from);
+  if (held) markAgentContextForwardGeneration(to, held);
+}
+/** Provider adapters may accept the shared owner only for this exact active delivery. */
+export function isAgentContextForwardGenerationRequest(req: RunnerRequest): boolean {
+  const cap = req.agentContext;
+  if (!cap || !forwardGenerations.has(cap)) return false;
+  const held = forwardGenerations.get(cap)!;
+  current(cap); held.assertCurrent();
+  const delivery = activeDeliveries.get(cap);
+  return !!delivery && req.runtimeSessionId === undefined
+    && req.runtimeSessionOwnerId === `agent-context:${delivery.contextKey}:${delivery.bindingKey}`
+    && req.sessionFingerprintSeed === `agent-context.v1:${delivery.contextKey}:${delivery.bindingKey}${nativeGenerationSeed(delivery.generation)}`;
+}
+const FORWARD_BARRIER_SCHEMA = "agentlas.agent-context-forward-barrier.v1";
+/** A narrowed source audience must not inherit older checkpoint/history/native
+ * state. Keep the journal and install its existing forward barrier once for
+ * the authenticated audience key, including after a process restart. */
+export function enforceAgentContextMemoryBoundary(capability: AgentContextCapability, input: { key: string | null; assertCurrent(): void }): void {
+  const value=current(capability);input.assertCurrent();
+  const snapshot=store.readRange(value.identity);
+  const latest=[...snapshot.entries].reverse().find(entry=>entry.kind==="checkpoint-reference"&&entry.payload.schema===FORWARD_BARRIER_SCHEMA);
+  if(!input.key&&!latest?.payload.memoryBoundaryKey)return;
+  const key=input.key??"ordinary-memory.v1";
+  const prior=forwardGenerations.get(capability);
+  if(latest?.payload.memoryBoundaryKey===key&&!prior)return;
+  forwardGenerations.set(capability,Object.freeze({id:prior?.id??`memory-boundary:${key}`,memoryBoundaryKey:key,
+    assertCurrent(){prior?.assertCurrent();input.assertCurrent();}}));
+}
+/** Older bytes remain inspectable evidence; they are never automatic replay. */
+function replayableSnapshot<T extends Pick<AgentContextSnapshot, "entries">>(snapshot: T): T {
+  let after = -1;
+  for (const entry of snapshot.entries) if (entry.kind === "checkpoint-reference" && entry.payload.schema === FORWARD_BARRIER_SCHEMA) after = entry.seq;
+  return after < 0 ? snapshot : { ...snapshot, entries: snapshot.entries.filter(entry => entry.seq > after) };
+}
 export function prepareAgentContextTurn(capability: AgentContextCapability, input: {
   turnId: string; provider: AgentContextProvider; signal?: AbortSignal;
   events: readonly AgentContextEvent[]; expectedRevision?: number;
@@ -327,10 +376,30 @@ export function prepareAgentContextTurn(capability: AgentContextCapability, inpu
   const value=current(capability);
   if(input.turnId!==value.binding.turnId)fail("agent_context_turn_binding_changed");
   if(input.expectedRevision!==undefined && store.readHead(value.identity).revision!==input.expectedRevision)fail("agent_context_revision_changed");
-  for(const event of input.events){input.signal?.throwIfAborted();appendAgentContextEvent(capability,event);}
-  input.signal?.throwIfAborted();current(capability);
-  const delivery=store.beginDelivery(value.identity,input.provider,{turnId:input.turnId});
+  const forward = forwardGenerations.get(capability);
+  const begin = () => {
+    if (forward) {
+      forward.assertCurrent();
+      // One transaction retires every old adapter, records the replay barrier and
+      // opens the real delivery. A busy/replayed turn rolls all three back.
+      const bindings = getDb().prepare("SELECT provider_json,generation FROM agent_context_bindings WHERE context_key=?")
+        .all(agentContextKey(value.identity)) as Array<{ provider_json: string; generation: number }>;
+      for (const binding of bindings) store.invalidateProvider(value.identity, JSON.parse(binding.provider_json) as AgentContextProvider, binding.generation);
+      appendAgentContextEvent(capability, { eventId: `forward-barrier:${input.turnId}`, kind: "checkpoint-reference",
+        payload: { schema: FORWARD_BARRIER_SCHEMA, authorityId: forward.id, turnId: input.turnId,
+          ...(forward.memoryBoundaryKey?{memoryBoundaryKey:forward.memoryBoundaryKey}:{}) } });
+    }
+    for(const event of input.events){input.signal?.throwIfAborted();appendAgentContextEvent(capability,event);}
+    input.signal?.throwIfAborted();current(capability);
+    return store.beginDelivery(value.identity,input.provider,{turnId:input.turnId});
+  };
+  const delivery = forward ? getDb().transaction(begin).immediate() : begin();
   prepared.set(delivery,{capability,acknowledged:false});
+  if (forward) recordAgentContextRunEvent(delivery.turnId, value.identity.agentId, AGENT_CONTEXT_GENERATION_EVENT_KIND, {
+    schemaVersion: "agentlas.agent-context-generation.v1", runtime: input.provider.kind, reason: "forward_recovery",
+    fromGeneration: delivery.generation - 1, toGeneration: delivery.generation, windowSource: "none",
+    contextRef: contextRef(delivery.contextKey), bindingRef: contextRef(delivery.bindingKey),
+  }, `agent-context-generation:${delivery.contextKey}:${delivery.bindingKey}:${delivery.generation}`);
   return delivery;
 }
 export function acknowledgeAgentContextTurn(capability: AgentContextCapability, delivery: AgentContextDelivery,
@@ -434,13 +503,13 @@ function errorSessionId(error: unknown): string | null {
 const COMPACT_HOST_PURPOSES: ReadonlyMap<string, string> = new Map([
   ["goal-continuation", "goal continuation"], ["update-resume", "resumed after update"], ["run-recovery", "recovery pass"],
 ]);
-
-
-
-
-
-
-
+/*
+ * LEGACY ONLY. Journals written before the marker above carry no purpose on host-written rows (production 2026-10-13:
+ * 166 such rows, ~300k chars in the Yotube room journals). The prefixes below are the fixed first words of the host's
+ * own prompt builders (hephaestus/loop-engineering.ts buildGoalDrivenContinuationPrompt and
+ * buildStormbreakerContinuationPrompt, invocation/automatic-goal.ts); a row WITH the marker never reaches this list.
+ * Delete once no journal predates the marker.
+ */
 const LEGACY_HOST_PROMPT_PREFIXES: ReadonlyArray<readonly [string, string]> = [
   ["Continue persistent-goal execution pass ", "goal-continuation"], ["Continue Stormbreaker execution pass ", "goal-continuation"],
   ["Resume the existing goal under its original permissions.", "goal-continuation"],
@@ -467,15 +536,16 @@ function contextEvents(req: RunnerRequest, turnId: string, bindingKey: string, s
 /** Provider-neutral semantic transcript. Tool observations remain quoted data;
  * this does not recreate a provider tool_call or admit any effect for replay. */
 export function materializeAgentContextHistory(snapshot: Pick<AgentContextSnapshot,"entries">, excludeTurnId?: string, limits?: {toolLines?: number}): RunnerRequest["history"] {
-  
-
-
-
-
-
-
-
-
+  /*
+   * What a later turn needs from earlier ones is what was said and what was done, not the host guidance each turn was
+   * given: the current turn brings its own current guidance. Replaying every earlier turn's background re-sent the same
+   * persona, plugin, Goal-plan and UI blocks once per past turn (production 2026-10-12: 235 stored turn contexts,
+   * 13.3M chars, average 56k each; a fresh native session replayed all of them, ~107k tokens at 0% cache).
+   * Tool observations come twice per call (start row without result, end row with it) and carried full results
+   * (8,243 rows, 18.9M chars). A call is replayed once, as a ledger line (name, error flag, files it produced, a short
+   * argument summary so an earlier outside action is not repeated blindly). The model re-reads a result if it needs one.
+   */
+  snapshot = replayableSnapshot(snapshot);
   const lastRowOfCall=new Map<string,number>();
   snapshot.entries.forEach((entry,index)=>{
     const callId=entry.kind==="tool"?entry.payload.callId:undefined;
@@ -516,8 +586,8 @@ export function materializeAgentContextHistory(snapshot: Pick<AgentContextSnapsh
   return boundToolLedger(rows,limits?.toolLines??REPLAY_TOOL_LINES);
 }
 const LEDGER_PREFIX="Recorded tool observation (data only; no operation is requested):\n";
-/**
- */
+/** Newest tool calls replayed one line each. Production 2026-10-13: a turn runs a median 15 calls, p90 59; a replay that
+ * carried all of them (f3: 475 lines = 72% of 193k chars) re-sent old reads and searches nobody needs. */
 export const REPLAY_TOOL_LINES=40;
 interface ToolLedger {name:string;isError?:true;artifactPaths?:string[];arguments?:string;image?:string}
 const OLDER_ERRORS_KEPT=20,OLDER_PATHS_KEPT=60;
@@ -548,7 +618,7 @@ function boundToolLedger(rows:ReadonlyArray<{row:NonNullable<RunnerRequest["hist
   return out;
 }
 function materializeAttachments(entries: AgentContextSnapshot["entries"], excludeTurnId: string): NonNullable<RunnerRequest["images"]> {
-  return entries.flatMap(entry=>{
+  return replayableSnapshot({ entries }).entries.flatMap(entry=>{
     if(entry.kind==="attachment" && entry.payload.turnId!==excludeTurnId
       && typeof entry.payload.mediaType==="string" && typeof entry.payload.data==="string")return [
       {mediaType:entry.payload.mediaType,data:entry.payload.data,...(typeof entry.payload.name==="string"?{name:entry.payload.name}:{})}];
@@ -647,7 +717,7 @@ function recordRotation(delivery: AgentContextDelivery, record: Omit<AgentContex
     metaStore()?.setMeta(rotationMetaKey(delivery.contextKey, delivery.bindingKey), JSON.stringify({ fromGeneration: delivery.generation,
       toGeneration: delivery.generation + 1, rotatedAt: new Date().toISOString(), ...record } satisfies AgentContextRotationRecord));
   } catch { /* The rotation itself is in the binding row; a lost reason renders as "none". */ }
-  
+  // One run event per generation switch (none existed: production 2026-10-18 showed 0 rotations and nothing to count them by).
   if (origin) recordAgentContextRunEvent(delivery.turnId, origin.agentId, AGENT_CONTEXT_GENERATION_EVENT_KIND, {
     schemaVersion: "agentlas.agent-context-generation.v1", runtime: origin.runtime, reason: record.reason,
     fromGeneration: delivery.generation, toGeneration: delivery.generation + 1,
@@ -889,6 +959,7 @@ export function nativeGenerationSeed(generation: number): string {
   return Number.isSafeInteger(generation) && generation > 1 ? `:g${generation}` : "";
 }
 const deliveredInstructions=new Map<string,string>();
+const nativeStableAcknowledgements=new Map<string,{epoch:number;hashes:ReadonlySet<string>}>();
 const MAX_DELIVERED_INSTRUCTIONS=512;
 /** Short ACK key for one instructions version: it rides the turn's stable-block list, so the store's stable-block ACK index
  * remembers which version the session received across restarts without journaling another copy of the prompt. */
@@ -921,6 +992,7 @@ export function withAgentContext(runner: Runner, provider: Omit<AgentContextProv
     catch { /* An unavailable optional reader has no derived binding. */ }
     const surfaceMemoryRequest = req;
     const derivedMemoryKey = surfaceMemory?.sourceMemoryRequestKey(surfaceMemoryRequest) ?? null;
+    const assignedMemoryBoundary=surfaceMemory?.assignedTargetMemoryRequestBoundary?.(surfaceMemoryRequest)??null;
     const assertSurfaceMemoryCurrent = () => {
       if (derivedMemoryKey && surfaceMemory?.sourceMemoryRequestKey(surfaceMemoryRequest) !== derivedMemoryKey)
         fail("agent_context_memory_source_changed");
@@ -929,8 +1001,11 @@ export function withAgentContext(runner: Runner, provider: Omit<AgentContextProv
     // source scope. Unknown/foreign/manual data remains in the original input.
     let memoryWire: typeof import("../memory/generation-pack") | null = null;
     let memoryBinding: import("../memory/generation-pack").MemoryPackWireBinding | null = null;
-    try { memoryWire = require("../memory/generation-pack") as typeof import("../memory/generation-pack");
+    enforceAgentContextMemoryBoundary(capability,{key:assignedMemoryBoundary?derivedMemoryKey:null,
+      assertCurrent:()=>assignedMemoryBoundary?.assertCurrent()});
+    try { if(!assignedMemoryBoundary){memoryWire = require("../memory/generation-pack") as typeof import("../memory/generation-pack");
       memoryBinding = memoryWire.prepareMemoryPackWire(req, value.identity, checkpointTask(req)); }
+    }
     catch { /* Missing coverage cannot suppress any input. */ }
     const memoryBlocks = memoryWire?.memoryPackWireBlocks(memoryBinding) ?? [];
     if (memoryBlocks.length) req = carryRunnerTurnContext(req, { ...req, turnContextStable: [...new Set([...(req.turnContextStable ?? []), ...memoryBlocks])] });
@@ -942,23 +1017,25 @@ export function withAgentContext(runner: Runner, provider: Omit<AgentContextProv
     const consumeMissingProof=options.consumePreviousContextMissingProof;
     if(policy && typeof consumeMissingProof!=="function")refuseBeforeDispatch("agent_context_transport_proof_required");
     const packet=policy?retainedResponsesPromptPacket(req):null;
-    
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+    /*
+     * A native session is the agent's conversation with its runtime, not one turn's tool surface. The tools routed for a
+     * turn (mcpAllowedTools), an isolated MCP grant such as the browser and a catalog-only grant change what the process
+     * exposes, not the conversation: Codex resumes a thread in a process with other servers (codex.ts turn-scoped
+     * app-server), Claude Code resumes with another --mcp-config, ACP loads a session with new mcpServers. Keyed on
+     * them, every routing change opened a new native session: production 2026-10-12, Motiondirector's one Yotube room
+     * chat started five new Codex threads in a day (02:40-08:47Z), each first request re-sending ~107k tokens at 0%
+     * cache. The system prompt is not in the key either: it varies with the sections a turn needs (instructions sizes
+     * 5,844-12,636 tokens in that chat), and a resumed native session is given the current version as a stable
+     * turn-context block once it differs from what that session last received (instructionsBlockFor).
+     * Model, permission, cwd, plan mode and locale are per-turn inputs of a native turn, not a new conversation (owner
+     * 2026-10-12: "모델·권한·폴더·지시가 바뀐다고 세션이 바뀔 이유가 없다"): Codex reasserts sandbox, approval and cwd on every
+     * turn/start and carries the thread's history into a model change itself; Claude Code resumes with another --model
+     * and --permission-mode; the locale reaches the session with the instructions. So the key is the agent's
+     * conversation with one runtime and its account source. A workforce tool grant keeps its exact configuration (its
+     * observation acknowledges the thread it starts). Stateless and Responses-transport providers keep the full key.
+     */
+    const forwardGeneration = forwardGenerations.get(capability);
+    forwardGeneration?.assertCurrent();
     const nativeSessionKey=NATIVE_CONTEXT_RESUME_KINDS.has(provider.kind) && !policy;
     const adapter:AgentContextProvider={...provider,...(nativeSessionKey && !MODEL_OWNED_NATIVE_KINDS.has(provider.kind)?{}:{model:req.model}),configurationDigest:digest(nativeSessionKey ? [
       "native-session.v3",req.runtimeSource??options.configurationSource??"",options.configurationIdentity??"",
@@ -978,6 +1055,14 @@ export function withAgentContext(runner: Runner, provider: Omit<AgentContextProv
     const continuationHandle=continuationHandles.get(turnId)??null;continuationHandles.delete(turnId);
     // The conversation this turn resumes: the host's continuation handle (native, non-Responses adapters only), else the binding's.
     const nativeHandle=nativeKind && !policy && continuationHandle ? continuationHandle : delivery.nativeHandle;
+    const retentionScope = { chatId: delivery.contextKey, runtimeKind: provider.kind, sessionId: nativeHandle ?? "" };
+    const enteredRetentionEpoch = nativeSessionKey && nativeHandle && nativeHandle === delivery.nativeHandle
+      ? nativeStableTurnContextEpoch(retentionScope, true) : undefined;
+    const retentionAckKey = enteredRetentionEpoch === undefined ? null
+      : JSON.stringify([delivery.contextKey, delivery.bindingKey, delivery.generation, nativeHandle]);
+    const nativeStableAck = retentionAckKey === null ? undefined : nativeStableAcknowledgements.get(retentionAckKey);
+    const nativeStableReuse = nativeStableAck?.epoch === enteredRetentionEpoch && enteredRetentionEpoch !== undefined;
+    let nativeDeliveredHashes: readonly string[] = [];
     const noteUnsettled=(observed:string|null)=>{
       const handle=observed??nativeHandle??null,stateful=nativeKind||!!policy;
       remember(unsettledTurns,turnId,{resumable:stateful?!!handle:true,handle,retire(){
@@ -1002,7 +1087,7 @@ export function withAgentContext(runner: Runner, provider: Omit<AgentContextProv
         const observed = store.readRange(value.identity, { after: delivery.throughSeq });
         let throughSeq = delivery.throughSeq;
         for (const entry of observed.entries) { if (entry.producerBinding !== delivery.bindingKey) break; throughSeq = entry.seq; }
-        const source = store.readRange(value.identity, { through: throughSeq }), sourceHead = store.readHead(value.identity);
+        const source = replayableSnapshot(store.readRange(value.identity, { through: throughSeq })), sourceHead = store.readHead(value.identity);
         // Unknown window: the shared, labelled degraded value (docs native-harness 07 G08), not a literal guess.
         const task = checkpointTask(req), window = runtimeContextWindow(provider.kind, req.model) ?? UNKNOWN_CONTEXT_WINDOW;
         const historyBudgetTokens = Math.max(0, Math.floor(window * 0.5) - estimateTransportTokens(req.systemPrompt)
@@ -1061,10 +1146,19 @@ export function withAgentContext(runner: Runner, provider: Omit<AgentContextProv
     }};
     try {
       const native=nativeKind,stateful=native || !!policy,resume=stateful && !!nativeHandle;
+      let result: RunnerResult;
+      let instructions: ReturnType<typeof instructionsBlockFor> | null = null;
+      if (forwardGeneration) {
+        forwardGeneration.assertCurrent();
+        result = await enterRunner({ ...req, history: [], runtimeSessionId: undefined,
+          runtimeSessionOwnerId: `agent-context:${delivery.contextKey}:${delivery.bindingKey}`,
+          sessionFingerprintSeed: `agent-context.v1:${delivery.contextKey}:${delivery.bindingKey}${nativeGenerationSeed(delivery.generation)}` }, wrapped);
+        forwardGeneration.assertCurrent();
+      } else {
       // The prepared input frontier is immutable. Later owner updates stay
       // for their own authorized turn, even if another writer appends now.
       const snapshot=!resume && !decision
-        ?store.readRange(value.identity,{through:delivery.throughSeq})
+        ?replayableSnapshot(store.readRange(value.identity,{through:delivery.throughSeq}))
         :{contextKey:delivery.contextKey,revision:0,throughSeq:delivery.throughSeq,entries:delivery.entries};
       const taskBoundary = decision ? null : checkpointTask(req);
       const rawHistory = materializeAgentContextHistory(snapshot, turnId);
@@ -1084,7 +1178,7 @@ export function withAgentContext(runner: Runner, provider: Omit<AgentContextProv
         :[{ id: "runner.turn-context.opaque", revision: 1, stability: "turn-context", changeTriggers: ["task", "owner-input", "checkpoint"], order: Number.MAX_SAFE_INTEGER, text: originalContext }];
       const originalImages=(req.images??[]).map(image=>Object.freeze({...image}));
       activeBootstraps.set(capability, { delivery, kind: provider.kind, request: req, create: () => {
-        const full=resume?store.readRange(current(capability).identity,{through:delivery.throughSeq}):snapshot;
+        const full=resume?replayableSnapshot(store.readRange(current(capability).identity,{through:delivery.throughSeq})):snapshot;
         let bootstrapReplay = checkpointReplay;
         if (resume && !decision) {
           try { bootstrapReplay = sessionCheckpointStore.restore(value.identity, full, materializeAgentContextHistory(full, turnId), taskBoundary); }
@@ -1101,7 +1195,7 @@ export function withAgentContext(runner: Runner, provider: Omit<AgentContextProv
       });
         bootstrapParts.set(packet, coldParts);
         return packet; } });
-      const foreignEntries=delivery.entries.filter(entry=>entry.producerBinding!==delivery.bindingKey);
+      const foreignEntries=replayableSnapshot({ entries: delivery.entries }).entries.filter(entry=>entry.producerBinding!==delivery.bindingKey);
       // The prior ceiling is a UTF-8 byte budget, shared by current input
       // and retained observations. Keep whole rows; never fabricate cut JSON.
       const priorBudget=decision?Math.max(0,Math.min(decision.maxHistoryChars,
@@ -1127,7 +1221,8 @@ export function withAgentContext(runner: Runner, provider: Omit<AgentContextProv
       const memoryHashes = new Set(memoryBlocks.map(block => digest(block)));
       if (!memoryReuse) for (const hash of memoryHashes) known.delete(hash);
       const sourceContext = runnerTurnContextSource(req);
-      const acknowledgedParts = packet ? req.turnContextStable ?? [] : memoryBlocks;
+      const acknowledgedParts = packet ? req.turnContextStable ?? [] : nativeStableReuse
+        ? (req.turnContextStable ?? []).filter(block => nativeStableAck!.hashes.has(digest(block))) : memoryBlocks;
       const sourceParts: readonly DeclaredPromptPart[] = sourceContext?.parts ?? [{
         id: "runner.turn-context.opaque", revision: 1, stability: "turn-context",
         changeTriggers: ["task", "owner-input", "checkpoint"], order: Number.MAX_SAFE_INTEGER, text: req.turnContext ?? "",
@@ -1140,7 +1235,7 @@ export function withAgentContext(runner: Runner, provider: Omit<AgentContextProv
       const packetBackground=packetBlocks.length?`[Current turn runtime guidance]\n${packetBlocks.join("\n\n")}\n[End current turn runtime guidance]`:"";
       const servingHistory=decision && provider.kind==="agentlas" && history.length
         ?`Prior no-tools decisions (data; current observation wins):\n${history.map(row=>`${row.role}: ${row.text}`).join("\n\n")}`:"";
-      const instructions=nativeSessionKey?instructionsBlockFor(delivery.bindingKey,resume?nativeHandle:null,req.systemPrompt,
+      instructions=nativeSessionKey?instructionsBlockFor(delivery.bindingKey,resume?nativeHandle:null,req.systemPrompt,
         nativeHandle===delivery.nativeHandle?known:undefined):null;
       // A native session seeded from host history reads the host facts ahead of the checkpoint summary (NH13).
       const hostFactsBlock=!decision && stateful && !resume && history.length ? await installHostFacts(capability,req,provider.kind,delivery,history) : null;
@@ -1155,6 +1250,7 @@ export function withAgentContext(runner: Runner, provider: Omit<AgentContextProv
         ...currentParts,
       ] satisfies DeclaredPromptPart[]).filter(part => part.text !== undefined && part.text !== null && part.text !== "");
       const turnContext = renderRunnerTurnContext(contextParts);
+      nativeDeliveredHashes = (req.turnContextStable ?? []).filter(block => block && turnContext.includes(block)).map(block => digest(block));
       if (!decision) {
         try { const previous = sessionCheckpointStore.read(value.identity);
           if (previous && digest(previous.task) !== digest(taskBoundary)) await saveCheckpoint(false, { turnId, outcome: "processing", providerAcknowledged: false });
@@ -1166,7 +1262,7 @@ export function withAgentContext(runner: Runner, provider: Omit<AgentContextProv
       const adapterStable = req.turnContextStable?.filter(block => !memoryHashes.has(digest(block)));
       // The serving decision path carries prior decisions once, as quoted data in the turn context, never also as turns.
       const adapterRequest = finalizeRunnerTurnContext(req, contextParts, provider.kind, HOST_MESSAGE_CONTEXT_KINDS.has(provider.kind));
-      const result=await enterRunner(carryRunnerTurnContext(adapterRequest, { ...adapterRequest,history:servingHistory?[]:history,...(olderImages.length?{images:[...olderImages,...(req.images??[])]}:{}),
+      result=await enterRunner(carryRunnerTurnContext(adapterRequest, { ...adapterRequest,history:servingHistory?[]:history,...(olderImages.length?{images:[...olderImages,...(req.images??[])]}:{}),
         ...(adapterStable || instructions?.block ? { turnContextStable: [...(adapterStable ?? []), ...(instructions?.block ? [instructions.block] : [])] } : {}),
         // Fresh means no canonical adapter handle. Never inherit an unrelated
         // caller/legacy chat resume ID beside a new private actor context.
@@ -1185,6 +1281,7 @@ export function withAgentContext(runner: Runner, provider: Omit<AgentContextProv
         // The exact private placement descriptor already framed API/local input above; never parse ledgerHints or old strings.
         // adapterRequest carries the exact composed context and original current-user input.
       }),wrapped);
+      }
       // Validate the original branded read before recording or acknowledging
       // provider output; outer UI guards run after this journal boundary.
       try { assertSurfaceMemoryCurrent(); }
@@ -1223,6 +1320,16 @@ export function withAgentContext(runner: Runner, provider: Omit<AgentContextProv
       }
       const acknowledged = acknowledgeAgentContextTurn(capability,delivery,
         {receiptId:`completed:${turnId}`,nativeHandle:result.sessionId,observedThroughSeq});
+      if (retentionAckKey !== null) {
+        if (acknowledged === true && result.sessionId === nativeHandle
+          && nativeStableTurnContextEpoch(retentionScope) === enteredRetentionEpoch) {
+          const hashes = new Set([
+            ...(nativeStableReuse ? nativeStableAck!.hashes : []), ...nativeDeliveredHashes,
+          ]);
+          while (hashes.size > MAX_DELIVERED_INSTRUCTIONS) hashes.delete(hashes.values().next().value as string);
+          remember(nativeStableAcknowledgements, retentionAckKey, { epoch: enteredRetentionEpoch!, hashes });
+        } else nativeStableAcknowledgements.delete(retentionAckKey);
+      }
       memoryWire?.settleMemoryPackWire(memoryBinding, delivery.bindingKey, delivery.generation, acknowledged === true);
       if(acknowledged === true)recordHostFactsInstalled(capability,delivery,`completed:${turnId}`,result.sessionId);
       if(acknowledged === true && instructions && result.sessionId)instructions.delivered(result.sessionId);
@@ -1236,6 +1343,7 @@ export function withAgentContext(runner: Runner, provider: Omit<AgentContextProv
         const contextWindowTokens = result.contextWindowTokens ?? runtimeContextWindow(provider.kind, req.model);
         const generation = decideGeneration({ kind: provider.kind, contextWindowTokens, lastInputTokens: result.contextInputTokens ?? null });
         if (generation.action === "new_generation") {
+          if (retentionAckKey !== null) nativeStableAcknowledgements.delete(retentionAckKey);
           try { store.invalidateProvider(current(capability).identity,adapter,delivery.generation);
             recordRotation(delivery, { reason: "context_ratio", reportedInputTokens: result.contextInputTokens ?? null, contextWindowTokens },
               { runtime: provider.kind, agentId: value.identity.agentId, windowSource: result.contextWindowTokens ? "runtime-result"
@@ -1270,7 +1378,7 @@ export function withAgentContext(runner: Runner, provider: Omit<AgentContextProv
       if(runnerEntered && !runnerRefusedBeforeDispatch(error))noteUnsettled(errorSessionId(error));
       else markRefusedBeforeDispatch(error);
       if (!decision) await saveCheckpoint(false, { turnId, outcome, providerAcknowledged: false, ...(failureCode ? { failureCode } : {}) });
-      if(missing)store.invalidateProvider(current(capability).identity,adapter,delivery.generation);
+      if(missing){if(retentionAckKey!==null)nativeStableAcknowledgements.delete(retentionAckKey);store.invalidateProvider(current(capability).identity,adapter,delivery.generation);}
       throw error;
     }finally{
       const pendingAliveAck = aliveAckRegistrations.get(capability);

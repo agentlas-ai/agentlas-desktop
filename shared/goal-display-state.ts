@@ -29,7 +29,7 @@ export const GOAL_OWNER_QUESTION_REASONS: ReadonlySet<string> = new Set([GOAL_OW
 export const GOAL_OWNER_REVIEW_REASONS: ReadonlySet<string> = new Set(["auto_goal_owner_review_required"]);
 
 /**
- * A Goal held for the owner's answer to its own question.
+ * A Goal held for the owner's answer to its own question (owner 2026-10-20: "답오기전에 해당작업 보류하며 다른 작업은 진행").
  * The host never lets a Goal rest as `blocked` or `waiting_user` (store/long-runs.ts resolveNonBlockingGoalStatus), so the
  * hold is the allowed resting status `waiting_tool` carrying the question code in blocked_reason. Every status transition
  * rewrites blocked_reason, so the hold cannot outlive the state it describes. Nothing wakes a held Goal on its own; the

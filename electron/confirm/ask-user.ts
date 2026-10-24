@@ -103,6 +103,13 @@ function emitToQuestionSurfaces(payload: AskUserRequestEvent): boolean {
   return rendererEmitted || mobileEmitted;
 }
 
+/** A trusted host observed an existing remote broker row. This only notifies
+ * the existing surfaces; it never creates a second pending promise. */
+export function relayAskUserObservation(payload:AskUserRequestEvent):void {
+  emitToQuestionSurfaces(payload);
+  if(payload.chatId&&payload.expiresAt>Date.now())reportOwnerAsk({chatId:payload.chatId,source:"ask_user",key:`ask-user:${payload.requestId}`});
+}
+
 /**
  * 사용자에게 묻고 **답을 기다린다.**
  *
@@ -158,7 +165,7 @@ export function askUser(
     }
     // The run is waiting live for this answer, so it will not settle (and ring) until the owner answers: tell the owner now
     // (desktop alert, phone push) so a question asked while they look elsewhere is not silently left to time out
-    // (an ask is always a card that rings).
+    // (owner 2026-10-20: "묻는건 무조건 카드로 주고 알림 울리게해").
     if (payload.chatId) reportOwnerAsk({ chatId: payload.chatId, source: "ask_user", key: `ask-user:${requestId}` });
     if (opts.signal) {
       abortListener = () => {
@@ -192,6 +199,19 @@ export function listPendingAskUserRequests(): AskUserRequestEvent[] {
     ...payload,
     options: payload.options.map((option) => ({ ...option })),
   }));
+}
+
+/** Two observations may describe the same broker row, never two different
+ * questions that happen to reuse an id. Preserve the original local source. */
+export function mergePendingAskUserRequests(first:AskUserRequestEvent[],second:AskUserRequestEvent[]):AskUserRequestEvent[] {
+  const fingerprint=(row:AskUserRequestEvent)=>JSON.stringify([row.requestId,row.chatId,row.question,
+    row.options.map(option=>[option.label,option.description??null]),row.allowFreeText,row.askedBy,row.createdAt,row.expiresAt]);
+  const merged=[...first];
+  for(const row of second){const prior=merged.find(item=>item.requestId===row.requestId);
+    if(prior){if(fingerprint(prior)!==fingerprint(row))throw new Error("question_runtime_source_conflict");}
+    else merged.push(row);
+  }
+  return merged;
 }
 
 /**

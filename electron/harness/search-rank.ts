@@ -1,13 +1,13 @@
 /**
- * @agent-mail
- * @browser
-
-
-
-
-
-
-
+ * Relevance order for harness_search. Dev replay r07 (2026-10-17): Film searched "elevenlabs text to speech native owner
+ * connection" and got @agent-mail, @browser, … first. Every kind was listed in a fixed order (plugins, skills, connectors,
+ * tools, features, operations), any one matching word was enough, and the list was cut at 60, so the operation that
+ * answered (speech.synthesize) never surfaced and the step stopped "no secure ElevenLabs path". r06 was the same for
+ * media.listen.
+ *
+ * A query word found in an entry's id or name counts 3, found in its description counts 1. Words shorter than 3
+ * characters ("to", "a") carry no signal and are ignored. Entries are ordered by score, and ties keep their original
+ * order. An empty query keeps the original order.
  */
 export interface RankableHarnessItem {
   id: string; name: string; description: string;

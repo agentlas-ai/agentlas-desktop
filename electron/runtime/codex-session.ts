@@ -481,21 +481,21 @@ export function disposeCodexSessionPool(): void {
 
 /* ──────────────────── Run-scoped MCP servers on a resident thread ──────────────────── */
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+/*
+ * A resident app-server used to carry each invocation's MCP servers as spawn arguments (`-c mcp_servers.*`). Every
+ * invocation mints new launch handles and capability files (mcp-config.ts), so the argv, and with it the pool key,
+ * changed on every turn: production 10-13..16, codex spawned 374 times and reused 4. Measured offline on the installed
+ * codex-cli 0.163.0 (empty CODEX_HOME, no sign-in, no model request; /tmp/prompt-audit/w3a/probe):
+ *   - thread/start and thread/resume accept the servers as thread config (`config.mcp_servers`), and the thread runs
+ *     exactly those (mcpServerStatus/list with the threadId);
+ *   - thread/resume of a thread this connection still subscribes keeps its old servers, and config/mcpServer/reload
+ *     does not replace thread config;
+ *   - thread/unsubscribe followed by thread/resume with a new table stops the old server processes and starts the new
+ *     ones in the same process (27-53 ms), keeping the thread; identical tables restart too;
+ *   - inline `env` values of that table were found nowhere under CODEX_HOME (rollout and state files included).
+ * So the resident is keyed on the grant identity (the server names) and each turn rebinds its own table before
+ * turn/start; a process whose rebind cannot be confirmed is discarded, never reused with the previous grant.
+ */
 let threadMcpRebindSupported = true;
 /** False once this executable refused thread/unsubscribe: residents key on the per-invocation argv again. */
 export function codexThreadMcpRebindSupported(): boolean { return threadMcpRebindSupported; }
@@ -734,11 +734,11 @@ export async function prepareCodexThreadResume(
 }
 
 /**
-
-
-
-
-
+ * A one-shot `codex exec resume` is a writer of the thread too, and Codex refuses it ("thread … already has an active
+ * writer") while a resident app-server of this process still holds that thread. Production 2026-10-05 (X Marketing):
+ * an attended turn left its resident session holding the room's thread; the next Goal turns ran with an isolated MCP
+ * grant, which only `exec` supports, and every one exited in 0.2 s for 25 minutes. Hand the thread over the same way
+ * a resident resume does: retire this process's idle holder and wait for it to exit; an active turn stays busy.
  */
 export async function prepareCodexExecThreadResume(
   codexHome: string,

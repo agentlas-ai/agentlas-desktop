@@ -13,7 +13,7 @@ import type { SessionChannel } from "./session-scope";
 
 /**
  * The fixed privacy rule, delivered once per session with the One-mode instructions of a seat or team-member agent (mcp/client.ts,
- * next to `reply.display` and `reply.document`). An exact line: the wording is fixed.
+ * next to `reply.display` and `reply.document`). An exact line: the wording is what was measured.
  */
 export const CHANNEL_PRIVACY_RULE =
   "channels: what the owner tells you in a one-to-one conversation stays there unless the owner asks you to share it; in a group room speak only from what that room has seen";
@@ -32,8 +32,11 @@ export function sessionChannelTag(channel: SessionChannel): string | null {
 }
 
 /**
- * The clause every room line ends with. A rule given once, as a block of the session's first turn, is not reliably kept by every
- * model, so the reminder rides the line of every turn spoken in a room.
+ * The clause every room line ends with. Measured with real models (one session spoken to first one-to-one, then in a room, a
+ * participant asking for what the owner had said privately; 2 scenarios, 2 to 3 answers each): with neither the rule nor a channel
+ * line Haiku repeated it in 3 of 6 answers and the cheapest Codex model in 4 of 4; the fixed rule with a plain channel line kept Haiku
+ * quiet (0 of 6) but not Codex (3 of 4), whose copy of the rule is a one-time block of its first turn; the same sentence in the room
+ * line of the turn itself kept both quiet (Codex 0 of 4, Haiku 0 of 2). So the reminder rides the line of every turn spoken in a room.
  */
 export const ROOM_CHANNEL_CLAUSE = "speak only from what this room has seen, not from one-to-one talk";
 

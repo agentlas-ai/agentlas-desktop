@@ -1,12 +1,12 @@
-
-
-
-
-
-
-
-
-
+/*
+ * 쿠키 가져오기의 "누적" 규칙 — 순수 판정만 모아 둔 곳.
+ *
+ * 왜 따로 떼었나 (오너 신고 2026-09-14: "가져올 때마다 초기화해서 덮어쓴다"):
+ * 가져오기는 **합치기**여야 한다. 같은 쿠키를 두 번 가져오면 한 줄, 다른 쿠키를 가져오면
+ * 둘 다 남아야 한다. 그런데 이 판정이 SQL 문자열 사이에 흩어져 있으면 아무도 값으로
+ * 확인할 수 없고, 문장 대조 게이트는 제품이 나아질 때 거짓말을 한다. 그래서 결정만
+ * 여기로 꺼내고, DB 쪽은 그 결정을 실행만 한다. 이 파일은 아무것도 import 하지 않는다.
+ */
 
 /** Chromium 쿠키 행의 진짜 고유키 후보 — 이 조합이 저장소의 UNIQUE 제약이다. */
 export const COOKIE_IDENTITY_COLUMNS = [
@@ -197,16 +197,16 @@ export function decideNativeCookieWrite(input: {
 }
 
 /**
-
-
-
-
-
-
-
-
-
-
+ * 자동 갱신이 전용 브라우저(CDP)에 쿠키를 **다시 넣을지** 판정한다.
+ *
+ * ★오너 신고 2026-09-28 "왜 자꾸 로그아웃되냐 — 크롬 본판이나 브라우저나 다".
+ *   macOS 경로는 SQL 병합 판정(decideCookieWrite)을 거친 뒤에도 CDP `addCookies` 로 원본의
+ *   **모든** 쿠키를 무조건 덮었다. 전용 브라우저가 그 사이 회전시킨 로그인 토큰(구글 PSIDTS 등)이
+ *   평소 크롬의 낡은 값으로 되돌아가고, 같은 세션이 두 브라우저에서 엇갈린 토큰으로 쓰인다 —
+ *   사이트의 세션 도용 방어가 반응할 수 있는 모양이다(사이트 쪽 판정은 미확인). 자동 갱신은 전용 브라우저에 **없거나**, 원본이
+ *   **더 늦게 만료되는**(더 새로 발급된) 쿠키만 넣는다. 사용자가 방금 누른 가져오기는 원본이 이긴다.
+ *
+ * 만료 값은 초 단위이며 세션 쿠키는 없음(undefined) 또는 음수다.
  */
 export function decideRuntimeCookieFeed(input: {
   explicitImport: boolean;
@@ -228,9 +228,15 @@ export function decideRuntimeCookieFeed(input: {
  * 한 번에 넣을 쿠키를 **로그인 묶음 단위로** 고른다(자동 갱신 전용 판정, 사용자가 누른 가져오기는
  * 원본이 전부 이긴다).
  *
- * 왜 묶음 단위인가: 쿠키를 **한 줄씩** 판정하면(decideRuntimeCookieFeed·decideNativeCookieWrite) 목적지에 묶음 일부만 남아
- *   있을 때 "있는 줄은 지키고 없는 줄만 넣기" 가 되어 두 로그인 세대가 섞이거나, 반쪽 묶음을 "살아 있는 세션"으로 여겨 영영
- *   채우지 않는다. 섞인·반쪽 로그인은 사이트가 로그인으로 받지 않는다.
+ * ★오너 신고 "왜 자꾸 로그아웃되냐" (09-27~) — 실측 2026-09-29(오너 기기, 이름·도메인·시각만):
+ *   전용 크롬의 .youtube.com 에는 __Secure-3PSID·3PAPISID·1PSIDTS·3PSIDTS·3PSIDCC 만 있고
+ *   SID·HSID·SSID·APISID·SAPISID·__Secure-1PSID·1PAPISID·LOGIN_INFO 가 **없었다**. 평소 크롬(원본)에는
+ *   전부 있다. 같은 저장소의 .google.com 은 __Secure-1PSID 가 21:27:30 발급, SID·HSID·PSIDTS 는
+ *   21:45:18 투입 — 한 로그인의 쿠키가 두 세대로 섞여 있다. 자동화가 선 로그인 벽 9건은 전부
+ *   youtube.com/signin → accounts.google.com accountchooser 였다(run_events 09-27~29).
+ *   원인은 쿠키 **한 줄씩** 내리던 판정(decideRuntimeCookieFeed·decideNativeCookieWrite): 목적지에
+ *   묶음 일부만 남아 있으면 "있는 줄은 지키고 없는 줄만 넣기" 가 되어 두 세션을 섞거나, 반쪽 묶음을
+ *   "살아 있는 세션"으로 여겨 영영 채우지 않는다. 섞인·반쪽 로그인은 사이트가 로그인으로 받지 않는다.
  *
  * 규칙(로그인 쿠키 이름을 아는 묶음만; 모르는 사이트는 perCookie 그대로):
  *   - 원본에 그 묶음의 로그인 쿠키가 없으면 → 줄 단위 판정(옮길 로그인이 없다).

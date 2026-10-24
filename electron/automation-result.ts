@@ -49,12 +49,12 @@ export interface AutomationJudgeReceipt {
  */
 export const AUTOMATION_JUDGE_PIN_FALLBACK = "pool_then_pin" as const;
 /**
-
-
-
-
-
-
+ * Whole budget for one unattended outcome/failure judgment (pool member, then
+ * the pin). The shared 45s default splits into ~22.5s per attempt, and a Codex
+ * judge turn (CLI spawn + reasoning) measures ~20-25s: production 1.2.40
+ * 2026-09-24 03:00Z gpt-6-luna succeeded at 22,496ms, and the candidate-app E2E
+ * the same morning timed out both attempts at ~22,500ms, leaving the run
+ * "unjudged". Nobody waits on this background call, so both attempts get room.
  */
 export const AUTOMATION_OUTCOME_JUDGE_TIMEOUT_MS = 300_000;
 
@@ -276,14 +276,14 @@ function toolActivityBlock(activity: ObservedToolActivity | undefined): string {
 }
 
 /**
-
-
-
-
-
-
-
-
+ * Steps the host executes itself: trigger, condition and transform are deterministic host
+ * logic; a code step's script was written by a model but the host runs it (and a failed step
+ * may be rewritten by a model and run again — run-graph.ts rewriteFailedCodeStep). No model
+ * acts at run time, so a graph made only of these makes zero tool calls by construction and the
+ * claimed_without_tools inversion below must not read that as a false claim. The judge is told
+ * instead (hostComputedBlock) and still weighs whether the output itself is plausible.
+ * Measured 2026-10-04: every run of One's code-only Toolchain ("reverse a sentence", output
+ * correct) was flipped to error · claimed_without_tools and briefed to the owner as an anomaly.
  */
 const HOST_COMPUTED_NODE_TYPES: ReadonlySet<string> = new Set(["trigger", "code", "condition", "transform"]);
 

@@ -5,7 +5,7 @@
 // Recurrence is a count of distinct runs. What separates a tool from a habit is the evidence:
 //   · a failed episode shows the way not to do it and neither counts nor defines the structure, so a retry after a failure is
 //     never counted twice. Identical successful runs in one conversation minutes apart are NOT retries: a reply flow done for
-//     five posts in a row is five uses;
+//     five posts in a row is five uses (measured: 139 Threads runs in one conversation);
 //   · one surface holds several operations (a site is read, scraped and posted to). Runs on a surface are clustered by how
 //     their steps agree — IDF-weighted steps and step pairs, as in the sentence detector — and each cluster is judged alone;
 //   · the stable structure of a cluster — steps most of its runs share — must contain an action whose selector, script, key or

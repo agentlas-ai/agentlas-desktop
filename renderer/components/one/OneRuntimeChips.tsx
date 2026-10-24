@@ -176,6 +176,7 @@ export function OneRuntimeChips({
         type="button"
         className={styles.composerChip}
         data-one-composer-trigger="model"
+        data-fit-chip="model"
         ref={modelTrigger}
         data-failed={failed ? "true" : undefined}
         disabled={disabled}
@@ -187,7 +188,7 @@ export function OneRuntimeChips({
         onClick={() => toggle("model")}
       >
         {failed ? <IconAlertTriangle size={14} /> : <IconSparkles size={15} />}
-        <span>{modelLabel}</span>
+        <span data-fit-label>{modelLabel}</span>
         <IconChevronDown size={12} />
       </button>
       {runtime && (runtime.efforts?.length ?? 0) > 0 && (
@@ -195,6 +196,7 @@ export function OneRuntimeChips({
           type="button"
           className={styles.composerChip}
           data-one-composer-trigger="effort"
+          data-fit-chip="effort"
           ref={effortTrigger}
           disabled={disabled}
           aria-expanded={menu === "effort"}
@@ -205,7 +207,7 @@ export function OneRuntimeChips({
           onClick={() => toggle("effort")}
         >
           <IconRoute size={15} />
-          <span>{effortLabel}</span>
+          <span data-fit-label>{effortLabel}</span>
           <IconChevronDown size={12} />
         </button>
       )}

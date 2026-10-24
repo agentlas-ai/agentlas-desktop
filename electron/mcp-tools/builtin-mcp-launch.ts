@@ -3,40 +3,40 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+/*
+ * Keyless built-in MCP servers launch from a content-addressed source file, never from source carried in argv.
+ *
+ * The seven built-ins (one-team, agent-mail, workspace-preview, agentlas-turn, agentlas-ui, agentlas-time, cua-driver)
+ * used to ship their whole audited source as compressed base64 in argv: `<execPath> -e BOOTSTRAP PAYLOAD`. argv is a
+ * shared channel with an OS cap. Codex receives every server of a run as `-c mcp_servers.<key>.args=[...]` on ONE
+ * command line (exec, the turn-scoped app-server of browser and Science/Alive grants, Workforce observation, any
+ * executable without thread rebind), and Grok's legacy driver runs `grok mcp add -- <command> <args>`. Windows caps a
+ * whole command line at 32,767 UTF-16 units (CreateProcess) and at 8,191 when the CLI is an npm `.cmd` shim run by
+ * cmd.exe (codex.cmd, grok.cmd).
+ * Measured 2026-10-17 with the real config builder: the seven payloads together were 58,937 argv chars, and an ordinary
+ * One room on Codex (one-team, agentlas-turn, agentlas-ui) put 36,927 chars of `-c` flags on one command line
+ * (Windows: 37,210 of 32,767 for codex.exe, 37,553 of 8,191 through cmd.exe for codex.cmd). After this change: 2,419.
+ *
+ * Each server guarded this with its own budget (4k to 24k) folded into the authenticity predicate. A per-server budget
+ * cannot protect a per-command-line limit, and exceeding it was silent: the launch stopped being authentic and
+ * mcp-config.ts dropped the server from every lane with no log line. One Team stood at 11,831 of 12,000; the next tool
+ * would have removed One's team tools from every room, on every runtime (measured with one extra tool: 12,095, gone
+ * from the Codex, Claude Code and Kimi configs alike).
+ *
+ * Now argv carries a fixed loader and a path: `<execPath> -e LOADER <dir>/<sha256>.cjs`, about 400 chars whatever the
+ * source grows to, so there is no budget and no cliff. The guarantee the argv form gave (PLUGIN-SPEC INV-1: no path
+ * that can be swapped between validation and execution) is kept where it actually came from, the child: the file's
+ * name is the sha256 of the audited source, and LOADER reads the file once into memory, hashes those bytes and runs
+ * exactly those bytes only when the hash is the name, or exits 78. A file replaced after Main validated the launch is
+ * refused by the child, never executed. Main's authenticity is recomputed on every call, never stored (INV-2): this
+ * executable, this server's loader, the canonical path named by this source's digest, and a regular file there holding
+ * exactly the source, rewritten from the signed bundle when it is missing or altered.
+ *
+ * The directory is `~/.agentlas/mcp-builtins` (os.homedir(), the same rule as the materialized browser launcher): Desktop
+ * Main and the daemon derive the same path, so a row one wrote is authentic for the other (the Terminal engine reads the
+ * same rows), and no Electron import is needed (the daemon loads these modules). Files are content-addressed and read-only; a file no
+ * build has used for 30 days is pruned.
+ */
 
 /** Gate assertion only, never part of authenticity: the launch is a fixed loader and a path, independent of the source size. */
 export const BUILTIN_MCP_LAUNCH_ARGV_MAX_CHARS = 4_096;

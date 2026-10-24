@@ -6,6 +6,7 @@ import { configuredNativeGuiOwner } from "./native-gui-startup";
 import { dispatchOnePreflightSteers } from "./preflight-steer-admission";
 import { notifyDaemonRunSettled } from "./daemon-run-alerts";
 import { publishNativeGuiActiveChats, publishNativeGuiInvocationEvent, publishNativeGuiSettled } from "./native-gui-events";
+import { refreshRuntimeAskUserObservations } from "../confirm/ask-user-runtime";
 
 type Channel = object & { dispatch(method: string, params: unknown): Promise<unknown>; onClose(listener: () => void): () => void };
 let legacyChatIds: string[] = [], nativeChatIds: string[] = [], recoveredChatIds: string[] = [];
@@ -51,7 +52,8 @@ export function createNativeGuiPublicBridge(policy: Readonly<{ maxRetainedBytes:
         // The phone bridge, too: it listens to Main's own service, which never sees daemon-hosted runs.
         publishNativeGuiInvocationEvent({ runId, chatId, event });
       },
-      onActiveChats(chatIds) { if (!live()) return; staleChatIds = new Set(); nativeChatIds = [...chatIds]; recoveredChatIds = []; publishActiveChats(); publishNativeGuiActiveChats(nativeChatIds); },
+      onActiveChats(chatIds) { if (!live()) return; staleChatIds = new Set(); nativeChatIds = [...chatIds]; recoveredChatIds = []; publishActiveChats(); publishNativeGuiActiveChats(nativeChatIds);
+        void refreshRuntimeAskUserObservations().catch(()=>{/* Retain uncertain cards until a current source answers. */}); },
       onSettled(settlement) {
         const { runId, chatId } = settlement;
         if (!live()) return;

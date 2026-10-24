@@ -34,7 +34,7 @@ const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(va
  * ("verification_background") runs BEFORE the background verifier starts, and a turn that claimed nothing is verified
  * only that way. The Goal, its revision and its chat are unchanged, so its proof contracts bind exactly as in `running`.
  * Admitting only running|verifying made every such verification inconclusive without a single model call (isolated app
- * run, `criterion_proof_goal_unbound` every time), so a Goal whose plan was done never closed.
+ * 2026-10-20, Finance Work chat: 5 of 5 `criterion_proof_goal_unbound`), so a Goal whose plan was done never closed.
  */
 const PROOF_BINDABLE_STATUSES: readonly string[] = ["running", "verifying", "waiting_tool"];
 function context(goalId: string, invocationRunId: string) {
@@ -75,10 +75,10 @@ function stored(runId: string, contractDigest: string): CriterionProofContract[]
   return value;
 }
 /**
-
-
-
-
+ * Which model classifies proof kinds. The proof contract is an independent judgment about the request, not the turn's
+ * work: it goes to the configured orchestrator judgment pool when one exists, and falls back to the turn's runtime only
+ * when none is configured. Measured (1.2.43 dev E2E, serving goal run_edd3ab50): pinned to the turn's Agentlas Light,
+ * every sub-goal came back "unknown" while codex runs classified the same conditions "file".
  */
 function classificationRoute(turnRuntime: RuntimeSelection): { selectionPolicy: NonNullable<ReturnType<typeof configuredOrchestratorJudgmentPolicy>> } | { runtimeSelection: RuntimeSelection } {
   const policy = configuredOrchestratorJudgmentPolicy();
@@ -188,7 +188,7 @@ export function admissibleCriterionProofRefs(contract:CriterionProofContract,ref
       const receipt = getInvocationRunReceipt(id);
       if (receipt?.status !== 'completed' || receipt.chatId !== captured.goal.chatId
         || !['read','write','full'].includes(receipt.executionPermission ?? '')) return false;
-      
+      // Quiesced (only typed failed-but-finished calls open) is enough to audit permission and folder scope (e160c4c9/97d33c7e).
       try { const read = readInvocationEffectBoundary({invocationRunId:id,expectedChatId:captured.goal.chatId}); return read.effects === 'settled' || read.quiesced === true; }
       catch { return false; }
     });

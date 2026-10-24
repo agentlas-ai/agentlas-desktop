@@ -7,8 +7,9 @@ import type { WorkStartAPI, WorkStartInput, WorkStartOptions, WorkStartReceipt }
 import type { RuntimeSelection, RuntimeStatus } from '../shared/types';
 import { getDb } from './store/db';
 import { createProject, getProject, updateProject } from './store/projects';
-import { createChat, getChat, normalizeChatRuntimeSelection, setChatRuntimeSelection, setChatWorkingFolder } from './store/chats';
+import { createProjectWorkChat, getChat, normalizeChatRuntimeSelection, setChatRuntimeSelection, setChatWorkingFolder } from './store/chats';
 import { normalizeRuntimeSelectionInput, runtimeMatchesSelection, selectionForRuntime } from '../shared/runtime-selection';
+import { bindManagedWorkingSessionScope } from './runtime/session-scope';
 import { getCanonicalTaskForChat } from './store/tasks';
 import { listInstalledAgentsReadOnly } from './mcp/registry';
 import { detectRuntimes } from './runtime/detect';
@@ -59,11 +60,17 @@ function owned(intentId: string, chatId: string): Row {
   if (!row || !chat || chat.projectId !== row.project_id || chat.originSurface !== 'work' || task?.id !== row.task_id) throw new Error('work_start_target_unavailable');
   return row;
 }
+/** Exact durable intent is the provenance for upgrading this specific legacy main, never all project chats. */
+function replayWorkingReceipt(row: Row): WorkStartReceipt {
+  const confirmed = owned(row.intent_id, row.chat_id);
+  bindManagedWorkingSessionScope(getDb(), confirmed.chat_id, { projectId: confirmed.project_id, subSessionId: null }, {kind:"desktop-project"});
+  return receipt(confirmed);
+}
 /** Only persists local project/chat/task intent. Actual provider execution stays in the existing Work send authority. */
 export async function createWorkStart(raw: WorkStartInput, detect = detectRuntimes): Promise<WorkStartReceipt> {
   const input=normalize(raw), digest=createHash('sha256').update(canonical(input)).digest('hex'),db=getDb();
   const prior=db.prepare('SELECT * FROM work_start_intents WHERE intent_id=?').get(input.intentId) as Row | undefined;
-  if (prior) { if (prior.input_digest !== digest) throw new Error('work_start_intent_conflict');return receipt(owned(input.intentId,prior.chat_id)); }
+  if (prior) { if (prior.input_digest !== digest) throw new Error('work_start_intent_conflict');return replayWorkingReceipt(prior); }
   const runtimes=await detect();const requested=input.runtimeSelection?normalizeRuntimeSelectionInput(input.runtimeSelection):undefined;
   const runtime=requested ? runtimes.find(r=>runtimeMatchesSelection(r,requested)) : runtimes.find(r=>r.active);
   if (!runtime || runtime.credentialAccess?.status === 'unavailable' || runtime.signInRequired) throw new Error('work_start_runtime_unavailable');
@@ -72,7 +79,7 @@ export async function createWorkStart(raw: WorkStartInput, detect = detectRuntim
   let createdFolder: string | null = null;
   try { return db.transaction(()=>{
     const replay=db.prepare('SELECT * FROM work_start_intents WHERE intent_id=?').get(input.intentId) as Row | undefined;
-    if (replay) { if (replay.input_digest !== digest) throw new Error('work_start_intent_conflict');return receipt(owned(input.intentId,replay.chat_id)); }
+    if (replay) { if (replay.input_digest !== digest) throw new Error('work_start_intent_conflict');return replayWorkingReceipt(replay); }
     const title=input.prompt.replace(/\s+/g,' ').trim().slice(0,80);
     const project=input.projectId ? getProject(input.projectId) : createProject({name:title,sourceType:'local',agentPool:[]});
     if (!project) throw new Error('work_start_project_unavailable');
@@ -87,7 +94,7 @@ export async function createWorkStart(raw: WorkStartInput, detect = detectRuntim
       if (!metadata.isDirectory() || metadata.isSymbolicLink()) throw new Error('work_start_project_folder_unavailable');
       updateProject(project.id,{folderPath:folder});
     } else if (!fs.existsSync(folder) || !fs.statSync(folder).isDirectory()) throw new Error('work_start_project_folder_unavailable');
-    const chat=createChat({projectId:project.id,agentId:controller.id,title,taskMode:'task',originSurface:'work'});
+    const chat=createProjectWorkChat({projectId:project.id,agentId:controller.id,title});
     if (chat.agentId!==controller.id) throw new Error('work_start_controller_mismatch');
     setChatRuntimeSelection(chat.id,selection,"work-start");setChatWorkingFolder(chat.id,folder);
     const task=getCanonicalTaskForChat(chat.id);if(!task)throw new Error('work_start_task_unavailable');
@@ -102,7 +109,7 @@ export async function createWorkStart(raw: WorkStartInput, detect = detectRuntim
 }
 export function getWorkStart(input: Parameters<WorkStartAPI['get']>[0]): WorkStartReceipt { exactKeys(input,['intentId','chatId']);return receipt(owned(input.intentId,input.chatId)); }
 export function claimWorkStart(input: Parameters<WorkStartAPI['claim']>[0]): { receipt: WorkStartReceipt; claimToken: string | null } {
-  exactKeys(input,['intentId','chatId']);return getDb().transaction(()=>{ const row=owned(input.intentId,input.chatId);if(row.status!=='queued')return {receipt:receipt(row),claimToken:null};if(canonical(getChat(input.chatId)?.runtimeSelection)!==canonical(storedPin(row.runtime_selection_json)))throw new Error('work_start_runtime_binding_changed');const token=randomUUID();getDb().prepare("UPDATE work_start_intents SET status='claimed',claim_token=?,updated_at=? WHERE intent_id=? AND status='queued'").run(token,new Date().toISOString(),row.intent_id);return {receipt:receipt(owned(input.intentId,input.chatId)),claimToken:token}; }).immediate();
+  exactKeys(input,['intentId','chatId']);return getDb().transaction(()=>{ const row=owned(input.intentId,input.chatId);replayWorkingReceipt(row);if(row.status!=='queued')return {receipt:receipt(row),claimToken:null};if(canonical(getChat(input.chatId)?.runtimeSelection)!==canonical(storedPin(row.runtime_selection_json)))throw new Error('work_start_runtime_binding_changed');const token=randomUUID();getDb().prepare("UPDATE work_start_intents SET status='claimed',claim_token=?,updated_at=? WHERE intent_id=? AND status='queued'").run(token,new Date().toISOString(),row.intent_id);return {receipt:receipt(owned(input.intentId,input.chatId)),claimToken:token}; }).immediate();
 }
 export function settleWorkStart(input: Parameters<WorkStartAPI['settle']>[0]): WorkStartReceipt {
   exactKeys(input,['intentId','chatId','claimToken','accepted']);if(!UUID.test(input.claimToken)||typeof input.accepted!=='boolean')throw new Error('work_start_settlement_invalid');

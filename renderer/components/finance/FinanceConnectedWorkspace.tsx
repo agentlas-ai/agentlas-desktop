@@ -1,16 +1,25 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import dynamic from "next/dynamic";
 import { ipc } from "@/lib/ipc";
 import { navigate } from "@/lib/navigation";
 import { financeStore } from "@/lib/finance-store";
 import { useT } from "@/lib/i18n";
 import { FinanceWorkspace, type FinanceAIContext } from "./FinanceWorkspace";
-import { FinanceWorkChat } from "./FinanceWorkChat";
-import { WorkChatDraftContext, type WorkChatDraftRequest } from "@/components/TaskCockpit";
+import { WorkChatDraftContext, type WorkChatDraftRequest } from "@/lib/work-chat-draft";
 import type { FinanceAPI } from "@shared/finance";
 import type { FinanceAnalystRequest } from "@shared/finance-analysts";
 import type { FinanceExperienceRequest } from "@shared/finance-experience";
+
+function FinanceChatLoading() {
+  const { locale } = useT();
+  return <p role="status" style={{ padding: 24 }}>{locale === "ko" ? "Finance 대화를 여는 중…" : "Opening Finance conversations…"}</p>;
+}
+const FinanceWorkChat = dynamic(() => import("./FinanceWorkChat").then(module => module.FinanceWorkChat), {
+  ssr: false,
+  loading: FinanceChatLoading,
+});
 
 function assertNotCancelled(signal: AbortSignal): void {
   if (signal.aborted) throw new DOMException("Cancelled", "AbortError");

@@ -10,10 +10,9 @@ import { assertScienceRecoveryRequest } from "../science-host/recovery-authority
 // 늘리면 두 곳이 갈라진다.
 //
 // `--mode ask`(읽기 전용)는 아래 거절을 풀지 못한다: 저 거절은 "읽기 전용"이 아니라
-// **도구 0개**(untrustedNoTools)와 **릴리스 검증된 파일시스템 경계**
-// (restrictedReadBoundary)를 요구한다. ask 모드는 읽기 도구를 그대로 갖고 있어
-// 둘 중 어느 것도 만족시키지 못한다. 권한→모드 매핑은 ACP 경로의 session/set_mode 가
-// 맡는다(read → plan/ask).
+// **도구 0개**(untrustedNoTools)를 요구한다. ask 모드는 읽기 도구를 그대로 갖고 있다.
+// 읽기 전용 자동화(restrictedReadBoundary)는 거절하지 않는다 — 설정된 read 권한으로 돈다(--force 없음).
+// 권한→모드 매핑은 ACP 경로의 session/set_mode 가 맡는다(read → plan/ask).
 import path from "node:path";
 import { RuntimeJudgmentRefusal } from "./judgment-refusal";
 import { StringDecoder } from "node:string_decoder";
@@ -45,6 +44,12 @@ const CANDIDATES = [
   // mistaken for Cursor.
   path.join(os.homedir(), ".local", "bin", "agent"),
   "agent",
+  // Native Windows: the official PowerShell installer (irm 'https://cursor.com/install?win32=true' | iex) puts
+  // cursor-agent.cmd in %LOCALAPPDATA%\cursor-agent and adds that folder to the user PATH, which this already
+  // running app does not see until it restarts.
+  ...(process.platform === "win32"
+    ? [path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local"), "cursor-agent", "cursor-agent.cmd")]
+    : []),
 ];
 
 function isGenericAgentCandidate(candidate: string): boolean {
@@ -250,9 +255,9 @@ async function runCursorTurn(req: RunnerRequest, events: RunnerEvents, dispatch:
   }
 
   // Cursor print mode exposes built-in file/shell tools and currently has no
-  // verified zero-tool switch. Browser-originated and restricted invocations
-  // must therefore fail before probing or spawning the CLI.
-  if (req.untrustedNoTools || req.restrictedReadBoundary) {
+  // verified zero-tool switch. Browser-originated no-tools invocations must
+  // therefore fail before probing or spawning the CLI.
+  if (req.untrustedNoTools) {
     // 표식을 단다 — 판정이 전멸했을 때 "기다리면 풀리는 사유"와 구분되어야 한다.
     throw new RuntimeJudgmentRefusal(
       "cursor",

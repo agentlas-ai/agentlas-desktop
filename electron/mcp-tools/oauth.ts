@@ -33,6 +33,7 @@ import {
 
 import { deleteSecret, readSecret, secretPresence, setSecret, type CredentialPresence } from "../secrets/vault";
 import { userDataPath } from "../runtime-paths";
+import { externalOpenSuppressedForTest, noteSuppressedExternalOpen } from "../external-open-test-guard";
 
 /** 발견·등록·토큰의 만료 없는 부분. 값(토큰)은 별도 시크릿에 둔다. */
 export interface McpOAuthSession {
@@ -59,7 +60,7 @@ interface StoredTokens {
 const DISCOVERY_TIMEOUT_MS = 10_000;
 const TOKEN_TIMEOUT_MS = 15_000;
 /** 사람이 브라우저에서 동의를 마칠 때까지 기다리는 시간. */
-
+// Long enough to switch to another browser window and sign in before approving (owner 2026-10-17 missed 5 min).
 const AUTHORIZE_TIMEOUT_MS = 10 * 60_000;
 /** 만료 직전에 미리 갱신하는 여유. 실행 도중 만료돼 호출이 깨지는 것을 막는다. */
 const REFRESH_SKEW_MS = 60_000;
@@ -422,16 +423,18 @@ async function metadataDocumentClient(rawUrl: string): Promise<{ clientId: strin
 }
 
 /**
-
-
-
-
-
-
-
+ * 인가 URL을 사용자의 기본 브라우저로 연다.
+ *
+ * 오너 실측(2026-10-17, ElevenLabs): Agentlas 전용 Chrome(자동화 프로필, 원격 디버깅)으로 열면 평소 로그인
+ * 쿠키가 없고, Google 로그인은 원격 디버깅 브라우저를 거절해 "로그인 아예 안 됨"이 됐다. 같은 URL을 기본
+ * 브라우저로 열자 이미 로그인된 탭에서 바로 승인됐다. Claude Code·Codex·Gemini CLI·OpenCode 도 OAuth 를
+ * 시스템 기본 브라우저와 loopback redirect 로 연다. 데몬처럼 Electron 이 없는 호스트에서는 OS 오프너를 쓴다.
+ * 열지 못하면 false — 시작 응답의 manualUrl 링크가 그대로 남는다. 자동 시험 장비가 AGENTLAS_E2E_NO_OPEN_EXTERNAL=1 로
+ * 열기를 끄면 열지 않고 false 를 돌려주며 URL 의 origin 과 경로만 기록한다.
  */
-async function openInDefaultBrowser(url: string): Promise<boolean> {
+export async function openInDefaultBrowser(url: string): Promise<boolean> {
   if (!/^https:\/\//i.test(url)) return false;
+  if (externalOpenSuppressedForTest()) { noteSuppressedExternalOpen(url); return false; }
   try {
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const electron = require("electron") as typeof import("electron") | string;
@@ -499,15 +502,15 @@ const activeAuthorizations = new Map<string, AuthorizationAttempt>();
 const startingAuthorizations = new Set<string>();
 
 /**
-
-
-
-
-
-
-
-
-
+ * Sign-in attempt status shared between the window and the background service (flow audit 2026-10-18, I-D7).
+ *
+ * An attempt lived only in the memory of the process that started it. A daemon turn's harness auth.login opened the
+ * sign-in, and Main's poll (mcpTools:oauthPoll) answered "unknown" for it; a sign-in opened from Main's settings could
+ * not be cancelled by a daemon turn's auth.cancel. The owning process now publishes each status change to a small
+ * value-free file (server id, attempt id, status, a fixed error sentence, owner pid, times; never a code, token or
+ * URL), and another process reads it when the attempt is not its own. A cancel from another process is a marker file
+ * the owner picks up within a second. A record whose owner process is gone, or that stopped moving past the consent
+ * window, reads as "unknown" again (the answer before this change).
  */
 const SHARED_ATTEMPT_DIR = "mcp-oauth-attempts";
 const SHARED_ATTEMPT_ID = /^[a-f0-9]{48}$/;
@@ -746,7 +749,7 @@ async function beginMcpOAuthAuthorization(input: McpOAuthAuthorizationInput): Pr
         await closeAuthorizationCallback(callbackServer);
         attempt.finishedAt = Date.now();
         publishSharedAttempt(attempt);
-        
+        // An approval that never reached Agentlas left nothing to read (owner 2026-10-17); say what happened.
         console.info(`[mcp-oauth] ${input.serverId.slice(0, 8)} ${attempt.status}${attempt.status === "connected" ? "" : ` (${oauthFailureReason(attempt.status, failure)})`}`);
         if (activeAuthorizations.get(input.serverId) === attempt) activeAuthorizations.delete(input.serverId);
       }

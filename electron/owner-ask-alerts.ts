@@ -1,6 +1,6 @@
 /*
  * One typed seam for "an AI asked the owner and is waiting for the answer" that did not come out of a run's own settlement
- * A model-authored card rings through the run's settlement
+ * (owner 2026-10-20: "묻는건 무조건 카드로 주고 알림 울리게해"). A model-authored card rings through the run's settlement
  * (run-alerts onSettled → pendingQuestion, the phone's final-message push). A card the HOST writes — the AGI monitor's
  * ask — has no such settlement, so it reports here and every listener rings the same way: Main's desktop alert, the
  * phone push. No electron import: gates load this file directly.

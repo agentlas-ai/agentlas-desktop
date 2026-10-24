@@ -12,6 +12,7 @@ import {
   PROJECT_MEMORY_DIR,
 } from "../architecture/manifest";
 import { runHephaestus, type HephaestusResult } from "../hephaestus/engine";
+import { coreVerifyFailureDetail } from "./verify-detail";
 import { ensureProjectMemory, refreshProjectSitemap } from "../memory/project-files";
 import { readDiscoveredProjectPmTextFiles } from "../memory/project-artifacts";
 import { getProject } from "../store/projects";
@@ -1285,9 +1286,7 @@ function verifyPayload(value: unknown): CoreVerifyPayload {
   const payload = asRecord(value);
   if (!payload) throw new Error("Core ontology verify returned an invalid payload.");
   if (payload.status !== "pass" || payload.integrity_check !== "ok") {
-    throw new Error(
-      `Core ontology verification failed (status=${String(payload.status)}, integrity=${String(payload.integrity_check)}).`,
-    );
+    throw new Error(`Core ontology verification failed (${coreVerifyFailureDetail(payload)}).`);
   }
   return payload as CoreVerifyPayload;
 }
@@ -1389,12 +1388,12 @@ const ingestFailureBackoff = new Map<string, { failures: number; retryAt: number
 const INGEST_FAILURE_BACKOFF_BASE_MS = 10 * 60_000;
 const INGEST_FAILURE_BACKOFF_MAX_MS = 6 * 60 * 60_000;
 
-
-
-
-
-
-
+/*
+ * Only the background ingest calls this; no turn awaits it (review 2026-10-16, desktop-b-04). A failed ingest (no
+ * Python, nothing ingestible) is not re-run on every turn: the next attempt for that folder waits 10 minutes, doubling
+ * up to 6 hours, kept in memory for this process. The work starts on a later tick so its synchronous index walk is not
+ * charged to the turn that asked for it.
+ */
 async function ensureWorkingFolderOntologyReady(projectFolder: string, signal?: AbortSignal): Promise<WorkingFolderOntologyRuntime> {
   const projectPath = fs.realpathSync.native(projectFolder);
   const existing = workingFolderQueues.get(projectPath);
@@ -1943,9 +1942,9 @@ export async function queryWorkingFolderOntologyContext(
   });
   if (!question) return empty("empty_query");
 
-  
-
-
+  // A turn never awaits an ingest (review 2026-10-16, desktop-b-04): a writable turn used to wait for the full
+  // `ontology auto` run (up to 180 s, not cancellable) before the model was dispatched. It now queries what the DB
+  // already holds, like a read-only turn, and refreshes the DB in the background for the next turn.
   if (!options.readOnly) ingestWorkingFolderOntologyInBackground(projectFolder, options.signal);
   let runtime: WorkingFolderOntologyRuntime;
   try {

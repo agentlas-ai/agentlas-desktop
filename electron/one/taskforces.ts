@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { bindOneTaskforceSessionScope } from "../runtime/session-scope";
 import type {
   CreateOneTaskforceInput,
   OneTaskforce,
@@ -167,6 +168,7 @@ export function createOneTaskforce(input: CreateOneTaskforceInput): OneTaskforce
     const seatId = ensureGroupSeatForTaskforce({ taskforceId: id, title, memberAgentIds, createdAt: now });
     getDb().prepare("UPDATE chats SET seat_id = ? WHERE id = ?").run(seatId, chat.id);
     applySeatSnapshotToChats(seatId);
+    bindOneTaskforceSessionScope(getDb(),chat.id);
   }).immediate();
   emitTaskforceChanged(id);
   return toTaskforce(rowFor(id));
@@ -203,6 +205,7 @@ export function updateOneTaskforce(input: UpdateOneTaskforceInput): OneTaskforce
     getDb().prepare("UPDATE chats SET seat_id = ? WHERE id = ? AND (seat_id IS NULL OR seat_id <> ?)").run(seatId, row.chat_id, seatId);
     renameSeat(seatId, title);
     syncGroupSeatOccupants(seatId, memberAgentIds);
+    bindOneTaskforceSessionScope(getDb(),row.chat_id);
   }).immediate();
   emitTaskforceChanged(id);
   return toTaskforce(rowFor(id));
@@ -260,9 +263,9 @@ export function oneTaskforceRemovalPreview(input: { id: string }): { sessionCoun
  * The caller owns the reservation transaction; no provider runs here.
  */
 export function ensureOneTaskforceForPreflight(input: { chatId: string; memberAgentIds: string[] }): OneTaskforceReceipt {
-  
-
-
+  // A member whose last task failed still takes new work in a room the owner composed; the failure stays on record.
+  // Refusing it blocked every message in that room for good (production 2026-10-11, room "Yotube": a teammate
+  // failed on 10-05, each send died in team preparation with one_group_member_unavailable).
   return ensureOneTaskforceForChat(input, true);
 }
 

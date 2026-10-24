@@ -1,19 +1,19 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+// The MCP servers an ACP turn binds, made self-contained, and the resident-process identity they imply.
+//
+// Main's MCP config (mcp-config.ts) carries per-invocation secrets as opaque aliases: a stdio entry names
+// `AGENTLAS_MCP_SECRET_<32 hex>` in its env with the value `${AGENTLAS_MCP_SECRET_<32 hex>}`, a remote entry puts
+// `Bearer ${…}` in a header or `${…}` as its url, and Main merges the alias values into the runner env. Claude Code
+// expands those references from its own env; ACP agents do not. Measured 2026-10-16 with the installed Grok Build
+// 1.0.51 and Kimi Code 0.28.0 (a fake stdio MCP server logging its env): an ACP `mcpServers` env pair
+// `NAME="${NAME}"` reaches the server as the literal text `${NAME}`, even when the agent's own env holds NAME. So every
+// keyed MCP server on an ACP lane received a placeholder instead of its credential, and the per-run alias values had to
+// live in the agent process env, which put them into the resident-pool key (a new process every turn).
+//
+// Here the references are resolved inline from the turn's env (the same structural resolution prepared-transport.ts
+// applies to native task browser configs), the alias names leave the agent's spawn env, and the turn's table gets two
+// digests: the grant (server names) and the table (resolved content). A process that can rebind its servers in place
+// is keyed on the grant and rebound each reused turn; any other is keyed on the table, so it is reused only when the
+// table is byte-identical (no per-invocation handle).
 import { createHash } from "node:crypto";
 
 /** mcp-config.ts mcpRuntimeSecretAlias: an opaque per-server name whose value is a vault secret or a per-run capability. */

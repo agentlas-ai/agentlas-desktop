@@ -8,8 +8,8 @@
  * The same impediment is one incident even when its digest moves: an open incident of the same group (goal, cause,
  * tactic) takes the new digest instead of being closed for a new row, so its attempts, reflections and retry history
  * carry on. While the Goal's own work or the host scheduler holds it (a turn in flight, a registered wake), an open
- * incident is held, not resolved and reopened (stall incidents used to be closed "running" about a minute after opening
- * while a teammate turn ran, and opened again for the next one).
+ * incident is held, not resolved and reopened (production 2026-10-13..20: 257 incidents in 7 days for one Goal, 149
+ * of them stall_detected closed "running" about a minute after opening while a teammate turn ran).
  *
  * Main-owned side table (created lazily, like the alive_* tables). Host facts only; no prose from a model is stored
  * as a fact, reflections are typed codes plus short evidence refs.

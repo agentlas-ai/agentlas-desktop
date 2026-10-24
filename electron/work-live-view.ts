@@ -161,24 +161,24 @@ export function reclaimOrphanAgentBrowserTabs(ownerId?: number): number {
 }
 
 /**
-
-
-
-
-
-
-
-
-
-
-
+ * The tab to close so a new one can open, least valuable first: an
+ * agent-opened tab, then an owner tab still on about:blank, then any owner tab
+ * — each least-recently-used, and never one the owner is looking at or a live
+ * run is driving.
+ *
+ * ★Owner tabs used to be exempt. The cap of 8 is per window across every
+ * chat, and each chat whose Browser panel was ever shown keeps a tab, so a day
+ * of normal use left 8 tabs the owner could not see from the current chat and
+ * no run could open one (production 1.2.49, 2026-09-28 14:13Z: a Threads goal
+ * turn refused with native-browser-tab-limit while nothing was on screen).
+ * A closed owner tab only loses its page; the chat's panel reopens its page.
  */
 /**
-
-
-
-
-
+ * A tab a live run drives is not taken from that run by anyone else. The run asking for a new tab may give up its
+ * own least recently used one, though: a continuous Goal run opened a tab per source it checked and went back to its
+ * first tab without closing them, filled all 8 within one run, and then could neither open a tab nor have one
+ * evicted, so the browser ladder stopped the Goal (production 2026-10-05 17:46 UTC, Thread Marketing, defect
+ * browser_unavailable:browser_ladder:native-tab-limit). Its working tab is the one it used last, so it stays.
  */
 function heldOnlyBy(active: ActiveWorkView, holdId: string | undefined): boolean {
   if (!holdId || !holdLive(holdId)) return false;
@@ -476,10 +476,10 @@ function setOwnerGuestVisible(active: ActiveWorkView, visible: boolean): void {
 }
 
 /**
-
-
-
-
+ * Main-only: how long ago this guest last changed host or size. Chromium drops
+ * mouse input that arrives while a view is being re-hosted or resized: an
+ * agent's first click on a tab the Browser panel was just switching to never
+ * reached the page (measured 2026-09-29: no mousedown at all, keys fine).
  */
 export function nativeBrowserGuestLayoutAge(ownerId: number, taskScopeId: string, viewId: string): number {
   const active = registeredGuest(ownerId, viewId, taskScopeId);
@@ -962,15 +962,15 @@ export async function openWorkLiveView(input: {
   });
   view.webContents.setWindowOpenHandler(({ url: target }) => {
     if (active.mode === "browser" && active.taskScopeId && permittedNavigation(active, target)) {
-      
-
-
-
-
-
-
-
-
+      // A popup becomes another task-scoped tab. The untrusted page never gets
+      // a child BrowserWindow or a reference to the Agentlas renderer.
+      // A popup opened while a run drives this tab belongs to that run.
+      //
+      // ★The tab adopts the popup's own WebContents instead of loading the
+      // URL in a fresh one. A fresh tab had no window.opener, so sign-in
+      // popups (OAuth "Sign in with Google" and similar) could never post
+      // their result back to the page that opened them, and the agent's CDP
+      // client never saw the popup at all (measured 2026-09-29).
       const opener = [...active.holds].find(holdLive);
       const taskOwner = taskFor(active.ownerId, active.taskScopeId);
       if (!taskOwner || taskOwner.window.isDestroyed() || !ensureBrowserTabCapacity(active.ownerId)) return { action: "deny" };

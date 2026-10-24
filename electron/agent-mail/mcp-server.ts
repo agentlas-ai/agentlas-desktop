@@ -167,12 +167,30 @@ function companyLaunch(allowedNames: readonly string[]) {
     // dispatch allowlist differ; Main repeats its opaque effect gate for each call.
     const source = SOURCE.replace("const tools = [", "const allTools = [")
       .replace("function handle(requestValue) {", `const companyAllowedNames = new Set(${JSON.stringify(names)});\nconst tools = allTools.filter(tool => companyAllowedNames.has(tool.name));\nfunction handle(requestValue) {`)
+      .replace("const MAX_REQUEST_BYTES = 512 * 1024;", `const MAX_REQUEST_BYTES = 512 * 1024;
+function companyRequestTimeoutMs() {
+  const expiresAt = process.argv[2];
+  const expiry = Date.parse(expiresAt);
+  if (!Number.isFinite(expiry) || new Date(expiry).toISOString() !== expiresAt || expiry <= Date.now()) throw new Error("company_work_policy_expired");
+  return Math.max(1, Math.min(180000, expiry - Date.now()));
+}`)
+      .replace("  return new Promise((resolve, reject) => {\n    const req = http.request", "  return new Promise((resolve, reject) => {\n    const timeoutMs = companyRequestTimeoutMs();\n    const req = http.request")
+      .replace("timeout: 90000", "timeout: timeoutMs")
+      .replace('    req.once("timeout",', '    const deadline = setTimeout(() => req.destroy(new Error("Agent mail request timed out.")), timeoutMs);\n    req.once("close", () => clearTimeout(deadline));\n    req.once("timeout",')
       .replace("const name = requestValue.params && requestValue.params.name;", "const name = requestValue.params && requestValue.params.name; if (!companyAllowedNames.has(name)) throw new Error('organization-mail-operation-denied');");
     launch = defineBuiltinMcpLaunch("agentlas-company-agent-mail", source); companyLaunches.set(key, launch);
   }
   return launch;
 }
-export function companyAgentMailMcpLaunchArgs(allowedNames: readonly string[]): string[] { return companyLaunch(allowedNames).launchArgs(); }
-export function isAuthenticCompanyAgentMailMcpLaunch(command: string | null, args: readonly string[], allowedNames: readonly string[]): boolean {
-  return command === process.execPath && companyLaunch(allowedNames).isAuthenticArgs(args);
+function companyPolicyExpiry(value: string): boolean {
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) && new Date(parsed).toISOString() === value;
+}
+export function companyAgentMailMcpLaunchArgs(allowedNames: readonly string[], policyExpiresAt: string): string[] {
+  if (!companyPolicyExpiry(policyExpiresAt) || Date.parse(policyExpiresAt) <= Date.now()) throw Error('company_work_policy_expired');
+  return [...companyLaunch(allowedNames).launchArgs(), policyExpiresAt];
+}
+export function isAuthenticCompanyAgentMailMcpLaunch(command: string | null, args: readonly string[], allowedNames: readonly string[], policyExpiresAt: string): boolean {
+  return command === process.execPath && companyPolicyExpiry(policyExpiresAt) && Date.parse(policyExpiresAt) > Date.now()
+    && args.length === 4 && args[3] === policyExpiresAt && companyLaunch(allowedNames).isAuthenticArgs(args.slice(0, 3));
 }

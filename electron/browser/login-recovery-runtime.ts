@@ -28,10 +28,10 @@ import {
   type TargetedImportReport,
 } from "./login-recovery";
 
-
-
-
-
+// Lazy on purpose: the background service runs the result-boundary login-wall check (mcp/client) and has no
+// `electron` module. A top-level import failed every daemon-run browser and computer-use result with
+// MODULE_NOT_FOUND (production 1.3.5, 2026-10-12, diagnostics/mcp-proxy.log result_withheld). Only Main reaches
+// the session calls below; the daemon goes through the native grant's broker first.
 const electronSession = {
   fromPartition: (partition: string): Session => (require("electron") as typeof import("electron")).session.fromPartition(partition),
 };

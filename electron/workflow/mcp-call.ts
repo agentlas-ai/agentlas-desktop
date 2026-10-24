@@ -92,12 +92,12 @@ export interface GraphMcpCallResult extends McpInvocationResult {
 }
 
 /**
-
-
-
-
-
-
+ * The Agentlas Browser binding refuses a gated config without an owner scope
+ * (`browser-approval-scope-missing`, required since 1.2.28). Both graph paths below were added in
+ * 1.2.54 without one, so every graph inventory or call that touched the browser failed — and One
+ * read the machine code as "the owner must approve read access" and asked for an approval that
+ * does not exist (production X room, 2026-10-03: 143 repeated questions). The scope is the chat the
+ * graph acts for; an automation session that was not opened from One belongs to Work.
  */
 function graphBrowserApprovalScope(chatId: string): BrowserApprovalScope {
   const surface = getChat(chatId)?.originSurface === "one" ? "one" : "work";
@@ -149,9 +149,9 @@ export function graphMcpToolNeverReadOnly(catalogId: string, toolName: string): 
 }
 
 /**
-
-
-
+ * Save-time twin of the effect check in runGraphMcpCall. Production 2026-10-05: a room agent saved a Toolchain whose
+ * read step called agentlas-browser browser_run_code_unsafe; the run refused it (graph_mcp_effect_mismatch) on 5 of 5
+ * calls because nothing checked the declared effect when the graph was saved.
  */
 export function graphMcpEffectProblems(graph: Pick<WorkflowGraph, "nodes">, locale: "ko" | "en"): Array<{ nodeId: string; reason: string }> {
   const problems: Array<{ nodeId: string; reason: string }> = [];

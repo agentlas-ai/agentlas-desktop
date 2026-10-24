@@ -1,25 +1,25 @@
 /**
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+ * What an automation run did, read from the host's tool ledger — never from the model's prose.
+ *
+ * Owner 2026-09-28 ("자동화로 뭐 했다고 챗에 나와야 하는 거 아니냐"): the Threads automation was posting
+ * replies while its chat showed only a failed turn, and the report that landed later was the model's own
+ * sentence. The outward counts here come only from `mcp_tool-use` ledger rows the host wrote while the run
+ * was executing (tool name, the element label the runtime clicked, the URL it navigated to, the error flag).
+ *
+ * Rules:
+ *  - The runtime reports one call twice (requested, then completed). Rows with the same node, tool call id
+ *    and arguments are one call; the last row's error flag wins.
+ *  - Host preflight lookups and supervisor notices (shared/tool-activity.ts) are not work and are dropped.
+ *  - An outward action COUNTS only from a typed effect: the `effect` argument the model declared on a browser
+ *    click (reply/post/repost/like/follow/message, or send/publish/delete/payment) on a successful completed
+ *    call, or the exact operation `browser_file_upload`. Typed text is a draft, not an effect; only its length
+ *    is kept. (Owner rule 2026-10-13: the host never decides meaning from the words of a label or tool name.)
+ *  - A label/tool-name guess (an unlabeled click on a "답글 게시" control, a `send_email` tool) is never a count.
+ *    It is kept apart as `outwardEstimate` (an observation estimate) and makes the coverage "unknown", so a
+ *    quiet-run decision can never rest on it.
+ *  - Unknown shapes are never promoted to outward counts. They stay visible as plain action rows.
+ *
+ * Pure: Main (IPC digest), the renderer and the phone bridge can all call it.
  */
 import { couldHaveChangedTheOutsideWorld, isHostPreflightTool, isHostSupervisorNotice } from "./tool-activity";
 import { classifyTool, isCommandTool } from "./tool-taxonomy";

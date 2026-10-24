@@ -4,18 +4,18 @@ import { BUILTIN_MCP_LAUNCH_ARGV_MAX_CHARS, defineBuiltinMcpLaunch } from "../mc
 import { MEMORY_KINDS, MEMORY_SCOPES } from "../architecture/manifest";
 import { FINANCE_MONITOR_RUN_TIMEOUT_MS } from "../../shared/finance";
 
-  
-                                                                                                                     
-                                                                                                                       
-                                                                                                                    
-                                                                                                            
-  
-                                                                                                                      
-                                                                        
-  
-                                                                                                                      
-                                                                                                              
-   
+/*
+ * agentlas-turn: per-run built-in MCP server holding the typed replacements for the text control blocks a model used
+ * to append to its reply (owner 2026-10-13: "we do not depend on prompts"). The child holds no authority: each call is
+ * forwarded to Main's loopback control server (control-server.ts), which re-checks the run capability and feeds the
+ * SAME pipeline the parsed block fed. The text parsers stay as the fallback for runtimes without this tool.
+ *
+ * Tools now: memory_note (replaces the `## Memory Events` envelope; the per-turn receipt/turn_summary is host-built),
+ * ask_form (replaces the `<<agentlas-ask>>` block; attended runs only).
+ *
+ * Must not import electron (the daemon loads it). The audited source launches through a file the child checks for its
+ * exact length and hash before running it (same contract as every built-in, mcp-tools/builtin-mcp-launch.ts).
+ */
 export const AGENTLAS_TURN_CATALOG_ID = "agentlas-turn";
 export const AGENT_TURN_CONTROL_ENV = "AGENTLAS_TURN_CONTROL_FILE";
 export const AGENTLAS_TURN_TOOL_NAMES = ["memory_note", "goal_wait", "goal_complete", "goal_tactic", "goal_plan_op", "goal_kpi", "ask_form", "harness_search", "harness_describe", "harness_call"] as const;
@@ -27,7 +27,10 @@ export const TURN_TOOLS_GOAL = ["memory_note", "goal_wait", "goal_complete", "go
 /** Attended runs (a person can answer) also get ask_form; unattended and mobile-durable runs never list it. */
 export const TURN_TOOLS_ASK = ["memory_note", "ask_form"] as const;
 export const TURN_TOOLS_GOAL_ASK = ["memory_note", "goal_wait", "goal_complete", "goal_tactic", "goal_plan_op", "goal_kpi", "ask_form"] as const;
-export function turnToolsFor(goal: boolean, ask: boolean): readonly string[] {
+/** A canonical owner may offer condition waiting without Work Goal completion or plan mutation. */
+export const TURN_TOOLS_WAIT = ["goal_wait"] as const;
+export function turnToolsFor(goal: boolean, ask: boolean, waitOnly = false): readonly string[] {
+  if (waitOnly) return TURN_TOOLS_WAIT;
   return [...(goal ? (ask ? TURN_TOOLS_GOAL_ASK : TURN_TOOLS_GOAL) : (ask ? TURN_TOOLS_ASK : TURN_TOOLS_BASE)), ...TURN_TOOLS_HARNESS];
 }
 /** The plan tools replace the `<<agentlas-tactic>>` / `<<agentlas-plan-op>>` / `<<agentlas-kpi>>` marker lines. */
@@ -41,7 +44,7 @@ export const GOAL_WAIT_CONDITIONS = ["terminal", "changed", "due"] as const;
 export const MEMORY_NOTE_SCOPES = MEMORY_SCOPES.filter((scope) => scope !== "agent_team");
 const idString = { type: "string", maxLength: 500 };
 
-                                                                                                                  
+// Tool definitions are prompt tokens too (owner 2026-10-13): the schema carries the enums, the host validates and
 // screens; the description says only what the schema cannot.
 export const MEMORY_NOTE_DESCRIPTION =
   "Save one durable learning to curated memory. content in English; owner wording in content_native; no secrets.";
@@ -572,29 +575,42 @@ export const AGENTLAS_TURN_TOOLS = ([
 ] as const).map(tool => {
   purposePrompt([{ id: `tool.agentlas-turn.${tool.name}.schema`, revision: 1, stability: "fixed-policy", changeTriggers: ["release"], text: JSON.stringify(tool.inputSchema) }]);
   return { ...tool, description: purposePrompt([
-  
-
-
+  // revision 3 (2026-10-17): harness_call names media.listen. Dev replay r06 stopped before upload on the owner's "직접 청취"
+  // gate with the host listening port unused; real-model A/B (claude sonnet low, codex gpt-6.1-sol; 8 runs per arm) called it
+  // 8/8 with this line and 0/8 without (/tmp/prompt-audit/listen-ab).
   { id: `tool.agentlas-turn.${tool.name}.description`, revision: tool.name === "harness_call" ? 3 : 2, stability: "fixed-policy", changeTriggers: ["release"], text: tool.description },
 ]) };
 });
 
-
-
-
-
-
-
-
-
-
-
-
+// MCP server instructions: Claude Code defers MCP tool definitions (ToolSearch), so a teammate sees only the names
+// harness_search/harness_describe/harness_call, never the harness_call menu. Dev replay r08 (2026-10-17): Film Production
+// Director (claude-code) wrote "I cannot listen to the audio", recorded its QA as FAIL and the run uploaded nothing, with
+// media.listen unused. Claude Code shows server instructions in its system prompt even when tools are deferred. Real-model
+// A/B in that channel (claude sonnet low, product Claude home, ENABLE_TOOL_SEARCH=true; /tmp/prompt-audit/listen-ab2):
+// media.listen was called in 0/6 runs without this line and 5/6 with it. Sent only while harness_call is one of this run's tools.
+// Second line (2026-10-17): the live document ports (document.open/apply/save, live-document/ports.ts). Same channel, same A/B
+// method, task "change paragraph 2 of report.docx and save" (/tmp/prompt-audit/doc-ab): without the line a script rewrote the file
+// in 8/8 runs and document.* was never called; a descriptive line ("document.open edits ... live in the Document tab") changed
+// nothing (0/8); this imperative line called document.open/apply/save in 8/8 and no run rewrote the file by script. Control task
+// (summarise report.docx into summary.txt, no edit): document.* called 0/4 with and 0/4 without the line.
+// Revision 2 (2026-10-23): "an existing file". A new deck is designed in code (document.deck.build); that instruction is the
+// system prompt's `deck:` line (runtime/prompt-modules.ts), because this text is the same for every runtime and the capability
+// table (shared/deck-capability.ts) decides per runtime whether a new deck goes to code or stays on document.create + ops.
+// Third line (2026-10-23): the Reach ports (reach.map/app/describe/invoke, reach-host/ports.ts): apps installed on this computer.
+// Real-channel A/B (claude sonnet low, ENABLE_TOOL_SEARCH=true, isolated config dir, this real server + the real harness dispatcher over a
+// fake app world; scripts/test-reach-real-channel-ab.cjs, N=4 per cell): without the line a task in an app that is not named by a
+// document or a dialog was done through reach.* in 5/16 runs (set a cell 0/4, export 0/4, print dialog 4/4, "which apps can you use" 1/4;
+// the set-a-cell runs went to osascript 4/4); with this imperative line 16/16 and no osascript in 15/16. Controls: a translation request
+// called reach.* 0/4 either way, and "explore 1Password" (off limits) never reached reach.explore in 4/4 either way (the port refuses it).
+// Local models (ollama, 8 per cell): gpt-oss:20b reach use 1/48 -> 17/48 and qwen3:30b-a3b 0/48 -> 28/48 over the tasks, with few
+// completed tasks (small models); the line is not what limits them.
 const AGENTLAS_TURN_INSTRUCTIONS = purposePrompt([
   { id: "tool.agentlas-turn.server-instructions", revision: 1, stability: "fixed-policy",
     changeTriggers: ["release"], text: "harness_call media.listen hears a local audio or video file for you." },
-  { id: "tool.agentlas-turn.server-instructions.document", revision: 1, stability: "fixed-policy",
-    changeTriggers: ["release"], text: "When asked to change a local xlsx/docx/pptx/hwpx/hwp file, use harness_call document.open, then document.apply and document.save: the owner watches the edit in the Document tab. Do not rewrite the file with a script." },
+  { id: "tool.agentlas-turn.server-instructions.document", revision: 2, stability: "fixed-policy",
+    changeTriggers: ["release"], text: "When asked to change an existing local xlsx/docx/pptx/hwpx/hwp file, use harness_call document.open, then document.apply and document.save: the owner watches the edit in the Document tab. Do not rewrite that file with a script." },
+  { id: "tool.agentlas-turn.server-instructions.reach", revision: 1, stability: "fixed-policy",
+    changeTriggers: ["release"], text: "When asked to do something in an app installed on this computer (export, print, read or change a value in it), use harness_call reach.map to find the app, then reach.app, reach.describe and reach.invoke. Do not script or drive the app yourself." },
 ]);
 
 const SOURCE_HEAD = String.raw`"use strict";

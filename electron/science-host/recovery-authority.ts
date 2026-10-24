@@ -41,13 +41,15 @@ const scienceKey = (s: ScienceRecoveryScope["science"]) => JSON.stringify([
   s.researchDirectorAgentId, s.researchDirectorAgentSlug, s.researchDirectorPackageVersion,
   s.researchDirectorPackageDigest, s.researchDirectorSystemPromptSha256,
   s.researchDirectorCatalogSha256 ?? null, s.researchDirectorBundleSha256 ?? null, s.workflowRoute ?? null,
+  s.workingSessionScope ?? null,
 ]);
 const scienceFields = new Set(["projectId", "conversationId", "turnId", "originUserMessageId", "invocationRunId",
   "researchDirectorAgentId", "researchDirectorAgentSlug", "researchDirectorPackageVersion",
   "researchDirectorPackageDigest", "researchDirectorSystemPromptSha256",
-  "researchDirectorCatalogSha256", "researchDirectorBundleSha256", "workflowRoute"]);
+  "researchDirectorCatalogSha256", "researchDirectorBundleSha256", "workflowRoute", "workingSessionScope"]);
 function onlyScienceScopeFields(s: ScienceRecoveryScope["science"]): boolean {
-  return Object.keys(s).every(key => scienceFields.has(key));
+  return Object.keys(s).every(key => scienceFields.has(key))
+    && (s.workingSessionScope === undefined || s.workingSessionScope === true);
 }
 
 /** assertCurrent must synchronously re-read the exact durable recovery/turn authority.
@@ -112,6 +114,16 @@ export function freshScienceRecoveryRequest(req: RunnerRequest, capability: obje
     singleUse: true, unattended: true, noSynchronousAsk: true };
 }
 
+/** The domain capability authorizes the common journal's forward-only generation.
+ * The shared layer owns native identity, retirement, ordered admission and ACK. */
+export function bindScienceRecoveryGeneration(req: RunnerRequest, capability: object): void {
+  const grant = readGrant(capability);
+  if (req.scienceRecoveryCapability !== capability || req.chatId !== grant.chatId || !req.agentContext)
+    throw new Error("science_recovery_runner_scope_mismatch");
+  const shared = require("../runtime/agent-context") as typeof import("../runtime/agent-context");
+  shared.markAgentContextForwardGeneration(req.agentContext, { id: grant.recoveryId, assertCurrent: grant.current });
+}
+
 /** Provider boundary: reject tampering/stale authority before session lookup or prompt construction. */
 export function assertScienceRecoveryRequest(req: RunnerRequest, runtimeKind?: string, backend?: string): boolean {
   if (req.scienceRecoveryCapability === undefined) {
@@ -120,12 +132,16 @@ export function assertScienceRecoveryRequest(req: RunnerRequest, runtimeKind?: s
     return false;
   }
   const grant = readGrant(req.scienceRecoveryCapability);
+  const sharedGeneration = !!req.agentContext && (() => {
+    const shared = require("../runtime/agent-context") as typeof import("../runtime/agent-context");
+    return typeof shared.isAgentContextForwardGenerationRequest === "function" && shared.isAgentContextForwardGenerationRequest(req);
+  })();
   if (req.chatId !== grant.chatId || req.agentId !== grant.science.researchDirectorAgentId
     || (runtimeKind !== undefined && runtimeKind !== grant.runtimeSelection.kind)
     || (runtimeKind === "byok" && backend !== grant.runtimeSelection.backend)
     || req.model !== grant.runtimeSelection.model
     || (grant.runtimeSelection.effort != null && req.effort !== grant.runtimeSelection.effort)
-    || req.runtimeSessionOwnerId !== grant.ownerId || req.sessionFingerprintSeed !== grant.ownerId
+    || (!sharedGeneration && (req.runtimeSessionOwnerId !== grant.ownerId || req.sessionFingerprintSeed !== grant.ownerId))
     || req.singleUse !== true || req.unattended !== true || req.noSynchronousAsk !== true
     || req.runtimeSessionId !== undefined || req.history.length !== 0
     || req.turnContext !== undefined || req.turnContextStable !== undefined || req.images !== undefined

@@ -27,9 +27,9 @@ export const ONE_FEATURE_INTRO_BLOCKING_STATE_CATEGORIES = [
   "import_flow",
   "route_ineligible",
   "authority_unknown",
-  
-
-
+  // 처음 실행 세팅(8스텝 온보딩)이 화면을 갖고 있는 동안. 실측(2026-08-20 dev QA)에서
+  // 대시보드에 들어가자 온보딩과 One 소개가 **동시에** 떠 어느 쪽을 먼저 봐야 할지
+  // 알 수 없었다. 소개·업데이트 안내는 세팅이 끝난 뒤에 나온다(사라지는 게 아니라 밀린다).
   "first_run_setup",
   // 실행 시 뜨는 계정 안내(대회·마감일)가 열려 있는 동안. 같은 실측에서 세팅을 닫자
   // 이번엔 그 안내와 One 소개가 겹쳤다 — 한 겹 아래 같은 결함이었다. 마감일이 있는
@@ -134,12 +134,12 @@ export interface FirstRunSurfaceInputs {
 }
 
 /**
-
-
-
-
-
-
+ * 지금 소개·업데이트 안내를 막는 것이 무엇인가. 막는 게 없으면 null.
+ *
+ * 한 곳에서 정하는 이유: One 소개·온톨로지 안내·페이지 투어가 각자 판단하면 첫 실행에
+ * 모달이 겹쳐 뜬다(2026-08-20 dev QA 실측: 온보딩 8스텝과 One 소개 1/4가 동시 표시).
+ * 순서는 **위에서부터** — 세팅이 가장 세고, 그다음이 사람이 답해야 하는 승인이다.
+ * 여기서 나오는 값은 사유로 기록에 남으므로, 밀린 사실이 조용히 사라지지 않는다.
  */
 export function resolveOneFeatureIntroBlocker(
   input: FirstRunSurfaceInputs,

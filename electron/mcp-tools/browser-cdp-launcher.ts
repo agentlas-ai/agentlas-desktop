@@ -571,12 +571,22 @@ function readBrowserCdpOwner(): BrowserCdpOwnerRecord | null {
   }
 }
 
+/**
+ * A cold Windows PowerShell start plus one WMI (Win32_Process) query took more than 3 s on every launch of
+ * the first real Windows run (Win11 ARM64 VM, 2026-10-24): the 3 s budget killed it and "startup recovery
+ * failed" was logged each time. ps/lsof keep the short budget; PowerShell gets one that fits its cold start.
+ */
+export const BROWSER_CDP_POWERSHELL_TIMEOUT_MS = 20_000;
+export function browserCdpInspectionTimeoutMs(executable: string): number {
+  return /(^|[\\/])powershell(\.exe)?$/iu.test(executable) ? BROWSER_CDP_POWERSHELL_TIMEOUT_MS : 3_000;
+}
+
 function execFileText(executable: string, args: string[], allowedExitCodes: number[] = []): Promise<string> {
   return new Promise((resolve, reject) => {
     execFile(
       executable,
       args,
-      { encoding: "utf8", timeout: 3_000, maxBuffer: 1024 * 1024, windowsHide: true },
+      { encoding: "utf8", timeout: browserCdpInspectionTimeoutMs(executable), maxBuffer: 1024 * 1024, windowsHide: true },
       (error, stdout) => {
         if (error) {
           const code = (error as NodeJS.ErrnoException).code;
@@ -600,6 +610,14 @@ function allowedBrowserExecutablePaths(platform = process.platform): Set<string>
     try { allowed.add(canonicalProfilePath(fs.realpathSync(candidate), platform)); } catch { /* missing candidate */ }
   }
   return allowed;
+}
+
+/** WQL `Name = 'chrome.exe' OR Name = 'msedge.exe'` for the allowed browser executables (Windows image names). */
+export function browserCdpWindowsImageNameFilter(executablePaths: readonly string[]): string {
+  const names = [...new Set(executablePaths
+    .map((candidate) => candidate.split(/[\\/]/u).pop()?.toLowerCase() ?? "")
+    .filter((name) => /^[a-z0-9._ -]+\.exe$/u.test(name)))].sort();
+  return names.length ? names.map((name) => `Name = '${name}'`).join(" OR ") : "Name = 'chrome.exe'";
 }
 
 /** Parse the bounded pid+executable inventory; command lines are queried only for these candidates. */
@@ -784,13 +802,17 @@ export async function inspectBrowserCdpProfileRoots(): Promise<BrowserCdpProcess
     return candidates.filter((snapshot) => browserCdpProfileRootMatches(snapshot));
   }
   if (process.platform === "win32") {
-    const allowed = [...allowedBrowserExecutablePaths("win32")]
+    const allowedPaths = [...allowedBrowserExecutablePaths("win32")];
+    const allowed = allowedPaths
       .map((candidate) => `'${candidate.replace(/'/gu, "''")}'`)
       .join(",");
     const script = [
       POWERSHELL_UTF8_OUTPUT,
       `$allowed = @(${allowed})`,
-      "$rows = @(Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -and $allowed -contains ([string]$_.ExecutablePath).ToLowerInvariant() } | ForEach-Object { [pscustomobject]@{ pid = [int]$_.ProcessId; executable = [string]$_.ExecutablePath; commandLine = [string]$_.CommandLine; loopbackOnly = $true } })",
+      // WMI filters by image name before PowerShell sees a row (enumerating every process was the slow part).
+      // The exact full-path match below still decides; the name filter only narrows what WMI returns.
+      `$filter = '${browserCdpWindowsImageNameFilter(allowedPaths).replace(/'/gu, "''")}'`,
+      "$rows = @(Get-CimInstance Win32_Process -Filter $filter | Where-Object { $_.ExecutablePath -and $allowed -contains ([string]$_.ExecutablePath).ToLowerInvariant() } | ForEach-Object { [pscustomobject]@{ pid = [int]$_.ProcessId; executable = [string]$_.ExecutablePath; commandLine = [string]$_.CommandLine; loopbackOnly = $true } })",
       "$rows | ConvertTo-Json -Compress",
     ].join("; ");
     const output = await execFileText("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script]);
@@ -1195,13 +1217,25 @@ export function resetBrowserCdpSessionRestoreArtifacts(
  */
 export async function withBrowserCdpMaintenance<T>(
   work: (result: BrowserCdpMaintenanceResult) => Promise<T> | T,
+  options: { skipProcessInventoryWhenNoRootCanExist?: boolean } = {},
 ): Promise<T> {
   ensureBrowserCdpProfilePrivate();
   if (!(await acquireBrowserCdpShutdownLock())) {
     throw new Error("Agentlas browser maintenance lock could not be acquired.");
   }
   try {
+    // Read before leases are cancelled: cancelling touches the lease directory, which itself arms the sweep.
+    const rootCanExist = !options.skipProcessInventoryWhenNoRootCanExist || browserCdpOrphanSweepArmed();
     const leasesCancelled = cancelAllBrowserCdpLeases();
+    if (!rootCanExist) {
+      // No owner marker, launch lock, lockfile, lease or live SingletonLock: no Agentlas browser root can be
+      // running, so skip the process inventory (on Windows each one is a PowerShell + WMI start) and only
+      // clear the profile's derived files.
+      try { fs.rmSync(browserCdpBackoffPath(), { force: true }); } catch { /* explicit maintenance resets recovery */ }
+      const staleLocksRemoved = clearBrowserCdpSingletonArtifacts();
+      const session = resetBrowserCdpSessionRestoreArtifacts();
+      return await work({ rootsClosed: 0, leasesCancelled, staleLocksRemoved, ...session });
+    }
     const initialRoots = await inspectBrowserCdpProfileRoots();
     const ownership = await reconcileBrowserCdpOwnerWithRetry({ attempts: 2, delayMs: 50 });
     if (ownership.state === "owned" && ownership.pid) {
@@ -1255,7 +1289,7 @@ export async function recoverAgentlasBrowserRuntimeAtStartup(): Promise<BrowserC
     sessionArtifactsRemoved: 0,
     preferencesUpdated: false,
   };
-  await withBrowserCdpMaintenance((value) => { result = value; });
+  await withBrowserCdpMaintenance((value) => { result = value; }, { skipProcessInventoryWhenNoRootCanExist: true });
   return result;
 }
 
@@ -1269,15 +1303,15 @@ function execText(file: string, args: string[]): Promise<string | null> {
 }
 
 /**
-
-
-
-
-
-
-
-
-
+ * ★A lease file is not the only proof that someone is using the browser.
+ * Main's mcp-proxy spawns a fresh launcher per wire and parks or kills it
+ * between wires, so an automation node can be mid-run with its Playwright
+ * client connected while no lease row exists. The sweep closed exactly such a
+ * browser (production 2026-09-28 15:04:55Z, "cleaned lease-less automation
+ * browser" while the Threads audit node's bridge was open; its next
+ * browser_navigate failed "Target page, context or browser has been closed").
+ * Before closing, look for a live client: a Playwright MCP child bound to this
+ * CDP port, or any process with an established connection to it.
  */
 export async function browserCdpHasLiveClient(port = browserCdpPort()): Promise<boolean> {
   if (process.platform === "win32") return false;
@@ -1295,12 +1329,12 @@ export async function browserCdpHasLiveClient(port = browserCdpPort()): Promise<
 export const BROWSER_CDP_ORPHAN_SWEEP_RECENT_MS = 5 * 60_000;
 
 /**
-
-
-
-
-
-
+ * Whether an Agentlas browser root can exist, read from the dedicated profile alone (nothing is spawned). Perf review
+ * MP-05 (2026-10-17): Main's 30 s sweep ran a process inventory for the life of the app even when the browser was never
+ * started (Windows: PowerShell + WMI per tick; macOS: ps, plus ps/lsof for the user's own Chrome; Linux: a sync /proc
+ * walk). Every launch path takes a lease and the launch lock before spawning and writes the owner marker once verified,
+ * and a running root holds the profile's SingletonLock (macOS/Linux) or lockfile (Windows). So the sweep stays armed
+ * while any of those exist, while lease activity is recent, or while a root is already under observation.
  */
 export function browserCdpOrphanSweepArmed(now = Date.now()): boolean {
   if (orphanCandidate) return true;
@@ -1533,6 +1567,7 @@ async function invokeBrowserTabsListThroughLauncher(launcher: string, options: {
       AGENTLAS_CDP_SKIP_GUARDIAN: "1",
     },
     stdio: ["pipe", "pipe", "pipe"],
+    windowsHide: true,
   });
   const childDrain = createOwnedChildDrain(child);
   let settled = false;
@@ -1838,17 +1873,17 @@ function approvalFor(name, args, currentUrl = '', structure = null) {
 `;
 
 /**
-
-
-
-
-
-
-
-
-
-
-
+ * Companion to the approval classifier: one-click social engagement (follow, like, repost) — an
+ * outward effect for growth goals that the approval gate deliberately does not gate (a like must
+ * not open an approval sheet). It reads the click's declared effect (the classifier's typed
+ * contract) and never changes classifyAction's answer.
+ *
+ * Intent alone is not an effect: the launcher stamps the clicked element, reads its
+ * accessibility state (aria-pressed/checked, aria-label, descendant labels, visible text) before
+ * and after the click, and reports the engagement only when that state actually changed
+ * (Follow → Following, aria-pressed false → true, 좋아요 → 좋아요 취소). Measured 2026-09-24:
+ * the automation ledger keeps no tool results for codex runs, so the launcher is the only place
+ * that can see the post-click state.
  */
 export const BROWSER_SOCIAL_ENGAGE_SOURCE = String.raw`
 function socialEngageIntent(name, args) {
@@ -1913,17 +1948,17 @@ function approvalContextUrl(name, args, observedUrl) {
  * 모델은 같은 프로필을 다시 열어 처음부터 되풀이했다. 상위 Playwright MCP 설명엔 이 구분이 없다.
  * 설명(tools/list)에 한 줄을 붙이고, ref 모양의 text/regex 는 보내지 않고 바로 길을 알려 준다.
  */
-
-
-
-
-
-
-
-
-
-
-
+/*
+ * Upload with no chooser open (production 2026-09-28 16:08Z and the Studio upload at 12:57Z: Playwright's
+ * browser_file_upload refuses unless a file-chooser modal is open, and the agent had not clicked one).
+ * When browser_file_upload comes back as an error, the files are set directly on the page's file input
+ * (Playwright setInputFiles → CDP DOM.setFileInputFiles): the input the agent last clicked (the ref itself, a
+ * label's control, its only contained input, or its explicit aria-controls target), else the page's only
+ * file input. Shared ancestors do not establish an association. Ambiguous candidates are never guessed.
+ * Paths are the staged copies
+ * the upload-root check already approved. Idea: ego-lite (MIT) driver/files.ts + page-input.ts and paseo
+ * (Apache-2.0) service.ts — resolve the input, then DOM.setFileInputFiles; reimplemented, no code copied.
+ */
 export const BROWSER_UPLOAD_FALLBACK_SOURCE = String.raw`
 function uploadFallbackCode(paths, ref) {
   const safeRef = typeof ref === 'string' && /^[A-Za-z0-9_-]{1,40}$/.test(ref) ? ref : '';
@@ -2176,7 +2211,8 @@ function ensurePrivateProfile() {
   fs.mkdirSync(CDP_PROFILE, { recursive: true, mode: 0o700 });
   try { fs.chmodSync(CDP_PROFILE, 0o700); } catch (e) {}
 }
-function execFileText(executable, args, allowedExitCodes = [], timeoutMs = 3000) {
+// A cold PowerShell + WMI query takes longer than 3 s on slow Windows machines (2026-10-24); ps/lsof keep 3 s.
+function execFileText(executable, args, allowedExitCodes = [], timeoutMs = /(^|[\\/])powershell(\.exe)?$/i.test(executable) ? 20000 : 3000) {
   return new Promise((resolve, reject) => {
     execFile(executable, args, { encoding: 'utf8', timeout: timeoutMs, maxBuffer: 1024 * 1024, windowsHide: true }, (error, stdout) => {
       if (error) {
@@ -3008,10 +3044,10 @@ function runNativeBrowserMcp() {
     if (digest === 'be2e09efef3017b4eaa76f0cb5289f66c4ea57833f94319b17c1c2f184987ad7') {
       const core = bundledRequire('playwright-core/lib/coreBundle');
       installed = installBrowserLeafHooks(core.tools);
-      // Treat only this leased endpoint as local so Playwright passes file paths
-      // through DOM.setFileInputFiles rather than encoding them for a remote endpoint.
-      
-      
+      // The leased guest runs on this machine, but a CDP endpoint is treated as remote, so
+      // setInputFiles sent files as base64 and refused anything over 50 MB. A 104 MB YouTube
+      // long-form failed in browser_file_upload (production 2026-10-13 16:28 UTC). Marking only
+      // this lease local makes Playwright pass paths through DOM.setFileInputFiles instead.
       const browserType = Object.getPrototypeOf(core.inprocess.playwright.chromium);
       const connectOverCDP = browserType.connectOverCDP;
       browserType.connectOverCDP = function (target, options) {
@@ -3433,9 +3469,9 @@ async function main() {
   let leaseFile = null;
   let closing = false;
   let browserReadyPromise = null;
-  // Resolve the bounded relay session DELETE before exit so the lease releases
-  // its capacity even when the launcher closes.
-  
+  // Resolves once the relay session DELETE is answered (bounded). Exiting before it is sent leaked one of the
+  // relay's 8 sessions per launcher; the 9th pass of a run then got 409 and the browser stayed unavailable until
+  // the run ended (Yotube room 2026-10-13 20:54Z: 8 wire_aborted, then upstream_transport_closed on every pass).
   let nativeRelease = Promise.resolve();
   const releaseLeaseOnce = () => {
     closing = true;
@@ -3514,6 +3550,7 @@ async function main() {
   ], {
     stdio: ['pipe', 'pipe', 'inherit'],
     env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', ...(nativeLeaseEndpoint ? { PLAYWRIGHT_MCP_CDP_HEADERS: 'Authorization: Bearer ' + NATIVE_TOKEN } : {}) },
+    windowsHide: true,
   });
   const childDrain = createOwnedChildDrain(child);
   child.on('error', (e) => {

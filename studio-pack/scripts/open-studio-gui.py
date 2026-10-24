@@ -648,7 +648,6 @@ def build_production_prompt(stage: str, bundle: dict | None, request: dict | Non
         raise ValueError("Studio production prompt must end with the final boundary")
     return "".join(module["text"] for module in ordered)
 
-
 def _artifact(stage: str, label: str, filename: str, kind: str, role: str) -> dict:
     return {
         "label": label,

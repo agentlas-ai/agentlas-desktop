@@ -1,3 +1,5 @@
+import { projectMobileCanonicalQuestionDecisions } from "./canonical-question";
+import { isMobileBridgeOneDecisionDto } from "../../shared/mobile-question-decision";
 import { Buffer } from "node:buffer";
 import { listUiInstances } from "../harness/ui-instances";
 import { fitInlineUiTranscriptText } from "../../shared/inline-ui-transcript";
@@ -82,7 +84,6 @@ import {
 import {
   ONE_DECISION_MULTI_SELECTION_CONTRACT_VERSION,
   ONE_DECISION_OTHER_ANSWER_CONTRACT_VERSION,
-  isOneDecisionViewV1,
   isPendingConfirmationSnoozed,
   normalizeOneDecision,
   oneDecisionJudgmentTexts,
@@ -187,9 +188,9 @@ function mobileBridgeChatImages(urls: readonly string[] | undefined): MobileBrid
     const attachmentId = CHAT_ATTACHMENT_URL_RE.exec(url.trim())?.[1]?.toLowerCase();
     if (!attachmentId || seen.has(attachmentId)) continue;
     seen.add(attachmentId);
-    
-
-
+    // Exactly { attachmentId }: phones up to Mobile 1.1.46 (build 109) drop an image DTO with any other key
+    // (exact-key check, relaxed in mobile ada1d0f). Measured: that build's real decoder passes 11/12 against
+    // Desktop HEAD and fails only an extra image key. Keep the shape until those builds are below the support floor.
     images.push({ attachmentId });
     if (images.length >= 8) break;
   }
@@ -334,26 +335,7 @@ function exactRecordKeys(value: Record<string, unknown>, keys: readonly string[]
  * This stays exported so the wire-contract test can prove that additive fields
  * do not silently become executable authority.
  */
-export function isMobileBridgeOneDecisionDto(
-  value: unknown,
-): value is MobileBridgeOneDecisionDto {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  const row = value as Record<string, unknown>;
-  if (!exactRecordKeys(row, ["authoritativeHostRef", "canonicalTaskVersion", "view"])) return false;
-  if (typeof row.authoritativeHostRef !== "string" || !/^host_[a-f0-9]{32}$/.test(row.authoritativeHostRef)) {
-    return false;
-  }
-  if (!Number.isSafeInteger(row.canonicalTaskVersion) || Number(row.canonicalTaskVersion) < 1) return false;
-  if (!isOneDecisionViewV1(row.view) || row.view.taskId === null) return false;
-  const expectedEvidence = new Map([
-    ["source_message", row.view.decisionId],
-    ["task", row.view.taskId],
-    ["requested_at", row.view.createdAt],
-  ]);
-  if (row.view.evidence.length !== expectedEvidence.size) return false;
-  return row.view.evidence.every((item) => expectedEvidence.get(item.kind) === item.ref)
-    && new Set(row.view.evidence.map((item) => item.kind)).size === expectedEvidence.size;
-}
+export { isMobileBridgeOneDecisionDto } from "../../shared/mobile-question-decision";
 
 function deviceSafeOneDecision(value: MobileBridgeOneDecisionDto, rowSkip = false): boolean {
   const textSafe = rowSkip ? mobileBridgeDecisionTextCurrent : mobileBridgeDecisionTextUnchanged;
@@ -522,6 +504,7 @@ function hostDto(options: MobileBridgeProjectionOptions): MobileBridgeHostDto {
       "confirmations",
       "one-invocation-v1",
       "one-decisions-v1",
+      "canonical-question-decisions-v1",
       "one-decision-multi-select-v2",
       "one-decision-answers-v3",
       "one-decision-owner-answers-v4",
@@ -965,6 +948,12 @@ function chatsDto(
 /** Rows a page walked through (newest first), visible or not: the cursor anchors on the oldest one. */
 export interface MobileBridgeHistoryConsumption { consumed: number; oldest?: { id: string; createdAt: string } }
 
+/** What a history page may carry beyond the shape every phone in the field decodes (capability-gated, additive). */
+export interface MobileBridgeHistoryOptions {
+  /** The phone reported thread.composition.v1: system rows of a scheduled run's report carry their typed notice. */
+  automationReportNotice?: boolean;
+}
+
 export function projectMobileBridgeHistory(
   history: readonly ChatHistoryEntry[],
   limit: number,
@@ -972,6 +961,7 @@ export function projectMobileBridgeHistory(
   chatId?: string,
   inlineUiFallbacks?: ReadonlyMap<string, string>,
   consumption?: MobileBridgeHistoryConsumption,
+  options: MobileBridgeHistoryOptions = {},
 ): MobileBridgeChatMessageDto[] {
   const budget = Math.max(1_024, Math.min(MOBILE_BRIDGE_SAFE_PAYLOAD_BYTES, Math.floor(budgetBytes)));
   const out: MobileBridgeChatMessageDto[] = [];
@@ -1019,6 +1009,11 @@ export function projectMobileBridgeHistory(
               })) } } : {}),
           } } : {}) }
       : undefined;
+    // A scheduled run's report is a system row like the unmarked internal ones (which stay private). Only a phone that
+    // can draw it receives the marker; every other phone gets the row exactly as before and keeps hiding it.
+    const reportNotice = options.automationReportNotice && notice?.purpose === "automation-report"
+      ? { purpose: "automation-report" as const, runId: notice.runId, automationId: notice.automationId }
+      : undefined;
     const shell: MobileBridgeChatMessageDto = {
       id: message.id,
       role: message.role,
@@ -1029,7 +1024,7 @@ export function projectMobileBridgeHistory(
         : {}),
       text: "",
       createdAt: message.createdAt,
-      ...(hostNotice ? { hostNotice } : {}),
+      ...(hostNotice ? { hostNotice } : reportNotice ? { hostNotice: reportNotice } : {}),
       ...(message.role === "user" && promptRunIds.has(message.id)
         ? { runId: promptRunIds.get(message.id)! }
         : {}),
@@ -2223,6 +2218,7 @@ export async function projectMobileBridgeSnapshotVariants(
     activeChatIds,
     taskProjections,
     oneDecisions: decisions.oneDecisions,
+    canonicalQuestionDecisionsV1: projectMobileCanonicalQuestionDecisions(options.hostIdentity.hostId,pendingConfirmations),
     oneDecisionMultiSelectionsV2: decisions.oneDecisionMultiSelectionsV2,
     oneDecisionAnswersV3: decisions.oneDecisionAnswersV3,
     oneDecisionOwnerAnswersV4: decisions.oneDecisionOwnerAnswersV4,

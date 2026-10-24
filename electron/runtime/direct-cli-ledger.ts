@@ -1,8 +1,8 @@
-
-
-
-
-
+// A CLI call that is not a runner turn (image generation, a document draft) still goes through the same model-call
+// ledger and invocation breaker as a runtime turn (R-078, 2026-10-18). Production 2026-10-13..17: nine image runs on the
+// Antigravity route (five for the Yotube room) spawned `agy --print` directly and appear nowhere in the ledger, and the
+// breaker never counted them. The call lands in the calling run's ledger scope (runId/chatId of the turn that asked)
+// with its runtime kind, role, phase, status and failure code; the request text is measured, never stored.
 import { invocationBreaker, invocationBreakerKey } from "./invocation-breaker";
 import { withModelCallLedger, withModelCallScope, type ModelCallRole } from "./model-call-ledger";
 import type { Runner, RunnerResult } from "./runner";

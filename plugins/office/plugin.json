@@ -2,7 +2,7 @@
   "schema": "agentlas.plugin/v2",
   "slug": "office",
   "name": "Agentlas Office",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "builtin": true,
   "publisher": {
     "name": "Agentlas",

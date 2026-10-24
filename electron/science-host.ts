@@ -1,3 +1,7 @@
+import { createScienceQuestionHost } from "./science-host/question-continuation";
+import { scienceAliveCoreHost } from "./science-host/alive-core";
+import { withHostInvocationAdmission } from "./invocation/host-admission";
+import { scienceLocalSpecialistHost } from "./science-host/local-specialists";
 import { scienceLocalEmbeddingHost } from "./science-host/local-embedding";
 import { ScienceQuestionRecoveryPresenter } from "./science-host/work-recovery";
 import { inspectScienceRuntimeSelectionAvailability } from "./science-host/runtime-selection-availability";
@@ -10,6 +14,10 @@ import { desktopAliveRuntime } from "./alive-runtime";
 import { desktopAliveClock } from "./alive-clock";
 import { projectResearchState } from "./science-host/research-state-projection";
 import { scienceCodexProductConfig } from "./science-host/codex-product-config";
+import { bindScienceCodexProductSessionStore } from "./science-host/codex-session-store";
+import { scienceHostGoalWake, readScienceHostGoalWake, cancelScienceHostGoalWake, recordScienceHostGoalOwnerControl } from "./science-host/goal-wake";
+import { recordSciencePublicationHostOutputs } from "./science-host/publication-outputs";
+import { recordScienceArtifactHostOutputs } from "./science-host/artifact-outputs";
 /*
  * 사이언스가 이 앱에게 요구하는 것을 한 벌로 채워 준다.
  *
@@ -70,6 +78,12 @@ import { listScienceTypesetProfileCatalog } from "./science-host/typeset-profile
 import { renderManuscriptPdf, resolveTectonic } from "./science-host/render-pdf";
 import { persistedWorkbookReadback, readPersistedScienceWorkbook } from "./science-host/workbook-intake-ipc";
 
+import { scienceRuntimeRole } from "agentlas-science";
+import { createScienceCanonicalGoalWaitOwner, installScienceCanonicalGoalWaitOwner } from "./science-host/goal-wait";
+import { readCanonicalGoalWait, holdCanonicalGoalWait, cancelCanonicalGoalWaitScope, setCanonicalGoalWaitOwnerProvider } from "./long-run/canonical-owner-waits";
+import { invocationProcessOwner } from "./store/invocation-run-owners";
+import { assertDesktopLongRunAdmissionOpen } from "./long-run/app-runtime-coordinator";
+import { onHostShutdown } from "./host-lifecycle";
 let installed = false;
 let registeredResearcherQuestionUiRelease: string | null = null;
 let questionRecovery: ScienceQuestionRecoveryPresenter | null = null;
@@ -163,7 +177,22 @@ function registerScienceMcpPreparedConfig(input: ScienceMcpPreparedRegistration)
 export function installDesktopScienceHost(): void {
   configureScienceMathPython();
   if (installed) return;
+  const goalWait = createScienceCanonicalGoalWaitOwner({
+    owner: () => { const current = invocationProcessOwner(); return scienceRuntimeRole() === "execution-owner" && current.ownerKind === "desktop"
+      ? { kind: "desktop", epoch: current.ownerId } : null; },
+    assertExecution: assertDesktopLongRunAdmissionOpen,
+    assertCurrentOwner: expected => {
+      assertDesktopLongRunAdmissionOpen();
+      const current = invocationProcessOwner();
+      if (scienceRuntimeRole() !== "execution-owner" || expected.kind !== "desktop"
+        || current.ownerKind !== "desktop" || expected.epoch !== current.ownerId) throw new Error("science_goal_wait_owner_changed");
+    },
+    intake: { read: readCanonicalGoalWait, hold: holdCanonicalGoalWait },
+    cancelScope: cancelCanonicalGoalWaitScope,
+  });
+  // The SDK's data-client role remains read-only; this does not promote Main to the execution owner.
   const compatibility = installScienceHost({
+    ...{ aliveCore: scienceAliveCoreHost },
     aliveRuntime: desktopAliveRuntime,
     aliveClock: desktopAliveClock,
     // 실행
@@ -176,7 +205,7 @@ export function installDesktopScienceHost(): void {
     // 에이전트 파일
     agentFolderPath, buildEffectiveAgentSystemPrompt, materializeAgentFiles,
     // 모델 호출
-    invocationService, captureScienceInvocationBinding,
+    invocationService: withHostInvocationAdmission(invocationService), captureScienceInvocationBinding,
     // 플랫폼
     userDataPath, currentUiLocale, productExtensionSignedPayload,
     RUNTIME_BACKEND_SET, RUNTIME_KIND_SET,
@@ -236,11 +265,20 @@ export function installDesktopScienceHost(): void {
     contractVersion: SCIENCE_HOST_CONTRACT_VERSION,
     capabilities: SCIENCE_HOST_REQUIRED_CAPABILITIES,
     execution: {
+      ...{ decisions: createScienceQuestionHost().port },
+      ...{ goalWait: goalWait.sdkHost },
+      ...{ hostGoalWake: scienceHostGoalWake },
+      ...{ readHostGoalWake: readScienceHostGoalWake, cancelHostGoalWake: cancelScienceHostGoalWake,
+        recordHostGoalOwnerControl: recordScienceHostGoalOwnerControl },
+      ...{ recordPublicationOutputs: recordSciencePublicationHostOutputs },
+      ...{ recordArtifactOutputs: recordScienceArtifactHostOutputs },
       ...{ projectResearchState },
       ...{ codexProductConfig: scienceCodexProductConfig },
+      ...{ bindCodexProductSessionStore: bindScienceCodexProductSessionStore },
       ...{ mintForwardSteeringRecoveryCapability },
       ...{ evidenceCollection: scienceEvidenceCollectionHost },
       criterionReview: scienceCriterionReviewHost,
+      localSpecialists: scienceLocalSpecialistHost,
       ...{ desktopTools: scienceDesktopTools },
       ...{ aliveDesktopTools: scienceAliveDesktopTools },
       registerMcpPreparedConfig: registerScienceMcpPreparedConfig,
@@ -265,5 +303,8 @@ export function installDesktopScienceHost(): void {
   });
   if (compatibility.status !== "compatible") throw new Error(compatibility.code);
   installScienceStoreSchemaRejectionReader(scienceStore);
+  installScienceCanonicalGoalWaitOwner(goalWait);
+  setCanonicalGoalWaitOwnerProvider(goalWait.provider);
+  onHostShutdown(() => { installScienceCanonicalGoalWaitOwner(null); setCanonicalGoalWaitOwnerProvider(null); });
   installed = true;
 }

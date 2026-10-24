@@ -21,6 +21,9 @@ import { runtimeIdentityKey, runtimeMatchesSelection as sharedRuntimeMatchesSele
 import { describeRoleWriteFailure } from "@/lib/runtime-role-failure";
 import type { LocalModelHubSnapshot, LocalModelInstallationReceipt } from "@shared/local-model-hub";
 import { Select } from "@/components/Select";
+import { RUNTIME_CHIPS, RuntimeConnectPopup, connectCopy, type RuntimeChipSpec } from "@/components/connect/RuntimeConnect";
+import connectStyles from "@/components/connect/ConnectChips.module.css";
+import { discoverySignInRequired } from "@shared/model-discovery";
 
 // resolvedId: 별칭이 실제로 어느 모델로 풀렸는지(실행이 알려준 값). 없으면 모르는 것.
 type ModelRow = { id: string; label: string; tag?: string; resolvedId?: string };
@@ -136,8 +139,15 @@ function runtimeLabel(runtime: RuntimeStatus): string {
   return runtime.label ?? RUNTIME_LABEL[runtime.kind] ?? runtime.kind;
 }
 
-function modelDiscoveryNotes(runtimes: RuntimeStatus[], ko: boolean): Array<{ key: string; text: string }> {
-  const notes: Array<{ key: string; text: string }> = [];
+type DiscoveryNote = { key: string; text: string; signIn?: boolean; connect?: RuntimeChipSpec };
+
+/**
+ * One line per runtime whose model listing failed. "Not signed in" is its own state (discoverySignInRequired:
+ * ACP's typed refusal or the CLI's own signed-out answer) and says so, with the Connect action that runs the CLI's
+ * sign-in. A signed-out grok used to read "could not read the model list. Check the connection …" (Windows 2026-10-24).
+ */
+export function modelDiscoveryNotes(runtimes: RuntimeStatus[], ko: boolean): DiscoveryNote[] {
+  const notes: DiscoveryNote[] = [];
   const seen = new Set<string>();
   for (const runtime of runtimes) {
     if (runtime.credentialAccess?.status === "unavailable") continue;
@@ -146,6 +156,19 @@ function modelDiscoveryNotes(runtimes: RuntimeStatus[], ko: boolean): Array<{ ke
     if (seen.has(key)) continue;
     seen.add(key);
     const label = runtimeLabel(runtime);
+    if (discoverySignInRequired(runtime.modelDiscovery.reason)) {
+      const connect = RUNTIME_CHIPS.find((chip) => chip.kind === runtime.kind);
+      notes.push({
+        key,
+        signIn: true,
+        ...(connect ? { connect } : {}),
+        text: connect
+          ? (ko ? `${label}: 로그인이 필요합니다.` : `${label}: sign in required.`)
+          : (ko ? `${label}: 로그인이 필요합니다. 이 에이전트의 로그인 명령으로 로그인한 뒤 다시 확인하세요.`
+            : `${label}: sign in required. Sign in with this agent's own login command, then check again.`),
+      });
+      continue;
+    }
     // Discovery reasons can contain RPC bodies and headers. Keep diagnostics
     // in the host; a cached or selected model does not make this probe succeed.
     const noCodexCache = runtime.kind === "codex" && runtime.modelDiscovery.reason === "no-cache";
@@ -222,15 +245,15 @@ export function RuntimeControl() {
   const [localModelSnapshot, setLocalModelSnapshot] = useState<LocalModelHubSnapshot | null>(null);
   const [localModelBusy, setLocalModelBusy] = useState(false);
   /**
-
-
-
-
-
-
-
-
- */
+   * ★실패는 화면에 도착해야 한다 (QA 실측 2026-09-08, 오너 2026-09-07 "안된다 금지").
+   *
+   * 이 화면의 쓰기 경로 세 곳이 전부 `catch { setMessage(""); }` 였다. 저장이 거절되면
+   * 문구가 **지워진다** — 즉 "아무 일도 안 일어난 화면"과 "거절당한 화면"이 픽셀 단위로
+   * 같았다. QA 가 오케스트레이터 행의 × 를 다섯 번 누르고도 이유를 못 본 것이 이것이고,
+   * 옛 저장소에서 멀티모달 저장이 CHECK 로 막히는 것도 같은 방식으로 안 보인다.
+   *
+   * 그래서 문구를 지우는 대신 **왜 거절됐는지와 푸는 길**을 적는다.
+   */
   const say = (text: string, tone: "info" | "error" = "info") => {
     setMessage(text);
     setMessageTone(tone);
@@ -245,6 +268,7 @@ export function RuntimeControl() {
   } | null>(null);
   const pointerDragRef = useRef<{ role: RuntimeRole; from: number; startX: number; startY: number } | null>(null);
   const discoveryNotes = useMemo(() => modelDiscoveryNotes(runtimes, ko), [runtimes, ko]);
+  const [connectSpec, setConnectSpec] = useState<RuntimeChipSpec | null>(null);
   const multimodalRuntimes = useMemo(
     // The local generate_image tool has executable adapters only for these
     // two CLIs. Input-vision support on a chat model is not image generation.
@@ -1069,13 +1093,13 @@ export function RuntimeControl() {
                     </span>
                   )}
                   {role === "orchestrator" && members.length === 1 && (
-                    
-
-
-
-
-
-
+                    /*
+                     * ★못 지우는 이유는 화면에 있어야 한다 (QA 실측 2026-09-08).
+                     * 마지막 오케스트레이터 후보는 지울 수 없는 것이 맞다 — 하나는 남아야
+                     * 한다. 그런데 그 이유가 비활성 단추의 title 에만 있었다. 비활성 단추는
+                     * 포커스를 못 받아 툴팁도 스크린리더도 거기 닿지 않는다. QA 는 다섯 번
+                     * 누르고도 아무 설명을 못 봤다 — 화면이 "고장"과 구별되지 않았다.
+                     */
                     <span
                       className="dashboard-runtime-pool-note"
                       title={ko
@@ -1237,9 +1261,32 @@ export function RuntimeControl() {
           {discoveryNotes.length > 0 && (
             <ul className="dashboard-runtime-discovery-notes" role="status">
               {discoveryNotes.map((note) => (
-                <li key={note.key}>{note.text}</li>
+                <li key={note.key} data-sign-in-required={note.signIn ? "true" : undefined}>
+                  {note.text}
+                  {note.connect && (
+                    <button type="button" className={connectStyles.small}
+                      aria-label={`${note.connect.name} — ${connectCopy(ko).connect}`}
+                      onClick={() => setConnectSpec(note.connect ?? null)}>
+                      {connectCopy(ko).connect}
+                    </button>
+                  )}
+                </li>
               ))}
             </ul>
+          )}
+          {connectSpec && (
+            <RuntimeConnectPopup
+              spec={connectSpec}
+              copy={connectCopy(ko)}
+              onClose={() => setConnectSpec(null)}
+              onDone={() => {
+                setConnectSpec(null);
+                // The sign-in cleared Main's detection caches; read the runtimes again, not the cached projection.
+                invalidateViewData("dashboard.runtimes");
+                const api = ipc();
+                void api?.runtime.detect(true).then((detected) => setRuntimes(detected)).catch(() => undefined);
+              }}
+            />
           )}
           <div className="dashboard-runtime-library">
             {renderRole("orchestrator")}

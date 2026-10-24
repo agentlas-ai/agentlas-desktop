@@ -105,6 +105,8 @@ function daemonVersion(): string { return runningVersion; }
 let controlSocket: ControlSocketHandle | null = null;
 let desktopParentPid: number | null = null;
 let serviceHeartbeat: NodeJS.Timeout | null = null;
+// Shares the existing service clock; no domain scheduler or automation row.
+let goalWaitHeartbeat: (() => void) | null = null;
 let idleExitWatch: NodeJS.Timeout | null = null;
 let graphRunsInFlight = 0;
 const graphLoginWaits = new Map<string, AbortController>();
@@ -160,6 +162,7 @@ function residencyInput(): DaemonResidencyInput {
   return {
     desktopAttached: desktopParentPid !== null,
     supervisorDomain: daemonNativeInvocation?.supervisorActive ?? false,
+    hostGoalDomain: science?.hostGoalWakePending ?? false,
     aliveDomain: aliveOrganisms?.daemonAliveResident() ?? false,
     loginContinuity: loginContinuityEnabled(),
     graphRuns: graphRunsInFlight + graphLoginWaits.size,
@@ -777,6 +780,7 @@ let shutdownPromise: Promise<void> | null = null;
 function performShutdown(reason: string): Promise<void> {
   if (shutdownPromise) return shutdownPromise;
   closing = true;
+  goalWaitHeartbeat = null;
   daemonNativeInvocation?.closeAdmission();
   for (const controller of graphLoginWaits.values()) controller.abort(new Error("app_closed"));
   graphLoginWaits.clear();
@@ -841,9 +845,9 @@ function performShutdown(reason: string): Promise<void> {
       } catch (error) { console.error("[agentlasd] local model shutdown failed:", error); }
       finally { if (localTimeout) clearTimeout(localTimeout); }
     }
-    
-
-
+    // The MCP approval proxy stays up until the owned runs have drained (flow audit 2026-10-18, I-D8): stopping it here
+    // cut the wire under a draining run's MCP calls and made any config build in that window mcp_proxy_gate_unavailable.
+    // It now stops in the finally below, beside the native socket, after the drain or its deadline.
     const childrenDrained = drainRunChildrenForHostShutdown(processPool.shutdownChildren());
     try { runHostShutdownHooks(); }
     catch (error) { console.error("[agentlasd] shutdown hooks failed:", error); }
@@ -904,9 +908,9 @@ export interface DaemonStartupOptions {
 }
 
 export async function startDaemon(options: DaemonStartupOptions = {}): Promise<void> {
-  
-
-
+  // First, before anything can throw on a later tick: an uncaught exception or unhandled rejection is recorded and the
+  // service keeps running, as Main does (logging.ts installMainProcessErrorSink). Without it Node ended the process on
+  // the first one and took every daemon-owned run with it, with no trace (flow audit 2026-10-18, I-D1).
   installDaemonProcessDiagnostics((event, fields) => {
     runtimeDiagnostics?.record(event, { ...fields, pid: process.pid, bootId, appInstanceId });
   });
@@ -954,6 +958,7 @@ export async function startDaemon(options: DaemonStartupOptions = {}): Promise<v
   console.log(`[agentlasd] user data: ${userDataDir()}`);
   serviceHeartbeat = setInterval(() => {
     lastHeartbeatAtMs = Date.now();
+    goalWaitHeartbeat?.();
     const ownerPid = desktopParentPid;
     if (ownerPid !== null && !processIsAlive(ownerPid)) {
       desktopParentPid = null;
@@ -969,8 +974,8 @@ export async function startDaemon(options: DaemonStartupOptions = {}): Promise<v
   // 돌리면 앱이 자기 DB 를 못 알아본다.
   const { initStore, getDb } = await import("../store/db");
   initStore({ migrationRole: "follower" });
-  
-
+  // The same store-backed ACP profile reader Main installs (ipc.ts setAcpProfileReader). Without it a daemon-owned run
+  // that picked a user's ACP terminal profile got no runner: pickRunner read no profiles here (flow audit 2026-10-18, I-D6).
   (await import("../runtime/acp-agents")).setAcpProfileReader(() => {
     try {
       const row = getDb().prepare("SELECT value FROM meta WHERE key = 'terminal_profiles'").get() as { value: string } | undefined;
@@ -1119,6 +1124,36 @@ export async function startDaemon(options: DaemonStartupOptions = {}): Promise<v
       // native readiness failure. No native request has been issued/replayed.
       console.warn("[agentlasd] native invocation unavailable:", nativeInvocationUnavailableCode);
     }
+  }
+
+  if (daemonNativeInvocation && daemonInvocationService && !closing) {
+    const waits = await import("../long-run/wait-subscriptions");
+    const waitOwners = await import("../long-run/canonical-owner-waits");
+    const target: import("../long-run/wait-subscriptions").GoalWaitHost = {
+      owner: { kind: "daemon", epoch: bootId },
+      dispatch: request => { if (closing) throw new Error("daemon_shutting_down"); assertServiceOwner();
+        return daemonInvocationService!.resumeGoalWait(request); },
+      isChatBusy: chatId => closing || daemonInvocationService!.activeChatIds().includes(chatId),
+    };
+    let nextCheckAt = 0, inFlight = false, scienceReconciled = false;
+    goalWaitHeartbeat = () => {
+      if (closing || inFlight) return;
+      const now = Date.now(), scienceReady = scienceService?.status().state === "ready";
+      // Opening an unrelated service never opens/restarts Science.
+      if (now < nextCheckAt && (!scienceReady || scienceReconciled)) return;
+      try { assertServiceOwner(); } catch { return; }
+      nextCheckAt = now + 60_000;
+      if (scienceReady && !scienceReconciled) {
+        const result = waitOwners.reconcileCanonicalGoalWaits(target.owner!);
+        if (!result.ok) return;
+        scienceReconciled = true;
+      }
+      inFlight = true;
+      void waits.pollGoalWaitSubscriptions({ host: target }).catch(error => {
+        console.error("[agentlasd] goal wait observation failed:", error);
+      }).finally(() => { inFlight = false; });
+    };
+    goalWaitHeartbeat();
   }
 
   // NH21: the enrolled service is the preferred owner of the One/Work Alive domain. It takes the lease when free (or

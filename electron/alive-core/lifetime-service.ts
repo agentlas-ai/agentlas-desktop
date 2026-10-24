@@ -41,8 +41,8 @@ export interface AliveLifetimeServiceOptions {
   /**
    * Decision point "unblock_attempt_due": called at most once per exact owner-blocked state (ownerWait
    * "needs-owner"), never for an owner stop. Absent = no unblocker installed yet (recorded as no-handler).
-   * The controller model is not woken for a state the host already knows;
-   * the registered unblocker handles this host-defined decision point.
+   * The controller model is never woken for such a state: its no-tools "wait" was ~23k tokens per hour for a
+   * fact the host already knew (owner store 2026-09-27..28: 30 wakes, 0 actions).
    */
   unblockAttempt?: (input: AliveUnblockAttempt) => AliveUnblockResult;
 }

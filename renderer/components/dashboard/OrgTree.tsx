@@ -365,7 +365,7 @@ export function OrgTree() {
   }
 
   // 서버에만 있는 Cloud 에이전트를 이 Mac 에 내려받는다. 내려받은 사본은 로컬 에이전트라 위쪽 로컬 목록과
-  // 조직도 '에이전트 추가'에 나타난다. 같은 slug 가 이미 있으면 이 줄 자체가 없다.
+  // 조직도 '에이전트 추가'에 나타난다(오너 결정 2026-10-19). 같은 slug 가 이미 있으면 이 줄 자체가 없다.
   async function installCloudListing(listing: MarketplaceListing) {
     const api = ipc();
     if (!api || busy) return;

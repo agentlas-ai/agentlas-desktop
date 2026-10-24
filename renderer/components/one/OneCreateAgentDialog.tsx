@@ -326,13 +326,13 @@ export function OneCreateAgentDialog({
     runtimeSelection,
   }), [characterId, description, generatePrompt, generatedSrc, mode, name, runtimeSelection, title, uploadedName, uploadedSrc]);
 
-  
-
-
-
-
-
-
+  /*
+   * Unsaved edits. Esc or a backdrop click closed "One 편집" / "팀원 편집" at once and
+   * threw the typed changes away (QA 2026-09-27) — only the create form keeps a draft.
+   * The baseline is what the edit effects below filled in; it is captured on the
+   * render after they ran (this effect is declared first, so it runs first in the
+   * commit that schedules those fills and captures in the next one).
+   */
   const editSnapshot = JSON.stringify([name, title, description, characterId, mode, uploadedSrc, generatedSrc, collaborationStyle, runtimeSelection]);
   const editBaselineRef = useRef<string | null>(null);
   const captureEditBaselineRef = useRef(false);

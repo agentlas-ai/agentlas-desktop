@@ -42,6 +42,11 @@ import { askUser } from "../confirm/ask-user";
 /** 승인 요청 하나 — 화면과 같은 정의를 쓴다(shared/types.ts). */
 export type ToolApprovalRequest = ToolApprovalRequestEvent;
 
+/** Host-owned approval/result scope. Keep the selected runtime in the identity. */
+export function toolApprovalSessionKey(runtime: string, primaryIdentity?: string | null, cwd?: string | null): string {
+  return `${runtime}:${primaryIdentity ?? cwd ?? "default"}`;
+}
+
 /*
  * ── 실행 전 중재자 등록소 ────────────────────────────────────────────────────
  *
@@ -206,17 +211,17 @@ export function setToolApprovalLedger(ledger: ToolApprovalLedger | null): void {
 }
 
 /**
-
-
-
+ * Why the arbiter wrapper answered "deny" for an ask without any policy decision. Every such path used to be
+ * silent (production 1.3.5/1.3.7: a native-provenance fault refused every full-access tool call and left no trace).
+ * The code is a closed machine token, never an error message, so it is safe to show the model and the run record.
  */
 const arbiterFaults = new WeakMap<object, string>();
 export function toolApprovalFaultCode(ask: object): string | undefined { return arbiterFaults.get(ask); }
 
 /**
-
-
-
+ * Asks the arbiter answered "deny" because the owner's card expired unanswered (5 minutes, requestToolApproval), not
+ * because the owner refused. Callers that remember a refusal (the room's access cards, borrowed-task-force.ts) read this
+ * so an unanswered card never counts as the owner's "no" (W7 S-room-owner-folder, 2026-10-16).
  */
 const expiredAsks = new WeakSet<object>();
 export function markToolApprovalExpired(ask: object): void { expiredAsks.add(ask); }

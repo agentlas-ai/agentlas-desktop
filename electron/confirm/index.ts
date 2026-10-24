@@ -1,3 +1,5 @@
+import { projectQuestionDecisionText, questionDecisionBankJson, type QuestionDecisionView } from "../../shared/question-decision";
+import { parseQuestionContinuationHostFence, questionContinuationHostFenceMatches, type QuestionContinuationHostFence } from "./question-host-fence";
 // 확인 요청(Request confirm) — "에이전트가 사용자 결정을 기다리는 채팅" 목록.
 //
 // 별도 런루프/CLI 훅 없이 DB에서 도출한다:
@@ -18,7 +20,7 @@ import { extractAskFences } from "../../shared/ask-fence-flatten";
 import { isOneOperationalRecoveryPrompt } from "../../shared/one-operational-recovery-prompt";
 import { getLastChatMessage, listRecentChats } from "../store/chats";
 import { getDb } from "../store/db";
-import { recordRunEvent, tryRecordRunEvent } from "../store/run-events";
+import { recordRunEvent, tryRecordRunEvent, getInvocationRunReceipt, getRunEventBySource } from "../store/run-events";
 import { ensureCanonicalTaskForChat } from "../store/tasks";
 import { onDesktopStoreChange } from "../store/change-bus";
 import { tryRecordOneDomainEvent } from "../one/domain-events";
@@ -283,10 +285,10 @@ export function recordCommittedAnswerReceipt(
 export const QUESTION_SUPERSEDED_CODE = "question_superseded";
 
 /**
-
-
-
-
+ * 같은 대화에 이 질문보다 새 질문이 있다 — 모델은 이미 다음 결정으로 넘어갔다.
+ * 실측(2026-10-18, 읽기 전용): 최근 질문 61개 중 26개가 답 없이 새 질문으로 대체됐는데, Main 은 그 옛 질문의 답도
+ * 받아, 아무도 기다리지 않는 결정을 실행할 수 있었다. 질문 뒤 호스트 말풍선은 질문을 대체하지 않는다
+ * (scripts/test-question-pending-past-host-bubble.cjs) — 새 "질문"이나 새 오너 메시지만 대체한다.
  */
 function newerQuestionExists(chatId: string, source: { id: string; createdAt: string }): boolean {
   const rows = getDb()
@@ -363,21 +365,27 @@ export function commitPendingConfirmationAnswer(
   reply: string,
   sourceMessageId?: string,
   continuation?: QuestionContinuationOptions,
+  /** Trusted in-process host only; ordinary renderer inputs cannot supply it. */
+  hostFence?: QuestionContinuationHostFence,
 ): { chatId: string; sourceMessageId: string; continuationRunId: string } {
+  if (hostFence && !parseQuestionContinuationHostFence(hostFence)) throw new Error("question-host-fence-invalid");
   /*
    * 질문이 "마지막 메시지"여야 한다는 규칙이 답을 버리고 있었다(라운드 3 실측 2026-09-14, app-stdout:
    * `confirm:commitAnswer … Question is stale or no longer pending` ×3). 목표 연속 실행이 질문 뒤에
    * "아직 답을 기다린다"는 말풍선을 붙이면 질문은 더 이상 마지막이 아니었고, 사람이 고른 답은 만료로 버려졌다.
    * 질문은 그 뒤에 **사용자** 메시지가 없고 아직 확정 답이 없는 한 살아 있다.
    */
-  
-
-
+  // The same answer to the same question again is acknowledgement, not a second decision — also after the
+  // continuation's user turn made the question non-pending. One "항상 승인" click committed twice and the second
+  // was refused as stale (main.log 2026-10-17 00:23:05Z), surfacing a refusal for an answer that had landed.
   if (sourceMessageId) {
     const prior = listCommittedQuestionAnswers(chatId)
       .filter((receipt) => receipt.sourceMessageId === sourceMessageId)
       .at(-1);
     if (prior?.continuationRunId && prior.reply && prior.reply === reply.trim()) {
+      if (hostFence && !questionContinuationHostFenceMatches(readCommittedQuestionHostFence(chatId, sourceMessageId), hostFence)) {
+        throw new Error("question-host-fence-changed");
+      }
       return { chatId, sourceMessageId, continuationRunId: prior.continuationRunId };
     }
   }
@@ -424,6 +432,10 @@ export function commitPendingConfirmationAnswer(
         ? JSON.stringify(normalizedContinuation.runtimeSelection)
         : undefined,
       continuationRequestHash: continuationRequestHash(request),
+      ...(hostFence ? { continuationHostFenceVersion: 1,
+        continuationHostOwnerSha256: hostFence.ownerSha256,
+        continuationHostScopeSha256: hostFence.scopeSha256,
+        continuationHostControlSha256: hostFence.controlSha256 } : {}),
     },
   });
   claimedQuestionMessages.add(`${chatId}\0${source.id}`);
@@ -619,11 +631,11 @@ function isQuestionFromRecoveryAfterOwnerGoalStop(
 }
 
 /**
-
-
-
-
-
+ * 이 질문을 낸 실행. 답은 그 실행의 권한을 잇는다 — 대화의 "가장 최근" 실행이 아니다.
+ * 실측(운영 2026-10-18 01:49Z): 질문은 전체 권한 실행이 냈는데 그 뒤 읽기 전용 팀 보고 턴이
+ * 돌았고, 화면이 그 최신 실행의 권한을 이어 오너의 답이 "Bash 비활성화"로 실행됐다.
+ * 정본은 이 메시지를 확정한 최종 이벤트(durableMessageId)다. 그 결속이 없는 질문만, 질문보다
+ * 먼저 시작한 가장 최근 전경 실행으로 대신한다 — 질문 뒤에 시작한 실행은 절대 고르지 않는다.
  */
 function questionSourceRunId(chatId: string, question: { id: string; createdAt: string }): string | undefined {
   try {
@@ -736,4 +748,129 @@ export function claimPendingConfirmationAnswer(
     claimedQuestionMessages.delete(key);
     invalidatePendingConfirmationsCache();
   };
+}
+
+/** Exact host-local reader. Legacy/mobile global pending enumeration remains unchanged. */
+export function readQuestionDecision(chatId: string, sourceMessageId?: string): QuestionDecisionView | null {
+  if (!chatId || (sourceMessageId !== undefined && !sourceMessageId)) return null;
+  const source = sourceMessageId
+    ? getDb().prepare("SELECT id,text,created_at FROM chat_messages WHERE chat_id=? AND id=? AND role='assistant'")
+      .get(chatId,sourceMessageId) as {id:string;text:string;created_at:string}|undefined
+    : (() => { const row = latestOpenQuestionMessage(chatId); return row
+      ? {id:row.id,text:row.text,created_at:row.createdAt} : undefined; })();
+  if (!source) return null;
+  const committed = listCommittedQuestionAnswers(chatId).find(answer => answer.sourceMessageId === source.id);
+  if (!pendingQuestionMessage(chatId,source.id) && !committed?.continuationRunId) return null;
+  const runs = getDb().prepare(`SELECT DISTINCT run_id FROM run_events WHERE chat_id=? AND kind='mcp_final'
+    AND json_valid(payload_json) AND json_extract(payload_json,'$.durableMessageId')=? LIMIT 2`)
+    .all(chatId,source.id) as Array<{run_id:string}>;
+  if (runs.length !== 1) return null;
+  const questions = projectQuestionDecisionText(source.text,source.id).questions;
+  if (!questions.length) return null;
+  const base = {chatId,sourceRunId:runs[0].run_id,sourceMessageId:source.id,
+    sourceMessageSha256:createHash("sha256").update(source.text,"utf8").digest("hex"),questions};
+  return {schema:"agentlas.question-decision.v1",...base,createdAt:source.created_at,
+    awaitingOwner: !committed?.continuationRunId || !getInvocationRunReceipt(committed.continuationRunId),
+    questionBankSha256:createHash("sha256").update(questionDecisionBankJson(base),"utf8").digest("hex"),
+    ...(committed?.continuationRunId ? {committed:{reply:committed.reply,
+      continuationRunId:committed.continuationRunId,ts:committed.ts}} : {})};
+}
+
+const HOST_QUESTION_OWNER_INTENT_KIND = "question_answer_owner_intent";
+const HOST_QUESTION_RECONFIRMED_KIND = "question_answer_host_reconfirmed";
+declare const questionOwnerIntentBrand: unique symbol;
+export interface QuestionHostOwnerIntent { readonly [questionOwnerIntentBrand]: true }
+const questionOwnerIntents = new WeakMap<object, {chatId:string;sourceMessageId:string;reply:string;requestId:string;fence:QuestionContinuationHostFence}>();
+
+function hostFenceFromPayload(payload:Record<string,unknown>):QuestionContinuationHostFence|null {
+  return payload.continuationHostFenceVersion===1 ? parseQuestionContinuationHostFence({
+    ownerSha256:payload.continuationHostOwnerSha256,scopeSha256:payload.continuationHostScopeSha256,
+    controlSha256:payload.continuationHostControlSha256}) : null;
+}
+const hostFencePayload=(fence:QuestionContinuationHostFence)=>({continuationHostFenceVersion:1,
+  continuationHostOwnerSha256:fence.ownerSha256,continuationHostScopeSha256:fence.scopeSha256,
+  continuationHostControlSha256:fence.controlSha256});
+
+/** First observed human intent is durable even when its current control fence needs no renewal. */
+export function observeQuestionHostOwnerIntent(input:{chatId:string;sourceMessageId:string;reply:string;requestId:string;fence:QuestionContinuationHostFence}):QuestionHostOwnerIntent {
+  if(!UUID_RE.test(input.requestId) || !parseQuestionContinuationHostFence(input.fence) || !input.reply.trim()) throw new Error("question-owner-intent-invalid");
+  const runId=answerReceiptRunId(input.chatId),sourceEventId=`question-owner:${input.requestId}`;
+  const reply=input.reply.trim(),replySha256=continuationReplySha256(reply);
+  recordRunEvent({runId,chatId:input.chatId,kind:HOST_QUESTION_OWNER_INTENT_KIND,sourceEventId,
+    payload:{sourceMessageId:input.sourceMessageId,continuationRunId:questionContinuationRunId(input.chatId,input.sourceMessageId),
+      continuationReplySha256:replySha256,...hostFencePayload(input.fence)}});
+  const stored=getRunEventBySource(runId,sourceEventId);
+  if(!stored || stored.kind!==HOST_QUESTION_OWNER_INTENT_KIND || stored.chatId!==input.chatId
+    || stored.payload.sourceMessageId!==input.sourceMessageId || stored.payload.continuationReplySha256!==replySha256
+    || stored.payload.continuationRunId!==questionContinuationRunId(input.chatId,input.sourceMessageId)
+    || !questionContinuationHostFenceMatches(hostFenceFromPayload(stored.payload),input.fence)) throw new Error("question-owner-intent-stale");
+  const token=Object.freeze(Object.create(null)) as QuestionHostOwnerIntent;
+  questionOwnerIntents.set(token,{...input,reply,fence:Object.freeze({...input.fence})});
+  return token;
+}
+
+/** Fresh trusted human retry can acknowledge controls already restored by native Continue.
+ * It never enables a lifetime, clears Stop, restores budget, or changes the stored reply/run. */
+export function reconfirmCommittedQuestionHostFence(token:QuestionHostOwnerIntent):void {
+  const input=token && typeof token==="object" ? questionOwnerIntents.get(token) : undefined;
+  if(!input) throw new Error("question-owner-intent-required");
+  const intent=getCommittedQuestionContinuation(input.chatId,input.sourceMessageId,input.reply);
+  const old=readCommittedQuestionHostFence(input.chatId,input.sourceMessageId);
+  if(!intent || !old || old.ownerSha256!==input.fence.ownerSha256 || old.scopeSha256!==input.fence.scopeSha256)
+    throw new Error("question-host-fence-not-reconfirmable");
+  const ownerSourceEventId=`question-owner:${input.requestId}`;
+  const observed=getRunEventBySource(answerReceiptRunId(input.chatId),ownerSourceEventId);
+  if(!observed || observed.kind!==HOST_QUESTION_OWNER_INTENT_KIND || observed.chatId!==input.chatId
+    || observed.payload.sourceMessageId!==input.sourceMessageId
+    || observed.payload.continuationReplySha256!==continuationReplySha256(input.reply)
+    || !questionContinuationHostFenceMatches(hostFenceFromPayload(observed.payload),input.fence)) throw new Error("question-owner-intent-stale");
+  recordRunEvent({runId:answerReceiptRunId(input.chatId),chatId:input.chatId,kind:HOST_QUESTION_RECONFIRMED_KIND,
+    sourceEventId:`question-reconfirm:${input.requestId}`,payload:{sourceMessageId:input.sourceMessageId,
+      continuationRunId:intent.runId,continuationRequestHash:intent.requestHash,
+      continuationReplySha256:continuationReplySha256(input.reply),ownerSourceEventId,...hostFencePayload(input.fence)}});
+  if(!questionContinuationHostFenceMatches(readCommittedQuestionHostFence(input.chatId,input.sourceMessageId),input.fence)) throw new Error("question-host-reconfirmation-not-durable");
+}
+
+/** Raw canonical answer row only; never synthesize missing legacy control custody. */
+export function readCommittedQuestionHostFence(chatId: string, sourceMessageId: string): QuestionContinuationHostFence | null {
+  const committed = listCommittedQuestionAnswers(chatId).find(answer => answer.sourceMessageId === sourceMessageId);
+  if (!committed?.continuationRunId) return null;
+  const intent=getCommittedQuestionContinuation(chatId,sourceMessageId,committed.reply);
+  if(!intent) return null;
+  const rows = getDb().prepare(`SELECT kind,chat_id,payload_json FROM run_events WHERE run_id=? AND kind IN (?,?) ORDER BY seq DESC`)
+    .all(answerReceiptRunId(chatId),ANSWER_RECEIPT_KIND,HOST_QUESTION_RECONFIRMED_KIND) as Array<{kind:string;chat_id:string|null;payload_json:string}>;
+  let original:QuestionContinuationHostFence|null=null;
+  const parsed=rows.flatMap(row=>{try{return [{...row,payload:JSON.parse(row.payload_json) as Record<string,unknown>}];}catch{return [];}});
+  for(const row of parsed) if(row.kind===ANSWER_RECEIPT_KIND && row.chat_id===chatId
+    && row.payload.sourceMessageId===sourceMessageId && row.payload.continuationRunId===intent.runId
+    && payloadContinuationReply(row.payload)===committed.reply) {original=hostFenceFromPayload(row.payload);break;}
+  // An old answer without host custody is readable, never silently upgraded.
+  if(!original) return null;
+  for(const row of parsed) {
+    const payload=row.payload;
+    if(row.kind!==HOST_QUESTION_RECONFIRMED_KIND || row.chat_id!==chatId || payload.sourceMessageId!==sourceMessageId
+      || payload.continuationRunId!==intent.runId || payload.continuationRequestHash!==intent.requestHash
+      || payload.continuationReplySha256!==continuationReplySha256(committed.reply)
+      || typeof payload.ownerSourceEventId!=="string") continue;
+    const fence=hostFenceFromPayload(payload),observed=getRunEventBySource(answerReceiptRunId(chatId),payload.ownerSourceEventId);
+    if(!fence || fence.ownerSha256!==original.ownerSha256 || fence.scopeSha256!==original.scopeSha256
+      || !observed || observed.kind!==HOST_QUESTION_OWNER_INTENT_KIND || observed.chatId!==chatId
+      || observed.payload.sourceMessageId!==sourceMessageId || observed.payload.continuationRunId!==intent.runId
+      || observed.payload.continuationReplySha256!==continuationReplySha256(committed.reply)
+      || !questionContinuationHostFenceMatches(hostFenceFromPayload(observed.payload),fence)) continue;
+    return fence;
+  }
+  return original;
+}
+
+/** Host-bound answers (including legacy Science sources) cannot enter the bare default starter. */
+export function committedQuestionRequiresHostPreparation(chatId:string,sourceMessageId:string):boolean {
+  return Boolean(getDb().prepare(`SELECT 1 FROM run_events WHERE chat_id=? AND kind='question_answer_committed'
+    AND json_valid(payload_json) AND json_extract(payload_json,'$.sourceMessageId')=?
+    AND json_type(payload_json,'$.continuationHostFenceVersion') IS NOT NULL LIMIT 1`).get(chatId,sourceMessageId))
+    || Boolean(getDb().prepare(`SELECT 1 FROM run_events final JOIN run_events started
+      ON started.chat_id=final.chat_id AND started.run_id=final.run_id AND started.kind='invoke_started'
+      WHERE final.chat_id=? AND final.kind='mcp_final' AND json_valid(final.payload_json)
+        AND json_extract(final.payload_json,'$.durableMessageId')=? AND json_valid(started.payload_json)
+        AND json_extract(started.payload_json,'$.invocationSource')='science' LIMIT 1`).get(chatId,sourceMessageId));
 }

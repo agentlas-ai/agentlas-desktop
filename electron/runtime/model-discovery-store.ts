@@ -14,7 +14,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { classifyDiscovery, type DiscoveryOutcome, type DiscoverySource } from "../../shared/model-discovery";
+import { classifyDiscovery, discoverySignInRequired, type DiscoveryOutcome, type DiscoverySource } from "../../shared/model-discovery";
 import { isPackagedRuntime, userDataPath } from "../runtime-paths";
 
 interface StoredRun {
@@ -149,7 +149,7 @@ export function recordDiscovery(runtime: string, outcome: DiscoveryOutcome): voi
  */
 export function settleDiscovery(
   runtime: string,
-  input: { stdout: string; models: readonly string[]; exitCode?: number | null; timedOut?: boolean; source?: DiscoverySource; idRe?: RegExp },
+  input: { stdout: string; models: readonly string[]; exitCode?: number | null; timedOut?: boolean; source?: DiscoverySource; idRe?: RegExp; signedOut?: boolean },
 ): DiscoveryOutcome {
   const previous = lastGoodDiscovery(runtime);
   const outcome = classifyDiscovery({ ...input, previousCount: previous?.count ?? null });
@@ -170,15 +170,15 @@ const staleNoCacheWarned = new Set<string>();
 const entitlementRefusalNoted = new Set<string>();
 /** The vendor refused this account (not signed in / not entitled). That is a fact about the account, not a defect: info, once per runtime per app start. */
 function isEntitlementRefusal(reason: string | null | undefined): boolean {
-  return /\b(?:acp:)?40[13]\b|permission_denied|unauthori[sz]ed|not authori[sz]ed/i.test(reason ?? "");
+  return discoverySignInRequired(reason) || /\b(?:acp:)?40[13]\b|permission_denied|unauthori[sz]ed|not authori[sz]ed/i.test(reason ?? "");
 }
 export function reportDiscoveryLoudly(runtime: string, outcome: DiscoveryOutcome, log?: (message: string) => void): boolean {
   if (outcome.status !== "failed" && !outcome.yieldWarning) {
     lastLogged.delete(runtime);
     return false;
   }
-  
-
+  // Serving the last-good list because the vendor cache was momentarily unreadable is intentional, not an
+  // error: warn once per process instead of an error line every time the picker refreshes (103 lines, 2026-10-10).
   if (outcome.stale && outcome.reason === "no-cache") {
     if (staleNoCacheWarned.has(runtime)) return false;
     staleNoCacheWarned.add(runtime);

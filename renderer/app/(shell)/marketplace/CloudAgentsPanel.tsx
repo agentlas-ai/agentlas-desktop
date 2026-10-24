@@ -9,7 +9,7 @@ type Phase = { phase: "idle" } | { phase: "installing" } | { phase: "done"; mess
 
 /**
  * Hub 메뉴의 "내 Cloud" 탭 — 내 Agent Cloud 에 저장한 에이전트를 이 Mac 에 내려받는다.
- * 내려받은 사본은 로컬 에이전트라서 조직도 '에이전트 추가'에 그대로 나타난다.
+ * 내려받은 사본은 로컬 에이전트라서 조직도 '에이전트 추가'에 그대로 나타난다(오너 결정 2026-10-19).
  * 목록은 로그인한 계정의 것이고, 로그인은 앱이 이미 가진 흐름(onSignIn)으로만 한다.
  */
 export function CloudAgentsPanel({

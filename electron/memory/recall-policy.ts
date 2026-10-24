@@ -1,13 +1,14 @@
 import { createHash } from "node:crypto";
 import { sameMemoryActor } from "../../shared/memory-actor-family";
 export interface MemoryRecallScope { projectId?: string|null; projectPath?: string|null; agentId?: string|null;
-  chatId?: string|null; visibilityDomain?: string|null }
+  chatId?: string|null; visibilityDomain?: string|null; recallBoundary?: "assigned-target" }
 export interface MemoryRecallPolicyRow { scope:string;project_id:string|null;project_path:string|null;agent_id:string|null;chat_id:string|null;
   binding_owner?:string|null;binding_actor?:string|null;applicability_json?:string|null }
 const fields=new Set(["scope","projectIds","projectPathHash","actorId","chatId","recallChannel","enabled","compatibilityScope","visibilityDomain","audience"]);
 const exact=(v:unknown,keys:string[]):v is Record<string,unknown>=>Boolean(v)&&typeof v==="object"&&!Array.isArray(v)&&Object.keys(v as object).sort().join()===keys.sort().join();
 /** Policy precedes ranking/embedding. Scope comes from an actual host reader. */
 export function allowsOrdinaryMemoryRecall(row:MemoryRecallPolicyRow,scope:MemoryRecallScope,owner:string):boolean {
+  if(scope.recallBoundary === "assigned-target")return false;
   if(!row.binding_owner)return owner.startsWith("device-local:");
   if(row.binding_owner!==owner)return false;
   let p:Record<string,unknown>;try {p=JSON.parse(row.applicability_json??"{}");}catch{return false;}

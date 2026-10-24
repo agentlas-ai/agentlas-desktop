@@ -106,10 +106,10 @@ export class AcpConnection {
     child.on("close", (code,signal) => {try{this.transportDiagnostics.childClosed(code,signal);}catch{/* Observation must not block closure. */}finish(code);});
     child.on("error", (error) => {try{const code=error&&typeof error==="object"&&!types.isProxy(error)?Object.getOwnPropertyDescriptor(error,"code")?.value:undefined;this.transportDiagnostics.childError(nativeSpawnErrorCode(code));}catch{/* Observation must not block closure. */}finish(null);});
     child.stdout.on("end", () => {try{this.transportDiagnostics.transportEnded("stdout-end");}catch{/* Observation must not block closure. */}finish(child.exitCode);});
-    
-
-
-
+    // A write to an agent that has already exited fails asynchronously with EPIPE on stdin. With no listener that error was
+    // uncaught and took the host process down: W7 ca1724ea (2026-10-17), the daemon exited reason=error during the copilot
+    // ACP model probe, and every GUI turn then failed native_gui_activation_prerequisites_missing until it re-attached.
+    // ACP lanes, codex app-server (codex-session.ts) and the codex alive session all use this connection. Closed transport.
     child.stdin.on("error", () => {try{this.transportDiagnostics.transportEnded("child-error");}catch{/* Observation must not block closure. */}finish(child.exitCode);});
   }
 
@@ -236,35 +236,65 @@ const SECRET_AUTH_ENV: Array<{ match: RegExp; envVars: string[] }> = [
   { match: /api[-_]?key/i, envVars: ["CODEX_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY", "XAI_API_KEY", "KIMI_API_KEY", "MOONSHOT_API_KEY"] },
 ];
 
+/** The variables an ACP `type: "env_var"` method reads: `vars[].name` (optional ones excluded), or the older single `varName`. */
+function envVarMethodNames(method: Record<string, any>): string[] {
+  if (Array.isArray(method.vars)) {
+    return method.vars
+      .filter((v: unknown) => v && typeof v === "object" && (v as Record<string, unknown>).optional !== true)
+      .map((v: Record<string, unknown>) => String(v.name ?? "").trim())
+      .filter(Boolean);
+  }
+  return typeof method.varName === "string" && method.varName.trim() ? [method.varName.trim()] : [];
+}
+
 /**
-
-
-
-
+ * The one auth method this client may send without a person at the keyboard, or undefined.
+ *
+ * `authenticate` with an interactive method is a sign-in: the agent opens the browser on the
+ * provider's sign-in page. ACP's default method type is "agent" (the agent runs its own flow), and
+ * Grok's only method `grok.com` starts a device-code sign-in every time it is called (Windows test
+ * of 1.3.88, 2026-10-23: six accounts.x.ai tabs, each a new code, from model listing and its 1/2/4-minute
+ * retries). Model listing, detection and turns never ask for that: signing in is the Connect action,
+ * which runs the CLI's own login command (runtime-connect.ts). So only a method that signs in from
+ * values already present qualifies:
+ *  - `type: "env_var"` with every required variable set;
+ *  - a method whose id names an API key (SECRET_AUTH_ENV) while that secret is set
+ *    (codex-acp advertises [api-key, chat-gpt]; with the key present api-key is chosen).
+ * Everything else ("agent", "terminal", untyped login methods) is never sent: a signed-in agent opens
+ * its session without it (measured: grok 1.0.67 session/new succeeds signed in, and signed out answers
+ * -32000 "Authentication required" with no browser), and a signed-out one gets the typed auth failure.
+ * Never invent or ask for credentials.
  */
 export function chooseAuthMethod(
   methods: Array<Record<string, any>>,
   env: NodeJS.ProcessEnv,
 ): Record<string, any> | undefined {
-  const needsMissingSecret = (m: Record<string, any>): boolean => {
-    const id = String(m?.id ?? "");
-    for (const rule of SECRET_AUTH_ENV) {
-      if (!rule.match.test(id)) continue;
-      return !rule.envVars.some((name) => !!env[name]);
+  const present = (name: string): boolean => typeof env[name] === "string" && env[name]!.trim().length > 0;
+  return methods.find((m) => {
+    if (!m || typeof m !== "object" || !m.id) return false;
+    if (m.type === "env_var") {
+      const names = envVarMethodNames(m);
+      return names.length > 0 && names.every(present);
     }
-    return false;
-  };
-  const usable = methods.filter((m) => m && !needsMissingSecret(m));
-  if (usable.length > 0) return usable[0];
-  return methods[0];
+    if (m.type !== undefined && m.type !== "agent") return false;
+    const id = String(m.id);
+    const rule = SECRET_AUTH_ENV.find((r) => r.match.test(id));
+    return rule ? rule.envVars.some(present) : false;
+  });
+}
+
+/** ACP's typed "authentication required" refusal (schema error code -32000), read from the code, never the wording. */
+export const ACP_AUTH_REQUIRED_CODE = -32000;
+export function isAcpAuthRequired(error: unknown): boolean {
+  return error instanceof AcpRpcError && error.code === ACP_AUTH_REQUIRED_CODE;
 }
 
 /**
-
-
-
-
-
+ * Session modes from a session/new response. Two shapes are in the wild and both
+ * are real: the spec's `modes: { currentModeId, availableModes }` and the
+ * `configOptions[category=mode]` select (measured 2026-08-18: grok advertises
+ * neither, gemini/cursor use one of the two). Parsing only — which mode a run
+ * should pick is policy and lives in acp.ts.
  */
 export function modeOptionsFromNewSession(response: any): Array<{ id: string; name: string; description?: string; current?: boolean }> {
   const rows: Array<{ id: string; name: string; description?: string; current?: boolean }> = [];

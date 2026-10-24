@@ -3,7 +3,7 @@ import fs from "node:fs";
 import type { BrowserWindow } from "electron";
 import { APP_CONTROL_CATALOG, type AppControlCatalogEntry, type AppControlInvokeArg } from "./catalog.generated";
 import { AppControlError, appControlDomainHandlerRegistered, appControlHandlerRegistered, appControlInteractionWindowAvailable, invokeAppControlIpc } from "./ipc-registry";
-import { appControlEffectNeedsOwnerTurn, appControlPolicy, type AppControlEffect } from "./policy";
+import { appControlEffectNeedsOwnerTurn, appControlOmittedFromModelCatalog, appControlPolicy, type AppControlEffect } from "./policy";
 import { APP_CONTROL_ARGUMENT_SCHEMAS, APP_UI_PREFERENCE_VALUE_SCHEMAS } from "./argument-schemas.generated";
 import { describeCatalogOperation, describeHostOperation, type OperationDescriptor } from "./operation-descriptors";
 import type { AppControlRendererOperation, AppControlRendererReply } from "../../shared/app-control";
@@ -184,7 +184,7 @@ const words = (value: string) => value
   .replace(/([a-z0-9])([A-Z])/g, "$1 $2").toLowerCase().split(/[^a-z0-9가-힣]+/).filter(Boolean);
 
 // Search is deterministic over the operation's own words (path, doc, signature, keywords). No translation table:
-                                                                                                                
+// the model writes the query in English (owner rule 2026-10-13: the host does not judge meaning by word lists).
 function queryTerms(query: string): string[] {
   return [...new Set(words(query))];
 }
@@ -219,6 +219,8 @@ export function appControlOperationsLocal(input: OperationsInput): AppControlOpe
     : !!operation.entry && appControlHandlerRegistered(operation.entry.channel)
       && (appControlDomainHandlerRegistered(operation.entry.channel) || appControlInteractionWindowAvailable(host?.interactionWindow?.() ?? host?.mainWindow() ?? null));
   const restricted = () => APP_CONTROL_CATALOG.flatMap((entry) => {
+    // An operation the model's catalog does not carry is not listed here either (policy.ts MODEL_CATALOG_OMITTED).
+    if (appControlOmittedFromModelCatalog(entry)) return [];
     const policy = appControlPolicy(entry);
     return !policy.allowed && (!exact || entry.path === exact)
       ? [{ operation: entry.path, reason: policy.reason, args: entry.params, signature: entry.signature }] : [];
@@ -251,7 +253,7 @@ export function appControlOperationsLocal(input: OperationsInput): AppControlOpe
       const pathWords = new Set(words(operation.path));
       let score = 0;
       for (const term of terms) {
-        
+        // A plural guess names the singular path token (dev 2026-10-18: "automations.runs" did not reach runCounts' "run").
         if (pathText.includes(term)) score += 3;
         else if (term.length > 3 && term.endsWith("s") && pathWords.has(term.slice(0, -1))) score += 2;
         else if ([...haystack].some((word) => word.startsWith(term) || term.startsWith(word) && word.length >= 4)) score += 1;
@@ -351,13 +353,13 @@ const IMAGE_DATA_URL = /^data:image\/(png|jpeg);base64,/;
 const IMAGE_OVER_CAP = `[image left out: a result keeps only its first ${MAX_RESULT_IMAGES} images as files]`;
 const IMAGE_NOT_SAVED = "[image left out: it could not be saved as a file]";
 
-
-
-
-
-
-
-
+// An operation that answers an image as a data URL (computerUse.capturePreview, browser.captureLiveFrame, site.captureRect,
+// workLiveView.capture, ...) left it to clipResult, which cut the base64 like any long text. Dev 2026-10-18 run30 O8 (GPT
+// firm QA checking a saved docx): capturePreview's 313,674-char data URL came back as 22,569 chars, no model could read it,
+// and the QA closed inconclusive. Each image is saved as a host observation capture (captures/observations, removed after the
+// settled-run detail window; never a run output) and the result
+// holds its absolute path; `images` names where each was and its file, and the harness channel hands those files to the model
+// as images (turn-tools/control-server.ts).
 function saveResultImages(value: unknown): { value: unknown; images?: AppResultImage[] } {
   let text: string;
   try { text = JSON.stringify(value) ?? "null"; } catch { return { value }; }
@@ -391,16 +393,16 @@ type ResultCut = { path: string; kind: "array" | "string"; total: number; return
 const LONG_TEXT = 2_000;
 const STUB_BUDGET = 6_000;
 
-
-
-
-
-
-
-
-
-
-
+// A result over RESULT_LIMIT keeps its JSON shape. Dev 2026-10-17 run8 (Haiku automation): automations.listRuns came back
+// as a cut JSON string over the limit, so the same `result` was an array for a small history and a string for a large one,
+// and every JSON.parse of it in code mode failed. Arrays are cut to the prefix that fits (one item kept while long text can
+// still shrink), then long free text, and `cuts` names each cut. Only a result none of that brings under the limit keeps
+// the string preview.
+// A cut list of records keeps the left-out records in place as stubs { id, name?, truncated: true } (within a budget), so
+// the list's length and its ids stay whole for code that reads only `result`. Dev 2026-10-18 run10 and run13:
+// automations.list kept 2 of 48 automations; Haiku's code read data.result, counted 2 and reported the week of
+// "자동화 2개" twice, once with the left-out names beside the result and the cut facts ahead of it, because the daemon's
+// canonical channel sorts keys (truncated/truncation came after result again) and the code never looked at them.
 function clipResult(value: unknown): { result: unknown; truncated?: true; cuts?: ResultCut[] } {
   if (value === undefined) return { result: null };
   let text: string;
@@ -513,8 +515,8 @@ function errorCode(error: unknown): string {
 /**
  * A name the operation does not take may be a field of one of its object arguments (models flatten `input`): say where it
  * goes, with the call shape. "takes input" alone left a model putting `input` next to `operation`, which harness app.call
- * reads as the container of ALL arguments (its `input` alias for `args`); with the shape written out, a model sends the
- * filter inside args.input.
+ * reads as the container of ALL arguments (its `input` alias for `args`); with the shape written out, 7 of 8 Haiku runs
+ * sent the filter inside args.input, against 0 of 8 without the hint.
  */
 function nestedFieldHint(path: string, unknown: readonly string[]): string {
   const properties = APP_CONTROL_ARGUMENT_SCHEMAS[path]?.properties;
@@ -559,7 +561,8 @@ export async function appControlCallLocal(caller: AppControlCaller, input: AppCo
   const named = input.args === undefined || input.args === null ? {}
     : typeof input.args === "object" && !Array.isArray(input.args) ? input.args as Record<string, unknown> : null;
   if (!named) throw new AppControlError("invalid-arguments", "args must be an object of named arguments.");
-  const catalogEntry = APP_CONTROL_CATALOG.find((entry) => entry.path === path);
+  // A name the model's catalog does not carry is answered as an unknown operation: no "not available to One" that confirms it exists.
+  const catalogEntry = APP_CONTROL_CATALOG.find((entry) => entry.path === path && !appControlOmittedFromModelCatalog(entry));
   if (catalogEntry) {
     const policy = appControlPolicy(catalogEntry);
     if (!policy.allowed) throw new AppControlError("operation-not-allowed", `${path} is not available to One: ${policy.reason}.`);
@@ -567,8 +570,9 @@ export async function appControlCallLocal(caller: AppControlCaller, input: AppCo
   const operation = operations().find((candidate) => candidate.path === path);
   if (!operation) {
     if (catalogEntry?.surface === "science") throw new AppControlError("science-not-installed", "Agentlas Science is not installed or not active.");
-    // The refusal names the closest catalog operations (the same deterministic search), so a guessed name such as
-    // automations.runs.list leads to the real one (automations.listRuns).
+    // The refusal names the closest catalog operations (the same deterministic search). Dev 2026-10-18 run11: Haiku guessed
+    // automations.runs.list, automations.history and automations.executions for automations.listRuns, and the hint named
+    // one_app_operations, a tool the harness path does not have (it was tried as an operation name).
     const searched = path ? (appControlOperationsLocal({ query: path, limit: 8 }).operations ?? []).map((item) => String(item.operation)) : [];
     // A misspelled path ("automatons.list") shares few whole words with the catalog's search. A path the shared typo matcher
     // finds almost identical leads; the search results keep their order after it; looser typo matches come last.
@@ -583,7 +587,7 @@ export async function appControlCallLocal(caller: AppControlCaller, input: AppCo
   const unknown = Object.keys(named).filter((key) => !operation.params.includes(key));
   if (unknown.length) throw new AppControlError("invalid-arguments", `${unknownArgumentMessage(path, unknown, operation.params)}${nestedFieldHint(path, unknown)}`);
   // A required argument that is missing is refused, never sent as undefined: automations.listRuns without its id answered
-  // 0 runs as if that were the history.
+  // 0 runs as if that were the history (dev 2026-10-17 run8), and the agent reported "no runs last week".
   const requiredKeys = APP_CONTROL_ARGUMENT_SCHEMAS[path]?.required;
   const missing = Array.isArray(requiredKeys) ? requiredKeys.filter((key) => typeof key === "string" && named[key] === undefined) : [];
   if (missing.length) throw new AppControlError("invalid-arguments", `${path} needs ${missing.join(", ")}; pass them in args.`);

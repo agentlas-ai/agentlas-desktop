@@ -255,62 +255,75 @@ export const RUNTIME_CAPABILITIES: Record<RuntimeKind, RuntimeCapabilityDescript
 };
 
 /**
-
-
-
-
-
-
-
-
-
+ * Request shapes each runtime ADAPTER refuses before dispatch — the selectors' source of truth (R-090, 2026-10-18).
+ *
+ * This is what the Agentlas adapter accepts, not an isolation proof (that is system-agents/judgment-capability.ts
+ * inspectJudgmentCapability, which every no-tools judgment candidate must also pass). A selector that INHERITS a runtime
+ * (the memory curator inheriting the turn runner, AGI's candidate list, the judgment recovery lane) skips one whose row
+ * refuses the request it is about to send; an explicit owner pin is not replaced, it gets the adapter's typed refusal.
+ * Production 2026-10-14..16: the automatic memory curator inherited Antigravity and failed 69 of 69 calls
+ * (untrustedNoTools refused, 2.7 s each including the sign-in probe) before falling back to the judgment pool.
+ * Each row is read off its adapter's own refusal, cited in `evidence`; changing an adapter's refusal changes its row.
  */
 export interface RuntimeRequestLimits {
   /** `untrustedNoTools`: accepted, accepted only together with `judgmentOnly`, or refused. */
   untrustedNoTools: "supported" | "judgment-only" | "refused";
-  /** `restrictedReadBoundary` (host filesystem boundary not release-verified on that adapter). */
-  restrictedReadBoundary: "supported" | "refused";
+  /**
+   * The runtime's own read mechanism. A run whose configured permission is read (a read-only automation's
+   * `restrictedReadBoundary` included) runs through it; no runtime refuses that boundary (owner rule 2026-10-23: agents carry
+   * no permission of their own, the runtime's configured permission applies). Documentation of the adapter's mapping only.
+   */
+  readMechanism: string;
   /** permission "read" with a configured tool surface (an MCP config or allowed MCP tools), outside browser-only runs. */
   readWithTools: "supported" | "refused";
   evidence: string;
 }
 
 export const RUNTIME_REQUEST_LIMITS: Record<RuntimeKind, RuntimeRequestLimits> = {
-  "claude-code": { untrustedNoTools: "supported", restrictedReadBoundary: "refused", readWithTools: "supported",
-    evidence: "electron/runtime/claude-code.ts runs untrustedNoTools with --safe-mode; restrictedReadBoundary is refused before dispatch (host filesystem boundary not release-verified)" },
-  codex: { untrustedNoTools: "judgment-only", restrictedReadBoundary: "refused", readWithTools: "supported",
-    evidence: "electron/runtime/codex.ts runCodex: `untrustedNoTools && !judgmentOnly` throws RuntimeJudgmentRefusal; restrictedReadBoundary throws" },
-  antigravity: { untrustedNoTools: "refused", restrictedReadBoundary: "refused", readWithTools: "refused",
-    evidence: "electron/runtime/antigravity.ts runAntigravity: untrustedNoTools (judgmentOnly or not) throws RuntimeJudgmentRefusal, restrictedReadBoundary is refused before dispatch, antigravityReadToolFailure refuses read+tools (agy_read_tools_unsupported: headless agy auto-denies every tool without a permission flag)" },
-  grok: { untrustedNoTools: "judgment-only", restrictedReadBoundary: "refused", readWithTools: "supported",
-    evidence: "electron/runtime/grok.ts runGrok: `untrustedNoTools && !judgmentOnly` throws (judgments run with --deny \"*\"); restrictedReadBoundary throws" },
-  cursor: { untrustedNoTools: "refused", restrictedReadBoundary: "refused", readWithTools: "supported",
-    evidence: "electron/runtime/cursor.ts: `untrustedNoTools || restrictedReadBoundary` throws RuntimeJudgmentRefusal" },
-  kimi: { untrustedNoTools: "refused", restrictedReadBoundary: "refused", readWithTools: "supported",
-    evidence: "electron/runtime/kimi.ts: `untrustedNoTools || restrictedReadBoundary` throws RuntimeJudgmentRefusal" },
-  acp: { untrustedNoTools: "supported", restrictedReadBoundary: "supported", readWithTools: "supported",
+  "claude-code": { untrustedNoTools: "supported", readWithTools: "supported",
+    readMechanism: "claudePermissionArgs(read): --disallowed-tools READ_ONLY_DENIED_TOOLS (no --permission-mode)",
+    evidence: "electron/runtime/claude-code.ts runs untrustedNoTools with --safe-mode" },
+  codex: { untrustedNoTools: "judgment-only", readWithTools: "supported",
+    readMechanism: "exec --sandbox read-only (resume -c sandbox_mode=\"read-only\"); app-server codexThreadPolicy(read) sandboxPolicy readOnly, networkAccess false, approvals answered by the host arbiter",
+    evidence: "electron/runtime/codex.ts runCodex: `untrustedNoTools && !judgmentOnly` throws RuntimeJudgmentRefusal" },
+  antigravity: { untrustedNoTools: "refused", readWithTools: "refused",
+    readMechanism: "antigravityPermissionArgs(read): no permission flag, so headless agy auto-denies write_file/command (workspace reads only)",
+    evidence: "electron/runtime/antigravity.ts runAntigravity: untrustedNoTools (judgmentOnly or not) throws RuntimeJudgmentRefusal, antigravityReadToolFailure refuses read+tools (agy_read_tools_unsupported: headless agy auto-denies every tool without a permission flag)" },
+  grok: { untrustedNoTools: "judgment-only", readWithTools: "supported",
+    readMechanism: "ACP (default): read/plan session mode + host arbiter rejects edit/execute; legacy grok.ts: grokPermissionArgs(read) --deny GROK_READ_ONLY_DENIED_TOOLS",
+    evidence: "electron/runtime/grok.ts runGrok: `untrustedNoTools && !judgmentOnly` throws (judgments run with --deny \"*\")" },
+  cursor: { untrustedNoTools: "refused", readWithTools: "supported",
+    readMechanism: "ACP (default): ask/plan session mode + host arbiter rejects edit/execute; legacy cursor.ts: no --force (headless writes are not applied)",
+    evidence: "electron/runtime/cursor.ts: `untrustedNoTools` throws RuntimeJudgmentRefusal" },
+  kimi: { untrustedNoTools: "refused", readWithTools: "supported",
+    readMechanism: "ACP (default): plan session mode + host arbiter rejects edit/execute; legacy kimi.ts has no read flag and says so (permission-not-enforceable notice)",
+    evidence: "electron/runtime/kimi.ts: `untrustedNoTools` throws RuntimeJudgmentRefusal" },
+  acp: { untrustedNoTools: "supported", readWithTools: "supported",
+    readMechanism: "chooseAcpModeId(read) plan/ask/read-only session mode + session/request_permission: read/search/fetch/think allowed, edit/execute rejected by the host arbiter",
     evidence: "electron/runtime/acp.ts has no refusal for these shapes (untrustedNoTools withholds the Agentlas tool surface; the agent's native tools are not proved off, see inspectJudgmentCapability)" },
-  byok: { untrustedNoTools: "supported", restrictedReadBoundary: "supported", readWithTools: "supported",
+  byok: { untrustedNoTools: "supported", readWithTools: "supported",
+    readMechanism: "prepareMainToolLoop(read): read built-ins only + host arbiter (mutating tools denied on read)",
     evidence: "electron/runtime/byok.ts omits tools and dispatch when untrustedNoTools" },
-  ollama: { untrustedNoTools: "supported", restrictedReadBoundary: "supported", readWithTools: "supported",
-    evidence: "electron/runtime/local-tool-loop.ts omits tools when untrustedNoTools and honors restrictedReadBoundary" },
-  lmstudio: { untrustedNoTools: "supported", restrictedReadBoundary: "supported", readWithTools: "supported",
+  ollama: { untrustedNoTools: "supported", readWithTools: "supported",
+    readMechanism: "local-tool-loop builtinToolsAsOpenAi(read): read built-ins only + host arbiter (mutating tools denied on read)",
+    evidence: "electron/runtime/local-tool-loop.ts omits tools when untrustedNoTools" },
+  lmstudio: { untrustedNoTools: "supported", readWithTools: "supported", readMechanism: "same local tool loop as ollama",
     evidence: "same local tool loop as ollama" },
-  mlx: { untrustedNoTools: "supported", restrictedReadBoundary: "supported", readWithTools: "supported",
+  mlx: { untrustedNoTools: "supported", readWithTools: "supported", readMechanism: "same local tool loop as ollama",
     evidence: "same local tool loop as ollama" },
-  "agentlas-local": { untrustedNoTools: "supported", restrictedReadBoundary: "supported", readWithTools: "supported",
+  "agentlas-local": { untrustedNoTools: "supported", readWithTools: "supported", readMechanism: "same local tool loop as ollama",
     evidence: "same local tool loop as ollama" },
-  agentlas: { untrustedNoTools: "supported", restrictedReadBoundary: "supported", readWithTools: "supported",
+  agentlas: { untrustedNoTools: "supported", readWithTools: "supported",
+    readMechanism: "prepareMainToolLoop(read) in agentlas-serving.ts: read built-ins only + host arbiter (mutating tools denied on read)",
     evidence: "electron/runtime/agentlas-serving.ts skips the tool loop when untrustedNoTools" },
 };
 
-export type RuntimeRequestRefusal = "untrusted_no_tools_unsupported" | "restricted_read_unsupported" | "read_tools_unsupported";
+export type RuntimeRequestRefusal = "untrusted_no_tools_unsupported" | "read_tools_unsupported";
 
 /** The fields of a RunnerRequest the limits read. */
 export interface RuntimeRequestShape {
   untrustedNoTools?: boolean;
   judgmentOnly?: boolean;
-  restrictedReadBoundary?: boolean;
   permission?: "read" | "write" | "full";
   browserOnly?: boolean;
   mcpConfigPath?: string;
@@ -324,7 +337,6 @@ export function runtimeRequestRefusal(kind: string, shape: RuntimeRequestShape):
   if (shape.untrustedNoTools && (limits.untrustedNoTools === "refused" || (limits.untrustedNoTools === "judgment-only" && !shape.judgmentOnly))) {
     return "untrusted_no_tools_unsupported";
   }
-  if (shape.restrictedReadBoundary && limits.restrictedReadBoundary === "refused") return "restricted_read_unsupported";
   if (limits.readWithTools === "refused" && shape.permission === "read" && !shape.browserOnly
     && (Boolean(shape.mcpConfigPath) || Boolean(shape.mcpAllowedTools?.length))) return "read_tools_unsupported";
   return null;

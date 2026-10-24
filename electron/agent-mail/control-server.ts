@@ -44,16 +44,16 @@ import { getCapabilityDecision } from "../store/capability-grants";
 // request starts inside any turn's scopes.
 const hostRootContext = AsyncLocalStorage.snapshot();
 
-
-
-
-
-
-
-
-
-
-
+// Main-side handler for the inline agent mail MCP child. Loopback only, one
+// random server token, one capability per run config.
+//
+// Sending: owner decision 2026-09-26 — a mail the owner asked One for goes out
+// in any permission mode (auto mode runs conversations as "read"; refusing
+// there made "send this mail" impossible without an extra step). The boundary
+// is the existing capability-grant model, not the run's permission tier: an
+// owner "deny" rule for the mail send tool stops it; nothing else asks again.
+// Dry-runs (graph simulation, plan mode) never send. Inbound-mail runs are
+// additionally held to the thread they were started for (see autoRuns).
 
 const MAX_REQUEST_BYTES = 512 * 1024;
 
@@ -90,8 +90,8 @@ let serverStarting: Promise<number> | null = null;
 let shutdownRegistered = false;
 const capabilities = new Map<string, AgentMailCapabilityBinding>();
 const capabilityMailScopes = new Map<string, AgentMailExecutionScope>();
-export interface CompanyAgentMailGate { assertCurrent(): Promise<void>; allowedOperations: readonly string[]; threadId: string }
-const companyGates = new Map<string, Readonly<{ assertCurrent: () => Promise<void>; allowed: ReadonlySet<string>; threadId: string }>>();
+export interface CompanyAgentMailGate { assertCurrent(): Promise<void>; runBoundary<T>(operation: () => Promise<T>): Promise<T>; allowedOperations: readonly string[]; threadId: string }
+const companyGates = new Map<string, Readonly<{ assertCurrent: () => Promise<void>; runBoundary: CompanyAgentMailGate['runBoundary']; allowed: ReadonlySet<string>; threadId: string }>>();
 const COMPANY_OPERATIONS = new Set(["thread", "read", "reply", "draft"]);
 async function assertCompanyMailEffect(binding: AgentMailCapabilityBinding): Promise<void> {
   const scope = capabilityMailScopes.get(binding.capabilityId), gate = companyGates.get(binding.capabilityId);
@@ -412,7 +412,13 @@ const VIEWS: readonly AgentMailThreadView[] = ["inbox", "waiting", "sent", "arch
 export async function handleAgentMailControlRequest(request: Record<string, unknown>): Promise<unknown> {
   const scope = typeof request.capabilityId === "string" ? capabilityMailScopes.get(request.capabilityId) : undefined;
   // A process/UI scope change can never move an already issued personal capability into company Mail.
-  return withAgentMailExecutionScope(scope ?? { kind: "personal" }, () => handleScopedAgentMailControlRequest(request));
+  const execute = () => withAgentMailExecutionScope(scope ?? { kind: "personal" }, () => handleScopedAgentMailControlRequest(request));
+  if(scope?.kind === "organization"){
+    const gate=companyGates.get(String(request.capabilityId));
+    if(!gate)throw Error("organization-mail-work-gate-required");
+    return gate.runBoundary(async()=>{const result=await execute();await gate.assertCurrent();return result});
+  }
+  return execute();
 }
 async function handleScopedAgentMailControlRequest(request: Record<string, unknown>): Promise<unknown> {
   if (typeof request.token !== "string" || !serverToken || request.token !== serverToken) throw new Error("agent-mail-capability-invalid");
@@ -744,13 +750,13 @@ export function removeAgentMailCapability(configKey: string, capabilityId: strin
 export async function createCompanyAgentMailCapability(input: Omit<AgentMailCapabilityBinding, "capabilityId">,
   configKey: string, gate: CompanyAgentMailGate): Promise<{ path: string; binding: AgentMailCapabilityBinding }> {
   const scope = currentAgentMailExecutionScope();
-  if (scope?.kind !== "organization" || !gate || typeof gate.assertCurrent !== "function" || !Array.isArray(gate.allowedOperations)
+  if (scope?.kind !== "organization" || !gate || typeof gate.assertCurrent !== "function" || typeof gate.runBoundary !== "function" || !Array.isArray(gate.allowedOperations)
     || !isAgentMailId(gate.threadId) || gate.allowedOperations.length < 1 || gate.allowedOperations.length > 4 || gate.allowedOperations.some(op => !COMPANY_OPERATIONS.has(op)))
     throw Error("organization-mail-work-gate-required");
-  const assertCurrent = gate.assertCurrent.bind(gate), allowed = new Set(gate.allowedOperations), threadId = gate.threadId;
+  const assertCurrent = gate.assertCurrent.bind(gate), runBoundary=gate.runBoundary.bind(gate), allowed = new Set(gate.allowedOperations), threadId = gate.threadId;
   await assertCurrent();
   const result = await createAgentMailCapability(input, configKey);
-  companyGates.set(result.binding.capabilityId, Object.freeze({ assertCurrent, allowed, threadId }));
+  companyGates.set(result.binding.capabilityId, Object.freeze({ assertCurrent, runBoundary, allowed, threadId }));
   try { await assertCurrent(); return result; }
   catch (error) { removeAgentMailCapability(configKey, result.binding.capabilityId); throw error; }
 }

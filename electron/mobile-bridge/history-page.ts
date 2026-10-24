@@ -3,7 +3,7 @@ import type { MobileBridgeChatHistoryPageDto } from "../../shared/mobile-bridge"
 import { listChatMessagesPage, listChatMessagesBeforeUiAnchor } from "../store/chats";
 import { listUiInstances } from "../harness/ui-instances";
 import { mergeMobileInlineUiTranscript } from "./finance-ui-transcript";
-import { projectMobileBridgeHistory, type MobileBridgeHistoryConsumption } from "./projector";
+import { projectMobileBridgeHistory, type MobileBridgeHistoryConsumption, type MobileBridgeHistoryOptions } from "./projector";
 import { mobileBridgeJsonBytes, MOBILE_BRIDGE_SAFE_PAYLOAD_BYTES } from "./sanitize";
 
 // Leave space inside the normal transport budget for cursor metadata and envelope.
@@ -40,6 +40,7 @@ export async function readMobileBridgeHistoryPage(
   chatId: string,
   limit = 200,
   cursor?: string,
+  options: MobileBridgeHistoryOptions = {},
 ): Promise<MobileBridgeChatHistoryPageDto> {
   const before = cursor === undefined ? undefined : decodeCursor(chatId, cursor);
   const instances = await listUiInstances(chatId);
@@ -74,7 +75,7 @@ export async function readMobileBridgeHistoryPage(
   const consumption: MobileBridgeHistoryConsumption = { consumed: 0 };
   const messages = projectMobileBridgeHistory(
     inline.history, limit, MOBILE_BRIDGE_HISTORY_PAGE_BYTES - CURSOR_RESERVE_BYTES, chatId,
-    inline.fallbackByMessageId, consumption,
+    inline.fallbackByMessageId, consumption, options,
   );
   if (inline.history.length && !consumption.consumed) {
     throw new RangeError("History message exceeds the mobile page budget");

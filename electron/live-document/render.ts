@@ -1,7 +1,7 @@
 import { BrowserWindow, session, type Session } from "electron";
 import { APP_CONTROL_MAIN_BUDGET_MS } from "../daemon/device-bridge";
-import { flowHtml, RENDER_SLIDE_WIDTH, sheetPagesHtml, slidePagesHtml } from "./render-html";
-import { liveDocumentSnapshot, LiveDocumentError } from "./store";
+import { flowHtml, RENDER_IMAGE_TYPES, RENDER_SLIDE_WIDTH, sheetPagesHtml, slidePagesHtml } from "./render-html";
+import { liveDocumentSnapshot, liveDocumentSourceParts, LiveDocumentError } from "./store";
 import { LIVE_DOCUMENT_RENDER_MAX_PAGES, type LiveDocumentRenderReply } from "../../shared/live-document";
 
 /*
@@ -97,6 +97,31 @@ async function photograph(window: BrowserWindow, width: number, budget: Budget):
   return `data:image/png;base64,${(size.width > width ? image.resize({ width, quality: "best" }) : image).toPNG().toString("base64")}`;
 }
 
+/** A picture larger than this, or the pictures of one slide past the total, keep their labelled box (the page is one IPC message). */
+const IMAGE_MAX_BYTES = 16 * 1024 * 1024;
+const SLIDE_IMAGES_MAX_BYTES = 48 * 1024 * 1024;
+
+/**
+ * Puts a slide's pictures into its page: the bytes come from the session's original file (store.ts liveDocumentSourceParts),
+ * go in as data: URLs (the only scheme the render session lets through) and the page waits until each has decoded or failed.
+ */
+async function loadImages(window: BrowserWindow, sessionId: string, parts: string[], budget: Budget): Promise<void> {
+  if (!parts.length) return;
+  const found = await liveDocumentSourceParts(sessionId, [...new Set(parts)], IMAGE_MAX_BYTES);
+  const urls: Record<string, string> = {};
+  let total = 0;
+  for (const [part, bytes] of found) {
+    const type = RENDER_IMAGE_TYPES[(/\.([a-z0-9]+)$/i.exec(part)?.[1] ?? "").toLowerCase()];
+    if (!type || total + bytes.length > SLIDE_IMAGES_MAX_BYTES) continue;
+    total += bytes.length;
+    urls[part] = `data:${type};base64,${Buffer.from(bytes).toString("base64")}`;
+  }
+  if (!Object.keys(urls).length) return;
+  await budget.within(window.webContents.executeJavaScript(`((urls) => Promise.all([...document.querySelectorAll('img.pic')].map((img) => {
+    const url = urls[img.dataset.part]; if (!url) return null; img.src = url; return img.decode().catch(() => img.remove());
+  })).then(() => true))(${JSON.stringify(urls)})`, true));
+}
+
 /** Boxes whose text runs past the box, or out of the page. */
 const MEASURE = `(() => { const page = document.querySelector('.slide') || document.body; const p = page.getBoundingClientRect(); const out = [];
   for (const el of document.querySelectorAll('[data-box]')) { const r = el.getBoundingClientRect();
@@ -162,6 +187,7 @@ async function renderNow(sessionId: string, range: RenderRange, budget: Budget, 
       for (const [offset, page] of shown.entries()) {
         window.setContentSize(page.width, page.height);
         await load(window, page.html, budget);
+        await loadImages(window, sessionId, page.images, budget);
         const index = start + offset + 1;
         for (const [box, kind] of await budget.within(window.webContents.executeJavaScript(MEASURE, true)) as Array<[string, LiveDocumentRenderOverflow["kind"]]>) progress.overflow.push({ page: index, box, kind });
         progress.pages.push({ index, label: page.label, width: page.width, height: page.height, dataUrl: await photograph(window, RENDER_SLIDE_WIDTH, budget) });

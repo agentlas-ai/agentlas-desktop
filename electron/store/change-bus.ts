@@ -27,10 +27,10 @@ export interface DesktopStoreChange {
   entity: DesktopStoreEntity;
   id?: string;
   /**
-
-
-
- */
+   * Task changes only: the opaque id of the project the task belongs to, null when it belongs to none, absent when the
+   * writer could not tell. A project screen filters on it instead of refreshing on every task in every project
+   * (review 2026-10-16 H3).
+   */
   projectId?: string | null;
 }
 
@@ -71,10 +71,10 @@ export function desktopStoreTransaction<T>(db: Database.Database, body: () => T)
 const listeners = new Set<DesktopStoreChangeListener>();
 
 /**
-
-
-
-
+ * A listener runs in the async context it subscribed from, not the writer's. Listeners fire synchronously inside the
+ * write, so they used to inherit whatever run the writer was in: a Goal verifier recording its inference start woke
+ * the AGI monitor, whose own Codex decision then opened its effect scope inside the verifier's sealed stage and was
+ * judged an untracked dispatch, aborting the real verification (Yotube room 2026-10-14 00:29Z and 00:48Z).
  */
 export function onDesktopStoreChange(listener: DesktopStoreChangeListener): () => void {
   const inSubscriberContext = AsyncLocalStorage.snapshot();
@@ -84,9 +84,9 @@ export function onDesktopStoreChange(listener: DesktopStoreChangeListener): () =
 }
 
 /**
-
-
-
+ * Announce a task change with the task's project scope (review 2026-10-16 H3). Every task change goes through here so a
+ * project screen can tell its own tasks from every other project's. Without `projectId` the stored row is read; a
+ * missing row (already deleted) or table leaves the scope absent, which subscribers treat as unknown.
  */
 export function emitTaskStoreChange(db: Database.Database, taskId: string, projectId?: string | null): void {
   let scope = projectId;

@@ -36,6 +36,76 @@ import { getDb } from "./db";
 import { invocationProcessOwner } from "./invocation-run-owners";
 import { getChatGoalContract, getChatGoalRevision } from "./chat-goals";
 import { agentRunCwd } from "../runtime/exec";
+import { scienceLongRunId, type ScienceLoopLongRunProjection as CanonicalScienceLoopLongRunProjection } from "agentlas-science/dist/contracts/science-long-run";
+
+// Additive extension contract: the bundled SDK pin can precede the installed Science extension.
+// Keep the validator identical to the canonical SDK contract; no dependency repin is required.
+const SCIENCE_LONG_RUN_PROJECTION_SCHEMA = "agentlas.science-long-run-projection.v2" as const;
+export type ScienceLoopLongRunProjection = CanonicalScienceLoopLongRunProjection & {
+  authorCompletion?: ScienceAuthorCompletionProjection;
+};
+
+export interface ScienceAuthorCompletionProjection {
+  eventId: string;
+  eventSequence: number;
+  sourceVersion: number;
+  sourceStateSha256: string;
+  scientificVerification: "unchecked";
+  record: {
+    schema: "agentlas.science.author-completion-record.v2";
+    authorDeclaredCompletion: true;
+    loopSessionId: string;
+    contractId: string;
+    contractVersion: number;
+    contractContentSha256: string;
+    receipts: readonly { criterionIndex: number; receiptId: string; receiptSha256: string; provenanceSha256: string }[];
+    advisories: readonly { code: string; observed: string; nextAction: string; [key: string]: unknown }[];
+    manuscriptWritingChecklist: Record<string, unknown> | null;
+  };
+}
+
+/** Verify the exact canonical declaration, including its limitations, before mirroring it. */
+export function scienceAuthorCompletionProjectionValid(input: ScienceLoopLongRunProjection): boolean {
+  try {
+  const exact = (value: unknown, keys: string[]): value is Record<string, unknown> => Boolean(value && typeof value === "object"
+    && !Array.isArray(value) && Object.keys(value).sort().join("\0") === [...keys].sort().join("\0"));
+  const hash = /^[a-f0-9]{64}$/;
+  const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
+  const declaration = input.authorCompletion;
+  if (input.schema !== SCIENCE_LONG_RUN_PROJECTION_SCHEMA || input.status !== "completed"
+    || !exact(declaration, ["eventId", "eventSequence", "sourceVersion", "sourceStateSha256", "scientificVerification", "record"])
+    || !uuid.test(declaration.eventId) || !Number.isSafeInteger(declaration.eventSequence) || declaration.eventSequence < 1
+    || declaration.eventSequence > input.eventCursor || declaration.sourceVersion !== input.sourceVersion
+    || !Number.isSafeInteger(input.sourceVersion) || input.sourceVersion < 1 || !Number.isSafeInteger(input.eventCursor)
+    || declaration.sourceStateSha256 !== input.sourceStateSha256 || !hash.test(input.sourceStateSha256)
+    || declaration.scientificVerification !== "unchecked") return false;
+  const record = declaration.record;
+  if (!exact(record, ["schema", "authorDeclaredCompletion", "loopSessionId", "contractId", "contractVersion", "contractContentSha256",
+    "receipts", "advisories", "manuscriptWritingChecklist"])
+    || record.schema !== "agentlas.science.author-completion-record.v2" || record.authorDeclaredCompletion !== true
+    || !uuid.test(record.loopSessionId) || !uuid.test(record.contractId)
+    || record.loopSessionId !== input.loopSessionId || record.contractId !== input.contractId
+    || record.contractVersion !== input.contractVersion || !Number.isSafeInteger(record.contractVersion) || record.contractVersion < 1
+    || record.contractContentSha256 !== input.contractContentSha256 || !hash.test(record.contractContentSha256)
+    || !Array.isArray(record.receipts) || !Array.isArray(record.advisories)
+    || record.manuscriptWritingChecklist !== null && (typeof record.manuscriptWritingChecklist !== "object" || Array.isArray(record.manuscriptWritingChecklist))) return false;
+  let previousIndex = -1;
+  for (const receipt of record.receipts) {
+    if (!exact(receipt, ["criterionIndex", "receiptId", "receiptSha256", "provenanceSha256"])
+      || typeof receipt.criterionIndex !== "number" || !Number.isSafeInteger(receipt.criterionIndex) || receipt.criterionIndex <= previousIndex
+      || receipt.criterionIndex >= input.successCriteria.length || typeof receipt.receiptId !== "string" || !uuid.test(receipt.receiptId)
+      || typeof receipt.receiptSha256 !== "string" || !hash.test(receipt.receiptSha256)
+      || typeof receipt.provenanceSha256 !== "string" || !hash.test(receipt.provenanceSha256)) return false;
+    previousIndex = receipt.criterionIndex;
+  }
+  if (record.advisories.some(item => !item || typeof item !== "object" || typeof item.code !== "string"
+    || typeof item.observed !== "string" || typeof item.nextAction !== "string")) return false;
+  const canonical = (value: unknown): unknown => Array.isArray(value) ? value.map(canonical) : value && typeof value === "object"
+    ? Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical((value as Record<string, unknown>)[key])])) : value;
+  return typeof input.completionReceiptSetSha256 === "string" && hash.test(input.completionReceiptSetSha256)
+    && createHash("sha256").update(JSON.stringify(canonical(record)), "utf8").digest("hex") === input.completionReceiptSetSha256;
+  } catch { return false; }
+}
 
 export interface LongRunRecord {
   id: string;
@@ -681,22 +751,22 @@ export function upsertLongRunDomainBinding(input: {
   return binding;
 }
 
-
-
-
-
-
-
-
-
-
-
+/*
+ * ★Owner stop is a boundary (owner 2026-09-25). A goal the owner/user paused stays paused until the owner
+ * resumes it. Before this, a pause landed as a ledger fact only: pausing a `blocked` goal changed nothing,
+ * and the blocked-goal sweep, the effect-observation resume and the app-closed restart path resumed it —
+ * isolated live run 2026-09-25 (run_80dc1968 / run_8df1afec) kept spending after two user pauses.
+ *
+ * The hold is read from the ledger, not from status alone, so a later host re-park (app_closed pause,
+ * retry wait) cannot launder it: the latest user pause is held until a later owner resume
+ * (user_control resume_with_message / command resume, or a user-actor transition back to queued/running).
+ */
 export const LONG_RUN_OWNER_HOLD_CODE = "long_run_owner_paused";
 
 /**
-
-
-
+ * The room's Goal is stopped until its owner lifts it: an owner pause, an unreleased owner hold, or a budget stop.
+ * Owner decision 2026-10-06: a paused room also stops the agent graphs (Toolchains) it made — on 2026-10-05 the
+ * paused X Marketing room's schedules kept running and drafting.
  */
 export function chatGoalStoppedByOwner(chatId: string): boolean {
   const row = getDb().prepare(`SELECT id, status, pause_reason FROM long_runs WHERE root_chat_id = ?
@@ -720,10 +790,10 @@ export function longRunOwnerHold(runId: string): boolean {
 }
 
 /**
-
-
-
-
+ * Host settlement of a system-admitted Goal at its retry cap (owner 2026-09-25). Two exits only:
+ *  - "settled_with_evidence": every current criterion passed in the latest authorized verifier round,
+ *    with resolvable host references. Completion revalidates that exact proof set atomically.
+ *  - "owner_review_required": historical compatibility outcome; keeps independent work queued.
  */
 export const AUTO_GOAL_SETTLED_WITH_EVIDENCE = "auto_goal_settled_with_evidence";
 export const AUTO_GOAL_OWNER_REVIEW_REQUIRED = "auto_goal_owner_review_required";
@@ -849,10 +919,10 @@ export function transitionLongRun(input: {
 }
 
 /**
-
-
-
-
+ * A cancelled or failed run owns no open work. Measured 2026-09-27: 11 cancelled runs still held
+ * tasks in todo/doing/verifying (run_6d24b328 'doing' since 09-15) because every cancel path — user
+ * delete, blocked-goal sweep, MCP cancelRun — changed only long_runs. Nothing read them yet, but any
+ * count of open work across runs would have seen phantom work. Callers run inside their transaction.
  */
 function closeOpenTasksOfEndedRun(runId: string, now: string): void {
   const db = getDb();
@@ -893,7 +963,7 @@ export function blockHostPausedClaimedGoalWait(runId: string, expectedVersion: n
   return blocked;
 }
 
-/** */
+/** Ledger kind of the host's "no Goal stays blocked" sweep (owner 2026-09-23). */
 export const BLOCKED_GOAL_SWEEP_EVENT_KIND = "run.blocked_sweep";
 export const BLOCKED_GOAL_SWEEP_SCHEMA = "agentlas.blocked-goal-sweep.v1";
 
@@ -909,10 +979,10 @@ export interface BlockedGoalRetry {
 }
 
 /**
-
-
-
-
+ * Follow-ups scheduled after Goal turns for the same reason since the owner last spoke (`ownerSince`) or used a
+ * Goal control. Each one is a turn that ended without starting new work. Measured on the owner's DB 2026-10-04
+ * (Thread Marketing): a fixed 30-second follow-up after every refused wait re-ran a ~247k-token turn 39 times
+ * in one hour, all with the same answer ("972 to go, next check 15:11").
  */
 export function consecutiveGoalTurnFollowUps(runId: string, reason: string, ownerSince: string | null, now = Date.now(),
   options: { sinceCompletedTurn?: boolean } = {}): number {
@@ -970,14 +1040,14 @@ export function pendingBlockedGoalRetry(runId: string): BlockedGoalRetry | null 
 }
 
 /**
-
-
-
-
-
-
-
-
+ * 막힌 목표를 '자동 재시도 예약'으로 옮긴다 — 오너 지시 2026-09-23 "블락되는거 전부다 치워라",
+ * 정정 "눌러서 이어가는게 결국 멈춘거 아닌가".
+ *
+ * 앱이 지금 당장 확인(효과 관찰)도 재개도 못 할 때(런타임 없음·사용 한도·관찰 모름) 사람을 기다리지 않고
+ * 스스로 다시 할 시각을 원장에 적는다. 상태는 'waiting_tool'(앱이 기다리는 중)이고, 그 시각이 되면
+ * 스윕이 원래 사유로 되돌려(reopenDueBlockedGoalRetry) 같은 판단을 다시 한다. 이 쓰기는 어떤 실행도
+ * 허가하지 않는다 — 불확실한 효과는 여전히 읽기 전용 관찰만 풀 수 있다. blocked→waiting_tool 은
+ * 일반 전이표에 없으므로 여기서만 CAS 로 쓴다.
  */
 export function scheduleBlockedGoalRetry(input: {
   runId: string;
@@ -1028,8 +1098,8 @@ export function scheduleBlockedGoalRetry(input: {
 }
 
 /**
- * A Goal that asked the owner a question rests until the owner answers.
- * The hold is the row itself: status waiting_tool with the question code in blocked_reason (the host never
+ * A Goal that asked the owner a question rests until the owner answers (owner 2026-10-20 "답오기전에 해당작업 보류하며
+ * 다른 작업은 진행"). The hold is the row itself: status waiting_tool with the question code in blocked_reason (the host never
  * rests a Goal as blocked/waiting_user, see resolveNonBlockingGoalStatus). Every transition rewrites blocked_reason, so it ends
  * with the state it describes. No retry is scheduled and nothing wakes a held Goal on its own, so it neither re-asks the same
  * card on every wake nor keeps a Work project's provider busy for the owner's other conversations (the spaced follow-up it
@@ -1130,15 +1200,15 @@ export function releaseGoalOwnerAnswerHold(input: { runId: string; expectedVersi
  * update), so one prompt look is owed. Later failures of the same launch back off normally. */
 export const BLOCKED_GOAL_STARTUP_RETRY_MS = 30_000;
 
-/**
-
-
-
-
-
-
-
- */
+/** Backoff for the next automatic retry: 5 min doubling, capped at 6 h. It counts only the failures this run
+ * has had since its last success (a settled completed turn or an owner control) within 24 h. A resume that
+ * worked is not a failure: counting it made every healthy Goal that resumes every few minutes sit at the 6 h
+ * cap after a single restart (measured 2026-10-03: retryIndex 70 on a 37-cycle Goal, 751 on a spinning one).
+ * Carried copies of an existing retry never count either — they re-write the same schedule.
+ * The owner's authority being (re)established also starts a fresh count: an adopted grant (run.goal_revision_bound) or
+ * a status change the owner made (Resume/Start). Retries before it stood on a host cause that is now gone; counting them
+ * put the Yotube Goal's next retry 5 h 20 min out right after 1.3.64 resumed it (2026-10-17: six goal_owner_grant_unrecorded
+ * retries before the grant was adopted at 14:39Z; a W7 copy then failed once and was scheduled at retryIndex 6). */
 export function nextBlockedGoalRetrySlot(runId: string, now = Date.now(),
   options: { startup?: boolean } = {}): { retryIndex: number; nextAt: string } {
   const since = new Date(now - 24 * 60 * 60_000).toISOString();
@@ -2025,9 +2095,9 @@ export function recordLongRunVerification(input: {
   const id = `verify_${randomUUID()}`;
   const now = new Date().toISOString();
   const db = getDb();
-  
-
-
+  // IMMEDIATE: this reads (and resolves evidence refs) before it writes. Deferred, a daemon commit in between failed
+  // the insert with SQLITE_BUSY_SNAPSHOT, which busy_timeout never waits on ("terminal verification failed: database
+  // is locked", Yotube room 2026-10-13 18:57Z).
   db.transaction(() => {
     const current = getLongRun(input.runId)!;
     const currentBinding = getLongRunGoalRevisionBinding(input.runId);
@@ -2145,6 +2215,64 @@ export function applyScienceLongRunProjectionStatus(input: {
   return next;
 }
 
+/** Mirror a validated author declaration without issuing any scientific verification receipt. */
+export function applyScienceAuthorCompletionProjection(input: ScienceLoopLongRunProjection, owner: {
+  hostOwnerKind: "desktop" | "daemon"; appInstanceId?: string; assertOwner?: () => void;
+}): LongRunRecord {
+  const assertOwner = () => {
+    if (owner.hostOwnerKind === "daemon") {
+      if (!owner.appInstanceId || typeof owner.assertOwner !== "function") throw new Error("science_projection_owner_invalid");
+      owner.assertOwner();
+    } else if (owner.hostOwnerKind !== "desktop") throw new Error("science_projection_owner_invalid");
+  };
+  assertOwner();
+  if (!scienceAuthorCompletionProjectionValid(input)) throw new Error("science_projection_author_completion_invalid");
+  const db = getDb();
+  const result = db.transaction(() => {
+    assertOwner();
+    const current = getLongRun(scienceLongRunId(input.loopSessionId));
+    const binding = current && getLongRunDomainBinding(current.id);
+    if (!current || current.surface !== "science" || current.scienceJobId !== input.loopSessionId
+      || current.hostOwnerKind !== owner.hostOwnerKind
+      || owner.hostOwnerKind === "daemon" && current.appInstanceId !== owner.appInstanceId
+      || !binding || binding.projectionStatus !== "current" || binding.domain !== "science" || binding.objectType !== "loop_session"
+      || binding.objectId !== input.loopSessionId || binding.externalProjectId !== input.scienceProjectId
+      || binding.contractId !== input.contractId || binding.contractVersion !== input.contractVersion
+      || binding.contractContentSha256 !== input.contractContentSha256 || binding.objectVersion !== input.sourceVersion
+      || binding.stateSha256 !== input.sourceStateSha256 || binding.eventCursor !== input.eventCursor) {
+      throw new Error("science_projection_author_completion_binding_invalid");
+    }
+    if (current.status === "completed") {
+      const previous = db.prepare("SELECT payload_json FROM long_run_events WHERE run_id=? AND kind='science.author_completion_projected' ORDER BY seq DESC LIMIT 1")
+        .get(current.id) as { payload_json: string } | undefined;
+      const payload = previous && JSON.parse(previous.payload_json);
+      if (payload?.completionReceiptSetSha256 !== input.completionReceiptSetSha256
+        || payload?.authorCompletion?.eventId !== input.authorCompletion?.eventId) throw new Error("science_projection_author_completion_terminal_conflict");
+      return current;
+    }
+    if (LONG_RUN_TERMINAL_STATUSES.has(current.status)) throw new Error("science_projection_author_completion_terminal_conflict");
+    if (listLongRunTasks(current.id, true).some(task => task.id !== "task:bootstrap")) {
+      throw new Error("science_projection_author_completion_tasks_open");
+    }
+    const now = new Date().toISOString();
+    db.prepare(`UPDATE long_run_tasks SET state='completed', evidence_ref=?, blocked_reason=NULL, updated_at=?, completed_at=?
+      WHERE run_id=? AND id='task:bootstrap' AND state IN ('todo','doing','waiting_worker','waiting_tool','waiting_user','verifying','blocked')`)
+      .run(`science-author-completion:${input.completionReceiptSetSha256}`, now, now, current.id);
+    const changed = db.prepare(`UPDATE long_runs SET status='completed', pause_reason=NULL, blocked_reason=NULL,
+      completed_at=?, updated_at=?, version=version+1 WHERE id=? AND status=? AND version=?`)
+      .run(now, now, current.id, current.status, current.version);
+    if (changed.changes !== 1) throw new Error("science_projection_status_conflict");
+    appendEventInDb({ runId: current.id, kind: "science.author_completion_projected", actorKind: "system", actorId: "science-projection",
+      payload: { from: current.status, to: "completed", completionMeaning: "author-declared", scientificVerification: "unchecked",
+        sourceVersion: input.sourceVersion, sourceStateSha256: input.sourceStateSha256,
+        completionReceiptSetSha256: input.completionReceiptSetSha256, authorCompletion: input.authorCompletion }, at: now });
+    assertOwner();
+    return getLongRun(current.id)!;
+  }).immediate();
+  emitDesktopStoreChange({ entity: "long-run", id: result.id });
+  return result;
+}
+
 export function tryCompleteVerifiedLongRun(runId: string): boolean {
   const run = getLongRun(runId);
   if (run && getChatGoalRevision(run.goalId)?.lifecycle === "ongoing") return false;
@@ -2245,9 +2373,9 @@ export function recordLongRunInferenceStarted(input: {
       AND json_extract(payload_json,'$.runtimeEvidence.sourceEventId')=? LIMIT 1`)
       .get(input.invocationRunId, `${input.sourceId}:started`) as { ts: string; payload_json: string } | undefined;
     const payload = source ? JSON.parse(source.payload_json) : null;
-
-
-
+    // Which check failed, so the next occurrence names its cause (production 1.3.57, 2026-10-17 05:40:15: one goal-wake
+    // tool selection threw this once; the stored copy of its source id had been masked as a Telegram token, now kept exact
+    // by run-events.ts canonicalInferenceSourceId).
     const failed = !run ? "long_run_missing" : !payload ? "usage_start_row_missing"
       : payload.schemaVersion !== "agentlas.inference-accounting.v1" || payload.attribution !== "goal" ? "usage_start_shape"
       : payload.goalId !== input.goalId || payload.sourceId !== input.sourceId || payload.scopeAnchorId !== input.scopeAnchorId

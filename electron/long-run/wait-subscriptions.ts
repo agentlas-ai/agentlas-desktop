@@ -1,3 +1,7 @@
+import { appendGoalWaitObservation, createGoalWaitObservationData, goalWaitSubjectRef as identity } from "./goal-wait-observation";
+import { pollCanonicalGoalWaits, reconcileCanonicalGoalWaits } from "./canonical-owner-waits";
+import { normalizeGoalWaitTimer } from "./normalize-timer";
+import { claimWaitContinuation, dispatchWaitClaim, reconcileWaitClaim, waitObservationReady, nextWaitObservationAt } from "./wait-engine";
 import { desktopStoreTransaction } from "../store/change-bus";
 import { episodeWaitFenceReason, recordEpisodeWaitTransition, drainGoalEpisodeNotices } from "./episode-disposition";
 import { ownsHostGoalLoop } from "./host-goal-surface";
@@ -83,10 +87,7 @@ export function goalWaitReplansSettled(): boolean { return replanInFlight.size =
 /** Main installs its single invocation dispatcher after startup bindings are ready. */
 export function setGoalWaitHost(value: GoalWaitHost | null): void { host = value; }
 const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
-const identity = (intent: GoalWaitIntent) => intent.subject.kind === "invocation"
-  ? `invocation:${intent.subject.invocationRunId}` : intent.subject.kind === "artifact"
-    ? `artifact:${intent.subject.artifactId}` : intent.subject.kind === "automation"
-      ? `automation:${intent.subject.automationId}` : `timer:${intent.subject.notBefore}`;
+
 export function latestGoalWaitSubscription(goalId: string): GoalWaitSubscription | null {
   const run = getLongRunByGoalId(goalId);
   if (!run || run.surface === "science") return null;
@@ -173,7 +174,7 @@ function persist(value: GoalWaitSubscription): void {
     sourceEventId: `wait:${value.waitId}:${value.revision}`, payload: { subscription: value } });
   recordEpisodeWaitTransition(value);
 }
-export function observeGoalWaitSubject(wait: Pick<GoalWaitSubscription, "chatId" | "sourceInvocationId" | "intent">, now = Date.now()): GoalWaitObservation {
+export function observeGoalWaitSubject(wait: Pick<GoalWaitSubscription, "chatId" | "sourceInvocationId" | "intent">, now = Date.now(), options: { authorizeInvocation?(subject: {chatId:string;invocationRunId:string}):boolean } = {}): GoalWaitObservation {
   const chat = getChat(wait.chatId);
   if (!chat) throw new Error("goal_wait_chat_missing");
   const subject = wait.intent.subject;
@@ -203,10 +204,10 @@ export function observeGoalWaitSubject(wait: Pick<GoalWaitSubscription, "chatId"
   }
   if (subject.invocationRunId === wait.sourceInvocationId) throw new Error("goal_wait_self_subscription");
   const otherChat = getChat(subject.chatId);
-  if (!otherChat || otherChat.projectId !== chat.projectId) throw new Error("goal_wait_subject_owner_mismatch");
+  if (!otherChat || (options.authorizeInvocation ? !options.authorizeInvocation(subject) : otherChat.projectId !== chat.projectId)) throw new Error("goal_wait_subject_owner_mismatch");
   const start = getDb().prepare("SELECT payload_json FROM run_events WHERE run_id=? AND chat_id=? AND kind='invoke_started' LIMIT 1")
     .get(subject.invocationRunId, otherChat.id) as { payload_json: string } | undefined;
-  if (!start || JSON.parse(start.payload_json).invocationSource === "science") throw new Error("goal_wait_invocation_binding_invalid");
+  if (!start || (!options.authorizeInvocation && JSON.parse(start.payload_json).invocationSource === "science")) throw new Error("goal_wait_invocation_binding_invalid");
   const event = getDb().prepare("SELECT id, seq, kind FROM run_events WHERE run_id=? AND chat_id=? AND kind IN ('invoke_completed','invoke_failed','invoke_threw','invoke_cancelled','invoke_interrupted') ORDER BY seq DESC LIMIT 1")
     .get(subject.invocationRunId, otherChat.id) as { id: string; seq: number; kind: string } | undefined;
   // invoke_completed can precede adapter drainage. Wake only after the actual
@@ -238,25 +239,7 @@ export function registerGoalWaitSubscription(input: { goalId: string; invocation
     if (input.intent.deadline && Date.parse(input.intent.deadline) <= now) throw new Error("goal_wait_deadline_elapsed");
     if (input.intent.subject.kind === "timer") {
       // Ongoing Goals, and finite Goals with a deadline up to that deadline (goal-deadline.ts, owner 2026-09-27).
-      const authority = timerWaitAuthority(run.goalId, now);
-      if (!authority.ok) throw new Error(authority.reason);
-      if (authority.deadlineAt && Date.parse(input.intent.subject.notBefore) > Date.parse(authority.deadlineAt)) {
-        // Never past the deadline: a later check is due at the deadline, where the target is verified.
-        input = { ...input, intent: { ...input.intent, subject: { kind: "timer", notBefore: authority.deadlineAt } } };
-      }
-      if (input.intent.subject.kind !== "timer") throw new Error("goal_wait_timer_invalid");
-      let due = Date.parse(input.intent.subject.notBefore);
-      // notBefore is the earliest time, so a too-soon timer is served at the minimum spacing instead of refused.
-
-      // notBefore 47 s after the turn; a refusal here blocked the Goal on a person ("reply with the time you want").
-      if (Number.isFinite(due) && due < now + 60_000) {
-        // A finite Goal's last verification may be less than a minute away.
-        // Do not move its final wake past the very deadline we just enforced.
-        due = Math.min(now + 60_000, authority.deadlineAt ? Date.parse(authority.deadlineAt) : Infinity);
-        input = { ...input, intent: { ...input.intent, subject: { kind: "timer", notBefore: new Date(due).toISOString() } } };
-      }
-      if (!Number.isFinite(due) || (authority.deadlineAt && due > Date.parse(authority.deadlineAt))
-        || (input.intent.deadline && due >= Date.parse(input.intent.deadline))) throw new Error("goal_wait_timer_invalid");
+      input = { ...input, intent: normalizeGoalWaitTimer(input.intent, timerWaitAuthority(run.goalId, now), now) };
     }
     if (input.recoveryMode && (!ownsHostGoalLoop(run.surface) || input.intent.subject.kind !== "timer"
       || run.stallStreak < run.stallWindow || !input.recoveryProgressKey
@@ -366,10 +349,11 @@ function attention(wait: GoalWaitSubscription, target: GoalWaitHost): void {
  * restart, even the absence of invoke_started is not proof that dispatch did
  * not reach an external runtime. Never reconstruct and replay that request. */
 export function reconcileClaimedGoalWaitsAtStartup(target: GoalWaitHost | null = host): GoalWaitAttention[] {
-  try { assertDesktopLongRunAdmissionOpen(); } catch { return []; }
   const owner = pollOwner(target);
   if (!owner) return [];
   const exactEpoch = target?.owner !== undefined;
+  reconcileCanonicalGoalWaits(owner);
+  try { assertDesktopLongRunAdmissionOpen(); } catch { return []; }
   const reconciled: GoalWaitAttention[] = [];
   // This one-time recovery pass must not strand older Goals behind the normal
   // UI listing cap of 500 rows.
@@ -382,12 +366,22 @@ export function reconcileClaimedGoalWaitsAtStartup(target: GoalWaitHost | null =
     if (!candidate) continue;
     if (candidate.surface === "science" || !["app_closed", "crash_recovery"].includes(candidate.pauseReason ?? "")) continue;
     let blocked: GoalWaitSubscription | null = null;
-    desktopStoreTransaction(getDb(), () => {
-      const current = getLongRun(candidate.id), wait = latestGoalWaitSubscription(candidate.goalId);
-      if (!current || !ownsWaitRun(current, owner, exactEpoch) || current.appInstanceId !== candidate.appInstanceId
-        || current.version !== candidate.version || current.status !== "paused"
-        || !["app_closed", "crash_recovery"].includes(current.pauseReason ?? "")
-        || !wait || wait.state !== "claimed" || wait.runId !== current.id || wait.goalId !== current.goalId) return;
+    const expectedWait = latestGoalWaitSubscription(candidate.goalId);
+    if (!expectedWait) continue;
+    reconcileWaitClaim<GoalWaitSubscription>({
+      storage: {
+        transaction: body => desktopStoreTransaction(getDb(), body)(),
+        read: () => latestGoalWaitSubscription(candidate.goalId), persist,
+        current: wait => {
+          const current = getLongRun(candidate.id);
+          return Boolean(current && ownsWaitRun(current, owner, exactEpoch) && current.appInstanceId === candidate.appInstanceId
+            && current.version === candidate.version && current.status === "paused"
+            && ["app_closed", "crash_recovery"].includes(current.pauseReason ?? "")
+            && wait.runId === current.id && wait.goalId === current.goalId);
+        },
+      }, expected: expectedWait,
+      resolve: wait => {
+      const current = getLongRun(candidate.id)!;
       const revision = getChatGoalRevision(wait.goalId);
       const checkpoint = latestTaskCheckpoint(wait.goalId);
       const claim = wait.successorInvocationId ? getDb().prepare(`SELECT seq FROM long_run_events
@@ -462,12 +456,12 @@ export function reconcileClaimedGoalWaitsAtStartup(target: GoalWaitHost | null =
       if (settledRetry) {
         const retired: GoalWaitSubscription = { ...wait, revision: wait.revision + 1,
           state: "dispatched", nextCheckAt: null, wakeReason: "goal_wait_successor_verified_retry_checkpoint" };
-        persist(retired);
+        return { next: retired, afterPersist: () => {
         appendLongRunEvent({ runId: current.id, kind: "run.wait_claim_reconciled", actorKind: "host",
           payload: { waitId: wait.waitId, successorInvocationId: wait.successorInvocationId,
             checkpointId: checkpoint!.checkpointId, terminalEventId: terminal?.id ?? null,
             effectBoundaryReceiptId: settledRetryReceiptId, outcome: "verified_retry_checkpoint_no_replay" } });
-        return;
+        } };
       }
       const successorOwner = wait.successorInvocationId
         ? invocationRunOwners.getRunOwner(wait.chatId, wait.successorInvocationId) : null;
@@ -477,16 +471,15 @@ export function reconcileClaimedGoalWaitsAtStartup(target: GoalWaitHost | null =
       if (wait.episodeRequestId && !successorExecutionClosed) {
         // No receipt of a successor is not proof of non-dispatch. Preserve the
         // exact claim across restart; reconciliation never creates a replacement.
-        if (wait.wakeReason !== "goal_episode_dispatch_unknown") persist({ ...wait, revision: wait.revision + 1,
-          wakeReason: "goal_episode_dispatch_unknown", nextCheckAt: null });
-        return;
+        return wait.wakeReason !== "goal_episode_dispatch_unknown" ? { next: { ...wait, revision: wait.revision + 1,
+          wakeReason: "goal_episode_dispatch_unknown", nextCheckAt: null } } : null;
       }
       // An exact released successor can leave its result unknown, but cannot
       // own the Goal's next step forever. Retire this claim without changing
       // its successor id and schedule a distinct turn with current context.
       const reason = bindingExact ? "goal_wait_claimed_dispatch_uncertain" : "goal_wait_claimed_binding_changed";
       const next: GoalWaitSubscription = { ...wait, revision: wait.revision + 1, state: "cancelled", nextCheckAt: null, wakeReason: reason };
-      persist(next);
+      return { next, afterPersist: () => {
       appendLongRunEvent({ runId: current.id, kind: "run.wait_claim_reconciled", actorKind: "host",
         payload: { waitId: wait.waitId, goalId: wait.goalId, goalRevision: wait.goalRevision,
           checkpointId: wait.checkpointId, successorInvocationId: wait.successorInvocationId,
@@ -498,7 +491,9 @@ export function reconcileClaimedGoalWaitsAtStartup(target: GoalWaitHost | null =
       // queued/running states. A user Stop or pause never matches its predicate.
       scheduleFreshGoalWaitContinuation(next, reason);
       blocked = next;
-    })();
+      } };
+      },
+    });
     if (blocked) {
       const wait = blocked as GoalWaitSubscription;
       reconciled.push({ waitId: wait.waitId, goalId: wait.goalId, chatId: wait.chatId,
@@ -539,6 +534,7 @@ export async function pollGoalWaitSubscriptions(options: { now?: number; clock?:
   const owner = pollOwner(target);
   if (!owner) return;
   const exactEpoch = target.owner !== undefined;
+  await pollCanonicalGoalWaits({ now: options.now, clock: options.clock, owner });
   try { assertDesktopLongRunAdmissionOpen(); } catch { return; }
   const clock = options.clock ?? (() => options.now ?? Date.now());
   const now = clock();
@@ -776,7 +772,7 @@ export async function pollGoalWaitSubscriptions(options: { now?: number; clock?:
           return;
         }
       }
-      const ready = wait.intent.condition === "changed" ? observation.digest !== wait.lastObservedDigest : observation.terminal;
+      const ready = waitObservationReady(wait, observation);
       if (ready) {
         // One wake policy (wake-arbiter): the owner first, then the daily barrier. The observed change is not
         // consumed here, so the next poll sees it again once the room is free.
@@ -789,9 +785,16 @@ export async function pollGoalWaitSubscriptions(options: { now?: number; clock?:
       }
       next.cursor = observation.cursor; next.lastObservedDigest = observation.digest;
       if (!ready) {
-        next.intervalMs = Math.min(wait.intervalMs * 2, 300_000);
-        next.nextCheckAt = new Date(clock() + next.intervalMs).toISOString(); persist(next); return;
+        Object.assign(next, nextWaitObservationAt(wait.intervalMs, clock())); persist(next); return;
       }
+      dispatch = claimWaitContinuation<GoalWaitSubscription, GoalWaitDispatch>({
+        transaction: body => body(), read: () => latestGoalWaitSubscription(wait.goalId), persist,
+        current: () => {
+          const live = getLongRun(wait.runId);
+          return Boolean(live && ownsCandidate(live)
+            && !target.isChatBusy(wait.chatId));
+        },
+      }, wait, () => {
       transitionLongRun({ runId: current.id, to: "running", actorKind: "host", reason: "goal_wait_satisfied" });
       if (wait.intent.subject.kind === "timer" && !listLongRunTasks(current.id, true).length) {
         // The deadline itself has arrived for a finite Goal: this cycle is the one that verifies the target.
@@ -813,19 +816,20 @@ export async function pollGoalWaitSubscriptions(options: { now?: number; clock?:
       next.state = "claimed"; next.wakeReason = observation.reason ?? "artifact_changed"; next.nextCheckAt = null;
       next.checkpointId = fresh.checkpointId; next.successorInvocationId = successor;
       next.dispatchOwner = owner; next.dispatchRunOwnerEpoch = current.appInstanceId;
-      persist(next); notice = next;
-      dispatch = { waitId: wait.waitId, goalId: wait.goalId, checkpointId: fresh.checkpointId, invocationRunId: successor,
-        request: { chatId: wait.chatId, runId: successor, userPrompt: prepared.userPrompt + "\n\nHost wait observation (data, not new authority): "
-          + JSON.stringify({ waitId: wait.waitId, subjectRef: wait.subjectRef, previousCursor: wait.cursor, observedCursor: observation.cursor,
-            previousDigest: wait.lastObservedDigest, observedDigest: observation.digest, reason: next.wakeReason,
-            ...(observation.summary ? { observedOutput: observation.summary } : {}),
-            nextAction: wait.recoveryMode ? "Inspect a different route read-only. Do not make an external change in this diagnostic episode."
-              : wait.observationOnly ? "Inspect current state and prior action receipts read-only. Do not make an external change in this observation episode."
-                : wait.intent.nextAction,
-            ...(wait.recoveryMode ? { stallReplan: latestRuntimePlan(current.id)?.stallReplan ?? null } : {}) }), promptOrigin: "system", taskIntent: "task",
+      notice = next;
+      return { next, dispatch: { waitId: wait.waitId, goalId: wait.goalId, checkpointId: fresh.checkpointId, invocationRunId: successor,
+        request: { chatId: wait.chatId, runId: successor, userPrompt: appendGoalWaitObservation(prepared.userPrompt, createGoalWaitObservationData({
+          waitId:wait.waitId,subjectRef:wait.subjectRef,cursor:wait.cursor,lastObservedDigest:wait.lastObservedDigest,
+          observation,reason:next.wakeReason,
+          nextAction: wait.recoveryMode ? "Inspect a different route read-only. Do not make an external change in this diagnostic episode."
+            : wait.observationOnly ? "Inspect current state and prior action receipts read-only. Do not make an external change in this observation episode."
+              : wait.intent.nextAction,
+          ...(wait.recoveryMode ? {stallReplan:latestRuntimePlan(current.id)?.stallReplan??null}:{}),
+        })), promptOrigin: "system", taskIntent: "task",
           permissions: wait.recoveryMode || wait.observationOnly ? "read" : authority[2] as "read" | "write" | "full", runtimeSelection: prepared.runtimeSelection,
           ...(current.surface === "one" ? { oneMode: true,
-            onePermissionMode: wait.recoveryMode || wait.observationOnly ? "read" as const : authority[2] as "read" | "write" | "full" } : {}) } };
+            onePermissionMode: wait.recoveryMode || wait.observationOnly ? "read" as const : authority[2] as "read" | "write" | "full" } : {}) } } };
+      });
     }).immediate(); } catch (error) {
       const code = error && typeof error === "object" && "code" in error ? error.code : null;
       // A competing writer has not refused the Goal or its owner. Leave its
@@ -842,28 +846,30 @@ export async function pollGoalWaitSubscriptions(options: { now?: number; clock?:
     }
     if (dispatch) {
       const claimed = dispatch as GoalWaitDispatch;
-      const current = getLongRunByGoalId(claimed.goalId), latest = latestGoalWaitSubscription(claimed.goalId);
-      // A claim survives a lost reply or host change. Only its recorded owner
-      // may dispatch; an ownership mismatch is never permission to replay it.
-      if (!current || current.status !== "running" || !ownsCandidate(current) || !latest || latest.state !== "claimed"
-        || !claimOwnedBy(latest, owner) || latest.successorInvocationId !== claimed.invocationRunId
-        || current.appInstanceId !== latest.dispatchRunOwnerEpoch) return;
-      if (episodeWaitFenceReason(latest, clock())) return;
-      try { assertDesktopLongRunAdmissionOpen(); } catch { return; }
-      let state: "dispatched" | "cancelled" | "claimed" = "dispatched", reason = "goal_wait_dispatched";
-      try { if (target.dispatch(claimed).runId !== claimed.invocationRunId) throw new Error("goal_wait_dispatch_identity_mismatch"); }
-      catch { state = latest.episodeRequestId ? "claimed" : "cancelled"; reason = latest.episodeRequestId ? "goal_episode_dispatch_unknown" : "goal_wait_dispatch_failed"; }
-      if (state === "dispatched") recordGoalWake({ runId: current.id, chatId: claimed.request.chatId ?? "", source: "wait",
-        invocationRunId: claimed.invocationRunId, cause: latest.wakeReason ?? "goal_wait" });
-      desktopStoreTransaction(getDb(), () => {
-        const latest = latestGoalWaitSubscription(claimed.goalId), current = getLongRunByGoalId(claimed.goalId);
-        if (!latest || latest.state !== "claimed" || !claimOwnedBy(latest, owner)
-          || latest.successorInvocationId !== claimed.invocationRunId || !current
-          || !ownsWaitRun(current, owner, exactEpoch) || current.appInstanceId !== latest.dispatchRunOwnerEpoch) return;
-        const final = { ...latest, revision: latest.revision + 1, state, wakeReason: reason };
-        persist(final); notice = final;
-        if (state === "cancelled") scheduleFreshGoalWaitContinuation(final, reason, clock());
-      }).immediate();
+      const expected = latestGoalWaitSubscription(claimed.goalId);
+      if (!expected) return;
+      notice = dispatchWaitClaim<GoalWaitSubscription>({
+        storage: {
+          transaction: body => desktopStoreTransaction(getDb(), body).immediate(),
+          read: () => latestGoalWaitSubscription(claimed.goalId), persist,
+          current: latest => {
+            const current = getLongRunByGoalId(claimed.goalId);
+            return Boolean(current && current.status === "running" && ownsCandidate(current)
+              && current.appInstanceId === latest.dispatchRunOwnerEpoch
+              && latest.successorInvocationId === claimed.invocationRunId);
+          },
+        }, expected, owner,
+        assertStart: latest => {
+          if (episodeWaitFenceReason(latest, clock())) throw new Error("goal_wait_episode_fenced");
+          assertDesktopLongRunAdmissionOpen();
+        },
+        start: () => ({ start: true, runId: target.dispatch(claimed).runId }),
+        failureState: expected.episodeRequestId ? "claimed" : "cancelled",
+        failureReason: expected.episodeRequestId ? "goal_episode_dispatch_unknown" : "goal_wait_dispatch_failed",
+        onStarted: () => recordGoalWake({ runId: expected.runId, chatId: claimed.request.chatId ?? "", source: "wait",
+          invocationRunId: claimed.invocationRunId, cause: expected.wakeReason ?? "goal_wait" }),
+        onFinal: latest => { if (latest.state === "cancelled") scheduleFreshGoalWaitContinuation(latest, latest.wakeReason!, clock()); },
+      });
     }
     // Routine timed cycles are quiet; failures still ask for attention once.
     if (notice && ownsCandidate(getLongRun(candidate.id))

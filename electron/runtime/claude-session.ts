@@ -362,10 +362,10 @@ export interface ClaudeResidentMessageOptions {
 }
 
 /**
-
-
-
-
+ * 한 턴의 사용자 메시지를 stdin 으로 보낸다(NDJSON 한 줄, stdin 은 열어 둔다).
+ * 실측 형태 그대로 — 이 모양이 아니면 CLI 가 그 줄을 조용히 버린다.
+ * `uuid`/`priority`/`origin` are optional SDKUserMessage fields (measured offline on 2.1.301: the uuid comes back as
+ * command_lifecycle queued/started and as user_message_uuid on the turn's init, assistant and result frames).
  */
 export function writeClaudeResidentTurn(session: ClaudeResidentSession, text: string, opts: ClaudeResidentMessageOptions = {}): boolean {
   const stdin = session.child.stdin;
@@ -421,15 +421,15 @@ export function retireSupersededClaudeSessions(
 }
 
 /**
-
-
-
-
-
-
-
-
-
+ * A Claude native session is provider state, not a per-process transcript. If a model switch
+ * resumes that native id in a new resident process, a cwd/MCP/env pool key changes, or a one-shot
+ * turn updates it out of process, an older process with the same id can keep a stale local
+ * transcript. Retire those siblings before the new turn is admitted so a later resident turn
+ * cannot silently reuse stale state.
+ * The pool never interrupts an active turn here: a sibling holding this native session that is running a turn (checked
+ * out, or its sink attached, including a same-key resident the pool would otherwise open a second writer beside) makes
+ * the whole handoff busy and retires nothing. Otherwise the matching idle and closing siblings are retired and returned,
+ * so the caller waits for each to exit before the session is resumed (the codex/ACP contract; flow audit AD-5).
  */
 export function retireClaudeModelSiblings(
   pool: AcpSessionPool<ClaudeResidentSession>,
@@ -515,32 +515,32 @@ export function residencyDisabledFor(kind: string, env: NodeJS.ProcessEnv = proc
 }
 
 /**
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+ * 재사용 키. ACP 와 **같은 축**이다: 세션 지문(시스템프롬프트·권한 — 기존 계약
+ * 그대로) 위에 프로세스 정체성(cwd · MCP 권한 · 실행 파일 · 도구 관문 · argv)을
+ * 더하고, 마지막에 env 다이제스트를 얹는다.
+ *
+ * ★env 가 키에 들어가는 이유: 뜬 프로세스는 자기가 뜰 때의 env 를 **평생** 든다.
+ * 자격증명이 갱신돼도 이미 떠 있는 CLI 는 옛 값을 쓴다. 그래서 env 가 바뀌면 이어 쓰지
+ * 않는다(다이제스트만 쓰므로 값 자체는 어디에도 남지 않는다). env 에 매 실행 달라지는
+ * 값이 있으면 재사용이 안 될 뿐 — 안전한 쪽으로 실패한다.
+ *
+ * ★MCP: Main writes a new config file for every invocation (mcp/client.ts configKey `invocation-<uuid>`), and its
+ * entries carry that invocation's proxy launch handles and capability files, all revoked when the invocation ends.
+ * Keying on that path made every owner follow-up spawn a new CLI (production: 1 resident reuse in 38 main calls). With
+ * `mcpGrant` the key holds the grant's identity instead (the server names; the allowed tools, permission and env are in
+ * argv and env), and the runner swaps the new invocation's servers into a reused process with an acknowledged
+ * mcp_set_servers before the turn (claudeMcpSwapPayload). `mcpConfigPath` keeps the old per-path identity for an
+ * executable that cannot swap.
+ *
+ * ★Runtime secret aliases under a grant (claudeEnvDigestOmissions): Main merges every invocation's MCP runtime env
+ * into the runner env (mcp/client.ts), and some of it is minted per invocation (the native browser token, the OS
+ * execution capability, guest computer use, the memory-curator bridge). Hashing those values defeated the grant: a
+ * One Team member or writable-Goal chat that carried the Agentlas Browser spawned a new CLI on every follow-up
+ * (measured through runMcpInvocation: 6 turns, 6 spawns). An alias the `--mcp-config` file never references is not read
+ * by this process: those servers run behind Main's proxy (mcp-config.ts mcpProxySpec), which launches them with the
+ * env Main registered for the new invocation's launch handle, and the swap hands the reused process that handle. So
+ * its value leaves the key (its name stays). An alias the file references (`${ALIAS}`) is expanded once, at spawn,
+ * into a process the swap might not touch, so its value stays in the key exactly as before.
  */
 export function claudePoolKey(input: {
   chatId: string;

@@ -2,6 +2,8 @@ import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { LIVE_DOCUMENT_PORT_SCHEMAS as LIVE_DOCUMENT_SCHEMAS } from "../live-document/ports";
+import { DECK_PORT_SCHEMAS } from "../live-document/deck-ports";
+import { REACH_PORT_SCHEMAS } from "../reach-host/schemas";
 import { recordRunProducedFiles } from "./run-produced-files";
 import { composeFinanceSkillContent, FINANCE_PORTS } from "../finance/tools";
 import type { FinanceReceiptReference } from "../finance/receipts";
@@ -869,8 +871,8 @@ const PORTS: PortDefinition[] = [
       const known = new Set(items.map((item) => item.id));
       const unknown = [...attach, ...revoke].filter((id) => !known.has(id));
       if (unknown.length) return refused("capability_ref_unknown", `unknown: ${unknown.slice(0, 5).join(", ")}`);
-
-
+      // Owner 2026-10-14: product runs use only Agentlas's own skills, plugins and connectors; a runtime's personal items
+      // are never switched on. Refuse them by name instead of letting the switch throw.
       const personal = items.filter((item) => item.source !== "agentlas" && [...attach, ...revoke].includes(item.id)).map((item) => item.id);
       if (personal.length) return refused("personal_runtime", `personal runtime items are not used by Agentlas runs: ${personal.slice(0, 5).join(", ")}`);
       if (ctx.dryRun) return refused("dry_run");
@@ -1033,8 +1035,8 @@ const PORTS: PortDefinition[] = [
     handler: async (args, ctx) => {
       if (ctx.dryRun) return refused("dry_run");
       try {
-
-
+        // The operation's input arrives as `args` (exact key wins) or `input`, the word its input_schema reads as. Dev
+        // 2026-10-17 run8 (Haiku automation): {operation:"automations.listRuns", input:{id}} ran with no id and answered 0 runs.
         const appArgs = args.args !== undefined ? args.args : args.input;
         const result = await (await import("../app-control/service")).appControlCall({ ownerTurn: await harnessOwnerTurn(ctx) }, { operation: args.operation, args: appArgs });
         return ok(result);
@@ -1147,6 +1149,26 @@ const PORTS: PortDefinition[] = [
     inputSchema: LIVE_DOCUMENT_SCHEMAS.render, handler: async (args, ctx) => (await import("../live-document/ports")).documentRender(args, ctx) },
   { operationId: "document.save", kind: "command", purpose: "Write a live document back to its file in the original format (refused if the file changed on disk meanwhile).", required: ["sessionId"],
     inputSchema: LIVE_DOCUMENT_SCHEMAS.save, handler: async (args, ctx) => (await import("../live-document/ports")).documentSave(args, ctx) },
+  // New decks designed in code (live-document/deck-ports.ts): the model's own pptxgenjs script, run in a sandbox with the app's library.
+  { operationId: "document.deck.build", kind: "command", purpose: "Design a NEW .pptx deck in code: your pptxgenjs script (palette, fonts, layouts, shapes, native charts chosen for the topic) runs in a sandbox with the app's own pptxgenjs, saves the file, opens it in the Document tab and returns the lint findings. Not for editing an existing deck (document.apply).", required: ["path", "script"],
+    inputSchema: DECK_PORT_SCHEMAS.build, handler: async (args, ctx) => (await import("../live-document/deck-ports")).documentDeckBuild(args, ctx) },
+  { operationId: "document.deck.lint", kind: "query", purpose: "Check a .pptx (whoever made it) without rendering: text overflow and overlap, small type, low contrast, boxes off the slide, slides with only text. Each finding has numbers and a fix.", required: [],
+    inputSchema: DECK_PORT_SCHEMAS.lint, handler: async (args, ctx) => (await import("../live-document/deck-ports")).documentDeckLint(args, ctx) },
+  // Agentlas Reach (reach-host/ports.ts): the installed apps, how far each is usable, and carrying out one capability of one app.
+  { operationId: "reach.map", kind: "query", purpose: "Installed apps on this computer and how far each is usable by you (scriptable, partial, unmapped), with app keys.", required: [],
+    inputSchema: REACH_PORT_SCHEMAS.map, handler: async (args, ctx) => (await import("../reach-host/ports")).REACH_HANDLERS["reach.map"](args, ctx) },
+  { operationId: "reach.app", kind: "query", purpose: "One installed app's capabilities (ids, parameters count, whether each is ready to use).", required: ["app"],
+    inputSchema: REACH_PORT_SCHEMAS.app, handler: async (args, ctx) => (await import("../reach-host/ports")).REACH_HANDLERS["reach.app"](args, ctx) },
+  { operationId: "reach.describe", kind: "query", purpose: "One app capability in full: parameters as JSON Schema, what it does to the app, how it is carried out.", required: ["app", "capability"],
+    inputSchema: REACH_PORT_SCHEMAS.describe, handler: async (args, ctx) => (await import("../reach-host/ports")).REACH_HANDLERS["reach.describe"](args, ctx) },
+  { operationId: "reach.status", kind: "query", purpose: "State of the background app mapping: map age, exploration switch, driver.", required: [],
+    inputSchema: REACH_PORT_SCHEMAS.status, handler: async (args, ctx) => (await import("../reach-host/ports")).REACH_HANDLERS["reach.status"](args, ctx) },
+  { operationId: "reach.invoke", kind: "command", purpose: "Carry out one ready capability of an installed app (AppleScript command, or the app's own menu and dialog driven on screen); read-only runs may only use capabilities the app declares as reads.", required: ["app", "capability"],
+    inputSchema: REACH_PORT_SCHEMAS.invoke, handler: async (args, ctx) => (await import("../reach-host/ports")).REACH_HANDLERS["reach.invoke"](args, ctx) },
+  { operationId: "reach.explore", kind: "command", purpose: "Look at one running app now: open its dialogs one by one, read them, close them again, and turn what works into ready capabilities.", required: ["app"],
+    inputSchema: REACH_PORT_SCHEMAS.explore, handler: async (args, ctx) => (await import("../reach-host/ports")).REACH_HANDLERS["reach.explore"](args, ctx) },
+  { operationId: "reach.verify", kind: "command", purpose: "Check that an explored capability still works in the running app; re-read it if the app moved it.", required: ["app", "capability"],
+    inputSchema: REACH_PORT_SCHEMAS.verify, handler: async (args, ctx) => (await import("../reach-host/ports")).REACH_HANDLERS["reach.verify"](args, ctx) },
 ];
 
 const PORT_BY_ID = new Map(PORTS.map((port) => [port.operationId, port]));
@@ -1185,11 +1207,11 @@ async function harnessOwnerTurn(ctx: HarnessCallContext): Promise<boolean> {
 }
 
 /**
-
-
-
-
-
+ * A required "<x>Id" also arrives as "<x>", or as "id" when it is the operation's only required id. Production 2026-10-17
+ * (Yotube room, 1.3.61): skill.read {skill:"motion-explainer-video-producer"} and tool.describe {id:"provider.request"} were
+ * refused as arguments_missing although the value was right there, and each refusal cost the model another turn. The
+ * same alias rule as the operation key itself (turn-tools/control-server.ts harnessId). An exact key always wins, and only
+ * a non-empty string is carried over.
  */
 function withRequiredIdAliases(required: readonly string[], args: Record<string, unknown>): Record<string, unknown> {
   const text = (value: unknown): value is string => typeof value === "string" && value.trim() !== "";
@@ -1205,6 +1227,27 @@ function withRequiredIdAliases(required: readonly string[], args: Record<string,
 }
 
 /**
+ * The Reach listings name what they list differently from the ports that take it back: reach.map shows an app under `key`
+ * ("bundle:com.apple.finder") and reach.app shows a capability under `id`, while reach.app, describe, invoke, explore and verify ask for `app`
+ * and `capability`. A model that copies the listing's field name was refused as arguments_missing (real Finder runs 2026-10-24 on the Finance
+ * channel: 2 of 5 paid a turn for `key`, 4 of 5 for `id`, 2 of 5 sent the capability id without any `app`). Same rule as the id aliases: only when the real name is absent, only a non-empty
+ * string, an exact name always wins.
+ */
+function withReachListingAliases(operationId: string, required: readonly string[], args: Record<string, unknown>): Record<string, unknown> {
+  if (!operationId.startsWith("reach.")) return args;
+  const present = (value: unknown): boolean => typeof value === "string" && value.trim() !== "";
+  let out = args;
+  if (required.includes("app") && !present(out.app) && present(out.key)) out = { ...out, app: out.key };
+  if (required.includes("capability") && !present(out.capability) && present(out.id)) out = { ...out, capability: out.id };
+  // A capability id is "<app key>#<tier>:<ref>": with the id in hand the app is named twice. The id is still looked up inside that app only.
+  if (required.includes("app") && !present(out.app) && typeof out.capability === "string") {
+    const owner = /^((?:bundle|path):[^#]+)#/.exec(out.capability.trim());
+    if (owner) out = { ...out, app: owner[1] };
+  }
+  return out;
+}
+
+/**
  * `. Did you mean x?` (or nothing) for a refused operation id; hint text only, the refused id is never run as the near one.
  * An id that is exactly an app operation (automations.listRuns) is a call to app.call, not a port: say so.
  */
@@ -1213,7 +1256,9 @@ async function nearOperations(id: string): Promise<string> {
   let app = "";
   try {
     const { APP_CONTROL_CATALOG } = await import("../app-control/catalog.generated");
-    if (APP_CONTROL_CATALOG.some((entry) => entry.path === id)) app = ` ${id} is an app operation: run harness_call app.call with args {"operation":"${id}","args":{…}}.`;
+    // A name the model's catalog does not carry (policy.ts MODEL_CATALOG_OMITTED) is not offered as an app operation either.
+    const { appControlOmittedFromModelCatalog } = await import("../app-control/policy");
+    if (APP_CONTROL_CATALOG.some((entry) => entry.path === id && !appControlOmittedFromModelCatalog(entry))) app = ` ${id} is an app operation: run harness_call app.call with args {"operation":"${id}","args":{…}}.`;
   } catch { /* the catalog is a plain generated module; without it only the id hint is given */ }
   return `${near ? `.${near}` : ""}${app}`;
 }
@@ -1223,7 +1268,7 @@ export async function callHarnessPort(operationId: string, rawArgs: Record<strin
   const base = { schemaVersion: "agentlas.harness-result.v1" as const, operationId };
   // A misspelled id names the closest operation ids; the refused id is never run as one of them.
   if (!port) return { ...base, status: "refused", reason: "operation_unknown", next: `harness_search with kind "operation" lists them${await nearOperations(operationId)}`, receiptId: `hr_${randomUUID()}` };
-  const args = withRequiredIdAliases(port.required, rawArgs);
+  const args = withReachListingAliases(operationId, port.required, withRequiredIdAliases(port.required, rawArgs));
   const missing = port.required.filter((key) => args[key] === undefined || args[key] === null || (typeof args[key] === "string" && !(args[key] as string).trim()));
   // An argument sent under a wrong name is the usual cause: name the missing field it is closest to.
   if (missing.length) return { ...base, status: "refused", reason: "arguments_missing", next: missingArgumentsMessage(missing, Object.keys(rawArgs), [...port.required, ...Object.keys((port.inputSchema?.properties ?? {}) as object)]), receiptId: `hr_${randomUUID()}` };
@@ -1235,8 +1280,8 @@ export async function callHarnessPort(operationId: string, rawArgs: Record<strin
     outcome = refused("operation_failed", error instanceof Error ? error.message.slice(0, 200) : "unknown error");
   }
   const receiptId = port.kind === "query" ? `hr_${randomUUID()}` : await appendReceipt({ operationId, status: outcome.status, chatId: ctx.chatId, runId: ctx.runId });
-
-
+  // A file this call wrote waits for the run's invocation, which seals it into One Outputs at its next tool completion
+  // (A/B 2026-10-18: document.save and media.image.generate paths never reached the rail). The result keeps its shape.
   if (outcome.status === "ok" && outcome.produced?.length && !ctx.dryRun) recordRunProducedFiles(ctx.runId, operationId, outcome.produced);
   return outcome.status === "ok"
     ? { ...base, status: "ok", ...(outcome.financeReceipt ? { financeReceipt: outcome.financeReceipt } : {}), ...(outcome.nativeUi ? { nativeUi: outcome.nativeUi } : {}), data: outcome.data, receiptId }
@@ -1270,9 +1315,11 @@ export async function searchHarness(query: string, kind?: HarnessItemKind): Prom
   }
   if (want("operation")) for (const port of PORTS) if (matches(query, port.operationId, port.purpose)) out.push({ id: port.operationId, kind: "operation", name: port.operationId, description: `${port.purpose}${port.handler ? "" : " (unavailable)"}` });
   // The app's own operations answer through app.operations / app.call, whose purpose names no domain. The catalog paths
-  // that answer the query rank those two entries, and they lead the candidates so a tie goes to the app. The two entries are shown, with the matching paths named in their description, whenever the catalog
-  // answers the query: also under a kind filter, because a worker that narrows to plugin/skill/connector/tool/feature
-  // otherwise never sees the app's own operations, where Hub search (marketplace.search) lives, and
+  // that answer the query rank those two entries, and they lead the candidates so a tie goes to the app (dev 2026-10-18 O6:
+  // "automation run log schedule" returned skills and science tools, never automations.*, and the Light-lane worker gave up
+  // "no registration tool"). The two entries are shown, with the matching paths named in their description, whenever the catalog
+  // answers the query: also under a kind filter, because a worker that narrows to plugin/skill/connector/tool/feature (Haiku in
+  // the O17 retests, every time) otherwise never sees the app's own operations, where Hub search (marketplace.search) lives, and
   // reports "no such tool". Nothing else is added to what the query found.
   const appPaths = await appOperationPaths(query);
   const { hasHangul } = await import("./search-rank");
@@ -1283,8 +1330,9 @@ export async function searchHarness(query: string, kind?: HarnessItemKind): Prom
     if (at >= 0) out.splice(at, 1);
     // A Hangul query shares no word with the English port text and would drop the entry: its own words rank it (other queries unchanged;
     // text that only has accents or other non-ASCII letters is not Korean).
-    // The entry names the app operations that answered this query: their purpose lines name no domain, so naming the
-    // matching operation (marketplace.search for a Hub search) is what ties the generic entry to the request.
+    // The entry names the app operations that answered this query: dev 2026-10-18 O17 (Haiku) saw app.operations / app.call on top
+    // for "hub search agents public marketplace" and still opened catalog entries instead, because their purpose lines name no
+    // domain. Naming marketplace.search here is what ties the generic entry to the request.
     out.unshift({ id: port.operationId, kind: "operation", name: port.operationId, description: `${port.purpose}${port.handler ? "" : " (unavailable)"} Operations matching this search: ${appPaths.slice(0, 8).join(", ")}.`, rankTerms: hasHangul(query) ? [...appPaths, query.toLowerCase()] : appPaths });
   }
   // Best match first across every kind (search-rank.ts); the fixed kind order cut the answering operation off (r07).

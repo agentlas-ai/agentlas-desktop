@@ -1,27 +1,73 @@
-
-
-
-
-
-
-
-
-
-
-
-
+// Ollama native chat transport for the shared local tool loop.
+//
+// Why: Ollama's OpenAI-compatible /v1/chat/completions ignores every way of asking for a context
+// window (measured 2026-10-11 on ollama 0.31.1: options.num_ctx, a top-level num_ctx and extra_body
+// all left /api/ps at the 32768 default, and a preloaded 8192 window was reloaded at 32768 by the
+// next /v1 request). On a small-VRAM machine that default is 4096, so a ~6k-token prompt is silently
+// truncated. Only the native /api/chat accepts options.num_ctx per request.
+//
+// The tool loop keeps speaking OpenAI Chat Completions; this module is a fetch-compatible adapter
+// that translates one request to /api/chat and the NDJSON reply back into the SSE chunks that
+// streamChatTurn parses, including the single terminal usage chunk (prompt_eval_count /
+// eval_count), which the /v1 route never reported for Ollama.
+import os from "node:os";
 import { estimateAdmissionTokens } from "./token-estimate";
 
 /** Context tiers a plan may pick; each step doubles the KV cache, so the smallest fitting tier wins. */
 export const OLLAMA_CONTEXT_TIERS = [4096, 8192, 16384, 32768, 65536, 131072, 262144] as const;
 /** Default ceiling for a requested window: bigger asks reload slowly and can exhaust VRAM. */
 export const OLLAMA_DEFAULT_CONTEXT_CEILING = 65536;
+/**
+ * Share of this machine's memory the KV cache of one requested window may take (loopback servers only). The weights,
+ * the OS and the app need the rest; a window past it makes the load fail or crawl instead of answering.
+ */
+export const OLLAMA_KV_MEMORY_SHARE = 0.35;
 
 export interface OllamaContextLimits {
   /** Largest window the model was trained for (model_info "<arch>.context_length"). */
   modelMax?: number;
   /** Window the server currently has loaded for this model (/api/ps), if it is loaded. */
   loaded?: number;
+  /** f16 KV-cache bytes one token of window costs (model_info layers × KV heads × key+value width × 2 bytes). */
+  kvBytesPerToken?: number;
+}
+
+/** KV-cache bytes per token of window from /api/show model_info; undefined when the model does not report its shape. */
+export function ollamaKvBytesPerToken(info: Record<string, unknown>): number | undefined {
+  const field = (suffix: string): number | undefined => {
+    for (const [name, raw] of Object.entries(info)) {
+      if (!name.endsWith(suffix)) continue;
+      // Per-layer arrays (some architectures vary heads by layer): the widest layer bounds the cost.
+      const value = Array.isArray(raw) ? Math.max(...raw.filter((n): n is number => Number.isSafeInteger(n))) : raw;
+      if (Number.isSafeInteger(value) && Number(value) > 0) return Number(value);
+    }
+    return undefined;
+  };
+  const layers = field(".block_count");
+  const kvHeads = field(".attention.head_count_kv") ?? field(".attention.head_count");
+  const heads = field(".attention.head_count");
+  const embedding = field(".embedding_length");
+  const keyWidth = field(".attention.key_length") ?? (embedding && heads ? Math.floor(embedding / heads) : undefined);
+  const valueWidth = field(".attention.value_length") ?? keyWidth;
+  if (!layers || !kvHeads || !keyWidth || !valueWidth) return undefined;
+  return layers * kvHeads * (keyWidth + valueWidth) * 2;
+}
+
+/** True for a server on this machine, the only case where this machine's memory bounds the window. */
+export function ollamaHostIsLoopback(host: string): boolean {
+  try {
+    const name = new URL(host).hostname.replace(/^\[|\]$/g, "").toLowerCase();
+    return name === "localhost" || name === "::1" || /^127\./.test(name);
+  } catch { return false; }
+}
+
+/**
+ * Largest window this machine can hold for the model, or undefined when unknown (remote server, shape not reported).
+ * Never below the smallest tier: a model that cannot hold 4096 tokens fails on its own, not on our arithmetic.
+ */
+export function ollamaMemoryCeiling(host: string, limits: OllamaContextLimits, totalMemoryBytes = os.totalmem()): number | undefined {
+  if (!limits.kvBytesPerToken || !ollamaHostIsLoopback(host) || !(totalMemoryBytes > 0)) return undefined;
+  return Math.max(OLLAMA_CONTEXT_TIERS[0], Math.floor((totalMemoryBytes * OLLAMA_KV_MEMORY_SHARE) / limits.kvBytesPerToken));
 }
 
 export interface OllamaContextPlan {
@@ -29,6 +75,8 @@ export interface OllamaContextPlan {
   numCtx: number;
   modelMax?: number;
   loaded?: number;
+  /** This machine's memory bound on the window, when known. */
+  memoryMax?: number;
   ceiling: number;
   /** The plan could not fit the prompt even at the ceiling. */
   insufficient: boolean;
@@ -62,10 +110,13 @@ export function planOllamaContext(input: {
   outputReserve: number;
   limits: OllamaContextLimits;
   ceiling?: number;
+  /** This machine's memory bound (ollamaMemoryCeiling); undefined = not known, the model maximum alone bounds. */
+  memoryMax?: number;
 }): OllamaContextPlan {
   const modelMax = input.limits.modelMax;
+  const memoryMax = input.memoryMax && input.memoryMax > 0 ? input.memoryMax : undefined;
   const ceiling = Math.max(OLLAMA_CONTEXT_TIERS[0], Math.min(input.ceiling ?? OLLAMA_DEFAULT_CONTEXT_CEILING,
-    modelMax && modelMax > 0 ? modelMax : Number.MAX_SAFE_INTEGER));
+    modelMax && modelMax > 0 ? modelMax : Number.MAX_SAFE_INTEGER, memoryMax ?? Number.MAX_SAFE_INTEGER));
   const need = input.promptTokens + input.outputReserve;
   // 1.25x headroom: every tool step appends its call and result to the same window.
   const wanted = Math.ceil(need * 1.25);
@@ -82,7 +133,7 @@ export function planOllamaContext(input: {
   chosenBasis.set(key, modelMax ? { modelMax } : {});
   return {
     numCtx, ...(modelMax ? { modelMax } : {}), ...(input.limits.loaded ? { loaded: input.limits.loaded } : {}),
-    ceiling, insufficient: need > numCtx, needTokens: need,
+    ...(memoryMax ? { memoryMax } : {}), ceiling, insufficient: need > numCtx, needTokens: need,
   };
 }
 
@@ -110,6 +161,8 @@ export async function probeOllamaContextLimits(
       for (const [name, raw] of Object.entries(info)) {
         if (name.endsWith(".context_length") && Number.isSafeInteger(raw) && Number(raw) > 0) { value.modelMax = Number(raw); break; }
       }
+      const kvBytesPerToken = ollamaKvBytesPerToken(info);
+      if (kvBytesPerToken) value.kvBytesPerToken = kvBytesPerToken;
     }
   } catch { /* an old or remote server may not expose it; the plan then uses the ceiling alone */ }
   try {
@@ -197,6 +250,10 @@ export function openAiToOllamaChatBody(body: Record<string, unknown>, numCtx: nu
     model: body.model,
     messages,
     stream: true,
+    // Never let the server cut the prompt to fit (it keeps the first 4 tokens and drops the rest, measured 2026-10-24 on
+    // 0.31.1: 9297 -> 2050 tokens, wrong answer). With this it answers 400 exceed_context_size_error instead, which the
+    // loop reports as local_context_limit_exceeded. A server that predates the field ignores it; num_ctx still sizes it.
+    truncate: false,
     ...(Array.isArray(body.tools) && body.tools.length ? { tools: body.tools } : {}),
     ...(typeof body.keep_alive === "string" ? { keep_alive: body.keep_alive } : {}),
     ...(responseFormat?.type === "json_schema" && responseFormat.json_schema?.schema ? { format: responseFormat.json_schema.schema } : {}),

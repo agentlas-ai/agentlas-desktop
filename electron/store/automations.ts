@@ -326,7 +326,7 @@ export function getAutomation(id: string): Automation | null {
 }
 
 /**
- * An automation carrying this Goal's id that is not a retired Goal continuation. The host now wakes a
+ * An automation carrying this Goal's id that is not a retired Goal continuation. Since 2026-10-20 the host wakes a
  * Goal itself and no continuation row is created; the legacy rows are history (store/goal-continuation-rows.ts), so
  * none of them may own a Goal's next step, park it for the owner or be offered for review.
  */
@@ -559,10 +559,10 @@ export function createAutomation(input: {
 }
 
 /**
-
-
-
-
+ * An enabled automation's agent target is an explicit pick (archive/auto-archive.ts restoreAgentForUse): creating,
+ * retargeting or enabling it brings an archived agent back. Otherwise every run is refused errAgentArchived (dev
+ * 2026-10-18 O6: a weekly report automation targeting an auto-archived team member failed its first run
+ * "보관된 에이전트입니다"), and the sweep keeps it from being archived again while the automation stays on.
  */
 function restoreAutomationTarget(automation: Automation): Automation {
   if (automation.enabled && automation.targetType === "agent") restoreAgentForUse(automation.targetId);
@@ -1847,9 +1847,9 @@ export function listRunHistory(automationId: string, limit = 50): AutomationRunR
 }
 
 /**
-
-
-
+ * Every stored run of one automation counted over [since, until). Dev 2026-10-18: "지난주 자동화별 성공·실패 횟수" for a
+ * monitor with 925 runs that week could only be read 50 at a time from listRunHistory (newest first, no older page), and a
+ * reply holds about 55 runs, so no surface could give the count. Times are compared as UTC ISO strings, the stored form.
  */
 export function countRunHistory(automationId: string, since?: string | null, until?: string | null): AutomationRunCounts {
   const bound = (value: string | null | undefined, name: string): string | null => {

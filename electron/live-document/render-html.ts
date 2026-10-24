@@ -1,4 +1,5 @@
 import { cellAddress, LIVE_DOCUMENT_RENDER_LIMITS, parseCellAddress, type LiveDocumentModel, type LiveFlowBlock, type LiveFormat, type LivePage, type LiveShape, type LiveSlide } from "../../shared/live-document";
+import { chartSvg, cssColor, shapeSvg } from "./render-look";
 
 /*
  * Standalone HTML for each page of a live document, laid out the way the Document tab lays it out (the same shape boxes,
@@ -86,45 +87,100 @@ function isDark(hex: string | undefined): boolean {
   return 0.299 * r + 0.587 * g + 0.114 * b < 140;
 }
 
-function slideHtml(slide: LiveSlide, aspect: number): RenderPageHtml & { boxes: string[] } {
+/** Picture formats the render window decodes; anything else (EMF, WMF, TIFF) keeps its labelled box. */
+export const RENDER_IMAGE_TYPES: Record<string, string> = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", jpe: "image/jpeg", gif: "image/gif", bmp: "image/bmp", webp: "image/webp", svg: "image/svg+xml" };
+const imageType = (part: string): string | undefined => RENDER_IMAGE_TYPES[(/\.([a-z0-9]+)$/i.exec(part)?.[1] ?? "").toLowerCase()];
+const VANCHOR = { top: "flex-start", middle: "center", bottom: "flex-end" } as const;
+
+function tableHtml(shape: LiveShape, pct: string, width: number, height: number, pxPerPt: number): string {
+  const rows = shape.rows ?? [];
+  const cols = Math.max(...rows.map((row) => row.length));
+  const look = shape.look?.table;
+  const widths = shape.colWidths?.length === cols ? shape.colWidths : look?.cols.length === cols ? look.cols : undefined;
+  // A table without a style draws only what its cells say (pptxgenjs writes every fill and border); a styled one keeps the
+  // banded default under the cells' own values.
+  const plain = !!look && !look.styled;
+  const cell = (text: string, r: number, c: number): string => {
+    const own = look?.cells[r]?.[c] ?? null;
+    const css: string[] = [];
+    if (own?.fill) { const fill = cssColor(own.fill); if (fill) css.push(`background:${fill}`); }
+    if (own?.color && color(own.color)) css.push(`color:${own.color}`);
+    if (own?.bold !== undefined) css.push(`font-weight:${own.bold ? 700 : 400}`);
+    if (own?.size) css.push(`font-size:${(own.size * pxPerPt).toFixed(2)}px`);
+    if (own?.align) css.push(`text-align:${own.align}`);
+    if (own?.anchor) css.push(`vertical-align:${own.anchor}`);
+    if (own?.borders) own.borders.forEach((side, i) => {
+      const name = ["left", "right", "top", "bottom"][i];
+      css.push(side && color(side.color) ? `border-${name}:${Math.max(1, side.width * pxPerPt).toFixed(2)}px solid ${side.color}` : `border-${name}:none`);
+    });
+    const tag = !plain && r === 0 ? "th" : "td";
+    return `<${tag}${css.length ? ` style="${css.join(";")}"` : ""}>${esc(text)}</${tag}>`;
+  };
+  return `<table class="tb${plain ? " plain" : ""}" data-box="${esc(shape.id)}" style="${pct.replace(/height:[^;]+/, `max-height:${shape.h * 100}%`)}">`
+    + (widths ? `<colgroup>${widths.map((w) => `<col style="width:${w * 100}%">`).join("")}</colgroup>` : "")
+    + rows.map((row, r) => `<tr${look?.rows[r] ? ` style="height:${(look.rows[r] * height).toFixed(1)}px"` : ""}>${Array.from({ length: cols }, (_, c) => cell(row[c] ?? "", r, c)).join("")}</tr>`).join("")
+    + `</table>`;
+}
+
+function slideHtml(slide: LiveSlide, aspect: number): RenderPageHtml & { boxes: string[]; images: string[] } {
   const width = RENDER_SLIDE_WIDTH;
   const height = Math.round(width / aspect);
   const widthPt = aspect >= 1.5 ? 960 : 720;
+  const pxPerPt = width / widthPt;
   const boxes: string[] = [];
+  const images: string[] = [];
   const pct = (shape: LiveShape) => `left:${shape.x * 100}%;top:${shape.y * 100}%;width:${shape.w * 100}%;height:${shape.h * 100}%`;
+  const px = (shape: LiveShape) => ({ left: shape.x * width, top: shape.y * height, width: Math.max(0, shape.w * width), height: Math.max(0, shape.h * height) });
+  const turn = (shape: LiveShape) => (shape.look?.rot ? `;transform:rotate(${shape.look.rot}deg)` : "");
   const shapes = slide.shapes.map((shape) => {
+    const look = shape.look;
     if (shape.role === "object" && shape.rows) {
-      const cols = Math.max(...shape.rows.map((row) => row.length));
-      const widths = shape.colWidths?.length === cols ? shape.colWidths : undefined;
       boxes.push(shape.id);
-      return `<table class="tb" data-box="${esc(shape.id)}" style="${pct(shape).replace(/height:[^;]+/, `max-height:${shape.h * 100}%`)}">`
-        + (widths ? `<colgroup>${widths.map((w) => `<col style="width:${w * 100}%">`).join("")}</colgroup>` : "")
-        + shape.rows.map((row, r) => `<tr>${Array.from({ length: cols }, (_, c) => r === 0 ? `<th>${esc(row[c] ?? "")}</th>` : `<td>${esc(row[c] ?? "")}</td>`).join("")}</tr>`).join("")
-        + `</table>`;
+      return tableHtml(shape, pct(shape), width, height, pxPerPt);
     }
     if (shape.role === "object") {
       const fill = color(shape.format?.fill ?? shape.fill);
+      if (look?.chart) {
+        const box = px(shape);
+        return `<div class="ch" data-chart-box="${esc(shape.id)}" style="${pct(shape)}${turn(shape)}">${chartSvg(look.chart, box.width, box.height, pxPerPt)}</div>`;
+      }
+      if (look?.image) {
+        const type = imageType(look.image.part);
+        const placeholder = `<div class="o" style="${pct(shape)}"><span>${type ? "image" : `image (${esc((/\.([a-z0-9]+)$/i.exec(look.image.part)?.[1] ?? "?").toUpperCase())}, not drawn)`}</span></div>`;
+        if (!type) return placeholder;
+        images.push(look.image.part);
+        return `${placeholder}<img class="pic" alt="" data-part="${esc(look.image.part)}" style="${pct(shape)}${turn(shape)}${look.flipH ? ";scale:-1 1" : look.flipV ? ";scale:1 -1" : ""}">`;
+      }
+      if (look && (look.geom || look.line || look.fill)) return shapeSvg(look, px(shape), pxPerPt, fill);
       return `<div class="o" style="${pct(shape)}${fill ? `;background:${fill}` : ""}">${shape.label ? `<span>${esc(shape.label)}</span>` : ""}</div>`;
     }
     const size = shape.format?.size ?? (shape.role === "title" ? 40 : shape.role === "body" ? 24 : 18);
     const background = color(shape.format?.fill ?? shape.fill);
-    const ink = color(shape.format?.color) ?? (isDark(slide.background) || isDark(background) ? "#ffffff" : "#1b1b1b");
+    // A text shape with an outline, a non-rectangular preset or a fill the format cannot carry (gradient, transparency) has its
+    // geometry drawn under the text; the text box itself stays the measured box.
+    const underlay = !!look && (!!look.geom || !!look.line || (!!look.fill && look.fill !== "none" && (!background || look.fill.alpha !== undefined)));
+    const shapeFill = look?.fill && look.fill !== "none" ? look.fill.hex : background;
+    const ink = color(shape.format?.color) ?? (isDark(slide.background) || isDark(shapeFill) ? "#ffffff" : "#1b1b1b");
     const weight = shape.format?.bold ?? shape.role === "title" ? 700 : 400;
+    const anchor = look?.anchor ? `;justify-content:${VANCHOR[look.anchor]}` : "";
     boxes.push(shape.id);
-    return `<div class="t${shape.role === "body" ? " b" : ""}" data-box="${esc(shape.id)}" style="${pct(shape)};font-size:${((size / widthPt) * width).toFixed(2)}px;font-weight:${weight};color:${ink}${textCss(shape.format) ? `;${textCss(shape.format)}` : ""}${background ? `;background:${background}` : ""}">${esc(shape.text)}</div>`;
+    return (underlay && look ? shapeSvg(look, px(shape), pxPerPt, background) : "")
+      + `<div class="t${shape.role === "body" ? " b" : ""}" data-box="${esc(shape.id)}" style="${pct(shape)};font-size:${((size / widthPt) * width).toFixed(2)}px;font-weight:${weight};color:${ink}${textCss(shape.format) ? `;${textCss(shape.format).replace(/;?background:[^;]+/, "")}` : ""}${background && !underlay ? `;background:${background}` : ""}${anchor}${turn(shape)}">${esc(shape.text)}</div>`;
   }).join("");
   const background = color(slide.background) ?? "#ffffff";
   const css = `.slide{position:relative;width:${width}px;height:${height}px;overflow:hidden;background:${background};font-family:"Noto Sans KR","Apple SD Gothic Neo","Pretendard","Malgun Gothic",sans-serif}`
     + `.t{position:absolute;box-sizing:border-box;padding:${(width * 0.006).toFixed(1)}px ${(width * 0.01).toFixed(1)}px;line-height:1.2;white-space:pre-wrap;word-break:keep-all;overflow-wrap:anywhere;overflow:visible;display:flex;flex-direction:column;justify-content:center}`
     + `.b{justify-content:flex-start}`
     + `.o{position:absolute;display:grid;place-items:center;color:rgba(0,0,0,.35);font-size:${(width * 0.014).toFixed(1)}px}.o span{padding:4px 10px;border:1px dashed rgba(0,0,0,.25);border-radius:3px}`
+    + `.g{position:absolute;overflow:visible}.ch{position:absolute}.ch svg{display:block;overflow:visible}.pic{position:absolute;object-fit:fill;box-sizing:border-box}.pic:not([src]){display:none}`
     + `.tb{position:absolute;border-collapse:collapse;table-layout:fixed;font-size:${(width * 0.015).toFixed(1)}px;color:#1b1b1b;background:#ffffff}`
-    + `.tb th,.tb td{border:1px solid rgba(68,114,196,.45);padding:6px 9px;text-align:left;vertical-align:top;overflow-wrap:anywhere}.tb th{background:#4472c4;color:#ffffff;font-weight:700}.tb tr:nth-child(odd) td{background:rgba(68,114,196,.12)}`;
-  return { label: "", html: documentShell(css, `<div class="slide">${shapes}</div>`), width, height, boxes };
+    + `.tb th,.tb td{border:1px solid rgba(68,114,196,.45);padding:6px 9px;text-align:left;vertical-align:top;overflow-wrap:anywhere}.tb th{background:#4472c4;color:#ffffff;font-weight:700}.tb tr:nth-child(odd) td{background:rgba(68,114,196,.12)}`
+    + `.tb.plain{background:transparent}.tb.plain tr:nth-child(n) td{border:none;background:transparent;font-weight:400}`;
+  return { label: "", html: documentShell(css, `<div class="slide">${shapes}</div>`), width, height, boxes, images };
 }
 
-/** One page per slide. */
-export function slidePagesHtml(model: Extract<LiveDocumentModel, { kind: "slides" }>): Array<RenderPageHtml & { slideId: string; boxes: string[] }> {
+/** One page per slide; `images` are the package parts render.ts loads into the page's pictures after it opens. */
+export function slidePagesHtml(model: Extract<LiveDocumentModel, { kind: "slides" }>): Array<RenderPageHtml & { slideId: string; boxes: string[]; images: string[] }> {
   const aspect = model.aspect || 16 / 9;
   assertSlideAspect(aspect);
   return model.slides.map((slide, index) => ({ ...slideHtml(slide, aspect), label: `slide ${index + 1}`, slideId: slide.id }));

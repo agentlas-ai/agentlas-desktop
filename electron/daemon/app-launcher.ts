@@ -80,13 +80,13 @@ export interface EnsureDaemonOptions extends DaemonServiceOptions {
 }
 
 /**
-
-
-
-
-
-
-
+ * The one starter that hands a new daemon this Desktop's protected native enrollment (main.ts ensureDesktopDaemon).
+ * The daemon reads its native credential once, when it boots. On a first launch (no registry yet) a daemon that another
+ * caller started first booted with native_auth_not_provisioned. Those callers are Science, local models, and their
+ * self-heal after a daemon exit. Every GUI attach then failed with native_auth_channel_lost until the app restarted
+ * (A/B4 dev 2026-10-17 09:03Z; the acceptance kit's warm-up launch existed only to step around it). While a starter is
+ * registered, other callers never stop, spawn or replace a daemon. They attach to the running one; when none answers
+ * for this app version, they ask the starter to launch it, then attach.
  */
 let desktopDaemonStarter: (() => Promise<unknown>) | null = null;
 export function setDesktopDaemonStarter(starter: (() => Promise<unknown>) | null): void { desktopDaemonStarter = starter; }
@@ -798,11 +798,11 @@ export function suspendDaemonAutostart(command: AutostartCommand, runtime?: Auto
 export async function discoverNativeDaemonBoot(options: EnsureDaemonOptions): Promise<string> {
   const identity = resolveDaemonServiceIdentity(options);
   const socketPath = daemonControlSocketPath(identity.userDataDir);
-  
-
-
-
-
+  // A daemon that just spawned answers its control socket before its native endpoint exists (daemon/main.ts ping:
+  // nativeInvocation.unavailableCode "native_invocation_not_configured" until it is set up). An attach in that window
+  // closed the channel: first launch 2026-10-17, the initial attach failed with native_auth_channel_lost and the re-attach
+  // one second later succeeded. Wait until the endpoint has settled, either configured or with a final unavailable code,
+  // within the daemon's own startup bound. After that the attach (and the re-attacher) decide as before.
   const settleBy = Date.now() + (options.startupTimeoutMs ?? 30_000);
   for (;;) {
     const ping = await pingDaemon(socketPath);

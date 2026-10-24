@@ -4,7 +4,7 @@
 // 세션은 main 메모리에서 1회 조회. 로그인 직후 children으로 전환되며 하위가 새로 마운트된다.
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { ipc } from "@/lib/ipc";
 import { invalidateIpcCache } from "@/lib/ipc-cache";
 import type { AuthSession } from "@/lib/types";
@@ -12,7 +12,8 @@ import { FirstRunLogin } from "./first-run/FirstRunLogin";
 import { FirstRunGate } from "./first-run/FirstRunOnboarding";
 import { useT } from "@/lib/i18n";
 import { LoadingEstimate } from "./LoadingEstimate";
-import { BusinessDesktopEntry } from "../business/BusinessDesktopEntry";
+import { BusinessRouteGate } from "../business/BusinessRouteGate";
+import { COMPANY_ENTRY_ROUTE } from "../../shared/business/visibility";
 
 // DEV 전용 QA 라우트 — 브라우저(Playwright) 렌더 회귀 검증용으로 게이트를 우회한다.
 // 프로덕션 빌드에선 절대 우회하지 않는다. /one 역시 production에서는 계속 인증을 요구한다.
@@ -25,6 +26,14 @@ type SessionCheck =
 
 export function AuthGate({ children }: { children: React.ReactNode }) {
   const [check, setCheck] = useState<SessionCheck>({ kind: "checking" });
+  const router = useRouter();
+  // 회사 링크(agentlas://company/join)가 이미 떠 있는 앱에 도착하면 Main 이 고정 경로를 보낸다. MenuBridge 는 로그인한 뒤 화면 안에만 있어서
+  // 로그인 전·첫 설정 중에는 이 경로를 받을 곳이 없었다 — 회사 직원이 앱을 막 설치해 로그인 화면에 있을 때가 바로 이 링크를 여는 때다.
+  // 그래서 이 경로 하나만 여기서(항상 마운트됨) 받고, MenuBridge 는 같은 경로를 무시한다(이중 이동 방지).
+  useEffect(() => {
+    if (typeof window === "undefined" || !window.agentlasMenu) return;
+    return window.agentlasMenu.onNavigate((route) => { if (route === COMPANY_ENTRY_ROUTE) router.push(route); });
+  }, [router]);
   const [recheck, setRecheck] = useState(0);
   const observerEpoch = useRef(0);
   const requestEpoch = useRef(0);
@@ -109,8 +118,9 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
 
   // Company SSO has its own authenticated owner and server authority. Render
   // this exact entry without mounting the personal shell or its data readers.
+  // 조직 계정(또는 회사 링크로 들어온 직원)에게만 그린다 — 그 밖에는 개인 화면으로 돌려보낸다(BusinessRouteGate).
   // Every other route retains the original personal sign-in/onboarding gate.
-  if (pathname === "/business") return <BusinessDesktopEntry />;
+  if (pathname === "/business") return <BusinessRouteGate />;
 
   if (process.env.NODE_ENV !== "production" && DEV_QA_ROUTES.some((r) => pathname?.startsWith(r))) {
     return <>{children}</>;

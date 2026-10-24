@@ -1,9 +1,9 @@
-
-
-
-
-
-
+/* Tool library — plugin / connector / skill views.
+   Measured from the two reference recordings at 1:1 (2026-10-13):
+   ChatGPT "플러그인" (rows, detail column, prompt card, authorize + skill modals) and
+   Claude "사용자 지정" (hero, bordered cards, IDE-style skill viewer).
+   Palette comes from the page's --tl-* variables (tokens only). Every element with a
+   background, hover included, keeps inner padding. */
 
 /* ── logos ──────────────────────────────────────────────────────── */
 .logoTile { flex: none; display: inline-flex; align-items: center; justify-content: center; overflow: hidden; border-radius: 8px; background: var(--tl-tile, var(--paper)); box-shadow: 0 0 0 1px var(--tl-tile-line, var(--paper-edge)), 0 1px 2px color-mix(in srgb, var(--ink) 5%, transparent); color: var(--tl-sub, var(--muted-deep)); }

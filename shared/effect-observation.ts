@@ -65,11 +65,11 @@ export function effectObservationOutputSchema(attemptIds: readonly string[]): Re
 }
 
 /**
-
-
-
-
-
+ * The marker line with presentation wrappers removed. Observers answering in a
+ * chat persona (measured 2026-09-24: 7 of 7 looks came back as markdown with a
+ * name prefix and a progress bar) put the line in backticks, bold, a list item
+ * or a quote. Only leading/trailing markdown punctuation is removed - the body
+ * must still start with the exact marker and parse as the strict JSON below.
  */
 function markerLine(line: string): string | null {
   const unwrapped = line.trim()

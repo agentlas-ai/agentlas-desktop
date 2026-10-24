@@ -5,6 +5,8 @@ import { listInstalledServers } from "../mcp-tools/registry";
 import { getCatalogEntry } from "../mcp-tools/catalog";
 import { mcpServerConfigurationDigest } from "../mcp-tools/prepared-transport";
 import { loadMainToolInventory, runMainToolDispatch, type ResolvedTool, type MainToolDispatchResult } from "../runtime/local-tool-loop";
+import { toolApprovalSessionKey } from "../runtime/tool-approval";
+import type { TurnScopedGoalWaitResolver } from "../turn-tools/control-server";
 import { TOOL_RESULT_READ, installToolResultContext, projectToolResult, clearToolResultContext } from "../runtime/tool-result-context";
 import { getEnvConfigurationRevision } from "../secrets/vault";
 import { getDb } from "../store/db";
@@ -12,6 +14,8 @@ import { recordRunEvent } from "../store/run-events";
 import type { ToolPermission } from "../../shared/builtin-tools";
 import type { InstalledMcpServer } from "../../shared/types";
 import { runScienceDocumentTool, scienceDocumentToolDescriptors, SCIENCE_DOCUMENT_SERVER_DESCRIPTION, SCIENCE_DOCUMENT_SERVER_ID } from "./document-tools";
+import { runScienceReachTool, scienceReachToolDescriptors, SCIENCE_REACH_SERVER_DESCRIPTION, SCIENCE_REACH_SERVER_ID } from "./reach-tools";
+import { recordRunProducedFiles } from "../harness/run-produced-files";
 
 export interface ScienceDesktopToolScope {
   projectId: string;
@@ -51,7 +55,7 @@ interface ToolDescriptor {
 
 interface Inventory {
   id: string;
-  kind: "mcp" | "builtin" | "documents";
+  kind: "mcp" | "builtin" | "documents" | "reach";
   serverId: string;
   serverDigest: string;
   envRevision: number;
@@ -69,6 +73,10 @@ interface Binding {
   cwd?: string;
   signal?: AbortSignal;
   approvalScope?: BrowserApprovalScope;
+  ownerQuestionEligible?: boolean;
+  goalWaitCurrent?: () => boolean;
+  goalWaitResolver?: TurnScopedGoalWaitResolver;
+  goalWaitEligible: boolean;
   closed: boolean;
   metadataInventoryId: string;
   metadataDigest: string;
@@ -81,13 +89,40 @@ interface Binding {
   calls: Map<string, { signature: string; result: Promise<ScienceDesktopResult> }>;
 }
 
+// Only this bridge's explicit admission guards can prove that this call did not dispatch.
+// Keep their identity separate from transport/projection exceptions and never inspect arbitrary error prose.
+type DesktopToolAdmissionCode = "science_desktop_tool_run_not_bound" | "science_desktop_tool_turn_stale"
+  | "alive_desktop_tool_wake_stale" | "alive_desktop_tool_policy_stale"
+  | "science_desktop_tool_inventory_stale" | "science_desktop_tool_server_unavailable"
+  | "science_desktop_tool_arguments_invalid" | "science_desktop_tool_call_id_invalid"
+  | "science_desktop_tool_arguments_too_large" | "science_desktop_tool_call_id_reused";
+class DesktopToolAdmissionGuard extends Error {
+  constructor(readonly code: DesktopToolAdmissionCode) { super(code); }
+}
+function desktopToolAdmissionFailure(error: unknown): unknown {
+  if (!(error instanceof DesktopToolAdmissionGuard)) return error;
+  return Object.assign(new Error(error.code), { name: "ScienceDesktopToolAdmissionError", code: error.code.replaceAll("_", "-"),
+    failure: Object.freeze({ schema: "agentlas.science-desktop-tool-admission.v1",
+      code: error.code.replaceAll("_", "-"), phase: "admission", outcome: "not-dispatched" }) });
+}
+
+function desktopToolUnknownOutcome(error: unknown): Error {
+  // A downstream exception cannot assert that an external effect was never attempted.
+  let code: unknown;
+  try { const field = error && typeof error === "object" ? Object.getOwnPropertyDescriptor(error, "code") : undefined;
+    code = field && "value" in field ? field.value : undefined; } catch { /* untrusted exception object */ }
+  const transportCode = typeof code === "string" && /^(?:E[A-Z]{2,24}|SQLITE_[A-Z0-9_]{1,48}|ABORT_ERR|TIMEOUT)$/.test(code) ? code : undefined;
+  return Object.assign(new Error("science_desktop_tool_outcome_unconfirmed", { cause: error }),
+    { code: transportCode ?? "science-desktop-tool-outcome-unconfirmed" });
+}
+
 interface ScienceDesktopResult {
   content: unknown; isError?: boolean;
   visualProjection?: { shown: number; observed: number; incomplete: boolean; byteLimit: number;
     references: Array<{ mimeType: string; contentSha256: string; bytes: number }>; omittedReferences: number };
   visualResults?: Array<{ mimeType: "image/png" | "image/jpeg" | "image/webp" | "image/gif"; dataBase64: string; contentSha256: string }>;
 }
-const resultScope = (binding: Binding) => ({ runtimeKind: binding.runtimeKind, sessionKey: `science:${runId(binding.scope)}`,
+const resultScope = (binding: Binding) => ({ runtimeKind: binding.runtimeKind, sessionKey: toolApprovalSessionKey(binding.runtimeKind, binding.chatId),
   permission: binding.permission, cwd: binding.cwd, chatId: binding.chatId, agentId: binding.agentId });
 function resultTools(binding: Binding, loaded: Awaited<ReturnType<typeof loadMainToolInventory>>) {
   const tools = installToolResultContext(loaded.tools, loaded.byName, resultScope(binding), true, binding.resultContext);
@@ -127,8 +162,9 @@ function projectDesktopResult(binding: Binding, inventory: Inventory, dispatched
 }
 
 const bindings = new Map<string, Binding>();
+const unattendedScope = (binding: Binding) => isAliveScope(binding.scope) || binding.ownerQuestionEligible === false;
 const PAGE_SIZE = 50;
-const BUILTIN_SERVER_ID = "desktop-builtin";
+const BUILTIN_SERVER_ID = (require("agentlas-science") as { SCIENCE_DESKTOP_BUILTIN_SERVER_ID?: string }).SCIENCE_DESKTOP_BUILTIN_SERVER_ID ?? "desktop-builtin";
 
 function scopeKey(scope: DesktopToolScope): string {
   return isAliveScope(scope)
@@ -139,7 +175,7 @@ function scopeKey(scope: DesktopToolScope): string {
 function current(scope: DesktopToolScope): Binding {
   const binding = bindings.get(scopeKey(scope));
   if (!binding || binding.closed || JSON.stringify(binding.scope) !== JSON.stringify(scope))
-    throw new Error("science_desktop_tool_run_not_bound");
+    throw new DesktopToolAdmissionGuard("science_desktop_tool_run_not_bound");
   binding.signal?.throwIfAborted();
   const store = scienceStore();
   if (isAliveScope(scope)) {
@@ -149,19 +185,19 @@ function current(scope: DesktopToolScope): Binding {
     if (principal.agentId !== store.scienceAliveAgentId(scope.projectId)
       || principal.scope.projectId !== scope.projectId || principal.scope.conversationId !== scope.conversationId
       || principal.attachmentGeneration !== scope.attachmentGeneration
-      || digest(principal.scope) !== scope.scopeSha256) throw new Error("alive_desktop_tool_wake_stale");
+      || digest(principal.scope) !== scope.scopeSha256) throw new DesktopToolAdmissionGuard("alive_desktop_tool_wake_stale");
     const policy = store.aliveResearchContinuationAuthority(scope.projectId, scope.conversationId);
     if (policy.stopped || !policy.fullAutonomyStanding
       || policy.conversationStopEpoch !== scope.conversationStopEpoch
       || policy.approvalPolicySha256 !== scope.approvalPolicySha256)
-      throw new Error("alive_desktop_tool_policy_stale");
+      throw new DesktopToolAdmissionGuard("alive_desktop_tool_policy_stale");
     return binding;
   }
   const turn = store.getTurnForProject(scope.projectId, scope.turnId);
   const runtime = store.getConversationRuntimeBinding(scope.projectId, scope.conversationId);
   if (!turn || turn.conversationId !== scope.conversationId || turn.invocationRunId !== scope.invocationRunId
     || turn.runtimeChatId !== binding.chatId || runtime?.runtimeChatId !== binding.chatId || turn.status !== "running")
-    throw new Error("science_desktop_tool_turn_stale");
+    throw new DesktopToolAdmissionGuard("science_desktop_tool_turn_stale");
   store.assertScienceTurnExecutionAuthority(turn);
   return binding;
 }
@@ -177,27 +213,37 @@ function digest(value: unknown): string {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex");
 }
 
-function metadataDigest(servers: InstalledMcpServer[]): string {
-  return digest(servers.map(server => [server.id, mcpServerConfigurationDigest(server), server.name, server.nameEn]));
+function goalWaitEligible(binding: Pick<Binding, "goalWaitResolver" | "goalWaitCurrent">): boolean {
+  try { return Boolean(binding.goalWaitResolver && (!binding.goalWaitCurrent || binding.goalWaitCurrent())); }
+  catch { return false; }
+}
+
+function metadataDigest(servers: InstalledMcpServer[], waitEligible = false): string {
+  const serversDigest = servers.map(server => [server.id, mcpServerConfigurationDigest(server), server.name, server.nameEn]);
+  return digest(waitEligible ? [serversDigest, { goalWait: true }] : serversDigest);
 }
 
 function assertInventoryCurrent(scope: DesktopToolScope, inventory: Inventory): Binding {
   const binding = current(scope);
+  refreshMetadata(binding);
   if (binding.inventories.get(inventory.id) !== inventory)
-    throw new Error("science_desktop_tool_inventory_stale");
+    throw new DesktopToolAdmissionGuard("science_desktop_tool_inventory_stale");
   if (inventory.kind !== "mcp") return binding;
   const server = installed().find(candidate => candidate.id === inventory.serverId);
   if (!server || mcpServerConfigurationDigest(server) !== inventory.serverDigest
     || getEnvConfigurationRevision() !== inventory.envRevision)
-    throw new Error("science_desktop_tool_inventory_stale");
+    throw new DesktopToolAdmissionGuard("science_desktop_tool_inventory_stale");
   return binding;
 }
 
 function refreshMetadata(binding: Binding): InstalledMcpServer[] {
   const available = installed();
-  const next = metadataDigest(available);
+  const waitEligible = goalWaitEligible(binding);
+  const next = metadataDigest(available, waitEligible);
   const envRevision = getEnvConfigurationRevision();
   if (next !== binding.metadataDigest || envRevision !== binding.envRevision) {
+    if (binding.goalWaitEligible !== waitEligible) binding.preparations.clear();
+    binding.goalWaitEligible = waitEligible;
     binding.metadataDigest = next;
     binding.envRevision = envRevision;
     binding.metadataInventoryId = randomUUID();
@@ -226,10 +272,13 @@ function page<T>(binding: Binding, inventoryId: string, items: T[], cursor?: str
 /** The Science session owns a fixed menu; Desktop binds only the current ordinary turn. */
 function bindDesktopToolScope(scope: DesktopToolScope, options: {
   chatId: string; agentId: string; runtimeKind: string; permission: ToolPermission;
-  cwd?: string; signal?: AbortSignal; approvalScope?: BrowserApprovalScope;
+  cwd?: string; signal?: AbortSignal; approvalScope?: BrowserApprovalScope; ownerQuestionEligible?: boolean;
+  goalWaitCurrent?: () => boolean;
+  goalWaitResolver?: TurnScopedGoalWaitResolver;
 }): () => void {
   const key = scopeKey(scope);
   if (bindings.has(key)) throw new Error("science_desktop_tool_run_already_bound");
+  const waitEligible = goalWaitEligible(options);
   const binding: Binding = {
     scope: isAliveScope(scope)
       ? { projectId: scope.projectId, conversationId: scope.conversationId,
@@ -240,7 +289,8 @@ function bindDesktopToolScope(scope: DesktopToolScope, options: {
       : { projectId: scope.projectId, conversationId: scope.conversationId,
         turnId: scope.turnId, invocationRunId: scope.invocationRunId },
     ...options, closed: false, metadataInventoryId: randomUUID(),
-    metadataDigest: metadataDigest(installed()), envRevision: getEnvConfigurationRevision(),
+    goalWaitEligible: waitEligible,
+    metadataDigest: metadataDigest(installed(), waitEligible), envRevision: getEnvConfigurationRevision(),
     inventories: new Map(), serverInventories: new Map(), preparations: new Map(), pages: new Map(), calls: new Map(),
   };
   bindings.set(key, binding);
@@ -258,7 +308,9 @@ function bindDesktopToolScope(scope: DesktopToolScope, options: {
 
 export function bindScienceDesktopToolTurn(scope: ScienceDesktopToolScope, options: {
   chatId: string; agentId: string; runtimeKind: string; permission: ToolPermission;
-  cwd?: string; signal?: AbortSignal; approvalScope?: BrowserApprovalScope;
+  cwd?: string; signal?: AbortSignal; approvalScope?: BrowserApprovalScope; ownerQuestionEligible?: boolean;
+  goalWaitCurrent?: () => boolean;
+  goalWaitResolver?: TurnScopedGoalWaitResolver;
 }): () => void {
   return bindDesktopToolScope(scope, options);
 }
@@ -275,7 +327,7 @@ export function bindScienceAliveDesktopToolWake(scope: ScienceAliveDesktopToolSc
 export const scienceDesktopTools = {
   async list(scope: DesktopToolScope, query?: { serverId?: string; page?: string }): Promise<{
     inventoryId: string;
-    servers?: Array<{ id: string; name: string; description?: string; catalogId?: string }>;
+    servers?: Array<{ id: string; name: string; description?: string; catalogId?: string; discoverTools?: boolean }>;
     tools: ToolDescriptor[];
     nextPage?: string;
   }> {
@@ -288,8 +340,14 @@ export const scienceDesktopTools = {
         // An Alive wake is a background actor with no owner at the document: only an ordinary turn edits office files.
         ...(binding.cwd && !isAliveScope(scope) ? [{ id: SCIENCE_DOCUMENT_SERVER_ID, name: "Office documents",
           description: SCIENCE_DOCUMENT_SERVER_DESCRIPTION }] : []),
+        // Reach drives the owner's apps: like the documents, not for an Alive wake (a background actor with nobody at the screen).
+        // discoverTools: Science's compact tool list shows a server's tools to find_science_tools only for a server that says so (measured 2026-10-24 with the
+        // real Science MCP child: without it the Reach tools were never offered and a model asking for an app task was shown list_desktop_tools alone).
+        ...(!isAliveScope(scope) ? [{ id: SCIENCE_REACH_SERVER_ID, name: "Apps on this computer", discoverTools: true,
+          description: SCIENCE_REACH_SERVER_DESCRIPTION }] : []),
         ...available.map(server => ({ id: server.id, name: (server.nameEn || server.name).slice(0, 200),
           ...(server.catalogId ? { catalogId: server.catalogId.slice(0, 160) } : {}),
+          ...(server.catalogId === "agentlas-turn" && binding.goalWaitEligible ? { discoverTools: true } : {}),
           description: (server.catalogId && getCatalogEntry(server.catalogId)?.descriptionEn
             || "Custom installed MCP server; select it to inspect its available tools.").slice(0, 2_000) })),
       ];
@@ -298,11 +356,11 @@ export const scienceDesktopTools = {
     }
     const available = refreshMetadata(binding);
     if (query.serverId === BUILTIN_SERVER_ID) {
-      if (!binding.cwd) throw new Error("science_desktop_tool_server_unavailable");
+      if (!binding.cwd) throw new DesktopToolAdmissionGuard("science_desktop_tool_server_unavailable");
       let builtin = binding.serverInventories.get(BUILTIN_SERVER_ID)
         ? binding.inventories.get(binding.serverInventories.get(BUILTIN_SERVER_ID)!) : undefined;
       if (!builtin) {
-        const loaded = await loadMainToolInventory(undefined, binding.cwd, binding.permission, false, false, binding.signal);
+        const loaded = await loadMainToolInventory(undefined, binding.cwd, binding.permission, !unattendedScope(binding), false, binding.signal);
         current(scope);
         const tools = resultTools(binding, loaded).map(tool => ({ name: tool.function.name,
           description: (tool.function.description ?? "").slice(0, 2_000),
@@ -318,7 +376,7 @@ export const scienceDesktopTools = {
       return { inventoryId: builtin.id, tools: result.items, ...(result.nextPage ? { nextPage: result.nextPage } : {}) };
     }
     if (query.serverId === SCIENCE_DOCUMENT_SERVER_ID) {
-      if (!binding.cwd || isAliveScope(scope)) throw new Error("science_desktop_tool_server_unavailable");
+      if (!binding.cwd || isAliveScope(scope)) throw new DesktopToolAdmissionGuard("science_desktop_tool_server_unavailable");
       let documents = binding.serverInventories.get(SCIENCE_DOCUMENT_SERVER_ID)
         ? binding.inventories.get(binding.serverInventories.get(SCIENCE_DOCUMENT_SERVER_ID)!) : undefined;
       if (!documents) {
@@ -331,8 +389,22 @@ export const scienceDesktopTools = {
       const result = page(binding, documents.id, documents.tools, query.page);
       return { inventoryId: documents.id, tools: result.items, ...(result.nextPage ? { nextPage: result.nextPage } : {}) };
     }
+    if (query.serverId === SCIENCE_REACH_SERVER_ID) {
+      if (isAliveScope(scope)) throw new DesktopToolAdmissionGuard("science_desktop_tool_server_unavailable");
+      let reach = binding.serverInventories.get(SCIENCE_REACH_SERVER_ID)
+        ? binding.inventories.get(binding.serverInventories.get(SCIENCE_REACH_SERVER_ID)!) : undefined;
+      if (!reach) {
+        // The seven tools are the harness reach.* ports; there is no Main tool behind them, so nothing resolves by name.
+        reach = { id: randomUUID(), kind: "reach", serverId: SCIENCE_REACH_SERVER_ID,
+          serverDigest: "", envRevision: 0, tools: scienceReachToolDescriptors(), byName: new Map() };
+        binding.inventories.set(reach.id, reach);
+        binding.serverInventories.set(SCIENCE_REACH_SERVER_ID, reach.id);
+      }
+      const result = page(binding, reach.id, reach.tools, query.page);
+      return { inventoryId: reach.id, tools: result.items, ...(result.nextPage ? { nextPage: result.nextPage } : {}) };
+    }
     const server = available.find(candidate => candidate.id === query.serverId);
-    if (!server) throw new Error("science_desktop_tool_server_unavailable");
+    if (!server) throw new DesktopToolAdmissionGuard("science_desktop_tool_server_unavailable");
     let inventory = binding.serverInventories.get(server.id)
       ? binding.inventories.get(binding.serverInventories.get(server.id)!) : undefined;
     if (inventory) assertInventoryCurrent(scope, inventory);
@@ -341,11 +413,18 @@ export const scienceDesktopTools = {
       if (!preparation) {
         const metadataInventoryId = binding.metadataInventoryId;
         preparation = (async () => {
+          const scopedWait = server.catalogId === "agentlas-turn" && binding.goalWaitEligible && binding.goalWaitResolver
+            ? { turnRunId: runId(binding.scope), turnGoalWaitOnly: { resolveGoalWait: binding.goalWaitResolver },
+                admissionCurrent: () => {
+                  try { current(scope); return !binding.goalWaitCurrent || binding.goalWaitCurrent(); }
+                  catch { return false; }
+                } } : {};
           const config = await buildMcpConfigFile({ serverIds: [server.id], skipDefaultSeed: true,
+            ...scopedWait,
             configKey: `science-desktop-${randomUUID()}`,
-            toolGate: { runtime: binding.runtimeKind, sessionKey: `science:${runId(scope)}`,
+            toolGate: { runtime: binding.runtimeKind, sessionKey: toolApprovalSessionKey(binding.runtimeKind, binding.chatId),
               permission: binding.permission, cwd: binding.cwd, chatId: binding.chatId,
-              approvalScope: binding.approvalScope, unattended: true } });
+              approvalScope: binding.approvalScope, unattended: unattendedScope(binding) } });
           if (!config || config.includedServerIds.length !== 1 || config.includedServerIds[0] !== server.id) {
             config?.cleanup?.();
             throw new Error("science_desktop_tool_selected_server_not_prepared");
@@ -363,10 +442,11 @@ export const scienceDesktopTools = {
               || !tool.inputSchema || Array.isArray(tool.inputSchema) || typeof tool.inputSchema !== "object"
               || JSON.stringify(tool.inputSchema).length > 32_768))
               throw new Error("science_desktop_tool_schema_invalid");
+            refreshMetadata(binding);
             const currentServer = installed().find(candidate => candidate.id === server.id);
             if (!currentServer || mcpServerConfigurationDigest(currentServer) !== mcpServerConfigurationDigest(server)
               || getEnvConfigurationRevision() !== envRevision || binding.metadataInventoryId !== metadataInventoryId)
-              throw new Error("science_desktop_tool_inventory_stale");
+              throw new DesktopToolAdmissionGuard("science_desktop_tool_inventory_stale");
             const ready: Inventory = { id: randomUUID(), kind: "mcp", serverId: server.id,
               serverDigest: mcpServerConfigurationDigest(server), envRevision,
               config, tools, byName: loaded.byName };
@@ -388,34 +468,37 @@ export const scienceDesktopTools = {
   async call(scope: DesktopToolScope, input: {
     inventoryId: string; name: string; arguments: Record<string, unknown>; toolCallId: string;
   }): Promise<ScienceDesktopResult> {
+    try {
     const binding = current(scope);
     const inventory = binding.inventories.get(input.inventoryId);
     const reader = input.name === TOOL_RESULT_READ;
     const documents = inventory?.kind === "documents";
-    if (!inventory || (!reader && !documents && (!inventory.byName.has(input.name)
+    const reach = inventory?.kind === "reach";
+    if (!inventory || (!reader && !documents && !reach && (!inventory.byName.has(input.name)
       || inventory.byName.get(input.name)?.kind !== inventory.kind))
       || !inventory.tools.some(tool => tool.name === input.name))
-      throw new Error("science_desktop_tool_inventory_stale");
-    if (documents && !binding.cwd) throw new Error("science_desktop_tool_server_unavailable");
+      throw new DesktopToolAdmissionGuard("science_desktop_tool_inventory_stale");
+    if (documents && !binding.cwd) throw new DesktopToolAdmissionGuard("science_desktop_tool_server_unavailable");
+    if (reach && isAliveScope(scope)) throw new DesktopToolAdmissionGuard("science_desktop_tool_server_unavailable");
     assertInventoryCurrent(scope, inventory);
     if (!input.arguments || typeof input.arguments !== "object" || Array.isArray(input.arguments))
-      throw new Error("science_desktop_tool_arguments_invalid");
+      throw new DesktopToolAdmissionGuard("science_desktop_tool_arguments_invalid");
     if (!input.toolCallId || input.toolCallId.length > 256)
-      throw new Error("science_desktop_tool_call_id_invalid");
+      throw new DesktopToolAdmissionGuard("science_desktop_tool_call_id_invalid");
     const argumentsJson = JSON.stringify(input.arguments);
-    if (argumentsJson.length > 131_072) throw new Error("science_desktop_tool_arguments_too_large");
+    if (argumentsJson.length > 131_072) throw new DesktopToolAdmissionGuard("science_desktop_tool_arguments_too_large");
     if (reader) {
       // Observation only: same approval/current scope checks, no external-effect marker or replay cache.
       const page = await runMainToolDispatch(inventory.byName,
         { providerCallId: input.toolCallId, toolName: input.name, arguments: argumentsJson }, { onPartial: () => {}, onStatus: () => {} },
-        { ...resultScope(binding), unattended: true, signal: binding.signal,
+        { ...resultScope(binding), unattended: unattendedScope(binding), signal: binding.signal,
           assertCurrent: () => { assertInventoryCurrent(scope, inventory); } });
       return { content: page.isError ? page.content : JSON.parse(page.content), isError: page.isError };
     }
     const signature = JSON.stringify([input.inventoryId, input.name, argumentsJson]);
     const prior = binding.calls.get(input.toolCallId);
     if (prior) {
-      if (prior.signature !== signature) throw new Error("science_desktop_tool_call_id_reused");
+      if (prior.signature !== signature) throw new DesktopToolAdmissionGuard("science_desktop_tool_call_id_reused");
       return prior.result;
     }
     const signatureSha256 = digest(signature);
@@ -428,7 +511,7 @@ export const scienceDesktopTools = {
           AND json_extract(payload_json, '$.toolCallId') = ? LIMIT 1`)
         .get(runId(scope), input.toolCallId) as { signature?: string } | undefined;
       if (previous) {
-        if (previous.signature !== signatureSha256) throw new Error("science_desktop_tool_call_id_reused");
+        if (previous.signature !== signatureSha256) throw new DesktopToolAdmissionGuard("science_desktop_tool_call_id_reused");
         throw new Error("science_desktop_tool_dispatch_not_replayed");
       }
       assertInventoryCurrent(scope, inventory);
@@ -439,18 +522,31 @@ export const scienceDesktopTools = {
           inventoryId: inventory.id, toolName: input.name } });
     }).immediate();
     const result = (async () => {
-      assertInventoryCurrent(scope, inventory);
+      // This final guard still precedes the dispatch port, even though the durable attempt marker exists.
+      try { assertInventoryCurrent(scope, inventory); }
+      catch (error) { throw desktopToolAdmissionFailure(error); }
+      try {
       // The document ports take the turn's own chat, run and permission; their refusals are results, not exceptions.
       const dispatched: MainToolDispatchResult = documents
         ? { visionMessage: null, ...await runScienceDocumentTool(input.name, input.arguments,
           { chatId: binding.chatId, runId: runId(scope), permission: binding.permission, cwd: binding.cwd! }) }
+        : reach
+        // The Reach ports take the turn's own chat, run and permission and answer through the harness dispatcher; refusals are results.
+        ? { visionMessage: null, ...await runScienceReachTool(input.name, input.arguments,
+          { chatId: binding.chatId, runId: runId(scope), permission: binding.permission }) }
         : await runMainToolDispatch(inventory.byName,
           { providerCallId: input.toolCallId, toolName: input.name, arguments: argumentsJson },
           { onStatus: () => {}, onPartial: () => {} },
-          { runtimeKind: binding.runtimeKind, sessionKey: `science:${runId(scope)}`,
+          { runtimeKind: binding.runtimeKind, sessionKey: toolApprovalSessionKey(binding.runtimeKind, binding.chatId),
             permission: binding.permission, cwd: binding.cwd, chatId: binding.chatId,
-            agentId: binding.agentId, unattended: true, signal: binding.signal, retainMcpToolResult: true,
+            agentId: binding.agentId, unattended: unattendedScope(binding), signal: binding.signal, retainMcpToolResult: true,
             assertCurrent: () => { assertInventoryCurrent(scope, inventory); } });
+      // Paths originate in the shared Main dispatch result, never parsed model
+      // JSON. The outer invocation uses the ordinary Task/run/90-day binding.
+      const resolved = inventory.byName.get(input.name);
+      const readOnlyBuiltin = resolved?.kind === "builtin" && ["read_file", "read_image", "list_dir"].includes(resolved.builtinName);
+      if (!dispatched.isError && !readOnlyBuiltin && dispatched.artifactPaths?.length)
+        recordRunProducedFiles(runId(scope), `science-desktop-tool:${input.toolCallId}`, dispatched.artifactPaths);
       const projected = projectDesktopResult(binding, inventory, dispatched, input.toolCallId);
       recordRunEvent({ runId: runId(scope), chatId: binding.chatId,
         kind: "science_desktop_tool_result_received", sourceEventId: `science-desktop-tool:${input.toolCallId}:result`,
@@ -458,10 +554,12 @@ export const scienceDesktopTools = {
           delivery: (projected.content as { retained?: boolean }).retained === false ? "retention-unavailable" : "projected",
           producerResponseSha256: createHash("sha256").update(JSON.stringify(dispatched.rawMcpResult ?? { content: dispatched.content, artifactPaths: dispatched.artifactPaths ?? [] })).digest("hex") } });
       return projected;
+      } catch (error) { throw desktopToolUnknownOutcome(error); }
     })();
     binding.calls.set(input.toolCallId, { signature, result });
     if (binding.calls.size > 128) binding.calls.delete(binding.calls.keys().next().value!);
     return result;
+    } catch (error) { throw desktopToolAdmissionFailure(error); }
   },
 };
 

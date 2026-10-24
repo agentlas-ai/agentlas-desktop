@@ -219,24 +219,24 @@ function nodeEffect(node: WorkflowNode): GraphNodeEffect {
   //   output 노드에 effect를 써 주는 생성 경로가 없다(automation-emitter는 그 필드를 안 만들고,
   //   화면 셀렉트도 기본값을 저장하지 않는다). 그래서 기본을 read로 두면 그 노드는
   //   **시뮬레이션에서 안 막히고, 승인도 안 묻고, 멱등키 없이 3번까지 재시도된다.**
-                                         
+  //   실측으로 그 조합이 나왔다: dry-run이 실제로 발행한다.
   //   안 적힌 출력은 나가는 것으로 본다 — 안전한 쪽으로 틀리는 게 맞는 방향이다.
   return defaultNodeEffect(node.type);
 }
 
-   
-                         
-                                                
-                                                  
-                                                     
-                                                       
-                                                                
-                                                             
-  
-                                                                           
-                                                              
-                                                   
-   
+/**
+ * 이 단계를 사람이 먼저 확인해야 하는가.
+ * ★오너 이사회 결정(2026-08-10): **실행 중 승인은 전면 폐지한다.**
+ * 사람이 기계적으로 누르기만 하는 관문은 안전장치가 아니라 병목이다 — 자동화는 사람이
+ * 안 볼 때 도는 것이고, 도는 중에 사람을 기다리면 실행은 거기서 죽는다. 되돌리기 어려운
+ * 일에 대한 방어는 승인 대기가 아니라 (1) 시뮬레이션에서의 차단(`dryRunBlocks`)
+ * (2) 멱등키 없는 mutation 재시도 0회(`nodeMaxAttempts`) (3) 부수효과 미확인 정지
+ * (`MUTATION_UNVERIFIED`) — 이 셋이 이미 하고 있고, 이들은 사람을 기다리지 않는다.
+ *
+ * `node.config` 의 `approval`/`approvalSetBy`/`approvalWaitHours` 필드는 **일부러
+ * 남겨 둔다**. 지우면 저장된 모든 자동화의 `graphExecutionDigest` 가 바뀌어, 바로 그
+ * 순간 멈춰 있던 실행들의 재개가 전부 거부되기 때문이다. 커널은 그 값을 읽지 않는다.
+ */
 
 /**
  * 이 노드를 몇 번까지 다시 시도해도 되는가.
@@ -327,13 +327,13 @@ export interface RunGraphResult {
   /** 상한이 선언됐는데 런타임이 사용량을 보고하지 않아 집행할 수 없었는가. */
   budgetUnmeasured?: boolean;
   /**
-
-
-
-
-
-
- */
+   * Present when resuming cannot change this failure: a failed check whose judged steps cannot be re-run
+   * safely, already returned the same output with the same failing items, or used their rework budget.
+   * Schedulers and trigger outboxes do not retry it automatically (production 2026-10-16: three resumes
+   * re-judged one unchanged output). Typed; never derived from prose.
+   * `run_interrupted_effect`: the host died while a step that may have acted outside was running; that step waits
+   * for the owner's [Rerun from this node] / [Skip], so a retry could only hold it again.
+   */
   automaticRetry?: { allowed: false; reasonCode: GraphRetryStopReason; nodeId: string; fingerprint: string | null };
 }
 
@@ -373,11 +373,11 @@ const UNCERTAIN_EFFECT_HOLD_CODES = new Set([
   "automation_fresh_run_blocked",
 ]);
 
-   
-                                                                                                      
-                                                                                      
-                                            
-   
+/**
+ * The unknown-outcome holds that become a note in the step's prompt instead of a hold (owner decision
+ * 2026-10-05, "직접 대조가 전체중단시키거나 하면안됨"). RESUME_CONFLICT is two runs on one coordinate,
+ * not an unknown outcome, and stays a hold.
+ */
 const UNCERTAIN_EFFECT_NOTE_CODES = new Set([
   "MUTATION_UNVERIFIED",
   "automation_partial_reconciliation_required",
@@ -828,14 +828,14 @@ export async function rewriteFailedCodeStep(input: {
   code: string;
   failure: string;
   varNames: string[];
-     
-                                 
-    
-                                                         
-                                                              
-                                                                
-                                       
-    
+  /**
+   * 그 값들이 **실제로 어떻게 생겼는가**(앞부분).
+   *
+   * ★이름만 주면 모델은 자기가 기대하던 모양을 그대로 다시 가정한다. 실측 2026-08-20:
+   *   앞 단계가 마크다운 표를 문자열로 넘겼는데, 재작성기는 `varNames: ["report"]` 만
+   *   받고 여전히 `report['items']` 를 전제한 코드를 냈다 — 두 번 연속 같은 이유로 실패.
+   *   생김새를 함께 주면 "이건 글이구나"를 보고 다르게 쓴다.
+  */
   varSamples?: Record<string, string>;
   /** An unattended automation's saved runtime is authoritative for repair too. */
   runtimeSelection?: RuntimeSelection | null;
@@ -898,24 +898,24 @@ function codeFailureHeadline(raw: string | null | undefined): string {
   return L(`${last}\n\n(자세한 내용)\n${text.slice(-600)}`, `${last}\n\n(details)\n${text.slice(-600)}`);
 }
 
-   
-                                                    
-  
-                                                        
-                                     
-  
-              
-                               
-          
-  
-          
-  
-                                                  
-                                            
-  
-                                                          
-                                                  
-   
+/**
+ * 값이 **사실상 하나의 JSON 펜스 블록**이면 그 안을 꺼낸다. 아니면 원문 그대로.
+ *
+ * ★첫 판은 `^```...```$` 로 통째 일치를 봤는데, 실측한 모델 출력은 닫는 펜스 뒤에
+ *   빈 줄과 여는 펜스 잔해가 더 붙어 있었다(캠페인 E5):
+ *
+ *     ```json
+ *     {"apply":[],"review":[]}
+ *     ```
+ *
+ *     ```
+ *
+ *   그래서 앵커가 안 맞아 벗겨지지 않았고, 다음 코드 단계가 못 읽어 빈손을 냈다.
+ *   **모델 출력은 깔끔하지 않다** — 판정은 그 사실 위에 서야 한다.
+ *
+ * 규칙: 첫 펜스 블록의 내용이 JSON 이고, **펜스 밖에 뜻 있는 글이 없으면** 그것을 값으로
+ * 본다. 사람이 읽는 글 안의 예시 블록(앞뒤에 문장이 있는 경우)은 건드리지 않는다.
+ */
 export function unwrapFencedJson(text: string): string {
   const raw = String(text ?? "");
   const trimmed = raw.trim();
@@ -964,21 +964,21 @@ function firstBalancedJson(text: string): string | null {
   return null;
 }
 
-   
-                                 
-  
-                                                    
-                                             
-  
-                                            
-                                   
-  
-                                                             
-                                                      
-  
-                                                          
-                                        
-   
+/**
+ * 기계가 읽는 값에서 **읽을 수 있는 값**을 꺼낸다.
+ *
+ * ★부탁은 약속이고, 꺼내는 것은 보장이다. 프롬프트에 "JSON 만 내라"라고 못 박아도
+ *   모델은 앞에 한 줄을 붙인다. 실측 2026-08-20 (캠페인 E3):
+ *
+ *     I'll read the three attachment files.
+ *     [ { "mailId": "m-1", ... } ]
+ *
+ *   다음 코드가 `json.loads` 에 실패했고 **그 실패를 삼켜** 빈 목록을 냈다. 첨부 3개가
+ *   그대로 있는데 실행은 9/9 초록에 "완료"였다 — 이 저장소가 가장 싫어하는 모양이다.
+ *
+ * ★사람이 읽는 값에는 손대지 않는다. 그 판정은 `valueIsReadAsData` 하나가 한다 —
+ *   저작이 형식 계약을 붙이는 기준과 **같은 질문**이어야 한다.
+ */
 export function machineReadableValue(rawText: string, readAsData: boolean): string {
   const unfenced = unwrapFencedJson(rawText);
   if (!readAsData) return unfenced;
@@ -1007,7 +1007,7 @@ export function isReadOnlyCheckpointTool(name: string, rawArgs?: unknown): boole
   //   있다"는 영수증을 남겼고, 그게 automation_ambiguous_side_effect 로 굳어 **자동화가
   //   잠겼다** — 사람이 재조정하기 전까지 다시 안 돈다.
   //
-                                                               
+  //   실측 2026-08-20 (agy 라이브, 2회 재현): 발행 도구가 없는 출력 단계가 거절되는 것은
   //   옳은데(글이 안 올라갔으니), 그 실행이 부른 것은 `list_dir` 둘과 예비 조회뿐이었다.
   //   읽기만 한 실행은 바깥이 그대로라 다시 시도해도 안전하다. 거절만 있고 나갈 문이
   //   없으면 영구 잠김이다 — 이 저장소가 이미 이름 붙인 병이다.
@@ -1035,18 +1035,18 @@ export function hasReplaySafePreparedWorkforce(checkpoint: GraphCheckpoint, node
 }
 
 /**
-
-
-
-
-
-
-
-
-
-
-
-
+ * An agent step that was still running when the app stopped (restart, crash,
+ * update) is recorded as in-flight, and an in-flight step blocks the next run
+ * as `automation_ambiguous_side_effect`. That is right when the step may have
+ * acted outside - but measured 2026-09-23, the interrupted step had only looked
+ * (0 acting tool calls) and the hold still cost the automation a whole cycle.
+ *
+ * Replay is allowed only when the host's own receipts prove the step never
+ * requested anything but a read: every completed receipt is read-only, and every
+ * tool request the host recorded for that step (run_events, written before the
+ * call executes) passes the same argument-checked read-only classifier that
+ * the live run uses. Anything unknown keeps the hold. Only `agent` steps
+ * qualify - other step types act through the host, not through tool calls.
  */
 /**
  * Every tool request the host recorded for this step in this run (run_events, written before the call
@@ -1104,13 +1104,13 @@ export function reconcileReadOnlyInterruptedAgentNodes(
 }
 
 // ── A run whose host died mid-step (automation_run_interrupted, store/db.ts recovery) ────────────
-  
-                                                                                                                 
-                                                                                                                  
-                                                                                                       
-                                                                                                                   
-                                                                                                  
-   
+/*
+ * Owner decision 2026-10-16 (YouTube daily upload): when the app dies mid-run the occurrence is interrupted, the
+ * owner is told, and the resume re-runs only steps proven replay-safe. A step that may already have acted outside
+ * (declared mutation, a non-read receipt, a tool request that never reported a result) is never re-run
+ * automatically: it is held until the owner chooses [Rerun from this node] or [Skip]. Its unknown outcome is never
+ * turned into a prompt note (UNCERTAIN_EFFECT_NOTE_CODES), which would dispatch the upload again.
+ */
 export type InterruptedRunSource = { runId: string; hostPid: number | null };
 
 /** In-flight steps of every interrupted run in this occurrence's resume lineage, newest interruption first. */
@@ -1164,19 +1164,19 @@ export function reconcileReplaySafePreparedWorkforceNodes(checkpoint: GraphCheck
 }
 
 // ── A failed verification is reworked, never re-judged on the same output ────
-
-
-
-
-
-
-
-
-
-
-
-
-
+/*
+ * A check that fails judges what earlier steps produced. Re-judging that same output gives the same
+ * verdict. Production 2026-10-16 (TCIagent daily graph cdf732ca): after verify2 EVAL_FAILED the
+ * scheduler resumed the occurrence at 00:55, 01:56 and 03:56; each checkpoint listed step2 as
+ * completed, so only verify2 ran again, on the unchanged step2 output, with 0 tokens and the same
+ * verdict. The owner saw only failures.
+ *
+ * A resume after such a failure re-runs the steps the check judges, with the check's reasons in the
+ * node prompt's registered "[last attempt failed: fix these]" part, at most MAX_EVAL_REWORKS times
+ * per occurrence. It stops once, with a typed reason and no automatic retry, when a judged step
+ * may already have acted outside (no double publish), when the rework returned the input already
+ * judged (it is not judged again), when the budget is used, or when the judged value is run input.
+ */
 export const MAX_EVAL_REWORKS = 2;
 export const EVAL_FAILURE_EVENT_KIND = "workflow_eval_failure";
 export const EVAL_REWORK_EVENT_KIND = "workflow_eval_rework";
@@ -1567,19 +1567,19 @@ function substitute(template: string, vars: Record<string, unknown>): Substituti
   return { text, missing };
 }
 
-   
-                        
-  
-                                                           
-                                               
-                                                          
-                                                
-                                                                        
-                             
-  
-                                                          
-                                  
-   
+/**
+ * 판정자에게 보여 줄 값의 문자열 모양.
+ *
+ * ★`String(value)` 로 쓰면 **객체가 통째로 사라진다** — 코드 노드가 구조화된 결과를
+ *   내는 것은 정상이자 권장이고(그래서 하류가 필드로 읽는다), 그 값이 그대로
+ *   `"[object Object]"` 가 되어 채점표에 들어갔다. 실측 2026-08-19: 환율
+ *   `{date, rate: 1411.93, source}` 를 낸 노드의 검증이
+ *   "The result is [object Object] with no actual content" 로 **불합격**했다.
+ *   값은 완벽했고 판정자는 값을 본 적이 없다.
+ *
+ *   같은 파일의 `evidence` 는 이미 JSON 으로 넘기고 있었다 — 한쪽만 맞은 상태였다.
+ *   두 자리가 다시 갈라지지 않게 이 함수 하나를 쓴다.
+ */
 function judgeableText(value: unknown): string {
   if (typeof value === "string") return value;
   if (value == null) return "";
@@ -2108,12 +2108,12 @@ export async function runGraph(
   ) {
     throw new Error("automation_occurrence_id_invalid");
   }
-                                           
-                                                              
-                                                       
-                                                        
-                                                    
-                                                   
+  /* ★권한은 **그래프가 선언한 것**에서 나온다(2026-08-09).
+     저장된 `executionPermission` 은 사람이 고른 적이 없는 값이다 — 화면 어디에도 그걸
+     고르는 자리가 없고, 청사진 생성 경로가 전부 "read" 로 못박아 두고 있었다. 그래서
+     자기 청사진이 mutation 단계를 선언한 자동화가 read 로 태어나 런타임에 거부당했다
+     (실측: 모델이 "권한이 부족해 진행할 수 없습니다"라고 답하고 채점표가 fail).
+     저장값이 더 넓으면(write) 그건 존중한다 — 넓힌 것은 되돌리지 않는다. */
   const effectivePermission: "read" | "write" =
     opts.permissionCeiling === "read" ? "read"
       : automation.executionPermission === "write" ? "write" : requiredExecutionPermission(graph);
@@ -2309,13 +2309,13 @@ export async function runGraph(
         ),
       });
     }
-      
-                                                      
-                                                     
-                                                     
-                                                            
-                                   
-       
+    /*
+     * ★여기서부터는 좌표를 쥔 상태다. 아래 검사들 중 하나라도 걸리면 **한 단계도 돌지
+     *   않고** 나가는데, 그때 좌표를 쥔 채 나가면 그 표식은 아무도 대신 풀어 주지
+     *   않는다. 실측 2026-08-20: 그렇게 남은 표식 때문에 다음 시도가 곧바로
+     *   RESUME_CONFLICT 로 거절됐다 — 사람 눈에는 "고쳤는데 또 안 된다"로 보인다.
+     *   집은 쪽이 시작하지 못했으면 집은 쪽이 놓는다.
+     */
     const releaseCoordinateIfNotStarted = (): void => {
       try {
         releaseGraphResumeCoordinate(latestFailed.runId);
@@ -2432,16 +2432,16 @@ export async function runGraph(
       checkpointDigest: "sha256:" + "0".repeat(64),
     });
   }
-  
-
-
-
-
-
-
-
-
-
+  /*
+   * ★An admission hold on an effect whose outcome is unknown must outlive this run.
+   *   Held nodes do not run here, but the hold used to live only in this run's nodeFailures.
+   *   This run then became the latest failed checkpoint: the next run resumed from it (the held
+   *   node neither completed nor ambiguous) and dispatched the external effect again, and the
+   *   reconciliation view had nothing to show (test-automation-trigger-safety, 2026-10-04: a
+   *   legacy "publish done, no receipt" run → held once → re-dispatched on the second run).
+   *   Recording the hold as ambiguous keeps it held (MUTATION_UNVERIFIED on resume) and visible
+   *   to reconciliation and background observation until someone settles it.
+   */
   // Invocation-backed nodes can inspect the prior outcome with their existing
   // read tools. A direct transport cannot act on that instruction, so its hold
   // remains scoped to that node while independent branches continue.
@@ -2480,17 +2480,17 @@ export async function runGraph(
     checkpoint.loginWaits = {};
   }
   const loginWaits: NonNullable<RunGraphResult["loginWaits"]> = [];
-    
-                                              
-    
-                                                            
-                                                      
-                                                          
-                                      
-    
-                                                     
-                                                              
-     
+  /*
+   * ★이번에 **사람이 새로 준 값**은 지난 실행이 들고 있던 값을 이긴다.
+   *
+   *   실측 2026-08-20: 시작 값을 잘못 넣어 첫 단계에서 실패한 뒤, 올바른 값을 넣어 다시
+   *   실행했는데 그 값이 **조용히 버려지고** 예전의 틀린 값으로 또 돌았다(재개가 지난
+   *   실행의 vars 를 통째로 복원하기 때문). 오타 한 번이면 그 자동화는 영원히 같은 실패를
+   *   반복하고, 사용자는 자기가 준 값이 무시된 줄도 모른다.
+   *
+   *   재개가 복원해야 하는 것은 **이미 한 일의 결과**이지 사람이 준 요청이 아니다.
+   *   그래서 initialVars 로 명시된 칸만 새 값으로 덮는다 — 나머지 진행 상황은 그대로 둔다.
+   */
   const vars: Record<string, unknown> = { ...structuredClone(checkpoint.vars), ...initialVars };
   const outputs: Record<string, string> = { ...checkpoint.outputs };
   /**
@@ -2504,35 +2504,35 @@ export async function runGraph(
   const blockedEdges = new Set(checkpoint.blockedEdgeIds);
   const revisedRequestNodeIds = new Set<string>();
   let requestInputsChanged = false;
-    
-                                       
-    
-                                                      
-                                                    
-                                          
-                                                          
-                                                         
-                                                               
-    
-                                                       
-                                                     
-                                                   
-                                                  
-     
+  /*
+   * ★**요청이 바뀌면 그 요청을 쓴 단계는 다시 해야 한다.**
+   *
+   *   위에서 새 입력이 지난 값을 이기게 했는데(vars 병합), 그것만으로는 반쪽이었다.
+   *   실측 2026-08-20: 값을 잘못 넣어 실패한 뒤 올바른 값으로 다시 실행하면
+   *     · 커널의 vars 에는 **새 값이 제대로 들어가 있고**
+   *     · 그 값을 읽는 단계는 "지난번에 끝났다"고 건너뛰어져 **옛 산출물이 재사용**됐다.
+   *   그래서 화면에는 새 값이 보이는데 결과물은 옛 값으로 만들어진다 — 가장 헷갈리는 실패다.
+   *   (PPT 자동화 실측: vars.summary 는 "제대로 된 요약 문장", 파일 안은 빈 문자열.)
+   *
+   *   재개가 복원해야 하는 것은 **이미 한 일의 결과**이지, 그 일이 근거로 삼은 요청이
+   *   아니다. 요청이 달라졌으면 그 요청을 읽은 단계의 결과는 더 이상 그 요청의 결과가
+   *   아니다. 그래서 값이 **실제로 달라진** 칸을 읽는 단계만 완료에서 되돌린다.
+   *   값이 같으면 아무것도 되돌리지 않는다 — 멀쩡한 진행을 버리지 않기 위해서다.
+   */
   {
     const changedNames = Object.keys(initialVars).filter(
       (name) => JSON.stringify(checkpoint.vars[name]) !== JSON.stringify(initialVars[name]),
     );
     const revisedRequestVars = new Set(changedNames);
     requestInputsChanged = changedNames.length > 0;
-    
-
-
-
-
-
-
-
+    /*
+     * A completed step that never produced the value it declares did not finish: every step that reads the value
+     * fails with NODE_INPUT_MISSING on each resume. Production 2026-10-05 (a Threads verification Toolchain):
+     * desktop 1.2.57's background effect look settled as completed, with no output, a read step whose model had
+     * been refused ("at capacity"); three resumes then failed at the next step within a second each. A read or pure
+     * step runs again and its readers with it (below). A mutation step stays completed, since running it again
+     * could repeat an outward effect; its reader still says which value is missing.
+     */
     for (const node of graph.nodes) {
       const produced = str(node.config ?? {}, "produces");
       if (!produced || !completed.has(node.id) || Object.hasOwn(vars, produced) || nodeEffect(node) === "mutation") continue;
@@ -2572,14 +2572,14 @@ export async function runGraph(
         }
         return false;
       };
-        
-                                                        
-                                                      
-        
-                                                                  
-                                                                  
-                               
-         
+      /*
+       * ★한 칸만 되돌리면 반쪽이다. 되돌린 단계가 만들던 값을 읽는 단계도 옛 결과를 들고
+       *   있으므로 함께 되돌려야 한다 — 그 값은 이제 다른 요청의 결과이기 때문이다.
+       *
+       *   실측 2026-08-20: summary 가 바뀌어 step1 만 되돌렸더니, step1 이 만드는
+       *   deckfile 을 읽는 step2·verify2 가 옛 결과를 그대로 써서 검증이 계속 실패했다.
+       *   무효화는 **하류로 번져야** 한다.
+       */
       const stale = new Set(changedNames);
       for (let pass = 0; pass < graph.nodes.length; pass += 1) {
         let grew = false;
@@ -2706,7 +2706,7 @@ export async function runGraph(
   }
   // ★문을 여는 것만으로는 부족하다 — 그 문이 닫혀 있던 동안 "안 돌 것"으로 **확정된** 노드가
   //   체크포인트에 박혀 있다. 그것까지 되돌리지 않으면 이 해제는 자기가 노린 상황에서
-                                                                 
+  //   100% 무효다(실측: 실패→복구 후 재개하면 정상 경로가 영영 안 돌고 그래프가 "성공"으로 끝난다).
   {
     const liveInbound = (nodeId: string): boolean => {
       const ins = graph.edges.filter((e) => e.target === nodeId);
@@ -2743,9 +2743,9 @@ export async function runGraph(
   if (opts.signal?.aborted) {
     runController.abort(opts.signal.reason);
   } else if (opts.signal) {
-    
-
-
+    // Native approval provenance follows signal lineage: a graph run started inside a turn (an app operation) asks
+    // for tool approval under this controller, and an unregistered child is refused native_approval_signal_unregistered
+    // (production 10-16 run 7b6303fa, the same gap in the room and firm paths; audit R-102).
     registerApprovalLineageIfLive(opts.signal, runController.signal);
     const relayAbort = () => runController.abort(opts.signal?.reason);
     opts.signal.addEventListener("abort", relayAbort, { once: true });
@@ -2800,20 +2800,20 @@ export async function runGraph(
   }
 
 
-     
-                                 
-    
-                                                           
-                                                         
-                                                      
-                                                           
-                                            
-    
-                        
-                                           
-                                         
-                                                
-     
+  /**
+   * 이 검증이 떨어졌을 때 **누가 그것을 받는가**.
+   *
+   * ★받는 사람이 없으면 그 검증은 장식이다. 실측 2026-08-19: 채점표가 fail 을 냈는데
+   *   실행은 계속 흘러 마지막에 `ok: true` 로 끝났다. 검증을 붙여 놓고 "통과했다"고
+   *   보고한 셈이라, 이 저장소가 계속 고쳐 온 **거짓 성공**과 정확히 같은 모양이다.
+   *   (지금까지의 재시도·EVAL_STUCK 은 전부 **반복 되돌림 간선이 있을 때만** 도는데,
+   *    빌더가 그 간선을 안 그린 그래프에서는 하나도 발화하지 않는다.)
+   *
+   *   받는 사람으로 인정하는 것 셋:
+   *    · fail 핸들로 나가는 간선 — 사람이 실패 경로를 그렸다.
+   *    · 이 노드를 다시 돌릴 반복 몸통 — 되돌아가 고쳐 온다.
+   *    · 판정 결과 변수를 실제로 읽는 다른 노드 — 조건 분기든 프롬프트든.
+   */
   const evalFailureIsHandled = (nodeId: string, producedVar: string): boolean => {
     if (graph.edges.some((e) => e.source === nodeId && e.sourceHandle === "fail")) return true;
     if (loops.some((loop) => loop.body.includes(nodeId))) return true;
@@ -3145,17 +3145,17 @@ export async function runGraph(
     throw snapshotError;
   }
 
-    
-                                                           
-                                             
-                                                               
-                                    
-     
-    
-                                                               
-                                                 
-                                                               
-     
+  /*
+   * ★이 자동화가 가리키는 대상이 아직 있는가. 실측 2026-08-20: 지워진 에이전트를 가리키는
+   *   자동화를 실행하면 세션을 만들다 SQLite 가 그대로 튀어나왔다 —
+   *   `FOREIGN KEY constraint failed`. 사람은 자기가 지운 에이전트 이야기라는 걸
+   *   알 방법이 없고, 자동화 이름조차 없는 문장을 본다.
+   */
+  /*
+   * ★대상 id 가 **비어 있는 것**과 **없어진 것**은 다르다. 실측 2026-08-20: 처음 판이
+   *   빈 id 를 "지워졌다"고 말해, 기본 대상으로 도는 멀쩡한 자동화를 죽였다
+   *   (`쓰던 에이전트 ""을(를) 찾을 수 없습니다`). 이름을 댈 수 없으면 없어졌다고 말하지 않는다.
+   */
   let defaultTargetMissing = false;
   if (
     (automation.targetType === "agent" || automation.targetType === "firm")
@@ -3414,7 +3414,7 @@ export async function runGraph(
     }
     // ★막아 둔 것을 푸는 것만으로는 부족하다. 그 분기가 막혀 있는 동안 **"안 돌 것"으로
     //   확정된 노드**는 그대로 남는다. 반복 바깥에 있는 복구·대안 단계가 정확히 이 자리에서
-                                                         
+    //   영영 죽는다(실측: 첫 바퀴 성공 → 실패 경로가 닫히며 복구 단계가 skip 확정 →
     //   두 바퀴째 실제로 실패해도 복구가 안 돎).
     //   되감기는 지난 바퀴가 내린 결정을 되돌리는 일이므로, 건너뛰기 결정도 같이 되돌린다.
     const revivedNodeIds: string[] = [];
@@ -3462,7 +3462,7 @@ export async function runGraph(
     // 실패했을 때 반대쪽을 막는 코드(routeNodeFailure)는 있었는데, 성공했을 때 실패 쪽을 막는
     // 코드가 없었다. 그래서 잘 돈 노드의 error 출구에 이어 둔 "담당자에게 알려라" 단계가
     // 실패가 없는데도 실행 대상이 됐고, {{...\_error_reason}}이 없어 NODE_INPUT_MISSING으로
-                                                        
+    // 죽으면서 **성공한 그래프 전체를 실패로 만들었다**(실측: 신규 리드 처리 시나리오).
     // 사람이 보기에는 "아무 문제 없었는데 실패 알림 단계 때문에 실패"라는 앞뒤가 안 맞는 결과다.
     for (const edge of outByNode.get(nodeId) ?? []) {
       if (edge.handle === "error" || edge.handle === "timeout") blockedEdges.add(edge.edgeId);
@@ -3510,17 +3510,17 @@ export async function runGraph(
     produces: string,
     rawText: string,
   ): GraphNodeFailure | null => {
-      
-                                                          
-                                    
-      
-                                                                
-                                                           
-                              
-      
-                                                           
-                               
-       
+    /*
+     * ★모델이 JSON 을 **코드 펜스로 감싸 낸다.** 프롬프트로 "펜스 쓰지 마라"라고 해도
+     *   쓴다 — 부탁은 약속이고, 벗기는 것은 보장이다.
+     *
+     *   실측 2026-08-20 (캠페인 E5): 저작 계약을 넣어 에이전트가 JSON 을 내게 만들었더니
+     *   이번엔 ```json 으로 감싸서 냈고, 다음 코드 단계가 그걸 못 읽어 빈 배열을 냈다.
+     *   같은 자리에서 두 번째로 막힌 것이다.
+     *
+     *   **통째로 하나의 펜스**이고 그 안이 실제로 JSON 일 때만 벗긴다 — 사람이 읽는 글
+     *   안의 예시 코드 블록은 건드리지 않는다.
+     */
     const text = machineReadableValue(rawText, machineReadVars.has(produces));
     const policy = reducerPolicyOf(node);
     const writers = varWriters.get(produces) ?? [];
@@ -3590,16 +3590,16 @@ export async function runGraph(
    * 쓰며, ambiguous로 올리지 않는다 — 외부에 아무것도 나가지 않았음이 확정이기 때문이다.
    * 사유 원문과 지금 누를 행동을 함께 남긴다(코드만 남기지 않는다).
    */
-     
-                                               
-    
-                                                                     
-                                                              
-                                                       
-    
-                                                 
-                                                    
-     
+  /**
+   * 이 실패를 저작자가 그린 실패 경로로 흘려보낼 수 있는가 (커넥터 C40).
+   *
+   * 조사한 두 제품이 같은 자리에 이 기능을 둔다 — n8n은 `main` 타입에 category:'error'를 붙인
+   * 추가 출력 포트로, Dify는 `fail-branch` 소스 핸들로. 우리는 실측으로 없음을 확인했다:
+   * 상류가 실패하면 하류가 아예 안 돌아, "실패하면 대신 이걸 해라"를 그릴 방법이 없었다.
+   *
+   * ★단 하나 라우팅하지 않는 실패가 있다: **부수효과가 나갔는지 모르는 것**.
+   *   모르는 채로 대체 경로를 타면 같은 게 두 번 나갈 수 있다. 그건 계속 멈춘다.
+   */
   /**
    * 이 실패를 저작자가 그린 실패 경로로 흘려보냈는가. 흘려보냈으면 true —
    * 그때 실행은 **계속된다**(run 전체를 실패로 만들지 않는다).
@@ -3614,7 +3614,7 @@ export async function runGraph(
     const routes = (outByNode.get(node.id) ?? []).filter((e) => e.handle === handle);
     if (routes.length === 0) return false;
     // ★라우팅하면 안 되는 것들 — 닫힌 목록. 하나하나 이유가 다르다.
-                                                    
+    //   (계약 게이트가 실측으로 잡았다: 승인 대기까지 실패 경로로 흘려 사람 결정을
     //    조용히 건너뛰는 버그를 만들 뻔했다.)
     if (NON_ROUTABLE_FAILURES.has(failure.code)) return false;
     // 무엇이 왜 실패했는지를 상태에 남겨, 실패 경로가 조건 노드로 사유를 갈라 볼 수 있게 한다
@@ -3627,7 +3627,7 @@ export async function runGraph(
     //
     // ★그리고 실패 출구는 **다시 연다**. 같은 노드가 앞 바퀴에 성공했다면 그때 이 출구를
     //   닫아 뒀는데(completeNode), 이번 바퀴에 실제로 실패했으니 열려 있어야 한다.
-                                                        
+    //   안 열면 실패가 갈 곳을 잃고 복구 단계가 영영 안 돈다 — 실측으로 정확히 그랬다.
     //   막는 것과 여는 것을 같은 자리에서 다루지 않으면 언제나 한쪽이 남는다.
     const reopened: string[] = [];
     for (const edge of outByNode.get(node.id) ?? []) {
@@ -3643,7 +3643,7 @@ export async function runGraph(
     // ★출구를 다시 여는 것만으로는 부족하다 — 그 출구가 닫혀 있던 동안 **건너뛰기로 확정된**
     //   노드는 그대로 남는다. 반복 그래프에서 첫 바퀴에 성공하면 실패 경로가 닫히고, 그 아래
     //   복구 단계가 그 자리에서 "안 돌 것"으로 확정된다. 두 바퀴째 실제로 실패해도 이미
-                                           
+    //   확정된 건너뛰기는 풀리지 않아, 복구가 영영 안 돈다(실측).
     //   문을 열었으면 그 문으로 갈 수 있었던 것들도 함께 되살려야 한다.
     if (reopened.length) {
       const revive = (nodeId: string): void => {
@@ -3993,16 +3993,16 @@ export async function runGraph(
         const value = vars[subject];
         const subjectText = judgeableText(value);
         if (value == null || subjectText.trim() === "") {
-            
-                                                          
-                                                          
-                                                    
-            
-                                                              
-                                                         
-                                                        
-                                                   
-             
+          /*
+           * ★"값이 비어 있다" 와 "값이 없다" 는 다르다. 앞 단계가 **정상적으로 돌아
+           *   빈 결과를 냈을 때** 이 자리에서 "앞 단계가 만들어 주지 않았습니다" 라고
+           *   말하면 사실과 다르고, 사람은 있지도 않은 배선 문제를 찾게 된다.
+           *
+           *   실측 2026-08-20: 임계값 감시 자동화가 조용한 날(=대부분의 날)마다 여기서
+           *   죽었다. 계산은 정확했고 결과도 옳았다. 진짜 원인은 그래프의 모양이었다 —
+           *   갈림길이 "비어 있을 수 있다"고 말한 값에 그 앞의 검증이 "비어 있으면
+           *   안 된다"고 하고 있었다. 그 모순을 여기서 이름으로 말해 준다.
+           */
           const contradiction = value != null
             ? findGraphContradictions(graph, planGraphLoops).find((c) => c.nodeId === node.id)
             : undefined;
@@ -4037,7 +4037,7 @@ export async function runGraph(
         const produces = str(node.config, "produces") ?? `${node.id}_verdict`;
 
         // ── 채점표 경로 — config.items 가 있으면 항목별 yes/no 판정 ───────────
-                                                           
+        // 한 문장 기준 하나의 pass/fail 은 "뭘 고쳐야 하는지"를 말하지 못한다(실측:
         // 명시적 항목을 주면 재시도 성공 31%→98%). 항목은 must(있어야 한다)와
         // mustNot(하면 안 된다 — 판정자의 후한 버릇·꼼수 통과를 막는다)로 나뉜다.
         // 내용은 저작 시점에 AI가 그 그래프를 보고 쓴다 — 코드에 분야 목록은 없다.
@@ -4057,7 +4057,7 @@ export async function runGraph(
         if (checklist.length > 0) {
           // ★근거 기반 판정 — 재조회 스텝이 만든 값(config.evidence)이 있으면 함께 대조한다.
           //   "주가가 실제와 일치하나"류는 대상만 보고는 판정 불가이고, 같은 모델이 자기
-                                                                    
+          //   산출물을 판정하는 편향의 최대 완화책이 reference 제공이다(실패율 70%→15% 실측).
           const evidenceVar = str(node.config, "evidence");
           const evidenceValue = evidenceVar ? vars[evidenceVar] : undefined;
           if (evidenceVar && (evidenceValue == null || judgeableText(evidenceValue).trim() === "")) {
@@ -4133,7 +4133,7 @@ export async function runGraph(
                   ),
               // ★"기다리면 풀리는 사유"와 "런타임을 하나 붙여야 풀리는 사유"의 다음 행동은
               //   다르다. 거절(refused)에 "잠시 뒤 다시 실행"을 붙이면, 그 사용자는 영원히
-                                                                     
+              //   같은 자리에서 같은 버튼을 누른다(실측 2026-08-19: 설치된 5종 중 codex 만
               //   판정을 거절 — codex 단독 사용자는 검증이 있는 자동화를 끝낼 수 없다).
               nextAction: list.failureKind === "refused"
                 ? L(
@@ -4145,7 +4145,7 @@ export async function runGraph(
             return;
           }
           // ★흔들림 측정(옵션) — 같은 입력을 한 번 더 판정해 항목별 불일치를 기록한다.
-                                                          
+          //   판정은 같은 입력에도 흔들린다는 실측(20회 중 최대 50% 뒤집힘)이 있고,
           //   흔들리는 판정은 흔들린다고 말해야 한다. 결과는 1차 판정을 쓴다 —
           //   재판정으로 결과를 바꾸면 "몇 번 돌리느냐"가 결과를 정하게 된다.
           let stability: { agreed: boolean; disagreedItems: string[] } | null = null;
@@ -4194,14 +4194,14 @@ export async function runGraph(
             // ★떨어졌는데 그것을 받을 곳이 없으면 여기서 멈춘다 — 아무도 안 읽는 fail 을
             //   지나쳐 `ok: true` 로 끝나면, 검증을 붙인 사람에게 통과했다고 거짓말하는 것이다.
             if (!evalFailureIsHandled(node.id, produces)) {
-                
-                                                      
-                                                          
-                                                          
-                                                           
-                                                           
-                                                          
-                 
+              /*
+               * ★멈추는 것은 **금지선**뿐이다(오너 결정 2026-08-20).
+               *   근거를 대고 주장과 세상을 맞대 본 검증이 떨어졌다면 세상이 다르다 —
+               *   여기서 멈춘다. 근거 없이 값의 품질을 본 검증이 떨어진 것은 "목표에
+               *   얼마나 닿았나"이고, 그 판단은 **사용자가 승인한 목표를 들고 있는**
+               *   완주 판정이 한다. 여기서 멈추면 시킨 대로 한 자동화가 실패로 찍힌다.
+               *   떨어진 사실은 사라지지 않는다 — 아래에서 실행 기록에 그대로 남는다.
+               */
               if (evalIsBoundary(node)) {
                 const settled = settleEvalFailure(node, {
                   evaluatedDigest,
@@ -4319,7 +4319,7 @@ export async function runGraph(
         }
         vars[produces] = verdict.verdict;
         // ★사유를 다음 바퀴가 읽을 수 있게 남긴다. 이게 없으면 반복이 같은 것을 다시 만들고
-                                                     
+        //  같은 이유로 또 떨어진다(실측: 3바퀴를 돌아도 결과가 나아지지 않았다).
         vars[`${produces}_reason`] = verdict.reason ?? "";
         // 판정도 봉투를 낸다. 판정은 텍스트가 아니라 **구조**라서 json으로 담는다 —
         // 그래야 다음 단계가 문자열을 다시 뜯어 읽는(=단어장 판정으로 되돌아가는) 길이 없다.
@@ -4496,7 +4496,7 @@ export async function runGraph(
         }); };
         const recordCodeEffect = (attempt: Awaited<ReturnType<typeof runCodeStep>>) => {
           if (!attempt.effectReceipt) return;
-                                                                                 
+          // A failed/aborted script can still leave a measured local file delta.
           // This receipt does not settle unobserved network or business effects.
           tryRecordRunEvent({ runId, kind: "graph_host_effect", automationId: automation.id, payload: {
             nodeId: node.id, effectKind: attempt.effectReceipt.kind,
@@ -4513,8 +4513,9 @@ export async function runGraph(
             codeRecoveryBlocked = true;
             /*
              * The refusal read only the work unit an earlier run of this occurrence left and its last observation; the next
-             * redelivery or resume reads the same ones and is refused the same way (failed unit, no observation of its last
-             * attempt), and each redelivery would add a strategy reflection. Not typed when a stop
+             * redelivery or resume reads the same ones and is refused the same way. Production 2026-10-19 (1.3.80): two
+             * command graphs whose code step failed twice were redelivered 12-15 times each, every time refused at begin()
+             * (failed unit, no observation of its last attempt), each adding a strategy reflection. Not typed when a stop
              * or this run's budget took part in the decision: those can change.
              */
             if (inheritedCodeRefusal && !runSignal.aborted && budgetGuard(node) === null) {
@@ -4539,19 +4540,19 @@ export async function runGraph(
         };
         let run = await withFiniteDispatch(() => dispatchCode(codeText));
         assertFiniteCurrent();
-          
-                                                                 
-                                                             
-                                                             
-                                  
-          
-                                                              
-                                                            
-          
-                                                            
-                                                        
-                                                         
-           
+        /*
+         * ★빌더가 짠 스크립트는 **한 번도 돌아 본 적이 없다.** 실측 2026-08-20: 새로 만든
+         *   환율 자동화의 첫 단계가 자료원에서 HTTP 403 을 받고 죽었다. 사람에게는 파이썬
+         *   스택만 남고, 예전 문구는 "AI가 스크립트를 다시 짭니다"라고 **약속만** 했다 —
+         *   그렇게 하는 코드가 이 경로에 없었다.
+         *
+         *   그래서 실제로 한 번 다시 짜고 다시 돌린다(오너 결정 2026-08-19: 자동 복구가
+         *   피드백의 기준이다). 한 번만 한다 — 두 번째도 실패하면 그건 코드 문제가 아니다.
+         *
+         *   ★저장된 그래프는 건드리지 않는다. 고친 스크립트는 **이 실행 안에서만** 쓴다 —
+         *     그래프를 말없이 바꾸면 멈춘 실행의 재개가 digest 불일치로 거부된다.
+         *   ★의존성 결손은 다시 짜서 될 일이 아니다(패키지 선언 문제) — 그대로 둔다.
+         */
         if (!opts.immutableImplementation && !run.ok && !codeRecoveryBlocked && codeFailureAllowsAutomaticRetry(run, executionEffect)
           && run.failureCode !== "CODE_DEPENDENCY_MISSING" && !codeRepairAttempted.has(node.id)) {
           codeRepairAttempted.add(node.id);
@@ -4593,7 +4594,7 @@ export async function runGraph(
                 "Could not prepare the Python package(s) this code uses.",
               ),
               // ★사람에게 pip 이름을 묻지 않는다 — 코드를 지은 것은 AI다.
-                                                                         
+              //   (실측: PIL→Pillow, sklearn→scikit-learn. 사용자가 알 이유가 없다.)
               nextAction: L(
                 "[AI가 고치게 하기]를 누르면 이 단계에 올바른 패키지 이름을 채워 넣은 수정안을 만들어 드립니다.",
                 "Click [Have AI fix it] and a fix with the correct package name filled in will be made for this step.",
@@ -4601,18 +4602,18 @@ export async function runGraph(
             }
             : {
               code: "CODE_STEP_FAILED",
-                
-                                                                
-                                                              
-                                                                        
-                                            
-                 
+              /*
+               * ★파이썬 트레이스백을 통째로 내면 사람이 읽을 것이 없다. 실측 2026-08-20:
+               *   환율 조회 단계가 40줄짜리 스택을 냈고, 그 안에서 사람에게 쓸모 있는 것은
+               *   마지막 줄 하나(`HTTPError: HTTP Error 403: Forbidden`)뿐이었다.
+               *   그 한 줄을 앞에 세우고 스택은 뒤에 붙인다.
+               */
               reason: codeFailureHeadline(run.reason),
-                
-                                                               
-                                                                    
-                                                            
-                 
+              /*
+               * ★없는 기능을 약속하지 않는다. 예전 문구는 "AI가 스크립트를 다시 짭니다"였는데
+               *   **그렇게 하는 코드가 이 경로에 없다**(실측 2026-08-20). 사람은 기다렸다가
+               *   아무 일도 안 일어나는 것을 본다. 지금 실제로 할 수 있는 것만 적는다.
+               */
               nextAction: L(
                 "이 단계가 무엇을 어디서 가져와야 하는지 한 줄 더 적어 주고 다시 실행하세요"
                 + " — 다른 자료원이 필요할 수도 있습니다.",
@@ -4656,7 +4657,7 @@ export async function runGraph(
           if (conflict) { failGraphNode(node, conflict); return; }
           // ★그런 다음 **진짜 타입**으로 덮는다. 코드가 객체를 냈으면 객체로 남겨야
           //   다음 코드 노드가 vars[x]["sum"]으로 읽는다. applyProduces가 문자열로
-                                                  
+          //   덮어써 버리면 계산 결과가 문자열이 돼 조용히 어긋난다(실측).
           //   말 노드는 {{x}} 치환 때 substitute가 객체를 JSON으로 바꿔 준다.
           if (reducerPolicyOf(node) === "overwrite" && run.result != null) {
             vars[codeProduces] = run.result;
@@ -4713,7 +4714,7 @@ export async function runGraph(
         // 예전에는 agent/action과 한 블록에 묶여 `config.text`가 그대로 프롬프트로 모델에
         // 들어갔다. 그러면 사람이 "이걸 내보내라"고 적어 둔 완성된 결과를 모델이 마지막에
         // 한 번 더 **다시 쓰고**, 그 재작성본이 그래프의 산출물이 된다.
-                                                               
+        // 실측(그래프 안의 그래프): 안쪽 결과 "영업 12 / 개발 30 / 지원 8"이 출력 노드를
         // 지나며 "결과"로 바뀌어 바깥으로 나갔다 — 실패도 경고도 없이.
         //
         // 레지스트리는 이 블록을 "바깥으로 내보내기"로 선언한다(effect·approval·idempotencyKey를
@@ -4722,7 +4723,7 @@ export async function runGraph(
         // 결과는 모델이 뱉은 말이 아니라 **선언된 내용**으로 남긴다.
         // 바깥으로 안 나가는 출력(effect: read)은 그래프의 종착점일 뿐이라 모델을 아예 안 부른다.
         // ★`text`는 **내용**, `prompt`는 **지시문**이다. 둘을 같은 것으로 다루면
-                                             
+        //   "이걸 게시해라"라는 지시문이 게시물 본문이 된다(실측).
         //   그래서 감싸기·결과 고정은 `text`가 있을 때만 하고, 없으면 예전처럼 지시문으로 돈다.
         const declaredText = str(node.config, "text") ?? str(node.config, "prompt")
           ?? automation.promptTemplate;
@@ -4833,7 +4834,7 @@ export async function runGraph(
           journal("node_intent", node.id, { advisory: budgetStop.code, reason: budgetStop.reason, continued: true });
         }
         // ★출력 노드의 `text`는 **내용**이지 지시문이 아니다. 감싸지 않고 그대로 넘기면
-                                                          
+        //   모델이 그 내용을 "이렇게 써 달라는 요청"으로 읽고 다시 써 버린다(실측: 안쪽
         //   그래프의 결과 한 줄이 "결과"로 바뀌어 나갔다). 감싸는 문장이 그 오해를 막는다.
         // 내용이 선언된 출력만 "그대로 내보내기"로 다룬다. 지시문만 있는 출력(emitter가 만드는
         // 모양)은 예전처럼 지시문대로 돌아야 한다 — 아니면 빈 내용을 내보내고 성공으로 남는다.
@@ -4856,7 +4857,7 @@ export async function runGraph(
         // ── loop.feedback.reason — 판정 사유를 재실행 프롬프트에 자동 첨부 ──────
         // 반복 바퀴에서 채점표가 fail을 낸 뒤 이 노드가 다시 도는 경우, "지난 시도가
         // 왜 떨어졌는지"를 커널이 붙인다. 사람이 {{x_reason}}을 프롬프트에 적어야만
-                                               
+        // 전달되던 것을(실측: 아무도 안 적는다) 기본 동작으로 바꾼 것.
         // 이미 프롬프트가 _reason 값을 직접 참조해 치환됐다면 중복 첨부하지 않는다.
         let feedbackBlock = "";
         if (evalFeedback.size > 0 && !isOutwardOutput) {
@@ -4875,22 +4876,22 @@ export async function runGraph(
             }
           }
         }
-          
-                                              
-          
-                                                                 
-                                                                   
-                                                            
-          
-                                                                         
-                                                                                
-                                                         
-                                                                           
-                               
-          
-                                                         
-                                                            
-           
+        /*
+         * ★`consumes` 는 선언이 아니라 **전달**이어야 한다.
+         *
+         *   코드 노드는 이미 그렇게 돈다 — `consumes` 에 적힌 값을 스크립트 변수로 넣어 준다
+         *   (아래 code 케이스의 codeVars). 그런데 에이전트/출력 노드는 `{{이름}}` 치환에만
+         *   의존해서, 지시문이 그 자리를 안 적으면 선언해 둔 값이 **한 글자도 안 간다**.
+         *
+         *   실측 2026-08-19: 임계값 감시 자동화의 보고 단계가 `consumes: "summary"` 를 달고
+         *   "Using only the numbers in the report you are given …" 라고 썼다. 사람에게도
+         *   모델에게도 "값이 온다"고 읽히는 문장이다. 실제로는 안 왔고, 모델은 정직하게
+         *   "No report was provided in this run" 이라고 답했다. 앞 단계는 환율·임계값·결과를
+         *   전부 정확히 계산해 둔 상태였다.
+         *
+         *   그래서 지시문이 그 값을 참조하지 않으면 커널이 **이름표를 붙여 덧붙인다**.
+         *   이미 `{{이름}}` 으로 적어 둔 그래프는 그대로다(중복해서 두 번 넣지 않는다).
+         */
         let consumedBlock = "";
         {
           const declared = String(node.config?.consumes ?? "").trim();
@@ -4915,7 +4916,7 @@ export async function runGraph(
         // 값이 없는 것과 값이 비어 있는 것은 다르며, 전자는 사람이 채워야 하는 상태다.
         // ★판정 사유(_reason) 변수는 예외 — 반복의 **첫 바퀴에는 아직 판정이 없어서**
         //   값이 없는 것이 정상이다. 이걸 막으면 사유를 명시 참조한 반복 프롬프트가
-                                                              
+        //   첫 바퀴에서 NODE_INPUT_MISSING으로 죽는다(게이트가 실측으로 잡은 결함).
         //   다른 변수의 빈 구멍은 여전히 막는다 — 그건 저작 실수다.
         const blockingMissing = substituted.missing.filter((name) => !name.endsWith("_reason"));
         if (blockingMissing.length > 0 && prompt.trim()) {
@@ -5068,7 +5069,7 @@ export async function runGraph(
         let graphWorkerReceipt: GraphWorkerFailureReceipt | null = null;
         let modelInvocationFailed = false;
         let modelInvocationStarted = false;
-                                                                                                                        
+        // Owner decision 2026-10-16: a step of a graph that a group room's One saved acts with that room's One Team for
         // this step only. Minted (authority re-checked) at step start, revoked when the step ends (graph-team-grant.ts).
         let graphTeamGrant: GraphTeamGrant | null = null;
         try {
@@ -5166,13 +5167,13 @@ export async function runGraph(
           let graphTeamContinuation = false;
           const invokeNode: typeof runMcpInvocation = async (...args) => {
             assertFiniteCurrent();
-            
-
-
-
-
-
-
+            // An agent node's context is bound to its run owner lease. Without one every agent node refused before its
+            // runtime started (agent_context_original_invocation_owner_required; production 2026-10-12..14, earlier
+            // masked as "no completion receipt"), and each resume then stopped on worker_liveness_unknown. Claimed before
+            // the work unit begins, so a busy chat is a clean refusal, not an unconfirmed mutation. The next agent node (or
+            // attempt) on the same chat reopens this run's released lease instead of being refused as another run.
+            // A room busy with another run (the owner's Goal turn in the same room) is waited for, not a failure
+            // (graph-room-wait.ts); the node's deadline is held meanwhile.
             const ownerLease = nativeMcpCall ? null : await claimRoomWhenFree({ runId, nodeId: node.id, signal: nodeAbort.signal,
               claim: () => claimInvocationRunOwner(nodeChat.id, runId, { reopenReleased: true }),
               onWait: ({ phase, code, waitedMs }) => {
@@ -5282,7 +5283,7 @@ export async function runGraph(
               // ★도구 호출은 호스트 관측 사실이므로 원장(run_events)에 남긴다.
               // 지금까지 노드 실행의 tool-use는 notes(표시용)에만 담겨, 제품
               // 스스로도 "이 노드가 실제로 도구를 썼는가"를 대답할 수 없었다 —
-                                                     
+              // 실측: X 자동화의 노드 실행들이 화면을 실제로 조작(캡처 존재)
               // 했는데 run_events에는 mcp_tool-use 0건이라, 지어낸 실행과
               // 진짜 실행을 캡처 파일로만 구분해야 했다. 관측 없는 성공은
               // 성공이 아니라는 규칙(판정기·완주 루프)이 읽을 사실이 이 행이다.
@@ -5302,13 +5303,13 @@ export async function runGraph(
                 if (!eventReadOnly) unsafeToolRequested = true;
                 // 호스트 자신의 예비 조회(Agentlas Plugins ·, workforce 감사)는 "일했다"의
                 // 근거가 아니다 — 세지 않는다. 정본은 shared/tool-activity.
-                  
-                                                             
-                                                                
-                                                              
-                                                        
-                                                                           
-                   
+                /*
+                 * ★"불렀다"가 아니라 "바꿨을 수 있다"를 센다. 실측 2026-08-20:
+                 *   "요약을 파일로 저장" 단계를 가진 자동화가 ok:true 로 끝났는데 파일은
+                 *   없었다 — 그 실행이 부른 것은 웹 조회뿐이었고, 커널은 호출 수만 봤다.
+                 *   읽기만 하고 "저장했다"고 적은 답을 관측이 보증해 준 셈이다.
+                 *   모르는 이름은 여전히 "바꿨을 수 있음"으로 센다(정본: shared/tool-activity).
+                 */
                 if (!eventReadOnly) {
                   externalToolCallsByNode.set(
                     node.id,
@@ -5331,7 +5332,7 @@ export async function runGraph(
                     // A failed call keeps its reason, like the chat path
                     // (store/run-events.ts). Without it the Threads automation's
                     // codex refusal ("MCP tool call requires approval, but approval
-                                                                                    
+                    // policy is never", 2026-09-24/25) was a bare toolIsError:true.
                     // Success rows stay as before: completion proofs read a
                     // result preview only from the chat path.
                     ...(ev.tool.isError ? {
@@ -5454,7 +5455,7 @@ export async function runGraph(
           modelInvocationFailed = Boolean(graphWorkerAttempt && (result.graphWorkerFailure || runnerError || result.markedQuotaFailure));
           // ★바깥을 바꾸는 노드는 **도구를 부른 사실**이 있어야 성공일 수 있다.
           //
-                                                                            
+          // 실측 2026-08-19: X 자동화가 gemini 와 claude/opus 두 런타임에서 모두 4/4 로 끝나며
           // "답글 3건 게시 완료"라고 적었는데, 그 실행이 부른 도구는 Agentlas 자신의 플러그인
           // 조회뿐이었고 X 에는 아무것도 올라가지 않았다. 브라우저 도구는 정상이었다(직접 띄워
           // 27개 도구 확인) — 없어서가 아니라 안 부른 것이다. 실행 전체가 끝난 뒤 판정에서
@@ -5504,12 +5505,12 @@ export async function runGraph(
                 `"${node.label || node.id}" is a step that changes the outside world, but it never called a tool — `
                 + "that answer did not actually happen.",
               ),
-                
-                                                              
-                                                             
-                                                            
-                                        
-                 
+              /*
+               * ★두 가지 진실이 있고 둘 다 말해야 한다. 실측 2026-08-20: 주간 요약
+               *   자동화의 "요약 작성" 단계가 매번 여기서 죽었는데, 그 단계는 글을 쓸 뿐
+               *   바깥을 바꾸지 않는다 — 선언이 틀렸던 것이다. 도구 이야기만 하면 사람은
+               *   있지도 않은 도구를 찾아 헤매게 된다.
+               */
               nextAction: L(
                 "이 단계에 필요한 도구(브라우저·컴퓨터 유즈 등)가 붙어 있는지 확인하고, 지시에 "
                 + "'무엇을 어떤 도구로 하라'를 한 줄 적어 주세요. "
@@ -5625,15 +5626,15 @@ export async function runGraph(
           if (currentCommonUnit?.state === "started") commonUnits.set(node.id, commonRecovery.fail(currentCommonUnit));
           const rawMessage = nodeErr instanceof Error ? nodeErr.message : String(nodeErr);
           const receipts = checkpoint!.toolReceipts[node.id] ?? [];
-          
-
-
-
-
-
-
-
-
+          /*
+           * Typed dispatch evidence, never intent: the invocation's refusal carries RuntimeTurnDelivery "not-dispatched"
+           * (runtime/runner.ts: a runner's or host wrapper's refusal before any provider send; mcp/client.ts keeps it and
+           * puts it on the error event, or it is thrown as is), or the host failed a pre-runner stage with a typed
+           * pre-dispatch code (REPLAY_SAFE_PRE_DISPATCH_ERROR_CODES). With no provider output and no tool request observed in this attempt,
+           * the step did not run: a definite failure the normal retry/recovery handles, never an ambiguous side effect.
+           * Production 1.3.49 (2026-10-16 08:02:17Z, daily YouTube graph step2): a journal refusal before the antigravity
+           * process started became "may have committed an external action" and stopped the automation for review.
+           */
           const providerNeverDispatched = (runnerRefusedBeforeDispatch(nodeErr) || preDispatchErrorCode !== null)
             && !providerOutputObserved && !unsafeToolRequested && !unsafeToolObserved && checkpointPersistenceError === null;
           const replaySafeObservedReceipts = receipts.length > 0 && receipts.every((receipt) => (
@@ -5656,7 +5657,7 @@ export async function runGraph(
           // ★관측된 호출이 **전부 읽기 전용**이면 바깥은 하나도 안 바뀌었다 — 호출이 아예
           //   없었던 것과 안전성이 같다. 이 조건이 없어서, 호스트 자신의 예비 조회
           //   (Agentlas Plugins ·)만 남긴 실패가 "모호"로 잠겨 사람 확인을 요구했다.
-                                                                   
+          //   실측 2026-08-19: 도구 0건으로 멈춘 노드가 ambiguousNodeIds 에 들어가
           //   다음 실행이 automation_reconciliation_pending 으로 막혔다.
           const replaySafeFailure = effectivePermission === "read" ||
             replaySafeTypedFailure || replaySafePreparedFailure || noObservedSideEffect ||
@@ -5829,13 +5830,13 @@ export async function runGraph(
           ) || retriesDeclared(node);
           const retryAdmitted = commonRetryAllowed && transientSignal && (!modelInvocationFailed || quotaHandoff || settlementRetry) && !ambiguous && !nodeTimedOut && !contractStop &&
             !runSignal.aborted && attempts < maxAttempts;
-          
-
-
-
-
-
-
+          /*
+           * A step that provably never reached a provider (providerNeverDispatched) left no worker behind. Its work unit
+           * failed with no observation, and the next attempt's begin() then refused it as work_recovery_worker_liveness_unknown
+           * whenever no retryable Worker receipt had recorded one (measured: a store lock before dispatch, R-067; the
+           * settlement's not-dispatched rate-limit retry takes the same lane). Record the typed fact the step's own failure
+           * proved: nothing ran, nothing was produced, no effect to settle.
+           */
           let notDispatchedRecoveryAdmitted = true;
           const workerReceiptRecorded = graphWorkerReceipt?.status === "retryable" && graphWorkerReceipt.runtimeQuiesced;
           const failedUnit = commonUnits.get(node.id);
@@ -5848,13 +5849,13 @@ export async function runGraph(
               payload: { unitId: failedUnit.unitId, attemptId: failedUnit.attemptId, methodStarts: failedUnit.methodStarts,
                 action: verdict.action, reason: verdict.reason, attention: verdict.attention, delivery: "not-dispatched" } });
           } else if (retryAdmitted && !dryRun && claimedWithoutTools && !workerReceiptRecorded && failedUnit?.state === "failed") {
-            
-
-
-
-
-
-
+            /*
+             * A mutation step that answered without calling a tool proved the same two facts: its invocation returned its
+             * final answer (the worker ended) and no external call was observed (the retry lane admits it only when not
+             * ambiguous). Without this record the retry it was granted was refused at begin() as
+             * work_recovery_worker_liveness_unknown, and every resume of the occurrence stopped there (dev 2026-10-18 run21:
+             * a weekly report automation blocked four times in two minutes).
+             */
             const verdict = commonRecovery.retry(failedUnit, { checkpointMatches: true, completed: false,
               evidenceRef: `graph-attempt:${runId}:${node.id}:${attempts}:claimed-without-tools`, effectSafe: true, workerEnded: true }, {
               userStopped: runSignal.aborted, scopeCurrent: true, authorized: true, budgetAvailable: budgetGuard(node) === null });
@@ -6171,7 +6172,7 @@ export async function runGraph(
           for (const n of innerNodes) { indegree.set(n.id, 0); adjacency.set(n.id, []); }
           // ★되돌아가는 연결을 빼고 센다. 안 빼면 반복 머리의 indegree가 0이 안 돼
           //   Kahn이 거기서 멈추고, **사이클 하류까지 전부** 순서를 못 받는다. 그러면
-                                                           
+          //   "마지막"이 그래프의 뜻이 아니라 노드 id 철자로 정해진다(실측: 최종본 대신
           //   반복 몸통의 초안이 부모로 나갔다).
           const innerBack = findBackEdges({ version: 1, nodes: innerNodes, edges: innerEdges });
           for (const e of innerEdges) {
@@ -6214,7 +6215,7 @@ export async function runGraph(
           !(innerResult.dryRunBlocks ?? []).some((b) => b.nodeId === candidate.id),
         );
         // ★출력 노드 우선은 **끝에 있는** 출력에만 적용한다. 중간에 알림용 출력이 끼어 있으면
-                                                           
+        //   그게 뒤의 진짜 결과를 가로챈다(실측: "수집 완료"가 자식 그래프의 답이 됐다).
         const preferOutput = withValue.filter((candidate) =>
           candidate.type === "output" && !innerEdges.some((e) => e.source === candidate.id),
         );
@@ -6331,7 +6332,7 @@ export async function runGraph(
       (n) => status.get(n.id) === "pending" && inboundResolved(n.id) && !shouldSkip(n.id),
     );
     // ★브라우저 모드 그래프의 실행 단계는 브라우저 하나(같은 프로필·같은 탭)를 함께 쓴다.
-                                                                   
+    //   병렬로 띄우면 서로의 화면을 바꾼다 — 격리 후보 앱 E2E 2026-09-24(Threads 자동화):
     //   병렬 measure 가 publish 의 작성창에서 "취소"를 눌러 publish 의 ref 가 사라졌고(Ref not
     //   found ×4), measure 는 게시 전 상태를 측정했다. 그 단계들은 한 번에 하나만 돈다.
     let sharedBrowserBusy = [...running.keys()].some((id) => {

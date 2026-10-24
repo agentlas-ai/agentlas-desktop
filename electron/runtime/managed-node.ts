@@ -660,12 +660,12 @@ export function resolveManagedNodeRuntime(): ManagedNodeResolution {
 }
 
 /**
-
-
-
-
-
-
+ * Every node path the verifier child may legitimately return.
+ *
+ * On Windows the child materializes a persistent copy, and when a copy fails it falls back (c2a0db94) to the next
+ * persistent parent (`%LOCALAPPDATA%`) or to the packaged executable itself. Accepting only the home copy turned every
+ * fallback into `invalid_receipt`, so local-model engine attestation always failed on those machines (review
+ * 2026-10-16, desktop-b-05). The path stays pinned to the packaged layout and the known parents.
  */
 function expectedResolvedNodePaths(
   root: string,

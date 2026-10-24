@@ -1,17 +1,17 @@
 import type { OrchestrationTarget, RuntimeSelection } from "../../shared/types";
 
 /**
-
-
-
-
-
-
-
-
-
-
-
+ * A message the owner sent that Main has not taken yet.
+ *
+ * Measured (release peer, dev instance of af6ca162, twice): the first message of a room was sent, and about 4 s later
+ * the renderer reloaded. Main then had no admission, no pending send and no chat row for it. The text lived only in
+ * renderer memory while One prepared the team, so the reload deleted it without a trace.
+ *
+ * The entry is written in the same synchronous step that empties the composer. A reload, a crash or a relaunch
+ * between "send" and Main's first durable record therefore keeps the text. It is a local retry record, never execution
+ * authority: Main's receipts (submission state, run admission) decide whether it resumes, waits or is shown as not
+ * sent. It uses the follow-up outbox's storage contract: verify after every write, refuse an identity conflict, and
+ * keep a hard cap.
  */
 export type FirstSendSurface = "one" | "work";
 

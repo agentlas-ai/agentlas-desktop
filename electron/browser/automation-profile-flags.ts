@@ -1,17 +1,17 @@
 /**
-
-
-
-
-
-
-
-
-
-
-
-
-
+ * What the dedicated automation profile (~/.agentlas/chrome-cdp-profile) is
+ * allowed to keep. Automation needs sign-ins and site data (cookies, Local
+ * Storage, IndexedDB, Service Worker registrations), never Chrome's own models
+ * or an unbounded cache. Shared by every launch of that profile: the CDP
+ * launcher, the login window, the OAuth window and the sign-in import.
+ *
+ * Chrome keeps only the last --disable-features switch, so every disabled
+ * feature travels in one value.
+ *
+ * The OptimizationGuide features and --disable-component-update stop Chrome
+ * from downloading its on-device AI model into the profile. On 2026-10-16 the
+ * profile held 4 GB of OptGuideOnDeviceModel. The OAuth window was the one
+ * launch without --disable-component-update.
  */
 export const AUTOMATION_PROFILE_DISABLED_FEATURES = [
   "Translate",

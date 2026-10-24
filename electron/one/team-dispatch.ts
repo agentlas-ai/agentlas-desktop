@@ -273,7 +273,7 @@ export function oneTeamDispatchAllowedFor(chatId: string | null | undefined): bo
 
 /**
  * A teammate's own work: a session One handed work to, or a teammate's own conversation. This is where the hand work happens
- * (chats that drive an app by hand are One rooms or teammate sessions),
+ * (measured 2026-10-20: every chat that drove Blender, Threads or YouTube Studio by hand was a One room or a teammate session),
  * so a teammate uses callable Toolchains like a Work task does. It never gets One's authoring or dispatch tools.
  */
 export function isOneTeammateChat(chatId: string | null | undefined): boolean {
@@ -403,14 +403,14 @@ export function recoverOneTeamDispatches(): void {
   armOrphanSweep();
 }
 
-
-
-
-
-
-
-
-
+/*
+ * Liveness from the shared store, not from this process's memory (D3/W3, flow audit 2026-10-18). Desktop Main and the
+ * background service (agentlasd) each run their own invocation service; activeChatIds() lists only this process's runs.
+ * Read alone, a teammate running in the other process looked stopped: a restart's recovery closed it as interrupted, and a
+ * report turn was started while the room's own turn ran over there (refused invocation_chat_busy_other_host, an attempt
+ * spent). Production Yotube dispatch-4e0b59a9: its child run 398a77af completed at 10-13 18:53:31Z, the row stayed running,
+ * and the 20:59 update restart closed it as interrupted with nothing reported (9 interrupted rows never reported).
+ */
 const RESTART_INTERRUPTED = "restart_interrupted";
 const PARENT_BUSY_OTHER_PROCESS = "one_team_parent_busy_other_host";
 /** Reports waiting for a room that is busy elsewhere or for a restart's report: retried by the sweep, never failures. */
@@ -549,10 +549,10 @@ function armOrphanSweep(): void {
 }
 
 /**
-
-
-
-
+ * A running teammate session whose run stopped for something only the owner can do (a sign-in, an answer, an
+ * approval): its receipt says waiting_input. Read from the durable run (errorCode, the recorded notice), never from
+ * the teammate's prose. Yotube room 2026-10-12: the publisher waited two hours on a YouTube sign-in while One told the
+ * owner it was "still working", because every running session read as working.
  */
 function ownerWait(dispatch: OneDispatchRow): { reason: string; notice_code?: string; detail?: string } | null {
   if (dispatch.status !== "running") return null;
@@ -777,14 +777,14 @@ export function withdrawQueuedOneTeamReport(dispatchId: string): boolean {
 export const ONE_TEAM_REPORT_OWNER_STOPPED = "owner_stopped";
 
 /**
-
-
-
-
-
-
-
-
+ * A queued report turn ended failed or cancelled (store/invocation-steers.ts calls this inside the transaction that
+ * settles the steer row): the ledger goes back to "not reported" with the cause. reportToOne writes reported_at when it
+ * QUEUES the report, so a report that never ran stayed "reported" and nothing re-sent it (production 2026-10-18,
+ * dispatch-1f9ca888: steer a4d7b864 failed 02:44:23Z, reported_at still 02:09:34.386Z). `retry`: one attempt is spent
+ * and retryFailedReports sends it again within ONE_TEAM_REPORT_ATTEMPTS; otherwise the attempts are spent (an owner
+ * stop: `owner_stopped`; a report turn that may already have run: its cause). Only the mark this report wrote is
+ * reverted: the same child run, marked at or after the report was queued, no later report turn of the same session.
+ * An owner-wait notice (markReported false) never marked the ledger and changes nothing.
  */
 export function revertQueuedOneTeamReport(input: {
   steerId: string; dispatchId: string | null; childRunId: string | null; queuedAt: string;
@@ -951,12 +951,12 @@ function reportToOne(dispatch: OneDispatchRow, userPrompt?: string | null, markR
     // The durable result receipt already exposes the actual member output in the room, so no second assistant relay is
     // made up here. But a report that never started is not delivered (22 O6): keep why, count the attempt, retry later.
     const message = error instanceof Error ? error.message : String(error);
-    
-
-
-
-
-
+    /*
+     * A waiting Goal refuses the report turn and parks the report (deferred-system-relays): the room's next turn that runs
+     * carries it, exactly once. That is delivery, not a failed report. Counted as one, one_team_list showed the Goal's own
+     * model `report: failed` for work it was about to read, and the retries re-parked the same text (Yotube 2026-10-17
+     * 17:41Z, t3 dispatch: report_error goal_waiting_system_start_refused, report_attempts 1).
+     */
     if (message === "goal_waiting_system_start_refused" && reportParkedForGoal(dispatch.parent_chat_id, request.userPrompt)) {
       console.info("[one-team] report parked for the Goal's next turn:", dispatch.id);
       if (markReported) getDb().prepare("UPDATE one_team_dispatches SET reported_at = ?, report_error = NULL WHERE id = ? AND reported_at IS NULL")
@@ -1026,10 +1026,10 @@ function reportParkedForGoal(chatId: string, text: string, anyDelivery = false):
 }
 
 /**
-
-
-
-
+ * A report a waiting Goal parked before the rule above counted the refusal as a failed start, retried it until the
+ * attempts ran out, and kept `report: failed` in one_team_list although its parked copy was carried into the Goal's next
+ * turn. Production 2026-10-17, Yotube room, dispatch-3b8d6b65: report_error goal_waiting_system_start_refused, 3 attempts,
+ * its relay delivered; the daily graph's check step on 10-18 still listed it as a failed report. Such a row is reported.
  */
 function settleParkedReports(parentChatId?: string): void {
   const rows = getDb().prepare(`SELECT * FROM one_team_dispatches WHERE status <> 'running' AND reported_at IS NULL
@@ -1083,10 +1083,10 @@ function graphOwnerOf(caller: OneTeamCaller): string | null {
 }
 
 /**
-
-
-
-
+ * The run that dispatched, exactly as the host bound it to the capability: the graph step's run for a graph-step grant,
+ * otherwise the calling invocation (supervisorReplyRunId). A caller with no run (an AGI action) records none. Never
+ * re-derived from the room's current state (ID-3, flow audit 2026-10-18: attach() gave 151 of 185 dispatches no parent and
+ * could hand a graph step's dispatch an unrelated room run).
  */
 function dispatchParentRunId(caller: OneTeamCaller): string | null {
   const grant = caller.scope === "graph-step" ? caller.graphTeamGrant : null;
@@ -1114,11 +1114,11 @@ export function oneTeamList(caller: OneTeamCaller) {
       is_group: group !== null,
       group: group ? { id: group.id, revision: group.revision, member_agent_ids: [...group.memberAgentIds] } : null,
     },
-    
-
-
-
-
+    // Availability, not the owner's status line. "Failed · review needed" is the owner's call to action; a One that read it
+    // never started that teammate again (dev replay r08, 2026-10-17: motion grap and Blender Animator skipped because the
+    // list said so), and a failure stays on the seat until that teammate's next run, so one failure idled it for good.
+    // start_session never refused such a teammate. A typed `last_run: "failed"` still kept it idle in most real-model runs,
+    // so the seat's last outcome is not listed; sessions this conversation started carry their own outcome below.
     teammates: activeMembers().map((member) => ({
       member_id: member.id,
       name: member.displayName,
@@ -1174,8 +1174,8 @@ export function roomRuntimeSelectionForTeammate(parentChatId: string, member: On
 export const ONE_DELEGATION_PERMISSION = "full" as const;
 
 /**
- * The permission a teammate session runs with. One's own delegation is full. A session the AGI unblocker starts
- * from a model-written brief is capped at write (the brief used to run with the Goal's permission, full included, and could
+ * The permission a teammate session runs with. One's own delegation is full (owner 2026-10-04). A session the AGI unblocker starts
+ * from a model-written brief is capped at write (2026-10-20 audit: the brief ran with the Goal's permission, full included, and could
  * carry text taken from chat, tool and run-event content). Only the host passes the cap; a model argument never reaches it.
  */
 export function teamDelegationPermission(cap: unknown): "write" | typeof ONE_DELEGATION_PERMISSION {
@@ -1253,9 +1253,9 @@ export function oneTeamStartSession(caller: OneTeamCaller, input: { member?: unk
   const settling = reused && getDb().prepare(
     "SELECT 1 FROM one_team_dispatches WHERE child_chat_id = ? AND status = 'running' LIMIT 1",
   ).get(reused.id);
-  
-
-
+  // A session parked on the owner (a sign-in, an answer) has no live turn: its run only resumes after the owner acts.
+  // New work for that teammate gets its own session and the parked run stays as it is, so the resume still works.
+  // Yotube room 2026-10-13: a caption fix was attached to a run waiting on a YouTube sign-in and never ran.
   const parked = Boolean(reused && settling && parkedOnOwner(reused.id));
   const reusedBusy = Boolean(reused && !parked && (settling || chatLiveAnywhere(reused.id)));
   const graphOwner = graphOwnerOf(caller);
@@ -1301,6 +1301,7 @@ function launchDispatch(input: { parentChatId: string; member: OneOrgMember; bri
   /** new_session: the child keeps its own journal and never joins the member's shared roster session (session-scope.ts isolatedChild). */
   isolated?: boolean }): { created: OneDispatchRow; createdHere: boolean } {
   const { parentChatId, member, brief, hash, title, continuing } = input;
+  (require("../runtime/session-scope") as typeof import("../runtime/session-scope")).bindOneTaskforceSessionScope(getDb(),parentChatId);
   const delegation = teamDelegationPermission(input.delegationPermission);
   const ownerScope = teamDispatchOwnerScope();
   if (input.queuedId) assertDispatchReceiver(row(input.queuedId)!);

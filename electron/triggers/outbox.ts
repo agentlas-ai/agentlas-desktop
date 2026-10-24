@@ -30,8 +30,9 @@ const BUSY_RETRY_MS = 5_000;
 const MAX_DRAIN_BATCH = 32;
 
 // One matcher with the scheduler. This file kept its own copy without the kernel's MUTATION_UNVERIFIED, so a
-// held command occurrence was redelivered again and again instead of parked: every redelivery added a judgment, a
-// reflection and a doctor run, while only the owner's choice could release it.
+// held command occurrence was redelivered up to 48 times instead of parked: production 2026-10-19, three
+// Yotube command graphs failed 17-20 times each ("graph_nodes_pending_background_repair: MUTATION_UNVERIFIED"),
+// every redelivery adding a judgment, a reflection and a doctor run, while only the owner's choice could release it.
 function requiresGraphReconciliation(error: unknown): boolean {
   return effectsNeedReconciliation(error instanceof Error ? error.message : String(error ?? ""));
 }

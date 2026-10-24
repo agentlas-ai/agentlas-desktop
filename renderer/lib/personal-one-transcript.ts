@@ -37,10 +37,10 @@ export interface PersonalOnePendingAsk {
 }
 
 /**
-
-
-
-
+ * The question the personal window must offer as a card: the newest row is a finished assistant answer
+ * that ends on an `<<agentlas-ask>>` fence, and the owner has not written anything after it.
+ * The window strips the fence from the bubble, so without this the choices were invisible and the owner
+ * could only guess a free-text answer (production 1.2.95, 2026-10-11, Hope asked "local editing or wait for Excel").
  */
 export function personalOnePendingAsk(
   groups: ReturnType<typeof personalOneTranscript>,

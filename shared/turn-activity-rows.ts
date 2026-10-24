@@ -1,21 +1,21 @@
 /**
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+ * ★작업 블록 줄 — 데스크탑 One/Work 와 Science 가 같은 규칙 한 벌로 만든다.
+ *
+ * 오너 지시 2026-09-14: "추론 과정 디스플레이는 모듈화해서 One 것을 쓰라." 실측(연구자 앱 한 턴 60줄):
+ *   · "생각함" 30줄 — 1초 미만 생각마다 한 줄. One 은 연속된 생각을 합쳐 누적 시간을 보인다.
+ *   · "도구 unknown" — 이름 없는 tool-use 727건이 전부 런타임 상태 하트비트였다. 도구가 아니다.
+ *   · 도구 줄 객체에 셸 원문·절대 경로·영어 도구 이름이 그대로.
+ *
+ * 규칙(둘 다 이 함수를 부른다):
+ *   1. 연속된 생각(reasoning)은 한 줄로 합치고 시간을 누적한다. 상태 하트비트는 생각을 끊지 않는다.
+ *   2. 이름 없는/"unknown" 도구 이벤트는 줄이 되지 않는다(요약이 있으면 그 요약으로 남긴다).
+ *   3. 도구 객체는 사람이 읽는 한 줄: 프로젝트 폴더·홈 경로 축약, 공백 정리, 96자 상한.
+ *   4. 상태(status)는 줄이 아니다 — 작성창 상태 줄의 재료일 뿐이다.
+ *   5. 오류·중단 요청은 그대로 남는다. 최근 80줄만 돌려준다.
+ *
+ * 이 파일은 의존성이 없고 프레임워크를 모른다. 정본은 agentlas_desktop/shared/turn-activity-rows.ts,
+ * agentlas-science/src/turn-activity-rows.ts 는 바이트 동일 사본이며 계약이 두 파일의 해시를 대조한다
+ * (런타임 닥터 3제품 싱크와 같은 방식). 사본을 고치지 말고 정본을 고친 뒤 복사하라.
  */
 
 export type TurnActivityEventKind = "tool" | "reasoning" | "status" | "lifecycle" | "error";
@@ -31,6 +31,8 @@ export interface TurnActivityEvent {
   phase?: string | null;
   durationMs?: number | null;
   message?: string | null;
+  reason?: string | null;
+  retryAt?: string | null;
   status?: string | null;
 }
 
@@ -45,6 +47,8 @@ export interface TurnActivityRow {
   phase?: string | null;
   durationMs?: number | null;
   message?: string | null;
+  reason?: string | null;
+  retryAt?: string | null;
 }
 
 export interface TurnActivityRowOptions {
@@ -134,7 +138,8 @@ export function buildTurnActivityRows(events: readonly TurnActivityEvent[], opti
       continue;
     }
     if (event.kind === "lifecycle") {
-      rows.push({ sequence: event.sequence, kind: "lifecycle", code: event.code, at: event.at });
+      rows.push({ sequence: event.sequence, kind: "lifecycle", code: event.code, at: event.at,
+        ...(event.reason?{reason:event.reason}:{}),...(event.retryAt?{retryAt:event.retryAt}:{}) });
       continue;
     }
     if (event.kind === "error") {

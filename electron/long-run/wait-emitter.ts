@@ -60,6 +60,22 @@ export function parseGoalWaitIntent(text: string): { text: string; request: Pars
 
 
 
+/** A settled model proposal is data, never Goal or execution authority. */
+export function parseGoalWaitProposal(value: unknown): ParsedGoalWait | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const item = value as Record<string, unknown>;
+  if (item.status === "invalid") return Object.keys(item).every(key => key === "status" || key === "reason")
+    && typeof item.reason === "string" && /^goal_wait_[a-z_]{1,96}$/.test(item.reason)
+    ? { status: "invalid", reason: item.reason } : null;
+  if (item.status !== "requested" || Object.keys(item).some(key => key !== "status" && key !== "intent")) return null;
+  try {
+    const encoded = JSON.stringify(item.intent);
+    if (!encoded || encoded.length > 8192) return null;
+    const parsed = parseGoalWaitIntent("```agentlas-goal-wait\n" + encoded + "\n```").request;
+    return parsed?.status === "requested" ? parsed : null;
+  } catch { return null; }
+}
+
 export function goalWaitProtocol(lifecycle?: "finite" | "ongoing" | null): string {
   return `Goal wait (host block, not a tool): waiting on an observed invocation, saved artifact, graph output or timer; end the turn after it. Never wait to poll a model; never invent IDs; never claim accepted (the host returns a receipt) or complete in the same reply.
 One block max:

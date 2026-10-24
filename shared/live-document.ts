@@ -111,6 +111,96 @@ export interface LiveShape {
   rows?: string[][];
   /** insert_table column width ratios (sum 1); absent = equal columns. */
   colWidths?: number[];
+  /** How the shape looks in the file, for document.render only: never edited, never written back, not in the outline. */
+  look?: LiveShapeLook;
+}
+
+/** A slide object that exists only to be drawn (codecs/pptx.ts `.dr` ids): editing, placement and the outline ignore it. */
+export function isDrawnOnlyShape(shape: LiveShape): boolean {
+  return shape.role === "object" && !shape.label && !shape.fill && !shape.rows;
+}
+
+/** A colour read from a file: #rrggbb, with its opacity when below 1 (DrawingML alpha). */
+export interface LiveLookColor { hex: string; alpha?: number }
+
+/** Display-only description of a slide shape, table or chart as the file draws it (codecs/pptx-look.ts reads it, render-html.ts draws it). */
+export interface LiveShapeLook {
+  /** DrawingML preset geometry (rect, roundRect, ellipse, line, triangle, rightArrow, …); absent = rect. */
+  geom?: string;
+  /** The preset's first adjust value (e.g. roundRect corner, 100000 = 1), when the file sets one. */
+  adj?: number;
+  /** Fill: a solid colour, the first stop of a gradient, or `none` (explicit no fill). */
+  fill?: LiveLookColor | "none";
+  /** Outline; absent = none. Width in points. */
+  line?: { color: LiveLookColor; width: number; dash?: boolean };
+  /** Rotation in degrees, clockwise. */
+  rot?: number;
+  flipH?: boolean;
+  flipV?: boolean;
+  /** Vertical anchor of a text shape's text. */
+  anchor?: "top" | "middle" | "bottom";
+  /** A picture: the package part that holds it (render.ts reads the bytes from the session's original file). */
+  image?: { part: string };
+  /** A table: column widths (fractions of the table), row heights (fractions of the slide height) and each cell's look. */
+  table?: { cols: number[]; rows: number[]; styled: boolean; cells: Array<Array<LiveCellLook | null>> };
+  /** A native chart drawn from the values cached in the chart part. */
+  chart?: LiveChartLook;
+}
+
+export interface LiveCellLook {
+  fill?: LiveLookColor;
+  color?: string;
+  bold?: boolean;
+  /** Points. */
+  size?: number;
+  align?: "left" | "center" | "right";
+  anchor?: "top" | "middle" | "bottom";
+  /** Borders: left, right, top, bottom (null = none written). Width in points. */
+  borders?: Array<{ color: string; width: number } | null>;
+}
+
+export interface LiveChartSeriesLook {
+  name: string;
+  values: Array<number | null>;
+  /** Fill (bars, slices, areas) or stroke (lines) colour. */
+  color?: string;
+  /** Per-point colours (pie slices, varied bars), by category index. */
+  points?: Array<string | null>;
+  /** Line width in points (line charts). */
+  width?: number;
+}
+
+export interface LiveChartGroupLook {
+  type: "bar" | "line" | "area" | "pie" | "doughnut";
+  /** bar: horizontal bars; col: vertical columns. */
+  dir?: "bar" | "col";
+  grouping?: "clustered" | "stacked" | "percentStacked" | "standard";
+  series: LiveChartSeriesLook[];
+  /** Data labels: which parts each label shows. */
+  labels?: { value?: boolean; percent?: boolean; category?: boolean; format?: string };
+  holeSize?: number;
+  varyColors?: boolean;
+}
+
+export interface LiveChartLook {
+  categories: string[];
+  groups: LiveChartGroupLook[];
+  /** A chart kind this look does not draw (scatter, radar, 3D surface, …): drawn as its data, named. */
+  unsupported?: string;
+  title?: string;
+  legend?: "r" | "l" | "t" | "b" | "tr";
+  /** Axis labels shown (false when the file deletes the axis). */
+  categoryAxis?: boolean;
+  valueAxis?: boolean;
+  gridlines?: boolean;
+  min?: number;
+  max?: number;
+  /** Text size in points and colour of the chart's labels. */
+  textSize?: number;
+  textColor?: string;
+  background?: string;
+  /** Theme accents, for series and slices the file leaves to the theme. */
+  palette?: string[];
 }
 
 export interface LiveSlide {
@@ -157,8 +247,8 @@ export const LIVE_DOCUMENT_OPS_BY_FORMAT: Record<LiveDocumentFormat, readonly Li
   docx: ["set_text", "insert_text", "insert_paragraph", "insert_table", "delete_block", "set_format"],
   hwpx: ["set_text", "insert_text", "insert_paragraph", "insert_table", "delete_block", "set_format"],
   hwp: ["set_text", "insert_text", "insert_paragraph", "delete_block", "set_format"],
-  
-
+  // insert_table on a slide: `after` is the slide; set_notes writes its speaker notes. Dev 2026-10-18 run30 O9: a deck's
+  // "지표 변화" table became divider text and its notes were missing, because slides took neither.
   pptx: ["set_text", "insert_text", "add_slide", "delete_slide", "insert_table", "set_notes", "set_format"],
 };
 
@@ -708,7 +798,9 @@ export function applyLiveDocumentOps(model: LiveDocumentModel, ops: LiveDocument
         box = { x: body.x, y: body.y, w: body.w, h: body.h };
         slide.shapes.splice(slide.shapes.indexOf(body), 1);
       } else {
-        const top = Math.max(0.06, ...slide.shapes.map((shape) => shape.y + shape.h)) + 0.02;
+        // A shape only document.render draws (no label, no fill, no cells: a line, a gradient card) is left out, so a journal
+        // folded by any version of the reader places the table where it was placed when the op was applied.
+        const top = Math.max(0.06, ...slide.shapes.filter((shape) => !isDrawnOnlyShape(shape)).map((shape) => shape.y + shape.h)) + 0.02;
         if (top > 0.78) throw new LiveDocumentOpError("slide_full", `${slide.id} has no room under its text; add a slide or clear its body first`);
         box = { x: 0.06, y: top, w: 0.88, h: 0.94 - top };
       }

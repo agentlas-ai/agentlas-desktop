@@ -38,9 +38,9 @@ export interface AutomaticQuitInstaller {
   /**
    * True only while a quit is actually under way for an update (deferred for the verified install, or the native
    * handoff authorized). `quitDisposition()` is NOT this: it answers "defer-update" for the whole time a downloaded
-   * update merely waits for the next quit, and the app runs normally for hours in that state (a supervisor that read
-   * "defer-update" as "quitting" would stop for good there, so the conversation would vanish from Desktop and Mobile
-   * would lose its connection).
+   * update merely waits for the next quit, and the app runs normally for hours in that state (2026-10-20: 1.3.84
+   * downloaded 10:49Z, the native channel closed 12:54Z, and a supervisor that read "defer-update" as "quitting"
+   * stopped for good, so the Hope conversation vanished from Desktop and Mobile lost its connection).
    * Anything asking "is this app going away" must use this, never the disposition.
    */
   quitInProgress(): boolean;
@@ -186,7 +186,7 @@ export function createAutomaticQuitInstaller(
             observeInstallState(deps.getState());
             return;
           }
-          
+          // Say why: 2026-10-13 (1.3.18 -> 1.3.20) this refusal left no reason while the state had left "downloaded".
           const refusedState = result.state as { status?: string; code?: string; version?: string | null } | undefined;
           logger.warn(`[updater] automatic install on quit was not accepted; continuing normal quit (state=${refusedState?.status ?? "?"}${refusedState?.code ? ` code=${refusedState.code}` : ""} version=${refusedState?.version ?? "?"})`);
           continueNormalQuit();

@@ -45,7 +45,7 @@ export function createNativeEmployeeCustodyProducer(owners:NativeEmployeeCustody
     if(!await owners.beginAttempt(capability,digest(packet))||!await check(capability)){await owners.holdUnknown(capability);return 'unknown'}
     result=await owners.submit(capability,packet);
    }else result=await owners.lookup(capability,packet);
-   if(!await check(capability)||result.schema!=='agentlas.business.native-sharing.v1'||result.kind!=='packet'||result.associationId!==packet.associationId||result.idempotencyKey!==packet.idempotencyKey||result.nativePacketDigest!==digest(packet.approved)||!await owners.currentResult(capability,result)||!await owners.settle(capability,result)){
+   if(!await check(capability)||result.schema!=='agentlas.business.native-sharing.v1'||result.kind!=='packet'||result.associationId!==packet.associationId||result.idempotencyKey!==packet.idempotencyKey||result.nativePacketDigest!==digest(packet.approved)||!await owners.settle(capability,result)){
     await owners.holdUnknown(capability);return 'unknown';
    }
    if(!await check(capability)||!await owners.currentResult(capability,result)||!await check(capability))return 'unknown';

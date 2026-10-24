@@ -14,16 +14,16 @@ import { resolveEffectiveContextWindow } from "../../shared/models";
 
 export const GENERATION_CONTEXT_RATIO = 0.8;
 
-
-
-
-
-
-
-
-
-
-
+/*
+ * Hysteresis between generations. A new native session starts from replayed host history, and a fresh provider session has
+ * no prompt cache: a seed that sat near the 80% point would make the new generation's first turns rotate again, each time
+ * resending a large uncached prefix. Once the claude-code window became known (1M), the CLI seed bound reached it: 80% of
+ * W minus the reserve (767,232 tokens) handed to compactHistory, whose 60% share let 460,339 tokens of raw history in (the
+ * session checkpoint rarely summarizes: its compactor refuses inputs over 96 KB, and production holds 2,375 verbatim
+ * checkpoints against 4 semantic ones, so the seed is the journal itself). A fresh CLI seed now admits at most half the
+ * rotation point (continuity.ts): about 22% of W after compactHistory's share, beside the API and local loops, which fold
+ * a new generation's history to W x (1 - GENERATION_CONTEXT_RATIO) (stateless-generation.ts).
+ */
 export const GENERATION_SEED_RATIO = GENERATION_CONTEXT_RATIO / 2;
 
 export interface GenerationInput {
@@ -53,15 +53,15 @@ const RUNTIME_PROVIDER: Readonly<Record<string, string>> = {
 };
 
 /**
-
-
-
-
-
-
-
-
-
+ * Windows a runtime itself reported for a model the product's table does not know (Codex app-server
+ * `thread/tokenUsage/updated` → tokenUsage.modelContextWindow, codex 0.162.1 schema; Claude Code stream-json
+ * `result.modelUsage[<model>].contextWindow`, SDK ModelUsage, CLI 2.1.x). Kept in memory and in the meta store, so a
+ * restart keeps the observed number. Never a guess: only a positive integer the runtime sent. `evidence` names the field
+ * it came from, kept beside the number in the meta store.
+ *
+ * Claude Code takes only the aliases opus|sonnet|haiku|fable, which no catalog row matches: before this, the 80% rotation
+ * of every claude-code conversation ran on an unknown window and never fired (production 2026-10-17: native autocompact at
+ * 967,014 and 968,073 tokens of a 1M window, windowProvenance "unknown"; 100/100 bindings still generation 1).
  */
 const observedWindows = new Map<string, number>();
 const observedKey = (kind: string, model: string): string => `runtime-observed-window:${kind}:${model}`;

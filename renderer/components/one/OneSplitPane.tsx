@@ -134,11 +134,11 @@ export function OneSplitPane({
         }).finally(() => { loading = false; });
     };
     load();
-    
-
-
-
-
+    /*
+     * 옆 칸에서 답이 자라는 동안에만 자주 본다. 칸 셋이 1.5초마다 기록 전체를
+     * 다시 읽어 화면이 눈에 띄게 굼떴다(오너 지적 2026-08-24). 조용한 칸은
+     * 거의 묻지 않고, 창이 뒤로 가 있으면 아예 묻지 않는다.
+     */
     const tick = () => {
       if (document.visibilityState === "hidden") return;
       load();
@@ -287,8 +287,8 @@ export function OneSplitPane({
           if (isHousekeepingHostNotice(normalizeChatHostNotice(message.role, message.hostNotice))) return null;
           if (message.role === "system") {
             const notice = normalizeChatHostNotice(message.role, message.hostNotice);
-
-
+            // A system row without a typed notice is a host-written harness request (Goal resume, continuation): it is
+            // not drawn, like in the full One view. Interrupted answers below are internal states too (owner 2026-10-14).
             return notice ? <HostContinuationNotice key={message.id} text={text} locale={locale === "ko" ? "ko" : "en"} notice={notice} /> : null;
           }
           if (message.role === "assistant" && isInterruptedPartial(message.text ?? "")) return null;

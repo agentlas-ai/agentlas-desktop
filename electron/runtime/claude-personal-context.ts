@@ -1,17 +1,17 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+// What a product Claude Code run inherits from the person's own ~/.claude (owner decision 2026-10-11, all users):
+// nothing, except for One, and for One only the items the person switched on (capabilities/one-capabilities.ts).
+//
+// Product runs use a config-dir mirror for sessions (claude-product-home.ts: CLAUDE_CONFIG_DIR + an empty
+// CLAUDE_SECURESTORAGE_CONFIG_DIR keeps the person's keychain sign-in). The mirror links the person's configuration,
+// so which of it a run may use is still decided here, as a `--settings` overlay that wins over the user settings file:
+//   - `claudeMdExcludes`   personal CLAUDE.md and rules/*.md that are switched off (was: always, 2026-10-06)
+//   - `autoMemoryEnabled`  the project memory (projects/<cwd>/memory/MEMORY.md) only when that item is on
+//   - `skillOverrides`     {name: "off"} for each switched-off personal skill / command
+//   - `enabledPlugins`     {id: false} for each switched-off personal plugin
+// Measured on claude 2.1.296 against a stand-in Messages endpoint (ANTHROPIC_BASE_URL): the memory block
+// (8.8k tokens) and 152 personal skills leave the request; plugin tool schemas (46 tools) drop.
+// Not enforceable from a settings overlay (listed, `applies:false`): user hooks (arrays merge; `disableAllHooks`
+// would also kill the product's own tool-broker hook) and user-scope MCP servers in ~/.claude.json.
 import path from "node:path";
 import type { CapabilityItem, CapabilitySelection } from "../capabilities/one-capabilities";
 
@@ -74,14 +74,14 @@ export interface ClaudeMcpIsolation {
 }
 
 /**
-
-
-
-
-
-
-
-
+ * The person's user-scope MCP servers (`~/.claude.json` mcpServers) cannot be switched off from a settings overlay,
+ * and `enabledPlugins` only covers plugin servers. Measured on claude 2.1.296 (`system/init` of `claude -p`, stand-in
+ * endpoint): without the flag 20 MCP servers / 149 MCP tools loaded (the person's `agentlas` and `lazyweb` plus every
+ * plugin's); with `--strict-mcp-config` 0 servers / 0 MCP tools besides the `--mcp-config` ones. Strict also drops
+ * plugin servers, so it is withheld in exactly two cases, and the user-scope servers are then denied by name:
+ *   - One has a Claude connector or plugin switched on (its servers must load);
+ *   - the only Agentlas browser the run can reach is the engine plugin's copy (claude-browser-surface.ts): the
+ *     browser would otherwise be gone and the turn would dead-end.
  */
 export function claudeMcpIsolation(selection: CapabilitySelection | undefined, hostAllowedTools: readonly string[], pluginBrowserNeeded: boolean): ClaudeMcpIsolation {
   const connectors = claudeItems(selection, "connector");

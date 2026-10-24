@@ -71,7 +71,9 @@ function browserRequestScript(origin: string, path: string, body: { expectedSess
     const exactPage = () => location.origin === input.origin && location.pathname === '/business';
     if (!exactPage()) return null;
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 8000);
+    // Current Root metadata can take longer than eight seconds. Bound the
+    // transport wait; callers still validate current identity and absolute expiry.
+    const timer = setTimeout(() => controller.abort(), 30000);
     try {
       const init = { method: input.body === null ? 'GET' : 'POST', credentials: 'same-origin', cache: 'no-store', redirect: 'error', signal: controller.signal };
       if (input.body !== null) { init.headers = { 'Content-Type': 'application/json' }; init.body = JSON.stringify(input.body); }
@@ -122,6 +124,7 @@ export function createBusinessShippingConsole(): BusinessShippingConsole {
   const listeners = new Set<() => void>();
   const closedSessions = new Set<string>();
   const heldMutations = new Map<string, OriginalMutation>();
+  const pendingReads = new Map<string, Promise<BrowserResponse | null>>();
   // Terminal metadata outlives display invalidation. It never supplies a grant.
   const originalSessions = new Map<string, BusinessSession>();
   const heldSession = (session: BusinessSession): boolean => [...heldMutations.values()].some(value => sameBusinessSession(value.session, session));
@@ -130,6 +133,7 @@ export function createBusinessShippingConsole(): BusinessShippingConsole {
   const invalidate = (): void => {
     const displayed = lastAccount !== null || lastEligibility !== null;
     generation++;
+    pendingReads.clear();
     organizationMailSelected = false;
     lastAccount = null;
     lastEligibility = null;
@@ -212,10 +216,20 @@ export function createBusinessShippingConsole(): BusinessShippingConsole {
     const window = await ensureBrowser();
     if (!window || !origin || !exactPage(window) || body === null && path !== ACCOUNT_PATH && path !== ELIGIBILITY_PATH
       || body !== null && !/^\/api\/business\/organizations\/[A-Za-z0-9._:%-]+\/(select|logout)$/.test(path)) return null;
-    try {
-      const raw: unknown = await window.webContents.executeJavaScript(browserRequestScript(origin, path, body), false);
-      return exactPage(window) && validResponse(raw) ? freezeBusinessConsoleMetadata(raw) : null;
-    } catch { return null; }
+    const execute = async (): Promise<BrowserResponse | null> => {
+      try {
+        const raw: unknown = await window.webContents.executeJavaScript(browserRequestScript(origin!, path, body), false);
+        return exactPage(window) && validResponse(raw) ? freezeBusinessConsoleMetadata(raw) : null;
+      } catch { return null; }
+    };
+    if (body !== null) return execute();
+    // Panels may request the same display metadata together. Share only that
+    // in-flight read; every caller still checks its generation and expiry.
+    const key = JSON.stringify([generation, path]), existing = pendingReads.get(key);
+    if (existing) return existing;
+    const pending = execute(); pendingReads.set(key, pending);
+    try { return await pending; }
+    finally { if (pendingReads.get(key) === pending) pendingReads.delete(key); }
   };
   async function readAccount(): Promise<BusinessAccountSnapshot> {
     const window = await ensureBrowser();
@@ -284,6 +298,7 @@ export function createBusinessShippingConsole(): BusinessShippingConsole {
     if (url.searchParams.get('section') !== view || url.searchParams.get('view') !== dashboardView)
       await window.loadURL(`${origin}/business?view=${dashboardView}&section=${encodeURIComponent(view)}`);
     if (!exactPage(window)) throw Error('business_browser_unavailable');
+    if (window.isMinimized()) window.restore();
     window.show(); window.focus();
   };
   const signIn = async (): Promise<BusinessAccountSnapshot> => {
@@ -398,7 +413,20 @@ export function createBusinessShippingConsole(): BusinessShippingConsole {
       if (!isBusinessEligibility(exact) || before !== generation) return null;
       lastEligibility = exact;
       if (eligibilityTimer) clearTimeout(eligibilityTimer);
-      eligibilityTimer = setTimeout(invalidate, Math.max(1, Date.parse(exact.expiresAt) - Date.now()));
+      // Expire only this display lease. A newer current read (including the
+      // account pane) must not lose its generation when the old lease ends.
+      const expireEligibility = (): void => {
+        if (lastEligibility !== exact) return;
+        const remaining = Date.parse(exact.expiresAt) - Date.now();
+        if (remaining > 0) {
+          eligibilityTimer = setTimeout(expireEligibility, remaining);
+          eligibilityTimer.unref?.();
+          return;
+        }
+        lastEligibility = null;
+        eligibilityTimer = null;
+      };
+      eligibilityTimer = setTimeout(expireEligibility, Math.max(1, Date.parse(exact.expiresAt) - Date.now()));
       eligibilityTimer.unref?.();
       return exact;
     },

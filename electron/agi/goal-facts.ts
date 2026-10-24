@@ -48,7 +48,7 @@ export interface AgiGoalFactsDeps {
   /**
    * Chats a room's teammates work in (child conversations whose parent is the room). A Goal whose teammates are working is
    * not stalled even while its own chat is idle; without this the stall detector read their work as `self_hold` and the AGI
-   * kept starting model attempts on a room that was waiting for its team.
+   * kept starting model attempts on a room that was waiting for its team (production 2026-10-19, Yotube room).
    */
   childChatIds?(chatId: string): readonly string[];
   /** goal-continuation-hold parked the continuation row on needs_input. */
@@ -67,11 +67,11 @@ function tableExists(db: Database.Database, name: string): boolean {
 }
 
 /**
-
-
-
-
-
+ * The Goal's own turn: its newest controller attempt and the invocation that ran it. The room's newest run and the
+ * newest attempt of any role are not: a teammate's report turn, an owner's side question and a relay the waiting Goal
+ * refused are foreground runs of the same room, task-force specialists share the controller's invocation and a
+ * verifier runs under its own id (flow audit ID-2, production Yotube 10-14..10-18: 73 of 108 foreground runs bound a
+ * controller attempt; the incident `run:d85e262f` named an owner run that never became the Goal's turn).
  */
 export function goalControllerAttempt(db: Database.Database, longRunId: string): { id: string; invocationRunId: string | null } | null {
   if (!tableExists(db, "long_run_worker_attempts") || !tableExists(db, "long_run_workers")) return null;
@@ -129,9 +129,9 @@ function tactics(db: Database.Database, goalId: string, nowMs: number): { tactic
   const plan = readGoalPlan(goalId, undefined, db);
   if (!plan) return { tactics: [], blockedNodeId: null };
   const readiness = projectGoalPlanReadiness(plan, { nowMs });
-  
-
-
+  // A tactic the agent reported blocked carries the persistence policy's guidance until it is done (goal-shaping
+  // applyTacticMarker). Nothing ever wrote payload.blocked, so this fact was always null (production 2026-10-12:
+  // 0 of 138 tactics, while 31 open tactics carried guidance) and the unblocker never knew which tactic was stuck.
   const blocked = db.prepare(`SELECT node_id FROM goal_plan_nodes WHERE goal_id=? AND revision=? AND plan_seq=?
     AND kind='tactic' AND status IN ('active','proposed')
     AND CASE WHEN json_valid(payload_json) THEN json_type(payload_json,'$.guidance')='object' ELSE 0 END ORDER BY ord LIMIT 1`).get(goalId, plan.revision, plan.planSeq) as { node_id: string } | undefined;
@@ -185,10 +185,10 @@ export function browserLadderSignal(db: Database.Database, chatId: string, nowMs
 }
 
 /**
-
-
-
-
+ * The start or the runner threw: the receipt's code is a generic wrapper and the typed cause is the message's leading
+ * code (production 2026-10-12: invoke-start-failed with "goal_waiting_system_start_refused" 49 times, runner-failed with
+ * "automation_goal_execution_owner_changed" or "goal_episode_admission_missing"). Without it every such run read as
+ * run_failed_unknown. A host timeout message is kept as a timeout family.
  */
 const RECEIPT_WRAPPER_CODES = new Set(["invoke-start-failed", "runner-failed", "invoke-threw"]);
 function typedReceiptCode(receipt: { errorCode: string | null; errorMessage?: string | null }): string | null {
@@ -219,8 +219,8 @@ function receiptSignal(code: string, runId: string | null): AgiBlockerSignal {
 /** Only accepted Goal sources (owner input, owner control, plan/policy authority) wake a spent incident. Role=user and chat-wide
  * tool history are not provenance. Version, heartbeat, diagnostic notices, retry timestamps and completed tool calls are excluded:
  * the id of the newest completed worker tool used to be part of the progress key, so every tool a teammate finished was a "new
- * blocked state" with no retry history (one Goal opened a new incident for each of them). Whether the work moved is the host stall
- * detector's call (stall_streak), not a tool id. */
+ * blocked state" with no retry history (production 2026-10-13..20, one Yotube room Goal: 257 incidents in 7 days, 176 model attempts
+ * and 2.47M input tokens on 10-19). Whether the work moved is the host stall detector's call (stall_streak), not a tool id. */
 function wakeState(db: Database.Database, run: AgiGoalRow, nowMs: number): Pick<AgiBlockerFacts, "progress" | "nextWakeAtMs" | "fenceState"> {
   const revision = tableExists(db, "chat_goal_revisions") ? db.prepare(
     "SELECT revision,source_message_id,payload_json,created_at FROM chat_goal_revisions WHERE goal_id=? ORDER BY revision DESC LIMIT 1")
@@ -255,15 +255,15 @@ function wakeState(db: Database.Database, run: AgiGoalRow, nowMs: number): Pick<
   const boundaryEvent = db.prepare(`SELECT seq FROM long_run_events WHERE run_id=? AND NOT
     (kind='run.blocked_sweep' AND json_extract(payload_json,'$.action')='retry_scheduled')
     ORDER BY seq DESC LIMIT 1`).get(run.id) as { seq: number } | undefined;
-  
-
-
-
-
-
-
-
-
+  /*
+   * The blocked condition, not the Goal's bookkeeping (plan R6: one attempt per blocked state; R14: progress is a changed
+   * key result or owner input, never a counter). Production 2026-10-12, Yotube room: the authority also hashed
+   * cycle_count, cost_used_usd and app_instance_id, the newest wait subscription id/due, every scheduler next_run_at, the
+   * due boundaries and the checkpoint seq (run.cycle_recorded fires every cycle). A Goal cycling every few minutes was a
+   * "new blocked state" each time: 62 model attempts over 60 distinct digests in a day, each a new Codex session. The
+   * wait, schedules and boundaries still set the next wake (nextWakeAtMs below); an unchanged condition retries on the
+   * incident's own backoff (agiRetryDelayMs).
+   */
   const ownerPolicy = (owner as Array<Record<string, unknown>>).map(({ app_instance_id: _instance, cycle_count: _cycles,
     cost_used_usd: _cost, host_owner_kind: _host, ...policy }) => policy);
   const authority = createHash("sha256").update(JSON.stringify({ revision: revision?.payload_json ?? null, planHead, owner: ownerPolicy, chat, pool,
@@ -387,7 +387,7 @@ export function readAgiBlockerFacts(deps: AgiGoalFactsDeps, goalId: string): Agi
     && quietBaseline === episodeFactSignature(deps.db, run.id, run.rootChatId, signals, refs, latest ?? null);
   // One owner for a stall. While the host scheduler holds a registered wake for this Goal (its own stall recovery wait, or the episode
   // wait the Goal registered), the next step and its spacing are the host's: continueGoalForAlive defers a work turn with
-  // wait_owns_next_step, and an AGI model attempt on top of it only re-dispatches the same tactic.
+  // wait_owns_next_step, and an AGI model attempt on top of it only re-dispatches the same tactic (production 10-19: 76 dispatches of t9).
   // The stall stays a host fact; it is not an AGI incident. Applied after the quiet baseline so that comparison is unchanged.
   const hostWait = !terminal && !heldByOwner && !busy && signals.some(signal => signal.kind === "stall_detected") ? registeredHostWait(db, run) : null;
   const current = quiet ? [] : hostWait ? signals.filter(signal => signal.kind !== "stall_detected") : signals;
@@ -404,7 +404,7 @@ export function readAgiBlockerFacts(deps: AgiGoalFactsDeps, goalId: string): Agi
 
 /**
  * What switch_runtime can move, if anything: the newest automation of the Goal that is not a retired Goal continuation, and
- * its latest recorded run. The host now wakes a Goal itself and writes no continuation row, and the legacy rows
+ * its latest recorded run. Since 034d8584e the host wakes a Goal itself and writes no continuation row, and the legacy rows
  * (goal_id + long-run marker, switched off at boot, meta automation.goal-continuation-retired:<id>) are history: they own
  * no next turn, so they are never a target. The predicate is the one findAutomationByGoalId uses.
  * null = no target; undefined = tables absent, unknown (not refused). recordAgiMove and the classifier fact share this.

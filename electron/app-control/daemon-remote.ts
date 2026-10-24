@@ -1,10 +1,10 @@
 import { DEVICE_BRIDGE_UNAVAILABLE_MESSAGE, DeviceBridgeError, daemonDeviceBridge, type DaemonDeviceBridge } from "../daemon/device-bridge";
 import { AppControlError } from "./ipc-registry";
 
-
-
-
-
+// The background service runs One/Hope turns but owns no window and no IPC handler, so it cannot run an app-control
+// operation (production 1.3.3, 2026-10-12: every operation "available": false, and Hope fell back to osascript on the
+// owner's screen). It asks Main over the device bridge instead; Main runs the very same service with its own policy,
+// owner-turn rule and handlers. No electron import: the service loads this without Electron.
 
 type AppBridge = Pick<DaemonDeviceBridge, "appControl">;
 
@@ -29,7 +29,7 @@ export async function remoteAppControlOperations<T extends object>(input: Record
 
 export async function remoteAppControlCall(caller: { ownerTurn: boolean }, input: { operation?: unknown; args?: unknown; scope?: { chatId?: unknown } }, bridge: AppBridge = daemonDeviceBridge()): Promise<Record<string, unknown>> {
   let answer;
-  // An absent args stays absent: { args: undefined } is not a wire value.
+  // An absent args stays absent: { args: undefined } is not a wire value (dev 2026-10-18 run9, app.call automations.list).
   // A scope (the conversation a harness port checked) travels in the same input object; an absent one stays absent.
   const request = { operation: input.operation, ...(input.args !== undefined ? { args: input.args } : {}),
     ...(typeof input.scope?.chatId === "string" ? { scope: { chatId: input.scope.chatId } } : {}) };

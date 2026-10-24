@@ -53,13 +53,13 @@ import { withRemoteCurationRuntime } from "./remote-curation-binding";
 import { withMemorySourceRunner } from "../memory/source-custody";
 
 /**
-
-
-
-
-
-
-
+ * The auth probe is an observation: its result is logged (and refreshes the connect chips' cache), and nothing decides on
+ * it. The provider stays authoritative for an auth failure. It used to be awaited before every turn while holding the run
+ * slot: `agy models` and `grok models` are network calls, about 3.1 s on average and up to 7.7 s per agy turn
+ * (independent review wave 2, desktop-w2-05). It now runs beside the turn, at most once a minute per runtime and source.
+ * Not per working folder: a run in another folder or product home never refreshes the chips' cache (probeRuntimeAuthForRun),
+ * so its probe only wrote a log line. Production 1.3.57 ran `codex login status` 349 times, 200–1,425 ms each, because every
+ * folder had its own minute (performance review 2026-10-17, H6).
  */
 const RUNTIME_AUTH_PROBE_INTERVAL_MS = 60_000;
 const runtimeAuthProbeStartedAt = new Map<string, number>();
@@ -74,7 +74,7 @@ function withRuntimeAuthProbe(runner: Runner, runtimeKind: string): Runner {
     const now = Date.now();
     if ((runtimeAuthProbeStartedAt.get(probeKey) ?? -Infinity) + RUNTIME_AUTH_PROBE_INTERVAL_MS <= now) {
       runtimeAuthProbeStartedAt.set(probeKey, now);
-                                                                                                             
+      // Only measured codes and command evidence: no credential values, stdout, account, source path or env.
       void probeRuntimeAuthForRun(kind, { runtimeSource: req.runtimeSource, env: req.env, cwd: req.cwd }).then((probe) => {
         console.info("[runtime-auth-probe]", JSON.stringify({ schemaVersion: "agentlas.runtime-auth-before-run.v1", kind,
           state: probe.state, reason: probe.reason ?? probe.state, checkedAt: probe.checkedAt, latencyMs: probe.latencyMs, evidence: probe.evidence }));
@@ -187,7 +187,7 @@ function withLocalInferenceSlot(runner: Runner): Runner {
 const runClaudeCodeSlotted = withRunSlot(runClaudeCode, "claude-code");
 const runCodexSlotted = withRunSlot(runCodex, "codex");
 const runAntigravitySlotted = withRunSlot(runAntigravity, "antigravity");
-                                                                              
+// B-grade runtimes route through the generic ACP runner (PRD 2026-08-15 D-5):
 // cursor showed no tool calls, grok guessed tool kinds from `type` strings,
 // kimi was absent from the terminal. `AGENTLAS_DISABLE_ACP=1` (or a kind list)
 // restores the legacy hand drivers without a rebuild.
@@ -227,8 +227,8 @@ const RUNNER_LABEL: Record<string, string> = {
 };
 
 /**
-
-
+ * The name a person reads for a runtime kind ("Claude Code", not "claude-code").
+ * Chat copy used the raw kind (QA 2026-09-27: "claude-code을(를) 사용하도록 선택했습니다").
  */
 export function runtimeDisplayName(kind: string): string {
   const label = RUNNER_LABEL[kind];
@@ -666,14 +666,14 @@ export function rolePriorityRuntimes(
   const excluded = options.exclude ?? [];
   const blocked = (candidate: RuntimeStatus): boolean => {
     if (isRuntimeCredentialUnavailable(candidate)) return true;
-      
-                                                     
-      
-                                                        
-                                                               
-                                                 
-                                                       
-       
+    /*
+     * ★이미 한도에 걸린 런타임으로 폴백하지 않는다 (실사용 실측 2026-09-07).
+     *
+     * 사용자가 제미나이를 골라 뒀는데 agy 가 한도로 실패했고, 폴백이 grok 을 골랐다.
+     * 그런데 grok 은 **그 시점에 이미 한도 초과였다**(524673/500000, 24시간 롤링).
+     * 죽은 것에서 죽은 것으로 넘어가느라 실패 두 번과 8분을 썼다. 후보 필터에
+     * "지금 막혀 있다"는 개념이 없었기 때문이다. 시한이 지나면 스스로 다시 후보가 된다.
+     */
     if (runtimeCooldown(candidate)) return true;
     // An attempted entry identifies one executable/model pair. Excluding the
     // whole executable here silently removed the next configured model even

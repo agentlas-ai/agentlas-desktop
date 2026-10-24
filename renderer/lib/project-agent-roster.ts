@@ -114,30 +114,30 @@ function installedSource(agent: InstalledAgent, binding: InstalledAgentExactBind
 }
 
 /**
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+ * Staging a tool in a project is SELECTION, not INVOCATION.
+ *
+ * v0.9.76 made every remote row require a Hub exact pair
+ * (agentDefinitionId + agentReleaseId) before it could be selected. No server
+ * surface that feeds this roster returns that pair: the owner shelf comes from
+ * `cargo.search_agents`, whose projection carries cloudId/manifestId/revision/
+ * packageHash and never a definition/release, and the Hub search projection
+ * drops both fields outright. The gate was therefore unsatisfiable — the entire
+ * "내 에이전트" section was permanently disabled, and so was every installed
+ * agent restored from Cloud without a public Hub registration.
+ *
+ * The Mobile Bridge hit this exact defect first and recorded the measurement
+ * (`shared/mobile-bridge.ts`: "requiring a Hub binding to show a cloud row hid
+ * the owner's entire shelf — measured: 50 rows, 1 shown"). Its answer was to
+ * let cloud identity be cloud-shaped instead of fabricating a Hub pair. This is
+ * the same answer for the Desktop roster: each source resolves its identity in
+ * its OWN namespace, and the exact-release authority stays where a remote call
+ * is actually prepared — `workforce-orchestrator` still requires a definition
+ * and release id on every pin, fail-closed, before anything is invoked.
+ *
+ * targetId keeps the pre-v0.9.76 derivation (`agentDefinitionId ?? slug`) so
+ * saved pools are not orphaned: for cloud rows that has always resolved to the
+ * slug, and for Hub rows it keeps the exact definition id whenever the Hub
+ * supplies one.
  */
 function remoteReleasePin(listing: MarketplaceListing): string | null {
   const exact = listing.agentReleaseId?.trim();

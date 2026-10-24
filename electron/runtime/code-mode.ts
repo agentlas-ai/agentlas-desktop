@@ -26,13 +26,13 @@ function resultWasTruncated(value: unknown, depth = 3): boolean {
   if (record.truncated === true) return true;
   return Object.values(record).some(child => resultWasTruncated(child, depth - 1));
 }
-   
-                                                                                                                                     
-                                                                                                                                   
-                                                                                                                                      
-                                                                                                                                  
-                                                                                                                     
-   
+/**
+ * The text of the failure that ended an evaluation is part of the envelope, so a long one decides the envelope's size: a nested tool
+ * call that failed with a long text (its message is thrown as is) made six consecutive `agentlas_code` runs, whose code returned a
+ * number or a 400-character slice, answer "code_mode_result_too_large" (Normal on the serving lane, Finance 1008 rs-Q09, 2026-10-22):
+ * the model was told its return was too large and never saw the real error. The failure text is cut here, with a note of how much
+ * was left out, so the size check below is about the returned value and the model reads the start of the real error.
+ */
 const FAILURE_MAX_CHARS = 2000;
 function clipFailure(text: string): string {
   return text.length > FAILURE_MAX_CHARS ? `${text.slice(0, FAILURE_MAX_CHARS)} … [${text.length - FAILURE_MAX_CHARS} more characters left out]` : text;
@@ -130,8 +130,8 @@ export async function runMainCodeMode(byName: Map<string, ResolvedTool>, input: 
     }
   }
   const result = {schemaVersion: "agentlas.code-mode-result.v1", value, error: failure,
-    
-
+    // A cut nested result is a host fact on the envelope: code that read only `result` (dev 2026-10-18 run10, Haiku counted
+    // 2 of 48 automations from a cut automations.list) is answered with the count of results it may have under-read.
     operations: {observed: operationCount, failed, pending: pending.size, peakConcurrency, ...(truncatedResults ? {truncatedResults} : {})},
     memory: {scope: "evaluation", durable: false, restartState: "unknown"}};
   const content = JSON.stringify(result);

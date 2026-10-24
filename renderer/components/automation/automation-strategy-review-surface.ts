@@ -26,8 +26,9 @@ export function requiresAutomationStrategyReview(row: AutomationStrategyProposal
   if (!canApplyAutomationStrategyReview(row)) return false;
   // Payment and permission expansion are distinct human authorization boundaries.
   if (row.reviewAuthorization === "user_approval" && row.conflict === "needs_user_approval") return true;
-  // A Goal-contract amendment never opens an attention sheet: the AGI keeps the Goal moving by itself, so a question
-  // about it is an interruption. The durable panel still shows the held amendment and lets the owner apply it on purpose.
+  // A Goal-contract amendment never opens an attention sheet (owner decision 2026-10-20: the AGI keeps the Goal
+  // moving by itself, so a question about it is an interruption). The durable panel still shows the held
+  // amendment and lets the owner apply it on purpose.
   // Preserve the explicit one-time human delegation gate for legacy origins.
   if (row.goalOwnershipUnverified && !row.originAdoptionRecorded
     && row.conflict === "needs_user_approval" && row.canApply) return true;

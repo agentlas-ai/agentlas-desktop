@@ -1,7 +1,7 @@
 /* 규격: docs/DESIGN-ASK-CARD.md — 값은 globals.css 의 --ask-* 토큰이 정본이다.
    토큰은 오너가 준 참조 화면을 픽셀로 재서 넣었다. 여기에 숫자를 직접 쓰지 않는다. */
 /* 카드는 높이 상한이 있다(--ask-card-max-height). 상한이 없던 때에는 보기가 많으면 카드가 대화 영역을 48px 로 눌러
-   버리거나(Finance 검토 카드 Save 가 안 보임) 낮은 창에서 동작 줄이 창 밖으로 밀려났다. 이제 머리·직접 입력·
+   버리거나(Finance 검토 카드 Save 가 안 보임, 2026-10-20 신고) 낮은 창에서 동작 줄이 창 밖으로 밀려났다. 이제 머리·직접 입력·
    동작 줄은 늘 보이고 보기 목록만 그 안에서 스크롤한다. */
 .card {
   display: flex;
@@ -245,7 +245,7 @@
 }
 
 /* 글을 적어 둔 줄 = 고른 보기와 같은 "고른 상태"(배경 + 실선 윤곽). 초점 표시가 아니다 — 입력칸의 초점은 커서가 보여 주고,
-   글자 입력칸과 그 칸을 감싼 상자에는 초점 테두리·링을 그리지 않는다(focus-ring-survives-inline-styles-contract). */
+   글자 입력칸과 그 칸을 감싼 상자에는 초점 테두리·링을 그리지 않는다(오너 2026-10-04, focus-ring-survives-inline-styles-contract). */
 .footer[data-active="true"] {
   background: var(--ask-option-active);
   border-style: solid;
@@ -320,7 +320,7 @@
 
 .check[data-checked="true"] { background: var(--black); border-color: var(--black); }
 
-/* 아래 동작 줄: 이유(왼쪽) · 보조(외곽선) · 주(검은 알약) — 한 줄. 이유 문장이 줄 전체를 따로
+/* 아래 동작 줄: 이유(왼쪽) · 보조(외곽선) · 주(검은 알약) — 한 줄. 오너 요청 2026-09-27. 이유 문장이 줄 전체를 따로
    차지하던 것을 왼쪽 칸으로 옮겨, 좁을 때만 아래로 접힌다. */
 .actionRow {
   flex: none;
@@ -419,7 +419,7 @@
  * Keyboard focus stays visible (checked with real Tab presses in the One QA harness).
  */
 /* 호스트 화면이 자기 단추에 거는 키보드 윤곽이 카드 안까지 번지면 윤곽이 둘이 된다 — Finance 작업 공간의
-   `.root button:focus-visible`(클래스+요소+의사 클래스)가 실제로 그랬다(보기에 회색 링과 파란 윤곽이 겹쳤다).
+   `.root button:focus-visible`(클래스+요소+의사 클래스)가 실제로 그랬다(2026-10-20 실측: 보기에 회색 링 + 파란 윤곽 2px).
    보기 목록이 이제 스크롤 상자라 바깥 윤곽은 가장자리에서 잘려 줄 하나만 남기도 한다. 카드 안에서는 카드 규칙이 이긴다. */
 .card :is(.option, .close, .collapse, .skip, .actionSecondary, .actionPrimary):focus-visible {
   outline: none;

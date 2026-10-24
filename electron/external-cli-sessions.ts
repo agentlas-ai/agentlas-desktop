@@ -9,7 +9,7 @@ import type {
   CanonicalTaskWorkTarget,
   ChatHistoryEntry,
 } from "../shared/types";
-import { createChat, getChat, setChatRuntimeSelection, setChatWorkingFolder } from "./store/chats";
+import { createChat, createProjectWorkChat, getChat, setChatRuntimeSelection, setChatWorkingFolder } from "./store/chats";
 import { ensureCanonicalTaskForChat, getCanonicalTaskForChat } from "./store/tasks";
 import { getProject } from "./store/projects";
 import { getDb } from "./store/db";
@@ -353,12 +353,9 @@ export async function importExternalCliSession(
     throw new Error("This CLI session belongs to a different project folder");
   }
 
-  const chat = createChat({
-    projectId: project.id,
-    title: parsed.summary.title,
-    taskMode: "task",
-    originSurface,
-  });
+  const chat = originSurface === "work"
+    ? createProjectWorkChat({ projectId: project.id, title: parsed.summary.title })
+    : createChat({ projectId: project.id, title: parsed.summary.title, taskMode: "task", originSurface });
   if (project.folderPath) setChatWorkingFolder(chat.id, project.folderPath);
   setChatRuntimeSelection(chat.id, {
     kind: parsed.summary.provider,

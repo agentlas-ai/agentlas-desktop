@@ -13,6 +13,15 @@ interface Scope { runId: string; taskId: string; revision: string; stepIds: stri
 interface Action { actionId: string; stepId: string; taskId: string; revision: string; methodId: string; inputDigest: string;
   originInvocationRunId: string; expected: ExpectedWorkOutcome; observational: boolean }
 export interface MainWorkReference { action_id?: string; step_id?: string; regenerate_read?: true }
+/**
+ * How a call the host dispatched in this process ended without its answer, read from machine facts (the MCP transport boundary,
+ * the run's abort signal, a typed timeout), never from message text. Recorded in the journal reason after `main_tool_outcome_unknown:`.
+ */
+export type MainWorkUnknownEnd = "timeout" | "aborted" | "transport" | "response_unreadable" | "dispatch_ended";
+/** `returned`: the tool's own answer came back. `not_sent`: the request never left Main. Otherwise the call ended without its answer. */
+export type MainWorkFinish = "returned" | "not_sent" | "unconfirmed" | MainWorkUnknownEnd;
+const UNKNOWN_END = "main_tool_outcome_unknown:";
+const TERMINAL = ["succeeded", "cancelled", "failed"];
 const contexts = new WeakSet<object>();
 const MAX_RESULT_BYTES = 32 * 1024 * 1024;
 const RESULT_STORAGE = "agentlas.main-work-result-bytes.v1";
@@ -49,19 +58,70 @@ function decodeAction(payload:string):Action {
  * identity. A provider call id and the broker's ephemeral action UUID never do. */
 export class MainWorkRecoveryContext {
   private readonly journal = new DesktopWorkRecoveryJournal();
-     
-                                                                                                                                      
-                                                                                                                                   
-                                                                                                                                
-                                                                                                                              
-                                                                                                                                    
-     
-  private readonly live = new Set<string>();
+  /**
+   * Actions this run dispatched (admit with `live`) whose call has not ended: they are in flight in this process, so their outcome is
+   * pending rather than lost. A code-mode program that calls tools side by side (`Promise.all`) has several at once; the first one
+   * used to make the others "read the original outcome first" (Finance 1008 rs-T03, Light on the serving lane, 2026-10-22: four
+   * bare `harness_call` lookups at once, one admitted, three refused, the program ended and the aborted one stayed `started`,
+   * which blocked the whole step). Only an action that is no longer live yet has no outcome (aborted, lost, a previous run) blocks.
+   */
+  private readonly live = new Map<string, { unit: WorkUnit; observational: boolean }>();
   constructor(private readonly chatId: string, private readonly invocationRunId: string,
     private readonly assertCurrent: () => void) { contexts.add(this); }
 
-  /** The dispatch of this action ended, whichever way: from here on an unresolved journal state means a lost outcome. */
-  endLive(actionId: string): void { this.live.delete(actionId); }
+  /**
+   * The dispatch of this action ended, whichever way. If its started attempt was never closed (an exception between admission and
+   * finish: an abort rethrown at result delivery, a run that stopped being current, a result that could not be stored), it is closed
+   * here, so no action this process ran stays `started` (Finance 1008 rs7 rs-V40, 2026-10-23: a code-mode abort left one started and
+   * every later call of the step was refused). `effectStarted` false means the request never left Main.
+   * Never throws: closing the claim must not hide the dispatch's own error.
+   */
+  endDispatch(actionId: string, effectStarted: boolean): void {
+    const entry = this.live.get(actionId);
+    this.live.delete(actionId);
+    if (!entry) return;
+    try {
+      const current = this.journal.read(entry.unit.runId, entry.unit.unitId);
+      if (!current || current.state !== "started" || current.attemptId !== entry.unit.attemptId
+        || current.generation !== entry.unit.generation) return;
+      this.close(current, entry.observational, effectStarted ? "dispatch_ended" : "not_sent");
+    } catch { /* the journal stays as it was; the dispatch's own error is what the caller sees */ }
+  }
+
+  /**
+   * A call that ended without its answer. Never sent: no effect (cancelled). A read: no effect, a known end (failed), so it can run
+   * again. Anything else: the effect is unknown, recorded as held with its cause; only an identical repeat waits (admit), the step
+   * goes on (Finance 1008 rs7 rs-V02/V03, 2026-10-23: one World Bank fetch timed out at 30 s and every later call of the step was refused).
+   */
+  private close(unit: WorkUnit, observational: boolean, end: "not_sent" | MainWorkUnknownEnd): void {
+    if (end === "not_sent") this.journal.transition(unit, "cancelled", { reason: "main_tool_request_not_sent" });
+    else if (observational) this.journal.transition(unit, "failed", { reason: `main_tool_read_outcome_lost:${end}` });
+    else this.journal.transition(unit, "held", { reason: `${UNKNOWN_END}${end}` });
+  }
+
+  /** The cause recorded when the host saw this held action's call end without an answer; null for any other state or reason. */
+  private unknownEnd(runId: string, unitId: string): MainWorkUnknownEnd | null {
+    const row = getDb().prepare(`SELECT json_extract(payload_json,'$.state') state, json_extract(payload_json,'$.reason') reason FROM run_events
+      WHERE run_id=? AND kind='work_unit_transition' AND json_extract(payload_json,'$.unitId')=? ORDER BY seq DESC LIMIT 1`)
+      .get(runId, unitId) as { state: string; reason: string | null } | undefined;
+    return row?.state === "held" && typeof row.reason === "string" && row.reason.startsWith(UNKNOWN_END)
+      ? row.reason.slice(UNKNOWN_END.length) as MainWorkUnknownEnd : null;
+  }
+
+  /**
+   * `blocking`: non-read actions of the step whose outcome was lost with no record of how the call ended (started across a restart or
+   * in another run, a held row from before this rule): every later non-read call of the step waits for them, as before. A read never
+   * blocks (it has no effect). A call still in flight in this run (`live`) is pending, not lost.
+   * `unknown`: actions of the task revision whose call this host saw end without an answer: only an identical repeat waits for them.
+   */
+  private outcomes(scope: Scope, actions: Action[], stepId: string) {
+    const rows = actions.filter(item => !this.live.has(item.actionId)).map(action => {
+      const state = this.journal.read(scope.runId, action.actionId)?.state ?? "held";
+      return { action, state, end: state === "held" ? this.unknownEnd(scope.runId, action.actionId) : null };
+    }).filter(row => !TERMINAL.includes(row.state));
+    return { blocking: rows.filter(row => row.action.stepId === stepId && !row.action.observational && row.end === null),
+      unknown: rows.filter(row => row.end !== null) };
+  }
 
   private scope(): Scope {
     this.assertCurrent();
@@ -96,24 +156,34 @@ export class MainWorkRecoveryContext {
       instruction:"Use _agentlas_work.action_id for the same logical action after a model change or restart. Read its original outcome first. Only a confirmed completed observational action can request regenerate_read; its original identity and total-two method cap remain. Select a different canonical step for independent work. A provider call id is only transport correlation." });
   }
 
-     
-                                                                                                                                           
-                                                                                                                                        
-                                                                                                                                     
-                                                                                                                                          
-                                                                                                                                     
-                               
-     
+  /**
+   * The recovery view a `main_work_read_original_outcome` refusal carries: the actions of that step whose outcome never came back and what
+   * to do about them, not the whole history. The full packet (up to 64 actions with their expected-outcome descriptors) is about 28 KB;
+   * every refused call added it to the conversation (Finance 1008 rs-Q09, Normal on the serving lane, 2026-10-22: a code run refused
+   * twenty times, one task reaching 1.3M input tokens), and its instruction, "read its original outcome first", cannot be followed for an
+   * action whose call was aborted or lost: no outcome was ever stored, so the read answers tool_result_reference_unknown. The prompt
+   * packet above is unchanged.
+   */
   refusalPacket(stepId?: string): string {
     if (!findCanonicalTaskForChat(this.chatId)) return "";
     const scope=this.scope(), actions=this.actions(scope), step=stepId ?? scope.defaultStepId;
-    const unresolved=actions.filter(item=>item.stepId===step && !this.live.has(item.actionId))
-      .map(action=>({action,state:this.journal.read(scope.runId,action.actionId)?.state ?? "held"}))
-      .filter(row=>!["succeeded","cancelled","failed"].includes(row.state));
+    const unresolved=this.outcomes(scope,actions,step).blocking;
     return JSON.stringify({ schemaVersion:"agentlas.main-work-recovery.v1", taskId:scope.taskId, revision:scope.revision, stepIds:scope.stepIds,
       stepId:step, totalActions:actions.length, unresolvedTotal:unresolved.length,
       unresolved:unresolved.slice(-8).map(({action,state})=>({actionId:action.actionId,methodId:action.methodId,state,outcomeStored:false})),
       instruction:"These actions have no stored outcome: the call ended before its answer arrived, so reading main-tool-outcome:<actionId> answers tool_result_reference_unknown. Do not repeat them blindly. Non-read tools stay paused for this step until their effect is verified: check it with a read-only tool, or tell the person what is unconfirmed and ask. Independent work can select another step_id from stepIds. After a model change or restart, pass _agentlas_work.action_id to continue the same logical action. A provider call id is only transport correlation." });
+  }
+
+  /**
+   * The view a `main_work_same_action_outcome_unknown` refusal carries: the identical earlier call, how it ended, and what can be done.
+   * Under 1 KB; the step itself is not blocked, so it lists nothing else.
+   */
+  unknownOutcomePacket(actionIds: readonly string[]): string {
+    if (!findCanonicalTaskForChat(this.chatId)) return "";
+    const scope=this.scope(), byId=new Map(this.actions(scope).map(action=>[action.actionId,action]));
+    return JSON.stringify({ schemaVersion:"agentlas.main-work-recovery.v1", taskId:scope.taskId, revision:scope.revision,
+      unknown:actionIds.slice(-4).map(id=>({actionId:id,methodId:byId.get(id)?.methodId,state:"held",ended:this.unknownEnd(scope.runId,id),outcomeStored:false})),
+      instruction:"An identical earlier call ended without its answer, so whether its effect happened is unknown, and it is not run again automatically. Other calls in this task can continue. Check the effect with a read-only tool, or tell the person what is unconfirmed and ask." });
   }
 
   private actions(scope: Scope): Action[] {
@@ -133,15 +203,16 @@ export class MainWorkRecoveryContext {
       if (action && (input.reference?.step_id && action.stepId!==stepId || action.methodId!==input.methodId
         || action.inputDigest!==digest(input.arguments))) throw new Error("main_work_action_input_conflict");
       if (!action) {
-        // Only an action whose outcome never came back (started across a restart, held after a lost call) blocks the
-        // next one. A returned error (failed) or a call that never left Main (cancelled) has a known end, and a call still in
-        // flight in this run (a sibling of a code-mode program, see `live`) has a pending one.
-        const unresolved=actions.filter(item=>item.stepId===stepId && !this.live.has(item.actionId)
-          && !["succeeded","cancelled","failed"].includes(this.journal.read(scope.runId,item.actionId)?.state ?? "held"));
-        if (!input.observational && unresolved.length) throw new Error(`main_work_read_original_outcome:${unresolved.map(item=>item.actionId).join(",")}`);
+        // Only a non-read action whose outcome was lost with no record of how its call ended (started across a restart or in
+        // another run) blocks the next one of its step. A returned error (failed) or a call that never left Main (cancelled) has a
+        // known end, a call still in flight in this run (a sibling of a code-mode program, see `live`) has a pending one, and a call
+        // this host saw end without its answer (timeout, abort, lost transport: held with its cause) holds back only its identical repeat.
+        const outcomes=this.outcomes(scope,actions,stepId), inputDigest=digest(input.arguments);
+        if (!input.observational && outcomes.blocking.length) throw new Error(`main_work_read_original_outcome:${outcomes.blocking.map(row=>row.action.actionId).join(",")}`);
+        const same=outcomes.unknown.filter(row=>row.action.methodId===input.methodId && row.action.inputDigest===inputDigest);
+        if (!input.observational && same.length) throw new Error(`main_work_same_action_outcome_unknown:${same.map(row=>row.action.actionId).join(",")}`);
         const ordinal=Number((getDb().prepare("SELECT count(*) n FROM run_events WHERE run_id=? AND kind='main_work_action'").get(scope.runId) as {n:number}).n)+1;
         const actionId=workUnitId({runId:scope.runId,taskId:scope.taskId,stepId:`${stepId}:action:${ordinal}`,revision:scope.revision});
-        const inputDigest=digest(input.arguments);
         action={actionId,stepId,taskId:scope.taskId,revision:scope.revision,methodId:input.methodId,inputDigest,
           originInvocationRunId:this.invocationRunId, observational:input.observational,
           expected:{unitId:actionId,revision:scope.revision,inputDigest,targetRef:`main-tool-outcome:${actionId}`,
@@ -184,7 +255,7 @@ export class MainWorkRecoveryContext {
       const started=this.journal.transition(unit,"started",{reason:"main_canonical_tool_dispatch"});
       if (!started) throw new Error("main_work_same_method_limit_or_claim_changed");
       // Registered in the same synchronous step as the transition, so no sibling's admit can see a started action that is not yet live.
-      if (input.live) this.live.add(action.actionId);
+      if (input.live) this.live.set(action.actionId,{unit:started,observational:action.observational});
       return {unit:started,action};
     }).immediate();
   }
@@ -251,19 +322,23 @@ export class MainWorkRecoveryContext {
     this.journal.transition(admission.unit,"cancelled",{reason:"main_tool_not_dispatched"});
   }
 
-  /**
-
-
- */
-  finish(admission:{unit:WorkUnit;action:Action},result:Result,outcome:"returned"|"unconfirmed"="returned"):void {
+  /** `returned`: the tool's own result came back (a builtin ended, an MCP server answered), so an error is a known
+   * end (failed). `not_sent`: the request never left Main (cancelled). Otherwise the call ended before its result (timeout,
+   * abort, lost transport; `unconfirmed` = transport): see close().
+   * Measured 2026-10-17 (dev A/B4, BYOK Haiku): every error was held, and a held action blocks every later non-read
+   * action of its step with no way to clear it, so one non-zero shell exit ended all writes for the task revision. */
+  finish(admission:{unit:WorkUnit;action:Action},result:Result,outcome:MainWorkFinish="returned"):void {
     this.assertCurrent();const scope=this.scope();
     if(scope.runId!==admission.unit.runId || scope.revision!==admission.unit.revision)throw new Error("main_work_completion_scope_changed");
     const stored={content:result.content,isError:result.isError,visionMessage:result.visionMessage,
       ...(result.artifactPaths ? {artifactPaths:result.artifactPaths} : {}),...(result.rawMcpResult ? {rawMcpResult:result.rawMcpResult} : {})};
     const serialized=JSON.stringify(stored);
+    if(outcome!=="returned") {
+      this.close(admission.unit,admission.action.observational,outcome==="unconfirmed" ? "transport" : outcome);
+      return;
+    }
     if(result.isError) {
-      this.journal.transition(admission.unit,outcome==="returned" ? "failed" : "held",
-        {reason:outcome==="returned" ? "main_tool_error_returned" : "original_tool_outcome_unconfirmed"});
+      this.journal.transition(admission.unit,"failed",{reason:"main_tool_error_returned"});
       return;
     }
     const bytes=Buffer.from(serialized,"utf8");

@@ -1,18 +1,20 @@
 import type Database from "better-sqlite3";
 
 /**
- * A Goal's continuation is not an automation.
+ * A Goal's continuation is not an automation (owner 2026-10-20: "스톰브레이커 롱런 goal 이 왜 그래프가 되나, 그건
+ * 그래프가 아니다").
  *
- * Earlier versions wrote a hidden prompt automation ("Goal continuation · <chat>", prompt marked STORMBREAKER_LONG_RUN_MARKER,
- * goal_id set) when a turn ended with work left, and the host treated an enabled one as the owner of the Goal's next step.
- * Such a row could be enabled with next_run_at NULL, so it woke nobody, and a chat could have two.
+ * From 897ed935 (06-27, Stormbreaker) and 74c75be3 (08-11, Goal) a turn that ended with work left wrote a hidden
+ * prompt automation ("Goal continuation · <chat>", prompt marked STORMBREAKER_LONG_RUN_MARKER, goal_id set) and the
+ * host treated an enabled one as the owner of the Goal's next step. On the owner's store (2026-10-20, read-only) 4 of
+ * the 5 rows were enabled with next_run_at NULL, so they woke nobody, and "X Marketing" had two rows for one chat.
  * The host already wakes a Goal by itself (InvocationService.scheduleGoalContinuation → blocked-goal sweep), so the
  * turn end now asks for that wake and creates nothing.
  *
  * The rows that exist are history, not jobs: they are switched off once (never deleted, run history kept), with a
  * retirement record in `meta`, kept out of every automation list and of the scheduler, and cannot be switched on.
- * Only `automations.goal_id` plus the long-run marker identify them; client.ts used to be the only writer of `goal_id`
- * (IPC refuses it: automation_workspace_goal_association_untrusted).
+ * Only `automations.goal_id` plus the long-run marker identify them; client.ts (until this change) was the only
+ * writer of `goal_id` (IPC refuses it: automation_workspace_goal_association_untrusted).
  */
 
 /** Same literal as hephaestus/loop-engineering.ts STORMBREAKER_LONG_RUN_MARKER (a gate asserts they match). */

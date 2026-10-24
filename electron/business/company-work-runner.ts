@@ -10,7 +10,7 @@ import * as byok from '../runtime/byok';
 import { composeTracedPrompt } from '../runtime/prompt-composition-trace';
 import { composeDeclaredPrompt } from '../runtime/prompt-order';
 import type { DeclaredPromptPart } from '../runtime/prompt-order';
-import { assertCompanyWorkGrant,refreshCompanyWorkGrant } from './company-work-grant';
+import { assertCompanyWorkGrant,refreshCompanyWorkGrant,withCompanyMailOperation } from './company-work-grant';
 import { companyProviderHost,companyClaudePin,withCompanyProvider } from './company-work-provider';
 import {runCompanyClaude} from './company-work-claude';
 import { createCompanyAgentMailCapability,removeAgentMailCapability } from '../agent-mail/control-server';
@@ -45,8 +45,8 @@ async function runCompanyWorkInvocationInner(req:McpInvocationRequest,cap:object
  try{
   const servers:Parameters<typeof registerPreparedMcpConfig>[0]['servers']=[],serialized:Record<string,unknown>={},runtimeEnv:Record<string,string>={ELECTRON_RUN_AS_NODE:'1'};
   const server=(id:string,catalogId:string,args:string[]):InstalledMcpServer=>({id,catalogId,name:'',nameEn:'',transport:'stdio',command:process.execPath,args,url:null,envKeys:[],enabled:true,installedAt:new Date().toISOString()});
-  if(mailTools.length){capability=await createCompanyAgentMailCapability({chatId:req.chatId,permission:'full',cwd:null},configKey,{threadId:job.threadId,assertCurrent:()=>refreshCompanyWorkGrant(cap),allowedOperations:mailTools.map(n=>n.slice('agent_mail_'.length))});
-   const args=companyAgentMailMcpLaunchArgs(mailTools),env={[AGENT_MAIL_CONTROL_ENV]:capability.path,ELECTRON_RUN_AS_NODE:'1'},transport={command:process.execPath,args,env};
+  if(mailTools.length){capability=await createCompanyAgentMailCapability({chatId:req.chatId,permission:'full',cwd:null},configKey,{threadId:job.threadId,assertCurrent:()=>refreshCompanyWorkGrant(cap),runBoundary:operation=>withCompanyMailOperation(cap,operation),allowedOperations:mailTools.map(n=>n.slice('agent_mail_'.length))});
+   const args=companyAgentMailMcpLaunchArgs(mailTools,job.policy.expiresAt),env={[AGENT_MAIL_CONTROL_ENV]:capability.path,ELECTRON_RUN_AS_NODE:'1'},transport={command:process.execPath,args,env};
    serialized[configKey]=transport;Object.assign(runtimeEnv,env);servers.push({configKey,server:server(configKey,'agent-mail',args),transport});}
   if(fileTools.length){const fileControl=path.join(directory,'files.json');files=await createCompanyFileServer(cap,fileControl);const args=companyFileMcpLaunchArgs(fileTools),env={AGENTLAS_COMPANY_FILE_CONTROL:fileControl,ELECTRON_RUN_AS_NODE:'1'},transport={command:process.execPath,args,env},key='company-files';
    serialized[key]=transport;Object.assign(runtimeEnv,env);servers.push({configKey:key,server:server(key,'company-files',args),transport});}

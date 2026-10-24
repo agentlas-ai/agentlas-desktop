@@ -5,6 +5,7 @@ import { PopupFrame, PopupSteps } from "@/components/Popup";
 
 import { confirmPopup } from "@/lib/popup";
 import { FIRST_RUN_OPEN_EVENT } from "@/lib/first-run-state";
+import { coreAccountState, type CoreAccountState } from "@/lib/core-account-state";
 import { requestWhatsNewReplay } from "@/lib/whats-new";
 import { updaterCanUseOfficialInstaller } from "@shared/types";
 import { useCallback, useEffect, useState, type CSSProperties , useMemo} from "react";
@@ -41,8 +42,11 @@ import { OllamaMigrationPanel } from "@/components/settings/OllamaMigrationPanel
 import { PersonalAgentFrontPanel } from "@/components/settings/PersonalAgentFrontPanel";
 import { AgentMailPanel } from "@/components/settings/AgentMailPanel";
 import { ArchivePanel } from "@/components/settings/ArchivePanel";
+import { ReachPanel } from "@/components/settings/ReachPanel";
+import { EnterpriseServerPanel } from "@/components/settings/EnterpriseServerPanel";
 import { PricingPanel } from "@/components/settings/PricingPanel";
 import { ServiceConnectionsButton } from "@/components/connect/ServiceConnectionsButton";
+import { manualSetupFor, manualSetupShellLabel, manualSetupText, setupOsFromNavigator, type ManualSetupRuntime } from "@shared/runtime-manual-setup";
 import { ChipGrid, ConnectChip, RUNTIME_CHIPS, RuntimeChip, RuntimeConnectPopup, connectCopy, useRuntimeAuth, type RuntimeChipSpec } from "@/components/connect/RuntimeConnect";
 
 // BYOK 백엔드 목록은 shared/models.ts의 ByokBackend(단일 출처)를 그대로 쓴다.
@@ -479,6 +483,8 @@ export default function SettingsPage() {
         <MobileBridgePanel />
         <AgentMailPanel locale={locale} />
         <ArchivePanel locale={locale} />
+        <ReachPanel locale={locale} />
+        <EnterpriseServerPanel locale={locale} />
 
         {/* 언어 선택 */}
         <h2 style={{ fontFamily: "var(--font-head)", fontSize: 15, margin: "24px 0 12px" }}>
@@ -1088,11 +1094,11 @@ function MobileBridgePanel() {
   const [storeChoice, setStoreChoice] = useState<"android" | "ios" | null>(null);
   const [storeQrDataUrl, setStoreQrDataUrl] = useState("");
 
-    
-                                                           
-                                                     
-                                    
-     
+  /*
+   * ★이 대화상자는 **나가는 길이 바깥 클릭 하나뿐**이었다 (대화상자 실측 2026-09-08).
+   *   화면을 통째로 덮는데 닫기 단추가 없고 Escape 도 안 먹었다 — 키보드만 쓰면
+   *   갇힌다. 모달은 어디서나 같은 방법으로 닫혀야 한다.
+   */
   useEffect(() => {
     if (installGate === "closed") return;
     const onKey = (event: KeyboardEvent) => {
@@ -1114,11 +1120,11 @@ function MobileBridgePanel() {
       ]);
       setStatus(nextStatus);
       setDevices(nextDevices);
-        
-                                                   
-                                                
-                                           
-         
+      /*
+       * ★엔진이 준 문구를 그대로 화면에 올리던 자리 (실측 2026-09-08).
+       *   그 문구가 사람 문장이 아니라 식별자일 수 있다 — 그러면 사용자는
+       *   무엇을 해야 할지 알 수 없다. 사람 문장을 먼저 세운다.
+       */
       setLoadError(nextStatus.error && !looksLikeMachineText(nextStatus.error)
         ? nextStatus.error
         : nextStatus.error
@@ -1223,7 +1229,7 @@ function MobileBridgePanel() {
     } catch (error) {
       setPairing(null);
       setQrDataUrl("");
-                                                               
+      /* ★엔진 식별자를 그대로 그리던 자리 (실측 2026-09-08). 사람 문장을 먼저 세운다. */
       setMessage(humanFailure(error, locale === "ko"
         ? "연결 QR을 만들지 못했습니다. 잠시 뒤 다시 시도해 주세요."
         : "The pairing QR could not be created. Try again in a moment."));
@@ -1388,12 +1394,12 @@ function MobileBridgePanel() {
           </button>
         </div>
 
-        {
-
-
-
-
-}
+        {/* The pairing QR carries app-only data, so a phone's default camera cannot
+            complete a pairing — it just dumps the text (measured: a user's scan
+            landed in a notes app). WhatsApp has the same constraint and solves it
+            the same way: state the exact in-app path before showing the code.
+            This gate also answers the prerequisite question — is the app even
+            installed — instead of leaving a person with an unusable QR. */}
         {installGate !== "closed" && (
           <PopupFrame title={locale === "ko" ? "모바일 연결" : "Connect Mobile"} icon={<IconCheck size={20} />} closeLabel={locale === "ko" ? "닫기" : "Close"} onClose={() => setInstallGate("closed")}>
             <div data-testid="mobile-bridge-install-gate">
@@ -2081,7 +2087,7 @@ function MultimodalFallbackPanel({
  */
 function CoreAccountLine({ attached }: { attached: boolean }) {
   const { t } = useT();
-  const [state, setState] = useState<"unknown" | "authenticated" | "signed_out">("unknown");
+  const [state, setState] = useState<CoreAccountState>("unknown");
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<string | null>(null);
 
@@ -2090,7 +2096,7 @@ function CoreAccountLine({ attached }: { attached: boolean }) {
     try {
       const result = await ipc()?.hephaestus.coreAuthStatus();
       const status = (result?.json as { status?: string } | null)?.status;
-      setState(status === "authenticated" ? "authenticated" : status ? "signed_out" : "unknown");
+      setState(coreAccountState(status));
     } catch {
       setState("unknown");
     }
@@ -2308,16 +2314,16 @@ function UpdatePanel() {
   const [resumeBusy, setResumeBusy] = useState(false);
   const [laterChosen, setLaterChosen] = useState(false);
   const [state, setState] = useState<UpdaterState>({ status: "idle" });
-  
-
-
-
-
-
-
-
-
-
+  /*
+   * Desktop's own version is not the whole answer. Build, upload, routing and
+   * the Workforce contract all belong to the attached Agentlas-OS Core, which
+   * updates on its own release train and is resolved at runtime — managed
+   * `~/.agentlas/runtime/current` when healthy, the bundled copy otherwise.
+   * Measured 2026-07-28: managed 1.1.73 vs bundled 1.1.62, and the bundled
+   * fallback is missing five workforce goal-continuity tools outright. Showing
+   * only the app version left no surface anywhere telling the user (or support)
+   * which Core they are actually on.
+   */
   const [core, setCore] = useState<{
     version: string | null;
     root: string | null;
@@ -2594,11 +2600,11 @@ function UpdatePanel() {
 
 // ── BYOK live model catalog + manual ID escape hatch ─────
 // Model generations are provider-owned. Never pin versioned IDs in the UI.
-   
-                                                                                                                     
-                                                                                                                        
-                                                                  
-   
+/**
+ * Gemini explicit cachedContents (docs/2026-10-13-native-harness/13 §7): off by default; the owner's switch and TTL.
+ * Google bills cached tokens per hour of storage, so the switch says so in its tooltip; harness cache.settings.* is the
+ * one path (receipted), the same one the SDK and app control use.
+ */
 function GeminiExplicitCacheControl() {
   const { locale } = useT();
   const ko = locale === "ko";
@@ -2857,18 +2863,18 @@ const TP_PRESETS: Array<{ name: string; template: string }> = [
   { name: "Antigravity", template: "agy --prompt {{{prompt}}}" },
 ];
 
-                                                                                          
-                                                                
-   
-                                
-  
-                                                
-                               
-                                             
-                              
-                                                  
-                                    
-   
+// ACP(Agent Client Protocol) 프리셋 — 실행 명령은 agentclientprotocol/registry(2026-08-15) 실물 기준.
+// 이 모드의 프로필은 저장 즉시 엔진 선택에 kind "acp"로 나타난다(PRD 2026-08-15 B-1).
+/**
+ * 접이식 연결 섹션 (오너 결정 2026-08-18).
+ *
+ * 연결 대상이 18개까지 늘면서 한 줄로 늘어놓는 방식은 "무엇을 골라야 하는가"에
+ * 답하지 못했다. 두 섹션이 그 질문에 바로 답한다:
+ *   · 구독 모델 — 이미 내고 있는 구독으로 추가 비용 없이 (기본 펼침)
+ *   · API 모델 — 종량제 키로 (기본 접힘)
+ * 구독을 먼저 펼치는 이유: 대부분의 사용자에게 돈이 덜 드는 길이고, 우리가 CLI를
+ * 백그라운드로 띄우는 이유 자체가 그 구독 인증이기 때문이다.
+ */
 function ConnectSection({
   title,
   hint,
@@ -2926,7 +2932,7 @@ function ConnectSection({
   );
 }
 
-                                                     
+// 오너 결정(2026-08-18): 프리셋은 **자체 모델·구독을 가진 제공자**만 남긴다.
 // 사용자의 API 키를 중개할 뿐인 껍데기 런타임(OpenCode·Goose·Kilo·Cline)은 우리가
 // BYOK로 직접 부르는 것과 결과가 같아 고를 이유가 없고, 목록에 있으면 "무엇을 골라야
 // 하나"만 흐린다. Copilot은 구독 섹션(CLI 설치 패널)으로 승격돼 여기서는 뺀다.
@@ -3201,7 +3207,7 @@ function Banner() {
 
 // ── CLI 설치 패널 (요청 ⑤) ────────────────────────────────
 // 구독 모델 — 이미 내고 있는 구독으로 추가 비용 없이 쓰는 CLI 제공자.
-                                                       
+// 판단 기준(오너 결정 2026-08-18): "그 CLI를 통해야만 얻는 것" = 구독 인증.
 // 실행되는 런타임과 이 목록은 반드시 일치해야 한다 — 예전에는 grok·cursor가 실제로
 // 실행되는데 이 패널에 없어서, 사용자가 설치·로그인할 방법이 화면에 없었다.
 type CliKind = "claude-code" | "codex" | "antigravity" | "kimi" | "grok" | "cursor" | "github-copilot-cli";
@@ -3213,16 +3219,16 @@ type CliKind = "claude-code" | "codex" | "antigravity" | "kimi" | "grok" | "curs
  *             (예전에는 이런 CLI가 목록에 아예 없어서, 실행은 되는데 화면에 길이 없었다)
  */
 type CliSetup = "install" | "login" | "manual";
-const CLI_DEFS: Array<{ kind: CliKind; name: string; sub: string; setup: CliSetup; manual?: string }> = [
+const CLI_DEFS: Array<{ kind: CliKind; name: string; sub: string; setup: CliSetup; manual?: ManualSetupRuntime }> = [
   { kind: "claude-code", name: "Claude Code", sub: "Claude Pro · Max", setup: "install" },
   { kind: "codex", name: "Codex", sub: "ChatGPT Plus · Pro", setup: "install" },
   { kind: "antigravity", name: "Antigravity", sub: "Google AI subscription", setup: "login" },
   { kind: "grok", name: "Grok", sub: "X Premium · xAI", setup: "install" },
   { kind: "kimi", name: "Kimi Code", sub: "Kimi Code membership", setup: "install" },
-  // Cursor의 공식 배포는 설치 스크립트다. 우리가 대신 실행하지 않고 명령만 보여준다.
-  { kind: "cursor", name: "Cursor", sub: "Cursor Pro", setup: "manual", manual: "curl https://cursor.com/install -fsS | bash" },
-  // Copilot CLI는 npx로 실행되므로 설치가 필요 없다. 필요한 것은 GitHub 인증뿐.
-  { kind: "github-copilot-cli", name: "GitHub Copilot CLI", sub: "GitHub Copilot subscription", setup: "manual", manual: "gh auth login" },
+  // Cursor의 공식 배포는 OS별 설치 스크립트다. 우리가 대신 실행하지 않고 이 OS의 명령만 보여준다(shared/runtime-manual-setup.ts).
+  { kind: "cursor", name: "Cursor", sub: "Cursor Pro", setup: "manual", manual: "cursor" },
+  // Copilot CLI는 npx로 실행된다 — Node.js(npx)와 GitHub CLI 로그인이 필요하다. 이 OS의 설치·로그인 명령을 보여준다.
+  { kind: "github-copilot-cli", name: "GitHub Copilot CLI", sub: "GitHub Copilot subscription", setup: "manual", manual: "github-copilot-cli" },
 ];
 
 function CliInstallPanel({
@@ -3232,14 +3238,14 @@ function CliInstallPanel({
   statuses: RuntimeStatus[];
   onChanged: () => void | Promise<void>;
 }) {
-                                                                    
+  // 오너 2026-09-29: 온보딩과 같은 한 벌 — 칩 하나 = 연결할 것 하나, 초록은 살아 있는 확인 뒤에만,
   // 작은 [연결] → 단계 팝업(확인·설치·로그인·확인·완료), 끝나면 알아서 닫힌다.
   const { t, locale } = useT();
   const ko = locale === "ko";
   const cc = useMemo(() => connectCopy(ko), [ko]);
   const auth = useRuntimeAuth();
   const [connectFor, setConnectFor] = useState<RuntimeChipSpec | null>(null);
-  const [copilotNote, setCopilotNote] = useState<string | null>(null);
+  const [copilotNote, setCopilotNote] = useState<{ label: string; command: string; note: string | null } | null>(null);
   const copilotInstalled = statuses.some((s) => s.kind === "acp" && s.acpAgentId === "github-copilot-cli");
   const copilot = CLI_DEFS.find((def) => def.kind === "github-copilot-cli");
   const subOf = (kind: string, fallback: string) => CLI_DEFS.find((def) => def.kind === kind)?.sub ?? fallback;
@@ -3270,12 +3276,20 @@ function CliInstallPanel({
               sub={copilot.sub}
               ready={false}
               badge={copilotInstalled ? cc.unverified : cc.notInstalled}
-              action={{ label: cc.connect, onClick: () => setCopilotNote(copilot.manual ?? null) }}
+              action={{ label: cc.connect, onClick: () => {
+                if (!copilot.manual) return;
+                const setup = manualSetupFor(copilot.manual, setupOsFromNavigator(typeof navigator === "undefined" ? undefined : navigator));
+                setCopilotNote({ label: manualSetupShellLabel(setup, ko), command: manualSetupText(setup), note: setup.note ? (ko ? setup.note.ko : setup.note.en) : null });
+              } }}
             />
           )}
         </ChipGrid>
         {copilotNote && (
-          <div style={{ marginTop: 8, fontSize: 11.5, color: "var(--ink-soft)", fontFamily: "var(--font-mono)" }}>{copilotNote}</div>
+          <div style={{ marginTop: 8, fontSize: 11.5, color: "var(--ink-soft)" }}>
+            {copilotNote.label}
+            <div style={{ fontFamily: "var(--font-mono)", whiteSpace: "pre-wrap" }}>{copilotNote.command}</div>
+            {copilotNote.note && <div>{copilotNote.note}</div>}
+          </div>
         )}
       </ConnectSection>
       {connectFor && (
@@ -3351,13 +3365,13 @@ const multimodalSecretButtonStyle: CSSProperties = {
   boxShadow: "var(--neu-raised)",
 };
 
-   
-                                       
-  
-                                                 
-                                                         
-                                              
-   
+/**
+ * 실행 완료 알람 — 소리·앱 흔들기 (오너 2026-09-07).
+ *
+ * 긴 실행은 몇 분에서 몇 시간이다. 그동안 다른 창을 보고 있으면 끝난 줄 모른다.
+ * "지금 들어보기"를 둔 이유: 켜 놓고도 OS 알림 권한이 꺼져 있으면 아무 일도 안 일어나는데,
+ * 그 사실을 다음 실행이 끝날 때까지 알 수 없다. 그 자리에서 확인하게 한다.
+ */
 function RunAlertsPanel({ locale }: { locale: string }) {
   const ko = locale === "ko";
   const [settings, setSettings] = useState<RunAlertSettings | null>(null);

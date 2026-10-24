@@ -122,14 +122,14 @@ export function controlAutomaticGoal(input: {
     }
     if (run.status === "cancelled") {
       completeChatGoalContract(run.goalId, "cancelled");
-      
-
-
-
-
-
-
-
+      /*
+       * ★원장만 바꾸고 화면에 알리지 않으면, 끝난 목표가 화면에서 계속 진행 중이다.
+       *
+       * 여기는 결속을 직접 SQL 로 풀고 있었다. 그러면 setChatGoalBinding 안의
+       * emitDesktopStoreChange 를 지나지 않아 **대화 화면이 갱신 신호를 못 받는다.**
+       * 나머지 세 완료 지점은 전부 그 함수를 쓴다 — 이 자리만 달랐다.
+       * (QA 실측 2026-09-08: 원장이 닫힌 뒤에도 목표 칩과 "목표 추진" 토글이 그대로였다.)
+       */
       const rootChatId = run.rootChatId;
       if (rootChatId && getChat(rootChatId)?.goalId === run.goalId) setChatGoalBinding(rootChatId, null);
     }

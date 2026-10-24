@@ -13,12 +13,12 @@ export interface OneAgentChoice {
 }
 
 /**
-
-
-
-
-
-
+ * A searchable agent picker in the composer model menu's design.
+ *
+ * Owner 2026-10-04 (screenshot of 담당 교체): the replacement was a native <Select> listing every installed agent —
+ * no search, no faces, the OS menu's look. It opens in place below its trigger, so a scrolling sheet cannot clip it.
+ * Escape closes the list only; the sheet behind it stays open. The app-wide focus ring and button hover wash are
+ * opted out (data-focus-ring="wrapper", data-hover="own"): the panel draws its own, as the composer menu does.
  */
 export function OneAgentChoicePicker({
   label,

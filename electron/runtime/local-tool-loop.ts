@@ -11,7 +11,7 @@ import { boundedLocalOutputTokens, localContextFailure, localHttpFailureClass, m
 import { compactHistoryToBudget, estimateTransportTokens } from "./compact";
 import { openStatelessGeneration, statelessHistoryTokens, type StatelessWindow } from "./stateless-generation";
 import { ownerControlHistoryImages } from "./owner-control-pump";
-import { estimateRequestPromptTokens, ollamaNativeFetch, planOllamaContext, probeOllamaContextLimits, remeasureOllamaWindow } from "./ollama-native";
+import { estimateRequestPromptTokens, ollamaMemoryCeiling, ollamaNativeFetch, planOllamaContext, probeOllamaContextLimits, remeasureOllamaWindow } from "./ollama-native";
 import { browserDownloadAvailable, beginBrowserDownloadProof } from "../long-run/download-proof";
 import { beginBuiltinFileProof, beginNativeFileProof, mcpFileProofCandidate } from "../long-run/file-proof";
 import { assertScienceCollectionCapability, assertScienceCollectionTool, SCIENCE_COLLECTION_TOOLS } from "./science-collection-boundary";
@@ -52,7 +52,7 @@ import { openAiStrictSchemaOrNull } from "./strict-output-schema";
 import { abortReasonError } from "./abort-reason";
 import { builtinShellEnv } from "./builtin-shell-env";
 import { attestMainToolPreDispatchRejection, withDurableMainToolStart } from "../invocation/adapter-effect-context";
-import { assertMainWorkRecoveryContext, mainWorkToolSchema, type MainWorkRecoveryContext, type MainWorkReference } from "../invocation/main-work-recovery";
+import { assertMainWorkRecoveryContext, mainWorkToolSchema, type MainWorkFinish, type MainWorkRecoveryContext, type MainWorkReference } from "../invocation/main-work-recovery";
 import type { InstalledMcpServer } from "../../shared/types";
 import { getRuntimeSession, saveRuntimeSession } from "../store/runtime-sessions";
 import { OUTPUT_LIMIT_CONTINUATION_MAX_ROUNDS, outputLimitContinuationTurn } from "./output-limit-continuation";
@@ -65,6 +65,7 @@ import {
   defaultRuntimeToolPermission,
   getRuntimeToolPermissionArbiter,
   toolApprovalFaultCode,
+  toolApprovalSessionKey,
   type RuntimeToolPermissionAsk,
   type RuntimeToolPermissionDecision,
 } from "./tool-approval";
@@ -121,9 +122,9 @@ interface OpenAiToolCall {
   function: { name: string; arguments: string };
 }
 
-                                                                              
-                                                                           
-                                            
+/** Provider-neutral tool invocation data. No caller may synthesize a provider
+ * correlation ID: protocols without one carry their measured response part
+ * location into the Main broker instead. */
 export interface MainToolDispatchCall {
   providerCallId: string | null;
   providerCallLocation?: WorkforceBrokerProviderCallLocation | null;
@@ -232,8 +233,8 @@ export function createToolLoopProgress(runtimeKind: string, req: RunnerRequest, 
   };
 }
 
-                                                                          
-                                                                              
+/** Every actual HTTP model dispatch is a distinct measured scope. Missing
+ * terminals stay unknown, including failed retries before a later success. */
 export function createToolLoopUsage(events: RunnerEvents) {
   const usage = createRuntimeUsageCollector();
   return {
@@ -252,18 +253,18 @@ export function createToolLoopUsage(events: RunnerEvents) {
 }
 
 /**
-
-
-
-
-
-
-
-
-
-
-
-
+ * ★로컬 런타임의 실패 표식 — CLI 러너와 같은 계약(RunnerResult.failure).
+ *
+ * 실측 사고(2026-08-08, ollama): 로컬 모델이 도구 왕복에서 무너진 뒤
+ * "The system encountered a timeout error while processing a request. ..."
+ * 같은 기계 문장을 최종 답으로 뱉었고, 이 루프에는 실패 칸이 아예 없어서
+ * 그 문장이 정상 답으로 저장됐다(chat_messages 실물 확인). CLI 러너들은
+ * 2026-08-06에 이 계약으로 전환됐는데 로컬 4종(ollama/lmstudio/mlx/
+ * local-openai)이 공유하는 이 파일만 빠져 있었다 — 특례가 아니라 누락이다.
+ *
+ * 여기서 표식을 다는 경우는 "텍스트가 답이 아닌데 성공처럼 보이는" 것들뿐이다:
+ * 빈 답, 거절 고지문, 도구 루프 미수렴. 전송/HTTP 실패는 지금처럼 throw로
+ * 크게 실패한다(표식을 안 읽는 소비자에게도 확실히 전달되어야 한다).
  */
 function localFailure(
   kind: RunnerFailure["kind"],
@@ -324,14 +325,14 @@ export async function loadMainToolInventory(
     signal?.throwIfAborted();
     const key = prepared.configKey;
     const server = prepared.server;
-
-
-
-
-
-
-
-
+    // The identity comes from the Main-sealed binding, never a model tool name.
+    // A browser-only run connects exactly the servers Main sealed for it — the same
+    // set claude-code/codex receive in their MCP config. Main owns that decision; a
+    // second, stricter filter here left host-loop runtimes with the browser alone. Measured
+    // (parity QA 2026-09-25, a browser-mode automation asking for the Seoul time):
+    // codex and claude called agentlas-time.get_current_time; serving had 28 browser
+    // tools, answered "NEEDS-INPUT: get_current_time is not provided", three runs of
+    // three. Builtin file/shell tools stay off in browser-only runs (above), as for claude.
     let status;
     try {
       status = await testServerConnection(server, { timeoutMs: 8_000, signal, prepared });
@@ -475,7 +476,7 @@ export async function prepareMainToolLoop(
   // Under a Science / Alive-Science grant the server-side model must see that
   // grant's catalog only (it already bridges the Desktop tools it admits). An
   // ordinary One/Work run gets the same builtins as every host-loop runtime —
-                                                                      
+  // before 2026-09-24 serving in Work had no file/shell tools at all.
   // BYOK adapters use this same Main loop. A signed Science catalog is the
   // complete grant there too; API delivery must not add file/shell/download tools.
   const catalogMcpOnly = Boolean(req.mcpConfigPath) && req.mcpGrantCatalogOnly === true;
@@ -512,10 +513,10 @@ export async function prepareMainToolLoop(
       })();
   // ★ 로컬 소형 모델(agentlas-local)에는 도구를 그대로 준다. 코드 모드(agentlas_code)와 지연 메뉴
 
-
-
-
-
+  //   agentlas_code 만 5번 부르다 브라우저에 닿지 못하고 사용자에게 되물었다. 같은 모델에 도구를
+  //   직접 주면 브라우저·파일·셸 4/4 정확(엔진 직결 실측).
+  // A Main-issued effect observation looks only: read built-ins and Main's browser server, offered directly (no code
+  // mode or lazy menu). Every other server's schemas are context the look does not need (routed 2026-09-25).
   if (req.minimalObservation && !collection) {
     for (let index = eagerTools.length - 1; index >= 0; index -= 1) {
       const resolved = byName.get(eagerTools[index].function.name);
@@ -525,8 +526,8 @@ export async function prepareMainToolLoop(
       }
     }
   }
-  
-
+  // Small local models (managed Local, Ollama, LM Studio, MLX) get their tools directly: behind agentlas_code they
+  // reached for it first and then flailed (gpt-oss on Ollama, 2026-10-11, measured in the captured requests).
   const smallLocalModel = runtimeKind === "agentlas-local" || runtimeKind === "ollama" || runtimeKind === "lmstudio" || runtimeKind === "mlx";
   const indirectToolSurface = !collection && !catalogMcpOnly && !req.workforceRuntimeToolGrant && !req.untrustedNoTools && !smallLocalModel
     && !req.minimalObservation;
@@ -534,7 +535,7 @@ export async function prepareMainToolLoop(
   // direct. A single large MCP contract still needs on-demand schema discovery:
   // the statistics server alone has 180 alternatives (>300 KB).
   const menuAllowed = !collection && !catalogMcpOnly && !req.workforceRuntimeToolGrant && !req.untrustedNoTools && !req.minimalObservation;
-  const sessionKey = `${runtimeKind}:${req.sessionFingerprintSeed ?? req.cwd ?? "default"}`;
+  const sessionKey = toolApprovalSessionKey(runtimeKind, req.sessionFingerprintSeed, req.cwd);
   const tools = installToolResultContext(
     installLazyToolMenu(installMainCodeMode(eagerTools, byName, indirectToolSurface), byName, menuAllowed, runtimeKind === "agentlas-local", runtimeKind === "byok" || runtimeKind === "agentlas"),
     byName, { runtimeKind, sessionKey, cwd: req.cwd || undefined,
@@ -697,7 +698,8 @@ async function dispatchMainToolRaw(
     if (effectSlot.ref) await settleMainEffect(effectSlot.ref, "uncertain");
     throw error;
   } finally {
-    if (effectSlot.liveAction) approval.canonicalWorkRecovery?.endLive(effectSlot.liveAction);
+    // Every exit closes this dispatch's journal claim: an attempt still started here is closed with what is known (never left started).
+    if (effectSlot.liveAction) approval.canonicalWorkRecovery?.endDispatch(effectSlot.liveAction, effectSlot.effectStarted === true);
   }
   if (effectSlot.ref) {
     await settleMainEffect(effectSlot.ref, result.isError ? "failed" : "settled", result.content);
@@ -747,7 +749,8 @@ async function awaitMcpResultDelivery(
   approval.assertCurrent?.();
 }
 
-interface MainEffectSlot { ref?: string; replayedRef?: string; liveAction?: string }
+/** `effectStarted`: the call was handed to the tool (builtin run, MCP request) — before that point an end has no effect. */
+interface MainEffectSlot { ref?: string; replayedRef?: string; liveAction?: string; effectStarted?: boolean }
 
 async function settleMainEffect(ref: string, state: "settled" | "failed" | "uncertain", resultText?: string): Promise<void> {
   try { await (await companyOrOriginalEffectLedger()).settleEffect(ref, state, state === "settled" && resultText !== undefined ? { result: resultText } : undefined); } catch { /* the ledger never fails a tool result */ }
@@ -769,10 +772,10 @@ async function dispatchMainToolRawUnchecked(
   approval: LocalToolApprovalContext, broker?: MainWorkforceBroker, effectSlot?: MainEffectSlot,
 ): Promise<MainToolDispatchResult> {
   approval.signal?.throwIfAborted();
-  
-
-
-
+  // A Work run gives every tool, the host's own wrappers included, the optional _agentlas_work reference
+  // (mainWorkToolSchema). The wrappers check their own fields, so the reference comes off first, and a menu call hands
+  // it to the prepared tool it resolves to, where the recovery below reads it (dev 2026-10-18 W5: every
+  // agentlas_tools_call in a Haiku Work room was refused tool_menu_arguments_invalid ["_agentlas_work"]).
   let wrapperWork: { reference: unknown } | undefined;
   if (approval.canonicalWorkRecovery && (call.toolName === TOOL_RESULT_READ || call.toolName === CODE_MODE_TOOL || isToolMenuTool(call.toolName))) {
     const lifted = liftWorkReference(call.arguments);
@@ -803,7 +806,7 @@ async function dispatchMainToolRawUnchecked(
     const menu = resolveToolMenu(byName, call.toolName, call.arguments);
     if (menu?.kind === "result") {
       // Menu listing/preparation is a host operation too; the effect reader needs start + result
-                                                                                                         
+      // (live 2026-09-25, run 3834da2a: three agentlas_tools_* results alone kept the boundary pending).
       (currentHistoryRuntimeFence()?.assertCurrent(), events.onTool?.(call.toolName, call.arguments, undefined, call.providerCallId ?? undefined, false, undefined, undefined, agentlasDispatchedOrigin(call.toolName)));
       (currentHistoryRuntimeFence()?.assertCurrent(), events.onTool?.(call.toolName, call.arguments, menu.content, call.providerCallId ?? undefined, false, undefined, undefined, agentlasDispatchedOrigin(call.toolName)));
       return { content: menu.content, visionMessage: null, isError: false };
@@ -947,20 +950,23 @@ async function dispatchMainToolRawUnchecked(
   // The effect-boundary reader requires start+result per operation (codex emits
   // item.started the same way). Without it every host-loop Goal turn (serving,
   // agentlas-local, BYOK) read "outcome-pending" and verification stayed inconclusive
-                                                                            
+  // (isolated live run 2026-09-25, run_80dc1968: 12 inconclusive receipts).
   let work:ReturnType<MainWorkRecoveryContext["admit"]>|undefined;
   try {
     work=approval.canonicalWorkRecovery?.admit({reference:workReference,methodId:brokerToolId,arguments:args,observational:!planMutation,live:true});
   } catch(error) {
     const code=error instanceof Error ? error.message : String(error);
-    if(!/^main_work_(?:read_original_outcome|action_not_in_task|action_input_conflict|checkpoint_step_invalid|worker_liveness_unknown|outcome_unconfirmed|result_read_unavailable|read_regeneration_required|same_method_limit|same_method_limit_or_claim_changed)/.test(code))throw error;
+    if(!/^main_work_(?:read_original_outcome|same_action_outcome_unknown|action_not_in_task|action_input_conflict|checkpoint_step_invalid|worker_liveness_unknown|outcome_unconfirmed|result_read_unavailable|read_regeneration_required|same_method_limit|same_method_limit_or_claim_changed)/.test(code))throw error;
     if(actionId)broker?.finishAction(actionId,"not_dispatched");
     // The refusal ends this call like every other refusal here, so the timeline gets its completion (the code only, never the recovery
     // packet): a call refused at admission used to stay "started" with no end in the evidence, and a code-mode run that was refused twenty
     // times showed twenty calls that never finished. A blocked step gets the compact view of what blocks it (refusalPacket).
     (currentHistoryRuntimeFence()?.assertCurrent(), events.onTool?.(call.toolName, call.arguments, `Error: ${code.slice(0,300)}`, eventCallId, true));
     const recovery=code.startsWith("main_work_read_original_outcome")
-      ? approval.canonicalWorkRecovery!.refusalPacket(workReference?.step_id) : approval.canonicalWorkRecovery!.packet({always:true});
+      ? approval.canonicalWorkRecovery!.refusalPacket(workReference?.step_id)
+      : code.startsWith("main_work_same_action_outcome_unknown:")
+        ? approval.canonicalWorkRecovery!.unknownOutcomePacket(code.slice("main_work_same_action_outcome_unknown:".length).split(","))
+        : approval.canonicalWorkRecovery!.packet({always:true});
     return {content:JSON.stringify({code,recovery}),visionMessage:null,isError:true};
   }
   // The admitted call is in flight in this run until the wrapper's finally says otherwise (no await between admit and here): a sibling
@@ -1035,6 +1041,7 @@ async function dispatchMainToolRawUnchecked(
     const builtinCwd = approval.cwd ?? process.cwd();
     const confineShell = resolved.builtinName === "bash" && approval.permission === "write"
       ? await (await import("./confined-shell")).writeConfinedShell(builtinCwd) : null;
+    if (effectSlot) effectSlot.effectStarted = true;
     const outcome = await runBuiltinTool(resolved.builtinName, args, {
       cwd: builtinCwd,
       permission: (approval.permission ?? "read") as ToolPermission,
@@ -1107,13 +1114,17 @@ async function dispatchMainToolRawUnchecked(
     return dispatched;
   }
   let mcpOutcome: MainToolDispatchResult;
-  // True once the server's own answer came back; a throw before that leaves the outcome unconfirmed (held).
-  let mcpReturned = false;
+  // How the call ended, for the Work journal: "returned" once the server's own answer came back; otherwise read from machine
+  // facts in the catch below (never from the error text).
+  let mcpEnd: MainWorkFinish = "not_sent";
+  let mcpErrorType: typeof import("../mcp-tools/client").McpToolCallError | undefined;
+  let mcpSent = false;
   try {
-    const [{ callServerToolContent }, { saveBrowserCaptureArtifact }] = await Promise.all([
+    const [{ callServerToolContent, McpToolCallError }, { saveBrowserCaptureArtifact }] = await Promise.all([
       import("../mcp-tools/client"),
       import("../media/capture-artifacts"),
     ]);
+    mcpErrorType = McpToolCallError;
     approval.signal?.throwIfAborted();
     approval.assertCurrent?.();
     // Same host file proof as builtin writes, for MCP file tools Main can identify by catalog.
@@ -1121,6 +1132,7 @@ async function dispatchMainToolRawUnchecked(
       serverToolName: resolved.serverToolName, args, catalogId: resolved.server.catalogId,
       chatId: approval.chatId, cwd: approval.cwd, permission: approval.permission });
     const mcpFileProof = mcpFileCandidate ? beginNativeFileProof(mcpFileCandidate) : null;
+    mcpSent = true; if (effectSlot) effectSlot.effectStarted = true;
     const result = await callServerToolContent(resolved.server, resolved.serverToolName, args, {
       timeoutMs: oneGraphToolTimeoutMs({ catalogId: resolved.server.catalogId, toolName: resolved.serverToolName, args }),
       signal: approval.signal, prepared: resolved.prepared,
@@ -1130,14 +1142,14 @@ async function dispatchMainToolRawUnchecked(
       session: mcpToolCallSessions.get(byName),
     });
     if (!result) throw new Error("mcp_tool_result_unavailable");
-    mcpReturned = true;
+    mcpEnd = "returned";
     const text = result?.text ?? "";
     const images = result.isError || approval.scienceCollectionCapability ? [] : result.images;
-
-
-
-
-
+    // ★도구가 돌려준 이미지는 모델만 보고 끝나면 안 된다 — 디스크에 정본을 남기고
+    // 산출물 경로로 알려야 사용자의 결과 레일과 채팅에 실물로 뜬다.
+    // (2026-09-03 실측: 저장하는 곳이 없어 스크린샷 요청이 산출물 0건으로 끝났다.)
+    // A harness call's image is a host capture already saved and named in its JSON (turn-tools/control-server.ts
+    // harnessResultWithImages): the model sees it, and it is an observation, not a run output.
     const capturePaths = isDirectEntryTool(resolved) ? [] : images
       .map((image) => saveBrowserCaptureArtifact(image.mediaType, image.data))
       .filter((filePath): filePath is string => filePath !== null);
@@ -1175,6 +1187,13 @@ async function dispatchMainToolRawUnchecked(
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
+    // Not sent: the request never reached the transport (before callServerToolContent, or its own pre-request boundary). Sent but no
+    // readable answer: the server answered something unreadable, the run aborted, the call's time limit ran out, or the transport was lost.
+    const boundary = mcpErrorType && err instanceof mcpErrorType ? err : null;
+    if (mcpEnd !== "returned") mcpEnd = !mcpSent || boundary?.boundary === "pre-request-error" ? "not_sent"
+      : approval.signal?.aborted ? "aborted"
+      : boundary?.boundary === "received-protocol-error" ? "response_unreadable"
+      : boundary?.reason === "timeout" ? "timeout" : "transport";
     (currentHistoryRuntimeFence()?.assertCurrent(), events.onTool?.(call.toolName, call.arguments, message, eventCallId, true));
     if (actionId) {
       if (approvalDecision === null) throw new Error("workforce_broker_approval_missing");
@@ -1186,14 +1205,16 @@ async function dispatchMainToolRawUnchecked(
       isError: true,
     };
   }
+  // The journal records how the call ended before delivery is awaited: delivery can still reject (a run abort is rethrown there),
+  // and the outcome must not be lost with it (Finance 1008 rs-Q11/rs7 rs-V40: an aborted code-mode call stayed started).
+  if(work && "unit" in work) {
+    approval.canonicalWorkRecovery!.finish(work,mcpOutcome,mcpEnd);
+    mcpOutcome.canonicalWorkAction={action_id:work.action.actionId,step_id:work.action.stepId};
+  }
   // Outside the ordinary tool-error catch: rejection belongs to the host run
   // lifecycle, while the completed tool receipt above remains intact.
   await awaitMcpResultDelivery(approval, { catalogId: resolved.server.catalogId ?? null,
     toolName: resolved.serverToolName, isError: mcpOutcome.isError });
-  if(work && "unit" in work) {
-    approval.canonicalWorkRecovery!.finish(work,mcpOutcome,mcpReturned ? "returned" : "unconfirmed");
-    mcpOutcome.canonicalWorkAction={action_id:work.action.actionId,step_id:work.action.stepId};
-  }
   return mcpOutcome;
 }
 
@@ -1205,8 +1226,8 @@ export async function runOneToolCall(
   events: RunnerEvents,
   approval: LocalToolApprovalContext,
   broker?: MainWorkforceBroker,
-                                                                                                                       
-                                                                                                                           
+  /** Set when the host synthesized `call.id` for a local server that sent none: the broker gets the measured location,
+   * never a made-up provider correlation id (MainToolDispatchCall contract). The wire message still pairs by `call.id`. */
   synthesizedLocation?: WorkforceBrokerProviderCallLocation,
 ): Promise<{ toolMessage: Extract<ChatMessage, { role: "tool" }>; visionMessage: ChatMessage | null; isError: boolean; visionFromHarness?: true }> {
   const outcome = await runMainToolDispatch(
@@ -1524,10 +1545,10 @@ export interface RunLocalOpenAiChatOptions {
   /** Managed local only: exact-tokenizer overflow may excerpt historical turns
    * and retry. The current request, instructions, tools and results stay intact. */
   dynamicHistoryCompaction?: true;
-     
-                                                                                       
-                                                                                   
-     
+  /**
+   * Same system prompt without the optional keyword-gated Surface protocol. Used once,
+   * only when the measured request does not fit; the swap is reported as a notice.
+   */
   systemPromptFallback?: string;
   /** Trusted caller re-renders declared contracts before the final boundary, preserving history offsets. */
   renderOutputSchemaSystem?: () => { system: string; fallback?: string };
@@ -1614,8 +1635,8 @@ async function runLocalOpenAiChatInner(
   if (opts.acceptsImageResults === false) {
     // 화면을 볼 수 없는 모델에게 컴퓨터 유즈를 주면 스크린샷 JSON 을 해석 못 해 같은 호출만 반복한다
 
-
-
+    // 브라우저 스크린샷도 같은 이유로 뺀다 — 3회 반복 실측(2026-09-13)에서 비전 없는 모델이
+    // browser_take_screenshot 을 8번 부르고 screen_capture_unavailable 로 실패했다.
     const isBlindTool = (name: string) => name === "read_image" || name.startsWith("mcp__cua-driver__") || /^mcp__agentlas-browser__browser_(?:take_)?screenshot$/.test(name);
     const blind = tools.filter((tool) => isBlindTool(tool.function.name));
     if (blind.length > 0) {
@@ -1665,7 +1686,7 @@ async function runLocalOpenAiChatInner(
     transmittedHistoryCount = compacted.recent.length + 1;
     return compacted.droppedCount;
   };
-
+  // Host-side history trimming is background work: nothing about it is shown to the user (owner 2026-10-13).
   const reportHistoryCompaction = (_droppedCount: number): void => { historyCompactionReported = true; };
   // The conversation's "session" for a runtime with no provider session (stateless-generation.ts, native-harness NH10):
   // the handoff it installed, a new one at a settled boundary when a request's input reaches 80% of the window that admits
@@ -1686,8 +1707,8 @@ async function runLocalOpenAiChatInner(
     historyBudgetTokens = statelessHistoryTokens(digest, rows);
   };
   if (generations?.seed) installGeneration(generations.seed.digest, generations.seed.rows);
-                                                                                                                           
-                                                                                                                       
+  /** The window the rotation rule reads: measured/loaded/requested or a catalog number; a labelled default never moves it.
+   * Ollama: the num_ctx this very request is sent with (the window that admits it), not the ceiling it may grow to. */
   const generationWindow = (window: number | undefined, ollamaPlan: { numCtx: number } | null): StatelessWindow | null => {
     if (opts.contextWindow !== undefined) return { tokens: opts.contextWindow, source: "measured", known: true };
     if (ollamaPlan) return { tokens: ollamaPlan.numCtx, source: "requested", known: true };
@@ -1697,7 +1718,7 @@ async function runLocalOpenAiChatInner(
     return { tokens: window, source: opts.capacitySource ?? "loaded", known };
   };
   let generationStep = 0, lastRequestTokens: number | null = null, lastObservedInput: number | null = null;
-                                                                                                                     
+  // The window the last request was actually admitted into (measured, loaded, or the num_ctx sent) — reported on the
   // result so the context detail shows the real local window instead of a catalog figure (native-harness notyet NH18).
   let admittedWindow: number | null = null;
   let stepExactInput: number | null = null, sentRequestTokens: number | null = null;
@@ -1720,6 +1741,8 @@ async function runLocalOpenAiChatInner(
   // G32: a context failure earns exactly one re-measure; a window that did not shrink (or is unknown) fails typed at once.
   let contextRemeasures = 0;
   let remeasuredWindow: number | undefined;
+  /** An estimated window (model not loaded when the run began) is read back once, after the server loaded it on demand. */
+  let estimatedWindowVerified = false;
   /** Raised when a reply is cut by the output cap before it produced a tool call or any text. */
   let outputTokenFloor: number | undefined;
   let outputGrowths = 0;
@@ -1877,7 +1900,7 @@ async function runLocalOpenAiChatInner(
             ...planRequestFields(cachePlan),
             ...(opts.keepAlive ? { keep_alive: opts.keepAlive } : {}),
             ...(opts.chatTemplateKwargs ? { chat_template_kwargs: opts.chatTemplateKwargs } : {}),
-                                                                                                                             
+            // A malformed tool call repeated identically 3 of 3 times (measured); a fresh seed makes the retry a new sample.
             ...(toolParseRetries > 0 ? { seed: Math.floor(Math.random() * 2_147_483_647) } : {}),
             ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
             ...(opts.estimatedContextWindow !== undefined
@@ -1885,15 +1908,15 @@ async function runLocalOpenAiChatInner(
               : {}),
             ...("send" in effortPlan && !effortRejected ? { reasoning_effort: effortPlan.send } : {}),
             ...(tools.length > 0 ? { tools } : {}),
-            
-
-
-
-
-
-
-
-
+            /*
+             * ★제약 디코딩 — 형식 붕괴를 배선으로 없앤다.
+             *
+             * 판정·화면생성·진화제안은 답에서 구조를 파싱하는데, 자유 서술이면 작은
+             * 모델은 형식을 깨뜨리고 그 결과가 조용히 사라졌다("완료라는데 결과물이
+             * 없음", 실측 2026-08-08). json_schema 응답 형식은 모델이 문법상 틀린
+             * 토큰을 뱉을 수 없게 만든다 — 남는 것은 판단력 문제뿐이고, 그건 배선으로
+             * 고칠 수 없다는 것이 정직한 경계다.
+             */
             ...(req.outputSchema && nativeOutputSchema
               ? {
                   response_format: {
@@ -1914,11 +1937,15 @@ async function runLocalOpenAiChatInner(
       ? Math.min(remeasuredWindow, opts.estimatedContextWindow ?? remeasuredWindow) : opts.estimatedContextWindow;
     let turnCeiling = turnWindow;
     let ollamaPlan: { numCtx: number } | null = null;
-    if (opts.ollamaContext && !req.untrustedNoTools) {
+    // Every Ollama request, the no-tools judgment boundary included: that boundary omits the tool surface, not the window.
+    // Skipping it here sent judgments to the OpenAI route at the server default (4096 on a small-VRAM machine) and the
+    // server cut 6463-token prompts to 2050 without a word (Windows 1.3.88 test, 2026-10-23: 7 of 7 explicit-pin judgments).
+    if (opts.ollamaContext) {
       // The first request of a run reads the server fresh: a model swapped since the last run must not reuse a cached window.
       const limits = await probeOllamaContextLimits(host, model, req.signal, undefined, { fresh: turn === 0 && contextRemeasures === 0 });
       const reserve = requestOutputLimit(requestBody) ?? 4_096;
-      const plan = planOllamaContext({ host, model, promptTokens: estimateRequestPromptTokens(requestBody), outputReserve: reserve, limits });
+      const plan = planOllamaContext({ host, model, promptTokens: estimateRequestPromptTokens(requestBody), outputReserve: reserve, limits,
+        memoryMax: ollamaMemoryCeiling(host, limits) });
       turnWindow = plan.numCtx;
       turnCeiling = plan.ceiling;
       ollamaPlan = plan;
@@ -2063,12 +2090,12 @@ async function runLocalOpenAiChatInner(
         return refusedBeforeDispatch({ kind: "unavailable", runtime: runtimeKind, source: "marker",
           providerCode: "endpoint_unreachable", message: opts.unreachableMessage.slice(0, 400) });
       }
-
-
-
-
-
-
+      // 사용자가 멈춘 것을 "서버에 연결 못 함"이라고 말하면 거짓말이 된다 —
+      // 취소는 취소로 올려보낸다. 다만 **원 에러를 그대로 던지면 안 된다**:
+      // AbortController 의 DOMException 문구("This operation was aborted")가 그대로
+      // 화면에 흘러 한국어 UI에 영어 기계 문장이 박혔다(실측 2026-08-09 녹화).
+      // 그렇다고 "사용자가 중지했습니다"로 덮어도 안 된다 — 워치독·시간 초과가
+      // 끊은 것까지 사람이 누른 것으로 만든다. 끊은 쪽이 실은 이유를 먼저 읽는다.
       if (req.signal?.aborted) throw abortReasonError(req);
       throw new Error(opts.unreachableMessage);
     }
@@ -2110,9 +2137,9 @@ async function runLocalOpenAiChatInner(
         }
       }
       if (!resp.ok) {
-
-
-
+        // The server could not parse the model's own tool-call text (gpt-oss on Ollama, measured 2026-10-11:
+        // HTTP 500 "error parsing tool call"). Nothing was executed, and sampling differs on the next
+        // request, so repeat the identical request a bounded number of times before failing.
         if (resp.status >= 500 && /error parsing tool call/i.test(errText) && toolParseRetries < 2 && !ownerControlPending && !req.signal?.aborted) {
           toolParseRetries += 1;
           events.onStatus(req.locale === "ko" ? "모델의 도구 호출 형식이 깨져 같은 요청을 다시 보냅니다…" : "The model's tool call was malformed; sending the same request again…");
@@ -2192,13 +2219,32 @@ async function runLocalOpenAiChatInner(
       localCompatibleTerminal ? { turn } : undefined);
     if (result.compatNormalized && process.env.AGENTLAS_LOCAL_TOOL_DEBUG === "1") console.log("[local-tool-loop] compat normalized:", result.compatNormalized.join(","));
     (usage.complete(usageAttempt, result.terminalUsage), result.terminalUsage && opts.contextInputSink && (opts.contextInputSink.value = result.terminalUsage.inputTokens), currentHistoryRuntimeFence()?.assertCurrent());
+    // A server that loads the model on demand (LM Studio JIT) picks the window itself, and its OpenAI route cannot be asked
+    // for one: the request above was admitted against a catalog estimate. Read the window it really loaded, once. A request
+    // that cannot fit in it was shortened by the server, so this reply is not used (no tool call runs): the same request is
+    // admitted again against the real window, which compacts older history or refuses it typed — never a silent cut.
+    if (!estimatedWindowVerified && opts.capacitySource !== undefined && opts.remeasureContextWindow && remeasuredWindow === undefined
+      && !req.signal?.aborted) {
+      estimatedWindowVerified = true;
+      let loadedNow: number | undefined;
+      try { loadedNow = await opts.remeasureContextWindow(); } catch { loadedNow = undefined; }
+      const sentTokens = estimateTransportTokens(JSON.stringify(requestBody));
+      // Later requests of this run are admitted against the real window, whether or not this one fit.
+      if (loadedNow !== undefined && (turnWindow === undefined || loadedNow < turnWindow)) remeasuredWindow = loadedNow;
+      if (loadedNow !== undefined && sentTokens > loadedNow && remeasuredWindow === loadedNow) {
+        events.onNotice?.({ level: "warning", code: "local-context-window-remeasured",
+          message: `The server loaded the model with a ${loadedNow}-token window, smaller than this request (about ${sentTokens} tokens); its reply was set aside and the request is checked again against that window.` });
+        turn -= 1;
+        continue;
+      }
+    }
     const cutAtCap = result.finishReason === "length" && result.terminalObserved;
     // A text answer cut at the cap is kept and continued below; only an empty / tool-call cut may first earn a larger budget.
     const cutTextAnswer = cutAtCap && result.text.trim() !== "" && result.toolCalls.length === 0 && !result.incompleteToolCalls;
-
-
-
-
+    // A reply cut at the output cap carries no usable tool call. A reasoning model (qwen3 spent all 2000
+    // tokens thinking before its first call, measured 2026-10-11) used to surface here as "did not return
+    // a terminal receipt ... the request may have acted", which is false: nothing was dispatched. Give the
+    // model a larger budget once or twice when the caller did not pin one; otherwise say what happened.
     if (result.finishReason === "length" && result.terminalObserved && opts.contextWindow === undefined
       // Only a reply with nothing at all (a reasoning model spent the whole cap thinking) earns a larger budget; a cut
       // text answer or a cut tool call is continued below instead.
@@ -2256,8 +2302,8 @@ async function runLocalOpenAiChatInner(
     // terminal text response; never hand it to the local dispatcher.
     if (result.toolCalls.length === 0 || req.untrustedNoTools) {
 
-
-
+      // 화면엔 아무 말도 없음). CLI 래핑은 늘 말로 끝난다 — 한 번만 "사람에게 결과를 말하라" 고 다시 묻는다.
+      // 소형 모델은 답 대신 시스템 프롬프트의 "## Memory Events" 봉투만 따라 쓰기도 한다(같은 실측). 그것도 빈 답이다.
       const envelopeOnly = /^\s*#{1,6}\s*Memory Events/i.test(result.text) || /^\s*\{\s*"?schema_version"?\s*:\s*"?agentlas\.memory-ticket/i.test(result.text);
       if ((!(continuedText + result.text).trim() || envelopeOnly) && sawAnyToolCall && !req.untrustedNoTools && !summaryTurnRequested) {
         summaryTurnRequested = true;

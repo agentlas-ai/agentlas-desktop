@@ -14,7 +14,7 @@ import { readGoalPlan } from "../store/goal-plans";
 /**
  * The current revision's host-resolved deadline, or null. A plan shaped for an older revision does not count.
  *
- * A bounded series ("once an hour, ten in all") carries its interval and run count on the revision (shared/auto-goal.ts
+ * A bounded series ("1시간에 1회씩 최대 10개") carries its interval and run count on the revision (shared/auto-goal.ts
  * GoalCadence), so it has a deadline from admission on, before any plan exists: the end of its last scheduled run plus one
  * interval. The owner's own stated deadline, when the plan has one, wins.
  */

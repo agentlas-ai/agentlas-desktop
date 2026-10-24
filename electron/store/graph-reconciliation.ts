@@ -286,26 +286,26 @@ function revisedNodeDescriptors(
 }
 
 /**
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+ * ★그래프(또는 실행 필드 — 런타임·권한·도구 모드)가 **실패한 실행 뒤에 바뀌면** 그 실행의
+ *   미확인 부수효과는 영영 재조정할 수 없었다. 재조정 좌표를 "지금 그래프"로 검증했기 때문이다.
+ *
+ *   실측(설치본 DB, 2026-08-25~09-25): 모호한 실패 뒤 digest 가 바뀐 경우가 5번(자동화 2개).
+ *   f7a61706(Threads) 2026-09-23: 13:55Z 앱 재시작이 `report` 단계를 모호하게 끊었고, 15:10Z
+ *   목표 턴이 그래프를 새로 썼다(audit/engage/publish/report → inspect/strategy/content/publish/
+ *   measure). 그 뒤로 재조정은 graph_drift, 실행은 partial_graph_changed, 효과 관찰은 보류를
+ *   못 읽어(getAutomationEffectHold 가 던짐) 조용히 건너뛰었다 — 오너가 "처음부터"를 누를 때까지
+ *   예약이 멈춰 있었다. 그리고 digest 에는 runtimeSelection 이 들어 있어, 오너가 모델만 바꿔도
+ *   같은 막다른 길이 된다.
+ *
+ *   "그 단계가 바깥에서 일어났는가"는 **그 실행이 스스로 기록한 것**에 대한 질문이다 — 지금
+ *   그래프와 무관하다. 체크포인트는 자기 해시로 봉인돼 있으므로(checkpointDigest) 그래프 없이도
+ *   무결성을 검증할 수 있다. 그래서 바뀐 그래프에서는 체크포인트 자신의 노드 집합으로 검증하고,
+ *   관찰(묻기 전에 직접 본다)·오너의 재조정이 그대로 닫을 수 있게 한다. 닫힌 옛 발생은 재개하지
+ *   않는다(바뀐 그래프로 이어 붙일 좌표가 없다) — 다음 실행은 새 그래프로 새로 돈다.
+ *
+ *   잊는 것이 아니다: 결정은 workflow_node_reconciled 로 남고, 옛 실행 기록은 그대로다.
+ *   트리거 이벤트에 묶인 발생·시뮬레이션·봉인 없는 레거시 행은 지금처럼 사람 몫으로 둔다
+ *   ("unsupported" → graph_drift).
  */
 function loadRevisedGraphReconciliation(
   automation: Automation,
@@ -594,14 +594,14 @@ export function suspendAutomationForGraphReconciliation(automationId: string): b
 }
 
 /**
-
-
-
-
-
-
-
-
+ * A held view, or nothing when the old run cannot be reconciled against the graph that runs now.
+ *
+ * Owner 2026-10-14: the host judges by outcomes, not by settling every earlier tool call ("작업마다 정산하지말고 …
+ * 중간에 툴콜 미정산 이런걸 왜보냐"; "새로운 주제 할때마다 터지냐"). An error run whose graph has since changed, with
+ * no revised-graph path, used to throw graph_drift out of this listing, so EVERY later run of that automation failed
+ * before it started. Measured 2026-10-14 08:06–08:55Z: "X 매일 원글 초안 제안" and four Yotube check automations all
+ * failed with automation_graph_reconciliation_graph_drift. The old run stays in the record; the next run starts fresh
+ * on the current graph. The owner's explicit reconcile (reconcileAutomationGraph) still reports the drift.
  */
 export interface GraphReconciliationReadContext {
   /** Observation only. The owning kernel supplies this after native custody claim. */
@@ -1002,9 +1002,9 @@ export function reconcileAutomationGraph(
           : null,
         timezone: loaded.automation.timezone ?? null,
       });
-      
-
-
+      // The held nodes were proven replay-safe (read-only), so the occurrence that was waiting for this
+      // reconciliation is simply run again now. Jumping to the next daily slot silently dropped a failed run
+      // (production 2026-10-11 15:36 KST: the Threads verification waited a day for its deferred retry).
       if (input.retryNow === true && (restoredNextRunAt === null || Date.parse(restoredNextRunAt) > now.getTime())) {
         restoredNextRunAt = now.toISOString();
       }
@@ -1206,17 +1206,17 @@ function latestFailedScheduleRun(automation: Automation): FailedScheduleRun | nu
 }
 
 /**
-
-
-
-
-
-
-
-
-
-
-
+ * The cursor is the host's own re-arm of a Goal continuation (W1, 2026-10-18). A failed pass is re-armed by
+ * scheduleAdvisoryContinuation (goal-continuation-hold.ts) as a fresh episode ("fresh-independent-context", earlier
+ * effects unverified); a good pass moves to the ledger's cadence (armContinuationCadence). The cursor recovery read the
+ * retry as a held occurrence (and, while the advisory still rewrote the prompt and schedule, as an owner graph revision)
+ * and quarantined the continuation for good: production 834c86d9 "Goal continuation · Yotube" 2026-10-11 20:50:45
+ * advisory -> 21:06:23 observe_quarantined_effects (graph_definition_reconciliation_pending), next_run_at NULL ever
+ * since; fc4396e6, c5ae5890, 444d94f0 the same, 4 of 4.
+ * Proof from typed receipts only: the definition the latest run started with (workflow_graph_started.definitionDigest)
+ * is the one every re-arm since then recorded and the one stored now, and the latest re-arm wrote this exact cursor.
+ * Any other change (an owner edit, a receipt without a definition digest such as the production 10-11 rows) keeps the
+ * existing behaviour.
  */
 function hostArmedGoalContinuationCursor(automation: Automation, run: LatestRunRow): boolean {
   if (!automation.nextRunAt || !automation.goalId || !run.started_at) return false;
@@ -1319,11 +1319,11 @@ function scheduleCursorHold(automation: Automation): ScheduleCursorHold | null {
 }
 
 /**
-
-
-
-
-
+ * Whether this schedule can wake by itself (W1, 2026-10-18): "held" when the cursor recovery quarantines it on its
+ * uncertain effects (it clears next_run_at before any dispatch), "unarmed" when it is enabled with no cursor and nothing
+ * held, else "ok" (armed, or disabled — enabling computes a cursor). Production: "Goal continuation · Yotube" sat
+ * enabled with next_run_at NULL under such a hold and was re-bound to the next /goal Goal, so every turn end of that
+ * Goal fell to goal_continuation_unarmed (Yotube 95 + 19 times, 2026-10-12..18).
  */
 export function graphScheduleWakeState(automation: Automation): "ok" | "unarmed" | "held" {
   try {

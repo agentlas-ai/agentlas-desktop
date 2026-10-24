@@ -54,6 +54,7 @@ import styles from "./PersonalOneWorkspace.module.css";
 import { Select } from "@/components/Select";
 import { useComposerEnter } from "@/lib/use-composer-enter";
 import { useBusinessEligibility } from '@/business/use-business-eligibility';
+import { useOrganizationUiVisibility } from '@/business/organization-visibility';
 
 const PersonalOneTaskResult=dynamic(()=>import("./PersonalOneTaskResult").then(module=>module.PersonalOneTaskResult),{ssr:false});
 
@@ -66,7 +67,7 @@ type PersonalOneConversationMessage = ChatHistoryEntry & {
   hasDurableAnswer?: boolean;
   pendingCommandId?: string;
 };
-                                                                                                        
+// Personal One runs every turn with full access and Computer Use; Main decides that (owner 2026-10-05).
 // Its model is the conversation's chip (OneRuntimeChips): a message names no runtime, and Main runs the chip's pin for
 // it as for every host-started or phone turn of this conversation (electron/runtime/room-chip-runtime.ts).
 // With the owner's opt-in front (shared/one-front.ts) Main runs the conversation on Agentlas's light model instead, and
@@ -82,6 +83,7 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
   const [capabilities,setCapabilities]=useState<PersonalOneCapabilityTab|null>(null);
   const [menuOpen,setMenuOpen]=useState(false);
   const businessAccess = useBusinessEligibility({ enabled: menuOpen });
+  const organization = useOrganizationUiVisibility({ eligible: businessAccess.eligibility ? businessAccess.eligible : null }).management;
   const [securityOpen,setSecurityOpen]=useState(false);
   // Sidebar: owner choice persists; below 860px it is collapsed unless the owner opens it for this session.
   const [navPref,setNavPref]=useState<"open"|"closed"|null>(()=>{try{const v=window.localStorage.getItem("agentlas.one.personal.nav");return v==="open"||v==="closed"?v:null;}catch{return null;}});
@@ -128,7 +130,7 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
   const pickAttachments=async(files:File[])=>{
     if(attachmentBusy)return;const next=[...attachments];
     try{for(const original of files){
-                                                                                                            
+      // A large photo or screenshot is shrunk to fit the image limit instead of refused (owner 2026-10-14).
       const item=await fitImageUnder(original,ONE_ATTACHMENT_LIMITS.maxImageBytes);
       // A Finder file carries its path; a pasted screenshot, clip or generated file has none, so Main pins its bytes to
       // a private file and issues the same exact-file grant (the One composer's path).
@@ -471,7 +473,7 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
     :value.kind==="steer"?copy("이 작업의 다음 지시로 접수했습니다.","Saved as the next direction for this task.")
     :value.kind==="cancel"||value.kind==="stop-reply"?value.control?.phase==="stopped"||value.control?.phase==="settled"?copy("이 실행의 중지를 확인했습니다.","Stopping was confirmed for this run."):copy("중지 요청을접수했습니다. 실제 실행 정리는 관측에서 확인합니다.","Stop request received. Actual execution settling is checked in the observation.")
     :copy("작업을 맡겼습니다. 여기서 대화를 이어갈 수 있습니다.","Task handed off. You can keep talking here.");
-                                                                                                    
+  // A hand-off reads as a link to the session One opened (owner 2026-10-04: icons, no filler text).
   const delegation=(item:SupervisorDelegation)=>{
     const owned=snapshot?.tasks.find(task=>task.taskId===item.taskId); const state=owned?.state ?? item.state;
     return <button key={item.commandId} type="button" className={styles.delegation} data-handoff-command={item.commandId} data-state={state} data-hover="own" onClick={()=>openTask(item.taskId,item.commandId)}>
@@ -500,7 +502,7 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
       {menuOpen&&<nav ref={headerMenuRef} id="personal-one-menu" className={styles.headerMenu} aria-label={copy("One 메뉴","One menu")} onKeyDown={event=>{if(event.key==="Escape"){event.stopPropagation();setMenuOpen(false);headerMenuTrigger.current?.focus();}}}>
         <button type="button" onClick={()=>{setMenuOpen(false);setCapabilities("connections");}}>{copy("연결 도구","Connected tools")}</button>
         <button type="button" data-personal-one-security-entry="true" onClick={()=>{setMenuOpen(false);setSecurityOpen(true);}}>{copy("보안과 연결 관리","Security and connections")}</button>
-        {businessAccess.eligible&&<button type="button" data-business-entry="true" onClick={()=>{setMenuOpen(false);void openMain('/business');}}><IconSettings size={16}/>{copy("조직 설정","Organization settings")}</button>}
+        {organization&&<button type="button" data-business-entry="true" onClick={()=>{setMenuOpen(false);void openMain('/business');}}><IconSettings size={16}/>{copy("조직 설정","Organization settings")}</button>}
         <button type="button" onClick={()=>{setMenuOpen(false);setCapabilities("repeat");}}>{copy("반복 업무","Recurring work")}</button>
         <button type="button" onClick={()=>{setMenuOpen(false);setBudgetsOpen(true);}}>{copy("실행 예산","Execution budgets")}</button>
         <button type="button" onClick={()=>{setMenuOpen(false);setCheckinsOpen(true);}}>{copy("감시 조건","Monitoring")}</button>

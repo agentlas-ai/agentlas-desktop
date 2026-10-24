@@ -126,10 +126,10 @@ export function grokOAuthReady(
 
 /** 이 provider가 지금 바로 쓸 수 있나? (키리스=bin 존재 / 키필요=키 전부 존재) */
 /**
-
-
-
-
+ * A key saved under a plainly sloppy name (ELEVENLABS_1 for ELEVENLABS_API_KEY) counts as present: every run already
+ * receives it under the read name (runtime/env-resolver.ts). Without this the engine read "not ready" and the run's
+ * AGENTLAS_MULTIMODAL_* flags told agents the voice path was unavailable while the key sat in their environment
+ * (Yotube room, 2026-10-12). Runtime login keys never count, as they are never aliased.
  */
 async function hasPlainAlias(key: string, names: () => Promise<string[]>): Promise<boolean> {
   if (RUNTIME_AUTH_ENV_KEYS.has(key)) return false;

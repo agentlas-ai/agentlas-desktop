@@ -1,13 +1,13 @@
 /**
-
-
-
-
-
-
-
-
-
+ * What the outcome judge is told this automation was approved to do.
+ *
+ * `automations.goal` is empty for automations a Goal chat created or updated
+ * in place (measured 2026-09-24: the Threads automation had goal = NULL while
+ * its owning ongoing Goal carried the owner's growth mandate). The judge then
+ * saw only the name, so a run that chose to hold was read as "the goal being
+ * met". When the saved goal is empty, carry the owning Goal's current revision
+ * instead: the verified binding first, then the monitor-origin Goal as
+ * read-only context (never as authority).
  */
 import type { Automation } from "../shared/types";
 import { getChatGoalRevision } from "./store/chat-goals";

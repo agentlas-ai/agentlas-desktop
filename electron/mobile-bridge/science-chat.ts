@@ -1,4 +1,5 @@
 import { performance } from "node:perf_hooks";
+import { createHash } from "node:crypto";
 import type { ScienceDaemonClient } from "../science-host/daemon-client";
 import type { DaemonScienceCommand } from "../daemon/science-service";
 import type { ProductExtensionPermission } from "../../shared/product-extension";
@@ -10,6 +11,7 @@ import {
   type MobileScienceConversationDto,
   type MobileScienceMessageDto,
   type MobileScienceTurnDto,
+  type MobileScienceOwnerRequestDto,
 } from "../../shared/mobile-bridge";
 import { sanitizeMobileBridgeText, stripMobileBridgeControlFences } from "./sanitize";
 
@@ -25,6 +27,16 @@ let configuredClient: Client | null = null;
 
 /** Main supplies its already-bound owner client; Mobile never constructs or boots an executor. */
 export function configureMobileScienceChatClient(client: Client | null): void { configuredClient = client; }
+
+/** Shared generic Decision consumer reuses the already configured execution owner. */
+export async function sendMobileScienceQuestionCommand(command: Extract<DaemonScienceCommand,{op:"questionDecisions.answer"}>,assertAccount:()=>void):Promise<unknown> {
+  const services=desktopServices();
+  const admit=()=>{assertAccount();services.assertPermission("science:projects");services.assertPermission("science:agent-runtime");};
+  admit();
+  const client=services.client();if(!client)throw new Error("science_chat_unavailable");
+  const result=await client.commandObserved(command,{timeoutMs:10_000,observationDeadlineMs:performance.now()+12_000});
+  admit();return result;
+}
 
 export interface MobileScienceChatServices {
   client(): Client | null;
@@ -93,6 +105,22 @@ function turn(value: Row, scope: Scope): MobileScienceTurnDto {
     startedAt: value.startedAt == null ? null : timestamp(value.startedAt), finishedAt: value.finishedAt == null ? null : timestamp(value.finishedAt),
     createdAt: timestamp(value.createdAt), updatedAt: timestamp(value.updatedAt) };
 }
+function ownerRequest(value: Row, messages: Row[], scope: Scope, requestId: string, expectedText?: string): MobileScienceOwnerRequestDto {
+  assertScope(value, scope);
+  const statuses = ["accepted", "needs-decision", "applied", "superseded", "cancelled"];
+  if (value.requestId !== requestId || value.intent !== "steer" || value.runtimeSelection != null
+    || typeof value.content !== "string" || value.content.length > 20_000
+    || (expectedText !== undefined && value.content !== expectedText.replace(/\r\n/g, "\n").trim())
+    || !Number.isSafeInteger(value.epoch) || Number(value.epoch) < 0 || !statuses.includes(String(value.status))) throw Error("science_chat_receipt_invalid");
+  const stored = messages.find(candidate => candidate.id === value.messageId);
+  if (!stored || stored.role !== "user" || stored.visibility !== "visible" || stored.content !== value.content
+    || stored.createdAt !== value.createdAt) throw Error("science_chat_receipt_invalid");
+  const userMessage = message(stored, scope);
+  return { steering: { requestId: identifier(value.requestId), ...scope, targetTurnId: identifier(value.targetTurnId),
+    messageId: identifier(value.messageId), intent: "steer", contentSha256: createHash("sha256").update(value.content).digest("hex"),
+    epoch: Number(value.epoch), status: value.status as MobileScienceOwnerRequestDto["steering"]["status"], code: nullableCode(value.code),
+    successorTurnId: value.successorTurnId == null ? null : identifier(value.successorTurnId), createdAt: timestamp(value.createdAt) }, userMessage };
+}
 
 /** Bounded presentation adapter over the native Science conversation service. No raw event/tool/provider payloads cross. */
 export class MobileScienceChat {
@@ -159,6 +187,21 @@ export class MobileScienceChat {
           || (active.assistantMessageId && !all.some(value => value.id === active.assistantMessageId)))) {
           all = rows(await command({ op: "messages.list", input: scope }));
         }
+        let supportsQueuedSteering = false;
+        const ownerRequests: MobileScienceOwnerRequestDto[] = [];
+        if (params.supportsQueuedSteering === true) {
+          // An old daemon must reject this explicit feature probe rather than silently treating it as a list.
+          try { supportsQueuedSteering = row(await command({ op: "composer.steeringCapability", input: scope })).supported === true; }
+          catch { admit(); }
+          if (supportsQueuedSteering && typeof params.ownerRequestId === "string") {
+            const receipts = rows(await command({ op: "composer.steering", input: { ...scope, requestId: params.ownerRequestId } }));
+            if (receipts.length > 1) throw Error("science_chat_receipt_invalid");
+            if (receipts.length) {
+              if (!all.some(value => value.id === receipts[0].messageId)) all = rows(await command({ op: "messages.list", input: scope }));
+              ownerRequests.push(ownerRequest(receipts[0], all, scope, params.ownerRequestId));
+            }
+          }
+        }
         // Scope violations fail the response; internal/system rows remain in Science's store only.
         for (const value of all) assertScope(value, scope);
         const visible = all.filter(value => value.visibility === "visible" && (value.role === "user" || value.role === "assistant"));
@@ -172,12 +215,21 @@ export class MobileScienceChat {
           messages.push(projected); bytes += size;
         }
         messages.reverse();
-        return { ...identity, ...scope, ok: true, messages, turn: active, hasMore: visible.length > messages.length };
+        admit();
+        return { ...identity, ...scope, ok: true, messages, turn: active, hasMore: visible.length > messages.length,
+          ...(params.supportsQueuedSteering === true ? { supportsQueuedSteering, ownerRequests } : {}) };
       }
       if (method === "science.chat.send") {
         const requestId = params.requestId as string;
-        const result = row(await command({ op: "composer.start", input: { ...scope, requestId, mode: "append-user-message", content: params.text as string,
+        const result = row(await command({ op: "composer.start", nativeOwnerIntent: true, input: { ...scope, requestId, mode: "append-user-message", content: params.text as string,
+          ...(params.supportsQueuedSteering === true ? { acceptSteeringOnBusy: true as const } : {}),
           ...(params.locale === "ko" || params.locale === "en" ? { locale: params.locale } : {}) } }, true));
+        if (result.queued === true) {
+          if (params.supportsQueuedSteering !== true || result.accepted !== true || result.turn !== undefined
+            || result.run_id !== undefined || result.runId !== undefined || result.replayed !== undefined) throw Error("science_chat_receipt_invalid");
+          const receipt = ownerRequest(row(result.steering), rows(await command({ op: "messages.list", input: scope })), scope, requestId, params.text as string);
+          return { ...identity, ...scope, ok: true, requestId, accepted: true, queued: true, ...receipt };
+        }
         const current = turn(row(result.turn), scope), userMessage = message(row(result.userMessage), scope);
         if (result.accepted !== true || typeof result.replayed !== "boolean" || current.requestId !== requestId
           || current.userMessageId !== userMessage.messageId || userMessage.role !== "user") throw new Error("science_chat_receipt_invalid");

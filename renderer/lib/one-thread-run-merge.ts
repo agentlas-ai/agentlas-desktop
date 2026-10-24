@@ -1,13 +1,13 @@
 import type { InvocationRunReceipt, RunEventUi } from "@shared/types";
 
 /**
-
-
-
-
-
-
-
+ * When a One run settles, update only that run's work block instead of re-reading the conversation's last 40 runs ×
+ * 400 ledger events (5.5-9.7 MB per settle, perf review 2026-10-17 R-02).
+ *
+ * The caller reads the timeline head (the same 40 runs, one event each: receipts and membership only) and the settled
+ * run's events. The merge happens only when it gives exactly what the full re-read would: every other run in the window
+ * is already a block, finished, with the same receipt facts. Anything else (a new run, a run still going, a changed
+ * receipt) answers null and the caller does the full re-read as before.
  */
 
 /** Window and per-run event count of the full re-read this replaces (`listChatRunTimeline` defaults). */

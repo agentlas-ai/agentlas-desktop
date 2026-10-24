@@ -1996,8 +1996,8 @@ export class DesktopUpdaterController {
   private async installOnce(): Promise<UpdaterActionResult> {
     const version = this.state.version;
     if (!version) return { accepted: false, state: this.state };
-    
-
+    // Answer the press at once. The checks below took 42 s with no visible change and no log line on a busy
+    // production app (1.3.2 -> 1.3.3, 2026-10-12); the owner's rule is that pressing update visibly updates.
     const pressed = this.state;
     const startedAt = this.now();
     const stage = (name: string) => this.logger.log(`[updater] install ${version}: ${name} +${this.now() - startedAt}ms`);

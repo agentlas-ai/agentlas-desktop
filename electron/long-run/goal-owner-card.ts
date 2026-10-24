@@ -1,14 +1,14 @@
 import type { AgentlasAskQuestion } from "../../shared/ask-fence-flatten";
 
 /*
- * The decision card the host posts when a Goal's passes did nothing and the terminal verification did not close it. An ask is always a card that rings:
- * a Goal the host drove again and that did nothing, and that the
+ * The decision card the host posts when a Goal's passes did nothing and the terminal verification did not close it (owner
+ * 2026-10-20: "묻는건 무조건 카드로 주고 알림 울리게해"). A Goal the host drove again and that did nothing, and that the
  * independent verifier does not call done, is not waiting on a timer or a tool: it is waiting for someone. The invocation
  * service posts this card as its own assistant message after that verdict (askOwnerAfterIdleYield), holds the Goal for the
  * answer and rings the desktop and the phone; the card, the hold and the alerts read it with no second code path.
  *
  * It is never added before the verification: a card in the turn's own text pre-empted the terminal verification and held a
- * Goal whose plan was done and whose answer was right.
+ * Goal whose plan was done and whose answer was right (antigravity run, 2026-10-20).
  *
  * No word is judged here: the trigger is the host's own count of idle passes (client goal_idle_pass_yield) followed by a
  * verification verdict; the text is fixed host copy. No electron import (gates load this file directly).

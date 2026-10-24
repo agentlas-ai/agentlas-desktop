@@ -201,9 +201,9 @@ async function restoreToolMcpRegistration(rootPath: string): Promise<string | nu
 }
 
 /**
-
-
-
+ * The MCP server registered for a generated tool runs `mcp/server.mjs` unsandboxed as the owner, so it must be exactly
+ * what scaffold renders from `agentlas.tool.json` (review 2026-10-16, desktop-b-06): the owner consents to "a safe
+ * local tool package", not to whatever a later turn appended to the adapter. `src/tool.mjs` stays owner-editable.
  */
 async function assertGeneratedAdapterUnmodified(definition: JsonObject, mcpPath: string): Promise<void> {
   const onDisk = await fs.readFile(mcpPath);
