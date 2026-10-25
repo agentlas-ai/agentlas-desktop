@@ -4,18 +4,20 @@ import { parseGoalPanelEdit } from "./goal-panel";
 export const MOBILE_GOAL_CONTROL_METHODS = [
   "alive.getState", "alive.setEnabled", "alive.setTokenLimit",
   "agi.getTokenLimits", "agi.setTokenLimits",
-  "goalPanel.view", "goalPanel.edit", "goalPanel.shape", "chats.pauseGoal", "chats.deleteGoal",
+  "goalPanel.view", "goalPanel.edit", "goalPanel.shape", "chats.pauseGoal", "chats.deleteGoal", "chats.resumeGoal",
 ] as const;
 export type MobileGoalControlMethod = (typeof MOBILE_GOAL_CONTROL_METHODS)[number];
 export const MOBILE_GOAL_CONTROL_WRITE_METHODS = [
   "alive.setEnabled", "alive.setTokenLimit", "agi.setTokenLimits", "goalPanel.edit", "goalPanel.shape", "chats.pauseGoal", "chats.deleteGoal",
+  "chats.resumeGoal",
 ] as const;
 export const MOBILE_GOAL_CONTROL_CAPABILITY = {
   schemaVersion: 1, alive: true, agiTokenLimits: true, goalPanel: true,
-  pauseGoal: true, deleteGoal: true, resumeGoal: false, reviseGoal: false, reauthorizeGoal: false, goalResumeReview: false,
+  // resumeGoal (goal tree audit 2026-10-25): the phone could pause a Goal and then had no way back. Resume has no review gate
+  // any more (chats:getGoalResumeReview always answers null), so the phone uses the chip's own path (long-run/goal-owner-resume).
+  pauseGoal: true, deleteGoal: true, resumeGoal: true, reviseGoal: false, reauthorizeGoal: false, goalResumeReview: false,
   changedEvent: "goalControl.updated", hostBinding: "expectedHostId", shapeOutcome: "accepted",
   unsupportedReasons: {
-    resumeGoal: "main_resume_confirmation_contract_not_exposed",
     reviseGoal: "main_revision_contract_not_exposed",
     reauthorizeGoal: "main_reauthorization_contract_not_exposed",
     goalResumeReview: "main_attempt_review_contract_not_exposed",
@@ -60,6 +62,7 @@ export function validateMobileGoalControlParams(method: MobileGoalControlMethod,
     "goalPanel.view": ["chatId"], "goalPanel.edit": ["chatId", "expectedGoalId", "expectedPlan", "edit"],
     "goalPanel.shape": ["chatId", "expectedGoalId"],
     "chats.pauseGoal": ["chatId", "expectedGoalId"], "chats.deleteGoal": ["chatId", "expectedGoalId"],
+    "chats.resumeGoal": ["chatId", "expectedGoalId"],
   };
   if (!keys(p, ["expectedHostId", ...allowed[method]])) return "goal control contains unsupported fields";
   if (!method.startsWith("agi.") && !id(p.chatId)) return "chatId must be a bounded identifier";
@@ -75,7 +78,8 @@ export function validateMobileGoalControlParams(method: MobileGoalControlMethod,
     }
     if (typeof p.attemptTokenLimit === "number" && typeof p.dailyGoalTokenLimit === "number" && p.attemptTokenLimit > p.dailyGoalTokenLimit) return "attemptTokenLimit exceeds dailyGoalTokenLimit";
   }
-  if (method === "goalPanel.shape" || method === "goalPanel.edit" || method === "chats.pauseGoal" || method === "chats.deleteGoal") {
+  if (method === "goalPanel.shape" || method === "goalPanel.edit" || method === "chats.pauseGoal" || method === "chats.deleteGoal"
+    || method === "chats.resumeGoal") {
     if (!id(p.expectedGoalId, 256)) return "expectedGoalId must be a bounded identifier";
   }
   if (method === "goalPanel.edit") {

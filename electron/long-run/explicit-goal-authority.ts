@@ -117,6 +117,58 @@ export function findOwnerTurnGoalGrant(db: Database.Database, goalId: string, in
   };
 }
 
+/** run_events kinds that end a turn (store/run-events.ts recordRunEvent's terminal list, plus a thrown start). */
+const TURN_END_KINDS = ["invoke_completed", "invoke_waiting", "invoke_failed", "invoke_cancelled", "invoke_interrupted", "invoke_threw", "mcp_final", "mcp_error"];
+/** How far before the Goal's ledger row its defining turn may have started (a long owner turn ran 35 min on 2026-10-24). */
+const DEFINING_TURN_WINDOW_MS = 12 * 60 * 60 * 1000;
+
+/**
+ * The owner's turn that was live in the Goal's root chat when the Goal's ledger row was written, as its grant.
+ *
+ * Production 2026-10-24, room "X Marketing" (4c724ece): One's teammate called app.call chats.defineGoal inside the
+ * owner's turn aa858c45 (owner message, permission full, 07:24:25Z-07:59:39Z); the row was written at 07:39:39Z with
+ * no revision. The sweep then parked the Goal for 15 hours (goal_owner_grant_unrecorded, eight retries), the chip's
+ * Resume answered goal_owner_grant_required, and the panel refused edits (goal_panel_no_revision) — all while the
+ * instruction that made the Goal was on record. A chat runs one turn at a time, so the newest turn that started at or
+ * before the row and had not ended by then is the turn that defined it. It counts only when that turn is the owner's own
+ * (findOwnerTurnGoalGrant: permission recorded, durable user row, never a system or background turn). Machine records
+ * only; no text is read for meaning.
+ */
+export function findDefiningOwnerTurnGoalGrant(db: Database.Database, goalId: string): GoalRevision | null {
+  const run = db.prepare("SELECT root_chat_id, surface, created_at FROM long_runs WHERE goal_id = ?")
+    .get(goalId) as { root_chat_id: string | null; surface: string; created_at: string } | undefined;
+  if (!run?.root_chat_id || (run.surface !== "one" && run.surface !== "work")) return null;
+  const createdMs = Date.parse(run.created_at);
+  if (!Number.isFinite(createdMs)) return null;
+  const since = new Date(createdMs - DEFINING_TURN_WINDOW_MS).toISOString();
+  const start = db.prepare(`SELECT run_id FROM run_events WHERE chat_id = ? AND kind = 'invoke_started' AND ts <= ? AND ts >= ?
+    ORDER BY ts DESC LIMIT 1`).get(run.root_chat_id, run.created_at, since) as { run_id: string } | undefined;
+  if (!start) return null;
+  const ended = db.prepare(`SELECT 1 FROM run_events WHERE run_id = ? AND kind IN (${TURN_END_KINDS.map(() => "?").join(",")}) AND ts < ? LIMIT 1`)
+    .get(start.run_id, ...TURN_END_KINDS, run.created_at);
+  if (ended) return null;
+  const grant = findOwnerTurnGoalGrant(db, goalId, start.run_id);
+  return grant ? { ...grant, reason: "defining_owner_turn" } : null;
+}
+
+/**
+ * The owner pressed Resume on a Goal with no recorded grant. The press is the owner's instruction to continue the Goal
+ * shown on the chip; the permission it continues under is the one the owner's newest turn in this room recorded
+ * (findOwnerTurnGoalGrant on that turn). Used only by the owner's own Resume (ipc chats:resumeGoal), never by a host path.
+ * Null when the owner never had a turn in the room: then no permission is on record and the owner's message must give it.
+ */
+export function findOwnerResumeGoalGrant(db: Database.Database, goalId: string): GoalRevision | null {
+  const run = db.prepare("SELECT root_chat_id FROM long_runs WHERE goal_id = ?").get(goalId) as { root_chat_id: string | null } | undefined;
+  if (!run?.root_chat_id) return null;
+  const starts = db.prepare(`SELECT run_id FROM run_events WHERE chat_id = ? AND kind = 'invoke_started' ORDER BY ts DESC LIMIT 50`)
+    .all(run.root_chat_id) as Array<{ run_id: string }>;
+  for (const start of starts) {
+    const grant = findOwnerTurnGoalGrant(db, goalId, start.run_id);
+    if (grant) return { ...grant, reason: "owner_resume_grant" };
+  }
+  return null;
+}
+
 /**
  * The contract row an explicit Goal must have, written from its own ledger row when it is missing. A Goal defined
  * through chats:defineGoal (or bound by the chip before its first turn) had a ledger row and no contract, and every
@@ -145,13 +197,22 @@ export function ensureExplicitGoalContract(db: Database.Database, goalId: string
 }
 
 /** Store the recorded grant as revision 1, once. Null when a revision already exists or no grant is recorded.
- * `ownerTurn`: the caller's own live owner-authored invocation; used only when no goal-mode turn of the Goal is recorded. */
-export function recoverExplicitGoalRevision(db: Database.Database, goalId: string, ownerTurn?: { invocationRunId: string }): GoalRevision | null {
+ * Grants, in order: the Goal's goal-mode turn; `ownerTurn` (the caller's own live owner-authored invocation); the owner turn
+ * that was live when the Goal was defined; and, only with `ownerResume` (the owner's own Resume press), the owner's newest
+ * turn in the room. */
+export function recoverExplicitGoalRevision(db: Database.Database, goalId: string, ownerTurn?: { invocationRunId: string },
+  options: { ownerResume?: boolean } = {}): GoalRevision | null {
   if (db.prepare("SELECT 1 FROM chat_goal_revisions WHERE goal_id = ? LIMIT 1").get(goalId)) return null;
-  const revision = findExplicitGoalGrant(db, goalId) ?? (ownerTurn ? findOwnerTurnGoalGrant(db, goalId, ownerTurn.invocationRunId) : null);
+  const revision = findExplicitGoalGrant(db, goalId)
+    ?? (ownerTurn ? findOwnerTurnGoalGrant(db, goalId, ownerTurn.invocationRunId) : null)
+    ?? findDefiningOwnerTurnGoalGrant(db, goalId)
+    ?? (options.ownerResume ? findOwnerResumeGoalGrant(db, goalId) : null);
   if (!revision) return null;
   // A revision hangs off the Goal's contract. A Goal bound by the chip before its first turn got a ledger row but
   // no contract row (that turn found goal_id already set); the contract states the same objective and criteria.
+  // ensureExplicitGoalContract also retires an orphan active contract of a cleared binding in the same chat, which
+  // would otherwise make the insert below fail the one-active-contract-per-chat index.
+  ensureExplicitGoalContract(db, goalId);
   db.prepare(`INSERT INTO chat_goal_contracts (goal_id, chat_id, objective, acceptance_criteria_json, status, created_at, updated_at, completed_at)
     SELECT ?, ?, ?, ?, 'active', ?, ?, NULL WHERE NOT EXISTS (SELECT 1 FROM chat_goal_contracts WHERE goal_id = ?)`)
     .run(goalId, revision.chatId, revision.objective.replace(/\s+/g, " ").trim(),
@@ -168,10 +229,11 @@ export function recoverExplicitGoalRevision(db: Database.Database, goalId: strin
  * version like any ledger event, so call it only where no version fence is pending (the sweep, before dispatch).
  * Idempotent; null when no owner grant is recorded (the Goal is kept as it is — never cancelled for this).
  */
-export function adoptExplicitGoalGrant(goalId: string, ownerTurn?: { invocationRunId: string }): GoalRevision | null {
+export function adoptExplicitGoalGrant(goalId: string, ownerTurn?: { invocationRunId: string },
+  options: { ownerResume?: boolean } = {}): GoalRevision | null {
   const db = getDb();
   return db.transaction(() => {
-    const revision = recoverExplicitGoalRevision(db, goalId, ownerTurn);
+    const revision = recoverExplicitGoalRevision(db, goalId, ownerTurn, options);
     if (!revision) return null;
     const run = db.prepare("SELECT id FROM long_runs WHERE goal_id = ?").get(goalId) as { id: string } | undefined;
     if (!run) throw new Error("explicit_goal_run_missing");
@@ -179,7 +241,9 @@ export function adoptExplicitGoalGrant(goalId: string, ownerTurn?: { invocationR
     // `grant` says which record granted it.
     appendLongRunEvent({ runId: run.id, kind: "run.goal_revision_bound", actorKind: "host",
       payload: { revision: 1, previousRevision: null, receiptCursor: 0, sourceMessageId: revision.sourceMessage.messageId,
-        adoptedFrom: "explicit_goal_turn", grant: revision.reason === "owner_message_grant" ? "owner_message" : "goal_mode_turn" } });
+        adoptedFrom: "explicit_goal_turn", grant: revision.reason === "owner_message_grant" ? "owner_message"
+          : revision.reason === "defining_owner_turn" ? "defining_owner_turn"
+          : revision.reason === "owner_resume_grant" ? "owner_resume" : "goal_mode_turn" } });
     return revision;
   })();
 }

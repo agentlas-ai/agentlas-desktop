@@ -5,8 +5,15 @@
 .notice { margin: 6px 10px 0; padding: 6px 10px; border-radius: var(--rd-r-xs); background: var(--warn-soft); color: var(--warn); font-size: 12px; }
 
 .sessionBar { display: flex; align-items: center; gap: 4px; padding: 6px 8px; border-bottom: 1px solid var(--paper-edge); overflow-x: auto; flex: none; }
-.sessionTab { display: inline-flex; align-items: center; gap: 6px; max-width: 220px; height: 26px; padding: 0 8px; border: 1px solid transparent; border-radius: 7px; background: transparent; color: var(--ink-soft); font-size: 12px; cursor: pointer; }
+.sessionTab { display: inline-flex; align-items: center; flex: none; max-width: 240px; height: 26px; padding: 0 2px 0 0; border: 1px solid transparent; border-radius: 7px; background: transparent; color: var(--ink-soft); font-size: 12px; }
 .sessionTab[data-active="true"] { background: var(--paper-3); border-color: var(--paper-edge-strong); color: var(--ink); }
+.sessionSelect { display: inline-flex; align-items: center; gap: 6px; min-width: 0; height: 100%; padding: 0 4px 0 8px; border: 0; background: transparent; color: inherit; font: inherit; cursor: pointer; }
+/* The × follows the rail's own tab strip: shown on the active tab, on hover and on keyboard focus. */
+.sessionClose { position: relative; display: grid; place-items: center; flex: none; width: 18px; height: 18px; padding: 0; border: 0; border-radius: 5px; background: transparent; color: var(--muted-deep); cursor: pointer; opacity: 0; }
+.sessionClose::before { content: ""; position: absolute; inset: -3px; /* a11y-hit-area: 24px */ }
+.sessionTab:hover .sessionClose, .sessionTab:focus-within .sessionClose, .sessionTab[data-active="true"] .sessionClose { opacity: 1; }
+.sessionClose:hover { color: var(--ink); background: var(--paper-edge); }
+.sessionSelect:focus-visible, .sessionClose:focus-visible { outline: 2px solid var(--ok-soft); outline-offset: -2px; opacity: 1; }
 .sessionName { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .formatBadge { flex: none; padding: 1px 4px; border-radius: 4px; font-size: 9.5px; font-weight: 700; letter-spacing: 0.02em; color: #fff; background: #5d6670; }
 .formatBadge[data-format="xlsx"] { background: #1f7a4c; }

@@ -1,6 +1,30 @@
 # Changelog
 
-## 1.3.90 — 2026-10-25
+## 1.3.91 — 2026-10-25
+
+Includes everything planned for 1.3.90, which was not published.
+
+- An owner message always gets through: when the app is restarting, a session or Work project is busy, or a run is still stopping, the message waits with its reason on screen and is delivered later instead of being refused. A Goal without a recorded grant resumes from your message, a paused Goal can be resumed from the phone, and the Goal bar always keeps working buttons and says what is true now.
+- Answers on Work question cards always reach the agent, also while a Goal keeps the room busy; an answer to a question that was replaced goes out as a new message naming it, and a tap on a One question card while a run is going answers at once.
+- The right-hand panel no longer stalls. Document tabs have a close button, and a newer version of a document closes the run's older tabs automatically.
+- Telegram: a message waiting for its room survives a quit, update or crash, a message refused "not ready yet" starts again, and a failed ending that still asks you a question is sent as that question.
+- Windows: Stop ends the whole process tree of a run, so an agent no longer keeps editing files after you press it. Command-line agents installed through npm start directly with their arguments intact, and tool-gate hooks run under PowerShell.
+- Windows: Claude Code write runs start again. Edits are allowed and every shell command goes through the Agentlas tool gate (Windows has no Claude Code sandbox), and the run notice says so.
+- Windows: runtimes stay isolated in their own product folders without Developer Mode (folder junctions, hard links, or a copy readable only by your account), command-line agents read your Windows profile folder, and large saved keys are stored in pieces. One slow key read no longer locks every other key, and Retry in Settings retries the keys that failed.
+- Windows networking: the app, the background service and managed installs follow your proxy settings (including PAC) and trust the certificates in the Windows certificate store, while local model servers are always reached directly. `OLLAMA_HOST`, `LMSTUDIO_HOST` and `MLX_HOST` are read the way Ollama reads them.
+- Windows phone link: the phone terminal speaks `cmd.exe`, the bridge moves to a free port when Windows reserves the remembered one, the right network adapter is chosen on localized Windows, and Korean engine output is no longer garbled.
+- Windows: the tray icon is shipped, notifications show and open the chat they came from, signing out of or shutting down Windows closes the app without a prompt, start-at-login uses the standard Run entry (Korean user names work, nothing flashes, and a setting turned off in Task Manager stays off), and Ctrl+W no longer closes the window. The One window has no menu bar, Settings and About are in the menus, and Windows paths, key names and words appear in the interface.
+- Windows: Work runs with Full access no longer fail to build their tools, and the command tool runs Windows PowerShell (Stop and time limits end the whole tree). Folder swaps retry when antivirus holds a file, and file names are safe for Windows.
+- Question cards have a new design in One, Work and agent questions: options with radio buttons or check boxes, an "Other" field, and Skip and Submit (Cmd/Ctrl+Enter). A multi-select question in One is a question card again instead of an approval card with a disabled Approve.
+- The first One message after signing in works without restarting the app when the background service started while you were signed out.
+- Final answers no longer show internal tool-call or work-reference JSON.
+- Updates: Check for Updates offers Restart and Install on every screen, the install log states what protected the update on each platform, a company update mirror on Windows and Linux needs a signed release list, and differential downloads use single-range requests so they no longer fall back to the full installer.
+- Goals: a Goal that keeps failing for the same reason waits longer each time (5 minutes, then 30, then 6 hours) instead of starting a paid run every minute, and a run that ends while the window is minimized still shows its completion alert.
+- Agentlas Reach (still off by default, opt-in): plain menu commands are usable without opening them first, only menu commands recognised as harmless are used, apps on Linux and Windows are matched to their running programs, new windows are judged before they are closed, and more sensitive apps are excluded.
+
+This release binds Agentlas OS v1.2.69 at 2b4e27b78d9a1e808142f1e6e510ab7023c7b44d; public runtime asset `hephaestus-runtime-v1.2.69.tar.gz` is pinned at SHA-256 `0bb8ac3eac111fd26bc3a20a7b1657741399b9f87ed8b8f1c87f2402dbd4c283`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
+## 1.3.90 — 2026-10-25 (not shipped; folded into 1.3.91)
 
 - Windows: Stop ends the whole process tree of a run, so an agent no longer keeps editing files after you press it. Command-line agents installed through npm start directly with their arguments intact, and tool-gate hooks run under PowerShell.
 - Windows: Claude Code write runs start again. Edits are allowed and every shell command goes through the Agentlas tool gate (Windows has no Claude Code sandbox), and the run notice says so.

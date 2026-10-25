@@ -279,7 +279,14 @@ export interface LiveDocumentMeta {
   savedRevision: number;
   savedSha256: string;
   closed?: boolean;
+  /**
+   * Who opened the session: the owner (the Document tab's open dialog) or a run (harness document.open / create /
+   * deck.build). Absent on sessions opened before it was recorded — unknown, so never closed on the owner's behalf.
+   */
+  openedBy?: LiveDocumentOpener;
 }
+
+export type LiveDocumentOpener = "owner" | "run";
 
 export interface LiveDocumentSnapshot {
   meta: LiveDocumentMeta;
@@ -442,6 +449,81 @@ export function renameSheetInFormula(formula: string, oldName: string, newName: 
 export function inferLiveDocumentFormat(name: string): LiveDocumentFormat | null {
   const ext = name.trim().toLowerCase().match(/\.([a-z0-9]+)$/)?.[1];
   return (LIVE_DOCUMENT_FORMATS as readonly string[]).includes(ext ?? "") ? ext as LiveDocumentFormat : null;
+}
+
+// ── versions of one document ────────────────────────────────────────────────────────────────────────────────────
+
+/**
+ * One document's place in a version series, read from its file name: `제안서_v17.pptx`, `report-v1.2.docx`,
+ * `plan (3).xlsx`, `memo_2026-10-25.docx`, `memo_20261025_0930.docx`. Two files are versions of each other only when
+ * folder, extension, the name before the marker and the kind of marker all match; a name without a marker, or with
+ * anything after it (`_v3_final`), belongs to no series. Null = no series (the caller keeps such a tab).
+ */
+export interface LiveDocumentVersion {
+  /** Folder + name without the marker + extension, normalised for comparison. */
+  series: string;
+  /** `v` = v17 / ver2 / rev3, `copy` = "(2)", `date` = YYYYMMDD, `datetime` = YYYYMMDD + HHMM[SS]. */
+  kind: "v" | "copy" | "date" | "datetime";
+  version: number[];
+}
+
+export function liveDocumentVersion(filePath: string): LiveDocumentVersion | null {
+  const normalized = filePath.normalize("NFC").replace(/\\/g, "/");
+  const slash = normalized.lastIndexOf("/");
+  const folder = normalized.slice(0, slash + 1);
+  const leaf = normalized.slice(slash + 1);
+  const dot = leaf.lastIndexOf(".");
+  if (dot <= 0) return null;
+  const stem = leaf.slice(0, dot).trim();
+  const ext = leaf.slice(dot + 1).toLowerCase();
+  const found = ((): { base: string; kind: LiveDocumentVersion["kind"]; version: number[] } | null => {
+    // A v marker must not continue a Latin word ("dev17", "prev2"); "제안서v17" and "deck_v17" are markers.
+    const v = stem.match(/^(.*?)[\s._-]*(?<![A-Za-z])(?:v|ver|rev)\.?\s?(\d{1,4}(?:\.\d{1,4}){0,2})$/i);
+    if (v) return { base: v[1], kind: "v", version: v[2].split(".").map(Number) };
+    const copy = stem.match(/^(.*?)\s?\((\d{1,3})\)$/);
+    if (copy) return { base: copy[1], kind: "copy", version: [Number(copy[2])] };
+    const date = stem.match(/^(.*?)[\s._-]*((?:19|20)\d{2})[-._]?(0[1-9]|1[0-2])[-._]?(0[1-9]|[12]\d|3[01])(?:[\s._T-]?([01]\d|2[0-3])[-.:h]?([0-5]\d)(?:[-.:m]?([0-5]\d))?)?$/i);
+    if (date) {
+      const day = Number(`${date[2]}${date[3]}${date[4]}`);
+      return date[5] === undefined
+        ? { base: date[1], kind: "date", version: [day] }
+        : { base: date[1], kind: "datetime", version: [day, Number(`${date[5]}${date[6]}${date[7] ?? "00"}`)] };
+    }
+    return null;
+  })();
+  if (!found) return null;
+  const base = found.base.replace(/[\s._-]+$/, "").toLowerCase();
+  if (!base) return null;
+  return { series: `${folder}\u0000${base}\u0000${ext}`, kind: found.kind, version: found.version };
+}
+
+/** -1 / 0 / 1 when `a` is older / the same / newer than `b`; null when they are not versions of one document. */
+export function compareLiveDocumentVersions(a: string, b: string): -1 | 0 | 1 | null {
+  const left = liveDocumentVersion(a);
+  const right = liveDocumentVersion(b);
+  if (!left || !right || left.series !== right.series || left.kind !== right.kind) return null;
+  const length = Math.max(left.version.length, right.version.length);
+  for (let index = 0; index < length; index++) {
+    const x = left.version[index] ?? 0;
+    const y = right.version[index] ?? 0;
+    if (x !== y) return x < y ? -1 : 1;
+  }
+  return 0;
+}
+
+/**
+ * Sessions a newly opened document replaces: open, opened by a run, a strictly older version of the same document in
+ * the same conversation. Same-file reopening is handled by openLiveDocument itself; owner-opened, unknown-opener and
+ * ambiguous names are kept. The caller still checks for unsaved edits before closing any of them.
+ */
+export function supersededLiveDocumentSessions(
+  sessions: ReadonlyArray<Pick<LiveDocumentMeta, "sessionId" | "chatId" | "path" | "openedBy" | "closed">>,
+  opened: Pick<LiveDocumentMeta, "sessionId" | "chatId" | "path">,
+): string[] {
+  return sessions
+    .filter((session) => session.sessionId !== opened.sessionId && session.chatId === opened.chatId && !session.closed
+      && session.openedBy === "run" && compareLiveDocumentVersions(session.path, opened.path) === -1)
+    .map((session) => session.sessionId);
 }
 
 // ── validation ──────────────────────────────────────────────────────────────────────────────────────────────────

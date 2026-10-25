@@ -985,6 +985,9 @@ export interface MobileBridgeRpcErrorBody {
     | "authority_error"
     | "response_too_large"
     | "request_timeout"
+    // A write refused before anything ran because the chat was not ready yet (server.ts mobileBridgeNotReadyRefusal):
+    // retryable, never stored as the command's final answer. Old phones read it as an ordinary retryable failure.
+    | "desktop_not_ready"
     | OneVaultErrorCode
     | OneProviderRemoteErrorCode;
   message: string;

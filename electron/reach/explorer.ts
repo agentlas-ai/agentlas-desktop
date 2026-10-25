@@ -1,7 +1,7 @@
 import type { Actuator, ActuatorApp } from "./actuator";
 import { probeDialog, synthesizeDialogCapability, type ProbeResult } from "./dialog-probe";
 import { withForeground } from "./foreground";
-import { firstWithWindow, isLiveApp } from "./app-match";
+import { findLiveCandidates, firstWithWindow, isLiveApp } from "./app-match";
 import { isRiskyMenuPath, isSensitiveApp, opensFilePicker, startsWithPath, systemInsertedPrefixes } from "./explore-policy";
 import { enumerateMenus, menuCapabilities, menuLeaves, opensDialog, type MenuTarget, findMenuWindow } from "./menu-probe";
 import type { CapabilityRegistry } from "./registry";
@@ -38,7 +38,7 @@ export interface ExploreOptions {
   maxMenuNodes?: number;
 }
 
-export type ExploreSkip = "sensitive" | "not_running" | "no_window" | "no_front";
+export type ExploreSkip = "sensitive" | "not_running" | "ambiguous" | "no_window" | "no_front";
 
 export interface ExploreReport {
   app: string;
@@ -66,10 +66,12 @@ export async function exploreApp(ports: ExplorePorts, app: ExploreApp, options: 
   if (isSensitiveApp({ name: app.name, bundleId: app.bundleId })) return emptyReport(app.name, "sensitive");
 
   const apps: ActuatorApp[] = await ports.actuator.listApps({ signal: ports.signal });
-  // An app whose bundle id is known is found by that id and nothing else: another app that only shares the display name is not this app (independent review 4, S2:
-  // a third-party "Notes" in the map drove Apple Notes). Without a bundle id (Linux, Windows) the name rules of app-match.ts decide.
-  const candidates = apps.filter((candidate) => candidate.running && candidate.pid > 0 && (app.bundleId ? candidate.bundleId === app.bundleId : candidate.name === app.name || isLiveApp({ key: app.key, name: app.name }, candidate)));
-  if (candidates.length === 0) return emptyReport(app.name, "not_running");
+  // The running program is found by the same function the reach ports and the service use (app-match.ts): an app whose bundle id is known is found by that id and
+  // nothing else (independent review 4, S2: a third-party "Notes" drove Apple Notes), and two different programs that fit equally well are not guessed between (review 5,
+  // T3: on Windows and Linux "editor.exe" and "photo.exe" both fit one record and the explorer used to take one of them).
+  const running = apps.filter((candidate) => candidate.running && candidate.pid > 0);
+  const candidates = findLiveCandidates({ key: app.key, name: app.name }, running);
+  if (candidates.length === 0) return emptyReport(app.name, running.some((candidate) => isLiveApp({ key: app.key, name: app.name }, candidate)) ? "ambiguous" : "not_running");
   // and the process that was actually picked is checked the way the map's record is: the explorer never presses anything in a sensitive app
   if (candidates.some((candidate) => isSensitiveApp({ name: candidate.name, bundleId: candidate.bundleId }))) return emptyReport(app.name, "sensitive");
   // several processes of one program: the first that has a window with the menu bar

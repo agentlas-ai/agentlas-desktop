@@ -247,7 +247,8 @@ import { normalizeToolCall, shadowsToolRecordedPath } from "@shared/tool-call-de
 import { shellWrittenPaths } from "@shared/shell-written-paths";
 import { runtimeSelectionReceiptMatches } from "@shared/runtime-selection-receipt";
 import { ChatQuestionSheet, type QuestionSheetAnswer } from "@/components/ChatQuestionSheet";
-import { questionOutrunByNewerUserMessage, type AskActionBlock } from "@shared/ask-action-bar";
+import { askResendMessage, questionOutrunByNewerUserMessage, type AskActionBlock } from "@shared/ask-action-bar";
+import { savedAnswerNextStep } from "@/lib/question-answer-delivery";
 import { McpKeyRequestSheet } from "@/components/McpKeyRequestSheet";
 import { extractQuestions } from "@/lib/ask-question";
 import { stripMultimodalSetup } from "@/lib/multimodal-setup";
@@ -2195,6 +2196,19 @@ function restoreAnsweredQuestions(
       } : msg;
     }
     if (committedReply) {
+      // Saved while a run was going, then a newer question came before the answer's turn started (no owner row after
+      // it): the answer was never delivered. Keep it pending; delivery sends it (as a new message, since its question
+      // was replaced) instead of closing it as answered.
+      const ownerSpokeAfter = messages.slice(i + 1).some((later) => later.role === "user");
+      if (!ownerSpokeAfter && committed?.continuationRunId) {
+        return {
+          ...msg,
+          questions: msg.questions.map((q) => q.answer?.length ? q : { ...q, answer: ["✓"] }),
+          pendingCommittedReply: committedReply,
+          pendingContinuationRunId: committed.continuationRunId,
+          pendingContinuationAutoResume: true,
+        };
+      }
       // An accepted receipt proves the batch was answered, not how arbitrary
       // free text should be split back into questions. Preserve that boundary.
       return {
@@ -2909,11 +2923,11 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
   const [questionCommitPending, setQuestionCommitPending] = useState(false);
   /** 누른 순간 닫힌 질문 묶음(확정 대기 중). 거절되면 null 로 풀려 시트가 되살아난다. */
   const [optimisticAnsweredQuestionId, setOptimisticAnsweredQuestionId] = useState<string | null>(null);
-  /** 실행 중에 "새 메시지로 보내기"를 누른 답 — 실행이 끝나는 순간 보낸다. */
-  const [pendingResendText, setPendingResendText] = useState<{ chatId: string; text: string } | null>(null);
   const questionCommitPendingRef = useRef<string | null>(null);
   const continuationResumeAttemptsRef = useRef(new Set<string>());
   const continuationTransportRetryableRef = useRef(new Set<string>());
+  /** Main's typed refusal of a saved answer's continuation, per continuation run id (question-answer-delivery.ts reads it). */
+  const continuationRejectReasonRef = useRef(new Map<string, string>());
   const [continuationReconnectEpoch, setContinuationReconnectEpoch] = useState(0);
   useEffect(() => { continuationResumeAttemptsRef.current.clear(); }, [chatId]);
   useEffect(() => {
@@ -5195,6 +5209,7 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
           if (!isCurrentChat()) return false;
           if (!continued || continued.runId !== runId || continued.status === "rejected") {
             continuationTransportRetryableRef.current.delete(runId);
+            continuationRejectReasonRef.current.set(runId, continued?.reasonCode ?? "decision_continuation_rejected");
             throw new Error(continued?.reasonCode ?? "decision_continuation_rejected");
           }
           continuationTransportRetryableRef.current.delete(runId);
@@ -5628,14 +5643,31 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
    * 질문이 꼬리를 물었다 — 그 per-question 자동 전송은 폐기.)
    * 시트에서 안 고른 질문도 잠금("—")해 시트가 다시 뜨지 않게 한다.
    */
+  /**
+   * An answer Main would not save for its exact question (a newer question replaced it, the owner already wrote after it,
+   * or no receipt can be found) is still the owner's message: it goes out as a new message naming the question, through
+   * the composer's durable path (queued behind a running turn, else sent now). Never "not sent, try again".
+   */
+  const deliverAnswerAsNewTurn = useCallback((messageId: string, questionText: string, reply: string) => {
+    dismissQuestionBatch(messageId);
+    submitOrQueue(askResendMessage(locale === "ko" ? "ko" : "en", questionText, reply));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [locale, submitOrQueue]);
+
   const answerQuestionBatch = useCallback(
-    async (messageId: string, sourceMessageId: string, reply: string, perQuestion: QuestionSheetAnswer[]) => {
-      if (!isCurrentChat() || busy || questionCommitPendingRef.current) return;
+    async (messageId: string, sourceMessageId: string, reply: string, perQuestion: QuestionSheetAnswer[], questionText: string) => {
+      // A running turn does not hold the answer back in this view any more (owner 2026-10-25, HMG room: a Goal kept the
+      // chat busy, the answer waited in component state and never reached Main). It is saved in Main now and its
+      // continuation starts the moment the chat is idle (the auto-resume below), also after a reload or restart.
+      if (!isCurrentChat() || questionCommitPendingRef.current === messageId) return; // the same card twice commits once
+      if (questionCommitPendingRef.current) {
+        // Another saved answer is crossing to Main right now: this one waits its turn, it is not dropped.
+        window.setTimeout(() => { void answerQuestionBatchRef.current?.(messageId, sourceMessageId, reply, perQuestion, questionText); }, 400);
+        return;
+      }
       const api = ipc();
       if (!api?.confirm?.commitAnswer) {
-        setSessionNotice(locale === "ko"
-          ? "Desktop에 연결되지 않아 답변을 저장하지 못했습니다. 입력은 그대로 유지됩니다."
-          : "The answer was not saved because Desktop is unavailable. Your input is unchanged.");
+        deliverAnswerAsNewTurn(messageId, questionText, reply);
         return;
       }
       questionCommitPendingRef.current = messageId;
@@ -5681,8 +5713,9 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
             setOptimisticAnsweredQuestionId((current) => current === messageId ? null : current);
             dismissQuestionBatch(messageId);
             setSessionNotice(locale === "ko"
-              ? "이 질문은 새 질문으로 바뀌어 지나갔습니다. 답은 보내지 않았습니다. 새 질문에 답해 주세요."
-              : "This question was replaced by a newer one, so your answer was not sent. Answer the new question.");
+              ? "이 질문은 새 질문으로 바뀌었습니다. 고른 답은 버리지 않고 새 메시지로 보냈습니다."
+              : "This question was replaced by a newer one. Your answer was not dropped; it went out as a new message.");
+            deliverAnswerAsNewTurn(messageId, questionText, reply);
             return;
           }
           // IPC can lose its response after Main commits. Recover only the
@@ -5704,12 +5737,32 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
           } else {
             setOptimisticAnsweredQuestionId((current) => current === messageId ? null : current);
             setSessionNotice(locale === "ko"
-              ? "이 질문의 답변을 저장하지 못했습니다. 질문과 입력은 그대로이므로 다시 시도해 주세요."
-              : "The answer was not saved for this exact question. The question and your input are unchanged; try again.");
+              ? "이 질문은 더 이상 답을 기다리지 않아 고른 답을 새 메시지로 보냈습니다."
+              : "This question was no longer waiting, so your answer went out as a new message.");
+            deliverAnswerAsNewTurn(messageId, questionText, reply);
             return;
           }
         }
         window.dispatchEvent(new Event("agentlas:attention-refresh"));
+        const markSaved = (autoResume: boolean) => {
+          transcriptRevisionRef.current += 1;
+          setMessages((messages) => messages.map((message) => message.id === messageId
+            ? {
+                ...message,
+                pendingCommittedReply: reply,
+                pendingContinuationRunId: receipt?.continuationRunId,
+                pendingContinuationAutoResume: autoResume,
+              }
+            : message));
+        };
+        if (busy) {
+          // Main holds the answer; the auto-resume starts its continuation the moment this turn settles.
+          markSaved(true);
+          setSessionNotice(locale === "ko"
+            ? "답을 저장했습니다. 지금 실행이 끝나면 이 답으로 바로 이어갑니다."
+            : "Your answer is saved. It continues as soon as the current run settles.");
+          return;
+        }
         // 답은 저장됐다 — 오너가 곧바로 다른 메뉴로 가도 후속 실행은 시작한다(send 의 detached 경로).
         const sent = await send(reply, {
           permissions: perms,
@@ -5720,25 +5773,31 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
         }).catch(() => false);
         if (!isCurrentChat()) return;
         if (!sent) {
-          const retryable = receipt?.continuationRunId
-            ? continuationTransportRetryableRef.current.has(receipt.continuationRunId)
-            : false;
-          transcriptRevisionRef.current += 1;
-          setMessages((messages) => messages.map((message) => message.id === messageId
-            ? {
-                ...message,
-                pendingCommittedReply: reply,
-                pendingContinuationRunId: receipt?.continuationRunId,
-                pendingContinuationAutoResume: retryable,
-              }
-            : message));
-          setSessionNotice(retryable
-            ? (locale === "ko"
-              ? "답변은 안전하게 저장됐습니다. 연결이 복구되면 같은 실행으로 자동 재개합니다."
-              : "Your answer is safely saved. It will resume with the same run when the connection recovers.")
-            : (locale === "ko"
-              ? "답변은 안전하게 저장됐지만 후속 실행은 시작되지 않았습니다. 자동으로 다시 실행하지 않았습니다."
-              : "Your answer is safely saved, but the follow-up did not start. It was not run again automatically."));
+          const runId = receipt.continuationRunId;
+          const next = savedAnswerNextStep({
+            reasonCode: continuationRejectReasonRef.current.get(runId),
+            transportRetryable: continuationTransportRetryableRef.current.has(runId),
+            attempts: 0,
+          });
+          if (next === "deliver-as-new-turn") {
+            setSessionNotice(locale === "ko"
+              ? "이 질문을 낸 실행이 더 이상 답을 받을 수 없어 고른 답을 새 메시지로 보냈습니다."
+              : "The run that asked can no longer take the answer, so it went out as a new message.");
+            deliverAnswerAsNewTurn(messageId, questionText, reply);
+            return;
+          }
+          if (next === "return-to-composer") {
+            dismissQuestionBatch(messageId);
+            setComposerPrefill(reply);
+            setSessionNotice(locale === "ko"
+              ? "답을 저장했지만 이 목표는 답한 뒤 멈춰 있어 저절로 다시 시작하지 않습니다. 답은 작성창에 있습니다. 보내면 이어갑니다."
+              : "Your answer is saved, but this Goal was stopped after you answered, so it does not restart on its own. The answer is in the composer; send it to continue.");
+            return;
+          }
+          markSaved(true);
+          setSessionNotice(locale === "ko"
+            ? "답을 저장했습니다. 대화가 비는 즉시 이 답으로 자동으로 이어갑니다."
+            : "Your answer is saved. It continues automatically as soon as the chat is free.");
           return;
         }
         transcriptRevisionRef.current += 1;
@@ -5771,8 +5830,10 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
     },
     // send는 동일 useCallback에 의존
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [busy, chat, chatId, isCurrentChat, locale, project, send],
+    [busy, chat, chatId, isCurrentChat, locale, project, send, deliverAnswerAsNewTurn],
   );
+  const answerQuestionBatchRef = useRef<typeof answerQuestionBatch | null>(null);
+  answerQuestionBatchRef.current = answerQuestionBatch;
 
   /** 질문 시트 × 닫기 — 이 배치의 미답 질문을 잠가("—") 시트를 접는다. 전송 없음. */
   const dismissQuestionBatch = useCallback((messageId: string) => {
@@ -5790,18 +5851,6 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
       ),
     );
   }, []);
-
-  useEffect(() => {
-    if (!pendingResendText || busy || questionCommitPending) return;
-    const { chatId: target, text } = pendingResendText;
-    setPendingResendText(null);
-    // 다른 대화로 옮겨 갔으면 거기로 보내지 않는다 — 그 답은 원래 대화의 것이다.
-    if (target !== chatId) return;
-    setSessionNotice(null);
-    void send(text);
-    // send 는 매 렌더 새로 만들어진다 — 보낼 글과 busy 가 바뀔 때만 다시 본다.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pendingResendText, busy, questionCommitPending, chatId]);
 
   // 바텀 시트에 올릴 질문 묶음 — 가장 최근에 질문을 낸 어시스턴트 메시지 하나만 본다.
   // (더 오래된 미답 질문은 stale — 대화가 이미 지나갔으므로 다시 묻지 않는다.)
@@ -5841,43 +5890,87 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
     return null;
   }, [messages, optimisticAnsweredQuestionId]);
 
-  // Both automatic reconciliation and explicit Retry use the accepted bytes
-  // and Main-owned run. Neither path commits or parses a new answer.
+  /*
+   * The newest answer Main saved whose continuation has not started — the sheet's own question, or an older one a newer
+   * question replaced while a run was going (its sheet is gone, its answer is not). Delivery below takes it either way.
+   */
+  const savedAnswer = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i];
+      if (m.role !== "agent" || !m.pendingCommittedReply?.trim() || !m.pendingContinuationRunId?.trim()) continue;
+      return {
+        messageId: m.id,
+        sourceMessageId: m.questionSourceMessageId ?? m.id,
+        reply: m.pendingCommittedReply,
+        continuationRunId: m.pendingContinuationRunId,
+        autoResume: m.pendingContinuationAutoResume,
+        questionText: (m.questions ?? []).map((q) => q.question).join(" / "),
+      };
+    }
+    return null;
+  }, [messages]);
+  const savedAnswerAttemptsRef = useRef(new Map<string, number>());
+
+  // Both automatic delivery and explicit Retry use the accepted bytes and the Main-owned run; neither commits or parses a
+  // new answer. A transient refusal (a turn running, the app starting, the bridge down) tries again when the chat is free;
+  // a turn that can no longer take the answer gets it as a new message (renderer/lib/question-answer-delivery.ts).
   const resumeCommittedQuestion = useCallback(async () => {
-    const sheet = pendingQuestionSheet;
-    const reply = sheet?.initialReply;
-    const continuationRunId = sheet?.continuationRunId;
-    if (!isCurrentChat() || !sheet || !reply?.trim() || !continuationRunId?.trim() || busy || questionCommitPendingRef.current) return;
-    questionCommitPendingRef.current = sheet.messageId;
+    const saved = savedAnswer;
+    if (!isCurrentChat() || !saved || busy || questionCommitPendingRef.current) return;
+    const { messageId, sourceMessageId, reply, continuationRunId, questionText } = saved;
+    questionCommitPendingRef.current = messageId;
     setQuestionCommitPending(true);
-    const key = `${chatId}\0${sheet.sourceMessageId}\0${continuationRunId}`;
+    const key = `${chatId}\0${sourceMessageId}\0${continuationRunId}`;
     continuationResumeAttemptsRef.current.add(key);
+    const attempts = (savedAnswerAttemptsRef.current.get(key) ?? 0) + 1;
+    savedAnswerAttemptsRef.current.set(key, attempts);
+    continuationRejectReasonRef.current.delete(continuationRunId);
     try {
       const resumed = await send(reply, {
-        decisionContinuation: {
-          sourceMessageId: sheet.sourceMessageId,
-          runId: continuationRunId,
-        },
+        decisionContinuation: { sourceMessageId, runId: continuationRunId },
       }).catch(() => false);
       if (!isCurrentChat()) return;
       if (!resumed) {
-        const retryable = continuationTransportRetryableRef.current.has(continuationRunId);
+        const next = savedAnswerNextStep({
+          reasonCode: continuationRejectReasonRef.current.get(continuationRunId),
+          transportRetryable: continuationTransportRetryableRef.current.has(continuationRunId),
+          attempts,
+        });
         transcriptRevisionRef.current += 1;
-        setMessages((messages) => messages.map((message) => message.id === sheet.messageId
-          ? { ...message, pendingContinuationAutoResume: retryable }
+        if (next === "retry-when-idle") {
+          setMessages((messages) => messages.map((message) => message.id === messageId
+            ? { ...message, pendingContinuationAutoResume: true }
+            : message));
+          // Try again the next time the chat is free (or in a moment if it already looks free).
+          window.setTimeout(() => {
+            continuationResumeAttemptsRef.current.delete(key);
+            setContinuationReconnectEpoch((value) => value + 1);
+          }, 3_000);
+          setSessionNotice(locale === "ko"
+            ? "답은 저장돼 있습니다. 대화가 비는 즉시 이 답으로 자동으로 이어갑니다."
+            : "Your answer is saved. It continues automatically as soon as the chat is free.");
+          return;
+        }
+        setMessages((messages) => messages.map((message) => message.id === messageId
+          ? { ...message, pendingCommittedReply: undefined, pendingContinuationRunId: undefined, pendingContinuationAutoResume: undefined }
           : message));
-        setSessionNotice(retryable
-          ? (locale === "ko"
-            ? "저장된 답변의 연결이 아직 복구되지 않았습니다. 연결 복구 시 같은 실행으로 한 번 더 확인합니다."
-            : "The saved answer is still offline. It will reconcile once more with the same run after reconnection.")
-          : (locale === "ko"
-            ? "저장된 답변의 후속 실행은 시작되지 않았습니다. 자동으로 다시 실행하지 않았습니다."
-            : "The saved answer's follow-up did not start. It was not run again automatically."));
+        if (next === "return-to-composer") {
+          dismissQuestionBatch(messageId);
+          setComposerPrefill(reply);
+          setSessionNotice(locale === "ko"
+            ? "이 목표는 답한 뒤 멈춰 있어 저장된 답으로 저절로 다시 시작하지 않습니다. 답은 작성창에 있습니다. 보내면 이어갑니다."
+            : "This Goal was stopped after you answered, so the saved answer does not restart it on its own. The answer is in the composer; send it to continue.");
+          return;
+        }
+        setSessionNotice(locale === "ko"
+          ? "이 질문을 낸 실행이 더 이상 답을 받을 수 없어 저장된 답을 새 메시지로 보냈습니다."
+          : "The run that asked can no longer take the answer, so the saved answer went out as a new message.");
+        deliverAnswerAsNewTurn(messageId, questionText, reply);
         return;
       }
       transcriptRevisionRef.current += 1;
       setMessages((messages) => messages.map((message) => {
-        if (message.id !== sheet.messageId) return message;
+        if (message.id !== messageId) return message;
         return {
           ...message,
           pendingCommittedReply: undefined,
@@ -5887,21 +5980,23 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
             ? question : { ...question, answer: ["✓"] }),
         };
       }));
+      setSessionNotice(null);
     } finally {
-      if (isCurrentChat() && questionCommitPendingRef.current === sheet.messageId) {
+      if (isCurrentChat() && questionCommitPendingRef.current === messageId) {
         questionCommitPendingRef.current = null;
         setQuestionCommitPending(false);
       }
     }
-  }, [busy, chatId, isCurrentChat, locale, pendingQuestionSheet, send]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [busy, chatId, isCurrentChat, locale, savedAnswer, send, deliverAnswerAsNewTurn]);
 
   useEffect(() => {
-    const sheet = pendingQuestionSheet;
-    if (!sheet?.initialReply?.trim() || !sheet.continuationRunId || sheet.autoResume === false || busy || questionCommitPending) return;
-    const key = `${chatId}\0${sheet.sourceMessageId}\0${sheet.continuationRunId}`;
+    const saved = savedAnswer;
+    if (!saved || saved.autoResume === false || busy || questionCommitPending) return;
+    const key = `${chatId}\0${saved.sourceMessageId}\0${saved.continuationRunId}`;
     if (continuationResumeAttemptsRef.current.has(key)) return;
     void resumeCommittedQuestion();
-  }, [busy, chatId, continuationReconnectEpoch, pendingQuestionSheet, questionCommitPending, resumeCommittedQuestion]);
+  }, [busy, chatId, continuationReconnectEpoch, savedAnswer, questionCommitPending, resumeCommittedQuestion]);
 
   const handleSurfaceAction = useCallback(
     async (activeSurface: WorkbenchSurface, action: AgentlasSurfaceAction) => {
@@ -7466,37 +7561,24 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
           initialReply={pendingQuestionSheet.initialReply}
           onRetryCommitted={pendingQuestionSheet.continuationRunId ? () => { void resumeCommittedQuestion(); } : undefined}
           busy={busy || questionCommitPending}
+          autoDelivering={Boolean(pendingQuestionSheet.initialReply?.trim() && pendingQuestionSheet.autoResume !== false)}
           onConfirm={(reply, perQuestion) =>
             answerQuestionBatch(
               pendingQuestionSheet.messageId,
               pendingQuestionSheet.sourceMessageId,
               reply,
               perQuestion,
+              pendingQuestionSheet.questions.map((item) => item.question).join(" / "),
             )
           }
           onDismiss={() => dismissQuestionBatch(pendingQuestionSheet.messageId)}
           block={pendingQuestionSheet.block}
           onResend={(text) => {
-            // 답을 새 메시지로 — 옛 질문은 접고, 작성창과 같은 전송 경로로 보낸다.
-            // 실행이 도는 중이면 Work 작성창은 새 메시지를 받지 않는다(실측 2026-09-27: 그대로 보내면
-            // 답이 조용히 사라졌다). 그때는 실행이 끝나는 순간 보내도록 맡아 두고, 그렇다고 말한다.
+            // 답을 새 메시지로 — 옛 질문은 접고, 작성창과 같은 전송 경로로 보낸다. 실행이 도는 중이면 그 경로가
+            // Main 의 지시 대기열에 저장해 두고 실행이 정리되는 대로 보낸다(이 화면의 상태에 맡겨 두지 않는다:
+            // 예전에는 화면을 떠나거나 다시 그리면 그 답이 사라졌다).
             dismissQuestionBatch(pendingQuestionSheet.messageId);
-            if (busy || questionCommitPendingRef.current) {
-              setPendingResendText({ chatId, text });
-              setSessionNotice(locale === "ko"
-                ? "실행이 끝나면 이 답을 새 메시지로 바로 보냅니다."
-                : "This answer will be sent as a new message as soon as the run finishes.");
-              return;
-            }
-            void send(text);
-          }}
-          onKeepQueuedAnswer={(text) => {
-            // 실행 중에 낸 답의 질문을 새 질문이 대체했다. 답은 버리지 않고(예전엔 새 질문이 오는 순간 사라졌다)
-            // 실행이 끝나면 새 메시지로 보낸다. 새 질문 시트는 그대로 둔다.
-            setPendingResendText({ chatId, text });
-            setSessionNotice(locale === "ko"
-              ? "실행 중에 낸 답의 질문이 새 질문으로 바뀌었습니다. 그 답은 버리지 않고 실행이 끝나면 새 메시지로 보냅니다."
-              : "A newer question replaced the one your queued answer was for. The answer is kept and sent as a new message when the run finishes.");
+            submitOrQueue(text);
           }}
         />
       )}

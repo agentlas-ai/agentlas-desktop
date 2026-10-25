@@ -87,7 +87,7 @@ export async function documentList(_args: Record<string, unknown>, ctx: Ctx): Pr
 export async function documentOpen(args: Record<string, unknown>, ctx: Ctx): Promise<Outcome> {
   try {
     const live = await store();
-    const meta = await live.openLiveDocument({ chatId: ctx.chatId, path: str(args.path) });
+    const meta = await live.openLiveDocument({ chatId: ctx.chatId, path: str(args.path), openedBy: "run" });
     const snapshot = await live.liveDocumentSnapshot(meta.sessionId);
     const outline = liveDocumentOutline(snapshot.model, { maxChars: 20_000 });
     return { status: "ok", data: {
@@ -103,7 +103,7 @@ export async function documentCreate(args: Record<string, unknown>, ctx: Ctx): P
   if (!writable(ctx)) return refused("permission_read_only", "creating writes a new file; this run may not write");
   try {
     const live = await store();
-    const meta = await live.createLiveDocument({ chatId: ctx.chatId, path: str(args.path), title: str(args.title) });
+    const meta = await live.createLiveDocument({ chatId: ctx.chatId, path: str(args.path), title: str(args.title), openedBy: "run" });
     createdInRun.set(meta.sessionId, ctx.runId);
     if (createdInRun.size > CREATED_IN_RUN_LIMIT) createdInRun.delete(createdInRun.keys().next().value as string);
     const snapshot = await live.liveDocumentSnapshot(meta.sessionId);

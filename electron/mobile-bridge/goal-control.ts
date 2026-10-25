@@ -17,6 +17,8 @@ export interface MobileGoalControlServices {
   readGoalPanel(chatId: string): GoalPanelView | null;
   pauseGoal(chatId: string, expectedGoalId: string): void;
   deleteGoal(chatId: string, expectedGoalId: string): void;
+  /** The owner's Resume from the phone: the chip's own path (long-run/goal-owner-resume.ts) at the Goal's current version. */
+  resumeGoal(chatId: string, expectedGoalId: string): Promise<unknown>;
   editGoalPanel(input: unknown): GoalPanelEditResult;
   shapeGoalPanel(chatId: string, expectedGoalId: string): GoalPanelEditResult & { done?: Promise<void> };
 }
@@ -39,6 +41,10 @@ export function desktopGoalControlServices(): MobileGoalControlServices {
     readGoalPanel: goals.readGoalPanel,
     pauseGoal: (chatId, goalId) => invocationService.pauseGoal(chatId, goalId),
     deleteGoal: (chatId, goalId) => invocationService.deleteGoal(chatId, goalId),
+    resumeGoal: (chatId, goalId) => {
+      const { resumeGoalAsOwner } = require("../long-run/goal-owner-resume") as typeof import("../long-run/goal-owner-resume");
+      return resumeGoalAsOwner({ chatId, expectedGoalId: goalId, expectedVersion: null }, invocationService);
+    },
     editGoalPanel: (input) => goals.editGoalPanel(input, { activeChatIds: () => invocationService.activeChatIds() }),
     shapeGoalPanel: goals.requestGoalPanelShape,
   };
@@ -149,6 +155,10 @@ export class MobileGoalControl {
           operation(chatId!, input.expectedGoalId as string);
           return reply({ ok: true, outcome: "applied", view: this.services.readGoalPanel(chatId!) });
         }
+        case "chats.resumeGoal": {
+          await this.services.resumeGoal(chatId!, input.expectedGoalId as string);
+          return reply({ ok: true, outcome: "applied", view: this.services.readGoalPanel(chatId!) });
+        }
         case "goalPanel.view": return reply({ ok: true, view: this.services.readGoalPanel(chatId!) });
         case "goalPanel.edit": return reply(this.services.editGoalPanel(input));
         case "goalPanel.shape": {
@@ -160,7 +170,9 @@ export class MobileGoalControl {
       }
     } catch (error) {
       const raw = error && typeof error === "object" ? (error as { code?: unknown }).code : null;
-      const stopCode = error instanceof Error && ["goal_control_binding_changed", "goal_control_scope_mismatch", "goal_control_not_started"].includes(error.message) ? error.message : null;
+      // A machine code thrown as the message (resume: long_run_resume_version_conflict, auto_goal_resume_attempt_live, ...)
+      // is returned as is, so the phone can say what is true instead of a generic failure.
+      const stopCode = error instanceof Error && /^[a-z][a-z0-9_]{2,80}(?::[a-z0-9_-]{1,40})?$/.test(error.message) ? error.message : null;
       const code = typeof raw === "string" && /^[a-z][a-z0-9_.:-]{2,100}$/.test(raw) ? raw : stopCode ?? "goal_control_failed";
       // A refusal is accompanied by a new authoritative read, never an optimistic echo of the requested edit.
       let current: Record<string, unknown> = {};

@@ -129,7 +129,7 @@ export async function documentDeckBuild(args: Record<string, unknown>, ctx: Ctx)
   if (builtHere.size > BUILT_LIMIT) builtHere.delete(builtHere.keys().next().value as string);
   let sessionId: string | undefined, openNote: string | undefined;
   try {
-    const meta = await (await store()).openLiveDocument({ chatId: ctx.chatId, path: file });
+    const meta = await (await store()).openLiveDocument({ chatId: ctx.chatId, path: file, openedBy: "run" });
     sessionId = meta.sessionId;
   } catch (error) { openNote = `the file is written but could not be opened in the Document tab (${(error as { reason?: string })?.reason ?? "open failed"}); document.open retries`; }
   return { status: "ok", produced: [file], data: {

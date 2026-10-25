@@ -33,11 +33,12 @@ import { registerGoalPanelIpc } from "./goal-panel-ipc";
 import { appendLongRunEvent, getLongRunByGoalId, bindCurrentGoalRevisionToLongRun, longRunBudgetExhaustion, longRunOwnerHold, LONG_RUN_BUDGET_EXHAUSTED_CODE } from "./store/long-runs";
 import { getChatGoalRevision, reauthorizeStoredAutomaticGoal, reviseStoredAutomaticGoal } from "./store/chat-goals";
 import { adoptExplicitGoalGrant, ensureExplicitGoalContract } from "./long-run/explicit-goal-authority";
+import { resumeGoalAsOwner } from "./long-run/goal-owner-resume";
 import { latestGoalWaitSubscription } from "./long-run/wait-subscriptions";
 import { ONE_DECISION_JUDGE_TIMEOUT_MS } from "../shared/one-decision";
 import { goalResumeRecoveryBlockerCode } from "../shared/long-run";
 import { acknowledgeAutomationGoalExecutionReview, getAutomationGoalExecutionReview } from "./automation-goal-owner-review";
-import { acknowledgeGoalExecutionResume, currentAutomationGoalExecutionOwnerMatches } from "./automation-execution-control";
+import { currentAutomationGoalExecutionOwnerMatches } from "./automation-execution-control";
 import { getGoalRuntimeSelection, requestGoalRuntimeSelection } from "./long-run/runtime-handoff";
 import { getChatContinuitySnapshot } from "./long-run/continuity-snapshot";
 // IPC 핸들러 일괄 등록. main.ts 앱 ready 직후 호출.
@@ -277,7 +278,6 @@ import { createRendererSendQueue } from "./invocation/renderer-send-queue";
 import { canQueuePendingSend } from "./invocation/pending-chat-sends";
 import { isTransientSendRefusal } from "../shared/transient-send-refusal";
 import { cancelInvocationOwnerRun, invocationCurrentTurnControl } from "./runtime/invocation-owner-control";
-import { queueAutomaticGoalResume } from "./invocation/automatic-goal";
 // ── Hephaestus 엔진 브리지 — 데스크탑↔엔진 연결은 전부 electron/hephaestus/* 에서만 일어난다. ──
 import { hepAuthLogin, hepAuthStatus } from "./hephaestus/commands";
 import { hephaestusAvailable, hephaestusDoctor, hephaestusRoot, readHephaestusUpdateJournal, runHephaestusRuntimeUpdate } from "./hephaestus/engine";
@@ -530,11 +530,6 @@ import { findAutomationByGoalId } from "./store/automations";
 import { maybeDispatchEffectObservation } from "./long-run/effect-observation";
 import { isGoalObserving } from "./long-run/effect-observation-tickets";
 import { emitDesktopStoreChange } from "./store/change-bus";
-import {
-  confirmDesktopLongRunResumeDispatched,
-  failDesktopLongRunResumeDispatch,
-  resumeDesktopLongRunManually,
-} from "./long-run/app-runtime-coordinator";
 import { getOrCreateAutomationSession } from "./store/automation-sessions";
 import {
   acceptCanonicalTaskResult,
@@ -4714,6 +4709,11 @@ export function registerIpcHandlers(): { businessShipping: ReturnType<typeof reg
     if (created) {
       try { ensureExplicitGoalContract(getDb(), chat.goalId); }
       catch (contractError) { console.warn("[long-run] goal contract not recorded:", contractError); }
+      // And its revision 1 when the owner's own turn is the one defining it (app.call inside that turn): without it the
+      // sweep parked the Goal for 15 h, Resume refused it and the panel refused edits (explicit-goal-authority.ts
+      // findDefiningOwnerTurnGoalGrant). A Goal defined outside an owner turn stays without one; nothing is invented.
+      try { adoptExplicitGoalGrant(chat.goalId); }
+      catch (grantError) { console.warn("[long-run] goal grant not recorded:", grantError); }
     }
     const context = getGoalLedgerGoal(chat.goalId, projectDir);
     if (!created && !context) {
@@ -4814,26 +4814,9 @@ export function registerIpcHandlers(): { businessShipping: ReturnType<typeof reg
   ipcMain.handle("chats:resumeGoal", async (_e, id: string, expectedVersion: number, expectedGoalId: string,
     _submittedConfirmation?: GoalResumeConfirmation) => {
     assertTrustedSitePublishIpcSender(_e);
-    const chat = getChat(id);
-    if (!expectedGoalId || chat?.goalId !== expectedGoalId) throw new Error("goal_control_binding_changed");
-    if (invocationService.activeChatIds().includes(id)) return getGoalLedgerGoal(expectedGoalId, getChatWorkingFolder(id));
-    if (!getChatGoalRevision(expectedGoalId)) adoptExplicitGoalGrant(expectedGoalId);
-    const run = getLongRunByGoalId(expectedGoalId);
-    if (!run) return getGoalLedgerGoal(expectedGoalId, getChatWorkingFolder(id));
-    // No recorded owner grant (a Goal defined through chats:defineGoal): Resume has no instruction to continue on, so
-    // automaticGoalResumeRequest returns null and the chip only said "could not be checked or changed". The owner's next
-    // message in this room is the grant (explicit-goal-authority.ts findOwnerTurnGoalGrant); say so with a typed code.
-    if (!getChatGoalRevision(expectedGoalId)) throw Object.assign(new Error("goal_owner_grant_required"), { code: "goal_owner_grant_required" });
-    const revision = getChatGoalRevision(expectedGoalId);
-    const { request, queued } = await queueAutomaticGoalResume(id, expectedVersion);
-    try {
-      if (revision) acknowledgeGoalExecutionResume({ goalId: expectedGoalId, rootChatId: id, expectedRevision: revision.revision });
-      confirmDesktopLongRunResumeDispatched(queued.id);
-      invocationService.start(request, undefined, undefined, undefined, "goal-continuation",
-        admitMainInvocation(request.chatId, request.runId));
-    } catch (error) {
-      failDesktopLongRunResumeDispatch(queued.id, error instanceof Error ? error.message : String(error));
-    }
+    // One owner-resume path for the chip and the phone (long-run/goal-owner-resume.ts): the press is the grant when none is
+    // recorded, a busy room records the resume for the sweep, otherwise the chip's transaction and dispatch.
+    await resumeGoalAsOwner({ chatId: id, expectedGoalId, expectedVersion }, invocationService);
     return getGoalLedgerGoal(expectedGoalId, getChatWorkingFolder(id));
   });
   registerAppControlDomainIpc(ipcMain, "chats:setSwarmMode", (id: string, enabled: boolean) => {
@@ -7101,7 +7084,8 @@ export function registerIpcHandlers(): { businessShipping: ReturnType<typeof reg
   // there (saved, shown once, retried silently) and starts by itself. See invocation/renderer-send-queue.ts.
   let rendererSendQueueInstance: ReturnType<typeof createRendererSendQueue> | undefined;
   const rendererSendQueue = () => rendererSendQueueInstance ??= createRendererSendQueue(
-    (event, req) => startRendererInvocation(event, req) as Promise<{ runId: string }>);
+    (event, req) => startRendererInvocation(event, req) as Promise<{ runId: string }>,
+    { senderTrusted: (event) => { try { assertTrustedSitePublishIpcSender(event); return true; } catch { return false; } } });
   const startRendererInvocation = async (_event: IpcMainInvokeEvent, req: McpInvocationRequest) => {
     assertTrustedSitePublishIpcSender(_event);
     noteInvocationRunReceived(req?.runId);

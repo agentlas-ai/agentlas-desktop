@@ -294,6 +294,9 @@ async function waitForSharedSession(request: RunnerRequest, events: RunnerEvents
       blockedTurn: openHolder,
       line: own ? () => turnLine().enqueue(key, { chatId: own.chatId, runId: own.runId, leaseId }) : undefined,
       onWait() { events.onStatus?.(tStatus(locale, "agentContextTurnWait")); },
+      // A turn ahead that waits for the owner, or a long one, is waited for with the reason on screen, never refused.
+      onParked(kind) { events.onStatus?.(tStatus(locale, kind === "question" ? "agentContextTurnWaitParkedQuestion" : "agentContextTurnWaitParkedApproval")); },
+      waitPastLimit: true,
       ...sharedTurnWaitLimits,
     });
   } catch (error) { throw markRefusedBeforeDispatch(error instanceof AgentContextTurnWaitError ? turnWaitRefusal(error, locale) : error); }

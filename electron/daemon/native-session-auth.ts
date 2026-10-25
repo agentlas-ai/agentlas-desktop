@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { nativeStartDescriptor, sameNativeStartBinding, type NativeStartDescriptor, type NativePreparationWireRequest } from "./native-start-protocol";
 import type { ControlSocketPeer } from "./control-socket";
-import { assertNativeAuthBinding, createNativeServiceObservationSigner, validateNativeServiceObservation, validateNativeServiceObservationRequest, type NativeServiceObservation, createNativeIngressNoStartSigner, validateNativeIngressNoStartObservation, validateNativeIngressNoStartRequest, type NativeIngressNoStartObservation, createNativeTerminalAuthSigner, validateNativeTerminalPreparationRequest, nativeAuthCanonical, nativeAuthError, signNativeAuthFrame, verifyNativeAuthFrame, type NativeAuthBinding, type NativeCredential } from "./native-auth-credentials";
+import { NATIVE_AUTH_MAX_FRAME_BYTES, assertNativeAuthBinding, createNativeServiceObservationSigner, validateNativeServiceObservation, validateNativeServiceObservationRequest, type NativeServiceObservation, createNativeIngressNoStartSigner, validateNativeIngressNoStartObservation, validateNativeIngressNoStartRequest, type NativeIngressNoStartObservation, createNativeTerminalAuthSigner, validateNativeTerminalPreparationRequest, nativeAuthCanonical, nativeAuthError, signNativeAuthFrame, verifyNativeAuthFrame, type NativeAuthBinding, type NativeCredential } from "./native-auth-credentials";
 const nonce = () => randomBytes(32).toString("hex");
 function denied(code: string): never { throw nativeAuthError(code); }
 const exact = (value: unknown, fields: readonly string[]): value is Record<string, unknown> => {
@@ -16,7 +16,7 @@ export type NativeAuthenticatedIdentity = Readonly<{ scope: string; generation: 
 function authenticatedIdentity(t: Transcript): NativeAuthenticatedIdentity { return Object.freeze({ scope: t.scope, generation: t.generation, serviceIdentity: t.serviceIdentity, bootId: t.bootId, connection: t.connection }); }
 type PeerState = { identity?: NativeAuthenticatedIdentity; transcript: Transcript; active: boolean; sequence: number; eventSequence: number; callbackSequence: number; timer: ReturnType<typeof setTimeout>; release: () => void };
 export function decodeNativeAuthLine(line: string): unknown {
-  if (Buffer.byteLength(line) > 1048576) denied("native_auth_frame_limit");
+  if (Buffer.byteLength(line) > NATIVE_AUTH_MAX_FRAME_BYTES) denied("native_auth_frame_limit");
   let value: unknown; try { value = JSON.parse(line); } catch { denied("native_auth_json_invalid"); }
   if (nativeAuthCanonical(value) !== line) denied("native_auth_noncanonical_json"); return value;
 }
@@ -211,6 +211,21 @@ export function createNativeGuiAuthenticator(binding: NativeAuthBinding, key: Na
       return { requestId: b.requestId, method: "native.checkpoint", params: b.params, terminal, ...(ingressNoStart ? { ingressNoStart } : {}), ...(serviceObservation ? { serviceObservation } : {}), complete(result, error = null): unknown {
         if (used || !active || transcript !== captured || !(error === null || typeof error === "string" && /^[a-z][a-z0-9_]{1,99}$/.test(error))) denied("native_auth_checkpoint_reply_invalid");
         const body = { scope: binding.scope, generation: key.generation, serviceIdentity: binding.serviceIdentity, bootId: expectedBootId, connection: captured.connection, sequence: b.sequence, requestId: b.requestId, direction: "gui-to-daemon", domain: observed ? "agentlas.native.serviceObservationReply.v1" : attested ? "agentlas.native.ingressNoStartReply.v1" : terminal ? "agentlas.native.terminalCheckpointReply.v1" : "agentlas.native.checkpointReply.v1", result, error, ...(request ? { start: request.start, nonce: request.requestId } : {}) };
+        // The outer completion frame adds three levels around the result. A valid
+        // catalog value at depth 22 previously signed successfully, consumed this
+        // completion, then failed the channel's depth-24 encoder. Check the exact
+        // frame shape with the fixed-width Ed25519 signature BEFORE any signing.
+        // Only local result encoding failures become operation errors: signing or
+        // writing uncertainty must never trigger a second completion.
+        const preflight = () => nativeAuthCanonical({ completion: { body, signature: Buffer.alloc(64).toString("base64") } });
+        try { preflight(); }
+        catch (cause) {
+          const code = cause && typeof cause === "object" && "code" in cause ? cause.code : undefined;
+          if (code !== "native_auth_value_invalid" && code !== "native_auth_value_limit" && code !== "native_auth_frame_limit") throw cause;
+          body.result = null;
+          body.error = code === "native_auth_value_invalid" ? "native_auth_checkpoint_result_invalid" : "native_auth_checkpoint_result_limit";
+          preflight();
+        }
         nativeAuthCanonical(body); const reply = observed ? { body, signature: serviceSigner(body) } : attested ? { body, signature: ingressSigner(body) } : terminal ? { body, signature: terminalSigner(body) } : signature(key, body); used = true; return reply;
       } };
     },

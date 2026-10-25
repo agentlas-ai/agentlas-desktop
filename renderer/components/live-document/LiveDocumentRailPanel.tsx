@@ -153,18 +153,56 @@ export function LiveDocumentRailPanel({ chatId, locale, focusSessionId }: { chat
     else if (result.reason !== "cancelled") setNotice(reasonText(result.reason, locale));
   };
 
+  /*
+   * Closing a tab closes its session only (meta.closed): the file and the session's original copy stay on disk, and
+   * document.open brings it back. Unsaved edits ask first, like the toolbar's close (owner 2026-10-25: every Office tab
+   * had no ×, so a pile of v16…v20 tabs had to be opened and closed one by one from the toolbar).
+   */
+  const closeTab = async (sessionId: string) => {
+    const snapshot = await ipc()?.liveDocument?.snapshot(sessionId).catch(() => null);
+    const unsaved = snapshot ? snapshot.revision - snapshot.meta.savedRevision : 0;
+    if (unsaved > 0 && !window.confirm(ko ? "저장하지 않은 변경이 있습니다. 닫을까요? (원본 파일은 그대로입니다)" : "There are unsaved changes. Close anyway? (the file stays as it was)")) return;
+    const index = sessions.findIndex((session) => session.sessionId === sessionId);
+    if (active === sessionId) setActive(sessions[index + 1]?.sessionId ?? sessions[index - 1]?.sessionId ?? null);
+    await ipc()?.liveDocument?.close(sessionId);
+    refresh();
+  };
+  const moveWithKeyboard = (event: ReactKeyboardEvent<HTMLButtonElement>, index: number) => {
+    let next = index;
+    if (event.key === "ArrowRight") next = (index + 1) % sessions.length;
+    else if (event.key === "ArrowLeft") next = (index - 1 + sessions.length) % sessions.length;
+    else if (event.key === "Home") next = 0;
+    else if (event.key === "End") next = sessions.length - 1;
+    else if (event.key === "Delete") { event.preventDefault(); void closeTab(sessions[index].sessionId); return; }
+    else return;
+    event.preventDefault();
+    setActive(sessions[next].sessionId);
+    event.currentTarget.closest("[data-live-document-tabs]")?.querySelectorAll<HTMLButtonElement>("[data-live-document-tab-select]")[next]?.focus();
+  };
+
   if (!chatId) return <p className={styles.empty}>{ko ? "대화가 연결되면 문서를 열 수 있습니다." : "Documents open once this conversation is bound to a task."}</p>;
 
   return (
     <div className={styles.panel} data-live-document-panel="true">
-      <div className={styles.sessionBar} role="tablist" aria-label={ko ? "열린 문서" : "Open documents"}>
-        {sessions.map((session) => (
-          <button key={session.sessionId} type="button" role="tab" aria-selected={session.sessionId === active}
-            className={styles.sessionTab} data-active={session.sessionId === active ? "true" : "false"}
-            onClick={() => setActive(session.sessionId)} title={session.path}>
-            <span className={styles.formatBadge} data-format={session.format}>{FORMAT_LABEL[session.format]}</span>
-            <span className={styles.sessionName}>{session.name}</span>
-          </button>
+      <div className={styles.sessionBar} role="tablist" aria-label={ko ? "열린 문서" : "Open documents"} data-live-document-tabs="true">
+        {sessions.map((session, index) => (
+          <span key={session.sessionId} className={styles.sessionTab} data-active={session.sessionId === active ? "true" : "false"}
+            data-live-document-tab={session.sessionId}
+            // Middle click closes, as in a browser's tab strip.
+            onMouseDown={(event) => { if (event.button === 1) event.preventDefault(); }}
+            onAuxClick={(event) => { if (event.button !== 1) return; event.preventDefault(); void closeTab(session.sessionId); }}>
+            <button type="button" role="tab" aria-selected={session.sessionId === active} tabIndex={session.sessionId === active || (!active && index === 0) ? 0 : -1}
+              className={styles.sessionSelect} data-live-document-tab-select="true"
+              onClick={() => setActive(session.sessionId)} onKeyDown={(event) => moveWithKeyboard(event, index)} title={session.path}>
+              <span className={styles.formatBadge} data-format={session.format}>{FORMAT_LABEL[session.format]}</span>
+              <span className={styles.sessionName}>{session.name}</span>
+            </button>
+            <button type="button" className={styles.sessionClose} data-live-document-tab-close="true"
+              aria-label={ko ? `${session.name} 탭 닫기` : `Close ${session.name} tab`} title={ko ? "탭 닫기 (파일은 그대로)" : "Close tab (the file stays)"}
+              onClick={() => void closeTab(session.sessionId)}>
+              <IconClose size={11} />
+            </button>
+          </span>
         ))}
         <button type="button" className={styles.openButton} onClick={() => void openFile()} aria-label={ko ? "문서 열기" : "Open document"} title={ko ? "문서 열기" : "Open document"}>
           <IconPlus size={14} />{sessions.length === 0 && <span>{ko ? "문서 열기" : "Open document"}</span>}

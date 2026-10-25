@@ -8,6 +8,9 @@ import { userDataDir } from "../runtime-paths";
 import { keychainGet, keychainSet } from "../secrets/keychain-host";
 import { canonicalDaemonPath, resolveDaemonServiceIdentity } from "./service-identity";
 
+/** Encoded native frame bytes, excluding its newline. */
+export const NATIVE_AUTH_MAX_FRAME_BYTES = 1048576;
+
 export type NativeAuthBinding = Readonly<{ scope: string; serviceIdentity: string }>;
 export type NativeCredential = Readonly<{ scope: string; generation: string; role: "gui" | "daemon"; publicKey: string; peerPublicKey: string }>;
 type BindingState = { service: string; account: string; userDataDir: string; storePath: string };
@@ -218,17 +221,30 @@ export function verifyNativeAuthFrame(credential: NativeCredential, frame: Reado
 /** Deterministic compact JSON, rejects values JSON would silently erase or
  * coerce. Wire input must equal this encoding, so duplicate keys fail closed. */
 export function nativeAuthCanonical(value: unknown): string {
+  const maxNodes = 8192;
   let nodes = 0;
   const walk = (v: unknown, depth: number): string => {
-    if (++nodes > 8192 || depth > 24) deny("native_auth_value_limit");
+    if (++nodes > maxNodes || depth > 24) deny("native_auth_value_limit");
     if (v === null || typeof v === "boolean") return JSON.stringify(v);
     if (typeof v === "number") { if (!Number.isFinite(v)) deny("native_auth_value_invalid"); return JSON.stringify(v); }
     if (typeof v === "string") { if (Buffer.byteLength(v) > 524288) deny("native_auth_value_limit"); return JSON.stringify(v); }
-    if (Array.isArray(v)) return "[" + v.map(x => walk(x, depth + 1)).join(",") + "]";
+    if (Array.isArray(v)) {
+      // Every array slot needs its own JSON value. map() skips holes (or reads
+      // inherited indices), which could emit invalid JSON after preflight.
+      // Check the minimum node cost first: a huge sparse length cannot make
+      // this scan unbounded before the normal value limit is reached.
+      if (v.length > maxNodes - nodes) deny("native_auth_value_limit");
+      const items: string[] = [];
+      for (let index = 0; index < v.length; index++) {
+        if (!Object.hasOwn(v, index)) deny("native_auth_value_invalid");
+        items.push(walk(v[index], depth + 1));
+      }
+      return "[" + items.join(",") + "]";
+    }
     if (!v || typeof v !== "object" || Object.getPrototypeOf(v) !== Object.prototype && Object.getPrototypeOf(v) !== null) deny("native_auth_value_invalid");
     return "{" + Object.keys(v).sort().map(k => JSON.stringify(k) + ":" + walk((v as Record<string, unknown>)[k], depth + 1)).join(",") + "}";
   };
-  const encoded = walk(value, 0); if (Buffer.byteLength(encoded) > 1048576) deny("native_auth_frame_limit"); return encoded;
+  const encoded = walk(value, 0); if (Buffer.byteLength(encoded) > NATIVE_AUTH_MAX_FRAME_BYTES) deny("native_auth_frame_limit"); return encoded;
 }
 /** The private inherited pipe contains only the daemon role, never GUI private.
  * This Node-only function requires the actual registered GUI handle and binding. */

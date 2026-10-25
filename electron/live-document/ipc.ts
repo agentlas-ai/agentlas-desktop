@@ -79,7 +79,7 @@ export function registerLiveDocumentIpc(input: { ipc: Pick<IpcMain, "handle">; a
     const picked = owner ? await dialog.showOpenDialog(owner, options) : await dialog.showOpenDialog(options);
     if (picked.canceled || !picked.filePaths[0]) return { ok: false, reason: "cancelled" };
     try {
-      const meta = await openLiveDocument({ chatId: id(chatId), path: picked.filePaths[0] });
+      const meta = await openLiveDocument({ chatId: id(chatId), path: picked.filePaths[0], openedBy: "owner" });
       chatBySession.set(meta.sessionId, meta.chatId);
       broadcast({ sessionId: meta.sessionId, chatId: meta.chatId });
       return { ok: true, sessionId: meta.sessionId };

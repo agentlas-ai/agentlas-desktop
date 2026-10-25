@@ -36,9 +36,14 @@ export function captureMemoryContextGeneration(input: {
     if (memory.ownerNamespace !== source.ownerNamespace || memory.revocationEpoch !== source.intakeEpoch)
       return { generation: null, reason: "host-source-custody-changed" };
     const db = getDb();
-    const chat = db.prepare("SELECT kind,parent_chat_id,archived_at,origin_surface,project_id FROM chats WHERE id=?").get(chatId) as
-      { kind: string | null; parent_chat_id: string | null; archived_at: string | null; origin_surface: string | null; project_id: string | null } | undefined;
+    const chat = db.prepare("SELECT agent_id,kind,parent_chat_id,archived_at,origin_surface,project_id FROM chats WHERE id=?").get(chatId) as
+      { agent_id: string; kind: string | null; parent_chat_id: string | null; archived_at: string | null; origin_surface: string | null; project_id: string | null } | undefined;
     if (!chat || chat.archived_at) return { generation: null, reason: "host-chat-boundary-unavailable" };
+    // A borrowed worker can inherit the controller's model-call scope while
+    // recalling its own memories. That does not make it the chat's journal
+    // owner; leave it on the existing actor-scoped recall fallback.
+    if (input.visibilityDomain === undefined && chat.agent_id !== input.agentId)
+      return { generation: null, reason: "host-chat-actor-mismatch" };
     // Same native journal owner derivation as actual invocation admission. It
     // is resolved locally, never copied from model/renderer JSON.
     const owner = (require("../runtime/agent-context-admission") as typeof import("../runtime/agent-context-admission")).agentContextOwnerBinding();

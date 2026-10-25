@@ -41,6 +41,21 @@ import {
 } from "./replay";
 import { mobileBridgeJsonBytes } from "./sanitize";
 import { mobileBridgeMailReplayMayRerun } from "./mail-replay-policy";
+import { isTransientSendRefusalCode, sendRefusalCode } from "../../shared/transient-send-refusal";
+
+/**
+ * A phone write the Desktop refused only because the chat (or its channel) was not ready yet: the codes of
+ * shared/transient-send-refusal.ts, every one refused before anything reached a model. It is not the command's final
+ * word (no-dead-end sweep 2026-10-25): it used to be stored in the replay ledger as "authority_error / Desktop rejected
+ * the request", so the phone's retry with the same key got the same refusal back for 24 h. The ledger entry is released
+ * and the phone gets a retryable, typed answer instead (old apps read it as an ordinary retryable failure: the error
+ * object keeps exactly {code, message, retryable}).
+ */
+export const MOBILE_BRIDGE_DESKTOP_NOT_READY_CODE = "desktop_not_ready";
+export function mobileBridgeNotReadyRefusal(error: unknown): string | null {
+  const code = sendRefusalCode(error);
+  return code && isTransientSendRefusalCode(code) ? code : null;
+}
 import {
   RELAY_PAIR_CODE_PLACEHOLDER,
   parseRelayPairRequestFrame,
@@ -1120,6 +1135,18 @@ export class AgentlasMobileBridgeServer {
             );
           },
         ).catch((ledgerError) => this.onError(errorOf(ledgerError)));
+      }
+      const notReady = !timeout && writeRequest && !secureRequest ? mobileBridgeNotReadyRefusal(error) : null;
+      if (notReady && this.replayStore && replayFingerprint) {
+        let released = false;
+        try { this.replayStore.release(state.context.deviceId, replayKey, replayFingerprint); released = true; }
+        catch (ledgerError) { this.onError(errorOf(ledgerError)); }
+        if (released) {
+          if (state.revoked || state.revocationPending || !this.clients.has(state)) return;
+          this.send(state, mobileBridgeFailure(request.id, MOBILE_BRIDGE_DESKTOP_NOT_READY_CODE,
+            "Desktop was not ready to take this yet; nothing was run. It can be sent again.", true));
+          return;
+        }
       }
       const uncertainWrite = timeout && writeRequest;
       let response: MobileBridgeReplayResponse = mobileBridgeFailure(

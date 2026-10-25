@@ -2,7 +2,8 @@ import { randomUUID } from "node:crypto";
 import type { IpcMainInvokeEvent } from "electron";
 import type { ChatHistoryEntry, InvocationCurrentTurnSteerReceipt, InvocationSteerResult, McpInvocationRequest } from "../../shared/types";
 import { getDb } from "../store/db";
-import { appendChatMessage, autoTitleFromFirstMessage } from "../store/chats";
+import { appendChatMessage, autoTitleFromFirstMessage, getChat } from "../store/chats";
+import { holdingAgentResidency } from "../runtime/agent-residency";
 import { emitDesktopStoreChange } from "../store/change-bus";
 import { getPendingInvocationAdmissionForChat } from "../store/invocation-admissions";
 import { invocationRunOwners, invocationProcessOwner } from "../store/invocation-run-owners";
@@ -46,8 +47,24 @@ export function queuedSendNoticeRunId(runId: string | null | undefined, sendId: 
   return runId || `pending-send:${sendId}`;
 }
 
+/**
+ * Another chat of the same Work project holds the project's single provider process in this host (one CLI per Work
+ * project, runtime/project-residency.ts). A message started now would be refused work_project_residency_busy before
+ * dispatch ("send again after the current turn finishes"); it waits here instead, shown once (no-dead-end sweep
+ * 2026-10-25). API and local-model lanes hold no project residency, so they never wait on this.
+ */
+export function workProjectHeldElsewhere(chatId: string): boolean {
+  try {
+    const chat = getChat(chatId);
+    const projectId = chat?.originSurface === "work" ? chat.projectId : null;
+    if (!projectId) return false;
+    return holdingAgentResidency().some((entry) => entry.projectId === projectId && entry.inUse && entry.chatId !== chatId);
+  } catch { return false; }
+}
+
 function chatIsFree(chatId: string): boolean {
   if (invocationService.activeChatIds().includes(chatId)) return false;
+  if (workProjectHeldElsewhere(chatId)) return false;
   try { if (getPendingInvocationAdmissionForChat(chatId)) return false; } catch { /* unreadable is not proof of busy */ }
   try { if (invocationRunOwners.getActiveOwner(chatId)) return false; } catch { /* same */ }
   return true;
@@ -126,7 +143,14 @@ export function queuedSendEndedNotice(locale: "ko" | "en"): string {
     : "This message could not run. Check the model connection and usage limits, then send it again.";
 }
 
-export function createRendererSendQueue(startNow: RendererStartNow): {
+export interface RendererSendQueueOptions {
+  /** Whether an IPC event is a trusted app page right now (ipc.ts assertTrustedSitePublishIpcSender). */
+  senderTrusted?(event: IpcMainInvokeEvent): boolean;
+}
+
+const UNTRUSTED_SENDER_CODES = new Set(["untrusted-site-publish-ipc-sender", "untrusted-site-publish-ipc-window"]);
+
+export function createRendererSendQueue(startNow: RendererStartNow, options: RendererSendQueueOptions = {}): {
   queue: PendingChatSends<IpcMainInvokeEvent>;
   /** invoke:run: start now, or accept into the queue. */
   run(event: IpcMainInvokeEvent, req: McpInvocationRequest): Promise<{ runId: string } | QueuedRunAnswer>;
@@ -143,11 +167,20 @@ export function createRendererSendQueue(startNow: RendererStartNow): {
     random: Math.random,
     isChatFree: chatIsFree,
     onBusyWait: ({ chatId, waitedMs }) => diagnoseBusyChat(chatId, waitedMs),
-    senderAlive: (event) => { try { return !event.sender.isDestroyed(); } catch { return false; } },
-    // The queue is Main's: a closed window's messages start from another open window of the app (its real IPC event).
-    replacementSender: () => liveAppControlRendererEvent(),
+    senderAlive: (event) => {
+      try { return !event.sender.isDestroyed() && (options.senderTrusted ? options.senderTrusted(event) : true); } catch { return false; }
+    },
+    // The queue is Main's: a closed window's messages start from another open window of the app (its real IPC event),
+    // only once that window is a trusted app page (right after a restart the first one can still be the startup page).
+    replacementSender: () => {
+      const event = liveAppControlRendererEvent();
+      if (!event) return null;
+      try { return !options.senderTrusted || options.senderTrusted(event) ? event : null; } catch { return null; }
+    },
+    senderRefused: (cause) => UNTRUSTED_SENDER_CODES.has(String((cause as { code?: unknown })?.code ?? (cause as { message?: unknown })?.message ?? "")),
     runState: queuedSendRunState,
     placement: queuedSendPlacement,
+    failureCode: (runId) => getInvocationRunReceipt(runId)?.errorCode ?? null,
     saveUserRow: (request) => {
       if (request.promptOrigin === "system") return null;
       const row = appendChatMessage(request.chatId, "user", request.userPrompt, request.images?.length ? { images: request.images } : undefined);
@@ -177,6 +210,13 @@ export function createRendererSendQueue(startNow: RendererStartNow): {
         } catch { /* the saved message and the log remain */ }
         return;
       }
+      // A run that took the message and failed has already shown its own typed failure (persistEmptyFailureNotice);
+      // a second line blaming "model connection and usage limits" was wrong for every app-side cause.
+      if (runId) {
+        let status: string | undefined;
+        try { status = getInvocationRunReceipt(runId)?.status; } catch { status = undefined; }
+        if (status === "failed" || status === "cancelled") return;
+      }
       try {
         appendChatMessage(chatId, "assistant", queuedSendEndedNotice(pickLocale(request)),
           { hostNotice: { purpose: "host-status", runId: queuedSendNoticeRunId(runId, sendId), status: "needs-owner" } });
@@ -199,6 +239,10 @@ export function createRendererSendQueue(startNow: RendererStartNow): {
         pendingSendId: record.id, queuedRequestId: `pending-send:${record.id}` });
       if (canQueuePendingSend(req) && queue.hasQueued(req.chatId)) {
         // Earlier messages of this chat are still waiting: this one goes behind them, in the order it was typed.
+        return queuedAnswer(accept(event, req, undefined));
+      }
+      if (canQueuePendingSend(req) && workProjectHeldElsewhere(req.chatId)) {
+        // Another chat of this Work project is using its provider: wait for it instead of a refused run.
         return queuedAnswer(accept(event, req, undefined));
       }
       return startOwnerSendOrAcceptRefusal(() => startNow(event, req), (cause) =>

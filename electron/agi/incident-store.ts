@@ -126,6 +126,9 @@ export class AgiIncidentStore {
     let created = false;
     let reopened = false;
     let rebound = false;
+    // Take the write lock before reading the incident. A concurrent daemon commit
+    // otherwise invalidates this WAL snapshot and the first UPDATE fails without
+    // waiting on busy_timeout (production: agi-monitor wake, database is locked).
     this.db.transaction(() => {
       const existing = this.byDigest(diagnosis.goalId, diagnosis.stateDigest);
       const group = !existing && groupKey ? this.db.prepare(`SELECT id FROM agi_incidents WHERE goal_id=? AND status='open' AND group_key=?
@@ -152,7 +155,7 @@ export class AgiIncidentStore {
       } else if (existing.heldReason) {
         this.db.prepare("UPDATE agi_incidents SET held_reason=NULL, updated_at_ms=? WHERE id=?").run(nowMs, existing.id);
       }
-    })();
+    }).immediate();
     return { incident: this.byDigest(diagnosis.goalId, diagnosis.stateDigest)!, created, reopened, rebound };
   }
 

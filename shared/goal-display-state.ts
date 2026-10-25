@@ -39,9 +39,21 @@ export function goalHeldForOwnerAnswer(goal: { status: string | null | undefined
   return goal.status === "waiting_tool" && GOAL_OWNER_QUESTION_REASONS.has(goal.blockedReason ?? "");
 }
 
+/**
+ * A Goal no owner instruction is recorded for (defined by an agent outside any owner turn) rests in the allowed resting status
+ * `waiting_tool` carrying this code, set once by the blocked-goal sweep instead of a retry every backoff step that could never
+ * succeed (production 2026-10-24 X Marketing: eight retries in 15 h, each shown as "running"). The owner's Resume press or
+ * message is the grant; any status transition clears the code.
+ */
+export const GOAL_OWNER_GRANT_REQUIRED = "goal_owner_grant_required";
+export function goalHeldForOwnerGrant(goal: { status: string | null | undefined; blockedReason?: string | null }): boolean {
+  return goal.status === "waiting_tool" && goal.blockedReason === GOAL_OWNER_GRANT_REQUIRED;
+}
+
 export type GoalOwnerAttention = "question" | "review" | "approval" | "budget";
 export function goalOwnerAttention(input: { status: string | null | undefined; pauseReason?: string | null; blockedReason?: string | null }): GoalOwnerAttention | null {
   if (input.status === "waiting_user" || goalHeldForOwnerAnswer(input)) return "question";
+  if (goalHeldForOwnerGrant(input)) return "approval";
   if (input.status === "blocked") {
     if (GOAL_OWNER_QUESTION_REASONS.has(input.blockedReason ?? "")) return "question";
     if (GOAL_OWNER_REVIEW_REASONS.has(input.blockedReason ?? "")) return "review";
@@ -67,7 +79,7 @@ export function goalDisplayState(input: { status: string | null | undefined; pau
     return status === "pausing" && pauseReason !== "user" ? "running" : "paused";
   }
   if (status === "blocked") return goalOwnerAttention(input) ? "needs_owner" : "blocked";
-  if (status === "waiting_user" || goalHeldForOwnerAnswer(input)) return "needs_owner";
+  if (status === "waiting_user" || goalHeldForOwnerAnswer(input) || goalHeldForOwnerGrant(input)) return "needs_owner";
   if (RUNNING_STATUSES.has(status)) return "running";
   return "none";
 }

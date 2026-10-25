@@ -28,6 +28,7 @@ import {
   classifyBrowserFailure,
   detectHumanCheck,
   isBrowserErrorPage,
+  isBrowserDomToolError,
   ladderOwnerCard,
   runBrowserLadder,
   type BrowserFailureCode,
@@ -416,7 +417,7 @@ function productionDeps(code: BrowserFailureCode, scope: LadderScope, ladderId: 
     },
     stop: (card) => {
       // A DOM tool error with no other way in is the agent's to handle, not an owner card (see below).
-      if (code === "native-tool-failed") return;
+      if (isBrowserDomToolError(code)) return;
       // Owner 2026-10-05: One tells the owner instead of a "press Retry" card in this room. The run itself never
       // stopped (the agent was told to continue other work); the card stays only when One cannot take the report.
       if (binding && reportHostAlertToOne({ chatId: binding.chatId, code: card.reasonCode,
@@ -481,7 +482,7 @@ export async function onAgentlasBrowserToolFailure(input: {
             : binding.locale === "ko" ? `사이트 로그인이 필요합니다${site}. 열린 로그인 카드에서 로그인하면 작업이 이어집니다.`
               : `The site needs the owner's sign-in${site}. Signing in from the open login card lets the run continue.` });
       }
-      if (result.state.final === "stopped" && code !== "native-tool-failed") stopped.set(key, { at: Date.now(), result });
+      if (result.state.final === "stopped" && !isBrowserDomToolError(code)) stopped.set(key, { at: Date.now(), result });
       return result;
     }).finally(() => { if (flights.get(key) === flight) flights.delete(key); });
     flights.set(key, flight);
@@ -494,7 +495,7 @@ export async function onAgentlasBrowserToolFailure(input: {
    * continue") and repeat that answer for 5 minutes; the AGI monitor then reported the Goal as stuck
    * (browser_unavailable:browser_ladder:native-tool-failed, 1.2.55 and 1.2.57). Now the agent gets its own error back.
    */
-  if (code === "native-tool-failed" && result.state.final === "stopped") return null;
+  if (isBrowserDomToolError(code) && result.state.final === "stopped") return null;
   return answerFor(result, input, scope);
 }
 

@@ -59,6 +59,11 @@ export const BROWSER_FAILURE_CODES = [
 ] as const;
 export type BrowserFailureCode = (typeof BROWSER_FAILURE_CODES)[number];
 
+/** A DOM tool error remains the agent's to handle when optional screen control cannot take over. */
+export function isBrowserDomToolError(code: string): boolean {
+  return code === "native-tool-failed";
+}
+
 export type LadderRung =
   | "reestablish"
   | "switch-surface"

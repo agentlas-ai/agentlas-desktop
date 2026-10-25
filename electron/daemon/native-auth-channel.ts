@@ -8,7 +8,7 @@ import { createHash, randomBytes } from "node:crypto";
 import type { Readable, Writable } from "node:stream";
 import { boundedUnixSocketPath, defaultControlSocketPath, sweepStalePrivateSocketDirs, type ControlSocketPeer } from "./control-socket";
 import { canonicalDaemonPath } from "./service-identity";
-import { assertNativeAuthBinding, nativeAuthCanonical, nativeAuthError, nativeDaemonEnrollment, acceptNativeDaemonEnrollment, type NativeAuthBinding, type NativeCredential, type NativeIngressNoStartObservation, type NativeServiceObservation, validateNativeServiceObservationRequest, validateNativeIngressNoStartRequest, validateNativeTerminalPreparationRequest } from "./native-auth-credentials";
+import { NATIVE_AUTH_MAX_FRAME_BYTES as MAX_BYTES, assertNativeAuthBinding, nativeAuthCanonical, nativeAuthError, nativeDaemonEnrollment, acceptNativeDaemonEnrollment, type NativeAuthBinding, type NativeCredential, type NativeIngressNoStartObservation, type NativeServiceObservation, validateNativeServiceObservationRequest, validateNativeIngressNoStartRequest, validateNativeTerminalPreparationRequest } from "./native-auth-credentials";
 import { createNativeDaemonAuthenticator, createNativeGuiAuthenticator, decodeNativeAuthLine, type NativeAuthenticatedIdentity, type NativeTerminalCheckpointCapability, type NativeIngressNoStartConsumer, type NativeServiceObservationConsumer } from "./native-session-auth";
 const guiChannelIdentities = new WeakMap<object, () => NativeAuthenticatedIdentity | undefined>();
 export function nativeGuiChannelIdentity(channel: unknown): NativeAuthenticatedIdentity | undefined { return channel !== null && typeof channel === "object" ? guiChannelIdentities.get(channel)?.() : undefined; }
@@ -30,7 +30,6 @@ export interface NativeServiceObservationPort { dispatch(request: NativePreparat
 export interface NativeIngressNoStartPort { dispatch(request: NativePreparationWireRequest, opaqueServiceProof: unknown): Promise<unknown> }
 function exactKeys(value: Record<string, unknown>, fields: readonly string[]): boolean { const keys = Object.keys(value).sort(), expected = [...fields].sort(); return keys.length === expected.length && keys.every((key, index) => key === expected[index]); }
 export interface NativeTerminalCheckpointPort { dispatch(request: NativePreparationWireRequest): Promise<unknown>; request(action: "cancel" | "quiesce" | "finish" | "ingress.reject", payload: Readonly<Record<string, unknown>>): Promise<unknown> }
-const MAX_BYTES = 1048576;
 /**
  * invoke.nativeStart answers only after the daemon's whole start (preparation judges, runtime checks, first provider
  * dispatch). A 10 s bound closed the channel on a slow start, and nothing re-attaches it, so every later One action

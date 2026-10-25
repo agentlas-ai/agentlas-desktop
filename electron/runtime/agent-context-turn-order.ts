@@ -12,6 +12,8 @@
 //     conversation can answer, so the caller says so at once and names what to do,
 //   - the turn ahead died (its process is gone) and its run lease stays open longer than a restart needs to release it, or
 //   - the wait reached its limit while the turn ahead was still running.
+// The product caller (agent-context-admission.ts) passes onParked and waitPastLimit (no-dead-end sweep 2026-10-25): a parked or
+// long turn ahead is then waited for with its reason on screen, and only a dead holder still ends the wait.
 // The caller turns each into a plain sentence in the owner's language. No Electron import: the background service loads this
 // file too.
 import type { TurnLineHandle, TurnLineSnapshot } from "./agent-context-turn-line";
@@ -51,6 +53,14 @@ export interface AgentContextTurnSlotOptions {
   line?(): TurnLineHandle;
   /** Called once, when the turn starts to wait. */
   onWait?(): void;
+  /**
+   * When given, a turn ahead that waits for a person does not end this wait: this is called (once per kind) and the turn
+   * keeps its place until the owner answers or stops there (no-dead-end sweep 2026-10-25: refusing it ended the owner's
+   * message with "send again"). Without it the old refusal ("parked") stands.
+   */
+  onParked?(kind: string | null): void;
+  /** True: the wait limit does not end the wait (the turn ahead is still running; the owner can stop either). */
+  waitPastLimit?: boolean;
   maxWaitMs?: number;
   parkGraceMs?: number;
   stuckGraceMs?: number;
@@ -106,7 +116,7 @@ export async function acquireAgentContextTurnSlot(sessionKey: string, options: A
     }
     const started = now(), limit = options.maxWaitMs ?? TURN_WAIT_MAX_MS;
     const parkGrace = options.parkGraceMs ?? TURN_PARK_GRACE_MS, stuckGrace = options.stuckGraceMs ?? TURN_STUCK_GRACE_MS;
-    let delay = POLL_FIRST_MS, stuckSince: number | null = null;
+    let delay = POLL_FIRST_MS, stuckSince: number | null = null, parkedTold: string | null | undefined = undefined;
     for (;;) {
       options.signal?.throwIfAborted();
       let snapshot: TurnLineSnapshot | null = null;
@@ -118,13 +128,17 @@ export async function acquireAgentContextTurnSlot(sessionKey: string, options: A
       if (queue[0] === ticket && (!snapshot || snapshot.head) && !blocked) return { waited, release };
       // The turn ahead waits for a person: nothing here can answer that, and waiting for it is only a stall.
       const holder = snapshot?.holder;
-      if (holder?.parked && now() - holder.parked.since >= parkGrace) throw new AgentContextTurnWaitError("parked", holder.parked.kind);
+      if (holder?.parked && now() - holder.parked.since >= parkGrace) {
+        if (!options.onParked) throw new AgentContextTurnWaitError("parked", holder.parked.kind);
+        const kind = holder.parked.kind ?? null;
+        if (parkedTold !== kind) { parkedTold = kind; try { options.onParked(kind); } catch { /* a status line never ends the wait */ } }
+      }
       // A holder that died and left its run lease open: the next start of its kind of process releases it; if that does not come, the owner must.
       const turn = blocked ? options.blockedTurn?.() ?? null : null;
       const diedHolder = !!turn && !!snapshot?.dead.some(item => item.turn.chatId === turn.chatId && item.turn.runId === turn.runId);
       if (diedHolder) { stuckSince ??= now(); if (now() - stuckSince >= stuckGrace) throw new AgentContextTurnWaitError("stuck"); } else stuckSince = null;
       if (!waited) { waited = true; options.onWait?.(); }
-      if (now() - started >= limit) throw new AgentContextTurnWaitError("expired");
+      if (now() - started >= limit && !options.waitPastLimit) throw new AgentContextTurnWaitError("expired");
       let wake!: () => void;
       const woken = new Promise<void>(resolve => { wake = resolve; });
       const set = wakeups.get(sessionKey) ?? new Set<() => void>();

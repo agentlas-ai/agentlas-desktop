@@ -83,12 +83,23 @@ const ERROR_TEXT: Record<string, [string, string]> = {
   goal_panel_node_done: ["끝난 항목은 멈출 수 없어요.", "A finished item cannot be paused."],
   goal_panel_edit_invalid: ["내용을 확인해 주세요.", "Check the text and try again."],
   goal_control_binding_changed: ["이 대화의 목표가 바뀌었어요. 다시 열어 주세요.", "This conversation's goal changed. Reopen the panel."],
+  // Codes Main already returned that fell through to "try again" (goal-tree audit 2026-10-25): each says what to do.
+  goal_panel_node_not_found: ["그 항목은 이미 바뀌었거나 없어졌어요. 위 계획이 지금 계획이에요.", "That item was changed or removed already. The plan above is the current one."],
+  goal_plan_node_missing: ["그 항목은 이미 바뀌었거나 없어졌어요. 위 계획이 지금 계획이에요.", "That item was changed or removed already. The plan above is the current one."],
+  goal_panel_suggestion_not_found: ["그 제안은 이미 처리됐어요.", "That suggestion was already handled."],
+  goal_panel_strategy_required: ["하위 목표는 전략 아래에만 넣을 수 있어요. 먼저 전략을 고르세요.", "A sub-goal goes under a strategy. Pick a strategy first."],
+  goal_panel_not_a_tree: ["이 계획은 단계 목록이라 전략 아래에 넣을 수 없어요. 항목으로 추가해 주세요.", "This plan is a flat list, so nothing goes under a strategy. Add it as an item."],
+  prerequisites_invalid: ["선행 항목 연결이 맞지 않아요(없는 항목이거나 순환). 연결을 고쳐 주세요.", "The prerequisites do not line up (a missing item or a loop). Fix the links."],
+  goal_panel_amendment_not_recorded: ["목표 문장 변경이 기록되지 않았어요. 위 문장이 지금 목표예요.", "The goal text change was not recorded. The text above is the current goal."],
+  goal_panel_shape_unavailable: ["이 목표는 이 앱의 목표 실행기가 맡고 있지 않아 여기서 계획을 나눌 수 없어요. 목표를 맡은 화면에서 나눠 주세요.", "This app's goal runner does not run this goal, so its plan cannot be divided here. Divide it where the goal runs."],
+  goal_panel_edit_failed: ["저장하지 못했어요. 위에 보이는 계획이 지금 저장된 계획이에요.", "It was not saved. The plan shown above is what is saved now."],
 };
 
 function errorText(code: string, locale: Locale): string {
   const known = ERROR_TEXT[code];
   if (known) return known[locale === "ko" ? 0 : 1];
-  return locale === "ko" ? "바꾸지 못했어요. 다시 시도해 주세요." : "That change did not go through. Try again.";
+  return locale === "ko" ? `바꾸지 못했어요${code ? ` (${code})` : ""}. 위에 보이는 것이 지금 저장된 상태예요.`
+    : `That change did not go through${code ? ` (${code})` : ""}. What is shown above is what is saved now.`;
 }
 
 function relative(at: string, nowMs: number, locale: Locale): string {
@@ -199,6 +210,9 @@ export function GoalRailPanel({ view, locale, onView, nowMs: fixedNow }: {
       const result = await api.shape(view.chatId, view.goalId);
       if (result.view) onView(result.view);
       if (!result.ok) setNotice({ kind: "error", text: errorText(result.code, locale) });
+    } catch {
+      // A thrown shape call left no notice at all (the button just stopped spinning).
+      setNotice({ kind: "error", text: errorText("", locale) });
     } finally { setBusy(false); }
   };
 

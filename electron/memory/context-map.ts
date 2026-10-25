@@ -50,6 +50,52 @@ type ProcessResult = {
   errorMessage?: string;
 };
 
+// Core errors are JSON on stdout, not necessarily stderr. Only these public
+// machine codes may cross the child-output/log boundary; text can contain
+// project content, prompts, credentials, or host exception details.
+const REFRESH_CORE_ERROR_CODES = new Set([
+  "context_refresh_incomplete",
+  "project_not_initialized",
+  "project_bootstrap_incomplete",
+]);
+
+function contextRefreshFailure(
+  result: ProcessResult,
+  projectIdentityValid: boolean,
+  canonicalMapValid: boolean | null,
+): object {
+  let coreError: string | undefined;
+  for (const output of [result.stdout, result.stderr]) {
+    if (!output || Buffer.byteLength(output, "utf8") > MAX_RESULT_BYTES) continue;
+    try {
+      const payload: unknown = JSON.parse(output);
+      const code = payload && typeof payload === "object" && "error" in payload
+        ? payload.error : undefined;
+      if (typeof code === "string" && REFRESH_CORE_ERROR_CODES.has(code)) {
+        coreError = code;
+        break;
+      }
+    } catch {
+      // Unstructured child text is deliberately never logged.
+    }
+  }
+  const reason = result.timedOut ? "timeout"
+    : result.overflowed ? "output_limit"
+      : result.errorMessage ? "spawn_error"
+        : result.status !== 0 ? "process_exit"
+          : !projectIdentityValid ? "project_identity_changed"
+            : "invalid_canonical_map";
+  return {
+    reason,
+    exitCode: result.status,
+    timedOut: result.timedOut,
+    overflowed: result.overflowed,
+    projectIdentityValid,
+    canonicalMapValid,
+    ...(coreError ? { coreError } : {}),
+  };
+}
+
 type ContextSliceResult = {
   schemaVersion?: string;
   rendered?: string;
@@ -481,11 +527,16 @@ export async function triggerProjectContextMapRefresh(
         },
       );
       if (jobSignal.aborted) return false;
-      const canonical = result.status === 0
+      const projectIdentityValid = verifyActivatedFolderIdentity(projectPath);
+      const processSucceeded = result.status === 0
         && !result.timedOut
-        && !result.overflowed
-        && verifyActivatedFolderIdentity(projectPath)
-        && await hasCanonicalCodeMap(projectPath);
+        && !result.overflowed;
+      const canonicalMapValid = processSucceeded && projectIdentityValid
+        ? await hasCanonicalCodeMap(projectPath)
+        : null;
+      const canonical = processSucceeded
+        && projectIdentityValid
+        && canonicalMapValid === true;
       if (
         jobSignal.aborted
         || (canonical && !verifyActivatedFolderIdentity(projectPath))
@@ -495,7 +546,7 @@ export async function triggerProjectContextMapRefresh(
         if (!result.aborted) {
           console.warn(
             `[memory] context-map refresh failed (${projectPath}): `
-            + `${String(result.stderr || result.errorMessage || "invalid canonical map").trim().slice(0, 500)}`,
+            + JSON.stringify(contextRefreshFailure(result, projectIdentityValid, canonicalMapValid)),
           );
         }
         return false;

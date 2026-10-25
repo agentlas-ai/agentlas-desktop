@@ -23,11 +23,12 @@ import {
 } from "./app-runtime-coordinator";
 import { latestGoalWaitSubscription } from "./wait-subscriptions";
 import { settleDaemonTurnGoals } from "./daemon-turn-goal";
+import { reconcileGoalTree } from "./goal-tree-reconcile";
 import { type EffectObservationDispatcher } from "./effect-observation-tickets";
 import { currentUiLocale } from "../ui-locale";
 import { holdingAgentResidency } from "../runtime/agent-residency";
 import { decideGoalContinuationWake, ownerRequestWaiting, recordGoalWake, SAME_CAUSE_WAKE_REASON, type GoalWakeSource } from "./wake-arbiter";
-import { GOAL_OWNER_ANSWER_REQUIRED } from "../../shared/goal-display-state";
+import { GOAL_OWNER_ANSWER_REQUIRED, GOAL_OWNER_GRANT_REQUIRED } from "../../shared/goal-display-state";
 import { WORK_PROJECT_RESIDENCY_BUSY_CODE } from "../runtime/project-residency";
 
 export type BlockedGoalSweepAction = "observation_dispatched" | "resumed" | "retry_scheduled" | "cancelled" | "deferred";
@@ -98,12 +99,7 @@ function scheduleRetry(run: LongRunRecord, kind: "observe" | "resume", detail: s
     retryIndex: slot.retryIndex, nextAt: slot.nextAt, detail,
     trigger: options.dispatchFailed ? `dispatch-failed:${trigger}` : trigger,
     appInstanceId: desktopAppInstanceId() });
-  if (slot.retryIndex === 0 && detail === "goal_owner_grant_unrecorded") {
-    // No model was tried: the host found no recorded owner grant to continue on, and the owner's next message is one.
-    notify(run, "effect-retrying",
-      "이 목표를 이어갈 오너 지시 기록을 찾지 못해 멈춰 있어요. 이 방에 한 번 더 말씀해 주시면 그 메시지로 이어갑니다.",
-      "This goal is waiting because no recorded instruction from you was found to continue on. Send one more message here and it continues from it.");
-  } else if (slot.retryIndex === 0) {
+  if (slot.retryIndex === 0) {
     const minutes = Math.max(1, Math.round((Date.parse(slot.nextAt) - Date.now()) / 60_000));
     notify(run, "effect-retrying", kind === "observe"
       ? `이전 작업이 반영됐는지 지금은 확인하지 못했어요. ${minutes}분 뒤 앱이 스스로 다시 확인하고 이어갑니다.`
@@ -164,6 +160,35 @@ function parkForReplayBarrier(run: LongRunRecord, code: string, trigger: string)
   if (!told) notify(latest, "effect-retrying", "앞 작업 결과를 확인하지 못해 자동으로 이어가지 않았어요. 이어가기를 누르면 계속합니다.",
     "I could not confirm the result of the earlier step, so I did not continue on my own. Press Resume to continue.");
   return { runId: run.id, fromReason: run.blockedReason, action: "deferred", detail: code };
+}
+
+/**
+ * A Goal with no recorded owner grant rests in waiting_tool carrying GOAL_OWNER_GRANT_REQUIRED (shared/goal-display-state.ts):
+ * shown as "needs you" with a working Resume (the press is the grant, ipc chats:resumeGoal), never as running, and with no
+ * retry schedule. One notice per Goal. Any status transition (the owner's Resume or message) clears the code.
+ */
+function parkForOwnerGrant(run: LongRunRecord, trigger: string): BlockedGoalSweepResult {
+  const told = replayBarrierToldFor(run.id, GOAL_OWNER_GRANT_REQUIRED);
+  const parked = getDb().transaction(() => {
+    const current = getLongRun(run.id);
+    if (!current || current.version !== run.version) throw new Error("blocked_goal_sweep_state_changed");
+    if (current.status === "waiting_tool" && current.blockedReason === GOAL_OWNER_GRANT_REQUIRED) return current;
+    const changed = getDb().prepare(`UPDATE long_runs SET status='waiting_tool', pause_reason=NULL, blocked_reason=?,
+      app_instance_id=COALESCE(?, app_instance_id), paused_at=NULL, updated_at=?, version=version+1
+      WHERE id=? AND status=? AND version=?`)
+      .run(GOAL_OWNER_GRANT_REQUIRED, desktopAppInstanceId(), new Date().toISOString(), current.id, current.status, current.version);
+    if (changed.changes !== 1) throw new Error("blocked_goal_sweep_state_changed");
+    if (current.status !== "waiting_tool") appendLongRunEvent({ runId: current.id, kind: "run.status_changed", actorKind: "host",
+      payload: { from: current.status, to: "waiting_tool", reason: GOAL_OWNER_GRANT_REQUIRED } });
+    appendLongRunEvent({ runId: current.id, kind: BLOCKED_GOAL_SWEEP_EVENT_KIND, actorKind: "host",
+      payload: { schemaVersion: BLOCKED_GOAL_SWEEP_SCHEMA, action: REPLAY_BARRIER_OWNER_NEEDED_ACTION, detail: GOAL_OWNER_GRANT_REQUIRED,
+        fromStatus: current.status, trigger: trigger.slice(0, 80), appInstanceId: desktopAppInstanceId() } });
+    return getLongRun(current.id) ?? current;
+  }).immediate();
+  if (!told) notify(parked, "effect-retrying",
+    "이 목표는 오너 지시 기록 없이 만들어져 아직 시작하지 않았어요. 목표 칩의 이어가기를 누르거나 이 방에 말씀하시면 바로 이어갑니다.",
+    "This goal was set up without an instruction from you, so it has not started. Press Resume on the goal chip or send a message here and it continues.");
+  return { runId: run.id, fromReason: run.blockedReason, action: "deferred", detail: GOAL_OWNER_GRANT_REQUIRED };
 }
 
 function resume(run: LongRunRecord, dispatcher: EffectObservationDispatcher, trigger: string): BlockedGoalSweepResult {
@@ -336,9 +361,12 @@ function sweepOne(input: LongRunRecord, dispatcher: EffectObservationDispatcher,
   budget: { dispatches: number }): BlockedGoalSweepResult | null {
   let run = input;
   const defer = (detail: string): BlockedGoalSweepResult => ({ runId: run.id, fromReason: run.blockedReason, action: "deferred", detail });
+  // A deleted room ends its Goal even when the owner had paused it: the deletion is the owner's later, terminal action, and
+  // an owner-paused Goal with no room has no way back (production run_551d4283, the YouTube launch room deleted while the
+  // Goal was paused: paused for 15 days, re-owned at every app start). Checked before the owner hold for that reason.
+  if (goalOfDeletedChat(run)) return closeGoalOfDeletedChat(run, trigger);
   // An owner/user pause is a boundary: no observation, retry or resume until the owner resumes it.
   if (longRunOwnerHold(run.id)) return defer(LONG_RUN_OWNER_HOLD_CODE);
-  if (goalOfDeletedChat(run)) return closeGoalOfDeletedChat(run, trigger);
   // An explicit (goal-chip) Goal carries its owner grant in its recorded goal-mode turn, not in a stored revision.
   // Every resume path (effect observation, this sweep, the owner's Resume) needs the revision, so adopt it at the
   // first stop the sweep sees — before any observation is dispatched, because adopting appends a ledger event and
@@ -422,7 +450,12 @@ function sweepOne(input: LongRunRecord, dispatcher: EffectObservationDispatcher,
   // paused by quitting mid-turn (reproduced 2026-09-25). An explicit Goal's grant was adopted above; one with no
   // recorded goal-mode turn (defined by IPC only) is kept as it is: the host never invents authority, and never
   // cancels an owner-defined Goal for lacking one — the owner's next message grants it.
-  if (!getChatGoalRevision(run.goalId)) return scheduleRetry(run, "resume", "goal_owner_grant_unrecorded", trigger);
+  // Waiting for that grant is the owner's decision, not a retry: rest once, visibly, instead of a backoff loop that can
+  // never succeed (production 2026-10-24 X Marketing: eight retries in 15 h, each shown as running).
+  if (!getChatGoalRevision(run.goalId)) {
+    try { return parkForOwnerGrant(run, trigger); }
+    catch (error) { logSweepFailureCause("owner-grant-park", run.id, GOAL_OWNER_GRANT_REQUIRED, error); return defer(GOAL_OWNER_GRANT_REQUIRED); }
+  }
   if (budget.dispatches >= BLOCKED_GOAL_SWEEP_MAX_DISPATCHES) return defer("dispatch_budget");
   budget.dispatches += 1;
   return resume(run, dispatcher, trigger);
@@ -503,6 +536,11 @@ export function sweepBlockedGoals(dispatcher: EffectObservationDispatcher, trigg
   // First, close the Goals whose only run was a background-service turn that has ended: below, a queued Goal is a resume
   // candidate, and resuming one whose work already finished would redo it.
   try { settleDaemonTurnGoals(); } catch (error) { console.warn("[blocked-goal-sweep] service-turn Goals could not be settled:", error); }
+  // Contracts and tasks still open under an ended Goal run take that run's outcome (idempotent; one ledger event per repair).
+  try {
+    const repaired = reconcileGoalTree();
+    if (repaired.length) console.info("[blocked-goal-sweep] goal tree reconciled", JSON.stringify(repaired.map((row) => ({ runId: row.runId, repair: row.repair }))));
+  } catch (error) { console.warn("[blocked-goal-sweep] goal tree reconcile failed:", error); }
   const results: BlockedGoalSweepResult[] = [];
   const budget = { dispatches: 0 };
   // The per-sweep dispatch budget is first come, first served, so the order is the fairness rule. Id order always
@@ -516,6 +554,7 @@ export function sweepBlockedGoals(dispatcher: EffectObservationDispatcher, trigg
       AND (status IN ('blocked','queued')
         OR (status = 'paused' AND pause_reason IN ('runtime_unavailable','app_closed','crash_recovery'))
         OR (status = 'waiting_tool' AND blocked_reason = ?)
+        OR (root_chat_id IS NULL AND status IN ('draft','paused','pausing','waiting_tool','waiting_worker','waiting_user','verifying','running'))
         OR (status IN ('waiting_tool','running') AND EXISTS (SELECT 1 FROM long_run_events e WHERE e.run_id = long_runs.id AND e.kind IN (?, ?))))
       ORDER BY id LIMIT 100`).all(afterId, GOAL_OWNER_ANSWER_REQUIRED, BLOCKED_GOAL_SWEEP_EVENT_KIND, OWNER_GOAL_AMENDMENT_PENDING_KIND) as Array<{ id: string; updatedAt: string }>;
     if (!rows.length) break;

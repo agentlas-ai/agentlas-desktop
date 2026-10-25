@@ -16,7 +16,7 @@ import {
   resolveTelegramGoalIntent,
 } from "./judged-intents";
 import { runMcpInvocation } from "../mcp/client";
-import { invocationService } from "../invocation/service";
+import { invocationErrorAsksOwner, invocationService } from "../invocation/service";
 import { captureTelegramOneInvocationBinding } from "../invocation/workspace-binding";
 import { prejudgeOneRequestIntent } from "../one/judged-request-intent";
 import { prejudgeOneMemoryIntent } from "../one/memory-detector";
@@ -36,6 +36,8 @@ import { clearInlineSelect, type InlineKeyboardMarkup } from "./inline-select";
 import { getAgentById, listInstalledAgents } from "../mcp/registry";
 import { createChat, getChat, getChatWorkingFolder, setChatWorkingFolder } from "../store/chats";
 import { getDb } from "../store/db";
+import { isTransientSendRefusal, transientSendBackoffMs } from "../../shared/transient-send-refusal";
+import { finishTelegramInbound, markTelegramInboundHandling, persistTelegramInbound, takeReplayableTelegramInbound, telegramPollerKey } from "./inbound-queue";
 import { applySeatSnapshotToChats, ensureTelegramRoomSeat } from "../store/seats";
 import { getFirm } from "../store/firms";
 import { getProject } from "../store/projects";
@@ -1526,6 +1528,17 @@ export function stopTelegramWorkers(): void {
 
 async function pollTelegram(poller: Poller): Promise<void> {
   let offset = currentOffset([...poller.bindingIds]);
+  // Messages an earlier process accepted (offset already saved) but never started handling: their rooms take them now,
+  // in arrival order, before anything new (inbound-queue.ts). A message whose handling had started is not run twice.
+  try {
+    const pending = takeReplayableTelegramInbound(getDb(), telegramPollerKey(poller.token));
+    if (pending.clearedHandling || pending.clearedExpired) {
+      console.warn("[telegram] inbound rows from an earlier process were not replayed", { handling: pending.clearedHandling, expired: pending.clearedExpired });
+    }
+    for (const item of pending.replay) enqueueTelegramUpdate(poller, item.update as TelegramUpdate, { persisted: true });
+  } catch (error) {
+    console.warn("[telegram] inbound replay unavailable:", maskTelegramSecrets(error instanceof Error ? error.message : String(error)));
+  }
   let consecutiveErrors = 0;
   while (!poller.controller.signal.aborted) {
     try {
@@ -1601,12 +1614,26 @@ function logTelegramUpdateFailure(error: unknown): void {
  * 방마다 한 줄. 한 방에서는 실행이 하나씩 순서대로 돌고, 다른 방과 폴링 루프는 그것을
  * 기다리지 않는다. 방과 바인딩은 일대일(findBindingForChat)이라 방 줄이 곧 바인딩 줄이다.
  */
-function enqueueTelegramUpdate(poller: Poller, update: TelegramUpdate): void {
+function enqueueTelegramUpdate(poller: Poller, update: TelegramUpdate, options: { persisted?: boolean } = {}): void {
   const chat = update.message?.chat ?? update.callback_query?.message?.chat;
   const key = chat ? String(chat.id) : "";
+  const pollerKey = telegramPollerKey(poller.token);
+  // Durable before it waits: a quit, update or crash while it waits no longer loses it (inbound-queue.ts).
+  let durable = options.persisted === true;
+  if (!durable) {
+    try { persistTelegramInbound(getDb(), { pollerKey, updateId: update.update_id, chatKey: key, update }); durable = true; }
+    catch (error) { logTelegramUpdateFailure(error); }
+  }
   const previous = poller.lanes.get(key) ?? Promise.resolve();
   const next: Promise<void> = previous
-    .then(() => (poller.controller.signal.aborted ? undefined : handleTelegramUpdate(poller, update)))
+    .then(() => {
+      // Aborted before its turn (the poller stopped): the row stays queued and the next poller start delivers it.
+      if (poller.controller.signal.aborted) return undefined;
+      if (durable) { try { markTelegramInboundHandling(getDb(), pollerKey, update.update_id); } catch (error) { logTelegramUpdateFailure(error); } }
+      return handleTelegramUpdate(poller, update).finally(() => {
+        if (durable) { try { finishTelegramInbound(getDb(), pollerKey, update.update_id); } catch (error) { logTelegramUpdateFailure(error); } }
+      });
+    })
     .catch(logTelegramUpdateFailure)
     .finally(() => {
       if (poller.lanes.get(key) === next) poller.lanes.delete(key);
@@ -2525,6 +2552,15 @@ async function runOneBindingInvocation(
         return;
       }
       if (event.kind === "error") {
+        // A failed ending that still asks the owner a question (a team turn whose workers did not all verify re-emits its
+        // held answer as an error; service.ts invocationErrorAsksOwner) is a question, not a failure: the owner gets the
+        // question as plain text and answers with the next message, and the service holds the Goal for that answer.
+        const asked = invocationErrorAsksOwner(event) ? (event.text ?? event.durableTextForVerification ?? "").trim() : "";
+        if (asked) {
+          finalText = asked;
+          finish(() => resolve(flattenSentinelsForTelegram(asked, replyLocale)));
+          return;
+        }
         errorMessage = event.error?.message ?? "";
         finish(() => reject(new Error(errorMessage.trim() || tg("error.no_reply", {}, replyLocale))));
       }
@@ -2534,18 +2570,31 @@ async function runOneBindingInvocation(
       finish(() => reject(new TelegramInvocationTimeoutError(tg("run.timeout", {}, replyLocale))));
     }, TELEGRAM_INVOCATION_TIMEOUT_MS);
     timer.unref?.();
-    try {
-      const started = invocationService.start(request, workspaceBinding, {
-        // 원격 대화형 표식 — 질문 fence는 평문화돼 전송되고 사용자가 다음 메시지로 답한다.
-        // (미지정이면 "누락된 헤드리스"와 구분이 안 되는 fail-open 상태가 된다.)
-        source: "telegram",
-        surfaceContext,
-      });
-      runId = started.runId;
-      activeOneRunByBinding.set(binding.id, runId);
-    } catch (error) {
-      finish(() => reject(error instanceof Error ? error : new Error(String(error))));
-    }
+    // A start refused only because the room was not ready yet (its previous turn settling, busy in the other host, the
+    // service channel attaching: shared/transient-send-refusal.ts, refused before anything reached a model) waits and
+    // starts again under a new run id, inside this message's own time limit, instead of answering "run failed"
+    // (no-dead-end sweep 2026-10-25).
+    const startAttempt = (attempt: number): void => {
+      if (settled) return;
+      try {
+        const started = invocationService.start(attempt === 0 ? request : { ...request, runId: randomUUID() }, workspaceBinding, {
+          // 원격 대화형 표식 — 질문 fence는 평문화돼 전송되고 사용자가 다음 메시지로 답한다.
+          // (미지정이면 "누락된 헤드리스"와 구분이 안 되는 fail-open 상태가 된다.)
+          source: "telegram",
+          surfaceContext,
+        });
+        runId = started.runId;
+        activeOneRunByBinding.set(binding.id, runId);
+      } catch (error) {
+        if (isTransientSendRefusal(error)) {
+          const retry = setTimeout(() => startAttempt(attempt + 1), transientSendBackoffMs(attempt));
+          retry.unref?.();
+          return;
+        }
+        finish(() => reject(error instanceof Error ? error : new Error(String(error))));
+      }
+    };
+    startAttempt(0);
   });
 }
 

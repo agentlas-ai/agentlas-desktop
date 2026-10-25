@@ -222,7 +222,18 @@ export async function runSteps(ports: RunPorts, capability: Capability, params: 
         if (elements.length === 0) return "unreadable";
         if (elements.some((element) => element.role === "AXButton" && isCancelButton(cleanLabel(element.label) ?? ""))) return where;
         if (purposeIsPanel) return null; // About and Show <panel>: the panel is what was asked for
-        if (elements.some((element) => element.role === "AXButton" && ANSWER_BUTTON.test(cleanLabel(element.label) ?? "")) && !elements.some((element) => element.role === "AXToolbar")) return where;
+        // an answer button that sits on the window itself - not in its toolbar and not inside a web page, a text or a scroll area (independent review 5, T4: an editor or an
+        // Electron page with an OK button on it is a document; a confirmation window with a toolbar and one OK is a question)
+        const byIndex = new Map(elements.map((element) => [element.element_index, element]));
+        const insideDocumentPart = (element: ElementRecord): boolean => {
+          let parent = element.parent_index === undefined ? undefined : byIndex.get(element.parent_index);
+          for (let hops = 0; parent && hops < 64; hops += 1) {
+            if (DOCUMENT_ROLES.has(parent.role ?? "")) return true;
+            parent = parent.parent_index === undefined ? undefined : byIndex.get(parent.parent_index);
+          }
+          return false;
+        };
+        if (elements.some((element) => element.role === "AXButton" && ANSWER_BUTTON.test(cleanLabel(element.label) ?? "") && !insideDocumentPart(element))) return where;
         if (!elements.some((element) => element.role === "AXButton") || elements.some((element) => DOCUMENT_ROLES.has(element.role ?? ""))) return null;
         // buttons and a message and nothing a document holds: a dialog if it is dialog-sized, a canvas app's document window if it is large
         const bounds = (await ports.actuator.listWindows({ pid: found.pid }, { signal: ports.signal }).catch(() => [])).find((window) => window.windowId === found.id)?.bounds;

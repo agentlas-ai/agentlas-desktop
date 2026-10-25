@@ -20,6 +20,7 @@ import { canResumeInvocationBrowserLoginWait, claimInvocationBrowserLoginWait, r
 import { isOneQuietReply } from "../../shared/one-supervisor";
 import { bindWorkAttachmentRun, workAttachmentGroupIds, releaseWorkAttachmentRun, redactWorkAttachmentEvent, redactWorkAttachmentText } from "./work-attachments";
 import { stoppedGoalMessageReopens } from "../../shared/goal-display-state";
+import { TRANSIENT_SEND_DEADLINE_MS, isTransientSendRefusalCode, transientSendBackoffMs } from "../../shared/transient-send-refusal";
 import { withBrowserDownloadProofContext } from "../long-run/download-proof";
 import { admitMainInvocation, takeMainInvocationAdmission, MainInvocationLifetime, runMainBackgroundTask, type MainInvocationAdmission } from "../runtime/scheduled-root-context";
 import { withBuiltinFileProofContext } from "../long-run/file-proof";
@@ -1178,6 +1179,16 @@ export function invocationEventRequestsDecision(event: McpInvocationEvent): bool
   return extractAskFences(body).questions.length > 0;
 }
 
+/**
+ * A main-agent error terminal that still asks the owner a question (a typed decision request, or an ask fence in the
+ * durable text it carries). Task status and the "waiting-decision" projection stay final-only; this only decides
+ * whether the turn waits for the owner (record.pendingQuestion: no automatic completion claim, the Goal is held).
+ */
+export function invocationErrorAsksOwner(event: McpInvocationEvent): boolean {
+  if (event.kind !== "error" || event.agentId) return false;
+  return invocationEventRequestsDecision({ ...event, kind: "final" });
+}
+
 export function invocationEventPromotesTask(event: McpInvocationEvent): boolean {
   // Runtime progress is transported as a status-only `tool-use` event too
   // (for example, "Calling Claude Code CLI..."). That is not user work and
@@ -1430,7 +1441,7 @@ export class InvocationService {
   private readonly browserLoginWaitingRuns = new Map<string, RunRecord>();
   private readonly steerQueues = new Map<string, QueuedSteer[]>();
   /** Queued directions waiting out a locked store before their next start attempt (drainSteerQueue, R-067). */
-  private readonly steerDrainBackoff = new Map<string, { chatId: string; attempt: number; notBefore: number }>();
+  private readonly steerDrainBackoff = new Map<string, { chatId: string; attempt: number; notBefore: number; firstAt?: number }>();
   private readonly nativePreparing = new Map<string, NativePreparingPending>();
   private ordinaryOneTurnObserver?: (source: OrdinaryOneTurnSource) => OrdinaryOneTurnObservation | undefined;
   private readonly nativeIngress = new Map<string, NativeIngressPending>();
@@ -4015,6 +4026,8 @@ export class InvocationService {
     // Goal; it is not a Goal cycle. It must not bind a controller attempt, claim
     // completion, register waits or run the verifier on that Goal.
     let projectionGoalId = effectObservation ? null : chat.goalId;
+    /** This owner turn does not run the chat's stopped Goal (a conversational message, or a resume that could not apply). */
+    let ordinaryTurnOnStoppedGoal = false;
     // A goal-mode turn in a chat still bound to an ENDED Goal starts a new Goal instead of attaching to the ended one.
     if (projectionGoalId && runReq.goalMode && !executionContext && boundGoalIsTerminal(projectionGoalId)) {
       setChatGoalBinding(chat.id, null);
@@ -4155,8 +4168,28 @@ export class InvocationService {
     refreshGoalProjection();
     if (goalLongRun && getChatGoalRevision(goalLongRun.goalId) && !executionContext && !runWorkspaceBinding && goalLongRun.surface !== "science") {
       record.automaticGoalId = goalLongRun.goalId;
-      if (goalLongRun.rootChatId === chat.id) record.goalStopOwner = captureNativeGoalStopOwner({ goalId: goalLongRun.goalId,
-        rootChatId: chat.id, longRunId: goalLongRun.id });
+      // A Goal whose canonical rows disagree (a closed contract on a live ledger row, a revision bound elsewhere) cannot
+      // own this turn's Stop custody. That used to throw here, after the durable receipt, and refuse every owner message
+      // in the chat for good (no-dead-end sweep 2026-10-25). The message runs as an ordinary turn instead; the Goal keeps
+      // its rows untouched and the turn's own Stop stays unconditional (it aborts this run's controller).
+      if (goalLongRun.rootChatId === chat.id) {
+        try {
+          record.goalStopOwner = captureNativeGoalStopOwner({ goalId: goalLongRun.goalId, rootChatId: chat.id, longRunId: goalLongRun.id });
+        } catch (error) {
+          tryRecordRunEvent({ runId, chatId: chat.id, kind: "goal_dispatch_ordinary_turn", payload: { goalId: goalLongRun.goalId,
+            goalStatus: goalLongRun.status, cause: "goal_stop_owner_unavailable",
+            code: (error as { code?: unknown })?.code ?? (error instanceof Error ? error.message.slice(0, 80) : null) } });
+          record.automaticGoalId = undefined;
+          record.longRunProjection = undefined;
+          projectionGoalId = null;
+          goalLongRun = null;
+          goalLongRunTask = null;
+          goalInvocationProjection = null;
+          // Nor is it resumed by this message: its rows are not coherent enough to own an episode.
+          stoppedGoalReactivation = null;
+          ordinaryTurnOnStoppedGoal = true;
+        }
+      }
     }
     let goalControllerAttemptId: string | null = null;
     let goalControllerAttemptSettled = false;
@@ -4539,6 +4572,15 @@ export class InvocationService {
         }
         const terminalRequestsDecision = invocationEventRequestsDecision(event);
         if (terminalRequestsDecision) {
+          record.pendingQuestion = true;
+          if (event.userDecisionRequest) record.userDecisionRequest = event.userDecisionRequest;
+        } else if (invocationErrorAsksOwner(event)) {
+          // A team turn whose workers did not all verify ends on an error that still carries the synthesis's question
+          // to the owner (mcp/client.ts runBoundTaskForceInvocation re-emits the held final as kind "error"). The card is
+          // in the transcript and answerable, so the turn waits for the owner exactly like a final question: its Goal is
+          // held, not re-woken. Measured 2026-10-25 (HMG Work room, 1.3.89): every turn there ended
+          // task-force-verification-failed, a question was never registered, and the Goal resumed 30-80 s after each
+          // card, keeping the chat busy for 20+ minutes at a time; no answer receipt was ever recorded in that chat.
           record.pendingQuestion = true;
           if (event.userDecisionRequest) record.userDecisionRequest = event.userDecisionRequest;
         }
@@ -5077,6 +5119,7 @@ export class InvocationService {
         };
         if (stoppedGoalReactivation) {
           if (runReq.taskIntent === "conversation" && !stoppedGoalReactivation.ownerAnswer) {
+            ordinaryTurnOnStoppedGoal = true;
             stoppedGoalReactivation = null;
             record.automaticGoalId = undefined;
             record.longRunProjection = undefined;
@@ -5148,8 +5191,11 @@ export class InvocationService {
                 .get(sourceMessageId) as { chat_id: string; role: string; text: string } | undefined;
               if (controller.signal.aborted) return refuse("aborted");
               if (!current) return refuse("goal_run_missing");
-              if (current.status !== stoppedGoalReactivation!.status) return refuse(`status:${stoppedGoalReactivation!.status}>${current.status}`);
-              if (current.version !== stoppedGoalReactivation!.version) return refuse(`version:${stoppedGoalReactivation!.version}>${current.version}`);
+              // CAS on the LATEST version: any host event (sweep re-stamp, accounting, a wait note) moves the version, and
+              // refusing on that refused the owner's message with "the Goal just changed state" (no-dead-end sweep
+              // 2026-10-25). The message still resumes only a Goal that is stopped now; one another turn took (running) or
+              // that ended runs this message as an ordinary turn below.
+              if (!["paused", "blocked", "waiting_tool", "queued"].includes(current.status)) return refuse(`status:${stoppedGoalReactivation!.status}>${current.status}`);
               if (getChat(chat.id)?.goalId !== current.goalId || current.rootChatId !== chat.id) return refuse("chat_goal_binding_changed");
               if (source?.chat_id !== chat.id || source.role !== "user") return refuse("source_message_missing");
               if (source.text !== ownerVisiblePrompt(runReq)) return refuse("source_text_differs");
@@ -5237,35 +5283,22 @@ export class InvocationService {
             record.automaticGoalId = undefined;
             record.longRunProjection = undefined;
             projectionGoalId = null;
-            const ko = stall.reason === "claimed-wait"
-              ? "재시작 전에 대기 목표의 후속 호출이 시작됐는지 확인할 수 없어 이 메시지를 실행하지 않았습니다. 기존 작업의 실제 결과를 확인한 뒤 새 목표로 시작해 주세요. 중지는 언제든 가능합니다."
-              : stall.reason === "effect-boundary-uncertain"
-              ? "이전 호출의 효과 경계를 확인할 수 없어 이 메시지를 실행하지 않았습니다. 기존 작업의 실제 결과를 확인한 뒤 새 목표로 시작해 주세요."
-              : stall.reason === "attempt-live"
-              ? "이 목표의 이전 실행이 아직 돌고 있어 이번 메시지를 시작하지 않았습니다. 그 실행이 끝난 뒤 다시 보내 주세요."
-              : stall.reason === "budget"
-                ? "이 목표의 예산(반복 횟수·시간)이 다 써서 이번 메시지를 시작하지 않았습니다. 목표 칩에서 새 목표로 이어가 주세요."
-                : stall.reason === "revision"
-                  ? "이 목표의 기준이 다른 대화에서 바뀌어 이번 메시지를 시작하지 않았습니다. 그 대화에서 이어가거나 여기서 새 목표로 시작해 주세요."
-                  : "목표 상태가 방금 바뀌어 이번 메시지를 시작하지 않았습니다. 목표 칩의 현재 상태를 확인한 뒤 다시 보내 주세요.";
-            const en = stall.reason === "claimed-wait"
-              ? "The waiting Goal's successor may have started before restart, so this message did not run. Inspect its actual result before starting a new Goal. Stop is still available."
-              : stall.reason === "effect-boundary-uncertain"
-              ? "The previous effect boundary could not be verified, so this message did not run. Inspect the actual result before starting a new Goal."
-              : stall.reason === "attempt-live"
-              ? "An earlier run of this Goal is still going, so this message did not start. Send it again once that run finishes."
-              : stall.reason === "budget"
-                ? "This Goal's budget (cycles or time) is used up, so this message did not start. Continue as a new Goal from the goal chip."
-                : stall.reason === "revision"
-                  ? "This Goal's terms were changed in another chat, so this message did not start. Continue there, or start a new Goal here."
-                  : "The Goal just changed state, so this message did not start. Check the goal chip and send it again.";
-            return {
-              blockInvocation: true as const,
-              code: stall.reason === "claimed-wait" ? "goal_wait_claimed_reconciliation_required" as const
-                : stall.reason === "effect-boundary-uncertain" ? GOAL_RESUME_EFFECT_BOUNDARY_UNCERTAIN
-                : "automatic-goal-resume-state-changed" as const,
-              message: pickLocale(runReq) === "ko" ? ko : en,
-            };
+            // The owner's message is never refused because the Goal could not be resumed (it was, forever, for a Goal
+            // missing a contract row: X Marketing room 2026-10-24; and for a version race: W7 2026-10-17). It runs now as an
+            // ordinary turn of this chat; the Goal keeps its state and the chip still resumes it. The machine cause stays in
+            // goal_reactivation_refused and in the notice code; no automatic replay of the Goal's old attempt happens.
+            const ko = "목표는 지금 상태 그대로 두고, 이 메시지는 일반 대화로 바로 처리합니다. 목표를 이어가려면 목표 칩에서 재개하세요.";
+            const en = "The Goal stays as it is; this message runs now as an ordinary turn. Resume the Goal from the goal chip to continue it.";
+            const deferredNotice: McpInvocationEvent = { kind: "notice", notice: { level: "info",
+              code: "goal-resume-deferred-message-ran",
+              message: pickLocale(runReq) === "ko" ? ko : en, i18n: { ko, en },
+              details: JSON.stringify({ reason: stall.reason, resumeCode: stall.reason === "claimed-wait" ? "goal_wait_claimed_reconciliation_required"
+                : stall.reason === "effect-boundary-uncertain" ? GOAL_RESUME_EFFECT_BOUNDARY_UNCERTAIN : "automatic-goal-resume-state-changed" }) } };
+            record.events.push(deferredNotice);
+            recordMcpInvocationEvent(runId, runReq, deferredNotice);
+            this.publishRunEvent(record, { runId, chatId: chat.id, event: deferredNotice });
+            ordinaryTurnOnStoppedGoal = true;
+            return;
           }
           boundGoal = resumed;
           stoppedGoalReactivation = null;
@@ -5410,6 +5443,19 @@ export class InvocationService {
           // one that holds no producer custody, so nothing here may bind or refuse it. A slow model reaches its first dispatch
           // after Main's admission has landed (a local 4B: 12 s) and was refused goal_episode_admission_missing before any work.
           if (goalId && record.ownerLease?.ownerKind === "daemon" && goalAdmittedForServiceRun(runId, goalId)) return;
+          // The client names the chat's bound Goal whatever its state. A Goal that is not running (paused, blocked,
+          // waiting) is not this turn's episode: the owner's conversational message, or a message whose resume could not
+          // apply, runs as an ordinary turn. Binding it here re-attached the stopped Goal and refused the dispatch with
+          // goal_episode_admission_missing ("App problem") for every such message (no-dead-end sweep 2026-10-25).
+          if (goalId && !goalControllerAttemptId) {
+            const named = getLongRunByGoalId(goalId);
+            if (ordinaryTurnOnStoppedGoal || !named || named.status !== "running") {
+              if (projectionGoalId === goalId) { projectionGoalId = null; record.automaticGoalId = undefined; record.longRunProjection = undefined; }
+              tryRecordRunEvent({ runId, chatId: chat.id, kind: "goal_dispatch_ordinary_turn", payload: {
+                goalId, goalStatus: named?.status ?? null, cause: ordinaryTurnOnStoppedGoal ? "owner_turn_not_goal_episode" : "goal_not_running" } });
+              return;
+            }
+          }
           // Last synchronous pre-work opportunity: the client may have materialized the first Goal after selection.
           if (goalId && (!projectionGoalId || projectionGoalId === goalId)) {
             projectionGoalId = goalId;
@@ -7254,7 +7300,14 @@ export class InvocationService {
       this.start({ ...request, runId }, undefined, undefined, undefined, undefined, mainAdmission, undefined,
         request.oneMode && request.promptOrigin !== "system" ? QUEUED_ONE_ROOM_INHERITANCE : undefined);
       settleQueuedSteer(id, "started");
-    } catch {
+    } catch (error) {
+      // A start refused for a "not ready yet" reason (shared/transient-send-refusal.ts: refused before anything reached a
+      // model) is the owner's direction waiting, not an uncertain dispatch: it used to be held for recovery with no retry
+      // and sat undelivered (no-dead-end sweep 2026-10-25). It takes the drain queue with backoff under a new run id.
+      const code = innermostTypedCode(error) ?? refusalCode(error) ?? null;
+      if (isTransientSendRefusalCode(code) && this.queueRefusedIdleSteer(req.chatId, row, runId, error) === "scheduled") {
+        return this.durableSteerReceipt(getDurableQueuedSteer(id) ?? row, intentId);
+      }
       // A thrown start may already have crossed a provider boundary. Preserve
       // the one planned run ID; never manufacture another on an ACK retry.
       holdQueuedSteerForRecovery(id, "drained-run-start-uncertain");
@@ -7835,12 +7888,25 @@ export class InvocationService {
    * already recorded its planned run leaves that id spent and the retry starts a new run. Bounded by
    * STEER_DRAIN_STORE_BUSY_DELAYS_MS; the head keeps its place in the queue meanwhile.
    */
+  /** An idle-chat direction whose start was refused transiently joins the drain queue (see retryQueuedSteerOnLockedStore). */
+  private queueRefusedIdleSteer(chatId: string, row: DurableQueuedSteer, runId: string, error: unknown): "scheduled" | "exhausted" | "not-retryable" {
+    return this.retryQueuedSteerOnLockedStore(chatId, queuedSteerFromDurable(row), runId, "start", error);
+  }
+
   private retryQueuedSteerOnLockedStore(chatId: string, next: QueuedSteer, drainedRunId: string,
     phase: "claim" | "start", error: unknown): "scheduled" | "exhausted" | "not-retryable" {
-    if (innermostTypedCode(error) !== STORE_BUSY_CODE) return "not-retryable";
-    if (phase === "start" && !runnerRefusedBeforeDispatch(error)) return "not-retryable";
-    const attempt = (this.steerDrainBackoff.get(next.id)?.attempt ?? 0) + 1;
-    if (attempt > STEER_DRAIN_STORE_BUSY_DELAYS_MS.length) return "exhausted";
+    const typed = innermostTypedCode(error) ?? refusalCode(error) ?? null;
+    const storeBusy = innermostTypedCode(error) === STORE_BUSY_CODE;
+    // No-dead-end sweep 2026-10-25: a start refused because the chat or its channel was not ready yet (the same codes the
+    // owner's message queue retries) is retried too, with the message queue's backoff and deadline, instead of ending the
+    // owner's direction "failed". A waiting Goal's refusal of a system relay keeps its own parking path below.
+    const transient = !storeBusy && typed !== "goal_waiting_system_start_refused" && isTransientSendRefusalCode(typed);
+    if (!storeBusy && !transient) return "not-retryable";
+    if (phase === "start" && storeBusy && !runnerRefusedBeforeDispatch(error)) return "not-retryable";
+    const prior = this.steerDrainBackoff.get(next.id);
+    const attempt = (prior?.attempt ?? 0) + 1;
+    const firstAt = prior?.firstAt ?? Date.now();
+    if (storeBusy ? attempt > STEER_DRAIN_STORE_BUSY_DELAYS_MS.length : Date.now() - firstAt > TRANSIENT_SEND_DEADLINE_MS) return "exhausted";
     let retry = next;
     if (phase === "start") {
       // The admission was consumed by the refused start; a recovered direction starts without one, like this retry.
@@ -7850,15 +7916,15 @@ export class InvocationService {
     for (const [id, waiting] of this.steerDrainBackoff) {
       if (id !== next.id && !this.steerQueues.get(waiting.chatId)?.some((queued) => queued.id === id)) this.steerDrainBackoff.delete(id);
     }
-    const delayMs = STEER_DRAIN_STORE_BUSY_DELAYS_MS[attempt - 1]!;
-    this.steerDrainBackoff.set(next.id, { chatId, attempt, notBefore: Date.now() + delayMs });
+    const delayMs = storeBusy ? STEER_DRAIN_STORE_BUSY_DELAYS_MS[attempt - 1]! : transientSendBackoffMs(attempt - 1);
+    this.steerDrainBackoff.set(next.id, { chatId, attempt, notBefore: Date.now() + delayMs, firstAt });
     const queue = this.steerQueues.get(chatId) ?? [];
     if (!queue.some((queued) => queued.id === next.id)) queue.unshift(retry);
     this.steerQueues.set(chatId, queue);
     const timer = setTimeout(() => this.drainSteerQueue(chatId), delayMs + 5);
     timer.unref?.();
-    console.warn(`[invocation] queued steer start hit a locked store; retrying steer=${next.id} chat=${chatId} code=${STORE_BUSY_CODE} `
-      + `phase=${phase} attempt=${attempt}/${STEER_DRAIN_STORE_BUSY_DELAYS_MS.length} delayMs=${delayMs}`);
+    console.warn(`[invocation] queued steer start ${storeBusy ? "hit a locked store" : "was refused (not ready yet)"}; retrying steer=${next.id} chat=${chatId} `
+      + `code=${storeBusy ? STORE_BUSY_CODE : typed} phase=${phase} attempt=${attempt}${storeBusy ? `/${STEER_DRAIN_STORE_BUSY_DELAYS_MS.length}` : ""} delayMs=${delayMs}`);
     return "scheduled";
   }
 

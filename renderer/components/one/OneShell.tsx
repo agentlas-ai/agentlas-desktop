@@ -593,10 +593,14 @@ function firstApprovalLabel(confirmation: PendingConfirmation): string | null {
 /** Main's typed refusal for an answer to a replaced question (electron/confirm QUESTION_SUPERSEDED_CODE). */
 const QUESTION_SUPERSEDED_CODE = "question_superseded";
 
+/**
+ * An answer to a question a newer one replaced is never dropped (owner 2026-10-25: "안되는 경우가 없어야지"): it goes
+ * out as a new owner message that names the question, exactly like the Work card (lib/question-answer-delivery.ts).
+ */
 function questionReplacedNotice(locale: "ko" | "en"): string {
   return locale === "ko"
-    ? "이 질문은 새 질문으로 바뀌어 지나갔어요. 답은 보내지 않았어요. 새 질문에 답해 주세요."
-    : "This question was replaced by a newer one, so your answer was not sent. Answer the new question.";
+    ? "이 질문은 새 질문으로 바뀌어, 고른 답을 그 질문을 밝힌 새 메시지로 보냈어요."
+    : "This question was replaced by a newer one, so your answer went out as a new message naming that question.";
 }
 
 /**
@@ -7948,8 +7952,19 @@ function OneSessionsShell() {
     const projectedTask = projections.find((item) => item.chatId === confirmation.chatId);
     const isActiveOneConversation = conversation?.id === confirmation.chatId
       && conversation.originSurface === "one";
-    const noteReplacedQuestion = (cause: unknown) => {
-      if (ipcErrorCode(cause) === QUESTION_SUPERSEDED_CODE) setActionNotice(questionReplacedNotice(answerNoticeLocaleRef.current));
+    /** Main refused the answer because a newer question replaced this one: deliver it as a new owner message. */
+    const deliverReplacedAnswer = (cause: unknown): boolean => {
+      if (ipcErrorCode(cause) !== QUESTION_SUPERSEDED_CODE) return false;
+      if (activeThreadChatIdRef.current !== confirmation.chatId) {
+        // Another conversation is on screen: the message box of that conversation gets it, with the question named.
+        setActionNotice(answerNoticeLocaleRef.current === "ko"
+          ? `이 질문은 새 질문으로 바뀌었어요. 그 대화에서 이 답을 보내 주세요: ${askResendMessage("ko", confirmation.question, label)}`
+          : `This question was replaced. Send this answer in that conversation: ${askResendMessage("en", confirmation.question, label)}`);
+        return true;
+      }
+      setActionNotice(questionReplacedNotice(answerNoticeLocaleRef.current));
+      void submit(askResendMessage(answerNoticeLocaleRef.current === "ko" ? "ko" : "en", confirmation.question, label));
+      return true;
     };
     // Main refused the answer: show its current questions. If Main still waits on this exact question the answer did
     // not land, so its card may come back (lib/confirmation-answer-fence).
@@ -7968,11 +7983,13 @@ function OneSessionsShell() {
       if (!answeredConfirmationsRef.current.claim(confirmation)) return;
       setConfirmations((items) => items.filter((item) => item.sourceMessageId !== confirmation.sourceMessageId));
       try {
-        await api.confirm.commitAnswer({ chatId: confirmation.chatId, sourceMessageId: confirmation.sourceMessageId, reply: label })
-          .catch((cause: unknown) => { noteReplacedQuestion(cause); throw cause; });
-      } catch {
-        // Replaced or already answered: show Main's current questions instead of sending a stale answer.
-        showPendingAfterRefusal(await api.confirm.listPending().catch(() => null));
+        await api.confirm.commitAnswer({ chatId: confirmation.chatId, sourceMessageId: confirmation.sourceMessageId, reply: label });
+      } catch (cause) {
+        // Replaced: the answer goes out as a new message naming its question (never dropped). Otherwise (already
+        // answered, or Main still waits on it) show Main's current questions.
+        const pending = await api.confirm.listPending().catch(() => null);
+        if (!deliverReplacedAnswer(cause)) showPendingAfterRefusal(pending);
+        else if (pending) setConfirmations(answeredConfirmationsRef.current.apply(pending));
         return;
       }
       window.dispatchEvent(new Event("agentlas:attention-refresh"));
@@ -8001,14 +8018,18 @@ function OneSessionsShell() {
     let answerSaved = false;
     const keepSavedAnswer = () => {
       const here = activeThreadChatIdRef.current === confirmation.chatId;
-      if (here) setComposer((current) => current.trim() ? current : label);
+      if (here) {
+        // Saved, but its follow-up turn did not start and Main kept nothing: send it as the owner's message now (the
+        // send queue waits for the chat when it is not ready), instead of leaving it in the box for a second tap.
+        setActionNotice(answerNoticeLocaleRef.current === "ko"
+          ? "답은 저장됐고, 이어서 실행이 바로 시작되지 않아 같은 답을 메시지로 보냈어요."
+          : "Your answer was saved; its follow-up did not start at once, so the same answer went out as a message.");
+        void submit(label);
+        return;
+      }
       setActionNotice(answerNoticeLocaleRef.current === "ko"
-        ? here
-          ? "답은 저장됐지만 이어서 실행하지 못했어요. 답을 작성창에 다시 넣어 두었으니 보내면 이어서 진행해요."
-          : `답은 저장됐지만 이어서 실행하지 못했어요. 그 대화에서 이 답을 다시 보내 주세요: ${label}`
-        : here
-          ? "Your answer was saved, but the follow-up did not start. It is back in the message box; send it to continue."
-          : `Your answer was saved, but the follow-up did not start. Send it again in that conversation: ${label}`);
+        ? `답은 저장됐지만 이어서 실행하지 못했어요. 그 대화에서 이 답을 다시 보내 주세요: ${label}`
+        : `Your answer was saved, but the follow-up did not start. Send it again in that conversation: ${label}`);
     };
     try {
       // 두 호출은 서로 기다릴 이유가 없다 — 동시에 보낸다.
@@ -8064,8 +8085,13 @@ function OneSessionsShell() {
         setError(null);
         return;
       }
-      // Main refused an answer to a question a newer question replaced: say so; the newer card shows below.
-      noteReplacedQuestion(cause);
+      // Main refused an answer to a question a newer question replaced: it goes out as a new message naming the question.
+      if (deliverReplacedAnswer(cause)) {
+        const pending = await api.confirm.listPending().catch(() => null);
+        if (pending) setConfirmations(answeredConfirmationsRef.current.apply(pending));
+        setError(null);
+        return;
+      }
       // The question can be replaced between render and click. Re-read Main's
       // exact pending identities before treating the rejection as an outage:
       // starting an operational-recovery turn in that case would append a new
@@ -9105,7 +9131,11 @@ function OneSessionsShell() {
     : selectedReadOnly ? "read_only"
     : teamPreflightBusy || questionOutrunByNewerUserMessage(visibleSelectedConfirmation, messages)
       ? "newer_message"
-      : busy ? "running" : "none";
+      // A run that is merely going (a Goal continuation keeps the room busy) does not block the answer any more
+      // (no-dead-end sweep 2026-10-25, measured live: a busy click only selected the option and nothing was sent).
+      // The tap answers: answerConfirmation's busy branch saves the answer in Main and hands it to the running turn,
+      // like the Work card (ba80e9748). An answer outrun by a newer owner message still goes out as a new message.
+      : "none";
   // PRD §4.14 — 만료 판정이 **읽을 때만** 일어나서, 화면의 카드는 만료 뒤에도 눌렸다.
   // 화면도 시각으로 판단한다(제안 수명은 30분이다).
   const teamPreflightExpired = Boolean(teamPreflight && isOneTeamPreflightExpired(teamPreflight, nowTick));

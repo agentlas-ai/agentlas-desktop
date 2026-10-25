@@ -6,7 +6,9 @@
 //  · 푸터: 단추 하나 — 답한 것(고른 보기 또는 자유입력)이 없으면 "건너뛰기", 있으면
 //    "다음 질문"(뒤에 질문이 더 있을 때) 또는 "이 답 보내기"(마지막 질문). 질문은 한 번에 하나
 //  · 전송은 배치 1회: 질문 하나 답할 때마다 프롬프트로 쏘지 않는다(질문 꼬리물기 방지)
-//  · 선택/입력은 로컬 상태 — 스트리밍 중에도 즉시 클릭 가능, 최종 전송만 busy에 묶인다
+//  · 선택/입력은 로컬 상태 — 스트리밍 중에도 즉시 클릭 가능. 실행 중에 낸 답도 바로 부모(onConfirm)로 간다:
+//    부모가 Main 에 저장하고 실행이 정리되는 즉시 이어간다(2026-10-25 HMG 방: 이 컴포넌트가 답을 쥐고
+//    busy 가 풀리길 기다리다 목표가 대화를 계속 붙잡아 답이 끝내 Main 에 닿지 않았다)
 //  · 답장 스캐폴딩은 UI locale — 입력 언어 고착 방지
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ChatQuestion } from "@/components/ChatStream";
@@ -33,7 +35,7 @@ export function ChatQuestionSheet({
   onDismiss,
   block = "none",
   onResend,
-  onKeepQueuedAnswer,
+  autoDelivering = false,
 }: {
   /** 현재 답변 대기 중인(unanswered) 질문들 — 최신 어시스턴트 메시지 기준. */
   questions: ChatQuestion[];
@@ -50,11 +52,8 @@ export function ChatQuestionSheet({
   block?: AskActionBlock;
   /** 막힌 질문의 답을 새 메시지로 보낸다(작성창과 같은 전송 경로). */
   onResend?: (text: string) => void;
-  /**
-   * 실행 중에 낸(대기 중인) 답의 질문을 새 질문이 대체했다 — 그 답을 넘겨받는다. 이 시트는 답을 버리지 않는다.
-   * 받는 쪽은 지금 시트(새 질문)를 접지 말아야 한다.
-   */
-  onKeepQueuedAnswer?: (text: string) => void;
+  /** The saved answer (initialReply) continues by itself as soon as the chat is free: say so instead of asking for Retry. */
+  autoDelivering?: boolean;
 }) {
   const { locale } = useT();
   const ko = locale === "ko";
@@ -62,28 +61,18 @@ export function ChatQuestionSheet({
   const [notes, setNotes] = useState<Record<string, string>>({});
   const [active, setActive] = useState(0);
   const [collapsed, setCollapsed] = useState(false);
-  // 실행 중에 낸 답 — 실행이 정리되는 순간 그대로 보낸다(푸터 문구 "실행이 정리되면 전송"의 실체).
-  const [pendingSubmit, setPendingSubmit] = useState(false);
   const rootRef = useRef<HTMLDivElement | null>(null);
   // 키는 document 에서 받는다. 시트를 감싼 div 는 포커스를 받을 수 없어 onKeyDown 이
   // 한 번도 불리지 않았다 — 새로 뜬 시트에서 숫자 배지도 Enter 도 무반응이었다(2026-09-03 실측).
   const keyHandlerRef = useRef<(event: KeyboardEvent) => void>(() => {});
   const key = `${questions.map((q) => q.id).join("|")}\0${initialReply ?? ""}`;
-  // 실행 중에 제출해 "실행이 정리되면 전송"을 기다리던 답(직전 렌더 기준). 새 질문 묶음이 와도 버리지 않는다.
-  const queuedAnswerRef = useRef<string | null>(null);
 
-  // 새 질문 묶음이 오면 로컬 상태 초기화.
+  // 새 질문 묶음이 오면 로컬 상태 초기화. 이 시트는 답을 쥐고 있지 않다(낸 답은 이미 부모·Main 에 있다).
   useEffect(() => {
-    // 예전에는 여기서 대기 중인 답까지 지웠다 — 실행 중에 고른 답이 새 질문이 오는 순간 사라졌다.
-    const queued = queuedAnswerRef.current;
-    queuedAnswerRef.current = null;
-    if (queued) onKeepQueuedAnswer?.(queued);
     setSelected({});
     setNotes({});
     setActive(0);
     setCollapsed(false);
-    setPendingSubmit(false);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key]);
 
   useEffect(() => {
@@ -96,29 +85,10 @@ export function ChatQuestionSheet({
     () => composeQuestionReply(questions, selected, notes, ko),
     [questions, selected, notes, ko],
   );
-  // 위 초기화 효과보다 뒤에 둔다: 묶음이 바뀌는 커밋에서 초기화는 직전 묶음의 대기 답을 읽는다.
-  useEffect(() => {
-    queuedAnswerRef.current = pendingSubmit && !initialReply?.trim() && composed.reply.trim()
-      ? askResendMessage(ko ? "ko" : "en", questions.map((item) => item.question).join(" / "), composed.reply)
-      : null;
-  });
   const q = questions[Math.min(active, questions.length - 1)];
   const isLast = active >= questions.length - 1;
   const currentAnswered = q ? (selected[q.id]?.length ?? 0) > 0 || Boolean((notes[q.id] ?? "").trim()) : false;
   const hasAnyAnswer = composed.reply.trim().length > 0;
-
-  // 실행 중에 제출한 답은 busy 가 풀리는 즉시 보낸다. 안 보내면 사용자는 Enter 를 두 번 쳐야 하고,
-  // 그 사이 시트에는 "건너뛰기"만 보인다(2026-09-02 실측).
-  useEffect(() => {
-    if (initialReply?.trim() || !pendingSubmit || busy) return;
-    if (!hasAnyAnswer) {
-      setPendingSubmit(false);
-      return;
-    }
-    setPendingSubmit(false);
-    onConfirm(composed.reply, composed.perQuestion);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [initialReply, pendingSubmit, busy, hasAnyAnswer, composed]);
 
   if (initialReply?.trim()) {
     // This is an immutable accepted answer, not an editable draft. Its text
@@ -134,13 +104,16 @@ export function ChatQuestionSheet({
           onClose={onDismiss}
           options={[{
             id: "retry-committed",
-            title: busy ? (ko ? "재개 중" : "Resuming") : (ko ? "기존 실행 다시 시도" : "Retry the existing run"),
+            title: busy || autoDelivering ? (ko ? "자동으로 이어갑니다" : "Continues automatically") : (ko ? "기존 실행 다시 시도" : "Retry the existing run"),
             disabled: busy || !onRetryCommitted,
           }]}
           onChoose={() => { if (!busy) onRetryCommitted?.(); }}
         >
           <p style={{ margin: "0 0 12px" }}>
-            {onRetryCommitted
+            {autoDelivering
+              ? (ko ? "답을 저장했습니다. 지금 실행이 끝나거나 대화가 비는 즉시 이 답으로 이어갑니다. 답을 바꾸려면 닫은 뒤 새 메시지로 보내 주세요."
+                : "Your answer is saved. It continues as soon as the current run settles or the chat is free. To change your answer, close this card and send a new message.")
+              : onRetryCommitted
               ? (ko ? "저장된 원문으로만 재시도합니다. 답변을 바꾸려면 닫은 뒤 새 메시지로 보내 주세요."
                 : "Retry uses the saved text unchanged. To change your answer, close this card and send a new message.")
               : (ko ? "기존 실행 정보를 찾지 못해 여기서 재개할 수 없습니다. 닫은 뒤 새 메시지로 요청해 주세요."
@@ -189,10 +162,7 @@ export function ChatQuestionSheet({
       onResend?.(askResendMessage(ko ? "ko" : "en", questions.map((item) => item.question).join(" / "), c.reply));
       return;
     }
-    if (busy) {
-      setPendingSubmit(true);
-      return;
-    }
+    // A running turn does not hold the answer here: the parent saves it in Main now and continues it when the run settles.
     onConfirm(c.reply, c.perQuestion);
   };
 
@@ -211,7 +181,6 @@ export function ChatQuestionSheet({
     // 앞 질문에 답한 것이 있으면 그것을 보낸다. 아무것도 안 답했으면 에이전트에 "건너뜀"을
     // 답으로 보낸다 — 조용히 접으면 에이전트는 영영 답을 기다린다(One 과 같은 규칙).
     if (hasAnyAnswer) { submit(); return; }
-    if (busy) { onDismiss(); return; }
     onConfirm(
       askSkipReply(ko ? "ko" : "en", questions.map((item) => item.question).join(" / ")),
       [],

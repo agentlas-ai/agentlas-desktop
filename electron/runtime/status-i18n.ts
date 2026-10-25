@@ -28,6 +28,9 @@ const DICT = {
     thinking: "{agent}가 생각 중...",
     sending: "전송 중...",
     agentContextTurnWait: "같은 에이전트가 다른 대화에서 일하는 중이라, 그 일이 끝나면 이어서 시작합니다. 지금 시작하려면 그 대화에서 중지하세요...",
+    // Waiting, not refused (no-dead-end sweep 2026-10-25): the turn ahead waits for the owner in another conversation.
+    agentContextTurnWaitParkedApproval: "같은 에이전트가 다른 대화에서 승인을 기다리는 중이에요. 그 대화에서 승인하거나 중지하면 이 메시지가 바로 시작됩니다...",
+    agentContextTurnWaitParkedQuestion: "같은 에이전트가 다른 대화에서 답을 기다리는 중이에요. 그 대화에서 답하거나 중지하면 이 메시지가 바로 시작됩니다...",
     // The wait stopped without the session (agent-context-turn-order.ts): what is happening and what to do, in words the screen already uses.
     agentContextTurnParkedApproval: "같은 에이전트가 다른 대화에서 승인을 기다리고 있어서 이어서 시작하지 못했어요. 그 대화에서 승인하거나 중지한 뒤 다시 보내 주세요.",
     agentContextTurnParkedQuestion: "같은 에이전트가 다른 대화에서 답을 기다리고 있어서 이어서 시작하지 못했어요. 그 대화에서 답하거나 중지한 뒤 다시 보내 주세요.",
@@ -96,6 +99,8 @@ const DICT = {
     thinking: "{agent} is thinking...",
     sending: "Sending...",
     agentContextTurnWait: "This agent is still working in another conversation; this turn starts when that one finishes (stop it there to start now)...",
+    agentContextTurnWaitParkedApproval: "This agent is waiting for your approval in another conversation; this message starts as soon as you approve or stop it there...",
+    agentContextTurnWaitParkedQuestion: "This agent is waiting for your answer in another conversation; this message starts as soon as you answer or stop it there...",
     agentContextTurnParkedApproval: "This agent is waiting for your approval in another conversation, so this could not start. Approve or stop it there, then send again.",
     agentContextTurnParkedQuestion: "This agent is waiting for your answer in another conversation, so this could not start. Answer or stop it there, then send again.",
     agentContextTurnStuck: "This agent's work in another conversation seems to have stopped midway, so this could not start. Reopen Agentlas to clear it, then send again.",

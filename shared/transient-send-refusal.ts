@@ -51,7 +51,47 @@ const TRANSIENT_CODES: ReadonlySet<string> = new Set([
   "native_auth_checkpoint_unenrolled",
   // The ledger row the native ingress writes for any refusal before start. The real cause is not in it.
   "native_ingress_rejected_before_start",
+  // No-dead-end sweep 2026-10-25: each of these was a "not ready yet" that ended the owner's message for good ("This
+  // message could not run. Check the model connection ..."). All are refused before anything reaches a model.
+  // The app is quitting or installing an update: the queued message survives the restart and starts after it.
+  "desktop_execution_admission_closed",
+  // The owner's own Stop is still settling (pausing/cancelling): the message starts once the Stop has finished.
+  "goal_stop_in_progress",
+  // The background service channel is attaching or re-enrolling (same situation as native_gui_original_channel_unavailable).
+  "native_gui_activation_prerequisites_missing",
+  "native_invocation_host_not_ready",
+  "native_invocation_runtime_busy",
+  "daemon_shutting_down",
+  // Text addressed to a run that ended (or moved process) between the window's read and the send; it was not recorded
+  // (thrown before the intake row), so it goes as the next message. native_owner_text_binding_changed is NOT listed: it
+  // can mean the same intent is already recorded, and re-sending it would deliver it twice.
+  "native_owner_text_parent_unavailable",
+  "native_owner_text_context_unavailable",
+  "invocation_current_turn_unavailable",
+  "invocation_owner_unavailable",
 ]);
+
+/**
+ * A run that was admitted and then refused BEFORE anything reached a model (turnDelivery "not-dispatched") for one of
+ * these reasons is not finished: the chat or its shared session is simply occupied. The send queue starts the message
+ * again with backoff instead of ending it after one retry (pending-chat-sends.ts). Matched exactly.
+ */
+const TRANSIENT_RUN_FAILURE_CODES: ReadonlySet<string> = new Set([
+  // Another chat of the same Work project holds the project's single provider process (runtime/project-residency.ts).
+  "work_project_residency_busy",
+  // The shared seat session is taken by a turn of another conversation (runtime/agent-context-turn-order.ts).
+  "agent_context_turn_parked",
+  "agent_context_turn_holder_stuck",
+  "agent_context_turn_wait_expired",
+  // The session scope could not be read right now (a busy or locked store; runtime/agent-context-admission.ts).
+  "session_scope_unavailable",
+  // SQLite stayed locked before dispatch (mcp/client.ts).
+  "store_busy",
+]);
+
+export function isTransientRunFailureCode(code: string | null | undefined): boolean {
+  return !!code && (TRANSIENT_RUN_FAILURE_CODES.has(code) || isTransientSendRefusalCode(code));
+}
 
 /** `invocation_chat_busy`, `invocation_chat_busy_other_host`, and any later suffix of the same family. */
 const TRANSIENT_PREFIXES: readonly string[] = ["invocation_chat_busy"];

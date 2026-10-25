@@ -80,9 +80,13 @@ const RISKY_WORDS = new RegExp([
   // German / French / Spanish
   "papierkorb", "corbeille", "papelera", "passwort", "kennwort", "kreditkarte", "zahlung", "anmelden", "abmelden", "senden", "teilen", "löschen", "beenden", "quitter", "salir", "mot de passe", "carte", "paiement", "connexion", "déconnexion", "envoyer", "partager", "supprimer", "contraseña", "tarjeta", "pago", "iniciar sesión", "cerrar sesión", "enviar", "compartir", "eliminar",
   // erasing, in every language the destructive family is checked in (independent review 4, S1): Clear History, Delete Row, Drop Table, Truncate Table
-  "消去", "消す", "取り除", "クリア", "清除", "清空", "刪除", "移除", "清理", "entfernen", "leeren", "zurücksetzen", "verwerfen", "effacer", "\\bvider\\b", "retirer", "réinitialiser", "borrar", "vaciar", "quitar", "restablecer", "elimina\\b", "cancella", "svuota", "rimuovi", "ripristina", "excluir", "apagar", "remover", "limpar", "esvaziar", "redefinir", "drop (?:table|database|index|column|collection|schema|view)", "truncate",
+  "消去", "消す", "取り除", "クリア", "清除", "清空", "刪除", "移除", "清理", "entfernen", "leeren", "zurücksetzen", "verwerfen", "effacer", "\\bvider\\b", "retirer", "réinitialiser", "borrar", "vaciar", "quitar", "restablecer", "elimina\\b", "cancella", "svuota", "rimuovi", "ripristina", "excluir", "apagar", "remover", "limpar", "esvaziar", "redefinir", "drop (?:table|database|index|column|collection|schema|view)", "truncate", "^drop$",
+  // discarding, overwriting and resetting, in the other languages (independent review 5, T1) - the languages other than English and Korean also hand out nothing by family
+  "破棄", "放弃", "丢弃", "丟棄", "descartar", "scarta", "上書き", "覆盖", "覆蓋", "überschreiben", "écraser", "sobrescribir", "sobrescrever", "sovrascrivi", "リセット", "初期化", "重置", "还原", "還原", "리셋",
   // a phone or tablet used as a camera or scanner (Continuity: Import from iPhone or iPad > Take Photo, Scan Documents, Add Sketch), in every language (S5)
   "iphone", "ipad", "continuity", "from device", "take photo", "take picture", "scan document", "add sketch",
+  // ... whatever the phone or tablet is called, and in the other languages (independent review 5, T2); an unlocalized placeholder is never a command
+  "사진 ?찍기", "문서 ?스캔", "스케치", "写真を撮", "書類をスキャン", "文書をスキャン", "スケッチ", "拍照", "拍摄照片", "扫描文稿", "掃描文件", "foto aufnehmen", "dokumente scannen", "skizze", "prendre une photo", "numériser", "esquisse", "tomar foto", "escanear", "boceto", "scatta foto", "scansiona", "schizzo", "tirar foto", "digitalizar", "esboço", "<<",
 ].join("|"), "i");
 
 export function isRiskyMenuPath(path: readonly string[]): boolean {
@@ -112,6 +116,8 @@ export const SAFE_TOP_MENUS = word("format|서식|포맷|書式|フォーマッ�
 export const SENSOR_UNSAFE_MENUS = word("view|보기|表示|显示|顯示|檢視|查看|ansicht|darstellung|présentation|affichage|visualización|ver|vista|visualizza|visualização|exibir|insert|삽입|挿入|插入|einfügen|insertion|insertar|inserisci|inserir|arrange|정렬|配置|排列|anordnen|organiser|organizar|disponi|table|표|表|表格|tabelle|tableau|tabla|tabella|tabela");
 export const HELP_MENUS = word("help|도움말|ヘルプ|帮助|說明|hilfe|aide|ayuda|aiuto|ajuda");
 export const EDIT_MENUS = word("edit|편집|編集|编辑|編輯|bearbeiten|édition|edición|modifica|editar");
+const INSERT_MENUS = word("insert|삽입|挿入|插入|einfügen|insertion|insertar|inserisci|inserir");
+const FAMILY_LANGUAGE_MENUS = word("format|서식|포맷|view|보기|insert|삽입|arrange|정렬|table|표|edit|편집");
 export const SAFE_EDIT_SUBMENUS = word("find|찾기|検索|查找|尋找|suchen|rechercher|buscar|trova|localizar|spelling and grammar|맞춤법 및 문법|スペルと文法|拼写和语法|拼寫與文法|rechtschreibung und grammatik|orthographe et grammaire|ortografía y gramática|ortografia e grammatica|ortografia e gramática|substitutions|대체|置換|替换|替換|ersetzungen|remplacements|sustituciones|sostituzioni|substituições|transformations|변형|変換|转换|轉換|umwandlungen|transformaciones|trasformazioni|transformações|insert|삽입|挿入|插入|einfügen|insertion|insertar|inserisci|inserir");
 const CLOSED_VERBS = word([
   // new <window | tab | document | file | folder> - a closed list of nouns in every language, so that "New Movie Recording" and "Start New Meeting" are never one of them
@@ -177,11 +183,20 @@ export function isDirectMenuCommandPath(path: readonly string[], options: { sens
   const sensors = options.sensors === true;
   const top = plain(path[0]);
   const last = plain(path[path.length - 1]);
-  if (SAFE_TOP_MENUS.test(top)) return true;
+  // A family (a whole menu trusted for what it holds) is trusted only in the two languages whose list of risky words is complete - English and Korean. Over five
+  // review rounds the same class kept reopening with other words in the other languages (Clear History, Discard Changes, Overwrite, Reset ...), so there the closed
+  // verb lists decide, and a language that is not listed hands out fewer commands, never a harmful one (independent review 5, T1).
+  const trusted = FAMILY_LANGUAGE_MENUS.test(top);
+  const byVerb = (): boolean => CLOSED_VERBS.test(last) || VIEW_CLOSED.test(last) || (!sensors && OPEN_VERBS.test(last));
+  if (SAFE_TOP_MENUS.test(top)) return trusted ? true : byVerb();
   if (HELP_MENUS.test(top)) return HELP_VERBS.test(last);
-  // View, Insert, Arrange and Table are trusted as families - except in an app with a camera, microphone or location, which gets its closed verbs only
-  if (SENSOR_UNSAFE_MENUS.test(top)) return sensors ? CLOSED_VERBS.test(last) || VIEW_CLOSED.test(last) : true;
-  if (EDIT_MENUS.test(top) && path.length >= 3 && SAFE_EDIT_SUBMENUS.test(plain(path[1]))) return true;
+  // View, Insert, Arrange and Table are trusted as families - except in an app with a camera, microphone or location, which gets its closed verbs only.
+  // Insert holds its direct commands only: a submenu below it is where a phone or a tablet shows up as a camera (Continuity, review 5, T2).
+  if (SENSOR_UNSAFE_MENUS.test(top)) {
+    if (!trusted || (INSERT_MENUS.test(top) && path.length > 2)) return byVerb();
+    return sensors ? CLOSED_VERBS.test(last) || VIEW_CLOSED.test(last) : true;
+  }
+  if (EDIT_MENUS.test(top) && path.length === 3 && trusted && SAFE_EDIT_SUBMENUS.test(plain(path[1]))) return true;
   return CLOSED_VERBS.test(last) || (!sensors && OPEN_VERBS.test(last));
 }
 

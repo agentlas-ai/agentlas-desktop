@@ -3,8 +3,8 @@ import fs from "node:fs";
 import path from "node:path";
 import {
   applyLiveDocumentOps, assignLiveDocumentIds, inferLiveDocumentFormat, LIVE_DOCUMENT_VERSION, LiveDocumentOpError,
-  liveDocumentOpTargets, validateLiveDocumentOps,
-  type LiveDocumentActor, type LiveDocumentApplyResult, type LiveDocumentDelta, type LiveDocumentEntry, type LiveDocumentMeta,
+  liveDocumentOpTargets, supersededLiveDocumentSessions, validateLiveDocumentOps,
+  type LiveDocumentActor, type LiveDocumentOpener, type LiveDocumentApplyResult, type LiveDocumentDelta, type LiveDocumentEntry, type LiveDocumentMeta,
   type LiveDocumentModel, type LiveDocumentOp, type LiveDocumentSnapshot,
 } from "../../shared/live-document";
 import { LIVE_DOCUMENT_CODECS, LiveDocumentCodecError } from "./codecs";
@@ -130,7 +130,19 @@ export async function listLiveDocuments(chatId: string): Promise<LiveDocumentMet
   return out.sort((a, b) => a.openedAt.localeCompare(b.openedAt));
 }
 
-export async function openLiveDocument(input: { chatId: string; path: string }): Promise<LiveDocumentMeta> {
+/**
+ * Opens a file as a session of this conversation. `openedBy` records whose tab it is: a session a run opened is closed
+ * (tab only — the file and the session folder stay) when the same run or another one opens a newer version of the same
+ * document (shared/live-document.ts supersededLiveDocumentSessions), unless it holds unsaved edits. The owner's own
+ * tabs and sessions of unknown opener are never closed for them.
+ */
+export async function openLiveDocument(input: { chatId: string; path: string; openedBy?: LiveDocumentOpener }): Promise<LiveDocumentMeta> {
+  const meta = await openLiveDocumentSession(input);
+  await closeSupersededLiveDocuments(meta);
+  return meta;
+}
+
+async function openLiveDocumentSession(input: { chatId: string; path: string; openedBy?: LiveDocumentOpener }): Promise<LiveDocumentMeta> {
   const target = path.resolve(input.path);
   if (!path.isAbsolute(input.path)) throw new LiveDocumentError("path_not_absolute");
   const format = inferLiveDocumentFormat(target);
@@ -148,7 +160,16 @@ export async function openLiveDocument(input: { chatId: string; path: string }):
   // Reuse this conversation's open session of the same file when it still matches the disk.
   for (const meta of await listLiveDocuments(input.chatId)) {
     if (meta.path !== real) continue;
-    if (meta.savedSha256 === digest) return meta;
+    if (meta.savedSha256 === digest) {
+      // The owner opening a tab a run opened makes it theirs: it is no longer closed for a newer version.
+      if (input.openedBy !== "owner" || meta.openedBy === "owner") return meta;
+      const dir = await sessionDir(meta.sessionId);
+      return withLock(dir, () => {
+        const current = { ...readMeta(dir), openedBy: "owner" as const };
+        writeMeta(dir, current);
+        return current;
+      });
+    }
     const dir = await sessionDir(meta.sessionId);
     const state = fold(meta.sessionId, dir);
     if (state.entries.length > meta.savedRevision) throw new LiveDocumentError("unsaved_session_exists", `${meta.sessionId} has unsaved edits and the file changed on disk`);
@@ -167,13 +188,14 @@ export async function openLiveDocument(input: { chatId: string; path: string }):
   const meta: LiveDocumentMeta = {
     schemaVersion: LIVE_DOCUMENT_VERSION, sessionId, chatId: input.chatId, path: real, name: path.basename(real), format,
     openedAt: new Date().toISOString(), sourceSha256: digest, savedRevision: 0, savedSha256: digest,
+    ...(input.openedBy ? { openedBy: input.openedBy } : {}),
   };
   writeMeta(dir, meta);
   return meta;
 }
 
 /** Writes a blank document at a path that does not exist yet and opens it. A Hangul document is created as .hwpx. */
-export async function createLiveDocument(input: { chatId: string; path: string; title?: string }): Promise<LiveDocumentMeta> {
+export async function createLiveDocument(input: { chatId: string; path: string; title?: string; openedBy?: LiveDocumentOpener }): Promise<LiveDocumentMeta> {
   if (!path.isAbsolute(input.path)) throw new LiveDocumentError("path_not_absolute");
   const target = path.resolve(input.path);
   const format = inferLiveDocumentFormat(target);
@@ -186,7 +208,7 @@ export async function createLiveDocument(input: { chatId: string; path: string; 
   const title = (input.title ?? "").trim() || path.basename(target, path.extname(target));
   const bytes = blankDocument(format as "docx" | "xlsx" | "pptx" | "hwpx", title.slice(0, 200));
   fs.writeFileSync(target, bytes, { flag: "wx", mode: 0o644 });
-  return openLiveDocument({ chatId: input.chatId, path: target });
+  return openLiveDocument({ chatId: input.chatId, path: target, ...(input.openedBy ? { openedBy: input.openedBy } : {}) });
 }
 
 export async function liveDocumentSnapshot(sessionId: string): Promise<LiveDocumentSnapshot> {
@@ -322,6 +344,24 @@ export async function saveLiveDocumentReportingWrite(input: { sessionId: string;
     writeMeta(dir, { ...meta, savedRevision: revision, savedSha256: digest });
     return { ok: true, revision, sha256: digest, path: meta.path, written: true };
   });
+}
+
+/** Closes the sessions `opened` replaces; one with unsaved edits stays open (checked under its lock). Returns the closed ids. */
+async function closeSupersededLiveDocuments(opened: LiveDocumentMeta): Promise<string[]> {
+  const closed: string[] = [];
+  for (const sessionId of supersededLiveDocumentSessions(await listLiveDocuments(opened.chatId), opened)) {
+    let dir: string;
+    try { dir = await sessionDir(sessionId); } catch { continue; }
+    const done = await withLock(dir, () => {
+      const state = fold(sessionId, dir);
+      if (state.meta.closed || state.entries.length > state.meta.savedRevision) return false;
+      writeMeta(dir, { ...readMeta(dir), closed: true });
+      cache.delete(sessionId);
+      return true;
+    }).catch(() => false);
+    if (done) closed.push(sessionId);
+  }
+  return closed;
 }
 
 export async function closeLiveDocument(sessionId: string): Promise<boolean> {

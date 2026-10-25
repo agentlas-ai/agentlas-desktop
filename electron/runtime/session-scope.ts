@@ -735,7 +735,11 @@ export function resolveSessionScope(db: Database.Database, input: SessionScopeIn
   } catch (error) {
     const cause = sessionScopeFailureCause(error);
     const refused = (working || cause.startsWith("session_scope_work_binding_") || cause.startsWith("session_scope_project_work_") || cause.startsWith("session_scope_taskforce_") || seatId !== null || member) && !input.aliveController;
-    console.warn(`[session-scope] resolve failed (${cause})${refused ? ", this turn is refused rather than split from its shared session" : ", using the conversation's own journal"}`);
+    console.warn("[session-scope] resolve failed", {
+      causeCode: cause,
+      operation: input.persist ? "turn-admission" : "read-only-lookup",
+      outcome: refused ? (input.persist ? "turn-refused" : "scope-unavailable") : "legacy-fallback",
+    });
     return old("chat", "error", cause, refused);
   }
 }

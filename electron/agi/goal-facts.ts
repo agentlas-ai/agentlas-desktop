@@ -19,6 +19,7 @@ import { goalContinuationRowSql } from "../store/goal-continuation-rows";
 import type Database from "better-sqlite3";
 import { createHash } from "node:crypto";
 import { isGoalObserving } from "../long-run/effect-observation-tickets";
+import { isBrowserDomToolError } from "../browser/fallback-ladder";
 import type { AgiBlockerFacts, AgiBlockerSignal, AgiTacticFact } from "./blocker";
 
 /** The scheduler ticks every minute; a due slot missed by more than this with no run started is a miss. */
@@ -167,6 +168,9 @@ export function browserLadderSignal(db: Database.Database, chatId: string, nowMs
     AND json_extract(payload_json, '$.step') = 'final' ORDER BY ts DESC LIMIT 1`)
     .get(chatId, since) as { id: string; ts: string; code: string | null; final: string | null; reasonCode: string | null; site: string | null } | undefined;
   if (!row || !row.code || (row.final !== "stopped" && row.final !== "waiting-owner")) return null;
+  // The latest ladder may exhaust optional recovery for a DOM error while the agent continues.
+  // Keep that event as the latest word; filtering it out of SQL would revive an older outage.
+  if (row.final === "stopped" && isBrowserDomToolError(row.code)) return null;
   const later = db.prepare(`SELECT 1 FROM run_events WHERE chat_id = ? AND kind = 'mcp_tool-use' AND ts > ?
     AND json_extract(payload_json, '$.toolName') LIKE 'agentlas-browser.%'
     AND json_extract(payload_json, '$.runtimeEvidence.phase') = 'executed' LIMIT 1`).get(chatId, row.ts);
