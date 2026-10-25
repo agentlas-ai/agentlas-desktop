@@ -309,9 +309,22 @@ function requestHeaders(url) {
   });
 }
 
-function downloadDigest(url) {
+// /api/desktop/download 는 DMG 를 서버로 흘리지 않고 GitHub 로 302 넘긴다(Railway 외부 전송료 절감, 2026-10-25).
+// 사용자가 실제로 받는 바이트를 검증해야 하므로 https 리디렉션만 따라가서 최종 응답을 해시한다.
+function downloadDigest(url, redirectsLeft = 3) {
   return new Promise((resolveDownload, rejectDownload) => {
     const request = https.get(url, (response) => {
+      if ([301, 302, 303, 307, 308].includes(response.statusCode) && response.headers.location) {
+        response.resume();
+        let next;
+        try { next = new URL(response.headers.location, url); } catch { next = null; }
+        if (!next || next.protocol !== "https:" || redirectsLeft <= 0) {
+          rejectDownload(new Error(`Download GET ${response.statusCode} redirect rejected`));
+          return;
+        }
+        downloadDigest(next.toString(), redirectsLeft - 1).then(resolveDownload, rejectDownload);
+        return;
+      }
       if (response.statusCode !== 200) {
         response.resume();
         rejectDownload(new Error(`Download GET ${response.statusCode}`));
