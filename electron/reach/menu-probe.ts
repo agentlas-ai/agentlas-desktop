@@ -1,8 +1,9 @@
 import type { Actuator, ToolOutcome } from "./actuator";
 import { enumerateLinuxMenus, hasLinuxMenuBar, resolveLinuxMenuPath } from "./linux-ui";
 import { enumerateWindowsMenus, hasWindowsMenuBar, invokeWindowsMenuPath, resolveWindowsMenuPath } from "./windows-ui";
+import { isDirectMenuCommandPath, startsWithPath, systemInsertedPrefixes } from "./explore-policy";
 import { isPersonalMenu, sameLabel } from "./menu-text";
-import type { Capability } from "./types";
+import { MENU_COMMAND_TRAIT, type Capability } from "./types";
 
 export { isPersonalMenu };
 
@@ -188,19 +189,27 @@ export function opensDialog(label: string): boolean {
   return label.endsWith("…") || label.endsWith("...");
 }
 
-// Structure-tier capabilities: "this menu command exists". Not verified, not called; the explorer decides what to do with them.
-export function menuCapabilities(appKey: string, nodes: readonly MenuNode[]): Capability[] {
-  return menuLeaves(nodes).map((leaf) => ({
-    id: `${appKey}#structure:menu/${leaf.path.join(">")}`,
-    tier: "structure" as const,
-    source: { kind: "menu", ref: leaf.path.join(" > ") },
-    name: leaf.path.join(" > "),
-    suite: leaf.path[0],
-    kind: "command" as const,
-    granularity: "operation" as const,
-    ...(opensDialog(leaf.label) ? { traits: ["opens-dialog"] } : {}),
-    parameters: [],
-    effect: { class: "unknown" as const, basis: "unverified" as const },
-    status: "candidate" as const,
-  }));
+// Structure-tier capabilities: "this menu command exists". Reading the menu bar presses nothing. An item that opens a dialog stays a candidate until
+// the explorer has opened and read that dialog. A plain command (no ellipsis, a name that does no harm) is also carried out by pressing it: the body
+// is the one step the runner already checks live (the path must be in the menu now and switched on), so it is usable at once - see isDirectMenuCommand.
+export function menuCapabilities(appKey: string, nodes: readonly MenuNode[], platform: string = "darwin", options: { sensors?: boolean } = {}): Capability[] {
+  const system = systemInsertedPrefixes(nodes, platform);
+  return menuLeaves(nodes).map((leaf) => {
+    const dialog = opensDialog(leaf.label);
+    const direct = !dialog && isDirectMenuCommandPath(leaf.path, options) && !system.some((prefix) => startsWithPath(leaf.path, prefix));
+    return {
+      id: `${appKey}#structure:menu/${leaf.path.join(">")}`,
+      tier: "structure" as const,
+      source: { kind: "menu", ref: leaf.path.join(" > ") },
+      name: leaf.path.join(" > "),
+      suite: leaf.path[0],
+      kind: "command" as const,
+      granularity: "operation" as const,
+      ...(dialog ? { traits: ["opens-dialog"] } : direct ? { traits: [MENU_COMMAND_TRAIT] } : {}),
+      ...(direct ? { description: "Presses this item of the app's menu bar. What it does to the app is not known in advance; the call checks that the item is in the menu and switched on.", body: { kind: "steps" as const, steps: [{ tool: "invoke_menu", args: { path: [...leaf.path] } }] } } : {}),
+      parameters: [],
+      effect: { class: "unknown" as const, basis: "unverified" as const },
+      status: "candidate" as const,
+    };
+  });
 }

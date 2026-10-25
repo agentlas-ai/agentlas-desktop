@@ -3,6 +3,7 @@
 // 재구현하지 않는다. 스튜디오 패키지(studio-pack/)의 자체 런처 scripts/open-studio-gui.py 를
 // spawn 하면, 그 런처가 실제 SPA(web/dist) 를 서빙하고 /__studio/* 로 엔진에 브리지한다.
 // 렌더러는 이 로컬 URL 을 <iframe> 으로 띄운다 → 진짜 스튜디오가 그대로 앱 안에서 돈다.
+import { renameSyncWithRetry } from "../fs/retry";
 import crossSpawn from "cross-spawn";
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -181,9 +182,12 @@ function ensureWritablePack(bundled: string): string {
     const runtimeBak = `${dest}.runtime-bak`;
     let backedUp = false;
     try {
+      // A backup left by a restore that failed last time may be the only copy of the owner's board: never delete it.
+      // Keep it under a dated name (newest two) and back up the current runtime as usual (Windows audit fs.md #7:
+      // the old code rmSync'd it here, one update after Defender/an open file had made the restore fail).
+      preserveLeftoverStudioBackup(runtimeBak);
       if (fs.existsSync(runtimeDir)) {
-        fs.rmSync(runtimeBak, { recursive: true, force: true });
-        fs.renameSync(runtimeDir, runtimeBak);
+        renameSyncWithRetry(runtimeDir, runtimeBak);
         backedUp = true;
       }
     } catch {
@@ -200,27 +204,44 @@ function ensureWritablePack(bundled: string): string {
       if (bundledSignature) fs.writeFileSync(path.join(dest, PACK_SIGNATURE_FILE), bundledSignature, "utf8");
     } catch {
       // 복사 실패 — 백업해 둔 런타임을 되돌려 놓고 번들 경로로 폴백.
-      if (backedUp) {
-        try {
-          fs.rmSync(runtimeDir, { recursive: true, force: true });
-          fs.renameSync(runtimeBak, runtimeDir);
-        } catch {
-          /* 복원 실패는 비치명적 — 백업 디렉터리는 그대로 남는다 */
-        }
-      }
+      if (backedUp) restoreStudioRuntime(runtimeBak, runtimeDir);
       return bundled; // 번들이 쓰기 가능하면(dev) 그대로.
     }
     // 복사 성공 — 사용자 런타임 데이터를 제자리로 복원(번들에서 따라온 .studio-runtime 은 없음).
-    if (backedUp) {
-      try {
-        fs.rmSync(runtimeDir, { recursive: true, force: true });
-        fs.renameSync(runtimeBak, runtimeDir);
-      } catch {
-        /* 복원 실패는 비치명적 — 빈 board 로 시드된다 */
-      }
-    }
+    if (backedUp) restoreStudioRuntime(runtimeBak, runtimeDir);
   }
   return dest;
+}
+
+/**
+ * Put the owner's runtime back, retrying while Windows holds a path (Defender scanning the fresh pack, the indexer,
+ * a Studio server that has not exited yet). If it still fails the backup stays where it is and the next update
+ * keeps it (preserveLeftoverStudioBackup); it is never deleted.
+ */
+export function restoreStudioRuntime(runtimeBak: string, runtimeDir: string, fsImpl: StudioRestoreFs = fs): boolean {
+  try {
+    fsImpl.rmSync(runtimeDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    renameSyncWithRetry(runtimeBak, runtimeDir, { fsImpl });
+    return true;
+  } catch {
+    console.warn("[studio] runtime restore failed; the backup is kept for the next start");
+    return false;
+  }
+}
+
+type StudioRestoreFs = Pick<typeof fs, "rmSync" | "renameSync" | "existsSync" | "readdirSync">;
+
+/** A leftover `<pack>.runtime-bak` becomes `<pack>.runtime-bak-<ms>`; only the newest two dated copies are kept. */
+export function preserveLeftoverStudioBackup(runtimeBak: string, now = Date.now(), fsImpl: StudioRestoreFs = fs): void {
+  if (!fsImpl.existsSync(runtimeBak)) return;
+  renameSyncWithRetry(runtimeBak, `${runtimeBak}-${now}`, { fsImpl });
+  const dir = path.dirname(runtimeBak);
+  const prefix = `${path.basename(runtimeBak)}-`;
+  const dated = fsImpl.readdirSync(dir).filter((name) => name.startsWith(prefix) && /^\d+$/.test(name.slice(prefix.length)))
+    .sort((a, b) => Number(b.slice(prefix.length)) - Number(a.slice(prefix.length)));
+  for (const old of dated.slice(2)) {
+    try { fsImpl.rmSync(path.join(dir, old), { recursive: true, force: true }); } catch { /* next update retries */ }
+  }
 }
 
 function findFreePort(start: number): Promise<number> {

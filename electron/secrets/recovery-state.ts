@@ -127,9 +127,18 @@ async function servicePauseActive(directory: string, service: string): Promise<b
   }
 }
 
+/**
+ * Windows Credential Manager never prompts, so a native failure there is about one key, never a reason to pause the
+ * service (keychain-host.ts nativeStoreNeverPrompts; owner decision 2026-10-24). On Windows no pause is recorded, and a
+ * pause an older version recorded (service-pauses-v1, kept alive by Windows' quick pid reuse) is not honoured, so a
+ * restart is never locked. A key whose attempt failed is retried by its next automatic read (runWithCredentialRecovery).
+ */
+const credentialFailuresStayPerKey = (): boolean => process.platform === "win32";
+
 /** Check at actual native dispatch, including requests queued before failure.
  * Explicit means a deliberate retry of this one resource, never a service reset. */
 export async function assertKeychainServiceAvailable(service: string, explicit = false): Promise<void> {
+  if (credentialFailuresStayPerKey()) return;
   let directory: string;
   try { directory = servicePauseLocation(service); } catch { throw invalid(); }
   if (pausedKeychainServices.has(directory) && !explicit) throw new CredentialRecoveryStateError("keychain_unavailable");
@@ -144,6 +153,7 @@ export async function assertKeychainServiceAvailable(service: string, explicit =
  * a recovery-lock conflict. Latch before I/O so persistence failure still stops
  * this process. Markers contain process metadata, never account names or values. */
 export async function recordKeychainServiceFailure(service: string): Promise<void> {
+  if (credentialFailuresStayPerKey()) return;
   let directory: string;
   try { directory = servicePauseLocation(service); } catch { throw invalid(); }
   pausedKeychainServices.add(directory);
@@ -318,7 +328,10 @@ export async function runWithCredentialRecovery<T>(
   let ownerId: string | undefined;
   try {
     const previous = await inspect(dir, expected, recoveryGeneration);
-    const recoveryAttempt = explicit || previous.automaticRetryAllowed;
+    // Windows: a failed or interrupted attempt of this key is retried automatically (no prompt can storm); a damaged
+    // record still waits for the person's explicit retry, and a live owner still answers busy (acquireLock).
+    const recoveryAttempt = explicit || previous.automaticRetryAllowed || (credentialFailuresStayPerKey()
+      && (previous.errorCode === "keychain_unavailable" || previous.errorCode === "credential_attempt_incomplete"));
     if (previous.errorCode && !recoveryAttempt) throw new CredentialRecoveryStateError(previous.errorCode);
     await fs.mkdir(dir, { recursive: true, mode: 0o700 });
     const owner: Owner = {

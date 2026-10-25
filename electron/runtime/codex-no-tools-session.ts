@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { webSocketAgentFor } from "../net/system-network-core";
 import type { EventEmitter } from "node:events";
 import type { RunnerRequest, RunnerResult } from "./runner";
 import { aliveDecisionProfileForRequest } from "./alive-decision-context";
@@ -106,7 +107,9 @@ export function createCodexNoToolsProviderSession(options: CodexNoToolsProviderS
       try {
         if (!socket) {
           const held = options.connect?.(endpoint, headers) ?? new WebSocket(endpoint, { headers, maxPayload: MAX_BYTES,
-            perMessageDeflate: false, followRedirects: false, handshakeTimeout: 10_000 });
+            perMessageDeflate: false, followRedirects: false, handshakeTimeout: 10_000,
+            // System proxy (company networks); undefined = direct, as before.
+            agent: webSocketAgentFor(endpoint) });
           socket = held; headerFence = identity;
           held.on("error", () => { /* The current exchange owns its typed failure. */ });
           held.on("close", () => { if (socket === held) { socket = undefined; headerFence = undefined; lineage = undefined;

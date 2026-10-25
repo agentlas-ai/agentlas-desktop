@@ -2,6 +2,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { IconTarget } from "@/components/Icon";
 import { useT } from "@/lib/i18n";
+import { credentialStoreName } from "@/lib/platform-copy";
 
 interface TourStep {
   target: string;
@@ -506,10 +507,10 @@ function tourConfigForPath(pathname: string): TourConfig | null {
       steps: [
         {
           target: "env.security",
-          titleKo: "키는 키체인에 안전",
-          bodyKo: "API 키 원문은 화면에 남기지 않고 시스템 키체인에 보관합니다. 여기엔 저장됨 여부만 표시됩니다.",
-          titleEn: "Safe in the keychain",
-          bodyEn: "Your raw API keys go to the system keychain, never the renderer. The page shows only whether each is saved.",
+          titleKo: `키는 ${credentialStoreName(true)}에 안전`,
+          bodyKo: `API 키 원문은 화면에 남기지 않고 ${credentialStoreName(true)}에 보관합니다. 여기엔 저장됨 여부만 표시됩니다.`,
+          titleEn: `Safe in the ${credentialStoreName(false)}`,
+          bodyEn: `Your raw API keys go to the ${credentialStoreName(false)}, never the renderer. The page shows only whether each is saved.`,
         },
         {
           target: "env.toolbar",

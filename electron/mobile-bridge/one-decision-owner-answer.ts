@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import {
   ONE_DECISION_OWNER_ANSWER_CONTRACT_VERSION,
   ONE_DECISION_PRODUCT_SAFE_REJECT_REPLY,
+  oneDecisionOwnerSelectableIndexes,
 } from "../../shared/one-decision";
 import type {
   MobileBridgeOneDecisionDto,
@@ -33,10 +34,7 @@ export function projectOneDecisionOwnerAnswerV4(
   // Typed only (native-harness notyet NH25): the judged disposition keeps reject/modify controls out of the quick
   // answers, plus the product's own exact reject reply. Without a verdict an option is a plain "choice": choosing it
   // sends its exact label as the owner's confirmed answer and grants nothing (grantsAuthority stays with "approve").
-  const selectableIndexes = view.options.filter((option) =>
-    option.disposition !== "reject" && option.disposition !== "modify"
-    && option.label !== ONE_DECISION_PRODUCT_SAFE_REJECT_REPLY,
-  ).map((option) => option.index);
+  const selectableIndexes = oneDecisionOwnerSelectableIndexes(view);
   if (!selectableIndexes.length) return null;
   const bindingDigest = createHash("sha256").update(JSON.stringify([
     ONE_DECISION_OWNER_ANSWER_CONTRACT_VERSION,

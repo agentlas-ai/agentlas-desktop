@@ -422,8 +422,8 @@ export interface OrphanSweepResult {
  *    self/조상 프로세스·그 그룹은 제외한다. 다음 패스에도 동일 정체면 SIGKILL 로 승격.
  *  - 판정 불가(ps 실패 등)면 죽이지 않는다 — 오폭보다 고아가 낫다.
  *
- * Windows 는 CIM으로 실행 파일·커맨드라인·생성 시각을 다시 증명한 뒤 taskkill /T,
- * 다음 패스에 /F로 승격한다. 정체를 증명할 수 없으면 POSIX와 마찬가지로 죽이지 않는다.
+ * Windows 는 CIM으로 실행 파일·커맨드라인·생성 시각을 다시 증명한 뒤 곧바로 taskkill /T /F 한다
+ * (창 없는 콘솔 고아는 /F 없이는 끝나지 않는다). 정체를 증명할 수 없으면 POSIX와 마찬가지로 죽이지 않는다.
  */
 export async function sweepOrphanedRunChildren(): Promise<OrphanSweepResult> {
   const result: OrphanSweepResult = {
@@ -508,7 +508,10 @@ export async function sweepOrphanedRunChildren(): Promise<OrphanSweepResult> {
     const escalate = typeof record.termSignaledAt === "number";
     let signaled = false;
     if (process.platform === "win32") {
-      signaled = await taskkillWindowsTree(record.pid, escalate);
+      // A window-less console orphan only ends with /F (a non-forced taskkill answers "can only be terminated
+      // forcefully" and never sets termSignaledAt, so the old TERM-then-KILL ladder never reached /F). Identity was
+      // proven just above, on this pass (2026-10-24 Windows audit W-01).
+      signaled = await taskkillWindowsTree(record.pid, true);
     } else {
       if (!validPosixIdentity(record.posixIdentity) || !protectedPosix) {
         result.identityLookupFailed += 1;

@@ -70,7 +70,8 @@ async function electronAlerts(): Promise<ReturnType<typeof createDaemonRunAlerts
   ]);
   return createDaemonRunAlerts({
     settings: () => runAlerts.getRunAlerts(),
-    focused: () => electron.BrowserWindow.getAllWindows().some(window => !window.isDestroyed() && window.isFocused()),
+    // Focused, shown and not minimized (run-alerts.ts windowWatched): a minimized window can still hold focus on Windows.
+    focused: () => runAlerts.anyWindowWatched(electron.BrowserWindow.getAllWindows()),
     locale: () => locale.currentUiLocale(),
     quiet: runId => { try { return presentation.supervisorQuietRun(db.getDb(), runId); } catch { return false; } },
     signedIn: () => auth.getAuthSession().signedIn,

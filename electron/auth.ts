@@ -28,10 +28,20 @@ import type { AuthSession } from "../shared/types";
 import { userDataPath } from "./runtime-paths";
 import { developmentEffectsSuppressed, assertDevelopmentEffectAllowed } from "./development-effect-policy";
 import { currentUiLocale } from "./ui-locale";
+import { fitWindowToWorkArea } from "./window-lifecycle";
 
 type ElectronApi = typeof import("electron");
 
 /** GUI-only auth surfaces are optional in the packaged headless daemon. */
+/** The close chord as this OS writes it: ⌘W on macOS, Ctrl+W elsewhere (Windows audit ui.md #14). */
+export function closeKeyLabel(platform: NodeJS.Platform): string {
+  return platform === "darwin" ? "⌘W" : "Ctrl+W";
+}
+
+function primaryWorkAreaSize(): { width: number; height: number } | null {
+  try { return electronApi().screen.getPrimaryDisplay().workAreaSize; } catch { return null; }
+}
+
 function electronApi(): ElectronApi {
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   return require("electron") as ElectronApi;
@@ -957,16 +967,17 @@ export async function signInWithGoogle(parent: BrowserWindow | null): Promise<Au
   assertDevelopmentEffectAllowed("auth.sign-in-google");
   const { BrowserWindow, session: electronSession } = electronApi();
   const ses = electronSession.fromPartition(AUTH_PARTITION);
+  // 720 DIP is taller than a 1024x768 @125 % work area (819x576): fit the window to the screen it opens on (ui.md #10).
+  const signInSize = fitWindowToWorkArea({ width: 480, height: 720, minWidth: 360, minHeight: 480 }, primaryWorkAreaSize());
   // 로그인 창은 시스템 BrowserWindow — 별도 partition으로 격리해 메인 앱의 쿠키와 섞이지 않음
   const win = new BrowserWindow({
-    width: 480,
-    height: 720,
+    ...signInSize,
     parent: parent ?? undefined,
     // 비모달 — 메인 앱을 막지 않아 "닫기 못 함" 상황을 방지. 표준 프레임(좌상단 닫기) 유지.
     modal: false,
     closable: true,
     minimizable: true,
-    title: currentUiLocale() === "ko" ? "Agentlas — 로그인 (Esc 또는 ⌘W로 닫기)" : "Agentlas — Sign in (Esc or ⌘W to close)",
+    title: currentUiLocale() === "ko" ? `Agentlas — 로그인 (Esc 또는 ${closeKeyLabel(process.platform)}로 닫기)` : `Agentlas — Sign in (Esc or ${closeKeyLabel(process.platform)} to close)`,
     backgroundColor: "#ffffff",
     autoHideMenuBar: true,
     webPreferences: {

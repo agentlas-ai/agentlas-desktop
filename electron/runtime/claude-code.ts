@@ -99,6 +99,7 @@ import { adoptClaudeSessionIntoProductHome, claudeProductHomeDir, withClaudeMirr
 import { claudeSandboxEnvFile, ensureSandboxNpmCacheDir, sandboxNpmCacheDir } from "./sandbox-tool-cache";
 import { bindNativeFileProofObserver, mcpFileProofCandidate } from "../long-run/file-proof";
 import { normalEndToolEvidence, settleNormalEnd, trackReportedToolCalls } from "../../shared/turn-settlement";
+import { cliUserHome } from "./product-home-identity";
 
 /** Claude exposes file mutations as a typed tool_use input followed by a
  * tool_result. Admit only exact paths from known mutation tools; Main still
@@ -250,6 +251,47 @@ const CLAUDE_WORKSPACE_SANDBOX_SETTINGS = {
 } as const;
 
 /**
+ * The OS sandbox block a write run's settings carry, per platform.
+ *
+ * macOS/Linux: the strict workspace sandbox above, unchanged. Windows: none. Claude Code's sandbox exists only on
+ * macOS, Linux and WSL2 ("Sandboxing is currently only supported on macOS, Linux, and WSL2"), so with
+ * `failIfUnavailable` every native-Windows write turn exited at startup (2026-10-24 audit F1 / W-05). Owner decision
+ * 2026-10-24 ("편집 허용+셸은 관문"): on Windows a write run allows file edits (acceptEdits, the runtime's configured
+ * permission) and every shell call (Bash, or the PowerShell tool) goes through the Agentlas tool gate hook, which blocks
+ * the call when it cannot run (write-sandbox-launch-guard.ts, tool-broker-runtime.ts windowsPowerShellHookCommand).
+ */
+export function claudeWorkspaceSandboxSettings(
+  platform: NodeJS.Platform = process.platform,
+): typeof CLAUDE_WORKSPACE_SANDBOX_SETTINGS | Record<string, never> {
+  return platform === "win32" ? {} : CLAUDE_WORKSPACE_SANDBOX_SETTINGS;
+}
+
+/**
+ * The [Write run] notice of a claude-code write run (ledger desktop.main.claude-code.system, module R09
+ * runtime.permissions.workspace_sandbox: configuration, trigger permission; one text per host platform, which never
+ * changes within an install). It must say what actually bounds the run. macOS/Linux: the OS workspace sandbox
+ * (claudeWorkspaceSandboxSettings), text unchanged. Windows has no Claude Code sandbox (owner decision 2026-10-24,
+ * "편집 허용+셸은 관문"): every shell call goes through the Agentlas tool gate, so the notice says that, and names the
+ * Windows launchers the gate refuses (shared/write-sandbox-launch-guard.ts) instead of macOS ones; SIGILL/exit 132 is a
+ * macOS sandbox signal and is left out.
+ */
+export function claudeWriteRunNotice(platform: NodeJS.Platform = process.platform): string {
+  if (platform === "win32") {
+    return `[Write run] shell: Agentlas tool gate, no OS sandbox (Windows). Blocked (gate denial, approval, Access is denied, GUI/service start failure) = permission boundary, not machine limit; no launcher workaround (start, explorer, rundll32, Start-Process, Invoke-Item). Needs more: one sentence why, then final line exactly ${PERMISSION_ESCALATION_MARKER}.`;
+  }
+  return `[Write run] shell: workspace sandbox. Blocked (approval, Operation not permitted, GUI/emulator/service start failure, SIGILL/exit 132) = permission boundary, not machine limit; no launcher workaround (open, osascript, launchctl, .command, tmux). Needs more: one sentence why, then final line exactly ${PERMISSION_ESCALATION_MARKER}.`;
+}
+
+/** The Windows shell gate runs under PowerShell (pwsh 7 or Windows PowerShell 5.1); without either it cannot run. */
+export function windowsShellGateHostAvailable(env: NodeJS.ProcessEnv = process.env): boolean {
+  const nodeFs = require("node:fs") as typeof import("node:fs");
+  const root = env.SystemRoot || env.SYSTEMROOT || env.windir || "C:\\Windows";
+  if (nodeFs.existsSync(path.win32.join(root, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"))) return true;
+  const { findExecutableSync } = require("./path-lookup") as typeof import("./path-lookup");
+  return findExecutableSync("pwsh", [], env, "win32") !== null;
+}
+
+/**
  * ★read 는 "플래그 없음"이 아니다.
  *
  * 예전에는 read 에 아무 인자도 주지 않고 "헤드리스면 위험한 도구는 알아서 거부된다"고
@@ -297,10 +339,14 @@ export function claudeAgentPackageReadRules(agentId: string | null | undefined):
 export function claudeBuiltinPreAllowedTools(
   permission: RunnerRequest["permission"],
   opts: { browserOnly?: boolean; untrustedNoTools?: boolean } = {},
+  platform: NodeJS.Platform = process.platform,
 ): string[] {
   if (opts.browserOnly || opts.untrustedNoTools) return [];
   if (permission === "read") return ["WebFetch", "WebSearch"];
-  return permission === "write" ? [...WRITE_MODE_PRE_ALLOWED_TOOLS] : [];
+  if (permission !== "write") return [];
+  // Windows without Git Bash gives Claude a PowerShell tool instead of Bash. Like Bash it is admitted up front (nobody
+  // answers a headless prompt) and, like Bash, the PreToolUse shell gate decides each call first.
+  return platform === "win32" ? [...WRITE_MODE_PRE_ALLOWED_TOOLS, "PowerShell"] : [...WRITE_MODE_PRE_ALLOWED_TOOLS];
 }
 
 
@@ -424,7 +470,7 @@ export function claudePermissionArgs(
  * PreToolUse hook. Passing two --settings flags is unsafe because Claude keeps
  * only the latter object.
  */
-async function claudeExecutionSettings(req: RunnerRequest): Promise<string | null> {
+export async function claudeExecutionSettings(req: RunnerRequest): Promise<string | null> {
   if (req.permission !== "write") return req.toolBrokerSettingsPath ?? null;
 
   let hooks: unknown;
@@ -463,11 +509,16 @@ async function claudeExecutionSettings(req: RunnerRequest): Promise<string | nul
    */
   const launchGuard = writeSandboxLaunchGuardHook();
   if (!launchGuard) throw new Error("claude_write_sandbox_launch_guard_missing");
+  // Windows has no OS sandbox: the shell gate is the only boundary on shell calls, so a write run whose gate cannot run
+  // (no PowerShell to host it) does not start.
+  if (process.platform === "win32" && !windowsShellGateHostAvailable(req.env ?? process.env)) {
+    throw new Error("claude_windows_shell_gate_unavailable");
+  }
   const brokerHooks = hooks && typeof hooks === "object" && !Array.isArray(hooks) ? hooks as Record<string, unknown> : {};
   const brokerPreToolUse = Array.isArray(brokerHooks.PreToolUse) ? brokerHooks.PreToolUse as unknown[] : [];
   const mergedHooks = { ...brokerHooks, PreToolUse: [...brokerPreToolUse, launchGuard] };
   const encoded = JSON.stringify({
-    ...CLAUDE_WORKSPACE_SANDBOX_SETTINGS,
+    ...claudeWorkspaceSandboxSettings(),
     hooks: mergedHooks,
   });
   if (Buffer.byteLength(encoded, "utf8") > 40_960) {
@@ -491,7 +542,7 @@ async function claudeExecutionSettings(req: RunnerRequest): Promise<string | nul
  * quotes the "**[Hope]**" prefix; with this exclusion it reports none. (Codex: codex-product-home.ts.)
  */
 export function personalClaudeInstructionFiles(env: NodeJS.ProcessEnv = process.env): string[] {
-  const configDir = path.resolve(env.CLAUDE_CONFIG_DIR || path.join(env.HOME || os.homedir(), ".claude"));
+  const configDir = path.resolve(env.CLAUDE_CONFIG_DIR || path.join(cliUserHome(env), ".claude"));
   return [path.join(configDir, "CLAUDE.md"), path.join(configDir, "rules", "**", "*.md")];
 }
 
@@ -1325,9 +1376,7 @@ const runClaudeTurn = async (
    * 15분간 네 방법을 시도한 뒤 "하이퍼바이저 접근 권한이 없다"고 사용자에게 보고했다(기계는 멀쩡했다).
    */
   const writeSandboxNotice =
-    !runReq.untrustedNoTools && req.permission === "write"
-      ? `\n\n[Write run] shell: workspace sandbox. Blocked (approval, Operation not permitted, GUI/emulator/service start failure, SIGILL/exit 132) = permission boundary, not machine limit; no launcher workaround (open, osascript, launchctl, .command, tmux). Needs more: one sentence why, then final line exactly ${PERMISSION_ESCALATION_MARKER}.`
-      : "";
+    !runReq.untrustedNoTools && req.permission === "write" ? `\n\n${claudeWriteRunNotice()}` : "";
   // Snapshot what this prompt actually dispatches before asynchronous native init.
   const stableContextSnapshot = { turnContext: aliveProfile ? undefined : runReq.turnContext,
     stableBlocks: !aliveProfile && runReq.turnContextStable ? [...runReq.turnContextStable] : undefined };
@@ -1478,11 +1527,11 @@ const runClaudeTurn = async (
   // switched on (capabilities/one-capabilities.ts, claude-personal-context.ts). A settings overlay, not a config-dir mirror:
   // Claude's sign-in is keyed by its config dir.
   const personalSettings = withClaudePersonalContext(productSettings, selectionFor(runReq.agentId, undefined, runReq.chatId),
-    path.resolve((runReq.env ?? process.env).CLAUDE_CONFIG_DIR || path.join((runReq.env ?? process.env).HOME || os.homedir(), ".claude")),
+    path.resolve((runReq.env ?? process.env).CLAUDE_CONFIG_DIR || path.join(cliUserHome(runReq.env ?? process.env), ".claude")),
     req.cwd ?? agentRunCwd());
   // The run's config dir is the product mirror (claude-product-home.ts): exclude the same files under its path too.
   const mirroredSettings = personalSettings ? withClaudeMirrorExcludes(personalSettings,
-    path.resolve((runReq.env ?? process.env).CLAUDE_CONFIG_DIR || path.join((runReq.env ?? process.env).HOME || os.homedir(), ".claude")),
+    path.resolve((runReq.env ?? process.env).CLAUDE_CONFIG_DIR || path.join(cliUserHome(runReq.env ?? process.env), ".claude")),
     claudeProductHomeDir()) : personalSettings;
   const toolBrokerArgs = mirroredSettings ? ["--settings", mirroredSettings] : [];
   const noToolsArgs = runReq.untrustedNoTools
@@ -2330,7 +2379,8 @@ const runClaudeTurn = async (
      * 쓰기 샌드박스가 실제로 켜진 실행에서만, Bash 결과에 한해, 같은 approval-required 통로로 승격 칩을 띄운다.
      * (전체 액세스에는 샌드박스가 없으니 거기서의 132 는 진짜 기계 문제다 — 부르지 않는다.)
      */
-    const sandboxActive = Boolean(executionSettings) && req.permission === "write";
+    // Windows write runs carry no OS sandbox (claudeWorkspaceSandboxSettings), so a 132 there is not a sandbox kill.
+    const sandboxActive = Boolean(executionSettings) && req.permission === "write" && process.platform !== "win32";
     /*
      * 끊긴 MCP 서버(실측: 컴퓨터 유즈 35건 "is not connected")는 이 턴 안에서 못 살린다 — 사람에게 한 번 말하고,
      * 앱 로그에 남긴다. 모델 쪽은 시스템 프롬프트 꼬리(toolOutageGuidance)가 "반복하지 말고 끝내라"를 맡는다.

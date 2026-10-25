@@ -31,7 +31,18 @@ interface PlistFacts {
   scriptingDefinition?: string;
   backgroundOnly: boolean;
   agent: boolean;
+  // what the app tells the OS it will ask for: "camera", "microphone", "location" (usage descriptions in Info.plist)
+  sensors: string[];
 }
+
+// An app that says it will use the camera, the microphone or the location can switch them on from a menu; Reach then hands out no open-ended
+// show / hide / toggle command of it (explore-policy.ts), whatever language its menus are in.
+const SENSOR_KEYS: Array<[string[], string]> = [
+  [["NSCameraUsageDescription"], "camera"],
+  [["NSMicrophoneUsageDescription"], "microphone"],
+  [["NSLocationUsageDescription", "NSLocationWhenInUseUsageDescription", "NSLocationAlwaysUsageDescription", "NSLocationAlwaysAndWhenInUseUsageDescription"], "location"],
+];
+const sensorsOf = (has: (name: string) => boolean): string[] => SENSOR_KEYS.filter(([keys]) => keys.some(has)).map(([, label]) => label);
 
 async function readPlist(host: ReachHost, plistPath: string): Promise<PlistFacts | null> {
   const whole = await host.exec("/usr/bin/plutil", ["-convert", "json", "-o", "-", "--", plistPath], { timeoutMs: 5_000, maxBytes: 4 * 1024 * 1024 });
@@ -48,6 +59,7 @@ async function readPlist(host: ReachHost, plistPath: string): Promise<PlistFacts
         scriptingDefinition: text("OSAScriptingDefinition"),
         backgroundOnly: data.LSBackgroundOnly === true || data.LSBackgroundOnly === "1",
         agent: data.LSUIElement === true || data.LSUIElement === "1",
+        sensors: sensorsOf((name) => data[name] !== undefined),
       };
     } catch {
       return null;
@@ -61,6 +73,8 @@ async function readPlist(host: ReachHost, plistPath: string): Promise<PlistFacts
   };
   const identifier = await key("CFBundleIdentifier");
   if (!identifier) return null;
+  const sensorKeys = new Set<string>();
+  for (const name of SENSOR_KEYS.flatMap(([keys]) => keys)) if ((await key(name)) !== undefined) sensorKeys.add(name);
   return {
     identifier,
     name: await key("CFBundleName"),
@@ -70,6 +84,7 @@ async function readPlist(host: ReachHost, plistPath: string): Promise<PlistFacts
     scriptingDefinition: await key("OSAScriptingDefinition"),
     backgroundOnly: ["true", "1"].includes((await key("LSBackgroundOnly")) ?? ""),
     agent: ["true", "1"].includes((await key("LSUIElement")) ?? ""),
+    sensors: sensorsOf((name) => sensorKeys.has(name)),
   };
 }
 
@@ -171,6 +186,7 @@ export const macosProvider: PlatformProvider = {
       if (kind !== "native") signals.push(kind);
       if (facts.backgroundOnly) signals.push("background-only");
       if (facts.agent) signals.push("agent-app");
+      for (const sensor of facts.sensors) signals.push(`sensor:${sensor}`);
       if (duplicates > 0) signals.push("duplicate-bundle-id");
       const mtime = await host.fs.mtimeMs(plistPath);
       candidates.push({

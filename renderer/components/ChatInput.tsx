@@ -650,7 +650,7 @@ function ChatInputComponent({
       if (grant?.path) {
         grantedFiles.push({
           grant,
-          name: file.name || grant.path.split("/").filter(Boolean).at(-1) || (grant.kind === "directory" ? "folder" : "file"),
+          name: file.name || grant.path.split(/[\\/]/).filter(Boolean).at(-1) || (grant.kind === "directory" ? "folder" : "file"),
           mediaType: file.type || "application/octet-stream",
           size: file.size,
           kind: grant.kind,
@@ -1172,7 +1172,7 @@ function ChatInputComponent({
               const grant = await api.fs.pickDirectory();
               if (grant?.path) setFileGrants((a) => [...a, {
                 grant,
-                name: grant.path.split("/").filter(Boolean).at(-1) || "folder",
+                name: grant.path.split(/[\\/]/).filter(Boolean).at(-1) || "folder",
                 mediaType: "application/vnd.agentlas.directory+json",
                 size: 0,
                 kind: grant.kind,

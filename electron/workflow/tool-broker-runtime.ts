@@ -52,18 +52,107 @@ function brokerDir(runId: string, nodeId: string): string {
   return path.join(base, `${nodeId.replace(/[^A-Za-z0-9_-]/g, "_")}`);
 }
 
+/** POSIX sh word (Windows gates are rendered by windowsPowerShellHookCommand / grokHookHandlerToml). */
 function shellCommandArg(value: string): string {
-  if (process.platform === "win32") return JSON.stringify(value);
   if (/^[A-Za-z0-9_./:=@,+-]+$/.test(value)) return value;
   return `'${value.replace(/'/g, "'\\''")}'`;
 }
 
+/** PowerShell single-quoted literal (PowerShell also reads U+2018..U+201B as single quotes). */
+function powerShellLiteral(value: string): string {
+  return `'${value.replace(/['\u2018\u2019\u201A\u201B]/g, "$&$&")}'`;
+}
+
+/** What the Windows gate answers when its own program could not run: an explicit deny (grok blocks only on a deny). */
+export const TOOL_GATE_UNAVAILABLE_CODE = "AGENTLAS_TOOL_GATE_UNAVAILABLE";
+const TOOL_GATE_UNAVAILABLE_DENY = JSON.stringify({
+  hookSpecificOutput: {
+    hookEventName: "PreToolUse",
+    permissionDecision: "deny",
+    permissionDecisionReason: `${TOOL_GATE_UNAVAILABLE_CODE}: the Agentlas tool gate could not run, so this tool call was not run.`,
+  },
+});
+
+/**
+ * Windows: the gate as a PowerShell command, for a Claude hook with `"shell": "powershell"`.
+ *
+ * The old Windows form was cmd syntax (`set "ELECTRON_RUN_AS_NODE=1" && "Agentlas.exe" …`), but Claude Code runs hooks
+ * with Git Bash on Windows, or PowerShell without it — never cmd.exe. In bash `set "…"` sets nothing, so Agentlas.exe
+ * started as a second GUI instance, exited 0 with no answer, and the tool ran (2026-10-24 audit F4 / W-02); Windows
+ * PowerShell 5.1 rejects `&&`. Naming the shell makes one syntax run everywhere (pwsh 7 and Windows PowerShell 5.1).
+ * The child is started through .NET rather than `&`: Agentlas.exe is a GUI-subsystem program, which PowerShell does not
+ * wait for and whose standard handles it does not pass on, and only ProcessStartInfo can set ELECTRON_RUN_AS_NODE for
+ * that one child. stdin and stdout are copied as raw bytes (no code-page re-encoding of the JSON).
+ * Fail-closed: if the program cannot start or ends with a non-zero code, the command prints an explicit deny and
+ * exits 2 (Claude blocks on exit 2; grok blocks only on a deny). An older Claude that ignores `shell` would hand this
+ * text to Git Bash, which rejects it as a syntax error with exit 2 — also a block.
+ */
+export function windowsPowerShellHookCommand(script: string, planPath?: string, execPath = process.execPath): string {
+  const quotedArgs = [script, ...(planPath ? [planPath] : [])].map((value) => `"${value}"`).join(" ");
+  return [
+    "$ErrorActionPreference='Stop'",
+    `$d=${powerShellLiteral(TOOL_GATE_UNAVAILABLE_DENY)}`,
+    "try{$i=New-Object System.Diagnostics.ProcessStartInfo",
+    `$i.FileName=${powerShellLiteral(execPath)}`,
+    `$i.Arguments=${powerShellLiteral(quotedArgs)}`,
+    "$i.UseShellExecute=$false",
+    "$i.CreateNoWindow=$true",
+    "$i.RedirectStandardInput=$true",
+    "$i.RedirectStandardOutput=$true",
+    "$i.EnvironmentVariables['ELECTRON_RUN_AS_NODE']='1'",
+    "$p=[System.Diagnostics.Process]::Start($i)",
+    "$o=$p.StandardOutput.BaseStream.CopyToAsync([Console]::OpenStandardOutput())",
+    "[Console]::OpenStandardInput().CopyTo($p.StandardInput.BaseStream)",
+    "$p.StandardInput.Close()",
+    "$o.Wait()",
+    "$p.WaitForExit()",
+    "if($p.ExitCode -ne 0){throw 'gate-exit'}}catch{[Console]::Out.Write($d);exit 2}",
+  ].join(";");
+}
+
 /** Render a hook command that cannot accidentally enter Electron's GUI. */
 export function nodeHookCommand(script: string, planPath?: string): string {
+  if (process.platform === "win32") return windowsPowerShellHookCommand(script, planPath);
   const command = [process.execPath, script, ...(planPath ? [planPath] : [])].map(shellCommandArg).join(" ");
-  return process.platform === "win32"
-    ? `set "ELECTRON_RUN_AS_NODE=1" && ${command}`
-    : `ELECTRON_RUN_AS_NODE=1 ${command}`;
+  return `ELECTRON_RUN_AS_NODE=1 ${command}`;
+}
+
+export interface ClaudeCommandHookHandler {
+  type: "command";
+  command: string;
+  timeout: number;
+  /** Windows only: the shell Claude runs `command` with. */
+  shell?: "powershell";
+}
+
+/**
+ * The Claude PreToolUse handler for a gate script. macOS/Linux: the POSIX command, unchanged. Windows: the PowerShell
+ * command above with `"shell": "powershell"` (Claude Code 2.1.197+ reads it; the pinned CLI is 2.1.214) and a longer
+ * timeout, since Windows PowerShell and Agentlas.exe as Node both start cold for every tool call.
+ */
+export function nodeHookHandler(script: string, planPath?: string): ClaudeCommandHookHandler {
+  if (process.platform === "win32") {
+    return { type: "command", shell: "powershell", command: windowsPowerShellHookCommand(script, planPath), timeout: 30 };
+  }
+  return { type: "command", command: nodeHookCommand(script, planPath), timeout: 10 };
+}
+
+/**
+ * grok `hooks.toml` handler lines. macOS/Linux: the POSIX command string, unchanged. Windows: exec form — `command`
+ * is the program, `args` its arguments and `env` sets ELECTRON_RUN_AS_NODE for it — so no shell runs at all (grok
+ * picks pwsh, Windows PowerShell or Git Bash for an inline command on Windows, and reads `args`/`env`, measured in the
+ * grok 1.0.67 binary's hook reference).
+ */
+export function grokHookHandlerToml(script: string, planPath?: string): string[] {
+  if (process.platform === "win32") {
+    return [
+      `  command = ${JSON.stringify(process.execPath)}`,
+      `  args = [${[script, ...(planPath ? [planPath] : [])].map((value) => JSON.stringify(value)).join(", ")}]`,
+      '  env = { ELECTRON_RUN_AS_NODE = "1" }',
+      "  timeout = 30",
+    ];
+  }
+  return [`  command = ${JSON.stringify(nodeHookCommand(script, planPath))}`, "  timeout = 10"];
 }
 
 /** 훅 스크립트의 위치. 개발(dist 미빌드 아님)과 패키지 모두 같은 경로 규칙을 쓴다. */
@@ -103,11 +192,10 @@ export function materializeToolBroker(
   }
 
   fs.writeFileSync(planPath, JSON.stringify(plan), "utf8");
-  const command = nodeHookCommand(script, planPath);
   const hookBlock = {
     hooks: {
       PreToolUse: [
-        { matcher: ".*", hooks: [{ type: "command", command, timeout: 10 }] },
+        { matcher: ".*", hooks: [nodeHookHandler(script, planPath)] },
       ],
     },
   };
@@ -121,7 +209,6 @@ export function materializeToolBroker(
   const pluginDirPath = `${prefix}.grok-plugin`;
   try {
     fs.mkdirSync(pluginDirPath, { recursive: true });
-    const tomlCommand = JSON.stringify(command);
     fs.writeFileSync(
       path.join(pluginDirPath, "hooks.toml"),
       [
@@ -129,8 +216,7 @@ export function materializeToolBroker(
         'matcher = ".*"',
         "  [[hooks.PreToolUse.hooks]]",
         '  type = "command"',
-        `  command = ${tomlCommand}`,
-        "  timeout = 10",
+        ...grokHookHandlerToml(script, planPath),
         "",
       ].join("\n"),
       "utf8",

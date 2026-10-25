@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import { isTransientLock, renameWithRetry } from "../fs/retry";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import type { AppFactoryAppRecord } from "../../shared/types";
@@ -82,7 +83,15 @@ export async function buildAppArtifact(record: AppFactoryAppRecord, input: Await
     await fs.mkdir(path.dirname(destination), {recursive:true, mode:0o700});
     try { await fs.rename(output, destination); }
     catch (error) {
-      if (!["EEXIST", "ENOTEMPTY"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error;
+      // Same bundle digest already built (undo A→B→A, retry, rebuild): macOS/Linux say EEXIST/ENOTEMPTY, Windows
+      // says EPERM/EACCES for a directory renamed onto an existing directory (Windows audit fs.md #6). A transient
+      // lock (Defender scanning the fresh tree) with no destination yet is retried (fs/retry.ts).
+      const code = (error as NodeJS.ErrnoException).code ?? "";
+      const destinationExists = await fs.lstat(destination).then(stat => stat.isDirectory(), () => false);
+      if (!destinationExists && isTransientLock(error)) await renameWithRetry(output, destination, { attempts: 8 });
+      else if (!(["EEXIST", "ENOTEMPTY"].includes(code) || (destinationExists && ["EPERM", "EACCES"].includes(code)))) throw error;
+    }
+    if (await fs.lstat(output).then(() => true, () => false)) {
       const existing = await snapshotArtifactSource(destination, signal);
       if (existing.digest !== build.bundleDigest) throw new Error("artifact_bundle_cache_changed");
     }

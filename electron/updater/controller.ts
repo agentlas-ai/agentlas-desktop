@@ -10,6 +10,14 @@ import type {
   UpdaterErrorCode,
   UpdaterState,
 } from "../../shared/types";
+import {
+  describeUpdateTrust,
+  formatUpdateTrust,
+  parseUpdateTrustReceipt,
+  type ReleaseIntegrityStage,
+  type ReleaseIntegrityVerdict,
+  type UpdateTrustReceipt,
+} from "./release-integrity";
 
 const JOURNAL_SCHEMA_VERSION = 1;
 const CONTINUITY_GATE_VERSION = 2;
@@ -126,6 +134,8 @@ export interface UpdateInfoLike {
   version?: string;
   agentlasCompatibility?: unknown;
   releaseNotes?: unknown;
+  /** electron-updater's UpdateDownloadedEvent carries the pending payload path. */
+  downloadedFile?: unknown;
 }
 
 export interface UpdateCheckResultLike {
@@ -209,6 +219,11 @@ export interface InstallJournal {
    * transactions in the store, which hold regardless of this field.
    */
   continuity?: ContinuitySnapshot;
+  /**
+   * What protected this install (updater/release-integrity.ts). Diagnostic only: an unreadable value is ignored on
+   * read, never a reason to call the journal corrupt.
+   */
+  trust?: UpdateTrustReceipt;
 }
 
 export type InstallJournalInspection =
@@ -279,6 +294,17 @@ export interface UpdaterControllerDependencies {
    * uses so running work is checkpointed; default is a plain install().
    */
   requestInstall?: () => Promise<UpdaterActionResult>;
+  /**
+   * Release integrity gate (updater/release-integrity.ts): before a download and again before the native handoff.
+   * The official feed always passes and only returns the truthful receipt; a company-mirrored update on a platform
+   * without an OS signature check must carry a verified Agentlas-signed manifest. Absent (tests): the receipt is
+   * derived from the platform with no publisher configured.
+   */
+  verifyReleaseIntegrity?: (input: {
+    version: string;
+    stage: ReleaseIntegrityStage;
+    downloadedFile: string | null;
+  }) => Promise<ReleaseIntegrityVerdict>;
 }
 
 interface InstallAccessResult {
@@ -312,6 +338,7 @@ const updaterErrorCodes = new Set<UpdaterErrorCode>([
   "minimum-app-version",
   "minimum-runtime-version",
   "minimum-schema-version",
+  "install-integrity-unverified",
 ]);
 
 const updaterDiagnosticMessages = {
@@ -328,6 +355,10 @@ const updaterDiagnosticMessages = {
   "native-install-state": "The native updater could not prepare its local install state.",
   "native-install-timeout": "The native updater did not complete its handoff in time.",
   "native-install-unknown": "The native updater stopped before application replacement began.",
+  "mirror-trust-roots-missing": "This Desktop has no Agentlas release-signing root yet, so an update from the company server cannot be verified.",
+  "mirror-manifest-unavailable": "The company server did not provide the Agentlas-signed release list for this version.",
+  "mirror-manifest-invalid": "The release list from the company server failed Agentlas signature verification.",
+  "mirror-payload-mismatch": "The downloaded update does not match the Agentlas-signed release list.",
 } as const satisfies Record<UpdaterDiagnosticCategory, string>;
 
 export function updaterDiagnostic(category: UpdaterDiagnosticCategory): UpdaterDiagnostic {
@@ -439,6 +470,8 @@ function safeMessage(code: UpdaterErrorCode): string {
       return "This release needs an automatic Agentlas runtime bridge before it can be applied. The current app and local data remain unchanged.";
     case "minimum-schema-version":
       return "This release cannot safely migrate the installed Agentlas data schema. Do not install the same release manually; use a supported bridge version or recovery guidance.";
+    case "install-integrity-unverified":
+      return "The update from your company server could not be verified, so it was not installed. The installed app was left unchanged.";
   }
 }
 
@@ -743,6 +776,8 @@ export class DesktopUpdaterController {
   private availableVersion: string | null = null;
   private availableReleaseNotes: string | undefined;
   private blockedTargetVersion: string | null = null;
+  /** The pending payload electron-updater reported in update-downloaded; hashed by the release integrity gate. */
+  private downloadedFile: string | null = null;
   private blockedReasonCode: UpdaterErrorCode = "install-not-applied";
   private blockedDiagnostic: UpdaterDiagnostic | undefined;
   private blockedNativeInstallFailures = 0;
@@ -1198,6 +1233,8 @@ export class DesktopUpdaterController {
       || code === "legacy-cleanup-failed"
       || code === "install-source-untrusted"
       || code === "install-not-applied"
+      // The company server may publish the signed release list later; every check asks again.
+      || code === "install-integrity-unverified"
       || nativeRetryable;
     return {
       status: "manual-required",
@@ -1305,6 +1342,47 @@ export class DesktopUpdaterController {
     this.logger.warn(`[updater] installed app verification blocked: ${trust.diagnostic.category}`);
     this.publish(this.manualState(version, "install-source-untrusted", trust.diagnostic));
     return false;
+  }
+
+  /**
+   * Runs the release integrity gate. On refusal the payload is discarded and the version is held with a typed,
+   * retryable reason; the next check asks the company server again.
+   */
+  private async verifyReleaseIntegrityOrBlock(
+    version: string,
+    stage: ReleaseIntegrityStage,
+  ): Promise<UpdateTrustReceipt | null> {
+    let verdict: ReleaseIntegrityVerdict;
+    if (!this.deps.verifyReleaseIntegrity) {
+      verdict = { ok: true, receipt: describeUpdateTrust({ platform: String(this.deps.platform), feed: "official", publisherNames: [] }) };
+    } else {
+      try {
+        verdict = await this.deps.verifyReleaseIntegrity({ version, stage, downloadedFile: this.downloadedFile });
+      } catch {
+        verdict = {
+          ok: false,
+          reason: "mirror-manifest-invalid",
+          detail: "verifier_threw",
+          receipt: describeUpdateTrust({ platform: String(this.deps.platform), feed: "company", publisherNames: [] }),
+        };
+      }
+    }
+    if (verdict.ok) return verdict.receipt;
+    this.logger.warn(
+      `[updater] ${version} refused before ${stage === "before-install" ? "install" : "download"}: ${verdict.reason} `
+        + `(${verdict.detail}); ${formatUpdateTrust(verdict.receipt)}`,
+    );
+    if (!this.cleanupOrBlock(version)) return null;
+    this.downloadedFile = null;
+    this.availableVersion = null;
+    this.availableReleaseNotes = undefined;
+    this.blockedTargetVersion = version;
+    this.blockedReasonCode = "install-integrity-unverified";
+    this.blockedDiagnostic = updaterDiagnostic(verdict.reason);
+    this.blockedNativeInstallFailures = 0;
+    this.blockedRetryAfter = undefined;
+    this.publish(this.manualState(version, "install-integrity-unverified", this.blockedDiagnostic));
+    return null;
   }
 
   private blockInstallStart(error: unknown, knownJournal?: InstallJournal): UpdaterState {
@@ -1518,11 +1596,13 @@ export class DesktopUpdaterController {
       // matched. The gate blocked healthy updates permanently instead of
       // catching data loss, so it is off. The recovery copy is still written at
       // install time and stays on disk for manual use.
+      const acceptedTrust = parseUpdateTrustReceipt(journal.trust);
       this.logger.log(
         `[updater] accepting ${journal.targetVersion} `
           + (journal.continuity
             ? `(recovery copy kept at ${journal.continuity.backupPath})`
-            : "(installed without a recovery copy)"),
+            : "(installed without a recovery copy)")
+          + (acceptedTrust ? `; ${formatUpdateTrust(acceptedTrust)}` : ""),
       );
       if (!this.cleanupOrBlock(journal.targetVersion, journal, { keepDifferentialBaseline: true })) {
         this.writeJournal({ ...journal, phase: "blocked", reasonCode: "legacy-cleanup-failed" });
@@ -1645,6 +1725,7 @@ export class DesktopUpdaterController {
       }
       this.availableVersion = version;
       this.availableReleaseNotes = normalizeReleaseNotes(info.releaseNotes) ?? this.availableReleaseNotes;
+      this.downloadedFile = typeof info?.downloadedFile === "string" && info.downloadedFile ? info.downloadedFile : null;
       this.clearTransientRetry();
       this.publish({
         status: "downloaded",
@@ -1755,6 +1836,8 @@ export class DesktopUpdaterController {
       uid: this.deps.uid,
     });
     if (!(await this.verifyInstalledAppTrustOrBlock(version, access))) return;
+    // A company-mirrored release that cannot be verified is refused before 600 MB are fetched.
+    if (!(await this.verifyReleaseIntegrityOrBlock(version, "before-download"))) return;
 
     this.availableVersion = version;
     this.availableReleaseNotes = normalizeReleaseNotes(info.releaseNotes);
@@ -1784,6 +1867,20 @@ export class DesktopUpdaterController {
       this.state.status === "manual-required" &&
       this.state.code === "install-source-untrusted" &&
       this.state.canRetry === true;
+    const isIntegrityRetry =
+      this.state.status === "manual-required" &&
+      this.state.code === "install-integrity-unverified";
+    if (isIntegrityRetry) {
+      // Nothing was installed and the payload is already gone; ask the feed and the company server again.
+      this.blockedTargetVersion = null;
+      this.blockedReasonCode = "install-not-applied";
+      this.blockedDiagnostic = undefined;
+      this.blockedNativeInstallFailures = 0;
+      this.blockedRetryAfter = undefined;
+      this.availableVersion = null;
+      this.availableReleaseNotes = undefined;
+      this.publish({ status: "idle" });
+    }
     if (isNativeRetry) {
       if (this.state.retryAfter !== undefined && this.now() < this.state.retryAfter) {
         return Promise.resolve(this.state);
@@ -2012,7 +2109,11 @@ export class DesktopUpdaterController {
     stage("feed confirmed");
     const access = evaluateInstallAccess({ platform: this.deps.platform, execPath: this.deps.execPath, uid: this.deps.uid });
     if (!(await this.verifyInstalledAppTrustOrBlock(version, access))) return refused();
-    stage("app signature verified");
+    // Windows 1.3.88 -> 1.3.89 logged "app signature verified" here while nothing was verified (unsigned build, no
+    // publisherName). The line now states what actually protects this install on this platform and feed.
+    const trust = await this.verifyReleaseIntegrityOrBlock(version, "before-install");
+    if (!trust) return refused();
+    stage(`trust checked — ${formatUpdateTrust(trust)}`);
 
     // A best-effort backup cannot protect a still-running external action from
     // quitAndInstall killing its provider. Await that action's own settlement;
@@ -2072,6 +2173,7 @@ export class DesktopUpdaterController {
             : {};
         })(),
         ...(continuity ? { continuity } : {}),
+        trust,
       };
       // The journal drives post-install cleanup and retry accounting. Losing it
       // costs diagnostics on the next boot, not correctness, so a write failure

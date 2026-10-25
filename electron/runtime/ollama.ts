@@ -14,13 +14,9 @@ import { resolveEffectiveContextWindow } from "../../shared/models";
 import { runLocalOpenAiChat, type ChatMessage, type LocalChatContent, noModelSelectedResult } from "./local-tool-loop";
 import { ownerControlHistoryImages } from "./owner-control-pump";
 
-/** 기본 로컬 호스트. env OLLAMA_HOST로 재정의 가능(원격 Ollama도 지원). */
-export function ollamaHost(): string {
-  const raw = process.env.OLLAMA_HOST?.trim();
-  if (!raw) return "http://localhost:11434";
-  // "localhost:11434"처럼 스킴이 없으면 http:// 보정
-  return /^https?:\/\//.test(raw) ? raw.replace(/\/$/, "") : `http://${raw.replace(/\/$/, "")}`;
-}
+import { ollamaHost } from "./local-host";
+// 호스트 해석(OLLAMA_HOST=0.0.0.0·포트 없음·":11434")은 local-host.ts 한 곳에서 정한다.
+export { ollamaHost };
 
 export interface OllamaProbe {
   version: string;

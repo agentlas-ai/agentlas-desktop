@@ -22,6 +22,8 @@ export function useComposerEnter<T extends HTMLElement = HTMLTextAreaElement>(se
   // The commit's send is scheduled: Chromium on macOS follows a composing Enter with a second, plain Enter keydown, and
   // sending on it too made one Enter two sends (owner 2026-10-14, One room: the second, empty one paused the run).
   const commitSendScheduled = useRef(false);
+  // When the commit's send ran: a plain Enter echo that arrives after it is swallowed (one-composer-ime.ts).
+  const lastCommitSend = useRef<number | null>(null);
   return {
     onCompositionUpdate: (event) => { compositionText.current = event.data ?? ""; },
     onCompositionEnd: (event) => {
@@ -31,7 +33,7 @@ export function useComposerEnter<T extends HTMLElement = HTMLTextAreaElement>(se
         sendAfterCommit.current = false;
         commitSendScheduled.current = true;
         // The committed syllable reaches the value (and React state) after this event.
-        window.setTimeout(() => { commitSendScheduled.current = false; sendRef.current(); }, 0);
+        window.setTimeout(() => { commitSendScheduled.current = false; lastCommitSend.current = performance.now(); sendRef.current(); }, 0);
       }
     },
     handleEnter: (event) => {
@@ -42,6 +44,7 @@ export function useComposerEnter<T extends HTMLElement = HTMLTextAreaElement>(se
         keyCode: event.keyCode,
         msSinceCompositionEnd: lastEnd.current === null ? null : performance.now() - lastEnd.current,
         committedHangul: isHangulComposition(compositionText.current),
+        msSinceCommitSend: lastCommitSend.current === null ? null : performance.now() - lastCommitSend.current,
       });
       if (decision === "ignore") return false;
       if (decision === "send-after-commit") { sendAfterCommit.current = true; return true; }

@@ -1,5 +1,7 @@
 import { runAppleScript } from "../reach/applescript";
 import { isSensitiveApp } from "../reach/explore-policy";
+import { isDirectMenuCommand } from "../reach/map";
+import { findLiveCandidates, firstWithWindow } from "../reach/app-match";
 import { exploreApp } from "../reach/explorer";
 import { findMenuWindow } from "../reach/menu-probe";
 import { withForeground } from "../reach/foreground";
@@ -90,6 +92,7 @@ function findCapability(list: readonly Capability[], ref: string): { ok: true; c
 
 function usableNow(capability: Capability): boolean {
   if (capability.generic || capability.status === "degraded") return false;
+  if (isDirectMenuCommand(capability)) return true; // a menu command: the call resolves the path in the live menu first
   if (capability.tier === "published" && capability.status === undefined) return true;
   return capability.status === "verified";
 }
@@ -245,22 +248,23 @@ function bundleOf(key: string): string | null {
   return key.startsWith("bundle:") ? key.slice("bundle:".length).split("@")[0] : null;
 }
 
-async function liveTarget(rt: ReachRuntime, appKey: string, actuator: import("../reach/actuator").Actuator): Promise<{ pid: number; windowId: number; name: string } | { error: string }> {
-  const bundleId = bundleOf(appKey);
-  if (!bundleId) return { error: "gui_not_supported_for_this_app" };
+async function liveTarget(rt: ReachRuntime, app: { key: string; name: string; path?: string }, actuator: import("../reach/actuator").Actuator): Promise<{ pid: number; windowId: number; name: string } | { error: string }> {
   const apps = await actuator.listApps();
-  const live = apps.find((candidate) => candidate.bundleId === bundleId && candidate.running);
-  if (!live) return { error: "app_not_running" };
-  // the window that carries the app's menu bar (an About box or a panel has none)
-  const window = await findMenuWindow(actuator, live.pid);
-  if (!window) return { error: "app_has_no_window" };
-  return { pid: live.pid, windowId: window.windowId, name: live.name };
+  const candidates = findLiveCandidates(app, apps);
+  if (candidates.length === 0) return { error: "app_not_running" };
+  // the process that was picked is not a sensitive app, whatever the map's record says (independent review 4, S2)
+  if (candidates.some((candidate) => isSensitiveApp({ name: candidate.name, bundleId: candidate.bundleId }))) return { error: "app_off_limits" };
+  // the window that carries the app's menu bar (an About box or a panel has none), looked for in each process of the program until one has it
+  const found = await firstWithWindow(candidates, (live) => findMenuWindow(actuator, live.pid));
+  if (!found) return { error: "app_has_no_window" };
+  return { pid: found.live.pid, windowId: found.window.windowId, name: found.live.name };
 }
 
 function guiRefusal(error: string): Outcome {
   const next: Record<string, string> = {
     app_not_running: "open the app first; Reach only drives an app that is already running",
     app_has_no_window: "bring one of the app's windows on screen first",
+    app_off_limits: "Reach never drives this app (it holds secrets, messages or settings)",
     gui_not_supported_for_this_app: "only macOS apps are driven through their screen in this version",
     cua_download_failed: "the driver could not be downloaded; the owner can retry from Settings > Explore this desktop's apps",
     driver_unavailable: "the driver could not be started",
@@ -290,7 +294,7 @@ export async function reachInvoke(args: Record<string, unknown>, ctx: Ctx): Prom
     const gui = rt.gui;
     if (!gui) return unavailable("no_driver_in_this_host", "run this from the desktop app");
     const outcome = await gui.use(async (actuator) => {
-      const target = await liveTarget(rt, resolved.app.key, actuator);
+      const target = await liveTarget(rt, resolved.app, actuator);
       if ("error" in target) return { guiError: target.error } as const;
       const front = await withForeground(actuator, { pid: target.pid, windowId: target.windowId }, () => runSteps({ actuator, target: { pid: target.pid, windowId: target.windowId }, ...(rt.sleep ? { sleep: rt.sleep, settleMs: 1 } : {}) }, capability, parameters), undefined, rt.sleep);
       return front.ok ? ({ run: front.value } as const) : ({ guiError: front.code } as const);
@@ -331,9 +335,8 @@ export async function reachExplore(args: Record<string, unknown>, ctx: Ctx): Pro
   const resolved = await resolveApp(rt, str(args.app));
   if (!resolved.ok) return resolved.outcome;
   if (isSensitiveApp({ name: resolved.app.name, bundleId: bundleOf(resolved.app.key) ?? undefined })) return refused("app_off_limits", "Reach never explores apps that hold credentials, money, messages or the system");
-  const bundleId = bundleOf(resolved.app.key);
-  if (!bundleId) return unavailable("gui_not_supported_for_this_app", "only macOS apps are explored in this version");
-  const outcome = await rt.gui.use((actuator) => exploreApp({ actuator, registry: rt.registry, day: () => rt.day(), shouldStop: () => false, ...(rt.sleep ? { sleep: rt.sleep } : {}) }, { key: resolved.app.key, name: resolved.app.name, bundleId, fingerprint: resolved.app.fingerprint }, { maxDialogs: 6, maxMillis: 120_000 }));
+  const bundleId = bundleOf(resolved.app.key) ?? undefined;
+  const outcome = await rt.gui.use((actuator) => exploreApp({ actuator, registry: rt.registry, day: () => rt.day(), shouldStop: () => false, ...(rt.sleep ? { sleep: rt.sleep } : {}) }, { key: resolved.app.key, name: resolved.app.name, ...(bundleId ? { bundleId } : {}), sensors: resolved.app.signals.some((signal) => signal.startsWith("sensor:")), fingerprint: resolved.app.fingerprint }, { maxDialogs: 6, maxMillis: 120_000 }));
   if (!outcome.ok) return guiRefusal(outcome.error);
   const report = outcome.value;
   if (report.skipped) return guiRefusal(report.skipped === "not_running" ? "app_not_running" : report.skipped === "no_window" ? "app_has_no_window" : report.skipped === "sensitive" ? "app_off_limits" : "cannot_bring_forward");
@@ -352,7 +355,7 @@ export async function reachVerify(args: Record<string, unknown>, ctx: Ctx): Prom
   const capability = found.capability;
   if (capability.tier !== "explored" || capability.body?.kind !== "steps") return refused("not_verifiable_here", "only explored capabilities are re-read; a published one is stated by the app itself");
   const outcome = await rt.gui.use(async (actuator) => {
-    const target = await liveTarget(rt, resolved.app.key, actuator);
+    const target = await liveTarget(rt, resolved.app, actuator);
     if ("error" in target) return { guiError: target.error } as const;
     return { result: await repairDialogCapability({ actuator, target: { pid: target.pid, windowId: target.windowId }, appKey: resolved.app.key, fingerprint: resolved.app.fingerprint, day: rt.day(), ...(rt.sleep ? { sleep: rt.sleep } : {}) }, capability) } as const;
   });

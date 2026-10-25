@@ -229,6 +229,10 @@ export function ensureAgiActionSchema(db: Database.Database): void {
     status TEXT NOT NULL CHECK(status IN ('claimed','settled')), ok INTEGER, code TEXT,
     result_json TEXT CHECK(result_json IS NULL OR json_valid(result_json)), created_at_ms INTEGER NOT NULL, settled_at_ms INTEGER)`);
   db.exec("CREATE INDEX IF NOT EXISTS idx_agi_action_receipts_incident ON agi_action_receipts(incident_id, attempt)");
+  // The goal panel reads a goal's latest settled receipts (long-run/goal-panel.ts agiActions/agiSuggestions). Without
+  // this the right panel's 목표 tab scanned every receipt of every goal (15k rows, ~200 ms cold on the owner's store,
+  // 2026-10-25). Additive: older versions open the same file and simply do not use it.
+  db.exec("CREATE INDEX IF NOT EXISTS idx_agi_action_receipts_goal_settled ON agi_action_receipts(goal_id, settled_at_ms DESC)");
   db.exec(`CREATE TABLE IF NOT EXISTS agi_defect_reports (
     id TEXT PRIMARY KEY, goal_id TEXT NOT NULL, chat_id TEXT, incident_id TEXT, code TEXT NOT NULL, category TEXT NOT NULL,
     evidence_json TEXT NOT NULL CHECK(json_valid(evidence_json)), workaround TEXT, created_at_ms INTEGER NOT NULL,

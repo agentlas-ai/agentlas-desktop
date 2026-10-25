@@ -125,15 +125,18 @@ export function MenuBridge() {
   const ko = locale === "ko";
   const mac = typeof navigator !== "undefined" && /mac/i.test(navigator.platform);
   const modifier = mac ? "⌘" : "Ctrl";
+  // Windows/Linux keyboards say Shift and Enter; the Mac glyphs ⇧ and ↵ read as symbols there (Windows audit ui.md #14).
+  const shift = mac ? "⇧" : "Shift";
+  const enter = mac ? "↵" : "Enter";
   const shortcuts = [
     { label: ko ? "새 프로젝트" : "New project", keys: [modifier, "N"], icon: <IconFolder size={18} /> },
     { label: ko ? "사이드바" : "Sidebar", keys: [modifier, "["], icon: <IconSidebar size={18} /> },
     // Back follows the platform: Alt+Left on Windows/Linux. macOS's ⌘[ is this app's Sidebar, so Back has no key there.
     ...(mac ? [] : [{ label: ko ? "뒤로" : "Back", keys: ["Alt", "←"], icon: <IconArrowLeft size={18} /> }]),
     { label: ko ? "설정" : "Settings", keys: [modifier, ","], icon: <IconSettings size={18} /> },
-    { label: ko ? "메시지 보내기" : "Send message", keys: [modifier, "↵"], icon: <IconChat size={18} /> },
-    { label: "Agent Hub", keys: ["⇧", modifier, "M"], icon: <IconStore size={18} /> },
-    { label: ko ? "앱" : "Apps", keys: ["⇧", modifier, "L"], icon: <IconApps size={18} /> },
+    { label: ko ? "메시지 보내기" : "Send message", keys: [modifier, enter], icon: <IconChat size={18} /> },
+    { label: "Agent Hub", keys: [shift, modifier, "M"], icon: <IconStore size={18} /> },
+    { label: ko ? "앱" : "Apps", keys: [shift, modifier, "L"], icon: <IconApps size={18} /> },
     { label: ko ? "팝업 닫기" : "Close popup", keys: ["Esc"], icon: <IconClose size={18} /> },
   ];
   return shortcutsOpen ? <PopupFrame title={ko ? "단축키" : "Shortcuts"} icon={<IconApps size={20} />}

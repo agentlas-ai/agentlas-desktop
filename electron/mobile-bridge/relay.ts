@@ -1,3 +1,5 @@
+import type { Agent as HttpAgent } from "node:http";
+import { webSocketAgentFor } from "../net/system-network-core";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -129,6 +131,8 @@ export function relayCloseDetail(code: unknown, reason: unknown): string {
 }
 
 interface RelaySocketOptions {
+  /** The proxying agent when the system proxy applies to this URL (system-network-core). */
+  agent?: HttpAgent;
   headers?: Record<string, string>;
   handshakeTimeout?: number;
   perMessageDeflate?: boolean;
@@ -482,10 +486,12 @@ export class MobileBridgeCloudRelay {
         return;
       }
     }
-    const socket = new RelayWebSocket(relayUrl(this.endpoint, {
+    const controlUrl = relayUrl(this.endpoint, {
       role: "desktop",
       hostId: this.options.hostId,
-    }), {
+    });
+    const socket = new RelayWebSocket(controlUrl, {
+      agent: webSocketAgentFor(controlUrl),
       headers: { ...authentication!.headers, "x-agentlas-relay-secret": this.secret },
       handshakeTimeout: 8_000,
       perMessageDeflate: false,
@@ -639,11 +645,13 @@ export class MobileBridgeCloudRelay {
     const authentication = this.authentication();
     const cookie = authentication?.epoch;
     if (!onPairFrame || !cookie || this.stopped) return;
-    const cloud = new RelayWebSocket(relayUrl(this.endpoint, {
+    const tunnelUrl = relayUrl(this.endpoint, {
       role: "tunnel",
       hostId: this.options.hostId,
       channelId,
-    }), {
+    });
+    const cloud = new RelayWebSocket(tunnelUrl, {
+      agent: webSocketAgentFor(tunnelUrl),
       headers: { ...authentication!.headers, "x-agentlas-relay-secret": this.secret },
       handshakeTimeout: 8_000,
       perMessageDeflate: false,
@@ -695,11 +703,13 @@ export class MobileBridgeCloudRelay {
       );
       return;
     }
-    const cloud = new RelayWebSocket(relayUrl(this.endpoint, {
+    const tunnelUrl = relayUrl(this.endpoint, {
       role: "tunnel",
       hostId: this.options.hostId,
       channelId,
-    }), {
+    });
+    const cloud = new RelayWebSocket(tunnelUrl, {
+      agent: webSocketAgentFor(tunnelUrl),
       headers: { ...authentication!.headers, "x-agentlas-relay-secret": this.secret },
       handshakeTimeout: 8_000,
       perMessageDeflate: false,

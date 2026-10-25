@@ -15,6 +15,7 @@
 // 다운로드는 Electron net(크로미움 네트워크 스택)을 먼저 쓴다 — 시스템 프록시·PAC·윈도우
 // 인증서 저장소를 그대로 따르므로 브라우저가 되는 망이면 된다. 무결성은 이 릴리스에 고정된
 // sha512 로 검증하므로, 미러로 받아도 공급망은 같다.
+import { renameSyncWithRetry } from "../fs/retry";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
@@ -812,17 +813,20 @@ async function installInto(
       installedAt: new Date().toISOString(),
     }));
     const backup = `${staging}.previous`;
-    if (fs.existsSync(finalDir)) fs.renameSync(finalDir, backup);
+    if (fs.existsSync(finalDir)) renameSyncWithRetry(finalDir, backup);
     try {
       await renameWithRetry(staging, finalDir, options);
       const executable = path.join(finalDir, exeRelative(kind, key));
       rejectedExecutables.delete(path.resolve(executable));
       return executable;
     } catch (error) {
-      if (fs.existsSync(backup) && !fs.existsSync(finalDir)) fs.renameSync(backup, finalDir);
+      if (fs.existsSync(backup) && !fs.existsSync(finalDir)) renameSyncWithRetry(backup, finalDir);
       throw error;
     } finally {
-      if (fs.existsSync(backup) && fs.existsSync(finalDir)) fs.rmSync(backup, { recursive: true, force: true });
+      // A held file in the old copy must not turn a finished install into a failure (Windows audit fs.md #15).
+      if (fs.existsSync(backup) && fs.existsSync(finalDir)) {
+        try { fs.rmSync(backup, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); } catch { /* removed on a later install */ }
+      }
     }
   } catch (error) {
     try { fs.rmSync(staging, { recursive: true, force: true }); } catch { /* 청소 실패는 무해 */ }

@@ -31,6 +31,7 @@ import { SemanticRunStepProjector } from "../one/semantic-run-step";
 import { MainWorkRecoveryContext } from "./main-work-recovery";
 import { parseRunEventReplayInput, type RunEventReplay } from "../../shared/run-event-delivery";
 import { withInvocationAccounting } from "../long-run/accounting-context";
+import { sameCauseWakeHold, SAME_CAUSE_WAKE_REASON } from "../long-run/wake-arbiter";
 import { longRunMonetaryRefusal } from "../long-run/budget";
 import { runtimeFailureBlocksReplay } from "../runtime/selection";
 import { runtimeFailureBlocksNextAutomaticTurn } from "../../shared/runtime-turn-admission";
@@ -159,7 +160,7 @@ import { getProject } from "../store/projects";
 import { getAgentApp } from "../store/agent-apps";
 import { getDb } from "../store/db";
 import { resumeGoalsWaitingOnProject } from "../long-run/blocked-goal-sweep";
-import { adoptExplicitGoalGrant } from "../long-run/explicit-goal-authority";
+import { adoptExplicitGoalGrant, ensureExplicitGoalContract } from "../long-run/explicit-goal-authority";
 import { WORK_PROJECT_RESIDENCY_BUSY_CODE } from "../runtime/project-residency";
 import {
   admitInvocationWithStartReceipt,
@@ -3066,7 +3067,19 @@ export class InvocationService {
       throw new Error("goal_stop_in_progress");
     }
     const resumesPausedGoal = boundGoal?.status === "paused" && localUserTurn;
-    if (boundGoal?.status === "paused" && !resumesPausedGoal) {
+    // The owner's own paired channel (Mobile One, Telegram One) is not a host retry or a remote job: refusing it here
+    // left a paused room unreachable from the phone for good (the phone only read "Desktop rejected the request").
+    // It runs as an ordinary turn and leaves the Goal paused; resuming stays a Desktop message or the goal chip.
+    // Exactly the shapes those two channels start with (mobile-bridge/authority.ts, telegram/connect.ts): the binding
+    // plus that channel's own execution surface (and Telegram's surface text) and nothing else — no company work, graph
+    // or recovery custody.
+    const remoteSurfaceOnly = (surface: "mobile" | "telegram") => !executionContext
+      || (executionContext.source === surface && Object.keys(executionContext)
+        .every((key) => key === "source" || (surface === "telegram" && key === "surfaceContext")));
+    const ownerRemoteTurn = req.promptOrigin !== "system" && req.agentAppMode !== true
+      && ((workspaceBinding?.source === "mobile-one" && remoteSurfaceOnly("mobile"))
+        || (workspaceBinding?.source === "telegram-one" && remoteSurfaceOnly("telegram")));
+    if (boundGoal?.status === "paused" && !resumesPausedGoal && !ownerRemoteTurn) {
       throw new Error("goal_explicit_resume_required");
     }
     let stoppedGoalReactivation: { runId: string; version: number; status: "paused" | "blocked" | "waiting_tool" | "queued"; ownerAnswer?: boolean } | null = null;
@@ -4179,7 +4192,11 @@ export class InvocationService {
     const adoptRecordedExplicitGrant = (): void => {
       if (!goalLongRun || executionContext || goalLongRun.surface === "science" || getChatGoalRevision(goalLongRun.goalId)) return;
       try {
-        if (adoptExplicitGoalGrant(goalLongRun.goalId)) {
+        // No goal-mode turn of this Goal is recorded (a Goal defined through chats:defineGoal): the owner's own message
+        // turn running now is the instruction the "send one more message" notice asks for (explicit-goal-authority.ts).
+        const ownerTurn = localUserTurn && !backgroundObservation && !effectObservation && goalLongRun.rootChatId === chat.id
+          ? { invocationRunId: runId } : undefined;
+        if (adoptExplicitGoalGrant(goalLongRun.goalId, ownerTurn)) {
           goalLongRun = getLongRunByGoalId(goalLongRun.goalId);
           goalLongRunTask = goalLongRun ? listLongRunTasks(goalLongRun.id, true)[0] ?? null : null;
         }
@@ -5155,6 +5172,10 @@ export class InvocationService {
                 payload: { action: "resume_with_message", sourceMessageId, invocationRunId: runId,
                   previousStatus: current.status } });
               stall.reason = "contract";
+              // An explicit Goal defined without a contract row (chats:defineGoal) is not a Goal that "just changed
+              // state": refusing it repeated forever, for every owner message (production 2026-10-24, X Marketing room).
+              // Write its contract from its own ledger row first; an automatic Goal always has one from its admission.
+              if (!current.goalId.startsWith("goal:auto-message:")) ensureExplicitGoalContract(getDb(), current.goalId);
               const contractChanged = getDb().prepare(`UPDATE chat_goal_contracts
                 SET status = 'active', completed_at = NULL, updated_at = ?
                 WHERE goal_id = ? AND chat_id = ? AND status IN ('active', 'blocked')`)
@@ -6432,10 +6453,16 @@ export class InvocationService {
       const repeats = consecutiveGoalTurnFollowUps(run.id, followUpReason, ownerSince, Date.now(),
         { sinceCompletedTurn: !nothingStarted && !idleYield && !ownerQuestion });
       const plan = goalTurnFollowUpPlan({ repeats, requestedNotBefore: options.requestedNotBefore });
+      // The same move already failed for one machine cause (wake-arbiter.ts, owner 2026-09-24): the follow-up shows the time
+      // the sweep will really start it and carries that cause, instead of a 30 s step the arbiter would only defer again.
+      const sameCause = sameCauseWakeHold(run.id, record.chatId);
+      const held = sameCause && Date.parse(sameCause.retryAt) > Date.parse(plan.nextAt) ? sameCause : null;
       scheduleBlockedGoalRetry({ runId: run.id, expectedVersion: run.version, kind: "resume",
-        fromReason: followUpReason, retryIndex: repeats, nextAt: plan.nextAt, requestedBy: plan.requestedBy,
+        fromReason: held ? `${SAME_CAUSE_WAKE_REASON}:${held.cause}`.slice(0, 120) : followUpReason, retryIndex: repeats,
+        nextAt: held ? held.retryAt : plan.nextAt, requestedBy: held ? "host" : plan.requestedBy,
         detail: followUpReason, trigger: "goal-turn-background",
         appInstanceId: desktopAppInstanceId() });
+      if (held) console.info("[long-run] same-cause wait", JSON.stringify({ runId: run.id, cause: held.cause, failures: held.failures, nextAt: held.retryAt }));
       setTimeout(() => {
         try { runMainBackgroundTask(() => maybeDispatchEffectObservation(this, goalId, "goal-turn-background")); }
         catch (error) { console.warn("[effect-observation] background check unavailable:", error); }

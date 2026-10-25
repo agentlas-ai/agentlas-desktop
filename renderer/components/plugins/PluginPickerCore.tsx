@@ -30,6 +30,7 @@ import type {
 import styles from "./PluginPickerDialog.module.css";
 import { mcpOAuthAPI, runMcpOAuthAttempt } from "./McpOAuthAttempt";
 import { bundledSetupFor } from "./PluginSetupReview";
+import { CredentialStoreWord } from "../PlatformWord";
 
 export interface PluginPickerResult {
   /** 이번에 실제로 서버가 등록된 플러그인. */
@@ -608,8 +609,8 @@ export function KeyStep({
 
       <p className={styles.keyNote}>
         {ko
-          ? "값은 이 컴퓨터의 키체인에만 저장되고 화면이나 기록에 남지 않습니다."
-          : "Values are stored only in this computer's keychain — never shown or logged."}
+          ? <>값은 이 컴퓨터의 <CredentialStoreWord ko />에만 저장되고 화면이나 기록에 남지 않습니다.</>
+          : <>Values are stored only in this computer&apos;s <CredentialStoreWord ko={false} /> — never shown or logged.</>}
       </p>
 
       <footer className={styles.footer}>

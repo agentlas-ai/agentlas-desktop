@@ -84,7 +84,7 @@ export function BuildDoneToast() {
 
   useEffect(() => {
     if (prevPhase.current !== "done" && s.phase === "done" && s.result) {
-      const name = s.result.workspace.split("/").pop() || "package";
+      const name = s.result.workspace.split(/[\\/]/).pop() || "package";
       // 빌드 화면을 보고 있으면 화면 자체가 결과를 보여주므로 팝업은 생략.
       // ★저절로 뜨는 토스트 대신 전환기의 파란 점(오너 2026-09-29 "시트 띄우지말고 …").
       //   빌드 화면 밖에서 끝났으면 점으로 알리고, 결과·업로드는 빌드 화면에서 한다.
@@ -109,7 +109,7 @@ export function BuildDoneToast() {
   const readScope = s.result.readScope;
   const scanDisposition = buildScanDisposition(s.result.securityScan);
   const hasSecurityAdvisory = scanDisposition !== "passed";
-  const name = workspace.split("/").pop() || "package";
+  const name = workspace.split(/[\\/]/).pop() || "package";
 
   const upload = async (visibility: "private-link" | "marketplace") => {
     const label = visibility === "marketplace" ? (ko ? "허브" : "Hub") : (ko ? "클라우드" : "Cloud");

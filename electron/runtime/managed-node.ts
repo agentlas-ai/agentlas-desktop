@@ -1,3 +1,4 @@
+import { renameSyncWithRetry } from "../fs/retry";
 import { createHash } from "node:crypto";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
@@ -533,8 +534,8 @@ function copyPersistentNode(
     if (!validatePersistentNode(staging, expected)) {
       throw new Error("copy-verification-failed");
     }
-    fs.rmSync(destination, { recursive: true, force: true });
-    fs.renameSync(staging, destination);
+    fs.rmSync(destination, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    renameSyncWithRetry(staging, destination);
     const node = validatePersistentNode(destination, expected);
     if (!node) throw new Error("activation-verification-failed");
     return { node };

@@ -1,4 +1,5 @@
-import { app, BrowserWindow, globalShortcut, ipcMain, Menu, nativeImage, screen, shell, Tray } from "electron";
+import { app, BrowserWindow, globalShortcut, ipcMain, Menu, screen, shell, Tray } from "electron";
+import { trayIcon } from "./tray-icon";
 import { openRendererLink } from "./renderer-link-open";
 import type { IpcMainInvokeEvent, Rectangle } from "electron";
 import fs from "node:fs";
@@ -133,9 +134,7 @@ export function getOneWindowState(role: "main" | "one" = "one"): OneWindowState 
 }
 function ensureTray(): void {
   if (tray) return;
-  let icon = nativeImage.createFromPath(path.join(__dirname, "../../build-resources/icon-1024.png"));
-  if (!icon.isEmpty()) icon = icon.resize({ width: process.platform === "win32" ? 16 : 18, height: process.platform === "win32" ? 16 : 18 });
-  tray = new Tray(icon);
+  tray = new Tray(trayIcon());
   tray.setToolTip("Agentlas One");
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: host?.locale() === "ko" ? "One 열기" : "Open One", click: () => { void openOneWindow(); } },
@@ -145,12 +144,51 @@ function ensureTray(): void {
   ]));
   tray.on("click", () => { void openOneWindow(); });
 }
-function installShell(): void {
-  if (installed) return;
-  installed = true;
+/**
+ * How long Ctrl/Cmd+Shift+Space belongs to Agentlas. A global shortcut is taken from every other app.
+ * On Windows that chord is VS Code's parameter hints and an Office/IME chord, and it stayed taken for the
+ * life of the process once any One window had opened (Windows audit 2026-10-24, ui.md #8). Windows
+ * therefore holds it only while a One window exists; the tray (tray-icon.ts) is the reopen handle.
+ * macOS and Linux keep the process-long shortcut.
+ */
+export function oneShortcutLifetime(platform: NodeJS.Platform): "process" | "while-one-window-open" {
+  return platform === "win32" ? "while-one-window-open" : "process";
+}
+function registerShortcut(): void {
+  if (shortcut.registered) return;
   try { shortcut = globalShortcut.register(SHORTCUT, () => { void openOneWindow(); })
     ? { registered: true } : { registered: false, errorCode: "shortcut-unavailable" }; }
   catch { shortcut = { registered: false, errorCode: "shortcut-registration-failed" }; }
+}
+function releaseShortcut(): void {
+  if (!shortcut.registered) return;
+  try { globalShortcut.unregister(SHORTCUT); } catch { /* already gone */ }
+  shortcut = { registered: false };
+}
+/**
+ * Windows and Linux attach the application menu to every window that has none. The One companion
+ * (380-456 px) then showed "Agentlas Edit View Window Help", and its commands went to the main window,
+ * which may be hidden or absent in --one mode (ui.md #8). The companion has no menu bar there; its
+ * context menu keeps undo/copy/paste. macOS has one app menu bar, unchanged.
+ */
+export function oneWindowHasMenuBar(platform: NodeJS.Platform): boolean {
+  return platform === "darwin";
+}
+/**
+ * Menu.setApplicationMenu on Windows/Linux calls setMenu on every open window, so the removeMenu() at creation was
+ * undone as soon as Main rebuilt the app menu (the renderer reports its locale after the One window opened): a
+ * `--one` launch on Windows showed "Agentlas Edit View Window Help" whose commands target the hidden main window
+ * (Windows 11 VM, 2026-10-24). Main calls this after every application-menu change.
+ */
+export function enforceOneWindowMenuPolicy(platform: NodeJS.Platform = process.platform): void {
+  if (oneWindowHasMenuBar(platform)) return;
+  const window = getOneWindow();
+  if (window) window.removeMenu();
+}
+function installShell(): void {
+  if (installed) return;
+  installed = true;
+  if (oneShortcutLifetime(process.platform) === "process") registerShortcut();
   // A visible tray is also the recovery path after closing the only window.
   try { ensureTray(); } catch {
     trayError = "tray-unavailable";
@@ -190,11 +228,17 @@ export async function openOneWindow(input: { taskId?: string; focus?: boolean } 
       webPreferences: { preload: path.join(__dirname, "preload.js"), additionalArguments: ["--agentlas-window-role=one"],
         contextIsolation: true, nodeIntegration: false, sandbox: true, webSecurity: true } });
     one = window;
+    if (!oneWindowHasMenuBar(process.platform)) window.removeMenu();
+    if (oneShortcutLifetime(process.platform) === "while-one-window-open") registerShortcut();
     window.on("page-title-updated", event => { event.preventDefault(); });
     window.on("move", queueSave);
     window.on("resize", queueSave);
     window.on("close", persist);
-    window.on("closed", () => { if (saveTimer) clearTimeout(saveTimer); saveTimer = null; if (one === window) one = null; });
+    window.on("closed", () => {
+      if (saveTimer) clearTimeout(saveTimer); saveTimer = null;
+      if (one === window) one = null;
+      if (oneShortcutLifetime(process.platform) === "while-one-window-open" && !getOneWindow()) releaseShortcut();
+    });
     window.webContents.setWindowOpenHandler(({ url }) => {
       if (host?.externalEffectsAllowed()) openRendererLink(url, target => shell.openExternal(target));
       return { action: "deny" };

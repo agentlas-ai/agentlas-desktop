@@ -384,12 +384,7 @@ function parseOneTeamAgentPrompt(prompt: string, name: string): { title: string;
 }
 
 /** 편집 창을 채울 값 — 지금 정의에서 읽은 역할·성격과 "고쳐도 되는가". */
-function editableIdentityOf(
-  installedAgentId: string,
-  displayName: string,
-): { title: string; description: string; identityEditable: boolean } {
-  void displayName;
-  const agent = listInstalledAgentsReadOnly().find((item) => item.id === installedAgentId);
+function editableIdentityOf(agent: InstalledAgent | undefined): { title: string; description: string; identityEditable: boolean } {
   if (!agent) return { title: "", description: "", identityEditable: false };
   const parsed = parseOneTeamAgentPrompt(agent.systemPrompt, agent.name);
   if (!parsed) {
@@ -626,8 +621,14 @@ function liveStatus(row: Row, now = Date.now(), completion: OneOrgCompletionSumm
   return { kind: "new", ko: STATUS_TEMPLATES.noWork.ko, en: STATUS_TEMPLATES.noWork.en };
 }
 
-function toMember(row: Row, now = Date.now()): OneOrgMember {
-  const installed = listInstalledAgentsReadOnly().find((agent) => agent.id === row.installed_agent_id);
+/*
+ * `installedById` is one inventory read for the whole org answer. Each member used to re-read it twice
+ * (here and in editableIdentityOf): every read is the full installed_agents table plus a route lookup and a
+ * company-reference check per agent, so 10 seats × 2 × 179 agents made oneOrg:get block Main ~200 ms on the
+ * owner's store, and the attention poll calls it every 15 s and on every window focus (measured 2026-10-25).
+ */
+function toMember(row: Row, now: number, installedById: ReadonlyMap<string, InstalledAgent>): OneOrgMember {
+  const installed = installedById.get(row.installed_agent_id);
   const completionSummary = completionSummaryFor(row.installed_agent_id, row);
   const unavailableCode = oneAgentUnavailableCode(installed);
   const baseStatus = liveStatus(row, now, completionSummary);
@@ -661,7 +662,7 @@ function toMember(row: Row, now = Date.now()): OneOrgMember {
     completionSummary,
     autoSelectTools: row.auto_select_tools !== 0,
     collaborationStyle: COLLABORATION_STYLES.has(row.collaboration_style) ? row.collaboration_style : "default",
-    ...editableIdentityOf(row.installed_agent_id, row.display_name ?? ""),
+    ...editableIdentityOf(installed),
     runtimeSelection: getAgentRuntimeOverride("agent", row.installed_agent_id)?.selection ?? null,
     revision: row.revision,
     ...(unavailableCode && !row.archived_at ? {
@@ -693,11 +694,17 @@ export function getOneOrgState(): OneOrgState {
   const active = rows.filter((row) => !row.archived_at);
   const used = 1 + active.length;
   const revision = rows.reduce((max, row) => Math.max(max, row.revision), 1);
+  const visible = rows.filter((row) => !archived.has(row.installed_agent_id));
+  // First match wins, as Array.find did on the same ORDER BY installed_at DESC list.
+  const installedById = new Map<string, InstalledAgent>();
+  if (visible.length > 0) {
+    for (const agent of listInstalledAgentsReadOnly()) if (!installedById.has(agent.id)) installedById.set(agent.id, agent);
+  }
   return {
     schemaVersion: 1,
     revision,
     // Org chart hides seats whose agent is archived (30 days unused); the seat row stays, and invoking it restores the agent.
-    members: rows.filter((row) => !archived.has(row.installed_agent_id)).map((row) => toMember(row, now)),
+    members: visible.map((row) => toMember(row, now, installedById)),
     slots: {
       used,
       includesOne: true,

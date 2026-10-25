@@ -6,7 +6,8 @@ import { createHash, randomUUID } from "node:crypto";
 import { constants as fsConstants, lstatSync } from "node:fs";
 import fs, { type FileHandle } from "node:fs/promises";
 import path from "node:path";
-import { BrowserWindow, session as electronSession, shell } from "electron";
+import { BrowserWindow, screen, session as electronSession, shell } from "electron";
+import { fitWindowToWorkArea } from "../window-lifecycle";
 import { userDataDir } from "../runtime-paths";
 import { ownerFailureReason } from "../../shared/owner-visible-activity-text";
 import { currentUiLocale } from "../ui-locale";
@@ -2931,11 +2932,11 @@ function delay(ms: number, signal: AbortSignal): Promise<void> {
 
 function createTelegramWebWindow(title: string): BrowserWindow {
   const ses = electronSession.fromPartition(TELEGRAM_WEB_PARTITION);
+  // A 900x640 minimum ran off a 1024x768 @125 % work area (819x576) behind the taskbar (Windows audit ui.md #10).
+  let workArea: { width: number; height: number } | null = null;
+  try { workArea = screen.getPrimaryDisplay().workAreaSize; } catch { workArea = null; }
   const win = new BrowserWindow({
-    width: 1120,
-    height: 820,
-    minWidth: 900,
-    minHeight: 640,
+    ...fitWindowToWorkArea({ width: 1120, height: 820, minWidth: 900, minHeight: 640 }, workArea),
     title,
     backgroundColor: "#ffffff",
     autoHideMenuBar: true,

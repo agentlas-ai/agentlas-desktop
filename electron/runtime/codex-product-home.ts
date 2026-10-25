@@ -31,13 +31,17 @@
 // (codex-personal-context.ts).
 //
 // The mirror is skipped (the run keeps the real home) where it cannot hold: no auth.json to link
-// (keyring sign-in is keyed by the home's path), or links cannot be made (Windows without the right).
+// (keyring sign-in is keyed by the home's path), or the sign-in cannot be linked at all. On Windows without the symlink
+// right a file entry is a recorded hard link or copy instead (mirror-link.ts; Windows audit 2026-10-24, W-03); before
+// that every default Windows account ran product codex in the person's own home. A mirror that still cannot hold is
+// reported (product_home_isolation_unavailable), never silent.
 import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { userDataPath } from "../runtime-paths";
 import { inheritedProductHome, personalHomeDir, personalHomeOverride, productHomeRefusedOnThisHost } from "./product-home-identity";
+import { MIRROR_LINK_RECORD, adoptMirrorHardLink, isRecordedMirrorEntry, linkMirrorEntry, mirrorEntryLinked, mirrorEntryTarget, reconcileMirrorLinks, reportIsolationUnavailable } from "./mirror-link";
 
 /** Read by Codex as global user instructions; never mirrored. */
 export const CODEX_PERSONAL_INSTRUCTION_FILES: ReadonlySet<string> = new Set(["AGENTS.md", "AGENTS.override.md"]);
@@ -456,10 +460,12 @@ export function syncCodexProductHome(realHome: string, mirrorRoot = userDataPath
       if (!entries.includes(store)) { fs.mkdirSync(path.join(realHome, store), { recursive: true }); entries.push(store); }
     }
     fs.mkdirSync(home, { recursive: true, mode: 0o700 });
-    const wanted = new Set(entries.filter((name) => !mirrorExcludes(name, personal) && !isCodexPersonalSessionEntry(name)));
+    const wanted = new Set(entries.filter((name) => name !== MIRROR_LINK_RECORD && !mirrorExcludes(name, personal) && !isCodexPersonalSessionEntry(name)));
     const target = (name: string): string => path.join(realHome, name);
+    // Windows hard links / copies first: one no longer wanted goes, the rest behave like the links they stand for.
+    reconcileMirrorLinks(home, new Map([...wanted].map((name) => [name, target(name)] as const)));
     for (const name of fs.readdirSync(home)) {
-      if ((CODEX_PRODUCT_SESSION_DIRS as readonly string[]).includes(name)) continue;
+      if ((CODEX_PRODUCT_SESSION_DIRS as readonly string[]).includes(name) || name === MIRROR_LINK_RECORD) continue;
       const at = path.join(home, name);
       let stat: fs.Stats;
       try { stat = fs.lstatSync(at); } catch { continue; }
@@ -469,6 +475,8 @@ export function syncCodexProductHome(realHome: string, mirrorRoot = userDataPath
         if (!wanted.has(name) || fs.readlinkSync(at) !== target(name)) quietly(() => fs.unlinkSync(at));
         continue;
       }
+      if (isRecordedMirrorEntry(home, name)) continue; // a link made on Windows, kept in line above
+      if (wanted.has(name) && adoptMirrorHardLink(home, name, target(name))) continue;
       // Codex made this here because the real home had none at the time (a store a newer Codex adds).
       // It stays the mirror's own and is never moved or deleted: it may be open. config.toml is rewritten
       // from the person's below (a config Codex rewrote here yields to the person's, which is the authority).
@@ -477,7 +485,7 @@ export function syncCodexProductHome(realHome: string, mirrorRoot = userDataPath
     for (const name of wanted) {
       const at = path.join(home, name);
       if (isLink(at) || fs.existsSync(at)) continue;
-      quietly(() => fs.symlinkSync(target(name), at));
+      quietly(() => { linkMirrorEntry(target(name), at); });
     }
     bindCodexProductSessionStore(home, mirrorRoot, true);
     writeProductConfig(realHome, home, isolated);
@@ -485,8 +493,9 @@ export function syncCodexProductHome(realHome: string, mirrorRoot = userDataPath
     const hooksAt = path.join(home, "hooks.json");
     quietly(() => fs.rmSync(hooksAt, { force: true }));
     if (personal?.hooksJson) fs.writeFileSync(hooksAt, personal.hooksJson, { mode: 0o600 });
-    if (!isLink(path.join(home, "auth.json"))) return { skip: "links-unavailable" };
-  } catch {
+    if (!mirrorEntryLinked(home, "auth.json")) { reportIsolationUnavailable("codex", "sign-in-not-linked"); return { skip: "links-unavailable" }; }
+  } catch (error) {
+    reportIsolationUnavailable("codex", error);
     return { skip: "links-unavailable" };
   }
   return { home };
@@ -550,7 +559,7 @@ export function codexProductRunHome(home: string): string {
     const realHome = realCodexHome(process.env);
     if (path.resolve(home) !== realHome) return home;
     const mirror = mirrorPathFor(realHome);
-    return isLink(path.join(mirror, "auth.json")) && !keyringOnly(realHome) ? mirror : home;
+    return mirrorEntryLinked(mirror, "auth.json") && !keyringOnly(realHome) ? mirror : home;
   } catch {
     return home;
   }
@@ -576,9 +585,10 @@ const adoptedThreads = new Set<string>();
 export function adoptCodexThreadIntoProductStore(home: string | undefined, threadId: string, mirrorRoot = userDataPath("codex-product-home")): boolean {
   if (!home || !/^[0-9a-f-]{16,64}$/i.test(threadId) || adoptedThreads.has(threadId)) return false;
   if (path.dirname(path.resolve(home)) !== path.resolve(mirrorRoot) || path.basename(home) === "store") return false;
-  // The account home this mirror was made from: its sign-in link points there.
-  let realHome: string;
-  try { realHome = path.dirname(path.resolve(path.resolve(home), fs.readlinkSync(path.join(home, "auth.json")))); } catch { return false; }
+  // The account home this mirror was made from: its sign-in link (a symlink, or a recorded Windows hard link / copy) points there.
+  const signIn = mirrorEntryTarget(home, "auth.json");
+  if (signIn === null) return false;
+  const realHome = path.dirname(path.resolve(path.resolve(home), signIn));
   const store = productStoreFor(mirrorRoot);
   const suffix = `-${threadId}.jsonl`;
   const find = (root: string): string | null => {

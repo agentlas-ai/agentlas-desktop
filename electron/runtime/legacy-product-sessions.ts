@@ -30,6 +30,7 @@ import os from "node:os";
 import path from "node:path";
 import zlib from "node:zlib";
 import Database from "better-sqlite3";
+import { cliUserHome } from "./product-home-identity";
 
 export interface LegacyCleanupPaths {
   /** Agentlas's own app data: a cwd inside it is a product cwd. */
@@ -458,7 +459,7 @@ export async function moveLegacyProductSessions(paths: LegacyCleanupPaths): Prom
 
 /** Default locations for this install; each runtime is skipped when its home does not exist. */
 export function defaultLegacyCleanupPaths(userDataDir: string, mirrors: { codexStore: string; claudeMirror: string; copilotMirror: string }, env: NodeJS.ProcessEnv = process.env): LegacyCleanupPaths {
-  const home = env.HOME || os.homedir();
+  const home = cliUserHome(env);
   const codexHome = path.resolve(env.CODEX_HOME || path.join(home, ".codex"));
   const claudeDir = path.resolve(env.CLAUDE_CONFIG_DIR || path.join(home, ".claude"));
   const copilotHome = path.resolve(env.COPILOT_HOME || path.join(home, ".copilot"));

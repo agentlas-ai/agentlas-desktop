@@ -30,7 +30,7 @@ import path from "node:path";
 import { userDataPath } from "../runtime-paths";
 import { isMirrorLink, syncConfigHomeMirror } from "./config-home-mirror";
 import type { CapabilityItem, CapabilityKind, CapabilitySelection } from "../capabilities/one-capabilities";
-import { inheritedProductHome, personalHomeDir, productHomeRefusedOnThisHost } from "./product-home-identity";
+import { cliUserHome, inheritedProductHome, personalHomeDir, productHomeRefusedOnThisHost, withCliUserHome } from "./product-home-identity";
 
 /** Antigravity's conversation stores (per-conversation brain, annotations, recordings). Never linked into a product mirror. */
 const AGY_PERSONAL_SESSION_ENTRIES = new Set(["conversations", "brain", "annotations", "implicit", "html_artifacts",
@@ -320,12 +320,12 @@ export function withAgyProductHome(env: NodeJS.ProcessEnv, selection: Capability
   if (env.HOME && path.resolve(env.HOME) !== path.resolve(realHome) && !inheritedProductHome(env, "HOME")) return env;
   const mirror = syncAgyProductHome({ realHome, selection });
   if (!("home" in mirror)) return env;
-  return { ...env, HOME: mirror.home, AGENTLAS_AGY_REAL_HOME: realHome };
+  return { ...withCliUserHome(env, mirror.home), AGENTLAS_AGY_REAL_HOME: realHome };
 }
 
-/** The HOME an agy process with this environment reads ~/.gemini from. */
+/** The home an agy process with this environment reads ~/.gemini from (Go's os.UserHomeDir: USERPROFILE on Windows). */
 export function agySpawnHome(env: NodeJS.ProcessEnv): string {
-  return env.HOME || os.homedir();
+  return cliUserHome(env);
 }
 
 /** True when an agy process with this environment reads the person's own ~/.gemini (no product mirror). */

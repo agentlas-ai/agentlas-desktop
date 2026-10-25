@@ -291,6 +291,9 @@ export function OneGoalControls({ chatId, locale, isCurrent, onDeleted, onStoppe
   const reviewRequired = /(?:^|:\s*)automation_goal_execution_review_required$/.test(view.error ?? "");
   const ownershipReviewUnavailable = /(?:^|:\s*)automation_goal_execution_review_unavailable$/.test(view.error ?? "");
   const automationSetupRequired = /(?:^|:\s*)automation_goal_execution_setup_required$/.test(view.error ?? "");
+  // An explicit Goal with no recorded owner grant (defined through chats:defineGoal): Resume cannot start it, the owner's
+  // next message in this room can (it becomes the grant). Say that instead of the generic "could not be checked".
+  const ownerGrantRequired = /(?:^|:\s*)goal_owner_grant_required$/.test(view.error ?? "");
   const claimedWaitReconciliation = /(?:^|:\s*)goal_wait_claimed_reconciliation_required$/.test(view.error ?? "");
   const lifecycleConfirmationUnavailable = /(?:^|:\s*)goal_legacy_lifecycle_confirmation_unavailable$/.test(view.error ?? "");
   const lifecycleNotOngoing = /(?:^|:\s*)goal_legacy_lifecycle_not_ongoing$/.test(view.error ?? "");
@@ -497,6 +500,8 @@ export function OneGoalControls({ chatId, locale, isCurrent, onDeleted, onStoppe
       : ownershipReviewUnavailable
         ? (ko ? "자동화와 Goal의 연결을 확인할 수 없습니다. 최신 목표와 자동화 설정을 확인한 뒤 다시 이어가 주세요."
           : "The automation's connection to this Goal could not be verified. Check the current Goal and automation settings, then continue again.")
+      : ownerGrantRequired
+        ? (ko ? "이 목표를 이어갈 오너 지시가 아직 기록되지 않았습니다. 이 방에 메시지를 보내 주시면 그 메시지로 목표를 이어갑니다." : "No instruction from you is recorded for this goal yet. Send a message in this room and the goal continues from it.")
       : automationSetupRequired
         ? (ko ? "자동화 모델과 실행 대상 설정이 필요합니다. 다시 재개를 누르면 설정 화면을 열 수 있습니다."
           : "The automation's model or target needs configuration. Press Resume again to open its settings.")

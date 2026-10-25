@@ -38,6 +38,15 @@ import {
   sanitizeMobileBridgeText,
   truncateMobileBridgeUtf8,
 } from "./sanitize";
+import {
+  completionMarkerLine,
+  isUnapprovedSafeTerminalCommand,
+  matchCompletionMarker,
+  terminalShellPreamble,
+  windowsTerminalShell,
+  type TerminalShellDialect,
+  type TerminalShellSpec,
+} from "./terminal-shell-dialect";
 
 /**
  * The Mobile Bridge is only a transport.  This controller is the Desktop-side
@@ -91,6 +100,7 @@ interface TerminalProcess {
   cwd: string;
   handle: TerminalProcessHandle;
   pty: boolean;
+  dialect: TerminalShellDialect;
   exited: boolean;
   output: MobileBridgeTerminalLineDto[];
   nextSeq: number;
@@ -178,11 +188,8 @@ function resolveCwdForTerminal(terminalId: string, fallback: string): string {
   return fallback;
 }
 
-function shellSpec(): { command: string; args: string[] } {
-  if (process.platform === "win32") {
-    const command = process.env.ComSpec?.trim() || "cmd.exe";
-    return { command, args: ["/Q"] };
-  }
+function shellSpec(): TerminalShellSpec {
+  if (process.platform === "win32") return windowsTerminalShell(process.env);
   const candidates = process.platform === "darwin"
     ? ["/bin/zsh", "/bin/bash"]
     : [process.env.SHELL, "/bin/bash", "/bin/sh"];
@@ -200,7 +207,7 @@ function shellSpec(): { command: string; args: string[] } {
     : path.basename(command) === "bash"
       ? ["--noprofile", "--norc", "-i"]
       : ["-i"];
-  return { command, args: shellArgs };
+  return { command, args: shellArgs, dialect: "posix" };
 }
 
 function shellEnvironment(pty: boolean): NodeJS.ProcessEnv {
@@ -242,7 +249,7 @@ function safeDisplayText(value: string): string {
  * command separator.  An explicit approval can still run a legitimate build
  * or login command, but the phone cannot turn a typo into an unreviewed write.
  */
-function commandRisk(command: string): MobileBridgeTerminalRisk {
+function commandRisk(command: string, dialect: TerminalShellDialect): MobileBridgeTerminalRisk {
   const trimmed = command.trim();
   if (!trimmed || trimmed.length > COMMAND_MAX_CHARS) return "dangerous";
   // The v1 mobile field is explicitly one-line. A newline turns a harmless
@@ -258,9 +265,7 @@ function commandRisk(command: string): MobileBridgeTerminalRisk {
   // private local content, so even read-only commands such as ls/cat/rg/git
   // show must cross the Desktop approval gate before their output leaves the
   // host. This is a disclosure boundary, not only a write boundary.
-  return /^(?:pwd|date|whoami|tty|git\s+(?:status(?:\s+(?:--short|--porcelain(?:=v1)?))?|branch(?:\s+--show-current)?))$/i.test(trimmed)
-    ? "safe"
-    : "dangerous";
+  return isUnapprovedSafeTerminalCommand(dialect, trimmed) ? "safe" : "dangerous";
 }
 
 function commandMarker(requestId: string): string {
@@ -479,6 +484,7 @@ export class DesktopMobileTerminalController
       cwd,
       handle,
       pty: handle.pty,
+      dialect: spec.dialect,
       exited: false,
       output: [],
       nextSeq: 1,
@@ -493,6 +499,8 @@ export class DesktopMobileTerminalController
     this.terminals.set(terminalId, terminal);
     if (handle.child) trackRunChild(handle.child);
     handle.onData((stream, chunk) => this.consumeOutput(terminal, stream, chunk));
+    const preamble = terminalShellPreamble(spec.dialect, handle.pty);
+    if (preamble) handle.write(preamble);
     handle.onExit((code, signal) => {
       terminal.exited = true;
       for (const stream of ["stdout", "stderr"] as const) {
@@ -519,12 +527,13 @@ export class DesktopMobileTerminalController
   private consumeOutput(terminal: TerminalProcess, stream: "stdout" | "stderr", chunk: string): void {
     const emit = (line: string) => {
       const cleaned = stripControlText(line);
-      const marker = cleaned.match(new RegExp(`^${DONE_PREFIX}([a-zA-Z0-9_-]+):(-?\\d+)$`));
+      const marker = matchCompletionMarker(cleaned, DONE_PREFIX);
       if (marker) {
-        const request = [...terminal.requests.values()].find((item) => item.marker.endsWith(marker[1]));
+        if (marker.before.trim() && !marker.before.includes(DONE_PREFIX)) this.appendLine(terminal, stream, marker.before.trimEnd());
+        const request = [...terminal.requests.values()].find((item) => item.marker.endsWith(marker.id));
         if (request) {
           if (request.status !== "cancelled") request.status = "completed";
-          this.appendLine(terminal, "system", `Command completed (exit ${marker[2]}).`);
+          this.appendLine(terminal, "system", `Command completed (exit ${marker.exitCode}).`);
         }
         return;
       }
@@ -693,7 +702,7 @@ export class DesktopMobileTerminalController
     }
     const terminal = this.ensureTerminal(input.terminalId);
     if (terminal.exited) throw new Error("Terminal process exited");
-    const risk = commandRisk(input.command);
+    const risk = commandRisk(input.command, terminal.dialect);
     const preview: TerminalPreview = {
       terminalId: input.terminalId,
       previewId: `terminal-preview-${randomUUID()}`,
@@ -778,7 +787,7 @@ export class DesktopMobileTerminalController
     // consumes newline. This is the small but important distinction that
     // makes the same reviewed command work in both execution modes.
     const lineEnding = terminal.pty ? "\r" : "\n";
-    const payload = `${preview.command}${lineEnding}printf '\\n${marker}:%s\\n' "$?"${lineEnding}`;
+    const payload = `${preview.command}${lineEnding}${completionMarkerLine(terminal.dialect, marker)}${lineEnding}`;
     if (!terminal.handle.write(payload)) {
       request.status = "cancelled";
       throw new Error("Terminal process stdin is unavailable");

@@ -1,7 +1,8 @@
 import type { Actuator, ActuatorApp } from "./actuator";
 import { probeDialog, synthesizeDialogCapability, type ProbeResult } from "./dialog-probe";
 import { withForeground } from "./foreground";
-import { isRiskyMenuPath, isSensitiveApp, opensFilePicker } from "./explore-policy";
+import { firstWithWindow, isLiveApp } from "./app-match";
+import { isRiskyMenuPath, isSensitiveApp, opensFilePicker, startsWithPath, systemInsertedPrefixes } from "./explore-policy";
 import { enumerateMenus, menuCapabilities, menuLeaves, opensDialog, type MenuTarget, findMenuWindow } from "./menu-probe";
 import type { CapabilityRegistry } from "./registry";
 import type { Capability } from "./types";
@@ -15,6 +16,8 @@ export interface ExploreApp {
   name: string;
   bundleId?: string;
   fingerprint: string;
+  // the app says it uses the camera, the microphone or the location (Info.plist): it gets no open-ended show / hide / toggle command
+  sensors?: boolean;
 }
 
 export interface ExplorePorts {
@@ -56,15 +59,23 @@ export async function exploreApp(ports: ExplorePorts, app: ExploreApp, options: 
   const now = ports.now ?? Date.now;
   const started = now();
   const log = ports.log ?? (() => undefined);
-  const maxDialogs = options.maxDialogs ?? 8;
-  const deadline = started + (options.maxMillis ?? 90_000);
+  // No count limit by default (owner 2026-10-24: as many as possible): every dialog opener found is tried, one at a time, until the time for this app
+  // runs out or the owner is back (shouldStop is asked before each one); what is left is tried in the next round.
+  const maxDialogs = options.maxDialogs ?? Number.POSITIVE_INFINITY;
+  const deadline = started + (options.maxMillis ?? 240_000);
   if (isSensitiveApp({ name: app.name, bundleId: app.bundleId })) return emptyReport(app.name, "sensitive");
 
   const apps: ActuatorApp[] = await ports.actuator.listApps({ signal: ports.signal });
-  const running = apps.find((candidate) => (app.bundleId && candidate.bundleId === app.bundleId) || candidate.name === app.name);
-  if (!running || !running.running || running.pid <= 0) return emptyReport(app.name, "not_running");
-  const target: MenuTarget | null = await findMenuWindow(ports.actuator, running.pid, ports.signal);
-  if (!target) return emptyReport(app.name, "no_window");
+  // An app whose bundle id is known is found by that id and nothing else: another app that only shares the display name is not this app (independent review 4, S2:
+  // a third-party "Notes" in the map drove Apple Notes). Without a bundle id (Linux, Windows) the name rules of app-match.ts decide.
+  const candidates = apps.filter((candidate) => candidate.running && candidate.pid > 0 && (app.bundleId ? candidate.bundleId === app.bundleId : candidate.name === app.name || isLiveApp({ key: app.key, name: app.name }, candidate)));
+  if (candidates.length === 0) return emptyReport(app.name, "not_running");
+  // and the process that was actually picked is checked the way the map's record is: the explorer never presses anything in a sensitive app
+  if (candidates.some((candidate) => isSensitiveApp({ name: candidate.name, bundleId: candidate.bundleId }))) return emptyReport(app.name, "sensitive");
+  // several processes of one program: the first that has a window with the menu bar
+  const found = await firstWithWindow(candidates, (candidate) => findMenuWindow(ports.actuator, candidate.pid, ports.signal));
+  if (!found) return emptyReport(app.name, "no_window");
+  const target: MenuTarget = found.window;
   const report = emptyReport(app.name);
 
   await ports.registry.rebase(app.key, app.fingerprint);
@@ -78,7 +89,7 @@ export async function exploreApp(ports: ExplorePorts, app: ExploreApp, options: 
     const leaves = menuLeaves(scan.nodes);
     report.menuItems = leaves.length;
     const day = ports.day();
-    await ports.registry.upsert(app.key, app.fingerprint, menuCapabilities(app.key, scan.nodes), day);
+    await ports.registry.upsert(app.key, app.fingerprint, menuCapabilities(app.key, scan.nodes, ports.actuator.platform ?? "darwin", { sensors: app.sensors === true }), day);
     // A menu that would not close again means the app is not at rest: nothing else is pressed in it.
     if (scan.stuck) { report.blocked = true; finished = false; return; }
     if (ports.shouldStop() || ports.signal?.aborted) { report.stoppedEarly = true; finished = false; return; }
@@ -86,8 +97,9 @@ export async function exploreApp(ports: ExplorePorts, app: ExploreApp, options: 
     // 2. which dialog-opening items are worth a try
     const existing = new Map((await ports.registry.capabilities(app.key)).map((capability) => [capability.id, capability]));
     const candidates: string[][] = [];
+    const systemInserted = systemInsertedPrefixes(scan.nodes, ports.actuator.platform ?? "darwin");
     for (const leaf of leaves) {
-      if (!opensDialog(leaf.label) || isRiskyMenuPath(leaf.path)) continue;
+      if (!opensDialog(leaf.label) || isRiskyMenuPath(leaf.path) || systemInserted.some((prefix) => startsWithPath(leaf.path, prefix))) continue;
       if ((ports.actuator.platform ?? "darwin") !== "darwin" && opensFilePicker(leaf.path)) continue;
       if (!leaf.enabled) continue; // switched off right now (no document): looked at again in a later pass, not counted as a failure
       const id = `${app.key}#explored:dialog/${leaf.path.join(">")}`;
@@ -120,7 +132,7 @@ export async function exploreApp(ports: ExplorePorts, app: ExploreApp, options: 
     }
   }, ports.signal, ports.sleep);
   if (!front.ok) { report.skipped = "no_front"; return finish(report, now, started); }
-  if (finished) await ports.registry.markExplored(app.key, app.fingerprint, new Date().toISOString());
+  if (finished) await ports.registry.markExplored(app.key, app.fingerprint, ports.day()); // the day it was last looked at (a record from before this holds a full timestamp: its first ten characters are the day too)
   return finish(report, now, started);
 }
 

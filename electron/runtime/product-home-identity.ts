@@ -62,11 +62,32 @@ export function personalHomeOverride(env: NodeJS.ProcessEnv, variable: string): 
 }
 
 /**
+ * The home folder a CLI started with `env` reads its config from. Windows: USERPROFILE. The CLIs are Node (os.homedir()),
+ * Go (os.UserHomeDir), Rust and Python, and on Windows all of them read USERPROFILE (or the profile API), never HOME;
+ * HOME is often set there anyway (Git Bash, MSYS, Cygwin, a roaming H:\ drive), and reading it made the app look in
+ * another folder than the CLI (Windows audit 2026-10-24, spawn.md #8, runtimes.md W-09: agy MCP config staged under
+ * HOME, kimi sign-in and codex e-mail read from HOME). Elsewhere: HOME. Then os.homedir().
+ */
+export function cliUserHome(env: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform): string {
+  return (platform === "win32" ? env.USERPROFILE : env.HOME) || os.homedir();
+}
+
+/**
+ * `env` with the CLI's home moved to `home`: HOME, and on Windows USERPROFILE too (the variable a Windows CLI reads; a
+ * HOME-only override left it in the person's profile, spawn.md #8). The grok and agy product HOMEs use it.
+ */
+export function withCliUserHome(env: NodeJS.ProcessEnv, home: string, platform: NodeJS.Platform = process.platform): NodeJS.ProcessEnv {
+  return platform === "win32" ? { ...env, HOME: home, USERPROFILE: home } : { ...env, HOME: home };
+}
+
+/**
  * The person's own home folder. A grok or agy product run sets HOME to a product home, and a process started from it
  * inherits that HOME (os.homedir() reads HOME too). Then the run's recorded real home, else the account's home.
+ * On Windows USERPROFILE comes first (cliUserHome: the folder the CLIs read).
  */
 export function personalHomeDir(env: NodeJS.ProcessEnv = process.env): string {
-  for (const candidate of [env.HOME, env.USERPROFILE, env.AGENTLAS_GROK_REAL_HOME, env.AGENTLAS_AGY_REAL_HOME]) {
+  const first = process.platform === "win32" ? [env.USERPROFILE, env.HOME] : [env.HOME, env.USERPROFILE];
+  for (const candidate of [...first, env.AGENTLAS_GROK_REAL_HOME, env.AGENTLAS_AGY_REAL_HOME]) {
     if (!candidate) continue;
     if (!isAgentlasProductHome(candidate)) return candidate;
     reportIgnored("HOME");

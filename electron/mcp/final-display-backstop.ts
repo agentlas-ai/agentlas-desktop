@@ -22,6 +22,7 @@ import type {
   AgentlasUserDecisionRequest,
 } from "../../shared/types";
 import { stripAgentControlBlocks } from "../../shared/agent-control-blocks";
+import { sanitizeProtocolPayloads } from "../../shared/protocol-payload-display";
 import {
   canonicalAskFenceText,
   extractAskFences,
@@ -64,9 +65,11 @@ function stripBareMarkers(text: string): string {
 }
 
 /** U+FFFD는 이미 upstream 바이트 디코딩이 깨졌다는 뜻이다. 원문을 다시
- * 사용자에게 보여주지 않고, 누락된 부분만 짧은 생략부호로 표시한다. */
-function sanitizeDisplayText(text: string): string {
-  return stripAgentControlBlocks(text).replace(/\uFFFD+/gu, "…");
+ * 사용자에게 보여주지 않고, 누락된 부분만 짧은 생략부호로 표시한다.
+ * 글로 적힌 도구 호출·호스트 작업 참조 JSON(2026-10-24 Windows 로컬 모델 실측)도 답이 아니다 —
+ * shared/protocol-payload-display.ts 가 정확한 모양만 지우고, 지운 도구 호출은 한 줄 안내로 남긴다. */
+function sanitizeDisplayText(text: string, locale: string): string {
+  return sanitizeProtocolPayloads(stripAgentControlBlocks(text), locale).text.replace(/\uFFFD+/gu, "…");
 }
 
 function decisionProjection(text: string): {
@@ -104,7 +107,7 @@ export function applyFinalDisplayBackstop(
   const withoutMarkers = stripBareMarkers(original);
   if (!withoutMarkers.includes(SURFACE_OPEN_FENCE)) {
     const decision = decisionProjection(withoutMarkers);
-    const cleaned = sanitizeDisplayText(decision.visibleText);
+    const cleaned = sanitizeDisplayText(decision.visibleText, opts.locale);
     return {
       text: cleaned,
       durableText: durableDisplayText(cleaned, decision.durableAskText),
@@ -126,7 +129,7 @@ export function applyFinalDisplayBackstop(
 
   const surfaces = opts.allowSurfaceRender ? parsed.surfaces.map((entry) => entry.manifest) : [];
   const decision = decisionProjection(parsed.cleanedText);
-  const cleaned = sanitizeDisplayText(decision.visibleText).trim();
+  const cleaned = sanitizeDisplayText(decision.visibleText, opts.locale).trim();
   const text = cleaned || (surfaces.length > 0 ? surfaceReadyLine(opts.locale) : surfaceDroppedLine(opts.locale));
   return {
     text,

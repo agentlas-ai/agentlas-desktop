@@ -26,7 +26,7 @@ import { settleDaemonTurnGoals } from "./daemon-turn-goal";
 import { type EffectObservationDispatcher } from "./effect-observation-tickets";
 import { currentUiLocale } from "../ui-locale";
 import { holdingAgentResidency } from "../runtime/agent-residency";
-import { decideGoalWake, ownerRequestWaiting, recordGoalWake, type GoalWakeSource } from "./wake-arbiter";
+import { decideGoalContinuationWake, ownerRequestWaiting, recordGoalWake, SAME_CAUSE_WAKE_REASON, type GoalWakeSource } from "./wake-arbiter";
 import { GOAL_OWNER_ANSWER_REQUIRED } from "../../shared/goal-display-state";
 import { WORK_PROJECT_RESIDENCY_BUSY_CODE } from "../runtime/project-residency";
 
@@ -172,7 +172,7 @@ function resume(run: LongRunRecord, dispatcher: EffectObservationDispatcher, tri
   // then the daily barrier. A reached barrier parks the Goal until its window frees, visibly.
   const source: GoalWakeSource = trigger === "alive" ? "alive" : trigger === "project-released" ? "project-released"
     : trigger === "startup" ? "startup" : "sweep";
-  const verdict = decideGoalWake({ runId: run.id, chatId, source, gate: dispatcher });
+  const verdict = decideGoalContinuationWake({ runId: run.id, chatId, source, gate: dispatcher });
   if (!verdict.start) {
     if (verdict.reason === "wake_budget_reached") {
       try {
@@ -181,6 +181,20 @@ function resume(run: LongRunRecord, dispatcher: EffectObservationDispatcher, tri
           kind: "resume", fromReason: "wake_budget_reached", retryIndex: 0, nextAt: verdict.retryAt, detail: "wake_budget_reached",
           trigger, appInstanceId: desktopAppInstanceId() });
       } catch (error) { console.warn("[blocked-goal-sweep] budget park unavailable:", error); }
+    }
+    if (verdict.reason === SAME_CAUSE_WAKE_REASON) {
+      // The same move already failed for this cause: wait with the cause and its wake time instead of a paid start now.
+      const marker = `${SAME_CAUSE_WAKE_REASON}:${verdict.cause}`.slice(0, 120);
+      try {
+        const latest = getLongRun(run.id);
+        if (latest && !pendingBlockedGoalRetry(latest.id)) {
+          scheduleBlockedGoalRetry({ runId: latest.id, expectedVersion: latest.version,
+            kind: "resume", fromReason: marker, retryIndex: verdict.failures, nextAt: verdict.retryAt, detail: marker,
+            trigger, appInstanceId: desktopAppInstanceId() });
+          console.info("[long-run] same-cause wait", JSON.stringify({ runId: run.id, cause: verdict.cause, failures: verdict.failures, nextAt: verdict.retryAt }));
+        }
+      } catch (error) { logSweepFailureCause("same-cause-park", run.id, SAME_CAUSE_WAKE_REASON, error); }
+      return { runId: run.id, fromReason: run.blockedReason, action: "deferred", detail: marker };
     }
     return { runId: run.id, fromReason: run.blockedReason, action: "deferred", detail: verdict.reason };
   }

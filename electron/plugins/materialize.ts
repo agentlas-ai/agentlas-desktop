@@ -2,6 +2,7 @@
 // Only `.state/` is host/user data. The release itself is staged and verified
 // before an atomic directory swap, so plugin.json can never claim a new
 // version over a partial mixture of old and new files.
+import { renameSyncWithRetry } from "../fs/retry";
 import { createHash, randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -489,11 +490,12 @@ export function materializePluginRelease(input: {
 
     if (destinationStat) {
       backup = path.join(parent, `.${slug}.backup-${randomUUID()}`);
-      fs.renameSync(destinationDir, backup);
+      // Defender scans every freshly written plugin tree; retry a transient lock (fs/retry.ts, Windows audit fs.md #15).
+      renameSyncWithRetry(destinationDir, backup);
       input.onAfterDestinationBackup?.();
     }
     try {
-      fs.renameSync(stage, destinationDir);
+      renameSyncWithRetry(stage, destinationDir);
       stage = "";
       swapped = true;
       input.onAfterReleaseSwap?.();

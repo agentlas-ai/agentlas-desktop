@@ -19,6 +19,7 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import { execFile, spawn } from "node:child_process";
 import { createOwnedChildDrain, OWNED_CHILD_DRAIN_SOURCE } from "../runtime/owned-child-drain";
+import { BROWSER_SITE_LEARNING_CORE_SOURCE, BROWSER_SITE_LEARNING_GLUE_SOURCE } from "./site-learning-core";
 import { BROWSER_APPROVAL_FILE_ENV } from "../browser/approval-channel";
 import { AUTOMATION_PROFILE_CACHE_BYTES, AUTOMATION_PROFILE_DISPOSABLE, AUTOMATION_PROFILE_FLAGS } from "../browser/automation-profile-flags";
 import { assertDedicatedBrowserProfilePath } from "../browser/profile-path-boundary";
@@ -3352,6 +3353,8 @@ ${BROWSER_SOCIAL_ENGAGE_SOURCE}
 ${BROWSER_APPROVAL_CONTEXT_SOURCE}
 ${BROWSER_FIND_GUIDANCE_SOURCE}
 ${BROWSER_UPLOAD_FALLBACK_SOURCE}
+${BROWSER_SITE_LEARNING_CORE_SOURCE}
+${BROWSER_SITE_LEARNING_GLUE_SOURCE}
 function readCdpPageUrl() {
   if (NATIVE_ENDPOINT) return nativeRequest(nativeLeaseEndpoint + '/json/list', 'GET').then(extractCdpPageUrl, () => '');
   return new Promise((resolve) => {
@@ -4015,6 +4018,7 @@ async function main() {
     }
     if (msg && msg.method === 'tools/call' && msg.params) {
       const name = msg.params.name || '';
+      siteLearningNoteCall(msg.id, name);
       const originalArgs = msg.params.arguments || {};
       let args = normalizeToolArguments(name, originalArgs);
       const argumentFailure = browserEvaluateArgumentFailure(name, args) || browserFindArgumentFailure(name, args);
@@ -4117,7 +4121,7 @@ async function main() {
       return;
     }
     if (msg && msg.id != null && msg.result && Array.isArray(msg.result.content)) {
-      const guided = withBlankPageGuidance(msg.result);
+      const guided = withBlankPageGuidance(siteLearningAnnotateReply(msg.id, msg.result));
       if (guided !== msg.result) { writeClient({ ...msg, result: guided }); return; }
     }
     // tools/list 응답 → 스킬 툴 주입.

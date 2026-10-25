@@ -238,8 +238,18 @@ export function preferredMobileBridgeHost(): string {
   return selected;
 }
 
-const PHYSICAL_INTERFACE_RE = /^(?:en\d+|eth\d+|eno\d+|ens\d+|enp\w+|wlan\d+|wlp\w+|wi-?fi|ethernet)/i;
+// Windows names adapters in the display language: a Korean wired NIC is
+// "이더넷", Japanese "イーサネット", Chinese "以太网"/"乙太網路", older Windows
+// "로컬 영역 연결"/"Local Area Connection", and Chinese/German Wi-Fi is "WLAN".
+// Matching only the English "Ethernet" left the real NIC at the same score as a
+// VMware/VirtualBox adapter, and the alphabetical tie-break picked the VM.
+const PHYSICAL_INTERFACE_RE = /^(?:en\d+|eth\d+|eno\d+|ens\d+|enp\w+|wlan\d*|wlp\w+|wi-?fi|ethernet|이더넷|イーサネット|以太网|乙太網路|로컬 영역 연결|무선 네트워크 연결|local area connection|wireless network connection)/i;
 const VIRTUAL_INTERFACE_RE = /^(?:awdl|llw|utun|tun\d*|tap\d*|docker|veth|br-|bridge|vmnet|vbox|virbr|vethernet|hyper-v|parallels|lo\d*)/i;
+// Windows virtual adapters carry the vendor in the middle of a display name
+// ("VMware Network Adapter VMnet8", "VirtualBox Host-Only Network",
+// "Npcap Loopback Adapter", "Bluetooth 네트워크 연결"), so the anchored list
+// above cannot see them. These words never name a physical LAN adapter.
+const WINDOWS_VIRTUAL_NAME_RE = /vmware|virtualbox|vmnet|vbox|hyper-v|vethernet|parallels|npcap|loopback|\bwsl\b|tap-windows|wireguard|zerotier|hamachi|openvpn|bluetooth|블루투스/i;
 // On Windows, a Hyper-V external vSwitch or WSL bridged setup moves the
 // machine's REAL LAN address onto a "vEthernet (…)" adapter and leaves the
 // physical NIC unbound. Dropping those names entirely produced zero candidates
@@ -269,7 +279,7 @@ export function selectPreferredMobileBridgeHost(
     const address = candidate.address.split("%", 1)[0];
     const name = candidate.interfaceName.trim();
     const tailscale = /tailscale/i.test(name) || /^100\.(?:6[4-9]|[789]\d|1[01]\d|12[0-7])\./.test(address);
-    const virtual = VIRTUAL_INTERFACE_RE.test(name) && !tailscale;
+    const virtual = (VIRTUAL_INTERFACE_RE.test(name) || WINDOWS_VIRTUAL_NAME_RE.test(name)) && !tailscale;
     const windowsVSwitch = virtual && WINDOWS_VSWITCH_INTERFACE_RE.test(name);
     if (virtual && !windowsVSwitch) return [];
     const physical = !virtual && PHYSICAL_INTERFACE_RE.test(name);

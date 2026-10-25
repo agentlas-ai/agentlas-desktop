@@ -1,5 +1,5 @@
 import type { Actuator } from "./actuator";
-import { DIALOG_CONTROL_ROLES, isRiskyMenuPath } from "./explore-policy";
+import { DIALOG_CONTROL_ROLES, isClosingPath, isRiskyMenuPath, labelOpensDialog } from "./explore-policy";
 import { normalizeLinuxTree, popupIdsOf, withoutChrome } from "./linux-ui";
 import { normalizeWindowsTree } from "./windows-ui";
 import { invokeMenuPath, resolveMenuPath, type MenuTarget } from "./menu-probe";
@@ -334,6 +334,9 @@ export async function probeDialog(ports: ProbePorts, menuPath: readonly string[]
   const started = now();
   const done = (result: Omit<ProbeResult, "ms">): ProbeResult => ({ ...result, ms: now() - started });
   if (isRiskyMenuPath(menuPath)) return done({ status: "unsafe", code: "risky_path" });
+  // Only a dialog opener is ever pressed here. Repair re-finds a stored item by its label, and an update may have dropped the ellipsis: the item then
+  // acts at once (Export As PDF…  ->  Export As PDF) or is a closing / reverting command. Pressing it to "see whether a dialog opens" would run it.
+  if (!labelOpensDialog(menuPath[menuPath.length - 1] ?? "") || isClosingPath(menuPath)) return done({ status: "unsafe", code: "not_a_dialog_item" });
   const before = await observe(ports);
   if (before.sheet) return done({ status: "error", code: "dialog_already_open" }); // never start from a window that is not at rest
   // The owner may have come back while the window was being read: check once more, immediately before anything is pressed.

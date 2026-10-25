@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createHash } from "node:crypto";
+import { cliUserHome } from "./product-home-identity";
 
 // Official kimi-code v0.28 managed provider/file-token contract. Unknown TOML
 // features or credential scopes do not authorize sending a key to an endpoint.
@@ -87,7 +88,7 @@ function endpoint(value: string): string | null {
 export function resolveKimiAuth(env: NodeJS.ProcessEnv = process.env): KimiAuthResolution {
   try {
     if (env.KIMI_MODEL_NAME) return { state: "unknown", reason: "model-env-override" };
-    const home = env.KIMI_CODE_HOME || path.join(env.HOME || env.USERPROFILE || os.homedir(), ".kimi-code");
+    const home = env.KIMI_CODE_HOME || path.join(cliUserHome(env), ".kimi-code");
     const file = path.join(home, "config.toml");
     if (!fs.existsSync(file)) return { state: "signed-out", reason: "no-model-configured" };
     const tables = authConfig(fs.readFileSync(file, "utf8"));

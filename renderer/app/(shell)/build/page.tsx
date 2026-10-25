@@ -59,6 +59,7 @@ import type { CloudAgentPublishProgressEvent, CloudAgentPublishStage } from "@sh
 import { selectionForRuntime } from "@shared/runtime-selection";
 import { providerQuotaExhausted } from "@shared/runtime-quota";
 import { Select } from "@/components/Select";
+import { fileManagerName, shortcutLabel, useUiPlatform } from "@/lib/platform-copy";
 
 type StageState = "pending" | "active" | "done" | "error";
 const OPENCRAB_QUESTION_ID = "opencrab-ontology";
@@ -263,6 +264,7 @@ function friendlyHephaestusMessage(raw: string, ko: boolean): string {
 export default function BuildPage() {
   const { locale } = useT();
   const ko = locale === "ko";
+  const uiOs = useUiPlatform();
   const [status, setStatus] = useState<HephaestusStatus | null>(null);
   const [runtimes, setRuntimes] = useState<RuntimeStatus[]>([]);
   const [usage, setUsage] = useState<UsageSnapshot | null>(null);
@@ -322,14 +324,14 @@ export default function BuildPage() {
       const grant = await grantForDroppedFile(f);
       if (!grant) continue;
       const p = grant.path;
-      items.push({ path: p, grant, name: f.name || p.split("/").pop() || p, kind: grant.kind === "directory" ? "dir" : "file" });
+      items.push({ path: p, grant, name: f.name || p.split(/[\\/]/).pop() || p, kind: grant.kind === "directory" ? "dir" : "file" });
     }
     if (items.length > 0) addAttachments(items);
   };
 
   const attachFolder = async () => {
     const dir = await ipc()?.fs.pickDirectory();
-    if (dir) addAttachments([{ path: dir.path, grant: dir, name: dir.path.split("/").pop() || dir.path, kind: "dir" }]);
+    if (dir) addAttachments([{ path: dir.path, grant: dir, name: dir.path.split(/[\\/]/).pop() || dir.path, kind: "dir" }]);
   };
   const pendingQuestionKey = pendingQuestions.map((q) => q.id).join("|");
   const selectedCount = pendingQuestions.reduce((sum, q) => sum + (selectedOptions[q.id]?.length ?? 0), 0);
@@ -478,7 +480,7 @@ export default function BuildPage() {
       resetBuild();
       setFolderMsg(ko ? "폴더 권한을 갱신했습니다. 요청과 설정은 유지됐습니다. 다시 시작을 눌러 확인하세요." : "Folder access was refreshed. Your request and settings were kept. Start again when ready.");
     } catch {
-      setFolderMsg(ko ? "폴더 권한을 갱신하지 못했습니다. Finder에서 폴더가 실제로 있는지 확인하세요." : "Could not refresh folder access. Check that the folder still exists in Finder.");
+      setFolderMsg(ko ? `폴더 권한을 갱신하지 못했습니다. ${fileManagerName(true, uiOs)}에서 폴더가 실제로 있는지 확인하세요.` : `Could not refresh folder access. Check that the folder still exists in ${fileManagerName(false, uiOs)}.`);
     }
   };
 
@@ -882,7 +884,7 @@ export default function BuildPage() {
               <div className="build-action-row" data-tour-id="build.interview">
                 <button onClick={pickWorkspace} disabled={busy} className="build-folder-button titlebar-nodrag">
                   <IconFolder size={15} />
-                  <span>{workspace ? workspace.split("/").slice(-2).join("/") : ko ? "생성 폴더 선택" : "Choose output folder"}</span>
+                  <span>{workspace ? workspace.split(/[\\/]/).slice(-2).join("/") : ko ? "생성 폴더 선택" : "Choose output folder"}</span>
                 </button>
                 {running ? (
                   <button onClick={cancelBuild} className="build-secondary-button titlebar-nodrag">{ko ? "중지" : "Stop"}</button>
@@ -1103,7 +1105,7 @@ export default function BuildPage() {
                     if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) confirmInterviewReply();
                   }}
                   rows={2}
-                  placeholder={ko ? "묶음 전체에 대한 추가 메모… (⌘↵ 확인)" : "Extra note for the whole batch… (⌘↵ to confirm)"}
+                  placeholder={ko ? `묶음 전체에 대한 추가 메모… (${shortcutLabel("Enter", uiOs)} 확인)` : `Extra note for the whole batch… (${shortcutLabel("Enter", uiOs)} to confirm)`}
                   className="build-interview-input titlebar-nodrag"
                 />
                 <button

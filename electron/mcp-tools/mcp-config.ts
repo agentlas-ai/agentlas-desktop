@@ -1,4 +1,5 @@
 import {prepareOneOriginalMcpTransport,type OneOriginalMcpSelection} from '../one/one-original-mcp-credential';
+import { renameSyncWithRetry } from "../fs/retry";
 import {
   prepareMcpProxyLaunch,
   preparedMcpProxyLaunchScope,
@@ -124,9 +125,15 @@ export function shouldApplyAgentlasBrowserCdpOverride(server: InstalledMcpServer
   return Boolean(process.env[BROWSER_CDP_LAUNCHER_PATH_ENV]?.trim() && isCanonicalAgentlasBrowserLauncher(server));
 }
 
+/**
+ * `~/x` → `<home>/x` with this OS's separators. String concatenation gave `C:\Users\me/.agentlas/...` on Windows,
+ * which never equalled the path.join() form the canonical browser-launcher check compares with: every Windows run
+ * that carried the agentlas-browser grant failed config build with native-browser-config-unbound, and the blocked
+ * goal sweep retried it every minute (Windows VM 2026-10-24).
+ */
 function expandHome(arg: string): string {
   if (arg === "~") return os.homedir();
-  if (arg.startsWith("~/")) return os.homedir() + arg.slice(1);
+  if (arg.startsWith("~/") || (process.platform === "win32" && arg.startsWith("~\\"))) return path.join(os.homedir(), arg.slice(2));
   return arg;
 }
 
@@ -523,17 +530,26 @@ function ensurePrivateDir(dir: string): void {
   if (process.platform !== "win32") fs.chmodSync(dir, 0o700);
 }
 
+/**
+ * Every OS writes a temp file and renames it over the target. Windows used to truncate and rewrite the shared
+ * config/wrapper in place, so a run starting at the same moment read an empty or half-written file ("no tools",
+ * JSON error; 20 % of concurrent reads in the audit's simulation, Windows audit fs.md #8). Node and the CLIs open
+ * files with FILE_SHARE_DELETE, so the rename is allowed while they read; a transient AV lock is retried.
+ * Identical bytes are not rewritten (the wrapper is constant).
+ */
 function writePrivateFile(file: string, content: string): void {
-  if (process.platform === "win32") {
-    fs.writeFileSync(file, content, { encoding: "utf8", mode: 0o600 });
+  let current: string | null = null;
+  try { current = fs.readFileSync(file, "utf8"); } catch { current = null; }
+  if (current === content) {
+    if (process.platform !== "win32") fs.chmodSync(file, 0o600);
     return;
   }
   const temp = `${file}.${process.pid}.${randomUUID()}.tmp`;
   try {
     fs.writeFileSync(temp, content, { encoding: "utf8", mode: 0o600, flag: "wx" });
-    fs.renameSync(temp, file);
+    renameSyncWithRetry(temp, file);
     // rename 대상이 과거 0644 파일이어도 새 inode의 최소 권한을 다시 명시한다.
-    fs.chmodSync(file, 0o600);
+    if (process.platform !== "win32") fs.chmodSync(file, 0o600);
   } finally {
     fs.rmSync(temp, { force: true });
   }

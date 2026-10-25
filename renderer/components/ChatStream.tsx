@@ -1,4 +1,5 @@
 "use client";
+import { shortenLocalPaths } from "@/lib/local-path-redact";
 import { MessageActions } from "./MessageActions";
 import { displayMessageReply, type MessageReply } from "@/lib/message-reply";
 import type { GoalResultPresentation } from "../../shared/goal-result";
@@ -2238,7 +2239,7 @@ function isInternalSystemNote(text: string) {
 }
 
 function isInternalRuntimeStatus(text: string): boolean {
-  return /가\s*생각\s*중|is\s+thinking|(?:^|\s)codex:\s|\[runtime-session\]|sessionend hook|skill descriptions were shortened|agentlas plugins|career graph (?:색인 갱신|refreshed):?\s*nodes=|\/Users\/[^\s]+\/(?:\.codex|\.claude|Library\/Application Support)|(?:^|\s)(?:mcp__|automation_graph_|hep-network|stormbreaker[_-])|\b(?:bash|collab_tool_call|mcp_tool_call|write|read|edit|glob|grep|websearch|webfetch)\b|\b(?:codex|claude code|gemini|kimi|grok)\s+cli\b/i.test(text);
+  return /가\s*생각\s*중|is\s+thinking|(?:^|\s)codex:\s|\[runtime-session\]|sessionend hook|skill descriptions were shortened|agentlas plugins|career graph (?:색인 갱신|refreshed):?\s*nodes=|\/Users\/[^\s]+\/(?:\.codex|\.claude|Library\/Application Support)|[A-Za-z]:\\Users\\[^\s]+\\(?:\.codex|\.claude|AppData\\Roaming)|(?:^|\s)(?:mcp__|automation_graph_|hep-network|stormbreaker[_-])|\b(?:bash|collab_tool_call|mcp_tool_call|write|read|edit|glob|grep|websearch|webfetch)\b|\b(?:codex|claude code|gemini|kimi|grok)\s+cli\b/i.test(text);
 }
 
 // History is projected on every live delta, including rows outside the visible
@@ -2295,9 +2296,7 @@ function projectAssistantProse(text: string, streaming: boolean): string {
   // 낱말 경계에서 끊으면 "/Users/x/Library/Application" 까지만 축약돼 "Application Support/…/a.pdf" 가
   // 남았다. Work 가 새 프로젝트에 쓰는 기본 폴더가 바로 그 자리라 모든 새 사용자의 답변에 보였다.
   // 규칙: 슬래시로 끝나는 디렉터리 조각에만 한 칸 공백을 허용하고, 마지막 파일 이름 조각에는 허용하지 않는다.
-  const shortenLocalPaths = (chunk: string) => chunk
-    .replace(/\[([^\]]+)\]\((?:file:\/\/)?\/Users\/[^)\n]+\)/g, "$1")
-    .replace(/(?:file:\/\/)?\/Users\/(?:[^\s\/)\]}>`,]+(?: [^\s\/)\]}>`,]+)*\/)*[^\s\/)\]}>`,]+/g, (path) => path.split("/").filter(Boolean).at(-1) ?? "");
+  // Windows (C:\Users\…, file:///C:/Users/…) and Linux (/home/…) homes too: lib/local-path-redact.ts.
   return visible
     .split(/(!\[[^\]\n]*\]\([^)\n]*\))/)
     .map((segment, index) => (index % 2 === 1 ? segment : shortenLocalPaths(segment)))

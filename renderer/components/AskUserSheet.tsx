@@ -13,6 +13,7 @@ import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { usePathname } from "next/navigation";
 import { useT } from "@/lib/i18n";
 import { AskCard } from "@/components/AskCard";
+import { ASK_ACTION_COPY } from "@shared/ask-action-bar";
 import { clearAskUserDraft, loadAskUserDraft, saveAskUserDraft } from "@/lib/ask-user-draft";
 import { ipc } from "@/lib/ipc";
 import { askUserQueueSnapshot, removeAskUserRequest, useAskUserQueue } from "@/lib/ask-user-queue";
@@ -148,6 +149,19 @@ export function AskUserSheet() {
   };
 
   const secondsLeft = Math.max(0, Math.ceil((req.expiresAt - now) / 1_000));
+  const copy = ASK_ACTION_COPY[ko ? "ko" : "en"];
+  const minutesLeft = Math.floor(secondsLeft / 60);
+  const timeLeft = minutesLeft > 0
+    ? (ko ? `${minutesLeft}분 ${secondsLeft % 60}초` : `${minutesLeft}m ${secondsLeft % 60}s`)
+    : (ko ? `${secondsLeft}초` : `${secondsLeft}s`);
+  /*
+   * 제출(⌘↵)은 적은 답이 있으면 그 글을, 없으면 강조된 보기(첫 보기 = 추천)를 보낸다 — Claude Code 카드에서 추천이 기본 선택인 것과 같다.
+   * 보기를 누르면 예전처럼 그 자리에서 답이 된다. 건너뛰기는 예전 닫기와 같은 null 답이다.
+   */
+  const typedAnswer = req.allowFreeText ? draftValue.trim() : "";
+  const defaultOption = req.options[0]?.label ?? null;
+  const submitValue = typedAnswer || defaultOption;
+  const pending = Boolean(currentSubmission?.pending);
 
   /*
    * 오너 지시 2026-08-24: 묻는 자리는 앱 어디서나 한 모양이다.
@@ -172,25 +186,37 @@ export function AskUserSheet() {
           id: option.label,
           title: option.label,
           note: option.description ?? undefined,
-          active: currentSubmission ? currentSubmission.value === option.label : index === 0,
+          active: currentSubmission ? currentSubmission.value === option.label : !typedAnswer && index === 0,
           disabled: currentSubmission?.pending,
         }))}
         otherOption={req.allowFreeText ? {
-          title: ko ? "기타" : "Other",
-          note: ko ? "직접 답변을 입력합니다." : "Type your own answer.",
+          title: copy.other,
+          note: copy.otherNote,
         } : undefined}
         freeText={draftValue}
         onFreeTextChange={updateDraft}
         onChoose={(id) => { void answer(id); }}
         onClose={dismiss}
         collapsible
-        footer={{
+        footer={req.allowFreeText ? {
           placeholder: ko ? "직접 답하기" : "Answer in your own words",
-          skipLabel: req.allowFreeText ? (ko ? `답하지 않음 · ${secondsLeft}초` : `Skip · ${secondsLeft}s`) : (ko ? "건너뛰기" : "Skip"),
-          submitLabel: req.allowFreeText ? (ko ? `이 답 보내기 · ${secondsLeft}초` : `Send answer · ${secondsLeft}s`) : (ko ? "건너뛰기" : "Skip"),
-          hideInput: !req.allowFreeText,
+          skipLabel: copy.skip,
+          submitLabel: copy.submitSingle,
+          hasSelection: false,
+          // 단추는 아래 동작 줄이 맡는다. 입력칸의 Enter 는 예전처럼 적은 답을 보내고, 비었으면 건너뛴다.
+          hideButton: true,
           onSkip: (text) => { void answer(text ? text : null); },
+        } : undefined}
+        actionRow={{
+          hint: ko ? `${timeLeft} 뒤 답하지 않은 것으로 넘어갑니다` : `Skips itself in ${timeLeft}`,
+          secondary: { id: "skip", label: copy.skip, disabled: pending },
+          primary: { id: "submit", label: copy.submitSingle, disabled: pending || submitValue === null },
+          onAction: (id) => {
+            if (id === "skip") { dismiss(); return; }
+            if (submitValue !== null) void answer(submitValue);
+          },
         }}
+        statusLabel={copy.needsInput}
       >
         {currentSubmission?.pending && <p role="status">{currentSubmission.value === null
           ? (ko ? "질문을 닫는 중…" : "Closing the question…")

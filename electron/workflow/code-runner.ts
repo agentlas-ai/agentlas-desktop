@@ -25,6 +25,16 @@ import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { resolveHephaestusPython } from "../hephaestus/engine";
 import { withPythonCacheBoundary } from "../runtime/python-cache";
+
+/**
+ * Windows Python reads and writes pipes in the ANSI code page (cp1252 on English, cp949 on Korean Windows) unless UTF-8
+ * mode is on, so a step whose `vars` or `result` held Korean or an emoji failed with UnicodeDecodeError /
+ * UnicodeEncodeError (2026-10-24 audit F3). The harness speaks UTF-8 JSON on stdin/stdout; pip shares this env.
+ * macOS/Linux already use UTF-8 and stay unchanged.
+ */
+export function windowsPythonUtf8Env(platform: NodeJS.Platform = process.platform): NodeJS.ProcessEnv {
+  return platform === "win32" ? { PYTHONUTF8: "1", PYTHONIOENCODING: "utf-8" } : {};
+}
 import {
   agentRunCwd,
   detachedSpawnOpts,
@@ -429,7 +439,7 @@ export async function runCodeStep(input: CodeRunInput): Promise<CodeRunResult> {
   const { file, cleanup } = materializeScript(harness, input.lang);
   try {
     const env = input.lang === "python"
-      ? withPythonCacheBoundary({ ...process.env })
+      ? withPythonCacheBoundary({ ...process.env, ...windowsPythonUtf8Env() })
       : { ...process.env };
     const provisionNotes: string[] = [];
     if (input.lang === "python") {

@@ -5,6 +5,7 @@ import { createNodeHost } from "./host";
 import type { PlatformProvider } from "./provider";
 import {
   CAPABILITY_TIERS,
+  MENU_COMMAND_TRAIT,
   REACH_MAP_SCHEMA,
   type AppCandidate,
   type AppKind,
@@ -46,11 +47,21 @@ export function levelOf(usable: number, anyCapability: boolean): ReachLevel {
   return "unmapped";
 }
 
-// What an agent can rely on: stated by the source (published entries carry no status), or proven by an exercise. A capability that
-// was only seen (candidate) or has since failed (degraded) does not count.
+// A menu command the app shows (View > Show Sidebar, Format > Bold, File > Page Setup): it opens no dialog, so there is no shape to read and
+// nothing to try out before using it. The menu bar itself says the item exists, and every call resolves the path in the live menu first (the
+// item must still be there and switched on, steps-runner.ts) - as usable as a person pressing it. What it does is NOT known (effect "unknown"),
+// so it needs the run's write permission; items whose names say they delete, send, pay, sign out, quit or close are never given a body
+// (explore-policy.ts isDirectMenuCommandPath). Only a menu command with a body counts; one that failed (degraded) does not.
+export function isDirectMenuCommand(capability: Capability): boolean {
+  return capability.tier === "structure" && capability.traits?.includes(MENU_COMMAND_TRAIT) === true && capability.body?.kind === "steps" && capability.status !== "degraded";
+}
+
+// What an agent can rely on: stated by the source (published entries carry no status), or proven by an exercise, or a menu command the live
+// menu confirms at every call. A capability that was only seen (candidate) or has since failed (degraded) does not count.
 export function isUsable(capability: Capability): boolean {
   if (capability.generic) return false;
   if (capability.status === "degraded") return false;
+  if (isDirectMenuCommand(capability)) return true;
   if (capability.tier === "published" && capability.status === undefined) return true;
   return capability.status === "verified" && capability.verification !== undefined;
 }

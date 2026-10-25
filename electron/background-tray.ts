@@ -2,9 +2,9 @@
 // Agentlas keeps running without a window: login continuity ON, or the owner
 // chose "백그라운드에서 계속" at quit. It is the visible handle on that process —
 // "완전히 종료" is always one click away, so nothing runs invisibly.
-import path from "node:path";
-import { app, Menu, nativeImage, Tray } from "electron";
+import { app, Menu, Tray } from "electron";
 import { backgroundHoldShouldQuit, backgroundTrayText } from "./quit-policy";
+import { trayIcon } from "./tray-icon";
 
 export interface BackgroundHoldHost {
   locale(): "ko" | "en";
@@ -23,13 +23,6 @@ let ticker: NodeJS.Timeout | null = null;
 let hold: { autoQuitWhenIdle: boolean } | null = null;
 let holdHost: BackgroundHoldHost | null = null;
 let lastStatus: string | null = null;
-
-function trayIcon(): Electron.NativeImage {
-  // dist/electron/background-tray.js → ../../build-resources/icon-1024.png
-  const image = nativeImage.createFromPath(path.join(__dirname, "../../build-resources/icon-1024.png"));
-  if (image.isEmpty()) return image;
-  return image.resize({ width: process.platform === "win32" ? 16 : 18, height: process.platform === "win32" ? 16 : 18 });
-}
 
 export function backgroundHoldActive(): boolean {
   return hold !== null;

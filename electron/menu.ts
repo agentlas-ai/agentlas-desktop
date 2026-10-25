@@ -3,7 +3,9 @@
 // 데스크톱은 오픈소스 무료지만, 사용자가 Agentlas 웹과 연결하고 싶을 때 진입점.
 // 메뉴는 OS-native라 사용자가 자연스럽게 찾아옴 (앱 안 별도 버튼 안 만들어도 됨).
 import { app, BrowserWindow, dialog, Menu, shell } from "electron";
-import { checkSafely as updaterCheck, getUpdaterState } from "./updater";
+import { checkSafely as updaterCheck, getUpdaterState, quitAndInstall as updaterQuitAndInstall } from "./updater";
+import { requestUpdaterInstall } from "./updater/update-resume";
+import { updateInstallRefusedDialog, updateReadyDialog } from "./updater/update-ready-dialog";
 import { credentialRecoveryMenuItems } from "./secrets/recovery-menu";
 import { noteQuitIntent } from "./quit-reason";
 import { mainWindowDevToolsAllowed } from "./devtools-policy";
@@ -36,13 +38,28 @@ async function checkUpdatesInteractive(parent: BrowserWindow | null, locale: Men
       message = ko ? "업데이트 받는 중" : "Downloading update…";
       detail = `v${state.version ?? "?"} — ${state.progress ?? 0}%`;
       break;
-    case "downloaded":
-      // The install button is the download icon at the bottom of the sidebar (2026-10-12: this said "top-right", in English).
-      message = ko ? "업데이트 준비됨" : "Update ready";
-      detail = ko
-        ? `v${state.version}. 사이드바 아래 다운로드 아이콘을 누르면 설치하고 다시 시작합니다.`
-        : `v${state.version}. Press the download icon at the bottom of the sidebar to install and restart.`;
-      break;
+    case "downloaded": {
+      // The dialog carries the install action itself: before sign-in there is no sidebar to point at (Windows
+      // 1.3.88 -> 1.3.89, 2026-10-24). Same entry as the sidebar button and the IPC (running work is checkpointed).
+      const ready = updateReadyDialog(state.version, locale, process.platform);
+      const { response } = await dialog.showMessageBox(parent ?? undefined!, {
+        type: "info",
+        title: ko ? "업데이트" : "Updates",
+        message: ready.message,
+        detail: ready.detail,
+        buttons: ready.buttons,
+        defaultId: ready.defaultId,
+        cancelId: ready.cancelId,
+        noLink: true,
+      });
+      if (response !== ready.installResponse) return;
+      const result = await requestUpdaterInstall(undefined, updaterQuitAndInstall);
+      if (!result.accepted) {
+        const refused = updateInstallRefusedDialog(locale, result.state.error);
+        await dialog.showMessageBox(parent ?? undefined!, { type: "warning", title: ko ? "업데이트" : "Updates", ...refused });
+      }
+      return;
+    }
     case "installing":
       message = ko ? "설치 중" : "Installing…";
       detail = `v${state.version ?? "?"}`;
@@ -133,6 +150,52 @@ export function nonMacQuitMenuItem(platform: NodeJS.Platform, locale: MenuLocale
   return platform === "win32" ? { label: "Exit" } : { label: "Quit", accelerator: "Ctrl+Q" };
 }
 
+type NonMacRole = "undo" | "redo" | "cut" | "copy" | "paste" | "selectAll" | "reload" | "forceReload" | "toggleDevTools"
+  | "togglefullscreen" | "minimize";
+
+/**
+ * Role item labels on Windows/Linux. Electron translates role labels only on macOS; with the Korean UI the
+ * Windows Edit/View/Window menus read Undo, Copy, Reload, Minimize, Close in English (Windows audit ui.md #15).
+ * macOS and the English UI keep Electron's own labels (undefined = no override).
+ */
+export function nonMacRoleLabel(role: NonMacRole, platform: NodeJS.Platform, locale: MenuLocale): string | undefined {
+  if (platform === "darwin" || locale !== "ko") return undefined;
+  const ko: Record<NonMacRole, string> = {
+    undo: "실행 취소", redo: "다시 실행", cut: "잘라내기", copy: "복사", paste: "붙여넣기", selectAll: "모두 선택",
+    reload: "새로 고침", forceReload: "강제 새로 고침", toggleDevTools: "개발자 도구", togglefullscreen: "전체 화면",
+    minimize: "최소화",
+  };
+  return ko[role];
+}
+
+/** A role item with the Windows/Linux Korean label when there is one. */
+function roleItem(role: NonMacRole, locale: MenuLocale): Electron.MenuItemConstructorOptions {
+  const label = nonMacRoleLabel(role, process.platform, locale);
+  return label ? { role, label } : { role };
+}
+
+/**
+ * Window ▸ Close. Owner decision 2026-10-24 ("Windows에서 제거"): on Windows the item has no Ctrl+W, so a browser-habit
+ * Ctrl+W can no longer close the last window and quit the app (ui.md #4); the window still closes with X or this item.
+ * Electron's role "close" always carries Ctrl+W, so Windows uses a plain item. macOS has no Close item (Cmd+W does
+ * nothing there, unchanged); Linux keeps role "close".
+ */
+export function windowCloseMenuItem(platform: NodeJS.Platform, locale: MenuLocale): Electron.MenuItemConstructorOptions | null {
+  if (platform === "darwin") return null;
+  if (platform === "win32") {
+    return { label: locale === "ko" ? "닫기" : "Close", click: (_item, window) => { (window as BrowserWindow | undefined)?.close(); } };
+  }
+  return { role: "close" };
+}
+
+/**
+ * Settings and About on Windows/Linux. They lived only in the macOS app menu, so Windows had no Settings item, no
+ * Ctrl+, and no About, while the in-app shortcut list said "Settings Ctrl ," (ui.md #9).
+ */
+export function nonMacSettingsItems(platform: NodeJS.Platform): { preferencesAccelerator: string } | null {
+  return platform === "darwin" ? null : { preferencesAccelerator: "Ctrl+," };
+}
+
 /** 네이티브 메뉴 라벨 — 쉬운 한국어 우선. role 항목(undo/copy/minimize 등)은
  *  macOS가 OS 언어로 자동 번역하므로 여기서 다루지 않는다. */
 function menuLabels(locale: MenuLocale) {
@@ -200,6 +263,8 @@ export function buildAppMenu(
   const isMac = process.platform === "darwin";
   const L = menuLabels(locale);
   const quitItem = nonMacQuitMenuItem(process.platform, locale);
+  const settingsItems = nonMacSettingsItems(process.platform);
+  const closeItem = windowCloseMenuItem(process.platform, locale);
 
   const template: Electron.MenuItemConstructorOptions[] = [
     // macOS 첫 번째는 App 메뉴 (앱 이름 자동 표시)
@@ -262,6 +327,24 @@ export function buildAppMenu(
           accelerator: "CmdOrCtrl+N",
           click: () => send(getWindow(), "/project/new"),
         },
+        // Windows/Linux: Settings (Ctrl+,) and About live here; macOS has them in its app menu.
+        ...(settingsItems
+          ? [
+              { type: "separator" as const },
+              {
+                label: L.preferences,
+                accelerator: settingsItems.preferencesAccelerator,
+                click: () => send(getWindow(), "/settings"),
+              },
+              {
+                label: L.aboutApp,
+                click: () => {
+                  app.setAboutPanelOptions({ applicationName: app.getName(), applicationVersion: app.getVersion() });
+                  app.showAboutPanel();
+                },
+              },
+            ]
+          : []),
         { type: "separator" },
         {
           label: L.marketplace,
@@ -322,13 +405,13 @@ export function buildAppMenu(
     {
       label: L.edit,
       submenu: [
-        { role: "undo" },
-        { role: "redo" },
+        roleItem("undo", locale),
+        roleItem("redo", locale),
         { type: "separator" },
-        { role: "cut" },
-        { role: "copy" },
-        { role: "paste" },
-        { role: "selectAll" },
+        roleItem("cut", locale),
+        roleItem("copy", locale),
+        roleItem("paste", locale),
+        roleItem("selectAll", locale),
       ],
     },
 
@@ -347,9 +430,9 @@ export function buildAppMenu(
           click: () => send(getWindow(), "__navigate_back__"),
         },
         { type: "separator" },
-        { role: "reload" },
-        { role: "forceReload" },
-        ...(mainWindowDevToolsAllowed({ packaged: app.isPackaged }) ? [{ role: "toggleDevTools" as const }] : []),
+        roleItem("reload", locale),
+        roleItem("forceReload", locale),
+        ...(mainWindowDevToolsAllowed({ packaged: app.isPackaged }) ? [roleItem("toggleDevTools", locale)] : []),
         { type: "separator" },
         {
           label: L.actualSize,
@@ -361,13 +444,18 @@ export function buildAppMenu(
           accelerator: "CmdOrCtrl+Plus",
           click: () => applyZoom(getWindow(), (current) => current + 0.5),
         },
+        // "Plus" needs Shift on US/Korean keyboards, so Ctrl+= did not zoom in on Windows/Linux (ui.md #15).
+        ...(!isMac
+          ? [{ label: L.zoomIn, accelerator: "Ctrl+=", visible: false, acceleratorWorksWhenHidden: true,
+              click: () => applyZoom(getWindow(), (current) => current + 0.5) }]
+          : []),
         {
           label: L.zoomOut,
           accelerator: "CmdOrCtrl+-",
           click: () => applyZoom(getWindow(), (current) => current - 0.5),
         },
         { type: "separator" },
-        { role: "togglefullscreen" },
+        roleItem("togglefullscreen", locale),
       ],
     },
 
@@ -375,11 +463,12 @@ export function buildAppMenu(
     {
       label: L.window,
       submenu: [
-        { role: "minimize" },
-        { role: "zoom" },
+        roleItem("minimize", locale),
+        // Window ▸ Zoom does nothing on Windows/Linux (ui.md #15); macOS keeps it.
+        ...(isMac ? [{ role: "zoom" as const }] : []),
         ...(isMac
           ? ([{ type: "separator" }, { role: "front" }] as const)
-          : ([{ role: "close" }] as const)),
+          : closeItem ? [closeItem] : []),
       ],
     },
 

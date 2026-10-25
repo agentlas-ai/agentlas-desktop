@@ -12,6 +12,14 @@
 /** Chromium sends compositionend BEFORE the Enter keydown that committed the composition. */
 export const COMPOSITION_COMMIT_ENTER_WINDOW_MS = 30;
 
+/**
+ * After a Hangul commit has sent, a plain Enter keydown that follows within this window is the same keypress's echo,
+ * not a new send. macOS Chromium sends it right after compositionend; the Windows Korean IME can deliver it after the
+ * scheduled send already ran (slower machines, x64 emulation), which made one Enter two sends — the second, empty one
+ * pauses a running task (Windows audit 2026-10-24, ui.md #11).
+ */
+export const COMMIT_SEND_ECHO_WINDOW_MS = 250;
+
 export type ComposerEnterDecision = "ignore" | "swallow" | "send" | "send-after-commit";
 
 export function decideComposerEnter(input: {
@@ -28,12 +36,17 @@ export function decideComposerEnter(input: {
    * IMEs that convert on Enter (Japanese, Chinese) keep the old rule: that Enter only confirms the conversion.
    */
   committedHangul?: boolean;
+  /** Time since a Hangul commit last sent, null when none did. */
+  msSinceCommitSend?: number | null;
 }): ComposerEnterDecision {
   if (input.key !== "Enter" && input.keyCode !== 229) return "ignore";
   if (input.shiftKey) return "ignore";
   // The IME still owns the key: it commits the composition and the browser inserts no newline. A Hangul commit
   // is sent once the composition has ended.
   if (input.isComposing || input.keyCode === 229) return input.key === "Enter" && input.committedHangul ? "send-after-commit" : "ignore";
+  // The plain Enter echo of a keypress whose Hangul commit already sent.
+  if (input.msSinceCommitSend != null && input.msSinceCommitSend >= 0
+    && input.msSinceCommitSend <= COMMIT_SEND_ECHO_WINDOW_MS) return "swallow";
   // The committing Enter of a composition that ended an instant ago (Chromium sends compositionend first).
   if (input.msSinceCompositionEnd !== null && input.msSinceCompositionEnd >= 0
     && input.msSinceCompositionEnd <= COMPOSITION_COMMIT_ENTER_WINDOW_MS) return input.committedHangul ? "send" : "swallow";

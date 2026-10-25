@@ -7,6 +7,8 @@ import os from "node:os";
 import path from "node:path";
 import type { SiteAgentAppThumbnailResult } from "../../shared/site-studio";
 import { getSiteProject, siteAgentAppsRoot } from "./store";
+import { killCliTree } from "../runtime/exec";
+import { resolveManagedNodeRuntime } from "../runtime/managed-node";
 
 const CAPTURE_WIDTH = 1_280;
 const CAPTURE_HEIGHT = 720;
@@ -51,6 +53,31 @@ function isolatedBuildEnv(home: string): NodeJS.ProcessEnv {
   return env;
 }
 
+/**
+ * How the Astryx build runs npm. macOS/Linux: `npm` from PATH, unchanged. Windows: npm is `npm.cmd`, which a shell-less
+ * spawn never finds (libuv resolves a bare name only as .com/.exe → ENOENT on every Windows machine, 2026-10-24 audit
+ * F7), and many Windows PCs have no Node at all. So Windows runs the app's own verified Node with its npm-cli.js, and
+ * puts that Node first on the build's PATH for the scripts npm starts.
+ */
+export function astryxNpmCommand(
+  env: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform = process.platform,
+  managed: () => { ok: true; runtime: { node: string; npmCli: string } } | { ok: false } = () => {
+    const resolved = resolveManagedNodeRuntime();
+    return resolved.ok ? { ok: true, runtime: { node: resolved.runtime.node, npmCli: resolved.runtime.npmCli } } : { ok: false };
+  },
+): { command: string; prefix: string[]; env: NodeJS.ProcessEnv } {
+  if (platform !== "win32") return { command: "npm", prefix: [], env };
+  const runtime = managed();
+  if (!runtime.ok) throw new Error("Astryx build needs Node: the app's bundled Node runtime is unavailable.");
+  const nodeDir = path.win32.dirname(runtime.runtime.node);
+  return {
+    command: runtime.runtime.node,
+    prefix: [runtime.runtime.npmCli],
+    env: { ...env, PATH: [nodeDir, env.PATH].filter(Boolean).join(";") },
+  };
+}
+
 function runCommand(
   command: string,
   args: string[],
@@ -72,7 +99,9 @@ function runCommand(
     child.stdout?.on("data", collect);
     child.stderr?.on("data", collect);
     const timer = setTimeout(() => {
-      child.kill("SIGTERM");
+      // Windows: npm -> node -> the build's own children; end the tree, not only the leader.
+      if (process.platform === "win32") killCliTree(child, 1_000);
+      else child.kill("SIGTERM");
       reject(new Error(`Astryx build timed out: ${command} ${args.join(" ")}`));
     }, COMMAND_TIMEOUT_MS);
     timer.unref?.();
@@ -161,8 +190,9 @@ export async function buildSiteAgentApp(rootPath: string): Promise<string> {
     });
     const before = await sourceDigests(isolatedRoot);
     const env = isolatedBuildEnv(buildHome);
-    await runCommand("npm", ["ci", "--ignore-scripts", "--no-audit", "--no-fund"], isolatedRoot, env);
-    await runCommand("npm", ["run", "build"], isolatedRoot, env);
+    const npm = astryxNpmCommand(env);
+    await runCommand(npm.command, [...npm.prefix, "ci", "--ignore-scripts", "--no-audit", "--no-fund"], isolatedRoot, npm.env);
+    await runCommand(npm.command, [...npm.prefix, "run", "build"], isolatedRoot, npm.env);
     const after = await sourceDigests(isolatedRoot);
     assertSameSources(before, after);
     const isolatedDist = path.join(isolatedRoot, "dist");

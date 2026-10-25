@@ -17,6 +17,7 @@ import { detachedSpawnOpts, killCliTree, trackRunChild, withCliPath } from "../r
 import { survivingHiddenSpawn } from "../runtime/windows-hidden-detach";
 import { resolveManagedNodeRuntimeAsync } from "../runtime/managed-node";
 import { withPythonCacheBoundary, withPythonRuntimeBoundary } from "../runtime/python-cache";
+import { systemNetworkChildEnv } from "../net/system-network-core";
 import { optionalElectronAppPath } from "../runtime-paths";
 import { currentUiLocale } from "../ui-locale";
 import { hephaestusRoot, hephaestusRootDetail, readHephaestusVersion, resetHephaestusRootCache } from "./root";
@@ -244,6 +245,7 @@ export function resolveHephaestusSyncLaunch(
 
   const env = withPythonCacheBoundary(withCliPath({
     ...process.env,
+    ...systemNetworkChildEnv(process.env),
     HEPHAESTUS_RUNTIME_ROOT: runtimeRoot,
     PYTHONPATH: runtimeRoot,
     PYTHONUTF8: "1",
@@ -361,6 +363,10 @@ export async function resolveHephaestusStdioLaunch(
         PYTHONPATH: runtimeRoot,
         PYTHONUTF8: "1",
         PYTHONIOENCODING: "utf-8",
+        // The system proxy Desktop resolved (Windows WinINET/PAC, macOS settings),
+        // with loopback always bypassed: Windows urllib only bypasses dotless
+        // names for "<local>", so 127.0.0.1 judge calls went to the company proxy.
+        ...systemNetworkChildEnv(process.env),
         ...(judgeRuntime ? { AGENTLAS_JUDGE_RUNTIME: judgeRuntime } : {}),
         ...(memoryBinding?.env ?? {}),
       }),
@@ -715,6 +721,8 @@ export async function runHephaestus<T = unknown>(
   }
   const env = withPythonRuntimeBoundary(py.python, withCliPath({
     ...process.env,
+    // Same proxy Desktop uses, loopback bypassed (see engineSpawnSpec).
+    ...systemNetworkChildEnv(process.env),
     ...opts.env,
     HEPHAESTUS_RUNTIME_ROOT: pinnedRoot,
     PYTHONPATH: pinnedRoot + (process.env.PYTHONPATH ? path.delimiter + process.env.PYTHONPATH : ""),
@@ -781,8 +789,13 @@ export async function runHephaestus<T = unknown>(
       opts.signal.addEventListener("abort", onAbort, { once: true });
     }
 
-    child.stdout?.on("data", (d: Buffer) => {
-      const s = d.toString();
+    // The engine prints UTF-8 JSON (ensure_ascii=False). Decoding each pipe
+    // chunk on its own turned a Hangul character split across two chunks into
+    // U+FFFD; the stream decoder carries the partial bytes to the next chunk.
+    child.stdout?.setEncoding("utf8");
+    child.stderr?.setEncoding("utf8");
+    child.stdout?.on("data", (d: string) => {
+      const s = d;
       stdout += s;
       if (opts.onStdout) {
         stdoutBuf += s;
@@ -791,8 +804,8 @@ export async function runHephaestus<T = unknown>(
         for (const line of lines) if (line.trim()) opts.onStdout(line);
       }
     });
-    child.stderr?.on("data", (d: Buffer) => {
-      const s = d.toString();
+    child.stderr?.on("data", (d: string) => {
+      const s = d;
       stderr += s;
       if (opts.onStderr) {
         stderrBuf += s;

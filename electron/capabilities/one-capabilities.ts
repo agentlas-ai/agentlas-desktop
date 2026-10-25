@@ -25,6 +25,7 @@ import os from "node:os";
 import path from "node:path";
 import { BUILTIN_ONE_AGENT_ID } from "../../shared/builtin-agent-ids";
 import { userDataPath } from "../runtime-paths";
+import { cliUserHome } from "../runtime/product-home-identity";
 
 export type CapabilityKind = "skill" | "plugin" | "hook" | "memory" | "connector";
 export type CapabilitySource = "codex" | "claude" | "cursor" | "grok" | "gemini" | "copilot" | "agentlas";
@@ -91,7 +92,7 @@ const MAX_ITEMS_PER_KIND = 1500;
 const AGENTLAS_MARKETPLACES = new Set(["agentlas-core-engine", "agentlas-sei"]);
 
 export function defaultCapabilityRoots(env: NodeJS.ProcessEnv = process.env): CapabilityRoots {
-  const home = path.resolve(env.HOME || os.homedir());
+  const home = path.resolve(cliUserHome(env));
   return {
     home,
     codexHome: path.resolve(env.CODEX_HOME || path.join(home, ".codex")),

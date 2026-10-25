@@ -17,6 +17,7 @@
  */
 import { app, BrowserWindow, Notification } from "electron";
 import { getMeta, setMeta } from "./store/meta";
+import { retainNotification } from "./notification-target";
 
 const META_KEY = "run_alerts.v1";
 
@@ -131,6 +132,35 @@ export function decideRunAlert(settings: RunAlertSettings, input: RunAlertInput)
   return { alert: true, kind: failed ? "failed" : waiting ? "attention" : "done" };
 }
 
+/** The part of a BrowserWindow the "is the person looking at it" rule reads (plain objects in the gates). */
+export interface WatchableWindow {
+  isDestroyed(): boolean;
+  isFocused(): boolean;
+  isVisible(): boolean;
+  isMinimized(): boolean;
+}
+
+/**
+ * The person is looking at this window: it has focus, is shown, and is not minimized. Focus alone is not that.
+ * Windows can leave a minimized window as the active window (SW_MINIMIZE activates the next top-level window; when no
+ * other window can take activation ours stays active, and IsWindowVisible stays true while iconic), so `isFocused()`
+ * alone can answer "watching" for an app sitting minimized in the taskbar. Windows 11 VM 2026-10-24: a 50 s Work run
+ * ended while the window was minimized and no completion alert appeared. macOS (measured on Electron 43.7.6): a minimized
+ * window and a window behind another app already report isFocused() false; the extra checks change nothing there.
+ */
+export function windowWatched(win: WatchableWindow | null | undefined): boolean {
+  try {
+    return Boolean(win && !win.isDestroyed() && win.isVisible() && !win.isMinimized() && win.isFocused());
+  } catch {
+    return false; // a window closing under us is not being looked at
+  }
+}
+
+export function anyWindowWatched(windows: Iterable<WatchableWindow | null | undefined>): boolean {
+  for (const win of windows) if (windowWatched(win)) return true;
+  return false;
+}
+
 /**
  * 앱을 흔든다 — OS마다 이름이 다른 같은 뜻.
  * 없는 API 는 부르지 않는다: `app.dock` 은 macOS 에만 있고, 다른 OS 에서 만지면 예외다.
@@ -168,6 +198,9 @@ export function fireRunAlert(input: {
   locale: string;
   goal: string;
   onClick?: () => void;
+  /** The window whose taskbar button flashes (Windows/Linux). getAllWindows()[0] could be a hidden
+   *  helper (Business console, print helper), so the flash was invisible (Windows audit ui.md #18). */
+  flashWindow?: () => BrowserWindow | null;
 }): void {
   const text = runAlertText(input.decision.kind, input.locale, input.goal);
   try {
@@ -179,12 +212,14 @@ export function fireRunAlert(input: {
         silent: !input.settings.sound,
       });
       if (input.onClick) notification.on("click", input.onClick);
-      notification.show();
+      retainNotification(notification).show();
     }
   } catch {
     // 알림이 막혀 있어도 흔들기는 따로 시도한다.
   }
   if (input.settings.bounce) {
-    bounceApp(BrowserWindow.getAllWindows()[0] ?? null);
+    const preferred = input.flashWindow?.() ?? null;
+    bounceApp(preferred && !preferred.isDestroyed() ? preferred
+      : BrowserWindow.getAllWindows().find((window) => !window.isDestroyed() && window.isVisible()) ?? null);
   }
 }

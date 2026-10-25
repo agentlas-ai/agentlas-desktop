@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { portableFileName } from "../../shared/portable-file-name";
 import fs from "node:fs";
 import path from "node:path";
 import type { FsPathGrant, ImageAttachment } from "../../shared/types";
@@ -335,9 +336,9 @@ function canonicalChatFileType(filePath: string): string {
 }
 
 function safeChatFileName(value: string, fallback: string): string {
-  const leaf = path.basename(value.normalize("NFKC"));
-  const cleaned = leaf.replace(/[\u0000-\u001f\u007f/\\:]+/g, "_").replace(/^\.+/, "").trim();
-  return (cleaned || fallback).slice(0, 180);
+  const leaf = path.basename(value.normalize("NFKC").replace(/\\/g, "/"));
+  // Same rule on every OS: names from the phone or the cloud must materialize on Windows too (fs.md #21).
+  return portableFileName(leaf.replace(/[\u0000-\u001f\u007f/\\:]+/g, "_"), fallback, 180);
 }
 
 function readStableChatFile(sourcePath: string, expectedSize: number): { bytes: Buffer; sha256: string; size: number } {

@@ -15,6 +15,7 @@ import { useT } from "@/lib/i18n";
 import { ipc } from "@/lib/ipc";
 import type { McpRunKeyRequest } from "@/lib/types";
 import { IconKey, IconLock, IconSend, IconCheck } from "./Icon";
+import { CredentialStoreWord } from "./PlatformWord";
 
 export function McpKeyRequestSheet({
   request,
@@ -105,7 +106,7 @@ export function McpKeyRequestSheet({
         </div>
         <div className="mkr-summary"><IconCheck size={15} />{ko ? "저장 확인과 제공자 연결은 별도 단계" : "Saving and provider verification are separate"}</div>
         <div className="mkr-note">
-          <span><IconLock size={15} />{ko ? "키체인에만 저장" : "Stored only in keychain"}</span>
+          <span><IconLock size={15} />{ko ? <><CredentialStoreWord ko />에만 저장</> : <>Stored only in <CredentialStoreWord ko={false} /></>}</span>
           <span><IconSend size={15} />{ko ? "키 없이도 대안으로 진행" : "Continue with alternatives without keys"}</span>
         </div>
         <div className="mkr-tools">

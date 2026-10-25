@@ -1,5 +1,6 @@
 import type { Actuator } from "./actuator";
 import { probeDialog, synthesizeDialogCapability } from "./dialog-probe";
+import { isClosingPath, isRiskyMenuPath, labelOpensDialog } from "./explore-policy";
 import { withForeground } from "./foreground";
 import { enumerateMenus, menuLeaves, type MenuNode, type MenuTarget } from "./menu-probe";
 import type { Capability, CapabilityParameter } from "./types";
@@ -39,7 +40,9 @@ export interface MovedCandidate { path: string[]; how: "same" | "moved" | "renam
 
 // Where could this menu path have gone? Best guess first. Exact path and "the same words elsewhere" are accepted on their own; a label that is
 // only somewhat alike ("Print…" -> "Print Document…") is only a candidate: it is accepted if the dialog it opens looks like the old one.
-export function candidatePaths(oldPath: readonly string[], leaves: readonly MenuNode[]): MovedCandidate[] {
+export function candidatePaths(oldPath: readonly string[], allLeaves: readonly MenuNode[]): MovedCandidate[] {
+  // a stored dialog is looked for among the dialog openers only: an item without the ellipsis acts at once, and a closing one must never be pressed
+  const leaves = allLeaves.filter((leaf) => labelOpensDialog(leaf.label) && !isClosingPath(leaf.path) && !isRiskyMenuPath(leaf.path));
   const joined = oldPath.join("\u0000");
   const exact = leaves.find((leaf) => leaf.path.join("\u0000") === joined);
   if (exact) return [{ path: exact.path, how: "same", score: 1, needsShapeCheck: false }];

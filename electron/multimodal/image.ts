@@ -3,13 +3,13 @@
 //  - gemini(나노바나나): Antigravity CLI에는 이미지 툴이 노출되지 않아
 //    GEMINI_API_KEY가 보관함에 있을 때만 @google/genai로 생성(없으면 needs-key).
 // 결과는 data:image/png;base64 로 렌더러에 바로 넘겨 슬라이드 배경으로 깐다.
-import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { app } from "electron";
 import { userDataPath } from "../runtime-paths";
-import { detachedSpawnOpts, killCliTree, trackRunChild } from "../runtime/exec";
+import { detachedSpawnOpts, killCliTree, spawnCli, trackRunChild, withCliPath } from "../runtime/exec";
+import { nativeCliCandidates } from "../runtime/native-cli";
 import { withCodexProductHome } from "../runtime/codex-product-home";
 import { withAgyProductHome } from "../runtime/antigravity-personal-context";
 import { findExecutableSync } from "../runtime/path-lookup";
@@ -75,9 +75,11 @@ export interface ImageResult {
   lineage?: { sourceSha256: string; outputSha256: string };
 }
 
-function resolveBin(name: string, extra: string[]): string | null {
+function resolveBin(name: "agy" | "codex", extra: string[]): string | null {
   // Platform PATH delimiter and Windows PATHEXT (NH31): a POSIX ":" split read every Windows CLI as absent.
-  return findExecutableSync(name, extra);
+  // The runners' CLI PATH (withCliPath) and the Agentlas-installed native codex come first (2026-10-24 audit F6).
+  const native = name === "codex" ? nativeCliCandidates("codex") : [];
+  return findExecutableSync(name, [...native, ...extra], withCliPath(process.env));
 }
 
 const IMAGE_FILE = /\.(?:png|jpe?g|webp)$/i;
@@ -96,7 +98,8 @@ function runCliLines(bin: string, args: string[], options: { cwd: string; env: N
     try {
       // stdin은 반드시 닫는다(ignore) — 파이프로 열려 있으면 codex가
       // "Reading additional input from stdin..."으로 EOF를 기다리며 영원히 블록된다.
-      child = spawn(bin, args, { cwd: options.cwd, env: options.env, stdio: ["ignore", "pipe", "ignore"], ...detachedSpawnOpts() });
+      // spawnCli: a Windows .cmd (npm codex.cmd / agy.cmd) cannot start through plain spawn (EINVAL).
+      child = spawnCli(bin, args, { cwd: options.cwd, env: options.env, stdio: ["ignore", "pipe", "ignore"], ...detachedSpawnOpts() });
       trackRunChild(child);
     } catch {
       finish();

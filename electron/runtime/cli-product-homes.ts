@@ -22,14 +22,16 @@
 // installed on the measuring machine and `copilot --version` is the only call made (no login, no keychain read).
 // `AGENTLAS_<KIND>_KEEP_HOME=1` keeps the real folder.
 //
-// Windows: symlinks to files need a privilege, so a failed link makes the run keep the real folder (a copy would fork
-// a refreshed token); directories are linked as junctions (config-home-mirror.ts).
+// Windows: symlinks to files need a privilege, so a file is a recorded hard link (or, on another volume, a copy) that
+// every sync reconciles both ways, so a refreshed token is never forked; directories are junctions (mirror-link.ts,
+// Windows audit 2026-10-24, W-03). A mirror that still cannot hold is reported, never silent.
 import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { userDataPath } from "../runtime-paths";
 import { isMirrorLink, syncConfigHomeMirror } from "./config-home-mirror";
+import { mirrorEntryTarget, reportIsolationUnavailable } from "./mirror-link";
 import { scanTomlStatements, tomlKey, type TomlStatement } from "./codex-product-home";
 import type { CapabilitySelection } from "../capabilities/one-capabilities";
 import { personalHomeDir, personalHomeOverride, productHomeRefusedOnThisHost } from "./product-home-identity";
@@ -180,16 +182,24 @@ export function syncCliProductHome(kind: ProductHomeKind, realHome: string, sele
         ...(spec.own ? { own: spec.own(realHome, selection) } : {}),
       });
       for (const name of spec.signIn) {
-        if (fs.existsSync(path.join(realHome, name)) && !isMirrorLink(home, name)) return { skip: "links-unavailable" };
+        if (fs.existsSync(path.join(realHome, name)) && !isMirrorLink(home, name)) { reportIsolationUnavailable(kind, "sign-in-not-linked"); return { skip: "links-unavailable" }; }
       }
     } else {
       // Nothing of the person's to link (a CLI they never ran): the run still keeps its sessions in the mirror.
       fs.mkdirSync(home, { recursive: true, mode: 0o700 });
     }
-  } catch {
+  } catch (error) {
+    reportIsolationUnavailable(kind, error);
     return { skip: "links-unavailable" };
   }
   return { home };
+}
+
+/** The account folder a mirror was made from: where its config.json link (symlink, or recorded hard link / copy) points. */
+function linkedRealHome(mirrorHome: string): string {
+  const target = mirrorEntryTarget(mirrorHome, "config.json");
+  if (target === null) throw Object.assign(new Error("mirror_link_absent"), { code: "ENOENT" });
+  return path.dirname(path.resolve(mirrorHome, target));
 }
 
 /** The run environment with the CLI's config folder variable pointing at the product mirror. */
@@ -213,7 +223,7 @@ export function copilotSessionGone(mirrorHome: string | undefined, sessionId: st
   if (path.dirname(path.resolve(mirrorHome)) !== path.resolve(mirrorRoot)) return false;
   try {
     if (fs.existsSync(path.join(mirrorHome, "session-state", sessionId))) return false;
-    const realHome = path.dirname(path.resolve(mirrorHome, fs.readlinkSync(path.join(mirrorHome, "config.json"))));
+    const realHome = linkedRealHome(mirrorHome);
     return !fs.existsSync(path.join(realHome, "session-state", sessionId));
   } catch {
     return false;
@@ -232,7 +242,7 @@ export function adoptCopilotSession(mirrorHome: string | undefined, sessionId: s
     const target = path.join(mirrorHome, "session-state", sessionId);
     if (fs.existsSync(target)) { adoptedCopilot.add(sessionId); return false; }
     // The account folder this mirror was made from: its config.json link points there.
-    const realHome = path.dirname(path.resolve(mirrorHome, fs.readlinkSync(path.join(mirrorHome, "config.json"))));
+    const realHome = linkedRealHome(mirrorHome);
     const source = path.join(realHome, "session-state", sessionId);
     if (!fs.existsSync(source)) return false;
     fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });

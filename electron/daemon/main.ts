@@ -46,6 +46,7 @@ import { startControlSocket, type ControlSocketHandle, type ControlSocketPeer } 
 import { WarmProcessPool } from "./process-pool";
 import { DaemonDiagnosticLog, storeIdentityDigest, validAppInstanceId } from "./diagnostic-log";
 import { installDaemonProcessDiagnostics } from "./process-diagnostics";
+import { installNodeHostSystemNetwork } from "../net/system-network-core";
 import { captureDaemonSocketFence, canonicalDaemonPath, resolveDaemonServiceIdentity } from "./service-identity";
 import { createInvocationOwnerBroker } from "./invocation-owner-broker";
 import { validateMobileCurrentTurnParams, type MobileBridgeCurrentTurnMethod } from "../../shared/mobile-bridge";
@@ -914,6 +915,9 @@ export async function startDaemon(options: DaemonStartupOptions = {}): Promise<v
   installDaemonProcessDiagnostics((event, fields) => {
     runtimeDiagnostics?.record(event, { ...fields, pid: process.pid, bootId, appInstanceId });
   });
+  // Node fetch/https/ws here follow the OS trust store and the user's proxy
+  // (env, else the Windows WinINET value). No Electron session in this process.
+  void installNodeHostSystemNetwork({ host: "daemon" }).catch(() => { /* direct networking, as before */ });
   const requestedDir = resolveDaemonUserDataDir();
   fs.mkdirSync(requestedDir, { recursive: true, mode: 0o700 });
   const dir = canonicalDaemonPath(requestedDir);

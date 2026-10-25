@@ -26,6 +26,18 @@ export type KeychainCredential = { account: string };
 
 const DEFAULT_TIMEOUT_MS = 10_000;
 const MAX_TIMEOUT_MS = 120_000;
+/**
+ * Windows Credential Manager refuses a generic credential blob over 2,560 bytes (CRED_MAX_CREDENTIAL_BLOB_SIZE, 5 x 512;
+ * keytar 7.9.0 hands CredWriteW the value's UTF-8 bytes whole, keytar_win.cc SetPassword, and reports a localized
+ * "The stub received bad data."). macOS Keychain and libsecret have no such limit. vault.ts stores a larger value in
+ * chunks; anything else that reaches this layer with one is refused here, before the native call, so that one value
+ * can never pause the whole service (Windows audit 2026-10-24, runtimes.md W-04: a single oversized write made every
+ * later automatic BYOK / env / MCP key read in the process fail "automatic service access paused").
+ */
+export const WINDOWS_CREDENTIAL_BLOB_MAX_BYTES = 2560;
+export function credentialTooLargeForThisOs(value: string, platform: NodeJS.Platform = process.platform): boolean {
+  return platform === "win32" && Buffer.byteLength(value, "utf8") > WINDOWS_CREDENTIAL_BLOB_MAX_BYTES;
+}
 
 // One native request per exact operation/resource. Keep failed requests latched:
 // a renderer refresh or background retry is not a new user permission decision.
@@ -51,7 +63,24 @@ async function assertServiceAvailable(service: string, operation: NativeOperatio
   if (failedServices.has(service) && !permitted) throw new KeychainUnavailableError(operation, account, "automatic service access paused", true);
   await assertKeychainServiceAvailable(service, permitted);
 }
+/**
+ * Windows Credential Manager never shows a prompt and CredRead cannot wait on a person: the service pause and the
+ * per-request latch below exist to stop a storm of macOS "allow access?" dialogs and to keep a pending prompt from
+ * freezing the event loop, so on Windows they protect nothing and only lock every key (owner decision 2026-10-24: "On
+ * Windows, a key timeout shouldn't lock all keys"). VM 2026-10-24 08:08: the background service read one stored key for
+ * more than 10 s under load, every automatic key read in the app was then refused, and 23 keys stayed refused after a
+ * restart. On Windows a failure stays with its own key (its recovery record, retried by the next read or by Retry);
+ * macOS and Linux keep the pause and the latch exactly as before.
+ */
+export function nativeStoreNeverPrompts(platform: NodeJS.Platform = process.platform): boolean {
+  return platform === "win32";
+}
+/** In-process keytar: a GUI Main (it can answer a prompt), or any host on Windows (there is no prompt to hang on). */
+function inProcessNativeAllowed(): boolean {
+  return keychainPromptsAreAnswerable() || nativeStoreNeverPrompts();
+}
 function pauseService(service: string): Promise<void> {
+  if (nativeStoreNeverPrompts()) return Promise.resolve();
   failedServices.add(service);
   let pending = serviceFailures.get(service);
   if (!pending) {
@@ -145,7 +174,7 @@ function sharedNativeRequest<T>(operation: "read" | "list", service: string, acc
       failedRequests.delete(key); if (nativeRequests.get(key) === started) nativeRequests.delete(key);
     },
     () => {
-      failedRequests.add(key);
+      if (!nativeStoreNeverPrompts()) failedRequests.add(key);
       if (nativeRequests.get(key) === started) nativeRequests.delete(key);
     },
   );
@@ -311,7 +340,7 @@ export async function keychainGet(
       if (result.error) throw new KeychainUnavailableError("read", account, result.error);
       return result.value ?? null;
     };
-    if (keychainPromptsAreAnswerable()) {
+    if (inProcessNativeAllowed()) {
       return observeInProcessNative("read", account, async (isExpired) => {
         try { return await direct(); }
         catch (error) {
@@ -346,12 +375,14 @@ export async function keychainSet(
   explicit = false,
 ): Promise<void> {
   assertNativeKeychainEnabled("write", account);
+  // A deterministic refusal about this value, not about access to the store: never dispatched, never a service pause.
+  if (credentialTooLargeForThisOs(value)) throw new KeychainUnavailableError("write", account, "credential_too_large", true);
   await runWithCredentialRecovery({ operation: "read", service, account }, explicit, async () => {
     const writeChild = async () => {
       const result = await runKeychainChild("set", service, account, value);
       if (result.error) throw new KeychainUnavailableError("write", account, result.error);
     };
-    if (keychainPromptsAreAnswerable()) {
+    if (inProcessNativeAllowed()) {
       await observeInProcessNative("write", account, async (isExpired) => {
         try { await direct(); }
         catch (error) {
@@ -377,7 +408,7 @@ export async function keychainDelete(
       const result = await runKeychainChild("delete", service, account, null);
       if (result.error) throw new KeychainUnavailableError("delete", account, result.error);
     };
-    if (keychainPromptsAreAnswerable()) {
+    if (inProcessNativeAllowed()) {
       await observeInProcessNative("delete", account, async (isExpired) => {
         try { await direct(); }
         catch (error) {
@@ -404,7 +435,7 @@ export async function keychainListAccounts(
       if (result.error) throw new KeychainUnavailableError("list", null, result.error);
       return result.accounts ?? [];
     };
-    if (keychainPromptsAreAnswerable()) {
+    if (inProcessNativeAllowed()) {
       return observeInProcessNative("list", null, async (isExpired) => {
         try { return await direct(); }
         catch (error) {

@@ -67,6 +67,7 @@ import {
   outsideProviderPolicy,
   type AgentlasProviderState,
 } from "../../shared/capability-priority";
+import { cliUserHome } from "./product-home-identity";
 
 /** ChatGPT-bundled plugins that control the owner's desktop. */
 export const CODEX_DESKTOP_ONLY_PLUGINS = [
@@ -136,7 +137,7 @@ export function codexBrowserSurfaceClosed(input: CodexDesktopSurfaceInput): bool
 function codexHomeFor(input: CodexDesktopSurfaceInput): string {
   const env = input.env ?? process.env;
   const base = path.resolve(input.cwd ?? process.cwd());
-  const home = path.resolve(base, env.HOME || os.homedir());
+  const home = path.resolve(base, cliUserHome(env));
   return path.resolve(base, env.CODEX_HOME || path.join(home, ".codex"));
 }
 

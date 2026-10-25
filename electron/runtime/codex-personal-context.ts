@@ -31,6 +31,7 @@ import {
 } from "./codex-desktop-surface";
 import { realCodexHome, type CodexProductHomeOptions } from "./codex-product-home";
 import { skillFilesUnder, type CapabilityItem, type CapabilitySelection } from "../capabilities/one-capabilities";
+import { cliUserHome } from "./product-home-identity";
 
 export interface CodexPersonalContextInput {
   /** What this run may use (selectionFor(agentId)); absent means nothing personal. */
@@ -91,7 +92,7 @@ export function codexPersonalContextArgs(input: CodexPersonalContextInput = {}):
   const cwd = path.resolve(input.cwd ?? process.cwd());
   const selection = input.selection;
   const args: string[] = [];
-  const home = path.resolve(cwd, env.HOME || os.homedir());
+  const home = path.resolve(cwd, cliUserHome(env));
   const codexHome = path.resolve(cwd, env.CODEX_HOME || path.join(home, ".codex"));
   const personal = codexPersonalHomeOptions(selection, realCodexHome(env));
 

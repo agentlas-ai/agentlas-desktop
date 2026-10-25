@@ -1,3 +1,4 @@
+import { renameWithRetry } from "../fs/retry";
 import { createHash, randomBytes } from "node:crypto";
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
@@ -165,7 +166,7 @@ export async function ensureCuaDriver(ports: CuaProvisionPorts): Promise<CuaInst
     await fsp.writeFile(path.join(unpacked, "READY.json"), JSON.stringify(ready), { mode: 0o600 });
     await fsp.rm(archivePath, { force: true });
     await fsp.rm(directory, { recursive: true, force: true });
-    await fsp.rename(unpacked, directory);
+    await renameWithRetry(unpacked, directory);
     return { executable, directory, version: pin.version, reused: false };
   } finally {
     await fsp.rm(work, { recursive: true, force: true });

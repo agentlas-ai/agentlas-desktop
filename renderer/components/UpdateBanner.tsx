@@ -149,6 +149,8 @@ export function UpdateBanner({ collapsed = false }: { collapsed?: boolean }) {
         ? t("update.cleanup_failed")
         : state.code === "compatibility-metadata-missing"
           ? t("update.metadata_missing")
+        : state.code === "install-integrity-unverified"
+          ? t("update.integrity_unverified")
           : state.code === "minimum-app-version"
             ? t("update.too_old_to_auto_update")
           : state.code === "minimum-schema-version"

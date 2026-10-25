@@ -98,6 +98,14 @@ export class CapabilityRegistry {
             lastSeenDay: day,
           };
         }
+        // A menu command seen again brings its body (records written before menu commands were usable have none) and, if a call had marked it
+        // degraded because the item was gone, the sighting says it is back.
+        if (incoming.tier === "structure" && incoming.body && incoming.traits?.includes("menu-command")) {
+          current.body = incoming.body;
+          current.traits = incoming.traits;
+          current.description = incoming.description;
+          if (current.status === "degraded") current.status = "candidate";
+        }
         // a fresh probe of the same dialog replaces the shape (the app may have changed) and re-binds the fingerprint
         if (incoming.status === "verified") {
           current.parameters = incoming.parameters;

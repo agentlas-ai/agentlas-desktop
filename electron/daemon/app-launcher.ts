@@ -30,6 +30,7 @@ import {
   type AutostartReconciliation,
 } from "./autostart";
 import { isNonProductionInstance } from "./autostart-eligibility";
+import { portableExecutableFile } from "../windows-shell-integration";
 import { entryDigest, validateDaemonAutostartManifest, type DaemonAutostartManifest } from "./autostart-manifest";
 import {
   OFFICIAL_INSTALL_IDENTITY,
@@ -734,6 +735,11 @@ export async function shutdownDaemon(
   return { stopped, pid };
 }
 
+/** This process was started by electron-builder's Windows Portable launcher. */
+export function windowsPortableLaunch(platform: NodeJS.Platform, env: NodeJS.ProcessEnv): boolean {
+  return portableExecutableFile(platform, env) !== null;
+}
+
 /**
  * 자동 시작(로그인 시 데몬 기동) 설정을 파일시스템과 정합시킨다.
  *
@@ -744,6 +750,9 @@ export function reconcileDaemonAutostart(enabled: boolean, command: AutostartCom
   // 개발·QA 인스턴스는 로그인 항목을 만들지 않고, 이 설치 몫으로 남은 것은 걷어 낸다.
   // 주입된 runtime(비공개 시험)은 실제 launchd 를 건드리지 않으므로 규칙 그대로 시험한다.
   if (enabled && !runtime?.run && isNonProductionInstance()) return reconcileAutostart(false, command, runtime);
+  // Windows Portable runs from a %TEMP% extraction that its launcher deletes at exit: a login entry would start
+  // nothing (or a stale copy). Portable never installs one and retires any it finds (Windows audit ui.md #7, fs.md #12).
+  if (enabled && windowsPortableLaunch(runtime?.platform ?? process.platform, process.env)) return reconcileAutostart(false, command, runtime);
   return reconcileAutostart(enabled, command, runtime);
 }
 
@@ -768,7 +777,7 @@ export function buildDaemonAutostartCommand(options: EnsureDaemonOptions & {
 
 export function inspectDaemonAutostart(command: AutostartCommand, runtime?: AutostartRuntime): Omit<AutostartReconciliation, "changed"> {
   const plan = planAutostart(command, runtime?.platform, runtime?.home);
-  return { installed: isAutostartInstalled(plan), loaded: autostartLoaded(plan, runtime), filePath: plan.filePath, label: plan.label };
+  return { installed: isAutostartInstalled(plan, runtime ?? {}), loaded: autostartLoaded(plan, runtime), filePath: plan.filePath, label: plan.label };
 }
 
 /** Update must suspend the supervisor BEFORE daemon drain/store backup. If the
@@ -776,7 +785,7 @@ export function inspectDaemonAutostart(command: AutostartCommand, runtime?: Auto
  * On success, the new GUI re-publishes only after migrations/seeding finish. */
 export function suspendDaemonAutostart(command: AutostartCommand, runtime?: AutostartRuntime): { suspended: true; wasInstalled: boolean; wasLoaded: boolean } {
   const plan = planAutostart(command, runtime?.platform, runtime?.home);
-  const wasInstalled = isAutostartInstalled(plan);
+  const wasInstalled = isAutostartInstalled(plan, runtime ?? {});
   const wasLoaded = autostartLoaded(plan, runtime);
   if (wasInstalled || wasLoaded) {
     try { suspendAutostart(plan, runtime); }

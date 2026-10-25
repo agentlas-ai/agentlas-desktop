@@ -169,7 +169,8 @@ export async function releaseWorkAttachmentRun(runId: string): Promise<void> {
     if (record.directory && record.cwd && record.directoryIdentity) {
       const parent = path.dirname(record.directory), leaf = fs.lstatSync(record.directory);
       if (fs.realpathSync(parent) !== parent || !leaf.isDirectory() || leaf.isSymbolicLink() || leaf.dev !== record.directoryIdentity.dev || leaf.ino !== record.directoryIdentity.ino) fail("work_attachment_cleanup_scope_changed");
-      await fs.promises.rm(record.directory, { recursive: true, force: true });
+      // Windows: Defender/OneDrive can hold a just-read input for a moment; Node's rm already clears read-only files.
+      await fs.promises.rm(record.directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     }
   } finally { runs.delete(runId); }
 }

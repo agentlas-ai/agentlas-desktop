@@ -31,6 +31,7 @@ import type {
 import { CONNECTABLE_RUNTIMES, maskAccount } from "../../shared/runtime-connect";
 import { grokListingSignedOut, parseAgyModels } from "../../shared/model-discovery";
 import { manualSetupFor, manualSetupText, setupOsFromNodePlatform } from "../../shared/runtime-manual-setup";
+import { cliUserHome } from "./product-home-identity";
 
 interface RuntimeConnectPlan {
   /** 우리가 설치할 수 있나(install-cli 고정 목록). */
@@ -129,7 +130,7 @@ function run(binary: string, args: string[], timeoutMs: number, context: AuthPro
 /** codex 는 이메일을 말하지 않는다 — 자기 auth.json 의 id_token 에서 email 클레임만 읽는다(토큰은 쓰지 않음). */
 function codexAccountEmail(env: NodeJS.ProcessEnv = process.env): string | null {
   try {
-    const home = env.CODEX_HOME || path.join(env.HOME || env.USERPROFILE || os.homedir(), ".codex");
+    const home = env.CODEX_HOME || path.join(cliUserHome(env), ".codex");
     const parsed = JSON.parse(fs.readFileSync(path.join(home, "auth.json"), "utf8")) as { tokens?: { id_token?: string } };
     const payload = parsed.tokens?.id_token?.split(".")[1];
     if (!payload) return null;

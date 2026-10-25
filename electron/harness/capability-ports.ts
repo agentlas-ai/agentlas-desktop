@@ -1241,7 +1241,7 @@ function withReachListingAliases(operationId: string, required: readonly string[
   if (required.includes("capability") && !present(out.capability) && present(out.id)) out = { ...out, capability: out.id };
   // A capability id is "<app key>#<tier>:<ref>": with the id in hand the app is named twice. The id is still looked up inside that app only.
   if (required.includes("app") && !present(out.app) && typeof out.capability === "string") {
-    const owner = /^((?:bundle|path):[^#]+)#/.exec(out.capability.trim());
+    const owner = /^((?:bundle|path|desktop|appx|aumid|uninstall):[^#]+)#/.exec(out.capability.trim());
     if (owner) out = { ...out, app: owner[1] };
   }
   return out;

@@ -12,6 +12,15 @@ import path from "node:path";
 import { spawnCli, killCliTree, cliPathValue, setCliPath, standardAntigravityBinDirs } from "./exec";
 import { resolveManagedNodeRuntime, type ManagedNodeRuntime } from "./managed-node";
 import { cliSelfUpdateEnv } from "./cli-update-prefix";
+import { systemNetworkChildEnv, writeChildExtraCaBundle } from "../net/system-network-core";
+import {
+  npmTransportEnv,
+  npmTransportFromEnv,
+  npmTransportFromNpmrc,
+  npmTransportNpmrcLines,
+  npmTransportWithSystemProxy,
+  type NpmTransportSettings,
+} from "./npm-network-config";
 import {
   installNativeCli,
   invalidateNativeCliExecutable,
@@ -370,10 +379,40 @@ function writeNpmBootstrapNodeShim(runtime: ManagedNodeRuntime): void {
   }
 }
 
+/**
+ * Proxy/CA keys from the user's own .npmrc (npm-network-config.ts). Only these
+ * transport keys are read; tokens and the registry never leave that file.
+ */
+function userNpmrcTransport(env: NodeJS.ProcessEnv = process.env): NpmTransportSettings {
+  const configured = Object.entries(env).find(([name]) => name.toLowerCase() === "npm_config_userconfig")?.[1]?.trim();
+  const file = configured && path.resolve(configured) !== path.resolve(AGENTLAS_NPM_CONFIG)
+    ? configured
+    : path.join(os.homedir(), ".npmrc");
+  try {
+    return withExistingCafile(npmTransportFromNpmrc(fs.readFileSync(file, "utf8")));
+  } catch {
+    return {};
+  }
+}
+
+/** A cafile that is not on disk would make every managed install fail; drop it instead. */
+function withExistingCafile(settings: NpmTransportSettings): NpmTransportSettings {
+  if (!settings.cafile) return settings;
+  try {
+    if (fs.statSync(settings.cafile).isFile()) return settings;
+  } catch {
+    // fall through
+  }
+  const { cafile: _missing, ...rest } = settings;
+  return rest;
+}
+
 function ensureManagedNpmConfigFiles(): void {
   fs.mkdirSync(path.dirname(AGENTLAS_NPM_CONFIG), { recursive: true, mode: 0o700 });
   fs.mkdirSync(AGENTLAS_NPM_CACHE, { recursive: true, mode: 0o700 });
-  const npmrc = `registry=${OFFICIAL_NPM_REGISTRY}\naudit=false\nfund=false\nupdate-notifier=false\n`;
+  // The user's npm proxy/CA keys ride along (a company network needs them);
+  // registry, cache and prefix stay pinned.
+  const npmrc = `registry=${OFFICIAL_NPM_REGISTRY}\naudit=false\nfund=false\nupdate-notifier=false\n${npmTransportNpmrcLines(userNpmrcTransport())}`;
   if (!fs.existsSync(AGENTLAS_NPM_CONFIG) || fs.readFileSync(AGENTLAS_NPM_CONFIG, "utf8") !== npmrc) {
     fs.writeFileSync(AGENTLAS_NPM_CONFIG, npmrc, { encoding: "utf8", mode: 0o600 });
   }
@@ -384,6 +423,19 @@ function ensureManagedNpmConfigFiles(): void {
 
 function managedNpmEnv(runtime?: ManagedNodeRuntime): NodeJS.ProcessEnv {
   let env = augmentedEnv();
+  // Precedence for how npm reaches the network: npm_config_* env > the user's
+  // .npmrc > the system proxy Desktop resolved. Everything else npm_config_*
+  // is still dropped below.
+  const transport = npmTransportWithSystemProxy(
+    { ...userNpmrcTransport(env), ...withExistingCafile(npmTransportFromEnv(env)) },
+    systemNetworkChildEnv(env),
+  );
+  let extraCa: string | null = null;
+  try {
+    extraCa = writeChildExtraCaBundle(path.join(path.dirname(AGENTLAS_NPM_CONFIG), "system-ca.pem"), env);
+  } catch {
+    extraCa = null;
+  }
   for (const key of Object.keys(env)) {
     const lower = key.toLowerCase();
     if (lower === "node_options" || lower.startsWith("npm_config_")) delete env[key];
@@ -407,6 +459,9 @@ function managedNpmEnv(runtime?: ManagedNodeRuntime): NodeJS.ProcessEnv {
     NPM_CONFIG_AUDIT: "false",
     NPM_CONFIG_FUND: "false",
     NPM_CONFIG_UPDATE_NOTIFIER: "false",
+    ...npmTransportEnv(transport),
+    // OS-store roots (a company TLS-inspection root) for npm's own Node.
+    ...(extraCa ? { NODE_EXTRA_CA_CERTS: extraCa } : {}),
   };
 }
 

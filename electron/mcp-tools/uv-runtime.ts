@@ -19,6 +19,7 @@
 //   · 사용자가 이미 uv 를 갖고 있으면 그것을 쓴다(우리 것을 강요하지 않는다).
 //   · 설치는 **필요할 때 한 번**만 — uvx 를 쓰는 서버를 처음 띄울 때다. 앱 시작을 늦추지 않는다.
 
+import { renameWithRetry } from "../fs/retry";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -126,7 +127,7 @@ async function installUvx(signal: AbortSignal): Promise<string | null> {
     if (!stat.isFile() || stat.isSymbolicLink()) return null;
     const destination = path.join(uvHome(), `runtime-${path.basename(ownedDirectory).slice(".install-".length)}`);
     if (signal.aborted) throw aborted();
-    await fs.promises.rename(ownedDirectory, destination);
+    await renameWithRetry(ownedDirectory, destination);
     ownedDirectory = destination;
     await fs.promises.writeFile(receiptTemp, JSON.stringify({ directory: path.basename(destination) }), { flag: "wx", mode: 0o600 });
     if (signal.aborted) throw aborted();

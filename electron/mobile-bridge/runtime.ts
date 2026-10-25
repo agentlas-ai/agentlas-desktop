@@ -2,6 +2,7 @@ import {currentOneMobileSecureAdapter} from "../secrets/one-mobile-secure";
 import { MobilePushService } from "./push";
 import { cancelInvocationOwnerRun, invocationCurrentTurnControl } from "../runtime/invocation-owner-control";
 import { desktopGoalControlServices } from "./goal-control";
+import { startWithRetainedMobileBridgePort } from "./port-retry";
 import os from "node:os";
 import { randomBytes } from "node:crypto";
 
@@ -187,14 +188,6 @@ function retainedEndpointPort(options: MobileBridgeRuntimeOptions): number | und
   }
 }
 
-function addressAlreadyInUse(error: unknown): boolean {
-  if (typeof error === "object" && error !== null && "code" in error) {
-    return (error as { code?: unknown }).code === "EADDRINUSE";
-  }
-  return /EADDRINUSE|address already in use/i.test(
-    error instanceof Error ? error.message : String(error),
-  );
-}
 
 const LOOPBACK_HOST = "127.0.0.1";
 
@@ -438,35 +431,29 @@ export async function startAgentlasMobileBridge(
     // A paired phone stores this endpoint. Reusing the last port means closing
     // and reopening Desktop restores the same secure WebSocket automatically.
     const retainedPort = retainedEndpointPort(options);
-    const retryDelaysMs = [1_000, 2_000, 3_000, 4_000, 5_000];
-    for (let attempt = 0; ; attempt += 1) {
-      try {
-        return await startBridgeInternal(options, {
-          ...(retainedPort ? { port: retainedPort } : {}),
-        });
-      } catch (error) {
-        if (!retainedPort || !addressAlreadyInUse(error)) throw error;
-        // During an app update/restart the outgoing instance (or its socket in
-        // TIME_WAIT) can still hold the retained port for a few seconds. Losing
-        // the port silently invalidates every paired phone's stored endpoint,
-        // so wait the port out before surrendering it.
-        const delayMs = retryDelaysMs[attempt];
-        if (delayMs === undefined) {
-          // Another process genuinely owns the old port. Keep Desktop usable
-          // with a new port; the user repairs that exceptional case by pairing
-          // again instead of losing the entire mobile bridge.
-          console.warn(
-            `[mobile-bridge] retained port ${retainedPort} stayed busy; falling back to an ephemeral port (paired phones need a new QR)`,
-          );
-          return startBridgeInternal(options, { port: 0 });
-        }
-        await new Promise<void>((resolve) => {
-          const timer = setTimeout(resolve, delayMs);
-          timer.unref?.();
-        });
-      }
-    }
+    // During an app update/restart the outgoing instance (or its socket in
+    // TIME_WAIT) can still hold the retained port for a few seconds. Losing
+    // the port silently invalidates every paired phone's stored endpoint, so a
+    // busy port is waited out before surrendering it. A port the OS refuses
+    // (Windows reserved range → EACCES) is surrendered at once; another
+    // process genuinely owning it falls back after the waits. Either way
+    // Desktop keeps the bridge and its relay with a new port; the user repairs
+    // that exceptional case by pairing again.
+    return startWithRetainedMobileBridgePort({
+      retainedPort,
+      start: (port) => startBridgeInternal(options, port === undefined ? {} : { port }),
+      busyRetryDelaysMs: [1_000, 2_000, 3_000, 4_000, 5_000],
+      onFallback: retainedPortFallbackWarning,
+    });
   });
+}
+
+function retainedPortFallbackWarning(retainedPort: number, failure: "busy" | "forbidden"): void {
+  console.warn(
+    failure === "busy"
+      ? `[mobile-bridge] retained port ${retainedPort} stayed busy; falling back to an ephemeral port (paired phones need a new QR)`
+      : `[mobile-bridge] retained port ${retainedPort} is refused by the OS (reserved or exclusive); falling back to an ephemeral port (paired phones need a new QR)`,
+  );
 }
 
 async function rebindAgentlasMobileBridge(
@@ -485,9 +472,16 @@ async function rebindAgentlasMobileBridge(
       : currentManifest?.port;
     await stopRunningBridge(false);
     try {
-      const status = await startBridgeInternal(options, {
-        ...(hostOverride ? { host: hostOverride } : {}),
-        ...(retainedPort ? { port: retainedPort } : {}),
+      // The bridge was just stopped: a rebind that cannot get its port back
+      // must still come up (with a new port), not leave the bridge and relay down.
+      const status = await startWithRetainedMobileBridgePort({
+        retainedPort,
+        start: (port) => startBridgeInternal(options, {
+          ...(hostOverride ? { host: hostOverride } : {}),
+          ...(port === undefined ? {} : { port }),
+        }),
+        busyRetryDelaysMs: [1_000, 2_000],
+        onFallback: retainedPortFallbackWarning,
       });
       emitMobileBridgeStateChange(reason);
       return status;

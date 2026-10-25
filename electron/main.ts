@@ -26,6 +26,7 @@ import {
   ipcMain as electronIpcMain,
   Menu,
   nativeImage,
+  nativeTheme,
   net,
   Notification,
   powerMonitor,
@@ -66,7 +67,7 @@ import { registerLocalModelHubIpc } from "./local-model-hub-ipc";
 import { isAppControlEvent, recordAppControlRendererEvent } from "./app-control/ipc-registry";
 import { configureAppControlHost } from "./app-control/service";
 import { installSupervisorDock } from "./computer-use/supervisor-dock-main";
-import { assertOneWindowChannel, configureOneWindowHost, getOneWindow, oneOnlyLaunch, oneWindowShellActive, openOneWindow, registerOneWindowIpc } from "./one-window-manager";
+import { assertOneWindowChannel, configureOneWindowHost, enforceOneWindowMenuPolicy, getOneWindow, oneOnlyLaunch, oneWindowShellActive, openOneWindow, registerOneWindowIpc } from "./one-window-manager";
 import { registerOneVaultMainIpc, closeOneVaultMain, invalidateOneVaultMainAuthority, oneVaultMainMobileSources } from './secrets/one-vault-main';
 import {createOnePersonalNativeMainEntry} from './secrets/one-personal-native-main-owner';
 import {getServer as getInstalledMcpServer} from './mcp-tools/registry';
@@ -107,7 +108,9 @@ import { startMemoryRevocationCleanup, stopMemoryRevocationCleanup } from "./mem
 import { emitDesktopStoreChange, onDesktopStoreChange } from "./store/change-bus";
 import { watchExternalChatChanges } from "./store/external-chat-changes";
 import { clearDetectCache } from "./runtime/detect";
-import { getChat, repairPlaceholderTaskTitles } from "./store/chats";
+import { chatOriginSurface, getChat, repairPlaceholderTaskTitles } from "./store/chats";
+import { notificationClickTarget, retainNotification } from "./notification-target";
+import { createSessionEndingHandler, protocolRegistrationPlan, wireWindowsSessionEnd, windowsAppUserModelId } from "./windows-shell-integration";
 import { expireOrphanedSurfaceJobs } from "./store/agent-surface-jobs";
 import { reconcileAbandonedGoalContracts } from "./store/chat-goals";
 import { repairDetachedGoalBindings } from "./store/goal-binding-repair";
@@ -196,7 +199,7 @@ import { planAfterQuitPrompt, planGuiQuit, QUIT_PROMPT_CHOICES, quitPromptText, 
 import { backgroundHoldActive, enterBackgroundHold, leaveBackgroundHold } from "./background-tray";
 import { fitWindowToWorkArea, secondInstanceWindowAction, watchWindowForLastVisibleClose } from "./window-lifecycle";
 import { cleanupDoneExit, createQuitStepClock, createRelaunchAfterQuit, relaunchArgsForLaunchDuringQuit, relaunchExecPath, type QuitStepClock } from "./quit-exit";
-import { decideRunAlert, fireRunAlert, getRunAlerts } from "./run-alerts";
+import { anyWindowWatched, decideRunAlert, fireRunAlert, getRunAlerts } from "./run-alerts";
 import { onOwnerAsk } from "./owner-ask-alerts";
 import { supervisorQuietRun } from "./one/supervisor-presentation";
 import { currentUiLocale, readUiLocaleCore, setCurrentUiLocale } from "./ui-locale";
@@ -378,6 +381,11 @@ import {
   type ScienceChemistryCommitInput,
   type ScienceMolstarCommitInput,
 } from "agentlas-science/dist/contracts/science-renderer-runtime";
+import { installMainSystemNetwork } from "./net/system-network";
+
+// Node fetch/https/ws in Main follow the system proxy (WinINET/PAC) and the OS
+// trust store, like the app's own browser windows (Windows company networks).
+installMainSystemNetwork();
 
 export { currentUiLocale } from "./ui-locale";
 
@@ -593,6 +601,12 @@ function initializeInstallIdentity(): InstallIdentity {
     // name Agentlas, Electron's default userData path, and its Keychain
     // service. Only non-official identities receive an explicit namespace.
     app.setName(identity.appName);
+    // Windows: the process AppUserModelID must equal the one electron-builder stamps on the NSIS
+    // Start-menu/desktop shortcuts (appId). Electron's default (electron.app.<name>) has no shortcut,
+    // so toasts were not shown, a pinned icon did not merge with the window, and Action Center
+    // clicks did not route (Windows audit 2026-10-24, ui.md #2). Before any window or notification.
+    const appUserModelId = windowsAppUserModelId(process.platform, identity.channel);
+    if (appUserModelId) app.setAppUserModelId(appUserModelId);
     const userDataDir = candidateQaUserDataDir ?? identity.userDataOverride
       ?? (identity.channel === "local-candidate" || identity.channel === "dev"
         ? path.join(app.getPath("appData"), identity.userDataNamespace)
@@ -845,6 +859,30 @@ async function openOneFromNotification(input: { taskId?: string; chatId?: string
   const taskId = input.taskId ?? (input.chatId ? findCanonicalTaskForChat(input.chatId)?.id : undefined);
   await openOneWindow({ taskId });
 }
+/**
+ * A notification click opens the place it came from (owner 2026-10-24, ui.md #12): a Work chat opens its
+ * Work room in the main window, anything else opens One (notification-target.ts).
+ */
+async function openNotificationOrigin(input: { chatId?: string; taskId?: string }): Promise<void> {
+  let originSurface: "one" | "work" | null = null;
+  try { originSurface = input.chatId ? chatOriginSurface(input.chatId) : null; } catch { originSurface = null; }
+  const target = notificationClickTarget({ ...input, originSurface });
+  if (target.kind === "one" || !shellReadyForWindows) { await openOneFromNotification(input); return; }
+  leaveBackgroundHold();
+  const created = !mainWindow || mainWindow.isDestroyed();
+  if (created) await createWindow({ initialRoute: target.route });
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show(); mainWindow.focus();
+  if (!created) mainWindow.webContents.send("menu:navigate", target.route);
+}
+/** The window a run alert flashes: the one its click opens. */
+function notificationFlashWindow(chatId: string | undefined): BrowserWindow | null {
+  let surface: "one" | "work" | null = null;
+  try { surface = chatId ? chatOriginSurface(chatId) : null; } catch { surface = null; }
+  const main = mainWindow && !mainWindow.isDestroyed() ? mainWindow : null;
+  return surface === "work" ? main ?? getOneWindow() : getOneWindow() ?? main;
+}
 async function flushPendingOneNotification(): Promise<void> {
   if (!pendingOneNotification) return;
   const requested = pendingOneNotification;
@@ -870,10 +908,24 @@ function checkOneBriefingDesktopNotification(): void {
       silent: true,
     });
     notification.on("click", () => { void openOneFromNotification({ taskId: candidate.source.kind === "canonical_task" ? candidate.source.refId : undefined }); });
-    notification.show();
+    retainNotification(notification).show();
   } catch (error) {
     console.warn("[one-briefing] desktop notification check failed", error);
   }
+}
+
+/** The main window or the One window is in front of the person: focused, shown, not minimized (run-alerts.ts windowWatched). */
+function appWindowWatched(): boolean {
+  return anyWindowWatched([mainWindow, getOneWindow()]);
+}
+function appWindowStates(): Array<{ window: "main" | "one"; focused: boolean; visible: boolean; minimized: boolean }> {
+  const out: Array<{ window: "main" | "one"; focused: boolean; visible: boolean; minimized: boolean }> = [];
+  for (const [name, win] of [["main", mainWindow], ["one", getOneWindow()]] as const) {
+    try {
+      if (win && !win.isDestroyed()) out.push({ window: name, focused: win.isFocused(), visible: win.isVisible(), minimized: win.isMinimized() });
+    } catch { /* closing */ }
+  }
+  return out;
 }
 
 /**
@@ -903,7 +955,7 @@ function startRunAlertBridge(): void {
   const stopSettled = invocationService.onSettled((envelope) => {
     try {
       const settings = getRunAlerts();
-      const focused = Boolean(mainWindow && !mainWindow.isDestroyed() && mainWindow.isFocused() || getOneWindow()?.isFocused());
+      const focused = appWindowWatched();
       const decision = decideRunAlert(settings, {
         status: envelope.receipt.status,
         startedAt: envelope.receipt.startedAt,
@@ -911,6 +963,9 @@ function startRunAlertBridge(): void {
         focused,
         pendingQuestion: envelope.pendingQuestion === true,
       });
+      // One machine line per settled run: which rule decided (VM check: a minimized window must read alert:true).
+      console.info("[run-alert]", JSON.stringify({ runId: envelope.receipt.runId, status: envelope.receipt.status,
+        decision: decision.alert ? decision.kind : decision.reason, windows: appWindowStates() }));
       if (!decision.alert) return;
       // One checked and decided the owner needs to hear nothing ([quiet]): no sound, no bounce.
       if (supervisorQuietRunInStore(envelope.receipt.runId)) return;
@@ -923,7 +978,8 @@ function startRunAlertBridge(): void {
         // main 이 아는 유일한 사실이라 그것을 쓴다 — 짐작 대신 관측값.
         locale: app.getLocale().toLowerCase().startsWith("ko") ? "ko" : "en",
         goal: envelope.goal,
-        onClick: () => { void openOneFromNotification({ chatId: envelope.chatId }); },
+        onClick: () => { void openNotificationOrigin({ chatId: envelope.chatId }); },
+        flashWindow: () => notificationFlashWindow(envelope.chatId),
       });
     } catch {
       // 알람은 부가 기능이다 — 무슨 일이 있어도 실행 정산을 건드리지 않는다.
@@ -934,7 +990,7 @@ function startRunAlertBridge(): void {
   const stopOwnerAsk = onOwnerAsk((ask) => {
     try {
       const settings = getRunAlerts();
-      const focused = Boolean(mainWindow && !mainWindow.isDestroyed() && mainWindow.isFocused() || getOneWindow()?.isFocused());
+      const focused = appWindowWatched();
       const decision = decideRunAlert(settings, { status: "completed", focused, pendingQuestion: true });
       if (!decision.alert) return;
       fireRunAlert({
@@ -942,7 +998,8 @@ function startRunAlertBridge(): void {
         settings,
         locale: app.getLocale().toLowerCase().startsWith("ko") ? "ko" : "en",
         goal: getChat(ask.chatId)?.title ?? "",
-        onClick: () => { void openOneFromNotification({ chatId: ask.chatId }); },
+        onClick: () => { void openNotificationOrigin({ chatId: ask.chatId }); },
+        flashWindow: () => notificationFlashWindow(ask.chatId),
       });
     } catch {
       // 알람은 부가 기능이다 — AGI 의 질문 게시를 건드리지 않는다.
@@ -965,7 +1022,7 @@ function startOneTeamNotificationBridge(): void {
     if (!reason || !getAuthSession().signedIn || !Notification.isSupported()) return;
     // Focused Desktop is the foreground host and owns the in-app indication;
     // avoid the duplicate OS toast. A hidden/minimized host gets one toast.
-    if (mainWindow && !mainWindow.isDestroyed() && mainWindow.isFocused() || getOneWindow()?.isFocused()) return;
+    if (appWindowWatched()) return;
     const key = `${receipt.runId}:${reason}`;
     if (oneTeamNotificationKeys.has(key)) return;
     oneTeamNotificationKeys.add(key);
@@ -978,7 +1035,7 @@ function startOneTeamNotificationBridge(): void {
         : (notificationLocale === "ko" ? "오래 걸린 작업을 끝냈어요." : "One finished a long-running task.")
     const notification = new Notification({ title: "Agentlas One", body, silent: true });
     notification.on("click", () => { void openOneFromNotification({ chatId: envelope.chatId }); });
-    notification.show();
+    retainNotification(notification).show();
   });
 }
 
@@ -1126,11 +1183,12 @@ function registerAgentlasProtocolClient(): void {
   if (developmentEffectsSuppressed()) return;
   try {
     // dev 실행은 electron 바이너리 + 스크립트 경로를 함께 등록해야 OS 가 되돌려준다.
-    if (process.defaultApp && process.argv.length >= 2) {
-      app.setAsDefaultProtocolClient("agentlas", process.execPath, [path.resolve(process.argv[1])]);
-    } else {
-      app.setAsDefaultProtocolClient("agentlas");
-    }
+    // Windows Portable 은 지워지는 %TEMP% 사본이 아니라 런처 파일을 등록하고, 설치본이 이미 가진 스킴은 빼앗지 않는다.
+    const plan = protocolRegistrationPlan({ platform: process.platform, env: process.env, defaultApp: Boolean(process.defaultApp),
+      argv: process.argv, app, resolve: (value) => path.resolve(value) });
+    if (plan.kind === "skip") console.info(`[protocol] agentlas:// left to the installed app (${plan.reason})`);
+    else if (plan.args) app.setAsDefaultProtocolClient("agentlas", plan.execPath ?? process.execPath, plan.args);
+    else app.setAsDefaultProtocolClient("agentlas");
   } catch {
     // 등록 실패는 앱 기동을 막지 않는다 — 딥링크만 동작하지 않는다.
   }
@@ -1562,6 +1620,24 @@ app.on("browser-window-created", (_event, window) => {
       app.quit();
     },
   });
+  // Windows sign-out / restart / shutdown arrive as window messages (windows-shell-integration.ts).
+  wireWindowsSessionEnd(window, process.platform, { sessionEnding: (final, reasons) => noteWindowsSessionEnding(final, reasons) });
+});
+
+/** Windows sign-out / restart / shutdown (windows-shell-integration.ts createSessionEndingHandler). */
+const noteWindowsSessionEnding = createSessionEndingHandler({
+  systemShutdown: () => systemShutdownInProgress,
+  setSystemShutdown: (active) => {
+    systemShutdownInProgress = active;
+    noteSystemShutdown(active);
+    if (systemShutdownResetTimer) clearTimeout(systemShutdownResetTimer);
+    systemShutdownResetTimer = null;
+  },
+  noteOsShutdownIntent: (detail) => noteQuitIntent("os-shutdown", detail),
+  quit: () => app.quit(),
+  setTimer: (callback, ms) => { const timer = setTimeout(callback, ms); timer.unref(); return timer; },
+  clearTimer: (handle) => clearTimeout(handle as NodeJS.Timeout),
+  log: (line) => console.info(line),
 });
 
 app.on("activate", () => {
@@ -1612,7 +1688,7 @@ function quitClock(): QuitStepClock {
   return quitStepClock;
 }
 /** A launch that arrived during a committed quit starts Agentlas again after this exit (quit-exit.ts). */
-const relaunchAfterQuit = createRelaunchAfterQuit(app, () => relaunchExecPath(process.platform, process.env.APPIMAGE));
+const relaunchAfterQuit = createRelaunchAfterQuit(app, () => relaunchExecPath(process.platform, process.env.APPIMAGE, process.env.PORTABLE_EXECUTABLE_FILE));
 function applyRelaunchAfterQuit(): void {
   try {
     if (relaunchAfterQuit.apply()) console.info("[quit] relaunch arranged for the launch that arrived while quitting");
@@ -2415,6 +2491,9 @@ app.whenReady().then(async () => {
   }
 
   registerRendererProtocol();
+  // Pages are light-only (renderer/lib/theme.tsx DARK_THEME_ENABLED=false). In Windows dark mode the native title bar,
+  // menu bar, context menus and dialogs were dark over light pages (Windows audit ui.md #19). macOS/Linux unchanged.
+  if (process.platform === "win32") nativeTheme.themeSource = "light";
   // OS 에 agentlas:// 를 이 앱으로 등록한다(허브 웹의 설치 버튼이 여는 스킴).
   registerAgentlasProtocolClient();
   // 앱이 딥링크로 **처음** 켜진 경우(Windows/Linux 는 첫 argv 에 실려 온다).
@@ -2456,12 +2535,12 @@ app.whenReady().then(async () => {
         if (!Notification.isSupported()) return;
         const gb = (bytes: number): string => (bytes / 1024 ** 3).toFixed(1);
         const ko = currentUiLocale() === "ko";
-        new Notification({
+        retainNotification(new Notification({
           title: ko ? "디스크 공간이 부족합니다" : "Your disk is almost full",
           body: ko
             ? `남은 공간 ${gb(freeBytes)}GB · Agentlas 사용 ${gb(footprintBytes)}GB · 방금 ${gb(freedBytes)}GB 정리`
             : `${gb(freeBytes)} GB free · Agentlas uses ${gb(footprintBytes)} GB · just freed ${gb(freedBytes)} GB`,
-        }).show();
+        })).show();
       },
     });
     // Agentlas Reach: maps the installed apps in the background (the first map and every rebuild after a feature update are silent and do not
@@ -5361,8 +5440,8 @@ app.whenReady().then(async () => {
               : attention.state === "expired" ? "The result you were waiting for did not arrive within the time limit."
               : "Confirmation is needed before the waiting task continues.");
           const notification = new Notification({ title: "Agentlas", body, silent: true });
-          notification.on("click", () => { void openOneFromNotification({ chatId: attention.chatId }); });
-          notification.show();
+          notification.on("click", () => { void openNotificationOrigin({ chatId: attention.chatId }); });
+          retainNotification(notification).show();
         },
       });
       const uncertainClaims = reconcileClaimedGoalWaitsAtStartup();
@@ -5592,7 +5671,9 @@ function applyAppMenu(locale: "ko" | "en"): void {
       { role: "viewMenu" },
       { role: "windowMenu" },
     ]));
+    enforceOneWindowMenuPolicy();
     return;
   }
   Menu.setApplicationMenu(buildAppMenu(() => mainWindow, locale));
+  enforceOneWindowMenuPolicy();
 }

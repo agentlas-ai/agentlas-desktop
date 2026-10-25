@@ -64,6 +64,8 @@ export const OneComposerInput = memo(forwardRef<OneComposerInputHandle, OneCompo
   // run was active: the owner's message was applied and the run and its Goal were paused 20 ms later (owner 2026-10-14,
   // room "X Marketing" 10:40:27Z: steer applied .089, turn-stop pause .094).
   const commitSendScheduled = useRef(false);
+  // When the commit's send ran: a plain Enter echo arriving after it is swallowed (one-composer-ime.ts, Windows IME).
+  const lastCommitSendAt = useRef<number | null>(null);
 
   const getValue = useCallback(() => input.current?.value ?? value.current, []);
   const flushDraft = useCallback(() => {
@@ -195,6 +197,7 @@ export const OneComposerInput = memo(forwardRef<OneComposerInputHandle, OneCompo
         // The committed syllable reaches the textarea value after this event; send on the next task.
         window.setTimeout(() => {
           commitSendScheduled.current = false;
+          lastCommitSendAt.current = performance.now();
           flushDraft();
           if (target.value.trim()) callbacks.current.onSubmit(target.value);
         }, 0);
@@ -211,6 +214,7 @@ export const OneComposerInput = memo(forwardRef<OneComposerInputHandle, OneCompo
         keyCode: event.keyCode,
         msSinceCompositionEnd: lastCompositionEndAt.current === null ? null : performance.now() - lastCompositionEndAt.current,
         committedHangul: isHangulComposition(compositionText.current),
+        msSinceCommitSend: lastCommitSendAt.current === null ? null : performance.now() - lastCommitSendAt.current,
       });
       // The IME still holds this Enter: let it commit the syllable, then send from compositionend.
       if (decision === "send-after-commit") { sendAfterCommit.current = event.currentTarget; return; }

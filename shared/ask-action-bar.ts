@@ -184,6 +184,8 @@ type Copy = {
   other: string;
   otherNote: string;
   placeholder: string;
+  /** The status chip under a card that is waiting for the person (Claude Code question card, 2026-10-24). */
+  needsInput: string;
   reason: Record<AskDisabledReason, string>;
   notice: Record<Exclude<AskActionBlock, "none">, string>;
   hint: { single: string; multi: string };
@@ -192,13 +194,15 @@ type Copy = {
 export const ASK_ACTION_COPY: Record<"ko" | "en", Copy> = {
   ko: {
     submit: (count) => (count > 0 ? `제출 (${count}개)` : "제출"),
-    submitSingle: "보내기",
+    // 2026-10-24: the question card follows the Claude Code card — [건너뛰기] [제출 ⌘↵], last row "기타".
+    submitSingle: "제출",
     resend: "이 답을 새 메시지로 보내기",
     skip: "건너뛰기",
     dismiss: "닫기",
-    other: "직접 입력",
+    other: "기타",
     otherNote: "보기에 없는 답을 적습니다.",
     placeholder: "여기에 직접 답을 적으세요",
+    needsInput: "입력이 필요합니다",
     reason: {
       pick_or_type: "하나 이상 고르거나 직접 입력하세요.",
       type_or_pick_to_send: "보낼 답을 고르거나 적어 주세요.",
@@ -213,13 +217,14 @@ export const ASK_ACTION_COPY: Record<"ko" | "en", Copy> = {
   },
   en: {
     submit: (count) => (count > 0 ? `Submit (${count})` : "Submit"),
-    submitSingle: "Send",
+    submitSingle: "Submit",
     resend: "Send this answer as a new message",
     skip: "Skip",
     dismiss: "Close",
     other: "Other",
     otherNote: "Type an answer that is not listed.",
     placeholder: "Type your own answer here",
+    needsInput: "Input needed",
     reason: {
       pick_or_type: "Pick at least one option or type an answer.",
       type_or_pick_to_send: "Pick or type the answer you want to send.",

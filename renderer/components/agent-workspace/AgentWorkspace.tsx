@@ -24,6 +24,7 @@ import { confirmPopup } from "@/lib/popup";
 import { isTechnicalEvidence, memoryKindLabel, plainMemoryText, plainMemoryTitle } from "@/lib/agent-memory-explain";
 import styles from "./AgentWorkspace.module.css";
 import { Select } from "@/components/Select";
+import { shortcutLabel, useUiPlatform } from "@/lib/platform-copy";
 
 export type AgentWorkspaceView = "files" | "memory" | "changes" | "sync" | "history";
 
@@ -111,6 +112,7 @@ export function AgentWorkspace({ agent, name, locale, initialView = "files", onT
   onMemoryCountChange?: (agentId: string, count: number) => void;
 }) {
   const ko = locale === "ko";
+  const uiOs = useUiPlatform();
   const [view, setView] = useState<AgentWorkspaceView>(initialView);
   const [snapshot, setSnapshot] = useState<AgentWorkspaceSnapshot | null>(null);
   const [files, setFiles] = useState<AgentWorkspaceFile[]>([]);
@@ -448,7 +450,7 @@ export function AgentWorkspace({ agent, name, locale, initialView = "files", onT
       <nav className={styles.rail} aria-label={ko ? "워크스페이스 도구" : "Workspace tools"}>{navigation.map((item) => <button className={`${styles.railButton} ${view === item.key ? styles.railActive : ""}`} key={item.key} title={item.label} aria-label={item.label} aria-pressed={view === item.key} onClick={() => setView(item.key)}>{item.icon}{Boolean(item.count) && <span className={styles.badge}>{item.count}</span>}</button>)}</nav>
       <main className={styles.content}>
         {loading ? <div className={styles.empty}><span className={styles.loading} />{ko ? "에이전트 파일 읽는 중" : "Reading agent files"}</div> : !snapshot ? <div className={styles.empty}><IconFolder size={35} /><strong>{ko ? "파일을 확인할 수 없습니다" : "Files could not be read"}</strong><button className={styles.button} onClick={() => void run("refresh", async () => { await refresh(); })}>{ko ? "다시 읽기" : "Retry"}</button></div> : view === "files" ? <>
-          <aside className={styles.tree}><div className={styles.paneHeader}><strong>{ko ? "파일" : "Files"}</strong><button className={styles.iconButton} title={ko ? "파일 찾기 ⌘P" : "Find file ⌘P"} aria-label={ko ? "파일 찾기" : "Find file"} onClick={() => { setQuickOpen(true); setQuickQuery(""); }}><IconSearch size={13} /></button><button className={styles.iconButton} disabled={!snapshot.writable || Boolean(busy) || snapshot.activation === "recovery_required"} title={ko ? "새 파일 초안" : "New file draft"} aria-label={ko ? "새 파일 초안" : "New file draft"} onClick={() => { setNewPathDialog(true); setNewPath(""); }}><IconPlus size={13} /></button></div>
+          <aside className={styles.tree}><div className={styles.paneHeader}><strong>{ko ? "파일" : "Files"}</strong><button className={styles.iconButton} title={ko ? `파일 찾기 ${shortcutLabel("P", uiOs)}` : `Find file ${shortcutLabel("P", uiOs)}`} aria-label={ko ? "파일 찾기" : "Find file"} onClick={() => { setQuickOpen(true); setQuickQuery(""); }}><IconSearch size={13} /></button><button className={styles.iconButton} disabled={!snapshot.writable || Boolean(busy) || snapshot.activation === "recovery_required"} title={ko ? "새 파일 초안" : "New file draft"} aria-label={ko ? "새 파일 초안" : "New file draft"} onClick={() => { setNewPathDialog(true); setNewPath(""); }}><IconPlus size={13} /></button></div>
             <div className={styles.treeRows} role="tree" aria-label={ko ? "에이전트 파일 트리" : "Agent file tree"}>
               {rows.map((entry) => <button className={`${styles.treeRow} ${entry.path === path ? styles.selected : ""}`} key={entry.path} role="treeitem" aria-level={entry.depth + 1} aria-selected={entry.path === path} aria-expanded={entry.kind === "directory" ? expanded.has(entry.path) : undefined} style={{ paddingLeft: 8 + entry.depth * 13 }} onClick={() => entry.kind === "directory" ? void toggleDirectory(entry) : void openFile(entry.path)} onKeyDown={(event) => {
                 if (event.key === "ArrowRight" && entry.kind === "directory" && !expanded.has(entry.path)) { event.preventDefault(); void toggleDirectory(entry); }

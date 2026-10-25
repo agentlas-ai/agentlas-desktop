@@ -46,7 +46,8 @@ import { isMirrorLink, syncConfigHomeMirror } from "./config-home-mirror";
 import { allowlistedToml, withCliProductHome } from "./cli-product-homes";
 import { productClaudeGlobalConfig } from "./claude-product-home";
 import type { CapabilityItem, CapabilityKind, CapabilitySelection } from "../capabilities/one-capabilities";
-import { inheritedProductHome, personalHomeDir, personalHomeOverride, productHomeRefusedOnThisHost } from "./product-home-identity";
+import { inheritedProductHome, personalHomeDir, personalHomeOverride, productHomeRefusedOnThisHost, withCliUserHome } from "./product-home-identity";
+import { MIRROR_LINK_RECORD, isRecordedMirrorEntry, linkMirrorEntry, reconcileMirrorLinks, reportIsolationUnavailable, unlinkMirrorEntry } from "./mirror-link";
 
 const GROK_CELLS: ReadonlyArray<{ cell: string; kind: CapabilityKind }> = [
   { cell: "SKILLS", kind: "skill" },
@@ -211,25 +212,32 @@ export function syncGrokProductHome(realHome: string, selection: CapabilitySelec
         return [path.basename(target), target] as const;
       })));
     }
-    if (!isMirrorLink(home, "auth.json")) return { skip: "links-unavailable" };
-  } catch {
+    if (!isMirrorLink(home, "auth.json")) { reportIsolationUnavailable("grok", "sign-in-not-linked"); return { skip: "links-unavailable" }; }
+  } catch (error) {
+    reportIsolationUnavailable("grok", error);
     return { skip: "links-unavailable" };
   }
   return { home };
 }
 
-/** Fills a mirror folder with links to exactly `wanted` (name -> target); links it no longer wants go, files the CLI made stay. */
+/**
+ * Fills a mirror folder with links to exactly `wanted` (name -> target); links it no longer wants go, files the CLI made
+ * stay. A link is mirror-link.ts's: on Windows a skill folder is a junction and a hook file a recorded hard link / copy.
+ */
 function syncLinkFolder(dir: string, wanted: ReadonlyMap<string, string>): void {
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  reconcileMirrorLinks(dir, wanted);
   for (const name of fs.readdirSync(dir)) {
+    if (name === MIRROR_LINK_RECORD) continue;
     const at = path.join(dir, name);
     let link: string | null = null;
-    try { link = fs.readlinkSync(at); } catch { /* a file the CLI made: left alone */ }
+    try { link = fs.readlinkSync(at); } catch { /* a file the CLI made, or a recorded Windows link: below */ }
     if (link !== null && wanted.get(name) !== link) { try { fs.unlinkSync(at); } catch { /* raced */ } }
+    else if (link === null && !wanted.has(name) && isRecordedMirrorEntry(dir, name)) { try { unlinkMirrorEntry(dir, name); } catch { /* raced */ } }
   }
   for (const [name, target] of wanted) {
     const at = path.join(dir, name);
-    try { fs.lstatSync(at); } catch { try { fs.symlinkSync(target, at); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; } }
+    try { fs.lstatSync(at); } catch { try { linkMirrorEntry(target, at); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; } }
   }
 }
 
@@ -348,7 +356,7 @@ export function withGrokProductUserHome(env: NodeJS.ProcessEnv, selection: Capab
   if (env.HOME && path.resolve(env.HOME) !== path.resolve(realHome) && !inheritedProductHome(env, "HOME")) return env;
   let mirror: ReturnType<typeof syncGrokProductUserHome>;
   try { mirror = syncGrokProductUserHome(realHome, selection); } catch { return env; /* no app folder (a host outside the app) */ }
-  return "home" in mirror ? { ...env, HOME: mirror.home, AGENTLAS_GROK_REAL_HOME: realHome } : env;
+  return "home" in mirror ? { ...withCliUserHome(env, mirror.home), AGENTLAS_GROK_REAL_HOME: realHome } : env;
 }
 
 /** The run environment for an ACP agent: foreign-tool context switched off unless One chose it. */

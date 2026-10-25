@@ -18,6 +18,10 @@ export type CapabilityTier = (typeof CAPABILITY_TIERS)[number];
 
 export type AppKind = "native" | "electron" | "cef" | "qt" | "java" | "web-wrapper" | "unknown";
 
+// The trait of a structure-tier capability that is a plain menu command (File > Print Setup, View > Show Sidebar, Format > Bold): no dialog to read,
+// so there is nothing to try out first. The menu bar says the item exists and the call checks it live; see isDirectMenuCommand (map.ts).
+export const MENU_COMMAND_TRAIT = "menu-command";
+
 export type CapabilityKind = "query" | "command" | "job" | "device-action" | "unclassified";
 
 // Same classes as electron/app-control/policy.ts. "unknown" is the honest default for a third-party app: a dictionary says a

@@ -94,6 +94,79 @@ function tellBudgetOnce(runId: string, chatId: string, window: { count: number; 
   } catch (error) { console.warn("[wake-arbiter] budget notice failed:", error); }
 }
 
+/**
+ * The same move for the same cause (owner 2026-09-24 persistent-autonomy rule: at most twice, then a different move or a wait
+ * with the cause and its next wake time). Windows VM 2026-10-24 (logs/r2-main-nsis.log 13:01-13:12Z): every resume of a Work
+ * Goal failed at the tool-config build (mcp-runtime-config-unavailable, native-browser-config-unbound) and the sweep resumed
+ * it again every 60 s, each a paid start, because nothing here looked at how the previous wakes ended. The turn-follow-up
+ * spacing did not help: the background verifier's own completed attempt reset its count after every failed turn.
+ *
+ * The streak is read from this arbiter's own wake records (goal_wake_started, one per host start, keyed by the invocation)
+ * and each invocation's terminal run event (its machine errorCode). Prose is never read. The streak ends at a completed turn,
+ * a cancelled or host-stopped turn, a different cause, the owner speaking or using a Goal control (windowFloor), or a new
+ * launch of the app (an update or relaunch may have changed what failed: one prompt look is owed, as for retries).
+ * Only the paths that replay the Goal's own continuation ask (sweep, Alive, a released project, startup). A satisfied wait, an
+ * AGI teammate tactic (a different move) and Science keep their own rules.
+ */
+export const SAME_CAUSE_WAKE_REASON = "same_cause_backoff";
+/** Wait before the same move after the 1st and the 2nd consecutive failure with one cause. */
+export const SAME_CAUSE_RETRY_DELAYS_MS: readonly number[] = [5 * 60_000, 30 * 60_000];
+/** After the same move was made twice for one cause: the Goal waits with that cause and looks again at this spacing. */
+export const SAME_CAUSE_WAIT_MS = 6 * 60 * 60_000;
+const SAME_CAUSE_SCAN_LIMIT = 12;
+const PROCESS_STARTED_AT = new Date(Date.now() - Math.round(process.uptime() * 1000)).toISOString();
+const TERMINAL_KINDS = ["invoke_completed", "invoke_failed", "invoke_cancelled", "invoke_interrupted", "invoke_threw"] as const;
+
+export interface SameCauseWakeHold {
+  cause: string;
+  /** Consecutive failed host starts with this cause. */
+  failures: number;
+  lastFailedAt: string;
+  retryAt: string;
+}
+
+/** Consecutive failed host starts of this Goal with one machine cause, newest first; null when the last one did not fail. */
+export function sameCauseFailureStreak(runId: string, chatId: string, now = Date.now()): Omit<SameCauseWakeHold, "retryAt"> | null {
+  const floor = [windowFloor(runId, chatId, now), PROCESS_STARTED_AT].sort().at(-1)!;
+  const wakes = getDb().prepare(`SELECT run_id AS invocationRunId FROM run_events WHERE chat_id = ? AND kind = ? AND ts > ?
+    AND json_extract(payload_json, '$.longRunId') = ? ORDER BY ts DESC, seq DESC LIMIT ?`)
+    .all(chatId, GOAL_WAKE_EVENT_KIND, floor, runId, SAME_CAUSE_SCAN_LIMIT) as Array<{ invocationRunId: string }>;
+  const terminalOf = getDb().prepare(`SELECT kind, ts, payload_json FROM run_events WHERE run_id = ? AND kind IN (${TERMINAL_KINDS.map(() => "?").join(",")})
+    ORDER BY seq DESC LIMIT 1`);
+  let cause: string | null = null, failures = 0, lastFailedAt: string | null = null;
+  for (const wake of wakes) {
+    const terminal = terminalOf.get(wake.invocationRunId, ...TERMINAL_KINDS) as { kind: string; ts: string; payload_json: string } | undefined;
+    if (!terminal || (terminal.kind !== "invoke_failed" && terminal.kind !== "invoke_threw")) break;
+    let payload: { errorCode?: unknown; hostStopCause?: unknown } = {};
+    try { payload = JSON.parse(terminal.payload_json); } catch { /* an unreadable receipt is still a failure */ }
+    if (payload.hostStopCause) break; // the app or the owner stopped it: not the move failing
+    const code = typeof payload.errorCode === "string" && /^[A-Za-z0-9_.:-]{1,120}$/.test(payload.errorCode) ? payload.errorCode : "invoke_failed_uncoded";
+    if (cause !== null && code !== cause) break;
+    cause = code; failures += 1; lastFailedAt ??= terminal.ts;
+  }
+  return cause && lastFailedAt ? { cause, failures, lastFailedAt } : null;
+}
+
+/** When the same move may next be made for this Goal; null = now. */
+export function sameCauseWakeHold(runId: string, chatId: string, now = Date.now()): SameCauseWakeHold | null {
+  const streak = sameCauseFailureStreak(runId, chatId, now);
+  if (!streak) return null;
+  const delay = SAME_CAUSE_RETRY_DELAYS_MS[streak.failures - 1] ?? SAME_CAUSE_WAIT_MS;
+  const retryAt = Date.parse(streak.lastFailedAt) + delay;
+  return Number.isFinite(retryAt) && retryAt > now ? { ...streak, retryAt: new Date(retryAt).toISOString() } : null;
+}
+
+export type GoalContinuationWakeVerdict = GoalWakeVerdict
+  | { start: false; reason: typeof SAME_CAUSE_WAKE_REASON; retryAt: string; cause: string; failures: number };
+
+/** decideGoalWake for the paths that replay the Goal's own continuation, plus the same-cause rule above. */
+export function decideGoalContinuationWake(input: Parameters<typeof decideGoalWake>[0]): GoalContinuationWakeVerdict {
+  const verdict = decideGoalWake(input);
+  if (!verdict.start) return verdict;
+  const hold = sameCauseWakeHold(input.runId, input.chatId, input.now ?? Date.now());
+  return hold ? { start: false, reason: SAME_CAUSE_WAKE_REASON, retryAt: hold.retryAt, cause: hold.cause, failures: hold.failures } : verdict;
+}
+
 export function decideGoalWake(input: {
   runId: string; chatId: string; source: GoalWakeSource; gate?: GoalWakeGate;
   /** Effect observations are background looks that may run beside a live turn; they skip only the idle check. */

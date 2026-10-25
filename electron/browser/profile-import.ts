@@ -14,6 +14,7 @@ import {
   type BrowserProfilePasswordItem,
 } from "../../shared/browser-profile-import";
 import { developmentEffectsSuppressed } from "../development-effect-policy";
+import { windowsDpapiUnprotect } from "./chromium-cookie-identity";
 import {
   makeBrowserProfileImportWorkDir,
   removeBrowserProfileImportWorkDir,
@@ -302,15 +303,30 @@ async function readMacSafeStorageKey(browser: string): Promise<Buffer | null> {
   finally { password?.fill(0); }
 }
 
-function windowsDpapiUnprotect(ciphertext: Buffer): Buffer | null {
-  const script = [
-    "$inputText=[Console]::In.ReadToEnd()",
-    "$cipher=[Convert]::FromBase64String($inputText)",
-    "$plain=[Security.Cryptography.ProtectedData]::Unprotect($cipher,$null,[Security.Cryptography.DataProtectionScope]::CurrentUser)",
-    "[Console]::Out.Write([Convert]::ToBase64String($plain))",
-    "[Array]::Clear($plain,0,$plain.Length);[Array]::Clear($cipher,0,$cipher.Length)",
-  ].join(";");
-  const result = spawnSync("powershell.exe", ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script], {
+/**
+ * Synchronous DPAPI unwrap, kept only for a legacy pre-v10 password row (Chrome before 80 stored each password as its own
+ * DPAPI blob; the boundary's decrypt() is synchronous). The profile key itself goes through the asynchronous
+ * windowsDpapiUnprotect (chromium-cookie-identity.ts) so Main is not frozen while PowerShell starts.
+ * Windows PowerShell 5.1 does not load System.Security by default: without `Add-Type` the ProtectedData type is
+ * "Unable to find type" and every password read as undecryptable (2026-10-24 audit F9). Full path: a bare
+ * powershell.exe is looked up in the working directory first.
+ */
+export const WINDOWS_DPAPI_UNPROTECT_SCRIPT = [
+  "$ErrorActionPreference='Stop'",
+  "Add-Type -AssemblyName System.Security",
+  "$inputText=[Console]::In.ReadToEnd()",
+  "$cipher=[Convert]::FromBase64String($inputText.Trim())",
+  "$plain=[System.Security.Cryptography.ProtectedData]::Unprotect($cipher,$null,[System.Security.Cryptography.DataProtectionScope]::CurrentUser)",
+  "[Console]::Out.Write([Convert]::ToBase64String($plain))",
+  "[Array]::Clear($plain,0,$plain.Length);[Array]::Clear($cipher,0,$cipher.Length)",
+].join(";");
+
+function windowsPowerShellPath(): string {
+  return path.win32.join(process.env.SystemRoot || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+}
+
+function windowsDpapiUnprotectSync(ciphertext: Buffer): Buffer | null {
+  const result = spawnSync(windowsPowerShellPath(), ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", WINDOWS_DPAPI_UNPROTECT_SCRIPT], {
     input: ciphertext.toString("base64"), encoding: "utf8", windowsHide: true, timeout: 10_000, maxBuffer: 16 * 1024,
   });
   if (result.status !== 0 || !result.stdout?.trim()) return null;
@@ -366,7 +382,7 @@ export async function createNativeBrowserProfilePasswordDecryptBoundary(
       const wrapped = Buffer.from(state.os_crypt?.encrypted_key ?? "", "base64");
       if (wrapped.subarray(0, 4).toString("ascii") === "APPB") keyReason = "app-bound-encryption";
       else if (wrapped.subarray(0, 5).toString("ascii") === "DPAPI") {
-        key = windowsDpapiUnprotect(wrapped.subarray(5));
+        key = await windowsDpapiUnprotect(wrapped.subarray(5));
         if (!key) keyReason = "decrypt-unavailable";
       } else keyReason = "decrypt-unavailable";
       wrapped.fill(0);
@@ -376,7 +392,7 @@ export async function createNativeBrowserProfilePasswordDecryptBoundary(
         const prefix = encryptedValue.subarray(0, 3).toString("ascii");
         if (prefix === "v20") return { ok: false, reason: "app-bound-encryption" };
         if (prefix !== "v10" && prefix !== "v11") {
-          const plaintext = windowsDpapiUnprotect(encryptedValue);
+          const plaintext = windowsDpapiUnprotectSync(encryptedValue);
           return plaintext ? { ok: true, plaintext } : { ok: false, reason: "decrypt-unavailable" };
         }
         if (!key) return { ok: false, reason: keyReason ?? "decrypt-unavailable" };

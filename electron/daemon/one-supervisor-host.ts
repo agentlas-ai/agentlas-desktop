@@ -30,9 +30,26 @@ export function createDaemonOneSupervisorHost(options: { bootId: string; assertO
   let closeHost:(()=>void)|undefined;
   const compatibility = Object.freeze({ protocol: ONE_SUPERVISOR_RUNTIME_PROTOCOL, supervisorSchema: ONE_SUPERVISOR_SCHEMA,
     journalSchema: ONE_SUPERVISOR_JOURNAL_SCHEMA, extensionsSchema:ONE_SUPERVISOR_EXTENSIONS_SCHEMA, storeSchema:STORE_SCHEMA_VERSION, nativeAbi: process.versions.modules });
+  // A domain adopted while signed out (native enrollment alone proves the local
+  // owner) binds actor "null". The owner signing in afterwards is the first-run
+  // path (AuthGate -> sign-in -> first message), and the GUI has already handed
+  // the domain over, so failing here left every One command refused until the
+  // app restarted (Windows VM 2026-10-24: invoke:run refused). Only null -> a
+  // signed-in actor of the same One is bound; sign-out and account switches stay
+  // fenced. In-flight runs keep their own actor check (supervisor_native_actor_changed).
+  const signedInAfterSignedOut = (bound: string, actor: string) => bound === "null" && actor !== "null";
+  function bindSignedInActor(actor: string) {
+    if (!identity || !signedInAfterSignedOut(identity.actor, actor) || getOneProfile().oneId !== identity.oneId) return;
+    // One guarded statement: rebinds only our own signed-out grant.
+    const changed = getDb().prepare("UPDATE one_supervisor_domain_authority SET actor_json=? WHERE slot='personal' AND one_id=? AND owner_epoch=? AND actor_json='null'")
+      .run(actor, identity.oneId, options.bootId).changes;
+    if (changed !== 1) fail("supervisor_daemon_identity_authority_changed");
+    identity = { oneId: identity.oneId, actor };
+  }
   function authority() {
-    options.assertOwner(); const actor = getAuthenticatedActorIds();
-    if (!identity || JSON.stringify(actor)!==identity.actor || getOneProfile().oneId !== identity.oneId) fail("supervisor_daemon_identity_authority_changed");
+    options.assertOwner(); const actor = JSON.stringify(getAuthenticatedActorIds());
+    bindSignedInActor(actor);
+    if (!identity || actor!==identity.actor || getOneProfile().oneId !== identity.oneId) fail("supervisor_daemon_identity_authority_changed");
   }
   function owner() {
     const db = getDb();
@@ -90,8 +107,9 @@ export function createDaemonOneSupervisorHost(options: { bootId: string; assertO
     const prior=owner() as OwnerProjection|null;
     if(!grant || !prior || prior.ownerKind!=="work-daemon" || prior.oneId!==grant.one_id || prior.ownerEpoch!==grant.owner_epoch || prior.generation!==grant.generation)return false;
     if(grant.compatibility_json!==JSON.stringify(compatibility))fail("supervisor_daemon_version_mismatch");
-    if(grant.one_id!==getOneProfile().oneId || grant.actor_json!==JSON.stringify(getAuthenticatedActorIds()))fail("supervisor_daemon_identity_authority_changed");
-    await initialize(grant.one_id,grant.actor_json,prior);return true;
+    const actor=JSON.stringify(getAuthenticatedActorIds());
+    if(grant.one_id!==getOneProfile().oneId || (grant.actor_json!==actor && !signedInAfterSignedOut(grant.actor_json,actor)))fail("supervisor_daemon_identity_authority_changed");
+    await initialize(grant.one_id,actor,prior);return true;
   }
   async function dispatch(raw: unknown): Promise<unknown> {
     options.assertOwner();

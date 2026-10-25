@@ -203,7 +203,8 @@ import {
   isOneDecisionProductSafeRejectReply,
   isPendingConfirmationSnoozed,
   normalizeOneDecision,
-  oneDecisionMultiSelectableIndexes,
+  oneDecisionOwnerSelectableIndexes,
+  oneDecisionQuestionCardIndexes,
   type OneDecisionField,
   type OneDecisionViewV1,
 } from "@shared/one-decision";
@@ -11879,11 +11880,19 @@ function DecisionCard({ confirmation, taskId, locale, disabled, block = "none", 
   const { readers: judgedReaders, modelUnavailable } = useJudgedOneDecision(confirmation);
   const decision: OneDecisionViewV1 = normalizeOneDecision(confirmation, taskId, judgedReaders);
   const riskRank = Number(decision.risk.level.slice(1));
-  // V1 intentionally disables multi-select rows for single-reply clients.
-  // Desktop uses the same judged selectable indexes as Mobile's V2 contract.
-  const multiSelectableIndexes = new Set(oneDecisionMultiSelectableIndexes(decision));
+  /*
+   * ★여러 개 고르는 질문은 펜스의 구조(multiSelect)만으로 질문 카드다 (오너 2026-10-24).
+   *   예전(f9a1b7038, 2026-09-29)에는 V2 의 판정 집합(oneDecisionMultiSelectableIndexes: blockedReason 없음)만
+   *   보기로 썼다. 판정이 아직 안 왔거나 모델이 없으면 normalizeOneDecision 이 R4 로 닫혀 모든 보기가 잠기고,
+   *   집합이 비어 아래 승인 카드로 떨어졌다 — 다중 선택이면 승인 답(approvalReply)도 null 이라 승인 단추는 죽어
+   *   있었다. 보기는 V4 오너 답(폰)과 같은 규칙으로 고른다: 성격이 거절·수정인 줄만 빼고 위험·잠금은 읽지 않는다.
+   *   고른 보기는 그 이름 그대로 오너의 답으로 갈 뿐 권한을 주지 않는다(commitAnswer reply).
+   *   질문 카드냐 승인 카드냐는 shared/one-decision.ts oneDecisionQuestionCardIndexes 한 곳이 정한다
+   *   (계약 scripts/test-one-multi-select-question-card.cjs).
+   */
+  const ownerSelectableIndexes = new Set(oneDecisionOwnerSelectableIndexes(decision));
   const directOptions = decision.options.filter((option) =>
-    (confirmation.multiSelect ? multiSelectableIndexes.has(option.index) : option.enabled)
+    (confirmation.multiSelect ? ownerSelectableIndexes.has(option.index) : option.enabled)
     && option.disposition !== "reject" && option.disposition !== "modify");
   /*
    * 경고를 띄울 상황인가 — 승인을 막을 상황인가가 아니다.
@@ -11982,13 +11991,14 @@ function DecisionCard({ confirmation, taskId, locale, disabled, block = "none", 
      *   옛 질문의 답을 확정해 "이전 요청 접수 불명"을 만들었다.
      *   판단은 shared/ask-action-bar.ts 한 곳이 하고(계약 test:one-question-action-bar), 여기는 그린다.
      */
-    // Even one positive multi-select choice needs a checkbox and Submit when
-    // the other option is rejection. Never turn a locked V1 row into authority.
-    const questionOptions = confirmation.multiSelect
-      ? directOptions
-      : lightweightChoice && directOptions.length > 1
-        ? directOptions
-        : selectableOptions.length > 1 ? selectableOptions : [];
+    // A multi-select question is always a question card (fence structure, not a verdict): even one positive
+    // choice gets a checkbox and Submit when the other option is rejection, and a question whose every row
+    // was typed reject/modify still shows its rows instead of an approve card that can never approve.
+    const questionIndexes = new Set(oneDecisionQuestionCardIndexes(decision, {
+      multiSelect: Boolean(confirmation.multiSelect),
+      lightweightChoice,
+    }));
+    const questionOptions = decision.options.filter((option) => questionIndexes.has(option.index));
     if (questionOptions.length > 0) {
       const copy = ASK_ACTION_COPY[locale];
       const multi = Boolean(confirmation.multiSelect);
@@ -12117,6 +12127,7 @@ function DecisionCard({ confirmation, taskId, locale, disabled, block = "none", 
               onAction: runAction,
             }}
             data-testid="one-decision-ask-card"
+            statusLabel={copy.needsInput}
           />
         </div>
       );

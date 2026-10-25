@@ -47,6 +47,7 @@ import {
   outsideProviderPolicy,
   type AgentlasProviderState,
 } from "../../shared/capability-priority";
+import { cliUserHome } from "./product-home-identity";
 
 export interface ClaudeBrowserSurfaceInput {
   desktopControlGrant?: boolean;
@@ -158,7 +159,7 @@ const ENGINE_CACHE_MS = 5_000;
  */
 export function claudeEngineBrowserEnabled(input: { env?: NodeJS.ProcessEnv; cwd?: string } = {}): boolean {
   const env = input.env ?? process.env;
-  const home = env.HOME || os.homedir();
+  const home = cliUserHome(env);
   const configDir = env.CLAUDE_CONFIG_DIR || path.join(home, ".claude");
   const cwd = input.cwd ? path.resolve(input.cwd) : null;
   const key = `${configDir}\u0000${cwd ?? ""}`;

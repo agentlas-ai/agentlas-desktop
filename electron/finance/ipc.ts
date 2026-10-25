@@ -162,6 +162,12 @@ export function registerFinanceIpc(input: { ipc: Pick<IpcMain, 'handle'>; assert
     const bytes = Buffer.from(arg.content, 'utf8'); if (bytes.length > 24 * 1024 * 1024) throw new Error('finance_export_too_large');
     const temporary = path.join(path.dirname(chosen.filePath), `.finance-export-${randomUUID()}.tmp`);
     try { fs.writeFileSync(temporary, bytes, { flag: 'wx', mode: 0o600 }); scope.assertCurrent(); fs.renameSync(temporary, chosen.filePath); }
+    catch (error) {
+      // Windows: Excel keeps an open file locked (EBUSY/EPERM). Say so instead of a raw errno (Windows audit fs.md #22).
+      const code = (error as NodeJS.ErrnoException).code ?? '';
+      if (['EBUSY', 'EPERM', 'EACCES'].includes(code)) throw new Error('finance_export_file_locked: the file is open in another program. Close it and export again.');
+      throw error;
+    }
     finally { if (fs.existsSync(temporary)) fs.unlinkSync(temporary); }
     const sha256 = createHash('sha256').update(fs.readFileSync(chosen.filePath)).digest('hex');
     if (sha256 !== createHash('sha256').update(bytes).digest('hex')) throw new Error('finance_export_readback_mismatch');

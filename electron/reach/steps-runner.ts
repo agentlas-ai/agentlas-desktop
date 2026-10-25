@@ -3,7 +3,8 @@ import { cleanLabel, readDialogTree, readElements, observe, newPanel, sameIds, s
 import { invokeMenuPath, resolveMenuPath } from "./menu-probe";
 import { bringAppForward, withForeground } from "./foreground";
 import type { MenuTarget } from "./menu-probe";
-import type { Capability } from "./types";
+import { opensAPanelByPurpose } from "./explore-policy";
+import { MENU_COMMAND_TRAIT, type Capability } from "./types";
 
 // Carries out an explored capability: the `steps` body, with the caller's parameters in place of the ${placeholders}. It brings the app
 // forward (menus of an app that is behind another window are disabled), runs the steps one at a time, checks the postcondition, and if
@@ -34,6 +35,11 @@ export interface RunResult {
 }
 
 const TOOLS = new Set(["invoke_menu", "set_value", "click", "hotkey", "press_key"]);
+// A button that ANSWERS a question (OK, Continue, Agree, Yes, Allow ...) in the languages Agentlas ships in. A window that has one and no toolbar is a question put to the
+// owner, whatever its size and whatever text it scrolls (independent review 4, S4: a license text with Agree / Disagree, a large confirmation with only Continue).
+const ANSWER_BUTTON = /^(?:ok|okay|continue|agree|disagree|accept|decline|yes|no|allow|don.t allow|deny|got it|확인|계속|동의|동의 안 함|동의하지 않음|예|아니요|아니오|허용|허용 안 함|はい|いいえ|続ける|同意する|同意しない|許可|許可しない|好|好的|确定|確定|继续|繼續|同意|不同意|是|否|ja|nein|fortfahren|zustimmen|ablehnen|erlauben|oui|non|continuer|accepter|refuser|autoriser|sí|si|continuar|aceptar|rechazar|permitir|sì|continua|accetta|rifiuta|consenti|sim|não|nao|aceitar|recusar)$/i;
+// what a document window holds and a message box does not
+const DOCUMENT_ROLES: ReadonlySet<string> = new Set(["AXTextArea", "AXScrollArea", "AXWebArea", "AXOutline", "AXTable", "AXBrowser", "AXSplitGroup", "AXTabGroup", "AXToolbar", "AXList"]);
 
 function placeholderName(value: unknown): string | null {
   const match = typeof value === "string" ? /^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$/.exec(value) : null;
@@ -145,7 +151,11 @@ export async function runSteps(ports: RunPorts, capability: Capability, params: 
       if (when !== undefined && params[when] === undefined) continue;
       if (step.tool === "invoke_menu") {
         // the driver presses every item along a path, and an item without a submenu is executed: only a path the live menu confirms goes out
-        const live = await resolveMenuPath(ports.actuator, ports.target, Array.isArray(step.args.path) ? (step.args.path as string[]) : [], ports.signal, ports.sleep);
+        const menuPath = Array.isArray(step.args.path) ? (step.args.path as string[]) : [];
+        let live = await resolveMenuPath(ports.actuator, ports.target, menuPath, ports.signal, ports.sleep);
+        // A toggle item (Show Tab Bar / Hide Tab Bar) is retitled when the app validates its menu, a moment after it was brought forward or changed:
+        // measured on TextEdit, the command that undoes a toggle was called "gone" on the first look and found a second later. One more look before it is.
+        if (live.status === "missing" && !ports.signal?.aborted) { await sleep(1200); live = await resolveMenuPath(ports.actuator, ports.target, menuPath, ports.signal, ports.sleep); }
         if (live.status !== "ok") return fail("step_refused", live.status === "unreadable" ? (live.code ?? "menu_unreadable") : "menu_path_unavailable", run, live.status !== "unreadable");
         if (!live.enabled) return fail("step_refused", "menu_item_disabled", run, false);
         const outcome = await invokeMenuPath(ports.actuator, ports.target, step.args.path as string[], ports.signal, ports.sleep);
@@ -192,6 +202,46 @@ export async function runSteps(ports: RunPorts, capability: Capability, params: 
       await sleep(ports.settleMs ?? 400);
     }
     await sleep(ports.settleMs ?? 700);
+    // A plain menu command is pressed without ever having been opened: if it turned out to open a dialog (File > Save on an untitled document asks where
+    // to save; a conversion asks to confirm; an app-modal alert or a Windows Yes/No box comes up as a window of its own) it is closed again and the call is
+    // refused, so no prompt is left that nobody can answer. A new document window is not a dialog and stays (File > New). A new window counts as a dialog
+    // when it has a Cancel button, or has buttons and none of what a document window holds (text, scroll areas, outlines, tables, a toolbar).
+    // (Independent review D5 and review 2 N2, 2026-10-24.)
+    if (capability.traits?.includes(MENU_COMMAND_TRAIT)) {
+      const firstStep = capability.body?.kind === "steps" ? capability.body.steps[0] : undefined;
+      const purposeIsPanel = opensAPanelByPurpose(Array.isArray(firstStep?.args.path) ? (firstStep?.args.path as string[]) : []);
+      const openedDialog = async (): Promise<MenuTarget | "unreadable" | null> => {
+        const state = await observe({ actuator: ports.actuator, target: ports.target, signal: ports.signal });
+        if (state.sheet) return ports.target;
+        const found = newPanel(before, state, ports.target.pid, ports.actuator.platform, knownOwner);
+        if (!found || found === "ambiguous") return null;
+        const where = { pid: found.pid, windowId: found.id };
+        const tree = await readDialogTree(ports.actuator, where, ports.target, ports.signal);
+        const elements = tree?.elements ?? [];
+        // a window that cannot be read cannot be told from an alert: it is not called a document and not closed - the call says there is a window it could not judge
+        if (elements.length === 0) return "unreadable";
+        if (elements.some((element) => element.role === "AXButton" && isCancelButton(cleanLabel(element.label) ?? ""))) return where;
+        if (purposeIsPanel) return null; // About and Show <panel>: the panel is what was asked for
+        if (elements.some((element) => element.role === "AXButton" && ANSWER_BUTTON.test(cleanLabel(element.label) ?? "")) && !elements.some((element) => element.role === "AXToolbar")) return where;
+        if (!elements.some((element) => element.role === "AXButton") || elements.some((element) => DOCUMENT_ROLES.has(element.role ?? ""))) return null;
+        // buttons and a message and nothing a document holds: a dialog if it is dialog-sized, a canvas app's document window if it is large
+        const bounds = (await ports.actuator.listWindows({ pid: found.pid }, { signal: ports.signal }).catch(() => [])).find((window) => window.windowId === found.id)?.bounds;
+        return bounds && (bounds.width > 700 || bounds.height > 450) ? null : where;
+      };
+      let dialog = await openedDialog();
+      if (dialog === "unreadable") return { ...fail("postcondition_unsatisfied", "new_window_unreadable", run), postcondition: "unsatisfied" };
+      if (dialog) {
+        await cleanup();
+        dialog = await openedDialog();
+        if (dialog && dialog !== "unreadable") {
+          // no Cancel button to press: the key that dismisses an alert, a sheet or a message box
+          await ports.actuator.call("press_key", { pid: dialog.pid, window_id: dialog.windowId, key: "escape", delivery_mode: "foreground" }, { signal: ports.signal }).catch(() => undefined);
+          await sleep(500);
+          dialog = await openedDialog();
+        }
+        return { ...fail("postcondition_unsatisfied", dialog && dialog !== "unreadable" ? "opened_a_dialog_left_open" : "opened_a_dialog", run), postcondition: "unsatisfied" };
+      }
+    }
     let postcondition: "satisfied" | "unsatisfied" | "unknown" = "unknown";
     if (capability.postconditions?.some((item) => item.kind === "dialog-closed")) postcondition = (await windowOfDialog()).same ? "satisfied" : "unsatisfied";
     if (postcondition === "unsatisfied") { await cleanup(); return { ...fail("postcondition_unsatisfied", "the dialog is still open after the last step", run), postcondition }; }

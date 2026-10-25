@@ -13,6 +13,9 @@
 ;   - always: removes the protocol key when it still opens this installation, and the caches only
 ;     Agentlas Desktop uses and can download again (updater cache, Desktop-installed CLIs, Desktop's
 ;     Node/uv/MCP copies);
+;   - always: removes Agentlas's own login autostart (the HKCU Run value cloud.agentlas.daemon.* that
+;     starts this installation, and the Startup-folder .cmd that releases before 2026-10-24 wrote).
+;     Left behind, Windows showed "cannot find ...\Agentlas.exe" at every sign-in (Windows audit fs.md #9);
 ;   - only when the person ticks it on the uninstaller's components page (both unticked by default):
 ;     Desktop data (%APPDATA%\Agentlas) and the whole shared ~\.agentlas folder. ~\.agentlas also
 ;     holds what Agentlas Terminal and the plugins use (projects, agents, memory, the engine runtime
@@ -61,6 +64,9 @@
   ${ifNot} ${isUpdated}
     Push $0
     Push $1
+    Push $2
+    Push $3
+    Push $4
     ${if} $installMode == "all"
       SetShellVarContext current
     ${endif}
@@ -76,6 +82,37 @@
       ${endif}
     ${endif}
     ClearErrors
+
+    ; Login autostart (daemon/autostart.ts windows-run-key): only values named cloud.agentlas.daemon.* whose
+    ; command starts this installation's exe with --agentlas-daemon-autostart. Deleting shifts the index, so
+    ; the loop re-reads the same index after a delete.
+    StrCpy $2 0
+    agentlasRunLoop:
+      ClearErrors
+      EnumRegValue $0 HKCU "Software\Microsoft\Windows\CurrentVersion\Run" $2
+      IfErrors agentlasRunDone
+      StrCmp $0 "" agentlasRunDone
+      StrCpy $1 $0 22
+      ${if} $1 == "cloud.agentlas.daemon."
+        ReadRegStr $1 HKCU "Software\Microsoft\Windows\CurrentVersion\Run" $0
+        StrCpy $3 '"$INSTDIR\${APP_EXECUTABLE_FILENAME}" --agentlas-daemon-autostart'
+        StrLen $4 $3
+        StrCpy $1 $1 $4
+        ${if} $1 == $3
+          DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" $0
+          DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run" $0
+          Goto agentlasRunLoop
+        ${endif}
+      ${endif}
+      IntOp $2 $2 + 1
+      Goto agentlasRunLoop
+    agentlasRunDone:
+    ClearErrors
+    ; The retired Startup .cmd (names are ours alone: cloud.agentlas.daemon.<digest>.cmd).
+    ${if} $APPDATA != ""
+      Delete "$APPDATA\Microsoft\Windows\Start Menu\Programs\Startup\cloud.agentlas.daemon.*.cmd"
+      Delete "$APPDATA\Microsoft\Windows\Start Menu\Programs\Startup\cloud.agentlas.daemon.*.cmd.suspended"
+    ${endif}
 
     ; Caches only Agentlas Desktop uses; each is downloaded again when needed.
     ${if} $LOCALAPPDATA != ""
@@ -100,6 +137,9 @@
     ${if} $installMode == "all"
       SetShellVarContext all
     ${endif}
+    Pop $4
+    Pop $3
+    Pop $2
     Pop $1
     Pop $0
   ${endif}
@@ -114,6 +154,13 @@
       ${endif}
       ${if} $APPDATA != ""
         RMDir /r "$APPDATA\${APP_FILENAME}"
+        ; RMDir /r leaves paths over 260 characters and read-only files (Windows audit fs.md #20, #23);
+        ; rd /s on the \\?\ path removes both (an already-removed folder only fails quietly).
+        ; nsExec leaves its exit code on the stack: popped into $0, then $0 is restored.
+        Push $0
+        nsExec::Exec 'cmd.exe /d /c rd /s /q "\\?\$APPDATA\${APP_FILENAME}"'
+        Pop $0
+        Pop $0
       ${endif}
       ${if} $installMode == "all"
         SetShellVarContext all
@@ -125,6 +172,10 @@
     ${ifNot} ${isUpdated}
       ${if} $PROFILE != ""
         RMDir /r "$PROFILE\.agentlas"
+        Push $0
+        nsExec::Exec 'cmd.exe /d /c rd /s /q "\\?\$PROFILE\.agentlas"'
+        Pop $0
+        Pop $0
       ${endif}
     ${endif}
   SectionEnd

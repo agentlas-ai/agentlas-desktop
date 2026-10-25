@@ -18,6 +18,8 @@ import {
   requireConfiguredInstallIdentity,
 } from "../install-identity";
 import {
+  KeychainUnavailableError,
+  WINDOWS_CREDENTIAL_BLOB_MAX_BYTES,
   keychainDelete,
   keychainGet,
   keychainListAccounts,
@@ -194,6 +196,95 @@ function queuePasswordOperation<T>(key: string, run: () => Promise<T>): Promise<
 }
 
 /*
+ * Windows Credential Manager holds at most WINDOWS_CREDENTIAL_BLOB_MAX_BYTES per credential (keychain-host.ts). A larger
+ * value (the autofill vault, up to 256 KB; an MCP OAuth token set with JWT access/id tokens; a service-account JSON in
+ * an env key) is stored there as chunks (Windows audit 2026-10-24, fs.md #2, runtimes.md W-04):
+ *   `<account>#agentlas-chunk-<digest12>-<i>`  the value's UTF-8 split at character boundaries, <= CHUNK_MAX_BYTES each;
+ *   `<account>`                                 the manifest `agentlas-chunked:v1:<count>:<sha256>`, written last.
+ * A read that finds a manifest reassembles the chunks and checks the digest (a mismatch is unavailable, never a wrong
+ * value). Chunk names carry the value's digest, so a reader holding the previous manifest still finds the previous
+ * chunks until the new manifest is written; the previous chunks are removed after it. A value within the limit is
+ * written plainly, exactly as before, and every value stored before this change reads unchanged. macOS and Linux never
+ * chunk. Listings never show chunk accounts.
+ */
+const CHUNK_MARK = "#agentlas-chunk-";
+const CHUNK_MAX_BYTES = 2048;
+const CHUNK_MANIFEST = /^agentlas-chunked:v1:([1-9]\d{0,5}):([a-f0-9]{64})$/;
+function chunksOnThisOs(): boolean { return process.platform === "win32"; }
+function isChunkAccount(account: string): boolean { return account.includes(CHUNK_MARK); }
+function chunkAccount(account: string, digest: string, index: number): string { return `${account}${CHUNK_MARK}${digest.slice(0, 12)}-${index}`; }
+function valueDigest(value: string): string { return createHash("sha256").update(value, "utf8").digest("hex"); }
+function parseChunkManifest(value: string | null): { count: number; digest: string } | null {
+  const match = typeof value === "string" ? CHUNK_MANIFEST.exec(value) : null;
+  return match ? { count: Number(match[1]), digest: match[2]! } : null;
+}
+/** UTF-8 pieces of at most `max` bytes, never splitting a character. */
+function splitUtf8(value: string, max: number): string[] {
+  const parts: string[] = [];
+  let current = "", bytes = 0;
+  for (const ch of value) {
+    const size = Buffer.byteLength(ch, "utf8");
+    if (bytes + size > max && current) { parts.push(current); current = ""; bytes = 0; }
+    current += ch; bytes += size;
+  }
+  if (current) parts.push(current);
+  return parts;
+}
+function nativeGet(service: string, account: string): Promise<string | null> {
+  return keychainGet(service, account, () => keytarApi().getPassword(service, account));
+}
+function nativeSet(service: string, account: string, value: string): Promise<void> {
+  return keychainSet(service, account, value, () => keytarApi().setPassword(service, account, value));
+}
+function nativeDelete(service: string, account: string): Promise<void> {
+  return keychainDelete(service, account, async () => { await keytarApi().deletePassword(service, account); });
+}
+/** The stored value behind `raw` (the head read): itself, or the chunks a manifest names, reassembled and verified. */
+async function resolveChunked(service: string, account: string, raw: string | null): Promise<string | null> {
+  const manifest = parseChunkManifest(raw);
+  if (!manifest) return raw;
+  const parts: string[] = [];
+  for (let index = 0; index < manifest.count; index += 1) {
+    const part = await nativeGet(service, chunkAccount(account, manifest.digest, index));
+    if (typeof part !== "string") throw new KeychainUnavailableError("read", account, "chunked credential incomplete", true);
+    parts.push(part);
+  }
+  const value = parts.join("");
+  if (valueDigest(value) !== manifest.digest) throw new KeychainUnavailableError("read", account, "chunked credential digest mismatch", true);
+  return value;
+}
+/** The chunk manifest currently stored at `account` (Windows only; no native read elsewhere). Unreadable: null. */
+async function storedChunkManifest(service: string, account: string): Promise<{ count: number; digest: string } | null> {
+  if (!chunksOnThisOs()) return null;
+  try { return parseChunkManifest(await nativeGet(service, account)); } catch { return null; }
+}
+async function deleteChunks(service: string, account: string, manifest: { count: number; digest: string } | null, keepDigest?: string): Promise<void> {
+  if (!manifest || manifest.digest === keepDigest) return;
+  for (let index = 0; index < manifest.count; index += 1) {
+    // Leftover chunks are unreachable without their manifest; a failed removal never fails the caller's write or delete.
+    await nativeDelete(service, chunkAccount(account, manifest.digest, index)).catch(() => undefined);
+  }
+}
+async function writeValue(service: string, account: string, value: string): Promise<void> {
+  const previous = await storedChunkManifest(service, account);
+  if (chunksOnThisOs() && Buffer.byteLength(value, "utf8") > WINDOWS_CREDENTIAL_BLOB_MAX_BYTES) {
+    const digest = valueDigest(value);
+    const parts = splitUtf8(value, CHUNK_MAX_BYTES);
+    for (let index = 0; index < parts.length; index += 1) await nativeSet(service, chunkAccount(account, digest, index), parts[index]!);
+    await nativeSet(service, account, `agentlas-chunked:v1:${parts.length}:${digest}`);
+    await deleteChunks(service, account, previous, digest);
+    return;
+  }
+  await nativeSet(service, account, value);
+  await deleteChunks(service, account, previous);
+}
+async function deleteValue(service: string, account: string): Promise<void> {
+  const previous = await storedChunkManifest(service, account);
+  await nativeDelete(service, account);
+  await deleteChunks(service, account, previous);
+}
+
+/*
  * ★키체인 호출은 전부 keychain-host 를 지난다(그 파일에 사유가 적혀 있다).
  *   화면이 있는 호스트에서는 예전 그대로 직접 부르고, 화면이 없는 호스트
  *   (플러그인 CLI·hep-graph·cron)에서는 죽일 수 있는 자식 프로세스로 옮긴다.
@@ -209,7 +300,7 @@ async function getPassword(account: string): Promise<string | null> {
   if (!passwordOperations.has(key) && keychainCache.has(key) && cachedCredentialIsFresh(key)) return keychainCache.get(key) ?? null;
   const started = queuePasswordOperation(key, async () => {
     if (keychainCache.has(key) && cachedCredentialIsFresh(key)) return keychainCache.get(key) ?? null;
-    const value = await keychainGet(service, account, () => keytarApi().getPassword(service, account));
+    const value = await resolveChunked(service, account, await nativeGet(service, account));
     keychainCache.set(key, value);
     noteCredentialCached(key);
     credentialStateRevision += 1;
@@ -234,7 +325,7 @@ async function setPassword(account: string, value: string): Promise<void> {
     const key = passwordKey(service, account);
     passwordReads.delete(key);
     await queuePasswordOperation(key, async () => {
-      await keychainSet(service, account, value, () => keytarApi().setPassword(service, account, value));
+      await writeValue(service, account, value);
       keychainCache.set(key, value);
       noteCredentialCached(key);
       if (knownAccounts?.service === service) knownAccounts.accounts.add(account);
@@ -253,7 +344,7 @@ async function deletePassword(account: string): Promise<void> {
     const key = passwordKey(service, account);
     passwordReads.delete(key);
     await queuePasswordOperation(key, async () => {
-      await keychainDelete(service, account, async () => { await keytarApi().deletePassword(service, account); });
+      await deleteValue(service, account);
       keychainCache.set(key, null);
       noteCredentialCached(key);
       if (knownAccounts?.service === service) knownAccounts.accounts.delete(account);
@@ -283,7 +374,7 @@ function retryAccountFromUser(service: string, account: string): Promise<string 
   if (current) return current;
   passwordReads.delete(key);
   const started = queuePasswordOperation(key, async () => {
-    const value = await retryKeychainReadFromUser(service, account, () => keytarApi().getPassword(service, account));
+    const value = await resolveChunked(service, account, await retryKeychainReadFromUser(service, account, () => keytarApi().getPassword(service, account)));
     keychainCache.set(key, value);
     noteCredentialCached(key);
     credentialStateRevision += 1;
@@ -304,7 +395,8 @@ function recoveryDisplay(resource: CredentialRecoveryResource): Pick<CredentialR
   if (resource.operation === "list") return { kind: "env", operation: "list", name: null };
   for (const [prefix, kind] of [[BYOK_META_PREFIX, "api-metadata"], [BYOK_PREFIX, "api"], [ENV_PREFIX, "env"], [SECRET_PREFIX, "secret"]] as const) {
     if (resource.account.startsWith(prefix)) {
-      return { kind, operation: "read", name: resource.account.slice(prefix.length).replace(/[\u0000-\u001f\u007f]/g, "").slice(0, 256) };
+      const account = isChunkAccount(resource.account) ? resource.account.slice(0, resource.account.indexOf(CHUNK_MARK)) : resource.account;
+      return { kind, operation: "read", name: account.slice(prefix.length).replace(/[\u0000-\u001f\u007f]/g, "").slice(0, 256) };
     }
   }
   return null;
@@ -337,7 +429,8 @@ function retryEnvListFromUser(service: string): Promise<string[]> {
   const current = userListRetries.get(service);
   if (current) return current;
   const started = retryKeychainListFromUser(service, async () => (await keytarApi().findCredentials(service)).map((item) => item.account))
-    .then((accounts) => {
+    .then((listed) => {
+      const accounts = listed.filter((account) => !isChunkAccount(account));
       const keys = accounts.filter((account) => account.startsWith(ENV_PREFIX)).map((account) => account.slice(ENV_PREFIX.length));
       if (keychainService() === service) { envKeyCacheService = service; envKeyCache = keys; envKeyCacheAt = Date.now(); rememberAccounts(service, accounts); }
       return keys;
@@ -599,7 +692,7 @@ export async function listEnvKeys(): Promise<string[]> {
     const accounts = developmentEffectsSuppressed() || USE_MEMORY_VAULT
       ? [...memoryVault.keys()]
       : await keychainListAccounts(service, async () =>
-          (await keytarApi().findCredentials(service)).map((c) => c.account));
+          (await keytarApi().findCredentials(service)).map((c) => c.account).filter((account) => !isChunkAccount(account)));
     if (!(developmentEffectsSuppressed() || USE_MEMORY_VAULT)) rememberAccounts(service, accounts);
     const keys = accounts.filter((a) => a.startsWith(ENV_PREFIX)).map((a) => a.slice(ENV_PREFIX.length));
     if (envKeyCacheService === service) { envKeyCache = keys; envKeyCacheAt = Date.now(); }

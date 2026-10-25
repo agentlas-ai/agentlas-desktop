@@ -2,11 +2,11 @@
 // 구조화 JSON({title, subtitle, body(markdown), figureCaption})으로 작성한다.
 // trex/content.ts와 동일 엔진 패턴(agy 우선 → codex). 키/네트워크 불필요(구독 CLI).
 // no-fallback: LLM 미연결/실패면 {ok:false, reason}만 반환한다. 가짜 템플릿을 만들지 않는다.
-import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { detachedSpawnOpts, killCliTree, trackRunChild, writeStdin } from "../runtime/exec";
+import { detachedSpawnOpts, killCliTree, spawnCli, trackRunChild, withCliPath, writeStdin } from "../runtime/exec";
+import { nativeCliCandidates } from "../runtime/native-cli";
 import { withAgyProductHome } from "../runtime/antigravity-personal-context";
 import { withCodexProductHome } from "../runtime/codex-product-home";
 import { findExecutableSync } from "../runtime/path-lookup";
@@ -38,9 +38,12 @@ export interface DocumentContentResult {
   reason?: string;
 }
 
-function resolveBin(name: string, extra: string[]): string | null {
+function resolveBin(name: "agy" | "codex", extra: string[]): string | null {
   // Platform PATH delimiter and Windows PATHEXT (NH31): a POSIX ":" split read every Windows CLI as absent.
-  return findExecutableSync(name, extra);
+  // The CLI PATH the runners use (withCliPath) and the Agentlas-installed native codex come first: on Windows that
+  // native exe lives under ~/.agentlas/npm/native and is on no inherited PATH (2026-10-24 audit F6).
+  const native = name === "codex" ? nativeCliCandidates("codex") : [];
+  return findExecutableSync(name, [...native, ...extra], withCliPath(process.env));
 }
 
 const AGY_PATHS = [path.join(os.homedir(), ".local/bin/agy"), "/opt/homebrew/bin/agy", "/usr/local/bin/agy"];
@@ -120,7 +123,9 @@ function runViaStdin(bin: string, args: string[], prompt: string, env: NodeJS.Pr
     };
     let child;
     try {
-      child = spawn(bin, args, { env, ...detachedSpawnOpts() });
+      // spawnCli, not spawn: Node refuses to start a Windows .cmd (npm's codex.cmd / agy.cmd) without a shell
+      // (spawn EINVAL); spawnCli starts the shim's program directly or through cmd.exe with escaping.
+      child = spawnCli(bin, args, { env, ...detachedSpawnOpts() });
       trackRunChild(child);
     } catch {
       finish(null);

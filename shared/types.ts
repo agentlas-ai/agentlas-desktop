@@ -5606,7 +5606,9 @@ export type UpdaterErrorCode =
   | "compatibility-metadata-missing"
   | "minimum-app-version"
   | "minimum-runtime-version"
-  | "minimum-schema-version";
+  | "minimum-schema-version"
+  /** A company-mirrored update had no verifiable OS signature or Agentlas-signed release manifest (updater/release-integrity.ts). */
+  | "install-integrity-unverified";
 
 /** Fixed, value-free updater diagnostics safe to persist and expose to renderer. */
 export type UpdaterDiagnosticCategory =
@@ -5622,7 +5624,11 @@ export type UpdaterDiagnosticCategory =
   | "native-install-payload"
   | "native-install-state"
   | "native-install-timeout"
-  | "native-install-unknown";
+  | "native-install-unknown"
+  | "mirror-trust-roots-missing"
+  | "mirror-manifest-unavailable"
+  | "mirror-manifest-invalid"
+  | "mirror-payload-mismatch";
 
 export interface UpdaterDiagnostic {
   category: UpdaterDiagnosticCategory;

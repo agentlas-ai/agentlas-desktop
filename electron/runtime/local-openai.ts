@@ -25,12 +25,8 @@ function loadedCapacityFailure(code: string): never {
   throw Object.assign(new Error(code), { code });
 }
 
-/** "localhost:1234"처럼 스킴이 없으면 http:// 보정하고 끝 슬래시를 제거한다. */
-export function normalizeLocalHost(raw: string | undefined, fallback: string): string {
-  const v = raw?.trim();
-  if (!v) return fallback;
-  return /^https?:\/\//.test(v) ? v.replace(/\/$/, "") : `http://${v.replace(/\/$/, "")}`;
-}
+// 호스트 해석은 local-host.ts 한 곳(0.0.0.0·포트 없음·":1234" 규칙)에서 정한다.
+export { normalizeLocalHost } from "./local-host";
 
 export interface LocalModelProbe {
   /** 서버가 노출한 모델 id들 (예: ["qwen3-30b-a3b", "gemma-3-12b"]) */

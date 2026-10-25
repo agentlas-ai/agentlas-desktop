@@ -17,12 +17,15 @@
 // endpoint and model-default part of the person's (productClaudeSettings): never their hooks, env or permissions.
 // `.claude.json` (global config) is the mirror's own file holding only the sign-in, install and first-run part of the
 // person's (productClaudeGlobalConfig) plus the user-scope MCP servers One switched on.
-// If links cannot be made (Windows without the right), the run keeps the real config dir.
+// "Link" is mirror-link.ts: a symlink on macOS/Linux; on Windows a junction for a folder and, for a file, a symlink when
+// allowed, else a recorded hard link or copy that every sync reconciles (Windows audit 2026-10-24, W-03: without
+// Developer Mode every product Claude run used to keep the person's own config dir). If even that cannot be made, the
+// run keeps the real config dir and the failure is reported (product_home_isolation_unavailable), never silent.
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { userDataPath } from "../runtime-paths";
-import { inheritedProductHome, personalHomeDir, personalHomeOverride, productHomeRefusedOnThisHost } from "./product-home-identity";
+import { cliUserHome, inheritedProductHome, personalHomeDir, personalHomeOverride, productHomeRefusedOnThisHost } from "./product-home-identity";
+import { MIRROR_LINK_RECORD, isRecordedMirrorEntry, linkMirrorEntry, mirrorEntryLinked, reconcileMirrorLinks, reportIsolationUnavailable } from "./mirror-link";
 
 /**
  * Entries of ~/.claude a product run reads as configuration; only these are linked into the mirror. Everything else —
@@ -184,33 +187,35 @@ function writeIfChanged(at: string, content: string): void {
 
 /** Claude's global config: inside a custom CLAUDE_CONFIG_DIR, else ~/.claude.json next to the default dir. */
 export function personalClaudeGlobalConfigPath(env: NodeJS.ProcessEnv = process.env): string {
-  return env.CLAUDE_CONFIG_DIR ? path.join(realClaudeConfigDir(env), ".claude.json") : path.join(env.HOME || os.homedir(), ".claude.json");
+  return env.CLAUDE_CONFIG_DIR ? path.join(realClaudeConfigDir(env), ".claude.json") : path.join(cliUserHome(env), ".claude.json");
 }
 
 export function syncClaudeProductHome(realDir: string, mirror = claudeProductHomeDir(), options: ClaudeProductHomeOptions = {},
-  personalGlobal = path.join(os.homedir(), ".claude.json")): { dir: string } | { skip: ClaudeProductHomeSkip } {
+  personalGlobal = path.join(cliUserHome(), ".claude.json")): { dir: string } | { skip: ClaudeProductHomeSkip } {
   // A gate or script (no install identity) never mirrors the account's own ~/.claude (product-home-identity.ts).
   if (productHomeRefusedOnThisHost(realDir)) return { skip: "unconfigured-host" };
   if (!fs.existsSync(realDir)) return { skip: "no-real-dir" };
   fs.mkdirSync(mirror, { recursive: true, mode: 0o700 });
   const wanted = new Set(fs.readdirSync(realDir).filter((name) => !isClaudePersonalSessionEntry(name)));
   try {
+    // Windows hard links / copies first: one no longer wanted goes, the rest behave like the links they stand for.
+    reconcileMirrorLinks(mirror, new Map([...wanted].map((name) => [name, path.join(realDir, name)] as const)));
     for (const name of wanted) {
       const at = path.join(mirror, name), target = path.join(realDir, name);
-      let current: string | null = null;
-      try { current = fs.readlinkSync(at); } catch { /* absent or not a link */ }
-      if (current === target) continue;
-      if (current !== null || fs.existsSync(at)) quietly(() => fs.rmSync(at, { recursive: false, force: true }));
-      const isDir = fs.statSync(target).isDirectory();
-      fs.symlinkSync(target, at, process.platform === "win32" && isDir ? "junction" : undefined);
+      if (mirrorEntryLinked(mirror, name, target)) continue;
+      if (fs.existsSync(at) || isRecordedMirrorEntry(mirror, name)) quietly(() => fs.rmSync(at, { recursive: false, force: true }));
+      else quietly(() => { if (fs.lstatSync(at).isSymbolicLink()) fs.unlinkSync(at); }); // a dangling link
+      // null: a Windows file that could be neither linked nor copied stays out of the mirror (Claude's default for it).
+      linkMirrorEntry(target, at);
     }
-  } catch {
+  } catch (error) {
+    reportIsolationUnavailable("claude-code", error);
     return { skip: "links-unavailable" };
   }
   // Links to entries the person removed, or that are no longer linked at all (an older mirror's `agents`), go away; the
   // mirror's own stores are never links and stay.
   for (const name of fs.readdirSync(mirror)) {
-    if (wanted.has(name) || name === ".claude.json") continue;
+    if (wanted.has(name) || name === ".claude.json" || name === MIRROR_LINK_RECORD) continue;
     const at = path.join(mirror, name);
     quietly(() => {
       if (fs.lstatSync(at).isSymbolicLink() && (!isClaudePersonalSessionEntry(name) || fs.readlinkSync(at) === path.join(realDir, name))) fs.unlinkSync(at);
@@ -349,7 +354,7 @@ export function adoptClaudeSessionIntoProductHome(env: NodeJS.ProcessEnv, sessio
   if (!/^[0-9a-f-]{8,64}$/i.test(sessionId) || env.CLAUDE_CONFIG_DIR === undefined || env.CLAUDE_SECURESTORAGE_CONFIG_DIR === undefined) return false;
   const mirrorFile = path.join(env.CLAUDE_CONFIG_DIR, "projects", projectKey(cwd), `${sessionId}.jsonl`);
   if (fs.existsSync(mirrorFile)) return true;
-  const personalDir = env.CLAUDE_SECURESTORAGE_CONFIG_DIR || path.join(env.HOME || os.homedir(), ".claude");
+  const personalDir = env.CLAUDE_SECURESTORAGE_CONFIG_DIR || path.join(cliUserHome(env), ".claude");
   const personalFile = path.join(personalDir, "projects", projectKey(cwd), `${sessionId}.jsonl`);
   if (!fs.existsSync(personalFile)) return false;
   fs.mkdirSync(path.dirname(mirrorFile), { recursive: true, mode: 0o700 });

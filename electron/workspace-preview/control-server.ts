@@ -277,7 +277,7 @@ async function startPreview(binding: WorkspacePreviewCapabilityBinding, request:
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
     !/(?:TOKEN|SECRET|PASSWORD|CREDENTIAL|PRIVATE_KEY|API_KEY|AUTH)/iu.test(key)));
   // On Windows the command goes verbatim inside one quote pair (`cd "my app"` used to reach cmd.exe as `cd \"my app\"`).
-  const shell = commandLineShellSpawn(command);
+  const shell = commandLineShellSpawn(command, undefined, binding.cwd);
   const child = spawn(shell.file, shell.args, {
       cwd: binding.cwd,
       env,

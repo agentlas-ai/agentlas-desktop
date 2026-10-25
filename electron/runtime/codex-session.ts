@@ -58,6 +58,7 @@ import {
   type RuntimeToolPermissionDecision,
 } from "./tool-approval";
 import { CODEX_MCP_ELICITATION_METHOD } from "./codex-elicitation";
+import { cliUserHome } from "./product-home-identity";
 
 export type { AcpSessionLease };
 
@@ -857,7 +858,7 @@ function localLaunchState(input: {
   const digest = crypto.createHash("sha256");
   const childEnv = input.env ?? process.env;
   const cwd = path.resolve(input.cwd);
-  const home = path.resolve(cwd, childEnv.HOME || os.homedir());
+  const home = path.resolve(cwd, cliUserHome(childEnv));
   const codexHome = path.resolve(cwd, childEnv.CODEX_HOME || path.join(home, ".codex"));
   const files = new Set([
     path.join(codexHome, "config.toml"),

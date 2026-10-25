@@ -17,6 +17,7 @@ import { repairDisprovedSeatFailuresInDb } from "./seat-failure-evidence";
 import { retireGoalContinuationAutomationsInDb } from "./goal-continuation-rows";
 import { currentUiLocale } from "../ui-locale";
 import { pruneLegacyDatabaseBackups } from "./backup-retention";
+import { currentProcessStartedAt, migrationLockOwnerState, windowsProcessStartedAt, type MigrationLockOwnerRecord } from "./migration-lock-owner";
 import { sameMigrationBackupFile, sameMigrationBackupSource, type MigrationBackupFingerprint } from "./migration-backup-identity";
 import { createOneDomainEventIndexes } from "./one-domain-event-indexes";
 import { createAgentContextSchema } from "./agent-context";
@@ -138,7 +139,14 @@ function acquireStoreMigrationLock(dbPath: string): () => void {
   if (dbPath === ":memory:" || dbPath.startsWith("file:")) return () => {};
   const lockPath = `${dbPath}.migration.lock`;
   const startedAt = Date.now();
-  const owner = JSON.stringify({ pid: process.pid, acquiredAt: new Date().toISOString(), nonce: randomUUID() });
+  const owner = JSON.stringify({ pid: process.pid, acquiredAt: new Date().toISOString(), nonce: randomUUID(),
+    processStartedAt: currentProcessStartedAt() });
+  // Windows: one start-time lookup per pid while waiting (migration-lock-owner.ts).
+  const startTimes = new Map<number, number | null>();
+  const ownerStartedAt = (pid: number): number | null => {
+    if (!startTimes.has(pid)) startTimes.set(pid, windowsProcessStartedAt(pid));
+    return startTimes.get(pid) ?? null;
+  };
 
   while (Date.now() - startedAt < STORE_MIGRATION_LOCK_WAIT_MS) {
     try {
@@ -165,8 +173,10 @@ function acquireStoreMigrationLock(dbPath: string): () => void {
       if (code !== "EEXIST") throw error;
 
       let ownerPid: number | null = null;
+      let ownerRecord: MigrationLockOwnerRecord = {};
       try {
-        const parsed = JSON.parse(fs.readFileSync(lockPath, "utf8")) as { pid?: unknown };
+        const parsed = JSON.parse(fs.readFileSync(lockPath, "utf8")) as MigrationLockOwnerRecord;
+        ownerRecord = parsed && typeof parsed === "object" ? parsed : {};
         if (Number.isSafeInteger(parsed.pid) && Number(parsed.pid) > 1) ownerPid = Number(parsed.pid);
       } catch {
         // A process can die between creating the lock and writing its owner.
@@ -175,7 +185,10 @@ function acquireStoreMigrationLock(dbPath: string): () => void {
       }
       let mtimeMs = 0;
       try { mtimeMs = fs.statSync(lockPath).mtimeMs; } catch { continue; }
-      const ownerIsDead = ownerPid !== null && !storeMigrationOwnerAlive(ownerPid);
+      // A pid Windows already gave to another process counts as dead (pid reuse after a crash, fs.md #10).
+      const ownerIsDead = ownerPid !== null && migrationLockOwnerState(ownerRecord, {
+        platform: process.platform, alive: storeMigrationOwnerAlive, startedAt: ownerStartedAt,
+      }) !== "alive";
       const ownerUnknownAndStale = ownerPid === null && Date.now() - mtimeMs >= STORE_MIGRATION_LOCK_WAIT_MS;
       if (ownerIsDead || ownerUnknownAndStale) {
         try { fs.rmSync(lockPath, { force: true }); } catch { /* another opener may have reclaimed it */ }

@@ -6,7 +6,7 @@ import {
   ASK_CARD_FIXED_FALLBACK_PX, ASK_OPTION_PEEK_PX, askCardPlan, findAskCardColumn, measureAskCardColumn, measureAskCardParts,
   sameAskCardPlan, type AskCardPlan,
 } from "@/lib/ask-card-room";
-import { IconChat, IconCheck, IconChevronDown, IconChevronRight, IconClose, IconEdit, IconSend } from "./Icon";
+import { IconCheck, IconChevronDown, IconClose } from "./Icon";
 import styles from "./AskCard.module.css";
 
 /**
@@ -17,6 +17,10 @@ import styles from "./AskCard.module.css";
  * 값은 globals.css 의 --ask-* 토큰이 정본이다. 규격은 docs/DESIGN-ASK-CARD.md.
  *
  * 웹에도 같은 규격을 그대로 옮긴다 — 토큰과 마크업이 문서에 적혀 있다.
+ *
+ * 2026-10-24 오너 지시: 질문 카드는 Claude Code 데스크탑의 질문 카드와 같은 모양이다 — 옅은 회색 머리 줄의 질문,
+ * 구분선으로 나뉜 세로 보기(왼쪽 라디오/체크 상자 + 제목 + 회색 설명), 마지막 "기타" 줄이 그대로 입력칸, 오른쪽 아래
+ * [건너뛰기][제출 ⌘↵], 카드 밑 "입력이 필요합니다" 칩. 고르는 규칙과 보내는 길은 예전 그대로다(이 컴포넌트는 그리기만 한다).
  */
 export interface AskCardOption {
   id: string;
@@ -27,10 +31,10 @@ export interface AskCardOption {
   /** "추천" 같은 짧은 표식. */
   badge?: string;
   disabled?: boolean;
-  /** 이 선택지가 지금 선택된 상태인지(키보드 이동·기본 추천 표시). */
+  /** 이 선택지가 지금 선택된 상태인지(키보드 이동·기본 추천 표시). 왼쪽 라디오가 채워진다. */
   active?: boolean;
   /**
-   * 여러 개 고르는 질문의 체크 상태. 값이 있으면 오른쪽에 체크 상자가 그려지고
+   * 여러 개 고르는 질문의 체크 상태. 값이 있으면 라디오 대신 왼쪽에 체크 상자가 그려지고
    * aria-pressed 가 붙는다 — 고른 것이 "화살표 강조"로만 보이면 사람은 그것이
    * 이미 보낸 답인지 고른 상태인지 가를 수 없었다(오너 신고 2026-09-27).
    */
@@ -53,9 +57,25 @@ export interface AskCardActionRow {
 /** 서버 렌더에서는 레이아웃 효과가 없다 — 같은 모양의 효과로 물러난다. */
 const useIsoLayoutEffect = typeof window !== "undefined" ? useLayoutEffect : useEffect;
 
+/** 위·아래 화살표가 오가는 줄: 보기 단추와 "기타" 입력칸. */
+const ROW_SELECTOR = "[data-ask-options] button:not(:disabled), [data-ask-footer] input:not(:disabled)";
+
+function isEditableTarget(target: EventTarget | null): boolean {
+  const element = target as HTMLElement | null;
+  const tag = element?.tagName?.toLowerCase();
+  return tag === "input" || tag === "textarea" || tag === "select" || Boolean(element?.isContentEditable);
+}
+
+/** 왼쪽 표식: 하나만 고르면 라디오, 여러 개면 체크 상자. */
+function ChoiceMarker({ on, multi }: { on: boolean; multi: boolean }) {
+  return multi
+    ? <span className={styles.checkbox} data-on={on ? "true" : "false"} aria-hidden="true">{on && <IconCheck size={12} />}</span>
+    : <span className={styles.radio} data-on={on ? "true" : "false"} aria-hidden="true" />;
+}
+
 export function AskCard({
   title,
-  icon = <IconChat size={18} />,
+  icon,
   options,
   onChoose,
   onClose,
@@ -70,9 +90,11 @@ export function AskCard({
   collapsible = false,
   collapsed: collapsedProp,
   onCollapsedChange,
+  statusLabel,
   "data-testid": testId,
 }: {
   title: string;
+  /** 머리 줄 왼쪽 아이콘. 질문 카드는 쓰지 않는다(Claude Code 카드처럼 질문 글만) — 승인 카드가 방패 등을 줄 때만 그린다. */
   icon?: ReactNode;
   /**
    * 접을 수 있는 카드 — 머리 줄에 접기 단추가 생기고, 접으면 제목 줄만 남는다. 묻는 카드가 대화 영역을 통째로
@@ -120,10 +142,18 @@ export function AskCard({
   onFreeTextChange?: (value: string) => void;
   children?: ReactNode;
   locale?: "ko" | "en";
+  /** 카드 밑 상태 칩("● 입력이 필요합니다"). 답을 기다리는 질문 카드만 준다. */
+  statusLabel?: string;
   "data-testid"?: string;
 }) {
   const [internalFreeText, setInternalFreeText] = useState("");
   const footerInputRef = useRef<HTMLInputElement | null>(null);
+  const [otherFocused, setOtherFocused] = useState(false);
+  /* 단축키 글자는 맥이면 ⌘, 아니면 Ctrl. 서버 렌더와 첫 그림이 같도록 마운트 뒤에 정한다. */
+  const [isMac, setIsMac] = useState(false);
+  useEffect(() => {
+    if (typeof navigator !== "undefined") setIsMac(/Mac|iPhone|iPad/i.test(navigator.platform || navigator.userAgent || ""));
+  }, []);
   const currentFreeText = freeText ?? internalFreeText;
   /*
    * 아래 단추의 이름은 "이 카드에서 사람이 답한 것"을 전부 보고 정해진다. 고른 보기를 빼고
@@ -200,13 +230,63 @@ export function AskCard({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [collapsible, plan?.tight, isCollapsed]);
   const ko = locale === "ko";
+
+  /*
+   * 키보드(Claude Code 카드와 같게): ⌘/Ctrl+Enter = 주 단추(제출), 위·아래 화살표 = 보기 줄 사이 이동.
+   * 다른 칸(작성창 등)에 글을 쓰는 중이거나 다른 묻는 카드에 초점이 있으면 가로채지 않는다. 접힌 카드는 보기가 안 보이므로 답하지 않는다.
+   * 숫자 키·Enter·Escape 는 예전처럼 카드를 쓰는 화면이 정한다.
+   */
+  const keyStateRef = useRef({ actionRow, collapsed: isCollapsed, freeText: currentFreeText });
+  keyStateRef.current = { actionRow, collapsed: isCollapsed, freeText: currentFreeText };
+  const hasActionRow = Boolean(actionRow);
+  useEffect(() => {
+    if (!hasActionRow || typeof document === "undefined") return;
+    const onKey = (event: KeyboardEvent) => {
+      const card = cardRef.current;
+      const state = keyStateRef.current;
+      if (!card || state.collapsed || event.defaultPrevented || event.altKey) return;
+      if (event.isComposing || event.keyCode === 229) return;
+      const target = event.target as HTMLElement | null;
+      const inCard = Boolean(target && card.contains(target));
+      const focused = document.activeElement as HTMLElement | null;
+      if (!inCard && focused?.closest("[data-ask-card]")) return;
+      if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+        if (!inCard && isEditableTarget(target)) return;
+        const primary = state.actionRow?.primary;
+        if (!primary || primary.disabled) return;
+        event.preventDefault();
+        state.actionRow!.onAction(primary.id, state.freeText.trim());
+        return;
+      }
+      if ((event.key !== "ArrowDown" && event.key !== "ArrowUp") || event.metaKey || event.ctrlKey || event.shiftKey) return;
+      if (!inCard && (isEditableTarget(target) || (focused && focused !== document.body))) return;
+      const rows = Array.from(card.querySelectorAll<HTMLElement>(ROW_SELECTOR));
+      if (rows.length === 0) return;
+      const at = rows.findIndex((row) => row === focused);
+      let next: number;
+      if (at < 0) {
+        const activeRow = rows.findIndex((row) => row.dataset.active === "true");
+        next = activeRow >= 0 ? activeRow : event.key === "ArrowDown" ? 0 : rows.length - 1;
+      } else {
+        next = Math.min(rows.length - 1, Math.max(0, at + (event.key === "ArrowDown" ? 1 : -1)));
+      }
+      event.preventDefault();
+      rows[next].focus();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [hasActionRow]);
+  const multi = options.some((option) => option.checked !== undefined);
   /*
    * 직접 입력은 보기 줄 하나다. 예전에는 "기타" 보기 줄과 입력 줄이 따로 있어(둘 다 같은 입력칸을 가리켰다) 카드가
    * 한 줄 반 더 컸다. 입력 줄이 있으면 그 줄이 "기타"이고, 입력 줄이 없을 때만 "기타" 단추를 그린다.
    */
   const otherIsInputRow = Boolean(otherOption && footer && !footer.hideInput);
 
-  return (
+  const otherTyped = Boolean(currentFreeText.trim());
+  const shortcutKeys = isMac ? ["⌘", "↵"] : ["Ctrl", "↵"];
+
+  const card = (
     <section
       ref={cardRef}
       className={styles.card}
@@ -220,7 +300,7 @@ export function AskCard({
       data-testid={testId}
     >
       <div className={styles.head}>
-        <span className={styles.headingIcon} aria-hidden="true">{icon}</span>
+        {icon && <span className={styles.headingIcon} aria-hidden="true">{icon}</span>}
         <div className={styles.titleBlock}>
           <p className={styles.title}>{title}</p>
           {subtitle && subtitle !== title && !isCollapsed && <p className={styles.subtitle}>{subtitle}</p>}
@@ -237,7 +317,7 @@ export function AskCard({
                 data-ask-collapse="true"
                 onClick={toggleCollapsed}
               >
-                <IconChevronDown size={16} />
+                <IconChevronDown size={15} />
               </button>
             )}
             {onClose && (
@@ -247,7 +327,7 @@ export function AskCard({
                 aria-label={ko ? "닫기" : "Close"}
                 onClick={onClose}
               >
-                <IconClose size={16} />
+                <IconClose size={15} />
               </button>
             )}
           </div>
@@ -256,7 +336,7 @@ export function AskCard({
 
       {!isCollapsed && Children.toArray(children).length > 0 && <div className={styles.body} data-ask-body="true">{children}</div>}
       {!isCollapsed && <div className={styles.options} data-ask-options="true">
-        {options.map((option, index) => (
+        {options.map((option) => (
           <button
             key={option.id}
             type="button"
@@ -267,7 +347,9 @@ export function AskCard({
             disabled={option.disabled}
             onClick={() => onChoose(option.id, currentFreeText.trim())}
           >
-            <span className={styles.index} aria-hidden="true">{option.icon ?? index + 1}</span>
+            {option.icon
+              ? <span className={styles.markerIcon} aria-hidden="true">{option.icon}</span>
+              : <ChoiceMarker on={option.checked ?? Boolean(option.active)} multi={option.checked !== undefined} />}
             <span className={styles.optionText}>
               <span className={styles.optionTitleRow}>
                 <span className={styles.optionTitle}>{option.title}</span>
@@ -275,9 +357,6 @@ export function AskCard({
               </span>
               {option.note && <span className={styles.optionNote}>{option.note}</span>}
             </span>
-            {option.checked !== undefined
-              ? <span className={styles.check} data-checked={option.checked ? "true" : "false"} aria-hidden="true">{option.checked && <IconCheck size={13} />}</span>
-              : option.active && <span className={styles.arrow} aria-hidden="true"><IconChevronRight size={16} /></span>}
           </button>
         ))}
         {otherOption && !otherIsInputRow && (
@@ -286,15 +365,14 @@ export function AskCard({
             className={styles.option}
             data-ask-option="other"
             data-ask-other-option="true"
-            data-active={currentFreeText.trim() ? "true" : "false"}
+            data-active={otherTyped ? "true" : "false"}
             onClick={() => footerInputRef.current?.focus()}
           >
-            <span className={styles.index} aria-hidden="true"><IconEdit size={14} /></span>
+            <ChoiceMarker on={otherTyped} multi={multi} />
             <span className={styles.optionText}>
               <span className={styles.optionTitleRow}><span className={styles.optionTitle}>{otherOption.title}</span></span>
               {otherOption.note && <span className={styles.optionNote}>{otherOption.note}</span>}
             </span>
-            {currentFreeText.trim() && <span className={styles.arrow} aria-hidden="true"><IconChevronRight size={16} /></span>}
           </button>
         )}
       </div>}
@@ -305,18 +383,23 @@ export function AskCard({
           data-ask-footer="true"
           data-input={footer.hideInput ? "false" : "true"}
           data-ask-other-option={otherIsInputRow ? "true" : undefined}
-          data-active={otherIsInputRow && currentFreeText.trim() ? "true" : undefined}
+          data-active={otherIsInputRow && otherTyped ? "true" : undefined}
+          onClick={(event) => { if (event.target === event.currentTarget) footerInputRef.current?.focus(); }}
         >
-          <span className={styles.footerMark} aria-hidden="true"><IconEdit size={14} /></span>
+          {!footer.hideInput && <ChoiceMarker on={otherTyped} multi={multi} />}
           {!footer.hideInput && <input
               ref={footerInputRef}
               className={styles.footerInput}
               value={currentFreeText}
-              placeholder={footer.placeholder}
+              /* "기타" 줄은 쉬는 동안 보기 제목처럼 "기타"라고 읽히고, 초점이 오면 회색 안내 글로 바뀐다(Claude Code 카드). */
+              placeholder={otherIsInputRow && otherOption && !otherFocused ? otherOption.title : footer.placeholder}
+              data-resting={otherIsInputRow && !otherFocused && !otherTyped ? "true" : undefined}
               aria-label={otherOption?.title ?? footer.placeholder}
+              onFocus={() => setOtherFocused(true)}
+              onBlur={() => setOtherFocused(false)}
               onChange={(event) => updateFreeText(event.target.value)}
               onKeyDown={(event) => {
-                if (event.key === "Enter" && !event.nativeEvent.isComposing && event.nativeEvent.keyCode !== 229) {
+                if (event.key === "Enter" && !event.metaKey && !event.ctrlKey && !event.nativeEvent.isComposing && event.nativeEvent.keyCode !== 229) {
                   event.preventDefault();
                   /*
                    * ★Enter 는 **바로 아래 단추가 하는 일**을 한다 (실측 2026-09-08).
@@ -325,6 +408,7 @@ export function AskCard({
                    *   두 길이 서로 다른 답을 내면 사람은 둘 중 하나를 고장으로 읽는다.
                    *   라벨(askCardFooterLabel)도 이미 입력 유무를 따라가므로, 사람은 누르기
                    *   전에 무슨 일이 일어날지 읽을 수 있다.
+                   *   ⌘/Ctrl+Enter 는 위 카드 단축키(주 단추)가 맡는다.
                    */
                   footer.onSkip(currentFreeText.trim());
                 }
@@ -361,15 +445,29 @@ export function AskCard({
                 data-ask-action={actionRow.primary.id}
                 disabled={actionRow.primary.disabled}
                 title={actionRow.primary.disabled && actionRow.reason ? actionRow.reason : undefined}
+                aria-keyshortcuts={isMac ? "Meta+Enter" : "Control+Enter"}
                 onClick={() => actionRow.onAction(actionRow.primary!.id, currentFreeText.trim())}
               >
-                <IconSend size={14} />
-                {actionRow.primary.label}
+                <span>{actionRow.primary.label}</span>
+                <span className={styles.keys} aria-hidden="true">
+                  {shortcutKeys.map((key) => <kbd key={key} className={styles.kbd}>{key}</kbd>)}
+                </span>
               </button>
             )}
           </div>
         </div>
       )}
     </section>
+  );
+
+  if (!statusLabel) return card;
+  return (
+    <>
+      {card}
+      <p className={styles.status} role="status" data-ask-status="true">
+        <span className={styles.statusDot} aria-hidden="true" />
+        <span className={styles.statusPill}>{statusLabel}</span>
+      </p>
+    </>
   );
 }

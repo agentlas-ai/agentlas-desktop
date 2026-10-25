@@ -1,3 +1,4 @@
+import { systemNetworkChildEnv } from "../net/system-network-core";
 import fs from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
@@ -56,6 +57,8 @@ function pythonCall(python:string,script:string,signal:AbortSignal):Promise<z.in
     const args=[...(path.basename(python).toLowerCase().replace(/\.exe$/,'')==='py'?['-3']:[]),'-B',env.PYTHONNOUSERSITE==='1'?'-I':'-E',script];
     // Only runtime essentials reach the fixed adapter; user/API credentials never do.
     for(const key of Object.keys(env))if(!/^(?:PATH|HOME|USERPROFILE|SYSTEMROOT|WINDIR|TEMP|TMP|TMPDIR|LOCALAPPDATA|APPDATA|LANG|LC_[A-Z_]+|PYTHONDONTWRITEBYTECODE|PYTHONPYCACHEPREFIX|PYTHONNOUSERSITE|SSL_CERT_FILE|SSL_CERT_DIR)$/i.test(key))delete env[key];
+    // The proxy Desktop uses (env or system), only when its URL carries no user:password.
+    const proxyEnv=systemNetworkChildEnv(process.env);if(!Object.entries(proxyEnv).some(([key,value])=>/proxy$/i.test(key)&&!/^no_proxy$/i.test(key)&&/^[a-z]+:\/\/[^/]*@/i.test(value)))Object.assign(env,proxyEnv);
     let child:ReturnType<typeof spawn>;try{child=spawn(python,args,{shell:false,windowsHide:true,detached:process.platform!=='win32',env,stdio:['pipe','pipe','pipe']});}catch{reject(new Error('finance_world_python_unavailable'));return;}
     let settled=false,size=0;const chunks:Buffer[]=[];
     const finish=(error?:Error,value?:z.infer<typeof payload>)=>{if(settled)return;settled=true;clearTimeout(timer);signal.removeEventListener('abort',cancel);if(error)reject(error);else resolve(value!);};

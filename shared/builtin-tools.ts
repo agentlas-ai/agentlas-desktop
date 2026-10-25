@@ -22,7 +22,7 @@ import { FILE_OBSERVATION_MAX_BYTES, observeWorkspaceFile, type FileObservation 
 import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { inflateSync } from "node:zlib";
 import { classifyLaunchEscape, launchEscapeDenialReason } from "./write-sandbox-launch-guard";
 import { PERMISSION_ESCALATION_MARKER } from "./permission-escalation";
@@ -847,7 +847,7 @@ export const BUILTIN_TOOLS: readonly BuiltinTool[] = [
       if (confined && !ctx.confineShell) throw new Error(`permission denied: 'bash' requires 'full' but this run has '${ctx.permission}'.`);
       const escape = confined ? classifyLaunchEscape(command) : null;
       if (escape) throw new Error(launchEscapeDenialReason(escape, PERMISSION_ESCALATION_MARKER));
-      const launch = confined ? ctx.confineShell!(command) : { file: "bash", args: ["-lc", command] };
+      const launch = confined ? ctx.confineShell!(command) : hostShellLaunch(command);
       // ★비동기 spawn 을 쓴다. 터미널 사본은 spawnSync 였는데, 데스크탑에서 그러면
       // 명령이 끝날 때까지 **메인 프로세스 전체가 멈춘다**(UI·다른 실행·IPC 포함).
       // 최대 10분짜리 도구가 앱을 10분 얼리는 것은 도구가 아니라 결함이다.
@@ -865,11 +865,11 @@ export const BUILTIN_TOOLS: readonly BuiltinTool[] = [
         let overflowed = false;
         let settled = false;
         const timer = setTimeout(() => {
-          try { child.kill("SIGKILL"); } catch { /* already gone */ }
+          killShellTree(child);
           finish(null, `timed out after ${timeout}ms`);
         }, timeout);
         const onAbort = () => {
-          try { child.kill("SIGKILL"); } catch { /* already gone */ }
+          killShellTree(child);
           finish(null, "cancelled");
         };
         ctx.signal?.addEventListener("abort", onAbort, { once: true });
@@ -878,7 +878,7 @@ export const BUILTIN_TOOLS: readonly BuiltinTool[] = [
           bytes += chunk.length;
           if (bytes > MAX_BYTES) {
             overflowed = true;
-            try { child.kill("SIGKILL"); } catch { /* already gone */ }
+            killShellTree(child);
             return;
           }
           if (into === "out") out += chunk.toString("utf8");
@@ -912,6 +912,47 @@ export const BUILTIN_TOOLS: readonly BuiltinTool[] = [
     },
   },
 ];
+
+/**
+ * The host shell for the `bash` built-in (exec). macOS/Linux: `bash -lc`. Windows has no bash by default, so the
+ * command failed with spawn ENOENT for every host-loop runtime (Agentlas serving, BYOK, local models) and the model
+ * worked around it through other tools (Windows 11 VM, 2026-10-24). Windows runs Windows PowerShell 5.1 by its
+ * System32 path (never a same-named file in the working folder), as an encoded command (no command-line quoting),
+ * with UTF-8 output so Korean text survives, and returns the native command's exit code.
+ */
+export function hostShellLaunch(command: string, platform: NodeJS.Platform = process.platform, env: NodeJS.ProcessEnv = process.env): { file: string; args: string[] } {
+  if (platform !== "win32") return { file: "bash", args: ["-lc", command] };
+  const systemRoot = env.SystemRoot || env.SYSTEMROOT || env.windir || "C:\\Windows";
+  const file = path.win32.join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+  const script = [
+    "$ErrorActionPreference='Continue'",
+    "$ProgressPreference='SilentlyContinue'",
+    "[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new($false)",
+    "$OutputEncoding=[Console]::OutputEncoding",
+    "$global:AgentlasShellError=$false",
+    // Error records go to stderr as their message text (otherwise an encoded command serializes them as CLIXML).
+    "& {",
+    command,
+    "} 2>&1 | ForEach-Object { if ($_ -is [System.Management.Automation.ErrorRecord]) { if ($_.FullyQualifiedErrorId -notlike 'NativeCommandError*') { $global:AgentlasShellError=$true }; [Console]::Error.WriteLine($_.ToString()) } else { $_ } } | Out-String -Stream -Width 4096",
+    // A native command's non-zero code wins; otherwise a PowerShell error is exit 1. A native command's stderr text
+    // (git progress, warnings) arrives as NativeCommandError records in Windows PowerShell 5.1 and is not a failure.
+    "if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) { exit $LASTEXITCODE } elseif ($global:AgentlasShellError) { exit 1 } else { exit 0 }",
+  ].join("\n");
+  // -OutputFormat Text and the silenced progress stream keep "#< CLIXML <Objs ...>" records out of what the model reads.
+  return { file, args: ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-OutputFormat", "Text", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")] };
+}
+
+/** Stop the shell and what it started. On Windows child.kill() ends only the shell; its children (ping, npm, a dev
+ * server) kept running after Stop or a timeout. taskkill /T /F ends the tree while our handle still owns the pid. */
+function killShellTree(child: { pid?: number; kill(signal?: NodeJS.Signals | number): boolean }): void {
+  if (process.platform === "win32" && child.pid) {
+    try {
+      spawnSync(path.win32.join(process.env.SystemRoot || process.env.windir || "C:\\Windows", "System32", "taskkill.exe"),
+        ["/PID", String(child.pid), "/T", "/F"], { windowsHide: true, timeout: 10_000 });
+    } catch { /* fall back to the leader */ }
+  }
+  try { child.kill("SIGKILL"); } catch { /* already gone */ }
+}
 
 const BY_NAME = new Map(BUILTIN_TOOLS.map((tool) => [tool.name, tool]));
 

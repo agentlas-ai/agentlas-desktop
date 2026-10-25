@@ -8,7 +8,7 @@ import crossSpawn from "cross-spawn";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import type { ChildProcess, SpawnOptions } from "node:child_process";
+import { spawn as nodeSpawn, type ChildProcess, type SpawnOptions } from "node:child_process";
 import { userDataPath } from "../runtime-paths";
 import { onHostShutdown } from "../host-lifecycle";
 import { currentRunPriority, nicenessForPriority } from "./run-priority";
@@ -220,22 +220,151 @@ export function measureWindowsCliCommand(plan: WindowsCliLaunchPlan): WindowsCli
     fits: nativeUtf16WithNull <= 32_767 && (cmdUtf16 === null || cmdUtf16 <= 8_191) };
 }
 
-/** Parse with the same cross-spawn, child env and cwd as spawnCli; never spawn. */
+/** Parse with the same launch plan, child env and cwd as spawnCli; never spawn. */
 export function windowsCliCommandBudget(
   command: string,
   args: string[],
   options: SpawnOptions,
 ): WindowsCliCommandBudget | null {
   if (process.platform !== "win32") return null;
-  const parser = crossSpawn as unknown as {
-    _parse(command: string, args: string[], options: SpawnOptions): WindowsCliLaunchPlan;
-  };
-  const parsed = parser._parse(command, args, {
+  const plan = planWindowsCliSpawn(command, args, {
     ...options, env: envForCli(command, options.env ?? process.env),
-  });
+  }, { validate: false });
   // Preserve the original missing-executable path; null is not a proven budget.
-  if (!parsed.file) return null;
-  return measureWindowsCliCommand(parsed);
+  if (!plan.file) return null;
+  return measureWindowsCliCommand(plan);
+}
+
+/*
+ * ── How a CLI starts on Windows ──────────────────────────────────────────────────────────────────────────────────
+ * cross-spawn runs every `.cmd` through `cmd.exe /d /s /c "<line>"` and escapes cmd's meta characters once. A batch
+ * file that forwards `%*` (every npm cmd-shim: %APPDATA%\npm\codex.cmd, claude.cmd, npx.cmd, grok.cmd) makes cmd
+ * parse the arguments a second time, and cross-spawn doubles the escaping only for shims under `node_modules\.bin`.
+ * A global shim therefore split a JSON/TOML argument at `&` when a user or project path held one (`R&D`), dropped `^`,
+ * and cut every argument at a newline (2026-10-24 Windows audit F5). cmd.exe also refuses a UNC current directory and
+ * silently runs in C:\Windows (F10), and its leader is cmd.exe instead of the agent (F2).
+ *
+ * So, in this order:
+ *  1. an npm cmd-shim is not run through cmd.exe at all: the program it names (a native `.exe`, or `node.exe` with the
+ *     package's script, exactly as the shim would choose) starts directly with libuv's argv quoting;
+ *  2. any other batch that re-parses its arguments gets cross-spawn's double escaping;
+ *  3. what cmd.exe cannot carry is refused with a typed error rather than silently changed: a newline in an argument
+ *     (`windows_cmd_argument_newline`) and a UNC working folder (`windows_unc_cwd_cmd_unsupported`).
+ * macOS and Linux never reach this: spawnCli calls cross-spawn unchanged there.
+ */
+interface CrossSpawnParsed {
+  command: string;
+  args: string[];
+  options: SpawnOptions;
+  file?: string;
+}
+const crossSpawnInternals = crossSpawn as unknown as {
+  _parse(command: string, args: string[], options: SpawnOptions): CrossSpawnParsed;
+  _enoent: { hookChildProcess(child: ChildProcess, parsed: CrossSpawnParsed): void };
+};
+// cross-spawn's own escaping (lib/util/escape.js), so the double-escaped line is the one cross-spawn would build.
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const crossSpawnEscape = require("cross-spawn/lib/util/escape") as {
+  command(value: string): string;
+  argument(value: string, doubleEscapeMetaChars: boolean): string;
+};
+
+export const WINDOWS_CMD_ARGUMENT_NEWLINE = "windows_cmd_argument_newline";
+export const WINDOWS_UNC_CWD_CMD_UNSUPPORTED = "windows_unc_cwd_cmd_unsupported";
+
+function windowsLaunchError(code: string, message: string): Error {
+  return Object.assign(new Error(`${code}: ${message}`), { code });
+}
+
+/** `\\server\share\…` or `\\?\UNC\server\share\…` (not a `\\?\C:\` or `\\.\` device path). */
+export function isWindowsUncPath(value: string): boolean {
+  return /^[\\/]{2}\?[\\/]UNC[\\/]/i.test(value) || /^[\\/]{2}(?![?.][\\/])[^\\/]+[\\/][^\\/]+/.test(value);
+}
+
+/**
+ * The program an npm cmd-shim runs with `%*`. Modern cmd-shim: `"%_prog%"  "%dp0%\node_modules\…\cli.js" %*` (node,
+ * `%dp0%\node.exe` when present) or `"%dp0%\node_modules\…\claude.exe"   %*`; older: `"%~dp0\node.exe" "%~dp0\…js" %*`.
+ * A shim that passes its own flags before the script (a `#!/usr/bin/env node --flag` package) does not match and keeps
+ * the cmd route.
+ */
+export function windowsNpmShimTarget(text: string): { kind: "node" | "exe"; relative: string } | null {
+  const node = /(?:"%_prog%"|"%~dp0\\node\.exe"|(?:^|[\s(&])node)[ \t]+"%(?:dp0%|~dp0)\\([^"%\r\n]+\.(?:js|cjs|mjs))"[ \t]+%\*/im.exec(text);
+  if (node) return { kind: "node", relative: node[1]! };
+  const exe = /(?:^|[\s&])"%(?:dp0%|~dp0)\\([^"%\r\n]+\.exe)"[ \t]+%\*/im.exec(text);
+  if (exe) return { kind: "exe", relative: exe[1]! };
+  return null;
+}
+
+function regularFile(file: string): boolean {
+  try { return fs.statSync(file).isFile(); } catch { return false; }
+}
+
+function readWindowsBatch(file: string): string | null {
+  try {
+    const stat = fs.statSync(file);
+    if (!stat.isFile() || stat.size > 16_384) return null;
+    return fs.readFileSync(file, "latin1");
+  } catch {
+    return null;
+  }
+}
+
+export interface WindowsCliSpawnPlan extends WindowsCliLaunchPlan {
+  route: "native" | "npm-shim-direct" | "cmd";
+  /** The cross-spawn parse for the cmd route; its ENOENT hook needs it. */
+  parsed?: CrossSpawnParsed;
+  /** The executable identity the spawn ledger records (what the OS will report for this PID). */
+  identity: string;
+}
+
+/** Windows launch plan for spawnCli (pure apart from reading the batch file and checking files exist). */
+export function planWindowsCliSpawn(
+  command: string,
+  args: string[],
+  options: SpawnOptions,
+  opts: { validate?: boolean } = {},
+): WindowsCliSpawnPlan {
+  const parsed = crossSpawnInternals._parse(command, args, options);
+  const viaCmd = Boolean(parsed.file) && /\.(?:cmd|bat)$/i.test(parsed.file ?? "")
+    && parsed.options.windowsVerbatimArguments === true;
+  if (!viaCmd) {
+    return { command, args: [...args], options, file: parsed.file, route: "native", identity: command };
+  }
+  const batch = parsed.file!;
+  const text = readWindowsBatch(batch);
+  const target = text ? windowsNpmShimTarget(text) : null;
+  if (target) {
+    const dir = path.dirname(batch);
+    const program = path.join(dir, ...target.relative.split(/[\\/]+/).filter(Boolean));
+    if (regularFile(program)) {
+      if (target.kind === "exe") {
+        return { command: program, args: [...args], options, file: program, route: "npm-shim-direct", identity: program };
+      }
+      const local = path.join(dir, "node.exe");
+      const node = regularFile(local) ? local : crossSpawnInternals._parse("node", [], options).file;
+      if (node && /\.exe$/i.test(node)) {
+        return { command: node, args: [program, ...args], options, file: node, route: "npm-shim-direct", identity: node };
+      }
+    }
+  }
+  if (opts.validate !== false) {
+    if (args.some((arg) => /[\r\n]/.test(arg))) {
+      throw windowsLaunchError(WINDOWS_CMD_ARGUMENT_NEWLINE,
+        `${path.basename(batch)} runs through cmd.exe, which ends a command at a line break; pass multi-line text on stdin or in a file`);
+    }
+    if (typeof options.cwd === "string" && isWindowsUncPath(options.cwd)) {
+      throw windowsLaunchError(WINDOWS_UNC_CWD_CMD_UNSUPPORTED,
+        `${path.basename(batch)} runs through cmd.exe, which cannot use a network (UNC) folder as its working folder`);
+    }
+  }
+  // A batch that forwards its arguments re-parses them: escape for both passes (cross-spawn does this only under
+  // node_modules\.bin). One that cannot be read is treated as an npm-style shim, the common case.
+  const reparses = text === null || /%\*|%~?[0-9]/.test(text);
+  if (reparses && !/node_modules[\\/]\.bin[\\/][^\\/]+\.cmd$/i.test(batch)) {
+    const line = [crossSpawnEscape.command(path.normalize(command)), ...args.map((arg) => crossSpawnEscape.argument(arg, true))].join(" ");
+    parsed.args = ["/d", "/s", "/c", `"${line}"`];
+  }
+  return { command: parsed.command, args: parsed.args, options: parsed.options, file: batch, route: "cmd", parsed, identity: command };
 }
 
 /** child_process.spawn 대체 — Windows `.cmd`/`.bat` 심 해석 + GUI용 PATH 보강. */
@@ -262,7 +391,7 @@ export function spawnCli(
       suppressedSelfSpawnDiagnostics = 0;
     } else suppressedSelfSpawnDiagnostics += 1;
   }
-  const child = crossSpawn(command, args, {
+  const spawnOptions: SpawnOptions = {
     // A GUI parent on Windows gives every console child (CLI .cmd shims via cmd.exe, node, python) its own
     // visible console window unless hidden. Callers that need a console must pass windowsHide: false.
     windowsHide: true,
@@ -273,7 +402,22 @@ export function spawnCli(
       // 부가 증거가 된다. 손자(MCP/빌드)에도 상속되므로 트리 전체가 표식을 가진다.
       [AGENTLAS_SPAWN_MARKER_ENV]: `agentlas:${process.pid}`,
     },
-  });
+  };
+  let child: ChildProcess;
+  let identity = command;
+  if (process.platform === "win32") {
+    const plan = planWindowsCliSpawn(command, args, spawnOptions);
+    identity = plan.identity;
+    if (plan.parsed) {
+      child = nodeSpawn(plan.command, plan.args, { windowsHide: true, ...plan.options });
+      crossSpawnInternals._enoent.hookChildProcess(child, plan.parsed);
+    } else {
+      child = crossSpawn(plan.command, plan.args, { windowsHide: true, ...plan.options });
+    }
+  } else {
+    // spawnOptions already defaults windowsHide (an explicit caller choice wins); repeated for the console census.
+    child = crossSpawn(command, args, { windowsHide: true, ...spawnOptions });
+  }
   // A CLI may exit normally while an MCP grandchild keeps running, possibly
   // holding stdout/stderr open so `close` never arrives. Reclaim its owned
   // group on `exit`, with the same TERM -> KILL escalation as cancellation.
@@ -281,10 +425,11 @@ export function spawnCli(
   if (options.detached && process.platform !== "win32" && child.pid) {
     child.once("exit", () => killCliTree(child));
   }
-  // On Windows cross-spawn executes a .cmd shim through cmd.exe, so
-  // child.spawnfile alone loses the provider executable identity. Remember the
-  // original command (never its arguments) for the crash-recovery ledger.
-  rememberSpawnedRunChildCommand(child, command);
+  // On Windows a .cmd shim runs through cmd.exe, so child.spawnfile alone loses
+  // the provider executable identity. Remember the original command (never its
+  // arguments) for the crash-recovery ledger; an npm shim started directly
+  // records the executable that really runs, which is what the OS reports.
+  rememberSpawnedRunChildCommand(child, identity);
   return child;
 }
 
@@ -516,13 +661,20 @@ function runProbeCliVersion(command: string, timeoutMs: number): Promise<CliVers
  * - macOS: zsh, then bash, then sh; Linux: $SHELL, then bash, then sh. Only an absolute, executable path is used,
  *   so a missing $SHELL (a service environment) or a missing /bin/zsh never fails every command. Login shell (-lc).
  * `preferred` (a caller's explicit shell) is tried first on macOS and Linux.
+ * `cwd` (the folder the command will run in): cmd.exe cannot run in a UNC folder (`\\server\share`, `\\wsl$\…`); it
+ * prints a warning and runs in C:\Windows instead, so a Windows UNC folder is refused with
+ * `windows_unc_cwd_cmd_unsupported`. (`pushd` would map a drive letter that outlives a stopped or killed command.)
  */
-export function commandLineShellSpawn(command: string, preferred?: string): {
+export function commandLineShellSpawn(command: string, preferred?: string, cwd?: string): {
   file: string;
   args: string[];
   windowsVerbatimArguments: boolean;
 } {
   if (process.platform === "win32") {
+    if (cwd && isWindowsUncPath(cwd)) {
+      throw windowsLaunchError(WINDOWS_UNC_CWD_CMD_UNSUPPORTED,
+        "cmd.exe cannot use a network (UNC) folder as its working folder; open the project from a drive letter");
+    }
     return { file: process.env.ComSpec?.trim() || "cmd.exe", args: ["/d", "/s", "/c", `"${command}"`], windowsVerbatimArguments: true };
   }
   const candidates = process.platform === "darwin"
@@ -547,8 +699,9 @@ export function detachedSpawnOpts(): { detached?: boolean; windowsHide?: boolean
 /**
  * LLM 실행 자식 트리 종료 — POSIX는 프로세스 그룹 SIGTERM → graceMs 후 SIGKILL 승격.
  * 단일 child.kill()은 CLI가 띄운 손자(MCP 서버·빌드 프로세스)를 고아로 남기던 문제를 막는다.
- * Windows는 taskkill /T 로 트리 전체에 정상 종료를 요청하고 grace 뒤 /F 로 승격한다.
- * 그룹킬/taskkill 실행 실패 시에만 단일 child.kill()로 폴백한다. detachedSpawnOpts()와 짝으로 사용.
+ * Windows는 리더가 살아 있는 동안 곧바로 taskkill /T /F 로 트리 전체를 끝낸다(창 없는 콘솔 트리는 /F 없이는
+ * 끝나지 않는다 — forceKillWindowsTree 주석). 그룹킬/taskkill 실행 실패 시에만 단일 child.kill()로 폴백한다.
+ * detachedSpawnOpts()와 짝으로 사용.
  */
 // Keep shutdown aware of escalations scheduled before a leader's close event.
 // A closed leader can still have an MCP grandchild in its owned process group.
@@ -631,32 +784,40 @@ function scheduleCliTreeEscalation(action: () => void, graceMs: number): () => v
   };
 }
 
+/**
+ * Windows tree kill: `taskkill /PID <pid> /T /F`, at once, while the leader handle still proves this PID is ours.
+ *
+ * Run children are window-less console processes (piped stdio + windowsHide = CREATE_NO_WINDOW), so a non-forced
+ * taskkill has no window to send WM_CLOSE to and always answers "can only be terminated forcefully" (exit 1). The old
+ * first pass did exactly that, its fallback `child.kill()` ended the leader only, and the leader's exit then cancelled
+ * the /F pass: Stop left an npm-installed agent (node under cmd.exe) editing files and every shell/MCP grandchild
+ * running (2026-10-24 Windows audit F2 / W-01). A graceful end on Windows goes through each runtime's own protocol
+ * (Claude interrupt, ACP session/cancel, Codex turn/interrupt, stdin EOF) before this is called.
+ * `child.kill()` remains only for a taskkill that cannot start, or one that fails while the leader is still alive.
+ */
+function forceKillWindowsTree(child: ChildProcess): void {
+  const pid = child.pid;
+  // Never target a numeric PID after Node has observed the owned leader exit: Windows can reuse it.
+  if (!pid || child.exitCode !== null || child.signalCode !== null) return;
+  const fallback = (): void => {
+    if (child.exitCode !== null || child.signalCode !== null) return;
+    try { child.kill(); } catch { /* already exited */ }
+  };
+  let killer: ChildProcess;
+  try {
+    killer = crossSpawn("taskkill.exe", ["/PID", String(pid), "/T", "/F"], { stdio: "ignore", windowsHide: true });
+  } catch {
+    fallback();
+    return;
+  }
+  killer.once("error", fallback);
+  killer.once("close", (code) => { if (code !== 0) fallback(); });
+  killer.unref?.();
+}
+
 export function killCliTree(child: ChildProcess, graceMs = 4000): void {
   if (process.platform === "win32" && child.pid) {
-    const pid = child.pid;
-    const runTaskkill = (force: boolean): void => {
-      const args = ["/PID", String(pid), "/T", ...(force ? ["/F"] : [])];
-      const killer = crossSpawn("taskkill.exe", args, {
-        stdio: "ignore",
-        windowsHide: true,
-      });
-      const fallback = (): void => {
-        try { child.kill(); } catch { /* already exited */ }
-      };
-      killer.once("error", fallback);
-      killer.once("close", (code) => { if (code !== 0) fallback(); });
-      killer.unref?.();
-    };
-
-    runTaskkill(false);
-    scheduleCliTreeEscalation(() => {
-      // Never target a numeric PID after Node has observed the owned leader exit:
-      // Windows can reuse that PID for an unrelated process during the grace period.
-      // taskkill /T already enumerated the descendants in the first pass; /F is safe
-      // only while the original leader handle still proves ownership of this PID.
-      if (child.exitCode !== null || child.signalCode !== null) return;
-      runTaskkill(true);
-    }, graceMs);
+    forceKillWindowsTree(child);
     return;
   }
   if (process.platform !== "win32" && child.pid) {
@@ -840,6 +1001,11 @@ export function trackRunChild(child: ChildProcess): void {
 }
 
 function terminateProbeProcess(child: ChildProcess): void {
+  // A `--version` probe through an npm .cmd is cmd.exe -> node: end the tree, not only cmd.exe.
+  if (process.platform === "win32" && child.pid) {
+    forceKillWindowsTree(child);
+    return;
+  }
   if (process.platform !== "win32" && child.pid) {
     try {
       process.kill(-child.pid, "SIGTERM");

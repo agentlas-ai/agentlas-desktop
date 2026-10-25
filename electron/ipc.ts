@@ -1,4 +1,5 @@
 import { withoutArchivedAgents } from "./archive/auto-archive";
+import { portableFileName } from "../shared/portable-file-name";
 import { configuredNativeGuiControls } from "./invocation/native-gui-controls";
 import { ownerTurnStartsOnDesktop } from "./invocation/goal-owner-route";
 import { publishLegacyInvocationActiveChats, combinedInvocationActiveChatIds } from "./invocation/native-gui-public";
@@ -31,7 +32,7 @@ import { registerAutomationChatActivityIpc } from "./automation-chat-activity-ip
 import { registerGoalPanelIpc } from "./goal-panel-ipc";
 import { appendLongRunEvent, getLongRunByGoalId, bindCurrentGoalRevisionToLongRun, longRunBudgetExhaustion, longRunOwnerHold, LONG_RUN_BUDGET_EXHAUSTED_CODE } from "./store/long-runs";
 import { getChatGoalRevision, reauthorizeStoredAutomaticGoal, reviseStoredAutomaticGoal } from "./store/chat-goals";
-import { adoptExplicitGoalGrant } from "./long-run/explicit-goal-authority";
+import { adoptExplicitGoalGrant, ensureExplicitGoalContract } from "./long-run/explicit-goal-authority";
 import { latestGoalWaitSubscription } from "./long-run/wait-subscriptions";
 import { ONE_DECISION_JUDGE_TIMEOUT_MS } from "../shared/one-decision";
 import { goalResumeRecoveryBlockerCode } from "../shared/long-run";
@@ -90,7 +91,7 @@ import { setAcpProfileReader } from "./runtime/acp-agents";
 import { sanitizeTerminalProfiles } from "../shared/terminal-profiles";
 import { tryAcquireRuntimeMaintenance } from "./runtime/run-slots";
 import { clearModelCache, listRuntimeModels } from "./runtime/providers";
-import { fireRunAlert, getRunAlerts, setRunAlerts } from "./run-alerts";
+import { fireRunAlert, getRunAlerts, setRunAlerts, windowWatched } from "./run-alerts";
 import { installCli, openCliLogin, updateCli, type InstallableCli, type ManageableCli } from "./runtime/install-cli";
 import { defaultRuntimeConnector, probeAllRuntimeAuth, probeRuntimeAuthCached, setRuntimeConnectEmitter } from "./runtime/runtime-connect";
 import { CONNECTABLE_RUNTIMES, type ConnectableRuntime } from "../shared/runtime-connect";
@@ -1073,7 +1074,7 @@ function applyPendingConfirmationAttention(win: BrowserWindow | null, rawCount: 
     return;
   }
 
-  const focused = win?.isFocused() ?? false;
+  const focused = windowWatched(win);
   if (focused || count <= previous) return;
 
   try {
@@ -2670,7 +2671,8 @@ export function registerIpcHandlers(): { businessShipping: ReturnType<typeof reg
       if (!markdown.trim()) return { ok: false, reason: "empty document" };
       const win = BrowserWindow.fromWebContents(event.sender);
       const title = typeof payload?.title === "string" ? payload.title : "";
-      const suggested = (payload?.suggestedName || `${title || "document"}.pdf`).replace(/[/\\]/g, "-");
+      // Windows refuses : ? * " < > | and reserved names in a save dialog's default name (shared/portable-file-name.ts).
+      const suggested = portableFileName(payload?.suggestedName || `${title || "document"}.pdf`, "document.pdf");
       const chosen = await dialog.showSaveDialog(win ?? undefined!, {
         defaultPath: suggested.endsWith(".pdf") ? suggested : `${suggested}.pdf`,
         filters: [{ name: "PDF", extensions: ["pdf"] }],
@@ -2909,7 +2911,7 @@ export function registerIpcHandlers(): { businessShipping: ReturnType<typeof reg
       const win = BrowserWindow.fromWebContents(e.sender);
       try {
         const res = await dialog.showSaveDialog(win ?? undefined!, {
-          defaultPath: suggestedName || "export.txt",
+          defaultPath: portableFileName(typeof suggestedName === "string" ? suggestedName : "", "export.txt"),
         });
         if (res.canceled || !res.filePath) return { ok: false, canceled: true };
         fs.writeFileSync(res.filePath, content, "utf8");
@@ -4707,6 +4709,12 @@ export function registerIpcHandlers(): { businessShipping: ReturnType<typeof reg
       acceptanceCriteria: deriveGoalAcceptanceCriteria(normalizedObjective, locale),
       projectDir,
     });
+    // The ledger row alone left the Goal with no contract (production 2026-10-24, X Marketing room: defined through
+    // app.call, then every owner message was refused). The goal-mode turn path writes both; so does this one.
+    if (created) {
+      try { ensureExplicitGoalContract(getDb(), chat.goalId); }
+      catch (contractError) { console.warn("[long-run] goal contract not recorded:", contractError); }
+    }
     const context = getGoalLedgerGoal(chat.goalId, projectDir);
     if (!created && !context) {
       const failure = lastGoalLedgerFailure();
@@ -4812,6 +4820,10 @@ export function registerIpcHandlers(): { businessShipping: ReturnType<typeof reg
     if (!getChatGoalRevision(expectedGoalId)) adoptExplicitGoalGrant(expectedGoalId);
     const run = getLongRunByGoalId(expectedGoalId);
     if (!run) return getGoalLedgerGoal(expectedGoalId, getChatWorkingFolder(id));
+    // No recorded owner grant (a Goal defined through chats:defineGoal): Resume has no instruction to continue on, so
+    // automaticGoalResumeRequest returns null and the chip only said "could not be checked or changed". The owner's next
+    // message in this room is the grant (explicit-goal-authority.ts findOwnerTurnGoalGrant); say so with a typed code.
+    if (!getChatGoalRevision(expectedGoalId)) throw Object.assign(new Error("goal_owner_grant_required"), { code: "goal_owner_grant_required" });
     const revision = getChatGoalRevision(expectedGoalId);
     const { request, queued } = await queueAutomaticGoalResume(id, expectedVersion);
     try {

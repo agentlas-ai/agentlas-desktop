@@ -389,6 +389,43 @@ export function oneDecisionMultiSelectableIndexes(view: OneDecisionViewV1): numb
     .map((option) => option.index);
 }
 
+/**
+ * Options the owner may pick as their own answer: the fence's rows minus the typed reject/modify controls and the
+ * product's own reject reply. Risk, `blockedReason` and V1 `enabled` are not read — a missing or careful verdict
+ * must not take an owner's choices away (2026-10-24: a multi-select One question became an approve/reject card
+ * with a dead Approve because the V2 set above was empty until a verdict landed). Choosing sends the exact labels
+ * as the owner's answer and grants nothing. V4 owner answers (Mobile) and the Desktop One card share this rule.
+ */
+export function oneDecisionOwnerSelectableIndexes(view: Pick<OneDecisionViewV1, "options">): number[] {
+  return view.options
+    .filter((option) => option.disposition !== "reject"
+      && option.disposition !== "modify"
+      && option.label !== ONE_DECISION_PRODUCT_SAFE_REJECT_REPLY)
+    .map((option) => option.index);
+}
+
+/**
+ * The rows the One card draws as a question (check boxes or radios with Submit). Empty means the card is an
+ * approval (approve · reject). The fence's structure decides the kind: a multi-select question is always a
+ * question; it shows the owner-selectable rows, or every row when a verdict typed all of them reject/modify, never
+ * an approve row with nothing to approve. A single-select question is an approval only when at most one row is not
+ * a reject/modify control; a light (R0) choice draws its enabled rows.
+ */
+export function oneDecisionQuestionCardIndexes(
+  view: Pick<OneDecisionViewV1, "options">,
+  shape: { multiSelect: boolean; lightweightChoice: boolean },
+): number[] {
+  if (shape.multiSelect) {
+    const owner = oneDecisionOwnerSelectableIndexes(view);
+    return owner.length > 0 ? owner : view.options.map((option) => option.index);
+  }
+  const answerRow = (option: OneDecisionOption) => option.disposition !== "reject" && option.disposition !== "modify";
+  const direct = view.options.filter((option) => option.enabled && answerRow(option)).map((option) => option.index);
+  if (shape.lightweightChoice && direct.length > 1) return direct;
+  const selectable = view.options.filter(answerRow).map((option) => option.index);
+  return selectable.length > 1 ? selectable : [];
+}
+
 /** Offer typed answers only for a judged question with no granting option. */
 export function oneDecisionOtherAnswerAllowed(
   view: OneDecisionViewV1,

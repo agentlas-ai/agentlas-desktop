@@ -1,3 +1,4 @@
+import { renameWithRetry } from "../fs/retry";
 import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -145,7 +146,7 @@ async function prepareProfile(runtime: ManagedNodeRuntime, profile: ArtifactBuil
       await runArtifactCompilerChild(runtime, [runtime.npmCli, "ci", "--include=dev", "--ignore-scripts", "--no-audit", "--no-fund"], staging, signal, 180_000);
       await fs.writeFile(path.join(staging, "profile-receipt.json"), JSON.stringify({profileDigest: profile.profileDigest, treeDigest: await treeDigest(staging)}));
       signal?.throwIfAborted();
-      await fs.rename(staging, cache);
+      await renameWithRetry(staging, cache);
       await freezeTree(cache);
       return cache;
     } catch (error) { await fs.rm(staging, {recursive:true,force:true}).catch(() => {}); throw error; }

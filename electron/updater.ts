@@ -33,6 +33,9 @@ import { userDataDir, userDataPath } from "./runtime-paths";
 import { enterpriseFeedUrl, enterpriseReleaseMetadataUrl, usesCompanyUpdates } from "./enterprise-server/connection";
 import { enterpriseAuthorizationHeader, enterpriseConnection, noteEnterpriseFeedCheck, startEnterpriseServerConnection } from "./enterprise-server/runtime";
 import { enterpriseServerFetch } from "./enterprise-server/os-trust-fetch";
+import { MIRRORED_RELEASE_MANIFEST_FILE } from "./enterprise-server/release-manifest";
+import { OFFICIAL_RELEASE_TRUST_ROOTS, REVOKED_RELEASE_SIGNING_KIDS } from "./enterprise-server/release-trust-roots";
+import { desktopGenericFeedOptions, readPublisherNames, verifyReleaseIntegrity } from "./updater/release-integrity";
 
 // electron-updater is CommonJS in the main process bundle.
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -161,15 +164,68 @@ async function configureDesktopReleaseFeed(): Promise<void> {
   if (!tag) return;
   const company = enterpriseConnection();
   if (usesCompanyUpdates(company)) {
-    // Company mirror (04-UPDATE-CHAIN.md): same signed installers, served from the Enterprise Server. electron-updater
-    // still verifies the OS code signature, so a compromised mirror cannot install an unsigned build.
+    // Company mirror (04-UPDATE-CHAIN.md): the same installers, served from the Enterprise Server, which also serves
+    // the latest*.yml carrying their sha512 — a compromised mirror can change both. Only macOS (Squirrel.Mac code
+    // signature) and a Windows build with a configured Authenticode publisher have an OS signature check here; Windows
+    // builds are unsigned today and AppImage has none. Those platforms must verify the Agentlas-signed release
+    // manifest instead (updater/release-integrity.ts, wired as verifyReleaseIntegrity below) or refuse the update.
     autoUpdater.requestHeaders = { ...enterpriseAuthorizationHeader() };
-    autoUpdater.setFeedURL({ provider: "generic", url: enterpriseFeedUrl(company, tag) });
+    autoUpdater.setFeedURL(desktopGenericFeedOptions(enterpriseFeedUrl(company, tag)));
     return;
   }
-  autoUpdater.setFeedURL({
-    provider: "generic",
-    url: `https://github.com/${OFFICIAL_DESKTOP_RELEASE_REPOSITORY}/releases/download/${tag}/`,
+  autoUpdater.setFeedURL(desktopGenericFeedOptions(
+    `https://github.com/${OFFICIAL_DESKTOP_RELEASE_REPOSITORY}/releases/download/${tag}/`,
+  ));
+}
+
+/** publisherName from the bundled app-update.yml — written by electron-builder only for a signed Windows build. */
+function bundledPublisherNames(): string[] {
+  try {
+    return readPublisherNames(fs.readFileSync(updateConfigPath(), "utf8"));
+  } catch {
+    return [];
+  }
+}
+
+const RELEASE_MANIFEST_TIMEOUT_MS = 15_000;
+const RELEASE_MANIFEST_MAX_BYTES = 256 * 1024;
+
+/** The company server's copy of the cloud-signed release list for one version, or null when it cannot be read. */
+async function readMirroredReleaseManifest(version: string): Promise<unknown | null> {
+  const company = enterpriseConnection();
+  if (!usesCompanyUpdates(company)) return null;
+  const url = `${enterpriseFeedUrl(company, `v${version}`)}${MIRRORED_RELEASE_MANIFEST_FILE}`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), RELEASE_MANIFEST_TIMEOUT_MS);
+  timer.unref?.();
+  try {
+    const response = await enterpriseServerFetch(url, {
+      headers: { Accept: "application/json", ...enterpriseAuthorizationHeader() },
+      signal: controller.signal,
+    });
+    if (!response.ok) return null;
+    const text = await response.text();
+    if (text.length > RELEASE_MANIFEST_MAX_BYTES) return null;
+    return JSON.parse(text) as unknown;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function releaseIntegrityFor(input: { version: string; stage: "before-download" | "before-install"; downloadedFile: string | null }) {
+  const company = enterpriseConnection();
+  return verifyReleaseIntegrity({
+    platform: process.platform,
+    feed: usesCompanyUpdates(company) ? { kind: "company", serverUrl: company.serverUrl } : { kind: "official" },
+    publisherNames: process.platform === "win32" ? bundledPublisherNames() : [],
+    version: input.version,
+    stage: input.stage,
+    downloadedFile: input.downloadedFile,
+    roots: OFFICIAL_RELEASE_TRUST_ROOTS,
+    revokedKids: REVOKED_RELEASE_SIGNING_KIDS,
+    fetchManifest: () => readMirroredReleaseManifest(input.version),
   });
 }
 
@@ -497,6 +553,7 @@ export async function initAutoUpdater(options: AutoUpdaterInitOptions = {}): Pro
     runtimeVersion: () => readBundledRuntimeVersion(process.resourcesPath, sourceRoot),
     offeredVersion: readOfferedVersion,
     requestInstall: () => requestUpdaterInstall(undefined, quitAndInstall),
+    verifyReleaseIntegrity: releaseIntegrityFor,
     databaseSchemaVersion: () => readDatabaseSchemaVersion(dbPath),
     inspectInstalledAppTrust: (bundlePath) => inspectMacInstalledAppTrust({
       bundlePath,

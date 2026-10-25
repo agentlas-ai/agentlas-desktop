@@ -27,7 +27,8 @@ import type {
 import {
   type ByokBackend,
 } from "@shared/models";
-import { AUTO_PROVIDER } from "@shared/multimodal";
+import { AUTO_PROVIDER, MULTIMODAL_PROVIDERS } from "@shared/multimodal";
+import { credentialRetryTargets } from "@shared/credential-recovery";
 import { navigate } from "@/lib/navigation";
 import { IconCheck, IconFilm, IconImage, IconKey, IconLock, IconWand } from "@/components/Icon";
 import { MigrationPanel } from "@/components/MigrationPanel";
@@ -218,6 +219,28 @@ export default function SettingsPage() {
       setMultimodalRefreshing(false);
     }
   }, []);
+
+  /**
+   * Retry: first an explicit read of each key of this section whose automatic read failed (value-free Main handles, the
+   * same call as the credential recovery panel), then the reload. A reload alone repeated the refused automatic read.
+   */
+  const retryMultimodal = useCallback(async () => {
+    const api = ipc();
+    if (!api) return false;
+    setMultimodalRefreshing(true);
+    try {
+      const failures = await api.credentialRecovery.list().catch(() => []);
+      // The catalog itself when the provider list is what failed to load.
+      const providers = multimodalProviders.length > 0 ? multimodalProviders : MULTIMODAL_PROVIDERS;
+      const envKeys = [...new Set(providers.flatMap((provider) => provider.envKeys))];
+      for (const failure of credentialRetryTargets(failures, envKeys)) {
+        await api.credentialRecovery.retry(failure.retryToken).catch(() => undefined);
+      }
+    } finally {
+      setMultimodalRefreshing(false);
+    }
+    return refreshMultimodal();
+  }, [multimodalProviders, refreshMultimodal]);
 
   const refresh = useCallback(async () => {
     const api = ipc();
@@ -931,7 +954,7 @@ export default function SettingsPage() {
           onDraftChange={(key, value) => setMultimodalDraft((draft) => ({ ...draft, [key]: value }))}
           onSelect={(modality, providerId) => void saveMultimodalProvider(modality, providerId)}
           onSaveEnv={(key) => void saveMultimodalEnv(key)}
-          onRetry={() => void refreshMultimodal()}
+          onRetry={() => void retryMultimodal()}
         />
 
         <RunAlertsPanel locale={locale} />
@@ -2439,6 +2462,7 @@ function UpdatePanel() {
     if (state.code === "continuity-backup-failed") return t("settings.update.safety_backup_failed");
     if (state.code === "legacy-cleanup-failed") return t("settings.update.cleanup_failed");
     if (state.code === "compatibility-metadata-missing") return t("settings.update.metadata_missing");
+    if (state.code === "install-integrity-unverified") return t("settings.update.integrity_unverified");
     if (state.code === "minimum-app-version") return t("settings.update.too_old_to_auto_update");
     if (state.code === "minimum-schema-version") return t("settings.update.schema_incompatible");
     switch (state.status) {

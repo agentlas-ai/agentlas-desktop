@@ -23,6 +23,7 @@ import { runCodexAliveResidentTurn, closeCodexAliveResidentOwner,
 import { aliveDecisionProfileForRequest } from "./alive-decision-context";
 import { resolveEffectiveContextWindow } from "../../shared/models";
 import { accountCodexHome, adoptCodexThreadIntoProductStore, isIsolatedCodexProductHome, withCodexProductHome } from "./codex-product-home";
+import { linkMirrorEntry, reconcileMirrorLinks, reportIsolationUnavailable } from "./mirror-link";
 import os from "node:os";
 import fs from "node:fs/promises";
 import crypto from "node:crypto";
@@ -3277,8 +3278,12 @@ async function runCodexMinimalObservation(bin: string, req: RunnerRequest, event
   observeNativeFile: ReturnType<typeof bindNativeFileProofObserver>): Promise<RunnerResult> {
   const realHome = req.env?.CODEX_HOME || process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
   const home = await fs.mkdtemp(path.join(os.tmpdir(), "agentlas-codex-observation-"));
+  const realAuth = path.join(realHome, "auth.json");
   try {
-    await fs.symlink(path.join(realHome, "auth.json"), path.join(home, "auth.json")).catch(() => {});
+    // A symlink; on Windows without the symlink right a hard link or copy (mirror-link.ts). Nothing made: the look runs
+    // signed out, as before, but no longer silently.
+    try { if (linkMirrorEntry(realAuth, path.join(home, "auth.json")) === null) reportIsolationUnavailable("codex-observation", "sign-in-not-linked"); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") reportIsolationUnavailable("codex-observation", error); }
     const instructions = path.join(home, "observation-instructions.md");
     await fs.writeFile(instructions, composeCodexHostInstructions(req), { encoding: "utf8", mode: 0o600 });
     const schema = req.outputSchema ? openAiStrictSchemaOrNull(req.outputSchema.schema) : null;
@@ -3314,6 +3319,8 @@ async function runCodexMinimalObservation(bin: string, req: RunnerRequest, event
     return { text: run.text.trim(), tokens: run.tokens, ...codexExecSettlement(run),
       ...(run.observedUsage ? { observedUsage: run.observedUsage } : {}) };
   } finally {
+    // A token Codex refreshed in a Windows copy / broken hard link reaches the account's auth.json before the look is removed.
+    try { reconcileMirrorLinks(home, new Map([["auth.json", realAuth]])); } catch { /* reported inside */ }
     await fs.rm(home, { recursive: true, force: true }).catch(() => {});
   }
 }

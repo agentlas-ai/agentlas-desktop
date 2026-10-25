@@ -161,6 +161,45 @@ function runtimesFor(runId: string): AutomationRunRuntime[] {
   return [...seen.values()];
 }
 
+/*
+ * Finished runs' digests, keyed by the run row's own identity (status, last activity, node states). Re-digesting
+ * reads every tool event of the run and parses each payload: the right panel's 자동화 tab asks for five runs each
+ * time it opens, which was ~300 KB and 120-180 ms of Main on the owner's store (measured 2026-10-25). A finished
+ * run's ledger does not change (the renderer's digest cache relies on the same fact); a run that can still move is
+ * never cached, and any change to the row's status/activity/node states is a different key.
+ */
+const MAX_FINISHED_DIGESTS = 256;
+const finishedDigests = new Map<string, AutomationRunDigest>();
+
+function finishedDigestKey(row: RunRow): string | null {
+  // Settled outcomes only: running, needs_input (resumable on the same row) and anything unknown always re-read.
+  if (row.status !== "ok" && row.status !== "error" && row.status !== "cancelled") return null;
+  return JSON.stringify([row.id, row.automation_id, row.status, row.started_at, row.last_activity_at, row.node_states_json]);
+}
+
+/** Run-history pages only (right panel); report delivery and live digests always re-read the ledger. */
+function pagedDigestRow(row: RunRow): AutomationRunDigest {
+  const key = finishedDigestKey(row);
+  if (key) {
+    const cached = finishedDigests.get(key);
+    if (cached) {
+      finishedDigests.delete(key);
+      finishedDigests.set(key, cached);
+      return cached;
+    }
+  }
+  const digest = digestRow(row);
+  if (key) {
+    finishedDigests.set(key, digest);
+    while (finishedDigests.size > MAX_FINISHED_DIGESTS) {
+      const oldest = finishedDigests.keys().next().value;
+      if (oldest === undefined) break;
+      finishedDigests.delete(oldest);
+    }
+  }
+  return digest;
+}
+
 function digestRow(row: RunRow): AutomationRunDigest {
   const running = row.status === "running";
   return digestAutomationRun({
@@ -197,7 +236,7 @@ export function automationRunPage(automationId: string, options: { before?: stri
   const page = rows.slice(0, limit);
   return {
     automationId,
-    runs: page.map(digestRow),
+    runs: page.map(pagedDigestRow),
     nextCursor: rows.length > limit ? page.at(-1)?.started_at ?? null : null,
   };
 }

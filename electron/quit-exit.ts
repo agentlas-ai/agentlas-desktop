@@ -162,7 +162,10 @@ export interface RelaunchAfterQuit {
  * The executable to start again. An AppImage runs from a mount that disappears with this process, so Electron's default
  * (process.execPath inside the mount) would start nothing: relaunch the AppImage file itself, as the updater does.
  */
-export function relaunchExecPath(platform: NodeJS.Platform, appImage: string | undefined): string | undefined {
+export function relaunchExecPath(platform: NodeJS.Platform, appImage: string | undefined, portableFile?: string | undefined): string | undefined {
+  // Windows Portable: process.execPath is the %TEMP% extraction that the portable launcher deletes after this
+  // process exits (Windows audit ui.md #7). Start the portable launcher file itself.
+  if (platform === "win32") return typeof portableFile === "string" && portableFile.trim().length > 0 ? portableFile : undefined;
   return platform === "linux" && typeof appImage === "string" && appImage.trim().length > 0 ? appImage : undefined;
 }
 

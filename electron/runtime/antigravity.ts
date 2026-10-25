@@ -2500,7 +2500,7 @@ async function runPreparedAntigravityAttempt(
       ? { projectId: (await ensureAntigravityBrowserProjectPolicy(undefined, agyRunHome)).projectId, scopedRead: false }
       : null;
   const ensureBrowserReadPolicy = (env: NodeJS.ProcessEnv): void => {
-    if (browserProject?.scopedRead) ensureAntigravityBrowserReadProjectPolicy(env.HOME || os.homedir(), env.AGENTLAS_AGY_REAL_HOME || os.homedir());
+    if (browserProject?.scopedRead) ensureAntigravityBrowserReadProjectPolicy(agySpawnHome(env), env.AGENTLAS_AGY_REAL_HOME || os.homedir());
   };
 
   // One-shot agy has no stdin prompt input. Its oversized prompt needs a

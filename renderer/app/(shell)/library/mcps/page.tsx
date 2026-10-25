@@ -39,6 +39,7 @@ import type {
 import {
   IconLock, IconSparkles, IconSearch, IconRefresh, IconSettings, IconPlus, IconChevronDown,
 } from "@/components/Icon";
+import { CredentialStoreWord } from "@/components/PlatformWord";
 
 type Scope = "mine" | "discover";
 type Route =
@@ -554,14 +555,14 @@ function LibraryMcpsView({ passiveEntry }: { passiveEntry: boolean }) {
           </div>}
           {customOpenCrabUrl && <p className={styles.fieldAlert} role="alert">
             {locale === "en"
-              ? "Private OpenCrab URLs contain a credential. Connect OpenCrab from Discover so the URL stays in Keychain."
-              : "OpenCrab 개인 URL에는 인증정보가 들어 있습니다. URL이 키체인에만 남도록 탐색에서 OpenCrab을 찾아 연결하세요."}
+              ? <>Private OpenCrab URLs contain a credential. Connect OpenCrab from Discover so the URL stays in <CredentialStoreWord ko={false} />.</>
+              : <>OpenCrab 개인 URL에는 인증정보가 들어 있습니다. URL이 <CredentialStoreWord ko />에만 남도록 탐색에서 OpenCrab을 찾아 연결하세요.</>}
           </p>}
         </>}
         <input className={`${styles.input} ${styles.mono}`} value={cEnv} onChange={(e) => setCEnv(e.target.value)} placeholder={cTransport === "stdio" ? t("mcps.custom.env") : t("mcps.custom.header")} aria-label={ko ? "필수 키 또는 헤더 이름 (값 제외)" : "Required key or header names (no values)"} aria-invalid={!keysValid} />
         {!keysValid && <p className={styles.fieldAlert} role="alert">{ko ? "키 값을 붙여넣지 말고 키 또는 헤더 이름만 입력하세요." : "Enter only key or header names; do not paste values."}</p>}
         <div className={styles.customFoot}>
-          <span className={styles.customHint}><IconLock size={12} />{ko ? "값은 키체인에만 저장" : "Values stay in Keychain"}</span>
+          <span className={styles.customHint}><IconLock size={12} />{ko ? <>값은 <CredentialStoreWord ko />에만 저장</> : <>Values stay in <CredentialStoreWord ko={false} /></>}</span>
           <button type="button" className={styles.primaryButton} onClick={() => void addCustom()} disabled={!customValid || cBusy || customOpenCrabUrl}>{cBusy ? t("mcps.testing") : t("mcps.custom.create")}</button>
         </div>
       </div>

@@ -187,7 +187,7 @@ export class BackgroundTaskRegistry {
       // outlives the service. On Windows a detached cmd.exe had no console, so every console program the command ran
       // opened its own visible window; survivingHiddenSpawn starts it from a detached launcher with a hidden console
       // instead (still outside the service's job; stop()'s tree kill on the launcher reaches the command).
-      const shell = commandLineShellSpawn(command, this.opts.shell);
+      const shell = commandLineShellSpawn(command, this.opts.shell, cwd);
       const plan = survivingHiddenSpawn({
         command: shell.file, args: shell.args, cwd, env, stdio: ["ignore", out, out],
         windowsVerbatimArguments: shell.windowsVerbatimArguments,

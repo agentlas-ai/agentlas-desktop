@@ -15,6 +15,39 @@ import { sha256File } from "./download-manager";
 import { extractEngineZip } from "./archive";
 import { verifyManagedEngineAttestation } from "./attestation";
 import { parseEngineDeviceList } from "./acceleration";
+import { isTransientLock, renameWithRetry } from "../fs/retry";
+
+/**
+ * Replace an installed engine without deleting a live one. The old code ran rm(finalRoot) then rename: with
+ * llama-server.exe running, Windows deleted what it could and refused the exe/DLLs, leaving a half-deleted live
+ * engine whose receipt then failed its hash check (Windows audit fs.md #16). Now the old root is moved aside first
+ * (Windows refuses to move a folder holding a running exe, so nothing is deleted), the new tree takes its place,
+ * and the old copy is removed afterwards. A folder still held after the retries fails as engine_in_use.
+ */
+export async function swapEngineRoot(staged: string, finalRoot: string, io: {
+  exists?: (path: string) => Promise<boolean>;
+  move?: (from: string, to: string) => Promise<void>;
+  remove?: (path: string) => Promise<void>;
+} = {}): Promise<void> {
+  const exists = io.exists ?? (async (path: string) => lstat(path).then(() => true, () => false));
+  const move = io.move ?? ((from: string, to: string) => renameWithRetry(from, to));
+  const remove = io.remove ?? ((path: string) => rm(path, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
+  let aside: string | null = null;
+  if (await exists(finalRoot)) {
+    aside = `${finalRoot}.old-${randomUUID()}`;
+    try { await move(finalRoot, aside); }
+    catch (error) {
+      if (isTransientLock(error)) throw Object.assign(new Error("engine_in_use"), { code: "engine_in_use" });
+      throw error;
+    }
+  }
+  try { await move(staged, finalRoot); }
+  catch (error) {
+    if (aside) await move(aside, finalRoot).catch(() => { /* the aside copy stays for the next install */ });
+    throw error;
+  }
+  if (aside) await remove(aside).catch(() => { /* a later install removes it */ });
+}
 
 interface CommandResult {
   exitCode: number | null;
@@ -219,8 +252,7 @@ export class LocalEngineInstaller {
       const executableSha256 = await sha256File(executable);
       const runtimeFiles = await Promise.all(files.map(async file => ({ relativePath: relative(temp,file).split(sep).join("/"), sha256: await sha256File(file), byteLength: (await stat(file)).size })));
       signal?.throwIfAborted();
-      await rm(finalRoot, { recursive: true, force: true });
-      await rename(temp, finalRoot);
+      await swapEngineRoot(temp, finalRoot);
       const devices = await this.probeDevices(resolve(finalRoot, executableRelativePath), signal);
       return {
         schemaVersion: LOCAL_MODEL_HUB_SCHEMA_VERSION,

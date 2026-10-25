@@ -6,10 +6,13 @@
 // session written through the mirror lands in the real folder and resumes from either side. The person's real
 // folder is only ever READ here: nothing in it is created, changed or removed.
 //
-// A mirror directory holds only symlinks plus files this module writes (`own`). Anything else found there was
+// A mirror directory holds only links plus files this module writes (`own`). Anything else found there was
 // created by the CLI itself (a store a newer version adds); it is left alone, never moved or deleted.
+// "Link" is mirror-link.ts: a symlink on macOS/Linux; on Windows a junction for a folder and, for a file, a symlink
+// when allowed, else a recorded hard link or copy that every sync reconciles (Windows audit 2026-10-24, W-03).
 import fs from "node:fs";
 import path from "node:path";
+import { MIRROR_LINK_RECORD, adoptMirrorHardLink, isRecordedMirrorEntry, linkMirrorEntry, mirrorEntryLinked, reconcileMirrorLinks, unlinkMirrorEntry } from "./mirror-link";
 
 export interface ConfigHomeMirrorInput {
   /** The person's real folder (read only). */
@@ -41,20 +44,15 @@ function quietly(action: () => void): void {
   }
 }
 
-/** A symlink; on Windows a folder is linked as a junction (no privilege needed), a file as a symlink (may be refused). */
-function link(target: string, at: string): void {
-  let type: "junction" | undefined;
-  if (process.platform === "win32") { try { if (fs.statSync(target).isDirectory()) type = "junction"; } catch { /* dangling */ } }
-  fs.symlinkSync(target, at, type);
-}
-
 /** Brings the mirror in line with the real folder. Throws when links cannot be made. */
 export function syncConfigHomeMirror(input: ConfigHomeMirrorInput): void {
   const own = input.own ?? {};
   const folders = new Set(input.folders ?? []);
   const entries = fs.readdirSync(input.realDir);
   fs.mkdirSync(input.mirrorDir, { recursive: true, mode: 0o700 });
-  const wanted = new Set(entries.filter((name) => !input.hide(name) && !folders.has(name) && !(name in own)));
+  const wanted = new Set(entries.filter((name) => name !== MIRROR_LINK_RECORD && !input.hide(name) && !folders.has(name) && !(name in own)));
+  // Windows hard links / copies first: one no longer wanted goes, the rest behave like the links they stand for.
+  reconcileMirrorLinks(input.mirrorDir, new Map([...wanted].map((name) => [name, path.join(input.realDir, name)] as const)));
   for (const name of fs.readdirSync(input.mirrorDir)) {
     const at = path.join(input.mirrorDir, name);
     const stat = lstat(at);
@@ -64,19 +62,23 @@ export function syncConfigHomeMirror(input: ConfigHomeMirrorInput): void {
       if (!wanted.has(name) || fs.readlinkSync(at) !== path.join(input.realDir, name)) quietly(() => fs.unlinkSync(at));
       continue;
     }
-    if (name in own || folders.has(name)) continue;
+    if (name in own || folders.has(name) || name === MIRROR_LINK_RECORD) continue;
+    if (isRecordedMirrorEntry(input.mirrorDir, name)) continue; // a link made on Windows, kept in line above
+    if (wanted.has(name) && adoptMirrorHardLink(input.mirrorDir, name, path.join(input.realDir, name))) continue;
     // The CLI made this here because the real folder had none at the time; it stays the mirror's own.
     wanted.delete(name);
   }
   for (const name of wanted) {
     const at = path.join(input.mirrorDir, name);
     if (lstat(at)) continue;
-    quietly(() => link(path.join(input.realDir, name), at));
+    quietly(() => { linkMirrorEntry(path.join(input.realDir, name), at); });
   }
   for (const [name, text] of Object.entries(own)) {
     const at = path.join(input.mirrorDir, name);
     const stat = lstat(at);
+    // A link left at this name (an older mirror linked it) goes first: written through, it would replace the person's file.
     if (stat?.isSymbolicLink() || (stat && !stat.isFile())) quietly(() => fs.rmSync(at, { recursive: true, force: true }));
+    else if (stat && isRecordedMirrorEntry(input.mirrorDir, name)) quietly(() => unlinkMirrorEntry(input.mirrorDir, name));
     let current: string | null = null;
     try { current = fs.readFileSync(at, "utf8"); } catch { /* none yet */ }
     if (current !== text) {
@@ -87,7 +89,10 @@ export function syncConfigHomeMirror(input: ConfigHomeMirrorInput): void {
   }
 }
 
-/** True when `name` of the mirror is a symlink (used by callers to confirm sign-in files are linked). */
+/**
+ * True when `name` of the mirror stands for the person's entry: a symlink, or on Windows a recorded hard link / copy
+ * (used by callers to confirm sign-in files are linked).
+ */
 export function isMirrorLink(mirrorDir: string, name: string): boolean {
-  return lstat(path.join(mirrorDir, name))?.isSymbolicLink() === true;
+  return mirrorEntryLinked(mirrorDir, name);
 }

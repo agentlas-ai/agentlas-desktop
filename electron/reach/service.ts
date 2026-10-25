@@ -3,9 +3,10 @@ import { exploreApp, type ExploreReport } from "./explorer";
 import { isSensitiveApp } from "./explore-policy";
 import { levelOf, isUsable, type ReachScan } from "./map";
 import { findMenuWindow } from "./menu-probe";
+import { bundleIdOfKey, findLiveCandidates, findRecordOf, firstWithWindow } from "./app-match";
 import { repairDialogCapability } from "./repair";
 import type { CapabilityRegistry } from "./registry";
-import type { AppRecord, Capability, ReachMap } from "./types";
+import { MENU_COMMAND_TRAIT, type AppRecord, type Capability, type ReachMap } from "./types";
 
 // The background half of Reach: it draws the map by itself, and, only while the owner's switch is on, quietly turns what it finds into
 // things an agent can use, repairs what an update broke, and shares what was proven. It never shows anything and never asks anything.
@@ -104,9 +105,9 @@ const DEFAULTS: Required<ReachServiceOptions> = {
   installRebuildMinMs: 10 * 60_000,
   idleRequiredSec: 600,
   stopBelowIdleSec: 30,
-  explorePassMs: 5 * 60_000,
-  appsPerPass: 3,
-  cooldownMs: 20 * 60_000,
+  explorePassMs: 15 * 60_000,
+  appsPerPass: 8,
+  cooldownMs: 5 * 60_000,
   watchdogMs: 5_000,
   revisitsPerApp: 3,
 };
@@ -324,12 +325,11 @@ export class ReachService {
     const deadline = this.p.now() + this.o.explorePassMs;
     try {
       const running = await ready.actuator.listApps({ signal });
-      const byKey = new Map(map.apps.map((app) => [app.key, app]));
       const targets: Array<{ app: AppRecord; bundleId?: string; name: string }> = [];
-      for (const live of running.filter((item) => item.running && item.bundleId)) {
-        const record = byKey.get(`bundle:${live.bundleId}`);
-        if (!record || isSensitiveApp({ name: live.name, bundleId: live.bundleId })) continue;
-        targets.push({ app: record, bundleId: live.bundleId, name: live.name });
+      for (const live of running.filter((item) => item.running)) {
+        const record = findRecordOf(live, map.apps);
+        if (!record || targets.some((target) => target.app.key === record.key) || isSensitiveApp({ name: live.name, bundleId: live.bundleId }) || isSensitiveApp({ name: record.name, bundleId: bundleIdOfKey(record.key) ?? undefined })) continue;
+        targets.push({ app: record, ...(live.bundleId ? { bundleId: live.bundleId } : {}), name: live.name });
       }
       // unexplored and weaker apps first; an app explored for this fingerprint goes last
       const order = new Map<string, number>();
@@ -344,8 +344,8 @@ export class ReachService {
       for (const target of targets) {
         if (signal.aborted || this.p.now() > deadline || explored >= this.o.appsPerPass) break;
         const file = await this.p.registry.read(target.app.key);
-        if (file?.exploredAt && file.fingerprint === target.app.fingerprint && !(await this.hasDegraded(target.app.key)) && !(await this.hasStale(target.app.key))) continue;
-        const report = await this.exploreOne(ready.actuator, target, signal);
+        if (file?.exploredAt && file.fingerprint === target.app.fingerprint && !(await this.hasDegraded(target.app.key)) && !(await this.hasStale(target.app.key)) && !(await this.hasMenuCommandToRevive(target.app.key, file.exploredAt))) continue;
+        const report = await this.exploreOne(ready.actuator, target, signal, Math.max(5_000, deadline - this.p.now()));
         explored += 1;
         this.p.log(`[reach] explored ${report.app}: ${report.verified} verified, ${report.failed} failed${report.skipped ? `, skipped ${report.skipped}` : ""}${report.blocked ? ", blocked" : ""}`);
         await this.recount();
@@ -366,30 +366,42 @@ export class ReachService {
     return (await this.p.registry.capabilities(appKey)).some((capability) => capability.tier === "explored" && capability.status === "verified" && capability.body?.kind === "steps" && capability.evidence?.lastSeenDay !== today);
   }
 
-  private async hasDegraded(appKey: string): Promise<boolean> {
-    return (await this.p.registry.capabilities(appKey)).some((capability) => capability.status === "degraded" && capability.body?.kind === "steps");
+  // A plain menu command a call found gone is looked for again in the menu bar once a day (the sighting revives it); nothing is pressed for it.
+  private async hasMenuCommandToRevive(appKey: string, exploredAt: string): Promise<boolean> {
+    if (exploredAt.slice(0, 10) === this.p.day()) return false;
+    return (await this.p.registry.capabilities(appKey)).some((capability) => capability.tier === "structure" && capability.status === "degraded" && capability.traits?.includes(MENU_COMMAND_TRAIT) === true);
   }
 
-  private async exploreOne(actuator: Actuator, target: { app: AppRecord; bundleId?: string; name: string }, signal: AbortSignal): Promise<ExploreReport> {
-    const common = { actuator, registry: this.p.registry, day: () => this.p.day(), shouldStop: () => signal.aborted || !this.stillAway(), signal, log: (line: string) => this.p.log(line), ...(this.p.sleep ? { sleep: this.p.sleep } : {}) };
+  private async hasDegraded(appKey: string): Promise<boolean> {
+    // Only a dialog capability is repaired by opening its dialog again. A plain menu command that was refused (the item was gone, or switched off) is
+    // never "repaired": repairing would press it. It is revived by the next natural look at the menu bar (registry.upsert), so it does not
+    // call an app back for another pass either.
+    return (await this.p.registry.capabilities(appKey)).some((capability) => capability.tier === "explored" && capability.status === "degraded" && capability.body?.kind === "steps");
+  }
+
+  private async exploreOne(actuator: Actuator, target: { app: AppRecord; bundleId?: string; name: string }, signal: AbortSignal, remainingMs: number): Promise<ExploreReport> {
+    const common = { actuator, registry: this.p.registry, day: () => this.p.day(), now: () => this.p.now(), shouldStop: () => signal.aborted || !this.stillAway(), signal, log: (line: string) => this.p.log(line), ...(this.p.sleep ? { sleep: this.p.sleep } : {}) };
     // repair first: something that worked and then stopped is worth more than something new
-    const degraded = (await this.p.registry.capabilities(target.app.key)).filter((capability) => capability.status === "degraded" && capability.body?.kind === "steps");
-    if (degraded.length > 0) await this.repair(actuator, target, degraded, signal);
-    await this.revisit(actuator, target, signal);
-    return exploreApp(common, { key: target.app.key, name: target.name, ...(target.bundleId ? { bundleId: target.bundleId } : {}), fingerprint: target.app.fingerprint });
+    const degraded = (await this.p.registry.capabilities(target.app.key)).filter((capability) => capability.tier === "explored" && capability.status === "degraded" && capability.body?.kind === "steps");
+    // one budget for the whole app: the repairs and the daily look come out of the same time as the exploration (review 3, R3)
+    const until = this.p.now() + Math.min(240_000, remainingMs);
+    if (degraded.length > 0) await this.repair(actuator, target, degraded, signal, until);
+    await this.revisit(actuator, target, signal, until);
+    // the app gets at most the time that is left of this pass (it was only checked before an app was started, so a pass could run a whole app past its end)
+    return exploreApp(common, { key: target.app.key, name: target.name, ...(target.bundleId ? { bundleId: target.bundleId } : {}), fingerprint: target.app.fingerprint, sensors: target.app.signals.some((signal) => signal.startsWith("sensor:")) }, { maxMillis: Math.max(1_000, Math.min(240_000, until - this.p.now())) });
   }
 
   // The window that carries the app's menu bar now, or null when it has none on screen.
-  private async liveWindow(actuator: Actuator, target: { bundleId?: string; name: string }, signal: AbortSignal): Promise<{ pid: number; windowId: number } | null> {
+  private async liveWindow(actuator: Actuator, target: { app: AppRecord; bundleId?: string; name: string }, signal: AbortSignal): Promise<{ pid: number; windowId: number } | null> {
     const apps = await actuator.listApps({ signal });
-    const live = apps.find((item) => item.bundleId === target.bundleId && item.running);
-    return live ? findMenuWindow(actuator, live.pid, signal) : null;
+    const found = await firstWithWindow(findLiveCandidates(target.app, apps), (live) => findMenuWindow(actuator, live.pid, signal));
+    return found ? found.window : null;
   }
 
   // What was explored is looked at again once a day: a dialog that is still there as it was earns another day of evidence (what makes it
   // worth sharing); one that changed is rewritten with a new revision; one that is gone is marked failed so the next round repairs or
   // drops it, before an agent runs into it.
-  private async revisit(actuator: Actuator, target: { app: AppRecord; bundleId?: string; name: string }, signal: AbortSignal): Promise<void> {
+  private async revisit(actuator: Actuator, target: { app: AppRecord; bundleId?: string; name: string }, signal: AbortSignal, until: number): Promise<void> {
     const today = this.p.day();
     const stale = (await this.p.registry.capabilities(target.app.key))
       .filter((capability) => capability.tier === "explored" && capability.status === "verified" && capability.body?.kind === "steps" && capability.evidence?.lastSeenDay !== today)
@@ -398,7 +410,7 @@ export class ReachService {
     const at = await this.liveWindow(actuator, target, signal);
     if (!at) return;
     for (const capability of stale) {
-      if (signal.aborted || !this.stillAway()) return;
+      if (signal.aborted || !this.stillAway() || this.p.now() >= until) return; // what is left waits for the next round
       const result = await repairDialogCapability({ actuator, target: at, appKey: target.app.key, fingerprint: target.app.fingerprint, day: today, signal, ...(this.p.sleep ? { sleep: this.p.sleep } : {}) }, capability);
       if (result.status === "repaired") {
         const unchanged = result.how === "same" && JSON.stringify(result.capability.parameters) === JSON.stringify(capability.parameters);
@@ -409,11 +421,11 @@ export class ReachService {
     }
   }
 
-  private async repair(actuator: Actuator, target: { app: AppRecord; bundleId?: string; name: string }, degraded: Capability[], signal: AbortSignal): Promise<void> {
+  private async repair(actuator: Actuator, target: { app: AppRecord; bundleId?: string; name: string }, degraded: Capability[], signal: AbortSignal, until: number): Promise<void> {
     const at = await this.liveWindow(actuator, target, signal);
     if (!at) return;
     for (const capability of degraded) {
-      if (signal.aborted || !this.stillAway()) return;
+      if (signal.aborted || !this.stillAway() || this.p.now() >= until) return;
       const attemptKey = `repair:${capability.id}`;
       if (await this.p.registry.shouldSkip(target.app.key, attemptKey)) continue;
       const result = await repairDialogCapability({ actuator, target: at, appKey: target.app.key, fingerprint: target.app.fingerprint, day: this.p.day(), signal, ...(this.p.sleep ? { sleep: this.p.sleep } : {}) }, capability);

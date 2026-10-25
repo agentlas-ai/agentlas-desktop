@@ -22,7 +22,8 @@ process.stdin.on("end", () => {
     deny("WRITE_SANDBOX_GUARD_UNREADABLE: the launch guard could not read this tool call, so it did not run.");
     return;
   }
-  if (input.tool_name !== "Bash") return;
+  // Claude's shell tools: Bash everywhere, and its PowerShell tool on Windows without Git Bash. Both carry `command`.
+  if (input.tool_name !== "Bash" && input.tool_name !== "PowerShell") return;
   const command = typeof input.tool_input?.command === "string" ? input.tool_input.command : "";
   const escape = classifyLaunchEscape(command);
   if (escape) deny(launchEscapeDenialReason(escape, PERMISSION_ESCALATION_MARKER));

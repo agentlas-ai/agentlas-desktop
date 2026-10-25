@@ -48,6 +48,10 @@ function run(bin: string, args: string[], timeoutMs: number): Promise<{ code: nu
     const child = spawn(bin, args, { stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
     let stdout = "", stderr = "";
     const timer = setTimeout(() => { child.kill("SIGKILL"); reject(new Error("media_quality_timeout")); }, timeoutMs);
+    // ffprobe JSON carries file names and tags; a multi-byte character split
+    // between two pipe chunks must not decode as U+FFFD.
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
     child.stdout.on("data", (chunk) => { stdout += chunk.toString(); if (stdout.length > OUTPUT_LIMIT) child.kill("SIGKILL"); });
     child.stderr.on("data", (chunk) => { stderr += chunk.toString(); if (stderr.length > OUTPUT_LIMIT) stderr = stderr.slice(-OUTPUT_LIMIT); });
     child.on("error", (error) => { clearTimeout(timer); reject(error); });
