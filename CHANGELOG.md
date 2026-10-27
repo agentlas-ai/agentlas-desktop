@@ -1,6 +1,22 @@
 # Changelog
 
-## 1.3.93 — 2026-10-27
+## 1.3.94 — 2026-10-27
+
+Includes everything planned for 1.3.92 and 1.3.93, which were not published.
+
+- Goals and automations keep going: a Goal or automation continues from its checkpoint across old recovery diagnostics, an authorized timer wait needs no deadline, a waiting Goal keeps the permission it actually had, repairs, edits and scheduling are no longer blocked by earlier runs, and the team obligations you selected survive a continuation.
+- Your messages are kept safe: directions that overflow the queue stay in the durable queue, input waits through a deferred attachment start, queued preparation and follow-ups keep their owner, and an unfinished Goal retry goes through your resume. Accepted follow-ups in Work appear as normal chat messages, and your answer to a question card is honored while the composer toolbar no longer overlaps.
+- Approvals: your deny and a payment stop even a Full-access run, local supervisor approvals, browser revocation and sandboxed execution are hardened, full permission is assigned only after the native owner interface is validated, and app control keeps the permission of the current execution across callers.
+- Company (Business): employee sessions connect to verified company servers, signed native sessions are retained without browser cookies, company device login no longer assumes single sign-on, and onboarding error notices and the connection popup recover cleanly.
+- Runtime and updates: an exact shared-session lease held by a dead process is recovered, update continuity work runs apart from the main process and drains the workers it owns, observation refreshes are bounded during bursts of store events, background supervisor reads are narrower, and deep supervisor catalog results transfer safely.
+- Work, Office and Science: Office documents coalesce refreshes and apply each edit once, the Science view retires cleanly when you return to its owner window, the add-view control stays reachable in crowded rails, Work and One composers share the same padding, and personal conversations state the scope of model selection.
+- Phone and Telegram: the phone keeps its replay capacity and follows the current owner turn, and long-running Telegram turns stay alive until you stop them. The Finance watchlist floats and the dashboard is wider.
+- Agentlas Reach (still off by default, opt-in): no menu is trusted for what it contains, only items recognised by name; a command body granted by an older rule does not outlive that rule; complete raw menu safety evidence is required; steps that are not menus are preserved; and stored dialog grants and sensor usability are revalidated.
+- Release checks follow https redirects when hashing the served installer.
+
+This release binds Agentlas OS v1.2.69 at 2b4e27b78d9a1e808142f1e6e510ab7023c7b44d; public runtime asset `hephaestus-runtime-v1.2.69.tar.gz` is pinned at SHA-256 `0bb8ac3eac111fd26bc3a20a7b1657741399b9f87ed8b8f1c87f2402dbd4c283`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
+## 1.3.93 — 2026-10-27 (not shipped; folded into 1.3.94)
 
 Includes everything planned for 1.3.92, which was not published.
 

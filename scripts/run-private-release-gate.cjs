@@ -31,6 +31,8 @@ function windowsSystemCommand(command, env = process.env) {
   return path.win32.join(root, "System32", command);
 }
 
+let privateLogFile = null;
+
 function privateLog() {
   const temporary = process.env.RUNNER_TEMP;
   if (!temporary || !path.isAbsolute(temporary)) throw new Error("runner temporary directory required");
@@ -39,6 +41,7 @@ function privateLog() {
   const directory = fs.mkdtempSync(path.join(root, "agentlas-release-private-"));
   fs.chmodSync(directory, 0o700);
   const file = path.join(directory, "output.log");
+  privateLogFile = file;
   const fd = fs.openSync(file, "wx", 0o600);
   try {
     fs.fchmodSync(fd, 0o600);
@@ -109,6 +112,27 @@ async function stopProcessTree(child, signal, fd) {
   return await waitUntilGone(group, 500);
 }
 
+// On failure, only two kinds of typed facts cross the public log boundary: the npm script that was running and the
+// last progress marker printed by a public build script. Private verifier output never matches these patterns.
+const PUBLIC_MARKER = /^(\[(?:release-preflight|science-release-catalog|copy-builtin-plugins|sandbox-preloads|computer-use)\] [\x20-\x7e]{0,200})$/;
+const NPM_SCRIPT = /^> agentlas-desktop@\S+ ([A-Za-z0-9:_-]{1,64})$/;
+function failureHints(file) {
+  let text;
+  try { text = fs.readFileSync(file, "utf8"); } catch { return ""; }
+  let script = null;
+  let marker = null;
+  for (const line of text.split(/\r?\n/)) {
+    const s = NPM_SCRIPT.exec(line);
+    if (s) script = s[1];
+    const m = PUBLIC_MARKER.exec(line);
+    if (m) marker = m[1];
+  }
+  const parts = [];
+  if (script) parts.push(`script=${script}`);
+  if (marker) parts.push(`marker=${marker.replace(/(?:\/[A-Za-z0-9._@+-]+){2,}/g, "<path>").slice(0, 160)}`);
+  return parts.join(" ");
+}
+
 async function run(stage, command, args) {
   let fd;
   try { fd = privateLog(); }
@@ -158,6 +182,10 @@ async function run(stage, command, args) {
       return;
     }
     const code = Number.isInteger(result.code) ? result.code : 1;
+    if (code !== 0 && privateLogFile) {
+      const hints = failureHints(privateLogFile);
+      if (hints) process.stdout.write(`RELEASE_STAGE_FAILURE_HINT ${stage} ${hints}\n`);
+    }
     process.stdout.write(`RELEASE_STAGE_${code === 0 ? "OK" : "FAILED"} ${stage} exit=${code}\n`);
     process.exitCode = code;
   } catch (error) {
