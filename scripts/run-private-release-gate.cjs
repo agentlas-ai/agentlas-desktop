@@ -210,12 +210,60 @@ function prepareStage(stage, env, fd) {
   return Number.isInteger(result.status) ? result.status : 1;
 }
 
+// The owned core fixture registers the interpreter it was given (HEPHAESTUS_PYTHON = realpath of sys.executable) and
+// then refuses every child command that is not that exact string. A Homebrew Python always reports its stable
+// /opt/homebrew/opt/... alias as sys.executable, whatever path it was started through, so the engine's own
+// "<sys.executable> -m ontology ..." command never matches and the second gate stops on core_python_denied_effect.
+// For this one stage, put an interpreter whose reported path equals its real path first on PATH.
+const PYTHON_NAMES = ["python3", "python3.14", "python3.13", "python3.12", "python3.11", "python3.10", "python3.9"];
+function pythonProbe(command, args, env) {
+  try { return execFileSync(command, ["-I", "-c", ...args], { env: { PATH: env.PATH || "/usr/bin:/bin" }, encoding: "utf8", timeout: 15000, stdio: ["ignore", "pipe", "ignore"] }).trim(); }
+  catch { return null; }
+}
+function pythonCandidates(env, roots) {
+  const found = [];
+  const add = (file, source) => { try { fs.accessSync(file, fs.constants.X_OK); if (!found.some(item => item.file === file)) found.push({ file, source }); } catch {} };
+  for (const dir of (env.PATH || "").split(path.delimiter).filter(Boolean)) for (const name of PYTHON_NAMES) add(path.join(dir, name), "path");
+  const children = dir => { try { return fs.readdirSync(dir); } catch { return []; } };
+  for (const version of children(path.join(roots.toolCache, "Python"))) for (const arch of children(path.join(roots.toolCache, "Python", version))) add(path.join(roots.toolCache, "Python", version, arch, "bin", "python3"), "toolcache");
+  for (const version of children(roots.frameworks)) add(path.join(roots.frameworks, version, "bin", "python3"), "framework");
+  add(roots.system, "system");
+  return found;
+}
+function consistentPython(env, roots = { toolCache: env.RUNNER_TOOL_CACHE || "/Users/runner/hostedtoolcache", frameworks: "/Library/Frameworks/Python.framework/Versions", system: "/usr/bin/python3" }) {
+  let best = null;
+  for (const candidate of pythonCandidates(env, roots)) {
+    const real = pythonProbe(candidate.file, ["import os,sys;print(os.path.realpath(sys.executable))"], env);
+    if (!real || !path.isAbsolute(real)) continue;
+    const reported = pythonProbe(real, ["import sys;print(sys.executable)"], env);
+    const version = pythonProbe(real, ["import sys;print(sys.version_info[0]*100+sys.version_info[1])"], env);
+    if (reported !== real || !(Number(version) >= 311)) continue;
+    if (!best || Number(version) > best.version) best = { real, source: candidate.source, version: Number(version) };
+  }
+  return best;
+}
+
+// When no installed interpreter reports its own real path (a runner whose only Python is Homebrew's), a copy-style
+// virtual environment built from the default python3 does: its executable is a real file inside the stage's own
+// temporary folder, so the reported path and the real path are the same string.
+function venvPython(env, dir) {
+  const target = path.join(dir, "pyvenv");
+  try {
+    execFileSync("python3", ["-I", "-m", "venv", "--copies", "--without-pip", target], { env: { PATH: env.PATH || "/usr/bin:/bin" }, stdio: ["ignore", "ignore", "ignore"], timeout: 60000 });
+    const file = path.join(target, "bin", "python3");
+    const real = pythonProbe(file, ["import os,sys;print(os.path.realpath(sys.executable))"], env);
+    if (real && pythonProbe(real, ["import sys;print(sys.executable)"], env) === real) return { real, source: "venv" };
+  } catch {}
+  return null;
+}
+
 async function run(stage, command, args) {
   let fd;
   try { fd = privateLog(); }
   catch { process.stdout.write(`RELEASE_STAGE_LOG_UNAVAILABLE ${stage} exit=73\n`); process.exitCode = 73; return; }
   let child;
   let stageTemp = null;
+  let pythonSource = null;
   let spawnError = null;
   let requestedSignal = null;
   let cancellation = null;
@@ -239,6 +287,16 @@ async function run(stage, command, args) {
     const selected = portableCommand(command, args);
     stageTemp = cleanStageTemp(stage);
     const childEnv = stageTemp ? { ...process.env, TMPDIR: stageTemp.dir } : process.env;
+    if (stageTemp) {
+      const python = consistentPython(process.env) || venvPython(process.env, stageTemp.dir);
+      pythonSource = python ? python.source : "none_consistent";
+      if (python) {
+        const shim = path.join(stageTemp.dir, "pybin");
+        fs.mkdirSync(shim, { mode: 0o700 });
+        fs.symlinkSync(python.real, path.join(shim, "python3"));
+        childEnv.PATH = `${shim}${path.delimiter}${process.env.PATH || ""}`;
+      }
+    }
     const prepared = prepareStage(stage, childEnv, fd);
     if (prepared !== 0) {
       process.stdout.write(`RELEASE_STAGE_FAILURE_HINT ${stage} step=prepare:embedded-core\n`);
@@ -270,7 +328,7 @@ async function run(stage, command, args) {
     }
     const code = Number.isInteger(result.code) ? result.code : 1;
     if (code !== 0 && privateLogFile) {
-      const hints = failureHints(privateLogFile);
+      const hints = [failureHints(privateLogFile), pythonSource ? `python=${pythonSource}` : ""].filter(Boolean).join(" ");
       if (hints) process.stdout.write(`RELEASE_STAGE_FAILURE_HINT ${stage} ${hints}\n`);
     }
     process.stdout.write(`RELEASE_STAGE_${code === 0 ? "OK" : "FAILED"} ${stage} exit=${code}\n`);
@@ -299,4 +357,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { portableCommand };
+module.exports = { portableCommand, consistentPython, venvPython };
