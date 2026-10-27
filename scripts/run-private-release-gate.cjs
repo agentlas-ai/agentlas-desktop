@@ -118,7 +118,7 @@ async function stopProcessTree(child, signal, fd) {
 const PUBLIC_MARKER = /^((?:\[(?:release-preflight|science-release-catalog|copy-builtin-plugins|sandbox-preloads|computer-use)\] |One Briefing contract verified|app screen routes verified)[\x20-\x7e]{0,160})$/;
 const NPM_SCRIPT = /^> agentlas-desktop@\S+ ([A-Za-z0-9:_-]{1,64})$/;
 const TS_DIAGNOSTIC = /^((?:electron|shared|renderer)\/[A-Za-z0-9._@\/-]{1,120}\(\d+,\d+\): error TS\d+: [\x20-\x7e]{0,200})$/;
-const ERROR_LINE = /^((?:[A-Za-z]*Error|fatal): [\x20-\x7e]{0,200})$/;
+const ERROR_LINE = /^((?:[A-Za-z]*Error|FATAL ERROR|fatal): [\x20-\x7e]{0,200})$/;
 const ABSOLUTE_PATH = /(^|[\s"'(=:])((?:\/[A-Za-z0-9._@+-]+){2,})/g;
 const scrub = text => text.replace(ABSOLUTE_PATH, "$1<path>").slice(0, 200);
 function failureHints(file) {
