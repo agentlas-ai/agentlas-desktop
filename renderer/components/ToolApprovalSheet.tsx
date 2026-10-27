@@ -9,6 +9,8 @@
  *
  * 지금은:
  *  - 대화 화면(One/Work)이 자기 chatId 의 요청을 인라인 카드로 그린다(ToolApprovalInline).
+ *    예외(오너 2026-10-27): 개인 에이전트 대화는 자기가 감독하는 방의 카드도 그 방 chatId 로 함께 그린다
+ *    (components/one/PersonalOneSupervisedApprovals) — 답은 원래 방의 요청으로 간다.
  *  - **지금 화면에 없는 대화**의 대기 요청은 전역 점(lib/attention)이 센다. 누르면 그
  *    대화로 간다(needsBadge 규칙 그대로 — 보이는 대화의 요청은 세지 않는다).
  *  - post-denial 은 아예 오지 않는다(큐가 live 만 담는다). 이미 거부된 호출은 러너의
@@ -27,7 +29,7 @@
  */
 import { useT } from "@/lib/i18n";
 import { ToolApprovalCard } from "@/components/ToolApprovalInline";
-import { useToolApprovals } from "@/lib/tool-approvals";
+import { useApprovalDeck, useToolApprovals } from "@/lib/tool-approvals";
 import { useOrphanAttentionRevealed } from "@/lib/attention";
 
 /** 갈 대화가 없는 도구 승인 — 오너가 전환기 점 목록에서 열었을 때만 카드로 편다. */
@@ -37,12 +39,15 @@ export function ToolApprovalSheet() {
   const { queue } = useToolApprovals();
   const revealed = useOrphanAttentionRevealed();
   const orphan = queue.filter((request) => !request.chatId);
+  const deck = useApprovalDeck(orphan); // one card at a time (owner 2026-10-27)
   if (!revealed || orphan.length === 0) return null;
+  if (!deck.current) return null;
 
   return (
     <div className="tab" data-testid="tool-approval-orphans" role="region" aria-label={ko ? "대화 밖 도구 승인" : "Tool approvals outside a chat"}>
       <div className="tab-cards">
-        {orphan.map((request) => <ToolApprovalCard key={request.id} request={request} compact chip />)}
+        <ToolApprovalCard key={deck.current.id} request={deck.current} compact chip
+          deck={{ index: deck.index, total: deck.total, onPrev: deck.prev, onNext: deck.next }} />
       </div>
       <style jsx>{`
         .tab {

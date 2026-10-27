@@ -39,6 +39,9 @@ import {
   canonicalJsonValue,
   graphExecutionDigest,
   sha256Value,
+  GRAPH_CHECKPOINT_SCHEMA,
+  PREVIOUS_GRAPH_CHECKPOINT_SCHEMA,
+  LEGACY_GRAPH_CHECKPOINT_SCHEMA,
 } from "../../shared/graph-execution-digest";
 import {
   dryRunPromise,
@@ -56,6 +59,7 @@ import { claimInvocationRunOwner, invocationRunOwners } from "../store/invocatio
 import { sameMethodAttemptLimit, MAX_SAME_METHOD_STARTS, type WorkUnit } from "../../shared/work-recovery";
 import { GraphWorkRecovery, type GraphWorkRecoveryScope } from "./work-recovery";
 import { hostRunChildrenEnded } from "../runtime/spawn-registry";
+import { restoreAgentForUse } from "../archive/auto-archive";
 import { listAutomationGraphReconciliations } from "../store/graph-reconciliation";
 import { runGraphMcpCall, projectGraphMcpArguments } from "./mcp-call";
 import { nativeGraphSuccessNeedsReflection } from "../../shared/automation-graph-definition";
@@ -385,9 +389,6 @@ const UNCERTAIN_EFFECT_NOTE_CODES = new Set([
   "automation_fresh_run_blocked",
 ]);
 
-const GRAPH_CHECKPOINT_SCHEMA = "agentlas.automation-graph-checkpoint.v4";
-const PREVIOUS_GRAPH_CHECKPOINT_SCHEMA = "agentlas.automation-graph-checkpoint.v3";
-const LEGACY_GRAPH_CHECKPOINT_SCHEMA = "agentlas.automation-graph-checkpoint.v2";
 const WORKFORCE_PREPARE_RECEIPT_SCHEMA = "agentlas.workforce-prepare-checkpoint-receipt.v1";
 const SHA256_RE = /^sha256:[0-9a-f]{64}$/;
 
@@ -1505,6 +1506,8 @@ const REPLAY_SAFE_PRE_DISPATCH_ERROR_CODES = new Set([
   "stormbreaker-core-harness-unavailable",
   // mcp/client.ts: this run's tool connections could not be prepared; the runner is never called (earlyResult).
   "mcp-runtime-config-unavailable",
+  // mcp/client.ts: the node's agent is archived; refused before the runner is called (earlyResult), also on the event as not-dispatched.
+  "agent_archived",
 ]);
 
 function isTypedReplaySafeWorkforceError(code: string): boolean {
@@ -3244,6 +3247,9 @@ export async function runGraph(
         runtimeSelection: automation.runtimeSelection ?? null,
       }).chat;
     } else if (getAgentById(ref)) {
+      // A node's agent is the owner's explicit pick like the automation's own target (store/automations.ts restoreAutomationTarget):
+      // one that sat unused for 30 days between monthly runs comes back instead of being refused "agent_archived" by the invocation.
+      restoreAgentForUse(ref);
       resolved = getOrCreateAutomationSession({
         automationId: `${automation.id}::a:${ref}`,
         agentId: ref,
@@ -5999,6 +6005,8 @@ export async function runGraph(
               occurrenceId: checkpoint!.occurrenceId, nodeId: node.id, loops: commonScope(node, "").loops })}`,
             callerChatId: chat.id, parentRunId: runId, permission, signal: scopedSignal,
             assertCurrent: assertFiniteCurrent,
+            // Reaching this node again means admission already passed (the owner's [Rerun from this node] clears a held step first).
+            reattempt: true,
             depth: opts.depth ?? 0, callChain: opts.callChain ?? [automation.id],
             dryRun, ...(opts.sink ? { sink: opts.sink } : {}),
           }));

@@ -140,7 +140,32 @@ export function createInvocationRunOwnerStore(ports: InvocationRunOwnerStorePort
     }).immediate();
   }
 
-  return { claim, getActiveOwner, getRunOwner, getOwnerByRunId, getPreviousOwner, listActiveOwners, releaseAbandoned,
+  /** The leases of specific owner processes that the caller has PROVEN gone. Unlike releaseAbandoned this is not "every other
+   * process of the kind": a terminal has no single-instance lock, so one terminal's death proves nothing about another that is
+   * still running its own turn. Only rows of the named owner ids and kind, still active or settling, in one transaction. */
+  function releaseAbandonedOwners(ownerKind: InvocationRunOwner["ownerKind"], deadOwnerIds: readonly string[]): InvocationRunOwner[] {
+    if (!["desktop", "daemon", "terminal"].includes(ownerKind) || !Array.isArray(deadOwnerIds) || !deadOwnerIds.every(validId)) {
+      throw new Error("invocation_owner_identity_invalid");
+    }
+    const ids = [...new Set(deadOwnerIds)];
+    if (ids.length === 0) return [];
+    return ports.getDb().transaction(() => {
+      const select = ports.getDb().prepare(`SELECT * FROM invocation_run_owners
+        WHERE owner_kind = ? AND owner_id = ? AND state IN ('active','settling')`);
+      const release = ports.getDb().prepare(`UPDATE invocation_run_owners SET state = 'released', updated_at = ?
+        WHERE run_id = ? AND lease_id = ? AND state IN ('active','settling')`);
+      const released: InvocationRunOwner[] = [];
+      for (const id of ids) {
+        for (const row of select.all(ownerKind, id) as OwnerRow[]) {
+          const lease = owner(row)!;
+          if (release.run(now(), lease.runId, lease.leaseId).changes === 1) released.push(lease);
+        }
+      }
+      return released;
+    }).immediate();
+  }
+
+  return { claim, getActiveOwner, getRunOwner, getOwnerByRunId, getPreviousOwner, listActiveOwners, releaseAbandoned, releaseAbandonedOwners,
     markSettling: (expected: InvocationRunOwner) => transition(expected, "settling"),
     release: (expected: InvocationRunOwner) => transition(expected, "released") };
 }

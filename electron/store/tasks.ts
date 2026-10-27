@@ -5,6 +5,7 @@ import { getSeatForChat } from "./seats";
 import { emitTaskStoreChange } from "./change-bus";
 import { tryRecordOneDomainEvent } from "../one/domain-events";
 import { ownerDirectionAfterInvocationRun } from "./run-events";
+import { personalAgentRoomIdsAmong } from "../one/personal-agent-rooms";
 import type {
   CanonicalTask,
   CanonicalTaskParticipant,
@@ -258,7 +259,12 @@ function participantNeedsUpsert(
   );
 }
 
-function toTask(row: TaskRow, participantsByTask?: Map<string, ParticipantRow[]>): CanonicalTask {
+/** Tasks whose chat is a room the personal agent runs (one/personal-agent-rooms.ts). */
+function personalAgentTaskRooms(chatIds: Array<string | null>): Set<string> {
+  try { return personalAgentRoomIdsAmong(chatIds.filter((id): id is string => Boolean(id)), getDb()); } catch { return new Set(); }
+}
+
+function toTask(row: TaskRow, participantsByTask?: Map<string, ParticipantRow[]>, supervisedRooms?: ReadonlySet<string>): CanonicalTask {
   // Lists join this once for all rows. Single-task readers use the same source
   // without promoting a conversation or changing its project ownership.
   const surface = row.origin_surface !== undefined ? row.origin_surface : row.origin_chat_id && tableExists("chats")
@@ -273,6 +279,8 @@ function toTask(row: TaskRow, participantsByTask?: Map<string, ParticipantRow[]>
     status: normalizeStatus(row.status),
     originChatId: row.origin_chat_id,
     ...(surface === "one" || surface === "work" ? { originSurface: surface } : {}),
+    ...(row.origin_chat_id && (supervisedRooms ?? personalAgentTaskRooms([row.origin_chat_id])).has(row.origin_chat_id)
+      ? { supervisedByPersonalAgent: true as const } : {}),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     archivedAt: row.archived_at,
@@ -597,7 +605,8 @@ export function listCanonicalTasks(input: {
       for (const row of all) { const list = participantsByTask.get(row.task_id) ?? []; list.push(row); participantsByTask.set(row.task_id, list); }
     }
   }
-  return rows.map((row) => toTask(row, participantsByTask));
+  const supervised = personalAgentTaskRooms(rows.map((row) => row.origin_chat_id));
+  return rows.map((row) => toTask(row, participantsByTask, supervised));
 }
 
 /**
@@ -724,23 +733,40 @@ export function setCanonicalTaskStatus(
  * 조용히 completed로 덮지 않는다(거짓 성공). `failed`로 정산하고 사유를 원장에 남긴다 —
  * 사용자는 "끝나지 않았다"를 알아야 이어서 할지 다시 할지 정할 수 있다.
  * `waiting-decision`은 사람의 답을 기다리는 정당한 상태이므로 건드리지 않는다.
+ *
+ * 단 "activeRuns 가 비었다"는 이 프로세스의 사실일 뿐이다. 다른 프로세스가 지금 그 턴을 돌리고 있으면(백그라운드 서비스가 호스트한
+ * 턴은 Desktop 재시작 뒤에도 계속된다, 터미널이 호스트한 턴도) 고아가 아니다 — 그 Task 는 건드리지 않는다. 증거는 채팅의 비해제
+ * 런 리스다: 서비스는 지금 붙은 부트(`liveDaemonBootId`)의 리스만, 터미널은 시작 때 이미 "사라짐"이 증명된 리스를 풀어 둔 뒤라
+ * 남은 리스 전부. 서비스가 없거나 다른 부트면 그 리스는 죽은 서비스의 것이라 예전처럼 고아로 정산한다.
  */
-export function settleInterruptedTasksOnBoot(): { settled: number; taskIds: string[] } {
-  if (!tableExists("tasks")) return { settled: 0, taskIds: [] };
+export function settleInterruptedTasksOnBoot(
+  options: { liveDaemonBootId?: string | null } = {},
+): { settled: number; taskIds: string[]; keptLiveHostTaskIds: string[] } {
+  if (!tableExists("tasks")) return { settled: 0, taskIds: [], keptLiveHostTaskIds: [] };
   const db = getDb();
   const rows = db
     .prepare("SELECT id FROM tasks WHERE status = 'running'")
     .all() as { id: string }[];
+  const heldByLiveHost = tableExists("invocation_run_owners")
+    ? db.prepare(`SELECT 1 FROM invocation_run_owners o
+        WHERE o.chat_id = (SELECT origin_chat_id FROM tasks WHERE id = ?) AND o.state IN ('active','settling')
+          AND ((o.owner_kind = 'daemon' AND o.owner_id = ?) OR o.owner_kind = 'terminal') LIMIT 1`)
+    : null;
   const taskIds: string[] = [];
+  const keptLiveHostTaskIds: string[] = [];
   for (const row of rows) {
     try {
+      if (heldByLiveHost?.get(row.id, options.liveDaemonBootId ?? null)) {
+        keptLiveHostTaskIds.push(row.id);
+        continue;
+      }
       setCanonicalTaskStatus(row.id, "failed");
       taskIds.push(row.id);
     } catch {
       // 한 건의 정산 실패가 나머지 고아를 진행 중으로 남겨두게 두지 않는다.
     }
   }
-  return { settled: taskIds.length, taskIds };
+  return { settled: taskIds.length, taskIds, keptLiveHostTaskIds };
 }
 
 export function acceptCanonicalTaskResult(

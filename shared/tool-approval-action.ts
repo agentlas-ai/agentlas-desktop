@@ -1,6 +1,7 @@
 import type {
   ToolApprovalDecision,
   ToolApprovalDurableConsentReceipt,
+  ToolApprovalOwnerNoteReceipt,
   ToolApprovalRequestEvent,
   ToolApprovalResolutionReceipt,
 } from "./types";
@@ -32,7 +33,15 @@ export function isToolApprovalResolutionReceipt(
     && typeof row.pending === "boolean"
     && (row.decidedAt === null || typeof row.decidedAt === "string")
     && (row.durableConsent === undefined || isToolApprovalDurableConsentReceipt(row.durableConsent))
+    && (row.ownerNote === undefined || isToolApprovalOwnerNoteReceipt(row.ownerNote))
   );
+}
+
+export function isToolApprovalOwnerNoteReceipt(value: unknown): value is ToolApprovalOwnerNoteReceipt {
+  if (!value || typeof value !== "object") return false;
+  const row = value as Partial<ToolApprovalOwnerNoteReceipt>;
+  return (row.status === "sent" || row.status === "failed" || row.status === "skipped")
+    && (row.code === undefined || typeof row.code === "string");
 }
 
 function isToolApprovalDurableConsentReceipt(
@@ -60,6 +69,7 @@ export interface ToolApprovalDecisionApi {
     id: string,
     decision: ToolApprovalDecision,
     actionId: string,
+    note?: string,
   ) => Promise<unknown>;
   getToolApprovalResolution: (id: string) => Promise<unknown>;
   listToolApprovals: () => Promise<ToolApprovalRequestEvent[]>;
@@ -155,10 +165,14 @@ export async function commitToolApprovalDecision(
   api: ToolApprovalDecisionApi,
   requestId: string,
   decision: ToolApprovalDecision,
+  /** The owner's "No, and do this instead" line. Only a deny carries one; the same actionId whatever the note says. */
+  note?: string,
 ): Promise<ToolApprovalDecisionResult> {
   const actionId = toolApprovalActionId(requestId, decision);
   try {
-    const value = await api.resolveToolApproval(requestId, decision, actionId);
+    const value = note !== undefined && decision === "deny"
+      ? await api.resolveToolApproval(requestId, decision, actionId, note)
+      : await api.resolveToolApproval(requestId, decision, actionId);
     if (isToolApprovalResolutionReceipt(value)) {
       if (exactResolution(value, requestId, decision, actionId)) {
         return { state: "resolved", receipt: value };

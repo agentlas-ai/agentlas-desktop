@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
 import { DesktopWorkRecoveryJournal, workUnitId } from "./work-recovery-store";
 import { getDb } from "../store/db";
-import { invocationAttemptBinding, recordRunEvent } from "../store/run-events";
+import { getInvocationRunReceipt, invocationAttemptBinding, recordRunEvent } from "../store/run-events";
+import { invocationRunOwners } from "../store/invocation-run-owners";
 import { ensureCanonicalTaskForChat, findCanonicalTaskForChat } from "../store/tasks";
 import { getChat } from "../store/chats";
 import { getChatGoalRevision } from "../store/chat-goals";
@@ -17,7 +18,7 @@ export interface MainWorkReference { action_id?: string; step_id?: string; regen
  * How a call the host dispatched in this process ended without its answer, read from machine facts (the MCP transport boundary,
  * the run's abort signal, a typed timeout), never from message text. Recorded in the journal reason after `main_tool_outcome_unknown:`.
  */
-export type MainWorkUnknownEnd = "timeout" | "aborted" | "transport" | "response_unreadable" | "dispatch_ended";
+export type MainWorkUnknownEnd = "timeout" | "aborted" | "transport" | "response_unreadable" | "dispatch_ended" | "process_lost";
 /** `returned`: the tool's own answer came back. `not_sent`: the request never left Main. Otherwise the call ended without its answer. */
 export type MainWorkFinish = "returned" | "not_sent" | "unconfirmed" | MainWorkUnknownEnd;
 const UNKNOWN_END = "main_tool_outcome_unknown:";
@@ -66,6 +67,8 @@ export class MainWorkRecoveryContext {
    * which blocked the whole step). Only an action that is no longer live yet has no outcome (aborted, lost, a previous run) blocks.
    */
   private readonly live = new Map<string, { unit: WorkUnit; observational: boolean }>();
+  /** Every action this run moved to `started`, live or not: only another run's start can be an orphan (see closeOrphanedStarts). */
+  private readonly startedHere = new Set<string>();
   constructor(private readonly chatId: string, private readonly invocationRunId: string,
     private readonly assertCurrent: () => void) { contexts.add(this); }
 
@@ -97,6 +100,43 @@ export class MainWorkRecoveryContext {
     if (end === "not_sent") this.journal.transition(unit, "cancelled", { reason: "main_tool_request_not_sent" });
     else if (observational) this.journal.transition(unit, "failed", { reason: `main_tool_read_outcome_lost:${end}` });
     else this.journal.transition(unit, "held", { reason: `${UNKNOWN_END}${end}` });
+  }
+
+  /**
+   * A `started` action of an earlier run whose run is over is a call the previous process took with it (kill -9, OOM, a forced
+   * update): nothing runs it, its answer was never stored, and every closer above needs the live admission, so it stayed `started`
+   * and refused every non-read call of the step for as long as the Goal revision held, with a refusal that told the model to read an
+   * outcome that does not exist. It is closed here with its cause (process_lost), once, so it holds back only its identical repeat
+   * (the rule for a call this host saw end without its answer) and the step goes on. A run that may still be live is left alone: any
+   * other holder of the chat's lease, or a lease that is not released, proves nothing about the call. Runs outside the admit
+   * transaction so a refusal in it cannot roll the close back. Never throws.
+   */
+  private closeOrphanedStarts(scope: Scope): void {
+    try {
+      const holder = invocationRunOwners.getActiveOwner(this.chatId);
+      if (holder && holder.runId !== this.invocationRunId) return;
+      const ended = new Map<string, boolean>();
+      // Proof of an ended run, never the lack of proof of a live one: a lease that was released (the run settled, or the next boot
+      // released what the dead process left), or with no lease row a terminal receipt. A run with neither may be another live
+      // context (test-main-work-live-siblings-do-not-block case 4), so it keeps blocking.
+      const runEnded = (runId: string): boolean => {
+        const owner = invocationRunOwners.getOwnerByRunId(runId);
+        if (owner) return owner.state === "released";
+        const status = getInvocationRunReceipt(runId)?.status;
+        return status === "completed" || status === "failed" || status === "cancelled" || status === "waiting_input";
+      };
+      for (const action of this.actions(scope)) {
+        if (action.originInvocationRunId === this.invocationRunId || this.live.has(action.actionId) || this.startedHere.has(action.actionId)) continue;
+        try {
+          const unit = this.journal.read(scope.runId, action.actionId);
+          if (!unit || unit.state !== "started") continue;
+          if (!ended.has(action.originInvocationRunId)) ended.set(action.originInvocationRunId, runEnded(action.originInvocationRunId));
+          if (ended.get(action.originInvocationRunId)) this.close(unit, action.observational, "process_lost");
+        } catch (error) {
+          console.warn(`[main-work] orphaned started action not closed action=${action.actionId} code=${(error as { code?: unknown })?.code ?? "none"}`);
+        }
+      }
+    } catch { /* The step then behaves as before this repair; the next admit tries again. */ }
   }
 
   /** The cause recorded when the host saw this held action's call end without an answer; null for any other state or reason. */
@@ -195,6 +235,7 @@ export class MainWorkRecoveryContext {
   admit(input: { reference?: MainWorkReference; methodId: string; arguments: Record<string,unknown>; observational: boolean; live?: boolean }):
     { unit: WorkUnit; action: Action } | { reused: Result; action: Action } {
     assertMainWorkRecoveryContext(this);const scope=this.scope();
+    this.closeOrphanedStarts(scope);
     return getDb().transaction(()=>{
       this.assertCurrent();const actions=this.actions(scope), stepId=input.reference?.step_id ?? scope.defaultStepId;
       if (!scope.stepIds.includes(stepId)) throw new Error("main_work_checkpoint_step_invalid");
@@ -254,6 +295,7 @@ export class MainWorkRecoveryContext {
       }
       const started=this.journal.transition(unit,"started",{reason:"main_canonical_tool_dispatch"});
       if (!started) throw new Error("main_work_same_method_limit_or_claim_changed");
+      this.startedHere.add(action.actionId);
       // Registered in the same synchronous step as the transition, so no sibling's admit can see a started action that is not yet live.
       if (input.live) this.live.set(action.actionId,{unit:started,observational:action.observational});
       return {unit:started,action};

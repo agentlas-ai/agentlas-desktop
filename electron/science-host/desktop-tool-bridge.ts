@@ -534,7 +534,7 @@ export const scienceDesktopTools = {
         : reach
         // The Reach ports take the turn's own chat, run and permission and answer through the harness dispatcher; refusals are results.
         ? { visionMessage: null, ...await runScienceReachTool(input.name, input.arguments,
-          { chatId: binding.chatId, runId: runId(scope), permission: binding.permission }) }
+          { chatId: binding.chatId, runId: runId(scope), permission: binding.permission, ...(binding.signal ? { signal: binding.signal } : {}) }) }
         : await runMainToolDispatch(inventory.byName,
           { providerCallId: input.toolCallId, toolName: input.name, arguments: argumentsJson },
           { onStatus: () => {}, onPartial: () => {} },

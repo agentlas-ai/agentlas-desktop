@@ -31,6 +31,12 @@ const MAX_COOLDOWN_MS = 60 * 60_000;
 const COOLDOWN_KINDS: ReadonlySet<RunnerFailureKind> = new Set(["quota", "rate_limit", "auth"]);
 /** Request throttling lifts by itself: without the provider's Retry-After, step aside briefly, not for ten minutes. */
 const RATE_LIMIT_DEFAULT_COOLDOWN_MS = 60_000;
+/**
+ * Refusals this host raised itself before anything was sent, typed `auth` but not a provider verdict: the OS keychain could not
+ * read the saved key (credential-access.ts RUNTIME_CREDENTIAL_UNAVAILABLE_CODE, the same string; no value import here, this module
+ * stays pure). The key may be readable the next minute, so it is neither a ten-minute cooldown nor "signed out until one success".
+ */
+const HOST_LOCAL_REFUSAL_CODES: ReadonlySet<string> = new Set(["byok_credential_unavailable"]);
 
 export interface RuntimeCooldown {
   until: number;
@@ -104,10 +110,11 @@ export function parseRetryHint(hint: string | undefined, now: number): number | 
  */
 export function noteRuntimeFailure(
   runtime: RuntimeIdentity,
-  failure: Pick<RunnerFailure, "kind" | "message" | "retryAfterHint">,
+  failure: Pick<RunnerFailure, "kind" | "message" | "retryAfterHint"> & Partial<Pick<RunnerFailure, "providerCode">>,
   now = Date.now(),
 ): RuntimeCooldown | null {
   if (!COOLDOWN_KINDS.has(failure.kind)) return null;
+  if (failure.providerCode && HOST_LOCAL_REFUSAL_CODES.has(failure.providerCode)) return null;
   const hinted = parseRetryHint(failure.retryAfterHint, now);
   const until = Math.min(hinted ?? now + (failure.kind === "rate_limit" ? RATE_LIMIT_DEFAULT_COOLDOWN_MS : DEFAULT_COOLDOWN_MS), now + MAX_COOLDOWN_MS);
   const entry: RuntimeCooldown = {

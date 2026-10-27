@@ -442,16 +442,27 @@ function latestOwnerRevocation(ownerKeys: string[]): { epoch: number; revokedAt:
   ).get(...ownerKeys) as { epoch: number; revokedAt: string } | undefined ?? null;
 }
 
+function exactContentRevoked(ownerKeys: string[], kind: MemoryKind, contentHash: string): boolean {
+  return Boolean(getDb().prepare(
+    `SELECT 1 FROM memory_revocations
+      WHERE owner_key IN (${ownerKeys.map(()=>"?").join(",")}) AND memory_kind = ? AND content_hash = ?
+      LIMIT 1`,
+  ).get(...ownerKeys, kind, contentHash));
+}
+
+/**
+ * Read-only twin of the exact-content refusal in assertMemoryWriteAllowed: true when the owner already forgot this exact
+ * text for this authority. Lets a bulk writer (memory import) skip that one item up front instead of learning it from a throw.
+ */
+export function isMemoryContentRevoked(input: Pick<MemoryAuthorityInput, "scope" | "kind" | "content" | "projectId" | "projectPath" | "agentId" | "chatId">): boolean {
+  return exactContentRevoked(memoryAuthorityOwnerKeys(input), input.kind, memoryContentHash(input.content));
+}
+
 /** Must run inside the caller's IMMEDIATE insert transaction. */
 export function assertMemoryWriteAllowed(input: MemoryAuthorityInput): void {
   const ownerKeys = memoryAuthorityOwnerKeys(input);
   const contentHash = memoryContentHash(input.content);
-  const exact = getDb().prepare(
-    `SELECT 1 FROM memory_revocations
-      WHERE owner_key IN (${ownerKeys.map(()=>"?").join(",")}) AND memory_kind = ? AND content_hash = ?
-      LIMIT 1`,
-  ).get(...ownerKeys, input.kind, contentHash);
-  if (exact) throw new MemoryRevokedError("exact-content-revoked");
+  if (exactContentRevoked(ownerKeys, input.kind, contentHash)) throw new MemoryRevokedError("exact-content-revoked");
 
   const latest = latestOwnerRevocation(ownerKeys);
   if (!latest) return;

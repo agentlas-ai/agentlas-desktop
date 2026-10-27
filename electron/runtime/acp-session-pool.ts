@@ -32,12 +32,7 @@ import {
   type AgentResidencyAdmission,
   type AwakeAgentResidencyAdmission,
 } from "./agent-residency";
-import {
-  awaitProjectResidencySiblingsExit,
-  beginProjectResidencyAdmission,
-  enforceProjectResidencyIdle,
-  finishProjectResidencyAdmission,
-} from "./project-residency";
+import { acquireNativeWriter, currentNativeWriter, nativeWriterKey, retainNativeWriterClose } from "./native-writer-admission";
 import type { AgentProcessLifecycleReason } from "../../shared/types";
 
 export interface AcpPoolMeta {
@@ -50,7 +45,7 @@ export interface AcpPoolMeta {
    * turn here is released with the session, not only the one that took the last turn. Omitted: matched by `chatId` alone.
    */
   sessionScopeKey?: string | null;
-  /** Main-owned Work project partition; never used as the conversation key. */
+  /** Project attribution only. Independent sessions in the same project may run together. */
   projectId?: string | null;
   runtimeKind: string;
   source?: AgentResidencySource;
@@ -67,6 +62,9 @@ interface PoolEntry<S> {
   residencyKey: string;
   session: S;
   projectId: string | null;
+  writerKey: string;
+  writerKeys: readonly string[];
+  releaseWriter?: () => void;
   inUse: boolean;
   lastActivityAt: number;
   reaperExempt: boolean;
@@ -174,35 +172,33 @@ export class AcpSessionPool<S> {
    * 반드시 `release()` 또는 `discard()` 로 돌려줘야 한다(try/finally).
    */
   async acquire(key: string, meta: AcpPoolMeta, open: () => Promise<S>, retain?: () => boolean): Promise<AcpSessionLease<S>> {
-    this.reapDead();
-    const awake = currentAwakeAgentResidency(meta.agentId);
-    const projectId = typeof meta.projectId === "string" ? meta.projectId.trim() || null : null;
-    let reusable = this.entries.find((e) => e.key === key && e.projectId === projectId && !e.inUse && !e.closing && !e.retireOnRelease);
-    if (reusable && reusable.awakeAdmission !== awake) {
-      if (reusable.awakeAdmission) throw Object.assign(new Error("agent_awake_context_owned"), { code: "agent_awake_context_owned" });
-      // First actor attachment cannot inherit an unbound process lease. The
-      // provider's persisted resume handle remains available to its runner.
-      this.remove(reusable, { close: true, reason: "shutdown" });
-      reusable = undefined;
-    }
-    let projectAdmission: string | null = null;
+    const enclosingWriter = currentNativeWriter();
+    const signal = meta.signal ?? enclosingWriter?.signal;
+    const writerKey = enclosingWriter?.key ?? nativeWriterKey({ runtimeKind: meta.runtimeKind,
+      contextKey: meta.sessionScopeKey,
+      chatId: meta.chatId,
+      sessionOwnerId: meta.nodeId ?? meta.agentId,
+    }) ?? nativeWriterKey({ runtimeKind: meta.runtimeKind, contextKey: `pool:${key}` })!;
+    const writerKeys = enclosingWriter?.keys ?? [writerKey];
+    // Selected runners already hold the same writer before taking a global CLI slot. Direct pool callers use the
+    // identical fair primitive, held for the checkout rather than only the asynchronous process-open window.
+    let releaseWriter = enclosingWriter ? () => {} : await acquireNativeWriter(writerKey, { signal });
     let residentAdmission: AgentResidencyAdmission | undefined;
     let opening = false;
     let opened: PoolEntry<S> | undefined;
     try {
-      projectAdmission = beginProjectResidencyAdmission({
-        projectId,
-        keepResidencyKey: reusable?.residencyKey ?? null,
-      });
-      // Project admission starts idle retirement synchronously and every close is a measured, asynchronous process
-      // exit. Holding the admission, wait (bounded, Stop-aware) for those exits: one physical CLI per Work project, and a
-      // follow-up whose key changed no longer refuses itself on the sibling it just retired (production 2026-10-16).
-      if (projectId) {
-        await awaitProjectResidencySiblingsExit(projectId, reusable?.residencyKey ?? null,
-          { waitMs: this.opts.projectSiblingExitWaitMs, signal: meta.signal });
-        // The wait yielded: an idle candidate may have been retired meanwhile (LRU, reaper). Never lend a closing one.
-        if (reusable && (reusable.closing || reusable.inUse || !this.entries.includes(reusable))) reusable = undefined;
+      this.reapDead();
+      const awake = currentAwakeAgentResidency(meta.agentId);
+      const projectId = typeof meta.projectId === "string" ? meta.projectId.trim() || null : null;
+      let reusable = this.entries.find((e) => e.key === key && e.projectId === projectId && !e.inUse && !e.closing && !e.retireOnRelease);
+      if (reusable && reusable.awakeAdmission !== awake) {
+        if (reusable.awakeAdmission) throw Object.assign(new Error("agent_awake_context_owned"), { code: "agent_awake_context_owned" });
+        // First actor attachment cannot inherit an unbound process lease. The
+        // provider's persisted resume handle remains available to its runner.
+        this.remove(reusable, { close: true, reason: "shutdown" });
+        reusable = undefined;
       }
+      signal?.throwIfAborted();
       if (reusable) {
         reusable.inUse = true;
         reusable.lastActivityAt = this.now();
@@ -215,8 +211,10 @@ export class AcpSessionPool<S> {
           throw error;
         }
         touchAgentResidency(reusable.residencyKey, { inUse: true, now: reusable.lastActivityAt, chatId: meta.chatId ?? null });
-        finishProjectResidencyAdmission(projectId, projectAdmission);
-        projectAdmission = null;
+        reusable.writerKey = writerKey;
+        reusable.writerKeys = writerKeys;
+        reusable.releaseWriter = releaseWriter;
+        releaseWriter = () => {};
         const lease: AcpSessionLease<S> = { key, session: reusable.session, fresh: false };
         this.leases.set(lease, reusable);
         return lease;
@@ -229,7 +227,8 @@ export class AcpSessionPool<S> {
       }
       // Production pools share the registry's global seats: an LRU eviction closes asynchronously, so wait for it
       // (bounded, Stop-aware) instead of refusing the new conversation on the seat being freed.
-      if (!this.opts.budget) await awaitAgentResidencyHeadroom(meta.agentId, { signal: meta.signal });
+      if (!this.opts.budget) await awaitAgentResidencyHeadroom(meta.agentId, { signal });
+      signal?.throwIfAborted();
       residentAdmission = beginAgentResidencyAdmission(meta.agentId);
       this.opening += 1;
       opening = true;
@@ -239,6 +238,9 @@ export class AcpSessionPool<S> {
         residencyKey: `acp-session:${key}#${++leaseSeq}`,
         session,
         projectId,
+        writerKey,
+        writerKeys,
+        releaseWriter,
         inUse: true,
         lastActivityAt: this.now(),
         reaperExempt: meta.reaperExempt ?? isResidencyExemptAgent(meta.agentId),
@@ -247,6 +249,7 @@ export class AcpSessionPool<S> {
         awakeAdmission: awake,
       };
       opened = entry;
+      releaseWriter = () => {};
       this.entries.push(entry);
       entry.retireOnRelease = retain ? !retain() : false;
       registerAgentResidency({
@@ -269,8 +272,6 @@ export class AcpSessionPool<S> {
       });
       entry.registered = true;
       residentAdmission = undefined;
-      finishProjectResidencyAdmission(projectId, projectAdmission);
-      projectAdmission = null;
       const lease: AcpSessionLease<S> = { key, session, fresh: true };
       this.leases.set(lease, entry);
       return lease;
@@ -282,22 +283,16 @@ export class AcpSessionPool<S> {
         if (!opened.registered && (opened.closeCompletion || opened.closeFailed)) {
           const admission = residentAdmission;
           residentAdmission = undefined;
-          const projectToken = projectAdmission;
-          projectAdmission = null;
           const completion = opened.closeCompletion
             ?? Promise.reject(new Error("agent_residency_close_failed"));
           retainAgentResidencyAdmissionUntilClosed(admission, completion);
-          // This unregistered writer is invisible to project entry lookup.
-          // Retain its exact project token as well as global capacity until
-          // termination; rejection quarantines both ownership reservations.
-          void completion.then(() => finishProjectResidencyAdmission(projectId, projectToken), () => {});
         }
       }
-      finishProjectResidencyAdmission(projectId, projectAdmission);
       throw error;
     } finally {
       if (opening) this.opening -= 1;
       finishAgentResidencyAdmission(residentAdmission);
+      releaseWriter();
     }
   }
 
@@ -324,7 +319,7 @@ export class AcpSessionPool<S> {
     // 유휴 세션은 호스트를 살려 두지 않는다(터미널·게이트가 종료 못 하던 자리).
     try { this.opts.unref?.(entry.session); } catch { /* 이미 죽었을 수 있다 */ }
     touchAgentResidency(entry.residencyKey, { inUse: false, now: entry.lastActivityAt });
-    enforceProjectResidencyIdle(entry.projectId, entry.residencyKey);
+    entry.releaseWriter?.(); entry.releaseWriter = undefined;
     // 반납한 김에 예산을 다시 본다(사용자가 슬라이더를 내렸을 수 있다).
     this.enforceBudget(0);
   }
@@ -409,6 +404,7 @@ export class AcpSessionPool<S> {
     const finish = (): void => {
       const index = this.entries.indexOf(entry);
       if (index >= 0) this.entries.splice(index, 1);
+      entry.releaseWriter?.(); entry.releaseWriter = undefined;
     };
     try {
       const completion = this.opts.close(entry.session);
@@ -420,11 +416,14 @@ export class AcpSessionPool<S> {
         // Callers may retire synchronously; keep rejection observed even when
         // no registry row exists yet (a failed registration after spawn).
         void entry.closeCompletion.catch(() => {});
+        for (const writer of entry.writerKeys) retainNativeWriterClose(writer, entry.closeCompletion);
         return entry.closeCompletion;
       }
       finish();
     } catch (error) {
       entry.closeFailed = true;
+      const failed = Promise.reject(error);
+      for (const writer of entry.writerKeys) retainNativeWriterClose(writer, failed);
       throw error;
     }
   }

@@ -169,7 +169,11 @@ export function restoreGoalWaitAfterUndispatchedStart(superseded: SupersededGoal
     const run = getLongRun(superseded.previous.runId);
     if (!run || liveLongRunAttemptCount(run.id) > 0) return false;
     persist({ ...superseded.previous, revision: latest.revision + 1 });
-    if (superseded.runWasWaiting && run.status === "running") {
+    // The restored wait owns the next step again, so the Goal rests on it whatever state the failed start found: an owner Resume
+    // (or a pause lifted) had already moved it to running before this start, runWasWaiting is false, and a running Goal is never
+    // polled for its wait - pending wait, no attempt, nobody to wake it until a restart. queued has no edge to waiting_tool.
+    if (run.status === "running" || run.status === "queued") {
+      if (run.status === "queued") transitionLongRun({ runId: run.id, to: "running", actorKind: "host", reason: "goal_wait_restored_after_failed_start" });
       transitionLongRun({ runId: run.id, to: "waiting_tool", actorKind: "host", reason: "goal_wait_restored_after_failed_start" });
     }
     return true;
@@ -181,6 +185,7 @@ function scheduleFreshGoalWaitContinuation(wait: Pick<GoalWaitSubscription, "run
   const run = getLongRun(wait.runId);
   if (!run || longRunOwnerHold(run.id) || goalOwnerAnswerHold(run.id) || ["pausing", "cancelling", "cancelled", "completed"].includes(run.status)
     || (run.status === "paused" && !["app_closed", "crash_recovery", "runtime_unavailable"].includes(run.pauseReason ?? ""))) return;
+  if (liveLongRunAttemptCount(run.id) > 0) return;
   // The blocked-goal sweep owns an existing retry, including one already due.
   // Replacing it on each wait poll would move its deadline forward forever.
   if (pendingBlockedGoalRetry(run.id)) return;
@@ -537,15 +542,26 @@ export function reconcileClaimedGoalWaitsAtStartup(target: GoalWaitHost | null =
 
 /** Scheduler is only the timer. The installed Main service remains the only
  * dispatcher; compare-and-swap snapshots prevent duplicate wakes and Stop races. */
+const RECOVERABLE_RETIRED_WAIT_REASONS = new Set(["goal_wait_pre_dispatch_refused", "goal_wait_dispatch_failed", "goal_wait_deadline"]);
 function* goalWaitPollingCandidates(owner: GoalWaitHostOwner, exactEpoch: boolean): Generator<NonNullable<ReturnType<typeof getLongRun>>> {
   let afterId = "";
   // The UI listing caps at 500. Stable ID paging ensures an older pending
   // subscription cannot remain invisible on every scheduler tick.
   while (true) {
     const rows = getDb().prepare(`SELECT id FROM long_runs WHERE id > ?
-      AND status IN ('waiting_tool','paused') AND execution_location='desktop-local'
+      AND (status IN ('waiting_tool','paused') OR (status='running' AND (
+        ((SELECT json_extract(e.payload_json,'$.subscription.state') FROM long_run_events e
+          WHERE e.run_id=long_runs.id AND e.kind='run.wait_subscription' ORDER BY e.seq DESC LIMIT 1)
+          IN ('cancelled','expired') AND
+        (SELECT json_extract(e.payload_json,'$.subscription.wakeReason') FROM long_run_events e
+          WHERE e.run_id=long_runs.id AND e.kind='run.wait_subscription' ORDER BY e.seq DESC LIMIT 1)
+          IN (?,?,?))
+        -- A pending wait under a running Goal is the zombie an owner Resume with a failed start used to leave.
+        OR (SELECT json_extract(e.payload_json,'$.subscription.state') FROM long_run_events e
+          WHERE e.run_id=long_runs.id AND e.kind='run.wait_subscription' ORDER BY e.seq DESC LIMIT 1) = 'pending'
+      ))) AND execution_location='desktop-local'
       AND surface<>'science' AND host_owner_kind=? AND (?=0 OR app_instance_id=?)
-      ORDER BY id LIMIT 500`).all(afterId, owner.kind, Number(exactEpoch), owner.epoch) as Array<{ id: string }>;
+      ORDER BY id LIMIT 500`).all(afterId, ...RECOVERABLE_RETIRED_WAIT_REASONS, owner.kind, Number(exactEpoch), owner.epoch) as Array<{ id: string }>;
     if (!rows.length) return;
     for (const { id } of rows) {
       afterId = id;
@@ -573,6 +589,13 @@ export async function pollGoalWaitSubscriptions(options: { now?: number; clock?:
     if (candidate.surface === "science") return;
     const ownsCandidate = (run: ReturnType<typeof getLongRun>) => ownsWaitRun(run, owner, exactEpoch)
       && run?.appInstanceId === candidate.appInstanceId && !longRunOwnerHold(candidate.id);
+    if (candidate.status === "running" && latestGoalWaitSubscription(candidate.goalId)?.state === "pending") {
+      // A pending wait is the next step of a Goal nobody works: nothing polls a running Goal, so an owner Resume whose start failed (and
+      // older releases for the same failure) left it for ever. Rest it on its wait again - never while a turn is live in the room.
+      if (target.isChatBusy(candidate.rootChatId ?? "") || liveLongRunAttemptCount(candidate.id) > 0 || !ownsCandidate(getLongRun(candidate.id))) return;
+      try { candidate = transitionLongRun({ runId: candidate.id, to: "waiting_tool", actorKind: "host", reason: "goal_wait_state_repaired", expectedVersion: candidate.version }); }
+      catch { return; }
+    }
     const wait = latestGoalWaitSubscription(candidate.goalId);
     if (!wait) {
       // A missing or unreadable registration cannot reserve the Goal forever.
@@ -581,6 +604,30 @@ export async function pollGoalWaitSubscriptions(options: { now?: number; clock?:
         && getChat(candidate.rootChatId)?.goalId === candidate.goalId && !target.isChatBusy(candidate.rootChatId)) {
         scheduleFreshGoalWaitContinuation({ runId: candidate.id }, "goal_wait_registration_unavailable", clock());
       }
+      return;
+    }
+    if (["cancelled", "expired"].includes(wait.state) && RECOVERABLE_RETIRED_WAIT_REASONS.has(wait.wakeReason ?? "")) {
+      // Finalization commits before follow-up scheduling. Retry a failed write
+      // on the next poll, without reviving or replaying the retired successor.
+      if (candidate.appInstanceId === owner.epoch && ownsCandidate(getLongRun(candidate.id))
+        && getChat(wait.chatId)?.goalId === wait.goalId && !target.isChatBusy(wait.chatId)) {
+        scheduleFreshGoalWaitContinuation(wait, wait.wakeReason ?? "goal_wait_retired", clock());
+      }
+      return;
+    }
+    if (wait.state === "claimed" && candidate.status === "paused" && longRunOwnerHold(candidate.id) && wait.dispatchOwner?.kind === owner.kind
+      && ownsWaitRun(candidate, owner, false) && liveLongRunAttemptCount(candidate.id) === 0 && !target.isChatBusy(wait.chatId)) {
+      // A claim an earlier release left behind when the owner paused while its successor was prepared (dispatchWaitClaim now retires it
+      // itself). Under the owner's hold nothing can start from it; retiring it never replays the successor, and the owner's Resume
+      // continues from current context instead of finding every later wait refused as already registered.
+      try {
+        desktopStoreTransaction(getDb(), () => {
+          const latest = latestGoalWaitSubscription(wait.goalId), current = getLongRun(candidate.id);
+          if (!latest || latest.waitId !== wait.waitId || latest.revision !== wait.revision || latest.state !== "claimed"
+            || !current || current.version !== candidate.version || !longRunOwnerHold(current.id)) return;
+          persist({ ...latest, revision: latest.revision + 1, state: "cancelled", nextCheckAt: null, wakeReason: "goal_wait_pre_dispatch_refused" });
+        }).immediate();
+      } catch { /* the next poll retries the same retirement */ }
       return;
     }
     if (wait.state !== "pending" || target.isChatBusy(wait.chatId)) return;
@@ -859,9 +906,9 @@ export async function pollGoalWaitSubscriptions(options: { now?: number; clock?:
     }
     if (dispatch) {
       const claimed = dispatch as GoalWaitDispatch;
-      let obligationPreparationError: unknown;
+      let obligationPreparationFailed = false, obligationPreparationError: unknown;
       try { claimed.request = await prepareGoalObligationContinuation(claimed.request, { goalId: wait.goalId, goalRevision: wait.goalRevision }); }
-      catch (error) { obligationPreparationError = error; }
+      catch (error) { obligationPreparationFailed = true; obligationPreparationError = error; }
       const expected = latestGoalWaitSubscription(claimed.goalId);
       if (!expected) { abandonGoalObligationContinuation(claimed.request); return; }
       notice = dispatchWaitClaim<GoalWaitSubscription>({
@@ -874,13 +921,23 @@ export async function pollGoalWaitSubscriptions(options: { now?: number; clock?:
               && current.appInstanceId === latest.dispatchRunOwnerEpoch
               && latest.successorInvocationId === claimed.invocationRunId);
           },
+          // The owner paused (or the room moved) while the successor was prepared: the exact claim of this host may still be
+          // recorded as retired, never started, so it cannot hold the Goal's next step for ever.
+          receiptCurrent: latest => {
+            const live = getLongRunByGoalId(claimed.goalId);
+            return Boolean(live && live.id === latest.runId && ownsWaitRun(live, owner, exactEpoch)
+              && claimOwnedBy(latest, owner) && latest.successorInvocationId === claimed.invocationRunId);
+          },
         }, expected, owner,
         assertStart: latest => {
+          // Preparation never dispatched this successor. Retire its claim on
+          // refusal; only a failure after target.dispatch may be uncertain.
+          if (obligationPreparationFailed) throw obligationPreparationError;
           if (episodeWaitFenceReason(latest, clock())) throw new Error("goal_wait_episode_fenced");
           assertDesktopLongRunAdmissionOpen();
         },
-        start: () => { if (obligationPreparationError) throw obligationPreparationError;
-          return { start: true, runId: target.dispatch(claimed).runId }; },
+        start: () => ({ start: true, runId: target.dispatch(claimed).runId }),
+        preStartFailureReason: "goal_wait_pre_dispatch_refused",
         failureState: expected.episodeRequestId ? "claimed" : "cancelled",
         failureReason: expected.episodeRequestId ? "goal_episode_dispatch_unknown" : "goal_wait_dispatch_failed",
         onStarted: () => recordGoalWake({ runId: expected.runId, chatId: claimed.request.chatId ?? "", source: "wait",

@@ -1,5 +1,5 @@
 import { runAppleScript } from "../reach/applescript";
-import { isSensitiveApp } from "../reach/explore-policy";
+import { isPublishedOffLimits, isSensitiveApp } from "../reach/explore-policy";
 import { isDirectMenuCommand, isCurrentDialogCapability, type CapabilityPolicyContext } from "../reach/map";
 import { findLiveCandidates, firstWithWindow } from "../reach/app-match";
 import { exploreApp } from "../reach/explorer";
@@ -31,10 +31,13 @@ type Outcome =
   | { status: "ok"; data: unknown }
   | { status: "refused" | "unavailable"; reason: string; next?: string; data?: unknown };
 
-interface Ctx { chatId: string; runId: string; dryRun?: boolean; permission?: "read" | "write" | "full" }
+// signal: the calling turn's lifetime (HarnessCallContext.signal). Stop or a cancelled goal aborts it; a call that drives an app has to follow it.
+interface Ctx { chatId: string; runId: string; dryRun?: boolean; permission?: "read" | "write" | "full"; signal?: AbortSignal }
 
 const str = (value: unknown): string => (typeof value === "string" ? value.trim() : "");
 const refused = (reason: string, next?: string, data?: unknown): Outcome => ({ status: "refused", reason, ...(next ? { next } : {}), ...(data !== undefined ? { data } : {}) });
+const stopped = (ctx: Ctx): boolean => ctx.signal?.aborted === true;
+const aborted = (): Outcome => refused("aborted", "the run was stopped; the app was left as it was");
 const unavailable = (reason: string, next?: string): Outcome => ({ status: "unavailable", reason, ...(next ? { next } : {}) });
 const writable = (ctx: Ctx): boolean => ctx.permission === "write" || ctx.permission === "full";
 const clamp = (value: unknown, low: number, high: number, fallback: number): number => {
@@ -94,8 +97,13 @@ function policyContext(app: AppRecord): CapabilityPolicyContext {
   return { sensors: app.signals.some((signal) => signal.startsWith("sensor:")), name: app.name, bundleId: bundleOf(app.key) ?? app.key, platform: app.platform };
 }
 
+// A scripting (published) capability of an app Reach never scripts: still listed, never callable.
+function publishedOffLimits(capability: Capability, context: CapabilityPolicyContext = {}): boolean {
+  return capability.body?.kind !== "steps" && isPublishedOffLimits({ name: context.name ?? "", bundleId: context.bundleId });
+}
+
 function usableNow(capability: Capability, context: CapabilityPolicyContext = {}): boolean {
-  if (capability.generic || capability.status === "degraded") return false;
+  if (capability.generic || capability.status === "degraded" || publishedOffLimits(capability, context)) return false;
   if (capability.tier === "structure") return isDirectMenuCommand(capability, context); // the live menu confirms each command
   if (capability.tier === "explored" && !isCurrentDialogCapability(capability, context)) return false;
   if (capability.tier === "published" && capability.status === undefined) return true;
@@ -201,6 +209,7 @@ export async function reachApp(args: Record<string, unknown>): Promise<Outcome> 
 }
 
 function runnableReason(capability: Capability, rt: ReachRuntime, context: CapabilityPolicyContext): string | null {
+  if (publishedOffLimits(capability, context)) return "Reach does not script this app: it holds credentials, money, messages or the system";
   if (capability.status === "degraded") return "it failed when last used; Reach re-reads it when the owner is away";
   if (!usableNow(capability, context)) return "only seen so far: it becomes callable once an exploration has opened and closed its dialog";
   if (capability.body?.kind === "steps") return rt.gui ? null : "this host has no driver for the app's screen";
@@ -239,6 +248,7 @@ export async function reachDescribe(args: Record<string, unknown>): Promise<Outc
       ...(reason ? { notRunnableBecause: reason } : {}),
       next: reason === null
         ? (capability.effect.class === "read" && capability.effect.basis === "declared" ? "reach.invoke with these parameters" : "reach.invoke with these parameters; it needs the run's write permission because what it does is not declared")
+        : publishedOffLimits(capability, context) ? "choose another app; Reach does not script this one"
         : "choose another capability, or ask the owner to turn on app exploration in Settings",
     },
   };
@@ -255,14 +265,14 @@ function bundleOf(key: string): string | null {
   return key.startsWith("bundle:") ? key.slice("bundle:".length).split("@")[0] : null;
 }
 
-async function liveTarget(rt: ReachRuntime, app: { key: string; name: string; path?: string }, actuator: import("../reach/actuator").Actuator): Promise<{ pid: number; windowId: number; name: string } | { error: string }> {
-  const apps = await actuator.listApps();
+async function liveTarget(rt: ReachRuntime, app: { key: string; name: string; path?: string }, actuator: import("../reach/actuator").Actuator, signal?: AbortSignal): Promise<{ pid: number; windowId: number; name: string } | { error: string }> {
+  const apps = await actuator.listApps({ signal });
   const candidates = findLiveCandidates(app, apps);
   if (candidates.length === 0) return { error: "app_not_running" };
   // the process that was picked is not a sensitive app, whatever the map's record says (independent review 4, S2)
   if (candidates.some((candidate) => isSensitiveApp({ name: candidate.name, bundleId: candidate.bundleId }))) return { error: "app_off_limits" };
   // the window that carries the app's menu bar (an About box or a panel has none), looked for in each process of the program until one has it
-  const found = await firstWithWindow(candidates, (live) => findMenuWindow(actuator, live.pid));
+  const found = await firstWithWindow(candidates, (live) => findMenuWindow(actuator, live.pid, signal));
   if (!found) return { error: "app_has_no_window" };
   return { pid: found.live.pid, windowId: found.window.windowId, name: found.live.name };
 }
@@ -283,15 +293,19 @@ function guiRefusal(error: string): Outcome {
 
 export async function reachInvoke(args: Record<string, unknown>, ctx: Ctx): Promise<Outcome> {
   if (ctx.dryRun) return refused("dry_run", "nothing was run");
+  if (stopped(ctx)) return aborted();
   const rt = await getReachRuntime();
   const resolved = await resolveApp(rt, str(args.app));
   if (!resolved.ok) return resolved.outcome;
   const found = findCapability(await allCapabilities(rt, resolved.app), str(args.capability));
   if (!found.ok) return found.outcome;
   const capability = found.capability;
+  const context = policyContext(resolved.app);
+  // The app's own scripting interface is held to the same off-limits screen as its screen: reach.explore refuses Terminal and Mail, so reach.invoke
+  // must not run their `do script` or read their message bodies. Said before the permission check, because no permission would make it allowed.
+  if (publishedOffLimits(capability, context)) return refused("app_off_limits", "Reach never scripts apps that hold credentials, money, messages or the system");
   // A menu command stored by an older, looser rule is asked again at the moment of the call - with what is known about this app (a camera, a microphone, a location
   // makes the rule stricter) - and withdrawn when it no longer passes (independent review 7, V1): nothing is pressed.
-  const context = policyContext(resolved.app);
   if ((capability.tier === "structure" && capability.traits?.includes("menu-command") && !isDirectMenuCommand(capability, context))
     || (capability.tier === "explored" && !isCurrentDialogCapability(capability, context))) {
     if (rt.service) await rt.service.onInvokeOutcome(resolved.app.key, resolved.app.fingerprint, capability.id, { ok: false, code: "rule_tightened" });
@@ -310,14 +324,19 @@ export async function reachInvoke(args: Record<string, unknown>, ctx: Ctx): Prom
     const gui = rt.gui;
     if (!gui) return unavailable("no_driver_in_this_host", "run this from the desktop app");
     const outcome = await gui.use(async (actuator) => {
-      const target = await liveTarget(rt, resolved.app, actuator);
+      // Stop can arrive while this call waited for the screen lease: the app is not touched then.
+      if (stopped(ctx)) return { guiError: "aborted" } as const;
+      const target = await liveTarget(rt, resolved.app, actuator, ctx.signal);
       if ("error" in target) return { guiError: target.error } as const;
-      const front = await withForeground(actuator, { pid: target.pid, windowId: target.windowId }, () => runSteps({ actuator, target: { pid: target.pid, windowId: target.windowId }, ...(rt.sleep ? { sleep: rt.sleep, settleMs: 1 } : {}) }, capability, parameters), undefined, rt.sleep);
+      const front = await withForeground(actuator, { pid: target.pid, windowId: target.windowId }, () => runSteps({ actuator, target: { pid: target.pid, windowId: target.windowId }, ...(ctx.signal ? { signal: ctx.signal } : {}), ...(rt.sleep ? { sleep: rt.sleep, settleMs: 1 } : {}) }, capability, parameters), ctx.signal, rt.sleep);
       return front.ok ? ({ run: front.value } as const) : ({ guiError: front.code } as const);
     });
-    if (!outcome.ok) return guiRefusal(outcome.error);
-    if ("guiError" in outcome.value) return guiRefusal(outcome.value.guiError as string);
+    // A driver call that failed because the run was stopped is a stop, not "the app's screen could not be driven".
+    if (!outcome.ok) return stopped(ctx) ? aborted() : guiRefusal(outcome.error);
+    if ("guiError" in outcome.value) return stopped(ctx) ? aborted() : guiRefusal(outcome.value.guiError as string);
     const run = outcome.value.run;
+    // A call that did not finish because the run was stopped says nothing about the capability, and the reason is the stop, not a refused step.
+    if (!run.ok && stopped(ctx)) return aborted();
     // Only a failure that says the app's screen moved (the runner marks it repairable) degrades the capability; a call with wrong arguments, an app that was
     // not in front or a cancelled call leaves a healthy capability usable.
     await rt.service?.onInvokeOutcome(resolved.app.key, resolved.app.fingerprint, capability.id, { ok: run.ok, code: run.code, repairable: run.repairable });
@@ -331,6 +350,7 @@ export async function reachInvoke(args: Record<string, unknown>, ctx: Ctx): Prom
   if (!bundleId) return unavailable("not_runnable", "only apps identified by a bundle id can be scripted");
   const harvest = (await rt.readHarvest(resolved.app.key)) ?? [];
   const knownClasses = classesOf(harvest);
+  if (stopped(ctx)) return aborted();
   const result = await runAppleScript(rt.exec, { bundleId, capability, parameters, knownClasses });
   await rt.service?.onInvokeOutcome(resolved.app.key, resolved.app.fingerprint, capability.id, { ok: result.ok, code: result.code });
   if (result.ok) return { status: "ok", data: { ok: true, value: cut(result.value ?? "", MAX_RESULT_CHARS) } };
@@ -346,22 +366,26 @@ export async function reachInvoke(args: Record<string, unknown>, ctx: Ctx): Prom
 export async function reachExplore(args: Record<string, unknown>, ctx: Ctx): Promise<Outcome> {
   if (ctx.dryRun) return refused("dry_run", "nothing was opened");
   if (!writable(ctx)) return refused("permission_required", "exploring brings the app to the front and opens its dialogs; the run needs write permission");
+  if (stopped(ctx)) return aborted();
   const rt = await getReachRuntime();
   if (!rt.gui) return unavailable("no_driver_in_this_host", "run this from the desktop app");
   const resolved = await resolveApp(rt, str(args.app));
   if (!resolved.ok) return resolved.outcome;
   if (isSensitiveApp({ name: resolved.app.name, bundleId: bundleOf(resolved.app.key) ?? undefined })) return refused("app_off_limits", "Reach never explores apps that hold credentials, money, messages or the system");
   const bundleId = bundleOf(resolved.app.key) ?? undefined;
-  const outcome = await rt.gui.use((actuator) => exploreApp({ actuator, registry: rt.registry, day: () => rt.day(), shouldStop: () => false, ...(rt.sleep ? { sleep: rt.sleep } : {}) }, { key: resolved.app.key, name: resolved.app.name, ...(bundleId ? { bundleId } : {}), sensors: resolved.app.signals.some((signal) => signal.startsWith("sensor:")), fingerprint: resolved.app.fingerprint }, { maxDialogs: 6, maxMillis: 120_000 }));
-  if (!outcome.ok) return guiRefusal(outcome.error);
+  // Stop ends the exploration after the dialog in hand is closed (exploreApp's shouldStop / signal), and a Stop that arrived while this waited for the screen lease means it never starts.
+  const outcome = await rt.gui.use((actuator) => stopped(ctx) ? Promise.resolve(null) : exploreApp({ actuator, registry: rt.registry, day: () => rt.day(), shouldStop: () => stopped(ctx), ...(ctx.signal ? { signal: ctx.signal } : {}), ...(rt.sleep ? { sleep: rt.sleep } : {}) }, { key: resolved.app.key, name: resolved.app.name, ...(bundleId ? { bundleId } : {}), sensors: resolved.app.signals.some((signal) => signal.startsWith("sensor:")), fingerprint: resolved.app.fingerprint }, { maxDialogs: 6, maxMillis: 120_000 }));
+  if (!outcome.ok) return stopped(ctx) ? aborted() : guiRefusal(outcome.error);
   const report = outcome.value;
-  if (report.skipped) return guiRefusal(report.skipped === "not_running" ? "app_not_running" : report.skipped === "no_window" ? "app_has_no_window" : report.skipped === "sensitive" ? "app_off_limits" : "cannot_bring_forward");
+  if (!report) return aborted();
+  if (report.skipped) return stopped(ctx) ? aborted() : guiRefusal(report.skipped === "not_running" ? "app_not_running" : report.skipped === "no_window" ? "app_has_no_window" : report.skipped === "sensitive" ? "app_off_limits" : "cannot_bring_forward");
   return { status: "ok", data: { app: report.app, menuItemsSeen: report.menuItems, dialogsTried: report.probed, nowUsable: report.verified, failed: report.failed, stoppedEarly: report.stoppedEarly, blocked: report.blocked } };
 }
 
 export async function reachVerify(args: Record<string, unknown>, ctx: Ctx): Promise<Outcome> {
   if (ctx.dryRun) return refused("dry_run", "nothing was opened");
   if (!writable(ctx)) return refused("permission_required", "verifying brings the app to the front and opens its dialog; the run needs write permission");
+  if (stopped(ctx)) return aborted();
   const rt = await getReachRuntime();
   if (!rt.gui) return unavailable("no_driver_in_this_host", "run this from the desktop app");
   const resolved = await resolveApp(rt, str(args.app));
@@ -371,17 +395,20 @@ export async function reachVerify(args: Record<string, unknown>, ctx: Ctx): Prom
   const capability = found.capability;
   if (capability.tier !== "explored" || capability.body?.kind !== "steps") return refused("not_verifiable_here", "only explored capabilities are re-read; a published one is stated by the app itself");
   const outcome = await rt.gui.use(async (actuator) => {
-    const target = await liveTarget(rt, resolved.app, actuator);
+    if (stopped(ctx)) return { guiError: "aborted" } as const;
+    const target = await liveTarget(rt, resolved.app, actuator, ctx.signal);
     if ("error" in target) return { guiError: target.error } as const;
-    return { result: await repairDialogCapability({ actuator, target: { pid: target.pid, windowId: target.windowId }, appKey: resolved.app.key, fingerprint: resolved.app.fingerprint, day: rt.day(), ...(rt.sleep ? { sleep: rt.sleep } : {}) }, capability) } as const;
+    return { result: await repairDialogCapability({ actuator, target: { pid: target.pid, windowId: target.windowId }, appKey: resolved.app.key, fingerprint: resolved.app.fingerprint, day: rt.day(), ...(ctx.signal ? { signal: ctx.signal } : {}), ...(rt.sleep ? { sleep: rt.sleep } : {}) }, capability) } as const;
   });
-  if (!outcome.ok) return guiRefusal(outcome.error);
-  if ("guiError" in outcome.value) return guiRefusal(outcome.value.guiError as string);
+  if (!outcome.ok) return stopped(ctx) ? aborted() : guiRefusal(outcome.error);
+  if ("guiError" in outcome.value) return stopped(ctx) ? aborted() : guiRefusal(outcome.value.guiError as string);
   const result = outcome.value.result;
   if (result.status === "repaired") {
     await rt.registry.upsert(resolved.app.key, resolved.app.fingerprint, [result.capability], rt.day());
     return { status: "ok", data: { id: capability.id, status: "verified", changed: result.how !== "same" || (result.capability.revision ?? 0) > (capability.revision ?? 0), how: result.how, revision: result.capability.revision ?? 0 } };
   }
+  // A re-read cut short by Stop proves nothing about the app: the capability is not marked degraded for it.
+  if (stopped(ctx)) return aborted();
   await rt.service?.onInvokeOutcome(resolved.app.key, resolved.app.fingerprint, capability.id, { ok: false, code: result.reason });
   return { status: "ok", data: { id: capability.id, status: "degraded", reason: result.reason, ...(result.status === "degraded" && result.code ? { code: result.code } : {}) } };
 }

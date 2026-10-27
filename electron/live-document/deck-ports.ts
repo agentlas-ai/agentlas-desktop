@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { ZipPackage } from "./zip";
+import { LiveDocumentCodecError } from "./codecs/common";
 import { parseXml } from "./xml-lite";
 import { DECK_OUTPUT_MAX_BYTES, DECK_SCRIPT_MAX_CHARS, DECK_TIMEOUT_DEFAULT_MS, runDeckScript } from "./deck-run";
 import { lintDeck, type DeckLintReport } from "./deck-lint";
@@ -62,6 +63,27 @@ export const DECK_PORT_SCHEMAS = {
   },
 } as const;
 
+/**
+ * The session of this conversation that holds edits not yet saved to `file`, or null. Replacing the file under it would leave the session
+ * with an old model on a new file: open refuses (unsaved_session_exists), save refuses (file_changed_on_disk), apply keeps accepting edits
+ * that can never be saved, and no model-facing port closes a session.
+ */
+async function sessionWithUnsavedEdits(chatId: string, file: string): Promise<string | null> {
+  let real: string;
+  try { real = fs.realpathSync(file); } catch { return null; }
+  const documents = await store();
+  for (const meta of await documents.listLiveDocuments(chatId)) {
+    if (meta.path !== real) continue;
+    try {
+      const snapshot = await documents.liveDocumentSnapshot(meta.sessionId);
+      if (snapshot.revision > snapshot.meta.savedRevision) return meta.sessionId;
+    } catch { /* a session that cannot be read holds nothing that can be saved */ }
+  }
+  return null;
+}
+
+const UNSAVED_SESSION_NEXT = "build to a new file name, or document.save that session first if its edits are worth keeping (a saved deck is no longer one this port may replace)";
+
 async function store() {
   return import("./store");
 }
@@ -70,7 +92,7 @@ async function store() {
 export function validateDeckPackage(bytes: Uint8Array): string[] {
   const issues: string[] = [];
   let pkg: ZipPackage;
-  try { pkg = new ZipPackage(bytes); } catch { return ["the file is not a zip package"]; }
+  try { pkg = new ZipPackage(bytes); } catch (error) { return [error instanceof LiveDocumentCodecError ? `the package unpacks larger than the limit (${error.message})` : "the file is not a zip package"]; }
   for (const required of ["[Content_Types].xml", "ppt/presentation.xml"]) if (!pkg.has(required)) issues.push(`missing part ${required}`);
   const slides = pkg.names().filter((name) => /^ppt\/slides\/slide\d+\.xml$/.test(name));
   if (!slides.length) issues.push("the deck has no slides");
@@ -102,6 +124,8 @@ export async function documentDeckBuild(args: Record<string, unknown>, ctx: Ctx)
   if (fs.existsSync(file)) {
     const digest = sha256(new Uint8Array(fs.readFileSync(file)));
     if (builtHere.get(file) !== digest) return refused("file_exists", "this port replaces only a deck it wrote itself; pick a new file name, or edit the existing deck with document.open and document.apply");
+    const unsaved = await sessionWithUnsavedEdits(ctx.chatId, file);
+    if (unsaved) return refused("unsaved_session_exists", `session ${unsaved} holds edits that are not saved to this deck, and a rebuild would replace the file under it; ${UNSAVED_SESSION_NEXT}`, { sessionId: unsaved });
   }
   const run = await runDeckScript({ script: str(args.script), timeoutMs: DECK_TIMEOUT_DEFAULT_MS });
   if (!run.ok) {
@@ -116,6 +140,11 @@ export async function documentDeckBuild(args: Record<string, unknown>, ctx: Ctx)
   if (issues.length) return refused("deck_output_invalid", `PowerPoint may refuse this file: ${issues.join("; ")}. Fix the script and build again.`);
   let report: DeckLintReport;
   try { report = lintDeck(run.bytes); } catch (error) { return refused("deck_output_invalid", error instanceof Error ? error.message.slice(0, 200) : "the deck could not be read"); }
+  // The script ran for up to a minute: an edit may have arrived meanwhile, so look again right before the file is replaced.
+  if (fs.existsSync(file)) {
+    const unsaved = await sessionWithUnsavedEdits(ctx.chatId, file);
+    if (unsaved) return refused("unsaved_session_exists", `session ${unsaved} got edits that are not saved to this deck while it was built, and the new deck was not written; ${UNSAVED_SESSION_NEXT}`, { sessionId: unsaved });
+  }
   // Write beside the target and rename: a reader never sees half a file.
   const staging = path.join(folder, `.${path.basename(file)}.agentlas-${process.pid}.tmp`);
   try {
@@ -131,7 +160,13 @@ export async function documentDeckBuild(args: Record<string, unknown>, ctx: Ctx)
   try {
     const meta = await (await store()).openLiveDocument({ chatId: ctx.chatId, path: file, openedBy: "run" });
     sessionId = meta.sessionId;
-  } catch (error) { openNote = `the file is written but could not be opened in the Document tab (${(error as { reason?: string })?.reason ?? "open failed"}); document.open retries`; }
+  } catch (error) {
+    const reason = (error as { reason?: string })?.reason ?? "open failed";
+    // An open session with unsaved edits is not closed for the new file, so opening again cannot succeed until that session is saved or the tab is closed.
+    openNote = reason === "unsaved_session_exists"
+      ? `the file is written but could not be opened in the Document tab (${reason}): an open session of this file holds edits the new file does not contain; document.save keeps them, or the owner closes that tab`
+      : `the file is written but could not be opened in the Document tab (${reason}); document.open on the path tries again`;
+  }
   return { status: "ok", produced: [file], data: {
     path: file, ...(sessionId ? { sessionId } : {}), ...(openNote ? { note: openNote } : {}), slides: report.slides, bytes: run.bytes.length, isolation: run.isolation, seconds: run.seconds,
     ...(run.logs.length ? { logs: run.logs } : {}), lint: summary(report, 12),

@@ -19,7 +19,7 @@ import { admitMainInvocation } from "../runtime/scheduled-root-context";
 import { canonicalInvocationRequestJson, getInvocationAdmission, INVOCATION_ADMISSION_DIGEST_VERSION } from '../store/invocation-admissions';
 import { currentUiLocale } from "../ui-locale";
 import { OneSupervisorStore, supervisorHash, personalSupervisorConversationInDb, supervisorStoppedGoalForTask, type SupervisorRequestRow } from "./supervisor-store";
-import { OneSupervisorService, type SupervisorRuntime } from "./supervisor-service";
+import { OneSupervisorService, SupervisorStartDeferred, type SupervisorRuntime } from "./supervisor-service";
 import { SupervisorScienceAdapter } from "./supervisor-science";
 import { supervisorExactResult, supervisorQuietRun, supervisorReplyTurns } from "./supervisor-presentation";
 import { onAskUserLifecycle } from "../confirm/ask-user";
@@ -166,6 +166,10 @@ export function currentOneNativeWorkBudget(commandId:string,budgetId:string):{ad
   }
   return {admitted:true,revision:reservation.policy_revision};
 }
+/** Nothing was started for a run when the admission ledger has no row for it, or has rejected it (owner-start-boundary-not-crossed). */
+function noStartProof(runId:string):boolean {
+  try { const admission=getInvocationAdmission(runId); return !admission || admission.status==='rejected'; } catch { return false; }
+}
 export function oneSupervisor():OneSupervisorService {
   if (supervisor) return supervisor;
   if(!hostOptions && invocationProcessOwner().ownerKind==="daemon")throw Object.assign(supervisorError('supervisor_daemon_domain_not_adopted'),{code:"supervisor_daemon_domain_not_adopted"});
@@ -204,6 +208,9 @@ export function oneSupervisor():OneSupervisorService {
           if(row){store.retryReview(req.runId!,'finance_daily_review_denied');store.update(row,{state:'failed',acknowledgement:'settled',reason:'finance_daily_review_denied'});}
         }).immediate();
       }
+      // Billing could not be reached: nothing was decided and the schedule is kept. The service returns the review's
+      // results to the queue (with backoff) and records this typed cause.
+      if(error instanceof Error && error.message==='finance_daily_access_unavailable')throw new SupervisorStartDeferred('finance_monitoring_access_unavailable');
       throw error;
     }
     hostOptions?.assertAuthority();owner.assert(getOneProfile().oneId);
@@ -272,12 +279,16 @@ export function oneSupervisor():OneSupervisorService {
       return {chatId:chat.id,taskId:task.id};
     },graphTasks:oneId=>personalGraphTasks(getDb(),oneId,{automations:listAutomations,
       liveRunId:id=>getAutomationLiveRunState(id)==="running" ? getAutomationLiveRunId(id) : null}),
-    alwaysApprove:chatId=>grantChatAlwaysApproval(chatId,"one-delegation"),quietRun:runId=>supervisorQuietRun(getDb(),runId),tasks:desktopTasks,locale:currentUiLocale,normalizeRuntimeSelection:normalizeChatRuntimeSelection,frontRuntime:oneFrontRuntimeSelection,
+    alwaysApprove:chatId=>grantChatAlwaysApproval(chatId,"one-delegation"),quietRun:runId=>supervisorQuietRun(getDb(),runId),
+    // The question card a settled worker run left for the owner (D4): the same durable reader the cards use, whichever host ran it.
+    questionWait:(chatId,runId)=>{const view=(require("../confirm") as typeof import("../confirm")).readQuestionDecision(chatId);
+      return view && view.sourceRunId===runId && view.awaitingOwner && !view.committed ? {sourceMessageId:view.sourceMessageId,
+        detail:view.questions.map(q=>[q.question,...(q.options.length?[`options: ${q.options.map(o=>o.label).join(" / ")}`]:[])].join("\n")).join("\n")} : null;},tasks:desktopTasks,locale:currentUiLocale,normalizeRuntimeSelection:normalizeChatRuntimeSelection,frontRuntime:oneFrontRuntimeSelection,
     turns:(chatId,requests)=>supervisorReplyTurns(getDb(),chatId,requests,invocationService.attach(chatId)),
     appearance:input=>{updateOneProfile({expectedVersion:input.expectedVersion,patch:{displayName:input.displayName,bubbleColor:input.bubbleColor}});},
     legacyHistory:(oneId,chatId)=>legacy.inventory(oneId,chatId,new Set(invocationService.activeChatIds()),['inherited','machine'].includes(getOneProfileOrigin())),
     runtime:{
-      start:startNative,attach,receipt,
+      start:startNative,attach,receipt,noStartProof,
       cancel:runId=>!hostOptions && (invocationRunOwners.getOwnerByRunId(runId)?.ownerKind==='daemon' || nativeRuntime?.ownsPending(runId)) ? nativeRuntime!.cancel(runId) : invocationService.cancel(runId),pauseGoal:(chatId,goalId)=>invocationService.pauseGoal(chatId,goalId),
       cancelGoal:(chatId,goalId)=>invocationService.deleteGoal(chatId,goalId),
       steer:(req,runId)=>!hostOptions && invocationRunOwners.getOwnerByRunId(runId)?.ownerKind==='daemon' ? nativeRuntime!.steer(req,runId) : invocationService.steerFromSupervisor(req,runId,admitMainInvocation(req.chatId)),
@@ -312,7 +323,7 @@ export function oneSupervisor():OneSupervisorService {
       assertOneHistoryCommandCurrent(job.command_id, 'claim');
       const chat=getChat(job.chat_id),task=getCanonicalTaskForChat(job.chat_id);
       if (!chat || chat.originSurface!=="work" || chat.kind!=="user" || task?.id!==job.task_id) throw supervisorError('supervisor_work_native_binding_changed');
-    },runtime:{start:startNative,attach,receipt,onSettled},
+    },runtime:{start:startNative,attach,receipt,onSettled,noStartProof},
     onFailure:error=>console.warn("[one-supervisor] worker admission deferred",error instanceof Error ? error.message : "unknown"),
   });
   // Dots parity (owner 2026-10-04): One speaks first on a check-in it was asked to run, or when a worker it
@@ -320,8 +331,8 @@ export function oneSupervisor():OneSupervisorService {
   let checkinBusy=false;
   const fireCheckins=async()=>{if(checkinBusy)return;checkinBusy=true;try{
     // Finance permission/consent is rechecked before the existing One scheduler admits a due briefing.
-    await (await import('../finance/daily-briefing')).wakeFinanceDailyBriefing();
-    supervisor?.fireDueCheckins();recoverOnePersonalDataResults();wakeOnePersonalIntegrationsFromExistingCheckin();
+    const heldCheckins=await (await import('../finance/daily-briefing')).wakeFinanceDailyBriefing();
+    supervisor?.fireDueCheckins(Date.now(),heldCheckins);recoverOnePersonalDataResults();wakeOnePersonalIntegrationsFromExistingCheckin();
   }catch(error){console.warn("[one-supervisor] check-ins deferred",error instanceof Error ? error.message : "unknown");}finally{checkinBusy=false;}};
   const checkinTimer=setInterval(fireCheckins,30_000);checkinTimer.unref?.();
   const stopQuestions=onAskUserLifecycle(event=>{

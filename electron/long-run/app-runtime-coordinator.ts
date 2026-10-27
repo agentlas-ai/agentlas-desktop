@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 import { onHostShutdown } from "../host-lifecycle";
 import { reconcileHostPausedLongRuns } from "./startup-reconciler";
 import { invocationProcessOwner, invocationRunOwners } from "../store/invocation-run-owners";
+import { releaseGoneTerminalOwners } from "../store/terminal-owner-liveness";
+import { userDataDir } from "../runtime-paths";
 import {
   pauseActiveDesktopLongRunsForAppShutdown,
   recoverInterruptedDesktopLongRunsAtStartup,
@@ -46,7 +48,11 @@ function closeAdmissionAndInterruptBestEffort(): void {
   }
 }
 
-export function initializeAppRuntimeCoordinator(): { appInstanceId: string; recoveredRunIds: string[] } {
+/** `liveDaemonBootId`: the boot id of the background service this Desktop reattached to at startup (its ping named it), when there
+ * is one. A service turn still running under that boot is not an orphan of the previous Desktop. */
+export function initializeAppRuntimeCoordinator(
+  options: { liveDaemonBootId?: string | null } = {},
+): { appInstanceId: string; recoveredRunIds: string[] } {
   if (initialized) return { appInstanceId, recoveredRunIds: [] };
   // Only Electron's exclusive GUI lock proves the previous Desktop epoch has
   // ended. A dev multi-instance or headless host must never adopt a live owner.
@@ -71,7 +77,18 @@ export function initializeAppRuntimeCoordinator(): { appInstanceId: string; reco
       console.error("[invocation] abandoned run lease release failed", error);
     }
   }
-  if (exclusive) recoveredRunIds = recoverInterruptedDesktopLongRunsAtStartup(appInstanceId, assertExclusive);
+  // A terminal that died without releasing (kill -9, a crash, a reboot) left its lease active, which refuses every later turn of
+  // its chat on every surface. Unlike Desktop's, a terminal's lease is proven abandoned per owner process, not by a lock.
+  try {
+    const swept = releaseGoneTerminalOwners(invocationRunOwners, userDataDir());
+    if (swept.released.length > 0) {
+      console.warn(`[invocation] released ${swept.released.length} run lease(s) a terminal that is gone left unsettled: ${swept.released.map((owner) => owner.runId).join(", ")}`);
+    }
+    for (const kept of swept.kept) console.info("[invocation] terminal lease kept", { code: kept.code, ownerId: kept.ownerId, runIds: kept.runIds, pid: kept.pid });
+  } catch (error) {
+    console.error("[invocation] terminal lease sweep failed", error);
+  }
+  if (exclusive) recoveredRunIds = recoverInterruptedDesktopLongRunsAtStartup(appInstanceId, assertExclusive, { liveDaemonBootId: options.liveDaemonBootId ?? null });
   initialized = true;
   admissionOpen = true;
   /*
@@ -102,6 +119,12 @@ export function initializeAppRuntimeCoordinator(): { appInstanceId: string; reco
     try { pauseActiveDesktopLongRunsForAppShutdown(appInstanceId); } catch {}
     closeAdmissionAndInterruptBestEffort();
   });
+  // The owner's attachment copies a stopped process left in a Work folder (a crash or update mid-run never released them) are removed
+  // shortly after start, in the background (invocation/work-attachments.ts). Loaded here so importing the coordinator stays light.
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    (require("../invocation/work-inputs-startup-sweep") as typeof import("../invocation/work-inputs-startup-sweep")).scheduleWorkInputsStartupSweep();
+  } catch { /* a sweep never blocks startup */ }
   return { appInstanceId, recoveredRunIds };
 }
 

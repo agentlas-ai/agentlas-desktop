@@ -8,6 +8,7 @@ import { assertScienceRecoveryRequest } from "../science-host/recovery-authority
 // mcp/client.ts가 활성 런타임 → 적절한 러너로 라우팅한다.
 import { runtimeNativeAbilitiesLine } from "./native-capabilities";
 import { createHash } from "node:crypto";
+import { accessSync, constants as fsConstants, statSync } from "node:fs";
 import { featureIsNative } from "../harness/feature-registry";
 import type { ChatHistoryEntry, ImageAttachment, McpInvocationEvent } from "../../shared/types";
 import type { ToolInvocationOrigin } from "../../shared/tool-invocation-origin";
@@ -949,6 +950,53 @@ export function preDispatchRefusal(cause: unknown, stage: string, fallbackCode =
   }
   const message = cause instanceof Error ? cause.message : String(cause ?? fallbackCode);
   return new PreDispatchRefusalError(refusalCode(cause) ?? fallbackCode, message, cause, stage);
+}
+
+/** A process that could not be created for lack of a resource right now (descriptors, processes, memory): it clears by itself. */
+export const RUNTIME_SPAWN_RESOURCE_BUSY_CODE = "runtime_spawn_resource_busy";
+const SPAWN_RESOURCE_BUSY_ERRNOS: ReadonlySet<string> = new Set(["EMFILE", "ENFILE", "EAGAIN", "ENOMEM"]);
+
+/**
+ * A runner child that was never created: Node reports a failed spawn (ENOENT, EACCES, EMFILE, a deleted working folder...)
+ * as an `error` event of a child with no pid, or throws it from `spawn()` itself (child null). Nothing of the turn reached
+ * the CLI, so it is a refusal before dispatch, never RuntimeTurnUnsettledError ("the request may have acted"): the
+ * send queue starts the message again, a borrowed worker session stays, and the cause is a code, not prose. Null when the
+ * error is not a failed spawn (a live process's own error), so the caller keeps its previous handling.
+ * Code: the working folder when that is what is gone (spawn reports ENOENT for it too), else the executable's state, a
+ * transient resource shortage, or `<kind>_spawn_failed`. The raw errno error stays as the standard `cause`.
+ */
+export function spawnStartFailureRefusal(child: { pid?: number } | null | undefined, error: unknown,
+  ctx: { runtimeKind: string; cwd?: string | null; locale?: string }): PreDispatchRefusalError | null {
+  if (child && child.pid !== undefined) return null;
+  if (!error || typeof error !== "object") return null;
+  const errno = (error as { code?: unknown }).code;
+  const syscall = (error as { syscall?: unknown }).syscall;
+  if (typeof errno !== "string" || !/^E[A-Z0-9]+$/.test(errno) || typeof syscall !== "string" || !syscall.startsWith("spawn")) return null;
+  const stage = `${ctx.runtimeKind}-spawn`;
+  const cwd = typeof ctx.cwd === "string" && ctx.cwd ? ctx.cwd : null;
+  if (SPAWN_RESOURCE_BUSY_ERRNOS.has(errno)) {
+    return new PreDispatchRefusalError(RUNTIME_SPAWN_RESOURCE_BUSY_CODE, error instanceof Error ? error.message : errno, error, stage);
+  }
+  if (cwd) {
+    let folderCode: string | null = null;
+    try {
+      if (!statSync(cwd).isDirectory()) folderCode = "project_folder_not_directory";
+      else accessSync(cwd, fsConstants.R_OK | fsConstants.X_OK);
+    } catch (probe) {
+      const probeErrno = (probe as { code?: unknown }).code;
+      folderCode = probeErrno === "ENOENT" ? "project_folder_missing" : probeErrno === "ENOTDIR" ? "project_folder_not_directory" : "project_folder_unreadable";
+    }
+    if (folderCode) {
+      const ko = ctx.locale === "ko";
+      const message = folderCode === "project_folder_missing" ? (ko ? `작업 폴더를 찾을 수 없습니다: ${cwd}` : `The working folder was not found: ${cwd}`)
+        : folderCode === "project_folder_not_directory" ? (ko ? `작업 폴더가 폴더가 아닙니다: ${cwd}` : `The working folder is not a folder: ${cwd}`)
+        : (ko ? `작업 폴더를 열 수 없습니다: ${cwd}` : `The working folder cannot be opened: ${cwd}`);
+      return new PreDispatchRefusalError(folderCode, message, error, stage);
+    }
+  }
+  const code = errno === "ENOENT" ? "runtime_executable_missing" : errno === "EACCES" || errno === "EPERM" ? "runtime_executable_not_runnable"
+    : `${ctx.runtimeKind.replace(/[^a-z0-9]+/gi, "_").toLowerCase()}_spawn_failed`;
+  return new PreDispatchRefusalError(code, error instanceof Error ? error.message : errno, error, stage);
 }
 
 /** The typed runner failure a cause carries: the failure of a returned RunnerResult, or the RunnerFailure itself. */

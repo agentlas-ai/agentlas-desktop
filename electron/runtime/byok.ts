@@ -97,6 +97,15 @@ function byokNoModel(backend: ByokBackend, req: RunnerRequest): RunnerResult | n
     : "No model ID is selected. Choose a live model or enter a model ID in Settings.");
 }
 
+/**
+ * The key is read from the OS keychain before any request exists. A read that fails (a locked keychain, a native lookup that
+ * timed out, a company policy refusal) sent nothing, so it is a refusal before dispatch that keeps its own typed code, not
+ * a dispatched turn without a receipt that the host must never replay.
+ */
+function readKeyBeforeDispatch(backend: Parameters<typeof readApiKey>[0]): Promise<string | null> {
+  return readApiKey(backend).catch((error: unknown) => { throw markRefusedBeforeDispatch(error); });
+}
+
 /** A missing provider key: refused before any request leaves Main, with a typed code instead of a thrown sentence. */
 function byokCredentialMissing(message: string): RunnerResult {
   return refusedBeforeDispatch({ kind: "auth", runtime: "byok", source: "marker", providerCode: "credential_missing", message: message.slice(0, 400) });
@@ -973,7 +982,7 @@ export const runAnthropicByok: Runner = async (
   events: RunnerEvents,
 ): Promise<RunnerResult> => {
   assertScienceRecoveryRequest(req, "byok", "anthropic");
-  const key = await readApiKey("anthropic");
+  const key = await readKeyBeforeDispatch("anthropic");
   if (!key) return byokCredentialMissing(tStatus(req.locale, "errKeyMissingAnthropic"));
   return runAnthropicMessages("anthropic", "https://api.anthropic.com", { "x-api-key": key }, req, events);
 };
@@ -989,7 +998,7 @@ function makeAnthropicCompatByok(backend: ByokBackend): Runner {
     assertScienceRecoveryRequest(req, "byok", backend);
     const preset = anthropicCompatProvider(backend);
     if (!preset) throw markRefusedBeforeDispatch(new Error(`Unknown Anthropic-compatible backend: ${backend}`));
-    const key = await readApiKey(backend);
+    const key = await readKeyBeforeDispatch(backend);
     if (!key) {
       return byokCredentialMissing(
         req.locale === "ko"
@@ -1097,7 +1106,7 @@ async function runOpenAICompatible(
   events: RunnerEvents,
 ): Promise<RunnerResult> {
   assertScienceRecoveryRequest(req, "byok", backend);
-  const key = await readApiKey(backend);
+  const key = await readKeyBeforeDispatch(backend);
   if (!key) {
     return byokCredentialMissing(
       req.locale === "ko"
@@ -1148,7 +1157,7 @@ export const runOpenAIByok: Runner = async (
   events: RunnerEvents,
 ): Promise<RunnerResult> => {
   assertScienceRecoveryRequest(req, "byok", "openai");
-  const key = await readApiKey("openai");
+  const key = await readKeyBeforeDispatch("openai");
   if (!key) return byokCredentialMissing(tStatus(req.locale, "errKeyMissingOpenAI"));
   return runOpenAiCompletionWithMainToolLoop(
     "openai", "https://api.openai.com/v1", "OpenAI", key, req, events,
@@ -1161,7 +1170,7 @@ export const runUpstageByok: Runner = async (
   events: RunnerEvents,
 ): Promise<RunnerResult> => {
   assertScienceRecoveryRequest(req, "byok", "upstage");
-  const key = await readApiKey("upstage");
+  const key = await readKeyBeforeDispatch("upstage");
   if (!key) return byokCredentialMissing("Upstage Solar API key missing (Settings → BYOK)");
   return runOpenAiCompletionWithMainToolLoop(
     "upstage", "https://api.upstage.ai/v1", "Upstage", key, req, events,
@@ -1183,7 +1192,7 @@ export const runCustomByok: Runner = async (
       baseUrl = row.value.trim().replace(/\/$/, "");
     }
   } catch {}
-  const key = await readApiKey("custom");
+  const key = await readKeyBeforeDispatch("custom");
   if (!key) return byokCredentialMissing("Custom API key missing (Settings → BYOK)");
   const reviewedEndpoint = await companyCustomByokEndpoint(baseUrl);
   return runOpenAiCompletionWithMainToolLoop("custom", reviewedEndpoint, "Custom", key, req, events,
@@ -1197,7 +1206,7 @@ export const runGoogleByok: Runner = async (
   events: RunnerEvents,
 ): Promise<RunnerResult> => {
   assertScienceRecoveryRequest(req, "byok", "google");
-  const key = await readApiKey("google");
+  const key = await readKeyBeforeDispatch("google");
   if (!key) return byokCredentialMissing(tStatus(req.locale, "errKeyMissingGoogle"));
 
   const noModel = byokNoModel("google", req);

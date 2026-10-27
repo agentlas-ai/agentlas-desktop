@@ -90,6 +90,8 @@ export interface OneDispatchRow {
 }
 
 const MAX_BRIEF = 8_000;
+/** What a queued job's brief may grow to by the directions added before it starts (the start cap is MAX_BRIEF; a direction is never cut). */
+const MAX_QUEUED_BRIEF = MAX_BRIEF * 2;
 const MAX_RESULT = 12_000;
 /*
  * Runaway brakes (pre-mortem 2026-09-26, EDGE-CASES.md). The depth rule stops a
@@ -304,25 +306,37 @@ function ownerMessage(ko: string, en: string): string {
   return currentUiLocale() === "ko" ? ko : en;
 }
 
+/** A system turn cannot enter a teammate session that holds a paused Goal (or whose Stop is still settling): a new session can. */
+const SESSION_GOAL_REFUSAL = /goal_(?:explicit_resume_required|stop_in_progress)|auto_goal_/;
+/** The machine code of a thrown start error: its own message when that is a code, otherwise a generic one. */
+function refusalCodeOf(error: unknown): string {
+  const raw = error instanceof Error ? error.message : String(error);
+  return /^[a-z][a-z0-9_]{2,80}$/.test(raw) ? raw : "start_failed";
+}
+/** The code a startRefusal carries (host-written; a queued start reads it instead of the sentence). */
+function startRefusalCodeOf(error: unknown): string | null {
+  const code = (error as { startRefusalCode?: unknown } | null)?.startRefusalCode;
+  return typeof code === "string" ? code : null;
+}
+
 /*
  * Why a start was refused, as a precise reason the owner can act on. Nothing was
  * started in any of these cases (the row and a fresh chat are removed), so asking
  * again cannot create a second session.
  */
 function startRefusal(error: unknown): Error {
-  const raw = error instanceof Error ? error.message : String(error);
-  const code = /^[a-z][a-z0-9_]{2,80}$/.test(raw) ? raw : "start_failed";
-  const reason = /goal_(?:explicit_resume_required|stop_in_progress)|auto_goal_/.test(code)
+  const code = refusalCodeOf(error);
+  const reason = SESSION_GOAL_REFUSAL.test(code)
     ? ["그 팀원 세션에 멈춘 목표가 있어 이어 쓸 수 없어요. 새 세션으로 맡기면 됩니다.", "That teammate session holds a paused goal, so it cannot be continued. Hand it over in a new session."]
     : code === "desktop_execution_admission_closed"
       ? ["앱이 종료 중이라 시작하지 않았어요. 앱을 다시 연 뒤 맡기세요.", "The app is shutting down, so nothing was started. Hand it over after reopening the app."]
       : code === "invocation_cleanup_pending" || code === "goal_verification_pending"
         ? ["그 팀원 세션이 앞 작업을 정리하는 중이라 시작하지 않았어요. 잠시 뒤 다시 맡기세요.", "That teammate session is still wrapping up earlier work, so nothing was started. Try again shortly."]
         : ["팀원 세션을 시작하지 못했어요.", "The teammate session could not be started."];
-  return new Error(`one-team-start-refused:${code}: ${ownerMessage(
+  return Object.assign(new Error(`one-team-start-refused:${code}: ${ownerMessage(
     `${reason[0]} 아무것도 시작되지 않았으니 다시 맡겨도 중복되지 않아요.`,
     `${reason[1]} Nothing was started, so asking again will not create a duplicate.`,
-  )}`);
+  )}`), { startRefusalCode: code });
 }
 
 export function resolveOneTeamMember(query: string): OneOrgMember {
@@ -413,8 +427,12 @@ export function recoverOneTeamDispatches(): void {
  */
 const RESTART_INTERRUPTED = "restart_interrupted";
 const PARENT_BUSY_OTHER_PROCESS = "one_team_parent_busy_other_host";
-/** Reports waiting for a room that is busy elsewhere or for a restart's report: retried by the sweep, never failures. */
-const HELD_REPORT_CODES = [RESTART_INTERRUPTED, PARENT_BUSY_OTHER_PROCESS] as const;
+/** The report turn's start was refused for a reason that clears by itself (shared/transient-send-refusal.ts): nothing is wrong, the room is not ready yet. */
+const REPORT_START_NOT_READY = "one_team_report_start_not_ready";
+/** Reports waiting for a room that is busy elsewhere, for a restart's report, or for a room that is not ready yet: retried by the sweep, never failures. */
+const HELD_REPORT_CODES = [RESTART_INTERRUPTED, PARENT_BUSY_OTHER_PROCESS, REPORT_START_NOT_READY] as const;
+/** The sweep polls a held report only this long after its session ended; the room's own settle and a sign-in return still retry it. */
+const HELD_REPORT_SWEEP_MAX_AGE_MS = 24 * 3_600_000;
 const CHAT_BUSY_OTHER_HOST = "invocation_chat_busy_other_host";
 /** A child no process holds is settled by the periodic sweep only after this quiet time: the owner's own listener
  * finalizes within 1.5 s, and a queued next run of the same chat claims it well inside it. Recovery uses 0. */
@@ -544,6 +562,9 @@ function armOrphanSweep(): void {
   orphanSweep = setInterval(() => {
     settleOrphanedDispatches(ORPHAN_GRACE_MS);
     retryFailedReports(undefined, HELD_REPORT_CODES);
+    // A queued job has no settle event of its own to wake it when the seat freed in the other process, when this sweep
+    // just finalized the session in front of it, or when its start was refused for a reason that has since cleared.
+    startQueuedDispatches();
   }, ORPHAN_SWEEP_MS);
   orphanSweep.unref?.();
 }
@@ -775,6 +796,8 @@ export function withdrawQueuedOneTeamReport(dispatchId: string): boolean {
 
 /** report_error of a report whose queued turn the owner's stop (Stop, Goal pause or delete) withdrew: kept visible, never carried again. */
 export const ONE_TEAM_REPORT_OWNER_STOPPED = "owner_stopped";
+/** report_error of a session the graph step that started it cancelled when it ended (owner Stop, pause, delete or node deadline): marked reported, nothing is sent. */
+export const ONE_TEAM_GRAPH_STEP_ENDED = "graph_step_ended";
 
 /**
  * A queued report turn ended failed or cancelled (store/invocation-steers.ts calls this inside the transaction that
@@ -894,12 +917,26 @@ function parkOwnerWait(dispatch: OneDispatchRow, runId: string, wait: NonNullabl
   }
 }
 
-/** A report held for later (the room busy in the other process): no attempt is spent; the sweep and the room's own settle retry it. */
-function holdReport(dispatch: OneDispatchRow, markReported: boolean): void {
+/** A report held for later (the room busy in the other process, or not ready to take a turn yet): no attempt is spent; the sweep and the room's own settle retry it. */
+function holdReport(dispatch: OneDispatchRow, markReported: boolean, code: string = PARENT_BUSY_OTHER_PROCESS): void {
   withdrawQueuedOneTeamReport(dispatch.id);
   if (markReported) getDb().prepare("UPDATE one_team_dispatches SET report_error = ? WHERE id = ? AND reported_at IS NULL")
-    .run(PARENT_BUSY_OTHER_PROCESS, dispatch.id);
+    .run(code, dispatch.id);
   armOrphanSweep();
+}
+
+/**
+ * The typed code of a refusal that clears by itself (the same list the service and the send queue retry on), or null.
+ * Read lazily: this module stays importable without the shared list (contract runs), where nothing is transient.
+ */
+function transientRefusalCode(error: unknown): string | null {
+  try {
+    const refusal = require("../../shared/transient-send-refusal") as typeof import("../../shared/transient-send-refusal");
+    const code = refusal.sendRefusalCode(error);
+    return code && refusal.isTransientSendRefusalCode(code) ? code : null;
+  } catch {
+    return null;
+  }
 }
 
 /** "started": the report turn started or was queued (or parked for a waiting Goal); "held": the room runs in the other
@@ -965,6 +1002,15 @@ function reportToOne(dispatch: OneDispatchRow, userPrompt?: string | null, markR
     }
     // The other process took the room between the check above and this start: same as busy there, no attempt spent.
     if (message === CHAT_BUSY_OTHER_HOST) { holdReport(dispatch, markReported); return "held"; }
+    // Not ready yet (cleanup pending in the other process, the channel reattaching ...): the same refusals the service and the send
+    // queue retry. No attempt is spent and the sweep sends it again once the cause is gone (production: one start refused once
+    // used 1 of 3 attempts and nothing ever re-sent it, so a Goal or graph step waiting on this result never woke).
+    const notReady = transientRefusalCode(error);
+    if (notReady) {
+      console.info(`[one-team] report held dispatch=${dispatch.id} hold=${REPORT_START_NOT_READY} cause=${notReady}`);
+      holdReport(dispatch, markReported, REPORT_START_NOT_READY);
+      return "held";
+    }
     console.warn("[one-team] report turn not started:", message);
     if (markReported) getDb().prepare("UPDATE one_team_dispatches SET report_error = ?, report_attempts = report_attempts + 1 WHERE id = ? AND reported_at IS NULL")
       .run(message.slice(0, 240), dispatch.id);
@@ -1050,10 +1096,12 @@ function retryFailedReports(parentChatId?: string, codes?: readonly string[]): v
   try {
     ensureTable();
     settleParkedReports(parentChatId);
+    // The sweep (codes) polls held reports for a bounded time, so a report held for good cannot fill its ten slots forever.
+    const sweepSince = codes?.length ? new Date(Date.now() - HELD_REPORT_SWEEP_MAX_AGE_MS).toISOString() : null;
     const rows = getDb().prepare(`SELECT * FROM one_team_dispatches WHERE status <> 'running' AND reported_at IS NULL AND report_error IS NOT NULL
-      AND report_attempts < ? ${parentChatId ? "AND parent_chat_id = ?" : ""} ${codes?.length ? `AND report_error IN (${codes.map(() => "?").join(",")})` : ""}
+      AND report_attempts < ? ${parentChatId ? "AND parent_chat_id = ?" : ""} ${codes?.length ? `AND report_error IN (${codes.map(() => "?").join(",")}) AND updated_at >= ?` : ""}
       ORDER BY updated_at LIMIT 10`)
-      .all(ONE_TEAM_REPORT_ATTEMPTS, ...(parentChatId ? [parentChatId] : []), ...(codes ?? [])) as OneDispatchRow[];
+      .all(ONE_TEAM_REPORT_ATTEMPTS, ...(parentChatId ? [parentChatId] : []), ...(codes ?? []), ...(sweepSince ? [sweepSince] : [])) as OneDispatchRow[];
     for (const dispatch of rows) {
       // A room whose turn runs in either process gets the report after it, never a second turn beside it.
       if (chatLiveAnywhere(dispatch.parent_chat_id)) continue;
@@ -1100,6 +1148,70 @@ function adoptForGraphStep(dispatchId: string, owner: string | null): void {
   getDb().prepare("UPDATE one_team_dispatches SET graph_owner = ? WHERE id = ? AND graph_owner IS NULL AND status IN ('running','queued')").run(owner, dispatchId);
 }
 
+/**
+ * A session the graph step STARTED (not one it adopted by steering or reusing it): the host wrote the step's run as the dispatch's
+ * parent_run_id from the Main-minted grant (dispatchParentRunId), while an adopted session keeps the parent it was started with.
+ */
+function startedByGraphStep(dispatch: OneDispatchRow, owner: string): boolean {
+  return Boolean(dispatch.parent_run_id) && owner.startsWith(`${dispatch.parent_run_id}#`);
+}
+
+/** Cancels a teammate's run wherever it is held (this process or the background service): the entry the owner's own Stop uses. */
+async function cancelChildRun(runId: string): Promise<"requested" | "already-requested" | "not-found"> {
+  type Cancel = (id: string) => Promise<"requested" | "already-requested" | "not-found"> | "requested" | "already-requested" | "not-found";
+  let cancel: Cancel;
+  try { cancel = (require("../runtime/invocation-owner-control") as typeof import("../runtime/invocation-owner-control")).cancelInvocationOwnerRun; }
+  catch { cancel = (id) => runtime().invocationService.cancel(id); } // a host without the owner router: this process's runs only
+  return await cancel(runId);
+}
+
+/**
+ * The graph step that dispatched these sessions ended on the owner's Stop (pause, delete) or on its node deadline: the sessions it
+ * STARTED stop with it. They run with full access and Always allow; without this they carried on unobserved after the owner stopped
+ * the graph (a video publish went out anyway) and their results reached only the room's One. Queued jobs are cancelled, running ones
+ * get the run cancel and are closed `cancelled` with report_error graph_step_ended (marked reported: the owner stopped it, nothing is
+ * sent). A session whose run cannot be reached stays as it is, with the typed cause in the log; the sweep closes it when it ends.
+ * Sessions the step only adopted belong to the room and keep running.
+ */
+export async function cancelGraphStepOwnedWork(owner: string, cause: string): Promise<{ cancelled: string[]; unreached: string[] }> {
+  ensureTable();
+  const done = { cancelled: [] as string[], unreached: [] as string[] };
+  const rows = getDb().prepare("SELECT * FROM one_team_dispatches WHERE graph_owner = ? AND status IN ('running','queued') ORDER BY created_at, rowid")
+    .all(owner) as OneDispatchRow[];
+  const reason = ko() ? "이 일을 맡긴 그래프 단계가 끝나 함께 멈췄어요." : "Cancelled because the graph step that started it ended.";
+  const running: OneDispatchRow[] = [];
+  for (const dispatch of rows) {
+    if (!startedByGraphStep(dispatch, owner)) continue;
+    if (dispatch.status === "queued") { if (cancelQueuedDispatch(dispatch, ONE_TEAM_GRAPH_STEP_ENDED, reason)) done.cancelled.push(dispatch.id); }
+    else running.push(dispatch);
+  }
+  await Promise.all(running.map(async (dispatch) => {
+    const { runId } = latestChildRun(dispatch);
+    let outcome: "requested" | "already-requested" | "not-found";
+    try { outcome = await cancelChildRun(runId); }
+    catch (error) {
+      console.warn(`[one-team] graph step ended; its session could not be cancelled dispatch=${dispatch.id} run=${runId} cause=graph_step_cancel_unreachable step=${cause}:`,
+        error instanceof Error ? error.message : error);
+      done.unreached.push(dispatch.id);
+      return;
+    }
+    // No live run in any process: the receipt (or the sweep) closes the row truthfully, completed or cancelled.
+    if (outcome === "not-found") return;
+    const now = new Date().toISOString();
+    const text = lastAssistantText(dispatch.child_chat_id, dispatch.updated_at) ?? `${ONE_TEAM_GRAPH_STEP_ENDED}: ${reason}`;
+    const changed = getDb().prepare("UPDATE one_team_dispatches SET status = 'cancelled', result_text = ?, reported_at = ?, report_error = ?, updated_at = ? WHERE id = ? AND status = 'running'")
+      .run(text, now, ONE_TEAM_GRAPH_STEP_ENDED, now, dispatch.id);
+    if (changed.changes !== 1) return;
+    console.info(`[one-team] graph step ended; session cancelled dispatch=${dispatch.id} run=${runId} cause=${ONE_TEAM_GRAPH_STEP_ENDED} step=${cause} cancel=${outcome}`);
+    retainDispatchResult(row(dispatch.id)!);
+    withdrawQueuedOneTeamReport(dispatch.id);
+    const pending = waiters.get(dispatch.id);
+    if (pending) { waiters.delete(dispatch.id); for (const waiter of pending) waiter.resolve(row(dispatch.id)!); }
+    done.cancelled.push(dispatch.id);
+  }));
+  return done;
+}
+
 export function oneTeamList(caller: OneTeamCaller) {
   const ownerChatId = assertCaller(caller.chatId);
   const group = groupOf(ownerChatId);
@@ -1135,7 +1247,9 @@ export function oneTeamList(caller: OneTeamCaller) {
     sessions_from_this_conversation: open.filter(dispatch=>dispatchReceiverCurrent(dispatch)
       && (isLive(dispatch) || dispatchHandoff(dispatch).relayAllowed)).map((dispatch) => ({
       ...view(dispatch),
-      running_now: !dispatch.child_chat_id.startsWith(QUEUED_CHAT_PREFIX) && chatLiveAnywhere(dispatch.child_chat_id),
+      // A job closed out of the queue never ran: the session it would have continued may be live for another job.
+      running_now: !dispatch.child_chat_id.startsWith(QUEUED_CHAT_PREFIX) && !dispatch.child_run_id.startsWith(QUEUE_CLOSED_RUN_PREFIX)
+        && chatLiveAnywhere(dispatch.child_chat_id),
     })),
   };
 }
@@ -1198,7 +1312,11 @@ export function oneTeamStartSession(caller: OneTeamCaller, input: { member?: unk
   ).get(parentChatId, member.id, hash) as OneDispatchRow | undefined;
   // Retries and double calls reuse the session; the same brief tomorrow (a daily task) is new work.
   // A goal continuation re-reading its own history is never new work: it always gets the existing session.
-  if (duplicate && dispatchReceiverCurrent(duplicate)
+  // Work that was never started is not "the same work already started": a job closed out of the queue (it has a queue-closed run id)
+  // and a session the starting graph step cancelled when it ended are handed over again when the brief comes again.
+  const neverStarted = duplicate !== undefined && (duplicate.child_run_id.startsWith(QUEUE_CLOSED_RUN_PREFIX)
+    || (duplicate.status === "cancelled" && duplicate.report_error === ONE_TEAM_GRAPH_STEP_ENDED));
+  if (duplicate && !neverStarted && dispatchReceiverCurrent(duplicate)
     && (viaContinuation || isLive(duplicate) || Date.now() - Date.parse(duplicate.created_at) < DUPLICATE_WINDOW_MS)) {
     assertDispatchReceiver(duplicate);
     adoptForGraphStep(duplicate.id, graphOwnerOf(caller));
@@ -1315,14 +1433,31 @@ function launchDispatch(input: { parentChatId: string; member: OneOrgMember; bri
     try { getDb().prepare("INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)").run(isolatedChildKey(chat.id), "1"); }
     catch (error) { console.warn("[one-team] new_session isolation mark unavailable:", error instanceof Error ? error.message : error); }
   }
+  // A session the personal conversation opened is the personal agent's room (owner 2026-10-27): read-only for the owner.
+  if (createdHere) {
+    try { (require("./personal-agent-rooms") as typeof import("./personal-agent-rooms")).markPersonalAgentTeamRoom(getDb(), chat.id, parentChatId); }
+    catch (error) { console.warn("[one-team] personal agent room mark deferred:", error instanceof Error ? error.message : error); }
+  }
   installSettleListener();
   const id = input.queuedId ?? `dispatch-${randomUUID()}`;
   const runId = randomUUID();
   const now = new Date().toISOString();
   const parentRunId = input.parentRunId ?? null;
+  // The brief the session starts with: for a queued row, whatever the row holds once it is claimed (a direction added while it waited is in it).
+  let startBrief = brief;
   if (input.queuedId) {
-    getDb().prepare("UPDATE one_team_dispatches SET status = 'running', child_chat_id = ?, child_run_id = ?, updated_at = ? WHERE id = ? AND status = 'queued'")
+    const claimed = getDb().prepare("UPDATE one_team_dispatches SET status = 'running', child_chat_id = ?, child_run_id = ?, updated_at = ? WHERE id = ? AND status = 'queued'")
       .run(chat.id, runId, now, id);
+    if (claimed.changes !== 1) {
+      // The other process (its sweep or settle) started it, or it was cancelled, between the read and this claim: start nothing.
+      // Starting anyway would run the job twice and the refusal below would then reset the other process's running row.
+      if (createdHere) {
+        try { chats.removeChat(chat.id); } catch { /* keep the empty chat rather than fail twice */ }
+        try { getDb().prepare("DELETE FROM meta WHERE key = ?").run(isolatedChildKey(chat.id)); } catch { /* a stale mark is harmless */ }
+      }
+      throw Object.assign(new Error("one_team_queued_dispatch_taken"), { queuedTaken: true });
+    }
+    startBrief = row(id)?.brief ?? brief;
   } else {
     getDb().prepare(`
       INSERT INTO one_team_dispatches (id, parent_chat_id, parent_run_id, member_id, member_agent_id, member_name,
@@ -1343,7 +1478,7 @@ function launchDispatch(input: { parentChatId: string; member: OneOrgMember; bri
     invocationService.start({
       runId,
       chatId: chat.id,
-      userPrompt: withRoomParagraph(brief, parentChatId, member),
+      userPrompt: withRoomParagraph(startBrief, parentChatId, member),
       promptOrigin: "system",
       locale: currentUiLocale(),
       permissions: delegation,
@@ -1360,9 +1495,10 @@ function launchDispatch(input: { parentChatId: string; member: OneOrgMember; bri
     }, undefined, undefined, undefined, "one-dispatch-brief");
   } catch (error) {
     if (input.queuedId) {
-      // A queued row stays queued: the next settle retries it (the refusal is usually transient, e.g. cleanup pending).
-      getDb().prepare("UPDATE one_team_dispatches SET status = 'queued', child_chat_id = ?, child_run_id = '', updated_at = ? WHERE id = ?")
-        .run(continuing ? chat.id : `${QUEUED_CHAT_PREFIX}${id}`, new Date().toISOString(), id);
+      // A queued row stays queued: startQueuedDispatches decides whether this refusal waits, maps to a new session or closes the job.
+      // Only this attempt's own claim is undone (run id): a job another process already started keeps running.
+      getDb().prepare("UPDATE one_team_dispatches SET status = 'queued', child_chat_id = ?, child_run_id = '', updated_at = ? WHERE id = ? AND status = 'running' AND child_run_id = ?")
+        .run(continuing ? chat.id : `${QUEUED_CHAT_PREFIX}${id}`, new Date().toISOString(), id, runId);
     } else {
       getDb().prepare("DELETE FROM one_team_dispatches WHERE id = ?").run(id);
     }
@@ -1420,7 +1556,9 @@ function enqueueDispatch(input: { fresh?: boolean; parentChatId: string; member:
 
 /**
  * Start queued dispatches whose seat is free, oldest first, one per seat. Called when a teammate session settles or parks
- * on the owner, and after a restart. A seat with an older queued job keeps its order: a later job never jumps it.
+ * on the owner, after a restart and by the minute sweep. A seat with an older queued job keeps its order: a later job never
+ * jumps it, until that job starts or is closed. Every queued job leaves the queue: it starts, it is closed (failed, with the
+ * typed cause) when it can never start, or it is cancelled (the room is gone, or by one_team_cancel_queued).
  */
 export function startQueuedDispatches(): void {
   try {
@@ -1434,8 +1572,21 @@ export function startQueuedDispatches(): void {
       const seat = `${item.parent_chat_id}\u0000${item.member_agent_id}`;
       if (heldSeats.has(seat)) continue;
       heldSeats.add(seat);
+      // The owner archived or deleted the room while the job waited: it would otherwise start later with the room's full
+      // authority and Always allow, for work nobody is waiting for any more.
+      const parent = chats.getChat(item.parent_chat_id);
+      if (!parent || parent.archivedAt) {
+        cancelQueuedDispatch(item, parent ? "queue_room_archived" : "queue_room_deleted",
+          ko() ? "방이 보관되거나 삭제돼 시작하지 않고 줄에서 뺐어요." : "The room was archived or deleted, so the queued job was removed without starting.");
+        heldSeats.delete(seat);
+        continue;
+      }
       const member = activeMembers().find((candidate) => candidate.id === item.member_id || candidate.installedAgentId === item.member_agent_id);
-      if (!member) { failQueuedDispatch(item, ko() ? "그 팀원이 더 이상 팀에 없어 시작하지 못했어요." : "That teammate is no longer on the team, so the queued job was not started."); continue; }
+      if (!member) {
+        failQueuedDispatch(item, "queue_member_gone", ko() ? "그 팀원이 더 이상 팀에 없어 시작하지 못했어요." : "That teammate is no longer on the team, so the queued job was not started.");
+        heldSeats.delete(seat);
+        continue;
+      }
       if (seatBlocker(item.parent_chat_id, member)) continue;
       const running = (getDb().prepare("SELECT COUNT(*) AS n FROM one_team_dispatches WHERE parent_chat_id = ? AND status = 'running'").get(item.parent_chat_id) as { n: number }).n;
       if (running >= MAX_RUNNING_PER_PARENT) continue;
@@ -1453,29 +1604,125 @@ export function startQueuedDispatches(): void {
           }
         }
       }
-      try {
-        const isolated = (() => { try { return getDb().prepare("SELECT 1 AS present FROM meta WHERE key = ?").get(`${ISOLATED_DISPATCH_KEY_PREFIX}${item.id}`) !== undefined; } catch { return false; } })();
-        launchDispatch({ parentChatId: item.parent_chat_id, member, brief: item.brief, hash: item.brief_hash,
-          title: item.brief.split(/\r?\n/, 1)[0]!.slice(0, 120), continuing, queuedId: item.id, delegationPermission: item.delegation_permission, isolated });
-      } catch (error) {
-        console.warn("[one-team] queued dispatch not started yet:", error instanceof Error ? error.message : error);
-      }
+      if (startQueuedItem(item, member, continuing) === "closed") heldSeats.delete(seat);
     }
   } catch (error) {
     console.warn("[one-team] queued dispatch drain skipped:", error instanceof Error ? error.message : error);
   }
 }
 
-/** A queued job that can never start (its teammate left): close it as failed and tell One, like any other ended session. */
-function failQueuedDispatch(item: OneDispatchRow, reason: string): void {
-  const now = new Date().toISOString();
-  const changed = getDb().prepare("UPDATE one_team_dispatches SET status = 'failed', result_text = ?, updated_at = ? WHERE id = ? AND status = 'queued'")
-    .run(reason, now, item.id);
-  if (changed.changes !== 1) return;
-  const settled = row(item.id)!;
+/** A queued job whose start is refused this many times in a row for a reason that does not clear by itself is closed, not retried for ever. */
+const QUEUED_START_REFUSALS = 3;
+/** A queued job whose every start has been refused for this long is closed, whatever the reason (the same bound the send queue gives a waiting message). */
+const QUEUED_START_DEADLINE_MS = 2 * 3_600_000;
+/** Two counted refusals of one queued job are at least this far apart. */
+const QUEUED_START_REFUSAL_SPACING_MS = 30_000;
+/** Start refusals per queued job in this process (a restart begins the count again; the queue itself is durable). */
+const queuedStartRefusals = new Map<string, { count: number; firstAt: number; countedAt: number }>();
+
+/**
+ * One queued job's start. "started": running now. "waiting": refused for now, it stays queued and is tried again by the next
+ * settle, sign-in return or sweep. "closed": it can never start and was closed. "taken": another process started or cancelled it.
+ * A continued session that holds a paused Goal cannot take a system turn: the refusal itself says to hand the job over in a new
+ * session, so the job is moved there (before, it was retried into that session on every settle and held the seat's whole queue).
+ */
+function startQueuedItem(item: OneDispatchRow, member: OneOrgMember, continuing: import("../../shared/types").Chat | null): "started" | "waiting" | "closed" | "taken" {
+  const isolated = (() => { try { return getDb().prepare("SELECT 1 AS present FROM meta WHERE key = ?").get(`${ISOLATED_DISPATCH_KEY_PREFIX}${item.id}`) !== undefined; } catch { return false; } })();
+  const launch = (session: import("../../shared/types").Chat | null) => launchDispatch({ parentChatId: item.parent_chat_id, member, brief: item.brief,
+    hash: item.brief_hash, title: item.brief.split(/\r?\n/, 1)[0]!.slice(0, 120), continuing: session, queuedId: item.id,
+    delegationPermission: item.delegation_permission, isolated });
+  try {
+    try { launch(continuing); }
+    catch (first) {
+      const code = startRefusalCodeOf(first);
+      if (!continuing || !code || !SESSION_GOAL_REFUSAL.test(code)) throw first;
+      console.info(`[one-team] queued dispatch moved to a new session dispatch=${item.id} cause=${code}`);
+      launch(null);
+    }
+    queuedStartRefusals.delete(item.id);
+    return "started";
+  } catch (error) {
+    if ((error as { queuedTaken?: unknown } | null)?.queuedTaken === true) return "taken";
+    console.warn("[one-team] queued dispatch not started yet:", error instanceof Error ? error.message : error);
+    const code = startRefusalCodeOf(error) ?? refusalCodeOf(error);
+    const at = Date.now();
+    const record = queuedStartRefusals.get(item.id) ?? { count: 0, firstAt: at, countedAt: -Infinity };
+    // A refusal that clears by itself (cleanup pending, the app quitting, the channel reattaching) and a receiver that is signed
+    // out for now wait without counting; anything else is counted, at most once per spacing (a settle, a sign-in return and the
+    // sweep can all drain within seconds: a short glitch must not use up the count).
+    const waits = transientRefusalCode({ code }) !== null || code === "one_team_dispatch_owner_unbound";
+    const counted = !waits && at - record.countedAt >= QUEUED_START_REFUSAL_SPACING_MS;
+    const next = { count: counted ? record.count + 1 : record.count, firstAt: record.firstAt, countedAt: counted ? at : record.countedAt };
+    queuedStartRefusals.set(item.id, next);
+    if (next.count < QUEUED_START_REFUSALS && Date.now() - next.firstAt < QUEUED_START_DEADLINE_MS) return "waiting";
+    failQueuedDispatch(item, `queue_start_refused:${code}`, ko()
+      ? "팀원 세션을 시작하지 못해 줄에서 뺐어요. 새로 맡기면 됩니다."
+      : "The teammate session could not be started, so the queued job was removed from the queue. Hand it over again.");
+    return "closed";
+  }
+}
+
+/** child_run_id of a queued job closed without ever running: non-empty, so the closed row passes the team handoff check (session-handoff.ts validRef) and is readable. */
+const QUEUE_CLOSED_RUN_PREFIX = "queue-closed:";
+
+/** Common close of a queued row: retained result, no leftover isolation request or refusal count. */
+function closedQueuedRow(id: string): OneDispatchRow {
+  const settled = row(id)!;
   retainDispatchResult(settled);
+  queuedStartRefusals.delete(id);
+  try { getDb().prepare("DELETE FROM meta WHERE key = ?").run(`${ISOLATED_DISPATCH_KEY_PREFIX}${id}`); } catch { /* a stale mark is harmless */ }
+  return settled;
+}
+
+/**
+ * A queued job that can never start (its teammate left, its start keeps being refused): close it as failed and tell One, like any
+ * other ended session. `code` is the typed cause, kept in the log and at the front of the result the readers get. The row gets a
+ * run id in the same statement (the retained copy is taken from it): with the empty one every report of it was withheld.
+ */
+function failQueuedDispatch(item: OneDispatchRow, code: string, reason: string): void {
+  const now = new Date().toISOString();
+  const changed = getDb().prepare("UPDATE one_team_dispatches SET status = 'failed', result_text = ?, child_run_id = ?, updated_at = ? WHERE id = ? AND status = 'queued'")
+    .run(`${code}: ${reason}`, `${QUEUE_CLOSED_RUN_PREFIX}${item.id}`, now, item.id);
+  if (changed.changes !== 1) return;
+  console.warn(`[one-team] queued dispatch closed as failed dispatch=${item.id} cause=${code}`);
+  const settled = closedQueuedRow(item.id);
   reportTeamResult(settled);
+  const pending = waiters.get(item.id);
+  if (pending) waiters.delete(item.id);
+  const markReported = () => getDb().prepare("UPDATE one_team_dispatches SET reported_at = ? WHERE id = ?").run(now, item.id);
+  if (graphTeamStepOpen(settled.graph_owner)) {
+    // The step that queued it hears it like any other result of its sessions (finalizeDispatch), not a read-only report turn.
+    withdrawQueuedOneTeamReport(item.id);
+    markReported();
+    if (pending && pending.size > 0) for (const waiter of pending) waiter.resolve(row(item.id)!);
+    else deliverGraphTeamStepEvent(settled.graph_owner, { kind: "settled", dispatchId: item.id });
+    return;
+  }
+  let parentActive = false;
+  try { parentActive = dispatchReceiverCurrent(settled) && dispatchHandoff(settled).relayAllowed && chatLiveAnywhere(settled.parent_chat_id); } catch { /* treat as idle */ }
+  if (pending && pending.size > 0 && parentActive) {
+    withdrawQueuedOneTeamReport(item.id);
+    markReported();
+    for (const waiter of pending) waiter.resolve(row(item.id)!);
+    return;
+  }
   reportToOne(settled);
+}
+
+/**
+ * A queued job that is no longer wanted and never ran (its room is gone, its graph step ended): cancelled with a typed cause in
+ * report_error and marked reported, so nothing is retried and no turn is started for it.
+ */
+function cancelQueuedDispatch(item: OneDispatchRow, code: string, reason: string): boolean {
+  const now = new Date().toISOString();
+  const changed = getDb().prepare(`UPDATE one_team_dispatches SET status = 'cancelled', result_text = ?, child_run_id = ?, reported_at = ?, report_error = ?, updated_at = ?
+    WHERE id = ? AND status = 'queued'`).run(`${code}: ${reason}`, `${QUEUE_CLOSED_RUN_PREFIX}${item.id}`, now, code, now, item.id);
+  if (changed.changes !== 1) return false;
+  console.info(`[one-team] queued dispatch cancelled dispatch=${item.id} cause=${code}`);
+  closedQueuedRow(item.id);
+  const pending = waiters.get(item.id);
+  if (pending) { waiters.delete(item.id); for (const waiter of pending) waiter.resolve(row(item.id)!); }
+  return true;
 }
 
 /** Cancel a queued job before it starts. A running session is stopped through the normal run cancel, not here. */
@@ -1488,11 +1735,10 @@ export function oneTeamCancelQueued(caller: OneTeamCaller, input: { sessionId?: 
       "That session is not queued (it already started or ended). Nothing was cancelled.",
     )}`);
   }
-  const changed = getDb().prepare("UPDATE one_team_dispatches SET status = 'cancelled', result_text = ?, reported_at = ?, updated_at = ? WHERE id = ? AND status = 'queued'")
-    .run(ownerMessage("시작 전에 취소했어요.", "Cancelled before it started."), new Date().toISOString(), new Date().toISOString(), dispatch.id);
-  const after = row(dispatch.id)!;
-  if (changed.changes === 1) retainDispatchResult(after);
-  return { ...view(after), cancelled: changed.changes === 1 };
+  // With a run id of its own (queue-closed:…), like every queued row closed without running: the empty one made the cancelled row
+  // unreadable to one_team_session_status and hid it from one_team_list (session-handoff.ts validRef).
+  const cancelled = cancelQueuedDispatch(dispatch, "queue_cancelled", ownerMessage("시작 전에 취소했어요.", "Cancelled before it started."));
+  return { ...view(row(dispatch.id)!), cancelled };
 }
 
 export function oneTeamSteer(caller: OneTeamCaller, input: { sessionId?: unknown; message?: unknown }) {
@@ -1500,18 +1746,42 @@ export function oneTeamSteer(caller: OneTeamCaller, input: { sessionId?: unknown
   const message = typeof input.message === "string" ? input.message.trim() : "";
   if (!message) throw new Error("one-team-message-required");
   if (message.length > MAX_BRIEF) throw new Error("one-team-message-too-long");
-  const dispatch = rowForSession(typeof input.sessionId === "string" ? input.sessionId : "", parentChatId);
+  let dispatch = rowForSession(typeof input.sessionId === "string" ? input.sessionId : "", parentChatId);
   if (!memberAgentIds().has(dispatch.member_agent_id) || !activeMembers().some((member) => member.id === dispatch.member_id)) {
     throw new Error(ko()
       ? "one-team-member-gone: 그 팀원은 더 이상 팀에 없어요. one_team_list 로 지금 팀원을 확인하세요."
       : "one-team-member-gone: that teammate is no longer on the team. Check one_team_list.");
   }
   adoptForGraphStep(dispatch.id, graphOwnerOf(caller));
+  for (let attempt = 0; attempt < 3 && dispatch.status === "queued"; attempt += 1) {
+    // Not started yet: the direction joins the queued brief so the teammate gets it from the first step. It is never cut: the brief
+    // may grow past the start cap for this (cutting the end, as before, dropped the direction itself and the answer still said it
+    // applied). Only a brief this long is refused, with the typed code, and the row is left unchanged.
+    const merged = `${dispatch.brief}\n\n[added before start] ${message}`;
+    if (merged.length > MAX_QUEUED_BRIEF) {
+      throw new Error(`one-team-brief-too-long: ${ownerMessage(
+        "줄에 선 일의 브리프가 이미 길어 이 지시를 더할 수 없어요. 지시를 줄이거나 새 세션으로 맡기세요.",
+        "The queued job's brief is already too long to take this direction. Shorten the direction or hand it over as a new session.",
+      )}`);
+    }
+    // The write only lands on the brief that was read: a direction added at the same moment by the other process is not overwritten.
+    const added = getDb().prepare("UPDATE one_team_dispatches SET brief = ?, updated_at = ? WHERE id = ? AND status = 'queued' AND brief = ?")
+      .run(merged, new Date().toISOString(), dispatch.id, dispatch.brief);
+    if (added.changes === 1) {
+      return { ...view(row(dispatch.id)!), queued: true, note: "Still queued behind the teammate's current session; your direction was added to the brief and applies from the start." };
+    }
+    // It started (its brief is already the session's prompt), was closed, or was edited meanwhile: read it again and go on from what it is now.
+    dispatch = row(dispatch.id) ?? dispatch;
+  }
   if (dispatch.status === "queued") {
-    // Not started yet: the direction joins the queued brief so the teammate gets it from the first step.
-    const merged = `${dispatch.brief}\n\n[added before start] ${message}`.slice(0, MAX_BRIEF);
-    getDb().prepare("UPDATE one_team_dispatches SET brief = ?, updated_at = ? WHERE id = ? AND status = 'queued'").run(merged, new Date().toISOString(), dispatch.id);
-    return { ...view(row(dispatch.id)!), queued: true, note: "Still queued behind the teammate's current session; your direction was added to the brief and applies from the start." };
+    throw new Error(`one-team-steer-conflict: ${ownerMessage("줄에 선 일이 계속 바뀌어 지시를 더하지 못했어요. 다시 보내세요.", "The queued job kept changing, so the direction was not added. Send it again.")}`);
+  }
+  if (dispatch.child_chat_id.startsWith(QUEUED_CHAT_PREFIX)) {
+    // Closed from the queue without ever having a session: there is nothing to reopen.
+    throw new Error(`one-team-queued-closed: ${ownerMessage(
+      "그 일은 시작되기 전에 줄에서 빠졌어요. 새 세션으로 맡기세요.",
+      "That job left the queue before it started. Hand it over as a new session.",
+    )}`);
   }
   if (!dispatchHandoff(dispatch).relayAllowed) throw new Error("one_team_dispatch_owner_unbound");
   const { invocationService } = runtime();

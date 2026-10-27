@@ -56,6 +56,8 @@ import { createTurnToolsCapability, removeTurnToolsCapability, type TurnScopedGo
 import { GRAPH_EFFECT_ITEM_TOOL_NAMES, ONE_TEAM_CONTROL_ENV, ROOM_MEMBER_TOOL_NAMES, isAuthenticOneTeamMcpLaunch } from "../one/team-mcp-server";
 import { createOneTeamCapability, removeOneTeamCapability } from "../one/team-control-server";
 import { oneTeamDispatchAllowedFor } from "../one/team-dispatch";
+import { WORK_SESSION_TOOL_NAMES } from "../../shared/work-session-tools";
+import type { RuntimeSelection, RuntimeStatus } from "../../shared/types";
 import { graphTeamGrantCurrent, type GraphTeamGrant } from "../one/graph-team-grant";
 import { roomMemberContext } from "../one/room-chat";
 import {
@@ -201,6 +203,8 @@ export interface McpConfigBuildOptions {
   nativeScopedSelectionForServer?: (server: Readonly<InstalledMcpServer>) => OneOriginalMcpSelection;
   /** Main-only personal One reply origin for exact Work/Science handoff attribution. */
   supervisorReplyRunId?: string;
+  /** Exact host-owned Work main invocation; tool arguments cannot supply it. */
+  workSession?: { runId: string; runtimes?: RuntimeStatus[]; runtimeSelection?: RuntimeSelection; workspace?: string };
   /** Receiving native host's origin/epoch revocation fence. Never a wire value. */
   admissionCurrent?: () => boolean;
   /** Main-owned non-chat Build plan authority; never accepted from a runtime payload. */
@@ -902,6 +906,9 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
     : false;
 
   const inboundMailRun = isAgentMailAutoRunChat(callerChatId);
+  const workSessionMain = Boolean(callerChatId && opts?.workSession?.runId && opts.workSession.runId === opts.turnRunId
+    && opts.toolGate?.simulation !== true && opts.toolGate?.planMode !== true
+    && (await import("../work/session-dispatch")).workSessionDispatchAllowedFor(callerChatId));
   // Owner decision 2026-10-16: a room-saved graph's agent/action step gets that room's One Team, its grant's tools only.
   // The grant is Main-minted for exactly this step's chat and re-checked here; a dry run or plan never gets it. It is decided
   // first: a graph step calls Toolchains through its pinned toolchain_call steps, never through the consumer tools.
@@ -960,7 +967,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
     }
     if (s.catalogId === "one-team" && (!callerChatId || opts?.toolGate?.simulation === true || opts?.toolGate?.planMode === true
       || opts?.toolGate?.oneTeamReport === true
-      || (!oneTeamDispatchAllowedFor(callerChatId) && !toolchainConsumer && !roomMember && !graphTeamGrant) || !isAuthenticOneTeamMcpLaunch(s.command, s.args ?? []))) {
+      || (!oneTeamDispatchAllowedFor(callerChatId) && !toolchainConsumer && !roomMember && !graphTeamGrant && !workSessionMain) || !isAuthenticOneTeamMcpLaunch(s.command, s.args ?? []))) {
       // One's own conversation only (depth 1): a teammate chat, a session One
       // opened and dry runs never see the team dispatch tools. A Work task sees
       // the Toolchain consumer subset only (toolchainConsumer above).
@@ -1167,7 +1174,10 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
       if (s.catalogId === "one-team") {
         try {
           const capabilityConfigKey = opts?.configKey ?? key;
-          const capability = await createOneTeamCapability(graphTeamGrant
+          const capability = await createOneTeamCapability(workSessionMain
+            ? { chatId: callerChatId ?? null, permission: opts?.toolGate?.permission ?? "read", scope: "work-session" as const,
+                tools: [...WORK_SESSION_TOOL_NAMES, ...(toolchainConsumer ? (await import("../toolchains/consumer")).TOOLCHAIN_CONSUMER_TOOLS : [])], workSession: opts?.workSession }
+            : graphTeamGrant
             // Acts for the room that saved the graph; the grant's permission and tools, never the run's wider ones.
             ? { chatId: graphTeamGrant.ownerChatId, permission: graphTeamGrant.permission, scope: "graph-step" as const,
                 tools: [...graphTeamGrant.tools, ...graphTeamGrant.effectTools], graphTeamGrant }

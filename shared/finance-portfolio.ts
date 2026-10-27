@@ -96,14 +96,6 @@ export function financeQuoteBasis(sources: readonly Pick<FinanceSource, 'id' | '
   const source = sources.find(item => item.id === quote.sourceId);
   return source && source.kind === 'provider' && source.status === 'connected' ? 'market' : 'entered';
 }
-export interface FinancePortfolioPriceNote { basis: FinancePriceBasis | 'mixed'; from: string; to: string; entered: number; market: number }
-/** What the note under one currency's allocation says: whose prices the values multiply and from which dates. Positions without a price are not passed in. */
-export function financePortfolioPriceNote(rows: readonly { basis: FinancePriceBasis; asOf: string }[]): FinancePortfolioPriceNote | null {
-  if (!rows.length) return null;
-  const dates = rows.map(row => row.asOf.slice(0, 10)).sort();
-  const entered = rows.filter(row => row.basis === 'entered').length, market = rows.length - entered;
-  return { basis: entered && market ? 'mixed' : entered ? 'entered' : 'market', from: dates[0], to: dates[dates.length - 1], entered, market };
-}
 export type FinancePortfolioSaveFailure = 'revision_conflict' | 'duplicate_asset' | 'identity_ambiguous' | 'position_ambiguous' | 'other';
 /** The typed refusal inside an IPC error message, so the card can say what the host already knows. */
 export function financePortfolioSaveFailure(message: string): FinancePortfolioSaveFailure {

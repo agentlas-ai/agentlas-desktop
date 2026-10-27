@@ -62,7 +62,7 @@ function readAll(): Record<string, AgentRoute> {
     const stat = fs.statSync(file);
     if (readCache && readCache.file === file && readCache.mtimeMs === stat.mtimeMs && readCache.size === stat.size) return readCache.map;
     const raw = fs.readFileSync(file, "utf8");
-    const obj = JSON.parse(raw) as Record<string, AgentRoute>;
+    const obj = JSON.parse(raw.replace(/^﻿/, "")) as Record<string, AgentRoute>;
     const map = obj && typeof obj === "object" ? obj : {};
     readCache = { file, mtimeMs: stat.mtimeMs, size: stat.size, map };
     return map;
@@ -107,6 +107,161 @@ export function getRoutesRevision(): number {
   return routesRevision;
 }
 
+/*
+ * Read-modify-write for agent-routes.json. readAll() above is for readers: it folds every read failure into {}.
+ * A writer that starts from that {} and saves one route wipes every other route (and a writer that read earlier
+ * loses whatever another process — the Terminal engine shares this file — saved in between). So a writer:
+ *   ① treats only a missing/empty file as empty, ② retries transient errors (EPERM/EBUSY while another process
+ *   renames the file) and half-written content briefly, ③ preserves a file that stays unparseable as
+ *   `<file>.corrupt-<ts>` and continues from the routes it can still read, ④ commits only if the file is unchanged
+ *   since it was read, otherwise re-reads and re-applies its change. Mirror of agentlas_terminal/engine/json-state-file.cjs.
+ */
+const TRANSIENT_FS_CODES = new Set(["EPERM", "EACCES", "EBUSY", "EAGAIN", "EMFILE", "ENFILE"]);
+const ROUTES_READ_ATTEMPTS = 6;
+const ROUTES_CAS_ATTEMPTS = 8;
+const ROUTES_WRITE_ATTEMPTS = 4;
+const routesWaitCell = new Int32Array(new SharedArrayBuffer(4));
+
+function sleepSync(ms: number): void {
+  Atomics.wait(routesWaitCell, 0, 0, ms);
+}
+
+function routesFingerprint(file: string): string {
+  try {
+    const stat = fs.statSync(file);
+    return `${stat.ino}:${stat.size}:${stat.mtimeMs}`;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException)?.code === "ENOENT" ? "absent" : "unknown";
+  }
+}
+
+type RoutesFileState =
+  | { status: "ok"; map: Record<string, AgentRoute>; fingerprint: string }
+  | { status: "absent"; fingerprint: string }
+  | { status: "empty"; fingerprint: string }
+  | { status: "corrupt"; raw: string; fingerprint: string }
+  | { status: "unreadable"; code: string; fingerprint: string };
+
+function readRoutesFileState(file: string): RoutesFileState {
+  let last: RoutesFileState = { status: "unreadable", code: "EREAD", fingerprint: "unknown" };
+  for (let attempt = 0; attempt < ROUTES_READ_ATTEMPTS; attempt += 1) {
+    if (attempt > 0) sleepSync(20 * attempt);
+    const fingerprint = routesFingerprint(file);
+    if (fingerprint === "absent") return { status: "absent", fingerprint };
+    let raw: string;
+    try {
+      raw = fs.readFileSync(file, "utf8");
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException)?.code;
+      if (code === "ENOENT") return { status: "absent", fingerprint: "absent" };
+      last = { status: "unreadable", code: code ?? "EREAD", fingerprint };
+      continue;
+    }
+    if (!raw.trim()) return { status: "empty", fingerprint };
+    try {
+      const parsed = JSON.parse(raw.replace(/^\uFEFF/, "")) as unknown;
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        return { status: "ok", map: parsed as Record<string, AgentRoute>, fingerprint };
+      }
+    } catch {
+      /* corrupt — recorded below */
+    }
+    last = { status: "corrupt", raw, fingerprint };
+  }
+  return last;
+}
+
+// Closed route objects are flat (no nested braces), so a truncated file still yields every route written before the cut.
+function salvageRoutes(raw: string): Record<string, AgentRoute> {
+  const map: Record<string, AgentRoute> = {};
+  for (const match of raw.matchAll(/"([^"\\]+)"\s*:\s*(\{[^{}]*\})/g)) {
+    try {
+      const route = JSON.parse(match[2]) as AgentRoute;
+      if (route && typeof route.path === "string" && route.agentId === match[1]) map[match[1]] = route;
+    } catch {
+      /* closed but not JSON — drop */
+    }
+  }
+  return map;
+}
+
+function quarantineRoutesFile(file: string, raw: string): string {
+  const target = `${file}.corrupt-${new Date().toISOString().replace(/[:.]/g, "-")}-${randomUUID().slice(0, 4)}`;
+  try {
+    fs.writeFileSync(target, raw, { encoding: "utf8", mode: 0o600, flag: "wx" });
+  } catch (cause) {
+    throw Object.assign(new Error(`json_state_quarantine_failed: could not preserve ${file} before repairing it`), {
+      code: "json_state_quarantine_failed",
+      cause,
+    });
+  }
+  return target;
+}
+
+function writeAllWithRetry(map: Record<string, AgentRoute>): void {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      writeAll(map);
+      return;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException)?.code;
+      if (attempt + 1 >= ROUTES_WRITE_ATTEMPTS || !code || !TRANSIENT_FS_CODES.has(code)) throw error;
+      sleepSync(25 * 2 ** attempt);
+    }
+  }
+}
+
+/** mutate edits the freshly read map in place; return false when nothing changed (no write). */
+function updateRoutes(mutate: (map: Record<string, AgentRoute>) => boolean | void): void {
+  const file = routesFile();
+  for (let attempt = 0; ; attempt += 1) {
+    const state = readRoutesFileState(file);
+    let base: Record<string, AgentRoute>;
+    if (state.status === "ok") {
+      base = state.map;
+    } else if (state.status === "absent" || state.status === "empty") {
+      base = {};
+    } else if (state.status === "corrupt") {
+      const preserved = quarantineRoutesFile(file, state.raw);
+      console.warn(`[agent-routes] json_state_corrupt_quarantined: original kept at ${preserved}`);
+      base = salvageRoutes(state.raw);
+    } else {
+      throw Object.assign(new Error(`json_state_unreadable: ${file} could not be read (${state.code}); it was left untouched`), {
+        code: "json_state_unreadable",
+      });
+    }
+    if (mutate(base) === false) return;
+    // The last attempt skips the fingerprint check: merging into the content just read beats refusing to save.
+    if (attempt + 1 < ROUTES_CAS_ATTEMPTS && routesFingerprint(file) !== state.fingerprint) {
+      sleepSync(10 + Math.floor(Math.random() * 30));
+      continue;
+    }
+    writeAllWithRetry(base);
+    return;
+  }
+}
+
+/** Apply values computed from an earlier snapshot only where the route is still exactly what that snapshot saw. */
+function applyRoutePatches(patches: Map<string, { before: AgentRoute; after: AgentRoute }>): void {
+  if (patches.size === 0) return;
+  try {
+    updateRoutes((map) => {
+      let changed = false;
+      for (const [agentId, { before, after }] of patches) {
+        const current = map[agentId];
+        if (current && JSON.stringify(current) === JSON.stringify(before)) {
+          map[agentId] = after;
+          changed = true;
+        }
+      }
+      return changed;
+    });
+  } catch (error) {
+    // Startup maintenance must never stop the app: an unwritable routes file is retried by the next pass.
+    console.warn(`[agent-routes] route maintenance deferred: ${(error as { code?: string })?.code ?? "unknown"}`);
+  }
+}
+
 function fsyncDirectoryBestEffort(directory: string): void {
   try {
     const fd = fs.openSync(directory, fs.constants.O_RDONLY);
@@ -131,9 +286,9 @@ export function listRoutes(): AgentRoute[] {
 }
 
 export function setRoute(route: AgentRoute): void {
-  const map = readAll();
-  map[route.agentId] = route;
-  writeAll(map);
+  updateRoutes((map) => {
+    map[route.agentId] = route;
+  });
 }
 
 /**
@@ -148,6 +303,9 @@ export function reconcileLocalRouteDefinitionHashes(): {
   missing: number;
 } {
   const map = readAll();
+  // Computed from this snapshot, merged into the freshly read file only where a route is still unchanged
+  // (a hash walk can take long; a route saved meanwhile by another process must not be overwritten by it).
+  const patches = new Map<string, { before: AgentRoute; after: AgentRoute }>();
   let scanned = 0;
   let updated = 0;
   let failed = 0;
@@ -167,7 +325,7 @@ export function reconcileLocalRouteDefinitionHashes(): {
       ) {
         const next = { ...route, source: "local-import" as const, definitionHash };
         delete next.missingSince;
-        map[agentId] = next;
+        patches.set(agentId, { before: route, after: next });
         updated += 1;
       }
     } catch {
@@ -178,13 +336,13 @@ export function reconcileLocalRouteDefinitionHashes(): {
       // temporary (external disk, cloud sync, rename) and deleting a user's
       // agent and chats over it is unrecoverable.
       if (!route.missingSince) {
-        map[agentId] = { ...route, missingSince: now };
+        patches.set(agentId, { before: route, after: { ...route, missingSince: now } });
         updated += 1;
       }
       missing += 1;
     }
   }
-  if (updated > 0) writeAll(map);
+  applyRoutePatches(patches);
   return { scanned, updated, failed, missing };
 }
 
@@ -206,6 +364,7 @@ export function backfillLegacyLocalRouteDefinitionHashes(): {
   missing: number;
 } {
   const map = readAll();
+  const patches = new Map<string, { before: AgentRoute; after: AgentRoute }>();
   let scanned = 0;
   let updated = 0;
   let failed = 0;
@@ -221,16 +380,16 @@ export function backfillLegacyLocalRouteDefinitionHashes(): {
     scanned += 1;
     try {
       const definitionHash = computeLocalAgentDefinitionHash(route.path);
-      map[agentId] = { ...route, source: "local-import", definitionHash };
+      patches.set(agentId, { before: route, after: { ...route, source: "local-import", definitionHash } });
       updated += 1;
     } catch {
       failed += 1;
       missing += 1;
-      map[agentId] = { ...route, missingSince: now };
+      patches.set(agentId, { before: route, after: { ...route, missingSince: now } });
       updated += 1;
     }
   }
-  if (updated > 0) writeAll(map);
+  applyRoutePatches(patches);
   return { scanned, updated, failed, missing };
 }
 
@@ -240,16 +399,16 @@ export function backfillLegacyLocalRouteDefinitionHashes(): {
  * survives beside the new installed-agent id.
  */
 export function replaceRoute(route: AgentRoute, removeAgentIds: string[] = []): void {
-  const map = readAll();
-  for (const agentId of removeAgentIds) delete map[agentId];
-  map[route.agentId] = route;
-  writeAll(map);
+  updateRoutes((map) => {
+    for (const agentId of removeAgentIds) delete map[agentId];
+    map[route.agentId] = route;
+  });
 }
 
 export function removeRoute(agentId: string): void {
-  const map = readAll();
-  if (map[agentId]) {
+  updateRoutes((map) => {
+    if (!map[agentId]) return false;
     delete map[agentId];
-    writeAll(map);
-  }
+    return true;
+  });
 }

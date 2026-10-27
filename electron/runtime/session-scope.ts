@@ -69,7 +69,12 @@ export interface SessionScopeInput {
 export type SessionScopeKind = "legacy" | "seat" | "roster" | "work" | "taskforce";
 const WORK_SCOPE_PREFIX = "session-scope.work:";
 const WORK_TASK_ROOT_PREFIX = "session-scope.work-task-root:";
-export interface WorkingSessionScope { projectId: string; subSessionId: string | null }
+export interface WorkingSessionScope {
+  projectId: string;
+  subSessionId: string | null;
+  /** v3 Desktop Work: one main journal per real conversation; project assets remain shared. */
+  rootChatId?: string;
+}
 const scopeIdentifier = (value: unknown): value is string => typeof value === "string" && /^[A-Za-z0-9_-]{1,160}$/.test(value);
 const WORK_SCOPE_REQUIRED_PREFIX = "session-scope.work-required:";
 export type ManagedWorkingProvenance = {kind:"desktop-project"}|{kind:"external-logical";logicalId:string};
@@ -82,9 +87,9 @@ function workingRegistration(db:Pick<Database.Database,"prepare">,chatId:string)
     required=(db.prepare("SELECT value FROM meta WHERE key=?").get(WORK_SCOPE_REQUIRED_PREFIX+chatId) as {value:string}|undefined)?.value;
   } catch(error) { if(raw===undefined)throw error; throw new Error("session_scope_work_binding_read_failed",{cause:error}); }
   if(raw===undefined){if(required!==undefined)throw new Error("session_scope_work_binding_required");return null;}
-  let value:{v?:unknown;projectId?:unknown;subSessionId?:unknown;hostWitness?:ManagedWorkingWitness};
+  let value:{v?:unknown;projectId?:unknown;subSessionId?:unknown;rootChatId?:unknown;hostWitness?:ManagedWorkingWitness};
   try{value=JSON.parse(raw);}catch{throw new Error("session_scope_work_binding_invalid");}
-  if(!value || (value.v!==1&&value.v!==2) || !scopeIdentifier(value.projectId)
+  if(!value || (value.v!==1&&value.v!==2&&value.v!==3) || !scopeIdentifier(value.projectId)
     || (value.subSessionId!==null&&!scopeIdentifier(value.subSessionId)))throw new Error("session_scope_work_binding_invalid");
   if(value.v===1){if(required!==undefined)throw new Error("session_scope_work_binding_downgraded");return {scope:{projectId:value.projectId,subSessionId:value.subSessionId},raw,witness:null};}
   const w=value.hostWitness;
@@ -92,9 +97,18 @@ function workingRegistration(db:Pick<Database.Database,"prepare">,chatId:string)
     || !w.provenance || !["desktop-project","external-logical"].includes(w.provenance.kind)
     || (w.provenance.kind==="external-logical"&&!scopeIdentifier(w.provenance.logicalId))
     || !w.transport || typeof w.transport!=="object")throw new Error("session_scope_work_binding_invalid");
-  return {scope:{projectId:value.projectId,subSessionId:value.subSessionId},raw,witness:w};
+  const legacyScope:WorkingSessionScope={projectId:value.projectId,subSessionId:value.subSessionId};
+  if(value.v===3 && (w.provenance.kind!=="desktop-project" || !scopeIdentifier(value.rootChatId)))throw new Error("session_scope_work_binding_invalid");
+  // Read-only normalization: the existing registration is upgraded only at admission.
+  const scope=w.provenance.kind==="desktop-project"?desktopWorkingScope(db,chatId,legacyScope):legacyScope;
+  if(value.v===3 && (scope.rootChatId!==value.rootChatId || scope.subSessionId!==value.subSessionId))throw new Error("session_scope_work_binding_changed");
+  return {scope,raw,witness:w};
 }
 function setWorkingRoot(db:Pick<Database.Database,"prepare">,scope:WorkingSessionScope):void {
+  if(scope.rootChatId){
+    db.prepare("INSERT OR IGNORE INTO meta(key,value) VALUES (?,?)").run(`${WORK_TASK_ROOT_PREFIX}${scope.projectId}:conversation:${scope.rootChatId}`,scope.rootChatId);
+    return;
+  }
   const key=WORK_TASK_ROOT_PREFIX+scope.projectId;
   if(!db.prepare("SELECT value FROM meta WHERE key=?").get(key)){
     const root=registeredWorkingMainChatId(db,scope.projectId);if(root)db.prepare("INSERT OR IGNORE INTO meta(key,value) VALUES (?,?)").run(key,root);
@@ -116,22 +130,45 @@ function managedTransport(db:Pick<Database.Database,"prepare">,chatId:string,pro
   if(!row||row.archived_at||(typeof row.agent_id!=="string"||!row.agent_id.trim()))throw new Error("session_scope_work_binding_changed");
   return {agentId:row.agent_id,facts:{projectId:row.project_id,firmId:row.firm_id,kind:row.kind,parentChatId:row.parent_chat_id,origin:row.origin_surface,...(provenance.kind==="external-logical"?{title:row.title}:{})}};
 }
+/** Resolve only real Work ancestry. A project peer or hidden standalone ledger is never a parent. */
+function desktopWorkingScope(db:Pick<Database.Database,"prepare">,chatId:string,scope:WorkingSessionScope):WorkingSessionScope {
+  const seen=new Set<string>();let id=chatId;let child=false;
+  for(;;){
+    if(seen.has(id)||seen.size>=64)throw new Error("session_scope_work_binding_changed");seen.add(id);
+    const row=db.prepare("SELECT project_id,origin_surface,kind,parent_chat_id,archived_at FROM chats WHERE id=?").get(id) as
+      {project_id:string|null;origin_surface:string|null;kind:string|null;parent_chat_id:string|null;archived_at:string|null}|undefined;
+    if(!row||row.archived_at||row.project_id!==scope.projectId||row.origin_surface!=="work")throw new Error("session_scope_work_binding_changed");
+    if(row.kind!=="division"){
+      if((row.kind!=="user"&&row.kind!==null)||row.parent_chat_id)throw new Error("session_scope_work_binding_changed");
+      if(scope.rootChatId&&scope.rootChatId!==id)throw new Error("session_scope_work_binding_changed");
+      return {projectId:scope.projectId,rootChatId:id,subSessionId:child?chatId:null};
+    }
+    if(!row.parent_chat_id)throw new Error("session_scope_work_binding_changed");
+    child=true;id=row.parent_chat_id;
+  }
+}
 /** Called only by the existing trusted host creators/admission. No renderer or model registration API. */
 export function bindManagedWorkingSessionScope(db:Pick<Database.Database,"prepare"|"transaction">,chatId:string,scope:WorkingSessionScope,provenance:ManagedWorkingProvenance):void {
   if(!scopeIdentifier(chatId)||!scopeIdentifier(scope.projectId)||(scope.subSessionId!==null&&!scopeIdentifier(scope.subSessionId))
     || !provenance || !["desktop-project","external-logical"].includes(provenance.kind)
     || (provenance.kind==="external-logical"&&!scopeIdentifier(provenance.logicalId)))throw new Error("session_scope_work_identity_invalid");
   db.transaction(()=>{
+    if(provenance.kind==="desktop-project")scope=desktopWorkingScope(db,chatId,scope);
     const prior=workingRegistration(db,chatId);
-    if(prior && (prior.scope.projectId!==scope.projectId||prior.scope.subSessionId!==scope.subSessionId))throw new Error("session_scope_work_binding_changed");
-    if(prior?.witness){if(JSON.stringify(prior.witness.provenance)!==JSON.stringify(provenance))throw new Error("session_scope_work_binding_changed");assertWorkingSessionBindingCurrent(db,{chatId,agentId:managedTransport(db,chatId,prior.witness.provenance).agentId,scope,registration:prior.raw});return;}
+    if(prior && (prior.scope.projectId!==scope.projectId||prior.scope.subSessionId!==scope.subSessionId||prior.scope.rootChatId!==scope.rootChatId))throw new Error("session_scope_work_binding_changed");
+    if(prior?.witness){
+      if(JSON.stringify(prior.witness.provenance)!==JSON.stringify(provenance))throw new Error("session_scope_work_binding_changed");
+      assertWorkingSessionBindingCurrent(db,{chatId,agentId:managedTransport(db,chatId,prior.witness.provenance).agentId,scope,registration:prior.raw});
+      if(provenance.kind!=="desktop-project"||JSON.parse(prior.raw).v===3)return;
+    }
     const live=managedTransport(db,chatId,provenance),transport=live.facts;
     if(provenance.kind==="desktop-project" && (transport.projectId!==scope.projectId||transport.origin!=="work"
       || !db.prepare("SELECT id FROM projects WHERE id=?").get(scope.projectId)))throw new Error("session_scope_work_binding_changed");
-    const value=JSON.stringify({v:2,projectId:scope.projectId,subSessionId:scope.subSessionId,hostWitness:{schema:"agentlas.managed-working-transport.v1",provenance,transport}});
+    const value=JSON.stringify({v:scope.rootChatId?3:2,projectId:scope.projectId,subSessionId:scope.subSessionId,
+      ...(scope.rootChatId?{rootChatId:scope.rootChatId}:{}),hostWitness:{schema:"agentlas.managed-working-transport.v1",provenance,transport}});
     if(prior){if(db.prepare("UPDATE meta SET value=? WHERE key=? AND value=?").run(value,WORK_SCOPE_PREFIX+chatId,prior.raw).changes!==1)throw new Error("session_scope_work_binding_changed");}
     else db.prepare("INSERT INTO meta(key,value) VALUES (?,?)").run(WORK_SCOPE_PREFIX+chatId,value);
-    db.prepare("INSERT INTO meta(key,value) VALUES (?,?)").run(WORK_SCOPE_REQUIRED_PREFIX+chatId,value);
+    db.prepare("INSERT INTO meta(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(WORK_SCOPE_REQUIRED_PREFIX+chatId,value);
     assertWorkingSessionBindingCurrent(db,{chatId,agentId:live.agentId,scope,registration:value});setWorkingRoot(db,scope);
   }).immediate();
 }
@@ -141,7 +178,7 @@ export function inheritWorkingSessionScope(db:Pick<Database.Database,"prepare"|"
     const parent=workingRegistration(db,parentId);if(!parent)return;
     const child=db.prepare("SELECT kind,parent_chat_id FROM chats WHERE id=?").get(childId) as {kind:string;parent_chat_id:string|null}|undefined;
     if(!child||child.kind!=="division"||child.parent_chat_id!==parentId)throw new Error("work_project_session_child_mismatch");
-    const scope={projectId:parent.scope.projectId,subSessionId:childId};
+    const scope={projectId:parent.scope.projectId,subSessionId:childId,...(parent.scope.rootChatId?{rootChatId:parent.scope.rootChatId}:{})};
     if(parent.witness){
       assertWorkingSessionBindingCurrent(db,{chatId:parentId,agentId:managedTransport(db,parentId,parent.witness.provenance).agentId,scope:parent.scope,registration:parent.raw});
       bindManagedWorkingSessionScope(db,childId,scope,parent.witness.provenance);
@@ -154,7 +191,7 @@ export interface WorkingSessionBinding {readonly chatId:string;readonly agentId:
 export function assertWorkingSessionBindingCurrent(db:Pick<Database.Database,"prepare">,expected:WorkingSessionBinding):void {
   try{
     const current=workingRegistration(db,expected.chatId);
-    if(!current||current.scope.projectId!==expected.scope.projectId||current.scope.subSessionId!==expected.scope.subSessionId
+    if(!current||current.scope.projectId!==expected.scope.projectId||current.scope.subSessionId!==expected.scope.subSessionId||current.scope.rootChatId!==expected.scope.rootChatId
       || (expected.registration!==undefined&&current.raw!==expected.registration))throw new Error("session_scope_work_binding_changed");
     if(!current.witness)return; // Legacy v1 external registration keeps its original prepare-only/minimal-schema contract.
     const live=managedTransport(db,expected.chatId,current.witness.provenance);
@@ -205,7 +242,7 @@ export function projectWorkSessionFacts(db: Pick<Database.Database, "prepare">,
   const registered = workingSessionScope(db, input.chatId);
   if (registered && registered.projectId !== first.project_id) return reject();
   return { chatId: first.id, agentId: first.agent_id, rootChatId: row.id, taskId: task.id, projectId: first.project_id,
-    scope: registered ?? { projectId: first.project_id, subSessionId: first.kind === "division" ? first.id : null }, rows };
+    scope: registered ?? { projectId: first.project_id, rootChatId: row.id, subSessionId: first.kind === "division" ? first.id : null }, rows };
   } catch (error) {
     if (error instanceof Error && error.message.startsWith("session_scope_project_work_")) throw error;
     throw new Error("session_scope_project_work_read_failed", {cause:error});
@@ -218,6 +255,9 @@ export function assertProjectWorkSessionFacts(db: Pick<Database.Database, "prepa
 /** Existing legacy journals are eligible only through the same live host facts
  * used for this turn. Preview and admission use the same candidate set. */
 function projectWorkCandidateDomains(db: Pick<Database.Database, "prepare">, input: SessionScopeInput, facts: ProjectWorkSessionFacts): string[] {
+  // A rooted conversation can adopt only its own former transport journal.
+  // Do not inspect unrelated project peers: their stale custody cannot refuse this turn.
+  if(facts.scope.rootChatId){const row=facts.rows[0];return [legacyVisibilityDomain({chatId:row.id,kind:row.kind,parentChatId:row.parent},false)];}
   const candidates = db.prepare("SELECT id FROM chats WHERE agent_id=? AND project_id=? AND origin_surface='work' AND archived_at IS NULL").all(input.agentId, facts.projectId) as { id: string }[];
   const domains: string[] = [];
   for (const candidate of candidates) {
@@ -227,7 +267,7 @@ function projectWorkCandidateDomains(db: Pick<Database.Database, "prepare">, inp
       if (sessionScopeFailureCause(error) === "session_scope_project_work_authority_changed") continue;
       throw error;
     }
-    if (!other || other.scope.projectId !== facts.scope.projectId || other.scope.subSessionId !== facts.scope.subSessionId) continue;
+    if (!other || other.scope.projectId !== facts.scope.projectId || other.scope.rootChatId !== facts.scope.rootChatId || other.scope.subSessionId !== facts.scope.subSessionId) continue;
     const row = other.rows[0]; domains.push(legacyVisibilityDomain({chatId: row.id, kind: row.kind, parentChatId: row.parent}, false));
   }
   return domains;
@@ -246,6 +286,13 @@ export function workingTaskRootChatId(db: Pick<Database.Database, "prepare">, ch
   try {
     const scope = workingSessionScope(db, chatId);
     if (!scope) return null;
+    if(scope.rootChatId){
+      // An old exact parent may not have admitted its first scoped turn yet.
+      // Ancestry is observed here; this lookup never creates its registration.
+      desktopWorkingScope(db,scope.rootChatId,{projectId:scope.projectId,rootChatId:scope.rootChatId,subSessionId:null});
+      const root=workingSessionScope(db,scope.rootChatId);
+      return !root||(root.projectId===scope.projectId&&root.rootChatId===scope.rootChatId&&root.subSessionId===null)?scope.rootChatId:null;
+    }
     const anchor = (db.prepare("SELECT value FROM meta WHERE key=?").get(WORK_TASK_ROOT_PREFIX + scope.projectId) as { value: string } | undefined)?.value;
     // Deleting an anchor cannot transfer old files or Task custody to another
     // conversation. Registration writes it once; reads never repair/retarget it.
@@ -326,7 +373,7 @@ function resolveTaskforce(db:Database.Database,input:SessionScopeInput,mode:Sess
   return {...resolveAssignment(db,input,mode,{kind:"taskforce",scopeId:domain,actorKey:`agent:${input.agentId}`,seat:null,candidates:()=>[]},channel),taskforce:{...scope,actorOccupancy:{slot:witness.slot,since:witness.since}}};
 }
 
-const workDomain = (scope: WorkingSessionScope) => `work:${scope.projectId}:main${scope.subSessionId ? `:subsession:${scope.subSessionId}` : ""}`;
+const workDomain = (scope: WorkingSessionScope) => `work:${scope.projectId}${scope.rootChatId ? `:conversation:${scope.rootChatId}` : ""}:main${scope.subSessionId ? `:subsession:${scope.subSessionId}` : ""}`;
 /**
  * Where a conversation's turns are spoken: with the owner alone (`direct`), in a group room (`room`: the room's own
  * conversation), as a child task dispatched from another conversation (`dispatch`: a room's teammate, or a Work stage), or
@@ -510,6 +557,23 @@ function chooseSeatCandidates(db: Pick<Database.Database, "prepare">, ownerScope
  * registered to this exact immutable working range. Other projects and helper
  * scopes never become candidates merely because they share an actor. */
 function chooseWorkingCandidates(db: Pick<Database.Database, "prepare">, input: SessionScopeInput, scope: WorkingSessionScope, additionalDomains: readonly string[] = []): string[] {
+  if(scope.rootChatId){
+    const domains=new Set([workDomain(scope),...additionalDomains]);
+    // Only the original project anchor may retain the former shared native journal.
+    // Other conversations retain their own legacy journal; no peer journal is adopted.
+    const anchor=(db.prepare("SELECT value FROM meta WHERE key=?").get(WORK_TASK_ROOT_PREFIX+scope.projectId) as {value:string}|undefined)?.value;
+    const oldDomain=`work:${scope.projectId}:main`;
+    const old=(db.prepare("SELECT value FROM meta WHERE key=?").get(sessionScopeActorMetaKey(input.ownerScope,oldDomain,`agent:${input.agentId}`)) as {value:string}|undefined)?.value;
+    const sharedDomain=assignmentDomain(old)??oldDomain;
+    if(!scope.subSessionId&&anchor===scope.rootChatId)domains.add(sharedDomain);
+    else domains.delete(sharedDomain); // An adopted chat:<peer> handle must not resume in two roots.
+    const rows=db.prepare(`SELECT json_extract(h.identity_json,'$.visibilityDomain') AS domain,MAX(h.updated_at) AS updated_at,
+      MAX(EXISTS(SELECT 1 FROM agent_context_bindings b WHERE b.context_key=h.context_key AND b.native_handle IS NOT NULL AND b.native_handle<>'')) AS has_handle
+      FROM agent_context_heads h WHERE json_extract(h.identity_json,'$.ownerScope')=? AND json_extract(h.identity_json,'$.agentId')=?
+      AND json_extract(h.identity_json,'$.visibilityDomain') IN (SELECT value FROM json_each(?))
+      GROUP BY domain ORDER BY has_handle DESC,updated_at DESC,domain ASC`).all(input.ownerScope,input.agentId,JSON.stringify([...domains])) as Array<{domain:string}>;
+    return rows.map(row=>row.domain).filter(validDomain);
+  }
   const rows = db.prepare(`SELECT json_extract(h.identity_json,'$.visibilityDomain') AS domain, MAX(h.updated_at) AS updated_at,
       MAX(EXISTS(SELECT 1 FROM agent_context_bindings b WHERE b.context_key=h.context_key AND b.native_handle IS NOT NULL AND b.native_handle<>'')) AS has_handle
     FROM agent_context_heads h
@@ -785,6 +849,7 @@ export function assignedSeatDomains(db: Pick<Database.Database, "prepare">, owne
  */
 export function journalDomainsOfConversation(db: Pick<Database.Database, "prepare">, input: { ownerScope: string; agentId: string; chatId: string; kind: string | null; parentChatId: string | null }): string[] {
   const own = legacyVisibilityDomain({ chatId: input.chatId, kind: input.kind, parentChatId: input.parentChatId }, false);
+  let retiredSharedDomain:string|null=null;
   let assigned: string[] = [];
   try { if(isolatedChild(db,input.chatId) && registeredTaskforceScope(db,input.kind==="division"&&input.parentChatId?input.parentChatId:input.chatId))return [own];
     const tf=taskforceScopeForChat(db,input);if(tf){const domain=taskforceDomain(tf),raw=(db.prepare("SELECT value FROM meta WHERE key=?").get(sessionScopeActorMetaKey(input.ownerScope,domain,`agent:${input.agentId}`)) as {value:string}|undefined)?.value;
@@ -794,6 +859,14 @@ export function journalDomainsOfConversation(db: Pick<Database.Database, "prepar
   try {
     const work = workingSessionScope(db, input.chatId);
     if(work)assertWorkingSessionBindingCurrent(db,{...input,scope:work});
+    if(work?.rootChatId){
+      const anchor=(db.prepare("SELECT value FROM meta WHERE key=?").get(WORK_TASK_ROOT_PREFIX+work.projectId) as {value:string}|undefined)?.value;
+      if(work.subSessionId||anchor!==work.rootChatId){
+        const oldDomain=`work:${work.projectId}:main`;
+        const old=(db.prepare("SELECT value FROM meta WHERE key=?").get(sessionScopeActorMetaKey(input.ownerScope,oldDomain,`agent:${input.agentId}`)) as {value:string}|undefined)?.value;
+        retiredSharedDomain=assignmentDomain(old)??oldDomain;
+      }
+    }
     const record=workingRegistration(db,input.chatId);
     const facts = work && (!record?.witness || record.witness.provenance.kind==="external-logical") ? null : projectWorkSessionFacts(db, input);
     if (facts) {
@@ -809,7 +882,7 @@ export function journalDomainsOfConversation(db: Pick<Database.Database, "prepar
     if (["session_scope_project_work_","session_scope_work_binding_"].some(prefix=>sessionScopeFailureCause(error).startsWith(prefix))) throw error;
     /* Keep unrelated legacy domains without writing or adopting another journal. */
   }
-  return [own, ...assigned.filter(domain => domain !== own)];
+  return [own, ...assigned.filter(domain => domain !== own)].filter(domain=>domain!==retiredSharedDomain);
 }
 
 /**

@@ -371,7 +371,8 @@ function ProjectPage() {
       // Older projects and imported fixtures can predate the ordered pool.
       // Keep that state explicit and empty instead of inventing a controller.
       if (!editingTeamRef.current) setAgentPoolDraft(userFacingPool);
-      const projectTasks = taskRows.filter((task) => task.projectId === id);
+      // A personal agent's room is reached from the personal agent, not the project's list (owner 2026-10-27).
+      const projectTasks = taskRows.filter((task) => task.projectId === id && task.supervisedByPersonalAgent !== true);
       taskIdsRef.current = new Set(projectTasks.map((task) => task.id));
       setTasks(projectTasks);
       // Keep the complete installed graph for identity resolution. The roster

@@ -111,6 +111,8 @@ export async function startMainBrowserBroker(options: {
       req.resume(); res.writeHead(400); res.end('{"error":"native-browser-broker-payload-invalid"}'); return;
     }
     const operation = req.url!.slice(1);
+    // Only a grant acquisition that has not been delivered yet is released by this request's own failure or timer.
+    // A page operation, snapshot or recovery that errors or runs long fails that one request and keeps the run's grant.
     let pendingId: string | null = null;
     let timer: NodeJS.Timeout | null = null;
     const fail = (error: unknown) => {
@@ -133,7 +135,15 @@ export async function startMainBrowserBroker(options: {
       });
       if (!safeId(body.id) || !current(candidate)) throw new Error("native-browser-broker-payload-invalid");
       const id = body.id;
-      timer = setTimeout(() => { if (pendingId) release(candidate, pendingId); fail(new Error("native-browser-broker-timeout")); }, 20_000);
+      timer = setTimeout(() => {
+        if (pendingId) release(candidate, pendingId);
+        else if (operation === "recover-login") {
+          // A slow recovery is cancelled and its scope dropped so the next call starts a fresh one; the grant stays.
+          const slow = candidate.recoveries.get(id);
+          if (slow) { candidate.recoveries.delete(id); slow.controller.abort(); }
+        }
+        fail(new Error("native-browser-broker-timeout"));
+      }, 20_000);
       let reply: unknown;
       if (operation === "release") { release(candidate, id, body.cancelled === true); reply = { released: true }; }
       else if (operation === "grant") {
@@ -173,7 +183,6 @@ export async function startMainBrowserBroker(options: {
       } else {
         const entry = candidate.grants.get(id);
         if (!entry?.grant || entry.expiresAt <= now()) { release(candidate, id); throw new Error("native-browser-grant-revoked"); }
-        pendingId = id;
         if (operation === "snapshot") reply = snapshot(candidate, entry, typeof body.screenshotAfter === "number" ? body.screenshotAfter : 0);
         else if (operation === "reestablish") { await entry.grant.reestablish?.(); reply = snapshot(candidate, entry); }
         else if (operation === "recover-login") {
@@ -197,15 +206,27 @@ export async function startMainBrowserBroker(options: {
             recovery = owned;
           }
           recovery.observing++;
-          const outcomes = await options.recoverLogin(entry.grant, { chatId: entry.chatId, runId: entry.runId,
-            ...(typeof body.nodeId === "string" ? { nodeId: body.nodeId } : {}), signal: recovery.controller.signal,
-            onPendingScopeReleased: recovery.ended, onPrerequisiteRestored: (prerequisite) => {
-              if (!current(candidate) || recovery.controller.signal.aborted || candidate.recoveries.get(id) !== recovery
-                || prerequisite.runId !== entry.runId || prerequisite.chatId !== entry.chatId
-                || prerequisite.nodeId !== body.nodeId) return;
+          let outcomes: Awaited<ReturnType<NonNullable<typeof options.recoverLogin>>>;
+          try {
+            outcomes = await options.recoverLogin(entry.grant, { chatId: entry.chatId, runId: entry.runId,
+              ...(typeof body.nodeId === "string" ? { nodeId: body.nodeId } : {}), signal: recovery.controller.signal,
+              onPendingScopeReleased: recovery.ended, onPrerequisiteRestored: (prerequisite) => {
+                if (!current(candidate) || recovery.controller.signal.aborted || candidate.recoveries.get(id) !== recovery
+                  || prerequisite.runId !== entry.runId || prerequisite.chatId !== entry.chatId
+                  || prerequisite.nodeId !== body.nodeId) return;
+                const watch = candidate.watch;
+                if (watch && watch.writableLength < 64 * 1024) watch.write(`${JSON.stringify({ event: "recovery-restored", grantId: id, prerequisite })}\n`);
+              } });
+          } catch (error) {
+            // The grant stays; only this scope ends, otherwise its observation count would never reach zero.
+            recovery.observing = Math.max(0, recovery.observing - 1);
+            if (!recovery.pending && !recovery.observing && candidate.recoveries.get(id) === recovery) {
+              candidate.recoveries.delete(id);
               const watch = candidate.watch;
-              if (watch && watch.writableLength < 64 * 1024) watch.write(`${JSON.stringify({ event: "recovery-restored", grantId: id, prerequisite })}\n`);
-            } });
+              if (watch && watch.writableLength < 64 * 1024) watch.write(`${JSON.stringify({ event: "recovery-ended", grantId: id })}\n`);
+            }
+            throw error;
+          }
           recovery.observing--;
           if (!Array.isArray(outcomes) || outcomes.length > 32) throw new Error("native-browser-broker-response-invalid");
           // Runtime invokes the callback once after ALL pending pages in this
@@ -213,7 +234,8 @@ export async function startMainBrowserBroker(options: {
           recovery.pending = recovery.endedDuringObservation ? 0
             : outcomes.some(outcome => outcome.state === "awaiting-owner" || outcome.state === "in-flight") ? 1 : 0;
           recovery.endedDuringObservation = 0;
-          if (!recovery.pending && !recovery.observing) {
+          // A scope dropped by the timer (or replaced) must not close its successor.
+          if (!recovery.pending && !recovery.observing && candidate.recoveries.get(id) === recovery) {
             candidate.recoveries.delete(id);
             candidate.watch?.write(`${JSON.stringify({ event: "recovery-ended", grantId: id })}\n`);
           }
@@ -255,7 +277,7 @@ export async function startMainBrowserBroker(options: {
         && (!candidate.grants.has(id) || candidate.grants.get(id)?.controller.signal.aborted)) throw new Error("native-browser-grant-revoked");
       const encoded = JSON.stringify(reply);
       if (Buffer.byteLength(encoded) > 8 * 1024 * 1024) throw new Error("native-browser-broker-response-invalid");
-      if (!res.writableEnded && !res.destroyed) { res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" }); res.end(encoded); }
+      if (!res.writableEnded && !res.destroyed) { res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" }); res.end(encoded); pendingId = null; }
     } catch (error) { if (pendingId) release(candidate, pendingId); fail(error); }
     finally { if (timer) clearTimeout(timer); }
   });

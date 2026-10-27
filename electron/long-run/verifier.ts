@@ -316,7 +316,8 @@ function stringToolArg(value: unknown, aliases: readonly string[]): string | nul
 function unwrapShellCommand(command: string): string {
   let current = command.trim();
   for (let depth = 0; depth < 2; depth += 1) {
-    const match = /^(?:\/usr\/bin\/env\s+)?(?:\/bin\/)?(?:ba|z|)sh\s+-l?c\s+(["'])([\s\S]*)\1$/.exec(current);
+    // Same rule as invocation/no-effect-failure.ts: the script may not contain its own opening quote.
+    const match = /^(?:\/usr\/bin\/env\s+)?(?:\/bin\/)?(?:ba|z|)sh\s+-l?c\s+(["'])((?:(?!\1)[\s\S])*)\1$/.exec(current);
     if (!match) break;
     current = match[2].trim();
   }

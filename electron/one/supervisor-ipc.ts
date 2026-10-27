@@ -16,5 +16,10 @@ export function registerOneSupervisorIpc(input:{ipc:Pick<IpcMain,"handle">;asser
     checkin:(value:any)=>oneSupervisorEndpoint().checkin(value),
     budgets:(value:any)=>oneSupervisorEndpoint().budgets(value),
     budgetConfigure:(value:any)=>oneSupervisorEndpoint().budgetConfigure(value),
+    // Read in this process from the shared store whichever host runs the personal agent (owner 2026-10-27).
+    supervisedRooms:async(value:any)=>(await import("./supervised-approvals")).supervisedRoomsAmong(value),
+    // "내가 직접 이어가기" (owner 2026-10-27): the owner takes a personal agent's room back. Renderer only; the model's
+    // app.call to oneSupervisor.* is refused (app-control/policy.ts).
+    releaseRoom:async(value:any)=>(await import("./personal-agent-rooms")).releasePersonalAgentRoom(value),
   })) input.ipc.handle(`oneSupervisor:${method}`,(event,value)=>{input.assertTrustedSender(event);return action(value);});
 }

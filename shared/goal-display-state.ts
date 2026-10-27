@@ -49,6 +49,12 @@ export const GOAL_OWNER_GRANT_REQUIRED = "goal_owner_grant_required";
 export function goalHeldForOwnerGrant(goal: { status: string | null | undefined; blockedReason?: string | null }): boolean {
   return goal.status === "waiting_tool" && goal.blockedReason === GOAL_OWNER_GRANT_REQUIRED;
 }
+/**
+ * Every blocked_reason a Goal rests in `waiting_tool` for the owner with (the answer to its question, the grant to start).
+ * SQL that must skip held Goals binds this list instead of copying one literal, so a new hold code cannot reach the display
+ * rule above and miss the sidebar comet or the quit pause.
+ */
+export const GOAL_OWNER_HOLD_BLOCKED_REASONS: readonly string[] = [...GOAL_OWNER_QUESTION_REASONS, GOAL_OWNER_GRANT_REQUIRED];
 
 export type GoalOwnerAttention = "question" | "review" | "approval" | "budget";
 export function goalOwnerAttention(input: { status: string | null | undefined; pauseReason?: string | null; blockedReason?: string | null }): GoalOwnerAttention | null {

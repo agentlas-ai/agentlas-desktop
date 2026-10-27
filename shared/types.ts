@@ -1906,6 +1906,12 @@ export interface Chat {
   seatLabel?: string | null;
   seatKind?: "solo" | "group" | null;
   participants?: Array<{ slot: number; agentId: string | null; displayName: string }> | null;
+  /**
+   * A room the personal agent opened and runs (electron/one/personal-agent-rooms.ts, owner 2026-10-27): the owner reads
+   * it but writes to the personal agent, it stays out of the Work lists, and "내가 직접 이어가기" makes it ordinary again.
+   * Absent otherwise and on older hosts.
+   */
+  supervisedByPersonalAgent?: true;
 }
 
 /**
@@ -2035,6 +2041,8 @@ export interface CanonicalTask {
   originChatId: string | null;
   /** Read-only source of the linked chat; absent when that chat is unavailable or on older hosts. */
   originSurface?: "one" | "work";
+  /** The linked chat is a room the personal agent runs (Chat.supervisedByPersonalAgent); Work lists leave it out. */
+  supervisedByPersonalAgent?: true;
   createdAt: string;
   updatedAt: string;
   archivedAt: string | null;
@@ -6659,7 +6667,7 @@ export interface MemoryImportRowUi {
   ownerAgentId: string | null;
   scope: string;
   kind: string;
-  status: "new" | "duplicate" | "redacted";
+  status: "new" | "duplicate" | "redacted" | "forgotten";
 }
 
 export interface MemoryImportPreviewUi {
@@ -6672,6 +6680,10 @@ export interface MemoryImportPreviewUi {
     newCount: number;
     duplicateCount: number;
     redactedCount: number;
+    /** Sections the owner already forgot; they are not brought back. */
+    forgottenCount: number;
+    /** Files with sections still to import that this pass did not cover. */
+    truncatedFiles: number;
     byOwner: Record<string, number>;
     byKind: Record<string, number>;
   };
@@ -6682,9 +6694,13 @@ export interface MemoryImportResultUi {
   targetAgentId: string;
   imported: number;
   skippedDuplicate: number;
+  /** Sections the owner already forgot; skipped so the rest of the folder still imports. */
+  skippedForgotten: number;
   redacted: number;
   embedded: number;
   intakeAttempted: number;
+  /** Files with sections still to import that this pass did not cover. */
+  truncatedFiles: number;
   byOwner: Record<string, number>;
 }
 
@@ -7175,6 +7191,8 @@ export interface AgentlasIpc {
     id: string,
     decision: ToolApprovalDecision,
     actionId: string,
+    /** Optional owner line for a "deny" ("No, and do this instead"): sent to the approval's room once the refusal resolves. */
+    note?: string,
   ) => Promise<ToolApprovalResolutionReceipt>;
   getToolApprovalResolution: (id: string) => Promise<ToolApprovalResolutionReceipt>;
   listToolApprovals: () => Promise<ToolApprovalRequestEvent[]>;
@@ -8037,7 +8055,7 @@ export interface AgentlasIpc {
     refreshCredentials: () => Promise<BrowserCredentialConsent>;
     listPermissions: () => Promise<BrowserPermissionEntry[]>;
     revokePermission: (site: string, actionType: string) => Promise<{ ok: true }>;
-    resolveApproval: (requestId: string, decision: BrowserApprovalDecision) => Promise<{ ok: boolean }>;
+    resolveApproval: (requestId: string, decision: BrowserApprovalDecision, note?: string) => Promise<BrowserApprovalResolutionResult>;
     listPendingApprovals: () => Promise<BrowserApprovalRequestEvent[]>;
     listLogs: (limit?: number) => Promise<BrowserActionLog[]>;
     /** Capture the current task's already-open page when supplied; never navigates. */
@@ -9176,6 +9194,30 @@ export interface ToolApprovalResolutionReceipt {
   pending: boolean;
   decidedAt: string | null;
   durableConsent?: ToolApprovalDurableConsentReceipt;
+  /**
+   * Only on the answer to the call that carried an owner note with a "deny" (runtime:resolveToolApproval /
+   * browser:resolveApproval). Never on a replay or a ledger read: the note is sent once, by the call that resolved.
+   */
+  ownerNote?: ToolApprovalOwnerNoteReceipt;
+}
+
+/**
+ * What became of the line the owner wrote with "No, and do this instead" (owner 2026-10-27). The refusal itself is
+ * the receipt's own `resolvedDecision`; this is only the note.
+ *  - "sent":    accepted into the approval's own room as the owner's message (queued behind the running turn, or
+ *               started as the next one). Exactly once per approval request.
+ *  - "failed":  the refusal stands but the room could not take the line (`code`); the renderer keeps the text visible.
+ *  - "skipped": no note went out (`code`: note_empty, not_denied, no_room, replayed).
+ */
+export interface ToolApprovalOwnerNoteReceipt {
+  status: "sent" | "failed" | "skipped";
+  code?: string;
+}
+
+/** The answer to browser:resolveApproval; `ownerNote` only when the deny carried a note. */
+export interface BrowserApprovalResolutionResult {
+  ok: boolean;
+  ownerNote?: ToolApprovalOwnerNoteReceipt;
 }
 
 /** One's durable memory row as the renderer may see it: bounded content, project slug only, never a local path. */

@@ -5,6 +5,7 @@ import { hasCallbackResultCoverage } from "../invocation/effect-boundary";
 import { parseEffectMetadata } from "../invocation/effect-metadata";
 import type { RunnerEvents, RunnerResult } from "../runtime/runner";
 import { getDb } from "../store/db";
+import { adapterEffectScopeKind } from "../runtime/acp-kinds";
 import { getLongRunAttemptGoalRevision } from "../store/long-runs";
 import { recordRunEvent } from "../store/run-events";
 import { captureGoalVerificationBoundary } from "./verification-boundary";
@@ -181,9 +182,12 @@ class EffectSession implements VerificationSession {
     this.record("verifier_effect_stage_released", { reasonCodes: added });
   }
 
-  dispatch(stage: Stage, kind: string, signal: AbortSignal,
+  dispatch(stage: Stage, runtimeKind: string, signal: AbortSignal,
     start: (signal: AbortSignal, onTool: NonNullable<RunnerEvents["onTool"]>) => Promise<RunnerResult>,
   ): Promise<RunnerResult> {
+    // cursor/grok/kimi run through the ACP runner and report their effect scope as "acp"; the rest of this method judges that scope kind.
+    // Before, a verification on one of those three failed verification_effects_coverage_unknown before it dispatched.
+    const kind = adapterEffectScopeKind(runtimeKind);
     this.checkLive();
     if (!stage.open || this.stage !== stage) {
       this.fail("verification_effects_late_dispatch");

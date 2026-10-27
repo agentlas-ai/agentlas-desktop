@@ -824,8 +824,8 @@ const api: AgentlasIpc = {
   },
   // 도구 승인 결정 — live 요청은 이 호출이 대기 중인 실행을 풀고,
   // post-denial 은 다음 실행의 허용 범위에만 반영된다.
-  resolveToolApproval: (id: string, decision: ToolApprovalDecision, actionId: string) =>
-    ipcRenderer.invoke("runtime:resolveToolApproval", id, decision, actionId),
+  resolveToolApproval: (id: string, decision: ToolApprovalDecision, actionId: string, note?: string) =>
+    ipcRenderer.invoke("runtime:resolveToolApproval", id, decision, actionId, note),
   getToolApprovalResolution: (id: string) =>
     ipcRenderer.invoke("runtime:getToolApprovalResolution", id),
   listToolApprovals: () => ipcRenderer.invoke("runtime:listToolApprovals"),
@@ -855,8 +855,8 @@ const api: AgentlasIpc = {
     listPermissions: () => ipcRenderer.invoke("browser:listPermissions"),
     revokePermission: (site: string, actionType: string) =>
       ipcRenderer.invoke("browser:revokePermission", site, actionType),
-    resolveApproval: (requestId: string, decision) =>
-      ipcRenderer.invoke("browser:resolveApproval", requestId, decision),
+    resolveApproval: (requestId: string, decision, note?: string) =>
+      ipcRenderer.invoke("browser:resolveApproval", requestId, decision, note),
     listPendingApprovals: () => ipcRenderer.invoke("browser:listPendingApprovals"),
     listLogs: (limit?: number) => ipcRenderer.invoke("browser:listLogs", limit),
     captureLiveFrame: (preferredUrl?: string, viewport?: "desktop" | "phone") =>
@@ -1116,6 +1116,8 @@ const api: AgentlasIpc = {
     receipt: (input) => ipcRenderer.invoke("oneSupervisor:receipt", input),
     stopTask: (input) => ipcRenderer.invoke("oneSupervisor:stopTask", input),
     checkin: (input) => ipcRenderer.invoke("oneSupervisor:checkin", input),
+    supervisedRooms: (input) => ipcRenderer.invoke("oneSupervisor:supervisedRooms", input),
+    releaseRoom: (input) => ipcRenderer.invoke("oneSupervisor:releaseRoom", input),
   },
   oneContext: {
     snapshot: (input) => ipcRenderer.invoke("oneContext:snapshot", input),

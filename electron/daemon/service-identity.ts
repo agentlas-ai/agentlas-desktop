@@ -31,24 +31,46 @@ export function canonicalDaemonPath(value: string): string {
   }
 }
 
-export function resolveDaemonServiceIdentity(options: DaemonServiceOptions): DaemonServiceIdentity {
+function identityInputs(options: DaemonServiceOptions) {
   const userDataDir = canonicalDaemonPath(options.userDataDir);
   const storePath = canonicalDaemonPath(options.storePath?.trim()
     || process.env.AGENTLAS_STORE_PATH?.trim() || path.join(userDataDir, "agentlas.sqlite"));
   const installIdentity = options.installIdentity ?? OFFICIAL_INSTALL_IDENTITY;
-  let storeFile: { dev: number; ino: number } | null = null;
-  try { const stat = fs.statSync(storePath); storeFile = { dev: stat.dev, ino: stat.ino }; }
+  let stat: fs.Stats | null = null;
+  try { stat = fs.statSync(storePath); }
   catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+  const install = serializeInstallIdentity(installIdentity.userDataOverride
+    ? { ...installIdentity, userDataOverride: canonicalDaemonPath(installIdentity.userDataOverride) }
+    : installIdentity);
+  return { userDataDir, storePath, installIdentity, stat, install };
+}
+
+/** The identity is persisted (autostart manifest) and compared across a restart, so it holds the store's inode but not its
+ * st_dev: macOS renumbers the volume at every boot (16777229 -> 16777231 -> 16777233 on the owner's Mac), which made every login-item
+ * start after a reboot refuse its own manifest (daemon_autostart_store_identity_mismatch) until the GUI republished it. */
+export function resolveDaemonServiceIdentity(options: DaemonServiceOptions): DaemonServiceIdentity {
+  const { userDataDir, storePath, installIdentity, stat, install } = identityInputs(options);
   const serviceIdentity = createHash("sha256").update(JSON.stringify({
+    schema: "agentlas.daemon-service-identity.v2",
+    userDataDir,
+    storePath,
+    storeFile: stat ? { ino: stat.ino } : null,
+    install,
+  })).digest("hex");
+  return { userDataDir, storePath, installIdentity, serviceIdentity };
+}
+
+/** The identity as builds before this change computed it (st_dev inside the hash). Recognition only: a manifest published, or a
+ * service started, by such a build still matches in the boot that wrote it. Nothing new is ever published under it. */
+export function legacyDaemonServiceIdentity(options: DaemonServiceOptions): string {
+  const { userDataDir, storePath, stat, install } = identityInputs(options);
+  return createHash("sha256").update(JSON.stringify({
     schema: "agentlas.daemon-service-identity.v1",
     userDataDir,
     storePath,
-    storeFile,
-    install: serializeInstallIdentity(installIdentity.userDataOverride
-      ? { ...installIdentity, userDataOverride: canonicalDaemonPath(installIdentity.userDataOverride) }
-      : installIdentity),
+    storeFile: stat ? { dev: stat.dev, ino: stat.ino } : null,
+    install,
   })).digest("hex");
-  return { userDataDir, storePath, installIdentity, serviceIdentity };
 }
 
 export function daemonControlSocketPath(userDataDir: string): string {

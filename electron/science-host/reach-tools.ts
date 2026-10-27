@@ -30,6 +30,8 @@ export interface ScienceReachToolContext {
   chatId: string;
   runId: string;
   permission: ToolPermission;
+  /** The turn's lifetime: Stop ends a reach call that is driving an app. */
+  signal?: AbortSignal;
 }
 
 // The wording of the harness registry's purposes (capability-ports.ts), so a model sees the same thing on every surface.
@@ -58,7 +60,7 @@ export async function runScienceReachTool(name: string, args: Record<string, unk
   let result: { status: string };
   try {
     const { callHarnessPort } = await import("../harness/capability-ports");
-    result = await callHarnessPort(tool.operation, args, { chatId: ctx.chatId, runId: ctx.runId, permission: ctx.permission, dryRun: false });
+    result = await callHarnessPort(tool.operation, args, { chatId: ctx.chatId, runId: ctx.runId, permission: ctx.permission, dryRun: false, ...(ctx.signal ? { signal: ctx.signal } : {}) });
   } catch {
     result = { status: "unavailable", reason: "reach_port_failed", next: "reach_status says whether the app map and the driver are ready" } as { status: string };
   }

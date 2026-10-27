@@ -54,7 +54,9 @@ export type DurableQueuedSteerRecoveryReason =
   | "drained-run-start-uncertain"
   | "drained-run-receipt-missing"
   | "draining-run-id-missing"
-  | "one-team-report-owner-unbound";
+  | "one-team-report-owner-unbound"
+  /** The owner's Stop could not write its withdrawal of this row through the whole bounded retry (internal; shown as original-run-start-uncertain). */
+  | "run-stopped-withdraw-unconfirmed";
 const RECOVERY_REASONS: readonly DurableQueuedSteerRecoveryReason[] = [
   "original-run-start-uncertain",
   "original-run-effect-boundary-unconfirmed",
@@ -62,6 +64,7 @@ const RECOVERY_REASONS: readonly DurableQueuedSteerRecoveryReason[] = [
   "drained-run-receipt-missing",
   "draining-run-id-missing",
   "one-team-report-owner-unbound",
+  "run-stopped-withdraw-unconfirmed",
 ];
 
 /**
@@ -392,15 +395,22 @@ export function settleQueuedSteer(id: string, status: "started" | "cancelled" | 
   }).immediate();
 }
 
-export function cancelQueuedSteersForChat(chatId: string, preserveTeamReports: boolean, cause: DurableQueuedSteerTerminalCause): void {
-  const preserve = preserveTeamReports ? " AND CASE WHEN json_valid(request_json) THEN COALESCE(json_type(request_json,'$.oneTeamReportTurn'),'')<>'true' ELSE 1 END" : "";
+/**
+ * `queuedAtOrBefore` bounds a withdrawal that is written again after a lock (service.ts withdrawQueuedDirectionsForStop):
+ * only what was queued when the owner stopped, never a direction typed after it.
+ */
+export function cancelQueuedSteersForChat(chatId: string, preserveTeamReports: boolean, cause: DurableQueuedSteerTerminalCause,
+  queuedAtOrBefore?: string): void {
+  const preserve = (preserveTeamReports ? " AND CASE WHEN json_valid(request_json) THEN COALESCE(json_type(request_json,'$.oneTeamReportTurn'),'')<>'true' ELSE 1 END" : "")
+    + (queuedAtOrBefore !== undefined ? " AND queued_at <= ?" : "");
+  const bound = queuedAtOrBefore !== undefined ? [queuedAtOrBefore] : [];
   const db = getDb();
   db.transaction(() => {
     const rows = db.prepare(`SELECT ${REPORT_LEDGER_COLUMNS} FROM invocation_steers WHERE chat_id = ? AND status = 'queued'${preserve} ORDER BY rowid`)
-      .all(chatId) as ReportLedgerRow[];
+      .all(chatId, ...bound) as ReportLedgerRow[];
     db.prepare(
       "UPDATE invocation_steers SET status = 'cancelled', recovery_reason = ?, updated_at = ? WHERE chat_id = ? AND status = 'queued'" + preserve,
-    ).run(terminalCause(cause), new Date().toISOString(), chatId);
+    ).run(terminalCause(cause), new Date().toISOString(), chatId, ...bound);
     for (const row of rows) revertTeamReportLedger(row, terminalCause(cause));
   }).immediate();
 }

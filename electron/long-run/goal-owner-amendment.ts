@@ -1,4 +1,7 @@
-import { getGoalExecutionDirectiveReview, recordGoalExecutionDirective } from "./goal-execution-context";
+import {
+  getGoalExecutionDirectiveReview, OWNER_EXECUTION_DIRECTIVE_EVENT_KIND, recordGoalExecutionDirective, unavailableDirectiveReviews,
+} from "./goal-execution-context";
+import { GOAL_DIRECTIVE_JUDGE_UNAVAILABLE_PREFIX } from "../../shared/goal-execution-directives";
 
 
 
@@ -167,6 +170,21 @@ function pendingSourceIds(runId: string): string[] {
   return pending.filter((id) => !settled.has(id));
 }
 
+/**
+ * Oldest owner message first. A message the judge answered late (judge outage, then a re-ask) is recorded after newer
+ * ones, but the owner's later word must still be the last update applied.
+ */
+function orderBySourceMessage(ids: string[]): string[] {
+  if (ids.length < 2) return ids;
+  const rowOf = getDb().prepare("SELECT rowid AS position FROM chat_messages WHERE id = ?");
+  const position = new Map<string, number>();
+  ids.forEach((id, index) => {
+    const row = rowOf.get(id) as { position: number } | undefined;
+    position.set(id, row ? row.position : Number.MAX_SAFE_INTEGER / 2 + index);
+  });
+  return [...ids].sort((a, b) => position.get(a)! - position.get(b)!);
+}
+
 /** Owner amendments recorded for this Goal's run and not yet bound as a revision (goal panel shows the count). */
 export function pendingOwnerGoalAmendmentCount(goalId: string): number {
   const run = getLongRunByGoalId(goalId);
@@ -211,7 +229,7 @@ export function applyPendingOwnerGoalAmendments(
 ): OwnerGoalAmendmentApplyResult {
   const run = getLongRunByGoalId(goalId);
   if (!run || !run.rootChatId) return { applied: false, reason: "no_long_run" };
-  const pending = pendingSourceIds(run.id);
+  const pending = orderBySourceMessage(pendingSourceIds(run.id));
   if (pending.length === 0) return { applied: false, reason: "none_pending" };
   const contract = getChatGoalContract(goalId);
   if (!contract || !["active", "blocked"].includes(contract.status)) return { applied: false, reason: "goal_not_active" };
@@ -286,6 +304,93 @@ export function holdFiniteGoalForPendingAmendment(goalId: string): boolean {
   return !amendment.applied;
 }
 
+export const OWNER_GOAL_REVIEW_RETRY_KIND = "run.owner_goal_review_retry";
+export const OWNER_GOAL_REVIEW_RETRIED_KIND = "run.owner_goal_review_retried";
+/** Wait before the n-th automatic re-ask of a message the judge could not answer: a momentary outage is asked again at the
+ * next sweep tick, a long limit window backs off. Past the end, only the owner's next message asks again. */
+const REVIEW_RETRY_BACKOFF_MS = [1, 5, 15, 45, 120, 360].map((minutes) => minutes * 60_000);
+const OWNER_DRIVEN_RETRY_SPACING_MS = 60_000;
+const OWNER_DRIVEN_RETRY_MAX_ATTEMPTS = 12;
+const REVIEW_RETRY_MAX_SOURCES_PER_PASS = 3;
+const reviewRetriesInFlight = new Set<string>();
+
+export interface OwnerGoalReviewRetryOutcome {
+  sourceMessageId: string;
+  attempt: number;
+  label: AmendmentLabel;
+  reasonCode: OwnerGoalAmendmentReviewCode;
+  recorded: boolean;
+  applied: boolean;
+}
+
+/**
+ * An owner message the judge could not answer (timeout, limit, pool change) is not classified: it is asked again, bounded
+ * by a backoff, instead of staying "pending" for ever with the Goal on its old target. A semantic `unknown` is an answer
+ * and is not re-asked. Each attempt is written to the run ledger before the judge is called (a crash still counts it) and
+ * its outcome after, both with machine codes.
+ */
+export async function retryUnavailableOwnerGoalReviews(goalId: string, opts: {
+  judgeFn?: JudgeFn;
+  /** Set when triggered by a new owner message: shorter spacing, a larger cap. */
+  ownerDriven?: boolean;
+  exceptSourceMessageId?: string;
+  nowMs?: number;
+} = {}): Promise<OwnerGoalReviewRetryOutcome[]> {
+  const outcomes: OwnerGoalReviewRetryOutcome[] = [];
+  let sources: ReturnType<typeof unavailableDirectiveReviews>;
+  try { sources = unavailableDirectiveReviews(goalId); } catch { return outcomes; }
+  const now = opts.nowMs ?? Date.now();
+  let started = 0;
+  for (const source of sources) {
+    if (started >= REVIEW_RETRY_MAX_SOURCES_PER_PASS) break;
+    if (source.sourceMessageId === opts.exceptSourceMessageId) continue;
+    const key = `${goalId}:${source.sourceMessageId}`;
+    if (reviewRetriesInFlight.has(key)) continue;
+    const prior = getDb().prepare(`SELECT COUNT(*) AS attempts, MAX(occurred_at) AS lastAt FROM long_run_events
+      WHERE run_id = ? AND kind = ? AND json_extract(payload_json, '$.sourceMessageId') = ?`)
+      .get(source.runId, OWNER_GOAL_REVIEW_RETRY_KIND, source.sourceMessageId) as { attempts: number; lastAt: string | null };
+    const attempts = Number(prior.attempts) || 0;
+    const spacing = opts.ownerDriven
+      ? (attempts < OWNER_DRIVEN_RETRY_MAX_ATTEMPTS ? OWNER_DRIVEN_RETRY_SPACING_MS : null)
+      : (attempts < REVIEW_RETRY_BACKOFF_MS.length ? REVIEW_RETRY_BACKOFF_MS[attempts] : null);
+    if (spacing === null) continue;
+    const since = Math.max(Date.parse(source.reviewedAt) || 0, Date.parse(prior.lastAt ?? "") || 0);
+    if (now - since < spacing) continue;
+    reviewRetriesInFlight.add(key);
+    started += 1;
+    try {
+      appendLongRunEvent({ runId: source.runId, kind: OWNER_GOAL_REVIEW_RETRY_KIND, actorKind: "host",
+        payload: { goalId, sourceMessageId: source.sourceMessageId, attempt: attempts + 1,
+          trigger: opts.ownerDriven ? "owner_message" : "sweep", previousReasonCode: source.reasonCode } });
+      const review = await reviewOwnerGoalMessage({ goalId, chatId: source.chatId, sourceMessageId: source.sourceMessageId,
+        retryEarlierUnavailable: false, ...(opts.judgeFn ? { judgeFn: opts.judgeFn } : {}) });
+      const outcome: OwnerGoalReviewRetryOutcome = { sourceMessageId: source.sourceMessageId, attempt: attempts + 1,
+        label: review.label, reasonCode: review.reasonCode, recorded: review.recorded, applied: review.apply?.applied ?? false };
+      appendLongRunEvent({ runId: source.runId, kind: OWNER_GOAL_REVIEW_RETRIED_KIND, actorKind: "host",
+        payload: { goalId, ...outcome, ...(review.apply && !review.apply.applied ? { deferredReason: review.apply.reason } : {}) } });
+      outcomes.push(outcome);
+    } catch (error) {
+      console.warn(`[goal-amendment] re-ask failed goal=${goalId} message=${source.sourceMessageId} cause=${error instanceof Error ? error.message.slice(0, 120) : "unknown"}`);
+    } finally { reviewRetriesInFlight.delete(key); }
+  }
+  return outcomes;
+}
+
+/** Periodic half (blocked-goal-sweep): ask again for every live Goal that holds a message the judge could not answer. */
+export function sweepUnavailableOwnerGoalReviews(): void {
+  const rows = getDb().prepare(`SELECT DISTINCT l.goal_id AS goalId FROM long_runs l
+    WHERE l.status NOT IN ('completed','cancelled','failed') AND l.surface IN ('one','work')
+      AND l.execution_location = 'desktop-local' AND l.host_owner_kind = 'desktop'
+      AND EXISTS (SELECT 1 FROM long_run_events e WHERE e.run_id = l.id AND e.kind = ?
+        AND json_extract(e.payload_json, '$.kind') = 'pending'
+        AND json_extract(e.payload_json, '$.reasonCode') LIKE ?)
+    LIMIT 200`).all(OWNER_EXECUTION_DIRECTIVE_EVENT_KIND, `${GOAL_DIRECTIVE_JUDGE_UNAVAILABLE_PREFIX}%`) as Array<{ goalId: string }>;
+  for (const { goalId } of rows) {
+    void retryUnavailableOwnerGoalReviews(goalId).catch((error: unknown) =>
+      console.warn(`[goal-amendment] re-ask sweep failed goal=${goalId} cause=${error instanceof Error ? error.message.slice(0, 120) : "unknown"}`));
+  }
+}
+
 /**
  * Fire-and-forget review of one owner turn in a Goal chat. Never blocks the
  * turn, never throws. Every outcome carries a machine reasonCode so a review
@@ -296,6 +401,8 @@ export function reviewOwnerGoalMessage(input: {
   chatId: string;
   sourceMessageId: string;
   judgeFn?: JudgeFn;
+  /** false: do not also re-ask earlier messages left unanswered by a judge outage (set by that re-ask itself). */
+  retryEarlierUnavailable?: boolean;
 }): Promise<{ label: AmendmentLabel; reasonCode: OwnerGoalAmendmentReviewCode; recorded: boolean; apply: OwnerGoalAmendmentApplyResult | null }> {
   const skipped = (code: string) => ({ label: "unknown" as const, reasonCode: `skipped:${code}` as const, recorded: false, apply: null });
   // Detach from the owner's turn: its worker pin and abort signal are not this review's.
@@ -329,7 +436,15 @@ export function reviewOwnerGoalMessage(input: {
     if (label !== "amends_goal") return { label, reasonCode, recorded: directiveRecorded, apply: null };
     const recorded = recordPendingOwnerGoalAmendment(input.goalId, input.sourceMessageId);
     return { label, reasonCode, recorded, apply: applyPendingOwnerGoalAmendments(input.goalId) };
-  })().catch((error: unknown) => ({
+  })().then((result) => {
+    // The judge answered, so an earlier owner message it could not answer is asked again now instead of waiting for the sweep.
+    if (input.retryEarlierUnavailable !== false && !result.reasonCode.startsWith("skipped:")
+      && !result.reasonCode.startsWith(GOAL_DIRECTIVE_JUDGE_UNAVAILABLE_PREFIX)) {
+      void retryUnavailableOwnerGoalReviews(input.goalId, { ownerDriven: true, exceptSourceMessageId: input.sourceMessageId,
+        ...(input.judgeFn ? { judgeFn: input.judgeFn } : {}) }).catch(() => undefined);
+    }
+    return result;
+  }).catch((error: unknown) => ({
     label: "unknown" as const,
     reasonCode: `judge_unavailable:${error instanceof Error ? error.message.replace(/[^A-Za-z0-9_.:-]+/g, "_").slice(0, 80) : "threw"}` as const,
     recorded: false,

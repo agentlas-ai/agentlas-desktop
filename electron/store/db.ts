@@ -23,6 +23,7 @@ import { createOneDomainEventIndexes } from "./one-domain-event-indexes";
 import { createAgentContextSchema } from "./agent-context";
 import { createAgentStrategySchema } from "./agent-strategy-schema";
 import { createRoomDiscussionSchema } from "./room-discussion-schema";
+import { GRAPH_CHECKPOINT_SCHEMA, PREVIOUS_GRAPH_CHECKPOINT_SCHEMA, sha256Value } from "../../shared/graph-execution-digest";
 
 // Picks the Korean or English human-readable string for the current UI locale.
 const L = (ko: string, en: string): string => (currentUiLocale() === "ko" ? ko : en);
@@ -31,7 +32,7 @@ let _db: Database.Database | null = null;
 let _postContinuityRepairsDeferred = false;
 let _openedStoreMigrationRole: StoreMigrationRole | null = null;
 
-const SCHEMA_VERSION = 134;
+const SCHEMA_VERSION = 135;
 
 /**
  * The schema version this binary's migration ladder produces.
@@ -287,6 +288,73 @@ function tableExists(db: Database.Database, table: string): boolean {
   );
 }
 
+/**
+ * v135: `long_runs.pause_reason` has to accept every value of shared/long-run.ts LONG_RUN_PAUSE_REASONS. v107 created the
+ * CHECK without 'agent_paused' — the reason a Science loop paused by its agent/controller is projected with — so that UPDATE
+ * failed the CHECK, the projection transaction rolled back and the common ledger kept showing the paused loop as running.
+ * SQLite cannot alter a CHECK: the table is rebuilt from its own stored definition (columns later steps added are carried as
+ * they are, never listed by hand) with foreign keys off, the way the v102 chats rebuild does. All-or-nothing in one
+ * transaction; rows, indexes and child references are verified before it commits. Runs only on the migration owner.
+ */
+export function widenLongRunPauseReasonCheck(db: Database.Database): "rebuilt" | "current" | "absent" | "unrecognized" {
+  const stored = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'long_runs'").get() as { sql: string | null } | undefined;
+  if (!stored?.sql) return "absent";
+  const list = /(pause_reason\s+IN\s*\()([^)]*)(\))/i.exec(stored.sql);
+  // An unfamiliar definition is left as it is (a rebuild from text we cannot read could drop a rule); the cause stays typed.
+  if (!list) return "unrecognized";
+  const values = [...list[2]!.matchAll(/'([^']*)'/g)].map((match) => match[1]!);
+  if (values.includes("agent_paused")) return "current";
+  const widened = values.flatMap((value) => (value === "user" ? [value, "agent_paused"] : [value]));
+  if (!widened.includes("agent_paused")) widened.push("agent_paused");
+  const definition = stored.sql
+    .replace(list[0]!, `${list[1]}${widened.map((value) => `'${value}'`).join(",")}${list[3]}`)
+    .replace(/^(\s*CREATE\s+TABLE\s+)"?long_runs"?/i, "$1long_runs_v135");
+  if (!/^\s*CREATE\s+TABLE\s+long_runs_v135\b/i.test(definition)) return "unrecognized";
+
+  const columns = schemaColumns(db, "long_runs").map((column) => quoteSqlIdentifier(column.name)).join(", ");
+  const dependents = ["long_runs", ...(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name <> 'long_runs'")
+    .all() as Array<{ name: string }>).map((row) => row.name).filter((name) => {
+    // A virtual table whose module is not loaded cannot be inspected and cannot reference long_runs.
+    try {
+      return (db.prepare(`PRAGMA foreign_key_list(${quoteSqlIdentifier(name)})`).all() as Array<{ table: string }>)
+        .some((reference) => reference.table.toLowerCase() === "long_runs");
+    } catch { return false; }
+  })];
+  const violations = (): Set<string> => new Set(dependents.flatMap((name) =>
+    (db.prepare(`PRAGMA foreign_key_check(${quoteSqlIdentifier(name)})`).all() as Array<{ table: string; rowid: number | null; parent: string; fkid: number }>)
+      .map((row) => `${row.table}:${row.rowid ?? "null"}:${row.parent}:${row.fkid}`)));
+
+  // With foreign keys on, DROP TABLE deletes the parent's rows first and cascades into every child table. The pragma is a
+  // no-op inside a transaction, so refuse to go on rather than risk that.
+  db.pragma("foreign_keys = OFF");
+  try {
+    if (Number(db.pragma("foreign_keys", { simple: true })) !== 0) throw new Error("long_runs_rebuild_needs_foreign_keys_off");
+    db.transaction(() => {
+      const dependentsBefore = violations();
+      const owned = (kind: "index" | "trigger") => (db.prepare(
+        "SELECT sql FROM sqlite_master WHERE type = ? AND tbl_name = 'long_runs' AND sql IS NOT NULL").all(kind) as Array<{ sql: string }>).map((row) => row.sql);
+      const indexes = owned("index");
+      const triggers = owned("trigger");
+      db.exec("DROP TABLE IF EXISTS long_runs_v135");
+      db.exec(definition);
+      // rowid is carried too: row order and the integrity check's row keys stay what they were.
+      db.exec(`INSERT INTO long_runs_v135 (rowid, ${columns}) SELECT rowid, ${columns} FROM long_runs`);
+      const before = (db.prepare("SELECT COUNT(*) AS n FROM long_runs").get() as { n: number }).n;
+      const after = (db.prepare("SELECT COUNT(*) AS n FROM long_runs_v135").get() as { n: number }).n;
+      if (before !== after) throw new Error(`v135 long_runs rebuild lost rows: ${before} -> ${after}`);
+      db.exec("DROP TABLE long_runs");
+      db.exec("ALTER TABLE long_runs_v135 RENAME TO long_runs");
+      for (const sql of indexes) db.exec(sql.replace(/^CREATE (UNIQUE )?INDEX /i, (head) => `${head}IF NOT EXISTS `));
+      for (const sql of triggers) db.exec(sql.replace(/^CREATE TRIGGER /i, "CREATE TRIGGER IF NOT EXISTS "));
+      const introduced = [...violations()].filter((key) => !dependentsBefore.has(key));
+      if (introduced.length > 0) throw new Error(`v135 long_runs rebuild introduced ${introduced.length} integrity violation(s): ${introduced.slice(0, 5).join(", ")}`);
+    })();
+  } finally {
+    db.pragma("foreign_keys = ON");
+  }
+  return "rebuilt";
+}
+
 /** Remove only the historical non-unique copy of the table's exact UNIQUE
  * constraint. Unexpected definitions are preserved; no user rows are changed. */
 function dropRedundantRunSequenceIndex(db: Database.Database): void {
@@ -475,25 +543,16 @@ function rowHasFreshActivity(row: RecoverableAutomationRunRow, cutoffMs: number)
   return times.length > 0 && Math.max(...times) > cutoffMs;
 }
 
-function canonicalRecoveryValue(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(canonicalRecoveryValue);
-  if (value && typeof value === "object") {
-    return Object.fromEntries(
-      Object.entries(value as Record<string, unknown>)
-        .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
-        .map(([key, child]) => [key, canonicalRecoveryValue(child)]),
-    );
-  }
-  return value;
-}
-
+// A sealed checkpoint is recognised by the graph runner's own schema strings (shared/graph-execution-digest.ts): the
+// current one and the previous one it still resumes. A literal copy here once named only the previous schema, so no
+// checkpoint the runner writes now was ever replay-safe and every recoverable event was parked for the owner.
 function sealedRecoveryCheckpointIsReplaySafe(row: RecoverableAutomationRunRow): boolean {
   if (!row.checkpoint_json || !row.occurrence_id || !row.graph_digest) return false;
   try {
     const checkpoint = JSON.parse(row.checkpoint_json) as Record<string, unknown>;
     if (
       !checkpoint || typeof checkpoint !== "object" || Array.isArray(checkpoint) ||
-      checkpoint.schemaVersion !== "agentlas.automation-graph-checkpoint.v3" ||
+      (checkpoint.schemaVersion !== GRAPH_CHECKPOINT_SCHEMA && checkpoint.schemaVersion !== PREVIOUS_GRAPH_CHECKPOINT_SCHEMA) ||
       checkpoint.occurrenceId !== row.occurrence_id || checkpoint.graphDigest !== row.graph_digest ||
       !Array.isArray(checkpoint.ambiguousNodeIds) || !Array.isArray(checkpoint.inFlightNodeIds) ||
       checkpoint.ambiguousNodeIds.some((id) => typeof id !== "string") ||
@@ -503,10 +562,7 @@ function sealedRecoveryCheckpointIsReplaySafe(row: RecoverableAutomationRunRow):
     ) return false;
     const payload = { ...checkpoint };
     delete payload.checkpointDigest;
-    const digest = `sha256:${createHash("sha256")
-      .update(JSON.stringify(canonicalRecoveryValue(payload)))
-      .digest("hex")}`;
-    return digest === checkpoint.checkpointDigest &&
+    return sha256Value(payload) === checkpoint.checkpointDigest &&
       checkpoint.ambiguousNodeIds.length === 0 && checkpoint.inFlightNodeIds.length === 0;
   } catch {
     return false;
@@ -6308,7 +6364,7 @@ export function initStore(options: StoreInitOptions = {}): void {
           'verifying','pausing','paused','blocked','completed','failed','cancelling','cancelled'
         )),
         pause_reason TEXT CHECK(pause_reason IS NULL OR pause_reason IN (
-          'user','app_closed','budget','runtime_unavailable','approval_required','crash_recovery'
+          'user','agent_paused','app_closed','budget','runtime_unavailable','approval_required','crash_recovery'
         )),
         runtime_fallback_policy TEXT NOT NULL DEFAULT 'locked'
           CHECK(runtime_fallback_policy IN ('locked','preapproved_safe')),
@@ -7165,6 +7221,14 @@ export function initStore(options: StoreInitOptions = {}): void {
   // Followers refuse older schema; only the existing migration owner performs DDL.
   if (userVersion < 134) {
     _db.transaction(() => { addColumnIfMissing(_db!, "mcp_servers", "connection_epoch", "connection_epoch INTEGER NOT NULL DEFAULT 0 CHECK(connection_epoch >= 0)"); })();
+  }
+
+  // v135: long_runs.pause_reason accepts 'agent_paused' (a Science loop paused by its agent). Rebuild of an existing table; fresh
+  // and v107-bootstrapped stores already carry it and are left as they are. A shape the rebuild cannot read is left too and named
+  // here, so the Science projection's own failure code has a cause beside it.
+  if (userVersion < 135) {
+    const widened = widenLongRunPauseReasonCheck(_db);
+    if (widened === "unrecognized") console.warn("[store] v135 long_runs_pause_reason_check_unrecognized: left as it is");
   }
 
   } catch (error) {

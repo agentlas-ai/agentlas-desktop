@@ -7,16 +7,18 @@
  * 물어본 요청(live)만 여기 온다. 이미 거부되고 지나간 것(post-denial)은 러너가 남긴
  * 알림 한 줄이 전부이며 카드가 되지 않는다.
  *
- * Graph 칩은 네 답([이번만 허용] [이 작업에서 계속 허용] [항상 허용] [거부])을
- * 보여 준다. One의 기존 compact AskCard는 세 답을 유지한다.
+ * 칩은 네 답(allow_once · allow_session · allow_always · deny)을 번호 붙은 세로 목록으로 보여 준다
+ * ("예 / 이 작업 동안 다시 묻지 않기 / 항상 허용 / 아니오").
  *
- * 승인 자체는 대화를 멈추는 경계지만, 화면을 차지하는 질문 시트가 아니다. Graph 칩은
- * 제목·런타임·네 선택지를 한 줄로 보여 주고, One은 기존 질문 카드를 그대로 쓴다.
+ * ★오너 2026-10-27 "승인카드 디자인이 좀 애매하다. 코덱스나 클로드코드 앱의 승인카드를 따라해라": 모양은
+ * components/ApprovalPrompt 한 곳 — 질문 한 줄, 실제 실행될 명령·경로(코드 블록), 번호 선택지, 단축키 힌트,
+ * 여러 건이면 한 장씩 "1/3 · 다음". 선택지의 뜻과 저장·전송은 그대로다.
  */
 import { redactSecrets } from "@shared/secret-patterns";
 import { useEffect, useState } from "react";
 import { AskCard, type AskCardOption } from "@/components/AskCard";
-import { IconShield, IconCheck, IconClose, IconFolder } from "./Icon";
+import { IconShield, IconFolder } from "./Icon";
+import { ApprovalPrompt, type ApprovalPromptDeck, type ApprovalPromptOption } from "./ApprovalPrompt";
 import { useT } from "@/lib/i18n";
 import type { ToolApprovalRequestEvent } from "@/lib/types";
 import {
@@ -24,6 +26,7 @@ import {
   dismissToolApproval,
   markChatVisible,
   refreshToolApprovalDecision,
+  useApprovalDeck,
   useToolApprovals,
 } from "@/lib/tool-approvals";
 
@@ -56,11 +59,14 @@ export function ToolApprovalCard({
   request,
   compact = false,
   chip = false,
+  deck,
 }: {
   request: ToolApprovalRequestEvent;
   compact?: boolean;
   /** The compact Graph surface is opt-in; One keeps its existing AskCard. */
   chip?: boolean;
+  /** "1/3 · 다음" — set when this is one of several waiting approvals shown one at a time. */
+  deck?: ApprovalPromptDeck;
 }) {
   const { locale } = useT();
   const { actions } = useToolApprovals();
@@ -79,7 +85,7 @@ export function ToolApprovalCard({
     const timer = window.setTimeout(() => setClientExpired(true), Math.min(remaining, 2_147_000_000));
     return () => window.clearTimeout(timer);
   }, [expiryMs, request.id]);
-  const durableFailure = action?.durableConsent && action.durableConsent.status !== "persisted";
+  const durableFailure = (action?.durableConsent && action.durableConsent.status !== "persisted") || Boolean(action?.noteFailure);
   // A durable-save failure is a resolved call that must remain visible until
   // dismissal; the original live request's wall-clock expiry must not hide
   // that receipt after the user has already answered.
@@ -119,10 +125,16 @@ export function ToolApprovalCard({
     : imageTool
       ? (ko ? "이미지 생성을 허용할까요?" : "Allow image generation?")
       : (ko ? `${toolDisplayName(request.tool)} 사용을 허용할까요?` : `Allow ${toolDisplayName(request.tool)}?`);
-  const askOptions: AskCardOption[] = [
+  /*
+   * 오너 2026-10-27: Claude Code·Codex 의 승인 프롬프트 문구를 따른다 — 예 / 이 작업 동안 다시 묻지 않기 / 항상 허용 / 아니오.
+   * 선택지의 뜻과 저장·전송(allow_once·allow_session·allow_always·deny)은 그대로다. "항상 허용"은 실제로 저장되는 범위만 말한다:
+   * 영구 규칙은 사용자·작업 폴더·요청한 에이전트·정확한 대상(credentialResourceIdentity)·권한 수준에 묶인
+   * consentBinding 한 건이다(electron/runtime/tool-approval.ts persistAlwaysGrant) — 도구 이름이나 명령 패턴 전체가 아니다.
+   */
+  const askOptions: (AskCardOption & Pick<ApprovalPromptOption, "role" | "showNote">)[] = [
     {
       id: "allow_once",
-      title: ko ? "이번만 허용" : "Allow once",
+      title: ko ? "예" : "Yes",
       note: escalation
         ? (ko ? "이번 이어가기 실행에만 전체 액세스를 줍니다." : "Full access for this resumed run only.")
         // No "<runtime> 가": the particle does not fit every name. Folder notes say what happens to the
@@ -131,44 +143,53 @@ export function ToolApprovalCard({
           ? (ko ? "지금 이 요청에만 허용합니다." : "This request only.")
           : (ko ? "이번 호출에만 씁니다." : "For this call only."),
       active: true,
+      role: "primary",
+      showNote: escalation,
       disabled: locked,
     },
     {
       id: "allow_session",
-      title: ko ? "이 작업에서 계속 허용" : "Allow for this task",
+      title: ko ? "예, 이 작업 동안 다시 묻지 않기" : "Yes, and don't ask again during this task",
       note: escalation
         ? (ko ? "이 대화에서는 승격을 다시 묻지 않습니다." : "No more escalation questions in this conversation.")
         : (ko ? "이 작업이 끝날 때까지 다시 묻지 않습니다." : "No more questions until this task ends."),
+      showNote: escalation,
       disabled: locked,
     },
     {
       id: "allow_always",
-      title: ko ? "항상 허용" : "Always allow",
+      title: ko ? "예, 항상 허용" : "Yes, always allow",
       note: escalation
         ? (ko ? "권한이 모자랄 때 항상 전체 액세스로 진행합니다." : "Always continue with full access when permission falls short.")
         : folderAccess
           ? folderWrite
             ? (ko ? "이 폴더의 파일 생성과 수정을 다시 묻지 않습니다." : "Never ask again about editing files here.")
             : (ko ? "이 폴더 읽기를 다시 묻지 않습니다." : "Never ask again about reading this folder.")
-          : (ko ? "이 도구의 같은 작업 패턴을 다시 묻지 않습니다." : "Do not ask again for this tool's matching action pattern."),
+          : (ko ? "이 폴더에서 이 에이전트의 똑같은 호출만 다시 묻지 않습니다." : "Only this exact call, by this agent, in this folder is not asked again."),
+      showNote: true,
       disabled: locked,
     },
     {
       id: "deny",
-      title: ko ? "거부" : "Deny",
+      title: ko ? "아니오" : "No",
       note: escalation
         ? (ko ? "읽기 전용을 유지합니다 — 요청된 변경은 실행되지 않습니다." : "Stay read-only — the requested change is not executed.")
         : folderAccess
           ? folderWrite
             ? (ko ? "이 폴더에 파일을 만들거나 수정하지 않고 계속합니다." : "Continues without editing files in this folder.")
             : (ko ? "이 폴더를 읽지 않고 계속합니다." : "Continues without reading this folder.")
-          : (ko ? "이 호출만 거부하고 계속합니다." : "Refuses this call; the run continues."),
+          : (ko ? "이 호출만 거절하고 계속합니다." : "Refuses this call; the run continues."),
+      role: "deny",
+      showNote: escalation || folderAccess,
       disabled: locked,
     },
   ];
 
-  const choose = (id: string) => {
-    void decideToolApproval(request.id, id as Parameters<typeof decideToolApproval>[1]);
+  // "아니오, 그리고 대신 이렇게 하세요" (오너 2026-10-27): 거절에 한 줄을 실어 보낸다. 줄은 이 요청이 붙어 있던 방(request.chatId)의 오너
+  // 메시지로 한 번 간다 — 개인 에이전트 대화에 그려진 감독 방 카드도 그 방으로 간다. 방이 없는 요청에는 보낼 곳이 없어 입력을 열지 않는다.
+  const noteTarget = request.chatId ? { draftKey: request.id } : null;
+  const choose = (id: string, note?: string) => {
+    void decideToolApproval(request.id, id as Parameters<typeof decideToolApproval>[1], id === "deny" ? note : undefined);
   };
 
   const decisionLabel = action?.resolvedDecision === "allow_once"
@@ -180,7 +201,12 @@ export function ToolApprovalCard({
         : action?.resolvedDecision === "deny"
           ? (ko ? "거부" : "Deny")
           : null;
-  const feedback = action?.phase === "submitting"
+  const noteFailure = action?.noteFailure;
+  const feedback = noteFailure
+    ? (ko
+      ? "거절은 적용됐지만 지시를 방에 보내지 못했습니다. 아래 글을 방 입력창에 직접 보내 주세요."
+      : "The refusal was applied, but the instruction could not be sent to the room. Send the text below in the room yourself.")
+    : action?.phase === "submitting"
     ? (ko ? "결정을 전달하고 실제 실행 상태를 확인하는 중입니다." : "Sending the decision and verifying the actual runtime state.")
     : action?.phase === "retryable"
       ? (ko ? "결정이 적용되지 않았습니다. 승인 카드는 그대로 유지됐습니다. 다시 선택해 주세요." : "The decision was not applied. This approval is still waiting; choose again.")
@@ -213,6 +239,7 @@ export function ToolApprovalCard({
       }}
     >
       <span>{feedback}</span>
+      {noteFailure && <q data-testid="tool-approval-note-failed" style={{ display: "block", marginTop: 4, overflowWrap: "anywhere", userSelect: "text" }}>{noteFailure.text}</q>}
       {durableNotice && <span style={{ display: "block", marginTop: 4 }}>{durableNotice}</span>}
       {action?.phase === "unknown" && (
         <button
@@ -288,55 +315,37 @@ export function ToolApprovalCard({
     );
   }
 
+  const detailText = request.detail?.trim() ? redactSecrets(request.detail.trim()) : "";
+  // The command or path the runtime is actually about to run, as code. An escalation request carries none, so a
+  // line states the boundary it would widen instead.
   const chipDetail = request.detail?.trim()
     ? `${runtimeName} · ${redactSecrets(request.detail.trim())}`
     : escalation
       ? (ko ? "지금은 읽기 전용 — 허용하면 이 요청을 이어서 합니다" : "Read-only now — allowing continues this request")
       : runtimeName;
   if (compact && chip) {
-    // The second line says what is being allowed, not that something is being asked (the
-    // question already says that). A runtime-blocked call carries the command or path it
-    // tried; an escalation request carries none, so it states the boundary it would widen.
+    const folder = request.cwd
+      ? redactSecrets(request.cwd).replace(/[\x00-\x1f\x7f]/g, "").split(/[\\/]+/).filter(Boolean).slice(-2).join("/")
+      : "";
     return (
-      <section
-        className="tool-approval-chip"
-        role="alertdialog"
-        aria-live="assertive"
-        aria-label={askTitle}
-        data-ask-card="true"
-        data-testid="tool-approval-card"
-      >
-        {/* Owner 2026-10-17: like Claude Code / Codex, the question and what it allows sit on top and the choices
-            stack as numbered rows (docs/DESIGN-ASK-CARD.md: choices stack vertically), the first one marked. */}
-        <div className="tool-approval-chip-head">
-          <span className="tool-approval-chip-icon" aria-hidden><IconShield size={14} /></span>
-          <div className="tool-approval-chip-copy">
-            <strong>{askTitle}</strong>
-            <small title={chipDetail}>{chipDetail}</small>
-          </div>
-        </div>
-        <div className="tool-approval-chip-actions" role="group" aria-label={ko ? "승인 선택" : "Approval choices"}>
-          {askOptions.map((option, index) => (
-            <button
-              key={option.id}
-              type="button"
-              className={`tool-approval-chip-action tool-approval-chip-action-${option.id.replace("allow_", "")}`}
-              data-ask-option={option.id}
-              data-active={option.active ? "true" : "false"}
-              title={option.note}
-              aria-label={`${option.title}: ${option.note}`}
-              disabled={locked}
-              onClick={() => choose(option.id)}
-            >
-              <span className="tool-approval-chip-key" aria-hidden>{index + 1}</span>
-              <span className="tool-approval-chip-action-title">{option.title}</span>
-              <span className="tool-approval-chip-action-note">{option.note}</span>
-              {option.id === "deny" ? <IconClose size={13} /> : option.active ? <IconCheck size={13} /> : null}
-            </button>
-          ))}
-        </div>
-        {feedbackNode}
-      </section>
+      <ApprovalPrompt
+        question={askTitle}
+        code={detailText || null}
+        codeLabel={ko ? "실행될 명령 또는 대상" : "Command or target to run"}
+        meta={(
+          <span title={[runtimeName, request.cwd ? redactSecrets(request.cwd) : ""].filter(Boolean).join(" · ")}>
+            {detailText
+              ? <>{runtimeName}{folder ? ` · ${folder}` : ""}</>
+              : <small title={chipDetail}>{chipDetail}</small>}
+          </span>
+        )}
+        options={askOptions}
+        locked={locked}
+        onChoose={choose}
+        denyNote={noteTarget}
+        deck={deck}
+        footer={feedbackNode}
+      />
     );
   }
 
@@ -348,7 +357,17 @@ export function ToolApprovalCard({
         subtitle={chipDetail}
         locale={ko ? "ko" : "en"}
         options={askOptions}
-        onChoose={choose}
+        onChoose={(id, freeText) => choose(id, freeText)}
+        // The same "No, and do this instead" line as the prompt above: typing in this row and pressing Enter refuses with it.
+        // An empty Enter does nothing here (this card's rows are the choices), unlike the prompt where it refuses without a line.
+        {...(noteTarget ? {
+          otherOption: { title: ko ? "아니오, 대신 이렇게 하세요" : "No, and tell the personal agent what to do instead" },
+          footer: {
+            placeholder: ko ? "대신 이렇게 하세요 (Enter 로 보내기)" : "Tell the personal agent what to do instead (Enter to send)",
+            skipLabel: "", submitLabel: "", hideButton: true,
+            onSkip: (text: string) => { if (!locked && text.trim()) choose("deny", text); },
+          },
+        } : {})}
         data-testid="tool-approval-card"
       >
         {request.cwd && <div style={{display: "flex", alignItems: "center", gap: 8, marginBottom: 8, color: "var(--muted-deep)", fontSize: 12, overflowWrap: "anywhere"}}>
@@ -392,6 +411,8 @@ export function ToolApprovalInline({
   const { queue } = useToolApprovals();
   useEffect(() => markChatVisible(chatId), [chatId]);
   const mine = chatId ? queue.filter((item) => item.chatId === chatId) : [];
+  const deck = useApprovalDeck(mine);
+  const shown = deck.current;
   useEffect(() => {
     if (permission !== "full" || mine.length === 0) return;
     for (const request of mine) void decideToolApproval(request.id, "allow_session");
@@ -408,7 +429,11 @@ export function ToolApprovalInline({
         "--agentlas-composer-inset": `${composerInset}px`,
       } as React.CSSProperties) : undefined}
     >
-      {mine.map((request) => <ToolApprovalCard key={request.id} request={request} compact={compact} chip={chip} />)}
+      {/* One card at a time (owner 2026-10-27): the rest wait behind "1/3 · Next" instead of stacking above the composer. */}
+      {shown ? (
+        <ToolApprovalCard key={shown.id} request={shown} compact={compact} chip={chip}
+          deck={{ index: deck.index, total: deck.total, onPrev: deck.prev, onNext: deck.next }} />
+      ) : null}
     </div>
   );
 }

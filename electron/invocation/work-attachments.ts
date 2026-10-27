@@ -1,8 +1,10 @@
 import { randomUUID, createHash } from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import type { McpInvocationRequest, McpInvocationEvent } from "../../shared/types";
 import { workChatFileInputs, readWorkChatFileEntry, type WorkChatFileInput } from "../store/chat-message-attachments";
+import { ownProcessStartToken, processState } from "../store/terminal-owner-liveness";
 
 interface WorkInputRun {
   chatId: string;
@@ -51,6 +53,104 @@ function ensureDirectory(root: string, relative: string): string {
   return current;
 }
 
+/*
+ * The owner's attached files are copied into <cwd>/.agentlas/work-inputs/<uuid>/ for the run and removed by releaseWorkAttachmentRun,
+ * which works from this process's memory. A process that dies mid-run (a crash, an update, a power cut) never reaches it, so the
+ * private copies stayed in the project folder for good, where the owner may commit them. Every directory now carries a small owner
+ * marker, and the next staging in that folder (and the app's start, work-inputs-startup-sweep.ts) removes the directories whose
+ * owner is provably gone. A live owner is never touched: the daemon and Desktop can share a working folder.
+ */
+const PROCESS_EPOCH = randomUUID();
+const OWNER_MARKER = ".agentlas-owner.json";
+/** An owner that cannot be proven alive or gone (another machine, an unreadable start time, no marker) is given this long. */
+const ORPHAN_AGE_MS = 24 * 60 * 60 * 1000;
+/** Looking at one folder costs a directory read and, for a live foreign owner, a process lookup: not more often than this. */
+const SWEEP_EVERY_MS = 60_000;
+const STAGING_DIR_NAME = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const sweptAt = new Map<string, number>();
+
+interface WorkInputOwnerMarker { schemaVersion: 1; runId: string; epoch: string; pid: number; startToken: string | null; host: string; createdAt: number }
+
+function writeOwnerMarker(directory: string, runId: string): void {
+  try {
+    const marker: WorkInputOwnerMarker = { schemaVersion: 1, runId, epoch: PROCESS_EPOCH, pid: process.pid, startToken: ownProcessStartToken(), host: os.hostname(), createdAt: Date.now() };
+    fs.writeFileSync(path.join(directory, OWNER_MARKER), JSON.stringify(marker), { flag: "wx", mode: 0o600 });
+  } catch { /* best effort: a directory without a marker is still reclaimed by age */ }
+}
+
+async function readOwnerMarker(directory: string): Promise<WorkInputOwnerMarker | null> {
+  try {
+    const file = path.join(directory, OWNER_MARKER);
+    const stat = await fs.promises.lstat(file);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 4096) return null;
+    const value = JSON.parse(await fs.promises.readFile(file, "utf8")) as Record<string, unknown>;
+    if (value.schemaVersion !== 1 || typeof value.epoch !== "string" || typeof value.host !== "string"
+      || !Number.isSafeInteger(value.pid) || (value.pid as number) <= 0 || typeof value.createdAt !== "number" || !Number.isFinite(value.createdAt)) return null;
+    return { schemaVersion: 1, runId: typeof value.runId === "string" ? value.runId : "", epoch: value.epoch, pid: value.pid as number,
+      startToken: typeof value.startToken === "string" ? value.startToken : null, host: value.host, createdAt: value.createdAt };
+  } catch { return null; }
+}
+
+export type WorkInputSweepReason = "own_process_untracked" | "owner_gone" | "stale" | "run_live" | "owner_alive" | "young" | "identity_changed" | "unreadable";
+
+/** One staging directory: remove it only when nothing alive can still be reading it. Machine codes only. */
+async function orphanVerdict(directory: string, now: number): Promise<{ remove: boolean; reason: WorkInputSweepReason }> {
+  // Looked up fresh for every directory: a run of this process that started staging meanwhile is never taken for an orphan.
+  for (const record of runs.values()) if (record.directory === directory) return { remove: false, reason: "run_live" };
+  const marker = await readOwnerMarker(directory);
+  // This process's own directory that no run of it tracks any more (a release that failed): nothing of this process can be using it.
+  if (marker?.epoch === PROCESS_EPOCH) return { remove: true, reason: "own_process_untracked" };
+  if (marker && marker.host === os.hostname()) {
+    const owner = processState(marker.pid, marker.startToken);
+    if (owner === "gone") return { remove: true, reason: "owner_gone" };
+    if (owner === "alive") return { remove: false, reason: "owner_alive" };
+  }
+  const since = marker ? marker.createdAt : (await fs.promises.lstat(directory)).mtimeMs;
+  return now - since > ORPHAN_AGE_MS ? { remove: true, reason: "stale" } : { remove: false, reason: "young" };
+}
+
+/**
+ * Remove the input copies a dead process left in `<cwd>/.agentlas/work-inputs`. Never throws and never blocks a run; a directory it cannot
+ * judge stays and is looked at again. Only entries named like a staging directory, real directories (no links) under a real
+ * `.agentlas/work-inputs`, are considered.
+ */
+export async function sweepOrphanedWorkInputs(cwd: string, options: { now?: number; force?: boolean } = {}): Promise<{ removed: number; kept: number; reasons: Partial<Record<WorkInputSweepReason, number>> }> {
+  const result = { removed: 0, kept: 0, reasons: {} as Partial<Record<WorkInputSweepReason, number>> };
+  const note = (reason: WorkInputSweepReason, removed: boolean) => { if (removed) result.removed += 1; else result.kept += 1; result.reasons[reason] = (result.reasons[reason] ?? 0) + 1; };
+  let parent: string;
+  try {
+    const root = await fs.promises.realpath(cwd);
+    const agentlas = path.join(root, ".agentlas"), staging = path.join(agentlas, "work-inputs");
+    for (const dir of [agentlas, staging]) {
+      const stat = await fs.promises.lstat(dir);
+      if (!stat.isDirectory() || stat.isSymbolicLink() || await fs.promises.realpath(dir) !== dir) return result;
+    }
+    parent = staging;
+  } catch { return result; }
+  const now = options.now ?? Date.now();
+  if (!options.force && now - (sweptAt.get(parent) ?? 0) < SWEEP_EVERY_MS) return result;
+  sweptAt.set(parent, now);
+  let names: string[];
+  try { names = await fs.promises.readdir(parent); } catch { return result; }
+  for (const name of names) {
+    if (!STAGING_DIR_NAME.test(name)) continue;
+    const directory = path.join(parent, name);
+    try {
+      const before = await fs.promises.lstat(directory);
+      if (!before.isDirectory() || before.isSymbolicLink() || await fs.promises.realpath(directory) !== directory) { note("unreadable", false); continue; }
+      const verdict = await orphanVerdict(directory, now);
+      if (!verdict.remove) { note(verdict.reason, false); continue; }
+      const again = await fs.promises.lstat(directory);
+      if (again.dev !== before.dev || again.ino !== before.ino) { note("identity_changed", false); continue; }
+      // Windows: Defender/OneDrive can hold a just-read input for a moment; Node's rm already clears read-only files.
+      await fs.promises.rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+      note(verdict.reason, true);
+    } catch { note("unreadable", false); }
+  }
+  if (result.removed > 0) console.info("[work-inputs] removed input copies a stopped process left behind", { removed: result.removed, kept: result.kept, reasons: result.reasons });
+  return result;
+}
+
 /** Runs after actual cwd selection; one bounded entry is materialized at a time. */
 export async function prepareWorkAttachmentContext(req: McpInvocationRequest, cwd: string, signal?: AbortSignal): Promise<void> {
   const record = owner(req);
@@ -79,9 +179,13 @@ export async function prepareWorkAttachmentContext(req: McpInvocationRequest, cw
     const items = groups.flatMap(groupId => workChatFileInputs(record.chatId, groupId));
     if (items.reduce((sum, item) => sum + item.size, 0) > 96 * 1024 * 1024) fail("work_attachment_total_limit");
     const parent = ensureDirectory(canonical, path.join(".agentlas", "work-inputs"));
+    // Copies a stopped process left in this folder are removed before a new one is staged (a failed look never fails the run).
+    await sweepOrphanedWorkInputs(canonical).catch(() => undefined);
+    check();
     const directory = path.join(parent, randomUUID());
     fs.mkdirSync(directory, { mode: 0o700 }); record.directory = directory;
     const dirStat = fs.lstatSync(directory);record.directoryIdentity = {dev:dirStat.dev,ino:dirStat.ino};
+    writeOwnerMarker(directory, record.runId);
     const lines: string[] = [];
     for (const item of items) {
       check();

@@ -158,6 +158,15 @@ export interface SupervisorCheckinInput {
 export interface SupervisorFollowUpInput { commandId: string; taskId: string; text: string; oneId?: string }
 /** How a host-started supervisor turn is labelled in its chat: One's own brief in a worker session, or One's review line. */
 export type SupervisorHostNoticePurpose = "one-dispatch-brief" | "one-delegation-review" | "one-checkin";
+/**
+ * A room the personal agent oversees (its Work hand-offs, rooms it messaged, its teammate dispatches; Main decides,
+ * electron/one/supervised-approvals.ts). The personal conversation draws that room's waiting approval cards (owner
+ * 2026-10-27); each card still answers the original room.
+ */
+export interface SupervisedRoom { chatId: string; title: string | null }
+export interface SupervisedRoomsInput { conversationChatId: string; chatIds: string[] }
+export interface PersonalAgentRoomReleaseInput { chatId: string }
+export interface PersonalAgentRoomRelease { chatId: string; released: true; releasedAt: string; alreadyReleased: boolean }
 export interface SupervisorControlInput { commandId: string; taskId: string; expectedVersion: string; action: "steer" | "cancel"; text?: string; oneId?:string; runId?: string }
 export interface OneSupervisorAPI {
   budgets(input:import("./one-budget").OneBudgetListInput):Promise<import("./one-budget").OneBudgetSnapshot[]>;
@@ -173,6 +182,10 @@ export interface OneSupervisorAPI {
   receipt(input: {oneId:string;commandId:string}): Promise<SupervisorCommandReceipt | null>;
   stopTask(input: SupervisorStopInput): Promise<SupervisorCommandReceipt>;
   checkin(input: SupervisorCheckinInput): Promise<{receipt?:SupervisorCommandReceipt;checkin?:OneCheckin;checkins?:OneCheckin[]}>;
+  /** Of the given rooms, the ones the personal agent oversees, with their titles. Read-only. */
+  supervisedRooms(input: SupervisedRoomsInput): Promise<SupervisedRoom[]>;
+  /** "내가 직접 이어가기": a room the personal agent runs becomes an ordinary Work room. Owner-only. */
+  releaseRoom(input: PersonalAgentRoomReleaseInput): Promise<PersonalAgentRoomRelease>;
 }
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{2,199}$/;

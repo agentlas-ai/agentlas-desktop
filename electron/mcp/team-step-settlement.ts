@@ -19,6 +19,7 @@ import {
   type RunnerFailure, type RunnerRequest, type RunnerResult, type RuntimeTurnDelivery,
 } from "../runtime/runner";
 import { observedRunnerReturnedResult } from "../runtime/observed-runner";
+import { parseRetryHint } from "../runtime/runtime-cooldown";
 import { unsettledContinuationPrompt } from "../runtime/unsettled-continuation";
 import { carryRunnerTurnContext, replaceRunnerUserPrompt } from "../runtime/runner-turn-context-binding";
 import { decideTurnSettlement, RATE_LIMIT_MAX_RETRIES, type TurnFailureKind } from "../../shared/turn-settlement";
@@ -36,6 +37,8 @@ export interface TeamStepSettlementInput {
   resumeBudget: number;
   /** Same-request retries already spent. */
   attempt: number;
+  /** The provider's Retry-After in ms from now (rate_limit): the shared decision waits at least this long, within its bound. */
+  retryAfterMs?: number;
 }
 
 export type TeamStepSettlementDecision =
@@ -64,6 +67,7 @@ export function decideTeamStepSettlement(input: TeamStepSettlementInput): TeamSt
     ...(input.delivery ? { delivery: input.delivery } : {}),
     ...(input.kind && TURN_FAILURE_KINDS.has(input.kind) ? { kind: input.kind as TurnFailureKind } : {}),
     ...(input.providerCode ? { providerCode: input.providerCode } : {}),
+    ...(input.retryAfterMs !== undefined ? { retryAfterMs: input.retryAfterMs } : {}),
     unattended: true,
     attempt: input.attempt,
     resumeBudget: input.resumeBudget,
@@ -83,7 +87,7 @@ export interface TeamStepFacts {
   unsettled: boolean;
   delivery: RuntimeTurnDelivery | null;
   sessionId: string | null;
-  failure: { kind: string; providerCode: string | null } | null;
+  failure: { kind: string; providerCode: string | null; /** The provider's own Retry-After (ISO time or "in 30s"), when the failure carried one. */ retryAfterHint?: string | null } | null;
   /** The error's own machine code when it carries one (task_force_runtime_failure, worker_capabilities_*, …). */
   errorCode: string | null;
   /** The text the runner returned with this outcome (a cut reply's partial text). */
@@ -108,7 +112,11 @@ function sessionOf(value: unknown): string | null {
 }
 function failureOf(value: unknown): TeamStepFacts["failure"] {
   const kind = field(value, "kind");
-  return typeof kind === "string" && kind ? { kind, providerCode: typedCode(field(value, "providerCode")) } : null;
+  const hint = field(value, "retryAfterHint");
+  return typeof kind === "string" && kind
+    ? { kind, providerCode: typedCode(field(value, "providerCode")),
+      ...(typeof hint === "string" && hint.trim() && hint.length <= 200 ? { retryAfterHint: hint } : {}) }
+    : null;
 }
 /** The RunnerResult a thrown error carries: observed-runner's returned result, else a result-shaped standard `cause`. */
 function returnedResultOf(error: unknown): RunnerResult | null {
@@ -144,9 +152,12 @@ export function readTeamStepFacts(outcome: Outcome, aborted: boolean): TeamStepF
 }
 
 /** The decision input for one outcome. A typed output-limit cut proves the model ran: an accepted, unsettled turn. */
-export function teamStepSettlementInput(facts: TeamStepFacts, used: { continued: boolean; retries: number }): TeamStepSettlementInput {
+export function teamStepSettlementInput(facts: TeamStepFacts, used: { continued: boolean; retries: number }, now = Date.now()): TeamStepSettlementInput {
   const outputLimit = isOutputLimitCode(facts.failure?.providerCode);
+  // The provider's own wait, from its typed hint only: retrying inside its window just earns the same 429 again.
+  const resetAt = facts.failure?.retryAfterHint ? parseRetryHint(facts.failure.retryAfterHint, now) : null;
   return {
+    ...(resetAt !== null ? { retryAfterMs: Math.max(0, resetAt - now) } : {}),
     outcome: facts.aborted ? "cancelled" : facts.unsettled || outputLimit ? "unsettled" : "failed",
     ...(outputLimit ? { delivery: "accepted" as const } : facts.delivery ? { delivery: facts.delivery } : {}),
     ...(facts.failure ? { kind: facts.failure.kind } : {}),
@@ -228,6 +239,27 @@ export interface TeamStepSettlementPort {
   record?(phase: TeamStepSettlementPhase, note: TeamStepFailureNote): void;
 }
 
+/** How often a long retry wait asks the caller's aborted(), for a stop that is not on the request's own signal. */
+const TEAM_STEP_WAIT_POLL_MS = 500;
+
+/**
+ * A retry wait (up to the provider's Retry-After, at most the shared unattended bound) that ends the moment the step is stopped:
+ * at once on the request's own signal, within one poll for any other stop the caller's aborted() reports. A plain timer made the
+ * owner's Stop wait out the whole provider window.
+ */
+function waitUnlessAborted(port: TeamStepSettlementPort, delayMs: number): Promise<void> {
+  return new Promise((resolve) => {
+    const signal = port.request.signal;
+    let tick: ReturnType<typeof setInterval> | undefined;
+    const done = (): void => { clearTimeout(timer); if (tick) clearInterval(tick); signal?.removeEventListener("abort", done); resolve(); };
+    const timer = setTimeout(done, delayMs);
+    timer.unref?.();
+    tick = setInterval(() => { let stopped = false; try { stopped = port.aborted(); } catch { /* a failing probe never decides */ } if (stopped) done(); }, TEAM_STEP_WAIT_POLL_MS);
+    tick.unref?.();
+    if (signal) { if (signal.aborted) done(); else signal.addEventListener("abort", done, { once: true }); }
+  });
+}
+
 /**
  * Run one step under the bounded policy. Returns or throws exactly what the surfaced dispatch returned or threw, marked so
  * teamStepFailureNote reads the first dispatch's facts and what the policy tried.
@@ -254,7 +286,7 @@ export async function runTeamStepWithSettlement(port: TeamStepSettlementPort): P
       retries += 1;
       trail.retried = true;
       record("retried", trail);
-      if (decision.delayMs > 0) await new Promise((resolve) => { setTimeout(resolve, decision.delayMs).unref?.(); });
+      if (decision.delayMs > 0) await waitUnlessAborted(port, decision.delayMs);
       if (port.aborted()) return surface(outcome, trail);
       outcome = await run(port.request);
       facts = readTeamStepFacts(outcome, port.aborted());

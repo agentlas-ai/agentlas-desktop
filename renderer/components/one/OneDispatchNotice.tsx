@@ -17,7 +17,9 @@ import { ChatQuestionSheet } from "../ChatQuestionSheet";
 type Notice = Extract<ChatHostNotice, { purpose: "one-dispatch-link" | "one-dispatch-result" }>;
 
 /** Displays the member's observed work on an existing room receipt, without creating messages. */
-export function OneDispatchNotice({ notice, locale }: { notice: Notice; locale: "ko" | "en" }) {
+export function OneDispatchNotice({ notice, locale, onOpenChat }: { notice: Notice; locale: "ko" | "en";
+  /** Opens the teammate's own session (read-only when the personal agent opened it). Absent: no link is drawn. */
+  onOpenChat?: (chatId: string) => void }) {
   const [current, setCurrent] = useState(notice);
   const [answerBusy, setAnswerBusy] = useState(false);
   const [answerError, setAnswerError] = useState<string | null>(null);
@@ -88,6 +90,10 @@ export function OneDispatchNotice({ notice, locale }: { notice: Notice; locale: 
         status={status === "running" ? "working" : status === "waiting_input" ? "waiting" : status === "failed" ? "failed" : "quiet"} />}
       <strong style={{ color: "var(--ink)", fontWeight: 600 }}>{current.memberName}</strong>
       <span>{status ? labels[status] : current.purpose === "one-dispatch-result" ? (ko ? "결과 도착" : "Result received") : (ko ? "작업 전달됨" : "Work delegated")}</span>
+      {onOpenChat && <button type="button" data-one-dispatch-open={current.chatId} onClick={() => onOpenChat(current.chatId)}
+        style={{ marginLeft: "auto", border: 0, background: "transparent", padding: 0, color: "var(--accent)", font: "inherit", fontSize: 12, cursor: "pointer", flexShrink: 0 }}>
+        {ko ? "세션 열기" : "Open session"}
+      </button>}
     </div>
     {!!dispatch?.activity?.length && <details open={status === "running" || status === "waiting_input"} style={{ fontSize: 12, color: "var(--muted-deep)", marginBottom: 8 }}>
       <summary>{ko ? "진행 기록" : "Work activity"}</summary>

@@ -902,6 +902,9 @@ export interface McpToolCallOptions {
   /** Main-owned Science opt-in; preserve the received result before model projection. */
   retainFullResult?: true;
   signal?: AbortSignal;
+  /** Called once right before tools/call is written: from then on the call may have happened, so a caller that tied
+   * the call to a stop signal until now lets go of it. Not called when the call fails before reaching that point. */
+  onDispatch?: () => void;
   /** Mutable transaction seal. First compatible Workforce call fills it; all
    * later calls must use the exact same real runtime target/version/protocol. */
   runtimePin?: McpRuntimePin;
@@ -1240,6 +1243,7 @@ async function callServerToolContentInternal(
           const remoteCuration = companyWork ? null : captureRemoteCurationConsumer(options?.prepared, completeRemoteMemoryCuration);
           const callOriginal = ()=>{
             assertCurrentConnection();
+            options?.onDispatch?.();
             return activeClient.callTool({ name: toolName, arguments: args },
               modernDefinition ? { toolDefinition: modernDefinition } : undefined);
           };

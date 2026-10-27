@@ -18,7 +18,7 @@ function deny():never{throw Error('business_native_original_checkpoint_required'
 /** Delivery journal lives in the ORIGINAL native DB. It is not a task queue and
  * cannot authorize an organization action. Attempt CAS precedes any dispatch. */
 export function createNativeEmployeeReportJournal(runtime:OneVaultRuntime,source:ReturnType<typeof createNativeEmployeeResultSource>,connection:ReturnType<typeof createNativeEmployeeConnection>){
- const db=runtime.sources.db,results=new WeakMap<object,{acceptanceId:string;association:string;receipt:string}>();
+ const db=runtime.sources.db,results=new WeakMap<object,{acceptanceId:string;association:string;receipt:string}>(),sending=new Set<string>();
  function initialize(){db.exec(`CREATE TABLE IF NOT EXISTS one_business_native_report_delivery(
  acceptance_id TEXT PRIMARY KEY,packet_json TEXT NOT NULL,request_json TEXT NOT NULL,state TEXT NOT NULL,receipt_json TEXT);`)}
  function currentRecord(record:Readonly<NativeEmployeeAcceptedResult>){const a=connection.current();if(!a||a.associationId!==record.associationId||a.associationRevision!==record.associationRevision||record.sourceRevision!==`source:${a.sourceRevision}`||record.consentRevision!==`consent:${a.consentRevision}`)deny();return a;}
@@ -49,19 +49,48 @@ export function createNativeEmployeeReportJournal(runtime:OneVaultRuntime,source
   const request:BusinessEmployeeAgentReportRequest={kind:'report',agentResourceId:agent.resourceId,ownerReportId:record.acceptanceId,expectedRevision:selectors.expectedRevision,idempotencyKey:record.acceptanceId};
   db.prepare("INSERT INTO one_business_native_report_delivery VALUES(?,?,?,'ready',NULL)").run(record.acceptanceId,JSON.stringify(packet),JSON.stringify(request));currentRecord(record);
  }
+ /** The same packet, under the same idempotency key, for a delivery whose first submission is unknown or never reached Root. */
+ async function resend(cap:object,packet:NativeEmployeeCustodyPacket):Promise<BusinessNativeCustodyReceipt>{
+  const moved=await source.withCurrent(cap,r=>Number(db.prepare("UPDATE one_business_native_report_delivery SET state='attempted' WHERE acceptance_id=? AND state IN ('unknown','attempted')").run(r.acceptanceId).changes)===1);
+  if(!moved)deny();sending.add(packet.idempotencyKey);
+  try{return await owners.submit(cap,packet)}catch(error){await owners.holdUnknown(cap);throw error}
+ }
  const publication=createNativeEmployeePublication(runtime,source,connection,cap=>source.withCurrent(cap,row));
- const owners:NativeEmployeeCustodyOwners={protocol:'agentlas.business.native-custody-producer.v2',publish:publication.publish,subscribeAccepted:source.subscribeAccepted,
+ const owners:NativeEmployeeCustodyOwners={protocol:'agentlas.business.native-custody-producer.v2',publish:publication.publish,subscribeAccepted:source.subscribeAccepted,pending,
   async current(cap){try{return await source.withCurrent(cap,r=>{currentRecord(r);return true})}catch{return false}},
   inspect:cap=>source.withCurrent(cap,row),
-  beginAttempt:(cap,packetDigest)=>source.withCurrent(cap,r=>{const prior=row(r);if(!prior||prior.state!=='ready'||digest(prior.packet)!==packetDigest)return false;return Number(db.prepare("UPDATE one_business_native_report_delivery SET state='attempted' WHERE acceptance_id=? AND state='ready' AND packet_json=?").run(r.acceptanceId,JSON.stringify(prior.packet)).changes)===1}),
-  async holdUnknown(cap){const record=source.read(cap);if(record)db.prepare("UPDATE one_business_native_report_delivery SET state='unknown' WHERE acceptance_id=? AND state='attempted'").run(record.acceptanceId)},
-  async submit(cap,packet){const delivery=await source.withCurrent(cap,r=>row(r));if(!delivery||delivery.state!=='attempted'||digest(delivery.packet)!==digest(packet))deny();await connection.refresh();const result=await connection.request('packet',packet) as BusinessNativeCustodyReceipt;
+  // The association check is the last work before the packet leaves, so it runs before the attempt is recorded: a failure there sent nothing and leaves the row 'ready'.
+  beginAttempt:async(cap,packetDigest)=>{await connection.refresh();return source.withCurrent(cap,r=>{const prior=row(r);if(!prior||prior.state!=='ready'||digest(prior.packet)!==packetDigest)return false;const moved=Number(db.prepare("UPDATE one_business_native_report_delivery SET state='attempted' WHERE acceptance_id=? AND state='ready' AND packet_json=?").run(r.acceptanceId,JSON.stringify(prior.packet)).changes)===1;if(moved)sending.add(r.acceptanceId);return moved})},
+  async holdUnknown(cap){const record=source.read(cap);if(record){sending.delete(record.acceptanceId);db.prepare("UPDATE one_business_native_report_delivery SET state='unknown' WHERE acceptance_id=? AND state='attempted'").run(record.acceptanceId)}},
+  async submit(cap,packet){const delivery=await source.withCurrent(cap,r=>row(r));if(!delivery||delivery.state!=='attempted'||digest(delivery.packet)!==digest(packet))deny();sending.add(packet.idempotencyKey);let result:BusinessNativeCustodyReceipt;try{result=await connection.request('packet',packet) as BusinessNativeCustodyReceipt}finally{sending.delete(packet.idempotencyKey)}
    await source.withCurrent(cap,r=>{const a=currentRecord(r);results.set(result,{acceptanceId:r.acceptanceId,association:JSON.stringify(a),receipt:JSON.stringify(result)})});return result;},
-  async lookup(cap,packet){const delivery=await source.withCurrent(cap,r=>row(r));if(!delivery||delivery.state==='ready'||digest(delivery.packet)!==digest(packet))deny();await connection.refresh();const result=await connection.request('receipt',null,{idempotencyKey:packet.idempotencyKey}) as BusinessNativeCustodyReceipt;
+  async lookup(cap,packet){const delivery=await source.withCurrent(cap,r=>row(r));if(!delivery||delivery.state==='ready'||digest(delivery.packet)!==digest(packet))deny();await connection.refresh();let result:BusinessNativeCustodyReceipt;
+   try{result=await connection.request('receipt',null,{idempotencyKey:packet.idempotencyKey}) as BusinessNativeCustodyReceipt}
+   catch(error){
+    // No receipt could be read under this key. The key is fixed and Root deduplicates by it, so sending the same packet again is how an unsent or lost submission ends;
+    // a settled row or a send still under way in this process is left alone.
+    if(delivery.state==='settled'||sending.has(packet.idempotencyKey))throw error;
+    result=await resend(cap,packet);
+   }
    await source.withCurrent(cap,r=>{const a=currentRecord(r);results.set(result,{acceptanceId:r.acceptanceId,association:JSON.stringify(a),receipt:JSON.stringify(result)})});return result;},
   async currentResult(cap,result){try{await connection.refresh();const latest=await connection.request('receipt',null,{idempotencyKey:result.idempotencyKey}) as BusinessNativeCustodyReceipt;if(digest({...latest,replayed:false})!==digest({...result,replayed:false}))return false;return await source.withCurrent(cap,r=>{const proof=results.get(result);return !!proof&&proof.acceptanceId===r.acceptanceId&&proof.association===JSON.stringify(currentRecord(r))&&proof.receipt===JSON.stringify(result)})}catch{return false}},
   async settle(cap,result){if(!await owners.currentResult(cap,result))return false;return source.withCurrent(cap,r=>{const prior=row(r);if(!prior||result.idempotencyKey!==prior.packet.idempotencyKey||result.nativePacketDigest!==digest(prior.packet.approved))return false;if(prior.receipt&&digest({...prior.receipt,replayed:false})!==digest({...result,replayed:false}))return false;return Number(db.prepare("UPDATE one_business_native_report_delivery SET state='settled',receipt_json=? WHERE acceptance_id=? AND state IN ('attempted','unknown','settled')").run(JSON.stringify(result),r.acceptanceId).changes)===1})},
  };
- return Object.freeze({initialize,checkpoint,reconcilePublication:publication.reconcile,recoverPublication:publication.recover,
+ /** Focused owner action only: sends an accepted share whose first attempt stopped before the packet left (the row is still 'ready'). Null when it is not. */
+ async function dispatch(cap:object):Promise<BusinessNativeCustodyReceipt|null>{
+  const delivery=await source.withCurrent(cap,row);if(!delivery||delivery.state!=='ready')return null;
+  if(!await owners.beginAttempt(cap,digest(delivery.packet)))return null;
+  try{return await owners.submit(cap,delivery.packet)}catch(error){await owners.holdUnknown(cap);throw error}
+ }
+ /** Accepted shares whose delivery has not settled, as fresh capabilities, so an attach after a restart can finish what the owner already approved. */
+ async function pending():Promise<object[]>{
+  const caps:object[]=[];
+  try{
+   const ids=db.prepare("SELECT acceptance_id FROM one_business_native_report_delivery WHERE state IN ('ready','attempted','unknown') ORDER BY rowid LIMIT 16").all() as Array<{acceptance_id:string}>;
+   for(const {acceptance_id} of ids)try{caps.push(await source.restore(acceptance_id))}catch{/* revoked or changed original: nothing left to deliver */}
+  }catch{/* the journal table does not exist yet: nothing was ever accepted */}
+  return caps;
+ }
+ return Object.freeze({initialize,checkpoint,dispatch,reconcilePublication:publication.reconcile,recoverPublication:publication.recover,
   continuePublication:publication.continue,owners:Object.freeze(owners)});
 }

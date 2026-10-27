@@ -988,6 +988,9 @@ export interface MobileBridgeRpcErrorBody {
     // A write refused before anything ran because the chat was not ready yet (server.ts mobileBridgeNotReadyRefusal):
     // retryable, never stored as the command's final answer. Old phones read it as an ordinary retryable failure.
     | "desktop_not_ready"
+    // An owner message into a room the personal agent runs (capability personalAgentRoomsV1). Not retryable: the phone points
+    // the owner at the personal agent. An older phone reads it as an ordinary refusal.
+    | "supervised_room_read_only"
     | OneVaultErrorCode
     | OneProviderRemoteErrorCode;
   message: string;
@@ -1404,6 +1407,12 @@ export interface MobileBridgeChatDto {
   oneOrigin: boolean;
   /** The personal One's own conversation (one_supervisor_conversations binding); absent otherwise. */
   personalOneConversation?: true;
+  /**
+   * A room the personal agent opened and runs (owner 2026-10-27; bridge.ready capability personalAgentRoomsV1). The owner
+   * reads it and talks to the personal agent instead: an owner message into it is refused with error code
+   * supervised_room_read_only. Approval and question answers still reach it. Absent otherwise and on older hosts.
+   */
+  supervisedByPersonalAgent?: true;
   /** Null only for a general One conversation that has not become a Task. */
   taskId: string | null;
   taskVersion: number | null;
@@ -3864,21 +3873,25 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
           )
         : "one.decision.clarifyAnswer accepts only exact Decision binding and clarification";
     case "browser.resolveApproval":
-      return hasOnlyKeys(params, ["requestId", "decision"])
+      // `note`: the owner's "No, and do this instead" line (bridge.ready capability approvalOwnerNoteV1). Optional, so an
+      // older phone's request is unchanged; an older Desktop refuses the key, so a phone sends it only when advertised.
+      return hasOnlyKeys(params, ["requestId", "decision", "note"])
         ? firstError(
             requiredString(params, "requestId", 160),
             validateEnum(params, "decision", ["once", "always", "deny"], false),
+            params.note === undefined ? null : requiredText(params, "note", 2_000),
           )
-        : "browser.resolveApproval accepts only requestId and decision";
+        : "browser.resolveApproval accepts only requestId, decision and note";
     case "runtime.resolveToolApproval":
       // 결정 4종은 데스크탑 ToolApprovalDecision 과 **같은 값**이다(shared/types.ts).
       // allow_always 는 능력 규칙을 영구 기록하므로 폰에서도 같은 무게를 갖는다.
-      return hasOnlyKeys(params, ["id", "decision"])
+      return hasOnlyKeys(params, ["id", "decision", "note"])
         ? firstError(
             requiredString(params, "id", 160),
             validateEnum(params, "decision", ["allow_once", "allow_session", "allow_always", "deny"], false),
+            params.note === undefined ? null : requiredText(params, "note", 2_000),
           )
-        : "runtime.resolveToolApproval accepts only id and decision";
+        : "runtime.resolveToolApproval accepts only id, decision and note";
     case "one.dispatch.answerQuestion":
       return hasOnlyKeys(params, ["parentChatId","dispatchId","chatId","runId","sourceMessageId","reply","locale","retryCommitted"])
         ? firstError(requiredString(params,"parentChatId",128), requiredString(params,"dispatchId",128),

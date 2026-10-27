@@ -25,6 +25,9 @@ export interface ToolchainCallOptions {
   depth?: number;
   callChain?: string[];
   dryRun?: boolean;
+  /** Host-only: the graph run that calls this occurrence again has already admitted it (the owner chose [Rerun from this node], or the
+   * engine judged the step safe to replay). A failed, uncertain or interrupted receipt of the same key is then replaced by a new attempt. */
+  reattempt?: boolean;
   /** Host-only: this conversation holds a live trial grant for this exact draft version (toolchains/trial.ts). */
   trial?: boolean;
   sink?: RunGraphOptions["sink"];
@@ -47,6 +50,30 @@ export function getToolchainCall(id: string): ToolchainCallReceipt | null {
   return rows.map(row => JSON.parse(row.value) as ToolchainCallReceipt).find(row => row.id === id) ?? null;
 }
 const inFlight = new Map<string, Promise<ToolchainCallReceipt>>();
+/** Health reads machine codes, never prose (shared/toolchain-health.ts). runGraph reports an owner Stop as the bare word "aborted", an aborted
+ * signal throws prose, and an undici network error carries its code only in `cause`; the call states what happened in a code the host knows. */
+const NETWORK_CAUSE_CODES = new Set(["ECONNRESET", "ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN", "ETIMEDOUT", "ENETUNREACH", "EHOSTUNREACH", "EPIPE",
+  "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_HEADERS_TIMEOUT", "UND_ERR_BODY_TIMEOUT", "UND_ERR_SOCKET"]);
+function failureText(error: unknown, signal: AbortSignal | undefined): string {
+  if (signal?.aborted) return "toolchain_call_aborted";
+  if (!(error instanceof Error)) return "toolchain_execution_failed";
+  const cause = (error as { cause?: unknown }).cause;
+  const code = [(cause as { code?: unknown } | null | undefined)?.code, (error as { code?: unknown }).code]
+    .find((value): value is string => typeof value === "string" && NETWORK_CAUSE_CODES.has(value));
+  return code ? `network_unavailable:${code}: ${error.message}` : error.message;
+}
+/**
+ * A receipt of the same key may be replaced by a new attempt when it cannot have changed anything outside, or when the graph run that calls
+ * it again has admitted it. A succeeded receipt is always replayed (exactly-once result); a live attempt of this process is always awaited.
+ * An uncertain receipt, or a write Toolchain left running by a dead process, stays unresolved for callers that cannot say the owner checked.
+ */
+function supersedable(prior: ToolchainCallReceipt, key: string, options: ToolchainCallOptions): boolean {
+  if (inFlight.has(key) || prior.status === "succeeded") return false;
+  if (prior.status === "failed" || options.reattempt) return true;
+  if (prior.status !== "running") return false;
+  const graph = getToolchainAsset(prior.toolchainId)?.versions.find(item => item.version === prior.version)?.implementation.snapshot.graph;
+  return Boolean(graph) && requiredExecutionPermission(graph!) !== "write";
+}
 export function callToolchain(input: ToolchainCallInput, options: ToolchainCallOptions): Promise<ToolchainCallReceipt> {
   return invoke(input, options, false);
 }
@@ -65,7 +92,8 @@ async function invoke(input: ToolchainCallInput, options: ToolchainCallOptions, 
   const inputHash = sha256Value({ toolchainId: input.toolchainId, version: input.version, args: input.args, permission: options.permission,
     dryRun: Boolean(options.dryRun), validation });
   // Claim the occurrence before any asynchronous work. A persisted running row after a
-  // restart is returned as unresolved; it is never permission to replay external effects.
+  // restart is returned as unresolved unless it is a read-only Toolchain or the graph run admitted
+  // the node again (supersedable); it is never permission to replay an unconfirmed external effect.
   const claim = getDb().transaction(() => {
     options.assertCurrent?.();
     publication?.check();
@@ -73,7 +101,9 @@ async function invoke(input: ToolchainCallInput, options: ToolchainCallOptions, 
     if (prior) {
       const receipt = JSON.parse(prior.value) as ToolchainCallReceipt;
       if (receipt.inputHash !== inputHash) throw new Error("toolchain_request_identity_conflict");
-      return { prior: receipt };
+      if (!supersedable(receipt, key, options)) return { prior: receipt };
+      // The earlier attempt stays readable by its own id (native registration and reports bind receipts by id).
+      write(`${key}#${receipt.id}`, receipt);
     }
     const asset = getToolchainAsset(input.toolchainId);
     const release = asset?.versions.find(item => item.version === input.version);
@@ -142,6 +172,8 @@ async function invoke(input: ToolchainCallInput, options: ToolchainCallOptions, 
         ...(options.callerChatId ? { actingChatId: options.callerChatId } : {}),
       }));
       unconfirmedEffect = Object.values(result.nodeFailures ?? {}).some(failure => failure.code === "MUTATION_UNVERIFIED");
+      // runGraph's own sentinel for a run that was stopped (the caller's signal, or the goal's finite stop that only the inner run sees).
+      if (!result.ok && result.error === "aborted") throw new Error("toolchain_call_aborted");
       publication?.check();
       if (!result.ok || result.needsInput || result.pendingNodeIds?.length) throw new Error(result.error ?? "toolchain_execution_unsettled");
       const binding = release.implementation.outputBinding;
@@ -157,7 +189,7 @@ async function invoke(input: ToolchainCallInput, options: ToolchainCallOptions, 
       completed = { ...receipt, status: "succeeded", ok: true, result: output, completedAt: new Date().toISOString() };
     } catch (error) {
       completed = { ...receipt, status: (effectful || unconfirmedEffect) && !options.dryRun ? "uncertain" : "failed", ok: false,
-        error: error instanceof Error ? error.message : "toolchain_execution_failed", completedAt: new Date().toISOString() };
+        error: failureText(error, options.signal), completedAt: new Date().toISOString() };
     }
     write(key, completed);
     if (options.trial) recordToolchainTrialOutcome(completed);

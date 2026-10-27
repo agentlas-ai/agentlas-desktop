@@ -371,6 +371,8 @@ export class FinanceService {
       if(row){
         try{await requireFinanceMonitoringAccess(scope);}
         catch(error){
+          // Billing that cannot be reached right now is "cannot tell", not "not allowed": this run ends, the schedule stays.
+          if(error instanceof Error&&error.message==="finance_monitoring_access_unavailable")throw error;
           try{await this.pause(scope,{monitorId:monitor.id});}
           catch{scope.assertCurrent();console.warn("finance_monitor_pause_pending");}
           throw error;

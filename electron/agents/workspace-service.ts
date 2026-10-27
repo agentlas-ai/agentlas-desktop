@@ -1,7 +1,11 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { getMemoryDb as getDb } from "../memory/database";
+import { userDataPath } from "../runtime-paths";
+import { hostRunChildrenEnded, spawnRegistryDirectory } from "../runtime/spawn-registry";
+import { ownProcessStartToken, processState, proveTerminalOwnerGone } from "../store/terminal-owner-liveness";
 import { getRoute } from "./routes";
 import { AGENT_SKILL_ROOTS, materializeAgentFiles, resolveAgentPackageDir } from "./files";
 import { agentRevisionOutcomes } from "./revision-outcomes";
@@ -555,9 +559,108 @@ export function initializeDedicatedHistoryWorkWorkspace(agentId:string,expectedT
   const revision=createRevision(agentId,tree,"baseline","Explicit personal History file materialization"),{tree:_tree,agentId:_agent,...metadata}=revision;return metadata;
  });
 }
+/** Why a run lease file stays or goes: the holder process and what protects its agent processes, as machine codes (no prose). */
+type RunLeaseProof = { gone: true; via: "terminal_record" | "custody_released" | "spawn_ledger" | "released_in_process" | "host_rebooted" } | { gone: false; code: string; pid?: number };
+interface RunLeaseRecord { agentId?: unknown; runId?: unknown; pid?: unknown; host?: unknown; startToken?: unknown; ownerId?: unknown; spawnLedger?: unknown; createdAt?: unknown }
+/** The leases THIS process took and has not released. A lease file naming this very pid that is not in here was left by a release
+ * that threw (changed root, Windows EPERM): nothing in the process holds it any more, and no restart should be needed to see so. */
+const heldRunLeases = new Set<string>();
+const heldRunLeaseKey = (agentId: unknown, runId: unknown): string => `${String(agentId)}\0${String(runId)}`;
+function runCustody(runId: string): { ownerKind: string; ownerId: string; state: string } | null {
+  try {
+    const db = getDb();
+    if (!db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='invocation_run_owners'").get()) return null;
+    // A lease id is the run id, or `<run id>:<agent id>:<uuid>` when a run pins several agents (mcp/client.ts pinWorkspace).
+    const row = db.prepare(`SELECT owner_kind, owner_id, state FROM invocation_run_owners
+      WHERE run_id = ? OR substr(?, 1, length(run_id) + 1) = run_id || ':' ORDER BY (run_id = ?) DESC, updated_at DESC LIMIT 1`)
+      .get(runId, runId, runId) as { owner_kind: string; owner_id: string; state: string } | undefined;
+    return row ? { ownerKind: row.owner_kind, ownerId: row.owner_id, state: row.state } : null;
+  } catch { return null; }
+}
+/**
+ * Has the run that took this lease provably ended? The lease protects the pinned files from a CLI that reads them lazily, so the
+ * holder process being gone is not enough (a detached agent process can outlive it): its agent processes must be accounted for too.
+ *  - a terminal lease names its owner id: the terminal's liveness record lists its agent processes (store/terminal-owner-liveness.ts);
+ *  - otherwise the run's custody row (invocation_run_owners) decides: released = the owner finished or was proven gone; a terminal
+ *    owner still marked active is proven the same way.
+ * Never a timer: a lease nothing can account for stays, with the reason.
+ */
+function proveRunLeaseGone(lease: RunLeaseRecord): RunLeaseProof {
+  const runId = typeof lease.runId === "string" ? lease.runId : "";
+  const pid = lease.pid;
+  if (!runId || typeof pid !== "number" || !Number.isSafeInteger(pid) || pid <= 0) return { gone: false, code: "run_lease_unreadable" };
+  if (pid === process.pid) return heldRunLeases.has(heldRunLeaseKey(lease.agentId, runId)) ? { gone: false, code: "run_lease_own_process", pid } : { gone: true, via: "released_in_process" };
+  if (typeof lease.host === "string" && lease.host !== os.hostname()) return { gone: false, code: "run_lease_other_host", pid };
+  const holder = processState(pid, typeof lease.startToken === "string" ? lease.startToken : null);
+  if (holder === "alive") return { gone: false, code: "run_lease_owner_alive", pid };
+  if (holder === "unknown") {
+    // A lease from before start tokens cannot tell its holder from a process that took the pid later. One written before this machine
+    // booted was held by a process that did not survive the reboot, whatever the pid is now.
+    const takenAt = Date.parse(typeof lease.createdAt === "string" ? lease.createdAt : "");
+    if (typeof lease.startToken !== "string" && Number.isFinite(takenAt) && takenAt < Date.now() - os.uptime() * 1000 - 60_000) return { gone: true, via: "host_rebooted" };
+    return { gone: false, code: "run_lease_owner_unverifiable", pid };
+  }
+  const fromTerminal = (ownerId: string): RunLeaseProof => {
+    const proof = proveTerminalOwnerGone(userDataPath(), ownerId);
+    return proof.gone ? { gone: true, via: "terminal_record" } : { gone: false, code: proof.code, ...(proof.pid !== undefined ? { pid: proof.pid } : {}) };
+  };
+  if (typeof lease.ownerId === "string" && lease.ownerId) return fromTerminal(lease.ownerId);
+  // Every CLI the dead holder started is in the spawn ledger of the userData it ran under (runtime/spawn-registry.ts): none alive
+  // means nothing of this run can still be reading the pinned files, whatever the custody row says or lacks.
+  const fromSpawnLedger = (code: string): RunLeaseProof =>
+    hostRunChildrenEnded(pid, typeof lease.spawnLedger === "string" && path.isAbsolute(lease.spawnLedger) ? lease.spawnLedger : undefined)
+      ? { gone: true, via: "spawn_ledger" } : { gone: false, code, pid };
+  const custody = runCustody(runId);
+  if (!custody) return fromSpawnLedger("run_lease_descendants_unproven");
+  if (custody.state === "released") return { gone: true, via: "custody_released" };
+  if (custody.ownerKind === "terminal") return fromTerminal(custody.ownerId);
+  return fromSpawnLedger("run_lease_custody_active");
+}
+const reportedRunLeases = new Map<string, string>();
+// A live run is the steady state of a lease, and the UI asks for the workspace often: a holder found alive is not looked at again
+// for this long (checking it reads the process table — `ps`, or PowerShell on Windows — on the main thread).
+const RUN_LEASE_ALIVE_RECHECK_MS = 5_000;
+const runLeaseAliveAt = new Map<string, number>();
+/**
+ * A terminal or app that died mid-run (quit, closed window, crash, power loss) left its lease file behind, and nothing released it:
+ * the agent answered run_active to every file change and recovery check for good, with no way for the owner to clear it. Remove
+ * the leases whose run is provably over; keep the rest and name why (once per change). Never throws: a lease that cannot be read
+ * or proven stays, which is the safe answer.
+ */
+function reconcileRunLeases(agentId: string, directory: string): void {
+  let names: string[];
+  try { names = fs.readdirSync(directory).filter(file => file.endsWith(".json")); } catch { return; }
+  for (const name of names) {
+    const file = path.join(directory, name);
+    try {
+      const stat = fs.lstatSync(file);
+      if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) continue; // the release path refuses these too
+      const lease = readJson<RunLeaseRecord>(file);
+      if (lease.agentId !== undefined && lease.agentId !== agentId) continue;
+      const aliveKey = `${file}\0${stat.mtimeMs}`, aliveAt = runLeaseAliveAt.get(aliveKey);
+      if (aliveAt !== undefined && Date.now() - aliveAt < RUN_LEASE_ALIVE_RECHECK_MS) continue;
+      const proof = proveRunLeaseGone(lease);
+      if (!proof.gone && proof.code === "run_lease_owner_alive") runLeaseAliveAt.set(aliveKey, Date.now());
+      else runLeaseAliveAt.delete(aliveKey);
+      if (proof.gone) {
+        fs.unlinkSync(file);
+        reportedRunLeases.delete(file);
+        console.warn("[agent-workspace] released the run lease of a run that ended without releasing it", { agentId, runId: lease.runId, via: proof.via });
+      } else if (proof.code !== "run_lease_own_process" && reportedRunLeases.get(file) !== proof.code) {
+        reportedRunLeases.set(file, proof.code);
+        console.info("[agent-workspace] run lease kept", { agentId, runId: lease.runId, code: proof.code, pid: proof.pid });
+      }
+    } catch { /* an unreadable or unremovable lease stays */ }
+  }
+}
 function hasRunLease(agentId: string, root: string): boolean {
-  // A dead parent can leave a CLI descendant running. PID death alone cannot release its file lease.
-  if (fs.existsSync(leaseDir(agentId, root)) && fs.readdirSync(leaseDir(agentId, root)).some(file => file.endsWith(".json"))) return true;
+  // A dead parent can leave a CLI descendant running. PID death alone cannot release its file lease: only a lease whose run is
+  // provably over (holder and its agent processes accounted for) is removed here.
+  const leases = leaseDir(agentId, root);
+  if (fs.existsSync(leases)) {
+    reconcileRunLeases(agentId, leases);
+    if (fs.readdirSync(leases).some(file => file.endsWith(".json"))) return true;
+  }
   const db = getDb();
   const columns = db.prepare("PRAGMA table_info(runs)").all() as Array<{ name: string }>;
   if (columns.some(column => column.name === "agent_id") && columns.some(column => column.name === "status")) {
@@ -565,7 +668,12 @@ function hasRunLease(agentId: string, root: string): boolean {
   }
   return false;
 }
-export function acquireAgentWorkspaceRunLease(agentId: string, runId: string): { revisionId: string; treeDigest: string } {
+/**
+ * `holder.ownerId` is a terminal's process owner id (the same id as its run-owner lease and its liveness record). The lease
+ * records who took it — host, pid and process start time, and that owner id — so a later process can prove the run over
+ * (proveRunLeaseGone) instead of reading `run_active` forever when the holder died.
+ */
+export function acquireAgentWorkspaceRunLease(agentId: string, runId: string, holder: { ownerId?: string } = {}): { revisionId: string; treeDigest: string } {
   return withLock(agentId, () => {
     assertAgentWorkspaceActivationReady(agentId);
     const { root } = rootFor(agentId);
@@ -577,8 +685,17 @@ export function acquireAgentWorkspaceRunLease(agentId: string, runId: string): {
     const history=historyRegistration(agentId);if(history&&history.state!=="accepted")throw new AgentWorkspaceError("work_registration_changed","The personal file registration is not active.");
     assertNoUnreviewedNativeCandidates(root);
     const tree = snapshotAgentWorkspace(root); const revision = currentRevision(agentId, tree);
+    const startToken = ownProcessStartToken();
+    // Where THIS host records the CLI children it starts: a later process (another host, or this one after a restart) reads it back to
+    // see that none of them is left (proveRunLeaseGone).
+    let spawnLedger: string | undefined;
+    try { spawnLedger = spawnRegistryDirectory(); } catch { /* no userData injected (a bare unit run): the default ledger is read instead */ }
     atomicJson(path.join(leaseDir(agentId, root, true), workspaceHash(runId) + ".json"), { schemaVersion: "agentlas.revision-run-lease.v1", agentId, runId,
-      pid: process.pid, revisionId: revision.id, treeDigest: tree.treeDigest, createdAt: iso() });
+      pid: process.pid, host: os.hostname(), ...(startToken ? { startToken } : {}),
+      ...(typeof holder?.ownerId === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(holder.ownerId) ? { ownerId: holder.ownerId } : {}),
+      ...(typeof spawnLedger === "string" ? { spawnLedger } : {}),
+      revisionId: revision.id, treeDigest: tree.treeDigest, createdAt: iso() });
+    heldRunLeases.add(heldRunLeaseKey(agentId, runId));
     return { revisionId: revision.id, treeDigest: tree.treeDigest };
   });
 }
@@ -594,12 +711,46 @@ function assertNoUnreviewedNativeCandidates(root: string): void {
   }
 }
 export function releaseAgentWorkspaceRunLease(agentId: string, runId: string): void {
+  // The run is over for this process whether or not the file can be removed below: a lease this release could not delete is then
+  // reconciled like any other whose holder is gone (proveRunLeaseGone), instead of reading as a live run until the app restarts.
+  heldRunLeases.delete(heldRunLeaseKey(agentId, runId));
   const { root } = rootFor(agentId); const file = path.join(leaseDir(agentId, root), workspaceHash(runId) + ".json");
   if (fs.existsSync(file)) {
     const stat = fs.lstatSync(file);
     if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) throw new AgentWorkspaceError("unsafe_run_state", "Review the saved run lease before releasing it.");
     const lease = readJson<{ runId: string; pid: number }>(file); if (lease.runId === runId && lease.pid === process.pid) fs.unlinkSync(file);
   }
+}
+/**
+ * The owner's own release of the leases whose holder process is gone — for what no automatic proof settles (a lease written by an
+ * older terminal, or a run whose agent processes nothing recorded). Releasing is the owner's statement that no agent process of
+ * that run remains; a lease whose holder is alive, on another machine, or cannot be checked is refused with its code.
+ */
+export function acknowledgeAgentWorkspaceRunLeases(agentId: string): { released: string[]; kept: Array<{ runId: string; code: string }> } {
+  return withLock(agentId, () => {
+    const result = { released: [] as string[], kept: [] as Array<{ runId: string; code: string }> };
+    const directory = leaseDir(agentId, rootFor(agentId).root);
+    if (!fs.existsSync(directory)) return result;
+    for (const name of fs.readdirSync(directory).filter(file => file.endsWith(".json"))) {
+      const file = path.join(directory, name);
+      let runId = name;
+      try {
+        const stat = fs.lstatSync(file);
+        if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) { result.kept.push({ runId, code: "unsafe_run_state" }); continue; }
+        const lease = readJson<RunLeaseRecord>(file);
+        if (typeof lease.runId === "string" && lease.runId) runId = lease.runId;
+        const pid = lease.pid;
+        if (typeof pid !== "number" || !Number.isSafeInteger(pid) || pid <= 0) { result.kept.push({ runId, code: "run_lease_unreadable" }); continue; }
+        if (pid === process.pid) { result.kept.push({ runId, code: "run_lease_own_process" }); continue; }
+        if (typeof lease.host === "string" && lease.host !== os.hostname()) { result.kept.push({ runId, code: "run_lease_other_host" }); continue; }
+        const holder = processState(pid, typeof lease.startToken === "string" ? lease.startToken : null);
+        if (holder !== "gone") { result.kept.push({ runId, code: holder === "alive" ? "run_lease_owner_alive" : "run_lease_owner_unverifiable" }); continue; }
+        fs.unlinkSync(file);
+        result.released.push(runId);
+      } catch { result.kept.push({ runId, code: "run_lease_unreadable" }); }
+    }
+    return result;
+  });
 }
 export function getAgentWorkspace(agentId: string): AgentWorkspaceSnapshot {
   recoverAgentWorkspaceOperation(agentId);

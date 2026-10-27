@@ -172,15 +172,33 @@ function writeState(): void {
   const file = statePath();
   const dir = path.dirname(file);
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-  const sorted = [...records.values()].sort((a, b) => a.startedAt.localeCompare(b.startedAt));
-  const all = sorted.slice(-MAX_RECORDS);
-  const bytes = Buffer.from(`${JSON.stringify({ schemaVersion: DOWNLOAD_SCHEMA_VERSION, records: all } satisfies DownloadStateFile)}\n`, "utf8");
+  const rows = [...records.values()].sort((a, b) => a.startedAt.localeCompare(b.startedAt))
+    .map((record) => ({ record, json: JSON.stringify(record) }));
+  // Newest records win under both caps (count and bytes, like history-registry); a running download is always kept
+  // because its handlers need the record. Without the byte trim the file stopped accepting writes once it neared 1 MiB,
+  // which refused every later download until the owner cleared old task histories by hand.
+  const budget = MAX_STATE_BYTES - 256;
+  const sizeOf = (json: string) => Buffer.byteLength(json, "utf8") + 1;
+  let used = 0, count = 0;
+  for (const row of rows) if (activeItems.has(row.record.id)) { used += sizeOf(row.json); count += 1; }
+  const kept = new Set<DownloadRecord>();
+  let full = false;
+  for (let index = rows.length - 1; index >= 0; index -= 1) {
+    const { record, json } = rows[index]!;
+    if (activeItems.has(record.id)) { kept.add(record); continue; }
+    if (full) continue;
+    const size = sizeOf(json);
+    if (count >= MAX_RECORDS || used + size > budget) { full = true; continue; }
+    used += size; count += 1; kept.add(record);
+  }
+  const all = rows.filter((row) => kept.has(row.record));
+  const bytes = Buffer.from(`{"schemaVersion":${JSON.stringify(DOWNLOAD_SCHEMA_VERSION)},"records":[${all.map((row) => row.json).join(",")}]}\n`, "utf8");
   if (bytes.byteLength > MAX_STATE_BYTES) throw new Error("browser_download_state_too_large");
   const temp = `${file}.${process.pid}.${randomUUID()}.tmp`;
   fs.writeFileSync(temp, bytes, { mode: 0o600, flag: "wx" });
   fs.renameSync(temp, file);
-  // Records past the 1,000 kept are gone from the file; their downloaded files go with them.
-  const dropped = sorted.slice(0, Math.max(0, sorted.length - MAX_RECORDS)).map((record) => record.id).filter((id) => !activeItems.has(id));
+  // Records trimmed from the file are gone from memory too; their downloaded files go with them.
+  const dropped = rows.filter((row) => !kept.has(row.record)).map((row) => row.record.id);
   for (const id of dropped) records.delete(id);
   removeDownloadFiles(dropped);
 }

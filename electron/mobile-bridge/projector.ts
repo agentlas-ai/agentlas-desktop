@@ -900,6 +900,8 @@ export function projectMobileBridgeChat(
     // The phone keeps this row (its personal One reads approvals through it) but leaves it out of the One
     // session list, as Desktop's listRecentOneChats does (c210538f). Additive: older apps ignore it.
     ...(isPersonalSupervisorConversation(chat.id) ? { personalOneConversation: true as const } : {}),
+    // A room the personal agent runs (owner 2026-10-27; capability personalAgentRoomsV1). Additive: older apps ignore it.
+    ...(chat.supervisedByPersonalAgent === true ? { supervisedByPersonalAgent: true as const } : {}),
     taskId: task?.id ?? chat.taskId ?? null,
     taskVersion: task?.version ?? null,
     taskStatus: task?.status ?? null,

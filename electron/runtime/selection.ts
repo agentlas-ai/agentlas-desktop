@@ -1,4 +1,4 @@
-import { isRuntimeCredentialUnavailable } from "./credential-access";
+import { isRuntimeCredentialUnavailable, RUNTIME_CREDENTIAL_UNAVAILABLE_CODE } from "./credential-access";
 import { invocationBreaker, invocationBreakerKey } from "./invocation-breaker";
 import { runtimeCooldown } from "./runtime-cooldown";
 import type {
@@ -33,11 +33,12 @@ import { runMLX } from "./mlx";
 import { ollamaHost, runOllama } from "./ollama";
 import { runManagedLocalModel } from "../local-model-hub/runtime-adapter";
 import { acquireRunSlot } from "./run-slots";
+import { withHostNativeWriter } from "./native-writer-host";
 import { agentActivityKey, registerAgentResidency, touchAgentResidency } from "./agent-residency";
-import { acpOrLegacyRunner, acpSessionKind, createAcpRunner, type AcpAgentSpec } from "./acp";
+import { ACP_AGENTS, acpDisabledFor, acpOrLegacyRunner, acpSessionKind, createAcpRunner, type AcpAgentSpec } from "./acp";
 import { resolveAcpAgentSpec } from "./acp-agents";
 import { acquireLocalInferenceSlot } from "./local-inference-run-slots";
-import { tagPickedRunnerKind, withNativeBrowserGuidance, type Runner, type RunnerFailure } from "./runner";
+import { markRefusedBeforeDispatch, tagPickedRunnerKind, withNativeBrowserGuidance, type Runner, type RunnerFailure, type RunnerResult } from "./runner";
 import { getSubscriptionCreditUse, peekProviderQuotaExhausted } from "../usage";
 import { peekAgentlasCreditsAvailable } from "../billing";
 import { listModelRoleMembers } from "../store/model-roles";
@@ -63,6 +64,16 @@ import { withMemorySourceRunner } from "../memory/source-custody";
  */
 const RUNTIME_AUTH_PROBE_INTERVAL_MS = 60_000;
 const runtimeAuthProbeStartedAt = new Map<string, number>();
+
+/**
+ * A typed failure these host wrappers return before any runner is entered. It says so (RuntimeTurnDelivery "not-dispatched"):
+ * without it mcp/client.ts cannot tell the refusal from a dispatched turn and reports "the request may have acted"
+ * (runtime_turn_unsettled), which skips the role-pool fallback and closes the send queue's retry on a message no model saw.
+ * ownerControlTerminal stays "uncertain" like local-tool-loop refusedBeforeDispatch: no follow-up episode runs on a refusal.
+ */
+function refusedBeforeRunner(failure: RunnerFailure): RunnerResult {
+  return { text: "", ownerControlTerminal: "uncertain", turnDelivery: "not-dispatched", failure };
+}
 
 /** Per-turn, before the provider or its reusable session is used. Unknown probes are not authentication. */
 function withRuntimeAuthProbe(runner: Runner, runtimeKind: string): Runner {
@@ -92,10 +103,10 @@ function withRuntimeAuthProbe(runner: Runner, runtimeKind: string): Runner {
       && peekProviderQuotaExhausted(kind, Date.now(), req.model)) {
       // Host admission is unavailable before dispatch, not a request refusal
       // or a provider quota failure that adds cooldown or paid fallback.
-      return { text: "", failure: { kind: "unavailable", source: "marker", runtime: kind,
+      return refusedBeforeRunner({ kind: "unavailable", source: "marker", runtime: kind,
         providerCode: "subscription_credits_disabled",
         message: req.locale === "ko" ? "구독 한도가 소진됐고 크레딧 자동 사용이 꺼져 있어 시작하지 않았습니다."
-          : "This run was not started: the subscription limit is reached and automatic credit use is off." } };
+          : "This run was not started: the subscription limit is reached and automatic credit use is off." });
     }
     return runner(req, events);
   };
@@ -112,6 +123,10 @@ function withRuntimeAuthProbe(runner: Runner, runtimeKind: string): Runner {
 function withRunSlot(runner: Runner, runtimeKind: string): Runner {
   const checkedRunner = withRuntimeAuthProbe(runner, runtimeKind);
   return async (req, events) => {
+    // The native handle namespace follows the actual transport, using the same inventory/switch as its dispatcher.
+    const acp = ACP_AGENTS[runtimeKind];
+    const writerKind = acp && !acpDisabledFor(runtimeKind) ? acpSessionKind(acp.id) : runtimeKind;
+    return withHostNativeWriter(writerKind, req, events, async () => {
     // 우선순위: 요청 명시값 → 호출 문맥(withRunPriority) → interactive.
     // 자동화 스케줄러·데몬 graph.run 이 background 문맥을 깔고, 채팅 턴은 기본값이다.
     // 오너 턴 안에서 맡긴 일(firm/swarm/task-force 워커·플래너·종합, 큐레이터)은 오너 레인을 쓰지 않는다(NH20).
@@ -158,6 +173,7 @@ function withRunSlot(runner: Runner, runtimeKind: string): Runner {
       try { touchAgentResidency(residencyKey, { inUse: false }); } catch { /* 관측 실패 무시 */ }
       release();
     }
+    });
   };
 }
 
@@ -321,7 +337,7 @@ export function pickRunner(active: RuntimeStatus): { runner: Runner; label: stri
   return selected
     ? { ...selected, runner: tagPickedRunnerKind(invocationBreaker.wrap(withNativeBrowserGuidance(withDaemonAgentContext(withAgentContext(
       // Innermost: the ledger sees the request after every host wrapper, exactly as the adapter does (context-reduction C01).
-      withMemorySourceRunner(withRemoteCurationRuntime(withModelCallLedger(async(req,events)=>{if(!configurationCurrent())throw new Error("runtime_selected_configuration_changed");return selected.runner(req,events);}, { kind: active.kind, backend: active.backend ?? null, model: active.model ?? null, effort: null }), active, configurationCurrent)),
+      withMemorySourceRunner(withRemoteCurationRuntime(withModelCallLedger(async(req,events)=>{if(!configurationCurrent())throw markRefusedBeforeDispatch(Object.assign(new Error("runtime_selected_configuration_changed"),{code:"runtime_selected_configuration_changed"}));return selected.runner(req,events);}, { kind: active.kind, backend: active.backend ?? null, model: active.model ?? null, effort: null }), active, configurationCurrent)),
       { kind: active.kind, ...(active.backend ? { backend: active.backend } : {}) },
       { configurationSource:active.source,configurationIdentity }),
       { kind: active.kind,configurationIdentity,...(active.backend ? { backend: active.backend } : {}) }), active.kind), invocationBreakerKey(active), selected.label), active.kind) }
@@ -332,32 +348,30 @@ function pickRunnerWithoutHostGuidance(active: RuntimeStatus, acpSpec: AcpAgentS
   if (isRuntimeCredentialUnavailable(active)) {
     return {
       label: `BYOK · ${active.backend}`,
-      runner: async (req) => ({
-        text: "",
-        failure: {
-          kind: "auth",
-          runtime: `byok:${active.backend}`,
-          source: "marker",
-          message: req.locale === "ko"
-            ? `${active.backend}의 저장된 API 키에 접근할 수 없습니다. 도움말 메뉴에서 해당 API 키 접근을 다시 시도할 수 있습니다.`
-            : `The saved ${active.backend} API key is unavailable. Use Help to retry access to this API key.`,
-        },
+      // The code keeps this keychain refusal apart from a provider sign-in failure: no cooldown, no "signed out" mark, no
+      // CLI sign-in card (runtime-cooldown.ts noteRuntimeFailure; mcp/client.ts emitTerminalRecoveryFailure).
+      runner: async (req) => refusedBeforeRunner({
+        kind: "auth",
+        runtime: `byok:${active.backend}`,
+        source: "marker",
+        providerCode: RUNTIME_CREDENTIAL_UNAVAILABLE_CODE,
+        message: req.locale === "ko"
+          ? `${active.backend}의 저장된 API 키에 접근할 수 없습니다. 도움말 메뉴에서 해당 API 키 접근을 다시 시도할 수 있습니다.`
+          : `The saved ${active.backend} API key is unavailable. Use Help to retry access to this API key.`,
       }),
     };
   }
   if (runtimeModelUnavailable(active, active.model)) {
     return {
       label: RUNNER_LABEL[active.kind] ?? active.label ?? active.kind,
-      runner: async (req) => ({
-        text: "",
-        failure: {
-          kind: "unsupported",
-          runtime: active.kind === "byok" ? `byok:${active.backend}` : active.kind,
-          source: "marker",
-          message: req.locale === "ko"
-            ? `선택한 모델 ${active.model}이 현재 ${active.kind} 모델 목록에 없습니다. 연결을 다시 확인하거나 사용 가능한 모델을 선택해 주세요.`
-            : `The selected model ${active.model} is absent from the current ${active.kind} model list. Refresh the connection or select an available model.`,
-        },
+      runner: async (req) => refusedBeforeRunner({
+        kind: "unsupported",
+        runtime: active.kind === "byok" ? `byok:${active.backend}` : active.kind,
+        source: "marker",
+        providerCode: "runtime_model_unavailable",
+        message: req.locale === "ko"
+          ? `선택한 모델 ${active.model}이 현재 ${active.kind} 모델 목록에 없습니다. 연결을 다시 확인하거나 사용 가능한 모델을 선택해 주세요.`
+          : `The selected model ${active.model} is absent from the current ${active.kind} model list. Refresh the connection or select an available model.`,
       }),
     };
   }

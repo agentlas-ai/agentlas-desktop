@@ -56,6 +56,10 @@ type RuntimeRecord = {
 };
 
 const runtimes = new Map<string, RuntimeRecord>();
+/** Launches in flight, one per project: a second Launch while the first is still starting joins it instead of binding another server. */
+const launches = new Map<string, Promise<SiteAgentAppLaunchResult>>();
+/** Raised by every dispose, so a launch that was still starting cannot register a server nobody will close. */
+let runtimeGeneration = 0;
 
 function digest(value: string): Buffer {
   return createHash("sha256").update(value).digest();
@@ -276,6 +280,9 @@ async function handleRun(request: IncomingMessage, response: ServerResponse, run
   if (request.method !== "POST") return fail(response, 405, "method-not-allowed", "Use POST.");
   const authorization = authorize(request, runtime);
   if (!authorization.ok) return fail(response, authorization.status, authorization.code, authorization.message);
+  // Stop removes the runtime from the registry before its server finishes closing: a request still riding an open
+  // connection must not start an owner-permission run after the owner saw "stopped".
+  if (runtimes.get(runtime.projectId) !== runtime) return fail(response, 503, "runtime-stopped", "This Agent App runtime was stopped.");
   if (!String(request.headers["content-type"] ?? "").toLowerCase().startsWith("application/json")) {
     return fail(response, 415, "unsupported-media-type", "Use application/json.");
   }
@@ -486,12 +493,28 @@ export function siteAgentAppRuntimeStatus(projectId: string): SiteAgentAppRuntim
   };
 }
 
-export async function launchSiteAgentApp(projectId: string): Promise<SiteAgentAppLaunchResult> {
+export function launchSiteAgentApp(projectId: string): Promise<SiteAgentAppLaunchResult> {
+  const inFlight = launches.get(projectId);
+  if (inFlight) return inFlight;
+  const launch = launchSiteAgentAppOnce(projectId).finally(() => {
+    if (launches.get(projectId) === launch) launches.delete(projectId);
+  });
+  launches.set(projectId, launch);
+  return launch;
+}
+
+async function launchSiteAgentAppOnce(projectId: string): Promise<SiteAgentAppLaunchResult> {
+  const generation = runtimeGeneration;
   const capability = randomBytes(32).toString("base64url");
   let runtime = runtimes.get(projectId);
   if (!runtime) {
-    runtime = await createRuntime(projectId, digest(capability));
-    runtimes.set(projectId, runtime);
+    const created = await createRuntime(projectId, digest(capability));
+    if (generation !== runtimeGeneration) {
+      created.server.close();
+      throw new Error("site-agent-app-runtime-disposed");
+    }
+    runtimes.set(projectId, created);
+    runtime = created;
   } else {
     runtime.capabilityDigest = digest(capability);
   }
@@ -500,6 +523,8 @@ export async function launchSiteAgentApp(projectId: string): Promise<SiteAgentAp
 }
 
 export async function stopSiteAgentApp(projectId: string): Promise<SiteAgentAppRuntimeStatus> {
+  // A Launch still starting would register its server right after this Stop found nothing to close.
+  await launches.get(projectId)?.catch(() => undefined);
   const runtime = runtimes.get(projectId);
   if (!runtime) return siteAgentAppRuntimeStatus(projectId);
   if (runtime.activeRunId) invocationService.cancel(runtime.activeRunId);
@@ -509,6 +534,7 @@ export async function stopSiteAgentApp(projectId: string): Promise<SiteAgentAppR
 }
 
 export function disposeSiteAgentAppRuntimes(): void {
+  runtimeGeneration += 1;
   for (const runtime of runtimes.values()) {
     if (runtime.activeRunId) invocationService.cancel(runtime.activeRunId);
     runtime.server.close();

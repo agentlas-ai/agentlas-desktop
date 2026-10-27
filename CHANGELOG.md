@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.3.100 — 2026-10-27
+
+- Work: every Work conversation now has one persistent main AI. Delegated sub-sessions run asynchronously, their results come back to the main AI, and a delegation that cannot finish ends with a typed cause instead of a wedge. The main AI no longer fans a request out into a team by default (the escalation stays available when you ask for a team), and the one-CLI-per-project serialization and the child-session cap are gone — run slots and the seat budget queue the work.
+- Goals and long runs: a failed team verification holds the Goal instead of cancelling it, a delegated permission no longer needs a bound execution (Telegram, scheduler, site generation and graph runs keep working), result reports to the main AI retry with bounded backoff and always end with a typed outcome, verifier outages and question cards hold instead of cancelling or completing, and Resume while a turn is live queues for the next sweep. The store schema moves to v135 so a Science loop paused by its agent is recorded as paused.
+- Approvals: the personal agent oversees approvals in the rooms it hands work to, approval cards from those rooms show in its conversation and follow the Claude Code / Codex prompt grammar, and "No, and tell the personal agent what to do instead" is available. A stored deny rule under Full access now asks you with an approval chip (once; the rule stays) instead of silently denying, which replaces the deny-first behavior of 1.3.99. Payments still ask under Full access, and the delegation floor also stops Windows deletes and credential paths.
+- Personal agent rooms: rooms the personal agent opens for you are read-only, kept out of Work lists and the dashboard, and open from the personal agent; "continue myself" hands one back. Their results and questions no longer push to your phone, while failures still do.
+- Finance: results no longer show source, as-of or open-original lines.
+- Layout: the split-pane composer no longer overflows when a pane narrows.
+- More than 150 further defects found in a two-round review of the Desktop and engine back ends are repaired: paths that could block the AI or you, drop your input or show a failure you should never see, or behave differently per runtime, OS or host.
+
+This release binds Agentlas OS v1.2.69 at 2b4e27b78d9a1e808142f1e6e510ab7023c7b44d; public runtime asset `hephaestus-runtime-v1.2.69.tar.gz` is pinned at SHA-256 `0bb8ac3eac111fd26bc3a20a7b1657741399b9f87ed8b8f1c87f2402dbd4c283`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.99 — 2026-10-27
 
 Includes everything planned for 1.3.92 through 1.3.98, which were not published.

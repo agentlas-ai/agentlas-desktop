@@ -1,4 +1,11 @@
 import { unzipSync, zipSync, strFromU8, strToU8, type Zippable } from "fflate";
+import { LiveDocumentCodecError } from "./codecs/common";
+
+// The file size cap of the Document tab is on the compressed bytes, and every part is held in memory once unpacked: a 100 KiB package can declare
+// 100 MiB. fflate unpacks into a buffer of the size the entry declares, so checking the declared sizes first bounds what is really inflated.
+export const ZIP_ENTRY_MAX_BYTES = 64 * 1024 * 1024;
+export const ZIP_TOTAL_MAX_BYTES = 256 * 1024 * 1024;
+export const ZIP_ENTRY_MAX_COUNT = 10_000;
 
 /*
  * Zip package view for OOXML and HWPX. Entry order is kept (HWPX and ODF-style readers require `mimetype` first,
@@ -9,7 +16,14 @@ export class ZipPackage {
   private readonly order: string[] = [];
 
   constructor(bytes: Uint8Array) {
-    const files = unzipSync(bytes);
+    let total = 0, count = 0;
+    const files = unzipSync(bytes, { filter: (file) => {
+      count += 1; total += file.originalSize;
+      if (count > ZIP_ENTRY_MAX_COUNT) throw new LiveDocumentCodecError("package_too_large", `more than ${ZIP_ENTRY_MAX_COUNT} parts`);
+      if (file.originalSize > ZIP_ENTRY_MAX_BYTES) throw new LiveDocumentCodecError("package_too_large", `a part unpacks to ${file.originalSize} bytes (limit ${ZIP_ENTRY_MAX_BYTES})`);
+      if (total > ZIP_TOTAL_MAX_BYTES) throw new LiveDocumentCodecError("package_too_large", `the parts unpack to more than ${ZIP_TOTAL_MAX_BYTES} bytes`);
+      return true;
+    } });
     for (const [name, data] of Object.entries(files)) {
       this.entries.set(name, data);
       this.order.push(name);

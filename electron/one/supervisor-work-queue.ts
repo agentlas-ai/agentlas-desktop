@@ -147,6 +147,18 @@ export class OneSupervisorWorkQueue {
       lease_until=0,reason='unstarted_claim_recovered',updated_at=? WHERE phase='claimed' AND lease_until<=?`)
       .run(this.now(), this.now()).changes);
   }
+  /**
+   * A start refused before anything reached a model (shared/transient-send-refusal.ts) crossed no effect boundary. The job
+   * waits out `delayMs` as an unstarted claim - shown queued, cancellable - and the ordinary expiry recovery
+   * (recoverUnstarted) queues it again for the SAME run. The CAS fences a stale starter by phase, owner and generation.
+   */
+  retryRefused(lease: SupervisorWorkLease, delayMs: number, reason: string): SupervisorWorkLease | null {
+    const now = this.now();
+    const changed = this.db.prepare(`UPDATE one_supervisor_work_jobs SET phase='claimed',lease_until=?,reason=?,updated_at=?
+      WHERE command_id=? AND phase IN ('claimed','starting','held') AND owner_epoch IS ? AND generation=?`)
+      .run(now + Math.max(100, Math.floor(delayMs)), reason.slice(0, 240), now, lease.command_id, lease.owner_epoch, lease.generation);
+    return changed.changes === 1 ? this.get(lease.command_id) : null;
+  }
   cancelUnstarted(lease: SupervisorWorkLease): boolean {
     return this.db.prepare(`UPDATE one_supervisor_work_jobs SET phase='cancelled',lease_until=0,
       reason='cancelled_before_dispatch',updated_at=? WHERE command_id=? AND generation=? AND (phase IN ('queued','claimed') OR (phase='held' AND reason='held_before_native_dispatch'))`)

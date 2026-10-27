@@ -31,7 +31,7 @@ import {
 } from "./autostart";
 import { isNonProductionInstance } from "./autostart-eligibility";
 import { portableExecutableFile } from "../windows-shell-integration";
-import { entryDigest, validateDaemonAutostartManifest, type DaemonAutostartManifest } from "./autostart-manifest";
+import { entryDigest, readDaemonAutostartFailure, validateDaemonAutostartManifest, type DaemonAutostartManifest } from "./autostart-manifest";
 import {
   OFFICIAL_INSTALL_IDENTITY,
   serializeInstallIdentity,
@@ -43,6 +43,7 @@ import type { NativeBrowserDaemonBinding, NativeBrowserMainCapability } from "..
 import {
   canonicalDaemonPath,
   daemonControlSocketPath,
+  legacyDaemonServiceIdentity,
   resolveDaemonServiceIdentity,
   type DaemonServiceIdentity,
   type DaemonServiceOptions,
@@ -386,8 +387,16 @@ async function stopUnreadyDaemon(spawned: SpawnedDaemon): Promise<boolean> {
   return exited();
 }
 
+/** A service an earlier build started under the identity that hashed the store's st_dev (same store, same boot). It is ours to
+ * replace, never to attach to: every client of the service compares the identity it reports with the current one. */
+function startedUnderLegacyIdentity(ping: DaemonPing, identity: DaemonServiceIdentity): boolean {
+  if (!ping.serviceIdentity || ping.serviceIdentity === identity.serviceIdentity) return false;
+  try { return ping.serviceIdentity === legacyDaemonServiceIdentity(identity); }
+  catch { return false; }
+}
+
 function matchesService(ping: DaemonPing, identity: DaemonServiceIdentity): boolean {
-  if (ping.serviceIdentity) return ping.serviceIdentity === identity.serviceIdentity;
+  if (ping.serviceIdentity) return ping.serviceIdentity === identity.serviceIdentity || startedUnderLegacyIdentity(ping, identity);
   // One-time compatibility with the old parent-bound helper, which reported
   // its opened store but had no service identity. Never replace a foreign DB.
   try { return Boolean(ping.storePath && canonicalDaemonPath(ping.storePath) === identity.storePath); }
@@ -511,7 +520,7 @@ async function ensureDaemonRunningOnce(
     let previousVersion: string | null = null;
     if (ping?.ok) {
       if (!matchesService(ping, opts)) return { status: "failed", reason: "daemon_service_identity_mismatch" };
-      if (ping.version === opts.appVersion && ping.serviceProtocolVersion === 2) {
+      if (ping.version === opts.appVersion && ping.serviceProtocolVersion === 2 && !startedUnderLegacyIdentity(ping, opts)) {
         await attachDesktop(socketPath, ping, opts, setPhase);
         recordDiagnostic(diagnostics, "already_running", { pid: ping.pid, bootId: ping.bootId,
           parentPid: opts.parentPid ?? process.pid, appInstanceId: opts.appInstanceId });
@@ -548,7 +557,7 @@ async function ensureDaemonRunningOnce(
       // Another GUI may have won publication during our spawn. Reuse that
       // exact service; never stop a process for which we have no child handle.
       const winner = await pingDaemon(socketPath);
-      if (winner?.ok && matchesService(winner, opts) && winner.version === opts.appVersion
+      if (winner?.ok && matchesService(winner, opts) && !startedUnderLegacyIdentity(winner, opts) && winner.version === opts.appVersion
         && winner.serviceProtocolVersion === 2) {
         await attachDesktop(socketPath, winner, opts, setPhase);
         return { status: "already-running", pid: winner.pid ?? -1, version: winner.version };
@@ -581,14 +590,17 @@ export async function desktopDaemonAnswers(options: EnsureDaemonOptions): Promis
   try {
     const opts = { ...options, ...resolveDaemonServiceIdentity(options) };
     const ping = await pingDaemon(daemonControlSocketPath(opts.userDataDir));
-    return Boolean(ping?.ok && matchesService(ping, opts) && ping.version === opts.appVersion && ping.serviceProtocolVersion === 2);
+    return Boolean(ping?.ok && matchesService(ping, opts) && !startedUnderLegacyIdentity(ping, opts)
+      && ping.version === opts.appVersion && ping.serviceProtocolVersion === 2);
   } catch {
     return false;
   }
 }
 
 export type DaemonMigrationQuiescence =
-  | { status: "absent" | "compatible" | "stopped"; pid: number | null }
+  /** `bootId` (compatible only): the live service's boot id. Its run leases name the same id, so a lease that carries it belongs to
+   * a turn that service is still running, and one that does not belongs to a service that is gone. */
+  | { status: "absent" | "compatible" | "stopped"; pid: number | null; bootId?: string }
   | { status: "failed"; reason: string; pid: number | null };
 
 /** MUST run before initStore/migration. Socket disappearance is insufficient:
@@ -605,7 +617,9 @@ export async function quiesceDaemonBeforeStoreMigration(
       : { status: "failed", reason: "daemon_control_owner_unconfirmed", pid: null };
     if (!matchesService(ping, identity)) return { status: "failed", reason: "daemon_service_identity_mismatch", pid: ping.pid ?? null };
     if (ping.serviceProtocolVersion === 2 && ping.version === options.appVersion
-      && ping.storeSchemaVersion === options.requiredSchemaVersion) return { status: "compatible", pid: ping.pid ?? null };
+      && ping.storeSchemaVersion === options.requiredSchemaVersion) {
+      return { status: "compatible", pid: ping.pid ?? null, ...(typeof ping.bootId === "string" && ping.bootId ? { bootId: ping.bootId } : {}) };
+    }
     if (anotherDesktopIsAttached(ping)) return { status: "failed", reason: "daemon_attached_desktop_alive", pid: ping.pid ?? null };
     return await stopObservedDaemon(socketPath, ping, options.timeoutMs ?? 25_000)
       ? { status: "stopped", pid: ping.pid ?? null }
@@ -663,11 +677,15 @@ export async function releaseDaemonForGuiQuit(options: DaemonServiceOptions & {
   }
 }
 
-/** Service-owned work (Science turn, graph run, CLI child, local model op) a stop would cut. */
-export async function readDaemonActiveWork(userDataDir: string, timeoutMs = 1_500): Promise<string[]> {
+/** Service-owned work (Science turn, graph run, CLI child, local model op) a stop would cut. [] only when there is no service
+ * (nothing listens on the control socket) or it reported none; null when a service is there but the ping failed or timed out
+ * (a busy event loop), which is NOT an empty census: quitting on it cut a Science turn that was still running. */
+export async function readDaemonActiveWork(userDataDir: string, timeoutMs = 1_500): Promise<string[] | null> {
   if (process.env.AGENTLAS_DISABLE_DAEMON === "1") return [];
-  const ping = await pingDaemon(daemonControlSocketPath(userDataDir), timeoutMs);
-  return Array.isArray(ping?.activeWork) ? ping!.activeWork!.filter((reason) => typeof reason === "string") : [];
+  const socketPath = daemonControlSocketPath(userDataDir);
+  const ping = await pingDaemon(socketPath, timeoutMs);
+  if (!ping?.ok) return await controlSocketIsAbsent(socketPath) ? [] : null;
+  return Array.isArray(ping.activeWork) ? ping.activeWork.filter((reason) => typeof reason === "string") : [];
 }
 
 /** An automatic update needs proof of an idle service before stopping it.
@@ -740,6 +758,32 @@ export function windowsPortableLaunch(platform: NodeJS.Platform, env: NodeJS.Pro
   return portableExecutableFile(platform, env) !== null;
 }
 
+/** Why this launch can never hold a login entry (the owner's switch is then saved but nothing is installed), as a machine code. */
+export function daemonAutostartUnavailableReason(platform: NodeJS.Platform = process.platform, env: NodeJS.ProcessEnv = process.env,
+  execPath: string = process.execPath): string | null {
+  if (windowsPortableLaunch(platform, env)) return "daemon_autostart_unavailable_windows_portable";
+  if (linuxAppImageLaunch(platform, env, execPath)) return "daemon_autostart_unavailable_linux_appimage";
+  if (macAppTranslocated(platform, execPath)) return "daemon_autostart_unavailable_macos_translocated";
+  return null;
+}
+
+/** macOS runs a quarantined app that was not moved out of Downloads/the disk image from a read-only copy under a random
+ * `AppTranslocation/<uuid>` path that differs on every launch: a launchd job naming it starts nothing after the next login. */
+export function macAppTranslocated(platform: NodeJS.Platform, execPath: string = process.execPath): boolean {
+  return platform === "darwin" && /[\\/]AppTranslocation[\\/]/.test(execPath);
+}
+
+/** This process runs from a Linux AppImage: its executable, daemon entry and app files are inside a mount that disappears with the
+ * process (and differs on the next launch). APPDIR, when the runtime exports it, must contain this executable, so an APPIMAGE
+ * variable inherited by another install (a .deb started from a terminal inside an AppImage app) is not mistaken for it. */
+export function linuxAppImageLaunch(platform: NodeJS.Platform, env: NodeJS.ProcessEnv, execPath: string = process.execPath): boolean {
+  if (platform !== "linux" || typeof env.APPIMAGE !== "string" || !env.APPIMAGE.trim()) return false;
+  const appDir = typeof env.APPDIR === "string" ? env.APPDIR.trim() : "";
+  if (!appDir) return true;
+  const relative = path.relative(path.resolve(appDir), path.resolve(execPath));
+  return relative !== "" && !relative.startsWith("..") && !path.isAbsolute(relative);
+}
+
 /**
  * 자동 시작(로그인 시 데몬 기동) 설정을 파일시스템과 정합시킨다.
  *
@@ -747,12 +791,26 @@ export function windowsPortableLaunch(platform: NodeJS.Platform, env: NodeJS.Pro
  * barrier. Only a fully bound manifest can install a persistent service.
  */
 export function reconcileDaemonAutostart(enabled: boolean, command: AutostartCommand, runtime?: AutostartRuntime): AutostartReconciliation {
+  const result = reconcileDaemonAutostartNow(enabled, command, runtime);
+  // The login entry records why its last start was refused (autostart-entry.ts). Put the typed cause where the next diagnosis reads it.
+  const failure = enabled && command.manifestPath ? readDaemonAutostartFailure(command.manifestPath) : null;
+  if (failure) console.warn("[daemon] login entry start failed earlier", failure);
+  return result;
+}
+
+function reconcileDaemonAutostartNow(enabled: boolean, command: AutostartCommand, runtime?: AutostartRuntime): AutostartReconciliation {
   // 개발·QA 인스턴스는 로그인 항목을 만들지 않고, 이 설치 몫으로 남은 것은 걷어 낸다.
   // 주입된 runtime(비공개 시험)은 실제 launchd 를 건드리지 않으므로 규칙 그대로 시험한다.
   if (enabled && !runtime?.run && isNonProductionInstance()) return reconcileAutostart(false, command, runtime);
   // Windows Portable runs from a %TEMP% extraction that its launcher deletes at exit: a login entry would start
   // nothing (or a stale copy). Portable never installs one and retires any it finds (Windows audit ui.md #7, fs.md #12).
   if (enabled && windowsPortableLaunch(runtime?.platform ?? process.platform, process.env)) return reconcileAutostart(false, command, runtime);
+  // Same hazard on Linux: an AppImage's mount (ExecStart, manifest executable and entry all live in it) is gone once the process
+  // exits, so the unit would look active now and never start at the next login. The AppImage file itself is not enough: the entry
+  // and app metadata the manifest pins are inside the mount too. Retire whatever an earlier launch installed instead.
+  if (enabled && linuxAppImageLaunch(runtime?.platform ?? process.platform, process.env)) return reconcileAutostart(false, command, runtime);
+  // macOS: the same for a translocated app (its execPath is a per-launch random mount).
+  if (enabled && macAppTranslocated(runtime?.platform ?? process.platform)) return reconcileAutostart(false, command, runtime);
   return reconcileAutostart(enabled, command, runtime);
 }
 

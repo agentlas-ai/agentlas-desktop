@@ -88,7 +88,9 @@ const READ_ONLY_LOOKUPS = new Set(["printenv", "type", "whereis"]);
 function unwrapShell(command: string): string {
   let current = command.trim();
   for (let depth = 0; depth < 2; depth += 1) {
-    const match = /^(?:\/usr\/bin\/env\s+)?(?:\/bin\/|\/usr\/bin\/)?(?:ba|z|)sh\s+-l?c\s+(["'])([\s\S]*)\1$/.exec(current);
+    // The script may not contain its own opening quote: a greedy match would swallow a command that follows the
+    // wrapper (`bash -c 'ls' && rm -rf 'x'`) into the first command's quoted argument and call the line read-only.
+    const match = /^(?:\/usr\/bin\/env\s+)?(?:\/bin\/|\/usr\/bin\/)?(?:ba|z|)sh\s+-l?c\s+(["'])((?:(?!\1)[\s\S])*)\1$/.exec(current);
     if (!match) break;
     current = match[2].trim();
   }

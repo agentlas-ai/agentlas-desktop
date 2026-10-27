@@ -2,13 +2,14 @@ import { currentGoalExecutionObligations, prepareGoalObligationContinuation, goa
 /** Recover idle Goals through fresh current-context episodes. Checkpoint and
  * effect failures are advisory facts; only an explicit owner hold stops work.
  * Retry spacing still prevents unavailable runtimes from spinning. */
-import { applyPendingOwnerGoalAmendments, OWNER_GOAL_AMENDMENT_PENDING_KIND } from "./goal-owner-amendment";
+import { applyPendingOwnerGoalAmendments, OWNER_GOAL_AMENDMENT_PENDING_KIND, sweepUnavailableOwnerGoalReviews } from "./goal-owner-amendment";
 import { randomUUID } from "node:crypto";
 import { redactSecrets } from "../../shared/secret-patterns";
 import { getDb } from "../store/db";
 import { adoptExplicitGoalGrant } from "./explicit-goal-authority";
 import { appendChatMessage, getChat } from "../store/chats";
 import { getChatGoalRevision } from "../store/chat-goals";
+import { invocationRunOwners } from "../store/invocation-run-owners";
 import {
   appendLongRunEvent, bindCurrentGoalRevisionToLongRun, getLongRun, liveLongRunAttemptCount, nextBlockedGoalRetrySlot,
   pendingBlockedGoalRetry, reopenDueBlockedGoalRetry, scheduleBlockedGoalRetry, transitionLongRun,
@@ -23,11 +24,10 @@ import {
   failDesktopLongRunResumeDispatch,
 } from "./app-runtime-coordinator";
 import { latestGoalWaitSubscription } from "./wait-subscriptions";
-import { settleDaemonTurnGoals } from "./daemon-turn-goal";
+import { followDaemonTurnGoal, settleDaemonTurnGoals, type DaemonTurnGoalResult } from "./daemon-turn-goal";
 import { reconcileGoalTree } from "./goal-tree-reconcile";
 import { type EffectObservationDispatcher } from "./effect-observation-tickets";
 import { currentUiLocale } from "../ui-locale";
-import { holdingAgentResidency } from "../runtime/agent-residency";
 import { decideGoalContinuationWake, ownerRequestWaiting, recordGoalWake, SAME_CAUSE_WAKE_REASON, type GoalWakeSource } from "./wake-arbiter";
 import { GOAL_OWNER_ANSWER_REQUIRED, GOAL_OWNER_GRANT_REQUIRED } from "../../shared/goal-display-state";
 import { WORK_PROJECT_RESIDENCY_BUSY_CODE } from "../runtime/project-residency";
@@ -113,15 +113,14 @@ function scheduleRetry(run: LongRunRecord, kind: "observe" | "resume", detail: s
 }
 
 /**
- * Another turn in the same Work project holds its provider (the admission that refused this Goal's turn
- * with work_project_residency_busy). Measured 2026-09-24: two Goals in one project made the sweep resume
- * the waiting one every 60 s, fail again, and post the same "continuing" notice each time.
+ * No turn is held back by another turn of its Work project any more: a project is shared attribution and only turns that write the
+ * same native session queue (runtime/native-writer-admission.ts), so the project-wide admission that refused a Goal's turn with
+ * work_project_residency_busy (measured 2026-09-24: the sweep resumed the waiting Goal every 60 s and it failed again) is gone.
+ * A Goal still carrying that retired reason resumes like any other blocked Goal. Kept as the named answer `false` for callers and
+ * gates written against the old contract.
  */
-export function projectHeldByAnotherTurn(run: LongRunRecord, dispatcher: EffectObservationDispatcher): boolean {
-  const projectId = run.rootChatId ? getChat(run.rootChatId)?.projectId ?? null : null;
-  if (!projectId) return false;
-  if (holdingAgentResidency().some((entry) => entry.projectId === projectId && entry.inUse && entry.chatId !== run.rootChatId)) return true;
-  return dispatcher.activeChatIds().some((chatId) => chatId !== run.rootChatId && getChat(chatId)?.projectId === projectId);
+export function projectHeldByAnotherTurn(_run: LongRunRecord, _dispatcher: EffectObservationDispatcher): boolean {
+  return false;
 }
 
 /**
@@ -197,6 +196,11 @@ function resume(run: LongRunRecord, dispatcher: EffectObservationDispatcher, tri
   if (goalObligationPreparations.has(run.id)) return { runId: run.id, fromReason: run.blockedReason,
     action: "deferred", detail: "goal_preflight_preparing" };
   const chatId = run.rootChatId!;
+  // A turn another process holds in this room (the background service) owns the room's lease: Main cannot start beside it, and
+  // trying only schedules a retry the owner is told about. Wait for it quietly; the lease ends with that turn.
+  let leased = false;
+  try { leased = invocationRunOwners.getActiveOwner(chatId) !== null; } catch { /* an unreadable lease is not a reason to hold the Goal */ }
+  if (leased) return { runId: run.id, fromReason: run.blockedReason, action: "deferred", detail: "chat_busy" };
   // Every resume path (sweep, Alive's continue, a released project) asks the one wake policy: the owner first,
   // then the daily barrier. A reached barrier parks the Goal until its window frees, visibly.
   const source: GoalWakeSource = trigger === "alive" ? "alive" : trigger === "project-released" ? "project-released"
@@ -243,8 +247,9 @@ function resume(run: LongRunRecord, dispatcher: EffectObservationDispatcher, tri
         if (!request) throw new Error("long_run_resume_dispatch_unavailable");
         getDb().prepare("UPDATE chat_goal_contracts SET status = 'active', completed_at = NULL, updated_at = ? WHERE goal_id = ? AND status = 'blocked'")
           .run(new Date().toISOString(), latest.goalId);
-        const queued = transitionLongRun({ runId: latest.id, to: "queued", actorKind: "host", reason: "blocked-sweep-resume",
-          appInstanceId: desktopAppInstanceId(), expectedVersion: latest.version });
+        // queued is no edge from running or waiting_tool: a Goal already past the queue only needs this host to own the start.
+        const queued = transitionLongRun({ runId: latest.id, to: ["running", "waiting_tool"].includes(latest.status) ? "running" : "queued",
+          actorKind: "host", reason: "blocked-sweep-resume", appInstanceId: desktopAppInstanceId(), expectedVersion: latest.version });
         appendLongRunEvent({ runId: latest.id, kind: BLOCKED_GOAL_SWEEP_EVENT_KIND, actorKind: "host",
           payload: { schemaVersion: BLOCKED_GOAL_SWEEP_SCHEMA, action: "resumed", fromReason: run.blockedReason,
             fromStatus: run.status, trigger: trigger.slice(0, 80), appInstanceId: desktopAppInstanceId() } });
@@ -255,7 +260,8 @@ function resume(run: LongRunRecord, dispatcher: EffectObservationDispatcher, tri
       // The owner's own turn (or another live holder) owns the run right now: losing to it is not a failure.
       // No retry slot, no notice, no log line; the next periodic pass looks again once that turn has settled.
       // Measured 2026-10-12 group room 8f3e09ee: this was scheduled as a retry and announced as "could not start a model".
-      if (code === RESUME_LOST_TO_LIVE_OWNER_CODE) return { runId: run.id, fromReason: run.blockedReason, action: "deferred", detail: "chat_busy" };
+      // The cause stays typed: sweepOne gives the dispatch slot back, nothing was started.
+      if (code === RESUME_LOST_TO_LIVE_OWNER_CODE) return { runId: run.id, fromReason: run.blockedReason, action: "deferred", detail: RESUME_LOST_TO_LIVE_OWNER_CODE };
       if (code !== "blocked_goal_sweep_state_changed") logSweepFailureCause("resume-prepare", run.id, code, error);
       const latest = getLongRun(run.id);
       if (!latest || code === "blocked_goal_sweep_state_changed" || !["blocked", "paused", "queued", "running", "waiting_tool"].includes(latest.status)) {
@@ -478,11 +484,6 @@ function sweepOne(input: LongRunRecord, dispatcher: EffectObservationDispatcher,
   if (liveLongRunAttemptCount(run.id) > 0) return defer("attempt_running");
   // The host does not judge an earlier attempt's outside effects (owner 2026-10-12); the resumed turn checks for itself.
 
-  // 2a. Its turn was refused because another turn holds this Work project: wait for that turn to end
-  // (resumeGoalsWaitingOnProject is called when it settles). No model start, no retry schedule, no notice.
-  if (run.status === "blocked" && run.blockedReason === WORK_PROJECT_RESIDENCY_BUSY_CODE && projectHeldByAnotherTurn(run, dispatcher)) {
-    return defer("project_held_by_another_turn");
-  }
   // 2. Effects are settled (or absent): continue the goal itself.
   const chat = run.rootChatId ? getChat(run.rootChatId) : null;
   if (!chat || chat.goalId !== run.goalId) return scheduleRetry(run, "resume", "goal_chat_binding_missing", trigger);
@@ -498,7 +499,10 @@ function sweepOne(input: LongRunRecord, dispatcher: EffectObservationDispatcher,
   }
   if (budget.dispatches >= BLOCKED_GOAL_SWEEP_MAX_DISPATCHES) return defer("dispatch_budget");
   budget.dispatches += 1;
-  return resume(run, dispatcher, trigger);
+  const resumed = resume(run, dispatcher, trigger);
+  // A slot is a model start. A Goal that lost to a live holder started nothing, so it must not keep the Goals behind it waiting.
+  if (resumed.action === "deferred" && (resumed.detail === "chat_busy" || resumed.detail === RESUME_LOST_TO_LIVE_OWNER_CODE)) budget.dispatches -= 1;
+  return resumed;
 }
 
 /** Host pauses an Alive orchestrator may continue. An owner pause, an approval hold and a budget stop never are.
@@ -546,6 +550,14 @@ export function continueGoalForAlive(runId: string, expectedVersion: number, dis
   if (refusal) return deferred(refusal, refusal === "desktop_long_run_admission_closed" ? null : getLongRun(runId)?.blockedReason ?? null);
   const run = getLongRun(runId)!;
   const budget = { dispatches: 0 };
+  // A Goal parked while its service turn ran on belongs to that turn first (daemon-turn-goal.ts; the sweep settles it before it
+  // looks for candidates, this entry point does not go through the sweep): resuming it here would start a second episode over
+  // work the service already did, or over the turn that is still running.
+  if (run.status === "paused") {
+    let followed: DaemonTurnGoalResult | null = null;
+    try { followed = followDaemonTurnGoal(run.goalId); } catch { /* the sweep's own settle pass tries again */ }
+    if (followed && followed.action !== "skipped") return deferred(followed.action === "unchanged" ? "service_turn_live" : "service_turn_settled");
+  }
   if (run.status === "blocked") return sweepOne(run, dispatcher, "alive", budget) ?? deferred("alive_goal_not_continuable", run.blockedReason);
   if (pendingBlockedGoalRetry(run.id)) return sweepOne(run, dispatcher, "alive", budget) ?? deferred("alive_goal_not_continuable", run.blockedReason);
   // A host pause the sweep already owns (runtime_unavailable → scheduled retry, refused startup pause) goes its way.
@@ -576,6 +588,9 @@ export function sweepBlockedGoals(dispatcher: EffectObservationDispatcher, trigg
   // First, close the Goals whose only run was a background-service turn that has ended: below, a queued Goal is a resume
   // candidate, and resuming one whose work already finished would redo it.
   try { settleDaemonTurnGoals(); } catch (error) { console.warn("[blocked-goal-sweep] service-turn Goals could not be settled:", error); }
+  // An owner message the judge could not answer earlier is asked again (bounded backoff); a restated target then reaches
+  // the pending-amendment path below instead of staying unclassified for ever.
+  try { sweepUnavailableOwnerGoalReviews(); } catch (error) { console.warn("[blocked-goal-sweep] unanswered owner reviews could not be re-asked:", error); }
   // Contracts and tasks still open under an ended Goal run take that run's outcome (idempotent; one ledger event per repair).
   try {
     const repaired = reconcileGoalTree();

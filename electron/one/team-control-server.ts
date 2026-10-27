@@ -22,6 +22,8 @@ import { personalDataHash, personalDataError } from './personal-data-store';
 import type { PersonalDataTarget } from '../../shared/one-personal-data';
 import { getDb } from '../store/db';
 import { supervisorError } from "../../shared/one-supervisor";
+import { WORK_SESSION_TOOL_NAMES } from "../../shared/work-session-tools";
+import type { RuntimeStatus, RuntimeSelection } from "../../shared/types";
 import {
   oneTeamCreateMember,
   oneTeamComposeGroup,
@@ -52,7 +54,9 @@ export interface OneTeamCapabilityBinding extends OneTeamCaller {
   supervisorReplyRunId?: string;
   /** A Work task: only `tools` (Toolchain search/run/result) may be called through this capability.
    * "graph-step": a room-saved graph's agent/action step acting for that room (graph-team-grant.ts), `tools` only. */
-  scope?: "toolchain-consumer" | "room-member" | "graph-step";
+  scope?: "toolchain-consumer" | "room-member" | "graph-step" | "work-session";
+  /** Main-issued exact Work run and live allocation inventory, never tool arguments. */
+  workSession?: { runId: string; runtimes?: RuntimeStatus[]; runtimeSelection?: RuntimeSelection; workspace?: string };
   tools?: readonly string[];
   /** graph-step only: the Main-minted grant, re-checked on every call (authority current, step not ended). */
   graphTeamGrant?: GraphTeamGrant;
@@ -118,7 +122,7 @@ export async function dispatchOneSupervisorTool(binding: Pick<OneTeamCapabilityB
     if (!binding.chatId || !isPersonalSupervisorConversation(binding.chatId)) throw new Error("supervisor_personal_conversation_required");
     const service = (await import("./supervisor")).supervisorRunsInDaemon() ? oneSupervisor() : (await import("./supervisor-native-runtime")).oneSupervisorEndpoint();
     await service.assertConversation(binding.chatId);
-    const observation = name === "one_supervisor_status" || name === "one_app_operations"
+    const observation = name === "one_supervisor_status" || name === "one_app_operations" || name === "one_approvals_list"
       || (name === "one_supervisor_checkin" && (input.action === "list" || input.action === "cancel"))
       || (name === "one_supervisor_control" && input.action === "cancel");
     if (!observation) {
@@ -148,6 +152,20 @@ export async function dispatchOneSupervisorTool(binding: Pick<OneTeamCapabilityB
       case "one_app_call": return (require("../app-control/service") as typeof import("../app-control/service"))
         .appControlCall({ownerTurn:await service.ownerTurn(binding.supervisorReplyRunId),permission:binding.permission ?? "read"},{operation:input.operation,args:input.args});
       case "one_supervisor_control": return service.control({commandId:String(input.command_id ?? ""),taskId:String(input.task_id ?? ""),expectedVersion:String(input.control_version ?? ""),action:input.action as "steer"|"cancel",...(input.message ? {text:String(input.message)} : {})});
+      // Approvals in the rooms this personal agent oversees (owner 2026-10-27). Main checks room scope, the floor and the
+      // owner-message basis; one_app_call to approval operations stays refused (app-control/policy.ts).
+      case "one_approvals_list": {
+        const approvals = await import("./supervised-approvals"), scope = {oneChatId:binding.chatId,replyRunId:binding.supervisorReplyRunId};
+        return {owner_message_id:approvals.ownerMessageForTurn(scope),approvals:approvals.listSupervisedApprovals(scope).map(item=>({approval_id:item.id,kind:item.kind,
+          chat_id:item.chatId,room:item.roomTitle,title:item.title,detail:item.detail,requested_at:item.requestedAt,expires_at:item.expiresAt,floor:item.floor}))};
+      }
+      case "one_approval_answer": {
+        const answer = await (await import("./supervised-approvals")).answerSupervisedApproval({id:input.approval_id,kind:input.kind,decision:input.decision,
+          basis:{kind:"owner_message",messageId:input.owner_message_id}},{oneChatId:binding.chatId,replyRunId:binding.supervisorReplyRunId});
+        return {status:answer.status,...(answer.kind ? {kind:answer.kind} : {}),...(answer.id ? {approval_id:answer.id} : {}),...(answer.chatId ? {chat_id:answer.chatId} : {}),
+          ...(answer.roomTitle !== undefined ? {room:answer.roomTitle} : {}),...(answer.decision ? {decision:answer.decision} : {}),
+          ...(answer.floor ? {floor:answer.floor} : {}),...(answer.reason ? {reason:answer.reason} : {})};
+      }
       default: throw new Error("supervisor_operation_unknown");
     }
 }
@@ -211,6 +229,19 @@ async function handleOneTeamControlRequestUnchecked(request: Record<string, unkn
   if (!tokenMatches(request.token, serverToken)) throw new Error("one-team-capability-invalid");
   const binding = typeof request.capabilityId === "string" ? capabilities.get(request.capabilityId) : undefined;
   if (!binding) throw new Error("one-team-capability-invalid");
+  if (binding.scope === "work-session") {
+    if (request.operation === "work") {
+      if (!binding.chatId || !binding.workSession
+        || !binding.tools?.includes(String(request.name))
+        || !(WORK_SESSION_TOOL_NAMES as readonly string[]).includes(String(request.name))) throw new Error("work-session-tool-not-granted");
+      const { dispatchWorkSessionTool } = await import("../work/session-dispatch");
+      return dispatchWorkSessionTool({ chatId: binding.chatId, runId: binding.workSession.runId,
+        permission: binding.permission, runtimes: binding.workSession.runtimes,
+        runtimeSelection: binding.workSession.runtimeSelection, workspace: binding.workSession.workspace }, String(request.name), request.input);
+    }
+    if (!["graph", "toolchain_tools", "toolchain_tool"].includes(String(request.operation))) throw new Error("work-session-tool-not-granted");
+  }
+  else if (request.operation === "work") throw new Error("work-session-tool-not-granted");
   // Callable Toolchains are MCP tools of their own (tc_*); the list and each call are decided here, never in the child.
   if (request.operation === "toolchain_tools" || request.operation === "toolchain_tool") return toolchainToolOperation(binding, request);
   // A teammate working on a hand-off from a group room: room_say, and the Toolchain consumer tools when it was given them;
@@ -291,7 +322,7 @@ async function handleOneTeamControlRequestUnchecked(request: Record<string, unkn
     return dispatchOneSupervisorTool(binding,String(request.name ?? ''),input);
   }
   // The child lists only the consumer tools, but the boundary is here, not in the child.
-  if ((binding.scope === "toolchain-consumer" || binding.scope === "room-member")
+  if ((binding.scope === "toolchain-consumer" || binding.scope === "room-member" || binding.scope === "work-session")
     && (request.operation !== "graph" || !binding.tools?.includes(String(request.name ?? "")))) throw new Error("one-team-consumer-scope");
   switch (request.operation) {
     case "graph": {
@@ -320,7 +351,7 @@ async function handleOneTeamControlRequestUnchecked(request: Record<string, unkn
  */
 async function toolchainToolOperation(binding: OneTeamCapabilityBinding, request: Record<string, unknown>): Promise<unknown> {
   const offered = binding.scope === "graph-step" ? false
-    : binding.scope === "room-member" || binding.scope === "toolchain-consumer" ? Boolean(binding.tools?.includes("toolchain_run")) : true;
+    : binding.scope === "room-member" || binding.scope === "toolchain-consumer" || binding.scope === "work-session" ? Boolean(binding.tools?.includes("toolchain_run")) : true;
   const [{ listToolchainAssets }, { callableToolchainReleases }, tools, { requiredExecutionPermission }] = await Promise.all([
     import("../toolchains/assets"), import("../toolchains/search"), import("../../shared/toolchain-mcp-tools"), import("../../shared/graph-node-protocol")]);
   const rows = offered ? callableToolchainReleases(listToolchainAssets()).map(({ asset, release }) => ({ asset, release,
@@ -408,7 +439,7 @@ export function startOneTeamControlServer(): Promise<number> {
 
 /** Mint a per-config capability file (0600) that the MCP child reads. */
 export async function createOneTeamCapability(
-  input: OneTeamCaller & Pick<OneTeamCapabilityBinding, "scope" | "tools" | "supervisorReplyRunId" | "graphTeamGrant">,
+  input: OneTeamCaller & Pick<OneTeamCapabilityBinding, "scope" | "tools" | "supervisorReplyRunId" | "graphTeamGrant" | "workSession">,
   configKey: string,
 ): Promise<{ path: string; binding: OneTeamCapabilityBinding }> {
   if (input.scope === "graph-step" && (!input.tools?.length
@@ -422,6 +453,10 @@ export async function createOneTeamCapability(
   // conversation that is not the personal one is not offered them.
   let tools = input.tools ?? (personalSupervisorConversation(input.chatId) ? undefined
     : AGENTLAS_ONE_TEAM_TOOL_NAMES.filter((name) => !(ONE_SUPERVISOR_TOOL_NAMES as readonly string[]).includes(name)&&!(ONE_HISTORY_TOOL_NAMES as readonly string[]).includes(name)));
+  if (input.scope !== "work-session") tools = (tools ?? AGENTLAS_ONE_TEAM_TOOL_NAMES)
+    .filter(name => !(WORK_SESSION_TOOL_NAMES as readonly string[]).includes(name));
+  else if (!input.chatId || !input.workSession?.runId
+    || !(await import("../work/session-dispatch")).workSessionDispatchAllowedFor(input.chatId)) throw new Error("work-session-main-required");
   let personalSource: OneTeamCapabilityBinding['personalSource'];
   let historySource: OneTeamCapabilityBinding['historySource'];
   const db=getDb();

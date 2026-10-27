@@ -10,7 +10,8 @@
  * repeat through. A successful settle also stores a bounded, secret-redacted result in the durable tool-result store; until
  * `acknowledgeEffect` says the result reached the model, an identical call from another run is answered with that stored
  * result (`replayed`) instead of executing again (G12). Read-only calls are not checkpointed. Append-only JSONL under userData; never auto-deleted.
- * No electron import (the daemon dispatches too).
+ * No electron import (the daemon dispatches too). Main and the daemon append to the same file: every call first reads the rows added since
+ * its last read, so one process sees the other's unsettled begin, settle and ack.
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -36,7 +37,6 @@ const resultByRef = new Map<string, EffectResultRef>();
 const ackedRefs = new Set<string>();
 /** Upper bound of a stored effect result. Longer text is cut with a visible marker, never dropped (a cut result still prevents a re-run). */
 export const EFFECT_RESULT_MAX_CHARS = 262_144;
-let loaded = false;
 let fileOverride: string | null = null;
 
 async function ledgerFile(): Promise<string> {
@@ -81,33 +81,98 @@ async function readEffectResult(result: EffectResultRef): Promise<string | null>
 
 /** A read failure other than "no ledger yet": the uncertain-effect list is then unknown, not empty (NH13). */
 let loadError: string | null = null;
-async function load(): Promise<void> {
-  if (loaded) return;
-  loaded = true;
-  loadError = null;
-  try {
-    const text = fs.readFileSync(await ledgerFile(), "utf8");
-    for (const line of text.split("\n")) {
-      if (!line.trim()) continue;
-      try { index(JSON.parse(line) as Row); } catch { /* a torn last line is skipped, never fatal */ }
-    }
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException | null)?.code;
-    // No ledger yet is an observed empty ledger; anything else leaves it unknown and is read again next time.
-    if (code !== "ENOENT") { loadError = typeof code === "string" ? code : "read_failed"; loaded = false; }
+/** Main and the daemon append to the same file, so the index is a cursor into it, not a one-time snapshot. */
+let syncedFile: string | null = null;
+let readOffset = 0;
+/** Own appends already indexed from memory that another process's rows interleaved with: the cursor skips them once it passes. */
+const selfIndexed = new Set<string>();
+
+function resetIndex(): void {
+  latestByKey.clear(); beginByRef.clear(); settledByRef.clear(); resultByRef.clear(); ackedRefs.clear(); selfIndexed.clear();
+  readOffset = 0;
+}
+
+function parseRow(text: string): { row: Row; source: string } | null {
+  const parse = (source: string): { row: Row; source: string } | null => {
+    try { const row = JSON.parse(source) as Row; return row && typeof row === "object" && typeof row.t === "string" ? { row, source } : null; } catch { return null; }
+  };
+  const whole = parse(text);
+  if (whole) return whole;
+  // A process that died mid-append leaves a torn fragment and the next row is glued to its end: the row is still intact.
+  const glued = text.lastIndexOf('{"t":"');
+  return glued > 0 ? parse(text.slice(glued)) : null;
+}
+
+function readErrorCode(error: unknown): string {
+  const code = (error as NodeJS.ErrnoException | null)?.code;
+  return typeof code === "string" ? code : "read_failed";
+}
+
+/**
+ * Index every row appended to the file since the last read — by this process or by the other one (Main and the daemon
+ * share it). Synchronous on purpose: a caller decides on the result with no await in between. No ledger yet is an observed
+ * empty ledger; any other read failure leaves the cursor where it was (the list is unknown, not empty) and is retried.
+ */
+function syncLedger(file: string): void {
+  if (syncedFile !== file) { resetIndex(); syncedFile = file; }
+  let size: number;
+  try { size = fs.statSync(file).size; } catch (error) {
+    const code = readErrorCode(error);
+    if (code === "ENOENT") { if (readOffset > 0) resetIndex(); loadError = null; } else loadError = code;
+    return;
   }
+  if (size < readOffset) resetIndex(); // replaced or truncated (never expected): fold again from the start
+  if (size === readOffset) { loadError = null; return; }
+  let chunk: Buffer;
+  try {
+    const fd = fs.openSync(file, "r");
+    try {
+      const buffer = Buffer.alloc(size - readOffset);
+      let got = 0;
+      while (got < buffer.length) {
+        const n = fs.readSync(fd, buffer, got, buffer.length - got, readOffset + got);
+        if (n <= 0) break;
+        got += n;
+      }
+      chunk = buffer.subarray(0, got);
+    } finally { fs.closeSync(fd); }
+  } catch (error) { loadError = readErrorCode(error); return; }
+  loadError = null;
+  let start = 0;
+  while (start < chunk.length) {
+    const newline = chunk.indexOf(0x0a, start);
+    const text = chunk.toString("utf8", start, newline < 0 ? chunk.length : newline);
+    const parsed = text.trim() ? parseRow(text) : null;
+    // An unterminated tail counts only once it parses whole; otherwise the rest of the row is still to come.
+    if (newline < 0 && !parsed) break;
+    if (parsed && !selfIndexed.delete(parsed.source)) index(parsed.row);
+    start = newline < 0 ? chunk.length : newline + 1;
+  }
+  readOffset += start;
 }
 
 /** Why the last ledger read failed (null when it was read or does not exist yet). */
 export function effectLedgerReadError(): string | null { return loadError; }
 
-async function append(row: Row): Promise<void> {
+/** The ledger path, or null when it cannot be resolved (the in-memory index alone then guards this process). */
+async function resolveLedgerFile(): Promise<string | null> {
+  try { return await ledgerFile(); } catch { loadError = "path_unavailable"; return null; }
+}
+
+/** Index in memory at once (this process's guard), then append; callers sync the file just before so the append is not a blind one. */
+function appendRow(file: string | null, row: Row): void {
   index(row);
+  if (!file) return;
+  const line = JSON.stringify(row);
   try {
-    const file = await ledgerFile();
     fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
-    fs.appendFileSync(file, `${JSON.stringify(row)}\n`, { mode: 0o600 });
-  } catch { /* the in-memory index still guards this process */ }
+    fs.appendFileSync(file, `${line}\n`, { mode: 0o600 });
+  } catch { return; /* the in-memory index still guards this process */ }
+  // Nothing was written between the last read and this append: our row is already behind the cursor. Otherwise skip it when the cursor passes.
+  let size = -1;
+  try { size = fs.statSync(file).size; } catch { /* the cursor path below stays correct */ }
+  if (syncedFile === file && size === readOffset + Buffer.byteLength(line) + 1) readOffset = size;
+  else selfIndexed.add(line);
 }
 
 function canonical(value: unknown): unknown {
@@ -135,24 +200,29 @@ export type BeginOutcome =
 
 /** Checkpoint before a mutating effect leaves Main. `run` is the caller's opaque run identity. */
 export async function beginEffect(input: { surface: EffectSurface; chatId?: string | null; run: string; tool: string; args: unknown }): Promise<BeginOutcome> {
-  await load();
+  const file = await resolveLedgerFile();
+  if (file) syncLedger(file); // the other process (Main <-> daemon) may have left an unsettled begin since the last call
   const key = effectKey(input.chatId, input.tool, input.args);
-  const latest = latestByKey.get(key);
+  let latest = latestByKey.get(key);
   if (latest?.t === "settle" && latest.state === "settled" && latest.result && !ackedRefs.has(latest.ref)) {
     const begin = beginByRef.get(latest.ref);
     if (begin && begin.run !== input.run) {
       const text = await readEffectResult(latest.result);
-      if (text !== null) {
-        await append({ t: "replay", ref: randomUUID(), key, at: new Date().toISOString(), priorRef: latest.ref });
+      if (file) syncLedger(file); // the read yielded: the result may have been acknowledged or superseded meanwhile
+      const fresh = latestByKey.get(key);
+      if (text !== null && fresh === latest && !ackedRefs.has(latest.ref)) {
+        appendRow(file, { t: "replay", ref: randomUUID(), key, at: new Date().toISOString(), priorRef: latest.ref });
         return { status: "replayed", priorRef: latest.ref, priorAt: begin.at, content: text, replayed: true };
       }
+      latest = fresh;
     }
   }
+  // From here to the begin append nothing awaits, so the decision is made on the file as it was read.
   const prior = latest?.t === "begin" && latest.run !== input.run ? latest
     : latest?.t === "settle" && latest.state === "uncertain" ? beginByRef.get(latest.ref) ?? null
       : null;
   if (prior) {
-    await append({ t: "notice", ref: randomUUID(), key, at: new Date().toISOString(), priorRef: prior.ref });
+    appendRow(file, { t: "notice", ref: randomUUID(), key, at: new Date().toISOString(), priorRef: prior.ref });
     return {
       status: "uncertain_prior", priorRef: prior.ref, priorAt: prior.at,
       content: `EFFECT_UNCERTAIN: an identical ${input.tool} call started at ${prior.at} and its outcome was never confirmed. `
@@ -160,7 +230,7 @@ export async function beginEffect(input: { surface: EffectSurface; chatId?: stri
     };
   }
   const ref = randomUUID();
-  await append({ t: "begin", ref, key, at: new Date().toISOString(), surface: input.surface, tool: input.tool, chatId: input.chatId ?? null,
+  appendRow(file, { t: "begin", ref, key, at: new Date().toISOString(), surface: input.surface, tool: input.tool, chatId: input.chatId ?? null,
     run: input.run, argsDigest: effectArgsDigest(input.args) });
   return { status: "begun", ref };
 }
@@ -173,13 +243,19 @@ export async function beginEffect(input: { surface: EffectSurface; chatId?: stri
  * `uncertain` row. Returns whether the row was written.
  */
 export async function settleEffect(ref: string, state: EffectSettleState, options?: { resolveUncertain?: boolean; result?: string }): Promise<boolean> {
-  await load();
+  const file = await resolveLedgerFile();
+  if (file) syncLedger(file);
   const begin = beginByRef.get(ref);
   if (!begin) return false;
-  const prior = settledByRef.get(ref);
-  if (prior && !(prior === "uncertain" && options?.resolveUncertain === true && state !== "uncertain")) return false;
+  const final = (): boolean => {
+    const prior = settledByRef.get(ref);
+    return Boolean(prior) && !(prior === "uncertain" && options?.resolveUncertain === true && state !== "uncertain");
+  };
+  if (final()) return false;
   const result = state === "settled" && typeof options?.result === "string" ? await storeEffectResult(begin.chatId, options.result) : null;
-  await append({ t: "settle", ref, key: begin.key, at: new Date().toISOString(), state, ...(result ? { result } : {}) });
+  if (file) syncLedger(file); // storing the result yielded: the first settle of a ref stays final across both processes
+  if (final()) return false;
+  appendRow(file, { t: "settle", ref, key: begin.key, at: new Date().toISOString(), state, ...(result ? { result } : {}) });
   return true;
 }
 
@@ -188,16 +264,18 @@ export async function settleEffect(ref: string, state: EffectSettleState, option
  * again. Idempotent; a ref without a stored result, an unknown ref or an already acknowledged one is a no-op (false).
  */
 export async function acknowledgeEffect(ref: string): Promise<boolean> {
-  await load();
+  const file = await resolveLedgerFile();
+  if (file) syncLedger(file);
   const begin = beginByRef.get(ref);
   if (!begin || !resultByRef.has(ref) || ackedRefs.has(ref)) return false;
-  await append({ t: "ack", ref: randomUUID(), key: begin.key, at: new Date().toISOString(), settleRef: ref });
+  appendRow(file, { t: "ack", ref: randomUUID(), key: begin.key, at: new Date().toISOString(), settleRef: ref });
   return true;
 }
 
 /** Effects whose newest row is an unsettled begin or an uncertain settle (for status and recovery views). */
 export async function uncertainEffects(chatId?: string | null): Promise<Array<{ ref: string; tool: string; at: string; chatId: string | null; surface: EffectSurface }>> {
-  await load();
+  const file = await resolveLedgerFile();
+  if (file) syncLedger(file);
   const out: Array<{ ref: string; tool: string; at: string; chatId: string | null; surface: EffectSurface }> = [];
   for (const row of latestByKey.values()) {
     // A notice only tells the model once; it never resolves the prior effect, so that effect stays listed until a settle says otherwise.
@@ -211,7 +289,7 @@ export async function uncertainEffects(chatId?: string | null): Promise<Array<{ 
 
 /** Test seam: a private ledger file and a cold index. */
 export function useEffectLedgerFileForTest(file: string | null): void {
-  fileOverride = file; loaded = false; loadError = null; latestByKey.clear(); beginByRef.clear(); settledByRef.clear(); resultByRef.clear(); ackedRefs.clear();
+  fileOverride = file; syncedFile = null; loadError = null; resetIndex();
 }
 
 /** Opaque per-run identity for a dispatcher object (an approval context or a proxy gate). */

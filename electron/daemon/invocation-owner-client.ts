@@ -25,7 +25,7 @@ function unavailable(): Error & { code: string } {
 function record(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
 }
-const METHODS = ["invoke.currentTurn", "invoke.steerCurrentTurn", "invoke.currentTurnSteerReceipt", "invoke.cancel"];
+const METHODS = ["invoke.currentTurn", "invoke.steerCurrentTurn", "invoke.currentTurnSteerReceipt", "invoke.cancel", "invoke.ownerSteer"];
 
 /** Native local client. It observes the existing daemon only: no spawn, replay,
  * fallback brain, or reconnect timer. Every RPC has a distinct bounded wait. */
@@ -142,7 +142,9 @@ export function createInvocationOwnerClient(options: InvocationOwnerClientOption
         || typeof ping.storePath !== "string" || canonicalDaemonPath(ping.storePath) !== identity.storePath
         || !Number.isSafeInteger(ping.storeSchemaVersion) || Number(ping.storeSchemaVersion) < options.requiredSchemaVersion) throw unavailable();
       guard = { serviceIdentity: identity.serviceIdentity, bootId: ping.bootId };
-      const receipt = record(await rpc("invoke.ownerRegister", { ...guard, ownerId: options.ownerId, ownerKind: options.ownerKind }));
+      const brokerFeatures = record(ping.invocationControlBroker);
+      const receipt = record(await rpc("invoke.ownerRegister", { ...guard, ownerId: options.ownerId, ownerKind: options.ownerKind,
+        ...(brokerFeatures?.ownerProcessClaims === true ? { ownerPid: process.pid } : {}) }));
       if (!receipt || receipt.ownerId !== options.ownerId || receipt.ownerKind !== options.ownerKind) throw unavailable();
       registered = true;
       for (const input of beforeRegistered.splice(0)) void receiveControl(input).catch(() => { /* No resend. */ });

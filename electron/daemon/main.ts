@@ -49,8 +49,10 @@ import { installDaemonProcessDiagnostics } from "./process-diagnostics";
 import { installNodeHostSystemNetwork } from "../net/system-network-core";
 import { captureDaemonSocketFence, canonicalDaemonPath, resolveDaemonServiceIdentity } from "./service-identity";
 import { createInvocationOwnerBroker } from "./invocation-owner-broker";
+import { workSessionHostState, currentWorkSessionHost, rememberWorkSessionHost, reconcileDeadWorkSessionHost, type WorkSessionHostClaim } from "../work/session-host";
 import { validateMobileCurrentTurnParams, type MobileBridgeCurrentTurnMethod } from "../../shared/mobile-bridge";
 import type { InvocationRunOwner } from "../store/invocation-owner-core";
+import { releaseGoneTerminalOwners } from "../store/terminal-owner-liveness";
 import type { NativeInvocationRuntimeOptions } from "./native-invocation-runtime";
 
 /**
@@ -131,6 +133,12 @@ let daemonNativeInvocation: Awaited<ReturnType<typeof import("./native-invocatio
 let aliveOrganisms: typeof import("../alive-organisms") | null = null;
 let nativeInvocationUnavailableCode: string | null = "native_invocation_not_configured";
 let daemonInvocationControl: typeof import("../runtime/invocation-owner-control") | null = null;
+let workSessionAuthRestore: (() => void) | null = null;
+let workSessionOwnerEvent: (() => Promise<boolean>) | null = null;
+/** Chats whose run leases a previous service of this machine left unsettled (released at this boot's win of the control socket). */
+const abandonedServiceChatIds = new Set<string>();
+const departedWorkOwners = new Map<string, WorkSessionHostClaim>();
+const recoveringWorkOwners = new Set<string>();
 
 async function getDaemonInvocationControl() {
   if (!daemonInvocationControl) {
@@ -406,7 +414,7 @@ async function handleControlMethod(method: string, params: unknown, peer: Contro
       // The daemon's liveness is not evidence that Main-owned chat/Goal
       // invocations have advanced. Consumers must query Main's run ledger.
       invocationProgressOwner: "leased-harness-owner",
-      invocationControlBroker: { protocolVersion: 1, ready: invocationBroker !== null,
+      invocationControlBroker: { protocolVersion: 1, ready: invocationBroker !== null, ownerProcessClaims: true,
         activeOwners: ownerObservation.known ? ownerObservation.count : null },
       nativeInvocation: daemonNativeInvocation ? { ...daemonNativeInvocation.status(), address: daemonNativeInvocation.address,
         pendingCount: daemonNativeInvocation.pendingCount, unavailableCode: null } : { version: "agentlas.native-attach.v1",
@@ -432,13 +440,13 @@ async function handleControlMethod(method: string, params: unknown, peer: Contro
     };
   }
   if (method === "invoke.ownerRegister" || method === "invoke.ownerComplete"
-    || ["invoke.currentTurn", "invoke.steerCurrentTurn", "invoke.currentTurnSteerReceipt", "invoke.cancel"].includes(method)) {
+    || ["invoke.currentTurn", "invoke.steerCurrentTurn", "invoke.currentTurnSteerReceipt", "invoke.cancel", "invoke.ownerSteer"].includes(method)) {
     assertServiceControl(params);
     if (!invocationBroker || !invocationOwners) throw new Error("invocation_owner_unavailable");
     const input = params as Record<string, unknown>;
     if (method === "invoke.ownerRegister") {
-      if (Object.keys(input).some(key => !["serviceIdentity", "bootId", "ownerId", "ownerKind"].includes(key))) throw new Error("invocation_owner_control_invalid");
-      return invocationBroker.register(peer, input as unknown as { ownerId: string; ownerKind: "desktop" | "terminal" });
+      if (Object.keys(input).some(key => !["serviceIdentity", "bootId", "ownerId", "ownerKind", "ownerPid"].includes(key))) throw new Error("invocation_owner_control_invalid");
+      return invocationBroker.register(peer, input as unknown as { ownerId: string; ownerKind: "desktop" | "terminal"; ownerPid?: number });
     }
     if (method === "invoke.ownerComplete") {
       if (Object.keys(input).some(key => !["serviceIdentity", "bootId", "completion"].includes(key))) throw new Error("invocation_owner_control_invalid");
@@ -459,6 +467,13 @@ async function handleControlMethod(method: string, params: unknown, peer: Contro
       if (Object.keys(control).some(key => !["chatId", "runId"].includes(key)) || control.runId !== owner.runId) throw new Error("invocation_owner_control_invalid");
       return owner.ownerId === bootId ? (await import("../invocation/service")).invocationService.cancel(owner.runId)
         : invocationBroker.dispatch(owner, "invoke.cancel", control);
+    }
+    if (method === "invoke.ownerSteer") {
+      const local = await getDaemonInvocationControl();
+      const next = local.validateInvocationOwnerNextTurn(control);
+      if (owner.ownerId !== bootId) return invocationBroker.dispatch(owner, "invoke.ownerSteer", next);
+      return local.handleInvocationOwnerControl({ requestId: "work-next-turn", ownerId: owner.ownerId,
+        leaseId: owner.leaseId, chatId: owner.chatId, runId: owner.runId, method: "invoke.ownerSteer", params: next });
     }
     if (validateMobileCurrentTurnParams(method as MobileBridgeCurrentTurnMethod, control)) throw new Error("invocation_owner_control_invalid");
     if (owner.ownerId !== bootId) return invocationBroker.dispatch(owner, method as import("./invocation-owner-broker").InvocationOwnerBrokerMethod, control);
@@ -711,12 +726,16 @@ async function handleControlMethod(method: string, params: unknown, peer: Contro
     // graph.run is the local owner's explicit native command ingress. A new
     // command has its own occurrence; no serialized field may mint custody.
     const occurrenceId = `owner-request:${randomUUID()}`;
+    // Main's scheduler, Run now and event triggers all hold the automation's cross-process run lease while they run
+    // it. This command takes the same lease, so the same automation never runs twice at once (published/charged twice).
+    let held: import("../store/automations").HeldAutomationRunLease | null = null;
     const assertOccurrenceCurrent = () => {
       assertServiceOwner();
       if (closing || controller.signal.aborted || !lifetime.ownsActiveRoot()) {
         throw new Error("graph_occurrence_custody_changed");
       }
       if (stored) {
+        if (!held?.current()) throw new Error("graph_occurrence_custody_changed");
         const current = getAutomation(stored.id);
         if (!current?.graph || graphExecutionDigest(current, current.graph) !== graphDigest) {
           throw new Error("graph_occurrence_custody_changed");
@@ -724,6 +743,18 @@ async function handleControlMethod(method: string, params: unknown, peer: Contro
       }
     };
     let afterSettled: ReturnType<typeof captureMainRootContinuation>;
+    if (stored) {
+      const { holdAutomationRunLease } = await import("../store/automations");
+      held = holdAutomationRunLease(stored.id, `${process.pid}:headless`, {
+        allowDisabled: true,
+        onLost: () => controller.abort(new Error("Automation execution lease ownership lost")),
+      });
+      if (!held) {
+        // The same typed refusal as Desktop's Run now (automations:runNow). Nothing ran, so the command is safe to repeat.
+        throw Object.assign(new Error("automation_run_not_accepted: this automation is already running (its run lease is held by the Desktop scheduler, a manual run or another terminal); run it again after it finishes"),
+          { code: "automation_run_not_accepted" });
+      }
+    }
     graphRunsInFlight += 1;
     // 데몬으로 들어온 그래프 실행은 정의상 무인 작업이다 — 실행 슬롯 2단 큐와 자식 nice
     // 차등이 이 문맥 표식으로 동작한다(사람이 기다리는 채팅 턴이 항상 앞선다).
@@ -763,6 +794,8 @@ async function handleControlMethod(method: string, params: unknown, peer: Contro
       return wireResult;
     } finally {
       graphRunsInFlight -= 1;
+      // Synchronous with the return above, so a restored login wait cannot see this lease before it is given back.
+      held?.release();
     }
   }
   throw new Error(`unknown method: ${method}`);
@@ -781,6 +814,11 @@ let shutdownPromise: Promise<void> | null = null;
 function performShutdown(reason: string): Promise<void> {
   if (shutdownPromise) return shutdownPromise;
   closing = true;
+  workSessionAuthRestore?.();
+  workSessionAuthRestore = null;
+  workSessionOwnerEvent = null;
+  departedWorkOwners.clear();
+  recoveringWorkOwners.clear();
   goalWaitHeartbeat = null;
   daemonNativeInvocation?.closeAdmission();
   for (const controller of graphLoginWaits.values()) controller.abort(new Error("app_closed"));
@@ -963,12 +1001,29 @@ export async function startDaemon(options: DaemonStartupOptions = {}): Promise<v
   serviceHeartbeat = setInterval(() => {
     lastHeartbeatAtMs = Date.now();
     goalWaitHeartbeat?.();
+    // Reuse the existing service heartbeat after a broker disconnect. Socket
+    // loss merely schedules observation; only ESRCH from the shared host port
+    // wakes death recovery. Graceful detach can precede actual process exit.
+    if (!closing && workSessionOwnerEvent) for (const [id, owner] of departedWorkOwners) {
+      if (recoveringWorkOwners.has(id)) continue;
+      if (workSessionHostState(owner) !== "dead") continue;
+      if (!reconcileDeadWorkSessionHost(owner)) continue;
+      recoveringWorkOwners.add(id);
+      // Lease cleanup alone does not deliver the result. Keep this exact wake
+      // claim until recovery succeeds; transient store failures retry on the
+      // existing heartbeat, without overlapping recoveries for this host.
+      void workSessionOwnerEvent().then(recovered => {
+        if (!closing && recovered && departedWorkOwners.get(id) === owner) departedWorkOwners.delete(id);
+      }).catch(() => { /* Keep the claim if a future event implementation rejects. */ })
+        .finally(() => { recoveringWorkOwners.delete(id); });
+    }
     const ownerPid = desktopParentPid;
     if (ownerPid !== null && !processIsAlive(ownerPid)) {
       desktopParentPid = null;
       appInstanceId = null;
       attachedExpectedStoreIdentity = null;
       recordServicePhase("parent_exited");
+      workSessionOwnerEvent?.();
     }
   }, 500);
 
@@ -990,7 +1045,17 @@ export async function startDaemon(options: DaemonStartupOptions = {}): Promise<v
   const runOwners = await import("../store/invocation-run-owners");
   runOwners.configureInvocationProcessOwner("daemon", bootId);
   invocationOwners = runOwners.invocationRunOwners;
-  invocationBroker = createInvocationOwnerBroker({ owners: invocationOwners });
+  try { rememberWorkSessionHost(currentWorkSessionHost()); }
+  catch (error) { console.warn("[agentlasd] Work host registration deferred:", error instanceof Error ? error.message : error); }
+  invocationBroker = createInvocationOwnerBroker({ owners: invocationOwners, onOwnerRegistered: owner => {
+    if (owner.pid !== undefined) rememberWorkSessionHost({ ownerId: owner.ownerId, ownerKind: owner.ownerKind, pid: owner.pid });
+  }, onOwnerDisconnected: owner => {
+    if (closing) return;
+    if (owner.pid !== undefined) departedWorkOwners.set(owner.ownerId, { ownerId: owner.ownerId, ownerKind: owner.ownerKind, pid: owner.pid });
+    // Ready hosts may reconcile a now-terminal receipt immediately. If setup
+    // is incomplete the claim remains for the first ready heartbeat above.
+    workSessionOwnerEvent?.();
+  } });
   if (process.env.AGENTLAS_EXPECTED_STORE_IDENTITY) {
     const { openedStorePath } = await import("../store/db");
     const actualStoreIdentity = storeIdentityDigest(openedStorePath(), appInstanceId);
@@ -1056,9 +1121,24 @@ export async function startDaemon(options: DaemonStartupOptions = {}): Promise<v
       const released = invocationOwners?.releaseAbandoned("daemon", bootId) ?? [];
       if (released.length > 0) {
         console.warn(`[agentlasd] released ${released.length} run lease(s) a previous service left unsettled: ${released.map((owner) => owner.runId).join(", ")}`);
+        // The dead service held the owner's queued follow-ups in its memory; their durable rows are recovered below once this
+        // service can run a turn.
+        for (const owner of released) abandonedServiceChatIds.add(owner.chatId);
       }
     } catch (error) {
       console.error("[agentlasd] abandoned run lease release failed:", error);
+    }
+    // A terminal that died without releasing (kill -9, a crash, a reboot) holds its chat's lease for good; only a per-owner proof
+    // that its process and agent children are gone may release it (never "every other terminal").
+    try {
+      if (invocationOwners) {
+        const swept = releaseGoneTerminalOwners(invocationOwners, userDataDir());
+        if (swept.released.length > 0) {
+          console.warn(`[agentlasd] released ${swept.released.length} run lease(s) a terminal that is gone left unsettled: ${swept.released.map((owner) => owner.runId).join(", ")}`);
+        }
+      }
+    } catch (error) {
+      console.error("[agentlasd] terminal lease sweep failed:", error);
     }
     recordServicePhase("control_socket_ready");
     console.log(`[agentlasd] control socket: ${socket.address}`);
@@ -1127,6 +1207,53 @@ export async function startDaemon(options: DaemonStartupOptions = {}): Promise<v
       // Preserve existing Science/control service behavior while exposing exact
       // native readiness failure. No native request has been issued/replayed.
       console.warn("[agentlasd] native invocation unavailable:", nativeInvocationUnavailableCode);
+    }
+  }
+
+  // Work recovery starts only after enrollment, the native owner transport and
+  // permission proxy are ready. The shared dispatcher preserves other live
+  // hosts and never replays an attempted dispatch with a missing receipt.
+  if (daemonNativeInvocation && daemonInvocationService && !closing) {
+    try {
+      const [{ recoverWorkSessionDispatches }, { onAuthSessionRestored }] = await Promise.all([
+        import("../work/session-dispatch"), import("../auth"),
+      ]);
+      const recover = async () => {
+        if (closing || !daemonNativeInvocation || !daemonInvocationService) return false;
+        assertServiceOwner();
+        await recoverWorkSessionDispatches();
+        return !closing;
+      };
+      if (!closing) {
+        assertServiceOwner();
+        // An enrolled service can receive the owner session after startup.
+        // Reconcile then too; do not invent a polling execution coordinator.
+        workSessionOwnerEvent = () => recover().catch(error => {
+          console.warn("[agentlasd] Work recovery deferred:", error instanceof Error ? error.message : error);
+          return false;
+        });
+        workSessionAuthRestore = onAuthSessionRestored(() => { void workSessionOwnerEvent?.(); });
+        await recover();
+      }
+    } catch (error) {
+      console.warn("[agentlasd] Work recovery deferred:", error instanceof Error ? error.message : error);
+    }
+  }
+
+  // The owner's follow-ups that the service this one replaced had queued behind its turns are durable rows with no memory queue
+  // anywhere now: only a Desktop start rehydrated them, so a service-only restart (crash, update) left the "queued" message
+  // waiting for the next window start. Only the chats whose leases this boot released are touched, never a Desktop-owned run's;
+  // the drain claim keeps a second host from starting the same direction.
+  if (daemonNativeInvocation && daemonInvocationService && !closing && abandonedServiceChatIds.size > 0) {
+    for (const chatId of [...abandonedServiceChatIds]) {
+      abandonedServiceChatIds.delete(chatId);
+      try {
+        assertServiceOwner();
+        const report = daemonInvocationService.recoverQueuedSteers(chatId);
+        if (report.examined > 0) console.log(`[agentlasd] recovered queued steers of a replaced service chat=${chatId}`, report);
+      } catch (error) {
+        console.warn(`[agentlasd] queued steer recovery deferred chat=${chatId}:`, error instanceof Error ? error.message : error);
+      }
     }
   }
 

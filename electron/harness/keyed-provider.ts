@@ -63,20 +63,23 @@ export interface KeyedCallContext { chatId: string; runId: string; dryRun?: bool
  */
 export const ANSWER_WINDOW_MS = 25_000;
 const inflight = new Map<string, Promise<Outcome>>();
-const finished = new Map<string, { outcome: Outcome; at: number }>();
+/** keep: a spend-once call (POST) answers the same request from this copy for FINISHED_KEEP_MS; otherwise (a status read) the copy
+ * exists only for a caller that was told "running", is handed over once and expires after UNCLAIMED_KEEP_MS. */
+const finished = new Map<string, { outcome: Outcome; at: number; keep: boolean }>();
 const FINISHED_KEEP_MS = 6 * 60 * 60_000;
+const UNCLAIMED_KEEP_MS = 5 * 60_000;
 let answerWindowMs = ANSWER_WINDOW_MS;
 /** Contract gates only: a short answer window. */
 export function setKeyedAnswerWindowForTests(ms: number): void { answerWindowMs = Math.max(10, ms); }
 
-async function answerWithin(key: string, start: () => Promise<Outcome>, running: () => Outcome, windowMs = answerWindowMs): Promise<Outcome> {
+async function answerWithin(key: string, start: () => Promise<Outcome>, running: () => Outcome, windowMs = answerWindowMs, remember = true): Promise<Outcome> {
   const now = Date.now();
-  for (const [k, v] of finished) if (now - v.at > FINISHED_KEEP_MS) finished.delete(k);
+  for (const [k, v] of finished) if (now - v.at > (v.keep ? FINISHED_KEEP_MS : UNCLAIMED_KEEP_MS)) finished.delete(k);
   const done = finished.get(key);
-  if (done) return done.outcome;
+  if (done) { if (!done.keep) finished.delete(key); return done.outcome; }
   let job = inflight.get(key);
   if (!job) {
-    job = start().then((outcome) => { if (outcome.status === "ok") finished.set(key, { outcome, at: Date.now() }); return outcome; })
+    job = start().then((outcome) => { if (outcome.status === "ok") finished.set(key, { outcome, at: Date.now(), keep: remember }); return outcome; })
       .finally(() => { inflight.delete(key); });
     inflight.set(key, job);
   }
@@ -84,6 +87,8 @@ async function answerWithin(key: string, start: () => Promise<Outcome>, running:
   const windowEnd = new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), windowMs); });
   const first = await Promise.race([job, windowEnd]);
   if (timer) clearTimeout(timer);
+  // A status read answered inside the window has been delivered: the next identical read asks the provider again.
+  if (first && !remember) finished.delete(key);
   return first ?? running();
 }
 
@@ -318,8 +323,11 @@ export async function keyedProviderRequest(args: Record<string, unknown>, ctx: K
   const key = await providerKey(adapter);
   if (!key) return refused("provider_key_missing", `the owner saves ${adapter.envKey} for ${adapter.label} in Settings`);
   const requestKey = sha(JSON.stringify({ op: "provider.request", routeId, method, apiPath, json: args.json ?? null, outputFile, chatId: ctx.chatId }));
+  // Only a POST spends something: it is answered once per request. A GET/DELETE reads a state that moves (a job's status), so a
+  // finished read is never replayed to a later identical one — it only joins a read still in flight.
   return answerWithin(requestKey, () => keyedProviderRequestNow(adapter, key, { routeId, method, apiPath, json: args.json, outputFile }, ctx),
-    () => ok({ routeId, state: "running", next: "the call is still running in the host; call provider.request again with the same arguments to get its result (it is not sent twice)" }));
+    () => ok({ routeId, state: "running", next: "the call is still running in the host; call provider.request again with the same arguments to get its result (it is not sent twice)" }),
+    answerWindowMs, method === "POST");
 }
 
 async function keyedProviderRequestNow(adapter: KeyedAdapter, key: string, input: { routeId: string; method: string; apiPath: string; json: unknown; outputFile: string | null }, ctx: KeyedCallContext): Promise<Outcome> {

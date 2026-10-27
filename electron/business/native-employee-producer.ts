@@ -26,6 +26,8 @@ export interface NativeEmployeeCustodyOwners {
  lookup(capability:object,packet:Readonly<NativeEmployeeCustodyPacket>):Promise<BusinessNativeCustodyReceipt>;
  currentResult(capability:object,result:Readonly<BusinessNativeCustodyReceipt>):Promise<boolean>;
  publish(capability:object):Promise<'published'|'awaiting-enrollment'|'unknown'>;
+ /** Accepted shares whose delivery has not settled; an attach picks them up so an approval is never left undelivered by a restart. */
+ pending?():Promise<object[]>;
 }
 /** Native v2 performs no organization policy projection. Its opaque capability
  * comes from the genuine native acceptance transaction; Root independently
@@ -33,16 +35,20 @@ export interface NativeEmployeeCustodyOwners {
 export function createNativeEmployeeCustodyProducer(owners:NativeEmployeeCustodyOwners,lifetime:{signal:AbortSignal;current():boolean}){
  const names=['subscribeAccepted','current','inspect','beginAttempt','holdUnknown','settle','submit','lookup','currentResult','publish'] as const;
  const refs=names.map(name=>owners?.[name]);let closed=false,attached=false,unknown=false,release:(()=>void)|null=null;
- const active=new WeakMap<object,Promise<'published'|'awaiting-enrollment'|'unknown'|'denied'>>();
+ const active=new WeakMap<object,Promise<'published'|'awaiting-enrollment'|'unknown'|'denied'>>(),handling=new Set<string>();
  function blocker(){return closed||unknown||owners?.protocol!=='agentlas.business.native-custody-producer.v2'||names.some((name,i)=>typeof owners[name]!=='function'||owners[name]!==refs[i])||lifetime.signal.aborted?'business_native_custody_producer_unavailable':null}
  async function check(capability:object){return !blocker()&&lifetime.current()&&await owners.current(capability)&&!blocker()&&lifetime.current()}
  async function receiveOriginal(capability:object):Promise<'published'|'awaiting-enrollment'|'unknown'|'denied'>{
   if(!await check(capability))return 'denied';const delivery=await owners.inspect(capability);if(!delivery||!await check(capability))return 'denied';
   const packet=structuredClone(delivery.packet);if(packet.schema!==BUSINESS_NATIVE_CUSTODY_PACKET||packet.acceptanceKind!=='explicit-sharing-acceptance')return 'denied';
+  // One delivery of an acceptance at a time, however many capabilities reach it (the accept, an attach sweep): a second one must not touch the first one's attempt.
+  if(handling.has(packet.idempotencyKey))return 'unknown';handling.add(packet.idempotencyKey);
   try{
    let result:BusinessNativeCustodyReceipt;
    if(delivery.state==='ready'){
-    if(!await owners.beginAttempt(capability,digest(packet))||!await check(capability)){await owners.holdUnknown(capability);return 'unknown'}
+    // false = this call did not take the attempt (another actor did, or the row is no longer ready): that attempt is not ours to hold.
+    if(!await owners.beginAttempt(capability,digest(packet)))return 'unknown';
+    if(!await check(capability)){await owners.holdUnknown(capability);return 'unknown'}
     result=await owners.submit(capability,packet);
    }else result=await owners.lookup(capability,packet);
    if(!await check(capability)||result.schema!=='agentlas.business.native-sharing.v1'||result.kind!=='packet'||result.associationId!==packet.associationId||result.idempotencyKey!==packet.idempotencyKey||result.nativePacketDigest!==digest(packet.approved)||!await owners.settle(capability,result)){
@@ -51,10 +57,14 @@ export function createNativeEmployeeCustodyProducer(owners:NativeEmployeeCustody
    if(!await check(capability)||!await owners.currentResult(capability,result)||!await check(capability))return 'unknown';
    const publication=await owners.publish(capability);return await check(capability)?publication:'unknown';
   }catch{try{await owners.holdUnknown(capability)}catch{}return 'unknown'}
+  finally{handling.delete(packet.idempotencyKey)}
  }
  function receive(capability:object){if(!capability||typeof capability!=='object')return Promise.resolve('denied' as const);const prior=active.get(capability);if(prior)return prior;const pending=receiveOriginal(capability).catch(()=> 'unknown' as const).finally(()=>active.delete(capability));active.set(capability,pending);return pending;}
  function close(){closed=true;if(release){const stop=release;release=null;try{stop()}catch{unknown=true}}}
- return Object.freeze({blocker,receive,attach(){if(attached)return !blocker();if(blocker())return false;try{release=owners.subscribeAccepted(cap=>{void receive(cap)});if(typeof release!=='function'){unknown=true;return false}attached=true;lifetime.signal.addEventListener('abort',close,{once:true});return true}catch{unknown=true;return false}},close,
+ return Object.freeze({blocker,receive,attach(){if(attached)return !blocker();if(blocker())return false;try{release=owners.subscribeAccepted(cap=>{void receive(cap)});if(typeof release!=='function'){unknown=true;return false}attached=true;lifetime.signal.addEventListener('abort',close,{once:true});
+   // An earlier approval whose first attempt never left (or whose answer was lost) is delivered now, by the same idempotent path as a new one.
+   if(typeof owners.pending==='function')void owners.pending().then(caps=>{for(const cap of caps)void receive(cap)}).catch(()=>{});
+   return true}catch{unknown=true;return false}},close,
   cleanlyClosed:()=>closed&&!unknown&&release===null});
 }
 export function sameNativeEmployeeAssociation(a:BusinessNativeAssociation,packet:NativeEmployeeCustodyPacket){return a.associationId===packet.associationId&&a.associationRevision===packet.associationRevision&&a.sourceRevision===packet.sourceRevision&&a.consentRevision===packet.consentRevision&&a.state==='active';}

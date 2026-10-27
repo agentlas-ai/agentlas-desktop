@@ -16,7 +16,7 @@ import { applyEpisodeReservedStrategyProposal, type AutomationStrategyProposalRe
 import { runAutomationStrategyCycle } from "../automation-strategy-cycle";
 import { latestGoalWaitSubscription, registerGoalWaitSubscription } from "./wait-subscriptions";
 import { projectGoalPlanReadiness, selectActiveTactics, type LiveGoalPlan } from "../../shared/goal-shape";
-import { graphExecutionDigest, sha256Value } from "../../shared/graph-execution-digest";
+import { graphExecutionDigest, sha256Value, GRAPH_CHECKPOINT_SCHEMA } from "../../shared/graph-execution-digest";
 import type { WorkflowGraph } from "../../shared/types";
 import type { AgiGoalFactsDeps } from "../agi/goal-facts";
 import type { GoalWaitIntent } from "./wait-emitter";
@@ -58,7 +58,7 @@ function noEffectSource(source: SourceRun, graph: WorkflowGraph, definition: str
     throw new Error("goal_strategy_source_unavailable");
   const checkpoint = JSON.parse(source.checkpoint_json) as Record<string, unknown>;
   const { checkpointDigest, ...payload } = checkpoint;
-  if (checkpoint.schemaVersion !== "agentlas.automation-graph-checkpoint.v4" || checkpointDigest !== hash(payload)
+  if (checkpoint.schemaVersion !== GRAPH_CHECKPOINT_SCHEMA || checkpointDigest !== hash(payload)
     || checkpoint.graphDigest !== source.graph_digest || checkpoint.occurrenceId !== source.occurrence_id
     || !["inFlightNodeIds", "ambiguousNodeIds"].every(k => Array.isArray(checkpoint[k]) && (checkpoint[k] as unknown[]).length === 0)
     || !checkpoint.toolReceipts || typeof checkpoint.toolReceipts !== "object" || Array.isArray(checkpoint.toolReceipts)

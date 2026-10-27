@@ -9,7 +9,7 @@ import { agiActionNoticeLine, hostStatusLabel, isHousekeepingHostNotice } from "
  * Keep the original text in the message ledger; internal resume instructions
  * and verifier payloads are not user-facing task instructions.
  */
-export function HostContinuationNotice({ text, locale, notice }: { text: string; locale: "ko" | "en"; notice?: ChatHostNotice; onOpenChat?: (chatId: string) => void }) {
+export function HostContinuationNotice({ text, locale, notice, onOpenChat }: { text: string; locale: "ko" | "en"; notice?: ChatHostNotice; onOpenChat?: (chatId: string) => void }) {
   // Housekeeping (the host checking, continuing, waiting, resuming; One waking to review handed-off work) is not drawn.
   if (isHousekeepingHostNotice(notice)) return null;
   if (notice?.purpose === "one-dispatch-brief") {
@@ -24,7 +24,7 @@ export function HostContinuationNotice({ text, locale, notice }: { text: string;
     </article>;
   }
   if (notice?.purpose === "one-dispatch-link" || notice?.purpose === "one-dispatch-result") {
-    return <OneDispatchNotice notice={notice} locale={locale} />;
+    return <OneDispatchNotice notice={notice} locale={locale} onOpenChat={onOpenChat} />;
   }
   if (notice?.purpose === "one-team-member-joined") {
     // One 이 팀원을 만들거나 단톡방에 초대한 영수증 — 글은 Main 이 쓴 기록이 아니라 표식으로 다시 그린다.

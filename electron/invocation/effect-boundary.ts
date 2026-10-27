@@ -8,6 +8,7 @@ import { boundEffectBoundary, MAIN_TOOL_PREDISPATCH_PROTOCOL, isMainToolPreDispa
 import { verifyScienceFailureSettlement, type ScienceToolCorrelation } from "./science-failure-settlement";
 import { createHash } from "node:crypto";
 import { parseScienceNativeFailureObservation, type ScienceNativeFailureObservation } from "./science-native-failure";
+import { ACP_PREFERRED_KINDS } from "../runtime/acp-kinds";
 
 // These adapters forward a provider tool-result block or a completed Main tool
 // dispatch with an explicit isError boolean. ACP/Antigravity and unknown
@@ -19,6 +20,13 @@ import { parseScienceNativeFailureObservation, type ScienceNativeFailureObservat
 const RESULT_COVERAGE = new Set(["claude-code", "codex", "byok", "ollama", "lmstudio", "mlx", "agentlas-local", "agentlas"]);
 /** Shared Main contract, not a provider-supplied no-tools attestation. */
 export function hasCallbackResultCoverage(kind: string): boolean { return RESULT_COVERAGE.has(kind); }
+/**
+ * The adapter-effect scope kind that attests a stored runtime kind. cursor/grok/kimi turns run through the ACP runner, whose effect scope
+ * is "acp" (runtime/acp.ts), so no scope was ever named after the runtime kind and `dynamicCovered` could never find one: every completed
+ * turn of the three ended coverage unknown, effects "uncertain", and held the owner's follow-up. Their ACP-disabled hand drivers open no
+ * scope (cursor's reports no tool rows at all), so they stay unknown on purpose.
+ */
+export function receiptScopeKind(kind: string): string { return ACP_PREFERRED_KINDS.has(kind) ? "acp" : kind; }
 /** Host capability/Goal notices lack provider operation identity, arguments and
  * typed outcome. A real provider operation sharing the display name still counts. */
 export function isEffectStatusOnlyTool(tool: {name:string;id?:unknown;args?:unknown;isError?:unknown}): boolean {
@@ -182,7 +190,7 @@ export class InvocationEffectBoundaryTracker {
         } catch { this.recordingFailed(); pending.add("science-schema-rejection-recording-failed"); }
       }
       const dynamicCovered = (kind: string): boolean => {
-        const scopes = [...this.adapterScopes.values()].filter(scope => scope.adapterKind === kind);
+        const scopes = [...this.adapterScopes.values()].filter(scope => scope.adapterKind === kind || scope.adapterKind === receiptScopeKind(kind));
         return scopes.some(scope => scope.rootBound && scope.chatId === this.chatId && scope.report?.complete === true
           && scope.report.protocol !== MAIN_TOOL_PREDISPATCH_PROTOCOL)
           && scopes.every(scope => scope.chatId === this.chatId && scope.report?.complete === true

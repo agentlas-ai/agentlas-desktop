@@ -15,7 +15,9 @@ import { useT } from "@/lib/i18n";
 import { ipc, ipcEvents } from "@/lib/ipc";
 import { useOrphanAttentionRevealed } from "@/lib/attention";
 import type { BrowserApprovalRequestEvent, BrowserApprovalDecision } from "@/lib/types";
-import { IconShield, IconCheck, IconClose, IconClock, IconTarget } from "./Icon";
+import { ApprovalPrompt, type ApprovalPromptDeck } from "./ApprovalPrompt";
+import { useApprovalDeck } from "@/lib/tool-approvals";
+import { cleanApprovalNote, clearApprovalNoteDraft } from "@/lib/approval-note-drafts";
 
 const ACTION_LABEL: Record<string, { ko: string; en: string }> = {
   send: { ko: "메시지 전송", en: "Send message" },
@@ -28,12 +30,24 @@ const ACTION_LABEL: Record<string, { ko: string; en: string }> = {
   action: { ko: "브라우저 작업", en: "Browser action" },
 };
 
-export function BrowserActionApprovalSheet({ chatId, onStandaloneHeightChange }: {
+export function BrowserActionApprovalSheet({ chatId, onStandaloneHeightChange, supervisedRoom = false, pinRequestId, deck: deckOverride }: {
   // Kept temporarily for call-site compatibility only. Main owns authority;
   // the renderer must never auto-resolve from the currently visible setting.
   permission?: "auto" | "read" | "write" | "full";
   chatId?: string | null;
   onStandaloneHeightChange?: (height: number) => void;
+  /**
+   * `chatId` is a room the personal agent oversees, drawn in the personal conversation (owner 2026-10-27). Its
+   * requests match by that room alone, whatever surface they came from, and the card stays where it is drawn
+   * instead of moving to the composer. The answer goes to the same request as in the room itself.
+   */
+  supervisedRoom?: boolean;
+  /**
+   * Draw exactly this request (the personal agent's one-at-a-time queue picks which one is on screen) and take the
+   * "1/3 · Next" position from that queue instead of this sheet's own.
+   */
+  pinRequestId?: string;
+  deck?: ApprovalPromptDeck;
 } = {}) {
   const pathname = usePathname();
   const searchParams = useSearchParams();
@@ -47,12 +61,18 @@ export function BrowserActionApprovalSheet({ chatId, onStandaloneHeightChange }:
   const [queue, setQueue] = useState<BrowserApprovalRequestEvent[]>([]);
   const [now, setNow] = useState(() => Date.now());
   const [expiredNotice, setExpiredNotice] = useState<string | null>(null);
+  // "No, and do this instead": the request whose refusal (with the owner's line) is on its way, the send error to show on
+  // its card, and the line the room could not take (kept visible until dismissed).
+  const [submittingId, setSubmittingId] = useState<string | null>(null);
+  const [sendError, setSendError] = useState<string | null>(null);
+  const [noteFailedText, setNoteFailedText] = useState<string | null>(null);
   const wrapperRef = useRef<HTMLDivElement>(null);
   const eventRevisionRef = useRef(0);
   const latestEventRevisionRef = useRef(new Map<string, number>());
   const ownedQueue = queue.filter((request) => {
     const owner = request.owner;
     if (!owner) return false;
+    if (supervisedRoom) return owner.context !== "build" && owner.chatId !== null && owner.chatId === currentChatId;
     if (buildRoute) {
       return owner.surface === "work" && owner.chatId === null && owner.context === "build";
     }
@@ -68,8 +88,14 @@ export function BrowserActionApprovalSheet({ chatId, onStandaloneHeightChange }:
    */
   const ownerlessQueue = orphansRevealed ? queue.filter((request) => request.owner === null) : [];
   const visibleQueue = ownedQueue.length > 0 ? ownedQueue : ownerlessQueue;
-  const req = visibleQueue[0] ?? null;
-  const usesConversationComposer = Boolean(
+  // One card at a time (owner 2026-10-27): the rest wait behind "1/3 · Next" instead of stacking.
+  const ownDeck = useApprovalDeck(visibleQueue.map((request) => ({ id: request.requestId })));
+  const req = (pinRequestId
+    ? visibleQueue.find((request) => request.requestId === pinRequestId)
+    : visibleQueue.find((request) => request.requestId === ownDeck.current?.id) ?? visibleQueue[0]) ?? null;
+  const deck: ApprovalPromptDeck | undefined = deckOverride
+    ?? (ownDeck.total > 1 ? { index: ownDeck.index, total: ownDeck.total, onPrev: ownDeck.prev, onNext: ownDeck.next } : undefined);
+  const usesConversationComposer = !supervisedRoom && Boolean(
     req?.owner
     && req.owner.context !== "build"
     && req.owner.surface !== "science"
@@ -159,10 +185,24 @@ export function BrowserActionApprovalSheet({ chatId, onStandaloneHeightChange }:
     return () => window.clearTimeout(timer);
   }, [expiredNotice]);
 
+  const feedbackNode = sendError || noteFailedText ? (
+    <div role="alert" data-testid="browser-approval-outcome"
+      style={{ marginTop: 8, padding: "8px 10px", borderRadius: 10, border: "1px solid color-mix(in srgb, currentColor 18%, transparent)", fontSize: 12, lineHeight: 1.45 }}>
+      {sendError ? <span>{sendError}</span> : (
+        <>
+          <span>{ko ? "거절은 적용됐지만 지시를 방에 보내지 못했습니다. 아래 글을 방 입력창에 직접 보내 주세요."
+            : "The refusal was applied, but the instruction could not be sent to the room. Send the text below in the room yourself."}</span>
+          <q data-testid="browser-approval-note-failed" style={{ display: "block", marginTop: 4, overflowWrap: "anywhere", userSelect: "text" }}>{noteFailedText}</q>
+          <button type="button" onClick={() => setNoteFailedText(null)} style={{ marginTop: 4 }}>{ko ? "확인" : "Dismiss"}</button>
+        </>
+      )}
+    </div>
+  ) : null;
+
   if (!req) {
-    return expiredNotice ? (
+    return expiredNotice || noteFailedText ? (
       <div className={`baa-expired ${oneRoute ? "one" : ""}`} role="status">
-        {expiredNotice}
+        {expiredNotice ?? feedbackNode}
         <style jsx>{`
           .baa-expired {
             position: fixed;
@@ -190,15 +230,40 @@ export function BrowserActionApprovalSheet({ chatId, onStandaloneHeightChange }:
     ) : null;
   }
 
-  const resolve = (decision: BrowserApprovalDecision) => {
+  const resolve = (decision: BrowserApprovalDecision, rawNote?: string) => {
     const requestId = req.requestId;
-    setQueue((current) => current.filter((item) => item.requestId !== requestId));
-    void ipc()?.browser.resolveApproval(requestId, decision).then((result) => {
+    const note = decision === "deny" ? cleanApprovalNote(rawNote) : undefined;
+    if (note === undefined) {
+      clearApprovalNoteDraft(requestId);
+      setQueue((current) => current.filter((item) => item.requestId !== requestId));
+      void ipc()?.browser.resolveApproval(requestId, decision).then((result) => {
+        if (!result?.ok) {
+          setExpiredNotice(
+            ko ? "이미 만료된 요청입니다. 작업은 실행되지 않았습니다." : "That request already expired. No action was taken.",
+          );
+        }
+      });
+      return;
+    }
+    // A refusal with the owner's line: the card stays (locked, text kept) until Main says the refusal took effect and what
+    // became of the line; a send that fails outright leaves the card to answer again.
+    if (submittingId === requestId) return;
+    setSubmittingId(requestId);
+    setSendError(null);
+    void Promise.resolve(ipc()?.browser.resolveApproval(requestId, decision, note)).then((result) => {
+      setSubmittingId(null);
+      setQueue((current) => current.filter((item) => item.requestId !== requestId));
+      clearApprovalNoteDraft(requestId);
       if (!result?.ok) {
         setExpiredNotice(
           ko ? "이미 만료된 요청입니다. 작업은 실행되지 않았습니다." : "That request already expired. No action was taken.",
         );
+      } else if (result.ownerNote?.status === "failed") {
+        setNoteFailedText(note);
       }
+    }).catch(() => {
+      setSubmittingId(null);
+      setSendError(ko ? "결정을 보내지 못했습니다. 승인 카드는 그대로입니다. 다시 선택해 주세요." : "The decision was not sent. The approval is still waiting; choose again.");
     });
   };
 
@@ -208,63 +273,57 @@ export function BrowserActionApprovalSheet({ chatId, onStandaloneHeightChange }:
   const unsafeCodeDetail = req.summary.replace(/^unsafe-code\s*:\s*/i, "").trim();
 
   /*
-   * 오너 지시 2026-08-24: 묻는 자리는 앱 어디서나 한 모양이다.
-   * 규격은 docs/DESIGN-ASK-CARD.md.
+   * 오너 2026-10-27: 도구 승인과 같은 문법 — 질문 한 줄, 실제 실행될 내용(코드 블록), 번호 선택지(components/ApprovalPrompt).
+   * 선택지의 뜻과 보내는 값(once · always · deny)은 그대로다. "항상 허용"은 이 사이트의 같은 종류 작업만(electron/browser/connect.ts).
    */
   const remainingSeconds = Math.max(0, Math.ceil((req.expiresAt - now) / 1_000));
-  const askTitle = `${actionName}${req.site ? ` · ${req.site}` : ""}`;
   const approvalKicker = req.owner?.context === "build"
-    ? (ko ? "Build 승인 필요" : "Build approval needed")
+    ? "Build"
     : req.owner?.surface === "science"
-      ? (ko ? "Science 승인 필요" : "Science approval needed")
-      : (ko ? "승인 필요" : "Approval needed");
+      ? "Science"
+      : null;
   const summaryLine = isUnsafeCode ? (unsafeCodeDetail || req.summary) : req.summary;
-  const safetyNote = isPayment
-    ? (ko ? "결제는 매번 확인" : "Confirm each payment")
+  const codeText = [summaryLine || (ko ? "실행 전에 확인하세요." : "Confirm before running."), req.target ? `→ ${req.target}` : ""]
+    .filter(Boolean).join("\n");
+  const warning = isPayment
+    ? (ko ? "결제는 항상 직접 확인하세요." : "Always check payments yourself.")
     : isUnsafeCode
       ? (ko ? "여러 페이지 동작을 실행할 수 있습니다. 이 대화의 ‘항상 허용’을 켜면 확인을 생략합니다."
             : "Code can perform multiple page actions. Always allow in this conversation skips this check.")
       : null;
+  const options = [
+    { id: "once", title: ko ? "예" : "Yes", role: "primary" as const, note: ko ? "이번 한 번만 실행합니다." : "Runs this action once." },
+    ...(req.allowAlways ? [{
+      id: "always",
+      title: ko ? "예, 항상 허용" : "Yes, always allow",
+      showNote: true,
+      note: ko ? "이 사이트의 같은 종류 작업은 다시 묻지 않습니다." : "This kind of action on this site is not asked again.",
+    }] : []),
+    { id: "deny", title: ko ? "아니오" : "No", role: "deny" as const, note: ko ? "실행하지 않고, 같은 사이트·작업은 다음부터 막습니다." : "Not run; the same site and action is blocked from now on." },
+  ];
 
   const content = (
     <>
-      <section className="baa-chip" role="alertdialog" aria-live="assertive" aria-label={askTitle}>
-        {/* 설명은 왼쪽 글 묶음이 갖고, 오른쪽 끝은 단추가 갖는다. 안전 문구를 꼬리 슬롯에
-            두면 짧은 카운트다운용으로 만든 자리(flex 0 0 auto · nowrap)를 긴 문장이 차지해
-            정작 무엇을 승인하는지(제목·코드)가 줄임표로 잘린다. */}
-        <div className="baa-chip-copy">
-          <span className="baa-chip-kicker"><IconShield size={15} />{approvalKicker}</span>
-          <strong>{askTitle}</strong>
-          <small className={isUnsafeCode ? "baa-code-preview" : undefined}>{summaryLine || (ko ? "실행 전에 확인하세요." : "Confirm before running.")}</small>
-          {req.target && <div className="baa-chip-target"><IconTarget size={14} /><small><b>{ko ? "대상" : "Target"}</b>{req.target}</small></div>}
-          {safetyNote && <small className="baa-chip-note">{safetyNote}</small>}
-        </div>
-        {/* 남은 시간은 안전 문구가 있어도 사라지면 안 된다 — 만료되면 이 요청은
-            fail-closed 로 조용히 죽으므로, 매번 묻는 종류일수록 더 필요하다. */}
-        <span className="baa-chip-timer">
-          <IconClock size={14} />
-          {ko ? `${remainingSeconds}초 · 대기 ${visibleQueue.length}건` : `${remainingSeconds}s · ${visibleQueue.length} pending`}
-        </span>
-        <div className="baa-chip-actions" role="group" aria-label={ko ? "승인 선택" : "Approval choices"}>
-          <button type="button" className="baa-chip-once" onClick={() => resolve("once")}><IconCheck size={14} />{ko ? "이번만 허용" : "Allow once"}</button>
-          {req.allowAlways && <button type="button" onClick={() => resolve("always")}>{ko ? "항상 허용" : "Always allow"}</button>}
-          <button type="button" className="baa-chip-deny" onClick={() => resolve("deny")}>
-            <IconClose size={14} />
-            {ko ? "거부" : "Deny"}
-          </button>
-        </div>
-      </section>
-      {isUnsafeCode && (
-        <details className="baa-code-review">
-          <summary>{ko ? "실행할 코드 전체 보기" : "Review full code"}</summary>
-          <pre tabIndex={0} aria-label={ko ? "실행할 브라우저 코드" : "Browser code to execute"}>{unsafeCodeDetail}</pre>
-        </details>
-      )}
-      <style jsx>{`
-        .baa-code-review { margin-top: 12px; pointer-events: auto; }
-        .baa-code-review summary { cursor: pointer; font-size: 13px; }
-        .baa-code-review pre { max-height: 40vh; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; padding: 12px; font-size: 12px; line-height: 1.5; }
-      `}</style>
+      <ApprovalPrompt
+        key={req.requestId}
+        question={ko ? "이 브라우저 작업을 허용할까요?" : "Allow this browser action?"}
+        ariaLabel={`${actionName}${req.site ? ` · ${req.site}` : ""}`}
+        code={codeText}
+        codeLabel={isUnsafeCode ? (ko ? "실행할 브라우저 코드" : "Browser code to execute") : (ko ? "실행될 브라우저 작업" : "Browser action to run")}
+        meta={<>{approvalKicker ? `${approvalKicker} · ` : ""}{actionName}{req.site ? ` · ${req.site}` : ""}</>}
+        warning={warning}
+        options={options}
+        locked={submittingId === req.requestId}
+        onChoose={(id, note) => resolve(id as BrowserApprovalDecision, note)}
+        // The line goes to the room the action runs in; a build or Science action (or one with no room) has none to tell.
+        denyNote={req.owner?.chatId && req.owner.context !== "build" && req.owner.surface !== "science" ? { draftKey: req.requestId } : null}
+        footer={feedbackNode}
+        deck={deck}
+        trailing={<span className="baa-timer" title={ko ? "남은 시간 — 지나면 실행되지 않습니다" : "Time left — the action is not run after it ends"}>{ko ? `${remainingSeconds}초` : `${remainingSeconds}s`}</span>}
+        className="baa-chip"
+        testId="browser-action-approval"
+        attrs={{ "data-browser-approval-id": req.requestId }}
+      />
       <style jsx global>{`
         [data-browser-action-approval-wrap="true"] {
           position: fixed;
@@ -275,45 +334,7 @@ export function BrowserActionApprovalSheet({ chatId, onStandaloneHeightChange }:
           z-index: 90;
           pointer-events: none;
         }
-      `}</style>
-      <style jsx>{`
-        .baa-chip {
-          pointer-events: auto;
-          display: flex;
-          align-items: center;
-          gap: 12px;
-          width: 100%;
-          box-sizing: border-box;
-          padding: 8px 10px 8px 12px;
-          border: 1px solid var(--paper-edge, rgba(25, 31, 36, .14));
-          border-radius: var(--popup-radius);
-          background: var(--popup-card-bg);
-          color: var(--ink, #202428);
-          box-shadow: var(--popup-shadow);
-        }
-        .baa-chip-copy { min-width: 0; flex: 1 1 auto; display: grid; gap: 2px; }
-        .baa-chip-kicker { display: inline-flex; align-items: center; gap: 6px; color: var(--warn, #a26a00); font-size: 11px; font-weight: 750; }
-        .baa-chip-copy strong, .baa-chip-copy small { overflow-wrap: anywhere; white-space: normal; }
-        .baa-chip-copy .baa-code-preview { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
-        .baa-chip-copy strong { font-size: 13px; font-weight: 720; }
-        .baa-chip-copy small, .baa-chip-timer { color: var(--muted-deep, #667078); font-size: 12px; line-height: 1.4; }
-        .baa-chip-target { display: flex; align-items: flex-start; gap: 6px; padding-top: 5px; }
-        .baa-chip-target :global(svg) { flex: 0 0 auto; margin-top: 2px; }
-        .baa-chip-target small { min-width: 0; white-space: pre-wrap; }
-        .baa-chip-target b { margin-right: 6px; color: var(--ink-soft); font-weight: 650; }
-        /* 안전 문구는 한 줄에 안 들어가는 문장이다 — 줄바꿈을 허용하고 제목처럼 자르지 않는다. */
-        .baa-chip-copy .baa-chip-note { white-space: normal; overflow: visible; }
-        .baa-chip-actions { display: flex; flex: 0 0 auto; gap: 5px; align-items: center; margin-left: auto; }
-        .baa-chip-actions button { display: inline-flex; align-items: center; justify-content: center; gap: 5px; min-height: 44px; padding: 0 10px; border: 1px solid var(--paper-edge-strong, #ccd2d6); border-radius: 10px; background: var(--paper, #fff); color: var(--ink-soft, #374047); font: inherit; font-size: 12px; font-weight: 680; white-space: nowrap; cursor: pointer; }
-        .baa-chip-actions button:hover, .baa-chip-actions button:focus-visible { outline: 2px solid rgba(42, 47, 50, .12); }
-        .baa-chip-actions .baa-chip-once { background: var(--popup-control-bg); color: var(--ink); }
-        .baa-chip-actions .baa-chip-deny { border-color: var(--danger-soft, #e9b8b8); color: var(--danger, #9f3030); }
-        .baa-chip-timer { display: inline-flex; align-items: center; gap: 4px; flex: 0 0 auto; white-space: nowrap; }
-        @media (max-width: 700px) {
-          .baa-chip { align-items: stretch; flex-direction: column; gap: 7px; padding: 9px; }
-          .baa-chip-actions { width: 100%; overflow-x: auto; }
-          .baa-chip-timer { white-space: normal; }
-        }
+        [data-browser-action-approval-wrap="true"] .baa-chip { pointer-events: auto; }
       `}</style>
     </>
   );
@@ -323,7 +344,7 @@ export function BrowserActionApprovalSheet({ chatId, onStandaloneHeightChange }:
         ref={wrapperRef}
         className="baa-wrap"
         data-browser-action-approval-wrap="true"
-        data-browser-action-approval-placement={usesConversationComposer ? "conversation" : "standalone"}
+        data-browser-action-approval-placement={supervisedRoom ? "supervised-room" : usesConversationComposer ? "conversation" : "standalone"}
         data-composer-decision-card="true"
       >
         {content}

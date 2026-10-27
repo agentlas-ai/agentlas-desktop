@@ -193,6 +193,7 @@ export function supersedeExplicitMemory(entry: Pick<MemoryEntry, "id">, blockKey
       current.embedding_model, current.embedding_adapter, current.embedding_model_sha256, now,
     );
     getDb().prepare("UPDATE memory_entries SET superseded_at = ? WHERE id = ? AND superseded_at IS NULL").run(now, old.id);
+    recordSupersededProvenance(entry.id, [old.id]);
     return old.id;
   }).immediate();
 }
@@ -309,6 +310,18 @@ export function supersedeRestatedMemories(entry: MemoryEntry): string[] {
       );
       if (retire.run(now, old.id).changes === 1) superseded.push(old.id);
     }
+    recordSupersededProvenance(entry.id, restated.map((result) => result.item.candidate.id));
   })();
   return superseded;
+}
+
+/**
+ * The older row keeps its own run/ticket origins; the replacement points at it so the runs the lesson came back from
+ * stay countable (agents/learning-evidence.ts follows `memory`/`supersedes` links). Same link shape as an owner edit.
+ */
+function recordSupersededProvenance(successorId: string, oldIds: readonly string[]): void {
+  const link = getDb().prepare(
+    "INSERT OR IGNORE INTO memory_origin_links(memory_id, source_kind, source_id, source_revision, relation) VALUES (?, 'memory', ?, '', 'supersedes')",
+  );
+  for (const oldId of oldIds) link.run(successorId, oldId);
 }

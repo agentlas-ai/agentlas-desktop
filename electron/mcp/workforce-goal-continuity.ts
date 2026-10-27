@@ -229,3 +229,16 @@ export async function completeDesktopWorkforceGoal(input: {
     ...await accountArgs(),
   ], input.projectDir);
 }
+
+/**
+ * Closes the workforce Goal bound to a Task when the owner accepts that Task's result. One definition for every surface
+ * that can accept (Desktop IPC `tasks:acceptResult`, the phone's `tasks.acceptResult`): the phone path used to leave the
+ * Goal open for good. False = no Goal is bound to this Task, nothing to close.
+ */
+export async function completeDesktopTaskWorkforceGoal(input: { taskId: string; projectDir: string }): Promise<boolean> {
+  const goalId = desktopWorkforceGoalId(input.taskId);
+  const context = await loadDesktopWorkforceGoal(input.projectDir, goalId);
+  if (!(context.goals ?? []).length) return false;
+  await completeDesktopWorkforceGoal({ projectDir: input.projectDir, goalId, status: "completed" });
+  return true;
+}

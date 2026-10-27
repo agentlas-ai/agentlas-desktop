@@ -45,6 +45,16 @@ export function isSensitiveApp(app: Pick<ActuatorApp, "name" | "bundleId">): boo
   return SENSITIVE_APP_WORDS.test(app.name) || SENSITIVE_APP_WORDS.test(bundle) || SENSITIVE_DESKTOP_APPS.test(app.name) || SENSITIVE_DESKTOP_APPS.test(bundle);
 }
 
+// An app whose own scripting interface (a published capability) Reach never calls. The screen-driving screen above applies to the scripting
+// path too: Terminal's `do script` runs a shell command and Mail's message bodies are declared reads, so a run's write ceiling or read-only
+// grant would otherwise be the only fence. Finder is the one app the scripting path keeps (its dictionary is the documented real-app case,
+// ARCHITECTURE §13.20); driving Finder's screen stays off limits.
+const PUBLISHED_ALLOWED_BUNDLES = new Set(["com.apple.finder"]);
+export function isPublishedOffLimits(app: Pick<ActuatorApp, "name" | "bundleId">): boolean {
+  if (app.bundleId !== undefined && PUBLISHED_ALLOWED_BUNDLES.has(app.bundleId)) return false;
+  return isSensitiveApp(app);
+}
+
 // Menu items that are the platform's own features injected into every app (AutoFill, Dictation, Writing Tools, Emoji, Services, Share) or whose
 // name says they touch secrets, money, people, accounts, the network, hardware sensors, or destroy things.
 const RISKY_WORDS = new RegExp([

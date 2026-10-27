@@ -1,4 +1,5 @@
 import { TOOLCHAIN_GENERATION_TIMEOUT_MS } from "./toolchain-asset";
+import { workSessionReadPermissionCall } from "./work-session-tools";
 
 /** Only Main's authenticated one-team binding may use this read-run exception.
  * Stop is a control operation that must remain available after permission drops;
@@ -9,6 +10,8 @@ export function oneGraphReadPermissionCall(input: {
   args?: unknown;
 }): boolean {
   if (input.catalogId !== "one-team") return false;
+  // Work management only inherits the caller ceiling; children enforce their own file/effect boundary.
+  if (workSessionReadPermissionCall(input)) return true;
   // toolchain_report records a caller's report about its own run and posts one line upward; it runs and changes nothing.
   if (["one_graph_schema", "one_graph_inspect", "one_graph_result", "toolchain_search", "toolchain_report"].includes(input.toolName)) return true;
   if (input.toolName !== "one_graph_set_enabled" || !input.args

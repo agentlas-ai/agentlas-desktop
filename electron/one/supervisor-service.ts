@@ -3,6 +3,7 @@ import { readOrdinaryOneTurn, type OrdinaryOneTurnSource } from "../invocation/o
 import { createSupervisorNativeOrigin } from "./supervisor-native-runtime";
 import { randomUUID } from "node:crypto";
 import type { ChatHistoryEntry, InvocationRunReceipt, McpInvocationRequest, RuntimeSelection, ImageAttachment } from "../../shared/types";
+import type { AgentlasUserDecisionRequest } from "../../shared/types";
 import {
   ONE_SUPERVISOR_SCHEMA, supervisorIdentifier, supervisorObject, supervisorText,
   type OneSupervisorSnapshot, type SupervisorCommandReceipt, type SupervisorControlInput, type SupervisorNotice,
@@ -12,6 +13,7 @@ import {
 } from "../../shared/one-supervisor";
 import { OneSupervisorStore, supervisorHash, supervisorWorkForWorkerChat, type SupervisorRequestRow } from "./supervisor-store";
 import { supervisorExactResult } from "./supervisor-presentation";
+import { markPersonalAgentRoom, personalAgentRoomReleased, PERSONAL_AGENT_ROOM_RELEASED } from "./personal-agent-rooms";
 import { parseGraphResultDetail } from "./graph-review";
 import type { OneTeamResult } from "./host-alerts";
 import { buildTeamSessionHandoff } from "./session-handoff";
@@ -22,6 +24,7 @@ import { isTypedCode } from "../../shared/turn-settlement";
 import type { OneSupervisorOwner } from "./supervisor-owner";
 import type { SupervisorJournalInput, SupervisorJournalPage, SupervisorStopInput } from "../../shared/one-supervisor-runtime";
 import {OneBudgetAdmissionDenied,type OneBudgetStore} from "./budget-store";
+import {TRANSIENT_SEND_DEADLINE_MS,isTransientSendRefusalCode,sendRefusalCode,transientSendBackoffMs} from "../../shared/transient-send-refusal";
 import {ONE_BUDGET_REJECTION_CODES,type OneBudgetConfigureInput,type OneBudgetConfigureResult,type OneBudgetListInput,type OneBudgetRejectionCode} from "../../shared/one-budget";
 
 export interface SupervisorRuntime {
@@ -32,9 +35,31 @@ export interface SupervisorRuntime {
   steer(request: McpInvocationRequest, expectedRunId: string): {queued: boolean; queuedRequestId?: string; runId?: string; activeRunId?: string} | Promise<{queued: boolean; queuedRequestId?: string; runId?: string; activeRunId?: string}>;
   pauseGoal(chatId: string, goalId: string): void;
   cancelGoal(chatId: string, goalId: string): void;
-  onSettled(listener: (event: {runId: string; chatId: string; receipt: InvocationRunReceipt}) => void): () => void;
+  onSettled(listener: (event: SupervisorSettledEvent) => void): () => void;
   /** Where a queued direction stands (invocation_steers): delivered into a run, withdrawn or failed. */
   steerState?(queuedRequestId: string): {status: string; drainedRunId: string | null; recoveryReason?: string | null} | null;
+  /**
+   * True only when the durable admission ledger proves nothing was started for this run (no admission row, or a rejected one).
+   * A start refused for a "not ready yet" reason may be run again under the same run id only with this proof. A runtime
+   * with no ledger leaves the refusal's typed code as the whole proof, as the owner-message queue does.
+   */
+  noStartProof?(runId: string): boolean;
+}
+/** A host check that could not be answered right now (billing unreachable). Nothing started and nothing was decided. */
+export class SupervisorStartDeferred extends Error {
+  constructor(readonly code: string) { super(code); }
+}
+/**
+ * A settled run as the runtime reports it. Main's own InvocationService envelope also says whether the run ended
+ * waiting for the owner (a question card); a runtime that cannot say (the daemon-owned native receipt) leaves it out,
+ * and the supervisor reads the durable question instead (questionWait).
+ */
+export interface SupervisorSettledEvent {
+  runId: string;
+  chatId: string;
+  receipt: InvocationRunReceipt;
+  pendingQuestion?: boolean;
+  userDecisionRequest?: AgentlasUserDecisionRequest;
 }
 export interface SupervisorDependencies {
   store: OneSupervisorStore;
@@ -64,6 +89,8 @@ export interface SupervisorDependencies {
   budget?:OneBudgetStore;
   /** Whether this host-started One run ended with the quiet reply (nothing saved, no alert). */
   quietRun?(runId: string): boolean;
+  /** The durable question card that run left waiting for the owner in that chat, or null (confirm/index.ts). */
+  questionWait?(chatId: string, runId: string): {sourceMessageId: string; detail: string} | null;
   /** Marks a Work session One opened as Always allow (owner 2026-10-04), so the worker never stops to ask. */
   alwaysApprove?(chatId: string): void;
   workIdentityMutable?: boolean;
@@ -116,6 +143,14 @@ export class OneSupervisorService {
    * recover) right after a send, which held every Hope message before its run began (production 1.2.93, 2026-10-11). */
   private readonly dispatchInFlight = new Map<string, number>();
   private closed = false;
+  /** Owner replies/reviews whose start was refused before anything reached a model: when they may be started again (same run id). */
+  private readonly refusals = new Map<string, { attempts: number; firstAt: number; notBefore: number }>();
+  /** What a refused reply was built with, so its retry carries the identical request (the budget and admission digests bind it). */
+  private readonly dispatchFrames = new Map<string, { locale: "ko" | "en"; runtimeSelection: RuntimeSelection | undefined }>();
+  /** Held commands whose "refused before dispatch" proof may still arrive from the admission ledger (a daemon's rejection lands after its reply). */
+  private readonly lateProof = new Set<string>();
+  private reviewHoldOffUntil = 0;
+  private retryTimer: ReturnType<typeof setTimeout> | undefined;
   private readonly unsubscribe: () => void;
   constructor(private readonly deps: SupervisorDependencies) {
     this.unsubscribe = deps.runtime.onSettled(event => {
@@ -124,11 +159,11 @@ export class OneSupervisorService {
       try { deps.assertAuthority?.(); deps.owner?.assert(oneId,true); } catch { return; } // stale owners never write another owner's outcome
       const ordinary = deps.store.db.prepare("SELECT payload_json FROM one_supervisor_requests WHERE run_id=?").all(event.runId) as Array<{payload_json:string}>;
       if (ordinary.some(row => Object.prototype.hasOwnProperty.call(JSON.parse(row.payload_json), "ordinaryNative"))) return;
-      for (const row of deps.store.forRun(event.runId)) if(row.one_id===oneId)this.settle(row, event.receipt);
+      for (const row of deps.store.forRun(event.runId)) if(row.one_id===oneId)this.settle(row, event.receipt, false, event);
       if(!deps.owner || deps.owner.current()?.phase==='active')this.drain();
     });
   }
-  close(): void { this.closed = true; this.unsubscribe(); }
+  close(): void { this.closed = true; if (this.retryTimer) clearTimeout(this.retryTimer); this.retryTimer = undefined; this.unsubscribe(); }
   /** Host-only observation of an existing ordinary native One turn; never a start or tool grant. */
   observeOrdinaryNativeTurn(source: OrdinaryOneTurnSource): OrdinaryNativeTurnObservation | undefined {
     const captured = readOrdinaryOneTurn(source, "scope"), request = captured.request;
@@ -227,7 +262,85 @@ export class OneSupervisorService {
     if(!this.deps.budget)throw supervisorError("supervisor_budget_unavailable");
     return this.deps.budget.snapshot(input);
   }
-  private observeDispatch(row: SupervisorRequestRow, action: () => unknown, acceptedReason?: string, control = false): SupervisorCommandReceipt {
+  /**
+   * A start refused for a "not ready yet" reason (shared/transient-send-refusal.ts: the chat, the daemon channel or a
+   * settling turn is busy, refused before anything reached a model) is not an uncertain dispatch. The typed code names
+   * the cause; the ledger proves nothing started (runtime.noStartProof) when the runtime has one. Returns that code,
+   * or null when the refusal cannot be proven pre-start (then it is held as before, never replayed).
+   * Only an owner reply (or a host review) is re-run: drain() starts the stored row again under the SAME run id.
+   */
+  private preStartRefusal(row: SupervisorRequestRow, error: unknown): string | null {
+    if (row.kind !== "reply" || !row.run_id || ordinaryNativeMarker(row)) return null;
+    const code = sendRefusalCode(error);
+    if (!code || !isTransientSendRefusalCode(code)) return null;
+    if (error instanceof OneBudgetAdmissionDenied) return code; // built before the native dispatch function is called (budget-store.ts)
+    return (this.deps.runtime.noStartProof?.(row.run_id) ?? true) ? code : null;
+  }
+  /** Back to stored with the typed cause; drain() starts it again after the shared backoff, until the shared deadline. */
+  private requeueRefused(row: SupervisorRequestRow, code: string): void {
+    const now = Date.now(), prior = this.refusals.get(row.command_id);
+    const attempts = (prior?.attempts ?? 0) + 1, firstAt = prior?.firstAt ?? now;
+    if (now - firstAt > TRANSIENT_SEND_DEADLINE_MS) {
+      // Given up on after the shared deadline: the cause stays on the receipt, and the review's results go back to the queue.
+      this.refusals.delete(row.command_id); this.dispatchFrames.delete(row.command_id);
+      this.deps.store.update(row, {state: "failed", acknowledgement: "settled", reason: code});
+      if (isReview(row)) { this.holdOffReviews(row.run_id!); this.deps.store.retryReview(row.run_id!, code); }
+      console.warn("[one-supervisor] start refused before dispatch for too long; ended", {code, attempts});
+      return;
+    }
+    const delayMs = transientSendBackoffMs(attempts - 1);
+    this.refusals.set(row.command_id, {attempts, firstAt, notBefore: now + delayMs});
+    this.deps.store.update(row, {state: "stored", acknowledgement: "stored", reason: code});
+    if (attempts === 1) console.warn("[one-supervisor] start refused before dispatch; will start again", {code, delayMs});
+    this.armDrain(delayMs);
+  }
+  /** New review claims wait out the same backoff, so a refusal cannot burn a result's three attempts in three ticks. */
+  private holdOffReviews(reviewRunId: string): void {
+    const claimed = (this.deps.store.db.prepare("SELECT MAX(review_attempts) AS n FROM one_supervisor_notices WHERE review_run_id=?")
+      .get(reviewRunId) as {n: number | null} | undefined)?.n ?? 1;
+    const delayMs = transientSendBackoffMs(Math.max(0, claimed - 1));
+    this.reviewHoldOffUntil = Math.max(this.reviewHoldOffUntil, Date.now() + delayMs);
+    this.armDrain(delayMs);
+  }
+  private armDrain(delayMs: number): void {
+    if (this.closed) return;
+    if (this.retryTimer) clearTimeout(this.retryTimer);
+    this.retryTimer = setTimeout(() => {
+      this.retryTimer = undefined;
+      if (this.closed) return;
+      try { this.drain(); } catch { /* The next recover() or snapshot drains again. */ }
+    }, Math.max(50, delayMs) + 5);
+    this.retryTimer.unref?.();
+  }
+  /**
+   * Looks again, a few times over ~15 s, whether the admission ledger now proves that nothing was started for a held command whose
+   * refusal was a "not ready yet" code. Proven: it is stored again and started under the same run id (a review keeps its claimed
+   * results meanwhile). Never proven: it stays held, and a review closes as outcome-unknown exactly as before.
+   */
+  private awaitLateProof(commandId: string, code: string, attempt = 0): void {
+    const delays = [500, 1_000, 2_000, 4_000, 8_000];
+    if (this.closed) return;
+    this.lateProof.add(commandId);
+    const timer = setTimeout(() => {
+      if (this.closed) return;
+      try {
+        this.binding();
+        const row = this.deps.store.get(commandId);
+        if (!row || row.state !== "held" || !row.run_id) { this.lateProof.delete(commandId); return; }
+        if (!this.deps.runtime.receipt(row.run_id) && this.deps.runtime.noStartProof?.(row.run_id)) {
+          this.lateProof.delete(commandId);
+          this.deps.store.update(row, {state: "stored", acknowledgement: "stored", reason: code});
+          this.drain();
+          return;
+        }
+        if (attempt + 1 < delays.length) { this.awaitLateProof(commandId, code, attempt + 1); return; }
+        this.lateProof.delete(commandId);
+        if (isReview(row)) this.unconfirmedReview(row.run_id);
+      } catch { this.lateProof.delete(commandId); /* The next recover() reads the row again. */ }
+    }, delays[attempt]);
+    timer.unref?.();
+  }
+  private observeDispatch(row: SupervisorRequestRow, action: () => unknown, acceptedReason?: string, control = false, redispatch = false): SupervisorCommandReceipt {
     const flight=Date.now(); this.dispatchInFlight.set(row.command_id,flight);
     const landed=()=>{if(this.dispatchInFlight.get(row.command_id)===flight)this.dispatchInFlight.delete(row.command_id);};
     const token=this.deps.owner?.current();
@@ -237,11 +350,29 @@ export class OneSupervisorService {
       if(!control && (!value || typeof value!=='object' || (value as {runId?:string}).runId!==row.run_id))throw supervisorError('supervisor_native_run_mismatch');
       if(control && value==='not-found')throw supervisorError('supervisor_reply_target_stale');
       if(saved.state==='dispatching')this.deps.store.update(saved,{state:'accepted',acknowledgement:'delivered',...(acceptedReason?{reason:acceptedReason}:{})});
+      this.refusals.delete(row.command_id);this.dispatchFrames.delete(row.command_id);
     };
     const reject=(error:unknown)=>{
       const saved=current();
-      if(saved.state==='dispatching')this.deps.store.update(saved,{state:error instanceof OneBudgetAdmissionDenied?'failed':'held',acknowledgement:error instanceof OneBudgetAdmissionDenied?'settled':'unknown',reason:error instanceof Error?error.message.slice(0,240):'supervisor_dispatch_unconfirmed'});
-      if(isReview(saved))this.unconfirmedReview(saved.run_id!);
+      // Budget admission is refused before the native dispatch function exists; a deferred host check never decided anything.
+      const denied=error instanceof OneBudgetAdmissionDenied || error instanceof SupervisorStartDeferred;
+      let awaitingProof:string|null=null;
+      if(saved.state==='dispatching'){
+        const refusal=redispatch?this.preStartRefusal(saved,error):null;
+        if(refusal){this.requeueRefused(saved,refusal);return;}
+        this.deps.store.update(saved,{state:denied?'failed':'held',acknowledgement:denied?'settled':'unknown',reason:error instanceof Error?error.message.slice(0,240):'supervisor_dispatch_unconfirmed'});
+        // A "not ready yet" code the ledger cannot vouch for yet: the owner's rejection may land just after the reply.
+        const code=redispatch&&!denied&&saved.kind==='reply'&&!ordinaryNativeMarker(saved)?sendRefusalCode(error):undefined;
+        if(code&&isTransientSendRefusalCode(code)&&this.deps.runtime.noStartProof)awaitingProof=code;
+      }
+      this.refusals.delete(saved.command_id);this.dispatchFrames.delete(saved.command_id);
+      if(awaitingProof){this.awaitLateProof(saved.command_id,awaitingProof);return;}
+      if(isReview(saved)){
+        // A review that never reached the native start has no outcome to wonder about: its results return to the queue
+        // (three attempts, with backoff) instead of closing as review_outcome_unknown with the alert already suppressed.
+        if(denied&&saved.state==='dispatching'){this.holdOffReviews(saved.run_id!);this.deps.store.retryReview(saved.run_id!,error instanceof Error?error.message:'supervisor_start_denied');}
+        else this.unconfirmedReview(saved.run_id!);
+      }
     };
     try {
       const value=action();
@@ -359,15 +490,23 @@ export class OneSupervisorService {
       throw supervisorError('supervisor_review_report_only');
     }
   }
-  private settle(row: SupervisorRequestRow, receipt: InvocationRunReceipt, ordinary = false): void {
+  private boundToSuccessor(row: SupervisorRequestRow, receipt: InvocationRunReceipt): boolean {
+    let payload: {supervisorDirection?: unknown; targetChatId?: unknown; chatId?: unknown};
+    try { payload = JSON.parse(row.payload_json); } catch { return false; }
+    return Boolean(payload.supervisorDirection) && row.run_id === receipt.runId && (payload.targetChatId ?? payload.chatId) === receipt.chatId;
+  }
+  private settle(row: SupervisorRequestRow, receipt: InvocationRunReceipt, ordinary = false, event?: SupervisorSettledEvent): void {
     if (ordinaryNativeMarker(row) && !ordinary) return;
     if (!settled(receipt)) return;
     if (row.kind==='cancel' && JSON.parse(row.payload_json).boundGoalId) return;
     if (row.kind === "chat-send" && JSON.parse(row.receipt_json).reason === "legacy_chat_delivery_unverified") return;
     // A desktop direction belongs to its successor, never the run it was queued
     // behind. This also fences old receipts created before successor binding.
+    // A direction row is bound to its successor by the exact planned run id and target chat it was sealed with
+    // (supervisor-direction-recovery.ts): a successor that is first observed already terminal settles it too, instead of
+    // leaving it "delivered, application not observed" for ever.
     if (row.kind === "steer" && !row.task_id?.startsWith("science-")
-      && JSON.parse(row.receipt_json).reason !== "applied_in_next_run") return;
+      && JSON.parse(row.receipt_json).reason !== "applied_in_next_run" && !this.boundToSuccessor(row, receipt)) return;
     this.deps.store.db.transaction(() => {
       const cancelRequested = row.kind === "cancel" || row.kind === "stop-reply";
       this.deps.store.update(row, {
@@ -377,7 +516,13 @@ export class OneSupervisorService {
       // Every hand-off One made comes back for review: Work, a follow-up, a message into another conversation and a Science
       // turn (docs native-harness 22 O1/O2; before, only Work and follow-ups did, so a group room or a Science turn finished
       // in silence when it settled in this runtime).
-      if (row.kind === "work" || row.kind === "follow-up" || row.kind === "chat-send" || row.kind === "science") this.deps.store.notice(row, receipt.status);
+      // A run that ended on a question card is waiting for the owner, not finished (D4, design 2026-10-27 §2): One is told
+      // what it asks, once per card, through the same needs-owner notice as a live askUser question.
+      if (row.kind === "work" || row.kind === "follow-up" || row.kind === "chat-send" || row.kind === "science") {
+        const wait = row.task_id && receipt.status !== "cancelled" ? this.questionWait(receipt, event) : null;
+        if (wait) this.deps.store.noticeNeedsOwner(row.one_id, row.task_id!, row.origin_chat_id, `question:${wait.sourceMessageId}`, wait.detail);
+        else this.deps.store.notice(row, receipt.status);
+      }
       if (isReview(row)) {
         // Only this run (the claim's generation) closes its results; an owner stop is not retried.
         if (this.runBlocksNextAutomaticTurn(receipt.runId,receipt.chatId,receipt)) this.deps.store.closeReview(row.run_id!, "review_outcome_unknown");
@@ -386,6 +531,19 @@ export class OneSupervisorService {
         else this.deps.store.retryReview(row.run_id!, `review_${receipt.status}`);
       }
     })();
+  }
+  /** The question card a settled run left for the owner. Main's envelope is exact; without it, the durable card. */
+  private questionWait(receipt: InvocationRunReceipt, event?: SupervisorSettledEvent): {sourceMessageId: string; detail: string} | null {
+    if (event?.pendingQuestion === false) return null;
+    let durable: {sourceMessageId: string; detail: string} | null = null;
+    try { durable = this.deps.questionWait?.(receipt.chatId, receipt.runId) ?? null; } catch { durable = null; }
+    if (event?.pendingQuestion !== true) return durable;
+    const request = event.userDecisionRequest;
+    const detail = request?.questions?.length ? request.questions.map(question => {
+      const options = (question.options ?? []).map(option => option.label).filter(Boolean);
+      return [question.question, ...(options.length ? [`options: ${options.join(" / ")}`] : [])].join("\n");
+    }).join("\n") : durable?.detail ?? "";
+    return {sourceMessageId: request?.sourceMessageId ?? durable?.sourceMessageId ?? `run:${receipt.runId}`, detail};
   }
   /** Saved-but-unclaimed replies are safe. A claimed start without proof is held, never replayed. */
   recover(): void {
@@ -409,6 +567,8 @@ export class OneSupervisorService {
       // An old direction may still name its predecessor. Its durable queue
       // cursor, not that run's liveness, owns the application verdict.
       if (row.kind === "steer" && JSON.parse(row.receipt_json).reason !== "applied_in_next_run") continue;
+      const refused = this.refusedHoldRecoverable(row);
+      if (refused) { this.deps.store.update(row, {state:"stored",acknowledgement:"stored",reason:refused}); continue; }
       const receipt = this.deps.runtime.receipt(row.run_id);
       if (settled(receipt)) this.settle(row, receipt!);
       else if (row.state === "held" && (row.kind === "reply" || row.kind === "work" || row.kind === "follow-up") && receipt?.status === "running"
@@ -423,9 +583,24 @@ export class OneSupervisorService {
       else if ((!receipt || this.deps.runtime.attach(receipt.chatId)?.runId !== row.run_id) && row.state !== "held") {
         this.deps.store.update(row, {state:"held",acknowledgement:"unknown",reason:"dispatch_liveness_unconfirmed"});
       }
-      if (isReview(row) && this.deps.store.get(row.command_id)?.state === "held") this.unconfirmedReview(row.run_id);
+      if (isReview(row) && !this.lateProof.has(row.command_id) && this.deps.store.get(row.command_id)?.state === "held") this.unconfirmedReview(row.run_id);
     }
     this.drain();
+  }
+  /**
+   * An owner reply held for a "not ready yet" refusal (an older build parked every refusal as held, and nothing ever started
+   * it again), or by a refusal whose ledger proof arrived late. With the typed cause on its receipt and the ledger proving
+   * that nothing was started for the run, it is stored again and started under the same run id. A runtime without a ledger
+   * never recovers a held row: held stays "may have run" there. Reviews are not revived (their results were already closed).
+   */
+  private refusedHoldRecoverable(row: SupervisorRequestRow): string | null {
+    if (row.kind !== "reply" || row.state !== "held" || !row.run_id || isReview(row) || !this.deps.runtime.noStartProof) return null;
+    let reason: unknown;
+    try { reason = (JSON.parse(row.receipt_json) as SupervisorCommandReceipt).reason; } catch { return null; }
+    if (typeof reason !== "string" || !isTransientSendRefusalCode(reason)) return null;
+    if (Date.now() - Date.parse(row.updated_at) > TRANSIENT_SEND_DEADLINE_MS) return null;
+    if (this.deps.runtime.receipt(row.run_id)) return null;
+    return this.deps.runtime.noStartProof(row.run_id) ? reason : null;
   }
   /** A held dispatch with no receipt does not prove that no brain ran. */
   private unconfirmedReview(runId: string): void {
@@ -461,8 +636,12 @@ export class OneSupervisorService {
       if (this.deps.store.pending(oneId).some(row => row.kind === "reply" && !ordinaryNativeMarker(row) && ["dispatching","accepted"].includes(row.state))) return;
       const stored = this.deps.store.list(oneId,"stored").filter(item => item.kind === "reply" && !ordinaryNativeMarker(item));
       // The owner's own messages go first; a review of finished delegations waits for them.
-      const row = stored.find(item => !isReview(item)) ?? stored[0] ?? this.queueReview(oneId, chatId);
+      // New review claims wait out a refused review's backoff (holdOffReviews) so its results keep their three attempts.
+      const row = stored.find(item => !isReview(item)) ?? stored[0] ?? (Date.now() < this.reviewHoldOffUntil ? null : this.queueReview(oneId, chatId));
       if (!row) return;
+      // A start refused before dispatch waits out its backoff in the stored state; the timer drains again at its end.
+      const refused = this.refusals.get(row.command_id);
+      if (refused && refused.notBefore > Date.now()) { this.armDrain(refused.notBefore - Date.now()); return; }
       const payload = JSON.parse(row.payload_json) as SupervisorSendInput & {reportOnly?:boolean};
       const reportOnly = isReview(row) && (payload.reportOnly === true || this.reviewNeedsReportOnly(row.run_id!));
       if (reportOnly && payload.reportOnly !== true) {
@@ -470,12 +649,17 @@ export class OneSupervisorService {
         this.deps.store.db.prepare("UPDATE one_supervisor_requests SET payload_json=? WHERE command_id=?")
           .run(JSON.stringify(payload),row.command_id);
       }
-      this.deps.store.update(row,{state:"dispatching"});
+      // The same run id is started again after a refusal, so the request must be byte-identical: locale and the front lane are
+      // read once per command (the budget reservation and the owner admission both bind the canonical request).
+      const frame = this.dispatchFrames.get(row.command_id) ?? {locale:this.deps.locale(),runtimeSelection:payload.runtimeSelection ?? this.frontSelection()};
+      this.dispatchFrames.set(row.command_id,frame);
+      // The previous attempt's refusal cause is history, not the state of this attempt (an accepted reply keeps no stale cause).
+      this.deps.store.update(row,{state:"dispatching",reason:null});
       this.observeDispatch(row, () => this.deps.runtime.start({runId:row.run_id!,chatId,userPrompt:payload.text,promptOrigin:"system",oneMode:true,
           taskIntent:"conversation",permissions:reportOnly ? "read" : "full",onePermissionMode:reportOnly ? "read" : "full",
-          ...(reportOnly ? {} : {toolMode:"computer-use" as const}),locale:this.deps.locale(),runtimeSelection:payload.runtimeSelection ?? this.frontSelection(),
+          ...(reportOnly ? {} : {toolMode:"computer-use" as const}),locale:frame.locale,runtimeSelection:frame.runtimeSelection,
           images:payload.images,fileGroupId:payload.fileGroupId},
-          isReview(row) ? (payload as {purpose?: SupervisorHostNoticePurpose}).purpose ?? "one-delegation-review" : undefined));
+          isReview(row) ? (payload as {purpose?: SupervisorHostNoticePurpose}).purpose ?? "one-delegation-review" : undefined), undefined, false, true);
     } finally { this.draining = false; }
   }
   /** The opted-in light front for this reply turn; a damaged or throwing source is the owner's own lane, never a failed turn. */
@@ -609,6 +793,7 @@ export class OneSupervisorService {
       ] : []),
       ...(waiting.length ? [
         "- For a task waiting for the owner: tell the owner exactly what it needs and that they can answer in that Work session. Do not answer for them.",
+        "- Approval cards from rooms you oversee also show in this conversation (one_approvals_list). When the owner answers one in a message to you, pass that answer on with one_approval_answer; on owner_tap_required, ask them to tap the card themselves.",
       ] : []),
       ...(alerts.length ? [
         "- For an app report from another conversation: tell the owner in one or two sentences which conversation, what happened, and what they need to do, if anything. That conversation keeps working on what it can; do not take over its work.",
@@ -658,10 +843,12 @@ export class OneSupervisorService {
     }
   }
   /** Queues the check-ins that are due and lets One run them when its conversation is free. */
-  fireDueCheckins(now = Date.now()): number {
+  fireDueCheckins(now = Date.now(), hold?: readonly string[]): number {
     if (this.closed) return 0;
     const {oneId,chatId} = this.binding();
-    const fired = this.deps.store.fireDueCheckins(oneId, chatId, now);
+    // `hold` names check-ins whose gate could not be answered right now (finance billing unreachable): they stay due and
+    // are asked again on the next sweep, instead of firing without their gate or being revoked.
+    const fired = this.deps.store.fireDueCheckins(oneId, chatId, now, hold);
     // The same tick starts a review for results another process queued (a graph the scheduler delivered) or that
     // were queued while One was closed.
     if (fired || this.deps.store.hasPendingReview(oneId)) this.drain();
@@ -679,7 +866,8 @@ export class OneSupervisorService {
     const {oneId,chatId} = this.binding();
     // Exact owner of that worker conversation, however many hand-offs came after it.
     const work = supervisorWorkForWorkerChat(this.deps.store.db, workerChatId, oneId);
-    if (!work) return false;
+    // A room the owner took back is the owner's to answer, not the personal agent's to report.
+    if (!work || personalAgentRoomReleased(workerChatId, this.deps.store.db)) return false;
     const queued = this.deps.store.noticeNeedsOwner(oneId, work.task_id, chatId, waitId, detail);
     if (queued) this.drain();
     return queued;
@@ -758,6 +946,8 @@ export class OneSupervisorService {
     const automaticUnknown = Boolean(automatic && delegated?.workerChatId
       && latest?.run_id && this.runBlocksNextAutomaticTurn(latest.run_id,delegated.workerChatId));
     const rejected=!work || !delegated?.workerChatId ? "supervisor_follow_up_not_delegated"
+      // The owner took this room back ("내가 직접 이어가기"): the personal agent no longer writes into it.
+      : personalAgentRoomReleased(delegated.workerChatId,this.deps.store.db) ? PERSONAL_AGENT_ROOM_RELEASED
       : automaticUnknown ? "supervisor_follow_up_outcome_unknown"
       : work.state === "cancelled" ? "supervisor_task_cancelled"
         : !["completed","failed"].includes(work.state) || this.deps.runtime.attach(delegated.workerChatId) ? "supervisor_task_still_running"
@@ -800,7 +990,8 @@ export class OneSupervisorService {
     }
     const exists=this.deps.store.db.prepare("SELECT 1 FROM sqlite_master WHERE name='chats'").get()
       && this.deps.store.db.prepare("SELECT 1 FROM chats WHERE id=?").get(input.chatId);
-    const rejected=input.chatId===chatId ? "supervisor_chat_is_personal" : !exists ? "supervisor_chat_missing" : null;
+    const rejected=input.chatId===chatId ? "supervisor_chat_is_personal" : !exists ? "supervisor_chat_missing"
+      : personalAgentRoomReleased(input.chatId,this.deps.store.db) ? PERSONAL_AGENT_ROOM_RELEASED : null;
     const runId=randomUUID();
     const row=this.deps.store.db.transaction(()=>{
       const saved=this.deps.store.receive({commandId:input.commandId,oneId,kind:"chat-send",payload:input,originChatId:chatId,taskId});
@@ -869,6 +1060,10 @@ export class OneSupervisorService {
       if (!this.deps.workQueue) this.deps.store.update(row,{state:"dispatching"});
       // Target chat stays in the payload's host-sealed receipt, not a renderer-supplied identity.
       this.deps.store.db.prepare("UPDATE one_supervisor_requests SET payload_json=? WHERE command_id=?").run(JSON.stringify({...input,workerChatId:work.chatId}),row.command_id);
+      // The room this hand-off opened is the personal agent's: read-only for the owner, out of the Work lists (owner 2026-10-27).
+      // A marker that cannot be written here is backfilled from this very row (personal-agent-rooms.ts); never fail the hand-off.
+      try{markPersonalAgentRoom(this.deps.store.db,{chatId:work.chatId,oneId,source:"work",personalChatId:chatId});}
+      catch(error){console.warn("[one-supervisor] personal agent room mark deferred",error instanceof Error?error.message:"unknown");}
       this.deps.workQueue?.enqueue(this.deps.store.get(row.command_id)!, work.chatId);
     }).immediate();
     if (this.deps.workQueue) {
@@ -936,7 +1131,9 @@ export class OneSupervisorService {
     } else task=(await this.snapshot()).tasks.find(item=>item.taskId===input.taskId);
     if(this.binding(oneId,input.action==='cancel').chatId!==chatId)throw supervisorError('supervisor_identity_changed');
     const rejected = !task || task.controlVersion !== input.expectedVersion || input.runId!==undefined&&task.runId!==input.runId ? "supervisor_task_version_conflict"
-      : !task.controls.includes(input.action) ? "supervisor_task_control_unavailable" : null;
+      : !task.controls.includes(input.action) ? "supervisor_task_control_unavailable"
+      // A direction through the personal agent into a room the owner took back; stopping stays available.
+      : input.action === "steer" && task.chatId && personalAgentRoomReleased(task.chatId, this.deps.store.db) ? PERSONAL_AGENT_ROOM_RELEASED : null;
     if (rejected) {
       const row=this.deps.store.receive({commandId:input.commandId,oneId,kind:input.action,payload:input,originChatId:chatId,taskId:input.taskId});
       return this.deps.store.update(row,{state:"failed",acknowledgement:"settled",reason:rejected});

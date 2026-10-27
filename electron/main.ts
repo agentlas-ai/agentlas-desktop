@@ -197,7 +197,7 @@ import { recoverDesktopStartup, type StartupRecoveryPresentation } from "./one/s
 import { initFileLogging, installMainProcessErrorSink, installStdioErrorGuard, mainLogFilePath } from "./logging";
 import { shouldYieldToNativeInstall } from "./updater/yield-to-native-install";
 import { clearQuitIntent, currentQuitIntentCode, installQuitSignalHandlers, noteQuitIntent, noteSystemShutdown, rearmQuitSignalHandlers, recordImmediateExit, recordQuitStarted } from "./quit-reason";
-import { planAfterQuitPrompt, planGuiQuit, QUIT_PROMPT_CHOICES, quitPromptText, quitWorkCount, type QuitPlan } from "./quit-policy";
+import { planAfterQuitPrompt, planGuiQuit, QUIT_PROMPT_CHOICES, quitCensus, quitPromptText, quitWorkCount, type QuitPlan } from "./quit-policy";
 import { backgroundHoldActive, enterBackgroundHold, leaveBackgroundHold } from "./background-tray";
 import { fitWindowToWorkArea, secondInstanceWindowAction, watchWindowForLastVisibleClose } from "./window-lifecycle";
 import { cleanupDoneExit, createQuitStepClock, createRelaunchAfterQuit, relaunchArgsForLaunchDuringQuit, relaunchExecPath, type QuitStepClock } from "./quit-exit";
@@ -217,6 +217,7 @@ import {
   startAgentlasMobileBridge,
   stopAgentlasMobileBridge,
 } from "./mobile-bridge/runtime";
+import { MOBILE_BRIDGE_TLS_READ_FAILED } from "./mobile-bridge/tls";
 import { userDataDir, userDataPath } from "./runtime-paths";
 import { assertPendingInstallBrowserBoundary, configureInstallBrowserBoundary, prepareInstallBrowserBoundary } from "./browser/install-browser-boundary";
 import { runHostShutdownHooks } from "./host-lifecycle";
@@ -649,10 +650,14 @@ traceUpdaterStartup("install-identity-ready");
 // Browser caches are bounded so the profile keeps only what automation needs (2026-10-16).
 capAppBrowserCache();
 
+/** Boot id of the background service this Desktop found alive and compatible when it opened the store; null when none. */
+let startupLiveDaemonBootId: string | null = null;
+
 /** A reopening GUI cannot migrate or boot-repair a store still owned by an
  * older service. A compatible live daemon keeps its execution and the GUI
  * attaches as an ordinary writer without replaying owner boot repairs. */
 async function initializeDesktopStore(options: Parameters<typeof initStore>[0] = {}): Promise<void> {
+  startupLiveDaemonBootId = null;
   if (developmentEffectsSuppressed()) { initStore(options); return; }
   const { quiesceDaemonBeforeStoreMigration } = await import("./daemon/app-launcher");
   const daemon = await quiesceDaemonBeforeStoreMigration({
@@ -660,6 +665,8 @@ async function initializeDesktopStore(options: Parameters<typeof initStore>[0] =
     appVersion: app.getVersion(), requiredSchemaVersion: STORE_SCHEMA_VERSION,
   });
   if (daemon.status === "failed") throw new Error(daemon.reason);
+  // The service we reattach to keeps the turns it hosts running; startup recovery must not read them as the previous Desktop's orphans.
+  if (daemon.status === "compatible" && daemon.bootId) startupLiveDaemonBootId = daemon.bootId;
   initStore({ ...options, ...(daemon.status === "compatible" ? { migrationRole: "follower" as const } : {}) });
 }
 
@@ -953,10 +960,33 @@ let disposeRunAlertBridge: (() => void) | null = null;
 function supervisorQuietRunInStore(runId: string): boolean {
   try { return supervisorQuietRun(getDb(), runId); } catch { return false; }
 }
+let workSessionRecoveryReady = false;
+function wakeWorkSessionRecovery(reason: string): void {
+  if (!workSessionRecoveryReady || quitServicesStopPromise || quitCleanupPromise) return;
+  void import("./work/session-dispatch")
+    .then(({ recoverWorkSessionDispatches }) => recoverWorkSessionDispatches())
+    .catch((error) => console.warn("[work-session] recovery deferred:", reason, error instanceof Error ? error.message : error));
+}
+
 function startRunAlertBridge(): void {
   if (disposeRunAlertBridge) return;
   const stopSettled = invocationService.onSettled((envelope) => {
     try {
+      // A Work main owns its children's progress and repair. Keep their failure
+      // facts in the ledger and inbox, without a competing owner-facing alarm.
+      if ((require("./work/session-dispatch") as typeof import("./work/session-dispatch"))
+        .isWorkSessionChildRun(envelope.chatId, envelope.runId)) {
+        console.info("[run-alert]", JSON.stringify({ runId: envelope.runId,
+          status: envelope.receipt.status, decision: "work-main-owns-report" }));
+        return;
+      }
+      if (envelope.receipt.status === "completed" && envelope.pendingQuestion !== true
+        && (require("./work/session-dispatch") as typeof import("./work/session-dispatch"))
+          .workSessionParentHasPendingChildren(envelope.chatId, envelope.runId)) {
+        console.info("[run-alert]", JSON.stringify({ runId: envelope.runId,
+          status: envelope.receipt.status, decision: "work-main-awaiting-children" }));
+        return;
+      }
       const settings = getRunAlerts();
       const focused = appWindowWatched();
       const decision = decideRunAlert(settings, {
@@ -1023,6 +1053,13 @@ function startOneTeamNotificationBridge(): void {
           ? "long-complete"
           : null;
     if (!reason || !getAuthSession().signedIn || !Notification.isSupported()) return;
+    // The same two Work rules the run alert applies (startRunAlertBridge): the Work main owns a child's progress and repair, and a
+    // parent turn that ends while children still work is not finished. Without them this toast opened the hidden child chat.
+    try {
+      const work = require("./work/session-dispatch") as typeof import("./work/session-dispatch");
+      if (work.isWorkSessionChildRun(envelope.chatId, receipt.runId)) return;
+      if (reason === "long-complete" && work.workSessionParentHasPendingChildren(envelope.chatId, receipt.runId)) return;
+    } catch { /* The notification never touches the run's settlement; an unreadable ledger keeps the ordinary path. */ }
     // Focused Desktop is the foreground host and owns the in-app indication;
     // avoid the duplicate OS toast. A hidden/minimized host gets one toast.
     if (appWindowWatched()) return;
@@ -2193,15 +2230,16 @@ let quitFullConfirmed = false;
 let quitRelaunching = false;
 let quitResolving = false;
 
-async function countQuitWork(): Promise<number> {
+/** `unreadable`: the service is there but its work census could not be read (busy event loop). Never counted as "no work". */
+async function readQuitCensus(serviceTimeoutMs?: number): Promise<{ count: number; unreadable: boolean }> {
   let guiKinds: string[] = [];
   try { guiKinds = collectUpdateWork().map((item) => item.kind); } catch { /* store closed */ }
-  let serviceReasons: string[] = [];
+  let serviceReasons: string[] | null = [];
   try {
     const { readDaemonActiveWork } = await import("./daemon/app-launcher");
-    serviceReasons = await readDaemonActiveWork(userDataDir());
+    serviceReasons = await readDaemonActiveWork(userDataDir(), serviceTimeoutMs);
   } catch { /* no service */ }
-  return quitWorkCount(guiKinds, serviceReasons);
+  return quitCensus(guiKinds, serviceReasons);
 }
 
 function loginContinuityOn(): boolean {
@@ -2225,7 +2263,8 @@ function holdInBackground(plan: Extract<QuitPlan, { kind: "background" }>): void
   if (mainWindow && !mainWindow.isDestroyed()) mainWindow.once("show", () => leaveBackgroundHold());
   enterBackgroundHold({
     locale: () => (currentUiLocale() === "ko" ? "ko" : "en"),
-    activeWork: countQuitWork,
+    // null = unreadable this tick: the hold neither quits on it nor shows a count; the next tick asks again.
+    activeWork: async () => { const census = await readQuitCensus(); return census.unreadable ? null : census.count; },
     continuity: loginContinuityOn,
     openOne: () => { void openOneFromNotification(); },
     open: () => {
@@ -2254,7 +2293,12 @@ async function resolveOrdinaryQuit(): Promise<void> {
     const relaunching = quitRelaunching || intentCode === "relaunch";
     const continuity = loginContinuityOn();
     const needsCensus = !quitFullConfirmed && !relaunching && !headless && !nonInteractive && !systemShutdownInProgress;
-    const activeWork = needsCensus ? await countQuitWork() : 0;
+    let census = needsCensus ? await readQuitCensus() : { count: 0, unreadable: false };
+    // A service that is there but missed the short ping usually answers a longer one. If it still does not, ask: stopping it on a
+    // census nobody could read cut a running Science turn. "Stop work and quit" in the prompt is always available.
+    if (census.unreadable) census = await readQuitCensus(4_000);
+    if (census.unreadable) console.warn("[quit] service work census unreadable; asking instead of stopping it", { code: "daemon_active_work_unknown" });
+    const activeWork = census.unreadable ? 1 : census.count;
     const plan = planGuiQuit({
       continuity, activeWork, fullQuitConfirmed: quitFullConfirmed,
       systemShutdown: systemShutdownInProgress || nonInteractive, relaunching, headless,
@@ -2597,7 +2641,7 @@ app.whenReady().then(async () => {
   // so the next registration threw app_runtime_shutdown_in_progress and startup "failed". Starting
   // services now would only run them past cleanup: stop here, close what we opened, let Quit finish.
   if (quitCleanupPromise) throw new StartupAbandonedForQuit();
-  const longRunStartup = developmentEffectsSuppressed() ? null : initializeAppRuntimeCoordinator();
+  const longRunStartup = developmentEffectsSuppressed() ? null : initializeAppRuntimeCoordinator({ liveDaemonBootId: startupLiveDaemonBootId });
   if (developmentEffectsSuppressed()) {
     invocationService.beginAppShutdown();
     closeLongRunVerifierAdmission();
@@ -2610,9 +2654,18 @@ app.whenReady().then(async () => {
     interrupt: () => { invocationService.beginAppShutdown(); },
     isSettled: () => invocationService.activeRunIds().length === 0,
   });
+  if (!developmentEffectsSuppressed()) {
+    try {
+      const host = await import("./work/session-host");
+      host.rememberWorkSessionHost(host.currentWorkSessionHost());
+    } catch (error) {
+      console.warn("[work-session] host registration deferred:", error instanceof Error ? error.message : error);
+    }
+  }
   const invocationOwnerClient = developmentEffectsSuppressed() ? null : createInvocationOwnerClient({
     ...desktopDaemonClientOptions(), ...invocationProcessOwner() as { ownerId: string; ownerKind: "desktop" },
     onControl: handleInvocationOwnerControl,
+    onDisconnect: () => wakeWorkSessionRecovery("owner-control-disconnected"),
   });
   if (invocationOwnerClient) {
     configureInvocationOwnerTransport((owner, method, control) => invocationOwnerClient.dispatch(owner, method, control));
@@ -2714,7 +2767,10 @@ app.whenReady().then(async () => {
    * 조용히 completed로 덮지 않고 failed로 적어, 이어서 할지 다시 할지는 사용자가 정한다.
    */
   try {
-    const interrupted = settleInterruptedTasksOnBoot();
+    const interrupted = settleInterruptedTasksOnBoot({ liveDaemonBootId: startupLiveDaemonBootId });
+    if (interrupted.keptLiveHostTaskIds.length > 0) {
+      console.info("[tasks] left running: another live host still runs the turn", { count: interrupted.keptLiveHostTaskIds.length });
+    }
     if (interrupted.settled > 0) {
       console.log("[tasks] settled interrupted runs on boot", { count: interrupted.settled });
       for (const taskId of interrupted.taskIds) {
@@ -5114,6 +5170,11 @@ app.whenReady().then(async () => {
       .then(({ recoverOneTeamDispatches }) => recoverOneTeamDispatches())
       .catch((error) => console.warn("[one-team] startup recovery skipped:", error instanceof Error ? error.message : error));
   }, 15_000).unref?.();
+  setTimeout(() => {
+    if (quitServicesStopPromise || developmentEffectsSuppressed()) return;
+    workSessionRecoveryReady = true;
+    wakeWorkSessionRecovery("startup");
+  }, 15_000).unref?.();
   startOneTeamNotificationBridge();
   startRunAlertBridge();
   // Repeated-work detector (electron/toolchains/detector.ts): one model judgment a day at most, Main only, real app only.
@@ -5166,12 +5227,16 @@ app.whenReady().then(async () => {
           const originalEnrollment = enrollment;
           // Re-attach after a close while the app runs: one attach at a time, 1 s..30 s backoff, stops when quitting.
           nativeChannelReattacher ??= (await import("./invocation/native-gui-reattach")).createNativeChannelReattacher({
-            discoverBoot: () => module.discoverNativeDaemonBoot(options),
+            discoverBoot: async () => {
+              try { return await module.discoverNativeDaemonBoot(options); }
+              finally { wakeWorkSessionRecovery("daemon-reattach-observation"); }
+            },
             attach: async (nextBootId) => {
               const next = await native.attachNativeGuiDaemon(originalEnrollment, nextBootId, nativeEventSink, nativeAttachHooks);
               await controls.refresh();
               if (!next.ready || !bridge.available || !controls.available) throw new Error("native_gui_attach_not_ready");
               if (bridge.available && controls.available && !native.configuredNativeGuiOwner()) initializeNativeGuiInvocationOwner(originalEnrollment, policy.NATIVE_MAIN_PREPARATION_POLICY);
+              wakeWorkSessionRecovery("daemon-reattached");
             },
             currentChannel: () => native.nativeGuiEnrollmentChannel(originalEnrollment),
             isQuitting: () => quitPlanCommitted || quitRelaunching || quitCleanupDone || automaticQuitInstaller.quitInProgress(),
@@ -5209,6 +5274,7 @@ app.whenReady().then(async () => {
           }
           if (!attachment.ready) reattacher.trigger("observation not ready");
           nativeAttachment = attachment;
+          wakeWorkSessionRecovery("daemon-attached");
           // General starts remain blocked until actual event/replay, approval,
           // recovery and original service cwd/noBrain observers are integrated.
           // The original Main guards/router, source observations, public receiver
@@ -5383,6 +5449,7 @@ app.whenReady().then(async () => {
   };
   disposeAuthSessionRestoration = onAuthSessionRestored((sessionSnapshot) => {
     if (!shellReadyForWindows || !sessionSnapshot.signedIn || !getAuthSession().signedIn) return;
+    wakeWorkSessionRecovery("authentication-restored");
     reconcileMobileBridgeDevicesForAccount(userDataDir());
     failCloseActiveHubBookmarks();
     broadcastAuthSession(sessionSnapshot);
@@ -5406,7 +5473,10 @@ app.whenReady().then(async () => {
     if (attempt >= MOBILE_BRIDGE_BOOT_RETRY_MS.length) return;
     setTimeout(() => {
       if (quitServicesStopPromise || quitCleanupPromise || mobileBridgeRuntimeStatus().running) return;
-      if (!lastBridgeStartupDaemonNotReady || !restoreMobileBridgeOwnership) return;
+      // An unreadable TLS pair (a locked file, mobile-bridge/tls.ts) is the same kind of "not yet": the bridge kept the
+      // pinned certificate instead of minting a new one, so the same bounded restore path opens it once the lock clears.
+      const tlsLocked = (lastBridgeStartupError as { code?: unknown } | null)?.code === MOBILE_BRIDGE_TLS_READ_FAILED;
+      if (!(lastBridgeStartupDaemonNotReady || tlsLocked) || !restoreMobileBridgeOwnership) return;
       console.warn(`[mobile-bridge] retrying after the service was not ready (attempt ${attempt + 1})`);
       void restoreMobileBridgeOwnership().catch(() => retryMobileBridgeAfterBoot(attempt + 1));
     }, MOBILE_BRIDGE_BOOT_RETRY_MS[attempt]).unref?.();

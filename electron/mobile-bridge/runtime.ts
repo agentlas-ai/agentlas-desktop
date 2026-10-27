@@ -284,6 +284,15 @@ async function startBridgeInternal(
       // 새 기기가 붙으면 릴레이의 "재페어링 필요" 래치를 푼다 — 그 래치는
       // 폐기된 자격으로 무한 재시도하던 것을 막는 것이지, 새 페어링을 막는 게 아니다.
       if (reason === "device-paired") relay?.clearRepairRequiredLatch();
+      // Every revocation that goes through the live pairing lands here (owner removal, a phone's own unpair,
+      // account_inactive, a pairing rollback). A revoked phone can never come back to release the terminal it holds.
+      if (reason === "device-revoked") {
+        try {
+          for (const device of pairing.listDevices()) {
+            if (device.revokedAt !== null) releaseTerminalLeasesOfDevice(authority, device.deviceId);
+          }
+        } catch { console.warn("[mobile-bridge] terminal lease hand-back after a revocation could not read the device store"); }
+      }
       try { push?.prune(); } catch { console.warn("[mobile-push] registration store unavailable"); }
       emitMobileBridgeStateChange(reason);
     },
@@ -540,6 +549,21 @@ export function revokeMobileBridgeDevice(deviceId: string): { ok: boolean } {
 }
 
 /**
+ * Terminal ownership lives in the authority and only its owner can release it, so a phone revoked while holding one
+ * (or reinstalled under a new deviceId) would freeze the terminal for every other phone and pause the Desktop agent
+ * for good. Idempotent and best effort: the authority retries a refusing controller and finally resets its own lease.
+ */
+function releaseTerminalLeasesOfDevice(
+  authority: Pick<MobileBridgeAuthorityHandle, "releaseTerminalLeasesForDevice">,
+  deviceId: string,
+): void {
+  const failed = (error: unknown) => console.warn(
+    `[mobile-bridge] terminal lease hand-back for a revoked device failed: ${error instanceof Error ? error.message : String(error)}`,
+  );
+  try { void authority.releaseTerminalLeasesForDevice(deviceId).catch(failed); } catch (error) { failed(error); }
+}
+
+/**
  * Reconciles pairing credentials against the account now signed in.
  *
  * Only a PROVEN identity change revokes: a credential whose recorded workspace
@@ -584,7 +608,11 @@ export function reconcileMobileBridgeDevicesForAccount(
   if (!userDataPath) return { revoked: 0 };
   const revoked = revokeMobileBridgeDevicesForOtherAccounts(userDataPath, activeWorkspaceId);
   try { state.push?.prune(); } catch { console.warn("[mobile-push] registration store unavailable"); }
-  for (const deviceId of revoked) state.server.disconnectDevice(deviceId);
+  for (const deviceId of revoked) {
+    state.server.disconnectDevice(deviceId);
+    // revokeMobileBridgeDevicesForOtherAccounts writes the store directly, so no "device-revoked" change reaches onChanged.
+    releaseTerminalLeasesOfDevice(state.authority, deviceId);
+  }
   if (revoked.length > 0) {
     console.warn(`[mobile-bridge] revoked ${revoked.length} device(s) bound to a different account`);
   }

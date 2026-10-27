@@ -533,18 +533,20 @@ export async function browserRequestApproval(
     logBrowserAction({ site, action: req.actionType, target: req.target, result: "auto", approval: "always" });
     return "approved";
   }
-  if (stored === "deny") {
+  // 사이트별 "거부"는 오너가 그 사이트에 내린 구체적 결정이라 존중한다. 단 이 실행이 Full access 이면(오너가 이
+  // 실행에 전부 허용을 골랐다) 조용히 거부하지 않고 아래 승인 칩으로 묻는다(오너 2026-10-27 "거부 우선 말고 승인 칩").
+  const askOverDeny = stored === "deny" && options.permission === "full";
+  if (stored === "deny" && !askOverDeny) {
     logBrowserAction({ site, action: req.actionType, target: req.target, result: "blocked", approval: "deny" });
     return "denied";
   }
-  // 사이트별 "거부"는 오너가 그 사이트에 내린 구체적 결정이라 위에서 먼저 존중한다.
   // Full access skips the sheet too, except for a payment: a paid action always stops and asks
-  // (owner 2026-09-29), and an owner's site "deny" (above) still wins (owner 2026-10-27).
-  if (options.permission === "full" && req.actionType !== "payment") {
+  // (owner 2026-09-29), and so does a site the owner denied (above).
+  if (options.permission === "full" && !askOverDeny && req.actionType !== "payment") {
     logBrowserAction({ site, action: req.actionType, target: req.target, result: "auto", approval: "run-full-access" });
     return "approved";
   }
-  if (req.actionType !== "payment" && chatAlwaysApproved(options.owner)) {
+  if (!askOverDeny && req.actionType !== "payment" && chatAlwaysApproved(options.owner)) {
     logBrowserAction({ site, action: req.actionType, target: req.target, result: "auto", approval: "chat-always" });
     return "approved";
   }
@@ -554,7 +556,7 @@ export async function browserRequestApproval(
   // dead-ends waiting on an approval sheet that may not even be on screen. Only
   // genuinely irreversible external actions — a payment, or browser-run unsafe
   // code — still ask for an explicit nod.
-  if (req.actionType !== "payment" && req.actionType !== "unsafe-code") {
+  if (!askOverDeny && req.actionType !== "payment" && req.actionType !== "unsafe-code") {
     logBrowserAction({ site, action: req.actionType, target: req.target, result: "auto", approval: "user-driven" });
     return "approved";
   }

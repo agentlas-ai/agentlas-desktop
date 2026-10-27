@@ -246,7 +246,7 @@ export async function runScopedBinding(server: InstalledMcpServer, ctx?: Pick<Ha
 }
 
 /** Current tools/list of one installed connector, with the digest tool.call must carry. */
-export async function describeConnectorTools(providerRef: string, ctx?: Pick<HarnessCallContext, "mcpConfigPath">): Promise<
+export async function describeConnectorTools(providerRef: string, ctx?: Pick<HarnessCallContext, "mcpConfigPath" | "signal">): Promise<
   | { ok: true; server: InstalledMcpServer; prepared?: PreparedMcpBinding; tools: Array<{ name: string; description: string; schemaDigest: string; inputSchema: unknown }> }
   | { ok: false; code: string; next?: string }
 > {
@@ -258,7 +258,9 @@ export async function describeConnectorTools(providerRef: string, ctx?: Pick<Har
   const { server, prepared } = bound;
   const { testServerConnection } = await import("../mcp-tools/client");
   const { mcpToolSchemaDigest } = await import("../mcp-tools/tool-schema");
-  const status = await testServerConnection(server, { timeoutMs: 20_000, ...(prepared ? { prepared } : {}) });
+  // The run's stop signal reaches the inventory probe too: a stopped run does not keep a connector process starting for 20 s.
+  const status = await testServerConnection(server, { timeoutMs: 20_000, ...(ctx?.signal ? { signal: ctx.signal } : {}), ...(prepared ? { prepared } : {}) });
+  if (status.failureCode === "connection_cancelled") return { ok: false, code: "cancelled", next: "the run was stopped before the connector answered; nothing was dispatched" };
   if (status.missingEnv.length > 0 || status.failureCode === "authentication_required") return { ok: false, code: "auth-required", next: "auth.status then auth.ensure/auth.login" };
   if (!status.connected) return { ok: false, code: "offline", next: "connector.status; retry when the server answers" };
   return {
@@ -277,6 +279,8 @@ export async function describeConnectorTools(providerRef: string, ctx?: Pick<Har
 // ── tool.call ────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 const BINARY_INLINE_LIMIT = 16 * 1024;
+/** The agentlas-turn gateway child stops waiting for a reply after 30 s (turn-tools/mcp-server.ts); the wait keeps 3 s of margin. */
+const TOOL_REQUEST_BUDGET_MS = 27_000;
 const inlineWaitMs = (): number => {
   const value = Number(process.env.AGENTLAS_TOOL_INLINE_WAIT_MS);
   return Number.isFinite(value) && value >= 0 ? value : 20_000;
@@ -314,7 +318,7 @@ async function settle(call: LiveCall, state: ToolCallState, error: CallRecord["e
   await appendReceipt({ operationId: "tool.call.settled", callId: record.callId, resultRef: record.resultRef, state, providerRef: record.providerRef, toolId: record.toolId, chatId: record.chatId, runId: record.runId });
 }
 
-async function run(call: LiveCall, server: InstalledMcpServer, args: Args, prepared?: PreparedMcpBinding): Promise<void> {
+async function run(call: LiveCall, server: InstalledMcpServer, args: Args, prepared?: PreparedMcpBinding, onDispatch?: () => void): Promise<void> {
   const { record, controller } = call;
   const { callServerToolContent, McpToolCallError } = await import("../mcp-tools/client");
   try {
@@ -325,6 +329,7 @@ async function run(call: LiveCall, server: InstalledMcpServer, args: Args, prepa
       expectedToolSchemaDigest: record.schemaDigest,
       retainFullResult: true,
       signal: controller.signal,
+      ...(onDispatch ? { onDispatch } : {}),
       timeoutMs: 45_000,
     });
     if (!result) { await settle(call, "failed", { code: "auth-required", message: "the connector is missing credentials" }); return; }
@@ -367,6 +372,11 @@ export async function toolCall(args: Args, ctx: HarnessCallContext): Promise<Por
     return refused("invalid-input", "required: toolId, providerRef, schemaDigest, arguments (object)");
   }
   if (ctx.dryRun) return refused("dry_run", "a dry run validates only; nothing was dispatched");
+  // ctx.signal is the calling turn's lifetime plus its gateway request (Stop, a revoked admission, the 30 s gateway limit).
+  // A call not yet sent when it ends is never sent: nothing may leave after the run was told it stopped or timed out.
+  const requestStartedAt = Date.now();
+  const stoppedBeforeSend = () => refused("cancelled", "the run ended before this call was sent; nothing was dispatched");
+  if (ctx.signal?.aborted) return stoppedBeforeSend();
 
   const inventory = await describeConnectorTools(providerRef, ctx);
   if (!inventory.ok) return refused(inventory.code, inventory.next);
@@ -378,6 +388,7 @@ export async function toolCall(args: Args, ctx: HarnessCallContext): Promise<Por
     return refused("stale-binding", `the connector no longer lists ${toolName}; tool.describe for the current tools${near ? `.${near}` : ""}`);
   }
   if (tool.schemaDigest !== schemaDigest) return refused("stale-schema", `current schemaDigest is ${tool.schemaDigest}; re-read the schema before calling`);
+  if (ctx.signal?.aborted) return stoppedBeforeSend();
 
   const callId = `tc_${randomUUID()}`;
   const controller = new AbortController();
@@ -402,14 +413,23 @@ export async function toolCall(args: Args, ctx: HarnessCallContext): Promise<Por
     result: null,
   };
   const entry = { record, controller } as LiveCall;
+  // Until tools/call is written the run's end holds the call back (it settles "cancelled"); once written the call is the durable
+  // job it always was and only tool.cancel stops it.
+  const holdUnsent = () => { record.cancelRequested = true; controller.abort(ctx.signal?.reason); };
+  const releaseSent = () => ctx.signal?.removeEventListener("abort", holdUnsent);
+  if (ctx.signal) { ctx.signal.addEventListener("abort", holdUnsent, { once: true }); if (ctx.signal.aborted) holdUnsent(); }
   live.set(callId, entry);
   await pushEvent(record, "accepted");
   // The accept receipt is written before the request can leave: an uncertain outcome always has evidence of the attempt.
   await appendReceipt({ operationId: "tool.call", callId, resultRef: record.resultRef, providerRef, toolId: toolName, schemaDigest, argumentsDigest: record.argumentsDigest, chatId: ctx.chatId, runId: ctx.runId });
-  entry.done = run(entry, inventory.server, callArgs as Args, inventory.prepared).catch(() => undefined);
+  entry.done = run(entry, inventory.server, callArgs as Args, inventory.prepared, releaseSent).catch(() => undefined)
+    .finally(()=>{ releaseSent(); });
 
+  // The wait ends before the 30 s gateway limit that already ran with the connector description: an answer after the child gave up
+  // is lost, and the model retries a call that did run.
+  const waitMs = Math.max(0, Math.min(inlineWaitMs(), TOOL_REQUEST_BUDGET_MS - (Date.now() - requestStartedAt)));
   let timer: ReturnType<typeof setTimeout> | undefined;
-  await Promise.race([entry.done, new Promise<void>((resolve) => { timer = setTimeout(resolve, inlineWaitMs()); timer.unref?.(); })]);
+  await Promise.race([entry.done, new Promise<void>((resolve) => { timer = setTimeout(resolve, waitMs); timer.unref?.(); })]);
   if (timer) clearTimeout(timer);
   return ok(view(record));
 }

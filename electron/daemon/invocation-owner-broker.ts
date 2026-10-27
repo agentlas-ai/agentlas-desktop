@@ -3,13 +3,15 @@ import type { InvocationRunOwner } from "../store/invocation-owner-core";
 import type { ControlSocketPeer } from "./control-socket";
 
 export type InvocationOwnerBrokerMethod = "invoke.currentTurn" | "invoke.steerCurrentTurn"
-  | "invoke.currentTurnSteerReceipt" | "invoke.cancel";
+  | "invoke.currentTurnSteerReceipt" | "invoke.cancel" | "invoke.ownerSteer";
 
 export interface InvocationOwnerBrokerPorts {
   owners: { getRunOwner(chatId: string, runId: string): InvocationRunOwner | null };
   now?(): number;
   timeoutMs?: number;
   maxPending?: number;
+  onOwnerRegistered?(owner: { ownerId: string; ownerKind: "desktop" | "terminal"; pid?: number }): void;
+  onOwnerDisconnected?(owner: { ownerId: string; ownerKind: "desktop" | "terminal"; pid?: number }): void;
 }
 
 export interface InvocationOwnerCompletion {
@@ -24,6 +26,7 @@ type Registration = {
   peer: ControlSocketPeer;
   ownerId: string;
   ownerKind: "desktop" | "terminal";
+  pid?: number;
   removeCloseListener: () => void;
 };
 type Pending = {
@@ -85,6 +88,8 @@ export function createInvocationOwnerBroker(ports: InvocationOwnerBrokerPorts) {
     for (const [requestId, request] of pending) {
       if (request.registration === registration) finish(requestId, unavailable());
     }
+    try { ports.onOwnerDisconnected?.({ ownerId: registration.ownerId, ownerKind: registration.ownerKind,
+      ...(registration.pid !== undefined ? { pid: registration.pid } : {}) }); } catch { /* Wake failures cannot retain a disconnected peer. */ }
   }
 
   return {
@@ -93,17 +98,22 @@ export function createInvocationOwnerBroker(ports: InvocationOwnerBrokerPorts) {
       return !closed && registrations.has(ownerId);
     },
 
-    register(peer: ControlSocketPeer, input: { ownerId: string; ownerKind: "desktop" | "terminal" }) {
+    register(peer: ControlSocketPeer, input: { ownerId: string; ownerKind: "desktop" | "terminal"; ownerPid?: number }) {
       if (closed || !input || !validId(input.ownerId)
-        || (input.ownerKind !== "desktop" && input.ownerKind !== "terminal")) throw unavailable();
+        || (input.ownerKind !== "desktop" && input.ownerKind !== "terminal")
+        || (input.ownerPid !== undefined && (!Number.isSafeInteger(input.ownerPid) || input.ownerPid <= 0))) throw unavailable();
       const prior = registrations.get(input.ownerId);
       const peerPrior = peers.get(peer);
       if (prior || peerPrior) {
-        if (prior !== peerPrior || prior?.peer !== peer || prior.ownerKind !== input.ownerKind) throw unavailable();
+        if (prior !== peerPrior || prior?.peer !== peer || prior.ownerKind !== input.ownerKind || prior.pid !== input.ownerPid) throw unavailable();
         return { ownerId: prior.ownerId, ownerKind: prior.ownerKind };
       }
-      const registration: Registration = { peer, ownerId: input.ownerId, ownerKind: input.ownerKind,
+      const registration: Registration = { peer, ownerId: input.ownerId, ownerKind: input.ownerKind, pid: input.ownerPid,
         removeCloseListener: () => {} };
+      // Persist host-written provenance before acknowledging this epoch. A store
+      // failure leaves registration retryable and cannot create a live receiver.
+      ports.onOwnerRegistered?.({ ownerId: registration.ownerId, ownerKind: registration.ownerKind,
+        ...(registration.pid !== undefined ? { pid: registration.pid } : {}) });
       registrations.set(input.ownerId, registration);
       peers.set(peer, registration);
       try { registration.removeCloseListener = peer.onClose(() => unregister(peer)); }
@@ -121,7 +131,7 @@ export function createInvocationOwnerBroker(ports: InvocationOwnerBrokerPorts) {
         if (closed || pending.size >= maxPending || !owner || !validId(owner.chatId)
           || !validId(owner.runId) || !validId(owner.ownerId) || !validId(owner.leaseId)
           || (owner.state !== "active" && owner.state !== "settling")
-          || !["invoke.currentTurn", "invoke.steerCurrentTurn", "invoke.currentTurnSteerReceipt", "invoke.cancel"].includes(method)) {
+          || !["invoke.currentTurn", "invoke.steerCurrentTurn", "invoke.currentTurnSteerReceipt", "invoke.cancel", "invoke.ownerSteer"].includes(method)) {
           throw unavailable();
         }
         const registration = registrations.get(owner.ownerId);

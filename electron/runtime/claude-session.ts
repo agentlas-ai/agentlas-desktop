@@ -62,6 +62,8 @@ export interface ClaudeResidentSession {
   closed: boolean;
   /** 프로세스가 죽었다. */
   dead: boolean;
+  /** The `error` event that ended this process (a failed spawn, which has no pid); the turn reads its errno from it. */
+  spawnError?: Error;
   /** 이 세션이 `result` 까지 완주한 턴 수 — 구형 CLI(스폰 즉시 실패) 판별에 쓴다. */
   completedTurns: number;
   /** 마지막 stderr 꼬리(진단용, 상한 있음). */
@@ -185,7 +187,7 @@ export function openClaudeResidentSession(opts: {
       }
     };
     child.once("close", (code) => die(typeof code === "number" ? code : null));
-    child.once("error", () => die(null));
+    child.once("error", (error) => { session.spawnError = error; die(null); });
     // stdin 이 EPIPE 로 프로세스를 죽이지 않게 한다(자식이 먼저 닫는 경우).
     child.stdin?.on("error", () => {});
     return session;

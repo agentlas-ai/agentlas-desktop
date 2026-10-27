@@ -22,6 +22,13 @@ export async function probeRuntimeCredentialAccess(
   }
 }
 
+/**
+ * The machine code of the refusal a turn gets while the selected saved key cannot be read (selection.ts). The OS keychain, not
+ * the provider, refused: nothing was sent, no sign-in expired, and the key may be readable again the next minute. So this
+ * code is never recorded as a runtime cooldown or "signed out" (runtime-cooldown.ts) and never offers a CLI sign-in.
+ */
+export const RUNTIME_CREDENTIAL_UNAVAILABLE_CODE = "byok_credential_unavailable";
+
 /** Shared selection guard: inaccessible credentials cannot authorize fallback. */
 export function isRuntimeCredentialUnavailable(
   runtime: { credentialAccess?: { status: string } } | null | undefined,

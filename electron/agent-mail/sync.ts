@@ -99,9 +99,11 @@ interface SyncState {
   /**
    * Received messages whose inbound handling could not start because reading
    * them failed (network, 5xx). The cursor has already moved past them, so
-   * without this list they would never get their run.
+   * without this list they would never get their run. Every received message is written here in the SAME write that moves
+   * the cursor, and again when its run start was refused as "not ready yet" (`since` = when it began waiting, bounded by
+   * TRANSIENT_SEND_DEADLINE_MS).
    */
-  pending?: Array<{ messageId: string; threadId: string | null; attempts: number }>;
+  pending?: Array<{ messageId: string; threadId: string | null; attempts: number; since?: string }>;
 }
 
 let state: SyncState | null = null;
@@ -230,7 +232,12 @@ function loadState(): SyncState {
         pending: Array.isArray(parsed.pending)
           ? parsed.pending
             .filter((item) => item && isAgentMailId(item.messageId) && Number.isSafeInteger(item.attempts))
-            .map((item) => ({ messageId: item.messageId, threadId: isAgentMailId(item.threadId) ? item.threadId : null, attempts: item.attempts }))
+            .map((item) => ({
+              messageId: item.messageId,
+              threadId: isAgentMailId(item.threadId) ? item.threadId : null,
+              attempts: item.attempts,
+              ...(typeof item.since === "string" && Number.isFinite(Date.parse(item.since)) ? { since: item.since } : {}),
+            }))
             .slice(-PENDING_KEEP)
           : [],
       };
@@ -490,6 +497,7 @@ async function pullScoped(scope: AgentMailExecutionScope): Promise<number> {
     saved.changeSeq = res.changeSeq;
     if (!res.hasMore) break;
   }
+  queueReceivedPending(saved, received);
   saveState();
   // P2.7: identity_status = the mail identity or a domain changed → re-read the mailbox.
   if (identityChanged) {
@@ -646,8 +654,17 @@ async function a2aUnsolicited(message: AgentMailMessage, threadId: string): Prom
 /** `reason` = why no reply went out (skip rule or the server's refusal code) — the "처리함" record. */
 function markHandled(messageId: string, chatId: string | null, reason: string | null = null): void {
   const saved = loadState();
+  const previous = { handled: saved.handled, pending: saved.pending };
   saved.handled = [...saved.handled.filter((item) => item.messageId !== messageId), { messageId, at: new Date().toISOString(), chatId, ...(reason ? { reason } : {}) }].slice(-HANDLED_KEEP);
-  saveState();
+  // Leaving "pending" and entering "handled" is ONE write: a mail that is in neither list is never looked at again.
+  if (saved.pending?.some((entry) => entry.messageId === messageId)) saved.pending = saved.pending.filter((entry) => entry.messageId !== messageId);
+  // A write that failed (a locked state file) must not leave the mail "handled" in memory only: the next pass would skip it and the run never started.
+  try { saveState(); } catch (error) { saved.handled = previous.handled; saved.pending = previous.pending; throw error; }
+}
+
+/** Lazily loaded like runtime(): contract runs compile this file with only its boundary modules stubbed. */
+function refusals() {
+  return require("../../shared/transient-send-refusal") as typeof import("../../shared/transient-send-refusal");
 }
 
 /**
@@ -682,6 +699,44 @@ function deferPending(item: { messageId: string; threadId: string | null }): voi
   if (list.some((entry) => entry.messageId === item.messageId)) return;
   saved.pending = [...list, { messageId: item.messageId, threadId: item.threadId, attempts: 0 }].slice(-PENDING_KEEP);
   saveState();
+}
+
+/**
+ * The feed moves the cursor past a received message for good, so the message must be on disk in the SAME write that moves
+ * the cursor. Without this a state write that failed once (a locked file) after the cursor was saved lost every received
+ * mail of that pass: the feed never shows them again and no run had started. Memory only; the caller's saveState writes it.
+ */
+function queueReceivedPending(saved: SyncState, received: Array<{ messageId: string; threadId: string | null }>): void {
+  const list = saved.pending ?? [];
+  const since = new Date().toISOString();
+  const fresh = received
+    .filter((item, index, all) => all.findIndex((other) => other.messageId === item.messageId) === index)
+    .filter((item) => !list.some((entry) => entry.messageId === item.messageId) && !saved.handled.some((entry) => entry.messageId === item.messageId))
+    .map((item) => ({ messageId: item.messageId, threadId: item.threadId, attempts: 0, since }));
+  if (fresh.length) saved.pending = [...list, ...fresh].slice(-PENDING_KEEP);
+}
+
+/**
+ * The run start was refused with a typed "not ready yet" code (shared/transient-send-refusal.ts), which is thrown before
+ * anything is dispatched: the mail is still unanswered and starting it later cannot double it. Take it back out of
+ * "handled" and wait for a later pass without spending a read retry. Bounded by the same 2 h the owner's send queue
+ * uses; past it the mail is recorded as handled with the refusal code as the reason.
+ */
+function requeueRefusedInbound(item: { messageId: string; threadId: string | null }, code: string | undefined, since: string | undefined): void {
+  const saved = loadState();
+  saved.handled = saved.handled.filter((entry) => entry.messageId !== item.messageId);
+  const now = Date.now();
+  const waitedMs = since ? now - Date.parse(since) : 0;
+  const rest = (saved.pending ?? []).filter((entry) => entry.messageId !== item.messageId);
+  if (waitedMs > refusals().TRANSIENT_SEND_DEADLINE_MS) {
+    console.warn(`[agent-mail] inbound run never started within the wait limit: ${code ?? "unknown"}`);
+    saved.pending = rest;
+    saved.handled = [...saved.handled, { messageId: item.messageId, at: new Date(now).toISOString(), chatId: null, reason: code ?? "start_refused" }].slice(-HANDLED_KEEP);
+  } else {
+    saved.pending = [...rest, { messageId: item.messageId, threadId: item.threadId, attempts: 0, since: since ?? new Date(now).toISOString() }].slice(-PENDING_KEEP);
+  }
+  // Memory is already right; a write that fails here is repeated by the next pass's save.
+  try { saveState(); } catch (error) { console.warn("[agent-mail] pending state not saved yet:", error instanceof Error ? error.message : error); }
 }
 
 /** Company mail is answered through the company-work port, which exists only while this window holds a current company session. */
@@ -725,16 +780,18 @@ async function handleScopedInbound(received: Array<{ messageId: string; threadId
       rememberPending(item, message.code);
       continue;
     }
-    forgetPending(item.messageId);
+    // The mail stays pending until it ends up handled (markHandled moves it in one write) or needs no run at all.
+    // Where it began waiting for a run to be admitted (see requeueRefusedInbound):
+    const waitingSince = saved.pending?.find((entry) => entry.messageId === item.messageId)?.since;
     const mode = effectiveInboundMode(modeForSender(mailbox, message.message.from), agentMailLastKnownEntitlement()?.mailbox.send);
-    if (mode === "notify") continue;
+    if (mode === "notify") { forgetPending(item.messageId); continue; }
     const skip = inboundSkipReason(message.message, own);
     if (skip) {
       markHandled(item.messageId, null, skip);
       continue;
     }
     const threadId = message.message.threadId ?? item.threadId;
-    if (!threadId) continue;
+    if (!threadId) { forgetPending(item.messageId); continue; }
     if (await a2aUnsolicited(message.message, threadId)) {
       if (!scopeStillSelected(scope)) return;
       markHandled(item.messageId, null, "a2a_unsolicited");
@@ -751,6 +808,7 @@ async function handleScopedInbound(received: Array<{ messageId: string; threadId
       markHandled(item.messageId, chatId);
     } catch (error) {
       console.warn("[agent-mail] inbound run not started:", error instanceof Error ? error.message : error);
+      if (scopeStillSelected(scope) && refusals().isTransientSendRefusal(error)) requeueRefusedInbound(item, refusals().sendRefusalCode(error), waitingSince);
     }
   }
 }

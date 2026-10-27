@@ -483,7 +483,7 @@ export function AgentWorkspace({ agent, name, locale, initialView = "files", onT
       <label className={styles.popupPath}>{ko ? "새 경로" : "New path"}<input autoFocus value={newPath} placeholder="skills/my-skill/SKILL.md" onChange={(event) => setNewPath(event.target.value)} /></label>
       <p className={styles.popupNote}><IconShield size={15} />{ko ? "변경안을 먼저 검토합니다. 승인 후 이름이 바뀝니다." : "Review the proposal first. Rename happens after approval."}</p>
     </PopupFrame>}
-    {memoryImportPreview && <AgentMemoryImportDialog preview={memoryImportPreview} agentId={agent.id} locale={locale} onClose={() => setMemoryImportPreview(null)} onImported={async (count) => { await refresh(); setNotice(ko ? `메모리 ${count}건을 가져왔습니다.` : `Imported ${count} memories.`); }} />}
+    {memoryImportPreview && <AgentMemoryImportDialog preview={memoryImportPreview} agentId={agent.id} locale={locale} onClose={() => setMemoryImportPreview(null)} onImported={async (count, remainingFiles) => { await refresh(); setNotice(ko ? `메모리 ${count}건을 가져왔습니다.${remainingFiles > 0 ? ` 파일 ${remainingFiles}개가 남아 있어 다시 가져오면 이어집니다.` : ""}` : `Imported ${count} memories.${remainingFiles > 0 ? ` ${remainingFiles} more files remain; import again to continue.` : ""}`); }} />}
   </section>;
 }
 

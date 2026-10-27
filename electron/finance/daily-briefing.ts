@@ -64,24 +64,35 @@ export async function observeFinanceDailyCheckin(scope:FinanceScope,binding:Fina
   }
   scope.assertCurrent();return {active:row.active===1,nextRunAt:row.active===1?new Date(row.next_at).toISOString():null,lastSentAt,pending:notices.some(notice=>notice.review_state==='pending'||notice.review_state==='claimed')};
 }
-/** Called before the existing One check-in sweep in its current Main/daemon owner. No new timer. */
-export async function wakeFinanceDailyBriefing():Promise<void> {
+/** Only these answers revoke a registered schedule: no signed-in account, or another account than the one that registered it. */
+const FINANCE_DAILY_DEFINITE_DENIALS:ReadonlySet<string>=new Set(['finance_sign_in_required','finance_account_changed']);
+/**
+ * Called before the existing One check-in sweep in its current Main/daemon owner. No new timer.
+ * Returns the check-in ids whose gate could not be answered this tick (billing unreachable, a busy settings lock): they are
+ * neither revoked nor fired, and the next 30 s sweep asks again. A laptop that just woke before its Wi-Fi is back keeps its schedule.
+ */
+export async function wakeFinanceDailyBriefing():Promise<string[]> {
   const [{getDb},{getOneProfile}]=await Promise.all([import('../store/db'),import('../store/one-profile')]);const db=getDb();
-  if(!db.prepare("SELECT 1 FROM sqlite_master WHERE name='one_supervisor_checkins'").get())return;
+  if(!db.prepare("SELECT 1 FROM sqlite_master WHERE name='one_supervisor_checkins'").get())return [];
   const oneId=getOneProfile().oneId;
   const rows=db.prepare('SELECT id,command_id,instruction FROM one_supervisor_checkins WHERE one_id=?').all(oneId) as {id:string;command_id:string;instruction:string}[];
   const bindings=rows.filter(row=>/^finance-daily:[a-f0-9]{48}$/.test(row.command_id)&&isFinanceDailyInstruction(row.instruction)).map(row=>({oneId,checkinId:row.id,commandId:row.command_id}));
-  if(!bindings.length)return;
+  if(!bindings.length)return [];
   let allowed:FinanceDailyBinding|null=null;
   try{
     const {captureFinanceScope}=await import('./service');const scope=await captureFinanceScope();scope.assertCurrent();
     const {guardFinanceDailyBriefing}=await import('./experience');scope.assertCurrent();allowed=await guardFinanceDailyBriefing(scope);scope.assertCurrent();
-  }catch{allowed=null;}
+  }catch(error){
+    const code=error instanceof Error?error.message:'finance_daily_wake_unknown';
+    if(!FINANCE_DAILY_DEFINITE_DENIALS.has(code)){console.warn('[finance-daily] sweep deferred',code);return bindings.map(binding=>binding.checkinId);}
+    allowed=null;
+  }
   // Revocation is limited to previously registered Finance instructions in this One.
   // A different/signed-out account never inherits another account's active schedule.
   for(const binding of bindings){if(allowed?.oneId===binding.oneId&&allowed.checkinId===binding.checkinId&&allowed.commandId===binding.commandId)continue;
     await revokeFinanceDailyCheckin({assertCurrent(){}} as FinanceScope,binding);
   }
+  return [];
 }
 
 /** Every actual One review admission checks current entitlement; timer admission alone is insufficient. */
@@ -96,6 +107,9 @@ export async function assertFinanceDailyReview(runId:string):Promise<void>{
     const {admitFinanceDailyBriefing}=await import('./experience');scope.assertCurrent();
     for(const binding of bindings){await admitFinanceDailyBriefing(scope,binding,runId);scope.assertCurrent();}
   }catch(error){
+    // Billing unreachable at the moment this review would start: nothing was decided, so the schedule is kept.
+    // The caller returns the review's results to the queue and records this typed cause.
+    if(error instanceof Error&&error.message==='finance_monitoring_access_unavailable')throw new Error('finance_daily_access_unavailable',{cause:error});
     if(error instanceof Error&&error.message==='finance_daily_already_admitted'){
       for(const binding of bindings)db.prepare("UPDATE one_supervisor_notices SET review_state='skipped',review_reason='finance_daily_already_admitted' WHERE one_id=? AND task_id=? AND review_run_id=? AND review_state='claimed'").run(binding.oneId,`checkin:${binding.checkinId}`,runId);
     }else for(const binding of bindings)await revokeFinanceDailyCheckin({assertCurrent(){}} as FinanceScope,binding,true);

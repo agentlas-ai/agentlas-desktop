@@ -19,6 +19,7 @@ import {
 } from "../runtime/continuity";
 import { getAgentConcurrency } from "../store/concurrency";
 import { tryRecordFailureEvent, tryRecordRunEvent } from "../store/run-events";
+import { executionFailureReport, type ExecutionFailureCause } from "../../shared/execution-effect-contract";
 import { taskForceAllocationOutputSchema, type BorrowedTaskForceParams } from "./borrowed-task-force";
 import { runSwarm, type SwarmBoard, type SwarmEvent, type SwarmTask } from "./swarm-engine";
 import { buildEffectiveAgentSystemPrompt } from "../agents/files";
@@ -34,7 +35,6 @@ import {
 } from "../runtime/workload-routing";
 import { runtimeFailureBlocksReplay, pickActive, pickRunner, rolePriorityRuntimes } from "../runtime/selection";
 import { runnerFailureFromError, withoutMcpTransportEnv } from "../runtime/runner";
-import { ProjectResidencyBusyError, WORK_PROJECT_RESIDENCY_BUSY_CODE } from "../runtime/project-residency";
 import { revalidateInvocationWorkspaceBinding } from "../invocation/workspace-binding";
 import { stripReplyMemoryEventsReadOnly } from "../memory/curator";
 import { buildProjectContextSlice } from "../memory/context-map";
@@ -693,7 +693,6 @@ export async function runSwarmInvocation(
       ? { text: "", failure: roomPinRefusal }
       : await withModelCallScope({ role: "worker", phase: "swarm-worker" }, () => runWorkerOn(executedRuntime, executedRunner));
     while (result.failure && !directUserRuntimePinHonored && !roomPinnedWorker && !(signal ?? p.signal)?.aborted) {
-      if (result.failure.providerCode === WORK_PROJECT_RESIDENCY_BUSY_CODE) break;
       if (!failedWorkerRuntimes.some((runtime) => sameRuntime(runtime, executedRuntime)
         && runtime.model === executedRuntime.model)) {
         failedWorkerRuntimes.push(executedRuntime);
@@ -720,10 +719,7 @@ export async function runSwarmInvocation(
         emit(task, { kind: "tool-use", done: true, status: p.locale === "ko" ? "실행 중단 — 작업 기록을 확인하세요." : "Execution stopped — review the work history." });
         throw new ObservedRunnerFailureError(result.failure);
       }
-      if (result.failure.providerCode === WORK_PROJECT_RESIDENCY_BUSY_CODE) {
-        throw new ProjectResidencyBusyError(p.chat.projectId ?? "unknown");
-      }
-      throw new Error(`${result.failure.runtime} runtime ${result.failure.kind}: ${result.failure.message}`);
+      throw new ObservedRunnerFailureError(result.failure);
     }
     const effectiveResolution = resolution && workerFellBack
       ? {
@@ -867,7 +863,6 @@ export async function runSwarmInvocation(
       && !directUserRuntimePinHonored
       && !(signal ?? p.signal)?.aborted
     ) {
-      if (result.failure.providerCode === WORK_PROJECT_RESIDENCY_BUSY_CODE) break;
       if (!failedSynthesisRuntimes.some((runtime) => sameRuntime(runtime, executedRuntime)
         && runtime.model === executedRuntime.model)) {
         failedSynthesisRuntimes.push(executedRuntime);
@@ -899,10 +894,7 @@ export async function runSwarmInvocation(
         synthEmit({ kind: "tool-use", done: true, status: p.locale === "ko" ? "실행 중단 — 작업 기록을 확인하세요." : "Execution stopped — review the work history." });
         throw new ObservedRunnerFailureError(result.failure);
       }
-      if (result.failure.providerCode === WORK_PROJECT_RESIDENCY_BUSY_CODE) {
-        throw new ProjectResidencyBusyError(p.chat.projectId ?? "unknown");
-      }
-      throw new Error(`${result.failure.runtime} runtime ${result.failure.kind}: ${result.failure.message}`);
+      throw new ObservedRunnerFailureError(result.failure);
     }
     const executedResolution = reconcileWorkloadRunnerResult(
       executedRuntime === active
@@ -996,6 +988,31 @@ export async function runSwarmInvocation(
           final || (p.locale === "ko" ? "완료된 패킷의 결과가 없습니다." : "No completed packet result is available."),
         ].join("\n\n");
   const finalText = restrictedSwarmText(p, rawFinalText, "swarm-final");
+  // The final gate is the swarm's structural verdict. A blocked gate (not the owner's stop) leaves the same typed receipt a
+  // team run leaves (task_force_execution_receipt, verifierStatus fail), so every reader of that verdict - the Goal follower,
+  // task acceptance, the Work failure reader - sees work left, never a completed run that merely carries a warning in its text.
+  if (!aborted && !finalGate.canReportSuccess) {
+    const nonPassing = [
+      ...finalGate.blocked.map((stepId) => ({ stepId, code: "swarm_packet_failed", phase: "execution" as const })),
+      ...finalGate.incomplete.map((stepId) => ({ stepId, code: "swarm_packet_incomplete", phase: "verification" as const })),
+    ];
+    const causes: ExecutionFailureCause[] = nonPassing.slice(0, 32).map(({ stepId, code, phase }) =>
+      ({ phase, code, stepId, delivery: "unknown", recovery: "continue-work" }));
+    tryRecordRunEvent({
+      runId,
+      kind: "task_force_execution_receipt",
+      chatId: p.chat.id,
+      payload: {
+        schemaVersion: "agentlas.desktop-swarm-execution-summary.v1",
+        synthesisStatus: final.trim() ? "completed" : "failed",
+        verifierStatus: "fail",
+        verifierIssues: nonPassing.slice(0, 32).map(({ stepId, code }) => `${code}:${stepId}`),
+        finalGate: { status: finalGate.status, required: finalGate.required, passing: finalGate.passing.length,
+          blocked: finalGate.blocked.length, incomplete: finalGate.incomplete.length },
+        failureReport: executionFailureReport({ outcome: finalGate.passing.length > 0 ? "partial" : "failed", causes }),
+      },
+    });
+  }
   tryRecordRunEvent({
     runId,
     kind: "swarm_finished",

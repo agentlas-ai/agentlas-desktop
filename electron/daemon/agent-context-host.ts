@@ -4,8 +4,9 @@ import { agentContextKey, type AgentContextIdentity } from "../store/agent-conte
 import { createAgentContextCapability, type AgentContextCapability } from "../runtime/agent-context";
 import {
   admitAwakeAgentResidency, admitWarmAgentResidency, isAgentContextResidencyAdmissionCurrent, isAwakeAgentResidencyAdmission, releaseAwakeAgentResidency, retireAwakeAgentResidencyAdapter, withAwakeAgentResidency,
-  agentResidencyBudget, holdingAgentResidency, type AwakeAgentResidencyAdmission,
+  agentResidencyBudget, holdingAgentResidency, isAgentResidencyCapacityRefusal, type AwakeAgentResidencyAdmission,
 } from "../runtime/agent-residency";
+import { markRefusedBeforeDispatch } from "../runtime/runner";
 import { onHostShutdown } from "../host-lifecycle";
 import { registerNativeApprovalChildSignal } from "../runtime/native-approval-provenance";
 
@@ -107,14 +108,22 @@ export function createDaemonAgentContextHost(options: {
     const generation = actor.generation;
     const lifetime = options.awakeLifetime?.(actor.identity) ?? null;
     lifetime?.assertCurrent();
-    actor.admission = (lifetime ? admitAwakeAgentResidency : admitWarmAgentResidency)({ contextKey: actor.key, agentId: actor.identity.agentId,
+    const owner = { contextKey: actor.key, agentId: actor.identity.agentId,
       ownerEpoch: options.bootId, generation, assertCurrent() {
         currentHost();
         lifetime?.assertCurrent();
         if (actors.get(actor.key) !== actor || actor.generation !== generation || actor.state === "stopped") {
           fail("agent_context_actor_generation_changed");
         }
-      } });
+      } };
+    try { actor.admission = (lifetime ? admitAwakeAgentResidency : admitWarmAgentResidency)(owner); }
+    catch (error) {
+      // An awake seat is a reserved budget slot that nothing can evict, so a roster larger than the budget (or a budget held
+      // by running turns) has no seat to give. The member still runs: it keeps its context under the normal warm-session LRU
+      // and takes a process seat only while it has one open, like any ordinary conversation.
+      if (!lifetime || !isAgentResidencyCapacityRefusal(error)) throw error;
+      actor.admission = admitWarmAgentResidency(owner);
+    }
   }
   function resolve(identity: AgentContextIdentity): Actor {
     currentHost();
@@ -217,12 +226,12 @@ export function createDaemonAgentContextHost(options: {
         const known = actor.turns.get(turn.turnId);
         if (known) return known.promise as Promise<T>;
         if (actor.queue.length >= maxPending) fail("agent_context_mailbox_capacity");
-      } catch (error) { return Promise.reject(error); }
+      } catch (error) { return Promise.reject(turn?.signal?.aborted ? error : markRefusedBeforeDispatch(error)); }
       const generation = actor.generation;
       const controller = new AbortController();
       // The runner receives this controller's signal, not the invocation's, and native approval provenance follows signals:
       // without lineage every tool ask of the turn is refused as native_approval_signal_unregistered (production 1.3.5/1.3.7).
-      try { registerNativeApprovalChildSignal(turn.signal, controller.signal); } catch (error) { return Promise.reject(error); }
+      try { registerNativeApprovalChildSignal(turn.signal, controller.signal); } catch (error) { return Promise.reject(markRefusedBeforeDispatch(error)); }
       let resolveResult!: (value: T) => void;
       let rejectResult!: (error: unknown) => void;
       const promise = new Promise<T>((resolve, reject) => { resolveResult = resolve; rejectResult = reject; });
@@ -251,6 +260,9 @@ export function createDaemonAgentContextHost(options: {
           if (!scopeDestroyed) { scopeDestroyed = true; invocationScope.emitDestroy(); }
         },
         execute: () => invocationScope.runInAsyncScope(async () => {
+          // Until the runner is entered nothing reached a model: a refusal of the host's own guards is "not-dispatched" (a
+          // Stop's abort reason is the invocation's own object and keeps its handling).
+          let entered = false;
           try {
             const assertCurrent = () => {
               currentHost();
@@ -271,12 +283,13 @@ export function createDaemonAgentContextHost(options: {
               actor.adapterKey = turn.adapterKey;
             }
             const capability = createAgentContextCapability(actor.identity, { turnId: turn.turnId, assertCurrent });
+            entered = true;
             const value = await withAwakeAgentResidency(actor.admission, () => execute(capability, controller.signal), assertCurrent);
             // Late output after Stop or ownership change cannot be reported as
             // a current actor turn. The existing invocation keeps its receipt.
             assertCurrent();
             resolveResult(value);
-          } catch (error) { rejectResult(error); }
+          } catch (error) { rejectResult(entered || controller.signal.aborted ? error : markRefusedBeforeDispatch(error)); }
         }) };
       actor.turns.set(turn.turnId, { promise, settled: false });
       actor.queue.push(job);

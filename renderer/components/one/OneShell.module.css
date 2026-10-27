@@ -4313,9 +4313,14 @@
   background: var(--paper);
 }
 
+/* 칸 모서리를 끌어 칸이 좁아지면(창 960 에서 4 칸 · 20% = 칸 146px, 입력칸 51px) 한 줄짜리 입력칸 안에서 자리표시자가 2~3 줄로
+   꺾여 둘째 줄 윗부분이 입력칸 아래로 비어져 나왔고, 쓴 글도 꺾이면 높이가 그대로라 잘렸다(오너 2026-10-27 "탭을 움직이면 특정
+   사이즈에서 오버플로우"). 입력칸 높이는 쓴 글을 따라 자라고(field-sizing: content, 96px 뒤에는 안에서 스크롤), 자리표시자는 한
+   줄에서 잘린다. 폭은 내용이 아니라 칸이 정한다(basis 0) — 쓰는 동안 입력칸 폭이 출렁이지 않는다. */
 .splitPaneComposer > textarea {
-  flex: 1 1 auto;
+  flex: 1 1 0;
   min-width: 0;
+  field-sizing: content;
   max-height: 96px;
   padding: 6px 0;
   border: 0;
@@ -4326,6 +4331,12 @@
   font: inherit;
   font-size: 12.5px;
   line-height: 1.45;
+}
+
+.splitPaneComposer > textarea::placeholder {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .splitPaneComposer > button {

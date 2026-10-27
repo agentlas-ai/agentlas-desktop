@@ -59,8 +59,13 @@ export class InvocationBreaker {
     return async (req, events) => {
       if (this.isOpen(key)) {
         await this.clock.sleep(INVOCATION_BREAKER_REFUSAL_DELAY_MS);
+        // Nothing was launched: the result says so (RuntimeTurnDelivery "not-dispatched"), so the host keeps this code, may move to
+        // another candidate, and the send queue starts the owner's message again once the minute is over (runtime_invocation_storm
+        // is a transient run failure code). Inline, not imported: this module has no runtime dependencies on purpose.
         return {
           text: "",
+          ownerControlTerminal: "uncertain",
+          turnDelivery: "not-dispatched",
           failure: {
             kind: "refused",
             source: "marker",

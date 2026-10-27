@@ -142,7 +142,7 @@ export function developmentRendererRequestAllowed(rawUrl: string, devStartUrl?: 
 const DEVELOPMENT_LOCAL_IPC_CHANNELS = new Set([
   "auth:getSession", "app:getLocale", "menu:setLocale", "confirm:listPendingAskUser",
   "surfaces:get", "workspace:get",
-  "oneSupervisor:snapshot", "oneSupervisor:journal", "oneSupervisor:receipt",
+  "oneSupervisor:snapshot", "oneSupervisor:journal", "oneSupervisor:receipt", "oneSupervisor:supervisedRooms",
   "oneSupervisor:budgets", "oneContext:snapshot", "oneContext:revoke",
   "oneHarness:getResult", "oneProfile:get", "oneProfile:origin",
   "oneWindow:getState", "oneWindow:open", "oneWindow:hide", "oneWindow:setAlwaysOnTop", "oneWindow:showMain",
@@ -162,6 +162,8 @@ const DEVELOPMENT_LOCAL_IPC_CHANNELS = new Set([
   "hephaestus:stopStudio", "productExtensions:closeScienceView", "science:composer:cancel", "science:renderers:dispose", "science:manuscripts:cancelRenderJob",
   "browserAnnotation:stop", "browserUi:stopFind",
   "oneSupervisor:stopTask", "oneSupervisor:stopReply",
+  // Local store only: the owner takes a personal agent's room back.
+  "oneSupervisor:releaseRoom",
 ]);
 
 export function assertDevelopmentIpcAllowed(channel: string, args: readonly unknown[]): void {

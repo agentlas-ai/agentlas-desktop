@@ -319,6 +319,8 @@ import roomWorkStyles from "./SeatRoomWork.module.css";
 import { PersonalOneWorkspace } from "./PersonalOneWorkspace";
 import panelMenu from "@/components/PanelPopover.module.css";
 import { ownerFailureReasonOrNull } from "@shared/owner-visible-activity-text";
+import { PersonalAgentRoomNotice } from "@/components/PersonalAgentRoomNotice";
+import { isPersonalAgentRoom, PERSONAL_AGENT_HREF, usePersonalAgentRoom } from "@/lib/personal-agent-room";
 
 // IPC 결과는 호출마다 새 객체다. 내용이 같으면 이전 상태 참조를 돌려줘 React가
 // 리렌더를 생략하게 한다(모든 IPC 페이로드는 구조상 JSON 직렬화 가능).
@@ -4844,6 +4846,9 @@ function OneSessionsShell() {
       ),
     );
   }, [activeChatRecord, activeSeat, oneOrgState]);
+  // A teammate session the personal agent opened (owner 2026-10-27): read here, spoken to through the personal agent.
+  const activeRoomLive = usePersonalAgentRoom(activeThreadChatId);
+  const activePersonalAgentRoom = activeRoomLive || isPersonalAgentRoom(activeChatRecord);
   /** 이전 담당 이름 — 좌석 스냅샷(참여자)에서. 없으면 그 줄을 그리지 않는다(I9). */
   const previousOccupantName = useMemo(() => {
     if (!activeSeatEmpty) return null;
@@ -11044,14 +11049,16 @@ function OneSessionsShell() {
                 disabled={taskforceBusy}
               >{appLocale === "ko" ? "같은 멤버로 새 단톡 만들기" : "Start a new group chat with the same members"}</button>
             </div>}
+            {activePersonalAgentRoom && <PersonalAgentRoomNotice locale={appLocale === "ko" ? "ko" : "en"} width="100%"
+              onOpenPersonalAgent={() => router.push(PERSONAL_AGENT_HREF)} />}
             {/* 새 세션 추천 작업 — 작성창 바로 위(오너 2026-09-26, Codex 식). */}
-            {firstRequestEntry && !activeSeatDissolved && (
+            {firstRequestEntry && !activeSeatDissolved && !activePersonalAgentRoom && (
               <OneFirstRequestCards locale={appLocale} entry={firstRequestEntry} cards={firstRequestCards} onInsert={insertFirstRequestPrompt} hasDraft={composerHasText} />
             )}
             <MessageReplyPreview reply={messageReply} locale={appLocale} onDismiss={() => setMessageReply(null)} />
-            <form className={styles.composer} data-one-composer="true" data-has-files={attachmentDrafts.length > 0 ? "true" : undefined} data-unavailable={activeDirectSessionUnavailable ? "true" : undefined} style={activeSeatDissolved ? { display: "none" } : undefined} onSubmit={(event) => {
+            <form className={styles.composer} data-one-composer="true" data-has-files={attachmentDrafts.length > 0 ? "true" : undefined} data-unavailable={activeDirectSessionUnavailable ? "true" : undefined} style={activeSeatDissolved || activePersonalAgentRoom ? { display: "none" } : undefined} onSubmit={(event) => {
               event.preventDefault();
-              if (activeSeatDissolved || activeDirectSessionUnavailable) return;
+              if (activeSeatDissolved || activeDirectSessionUnavailable || activePersonalAgentRoom) return;
               const submittedValue = composerInputRef.current?.value ?? composer;
               if (busy && !submittedValue.trim()) stopRun();
               else void submit(submittedValue);

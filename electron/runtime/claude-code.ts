@@ -39,6 +39,7 @@ import {
   RuntimeTurnUnsettledError,
   childExitReason,
   markRefusedBeforeDispatch,
+  spawnStartFailureRefusal,
 } from "./runner";
 import { containsMcpStartupTransportFatal } from "./mcp-startup-fatal";
 import { detectApprovalRequired } from "./runtime-refusal";
@@ -2069,7 +2070,8 @@ const runClaudeTurn = async (
       } catch (error) {
         cleanupSysFile();
         cleanupAgentAppMcpConfig();
-        rejectRuntime(error);
+        // Starting the process throws the errnos it does not report as an event (ENOTDIR, EPERM...): no process, nothing ran.
+        rejectRuntime(spawnStartFailureRefusal(null, error, { runtimeKind: KIND, cwd: runCwd, locale: req.locale }) ?? error);
         return;
       }
       trackRunChild(child);
@@ -3072,8 +3074,11 @@ const runClaudeTurn = async (
       settled = true;
       broken = true;
       detachTurn();
-      rejectRuntime(turnDispatchAttempted && !sawResult && !req.signal?.aborted
-        ? new RuntimeTurnUnsettledError(KIND, req.locale, sessionId, runnerFailure?.message, turnDeliveryFact()) : err);
+      // A child that never got a pid never started (ENOENT, EACCES, EMFILE, a deleted working folder): nothing was sent.
+      const notStarted = req.signal?.aborted ? null : spawnStartFailureRefusal(child, err, { runtimeKind: KIND, cwd: runCwd, locale: req.locale });
+      if (notStarted) turnDispatchAttempted = false;
+      rejectRuntime(notStarted ?? (turnDispatchAttempted && !sawResult && !req.signal?.aborted
+        ? new RuntimeTurnUnsettledError(KIND, req.locale, sessionId, runnerFailure?.message, turnDeliveryFact()) : err));
     };
     const settle = (code: number | null) => {
       if (settled) return;
@@ -3121,6 +3126,15 @@ const runClaudeTurn = async (
         console.warn(`[residency] claude-code degraded to one-shot: ${(stderr || session?.stderrTail || "").slice(-500).trim().slice(0, 200)}`);
         events.onStatus(`[residency] disabled kind=${KIND} reason=input-format-unsupported`);
         void runClaudeTurn(req, events, false, observeNativeFile).then(resolve, reject);
+        return;
+      }
+      // A resident whose process never started (its spawn failed) read nothing from the pipe the turn was written into.
+      const residentNotStarted = turnDispatchAttempted && !sawResult && session?.spawnError
+        ? spawnStartFailureRefusal(session.child, session.spawnError, { runtimeKind: KIND, cwd: runCwd, locale: req.locale }) : null;
+      if (residentNotStarted) {
+        turnDispatchAttempted = false;
+        broken = true;
+        rejectRuntime(residentNotStarted);
         return;
       }
       // No result after a dispatched turn is uncertain, including tool-only

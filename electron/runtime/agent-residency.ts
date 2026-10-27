@@ -102,6 +102,11 @@ const openingAdmissions = new Map<AgentResidencyAdmission, { awake?: AwakeAgentR
 const activeContextTurns = new Map<AwakeAgentResidencyAdmission, number>();
 
 function residencyFailure(code: string): never { throw Object.assign(new Error(code), { code }); }
+/** No resident seat is free: a fact about residency, not a reason the turn cannot run (the runner continues one-shot). */
+export const AGENT_RESIDENCY_CAPACITY_CODE = "agent_residency_capacity";
+export function isAgentResidencyCapacityRefusal(error: unknown): boolean {
+  return !!error && typeof error === "object" && (error as { code?: unknown }).code === AGENT_RESIDENCY_CAPACITY_CODE;
+}
 export function isAgentContextResidencyAdmissionCurrent(value: AwakeAgentResidencyAdmission | undefined): boolean {
   const record = value && awakeAdmissions.get(value);
   if (!record) return false;

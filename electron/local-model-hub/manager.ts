@@ -4,7 +4,7 @@ import type { LocalModelRuntimeObservation } from "./ports";
 import { spawn, type ChildProcess } from "node:child_process";
 import { createServer } from "node:net";
 import { mkdir, open, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
-import { dirname, join, resolve, sep } from "node:path";
+import { dirname, join, resolve, sep, win32 } from "node:path";
 import type {
   LocalEngineInstallationReceipt,
   LocalModelCapabilityReceipt,
@@ -27,7 +27,7 @@ import {
 import { LocalPackageDownloadManager, sha256File } from "./download-manager";
 import { HuggingFaceModelIndex } from "./huggingface";
 import { LocalEngineInstaller } from "./engine-installer";
-import { observeLocalProcessIdentity, matchesLocalProcessIdentity, terminateMatchedLocalProcess } from "./platform";
+import { observeLocalProcessIdentity, matchesLocalProcessIdentity, terminateMatchedLocalProcess, type LocalProcessIdentity } from "./platform";
 import { estimateLocalModelFit, observeLocalHardware } from "./hardware";
 import { parseEngineLoadLog } from "./acceleration";
 import { registerApprovalLineageIfLive } from "../runtime/linked-abort";
@@ -86,6 +86,8 @@ export interface LocalModelHubManagerOptions {
 /** A managed llama-server is retained between turns, but never indefinitely. */
 export const LOCAL_MODEL_IDLE_REAP_MS = 12 * 60 * 60_000;
 const LOCAL_MODEL_IDLE_REAP_CHECK_MS = 10 * 60_000;
+/** Least time between two looks at an unresolved process lease (each look can hash an engine and a model). */
+const PROCESS_LEASE_RETRY_MIN_MS = 3_000;
 /** An engine that exits on its own is restarted at most this many times per window; one that dies on every request must not loop. */
 const ENGINE_RECOVERY_MAX = 2;
 const ENGINE_RECOVERY_WINDOW_MS = 10 * 60_000;
@@ -191,6 +193,22 @@ async function ownerLeaseProvesPidReuse(lease: OwnerLease): Promise<boolean> {
   return Boolean(lease.processCommandLine && identity.commandLine && identity.commandLine !== lease.processCommandLine);
 }
 
+/**
+ * The same question for the engine's process lease: does the live process at the lease's pid provably differ from the
+ * engine the lease recorded? Only a difference that was observed counts. A Windows lease without a recorded start time
+ * whose executable still matches proves nothing, so it keeps the conservative answer.
+ */
+function processLeaseProvesPidReuse(lease: ProcessLease, identity: LocalProcessIdentity): boolean {
+  if (identity.pid !== lease.pid) return false;
+  if (process.platform === "win32") {
+    if (lease.processCreatedAt && identity.createdAt) return identity.createdAt !== lease.processCreatedAt;
+    return Boolean(identity.executablePath)
+      && win32.normalize(identity.executablePath!).toLowerCase() !== win32.normalize(lease.executablePath).toLowerCase();
+  }
+  return identity.commandLine.length > 0
+    && !(identity.commandLine.includes(lease.executablePath) && identity.commandLine.includes(lease.modelPath));
+}
+
 function processAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
@@ -253,6 +271,9 @@ export class LocalModelHubManager {
   private initialized = false;
   private initializing: Promise<void> | null = null;
   private unavailableReason: string | null = null;
+  private processLeaseUnresolved = false;
+  private processLeaseRetry: Promise<void> | null = null;
+  private processLeaseTriedAt = 0;
   private shutdownPromise: Promise<void> | null = null;
   private saveChain: Promise<void> = Promise.resolve();
   private residentProcess: ChildProcess | null = null;
@@ -335,8 +356,34 @@ export class LocalModelHubManager {
       await this.reconcileStaleProcessLease();
     } catch (error) {
       this.unavailableReason = error instanceof Error ? error.message : "local_model_process_recovery_failed";
+      this.processLeaseUnresolved = true;
+      this.processLeaseTriedAt = Date.now();
     }
     this.initialized = true;
+  }
+
+  /**
+   * A process lease this start could not settle (a lease that cannot be read as one, files that no longer match it, a pid
+   * whose owner cannot be observed) is a statement about a process, and the process can end. The next mutation looks
+   * again instead of keeping the hub shut until the app restarts. Other reasons (state file unreadable or invalid, a
+   * foreign owner lease) have their own recovery and are left alone.
+   */
+  private async retryProcessLeaseRecovery(): Promise<void> {
+    if (!this.processLeaseUnresolved || this.shutdownPromise) return;
+    // A look can hash an engine and a model of several GB: not again within the same moment (start, then its first mutation).
+    if (!this.processLeaseRetry && Date.now() - this.processLeaseTriedAt < PROCESS_LEASE_RETRY_MIN_MS) return;
+    this.processLeaseRetry ??= (async () => {
+      try {
+        await this.reconcileStaleProcessLease();
+        this.processLeaseUnresolved = false;
+        this.unavailableReason = null;
+      } catch (error) {
+        this.unavailableReason = error instanceof Error ? error.message : "local_model_process_recovery_failed";
+      } finally {
+        this.processLeaseTriedAt = Date.now();
+      }
+    })().finally(() => { this.processLeaseRetry = null; });
+    await this.processLeaseRetry;
   }
 
   private async claimOwnerLease(): Promise<void> {
@@ -387,6 +434,13 @@ export class LocalModelHubManager {
       await rm(this.processLeasePath, { force: true });
       return;
     }
+    // The engine this lease named died with the crash or reboot and its pid now belongs to someone else. That process is not
+    // ours to touch: only the lease goes (the same proof the owner lease uses). An unobservable pid keeps the conservative answer below.
+    const observed = await observeLocalProcessIdentity(lease.pid);
+    if (observed && processLeaseProvesPidReuse(lease, observed)) {
+      await rm(this.processLeasePath, { force: true });
+      return;
+    }
     const engineBoundary = `${resolve(this.engineRoot)}${sep}`;
     const modelBoundary = `${resolve(this.packageRoot)}${sep}`;
     if (!resolve(lease.executablePath).startsWith(engineBoundary) || !resolve(lease.modelPath).startsWith(modelBoundary)) {
@@ -396,8 +450,7 @@ export class LocalModelHubManager {
       await sha256File(lease.executablePath).catch(() => null) !== lease.executableSha256
       || await sha256File(lease.modelPath).catch(() => null) !== lease.modelSha256
     ) throw hubError("local_model_process_lease_hash_mismatch");
-    const identity = await observeLocalProcessIdentity(lease.pid);
-    if (!identity || !matchesLocalProcessIdentity(identity, lease)) {
+    if (!observed || !matchesLocalProcessIdentity(observed, lease)) {
       throw hubError("local_model_process_lease_command_mismatch");
     }
     await terminateMatchedLocalProcess(lease);
@@ -407,12 +460,22 @@ export class LocalModelHubManager {
   private async save(): Promise<void> {
     if (this.unavailableReason) throw hubError(this.unavailableReason);
     const snapshot = JSON.stringify(this.state, null, 2);
-    this.saveChain = this.saveChain.then(async () => {
+    // Writes run in call order, but each one waits for the previous to SETTLE, never to succeed: a rejected chain skips every
+    // later .then() callback and hands them the same rejection, so one transient failure (disk full, a scanner holding the
+    // file on rename) would fail every save until the app restarts. Only the caller whose write failed gets its error;
+    // the next save serializes the then-current state and writes it whole.
+    const run = this.saveChain.then(async () => {
       const temporary = `${this.statePath}.tmp-${randomUUID()}`;
-      await writeFile(temporary, `${snapshot}\n`, { encoding: "utf8", mode: 0o600 });
-      await rename(temporary, this.statePath);
+      try {
+        await writeFile(temporary, `${snapshot}\n`, { encoding: "utf8", mode: 0o600 });
+        await rename(temporary, this.statePath);
+      } catch (error) {
+        await rm(temporary, { force: true }).catch(() => undefined);
+        throw error;
+      }
     });
-    await this.saveChain;
+    this.saveChain = run.catch(() => undefined);
+    await run;
   }
 
   private async ready(): Promise<void> {
@@ -421,6 +484,7 @@ export class LocalModelHubManager {
 
   private async readyForMutation(): Promise<void> {
     await this.ready();
+    if (this.unavailableReason) await this.retryProcessLeaseRecovery();
     if (this.unavailableReason) throw hubError(this.unavailableReason);
   }
 
@@ -460,8 +524,11 @@ export class LocalModelHubManager {
         return existing;
       }
       if ((this.state.registeredModels?.length ?? 0) >= 1000) throw hubError("local_model_registry_capacity_exceeded");
-      this.state.registeredModels = [...(this.state.registeredModels ?? []), identity];
-      try { await this.save(); } catch (error) { this.unavailableReason = "local_model_registry_write_failed"; throw error; }
+      const registered = this.state.registeredModels;
+      this.state.registeredModels = [...(registered ?? []), identity];
+      // A failed write fails this call only. The registry goes back to what is on disk, so the hub stays usable and a later save
+      // (which writes the whole state) cannot persist a model its owner was told did not register.
+      try { await this.save(); } catch (error) { this.state.registeredModels = registered; throw error; }
       return { ...identity };
     });
   }
@@ -984,8 +1051,9 @@ export class LocalModelHubManager {
             finishedAt: new Date().toISOString(),
             reasonCode: `engine_exited_${code ?? exitSignal ?? "unknown"}`,
           }]);
-          void this.save().catch(() => {
-            this.unavailableReason = "local_model_crash_receipt_write_failed";
+          // Not latched (see recoverAfterEngineExit): the receipt stays in memory and the next save writes it with the rest.
+          void this.save().catch((error) => {
+            console.error(`[local-model-hub] crash receipt write failed (${(error as { code?: unknown } | null)?.code ?? "unknown"}); kept for the next save`);
           });
           void this.removeProcessLease(receipt.processEpoch);
           // The restart repeats what the owner ASKED for (receiptBase.contextTokens; 0 = auto), never the n_ctx the engine
@@ -1226,12 +1294,26 @@ export class LocalModelHubManager {
           });
       } else {
         try {
-          await this.save();
+          await this.saveRunReceipt();
         } finally {
           active.finish();
         }
       }
     }
+  }
+
+  /**
+   * The run is over: the model answered and any tool call it made already happened. A receipt that cannot be written must
+   * never turn that into the caller's failure (the host reads a throw after dispatch as an unsettled turn and may run the
+   * same prompt again). It is tried twice; if the disk still refuses, the receipt stays in memory with its code in the log
+   * and the next save of this state writes it.
+   */
+  private async saveRunReceipt(): Promise<void> {
+    let failure: unknown;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try { await this.save(); return; } catch (error) { failure = error; }
+    }
+    console.error(`[local-model-hub] run receipt write failed (${(failure as { code?: unknown } | null)?.code ?? (failure instanceof Error ? failure.message : "unknown")}); kept in memory for the next save`);
   }
 
   private beginActiveInference(parentSignal?: AbortSignal): { signal: AbortSignal; finish: () => void } {

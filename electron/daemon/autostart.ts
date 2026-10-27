@@ -203,6 +203,8 @@ export function installAutostart(plan: AutostartPlan, runtime: AutostartRuntime 
   if (!plan.manifestPath || !plan.manifestContents) fail("daemon_autostart_manifest_required");
   validateDaemonAutostartManifest(JSON.parse(plan.manifestContents));
   writeAtomic(plan.manifestPath, plan.manifestContents);
+  // A refusal recorded for the previous definition says nothing about this one.
+  try { fs.unlinkSync(`${plan.manifestPath}.failure.json`); } catch { /* none recorded */ }
   if (plan.mechanism === "windows-run-key") {
     runKey(runtime).write(plan.windowsRun!);
     if (readRunValue(plan, runtime)?.line !== plan.contents) fail("daemon_autostart_windows_run_key_write_unverified");
@@ -259,21 +261,25 @@ export function suspendAutostart(plan: AutostartPlan, runtime: AutostartRuntime 
   } else if (command(runtime, "systemctl", ["--user", "disable", "--now", `${plan.label}.service`]).code !== 0) fail("daemon_autostart_suspend_failed");
   if (autostartLoaded(plan, runtime)) fail("daemon_autostart_still_loaded");
 }
-function isPreviousOwnedDefinition(plan: AutostartPlan, runtime: AutostartRuntime): boolean {
-  if (!plan.manifestPath) return false;
+/** The plan an earlier launch or version of this same installation published, when the installed definition is exactly it. */
+function previousOwnedPlan(plan: AutostartPlan, runtime: AutostartRuntime): AutostartPlan | null {
+  if (!plan.manifestPath) return null;
   try {
     const previous = JSON.parse(readOwned(plan.manifestPath) ?? "null") as DaemonAutostartManifest;
-    if (previous?.schema !== "agentlas.daemon-autostart.v1" || daemonAutostartLabel(previous) !== plan.label) return false;
+    if (previous?.schema !== "agentlas.daemon-autostart.v1" || daemonAutostartLabel(previous) !== plan.label) return null;
     // Stale artifacts are namespace evidence only. Never validate by launching
     // the old binary, opening its DB, or trusting file existence alone.
     const oldPlan = planAutostart({ executable: previous.executable,
       entry: path.join(path.dirname(previous.entry), "autostart-entry.js"),
       manifest: previous, manifestPath: plan.manifestPath }, runtime.platform, runtime.home);
     if (plan.mechanism === "windows-run-key") {
-      return oldPlan.filePath === plan.filePath && readRunValue(oldPlan, runtime, previous.executable)?.line === oldPlan.contents;
+      return oldPlan.filePath === plan.filePath && readRunValue(oldPlan, runtime, previous.executable)?.line === oldPlan.contents ? oldPlan : null;
     }
-    return oldPlan.filePath === plan.filePath && readOwned(plan.filePath) === oldPlan.contents;
-  } catch { return false; }
+    return oldPlan.filePath === plan.filePath && readOwned(plan.filePath) === oldPlan.contents ? oldPlan : null;
+  } catch { return null; }
+}
+function isPreviousOwnedDefinition(plan: AutostartPlan, runtime: AutostartRuntime): boolean {
+  return previousOwnedPlan(plan, runtime) !== null;
 }
 export function reconcileAutostart(enabled: boolean, input: AutostartCommand, runtime: AutostartRuntime = {}): AutostartReconciliation {
   const plan = planAutostart(input, runtime.platform, runtime.home);
@@ -284,9 +290,14 @@ export function reconcileAutostart(enabled: boolean, input: AutostartCommand, ru
   let loaded = autostartLoaded(plan, runtime);
   if (!enabled) {
     const present = plan.mechanism === "windows-run-key" ? readDefinition(plan, runtime) !== null : fs.existsSync(plan.filePath);
-    if (!exact && !loaded && !present) return { installed: false, loaded: false, changed: false, filePath: plan.filePath, label: plan.label };
-    suspendAutostart(plan, runtime); removeAutostart(plan, runtime);
-    return { installed: false, loaded: false, changed: exact || loaded, filePath: plan.filePath, label: plan.label };
+    // An entry an earlier launch or version installed names another executable (a Windows Portable temp copy, an AppImage mount
+    // that no longer exists): this launch's plan never equals it (a Run value is looked up by executable, so it does not even see
+    // it), so retire it by the plan its own stored manifest proves.
+    const earlier = exact ? null : previousOwnedPlan(plan, runtime);
+    if (!exact && !loaded && !present && !earlier) return { installed: false, loaded: false, changed: false, filePath: plan.filePath, label: plan.label };
+    const installedPlan = earlier ?? plan;
+    suspendAutostart(installedPlan, runtime); removeAutostart(installedPlan, runtime);
+    return { installed: false, loaded: false, changed: exact || loaded || earlier !== null, filePath: plan.filePath, label: plan.label };
   }
   validateDaemonAutostartManifest(input.manifest);
   // The new GUI has passed its store-migration quiescence barrier. Retire only

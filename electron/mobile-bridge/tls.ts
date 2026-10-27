@@ -141,27 +141,101 @@ function materialFromPem(certificate: string, privateKey: string): MobileBridgeT
  * build a trust store pinned to this exact Desktop certificate before sending
  * either the pairing nonce or its long-lived bearer credential.
  */
+/*
+ * 읽기 실패와 "내용이 진짜 못 쓰게 됐다"는 다른 사건이다. 회전은 모든 페어링 폰의 핀을 영구히 깨뜨리므로(되돌릴 수 없다)
+ * 후자에서만 한다: 읽기는 됐는데 PEM 파싱·키 불일치·만료로 materialFromPem 이 던진 경우. 파일 I/O 오류(백신·백업의
+ * 일시 잠금 EBUSY, 핸들 한도 EMFILE, 권한 EPERM/EACCES …)는 인증서가 멀쩡하다는 뜻이므로 잠깐 다시 읽어 보고,
+ * 그래도 안 되면 인증서를 그대로 둔 채 이유와 함께 던진다(runtime 이 lastError 로 보이고 재시도 버튼이 같은 핀으로 다시 연다).
+ * 존재 확인도 마찬가지다 — existsSync 는 모든 오류를 "없음"으로 읽어 새 인증서 생성으로 이어졌다.
+ */
+const TLS_READ_RETRY_DELAYS_MS: readonly number[] = [100, 300, 900];
+const TLS_TRANSIENT_IO_CODES: ReadonlySet<string> = new Set([
+  "EBUSY", "EMFILE", "ENFILE", "EAGAIN", "EIO", "ETIMEDOUT", "EPERM", "EACCES", "ENOMEM", "EINTR", "ENOLCK", "ESTALE",
+]);
+export const MOBILE_BRIDGE_TLS_READ_FAILED = "mobile_bridge_tls_read_failed";
+
+function errnoCode(error: unknown): string | undefined {
+  const code = (error as NodeJS.ErrnoException | null)?.code;
+  return typeof code === "string" ? code : undefined;
+}
+
+function tlsReadFailure(file: string, error: unknown): Error {
+  const code = errnoCode(error) ?? "unknown";
+  return Object.assign(
+    new Error(
+      `Mobile Bridge TLS material could not be read (${code} on ${path.basename(file)}); ` +
+        "the existing certificate was kept, so paired phones keep their pin. Retry the Mobile Bridge.",
+    ),
+    { code: MOBILE_BRIDGE_TLS_READ_FAILED, cause: error },
+  );
+}
+
+/** true = the file exists, false = it does not. Any other answer is an I/O failure, never "absent". */
+function tlsFilePresent(file: string): boolean {
+  try {
+    return fs.statSync(file, { throwIfNoEntry: false }) !== undefined;
+  } catch (error) {
+    throw tlsReadFailure(file, error);
+  }
+}
+
+async function readTlsPemPair(certPath: string, keyPath: string): Promise<{ certificate: string; privateKey: string }> {
+  for (let attempt = 0; ; attempt += 1) {
+    let file = certPath;
+    try {
+      const certificate = fs.readFileSync(certPath, "utf8");
+      file = keyPath;
+      const privateKey = fs.readFileSync(keyPath, "utf8");
+      return { certificate, privateKey };
+    } catch (error) {
+      const code = errnoCode(error);
+      const delay = TLS_READ_RETRY_DELAYS_MS[attempt];
+      if (!code || !TLS_TRANSIENT_IO_CODES.has(code) || delay === undefined) throw tlsReadFailure(file, error);
+      await new Promise<void>((resolve) => setTimeout(resolve, delay));
+    }
+  }
+}
+
+/** The pair that is about to be replaced stays on disk so an accident can be undone by hand (the pin is its fingerprint). */
+function backUpUnusableTlsPair(certPath: string, keyPath: string, certificate: string, privateKey: string): void {
+  const stamp = Date.now();
+  try {
+    writePrivateFileAtomic(`${keyPath}.${stamp}.bak`, privateKey);
+    writePrivateFileAtomic(`${certPath}.${stamp}.bak`, certificate);
+  } catch (error) {
+    console.warn(`[mobile-bridge] could not back up the unusable TLS pair before replacing it (${errnoCode(error) ?? "unknown"})`);
+  }
+}
+
 export async function loadOrCreateMobileBridgeTls(
   userDataPath: string,
 ): Promise<MobileBridgeTlsMaterial> {
   const certPath = certificatePath(userDataPath);
   const keyPath = privateKeyPath(userDataPath);
-  if (fs.existsSync(certPath) && fs.existsSync(keyPath)) {
+  const certPresent = tlsFilePresent(certPath);
+  const keyPresent = tlsFilePresent(keyPath);
+  if (certPresent && keyPresent) {
+    const { certificate, privateKey } = await readTlsPemPair(certPath, keyPath);
     try {
-      const material = materialFromPem(
-        fs.readFileSync(certPath, "utf8"),
-        fs.readFileSync(keyPath, "utf8"),
-      );
+      const material = materialFromPem(certificate, privateKey);
       if (process.platform !== "win32") {
-        fs.chmodSync(certPath, 0o600);
-        fs.chmodSync(keyPath, 0o600);
+        // Tightening modes is hardening, not a reason to refuse a valid pair (a volume owned by another user or with
+        // ACLs answers EPERM): the pair was read, so it is the one the phones pinned.
+        try {
+          fs.chmodSync(certPath, 0o600);
+          fs.chmodSync(keyPath, 0o600);
+        } catch (error) {
+          console.warn(`[mobile-bridge] could not tighten TLS file permissions (${errnoCode(error) ?? "unknown"}); using the existing pair`);
+        }
       }
       return material;
     } catch {
-      // Rotation is explicit and atomic below. Existing paired devices fail
-      // closed on the old fingerprint and must scan a new Desktop QR.
+      // The files were read and their content is unusable (not PEM, key/certificate mismatch, expired). Rotation is
+      // explicit and atomic below. Existing paired devices fail closed on the old fingerprint and must scan a new
+      // Desktop QR.
+      backUpUnusableTlsPair(certPath, keyPath, certificate, privateKey);
     }
-  } else if (fs.existsSync(certPath) || fs.existsSync(keyPath)) {
+  } else if (certPresent || keyPresent) {
     throw new Error("Mobile Bridge TLS material is incomplete; explicit recovery is required");
   }
 

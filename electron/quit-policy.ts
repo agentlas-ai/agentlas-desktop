@@ -56,8 +56,10 @@ export function planGuiQuit(input: QuitPolicyInput): QuitPlan {
 /**
  * One number for "work that quitting would stop": GUI census kinds (update-resume
  * census) plus service-owned work agentlasd reports (daemon.ping activeWork).
- * A Science turn appears on both sides; count it once. Run children belong to
- * some run already counted, so they only count when nothing else explains them.
+ * A Science turn appears on both sides; count it once. Run children and foreground
+ * invocation runs (the service counts the runs of every owner attached to it, this
+ * GUI's included) belong to some run already counted, so they only count when
+ * nothing else explains them. Background tasks are the service's own.
  */
 export function quitWorkCount(guiKinds: readonly string[], serviceReasons: readonly string[]): number {
   let count = guiKinds.length;
@@ -65,8 +67,19 @@ export function quitWorkCount(guiKinds: readonly string[], serviceReasons: reado
   if (service.has("science") && !guiKinds.includes("science")) count += 1;
   if (service.has("graph-run")) count += 1;
   if (service.has("local-model")) count += 1;
-  if (count === 0 && service.has("run-children")) count = 1;
+  if (service.has("background-tasks")) count += 1;
+  if (count === 0 && (service.has("run-children") || service.has("invocation-runs"))) count = 1;
   return count;
+}
+
+/**
+ * The census a quit decision reads. `serviceReasons` is null when the service answers its socket's existence but not its census
+ * (ping timed out or failed while the control socket is there): that is not "no work". With GUI work already counted the answer
+ * is already "work"; with none, the census is unreadable and the caller must not stop the service on it.
+ */
+export function quitCensus(guiKinds: readonly string[], serviceReasons: readonly string[] | null): { count: number; unreadable: boolean } {
+  const count = quitWorkCount(guiKinds, serviceReasons ?? []);
+  return { count, unreadable: serviceReasons === null && count === 0 };
 }
 
 export type QuitPromptChoice = "stop" | "background" | "cancel";

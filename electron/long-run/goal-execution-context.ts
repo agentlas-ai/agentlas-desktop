@@ -1,11 +1,15 @@
 import { createHash } from "node:crypto";
-import { foldGoalExecutionDirectives, type GoalExecutionDirectiveKind, type GoalExecutionDirectiveRecord } from "../../shared/goal-execution-directives";
+import {
+  foldGoalExecutionDirectives, goalDirectiveReviewRetryable, isGoalExecutionDirectiveRecord,
+  type GoalExecutionDirectiveKind, type GoalExecutionDirectiveRecord,
+} from "../../shared/goal-execution-directives";
 import { getDb } from "../store/db";
 import { getChat } from "../store/chats";
 import { getChatGoalContract, getChatGoalRevision } from "../store/chat-goals";
 import { appendLongRunEvent, getLongRunByGoalId, getLongRunGoalRevisionBinding } from "../store/long-runs";
 
-const EVENT_KIND = "run.owner_execution_directive";
+export const OWNER_EXECUTION_DIRECTIVE_EVENT_KIND = "run.owner_execution_directive";
+const EVENT_KIND = OWNER_EXECUTION_DIRECTIVE_EVENT_KIND;
 const digest = (text: string) => `sha256:${createHash("sha256").update(text).digest("hex")}`;
 
 function currentContext(goalId: string) {
@@ -26,7 +30,9 @@ function ownerSource(chatId: string, sourceMessageId: string, originalMessageId:
 }
 
 /** Replayed source admission reuses its existing review, including unknown;
- * it does not buy another classification just because the same turn was replayed. */
+ * it does not buy another classification just because the same turn was replayed.
+ * A review that only records a judge outage (judge_unavailable:*) is not an answer: it reads as no review, so the next
+ * review of the same message asks the judge again instead of freezing the outage as the message's classification. */
 export function getGoalExecutionDirectiveReview(input: {
   goalId: string; chatId: string; sourceMessageId: string; expectedRevision: number; expectedSourceText: string;
 }): GoalExecutionDirectiveRecord | null {
@@ -43,8 +49,36 @@ export function getGoalExecutionDirectiveReview(input: {
     return record.schemaVersion === "agentlas.goal-execution-directive.v1" && record.goalId === input.goalId
       && record.chatId === input.chatId && record.goalRevision === input.expectedRevision
       && record.sourceMessageId === source.id && record.sourceDigest === digest(source.text)
-      && ["method", "constraint", "pending", "ignored"].includes(record.kind) && typeof record.reasonCode === "string" ? record : null;
+      && ["method", "constraint", "pending", "ignored"].includes(record.kind) && typeof record.reasonCode === "string"
+      && !goalDirectiveReviewRetryable(record) ? record : null;
   } catch { return null; }
+}
+
+/** Owner messages of this Goal whose latest review is only a judge outage, oldest first. The retry runner
+ * (goal-owner-amendment.ts) asks the judge again for these; a message that has since been edited or deleted is not listed. */
+export function unavailableDirectiveReviews(goalId: string): Array<{
+  runId: string; chatId: string; sourceMessageId: string; reviewedAt: string; reasonCode: string;
+}> {
+  const context = currentContext(goalId);
+  if (!context) return [];
+  const scope = { goalId, chatId: context.goal.chatId, revision: context.goal.revision };
+  const rows = getDb().prepare("SELECT payload_json, occurred_at FROM long_run_events WHERE run_id = ? AND kind = ? ORDER BY seq")
+    .all(context.run.id, EVENT_KIND) as Array<{ payload_json: string; occurred_at: string }>;
+  const latest = new Map<string, { record: GoalExecutionDirectiveRecord; reviewedAt: string }>();
+  for (const row of rows) {
+    let raw: unknown;
+    try { raw = JSON.parse(row.payload_json); } catch { continue; }
+    if (isGoalExecutionDirectiveRecord(scope, raw)) latest.set(raw.sourceMessageId, { record: raw, reviewedAt: row.occurred_at });
+  }
+  const out: Array<{ runId: string; chatId: string; sourceMessageId: string; reviewedAt: string; reasonCode: string; order: number }> = [];
+  for (const { record, reviewedAt } of latest.values()) {
+    if (!goalDirectiveReviewRetryable(record)) continue;
+    const source = ownerSource(context.goal.chatId, record.sourceMessageId, context.goal.originalRequest.messageId);
+    if (!source || digest(source.text) !== record.sourceDigest) continue;
+    out.push({ runId: context.run.id, chatId: context.goal.chatId, sourceMessageId: source.id, reviewedAt,
+      reasonCode: record.reasonCode, order: source.sourceOrder });
+  }
+  return out.sort((a, b) => a.order - b.order).map(({ order: _order, ...entry }) => entry);
 }
 
 /** Persist the existing classifier's answer only if its exact source and Goal

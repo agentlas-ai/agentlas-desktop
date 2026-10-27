@@ -30,7 +30,7 @@ import {
   type StrategyShiftMarker,
 } from "../../shared/agent-strategy";
 import type { LiveGoalPlan } from "../../shared/goal-shape";
-import type { MetricSample } from "../../shared/mission-pace";
+import { krDirection, type MetricSample } from "../../shared/mission-pace";
 import {
   goalPlanTacticPayload,
   insertGoalPlanNode,
@@ -69,7 +69,7 @@ export function syncGoalKpis(plan: LiveGoalPlan): GoalKpi[] {
   const krs = plan.mission?.key_results ?? [];
   for (const kr of krs) {
     upsertGoalKpi({ goalId: plan.goalId, kpiId: kr.id, revision: plan.revision, name: kr.metric, unit: kr.unit,
-      direction: kr.baseline !== null && kr.baseline > kr.target ? "down" : "up", krId: kr.id, target: kr.target,
+      direction: krDirection(kr.baseline, kr.target), krId: kr.id, target: kr.target,
       deadlineAt: kr.deadline_at, baseline: kr.baseline, sourceKind: "agent_observed", sourceRef: null });
   }
   detachStaleKrKpis(plan.goalId, krs.map((kr) => kr.id));

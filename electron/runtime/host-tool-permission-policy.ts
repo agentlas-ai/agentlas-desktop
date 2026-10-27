@@ -144,9 +144,10 @@ export function createHostToolPermissionPolicy(ports: HostToolPermissionPolicyPo
     /*
      * 저장된 능력 규칙이 최우선이다(deny > allow, chat > agent > global).
      * "항상 허용"으로 영구 부여된 행동은 권한 등급과 무관하게 통과한다.
-     * Full access는 그 밖의 모든 일반 도구 관문을 해제하지만, 오너가 저장한
-     * 명시적 거부는 이긴다(오너 2026-10-27). One이 넘긴 일은 오너가 고르지 않아도
-     * 자동으로 full이라, full이 거부를 이기면 위임된 실행에서 거부 규칙이 무력했다.
+     * Full access는 그 밖의 모든 일반 도구 관문을 해제한다. 단, 그 호출에 오너가 저장한
+     * 거부 규칙이 있으면 조용히 허용하지도, 조용히 거부하지도 않고 승인 칩으로 묻는다
+     * (오너 2026-10-27 "거부 우선 말고 승인 칩 뜨게"). One이 넘긴 일은 자동으로 full이라,
+     * full이 거부를 이기면 위임된 실행에서 거부 규칙이 무력했다.
      */
     const capability = capabilityClassFor(ask.kind, ask.tool);
     // Full access is the owner's explicit grant for this run, and it needs no
@@ -178,16 +179,19 @@ export function createHostToolPermissionPolicy(ports: HostToolPermissionPolicyPo
       throw error;
     }
     // Durable rules are re-read for each request so revocation is not cached by the runtime.
-    if (ruled === "deny") return "deny";
+    if (ruled === "deny" && !fullAccess) return "deny";
     if (ruled === "allow") return "allow_once";
-    if (fullAccess) return "allow_session";
+    // Full access with the owner's stored deny for this very call: the card asks (below); an answer of "yes" is for this
+    // call only, since the stored rule stays.
+    const askOverDeny = fullAccess && ruled === "deny";
+    if (fullAccess && !askOverDeny) return "allow_session";
     // One's own coordination tools (one-team: hand off, follow up, observe, team sessions, groups) are gated by Main's
     // One control server — capability binding, personal-conversation scope, follow-up bounds — the same gate codex exec
     // runs reach through default_tools_approval_mode. Owner 2026-10-04: what One hands off runs without asking. An
     // explicit owner deny rule (above) still wins.
-    if (ask.tool.startsWith("mcp__one-team__")) return "allow_session";
-    if (!ask.mutating) return "allow_once";
-    if (ask.permission === "write") return "allow_session";
+    if (!askOverDeny && ask.tool.startsWith("mcp__one-team__")) return "allow_session";
+    if (!askOverDeny && !ask.mutating) return "allow_once";
+    if (!askOverDeny && ask.permission === "write") return "allow_session";
     const deniedAt = recentUserDenials.get(denialKey(ask));
     if (deniedAt && now() - deniedAt < USER_DENIAL_TTL_MS) return "deny";
     const expiredAt = recentExpiries.get(denialKey(ask));
@@ -229,6 +233,7 @@ export function createHostToolPermissionPolicy(ports: HostToolPermissionPolicyPo
       if (outcome.reason === "expired") { markToolApprovalExpired(ask); recentExpiries.set(denialKey(ask), now()); }
       else recentUserDenials.set(denialKey(ask), now());
     }
+    if (askOverDeny && outcome.decision !== "deny") return "allow_once";
     // Durable consent is checked again for each call, including its first approval.
     // A native session permit would outlive revocation of the saved rule.
     if (outcome.decision === "allow_always" || outcome.decision === "allow_session") {

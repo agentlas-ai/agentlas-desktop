@@ -51,6 +51,8 @@ export interface AgentContextTurnSlotOptions {
   blockedTurn?(): { chatId: string; runId: string } | null;
   /** Takes this turn's place in the durable line at arrival; absent: the line of this process only. */
   line?(): TurnLineHandle;
+  /** A native writer shared with another host must not fall back to a process-local line on store failure. */
+  requireDurableLine?: boolean;
   /** Called once, when the turn starts to wait. */
   onWait?(): void;
   /**
@@ -108,11 +110,12 @@ export async function acquireAgentContextTurnSlot(sessionKey: string, options: A
   };
   let waited = false;
   try {
+    if (options.requireDurableLine && !options.line) throw new Error("native_writer_durable_line_required");
     // The durable place is taken at arrival, before anything else of this turn is prepared. A store that cannot give one
     // (busy, unreadable) leaves this turn on the line of its own process, as before the durable line existed.
     if (options.line) {
       try { place = options.line(); }
-      catch (error) { place = null; warn(`no place in the durable line, this process's line only: ${error instanceof Error ? error.message : String(error)}`); }
+      catch (error) { if (options.requireDurableLine) throw error; place = null; warn(`no place in the durable line, this process's line only: ${error instanceof Error ? error.message : String(error)}`); }
     }
     const started = now(), limit = options.maxWaitMs ?? TURN_WAIT_MAX_MS;
     const parkGrace = options.parkGraceMs ?? TURN_PARK_GRACE_MS, stuckGrace = options.stuckGraceMs ?? TURN_STUCK_GRACE_MS;
@@ -122,7 +125,7 @@ export async function acquireAgentContextTurnSlot(sessionKey: string, options: A
       let snapshot: TurnLineSnapshot | null = null;
       if (place) {
         try { snapshot = place.poll(); }
-        catch (error) { warn(`the durable line could not be read, this process's line only: ${error instanceof Error ? error.message : String(error)}`); try { place.release(); } catch { /* skipped once the process ends */ } place = null; }
+        catch (error) { if (options.requireDurableLine) throw error; warn(`the durable line could not be read, this process's line only: ${error instanceof Error ? error.message : String(error)}`); try { place.release(); } catch { /* skipped once the process ends */ } place = null; }
       }
       const blocked = options.blocked();
       if (queue[0] === ticket && (!snapshot || snapshot.head) && !blocked) return { waited, release };

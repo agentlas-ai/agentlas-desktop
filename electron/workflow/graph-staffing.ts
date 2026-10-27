@@ -57,20 +57,49 @@ function queryFor(role: string): string {
   return role.trim().replace(/\s+/g, " ").slice(0, 80);
 }
 
+/** 어느 역할 문구에나 끼는 기능어 — 겹쳐도 일이 같다는 뜻이 아니다. */
+const STAFFING_STOPWORDS = new Set([
+  "a", "an", "as", "at", "be", "by", "do", "he", "if", "in", "is", "it", "me", "my", "no", "of", "on", "or", "so", "to", "up", "us", "we",
+  "the", "and", "for", "with", "from", "into", "that", "this", "then", "than", "them", "they", "their", "your", "our",
+  "are", "was", "were", "will", "can", "has", "have", "not", "all", "any", "how", "use", "using", "via", "per", "also",
+  "what", "when", "where", "which", "who", "why", "its",
+]);
+
+const HANGUL_TOKEN = /[가-힣]/;
+
+/** 역할 문구의 의미 있는 서로 다른 단어들. 기능어는 빼고 한글은 2자부터 센다(영문 약어 ai·ux·qa 는 단어 단위로만 겹친다). */
+function staffingWords(text: string): string[] {
+  const words = text.toLowerCase().split(/[^a-z0-9가-힣]+/)
+    .filter((w) => w.length >= 2 && (HANGUL_TOKEN.test(w) || !STAFFING_STOPWORDS.has(w)));
+  return [...new Set(words)];
+}
+
+/** 같은 단어인가 — 영문은 단어 단위(review ~ reviews ~ reviewer)로 보고 "plan" 속의 "an" 같은 부분 문자열은 겹침이 아니다. */
+function sameWord(role: string, candidate: string): boolean {
+  if (role === candidate) return true;
+  if (HANGUL_TOKEN.test(role)) return false;
+  const shorter = Math.min(role.length, candidate.length);
+  return shorter >= 4 && Math.abs(role.length - candidate.length) <= 3 && (role.startsWith(candidate) || candidate.startsWith(role));
+}
+
 /**
  * 설치본 중에 역할과 맞는 것이 있나 — 이름·소개에 역할 단어가 겹치는지로만 본다.
  * ★의미 판단을 여기서 하지 않는다. 애매하면 안 고르고 Hub로 넘긴다.
+ * ★겹침은 **서로 다른 의미 단어**로 센다(기능어·짧은 조각·같은 단어의 중복 표기는 증거가 아니다). 사진 리뷰어가
+ *   코드 리뷰 노드에 꽂혀 이후 모든 실행을 사진 에이전트로 돌린 결함(plan 속 "an", review 한 단어의 이중 집계).
  */
 function matchInstalled(
   role: string,
   installed: StaffingCandidateSource["installed"],
 ): { id: string; name: string } | null {
-  const words = role.toLowerCase().split(/[^a-z0-9가-힣]+/).filter((w) => w.length >= 2);
+  const words = staffingWords(role);
   if (words.length === 0) return null;
   let best: { id: string; name: string; hits: number } | null = null;
   for (const agent of installed) {
     const hay = `${agent.name} ${agent.tagline ?? ""}`.toLowerCase();
-    const hits = words.filter((w) => hay.includes(w)).length;
+    const hayWords = hay.split(/[^a-z0-9가-힣]+/).filter(Boolean);
+    // 한글은 조사가 붙어 단어 경계가 없다("코드를") — 포함 여부로 본다. 영문은 단어 단위다.
+    const hits = words.filter((w) => HANGUL_TOKEN.test(w) ? hay.includes(w) : hayWords.some((h) => sameWord(w, h))).length;
     if (hits === 0) continue;
     if (!best || hits > best.hits) best = { id: agent.id, name: agent.name, hits };
   }

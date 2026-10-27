@@ -32,9 +32,10 @@ import type {
 } from "../../shared/types";
 import { memoryOwnerAgentId } from "../../shared/memory-ownership";
 import { effectiveInvocationPermission } from "../../shared/invocation-permission";
+import { attestDelegatedPermission, DelegatedAuthorityError, resolveHostDelegatedPermission, type HostDelegatedGrant } from "./delegated-authority";
+import { executionFailureReport, readExecutionFailureCause, type ExecutionFailureReport } from "../../shared/execution-effect-contract";
 import type { LongRunTaskCheckpoint } from "../../shared/long-run-checkpoint";
 import { runnerFailureFromError, type Runner, type RunnerFailure, type RunnerRequest, type RunnerResult } from "../runtime/runner";
-import { ProjectResidencyBusyError, WORK_PROJECT_RESIDENCY_BUSY_CODE } from "../runtime/project-residency";
 import type { RuntimeLocale } from "../runtime/status-i18n";
 import {
   appendChatMessage,
@@ -161,6 +162,12 @@ function cleanAgentAppControlBlocks(text: string): string {
 const NODE_TIMEOUT_MS = 30 * 60 * 1000;
 
 export interface FirmRunParams {
+  /** Host-local approved step grant; not a renderer/planner permission field. */
+  delegatedGrant?: HostDelegatedGrant;
+  /** Stable parent packet identity, retained across repair attempts. */
+  delegatedScopeKey?: string;
+  /** Host-only diagnostic propagation through copied nested stage params. */
+  onExecutionFailure?: (report: ExecutionFailureReport) => void;
   /** Typed delivery plan from the model/Main; absent means full stage tools. */
   deliveryPlan?: FirmDeliveryPlan;
   prepareWorkerCapabilities?: PrepareWorkerCapabilities;
@@ -244,6 +251,7 @@ export interface FirmRunResult {
   ok: boolean;
   text: string;
   settlement?: FirmRunSettlement;
+  failureReports?: readonly ExecutionFailureReport[];
 }
 
 function firmRunSettlement(kind: FirmRunSettlement["kind"], evidence: readonly (FirmExecutionEvidence | undefined)[]): FirmRunSettlement {
@@ -304,17 +312,26 @@ function firmProjectReadOnly(
 /**
  * A firm node receives an explicit stage grant.  Child plan/synthesis turns
  * are read-only; only a delegated implementation turn may receive bounded
- * write access.  The CEO/root may retain the host mode, but `full` is never
- * inherited by a child node.
+ * write access. A child receives wider authority only from an exact live
+ * host-approved step grant, never by copying its parent's `full` string.
  */
 export function firmNodePermission(
-  p: Pick<FirmRunParams, "req" | "restrictedReadBoundary">,
+  p: Pick<FirmRunParams, "req" | "restrictedReadBoundary" | "delegatedGrant" | "delegatedScopeKey" | "workingFolder" | "workspaceBinding" | "controllerRuntimeRole">,
   turn: Pick<NodeTurn, "tier" | "phase">,
 ): RunnerRequest["permission"] {
   const host = effectiveInvocationPermission(p.req.permissions, p.req.planMode);
   if (p.restrictedReadBoundary === true || host === "read") return "read";
-  if (turn.tier === 1) return host;
-  return turn.phase === "delegate" ? "write" : "read";
+  // A borrowed firm's CEO is tier 1 only inside that firm. It is still a
+  // delegate of the outer room and cannot inherit its ambient full mode.
+  const fallbackPermission = turn.tier === 1
+    ? p.controllerRuntimeRole === "worker" && host === "full" ? "write" : host
+    : turn.phase === "delegate" ? "write" : "read";
+  if (fallbackPermission === "read") return "read";
+  return resolveHostDelegatedPermission(p.delegatedGrant, {
+    runId: p.req.runId, scopeKey: p.delegatedScopeKey,
+    workspace: p.workspaceBinding ? revalidateInvocationWorkspaceBinding(p.workspaceBinding) : p.workingFolder,
+    permission: host, fallbackPermission, planMode: p.req.planMode, restrictedReadBoundary: p.restrictedReadBoundary,
+  });
 }
 
 export function firmDivisionRequiresDirectExecution(
@@ -654,11 +671,9 @@ function emitAgentMessage(
     return false;
   }
   guard.pairCounts.set(pair, nextRoundtrip);
-  // A handoff is a typed packet, not an authority transfer.  Child turns are
-  // bounded to write at most; the parent's `full` mode never crosses this
-  // edge.  The actual runner enforces the same grant independently.
-  const handoffPermission: RunnerRequest["permission"] =
-    p.req.permissions === "read" ? "read" : "write";
+  // Report the same live step grant used by the runner, including its plan/read
+  // ceiling. A packet and a parent's `full` string cannot mint that grant.
+  const handoffPermission = firmNodePermission(p, { tier: 2, phase: "delegate" });
   const outgoing = direction === "orchestrator-to-worker";
   p.sink({
     kind: "tool-use",
@@ -840,6 +855,17 @@ async function runNodeTurnSafe(
     if (p.signal?.aborted || err instanceof TeamGoalContextError) throw err;
     const failure = err instanceof ObservedRunnerFailureError ? err.failure : runnerFailureFromError(err, p.active.kind);
     const runtimeFailure = runtimeFailureBlocksReplay(failure) ? failure : undefined;
+    const failureReport = executionFailureReport({ outcome: "failed", causes: [readExecutionFailureCause(err, {
+      phase: err instanceof DelegatedAuthorityError ? "admission"
+        : err instanceof WorkerCapabilityError && err.turnDelivery === "not-dispatched" ? "preparation" : "execution",
+      stepId: turn.node.id, fallbackCode: failure.providerCode ?? "firm_node_failed",
+    })] });
+    p.onExecutionFailure?.(failureReport);
+    tryRecordRunEvent({ runId: p.req.runId ?? `firm:${p.chat.id}`, chatId: p.chat.id,
+      nodeId: turn.node.id, kind: "execution_failure", payload: failureReport as unknown as Record<string, unknown> });
+    // JSON is observed failure data in the existing checkpoint context module,
+    // not a new instruction. The synthesizer receives the exact actionable cause.
+    partialCheckpoint = [partialCheckpoint, JSON.stringify(failureReport)].filter(Boolean).join("\n");
     // 실패/타임아웃 노드도 per-node 완료 신호 → UI에서 ▶ 가 멈추고 정리된다(스턱 방지).
     p.sink({
       kind: "tool-use",
@@ -897,27 +923,66 @@ async function runNodeTurnSafe(
   }
 }
 
-/** delegation 타깃을 후보 노드(role/name)와 매칭. */
+/**
+ * delegation 타깃을 후보 노드(role/name)와 매칭.
+ * 정확 일치가 포함 관계보다 먼저다: 'Design QA' 를 'Design' 이 `t.includes(role)` 로 먼저 잡아 두 본부의
+ * brief 가 뒤바뀌던 결함(터미널 firms/orchestrate.cjs 와 같은 규칙). 정확 일치가 없을 때만 포함 관계를 쓰고,
+ * 여럿이 걸리면 타깃이 통째로 담고 있는 가장 긴 역할명 → 타깃을 담은 가장 짧은 역할명 순으로 고른다.
+ */
+function matchTargetsDetailed(
+  delegations: Delegation[],
+  candidates: ResolvedNode[],
+): { picked: MatchedWork[]; unmatched: Delegation[] } {
+  const norm = (s: string) => s.trim().toLowerCase();
+  const picked: MatchedWork[] = [];
+  const unmatched: Delegation[] = [];
+  const used = new Set<string>();
+  for (const d of delegations) {
+    const t = norm(d.target);
+    if (!t) { unmatched.push(d); continue; }
+    const free = candidates.filter((c) => !used.has(c.id));
+    // The delegate protocol lists a report as "role (name)" (buildDelegateProtocol), so that spelling is exact too:
+    // two seats with the same role are told apart by their name, not by whichever comes first.
+    const exact = candidates.filter((c) => norm(c.role) === t || norm(c.name) === t || (norm(c.name) && norm(`${c.role} (${c.name})`) === t));
+    let node: ResolvedNode | null = exact.find((c) => !used.has(c.id)) ?? null;
+    // Naming the same node twice must not spill the second brief onto a wider-named node.
+    if (!node && exact.length > 0) { unmatched.push(d); continue; }
+    if (!node) {
+      const named = free.filter((c) => norm(c.role) && t.includes(norm(c.role)));
+      const wider = free.filter((c) => norm(c.role) && norm(c.role).includes(t));
+      node = named.reduce<ResolvedNode | null>((best, c) => (!best || norm(c.role).length > norm(best.role).length ? c : best), null)
+        ?? wider.reduce<ResolvedNode | null>((best, c) => (!best || norm(c.role).length < norm(best.role).length ? c : best), null);
+    }
+    if (node) {
+      used.add(node.id);
+      picked.push({ node, brief: d.brief || "", allocation: d.allocation, stage: d.stage ?? "production" });
+    } else {
+      unmatched.push(d);
+    }
+  }
+  return { picked, unmatched };
+}
+
 function matchTargets(
   delegations: Delegation[],
   candidates: ResolvedNode[],
 ): MatchedWork[] {
-  const norm = (s: string) => s.trim().toLowerCase();
-  const picked: MatchedWork[] = [];
-  const used = new Set<string>();
-  for (const d of delegations) {
-    const t = norm(d.target);
-    const node = candidates.find(
-      (c) =>
-        !used.has(c.id) &&
-        (norm(c.role) === t || norm(c.name) === t || norm(c.role).includes(t) || t.includes(norm(c.role))),
-    );
-    if (node) {
-      used.add(node.id);
-      picked.push({ node, brief: d.brief || "", allocation: d.allocation, stage: d.stage ?? "production" });
-    }
-  }
-  return picked;
+  return matchTargetsDetailed(delegations, candidates).picked;
+}
+
+/** A delegation that names no free report is a typed fact on the run, never silence (division and follow-up rounds). */
+function recordUnmatchedDelegations(
+  p: FirmRunParams, nodeId: string, agentId: string | null, matchedCount: number,
+  unmatched: readonly Delegation[], available: readonly ResolvedNode[],
+): void {
+  if (unmatched.length === 0) return;
+  tryRecordRunEvent({
+    runId: p.req.runId ?? `firm:${p.chat.id}`, chatId: p.chat.id, nodeId, agentId,
+    kind: "firm_delegate_target_unmatched",
+    payload: { schemaVersion: "agentlas.firm-delegate-target-unmatched.v1", matchedCount,
+      targets: unmatched.map((d) => d.target).join(" | ").slice(0, 400),
+      available: available.map((n) => n.role).join(" | ").slice(0, 400) },
+  });
 }
 
 interface NodeTurn {
@@ -1267,12 +1332,26 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
       const boundedRunner: Runner = async (request, events) => {
         assertAppMemory();
         if (!p.req.agentAppMode) assertTeamGoalContext(p.goalContext, request.signal ?? turn.signal ?? p.signal);
-        runnerCalled = true;
         const planBounded = p.req.planMode === true ? { ...request, permission: "read" as const, planMode: true as const } : request;
+        const authorityContext = {
+          runId: p.req.runId, scopeKey: p.delegatedScopeKey, workspace: workingFolder,
+          permission: p.req.permissions,
+          fallbackPermission: nodePermission as "read" | "write" | "full",
+          planMode: p.req.planMode, restrictedReadBoundary: p.restrictedReadBoundary,
+          controlPlane: Boolean(p.req.agentAppMode || turn.runtimeToolsDisabled || controlPlaneTurn),
+        };
+        const authority = attestDelegatedPermission({ grant: p.delegatedGrant, context: authorityContext,
+          actualPermission: planBounded.permission, actualWorkspace: planBounded.cwd,
+          signal: planBounded.signal ?? turn.signal ?? p.signal });
+        tryRecordRunEvent({ runId: p.req.runId ?? `firm:${p.chat.id}`, chatId: p.chat.id,
+          nodeId: node.id, kind: "delegated_authority", payload: { ...authority, phase } });
         const releaseOwnerAsk = ownerAskWithheld ? withholdTurnAskForRun(p.req.runId) : null;
         try {
           const runCurrent: Runner = (next, nextEvents) => {
             if (!p.req.agentAppMode) assertTeamGoalContext(p.goalContext, next.signal ?? turn.signal ?? p.signal);
+            attestDelegatedPermission({ grant: p.delegatedGrant, context: authorityContext,
+              actualPermission: next.permission, actualWorkspace: next.cwd, signal: next.signal ?? turn.signal ?? p.signal });
+            runnerCalled = true;
             return runObservedRunner(runtimePicked.runner, next, nextEvents);
           };
           // Same bounded settlement as a room teammate (team-step-settlement.ts): a turn its session acknowledged that ended
@@ -1299,6 +1378,9 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
       };
       const workerRunner = turn.runtimeToolsDisabled || controlPlaneTurn ? boundedRunner
         : workerCapabilityRunner(p.prepareWorkerCapabilities, {
+          ...(p.delegatedGrant && p.req.runId && p.delegatedScopeKey ? { delegatedAuthority: {
+            grant: p.delegatedGrant, runId: p.req.runId, scopeKey: p.delegatedScopeKey,
+          } } : {}),
           workerId: node.id, attemptId: capabilityAttemptId, agentId: node.agentId ?? undefined, agentName: node.name,
           task: { ...p.workerCapabilityTask, brief: turn.userPrompt, doneWhen: p.workerCapabilityTask?.doneWhen ?? [] },
           runtime, ceiling: p.req.agentAppMode ? "agent-app" : p.workerCapabilityCeiling ?? "host",
@@ -1414,7 +1496,8 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
       return measuredResult;
     } catch (error) {
       recordUsage(measuredResult?.observedUsage ?? observedRunnerUsage(error), (turn.signal ?? p.signal)?.aborted ? "cancelled" : "failed", measuredResult ?? error);
-      if (error instanceof TeamGoalContextError || error instanceof WorkerCapabilityError || (turn.signal ?? p.signal)?.aborted) throw error;
+      if (error instanceof TeamGoalContextError || error instanceof WorkerCapabilityError
+        || error instanceof DelegatedAuthorityError || (turn.signal ?? p.signal)?.aborted) throw error;
       return { text: "", failure: runnerFailureFromError(error, runtime.kind) };
     }
   };
@@ -1433,7 +1516,6 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
     && !teammatePinnedToRoom
     && !(turn.signal ?? p.signal)?.aborted
   ) {
-    if (result.failure.providerCode === WORK_PROJECT_RESIDENCY_BUSY_CODE) break;
     if (!failedNodeRuntimes.some((runtime) => sameRuntimeModel(runtime, executedRuntime))) {
       failedNodeRuntimes.push(executedRuntime);
     }
@@ -1463,10 +1545,9 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
   }
   if (result.failure) {
     if (runtimeFailureBlocksReplay(result.failure)) throw new ObservedRunnerFailureError(result.failure);
-    if (result.failure.providerCode === WORK_PROJECT_RESIDENCY_BUSY_CODE) {
-      throw new ProjectResidencyBusyError(p.chat.projectId ?? "unknown");
-    }
-    throw new Error(`${result.failure.runtime} runtime ${result.failure.kind}: ${result.failure.message}`);
+    // Preserve the exact typed provider cause. Session admission is owned by
+    // the runner; a project-wide wrapper must not invent a second mutex.
+    throw new ObservedRunnerFailureError(result.failure);
   }
   // Keep later CEO/manager turns in the same firm run on the runtime that
   // actually survived the fallback. Worker turns still resolve independently
@@ -1684,7 +1765,9 @@ async function runDivision(
   let evidence = plan.evidence;
   // 위임이 없으면 본부 자기 턴(plan)이 곧 산출물이므로 그 성공 여부가 본부의 성공 여부다.
   let divisionOk = plan.ok;
-  const matched = specialists.length > 0 ? matchTargets(plan.delegations, specialists) : [];
+  const { picked: matched, unmatched: unmatchedBySpecialist } = specialists.length > 0
+    ? matchTargetsDetailed(plan.delegations, specialists) : { picked: [] as MatchedWork[], unmatched: [] as Delegation[] };
+  recordUnmatchedDelegations(p, division.id, fkAgentId, matched.length, unmatchedBySpecialist, specialists);
   if (matched.length > 0) {
     p.sink({
       kind: "tool-use",
@@ -1795,6 +1878,14 @@ async function runDivision(
 
 /** firm 채팅 진입점 — runMcpInvocation에서 firmId+divisions가 있으면 호출. */
 export async function runFirmInvocation(p: FirmRunParams): Promise<FirmRunResult> {
+  const failureReports: ExecutionFailureReport[] = [];
+  const result = await runFirmInvocationInternal({ ...p, onExecutionFailure: (report) => {
+    failureReports.push(report); p.onExecutionFailure?.(report);
+  } });
+  return { ...result, ...(failureReports.length ? { failureReports } : {}) };
+}
+
+async function runFirmInvocationInternal(p: FirmRunParams): Promise<FirmRunResult> {
   p = bindTeamGoalContext(p);
   if (!p.req.runId) {
     p = { ...p, req: { ...p.req, runId: `firm-direct-${randomUUID()}` } };
@@ -1896,7 +1987,18 @@ export async function runFirmInvocation(p: FirmRunParams): Promise<FirmRunResult
     return runCeoDirectExecution();
   }
 
-  const matched = matchTargets(plan.delegations, ceoReports);
+  const { picked: matched, unmatched: unmatchedDelegations } = matchTargetsDetailed(plan.delegations, ceoReports);
+  // A delegation that names no direct report must leave a typed fact: otherwise the plan prose reads as a completed
+  // team run. The run continues exactly as before; this only records which targets resolved to nobody.
+  if (unmatchedDelegations.length > 0) {
+    tryRecordRunEvent({
+      runId: p.req.runId ?? `firm:${chat.id}`, chatId: chat.id, nodeId: org.ceo.id, agentId: org.ceo.agentId ?? null,
+      kind: "firm_delegate_target_unmatched",
+      payload: { schemaVersion: "agentlas.firm-delegate-target-unmatched.v1", matchedCount: matched.length,
+        targets: unmatchedDelegations.map((d) => d.target).join(" | ").slice(0, 400),
+        available: ceoReports.map((n) => n.role).join(" | ").slice(0, 400) },
+    });
+  }
   // The declared stage of each node this run delegated to (later follow-ups update it).
   const stageByNode = new Map<string, DelegationStage>(matched.map((item) => [item.node.id, item.stage]));
   const isVerificationResult = (result: FirmStageResult) => stageByNode.get(result.node.id) === "verification";
@@ -2245,7 +2347,9 @@ export async function runFirmInvocation(p: FirmRunParams): Promise<FirmRunResult
   // the run without a corresponding WorkOrder or receipt.
   for (let round = 0; round < ceoReports.length; round += 1) {
     const hasFailedResult = !latestTeamResultsAllOk(teamResults);
-    const followupMatched = matchTargets(finalTurn.delegations, ceoReports)
+    const followupNamed = matchTargetsDetailed(finalTurn.delegations, ceoReports);
+    if (round === 0) recordUnmatchedDelegations(p, org.ceo.id, org.ceo.agentId ?? null, followupNamed.picked.length, followupNamed.unmatched, ceoReports);
+    const followupMatched = followupNamed.picked
       .filter((item) => !usedDivisionIds.has(item.node.id) || (hasFailedResult && (divisionAttempts.get(item.node.id) ?? 0) < 2));
     for (const item of followupMatched) stageByNode.set(item.node.id, item.stage);
     if (followupMatched.length === 0) break;

@@ -39,7 +39,8 @@ export function DashboardProjects() {
     }).catch(() => { if (alive) setLoadFailed(true); });
     return () => { alive = false; };
   }, []);
-  const taskMap = useMemo(() => new Map(projects.map((project) => [project.id, tasks.filter((task) => task.projectId === project.id)])), [projects, tasks]);
+  // A personal agent's room is not counted as the project's own Work (owner 2026-10-27).
+  const taskMap = useMemo(() => new Map(projects.map((project) => [project.id, tasks.filter((task) => task.projectId === project.id && task.supervisedByPersonalAgent !== true)])), [projects, tasks]);
   return <section className="dashboard-projects dashboard-panel">
     <header><div><span>{ko ? "프로젝트" : "Projects"}</span><strong>{ko ? "진행 중인 일" : "Work in progress"}</strong></div><button type="button" onClick={() => navigate("/workspace")}>{ko ? "전체 보기" : "View all"}</button></header>
     <div>{projects.slice(0, 4).map((project) => {

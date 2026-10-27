@@ -35,6 +35,15 @@ export function sha256Value(value: unknown): string {
     .digest("hex")}`;
 }
 
+/**
+ * The checkpoint schema strings the graph runner writes and reads. Every reader that has to recognise a sealed
+ * checkpoint (the runner, reconciliation, stale-run recovery, the strategy episode) imports these; a private copy
+ * of "v3" in the stale-run recovery made every current checkpoint look foreign and parked each recoverable event.
+ */
+export const GRAPH_CHECKPOINT_SCHEMA = "agentlas.automation-graph-checkpoint.v4";
+export const PREVIOUS_GRAPH_CHECKPOINT_SCHEMA = "agentlas.automation-graph-checkpoint.v3";
+export const LEGACY_GRAPH_CHECKPOINT_SCHEMA = "agentlas.automation-graph-checkpoint.v2";
+
 export function graphExecutionDigest(automation: Automation, graph: WorkflowGraph): string {
   return sha256Value({
     graph,

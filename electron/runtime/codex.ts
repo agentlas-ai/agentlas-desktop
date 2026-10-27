@@ -37,7 +37,7 @@ import { WORK_PROJECT_RESIDENCY_BUSY_CODE } from "./project-residency";
 import { codexShellEnvironmentArgs } from "./env-key-reach";
 import { ensureSandboxNpmCacheDir, sandboxNpmCacheDir } from "./sandbox-tool-cache";
 import { imageOutputContract } from "./prompt-sections";
-import { cumulativeSurfaceGateText, ensureChildCloseAfterExit, startCliHeartbeat, startCliSilenceGuard, runtimeSilentTimeoutFailure, cliSilenceWindowMs, cliToolSilenceWindowMs, type CliSilenceGuard, childExitReason, RUNTIME_SILENT_TIMEOUT_CODE, runtimeProtocolUnrecognizedFailure, wrapSystemPrompt, workforceObservedHostAuthorityEnforcement, RuntimeTurnUnsettledError, markRefusedBeforeDispatch, preDispatchRefusal } from "./runner";
+import { cumulativeSurfaceGateText, ensureChildCloseAfterExit, startCliHeartbeat, startCliSilenceGuard, runtimeSilentTimeoutFailure, cliSilenceWindowMs, cliToolSilenceWindowMs, type CliSilenceGuard, childExitReason, RUNTIME_SILENT_TIMEOUT_CODE, runtimeProtocolUnrecognizedFailure, wrapSystemPrompt, workforceObservedHostAuthorityEnforcement, RuntimeTurnUnsettledError, markRefusedBeforeDispatch, preDispatchRefusal, spawnStartFailureRefusal } from "./runner";
 import { decideTurnSettlement, normalEndToolEvidence, settleNormalEnd, trackReportedToolCalls } from "../../shared/turn-settlement";
 import { detectRuntimeRefusal } from "./runtime-refusal";
 import { abortReasonError } from "./abort-reason";
@@ -873,7 +873,8 @@ function runCodexProcess(
       diagnose({ phase: "process-error", runtimeAttemptId: null, transport: null, protocol: null, protocolScope: null,
         terminal: { accepted: false, threadMismatch: 0, turnMismatch: 0, earlyOverflow: 0 },
         failure: { category: "child-process-error", rpcCode: null, timeoutMs: null, requestMethod: null } });
-      throw error;
+      // spawn() throws the errnos it does not report as an event (ENOTDIR, EPERM...): no process, nothing ran.
+      throw spawnStartFailureRefusal(null, error, { runtimeKind: KIND, cwd: req.cwd ?? agentRunCwd(), locale: req.locale }) ?? error;
     }
     let transportDiagnostics: NativeTransportDiagnostics | null = null;
     let protocolDiagnostics: NativeProtocolDiagnostics | null = null;
@@ -1402,12 +1403,15 @@ function runCodexProcess(
       child.stderr?.removeAllListeners("data");
       req.signal?.removeEventListener("abort", onAbort);
       if (stableContextDelivery) invalidateStableTurnContext(stableContextDelivery.identity);
-      try { effects.complete("process_error", false); }
+      // A child that never got a pid never started (ENOENT, EACCES, EMFILE, a deleted working folder): nothing was sent.
+      const notStarted = req.signal?.aborted || terminalObservationFailed ? null
+        : spawnStartFailureRefusal(child, err, { runtimeKind: KIND, cwd: req.cwd ?? agentRunCwd(), locale: req.locale });
+      try { effects.complete(notStarted ? "not_dispatched" : "process_error", notStarted !== null); }
       catch (error) {
         reject(req.signal?.aborted ? abortReasonError(req) : terminalObservationFailed ? terminalObservationError : error);
         return;
       }
-      reject(req.signal?.aborted ? abortReasonError(req) : terminalObservationFailed ? terminalObservationError : new RuntimeTurnUnsettledError(KIND, req.locale));
+      reject(req.signal?.aborted ? abortReasonError(req) : terminalObservationFailed ? terminalObservationError : notStarted ?? new RuntimeTurnUnsettledError(KIND, req.locale));
     });
     child.on("close", (code, signal) => {
       // Pipe chunks can split a Korean UTF-8 code point. Decoding them

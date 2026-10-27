@@ -14,6 +14,7 @@
 import { getDb } from "../store/db";
 import type { ToolchainAsset, ToolchainCallReceipt } from "../../shared/toolchain-asset";
 import { TRIAL_GRANT_WINDOW_MS, trialEligible, trialVerdict, trialVersion, type TrialLedger } from "../../shared/toolchain-detector";
+import { failureKindOf } from "../../shared/toolchain-health";
 
 export type { TrialLedger } from "../../shared/toolchain-detector";
 import { getToolchainAsset, promoteToolchainVersionFromTrial } from "./assets";
@@ -90,6 +91,8 @@ export function toolchainTokenComparison(toolchainId: string, useRunIds: readonl
 export function recordToolchainTrialOutcome(receipt: Readonly<ToolchainCallReceipt>): void {
   try {
     if (receipt.status === "running" || receipt.dryRun) return;
+    // The same reading as a callable Toolchain's health: an owner Stop, a lost login or a dropped network says nothing about the draft, so it is neither a use nor a failure.
+    if (receipt.status !== "succeeded" && failureKindOf(receipt.error ?? receipt.status) === "environment") return;
     const ledger = read(receipt.toolchainId, receipt.version);
     if (!ledger || ledger.state !== "trial" || ledger.contentHash !== receipt.contentHash || ledger.outcomes.some(item => item.callId === receipt.id)) return;
     const outcomes = [...ledger.outcomes, { callId: receipt.id, chatId: receipt.callerChatId, parentRunId: receipt.parentRunId,

@@ -53,7 +53,11 @@ function scheduleStartupContinuation(runId: string, reason: string): boolean {
 
 /** A lost verifier or failed wait insertion is not a permanent stop for an
  * ongoing mandate. Recover only a current, fully settled producer; schedule
- * observation rather than replaying its actions or promoting the result. */
+ * observation rather than replaying its actions or promoting the result.
+ * Only rows an older release parked as `blocked` reach this: the host no longer
+ * writes blocked (resolveNonBlockingGoalStatus reads that request as running),
+ * so a Goal whose verifier did not run is handed to the host retry at the end of
+ * its turn instead (invocation/service.ts, verificationUnavailable). */
 export function scheduleUnverifiedOngoingGoalCycles(): CheckpointStartupResult[] {
   const results: CheckpointStartupResult[] = [];
   let afterId = "";

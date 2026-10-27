@@ -1,7 +1,7 @@
 import { isPredispatchApprovalRefusal } from "../../shared/tool-failure";
 import { verifyScienceSchemaRejection, type ScienceSchemaRejectionSettlement } from "./science-schema-rejection";
 import type { ScienceNativeFailureObservation } from "./science-native-failure";
-import { isEffectStatusOnlyTool, isSettledPreparationScope } from "./effect-boundary";
+import { isEffectStatusOnlyTool, isSettledPreparationScope, receiptScopeKind } from "./effect-boundary";
 import type { RuntimeEffectBoundaryReceipt } from "./effect-boundary";
 import { createHash } from "node:crypto";
 import { getDb } from "../store/db";
@@ -210,11 +210,12 @@ export function readInvocationEffectBoundary(input: InvocationEffectBoundaryInpu
         if (!parentStart || !parentEnd || !ownStart || !ownEnd || parentStart.seq >= ownStart.seq || parentEnd.seq <= ownEnd.seq) pending.add(`adapter:${scope.scopeId}:parent-lifetime-mismatch`);
       }
     }
-    for (const kind of (exactBoundary?.adapterKinds ?? []) as string[]) if (["antigravity", "acp"].includes(kind)
-      && !(scopes ?? []).some(scope => scope.adapterKind === kind && scope.rootBound
+    // cursor/grok/kimi are attested by the ACP runner's "acp" scope (receiptScopeKind), exactly like the generic acp kind.
+    for (const kind of (exactBoundary?.adapterKinds ?? []) as string[]) if (["antigravity", "acp"].includes(receiptScopeKind(kind))
+      && !(scopes ?? []).some(scope => (scope.adapterKind === kind || scope.adapterKind === receiptScopeKind(kind)) && scope.rootBound
         && scope.chatId === input.expectedChatId && scope.report?.complete === true
         && scope.report.protocol !== MAIN_TOOL_PREDISPATCH_PROTOCOL)) pending.add("runtime-effect-adapter-receipt-missing");
-    if (((exactBoundary?.adapterKinds ?? []) as string[]).some(kind => ["antigravity", "acp"].includes(kind))) {
+    if (((exactBoundary?.adapterKinds ?? []) as string[]).some(kind => ["antigravity", "acp"].includes(receiptScopeKind(kind)))) {
       for (const id of tools.keys()) if (!reportedOperationIds.has(id)) pending.add("runtime-effect-adapter-operation-missing");
     }
     if (terminal?.kind === "invoke_failed" && exactBoundary?.runtimeQuiesced === true && boundary?.effects === "settled"

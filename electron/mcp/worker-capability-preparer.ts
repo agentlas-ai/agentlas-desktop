@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type { McpNeedCandidate, ResolvedMcpNeeds } from "../mcp-tools/need-resolver";
 import type { ActiveGoalToolScope } from "../mcp-tools/auto-select";
 import { WorkerCapabilityError, type PrepareWorkerCapabilities, type WorkerCapabilityInput, type WorkerCapabilityLease } from "./worker-capabilities";
+import { resolveHostDelegatedPermission } from "./delegated-authority";
 
 export interface WorkerCapabilityInventory {
   fingerprint: string;
@@ -40,8 +41,15 @@ export function createWorkerCapabilityPreparer(deps: PreparationDependencies): P
     const assertCurrent = () => {
       deps.assertParentCurrent();
       const scope = deps.readScope();
+      let permissionAllowed = Boolean(input.permission && permissionRank[input.permission] <= permissionRank[deps.scope.permission]);
+      if (!permissionAllowed && input.permission && input.delegatedAuthority) {
+        const authority = input.delegatedAuthority;
+        permissionAllowed = resolveHostDelegatedPermission(authority.grant, { runId: authority.runId,
+          scopeKey: authority.scopeKey, workspace: input.cwd, permission: input.permission,
+          fallbackPermission: deps.scope.permission }) === input.permission;
+      }
       if (input.signal?.aborted || !scope || scopeKey(scope) !== expectedScope
-        || !input.permission || permissionRank[input.permission] > permissionRank[deps.scope.permission]
+        || !permissionAllowed
         || input.cwd !== deps.cwd
         || (inventory && deps.inventory().fingerprint !== inventory.fingerprint)) {
         throw new WorkerCapabilityError("worker-capability-scope-changed");
@@ -137,7 +145,8 @@ export function createWorkerCapabilityPreparer(deps: PreparationDependencies): P
   return async (input) => {
     try { return await prepare(input); }
     catch (error) {
-      const failure = error instanceof WorkerCapabilityError ? error : new WorkerCapabilityError("worker-capability-preparation-unavailable");
+      const failure = error instanceof WorkerCapabilityError ? error : new WorkerCapabilityError("worker-capability-preparation-unavailable",
+        "worker-capability-preparation-unavailable", { cause: error, turnDelivery: "not-dispatched" });
       emit({ schemaVersion: 1, workerId: input.workerId, attemptId: input.attemptId,
         status: "unavailable", reasonCode: failure.code, evidenceType: "capability-binding-only" });
       throw failure;

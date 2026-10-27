@@ -8,7 +8,8 @@
 // Every update now has a row here from the moment it is queued until its handling has ended. A row that never started
 // handling ("queued") is handed to its lane again when the poller starts. A row whose handling had started ("handling")
 // is not run a second time: that turn may already have acted (the same rule as the desktop send queue's unconfirmed
-// placement); it is cleared with a log line. Rows older than the window are cleared too: a day-old instruction is not run
+// placement); the owner is told once that it stopped before finishing (telegram/connect.ts announceInterruptedTelegramTurns)
+// and the row is cleared. Rows older than the window are cleared too: a day-old instruction is not run
 // behind the owner's back. The token is never stored; a poller is identified by a hash of it.
 // No Electron import: the gate drives this module with a real SQLite handle.
 import { createHash } from "node:crypto";
@@ -44,7 +45,11 @@ export function persistTelegramInbound(db: TelegramInboundDb, input: { pollerKey
     VALUES (?, ?, ?, ?, 'queued', ?)`).run(input.pollerKey, input.updateId, input.chatKey, JSON.stringify(input.update), input.now ?? Date.now());
 }
 
-/** Its handling starts now: from here on it is never replayed (it may act). */
+/**
+ * The update has just ACTED (a command ran, a report toggle changed, the run started): from here on it is never replayed. Called at that
+ * first effect, not when the room's lane picks the update up: the judges, the attachment download, the acknowledgement and the start
+ * retries before it have no effect, and an interruption in them leaves the row queued for the next poller start.
+ */
 export function markTelegramInboundHandling(db: TelegramInboundDb, pollerKey: string, updateId: number): void {
   ensure(db);
   db.prepare("UPDATE telegram_inbound_updates SET state = 'handling' WHERE poller_key = ? AND update_id = ?").run(pollerKey, updateId);
@@ -60,10 +65,20 @@ export function finishTelegramInbound(db: TelegramInboundDb, pollerKey: string, 
  * At poller start: the updates accepted by an earlier process that never started handling, in arrival order. Rows that
  * had started handling, and rows past the replay window, are cleared and reported.
  */
-export function takeReplayableTelegramInbound(db: TelegramInboundDb, pollerKey: string, now = Date.now()):
-  { replay: Array<{ updateId: number; chatKey: string; update: unknown }>; clearedHandling: number; clearedExpired: number } {
+export function takeReplayableTelegramInbound(db: TelegramInboundDb, pollerKey: string, now = Date.now(), options: { keepInterrupted?: boolean } = {}):
+  { replay: Array<{ updateId: number; chatKey: string; update: unknown }>; interrupted: Array<{ updateId: number; chatKey: string; update: unknown }>; clearedHandling: number; clearedExpired: number } {
   ensure(db);
-  const clearedHandling = db.prepare("DELETE FROM telegram_inbound_updates WHERE poller_key = ? AND state = 'handling'").run(pollerKey).changes;
+  // The turns an earlier process had started and did not finish (quit, update, crash): never run again, but the owner was told
+  // "I will send the result" and must hear that it stopped. The caller announces them; with keepInterrupted the rows stay until it
+  // has (finishTelegramInbound), so a send that failed is tried again at the next start instead of lost.
+  const interrupted: Array<{ updateId: number; chatKey: string; update: unknown }> = [];
+  for (const row of db.prepare("SELECT update_id, chat_key, update_json FROM telegram_inbound_updates WHERE poller_key = ? AND state = 'handling' AND created_at >= ? ORDER BY update_id")
+    .all(pollerKey, now - TELEGRAM_INBOUND_REPLAY_WINDOW_MS) as Array<{ update_id: number; chat_key: string; update_json: string }>) {
+    try { interrupted.push({ updateId: row.update_id, chatKey: row.chat_key, update: JSON.parse(row.update_json) }); }
+    catch { finishTelegramInbound(db, pollerKey, row.update_id); }
+  }
+  const clearedHandling = options.keepInterrupted ? 0
+    : db.prepare("DELETE FROM telegram_inbound_updates WHERE poller_key = ? AND state = 'handling'").run(pollerKey).changes;
   const clearedExpired = db.prepare("DELETE FROM telegram_inbound_updates WHERE poller_key = ? AND created_at < ?")
     .run(pollerKey, now - TELEGRAM_INBOUND_REPLAY_WINDOW_MS).changes;
   const rows = db.prepare("SELECT update_id, chat_key, update_json FROM telegram_inbound_updates WHERE poller_key = ? AND state = 'queued' ORDER BY update_id")
@@ -73,5 +88,5 @@ export function takeReplayableTelegramInbound(db: TelegramInboundDb, pollerKey: 
     try { replay.push({ updateId: row.update_id, chatKey: row.chat_key, update: JSON.parse(row.update_json) }); }
     catch { finishTelegramInbound(db, pollerKey, row.update_id); }
   }
-  return { replay, clearedHandling, clearedExpired };
+  return { replay, interrupted, clearedHandling, clearedExpired };
 }

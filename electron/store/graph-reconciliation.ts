@@ -4,6 +4,7 @@ import {
   canonicalJsonValue,
   graphExecutionDigest,
   sha256Value,
+  GRAPH_CHECKPOINT_SCHEMA,
 } from "../../shared/graph-execution-digest";
 import type {
   Automation,
@@ -29,7 +30,6 @@ import { recordRunEvent, tryRecordRunEvent } from "./run-events";
 import { resolveAutomationGraph } from "../../shared/automation-graph-definition";
 import { getAutomationDefinitionDigest } from "../long-run/automation-provenance";
 
-const GRAPH_CHECKPOINT_SCHEMA = "agentlas.automation-graph-checkpoint.v4";
 const SHA256_RE = /^sha256:[0-9a-f]{64}$/;
 const MAX_CHECKPOINT_BYTES = 1024 * 1024;
 const MAX_RECONCILED_OUTPUT_BYTES = 256 * 1024;

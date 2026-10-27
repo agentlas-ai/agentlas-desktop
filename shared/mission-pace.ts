@@ -2,6 +2,8 @@
  * 대계 KR 속도 계산(순수) — "하루에 얼마가 필요하고, 지금 얼마가 부족한가"(docs/2026-09-24-PLAN M-1·M-3-4).
  *
  * required = (target − current) / days_left, observed = 관측 표본의 기울기(하루당), gap = required − observed.
+ * 값이 줄어야 하는 KR(기준선이 목표보다 큼, 예 '이탈률 20% → 5%')은 부호를 뒤집어 같은 식으로 계산한다 — required·observed·gap 은
+ * 항상 "목표 쪽으로 간 양"이고, current·remaining 만 원래 값의 부호로 돌려준다(Agent Strategy 의 computeKpiMetrics 와 같은 정규화).
  * 센서가 없으면 추측하지 않는다: status "no_sensor" 는 **인프라 상태**이지 전략 실패가 아니다(M-3-4).
  * 결측은 보간하지 않는다.
  */
@@ -19,10 +21,18 @@ export interface MissionPaceInput {
   samples: readonly MetricSample[];
 }
 
+/** 값이 목표 쪽으로 늘어야 하는지(up) 줄어야 하는지(down). 기준선을 모르면 up — Agent Strategy 의 KPI 방향과 같은 규칙 하나. */
+export type KrDirection = "up" | "down";
+export function krDirection(baseline: number | null, target: number): KrDirection {
+  return baseline !== null && baseline > target ? "down" : "up";
+}
+
 export type MissionPaceStatus = "no_deadline" | "no_sensor" | "achieved" | "deadline_passed" | "on_pace" | "behind" | "ahead";
 
 export interface MissionPace {
   status: MissionPaceStatus;
+  /** requiredPerDay·observedPerDay·gapPerDay 는 이 방향으로 목표에 다가가는 양이고, current·remaining 은 원래 값의 부호다. */
+  direction: KrDirection;
   current: number | null;
   remaining: number | null;
   daysLeft: number | null;
@@ -51,21 +61,29 @@ function observedSlope(samples: readonly MetricSample[], baseline: number | null
 }
 
 export function missionPace(input: MissionPaceInput): MissionPace {
+  // 아래 식은 "값이 커질수록 전진"이다. 줄여야 하는 KR 은 값을 뒤집어 넣고(-0 은 0 으로), 값을 내놓을 때만 원래 부호로 돌린다.
+  const direction = krDirection(input.baseline, input.target);
+  const sign = direction === "down" ? -1 : 1;
+  const flip = (value: number): number => (sign === 1 || value === 0 ? value : -value);
+  const target = flip(input.target);
+  const baseline = input.baseline === null ? null : flip(input.baseline);
+  const samples = sign === 1 ? input.samples : input.samples.map((s) => ({ ...s, value: flip(s.value) }));
   const startMs = Date.parse(input.startAt);
   const deadlineMs = input.deadlineAt ? Date.parse(input.deadlineAt) : Number.NaN;
-  const latest = [...input.samples].filter((s) => Number.isFinite(s.value) && Number.isFinite(Date.parse(s.observedAt)))
+  const latest = [...samples].filter((s) => Number.isFinite(s.value) && Number.isFinite(Date.parse(s.observedAt)))
     .sort((a, b) => Date.parse(b.observedAt) - Date.parse(a.observedAt))[0];
   const current = latest ? latest.value : null;
-  const reference = current ?? input.baseline;
-  const remaining = reference === null ? null : input.target - reference;
+  const reference = current ?? baseline;
+  const remaining = reference === null ? null : target - reference;
   const daysLeft = Number.isFinite(deadlineMs) ? (deadlineMs - input.nowMs) / DAY_MS : null;
-  const observed = observedSlope(input.samples, input.baseline, Number.isFinite(startMs) ? startMs : input.nowMs);
+  const observed = observedSlope(samples, baseline, Number.isFinite(startMs) ? startMs : input.nowMs);
   const requiredPerDay = remaining !== null && daysLeft !== null && daysLeft > 0 ? Math.max(0, remaining) / daysLeft : null;
-  const base = { current, remaining: round(remaining), daysLeft: round(daysLeft), requiredPerDay: round(requiredPerDay),
+  const base = { direction, current: current === null ? null : flip(current), remaining: remaining === null ? null : round(flip(remaining)),
+    daysLeft: round(daysLeft), requiredPerDay: round(requiredPerDay),
     observedPerDay: round(observed), gapPerDay: requiredPerDay !== null && observed !== null ? round(requiredPerDay - observed) : null,
     requiredOverObserved: requiredPerDay !== null && observed !== null && observed > 0 ? round(requiredPerDay / observed) : null,
-    requiredPerDayUpperBound: reference === null && daysLeft !== null && daysLeft > 0 ? round(Math.max(0, input.target) / daysLeft) : null };
-  if (current !== null && current >= input.target) return { ...base, status: "achieved" };
+    requiredPerDayUpperBound: reference === null && daysLeft !== null && daysLeft > 0 ? round(Math.max(0, target) / daysLeft) : null };
+  if (current !== null && current >= target) return { ...base, status: "achieved" };
   if (daysLeft === null) return { ...base, status: current === null ? "no_sensor" : "no_deadline" };
   if (daysLeft <= 0) return { ...base, status: "deadline_passed" };
   if (current === null || observed === null) return { ...base, status: "no_sensor" };

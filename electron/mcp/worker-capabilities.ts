@@ -1,9 +1,12 @@
 import type { RuntimeStatus } from "../../shared/types";
 import type { Runner, RunnerRequest } from "../runtime/runner";
+import type { HostDelegatedGrant } from "./delegated-authority";
 
 export type WorkerCapabilityRunnerFields = Partial<Pick<RunnerRequest,
   "mcpConfigPath" | "mcpAllowedTools" | "mcpCodexConfigArgs" | "env" | "isolatedMcpConfig" | "browserOnly">>;
 export interface WorkerCapabilityInput {
+  /** Host-local exact step authority, never derived from the capability selection model. */
+  delegatedAuthority?: { grant: HostDelegatedGrant; runId: string; scopeKey: string };
   workerId: string;
   attemptId: string;
   agentId?: string;
@@ -22,7 +25,12 @@ export interface WorkerCapabilityLease {
 }
 export type PrepareWorkerCapabilities = (input: WorkerCapabilityInput) => Promise<WorkerCapabilityLease>;
 export class WorkerCapabilityError extends Error {
-  constructor(readonly code: string, message = code) { super(message); this.name = "WorkerCapabilityError"; }
+  readonly turnDelivery?: "not-dispatched";
+  readonly cleanupFailure?: unknown;
+  constructor(readonly code: string, message = code, options?: { cause?: unknown; cleanupFailure?: unknown; turnDelivery?: "not-dispatched" }) {
+    super(message, options); this.name = "WorkerCapabilityError"; this.turnDelivery = options?.turnDelivery;
+    this.cleanupFailure = options?.cleanupFailure;
+  }
 }
 const RUNNER_KEYS = new Set(["mcpConfigPath", "mcpAllowedTools", "mcpCodexConfigArgs", "env", "isolatedMcpConfig", "browserOnly"]);
 
@@ -38,6 +46,7 @@ export function workerCapabilityRunner(
   return async (request, events) => {
     let lease: WorkerCapabilityLease | undefined;
     let dispatched = false;
+    let pendingFailure: unknown;
     try {
       if (request.signal?.aborted) throw new WorkerCapabilityError("worker_capabilities_cancelled");
       lease = await prepare({ ...input, permission: request.permission, cwd: request.cwd, signal: request.signal });
@@ -60,15 +69,25 @@ export function workerCapabilityRunner(
       return await runner({ ...request, ...lease.runner }, events);
     } catch (error) {
       if (!dispatched) {
-        const failure = error instanceof WorkerCapabilityError ? error : new WorkerCapabilityError("worker_capabilities_failed");
+        const failure = new WorkerCapabilityError(error instanceof WorkerCapabilityError ? error.code : "worker_capabilities_failed",
+          error instanceof WorkerCapabilityError ? error.message : "worker_capabilities_failed", { cause: error, turnDelivery: "not-dispatched" });
+        pendingFailure = failure;
         report(failure.code);
         throw failure;
       }
+      pendingFailure = error;
       throw error; // Preserve provider failures; never fall back after failed preparation.
     } finally {
       if (lease && typeof lease.release === "function") {
         try { await lease.release(); }
-        catch { report("worker_capabilities_release_failed"); throw new WorkerCapabilityError("worker_capabilities_release_failed"); }
+        catch (error) {
+          report("worker_capabilities_release_failed");
+          // Release can fail after real execution. Do not label it not-dispatched
+          // or discard the original provider/transport observation.
+          throw new WorkerCapabilityError("worker_capabilities_release_failed", "worker_capabilities_release_failed",
+            { cause: pendingFailure ?? error, ...(pendingFailure ? { cleanupFailure: error } : {}),
+              ...(!dispatched ? { turnDelivery: "not-dispatched" as const } : {}) });
+        }
       }
     }
   };

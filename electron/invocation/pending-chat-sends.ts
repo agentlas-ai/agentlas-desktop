@@ -82,6 +82,12 @@ export interface PendingChatSendsDeps<Sender> {
   onHeld?(sendId: string, code: string): void;
   inputReady?(sendId: string, request: McpInvocationRequest): boolean;
   senderAlive(sender: Sender): boolean;
+  /**
+   * An owner text accepted here as a refused steer (its row has the steer's intent id) that the process hosting the turn already
+   * recorded under that same intent: it is delivered there, so this row must not start it a second time (a lost reply made the
+   * refusal look like "nothing was recorded"). Never throws into the queue; unreadable counts as not recorded.
+   */
+  alreadyDelivered?(chatId: string, intentId: string): boolean;
   /** A live sender of this app to start from when the message's own window is gone (null: none open right now). */
   replacementSender?(chatId: string): Sender | null;
   /**
@@ -133,6 +139,8 @@ const SENDER_WAIT_POLL_MS = 2_000;
 const STARTING_POLL_MS = 2_000;
 /** Re-queues after a run that provably sent nothing (R-084: keep the message, retry once). */
 const MAX_NOT_DISPATCHED_RETRIES = 1;
+/** Immediate tries to write down a run that started, before it is kept in memory and written at the next look. */
+const START_RECORD_TRIES = 3;
 
 export function pendingSendPromptHash(text: string): string {
   return createHash("sha256").update(text, "utf8").digest("hex");
@@ -188,6 +196,9 @@ export function createPendingChatSends<Sender>(deps: PendingChatSendsDeps<Sender
   const senders = new Map<string, Sender>();
   const timers = new Map<string, unknown>();
   const pumping = new Set<string>();
+  // sendId -> runId of a run that STARTED while its row could not be updated (a locked or full store). The row still reads "queued";
+  // this is what keeps it from being started a second time until the write lands (recordStart).
+  const unrecorded = new Map<string, string>();
 
   const insert = deps.db.prepare(`INSERT INTO pending_chat_sends
     (id, chat_id, intent_id, request_json, user_row_json, prompt_hash, state, attempts, created_at, updated_at)
@@ -202,6 +213,9 @@ export function createPendingChatSends<Sender>(deps: PendingChatSendsDeps<Sender
   const headOf = deps.db.prepare("SELECT * FROM pending_chat_sends WHERE chat_id = ? AND state = 'queued' ORDER BY seq LIMIT 1");
   const countOf = deps.db.prepare("SELECT COUNT(*) AS n FROM pending_chat_sends WHERE chat_id = ? AND state IN ('queued', 'starting')");
   const setStarting = deps.db.prepare("UPDATE pending_chat_sends SET state = 'starting', run_id = ?, updated_at = ? WHERE id = ?");
+  // After a SUCCESSFUL start: only a row still waiting (or already marked starting by the custody reservation) takes the run; a row the
+  // owner cancelled meanwhile is never brought back.
+  const recordStarted = deps.db.prepare("UPDATE pending_chat_sends SET state = 'starting', run_id = ?, updated_at = ? WHERE id = ? AND state IN ('queued', 'starting')");
   const requeue = deps.db.prepare("UPDATE pending_chat_sends SET state = 'queued', run_id = NULL, dispatch_retries = dispatch_retries + 1, last_code = ?, updated_at = ? WHERE id = ?");
   const startingOf = deps.db.prepare("SELECT * FROM pending_chat_sends WHERE chat_id = ? AND state = 'starting' ORDER BY seq");
   const startingByRun = deps.db.prepare("SELECT * FROM pending_chat_sends WHERE run_id = ? AND state = 'starting'");
@@ -328,7 +342,29 @@ export function createPendingChatSends<Sender>(deps: PendingChatSendsDeps<Sender
   }
   function kick(chatId: string, delayMs: number): void {
     clearTimerFor(chatId);
-    timers.set(chatId, deps.setTimer(() => { timers.delete(chatId); void pump(chatId); }, Math.max(0, delayMs)));
+    timers.set(chatId, deps.setTimer(() => {
+      timers.delete(chatId);
+      // A pass that dies on a bookkeeping error (a locked store) is not the end of the drain: look again, nothing is dropped.
+      void pump(chatId).catch((error) => {
+        deps.log?.("pending send drain failed, looking again", { chatId, code: String((error as { code?: unknown })?.code ?? (error as Error)?.message ?? error).slice(0, 80) });
+        kick(chatId, STARTING_POLL_MS);
+      });
+    }, Math.max(0, delayMs)));
+  }
+
+  /**
+   * A run was admitted for this row: write it down. Only a refused START is a refusal; a failed write after a successful start is
+   * bookkeeping (it used to be classified as a refused start: the live run's message ended "failed", or stayed queued and started
+   * again). The run is remembered here, so the row is never started a second time, until the write lands.
+   */
+  function recordStart(row: Row, runId: string): boolean {
+    for (let attempt = 0; attempt < START_RECORD_TRIES; attempt += 1) {
+      try { recordStarted.run(runId, deps.now(), row.id); unrecorded.delete(row.id); return true; }
+      catch { /* a locked or full store: try again, then keep the run in memory */ }
+    }
+    if (!unrecorded.has(row.id)) deps.log?.("pending send admitted, record deferred", { chatId: row.chat_id, sendId: row.id, runId });
+    unrecorded.set(row.id, runId);
+    return false;
   }
 
   async function pump(chatId: string): Promise<void> {
@@ -343,6 +379,14 @@ export function createPendingChatSends<Sender>(deps: PendingChatSendsDeps<Sender
           if (startingPending > 0) kick(chatId, STARTING_POLL_MS);
           return;
         }
+        // Its run already started and only the row's update is missing (a locked store): write the run down, never start it again.
+        const remembered = unrecorded.get(row.id);
+        if (remembered !== undefined) {
+          if (!recordStart(row, remembered)) { kick(chatId, STARTING_POLL_MS); return; }
+          startingPending += 1;
+          deps.onChange?.(chatId);
+          continue;
+        }
         const request = JSON.parse(row.request_json) as McpInvocationRequest;
         // Only continuous refusals count: a message waiting for a busy chat, a window or a restart never gives up.
         if (row.refused_since !== null && row.refused_since !== undefined && deps.now() - row.refused_since > TRANSIENT_SEND_DEADLINE_MS) {
@@ -354,6 +398,19 @@ export function createPendingChatSends<Sender>(deps: PendingChatSendsDeps<Sender
             senders.delete(row.id);
             deps.log?.("pending send gave up", { chatId, sendId: row.id, attempts: row.attempts, code: row.last_code });
             deps.onEnded?.({ chatId, request, reason: "deadline", ...(row.last_code ? { code: row.last_code } : {}), sendId: row.id });
+            deps.onChange?.(chatId);
+            continue;
+          }
+        }
+        // Recorded by the host of the turn under this very intent: delivered there, never started again here. Checked before any
+        // wait (a window, a busy chat) so the duplicate leaves at once; the row stays for the receipt that answers by intent id.
+        if (row.intent_id && deps.alreadyDelivered) {
+          let recorded = false;
+          try { recorded = deps.alreadyDelivered(chatId, row.intent_id) === true; } catch { recorded = false; }
+          if (recorded) {
+            setState.run("abandoned", "steer_recorded", deps.now(), row.id);
+            senders.delete(row.id);
+            deps.log?.("pending send already recorded as a steer", { chatId, sendId: row.id });
             deps.onChange?.(chatId);
             continue;
           }
@@ -393,6 +450,7 @@ export function createPendingChatSends<Sender>(deps: PendingChatSendsDeps<Sender
           }
         }
         const rec = record(row);
+        let startedRunId = "";
         try {
           // Every attempt is a new run: a refused start has already closed its own admission.
           const runId = randomUUID();
@@ -402,13 +460,7 @@ export function createPendingChatSends<Sender>(deps: PendingChatSendsDeps<Sender
             else markStarting();
           }
           const answer = await deps.start(sender as Sender, { ...request, runId }, rec.userRow, row.id);
-          const startedRunId = answer && typeof (answer as { runId?: unknown }).runId === "string" ? (answer as { runId: string }).runId : runId;
-          // Admitted, not placed: the row stays until the run's placement is known (settleStarting).
-          setStarting.run(startedRunId, deps.now(), row.id);
-          startingPending += 1;
-          deps.log?.("pending send admitted", { chatId, sendId: row.id, runId: startedRunId, attempts: row.attempts + 1 });
-          deps.onChange?.(chatId);
-          continue;
+          startedRunId = answer && typeof (answer as { runId?: unknown }).runId === "string" ? (answer as { runId: string }).runId : runId;
         } catch (cause) {
           const code = sendRefusalCode(cause);
           // A source may report a native failure after delivery. Queue transport
@@ -458,6 +510,12 @@ export function createPendingChatSends<Sender>(deps: PendingChatSendsDeps<Sender
           deps.onChange?.(chatId);
           continue;
         }
+        // Reached only when the start succeeded (every refusal above leaves the loop body). Admitted, not placed: the row stays until
+        // the run's placement is known (settleStarting). A failed write here is bookkeeping, never a refused start (recordStart).
+        if (!recordStart(row, startedRunId)) { kick(chatId, STARTING_POLL_MS); return; }
+        startingPending += 1;
+        deps.log?.("pending send admitted", { chatId, sendId: row.id, runId: startedRunId, attempts: row.attempts + 1 });
+        deps.onChange?.(chatId);
       }
     } finally {
       pumping.delete(chatId);

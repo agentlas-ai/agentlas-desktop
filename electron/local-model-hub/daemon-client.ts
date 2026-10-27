@@ -75,6 +75,7 @@ export function createLocalModelDaemonClient(options: LocalModelDaemonClientOpti
   let daemon: VerifiedDaemon | null = null;
   let ready: DaemonLocalModelStatus | null = null;
   let starting: Promise<DaemonLocalModelStatus> | null = null;
+  let verifying: Promise<DaemonLocalModelStatus> | null = null;
   let observedSnapshot: { ownerEpoch: string; snapshot: LocalModelHubSnapshot } | null = null;
   let observationGeneration = 0;
   let observationFlight: Promise<LocalModelRuntimeObservation> | null = null;
@@ -148,8 +149,23 @@ export function createLocalModelDaemonClient(options: LocalModelDaemonClientOpti
       assertIdentity();
       if (detaching) throw failure("local_model_daemon_client_detached", "not-dispatched");
     } catch (error) { return Promise.reject(error); }
-    if (ready) return Promise.resolve(ready);
     if (starting) return starting;
+    if (!ready) return startService();
+    // What an earlier call attached to is not trusted blindly: the daemon may have died (memory pressure, a manual stop)
+    // and been launched again on the same socket with a new boot id, and the service rejects every command that
+    // carries the old one. A new call looks at the daemon that is up now, as the Science client does on every call.
+    verifying ??= (async () => {
+      const attached = daemon;
+      const live = await inspect().then(value => value, () => null);
+      if (closed || detaching) throw failure("local_model_daemon_client_detached", "not-dispatched");
+      if (ready && attached && daemon === attached && live && live.bootId === attached.bootId) return ready;
+      if (daemon === attached) { daemon = null; ready = null; }
+      if (ready) return ready;
+      return starting ?? startService();
+    })().finally(() => { verifying = null; });
+    return verifying;
+  }
+  function startService(): Promise<DaemonLocalModelStatus> {
     observedSnapshot = null;
     observationGeneration += 1;
     starting = (async () => {

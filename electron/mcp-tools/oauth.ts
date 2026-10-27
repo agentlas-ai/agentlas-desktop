@@ -127,7 +127,7 @@ async function fetchJson(url: string, init: RequestInit, timeoutMs: number): Pro
     }
     if (!response.ok) {
       // Endpoint bodies may contain credentials or codes. Never echo them to the UI/logs.
-      throw new Error(`OAuth endpoint returned HTTP ${response.status}`);
+      throw Object.assign(new Error(`OAuth endpoint returned HTTP ${response.status}`), { httpStatus: response.status });
     }
     return JSON.parse(text) as unknown;
   } finally {
@@ -591,6 +591,7 @@ async function persistAuthorization(attempt: AuthorizationAttempt, session: McpO
   const keys = [sessionSecretKey(attempt.serverId), tokenSecretKey(attempt.serverId)];
   const previous = await Promise.all(keys.map((key) => readSecret(key)));
   signal.throwIfAborted();
+  heldPairs.delete(attempt.serverId); // the new grant replaces a refreshed pair still waiting for the vault
   try {
     await setSecret(keys[0], JSON.stringify(session));
     signal.throwIfAborted();
@@ -939,12 +940,55 @@ function readTokenResponse(raw: Record<string, unknown>): { tokens: StoredTokens
   };
 }
 
-async function persist(serverId: string, session: McpOAuthSession, tokens: StoredTokens): Promise<void> {
-  await setSecret(sessionSecretKey(serverId), JSON.stringify(session));
+/**
+ * A refreshed pair the vault could not take yet. The authorization server retired the old refresh token the moment it answered,
+ * so this pair is the only copy: it stays in this process and is written again later, never dropped.
+ */
+interface HeldPair { session: McpOAuthSession; tokens: StoredTokens; nextTryAt: number; writing: boolean }
+const heldPairs = new Map<string, HeldPair>();
+const HELD_RETRY_MS = 30_000;
+
+/** Machine reason for the log: a code, never a message, token or endpoint body. */
+function oauthFailureCode(error: unknown): string {
+  const e = error as { code?: unknown; httpStatus?: unknown; name?: unknown } | null;
+  if (e?.code === "keychain_unavailable") return "keychain_unavailable";
+  if (typeof e?.httpStatus === "number") return e.httpStatus === 400 || e.httpStatus === 401 ? `token_endpoint_rejected_${e.httpStatus}` : `token_endpoint_http_${e.httpStatus}`;
+  if (e?.name === "AbortError" || e?.name === "TimeoutError") return "token_endpoint_timeout";
+  return "failed";
+}
+
+function noteOAuthFailure(serverId: string, step: string, error: unknown): void {
+  console.warn(`[mcp-oauth] ${serverId.slice(0, 8)} ${step} reason=${oauthFailureCode(error)}`);
+}
+
+/**
+ * Tokens first, session second. A rotated refresh token that landed beside a stale session only makes the next resolve refresh
+ * once more; the other order left a fresh session beside the old token, which served an expired access token as valid.
+ */
+async function persist(serverId: string, session: McpOAuthSession, tokens: StoredTokens, held?: HeldPair): Promise<void> {
   await setSecret(tokenSecretKey(serverId), JSON.stringify(tokens));
+  if (held && heldPairs.get(serverId) !== held) return; // a reconnect or a forget replaced this pair between the writes
+  await setSecret(sessionSecretKey(serverId), JSON.stringify(session));
+}
+
+/** Write a held pair again, at most once per HELD_RETRY_MS, without making the caller wait for the vault. */
+function settleHeldPair(serverId: string, held: HeldPair): void {
+  if (held.writing || Date.now() < held.nextTryAt) return;
+  held.writing = true;
+  void persist(serverId, held.session, held.tokens, held).then(
+    () => { if (heldPairs.get(serverId) === held) heldPairs.delete(serverId); },
+    (error) => { held.nextTryAt = Date.now() + HELD_RETRY_MS; noteOAuthFailure(serverId, "persist_retry", error); },
+  ).finally(() => { held.writing = false; });
+}
+
+async function readTokenSecret(serverId: string): Promise<string | null> {
+  const held = heldPairs.get(serverId);
+  return held ? JSON.stringify(held.tokens) : readSecret(tokenSecretKey(serverId));
 }
 
 export async function readMcpOAuthSession(serverId: string): Promise<McpOAuthSession | null> {
+  const held = heldPairs.get(serverId);
+  if (held) return held.session;
   const raw = await readSecret(sessionSecretKey(serverId));
   if (!raw) return null;
   try {
@@ -957,6 +1001,7 @@ export async function readMcpOAuthSession(serverId: string): Promise<McpOAuthSes
 export async function forgetMcpOAuth(serverId: string): Promise<void> {
   const pending = activeAuthorizations.get(serverId);
   if (pending) await cancelMcpOAuthAuthorization(serverId, pending.attemptId);
+  heldPairs.delete(serverId);
   await deleteSecret(sessionSecretKey(serverId));
   await deleteSecret(tokenSecretKey(serverId));
 }
@@ -980,7 +1025,7 @@ export async function hasUsableMcpOAuthCredential(serverId: string, serverUrl: s
   } catch { return false; }
   if (session.expiresAt !== undefined && (typeof session.expiresAt !== "number" ||
       !Number.isFinite(session.expiresAt) || session.expiresAt - REFRESH_SKEW_MS <= Date.now())) return false;
-  const raw = await readSecret(tokenSecretKey(serverId));
+  const raw = await readTokenSecret(serverId);
   if (!raw) return false;
   try {
     const tokens = JSON.parse(raw) as StoredTokens | null;
@@ -1001,13 +1046,13 @@ const REFRESH_LOCK_WAIT_MS = TOKEN_TIMEOUT_MS + 5_000;
 /** The stored access token when another caller already refreshed since `first` was read; undefined if not. */
 async function refreshedMeanwhile(serverId: string, first: StoredTokens): Promise<string | null | undefined> {
   const session = await readMcpOAuthSession(serverId);
-  const raw = await readSecret(tokenSecretKey(serverId));
+  const raw = await readTokenSecret(serverId);
   if (!session || !raw) return null;
   let tokens: StoredTokens;
   try { tokens = JSON.parse(raw) as StoredTokens; } catch { return null; }
   if (!tokens || typeof tokens.accessToken !== "string" || !tokens.accessToken.trim()) return null;
-  // Tokens are written after the session, so a new refresh token (or a new access token beside a fresh expiry)
-  // proves the other refresh finished both writes.
+  // Tokens are written before the session (persist): a new refresh token is a complete new pair on its own, and a new
+  // access token beside a fresh expiry proves the other refresh finished both writes.
   if (tokens.refreshToken !== first.refreshToken) return tokens.accessToken;
   const fresh = !session.expiresAt || session.expiresAt - REFRESH_SKEW_MS > Date.now();
   if (fresh && tokens.accessToken !== first.accessToken) return tokens.accessToken;
@@ -1083,21 +1128,34 @@ async function refreshMcpOAuthAccessToken(serverId: string, first: StoredTokens)
         body: body.toString(),
       }, TOKEN_TIMEOUT_MS) as Record<string, unknown>;
       const next = readTokenResponse(rawResponse);
-      await persist(serverId, {
+      const nextSession: McpOAuthSession = {
         ...session,
         expiresAt: next.expiresAt,
         ...(next.scope !== undefined ? { scope: next.scope } : {}),
         obtainedAt: Date.now(),
-      }, {
+      };
+      const nextTokens: StoredTokens = {
         accessToken: next.tokens.accessToken,
         // 회전하지 않는 AS도 있다 — 새 refresh가 없으면 기존 것을 유지한다.
         ...(next.tokens.refreshToken ?? first.refreshToken
           ? { refreshToken: next.tokens.refreshToken ?? first.refreshToken }
           : {}),
-      });
+      };
+      // From here the old refresh token is dead at the authorization server: a vault that refuses the write (locked, headless
+      // service, timeout) must not lose the new pair, so it is held in this process and written again later.
+      const held: HeldPair = { session: nextSession, tokens: nextTokens, nextTryAt: 0, writing: false };
+      heldPairs.set(serverId, held);
+      try {
+        await persist(serverId, nextSession, nextTokens, held);
+        if (heldPairs.get(serverId) === held) heldPairs.delete(serverId);
+      } catch (error) {
+        held.nextTryAt = Date.now() + HELD_RETRY_MS;
+        noteOAuthFailure(serverId, "refresh_persist_deferred", error);
+      }
       return next.tokens.accessToken;
     } finally { await release(); }
-  } catch {
+  } catch (error) {
+    noteOAuthFailure(serverId, "refresh_failed", error);
     return null;
   }
 }
@@ -1117,7 +1175,9 @@ export async function resolveMcpOAuthAccessToken(serverId: string, serverUrl?: s
       if (!resourceMatchesServer(session.resource, canonicalResourceUri(serverUrl))) return null;
     } catch { return null; }
   }
-  const raw = await readSecret(tokenSecretKey(serverId));
+  const heldPair = heldPairs.get(serverId);
+  if (heldPair && !options?.passiveOnly) settleHeldPair(serverId, heldPair); // a pair the vault refused earlier is written again, off this path
+  const raw = await readTokenSecret(serverId);
   if (!raw) return null;
   let tokens: StoredTokens;
   try {

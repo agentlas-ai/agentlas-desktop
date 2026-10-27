@@ -22,7 +22,7 @@ const str = (value: unknown): string => (typeof value === "string" ? value.trim(
 const SLUG_RE = /^[a-z0-9][a-z0-9._-]{0,80}$/;
 
 /** The owner's own surfaces call the dispatcher with chat "ui" (renderer / SDK). */
-const ownerCall = (ctx: Ctx): boolean => ctx.chatId === "ui";
+export const ownerCall = (ctx: { chatId: string }): boolean => ctx.chatId === "ui";
 
 async function revisionsFile(): Promise<string> {
   const { userDataPath } = await import("../runtime-paths");

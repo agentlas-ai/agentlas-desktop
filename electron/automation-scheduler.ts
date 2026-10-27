@@ -407,6 +407,16 @@ function appCloseClassification(): AutomationResultClassification {
     reason: "The app closed before this run settled. Review its recorded effects before restarting.", evidence: null };
 }
 
+/**
+ * The owner's Stop (or the Goal pause/stop that owns this run) aborts the controller with this typed reason
+ * (automation-execution-control). App close and lease loss abort with other reasons, so the reason is the only evidence.
+ */
+function stoppedByOwner(controller: AbortController): boolean {
+  const reason = controller.signal.reason;
+  return controller.signal.aborted && !appClosedControllers.has(controller)
+    && reason instanceof Error && reason.message === "automation_stopped_by_user";
+}
+
 function withAutomationJudgmentSignal<T>(signal: AbortSignal, action: () => T): T {
   const inherited = invocationJudgmentContext();
   return withInvocationJudgmentContext(inherited?.selection,
@@ -502,7 +512,7 @@ function boundedIntegerEnv(name: string, fallback: number, min: number, max: num
   return fallback;
 }
 
-// 한 번의 점검에서 동시에 돌릴 자동화 수 상한. due가 한꺼번에 많이 쌓여도(앱이 오래 꺼져
+// due 폴링으로 동시에 돌릴 자동화 수 상한. due가 한꺼번에 많이 쌓여도(앱이 오래 꺼져
 // 있다 켜진 경우 등) 모든 에이전트 런을 동시에 띄우지 않게 막는다 — 저사양 기기에서
 // CPU/RAM 폭주 방지. 각 런은 내부에서 다시 CLI/엔진 프로세스를 띄우므로 N을 작게 둔다.
 const MAX_CONCURRENT_AUTOMATIONS = boundedIntegerEnv(
@@ -512,25 +522,36 @@ const MAX_CONCURRENT_AUTOMATIONS = boundedIntegerEnv(
   16,
 );
 
-/** 작업 배열을 최대 `limit`개씩만 동시 실행하는 경량 풀(외부 의존성 없음). */
-async function runWithConcurrency<T>(
-  items: T[],
-  limit: number,
-  worker: (item: T) => Promise<void>,
-): Promise<void> {
-  const queue = items.slice();
-  // 호출부가 나중에 늘어도 NaN/Infinity가 Array.from length=0으로 조용히 전량 스킵되지 않게
-  // 풀 자체에서도 한 번 더 방어한다. 빈 queue만 lane 0이 정상이다.
-  const safeLimit = Number.isFinite(limit) ? Math.max(1, Math.floor(limit)) : 1;
-  const size = Math.min(safeLimit, queue.length);
-  const lanes = Array.from({ length: size }, async () => {
-    while (queue.length > 0) {
-      const next = queue.shift();
-      if (next === undefined) break;
-      await worker(next);
-    }
-  });
-  await Promise.all(lanes);
+/*
+ * 상한은 틱마다가 아니라 프로세스 전체다. 60초 틱이 겹치면(앞 틱의 두 레인이 긴 자동화로 바쁜 동안 다음 틱이
+ * 시작) 틱마다 풀을 따로 두던 때는 상한이 무력했고, 앞 틱이 쥔 낡은 due 스냅샷이 뒤 틱에서 이미 끝난
+ * 회차를 한 번 더 돌렸다. 슬롯은 모든 틱이 공유하고, 이미 줄에 선 자동화는 다음 틱이 다시 세우지 않는다.
+ * 기다림은 앞선 실행이 끝나면 풀리는 순서 대기이고, 슬롯 하나가 끝내 안 돌아와도(멈춘 실행) 복구 판정이 쓰는
+ * 같은 상한(활성 도구 무반응 상한 + 2분) 뒤에는 강제로 풀린다. 종료·업데이트 정지 중에는 깨어나자마자 접수를
+ * 포기한다 — 회차는 그대로 due 로 남는다.
+ */
+const dueRunSlots = { active: 0, waiters: [] as Array<() => void> };
+const dueRunQueued = new Set<string>();
+const DUE_RUN_SLOT_MAX_HOLD_MS = MAX_AUTOMATION_ACTIVE_TOOL_STALL_MS + 2 * 60 * 1000;
+
+async function acquireDueRunSlot(): Promise<() => void> {
+  if (dueRunSlots.active < MAX_CONCURRENT_AUTOMATIONS) dueRunSlots.active += 1;
+  else await new Promise<void>((resolve) => { dueRunSlots.waiters.push(resolve); }); // 슬롯은 active 를 그대로 둔 채 다음 대기자에게 넘어간다.
+  let released = false;
+  const release = (): void => {
+    if (released) return;
+    released = true;
+    clearTimeout(forced);
+    const next = dueRunSlots.waiters.shift();
+    if (next) next();
+    else dueRunSlots.active = Math.max(0, dueRunSlots.active - 1);
+  };
+  const forced = setTimeout(() => {
+    console.warn("[automation] due-run slot released after the live-owner ceiling (reasonCode automation_due_slot_hold_expired)");
+    release();
+  }, DUE_RUN_SLOT_MAX_HOLD_MS);
+  forced.unref?.();
+  return release;
 }
 
 /** 완료 시 OS 알림(설계 §2.7 한계 #10 — 결과 미표출 해소). Notification 미지원이면 조용히 무시. */
@@ -1106,6 +1127,10 @@ async function runOne(
     runId?: string;
     preclaimed?: boolean;
     resumeLoginWaitRunId?: string;
+    /** The next_run_at of the due row this run was selected from. A schedule slot another tick already ran is not run again. */
+    expectedNextRunAt?: string | null;
+    /** Values the owner typed for this very run (Run now). Never queued: a refused click cannot leave them for a later run. */
+    ownerInitialVars?: Record<string, unknown>;
   },
 ): Promise<TriggerDispatchResult> {
   const afterSettled = captureMainRootContinuation();
@@ -1184,6 +1209,27 @@ async function runOne(
     opts?.claim && !opts.preclaimed &&
     !claimAutomationRun(a.id, LEASE_OWNER, new Date(), { allowDisabled: opts.allowDisabledLease === true })
   ) return { accepted: false };
+  // 리스를 쥔 뒤에는 next_run_at 을 리스 보유자만 바꾼다(오너의 일정 수정 제외) — 이 시점의 재확인에는 경쟁이 없다.
+  // due 스냅샷을 쥐고 줄을 기다린 사이 같은 회차가 다른 틱에서 끝났다면(리스가 풀린 뒤라 claim 은 성공한다)
+  // 한 번 더 돌지 않고 리스를 돌려준다. 확인 자체가 못 되면 접수하지 않는다 — 회차는 그대로 due 라 다음 틱이 다시 본다.
+  if (opts?.claim && !opts.preclaimed && opts.expectedNextRunAt !== undefined) {
+    let currentNextRunAt: string | null = null;
+    let staleCode: "automation_due_snapshot_stale" | "automation_due_snapshot_unverified" | null = null;
+    try {
+      const latest = getAutomation(a.id);
+      currentNextRunAt = latest?.nextRunAt ?? null;
+      if (!latest || (!latest.enabled && opts.allowDisabledLease !== true) || currentNextRunAt !== opts.expectedNextRunAt) {
+        staleCode = "automation_due_snapshot_stale";
+      }
+    } catch { staleCode = "automation_due_snapshot_unverified"; }
+    if (staleCode) {
+      try { releaseAutomationRun(a.id, LEASE_OWNER); } catch { /* peer lease */ }
+      tryRecordRunEvent({ runId: `automation-due-check:${randomUUID()}`, automationId: a.id,
+        kind: "automation_due_snapshot_stale", payload: { reasonCode: staleCode,
+          expectedNextRunAt: opts.expectedNextRunAt, currentNextRunAt } });
+      return { accepted: false };
+    }
+  }
   try {
     opts?.triggerDelivery?.onAccepted();
   } catch (error) {
@@ -1521,7 +1567,11 @@ async function runOne(
       // — 사람이 방금 준 값이 자동 수집된 값보다 뒤에 오는 것이 사용자의 기대다.
       const ownerContinuationContext = goalContinuationRunContext(a);
       let graphInitialVars = opts?.triggerContext;
-      if (!opts?.dryRun) {
+      if (opts?.ownerInitialVars) {
+        // Run now 의 값은 큐를 거치지 않고 이 실행에 직접 묶인다. 접수가 거절된 클릭의 값이 큐에 남아
+        // 다음 실행(다른 호출 포함)에 새는 길이 없고, 시뮬레이션도 오너가 준 값으로 돈다.
+        graphInitialVars = { ...(graphInitialVars ?? {}), ...opts.ownerInitialVars };
+      } else if (!opts?.dryRun) {
         try {
           const pending = consumeRunInput(a.id, runId);
           if (pending) graphInitialVars = { ...(graphInitialVars ?? {}), ...pending.payload };
@@ -1872,6 +1922,13 @@ async function runOne(
             occurrenceAttempt = 1;
           }
         }
+        // 오너가 직접 멈춘 회차는 상태가 partial 로 남아도 스케줄러가 먼저 이어서 돌리지 않는다. 재시작은 오너 몫이다 —
+        // 자연 다음 슬롯으로 전진하고, 중단된 회차의 체크포인트는 실행 기록에서 오너가 명시적으로 재개한다.
+        const ownerStopped = stoppedByOwner(controller);
+        if (ownerStopped && currentRunId) {
+          tryRecordRunEvent({ runId: currentRunId, automationId: a.id, kind: "automation_retry_stopped",
+            payload: { schemaVersion: "agentlas.automation-retry-stop.v1", reasonCode: "automation_stopped_by_user" } });
+        }
         for (let attempt = 0; attempt < 3; attempt += 1) {
           try {
             markAutomationRun(a.id, opts?.fireTime ?? new Date(), {
@@ -1885,7 +1942,7 @@ async function runOne(
               finishedAt: new Date(),
               deferredRetryMs: SCHEDULE_RETRY_BASE_MS * 2 ** Math.max(0, occurrenceAttempt - 1),
               deferRetry: !graphLoginWait && occurrenceAttempt < MAX_SCHEDULE_OCCURRENCE_ATTEMPTS,
-              ...(automaticRetryStopped ? { automaticRetry: false } : {}),
+              ...(automaticRetryStopped || ownerStopped ? { automaticRetry: false } : {}),
               outcome: runOutcome,
               outcomeReason: runOutcomeReason,
               suspendForReconciliation: false,
@@ -2208,6 +2265,7 @@ async function runOne(
             advanceSchedule: false,
             allowDisabledLease: opts?.allowDisabledLease,
             triggerContext: opts?.triggerContext,
+            ...(opts?.ownerInitialVars ? { ownerInitialVars: opts.ownerInitialVars } : {}),
             zeroToolRetried: true,
             // Physical retries remain the original logical request.
             occurrenceId: opts?.triggerDelivery?.occurrenceId ?? opts?.occurrenceId,
@@ -2237,7 +2295,8 @@ async function runOne(
     }
   }
   return { accepted: true, automationId: a.id, runId: currentRunId, status: runStatus, error: runError, output,
-    ...(automaticRetryStopped ? { automaticRetry: false as const } : {}),
+    // An owner Stop is the same boundary for an event delivery: the outbox parks it for the owner instead of redelivering it.
+    ...(automaticRetryStopped || stoppedByOwner(controller) ? { automaticRetry: false as const } : {}),
     // The same typed boundary graph_effect_check_pending records above; the trigger outbox parks on it.
     ...(runStatus !== "ok" && runStatus !== "skipped" && requiresGraphReconciliation(machineError ?? runError)
       ? { effectsUnconfirmed: true as const } : {}) };
@@ -2274,13 +2333,32 @@ async function runDueAutomations(
     return false;
   });
   // due-폴링 경로는 크로스프로세스 리스로 클레임(headless vs GUI 이중 실행 방지).
-  await runWithConcurrency(due, MAX_CONCURRENT_AUTOMATIONS, async (a) => {
-    await dispatch(async () => { await runOne(a, {
-      claim: true,
-      fireTime: now,
-      occurrenceId: scheduledOccurrenceIdForDueRun(a),
-    }); });
-  });
+  // 앞선 틱이 이미 줄에 세운 자동화는 그 틱이 끝까지 맡는다 — 같은 회차를 두 틱이 따로 세우지 않는다.
+  const queued = due.filter((a) => !dueRunQueued.has(a.id));
+  for (const a of queued) dueRunQueued.add(a.id);
+  const settled = await Promise.allSettled(queued.map(async (snapshot) => {
+    try {
+      const releaseSlot = await acquireDueRunSlot();
+      try {
+        if (dispatchPaused()) return;
+        // 줄에서 기다리는 동안 다른 경로가 이 회차를 끝냈거나(next_run_at 전진) 오너가 정의를 바꿨을 수 있다.
+        // 낡은 스냅샷이 아니라 지금 저장본으로 다시 읽고, 이 회차가 아니면 접수하지 않는다(다음 틱이 새로 읽는다).
+        let current: Automation | null;
+        try { current = getAutomation(snapshot.id); }
+        catch (error) { console.error(`[automation] due snapshot re-read deferred (${snapshot.id}):`, error); return; }
+        if (!current || !current.enabled || (current.nextRunAt ?? null) !== (snapshot.nextRunAt ?? null)) return;
+        const fresh = current;
+        await dispatch(async () => { await runOne(fresh, {
+          claim: true,
+          fireTime: now,
+          occurrenceId: scheduledOccurrenceIdForDueRun(fresh),
+          expectedNextRunAt: snapshot.nextRunAt ?? null,
+        }); });
+      } finally { releaseSlot(); }
+    } finally { dueRunQueued.delete(snapshot.id); }
+  }));
+  const failed = settled.find((entry): entry is PromiseRejectedResult => entry.status === "rejected");
+  if (failed) throw failed.reason;
 }
 
 /** Main-only exact restoration consumer. The source must already be durably parked. */
@@ -2365,7 +2443,7 @@ export function subscribeGraphLoginWait(result: RunGraphResult, controller: Abor
 }
 
 /** "Run now" — 스케줄 무관하게 지정 자동화를 즉시 1회 실행(enabled 여부 무시). */
-export async function runAutomationNow(id: string, opts?: { dryRun?: boolean; fresh?: boolean }, mainAdmission?: MainInvocationAdmission): Promise<TriggerDispatchResult> {
+export async function runAutomationNow(id: string, opts?: { dryRun?: boolean; fresh?: boolean; ownerInitialVars?: Record<string, unknown> }, mainAdmission?: MainInvocationAdmission): Promise<TriggerDispatchResult> {
   mainAdmission = takeMainInvocationAdmission(mainAdmission);
   if (shutdownDispatchClosed) throw new Error("Automation execution is closed because the app is quitting");
   if (installQuiescing) throw new Error("Automation execution is paused while an update is prepared");
@@ -2380,6 +2458,7 @@ export async function runAutomationNow(id: string, opts?: { dryRun?: boolean; fr
   return lifetime.run(() => runOne(a, {
     claim: true, advanceSchedule: false, allowDisabledLease: true,
     ...(opts?.dryRun ? { dryRun: true } : {}),
+    ...(opts?.ownerInitialVars && Object.keys(opts.ownerInitialVars).length > 0 ? { ownerInitialVars: opts.ownerInitialVars } : {}),
     ...(opts?.fresh ? { fresh: true, runId: freshRunId,
       occurrenceId: `owner-request:${randomUUID()}`,
       assertOwnerOccurrenceCurrent: () => {

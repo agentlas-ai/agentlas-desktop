@@ -155,8 +155,17 @@ export function createSupervisorNativeRuntime(options: {
     // Durable retained custody remains a barrier even while the viewer is offline.
     return owner?.ownerKind === "daemon" && ["active", "settling"].includes(owner.state) ? { runId: owner.runId } : null;
   }
+  /** A start with no admission row, or with a rejected one (owner-start-boundary-not-crossed), left no run behind. Its pending
+   * entry must go, or attach() reports a run that does not exist and drain() never starts another owner message. An admission
+   * that is pending/admitted stays: the original attempt may be live and is reconciled from its receipt and custody. */
+  function releaseIfNeverStarted(runId: string): void {
+    let admission: ReturnType<typeof getInvocationAdmission>;
+    try { admission = getInvocationAdmission(runId); } catch { return; /* Unreadable ledger: keep the entry, the next poll asks again. */ }
+    if (!admission || admission.status === "rejected") pending.delete(runId);
+  }
   function poll(): void {
     if(!bootstrap)return;
+    for (const runId of [...pending.keys()]) releaseIfNeverStarted(runId);
     for (const row of options.store.pending(options.identity())) {
       if (!row.run_id) continue;
       const receipt = options.receipt(row.run_id);
@@ -187,11 +196,12 @@ export function createSupervisorNativeRuntime(options: {
       starts.add(request.runId); pending.set(request.runId, request.chatId);
       // Original owner has one admission and one actual start. A lost response
       // stays uncertain and is reconciled using exact durable custody/receipts.
-      const actual = withOnePersonalNativeOriginal(origin,request,()=>value.owner.startHost(origin, request));
-      void actual.then(() => { pending.delete(request.runId!); poll(); }, () => {
-        const admission = getInvocationAdmission(request.runId!);
-        if (admission?.status === "rejected") pending.delete(request.runId!);
-      });
+      let actual: Promise<{ runId: string }>;
+      // startHost refuses synchronously before it reserves anything (channel not ready, capacity, fenced command); only a
+      // returned promise can describe an attempt, so a throw here must not leave the entry behind.
+      try { actual = withOnePersonalNativeOriginal(origin,request,()=>value.owner.startHost(origin, request)); }
+      catch (error) { releaseIfNeverStarted(request.runId); throw error; }
+      void actual.then(() => { pending.delete(request.runId!); poll(); }, () => releaseIfNeverStarted(request.runId!));
       return actual;
     },
     async cancel(runId: string): Promise<string> {

@@ -38,6 +38,7 @@ import { ONE_ATTACHMENT_LIMITS } from "../../../shared/one-attachments";
 import { ComposerDecisionSlot } from "@/components/ComposerDecisionPortal";
 import { ToolApprovalInline } from "@/components/ToolApprovalInline";
 import { BrowserActionApprovalSheet } from "@/components/BrowserActionApprovalSheet";
+import { PersonalOneSupervisedApprovals } from "./PersonalOneSupervisedApprovals";
 import { McpKeyRequestSheet } from "@/components/McpKeyRequestSheet";
 import { bindAgentScreenScope } from "@/lib/agent-screen-scope";
 import { AgiDefectChip, AgiIncidentReportButton } from "../agi/AgiBugReport";
@@ -569,6 +570,10 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
           {/* Only Main's exact pending requests may authorize an action. A current
               local permission selection must not resolve a previous run's card. */}
           <ToolApprovalInline chatId={snapshot?.conversationChatId} compact chip composerWidth={Math.max(300,Math.min(736,viewportWidth-(detached?32:250)))} />
+          {/* Owner 2026-10-27: the rooms this personal agent oversees show their waiting approvals here too, after this
+              conversation's own cards; each card still answers its own room. */}
+          <PersonalOneSupervisedApprovals conversationChatId={snapshot?.conversationChatId} locale={ko?"ko":"en"}
+            composerWidth={Math.max(300,Math.min(736,viewportWidth-(detached?32:250)))} onOpenRoom={href=>void openMain(href)} />
         </div>
         <AgiDefectChip chatId={snapshot?.conversationChatId ?? null} locale={ko?"ko":"en"} />
         {receipt?.state==="failed"&&receipt.kind!=="reply"&&<AgiIncidentReportButton key={receipt.commandId} locale={ko?"ko":"en"} draft={{

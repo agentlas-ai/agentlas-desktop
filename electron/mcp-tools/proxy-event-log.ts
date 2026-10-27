@@ -21,7 +21,7 @@ const RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_LINES_PER_MINUTE = 120;
 const TOKEN = /^[A-Za-z0-9_][A-Za-z0-9_.:-]{0,79}$/;
 
-export type McpProxyLogEvent = "closed" | "refused" | "result_withheld" | "upstream_failed";
+export type McpProxyLogEvent = "closed" | "refused" | "result_withheld" | "result_truncated" | "upstream_failed";
 export interface McpProxyLogFields {
   server?: string | null;
   handle?: string | null;

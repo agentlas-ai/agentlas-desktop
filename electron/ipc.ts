@@ -13,6 +13,7 @@ import { appControlInvocationPermission, isAppControlEvent } from "./app-control
 import { createRendererInvocationPreparation } from "./invocation/renderer-preparation";
 import { answerOneDispatchQuestion } from "./one/team-dispatch";
 import { registerOneSupervisorIpc } from "./one/supervisor-ipc";
+import { assertOwnerMayWriteRoom } from "./one/personal-agent-rooms";
 import { registerOneHarnessIpc } from "./one/harness-ipc";
 import { registerLiveDocumentIpc } from "./live-document/ipc";
 import { registerFinanceIpc } from "./finance/ipc";
@@ -24,7 +25,7 @@ import { authorizeSupervisorNativeOrigin, supervisorNativeNoticePurpose, dispatc
 import { assertOneWindowChannel } from "./one-window-manager";
 import { registerOnePersonalDataIpc } from './one/personal-data-ipc';
 import { registerBusinessShippingIpc } from './business/shipping-console-ipc';
-import { recordAppControlRendererEvent, registerAppControlDomainIpc } from "./app-control/ipc-registry";
+import { liveAppControlRendererEvent, recordAppControlRendererEvent, registerAppControlDomainIpc } from "./app-control/ipc-registry";
 import { registerAgentWorkspaceIpc } from "./agents/workspace-ipc";
 import { importDedicatedBrowserCookies, syncConnectBrowserSession } from "./browser/native-session-cookie-import";
 import { goalActiveChatIds } from "./store/goal-active-chats";
@@ -267,11 +268,9 @@ import { listInstalledAgentHubBindings } from "./ontology/hub-bindings";
 import { resolveTeamOrg, resolveAgentTeam } from "./agents/org-resolver";
 import { runMcpInvocation } from "./mcp/client";
 import {
-  completeDesktopWorkforceGoal,
-  desktopWorkforceGoalId,
+  completeDesktopTaskWorkforceGoal,
   resolveDesktopWorkforceGoalId,
   freshGoalIdForChat,
-  loadDesktopWorkforceGoal,
 } from "./mcp/workforce-goal-continuity";
 import { configureRunKeyOwnerHost, observeHostedRunKeyEvent, resolveRunKeyElicitationAnywhere, resolveRunKeyWithStoredName } from "./mcp/run-key-elicitation";
 import { onNativeGuiInvocationEvent } from "./invocation/native-gui-events";
@@ -280,7 +279,8 @@ import { createRendererSendQueue } from "./invocation/renderer-send-queue";
 import { canQueuePendingSend } from "./invocation/pending-chat-sends";
 import { createQueuedOwnerInputCustody, type QueuedOwnerStartBoundary } from "./invocation/queued-owner-input-custody";
 import { queuedSendRunState, queuedSendPlacement } from "./invocation/renderer-send-queue";
-import { isTransientSendRefusal } from "../shared/transient-send-refusal";
+import { isPossiblyRecordedSendRefusal, isTransientSendRefusal } from "../shared/transient-send-refusal";
+import { readRecordedOwnerSteer } from "./invocation/recorded-owner-steer";
 import { cancelInvocationOwnerRun, invocationCurrentTurnControl } from "./runtime/invocation-owner-control";
 // ── Hephaestus 엔진 브리지 — 데스크탑↔엔진 연결은 전부 electron/hephaestus/* 에서만 일어난다. ──
 import { hepAuthLogin, hepAuthStatus } from "./hephaestus/commands";
@@ -317,6 +317,7 @@ import { SYSTEM_OPTIMIZER_PROMPT_MARKER } from "./system-agents/system-optimizer
 import { stripAutomationContinuityCapsule } from "./automation-continuity";
 import { buildChatRecap, markChatRecapViewed } from "./chat/recap";
 import { assertChatRemovalAllowed } from "./chat/removal-guard";
+import { assertChatNotRunInAnotherHost } from "./chat/removal-host-guard";
 import { startStudio, stopStudio } from "./hephaestus/studio";
 import { listRuntimeAskUserRequests, submitRuntimeAskUserAnswer } from "./confirm/ask-user-runtime";
 import type {
@@ -701,7 +702,6 @@ import {
   countRunHistory,
   acknowledgeAutomationRun,
   getLatestGraphRun,
-  enqueueRunInput,
 } from "./store/automations";
 import { graphInputRequirement } from "../shared/graph-trigger-input";
 import {
@@ -971,6 +971,11 @@ import {
 } from "./store/capability-grants";
 import type { ToolApprovalDecision } from "../shared/types";
 import { installHostToolPermissionPolicy } from "./runtime/host-tool-permission-policy";
+import {
+  installApprovalOwnerNoteSender,
+  resolveBrowserApprovalWithOwnerNote,
+  resolveToolApprovalWithOwnerNote,
+} from "./runtime/tool-approval-owner-note";
 
 // DESKTOP_MOBILE_BRIDGE: live invocation authority moved to invocation/service.ts.
 // Hephaestus 빌더(hep-build) 진행 중 실행 — 취소용 AbortController 레지스트리.
@@ -4233,8 +4238,14 @@ export function registerIpcHandlers(): { businessShipping: ReturnType<typeof reg
   registerAppControlDomainIpc(ipcMain, "browser:revokePermission", (site: string, actionType: string) =>
     browserRevokePermission(site, actionType),
   );
-  registerAppControlDomainIpc(ipcMain, "browser:resolveApproval", (requestId: string, decision: BrowserPermissionDecision) =>
-    browserResolveApproval(requestId, decision),
+  // "아니오, 그리고 대신 이렇게 하세요": 거절에 오너의 한 줄을 같이 보내면 그 승인이 붙어 있던 방의 오너 메시지로 한 번 간다
+  // (runtime/tool-approval-owner-note.ts). 줄이 없으면 예전과 같은 결정이다.
+  registerAppControlDomainIpc(ipcMain, "browser:resolveApproval", (requestId: string, decision: BrowserPermissionDecision, note?: string) =>
+    resolveBrowserApprovalWithOwnerNote({
+      decision, note, requestId,
+      chatId: listPendingBrowserApprovals().find((pending) => pending.requestId === requestId)?.owner?.chatId ?? null,
+      resolve: () => browserResolveApproval(requestId, decision),
+    }),
   );
   registerAppControlDomainIpc(ipcMain, "browser:listPendingApprovals", () => listPendingBrowserApprovals());
 
@@ -4281,13 +4292,15 @@ export function registerIpcHandlers(): { businessShipping: ReturnType<typeof reg
     const { setDaemonAutostartEnabled, getDaemonAutostartEnabled } = await import("./store/daemon-autostart");
     if (typeof enabled !== "boolean") throw new TypeError("daemon_autostart_preference_invalid");
     try {
-      const { reconcileDaemonAutostart } = await import("./daemon/app-launcher");
+      const { reconcileDaemonAutostart, daemonAutostartUnavailableReason } = await import("./daemon/app-launcher");
       // main.ts 부팅 경로와 **같은** 커맨드로 정합시킨다(경로가 갈리면 부팅 항목이 둘이 된다).
       const actual = reconcileDaemonAutostart(enabled, await daemonAutostartCommand());
       setDaemonAutostartEnabled(enabled);
       return { enabled: getDaemonAutostartEnabled(), reconciled: actual.installed === enabled
           && (process.platform === "win32" || actual.loaded === enabled),
-        installed: actual.installed, loaded: actual.loaded };
+        installed: actual.installed, loaded: actual.loaded,
+        // 이 실행 방식(Windows Portable, Linux AppImage)은 로그인 항목을 둘 수 없다 — 정확한 원인 코드를 설정 화면의 기존 문구에 싣는다.
+        ...(enabled && actual.installed !== enabled && daemonAutostartUnavailableReason() ? { reason: daemonAutostartUnavailableReason() } : {}) };
     } catch (error) {
       // OS 등록이나 preference 저장이 실패했다. 성공으로 포장하지 않는다.
       return {
@@ -4324,14 +4337,27 @@ export function registerIpcHandlers(): { businessShipping: ReturnType<typeof reg
     id: string,
     decision: ToolApprovalDecision,
     actionId: string,
+    note?: string,
   ) => {
     const native = configuredNativeGuiControls();
-    if (native?.hasApproval(id)) return native.resolveApproval(_e, id, decision, actionId);
-    return resolveToolApproval(
-      typeof id === "string" ? id.slice(0, 256) : "",
-      decision,
-      typeof actionId === "string" ? actionId.slice(0, 512) : "",
-    );
+    // The room the card belongs to is read before the decision: the request leaves the queue when it resolves. It is the
+    // request's own chat even when the card was drawn in the personal agent's conversation (a supervised room).
+    let chatId: string | undefined;
+    try {
+      chatId = (listPendingToolApprovals().find((request) => request.id === id)
+        ?? native?.listAvailableApprovals().find((request) => request.id === id))?.chatId;
+    } catch { chatId = undefined; }
+    return resolveToolApprovalWithOwnerNote({
+      decision, note, chatId, requestId: typeof id === "string" ? id.slice(0, 256) : "", event: _e,
+      resolve: () => {
+        if (native?.hasApproval(id)) return native.resolveApproval(_e, id, decision, actionId);
+        return resolveToolApproval(
+          typeof id === "string" ? id.slice(0, 256) : "",
+          decision,
+          typeof actionId === "string" ? actionId.slice(0, 512) : "",
+        );
+      },
+    });
   });
   // Main and agentlasd install the same native store-backed consent policy.
   // Authenticated identity comes from this host, never the invocation payload.
@@ -4601,6 +4627,8 @@ export function registerIpcHandlers(): { businessShipping: ReturnType<typeof reg
     // Renderer의 busy 표시는 투영일 뿐이다. 삭제 권위인 Main이 terminal event가 끝날
     // 때까지 채팅 행을 보존해, 실행 결과가 사라진 대화에 기록되는 race를 막는다.
     assertChatRemovalAllowed(id, invocationService.activeChatIds());
+    // 데몬·터미널이 호스트한 턴은 이 프로세스의 census 에 없다 — 지우면 도구는 계속 돌고 답은 FK 오류로 유실된다.
+    assertChatNotRunInAnotherHost(id, combinedInvocationActiveChatIds());
     // A deleted room ends its Goal: the run, its continuation automations and queued directions stop
     // with it, instead of a paused Goal with no room (Youtube launch, deleted 2026-10-11).
     const goalId = getChat(id)?.goalId;
@@ -4918,16 +4946,10 @@ export function registerIpcHandlers(): { businessShipping: ReturnType<typeof reg
     // The exact run the owner is accepting, not the room's newest run (a later host turn is not a newer request).
     const receipt = task?.originChatId ? invocationService.receipt(input.expectedRunId) : null;
     if (task?.originChatId && getSessionCookieHeader()) {
-      const projectDir = getChatWorkingFolder(task.originChatId) ?? process.cwd();
-      const goalId = desktopWorkforceGoalId(task.id);
-      const context = await loadDesktopWorkforceGoal(projectDir, goalId);
-      if (context.goals.length) {
-        await completeDesktopWorkforceGoal({
-          projectDir,
-          goalId,
-          status: "completed",
-        });
-      }
+      await completeDesktopTaskWorkforceGoal({
+        taskId: task.id,
+        projectDir: getChatWorkingFolder(task.originChatId) ?? process.cwd(),
+      });
     }
     const accepted = acceptCanonicalTaskResult(input, receipt);
     // The canonical Task acceptance above is the authoritative user action.
@@ -6262,9 +6284,9 @@ export function registerIpcHandlers(): { businessShipping: ReturnType<typeof reg
       error.nextAction = decision.nextAction;
       throw error;
     }
-    for (const [name, value] of Object.entries(decision.input)) {
-      enqueueRunInput(id, { [name]: value }, "desktop");
-    }
+    // 오너가 넣은 값은 접수 전에 영속 큐로 보내지 않고 이 실행에 직접 묶는다. 큐에 먼저 쌓으면 접수가 거절된
+    // 클릭의 값이 남아 다음 실행(다른 호출 포함)이 오너가 거절됐다고 본 낡은 값을 먼저 집어간다.
+    const ownerInitialVars: Record<string, unknown> = { ...decision.input };
     // 수동 실행은 실제 스케줄러의 접수·최종 상태를 돌려준다. 버튼 클릭 자체를 성공으로
     // 간주하면 리스 충돌이나 실행 실패가 "시작됨"으로 보이므로 fire-and-forget하지 않는다.
     const dryRun = opts?.dryRun === true;
@@ -6272,7 +6294,7 @@ export function registerIpcHandlers(): { businessShipping: ReturnType<typeof reg
     // stay on their original occurrence; they do not veto this new request.
     // Explicit reconciliation uses its separate same-occurrence resume path.
     const { runAutomationNow } = await import("./automation-scheduler");
-    const result = await runAutomationNow(id, { ...(dryRun ? { dryRun: true } : {}), fresh: true }, admitMainAutomation(id));
+    const result = await runAutomationNow(id, { ...(dryRun ? { dryRun: true } : {}), fresh: true, ownerInitialVars }, admitMainAutomation(id));
     if (!result.accepted) {
       const error = new Error("automation_run_not_accepted") as Error & { code?: string };
       error.code = "automation_run_not_accepted";
@@ -7042,6 +7064,8 @@ export function registerIpcHandlers(): { businessShipping: ReturnType<typeof reg
   });
   ipcMain.handle("invoke:preflightSubmissionBegin", (_event, input: OnePreflightSubmissionInput) => {
     assertTrustedSitePublishIpcSender(_event);
+    // A room the personal agent runs takes no owner-typed message (owner 2026-10-27; personal-agent-rooms.ts).
+    assertOwnerMayWriteRoom(input?.chatId);
     const configuredOwner = configuredNativeGuiOwner();
     if (configuredOwner && isAppControlEvent(_event)) throw new Error("native_gui_original_renderer_required");
     // The submission carries the epoch of the owner invoke:run will start this turn in; stamping the configured
@@ -7060,6 +7084,7 @@ export function registerIpcHandlers(): { businessShipping: ReturnType<typeof reg
   });
   ipcMain.handle("invoke:preflightSteerEnqueue", (_event, input: OnePreflightSteerInput) => {
     assertTrustedSitePublishIpcSender(_event);
+    assertOwnerMayWriteRoom((input as { chatId?: unknown } | null)?.chatId);
     if(configuredNativeGuiOwner())authorizeNativeGuiRenderer(_event);
     const receipt = enqueueOnePreflightSteer(input);
     captureNativePreflightSteerGesture(_event,receipt);
@@ -7100,6 +7125,7 @@ export function registerIpcHandlers(): { businessShipping: ReturnType<typeof reg
       sanitizeRequest: rendererInvocationRequestForStart,
       senderTrusted: (event) => { try { assertTrustedSitePublishIpcSender(event); return true; } catch { return false; } },
       onQueued: holdQueuedOnePreflightSubmission,
+      recordedOwnerSteer: (chatId, intentId) => readRecordedOwnerSteer(chatId, intentId)?.steer ?? null,
       beforeQueuedStart: (event, request) => {
         assertTrustedSitePublishIpcSender(event);
         if (!request.preflightSubmissionId) return;
@@ -7336,6 +7362,7 @@ export function registerIpcHandlers(): { businessShipping: ReturnType<typeof reg
   onAuthSessionRestored(() => rendererSendQueueInstance?.resumeCustodiedInputs(true));
   ipcMain.handle("invoke:run", async (_event, req: McpInvocationRequest) => {
     assertTrustedSitePublishIpcSender(_event);
+    assertOwnerMayWriteRoom(req?.chatId);
     return rendererSendQueue().run(_event, req);
   });
   ipcMain.handle("invoke:currentTurn", async (_event, chatId: string) => {
@@ -7360,12 +7387,18 @@ export function registerIpcHandlers(): { businessShipping: ReturnType<typeof reg
   };
   ipcMain.handle("invoke:steerCurrentTurn", async (_event, input: import("../shared/types").InvocationCurrentTurnSteerRequest) => {
     assertTrustedSitePublishIpcSender(_event);
+    assertOwnerMayWriteRoom(input?.chatId);
     const queued = rendererSendQueue();
     const waiting = input && typeof input.chatId === "string" ? queued.currentTurnReceiptFor(input.chatId, input.intentId, input.expectedRunId) : null;
     if (waiting) return waiting;
     try { return await steerCurrentTurnFromRenderer(_event, input); }
     catch (cause) {
       if (!isTransientSendRefusal(cause) || typeof input?.text !== "string") throw cause;
+      // The reply was lost with the channel (native_auth_channel_lost, ...): the service may have recorded this exact intent. Its own
+      // record answers, and the words are not sent a second time as the next message.
+      const recorded = isPossiblyRecordedSendRefusal(cause) && typeof input.intentId === "string"
+        ? readRecordedOwnerSteer(input.chatId, input.intentId) : null;
+      if (recorded) return recorded.currentTurn;
       // The turn the text was addressed to is gone or not reachable: it goes as the next message, with the same
       // execution choices the owner's last turn ran with (a host-written turn, e.g. a read-only teammate report, is not one).
       let permissions: McpInvocationRequest["permissions"] = "read";
@@ -7415,8 +7448,7 @@ export function registerIpcHandlers(): { businessShipping: ReturnType<typeof reg
       request, intentId, admitMainInvocation(request.chatId),
     );
   };
-  ipcMain.handle("invoke:steer", async (_event, req: McpInvocationRequest, intentId?: string) => {
-    assertTrustedSitePublishIpcSender(_event);
+  const steerOrQueueOwnerText = async (_event: IpcMainInvokeEvent, req: McpInvocationRequest, intentId?: string) => {
     // Text that cannot join the current turn right now (the run just ended, or its process changed) is not an error the
     // owner has to see: it is accepted and runs as the next message.
     const queued = rendererSendQueue();
@@ -7424,11 +7456,27 @@ export function registerIpcHandlers(): { businessShipping: ReturnType<typeof reg
     if (waiting) return waiting;
     try { return await steerFromRenderer(_event, req, intentId); }
     catch (cause) {
+      // A reply lost with the channel is not "nothing was recorded": the background service answers from its own record of this
+      // intent (shared store), so the same words are never delivered a second time as the next message.
+      const recorded = intentId && isPossiblyRecordedSendRefusal(cause) ? readRecordedOwnerSteer(req?.chatId, intentId) : null;
+      if (recorded) return recorded.steer;
       const accepted = queued.acceptRefusedSteer(_event, rendererInvocationRequest(req), intentId, cause);
       if (accepted) return accepted;
       throw cause;
     }
+  };
+  ipcMain.handle("invoke:steer", async (_event, req: McpInvocationRequest, intentId?: string) => {
+    assertTrustedSitePublishIpcSender(_event);
+    // The refused-approval note ("No, and do this instead") reaches the room through steerOrQueueOwnerText directly, not
+    // through this channel: it is part of answering the card, which stays possible in a personal agent's room.
+    assertOwnerMayWriteRoom(req?.chatId);
+    return steerOrQueueOwnerText(_event, req, intentId);
   });
+  // The owner's line of a refused approval ("No, and do this instead") rides the very same path as a message typed in the
+  // room. A phone's answer has no renderer event of its own: the app's live page stands in, exactly as the send queue's
+  // replacement sender does for a closed window.
+  installApprovalOwnerNoteSender((request, intentId, event) =>
+    steerOrQueueOwnerText((event ?? liveAppControlRendererEvent() ?? undefined) as IpcMainInvokeEvent, request, intentId));
   ipcMain.handle("invoke:steerReceipt", async (_event, input: { chatId: string; intentId: string }) => {
     assertTrustedSitePublishIpcSender(_event);
     if (!input || typeof input !== "object") throw new Error("invocation_steer_invalid_lookup");

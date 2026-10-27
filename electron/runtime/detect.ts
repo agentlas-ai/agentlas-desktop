@@ -78,6 +78,16 @@ function runtimeDetectCacheMs(): number {
   return Number(process.env.AGENTLAS_RUNTIME_DETECT_CACHE_MS ?? 10_000);
 }
 
+/** One probe is never allowed to hold every runtime's detection (Promise.all below, and every run waits for it). */
+const KIMI_PROBE_BUDGET_MS = 15_000;
+function boundedProbe<T>(probe: Promise<T | null>, budgetMs: number): Promise<T | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return Promise.race([
+    probe,
+    new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), budgetMs); timer.unref?.(); }),
+  ]).finally(() => { if (timer) clearTimeout(timer); });
+}
+
 function runtimeProbeDisabled(kind: RuntimeKind): boolean {
   const disabled = (process.env.AGENTLAS_DISABLED_RUNTIME_KINDS ?? "")
     .split(",")
@@ -571,7 +581,7 @@ async function detectRuntimesUncached(observationOnly = false): Promise<RuntimeS
       ? Promise.resolve({ inventory: [], discovery: unsupportedDiscovery("runtime-disabled") })
       : readCodexModelDiscovery(),
     antigravityDisabled ? Promise.resolve(null) : probeAntigravity(),
-    kimiDisabled ? Promise.resolve(null) : probeKimi(),
+    kimiDisabled ? Promise.resolve(null) : boundedProbe(probeKimi({ observationOnly, onSettled: clearDetectCache }), KIMI_PROBE_BUDGET_MS),
     grokDisabled ? Promise.resolve(null) : probeGrok(),
     cursorDisabled ? Promise.resolve(null) : probeCursor(),
     ollamaDisabled ? Promise.resolve(null) : probeOllama(),

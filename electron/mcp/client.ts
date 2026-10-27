@@ -1,6 +1,9 @@
 import { bindRunnerTurnContext, carryRunnerTurnContext, renderRunnerTurnContext, replaceRunnerUserPrompt, runnerTurnContextSource } from "../runtime/runner-turn-context-binding";
 import { composeTracedPrompt } from "../runtime/prompt-composition-trace";
 import { CHANNEL_PRIVACY_RULE } from "../runtime/session-channel";
+import { workMainOwnsRouting, workSessionMainPolicy } from "../work/session-policy";
+import { workSessionChildDelegatedAuthority } from "../work/session-authority";
+import { isWorkSessionChildRun } from "../work/session-dispatch";
 import { toolApprovalSessionKey } from "../runtime/tool-approval";
 import { BUILTIN_ONE_AGENT_ID } from "../../shared/builtin-agent-ids";
 import { fixedPurposePrompt, purposePrompt } from "../runtime/purpose-prompts";
@@ -273,6 +276,7 @@ import { runMcpKeyElicitationGate } from "./run-key-elicitation";
 import { getEnvConfigurationRevision } from "../secrets/vault";
 import { bridgeHubPluginCandidates } from "../mcp-tools/hub-plugin-bridge";
 import { noteRuntimeFailure, noteRuntimeSucceeded, runtimeCooldown, clearRuntimeCooldown, parseRetryHint } from "../runtime/runtime-cooldown";
+import { RUNTIME_CREDENTIAL_UNAVAILABLE_CODE } from "../runtime/credential-access";
 import { recordResolvedAlias } from "../runtime/model-discovery-store";
 import { setResolvedCliModelAlias } from "../../shared/models";
 import { buildMcpConfigFile, isKeylessPlaywrightMcpDuplicate, type BrowserApprovalScope } from "../mcp-tools/mcp-config";
@@ -663,48 +667,73 @@ function hasOneRecoveryDecision(text: unknown): boolean {
 /** Never omit state just because a runtime advertises session support. */
 
 
-/** Requests are not successes. An exact successful retry resolves that failed operation. */
-function createOneToolFailureTracker(): { note: (tool: NonNullable<McpInvocationEvent["tool"]>) => boolean; unresolved: () => boolean } {
+/**
+ * Requests are not successes. An exact successful retry resolves that failed operation, and so does a recovery pass that
+ * came back with tool success evidence and no tool error (beginPass before it, settlePass after): the recovery prompt asks for
+ * "re-run it or take another path to the same outcome", so only requiring the exact same call left a finished task on the
+ * decision card. A pass of words alone has no success evidence and settles nothing.
+ */
+function createOneToolFailureTracker(): {
+  note: (tool: NonNullable<McpInvocationEvent["tool"]>) => boolean;
+  unresolved: () => boolean;
+  beginPass: () => void;
+  settlePass: () => boolean;
+} {
   const pending = new Map<string, string>();
   const completed = new Set<string>();
   const failed = new Set<string>();
   let overflowFailure = false;
+  let passSuccesses = 0;
+  let passFailures = 0;
   const canonical = (value: unknown): string => {
     if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
     if (value && typeof value === "object") return `{${Object.keys(value).sort()
       .map(key => `${JSON.stringify(key)}:${canonical((value as Record<string, unknown>)[key])}`).join(",")}}`;
     return JSON.stringify(value) ?? "null";
   };
+  const observe = (tool: NonNullable<McpInvocationEvent["tool"]>): boolean => {
+    const id = tool.id?.trim();
+    if (id && completed.has(id)) return false;
+    let key: string | undefined;
+    if (tool.args !== undefined) {
+      let args: unknown = tool.args;
+      try { args = JSON.parse(tool.args); } catch { /* Keep non-JSON arguments exact. */ }
+      key = createHash("sha256").update(`${tool.name.trim().toLowerCase()}\0${canonical(args)}`).digest("hex");
+    } else if (id) key = pending.get(id);
+    if (tool.result === undefined && tool.isError !== true) {
+      if (id && key) {
+        if (pending.size >= 4096 && !pending.has(id)) pending.delete(pending.keys().next().value!);
+        pending.set(id, key);
+      }
+      return false;
+    }
+    if (id) {
+      pending.delete(id);
+      if (completed.size >= 4096) completed.delete(completed.values().next().value!);
+      completed.add(id);
+    }
+    if (!key) { if (tool.isError === true) overflowFailure = true; return true; }
+    if (tool.isError === true) {
+      if (failed.size >= 4096 && !failed.has(key)) overflowFailure = true;
+      else failed.add(key);
+    } else if (tool.result !== undefined && tool.isError === false) failed.delete(key);
+    return true;
+  };
   return {
     note(tool): boolean {
-      const id = tool.id?.trim();
-      if (id && completed.has(id)) return false;
-      let key: string | undefined;
-      if (tool.args !== undefined) {
-        let args: unknown = tool.args;
-        try { args = JSON.parse(tool.args); } catch { /* Keep non-JSON arguments exact. */ }
-        key = createHash("sha256").update(`${tool.name.trim().toLowerCase()}\0${canonical(args)}`).digest("hex");
-      } else if (id) key = pending.get(id);
-      if (tool.result === undefined && tool.isError !== true) {
-        if (id && key) {
-          if (pending.size >= 4096 && !pending.has(id)) pending.delete(pending.keys().next().value!);
-          pending.set(id, key);
-        }
-        return false;
-      }
-      if (id) {
-        pending.delete(id);
-        if (completed.size >= 4096) completed.delete(completed.values().next().value!);
-        completed.add(id);
-      }
-      if (!key) { if (tool.isError === true) overflowFailure = true; return true; }
-      if (tool.isError === true) {
-        if (failed.size >= 4096 && !failed.has(key)) overflowFailure = true;
-        else failed.add(key);
-      } else if (tool.result !== undefined && tool.isError === false) failed.delete(key);
-      return true;
+      const completedNow = observe(tool);
+      if (completedNow && tool.isError === true) passFailures += 1;
+      else if (completedNow && tool.isError === false && tool.result !== undefined) passSuccesses += 1;
+      return completedNow;
     },
     unresolved: () => overflowFailure || failed.size > 0,
+    beginPass(): void { passSuccesses = 0; passFailures = 0; },
+    settlePass(): boolean {
+      if (passSuccesses === 0 || passFailures > 0) return false;
+      failed.clear();
+      overflowFailure = false;
+      return true;
+    },
   };
 }
 
@@ -2697,7 +2726,7 @@ async function runMcpInvocationInContext(
     if (target.source === "local" && target.entityKind === "agent") restoreAgentForUse(target.agentId);
   }
   if (isAgentArchived(chat.agentId)) {
-    sink({ kind: "error", error: { code: "agent_archived", message: tStatus(locale, "errAgentArchived") } });
+    sink({ kind: "error", error: { code: "agent_archived", message: tStatus(locale, "errAgentArchived"), turnDelivery: "not-dispatched" } }); // before any provider send: a graph step reads "did not run", not an unknown effect
     return earlyResult();
   }
   let agent = getAgentById(chat.agentId);
@@ -3576,8 +3605,15 @@ async function runMcpInvocationInContext(
   // A teammate in a One room does its piece of work and answers One. The Goal/Stormbreaker/UltraCode protocol belongs to the
   // controller turns only (One and AGI): production 2026-10-12, every Motiondirector room turn re-read it (owner: "모든
   // 에이전트가 이걸 알아야 함? One만 알면 되는 거 아니냐").
+  const workSessionChild = chat.kind === "division" && chat.originSurface === "work" && Boolean(req.runId)
+    && isWorkSessionChildRun(chat.id, req.runId!, true);
+  const workSessionMain = workMainOwnsRouting({ originSurface: chat.originSurface, kind: chat.kind,
+    agentAppMode: req.agentAppMode, source: executionContext?.source,
+    explicitExecution: Boolean(oneTeamExecutionPolicy || userNamedTargetsThisTurn || explicitWorkforceGoal
+      || explicitNetworkGoal || hubWorkforceRequested || borrowedAgentSlugs.length
+      || explicitStormbreakerRequest || structuredStormbreakerRequest || req.routerAgent) });
   const roomMemberTurn = Boolean(req.oneMode && !req.agentAppMode && chat.id && roomMemberContext(chat.id));
-  const stormbreakerEngaged = oneTeamAllowsStorm && !roomMemberTurn && !req.agentAppMode && !restrictedReadBoundary && !effectObservationRun && (
+  const stormbreakerEngaged = !workSessionMain && !workSessionChild && oneTeamAllowsStorm && !roomMemberTurn && !req.agentAppMode && !restrictedReadBoundary && !effectObservationRun && (
     chat.kind === "division" ||
     chat.continuousMode === true ||
     explicitStormbreakerRequest ||
@@ -3590,6 +3626,7 @@ async function runMcpInvocationInContext(
    * 가벼운 턴 오탐은 130건 중 115건이었다. 같은 코퍼스에서 직전 턴 이어받기는
    * 재현율 88.5%였고 전체 턴의 86%가 후속 턴이다. 첫 턴은 예측하지 않는다. */
   const previousTurn = previousTurnObservation(chat.id);
+
   const turnEscalation = classifyTurnEscalation({
     previousTurn,
     explicitTeamRequest: explicitStormbreakerRequest || structuredStormbreakerRequest,
@@ -3598,6 +3635,7 @@ async function runMcpInvocationInContext(
     ? (getProject(invocationProjectId)?.agentPool ?? [])
     : [];
   const stormbreakerSwarm =
+    !workSessionMain &&
     oneTeamAllowsStorm &&
     !req.agentAppMode &&
     !restrictedReadBoundary &&
@@ -4126,6 +4164,7 @@ async function runMcpInvocationInContext(
         && executionContext.graphTeamGrant.chatId === req.chatId && executionContext.graphTeamGrant.automationId === req.automationId
         && executionContext.graphTeamGrant.nodeId === executionContext.nodeId ? executionContext.graphTeamGrant : null;
       const cfg = await buildMcpConfigFile({
+        ...(workSessionMain && req.runId ? { workSession: { runId: req.runId, runtimes, runtimeSelection: req.runtimeSelection, workspace: resolvedResultFolder } } : {}),
         ...(graphTeamGrant ? { graphTeamGrant } : {}),
         osMemoryCuratorRun: captureNativeOsCuratorRun({ runId: req.runId!, model: confirmedRuntime.model ?? "",
           current: isMcpConfigCurrent, signal }),
@@ -4150,6 +4189,7 @@ async function runMcpInvocationInContext(
           ...(req.requiredToolCatalogIds ?? []),
           // The room's One Team for a room-saved graph step (graphTeamGrant above); no grant, no row.
           ...(graphTeamGrant ? ["one-team"] : []),
+          ...(workSessionMain ? ["one-team"] : []),
           ...(workspacePreviewOwnerGrant
             ? [AGENTLAS_WORKSPACE_PREVIEW_CATALOG_ID]
             : []),
@@ -4629,18 +4669,28 @@ async function runMcpInvocationInContext(
   // result into the working folder. One and Work now share the same rule —
   // the old One exclusion predates the unified One/Work image binding.
   const runtimeDrawsItself = (RUNTIME_NATIVE_CAPABILITIES[active.kind] ?? []).includes("image.generate");
+  /*
+   * The two gates below read what the owner asked, not the host's prompt. A Goal resume / wait wake restates the objective word
+   * for word, so its vocabulary is true on every episode: each resume generated a new paid image (the image engine was handed
+   * the resume boilerplate), a read-only reconciliation handoff failed before the model ran, and "take a screenshot" goals
+   * failed after the work for want of a new capture. The only owner-written text inside a host prompt is the owner's latest
+   * unanswered message; a worker brief One wrote (one-dispatch-brief) is a real task and is read whole.
+   */
+  const ownerRequestText = !hostWrotePrompt()
+    ? req.userPrompt
+    : await import("../invocation/automatic-goal").then((goal) => goal.unansweredOwnerMessage(chat.id) ?? "").catch(() => "");
   const imageGenerationRequired = !req.agentAppMode
     && chat.kind !== "division"
     && !runtimeDrawsItself
-    && naturalLanguageRequiresImageGeneration(req.userPrompt);
+    && naturalLanguageRequiresImageGeneration(ownerRequestText);
   /*
    * ★찍어 달라고 했으면 찍은 것이 있어야 한다 — 그리라고는 하지 않았으므로 생성은 하지 않고
    * 결과만 요구한다(위 판정기 주석의 실측 참고).
    */
   const screenCaptureRequired = !req.agentAppMode
     && chat.kind !== "division"
-    && !naturalLanguageRequiresImageGeneration(req.userPrompt)
-    && naturalLanguageRequiresScreenCapture(req.userPrompt);
+    && !naturalLanguageRequiresImageGeneration(ownerRequestText)
+    && naturalLanguageRequiresScreenCapture(ownerRequestText);
   let observedImageArtifactEvidence = false;
   const pendingWorkToolImages: Array<{ sourcePath: string; image: ImageAttachment }> = [];
   const generatedImageSourcePaths = new Set<string>();
@@ -4741,8 +4791,16 @@ async function runMcpInvocationInContext(
         ...finalEvent, kind: "error",
         text: finalEvent?.text ?? result.text,
         error: {
+          // A stable class, not the cause: the Goal follower (long-run/daemon-turn-goal.ts TASK_FORCE_UNVERIFIED_CODE) holds a Goal for
+          // the owner on exactly this typed code, and a different code per cause cancelled it (X marketing room, 2026-10-21). The
+          // exact causes are typed data in the run ledger (execution_failure events and the execution receipt's failureReport),
+          // which the main session reads; the owner reads `message`, which is the room's real text, never this label.
           code: "task-force-verification-failed",
-          message: locale === "ko" ? "태스크포스의 일부 실행이 완료되거나 검증되지 않았습니다. 저장된 결과와 실행 기록을 확인하세요." : "Some task force execution is incomplete or unverified. Review the saved result and run history.",
+          message: finalEvent?.text?.trim() || result.text?.trim()
+            || (locale === "ko" ? "남은 작업과 원인을 확인하고 있습니다." : "Reviewing the remaining work and its cause."),
+          ...(result.failureReport?.causes.length && result.failureReport.causes.every(cause => cause.delivery === "not-dispatched")
+            && !result.failureReport.effects.some(effect => ["attempted", "uncertain", "verified"].includes(effect.state))
+            ? { turnDelivery: "not-dispatched" as const } : {}),
         },
       });
     }
@@ -4764,7 +4822,7 @@ async function runMcpInvocationInContext(
   // next explicit "bring an expert" confirmation to local-only, so the run
   // falsely claimed no PDF/file tools were available without invoking the
   // selected Workforce at all.
-  if (!scienceCollectionCurrent && oneTeamExecutionPolicy !== "confirmed_external_workforce") {
+  if (!workSessionMain && !scienceCollectionCurrent && oneTeamExecutionPolicy !== "confirmed_external_workforce") {
     try {
       const durableContext = await loadDesktopWorkforceGoal(workforceProjectDir, durableWorkforceGoalId);
       const goal = durableContext.goals[0];
@@ -5324,6 +5382,7 @@ async function runMcpInvocationInContext(
     runnableRosterCount: rosterSpecs.length + projectRosterForTurn.filter((member) => member.source === "cloud").length,
   });
   const rosterFirstEligible =
+    !workSessionMain &&
     !oneTeamExecutionPolicy &&
     !req.agentAppMode &&
     !restrictedReadBoundary &&
@@ -5507,6 +5566,7 @@ async function runMcpInvocationInContext(
   // Explicit single borrow also bypasses swarm: its verified Hub user preamble
   // must reach the selected primary runtime unchanged instead of being discarded.
   if (
+    !workSessionMain &&
     oneTeamAllowsStorm &&
     !req.agentAppMode &&
     (chat.swarmMode || stormbreakerSwarm) &&
@@ -5568,7 +5628,7 @@ async function runMcpInvocationInContext(
   // ── 멀티 에이전트 firm 오케스트레이션 ──
   // 회사 채팅이고 정규화된 조직에 본부/전문가가 있으면 3-tier 오케스트레이터로 분기.
   // (본부가 없는 firm은 아래 단일 CEO 경로 — 기존 동작 유지)
-  if (!oneTeamExecutionPolicy && chat.firmId) {
+  if (!workSessionMain && !oneTeamExecutionPolicy && chat.firmId) {
     const firm = getFirm(chat.firmId);
     if (firm) {
       const org = getResolvedOrg(firm);
@@ -5578,7 +5638,15 @@ async function runMcpInvocationInContext(
             ? borrowedCurrentUserPrompt(effectiveUserPromptParts, explicitBorrowUserParts)
             : effectiveUserPrompt;
           assertMcpGoalSelectionCurrent();
+          const workFirmChild = workSessionChild;
+          const workChildAuthority = workFirmChild ? workSessionChildDelegatedAuthority({
+            runId: req.runId, chatId: chat.id, permission: req.permissions, planMode: req.planMode,
+            workspace: workspaceBinding ? revalidateInvocationWorkspaceBinding(workspaceBinding) : workingFolder,
+            signal,
+          }) : undefined;
           await runFirmInvocation({
+            ...(workFirmChild ? { controllerRuntimeRole: "worker" as const } : {}),
+            ...workChildAuthority,
             req: { ...req, userPrompt: firmUserPrompt },
             chat: { id: chat.id, projectId: invocationProjectId, firmId: chat.firmId, goalId: chat.goalId },
             goalCheckpoint: chat.goalId ? latestTaskCheckpoint(chat.goalId) ?? undefined : undefined,
@@ -5682,6 +5750,12 @@ async function runMcpInvocationInContext(
       systemContextParts.push(...parts);
     }
   };
+  if (workSessionMain) {
+    const policy = workSessionMainPolicy();
+    if (persistentAgentContext) {
+      turnContextParts.push(policy); keepLastTurnContext("work.session.main", "fixed-policy", ["release"]);
+    } else systemContextParts.push(mainHostSystemPart("work-session-main", "fixed-policy", ["release"], policy));
+  }
   // One immutable project snapshot per execution boundary. All supported runner
   // adapters consume the same block through their existing context transport.
   // Projectless One executes in agentRunCwd(), not Electron's process cwd.
@@ -5830,7 +5904,7 @@ async function runMcpInvocationInContext(
       placeHostContext("host.project", ["project-instructions"], projectDefinition,
         [mainHostSystemPart("project", "versioned-content", ["project-instructions", "locale"], projectDefinition)]);
     }
-    if (project?.agentPool.length) {
+    if (!workSessionMain && project?.agentPool.length) {
       const userFacingPool = project.agentPool.filter((member) => {
         if (member.entityKind === "team" || !member.agentId) return true;
         const installed = getAgentById(member.agentId);
@@ -5997,7 +6071,7 @@ async function runMcpInvocationInContext(
     turnContextParts.push(memoryEmitterPromptFor(effectiveUserPrompt, pickLocale(req))); keepLastTurnContext("memory.receipt", "fixed-policy", ["release"]);
   }
   if (mcpAutoSelectionPrompt) { turnContextParts.push(mcpAutoSelectionPrompt); declareLastTurnContext("tools.selection", "turn-context", ["tool-grant", "capability-inventory"]); }
-  if (!req.agentAppMode && !isAliveControllerRun && chat.kind === "division" && (req.toolMode || req.hubMode)) {
+  if (!workSessionChild && !req.agentAppMode && !isAliveControllerRun && chat.kind === "division" && (req.toolMode || req.hubMode)) {
     const supervisor = assembleSystemPrompt(
       AUTOMATION_SUPERVISOR_SYSTEM_AGENT,
       [effectiveUserPrompt, req.toolMode ?? "", req.hubMode ?? ""].join("\n"),
@@ -6594,10 +6668,8 @@ async function runMcpInvocationInContext(
     let observedOneToolFailure = false;
     const oneToolFailures = createOneToolFailureTracker();
     let oneRecoveryDecisionPending = false;
-    // 복구 패스 판정용 패스 단위 계수 — 복구 패스가 "도구 성공 증거 있음 + 무오류"로
-    // 끝났을 때에만 실패 흔적을 지운다(도구 없이 말로만 끝내는 가짜 성공 방지).
-    let passToolFailures = 0;
-    let passToolSuccesses = 0;
+    // 복구 패스가 "도구 성공 증거 있음 + 무오류"로 끝났을 때에만 실패 흔적을 지운다(도구 없이 말로만 끝내는
+    // 가짜 성공 방지) — 패스 단위 계수는 oneToolFailures(beginPass/settlePass)가 쥔다.
     // How the model's own tool calls came back over the whole invocation (runner callback only; host pseudo-rows such as
     // the plugin routing lines go through the sink and are not the model's calls). Read once at the end of the pass loops
     // by the empty-reply rule (H2) below.
@@ -6713,11 +6785,7 @@ async function runMcpInvocationInContext(
         const completedToolOutcome = oneToolFailures.note({ name, args, result, id, isError });
         modelToolOutcomes.note({ id, isError, result, produced: Boolean(artifactPaths?.length) || Boolean(imageDataUrl) });
         observedOneToolFailure = oneToolFailures.unresolved();
-        if (completedToolOutcome && isError === true) {
-          passToolFailures += 1;
-        }
         if (completedToolOutcome && isError === false && result !== undefined) {
-          passToolSuccesses += 1;
           // The Codex runtime uses this generic wrapper only for an MCP call.
           // Shell/read tools can echo arbitrary URLs from local documents (for
           // example a proposed schema's example.invalid), which must never be
@@ -7009,6 +7077,9 @@ async function runMcpInvocationInContext(
       ): Awaited<ReturnType<Runner>> => {
         const failure = result.failure;
         if (!failure || terminalNoticeEmitted) return result;
+        // The keychain, not a provider, refused the saved key: no CLI sign-in card fits it, and its own failure message (thrown
+        // to the owner right after this returns) already names the one thing to do. No second, generic recovery line.
+        if (failure.providerCode === RUNTIME_CREDENTIAL_UNAVAILABLE_CODE) return result;
         terminalNoticeEmitted = true;
         const elapsedMs = Math.max(0, recoveryElapsedMs());
         const details = JSON.stringify({
@@ -7256,7 +7327,13 @@ async function runMcpInvocationInContext(
         persistGoalUsage(result.observedUsage);
         // A partial reply without a proven terminal is an unknown effect,
         // never permission to retry this request on another brain.
-        if (result.ownerControlTerminal === "uncertain" && !runtimeTerminalEvidence.closedHttpRefusal) return result;
+        // "Cannot use it now" is a fact, not a retry: a runner-typed quota / rate limit / sign-in refusal still cools the
+        // runtime and marks it signed out (noteRuntimeFailure keeps only those kinds), or the next turn, the Goal's quota
+        // handoff and the connection badge all keep trusting a dead runtime.
+        if (result.ownerControlTerminal === "uncertain" && !runtimeTerminalEvidence.closedHttpRefusal) {
+          if (result.failure?.source === "marker") noteRuntimeFailure(active, result.failure);
+          return result;
+        }
         // A run that actually worked is the only thing that clears "sign in required".
         if (!result.failure) noteRuntimeSucceeded(selectedRuntime);
         // The light front answered: an earlier "went to my CLI" line no longer describes the conversation.
@@ -7453,7 +7530,7 @@ async function runMcpInvocationInContext(
           : "Generating the requested image with the configured multimodal engine…",
       });
       // The run's permission reaches the image route's own CLI (multimodal/image.ts ImageAdmission, R-078).
-      const generated = await generateImage(imageSlot.model, req.userPrompt, { permission: req.permissions });
+      const generated = await generateImage(imageSlot.model, ownerRequestText, { permission: req.permissions });
       if (!generated.ok || !generated.artifactPath || !generated.src) {
         throw new Error(`image_tool_unavailable: ${generated.reason ?? "no image was produced"}`);
       }
@@ -7465,7 +7542,7 @@ async function runMcpInvocationInContext(
       hostGeneratedImageAttachment = pendingWorkToolImages[0].image;
       runnerEvents.onTool(
         "generate_image",
-        JSON.stringify({ prompt: req.userPrompt }),
+        JSON.stringify({ prompt: ownerRequestText }),
         JSON.stringify({ ok: true, engine: generated.engine ?? imageSlot.runtimeKind }),
         `host-image-${randomUUID()}`,
         false,
@@ -7940,8 +8017,7 @@ async function runMcpInvocationInContext(
         if (!continuousMode && result.text.trim()) {
           partialFloor = partialFloor ? `${partialFloor}\n${result.text}` : result.text;
         }
-        passToolFailures = 0;
-        passToolSuccesses = 0;
+        oneToolFailures.beginPass();
         const nextRunnerReq = runnerRequestForRuntime(active, picked!);
         const recoveryPrompt = buildOneRecoveryPrompt(result.text, attempt, locale);
         activeRunnerReq = replaceRunnerUserPrompt(nextRunnerReq, explicitBorrowUserPreamble
@@ -7957,6 +8033,7 @@ async function runMcpInvocationInContext(
           oneRecoveryDecisionPending = true;
           break;
         }
+        oneToolFailures.settlePass();
         observedOneToolFailure = oneToolFailures.unresolved();
       }
       if (observedOneToolFailure && !oneRecoveryDecisionPending && !signal?.aborted) {

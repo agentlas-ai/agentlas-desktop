@@ -2,7 +2,7 @@
 import { useId, useState } from "react";
 import type { FinanceAIResult, FinanceConversationDataResult, FinanceDataResult } from "@shared/finance";
 import { financeQueryScope } from "@shared/finance-query-scope";
-import { IconChevronDown, IconChevronRight, IconChevronLeft, IconExternalLink } from "@/components/Icon";
+import { IconChevronDown, IconChevronRight, IconChevronLeft } from "@/components/Icon";
 import { FinanceDataResultView, financeDataVisual } from "./FinanceDataResultView";
 import { financeFeedLink } from "./FinanceDashboardFeed";
 import { financeCell, financeColumn } from "./FinanceMessage";
@@ -52,7 +52,7 @@ export function financeQueryPresentation(entry: FinanceConversationDataResult): 
     if (has(["Author handle", "Post text (claim)", "Author created at", "Original post"])) { kind = "social"; title = "Post text (claim)"; meta = ["Author handle", "Author created at"]; url = "Original post"; }
     else if (has(["Provider", "Author", "Post time", "Short claim", "Original post"])) { kind = "social"; title = "Short claim"; meta = ["Author", "Post time"]; url = "Original post"; }
   } else if (metric === "price" && (has(["Symbol", "Price", "Currency", "Observed at"]) || has(["Symbol", "Price", "Latest trading day", "Volume"]))) {
-    return { kind: "quote", items: result.rows.map(row => { const value = row[at("Price")], currency = text(row, "Currency"); return { title: text(row, "Symbol"), meta: metadata(row, ["Observed at", "Latest trading day"]), href: null, row, value: typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null, currency: /^[A-Z]{3}$/.test(currency) && currency !== "XXX" ? currency : null }; }) };
+    return { kind: "quote", items: result.rows.map(row => { const value = row[at("Price")], currency = text(row, "Currency"); return { title: text(row, "Symbol"), meta: [], href: null, row, value: typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null, currency: /^[A-Z]{3}$/.test(currency) && currency !== "XXX" ? currency : null }; }) };
   }
   return kind === "records" ? records() : { kind, items: result.rows.map(row => ({ title: text(row, title) || "—", meta: metadata(row, meta), href: financeFeedLink(text(row, url)), row })) };
 }
@@ -79,8 +79,6 @@ export function financeQueryDate(value: string, ko: boolean, now = new Date(), t
     return new Intl.DateTimeFormat(ko ? "ko-KR" : "en-US", { ...(year !== currentYear ? { year: "numeric" as const } : {}), month: "short", day: "numeric", ...(instant ? { hour: "2-digit" as const, minute: "2-digit" as const } : {}), timeZone: instant ? timeZone : "UTC" }).format(date);
   } catch { return ""; }
 }
-/** Where a link goes, for its tooltip: the host without a leading www. */
-function financeLinkHost(href: string): string { try { return new URL(href).hostname.replace(/^www\./, ""); } catch { return ""; } }
 function Row({ item, result, kind, ko }: { item: QueryItem; result: FinanceDataResult; kind: FinanceQueryPresentation["kind"]; ko: boolean }) {
   const [expanded, setExpanded] = useState(false), id = useId();
   const money = item.value === undefined || item.value === null ? null : financeQueryNumber(item.value, ko);
@@ -90,9 +88,9 @@ function Row({ item, result, kind, ko }: { item: QueryItem; result: FinanceDataR
     {item.href ? <a className={styles.title} href={item.href} target="_blank" rel="noopener noreferrer" title={item.title}>{item.title}</a> : <strong className={styles.title} title={item.title}>{item.title}</strong>}
     {!!meta.length && <span className={styles.secondary} title={item.meta.map(item => item.value).join(" · ")}>{meta.join(" · ")}</span>}
     {kind === "quote" && <p className={styles.price}>{money ?? (ko ? "미확인" : "Unknown")} <small>{item.currency ?? (ko ? "통화 미확인" : "Currency unknown")}</small></p>}
-  </div>{item.href && <a className={styles.open} href={item.href} target="_blank" rel="noopener noreferrer" aria-label={`${ko ? "원문 열기" : "Open original"} · ${item.title}`} title={`${ko ? "원문 열기" : "Open original"} · ${financeLinkHost(item.href)}`}><IconExternalLink size={16}/></a>}<button type="button" className={styles.expand} aria-expanded={expanded} aria-controls={id} aria-label={`${ko ? "조회 상세" : "Result details"} · ${item.title}`} title={ko ? "상세 보기" : "View details"} onClick={() => setExpanded(value => !value)}>{expanded ? <IconChevronDown size={16}/> : <IconChevronRight size={16}/>}</button></div>
+  </div><button type="button" className={styles.expand} aria-expanded={expanded} aria-controls={id} aria-label={`${ko ? "조회 상세" : "Result details"} · ${item.title}`} title={ko ? "상세 보기" : "View details"} onClick={() => setExpanded(value => !value)}>{expanded ? <IconChevronDown size={16}/> : <IconChevronRight size={16}/>}</button></div>
     {kind === "records" && !expanded && <dl className={styles.values}>{fields.filter(field => field.index !== item.titleColumn).slice(0, 4).map((field, index) => <div key={index}><dt title={financeColumn(field.name, ko)}>{financeColumn(field.name, ko)}</dt><dd title={String(field.value ?? "")}>{typeof field.value === "number" ? financeQueryNumber(field.value, ko) : financeCell(field.value, field.name, ko)}</dd></div>)}</dl>}
-    {expanded && <div className={styles.rowDetail} id={id}><p>{item.title}</p><dl className={styles.values}>{fields.map((field, index) => { const cell = typeof field.value === "number" ? financeQueryNumber(field.value, ko) : financeCell(field.value, field.name, ko), link = financeQueryFieldLink(item.href, field.value); return <div key={index}><dt>{financeColumn(field.name, ko)}</dt><dd>{link ? <a href={link} target="_blank" rel="noopener noreferrer" title={`${ko ? "원문 열기" : "Open original"} · ${financeLinkHost(link)}`}>{cell}</a> : cell}</dd></div>; })}</dl></div>}
+    {expanded && <div className={styles.rowDetail} id={id}><p>{item.title}</p><dl className={styles.values}>{fields.map((field, index) => { const cell = typeof field.value === "number" ? financeQueryNumber(field.value, ko) : financeCell(field.value, field.name, ko), link = financeQueryFieldLink(item.href, field.value); return <div key={index}><dt>{financeColumn(field.name, ko)}</dt><dd>{link ? <a href={link} target="_blank" rel="noopener noreferrer">{cell}</a> : cell}</dd></div>; })}</dl></div>}
   </li>;
 }
 /** Raw rows are explicit, paged text. Only the typed item link above can navigate. */

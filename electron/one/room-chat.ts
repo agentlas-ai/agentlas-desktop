@@ -42,8 +42,12 @@ export interface RoomChatPorts {
   roster(roomChatId: string): RoomChatRoster | null;
   /** The run currently working in this chat, or null when it is idle. */
   activeRunId(chatId: string): string | null;
-  /** Steer an active run only: never starts a run (a stale run id throws). */
-  steerMember(input: { chatId: string; expectedRunId: string; prompt: string }): void;
+  /**
+   * Steer an active run only: never starts a run (a stale run id throws). `delegationPermission` is the cap the receiver's session
+   * was started with (one_team_dispatches.delegation_permission: "write" for a session the AGI started, null = One's default); the
+   * steered turn runs at that cap, never above it (the same rule as one_team_steer).
+   */
+  steerMember(input: { chatId: string; expectedRunId: string; prompt: string; delegationPermission?: string | null }): void;
   /** A normal system follow-up to One in the room. */
   wakeOne(input: { roomChatId: string; notes: RoomNoteForOne[] }): void;
   now?(): number;
@@ -127,13 +131,18 @@ export function createRoomChat(ports: RoomChatPorts) {
   }
 
   function memberDelivery(roomChatId: string, member: RoomChatMember, prompt: string): "live" | "idle" | "braked" {
-    const dispatch = ports.db().prepare(
-      "SELECT child_chat_id FROM one_team_dispatches WHERE parent_chat_id = ? AND member_agent_id = ? AND status = 'running' ORDER BY created_at DESC, rowid DESC LIMIT 1",
-    ).get(roomChatId, member.agentId) as { child_chat_id: string } | undefined;
+    const where = "FROM one_team_dispatches WHERE parent_chat_id = ? AND member_agent_id = ? AND status = 'running' ORDER BY created_at DESC, rowid DESC LIMIT 1";
+    let dispatch: { child_chat_id: string; delegation_permission?: string | null } | undefined;
+    try {
+      dispatch = ports.db().prepare(`SELECT child_chat_id, delegation_permission ${where}`).get(roomChatId, member.agentId) as typeof dispatch;
+    } catch {
+      // A store from before the cap column existed has no capped sessions: the session runs at One's default.
+      dispatch = ports.db().prepare(`SELECT child_chat_id ${where}`).get(roomChatId, member.agentId) as typeof dispatch;
+    }
     const runId = dispatch ? ports.activeRunId(dispatch.child_chat_id) : null;
     if (!dispatch || !runId) return "idle";
     try {
-      ports.steerMember({ chatId: dispatch.child_chat_id, expectedRunId: runId, prompt });
+      ports.steerMember({ chatId: dispatch.child_chat_id, expectedRunId: runId, prompt, delegationPermission: dispatch.delegation_permission ?? null });
       return "live";
     } catch {
       // The run ended between the check and the steer: it is idle now, so One decides.
@@ -269,9 +278,12 @@ function productionPorts(): RoomChatPorts {
       return { members, oneNames: [] };
     },
     activeRunId: (chatId) => (invocation().activeChatIds().includes(chatId) ? invocation().attach(chatId, { includeEvents: false })?.runId ?? null : null),
-    steerMember({ chatId, expectedRunId, prompt }) {
+    steerMember({ chatId, expectedRunId, prompt, delegationPermission }) {
+      // The cap is the session's, not the sender's (one_team_steer keeps it too): a note from a teammate who runs at full must not lift
+      // a session the AGI started at write. The same rule as the start (team-dispatch.ts teamDelegationPermission).
+      const cap = (require("./team-dispatch") as typeof import("./team-dispatch")).teamDelegationPermission(delegationPermission);
       invocation().steer({
-        chatId, userPrompt: prompt, promptOrigin: "system", locale: locale(), permissions: "full", onePermissionMode: "full",
+        chatId, userPrompt: prompt, promptOrigin: "system", locale: locale(), permissions: cap, onePermissionMode: cap,
         taskIntent: "conversation", oneMode: true,
       } as never, expectedRunId);
     },

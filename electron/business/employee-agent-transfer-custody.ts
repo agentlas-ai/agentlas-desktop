@@ -188,7 +188,7 @@ export function createEmployeeAgentTransferCustody(input: EmployeeAgentTransferC
     input.db.prepare("UPDATE one_business_agent_transfers SET state='committed',receipt_json=? WHERE transfer_id=? AND kind='export' AND state IN ('attempted','committed')")
       .run(canonical({ ...receipt, replayed: false }), transferId);
   }
-  function importedReadback(value: EmployeeAgentTransferPackage, root: string) {
+  function importedReadback(value: EmployeeAgentTransferPackage, root: string, requireInstalled = true) {
     targetPackage(value); directory(root);
     for (const file of value.files) if (bytesDigest(readEmployeeAgentTransferFile(root, file.path)) !== bytesDigest(file.content)) fail('import_readback_changed');
     const manifest = JSON.parse(readEmployeeAgentTransferFile(root, 'agentlas.json').toString('utf8'));
@@ -202,10 +202,55 @@ export function createEmployeeAgentTransferCustody(input: EmployeeAgentTransferC
         else if (!entry.isFile() || !expected.delete(relative)) fail('import_readback_changed');
       }
     };
-    walk(root, ''); if (expected.size || !input.installed(value, root)) fail('import_readback_changed');
+    walk(root, ''); if (expected.size || requireInstalled && !input.installed(value, root)) fail('import_readback_changed');
     targetPackage(value);
   }
+  /** Writes the approved file set into a folder that does not exist yet (the exclusive create is the guard); `guard` re-checks the live approval. */
+  function writeImportFiles(value: EmployeeAgentTransferPackage, root: string, parentPin: fs.Stats, guard: () => void) {
+    const ticket = value.ticket, parent = path.dirname(root);
+    guard(); sameDirectory(parent, parentPin); fs.mkdirSync(root, { mode: 0o700 }); const rootPin = directory(root);
+    const files = [...value.files, { path: 'agentlas.json', content: canonical({ agentId: ticket.target.agentId, entry: ticket.files.find(f => f.kind === 'definition')!.path }) }];
+    for (const file of files) {
+      guard(); sameDirectory(root, rootPin); sameDirectory(parent, parentPin);
+      let folder = root;
+      for (const component of file.path.split('/').slice(0, -1)) {
+        folder = path.join(folder, component); if (!fs.existsSync(folder)) fs.mkdirSync(folder, { mode: 0o700 }); directory(folder);
+      }
+      const fd = fs.openSync(path.join(root, file.path), fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | (fs.constants.O_NOFOLLOW ?? 0), 0o600);
+      try { guard(); sameDirectory(root, rootPin); directory(folder); fs.writeFileSync(fd, file.content, 'utf8'); fs.fsyncSync(fd); }
+      finally { fs.closeSync(fd); }
+    }
+  }
+  /** An import that stopped after its row was claimed (a failed confirmation, a locked file, a killed app) is finished from what is on disk. The
+   * effect is local (files plus this device's registration), so it can be read back, and the folder is this transfer's own (named by its target
+   * agent id): whatever an interrupted attempt left there is replaced, never mixed with the approved set. The earlier native review stays the
+   * approval; the package digest pins what may be written. */
+  async function resumeImport(value: EmployeeAgentTransferPackage, root: string, confirmCurrent: () => Promise<EmployeeAgentTransferReceipt>) {
+    const ticket = value.ticket;
+    if (!employeeAgentTransferReceiptMatches(await confirmCurrent(), value)) fail('receipt_changed');
+    targetPackage(value);
+    try { importedReadback(value, root, false); }
+    catch {
+      const parent = path.dirname(root); fs.mkdirSync(parent, { recursive: true, mode: 0o700 }); const parentPin = directory(parent);
+      fs.rmSync(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+      writeImportFiles(value, root, parentPin, () => targetPackage(value));
+    }
+    if (!input.installed(value, root)) await input.install(value, root);
+    importedReadback(value, root); targetPackage(value);
+    input.db.prepare("UPDATE one_business_agent_transfers SET state='installed' WHERE transfer_id=? AND kind='import' AND state IN ('claimed','unknown') AND package_digest=?")
+      .run(ticket.transferId, employeeAgentTransferDigest(value));
+  }
+  // One import of a transfer at a time: a retry that arrives while the first is still working waits for it and then reads back its result.
+  const importTails = new Map<string, Promise<unknown>>();
   async function importCommitted(raw: unknown, remoteReceipt: EmployeeAgentTransferReceipt,
+    review: (value: EmployeeAgentTransferPackage) => Promise<{ assertCurrent(): void }>, confirmCurrent: () => Promise<EmployeeAgentTransferReceipt>) {
+    const transferId = validateEmployeeAgentTransferPackage(raw).ticket.transferId;
+    const run = (importTails.get(transferId) ?? Promise.resolve()).then(() => importCommittedOnce(raw, remoteReceipt, review, confirmCurrent));
+    const tail = run.catch(() => undefined); importTails.set(transferId, tail);
+    void tail.then(() => { if (importTails.get(transferId) === tail) importTails.delete(transferId); });
+    return run;
+  }
+  async function importCommittedOnce(raw: unknown, remoteReceipt: EmployeeAgentTransferReceipt,
     review: (value: EmployeeAgentTransferPackage) => Promise<{ assertCurrent(): void }>, confirmCurrent: () => Promise<EmployeeAgentTransferReceipt>) {
     const value = validateEmployeeAgentTransferPackage(raw), ticket = value.ticket, digest = employeeAgentTransferDigest(value);
     targetPackage(value); if (!employeeAgentTransferReceiptMatches(remoteReceipt, value)) fail('receipt_changed'); schema();
@@ -214,6 +259,14 @@ export function createEmployeeAgentTransferCustody(input: EmployeeAgentTransferC
       agentId: ticket.target.agentId, localState: 'installed', companyState: 'committed', fileCount: value.files.length });
     if (existing) {
       if (existing.kind !== 'import' || existing.package_digest !== digest || existing.association_id !== owner().associationId) fail('idempotency_conflict');
+      if (existing.state === 'claimed' || existing.state === 'unknown') {
+        // Only this transfer's own folder may be rebuilt; a row that points anywhere else is not something this code wrote.
+        const own = input.userDataPath('business-agent-transfers', ticket.target.agentId);
+        if (!existing.root_path || existing.root_path !== own || !path.isAbsolute(own)) fail('import_effect_unknown');
+        try { await resumeImport(value, own, confirmCurrent); }
+        catch (error) { input.db.prepare("UPDATE one_business_agent_transfers SET state='unknown' WHERE transfer_id=? AND kind='import' AND state='claimed'").run(ticket.transferId); throw error; }
+        return localReceipt();
+      }
       if (existing.state !== 'installed' || !existing.root_path) fail('import_effect_unknown');
       if (!employeeAgentTransferReceiptMatches(await confirmCurrent(), value)) fail('receipt_changed');
       importedReadback(value, existing.root_path); return localReceipt();
@@ -226,18 +279,7 @@ export function createEmployeeAgentTransferCustody(input: EmployeeAgentTransferC
     input.db.prepare("INSERT INTO one_business_agent_transfers VALUES(?,?,'import','claimed',?,?,NULL,?,?)")
       .run(ticket.transferId, owner().associationId, digest, canonical(value), root, canonical(remoteReceipt));
     try {
-      targetPackage(value); approval.assertCurrent(); sameDirectory(parent, parentPin); fs.mkdirSync(root, { mode: 0o700 }); const rootPin = directory(root);
-      const files = [...value.files, { path: 'agentlas.json', content: canonical({ agentId: ticket.target.agentId, entry: ticket.files.find(f => f.kind === 'definition')!.path }) }];
-      for (const file of files) {
-        targetPackage(value); approval.assertCurrent(); sameDirectory(root, rootPin); sameDirectory(parent, parentPin);
-        let folder = root;
-        for (const component of file.path.split('/').slice(0, -1)) {
-          folder = path.join(folder, component); if (!fs.existsSync(folder)) fs.mkdirSync(folder, { mode: 0o700 }); directory(folder);
-        }
-        const fd = fs.openSync(path.join(root, file.path), fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | (fs.constants.O_NOFOLLOW ?? 0), 0o600);
-        try { targetPackage(value); approval.assertCurrent(); sameDirectory(root, rootPin); directory(folder); fs.writeFileSync(fd, file.content, 'utf8'); fs.fsyncSync(fd); }
-        finally { fs.closeSync(fd); }
-      }
+      writeImportFiles(value, root, parentPin, () => { targetPackage(value); approval.assertCurrent(); });
       if (!employeeAgentTransferReceiptMatches(await confirmCurrent(), value)) fail('receipt_changed'); targetPackage(value); approval.assertCurrent();
       await input.install(value, root); importedReadback(value, root); targetPackage(value); approval.assertCurrent();
       input.db.prepare("UPDATE one_business_agent_transfers SET state='installed' WHERE transfer_id=? AND kind='import' AND state='claimed' AND package_digest=?").run(ticket.transferId, digest);

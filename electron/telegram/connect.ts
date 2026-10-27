@@ -177,13 +177,23 @@ interface Poller {
   running: boolean;
   /** 방(=바인딩)마다 하나씩 도는 작업 줄. 폴링 루프는 여기에 넣기만 하고 기다리지 않는다. */
   lanes: Map<string, Promise<void>>;
+  /** Why this poller was stopped, set before it aborts. Only a "shutdown" leaves a cut-short turn's inbound row for the next start to announce. */
+  stopReason?: TelegramWorkerStopReason;
+  /** Updates whose turn was cut short by that shutdown: their durable rows stay (inbound-queue.ts). */
+  interrupted?: Set<number>;
 }
+
+/** shutdown = the app quits or updates (default); disconnect = this binding was removed or paused; logout = the account changed. */
+export type TelegramWorkerStopReason = "shutdown" | "disconnect" | "logout";
 
 const TELEGRAM_SECRET_SCOPE = "telegram.bot-token";
 const TELEGRAM_WEB_PARTITION = "persist:agentlas-telegram-connect";
 const BOTFATHER_WEB_URL = "https://web.telegram.org/k/#@BotFather";
 const pollers = new Map<string, Poller>();
 let reconcileInFlight: Promise<void> | null = null;
+let reconcileFollowUp: Promise<void> | null = null;
+/** `${pollerKey}:${updateId}` of every update whose turn is running in THIS process (its durable row says "handling" once it has acted). */
+const handlingInThisProcess = new Set<string>();
 let telegramWorkerGeneration = 0;
 const TELEGRAM_REQUEST_TIMEOUT_MS = readPositiveTimeoutMs(
   process.env.AGENTLAS_TELEGRAM_REQUEST_TIMEOUT_MS,
@@ -241,6 +251,8 @@ const TELEGRAM_COPY = {
     "run.started": "시작했어요. 웹/파일 제작은 몇 분 걸릴 수 있습니다. 끝나면 이 방에 결과 경로와 여는 방법을 보냅니다.",
     "run.working": "받았어요. 지금 작업 중입니다 — 몇 분 걸릴 수 있어요. 끝나면 이 방에 결과를 보냅니다.",
     "run.timeout": "작업이 너무 오래 걸려 자동으로 멈췄습니다. 이 방에 \"계속 진행해\"라고 보내면 같은 세션에서 이어갈 수 있습니다.",
+    "run.interrupted_by_restart": "앱이 종료되거나 업데이트되어 직전 요청이 끝나기 전에 멈췄습니다. 같은 요청을 한 번 더 보내 주세요.",
+    "run.reply_undelivered": "작업은 끝났지만 결과를 이 방으로 보내지 못했습니다. Agentlas 데스크탑 대화에서 확인해 주세요.",
     "attachment.default_prompt": "첨부 파일을 확인해줘.",
     "attachment.too_large": "첨부 파일이 너무 큽니다: {name}. Telegram에서 받을 수 있는 안전 한도는 {limit}MB입니다.",
     "attachment.download_failed": "첨부 파일을 내려받지 못했습니다: {message}",
@@ -356,6 +368,8 @@ const TELEGRAM_COPY = {
     "run.started": "Started. Website/file creation can take a few minutes. I will send the result path and how to open it here when it finishes.",
     "run.working": "Got it. Working on it now — this can take a few minutes. I will send the result here when it's done.",
     "run.timeout": "The run took too long and was stopped automatically. Send \"continue\" in this chat to resume the same session.",
+    "run.interrupted_by_restart": "The app closed or updated while your last request was running, so it stopped before finishing. Please send the same request again.",
+    "run.reply_undelivered": "The work finished, but the result could not be sent to this chat. Please check it in the Agentlas desktop conversation.",
     "attachment.default_prompt": "Please inspect the attached file.",
     "attachment.too_large": "The attachment is too large: {name}. The safe Telegram download limit is {limit}MB.",
     "attachment.download_failed": "Could not download the attachment: {message}",
@@ -460,7 +474,13 @@ type TelegramInvocationMode = {
 class TelegramRequestTimeoutError extends Error {}
 /** Bot API 가 거절한 요청. 판정은 설명 문장이 아니라 error_code 로 한다. */
 class TelegramApiError extends Error {
-  constructor(message: string, readonly method: string, readonly errorCode: number | null) {
+  constructor(
+    message: string,
+    readonly method: string,
+    readonly errorCode: number | null,
+    /** Bot API `parameters.retry_after` (seconds) on a 429: the machine field, never the description text. */
+    readonly retryAfterSec: number | null = null,
+  ) {
     super(message);
   }
 }
@@ -692,12 +712,17 @@ async function readBindingSecret(id: string): Promise<string | null> {
       return token;
     }
   } catch (err) {
+    // Terminal 이 만든 행의 비밀은 Keychain 이 아니라 0600 파일이다 — Keychain 읽기 실패가 연결을 죽이지 않는다.
+    if (hasTerminalTelegramTokenCandidate(id)) return null;
     cancelTelegramBindingInvocation(id);
     getDb()
       .prepare("UPDATE telegram_bindings SET token_saved = 0, status = 'failed', last_error = ?, updated_at = ? WHERE id = ?")
       .run((err instanceof Error ? err.message : String(err)).slice(0, 1000), nowIso(), id);
     return null;
   }
+  // Terminal 바인딩은 token_saved=1 이어도 명시적 import 전까지 비밀이 Keychain 에 없다. 'missing keychain' 으로
+  // 굳히면 Terminal 의 `connect pair` 가 영원히 귀속하지 못하고 import 복구도 가려진다 — 폴링 대상에서만 뺀다.
+  if (hasTerminalTelegramTokenCandidate(id)) return null;
   markTokenMissing(id);
   return null;
 }
@@ -841,10 +866,16 @@ async function telegramApi<T>(
     const json = await Promise.race([
       res.json().catch(() => null),
       aborted,
-    ]) as { ok?: boolean; result?: T; description?: string; error_code?: number } | null;
+    ]) as { ok?: boolean; result?: T; description?: string; error_code?: number; parameters?: { retry_after?: number } } | null;
     if (!res.ok || !json?.ok) {
       const errorCode = typeof json?.error_code === "number" ? json.error_code : res.status || null;
-      throw new TelegramApiError(json?.description || `Telegram ${method} failed (${res.status})`, method, errorCode);
+      const retryAfter = json?.parameters?.retry_after;
+      throw new TelegramApiError(
+        json?.description || `Telegram ${method} failed (${res.status})`,
+        method,
+        errorCode,
+        typeof retryAfter === "number" && Number.isFinite(retryAfter) && retryAfter >= 0 ? retryAfter : null,
+      );
     }
     return json.result as T;
   } finally {
@@ -1477,7 +1508,16 @@ async function activeBindingSecrets(): Promise<Array<{ row: TelegramBindingRow; 
 }
 
 export async function reconcileTelegramWorkers(): Promise<void> {
-  if (reconcileInFlight) return reconcileInFlight;
+  if (reconcileInFlight) {
+    // The pass in flight reads the bindings once, at its start (the keychain read can take a while): a binding saved,
+    // resumed or removed after that is not in it. One more pass follows it, and every caller that came in meanwhile waits
+    // for that pass — their change is reflected when their promise resolves, not at the next unrelated trigger.
+    reconcileFollowUp ??= reconcileInFlight.catch(() => undefined).then(() => {
+      reconcileFollowUp = null;
+      return reconcileTelegramWorkers();
+    });
+    return reconcileFollowUp;
+  }
   reconcileInFlight = reconcileTelegramWorkersOnce().finally(() => {
     reconcileInFlight = null;
   });
@@ -1505,6 +1545,7 @@ async function reconcileTelegramWorkersOnce(): Promise<void> {
       if (!next?.bindingIds.has(bindingId)) cancelTelegramBindingInvocation(bindingId);
     }
     if (!next) {
+      poller.stopReason ??= "disconnect";
       poller.controller.abort();
       pollers.delete(key);
     } else {
@@ -1520,6 +1561,7 @@ async function reconcileTelegramWorkersOnce(): Promise<void> {
       controller: new AbortController(),
       running: true,
       lanes: new Map(),
+      interrupted: new Set(),
     };
     pollers.set(key, poller);
     void pollTelegram(poller).catch((err) => {
@@ -1534,8 +1576,10 @@ async function reconcileTelegramWorkersOnce(): Promise<void> {
   }
 }
 
-export function stopTelegramWorkers(): void {
+export function stopTelegramWorkers(reason: TelegramWorkerStopReason = "shutdown"): void {
   telegramWorkerGeneration += 1;
+  // The reason is on the poller before any turn is cancelled: a cancelled turn reads it to know whether its inbound row stays.
+  for (const poller of pollers.values()) poller.stopReason ??= reason;
   for (const bindingId of activeTelegramInvocationByBinding.keys()) cancelTelegramBindingInvocation(bindingId);
   for (const poller of pollers.values()) poller.controller.abort();
   pollers.clear();
@@ -1546,11 +1590,20 @@ async function pollTelegram(poller: Poller): Promise<void> {
   // Messages an earlier process accepted (offset already saved) but never started handling: their rooms take them now,
   // in arrival order, before anything new (inbound-queue.ts). A message whose handling had started is not run twice.
   try {
-    const pending = takeReplayableTelegramInbound(getDb(), telegramPollerKey(poller.token));
-    if (pending.clearedHandling || pending.clearedExpired) {
-      console.warn("[telegram] inbound rows from an earlier process were not replayed", { handling: pending.clearedHandling, expired: pending.clearedExpired });
+    const pollerKey = telegramPollerKey(poller.token);
+    const pending = takeReplayableTelegramInbound(getDb(), pollerKey, Date.now(), { keepInterrupted: true });
+    // A turn this very process is still ending (an earlier poller of the same bot being replaced) is not an interrupted one.
+    const interrupted = pending.interrupted.filter((row) => !handlingInThisProcess.has(`${pollerKey}:${row.updateId}`));
+    if (interrupted.length || pending.clearedExpired) {
+      console.warn("[telegram] inbound rows from an earlier process were not replayed", { handling: interrupted.length, expired: pending.clearedExpired });
     }
-    for (const item of pending.replay) enqueueTelegramUpdate(poller, item.update as TelegramUpdate, { persisted: true });
+    // A row still queued whose turn THIS process is handling (before its first effect the row stays queued) is not replayed a second time.
+    for (const item of pending.replay) {
+      if (handlingInThisProcess.has(`${pollerKey}:${item.updateId}`)) continue;
+      enqueueTelegramUpdate(poller, item.update as TelegramUpdate, { persisted: true });
+    }
+    // The turns that had started and were cut off (quit, update, crash) are not run again, but the owner was promised a result.
+    if (interrupted.length) void announceInterruptedTelegramTurns(poller, interrupted).catch(logTelegramUpdateFailure);
   } catch (error) {
     console.warn("[telegram] inbound replay unavailable:", maskTelegramSecrets(error instanceof Error ? error.message : String(error)));
   }
@@ -1600,6 +1653,40 @@ async function pollTelegram(poller: Poller): Promise<void> {
   }
 }
 
+/**
+ * Turns an earlier process had started and never finished (the app quit or updated, or crashed) are not run a second time —
+ * they may already have acted — but the owner was told "I will send the result", so they hear once that it stopped. The
+ * inbound row is cleared once the notice is delivered or can never be (the room is gone, the bot was blocked, the sender was
+ * not the paired owner); a notice that failed for a transient cause, or was cancelled, leaves the row for the next start
+ * (the 24 h replay window bounds it).
+ */
+async function announceInterruptedTelegramTurns(
+  poller: Poller,
+  rows: Array<{ updateId: number; chatKey: string; update: unknown }>,
+): Promise<void> {
+  const pollerKey = telegramPollerKey(poller.token);
+  const rooms = new Map<string, { updateIds: number[]; message: TelegramMessage | null }>();
+  for (const row of rows) {
+    const room = rooms.get(row.chatKey) ?? { updateIds: [], message: null };
+    room.updateIds.push(row.updateId);
+    room.message ??= (row.update as TelegramUpdate | null)?.message ?? null;
+    rooms.set(row.chatKey, room);
+  }
+  for (const [chatKey, room] of rooms) {
+    let settled = true;
+    const binding = room.message ? findBindingForChat([...poller.bindingIds], chatKey) : null;
+    if (binding && room.message && telegramSenderAuthorized(binding, room.message.chat, room.message.from?.id)) {
+      const locale = telegramHostLocale(room.message, telegramMessageText(room.message));
+      const delivery = await sendTelegramTextReliably(poller.token, chatKey, tg("run.interrupted_by_restart", {}, locale), poller.controller.signal);
+      settled = !delivery.error || (!poller.controller.signal.aborted && !isTransientTelegramSendError(delivery.error));
+    }
+    if (!settled) continue;
+    for (const updateId of room.updateIds) {
+      try { finishTelegramInbound(getDb(), pollerKey, updateId); } catch (error) { logTelegramUpdateFailure(error); }
+    }
+  }
+}
+
 function commandSyncApi(token: string): TelegramCommandSyncApi {
   return { call: (method, payload) => telegramApi(token, method, payload) };
 }
@@ -1644,9 +1731,21 @@ function enqueueTelegramUpdate(poller: Poller, update: TelegramUpdate, options: 
     .then(() => {
       // Aborted before its turn (the poller stopped): the row stays queued and the next poller start delivers it.
       if (poller.controller.signal.aborted) return undefined;
-      if (durable) { try { markTelegramInboundHandling(getDb(), pollerKey, update.update_id); } catch (error) { logTelegramUpdateFailure(error); } }
-      return handleTelegramUpdate(poller, update).finally(() => {
-        if (durable) { try { finishTelegramInbound(getDb(), pollerKey, update.update_id); } catch (error) { logTelegramUpdateFailure(error); } }
+      const handlingKey = `${pollerKey}:${update.update_id}`;
+      handlingInThisProcess.add(handlingKey);
+      // The row turns "handling" (never replayed) only where the update first ACTS, not when its lane picks it up: the judges, the
+      // attachment download, the acknowledgement and the start retries before it have no effect, and a quit, update or crash in them
+      // must leave the owner's message queued for the next start instead of dropping it (inbound-queue.ts).
+      let handlingMarked = false;
+      const markHandling = (): void => {
+        if (!durable || handlingMarked) return;
+        handlingMarked = true;
+        try { markTelegramInboundHandling(getDb(), pollerKey, update.update_id); } catch (error) { logTelegramUpdateFailure(error); }
+      };
+      return handleTelegramUpdate(poller, update, markHandling).finally(() => {
+        handlingInThisProcess.delete(handlingKey);
+        // A turn the app's shutdown cut short keeps its row: the next start tells the owner it stopped, then clears it.
+        if (durable && !poller.interrupted?.has(update.update_id)) { try { finishTelegramInbound(getDb(), pollerKey, update.update_id); } catch (error) { logTelegramUpdateFailure(error); } }
       });
     })
     .catch(logTelegramUpdateFailure)
@@ -1671,7 +1770,8 @@ function telegramDispatchDeps(
     resetConversation: async (bindingId) => {
       await resetTelegramConversation(bindingId);
     },
-    cancelActiveRun: cancelTelegramBindingInvocation,
+    // The owner's /stop: the turn ends quietly (its abort reason says so), whatever phase it is in.
+    cancelActiveRun: (bindingId) => cancelTelegramBindingInvocation(bindingId, new TelegramOwnerStop()),
     isRunning: (bindingId) => activeTelegramInvocationByBinding.has(bindingId),
     setDesignatedProject: setTelegramDesignatedProject,
     setDesignatedGraph: setTelegramDesignatedGraph,
@@ -1753,8 +1853,9 @@ function markUpdateSeen(bindingIds: string[], updateId: number): void {
     .run(updateId, nowIso(), ...bindingIds);
 }
 
-async function handleTelegramUpdate(poller: Poller, update: TelegramUpdate): Promise<void> {
+async function handleTelegramUpdate(poller: Poller, update: TelegramUpdate, markHandling?: () => void): Promise<void> {
   if (update.callback_query) {
+    markHandling?.(); // a pressed button acts at once
     await handleTelegramCallbackQuery(poller, update.callback_query);
     return;
   }
@@ -1764,6 +1865,7 @@ async function handleTelegramUpdate(poller: Poller, update: TelegramUpdate): Pro
   const chatId = String(message.chat.id);
   let binding = findBindingForChat([...poller.bindingIds], chatId);
   if (!binding) {
+    markHandling?.(); // pairing changes the binding: the handshake is never run twice
     // 보안: 선착순 귀속 금지. `/start <bindingId>` 토큰이 일치하는 미페어링 바인딩만 귀속한다.
     // bindingId는 randomUUID(추측 불가)이고 앱의 텔레그램 세션만 이 토큰을 실어 보낸다.
     const paired =
@@ -1790,6 +1892,7 @@ async function handleTelegramUpdate(poller: Poller, update: TelegramUpdate): Pro
     if (!binding || /^\/start(?:@\w+)?(?:\s|$)/i.test(text)) return;
   }
   if (!resolveTarget(binding.target_kind, binding.target_id, false)) {
+    markHandling?.();
     disableMissingTargetBinding(binding.id);
     await telegramApi(poller.token, "sendMessage", {
       chat_id: chatId,
@@ -1831,6 +1934,7 @@ async function handleTelegramUpdate(poller: Poller, update: TelegramUpdate): Pro
     return;
   }
   if (parsed.kind === "known") {
+    markHandling?.(); // a command acts (resets, designates, toggles): never run twice
     const commandLocale = commandReplyLocale(message, cleanedForCommand);
     const outcome = await dispatchTelegramCommand(
       parsed,
@@ -1850,8 +1954,60 @@ async function handleTelegramUpdate(poller: Poller, update: TelegramUpdate): Pro
     forcedWriteText = outcome.text;
   }
 
+  // The message is accepted as a turn: from here until it ends, /stop and /status see it — not only once its run has started
+  // (the judge calls and the attachment download below can take minutes, and a /stop in that time used to be answered "nothing to stop").
+  const turn = beginTelegramBindingTurn(binding.id, poller);
+  try {
+    await handleTelegramMessageTurn(poller, binding, message, text, forcedWriteText, turn, markHandling);
+  } finally {
+    turn.dispose();
+    // A turn the app's shutdown cut short keeps its durable inbound row: the next start tells the owner it stopped (inbound-queue.ts).
+    if (turn.signal.aborted && poller.stopReason === "shutdown") poller.interrupted?.add(update.update_id);
+  }
+}
+
+interface TelegramTurnHandle {
+  controller: AbortController;
+  signal: AbortSignal;
+  /** /stop and /status stop seeing the turn (idempotent). The poller's own abort still reaches it until dispose. */
+  release: () => void;
+  dispose: () => void;
+}
+
+/** Owns the whole turn of one accepted message — intake judgment, attachment download, the run, the reply. No elapsed-time cap. */
+function beginTelegramBindingTurn(bindingId: string, poller: Poller): TelegramTurnHandle {
+  const controller = new AbortController();
+  const onPollerAbort = () => controller.abort(poller.controller.signal.reason);
+  if (poller.controller.signal.aborted) onPollerAbort();
+  else poller.controller.signal.addEventListener("abort", onPollerAbort, { once: true });
+  activeTelegramInvocationByBinding.set(bindingId, controller);
+  const release = () => {
+    if (activeTelegramInvocationByBinding.get(bindingId) === controller) activeTelegramInvocationByBinding.delete(bindingId);
+  };
+  return {
+    controller,
+    signal: controller.signal,
+    release,
+    dispose: () => {
+      poller.controller.signal.removeEventListener("abort", onPollerAbort);
+      release();
+    },
+  };
+}
+
+async function handleTelegramMessageTurn(
+  poller: Poller,
+  binding: TelegramBindingRow,
+  message: TelegramMessage,
+  text: string,
+  forcedWriteText: string,
+  turn: TelegramTurnHandle,
+  markHandling?: () => void,
+): Promise<void> {
+  const signal = turn.signal;
   const clean = forcedWriteText || cleanTelegramPrompt(binding, text) || tg("attachment.default_prompt");
   if (!clean) return;
+  const chatId = String(message.chat.id);
   // The resident judge decides whether this is an automation-report control
   // command (enable/disable/status) by meaning, in any language. The wordlist
   // predicates are only the judge's hint: with NO connected model we never
@@ -1859,9 +2015,11 @@ async function handleTelegramUpdate(poller: Poller, update: TelegramUpdate): Pro
   // /write 는 사용자가 이미 명시적으로 정한 것이라 판정을 다시 돌리지 않는다.
   const reportIntent = forcedWriteText
     ? ({ intent: "none" as const, source: "fallback" as const })
-    : await resolveTelegramAutomationReportIntent(clean).catch(
+    : await awaitTelegramInvocation(resolveTelegramAutomationReportIntent(clean, { signal }), signal).catch(
       () => ({ intent: "none" as const, source: "fallback" as const }),
     );
+  // /stop (or a shutdown / disconnect) arrived while the judge was thinking: the message is not run, and no judge verdict acts.
+  if (signal.aborted) return;
   // A model verdict or an exact /reports command decides; a fallback (no model) never acts.
   const decided = reportIntent.source === "llm" || reportIntent.source === "command";
   if (decided && reportIntent.intent === "status") {
@@ -1872,6 +2030,7 @@ async function handleTelegramUpdate(poller: Poller, update: TelegramUpdate): Pro
     return;
   }
   if (decided && reportIntent.intent === "disable") {
+    markHandling?.();
     setAutomationReportEnabled(binding.id, false);
     await telegramApi(poller.token, "sendMessage", {
       chat_id: chatId,
@@ -1880,6 +2039,7 @@ async function handleTelegramUpdate(poller: Poller, update: TelegramUpdate): Pro
     return;
   }
   if (decided && reportIntent.intent === "enable") {
+    markHandling?.();
     setAutomationReportEnabled(binding.id, true);
     await telegramApi(poller.token, "sendMessage", {
       chat_id: chatId,
@@ -1890,8 +2050,10 @@ async function handleTelegramUpdate(poller: Poller, update: TelegramUpdate): Pro
   await telegramApi(poller.token, "sendChatAction", { chat_id: chatId, action: "typing" }).catch(() => undefined);
   let attachments: TelegramRuntimeAttachment[] = [];
   try {
-    attachments = await downloadTelegramAttachments(poller.token, binding, message, poller.controller.signal);
+    attachments = await downloadTelegramAttachments(poller.token, binding, message, signal);
   } catch (err) {
+    // A stop or shutdown that cut the download short is not a failed attachment.
+    if (signal.aborted) return;
     const msg = err instanceof Error ? err.message : String(err);
     // 첨부 하나가 크거나 늦은 것은 이 메시지의 실패다. 연결을 끊지 않는다.
     markBindingTransientError(binding.id, msg);
@@ -1907,9 +2069,11 @@ async function handleTelegramUpdate(poller: Poller, update: TelegramUpdate): Pro
   // write; the make-verb wordlist survives only as the judge's hint.
   const mode = forcedWriteText
     ? telegramWriteMode()
-    : await resolveTelegramInvocationMode(cleanWithAttachments).catch(
+    : await awaitTelegramInvocation(resolveTelegramInvocationMode(cleanWithAttachments, signal), signal).catch(
       () => TELEGRAM_READ_ONLY_MODE,
     );
+  // Stopped while the mode was being judged: nothing was started, so nothing is acknowledged or run.
+  if (signal.aborted) return;
   // 응답 언어는 사용자가 보낸 메시지의 언어를 따른다(앱 UI 로케일 무시).
   // 비율이 아니라 "한글이 있는가"로 본다 — 파일명이 섞였다고 영어로 답하면 안 된다.
   const replyLocale = telegramHostLocale(message, clean);
@@ -1927,31 +2091,149 @@ async function handleTelegramUpdate(poller: Poller, update: TelegramUpdate): Pro
     text: mode.permissions === "write" ? tg("run.started", {}, replyLocale) : tg("run.working", {}, replyLocale),
   }).catch(() => undefined);
   // 실행 내내 typing(…) 표시를 살려둔다(텔레그램은 ~5초면 꺼지므로 주기적으로 재전송).
-  const stopTyping = startTypingKeepAlive(poller.token, chatId, poller.controller.signal);
+  const stopTyping = startTypingKeepAlive(poller.token, chatId, signal);
   try {
-    const finalText = await runBindingInvocation(binding, message, cleanWithAttachments, mode, attachments, replyLocale, poller.controller.signal);
+    let finalText: string;
+    try {
+      finalText = await runBindingInvocation(binding, message, cleanWithAttachments, mode, attachments, replyLocale, undefined, turn.controller, markHandling);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      // The owner's own /stop already got its answer ("stop requested"): it is not a failed run, and nothing more is sent.
+      if (signal.reason instanceof TelegramOwnerStop && !poller.controller.signal.aborted && poller.bindingIds.has(binding.id)) {
+        markBindingRunStopped(binding.id, statusBeforeRun);
+        return;
+      }
+      // 실행 한 번의 실패(취소·모델 거절·빈 답)는 연결의 끝이 아니다. failed 로 적으면
+      // 다음 reconcile 이 폴러를 지워 봇이 영영 답하지 않는다(markBindingTransientError 주석 참고).
+      markBindingRunFailed(binding.id, msg, statusBeforeRun);
+      if (poller.controller.signal.aborted || !poller.bindingIds.has(binding.id)) return;
+      const text = tg("error.run_failed", { message: msg }, replyLocale);
+      await telegramApi(poller.token, "sendMessage", { chat_id: chatId, text }).catch(() => undefined);
+      return;
+    }
+    // The run has ended, so Stop has nothing left to cancel; the reply is delivered under the poller's own signal.
+    stopTyping();
+    turn.release();
     if (poller.controller.signal.aborted || !poller.bindingIds.has(binding.id)) {
       markBindingRunFailed(binding.id, "Telegram invocation cancelled", statusBeforeRun);
       return;
     }
-    await sendLongMessage(poller.token, chatId, finalText);
+    // Sending the answer is not the run: a 429 or a dropped connection here must not turn a finished run into "run failed",
+    // and must not lose the answer after one try (telegram_reply_undelivered).
+    const delivery = await sendTelegramTextReliably(poller.token, chatId, finalText, poller.controller.signal);
+    if (delivery.error) {
+      if (poller.controller.signal.aborted || !poller.bindingIds.has(binding.id)) {
+        markBindingRunFailed(binding.id, "Telegram invocation cancelled", statusBeforeRun);
+        return;
+      }
+      const failure = describeTelegramReplyUndelivered(delivery);
+      console.warn("[telegram] final reply not delivered", failure.log);
+      markBindingRunFailed(binding.id, failure.lastError, statusBeforeRun);
+      await sendTelegramTextReliably(poller.token, chatId, tg("run.reply_undelivered", {}, replyLocale), poller.controller.signal);
+      return;
+    }
     // A full inbound → reply round trip just succeeded: that is the verified connection, whatever the message said
     // (native-harness notyet NH25: the message's words never pick the status).
     const nextStatus: TelegramConnectStatus = "test_passed";
     getDb()
       .prepare("UPDATE telegram_bindings SET status = ?, last_error = NULL, last_test_at = ?, updated_at = ? WHERE id = ?")
       .run(nextStatus, nowIso(), nowIso(), binding.id);
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    // 실행 한 번의 실패(취소·모델 거절·빈 답)는 연결의 끝이 아니다. failed 로 적으면
-    // 다음 reconcile 이 폴러를 지워 봇이 영영 답하지 않는다(markBindingTransientError 주석 참고).
-    markBindingRunFailed(binding.id, msg, statusBeforeRun);
-    if (poller.controller.signal.aborted || !poller.bindingIds.has(binding.id)) return;
-    const text = tg("error.run_failed", { message: msg }, replyLocale);
-    await telegramApi(poller.token, "sendMessage", { chat_id: chatId, text }).catch(() => undefined);
   } finally {
     stopTyping();
   }
+}
+
+/** The owner's own /stop: the abort reason of a turn, so the turn can tell it from a shutdown or a removed binding. */
+class TelegramOwnerStop extends Error {
+  constructor() {
+    super("Telegram invocation cancelled");
+    this.name = "TelegramOwnerStop";
+  }
+}
+
+const TELEGRAM_REPLY_UNDELIVERED_CODE = "telegram_reply_undelivered";
+
+interface TelegramDelivery {
+  /** Pieces the Bot API accepted (a piece is never sent twice). */
+  delivered: number;
+  total: number;
+  error: unknown | null;
+}
+
+/** Waits that outlast this are not slept through inside one turn: the answer is reported undelivered with the real cause. */
+const TELEGRAM_SEND_RETRY_AFTER_CAP_MS = 120_000;
+const TELEGRAM_SEND_MAX_RETRIES = 6;
+
+/**
+ * Whether a failed send is worth another try, and after how long. A 429 waits exactly the Bot API's own `retry_after`
+ * field; a dropped connection or timeout and a 5xx wait on the shared backoff ladder; any other API answer (400 bad
+ * request, 403 bot blocked, 404 chat gone) is final. null = final.
+ */
+function telegramSendRetryDelayMs(error: unknown, retry: number): number | null {
+  if (error instanceof TelegramApiError) {
+    if (error.errorCode === 429) {
+      const waitMs = (error.retryAfterSec ?? 1) * 1000 + 250;
+      return waitMs > TELEGRAM_SEND_RETRY_AFTER_CAP_MS ? null : waitMs;
+    }
+    return error.errorCode !== null && error.errorCode >= 500 ? transientSendBackoffMs(retry + 2) : null;
+  }
+  return transientSendBackoffMs(retry + 2);
+}
+
+/** A cause that may clear by itself (rate limit, outage, dropped connection) as opposed to a final API answer (bot blocked, chat gone). */
+function isTransientTelegramSendError(error: unknown): boolean {
+  if (error instanceof TelegramApiError) return error.errorCode === 429 || (error.errorCode !== null && error.errorCode >= 500);
+  return true;
+}
+
+/**
+ * sendLongMessage with the failures a Telegram send really has handled in one place: each 3800-char piece is retried on a
+ * 429 (after the server's retry_after) or a network error (backoff), up to TELEGRAM_SEND_MAX_RETRIES times, and the retry
+ * wait is cancelled by `signal`. A piece the Bot API accepted is never sent again. Never throws: the outcome says how far
+ * it got and why it stopped.
+ */
+async function sendTelegramTextReliably(
+  token: string,
+  chatId: string,
+  text: string,
+  signal: AbortSignal,
+  markup?: InlineKeyboardMarkup,
+): Promise<TelegramDelivery> {
+  const chunks = chunkText(text, 3800);
+  const outcome: TelegramDelivery = { delivered: 0, total: chunks.length, error: null };
+  for (const [index, chunk] of chunks.entries()) {
+    const withMarkup = markup && index === chunks.length - 1 ? { reply_markup: markup } : {};
+    for (let retry = 0; ; retry += 1) {
+      try {
+        if (signal.aborted) throw signal.reason instanceof Error ? signal.reason : new Error("Telegram send cancelled");
+        await telegramApi(token, "sendMessage", { chat_id: chatId, text: chunk, ...withMarkup }, signal);
+        outcome.delivered += 1;
+        break;
+      } catch (error) {
+        const waitMs = signal.aborted || retry >= TELEGRAM_SEND_MAX_RETRIES ? null : telegramSendRetryDelayMs(error, retry);
+        if (waitMs === null) {
+          outcome.error = error;
+          return outcome;
+        }
+        await delay(waitMs, signal);
+      }
+    }
+  }
+  return outcome;
+}
+
+/** The typed cause of an undelivered final answer: a code first, then the numbers, then the Bot API's own words. */
+function describeTelegramReplyUndelivered(delivery: TelegramDelivery): { lastError: string; log: Record<string, unknown> } {
+  const error = delivery.error;
+  const api = error instanceof TelegramApiError ? error : null;
+  const message = maskTelegramSecrets(error instanceof Error ? error.message : String(error));
+  const parts = [`${delivery.delivered}/${delivery.total} pieces sent`];
+  if (api?.errorCode != null) parts.push(`http ${api.errorCode}`);
+  if (api?.retryAfterSec != null) parts.push(`retry_after ${api.retryAfterSec}s`);
+  return {
+    lastError: `${TELEGRAM_REPLY_UNDELIVERED_CODE} (${parts.join(", ")}): ${message}`.slice(0, 1000),
+    log: { code: TELEGRAM_REPLY_UNDELIVERED_CODE, delivered: delivery.delivered, total: delivery.total, errorCode: api?.errorCode ?? null, retryAfterSec: api?.retryAfterSec ?? null, transient: isTransientTelegramSendError(error) },
+  };
 }
 
 // 실행이 끝날 때까지 typing 액션을 주기적으로 재전송한다. 텔레그램 typing은 약 5초 후
@@ -2405,8 +2687,8 @@ const TELEGRAM_READ_ONLY_MODE: TelegramInvocationMode = { permissions: "read", g
  * (the write wordlist survives only as the judge's hint inside
  * resolveTelegramGoalIntent).
  */
-async function resolveTelegramInvocationMode(userText: string): Promise<TelegramInvocationMode> {
-  const judged = await resolveTelegramGoalIntent(userText);
+async function resolveTelegramInvocationMode(userText: string, signal?: AbortSignal): Promise<TelegramInvocationMode> {
+  const judged = await resolveTelegramGoalIntent(userText, { signal });
   if (judged.source !== "llm") return TELEGRAM_READ_ONLY_MODE;
   return judged.write ? telegramWriteMode() : TELEGRAM_READ_ONLY_MODE;
 }
@@ -2456,12 +2738,12 @@ const activeOneRunByBinding = new Map<string, string>();
 /** Owns the full Telegram turn, including preflight and a transient start retry. No elapsed-time cap. */
 const activeTelegramInvocationByBinding = new Map<string, AbortController>();
 // Account logout/replacement revokes remote work before any asynchronous credential cleanup.
-onAuthSessionOwnershipChanged(stopTelegramWorkers);
+onAuthSessionOwnershipChanged(() => stopTelegramWorkers("logout"));
 
-function cancelTelegramBindingInvocation(bindingId: string): boolean {
+function cancelTelegramBindingInvocation(bindingId: string, reason: Error = new Error("Telegram invocation cancelled")): boolean {
   const controller = activeTelegramInvocationByBinding.get(bindingId);
   if (!controller || controller.signal.aborted) return false;
-  controller.abort(new Error("Telegram invocation cancelled"));
+  controller.abort(reason);
   return true;
 }
 
@@ -2514,21 +2796,29 @@ async function runBindingInvocation(
   attachments: TelegramRuntimeAttachment[] = [],
   replyLocale: "ko" | "en" = detectReplyLocale(userText),
   signal?: AbortSignal,
+  /** The turn's controller when handleTelegramUpdate already registered it at intake: continued here, not replaced, and released by its owner. */
+  registered?: AbortController,
+  /** Called where the run first acts (the durable inbound row turns "handling", never replayed; see enqueueTelegramUpdate). */
+  markHandling?: () => void,
 ): Promise<string> {
-  const controller = new AbortController();
+  const controller = registered ?? new AbortController();
   const onAbort = () => controller.abort(signal?.reason);
-  if (signal?.aborted) onAbort();
-  else signal?.addEventListener("abort", onAbort, { once: true });
-  activeTelegramInvocationByBinding.set(binding.id, controller);
+  if (!registered) {
+    if (signal?.aborted) onAbort();
+    else signal?.addEventListener("abort", onAbort, { once: true });
+    activeTelegramInvocationByBinding.set(binding.id, controller);
+  }
   try {
     controller.signal.throwIfAborted();
     if (binding.target_kind === "one") {
-      return await runOneBindingInvocation(binding, message, userText, mode, attachments, replyLocale, controller.signal);
+      return await runOneBindingInvocation(binding, message, userText, mode, attachments, replyLocale, controller.signal, markHandling);
     }
-    return await runLegacyBindingInvocation(binding, message, userText, mode, attachments, replyLocale, controller.signal);
+    return await runLegacyBindingInvocation(binding, message, userText, mode, attachments, replyLocale, controller.signal, markHandling);
   } finally {
-    signal?.removeEventListener("abort", onAbort);
-    if (activeTelegramInvocationByBinding.get(binding.id) === controller) activeTelegramInvocationByBinding.delete(binding.id);
+    if (!registered) {
+      signal?.removeEventListener("abort", onAbort);
+      if (activeTelegramInvocationByBinding.get(binding.id) === controller) activeTelegramInvocationByBinding.delete(binding.id);
+    }
   }
 }
 
@@ -2546,6 +2836,7 @@ async function runOneBindingInvocation(
   attachments: TelegramRuntimeAttachment[],
   replyLocale: "ko" | "en",
   signal: AbortSignal,
+  markHandling?: () => void,
 ): Promise<string> {
   const chat = await ensureBindingChat(binding);
   signal.throwIfAborted();
@@ -2634,6 +2925,8 @@ async function runOneBindingInvocation(
         });
         runId = started.runId;
         activeOneRunByBinding.set(binding.id, runId);
+        // The run exists (the owner's words are in its transcript): from here on the message may have acted, so it is never replayed.
+        markHandling?.();
       } catch (error) {
         if (isTransientSendRefusal(error)) {
           retryTimer = setTimeout(() => startAttempt(attempt + 1), transientSendBackoffMs(attempt));
@@ -2656,12 +2949,14 @@ async function runLegacyBindingInvocation(
   attachments: TelegramRuntimeAttachment[],
   replyLocale: "ko" | "en",
   signal: AbortSignal,
+  markHandling?: () => void,
 ): Promise<string> {
   const chat = await ensureBindingChat(binding);
   signal.throwIfAborted();
   const surfaceContext = buildTelegramSurfaceContext(binding, message, mode);
   let finalFromEvents = "";
   let errorFromEvents = "";
+  markHandling?.(); // runMcpInvocation below is the first thing that acts
   const result = await awaitTelegramInvocation(runMcpInvocation({
     chatId: chat.id,
     userPrompt: userText,
@@ -2984,6 +3279,20 @@ function markBindingRunFailed(id: string, message: string, statusBeforeRun: Tele
        WHERE id = ?`,
     )
     .run(restored, message.slice(0, 1000), nowIso(), id);
+}
+
+/** The owner stopped the run themselves: 'running' goes back to the pre-run status and no error is recorded. */
+function markBindingRunStopped(id: string, statusBeforeRun: TelegramConnectStatus): void {
+  const restored: TelegramConnectStatus =
+    statusBeforeRun === "running" || statusBeforeRun === "failed" ? "chat_paired" : statusBeforeRun;
+  getDb()
+    .prepare(
+      `UPDATE telegram_bindings
+       SET status = CASE WHEN status = 'running' THEN ? ELSE status END,
+           last_error = CASE WHEN status = 'running' THEN NULL ELSE last_error END, updated_at = ?
+       WHERE id = ?`,
+    )
+    .run(restored, nowIso(), id);
 }
 
 function clearBindingError(id: string): void {

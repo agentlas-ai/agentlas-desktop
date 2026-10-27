@@ -8,6 +8,7 @@ import type { ChildProcess } from "node:child_process";
 import crypto from "node:crypto";
 import { StringDecoder } from "node:string_decoder";
 import { AcpSessionPool, type AcpSessionLease } from "./acp-session-pool";
+import { claimAttemptChild, releaseAttemptChild } from "./attempt-children";
 import { detachedSpawnOpts, killCliTree, spawnCli, markRunChildResident, trackRunChild, waitForCliTreeTermination } from "./exec";
 import { ensureChildCloseAfterExit } from "./runner";
 import { waitForRetiredCliExit } from "./retired-cli-exit";
@@ -177,13 +178,17 @@ export function antigravitySessionPool(): AcpSessionPool<AntigravityResidentSess
     sessionPool = new AcpSessionPool<AntigravityResidentSession>({
       alive: antigravityResidentSessionAlive,
       close: closeAntigravityResidentSession,
+      // A session returned to the pool may be borrowed by another invocation: the first one's drain must not own (and kill)
+      // it, and the borrower's drain must (attempt-children.ts).
       unref: (session) => {
+        releaseAttemptChild(session.child);
         session.child.unref?.();
         for (const pipe of [session.child.stdin, session.child.stdout, session.child.stderr]) {
           (pipe as unknown as { unref?: () => void } | null)?.unref?.();
         }
       },
       ref: (session) => {
+        claimAttemptChild(session.child);
         session.child.ref?.();
         for (const pipe of [session.child.stdin, session.child.stdout, session.child.stderr]) {
           (pipe as unknown as { ref?: () => void } | null)?.ref?.();

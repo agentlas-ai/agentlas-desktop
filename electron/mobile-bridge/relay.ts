@@ -7,6 +7,7 @@ import path from "node:path";
 import { getSessionCookieHeader, webBaseUrl } from "../auth";
 import type { MobilePushRelayPayload, MobilePushOutcome } from "./push";
 
+const WS_CONNECTING = 0;
 const WS_OPEN = 1;
 const RELAY_FILE = "relay.json";
 const SECRET_PATTERN = /^[A-Za-z0-9_-]{43}$/;
@@ -14,6 +15,8 @@ const CHANNEL_PATTERN = /^[A-Za-z0-9_-]{24}$/;
 const TOKEN_PATTERN = /^[A-Za-z0-9_-]{43,256}$/;
 const MAX_PENDING_BYTES = 8 * 1024 * 1024;
 const CONTROL_HEARTBEAT_MS = 20_000;
+const REPAIR_LATCH_MAX_TOKENS = 64;
+const REPAIR_LATCH_TTL_MS = 10 * 60_000;
 
 /*
  * 제어 채널 재시도 정책 (2026-09-27, main.log 2026-09-25 실측).
@@ -624,15 +627,50 @@ export class MobileBridgeCloudRelay {
   }
 
   /**
-   * 로컬 홉이 "재페어링만이 답"이라고 답했을 때 걸리는 래치. 걸린 동안은 터널을
-   * 열지 않는다 — 열어도 같은 401이고, 폰은 그 사실을 알 수 없어 계속 두드린다.
+   * 로컬 홉이 "재페어링만이 답"이라고 답한 **그 기기 토큰**에 걸리는 래치(토큰 sha256 앞 16자 → 사유). 걸린 토큰의
+   * 터널은 열지 않는다 — 열어도 같은 401이고, 폰은 그 사실을 알 수 없어 계속 두드린다.
+   *
+   * ★ 기기별이다. 예전에는 릴레이 전체에 문자열 하나였다: 설정에서 지운 폰 A 가 계속 두드리면 정상 폰 B 의 터널까지
+   *   열리지 않았고, 데스크탑 화면에는 아무 오류도 없었다. 사유도 토큰의 것이지 다른 기기의 것이 아니다.
+   * ★ 64개 LRU, 10분 뒤 스스로 풀린다. 잘못 걸렸더라도(저장소 일시 오류 등) 새 페어링을 기다리며 갇히지 않고, 진짜로
+   *   폐기된 폰은 10분에 한 번만 로컬 홉을 두드린다.
    */
-  private repairRequiredRefusal: string | null = null;
+  private readonly repairRequiredTokens = new Map<string, { refusal: string; at: number }>();
 
-  /** 페어링 상태가 바뀌면 래치를 푼다(새 기기가 붙을 수 있게 된다). */
+  private repairLatchKey(deviceToken: string): string {
+    return createHash("sha256").update(deviceToken).digest("hex").slice(0, 16);
+  }
+
+  private repairRequiredFor(deviceToken: string): { refusal: string; key: string } | null {
+    const key = this.repairLatchKey(deviceToken);
+    const entry = this.repairRequiredTokens.get(key);
+    if (!entry) return null;
+    if (Date.now() - entry.at >= REPAIR_LATCH_TTL_MS) {
+      this.repairRequiredTokens.delete(key);
+      return null;
+    }
+    // 쓰인 항목을 뒤로 보내 가득 찼을 때 가장 오래 안 쓰인 것부터 밀려나게 한다.
+    this.repairRequiredTokens.delete(key);
+    this.repairRequiredTokens.set(key, entry);
+    return { refusal: entry.refusal, key };
+  }
+
+  private latchRepairRequired(deviceToken: string, refusal: string): string {
+    const key = this.repairLatchKey(deviceToken);
+    this.repairRequiredTokens.delete(key);
+    this.repairRequiredTokens.set(key, { refusal, at: Date.now() });
+    while (this.repairRequiredTokens.size > REPAIR_LATCH_MAX_TOKENS) {
+      const oldest = this.repairRequiredTokens.keys().next().value;
+      if (oldest === undefined) break;
+      this.repairRequiredTokens.delete(oldest);
+    }
+    return key;
+  }
+
+  /** 페어링 상태가 바뀌면 래치를 전부 푼다(새 기기가 붙을 수 있게 된다). */
   clearRepairRequiredLatch(): void {
-    if (!this.repairRequiredRefusal) return;
-    this.repairRequiredRefusal = null;
+    if (this.repairRequiredTokens.size === 0) return;
+    this.repairRequiredTokens.clear();
     console.info("[mobile-bridge-relay] re-pairing latch cleared; tunnels may open again");
   }
 
@@ -697,9 +735,10 @@ export class MobileBridgeCloudRelay {
     const authentication = this.authentication();
     const cookie = authentication?.epoch;
     if (!cookie || this.stopped) return;
-    if (this.repairRequiredRefusal) {
+    const latched = this.repairRequiredFor(deviceToken);
+    if (latched) {
       console.warn(
-        `[mobile-bridge-relay] tunnel ${channelId} not opened: ${this.repairRequiredRefusal} — re-pair this Desktop`,
+        `[mobile-bridge-relay] tunnel ${channelId} not opened: refusal=${latched.refusal} token=${latched.key.slice(0, 8)} — that phone must be paired again`,
       );
       return;
     }
@@ -737,6 +776,9 @@ export class MobileBridgeCloudRelay {
       );
       if (cloud.readyState === WS_OPEN) cloud.close(1012, "tunnel closed");
       if (local?.readyState === WS_OPEN) local.close(1012, "tunnel closed");
+      // A hop still in its TLS handshake has no close handshake to run. Left alone it finishes later, the bridge counts it
+      // as the device's live (authenticated) connection, supersedes the phone's real one, and nobody reads it.
+      else if (local?.readyState === WS_CONNECTING) local.terminate();
     };
     cloud.on("message", (data, isBinary) => {
       if (local?.readyState === WS_OPEN) {
@@ -760,6 +802,7 @@ export class MobileBridgeCloudRelay {
         checkServerIdentity: pinnedCertificateIdentity(this.options.certificateDer),
       });
       local.on("open", () => {
+        if (closed) { local?.terminate(); return; }
         for (const frame of pending) local?.send(frame.data, { binary: frame.binary });
         pending = [];
         pendingBytes = 0;
@@ -775,12 +818,12 @@ export class MobileBridgeCloudRelay {
       local.on("unexpected-response", (_request, response) => {
         const refusal = upgradeRefusal(response);
         if (refusal && TERMINAL_REFUSALS.has(refusal)) {
-          // 사유가 회복 불가면 재시도가 의미 없다. 래치를 걸어 다음 터널 요청을
-          // 즉시 거절하고, 사람이 읽을 한 줄을 남긴다. 래치는 페어링이 바뀔 때 풀린다.
-          this.repairRequiredRefusal = refusal;
+          // 사유가 회복 불가면 재시도가 의미 없다. 이 토큰에만 래치를 걸어 이 토큰의 다음 터널 요청을
+          // 즉시 거절하고, 사람이 읽을 한 줄을 남긴다. 래치는 페어링이 바뀔 때(또는 10분 뒤) 풀린다.
+          const key = this.latchRepairRequired(deviceToken, refusal);
           console.warn(
-            `[mobile-bridge-relay] remote access needs re-pairing (${refusal}); ` +
-              "not opening further tunnels until this Desktop is paired again",
+            `[mobile-bridge-relay] remote access needs re-pairing (refusal=${refusal} token=${key.slice(0, 8)}); ` +
+              "not opening further tunnels for this phone's credential until it is paired again",
           );
         }
         closeBoth(

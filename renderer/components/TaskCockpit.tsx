@@ -306,6 +306,8 @@ import {
   type ChatFileItem,
 } from "@/lib/chat-files";
 import { Select } from "@/components/Select";
+import { PersonalAgentRoomMenu, PersonalAgentRoomNotice } from "./PersonalAgentRoomNotice";
+import { isPersonalAgentRoom, isPersonalAgentRoomRefusal, PERSONAL_AGENT_HREF, personalAgentRoomCopy } from "@/lib/personal-agent-room";
 
 function uid(): string {
   return Math.random().toString(36).slice(2);
@@ -4908,6 +4910,12 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
         busy ||
         (requestedTaskId && validatedTaskChatId !== chat.id)
       ) return false;
+      // A room the personal agent runs takes no owner-typed message (Main refuses it too); a saved question answer's
+      // continuation still goes through.
+      if (isPersonalAgentRoom(chat) && !opts?.decisionContinuation) {
+        setSessionNotice(personalAgentRoomCopy(locale === "ko" ? "ko" : "en").refused);
+        return false;
+      }
       const followupStopEpoch = workFollowupStopEpochs.get(chat.id) ?? 0;
       const unresolvedRecord = !opts?.decisionContinuation ? readWorkUncertainAdmissionRecord(chat.id) : null;
       const unresolvedRunId = unresolvedRecord?.runId ?? null;
@@ -5316,6 +5324,20 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
         // invoke 실패 — 미리 건 구독을 정리해 유령 리스너가 남지 않게 한다.
         subRef.current?.();
         subRef.current = null;
+        if (isPersonalAgentRoomRefusal(cause)) {
+          // Main knows this is a personal agent's room (this screen read the chat before it was marked): nothing ran.
+          // Drop the optimistic rows and show the room as what it is: the composer gives way to the notice.
+          clearWorkUncertainAdmission(chat.id, runId);
+          liveWorkFirstSendIds.delete(runId);
+          transcriptRevisionRef.current += 1;
+          setMessages((messages) => messages.filter((message) => message.id !== userMessageId && message.id !== placeholderId));
+          setBusy(false);
+          setCancelPending(false);
+          runIdRef.current = null;
+          setSessionNotice(personalAgentRoomCopy(locale === "ko" ? "ko" : "en").refused);
+          setChat((current) => current && current.id === chat.id ? { ...current, supervisedByPersonalAgent: true } : current);
+          return false;
+        }
         if (opts?.decisionContinuation) {
           // Main rejected the continuation or its transport was unavailable.
           // Keep the durable Decision card as the only retry surface; an
@@ -7463,6 +7485,14 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
         >
           <IconPanelRight size={16} />
         </button>
+        {isPersonalAgentRoom(chat) && <PersonalAgentRoomMenu chatId={chat.id} locale={locale === "ko" ? "ko" : "en"}
+          className="task-cockpit-header-action"
+          onReleased={() => {
+            // The room is ordinary now: read Main's chat again so the composer comes back.
+            const api = ipc();
+            void api?.chats?.get(chat.id).then((next) => { if (next && next.id === chat.id) setChat(next); else setChat({ ...chat, supervisedByPersonalAgent: undefined }); })
+              .catch(() => setChat({ ...chat, supervisedByPersonalAgent: undefined }));
+          }} />}
         <button
           onClick={() => void removeChat()}
           className="task-cockpit-header-action task-cockpit-header-danger"
@@ -7744,6 +7774,11 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
         </div>
       )}
       <div data-tour-id="workspace.input" style={{ flexShrink: 0, minWidth: 0 }}>
+        {isPersonalAgentRoom(chat) ? (
+          // Owner 2026-10-27: a room the personal agent opened is read here and spoken to through the personal agent.
+          <PersonalAgentRoomNotice locale={locale === "ko" ? "ko" : "en"} width={`min(calc(100% - 32px), ${WORK_COMPOSER_WIDTH_PX}px)`}
+            onOpenPersonalAgent={() => router.push(PERSONAL_AGENT_HREF)} />
+        ) : <>
         <MessageReplyPreview reply={messageReply} locale={locale} onDismiss={() => setMessageReply(null)} />
         <ChatInput
           runtimeControls={<OneRuntimeChips key={chat.id} chatId={chat.id} locale={locale === "ko" ? "ko" : "en"} disabled={busy || !agent} onSelectionConfirmed={setChat} />}
@@ -7783,6 +7818,7 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
           onToggleContinuous={handleToggleContinuous}
           onToggleSwarm={handleToggleSwarm}
         />
+        </>}
       </div>
       </div>
       <TaskSidePanel

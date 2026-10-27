@@ -75,27 +75,51 @@ export function dispatchWaitClaim<W extends WaitEngineRecord>(input:{
   /** Legacy episode policy is preserved; canonical unknown also stays claimed. */
   failureState:"claimed"|"cancelled";
   failureReason:string;
+  /** Opt in only when this adapter can retire a provably undispatched claim.
+   * A thrown start remains uncertain under failureState, since it may have acted. */
+  preStartFailureReason?:string;
 }):W|null {
   const claim=input.storage.read();
   if(!sameWaitSnapshot(claim,input.expected) || claim!.state!=="claimed"
     || claim!.dispatchOwner?.kind!==input.owner.kind || claim!.dispatchOwner.epoch!==input.owner.epoch
-    || !claim!.successorInvocationId || !input.storage.current(claim!)) return null;
-  try {input.assertStart(claim!);} catch {return null;}
+    || !claim!.successorInvocationId) return null;
+  // The claim is this host's own but the Goal's authority moved while it prepared (the owner paused it): nothing may start from
+  // it, and leaving it claimed holds the Goal's next step for ever - no later wait registers, and a Resume never touches a
+  // claimed wait. An adapter that can retire an undispatched claim retires it, without calling start.
+  const live=input.storage.current(claim!);
+  if(!live && !(input.preStartFailureReason && input.storage.receiptCurrent?.(claim!))) return null;
   let result:WaitStartResult|null=null;
   let state:W["state"]="dispatched",reason="goal_wait_dispatched";
-  try {
-    result=input.start(claim!);
-    if(result.start && result.runId!==claim!.successorInvocationId) throw new Error("goal_wait_dispatch_identity_mismatch");
-    if(!result.start) {state="pending";reason=result.reason;}
-  } catch {state=input.failureState;reason=input.failureReason;}
-  if(state==="dispatched") input.onStarted(claim!);
-  return input.storage.transaction(()=>{
+  let admitted=live;
+  if(!live) {state="cancelled";reason=input.preStartFailureReason!;}
+  else try {input.assertStart(claim!);} catch {
+    if(!input.preStartFailureReason)return null;
+    admitted=false;state="cancelled";reason=input.preStartFailureReason;
+  }
+  if(admitted) {
+    try {
+      result=input.start(claim!);
+      if(result.start && result.runId!==claim!.successorInvocationId) throw new Error("goal_wait_dispatch_identity_mismatch");
+      if(!result.start) {state="pending";reason=result.reason;}
+    } catch {state=input.failureState;reason=input.failureReason;}
+  }
+  // Finalize an accepted start even if its accounting/notice callback fails,
+  // then preserve that callback's original error for the caller.
+  let startedCallbackFailed=false,startedCallbackError:unknown;
+  if(state==="dispatched") try {input.onStarted(claim!);} catch(error) {
+    startedCallbackFailed=true;startedCallbackError=error;
+  }
+  const finalized=input.storage.transaction(()=>{
     const latest=input.storage.read();
     if(!sameWaitSnapshot(latest,claim!) || !(input.storage.current(latest!) || input.storage.receiptCurrent?.(latest!))) return null;
     const next={...latest!,revision:latest!.revision+1,state,wakeReason:reason,
       ...(result && !result.start ? {nextCheckAt:result.retryAt}:{} )} as W;
-    input.storage.persist(next);input.onFinal?.(next);return next;
+    input.storage.persist(next);return next;
   });
+  // A follow-up scheduling failure must not roll back an already final claim.
+  if(finalized)input.onFinal?.(finalized);
+  if(startedCallbackFailed)throw startedCallbackError;
+  return finalized;
 }
 /** Recovery deliberately has no start/prepare callback. Domain receipt readers
  * decide whether an exact successor was verified, is closed, or stays unknown.

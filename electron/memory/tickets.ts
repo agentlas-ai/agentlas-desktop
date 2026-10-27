@@ -186,25 +186,67 @@ function insertEpisode(
   if (summary && inserted.changes === 1) enqueueEnglishTranslation("memory_episode", episodeId, summary);
 }
 
-/** Idempotent for a runtime turn: retries reuse the same run+node ticket. */
+/**
+ * Idempotent for a runtime turn: retries reuse the same run+node ticket.
+ * `reviveFailedTurn` is for the caller that holds a SUCCESSFUL reply: a retry (same run + node) whose first attempt only left
+ * the receipt "the turn failed / was cancelled" is the same turn finally succeeding, so that receipt gives way to it instead of
+ * swallowing the reply's learning. Any other terminal ticket (a completed one, a curation failure, a revoked source) is final.
+ */
 export function beginMemoryTicket(input: {
   context: MemoryTicketContext;
   emitterStatus: MemoryEmitterStatus;
   candidateCount: number;
   turnSummary?: string | null;
+  reviveFailedTurn?: boolean;
 }): MemoryTicket {
   assertMemoryTicketSource(input.context);
   const key = turnKey(input.context);
   const existing = getDb().prepare(
     `SELECT ticket_id AS ticketId, emitter_status AS emitterStatus,
-            candidate_count AS candidateCount, state
+            candidate_count AS candidateCount, state, failure_code AS failureCode
        FROM memory_tickets WHERE turn_key = ? LIMIT 1`,
   ).get(key) as {
     ticketId: string;
     emitterStatus: MemoryEmitterStatus;
     candidateCount: number;
     state: string;
+    failureCode: string | null;
   } | undefined;
+  if (existing && input.reviveFailedTurn && existing.state === "failed"
+    && (existing.failureCode === "turn-failed" || existing.failureCode === "turn-cancelled")) {
+    const now = new Date().toISOString();
+    const candidateCount = Math.max(0, Math.floor(input.candidateCount));
+    // The conditional UPDATE is the claim: of two processes reviving the same receipt, one sees changes = 1.
+    const revived = getDb().transaction((): boolean => {
+      const claimed = getDb().prepare(
+        `UPDATE memory_tickets
+            SET state = 'received', emitter_status = ?, candidate_count = ?, curator_mode = 'policy',
+                curation_outcome = 'no_candidates', written_count = 0, deduped_count = 0, redacted_count = 0,
+                session_count = 0, discarded_count = 0, failure_code = NULL, updated_at = ?
+          WHERE ticket_id = ? AND state = 'failed' AND failure_code IN ('turn-failed', 'turn-cancelled')`,
+      ).run(input.emitterStatus, candidateCount, now, existing.ticketId);
+      if (claimed.changes !== 1) return false;
+      // The failed attempt's episode says "the turn failed"; the turn that now stands succeeded.
+      getDb().prepare("DELETE FROM memory_episodes WHERE ticket_id = ?").run(existing.ticketId);
+      insertEpisode(
+        existing.ticketId,
+        input.context,
+        memoryRunPredatesAnyForget(input.context.runId) ? null : input.turnSummary,
+        now,
+      );
+      return true;
+    })();
+    if (revived) {
+      return {
+        ticketId: existing.ticketId,
+        turnKey: key,
+        emitterStatus: input.emitterStatus,
+        candidateCount,
+        created: true,
+        resumed: true,
+      };
+    }
+  }
   if (existing) {
     const terminal = existing.state === "completed" || existing.state === "read_only" || existing.state === "failed";
     return {

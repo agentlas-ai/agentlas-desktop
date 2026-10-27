@@ -134,7 +134,8 @@ export class FinanceExperience {
         Object.assign(value.monitoring,binding,{enabled:true,localTime,timezone:this.ports.timezone(),nextRunAt:null});save();
         try{const registered=await this.ports.register(scope,binding,localTime);scope.assertCurrent();value.monitoring.nextRunAt=registered.nextRunAt;save();}
         catch(error){value.monitoring.enabled=false;value.monitoring.nextRunAt=null;try{save();}finally{await this.ports.revoke({...scope,assertCurrent(){}},binding);}throw error;}
-      } else if(!local&&value.monitoring.enabled&&!access.monitoringAllowed){await this.stop(scope,value,save);}
+      // Billing that cannot be reached ("unavailable") is not a verdict: only a verified non-subscription or a signed-out account stops it.
+      } else if(!local&&value.monitoring.enabled&&!access.monitoringAllowed&&access.status!=='unavailable'){await this.stop(scope,value,save);}
       const observed=await this.ports.observe(scope,value.monitoring);scope.assertCurrent();
       if(value.monitoring.enabled&&!observed.active){value.monitoring.enabled=false;value.monitoring.nextRunAt=null;save();}
       const next=value.monitoring.enabled?observed.nextRunAt:null,last=observed.lastSentAt??value.monitoring.lastSentAt;
@@ -150,7 +151,7 @@ export class FinanceExperience {
       if(!(await financeBuiltinPlugin().status(scope,FINANCE_NOTICE_VERSION)).ready)throw new Error('finance_plugin_activation_required');scope.assertCurrent();
       if(!this.dailySourcesAvailable(scope,value,sources))throw new Error('finance_source_unavailable');
       const access=await this.ports.access(scope);scope.assertCurrent();
-      if(!access.monitoringAllowed)throw new Error(access.status==='verified'?'finance_monitoring_pro_required':'finance_monitoring_access_unavailable');
+      if(!access.monitoringAllowed)throw new Error(access.status==='verified'?'finance_monitoring_pro_required':access.status==='signed-out'?'finance_monitoring_sign_in_required':'finance_monitoring_access_unavailable');
       const now=this.ports.now(),day=new Intl.DateTimeFormat('en-CA',{timeZone:this.ports.timezone(),year:'numeric',month:'2-digit',day:'2-digit'}).format(now);
       if(current.admissionDay===day&&current.admissionRunId!==runId)throw new Error('finance_daily_already_admitted');
       current.admissionDay=day;current.admissionRunId=id.parse(runId);save();
@@ -176,7 +177,10 @@ export class FinanceExperience {
       const observed=await this.ports.observe(scope,value.monitoring);scope.assertCurrent();
       if(!observed.active){value.monitoring.enabled=false;value.monitoring.nextRunAt=null;save();return null;}
       const due=observed.pending||observed.nextRunAt!==null&&Date.parse(observed.nextRunAt)<=this.ports.now().getTime();
-      if(due){const access=await this.ports.access(scope);scope.assertCurrent();if(!access.monitoringAllowed||value.consent?.version!==FINANCE_NOTICE_VERSION||!this.dailySourcesAvailable(scope,value,sources)||!(await financeBuiltinPlugin().status(scope,FINANCE_NOTICE_VERSION)).ready){await this.stop(scope,value,save);return null;}}
+      if(due){const access=await this.ports.access(scope);scope.assertCurrent();
+        // Unreachable billing is "cannot tell": keep the schedule and let the next sweep ask again (wakeFinanceDailyBriefing holds it).
+        if(access.status==='unavailable')throw new Error('finance_monitoring_access_unavailable');
+        if(!access.monitoringAllowed||value.consent?.version!==FINANCE_NOTICE_VERSION||!this.dailySourcesAvailable(scope,value,sources)||!(await financeBuiltinPlugin().status(scope,FINANCE_NOTICE_VERSION)).ready){await this.stop(scope,value,save);return null;}}
       const last=observed.lastSentAt??value.monitoring.lastSentAt;
       if(observed.nextRunAt!==value.monitoring.nextRunAt||last!==value.monitoring.lastSentAt){value.monitoring.nextRunAt=observed.nextRunAt;value.monitoring.lastSentAt=last;save();}
       return {oneId:value.monitoring.oneId,checkinId:value.monitoring.checkinId,commandId:value.monitoring.commandId};

@@ -144,6 +144,53 @@ function annotateBrowserFailure(frame: Frame, answer: { meta: Record<string, unk
   return { ...frame, result: { ...result, _meta: { ...(result._meta ?? {}), agentlasBrowserLadder: answer.meta },
     content: [...content, { type: "text", text: answer.text }] } };
 }
+/** What a tool result keeps when it cannot fit one wire frame. Past this a model could not read it anyway. */
+const OVERSIZE_RESULT_KEEP_BYTES = 1024 * 1024;
+/**
+ * A tool result too large for one wire frame. The call already ran: dropping the frame (and the wire with it) left the model
+ * with "call the tool again" for an effect whose result it never saw. Keep what fits, in order, and say so — in the text the
+ * model reads and in a typed `_meta.agentlasResultTruncated`. Null when nothing useful can be sent (a stalled reader).
+ */
+function boundOversizeToolResult(frame: Frame, originalBytes: number, room: number): Frame | null {
+  const result = frame.result;
+  if (frame.error || !result || typeof result !== "object" || Array.isArray(result)) return null;
+  for (let budget = Math.min(OVERSIZE_RESULT_KEEP_BYTES, room - 16 * 1024); budget >= 4096; budget = Math.floor(budget / 2)) {
+    let left = budget, omitted = 0;
+    const kept: unknown[] = [];
+    for (const item of Array.isArray(result.content) ? result.content : []) {
+      const text = item && typeof item === "object" && item.type === "text" && typeof item.text === "string" ? item.text as string : null;
+      if (text === null) {
+        let size = left + 1;
+        try { size = Buffer.byteLength(JSON.stringify(item) ?? ""); } catch { /* an unserializable item is omitted */ }
+        if (size <= left) { kept.push(item); left -= size; } else omitted += 1;
+        continue;
+      }
+      if (left <= 0) { omitted += 1; continue; }
+      let n = Math.min(text.length, left);
+      while (n > 0 && Buffer.byteLength(text.slice(0, n)) > left) n = Math.floor(n * 0.9);
+      if (n > 0 && n < text.length && (text.charCodeAt(n - 1) & 0xfc00) === 0xd800) n -= 1; // never split a surrogate pair
+      if (n < text.length) omitted += 1;
+      kept.push({ ...item, text: text.slice(0, n) }); left -= Buffer.byteLength(text.slice(0, n));
+    }
+    let structured: unknown;
+    if (result.structuredContent !== undefined) {
+      let size = left + 1;
+      try { size = Buffer.byteLength(JSON.stringify(result.structuredContent) ?? ""); } catch { /* omitted below */ }
+      if (size <= left) { structured = result.structuredContent; left -= size; } else omitted += 1;
+    }
+    let meta: Record<string, unknown> = {};
+    try { if (result._meta && typeof result._meta === "object" && Buffer.byteLength(JSON.stringify(result._meta)) <= 16 * 1024) meta = result._meta; } catch { /* dropped */ }
+    const keptBytes = budget - left;
+    const bounded: Frame = { ...frame, result: {
+      ...(result.isError === true ? { isError: true } : {}),
+      content: [...kept, { type: "text", text: `[Result cut by the host: the tool returned ${originalBytes} bytes, more than one reply can carry; the first ${keptBytes} bytes are shown. `
+        + "The call already ran once - do not repeat it to read the rest; narrow the request instead.]" }],
+      ...(structured !== undefined ? { structuredContent: structured } : {}),
+      _meta: { ...meta, agentlasResultTruncated: { originalBytes, keptBytes, omittedItems: omitted } } } };
+    if (Buffer.byteLength(JSON.stringify(bounded)) + 1 <= room) return bounded; // escaping can outgrow the raw byte count: retry smaller
+  }
+  return null;
+}
 const upstreamStats = { spawned: 0, reused: 0, parked: 0, dropped: 0 };
 /** Diagnostics/QA only: how many real upstream processes the bridge started or adopted. */
 export function mcpProxyUpstreamStats(): Readonly<typeof upstreamStats & { idle: number }> {
@@ -582,11 +629,18 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
   entry.connections.add(close); if (entry.timer) clearTimeout(entry.timer);
   req.on("aborted", () => close("wire_aborted")); req.on("end", () => close("wire_ended")); req.on("error", (error) => close(error, "request_error"));
   res.on("close", () => close("wire_response_closed")); res.on("error", (error) => close(error, "response_error"));
-  const down = (frame: Frame) => {
-    if (closed) return;
-    const line = JSON.stringify(frame) + "\n";
-    if (Buffer.byteLength(line) > MAX_FRAME_BYTES || res.writableLength + Buffer.byteLength(line) > MAX_FRAME_BYTES) { close("frame_limit", "down"); return; }
+  /** True only when the frame was actually written to the wire: a delivery acknowledgement must never rest on anything less. */
+  const down = (frame: Frame, bound?: (frame: Frame, originalBytes: number, room: number) => Frame | null): boolean => {
+    if (closed || res.destroyed || res.writableEnded) return false;
+    let line = JSON.stringify(frame) + "\n";
+    if (Buffer.byteLength(line) > MAX_FRAME_BYTES || res.writableLength + Buffer.byteLength(line) > MAX_FRAME_BYTES) {
+      // A tool result is cut to fit instead of being dropped with the wire (the call already ran).
+      const smaller = bound?.(frame, Buffer.byteLength(line) - 1, MAX_FRAME_BYTES - res.writableLength);
+      if (!smaller) { close("frame_limit", "down"); return false; }
+      line = JSON.stringify(smaller) + "\n";
+    }
     res.write(line);
+    return true;
   };
   const historyToolInput = (frame:Frame,schemaDigest:string|null=null):HistoryRuntimeToolInput=>({kind:"mcp",serverId:binding.server.id,catalogId:gate.catalogId,toolName:String(frame.params?.name??""),args:frame.params?.arguments??{},schemaDigest});
   const up = async (frame: Frame) => {
@@ -651,7 +705,15 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
       const clientCancelled = abortReason instanceof Error && abortReason.message === "mcp_proxy_call_cancelled";
       if (!clientCancelled) pending.controller?.signal.throwIfAborted();
       pending.detach?.(); native.delete(wireId); external.delete(idKey(pending.id));
-      down({ ...outgoing, id: pending.id });
+      const bound = pending.method === "tools/call" ? (big: Frame, originalBytes: number, room: number) => {
+        const smaller = boundOversizeToolResult(big, originalBytes, room);
+        if (smaller) recordMcpProxyEvent("result_truncated", { server: gate.serverKey, handle, initialized, reason: "frame_limit", where: "down",
+          inflight: native.size, wireAgeMs: Date.now() - wireOpenedAt });
+        return smaller;
+      } : undefined;
+      // Only a frame that really went out is acknowledged: a dropped one leaves the stored copy for the repeat to be answered from (G12).
+      const written = down({ ...outgoing, id: pending.id }, bound);
+      if (!written) return;
       // The result is on the wire to the CLI: the stored copy kept for crash replay is acknowledged (effect ledger G12).
       try { pending.onDelivered?.(); } catch { /* never fails the delivery */ }
     };

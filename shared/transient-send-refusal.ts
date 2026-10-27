@@ -74,6 +74,12 @@ const TRANSIENT_CODES: ReadonlySet<string> = new Set([
   // Capacity is backpressure before intake, so the owner's text can wait in the durable send queue.
   "invocation_steer_queue_full",
   "invocation_current_turn_steer_limit",
+  // The One supervisor lives in the background service and its channel is gone or still handing over (daemon restart,
+  // update, crash; a failed adopt leaves mode 'handoff'). Both are thrown before anything is dispatched
+  // (one/supervisor-native-runtime.ts callOneSupervisorRuntime / oneSupervisorEndpoint). supervisor_native_channel_changed
+  // is NOT listed: it is thrown after the dispatch, so the command may already be recorded.
+  "supervisor_native_channel_unavailable",
+  "supervisor_runtime_handoff_pending",
 ]);
 
 /**
@@ -92,6 +98,18 @@ const TRANSIENT_RUN_FAILURE_CODES: ReadonlySet<string> = new Set([
   "session_scope_unavailable",
   // SQLite stayed locked before dispatch (mcp/client.ts).
   "store_busy",
+  // The launch circuit breaker is open for this runtime and closes by itself after a minute; it launched nothing
+  // (runtime/invocation-breaker.ts).
+  "runtime_invocation_storm",
+  // The runtime's saved address or ACP profile changed between picking the runner and entering it: the next start picks it up afresh
+  // (runtime/selection.ts configurationCurrent).
+  "runtime_selected_configuration_changed",
+  // Every resident seat of the budget is held by a running turn or an awake daemon seat (runtime/agent-residency.ts). The
+  // runners continue one-shot; a refusal that still reaches the queue frees up as those turns end.
+  "agent_residency_capacity",
+  // The CLI process could not be created for lack of descriptors, processes or memory (EMFILE/ENFILE/EAGAIN/ENOMEM):
+  // nothing was sent, and the shortage clears by itself (runtime/runner.ts spawnStartFailureRefusal).
+  "runtime_spawn_resource_busy",
 ]);
 
 export function isTransientRunFailureCode(code: string | null | undefined): boolean {
@@ -132,6 +150,20 @@ export function sendRefusalCode(error: unknown): string | undefined {
 
 export function isTransientSendRefusal(error: unknown): boolean {
   return isTransientSendRefusalCode(sendRefusalCode(error));
+}
+
+/**
+ * Transient codes a WRITE to the background service can throw after the service already recorded it: the signed channel closed
+ * or was replaced while the reply was in flight (native_auth_channel_lost rejects every pending request; the generation check
+ * after dispatch throws native_gui_original_channel_unavailable). They are refused-before-anything for a call that never left, so
+ * they stay transient, but a caller that would resend the same words by ANOTHER route (a direction accepted as the next message)
+ * must first read the service's own record of that intent (recorded-owner-steer.ts).
+ */
+const POSSIBLY_RECORDED_CODES: ReadonlySet<string> = new Set(["native_auth_channel_lost", "native_gui_original_channel_unavailable"]);
+
+export function isPossiblyRecordedSendRefusal(error: unknown): boolean {
+  const code = sendRefusalCode(error);
+  return !!code && POSSIBLY_RECORDED_CODES.has(code);
 }
 
 /**

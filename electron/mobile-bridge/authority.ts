@@ -34,6 +34,11 @@ import {
   resolveToolApproval,
 } from "../runtime/tool-approval";
 import {
+  APPROVAL_OWNER_NOTE_MAX_CHARS,
+  resolveBrowserApprovalWithOwnerNote,
+  resolveToolApprovalWithOwnerNote,
+} from "../runtime/tool-approval-owner-note";
+import {
   onAskUserLifecycle,
 } from "../confirm/ask-user";
 import { listRuntimeAskUserRequests, submitRuntimeAskUserAnswer } from "../confirm/ask-user-runtime";
@@ -47,6 +52,7 @@ import {
 import { getDb } from "../store/db";
 import { onDesktopStoreChange } from "../store/change-bus";
 import { oneDispatchParentForRun } from "../one/dispatch-presentation";
+import { assertOwnerMayWriteRoom, isPersonalAgentRoom, PERSONAL_AGENT_ROOM_READ_ONLY } from "../one/personal-agent-rooms";
 import {
   acceptCanonicalTaskResult,
   ensurePairingVerificationTask,
@@ -62,6 +68,7 @@ import {
   ensureVerifiedAcceptedResultValueClosure,
 } from "../one/accepted-result-value-closure";
 import { prejudgeCompletionClaims } from "../one/judged-completion-claim";
+import { completeDesktopTaskWorkforceGoal } from "../mcp/workforce-goal-continuity";
 import { tryCompleteOneActivationFirstValue } from "../one/activation";
 import { ensureOneExperienceReuseReceipt } from "../one/experience-reuse";
 import { sealOneMemoryCandidateProvenance } from "../one/memory-candidates";
@@ -344,6 +351,13 @@ function runtimeCredentialUnavailable(runtime: RuntimeStatus): boolean {
 const MOBILE_RUNTIME_ROLES = ["orchestrator", "worker"] as const;
 const BUILD_APPROVAL_TIMEOUT_MS = 90_000;
 const TERMINAL_PREVIEW_TTL_MS = 60_000;
+// A phone that went offline while holding a terminal has this long to come back before the terminal returns to the
+// Desktop agent. Only the owner can release a lease and the agent is paused while it is held, so without a limit a
+// killed app, a lost phone or a reinstall (new deviceId) froze the terminal for everyone until the bridge restarted.
+const TERMINAL_LEASE_ORPHAN_GRACE_MS = 10 * 60_000;
+// Pauses between hand-back attempts when the terminal controller refuses; after the last one the authority's own lease
+// is reset regardless, so a phone is never locked out by a controller that stays unreachable.
+const TERMINAL_LEASE_HANDBACK_RETRY_MS: readonly number[] = [15_000, 60_000, 300_000];
 // A paired phone can start a full-authority Hephaestus build. Keep that scarce
 // operation single-flight per Desktop authority so repeated requests cannot
 // fan out unbounded local model/tool processes. Desktop-native builds are not
@@ -457,7 +471,11 @@ export interface MobileBridgeTerminalControl {
   }, context: MobileBridgeConnectionContext): Promise<MobileBridgeTerminalCancelDto>;
 }
 
-export type MobileBridgeAuthorityHandle = MobileBridgeAuthority & { dispose(): void };
+export type MobileBridgeAuthorityHandle = MobileBridgeAuthority & {
+  dispose(): void;
+  /** Hands the terminals a (revoked) device still holds back to the Desktop agent; resolves with how many. */
+  releaseTerminalLeasesForDevice(deviceId: string): Promise<number>;
+};
 
 type AuthorityListener = (event: MobileBridgeAuthorityEvent) => void;
 
@@ -613,6 +631,8 @@ interface MobileTerminalLeaseState {
   owner: "agent" | "mobile";
   ownerEpoch: number;
   ownerDeviceId: string | null;
+  /** The connection the takeover was granted on; handed back to the controller when the lease is released for the owner. */
+  ownerContext: MobileBridgeConnectionContext | null;
   previews: Map<string, MobileTerminalPreviewState>;
 }
 
@@ -1813,6 +1833,18 @@ export function durableMobileApprovalPending(id: string, chatId: string): boolea
   } catch { return false; }
 }
 
+/**
+ * A room the personal agent runs does not ring the phone with its own result, failure or question (owner 2026-10-27: the
+ * notification opened the Work room and the owner talked to it as if it were the personal agent). Every settled hand-off
+ * comes back to the personal agent for review, and that review's saved answer is the personal conversation's oneMessage push.
+ * The relay and every released phone accept only a message id for personalOne, so this push is withheld rather than
+ * re-addressed. Approvals still ring (destination approvals): the owner may have to tap one. So does a failure (owner
+ * 2026-10-27): a failed hand-off is never silent, and its tap opens the room's read-only notice.
+ */
+function personalAgentRoomPushWithheld(chatId: string): boolean {
+  try { return isPersonalAgentRoom(chatId); } catch { return false; }
+}
+
 export function observeMobilePushNotices(hostId: string, listener: (notice: MobilePushNotice, stillCurrent?: () => boolean) => void): () => void {
   // Personal One turns run in the background service since 2026-10-12; its finals arrive through native-gui-events.
   const onMessage = ({ runId, chatId, event }: { runId: string; chatId: string; event: McpInvocationEvent }) => {
@@ -1830,7 +1862,7 @@ export function observeMobilePushNotices(hostId: string, listener: (notice: Mobi
         subject: "One", occurredAt: new Date().toISOString(), ...(asksOwner ? { reason: "ownerAnswer" as const } : {}) });
       return;
     }
-    if (!getChat(chatId)) return;
+    if (!getChat(chatId) || personalAgentRoomPushWithheld(chatId)) return;
     listener({ category: "resultReady", destination: "thread", hostId,
       entityId: chatId, dedupeKey: `run-result:${hostId}:${runId}`,
       subject: "Agentlas", occurredAt: new Date().toISOString(), ...(asksOwner ? { reason: "ownerAnswer" as const } : {}) });
@@ -1847,6 +1879,8 @@ export function observeMobilePushNotices(hostId: string, listener: (notice: Mobi
     { runId: string; chatId: string; agentId?: string; receipt: { status: string }; pendingQuestion?: boolean; browserLoginWaiting?: boolean; userDecisionRequest?: unknown }) => {
     if (agentId || receipt.status !== "failed" || pendingQuestion || browserLoginWaiting || userDecisionRequest ||
         isPersonalOneConversation(chatId) || !getChat(chatId)) return;
+    // A failure of a supervised room still rings (owner 2026-10-27): the personal agent's own review may end quietly, and
+    // a failed hand-off must never be silent. The tap opens the room's read-only notice, which leads to the personal agent.
     listener({ category: "failure", destination: "thread", hostId,
       entityId: chatId, dedupeKey: `run-failed:${hostId}:${runId}`,
       subject: "Agentlas", occurredAt: new Date().toISOString() });
@@ -1871,7 +1905,7 @@ export function observeMobilePushNotices(hostId: string, listener: (notice: Mobi
   // owner-ask seam as the same thread push with the question wording. The personal One chat is skipped: its push needs a
   // message id the relay checks, and a host card there has none to give.
   const stopOwnerAsk = onOwnerAsk((ask) => {
-    if (!getChat(ask.chatId) || isPersonalOneConversation(ask.chatId)) return;
+    if (!getChat(ask.chatId) || isPersonalOneConversation(ask.chatId) || personalAgentRoomPushWithheld(ask.chatId)) return;
     listener({ category: "resultReady", destination: "thread", hostId, entityId: ask.chatId,
       dedupeKey: `owner-ask:${hostId}:${ask.key}`, subject: "Agentlas", occurredAt: new Date().toISOString(), reason: "ownerAnswer" });
   });
@@ -2305,6 +2339,13 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
    * phone. A reconnect therefore cannot silently reuse an old takeover epoch.
    */
   private readonly terminalLeases = new Map<string, MobileTerminalLeaseState>();
+  /**
+   * Live connection ids per device. A phone keeps its terminal across a dropped connection (its reconnect must find the
+   * takeover intact), but only while it can still come back; see armTerminalLeaseTimer.
+   */
+  private readonly deviceConnectionIds = new Map<string, Set<string>>();
+  /** One pending hand-back per device: the grace after its last connection closed, or a retry after the controller refused. */
+  private readonly terminalLeaseTimers = new Map<string, NodeJS.Timeout>();
   private readonly buildRuns = new Map<string, {
     status: InternalMobileBuildStatus;
     /** True until the builder promise settles, even after a terminal event. */
@@ -2412,6 +2453,12 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
     return {
       oneSupervisorV1: ONE_SUPERVISOR_SCHEMA,
       currentTurnSteeringV1: true,
+      // Additive: runtime.resolveToolApproval / browser.resolveApproval accept `note` with a deny ("No, and do this instead").
+      approvalOwnerNoteV1: { maxLength: APPROVAL_OWNER_NOTE_MAX_CHARS },
+      // Additive (owner 2026-10-27): a chat row with supervisedByPersonalAgent is a room the personal agent runs. A phone
+      // that reads this key leaves it out of its lists, shows it read-only and sends the owner to the personal agent; an
+      // owner message into it is refused with the RPC error code below. Older apps ignore the key and the field.
+      personalAgentRoomsV1: { chatField: "supervisedByPersonalAgent", refusalCode: PERSONAL_AGENT_ROOM_READ_ONLY },
       // Additive: apps that do not know the key ignore it; they keep the existing token summary.
       contextInspectV1: true,
       // Additive: the phone may report its decoder with device.capabilities (MOBILE_CLIENT_CAPABILITIES).
@@ -2447,13 +2494,112 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
     this.clientCapabilities.delete(context.deviceId);
     this.options.nativeToolApprovals?.connectionOpened(context, lease);
     this.options.oneSecure?.()?.connectionOpened(context);
+    // Counted only after the sinks above accepted it: a throw there makes the server discard the socket without a close.
+    let connections = this.deviceConnectionIds.get(context.deviceId);
+    if (!connections) this.deviceConnectionIds.set(context.deviceId, connections = new Set());
+    connections.add(context.connectionId);
+    // The owner is back: whatever terminal it holds stays its own.
+    this.clearTerminalLeaseTimer(context.deviceId);
   }
 
   connectionClosed(context: MobileBridgeConnectionContext): void {
+    // First, so a sink below that throws cannot leave a closed connection counted as live.
+    const connections = this.deviceConnectionIds.get(context.deviceId);
+    connections?.delete(context.connectionId);
+    if (connections && connections.size === 0) this.deviceConnectionIds.delete(context.deviceId);
+    if (!this.deviceConnectionIds.has(context.deviceId)) {
+      this.armTerminalLeaseTimer(context.deviceId, TERMINAL_LEASE_ORPHAN_GRACE_MS, 0, true);
+    }
     this.options.nativeToolApprovals?.connectionClosed(context);
     this.options.oneSecure?.()?.connectionClosed(context);
     // By connection, not device: a phone on LAN and relay at once keeps the visual session its live connection drives.
     this.visualSessions.closeConnectionSessions(context.connectionId);
+  }
+
+  private deviceHoldsTerminalLease(deviceId: string): boolean {
+    for (const lease of this.terminalLeases.values()) {
+      if (lease.owner === "mobile" && lease.ownerDeviceId === deviceId) return true;
+    }
+    return false;
+  }
+
+  private clearTerminalLeaseTimer(deviceId: string): void {
+    const timer = this.terminalLeaseTimers.get(deviceId);
+    if (timer) clearTimeout(timer);
+    this.terminalLeaseTimers.delete(deviceId);
+  }
+
+  /**
+   * Schedules the hand-back of a device's terminals (at most one pending per device). `onlyIfOffline` is the grace after
+   * its last connection closed: if it connected again meanwhile, nothing is taken from it.
+   */
+  private armTerminalLeaseTimer(deviceId: string, delayMs: number, attempt: number, onlyIfOffline: boolean): void {
+    if (this.disposed || this.terminalLeaseTimers.has(deviceId) || !this.deviceHoldsTerminalLease(deviceId)) return;
+    const timer = setTimeout(() => {
+      this.terminalLeaseTimers.delete(deviceId);
+      if (onlyIfOffline && this.deviceConnectionIds.get(deviceId)?.size) return;
+      void this.handBackTerminalLeases(deviceId, attempt, "owner_offline");
+    }, delayMs);
+    timer.unref?.();
+    this.terminalLeaseTimers.set(deviceId, timer);
+  }
+
+  /**
+   * Returns every terminal this device holds to the Desktop agent (owner "agent", next epoch) after asking the controller
+   * to release it. Used when the device is revoked (it can never come back to release anything) and, after a grace, when
+   * its owner stays offline. Resolves with the number of terminals handed back.
+   */
+  releaseTerminalLeasesForDevice(deviceId: string): Promise<number> {
+    this.clearTerminalLeaseTimer(deviceId);
+    return this.handBackTerminalLeases(deviceId, 0, "device_revoked");
+  }
+
+  private async handBackTerminalLeases(
+    deviceId: string,
+    attempt: number,
+    cause: "device_revoked" | "owner_offline",
+  ): Promise<number> {
+    const control = this.options.terminalControl;
+    // After the last retry the controller is not consulted: the lease must not outlive a controller that keeps refusing.
+    const resetOnly = attempt >= TERMINAL_LEASE_HANDBACK_RETRY_MS.length;
+    let handedBack = 0;
+    let refused = 0;
+    for (const [terminalId, lease] of [...this.terminalLeases]) {
+      if (lease.owner !== "mobile" || lease.ownerDeviceId !== deviceId) continue;
+      const ownerEpoch = lease.ownerEpoch;
+      const nextOwnerEpoch = ownerEpoch + 1;
+      if (control && !resetOnly) {
+        try {
+          await control.release({ terminalId, ownerEpoch, nextOwnerEpoch }, lease.ownerContext ?? {
+            connectionId: `terminal-lease-handback:${cause}`,
+            remoteAddress: null,
+            connectedAt: new Date().toISOString(),
+            deviceId,
+            deviceName: "",
+            devicePlatform: "dev",
+            devBootstrap: false,
+          });
+        } catch (error) {
+          refused += 1;
+          this.onError(errorOf(error));
+          continue;
+        }
+      }
+      // The owner may have released and taken over again while the controller answered: hand back only the lease seen above.
+      if (lease.owner !== "mobile" || lease.ownerDeviceId !== deviceId || lease.ownerEpoch !== ownerEpoch) continue;
+      lease.owner = "agent";
+      lease.ownerDeviceId = null;
+      lease.ownerContext = null;
+      lease.ownerEpoch = nextOwnerEpoch;
+      lease.previews.clear();
+      handedBack += 1;
+      console.info(`[mobile-bridge-authority] terminal lease handed back to the Desktop agent: cause=${cause} terminal=${terminalId}${resetOnly ? " controller=unreachable" : ""}`);
+    }
+    if (refused > 0) {
+      console.warn(`[mobile-bridge-authority] terminal lease hand-back refused by the controller: cause=${cause} terminals=${refused} attempt=${attempt + 1}`);
+      this.armTerminalLeaseTimer(deviceId, TERMINAL_LEASE_HANDBACK_RETRY_MS[attempt], attempt + 1, false);
+    }
+    return handedBack;
   }
 
   private terminalLease(terminalId: string): MobileTerminalLeaseState {
@@ -2463,6 +2609,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
       owner: "agent",
       ownerEpoch: 0,
       ownerDeviceId: null,
+      ownerContext: null,
       previews: new Map(),
     };
     this.terminalLeases.set(terminalId, created);
@@ -2609,6 +2756,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
       await control.takeover({ terminalId, expectedOwnerEpoch, nextOwnerEpoch }, context);
       lease.owner = "mobile";
       lease.ownerDeviceId = context.deviceId;
+      lease.ownerContext = context;
       lease.ownerEpoch = nextOwnerEpoch;
       return asJsonValue({ schemaVersion: 1, terminalId, owner: "mobile", ownerEpoch: nextOwnerEpoch } satisfies MobileBridgeTerminalTakeoverDto, "terminal.takeover");
     } catch (error) {
@@ -2651,6 +2799,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
       await control.release({ terminalId, ownerEpoch, nextOwnerEpoch }, context);
       lease.owner = "agent";
       lease.ownerDeviceId = null;
+      lease.ownerContext = null;
       lease.ownerEpoch = nextOwnerEpoch;
       lease.previews.clear();
       return asJsonValue({ schemaVersion: 1, terminalId, owner: "agent", ownerEpoch: nextOwnerEpoch } satisfies MobileBridgeTerminalReleaseDto, "terminal.release");
@@ -3317,15 +3466,14 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         // Value Closure trust validator peeks. A miss remains unverified and
         // cannot be promoted by a regex or static verdict.
         await prejudgeCompletionClaims(ACCEPTED_RESULT_CLOSURE_FACT_STATEMENTS, { timeoutMs: 300_000 }).catch(() => undefined);
-        const closure = ensureAcceptedResultValueClosure({
-          priorTaskVersion: expectedVersion,
-          acceptedTask: accepted,
-          expectedRunId,
-          receipt,
-          confirmedByUser: true,
-        });
+        // The canonical acceptance above is committed and is the owner's action; everything from here is a derived
+        // record (ipc.ts tasks:acceptResult does the same). A Task whose title/metadata moved its version after the
+        // result was ready has no exact result-ready event, and a long event history passes the lookup window — a
+        // throw here used to answer the phone "rejected" for a Task that was already complete, and the 24 h replay
+        // ledger kept that answer for every retry of the same key.
+        let closure: ReturnType<typeof ensureAcceptedResultValueClosure> | null = null;
         try {
-          ensureVerifiedAcceptedResultValueClosure({
+          closure = ensureAcceptedResultValueClosure({
             priorTaskVersion: expectedVersion,
             acceptedTask: accepted,
             expectedRunId,
@@ -3333,61 +3481,90 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
             confirmedByUser: true,
           });
         } catch {
-          // Mobile uses the same Main-only fail-closed artifact verifier as
-          // Desktop. A missing or stale binding leaves acceptance partial.
+          // Derived evidence stays absent when its exact historical binding cannot be rebuilt.
         }
-        try {
-          sealOneMemoryCandidateProvenance({
-            sourceTaskId: accepted.id,
-            sourceTaskVersion: accepted.version,
-            sourceRunId: expectedRunId,
-            sourceValueClosureId: closure.value.closure.valueClosureId,
-            sourceValueClosureVersion: closure.value.version,
-          });
-        } catch {
-          // Mobile acceptance remains authoritative when optional Memory
-          // provenance sealing races or finds no pending review candidate.
-        }
-        tryProduceAcceptedResultSuggestion({
-          hostId: this.options.hostIdentity.hostId,
-          taskId: accepted.id,
-          expectedTaskVersion: accepted.version,
-          expectedTaskUpdatedAt: accepted.updatedAt,
-          expectedRunId,
-          valueClosureId: closure.value.closure.valueClosureId,
-          expectedValueClosureVersion: closure.value.version,
-          confirmedByUser: true,
-        });
-        try {
-          tryCompleteOneActivationFirstValue({
-            taskId: accepted.id,
-            expectedTaskVersion: accepted.version,
-            valueClosureId: closure.value.closure.valueClosureId,
-            expectedValueClosureVersion: closure.value.version,
-          });
-        } catch {
-          // Mobile acceptance remains authoritative even if optional Desktop
-          // first-use activation evidence cannot be advanced.
-        }
-        try {
-          ensureOneExperienceReuseReceipt({
-            taskId: accepted.id,
-            expectedTaskVersion: accepted.version,
-            expectedTaskUpdatedAt: accepted.updatedAt,
-            expectedRunId,
-            valueClosureId: closure.value.closure.valueClosureId,
-            expectedValueClosureVersion: closure.value.version,
-            confirmedByUser: true,
-          });
-        } catch {
-          // The accepted Task and Value Closure remain authoritative even when
-          // optional compounding evidence cannot be recorded.
+        if (closure) {
+          try {
+            ensureVerifiedAcceptedResultValueClosure({
+              priorTaskVersion: expectedVersion,
+              acceptedTask: accepted,
+              expectedRunId,
+              receipt,
+              confirmedByUser: true,
+            });
+          } catch {
+            // Mobile uses the same Main-only fail-closed artifact verifier as
+            // Desktop. A missing or stale binding leaves acceptance partial.
+          }
+          try {
+            sealOneMemoryCandidateProvenance({
+              sourceTaskId: accepted.id,
+              sourceTaskVersion: accepted.version,
+              sourceRunId: expectedRunId,
+              sourceValueClosureId: closure.value.closure.valueClosureId,
+              sourceValueClosureVersion: closure.value.version,
+            });
+          } catch {
+            // Mobile acceptance remains authoritative when optional Memory
+            // provenance sealing races or finds no pending review candidate.
+          }
+          try {
+            tryProduceAcceptedResultSuggestion({
+              hostId: this.options.hostIdentity.hostId,
+              taskId: accepted.id,
+              expectedTaskVersion: accepted.version,
+              expectedTaskUpdatedAt: accepted.updatedAt,
+              expectedRunId,
+              valueClosureId: closure.value.closure.valueClosureId,
+              expectedValueClosureVersion: closure.value.version,
+              confirmedByUser: true,
+            });
+          } catch {
+            // Ecosystem growth is optional.
+          }
+          try {
+            tryCompleteOneActivationFirstValue({
+              taskId: accepted.id,
+              expectedTaskVersion: accepted.version,
+              valueClosureId: closure.value.closure.valueClosureId,
+              expectedValueClosureVersion: closure.value.version,
+            });
+          } catch {
+            // Mobile acceptance remains authoritative even if optional Desktop
+            // first-use activation evidence cannot be advanced.
+          }
+          try {
+            ensureOneExperienceReuseReceipt({
+              taskId: accepted.id,
+              expectedTaskVersion: accepted.version,
+              expectedTaskUpdatedAt: accepted.updatedAt,
+              expectedRunId,
+              valueClosureId: closure.value.closure.valueClosureId,
+              expectedValueClosureVersion: closure.value.version,
+              confirmedByUser: true,
+            });
+          } catch {
+            // The accepted Task and Value Closure remain authoritative even when
+            // optional compounding evidence cannot be recorded.
+          }
         }
         try {
           tryProduceOneImprovementProofForTask(accepted.id);
         } catch {
           // Improvement Proof is derived from separately verified comparable
           // runs. Missing proof data must never roll back Mobile acceptance.
+        }
+        if (accepted.originChatId && this.cloudAgentActions.hasCloudSession()) {
+          // The Goal bound to the Task closes with its accepted result, as on Desktop (ipc.ts). It is two Core calls and
+          // derived, so the phone's answer does not wait for it and a failure is logged, never raised.
+          try {
+            void completeDesktopTaskWorkforceGoal({
+              taskId: accepted.id,
+              projectDir: getChatWorkingFolder(accepted.originChatId) ?? process.cwd(),
+            }).catch((error) => this.onError(errorOf(error)));
+          } catch (error) {
+            this.onError(errorOf(error));
+          }
         }
         if (accepted.originChatId) this.scheduleSnapshotUpdated(accepted.originChatId);
         return asJsonValue({
@@ -3638,6 +3815,8 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         if (error) throw new TypeError(error);
         const chatId = requiredIdentifier(params, "chatId");
         if (!getChat(chatId)) throw new Error("Chat not found");
+        // An owner line into a room the personal agent runs is refused (code supervised_room_read_only, owner 2026-10-27).
+        if (request.method === "invoke.steerCurrentTurn") assertOwnerMayWriteRoom(chatId);
         const control = this.options.currentTurnControl ?? invocationService;
         if (request.method === "invoke.currentTurn") {
           const current = await control.currentTurn(chatId);
@@ -3774,6 +3953,8 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
           return asJsonValue(result,request.method);
         }
         const { invocation, decisionAnswer } = invocationParams(request, false);
+        // A question card's answer still reaches a personal agent's room; an ordinary owner message does not.
+        if (!decisionAnswer) assertOwnerMayWriteRoom(invocation.chatId);
         if(invocation.fileGroupId) this.attachmentUploads.bind(context.deviceId,invocation.fileGroupId,invocation.chatId);
         validateChatAttachmentSelection(invocation.chatId,invocation.fileGroupId,invocation.images);
         invocation.userPrompt=chatFilePrompt(invocation.chatId,invocation.userPrompt,invocation.fileGroupId);
@@ -3829,6 +4010,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
       }
       case "invoke.steer": {
         const { invocation, expectedRunId, decisionAnswer } = invocationParams(request, true);
+        if (!decisionAnswer) assertOwnerMayWriteRoom(invocation.chatId);
         if(invocation.fileGroupId) this.attachmentUploads.bind(context.deviceId,invocation.fileGroupId,invocation.chatId);
         validateChatAttachmentSelection(invocation.chatId,invocation.fileGroupId,invocation.images);
         invocation.userPrompt=chatFilePrompt(invocation.chatId,invocation.userPrompt,invocation.fileGroupId);
@@ -4148,14 +4330,19 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
       // DESKTOP_MOBILE_BRIDGE: Resolve only the opaque live browser request.
       // browserResolveApproval itself emits pending/resolved/expired lifecycle events.
       case "browser.resolveApproval": {
-        const params = guardedParams(request, ["requestId", "decision"]);
+        const params = guardedParams(request, ["requestId", "decision", "note"]);
         const requestId = requiredIdentifier(params, "requestId", RUN_ID_RE);
         const decision = requiredEnum(
           params,
           "decision",
           ["once", "always", "deny"] as const,
         ) as BrowserPermissionDecision;
-        const result = browserResolveApproval(requestId, decision);
+        const note = params.note === undefined ? undefined : requiredText(params, "note", 2_000);
+        const result = await resolveBrowserApprovalWithOwnerNote({
+          decision, note, requestId,
+          chatId: note === undefined ? null : listPendingBrowserApprovals().find(pending => pending.requestId === requestId)?.owner?.chatId ?? null,
+          resolve: () => browserResolveApproval(requestId, decision),
+        });
         if (!result.ok) throw new Error("Browser approval is no longer pending");
         this.scheduleSnapshotUpdated();
         return asJsonValue(result, request.method);
@@ -4167,18 +4354,31 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
        * 능력 규칙을 영구 기록한다(데스크탑과 다른 경로를 만들지 않는다).
        */
       case "runtime.resolveToolApproval": {
-        const params = guardedParams(request, ["id", "decision"]);
+        // `note` is the owner's "No, and do this instead" line (advertised by capability approvalOwnerNoteV1). A phone
+        // that does not know it never sends it; a Desktop that does not know it refuses the key, so a phone sends it
+        // only after bridge.ready names the capability.
+        const params = guardedParams(request, ["id", "decision", "note"]);
         const id = requiredIdentifier(params, "id", TOOL_APPROVAL_ID_RE);
         const decision = requiredEnum(
           params,
           "decision",
           ["allow_once", "allow_session", "allow_always", "deny"] as const,
         );
+        const note = params.note === undefined ? undefined : requiredText(params, "note", 2_000);
         const native = this.options.nativeToolApprovals;
         const nativeOwned = native?.has(id) === true;
         if (nativeOwned && listPendingToolApprovals().some(request => request.id === id)) throw new Error("native_mobile_approval_source_conflict");
+        // The room is read before the decision: the request leaves the queue when it resolves.
+        let noteChatId: string | undefined;
+        if (note !== undefined) {
+          try { noteChatId = (listPendingToolApprovals().find(request => request.id === id) ?? native?.list().find(request => request.id === id))?.chatId; }
+          catch { noteChatId = undefined; }
+        }
         // Once native custody is selected, unknown ACK/source loss never falls back to local.
-        const receipt = nativeOwned ? await native!.resolve(context, id, decision) : resolveToolApproval(id, decision);
+        const receipt = await resolveToolApprovalWithOwnerNote({
+          decision, note, chatId: noteChatId, requestId: id,
+          resolve: () => nativeOwned ? native!.resolve(context, id, decision) : resolveToolApproval(id, decision),
+        });
         this.scheduleSnapshotUpdated();
         // live 요청이 아니면(이미 지나간 고지) 대기 중인 실행은 없다 — 그 사실을 그대로 돌려준다.
         return asJsonValue({
@@ -5283,6 +5483,9 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
     this.visualSessions.dispose();
     this.projectFilePreviews.clear();
     this.terminalLeases.clear();
+    for (const timer of this.terminalLeaseTimers.values()) clearTimeout(timer);
+    this.terminalLeaseTimers.clear();
+    this.deviceConnectionIds.clear();
     cancelDeferredOneDecisionJudgments();
     this.pendingAutomationIds.clear();
     this.refreshRequested = false;

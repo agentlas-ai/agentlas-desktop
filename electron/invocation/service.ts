@@ -8,6 +8,8 @@ import { captureOrdinaryOneTurn, type OrdinaryOneTurnSource, type OrdinaryOneTur
 import { nativeOwnerTextChoices, NATIVE_OWNER_TEXT_CONTEXT_OMITTED } from "./native-owner-text";
 import type { NativeOwnerTextBinding, NativeOwnerTextInput, NativeOwnerTextReceipt } from "./native-owner-text";
 import { withNativeApprovalExecution } from "../runtime/native-approval-provenance";
+import { withNativeWriterExecution } from "../runtime/native-writer-host";
+import { stopWorkSessionRunIfLoaded, stopWorkSessionChatIfLoaded } from "../work/session-dispatch";
 import { invocationRunPriority, withRunPriority } from "../runtime/run-priority";
 import { getAuthenticatedActorIds, onAuthSessionOwnershipChanged, onAuthSessionRestored } from "../auth";
 import { assertFinanceWorkChatOwner } from "../finance/work-project";
@@ -227,6 +229,7 @@ import {
 import { getOneProfile } from "../store/one-profile";
 import { personalSupervisorConversationInDb } from "../one/supervisor-store";
 import { CARRIED_FOLLOWUP_STEER_PREFIX, carryUndeliveredOwnerFollowups as carryOwnerFollowupsToNextTurn } from "./carried-owner-followups";
+import { runTurnMayHaveBeenRead } from "./turn-placement";
 import { personalSupervisorGuidance } from "../../shared/one-supervisor-context";
 import { tryRecordOneDomainEvent } from "../one/domain-events";
 import {
@@ -619,6 +622,14 @@ const HOST_SHUTDOWN_ABORT_CAUSES: ReadonlySet<string> = new Set(["app_closed", "
 /** How often a chat held by this process outside its own turns (a graph agent node, a doctor run) is looked at again. */
 const PROCESS_LEASE_POLL_MS = 2_000;
 /**
+ * Waits between attempts to release a run-owner lease the store refused to release (a lock past busy_timeout). The last wait
+ * repeats until the release lands: the lease is this process's own and the release is idempotent, so there is nothing to give up.
+ * AGENTLAS_TEST_STEER_DRAIN_FAST=1 shortens the schedule for gates only.
+ */
+const OWNER_LEASE_RELEASE_RETRY_MS: readonly number[] = process.env.AGENTLAS_TEST_STEER_DRAIN_FAST === "1"
+  ? [20, 40, 80]
+  : [250, 750, 2_000, 5_000, 15_000, 30_000];
+/**
  * Waits between start attempts of a queued direction whose start hit a locked store (R-067); each attempt first waits
  * out the store's own busy_timeout. Bounded: after the last one the row fails with drain-store-busy-exhausted.
  * AGENTLAS_TEST_STEER_DRAIN_FAST=1 shortens the schedule for gates only.
@@ -648,6 +659,95 @@ function relayCopyParked(chatId: string, text: string): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * The durable half of a Stop's withdrawal (InvocationService.clearQueuedDirectionsForStop). The Stop itself never waits
+ * on it, but a lock that refuses the write must not leave the owner's direction `queued`: restart recovery would start
+ * a direction the owner withdrew, with its stored write permission. A lock is written again with the drain's bounded
+ * backoff (a direction typed after the Stop is never touched: retries only take what was queued by `stoppedAt`); a write
+ * that still fails holds those rows so nothing starts them, and recoverQueuedSteers settles them from the run's own stop.
+ */
+function withdrawQueuedDirectionsForStop(chatId: string, runId: string, preserveReports: boolean, stoppedAt: string, attempt: number): void {
+  const retried = attempt > 0 ? stoppedAt : undefined;
+  try {
+    getDb().transaction(() => {
+      if (preserveReports) for (const row of listRecoverableQueuedSteers(chatId)) {
+        if (row.request.oneTeamReportTurn === true && row.status === "queued" && !row.drainedRunId
+          && (retried === undefined || row.queuedAt <= retried)) {
+          // This is a hold, never a new admission. Auth restoration rechecks
+          // the exact original custody; stronger uncertainty holds stay held.
+          holdQueuedSteerForRecovery(row.id, "one-team-report-owner-unbound");
+        }
+      }
+      cancelQueuedSteersForChat(chatId, preserveReports, "run-stopped", retried);
+      cancelQueuedOnePreflightSteersForChat(chatId, retried);
+      rejectQueuedCurrentTurnSteersForStop(chatId, runId);
+    }).immediate();
+    if (attempt > 0) console.info(`[invocation] stop withdrawal written after a locked store chat=${chatId} attempt=${attempt}`);
+  } catch (error) {
+    const code = innermostTypedCode(error) ?? "none";
+    if (code === STORE_BUSY_CODE && attempt < STEER_DRAIN_STORE_BUSY_DELAYS_MS.length) {
+      const timer = setTimeout(() => withdrawQueuedDirectionsForStop(chatId, runId, preserveReports, stoppedAt, attempt + 1),
+        STEER_DRAIN_STORE_BUSY_DELAYS_MS[attempt]!);
+      timer.unref?.();
+      console.warn(`[invocation] stop withdrawal hit a locked store; retrying chat=${chatId} code=${code} attempt=${attempt + 1}/${STEER_DRAIN_STORE_BUSY_DELAYS_MS.length}`);
+      return;
+    }
+    let held = 0;
+    try {
+      for (const row of listRecoverableQueuedSteers(chatId)) {
+        if (row.status !== "queued" || row.drainedRunId || row.recoveryState === "held" || row.queuedAt > stoppedAt) continue;
+        if (holdQueuedSteerForRecovery(row.id, "run-stopped-withdraw-unconfirmed")) held += 1;
+      }
+    } catch { /* the lock that refused the withdrawal refuses this too; restart recovery settles the rows from the run's stop */ }
+    console.warn(`[invocation] stop withdrawal could not be written chat=${chatId} code=${code} attempt=${attempt} held=${held}`);
+  }
+}
+
+/**
+ * The cause that settles a queued direction the owner's Stop (or Goal pause/delete) withdrew but a lock kept from being
+ * written, read from the original run's own stop record; null when this row was not withdrawn. Withdrawn means: the run
+ * ended cancelled by the owner (not a steering interrupt, an app close or an update restart) and the direction was
+ * queued before that stop was requested. A direction typed after the Stop (queued behind the settling run) and a
+ * teammate report (kept or reverted by its own custody rules) are never settled here.
+ */
+function ownerStopWithdrawalCause(row: DurableQueuedSteer): "run-stopped" | "goal-stopped" | null {
+  if (row.status !== "queued" || row.drainedRunId || row.request.oneTeamReportTurn === true) return null;
+  const receipt = getInvocationRunReceipt(row.originalRunId);
+  if (!receipt || receipt.chatId !== row.chatId || receipt.status !== "cancelled" || receipt.interruptionCause === "steering"
+    || receipt.hostStopCause === "app_closed" || receipt.hostStopCause === "update_restart") return null;
+  const stop = getDb().prepare("SELECT MAX(ts) AS ts FROM run_events WHERE run_id = ? AND kind = 'invoke_cancel_requested'")
+    .get(row.originalRunId) as { ts: string | null } | undefined;
+  if (!stop?.ts || row.queuedAt > stop.ts) return null;
+  return isOwnerGoalStopCause(receipt.hostStopCause) ? "goal-stopped" : "run-stopped";
+}
+
+/**
+ * A host-written turn (promptOrigin "system": a teammate's room note, a relay) steered into a One teammate session never
+ * lifts it above the cap that session was started with (one_team_dispatches.delegation_permission "write" = a session the
+ * AGI started from a model-written brief, 2026-10-20 audit). The cap is the session's, not the sender's, so it is applied
+ * here for every steer path: room_say once queued its text into such a session as "full". The owner's own turns keep the
+ * owner's choice, and a session with no cap is unchanged. A store that cannot answer because it is locked refuses the
+ * steer (the callers retry a lock) instead of guessing "uncapped".
+ */
+function steerRequestUnderSessionCap<T extends McpInvocationRequest>(request: T): T {
+  if (request.promptOrigin !== "system" || (request.permissions !== "full" && request.onePermissionMode !== "full")) return request;
+  let capped = false;
+  try {
+    const row = getDb().prepare("SELECT delegation_permission FROM one_team_dispatches WHERE child_chat_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1")
+      .get(request.chatId) as { delegation_permission?: string | null } | undefined;
+    capped = row?.delegation_permission === "write";
+  } catch (error) {
+    // A store from before the cap column (or the dispatch table) has no capped sessions.
+    if (innermostTypedCode(error) === STORE_BUSY_CODE) throw error;
+  }
+  if (!capped) return request;
+  return {
+    ...request,
+    ...(request.permissions === "full" ? { permissions: "write" as const } : {}),
+    ...(request.onePermissionMode === "full" ? { onePermissionMode: "write" as const } : {}),
+  };
 }
 
 /**
@@ -786,7 +886,7 @@ function ownerWrittenSteers(queue: QueuedSteer[]): QueuedSteer[] {
 }
 
 function publicSteerRecoveryReason(reason:DurableQueuedSteerRecoveryReason|undefined):InvocationSteerRecovery["reason"] {
-  return !reason || reason==="one-team-report-owner-unbound" ? "original-run-start-uncertain" : reason;
+  return !reason || reason==="one-team-report-owner-unbound" || reason==="run-stopped-withdraw-unconfirmed" ? "original-run-start-uncertain" : reason;
 }
 /** Canonical source reference, Main-only positional argument; not an authority DTO. */
 export interface QueuedTeamReportSourceRef { dispatchId:string;childRunId:string;roomChatId:string }
@@ -1466,6 +1566,10 @@ export class InvocationService {
   private readonly nativePreparationListeners = new Set<(event: { runId: string; chatId: string; status: "handed-off" | "rejected" | "cancelled" | "uncertain" }) => void>();
   private acceptingStarts = true;
   private readonly processLeaseWaits = new Map<string, ReturnType<typeof setTimeout>>();
+  /** Leases of ended runs whose release the store refused: still "active" in the table until a retry lands (releaseOwnerLease). */
+  private readonly unreleasedOwnerLeases = new Map<string, { lease: InvocationRunOwner; attempts: number }>();
+  private unreleasedOwnerLeaseTimer: ReturnType<typeof setTimeout> | undefined;
+  private unreleasedOwnerLeaseTouchedAt = 0;
   private foreignNativeStartFence?: (chatId: string) => boolean;
 
   /** Trusted host bootstrap only. A negative observer never grants execution
@@ -2447,9 +2551,62 @@ export class InvocationService {
     ].filter((record) => !record.background).map((record) => record.chatId)]))];
   }
 
+  /**
+   * Release the lease of a run that has ended here. A release the store refuses (a lock past busy_timeout, 2026-10-18 "database is
+   * locked") used to be swallowed with a warning: the row stayed 'active' for this process, which then read the chat as running for
+   * good (processLeasedChatIds), queued directions polled for it forever, every new start was refused
+   * invocation_chat_owned_by_other_run, and only a restart repaired it. The refused release is kept and retried with backoff (and
+   * whenever the chat is looked at) until it lands; the release is idempotent, so a lease another boot already released also ends it.
+   */
+  private releaseOwnerLease(lease: InvocationRunOwner, phase: string): void {
+    try {
+      invocationRunOwners.release(lease);
+      this.unreleasedOwnerLeases.delete(lease.leaseId);
+    } catch (error) {
+      console.warn(`[invocation] owner lease release failed; it is retried run=${lease.runId} chat=${lease.chatId} phase=${phase} code=${innermostTypedCode(error) ?? "none"}`);
+      if (!this.unreleasedOwnerLeases.has(lease.leaseId)) this.unreleasedOwnerLeases.set(lease.leaseId, { lease, attempts: 0 });
+      this.scheduleUnreleasedOwnerLeaseRetry();
+    }
+  }
+
+  private scheduleUnreleasedOwnerLeaseRetry(): void {
+    if (this.unreleasedOwnerLeaseTimer || this.unreleasedOwnerLeases.size === 0) return;
+    const attempts = Math.min(...[...this.unreleasedOwnerLeases.values()].map((entry) => entry.attempts));
+    const delayMs = OWNER_LEASE_RELEASE_RETRY_MS[Math.min(attempts, OWNER_LEASE_RELEASE_RETRY_MS.length - 1)]!;
+    this.unreleasedOwnerLeaseTimer = setTimeout(() => {
+      this.unreleasedOwnerLeaseTimer = undefined;
+      const released = this.retryUnreleasedOwnerLeases();
+      // What waited behind the chat starts now (a queued direction otherwise looks again only on its own poll).
+      if (released.length > 0) {
+        try { this.publishActiveChats(); } catch { /* the lease is released; the next publish shows it */ }
+        for (const chatId of released) this.drainSteerQueue(chatId);
+      }
+      this.scheduleUnreleasedOwnerLeaseRetry();
+    }, delayMs);
+    this.unreleasedOwnerLeaseTimer.unref?.();
+  }
+
+  /** One pass over the refused releases; returns the chats whose lease is no longer held. A true or false answer both end a leak. */
+  private retryUnreleasedOwnerLeases(): string[] {
+    const released: string[] = [];
+    for (const [leaseId, entry] of [...this.unreleasedOwnerLeases]) {
+      try { invocationRunOwners.release(entry.lease); }
+      catch { entry.attempts += 1; continue; }
+      this.unreleasedOwnerLeases.delete(leaseId);
+      released.push(entry.lease.chatId);
+    }
+    return released;
+  }
+
   /** Chats whose active or settling run-owner lease belongs to THIS process (never the other host's). */
   private processLeasedChatIds(): string[] {
     try {
+      // A refused release is retried whenever the chat is looked at (the poll of a waiting direction, a new start's busy check),
+      // at most once a second; no publish or drain here, the caller already is one.
+      if (this.unreleasedOwnerLeases.size > 0 && Date.now() - this.unreleasedOwnerLeaseTouchedAt >= 1_000) {
+        this.unreleasedOwnerLeaseTouchedAt = Date.now();
+        this.retryUnreleasedOwnerLeases();
+      }
       const me = invocationProcessOwner();
       return invocationRunOwners.listActiveOwners()
         .filter((owner) => owner.ownerId === me.ownerId && owner.ownerKind === me.ownerKind)
@@ -2739,15 +2896,57 @@ export class InvocationService {
     return { carried, rejected };
   }
 
+  /**
+   * True when `runId` still has a running owner: it is live in this process, or its run-owner lease is active/settling (the
+   * other host, the background service or this window, owns it and releases the lease itself). A restart that left a lease
+   * behind is released by the next boot of that host before recovery looks (app-runtime-coordinator, daemon/main.ts), so an
+   * active lease here is a live owner, not a crash. A store that cannot answer proves nothing: false, and the caller holds as before.
+   */
+  private queuedSteerRunHeldByLiveOwner(runId: string, chatId: string): boolean {
+    if (this.activeRuns.has(runId) || this.settlingRuns.has(runId) || this.nativeIngress.has(runId) || this.nativePreparing.has(runId)
+      || this.pendingGoalVerifications.has(runId) || this.browserLoginWaitingRuns.has(runId)) return true;
+    try {
+      const owner = invocationRunOwners.getOwnerByRunId(runId);
+      return owner !== null && owner.chatId === chatId && owner.state !== "released";
+    } catch { return false; }
+  }
+
+  /**
+   * A durable direction of this chat that no queue of this process holds: the host that queued it died (a background service killed
+   * with the owner's follow-up in its memory) or was never able to enqueue it. Only a boot rehydrated those, so the owner's "queued"
+   * message waited for the next window start while new turns of the chat ran past it. When a run of the chat ends here its
+   * unqueued ready directions are rehydrated the same way (a live owner's rows are left to it, see queuedSteerRunHeldByLiveOwner).
+   */
+  private recoverOrphanedQueuedSteers(chatId: string): void {
+    try {
+      if (this.steerQueues.get(chatId)?.length) return;
+      const orphan = getDb().prepare("SELECT 1 AS found FROM invocation_steers WHERE chat_id = ? AND status IN ('queued','draining') AND recovery_state = 'ready' LIMIT 1").get(chatId);
+      if (orphan) this.recoverQueuedSteers(chatId, false, true);
+    } catch (error) {
+      console.warn(`[invocation] orphaned queued directions not recovered chat=${chatId} code=${innermostTypedCode(error) ?? "none"}`);
+    }
+  }
+
   /** Rehydrate exact accepted directions after SQLite is initialized on boot. */
-  recoverQueuedSteers(chatId?: string, ownerReportHoldsOnly = false): InvocationSteerRecoveryReport {
-    if (!ownerReportHoldsOnly) this.settleUntakenCurrentTurnDirections(chatId);
+  recoverQueuedSteers(chatId?: string, ownerReportHoldsOnly = false, keepCurrentTurnDirections = false): InvocationSteerRecoveryReport {
+    if (!ownerReportHoldsOnly && !keepCurrentTurnDirections) this.settleUntakenCurrentTurnDirections(chatId);
     const rows = listRecoverableQueuedSteers(chatId).filter(row=>!ownerReportHoldsOnly
       || row.request.oneTeamReportTurn===true && row.recoveryState==="held" && row.recoveryReason==="one-team-report-owner-unbound");
     let resumed = 0;
     let settled = 0;
     let held = 0;
     for (let row of rows) {
+      // The owner's Stop already withdrew this direction; a lock only kept that write from landing. Never start it.
+      let stopCause: ReturnType<typeof ownerStopWithdrawalCause> = null;
+      try { stopCause = ownerStopWithdrawalCause(row); } catch { /* No readable stop record: the row is handled as before. */ }
+      if (stopCause) {
+        try { if (settleQueuedSteer(row.id, "cancelled", stopCause)) settled += 1; } catch (error) {
+          // Still not started; the next recovery settles it from the same stop record.
+          console.warn(`[invocation] owner-stopped queued steer could not be settled steer=${row.id} code=${innermostTypedCode(error) ?? "none"}`);
+          try { if (holdQueuedSteerForRecovery(row.id, "run-stopped-withdraw-unconfirmed")) held += 1; } catch { /* the same lock */ }
+        }
+        continue;
+      }
       // A malformed/uncertain drain claim outranks owner recovery. An account
       // returning cannot turn evidence of a prior dispatch into a fresh queue.
       if (row.request.oneTeamReportTurn === true && row.status === "draining" && !row.drainedRunId) {
@@ -2786,7 +2985,12 @@ export class InvocationService {
         // A held relay One wrote to a teammate has no owner to decide on it: measured 2026-10-12, two such rows sat
         // for days after their run ended in a browser-login wait without a receipt. Once that run's lease is released
         // and an hour has passed, close it; the Goal re-derives what still needs saying. Owner-written ones stay held.
-        if (row.request.promptOrigin === "system" && originalOwner?.state === "released"
+        // An idle-chat direction (steerFromOwner) names the run it planned as its "original": no start ever made that run an owner
+        // row or a receipt, so "released" could never come true and the row stayed held for good. No lease and no receipt of the
+        // planned run, and nothing live under it, is the same proof that the run is over.
+        const plannedRunNeverStarted = !originalOwner && !hasInvocationRunReceipt(row.drainedRunId ?? row.originalRunId)
+          && !this.queuedSteerRunHeldByLiveOwner(row.originalRunId, row.chatId);
+        if (row.request.promptOrigin === "system" && (originalOwner?.state === "released" || plannedRunNeverStarted)
           && row.recoveryReason !== "one-team-report-owner-unbound"
           && Date.now() - Date.parse(row.queuedAt) > HELD_SYSTEM_STEER_RETIRE_MS && retireHeldQueuedSteer(row.id, "held-system-retired")) {
           settled += 1;
@@ -2804,6 +3008,10 @@ export class InvocationService {
         const drainedReceipt = getInvocationRunReceipt(row.drainedRunId);
         if (steerReceiptIsTerminal(drainedReceipt)) {
           if (settleQueuedSteer(row.id, "started")) settled += 1;
+        } else if (this.queuedSteerRunHeldByLiveOwner(row.drainedRunId, row.chatId)) {
+          // The run this direction was drained into is alive: its owner process (this one, or the other host) settles the row
+          // itself. Holding it made that settlement fail and the owner's delivered message read as undelivered.
+          continue;
         } else {
           // A start row without a terminal receipt may already have crossed an
           // external provider boundary. Holding is the only honest restart
@@ -2818,6 +3026,10 @@ export class InvocationService {
       }
       const originalReceipt = getInvocationRunReceipt(row.originalRunId);
       if (!steerReceiptIsTerminal(originalReceipt) && !previousExecutionClosed) {
+        // An active lease (or a run live in this process) is a running owner, not a restart's uncertainty: that owner holds this
+        // direction in its own queue and drains it when its run ends (a background-service turn survives the window closing).
+        // Holding it here failed that drain's claim and dropped the owner's direction until the next window start.
+        if (this.queuedSteerRunHeldByLiveOwner(row.originalRunId, row.chatId)) continue;
         holdQueuedSteerForRecovery(row.id, "original-run-start-uncertain");
         held += 1;
         continue;
@@ -2896,10 +3108,7 @@ export class InvocationService {
       if (startBoundary.crossed && !startBoundary.handedOff && startBoundary.runId) {
         this.releaseUndispatchedStart(startBoundary.runId, req.chatId, error, startBoundary.cleanups ?? []);
       }
-      if (!startBoundary.handedOff && startBoundary.ownerLease) {
-        try { invocationRunOwners.release(startBoundary.ownerLease); }
-        catch (cleanupError) { console.warn("[invocation] owner release remains unconfirmed:", cleanupError); }
-      }
+      if (!startBoundary.handedOff && startBoundary.ownerLease) this.releaseOwnerLease(startBoundary.ownerLease, "start-refused");
       if (durableAdmission && !startBoundary.crossed) {
         // Direct control flow proves no provider dispatch occurred. Absence of
         // a receipt alone would not prove that, especially across epochs.
@@ -4026,6 +4235,8 @@ export class InvocationService {
 
     const effectBoundary = new InvocationEffectBoundaryTracker(runId, runReq.chatId);
     let terminalObserved = false;
+    /** The runner's own typed proof that this turn's terminal failure sent nothing to a model (turnDelivery "not-dispatched"). */
+    let turnProvedNotDispatched = false;
     // A read-only effect observation looks at the outside world for a blocked
     // Goal; it is not a Goal cycle. It must not bind a controller attempt, claim
     // completion, register waits or run the verifier on that Goal.
@@ -4381,13 +4592,27 @@ export class InvocationService {
                 assertInvocationRunOwner(record.ownerLease);
               } } : undefined;
         if (nativeApprovalOwner && !lifetime.ownsActiveRoot()) throw new Error("native_approval_execution_root_required");
+        const writerLease = record.ownerLease;
+        const nativeWriterOwner = writerLease ? {
+          invocationIdentity: { record, request: runReq, controller, lease: writerLease },
+          runId, chatId: chat.id, ownerId: writerLease.ownerId, leaseId: writerLease.leaseId,
+          signal: controller.signal, assertCurrent: () => {
+            controller.signal.throwIfAborted();
+            if (this.activeRuns.get(runId) !== record || record.controller !== controller || record.request !== runReq
+              || record.ownerLease !== writerLease) {
+              throw Object.assign(new Error("native_writer_execution_ended"), { code: "native_writer_execution_ended" });
+            }
+            nativeApprovalOwner?.assertCurrent();
+            assertInvocationRunOwner(writerLease);
+          },
+        } : undefined;
         // Chat host handover (1.3.0 A2): the chat's previous turn ran in the other process, so that process lets go of its
         // idle resident runtime sessions before this one dispatches, and the same provider thread resumes here.
         const handedOver = handoverLease ? this.handOverChatHost(handoverLease, runReq.chatId, runId) : undefined;
         const dispatch = () => {
           controller.signal.throwIfAborted();
           if(record.oneTeamReportCustody && !queuedTeamReportCurrent(record.oneTeamReportCustody,record.oneTeamReportOriginalRequest!))throw new Error("one_team_report_owner_changed");
-          return withNativeApprovalExecution(nativeApprovalOwner, () => runMcpInvocation(
+          return withNativeApprovalExecution(nativeApprovalOwner, () => withNativeWriterExecution(nativeWriterOwner, () => runMcpInvocation(
       runReq,
       (rawEvent) => {
         if(record.oneTeamReportCustody && !queuedTeamReportCurrent(record.oneTeamReportCustody,record.oneTeamReportOriginalRequest!)) {
@@ -4985,6 +5210,7 @@ export class InvocationService {
           if (event.kind === "error") persistRecoverableAssistantPartial();
           const terminalKind = terminalDisposition!.terminalKind;
           if (event.kind === "error" && !event.agentId) persistEmptyFailureNotice(terminalKind, event.error?.code, event.error);
+          if (event.kind === "error" && !event.agentId && event.error?.turnDelivery === "not-dispatched") turnProvedNotDispatched = true;
           settleGoalControllerAttempt(terminalKind === "invoke_completed");
           canonicalTask = projectTaskStatus(
             runReq.chatId,
@@ -5507,7 +5733,7 @@ export class InvocationService {
         }
       },
       this.ownerControlInbox(runId, record),
-    ));
+    )));
         };
         // The owner's own message takes the owner slot lane (NH20); anything this turn starts for others does not inherit it.
         const runPriority = invocationRunPriority({ promptOrigin: runReq.promptOrigin, oneTeamReportTurn: runReq.oneTeamReportTurn, source: executionContext?.source });
@@ -5891,6 +6117,9 @@ export class InvocationService {
             return;
           }
           let retryCheckpointId: string | null = null;
+          // The verifier could not run or answered nothing. The host's non-blocking rule reads the requested "blocked" as running,
+          // and the turn-end follow-up was refused while the Goal was still verifying: nothing else owns the next step.
+          let verificationUnavailable = false;
           let episodeCheckpointId: string | null = null;
           // Only a host-observed idle yield on the Goal being verified (never the model's own claim).
           const idleYieldGoalId = !modelDeclaredCompletion && result.goalIdleYield?.goalId === completionClaim.goalId
@@ -5989,6 +6218,7 @@ export class InvocationService {
                 const current = getLongRunByGoalId(verifiedGoalId);
                 if (!result.goalEpisodeYield && current?.status === "verifying") transitionLongRun({ runId: current.id,
                   to: "blocked", actorKind: "host", reason: "verification_unavailable" });
+                if (!result.goalEpisodeYield) verificationUnavailable = true;
               }
             })
             .catch((error: unknown) => {
@@ -6008,6 +6238,7 @@ export class InvocationService {
               const current = getLongRunByGoalId(completionClaim.goalId!);
               if (!result.goalEpisodeYield && current && ["running", "verifying"].includes(current.status)) {
                 transitionLongRun({ runId: current.id, to: "blocked", actorKind: "host", reason: "verification_unavailable" });
+                verificationUnavailable = true;
               }
             })
             .finally(() => {
@@ -6034,6 +6265,8 @@ export class InvocationService {
               if (record.automaticGoalDeadline) clearTimeout(record.automaticGoalDeadline);
               this.settleAutomaticGoalInterruption(record);
               if (retryCheckpointId) this.scheduleGoalContinuation(completionClaim.goalId, record, "verification_retry_required");
+              // Same host follow-up, spaced by the same backoff: the Goal is running with no attempt, wait or retry otherwise.
+              else if (verificationUnavailable) this.scheduleGoalContinuation(completionClaim.goalId, record, "verification_unavailable");
             }));
           });
         }
@@ -6050,6 +6283,7 @@ export class InvocationService {
           kind: "invoke_error_diagnostic", payload: diagnostic });
         settleGoalControllerAttempt(false);
         effectObservationFailed = true;
+        if (runnerRefusedBeforeDispatch(error)) turnProvedNotDispatched = true;
         const failedGoalId = record.automaticGoalId ??
           (error instanceof Error && error.message === "durable_user_message_hook_failed" ? projectionGoalId : null);
         if (failedGoalId && !controller.signal.aborted) {
@@ -6204,6 +6438,13 @@ export class InvocationService {
         // while the adapter is still draining tool/transport work.
         try { effectBoundary.persist(); }
         catch (error) { console.warn("[invocation] effect boundary receipt failed:", error); }
+        // Relays this turn carried are Main-only context (never in the transcript): a turn refused before anything reached a
+        // model read none of them, so they wait again before the slot frees (the owner's retry starts the moment it does).
+        if (deferredRelays && turnProvedNotDispatched) {
+          try {
+            if (!runTurnMayHaveBeenRead(runId)) releaseDeferredSystemRelays(runId);
+          } catch (releaseError) { console.warn(`[invocation] deferred relays not released after a refused turn run=${runId} code=${innermostTypedCode(releaseError) ?? "none"}`); }
+        }
         if (this.activeRuns.settle(runId)) this.publishActiveChats();
         if (!nativeController || isLocalInvocationPreparationPort(nativePreparation!.port)) releaseOneAttachmentRun(requestedOneAttachmentRef);
       })))))).catch((error: unknown) => {
@@ -6213,10 +6454,7 @@ export class InvocationService {
         // publish here or the chat stays "running" and refuses every later start (independent review 2026-10-04).
         if (this.activeRuns.has(runId)) this.releaseUndispatchedStart(runId, runReq.chatId, error, startBoundary.cleanups ?? [], record);
       }).finally(() => lifetime.afterSettled(async () => {
-        if (record.ownerLease) {
-          try { invocationRunOwners.release(record.ownerLease); }
-          catch (error) { console.warn("[invocation] drained owner release remains unconfirmed:", error); }
-        }
+        if (record.ownerLease) this.releaseOwnerLease(record.ownerLease, "settled");
         if (nativePreparation) {
           // A missing cleanup ACK cannot retain an already drained execution slot.
           // Failed owner/CAS or actual preparation drain proof keeps the live fence.
@@ -6227,6 +6465,7 @@ export class InvocationService {
         // Actual execution authority is closed; original resource cleanup remains separate.
         this.publishSettled(runId, record);
         this.carryUndeliveredOwnerFollowups(runId, record);
+        this.recoverOrphanedQueuedSteers(runReq.chatId);
         const hasQueuedSteer = Boolean(this.steerQueues.get(record.chatId)?.length);
         this.drainSteerQueue(runReq.chatId);
         // A turn in a Work project released it: Goals refused as project-busy continue now (event-driven).
@@ -6312,10 +6551,7 @@ export class InvocationService {
     }
     this.settlingRuns.delete(runId);
     if (this.activeRuns.settle(runId)) this.publishActiveChats();
-    if (diagnosticRecord?.ownerLease) {
-      try { invocationRunOwners.release(diagnosticRecord.ownerLease); }
-      catch (cleanupError) { console.warn("[invocation] undispatched owner release remains unconfirmed:", cleanupError); }
-    }
+    if (diagnosticRecord?.ownerLease) this.releaseOwnerLease(diagnosticRecord.ownerLease, "undispatched");
     if (settledRecord) this.publishSettled(runId, settledRecord);
   }
 
@@ -6367,7 +6603,8 @@ export class InvocationService {
       } else if (!record.executionContext && getChat(record.chatId)?.goalId) return false;
       return true;
     };
-    const successorRunId = `login-resume-${randomUUID()}`;
+    // start()'s run-id gate (runtime/run-id.ts) takes only a strict UUID; a prefixed id was claimed durably and then refused every time.
+    const successorRunId = randomUUID();
     if (!claimInvocationBrowserLoginWait({ wait: parked.durable, prerequisite: parked.handle.prerequisite,
       ownerEpoch: desktopAppInstanceId(), successorInvocationId: successorRunId, isCurrent: current })) return;
     this.browserLoginWaitingRuns.delete(runId);
@@ -6486,7 +6723,9 @@ export class InvocationService {
       // 39 turns in an hour). Any other reason starts over after a completed turn, so a productive Goal keeps the 30 s
       // step while a failing one backs off. Only the first case was spaced before, and the same loop came back with
       // another reason: X Marketing 2026-10-05 failed runtime_turn_unsettled every minute for 25 minutes.
-      const nothingStarted = reason === "goal_wait_registration_failed";
+      // A turn whose completion claim the verifier could not judge moved nothing either: it counts the same way, or a verifier that
+      // keeps failing would wake a full model turn every 30 s.
+      const nothingStarted = reason === "goal_wait_registration_failed" || reason === "verification_unavailable";
       // A turn that ended because its passes stopped doing anything (client goal_idle_pass_yield) completed, yet it
       // is no progress either: its follow-ups count across completed turns too, so the Goal backs off instead of
       // being woken again after 30 s. Production 2026-10-06, Youtube launch on 1.2.69: after the idle yield the sweep
@@ -6649,6 +6888,7 @@ export class InvocationService {
     if (!expectedGoalId || chat?.goalId !== expectedGoalId) throw new Error("goal_control_binding_changed");
     if (run && (run.rootChatId !== chatId || run.surface === "science")) {
       if (action !== "delete") throw new Error("goal_control_scope_mismatch");
+      stopWorkSessionChatIfLoaded(chatId);
       // Old shared bindings are removable from this room without cancelling another room's Goal or its contract.
       // Its own live turns still stop, even if the durable detach fails.
       const local = [...new Map([...this.browserLoginWaitingRuns, ...this.settlingRuns, ...this.pendingGoalVerifications, ...this.activeRuns.entries()])]
@@ -6668,6 +6908,7 @@ export class InvocationService {
       return;
     }
     if (!run && action === "pause") throw new Error("goal_control_not_started");
+    stopWorkSessionChatIfLoaded(chatId);
     // Actual scheduler controllers keep their immutable creation owner even if
     // their row/receipt has since changed. Fence admissions before persistence.
     const automationStops = run ? snapshotAutomationGoalRunStops({ goalId: expectedGoalId,
@@ -6734,6 +6975,7 @@ export class InvocationService {
   }
 
   cancel(runId: string): "requested" | "already-requested" | "not-found" {
+    stopWorkSessionRunIfLoaded(runId);
     return this.cancelWithReason(runId, new Error(STOPPED_BY_USER));
   }
 
@@ -6856,18 +7098,8 @@ export class InvocationService {
     if (record.background || HOST_SHUTDOWN_ABORT_CAUSES.has(reason.message)) return;
     this.steerQueues.delete(record.chatId);
     const preserveReports=reason.message==="one_team_report_owner_changed" && Boolean(record.oneTeamReportCustody);
-    try {getDb().transaction(()=>{
-      if(preserveReports)for(const row of listRecoverableQueuedSteers(record.chatId)){
-        if(row.request.oneTeamReportTurn===true && row.status==="queued" && !row.drainedRunId){
-          // This is a hold, never a new admission. Auth restoration rechecks
-          // the exact original custody; stronger uncertainty holds stay held.
-          holdQueuedSteerForRecovery(row.id,"one-team-report-owner-unbound");
-        }
-      }
-      cancelQueuedSteersForChat(record.chatId,preserveReports,"run-stopped");
-      cancelQueuedOnePreflightSteersForChat(record.chatId);
-      rejectQueuedCurrentTurnSteersForStop(record.chatId, runId);
-    })();}catch{ /* Store refusal must never keep the original run alive. */ }
+    // A store refusal never keeps the original run alive, and never leaves the withdrawal unwritten either.
+    withdrawQueuedDirectionsForStop(record.chatId, runId, preserveReports, new Date().toISOString(), 0);
   }
 
   /** Interrupt an interactive turn only after its replacement direction is durable. */
@@ -7323,19 +7555,23 @@ export class InvocationService {
     try {
       this.start({ ...request, runId }, undefined, undefined, undefined, undefined, mainAdmission, undefined,
         request.oneMode && request.promptOrigin !== "system" ? QUEUED_ONE_ROOM_INHERITANCE : undefined);
-      settleQueuedSteer(id, "started");
     } catch (error) {
-      // A start refused for a "not ready yet" reason (shared/transient-send-refusal.ts: refused before anything reached a
-      // model) is the owner's direction waiting, not an uncertain dispatch: it used to be held for recovery with no retry
-      // and sat undelivered (no-dead-end sweep 2026-10-25). It takes the drain queue with backoff under a new run id.
-      const code = innermostTypedCode(error) ?? refusalCode(error) ?? null;
-      if (isTransientSendRefusalCode(code) && this.queueRefusedIdleSteer(req.chatId, row, runId, error) === "scheduled") {
+      // A start refused before anything reached a model (a "not ready yet" code, shared/transient-send-refusal.ts, or a locked
+      // store that start() marked refused-before-dispatch) is the owner's direction waiting, not an uncertain dispatch: it used
+      // to be held for recovery with no retry and sat undelivered (no-dead-end sweep 2026-10-25; the drain path already retried
+      // the same two refusals). It takes the drain queue with backoff under a new run id; a start that may have crossed a
+      // provider boundary is not retryable and is held below.
+      if (this.queueRefusedIdleSteer(req.chatId, row, runId, error) === "scheduled") {
         return this.durableSteerReceipt(getDurableQueuedSteer(id) ?? row, intentId);
       }
       // A thrown start may already have crossed a provider boundary. Preserve
       // the one planned run ID; never manufacture another on an ACK retry.
       holdQueuedSteerForRecovery(id, "drained-run-start-uncertain");
+      return this.durableSteerReceipt(getDurableQueuedSteer(id) ?? row, intentId);
     }
+    // The run is started: a lock on this settlement retries it, and nothing here can turn the started run into a hold (the owner
+    // saw an "undelivered" card for a turn that was running, and returning its text would run the direction twice).
+    this.settleQueuedSteerDurably(id, "started");
     return this.durableSteerReceipt(getDurableQueuedSteer(id) ?? row, intentId);
   }
 
@@ -7354,10 +7590,10 @@ export class InvocationService {
     if (req.oneAttachmentRef) {
       throw new Error("One attachments cannot be added through steering in v1; wait for the active run and send a new request");
     }
-    const steerRequest = {
+    const steerRequest = steerRequestUnderSessionCap({
       ...req,
       permissions: effectiveInvocationPermission(req.permissions, req.planMode),
-    };
+    });
     const reportCustody=steerRequest.oneTeamReportTurn===true?captureQueuedTeamReportCustody(steerRequest,oneTeamReportSource):undefined;
     if (oneTeamReportSource && !reportCustody)throw new Error("one_team_report_owner_unbound");
     if (preflightSteerId) {

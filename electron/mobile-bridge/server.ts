@@ -511,6 +511,10 @@ export class AgentlasMobileBridgeServer {
       return;
     }
     let identity: UpgradeIdentity | null = null;
+    // lastAuthenticationRefusal is the pairing's one shared "most recent" slot. When authenticate() threw (an unreadable
+    // device store) it was never written for THIS token, so reading it would hand the relay another phone's
+    // re-pair-required verdict for a credential that may be perfectly valid.
+    let authenticationThrew = false;
     try {
       // The explicit development credential is a separate authentication
       // authority, not a production pairing row. Check its exact token before
@@ -540,6 +544,7 @@ export class AgentlasMobileBridgeServer {
         }
       }
     } catch (error) {
+      authenticationThrew = true;
       this.onError(errorOf(error));
     }
     if (!identity) {
@@ -551,11 +556,13 @@ export class AgentlasMobileBridgeServer {
       // ★2026-08-08: `if (refusal)` 때문에 사유가 안 잡힌 경우는 여전히 조용했다.
       // 사유가 비어 있다는 사실 자체가 결함 신호이므로 그것도 적는다 —
       // 로그에 아무것도 없는 상태로는 다음에도 같은 시간을 쓴다.
-      const refusal = this.pairing?.lastAuthenticationRefusal ?? null;
+      const refusal = authenticationThrew ? null : this.pairing?.lastAuthenticationRefusal ?? null;
       console.warn(
         refusal
           ? `[mobile-bridge] upgrade refused: ${refusal}`
-          : "[mobile-bridge] upgrade refused: no reason recorded (authentication path is missing a refusal reason)",
+          : authenticationThrew
+            ? "[mobile-bridge] upgrade refused: authentication could not be decided (authenticate threw); no refusal reason is sent"
+            : "[mobile-bridge] upgrade refused: no reason recorded (authentication path is missing a refusal reason)",
       );
       rejectUpgrade(socket, 401, "unauthorized", refusal);
       return;
@@ -1149,7 +1156,12 @@ export class AgentlasMobileBridgeServer {
         }
       }
       const uncertainWrite = timeout && writeRequest;
-      let response: MobileBridgeReplayResponse = mobileBridgeFailure(
+      // An owner message into a room the personal agent runs (one/personal-agent-rooms.ts): a typed refusal, nothing ran.
+      const personalAgentRoom = !timeout && !secureRequest && (error as { code?: unknown } | null)?.code === "supervised_room_read_only";
+      let response: MobileBridgeReplayResponse = personalAgentRoom
+        ? mobileBridgeFailure(request.id, "supervised_room_read_only",
+          "This room is run by your personal agent. Talk to the personal agent instead.", false)
+        : mobileBridgeFailure(
         request.id,
         secureRequest ? (timeout && request.method === "one.vault.submit" ? "store_unknown"
           : error instanceof OneVaultError || error instanceof OneProviderRemoteError ? error.code : "secure_route_unavailable")

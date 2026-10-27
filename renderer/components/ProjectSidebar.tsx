@@ -149,7 +149,8 @@ export function ProjectSidebar() {
       <div className="project-sidebar-label">{ko ? "프로젝트" : "Projects"}</div>
       <nav className="project-sidebar-list" aria-label={ko ? "프로젝트" : "Projects"}>
         {projects.map((project) => {
-          const projectTasks = tasks.filter((task) => task.projectId === project.id && task.originChatId).slice(0, 6);
+          // A personal agent's room stays out of the sidebar (owner 2026-10-27).
+          const projectTasks = tasks.filter((task) => task.projectId === project.id && task.originChatId && task.supervisedByPersonalAgent !== true).slice(0, 6);
           const chatsCollapsed = collapsedProjects[project.id] ?? false;
           return <div className="project-sidebar-project" key={project.id}>
             <div className="project-sidebar-project-row">

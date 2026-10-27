@@ -174,6 +174,37 @@ export async function runGraphTeamStep<T>(driver: GraphTeamStepDriver<T>): Promi
   } finally {
     openSteps.delete(owner);
     step.wake?.();
+    if (driver.signal.aborted) await endOwnedSessions(owner, driver.signal.reason);
+  }
+}
+
+/**
+ * Aborts that do NOT end the sessions the step started, because the work is not over: the app quitting (a restart resumes it), the run
+ * lease moving to the other process (its step adopts the same sessions by their brief), and a looping model that the runner retries
+ * (the retry reuses them). Every other abort is the owner's Stop, pause or delete of the graph (code automation_stopped_by_user), the
+ * node deadline, or a run that failed for good: the step is gone and its grant revoked, and nothing would ever stop its sessions.
+ */
+const SESSION_KEEPING_ABORTS: ReadonlySet<string> = new Set(["app_closed", "app_shutdown", "update_restart",
+  "Automation execution lease ownership lost", "worker_output_degenerate"]);
+/** The step returns within this time even if a session cannot be reached to cancel; the cancel goes on. */
+const END_SESSIONS_WAIT_MS = 3_000;
+
+/**
+ * The sessions this step started stop with it (team-dispatch.ts cancelGraphStepOwnedWork). They run with full access and Always allow:
+ * without this an owner's Stop left them running, and their results reached the room's One instead of the step that was gone.
+ */
+async function endOwnedSessions(owner: string, reason: unknown): Promise<void> {
+  const cause = reason instanceof Error ? reason.message : typeof reason === "string" ? reason : "aborted";
+  if (SESSION_KEEPING_ABORTS.has(cause)) return;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const cancelling = (require("./team-dispatch") as typeof import("./team-dispatch")).cancelGraphStepOwnedWork(owner, cause);
+    cancelling.catch(() => undefined); // the race below may stop waiting for it first
+    await Promise.race([cancelling, new Promise<void>((resolve) => { timer = setTimeout(resolve, END_SESSIONS_WAIT_MS); })]);
+  } catch (error) {
+    console.warn(`[graph-team-step] sessions of the ended step were not cancelled owner=${owner} cause=graph_step_cancel_failed:`, error instanceof Error ? error.message : error);
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }
 

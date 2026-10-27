@@ -15,6 +15,7 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import { getMemoryDb as getDb, getMemoryStoreInfo } from "./database";
 import { insertMemoryEntry } from "./store";
+import { isMemoryContentRevoked, MemoryRevokedError } from "./revocations";
 import { autoIntakeCuratedMemory } from "../experience/store";
 import { getAgentById } from "../mcp/registry";
 import { listFirms } from "../store/firms";
@@ -23,7 +24,11 @@ import type { MemoryKind, MemoryScope } from "../architecture/manifest";
 import type { InstalledFirm } from "../../shared/types";
 
 const SOURCE_TOKEN_PREFIX = "mem-import:v1";
+// Files taken per pass: each team file may cost one model call to pick its owner. Files with sections still to import go
+// first (in name order), so running the import again moves on to the files this pass left; MAX_SCANNED_FILES bounds the
+// read-only look at which files those are. Whatever a pass did not cover is counted in truncatedFiles, never dropped silently.
 const MAX_FILES = 400;
+const MAX_SCANNED_FILES = 5000;
 const MAX_CONTENT = 4000;
 
 export interface MemoryImportRequest {
@@ -40,7 +45,8 @@ export interface MemoryImportRow {
   ownerAgentId: string | null;
   scope: MemoryScope;
   kind: MemoryKind;
-  status: "new" | "duplicate" | "redacted";
+  /** "forgotten": the owner already forgot this exact text, so it is not brought back. */
+  status: "new" | "duplicate" | "redacted" | "forgotten";
 }
 
 export interface MemoryImportPreview {
@@ -53,6 +59,9 @@ export interface MemoryImportPreview {
     newCount: number;
     duplicateCount: number;
     redactedCount: number;
+    forgottenCount: number;
+    /** Source files with sections still to import that this pass did not cover; import again to continue. */
+    truncatedFiles: number;
     byOwner: Record<string, number>;
     byKind: Record<string, number>;
   };
@@ -63,9 +72,13 @@ export interface MemoryImportResult {
   targetAgentId: string;
   imported: number;
   skippedDuplicate: number;
+  /** Sections the owner already forgot; skipped so the rest of the folder still imports. */
+  skippedForgotten: number;
   redacted: number;
   embedded: number;
   intakeAttempted: number;
+  /** Source files with sections still to import that this pass did not cover; import again to continue. */
+  truncatedFiles: number;
   byOwner: Record<string, number>;
 }
 
@@ -140,6 +153,11 @@ const SHARED_HINT =
   /(team[-_ ]?memory|team_memory|glossary|handoff|scope[-_ ]?ownership|common[-_ ]?safety|safety|tone|language|dossier|operating[-_ ]?architecture|memory[-_ ]?architecture|용어|공통|안전|인계|톤)/i;
 const RISK_HINT = /(security|attack|vuln|bug|gotcha|incident|보안|취약|버그|사고)/i;
 const ALWAYS_KEEP_HINT = /(team[-_ ]?memory|glossary|dossier|handoff|safety|scope[-_ ]?ownership|tone)/i;
+
+/** From the file name alone, so the files to take can be ordered before any owner is decided. */
+function alwaysKeepFor(relFile: string): boolean {
+  return ALWAYS_KEEP_HINT.test(relFile.toLowerCase());
+}
 
 function normalizeToken(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9가-힣]+/g, " ").trim();
@@ -313,7 +331,7 @@ async function decideOwner(
 ): Promise<OwnerDecision> {
   opts.assertCurrent?.();
   const lower = relFile.toLowerCase();
-  const alwaysKeep = ALWAYS_KEEP_HINT.test(lower);
+  const alwaysKeep = alwaysKeepFor(relFile);
   if (SHARED_HINT.test(lower)) {
     return {
       scope: "team_memory",
@@ -359,9 +377,9 @@ function collectMarkdown(root: string): Array<{ abs: string; rel: string }> {
   if (stat.isFile()) {
     return /\.(md|markdown|mdx|txt)$/i.test(root) ? [{ abs: root, rel: path.basename(root) }] : [];
   }
+  // The whole folder, in name order: a cap applied while walking would cut in readdir order and could never be resumed.
   const out: Array<{ abs: string; rel: string }> = [];
   const walk = (dir: string): void => {
-    if (out.length >= MAX_FILES) return;
     let entries: fs.Dirent[];
     try {
       entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -369,7 +387,6 @@ function collectMarkdown(root: string): Array<{ abs: string; rel: string }> {
       return;
     }
     for (const entry of entries) {
-      if (out.length >= MAX_FILES) return;
       if (entry.name.startsWith(".") || entry.name === "node_modules") continue;
       const abs = path.join(dir, entry.name);
       if (entry.isDirectory()) walk(abs);
@@ -399,14 +416,76 @@ interface BuiltEntry {
   redacted: boolean;
 }
 
+/** The sections of one file that would be imported, with the exact text that is written. */
+function importableSections(relFile: string, md: string, alwaysKeep: boolean): Array<{ heading: string; content: string }> {
+  const out: Array<{ heading: string; content: string }> = [];
+  const sections = /decisions\.md$/i.test(relFile) ? splitDatedBullets(md) : splitSections(md);
+  for (const sec of sections) {
+    if (!keepSection(sec.heading, sec.body, alwaysKeep)) continue;
+    const bodyText = sec.body.replace(/\n{3,}/g, "\n\n").trim();
+    const content = `${sec.heading}\n${bodyText}`.trim().slice(0, MAX_CONTENT);
+    if (content.length < 40) continue;
+    out.push({ heading: sec.heading, content });
+  }
+  return out;
+}
+
+/** Import tokens already stored, in one scan, so ordering a large folder does not cost a table scan per section. */
+function importedTokens(): Set<string> {
+  const tokens = new Set<string>();
+  const rows = getDb()
+    .prepare("SELECT evidence_json FROM memory_entries WHERE evidence_json LIKE ?")
+    .all(`%${SOURCE_TOKEN_PREFIX}:%`) as Array<{ evidence_json: string }>;
+  const shape = new RegExp(`${SOURCE_TOKEN_PREFIX}:[0-9a-f]{16}`, "g");
+  for (const row of rows) for (const found of String(row.evidence_json).matchAll(shape)) tokens.add(found[0]);
+  return tokens;
+}
+
+/**
+ * Which files this pass covers. A folder that fits is taken whole. A larger one is taken in name order among the files
+ * that still have a section to import (a repeat run therefore reaches the files the last pass left), topped up with
+ * already-imported files so their rows still show. `truncated` counts the files with something left to import, or not
+ * looked at, that did not fit.
+ */
+async function selectFiles(
+  files: Array<{ abs: string; rel: string }>,
+  opts: MemoryImportOptions,
+): Promise<{ selected: Array<{ abs: string; rel: string }>; truncated: number }> {
+  if (files.length <= MAX_FILES) return { selected: files, truncated: 0 };
+  const imported = importedTokens();
+  const pending: Array<{ abs: string; rel: string }> = [];
+  const done: Array<{ abs: string; rel: string }> = [];
+  const scanned = Math.min(files.length, MAX_SCANNED_FILES);
+  for (let index = 0; index < scanned; index += 1) {
+    // Reading is synchronous; let the app breathe between batches of a big folder.
+    if (index % 200 === 199) await new Promise<void>((resolve) => setImmediate(resolve));
+    opts.assertCurrent?.();
+    const file = files[index];
+    let md: string;
+    try {
+      md = fs.readFileSync(file.abs, "utf8");
+    } catch {
+      continue;
+    }
+    if (isGeneratedMemoryView(md)) continue;
+    const left = importableSections(file.rel, md, alwaysKeepFor(file.rel))
+      .some((sec) => !looksSecret(sec.content) && !imported.has(stableToken(file.rel, sec.heading)));
+    (left ? pending : done).push(file);
+  }
+  const taken = pending.slice(0, MAX_FILES);
+  const selected = [...taken, ...done.slice(0, MAX_FILES - taken.length)]
+    .sort((a, b) => a.rel.localeCompare(b.rel));
+  return { selected, truncated: pending.length - taken.length + (files.length - scanned) };
+}
+
 async function buildEntries(
   req: MemoryImportRequest,
   target: TargetShape,
   opts: MemoryImportOptions = {},
-): Promise<BuiltEntry[]> {
-  const files = collectMarkdown(req.sourcePath);
+): Promise<{ entries: BuiltEntry[]; truncatedFiles: number }> {
+  const { selected, truncated } = await selectFiles(collectMarkdown(req.sourcePath), opts);
   const built: BuiltEntry[] = [];
-  for (const { abs, rel } of files) {
+  for (const { abs, rel } of selected) {
     opts.assertCurrent?.();
     let md: string;
     try {
@@ -417,26 +496,26 @@ async function buildEntries(
     if (isGeneratedMemoryView(md)) continue;
     const owner = await decideOwner(rel, md, target, opts);
     opts.assertCurrent?.();
-    const sections = /decisions\.md$/i.test(rel) ? splitDatedBullets(md) : splitSections(md);
-    for (const sec of sections) {
-      if (!keepSection(sec.heading, sec.body, owner.alwaysKeep)) continue;
-      const bodyText = sec.body.replace(/\n{3,}/g, "\n\n").trim();
-      const content = `${sec.heading}\n${bodyText}`.trim().slice(0, MAX_CONTENT);
-      if (content.length < 40) continue;
+    for (const sec of importableSections(rel, md, owner.alwaysKeep)) {
       built.push({
         token: stableToken(rel, sec.heading),
         relFile: rel,
         heading: sec.heading,
-        content,
+        content: sec.content,
         scope: owner.scope,
         kind: kindForHeading(sec.heading, owner.fallbackKind),
         ownerAgentId: owner.ownerAgentId,
         ownerLabel: owner.ownerLabel,
-        redacted: looksSecret(content),
+        redacted: looksSecret(sec.content),
       });
     }
   }
-  return built;
+  return { entries: built, truncatedFiles: truncated };
+}
+
+/** The owner already forgot this exact text for the layer it would land in; writing it again would undo that. */
+function isForgotten(e: BuiltEntry): boolean {
+  return isMemoryContentRevoked({ scope: e.scope, kind: e.kind, content: e.content, agentId: e.ownerAgentId });
 }
 
 function validateRequest(req: MemoryImportRequest): TargetShape {
@@ -462,7 +541,7 @@ export async function importMemoryPreview(
 ): Promise<MemoryImportPreview> {
   opts = guardedOptions(opts);
   const target = validateRequest(req);
-  const entries = await buildEntries(req, target, opts);
+  const { entries, truncatedFiles } = await buildEntries(req, target, opts);
   opts.assertCurrent?.();
   const rows: MemoryImportRow[] = [];
   const byOwner: Record<string, number> = {};
@@ -470,17 +549,22 @@ export async function importMemoryPreview(
   let newCount = 0;
   let duplicateCount = 0;
   let redactedCount = 0;
+  let forgottenCount = 0;
   for (const e of entries) {
+    // The same refusal order apply uses, so the preview promises only what apply will write.
     const status: MemoryImportRow["status"] = e.redacted
       ? "redacted"
       : existsByToken(e.token)
         ? "duplicate"
-        : "new";
+        : isForgotten(e)
+          ? "forgotten"
+          : "new";
     if (status === "new") {
       newCount += 1;
       byOwner[e.ownerLabel] = (byOwner[e.ownerLabel] || 0) + 1;
       byKind[e.kind] = (byKind[e.kind] || 0) + 1;
     } else if (status === "duplicate") duplicateCount += 1;
+    else if (status === "forgotten") forgottenCount += 1;
     else redactedCount += 1;
     rows.push({
       file: e.relFile,
@@ -497,7 +581,7 @@ export async function importMemoryPreview(
     targetAgentId: target.agentId,
     targetKind: target.kind,
     rows,
-    summary: { total: entries.length, newCount, duplicateCount, redactedCount, byOwner, byKind },
+    summary: { total: entries.length, newCount, duplicateCount, redactedCount, forgottenCount, truncatedFiles, byOwner, byKind },
   };
 }
 
@@ -507,16 +591,18 @@ export async function importMemoryApply(
 ): Promise<MemoryImportResult> {
   opts = guardedOptions(opts);
   const target = validateRequest(req);
-  const entries = await buildEntries(req, target, opts);
+  const { entries, truncatedFiles } = await buildEntries(req, target, opts);
   opts.assertCurrent?.();
   const result: MemoryImportResult = {
     sourcePath: req.sourcePath,
     targetAgentId: target.agentId,
     imported: 0,
     skippedDuplicate: 0,
+    skippedForgotten: 0,
     redacted: 0,
     embedded: 0,
     intakeAttempted: 0,
+    truncatedFiles,
     byOwner: {},
   };
   for (const e of entries) {
@@ -529,19 +615,34 @@ export async function importMemoryApply(
       result.skippedDuplicate += 1;
       continue;
     }
-    const entry = insertMemoryEntry({
-      scope: e.scope,
-      kind: e.kind,
-      content: e.content,
-      agentId: e.ownerAgentId,
-      confidence: /\(20\d\d-\d\d-\d\d\)|Date:\s*20\d\d/.test(e.content) ? "high" : "medium",
-      sensitivity: "internal",
-      evidence: [e.token, `source:memory-import/${e.relFile}`],
-      requestContext: {
-        userIntent: `Imported memory: ${e.heading}`.slice(0, 200),
-        outcome: "imported-from-existing-memory",
-      },
-    });
+    if (isForgotten(e)) {
+      result.skippedForgotten += 1;
+      continue;
+    }
+    let entry: ReturnType<typeof insertMemoryEntry>;
+    try {
+      entry = insertMemoryEntry({
+        scope: e.scope,
+        kind: e.kind,
+        content: e.content,
+        agentId: e.ownerAgentId,
+        confidence: /\(20\d\d-\d\d-\d\d\)|Date:\s*20\d\d/.test(e.content) ? "high" : "medium",
+        sensitivity: "internal",
+        evidence: [e.token, `source:memory-import/${e.relFile}`],
+        requestContext: {
+          userIntent: `Imported memory: ${e.heading}`.slice(0, 200),
+          outcome: "imported-from-existing-memory",
+        },
+      });
+    } catch (error) {
+      // 오너가 잊은 내용 한 건이 나머지 섹션의 가져오기를 영원히 막지 않게 건너뛴다
+      // (위 isForgotten 확인과 쓰기 사이에 잊은 경우의 안전망. 잊기는 가져오기 토큰도 지워 재시도해도 같은 줄에서 던진다).
+      if (error instanceof MemoryRevokedError) {
+        result.skippedForgotten += 1;
+        continue;
+      }
+      throw error;
+    }
     result.imported += 1;
     result.embedded += 1; // insertMemoryEntry always computes a local embedding.
     result.byOwner[e.ownerLabel] = (result.byOwner[e.ownerLabel] || 0) + 1;

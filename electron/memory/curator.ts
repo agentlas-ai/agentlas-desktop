@@ -945,6 +945,7 @@ export function curateReply(
     emitterStatus,
     candidateCount: parsed.candidateCount + carried.length,
     turnSummary: parsed.turnSummary ?? fallbackTurnObservation(parsed.cleanedText),
+    reviveFailedTurn: true,
   });
   if (!ticket.created) {
     return {
@@ -1040,6 +1041,7 @@ export function stripReplyMemoryEventsReadOnly(
     emitterStatus: "read_only",
     candidateCount: parsed.candidateCount + Math.max(0, previouslyDiscarded),
     turnSummary: parsed.turnSummary ?? fallbackTurnObservation(parsed.cleanedText),
+    reviveFailedTurn: true,
   });
   if (ticket.created) {
     /*

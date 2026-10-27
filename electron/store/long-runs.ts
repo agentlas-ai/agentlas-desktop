@@ -30,7 +30,7 @@ import {
   type LongRunWorkerState,
   type LongRunWorkspaceBinding,
 } from "../../shared/long-run";
-import { GOAL_OWNER_ANSWER_REQUIRED, goalHeldForOwnerAnswer } from "../../shared/goal-display-state";
+import { GOAL_OWNER_ANSWER_REQUIRED, GOAL_OWNER_HOLD_BLOCKED_REASONS, goalHeldForOwnerAnswer, goalHeldForOwnerGrant } from "../../shared/goal-display-state";
 import { desktopStoreTransaction, emitDesktopStoreChange } from "./change-bus";
 import { getDb } from "./db";
 import { invocationProcessOwner } from "./invocation-run-owners";
@@ -869,7 +869,20 @@ export function transitionLongRun(input: {
     // A status no-op is not an ownership grant. Startup takes custody under
     // the exclusive GUI lock; callers must not silently retain or steal it.
     if (input.appInstanceId != null && input.appInstanceId !== current.appInstanceId) {
-      throw new Error("long_run_transition_owner_conflict");
+      // Only another instance's claim is a conflict. A run nobody owns yet (a Goal Main admitted for another process's turn
+      // is queued with no instance) has no live holder to lose to: the first host that asks takes it, compare-and-swap, or
+      // every resume of it was refused for ever and each refusal still spent a sweep dispatch slot.
+      if (current.appInstanceId != null || current.hostOwnerKind !== "desktop") throw new Error("long_run_transition_owner_conflict");
+      const db = getDb();
+      db.transaction(() => {
+        const claimed = db.prepare("UPDATE long_runs SET app_instance_id = ? WHERE id = ? AND version = ? AND status = ? AND app_instance_id IS NULL")
+          .run(input.appInstanceId, current.id, current.version, current.status);
+        if (claimed.changes !== 1) throw new Error("long_run_transition_owner_conflict");
+        appendEventInDb({ runId: current.id, kind: "run.owner_claimed", actorKind: input.actorKind ?? "host",
+          payload: { status: current.status, appInstanceId: input.appInstanceId, from: null }, at: new Date().toISOString() });
+      })();
+      emitDesktopStoreChange({ entity: "long-run", id: current.id });
+      return getLongRun(current.id) ?? current;
     }
     return current;
   }
@@ -1198,6 +1211,32 @@ export function releaseGoalOwnerAnswerHold(input: { runId: string; expectedVersi
   const next = getLongRun(input.runId);
   if (!next) throw new Error("goal_owner_answer_release_readback_failed");
   return next;
+}
+
+/**
+ * The owner pressed Resume on a Goal resting for them (its question, or its start grant) while another turn runs in the
+ * Goal's chat. The press is the owner's instruction, so the hold ends now and the Goal is queued; the blocked-goal sweep
+ * starts it once that turn has ended. Before, the press changed nothing and the hold waited for an owner message. Returns
+ * the queued run, or null when the Goal is no longer held (nothing to release) or a controller attempt is live.
+ */
+export function queueOwnerHeldGoalForResume(input: { runId: string; appInstanceId?: string | null }): LongRunRecord | null {
+  const db = getDb();
+  const queued = db.transaction((): boolean => {
+    const current = getLongRun(input.runId);
+    if (!current || current.surface === "science" || !(goalHeldForOwnerAnswer(current) || goalHeldForOwnerGrant(current))) return false;
+    if (liveLongRunAttemptCount(input.runId)) return false;
+    const now = new Date().toISOString();
+    const changed = db.prepare(`UPDATE long_runs SET status='queued', pause_reason=NULL, blocked_reason=NULL, paused_at=NULL,
+      app_instance_id=COALESCE(?, app_instance_id), updated_at=?, version=version+1 WHERE id=? AND status='waiting_tool' AND version=?`)
+      .run(input.appInstanceId ?? null, now, current.id, current.version);
+    if (changed.changes !== 1) return false;
+    appendEventInDb({ runId: current.id, kind: "run.status_changed", actorKind: "user",
+      payload: { from: "waiting_tool", to: "queued", reason: "user-resume", heldFor: current.blockedReason }, at: now });
+    return true;
+  })();
+  if (!queued) return null;
+  emitDesktopStoreChange({ entity: "long-run", id: input.runId });
+  return getLongRun(input.runId);
 }
 
 /** Delay of the first retry after the app (re)started: a restart changes what failed before (runtime, login,
@@ -2580,7 +2619,7 @@ export function requestLongRunVerification(goalId: string, evidence?: string | n
 }
 
 function pauseDesktopRuns(reason: "app-quit" | "startup-recovery", appInstanceId?: string,
-  assertExclusive?: () => void): string[] {
+  assertExclusive?: () => void, liveDaemonBootId: string | null = null): string[] {
   const db = getDb();
   const placeholders = [...LONG_RUN_ACTIVE_STATUSES].map(() => "?").join(",");
   const now = new Date().toISOString();
@@ -2591,15 +2630,23 @@ function pauseDesktopRuns(reason: "app-quit" | "startup-recovery", appInstanceId
     // neither app quit nor restart is evidence that its process has ended.
     // Hold the write lock from selection through settlement so a concurrent
     // owner change cannot slip between the filter and worker/event updates.
-    // A Goal held for the owner's answer has no turn to interrupt and nothing to resume: pausing it would turn it into a
-    // host pause that startup resumes (a wake that only re-asks the question), so it stays as it is across quit and restart.
-    const ownedRows = db.prepare(
-      `SELECT id, status FROM long_runs
+    // A Goal held for the owner (the answer to its question, or the grant to start) has no turn to interrupt and nothing to
+    // resume: pausing it would turn it into a host pause that startup resumes (a wake that only re-asks the question, or a
+    // start the owner never granted), so it stays as it is across quit and restart.
+    // Nor a Goal whose only run was a background-service turn that already ended: the follower closes it on its next pass. Paused
+    // as crash_recovery it left the follower's reach, and the startup resume then redid the finished work as a new Main episode.
+    // The same for a service turn that is still running under the service this Desktop reattached to (`liveDaemonBootId`): this
+    // process's empty activeRuns says nothing about a turn another process hosts, and the pause made the finished turn's Goal a
+    // resume candidate the follower could no longer reach.
+    const ownedRows = (db.prepare(
+      `SELECT id, goal_id AS goalId, status FROM long_runs
        WHERE execution_location = 'desktop-local' AND host_owner_kind = 'desktop'
          AND surface <> 'science' AND status IN (${placeholders})
-         AND NOT (status = 'waiting_tool' AND IFNULL(blocked_reason, '') = '${GOAL_OWNER_ANSWER_REQUIRED}')
+         AND NOT (status = 'waiting_tool' AND IFNULL(blocked_reason, '') IN (${GOAL_OWNER_HOLD_BLOCKED_REASONS.map(() => "?").join(",")}))
          AND (? <> 'app-quit' OR ? IS NULL OR app_instance_id = ?)`,
-    ).all(...LONG_RUN_ACTIVE_STATUSES, reason, appInstanceId ?? null, appInstanceId ?? null) as Array<{ id: string; status: LongRunStatus }>;
+    ).all(...LONG_RUN_ACTIVE_STATUSES, ...GOAL_OWNER_HOLD_BLOCKED_REASONS, reason, appInstanceId ?? null, appInstanceId ?? null) as Array<{ id: string; goalId: string; status: LongRunStatus }>)
+      .filter((row) => !(reason === "startup-recovery" && (row.status === "queued" || row.status === "running")
+        && (require("../long-run/daemon-turn-goal") as typeof import("../long-run/daemon-turn-goal")).serviceTurnGoalAwaitsFollower(row.goalId, { liveDaemonBootId })));
     for (const row of ownedRows) {
       // A durable user stop is never converted into an automatic host resume.
       const userControl = db.prepare("SELECT payload_json FROM long_run_events WHERE run_id = ? AND kind = 'run.user_control' AND actor_kind = 'user' ORDER BY seq DESC LIMIT 1")
@@ -2666,13 +2713,13 @@ export function recoverInterruptedDesktopLongRunsAtStartup(appInstanceId: string
   assertExclusive: () => void = () => {
     const electron = require("electron") as { app?: { hasSingleInstanceLock?: () => boolean } };
     if (electron.app?.hasSingleInstanceLock?.() !== true) throw new Error("desktop_startup_custody_not_exclusive");
-  }): string[] {
+  }, options: { liveDaemonBootId?: string | null } = {}): string[] {
   const db = getDb();
   return desktopStoreTransaction(db, () => {
     assertExclusive();
     const processOwner = invocationProcessOwner();
     if (processOwner.ownerKind !== "desktop") throw new Error("desktop_startup_custody_not_exclusive");
-    const recovered = pauseDesktopRuns("startup-recovery", appInstanceId, assertExclusive);
+    const recovered = pauseDesktopRuns("startup-recovery", appInstanceId, assertExclusive, options.liveDaemonBootId ?? null);
     // A paused Goal can still contain an attempt whose Desktop died before
     // settlement. Only an exact released lease proves that attempt is no
     // longer live; a dormant Goal or elapsed time alone proves nothing.

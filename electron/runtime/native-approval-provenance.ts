@@ -25,7 +25,7 @@ function current(owner: Owner): void {
 }
 /** Called inside the actual service-owned MainInvocationLifetime root only. */
 export async function withNativeApprovalExecution<T>(source: NativeApprovalExecution | undefined, action: () => Promise<T>): Promise<T> {
-  if (!source) return action();
+  if (!source) return scopes.exit(action);
   source.assertCurrent(); source.signal.throwIfAborted();
   if (scopes.getStore() || signals.has(source.signal)) fail("native_approval_execution_rebound");
   const owner: Owner = { source: Object.freeze({ ...source, actor: source.actor ? Object.freeze({ ...source.actor }) : null }), active: true };

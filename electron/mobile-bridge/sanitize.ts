@@ -8,7 +8,7 @@ import { maskPrivateKeyBlocks, SECRET_ASSIGNMENT_SOURCE } from "../../shared/sec
 // Private-key blocks go through the one shared rule (maskPrivateKeyBlocks): a truncated key is masked with its body too.
 // Credential assignments (`password: …`, `token=…`) go through the one shared rule too (SECRET_ASSIGNMENT_SOURCE), so the
 // phone, the suggestion validator and every Desktop write boundary agree on what a credential assignment is.
-const SECRET_RE = new RegExp(String.raw`(?:\b(?:AKIA|ASIA)[0-9A-Z]{16}\b|\bAIza[0-9A-Za-z_-]{35}\b|\bgithub_pat_[A-Za-z0-9_]{20,}\b|\b(?:sk|rk|pk|xox[baprs]|gh[pousr])[-_][A-Za-z0-9_=-]{12,}\b|${SECRET_ASSIGNMENT_SOURCE}|\bBearer\s+[A-Za-z0-9._~+\/-]{8,})`, "gi");
+const SECRET_RE = new RegExp(String.raw`(?:\b(?:AKIA|ASIA)[0-9A-Z]{16}\b|\bAIza[0-9A-Za-z_-]{35}\b|\bgithub_pat_[A-Za-z0-9_]{20,}\b|\b(?:sk|rk|pk|xox[baprs]|gh[pousr])[-_][A-Za-z0-9_=-]{12,}\b|\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}|${SECRET_ASSIGNMENT_SOURCE}|\bBearer\s+[A-Za-z0-9._~+\/-]{8,})`, "gi");
 const POSIX_ROOT = "(?:Applications|System|Users|home|private|var|tmp|Volumes|opt|etc|usr|Library|root|mnt|media|srv|run|proc|sys|dev|bin|sbin|workspace|workspaces|app|data)";
 // A local absolute path starts a token. Without this left boundary the "/app/page.tsx" inside the relative
 // "src/app/page.tsx" (or the "/data/x" of a URL) read as a local path, and the projector then withheld the whole

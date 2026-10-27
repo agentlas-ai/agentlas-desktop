@@ -30,3 +30,18 @@ export function readRunTurnPlacement(runId: string): RunTurnPlacement {
   // passing the direct runner (its own placement is unknown here), so only "every attempt refused" counts.
   return attempts.length > 0 && attempts.every((delivery) => delivery === "not-dispatched") ? "not-dispatched" : "unconfirmed";
 }
+
+/**
+ * Whether a model may have read this run's prompt: a placed fact, or any attempt not recorded as refused before dispatch.
+ * A run with no recorded attempt (a team or swarm path, a runner that records none) is not "read" by this ledger; the
+ * caller's own typed proof that the terminal failure sent nothing decides there (service.ts turnProvedNotDispatched).
+ */
+export function runTurnMayHaveBeenRead(runId: string): boolean {
+  if (!runId) return true;
+  const rows = getDb().prepare(`SELECT kind, payload_json FROM run_events WHERE run_id = ? AND kind IN (?, ?) ORDER BY seq ASC`)
+    .all(runId, RUNTIME_TURN_PLACED_EVENT, RUNTIME_TURN_ATTEMPT_EVENT) as Array<{ kind: string; payload_json: string | null }>;
+  return rows.some((row) => {
+    if (row.kind === RUNTIME_TURN_PLACED_EVENT) return true;
+    try { return (JSON.parse(row.payload_json ?? "{}") as { delivery?: unknown }).delivery !== "not-dispatched"; } catch { return true; }
+  });
+}

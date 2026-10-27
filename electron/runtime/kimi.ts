@@ -119,6 +119,16 @@ async function readConnectionReceipt(configDigest: string, binaryVersion: string
   }
 }
 
+/** This exact configuration was verified once, by any CLI version, however long ago: a later check that fails or cannot finish does not unplug it. */
+async function readKnownGoodConfiguration(configDigest: string): Promise<boolean> {
+  try {
+    const parsed = JSON.parse(await fs.readFile(CONNECTION_RECEIPT_FILE, "utf8")) as Partial<KimiConnectionReceipt>;
+    return parsed.version === CONNECTION_RECEIPT_VERSION && parsed.configDigest === configDigest;
+  } catch {
+    return false;
+  }
+}
+
 async function writeConnectionReceipt(configDigest: string, binaryVersion: string): Promise<void> {
   await fs.mkdir(path.dirname(CONNECTION_RECEIPT_FILE), { recursive: true, mode: 0o700 });
   await fs.writeFile(CONNECTION_RECEIPT_FILE, JSON.stringify({
@@ -133,51 +143,124 @@ async function clearConnectionReceipt(): Promise<void> {
   await fs.rm(CONNECTION_RECEIPT_FILE, { force: true }).catch(() => undefined);
 }
 
-let connectionVerificationInFlight: Promise<boolean> | null = null;
+/**
+ * A connection check is a real model turn (a billed round trip), so it is bounded and remembered:
+ * - it cannot hang a detect: the child is killed at the deadline, and a probe waits for it only within a short budget;
+ * - a failed check is not repeated at every detect (10 s cache expiry), only after the retry pause;
+ * - a configuration that was verified once is not unplugged by a check that fails or cannot finish (offline, a usage
+ *   limit, a slow server cannot be told from a lost login without reading prose); only a configuration that never
+ *   verified stays out until a check succeeds.
+ */
+const CONNECTION_VERIFY_DEADLINE_MS = 45_000;
+const CONNECTION_VERIFY_BUDGET_MS = 5_000;
+/** Pause before the same check runs again: 30 s after the first failure, then 90 s, then 3 min. */
+function connectionFailureRetryMs(failures: number): number {
+  return Math.min(30_000 * 3 ** Math.max(0, failures - 1), 3 * 60_000);
+}
 
-async function verifyKimiConnection(
-  bin: string,
-  configDigest: string,
-  binaryVersion: string,
-): Promise<boolean> {
-  if (await readConnectionReceipt(configDigest, binaryVersion)) return true;
-  if (connectionVerificationInFlight) return connectionVerificationInFlight;
-  connectionVerificationInFlight = (async () => {
-    await fs.mkdir(CONNECTION_CHECK_DIR, { recursive: true, mode: 0o700 });
-    const marker = "AGENTLAS_KIMI_CONNECTED";
-    const request: RunnerRequest = {
-      systemPrompt: "Connection verification only.",
-      history: [],
-      userPrompt: `Reply with exactly ${marker}. Do not use tools.`,
-      backendLabel: "Kimi Code CLI",
-      locale: "en",
-      permission: "read",
-      cwd: CONNECTION_CHECK_DIR,
-    };
-    const result = await runKimiProcess(
-      bin,
-      ["-p", request.userPrompt, "--output-format", "stream-json"],
-      request,
-      { onPartial() {}, onStatus() {}, onTool() {} },
-    ).catch(() => null);
-    if (!result || result.code !== 0 || !result.text.includes(marker)) return false;
-    await writeConnectionReceipt(configDigest, binaryVersion);
-    return true;
-  })().finally(() => { connectionVerificationInFlight = null; });
-  return connectionVerificationInFlight;
+type KimiConnectionCheck = "verified" | "failed";
+interface KimiVerification { key: string; startedAt: number; promise: Promise<KimiConnectionCheck>; supersede(): void }
+
+const verifiedThisRun = new Map<string, number>();
+const failedThisRun = new Map<string, { at: number; count: number }>();
+let connectionVerification: KimiVerification | null = null;
+
+function startKimiVerification(bin: string, configDigest: string, binaryVersion: string, key: string): KimiVerification {
+  if (connectionVerification?.key === key) return connectionVerification;
+  connectionVerification?.supersede();
+  const controller = new AbortController();
+  let superseded = false;
+  const timer = setTimeout(() => controller.abort(), CONNECTION_VERIFY_DEADLINE_MS);
+  timer.unref?.();
+  const entry: KimiVerification = {
+    key,
+    startedAt: Date.now(),
+    supersede: () => { superseded = true; controller.abort(); },
+    promise: (async (): Promise<KimiConnectionCheck> => {
+      await fs.mkdir(CONNECTION_CHECK_DIR, { recursive: true, mode: 0o700 });
+      const marker = "AGENTLAS_KIMI_CONNECTED";
+      const request: RunnerRequest = {
+        systemPrompt: "Connection verification only.",
+        history: [],
+        userPrompt: `Reply with exactly ${marker}. Do not use tools.`,
+        backendLabel: "Kimi Code CLI",
+        locale: "en",
+        permission: "read",
+        cwd: CONNECTION_CHECK_DIR,
+        signal: controller.signal,
+      };
+      const result = await runKimiProcess(
+        bin,
+        ["-p", request.userPrompt, "--output-format", "stream-json"],
+        request,
+        { onPartial() {}, onStatus() {}, onTool() {} },
+      ).catch(() => null);
+      return result && result.code === 0 && result.text.includes(marker) ? "verified" : "failed";
+    })().catch((): KimiConnectionCheck => "failed").then(async (outcome) => {
+      clearTimeout(timer);
+      if (superseded) return outcome;
+      if (outcome === "verified") {
+        failedThisRun.delete(key);
+        verifiedThisRun.set(key, Date.now());
+        // Without a version the receipt could not tell one binary from another: such a connection is remembered for this run only.
+        if (binaryVersion !== "unknown") await writeConnectionReceipt(configDigest, binaryVersion).catch(() => undefined);
+      } else {
+        failedThisRun.set(key, { at: Date.now(), count: (failedThisRun.get(key)?.count ?? 0) + 1 });
+      }
+      return outcome;
+    }).finally(() => { if (connectionVerification === entry) connectionVerification = null; }),
+  };
+  connectionVerification = entry;
+  return entry;
+}
+
+/** Waits for the check only until its budget (counted from its start) is spent; null = still running. */
+async function waitForKimiVerification(check: KimiVerification, budgetMs: number): Promise<KimiConnectionCheck | null> {
+  const remaining = budgetMs - (Date.now() - check.startedAt);
+  if (remaining <= 0) return null;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      check.promise,
+      new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), remaining); timer.unref?.(); }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 export interface KimiProbe { path: string; version: string; }
+export interface KimiProbeOptions {
+  /** Read what is already known and spend no model turn. */
+  observationOnly?: boolean;
+  /** Called when a check that outlived this probe finishes, so the caller can read the answer instead of waiting for its cache to expire. */
+  onSettled?: () => void;
+}
 
 /** Return only an executable, configured runtime; install-only is not connected. */
-export async function probeKimi(): Promise<KimiProbe | null> {
+export async function probeKimi(options: KimiProbeOptions = {}): Promise<KimiProbe | null> {
   const found = await firstExisting(kimiCandidates());
   if (!found) return null;
   const configDigest = await kimiConfigurationDigest();
   if (!configDigest) return null;
   const version = (await probeCliVersion(found, 2_500)) ?? "unknown";
-  if (!(await verifyKimiConnection(found, configDigest, version))) return null;
-  return { path: found, version };
+  const connected: KimiProbe = { path: found, version };
+  const key = `${configDigest}\0${version}`;
+  const verifiedAt = verifiedThisRun.get(key);
+  if (verifiedAt !== undefined && Date.now() - verifiedAt <= CONNECTION_RECEIPT_MAX_AGE_MS) return connected;
+  if (await readConnectionReceipt(configDigest, version)) return connected;
+  const knownGood = await readKnownGoodConfiguration(configDigest);
+  if (options.observationOnly) return knownGood ? connected : null;
+  const failed = failedThisRun.get(key);
+  if (failed && Date.now() - failed.at < connectionFailureRetryMs(failed.count)) return knownGood ? connected : null;
+  const check = startKimiVerification(found, configDigest, version, key);
+  if (!knownGood) {
+    const outcome = await waitForKimiVerification(check, CONNECTION_VERIFY_BUDGET_MS);
+    if (outcome === "verified") return connected;
+  }
+  // Only a check that connects a configuration nobody had verified changes what a reader sees.
+  if (!knownGood && options.onSettled) void check.promise.then((outcome) => { if (outcome === "verified") options.onSettled?.(); }, () => undefined);
+  return knownGood ? connected : null;
 }
 
 async function resolveKimiBinary(): Promise<string | null> {

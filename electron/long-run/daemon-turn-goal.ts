@@ -33,6 +33,8 @@ import { currentGoalExecutionObligations, currentGoalObligationsSatisfied } from
  *    next message starts a fresh Goal). Only the typed unverified-team code holds; no failure is read by its words.
  *  - invoke_cancelled -> owner pause (also for a series); invoke_interrupted -> host pause (app_closed) except for a series, which
  *    takes its next slot; both pauses resume on the owner's next message
+ * A Goal the host parked (paused app_closed / crash_recovery) while the turn ran on is followed too, from queued: the pause came from
+ * Desktop quitting or restarting, not from the turn (an interrupted turn leaves that pause standing).
  * Idempotent and fenced: it acts only on a Goal nothing else has taken over (no controller attempt, no newer live turn in the
  * chat, no owner hold), and a repeated call finds the Goal already settled.
  *
@@ -65,18 +67,22 @@ export interface DaemonTurnGoalResult { goalId: string; action: DaemonTurnGoalAc
 const result = (goalId: string, action: DaemonTurnGoalAction, detail: string): DaemonTurnGoalResult => ({ goalId, action, detail });
 
 /** The service run Main admitted this Goal for: the run named by the admitted intake marker, owned by a daemon lease. */
-function sourceDaemonRun(run: LongRunRecord): { runId: string; ended: boolean } | null {
+function sourceDaemonRun(run: LongRunRecord): { runId: string; ended: boolean; ownerId: string } | null {
   if (!run.rootChatId) return null;
   const db = getDb();
   const marker = db.prepare(`SELECT run_id FROM run_events WHERE kind = 'automatic_goal_intake_completed' AND chat_id = ?
       AND json_extract(payload_json, '$.goalId') = ? AND json_extract(payload_json, '$.outcome') = 'admitted'
       ORDER BY ts ASC LIMIT 1`).get(run.rootChatId, run.goalId) as { run_id: string } | undefined;
   if (!marker) return null;
-  const owner = db.prepare("SELECT owner_kind, chat_id, state FROM invocation_run_owners WHERE run_id = ?").get(marker.run_id) as
-    { owner_kind: string; chat_id: string; state: string } | undefined;
+  const owner = db.prepare("SELECT owner_kind, owner_id, chat_id, state FROM invocation_run_owners WHERE run_id = ?").get(marker.run_id) as
+    { owner_kind: string; owner_id: string; chat_id: string; state: string } | undefined;
   if (!owner || owner.owner_kind !== "daemon" || owner.chat_id !== run.rootChatId) return null;
-  return { runId: marker.run_id, ended: owner.state === "released" };
+  return { runId: marker.run_id, ended: owner.state === "released", ownerId: owner.owner_id };
 }
+
+/** Pause reasons the host itself writes when its process ends (app quit, restart recovery). A Goal parked there is the host's to
+ * settle, unlike a pause the owner or a blocker wrote. */
+const HOST_PAUSE_REASONS = new Set(["app_closed", "crash_recovery"]);
 
 /** The user message a service run answers: the row it bound as its prompt or, for a retry or recovery that appends none, the
  * latest user row it started from. A new owner message always binds its own row first, so it is never mistaken for a retry. */
@@ -116,6 +122,31 @@ interface DaemonTurnTerminal {
   at: string | null;
   /** The turn ended on a question card for the owner (invocation/service.ts seals invoke_completed with decisionRequested). */
   decisionRequested: boolean;
+  /** A team run that left work only for a reason nobody has to answer (see selfRecoverableTeamFailure), and how long to wait first. */
+  selfRecoverable: boolean;
+  retryAfterMs: number | null;
+}
+
+/** A team run that left work for a reason nobody has to answer: every root cause (one not merely blocked by another) is a wait for
+ * capacity or a retry of a preparation that never reached a provider, and no external effect may have happened. Read from the typed
+ * failure report in the run ledger, never from words. Anything else (authority, a decision, an unknown effect, no report) is the
+ * owner's to answer. */
+function selfRecoverableTeamFailure(report: unknown): { selfRecoverable: boolean; retryAfterMs: number | null } {
+  const none = { selfRecoverable: false, retryAfterMs: null };
+  if (!report || typeof report !== "object") return none;
+  const { causes, effects } = report as { causes?: unknown; effects?: unknown };
+  if (!Array.isArray(causes) || !Array.isArray(effects)) return none;
+  const roots = (causes as Array<Record<string, unknown> | null>).filter((cause): cause is Record<string, unknown> =>
+    !!cause && typeof cause === "object" && !(Array.isArray(cause.blockedBy) && cause.blockedBy.length > 0));
+  if (!roots.length || !roots.every((cause) => cause.recovery === "wait-capacity" || cause.recovery === "retry-preparation")) return none;
+  if ((effects as Array<Record<string, unknown> | null>).some((effect) => !!effect && ["attempted", "uncertain"].includes(String(effect.state)))) return none;
+  let wait = 0;
+  for (const cause of roots) {
+    const hinted = typeof cause.retryAfterHint === "string" ? Date.parse(cause.retryAfterHint) - Date.now() : Number.NaN;
+    const ms = typeof cause.retryAfterMs === "number" && Number.isFinite(cause.retryAfterMs) ? cause.retryAfterMs : Number.isFinite(hinted) ? hinted : 0;
+    wait = Math.max(wait, ms);
+  }
+  return { selfRecoverable: true, retryAfterMs: wait > 0 ? wait : null };
 }
 
 function terminalOf(runId: string): DaemonTurnTerminal | null {
@@ -135,13 +166,15 @@ function terminalOf(runId: string): DaemonTurnTerminal | null {
   const receipt = db.prepare("SELECT payload_json FROM run_events WHERE run_id = ? AND kind = 'task_force_execution_receipt' ORDER BY ts DESC, seq DESC LIMIT 1")
     .get(runId) as { payload_json: string } | undefined;
   let verifier: string | null = null;
+  let recoverable: { selfRecoverable: boolean; retryAfterMs: number | null } = { selfRecoverable: false, retryAfterMs: null };
   if (receipt) {
     try {
-      const status = (JSON.parse(receipt.payload_json) as { verifierStatus?: unknown }).verifierStatus;
-      if (typeof status === "string") verifier = status;
+      const payload = JSON.parse(receipt.payload_json) as { verifierStatus?: unknown; failureReport?: unknown };
+      if (typeof payload.verifierStatus === "string") verifier = payload.verifierStatus;
+      recoverable = selfRecoverableTeamFailure(payload.failureReport);
     } catch { /* no verdict */ }
   }
-  return { kind: terminal.kind, errorCode, verifier, at: typeof terminal.ts === "string" ? terminal.ts : null, decisionRequested };
+  return { kind: terminal.kind, errorCode, verifier, at: typeof terminal.ts === "string" ? terminal.ts : null, decisionRequested, ...recoverable };
 }
 
 /** A team run that ended with work left: the typed unverified-team code, or a turn that returned with a failed team verifier. */
@@ -159,13 +192,18 @@ function recordSettlement(run: LongRunRecord, sourceRunId: string, outcome: stri
     payload: { invocationRunId: sourceRunId, outcome, ...extra } });
 }
 
-/** Move one Goal along its service turn. Safe to call at any time and from any process that shares the store. */
-export function followDaemonTurnGoal(goalId: string): DaemonTurnGoalResult {
+/** The Goal and the service run it follows, or the reason it is not this follower's to move. One definition for the follower and for
+ * the Desktop startup recovery, so the two never disagree about which Goals are the follower's. */
+function followTarget(goalId: string): { run: LongRunRecord; chatId: string; source: { runId: string; ended: boolean; ownerId: string } } | DaemonTurnGoalResult {
   if (!goalId.startsWith(AUTO_GOAL_PREFIX)) return result(goalId, "skipped", "not_automatic_goal");
-  let run = getLongRunByGoalId(goalId);
+  const run = getLongRunByGoalId(goalId);
   if (!run || LONG_RUN_TERMINAL_STATUSES.has(run.status)) return result(goalId, "skipped", "goal_terminal_or_missing");
   if (run.surface === "science" || run.hostOwnerKind !== "desktop" || !run.rootChatId) return result(goalId, "skipped", "not_desktop_room_goal");
-  if (!["queued", "running"].includes(run.status)) return result(goalId, "skipped", "status_not_followed");
+  // A Goal the host parked because Desktop quit or restarted (an older release paused it on every startup, the quit path still does)
+  // is followed too: its service turn went on without Desktop, and left parked the Goal became a resume candidate that redid the
+  // finished work. A pause the owner or a blocker wrote is theirs and stays.
+  const hostParked = run.status === "paused" && HOST_PAUSE_REASONS.has(run.pauseReason ?? "");
+  if (!["queued", "running"].includes(run.status) && !hostParked) return result(goalId, "skipped", "status_not_followed");
   if (getChatGoalRevision(goalId)?.lifecycle !== "finite") return result(goalId, "skipped", "not_finite");
   const source = sourceDaemonRun(run);
   if (!source) return result(goalId, "skipped", "not_daemon_turn_goal");
@@ -173,7 +211,33 @@ export function followDaemonTurnGoal(goalId: string): DaemonTurnGoalResult {
   if (run.cycleCount > 0 || liveLongRunAttemptCount(run.id) > 0 || longRunOwnerHold(run.id)) return result(goalId, "skipped", "goal_has_other_owner");
   if (getDb().prepare("SELECT 1 FROM long_run_worker_attempts WHERE run_id = ? LIMIT 1").get(run.id)) return result(goalId, "skipped", "goal_has_controller_attempt");
   if (newerLiveTurn(run.rootChatId, source.runId)) return result(goalId, "skipped", "newer_turn_live");
-  const chatId = run.rootChatId;
+  return { run, chatId: run.rootChatId, source };
+}
+
+/** True when the follower will close this Goal on its next pass: its only run was a service turn that has already ended with a
+ * terminal event. Desktop startup recovery leaves such a Goal queued/running instead of pausing it as crash_recovery - the pause
+ * took it out of the follower's reach, and the host then started a new Main episode that redid work the service had finished
+ * (an extra write-permission turn nobody asked for). A service turn that ended without a terminal event is not covered: its Goal
+ * keeps the ordinary recovery.
+ *
+ * A service turn that is STILL running is covered when the service that owns it is the one this Desktop just reattached to
+ * (`liveDaemonBootId`, the boot id its ping named; the run's lease names the same boot, as run-events.ts daemonOwnsLiveRun reads it).
+ * The Desktop's empty activeRuns says nothing about a turn another process hosts: pausing that Goal as crash_recovery let the
+ * startup resume start a second turn on top of the live one, or redo the work once it finished. Without that proof (no service, or
+ * a lease of an earlier boot whose process is gone) a non-released lease is stale and the Goal keeps the ordinary recovery. */
+export function serviceTurnGoalAwaitsFollower(goalId: string, options: { liveDaemonBootId?: string | null } = {}): boolean {
+  const target = followTarget(goalId);
+  if ("action" in target) return false;
+  if (!target.source.ended) return Boolean(options.liveDaemonBootId) && target.source.ownerId === options.liveDaemonBootId;
+  return terminalOf(target.source.runId) !== null;
+}
+
+/** Move one Goal along its service turn. Safe to call at any time and from any process that shares the store. */
+export function followDaemonTurnGoal(goalId: string): DaemonTurnGoalResult {
+  const target = followTarget(goalId);
+  if ("action" in target) return target;
+  let run = target.run;
+  const { source, chatId } = target;
   // The service (another process) may still be writing its own turn tail into this ledger: fence each step on a fresh read.
   const step = (to: Parameters<typeof transitionLongRun>[0]["to"], reason: string, actorKind: "host" | "user" = "host"): LongRunRecord => {
     for (let attempt = 0; ; attempt += 1) {
@@ -202,14 +266,14 @@ export function followDaemonTurnGoal(goalId: string): DaemonTurnGoalResult {
 
   /** A bounded series: rest on the host's own schedule, the next run one interval after this one ended. False when another
    * process (Main's sweep, the owner's next turn) scheduled it first. */
-  const scheduleNextRun = (nextAt: string): boolean => {
+  const scheduleNextRun = (nextAt: string, why = { fromReason: "series_next_run", detail: "series_interval", trigger: "daemon-turn-series" }): boolean => {
     for (let attempt = 0; ; attempt += 1) {
       const fresh = getLongRunByGoalId(goalId);
       if (!fresh || LONG_RUN_TERMINAL_STATUSES.has(fresh.status) || longRunOwnerHold(fresh.id)) throw new Error("daemon_turn_goal_state_changed");
       if (goalHeldForOwnerAnswer(fresh) || pendingBlockedGoalRetry(fresh.id)) return false;
       try {
-        run = scheduleBlockedGoalRetry({ runId: fresh.id, expectedVersion: fresh.version, kind: "resume", fromReason: "series_next_run", retryIndex: 0,
-          nextAt, detail: "series_interval", trigger: "daemon-turn-series", requestedBy: "host", appInstanceId: desktopAppInstanceId() });
+        run = scheduleBlockedGoalRetry({ runId: fresh.id, expectedVersion: fresh.version, kind: "resume", fromReason: why.fromReason, retryIndex: 0,
+          nextAt, detail: why.detail, trigger: why.trigger, requestedBy: "host", appInstanceId: desktopAppInstanceId() });
         return true;
       } catch (error) {
         if (attempt >= 3 || !(error instanceof Error) || error.message !== "blocked_goal_retry_state_changed") throw error;
@@ -223,6 +287,14 @@ export function followDaemonTurnGoal(goalId: string): DaemonTurnGoalResult {
   }
   const terminal = terminalOf(source.runId);
   if (!terminal) return result(goalId, "skipped", "no_terminal_event");
+
+  // A Goal the host parked (paused app_closed / crash_recovery) while its service turn ran on: an interrupted turn is exactly what
+  // that pause says and its ordinary resume redoes the interrupted work, so it stands. Any other end settles it like a live Goal,
+  // starting from queued (the only way out of paused for the host).
+  if (run.status === "paused") {
+    if (terminal.kind === "invoke_interrupted") return result(goalId, "skipped", "host_pause_stands");
+    step("queued", "daemon-turn-adopted");
+  }
 
   // A bounded series: this turn was its first run, whatever came of it (the series is the work that is left). Only the owner's
   // own stop (invoke_cancelled) leaves it to the pause below. A question card the turn ended on holds the Goal for the owner's
@@ -247,14 +319,18 @@ export function followDaemonTurnGoal(goalId: string): DaemonTurnGoalResult {
     return result(goalId, "scheduled", nextAt);
   }
   if (SUCCESS_KINDS.includes(terminal.kind) && terminal.verifier !== "fail") {
+    // A turn that ended on a question card is not a completion for any finite Goal: the owner's answer decides what comes next
+    // (approval before a post, a choice), exactly as the Main host holds the Goal on a pending question (invocation/service.ts
+    // holdGoalForOwnerAnswer) and as the series and obligation branches hold here. Completing it closed the contract and unbound the
+    // room, so the owner's answer ran as an ordinary turn and could not continue the Goal.
+    if (terminal.decisionRequested) {
+      if (run.status === "queued") step("running", "daemon-turn-started");
+      if (!hold()) return result(goalId, "unchanged", "held_by_another_process");
+      recordSettlement(run, source.runId, "held_for_owner", { reason: "owner_question" });
+      return result(goalId, "held", source.runId);
+    }
     const goal = getChatGoalRevision(goalId);
     if (goal && currentGoalExecutionObligations(goal) && !currentGoalObligationsSatisfied(goalId)) {
-      if (terminal.decisionRequested) {
-        if (run.status === "queued") step("running", "daemon-turn-started");
-        if (!hold()) return result(goalId, "unchanged", "held_by_another_process");
-        recordSettlement(run, source.runId, "held_for_owner", { reason: "owner_question" });
-        return result(goalId, "held", source.runId);
-      }
       if (!scheduleNextRun(new Date().toISOString())) return result(goalId, "unchanged", "scheduled_by_another_process");
       recordSettlement(run, source.runId, "participant_review_required");
       return result(goalId, "scheduled", "goal_execution_obligations_unmet");
@@ -273,6 +349,15 @@ export function followDaemonTurnGoal(goalId: string): DaemonTurnGoalResult {
   // (held for the owner's answer, room still bound) instead of being cancelled out from under it.
   if (taskForceLeftWork(terminal)) {
     if (run.status === "queued") step("running", "daemon-turn-started");
+    // Work left only for a reason nobody has to answer (a wait for capacity, a preparation that never reached a provider): the owner
+    // is not asked. The Goal resumes by itself as an ordinary Goal turn after the wait, under that controller's own retry limits.
+    if (terminal.selfRecoverable) {
+      const waitMs = Math.min(Math.max(terminal.retryAfterMs ?? 60_000, 15_000), 15 * 60_000);
+      const nextAt = new Date(Date.now() + waitMs).toISOString();
+      if (!scheduleNextRun(nextAt, { fromReason: "task_force_capacity_wait", detail: "task_force_capacity_wait", trigger: "daemon-turn-goal" })) return result(goalId, "unchanged", "scheduled_by_another_process");
+      recordSettlement(run, source.runId, "auto_retry_scheduled", { nextAt, errorCode: terminal.errorCode, verifier: terminal.verifier });
+      return result(goalId, "scheduled", nextAt);
+    }
     if (!hold()) return result(goalId, "unchanged", "held_by_another_process");
     recordSettlement(run, source.runId, "held_for_owner", { errorCode: terminal.errorCode, verifier: terminal.verifier });
     return result(goalId, "held", source.runId);
@@ -306,8 +391,16 @@ export function followDaemonTurnGoalOfChat(chatId: string): DaemonTurnGoalResult
 
 /** Every unsettled automatic Goal of a service turn (Main's periodic pass and attach). */
 export function settleDaemonTurnGoals(limit = 50): DaemonTurnGoalResult[] {
-  const rows = getDb().prepare(`SELECT goal_id FROM long_runs WHERE goal_id LIKE 'goal:auto-message:%' AND status IN ('queued','running')
-      AND surface IN ('one','work') AND host_owner_kind = 'desktop' AND cycle_count = 0 ORDER BY updated_at ASC LIMIT ?`).all(limit) as Array<{ goal_id: string }>;
+  // Host-parked Goals (paused by Desktop quitting or restarting) count only when a service turn was admitted for them, and come
+  // after the live ones so a pile of parked Goals never crowds a queued one out of the window.
+  const rows = getDb().prepare(`SELECT goal_id FROM long_runs WHERE goal_id LIKE 'goal:auto-message:%'
+      AND (status IN ('queued','running')
+        OR (status = 'paused' AND pause_reason IN ('app_closed','crash_recovery')
+          AND EXISTS (SELECT 1 FROM run_events m JOIN invocation_run_owners o ON o.run_id = m.run_id AND o.owner_kind = 'daemon'
+            WHERE m.kind = 'automatic_goal_intake_completed' AND m.chat_id = long_runs.root_chat_id
+              AND json_extract(m.payload_json, '$.goalId') = long_runs.goal_id AND json_extract(m.payload_json, '$.outcome') = 'admitted')))
+      AND surface IN ('one','work') AND host_owner_kind = 'desktop' AND cycle_count = 0
+      ORDER BY CASE WHEN status = 'paused' THEN 1 ELSE 0 END, updated_at ASC LIMIT ?`).all(limit) as Array<{ goal_id: string }>;
   const out: DaemonTurnGoalResult[] = [];
   for (const row of rows) {
     try {

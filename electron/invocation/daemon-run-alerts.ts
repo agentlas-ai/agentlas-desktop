@@ -19,6 +19,10 @@ export interface DaemonRunAlertPorts {
   fireRunAlert(input: { decision: Extract<RunAlertDecision, { alert: true }>; settings: RunAlertSettings; locale: string; goal: string; onClick?: () => void }): void;
   toast(input: { title: string; body: string; onClick?: () => void }): void;
   open(chatId: string): void;
+  /** Work rules Main's own run-alert bridge applies (main.ts startRunAlertBridge): the Work main owns a child session's progress and
+   * repair, and a parent turn that ends while its children still work is not finished. Absent = the ordinary path. */
+  workChildRun?(chatId: string, runId: string): boolean;
+  workParentAwaitingChildren?(chatId: string, runId: string): boolean;
 }
 
 const LONG_COMPLETE_MS = 5 * 60 * 1_000;
@@ -38,6 +42,9 @@ export function createDaemonRunAlerts(ports: DaemonRunAlertPorts) {
       // carries that as pendingQuestion, so both mean "needs your input".
       const waiting = envelope.pendingQuestion === true || String(receipt.status) === "waiting_input";
       const status = String(receipt.status) === "waiting_input" ? "completed" : receipt.status;
+      // A background-hosted Work child or a parent still waiting on its children raises neither the toast nor the alarm, as in Main.
+      if (ports.workChildRun?.(envelope.chatId, envelope.runId)) return;
+      if (status === "completed" && !waiting && ports.workParentAwaitingChildren?.(envelope.chatId, envelope.runId)) return;
       const reason = waiting ? "approval" : receipt.status === "failed" ? "failure"
         : status === "completed" && Date.parse(receipt.finishedAt || receipt.updatedAt) - Date.parse(receipt.startedAt) >= LONG_COMPLETE_MS ? "long-complete" : null;
       if (reason && ports.signedIn() && !focused && remember(teamKeys, `${receipt.runId}:${reason}`)) {
@@ -64,9 +71,10 @@ let override: ReturnType<typeof createDaemonRunAlerts> | undefined, loaded: Prom
 /** Test seam: replace the real Electron-backed ports. */
 export function configureDaemonRunAlerts(value: ReturnType<typeof createDaemonRunAlerts> | undefined): void { override = value; loaded = undefined; }
 async function electronAlerts(): Promise<ReturnType<typeof createDaemonRunAlerts>> {
-  const [electron, runAlerts, windows, auth, locale, presentation, db, tasks, tray] = await Promise.all([
+  const [electron, runAlerts, windows, auth, locale, presentation, db, tasks, tray, workSessions] = await Promise.all([
     import("electron"), import("../run-alerts"), import("../one-window-manager"), import("../auth"), import("../ui-locale"),
     import("../one/supervisor-presentation"), import("../store/db"), import("../store/tasks"), import("../background-tray"),
+    import("../work/session-dispatch"),
   ]);
   return createDaemonRunAlerts({
     settings: () => runAlerts.getRunAlerts(),
@@ -84,6 +92,9 @@ async function electronAlerts(): Promise<ReturnType<typeof createDaemonRunAlerts
       notification.show();
     },
     open: chatId => { try { tray.leaveBackgroundHold(); void windows.openOneWindow({ taskId: tasks.findCanonicalTaskForChat(chatId)?.id }); } catch { /* the window may be closing */ } },
+    // The dispatch ledger is the shared store, so Main reads the background service's Work children from it; unreadable = ordinary path.
+    workChildRun: (chatId, runId) => { try { return workSessions.isWorkSessionChildRun(chatId, runId); } catch { return false; } },
+    workParentAwaitingChildren: (chatId, runId) => { try { return workSessions.workSessionParentHasPendingChildren(chatId, runId); } catch { return false; } },
   });
 }
 /** Called by the Main public-event bridge for every settlement the background service reports. */

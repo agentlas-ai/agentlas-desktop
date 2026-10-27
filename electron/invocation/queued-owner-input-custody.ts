@@ -70,7 +70,12 @@ export function createQueuedOwnerInputCustody(options: QueuedOwnerInputCustodyOp
   };
   const placement = (runId: string): "placed"|"not-dispatched"|"unconfirmed" => {
     const attempt = store.attempt(runId);
-    if (!attempt || options.running(runId)) return "unconfirmed";
+    // Custody owns only attachment/team input. A run no custody row knows is plain text: the host's own typed facts decide it
+    // (renderer-send-queue.ts queuedSendPlacement), exactly as when no custody is wired. Answering "unconfirmed" for it made every
+    // finished plain message "uncertain" and kept a refused-before-dispatch one from starting again. A custody-owned run that has
+    // no attempt row yet stays conservative.
+    if (!attempt) return store.byRun(runId) ? "unconfirmed" : options.placement(runId);
+    if (options.running(runId)) return "unconfirmed";
     const row = store.byOwner(attempt.owner_id);
     if (!row) return "unconfirmed";
     if (attempt.state === "reserved") {

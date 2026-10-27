@@ -40,8 +40,23 @@ export function codexNativeSteeringSchema(client: any, params: any, response: an
 }
 
 const schemaProbes = new Map<string, Promise<CodexNativeSteeringCapability | null>>();
+/**
+ * Probes that could not ask (a spawn error, a timeout, a failed exit, an unreadable file) prove nothing about the executable,
+ * so they are never cached as "unsupported": the same folder is asked again after a growing pause, and another folder is not
+ * held back by it. Only a schema that was read and lacks turn/steer is cached for the generation.
+ */
+const probeBackoff = new Map<string, { failures: number; retryAt: number }>();
+const PROBE_RETRY_BASE_MS = 15_000;
+const PROBE_RETRY_MAX_MS = 10 * 60_000;
 
-/** Cache only for the exact selected executable generation. Failed proof stays unsupported. */
+type SchemaProbeOutcome =
+  | { kind: "supported"; capability: CodexNativeSteeringCapability }
+  /** The schema was generated and read, and it has no native steering. */
+  | { kind: "unsupported" }
+  /** The probe could not run to a proof. */
+  | { kind: "unavailable" };
+
+/** Cache a proof only for the exact selected executable generation; an infrastructure failure is not a proof. */
 export async function probeCodexNativeSteering(input: { bin: string; cwd: string; env: NodeJS.ProcessEnv }): Promise<CodexNativeSteeringCapability | null> {
   let identity;
   try { identity = observeCliExecutableIdentity(input); } catch { return null; }
@@ -49,7 +64,10 @@ export async function probeCodexNativeSteering(input: { bin: string; cwd: string
   const key = `${identity.fingerprint}:${identity.generation}`;
   const previous = schemaProbes.get(key);
   if (previous) return previous;
-  const probe = (async (): Promise<CodexNativeSteeringCapability | null> => {
+  const attemptKey = `${key}\0${path.resolve(input.cwd)}`;
+  const paused = probeBackoff.get(attemptKey);
+  if (paused && Date.now() < paused.retryAt) return null;
+  const outcomePromise = (async (): Promise<SchemaProbeOutcome> => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "agentlas-codex-steer-schema-"));
     try {
       const child = spawnCli(input.bin, ["app-server", "generate-json-schema", "--out", dir], {
@@ -61,19 +79,38 @@ export async function probeCodexNativeSteering(input: { bin: string; cwd: string
         child.once("close", (code) => { clearTimeout(timer); resolve(code === 0); });
         child.once("error", () => { clearTimeout(timer); resolve(false); });
       });
-      if (!generated) return null;
-      const raw = await Promise.all(["ClientRequest.json", "v2/TurnSteerParams.json", "v2/TurnSteerResponse.json"]
-        .map((file) => fs.readFile(path.join(dir, file), "utf8")));
-      const capability = codexNativeSteeringSchema(...raw.map((text) => JSON.parse(text)) as [any, any, any]);
-      if (!capability) return null;
+      if (!generated) return { kind: "unavailable" };
+      let raw: string[];
+      try {
+        raw = await Promise.all(["ClientRequest.json", "v2/TurnSteerParams.json", "v2/TurnSteerResponse.json"]
+          .map((file) => fs.readFile(path.join(dir, file), "utf8")));
+      } catch (error) {
+        // A finished generation that has no such schema file is an executable without turn/steer; any other read failure proves nothing.
+        return (error as NodeJS.ErrnoException).code === "ENOENT" ? { kind: "unsupported" } : { kind: "unavailable" };
+      }
+      let parsed: [any, any, any];
+      try { parsed = raw.map((text) => JSON.parse(text)) as [any, any, any]; } catch { return { kind: "unavailable" }; }
+      const capability = codexNativeSteeringSchema(...parsed);
+      if (!capability) return { kind: "unsupported" };
       let turnStartClientUserMessageId = false;
       try { turnStartClientUserMessageId = codexTurnStartClientIdSchema(JSON.parse(await fs.readFile(path.join(dir, "v2/TurnStartParams.json"), "utf8"))); }
       catch { /* An absent or unreadable file proves nothing: the id is not sent. */ }
-      return Object.freeze({ ...capability, turnStartClientUserMessageId, executableGeneration: identity.generation,
-        schemaDigest: createHash("sha256").update(JSON.stringify(raw)).digest("hex") });
-    } catch { return null; }
+      return { kind: "supported", capability: Object.freeze({ ...capability, turnStartClientUserMessageId, executableGeneration: identity.generation,
+        schemaDigest: createHash("sha256").update(JSON.stringify(raw)).digest("hex") }) };
+    } catch { return { kind: "unavailable" }; }
     finally { await fs.rm(dir, { recursive: true, force: true }).catch(() => {}); }
-  })().catch(() => null);
+  })().catch((): SchemaProbeOutcome => ({ kind: "unavailable" }));
+  const probe: Promise<CodexNativeSteeringCapability | null> = outcomePromise.then((outcome) => {
+    if (outcome.kind === "unavailable") {
+      const failures = (probeBackoff.get(attemptKey)?.failures ?? 0) + 1;
+      probeBackoff.set(attemptKey, { failures, retryAt: Date.now() + Math.min(PROBE_RETRY_BASE_MS * 2 ** (failures - 1), PROBE_RETRY_MAX_MS) });
+      if (probeBackoff.size > 256) probeBackoff.delete(probeBackoff.keys().next().value!);
+      if (schemaProbes.get(key) === probe) schemaProbes.delete(key);
+      return null;
+    }
+    probeBackoff.delete(attemptKey);
+    return outcome.kind === "supported" ? outcome.capability : null;
+  });
   schemaProbes.set(key, probe);
   if (schemaProbes.size > 64) schemaProbes.delete(schemaProbes.keys().next().value!);
   return probe;

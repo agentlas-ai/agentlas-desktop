@@ -4,12 +4,15 @@ import type { SupervisorHostNoticePurpose } from "../../shared/one-supervisor";
 import { OneSupervisorStore, supervisorHash, type SupervisorRequestRow } from "./supervisor-store";
 import { OneSupervisorWorkQueue, type SupervisorWorkLease } from "./supervisor-work-queue";
 import {OneBudgetAdmissionDenied} from "./budget-store";
+import {TRANSIENT_SEND_DEADLINE_MS,isTransientSendRefusalCode,sendRefusalCode,transientSendBackoffMs} from "../../shared/transient-send-refusal";
 
 export interface SupervisorWorkRuntime {
   start(request: McpInvocationRequest, hostNoticePurpose?: SupervisorHostNoticePurpose): {runId: string} | Promise<{runId: string}>;
   attach(chatId: string): {runId: string} | null;
   receipt(runId: string): InvocationRunReceipt | null;
   onSettled(listener: (event: {runId: string; chatId: string; receipt: InvocationRunReceipt}) => void): () => void;
+  /** True only when the durable admission ledger proves nothing was started for this run (no row, or a rejected one). */
+  noStartProof?(runId: string): boolean;
 }
 export interface SupervisorWorkExecutorOptions {
   queue: OneSupervisorWorkQueue;
@@ -40,6 +43,8 @@ export class OneSupervisorWorkExecutor {
   private lastFailure: string | null = null;
   private readonly dispatching = new Set<string>();
   private readonly reconciled = new Map<string, {version: string; checkedAt: number}>();
+  /** Jobs whose start was refused before dispatch: how often, and since when (the shared deadline gives up on them). */
+  private readonly refusals = new Map<string, {attempts: number; firstAt: number}>();
   private readonly unsubscribe: () => void;
   constructor(private readonly deps: SupervisorWorkExecutorOptions) {
     if (deps.queue.db !== deps.store.db) throw supervisorError('supervisor_work_store_mismatch');
@@ -147,6 +152,7 @@ export class OneSupervisorWorkExecutor {
         const request = this.deps.store.get(current.command_id)!;
         if (request.state === "dispatching") this.deps.store.update(request, {state: "accepted", acknowledgement: "delivered"});
       }
+      this.refusals.delete(starting.command_id);
     } catch (error) {
       try { this.deps.assertOwner(); } catch { return; }
       const current = this.deps.queue.get(claimed.command_id);
@@ -158,6 +164,10 @@ export class OneSupervisorWorkExecutor {
         if(row && ["stored","dispatching"].includes(row.state))this.deps.store.update(row,{state:"failed",acknowledgement:"settled",reason});
         return;
       }
+      // A start refused for a "not ready yet" reason (shared/transient-send-refusal.ts: the daemon channel is reattaching, the
+      // chat is held by another host) reached no model. It is not an uncertain effect: the job waits and starts again.
+      const refusal = this.preStartRefusal(current, !starting, error);
+      if (refusal) { this.retryAfterRefusal(current, refusal); return; }
       // Only this pre-begin branch may mint the local-cancellation marker.
       // A native error can carry arbitrary text after the uncertain boundary.
       const heldReason = !starting ? 'held_before_native_dispatch'
@@ -169,6 +179,39 @@ export class OneSupervisorWorkExecutor {
         reason: starting ? reason : "work_binding_requires_review",
       });
     } finally { this.dispatching.delete(claimed.command_id); }
+  }
+  /** The typed code of a start refused before anything reached a model, or null when that cannot be proven. A job that never
+   * began (`neverBegan`) crossed no boundary at all; after begin() the admission ledger must show no start for the run. */
+  private preStartRefusal(job: SupervisorWorkLease, neverBegan: boolean, error: unknown): string | null {
+    const code = sendRefusalCode(error);
+    if (!code || !isTransientSendRefusalCode(code)) return null;
+    return neverBegan || (this.deps.runtime.noStartProof?.(job.run_id) ?? true) ? code : null;
+  }
+  /** Waits out the shared backoff as an unstarted (queued, cancellable) claim, then starts the same run again; gives up at the deadline. */
+  private retryAfterRefusal(job: SupervisorWorkLease, code: string): void {
+    const now = this.deps.now?.() ?? Date.now(), prior = this.refusals.get(job.command_id);
+    const attempts = (prior?.attempts ?? 0) + 1, firstAt = prior?.firstAt ?? now;
+    const row = this.deps.store.get(job.command_id);
+    if (now - firstAt > TRANSIENT_SEND_DEADLINE_MS) {
+      // The cause stays on the job and the request; One is told through the usual failed-Work review.
+      this.refusals.delete(job.command_id);
+      this.deps.queue.transition(job, "failed", code);
+      if (row && ["stored", "dispatching", "held"].includes(row.state)) {
+        this.deps.store.update(row, {state: "failed", acknowledgement: "settled", reason: code});
+        this.deps.store.notice(row, "failed");
+      }
+      return;
+    }
+    if (!this.deps.queue.retryRefused(job, transientSendBackoffMs(attempts - 1), code)) return;
+    this.refusals.set(job.command_id, {attempts, firstAt});
+    if (row && ["dispatching", "held"].includes(row.state)) this.deps.store.update(row, {state: "stored", acknowledgement: "stored", reason: code});
+    if (attempts === 1) this.deps.onFailure?.(Object.assign(new Error(code), {code}));
+  }
+  /** A job held by an older build for such a refusal (nothing ever started it again), with the ledger proving no start. */
+  private heldRefusalRecoverable(job: SupervisorWorkLease): string | null {
+    if (job.phase !== "held" || !job.reason || !isTransientSendRefusalCode(job.reason) || !this.deps.runtime.noStartProof) return null;
+    if ((this.deps.now?.() ?? Date.now()) - job.updated_at > TRANSIENT_SEND_DEADLINE_MS || this.deps.runtime.receipt(job.run_id)) return null;
+    return this.deps.runtime.noStartProof(job.run_id) ? job.reason : null;
   }
   private settle(job: SupervisorWorkLease, receipt: InvocationRunReceipt): void {
     if (receipt.runId !== job.run_id || receipt.chatId !== job.chat_id || !terminal(receipt.status)) return;
@@ -188,6 +231,8 @@ export class OneSupervisorWorkExecutor {
   private reconcile(job: SupervisorWorkLease): void {
     if (this.dispatching.has(job.command_id)) return;
     if (job.phase === "queued" || job.phase === "claimed" || terminal(job.phase)) return;
+    const refused = this.heldRefusalRecoverable(job);
+    if (refused) { this.retryAfterRefusal(job, refused); return; }
     const receipt = this.deps.runtime.receipt(job.run_id);
     if (receipt && receipt.runId === job.run_id && receipt.chatId === job.chat_id && terminal(receipt.status)) {
       this.settle(job, receipt);

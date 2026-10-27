@@ -13,8 +13,13 @@
  *  - 요청의 `chatId` 로 "어느 대화 것인가"를 들고 다닌다. 대화 화면은 자기 chatId 로
  *    카드를 인라인 렌더하고, 다른 화면은 배지만 본다.
  *  - 답을 한 번만 보낸다(같은 id 는 한 번 결정되면 큐에서 사라진다).
+ *
+ * ★예외(오너 2026-10-27 "승인카드가 다른 대화에 들어가서 못 봤다. 개인 에이전트가 총괄해야 한다"): 개인 에이전트
+ *   대화는 자기가 감독하는 방(맡긴 Work 방·메시지를 보낸 방·팀원 디스패치 방, Main 이 정함)의 카드도 그 방의 chatId 로
+ *   그린다(components/one/PersonalOneSupervisedApprovals). 같은 큐·같은 답 경로이고, 원래 방에서도 같은 카드가 보인다.
+ *   먼저 답한 쪽이 이기고 다른 쪽은 아래 terminal(conflict) 처리로 정리된다. 다른 화면의 동작은 그대로다.
  */
-import { useSyncExternalStore } from "react";
+import { useCallback, useRef, useState, useSyncExternalStore } from "react";
 import { ipc, ipcEvents } from "@/lib/ipc";
 import type {
   ToolApprovalRequestEvent,
@@ -29,6 +34,7 @@ import {
   type ToolApprovalDecisionResult,
 } from "@shared/tool-approval-action";
 import { readChatAlwaysApproval } from "./always-approved-chats";
+import { clearApprovalNoteDraft, cleanApprovalNote } from "./approval-note-drafts";
 
 let queue: ToolApprovalRequestEvent[] = [];
 const visibleChats = new Map<string, number>();
@@ -41,6 +47,10 @@ export type ToolApprovalActionState = {
   terminalStatus?: "expired" | "conflict";
   resolvedDecision?: ToolApprovalDecision | null;
   durableConsent?: ToolApprovalDurableConsentReceipt;
+  /** The owner's "No, and do this instead" line sent with this deny; kept until Main's receipt says what became of it. */
+  note?: string;
+  /** The refusal took effect but the room could not take the line: the card stays (terminal) and shows the text. */
+  noteFailure?: { text: string; code?: string };
 };
 const actions = new Map<string, ToolApprovalActionState>();
 
@@ -109,6 +119,8 @@ function ensureSubscribed(): void {
       && receipt.resolvedDecision === (currentAction.resolvedDecision ?? currentAction.decision)
       && receipt.actionId === toolApprovalActionId(receipt.requestId, currentAction.resolvedDecision ?? currentAction.decision)
       && (receipt.status === "resolved" || receipt.status === "replayed");
+    // A refusal that carries a note is finished by the invoke reply, which alone says whether the room took the line.
+    if (exactOwnAction && currentAction?.note !== undefined) return;
     if (exactOwnAction || exactSettledAction || !queue.some((item) => item.id === receipt.requestId)) {
       // Main emitted this only after recording the exact runtime result. Our
       // own click may therefore finish from the event before the invoke reply.
@@ -177,6 +189,13 @@ function applyDecisionResult(
   decision: ToolApprovalDecision,
   result: ToolApprovalDecisionResult,
 ): void {
+  const sentNote = actions.get(id)?.note;
+  const noteReceipt = result.receipt?.ownerNote;
+  // The refusal is settled, but the room did not take the owner's line: keep the card (terminal) with the text, as with a
+  // durable-save failure, until the owner has seen it.
+  const noteFailure = sentNote !== undefined && noteReceipt?.status === "failed"
+    ? { text: sentNote, ...(noteReceipt.code ? { code: noteReceipt.code } : {}) } : undefined;
+  if (result.state === "resolved") clearApprovalNoteDraft(id);
   // The exact Main event can arrive before the invoke promise. Do not replace
   // that already-confirmed outcome with a later transport/readback error.
   if (decided.has(id)) {
@@ -199,15 +218,16 @@ function applyDecisionResult(
   if (result.state === "resolved") {
     decided.add(id);
     const durableConsent = result.receipt.durableConsent;
-    if (durableConsent && durableConsent.status !== "persisted") {
+    if ((durableConsent && durableConsent.status !== "persisted") || noteFailure) {
       actions.set(id, {
         phase: "terminal",
         decision,
         resolvedDecision: result.receipt.resolvedDecision,
-        durableConsent,
+        ...(durableConsent && durableConsent.status !== "persisted" ? { durableConsent } : {}),
+        ...(noteFailure ? { noteFailure } : {}),
       });
       // Retain the card until the user acknowledges that the current choice
-      // ran but the durable rule was not committed.
+      // ran but the durable rule was not committed, or the room did not take the line.
     } else {
       queue = queue.filter((item) => item.id !== id);
       actions.delete(id);
@@ -239,17 +259,19 @@ function applyDecisionResult(
  * 사용자의 답. exact Main receipt 전에는 큐에서 지우지 않는다. false/reject/응답 유실은
  * resolution ledger + pending queue를 재조회하고, 실제 미적용이면 같은 카드를 복구한다.
  */
-export async function decideToolApproval(id: string, decision: ToolApprovalDecision): Promise<void> {
+export async function decideToolApproval(id: string, decision: ToolApprovalDecision, rawNote?: string): Promise<void> {
   if (decided.has(id) || actions.get(id)?.phase === "submitting") return;
+  // "No, and do this instead": only a refusal carries the owner's line (an empty or whitespace line is no line).
+  const note = decision === "deny" ? cleanApprovalNote(rawNote) : undefined;
   const api = ipc();
   if (!api) {
-    actions.set(id, { phase: "unknown", decision });
+    actions.set(id, { phase: "unknown", decision, ...(note !== undefined ? { note } : {}) });
     emit();
     return;
   }
-  actions.set(id, { phase: "submitting", decision });
+  actions.set(id, { phase: "submitting", decision, ...(note !== undefined ? { note } : {}) });
   emit();
-  const result = await commitToolApprovalDecision(api, id, decision);
+  const result = await commitToolApprovalDecision(api, id, decision, note);
   applyDecisionResult(id, decision, result);
 }
 
@@ -268,6 +290,7 @@ export async function refreshToolApprovalDecision(id: string): Promise<void> {
 /** 만료·다른 표면의 결정처럼 이미 terminal인 카드만 사용자가 닫는다. */
 export function dismissToolApproval(id: string): void {
   if (actions.get(id)?.phase !== "terminal") return;
+  clearApprovalNoteDraft(id);
   decided.add(id);
   actions.delete(id);
   queue = queue.filter((item) => item.id !== id);
@@ -292,4 +315,37 @@ export function markChatVisible(chatId: string | null | undefined): () => void {
 /** 요청을 인라인으로 그릴 대화가 지금 화면에 없는가(→ 배지 대상). */
 export function needsBadge(request: ToolApprovalRequestEvent, visible: ReadonlySet<string>): boolean {
   return !(request.chatId && visible.has(request.chatId));
+}
+
+/**
+ * 승인이 여러 건이면 한 번에 한 장만 보인다 (오너 2026-10-27, Claude Code·Codex 의 승인 프롬프트와 같은 문법).
+ * 보고 있던 요청 id 를 붙들고, 그 요청이 답으로 사라지면 같은 자리의 다음 요청을 즉시 보여 준다 (쌓지 않는다).
+ */
+export interface ApprovalDeck<T> {
+  current: T | null;
+  /** 0부터. */
+  index: number;
+  total: number;
+  next: () => void;
+  prev: () => void;
+}
+export function useApprovalDeck<T extends { id: string }>(items: readonly T[]): ApprovalDeck<T> {
+  const [pinned, setPinned] = useState<string | null>(null);
+  const lastIndex = useRef(0);
+  const found = pinned ? items.findIndex((item) => item.id === pinned) : -1;
+  const index = items.length === 0 ? 0 : found >= 0 ? found : Math.min(lastIndex.current, items.length - 1);
+  lastIndex.current = index;
+  const count = items.length;
+  const go = useCallback((step: number) => {
+    if (count < 2) return;
+    setPinned(items[(index + step + count) % count].id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [count, index, items]);
+  return {
+    current: items[index] ?? null,
+    index,
+    total: count,
+    next: useCallback(() => go(1), [go]),
+    prev: useCallback(() => go(-1), [go]),
+  };
 }

@@ -36,7 +36,7 @@ export function registerCompanyNativeOwnerMain(input: {
   assertTrustedSender(event: IpcMainInvokeEvent): BrowserWindow; isOwnerWindow(window: BrowserWindow): boolean;
   locale(): 'ko' | 'en'; signal: AbortSignal;
 }) {
-  let held: Held | null = null, closed = false, generation = 0, connecting = false, attemptGeneration = 0;
+  let held: Held | null = null, closed = false, generation = 0, connecting = false, attemptGeneration = 0, refreshUnreachable = false;
   let timer: NodeJS.Timeout | null = null;
   let db: OneVaultSqlite | null = null;
   const opened = new Set<BetterSqlite3.Database>();
@@ -146,8 +146,20 @@ export function registerCompanyNativeOwnerMain(input: {
       throw error;
     }
   }
-  async function refresh() { const a = current(); if (!a) fail(); const result = await request('association'); if (!validAssociation(result) || digest(result) !== digest(a)) { invalidate(); fail('company_native_identity_changed'); } return current() ?? fail(); }
-  function startMonitor() { if (!timer) { timer = setInterval(() => { if (current()) void refresh().catch(() => invalidate()); else if (held) invalidate(); }, 60000); timer.unref(); } }
+  async function refresh() { const a = current(); if (!a) fail(); const result = await request('association'); if (!validAssociation(result) || digest(result) !== digest(a)) { invalidate(); fail('company_native_identity_changed'); } refreshUnreachable = false; return current() ?? fail(); }
+  /** Only the company server's own answer ends a connection: its denial (401/403) or a changed identity/session. A dropped network, timeout, 5xx
+   * or unreadable reply says nothing about the pair, so the hold, the stored credential and the device key stay and the next ask decides.
+   * `h` is the hold the failed ask was made for; one that connect()/disconnect already replaced is not touched. */
+  function settleRefreshFailure(error: unknown, h: Held | null) {
+    if (!h || held !== h) return;
+    const e = error as { status?: unknown; message?: unknown; code?: unknown; cause?: { code?: unknown } } | null;
+    if (e?.status === 401 || e?.status === 403 || e?.message === 'company_native_identity_changed' || e?.message === 'company_native_session_changed') { invalidate(); return; }
+    if (refreshUnreachable) return;
+    refreshUnreachable = true;
+    const cause = [e?.code, e?.cause?.code, e?.message].find((v): v is string => typeof v === 'string' && v.length > 0);
+    console.warn('[company-native] association refresh deferred, connection kept: company_native_refresh_unreachable', cause ?? 'unknown');
+  }
+  function startMonitor() { if (!timer) { timer = setInterval(() => { if (current()) { const h = held; void refresh().catch(error => settleRefreshFailure(error, h)); } else if (held) invalidate(); }, 60000); timer.unref(); } }
   const connection = Object.freeze({ current, native, request, refresh, assertCurrent, invalidate, onInvalidated(callback: () => void) { callbacks.add(callback); return () => callbacks.delete(callback); } });
   function focused(event: IpcMainInvokeEvent) { refs(); const window = input.assertTrustedSender(event), id = event.sender.id, frame = event.senderFrame, frameUrl = frame?.url;
     const check = () => { refs(); if (isAppControlEvent(event) || !input.isOwnerWindow(window) || window.isDestroyed() || !window.isFocused() || event.sender.isDestroyed() || event.sender.id !== id || window.webContents !== event.sender || input.assertTrustedSender(event) !== window
@@ -185,7 +197,8 @@ export function registerCompanyNativeOwnerMain(input: {
         const publicJwk = createPrivateKey(restored.privateKey).export({ format: 'jwk' });
         if (!publicJwk.x || !publicJwk.y || Buffer.concat([Buffer.from([4]), Buffer.from(publicJwk.x, 'base64url'), Buffer.from(publicJwk.y, 'base64url')]).toString('base64url') !== association.native.hostPublicKey) fail('company_native_storage_invalid');
         await sameBrowser(association); f.check();
-        deactivate(true); db = local.db;
+        // Re-adopting the pair this device already holds is not a revocation of it (the UPDATE below needs the row to stay active).
+        deactivate(held?.value.association.associationId !== association.associationId); db = local.db;
         if (Number(db.prepare("UPDATE company_native_identity_owners SET generation=? WHERE association_id=? AND state='active' AND public_json=?").run(generation, association.associationId, row.public_json).changes) !== 1) fail('company_native_storage_invalid');
         held = { value: restored, path: row.encrypted_path, generation, db, root: local.root, serverPreflight }; activeOriginal = buildOriginal(held); startMonitor();
         await refresh(); f.check(); return status() ?? fail();
@@ -211,7 +224,7 @@ export function registerCompanyNativeOwnerMain(input: {
       held = { value, path: encryptedPath, generation, db, root: local.root, serverPreflight }; activeOriginal = buildOriginal(held); startMonitor(); return status() ?? fail();
     } finally { connecting = false; }
   }
-  input.ipc.handle('companyNative:status', async (event: IpcMainInvokeEvent) => { input.assertTrustedSender(event); refs(); if (!current()) return null; try { await refresh(); return status(); } catch { invalidate(); return null; } });
+  input.ipc.handle('companyNative:status', async (event: IpcMainInvokeEvent) => { input.assertTrustedSender(event); refs(); if (!current()) return null; const h = held; try { await refresh(); return status(); } catch (error) { settleRefreshFailure(error, h); return status(); } });
   input.ipc.handle('companyNative:connect', (event: IpcMainInvokeEvent) => connect(event));
   input.ipc.handle('companyNative:disconnect', async (event: IpcMainInvokeEvent) => { const f = focused(event); attemptGeneration++; try { if (current()) { await request('revoke', {}); f.check(); } } finally { invalidate(); } });
   let activeOriginal: ReturnType<typeof buildOriginal> | null = null;

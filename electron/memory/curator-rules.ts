@@ -26,6 +26,11 @@ export interface CuratorRuleset {
   [key: string]: unknown;
 }
 
+// Same text as patterns.projectBoundaryPath in the canonical file: a host path root that starts a token, also after a
+// backtick, quote, bracket, "=" or ":" (models wrap paths in backticks), with "/" or "\" after a drive letter.
+const PROJECT_BOUNDARY_PATH =
+  "(?:^|[\\s`\"'(\\[=:,])(?:\\/(?:Users|home|var|opt|private)\\/|~\\/|[A-Za-z]:[\\\\/]|file:\\/\\/)";
+
 // Embedded defaults mirror the canonical file so a broken install fails open
 // with identical behaviour; "embedded" in receipts makes that state visible.
 const EMBEDDED: CuratorRuleset = {
@@ -43,7 +48,7 @@ const EMBEDDED: CuratorRuleset = {
   decay: { dreaming: { idleRequiredSec: 600, cooldownMs: 6 * 60 * 60 * 1000 } },
   patterns: {
     projectBoundaryPath: {
-      regex: "(?:^|\\s)(?:\\/(?:Users|home|var|opt|private)\\/|~\\/|[A-Za-z]:\\\\|file:\\/\\/)",
+      regex: PROJECT_BOUNDARY_PATH,
       flags: "",
     },
   },
@@ -146,8 +151,7 @@ export function dreamingCooldownMs(): number {
 
 /** Filesystem paths that identify where this user works, regardless of project. */
 export function projectBoundaryPathRe(): RegExp {
-  return rulesetPattern("projectBoundaryPath")
-    ?? /(?:^|\s)(?:\/(?:Users|home|var|opt|private)\/|~\/|[A-Za-z]:\\|file:\/\/)/;
+  return rulesetPattern("projectBoundaryPath") ?? new RegExp(PROJECT_BOUNDARY_PATH);
 }
 
 // widensCapability was REMOVED 2026-08-12 (owner decision): a content wordlist

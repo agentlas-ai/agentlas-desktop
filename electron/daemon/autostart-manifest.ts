@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { deserializeInstallIdentity, serializeInstallIdentity, type InstallIdentity } from "../install-identity";
-import { canonicalDaemonPath, resolveDaemonServiceIdentity } from "./service-identity";
+import { canonicalDaemonPath, legacyDaemonServiceIdentity, resolveDaemonServiceIdentity } from "./service-identity";
 
 export const AUTOSTART_READY_KEY = "daemon_autostart_store_ready_v1";
 export interface DaemonAutostartManifest {
@@ -46,8 +46,9 @@ export function validateDaemonAutostartManifest(value: unknown): DaemonAutostart
   const install = deserializeInstallIdentity(JSON.stringify(m.installIdentity));
   if (install.channel === "qa" && canonicalDaemonPath(install.userDataOverride!) !== canonicalDaemonPath(m.userDataDir)) invalid("daemon_autostart_qa_identity_mismatch");
   if (!fs.statSync(m.storePath).isFile() || !fs.statSync(m.executable).isFile()) invalid("daemon_autostart_target_unavailable");
-  const identity = resolveDaemonServiceIdentity(m);
-  if (identity.serviceIdentity !== m.serviceIdentity) invalid("daemon_autostart_store_identity_mismatch");
+  // A manifest an earlier build published carries the st_dev formula: it still proves the store in the boot that wrote it, and the
+  // GUI's reconcile republishes it under the current formula (which survives a reboot).
+  if (resolveDaemonServiceIdentity(m).serviceIdentity !== m.serviceIdentity && legacyDaemonServiceIdentity(m) !== m.serviceIdentity) invalid("daemon_autostart_store_identity_mismatch");
   if (entryDigest(m.entry) !== m.entrySha256) invalid("daemon_autostart_entry_changed");
   const metadata = JSON.parse(fs.readFileSync(path.join(m.appMetadata.appPath, "package.json"), "utf8"));
   if (metadata.version !== m.appVersion) invalid("daemon_autostart_app_version_changed");
@@ -66,4 +67,16 @@ export function readDaemonAutostartManifest(file: string): DaemonAutostartManife
   if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 64 * 1024
     || (process.platform !== "win32" && ((stat.mode & 0o077) !== 0 || stat.uid !== process.getuid?.()))) invalid("daemon_autostart_manifest_permissions_invalid");
   return validateDaemonAutostartManifest(JSON.parse(fs.readFileSync(file, "utf8")));
+}
+
+/** The last refusal the login entry recorded next to the manifest (autostart-entry.ts), as machine fields; null when none. */
+export function readDaemonAutostartFailure(manifestPath: string): { code: string; at: string; transient: boolean } | null {
+  const file = `${manifestPath}.failure.json`;
+  try {
+    const stat = fs.lstatSync(file);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 4096) return null;
+    const value = JSON.parse(fs.readFileSync(file, "utf8")) as { schema?: unknown; code?: unknown; at?: unknown; transient?: unknown };
+    if (value?.schema !== "agentlas.daemon-autostart-failure.v1" || typeof value.code !== "string" || typeof value.at !== "string") return null;
+    return { code: value.code.slice(0, 128), at: value.at.slice(0, 40), transient: value.transient === true };
+  } catch { return null; }
 }

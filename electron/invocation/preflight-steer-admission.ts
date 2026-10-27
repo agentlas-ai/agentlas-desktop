@@ -120,7 +120,11 @@ export function dispatchOnePreflightSteers(submissionId?: string, chatId?: strin
         const boundary = readInvocationEffectBoundary({
           invocationRunId: parentRunId, expectedChatId: item.chatId,
         });
-        settledParent = boundary.terminal && boundary.effects === "settled";
+        // The owner's own message is never held on an unknown outside outcome, only on a run that has not finished (the rule
+        // recoverQueuedSteers applies to every other queued direction; its successor reads the parent's history as context). An
+        // ACP agent (grok/kimi/cursor/copilot) never attests quiescence, so a completed text-only turn there is "uncertain" for good:
+        // the same message attached on claude-code/codex and was held on those, with no successor ever made.
+        settledParent = boundary.terminal;
       } catch { /* No effect proof is not an auto-resume grant. */ }
     }
     if (!activeParent && !settledParent) {

@@ -118,9 +118,13 @@ function defaultCandidates(): ArchiveCandidate[] {
             (SELECT u.last_used_at FROM agent_usage u WHERE u.agent_key = a.id) AS lastUsedAt,
             EXISTS(SELECT 1 FROM one_org_members m WHERE m.installed_agent_id = a.id AND m.archived_at IS NULL
                    AND m.status_kind IN ('working','running','waiting')) AS busy,
-            -- An enabled automation that targets the agent is its next use, however far away the schedule puts it.
-            EXISTS(SELECT 1 FROM automations au WHERE au.enabled = 1 AND au.target_type = 'agent'
-                   AND au.target_id = a.id) AS scheduled
+            -- An enabled automation that targets the agent is its next use, however far away the schedule puts it. So is an
+            -- agent node of its graph: the graph's ref names the agent as explicitly as the target does.
+            (EXISTS(SELECT 1 FROM automations au WHERE au.enabled = 1 AND au.target_type = 'agent'
+                    AND au.target_id = a.id)
+             OR EXISTS(SELECT 1 FROM automations au,
+                         json_each(CASE WHEN json_valid(au.graph_json) THEN au.graph_json ELSE '{}' END, '$.nodes') node
+                       WHERE au.enabled = 1 AND json_extract(CASE WHEN node.type = 'object' THEN node.value ELSE '{}' END, '$.config.ref') = a.id)) AS scheduled
        FROM installed_agents a
       WHERE a.id NOT LIKE 'builtin-%'`,
   ).all() as Array<{ id: string; installedAt: string; builtin: number | null; bookmarkedAt: string | null; lastUsedAt: string | null; busy: number; scheduled: number }>;

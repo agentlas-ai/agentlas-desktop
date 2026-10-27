@@ -1,5 +1,5 @@
 import type { LoginPrerequisiteRef } from "../browser/login-prerequisite";
-import { sha256Value } from "../../shared/graph-execution-digest";
+import { sha256Value, GRAPH_CHECKPOINT_SCHEMA } from "../../shared/graph-execution-digest";
 import { redactOperationalSecrets } from "../invocation/event-secret-redaction";
 import { decodeAutomationMonitor, decodeAutomationPollState, type AutomationMonitorContract } from "../../shared/automation-monitor";
 // 자동화 — SQLite 영속 + 스케줄 next-run 계산. (이전 M0 in-memory stub 대체)
@@ -1001,7 +1001,7 @@ export function getGraphLoginWaitCheckpoint(automationId: string, runId?: string
   try {
     const checkpoint = JSON.parse(row.checkpoint_json ?? "null");
     const payload = { ...checkpoint }; delete payload.checkpointDigest;
-    if (!checkpoint || checkpoint.schemaVersion !== "agentlas.automation-graph-checkpoint.v4"
+    if (!checkpoint || checkpoint.schemaVersion !== GRAPH_CHECKPOINT_SCHEMA
       || checkpoint.checkpointDigest !== sha256Value(payload) || checkpoint.graphDigest !== row.graph_digest
       || checkpoint.occurrenceId !== row.occurrence_id || !checkpoint.loginWaits
       || !Object.values(checkpoint.loginWaits).length || !Object.values(checkpoint.loginWaits).every(validGraphLoginWaitEntry)) return null;
@@ -2067,10 +2067,12 @@ export function markAutomationRun(
   emitDesktopStoreChange({ entity: "automation", id });
 }
 
-// enabled이고 next_run_at이 지난(due) 자동화들.
+// enabled이고 next_run_at이 지난(due) 자동화들. 시계는 시간 트리거(schedule)만 가진다: 이벤트 행(fs/chain/webhook/poll/command)에
+// next_run_at 이 채워져 있어도(다른 쓰기 경로가 시계를 만들어 준 오염) 이벤트 없이 시계로 발사하지 않는다 — toAutomation 과 같은 기본값.
 export function dueAutomations(now: Date = new Date()): Automation[] {
   const rows = getDb()
     .prepare(`SELECT * FROM automations WHERE enabled = 1 AND next_run_at IS NOT NULL AND next_run_at <= ?
+      AND COALESCE(NULLIF(trigger_type, ''), 'schedule') = 'schedule'
       AND NOT ${goalContinuationRowSql()} ORDER BY next_run_at ASC`)
     .all(now.toISOString()) as AutomationRow[];
   return rows.map(toAutomation);
@@ -2219,6 +2221,53 @@ export function releaseAutomationRun(id: string, owner: string): boolean {
     .run(id, owner);
   if (result.changes > 0) emitDesktopStoreChange({ entity: "automation", id });
   return result.changes > 0;
+}
+
+export interface HeldAutomationRunLease {
+  /** True while this owner still holds the row and the heartbeat has not seen it taken away. */
+  current(): boolean;
+  /** Stops the heartbeat and gives the lease back (only if this owner still holds it). */
+  release(): void;
+}
+
+/**
+ * A graph run that does not go through the Main scheduler (the daemon's graph.run) still has to be the only run of
+ * that automation: Main's due ticks, Run now and event triggers all claim this same lease. Holds it with the scheduler's
+ * 60 s heartbeat; a definitive loss calls `onLost` (the caller aborts its run), a transient store error does not.
+ * Returns null when another owner holds the lease.
+ */
+export function holdAutomationRunLease(
+  id: string,
+  owner: string,
+  options: AutomationLeaseOptions & { heartbeatMs?: number; onLost?: () => void } = {},
+): HeldAutomationRunLease | null {
+  const { heartbeatMs, onLost, ...leaseOptions } = options;
+  if (!claimAutomationRun(id, owner, new Date(), leaseOptions)) return null;
+  let lost = false;
+  const timer = setInterval(() => {
+    try {
+      if (!renewAutomationRunLease(id, owner, new Date(), leaseOptions)) {
+        lost = true;
+        clearInterval(timer);
+        onLost?.();
+      }
+    } catch {
+      // One SQLITE_BUSY/I/O miss is not proof that a peer took the lease; the next beat retries.
+    }
+  }, Math.max(10, heartbeatMs ?? 60_000));
+  timer.unref?.();
+  return {
+    current() {
+      if (lost) return false;
+      const row = getDb().prepare("SELECT lease_owner, claimed_at FROM automations WHERE id = ?")
+        .get(id) as { lease_owner: string | null; claimed_at: string | null } | undefined;
+      return row?.lease_owner === owner && row.claimed_at != null;
+    },
+    release() {
+      clearInterval(timer);
+      try { releaseAutomationRun(id, owner); } catch { /* an owner CAS never removes a peer's lease */ }
+    },
+  };
 }
 
 // ── 노드 승인 브레이크 ────────────────────────────────────────────────────
@@ -2612,6 +2661,13 @@ export function consumeGraphResumeCoordinate(checkpointRunId: string): boolean {
 // 사용자가 요청한 적 없는 실행이 된다. 소비는 조건부 UPDATE로 한쪽만 이긴다.
 
 export const RUN_INPUT_MAX_BYTES = 256 * 1024;
+/**
+ * 대기열의 값은 이 시간 안에 쓰이지 않으면 버려진다. Run now 의 값은 이제 큐를 거치지 않고 실행에 직접 묶이지만,
+ * 이전 빌드가 접수 거절 뒤에도 남겨 둔 행이 채워진 DB 에 있을 수 있다 — 그 값이 한참 뒤의 예약·이벤트 실행에
+ * 몰래 쓰이지 않게 한다. 버려진 행은 이 표식으로 소비 처리되어 이유가 남는다.
+ */
+export const RUN_INPUT_TTL_MS = 10 * 60_000;
+export const RUN_INPUT_EXPIRED_RUN_ID = "run_input_expired";
 
 export interface PendingRunInput {
   id: string;
@@ -2642,8 +2698,8 @@ export function enqueueRunInput(
 export function peekRunInput(automationId: string): PendingRunInput | null {
   const row = getDb().prepare(
     `SELECT id, payload_json, requested_by, created_at FROM automation_run_inputs
-     WHERE automation_id = ? AND consumed_at IS NULL ORDER BY created_at LIMIT 1`,
-  ).get(automationId) as
+     WHERE automation_id = ? AND consumed_at IS NULL AND created_at >= ? ORDER BY created_at LIMIT 1`,
+  ).get(automationId, new Date(Date.now() - RUN_INPUT_TTL_MS).toISOString()) as
     | { id: string; payload_json: string; requested_by: string; created_at: string }
     | undefined;
   if (!row) return null;
@@ -2663,6 +2719,12 @@ export function peekRunInput(automationId: string): PendingRunInput | null {
  * null을 돌려준다 — 같은 값으로 두 번 실행하지 않기 위해서다.
  */
 export function consumeRunInput(automationId: string, runId: string): PendingRunInput | null {
+  const nowMs = Date.now();
+  try {
+    getDb().prepare(
+      "UPDATE automation_run_inputs SET consumed_at = ?, consumed_run_id = ? WHERE automation_id = ? AND consumed_at IS NULL AND created_at < ?",
+    ).run(new Date(nowMs).toISOString(), RUN_INPUT_EXPIRED_RUN_ID, automationId, new Date(nowMs - RUN_INPUT_TTL_MS).toISOString());
+  } catch { /* the TTL filter in peekRunInput already keeps an expired value from binding */ }
   const pending = peekRunInput(automationId);
   if (!pending) return null;
   const claimed = getDb().prepare(

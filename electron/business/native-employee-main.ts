@@ -101,8 +101,20 @@ export function registerNativeEmployeeMain(input:NativeEmployeeMainInput){
  });
  input.ipc.handle('businessNative:receipt',async(event:IpcMainInvokeEvent,value:unknown)=>{
   const action=owned(event);if(!businessEmployeeAgentOnly(value,['acceptanceId'])||!isBusinessId(value.acceptanceId))deny();const o=original(),cap=await o.source.restore(value.acceptanceId),delivery=await o.journal.owners.inspect(cap);action.check();
-  if(!delivery)return{state:'unknown' as const};if(delivery.state==='ready')return{state:'accepted' as const,delivery:'not-dispatched' as const};
-  const result=await o.journal.owners.lookup(cap,delivery.packet);action.check();if(!await o.journal.owners.settle(cap,result))return{state:'unknown' as const};
+  if(!delivery)return{state:'unknown' as const};
+  // This focused action drives a delivery that has not settled: a share whose first attempt never left is sent, and an unknown one is looked up and, when Root holds
+  // no receipt under its key, sent again with the same packet and key (Root deduplicates by it).
+  let result:Awaited<ReturnType<typeof o.journal.owners.lookup>>;
+  try{
+   if(delivery.state==='ready'){const sent=await o.journal.dispatch(cap);action.check();if(!sent)return{state:'accepted' as const,delivery:'not-dispatched' as const};result=sent}
+   else result=await o.journal.owners.lookup(cap,delivery.packet);
+  }catch(error){
+   // Root or the network is not answering now: nothing is lost and the next check asks again. Any other refusal is shown as it is.
+   const name=error&&typeof error==='object'&&'name'in error?String(error.name):'',status=error&&typeof error==='object'&&'status'in error?(error as {status?:unknown}).status:null;
+   if(!['TimeoutError','AbortError','TypeError'].includes(name)&&!(typeof status==='number'&&status>=500))throw error;
+   return{state:'unknown' as const};
+  }
+  action.check();if(!await o.journal.owners.settle(cap,result))return{state:'unknown' as const};
   const publication=await o.journal.reconcilePublication(cap);action.check();
   // Copy only the original durable packet selection after a fresh current read.
   // This metadata is not registration, approval, or a publication grant.

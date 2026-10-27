@@ -10,6 +10,7 @@ import { RUNTIME_BACKENDS } from "../../shared/runtime-backends";
 import { getDb } from "./db";
 import { takePreparedUserRow } from "./prepared-user-rows";
 import { oneDispatchSidebarPredicate, createOneDispatchNoticeProjector } from "../one/dispatch-presentation";
+import { personalAgentRoomIdsAmong } from "../one/personal-agent-rooms";
 import { getChatGoalRevision } from "./chat-goals";
 import { parseGoalResult, type GoalResultPresentation } from "../../shared/goal-result";
 import { repairAskOpenMarkers } from "../../shared/agent-control-blocks";
@@ -146,7 +147,12 @@ function parseChatRuntimeSelection(raw: string | null): RuntimeSelection | null 
   }
 }
 
-function toChat(row: ChatRow, resolvedTaskId?: string | null): Chat {
+/** Rooms the personal agent runs (one/personal-agent-rooms.ts); a store without that table has none. */
+function personalAgentRooms(chatIds: readonly string[]): Set<string> {
+  try { return personalAgentRoomIdsAmong(chatIds, getDb()); } catch { return new Set(); }
+}
+
+function toChat(row: ChatRow, resolvedTaskId?: string | null, supervisedRooms?: ReadonlySet<string>): Chat {
   // A general One conversation deliberately has no Task until execution
   // signals promote it. Existing Work/Task chats are reconciled on read.
   const taskId = resolvedTaskId !== undefined ? resolvedTaskId
@@ -176,12 +182,14 @@ function toChat(row: ChatRow, resolvedTaskId?: string | null): Chat {
     seatLabel: row.seat_label ?? null,
     seatKind: row.seat_kind === "solo" || row.seat_kind === "group" ? row.seat_kind : null,
     participants: parseChatParticipants(row.participants_json),
+    ...((supervisedRooms ?? personalAgentRooms([row.id])).has(row.id) ? { supervisedByPersonalAgent: true as const } : {}),
   };
 }
 
 function toChats(rows: ChatRow[]): Chat[] {
   const taskIds = existingCanonicalTaskIdsForChats(rows.map(row => row.id));
-  return rows.map(row => toChat(row, taskIds.get(row.id) ?? null));
+  const supervised = personalAgentRooms(rows.map(row => row.id));
+  return rows.map(row => toChat(row, taskIds.get(row.id) ?? null, supervised));
 }
 
 function parseChatParticipants(raw: string | null): Chat["participants"] {
@@ -543,7 +551,7 @@ export function createChat(input: {
   if (shouldCreateTask) ensureCanonicalTaskForChat(id);
   // A future explicit New keeps a durable range, rather than an unstored UI hint.
   if (originSurface === "work" && input.projectId && input.continueFromChatId && input.kind !== "division" && getProject(input.projectId)) {
-    bindManagedWorkingSessionScope(getDb(), id, { projectId: input.projectId, subSessionId: id }, {kind:"desktop-project"});
+    bindManagedWorkingSessionScope(getDb(), id, { projectId: input.projectId, rootChatId: id, subSessionId: null }, {kind:"desktop-project"});
   }
   const chat = getChat(id) as Chat;
   emitDesktopStoreChange({ entity: "chat", id });
@@ -562,7 +570,7 @@ export function createProjectWorkChat(input: { projectId: string; title?: string
   return getDb().transaction(() => {
     const chat = createChat({ projectId: project.id, title: input.title, agentId: input.agentId,
       taskMode: "task", originSurface: "work" });
-    bindManagedWorkingSessionScope(getDb(), chat.id, { projectId: project.id, subSessionId: null }, {kind:"desktop-project"});
+    bindManagedWorkingSessionScope(getDb(), chat.id, { projectId: project.id, rootChatId: chat.id, subSessionId: null }, {kind:"desktop-project"});
     return chat;
   }).immediate();
 }

@@ -3218,72 +3218,176 @@ button.dashboard-local-model-card:hover { color: var(--ink); }
 }
 
 /* Live tool permission: a card at the composer's width, never a full-width ask sheet (docs/DESIGN-ASK-CARD.md).
-   Owner 2026-10-17 ("너무 이상해", follow Claude Code / Codex): the question and what it allows on top, then the four
-   decisions as numbered rows — the first one marked — instead of four boxed buttons in a line. */
+   Owner 2026-10-27 ("승인카드 디자인이 좀 애매하다 — 코덱스나 클로드코드 앱의 승인카드를 따라해라"): one card sits right above the
+   composer — a question line, the command/target as a monospace block (folded to 4 lines), then numbered rows with the
+   shortcut on the right. Body-size type, a 1px border and the composer's own surface; several approvals take turns ("1/3")
+   instead of stacking. Shared by ToolApprovalCard and BrowserActionApprovalSheet through components/ApprovalPrompt. */
 .tool-approval-chip {
-  /* 불투명한 흰 바탕은 상수가 아니라 테마 토큰으로 낸다 — 상수 흰색 위에 테마
-     글자색(--ink)이 오면 다크에서 흰 상자 + 흰 글자가 된다(오너 실사용 2026-09-07). */
   /* 래퍼가 이미 작성창 폭이다. 여기서 다시 내용만큼 줄이면 그 폭이 무의미해진다. */
   width: 100%;
   max-width: 100%;
   min-width: 0;
   display: grid;
   gap: 8px;
-  padding: 10px 6px 6px;
+  padding: 12px 6px 6px;
   border: 1px solid var(--paper-edge);
   border-radius: 12px;
+  /* 불투명한 바탕은 상수가 아니라 테마 토큰으로 낸다 — 다크에서 흰 상자 + 흰 글자가 되지 않게. */
   background: var(--popup-card-bg);
-  box-shadow: 0 6px 24px rgba(15, 18, 20, 0.08);
+  box-shadow: 0 4px 18px rgba(15, 18, 20, 0.06);
   color: var(--ink);
+  font-size: 13px;
+  line-height: 1.45;
   box-sizing: border-box;
+  outline: none;
 }
 
 .tool-approval-chip-head {
   display: flex;
-  align-items: flex-start;
-  gap: 9px;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
   min-width: 0;
   padding: 0 8px;
 }
 
-.tool-approval-chip-icon {
-  display: inline-grid;
-  place-items: center;
-  flex: none;
-  width: 22px;
-  height: 22px;
-  margin-top: 1px;
-  border-radius: 6px;
-  background: var(--fill-1);
-  color: var(--ink-soft);
-}
-
-.tool-approval-chip-copy {
+.tool-approval-chip-question {
   min-width: 0;
   flex: 1 1 auto;
-  display: grid;
-  gap: 2px;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
 }
 
-.tool-approval-chip-copy strong,
-.tool-approval-chip-copy small {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
+.tool-approval-chip-deck {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  gap: 4px;
+  color: var(--muted-deep);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
 
-.tool-approval-chip-copy strong {
-  color: var(--ink);
-  font-size: 13px;
-  font-weight: 650;
-  line-height: 1.4;
+.tool-approval-chip-trailing {
+  margin-inline-end: 4px;
 }
 
-.tool-approval-chip-copy small {
+.tool-approval-chip-count {
+  margin-inline-end: 2px;
+  color: var(--ink-soft);
+  font-weight: 600;
+}
+
+.tool-approval-chip .tool-approval-chip-step {
+  min-width: 24px;
+  height: 24px;
+  padding: 0 6px;
+  border: 1px solid var(--paper-edge);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ink-soft);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.tool-approval-chip .tool-approval-chip-step:hover,
+.tool-approval-chip .tool-approval-chip-step:focus-visible {
+  background: var(--fill-1);
+  color: var(--ink);
+  outline: none;
+}
+
+.tool-approval-chip .tool-approval-chip-step:focus-visible {
+  box-shadow: 0 0 0 2px var(--info);
+}
+
+.tool-approval-chip-codewrap {
+  position: relative;
+  min-width: 0;
+  margin: 0 8px;
+}
+
+.tool-approval-chip-codebox {
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--fill-1);
+}
+
+.tool-approval-chip-code {
+  margin: 0;
+  padding: 0;
+  color: var(--ink);
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  /* Folded to four lines; Expand opens the rest (bounded, so a huge argument never pushes the composer off screen). */
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4;
+  overflow: hidden;
+}
+
+.tool-approval-chip-code[data-expanded="true"] {
+  display: block;
+  max-height: min(40vh, 360px);
+  overflow: auto;
+}
+
+.tool-approval-chip-code code {
+  font: inherit;
+}
+
+.tool-approval-chip .tool-approval-chip-expand {
+  display: block;
+  margin: 2px 0 0 auto;
+  padding: 2px 4px;
+  border: 0;
+  background: none;
   color: var(--muted-deep);
-  font-size: 11.5px;
-  line-height: 1.4;
+  font: inherit;
+  font-size: 12px;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.tool-approval-chip .tool-approval-chip-expand:hover,
+.tool-approval-chip .tool-approval-chip-expand:focus-visible {
+  color: var(--ink);
+  outline: none;
+}
+
+.tool-approval-chip .tool-approval-chip-expand:focus-visible {
+  box-shadow: 0 0 0 2px var(--info);
+  border-radius: 4px;
+}
+
+.tool-approval-chip-meta {
+  min-width: 0;
+  padding: 0 8px;
+  color: var(--muted-deep);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.tool-approval-chip-warning {
+  margin: 0 8px;
+  padding: 6px 10px;
+  border: 1px solid color-mix(in srgb, var(--warn) 45%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--warn) 10%, transparent);
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
 }
 
 .tool-approval-chip-actions {
@@ -3292,98 +3396,174 @@ button.dashboard-local-model-card:hover { color: var(--ink); }
   gap: 1px;
 }
 
-.tool-approval-chip-action {
-  display: flex;
-  align-items: center;
-  gap: 10px;
+.tool-approval-chip .tool-approval-chip-action {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 8px;
   min-width: 0;
   min-height: 34px;
-  padding: 0 10px 0 8px;
+  padding: 7px 10px 7px 8px;
   border: 0;
   border-radius: 8px;
   background: transparent;
   color: var(--ink-soft);
   font: inherit;
-  font-size: 12.5px;
+  font-size: 13px;
   text-align: left;
   cursor: pointer;
   transition: background-color 100ms ease;
 }
 
-.tool-approval-chip-action:hover:not(:disabled),
-.tool-approval-chip-action:focus-visible {
+.tool-approval-chip .tool-approval-chip-action[data-sel="true"]:not(:disabled),
+.tool-approval-chip .tool-approval-chip-action:hover:not(:disabled),
+.tool-approval-chip .tool-approval-chip-action:focus-visible {
   background: var(--fill-1);
   color: var(--ink);
   outline: none;
 }
 
-.tool-approval-chip-action:focus-visible {
+.tool-approval-chip .tool-approval-chip-action:focus-visible {
   box-shadow: inset 0 0 0 2px var(--info);
 }
 
-.tool-approval-chip-action:disabled {
+.tool-approval-chip .tool-approval-chip-action:disabled {
   color: var(--muted);
   cursor: not-allowed;
 }
 
 .tool-approval-chip-key {
-  display: inline-grid;
-  place-items: center;
-  flex: none;
-  width: 18px;
-  height: 18px;
-  border: 1px solid var(--paper-edge);
-  border-radius: 50%;
   color: var(--muted-deep);
-  font-size: 10.5px;
-  font-weight: 600;
   font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.tool-approval-chip-key::after {
+  content: ".";
+}
+
+.tool-approval-chip .tool-approval-chip-action[data-sel="true"] .tool-approval-chip-key {
+  color: var(--ink);
+  font-weight: 650;
+}
+
+.tool-approval-chip-text {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .tool-approval-chip-action-title {
-  flex: none;
+  font-weight: 500;
+}
+
+.tool-approval-chip .tool-approval-chip-action[data-sel="true"] .tool-approval-chip-action-title {
   font-weight: 600;
-  white-space: nowrap;
 }
 
 .tool-approval-chip-action-note {
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  margin-inline-start: 6px;
   color: var(--muted-deep);
-  font-size: 11.5px;
+  font-size: 12px;
 }
 
-.tool-approval-chip-action > svg {
-  flex: none;
-  color: var(--muted);
+.tool-approval-chip-hint {
+  align-self: center;
+  padding: 0 5px;
+  border: 1px solid var(--paper-edge);
+  border-radius: 4px;
+  color: var(--muted-deep);
+  font: inherit;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: nowrap;
 }
 
-/* The recommended choice reads first: a filled row and a dark number, not a black slab. */
-.tool-approval-chip-action-once {
+/* "아니오, 그리고 대신 이렇게 하세요" (오너 2026-10-27, Claude Code·Codex 의 마지막 선택지): 거절 행 바로 아래, 번호 칸과 같은 격자에 앉는다.
+   닫혀 있을 때는 흐린 안내 한 줄, 열리면 한 줄 입력. 높이는 안내 줄(28px)→입력 줄(34px)로 한 번만 바뀐다(Tab 으로 연 순간). */
+.tool-approval-chip .tool-approval-chip-note-open {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  min-height: 28px;
+  padding: 4px 10px 4px 8px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted-deep);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.tool-approval-chip .tool-approval-chip-note-open .tool-approval-chip-note-label {
+  grid-column: 2;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.tool-approval-chip .tool-approval-chip-note-open:hover:not(:disabled),
+.tool-approval-chip .tool-approval-chip-note-open:focus-visible {
   background: var(--fill-1);
   color: var(--ink);
+  outline: none;
 }
 
-.tool-approval-chip-action-once .tool-approval-chip-key {
-  border-color: var(--ink);
-  background: var(--ink);
-  color: var(--paper);
+.tool-approval-chip .tool-approval-chip-note-open:focus-visible {
+  box-shadow: inset 0 0 0 2px var(--info);
 }
 
-.tool-approval-chip-action-once > svg {
+.tool-approval-chip .tool-approval-chip-note-open:disabled {
+  color: var(--muted);
+  cursor: not-allowed;
+}
+
+.tool-approval-chip .tool-approval-chip-note-open .tool-approval-chip-hint {
+  grid-column: 3;
+}
+
+.tool-approval-chip-note {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  min-height: 34px;
+  padding: 2px 10px 2px 34px;
+}
+
+.tool-approval-chip .tool-approval-chip-note-input {
+  min-width: 0;
+  width: 100%;
+  box-sizing: border-box;
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--paper-edge);
+  border-radius: 8px;
+  background: var(--fill-1);
   color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+  outline: none;
 }
 
-/* 거부는 위험한 선택이 아니라 안전한 선택이다 — 빨간 경고색을 쓰지 않는다. */
-.tool-approval-chip-action-deny {
+.tool-approval-chip .tool-approval-chip-note-input::placeholder {
   color: var(--muted-deep);
 }
 
-@media (max-width: 700px) {
-  .tool-approval-chip-action-note {
+.tool-approval-chip .tool-approval-chip-note-input:focus-visible {
+  box-shadow: inset 0 0 0 2px var(--info);
+}
+
+.tool-approval-chip .tool-approval-chip-note-input[readonly] {
+  color: var(--muted-deep);
+}
+
+/* 단축키 안내를 포커스 따라 켜고 끄지 않는다 — 카드는 작성창 위에 붙어 있어서, 높이가 바뀌면 누르던 단추가 밑으로 밀려 클릭이 빗나간다. */
+@media (max-width: 560px) {
+  .tool-approval-chip-hint {
     display: none;
   }
 }

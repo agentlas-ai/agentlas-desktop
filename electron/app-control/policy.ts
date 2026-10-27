@@ -234,7 +234,7 @@ const DENIED_READ_PATHS: ReadonlySet<string> = new Set([
   "oneContext.snapshot", "oneContext.targets", "oneHarness.getResult", "oneHarness.readiness", "onePersonalData.bootstrap",
   "onePersonalData.connectorCatalog", "onePersonalData.gmailCatalog", "onePersonalData.gmailSourceSettings", "onePersonalData.historySnapshot",
   "onePersonalData.historyWorkStatus", "onePersonalData.listTargets", "onePersonalData.snapshot", "oneProvider.bootstrap", "oneProvider.status",
-  "oneSupervisor.budgets", "oneSupervisor.journal", "oneSupervisor.receipt", "oneSupervisor.snapshot", "oneVault.recoverableOperations",
+  "oneSupervisor.budgets", "oneSupervisor.journal", "oneSupervisor.receipt", "oneSupervisor.snapshot", "oneSupervisor.supervisedRooms", "oneVault.recoverableOperations",
   "oneWindow.getState", "workStart.get", "science.researchCapabilities.catalog", "runLedger.outputsAfter", "oneArtifacts.listEarlier", "runLedger.settleRowsAfter",
   "liveDocument.snapshot", "liveDocument.entries", "liveDocument.list", "enterpriseServer.status",
 ]);

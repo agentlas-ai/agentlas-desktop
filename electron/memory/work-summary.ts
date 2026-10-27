@@ -17,7 +17,9 @@ const WINDOWS_PATH_RE = /[A-Za-z]:\\(?:[^\\\s]+\\)*[^\\\s]*/g;
 const CJK_RE = /[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]/;
 
 function cleanSource(raw: string): string[] {
-  const text = String(raw ?? "")
+  // Mask credentials on the whole text before anything cuts it up: a value such as `p.ssw0rd` or a JWT contains the "."
+  // the sentence splitter breaks on, and the halves no longer match any secret pattern.
+  const text = redactSecrets(String(raw ?? ""))
     .replace(/```[\s\S]*?```/g, "\n")
     .replace(/`([^`\n]{1,160})`/g, "$1")
     .replace(/!\[[^\]]*]\([^)]*\)/g, " ")
@@ -34,6 +36,8 @@ function cleanSource(raw: string): string[] {
       .replace(/[*_~]+/g, "")
       .replace(/\s+/g, " ")
       .trim())
+    // Markup removal can join a credential key to its value (`**password**: x`), so mask the cleaned line as well.
+    .map((line) => redactSecrets(line))
     .filter(Boolean);
 }
 
@@ -42,6 +46,7 @@ function splitSentences(lines: string[]): string[] {
   for (const line of lines) {
     const parts = line.match(/[^.!?。！？]+(?:[.!?。！？]+|$)/g) ?? [line];
     for (const part of parts) {
+      // cleanSource already masked the whole text; this only backstops a line that reaches here another way.
       const value = redactSecrets(part).replace(/\s+/g, " ").trim();
       if (value) sentences.push(value);
     }

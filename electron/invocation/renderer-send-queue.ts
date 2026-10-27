@@ -2,11 +2,12 @@ import { randomUUID } from "node:crypto";
 import type { IpcMainInvokeEvent } from "electron";
 import type { ChatHistoryEntry, InvocationCurrentTurnSteerReceipt, InvocationSteerResult, McpInvocationRequest } from "../../shared/types";
 import { getDb } from "../store/db";
-import { appendChatMessage, autoTitleFromFirstMessage, getChat } from "../store/chats";
-import { holdingAgentResidency } from "../runtime/agent-residency";
+import { appendChatMessage, autoTitleFromFirstMessage } from "../store/chats";
 import { emitDesktopStoreChange } from "../store/change-bus";
 import { getPendingInvocationAdmissionForChat } from "../store/invocation-admissions";
 import { invocationRunOwners, invocationProcessOwner } from "../store/invocation-run-owners";
+import { releaseGoneTerminalOwners } from "../store/terminal-owner-liveness";
+import { userDataDir } from "../runtime-paths";
 import { withPreparedUserRow } from "../store/prepared-user-rows";
 import { pickLocale } from "../runtime/status-i18n";
 import { invocationService } from "./service";
@@ -48,28 +49,43 @@ export function queuedSendNoticeRunId(runId: string | null | undefined, sendId: 
   return runId || `pending-send:${sendId}`;
 }
 
-/**
- * Another chat of the same Work project holds the project's single provider process in this host (one CLI per Work
- * project, runtime/project-residency.ts). A message started now would be refused work_project_residency_busy before
- * dispatch ("send again after the current turn finishes"); it waits here instead, shown once (no-dead-end sweep
- * 2026-10-25). API and local-model lanes hold no project residency, so they never wait on this.
- */
-export function workProjectHeldElsewhere(chatId: string): boolean {
-  try {
-    const chat = getChat(chatId);
-    const projectId = chat?.originSurface === "work" ? chat.projectId : null;
-    if (!projectId) return false;
-    return holdingAgentResidency().some((entry) => entry.projectId === projectId && entry.inUse && entry.chatId !== chatId);
-  } catch { return false; }
-}
-
+// A Work project is shared attribution, not a provider process: another chat of the project is an independent native writer
+// (runtime/native-writer-admission.ts queues only turns that write the same native session), so a message never waits here on
+// a sibling chat. The old "one CLI per Work project" hold existed only to avoid work_project_residency_busy, which is gone.
 function chatIsFree(chatId: string): boolean {
   if (invocationService.activeChatIds().includes(chatId)) return false;
   if (invocationService.hasQueuedOwnerRequest(chatId)) return false;
-  if (workProjectHeldElsewhere(chatId)) return false;
   try { if (getPendingInvocationAdmissionForChat(chatId)) return false; } catch { /* unreadable is not proof of busy */ }
-  try { if (invocationRunOwners.getActiveOwner(chatId)) return false; } catch { /* same */ }
+  try {
+    let holder = invocationRunOwners.getActiveOwner(chatId);
+    // A terminal that died without releasing (kill -9, a crash, power loss) holds its chat for good unless its owner is PROVEN gone.
+    if (holder && holder.ownerKind === "terminal" && holder.ownerId !== invocationProcessOwner().ownerId) {
+      try { sweepGoneTerminalOwners(chatId); } catch { /* a failed proof keeps the lease: the chat stays busy */ }
+      holder = invocationRunOwners.getActiveOwner(chatId);
+    }
+    if (holder) return false;
+  } catch { /* same */ }
   return true;
+}
+
+// The proof can run `ps` (or PowerShell) for a live terminal, and the queue asks every few seconds: look again at most this often.
+const TERMINAL_SWEEP_EVERY_MS = 10_000;
+const terminalSweepAt = new Map<string, number>();
+const terminalSweepKept = new Map<string, { code: string; pid?: number; ownerId: string }>();
+
+/** Release the chat's terminal lease if (and only if) its owner process and agent children are provably gone. */
+export function sweepGoneTerminalOwners(chatId: string, now: number = Date.now()): number {
+  const last = terminalSweepAt.get(chatId) ?? 0;
+  if (now - last < TERMINAL_SWEEP_EVERY_MS) return 0;
+  terminalSweepAt.set(chatId, now);
+  const swept = releaseGoneTerminalOwners(invocationRunOwners, userDataDir(), { chatId });
+  if (swept.released.length > 0) {
+    terminalSweepKept.delete(chatId);
+    console.warn("[send-queue] released a lease of a terminal that is gone", { chatId, released: swept.released.length, runIds: swept.released.map((owner) => owner.runId) });
+  } else if (swept.kept[0]) {
+    terminalSweepKept.set(chatId, { code: swept.kept[0].code, ownerId: swept.kept[0].ownerId, ...(swept.kept[0].pid !== undefined ? { pid: swept.kept[0].pid } : {}) });
+  }
+  return swept.released.length;
 }
 
 /** How long a queued message may wait on a busy chat before we look into why, and how often we repeat the line. */
@@ -106,6 +122,8 @@ export function diagnoseBusyChat(chatId: string, waitedMs: number, now: number =
   console.warn("[send-queue] message still waiting for a busy chat", {
     chatId, waitedSeconds: Math.round(waitedMs / 1000), activeRunInThisProcess: activeRun, pendingAdmission: admission,
     lease: owner ? { state: owner.state, ownerKind: owner.ownerKind, ownedByThisProcess: owner.ownerId === me.ownerId, runId: owner.runId } : null,
+    // Why a terminal-held chat could not be released: the machine code of the proof (terminal_owner_alive, _child_alive, ...).
+    ...(owner?.ownerKind === "terminal" && terminalSweepKept.get(chatId) ? { terminalProof: terminalSweepKept.get(chatId) } : {}),
     // A lease this process owns while no run of this process is active is a leak (the run ended without releasing it).
     suspectedLeak: Boolean(owner && owner.ownerId === me.ownerId && !activeRun && !admission),
   });
@@ -155,6 +173,12 @@ export interface RendererSendQueueOptions {
   beforeQueuedStart?(event: IpcMainInvokeEvent, request: McpInvocationRequest): void | Promise<void>;
   /** Synchronous, in the same store transaction as acceptance: release only the queued parent's preparation slot. */
   onQueued?(request: McpInvocationRequest): void;
+  /**
+   * The owner direction the process hosting the turn already recorded under this intent (recorded-owner-steer.ts), in the shape
+   * invoke:steer answers; null when there is none. A refused steer accepted here as the next message is dropped instead of started
+   * when the host recorded it after all (its reply was lost), and its receipt then answers with the host's own.
+   */
+  recordedOwnerSteer?(chatId: string, intentId: string): InvocationSteerResult | null;
 }
 
 const UNTRUSTED_SENDER_CODES = new Set(["untrusted-site-publish-ipc-sender", "untrusted-site-publish-ipc-window"]);
@@ -186,6 +210,7 @@ export function createRendererSendQueue(startNow: RendererStartNow, options: Ren
     clearTimer: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
     random: Math.random,
     isChatFree: chatIsFree,
+    alreadyDelivered: (chatId, intentId) => options.recordedOwnerSteer?.(chatId, intentId) != null,
     persistentInput: (id) => options.custody?.persistentInput(id) === true,
     onHeld: (id,code) => options.custody?.hold(id,code),
     inputReady: (id, request) => !request.oneAttachmentRef && !request.oneTeamPreflightRef || options.custody?.readyForQueue(id) === true,
@@ -202,7 +227,7 @@ export function createRendererSendQueue(startNow: RendererStartNow, options: Ren
     },
     senderRefused: (cause) => UNTRUSTED_SENDER_CODES.has(String((cause as { code?: unknown })?.code ?? (cause as { message?: unknown })?.message ?? "")),
     runState: queuedSendRunState,
-    placement: (runId) => options.custody?.placement(runId) ?? queuedSendPlacement(runId),
+    placement: (runId) => options.custody ? options.custody.placement(runId) : queuedSendPlacement(runId),
     reserveStart: (id,request,markStarting) => {
       if (!options.custody) throw new Error("queued_input_custody_required");
       options.custody.reserveStart(id,request,markStarting);
@@ -332,10 +357,6 @@ export function createRendererSendQueue(startNow: RendererStartNow, options: Ren
         // Earlier messages of this chat are still waiting: this one goes behind them, in the order it was typed.
         return queuedAnswer(accept(event, req, undefined));
       }
-      if (canQueue(req) && workProjectHeldElsewhere(req.chatId)) {
-        // Another chat of this Work project is using its provider: wait for it instead of a refused run.
-        return queuedAnswer(accept(event, req, undefined));
-      }
       return startOwnerSendOrAcceptRefusal(() => startOwned(event, req, null), (cause) => {
         if (!canQueue(req)) return null;
         if (isTransientSendRefusal(cause)
@@ -366,6 +387,10 @@ export function createRendererSendQueue(startNow: RendererStartNow, options: Ren
     steerReceiptFor(chatId, intentId) {
       const record = queue.find(chatId, intentId);
       if (!record) return null;
+      // Dropped because the host of the turn had recorded this very direction: its own receipt is the truth (its row, its status).
+      if (record.state === "abandoned" && record.lastCode === "steer_recorded") {
+        try { return options.recordedOwnerSteer?.(chatId, intentId) ?? null; } catch { return null; }
+      }
       return {
         accepted: true, chatId, queued: record.state === "queued" || record.state === "starting", interruptsCurrent: false,
         queuedRequestId: `pending-send:${record.id}`, promptHash: record.promptHash, intentId,

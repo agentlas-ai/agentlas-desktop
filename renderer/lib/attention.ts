@@ -11,6 +11,8 @@
  *  - 승인·질문을 기다리는 대화가 **화면에 없으면** 어디에도 시트·카드·칩을 띄우지 않는다.
  *    이 저장소가 세고, 전환기가 점 하나로만 알린다. 누르면 그 대화로 가고, 카드는 그 대화의
  *    작성창 위에서 지금처럼 편다.
+ *    ★예외(오너 2026-10-27): 개인 에이전트 대화는 자기가 감독하는 방의 도구·브라우저 승인 카드를 그 방 chatId 로
+ *    함께 편다(components/one/PersonalOneSupervisedApprovals). 그동안 그 방은 "보이는 대화"로 등록돼 점에서 빠진다.
  *  - 이 저장소는 **문서 수명**이다. 어느 라우트 트리(AppShell / One / Science)가 마운트돼
  *    있든 같은 구독이 계속 돈다. 예전에는 승인 대기 폴링(독 배지·알림 포함)이 AppShell 에만
  *    있어서 One 으로 넘어가면 멈췄고, 언마운트 정리에서 독 배지를 0 으로 지웠다.
@@ -32,6 +34,7 @@ import type { BrowserApprovalRequestEvent, PendingConfirmation } from "@/lib/typ
 import type { OneOrgMember } from "@shared/one-org";
 import { isPendingConfirmationSnoozed } from "@shared/one-decision";
 import { createCoalescedRefresh } from "@/lib/one-refresh-coordinator";
+import { isPersonalAgentRoom, PERSONAL_AGENT_HREF } from "@/lib/personal-agent-room";
 
 export type AttentionSurface = "one" | "work" | "science";
 export type AttentionKind = "approval" | "result";
@@ -46,6 +49,11 @@ export interface AttentionItem {
   /** 대화가 아닌 목적지(빌드 화면·Science·One 조직도). */
   href: string | null;
   label: string | null;
+  /**
+   * The request belongs to a room the personal agent runs (owner 2026-10-27): the dot leads to the personal agent, whose
+   * conversation shows that room's approval cards. chatId stays so a visible room still hides it.
+   */
+  personalAgent?: true;
 }
 
 const POLL_MS = 3_000;
@@ -64,7 +72,7 @@ let orgUnread: OneOrgMember[] = [];
 let buildDone: { name: string } | null = null;
 let activeChats: ReadonlySet<string> | null = null;
 const finishedUnseen = new Set<string>();
-const chatInfo = new Map<string, { surface: "one" | "work"; title: string | null }>();
+const chatInfo = new Map<string, { surface: "one" | "work"; title: string | null; personalAgent: boolean }>();
 const chatLookups = new Set<string>();
 let orphansRevealed = false;
 
@@ -84,6 +92,16 @@ function rebuild(): void {
   const pushChat = (key: string, kind: AttentionKind, chatId: string | null, fallbackSurface: AttentionSurface | null = null, href: string | null = null, label: string | null = null) => {
     const known = info(chatId);
     if (chatId && !known) lookupChat(chatId);
+    if (known?.personalAgent) {
+      // A personal agent's room (owner 2026-10-27): its finished run is the personal agent's to report, not a dot of its
+      // own; its tool and browser approvals open in the personal agent's conversation. A question card still opens in the
+      // room, where it is answered.
+      if (kind === "result") return;
+      if (key.startsWith("tool:") || key.startsWith("browser:")) {
+        items.push({ key, kind, chatId, surface: "one", href: PERSONAL_AGENT_HREF, label: known.title ?? label, personalAgent: true });
+        return;
+      }
+    }
     items.push({ key, kind, chatId, surface: known?.surface ?? fallbackSurface, href, label: known?.title ?? label });
   };
   for (const request of tool.queue) pushChat(`tool:${request.id}`, "approval", request.chatId ?? null);
@@ -112,7 +130,8 @@ function rebuild(): void {
   const sameItems = items.length === snapshot.items.length && items.every((item, index) => {
     const previous = snapshot.items[index];
     return item.key === previous.key && item.kind === previous.kind && item.chatId === previous.chatId
-      && item.surface === previous.surface && item.href === previous.href && item.label === previous.label;
+      && item.surface === previous.surface && item.href === previous.href && item.label === previous.label
+      && item.personalAgent === previous.personalAgent;
   });
   // Active-chat broadcasts and approval action phases often leave every dot
   // unchanged. Preserve the snapshot so all routes and sidebar rows stay idle.
@@ -143,7 +162,8 @@ function lookupChat(chatId: string): void {
   const api = ipc();
   if (!api?.chats?.get) return;
   void api.chats.get(chatId).then((chat) => {
-    chatInfo.set(chatId, { surface: chat?.originSurface === "one" ? "one" : "work", title: chat?.title?.trim() || null });
+    chatInfo.set(chatId, { surface: chat?.originSurface === "one" ? "one" : "work", title: chat?.title?.trim() || null,
+      personalAgent: isPersonalAgentRoom(chat) });
     rebuild();
   }).catch(() => {
     // Unknown stays unknown; the next change retries.
@@ -230,6 +250,13 @@ function start(): void {
   subscribeToolApprovals(rebuild);
   subscribeAskUserQueue(rebuild);
   ipcEvents()?.onBrowserApproval?.((request) => mergeBrowser([request], false));
+  // A room that stopped (or started) being the personal agent's is looked up again ("내가 직접 이어가기").
+  ipcEvents()?.onStoreChanged?.((change) => {
+    if (change.entity !== "chat" || !change.id || !chatInfo.has(change.id)) return;
+    chatInfo.delete(change.id);
+    chatLookups.delete(change.id);
+    rebuild();
+  });
   const applyActive = (chatIds: string[]) => {
     const next = new Set(chatIds);
     const visible = toolApprovalsSnapshot().visible;
@@ -306,6 +333,8 @@ export interface AttentionChatEntry {
   results: number;
   /** 갈 대화가 없는 승인(오너가 목록에서 열면 그 자리에서 카드가 뜬다). */
   orphan: boolean;
+  /** A personal agent's room: opening it goes to the personal agent (href), not the room. */
+  personalAgent?: true;
 }
 export interface AttentionView {
   /** 화면에 없는 것 전부. */
@@ -356,6 +385,7 @@ export function useAttention(pathname: string): AttentionView {
       const entry = entries.get(entryKey) ?? {
         chatId: item.chatId, href: item.href, surface: item.surface, label: item.label,
         approvals: 0, results: 0, orphan: !item.chatId && !item.href,
+        ...(item.personalAgent ? { personalAgent: true as const } : {}),
       };
       bump(entry);
       if (!entry.label && item.label) entry.label = item.label;
@@ -395,9 +425,13 @@ export function attentionLabel(counts: { approvals: number; results: number }, l
  * 에서 문서를 통째로 다시 띄운다(실측: QA 에서 대기열이 비었다).
  */
 export async function openAttentionEntry(
-  entry: Pick<AttentionChatEntry, "chatId" | "href" | "orphan">,
+  entry: Pick<AttentionChatEntry, "chatId" | "href" | "orphan" | "personalAgent">,
   push: (href: string) => void = navigate,
 ): Promise<void> {
+  if (entry.personalAgent && entry.href) {
+    push(entry.href);
+    return;
+  }
   if (entry.chatId) {
     push(await pendingConfirmationHref({ chatId: entry.chatId }));
     return;

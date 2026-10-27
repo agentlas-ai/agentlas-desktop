@@ -52,12 +52,21 @@ export interface HostFileObservation {
   preview: string | null;
 }
 
+/**
+ * A name is Unicode letters/digits and `_ @ . -`, joined by `/` or `\`, optionally behind a Windows drive (`C:\`), ending in
+ * an ASCII extension. It must not start inside another name, and the extension may be followed directly by a Korean particle
+ * (`report.docx를`) but not by more name characters. The ASCII-only form it replaces never saw `보고서.docx`, `산출물/a.md`,
+ * `src\app\index.html` or `C:\Users\kim\report.xlsx`, so those Goals' file criteria could never be proven.
+ */
+const NAMED_FILE = /(?<![\p{L}\p{N}_@.\/\\-])((?:[A-Za-z]:[\\/]|\.{0,2}[\\/])?[\p{L}\p{N}_@.-]+(?:[\\/][\p{L}\p{N}_@.-]+)*\.[A-Za-z0-9]{1,10})(?![A-Za-z0-9_@-])/gu;
+
 /** File-like names an AI-written condition mentions: tokens with an extension, optionally with directories. */
 export function namedFiles(texts: readonly string[]): string[] {
   const names = new Set<string>();
   for (const text of texts) {
-    for (const match of String(text).matchAll(/(?:^|[\s"'`(\[<,:])((?:\.{0,2}\/)?[\w@.-]+(?:\/[\w@.-]+)*\.[A-Za-z0-9]{1,10})(?=$|[\s"'`)\]>,;:.!?])/g)) {
-      const name = match[1].replace(/^\.\//, "");
+    for (const match of String(text).matchAll(NAMED_FILE)) {
+      // One separator form: the allowed-root check and the observation's relative path work on `/` on every OS.
+      const name = match[1].replace(/\\/g, "/").replace(/^\.\//, "");
       // An extension is letters (optionally with digits): "v1.2.3", "3.5" are versions and numbers, not files.
       if (!/\.[A-Za-z0-9]*[A-Za-z][A-Za-z0-9]*$/.test(name) || /^https?:/i.test(name) || name.includes("..")) continue;
       names.add(name);

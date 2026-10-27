@@ -385,14 +385,17 @@ export function holdOnePreflightSteer(steerId: string): boolean {
 }
 
 /** Stop closes never-dispatched intake as well as native scheduler entries. Claimed outcomes stay distinct. */
-export function cancelQueuedOnePreflightSteersForChat(chatId: string): void {
+export function cancelQueuedOnePreflightSteersForChat(chatId: string, createdAtOrBefore?: string): void {
   validId(chatId, "chat_id");
+  // A Stop whose withdrawal is written again after a lock (service.ts) must not take an intake that began after the Stop.
+  const bound = createdAtOrBefore !== undefined ? [createdAtOrBefore] : [];
+  const when = createdAtOrBefore !== undefined ? " AND created_at <= ?" : "";
   getDb().transaction(() => {
     const now = new Date().toISOString();
     getDb().prepare("UPDATE one_preflight_steers SET status = 'cancelled', updated_at = ? " +
-      "WHERE chat_id = ? AND status = 'queued'").run(now, chatId);
+      `WHERE chat_id = ? AND status = 'queued'${when}`).run(now, chatId, ...bound);
     getDb().prepare("UPDATE one_preflight_submissions SET state = 'cancelled', updated_at = ? " +
-      "WHERE chat_id = ? AND state IN ('open','reserved','bound')").run(now, chatId);
+      `WHERE chat_id = ? AND state IN ('open','reserved','bound')${when}`).run(now, chatId, ...bound);
   })();
 }
 

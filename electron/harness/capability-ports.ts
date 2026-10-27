@@ -511,7 +511,15 @@ const PORTS: PortDefinition[] = [
       if (!server) {
         try { server = registry.installFromCatalog(ref); } catch { return refused("connector_not_in_catalog", "tool.search lists catalog connectors"); }
       }
-      if (!server.enabled) server = registry.setServerEnabled(server.id, true);
+      if (!server.enabled) {
+        // A local process that no first-party catalog entry vouches for (the Hub bridge parks these off as needs-approval, an import
+        // registers them off) starts only after the owner read its command — the same owner gate as plugin.install, not the model's.
+        if (server.transport === "stdio" && !server.catalogId && !(await import("./plugin-lifecycle")).ownerCall(ctx)) {
+          return { status: "refused", reason: "owner_decision_required", next: "the owner enables it in Tools/MCP settings after reading the command",
+            data: { serverId: server.id, command: server.command ?? null, args: server.args ?? [] } };
+        }
+        server = registry.setServerEnabled(server.id, true);
+      }
       const row = (await connectorRows()).find((item) => item.serverId === server!.id)!;
       const auth = await connectorAuth(row, "use");
       const observations = await import("./readiness-observations");
@@ -585,7 +593,7 @@ const PORTS: PortDefinition[] = [
         },
       });
       await appendReceipt({ operationId: "connector.import", kind, chatId: ctx.chatId, runId: ctx.runId, outcomes: outcomes.map(({ name, status, serverId, grade, vaultSaved, vaultKept, credentialRefs }) => ({ name, status, serverId, grade, vaultSaved, vaultKept, ...(credentialRefs ? { credentialRefs } : {}) })) });
-      return ok({ outcomes, next: "connector.connect turns a registered one on; its tools attach on the next turn" });
+      return ok({ outcomes, next: "connector.connect turns a registered http/sse one on (a local stdio one is enabled by the owner in Tools/MCP settings after reading its command); its tools attach on the next turn" });
     },
   },
   {

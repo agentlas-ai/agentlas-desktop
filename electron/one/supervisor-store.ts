@@ -253,11 +253,12 @@ export class OneSupervisorStore {
   }
   /** Moves every due check-in to its next time (CAS on next_at) and queues one notice per firing. A check-in that was
    * due several times while the app was closed fires once, then resumes its cadence from now. */
-  fireDueCheckins(oneId: string, chatId: string, now = Date.now()): number {
+  fireDueCheckins(oneId: string, chatId: string, now = Date.now(), hold?: readonly string[]): number {
     return this.db.transaction(() => {
       let fired = 0;
       const due = this.db.prepare("SELECT * FROM one_supervisor_checkins WHERE one_id=? AND active=1 AND next_at<=? ORDER BY next_at LIMIT 20").all(oneId,now) as Array<Parameters<OneSupervisorStore["checkinRow"]>[0] & {id:string}>;
       for (const row of due) {
+        if (hold?.includes(row.id)) continue;
         let next: number;
         try { next = nextCheckinAt(JSON.parse(row.cadence_json) as OneCheckinCadence, now); } catch { this.cancelCheckin(oneId,row.id); continue; }
         const moved = this.db.prepare("UPDATE one_supervisor_checkins SET next_at=?,last_fired_at=?,fires=fires+1 WHERE id=? AND next_at=?").run(next,now,row.id,row.next_at).changes;

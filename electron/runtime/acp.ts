@@ -11,6 +11,7 @@ import { registerNativeApprovalChildSignal } from "./native-approval-provenance"
 import { claimAttemptChild, releaseAttemptChild } from "./attempt-children";
 import { beginAdapterEffectRun, type AdapterEffectReport } from "../invocation/adapter-effect-context";
 import { assertScienceRecoveryAcpRequest } from "../science-host/recovery-authority";
+import { ACP_PREFERRED_KINDS, acpDisabledFor } from "./acp-kinds";
 // Generic ACP runner — one client for every runtime that speaks the Agent Client
 // Protocol (PRD 2026-08-15 D-5). Replaces the weak hand-coded drivers of the
 // "B" grade runtimes (cursor: no tool display; grok: tool kind guessed from
@@ -69,7 +70,7 @@ import {
   type RuntimeToolPermissionDecision,
 } from "./tool-approval";
 import { AcpSessionPool, type AcpSessionLease } from "./acp-session-pool";
-import { resolveAgentResidencySource, isResidencyExemptAgent } from "./agent-residency";
+import { resolveAgentResidencySource, isResidencyExemptAgent, isAgentResidencyCapacityRefusal, AGENT_RESIDENCY_CAPACITY_CODE } from "./agent-residency";
 import { classifyDiscovery, type DiscoveryOutcome } from "../../shared/model-discovery";
 import { schemaFallbackInstruction } from "../../shared/runtime-capabilities";
 import { composeDeclaredPrompt } from "./prompt-order";
@@ -124,16 +125,8 @@ export const ACP_AGENTS: Record<string, AcpAgentSpec> = {
   // 버튼이 화면에 새로 생긴다.
 };
 
-/** Runtimes whose pickRunner path prefers ACP over the legacy hand driver. */
-export const ACP_PREFERRED_KINDS = new Set(["cursor", "grok", "kimi"]);
-
-/** `AGENTLAS_DISABLE_ACP=1` (or `=cursor,grok`) restores the legacy drivers. */
-export function acpDisabledFor(kind: string, env: NodeJS.ProcessEnv = process.env): boolean {
-  const raw = (env.AGENTLAS_DISABLE_ACP ?? "").trim().toLowerCase();
-  if (!raw) return false;
-  if (raw === "1" || raw === "true" || raw === "all") return true;
-  return raw.split(/[,\s]+/).includes(kind);
-}
+// ACP_PREFERRED_KINDS and acpDisabledFor live in ./acp-kinds (import-free, so the effect-boundary code reads the same list).
+export { ACP_PREFERRED_KINDS, acpDisabledFor };
 
 /** ACP tool-call kinds → label. Fixed by the protocol; identical across agents. */
 const TOOL_KIND_LABEL: Record<string, string> = {
@@ -284,6 +277,8 @@ export class AcpSessionClient {
   turnActivityObserved = false;
   /** The agent produced something that can be work: any message chunk, a thought with text, a plan or todo list, any tool call or update, any update kind this client does not know. */
   workObserved = false;
+  /** Activity that is not a tool call this client tracks: an update kind it does not know, a vendor notification of work. It keeps a turn from being reported silent (effectReport). */
+  unaccountedActivity = false;
   contextUsed?: number;
   contextSize?: number;
   private readonly tools = new Map<string, ToolState>();
@@ -328,6 +323,7 @@ export class AcpSessionClient {
     this.text = "";
     this.turnActivityObserved = false;
     this.workObserved = false;
+    this.unaccountedActivity = false;
     this.tools.clear();
     this.thinking = false;
   }
@@ -393,6 +389,7 @@ export class AcpSessionClient {
       default:
         // A kind this client does not know may be work; only the kinds above are known not to be.
         this.workObserved = true;
+        this.unaccountedActivity = true;
         break;
     }
   }
@@ -428,12 +425,17 @@ export class AcpSessionClient {
       undefined, undefined, undefined, kind as RuntimeToolKind);
   }
 
-  effectReport(terminal: string | null): AdapterEffectReport {
+  effectReport(terminal: string | null, agentRequests = true): AdapterEffectReport {
     // ACP v1 tool updates are optional reporting, and end_turn does not certify
     // external/background job quiescence. Typed UI completion alone cannot upgrade this.
-    return { schemaVersion: "agentlas.adapter-effect-coverage.v1", protocol: "acp-v1", complete: false, terminal,
+    // The one turn this can attest is a silent one: it ended (end_turn), reported no tool call, asked for no permission or file/terminal
+    // access, and sent no update this client cannot account for, so nothing it reported could reach outside. Without this every text-only
+    // turn of grok/kimi/cursor/copilot ended effects "uncertain" for good and held the owner's follow-up (the verifier's empty-report arm for
+    // "acp" could never pass either). A turn that used any tool stays unattested: only the agent's own optional reporting would prove it quiet.
+    const silent = terminal === "end_turn" && !agentRequests && this.tools.size === 0 && !this.unaccountedActivity;
+    return { schemaVersion: "agentlas.adapter-effect-coverage.v1", protocol: "acp-v1", complete: silent, terminal,
       operationIds: [...this.tools.keys()].sort(), frameKinds: ["session/update"],
-      reasons: ["acp-agent-quiescence-contract-unconfirmed", ...([...this.tools.values()].some(tool => !tool.started || !tool.reported || tool.status === "failed") ? ["tool-incomplete-or-failed"] : [])] };
+      reasons: silent ? [] : ["acp-agent-quiescence-contract-unconfirmed", ...([...this.tools.values()].some(tool => !tool.started || !tool.reported || tool.status === "failed") ? ["tool-incomplete-or-failed"] : [])] };
   }
 
   /**
@@ -1341,6 +1343,7 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
         } else if (method.startsWith("cursor/")) {
           // Cursor's other vendor notifications (task, image generation) are work the agent did.
           client.workObserved = true;
+          client.unaccountedActivity = true;
         }
       },
       onRequest: async (method, params) => {
@@ -1425,19 +1428,29 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
           throw new Error("cli_executable_identity_changed_during_preparation");
         }
         await retireSupersededAcpSessions(pool, executableOwner, poolKey);
-        lease = await pool.acquire(poolKey, {
-          agentId: req.agentId ?? null,
-          nodeId: req.orchestrationAgentId ?? req.agentId ?? null,
-          chatId: req.chatId ?? null,
-          // The same journal key the pool key holds: the registry releases a shared session by it (agent-residency.ts).
-          ...(canonicalContextKey ? { sessionScopeKey: canonicalContextKey } : {}),
-          projectId: req.workProjectId ?? null,
-          runtimeKind: spec.id,
-          source: resolveAgentResidencySource(req.agentId),
-          reaperExempt: isResidencyExemptAgent(req.agentId),
-        }, openSession, retainExecutableOwner);
-        session = lease.session;
-        session.poolKey = poolKey;
+        try {
+          lease = await pool.acquire(poolKey, {
+            agentId: req.agentId ?? null,
+            nodeId: req.orchestrationAgentId ?? req.agentId ?? null,
+            chatId: req.chatId ?? null,
+            // The same journal key the pool key holds: the registry releases a shared session by it (agent-residency.ts).
+            ...(canonicalContextKey ? { sessionScopeKey: canonicalContextKey } : {}),
+            projectId: req.workProjectId ?? null,
+            runtimeKind: spec.id,
+            source: resolveAgentResidencySource(req.agentId),
+            reaperExempt: isResidencyExemptAgent(req.agentId),
+          }, openSession, retainExecutableOwner);
+          session = lease.session;
+          session.poolKey = poolKey;
+        } catch (error) {
+          // No resident seat is free (the budget is full of busy sessions and awake daemon seats): the turn still runs, in a
+          // process of its own that closes with it (closeAcpSession below), like claude-code, codex and antigravity do.
+          // Every other refusal (a busy Work project, an owned awake seat, a failed open) keeps its own handling.
+          if (!isAgentResidencyCapacityRefusal(error) || req.signal?.aborted) throw error;
+          lease = null;
+          events.onStatus(`[residency] one_shot kind=${spec.id} reason=${AGENT_RESIDENCY_CAPACITY_CODE}`);
+          session = await openSession();
+        }
       } else {
         session = await openSession();
       }
@@ -1927,7 +1940,7 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
         invalidateStableTurnContext({ chatId: contextChatId, runtimeKind: sessionKind, sessionId: contextSessionId });
       }
       silence?.stop();
-      effectRun?.complete(client.effectReport(req.signal?.aborted ? "cancelled" : effectTerminal));
+      effectRun?.complete(client.effectReport(req.signal?.aborted ? "cancelled" : effectTerminal, agentRequestObserved));
       req.signal?.removeEventListener("abort", onAbort);
       req.signal?.removeEventListener("abort", endApprovalTurn);
       endApprovalTurn();

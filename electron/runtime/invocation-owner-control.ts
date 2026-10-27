@@ -5,12 +5,79 @@ import { createInvocationOwnerRouter, invocationOwnerUnavailable } from "./invoc
 import type { InvocationRunOwner } from "../store/invocation-owner-core";
 import type { InvocationOwnerBrokerMethod } from "../daemon/invocation-owner-broker";
 import type { InvocationOwnerControlRequest } from "../daemon/invocation-owner-client";
+import type { InvocationSteerResult, McpInvocationRequest } from "../../shared/types";
+import { createHash } from "node:crypto";
+import type { WorkSessionHostClaim } from "../work/session-host";
 
 let remoteDispatch: ((owner: InvocationRunOwner, method: InvocationOwnerBrokerMethod, params: unknown) => Promise<unknown>) | null = null;
 
 export function configureInvocationOwnerTransport(dispatch: NonNullable<typeof remoteDispatch>): void {
   remoteDispatch = dispatch;
 }
+
+/** Next-turn queue transport is distinct from steering text into a running turn.
+ * Its request is constructed by a trusted host dispatcher, never a model tool's
+ * JSON permission fields. The existing inbox owns durable identity/deduplication. */
+export interface InvocationOwnerNextTurn {
+  chatId: string;
+  intentId: string;
+  request: McpInvocationRequest;
+}
+export type InvocationOwnerNextTurnReceipt = InvocationSteerResult & { workSessionHost?: WorkSessionHostClaim };
+export function validateInvocationOwnerNextTurn(value: unknown): InvocationOwnerNextTurn {
+  const input = value as InvocationOwnerNextTurn | null;
+  const request = input?.request;
+  if (!input || typeof input !== "object" || Array.isArray(input)
+    || Object.keys(input).some(key => !["chatId", "intentId", "request"].includes(key))
+    || typeof input.chatId !== "string" || !input.chatId || input.chatId.length > 256
+    || typeof input.intentId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/.test(input.intentId)
+    || !request || typeof request !== "object" || Array.isArray(request)
+    || request.chatId !== input.chatId || request.runId !== undefined
+    || typeof request.userPrompt !== "string" || !request.userPrompt.trim()
+    || request.steeringMode !== "queue"
+    || !["read", "write", "full"].includes(String(request.permissions))) throw invocationOwnerUnavailable();
+  return input;
+}
+export function createInvocationOwnerNextTurnRouter(ports: {
+  owner(chatId: string): InvocationRunOwner | null;
+  localOwnerId(): string;
+  localHost(): WorkSessionHostClaim;
+  local: Pick<typeof invocationService, "steerFromOwner" | "ownerSteerReceipt">;
+  remote(owner: InvocationRunOwner, input: InvocationOwnerNextTurn): Promise<unknown>;
+}) {
+  return async (request: McpInvocationRequest, intentId: string): Promise<InvocationOwnerNextTurnReceipt> => {
+    const input = validateInvocationOwnerNextTurn({ chatId: request.chatId, intentId, request });
+    // Shared-store read succeeds after a lost remote ACK even if the former
+    // owner has since ended. Existing request comparison remains authoritative.
+    const existing = ports.local.ownerSteerReceipt(request.chatId, intentId);
+    const retained = existing ? ports.local.steerFromOwner(request, intentId) : undefined;
+    const owner = ports.owner(request.chatId);
+    if (retained && (!owner || owner.state === "released")) return retained;
+    if (!owner || owner.state === "released" || owner.ownerId === ports.localOwnerId()) {
+      if (retained) return { ...retained, ...(retained.activeRunId === owner!.runId || retained.runId === owner!.runId
+        ? { workSessionHost: ports.localHost() } : {}) };
+      return { ...ports.local.steerFromOwner(request, intentId), workSessionHost: ports.localHost() };
+    }
+    if (owner.chatId !== request.chatId || (owner.state !== "active" && owner.state !== "settling")) throw invocationOwnerUnavailable();
+    const receipt = await ports.remote(owner, input) as InvocationOwnerNextTurnReceipt | null;
+    if (!receipt || receipt.accepted !== true || receipt.chatId !== request.chatId || receipt.intentId !== intentId
+      || receipt.interruptsCurrent !== false || receipt.promptHash !== createHash("sha256").update(request.userPrompt).digest("hex")
+      || !["queued", "draining", "started", "failed", "cancelled", "held"].includes(String(receipt.status))
+      || (!retained && !receipt.workSessionHost)
+      || (receipt.workSessionHost && (receipt.workSessionHost.ownerId !== owner.ownerId || receipt.workSessionHost.ownerKind !== owner.ownerKind
+        || !Number.isSafeInteger(receipt.workSessionHost.pid) || receipt.workSessionHost.pid <= 0))) throw invocationOwnerUnavailable();
+    return receipt;
+  };
+}
+export const steerInvocationOwnerNextTurn = createInvocationOwnerNextTurnRouter({
+  owner: chatId => invocationRunOwners.getActiveOwner(chatId), localOwnerId: () => invocationProcessOwner().ownerId,
+  localHost: () => ({ ...invocationProcessOwner(), pid: process.pid }),
+  local: invocationService,
+  remote: (owner, input) => {
+    if (!remoteDispatch) throw invocationOwnerUnavailable();
+    return remoteDispatch(owner, "invoke.ownerSteer", input);
+  },
+});
 
 /** Shared client ingress; it never reconciles another process's pending row. */
 export const invocationCurrentTurnControl = {
@@ -60,6 +127,12 @@ export function handleInvocationOwnerControl(input: InvocationOwnerControlReques
   const params = input.params as { chatId?: unknown; expectedRunId?: unknown; intentId?: unknown; runId?: unknown } | null;
   if (!params || params.chatId !== owner.chatId || (params.expectedRunId !== undefined && params.expectedRunId !== owner.runId)) {
     throw invocationOwnerUnavailable();
+  }
+  if (input.method === "invoke.ownerSteer") {
+    const next = validateInvocationOwnerNextTurn(input.params);
+    const receipt = invocationService.steerFromOwner(next.request, next.intentId);
+    return { ...receipt, ...(receipt.activeRunId === owner.runId || receipt.runId === owner.runId
+      ? { workSessionHost: { ...invocationProcessOwner(), pid: process.pid } } : {}) } satisfies InvocationOwnerNextTurnReceipt;
   }
   if (input.method === "invoke.currentTurn") return invocationService.currentTurn(owner.chatId);
   if (input.method === "invoke.steerCurrentTurn") return invocationService.steerCurrentTurn(input.params as Parameters<typeof invocationService.steerCurrentTurn>[0]);

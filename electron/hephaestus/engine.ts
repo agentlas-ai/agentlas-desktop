@@ -675,6 +675,9 @@ export async function runHephaestus<T = unknown>(
   opts: HephaestusRunOptions = {},
 ): Promise<HephaestusResult<T>> {
   const ko = (opts.locale ?? currentUiLocale()) === "ko";
+  // A Stop before the child exists has nothing to wait for: settle as cancelled (an already aborted signal never fires again).
+  const cancelled = (): HephaestusResult<T> => ({ ok: false, exitCode: null, json: null, stdout: "", stderr: "", error: ko ? "취소됨" : "Cancelled" });
+  if (opts.signal?.aborted) return cancelled();
   const root = hephaestusRoot();
   if (!root) {
     return {
@@ -686,7 +689,9 @@ export async function runHephaestus<T = unknown>(
       error: ko ? "Hephaestus 엔진을 찾을 수 없습니다(번들 누락)." : "Could not find the Hephaestus engine (bundle missing).",
     };
   }
-  const py = await resolveHephaestusPython();
+  // The first call probes the interpreter, which can take seconds on a cold disk or behind antivirus: a Stop pressed meanwhile ends the probe.
+  const py = await resolveHephaestusPython({ signal: opts.signal });
+  if (opts.signal?.aborted) return cancelled();
   if (!py) {
     return {
       ok: false,
@@ -782,11 +787,9 @@ export async function runHephaestus<T = unknown>(
     }, opts.timeoutMs ?? 900_000);
 
     if (opts.signal) {
-      if (opts.signal.aborted) {
-        onAbort();
-        return;
-      }
-      opts.signal.addEventListener("abort", onAbort, { once: true });
+      // Aborted since the check above: kill the child, but the close/error listeners below still settle the result.
+      if (opts.signal.aborted) onAbort();
+      else opts.signal.addEventListener("abort", onAbort, { once: true });
     }
 
     // The engine prints UTF-8 JSON (ensure_ascii=False). Decoding each pipe

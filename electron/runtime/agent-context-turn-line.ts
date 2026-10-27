@@ -56,6 +56,10 @@ export interface TurnLinePorts {
   processAlive?(pid: number): boolean;
   /** true only when the run of that turn is proven over (released, or a newer lease took the chat). Unknown is false. */
   runEnded?(turn: TurnLineTurn): boolean;
+  /** Native writers stay exclusive while their process and run are live; a missed heartbeat is not termination proof. */
+  requireProcessOrRunEnd?: boolean;
+  /** Physical writer tickets release explicitly after drain. A released invocation alone cannot close a quarantined writer. */
+  requireProcessExit?: boolean;
   /** Recover only this exact recorded lease after independently proving its process is gone. A stale beat is not proof. */
   recoverDeadRun?(holder: { who: TurnLineWho; turn: TurnLineTurn }): void;
   /** What this process's turn of that chat waits on a person for: "approval", "question", or null. */
@@ -135,9 +139,11 @@ export function createTurnLine(ports: TurnLinePorts) {
   function deadHolder(key: string, place: Stored, self: TurnLineWho): boolean {
     if (place.who.ownerId === self.ownerId && place.who.pid === self.pid) return false;
     if (!alive(place.who.pid)) return true;
+    if (ports.requireProcessExit) return false;
     let ended = false;
     try { ended = ports.runEnded?.(place.turn) === true; } catch { ended = false; }
     if (ended) return true;
+    if (ports.requireProcessOrRunEnd) return false;
     const watched = seen.get(key), at = mono();
     if (!watched || watched.beat !== place.beat) { seen.set(key, { beat: place.beat, at }); return false; }
     return at - watched.at >= TURN_LINE_STALE_MS;
@@ -238,8 +244,15 @@ export function createTurnLine(ports: TurnLinePorts) {
       if (released) return;
       released = true;
       if (timer) { clearInterval(timer); timer = null; }
-      try { ports.db().prepare("DELETE FROM meta WHERE key = ?").run(key); } catch (error) {
+      const remove = () => ports.db().prepare("DELETE FROM meta WHERE key = ?").run(key);
+      try { remove(); } catch (error) {
         warn(`a place could not be removed (${error instanceof Error ? error.message : String(error)}); it is skipped once this process ends`);
+        // A strict native ticket cannot be skipped from run-end alone. Retry exact-key cleanup after transient store
+        // failure, without reopening a provider or widening any grant. Process death remains independently measurable.
+        if (ports.requireProcessExit) {
+          const retry = setInterval(() => { try { remove(); clearInterval(retry); } catch { /* retain until cleanup or process exit */ } }, 250);
+          retry.unref?.();
+        }
       }
     }
     return { token, poll, tick, release };

@@ -8,8 +8,8 @@ import { trayIcon } from "./tray-icon";
 
 export interface BackgroundHoldHost {
   locale(): "ko" | "en";
-  /** Running work items, same census as the quit prompt. */
-  activeWork(): Promise<number>;
+  /** Running work items, same census as the quit prompt. null: the service is there but its census could not be read. */
+  activeWork(): Promise<number | null>;
   continuity(): boolean;
   /** Show the product window again (and leave background mode). */
   open(): void;
@@ -65,8 +65,9 @@ export function enterBackgroundHold(host: BackgroundHoldHost, options: { autoQui
   render(0);
   const tick = () => {
     void host.activeWork().then((count) => {
-      render(count);
-      if (hold && backgroundHoldShouldQuit({ autoQuitWhenIdle: hold.autoQuitWhenIdle, continuity: host.continuity() }, count)) {
+      render(count ?? 0);
+      // An unreadable census is not "the work finished": quitting on it stopped the service under a running Science turn.
+      if (count !== null && hold && backgroundHoldShouldQuit({ autoQuitWhenIdle: hold.autoQuitWhenIdle, continuity: host.continuity() }, count)) {
         console.info("[quit] background work finished; quitting");
         host.quitCompletely();
       }

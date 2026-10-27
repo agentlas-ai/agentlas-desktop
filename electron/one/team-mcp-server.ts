@@ -3,6 +3,8 @@ import { ONE_GRAPH_TOOLS, ONE_GRAPH_TOOL_NAMES } from "../../shared/graph-author
 import { ONE_SUPERVISOR_TOOLS, ONE_SUPERVISOR_TOOL_NAMES } from "../../shared/one-supervisor-tools";
 import { ONE_PERSONAL_TOOLS, ONE_PERSONAL_TOOL_NAMES } from '../../shared/one-personal-tools';
 import { ONE_HISTORY_TOOLS, ONE_HISTORY_TOOL_NAMES } from '../../shared/one-history-tools';
+import { WORK_SESSION_TOOL_NAMES } from "../../shared/work-session-tools";
+import { workSessionToolDefinitions } from "../work/session-policy";
 
 // Built-in inline MCP server: One starts and steers a teammate's own session.
 // The child holds no authority — each call is forwarded to Main's loopback
@@ -22,6 +24,7 @@ export const AGENTLAS_ONE_TEAM_TOOL_NAMES = [
   ...ONE_SUPERVISOR_TOOL_NAMES,
   ...ONE_PERSONAL_TOOL_NAMES,
   ...ONE_HISTORY_TOOL_NAMES,
+  ...WORK_SESSION_TOOL_NAMES,
 ] as const;
 
 /** Offered only to a teammate working on a hand-off from a group room (its own capability), never to One. */
@@ -99,6 +102,7 @@ const ro = { readOnlyHint: true, destructiveHint: false, openWorldHint: false };
 const act = { readOnlyHint: false, destructiveHint: false, openWorldHint: false };
 const session = { type: "string", minLength: 1, maxLength: 128, description: "session_id returned by one_team_start_session. It is an internal handle for these tools only: never show it to the owner (the conversation already shows an 'Open session' link)." };
 const tools = [
+  ...${JSON.stringify(workSessionToolDefinitions())},
   ...${JSON.stringify(INLINE_GRAPH_TOOLS)},
   { name: "one_team_list", annotations: ro, description: "List teammates with exact member ids/current work and sessions this conversation started with status.", inputSchema: { type: "object", properties: {}, additionalProperties: false } },
   { name: "one_team_start_session", annotations: act, description: "Assign work to an existing teammate's own session. Write intent, purpose and done criteria. Starts immediately; identical member/brief reuses receipt. By default continue this room's latest teammate session; new_session:true explicitly isolates a new conversation. Completion wakes this conversation: end your turn, do not poll. Tell owner confirmed owner_message; refusal means nothing started. Session ids are internal; UI shows Open session. Recover uncertain handoff via same request or one_team_list.", inputSchema: { type: "object", properties: { member: { type: "string", minLength: 1, maxLength: 200, description: "Teammate name or member id (see one_team_list)." }, brief: { type: "string", minLength: 1, maxLength: 8000 }, new_session: { type: "boolean", description: "Default false: continue this room's latest teammate session. true explicitly starts an isolated new conversation." } }, required: ["member", "brief"], additionalProperties: false } },
@@ -134,6 +138,7 @@ function handle(requestValue) {
   const name = requestValue.params && requestValue.params.name;
   if (allowed && !allowed.includes(name) && !(typeof name === "string" && TOOLCHAIN_TOOL.test(name))) return Promise.resolve(error("This One team tool is not available in this conversation."));
   const args = requestValue.params && requestValue.params.arguments && typeof requestValue.params.arguments === "object" ? requestValue.params.arguments : {};
+  if (typeof name === "string" && ${JSON.stringify(WORK_SESSION_TOOL_NAMES)}.includes(name)) return request("work", { name, input: args });
   if (typeof name === "string" && TOOLCHAIN_TOOL.test(name)) return request("toolchain_tool", { name, input: args });
   if (name === "room_say") return request("room", { text: args.text, to: args.to, replyTo: args.reply_to });
   if (name === "effect_item_check" || name === "effect_item_record") return allowed ? request("effect", { name, input: args }) : Promise.resolve(error("This One team tool is not available in this conversation."));

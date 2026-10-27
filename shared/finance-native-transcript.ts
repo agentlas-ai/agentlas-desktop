@@ -1,7 +1,7 @@
 import { FinanceNativeResultSchema } from './finance-native-ui';
 import { financeQueryScope } from './finance-query-scope';
 import { financePortfolioLineText } from './finance-portfolio';
-import { FINANCE_REPORT_SOURCE_LIMITS, financeReportCompositionSpec, financeReportComputeMetrics, financeReportLocale, financeReportProseBlocks, financeReportSourceBlock, financeReportSourceMore, selectFinanceReportSections, type FinanceReportSourceBlock, type FinanceReportSourceEntry } from './finance-report-presentation';
+import { financeReportCompositionSpec, financeReportComputeMetrics, financeReportLocale, financeReportProseBlocks, financeReportWarnings, selectFinanceReportSections } from './finance-report-presentation';
 import { validateInlineUiPresentationContent, type InlineUiPresentationContent } from './inline-ui-presentation';
 import { INTELLECT_UI_LIMITS, type IntellectUiNode } from './intellect-ui';
 
@@ -12,6 +12,8 @@ const number = (value: number) => new Intl.NumberFormat('en', { maximumFractionD
 /** A table cell on the phone is plain text: links keep their label, emphasis and code marks go. */
 const plainCell = (value: string) => value.replace(/\[([^\]\n]{1,1000})\]\(([^\s)]+)\)/g, '$1').replace(/\*\*([^*\n]+)\*\*|__([^_\n]+)__/g, '$1$2').replace(/`([^`\n]+)`/g, '$1').trim();
 const hidden = new Set(['url', 'source', 'source id', 'source url', 'retrieved at', 'accession', 'document', 'original filing', 'original post']);
+/** A price row on the phone, as on the desktop card, is the price and its currency: the time it was observed is not drawn (owner 2026-10-27). */
+const priceTimes = new Set(['observed at', 'latest trading day']);
 
 /** A literal daily price or Treasury series as the phone's chart: provider observations only, points never imply interpolation across missing days.
  *  `null` is "not a chart"; `empty` is a series with no numeric observation at all. The same series is drawn for a query result and for a saved report section. */
@@ -46,30 +48,6 @@ const clipText = (value: string, limit: number) => {
   return `${line.slice(0, /[\uD800-\uDBFF]/.test(line[end - 1] ?? '') ? end - 1 : end)}…`;
 };
 
-/**
- * A report's sources and as-of dates as one phone card, a card per section: its facts as lines (a fact with several values lists them one per line), a portfolio snapshot as a two-column table (the phone's table
- * widget draws fixed-width columns and shows the first two). It must never cost the report: tables that do not fit the document limits are thinned, then
- * left off, and if the document is still not valid there is no card.
- */
-function sourcesCard(block: FinanceReportSourceBlock): InlineUiPresentationContent | null {
-  const cell = (value: string) => clipText(value, INTELLECT_UI_LIMITS.inputChars);
-  // In a right-to-left report a value after the label is led by a left-to-right mark, so a date or an English sentence keeps its own order (digits after an Arabic letter would otherwise read back to front).
-  const ltr = (value: string) => block.direction === 'rtl' ? `\u200E${value}` : value;
-  const draw = (entries: FinanceReportSourceEntry[], rows: number): InlineUiPresentationContent => native(entries.map((entry): IntellectUiNode => {
-    const table = entry.table, shown = table && rows ? table.rows.slice(0, rows) : [];
-    return { type: 'card', title: clipText(entry.title, INTELLECT_UI_LIMITS.labelChars), children: [
-      ...(entry.facts.length ? [text(entry.facts.map(fact => fact.values.length > 1 ? [`${fact.label}:`, ...fact.values.map(value => `· ${ltr(value)}`)].join('\n') : `${fact.label}: ${ltr(fact.values[0])}`).join('\n'))] : []),
-      ...(table && shown.length ? [{ type: 'table' as const, columns: [cell(`${table.columns[0]} · ${table.columns[1]}`), cell(`${table.columns[2]} · ${table.columns[3]}`)], rows: shown.map(row => [cell(`${row[0]} · ${row[1]}`), cell(`${row[2]} · ${row[3]}`)]) }] : []),
-      ...(table && shown.length && table.hidden + table.rows.length - shown.length ? [text(financeReportSourceMore(table.hidden + table.rows.length - shown.length, block.language))] : []),
-    ] };
-  }).concat(block.hidden ? [text(financeReportSourceMore(block.hidden, block.language))] : []), clipText(block.title, INTELLECT_UI_LIMITS.labelChars));
-  // The tables thin out (all rows, 20, none) until the document is within the phone's limits; the facts of every section stay. The block's own caps keep it under them without tables.
-  for (const rows of [FINANCE_REPORT_SOURCE_LIMITS.rows, 20, 0]) {
-    const checked = validateInlineUiPresentationContent(draw(block.entries, rows));
-    if (checked.ok) return checked.content;
-  }
-  return null;
-}
 /** Read-only display projection. No raw operation result, provenance dump or executable action enters the document. */
 export function financeNativeTranscriptContents(value: unknown, options: { state?: string } = {}): readonly InlineUiPresentationContent[] {
   const checked = FinanceNativeResultSchema.safeParse(value);
@@ -91,7 +69,7 @@ export function financeNativeTranscriptContents(value: unknown, options: { state
     if (built) blocks.push({ kind: 'chart', spec: built.spec });
     if (!blocks.length) {
       if (result.rows.length > 50) return unavailable();
-      const visible = columns.map((name, index) => ({ name, index })).filter(column => !hidden.has(column.name.toLowerCase()));
+      const visible = columns.map((name, index) => ({ name, index })).filter(column => !hidden.has(column.name.toLowerCase()) && !(metric === 'price' && priceTimes.has(column.name.toLowerCase())));
       if (!visible.length || visible.length > 8) return unavailable();
       blocks.push(native(result.rows.map(row => ({ type: 'card', children: [text(visible.map(column => `${column.name}: ${row[column.index] === null ? '—' : typeof row[column.index] === 'number' ? number(row[column.index] as number) : row[column.index] ?? '—'}`).join('\n'))] })), clipText(financeQueryScope(view.request), INTELLECT_UI_LIMITS.labelChars)));
     }
@@ -124,10 +102,11 @@ export function financeNativeTranscriptContents(value: unknown, options: { state
       if (!chart && !metrics.length && section.projection?.rows.length && section.presentation !== 'narrative') children.unshift(text('This chart is not supported in this view.'));
       if (children.length) blocks.push(native(children, section.title));
     }
-    // The provider records and as-of dates travel as one more card after the report; with nothing else to show, or no room left, the answer is as it was.
-    const sources = blocks.length && blocks.length < 16 ? financeReportSourceBlock(view.report, view.sources, locale) : null;
-    const card = sources && sourcesCard(sources);
-    if (card) blocks.push(card);
+    // A warning the host itself raised (a value left out, a price that did not match, currencies never added) travels as one more card; no source or as-of line does.
+    // It never costs the report: with nothing else to show, no room left or a card the phone's limits refuse, the answer is as it was.
+    const warnings = blocks.length && blocks.length < 16 ? financeReportWarnings(view.report, locale) : [];
+    const card = warnings.length ? validateInlineUiPresentationContent(native(warnings.map(line => text(clipText(line, INTELLECT_UI_LIMITS.inputChars))))) : null;
+    if (card?.ok) blocks.push(card.content);
   } else blocks.push(native([text('A complete priced currency group is not available for an allocation chart.')]));
   if (!blocks.length || blocks.length > 16) return unavailable();
   const validated = blocks.map(block => validateInlineUiPresentationContent(block));

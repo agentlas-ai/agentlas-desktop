@@ -95,6 +95,9 @@ function parseArgs(args: unknown): unknown {
 
 const COMPOSE_LEAVES = new Set(["browser_type", "browser_fill", "browser_fill_form", "browser_file_upload"]);
 
+// `context_*` is the project-local Context Map (locate/slice/impact/verify): reads of the workspace, no outside effect.
+const MCP_READ_VERB = /^(?:get|describe|show|query|lookup|count|inspect|check|status|whoami|ping|preview|validate|diff|context)(?:[_\-.]|$)/;
+
 function isBrowserTool(name: string, leaf: string): boolean {
   return leaf.startsWith("browser_") || classifyTool(leaf || name) === "browser";
 }
@@ -203,6 +206,30 @@ export function summarizeOutwardEffects(calls: OutwardToolCall[], ctx: OutwardEf
   }
   for (let i = 0; i < Math.max(0, Math.min(500, ctx.verifiedSocialEngagements ?? 0)); i += 1) count("social_engage");
   return { outwardEffects, kinds: [...kinds], localWork };
+}
+
+/**
+ * Replay guard, not a progress signal: did these calls commit something OUTSIDE the unit's own workspace, so that running
+ * the unit a second time would do it twice (a mail sent, a PR opened, a page created, a declared send/publish click, a
+ * curl POST)? summarizeOutwardEffects counts any project-file write as a deliverable, but the unit's own file edits and
+ * shell are exactly what a repair redoes, so they never count here. An external MCP write whose verb reads like a file
+ * write (`create_pull_request`, `create_page`) does. A call that errored still counts — the effect may have landed before
+ * the failure was reported.
+ */
+export function committedOutsideWorkspace(calls: readonly { name: string; args?: unknown }[]): boolean {
+  const rest: OutwardToolCall[] = [];
+  for (const call of calls) {
+    const name = String(call.name ?? "").trim();
+    if (!name || isHostPreflightTool(name) || isHostSupervisorNotice(name)) continue;
+    const leaf = outwardToolLeaf(name);
+    const server = toolServer(name);
+    // External MCP getters (`get_page`, `describe_table`) are reads the shared taxonomy has no verb for.
+    if (server && MCP_READ_VERB.test(leaf)) continue;
+    const agentlasLocal = server === AGENTLAS_SYSTEM_TIME_CATALOG_ID || server === AGENTLAS_UI_CATALOG_ID || server === AGENTLAS_TURN_CATALOG_ID;
+    if (server && !agentlasLocal && !isBrowserTool(name, leaf) && classifyTool(leaf || name) === "file") return true;
+    rest.push({ name, args: call.args, failed: false });
+  }
+  return summarizeOutwardEffects(rest, { scratchRoots: [] }).kinds.some((kind) => kind !== "deliverable_file");
 }
 
 const LOOPBACK_HOST = /^(?:localhost|127(?:\.\d{1,3}){3}|0\.0\.0\.0|\[?::1\]?|[^.]+\.local|[^.]+\.localhost|host\.docker\.internal)$/i;
