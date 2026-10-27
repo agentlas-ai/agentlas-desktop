@@ -121,6 +121,38 @@ const TS_DIAGNOSTIC = /^((?:electron|shared|renderer)\/[A-Za-z0-9._@\/-]{1,120}\
 const ERROR_LINE = /^((?:[A-Za-z]*Error|FATAL ERROR|fatal): [\x20-\x7e]{0,200})$/;
 const ABSOLUTE_PATH = /(^|[\s"'(=:])((?:\/[A-Za-z0-9._@+-]+){2,})/g;
 const scrub = text => text.replace(ABSOLUTE_PATH, "$1<path>").slice(0, 200);
+// The owned release-gate runner prints one JSON line per gate. Only counts and generic snake_case failure codes cross
+// the public log boundary: never a gate name, a path, a stack frame or any other text of the private verifiers.
+const GATE_CODE = /^[a-z][a-z0-9_]{2,80}$/;
+function collectCodes(value, codes, depth = 0) {
+  if (depth > 6 || !value || typeof value !== "object") return;
+  if (typeof value.code === "string" && GATE_CODE.test(value.code)) codes.add(value.code);
+  for (const inner of Object.values(value)) if (inner && typeof inner === "object") collectCodes(inner, codes, depth + 1);
+}
+function ownedGateHints(text) {
+  let gates = 0;
+  let passed = 0;
+  let firstFailed = null;
+  const codes = new Set();
+  for (const line of text.split(/\r?\n/)) {
+    if (GATE_CODE.test(line)) { codes.add(line); continue; }
+    if (line.length > 20000 || line[0] !== "{" || line[line.length - 1] !== "}") continue;
+    let value;
+    try { value = JSON.parse(line); } catch { continue; }
+    if (typeof value?.releaseGate === "string") {
+      gates += 1;
+      if (value.result === "passed") passed += 1;
+      else if (value.result === "failed" && firstFailed === null) firstFailed = gates;
+    }
+    collectCodes(value, codes);
+  }
+  if (!gates && !codes.size) return "";
+  const parts = [];
+  if (gates) parts.push(`gates_seen=${gates} gates_passed=${passed}`);
+  if (firstFailed !== null) parts.push(`first_failed_index=${firstFailed}`);
+  if (codes.size) parts.push(`codes=${[...codes].slice(0, 6).join(",")}`);
+  return parts.join(" ");
+}
 function failureHints(file) {
   let text;
   try { text = fs.readFileSync(file, "utf8"); } catch { return ""; }
@@ -140,12 +172,33 @@ function failureHints(file) {
     const e = ERROR_LINE.exec(line);
     if (e && !firstError) firstError = e[1];
   }
+  const owned = ownedGateHints(text);
   const parts = [];
   if (script) parts.push(`script=${script}`);
   if (markers.length) parts.push(`markers=${markers.slice(-6).map(scrub).join(" | ")}`);
   if (diagnostics.length) parts.push(`ts=${diagnostics.map(scrub).join(" | ")}`);
   if (firstError) parts.push(`error=${scrub(firstError)}`);
+  if (owned) parts.push(owned);
   return parts.join(" ");
+}
+
+// The owned release-gate runner (MAC_PRIVATE_CONTRACTS) builds its root under os.tmpdir() and the engine looks for the
+// nearest ".agentlas" folder above its working directory. A ".agentlas" left in any parent of the runner's temp folder
+// (for example the account home that contains it) is then taken for the project and read from outside the owned root,
+// which the runner rejects (core_python_path_outside_owner). Give this one stage a fresh temp folder directly under
+// /private/tmp, whose parents can never hold project metadata, and remove it afterwards.
+function cleanStageTemp(stage) {
+  if (stage !== "MAC_PRIVATE_CONTRACTS" || process.platform !== "darwin") return null;
+  const dir = fs.realpathSync.native(fs.mkdtempSync("/private/tmp/agentlas-owned-gates-"));
+  const marker = `${dir}.owner.json`;
+  fs.writeFileSync(marker, JSON.stringify({ owner: "run-private-release-gate", stage, pid: process.pid, created: new Date().toISOString() }), { mode: 0o600 });
+  return { dir, marker };
+}
+function removeStageTemp(temp) {
+  if (!temp) return true;
+  try { fs.rmSync(temp.dir, { recursive: true, force: true }); } catch {}
+  try { fs.rmSync(temp.marker, { force: true }); } catch {}
+  return !fs.existsSync(temp.dir) && !fs.existsSync(temp.marker);
 }
 
 async function run(stage, command, args) {
@@ -153,6 +206,7 @@ async function run(stage, command, args) {
   try { fd = privateLog(); }
   catch { process.stdout.write(`RELEASE_STAGE_LOG_UNAVAILABLE ${stage} exit=73\n`); process.exitCode = 73; return; }
   let child;
+  let stageTemp = null;
   let spawnError = null;
   let requestedSignal = null;
   let cancellation = null;
@@ -174,7 +228,9 @@ async function run(stage, command, args) {
   }]));
   try {
     const selected = portableCommand(command, args);
-    child = spawn(selected.command, selected.args, { env: process.env, stdio: ["inherit", fd, fd], windowsHide: true, detached: process.platform !== "win32" });
+    stageTemp = cleanStageTemp(stage);
+    const childEnv = stageTemp ? { ...process.env, TMPDIR: stageTemp.dir } : process.env;
+    child = spawn(selected.command, selected.args, { env: childEnv, stdio: ["inherit", fd, fd], windowsHide: true, detached: process.platform !== "win32" });
     for (const [signal, handler] of handlers) process.on(signal, handler);
     const closed = new Promise(resolve => {
       child.once("error", error => { spawnError = error; });
@@ -211,6 +267,10 @@ async function run(stage, command, args) {
   } finally {
     for (const [signal, handler] of handlers) process.off(signal, handler);
     if (fd !== undefined) fs.closeSync(fd);
+    if (!removeStageTemp(stageTemp)) {
+      process.stdout.write(`RELEASE_STAGE_CLEANUP_FAILED ${stage} exit=1\n`);
+      if (!process.exitCode) process.exitCode = 1;
+    }
   }
 }
 
