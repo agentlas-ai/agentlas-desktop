@@ -112,24 +112,39 @@ async function stopProcessTree(child, signal, fd) {
   return await waitUntilGone(group, 500);
 }
 
-// On failure, only two kinds of typed facts cross the public log boundary: the npm script that was running and the
-// last progress marker printed by a public build script. Private verifier output never matches these patterns.
-const PUBLIC_MARKER = /^(\[(?:release-preflight|science-release-catalog|copy-builtin-plugins|sandbox-preloads|computer-use)\] [\x20-\x7e]{0,200})$/;
+// On failure, only typed facts from public build scripts cross the public log boundary: the npm script that was
+// running, the progress markers printed by public build scripts, and (inside the build:electron phase only, where no
+// private verifier runs) the first TypeScript diagnostics for product source files and the first error line.
+const PUBLIC_MARKER = /^((?:\[(?:release-preflight|science-release-catalog|copy-builtin-plugins|sandbox-preloads|computer-use)\] |One Briefing contract verified|app screen routes verified)[\x20-\x7e]{0,160})$/;
 const NPM_SCRIPT = /^> agentlas-desktop@\S+ ([A-Za-z0-9:_-]{1,64})$/;
+const TS_DIAGNOSTIC = /^((?:electron|shared|renderer)\/[A-Za-z0-9._@\/-]{1,120}\(\d+,\d+\): error TS\d+: [\x20-\x7e]{0,200})$/;
+const ERROR_LINE = /^((?:[A-Za-z]*Error|fatal): [\x20-\x7e]{0,200})$/;
+const ABSOLUTE_PATH = /(^|[\s"'(=:])((?:\/[A-Za-z0-9._@+-]+){2,})/g;
+const scrub = text => text.replace(ABSOLUTE_PATH, "$1<path>").slice(0, 200);
 function failureHints(file) {
   let text;
   try { text = fs.readFileSync(file, "utf8"); } catch { return ""; }
   let script = null;
-  let marker = null;
+  let inBuild = false;
+  const markers = [];
+  const diagnostics = [];
+  let firstError = null;
   for (const line of text.split(/\r?\n/)) {
     const s = NPM_SCRIPT.exec(line);
-    if (s) script = s[1];
+    if (s) { script = s[1]; inBuild = s[1] === "build:electron"; continue; }
     const m = PUBLIC_MARKER.exec(line);
-    if (m) marker = m[1];
+    if (m) { markers.push(m[1]); continue; }
+    if (!inBuild) continue;
+    const d = TS_DIAGNOSTIC.exec(line);
+    if (d) { if (diagnostics.length < 3) diagnostics.push(d[1]); continue; }
+    const e = ERROR_LINE.exec(line);
+    if (e && !firstError) firstError = e[1];
   }
   const parts = [];
   if (script) parts.push(`script=${script}`);
-  if (marker) parts.push(`marker=${marker.replace(/(?:\/[A-Za-z0-9._@+-]+){2,}/g, "<path>").slice(0, 160)}`);
+  if (markers.length) parts.push(`markers=${markers.slice(-6).map(scrub).join(" | ")}`);
+  if (diagnostics.length) parts.push(`ts=${diagnostics.map(scrub).join(" | ")}`);
+  if (firstError) parts.push(`error=${scrub(firstError)}`);
   return parts.join(" ");
 }
 
