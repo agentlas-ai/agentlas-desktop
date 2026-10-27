@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { isDirectMenuCommandPath, isClosingPath, isRiskyMenuPath, isSensitiveApp, labelOpensDialog, opensFilePicker } from "./explore-policy";
 import { createNodeHost } from "./host";
 import type { PlatformProvider } from "./provider";
 import {
@@ -52,16 +53,41 @@ export function levelOf(usable: number, anyCapability: boolean): ReachLevel {
 // item must still be there and switched on, steps-runner.ts) - as usable as a person pressing it. What it does is NOT known (effect "unknown"),
 // so it needs the run's write permission; items whose names say they delete, send, pay, sign out, quit or close are never given a body
 // (explore-policy.ts isDirectMenuCommandPath). Only a menu command with a body counts; one that failed (degraded) does not.
-export function isDirectMenuCommand(capability: Capability): boolean {
-  return capability.tier === "structure" && capability.traits?.includes(MENU_COMMAND_TRAIT) === true && capability.body?.kind === "steps" && capability.status !== "degraded";
+export interface CapabilityPolicyContext { sensors?: boolean; name?: string; bundleId?: string; platform?: string }
+
+export function isDirectMenuCommand(capability: Capability, context: CapabilityPolicyContext = {}): boolean {
+  if (!(capability.tier === "structure" && capability.traits?.includes(MENU_COMMAND_TRAIT) === true && capability.body?.kind === "steps" && capability.status !== "degraded")) return false;
+  // The CURRENT rule is asked again about what was stored: a body granted by an older, looser rule does not outlive the rule (independent review 7, V1).
+  const path = menuPathOf(capability);
+  return capability.body?.kind === "steps" && capability.body.steps.length === 1 && path !== null && isDirectMenuCommandPath(path, context);
+}
+
+// The menu path a stored menu command presses (its one `invoke_menu` step), or null when the body is not that shape.
+export function menuPathOf(capability: Capability): string[] | null {
+  const step = capability.body?.kind === "steps" ? capability.body.steps[0] : undefined;
+  const path = step?.tool === "invoke_menu" ? step.args.path : undefined;
+  return Array.isArray(path) && path.length > 0 && path.every((segment) => typeof segment === "string") ? (path as string[]) : null;
+}
+
+// A verified dialog from an older explorer must still obey today's exploration policy. Check every menu step, so a malformed body cannot hide a second opener.
+export function isCurrentDialogCapability(capability: Capability, context: CapabilityPolicyContext = {}): boolean {
+  if (capability.tier !== "explored" || capability.body?.kind !== "steps" || !menuPathOf(capability)) return false;
+  if (isSensitiveApp({ name: context.name ?? "", bundleId: context.bundleId })) return false;
+  return capability.body.steps.filter((step) => step.tool === "invoke_menu").every((step) => {
+    const path = step.args.path;
+    return Array.isArray(path) && path.length > 0 && path.every((part) => typeof part === "string")
+      && labelOpensDialog(path[path.length - 1]) && !isRiskyMenuPath(path) && !isClosingPath(path)
+      && !(context.platform !== undefined && context.platform !== "darwin" && opensFilePicker(path));
+  });
 }
 
 // What an agent can rely on: stated by the source (published entries carry no status), or proven by an exercise, or a menu command the live
 // menu confirms at every call. A capability that was only seen (candidate) or has since failed (degraded) does not count.
-export function isUsable(capability: Capability): boolean {
+export function isUsable(capability: Capability, context: CapabilityPolicyContext = {}): boolean {
   if (capability.generic) return false;
   if (capability.status === "degraded") return false;
-  if (isDirectMenuCommand(capability)) return true;
+  if (capability.tier === "structure") return isDirectMenuCommand(capability, context);
+  if (capability.tier === "explored" && !isCurrentDialogCapability(capability, context)) return false;
   if (capability.tier === "published" && capability.status === undefined) return true;
   return capability.status === "verified" && capability.verification !== undefined;
 }
@@ -85,7 +111,7 @@ function summarize(app: AppCandidate, harvest: HarvestRecord[], capabilities: Ca
   const byTier: Partial<Record<CapabilityTier, number>> = {};
   for (const capability of capabilities) byTier[capability.tier] = (byTier[capability.tier] ?? 0) + 1;
   const specific = capabilities.filter((item) => !item.generic).length;
-  const usable = capabilities.filter(isUsable).length;
+  const usable = capabilities.filter((capability) => isUsable(capability, { sensors: app.signals.some((signal) => signal.startsWith("sensor:")), name: app.name, bundleId: app.key.startsWith("bundle:") ? app.key.slice(7).split("@")[0] : app.key, platform: app.platform })).length;
   return {
     key: app.key,
     platform: app.platform,

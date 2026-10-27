@@ -6833,6 +6833,12 @@ export interface InvocationRunReceipt {
    * run has no idempotency key to collapse a duplicate onto.
    */
   executionPermission?: "read" | "write" | "full";
+  /**
+   * Whether the run started from an owner message (its ledger has `origin_user_message`) or is a host-written turn
+   * (teammate report, room follow-up, Goal continuation, recovery). An owner's answer to a host-written turn's question
+   * runs with the owner's own authority, not that turn's (shared/invocation-permission.ts ownerAnswerOnePermission).
+   */
+  ownerAuthored?: boolean;
   /** Held directions require explicit review; Main never auto-replays them. */
   steeringRecovery?: InvocationSteerRecovery[];
   /** A deliberate direction change interrupted this run; it is not a failed run. */

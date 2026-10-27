@@ -1,5 +1,7 @@
+import { createHash } from "node:crypto";
 import { workingTaskRootChatId, workingSessionScope } from "../runtime/session-scope";
 import { getDb } from "./db";
+import { getSeatForChat } from "./seats";
 import { emitTaskStoreChange } from "./change-bus";
 import { tryRecordOneDomainEvent } from "../one/domain-events";
 import { ownerDirectionAfterInvocationRun } from "./run-events";
@@ -238,6 +240,7 @@ function toParticipant(row: ParticipantRow): CanonicalTaskParticipant {
 function participantNeedsUpsert(
   taskId: string,
   input: { agentId: string | null; agentSlug: string; role: string | null; seenAt: string },
+  includeActivity = true,
 ): boolean {
   if (!tableExists("task_agent_participants")) return false;
   const row = getDb()
@@ -251,7 +254,7 @@ function participantNeedsUpsert(
   return (
     (input.agentId !== null && input.agentId !== row.agent_id) ||
     (input.role !== null && input.role !== row.role) ||
-    input.seenAt > row.last_seen_at
+    (includeActivity && input.seenAt > row.last_seen_at)
   );
 }
 
@@ -390,6 +393,52 @@ export function existingCanonicalTaskIdsForChats(chatIds: readonly string[]): Ma
   return ids;
 }
 
+/** Version 1 contains execution scope only. Activity timestamps, view state,
+ * labels and transcript text are excluded: an approved prompt being persisted
+ * is not a new brief. Goal revisions contain the explicit owner brief. */
+function taskChatExecutionScope(rootChatId: string): string {
+  const db = getDb();
+  const columns = new Set((db.prepare("PRAGMA table_info(chats)").all() as {name:string}[]).map(row => row.name));
+  const executionColumns = ["agent_id", "firm_id", "project_id", "kind", "parent_chat_id", "origin_surface", "working_folder",
+    "goal_id", "runtime_selection_json", "continuous_mode", "swarm_mode", "hired_agents", "seat_id", "participants_json"]
+    .filter(column => columns.has(column));
+  const chat = db.prepare(`SELECT ${executionColumns.join(",")} FROM chats WHERE id=?`).get(rootChatId) as Record<string,unknown>;
+  if (typeof chat.participants_json === "string") {
+    try {
+      const participants = JSON.parse(chat.participants_json) as unknown;
+      if (Array.isArray(participants)) chat.participants_json = participants.map(item => item && typeof item === "object"
+        ? {slot:item.slot,agentId:item.agentId} : item);
+    } catch { /* Corrupt scope remains distinct and cannot acquire approval. */ }
+  }
+  if (typeof chat.runtime_selection_json === "string") {
+    try {
+      const {label:_label,...selection} = JSON.parse(chat.runtime_selection_json) as Record<string,unknown>;
+      chat.runtime_selection_json = selection;
+    } catch { /* Keep malformed runtime metadata distinct. */ }
+  }
+  const goalId = typeof chat.goal_id === "string" ? chat.goal_id : null;
+  const contract = goalId && tableExists("chat_goal_contracts") ? db.prepare(
+    "SELECT goal_id,chat_id,objective,acceptance_criteria_json,status FROM chat_goal_contracts WHERE goal_id=?",
+  ).get(goalId) ?? null : null;
+  const revision = goalId && tableExists("chat_goal_revisions") ? db.prepare(
+    "SELECT revision,payload_json FROM chat_goal_revisions WHERE goal_id=? ORDER BY revision DESC LIMIT 1",
+  ).get(goalId) ?? null : null;
+  const seat = tableExists("one_seats") ? getSeatForChat(rootChatId) : null;
+  const roster = seat ? {id:seat.id,kind:seat.kind,projectId:seat.projectId,archivedAt:seat.archivedAt,dissolvedAt:seat.dissolvedAt,
+    occupants:seat.occupants.map(({slot,agentId}) => ({slot,agentId}))} : null;
+  return createHash("sha256").update(JSON.stringify({schemaVersion:1,chat,contract,revision,roster})).digest("hex");
+}
+const taskExecutionScopeDatabases = new WeakSet<ReturnType<typeof getDb>>();
+function taskExecutionScopeRecord(taskId: string): {digest:string}|undefined {
+  // Shared additive Main store; no wire/schema-version replacement. Existing
+  // tasks without a baseline advance once rather than assume unchanged scope.
+  const db = getDb();
+  if (!taskExecutionScopeDatabases.has(db)) { db.exec(`CREATE TABLE IF NOT EXISTS task_chat_execution_scopes (
+    task_id TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
+    schema_version INTEGER NOT NULL CHECK(schema_version=1), digest TEXT NOT NULL)`); taskExecutionScopeDatabases.add(db); }
+  return db.prepare("SELECT digest FROM task_chat_execution_scopes WHERE task_id=?").get(taskId) as {digest:string}|undefined;
+}
+
 /**
  * Materialize the durable Task for a user chat, or attach a division chat to
  * its root Task. This is deliberately idempotent so chat creation, projection,
@@ -428,12 +477,16 @@ export function ensureCanonicalTaskForChat(chatId: string): CanonicalTask | null
     .get(taskId) as TaskRow | undefined;
   const status = reconciledTaskStatus(root, prior);
   const coreChanged = taskCoreNeedsReconcile(root, prior);
+  const scopeDigest = taskChatExecutionScope(root.id);
+  const previousScope = taskExecutionScopeRecord(taskId);
+  const scopeChanged = Boolean(prior) && previousScope?.digest !== scopeDigest;
+  const participantIdentityChanged = Boolean(prior) && desiredParticipants.some(input => participantNeedsUpsert(taskId,input,false));
   const participantsChanged =
     Boolean(prior) && desiredParticipants.some((input) => participantNeedsUpsert(taskId, input));
-  if (prior && !coreChanged && !participantsChanged) return toTask(prior);
+  if (prior && !coreChanged && !participantsChanged && !scopeChanged) return toTask(prior);
   const reconcile = db.transaction(() => {
     const updatedAt = prior
-      ? monotonicUpdatedAt(prior.updated_at, rootUpdatedAt, current.updated_at)
+      ? !coreChanged && !participantIdentityChanged && !scopeChanged ? prior.updated_at : monotonicUpdatedAt(prior.updated_at, rootUpdatedAt, current.updated_at)
       : monotonicUpdatedAt(null, rootUpdatedAt, current.updated_at);
     db.prepare(
       `INSERT INTO tasks
@@ -460,8 +513,11 @@ export function ensureCanonicalTaskForChat(chatId: string): CanonicalTask | null
     );
 
     for (const input of desiredParticipants) upsertParticipant(taskId, input);
+    getDb().prepare("INSERT INTO task_chat_execution_scopes VALUES (?,1,?) ON CONFLICT(task_id) DO UPDATE SET digest=excluded.digest WHERE digest<>excluded.digest")
+      .run(taskId,scopeDigest);
   });
   reconcile();
+  if (participantsChanged || scopeChanged) emitTaskStoreChange(db, taskId);
   const row = db.prepare("SELECT * FROM tasks WHERE id = ? LIMIT 1").get(taskId) as
     | TaskRow
     | undefined;

@@ -209,6 +209,42 @@ export function assertOnePreflightSubmissionReady(
   }
 }
 
+/** Main's persisted send owns this exact parent. Preserve its follow-ups while taking over a proven unstarted preparation. */
+function assertQueuedPreflightIdentity(request: McpInvocationRequest): SubmissionRow | null {
+  const submissionId = request.preflightSubmissionId;
+  if (!submissionId) return null;
+  const old = submissionRow(submissionId);
+  if (request.oneMode !== true || !old || old.chat_id !== request.chatId || old.prompt_digest !== hash(request.userPrompt)
+    || old.runtime_digest !== hash(canonicalOnePreflightRuntime(request.runtimeSelection))) throw new Error("one_preflight_submission_identity_conflict");
+  return old;
+}
+
+/** The durable queue, rather than a renderer, now owns the unstarted parent; free the chat's preparation slot. */
+export function holdQueuedOnePreflightSubmission(request: McpInvocationRequest): void {
+  const old = assertQueuedPreflightIdentity(request);
+  if (old) holdOnePreflightSubmission(old.submission_id);
+}
+
+/** Main's persisted send owns this exact parent. Preserve its follow-ups while taking over a proven unstarted preparation. */
+export function resumeQueuedOnePreflightSubmission(request: McpInvocationRequest, ownerProcessEpoch: string): void {
+  getDb().transaction(() => {
+    const old = assertQueuedPreflightIdentity(request);
+    if (!old) return;
+    const submissionId = old.submission_id;
+    // An open preparation never reserved a parent; a reserved one needs the exact admission's no-start proof.
+    if ((old.state === "open" && old.owner_process_epoch !== ownerProcessEpoch)
+      || (old.state === "reserved" && old.parent_run_id && getInvocationAdmission(old.parent_run_id)?.status === "rejected")) {
+      holdOnePreflightSubmission(submissionId);
+    }
+    const held = submissionRow(submissionId)?.state === "held";
+    beginOnePreflightSubmission({ submissionId, chatId: request.chatId, userPrompt: request.userPrompt,
+      runtimeSelection: request.runtimeSelection, resume: true }, ownerProcessEpoch);
+    assertOnePreflightSubmissionReady(submissionId, request, ownerProcessEpoch);
+    if (held) getDb().prepare("UPDATE one_preflight_steers SET status = 'queued', updated_at = ? WHERE submission_id = ? AND status = 'held'")
+      .run(new Date().toISOString(), submissionId);
+  }).immediate();
+}
+
 /** Record the exact pending parent before start() can emit any external effect. */
 export function reserveOnePreflightParent(
   submissionId: string, parentRunId: string, request: McpInvocationRequest, ownerProcessEpoch: string,

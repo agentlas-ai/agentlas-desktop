@@ -22,12 +22,13 @@ import { FILE_OBSERVATION_MAX_BYTES, observeWorkspaceFile, type FileObservation 
 import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { spawn, spawnSync } from "node:child_process";
 import { inflateSync } from "node:zlib";
 import { classifyLaunchEscape, launchEscapeDenialReason } from "./write-sandbox-launch-guard";
 import { PERMISSION_ESCALATION_MARKER } from "./permission-escalation";
 import type { RuntimeToolKind } from "./runtime-tool-kind";
 import { closestNames, didYouMean, unknownArgumentMessage } from "./did-you-mean";
+import { executeOwnedShell, type OwnedShellLaunch } from "./owned-shell-process";
+import { sandboxChildEnvironment } from "./sandbox-child-environment";
 
 export type ToolPermission = "read" | "write" | "full";
 
@@ -45,7 +46,7 @@ export interface BuiltinToolContext {
    * commands. Injected only where such a boundary exists (macOS Seatbelt, Linux bubblewrap); without it, `bash` stays a
    * full-permission tool.
    */
-  confineShell?: (command: string) => { file: string; args: string[] };
+  confineShell?: (command: string) => OwnedShellLaunch;
   /** Main-owned native browser download; no caller-selected path or profile. */
   historyWork?: (name:string,args:Record<string,unknown>)=>Promise<unknown>;
   browserDownload?: (url: string) => Promise<{id:string;fileName:string;bytes:number;savePath:string}>;
@@ -847,68 +848,20 @@ export const BUILTIN_TOOLS: readonly BuiltinTool[] = [
       if (confined && !ctx.confineShell) throw new Error(`permission denied: 'bash' requires 'full' but this run has '${ctx.permission}'.`);
       const escape = confined ? classifyLaunchEscape(command) : null;
       if (escape) throw new Error(launchEscapeDenialReason(escape, PERMISSION_ESCALATION_MARKER));
-      const launch = confined ? ctx.confineShell!(command) : hostShellLaunch(command);
+      if (ctx.signal?.aborted) throw new Error("cancelled before shell start");
+      const launch: OwnedShellLaunch = confined ? ctx.confineShell!(command) : hostShellLaunch(command);
       // ★비동기 spawn 을 쓴다. 터미널 사본은 spawnSync 였는데, 데스크탑에서 그러면
       // 명령이 끝날 때까지 **메인 프로세스 전체가 멈춘다**(UI·다른 실행·IPC 포함).
       // 최대 10분짜리 도구가 앱을 10분 얼리는 것은 도구가 아니라 결함이다.
-      return await new Promise<string>((resolve, reject) => {
-        const child = spawn(launch.file, launch.args, {
-          cwd: ctx.cwd,
-          env: ctx.env ?? process.env,
-          // Output is piped back to the model; on Windows a GUI parent would otherwise open a console window per command.
-          windowsHide: true,
-        });
-        let out = "";
-        let err = "";
-        let bytes = 0;
-        const MAX_BYTES = 8 * 1024 * 1024;
-        let overflowed = false;
-        let settled = false;
-        const timer = setTimeout(() => {
-          killShellTree(child);
-          finish(null, `timed out after ${timeout}ms`);
-        }, timeout);
-        const onAbort = () => {
-          killShellTree(child);
-          finish(null, "cancelled");
-        };
-        ctx.signal?.addEventListener("abort", onAbort, { once: true });
-
-        const collect = (chunk: Buffer, into: "out" | "err") => {
-          bytes += chunk.length;
-          if (bytes > MAX_BYTES) {
-            overflowed = true;
-            killShellTree(child);
-            return;
-          }
-          if (into === "out") out += chunk.toString("utf8");
-          else err += chunk.toString("utf8");
-        };
-        child.stdout?.on("data", (c: Buffer) => collect(c, "out"));
-        child.stderr?.on("data", (c: Buffer) => collect(c, "err"));
-
-        function finish(code: number | null, note?: string): void {
-          if (settled) return;
-          settled = true;
-          clearTimeout(timer);
-          ctx.signal?.removeEventListener("abort", onAbort);
-          let head = `exit ${code == null ? "?" : code}`;
-          if (note) head += ` (${note})`;
-          else if (overflowed) head += " (output exceeded 8MB, truncated)";
-          const body = truncate([out, err].join("\n").trim() || "(no output)", 12_000);
-          const content = `${head}\n${body}`;
-          if (code !== 0 || note || overflowed) reject(new Error(content));
-          else resolve(content);
-        }
-        child.on("error", (error) => {
-          if (settled) return;
-          settled = true;
-          clearTimeout(timer);
-          ctx.signal?.removeEventListener("abort", onAbort);
-          reject(error);
-        });
-        child.on("close", (code) => finish(code));
-      });
+      const env = confined
+        ? sandboxChildEnvironment({ ...(ctx.env ?? process.env), ...launch.env }, launch.env?.TMPDIR ?? launch.env?.TEMP ?? ctx.cwd)
+        : ctx.env ?? process.env;
+      const result = await executeOwnedShell(launch, { cwd: ctx.cwd, env, signal: ctx.signal, timeoutMs: timeout });
+      const head = `exit ${result.code == null ? "?" : result.code}${result.stopReason ? ` (${result.stopReason})` : ""}`;
+      const body = truncate([result.out, result.err].join("\n").trim() || "(no output)", 12_000);
+      const content = `${head}\n${body}`;
+      if (result.code !== 0 || result.stopReason) throw new Error(content);
+      return content;
     },
   },
 ];
@@ -940,18 +893,6 @@ export function hostShellLaunch(command: string, platform: NodeJS.Platform = pro
   ].join("\n");
   // -OutputFormat Text and the silenced progress stream keep "#< CLIXML <Objs ...>" records out of what the model reads.
   return { file, args: ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-OutputFormat", "Text", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")] };
-}
-
-/** Stop the shell and what it started. On Windows child.kill() ends only the shell; its children (ping, npm, a dev
- * server) kept running after Stop or a timeout. taskkill /T /F ends the tree while our handle still owns the pid. */
-function killShellTree(child: { pid?: number; kill(signal?: NodeJS.Signals | number): boolean }): void {
-  if (process.platform === "win32" && child.pid) {
-    try {
-      spawnSync(path.win32.join(process.env.SystemRoot || process.env.windir || "C:\\Windows", "System32", "taskkill.exe"),
-        ["/PID", String(child.pid), "/T", "/F"], { windowsHide: true, timeout: 10_000 });
-    } catch { /* fall back to the leader */ }
-  }
-  try { child.kill("SIGKILL"); } catch { /* already gone */ }
 }
 
 const BY_NAME = new Map(BUILTIN_TOOLS.map((tool) => [tool.name, tool]));

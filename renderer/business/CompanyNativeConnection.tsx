@@ -30,7 +30,7 @@ export function CompanyNativeConnection({ session }: { session: BusinessSession 
   const until = exact && status && session ? new Date(Math.min(Date.parse(status.expiresAt), Date.parse(session.expiresAt))).toLocaleString(locale === 'ko' ? 'ko-KR' : 'en-US', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '';
   return <OsCard step={1} busy={busy} done={!!exact} tone={error ? 'danger' : exact ? 'ok' : busy ? 'info' : 'idle'} status={error ? copy('확인 필요', 'Needs check') : busy ? copy('확인 중…', 'Checking…') : exact ? copy('연결됨', 'Connected') : copy('연결 전', 'Not connected')}
     title={copy('회사 기기 연결', 'Company device connection')}
-    description={exact ? copy('현재 회사 계정으로 이 기기가 연결되어 있습니다.', 'This device is connected to the current company account.') : copy('회사 SSO로 로그인한 뒤 이 기기를 연결하세요.', 'Sign in with company SSO, then connect this device.')}>
+    description={exact ? copy('현재 회사 계정으로 이 기기가 연결되어 있습니다.', 'This device is connected to the current company account.') : copy('회사 계정으로 로그인한 뒤 이 기기를 연결하세요.', 'Sign in with your company account, then connect this device.')}>
     {exact
       ? <OsDangerZone bare ko={locale === 'ko'} title={copy('연결 유지 중', 'Connection active')} description={copy(`이 연결은 ${until}까지 유지됩니다.`, `This connection stays active until ${until}.`)} actionLabel={copy('기기 연결 해제', 'Disconnect device')} confirmTitle={copy('이 기기의 연결을 해제할까요?', 'Disconnect this device?')} consequence={copy('해제하면 이 기기는 회사 계정과 연결이 끊어집니다. 다시 쓰려면 이 기기를 다시 연결해야 합니다.', 'This device is disconnected from the company account. Connect it again to keep using company work.')} confirmLabel={copy('연결 해제', 'Disconnect')} disabled={!api} onConfirm={() => void disconnect()} />
       : <div className={os.actions} data-align="start">

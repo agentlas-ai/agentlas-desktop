@@ -84,6 +84,8 @@ export interface GraphMcpCallOptions {
   sink: (event: McpInvocationEvent) => void;
   /** Host classification for the existing graph checkpoint receipt listener. */
   onAdmission: (readOnly: boolean) => void;
+  /** Only a retained server response proves this call returned; transport errors do not. */
+  onResponse?: () => void;
 }
 
 export interface GraphMcpCallResult extends McpInvocationResult {
@@ -247,6 +249,9 @@ export async function runGraphMcpCall(input: GraphMcpCallOptions): Promise<Graph
         },
       }, { runtimeKind: "graph-mcp", sessionKey, permission, cwd, chatId,
         unattended: true, signal: input.signal, assertCurrent, retainMcpToolResult: true });
+    // Main's transport-error catch returns an error without rawMcpResult. A server
+    // error response still has the retained original and settles the remote call.
+    if (result.rawMcpResult) input.onResponse?.();
     if (result.isError) throw new Error(`graph_mcp_call_failed:${result.content}`);
     assertCurrent();
     const data = result.rawMcpResult && Object.hasOwn(result.rawMcpResult, "structuredContent")

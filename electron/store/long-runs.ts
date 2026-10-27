@@ -853,6 +853,10 @@ export function transitionLongRun(input: {
   if (input.to === "completed" && current.surface !== "science" && getChatGoalRevision(current.goalId)?.lifecycle === "ongoing") {
     throw new Error("ongoing_goal_requires_user_stop");
   }
+  if (input.to === "completed" && current.surface !== "science"
+    && !require("../long-run/goal-obligation-context").currentGoalObligationsSatisfied(current.goalId)) {
+    throw new Error("goal_execution_obligations_unmet");
+  }
   const requestedTo = input.to;
   const resolvedTo = resolveNonBlockingGoalStatus(current.status, input.to, input.reason, input.actorKind);
   const skipped = requestedTo !== resolvedTo;
@@ -1776,6 +1780,7 @@ export function currentCompleteGoalVerificationEvidence(runId: string): { refs: 
   if (!run || run.surface === "science" || !goalRevisionIsCurrent(run) || !run.acceptanceCriteria.length) return null;
   const goal = getChatGoalRevision(run.goalId), binding = getLongRunGoalRevisionBinding(runId);
   if (!goal || !binding || goal.lifecycle === "ongoing" || goal.chatId !== run.rootChatId) return null;
+  if (!require("../long-run/goal-obligation-context").currentGoalObligationsSatisfied(run.goalId)) return null;
   const normalize = (text: string) => text.replace(/\s+/g, " ").trim();
   if (normalize(goal.objective) !== normalize(run.objective)
     || goal.acceptanceCriteria.length !== run.acceptanceCriteria.length
@@ -2288,6 +2293,7 @@ export function settleVerifiedLongRun(runId: string, options?: { background?: bo
     if (longRunOwnerHold(run.id) || liveLongRunAttemptCount(run.id)) return null;
     if (run.surface === "science") return null;
     if (!goalRevisionIsCurrent(run)) return null;
+    if (!require("../long-run/goal-obligation-context").currentGoalObligationsSatisfied(run.goalId)) return null;
     const latest = latestCriterionVerdicts(runId);
     const unresolved = run.acceptanceCriteria.flatMap((_, index) => {
       const receipt = latest.get(index);

@@ -31,7 +31,7 @@ import type { ChatHostNotice, InvocationAdmissionReceipt, InvocationSteerRecover
 import { agiActionNoticeLine, isHousekeepingHostNotice, normalizeChatHostNotice } from "../../../shared/chat-host-notice";
 import { HostContinuationNotice } from "../HostContinuationNotice";
 import { AutomationLiveRows, AutomationReportSummary } from "../automation/AutomationChatActivity";
-import { OneGoalControls } from "./OneGoalControls";
+import { OneGoalControls, type OneGoalRetryBinding } from "./OneGoalControls";
 
 import { useRouter, useSearchParams } from "next/navigation";
 import { admissionRefusalDisplayCode, failureCode, failureMessage, goalAdmissionControlFailure, goalAdmissionControlFailureForCode, ipcErrorCode, isChatBusyFailure } from "@/lib/invocation-failure";
@@ -66,6 +66,7 @@ import {
 import { OneDocumentCard } from "@/components/one/OneDocumentCard";
 import { runtimeModelDisplayLabel, runtimeModelFallbackLabel } from "@/components/dashboard/RuntimeModelPicker";
 import { chipRuntimeFor, composerModelLabel, useRunningComposerModel } from "@/lib/one-runtime-chip";
+import { useToolbarFit } from "@/lib/use-toolbar-fit";
 import { readOneDocumentMark } from "@/lib/one-document-mark";
 import { OneSplitPane } from "@/components/one/OneSplitPane";
 import { LoadingEstimate } from "@/components/LoadingEstimate";
@@ -168,7 +169,7 @@ import { toCustomerSafeText } from "@shared/one-customer-safe";
 import { stripAgentControlBlocks, stripAgentIdentityBadges, stripAgentRoutingBanners } from "@shared/agent-control-blocks";
 import { isInterruptedPartial, isLivePartialCommitBoundary } from "@shared/interrupted-partial";
 import { classifyOneRequestIntent } from "@shared/one-request-intent";
-import { narrowerOnePermission } from "@shared/invocation-permission";
+import { narrowerOnePermission, ownerAnswerOnePermission } from "@shared/invocation-permission";
 import {
   oneTeamPreflightAutoStartStep,
   oneTeamPreflightFailureCode,
@@ -506,6 +507,35 @@ const EMPTY_ONE_MEMORY_MAP: OneMemoryMapSnapshot = Object.freeze({
   edges: [],
   clusterCount: 0,
 });
+
+/**
+ * The permission chip names what the running turn may actually do. A host-written turn (a teammate report, a room
+ * follow-up, an observation episode) can run narrower than the chip; the chip used to keep saying "Full access" while
+ * that turn ran read-only and told the owner it was read-only (Yotube 2026-10-25). The owner's setting stays in the title.
+ */
+function onePermissionChipText(input: {
+  selection: OnePermissionMode;
+  alwaysApprove: boolean;
+  running: "read" | "write" | "full" | null;
+  locale: "ko" | "en";
+}): { label: string; title: string; running: "read" | "write" | "full" | null } {
+  const ko = input.locale === "ko";
+  const name = (mode: OnePermissionMode) => mode === "auto" ? (ko ? "자동 모드" : "Auto mode")
+    : mode === "read" ? (ko ? "읽기 전용" : "Read only")
+      : mode === "write" ? (ko ? "파일 편집" : "Accept file edits")
+        : (ko ? "전체 액세스" : "Full access");
+  const setting = `${name(input.selection)}${input.alwaysApprove ? (ko ? " · 항상 승인" : " · Always approve") : ""}`;
+  // Auto never grants more than write, so a write turn under Auto is not narrower than the setting.
+  const rank = { read: 0, write: 1, full: 2 } as const;
+  const ceiling = input.selection === "auto" ? "write" : input.selection;
+  const narrower = input.running && rank[input.running] < rank[ceiling] ? input.running : null;
+  if (!narrower) return { label: setting, title: setting, running: null };
+  return {
+    label: `${name(narrower)} · ${ko ? "이번 실행" : "this run"}`,
+    title: ko ? `이번 실행: ${name(narrower)} · 설정: ${setting}` : `This run: ${name(narrower)} · Setting: ${setting}`,
+    running: narrower,
+  };
+}
 
 function readStoredOnePermission(): OnePermissionMode {
   if (typeof window === "undefined") return "full";
@@ -2730,6 +2760,14 @@ function OneSessionsShell() {
   // State, not a ref: the dock mounts after the first render, and an effect keyed
   // on a ref never re-ran, so the dock height was never observed.
   const [composerDockEl, setComposerDockEl] = useState<HTMLDivElement | null>(null);
+  /*
+   * 작성창 하단 툴바는 늘 한 줄이고 입력 줄 아래에 있다 — 넘치면 칩 글자를 접는다(OneShell.module.css [data-fit]).
+   * 오너 2026-10-25 (방 "Yotube", 목표 실행 중): 툴바가 두 줄로 꺾이자 고정 높이 툴바 행에서 위로 넘쳐 입력 줄을 덮었다.
+   * 작성창은 대화가 열린 뒤에야 그려질 수 있어 ref 객체 대신 요소 상태로 받는다 — 요소가 생기면 훅이 다시 붙는다.
+   */
+  const [composerToolsEl, setComposerToolsEl] = useState<HTMLDivElement | null>(null);
+  const composerToolsRef = useMemo(() => ({ current: composerToolsEl }), [composerToolsEl]);
+  useToolbarFit(composerToolsRef);
   const [showScrollToLatest, setShowScrollToLatest] = useState(false);
   const resultTopRef = useRef<HTMLDivElement>(null);
   const attachmentDragDepthRef = useRef(0);
@@ -4408,7 +4446,13 @@ function OneSessionsShell() {
     setMessages((current) => dropForeignChatMessages(current, activeThreadChatId));
   }, [activeThreadChatId, messages]);
   const composerAlwaysApproval = useChatAlwaysApproval(activeThreadChatId);
-  const onePermissionLabel = `${onePermission === "auto" ? (appLocale === "ko" ? "자동 모드" : "Auto mode") : onePermission === "read" ? (appLocale === "ko" ? "읽기 전용" : "Read only") : onePermission === "write" ? (appLocale === "ko" ? "파일 편집" : "Accept file edits") : (appLocale === "ko" ? "전체 액세스" : "Full access")}${composerAlwaysApproval.enabled ? (appLocale === "ko" ? " · 항상 승인" : " · Always approve") : ""}`;
+  const onePermissionChip = onePermissionChipText({
+    selection: onePermission,
+    alwaysApprove: composerAlwaysApproval.enabled,
+    running: busy && !activity.terminalStatus ? activity.effectivePermission ?? null : null,
+    locale: appLocale === "ko" ? "ko" : "en",
+  });
+  const onePermissionLabel = onePermissionChip.label;
   /*
    * ★머리말·담당·작성창 문구는 **지금 연 대화**로 판정한다 (좌석 전환 실측 2026-09-26).
    *   activeThreadChat 은 런타임 탐지와 함께 늦게 도착해, 그 사이(격리 앱에서 1.5~2.4초)
@@ -4429,6 +4473,12 @@ function OneSessionsShell() {
   const goalControlViewKey = `${selectedTaskId ?? ""}:${selectedConversationId ?? ""}:${activeThreadChatId ?? ""}`;
   const goalControlViewKeyRef = useRef(goalControlViewKey);
   goalControlViewKeyRef.current = goalControlViewKey;
+  const goalRetryBindingRef = useRef<OneGoalRetryBinding | null>(null);
+  const retryUnfinishedFlightRef = useRef<object | null>(null);
+  const registerGoalRetry = useCallback((binding: OneGoalRetryBinding) => {
+    goalRetryBindingRef.current = binding;
+    return () => { if (goalRetryBindingRef.current === binding) goalRetryBindingRef.current = null; };
+  }, []);
   useLayoutEffect(() => bindAgentScreenScope(activeThreadChatId), [activeThreadChatId]);
   useEffect(() => {
     oneChatFileGroupsRef.current.clear();
@@ -7725,21 +7775,51 @@ function OneSessionsShell() {
   // "이어서 진행" 한 번의 클릭 — 끝까지 확인되지 않은 실행을 같은 대화에서
   // 조용히 이어간다. 사용자에게 오류 문구를 다시 입력하라고 요구하지 않는다.
   const retryUnfinished = useCallback(() => {
-    if (busy) return;
+    if (busy || retryUnfinishedFlightRef.current) return;
     const chatId = selected?.chatId ?? conversation?.id;
     if (!chatId) return;
-    void startRun(
-      chatId,
-      selected?.taskId ?? null,
-      selected?.canonicalVersion ?? null,
-      tFor(appLocale, "one.shell.system_prompt.retry_unfinished"),
-      selected ? "task" : "conversation",
-      // This callback is the user's Retry button, not automatic recovery.
-      // Honor the visible permission selection for that explicit action;
-      // unattended continuations still inherit their durable authority.
-      { displayUserMessage: false, promptOrigin: "system", permissionMode: onePermission },
-    );
-  }, [appLocale, busy, conversation?.id, onePermission, selected, startRun]);
+    const viewKey = goalControlViewKey;
+    const fresh = () => !homeTransitionPendingRef.current && goalControlViewKeyRef.current === viewKey
+      && activeThreadChatIdRef.current === chatId;
+    if (!fresh()) return;
+    const flight = {};
+    retryUnfinishedFlightRef.current = flight;
+    void (async () => {
+      try {
+        const api = ipc();
+        if (!api) throw new Error("goal_control_unavailable");
+        const chat = await api.chats.get(chatId);
+        if (!fresh()) return;
+        if (!chat || chat.id !== chatId) throw new Error("goal_control_binding_changed");
+        if (chat.goalId) {
+          const goalId = chat.goalId;
+          const context = await api.chats.getGoalContext(chatId);
+          if (!fresh()) return;
+          if (!context || context.goalId !== goalId) throw new Error("goal_control_binding_changed");
+          const binding = goalRetryBindingRef.current;
+          if (!binding || binding.chatId !== chatId || binding.goalId !== goalId) throw new Error("goal_control_unavailable");
+          // The mounted controls own fresh holds, review UI and version-fenced Resume.
+          // Never turn this generated continuation into a new owner message.
+          await binding.retry();
+          return;
+        }
+        await startRun(
+          chatId,
+          selected?.taskId ?? null,
+          selected?.canonicalVersion ?? null,
+          tFor(appLocale, "one.shell.system_prompt.retry_unfinished"),
+          selected ? "task" : "conversation",
+          { displayUserMessage: false, promptOrigin: "system", permissionMode: onePermission },
+        );
+      } catch {
+        if (fresh()) setActionNotice(appLocale === "ko"
+          ? "목표 상태를 확인하지 못해 이어가지 않았어요. 이 대화의 목표 제어를 확인해 주세요."
+          : "The goal state could not be confirmed, so continuation did not start. Check this conversation's goal controls.");
+      } finally {
+        if (retryUnfinishedFlightRef.current === flight) retryUnfinishedFlightRef.current = null;
+      }
+    })();
+  }, [appLocale, busy, conversation?.id, goalControlViewKey, onePermission, selected, startRun]);
 
   /**
    * Automatic recovery. A run that stops short is One's problem to route around,
@@ -8045,7 +8125,9 @@ function OneSessionsShell() {
       // chip would turn the newly materialized Task into write authority even
       // though the preceding conversation was read-only.
       // The answer continues the source run's authority, never more than the owner's chip now.
-      const continuationPermission: OnePermissionMode = narrowerOnePermission(onePermission, sourceReceipt?.executionPermission ?? "read");
+      // An owner's answer to a host-written turn's question (Main's receipt: ownerAuthored false) takes the chip, like a
+      // typed message; an owner turn's question keeps that turn's authority under the chip (shared/invocation-permission).
+      const continuationPermission: OnePermissionMode = ownerAnswerOnePermission(onePermission, sourceReceipt);
       answerSaved = true;
       window.dispatchEvent(new Event("agentlas:attention-refresh"));
       // 영수증 목록 갱신은 이어지는 실행을 막지 않는다.
@@ -10649,6 +10731,7 @@ function OneSessionsShell() {
               locale={appLocale === "ko" ? "ko" : "en"}
               lastConfirmedModel={receipt?.chatId === activeThreadChatId ? receipt.model : null}
               handoffRequestKey={goalHandoffRequestKey}
+              registerRetryUnfinished={registerGoalRetry}
               helpContent={<>
                 <AutomationMonitorStrip key={activeThreadChatId} chatId={activeThreadChatId} locale={appLocale} />
                 <ContinuityStatus chatId={activeThreadChatId} locale={appLocale} />
@@ -11077,7 +11160,7 @@ function OneSessionsShell() {
                 disabled={composerInteractionBlocked}
               />
               <div className={styles.composerBar}>
-                <div className={styles.composerTools}>
+                <div className={styles.composerTools} ref={setComposerToolsEl} data-one-composer-tools="true">
                   <button
                     type="button"
                     className={styles.attachmentButton}
@@ -11150,7 +11233,8 @@ function OneSessionsShell() {
                     aria-label={appLocale === "ko"
                       ? `권한: ${onePermissionLabel}`
                       : `Permission: ${onePermissionLabel}`}
-                    title={onePermissionLabel}
+                    title={onePermissionChip.title}
+                    data-one-permission-running={onePermissionChip.running ?? undefined}
                     onClick={() => setComposerMenu((current) => current === "permission" ? null : "permission")}
                   >
                     {composerAlwaysApproval.enabled ? <IconCheck size={15} /> : <IconShield size={15} />}

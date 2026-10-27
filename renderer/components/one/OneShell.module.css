@@ -2111,7 +2111,7 @@
 
 /* A square tile per attachment inside the composer (owner 2026-10-14, the Codex composer). */
 .composer[data-has-files="true"] {
-  grid-template-rows: auto minmax(30px, auto) 32px;
+  grid-template-rows: auto minmax(30px, auto) minmax(32px, auto);
   grid-template-areas:
     "files files"
     "input input"
@@ -2211,7 +2211,8 @@
   min-height: 120px;
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
-  grid-template-rows: minmax(50px, auto) 38px;
+  /* 툴바 행은 내용 높이만큼 자란다 — 고정 높이면 그보다 큰 툴바가 위로 넘쳐 입력 줄을 덮는다(오너 2026-10-25). */
+  grid-template-rows: minmax(50px, auto) minmax(38px, auto);
   grid-template-areas:
     "input input"
     "tools actions";
@@ -2219,7 +2220,7 @@
   column-gap: 10px;
   row-gap: 8px;
   margin: 0 auto;
-  padding: 14px 14px 10px;
+  padding: 12px;
   border: 1px solid var(--paper-edge);
   border-radius: 18px;
   background: var(--paper);
@@ -2448,18 +2449,43 @@
   display: flex;
   align-items: center;
   gap: 2px;
-  flex-wrap: wrap;
+  /* 하단 툴바는 어떤 폭에서도 한 줄이다. 줄을 꺾으면 칩 묶음이 툴바 행보다 커져 입력 줄을 덮었다(오너 2026-10-25,
+     방 "Yotube": 자리표시자 위에 + 와 AGI 가 앉았다). 넘치면 useToolbarFit 이 아래 [data-fit] 단계로 칩 글자를 접는다. */
+  flex-wrap: nowrap;
   overflow: visible;
   scrollbar-width: none;
-  container: one-composer-tools / inline-size;
 }
 .composerTools::-webkit-scrollbar { display: none; }
-/* 좁은 작성창(결과 패널을 연 440px 대화 열): 칩의 꺾쇠를 빼고 여백을 줄여 글자 자리를 먼저
-   돌려준다 — 모델 이름이 "g…" 로 뭉개지기 전에 장식부터 뺀다. 칩은 눌러서 여는 그대로다. */
-@container one-composer-tools (max-width: 500px) {
-  .composerChip { width: 34px; flex: 0 0 34px; gap: 0; padding: 0; }
-  .composerChip span { display: none; }
-  .composerChip > svg:last-child { display: none; }
+/* 접는 순서는 덜 중요한 것부터(Work 작성창과 같다) — 1 작업량 → 2 권한 → 3 모델 이름 → 4 여백·단추 폭 → 5 마지막 보루(칩 묶음만
+   옆으로 밀기). 글자를 접은 칩은 아이콘 하나가 되고, 이름은 aria-label·title 에 남는다. 폭 문턱(@container 500px)은 칩이 몇 개
+   켜졌는지, 모델 이름이 얼마나 긴지("Running … · Next request …") 몰라서 문턱 위에서 줄이 꺾였다 — 실제로 넘치는지를 잰다. */
+.composerTools[data-fit~="1"] .composerChip[data-one-composer-trigger="effort"],
+.composerTools[data-fit~="2"] .composerChip[data-one-composer-trigger="permission"],
+.composerTools[data-fit~="3"] .composerChip[data-one-composer-trigger="model"] {
+  width: 34px;
+  flex: 0 0 34px;
+  gap: 0;
+  padding: 0;
+}
+.composerTools[data-fit~="1"] .composerChip[data-one-composer-trigger="effort"] span,
+.composerTools[data-fit~="1"] .composerChip[data-one-composer-trigger="effort"] > svg:last-child,
+.composerTools[data-fit~="2"] .composerChip[data-one-composer-trigger="permission"] span,
+.composerTools[data-fit~="2"] .composerChip[data-one-composer-trigger="permission"] > svg:last-child,
+.composerTools[data-fit~="3"] .composerChip[data-one-composer-trigger="model"] span,
+.composerTools[data-fit~="3"] .composerChip[data-one-composer-trigger="model"] > svg:last-child {
+  display: none;
+}
+.composerTools[data-fit~="4"] { gap: 0; }
+.composerTools[data-fit~="4"] .composerChip[data-one-composer-trigger],
+.composerTools[data-fit~="4"] .composerQuickMode,
+.composerTools[data-fit~="4"] .attachmentButton[data-one-composer-trigger="plus"] {
+  width: 30px;
+  min-width: 30px;
+  flex: 0 0 30px;
+}
+.composerTools[data-fit~="5"] {
+  overflow-x: auto;
+  overflow-y: hidden;
 }
 
 .composerActions {
@@ -2468,6 +2494,11 @@
   display: flex;
   align-items: center;
   gap: 2px;
+}
+/* 받아쓰기 단추는 다른 툴바 단추와 같은 34px — 44px 이면 툴바 행이 커지거나(이제 행은 내용만큼 자란다) 입력 줄로 넘친다. */
+.composerActions > div > button {
+  width: 34px;
+  min-height: 34px;
 }
 
 .attachmentButton {
@@ -2505,11 +2536,10 @@
   font-weight: 520;
   cursor: pointer;
 }
-/* 글자 칩은 줄어들며 말줄임한다. 예전엔 전부 flex:0 0 auto 라 좁은 대화 열에서 권한 칩이
-   숨은 가로 스크롤 밖으로 밀려 "Full acces" 로 말줄임 없이 잘렸다(오너 1.2.41).
-   모델 이름이 가장 먼저 줄고(가중 3), 아이콘·꺾쇠는 남는다(span 만 min-width 0). */
-.composerChip { flex: 0 1 auto; min-width: 0; }
-.composerChip[data-one-composer-trigger="model"] { flex-shrink: 3; }
+/* 글자 칩은 줄어들며 뭉개지지 않는다 — 넘치면 글자째로 아이콘이 된다(위 [data-fit] 단계). 글자는 150px 에서 말줄임한다.
+   옛 규칙(오너 1.2.41: 칩이 숨은 가로 스크롤 밖으로 밀려 "Full acces" 로 잘림)은 줄어드는 칩으로 막았지만, 그러면 넘침을
+   잴 수 없어 접기가 늦다. 이제 넘치면 권한 칩은 2 단계에서 아이콘이 되고, 가로 밀기는 전부 아이콘이 된 뒤의 마지막 보루다. */
+.composerChip { flex: 0 0 auto; min-width: 0; }
 .composerChip > svg { flex: 0 0 auto; }
 
 .composerChip:hover,
@@ -2546,7 +2576,7 @@
   min-height: 24px;
   height: 24px;
   align-self: stretch;
-  padding: 1px 2px;
+  padding: 0;
   resize: none;
   border: 0;
   background: transparent;
@@ -3587,8 +3617,8 @@
 
 .composer {
   min-height: 88px;
-  grid-template-rows: minmax(30px, auto) 32px;
-  padding: 12px 12px 9px;
+  grid-template-rows: minmax(30px, auto) minmax(32px, auto);
+  padding: 12px;
   border-color: var(--paper-edge);
   box-shadow: 0 3px 12px rgba(25, 31, 36, .035);
 }

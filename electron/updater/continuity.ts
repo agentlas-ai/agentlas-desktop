@@ -384,7 +384,7 @@ function pruneOldRecoveryCopies(root: string, keepPath: string | null, keepTotal
     const realRoot = fs.realpathSync(root);
     const directories = fs
       .readdirSync(root, { withFileTypes: true })
-      .filter((entry) => entry.isDirectory() && /^[0-9][0-9A-Za-z._-]*-\d{13}$/.test(entry.name))
+      .filter((entry) => entry.isDirectory() && /^[0-9][0-9A-Za-z._-]*-\d{13}(?:-[a-f0-9-]{36})?$/.test(entry.name))
       .map((entry) => {
         const fullPath = path.join(root, entry.name);
         const manifestPath = path.join(fullPath, "continuity.json");
@@ -427,7 +427,7 @@ const RECOVERY_SANITIZATION_VERSION = "opencrab-url-credential-v1";
  */
 const RECOVERY_SCRUB_CLEAN_LEDGER = "recovery-opencrab-scrub-clean.v1.json";
 
-type RecoveryCleanFingerprint = { dev: number; ino: number; size: number; mtimeMs: number; ctimeMs: number };
+export type RecoveryCleanFingerprint = { dev: number; ino: number; size: number; mtimeMs: number; ctimeMs: number };
 type RecoveryCleanLedger = {
   schemaVersion: 1;
   sanitizationVersion: string;
@@ -531,6 +531,47 @@ function recordCapturedRecoveryCopyClean(updaterRoot: string, databasePath: stri
   } catch {
     // Not recorded means the next launch scans the copy, as before.
   }
+}
+
+/** Computed inside the owned worker, after every SQLite handle has closed. */
+export function capturedRecoveryCleanProof(databasePath: string): RecoveryCleanFingerprint | null {
+  return recoveryCopyIsCredentialFree(databasePath) ? recoveryCleanFingerprint(databasePath) : null;
+}
+
+/** Only the parent calls this after accepting the result and observing worker exit.
+ * The expensive credential scan stays in the worker; unchanged file identity binds its proof. */
+export async function commitCapturedRecoveryCleanProof(
+  databasePath: string, proof: RecoveryCleanFingerprint | null, signal?: AbortSignal,
+): Promise<void> {
+  if (!proof) return;
+  const io = fs.promises;
+  const ledgerPath = path.join(path.dirname(path.dirname(path.dirname(databasePath))), RECOVERY_SCRUB_CLEAN_LEDGER);
+  const temporary = `${ledgerPath}.${randomUUID()}.tmp`;
+  try {
+    signal?.throwIfAborted();
+    const stat = await io.lstat(databasePath);
+    if (!stat.isFile() || stat.isSymbolicLink()
+      || !["dev", "ino", "size", "mtimeMs", "ctimeMs"].every(key => stat[key as keyof typeof stat] === proof[key as keyof RecoveryCleanFingerprint])) return;
+    for (const suffix of ["-wal", "-shm", "-journal"]) {
+      try { await io.access(databasePath + suffix); return; } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") return;
+      }
+    }
+    let entries: RecoveryCleanLedger["entries"] = {};
+    try {
+      const stat = await io.lstat(ledgerPath);
+      if (stat.isFile() && !stat.isSymbolicLink() && stat.size <= 64 * 1024) {
+        const old = JSON.parse(await io.readFile(ledgerPath, "utf8"));
+        if (old.schemaVersion === 1 && old.sanitizationVersion === RECOVERY_SANITIZATION_VERSION
+          && old.entries && typeof old.entries === "object" && !Array.isArray(old.entries)) entries = old.entries;
+      }
+    } catch { /* A missing/invalid cache requires a scan on next boot. */ }
+    entries[databasePath] = proof;
+    signal?.throwIfAborted();
+    await io.writeFile(temporary, JSON.stringify({ schemaVersion: 1, sanitizationVersion: RECOVERY_SANITIZATION_VERSION, entries }), { mode: 0o600, flag: "wx" });
+    signal?.throwIfAborted();
+    await io.rename(temporary, ledgerPath);
+  } finally { await io.rm(temporary, { force: true }); }
 }
 
 export interface InactiveRecoveryOpenCrabScrubResult {
@@ -920,11 +961,14 @@ export async function captureUpdaterContinuity(input: {
   accountSignedIn: boolean;
   accountExpiresAt?: number;
   now?: () => number;
+  /** Parent-created directory; worker never prunes or writes shared clean-ledger state. */
+  ownedDirectory?: string;
 }): Promise<ContinuitySnapshot> {
   const now = input.now ?? Date.now;
   const safeVersion = input.targetVersion.replace(/[^0-9A-Za-z._-]/g, "_");
   const recoveryRoot = path.join(input.userDataPath, "updater", "recovery");
-  const recoveryDir = path.join(recoveryRoot, `${safeVersion}-${now()}`);
+  const recoveryDir = input.ownedDirectory ?? path.join(recoveryRoot, `${safeVersion}-${now()}`);
+  if (path.dirname(recoveryDir) !== path.resolve(recoveryRoot)) throw new Error("continuity_capture_directory_invalid");
   const backupPath = path.join(recoveryDir, "agentlas.sqlite");
   const agentsBackupPath = path.join(recoveryDir, "agents");
   fs.mkdirSync(recoveryDir, { recursive: true, mode: 0o700 });
@@ -953,8 +997,8 @@ export async function captureUpdaterContinuity(input: {
       // Windows ACLs are inherited from userData.
     }
     const backup = new Database(backupPath, { readonly: true, fileMustExist: true });
-    const copied = databaseFacts(backup);
-    backup.close();
+    let copied: ReturnType<typeof databaseFacts>;
+    try { copied = databaseFacts(backup); } finally { backup.close(); }
     if (
       copied.databaseSchemaVersion !== before.databaseSchemaVersion ||
       CONTINUITY_TABLES.some(
@@ -990,12 +1034,14 @@ export async function captureUpdaterContinuity(input: {
       encoding: "utf8",
       mode: 0o600,
     });
-    pruneOldRecoveryCopies(recoveryRoot, recoveryDir);
-    // After every write to the copy (chmod changes ctime): the fingerprint must be the one the next launch sees.
-    recordCapturedRecoveryCopyClean(path.join(input.userDataPath, "updater"), backupPath);
+    if (!input.ownedDirectory) {
+      pruneOldRecoveryCopies(recoveryRoot, recoveryDir);
+      // After every write to the copy (chmod changes ctime): record its final fingerprint.
+      recordCapturedRecoveryCopyClean(path.join(input.userDataPath, "updater"), backupPath);
+    }
     return snapshot;
   } catch (error) {
-    fs.rmSync(recoveryDir, { recursive: true, force: true });
+    if (!input.ownedDirectory) fs.rmSync(recoveryDir, { recursive: true, force: true });
     throw error;
   } finally {
     source?.close();

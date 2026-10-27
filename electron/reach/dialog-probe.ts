@@ -3,7 +3,7 @@ import { DIALOG_CONTROL_ROLES, isClosingPath, isRiskyMenuPath, labelOpensDialog 
 import { normalizeLinuxTree, popupIdsOf, withoutChrome } from "./linux-ui";
 import { normalizeWindowsTree } from "./windows-ui";
 import { invokeMenuPath, resolveMenuPath, type MenuTarget } from "./menu-probe";
-import type { Capability, CapabilityParameter } from "./types";
+import { DIALOG_POLICY_REVISION, type Capability, type CapabilityParameter } from "./types";
 
 // Opens ONE dialog from a menu item that ends in an ellipsis, reads the shape of its controls, and closes it again with its Cancel
 // button. The platform convention (an ellipsis means "asks for more before it acts") is what makes opening safe; the round trip is what
@@ -206,6 +206,7 @@ export function synthesizeDialogCapability(appKey: string, menuPath: readonly st
     ...(shape.immediate ? { description: "A settings window with no Cancel button: every value given here is applied as soon as it is set." } : {}),
     status: "verified",
     verification: "structural",
+    dialogPolicyRevision: DIALOG_POLICY_REVISION,
     body: { kind: "steps", steps },
     postconditions: [{ kind: "dialog-closed" }],
     parameters,
@@ -361,7 +362,11 @@ export async function probeDialog(ports: ProbePorts, menuPath: readonly string[]
   let unreadable = false;
   let after: WindowFacts = before;
   const deadline = now() + (ports.settleMs ?? 2500);
-  while (now() < deadline && !ports.signal?.aborted) {
+  // the screen is looked at once even when the time to settle is already used up (a one millisecond allowance ended before the first look whenever the clock ticked over:
+  // an unstable gate step, independent review 7, V4)
+  let looked = false;
+  while ((!looked || now() < deadline) && !ports.signal?.aborted) {
+    looked = true;
     await sleep(ports.pollMs ?? 250);
     after = await observe(ports);
     if (after.sheet) {

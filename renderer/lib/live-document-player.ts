@@ -66,40 +66,21 @@ export function useLiveDocumentSession(sessionId: string | null) {
   const displayRef = useRef<LiveDocumentModel | null>(null);
   const revisionRef = useRef(0);
   const queue = useRef<LiveDocumentEntry[]>([]);
-  const running = useRef(false);
+  const running = useRef<number | null>(null);
   const generation = useRef(0);
   const replayed = useRef(false);
   const playRef = useRef<(() => Promise<void>) | null>(null);
 
   const commit = useCallback((model: LiveDocumentModel) => { displayRef.current = model; setDisplay(model); }, []);
 
-  const load = useCallback(async () => {
-    if (!sessionId) return;
-    const snapshot = await ipc()?.liveDocument?.snapshot(sessionId);
-    if (!snapshot) { setError("session_unknown"); return; }
-    generation.current++;
-    queue.current = [];
-    setCursor(null); setTyping(null);
-    setMeta(snapshot.meta);
-    revisionRef.current = snapshot.revision;
-    setRevision(snapshot.revision);
-    if (snapshot.replayFrom && !replayed.current) {
-      // Just opened and already edited: start from the file as opened and play the edits.
-      replayed.current = true;
-      setEntries([]);
-      commit(snapshot.replayFrom);
-      queue.current.push(...snapshot.entries);
-      void playRef.current?.();
-      return;
-    }
-    setEntries(snapshot.entries);
-    commit(snapshot.model);
-  }, [sessionId, commit]);
+  // Each activation owns one reader. Events arriving during a read request one trailing pass.
+  const refreshRef = useRef<((kind: "load" | "delta" | "changed") => Promise<void>) | null>(null);
+  const load = useCallback(async () => { await refreshRef.current?.("load"); }, []);
 
   const play = useCallback(async () => {
-    if (running.current) return;
-    running.current = true;
     const gen = generation.current;
+    if (running.current === gen) return;
+    running.current = gen;
     const alive = () => gen === generation.current;
     try {
       while (queue.current.length && alive()) {
@@ -110,6 +91,7 @@ export function useLiveDocumentSession(sessionId: string | null) {
           const model = displayRef.current;
           if (!model) return;
           const finalOps = fast ? [op] : await animate(op, entry, model, alive);
+          if (!alive()) return;
           try { commit(applyLiveDocumentOps(displayRef.current!, finalOps)); } catch { void load(); return; }
           setTyping(null);
         }
@@ -117,8 +99,8 @@ export function useLiveDocumentSession(sessionId: string | null) {
         setEntries((current) => [...current, entry].slice(-40));
       }
     } finally {
-      running.current = false;
-      setCursor(null); setTyping(null);
+      if (running.current === gen) running.current = null;
+      if (alive()) { setCursor(null); setTyping(null); }
     }
 
     /** Plays one op and returns what still has to be committed (structure an animation pre-inserted is not re-inserted). */
@@ -128,6 +110,7 @@ export function useLiveDocumentSession(sessionId: string | null) {
       const typeInto = async (target: string, from: string, to: string) => {
         setCursor({ target, label, color, phase: "select" });
         await sleep(220);
+        if (!isAlive()) return;
         const keep = commonPrefix(from, to);
         // Erase back to the shared prefix, then type the rest.
         const eraseSteps = Math.min(12, from.length - keep);
@@ -135,6 +118,7 @@ export function useLiveDocumentSession(sessionId: string | null) {
           setTyping({ target, text: from.slice(0, from.length - Math.ceil(((from.length - keep) * i) / eraseSteps)) });
           await sleep(18);
         }
+        if (!isAlive()) return;
         setCursor({ target, label, color, phase: "type" });
         const rest = to.slice(keep);
         const duration = Math.max(240, Math.min(1800, rest.length * 26));
@@ -158,13 +142,16 @@ export function useLiveDocumentSession(sessionId: string | null) {
       } else if (op.op === "insert_paragraph" && op.id) {
         commit(applyLiveDocumentOps(model, [{ ...op, text: "" }]));
         await sleep(60);
+        if (!isAlive()) return [];
         await typeInto(op.id, "", op.text);
         return [{ op: "set_text", target: op.id, text: op.text }];
       } else if (op.op === "add_slide" && op.id) {
         commit(applyLiveDocumentOps(model, [{ ...op, title: "", body: "" }]));
         setFocus({ slide: op.id });
         await sleep(120);
+        if (!isAlive()) return [];
         if (op.title) await typeInto(`${op.id}.title`, "", op.title);
+        if (!isAlive()) return [];
         if (op.title) commit(applyLiveDocumentOps(displayRef.current!, [{ op: "set_text", target: `${op.id}.title`, text: op.title }]));
         if (op.body) await typeInto(`${op.id}.body`, "", op.body);
         return [{ op: "set_text", target: `${op.id}.body`, text: op.body ?? "" }];
@@ -200,36 +187,123 @@ export function useLiveDocumentSession(sessionId: string | null) {
 
   playRef.current = play;
 
-  const pull = useCallback(async () => {
-    if (!sessionId) return;
-    const delta = await ipc()?.liveDocument?.entries(sessionId, revisionRef.current);
-    if (!delta) return;
-    if (delta.reset) { await load(); return; }
-    if (!delta.entries.length) return;
-    revisionRef.current = delta.revision;
-    setRevision(delta.revision);
-    queue.current.push(...delta.entries);
-    void play();
-  }, [sessionId, load, play]);
+  const pull = useCallback(async () => { await refreshRef.current?.("delta"); }, []);
 
   useEffect(() => {
+    let disposed = false;
+    let needsLoad = false;
+    let needsDelta = false;
+    let needsMeta = false;
+    let chatId: string | null = null;
+    let pending: Promise<void> | null = null;
+    generation.current++;
+    queue.current = [];
+    replayed.current = false;
+    displayRef.current = null;
+    revisionRef.current = 0;
     setMeta(null); setDisplay(null); setError(null);
-    void load();
-    const off = ipc()?.liveDocument?.onChanged((event) => { if (event.sessionId === sessionId) { void pull(); void refreshMeta(); } });
-    const timer = window.setInterval(() => void pull(), 2500);
-    async function refreshMeta() {
-      const snapshot = sessionId ? await ipc()?.liveDocument?.snapshot(sessionId) : null;
-      if (snapshot) setMeta(snapshot.meta);
+    setEntries([]); setRevision(0); setCursor(null); setTyping(null);
+
+    const refresh = (kind: "load" | "delta" | "changed"): Promise<void> => {
+      if (disposed || !sessionId) return Promise.resolve();
+      if (kind === "load") needsLoad = true;
+      else needsDelta = true;
+      if (kind === "changed") needsMeta = true;
+      if (!pending) {
+        pending = drain().finally(() => { pending = null; });
+      }
+      return pending;
+    };
+    async function drain() {
+      try {
+        while (!disposed && (needsLoad || needsDelta || needsMeta)) {
+          if (needsLoad) {
+            needsLoad = false; needsDelta = false; needsMeta = false;
+            const snapshot = await ipc()?.liveDocument?.snapshot(sessionId!);
+            if (disposed) return;
+            if (!snapshot) { setError("session_unknown"); continue; }
+            generation.current++;
+            queue.current = [];
+            setCursor(null); setTyping(null); setError(null);
+            setMeta(snapshot.meta);
+            chatId = snapshot.meta.chatId;
+            revisionRef.current = snapshot.revision;
+            setRevision(snapshot.revision);
+            if (snapshot.replayFrom && !replayed.current) {
+              replayed.current = true;
+              setEntries([]);
+              commit(snapshot.replayFrom);
+              queue.current.push(...snapshot.entries);
+              void playRef.current?.();
+            } else {
+              setEntries(snapshot.entries);
+              commit(snapshot.model);
+            }
+            continue;
+          }
+          if (needsDelta) {
+            needsDelta = false;
+            const since = revisionRef.current;
+            const delta = await ipc()?.liveDocument?.entries(sessionId!, since);
+            if (disposed) return;
+            if (needsLoad) continue;
+            if (delta?.reset) { needsLoad = true; continue; }
+            if (delta) {
+              setError(null);
+              // The watermark includes queued animation, so an entry is accepted only once.
+              const fresh = delta.entries.filter((entry) => entry.seq > revisionRef.current);
+              revisionRef.current = Math.max(revisionRef.current, delta.revision);
+              if (fresh.length) {
+                setRevision(revisionRef.current);
+                queue.current.push(...fresh);
+                void playRef.current?.();
+              }
+            }
+            // A notification received mid-read may describe a later revision than this response.
+            if (needsDelta || needsLoad) continue;
+          }
+          if (needsMeta) {
+            needsMeta = false;
+            // Reuse the metadata API; cloning the document model is unnecessary for save/name changes.
+            const sessions = chatId ? await ipc()?.liveDocument?.list(chatId) : null;
+            if (disposed) return;
+            const current = sessions?.find((item) => item.sessionId === sessionId);
+            if (current) setMeta(current);
+          }
+        }
+      } catch {
+        if (!disposed) {
+          if (!displayRef.current) needsLoad = true;
+          setError("unavailable");
+        }
+      }
     }
-    return () => { off?.(); window.clearInterval(timer); generation.current++; };
-  }, [sessionId, load, pull]);
+    refreshRef.current = refresh;
+    void refresh("load");
+    const off = ipc()?.liveDocument?.onChanged((event) => {
+      if (event.sessionId === sessionId) {
+        chatId = event.chatId;
+        void refresh("changed");
+      }
+    });
+    const timer = window.setInterval(() => void refresh("delta"), 2500);
+    return () => {
+      disposed = true;
+      if (refreshRef.current === refresh) refreshRef.current = null;
+      off?.(); window.clearInterval(timer); generation.current++;
+      queue.current = [];
+    };
+  }, [sessionId, commit]);
 
   /** The person's edit: shown at once, then journaled; a refusal reloads the authoritative state. */
   const apply = useCallback(async (ops: LiveDocumentOp[]): Promise<{ ok: boolean; reason?: string; created?: string[] }> => {
     if (!sessionId) return { ok: false, reason: "session_unknown" };
-    const optimistic = ops.every((op) => op.op === "set_text" || op.op === "set_cell" || op.op === "insert_text" || op.op === "set_format");
+    const refresh = refreshRef.current;
+    // Insertions are not idempotent: their journal entry must apply exactly once, after Main accepts it.
+    const optimistic = ops.every((op) => op.op === "set_text" || op.op === "set_cell" || op.op === "set_format");
     if (optimistic && displayRef.current) { try { commit(applyLiveDocumentOps(displayRef.current, ops)); } catch { /* reload below */ } }
     const result = await ipc()?.liveDocument?.apply({ sessionId, baseRevision: revisionRef.current, ops });
+    if (refreshRef.current !== refresh) return { ok: false, reason: "session_changed" };
     if (!result?.ok) { await load(); return { ok: false, reason: result && !result.ok ? result.reason : "unavailable" }; }
     await pull();
     return { ok: true, created: result.created };

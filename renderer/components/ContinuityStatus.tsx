@@ -1,9 +1,10 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { ChatContinuitySnapshot } from "@shared/types";
 import { ipc, ipcEvents } from "@/lib/ipc";
 import { classifyGoalSurfaceStatus, goalSurfaceStatusLabel } from "@/lib/goal-surface-status";
+import { createCoalescedRefresh } from "@/lib/one-refresh-coordinator";
 import { AutomationStrategyPanel } from "./automation/AutomationStrategyPanel";
 import styles from "./ContinuityStatus.module.css";
 
@@ -69,6 +70,8 @@ export function ContinuityStatus({ chatId, locale, detail = false, embedded = fa
   const [snapshot, setSnapshot] = useState<ChatContinuitySnapshot | null>(null);
   const [error, setError] = useState(false);
   const [lastConfirmedAt, setLastConfirmedAt] = useState<string | null>(null);
+  const currentChatId = useRef(chatId);
+  currentChatId.current = chatId;
   const ko = locale === "ko";
   const refresh = useCallback(async (onResult: (value: ChatContinuitySnapshot | null) => void) => {
     if (!chatId) return;
@@ -81,29 +84,40 @@ export function ContinuityStatus({ chatId, locale, detail = false, embedded = fa
   useEffect(() => {
     let disposed = false;
     let generation = 0;
+    const currentChat = () => !disposed && currentChatId.current === chatId;
     setSnapshot(null); setError(false); setLastConfirmedAt(null);
-    const read = async () => {
-      const current = ++generation;
+    const reader = createCoalescedRefresh<number>(async (current) => {
+      if (!currentChat() || current !== generation) return;
       try {
         await refresh((value) => {
-          if (disposed || current !== generation) return;
+          if (!currentChat() || current !== generation) return;
           if (value) { setSnapshot(value); setLastConfirmedAt(value.observedAt); }
           setError(!value);
         });
       } catch {
-        if (!disposed && current === generation) setError(true);
+        if (currentChat() && current === generation) setError(true);
       }
+    }, (_previous, incoming) => incoming);
+    const read = () => {
+      if (!currentChat() || !chatId) return;
+      // Invalidate now, not when the trailing read starts: an older response
+      // must not repaint while a newer store observation is waiting its turn.
+      const current = ++generation;
+      setError(true);
+      void reader.request(current);
     };
-    void read();
+    read();
     const off = ipcEvents()?.onStoreChanged?.((change) => {
-      if (["chat", "long-run", "automation", "run-event"].includes(change.entity)) void read();
+      if (change.entity === "chat") {
+        if (!change.id || change.id === chatId) read();
+      } else if (["long-run", "automation", "run-event"].includes(change.entity)) read();
     });
     const onVisibility = () => {
-      if (document.visibilityState === "visible") { setError(true); void read(); }
+      if (document.visibilityState === "visible") read();
     };
     document.addEventListener("visibilitychange", onVisibility);
-    const poll = window.setInterval(() => { if (document.visibilityState === "visible") void read(); }, 10_000);
-    return () => { disposed = true; ++generation; off?.(); document.removeEventListener("visibilitychange", onVisibility); clearInterval(poll); };
+    const poll = window.setInterval(() => { if (document.visibilityState === "visible") read(); }, 10_000);
+    return () => { disposed = true; ++generation; reader.dispose(); off?.(); document.removeEventListener("visibilitychange", onVisibility); clearInterval(poll); };
   }, [chatId, refresh]);
   if (!chatId) return null;
   if (!snapshot) return embedded ? null : error

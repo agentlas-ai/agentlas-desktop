@@ -213,6 +213,8 @@ export function noProxyMatches(noProxy: string, hostname: string, port: number):
 
 let activeProxy: SystemProxyConfig | null = null;
 let restoreProxy: (() => void) | null = null;
+let proxyResolutionReady = false;
+let proxyConfiguredForHost = false;
 
 type SetGlobalProxyFromEnv = (env: Record<string, string>) => () => void;
 
@@ -231,6 +233,8 @@ function proxyConfigKey(config: SystemProxyConfig | null): string {
  * process state changed.
  */
 export function applySystemProxy(config: SystemProxyConfig | null): boolean {
+  proxyResolutionReady = true;
+  proxyConfiguredForHost = config !== null;
   if (proxyConfigKey(config) === proxyConfigKey(activeProxy)) {
     activeProxy = config;
     return false;
@@ -253,6 +257,15 @@ export function applySystemProxy(config: SystemProxyConfig | null): boolean {
 
 export function activeSystemProxy(): SystemProxyConfig | null {
   return activeProxy;
+}
+
+/** Automatic OS trust may include ordinary public roots; only explicit custom bundles gate gzip. */
+export function requestCompressionNetworkState(): import("../../shared/http-request-compression").RequestCompressionNetworkState {
+  return {
+    ready: proxyResolutionReady,
+    proxyConfigured: proxyConfiguredForHost,
+    additionalCaCertificates: Boolean(process.env.NODE_EXTRA_CA_CERTS?.trim() || process.env.SSL_CERT_FILE?.trim() || process.env.SSL_CERT_DIR?.trim()),
+  };
 }
 
 /**

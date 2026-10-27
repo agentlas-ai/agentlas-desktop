@@ -1,3 +1,4 @@
+import { captureGoalExecutionObligations, prepareGoalObligationContinuation } from "../long-run/goal-obligation-context";
 import { channelPublishReceiptsPromptBlockFor } from "../publish-receipts";
 import { resumeDesktopLongRunManually } from "../long-run/app-runtime-coordinator";
 import { getChatGoalRevision } from "../store/chat-goals";
@@ -19,7 +20,7 @@ import { currentUiLocale } from "../ui-locale";
 import { UNCERTAIN_EFFECT_POLICY } from "../../shared/uncertain-effect-policy";
 import { runtimeFailureBlocksReplay } from "../runtime/selection";
 import { runtimeFailureBlocksNextAutomaticTurn } from "../../shared/runtime-turn-admission";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { stripStaffGuidance } from "../one/owner-prompt";
 import { isInterruptedPartial } from "../../shared/interrupted-partial";
 
@@ -210,6 +211,7 @@ export async function prepareInvocationAutomaticGoal(input: {
       acceptanceCriteria: buildAutomaticGoalCriteria({ sourceText: source.text, permission: input.permission,
         lifecycle: resolveGoalLifecycle(decision.lifecycle) }),
       authorityRefs: [`invocation:${input.runId}:permission:${input.permission}`],
+      executionObligations: captureGoalExecutionObligations(input.runId, source),
       budget: { maxCycles: AUTOMATIC_GOAL_CYCLE_LIMIT, maxCostUsd: null, maxWorkers: 2,
         wallclockDeadline: AUTOMATIC_GOAL_TIME_LIMIT_MS == null
           ? null
@@ -351,12 +353,13 @@ export async function queueAutomaticGoalResume(chatId: string, expectedVersion: 
   if (!["paused", "blocked", "queued", "running", "waiting_tool", "verifying", "waiting_user"].includes(initialRun.status)) {
     throw new Error("long_run_resume_dispatch_unavailable");
   }
+  const initialRevision = getChatGoalRevision(initialRun.goalId)?.revision ?? null;
   const initialRecoveryBlocker = goalResumeRecoveryBlockerCode(initialRun.blockedReason);
   if (initialRecoveryBlocker) throw new Error(initialRecoveryBlocker);
-  return getDb().transaction(() => {
+  const claimed = getDb().transaction(() => {
     const chat = getDb().prepare("SELECT goal_id FROM chats WHERE id = ?").get(chatId) as { goal_id: string | null } | undefined;
     const before = chat?.goal_id ? getLongRunByGoalId(chat.goal_id) : null;
-    if (!before) throw new Error("long_run_resume_dispatch_unavailable");
+    if (!before || before.goalId !== initialRun.goalId || getChatGoalRevision(before.goalId)?.revision !== initialRevision) throw new Error("long_run_resume_dispatch_unavailable");
     if (before.version !== expectedVersion) throw new Error("long_run_resume_version_conflict");
     const version = getLongRun(before.id)?.version;
     if (!version) throw new Error("long_run_resume_dispatch_unavailable");
@@ -367,7 +370,8 @@ export async function queueAutomaticGoalResume(chatId: string, expectedVersion: 
       payload: { command: "resume", runtimeReplayBarrier: barrier.observed } });
     getDb().prepare("UPDATE chat_goal_contracts SET status = 'active', completed_at = NULL, updated_at = ? WHERE goal_id = ? AND status = 'blocked'")
       .run(new Date().toISOString(), before.goalId);
-    return { request,
+    return { request: { ...request, runId: randomUUID() },
       queued: resumeDesktopLongRunManually(before.id, getLongRun(before.id)!.version) };
   }).immediate();
+  return { ...claimed, request: await prepareGoalObligationContinuation(claimed.request, { goalId: initialRun.goalId, goalRevision: initialRevision }) };
 }

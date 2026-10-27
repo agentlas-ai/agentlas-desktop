@@ -47,7 +47,7 @@ export interface PendingSendDb {
  * completed the message). "uncertain": the run ended without placement evidence and without proof that nothing was
  * sent; it is never re-sent.
  */
-export type PendingSendState = "queued" | "starting" | "started" | "uncertain" | "failed" | "gave_up" | "abandoned";
+export type PendingSendState = "queued" | "starting" | "started" | "uncertain" | "failed" | "gave_up" | "abandoned" | "held";
 
 export interface PendingSendRecord {
   id: string;
@@ -76,6 +76,11 @@ export interface PendingChatSendsDeps<Sender> {
   random(): number;
   /** No run active, no admission pending, no run-owner row alive for the chat, in either process. */
   isChatFree(chatId: string): boolean;
+  /** Durable owner input waits for its original authenticated account. */
+  /** Main still owns exact original input; elapsed time never consumes it. */
+  persistentInput?(sendId: string, request: McpInvocationRequest): boolean;
+  onHeld?(sendId: string, code: string): void;
+  inputReady?(sendId: string, request: McpInvocationRequest): boolean;
   senderAlive(sender: Sender): boolean;
   /** A live sender of this app to start from when the message's own window is gone (null: none open right now). */
   replacementSender?(chatId: string): Sender | null;
@@ -98,7 +103,11 @@ export interface PendingChatSendsDeps<Sender> {
   /** Saves the owner's message to the transcript now. Null when it could not be saved (the run will save it). */
   saveUserRow(request: McpInvocationRequest): unknown | null;
   /** Starts the run. Throws the start refusal unchanged. `userRow` is the row saved by saveUserRow. */
-  start(sender: Sender, request: McpInvocationRequest, userRow: unknown | null): Promise<unknown>;
+  start(sender: Sender, request: McpInvocationRequest, userRow: unknown | null, sendId: string): Promise<unknown>;
+  /** A Main custody adapter can veto a transient retry whose effect is unknown. */
+  reserveStart?(sendId: string, request: McpInvocationRequest, markStarting: () => void): void;
+  canRetryStart?(request: McpInvocationRequest, runId: string): boolean;
+  onPlaced?(sendId: string, runId: string): void;
   /**
    * The wait ended without a placed run: a permanent refusal, the deadline, a restart, or a run that ended with its
    * placement unconfirmed ("uncertain": never re-sent; `runId` names that run). Never called for a transient refusal.
@@ -130,16 +139,25 @@ export function pendingSendPromptHash(text: string): string {
 }
 
 /**
- * Requests whose start depends on something that cannot be replayed later are not queued: attachment and team-preflight
- * references are consumed by a rejected start, a system-originated prompt has its own retry, and an agent app turn is
- * not a chat message. Those keep today's behavior (the start error is thrown to the caller).
+ * One-use attachment/team refs can wait only after Main has captured exact
+ * durable input custody. The flag is a host decision, never a request field.
+ * System-originated and agent-app turns keep their separate execution lanes.
  */
-export function canQueuePendingSend(request: McpInvocationRequest | null | undefined): request is McpInvocationRequest {
+export function canQueuePendingSend(request: McpInvocationRequest | null | undefined, durableInputCustody = false): request is McpInvocationRequest {
   if (!request || typeof request.chatId !== "string" || !request.chatId) return false;
   if (typeof request.userPrompt !== "string" || !request.userPrompt.trim()) return false;
-  if (request.oneAttachmentRef || request.oneTeamPreflightRef || request.agentAppMode) return false;
+  if (request.agentAppMode || (request.oneAttachmentRef || request.oneTeamPreflightRef) && !durableInputCustody) return false;
   if (request.promptOrigin === "system") return false;
   try { return Buffer.byteLength(JSON.stringify(request), "utf8") <= MAX_REQUEST_BYTES; } catch { return false; }
+}
+
+/** Automatic work yields to accepted owner input without making the queue's
+ * own chatIsFree check see itself as busy. Held/unknown inputs grant no drain
+ * and must not block a newer owner direction. No schema is created here. */
+export function hasQueuedOwnerChatSend(db: Pick<PendingSendDb,"prepare">, chatId:string): boolean {
+  if (!chatId) return false;
+  if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='pending_chat_sends'").get()) return false;
+  return Boolean(db.prepare("SELECT 1 FROM pending_chat_sends WHERE chat_id=? AND state IN ('queued','starting') LIMIT 1").get(chatId));
 }
 
 export function createPendingChatSends<Sender>(deps: PendingChatSendsDeps<Sender>) {
@@ -221,6 +239,11 @@ export function createPendingChatSends<Sender>(deps: PendingChatSendsDeps<Sender
    * `restarted`: the run belonged to an earlier process of this host. A run that provably sent nothing is started
    * again (resumeAfterRestart); one whose placement is unconfirmed is never re-sent; a placed one counts as started.
    */
+  function persistent(row: Row, request: McpInvocationRequest): boolean {
+    try { return deps.persistentInput?.(row.id,request) === true; }
+    catch { return Boolean(request.oneAttachmentRef || request.oneTeamPreflightRef); }
+  }
+
   function settleStarting(row: Row, opts: { restarted?: boolean } = {}): "pending" | "done" {
     const request = JSON.parse(row.request_json) as McpInvocationRequest;
     const chatId = row.chat_id;
@@ -240,10 +263,10 @@ export function createPendingChatSends<Sender>(deps: PendingChatSendsDeps<Sender
     if (runState === "running") return "pending";
     let placement: PendingSendPlacement;
     try { placement = deps.placement(row.run_id); } catch { placement = "unconfirmed"; }
-    if (placement === "placed") { finish("started", null); return "done"; }
+    if (placement === "placed") { finish("started", null); deps.onPlaced?.(row.id, row.run_id); return "done"; }
     let failureCode: string | null = null;
     if (placement === "not-dispatched") { try { failureCode = deps.failureCode?.(row.run_id) ?? null; } catch { failureCode = null; } }
-    if (placement === "not-dispatched" && !opts.restarted && isTransientRunFailureCode(failureCode)) {
+    if (placement === "not-dispatched" && (!opts.restarted || persistent(row,request)) && isTransientRunFailureCode(failureCode)) {
       // Refused before dispatch because the chat or its shared session was occupied (another chat of the Work project, a
       // turn of another conversation on the same seat session, a locked store). Nothing reached a model; the message keeps
       // its place and starts again after a backoff. This is not one of the bounded not-dispatched retries below.
@@ -253,12 +276,22 @@ export function createPendingChatSends<Sender>(deps: PendingChatSendsDeps<Sender
       deps.onChange?.(chatId);
       return "done";
     }
+    if (placement === "not-dispatched" && persistent(row,request) && failureCode && !isTransientRunFailureCode(failureCode)) {
+      finish("held",failureCode);
+      deps.onHeld?.(row.id,failureCode);
+      return "done";
+    }
     // After a restart nothing of that run reached a model either: it is the same message, started again (never silently dropped).
     if (placement === "not-dispatched" && (row.dispatch_retries ?? 0) < MAX_NOT_DISPATCHED_RETRIES) {
       // Nothing reached a model: the message keeps its place (its seq) and starts again once the chat is free.
       requeue.run("not_dispatched", deps.now(), row.id);
       deps.log?.("pending send not dispatched, queued again", { chatId, sendId: row.id, runId: row.run_id });
       deps.onChange?.(chatId);
+      return "done";
+    }
+    if (placement === "not-dispatched" && persistent(row,request)) {
+      finish("held",failureCode ?? "not_dispatched");
+      deps.onHeld?.(row.id,failureCode ?? "not_dispatched");
       return "done";
     }
     if (placement === "not-dispatched") {
@@ -313,12 +346,17 @@ export function createPendingChatSends<Sender>(deps: PendingChatSendsDeps<Sender
         const request = JSON.parse(row.request_json) as McpInvocationRequest;
         // Only continuous refusals count: a message waiting for a busy chat, a window or a restart never gives up.
         if (row.refused_since !== null && row.refused_since !== undefined && deps.now() - row.refused_since > TRANSIENT_SEND_DEADLINE_MS) {
-          setState.run("gave_up", "deadline", deps.now(), row.id);
-          senders.delete(row.id);
-          deps.log?.("pending send gave up", { chatId, sendId: row.id, attempts: row.attempts, code: row.last_code });
-          deps.onEnded?.({ chatId, request, reason: "deadline", ...(row.last_code ? { code: row.last_code } : {}), sendId: row.id });
-          deps.onChange?.(chatId);
-          continue;
+          if (persistent(row,request)) {
+            clearRefusedSince.run(row.id);
+            deps.log?.("pending owner input retained after refusal window",{chatId,sendId:row.id,code:row.last_code});
+          } else {
+            setState.run("gave_up", "deadline", deps.now(), row.id);
+            senders.delete(row.id);
+            deps.log?.("pending send gave up", { chatId, sendId: row.id, attempts: row.attempts, code: row.last_code });
+            deps.onEnded?.({ chatId, request, reason: "deadline", ...(row.last_code ? { code: row.last_code } : {}), sendId: row.id });
+            deps.onChange?.(chatId);
+            continue;
+          }
         }
         // The queue is Main's, not the window's: a closed window hands its messages to another live window of the app,
         // and with none open the message waits for one (bounded by the deadline above) instead of being dropped.
@@ -334,6 +372,17 @@ export function createPendingChatSends<Sender>(deps: PendingChatSendsDeps<Sender
         if (row.not_before !== null && row.not_before !== undefined && row.not_before > deps.now()) {
           kick(chatId, row.not_before - deps.now()); return;
         }
+        if (deps.inputReady && !deps.inputReady(row.id, request)) {
+          clearRefusedSince.run(row.id);
+          if (persistent(row,request)) {
+            setState.run("held","queued_input_authority_unavailable",deps.now(),row.id);
+            deps.onHeld?.(row.id,"queued_input_authority_unavailable");
+            senders.delete(row.id);
+            deps.onChange?.(chatId);
+            continue; // Retain this input without blocking a newer owner direction.
+          }
+          kick(chatId, SENDER_WAIT_POLL_MS); return;
+        }
         if (!deps.isChatFree(chatId)) {
           try { deps.onBusyWait?.({ chatId, waitedMs: deps.now() - row.created_at, attempts: row.attempts }); } catch { /* diagnosis never blocks the drain */ }
           // The wiring may have just released the blocker: look again at once instead of after the poll gap.
@@ -347,7 +396,12 @@ export function createPendingChatSends<Sender>(deps: PendingChatSendsDeps<Sender
         try {
           // Every attempt is a new run: a refused start has already closed its own admission.
           const runId = randomUUID();
-          const answer = await deps.start(sender as Sender, { ...request, runId, preflightSubmissionId: undefined }, rec.userRow);
+          if (request.oneAttachmentRef || request.oneTeamPreflightRef) {
+            const markStarting = () => { setStarting.run(runId, deps.now(), row.id); };
+            if (deps.reserveStart) deps.reserveStart(row.id,{...request,runId},markStarting);
+            else markStarting();
+          }
+          const answer = await deps.start(sender as Sender, { ...request, runId }, rec.userRow, row.id);
           const startedRunId = answer && typeof (answer as { runId?: unknown }).runId === "string" ? (answer as { runId: string }).runId : runId;
           // Admitted, not placed: the row stays until the run's placement is known (settleStarting).
           setStarting.run(startedRunId, deps.now(), row.id);
@@ -357,20 +411,45 @@ export function createPendingChatSends<Sender>(deps: PendingChatSendsDeps<Sender
           continue;
         } catch (cause) {
           const code = sendRefusalCode(cause);
+          // A source may report a native failure after delivery. Queue transport
+          // is already complete; its separate run receipt owns the failure UI.
+          const failedRun=(byId.get(row.id) as Row).run_id;
+          let failedPlacement:PendingSendPlacement="unconfirmed";
+          try { if (failedRun) failedPlacement=deps.placement(failedRun); } catch { /* Unknown never grants replay. */ }
+          if (failedRun && failedPlacement==="placed") {
+            setState.run("started",null,deps.now(),row.id);
+            senders.delete(row.id);
+            deps.onPlaced?.(row.id,failedRun);
+            deps.onChange?.(chatId);
+            continue;
+          }
           let refusedSender = false;
           try { refusedSender = deps.senderRefused?.(cause) === true; } catch { refusedSender = false; }
           if (refusedSender) {
+            setState.run("queued", null, deps.now(), row.id);
             senders.delete(row.id);
             deps.log?.("pending send waits for a usable window", { chatId, sendId: row.id, code });
             kick(chatId, SENDER_WAIT_POLL_MS);
             return;
           }
-          if (isTransientSendRefusal(cause)) {
+          if (isTransientSendRefusal(cause) && (!deps.canRetryStart || deps.canRetryStart(request, (byId.get(row.id) as Row).run_id ?? ""))) {
+            setState.run("queued", null, deps.now(), row.id);
             setAttempt.run(code ?? null, deps.now(), deps.now(), row.id);
             const base = transientSendBackoffMs(row.attempts);
             deps.log?.("pending send refused, will retry", { chatId, sendId: row.id, attempt: row.attempts + 1, code });
             kick(chatId, Math.round(base * (0.8 + deps.random() * 0.4)));
             return;
+          }
+          if (persistent(row,request)) {
+            const runId=(byId.get(row.id) as Row).run_id;
+            let fact: PendingSendPlacement="unconfirmed";
+            try { if (runId) fact=deps.placement(runId); } catch { /* Unknown never grants retry. */ }
+            const state=fact === "not-dispatched" ? "held" : "uncertain";
+            setState.run(state,code ?? "start_failed",deps.now(),row.id);
+            deps.onHeld?.(row.id,code ?? "start_failed");
+            senders.delete(row.id);
+            deps.onChange?.(chatId);
+            continue;
           }
           setState.run("failed", code ?? "start_failed", deps.now(), row.id);
           senders.delete(row.id);
@@ -405,7 +484,7 @@ export function createPendingChatSends<Sender>(deps: PendingChatSendsDeps<Sender
       let userRow: unknown | null = null;
       try { userRow = deps.saveUserRow(request); } catch { userRow = null; }
       const now = deps.now();
-      const stored = { ...request, runId: undefined, preflightSubmissionId: undefined };
+      const stored = { ...request, runId: undefined };
       insert.run(id, request.chatId, options.intentId ?? null, JSON.stringify(stored),
         userRow === null ? null : JSON.stringify(userRow), pendingSendPromptHash(request.userPrompt), now, now);
       senders.set(id, sender);
@@ -414,6 +493,16 @@ export function createPendingChatSends<Sender>(deps: PendingChatSendsDeps<Sender
       deps.onChange?.(request.chatId);
       kick(request.chatId, options.cause === undefined ? 0 : transientSendBackoffMs(0));
       return record(byId.get(id) as Row);
+    },
+    /** Main may retain an unstarted input whose capability still needs repair.
+     * This is storage only: held rows cannot enter the drain or block a new turn. */
+    hold(id:string,code:string,runId?:string):void {
+      const row=byId.get(id) as Row|undefined;
+      if (!row || row.state!=="queued" || row.run_id) throw new Error("pending_send_hold_changed");
+      deps.db.prepare("UPDATE pending_chat_sends SET state='held',last_code=?,run_id=?,updated_at=? WHERE id=?")
+        .run(code,runId ?? null,deps.now(),id);
+      senders.delete(id);
+      deps.onChange?.(row.chat_id);
     },
     find(chatId: string, intentId: string): PendingSendRecord | null {
       const row = byIntent.get(chatId, intentId) as Row | undefined;

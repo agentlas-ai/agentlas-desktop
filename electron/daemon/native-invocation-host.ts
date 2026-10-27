@@ -9,7 +9,7 @@ import type { ControlSocketPeer } from "./control-socket";
 import { assertNativeAuthBinding, type NativeAuthBinding } from "./native-auth-credentials";
 import type { NativeAuthenticatedIdentity } from "./native-session-auth";
 import { makeNativePreparationWireRequest, nativeStartDescriptor, sameNativeStartBinding, type NativePreparationWireRequest, type NativeStartDescriptor } from "./native-start-protocol";
-import { importNativeJsonValue } from "./native-json-transfer";
+import { importNativeJsonValue, importNativeSupervisorJsonResult, NATIVE_SUPERVISOR_JSON_VERSION } from "./native-json-transfer";
 import { importNativeWorkImages, type NativeWorkImageChunk, type NativeWorkImageDescriptor } from "./native-image-transport";
 import { importNativeOneInlineImages, type NativeOneInlineImageDescriptor, type NativeOneInlineImageChunk } from "./native-one-inline-images";
 import { createNativePreparationControl, type NativePreparationControl } from "./native-preparation-control";
@@ -181,7 +181,20 @@ export function createDaemonNativeInvocationHost(options: {
           if (!proof) denied("native_host_service_observation_required");
           return r.observation.dispatch(makeNativePreparationWireRequest(r.start, "checkpoint", { kind: "attachments.claim", payload }), proof);
         } });
-      if(supervisorHost===true && request.oneMode===true)r.releaseSupervisor=registerSupervisorNativeRelay(request.chatId,binding.runId,(name,input)=>r.control.request('supervisor.command',{name,input}));
+      if (supervisorHost === true && request.oneMode === true) r.releaseSupervisor = registerSupervisorNativeRelay(request.chatId, binding.runId, async (name, input) => {
+        if (name !== "one_app_operations") return r.control.request("supervisor.command", { name, input });
+        current(r); signal.throwIfAborted();
+        let result: unknown;
+        try { result = await r.control.request("supervisor.command", { name, input, resultTransport: NATIVE_SUPERVISOR_JSON_VERSION }); }
+        catch (error) {
+          if ((error as { code?: unknown })?.code === "native_supervisor_command_invalid") denied("native_supervisor_result_transport_unsupported");
+          throw error; // No retry after an unknown command outcome, including on older hosts.
+        }
+        return importNativeSupervisorJsonResult(result, { maxBytes: options.maxTransferBytes, signal, assertCurrent: () => current(r),
+          receive: transfer => json(r, transfer, "checkpoint-value", signal),
+          release: captured => r.control.request("supervisor.command", { resultTransport: NATIVE_SUPERVISOR_JSON_VERSION, release: captured }),
+        });
+      });
       r.preparedReturned = true;
       return { request, port, ...(hostNoticePurpose?{hostNoticePurpose:hostNoticePurpose as SupervisorHostNoticePurpose}:{}) };
     },
@@ -203,9 +216,9 @@ export function createDaemonNativeInvocationHost(options: {
     bootstrapCurrent();
     const identity = options.transport.authenticatedPeerIdentity(peer), descriptor = nativeStartDescriptor(input);
     if (!identity || identity.scope !== options.binding.scope || identity.serviceIdentity !== options.binding.serviceIdentity || identity.bootId !== options.bootId) denied("native_host_authenticated_main_required");
-    if (records.has(descriptor.handle) || [...records.values()].some(r => r.binding.runId === descriptor.binding.runId)) denied("native_host_original_start_replayed");
-    if ([...records.values()].filter(r => !r.source || !options.service.nativeExecutableAuthorityClosedForSource(r.source)).length >= options.maxRecords) denied("native_host_record_capacity");
     compactClosedSources();
+    if (closedSources.has(descriptor.handle) || records.has(descriptor.handle) || [...records.values()].some(r => r.binding.runId === descriptor.binding.runId)) denied("native_host_original_start_replayed");
+    if ([...records.values()].filter(r => !r.source || !options.service.nativeExecutableAuthorityClosedForSource(r.source)).length >= options.maxRecords) denied("native_host_record_capacity");
     const binding = Object.freeze({ ...descriptor.binding, ownerProcessEpoch: options.bootId });
     const issuer = Object.freeze({}), terminal = options.transport.createTerminalCheckpointPort(peer, descriptor), rejection = options.transport.createIngressNoStartPort(peer, descriptor);
     const r: RecordState = { peer, identity, ingressIdentity: Object.freeze({ peer: identity, generation: identity.generation, serviceIdentity: identity.serviceIdentity, bootId: identity.bootId, ownerId: options.bootId, storeIdentity: identity.scope }), binding, start: descriptor, issuer,

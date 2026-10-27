@@ -1,3 +1,4 @@
+import type { AppControlCaller } from "./service";
 import { DEVICE_BRIDGE_UNAVAILABLE_MESSAGE, DeviceBridgeError, daemonDeviceBridge, type DaemonDeviceBridge } from "../daemon/device-bridge";
 import { AppControlError } from "./ipc-registry";
 
@@ -27,13 +28,13 @@ export async function remoteAppControlOperations<T extends object>(input: Record
   }
 }
 
-export async function remoteAppControlCall(caller: { ownerTurn: boolean }, input: { operation?: unknown; args?: unknown; scope?: { chatId?: unknown } }, bridge: AppBridge = daemonDeviceBridge()): Promise<Record<string, unknown>> {
+export async function remoteAppControlCall(caller: AppControlCaller, input: { operation?: unknown; args?: unknown; scope?: { chatId?: unknown } }, bridge: AppBridge = daemonDeviceBridge()): Promise<Record<string, unknown>> {
   let answer;
   // An absent args stays absent: { args: undefined } is not a wire value (dev 2026-10-18 run9, app.call automations.list).
   // A scope (the conversation a harness port checked) travels in the same input object; an absent one stays absent.
   const request = { operation: input.operation, ...(input.args !== undefined ? { args: input.args } : {}),
     ...(typeof input.scope?.chatId === "string" ? { scope: { chatId: input.scope.chatId } } : {}) };
-  try { answer = await bridge.appControl({ kind: "call", ownerTurn: caller.ownerTurn === true, input: request }); }
+  try { answer = await bridge.appControl({ kind: "call", ownerTurn: caller.ownerTurn === true, permission: caller.permission ?? "read", input: request }); }
   catch (error) { const { code, message } = unavailable(error); throw new AppControlError(code, message); }
   if (answer.outcome === "value") return answer.value as Record<string, unknown>;
   // Main's AppControlError text already leads with its code ("operation-not-allowed: ..."); keep it once.

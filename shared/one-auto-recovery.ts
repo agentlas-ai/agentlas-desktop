@@ -151,6 +151,11 @@ export function oneAutoRecoveryTerminalStop(
   if (receipt.status === "cancelled") return { retry: false, reason: "stopped-by-user" };
   if (receipt.hostStopCause) return { retry: false, reason: "settled" };
   if (receipt.status !== "failed" && receipt.status !== "interrupted") return null;
+  // A host turn the Goal refused because it waits for the owner is not a failure to repair: its text was parked and
+  // rides the room's next turn (deferred-system-relays.ts), and a recovery turn is itself a host turn the same wait
+  // refuses again. Yotube 2026-10-25 07:23:26Z: recovery b0af3b8a of refused relay d67af4e9 spent a judge call, was
+  // refused, and its "the previous attempt did not get through" prompt rode into the owner's answer turn.
+  if (receipt.errorCode === "goal_waiting_system_start_refused") return { retry: false, reason: "settled" };
   if (runtimeFailureBlocksNextAutomaticTurn({ providerCode: receipt.errorCode })) return { retry: false, reason: "no-progress" };
   return null;
 }

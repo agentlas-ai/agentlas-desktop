@@ -106,9 +106,16 @@ export class CapabilityRegistry {
           current.description = incoming.description;
           if (current.status === "degraded") current.status = "candidate";
         }
+        // ... and the other way: the current rule withholds what an older, looser rule had given a body, so the rescan takes the body away (independent review 7, V1)
+        else if (incoming.tier === "structure" && !incoming.body && current.tier === "structure" && current.traits?.includes("menu-command")) {
+          delete current.body;
+          if (incoming.traits) current.traits = incoming.traits; else delete current.traits;
+          current.description = incoming.description;
+        }
         // a fresh probe of the same dialog replaces the shape (the app may have changed) and re-binds the fingerprint
         if (incoming.status === "verified") {
           current.parameters = incoming.parameters;
+          current.dialogPolicyRevision = incoming.dialogPolicyRevision;
           if (incoming.body) current.body = incoming.body;
           if (incoming.postconditions) current.postconditions = incoming.postconditions;
           current.boundFingerprint = incoming.boundFingerprint ?? fingerprint;

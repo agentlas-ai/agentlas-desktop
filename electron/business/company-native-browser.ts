@@ -3,6 +3,8 @@ import { COMPANY_NATIVE_BASE, isCompanyNativeEnrollment, type CompanyNativeEnrol
 
 export interface CompanyNativeBrowserPort {
   currentSession(): Promise<BusinessSession | null>;
+  /** Local stop fence for an already authenticated original; never creates identity or reads cookies. */
+  retainsOriginalSession(expected: BusinessSession): boolean;
   approve(input: CompanyNativeEnrollment, expected: BusinessSession): Promise<{ challengeId: string; expiresAt: number } | null>;
 }
 /** This fixed route returns a public challenge. PKCE consumption and delivery of

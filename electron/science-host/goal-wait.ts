@@ -7,7 +7,7 @@ import type { InvocationExecutionContext } from "../mcp/client";
 import type { CanonicalGoalWaitOwnerRef, CanonicalGoalWaitOwnerProvider, CanonicalGoalWaitSourceToken, CanonicalGoalWaitPrepared,
   CanonicalGoalWaitIntake, CanonicalGoalWaitOwnerSnapshot } from "../long-run/canonical-owner-port";
 import type { GoalWaitHostOwner } from "../long-run/wait-subscriptions";
-import type { TimerWaitAuthority } from "../long-run/goal-deadline";
+import { goalTimerAuthorityForOwner } from "../long-run/goal-deadline";
 import { getDb } from "../store/db";
 import { readQuestionDecision } from "../confirm";
 import { readGoalWaitProposal } from "../long-run/goal-wait-proposal";
@@ -93,9 +93,7 @@ export function createScienceCanonicalGoalWaitOwner(ports:{owner():GoalWaitHostO
     const sourceStamp=sha({...common,loop:sourceLoop});
     const ownerStamp=sha({...common,loop:{id:loop.id,version:loop.version,stateSha256:loop.stateSha256,status:loop.status,activeRunId:loop.activeRunId}});
     const deadline=budget?.deadlineAt??null;
-    const timer:TimerWaitAuthority=!deadline?{ok:false,reason:"goal_wait_ongoing_authority_required"}
-      :!Number.isFinite(Date.parse(deadline))||Date.parse(deadline)<=Date.now()?{ok:false,reason:"goal_wait_goal_deadline_passed"}
-      :{ok:true,lifecycle:"finite",deadlineAt:deadline};
+    const timer=goalTimerAuthorityForOwner({lifecycle:"finite"});
     return {store,source,binding,registered,chat,loop,owner,control,budget,sourceStamp,ownerStamp,deadline,timer,reserved};
   }
   // Strict callers cannot opt into observation mode or receive a nullable owner.

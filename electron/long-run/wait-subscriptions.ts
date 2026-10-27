@@ -1,3 +1,4 @@
+import { prepareGoalObligationContinuation, abandonGoalObligationContinuation } from "./goal-obligation-context";
 import { appendGoalWaitObservation, createGoalWaitObservationData, goalWaitSubjectRef as identity } from "./goal-wait-observation";
 import { pollCanonicalGoalWaits, reconcileCanonicalGoalWaits } from "./canonical-owner-waits";
 import { normalizeGoalWaitTimer } from "./normalize-timer";
@@ -32,6 +33,37 @@ import { parseGoalWaitIntent, type GoalWaitIntent } from "./wait-emitter";
 import { timerWaitAuthority } from "./goal-deadline";
 import { decideGoalWake, recordGoalWake } from "./wake-arbiter";
 import { getAutomation } from "../store/automations";
+import { getInvocationRunReceipt } from "../store/run-events";
+import type { LongRunRecord } from "../store/long-runs";
+
+/** Keep the actual producing turn's permission; old Goal metadata is a fallback, never a new approval gate. */
+export function goalWaitContinuationPermission(chatId: string, invocationRunId: string,
+  revision: { authorityRefs: readonly string[] } | null | undefined): "read" | "write" | "full" | undefined {
+  try {
+    const source = getInvocationRunReceipt(invocationRunId);
+    if (source?.chatId === chatId && ["read", "write", "full"].includes(source.executionPermission ?? "")) {
+      return source.executionPermission;
+    }
+  } catch { /* Retain the saved grant when an older receipt cannot be read. */ }
+  const grant = revision?.authorityRefs.map(ref => /^invocation:([^:]+):permission:(read|write|full)$/.exec(ref)).find(Boolean);
+  return grant?.[2] as "read" | "write" | "full" | undefined;
+}
+
+/** Historical checkpoints and budgets are observations, not an automatic wait veto. */
+export function recordGoalWaitDiagnostics(wait: { waitId: string }, current: LongRunRecord,
+  checkpoint: Pick<LongRunTaskCheckpoint, "sideEffects"> | null | undefined, now: number): void {
+  try {
+    const reasons: string[] = [];
+    if (checkpoint?.sideEffects.state !== "settled") reasons.push("prior_effects_unsettled");
+    const deadline = current.budget.wallclockDeadline ? Date.parse(current.budget.wallclockDeadline) : Number.NaN;
+    if (Number.isFinite(deadline) && now >= deadline) reasons.push("past_wallclock_budget");
+    if (current.budget.maxCycles != null && current.cycleCount >= current.budget.maxCycles) reasons.push("past_cycle_budget");
+    const monetary = longRunMonetaryRefusal(current);
+    if (monetary) reasons.push(monetary);
+    if (reasons.length) appendLongRunEvent({ runId: current.id, kind: "run.wait_prior_metadata", actorKind: "host",
+      payload: { waitId: wait.waitId, reasons } });
+  } catch { /* Diagnostic failure never suspends an existing request. */ }
+}
 
 export interface GoalWaitSubscription {
   episodeCaptureId?: string; episodeRequestId?: string;
@@ -232,13 +264,12 @@ export function registerGoalWaitSubscription(input: { goalId: string; invocation
   const now = input.now ?? Date.now();
   return getDb().transaction(() => {
     const run = getLongRunByGoalId(input.goalId), revision = getChatGoalRevision(input.goalId);
-    if (!run || !revision || !run.rootChatId || run.surface === "science" || run.status !== "running"
+    if (!run || !revision || !run.rootChatId || run.surface === "science"
       || getChat(run.rootChatId)?.goalId !== run.goalId) throw new Error("goal_wait_goal_not_running");
-    if (!revision.authorityRefs.some(ref => /^invocation:([^:]+):permission:(read|write|full)$/.test(ref))) throw new Error("goal_wait_original_authority_missing");
     if (input.hasTransientAttachments) throw new Error("goal_wait_attachment_refresh_required");
     if (input.intent.deadline && Date.parse(input.intent.deadline) <= now) throw new Error("goal_wait_deadline_elapsed");
     if (input.intent.subject.kind === "timer") {
-      // Ongoing Goals, and finite Goals with a deadline up to that deadline (goal-deadline.ts, owner 2026-09-27).
+      // Timer registration uses the requested time, independent of old lifecycle/grant/deadline metadata.
       input = { ...input, intent: normalizeGoalWaitTimer(input.intent, timerWaitAuthority(run.goalId, now), now) };
     }
     if (input.recoveryMode && (!ownsHostGoalLoop(run.surface) || input.intent.subject.kind !== "timer"
@@ -603,20 +634,10 @@ export async function pollGoalWaitSubscriptions(options: { now?: number; clock?:
         const checkpoint = candidateCheckpoint(wait);
         prepareCheckpointContinuation(checkpoint);
         if (!ownsHostGoalLoop(current.surface) || !revision
-          || (revision.lifecycle !== "ongoing" && !(wait.intent.subject.kind === "timer"
-            && timerWaitAuthority(wait.goalId, Date.parse(wait.intent.subject.notBefore) - 1).ok))
           || revision.revision !== wait.goalRevision || getChat(wait.chatId)?.goalId !== wait.goalId) {
           failure = "goal_wait_goal_revision_changed";
-        } else if (!revision.authorityRefs.some(ref => /^invocation:([^:]+):permission:(read|write|full)$/.test(ref))) {
-          failure = "goal_wait_original_authority_missing";
-        } else if (checkpoint.sideEffects.state !== "settled") {
-          failure = "goal_wait_checkpoint_not_settled";
-        } else {
-          const deadline = current.budget.wallclockDeadline ? Date.parse(current.budget.wallclockDeadline) : Number.NaN;
-          failure = Number.isFinite(deadline) && clock() >= deadline ? "budget_wallclock_exhausted"
-            : current.budget.maxCycles != null && current.cycleCount >= current.budget.maxCycles ? "budget_cycles_exhausted"
-              : longRunMonetaryRefusal(current);
         }
+        recordGoalWaitDiagnostics(wait, current, checkpoint, clock());
       } catch { failure = "goal_wait_context_changed"; }
     }
     let quotaInventory: Awaited<ReturnType<typeof detectRuntimes>> | null = null;
@@ -685,17 +706,12 @@ export async function pollGoalWaitSubscriptions(options: { now?: number; clock?:
       if (getChatGoalRevision(wait.goalId)?.revision !== wait.goalRevision || getChat(wait.chatId)?.goalId !== wait.goalId) failure = "goal_wait_goal_revision_changed";
       if (wait.recoveryMode) {
         const revision = getChatGoalRevision(wait.goalId);
-        if (!ownsHostGoalLoop(current.surface) || revision?.lifecycle !== "ongoing"
-          || !revision.authorityRefs.some(ref => /^invocation:([^:]+):permission:(read|write|full)$/.test(ref))
+        if (!ownsHostGoalLoop(current.surface) || !revision
           || current.stallStreak < current.stallWindow
           || wait.recoveryProgressKey !== (current.lastProgressKey ?? `one-host:unknown:revision:${revision.revision}`)) {
           failure = "goal_wait_stall_recovery_invalid";
         }
-        const deadline = current.budget.wallclockDeadline ? Date.parse(current.budget.wallclockDeadline) : Number.NaN;
-        if (Number.isFinite(deadline) && clock() >= deadline) failure = "budget_wallclock_exhausted";
-        else if (current.budget.maxCycles != null && current.cycleCount >= current.budget.maxCycles) failure = "budget_cycles_exhausted";
-        else failure = longRunMonetaryRefusal(current) ?? failure;
-        if (checkpoint?.sideEffects.state !== "settled") failure = "goal_wait_checkpoint_not_settled";
+        recordGoalWaitDiagnostics(wait, current, checkpoint, clock());
       }
       const expired = wait.deadline !== null && Date.parse(wait.deadline) <= clock();
       if (current.status === "paused") {
@@ -797,11 +813,11 @@ export async function pollGoalWaitSubscriptions(options: { now?: number; clock?:
       }, wait, () => {
       transitionLongRun({ runId: current.id, to: "running", actorKind: "host", reason: "goal_wait_satisfied" });
       if (wait.intent.subject.kind === "timer" && !listLongRunTasks(current.id, true).length) {
-        // The deadline itself has arrived for a finite Goal: this cycle is the one that verifies the target.
+        // The requested timer opens the next work cycle without reinterpreting a prior plan cutoff.
         const authority = timerWaitAuthority(wait.goalId, Date.parse(wait.intent.subject.notBefore) - 1);
         if (!authority.ok) throw new Error(authority.reason);
         addLongRunTask({ runId: current.id, id: `task:ongoing:${wait.waitId}`, title: authority.lifecycle === "ongoing"
-          ? "Next ongoing work cycle" : "Next work cycle before the goal deadline", objective: current.objective,
+          ? "Next ongoing work cycle" : "Next scheduled work cycle", objective: current.objective,
           acceptanceCriteria: current.acceptanceCriteria, criterionIndices: current.acceptanceCriteria.map((_, index) => index) });
       }
       const fresh = recordTaskCheckpoint({ goalId: wait.goalId, workerId: checkpoint.capsule.workerId, attempt: checkpoint.capsule.attempt,
@@ -811,8 +827,7 @@ export async function pollGoalWaitSubscriptions(options: { now?: number; clock?:
       if (!claimCheckpointContinuation(wait.goalId, fresh.checkpointId, successor,
         wait.recoveryMode || wait.observationOnly ? wait.waitId : undefined)) throw new Error("goal_wait_successor_claim_refused");
       const revision = getChatGoalRevision(wait.goalId)!;
-      const authority = revision.authorityRefs.map(ref => /^invocation:([^:]+):permission:(read|write|full)$/.exec(ref)).find(Boolean);
-      if (!authority) throw new Error("goal_wait_original_authority_missing");
+      const permission = goalWaitContinuationPermission(wait.chatId, wait.sourceInvocationId, revision);
       next.state = "claimed"; next.wakeReason = observation.reason ?? "artifact_changed"; next.nextCheckAt = null;
       next.checkpointId = fresh.checkpointId; next.successorInvocationId = successor;
       next.dispatchOwner = owner; next.dispatchRunOwnerEpoch = current.appInstanceId;
@@ -821,14 +836,12 @@ export async function pollGoalWaitSubscriptions(options: { now?: number; clock?:
         request: { chatId: wait.chatId, runId: successor, userPrompt: appendGoalWaitObservation(prepared.userPrompt, createGoalWaitObservationData({
           waitId:wait.waitId,subjectRef:wait.subjectRef,cursor:wait.cursor,lastObservedDigest:wait.lastObservedDigest,
           observation,reason:next.wakeReason,
-          nextAction: wait.recoveryMode ? "Inspect a different route read-only. Do not make an external change in this diagnostic episode."
-            : wait.observationOnly ? "Inspect current state and prior action receipts read-only. Do not make an external change in this observation episode."
-              : wait.intent.nextAction,
+          nextAction: wait.intent.nextAction,
           ...(wait.recoveryMode ? {stallReplan:latestRuntimePlan(current.id)?.stallReplan??null}:{}),
         })), promptOrigin: "system", taskIntent: "task",
-          permissions: wait.recoveryMode || wait.observationOnly ? "read" : authority[2] as "read" | "write" | "full", runtimeSelection: prepared.runtimeSelection,
+          permissions: permission, runtimeSelection: prepared.runtimeSelection,
           ...(current.surface === "one" ? { oneMode: true,
-            onePermissionMode: wait.recoveryMode || wait.observationOnly ? "read" as const : authority[2] as "read" | "write" | "full" } : {}) } } };
+            onePermissionMode: permission } : {}) } } };
       });
     }).immediate(); } catch (error) {
       const code = error && typeof error === "object" && "code" in error ? error.code : null;
@@ -846,8 +859,11 @@ export async function pollGoalWaitSubscriptions(options: { now?: number; clock?:
     }
     if (dispatch) {
       const claimed = dispatch as GoalWaitDispatch;
+      let obligationPreparationError: unknown;
+      try { claimed.request = await prepareGoalObligationContinuation(claimed.request, { goalId: wait.goalId, goalRevision: wait.goalRevision }); }
+      catch (error) { obligationPreparationError = error; }
       const expected = latestGoalWaitSubscription(claimed.goalId);
-      if (!expected) return;
+      if (!expected) { abandonGoalObligationContinuation(claimed.request); return; }
       notice = dispatchWaitClaim<GoalWaitSubscription>({
         storage: {
           transaction: body => desktopStoreTransaction(getDb(), body).immediate(),
@@ -863,13 +879,15 @@ export async function pollGoalWaitSubscriptions(options: { now?: number; clock?:
           if (episodeWaitFenceReason(latest, clock())) throw new Error("goal_wait_episode_fenced");
           assertDesktopLongRunAdmissionOpen();
         },
-        start: () => ({ start: true, runId: target.dispatch(claimed).runId }),
+        start: () => { if (obligationPreparationError) throw obligationPreparationError;
+          return { start: true, runId: target.dispatch(claimed).runId }; },
         failureState: expected.episodeRequestId ? "claimed" : "cancelled",
         failureReason: expected.episodeRequestId ? "goal_episode_dispatch_unknown" : "goal_wait_dispatch_failed",
         onStarted: () => recordGoalWake({ runId: expected.runId, chatId: claimed.request.chatId ?? "", source: "wait",
           invocationRunId: claimed.invocationRunId, cause: expected.wakeReason ?? "goal_wait" }),
         onFinal: latest => { if (latest.state === "cancelled") scheduleFreshGoalWaitContinuation(latest, latest.wakeReason!, clock()); },
       });
+      if (!notice || (notice as GoalWaitSubscription).state !== "dispatched") abandonGoalObligationContinuation(claimed.request);
     }
     // Routine timed cycles are quiet; failures still ask for attention once.
     if (notice && ownsCandidate(getLongRun(candidate.id))

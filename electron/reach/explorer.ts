@@ -2,10 +2,11 @@ import type { Actuator, ActuatorApp } from "./actuator";
 import { probeDialog, synthesizeDialogCapability, type ProbeResult } from "./dialog-probe";
 import { withForeground } from "./foreground";
 import { findLiveCandidates, firstWithWindow, isLiveApp } from "./app-match";
-import { isRiskyMenuPath, isSensitiveApp, opensFilePicker, startsWithPath, systemInsertedPrefixes } from "./explore-policy";
-import { enumerateMenus, menuCapabilities, menuLeaves, opensDialog, type MenuTarget, findMenuWindow } from "./menu-probe";
+import { isRiskyMenuPath, isSensitiveApp, opensFilePicker, startsWithPath } from "./explore-policy";
+import { enumerateMenus, readSystemMenuProof, menuCapabilities, menuLeaves, opensDialog, type MenuTarget, findMenuWindow } from "./menu-probe";
+import { isCurrentDialogCapability, menuPathOf } from "./map";
 import type { CapabilityRegistry } from "./registry";
-import type { Capability } from "./types";
+import { DIALOG_POLICY_REVISION, type Capability } from "./types";
 
 // Explores ONE running app: reads its menu bar, then opens a bounded number of its dialog-opening menu items one by one, reads each
 // dialog's controls and closes it again, and records what it learned. It runs only when the caller says the owner is away, brings the app to
@@ -86,12 +87,15 @@ export async function exploreApp(ports: ExplorePorts, app: ExploreApp, options: 
   // The owner's app comes back afterwards.
   let finished = true;
   const front = await withForeground(ports.actuator, target, async () => {
+    // A bounded exploration map cannot prove absence of an injected system item. Require the complete raw sibling shape first.
+    const safety = await readSystemMenuProof(ports.actuator, target, ports.signal);
+    if (!safety.ok) { report.blocked = true; finished = false; return; }
     // 1. the menu bar: read from the accessibility tree, nothing pressed
     const scan = await enumerateMenus(ports.actuator, target, { signal: ports.signal, shouldStop: ports.shouldStop, maxNodes: options.maxMenuNodes ?? 900, ...(ports.sleep ? { sleep: ports.sleep } : {}) });
     const leaves = menuLeaves(scan.nodes);
     report.menuItems = leaves.length;
     const day = ports.day();
-    await ports.registry.upsert(app.key, app.fingerprint, menuCapabilities(app.key, scan.nodes, ports.actuator.platform ?? "darwin", { sensors: app.sensors === true }), day);
+    await ports.registry.upsert(app.key, app.fingerprint, menuCapabilities(app.key, scan.nodes, ports.actuator.platform ?? "darwin", { sensors: app.sensors === true, systemPrefixes: safety.prefixes }), day);
     // A menu that would not close again means the app is not at rest: nothing else is pressed in it.
     if (scan.stuck) { report.blocked = true; finished = false; return; }
     if (ports.shouldStop() || ports.signal?.aborted) { report.stoppedEarly = true; finished = false; return; }
@@ -99,14 +103,22 @@ export async function exploreApp(ports: ExplorePorts, app: ExploreApp, options: 
     // 2. which dialog-opening items are worth a try
     const existing = new Map((await ports.registry.capabilities(app.key)).map((capability) => [capability.id, capability]));
     const candidates: string[][] = [];
-    const systemInserted = systemInsertedPrefixes(scan.nodes, ports.actuator.platform ?? "darwin");
+    const systemInserted = safety.prefixes;
+    // Withdraw old dialog grants before considering the known-verified shortcut.
+    for (const capability of existing.values()) {
+      if (capability.tier !== "explored" || capability.status === "degraded") continue;
+      const path = menuPathOf(capability);
+      if (!isCurrentDialogCapability(capability, { ...app, platform: ports.actuator.platform ?? "darwin" }) || (path && systemInserted.some((prefix) => startsWithPath(path, prefix)))) {
+        await ports.registry.recordOutcome(app.key, app.fingerprint, capability.id, { ok: false, code: "rule_tightened" }, day);
+      }
+    }
     for (const leaf of leaves) {
       if (!opensDialog(leaf.label) || isRiskyMenuPath(leaf.path) || systemInserted.some((prefix) => startsWithPath(leaf.path, prefix))) continue;
       if ((ports.actuator.platform ?? "darwin") !== "darwin" && opensFilePicker(leaf.path)) continue;
       if (!leaf.enabled) continue; // switched off right now (no document): looked at again in a later pass, not counted as a failure
       const id = `${app.key}#explored:dialog/${leaf.path.join(">")}`;
       const known = existing.get(id);
-      if (known?.status === "verified" && known.boundFingerprint === app.fingerprint) continue; // already proven for this version
+      if (known?.status === "verified" && known.boundFingerprint === app.fingerprint && known.dialogPolicyRevision === DIALOG_POLICY_REVISION) continue; // already proven for this version
       if (await ports.registry.shouldSkip(app.key, id)) continue;
       candidates.push(leaf.path);
     }

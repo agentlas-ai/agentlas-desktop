@@ -3,7 +3,8 @@ import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { getChat } from "../store/chats";
-import { pathFromGrant } from "../fs/access";
+import { grantPath, pathFromGrant } from "../fs/access";
+import type { QueuedInputAttempt, QueuedInputEscrow, QueuedInputOwner } from "./queued-input-escrow";
 import type { McpInvocationEvent, McpInvocationRequest } from "../../shared/types";
 import {
   ONE_ATTACHMENT_CONTRACT_VERSION,
@@ -805,4 +806,92 @@ export function claimPreparedOneAttachments(proof: PreparedOneAttachmentClaim, b
 export function releasePreparedOneAttachments(proof: PreparedOneAttachmentClaim): void {
   const input = preparedAttachmentClaims.get(proof); if (!input) return;
   releaseOneAttachmentRun(input.ref); preparedAttachmentClaims.delete(proof);
+}
+
+interface QueuedAttachmentSnapshot {
+  schemaVersion: 1;
+  contractVersion: typeof ONE_ATTACHMENT_CONTRACT_VERSION;
+  attachmentSetId: string;
+  promptDigest: string;
+  teamProposalId: string | null;
+  expiresAt: string;
+  items: Array<{ stagedName: string; safe: OneAttachmentSafeItem }>;
+}
+
+/** Main calls this before the first start can consume its process-local ref.
+ * Only already-approved, revalidated snapshots enter durable queue custody. */
+export function reserveOneAttachmentsForQueue(
+  escrow: QueuedInputEscrow,
+  owner: QueuedInputOwner,
+  input: { ref: OneAttachmentRef; userPrompt: string; teamProposalId?: string | null },
+): void {
+  const record = validatedRecord(input.ref);
+  if (record.chatId !== owner.chatId || record.promptDigest !== sha256Text(input.userPrompt)
+    || record.teamProposalId !== (input.teamProposalId ?? null)) {
+    throw new OneAttachmentError("stale_grant", "Queued attachments do not match their original owner request.");
+  }
+  for (const item of record.items) revalidatePreparedItem(item);
+  escrow.reserve(owner, "attachments", Date.parse(record.expiresAt), directory => {
+    if (pathInside(directory, fs.realpathSync.native(attachmentRoot()))) {
+      throw new OneAttachmentError("invalid_request", "Durable queue input must be separate from process-local attachment staging.");
+    }
+    for (const item of record.items) copyPreparedFile(item.pendingPath, path.join(directory, path.basename(item.pendingPath)), item.safe);
+    const snapshot: QueuedAttachmentSnapshot = {
+      schemaVersion: 1, contractVersion: ONE_ATTACHMENT_CONTRACT_VERSION,
+      attachmentSetId: record.ref.attachmentSetId, promptDigest: record.promptDigest,
+      teamProposalId: record.teamProposalId, expiresAt: record.expiresAt,
+      items: record.items.map(item => ({ stagedName: path.basename(item.pendingPath), safe: { ...item.safe } })),
+    };
+    return snapshot;
+  });
+}
+
+/** New one-use authority for the exact durable input, never for a renderer
+ * path or a changed source. Escrow checks owner/attempt and prior placement. */
+export function reissueQueuedOneAttachments(
+  escrow: QueuedInputEscrow,
+  owner: QueuedInputOwner,
+  attempt: QueuedInputAttempt,
+  input: { userPrompt: string; teamProposalId?: string | null },
+): PreparedOneAttachments {
+  const resource = escrow.resource(owner, "attachments", attempt);
+  const snapshot = resource.payload as QueuedAttachmentSnapshot;
+  if (!snapshot || snapshot.schemaVersion !== 1 || snapshot.contractVersion !== ONE_ATTACHMENT_CONTRACT_VERSION
+    || !ID_RE.test(snapshot.attachmentSetId) || snapshot.promptDigest !== sha256Text(input.userPrompt)
+    || snapshot.teamProposalId !== (input.teamProposalId ?? null)
+    || !Number.isFinite(Date.parse(snapshot.expiresAt))
+    || !Array.isArray(snapshot.items) || snapshot.items.length < 1 || snapshot.items.length > ONE_ATTACHMENT_LIMITS.maxCount
+    || snapshot.items.some(item => !item || !isSafeOneAttachmentReceipt(item.safe)
+      || typeof item.stagedName !== "string" || item.stagedName !== path.basename(item.stagedName)
+      || item.stagedName === "." || item.stagedName === "..")
+    || new Set(snapshot.items.map(item => item.stagedName)).size !== snapshot.items.length
+    || snapshot.items.reduce((sum, item) => sum + item.safe.size, 0) > ONE_ATTACHMENT_LIMITS.maxTotalBytes) {
+    throw new OneAttachmentError("stale_grant", "The queued attachment snapshot or request changed.");
+  }
+  const attachmentSetId = `one-att:${randomUUID()}`;
+  const ref: OneAttachmentRef = { contractVersion: ONE_ATTACHMENT_CONTRACT_VERSION, attachmentSetId, capabilityToken: randomUUID() };
+  const pendingDir = path.join(pendingRoot(true)!, attachmentSetId.replace(/[^A-Za-z0-9._-]/g, "_"));
+  fs.mkdirSync(pendingDir, { mode: 0o700 });
+  try {
+    const items = snapshot.items.map(item => {
+      const sourcePath = path.join(resource.directory, item.stagedName);
+      const stat = fs.lstatSync(sourcePath, { bigint: true });
+      if (stat.isSymbolicLink() || (item.safe.kind === "directory" ? !stat.isDirectory() : !stat.isFile())) {
+        throw new OneAttachmentError("changed_source", "A queued attachment is no longer the approved snapshot.");
+      }
+      const pendingPath = path.join(pendingDir, item.stagedName);
+      copyPreparedFile(sourcePath, pendingPath, item.safe);
+      return {
+        grant: grantPath(sourcePath, { durable: false, exactFile: item.safe.kind !== "directory" }),
+        sourcePath, identity: statIdentity(stat), safe: { ...item.safe }, pendingPath,
+      };
+    });
+    const record: AttachmentSetRecord = {
+      ref, chatId: owner.chatId, promptDigest: snapshot.promptDigest, status: "prepared", items,
+      pendingDir, runDir: null, teamProposalId: snapshot.teamProposalId,
+      createdAt: new Date().toISOString(), expiresAt: new Date(Date.now() + ONE_ATTACHMENT_LIMITS.capabilityTtlMs).toISOString(),
+    };
+    records.set(attachmentSetId, record);
+    return preparedProjection(record);
+  } catch (error) { safeRemove(pendingDir); throw error; }
 }

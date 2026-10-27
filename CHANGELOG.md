@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.3.92 — 2026-10-27
+
+Committed desktop reliability updates: retain company native sessions when browser cookies are unavailable; improve onboarding error notices and connection-window recovery; show Work followups as messages. Respect saved denials and require confirmation for payments, even in Full access. Graph retries recheck execution and external-effect evidence before replay. Science tools classify generated-file tracking consistently using the shared tool-effect predicate.
+
+This release binds Agentlas OS v1.2.69 at 2b4e27b78d9a1e808142f1e6e510ab7023c7b44d; public runtime asset `hephaestus-runtime-v1.2.69.tar.gz` is pinned at SHA-256 `0bb8ac3eac111fd26bc3a20a7b1657741399b9f87ed8b8f1c87f2402dbd4c283`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.91 — 2026-10-25
 
 Includes everything planned for 1.3.90, which was not published.

@@ -1,10 +1,12 @@
 import { createHash, randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
-import { WORK_RECOVERY_POLICY_VERSION, MAX_SAME_METHOD_STARTS, MAX_USER_REQUESTS, USER_REQUEST_SPACING_MS, sameWorkIdentity, type WorkUnit, type WorkUnitState, type WorkRecoveryJournal, type ExpectedWorkOutcome, type WorkOutcomeObservation } from "../../shared/work-recovery";
+import { WORK_RECOVERY_POLICY_VERSION, MAX_USER_REQUESTS, USER_REQUEST_SPACING_MS, sameWorkIdentity, type WorkUnit, type WorkUnitState, type WorkRecoveryJournal, type ExpectedWorkOutcome, type WorkOutcomeObservation } from "../../shared/work-recovery";
 import { getDb } from "../store/db";
 import { recordRunEvent, type RecordRunEventInput } from "../store/run-events";
 
 type Writer = (input: RecordRunEventInput) => { id: string };
+type TransitionDetail = { reason: string; resultRef?: string; evidenceRef?: string; question?: boolean; questionKey?: string;
+  diagnosticAction?: string; diagnosticReason?: string };
 const KIND = "work_unit_transition";
 
 export function workUnitId(input: { runId: string; taskId: string; stepId: string; revision: string }): string {
@@ -37,7 +39,7 @@ export class DesktopWorkRecoveryJournal implements WorkRecoveryJournal {
       ...(typeof p.resultRef === "string" ? { resultRef: p.resultRef } : {}) };
   }
 
-  transition(unit: WorkUnit, state: WorkUnitState, detail: { reason: string; resultRef?: string; evidenceRef?: string; question?: boolean; questionKey?: string }): WorkUnit | null {
+  transition(unit: WorkUnit, state: WorkUnitState, detail: TransitionDetail): WorkUnit | null {
     return this.db.transaction(() => {
       const current = this.read(unit.runId, unit.unitId);
       if (current ? current.generation !== unit.generation || current.ownerEpoch !== unit.ownerEpoch
@@ -46,9 +48,8 @@ export class DesktopWorkRecoveryJournal implements WorkRecoveryJournal {
         || current.taskId !== unit.taskId || current.parentUnitId !== unit.parentUnitId
         || current.methodStarts !== unit.methodStarts || JSON.stringify(current.dependencyIds) !== JSON.stringify(unit.dependencyIds)
         || current.state !== unit.state : unit.generation !== 0 || unit.state !== "ready" || unit.methodStarts !== 0) return null;
-      if (current?.state === "succeeded" || current?.state === "cancelled") return null;
+      if (current?.state === "succeeded") return null;
       const started = state === "started";
-      if (started && unit.methodStarts >= MAX_SAME_METHOD_STARTS) return null;
       if ([unit.runId, unit.taskId, unit.unitId, unit.revision, unit.inputDigest, unit.methodId, unit.ownerEpoch].some(v => !v || v.length > 240)
         || JSON.stringify(unit.dependencyIds).length > 800 || (detail.resultRef?.length ?? 0) > 800
         || (state === "succeeded" && !detail.resultRef)) throw new Error("work_unit_identity_invalid");
@@ -64,7 +65,9 @@ export class DesktopWorkRecoveryJournal implements WorkRecoveryJournal {
           state, methodId: next.methodId, generation: next.generation, ownerEpoch: next.ownerEpoch,
           attemptId: next.attemptId, methodStarts: next.methodStarts,
           dependencyIds: JSON.stringify(unit.dependencyIds), resultRef: next.resultRef,
-          reason: detail.reason, evidenceRef: detail.evidenceRef, question: detail.question ?? false } });
+          reason: detail.reason, evidenceRef: detail.evidenceRef, question: detail.question ?? false,
+          ...(detail.diagnosticAction ? { diagnosticAction: detail.diagnosticAction } : {}),
+          ...(detail.diagnosticReason ? { diagnosticReason: detail.diagnosticReason } : {}) } });
       if (!event?.id) throw new Error("work_unit_start_not_durable");
       if (detail.question && !this.reserveQuestion(unit.runId, detail.questionKey ?? unit.unitId)) throw new Error("work_user_request_limit");
       const stored = this.read(unit.runId, unit.unitId);
@@ -124,6 +127,33 @@ export class DesktopWorkRecoveryJournal implements WorkRecoveryJournal {
     return this.reopenCompleted(unit, inputDigest, evidenceRef, "failed", "host_read_output_regeneration");
   }
 
+  /** The caller already tried to restore the completed checkpoint. Keep its old
+   * completion in the append-only journal while executing the current request. */
+  reopenCompletedForContinuation(unit: WorkUnit, evidenceRef: string): WorkUnit | null {
+    return this.reopenCompleted(unit, unit.inputDigest, evidenceRef, "failed", "host_result_regeneration");
+  }
+
+  /** A changed request is a new observation of this unit, not a reason to park it. */
+  reviseInput(unit: WorkUnit, inputDigest: string, evidenceRef: string): WorkUnit | null {
+    return this.db.transaction(() => {
+      const current = this.read(unit.runId, unit.unitId);
+      if (!current || JSON.stringify(current) !== JSON.stringify(unit) || !inputDigest || inputDigest.length > 240
+        || !evidenceRef || evidenceRef.length > 800) return null;
+      const { resultRef: priorResultRef, ...identity } = current;
+      const next: WorkUnit = { ...identity, inputDigest, state: "ready", generation: current.generation + 1 };
+      this.write({ runId: unit.runId, kind: KIND, sourceEventId: `work-unit:${unit.unitId}:${next.generation}`,
+        payload: { ...next, dependencyIds: JSON.stringify(next.dependencyIds), policyVersion: WORK_RECOVERY_POLICY_VERSION,
+          reason: "graph_request_input_revised", evidenceRef, priorInputDigest: current.inputDigest,
+          priorState: current.state, ...(priorResultRef ? { priorResultRef } : {}) } });
+      const stored = this.read(unit.runId, unit.unitId);
+      if (!stored || stored.generation !== next.generation || stored.inputDigest !== inputDigest
+        || stored.methodStarts !== current.methodStarts || stored.state !== "ready" || stored.resultRef) {
+        throw new Error("work_request_revision_not_durable");
+      }
+      return stored;
+    }).immediate();
+  }
+
   /** An explicit revised request can replace a confirmed completed outcome,
    * without replacing its unit id or resetting the same-method start budget. */
   reopenCompletedRequest(unit: WorkUnit, inputDigest: string, evidenceRef: string): WorkUnit | null {
@@ -136,8 +166,7 @@ export class DesktopWorkRecoveryJournal implements WorkRecoveryJournal {
     return this.db.transaction(() => {
       const current = this.read(unit.runId, unit.unitId);
       if (!current || current.state !== "succeeded" || JSON.stringify(current) !== JSON.stringify(unit)
-        || !inputDigest || inputDigest.length > 240 || !evidenceRef || evidenceRef.length > 800
-        || current.methodStarts >= MAX_SAME_METHOD_STARTS) return null;
+        || !inputDigest || inputDigest.length > 240 || !evidenceRef || evidenceRef.length > 800) return null;
       const next = { ...current, state, inputDigest, generation: current.generation + 1 };
       this.write({ runId: unit.runId, kind: KIND, sourceEventId: `work-unit:${unit.unitId}:${next.generation}`,
         payload: { policyVersion: WORK_RECOVERY_POLICY_VERSION, runId: unit.runId, taskId: unit.taskId,

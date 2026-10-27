@@ -30,7 +30,7 @@ export type UiPortOutcome =
   | { status: "refused" | "unavailable"; reason: string; next?: string; data?: unknown };
 
 /** Mirror of HarnessCallContext (capability-ports.ts). */
-export interface UiCallContext { chatId: string; runId: string; dryRun?: boolean }
+export interface UiCallContext { chatId: string; runId: string; dryRun?: boolean; permission?: "read" | "write" | "full" }
 
 export interface UiInputSchema {
   properties?: Record<string, { type: "string" | "number" | "integer" | "boolean" | "object" | "array" }>;
@@ -669,7 +669,7 @@ export async function uiAction(args: Record<string, unknown>, ctx: UiCallContext
     });
     if (admission) return admission;
     // The command id travels to the operation as its idempotency key (the effect owner may dedupe on it).
-    const result = await callHarnessPort(operationId, { ...input, ...(def.fixedArgs ?? {}) }, { chatId: record.chatId, runId: ctx.runId,
+    const result = await callHarnessPort(operationId, { ...input, ...(def.fixedArgs ?? {}) }, { chatId: record.chatId, runId: ctx.runId, permission: ctx.permission ?? "read",
       ...(commandKey ? { commandId: commandKey } : {}), ...(ctx.dryRun ? { dryRun: true } : {}) });
     attempt.receipt(result);
     if (result.status !== "ok") return { status: result.status, reason: result.reason ?? "operation_failed", ...(result.next ? { next: result.next } : {}) };

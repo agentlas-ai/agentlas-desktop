@@ -14,6 +14,7 @@ import { markRefusedBeforeDispatch, type Runner, type RunnerEvents, type RunnerR
 import { resolveSessionScope, rosterSessionIsCurrent, workingSessionIsCurrent, taskforceSessionScopeIsCurrent, assertProjectWorkSessionFacts, assertWorkingSessionBindingCurrent, requiresProjectWorkingSessionScope } from "./session-scope";
 import { acquireAgentContextTurnSlot, AgentContextTurnWaitError, type AgentContextTurnSlot } from "./agent-context-turn-order";
 import { createTurnLine, type TurnLineDb } from "./agent-context-turn-line";
+import { releaseDeadSessionTurn } from "./agent-context-dead-holder";
 import { listPendingToolApprovals } from "./tool-approval";
 import { listPendingAskUserRequests } from "../confirm/ask-user";
 import { CHAT_BUSY_OTHER_HOST_CODE, ensureChatHostHandover } from "./chat-host-handover";
@@ -261,6 +262,13 @@ function turnLine(): ReturnType<typeof createTurnLine> {
     runEnded: turn => {
       const owner = invocationRunOwners.getRunOwner(turn.chatId, turn.runId);
       return !!owner && (owner.state === "released" || (!!turn.leaseId && owner.leaseId !== turn.leaseId));
+    },
+    recoverDeadRun: holder => {
+      if (releaseDeadSessionTurn(holder, {
+        current: () => ({ ...invocationProcessOwner(), pid: process.pid }),
+        getOwner: (chatId, runId) => invocationRunOwners.getRunOwner(chatId, runId),
+        release: expected => invocationRunOwners.release(expected),
+      })) console.info("[session-turn-line] dead holder lease recovered", { code: "agent_context_dead_holder_released", runId: holder.turn.runId });
     },
     // What this process's turn of a chat waits on a person for. Only live asks count: they block the run, a notice of a denied call does not.
     parkedOn: chatId => listPendingToolApprovals().some(request => request.chatId === chatId) ? "approval"

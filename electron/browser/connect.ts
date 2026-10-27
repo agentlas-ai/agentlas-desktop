@@ -528,10 +528,6 @@ export async function browserRequestApproval(
     });
     return "cancelled";
   }
-  if (options.permission === "full") {
-    logBrowserAction({ site, action: req.actionType, target: req.target, result: "auto", approval: "run-full-access" });
-    return "approved";
-  }
   const stored = getBrowserPermission(site, req.actionType);
   if (stored === "always") {
     logBrowserAction({ site, action: req.actionType, target: req.target, result: "auto", approval: "always" });
@@ -542,6 +538,12 @@ export async function browserRequestApproval(
     return "denied";
   }
   // 사이트별 "거부"는 오너가 그 사이트에 내린 구체적 결정이라 위에서 먼저 존중한다.
+  // Full access skips the sheet too, except for a payment: a paid action always stops and asks
+  // (owner 2026-09-29), and an owner's site "deny" (above) still wins (owner 2026-10-27).
+  if (options.permission === "full" && req.actionType !== "payment") {
+    logBrowserAction({ site, action: req.actionType, target: req.target, result: "auto", approval: "run-full-access" });
+    return "approved";
+  }
   if (req.actionType !== "payment" && chatAlwaysApproved(options.owner)) {
     logBrowserAction({ site, action: req.actionType, target: req.target, result: "auto", approval: "chat-always" });
     return "approved";

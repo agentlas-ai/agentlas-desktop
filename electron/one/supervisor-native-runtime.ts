@@ -1,3 +1,4 @@
+import { effectiveInvocationPermission } from "../../shared/invocation-permission";
 import {retainHistoryWorkOrigin} from './history-work-dispatch';
 import {retainEmployeeAgentWorkOrigin} from '../business/employee-agent-work-dispatch';
 import { withOnePersonalNativeOriginal } from "../secrets/one-personal-native-entry";
@@ -33,7 +34,7 @@ export function authorizeSupervisorNativeOrigin(origin: object, request: Readonl
 export async function dispatchSupervisorNativeCommand(origin:object,request:Readonly<McpInvocationRequest>,name:string,input:Record<string,unknown>):Promise<unknown> {
   authorizeSupervisorNativeOrigin(origin,request);
   if(!request.oneMode || !request.runId)fail('supervisor_native_personal_source_required');
-  return (await import('./team-control-server')).dispatchOneSupervisorTool({chatId:request.chatId,supervisorReplyRunId:request.runId},name,input);
+  return (await import('./team-control-server')).dispatchOneSupervisorTool({chatId:request.chatId,supervisorReplyRunId:request.runId,permission:effectiveInvocationPermission(request.permissions,request.planMode)},name,input);
 }
 export function supervisorNativeNoticePurpose(origin: object, request: Readonly<McpInvocationRequest>): SupervisorHostNoticePurpose | undefined {
   authorizeSupervisorNativeOrigin(origin, request); return origins.get(origin)!.purpose;

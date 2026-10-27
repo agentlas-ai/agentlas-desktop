@@ -1,3 +1,4 @@
+import { currentGoalExecutionObligations, currentGoalObligationsSatisfied } from "./goal-obligation-context";
 /** An automatic Goal admitted for a turn the background service ran follows that turn.
  *
  * Goal custody is Desktop-only, so a goal-free One turn that runs in the service (team rooms included) finishes there as an
@@ -246,6 +247,18 @@ export function followDaemonTurnGoal(goalId: string): DaemonTurnGoalResult {
     return result(goalId, "scheduled", nextAt);
   }
   if (SUCCESS_KINDS.includes(terminal.kind) && terminal.verifier !== "fail") {
+    const goal = getChatGoalRevision(goalId);
+    if (goal && currentGoalExecutionObligations(goal) && !currentGoalObligationsSatisfied(goalId)) {
+      if (terminal.decisionRequested) {
+        if (run.status === "queued") step("running", "daemon-turn-started");
+        if (!hold()) return result(goalId, "unchanged", "held_by_another_process");
+        recordSettlement(run, source.runId, "held_for_owner", { reason: "owner_question" });
+        return result(goalId, "held", source.runId);
+      }
+      if (!scheduleNextRun(new Date().toISOString())) return result(goalId, "unchanged", "scheduled_by_another_process");
+      recordSettlement(run, source.runId, "participant_review_required");
+      return result(goalId, "scheduled", "goal_execution_obligations_unmet");
+    }
     if (run.status === "queued") step("running", "daemon-turn-started");
     step("verifying", "daemon-turn-completed");
     appendLongRunEvent({ runId: run.id, kind: "verification.model_judgment_accepted", actorKind: "host",

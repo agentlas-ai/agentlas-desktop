@@ -11,33 +11,51 @@
  * This is the same boundary for API workers. Writes are allowed only inside the working folder and the temp folder (plus
  * /dev/null). Secret folders are unreadable. The network stays allowed, as for the graph code runner (code-runner.ts).
  * A command that would start a process outside the sandbox through an OS launcher is refused before it runs
- * (shared/write-sandbox-launch-guard.ts, the rule Claude Code write runs already use). Windows has no such boundary without
- * administrator rights, so there is none here, and `bash` stays a full-permission tool there.
+ * (shared/write-sandbox-launch-guard.ts, the rule Claude Code write runs already use). This runner has no installed native
+ * Windows containment backend, so `bash` stays a full-permission tool there.
  */
 import fs from "node:fs";
 import os from "node:os";
+import path from "node:path";
+import { randomUUID } from "node:crypto";
 import { ensureSandboxNpmCacheDir, sandboxNpmCacheExport } from "./sandbox-tool-cache";
 
-export type ConfinedShell = (command: string) => { file: string; args: string[] };
+export type ConfinedShell = (command: string) => { file: string; args: string[]; env?: NodeJS.ProcessEnv; cleanup?: () => void };
 
 export async function writeConfinedShell(cwd: string): Promise<ConfinedShell | null> {
   if (!cwd) return null;
   // Plus the product's sandbox npm cache, and npm pointed at it, so `npm install` works (sandbox-tool-cache.ts).
   const npmCache = ensureSandboxNpmCacheDir();
-  const writable = [cwd, os.tmpdir(), "/dev/null", ...(npmCache ? [npmCache] : [])];
   const withNpmCache = (command: string): string => (npmCache ? `${sandboxNpmCacheExport(npmCache)}; ${command}` : command);
+  // Allocate only when the launcher is invoked, never while checking whether a tool can be offered.
+  // The shell runner owns cleanup after the child has actually closed, including timeout and Stop.
+  const launch = (build: (writable: string[], command: string) => { file: string; args: string[] }): ConfinedShell => command => {
+    const scratch = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "agentlas-shell-")));
+    try {
+      fs.writeFileSync(path.join(scratch, ".agentlas-scratch-owner.json"), JSON.stringify({
+        schemaVersion: "agentlas.shell-scratch.v1", runId: randomUUID(), ownerPid: process.pid, createdAt: new Date().toISOString(),
+      }), {mode: 0o600});
+      const writable = [cwd, scratch, "/dev/null", ...(npmCache ? [npmCache] : [])];
+      return { ...build(writable, withNpmCache(command)), env: { TMPDIR: scratch, TMP: scratch, TEMP: scratch },
+        cleanup: () => fs.rmSync(scratch, { recursive: true, force: true }) };
+    } catch (error) {
+      fs.rmSync(scratch, { recursive: true, force: true });
+      throw error;
+    }
+  };
   if (process.platform === "darwin") {
     const sandboxExec = "/usr/bin/sandbox-exec";
     if (!fs.existsSync(sandboxExec)) return null;
     const { buildSeatbeltProfile } = await import("../workflow/code-runner");
-    const profile = buildSeatbeltProfile({ writable });
-    return (command) => ({ file: sandboxExec, args: ["-p", profile, "/bin/bash", "-lc", withNpmCache(command)] });
+    return launch((writable, command) => ({ file: sandboxExec,
+      args: ["-p", buildSeatbeltProfile({ writable }), "/bin/bash", "--noprofile", "--norc", "-c", command] }));
   }
   if (process.platform === "linux") {
     const { buildBwrapArgs, linuxSandbox } = await import("../workflow/linux-sandbox");
     const bwrap = linuxSandbox();
     if (!bwrap) return null;
-    return (command) => ({ file: bwrap.path, args: buildBwrapArgs({ writable }, "/bin/bash", ["-lc", withNpmCache(command)]) });
+    return launch((writable, command) => ({ file: bwrap.path,
+      args: buildBwrapArgs({ writable }, "/bin/bash", ["--noprofile", "--norc", "-c", command]) }));
   }
   return null;
 }

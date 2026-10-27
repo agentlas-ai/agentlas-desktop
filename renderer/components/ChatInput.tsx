@@ -1486,7 +1486,7 @@ function ChatInputComponent({
           width: "min(100%, 740px)",
           margin: "0 auto",
           borderRadius: 20,
-          padding: "9px 11px 8px",
+          padding: 12,
           display: "flex",
           flexDirection: "column",
           gap: 8,
@@ -1585,7 +1585,7 @@ function ChatInputComponent({
         )}
 
         {(fileGrants.length > 0 || pastedTexts.length > 0) && (
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, padding: "0 4px 6px" }}>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, padding: 0 }}>
             {fileGrants.map((g, i) => (
               <span key={`${g.grant.scope.token}:${i}`} title={g.grant.path} style={{ display: "inline-flex", alignItems: "center", gap: 6, maxWidth: 240, padding: "4px 9px", borderRadius: 999, border: "1px solid var(--paper-edge, var(--paper-edge-strong))", background: "var(--paper-2, var(--paper-2))", fontSize: 12 }}>
                 <span aria-hidden="true">{g.kind === "directory" ? "📁" : "📎"}</span>
@@ -1732,9 +1732,9 @@ function ChatInputComponent({
             background: "transparent",
             color: "var(--ink)",
             resize: "none",
-            padding: "4px 6px",
+            padding: 0,
             fontFamily: "var(--font-body)",
-            minHeight: 42,
+            minHeight: 21,
             maxHeight: 150,
             overflowY: "auto",
             boxSizing: "border-box",

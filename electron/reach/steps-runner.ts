@@ -1,9 +1,9 @@
 import type { Actuator, ToolOutcome } from "./actuator";
 import { cleanLabel, readDialogTree, readElements, observe, newPanel, sameIds, scopedIds, isCancelButton, type ElementRecord } from "./dialog-probe";
-import { invokeMenuPath, resolveMenuPath } from "./menu-probe";
+import { readSystemMenuProof, invokeMenuPath, resolveMenuPath } from "./menu-probe";
 import { bringAppForward, withForeground } from "./foreground";
 import type { MenuTarget } from "./menu-probe";
-import { opensAPanelByPurpose } from "./explore-policy";
+import { opensAPanelByPurpose, startsWithPath } from "./explore-policy";
 import { MENU_COMMAND_TRAIT, type Capability } from "./types";
 
 // Carries out an explored capability: the `steps` body, with the caller's parameters in place of the ${placeholders}. It brings the app
@@ -39,7 +39,14 @@ const TOOLS = new Set(["invoke_menu", "set_value", "click", "hotkey", "press_key
 // owner, whatever its size and whatever text it scrolls (independent review 4, S4: a license text with Agree / Disagree, a large confirmation with only Continue).
 const ANSWER_BUTTON = /^(?:ok|okay|continue|agree|disagree|accept|decline|yes|no|allow|don.t allow|deny|got it|확인|계속|동의|동의 안 함|동의하지 않음|예|아니요|아니오|허용|허용 안 함|はい|いいえ|続ける|同意する|同意しない|許可|許可しない|好|好的|确定|確定|继续|繼續|同意|不同意|是|否|ja|nein|fortfahren|zustimmen|ablehnen|erlauben|oui|non|continuer|accepter|refuser|autoriser|sí|si|continuar|aceptar|rechazar|permitir|sì|continua|accetta|rifiuta|consenti|sim|não|nao|aceitar|recusar)$/i;
 // what a document window holds and a message box does not
-const DOCUMENT_ROLES: ReadonlySet<string> = new Set(["AXTextArea", "AXScrollArea", "AXWebArea", "AXOutline", "AXTable", "AXBrowser", "AXSplitGroup", "AXTabGroup", "AXToolbar", "AXList"]);
+// (the macOS names, then the Windows UI Automation control types and the Linux AT-SPI roles the translation step in windows-ui.ts / linux-ui.ts leaves as they are -
+// independent review 6, U3: on Windows and Linux a page with a Continue button inside was a dialog; the generic containers - Pane, layered pane, text - are left out on purpose:
+// a message box is built from them)
+const DOCUMENT_ROLES: ReadonlySet<string> = new Set([
+  "AXTextArea", "AXScrollArea", "AXWebArea", "AXOutline", "AXTable", "AXBrowser", "AXSplitGroup", "AXTabGroup", "AXToolbar", "AXList",
+  "Document", "ToolBar", "Tab", "DataGrid",
+  "document web", "document text", "document frame", "document spreadsheet", "document presentation", "document email", "scroll pane", "tool bar", "page tab list", "split pane",
+]);
 
 function placeholderName(value: unknown): string | null {
   const match = typeof value === "string" ? /^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$/.exec(value) : null;
@@ -110,6 +117,15 @@ export async function runSteps(ports: RunPorts, capability: Capability, params: 
   const before = await observe({ actuator: ports.actuator, target: ports.target, signal: ports.signal });
   const front = await bringAppForward(ports.actuator, ports.target, ports.signal);
   if (!front.ok) return fail("not_in_foreground", "the app could not be brought to the front", 0);
+
+  // A stale grant cannot authorize a platform-inserted command. The system tail is identified from the live menu shape before anything executes.
+  if (steps.some((step) => step.tool === "invoke_menu")) {
+    const safety = await readSystemMenuProof(ports.actuator, ports.target, ports.signal);
+    if (!safety.ok) return fail("step_refused", safety.code, 0);
+    if (steps.some((step) => step.tool === "invoke_menu" && Array.isArray(step.args.path) && safety.prefixes.some((prefix) => startsWithPath(step.args.path as string[], prefix)))) {
+      return fail("step_refused", "system_menu_item", 0);
+    }
+  }
 
   let run = 0;
   // A dialog is a sheet in the app's own window (its elements are in that window's tree) or a window of its own; the newest window that was

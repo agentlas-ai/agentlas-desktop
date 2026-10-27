@@ -7,7 +7,7 @@
 
 
 
-import { goalCadenceDeadlineAt } from "../../shared/auto-goal";
+import { goalCadenceDeadlineAt, type GoalLifecycle } from "../../shared/auto-goal";
 import { getChatGoalRevision } from "../store/chat-goals";
 import { readGoalPlan } from "../store/goal-plans";
 
@@ -29,15 +29,20 @@ export function goalDeadlineAt(goalId: string): string | null {
 }
 
 export type TimerWaitAuthority =
-  | { ok: true; lifecycle: "ongoing"; deadlineAt: null }
-  | { ok: true; lifecycle: "finite"; deadlineAt: string }
-  | { ok: false; reason: "goal_wait_ongoing_authority_required" | "goal_wait_goal_deadline_passed" };
+  | { ok: true; lifecycle: GoalLifecycle; deadlineAt: string | null }
+  | { ok: false; reason: "goal_wait_ongoing_authority_required" | "goal_wait_goal_deadline_passed"
+      | "goal_wait_no_goal" | "goal_wait_goal_not_running" | "goal_wait_original_authority_missing" };
+
+/** A timer is a scheduling request, not a new execution grant or lifecycle judgment.
+ * Past classification, receipts and plan deadlines do not suspend registration.
+ * Explicit Stop/cancellation is handled by the wait owner, not inferred here. */
+export function goalTimerAuthorityForOwner(input: { lifecycle?: GoalLifecycle } = {}, _now?: number): TimerWaitAuthority {
+  return { ok: true, lifecycle: input.lifecycle ?? "finite", deadlineAt: null };
+}
 
 export function timerWaitAuthority(goalId: string, now: number): TimerWaitAuthority {
-  const revision = getChatGoalRevision(goalId);
-  if (revision?.lifecycle === "ongoing") return { ok: true, lifecycle: "ongoing", deadlineAt: null };
-  const deadlineAt = goalDeadlineAt(goalId);
-  if (!deadlineAt) return { ok: false, reason: "goal_wait_ongoing_authority_required" };
-  if (Date.parse(deadlineAt) <= now) return { ok: false, reason: "goal_wait_goal_deadline_passed" };
-  return { ok: true, lifecycle: "finite", deadlineAt };
+  let lifecycle: GoalLifecycle | undefined;
+  // Classification is optional display metadata; an old/malformed revision cannot veto a timer.
+  try { lifecycle = getChatGoalRevision(goalId)?.lifecycle; } catch { /* keep the scheduling request */ }
+  return goalTimerAuthorityForOwner({ lifecycle }, now);
 }

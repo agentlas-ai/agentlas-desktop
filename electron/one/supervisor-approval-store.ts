@@ -127,13 +127,22 @@ export class OneSupervisorApprovalStore {
   }
   consume(id: string, ownerEpoch: string, assertCurrent: (request: ToolApprovalRequestEvent) => void):
     {decision: ToolApprovalDecision; decidedAt: string} | null {
-    const row = this.row(id);
-    if (!row || row.status !== "resolved" || row.owner_epoch !== ownerEpoch || !row.decision || !row.decided_at
-      || row.lease_until <= this.now() || row.expires_at <= this.now()) return null;
-    // Revocation, run cancellation, private identity, native resource and policy
-    // revision checks belong here, immediately before the runtime receives allow.
-    assertCurrent(JSON.parse(row.request_json) as ToolApprovalRequestEvent);
-    return {decision: row.decision, decidedAt: row.decided_at};
+    return this.db.transaction(() => {
+      const row = this.row(id);
+      if (!row || row.status !== "resolved" || row.owner_epoch !== ownerEpoch || !row.decision || !row.decided_at
+        || row.lease_until <= this.now() || row.expires_at <= this.now()) return null;
+      // Revocation, run cancellation, private identity, native resource and policy
+      // revision checks belong here, immediately before the runtime receives allow.
+      assertCurrent(JSON.parse(row.request_json) as ToolApprovalRequestEvent);
+      // Retire execution authority atomically, keeping the owner's decision as a
+      // replayable receipt. The CAS also fences cancellation or a nested consume
+      // during the native check; a second host/handle never receives this allow.
+      const changed = this.db.prepare(`UPDATE one_supervisor_tool_approvals SET lease_until=0
+        WHERE id=? AND status='resolved' AND owner_epoch=? AND request_hash=? AND decision=? AND decided_at=?
+          AND lease_until>? AND expires_at>?`)
+        .run(id, ownerEpoch, row.request_hash, row.decision, row.decided_at, this.now(), this.now());
+      return changed.changes === 1 ? {decision: row.decision, decidedAt: row.decided_at} : null;
+    }).immediate();
   }
   /** Restart retires this native host's waiters, never the other host's live requests. */
   retireEarlierOwners(ownerEpoch: string, hostKind: "main" | "daemon" = "main"): number {
@@ -142,8 +151,12 @@ export class OneSupervisorApprovalStore {
       || ownerEpoch.length <= prefix.length || ownerEpoch.length > 200) {
       throw new Error("supervisor_approval_host_invalid");
     }
-    return Number(this.db.prepare(`UPDATE one_supervisor_tool_approvals SET status='expired',decision='deny',decided_at=?,reason='owner_restarted'
-      WHERE status='pending' AND owner_epoch!=? AND substr(owner_epoch,1,?)=?`)
+    return Number(this.db.prepare(`UPDATE one_supervisor_tool_approvals SET
+      status=CASE WHEN status='pending' THEN 'expired' ELSE status END,
+      decision=CASE WHEN status='pending' THEN 'deny' ELSE decision END,
+      decided_at=CASE WHEN status='pending' THEN ? ELSE decided_at END,lease_until=0,
+      reason=CASE WHEN status='pending' THEN 'owner_restarted' ELSE reason END
+      WHERE (status='pending' OR status='resolved' AND lease_until>0) AND owner_epoch!=? AND substr(owner_epoch,1,?)=?`)
       .run(new Date(this.now()).toISOString(), ownerEpoch, prefix.length, prefix).changes);
   }
   /** Keeps the newest settled receipts; pending rows are never pruned. */
@@ -153,8 +166,13 @@ export class OneSupervisorApprovalStore {
       .run(Math.max(0, Math.floor(keepSettled))).changes);
   }
   cancel(id: string, ownerEpoch: string): void {
-    this.db.prepare(`UPDATE one_supervisor_tool_approvals SET status='expired',decision='deny',decided_at=?,reason='run_cancelled'
-      WHERE id=? AND owner_epoch=? AND status='pending'`).run(new Date(this.now()).toISOString(), id, ownerEpoch);
+    this.db.prepare(`UPDATE one_supervisor_tool_approvals SET
+      status=CASE WHEN status='pending' THEN 'expired' ELSE status END,
+      decision=CASE WHEN status='pending' THEN 'deny' ELSE decision END,
+      decided_at=CASE WHEN status='pending' THEN ? ELSE decided_at END,lease_until=0,
+      reason=CASE WHEN status='pending' THEN 'run_cancelled' ELSE reason END
+      WHERE id=? AND owner_epoch=? AND (status='pending' OR status='resolved' AND lease_until>0)`)
+      .run(new Date(this.now()).toISOString(), id, ownerEpoch);
   }
   recordConsent(id: string, ownerEpoch: string, receipt: ToolApprovalDurableConsentReceipt): void {
     // This records the existing native persister's receipt. It never creates,

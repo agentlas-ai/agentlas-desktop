@@ -9,7 +9,7 @@ import { createNativeGuiOwnerClient } from "./invocation/native-gui-owner";
 import { createNativeMainAuthCallbackAdapter } from "./invocation/native-main-auth-callback";
 import { createNativeMainPreparationRouter, type NativeMainPreparationRouterPorts } from "./invocation/native-main-preparation-router";
 import { createInvocationRunOwnerStore } from "./store/invocation-owner-core";
-import { isAppControlEvent } from "./app-control/ipc-registry";
+import { appControlInvocationPermission, isAppControlEvent } from "./app-control/ipc-registry";
 import { createRendererInvocationPreparation } from "./invocation/renderer-preparation";
 import { answerOneDispatchQuestion } from "./one/team-dispatch";
 import { registerOneSupervisorIpc } from "./one/supervisor-ipc";
@@ -255,6 +255,8 @@ import {
   listOnePreflightSteers,
   releaseOnePreflightSubmissionOfGoneRenderer,
   reserveOnePreflightParent,
+  resumeQueuedOnePreflightSubmission,
+  holdQueuedOnePreflightSubmission,
 } from "./store/one-preflight-steers";
 import { createPreflightSubmissionRenderers } from "./one/preflight-submission-renderers";
 import { createDurableOwnerTextRoutes, NOT_DAEMON_OWNED } from "./invocation/native-owner-text-routes";
@@ -276,6 +278,8 @@ import { onNativeGuiInvocationEvent } from "./invocation/native-gui-events";
 import { invocationService } from "./invocation/service";
 import { createRendererSendQueue } from "./invocation/renderer-send-queue";
 import { canQueuePendingSend } from "./invocation/pending-chat-sends";
+import { createQueuedOwnerInputCustody, type QueuedOwnerStartBoundary } from "./invocation/queued-owner-input-custody";
+import { queuedSendRunState, queuedSendPlacement } from "./invocation/renderer-send-queue";
 import { isTransientSendRefusal } from "../shared/transient-send-refusal";
 import { cancelInvocationOwnerRun, invocationCurrentTurnControl } from "./runtime/invocation-owner-control";
 // ── Hephaestus 엔진 브리지 — 데스크탑↔엔진 연결은 전부 electron/hephaestus/* 에서만 일어난다. ──
@@ -388,6 +392,7 @@ import {
 } from "./project-sources/save";
 import {
   getAuthSession,
+  onAuthSessionRestored,
   getAuthenticatedActorIds,
   getSessionCookieHeader,
   signInWithBrowser,
@@ -3500,14 +3505,14 @@ export function registerIpcHandlers(): { businessShipping: ReturnType<typeof reg
   )).map(({ key, requiredBy, hasValue }) => ({ key, requiredBy, hasValue })));
 
   // ── harness capability ports: UI / SDK / One app control use the same dispatcher as the model's harness_call ──
-  const harnessUiContext = { chatId: "ui", runId: "ui" };
+  const harnessUiContext = () => ({ chatId: "ui", runId: "ui", permission: appControlInvocationPermission() ?? "full" as const });
   registerAppControlDomainIpc(ipcMain, "harness:search", async (query: unknown, kind?: unknown) =>
     (await import("./harness/capability-ports")).searchHarness(typeof query === "string" ? query.slice(0, 500) : "", typeof kind === "string" ? kind as never : undefined));
   registerAppControlDomainIpc(ipcMain, "harness:describe", async (id: unknown) =>
-    (await import("./harness/capability-ports")).describeHarness(typeof id === "string" ? id : "", harnessUiContext));
+    (await import("./harness/capability-ports")).describeHarness(typeof id === "string" ? id : "", harnessUiContext()), assertTrustedSitePublishIpcSender);
   registerAppControlDomainIpc(ipcMain, "harness:call", async (operation: unknown, args?: unknown) =>
     (await import("./harness/capability-ports")).callHarnessPort(typeof operation === "string" ? operation : "",
-      args && typeof args === "object" && !Array.isArray(args) ? args as Record<string, unknown> : {}, harnessUiContext));
+      args && typeof args === "object" && !Array.isArray(args) ? args as Record<string, unknown> : {}, harnessUiContext()), assertTrustedSitePublishIpcSender);
 
   // UI instances (inline result views): the renderer lists a chat's instances and hears every change; actions go
   // through harness:call "ui.action" (chat "ui" + args.chatId), i.e. the same dispatcher as everything else.
@@ -7082,11 +7087,28 @@ export function registerIpcHandlers(): { businessShipping: ReturnType<typeof reg
   });
   // The owner's message is accepted by the per-chat send queue: it starts here when the chat is free, otherwise it waits
   // there (saved, shown once, retried silently) and starts by itself. See invocation/renderer-send-queue.ts.
+  let queuedOwnerCustodyInstance: ReturnType<typeof createQueuedOwnerInputCustody> | undefined;
+  const queuedOwnerCustody = () => queuedOwnerCustodyInstance ??= createQueuedOwnerInputCustody({
+    db: getDb(), epoch: rendererInvocationProcessEpoch,
+    running: runId => queuedSendRunState(runId) === "running", placement: queuedSendPlacement,
+  });
   let rendererSendQueueInstance: ReturnType<typeof createRendererSendQueue> | undefined;
   const rendererSendQueue = () => rendererSendQueueInstance ??= createRendererSendQueue(
-    (event, req) => startRendererInvocation(event, req) as Promise<{ runId: string }>,
-    { senderTrusted: (event) => { try { assertTrustedSitePublishIpcSender(event); return true; } catch { return false; } } });
-  const startRendererInvocation = async (_event: IpcMainInvokeEvent, req: McpInvocationRequest) => {
+    (event, req, boundary) => startRendererInvocation(event, req, boundary) as Promise<{ runId: string }>,
+    {
+      custody: queuedOwnerCustody(),
+      sanitizeRequest: rendererInvocationRequestForStart,
+      senderTrusted: (event) => { try { assertTrustedSitePublishIpcSender(event); return true; } catch { return false; } },
+      onQueued: holdQueuedOnePreflightSubmission,
+      beforeQueuedStart: (event, request) => {
+        assertTrustedSitePublishIpcSender(event);
+        if (!request.preflightSubmissionId) return;
+        const nativeOwner = ownerTurnStarter(configuredNativeGuiOwner(), request.chatId);
+        const epoch = nativeOwner ? nativeOwner.assertCanStart(request.runId!).bootId : rendererInvocationProcessEpoch;
+        resumeQueuedOnePreflightSubmission(request, epoch);
+      },
+    });
+  const startRendererInvocation = async (_event: IpcMainInvokeEvent, req: McpInvocationRequest, queuedBoundary?: QueuedOwnerStartBoundary) => {
     assertTrustedSitePublishIpcSender(_event);
     noteInvocationRunReceived(req?.runId);
     const configuredOwner = configuredNativeGuiOwner();
@@ -7235,6 +7257,7 @@ export function registerIpcHandlers(): { businessShipping: ReturnType<typeof reg
     }
     try {
       const localPreparation = nativeOwner ? undefined : createRendererInvocationPreparation(acceptedAdmission);
+      queuedBoundary?.enterSource();
       const startResult = reservationFrontier!.enterSource(() => nativeOwner
         ? nativeOwner.startReserved(_event, request, mainAdmission, acceptedAdmission)
         : invocationService.startNativePrepared(request, localPreparation!, mainAdmission, acceptedAdmission));
@@ -7260,7 +7283,7 @@ export function registerIpcHandlers(): { businessShipping: ReturnType<typeof reg
       // source owns its actual no-start proof, including synchronous throws.
       reservationFrontier!.closeBeforeSource();
       // A refusal that only means "not ready yet" is retried by the send queue, which saves the message once itself.
-      if (isTransientSendRefusal(cause) && canQueuePendingSend(request)) throw cause;
+      if (isTransientSendRefusal(cause) && canQueuePendingSend(request, queuedOwnerCustody().canQueue(request))) throw cause;
       // The renderer has already accepted and displayed this turn. Several
       // Main-owned start gates (participant snapshot, capability claim, durable
       // run receipt) execute before runMcpInvocation reaches its normal
@@ -7307,6 +7330,10 @@ export function registerIpcHandlers(): { businessShipping: ReturnType<typeof reg
       throw cause;
     }
   };
+  // Resume persisted owner messages at host startup, including after an update;
+  // the queue itself waits for a live trusted page and original account.
+  rendererSendQueue();
+  onAuthSessionRestored(() => rendererSendQueueInstance?.resumeCustodiedInputs(true));
   ipcMain.handle("invoke:run", async (_event, req: McpInvocationRequest) => {
     assertTrustedSitePublishIpcSender(_event);
     return rendererSendQueue().run(_event, req);
@@ -7423,6 +7450,12 @@ export function registerIpcHandlers(): { businessShipping: ReturnType<typeof reg
     assertTrustedSitePublishIpcSender(_event);
     const native = configuredNativeGuiOwner();
     if (native && isAppControlEvent(_event)) throw new Error("native_gui_original_renderer_required");
+    // Stop the exact saved input too; cleanup never depends on sign-in or native ACK.
+    let queuedAttemptRunId: string | null | undefined;
+    try { queuedAttemptRunId = queuedOwnerCustodyInstance?.currentRunId(runId); } catch { /* Stop remains unconditional. */ }
+    try { queuedOwnerCustodyInstance?.cancel(runId); }
+    catch { console.warn("[send-queue] exact cancelled input cleanup pending", { runId }); }
+    runId = queuedAttemptRunId ?? runId;
     // Captured native starts include preauthorization/prelease preparation.
     // The signed Stop lane never waits for start ACK or a run-owner SQL lookup.
     const recovered = configuredNativeGuiControls();

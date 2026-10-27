@@ -4,6 +4,8 @@ import { reportModelPayload, reportCachePlan, reportModelEndpoint, reportModelEf
 import { GENERATION_CONTEXT_RATIO } from "./session-generation";
 import { foldRetainedToolResult } from "./tool-result-context";
 import { createHash } from "node:crypto";
+import { prepareCompressedJsonRequest } from "../../shared/http-request-compression";
+import { requestCompressionNetworkState } from "../net/system-network-core";
 import { currentHistoryRuntimeFence, withCurrentHistoryProvider } from "../one/history-runtime-fences";
 import { assertScienceRecoveryRequest } from "../science-host/recovery-authority";
 // BYOK 직접 API 러너 — Anthropic Messages / OpenAI Chat Completions / Google Generative API.
@@ -634,13 +636,24 @@ async function runAnthropicMessagesInner(
     reportModelEndpoint({ url: baseUrl });
     const usageAttempt = measuredUsage.start();
     if (req.signal?.aborted) throw abortReasonError(req);
-    ownerControl.dispatched();
-    const resp = await withCurrentHistoryProvider(()=>fetch(`${baseUrl}/v1/messages`, {
+    const endpoint = `${baseUrl}/v1/messages`;
+    const originalRequest: RequestInit = {
       method: "POST",
       headers,
       signal: req.signal,
       body: JSON.stringify(outgoingBody()),
-    }));
+    };
+    const preparedRequest = await prepareCompressedJsonRequest(endpoint, originalRequest, { network: requestCompressionNetworkState() });
+    if (req.signal?.aborted) throw abortReasonError(req);
+    const resp = await withCurrentHistoryProvider(() => {
+      // Compression yields: refresh the same durable authority at the actual provider boundary.
+      if (req.signal?.aborted) throw abortReasonError(req);
+      assertScienceRecoveryRequest(req, "byok", backend);
+      const networkNow = requestCompressionNetworkState();
+      const dispatchRequest = networkNow.ready && !networkNow.proxyConfigured && !networkNow.additionalCaCertificates ? preparedRequest : originalRequest;
+      ownerControl.dispatched();
+      return fetch(endpoint, dispatchRequest);
+    });
 
     if (!resp.ok) {
       // HTTP 413 is a machine status: the request is over the endpoint's size limit. Typed capacity refusal, never replayed.

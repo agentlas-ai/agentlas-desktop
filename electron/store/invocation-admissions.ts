@@ -315,6 +315,36 @@ export function createInvocationAdmission(
   }).immediate();
 }
 
+/** Called only after a fresh current producer has authorized the SAME request.
+ * A rejected row is a no-start fact, never producer authority. Reopen only the
+ * exact identity; no start receipt or live lease can be carried into a retry. */
+export function rearmRejectedInvocationAdmission(
+  input: InvocationAdmissionIdentity, now: Date = new Date(),
+): InvocationAdmissionWriteResult {
+  const digest = validateIdentity(input), timestamp = now.toISOString();
+  return getDb().transaction((): InvocationAdmissionWriteResult => {
+    const row = rowForRun(input.runId);
+    if (!row) return { kind: "conflict", reason: "not-found" };
+    if (!exactIdentity(row, input, digest)) return { kind: "conflict", reason: "run-identity", admission: decode(row) };
+    if (row.status !== "rejected" || !row.rejection_reason_code) return { kind: "conflict", reason: "already-decided", admission: decode(row) };
+    if (anyStartReceipt(input.runId)) return { kind: "conflict", reason: "start-already-exists", admission: decode(row) };
+    const owner = getDb().prepare("SELECT chat_id, state FROM invocation_run_owners WHERE run_id = ?").get(input.runId) as { chat_id: string; state?: string } | undefined;
+    if (owner && (owner.chat_id !== input.chatId || owner.state !== "released")) return { kind: "conflict", reason: "owner-epoch", admission: decode(row) };
+    const pending = getPendingInvocationAdmissionForChat(input.chatId);
+    if (pending) return { kind: "conflict", reason: "pending-chat", admission: pending };
+    const changed = getDb().prepare(`UPDATE invocation_admissions SET status='pending', owner_process_epoch=?,
+      pending_at=?, updated_at=?, admitted_at=NULL, rejected_at=NULL, rejection_reason_code=NULL
+      WHERE run_id=? AND status='rejected' AND owner_process_epoch=? AND input_digest=?`)
+      .run(input.ownerProcessEpoch, timestamp, timestamp, input.runId, row.owner_process_epoch, digest);
+    if (changed.changes !== 1) throw new Error("invocation_admission_rearm_cas_failed");
+    // A pre-start lease may have been claimed and released without execution.
+    // Its exact tombstone must not prevent a new lease; old lease IDs stay invalid.
+    if (owner) getDb().prepare("DELETE FROM invocation_run_owners WHERE run_id=? AND chat_id=? AND state='released'").run(input.runId, input.chatId);
+    epochsReservedHere.add(input.ownerProcessEpoch);
+    return { kind: "created", admission: decode(rowForRun(input.runId)!) };
+  }).immediate();
+}
+
 /**
  * The callback must synchronously persist the exact invoke_started event using
  * the shared getDb() handle (for example recordRunEvent). It runs inside this

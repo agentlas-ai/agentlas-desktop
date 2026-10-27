@@ -39,7 +39,7 @@ import { WorkChatDraftContext } from "@/lib/work-chat-draft";
 export { WorkChatDraftContext, type WorkChatDraftRequest } from "@/lib/work-chat-draft";
 import { useRouter, useSearchParams } from "next/navigation";
 import { grantForPastedImage, ipc, ipcEvents } from "@/lib/ipc";
-import { readOneFollowupOutbox, saveOneFollowupIntent, removeOneFollowupIntent, pauseOneFollowupOutbox, resumeOneFollowupIntent, type OneFollowupIntent } from "@/lib/one-followup-outbox";
+import { readOneFollowupOutbox, saveOneFollowupIntent, removeOneFollowupIntent, pauseOneFollowupOutbox, type OneFollowupIntent } from "@/lib/one-followup-outbox";
 import { patchFirstSend, planFirstSendResume, readFirstSends, removeFirstSend, saveFirstSend, type FirstSendEntry } from "@/lib/one-first-send-outbox";
 import type {
   Chat,
@@ -1677,6 +1677,36 @@ function settleTranscriptRun(
     } : message);
 }
 
+function restoreWorkFollowupMessages(current: StreamMessage[], intents: readonly OneFollowupIntent[]): StreamMessage[] {
+  const ids = new Set(current.map(message => message.id));
+  const matched = new Set<string>();
+  const replaced = new Set<string>();
+  const restored = intents.flatMap(intent => {
+    const id = `steer:${intent.intentId}`;
+    const message = historyEntryToStreamMessage({
+      id, role: "user", text: intent.userPrompt, createdAt: intent.createdAt,
+      imageDataUrls: intent.request.images?.map(image => `data:${image.mediaType};base64,${image.data}`),
+    });
+    // Main can keep a refused direction under a different message ID too.
+    // Match copies one for one, including time and attachments; an older
+    // identical command or a second deliberate send is still its own turn.
+    const canonical = current.find(candidate => candidate.role === "user" && !candidate.id.startsWith("steer:")
+      && !matched.has(candidate.id) && Date.parse(candidate.createdAt ?? "") >= Date.parse(intent.createdAt)
+      && candidate.text === message.text
+      && JSON.stringify(candidate.imageDataUrls ?? []) === JSON.stringify(message.imageDataUrls ?? [])
+      && JSON.stringify(candidate.chatFileGroupIds ?? []) === JSON.stringify(message.chatFileGroupIds ?? []));
+    if (canonical) {
+      matched.add(canonical.id);
+      if (ids.has(id)) replaced.add(id);
+      return [];
+    }
+    if (ids.has(id)) return [];
+    ids.add(id);
+    return [message];
+  });
+  return restored.length || replaced.size ? [...current.filter(message => !replaced.has(message.id)), ...restored] : current;
+}
+
 function reconcileTranscriptSnapshot(
   current: StreamMessage[],
   durable: StreamMessage[],
@@ -2606,7 +2636,9 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
   const [workFollowupDrafts, setWorkFollowupDrafts] = useState<OneFollowupIntent[]>([]);
   const workFollowupDraftsRef = useRef<OneFollowupIntent[]>([]);
   const workFollowupReviewIdsRef = useRef(new Set<string>());
-  const [workFollowupStates, setWorkFollowupStates] = useState<Record<string, InvocationSteerResult["status"]>>({});
+  const workFollowupNoticeRef = useRef<{ intentId: string; text: string } | null>(null);
+  // The owner's message is its presentation, as in One. Delivery receipts and
+  // retained local copies are internal custody, never a second send action.
   const workFollowupOptimisticIds = useCallback(() => new Set([
     ...steerQueueRef.current.map(item => item.optimisticMessageId),
     ...workFollowupDraftsRef.current.map(item => `steer:${item.intentId}`),
@@ -2624,13 +2656,12 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
   const applyWorkFollowupReceipt = useCallback((intent: OneFollowupIntent, receipt: InvocationSteerResult | null) => {
     const accepted = !!receipt && ["queued", "draining", "started"].includes(receipt.status ?? "");
     // Queued/draining may become restart-held before execution. Keep the original
-    // locally until Main confirms started; acceptance alone must not hide it.
+    // locally until Main confirms started; acceptance alone must not delete its custody.
     if (receipt?.status === "started") {
       try { removeOneFollowupIntent(window.localStorage, intent.chatId, intent.intentId); }
       catch { /* Main accepted it; a local cleanup failure cannot undo that receipt. */ }
     }
     if (!isCurrentChat() || intent.chatId !== chatId) return accepted;
-    setWorkFollowupStates(current => current[intent.intentId] === receipt?.status ? current : ({ ...current, [intent.intentId]: receipt?.status }));
     if (["held", "failed", "cancelled"].includes(receipt?.status ?? "")) workFollowupReviewIdsRef.current.add(intent.intentId);
     const item = steerQueueRef.current.find(item => item.intentId === intent.intentId);
     if (item) item.acknowledged = accepted;
@@ -2644,13 +2675,21 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
     const api = ipc();
     const receipt = api ? await deliverWorkFollowupIntent(api, intent, options) : null;
     const accepted = applyWorkFollowupReceipt(intent, receipt);
-    if (isCurrentChat() && intent.chatId === chatId && !accepted) setSessionNotice(
-      receipt && ["held", "failed", "cancelled"].includes(receipt.status ?? "")
-        ? (locale === "ko" ? "추가 지시가 실행되지 않았습니다(보류·실패·취소). 작성한 글은 입력창 위에 보관해 두었습니다."
-          : "The follow-up did not run (held, failed or cancelled). Your text is kept above the composer.")
-        : (locale === "ko"
-          ? "추가 지시가 전달됐는지 아직 확인하지 못했습니다. 글은 입력창 위에 보관해 두었으니 ‘같은 요청 확인·전달’로 다시 확인할 수 있습니다."
-          : "Delivery of the follow-up is not confirmed yet. It is kept above the composer; use “Check or deliver this request” to check again."));
+    if (isCurrentChat() && intent.chatId === chatId) {
+      if (accepted) {
+        const ownedNotice = workFollowupNoticeRef.current;
+        if (ownedNotice?.intentId === intent.intentId) {
+          workFollowupNoticeRef.current = null;
+          setSessionNotice(current => current === ownedNotice.text ? null : current);
+        }
+      } else if (receipt && ["held", "failed", "cancelled"].includes(receipt.status ?? "")) {
+        const notice = locale === "ko"
+          ? "추가 지시를 실행하지 못했습니다. 보낸 내용은 대화에 남아 있습니다."
+          : "The follow-up could not run. Your message remains in the conversation.";
+        workFollowupNoticeRef.current = { intentId: intent.intentId, text: notice };
+        setSessionNotice(notice);
+      }
+    }
     return receipt;
   }, [applyWorkFollowupReceipt, chatId, isCurrentChat, locale]);
   const pumpWorkFollowups = useCallback(async () => {
@@ -2726,6 +2765,13 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
     const timer = window.setInterval(() => { void check(); }, 5000);
     return () => { disposed = true; window.clearInterval(timer); };
   }, [chatId, workFollowupDrafts.length > 0, applyWorkFollowupReceipt]);
+  useEffect(() => {
+    if (hydratedChatId !== chatId || !isCurrentChat()) return;
+    // A lost IPC reply can leave a local message before Main has a history
+    // row. Restore its ordinary bubble and attachments after hydration too.
+    setMessages(current => isCurrentChat()
+      ? restoreWorkFollowupMessages(current, workFollowupDrafts.filter(intent => intent.chatId === chatId)) : current);
+  }, [chatId, hydratedChatId, isCurrentChat, workFollowupDrafts]);
   const [artifact, setArtifact] = useState<CodeArtifact | null>(null);
   const [surface, setSurface] = useState<WorkbenchSurface | null>(null);
   const [surfaceConflict, setSurfaceConflict] = useState<{
@@ -4128,7 +4174,6 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
     steerQueueRef.current = [];
     setQueuedSteers([]);
     workFollowupReviewIdsRef.current.clear();
-    setWorkFollowupStates({});
     setArtifact(null);
     setSurface(null);
     setMediaPreview(null);
@@ -5346,9 +5391,6 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
               streamTicksRef.current?.flush();
               runIdRef.current = null;
             }
-            setSessionNotice(locale === "ko"
-              ? "이 대화의 실행이 이미 진행 중이라 새 지시를 저장했습니다. 현재 실행이 정리되면 이어서 반영합니다."
-              : "This chat already has a run in progress, so the new instruction was saved. It continues as soon as the current execution settles.");
             return true;
           }
         }
@@ -5552,19 +5594,7 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
           refreshWorkFollowupDrafts();
           // Local preservation also preserves the reply selection's exact text.
           onAccepted?.();
-          const steerReceipt = await dispatchWorkFollowup(intent, { automatic: true, stopEpoch: followupStopEpoch });
-          if (!isCurrentChat() || !steerReceipt || !["queued", "draining", "started"].includes(steerReceipt.status ?? "")) return;
-          setSessionNotice(steerReceipt.queued
-            ? steerReceipt.interruptsCurrent
-              ? (locale === "ko"
-                ? "새 지시를 저장했습니다. 현재 실행을 정리한 뒤 이어서 실행합니다."
-                : "The new instruction is saved. The current execution is being settled, then the new instruction will continue.")
-              : (locale === "ko"
-                ? "새 지시를 저장했습니다. 현재 실행이 정리되면 이어서 실행합니다."
-                : "The new instruction is saved and will continue after the current execution settles.")
-            : (locale === "ko"
-              ? "현재 실행은 이미 끝났습니다. 새 지시를 새 실행으로 시작했습니다."
-              : "The previous execution had already settled, so the new instruction started as a new run."));
+          await dispatchWorkFollowup(intent, { automatic: true, stopEpoch: followupStopEpoch });
         }).catch(() => {
           if (!isCurrentChat()) return;
           setComposerPrefill(text);
@@ -7715,26 +7745,6 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
       )}
       <div data-tour-id="workspace.input" style={{ flexShrink: 0, minWidth: 0 }}>
         <MessageReplyPreview reply={messageReply} locale={locale} onDismiss={() => setMessageReply(null)} />
-        {workFollowupDrafts.length > 0 && <div data-work-followup-outbox="true" style={{ padding: "8px 12px", maxHeight: 180, overflowY: "auto" }}>
-          {workFollowupDrafts.map(intent => <div key={intent.intentId} data-work-followup-intent={intent.intentId} style={{ marginBottom: 8 }}>
-            <small>{intent.autoDeliveryPaused || ["held", "failed", "cancelled"].includes(workFollowupStates[intent.intentId] ?? "")
-              ? (locale === "ko" ? "보관한 지시 · 검토 필요" : "Saved follow-up · review needed")
-              : ["queued", "draining", "started"].includes(workFollowupStates[intent.intentId] ?? "")
-                ? (locale === "ko" ? "전달됨 · 사본 보관 중" : "Delivered · copy kept")
-                : (locale === "ko" ? "보관한 지시 · 전달 확인 안 됨" : "Saved follow-up · delivery not confirmed")}</small>
-            <p style={{ margin: "4px 0", whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{parseChatFileMessage(intent.userPrompt).visibleText}</p>
-            {!!intent.request.images?.length && <small>{locale === "ko" ? `이미지 ${intent.request.images.length}개 보관` : `${intent.request.images.length} saved image(s)`}</small>}
-            <button type="button" className="btn" onClick={() => {
-              try {
-                resumeOneFollowupIntent(window.localStorage, intent.chatId, intent.intentId);
-                refreshWorkFollowupDrafts();
-                void dispatchWorkFollowup(intent);
-              } catch { setSessionNotice(locale === "ko" ? "보관한 요청을 읽지 못해 전달하지 않았습니다. 원문은 유지했습니다." : "The saved request could not be read or resumed. Its original was retained."); }
-            }}>
-              {locale === "ko" ? "같은 요청 확인·전달" : "Check or deliver this request"}
-            </button>
-          </div>)}
-        </div>}
         <ChatInput
           runtimeControls={<OneRuntimeChips key={chat.id} chatId={chat.id} locale={locale === "ko" ? "ko" : "en"} disabled={busy || !agent} onSelectionConfirmed={setChat} />}
           onSend={handleChatInputSend}

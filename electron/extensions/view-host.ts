@@ -90,9 +90,11 @@ interface ActiveScienceView {
   presentationSequence: number;
   presentationScopeKey: string | null;
   onPresentationChanged?: () => void;
+  disposeOwnerListeners: (() => void) | null;
 }
 
 const activeViews = new Map<number, ActiveScienceView>();
+const ownerScienceLeases = new WeakMap<Electron.WebContents, { current: string; superseded: Set<string> }>();
 const scienceToolApprovalChatByRequestId = new Map<string, string>();
 const scienceCaptureTails = new WeakMap<Electron.WebContents, Promise<void>>();
 
@@ -218,22 +220,40 @@ function insideRelease(releaseDir: string, target: string): boolean {
 function closeScienceQuestionSurface(active: ActiveScienceView): void {
   for (const requestId of active.askUserRequestIds) {
     const heldElsewhere = [...activeViews.values()].some((other) => other !== active && other.askUserRequestIds.has(requestId));
-    if (!heldElsewhere) submitAskUserAnswer(requestId, null);
+    if (!heldElsewhere) {
+      try { submitAskUserAnswer(requestId, null); } catch { /* An expired question must not prevent exit. */ }
+    }
   }
   active.askUserRequestIds.clear();
-  active.askUserDispose?.();
+  const dispose = active.askUserDispose;
   active.askUserDispose = null;
+  dispose?.();
 }
 
 function closeActive(active: ActiveScienceView, notify = true): void {
   if (activeViews.get(active.ownerId) !== active) return;
   activeViews.delete(active.ownerId);
-  clearSciencePresentation(active);
-  closeScienceQuestionSurface(active);
-  closeRenderer(active);
+  try { active.disposeOwnerListeners?.(); } catch {}
+  active.disposeOwnerListeners = null;
+  // Native view retirement is unconditional, including when a closing renderer
+  // can no longer receive question, presentation, or renderer notifications.
+  try { clearSciencePresentation(active); } catch {}
+  try { closeScienceQuestionSurface(active); } catch {}
+  try { closeRenderer(active); } catch {}
+  try { active.view.setVisible(false); } catch {}
   try { active.window.contentView.removeChildView(active.view); } catch {}
   try { active.view.webContents.close(); } catch {}
-  if (notify) active.send({ id: SCIENCE_EXTENSION_ID, leaseId: active.leaseId, state: "closed" });
+  if (notify) {
+    try { active.send({ id: SCIENCE_EXTENSION_ID, leaseId: active.leaseId, state: "closed" }); } catch {}
+  }
+}
+
+/** Exit uses the bound native owner, even if its package has since been disabled. */
+export function closeScienceExtensionViewForSender(senderId: number): BrowserWindow {
+  const active = activeViewForSender(senderId);
+  if (!active) throw new Error("science-extension-sender-not-authorized");
+  closeActive(active);
+  return active.window;
 }
 
 export function closeScienceExtensionView(ownerId: number, leaseId?: string): { ok: true } {
@@ -245,6 +265,16 @@ export function closeScienceExtensionView(ownerId: number, leaseId?: string): { 
 
 export function closeAllScienceExtensionViews(): void {
   for (const active of [...activeViews.values()]) closeActive(active, false);
+}
+
+function isScienceOwnerRoute(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    return /^\/science(?:\.html|\/)?$/.test(parsed.pathname)
+      || (parsed.protocol === "file:" && parsed.pathname.endsWith("/science.html"));
+  } catch {
+    return false;
+  }
 }
 
 export function isScienceExtensionViewSender(senderId: number): boolean {
@@ -1005,6 +1035,20 @@ export async function openScienceExtensionView(input: {
 }): Promise<ProductExtensionViewStatus> {
   const release = activeScienceExtension();
   if (!release) return { id: SCIENCE_EXTENSION_ID, leaseId: input.leaseId, state: "error", errorCode: "science-extension-not-active", errorMessage: "Agentlas Science is not installed and enabled." };
+  // A queued open from the old React route may arrive after its cleanup and
+  // the owner's navigation. It cannot create a fresh overlay on Work.
+  if (input.window.isDestroyed() || input.window.webContents.isDestroyed()
+    || !isScienceOwnerRoute(input.window.webContents.getURL())) {
+    closeScienceExtensionView(input.ownerId);
+    return { id: SCIENCE_EXTENSION_ID, leaseId: input.leaseId, state: "closed" };
+  }
+  const leases = ownerScienceLeases.get(input.window.webContents) ?? { current: input.leaseId, superseded: new Set<string>() };
+  if (leases.superseded.has(input.leaseId)) return { id: SCIENCE_EXTENSION_ID, leaseId: input.leaseId, state: "closed" };
+  // A package refresh can reopen the current lease. A superseded React mount
+  // cannot replace the newer mount, including after its own cleanup ran.
+  if (leases.current !== input.leaseId) leases.superseded.add(leases.current);
+  leases.current = input.leaseId;
+  ownerScienceLeases.set(input.window.webContents, leases);
   closeScienceExtensionView(input.ownerId);
   const view = new WebContentsView({
     webPreferences: {
@@ -1041,6 +1085,7 @@ export async function openScienceExtensionView(input: {
     presentationSequence: 0,
     presentationScopeKey: null,
     onPresentationChanged: input.onPresentationChanged,
+    disposeOwnerListeners: null,
   };
   activeViews.set(input.ownerId, active);
   active.askUserDispose = onAskUserLifecycle((request) => {
@@ -1089,24 +1134,37 @@ export async function openScienceExtensionView(input: {
   view.webContents.on("unresponsive", () => {
     active.send({ id: SCIENCE_EXTENSION_ID, leaseId: active.leaseId, state: "error", errorCode: "science-renderer-unresponsive", errorMessage: "The Science interface is not responding." });
   });
-  view.webContents.once("destroyed", () => {
-    clearSciencePresentation(active);
-    if (activeViews.get(active.ownerId) === active) activeViews.delete(active.ownerId);
-    closeScienceQuestionSurface(active);
-    if (active.renderer) closeRenderer(active, "failed", "science-extension-view-destroyed", "The Science interface was closed.");
-  });
+  view.webContents.once("destroyed", () => closeActive(active, false));
   input.window.contentView.addChildView(view);
   view.setBounds(safeBounds(input.bounds, input.window, input.ownerId));
   view.setVisible(true);
-  input.window.once("closed", () => closeActive(active, false));
+  const onOwnerClosed = () => closeActive(active, false);
+  const onOwnerNavigation = (_event: Electron.Event, url: string) => {
+    if (!isScienceOwnerRoute(url)) closeActive(active);
+  };
+  const onOwnerInPageNavigation = (event: Electron.Event, url: string, isMainFrame: boolean) => {
+    if (isMainFrame) onOwnerNavigation(event, url);
+  };
+  // The native child outlives the React route. Retire it on a committed owner
+  // navigation as well as the renderer's best-effort lease cleanup.
+  input.window.webContents.on("did-navigate", onOwnerNavigation);
+  input.window.webContents.on("did-navigate-in-page", onOwnerInPageNavigation);
+  input.window.once("closed", onOwnerClosed);
+  active.disposeOwnerListeners = () => {
+    input.window.webContents.removeListener("did-navigate", onOwnerNavigation);
+    input.window.webContents.removeListener("did-navigate-in-page", onOwnerInPageNavigation);
+    input.window.removeListener("closed", onOwnerClosed);
+  };
   const opening: ProductExtensionViewStatus = { id: SCIENCE_EXTENSION_ID, leaseId: active.leaseId, state: "opening" };
   active.send(opening);
   try {
     await view.webContents.loadURL(pathToFileURL(release.entryPath).toString());
+    if (activeViews.get(active.ownerId) !== active) return { id: SCIENCE_EXTENSION_ID, leaseId: active.leaseId, state: "closed" };
     const ready: ProductExtensionViewStatus = { id: SCIENCE_EXTENSION_ID, leaseId: active.leaseId, state: "ready", title: view.webContents.getTitle() || "Agentlas Science" };
     active.send(ready);
     return ready;
   } catch (error) {
+    if (activeViews.get(active.ownerId) !== active) return { id: SCIENCE_EXTENSION_ID, leaseId: active.leaseId, state: "closed" };
     closeActive(active, false);
     const failed: ProductExtensionViewStatus = {
       id: SCIENCE_EXTENSION_ID,

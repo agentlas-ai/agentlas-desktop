@@ -18,12 +18,11 @@ import {
   type ContinuitySnapshot,
 } from "./updater/controller";
 import {
-  captureUpdaterContinuity,
   readBundledRuntimeVersion,
   readDatabaseSchemaVersion,
-  verifyUpdaterContinuity,
   verifyUpdaterRecoveryCopies,
 } from "./updater/continuity";
+import { captureUpdaterContinuityInWorker, shutdownContinuityWorkers, verifyUpdaterContinuityInWorker } from "./updater/continuity-worker-client";
 import {
   inspectMacInstalledAppTrust,
   repairMacInstalledAppNpmGlobals,
@@ -592,23 +591,24 @@ export async function initAutoUpdater(options: AutoUpdaterInitOptions = {}): Pro
         throw error;
       }
     },
-    captureContinuity: (targetVersion) => {
+    captureContinuity: (targetVersion, signal) => {
       const account = getAuthSession();
-      return captureUpdaterContinuity({
+      return captureUpdaterContinuityInWorker({
         userDataPath,
         databasePath: dbPath,
         targetVersion,
         accountSignedIn: account.signedIn,
         ...(account.expiresAt !== undefined ? { accountExpiresAt: account.expiresAt } : {}),
-      });
+      }, signal);
     },
     verifyContinuity: (snapshot) =>
-      verifyUpdaterContinuity({
+      verifyUpdaterContinuityInWorker({
         snapshot,
         currentUserDataPath: userDataPath,
         currentDatabasePath: dbPath,
         currentAccountSignedIn: getAuthSession().signedIn,
       }),
+    shutdownContinuityWorkers,
     initialSessionRestore: options.initialAuthRestore,
     refreshSessionForRecovery: bootAuthFromKeychain,
     releaseInstanceLockForInstall: () => {
@@ -634,9 +634,11 @@ export async function initAutoUpdater(options: AutoUpdaterInitOptions = {}): Pro
   }
 }
 
-export function disposeAutoUpdater(): void {
-  controller?.dispose();
+export async function disposeAutoUpdater(): Promise<void> {
+  const previous = controller;
   controller = null;
+  if (previous) await previous.dispose();
+  else await shutdownContinuityWorkers();
 }
 
 /** Subscribe to the native updater instance that actually performs installs. */

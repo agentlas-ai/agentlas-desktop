@@ -579,6 +579,7 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
         <input ref={attachmentPicker} type="file" multiple hidden onChange={event=>{if(event.target.files)void pickAttachments(Array.from(event.target.files));event.target.value="";}}/>
         {attachmentError&&<p role="alert" className={styles.feedback}>{attachmentError}</p>}
         <MessageReplyPreview reply={messageReply} locale={locale} onDismiss={()=>setMessageReply(null)}/>
+        {front.view&&!front.view.effective&&<p className={styles.feedback} data-one-personal-model-scope="true" title={copy("개인 One과의 대화에 사용할 모델입니다. Work 업무의 실행 모델은 업무별로 선택합니다.","The model for your personal One conversation. Choose the execution model separately for each Work task.")}>{copy("개인 대화 모델","Personal chat model")}</p>}
         <form className={styles.composer} data-one-composer="true" data-expanded={composerExpanded} data-has-files={attachments.length>0} onSubmit={event=>{event.preventDefault();void send();}}>
           {attachments.length>0&&<div className={styles.attachmentDrafts} aria-label={copy("선택한 첨부","Selected attachments")}>{attachments.map((item,index)=><div className={styles.attachmentDraft} data-kind={item.preview?"image":"file"} key={index} title={item.draft.name}>
             {item.preview?<img src={item.preview} alt={item.draft.name}/>:<span className={styles.attachmentFile}><IconFileUp size={18}/><strong>{item.draft.name}</strong><small>{formatChatFileSize(item.draft.size)}</small></span>}

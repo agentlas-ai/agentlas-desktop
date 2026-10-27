@@ -1,3 +1,4 @@
+import { composeDeclaredPrompt, type PromptOrderingMetadata } from "../runtime/prompt-order";
 /** Model output requests a wait; only the host can accept/persist it. No
  * permission, execution, completion or notification authority is encoded here. */
 export type GoalWaitSubject =
@@ -76,22 +77,22 @@ export function parseGoalWaitProposal(value: unknown): ParsedGoalWait | null {
   } catch { return null; }
 }
 
-export function goalWaitProtocol(lifecycle?: "finite" | "ongoing" | null): string {
-  return `Goal wait (host block, not a tool): waiting on an observed invocation, saved artifact, graph output or timer; end the turn after it. Never wait to poll a model; never invent IDs; never claim accepted (the host returns a receipt) or complete in the same reply.
+export const GOAL_WAIT_PROTOCOL_MODULE = { id: "goal.wait.protocol", revision: 2, stability: "configuration",
+  changeTriggers: ["release", "goal-revision"] } as const satisfies PromptOrderingMetadata;
+
+export function goalWaitProtocol(_lifecycle?: "finite" | "ongoing" | null): string {
+  return composeDeclaredPrompt([{ ...GOAL_WAIT_PROTOCOL_MODULE, text: `Goal wait: request a later observation or work cycle through the host block below. The host returns a registration receipt.
 One block max:
 \`\`\`agentlas-goal-wait
 {"schemaVersion":"agentlas.goal-wait-intent.v1","subject":{"kind":"invocation","invocationRunId":"observed ID","chatId":"observed chat ID"},"condition":"terminal","nextAction":"what to inspect after","deadline":null}
 \`\`\`
-subjects: {"kind":"artifact","artifactId":"ID"} + "changed" | {"kind":"automation","automationId":"saved graph ID"} + "changed" (graph reads a value on its own schedule with no agent step; host wakes this Goal when its output changes) | ${lifecycle !== "finite"
-    ? `{"kind":"timer","notBefore":"future ISO"} + "due" (at least 1 min ahead; check external state first, never repeat a done post or purchase)`
-    : `timer: refused without a goal deadline; value measurable only later: finish now and state what to re-measure and when`}
-deadline: ISO or null. User direction, Stop, authority changes override.`;
+subjects: {"kind":"artifact","artifactId":"ID"} + "changed" | {"kind":"automation","automationId":"saved graph ID"} + "changed" (graph reads a value on its own schedule with no agent step; host wakes this Goal when its output changes) | {"kind":"timer","notBefore":"future ISO"} + "due" (later observation or next work cycle)
+deadline: ISO or null. An explicit user Stop cancels the wait.` }]);
 }
 
 /**
- * Per-turn clause for a finite Goal whose current revision has a host-resolved deadline (goal-deadline.ts): it may
- * wait for its next work cycle up to the deadline; the host moves a later request to the deadline itself.
+ * Recorded planning metadata; it does not impose a second timer cutoff or request renewed approval.
  */
 export function goalDeadlineWaitClause(deadlineAt: string): string {
-  return `deadline: ${deadlineAt}; work in bounded cycles; later step: {"kind":"timer","notBefore":"future ISO"} + "due", notBefore <= deadline (later is moved); check state first, never repeat a done post or purchase; at deadline measure and finish without a wait`;
+  return `plan.recordedDeadline: ${deadlineAt}; next observation or work cycle: {"kind":"timer","notBefore":"future ISO"} + "due"; use the requested notBefore`;
 }

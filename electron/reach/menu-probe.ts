@@ -44,6 +44,8 @@ export interface MenuScanOptions {
   sleep?: (ms: number) => Promise<void>;
 }
 
+const MENU_TREE_MAX_ELEMENTS = 3000;
+
 interface TreeElement { element_index: number; parent_index?: number; role?: string; label?: string; enabled?: boolean }
 
 interface MenuBar {
@@ -57,7 +59,7 @@ interface MenuBar {
 // returns those rows plus their ancestors. Nothing is pressed.
 async function readMenuBar(actuator: Actuator, target: MenuTarget, signal?: AbortSignal): Promise<{ ok: true; menu: MenuBar } | { ok: false; code: string }> {
   const state = await actuator.call("get_window_state", {
-    pid: target.pid, window_id: target.windowId, include_screenshot: false, tree_format: "elements", query: "AXMenu", max_elements: 3000, timeout_ms: 10_000,
+    pid: target.pid, window_id: target.windowId, include_screenshot: false, tree_format: "elements", query: "AXMenu", max_elements: MENU_TREE_MAX_ELEMENTS, timeout_ms: 10_000,
   }, { signal, timeoutMs: 40_000 });
   const rows = state.structured?.elements;
   if (!state.ok || !Array.isArray(rows)) return { ok: false, code: state.errorCode ?? state.refusalCode ?? "unreadable" };
@@ -78,9 +80,42 @@ async function readMenuBar(actuator: Actuator, target: MenuTarget, signal?: Abor
       bar, kids,
       itemsOf: (owner) => kids(owner, "AXMenu").flatMap((menu) => kids(menu, "AXMenuItem")),
       // A tree the driver cut short is a smaller map, never a wrong one: say so.
-      truncated: state.structured?.truncated === true || /PARTIAL TREE|Tree truncated/.test(state.text ?? ""),
+      truncated: elements.length >= MENU_TREE_MAX_ELEMENTS || state.structured?.truncated === true || /PARTIAL TREE|Tree truncated/i.test(state.text ?? ""),
     },
   };
+}
+
+export type SystemMenuProof = { ok: true; prefixes: string[][] } | { ok: false; code: string };
+
+// Safety evidence is independent of the exploration map's depth/item/node budgets. The raw driver tree retains ALL top-level
+// siblings and whether each owns a submenu; clipping a menu at 80 must never turn a system tail into an app-owned dialog.
+// Only macOS injects this shape. Other platforms keep their existing menu navigation and need no extra driver read here.
+export async function readSystemMenuProof(actuator: Actuator, target: MenuTarget, signal?: AbortSignal): Promise<SystemMenuProof> {
+  if (signal?.aborted) return { ok: false, code: "aborted" };
+  if (actuator.platform === "linux" || actuator.platform === "win32") return { ok: true, prefixes: [] };
+  try {
+    const read = await readMenuBar(actuator, target, signal);
+    if (!read.ok) return { ok: false, code: read.code };
+    if (read.menu.truncated) return { ok: false, code: "menu_tree_truncated" };
+    const { menu } = read;
+    const tops = menu.kids(menu.bar, "AXMenuBarItem");
+    if (tops.length === 0 || tops.some((top) => typeof top.label !== "string" || !top.label.trim())) return { ok: false, code: "menu_tree_unreadable" };
+    const nodes = tops.map((top): MenuNode => {
+      const path = [(top.label ?? "").trim()];
+      const children = menu.itemsOf(top).filter((item) => (item.label ?? "").trim()).map((item): MenuNode => {
+        const label = (item.label ?? "").trim();
+        const childPath = [...path, label];
+        const hasSubmenu = menu.kids(item, "AXMenu").length > 0;
+        // The tail rule inspects submenu presence, not its captions or depth. A structural placeholder preserves that fact.
+        return { label, path: childPath, leaf: !hasSubmenu, enabled: item.enabled !== false,
+          children: hasSubmenu ? [{ label: "", path: childPath, leaf: true, enabled: true, children: [] }] : [] };
+      });
+      return { label: path[0], path, leaf: children.length === 0, enabled: top.enabled !== false, children };
+    });
+    return { ok: true, prefixes: systemInsertedPrefixes(nodes, "darwin") };
+  } catch {
+    return { ok: false, code: "menu_tree_unreadable" };
+  }
 }
 
 export async function enumerateMenus(actuator: Actuator, target: MenuTarget, options: MenuScanOptions = {}): Promise<MenuScan> {
@@ -192,8 +227,8 @@ export function opensDialog(label: string): boolean {
 // Structure-tier capabilities: "this menu command exists". Reading the menu bar presses nothing. An item that opens a dialog stays a candidate until
 // the explorer has opened and read that dialog. A plain command (no ellipsis, a name that does no harm) is also carried out by pressing it: the body
 // is the one step the runner already checks live (the path must be in the menu now and switched on), so it is usable at once - see isDirectMenuCommand.
-export function menuCapabilities(appKey: string, nodes: readonly MenuNode[], platform: string = "darwin", options: { sensors?: boolean } = {}): Capability[] {
-  const system = systemInsertedPrefixes(nodes, platform);
+export function menuCapabilities(appKey: string, nodes: readonly MenuNode[], platform: string = "darwin", options: { sensors?: boolean; systemPrefixes?: readonly (readonly string[])[] } = {}): Capability[] {
+  const system = options.systemPrefixes ?? systemInsertedPrefixes(nodes, platform);
   return menuLeaves(nodes).map((leaf) => {
     const dialog = opensDialog(leaf.label);
     const direct = !dialog && isDirectMenuCommandPath(leaf.path, options) && !system.some((prefix) => startsWithPath(leaf.path, prefix));

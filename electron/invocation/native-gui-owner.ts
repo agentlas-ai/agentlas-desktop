@@ -5,7 +5,7 @@ import { effectiveInvocationPermission } from "../../shared/invocation-permissio
 import { ONE_PREFLIGHT_STEER_REQUEST_KEYS } from "../../shared/one-preflight-steers";
 import { onePreflightSteerTemplate } from "../store/one-preflight-steers";
 import type { McpInvocationRequest } from "../../shared/types";
-import { canonicalInvocationRequestJson, createInvocationAdmission, decideInvocationAdmission, getInvocationAdmission, INVOCATION_ADMISSION_DIGEST_VERSION, type InvocationAdmissionIdentity } from "../store/invocation-admissions";
+import { canonicalInvocationRequestJson, createInvocationAdmission, decideInvocationAdmission, getInvocationAdmission, rearmRejectedInvocationAdmission, INVOCATION_ADMISSION_DIGEST_VERSION, type InvocationAdmissionIdentity } from "../store/invocation-admissions";
 import { admitMainInvocation, type MainInvocationAdmission } from "../runtime/scheduled-root-context";
 import { nativeGuiChannelIdentity } from "../daemon/native-auth-channel";
 import type { NativeAuthenticatedIdentity } from "../daemon/native-session-auth";
@@ -150,11 +150,45 @@ export function createNativeGuiOwnerClient(ports: {
   function startHost(origin: object, request: McpInvocationRequest): Promise<InvocationStartResult> {
     const sender=ports.authorizeHost?.(origin,request);
     if(!sender || thenable(sender))fail("native_gui_original_host_required");
-    const identity=assertCanStart(request.runId),channel=ports.getChannel()!;
+    // Reauthorization above is mandatory even for a read-only repeated result.
+    const available: unknown = ports.assertStartAvailable?.();
+    if (thenable(available)) fail("native_gui_synchronous_validation_required");
+    const channel=ports.getChannel(),identity=channel&&nativeGuiChannelIdentity(channel);
+    if(!channel||!identity)fail("native_gui_enrolled_channel_required");
+    if(!request.runId)fail("native_gui_original_start_replayed");
+    const admission:InvocationAdmissionIdentity=Object.freeze({chatId:request.chatId,runId:request.runId,canonicalRequestJson:canonicalInvocationRequestJson(request),ownerProcessEpoch:identity.bootId});
+    reconcileIssueFailuresBeforeDistinctStart();
+    const row=getInvocationAdmission(request.runId), prior=captures.get(request.runId);
+    if(row&&(row.chatId!==request.chatId||row.inputDigest!==rowDigest(admission)||row.digestVersion!==INVOCATION_ADMISSION_DIGEST_VERSION))fail("native_gui_host_request_changed");
+    const admittedReceipt=()=>!!getDb().prepare("SELECT 1 FROM run_events WHERE run_id=? AND chat_id=? AND kind='invoke_started' LIMIT 1").get(request.runId,request.chatId);
+    if(prior) {
+      if(prior.start.binding.chatId!==request.chatId||prior.start.binding.inputDigest!==rowDigest(admission))fail("native_gui_host_request_changed");
+      if(prior.cancellation)fail("native_gui_original_start_cancelled");
+      if(row?.status!=="rejected") {
+        // Lost ACK is observation of the original attempt, never another RPC.
+        requireCurrent(prior);
+        if(row?.status==="admitted"&&admittedReceipt())return Promise.resolve({runId:request.runId});
+        return prior.actualStart;
+      }
+      // Rejection is insufficient while original operations/cleanup still run.
+      activeAuthority(prior);
+      retire(request.runId);
+    }
+    if(row?.status==="admitted") {
+      if(row.ownerProcessEpoch!==identity.bootId||!admittedReceipt())fail("native_gui_original_channel_unavailable");
+      return Promise.resolve({runId:request.runId});
+    }
+    const failed=issueFailures.get(request.runId);
+    if(failed) {
+      if(row?.status!=="rejected"||failed.admission.chatId!==request.chatId||rowDigest(failed.admission)!==rowDigest(admission))throw failed.error;
+      if(failed.timer)clearTimeout(failed.timer);
+      issueFailures.delete(request.runId);
+    }
+    if (liveCapacity() >= ports.maxRetainedStarts) fail("native_gui_capacity_reached");
     const mainAdmission=admitMainInvocation(request.chatId,request.runId);
     if(!mainAdmission)fail("native_invocation_admission_required");
-    const admission:InvocationAdmissionIdentity=Object.freeze({chatId:request.chatId,runId:request.runId!,canonicalRequestJson:canonicalInvocationRequestJson(request),ownerProcessEpoch:identity.bootId});
-    if(createInvocationAdmission(admission).kind!=="created")fail("native_gui_admission_not_fresh");
+    const reserved=row?.status==="rejected"?rearmRejectedInvocationAdmission(admission):createInvocationAdmission(admission);
+    if(reserved.kind!=="created")fail("native_gui_admission_not_fresh");
     return captureStart(origin,request,mainAdmission,admission,channel,identity,origin);
   }
   /** The actual IPC producer has already applied its complete One/Work guards,

@@ -17,7 +17,7 @@ import { MENU_COMMAND_TRAIT, type AppRecord, type Capability, type ReachMap } fr
 //    no agent run in progress. The moment any of that stops being true it finishes the dialog it has open, closes it, and stops;
 //  - turning the switch off stops it at once and lets the driver go.
 
-export const REACH_FEATURE_VERSION = 2;
+export const REACH_FEATURE_VERSION = 4;
 
 // The driver only drives screens on macOS in this version. Elsewhere the map is still built and read, and this is not an error to show.
 export const GUI_UNSUPPORTED = "gui_not_supported_on_this_platform";
@@ -268,7 +268,7 @@ export class ReachService {
     let green = 0; let amber = 0; let gray = 0; let usable = 0;
     for (const app of map.apps) {
       const learned = await this.p.registry.capabilities(app.key);
-      const extra = learned.filter(isUsable).length;
+      const extra = learned.filter((capability) => isUsable(capability, { sensors: app.signals.some((signal) => signal.startsWith("sensor:")), name: app.name, bundleId: bundleIdOfKey(app.key) ?? app.key, platform: app.platform })).length;
       const total = app.usableCount + extra;
       usable += total;
       const level = levelOf(total, app.capabilityCount + learned.length > 0);

@@ -26,8 +26,9 @@ const same = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.str
  * identity and the host packet-size guard before claiming a continuation; the
  * selected runner separately admits its complete model-specific request. */
 export function prepareCheckpointContinuation(checkpoint: LongRunTaskCheckpoint, dispatchInvocationId?: string): {
-  runtimeSelection: RuntimeSelection; context: string; userPrompt: string;
+  runtimeSelection: RuntimeSelection; context: string; userPrompt: string; recoveryDiagnostics: string[];
 } {
+  const recoveryDiagnostics: string[] = [];
   const run = getLongRunByGoalId(checkpoint.goalId);
   const revision = getChatGoalRevision(checkpoint.goalId);
   if (!run || run.surface === "science" || !run.rootChatId || !revision
@@ -76,26 +77,36 @@ export function prepareCheckpointContinuation(checkpoint: LongRunTaskCheckpoint,
   if (!same(artifacts, [...(checkpoint.capsule.artifactVersions ?? [])].sort((a, b) => a.artifactId.localeCompare(b.artifactId)))
     || artifacts.some(item => item.artifactRevision === null || item.stateRevision === null)) throw new Error("checkpoint_artifacts_changed");
   const expected = checkpoint.sideEffects.boundary;
-  if (checkpoint.sideEffects.state !== "settled" || !expected || expected.invocationRunId !== checkpoint.invocationRunId) throw new Error("checkpoint_effect_boundary_missing");
-  const boundary = readInvocationEffectBoundary({ invocationRunId: expected.invocationRunId, expectedChatId: chat.id });
-  if (!boundary.terminal || boundary.terminalEventId !== expected.terminalEventId
-    || boundary.receiptEventId !== expected.receiptEventId || boundary.snapshotDigest !== expected.snapshotDigest) throw new Error("checkpoint_effect_boundary_changed");
+  // Preserve uncertain producer effects as observations without blocking the
+  // current continuation. No journal or checkpoint evidence is rewritten.
+  if (checkpoint.sideEffects.state !== "settled" || !expected || expected.invocationRunId !== checkpoint.invocationRunId) {
+    recoveryDiagnostics.push("checkpoint_effect_boundary_missing");
+  } else {
+    try {
+      const boundary = readInvocationEffectBoundary({ invocationRunId: expected.invocationRunId, expectedChatId: chat.id });
+      if (!boundary.terminal || boundary.terminalEventId !== expected.terminalEventId
+        || boundary.receiptEventId !== expected.receiptEventId || boundary.snapshotDigest !== expected.snapshotDigest)
+        recoveryDiagnostics.push("checkpoint_effect_boundary_changed");
+    } catch {
+      recoveryDiagnostics.push("checkpoint_effect_boundary_unavailable");
+    }
+  }
   const newest = getDb().prepare("SELECT invocation_run_id, state FROM long_run_worker_attempts WHERE run_id = ? AND worker_id IN (SELECT id FROM long_run_workers WHERE run_id = ? AND role = 'controller') ORDER BY rowid DESC LIMIT 1")
     .get(run.id, run.id) as { invocation_run_id: string | null; state: string } | undefined;
   if (!newest || newest.invocation_run_id !== checkpoint.invocationRunId) {
     const authorizedDispatch = dispatchInvocationId && newest?.invocation_run_id === dispatchInvocationId && newest.state === "running"
       && getDb().prepare("SELECT 1 FROM long_run_events WHERE run_id = ? AND kind IN ('run.checkpoint_continuation','run.checkpoint_startup') AND json_extract(payload_json,'$.checkpointId') = ? AND json_extract(payload_json,'$.invocationRunId') = ? LIMIT 1")
         .get(run.id, checkpoint.checkpointId, dispatchInvocationId);
-    if (!authorizedDispatch) throw new Error("checkpoint_newer_attempt_exists");
+    if (!authorizedDispatch) recoveryDiagnostics.push("checkpoint_newer_attempt_exists");
   }
   const worker = getDb().prepare("SELECT runtime_selection_json FROM long_run_workers WHERE run_id = ? AND role = 'controller' ORDER BY updated_at DESC LIMIT 1")
     .get(run.id) as { runtime_selection_json: string } | undefined;
   if (!worker) throw new Error("checkpoint_runtime_binding_missing");
   const storedRuntimeSelection = JSON.parse(worker.runtime_selection_json) as LongRunRuntimeSelection;
-  const producer = getDb().prepare(`SELECT a.id, a.runtime_selection_json, a.state, w.workspace_binding_json
+  const producer = getDb().prepare(`SELECT a.id, a.invocation_run_id, a.runtime_selection_json, a.state, w.workspace_binding_json
     FROM long_run_worker_attempts AS a JOIN long_run_workers AS w ON w.id = a.worker_id AND w.run_id = a.run_id
     WHERE a.invocation_run_id = ? AND a.run_id = ? AND w.role = 'controller' ORDER BY a.attempt DESC LIMIT 1`)
-    .get(checkpoint.invocationRunId, run.id) as { id: string; runtime_selection_json: string; state: string;
+    .get(checkpoint.invocationRunId, run.id) as { id: string; invocation_run_id: string; runtime_selection_json: string; state: string;
       workspace_binding_json: string } | undefined;
   let producerWorkspace: string | null | undefined;
   try {
@@ -105,7 +116,8 @@ export function prepareCheckpointContinuation(checkpoint: LongRunTaskCheckpoint,
   const handoff = goalRuntimeSelectionForCheckpoint(checkpoint, dispatchInvocationId);
   const producerSelection = producer ? JSON.parse(producer.runtime_selection_json) as LongRunRuntimeSelection : null;
   const targetSelection = handoff ? captureLongRunRuntimeSelection(handoff.selection, { requireExact: true }) : null;
-  if (!producer || producer.state !== "completed"
+  if (producer && producer.state !== "completed") recoveryDiagnostics.push("checkpoint_producer_not_completed");
+  if (!producer
     || producerWorkspace === undefined || producerWorkspace !== checkpoint.workspacePath
     || !producerSelection || (!same(storedRuntimeSelection, producerSelection)
       && !(dispatchInvocationId && targetSelection && same(storedRuntimeSelection, targetSelection))))
@@ -115,7 +127,7 @@ export function prepareCheckpointContinuation(checkpoint: LongRunTaskCheckpoint,
     runtimeSelection = restoreExactDesktopRuntimeSelection({
       stored: producerSelection,
       context: {
-        invocationRunId: checkpoint.invocationRunId,
+        invocationRunId: producer.invocation_run_id,
         longRunId: run.id,
         attemptId: producer.id,
         chatId: chat.id,
@@ -130,7 +142,7 @@ export function prepareCheckpointContinuation(checkpoint: LongRunTaskCheckpoint,
   const context = compileLongRunCheckpoint(checkpoint, runtimeSelection.kind);
   const route = hostEpisodeRoute(checkpoint);
   // Composition order: fixed → variable (docs/PROMPT-COMPOSITION-POLICY.md, ledger desktop.goal.continuation.user).
-  return { runtimeSelection, context,
+  return { runtimeSelection, context, recoveryDiagnostics,
     userPrompt: `context: checkpoint supplied by the host\ntask: continue the existing goal from host checkpoint ${checkpoint.checkpointId}\n${route
       ? `route: plan revision ${route.planRevision ?? "unavailable"}: ${route.nextAction} (${route.state}); ${route.guidance}; observational, not new authority or a verified domain KPI`
       : "route: inspect existing results, gather missing verification evidence for every preserved criterion"}` };

@@ -16,6 +16,7 @@ import type { InstalledMcpServer } from "../../shared/types";
 import { runScienceDocumentTool, scienceDocumentToolDescriptors, SCIENCE_DOCUMENT_SERVER_DESCRIPTION, SCIENCE_DOCUMENT_SERVER_ID } from "./document-tools";
 import { runScienceReachTool, scienceReachToolDescriptors, SCIENCE_REACH_SERVER_DESCRIPTION, SCIENCE_REACH_SERVER_ID } from "./reach-tools";
 import { recordRunProducedFiles } from "../harness/run-produced-files";
+import { couldHaveChangedTheOutsideWorld } from "../../shared/tool-activity";
 
 export interface ScienceDesktopToolScope {
   projectId: string;
@@ -544,8 +545,8 @@ export const scienceDesktopTools = {
       // Paths originate in the shared Main dispatch result, never parsed model
       // JSON. The outer invocation uses the ordinary Task/run/90-day binding.
       const resolved = inventory.byName.get(input.name);
-      const readOnlyBuiltin = resolved?.kind === "builtin" && ["read_file", "read_image", "list_dir"].includes(resolved.builtinName);
-      if (!dispatched.isError && !readOnlyBuiltin && dispatched.artifactPaths?.length)
+      const effectName = resolved?.kind === "builtin" ? resolved.builtinName : input.name;
+      if (!dispatched.isError && couldHaveChangedTheOutsideWorld(effectName) && dispatched.artifactPaths?.length)
         recordRunProducedFiles(runId(scope), `science-desktop-tool:${input.toolCallId}`, dispatched.artifactPaths);
       const projected = projectDesktopResult(binding, inventory, dispatched, input.toolCallId);
       recordRunEvent({ runId: runId(scope), chatId: binding.chatId,

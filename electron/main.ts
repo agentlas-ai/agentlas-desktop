@@ -104,6 +104,8 @@ import { mainWindowDevToolsAllowed } from "./devtools-policy";
 import { rememberedMainWindowRoute, rememberMainWindowUrl } from "./main-route-memory";
 import { mainWindowInitialRoute } from "../shared/restorable-route";
 import { COMPANY_ENTRY_ROUTE, isCompanyDeepLink } from "../shared/business/visibility";
+import { inspectCompanyConnection, parseCompanyConnectionLink, saveCompanyBusinessConnection } from "./business/company-connection";
+import { enterpriseServerFetch } from "./enterprise-server/os-trust-fetch";
 import { startMemoryRevocationCleanup, stopMemoryRevocationCleanup } from "./memory/revocation-cleanup";
 import { emitDesktopStoreChange, onDesktopStoreChange } from "./store/change-bus";
 import { watchExternalChatChanges } from "./store/external-chat-changes";
@@ -251,6 +253,7 @@ import {
 import {
   closeAllScienceExtensionViews,
   closeScienceExtensionView,
+  closeScienceExtensionViewForSender,
   captureScienceExtensionViewRegion,
   assertScienceExtensionReleasePermission,
   assertScienceExtensionViewPermission,
@@ -1148,6 +1151,30 @@ const PLUGIN_DEEP_LINK_RE = /^agentlas:\/\/plugin\/([a-z0-9][a-z0-9-]{0,63})\/([
 // A link that arrives before the main window shows a product document becomes that window's first screen,
 // ahead of the remembered one (mainWindowInitialRoute); delivered once, by whichever comes first.
 let pendingDeepLinkRoute: string | null = null;
+let companyConnectionReviewPending = false;
+async function reviewCompanyConnection(serverUrl: string): Promise<void> {
+  if (companyConnectionReviewPending) return;
+  companyConnectionReviewPending = true;
+  try {
+    await app.whenReady();
+    const company = await inspectCompanyConnection(serverUrl, enterpriseServerFetch);
+    const ko = currentUiLocale() === 'ko';
+    const options: Electron.MessageBoxOptions = { type: 'question', title: ko ? '회사 서버 연결' : 'Connect company server',
+      message: ko ? `${company.companyName}에 연결할까요?` : `Connect to ${company.companyName}?`,
+      detail: company.serverUrl, buttons: ko ? ['취소', '연결'] : ['Cancel', 'Connect'], cancelId: 0, defaultId: 1, noLink: true };
+    const answer = mainWindow && !mainWindow.isDestroyed() ? await dialog.showMessageBox(mainWindow, options) : await dialog.showMessageBox(options);
+    if (answer.response !== 1) return;
+    saveCompanyBusinessConnection(company);
+    nativeCompanyEntry?.invalidate(); businessShippingEntry?.console.invalidate();
+    routeAgentlasDeepLink('agentlas://company/enter');
+  } catch (error) {
+    const ko = currentUiLocale() === 'ko';
+    const managed = error instanceof Error && error.message === 'company_connection_managed';
+    dialog.showErrorBox(ko ? '회사 연결 확인' : 'Check company connection', managed
+      ? (ko ? '이 기기는 회사에서 지정한 서버를 사용합니다. 관리자에게 회사 연결을 확인해 주세요.' : 'This device uses the server set by your company. Ask your administrator to check the connection.')
+      : (ko ? '회사 서버의 연결 정보를 확인하지 못했습니다. 회사에서 받은 링크와 서버 실행 상태를 확인해 주세요.' : 'The company server could not be verified. Check the company link and that the server is running.'));
+  } finally { companyConnectionReviewPending = false; }
+}
 
 /*
  * 회사 링크: agentlas://company/join (또는 /enter). 회사가 직원에게 건네는 진입 링크다 — 조직 계정이 아닌 사용자에게는 조직 화면이 하나도 보이지 않으므로,
@@ -1157,6 +1184,8 @@ let pendingDeepLinkRoute: string | null = null;
 function routeAgentlasDeepLink(rawUrl: string): void {
   if (developmentEffectsSuppressed()) return;
   const trimmed = rawUrl.trim();
+  const serverUrl = parseCompanyConnectionLink(trimmed);
+  if (serverUrl) { void reviewCompanyConnection(serverUrl); return; }
   const match = PLUGIN_DEEP_LINK_RE.exec(trimmed);
   const company = !match && isCompanyDeepLink(trimmed);
   if (!match && !company) return; // 모르는 모양은 무시한다 — 바깥 입력이 임의 경로를 열 수 없다.
@@ -1970,6 +1999,7 @@ function finishQuitCleanup(options: { preserveUpdater?: boolean } = {}): Promise
     // Close only its local stores; ordinary cancellation remains available via IPC.
     shellReadyForWindows = false;
     quitCleanupPromise = (async () => {
+      try { await disposeAutoUpdater(); } catch (error) { console.error("[updater] continuity worker shutdown incomplete", error); }
       try { await closeScienceStore(); } catch (error) { console.error("[science-store] close failed", error); }
       try { closeStore(); } catch (error) { console.error("[store] close failed", error); }
       await localModelHubControl?.shutdown();
@@ -2045,15 +2075,19 @@ function finishQuitCleanup(options: { preserveUpdater?: boolean } = {}): Promise
         chats: invocationService.activeChatIds().length, automations: automationWorkInFlight(),
       });
     }
+    if (!options.preserveUpdater) {
+      // A continuity capture owns its own SQLite handle and copy directory.
+      // Await its exit and cleanup before closing stores on an ordinary Quit.
+      await clock.step("updater-workers", async () => {
+        try { await disposeAutoUpdater(); } catch (error) { console.error("[updater] continuity worker shutdown incomplete", error); }
+      });
+    }
     await clock.step("science-store", async () => {
       try { await closeScienceStore(); } catch (error) { console.error("[science-store] close failed", error); }
     });
     await clock.step("store", () => {
       try { closeStore(); } catch (error) { console.error("[store] close failed", error); }
     });
-    if (!options.preserveUpdater) {
-      try { disposeAutoUpdater(); } catch {}
-    }
     quitCleanupDone = true;
     console.info(`[shutdown] cleanup steps ${JSON.stringify(clock.summary())}`);
   })();
@@ -3123,11 +3157,21 @@ app.whenReady().then(async () => {
     },
   });
   ipcMain.handle("science:shell:backToWork", (event, input: unknown) => {
-    assertScienceSender(event, input);
-    if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed()) throw new Error("science-owner-window-missing");
-    mainWindow.webContents.send("menu:navigate", "/dashboard");
-    mainWindow.show();
-    mainWindow.focus();
+    let owner: BrowserWindow;
+    if (isAppControlEvent(event)) {
+      assertScienceSender(event, input);
+      if (!mainWindow || mainWindow.isDestroyed()) throw new Error("science-owner-window-missing");
+      owner = mainWindow;
+      closeScienceExtensionView(owner.webContents.id);
+    } else {
+      const extensionId = input && typeof input === "object" && "extensionId" in input ? (input as { extensionId?: unknown }).extensionId : null;
+      if (extensionId !== "agentlas-science" || !event.senderFrame || event.senderFrame !== event.sender.mainFrame) throw new Error("science-extension-sender-not-authorized");
+      owner = closeScienceExtensionViewForSender(event.sender.id);
+    }
+    if (owner.isDestroyed() || owner.webContents.isDestroyed()) throw new Error("science-owner-window-missing");
+    owner.webContents.send("menu:navigate", "/dashboard");
+    owner.show();
+    owner.focus();
     return { ok: true, route: "/dashboard" };
   });
   ipcMain.handle("science:bootstrap", async (event, input: unknown) => {
@@ -5449,7 +5493,7 @@ app.whenReady().then(async () => {
       void pollGoalWaitSubscriptions().catch((error) => console.error("[goal-wait] startup observation failed", error));
       const { resumeSettledGoalCheckpoints, resumeLegacyOngoingBlockedGoals,
         scheduleUnverifiedOngoingGoalCycles } = await import("./long-run/startup-checkpoints");
-      const resumed = resumeSettledGoalCheckpoints(invocationService);
+      const resumed = await resumeSettledGoalCheckpoints(invocationService);
       if (resumed.length) console.info("[long-run] checkpoint startup reconciliation", resumed);
       const scheduled = scheduleUnverifiedOngoingGoalCycles();
       if (scheduled.length) console.info("[long-run] ongoing observation recovery", scheduled);

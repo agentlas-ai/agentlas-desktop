@@ -18,10 +18,11 @@ import {
   type PendingChatSends,
   type PendingSendRecord,
 } from "./pending-chat-sends";
-import { isTransientSendRefusal, startOwnerSendOrAcceptRefusal } from "../../shared/transient-send-refusal";
+import { isTransientSendRefusal, sendRefusalCode, startOwnerSendOrAcceptRefusal } from "../../shared/transient-send-refusal";
 import { liveAppControlRendererEvent } from "../app-control/ipc-registry";
 import { getInvocationRunReceipt } from "../store/run-events";
 import { readRunTurnPlacement } from "./turn-placement";
+import type { QueuedOwnerInputCustody, QueuedOwnerStartBoundary } from "./queued-owner-input-custody";
 
 /**
  * The Main-side wiring of the per-chat send queue (pending-chat-sends.ts) for the messages the renderer sends.
@@ -31,7 +32,7 @@ import { readRunTurnPlacement } from "./turn-placement";
  * persisted, and started by the queue when the chat is free. The renderer gets an ordinary answer.
  */
 
-export type RendererStartNow = (event: IpcMainInvokeEvent, req: McpInvocationRequest) => Promise<{ runId: string }>;
+export type RendererStartNow = (event: IpcMainInvokeEvent, req: McpInvocationRequest, boundary?: QueuedOwnerStartBoundary) => Promise<{ runId: string }>;
 
 /**
  * What invoke:run answers when the message was accepted but its run starts later (ID-8). `runId` only echoes the
@@ -64,6 +65,7 @@ export function workProjectHeldElsewhere(chatId: string): boolean {
 
 function chatIsFree(chatId: string): boolean {
   if (invocationService.activeChatIds().includes(chatId)) return false;
+  if (invocationService.hasQueuedOwnerRequest(chatId)) return false;
   if (workProjectHeldElsewhere(chatId)) return false;
   try { if (getPendingInvocationAdmissionForChat(chatId)) return false; } catch { /* unreadable is not proof of busy */ }
   try { if (invocationRunOwners.getActiveOwner(chatId)) return false; } catch { /* same */ }
@@ -144,21 +146,39 @@ export function queuedSendEndedNotice(locale: "ko" | "en"): string {
 }
 
 export interface RendererSendQueueOptions {
+  custody?: QueuedOwnerInputCustody;
+  /** Main normalization precedes custody; renderer-only authority is stripped. */
+  sanitizeRequest?(request: McpInvocationRequest): McpInvocationRequest;
   /** Whether an IPC event is a trusted app page right now (ipc.ts assertTrustedSitePublishIpcSender). */
   senderTrusted?(event: IpcMainInvokeEvent): boolean;
+  /** Only Main's durable queue may rebind its exact saved preflight before a deferred start. */
+  beforeQueuedStart?(event: IpcMainInvokeEvent, request: McpInvocationRequest): void | Promise<void>;
+  /** Synchronous, in the same store transaction as acceptance: release only the queued parent's preparation slot. */
+  onQueued?(request: McpInvocationRequest): void;
 }
 
 const UNTRUSTED_SENDER_CODES = new Set(["untrusted-site-publish-ipc-sender", "untrusted-site-publish-ipc-window"]);
 
 export function createRendererSendQueue(startNow: RendererStartNow, options: RendererSendQueueOptions = {}): {
   queue: PendingChatSends<IpcMainInvokeEvent>;
+  dispose(): void;
   /** invoke:run: start now, or accept into the queue. */
   run(event: IpcMainInvokeEvent, req: McpInvocationRequest): Promise<{ runId: string } | QueuedRunAnswer>;
   /** invoke:steer / invoke:steerCurrentTurn: when the steer was refused transiently, accept it as a message that runs next. */
   acceptRefusedSteer(event: IpcMainInvokeEvent, req: McpInvocationRequest, intentId: string | undefined, cause: unknown): InvocationSteerResult | null;
+  resumeCustodiedInputs(restoreAuthority?: boolean): void;
   steerReceiptFor(chatId: string, intentId: string): InvocationSteerResult | null;
   currentTurnReceiptFor(chatId: string, intentId: string, runId: string): InvocationCurrentTurnSteerReceipt | null;
 } {
+  let disposed = false;
+  const canQueue = (request: McpInvocationRequest) => canQueuePendingSend(request, options.custody?.canQueue(request) === true);
+  const startOwned = (event: IpcMainInvokeEvent, request: McpInvocationRequest, queueId: string | null, before?: () => void | Promise<void>) => {
+    const start = async (execution: McpInvocationRequest, boundary?: QueuedOwnerStartBoundary) => {
+      await before?.();
+      return startNow(event, execution, boundary);
+    };
+    return options.custody ? options.custody.start(request, queueId, start) : start(request);
+  };
   const queue = createPendingChatSends<IpcMainInvokeEvent>({
     db: getDb() as unknown as Parameters<typeof createPendingChatSends>[0]["db"],
     now: () => Date.now(),
@@ -166,6 +186,9 @@ export function createRendererSendQueue(startNow: RendererStartNow, options: Ren
     clearTimer: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
     random: Math.random,
     isChatFree: chatIsFree,
+    persistentInput: (id) => options.custody?.persistentInput(id) === true,
+    onHeld: (id,code) => options.custody?.hold(id,code),
+    inputReady: (id, request) => !request.oneAttachmentRef && !request.oneTeamPreflightRef || options.custody?.readyForQueue(id) === true,
     onBusyWait: ({ chatId, waitedMs }) => diagnoseBusyChat(chatId, waitedMs),
     senderAlive: (event) => {
       try { return !event.sender.isDestroyed() && (options.senderTrusted ? options.senderTrusted(event) : true); } catch { return false; }
@@ -179,17 +202,24 @@ export function createRendererSendQueue(startNow: RendererStartNow, options: Ren
     },
     senderRefused: (cause) => UNTRUSTED_SENDER_CODES.has(String((cause as { code?: unknown })?.code ?? (cause as { message?: unknown })?.message ?? "")),
     runState: queuedSendRunState,
-    placement: queuedSendPlacement,
+    placement: (runId) => options.custody?.placement(runId) ?? queuedSendPlacement(runId),
+    reserveStart: (id,request,markStarting) => {
+      if (!options.custody) throw new Error("queued_input_custody_required");
+      options.custody.reserveStart(id,request,markStarting);
+    },
+    canRetryStart: (request, runId) => !request.oneAttachmentRef && !request.oneTeamPreflightRef || options.custody?.placement(runId) === "not-dispatched",
+    onPlaced: () => options.custody?.reconcile(),
     failureCode: (runId) => getInvocationRunReceipt(runId)?.errorCode ?? null,
     saveUserRow: (request) => {
       if (request.promptOrigin === "system") return null;
-      const row = appendChatMessage(request.chatId, "user", request.userPrompt, request.images?.length ? { images: request.images } : undefined);
+      const row = options.custody?.savedUserRow(request)
+        ?? appendChatMessage(request.chatId, "user", request.userPrompt, request.images?.length ? { images: request.images } : undefined);
       try { autoTitleFromFirstMessage(request.chatId, request.userPrompt); } catch { /* a title is cosmetic */ }
       return row;
     },
-    start: (event, request, userRow) => {
+    start: async (event, request, userRow, sendId) => {
       // Never inherit a settling run's personal-native original (see withoutOnePersonalNativeOriginal).
-      const start = () => withoutOnePersonalNativeOriginal(() => startNow(event, request as McpInvocationRequest));
+      const start = () => withoutOnePersonalNativeOriginal(() => startOwned(event, request as McpInvocationRequest, sendId, () => options.beforeQueuedStart?.(event, request as McpInvocationRequest)));
       return userRow
         ? withPreparedUserRow<ChatHistoryEntry, { runId: string }>(request.chatId, request.userPrompt, userRow as ChatHistoryEntry, start)
         : start();
@@ -227,30 +257,105 @@ export function createRendererSendQueue(startNow: RendererStartNow, options: Ren
   });
 
   // A run that settles in this process decides its message at once (runs settled in the daemon are found by the poll).
-  invocationService.onSettled((envelope) => { try { queue.settleRun(envelope.runId); } catch { /* the poll decides it */ } });
+  const offSettled=invocationService.onSettled((envelope) => { if (disposed) return; try { resumeCustodiedInputs(); queue.settleRun(envelope.runId); } catch { /* the poll decides it */ } });
 
   const accept = (event: IpcMainInvokeEvent, req: McpInvocationRequest, intentId: string | undefined, cause?: unknown): PendingSendRecord =>
-    queue.enqueue(event, req, { ...(intentId ? { intentId } : {}), ...(cause === undefined ? {} : { cause }) });
+    getDb().transaction(() => {
+      const record = queue.enqueue(event, req, { ...(intentId ? { intentId } : {}), ...(cause === undefined ? {} : { cause }) });
+      options.custody?.adopt(req, record.id);
+      options.onQueued?.(req);
+      return record;
+    }).immediate();
+
+  // A crash between exact capture/refusal and enqueue must not strand owner
+  // input. Adoption and attempt opening serialize on the same owner DB. An
+  // absent source attempt is safe only with the completed Main capture marker;
+  // any opened/unknown attempt is held instead. No synthetic sender can start it.
+  const resumeCustodiedInputs = (restoreAuthority=false) => {
+    if (disposed) return;
+    for (const request of options.custody?.recoverableRequests(restoreAuthority) ?? []) {
+      try { accept(undefined as unknown as IpcMainInvokeEvent, request, undefined); }
+      catch { /* Retain exact provisional custody; never invent missing proof. */ }
+    }
+    for (const request of options.custody?.heldRequests() ?? []) {
+      try {
+        getDb().transaction(() => {
+          const record=queue.enqueue(undefined as unknown as IpcMainInvokeEvent,request);
+          options.custody!.adoptHeld(request,record.id,"queued_input_capture_incomplete");
+          queue.hold(record.id,"queued_input_capture_incomplete");
+          options.onQueued?.(request);
+        }).immediate();
+      } catch { /* Owned text remains durable; incomplete media is never executed. */ }
+    }
+    options.custody?.reconcile();
+    for (const resumed of options.custody?.resumeHeldQueues(restoreAuthority) ?? []) {
+      void queue.pumpNow(resumed.chatId).catch(() => { /* Retain the exact row; the next recovery pass reads its placement. */ });
+    }
+  };
+  resumeCustodiedInputs();
+  // Native daemon settlements are also observed through the shared store;
+  // their local Main onSettled callback is not guaranteed after reconnect.
+  const custodyRecoveryTimer = options.custody ? setInterval(() => {
+    try { resumeCustodiedInputs(); } catch { /* Store/account unavailable: retain input. */ }
+  }, 2_000) : undefined;
+  custodyRecoveryTimer?.unref();
 
   return {
-    queue,
+    queue, resumeCustodiedInputs,
+    dispose() { disposed = true; offSettled?.(); if (custodyRecoveryTimer) clearInterval(custodyRecoveryTimer); queue.dispose(); },
     async run(event, req) {
+      const rawSubmission = req.preflightSubmissionId;
+      req = options.sanitizeRequest ? options.sanitizeRequest(req) : { ...req };
+      if (rawSubmission !== undefined) req.preflightSubmissionId = rawSubmission;
+      const previous = options.custody?.existing(req);
       const queuedAnswer = (record: PendingSendRecord): QueuedRunAnswer => ({ runId: req.runId ?? "", chatId: req.chatId, queued: true,
         pendingSendId: record.id, queuedRequestId: `pending-send:${record.id}` });
-      if (canQueuePendingSend(req) && queue.hasQueued(req.chatId)) {
+      if (previous) {
+        const existing = previous.queue_id ? queue.get(previous.queue_id) : null;
+        if (existing) return queuedAnswer(existing);
+        throw new Error("queued_input_run_identity_exists");
+      }
+      try { options.custody?.capture(req); }
+      catch (cause) {
+        if (!canQueuePendingSend(req,true) || !options.custody?.captureHeld(req)) throw cause;
+        const code=sendRefusalCode(cause) ?? "queued_input_capture_incomplete";
+        const held=getDb().transaction(() => {
+          const record=queue.enqueue(event,req);
+          options.custody!.adoptHeld(req,record.id,code);
+          queue.hold(record.id,code);
+          options.onQueued?.(req);
+          return record;
+        }).immediate();
+        return queuedAnswer(held);
+      }
+      if (canQueue(req) && queue.hasQueued(req.chatId)) {
         // Earlier messages of this chat are still waiting: this one goes behind them, in the order it was typed.
         return queuedAnswer(accept(event, req, undefined));
       }
-      if (canQueuePendingSend(req) && workProjectHeldElsewhere(req.chatId)) {
+      if (canQueue(req) && workProjectHeldElsewhere(req.chatId)) {
         // Another chat of this Work project is using its provider: wait for it instead of a refused run.
         return queuedAnswer(accept(event, req, undefined));
       }
-      return startOwnerSendOrAcceptRefusal(() => startNow(event, req), (cause) =>
-        canQueuePendingSend(req) && isTransientSendRefusal(cause)
-          ? queuedAnswer(accept(event, req, undefined, cause)) : null);
+      return startOwnerSendOrAcceptRefusal(() => startOwned(event, req, null), (cause) => {
+        if (!canQueue(req)) return null;
+        if (isTransientSendRefusal(cause)
+          && (!req.oneAttachmentRef && !req.oneTeamPreflightRef || options.custody?.placement(req.runId!) === "not-dispatched"))
+          return queuedAnswer(accept(event,req,undefined,cause));
+        if (!options.custody?.canHold(req)) return null;
+        // Hard refusals and unknown effects retain owner input, but never enter
+        // the retry drain without a later exact positive no-effect boundary.
+        return getDb().transaction(() => {
+          const record=queue.enqueue(event,req,{cause});
+          const code=sendRefusalCode(cause) ?? "queued_input_start_unconfirmed";
+          options.custody!.adoptHeld(req,record.id,code);
+          queue.hold(record.id,code,req.runId);
+          options.onQueued?.(req);
+          return queuedAnswer(record);
+        }).immediate();
+      });
     },
     acceptRefusedSteer(event, req, intentId, cause) {
-      if (!canQueuePendingSend(req) || !isTransientSendRefusal(cause)) return null;
+      if (!canQueue(req) || !isTransientSendRefusal(cause)) return null;
       const id = intentId ?? randomUUID();
       const record = queue.find(req.chatId, id) ?? accept(event, req, id, cause);
       return {
@@ -267,7 +372,7 @@ export function createRendererSendQueue(startNow: RendererStartNow, options: Ren
         ...(record.runId ? { runId: record.runId } : {}),
         // "draining": admitted, placement not known yet. "held": ended without proof of placement; never re-sent.
         status: record.state === "queued" ? "queued" : record.state === "starting" ? "draining" : record.state === "started" ? "started"
-          : record.state === "uncertain" ? "held" : "failed",
+          : record.state === "uncertain" || record.state === "held" ? "held" : "failed",
       };
     },
     currentTurnReceiptFor(chatId, intentId, runId) {

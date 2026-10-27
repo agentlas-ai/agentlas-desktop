@@ -12,7 +12,7 @@ const handlers = new Map<string, RegisteredHandler>();
 const domainHandlers = new Map<string, (...args: unknown[]) => unknown>();
 const rendererEvents = new Map<number, IpcMainInvokeEvent>();
 const trackedSenders = new WeakSet<object>();
-const callScope = new AsyncLocalStorage<{ live: boolean; operation: string; event?: IpcMainInvokeEvent; window: BrowserWindow | null; ownerInteraction: boolean }>();
+const callScope = new AsyncLocalStorage<{ live: boolean; operation: string; event?: IpcMainInvokeEvent; window: BrowserWindow | null; ownerInteraction: boolean; permission: "read" | "write" | "full" }>();
 let interactionValidator: ((event: IpcMainInvokeEvent) => void) | null = null;
 
 export function configureAppControlInteractionValidator(validator: (event: IpcMainInvokeEvent) => void): void {
@@ -27,8 +27,11 @@ export function recordAppControlDomainHandler(channel: string, handler: (...args
   domainHandlers.set(channel, handler);
 }
 /** Explicitly extracted services share their real IPC entry and validation, without a renderer event argument. */
-export function registerAppControlDomainIpc(ipc: Pick<IpcMain, "handle">, channel: string, handler: (...args: any[]) => unknown): void {
-  ipc.handle(channel, (_event, ...args) => handler(...args));
+export function registerAppControlDomainIpc(ipc: Pick<IpcMain, "handle">, channel: string, handler: (...args: any[]) => unknown, validateOwnerEvent?: (event: IpcMainInvokeEvent) => unknown): void {
+  ipc.handle(channel, (event, ...args) => {
+    validateOwnerEvent?.(event);
+    return handler(...args);
+  });
   recordAppControlDomainHandler(channel, (...args) => {
     // Lazy imports avoid the development boundary -> registry initialization cycle.
     (require("../ipc-args-normalize") as typeof import("../ipc-args-normalize")).normalizeIpcArgsInPlace(args);
@@ -86,6 +89,12 @@ export function appControlInteractionWindowAvailable(window: BrowserWindow | nul
 
 export function appControlDomainHandlerRegistered(channel: string): boolean { return domainHandlers.has(channel); }
 
+/** Nested domain calls inherit the invoking run ceiling; an expired scope never becomes owner UI authority. */
+export function appControlInvocationPermission(): "read" | "write" | "full" | null {
+  const scope = callScope.getStore();
+  return scope ? scope.live ? scope.permission : "read" : null;
+}
+
 export class AppControlError extends Error {
   constructor(readonly code: string, message: string) {
     // The code leads the message: it is what reaches One through the control server.
@@ -122,11 +131,11 @@ function installDialogGuard(): void {
   }
 }
 
-export async function invokeAppControlIpc(input: { window: BrowserWindow | null; channel: string; args: unknown[]; operation: string; ownerInteraction?: boolean }): Promise<unknown> {
+export async function invokeAppControlIpc(input: { window: BrowserWindow | null; channel: string; args: unknown[]; operation: string; ownerInteraction?: boolean; permission?: "read" | "write" | "full" }): Promise<unknown> {
   installDialogGuard();
   const domain = domainHandlers.get(input.channel);
   if (domain) {
-    const scope = { live: true, operation: input.operation, window: null, ownerInteraction: false };
+    const scope = { live: true, operation: input.operation, window: null, ownerInteraction: false, permission: input.permission ?? "read" };
     try { return await callScope.run(scope, () => domain(...input.args)); }
     finally { scope.live = false; }
   }
@@ -135,7 +144,7 @@ export async function invokeAppControlIpc(input: { window: BrowserWindow | null;
   if (!input.window || input.window.isDestroyed() || input.window.webContents.isDestroyed()) throw new AppControlError("needs-owner-interaction", "This operation needs an authenticated interaction surface.");
   if (!appControlInteractionWindowAvailable(input.window)) throw new AppControlError("needs-owner-interaction", "This operation needs the owner's live authenticated interaction surface.");
   const event = rendererEvents.get(input.window.webContents.id)!;
-  const scope = { live: true, operation: input.operation, event, window: input.window, ownerInteraction: input.ownerInteraction === true };
+  const scope = { live: true, operation: input.operation, event, window: input.window, ownerInteraction: input.ownerInteraction === true, permission: input.permission ?? "read" };
   try {
     return await callScope.run(scope, () => handler(event, ...input.args));
   } finally {

@@ -1,3 +1,4 @@
+import { assertGoalObligationPreflightIntent, type GoalObligationPreflightIntent } from "../long-run/goal-obligation-context";
 import { isPrimarilyKorean, preferredLocaleFromText } from "../../shared/detect-language";
 import { isValidRuntimeSelectionInput } from "../../shared/runtime-selection";
 import { isCallOnlyHubAgent } from "../../shared/call-only-agent";
@@ -23,6 +24,7 @@ import { tryRecordOneDomainEvent } from "./domain-events";
 import { ensureOneGroupLocalStaff, oneOrgExecutionGuidance } from "./org";
 import { ensureOneTaskforceForPreflight, notifyOneTaskforceFromPreflight, listOneTaskforces } from "./taskforces";
 import { inspectOneAttachmentInput } from "./attachments";
+import type { QueuedInputAttempt, QueuedInputEscrow, QueuedInputOwner } from "./queued-input-escrow";
 import { oneTeamDispatchOwnerChat } from "./team-dispatch";
 import { isGoalOwnedOneChat } from "./preflight-admission";
 import type {
@@ -66,6 +68,18 @@ const PROPOSAL_TTL_MS = 30 * 60 * 1_000;
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
 const PROCESS_INSTANCE_ID = randomUUID();
 const PROCESS_PROMPTS = new Map<string, { original: string; execution: string; requestedAgentIds: string[]; requestRosterDigest: string; allowAutomaticRosterSelection: boolean; room?: { id: string; revision: number; memberAgentIds: string[] }; runtimeSelection?: RuntimeSelection }>();
+const USED_GOAL_INTENTS = new WeakSet<GoalObligationPreflightIntent>();
+const GOAL_PREFLIGHTS = new Map<string, { intent: GoalObligationPreflightIntent; taskStatus: CanonicalTask["status"] }>();
+function goalPreflight(record: InternalOneTeamPreflight): ReturnType<typeof GOAL_PREFLIGHTS.get> {
+  const goal = GOAL_PREFLIGHTS.get(record.proposal.proposalId);
+  if (goal) assertGoalObligationPreflightIntent(goal.intent);
+  return goal;
+}
+function releaseProcessPrompt(proposalId: string): void {
+  PROCESS_PROMPTS.delete(proposalId);
+  GOAL_PREFLIGHTS.delete(proposalId);
+}
+
 
 export interface OneTeamRuntimeBinding {
   kind: RuntimeStatus["kind"];
@@ -987,7 +1001,7 @@ function recoverReservations(deps: OneTeamPreflightDependencies): void {
       const alreadyStarted = Boolean(
         startedRunId && (deps.hasRunReceipt ?? hasInvocationRunReceipt)(startedRunId),
       );
-      PROCESS_PROMPTS.delete(record.proposal.proposalId);
+      releaseProcessPrompt(record.proposal.proposalId);
       if (alreadyStarted && record.reservation) {
         const startedStatus = record.reservation.mode === "team"
           ? "team_started"
@@ -1037,7 +1051,7 @@ function expireIfNeeded(record: InternalOneTeamPreflight, deps: OneTeamPreflight
     const live = state.proposals[index];
     if (!(ONE_TEAM_PREFLIGHT_EXPIRABLE_STATUSES as readonly string[]).includes(live.proposal.status)) return live;
     const next = { ...live, proposal: mutateProposal(live.proposal, "expired", now), reservation: null };
-    PROCESS_PROMPTS.delete(live.proposal.proposalId);
+    releaseProcessPrompt(live.proposal.proposalId);
     state.version += 1;
     state.proposals[index] = next;
     persistStore(state, raw, db);
@@ -1131,6 +1145,15 @@ export async function prepareOneTeamPreflight(
   input: PrepareOneTeamPreflightInput,
   deps: OneTeamPreflightDependencies = {},
 ): Promise<PrepareOneTeamPreflightResult> {
+  return prepareOneTeamPreflightInternal(input, deps);
+}
+
+async function prepareOneTeamPreflightInternal(
+  input: PrepareOneTeamPreflightInput,
+  deps: OneTeamPreflightDependencies,
+  goalIntent?: GoalObligationPreflightIntent,
+): Promise<PrepareOneTeamPreflightResult> {
+  if (goalIntent) assertGoalObligationPreflightIntent(goalIntent);
   const inputKeys = Object.keys((input ?? {}) as unknown as Record<string, unknown>);
   const allowedInputKeys = new Set(["chatId", "expectedTaskId", "expectedTaskVersion", "userPrompt", "requestedAgentIds", "requestedAgentIdsSource", "dynamicTeamRequested", "permission", "runtimeSelection", "attachmentRef"]);
   if (
@@ -1177,7 +1200,7 @@ export async function prepareOneTeamPreflight(
   // chat whose Goal is running/waiting is a steer/revision of that Goal; a
   // transient runtime-detection miss (runtime_changed) must not refuse it here.
   // Invocation admission re-resolves the runtime with its own fallback policy.
-  if (goalOwnsChat(initialChat, deps.getGoalStatus)) {
+  if (!goalIntent && goalOwnsChat(initialChat, deps.getGoalStatus)) {
     if (attachmentInput?.hasImages) {
       const goalRuntime = await liveRuntime(deps, input.runtimeSelection).catch(() => null);
       if (goalRuntime?.kind === "agentlas-local") {
@@ -1215,7 +1238,7 @@ export async function prepareOneTeamPreflight(
   if (attachmentInput?.hasImages && pinnedRuntime?.kind === "agentlas-local") {
     return { kind: "input_unsupported", code: "local_model_image_input_unsupported" };
   }
-  let teamNeed = await resolveOneTeamNeed(
+  let teamNeed = goalIntent ? { needed: true, reasons: ["explicit_team_request"] as OneTeamPreflightComplexityReason[], source: "explicit" as const, staffingIntent: "owner_existing_team" as OneTeamStaffingIntent } : await resolveOneTeamNeed(
     input.userPrompt,
     deps,
     (requestedAgentIds.length > 0 && input.requestedAgentIdsSource !== "room") || input.dynamicTeamRequested === true,
@@ -1249,7 +1272,7 @@ export async function prepareOneTeamPreflight(
   if (!chat) throw new OneTeamPreflightError("stale_binding", "The One conversation no longer exists");
   // The Goal may have been attached while the model was judging staffing.
   // Re-read at the mutation boundary and preserve the Goal-owned route.
-  if (goalOwnsChat(chat, deps.getGoalStatus)) {
+  if (!goalIntent && goalOwnsChat(chat, deps.getGoalStatus)) {
     const goalStatus = (deps.getGoalStatus ?? goalStatusForPreflight)(chat.goalId as string);
     console.warn("[one-team-preflight] goal_owned_bypass", JSON.stringify({
       chatId: chat.id,
@@ -1268,7 +1291,7 @@ export async function prepareOneTeamPreflight(
   // weakening it.
   validateTaskInput(input, existingTask);
   const promptDigest = sha256(input.userPrompt);
-  const existing = readStore().state.proposals.find((record) =>
+  const existing = !goalIntent && readStore().state.proposals.find((record) =>
     record.proposal.binding.chatId === chat.id
     && record.proposal.binding.promptDigest === promptDigest
     && ["proposed", "blocked", "deferred", "team_reserved", "workforce_reserved", "solo_reserved"].includes(record.proposal.status),
@@ -1293,6 +1316,9 @@ export async function prepareOneTeamPreflight(
   }
   const permission = input.permission ?? "write";
   const roster = exactInstalledRoster(chat, deps, input.userPrompt, allowAutomaticRosterSelection, requestedAgentIds, permission, input.runtimeSelection);
+  if (goalIntent && canonicalJson(roster.targets.map(canonicalJson).sort()) !== canonicalJson(goalIntent.targets.map(canonicalJson).sort())) {
+    throw new OneTeamPreflightError("candidate_changed", "Goal participant obligations are not fully satisfied");
+  }
   /*
    * 한 명이 못 오면 나머지도 버리던 자리(오너 지적 2026-08-24 "one만 일하냐?").
    * 실측: 방 팀원 둘 중 하나는 원본 폴더가 사라져 부를 수 없었는데, 그 한 명
@@ -1321,14 +1347,15 @@ export async function prepareOneTeamPreflight(
     // transaction. If Goal ownership arrived after the async judgement but
     // before this write, abort the team path without touching the Task.
     const currentChat = readChat(chat.id);
-    if (currentChat && goalOwnsChat(currentChat, deps.getGoalStatus)) {
+    if (goalIntent) assertGoalObligationPreflightIntent(goalIntent);
+    if (!goalIntent && currentChat && goalOwnsChat(currentChat, deps.getGoalStatus)) {
       return { skipForGoal: true as const };
     }
     if (teamNeed.staffingIntent === "owner_native_team"
       && (!currentChat || (deps.oneTeamDispatchOwnerChat ?? oneTeamDispatchOwnerChat)(currentChat.id) !== currentChat.id)) {
       throw new OneTeamPreflightError("stale_binding", "The One owner conversation changed during judgment");
     }
-    const duplicate = state.proposals.find((item) =>
+    const duplicate = !goalIntent && state.proposals.find((item) =>
       item.proposal.binding.chatId === chat.id
       && item.proposal.binding.promptDigest === promptDigest
       && ["proposed", "blocked", "deferred", "team_reserved", "workforce_reserved", "solo_reserved"].includes(item.proposal.status),
@@ -1344,7 +1371,7 @@ export async function prepareOneTeamPreflight(
     // then failed, One showed "Preparing" forever with no card and no run.
     // Keep both writes in one SQLite transaction so every rejected proposal
     // leaves the prior Task state intact.
-    const waitingTask = task.status === "waiting-decision" ? task : setTask(task.id, "waiting-decision");
+    const waitingTask = goalIntent || task.status === "waiting-decision" ? task : setTask(task.id, "waiting-decision");
     const proposal: OneTeamPreflightProposal = {
       contractVersion: ONE_TEAM_PREFLIGHT_CONTRACT_VERSION,
       proposalId: `team-proposal:${randomUUID()}`,
@@ -1418,7 +1445,7 @@ export async function prepareOneTeamPreflight(
       // 더 버리지 않는다 — 축출로 청구를 잃는 것보다 상한을 넘기는 편이 낫다.
       const keptSettled = settled.slice(Math.min(dropCount, settled.length));
       for (const dropped of settled.slice(0, Math.min(dropCount, settled.length))) {
-        PROCESS_PROMPTS.delete(dropped.proposal.proposalId);
+        releaseProcessPrompt(dropped.proposal.proposalId);
       }
       state.proposals = appended.filter((item) => alive.includes(item) || keptSettled.includes(item));
     } else {
@@ -1430,6 +1457,7 @@ export async function prepareOneTeamPreflight(
   const persisted = persist.immediate();
   if (persisted.skipForGoal) return { kind: "not_required" };
   const { proposal, waitingTask } = persisted;
+  if (goalIntent) GOAL_PREFLIGHTS.set(proposal.proposalId, { intent: goalIntent, taskStatus: waitingTask.status });
   if (!persisted.created) return { kind: "proposal", proposal };
   const standingStaffGuidance = oneOrgExecutionGuidance(requestedAgentIds);
   PROCESS_PROMPTS.set(proposal.proposalId, {
@@ -1461,7 +1489,7 @@ export async function prepareOneTeamPreflight(
       ],
     });
   }
-  if (task.status !== "waiting-decision") {
+  if (!goalIntent && task.status !== "waiting-decision") {
     tryRecordOneDomainEvent({
       eventId: `event:team-preflight-task-waiting:${proposal.proposalId.slice(-36)}`,
       eventType: "task.state_changed",
@@ -1542,12 +1570,13 @@ function exactTaskAndChat(
   record: InternalOneTeamPreflight,
   deps: OneTeamPreflightDependencies,
 ): { chat: Chat; task: CanonicalTask } | null {
+  const goal = goalPreflight(record);
   const chat = (deps.getChat ?? getChat)(record.proposal.binding.chatId);
   const task = (deps.getTask ?? getCanonicalTask)(record.proposal.binding.taskId);
   if (
     !chat || !task || task.originChatId !== chat.id
     || task.version !== record.proposal.binding.taskVersion
-    || task.status !== "waiting-decision"
+    || task.status !== (goal?.taskStatus ?? "waiting-decision")
   ) return null;
   const prompt = PROCESS_PROMPTS.get(record.proposal.proposalId);
   if (!prompt || sha256(prompt.original) !== record.proposal.binding.promptDigest) return null;
@@ -1627,6 +1656,9 @@ export async function resolveOneTeamPreflight(
       : input.resolution === "continue_solo"
         ? "solo"
         : null;
+  if (goalPreflight(record) && requestedMode && requestedMode !== "team") {
+    throw new OneTeamPreflightError("invalid_request", "Goal participant obligations require the complete team");
+  }
   if (requestedMode && record.reservation) {
     if (record.reservation.mode === requestedMode && record.reservation.runId === input.requestedRunId) {
       const proposal = record.proposal;
@@ -1687,7 +1719,7 @@ export async function resolveOneTeamPreflight(
     const proposal = resolve.immediate();
     if (input.resolution === "cancel") {
       (deps.setTaskStatus ?? setCanonicalTaskStatus)(bound.task.id, "open");
-      PROCESS_PROMPTS.delete(proposal.proposalId);
+      releaseProcessPrompt(proposal.proposalId);
     }
     resolutionEvent(proposal, bound.task, input.resolution, actor);
     return { kind: "resolved", proposal };
@@ -1718,7 +1750,15 @@ export async function resolveOneTeamPreflight(
     const taskforce = requestedMode === "team" && live.main.taskForceTargets.every(target => target.source === "local")
       ? ensureOneTaskforceForPreflight({ chatId: live.proposal.binding.chatId, memberAgentIds: live.main.candidates.slice(1).map(candidate => candidate.installedAgentId) })
       : undefined;
+    // The approved exact roster may materialize a new room in this same
+    // transaction. Bind that decision's resulting semantic Task version, not
+    // the version from before its own room/participant mutation.
+    const reservedTask = taskforce && !deps.getTask ? ensureCanonicalTaskForChat(live.proposal.binding.chatId) : currentBound.task;
+    if (!reservedTask || reservedTask.id !== currentBound.task.id || reservedTask.status !== (goalPreflight(live)?.taskStatus ?? "waiting-decision")) {
+      throw new OneTeamPreflightError("stale_binding", "The approved room could not retain its exact Task");
+    }
     const proposal = mutateProposal(live.proposal, reservedStatus, now, {
+      binding: { ...live.proposal.binding, taskVersion: reservedTask.version },
       // A manual execution choice supersedes automatic native staffing authority.
       ...(actor === "user" && oneTeamUsesNativeStaffing(live.proposal.staffingAuthority)
         ? { staffingAuthority: undefined } : {}),
@@ -1926,7 +1966,7 @@ export function acknowledgeOneTeamPreflight(
       acknowledgedProposalVersion: live.proposal.version,
     };
   }).immediate();
-  PROCESS_PROMPTS.delete(input.proposalId);
+  releaseProcessPrompt(input.proposalId);
   return acknowledged;
 }
 
@@ -2008,6 +2048,9 @@ export function claimPreparedOneTeamPreflight(
     const index = state.proposals.findIndex((item) => item.proposal.proposalId === prepared.proposalId);
     if (index < 0) throw new Error("One team preflight capability is unavailable");
     const record = state.proposals[index];
+    if (goalPreflight(record) && (!exactTaskAndChat(record, {}) || !exactCandidateSnapshots(record, {}))) {
+      throw new OneTeamPreflightError("stale_binding", "Goal changed before the exact team claim");
+    }
     if (
       !record.reservation
       || record.reservation.ownerInstanceId !== PROCESS_INSTANCE_ID
@@ -2031,7 +2074,7 @@ export function claimPreparedOneTeamPreflight(
     return proposal;
   });
   const proposal = claim.immediate();
-  PROCESS_PROMPTS.delete(prepared.proposalId);
+  releaseProcessPrompt(prepared.proposalId);
   if (prepared.mode === "team") {
     const task = getCanonicalTask(prepared.taskId);
     if (task) {
@@ -2077,9 +2120,202 @@ export function failOneTeamPreflightStart(
     });
     state.version += 1;
     state.proposals[index] = { ...record, proposal, reservation: null };
-    PROCESS_PROMPTS.delete(record.proposal.proposalId);
+    releaseProcessPrompt(record.proposal.proposalId);
     persistStore(state, raw, db);
     return proposal;
   });
   return fail.immediate();
+}
+
+interface QueuedTeamSnapshot {
+  schemaVersion: 1;
+  ref: OneTeamPreflightRef;
+  record: InternalOneTeamPreflight;
+  prompt: NonNullable<ReturnType<typeof PROCESS_PROMPTS.get>>;
+}
+function queuedTeamIdentity(record: InternalOneTeamPreflight): string {
+  const { status: _status, version: _version, updatedAt: _updated, expiresAt: _leaseExpiry, reservedRun: _reserved,
+    startedRun: _started, ...proposal } = record.proposal;
+  const { preparedInstanceId: _instance, ...main } = record.main;
+  return canonicalJson({ proposal, main });
+}
+
+/** Capture the exact already-reserved team and prompt BEFORE start can delete
+ * its process capability. This adds no new team selection or permission. */
+export function reserveOneTeamPreflightForQueue(
+  escrow: QueuedInputEscrow,
+  owner: QueuedInputOwner,
+  ref: OneTeamPreflightRef,
+  deps: OneTeamPreflightDependencies = {},
+): void {
+  prepareOneTeamPreflightClaim(ref, owner.chatId, deps);
+  const record = currentRecord(ref.proposalId);
+  const prompt = PROCESS_PROMPTS.get(ref.proposalId);
+  if (!record || !prompt || record.reservation?.runId !== owner.originRunId) {
+    throw new OneTeamPreflightError("stale_binding", "Queued team input does not own the original reserved run");
+  }
+  escrow.reserve(owner, "team", Date.parse(record.proposal.expiresAt), () => {
+    const snapshot: QueuedTeamSnapshot = JSON.parse(JSON.stringify({ schemaVersion: 1, ref, record, prompt }));
+    return snapshot;
+  });
+}
+
+/** Re-reserve only an exact, definitively undispatched Main-owned submission.
+ * The task, candidate package versions, installed roster, runtime, permission
+ * and owner text all remain the original snapshot. Stale state never gets
+ * silently rebased to a different team or Task version. */
+export async function reissueQueuedOneTeamPreflight(
+  escrow: QueuedInputEscrow,
+  owner: QueuedInputOwner,
+  attempt: QueuedInputAttempt,
+  deps: OneTeamPreflightDependencies = {},
+): Promise<OneTeamPreflightRef> {
+  const resource = escrow.resource(owner, "team", attempt);
+  const snapshot = resource.payload as QueuedTeamSnapshot;
+  if (!snapshot || snapshot.schemaVersion !== 1 || !snapshot.ref || !snapshot.record || !snapshot.prompt
+    || !isOneTeamPreflightProposal(snapshot.record.proposal)
+    || snapshot.ref.contractVersion !== ONE_TEAM_PREFLIGHT_CONTRACT_VERSION
+    || snapshot.ref.proposalId !== snapshot.record.proposal.proposalId
+    || snapshot.ref.expectedTaskId !== snapshot.record.proposal.binding.taskId
+    || snapshot.ref.expectedTaskVersion !== snapshot.record.proposal.binding.taskVersion
+    || snapshot.record.proposal.binding.chatId !== owner.chatId
+    || sha256(snapshot.prompt.original) !== snapshot.record.proposal.binding.promptDigest) {
+    throw new OneTeamPreflightError("stale_binding", "Queued team authority is invalid; original input is retained");
+  }
+  const proposalId = snapshot.ref.proposalId;
+  const previousPrompt = PROCESS_PROMPTS.get(proposalId);
+  PROCESS_PROMPTS.set(proposalId, snapshot.prompt);
+  let retained = false;
+  try {
+    const initial = currentRecord(proposalId);
+    if (!initial || queuedTeamIdentity(initial) !== queuedTeamIdentity(snapshot.record)) {
+      throw new OneTeamPreflightError("stale_binding", "The queued team proposal changed");
+    }
+    await exactRevalidation(initial, deps);
+    const result = escrow.withAttempt(owner, attempt, () => {
+      const db = getDb();
+      return db.transaction(() => {
+        const { state, raw } = readStore(db);
+        const index = state.proposals.findIndex(item => item.proposal.proposalId === proposalId);
+        const current = state.proposals[index];
+        const priorRunId = current?.reservation?.runId ?? current?.proposal.startedRun?.runId;
+        const priorMode = current?.reservation?.mode ?? current?.proposal.startedRun?.mode;
+        const eligibleStatus = current && ["team_reserved", "workforce_reserved", "solo_reserved", "team_started", "workforce_started", "solo_started", "recovery_required", "expired"].includes(current.proposal.status);
+        if (!current || !eligibleStatus || queuedTeamIdentity(current) !== queuedTeamIdentity(snapshot.record)
+          || priorRunId && priorRunId !== attempt.previousRunId && priorRunId !== owner.originRunId
+          || priorMode && priorMode !== snapshot.ref.mode
+          || !exactTaskAndChat(current, deps) || !exactCandidateSnapshots(current, deps)
+          || !exactRosterBinding(current, (deps.getChat ?? getChat)(owner.chatId)!, deps)) {
+          throw new OneTeamPreflightError("stale_binding", "Queued team ownership, task or roster changed before reservation");
+        }
+        const now = nowFor(deps);
+        const mode = snapshot.ref.mode;
+        const reservedAt = now.toISOString();
+        const proposal = mutateProposal(current.proposal, mode === "team" ? "team_reserved" : mode === "workforce" ? "workforce_reserved" : "solo_reserved", now, {
+          reservedRun: { mode, runId: attempt.runId, reservedAt }, startedRun: null,
+          // A fresh short execution lease follows exact durable owner custody;
+          // it does not select a different task, roster, permission or runtime.
+          expiresAt: new Date(now.getTime() + PROPOSAL_TTL_MS).toISOString(),
+        });
+        state.version += 1;
+        state.proposals[index] = { ...current, proposal,
+          main: { ...current.main, preparedInstanceId: PROCESS_INSTANCE_ID },
+          reservation: { ownerInstanceId: PROCESS_INSTANCE_ID, ownerPid: process.pid, mode, runId: attempt.runId, reservedAt },
+        };
+        persistStore(state, raw, db);
+        return { ...snapshot.ref, reservedRunId: attempt.runId };
+      }).immediate();
+    });
+    retained = true;
+    return result;
+  } finally {
+    if (!retained && PROCESS_PROMPTS.get(proposalId) === snapshot.prompt) {
+      if (previousPrompt) PROCESS_PROMPTS.set(proposalId, previousPrompt);
+      else releaseProcessPrompt(proposalId);
+    }
+  }
+}
+
+/** Historical Main claim proves participant intent only, never current execution authority. */
+export function readClaimedGoalParticipantSource(input: { runId: string; chatId: string; promptDigest: string }): {
+  proposalId: string; taskId: string; taskVersion: number; targets: OrchestrationTarget[];
+} | null {
+  if (!ID_RE.test(input.runId) || !ID_RE.test(input.chatId) || !/^(?:sha256:)?[a-f0-9]{64}$/.test(input.promptDigest)) return null;
+  const promptDigest=input.promptDigest.startsWith("sha256:") ? input.promptDigest : `sha256:${input.promptDigest}`;
+  const matches = readStore().state.proposals.filter(record => record.proposal.status === "team_started"
+    && record.proposal.startedRun?.runId === input.runId && record.proposal.startedRun.mode === "team"
+    && record.proposal.binding.chatId === input.chatId && record.proposal.binding.promptDigest === promptDigest);
+  if (matches.length !== 1) return null;
+  const { proposal, main } = matches[0];
+  return { proposalId: proposal.proposalId, taskId: proposal.binding.taskId, taskVersion: proposal.binding.taskVersion,
+    targets: main.taskForceTargets.map(target => ({ ...target })) };
+}
+
+/** Goal's host-branded intent is revalidated against today's catalog, Task and runtime.
+ * Old reservations and receipts supply no reusable capability. No renderer flag reaches this path. */
+export async function prepareGoalObligationTeamPreflight(
+  intent: GoalObligationPreflightIntent,
+  deps: OneTeamPreflightDependencies = {},
+): Promise<ResolveOneTeamPreflightResult> {
+  assertGoalObligationPreflightIntent(intent);
+  if (USED_GOAL_INTENTS.has(intent)) throw new OneTeamPreflightError("already_resolved", "Goal preparation intent was already consumed");
+  USED_GOAL_INTENTS.add(intent);
+  try {
+  const task = (deps.ensureTaskForChat ?? ensureCanonicalTaskForChat)(intent.chatId);
+  if (!task || !ID_RE.test(intent.requestedRunId)) throw new OneTeamPreflightError("stale_binding", "Goal Task is unavailable");
+  const agents = (deps.listInstalledAgents ?? listInstalledAgents)();
+  const firms = (deps.listFirms ?? listFirms)();
+  const requestedAgentIds = intent.targets.map(target => {
+    const matches = agents.filter(agent => target.source === "local"
+      ? target.entityKind === "agent" ? agent.id === target.agentId
+        : agent.kind === "team" && firms.some(firm => firm.id === target.firmId
+          && (firm.id === agent.id || firm.slug === agent.slug || firm.ceoAgentId === agent.id))
+      : target.source === "hub" && isCallOnlyHubAgent(agent) && agent.slug === target.slug);
+    if (matches.length !== 1) throw new OneTeamPreflightError("candidate_changed", "A required Goal participant is unavailable");
+    return matches[0].id;
+  });
+  if (!requestedAgentIds.length || new Set(requestedAgentIds).size !== requestedAgentIds.length) {
+    throw new OneTeamPreflightError("candidate_changed", "Goal participant identity is ambiguous");
+  }
+  const prepared = await prepareOneTeamPreflightInternal({ chatId: intent.chatId, userPrompt: intent.userPrompt,
+    expectedTaskId: task.id, expectedTaskVersion: task.version, requestedAgentIds, permission: intent.permission,
+    ...(intent.runtimeSelection ? { runtimeSelection: intent.runtimeSelection } : {}) }, deps, intent);
+  assertGoalObligationPreflightIntent(intent);
+  if (prepared.kind !== "proposal") throw new OneTeamPreflightError("candidate_changed", "Goal participants were not prepared");
+  const record = currentRecord(prepared.proposal.proposalId);
+  if (!record || !record.proposal.canConfirmTeam
+    || canonicalJson(record.main.taskForceTargets.map(canonicalJson).sort()) !== canonicalJson(intent.targets.map(canonicalJson).sort())) {
+    throw new OneTeamPreflightError("candidate_changed", "Goal participant obligations are not fully satisfied");
+  }
+  const resolved = await autoResolveOneTeamPreflight({ proposalId: prepared.proposal.proposalId,
+    expectedProposalVersion: prepared.proposal.version, requestedRunId: intent.requestedRunId }, deps);
+  try {
+    assertGoalObligationPreflightIntent(intent);
+    if (resolved.kind !== "reserved" || resolved.ref.mode !== "team") {
+      throw new OneTeamPreflightError("candidate_changed", "Goal participant obligations cannot continue solo");
+    }
+    return resolved;
+  } catch (error) {
+    if (resolved.kind === "reserved") failOneTeamPreflightStart(resolved.ref);
+    throw error;
+  }
+  } catch (error) {
+    for (const [proposalId, goal] of GOAL_PREFLIGHTS) {
+      if (goal.intent !== intent) continue;
+      const record=currentRecord(proposalId);
+      if (record?.reservation) failOneTeamPreflightStart({ contractVersion: ONE_TEAM_PREFLIGHT_CONTRACT_VERSION,
+        proposalId, reservedRunId:record.reservation.runId, expectedTaskId:record.proposal.binding.taskId,
+        expectedTaskVersion:record.proposal.binding.taskVersion, mode:record.reservation.mode });
+      else if (record) getDb().transaction(() => {
+        const {state,raw}=readStore();
+        const index=state.proposals.findIndex(item=>item.proposal.proposalId===proposalId);
+        if (index>=0 && !state.proposals[index].reservation) {
+          state.proposals[index]={...state.proposals[index],proposal:mutateProposal(state.proposals[index].proposal,"recovery_required",nowFor(deps))};
+          state.version++;persistStore(state,raw,getDb());
+        }
+      }).immediate();
+      releaseProcessPrompt(proposalId);
+    }
+    throw error;
+  }
 }

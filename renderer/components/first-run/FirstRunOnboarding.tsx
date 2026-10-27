@@ -489,10 +489,10 @@ export function FirstRunOnboarding({
   }[step];
 
   const stepIndex = FIRST_RUN_STEPS.indexOf(step);
-  const popupOpen = Boolean(connectFor);
+  const popupOpen = importOpen || Boolean(connectFor);
 
   return (
-    <div ref={rootRef} className={styles.root} role="dialog" aria-modal="true" aria-labelledby="first-run-title">
+    <div ref={rootRef} className={styles.root} role={popupOpen ? undefined : "dialog"} aria-modal={popupOpen ? undefined : true} aria-labelledby={popupOpen ? undefined : "first-run-title"}>
       <div className={styles.drag}>
         <span className={styles.brand}><img src="/brand/agentlas-one-mark.png" alt="" />Agentlas</span>
       </div>

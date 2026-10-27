@@ -3082,6 +3082,10 @@ function invocationRunReceiptSnapshot(runId: string): InvocationRunReceipt | nul
     // Stores predating the artifact table retain the invocation-input value.
   }
   const hasImages = startPayload.hasImages === true || hasBoundImage;
+  // The owner's own message started this run (mcp/client.ts records `origin_user_message` for it); a host-written turn
+  // has none. Same definition as InvocationService.latestOwnerReceipt.
+  const ownerAuthored = smallRows ? smallRows.some(row => row.kind === "origin_user_message")
+    : Boolean(invocationReceiptStatement("SELECT 1 FROM run_events WHERE run_id = ? AND kind = 'origin_user_message' LIMIT 1").get(runId));
   // A deliberate direction change is already neutral; every other failed or interrupted run may have been taken over.
   let supersededByRunId: string | undefined;
   if ((status === "failed" || status === "interrupted") && interruptionCause !== "steering") {
@@ -3108,6 +3112,7 @@ function invocationRunReceiptSnapshot(runId: string): InvocationRunReceipt | nul
     ...(executionPermissionPayload(startPayload)
       ? { executionPermission: executionPermissionPayload(startPayload) }
       : {}),
+    ownerAuthored,
     ...(executedModel ? { model: executedModel } : {}),
     ...(terminalFailure?.error_code ? { errorCode: terminalFailure.error_code }
       : status !== "completed" && stringPayload(terminalPayload, "errorCode")

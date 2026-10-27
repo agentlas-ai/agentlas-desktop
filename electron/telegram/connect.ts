@@ -11,6 +11,7 @@ import { fitWindowToWorkArea } from "../window-lifecycle";
 import { userDataDir } from "../runtime-paths";
 import { ownerFailureReason } from "../../shared/owner-visible-activity-text";
 import { currentUiLocale } from "../ui-locale";
+import { onAuthSessionOwnershipChanged } from "../auth";
 import {
   resolveTelegramAutomationReportIntent,
   resolveTelegramGoalIntent,
@@ -183,7 +184,7 @@ const TELEGRAM_WEB_PARTITION = "persist:agentlas-telegram-connect";
 const BOTFATHER_WEB_URL = "https://web.telegram.org/k/#@BotFather";
 const pollers = new Map<string, Poller>();
 let reconcileInFlight: Promise<void> | null = null;
-const TELEGRAM_INVOCATION_TIMEOUT_MS = 15 * 60 * 1000;
+let telegramWorkerGeneration = 0;
 const TELEGRAM_REQUEST_TIMEOUT_MS = readPositiveTimeoutMs(
   process.env.AGENTLAS_TELEGRAM_REQUEST_TIMEOUT_MS,
   30_000,
@@ -456,7 +457,6 @@ type TelegramInvocationMode = {
   instruction: string;
 };
 
-class TelegramInvocationTimeoutError extends Error {}
 class TelegramRequestTimeoutError extends Error {}
 /** Bot API 가 거절한 요청. 판정은 설명 문장이 아니라 error_code 로 한다. */
 class TelegramApiError extends Error {
@@ -678,6 +678,7 @@ function markTokenAvailable(id: string, token: string): void {
 }
 
 function markTokenMissing(id: string): void {
+  cancelTelegramBindingInvocation(id);
   getDb()
     .prepare("UPDATE telegram_bindings SET token_saved = 0, status = 'failed', last_error = ?, updated_at = ? WHERE id = ?")
     .run(tg("error.missing_keychain").slice(0, 1000), nowIso(), id);
@@ -691,6 +692,7 @@ async function readBindingSecret(id: string): Promise<string | null> {
       return token;
     }
   } catch (err) {
+    cancelTelegramBindingInvocation(id);
     getDb()
       .prepare("UPDATE telegram_bindings SET token_saved = 0, status = 'failed', last_error = ?, updated_at = ? WHERE id = ?")
       .run((err instanceof Error ? err.message : String(err)).slice(0, 1000), nowIso(), id);
@@ -1111,6 +1113,7 @@ export async function cloneTelegramConnection(input: TelegramConnectCloneInput):
 }
 
 export async function stopTelegramConnection(id: string): Promise<TelegramConnectBinding> {
+  cancelTelegramBindingInvocation(id);
   const row = getBindingRow(id);
   if (!row) throw new Error(`Telegram binding not found: ${id}`);
   getDb()
@@ -1224,6 +1227,7 @@ export async function removeTelegramConnection(
   id: string,
   deleteBotInBotFather = false,
 ): Promise<{ botDeleted: boolean }> {
+  cancelTelegramBindingInvocation(id);
   const row = getBindingRow(id);
   let botDeleted = false;
   // 옵션이 켜졌고, 이 봇을 쓰는 다른 포트가 없을 때만 BotFather에서 실제 봇을 삭제한다.
@@ -1481,7 +1485,9 @@ export async function reconcileTelegramWorkers(): Promise<void> {
 }
 
 async function reconcileTelegramWorkersOnce(): Promise<void> {
+  const generation = telegramWorkerGeneration;
   const active = await activeBindingSecrets();
+  if (generation !== telegramWorkerGeneration) return;
   const byToken = new Map<string, { token: string; bindingIds: Set<string> }>();
   for (const item of active) {
     const key = tokenKey(item.token);
@@ -1495,6 +1501,9 @@ async function reconcileTelegramWorkersOnce(): Promise<void> {
 
   for (const [key, poller] of pollers) {
     const next = byToken.get(key);
+    for (const bindingId of poller.bindingIds) {
+      if (!next?.bindingIds.has(bindingId)) cancelTelegramBindingInvocation(bindingId);
+    }
     if (!next) {
       poller.controller.abort();
       pollers.delete(key);
@@ -1514,14 +1523,20 @@ async function reconcileTelegramWorkersOnce(): Promise<void> {
     };
     pollers.set(key, poller);
     void pollTelegram(poller).catch((err) => {
+      if (poller.controller.signal.aborted) return;
       console.error("[telegram] poller crashed:", err);
       for (const bindingId of poller.bindingIds) markBindingFailed(bindingId, err instanceof Error ? err.message : String(err));
-      pollers.delete(key);
+      if (pollers.get(key) === poller) pollers.delete(key);
+    }).finally(() => {
+      poller.controller.abort();
+      if (pollers.get(key) === poller) pollers.delete(key);
     });
   }
 }
 
 export function stopTelegramWorkers(): void {
+  telegramWorkerGeneration += 1;
+  for (const bindingId of activeTelegramInvocationByBinding.keys()) cancelTelegramBindingInvocation(bindingId);
   for (const poller of pollers.values()) poller.controller.abort();
   pollers.clear();
 }
@@ -1656,16 +1671,8 @@ function telegramDispatchDeps(
     resetConversation: async (bindingId) => {
       await resetTelegramConversation(bindingId);
     },
-    cancelActiveRun: (bindingId) => {
-      const runId = getActiveTelegramRunId(bindingId);
-      if (runId) return invocationService.cancel(runId) === "requested";
-      const legacy = activeLegacyRunByBinding.get(bindingId);
-      if (!legacy || legacy.signal.aborted) return false;
-      legacy.abort();
-      return true;
-    },
-    isRunning: (bindingId) =>
-      Boolean(getActiveTelegramRunId(bindingId)) || Boolean(activeLegacyRunByBinding.get(bindingId)),
+    cancelActiveRun: cancelTelegramBindingInvocation,
+    isRunning: (bindingId) => activeTelegramInvocationByBinding.has(bindingId),
     setDesignatedProject: setTelegramDesignatedProject,
     setDesignatedGraph: setTelegramDesignatedGraph,
     setChatProjectFolder: (id, folderPath) => setChatWorkingFolder(id, folderPath),
@@ -1922,7 +1929,11 @@ async function handleTelegramUpdate(poller: Poller, update: TelegramUpdate): Pro
   // 실행 내내 typing(…) 표시를 살려둔다(텔레그램은 ~5초면 꺼지므로 주기적으로 재전송).
   const stopTyping = startTypingKeepAlive(poller.token, chatId, poller.controller.signal);
   try {
-    const finalText = await runBindingInvocation(binding, message, cleanWithAttachments, mode, attachments, replyLocale);
+    const finalText = await runBindingInvocation(binding, message, cleanWithAttachments, mode, attachments, replyLocale, poller.controller.signal);
+    if (poller.controller.signal.aborted || !poller.bindingIds.has(binding.id)) {
+      markBindingRunFailed(binding.id, "Telegram invocation cancelled", statusBeforeRun);
+      return;
+    }
     await sendLongMessage(poller.token, chatId, finalText);
     // A full inbound → reply round trip just succeeded: that is the verified connection, whatever the message said
     // (native-harness notyet NH25: the message's words never pick the status).
@@ -1932,10 +1943,11 @@ async function handleTelegramUpdate(poller: Poller, update: TelegramUpdate): Pro
       .run(nextStatus, nowIso(), nowIso(), binding.id);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    // 실행 한 번의 실패(시간 초과·모델 거절·빈 답)는 연결의 끝이 아니다. failed 로 적으면
+    // 실행 한 번의 실패(취소·모델 거절·빈 답)는 연결의 끝이 아니다. failed 로 적으면
     // 다음 reconcile 이 폴러를 지워 봇이 영영 답하지 않는다(markBindingTransientError 주석 참고).
     markBindingRunFailed(binding.id, msg, statusBeforeRun);
-    const text = err instanceof TelegramInvocationTimeoutError ? msg : tg("error.run_failed", { message: msg }, replyLocale);
+    if (poller.controller.signal.aborted || !poller.bindingIds.has(binding.id)) return;
+    const text = tg("error.run_failed", { message: msg }, replyLocale);
     await telegramApi(poller.token, "sendMessage", { chat_id: chatId, text }).catch(() => undefined);
   } finally {
     stopTyping();
@@ -2441,8 +2453,29 @@ function escapeRegExp(value: string): string {
  * /stop 이 취소할 대상이자, 실행 중 도착한 메시지를 병렬 실행 대신 steer로 보낼 근거다.
  */
 const activeOneRunByBinding = new Map<string, string>();
-/** 레거시(agent/firm) 실행의 중단 손잡이. /stop 이 레거시 포트에서도 실제로 멈추게 한다. */
-const activeLegacyRunByBinding = new Map<string, AbortController>();
+/** Owns the full Telegram turn, including preflight and a transient start retry. No elapsed-time cap. */
+const activeTelegramInvocationByBinding = new Map<string, AbortController>();
+// Account logout/replacement revokes remote work before any asynchronous credential cleanup.
+onAuthSessionOwnershipChanged(stopTelegramWorkers);
+
+function cancelTelegramBindingInvocation(bindingId: string): boolean {
+  const controller = activeTelegramInvocationByBinding.get(bindingId);
+  if (!controller || controller.signal.aborted) return false;
+  controller.abort(new Error("Telegram invocation cancelled"));
+  return true;
+}
+
+/** Cancellation also settles a wrapper whose dependency ignores AbortSignal; late preflight cannot start a run. */
+async function awaitTelegramInvocation<T>(pending: Promise<T>, signal: AbortSignal): Promise<T> {
+  let onAbort: () => void = () => {};
+  const aborted = new Promise<never>((_resolve, reject) => {
+    onAbort = () => reject(signal.reason instanceof Error ? signal.reason : new Error("Telegram invocation cancelled"));
+    if (signal.aborted) onAbort();
+    else signal.addEventListener("abort", onAbort, { once: true });
+  });
+  try { return await Promise.race([pending, aborted]); }
+  finally { signal.removeEventListener("abort", onAbort); }
+}
 
 export function getActiveTelegramRunId(bindingId: string): string | null {
   return activeOneRunByBinding.get(bindingId) ?? null;
@@ -2480,11 +2513,23 @@ async function runBindingInvocation(
   mode: TelegramInvocationMode = TELEGRAM_READ_ONLY_MODE,
   attachments: TelegramRuntimeAttachment[] = [],
   replyLocale: "ko" | "en" = detectReplyLocale(userText),
+  signal?: AbortSignal,
 ): Promise<string> {
-  if (binding.target_kind === "one") {
-    return runOneBindingInvocation(binding, message, userText, mode, attachments, replyLocale);
+  const controller = new AbortController();
+  const onAbort = () => controller.abort(signal?.reason);
+  if (signal?.aborted) onAbort();
+  else signal?.addEventListener("abort", onAbort, { once: true });
+  activeTelegramInvocationByBinding.set(binding.id, controller);
+  try {
+    controller.signal.throwIfAborted();
+    if (binding.target_kind === "one") {
+      return await runOneBindingInvocation(binding, message, userText, mode, attachments, replyLocale, controller.signal);
+    }
+    return await runLegacyBindingInvocation(binding, message, userText, mode, attachments, replyLocale, controller.signal);
+  } finally {
+    signal?.removeEventListener("abort", onAbort);
+    if (activeTelegramInvocationByBinding.get(binding.id) === controller) activeTelegramInvocationByBinding.delete(binding.id);
   }
-  return runLegacyBindingInvocation(binding, message, userText, mode, attachments, replyLocale);
 }
 
 /**
@@ -2500,8 +2545,10 @@ async function runOneBindingInvocation(
   mode: TelegramInvocationMode,
   attachments: TelegramRuntimeAttachment[],
   replyLocale: "ko" | "en",
+  signal: AbortSignal,
 ): Promise<string> {
   const chat = await ensureBindingChat(binding);
+  signal.throwIfAborted();
   // 사람이 실제로 한 말만 userPrompt 로 보낸다. 표면 안내는 executionContext 로 분리한다.
   const surfaceContext = buildTelegramSurfaceContext(binding, message, mode);
   const workspaceBinding = captureTelegramOneInvocationBinding(getChatWorkingFolder(chat.id));
@@ -2519,22 +2566,30 @@ async function runOneBindingInvocation(
     oneMode: true,
   };
   // 동기 start 경로가 들여다보는 판정을 미리 데운다(모바일/렌더러 진입점과 동일).
-  await withInvocationPreflightAccounting({ runId: request.runId, chatId: request.chatId }, () => Promise.all([
+  await awaitTelegramInvocation(withInvocationPreflightAccounting({ runId: request.runId, chatId: request.chatId }, () => Promise.all([
     prejudgeOneRequestIntent(request, { timeoutMs: 300_000 }),
     prejudgeOneMemoryIntent(request, { timeoutMs: 300_000 }),
-  ])).catch(() => undefined);
+  ])).catch(() => undefined), signal);
+  signal.throwIfAborted();
 
   return new Promise<string>((resolve, reject) => {
     let settled = false;
     let finalText = "";
     let errorMessage = "";
     let runId = "";
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+    const onAbort = () => {
+      try { if (runId) invocationService.cancel(runId); }
+      catch (error) { finish(() => reject(error instanceof Error ? error : new Error(String(error)))); }
+      finally { finish(() => reject(signal.reason instanceof Error ? signal.reason : new Error("Telegram invocation cancelled"))); }
+    };
     const finish = (callback: () => void) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      if (retryTimer) clearTimeout(retryTimer);
+      signal.removeEventListener("abort", onAbort);
       unsubscribe();
-      if (runId) activeOneRunByBinding.delete(binding.id);
+      if (runId && activeOneRunByBinding.get(binding.id) === runId) activeOneRunByBinding.delete(binding.id);
       callback();
     };
     const unsubscribe = invocationService.onEvent((envelope) => {
@@ -2565,17 +2620,11 @@ async function runOneBindingInvocation(
         finish(() => reject(new Error(errorMessage.trim() || tg("error.no_reply", {}, replyLocale))));
       }
     });
-    const timer = setTimeout(() => {
-      if (runId) invocationService.cancel(runId);
-      finish(() => reject(new TelegramInvocationTimeoutError(tg("run.timeout", {}, replyLocale))));
-    }, TELEGRAM_INVOCATION_TIMEOUT_MS);
-    timer.unref?.();
-    // A start refused only because the room was not ready yet (its previous turn settling, busy in the other host, the
-    // service channel attaching: shared/transient-send-refusal.ts, refused before anything reached a model) waits and
-    // starts again under a new run id, inside this message's own time limit, instead of answering "run failed"
-    // (no-dead-end sweep 2026-10-25).
+    signal.addEventListener("abort", onAbort, { once: true });
+    // A transient pre-dispatch refusal waits for the room; explicit stop, disconnect or shutdown cancels the retry.
     const startAttempt = (attempt: number): void => {
       if (settled) return;
+      if (signal.aborted) { onAbort(); return; }
       try {
         const started = invocationService.start(attempt === 0 ? request : { ...request, runId: randomUUID() }, workspaceBinding, {
           // 원격 대화형 표식 — 질문 fence는 평문화돼 전송되고 사용자가 다음 메시지로 답한다.
@@ -2587,8 +2636,8 @@ async function runOneBindingInvocation(
         activeOneRunByBinding.set(binding.id, runId);
       } catch (error) {
         if (isTransientSendRefusal(error)) {
-          const retry = setTimeout(() => startAttempt(attempt + 1), transientSendBackoffMs(attempt));
-          retry.unref?.();
+          retryTimer = setTimeout(() => startAttempt(attempt + 1), transientSendBackoffMs(attempt));
+          retryTimer.unref?.();
           return;
         }
         finish(() => reject(error instanceof Error ? error : new Error(String(error))));
@@ -2606,19 +2655,14 @@ async function runLegacyBindingInvocation(
   mode: TelegramInvocationMode,
   attachments: TelegramRuntimeAttachment[],
   replyLocale: "ko" | "en",
+  signal: AbortSignal,
 ): Promise<string> {
   const chat = await ensureBindingChat(binding);
+  signal.throwIfAborted();
   const surfaceContext = buildTelegramSurfaceContext(binding, message, mode);
-  const controller = new AbortController();
-  activeLegacyRunByBinding.set(binding.id, controller);
-  let timedOut = false;
-  const timer = setTimeout(() => {
-    timedOut = true;
-    controller.abort();
-  }, TELEGRAM_INVOCATION_TIMEOUT_MS);
   let finalFromEvents = "";
   let errorFromEvents = "";
-  const result = await runMcpInvocation({
+  const result = await awaitTelegramInvocation(runMcpInvocation({
     chatId: chat.id,
     userPrompt: userText,
     images: attachments.map((attachment) => attachment.image).filter((image): image is ImageAttachment => Boolean(image)),
@@ -2632,18 +2676,12 @@ async function runLegacyBindingInvocation(
     } else if (event.kind === "error" && event.error?.message) {
       errorFromEvents = event.error.message;
     }
-  }, controller.signal, undefined, {
+  }, signal, undefined, {
     // 원격 대화형 표식 — 질문 fence는 평문화돼 전송되고 사용자가 다음 메시지로 답한다.
     // (미지정이면 "누락된 헤드리스"와 구분이 안 되는 fail-open 상태가 된다.)
     source: "telegram",
     surfaceContext,
-  }).finally(() => {
-    clearTimeout(timer);
-    if (activeLegacyRunByBinding.get(binding.id) === controller) activeLegacyRunByBinding.delete(binding.id);
-  });
-  if (timedOut) {
-    throw new TelegramInvocationTimeoutError(tg("run.timeout", {}, replyLocale));
-  }
+  }), signal);
   const finalText = result.finalText?.trim() || finalFromEvents.trim();
   if (!finalText) {
     throw new Error(errorFromEvents.trim() || tg("error.no_reply", {}, replyLocale));
@@ -2914,6 +2952,7 @@ function chunkText(text: string, size: number): string[] {
 }
 
 function markBindingFailed(id: string, message: string): void {
+  cancelTelegramBindingInvocation(id);
   getDb()
     .prepare("UPDATE telegram_bindings SET status = 'failed', last_error = ?, updated_at = ? WHERE id = ?")
     .run(message.slice(0, 1000), nowIso(), id);
@@ -2940,7 +2979,8 @@ function markBindingRunFailed(id: string, message: string, statusBeforeRun: Tele
   getDb()
     .prepare(
       `UPDATE telegram_bindings
-       SET status = CASE WHEN status = 'running' THEN ? ELSE status END, last_error = ?, updated_at = ?
+       SET status = CASE WHEN status = 'running' THEN ? ELSE status END,
+           last_error = CASE WHEN status = 'running' THEN ? ELSE last_error END, updated_at = ?
        WHERE id = ?`,
     )
     .run(restored, message.slice(0, 1000), nowIso(), id);
@@ -2964,6 +3004,7 @@ function isTerminalTelegramError(err: unknown): boolean {
 }
 
 function disableMissingTargetBinding(id: string): void {
+  cancelTelegramBindingInvocation(id);
   getDb()
     .prepare("UPDATE telegram_bindings SET enabled = 0, status = 'failed', last_error = ?, updated_at = ? WHERE id = ?")
     .run(tg("target.deleted").slice(0, 1000), nowIso(), id);

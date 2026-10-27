@@ -37,6 +37,9 @@ export function FirstRunLogin({ onSignedIn }: { onSignedIn: (session: AuthSessio
     setBusy(true);
     setNotice(null);
     cancelled.current = false;
+    const failureNotice = ko
+      ? "로그인을 완료하지 못했어요. 브라우저를 확인한 뒤 다시 시도해 주세요."
+      : "We couldn't complete sign-in. Check your browser, then try again.";
     try {
       const next = await api.auth.signInWithBrowser();
       if (cancelled.current) return;
@@ -45,10 +48,10 @@ export function FirstRunLogin({ onSignedIn }: { onSignedIn: (session: AuthSessio
       if (cancelled.current) return;
       if (fallback.signedIn) onSignedIn(fallback);
       else if (!cancelled.current) {
-        setNotice(fallback.error || next.error || (ko ? "로그인이 끝나지 않았어요. 브라우저 창을 확인하고 다시 시도해 주세요." : "Sign-in did not finish. Check the browser window and try again."));
+        setNotice(failureNotice);
       }
-    } catch (error) {
-      if (!cancelled.current) setNotice(error instanceof Error ? error.message : String(error));
+    } catch {
+      if (!cancelled.current) setNotice(failureNotice);
     } finally {
       setBusy(false);
     }

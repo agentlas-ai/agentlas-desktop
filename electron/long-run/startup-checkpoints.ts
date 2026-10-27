@@ -1,3 +1,4 @@
+import { prepareGoalObligationContinuation, abandonGoalObligationContinuation, goalObligationContinuationPrompt } from "./goal-obligation-context";
 import { recordGoalWake } from "./wake-arbiter";
 import { hasPendingInvocationDirection } from "./pending-directions";
 import { latestGoalWaitSubscription, registerOngoingGoalCycle, type GoalWaitSubscription } from "./wait-subscriptions";
@@ -371,6 +372,7 @@ export async function resumeLegacyOngoingBlockedGoals(dispatcher: CheckpointStar
         results.push({ runId: id, status: scheduled ? "scheduled" : "skipped", reason });
       };
       let successorRunId: string | null = null;
+      let obligationRequest: McpInvocationRequest | undefined;
       try {
         const candidate = getLongRun(id);
         if (!candidate || candidate.status !== "blocked" || candidate.blockedReason !== "goal_wait_ongoing_authority_required") continue;
@@ -470,7 +472,12 @@ export async function resumeLegacyOngoingBlockedGoals(dispatcher: CheckpointStar
           return { checkpoint, request: { ...request, runId: successorRunId,
             runtimeSelection: continuation.runtimeSelection, userPrompt: continuation.userPrompt } };
         }).immediate();
-        const started = dispatcher.start(claimed.request, undefined, undefined, undefined, "goal-continuation");
+        obligationRequest = await prepareGoalObligationContinuation(claimed.request, { goalId: candidate.goalId, goalRevision: claimed.checkpoint.goalRevision });
+        // Repeat checkpoint and host admission checks after fresh preflight awaits.
+        assertDesktopLongRunAdmissionOpen();
+        prepareCheckpointContinuation(claimed.checkpoint);
+        goalObligationContinuationPrompt(obligationRequest);
+        const started = dispatcher.start(obligationRequest, undefined, undefined, undefined, "goal-continuation");
         if (started.runId !== successorRunId) throw new Error("legacy_lifecycle_dispatch_identity_mismatch");
         recordGoalWake({ runId: id, chatId: claimed.request.chatId ?? "", source: "startup", invocationRunId: successorRunId, cause: "legacy-lifecycle" });
         const current = getLongRun(id);
@@ -480,6 +487,7 @@ export async function resumeLegacyOngoingBlockedGoals(dispatcher: CheckpointStar
           payload: { appInstanceId, checkpointId: claimed.checkpoint.checkpointId, invocationRunId: successorRunId } });
         results.push({ runId: id, status: "started", reason: "legacy_ongoing_source_restored" });
       } catch (error) {
+        if (obligationRequest) abandonGoalObligationContinuation(obligationRequest);
         try {
           const current = getLongRun(id);
           if (successorRunId && current && ["queued", "running"].includes(current.status)) {
@@ -498,7 +506,7 @@ export async function resumeLegacyOngoingBlockedGoals(dispatcher: CheckpointStar
 /** Called only after auth, plugins, IPC and queued user directions have been
  * reconciled. A host pause or a continuation failure before dispatch can use
  * a settled checkpoint; a prior dispatch cannot replay. */
-export function resumeSettledGoalCheckpoints(dispatcher: CheckpointStartupDispatcher): CheckpointStartupResult[] {
+export async function resumeSettledGoalCheckpoints(dispatcher: CheckpointStartupDispatcher): Promise<CheckpointStartupResult[]> {
   try {
     assertDesktopLongRunAdmissionOpen();
   } catch (error) {
@@ -555,6 +563,7 @@ export function resumeSettledGoalCheckpoints(dispatcher: CheckpointStartupDispat
       "budget_cost_unavailable", "auto_goal_resume_surface_mismatch", "auto_goal_resume_not_stopped",
     ]);
     let successorRunId: string | null = null;
+      let obligationRequest: McpInvocationRequest | undefined;
     try {
       if (!failedBeforeContinuation) {
         const decision = reconcileHostPausedLongRuns([candidate.id])[0]?.decision;
@@ -645,11 +654,14 @@ export function resumeSettledGoalCheckpoints(dispatcher: CheckpointStartupDispat
       }
       const selection = continuation.runtimeSelection;
       successorRunId = randomUUID();
-      const resumedRequest: McpInvocationRequest = {
+      const resumedRequest = await prepareGoalObligationContinuation({
         ...request, runId: successorRunId, runtimeSelection: selection,
         ...(request.oneMode ? { onePermissionMode: request.permissions } : {}),
         userPrompt: continuation.userPrompt,
-      };
+      }, { goalId: candidate.goalId, goalRevision: checkpoint.goalRevision });
+      obligationRequest = resumedRequest;
+      assertDesktopLongRunAdmissionOpen();
+      prepareCheckpointContinuation(checkpoint);
       // The event, CAS transition and fresh invocation identity commit together.
       // No await separates this claim from start, so a person cannot be raced
       // after the final state/binding checks in this host process.
@@ -694,6 +706,7 @@ export function resumeSettledGoalCheckpoints(dispatcher: CheckpointStartupDispat
         payload: { appInstanceId, checkpointId: checkpoint.checkpointId, invocationRunId: successorRunId } });
       results.push({ runId: candidate.id, status: "started", reason: "settled_checkpoint" });
     } catch (error) {
+      if (obligationRequest) abandonGoalObligationContinuation(obligationRequest);
       const current = getLongRun(candidate.id);
       if (successorRunId && current && ["queued", "running"].includes(current.status)) {
         transitionLongRun({ runId: current.id, to: "paused", actorKind: "host", reason: "runtime_unavailable" });

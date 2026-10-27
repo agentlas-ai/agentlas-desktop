@@ -1,9 +1,10 @@
+import { effectiveInvocationPermission } from "../../shared/invocation-permission";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import type { BrowserWindow } from "electron";
 import { APP_CONTROL_CATALOG, type AppControlCatalogEntry, type AppControlInvokeArg } from "./catalog.generated";
 import { AppControlError, appControlDomainHandlerRegistered, appControlHandlerRegistered, appControlInteractionWindowAvailable, invokeAppControlIpc } from "./ipc-registry";
-import { appControlEffectNeedsOwnerTurn, appControlOmittedFromModelCatalog, appControlPolicy, type AppControlEffect } from "./policy";
+import { appControlEffectNeedsOwnerTurn, appControlOmittedFromModelCatalog, appControlPolicy, isAppControlTerminalOperation, type AppControlEffect } from "./policy";
 import { APP_CONTROL_ARGUMENT_SCHEMAS, APP_UI_PREFERENCE_VALUE_SCHEMAS } from "./argument-schemas.generated";
 import { describeCatalogOperation, describeHostOperation, type OperationDescriptor } from "./operation-descriptors";
 import type { AppControlRendererOperation, AppControlRendererReply } from "../../shared/app-control";
@@ -27,6 +28,8 @@ export interface AppControlHost {
 export interface AppControlCaller {
   /** A turn the owner wrote (not a review or check-in the host started). */
   ownerTurn: boolean;
+  /** Current host execution ceiling; never decoded from operation arguments. Absence stays read-only. */
+  permission?: "read" | "write" | "full";
 }
 
 /**
@@ -581,9 +584,6 @@ export async function appControlCallLocal(caller: AppControlCaller, input: AppCo
     const closest = [...near, ...searched.filter((name) => !near.includes(name)), ...typo.filter((name) => !near.includes(name) && !searched.includes(name))].slice(0, 8);
     throw new AppControlError("operation-unknown", `Unknown operation ${path || "(empty)"}.${closest.length ? ` Closest: ${closest.join(", ")}.` : ""} Search the catalog with one_app_operations (in harness_call: app.operations).`);
   }
-  if (appControlEffectNeedsOwnerTurn(operation.effect) && !caller.ownerTurn) {
-    throw new AppControlError("owner-turn-required", `${path} ${operation.effect === "destructive" ? "deletes or stops something" : "needs the owner's say-so"}; only a message the owner wrote can ask for it. Tell the owner what you would do.`);
-  }
   const unknown = Object.keys(named).filter((key) => !operation.params.includes(key));
   if (unknown.length) throw new AppControlError("invalid-arguments", `${unknownArgumentMessage(path, unknown, operation.params)}${nestedFieldHint(path, unknown)}`);
   // A required argument that is missing is refused, never sent as undefined: automations.listRuns without its id answered
@@ -591,6 +591,10 @@ export async function appControlCallLocal(caller: AppControlCaller, input: AppCo
   const requiredKeys = APP_CONTROL_ARGUMENT_SCHEMAS[path]?.required;
   const missing = Array.isArray(requiredKeys) ? requiredKeys.filter((key) => typeof key === "string" && named[key] === undefined) : [];
   if (missing.length) throw new AppControlError("invalid-arguments", `${path} needs ${missing.join(", ")}; pass them in args.`);
+  if (operation.effect !== "read" && !isAppControlTerminalOperation(path)
+    && effectiveInvocationPermission(caller.permission, false) === "read") {
+    throw new AppControlError("execution-permission-read-only", "app_control_write_permission_required");
+  }
   const chatScope = CHAT_SCOPED_OPERATIONS[path];
   if (chatScope) await chatScope(named, typeof input.scope?.chatId === "string" ? input.scope.chatId : "");
   const window = host?.interactionWindow?.() ?? host?.mainWindow() ?? null;
@@ -645,7 +649,7 @@ export async function appControlCallLocal(caller: AppControlCaller, input: AppCo
   const decoded = decodeAppControlArguments(named, APP_CONTROL_ARGUMENT_SCHEMAS[path]) as Record<string, unknown>;
   const args = entry.invokeArgs.map((arg) => build(arg, decoded));
   let value: unknown;
-  try { value = await invokeAppControlIpc({ window, channel: entry.channel, args, operation: path, ownerInteraction: caller.ownerTurn }); }
+  try { value = await invokeAppControlIpc({ window, channel: entry.channel, args, operation: path, ownerInteraction: caller.ownerTurn, permission: effectiveInvocationPermission(caller.permission, false) }); }
   catch (error) { await recordAppCallReceipt({ operation: path, effect: operation.effect, named: decoded, status: "failed", code: errorCode(error), ownerTurn: caller.ownerTurn }); throw withArgumentHints(error, path, decoded); }
   // The experience maps carry owner-local titles for the owner's renderer; an agent's copy drops them (safeLabel stays).
   if (OWNER_LOCAL_MAP_OPERATIONS.has(path)) value = (await import("../experience/relation-index")).withoutOwnerLocalLabels(value);

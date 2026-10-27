@@ -294,20 +294,20 @@ jobs:
           const cp = require('node:child_process');
           const manifestBytes = cp.execFileSync('git', ['-C', '.release-private-verification', 'show', `${process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_REF}:release-verification/desktop/manifest.json`]);
           const manifestDigest = crypto.createHash('sha256').update(manifestBytes).digest('hex');
-          if (manifestDigest !== process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_MANIFEST_SHA256 || manifestDigest !== 'ced235819e97789de5a6dc353d15319fee10fd644f50f59ad2533d0587203a94') throw new Error('Private Mac verification manifest digest mismatch');
+          if (manifestDigest !== process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_MANIFEST_SHA256 || manifestDigest !== 'e00af3f5a058f536b1841aa9358ff8d46b0fd88c5f14433de71a8332bf09ccca') throw new Error('Private Mac verification manifest digest mismatch');
           const manifest = JSON.parse(manifestBytes);
           const approvedPins = new Map(Object.entries({
             "scripts/composer-event-sync-contract.mjs": "f13850e468e55431cb071b8f9ce83f707d5d00b05697e72bf9debdab00793857",
             "scripts/experience-promotion-contract.cjs": "bff44bfcb268e8d810b5932829867e2e31c1f687141e304c09a3aaf8c7fcb6da",
             "scripts/fixtures/ontology-chip-projection-v1.golden.json": "c68992fdf26305d3273bc1b4bead3b8df7aaa4149c67cb083f8ef4728ee783c1",
             "scripts/fixtures/portable-experience-bundle-v1-golden.json": "95af4082e530bf1503a95e09d4743a87a7a7129f9b6911da525263313270d3a6",
-            "scripts/lib/agent-workspace-test-harness.cjs": "0568cb2ec70e7110671b1d11613abcfd2ba13870d6abd9aeb4ff7569bc1209d8",
+            "scripts/lib/agent-workspace-test-harness.cjs": "97eeb7c23e97ce05c4a906f45af22fe8503dbf222293898e6e1fce8800023379",
             "scripts/lib/agent-workspace-ui-contract.cjs": "679265dbe07d0fc074ed8c6f12451650eef52adf63e04f74294c7f627323253d",
-            "scripts/lib/one-live-contract-harness.cjs": "faf658d01a8c1175872bf8ee577c0ef7697fdf1b2e68e3baa1fd604498ec1073",
+            "scripts/lib/one-live-contract-harness.cjs": "1e74e6f11f3c81e2344c570447b9092c43e77383b9d609247d5852e06c0da8ab",
             "scripts/lib/science-release-archive-validator.cjs": "34c4505e114a405c24dceeef1832afd084db00b9a8176bd397a8021b96520824",
             "scripts/lib/staged-gate-compile.cjs": "c4787def017bc136d7c5a6557a2773b26e6424f14e7c8133f202fd54098d863b",
             "scripts/loadout-editor-contract.cjs": "74780e20e9ebef4092d118c2b6ece4e968cf45cd925931392eff70e474696ada",
-            "scripts/ontology-retirement-contract.mjs": "f4ac3666341407d9e6f90b48ece8841677e9cd93fe3257cf67732f2e51559d98",
+            "scripts/ontology-retirement-contract.mjs": "7907e506e2d2762a042e6d18a9fc77971517a395416df352980eba62a3f9e0e3",
             "scripts/plugin-spec-gate.cjs": "af92c5c2ea039937e65137bc70762b28bcdf25631108cffcae89dcf12fba3adf",
             "scripts/qa-language-switch.cjs": "7d5803d0a1e1476725f9cfa27f3ee9a0533a0b34866bd2ea482bf9b36a17528a",
             "scripts/qa-science-dinosaur-prompt-chain-electron.cjs": "3538a22edf65b568f84e79f573eefb93c1e7495f0ae6c8caca82d5cee5e123ec",
@@ -322,30 +322,36 @@ jobs:
             "scripts/test-build-session-contracts.cjs": "62b4b62a609647d43864e3b32d51cef0c7d1414711aacb941a6c021a43c146c8",
             "scripts/test-chat-ux-contracts.cjs": "98d586ea47d582bec9efa0e786d9ad0c223f9d00ba2be4ff71ef1ffbbc24213d",
             "scripts/test-experience-i18n-contract.cjs": "b25f1d7740febc868cace13690e358e0e08ac764dddc325e27294827d0d32398",
-            "scripts/test-experience-p0.cjs": "1f05ef2ed8a42448a3ee76b62acac2286f0d901c2eaaa7890562dffa4e44eb02",
-            "scripts/test-first-run-roles-from-onboarding.cjs": "a482380530cca91ff82807844cf04878e9d08c847ef9a4106c12abab0b696317",
+            "scripts/test-experience-p0.cjs": "48ba11245bc80394cbc5a129d3283fa8280c7701cd6d33a60a00e8ec9c1ddfba",
+            "scripts/test-first-run-roles-from-onboarding.cjs": "ee7cf2fe9828e8f63a10143177b524590d8f8130eac8576a8cb951686a6b18e8",
             "scripts/test-hub-bookmark-ux.cjs": "782386b1d2687fdd5e90f64bf239009410f55d0f419bac7d0d5482274bf22121",
-            "scripts/test-mobile-ontology-bridge.cjs": "84b5ffdfed2e3d03a3f5146bd1ae7de312bfbf8595e34bbae7c67cabfd010734",
+            "scripts/test-mobile-ontology-bridge.cjs": "76813731fcc4e656d5c9cfe4d087249b0dbc0c6a43203466b0a2c97d76c45fa5",
             "scripts/test-one-activity-contract.cjs": "17cfd9631dc0b15d57ec17ae0d697b933bf686c04adc684c2e0259bb09656277",
             "scripts/test-one-sidebar-contract.cjs": "04d662278f524d51789f9ea733745e7e0a592f734e0587696011e6b1763db75d",
-            "scripts/test-project-first-v84.cjs": "df83cbc572769f4e29466d4d9f735f4d18db3a8110e0a826ecdfa94efdd487cd",
-            "scripts/test-room-isolation-and-owner-turn.cjs": "8d35fdd605c9c5d5441d33abe9ba1c277f2d770da3515839d909c9acf90aff29",
+            "scripts/test-project-first-v84.cjs": "f9d73eb4ee8d9e26dbb85347d55dff1d5a9f56a7bcffd77eff162d50c5e375e2",
+            "scripts/test-room-isolation-and-owner-turn.cjs": "d3e387bf61adb545d597d6295183e27d860932389db8733f591e1550f24e4e9a",
             "scripts/test-system-agent-taste-runtime.cjs": "be6a377c460d29adeb2bb5198ad5727cbbf42f5f3e54aac6864217adb374a3e3",
             "scripts/test-taste-chip-workflow.cjs": "d0f83459c5f4d34f9d969451d2217e6eb8cd465b7bc9d6cd943e5ce5c9ccd19e",
             "scripts/test-taste-runtime-application.cjs": "d8f0fbef5b47d44b7504b8c6eb10231d5edfc3bee094657f53433f951abcb667",
             "scripts/test-terminal-ontology-loadout-feed.cjs": "c157aab78946ae9ef98f6b9af04fe207919dcf7a18e21cc664ee32bb65420e46",
-            "scripts/test-toolchain-apps.cjs": "6966083fb2b3c54b2c346eda44e9091053c8bed3d9637487b03d24d087edadca",
+            "scripts/test-toolchain-apps.cjs": "72285b508f147e440336cc9c33a5029365a9abf656eb2ce6d7de748e0bc0d227",
             "scripts/verify-agentlas-one-ui.cjs": "0c4e5260fd8af704343c2c927413ac13945ae16f1920d792f2496f6dee6559c5",
             "scripts/verify-build-recovery.mjs": "aa62f09ba3511d75762393cb747bf6654ef666c91b0cb90ef6bde61ed037f7fe",
             "scripts/verify-builtin-plugins-degrade.mjs": "47801c16ef3dd39c0da35d56103f8ba3eca3d179f4ce5ca8b73a8f556324eaaf",
             "scripts/verify-one-composer-surface.mjs": "4dc0eec040819d5db15d1e0e48ee866a139e33d8f3ff525cb25b3c75e5445f08",
             "scripts/verify-one-team-permission-boundary.mjs": "9f37775f6caacbe72d6ed5a763cbef4feff9a0fe44504936cf602158803b76c3",
-            "scripts/verify-one-team-surface.mjs": "f5c5bbae6201ba93c4e93762806175ced3dc2f8d13a7cf96b42b109af82eda9b",
+            "scripts/verify-one-team-surface.mjs": "d1e201c792c5378cd0be41080f43e0a74fd3f82db12e37c2c9b31c4ed748aa34",
             "scripts/current-sidebar-route-contract.cjs": "46d8f58f57e0a7a93cbde54582387d4f937e9f2bf07cd50956eb6520eb004f37",
             "scripts/verify-unanswerable-questions-hidden.mjs": "9fb5dbc618cf61511c52b171273939ab6d024bf152039ccf2c8c949c70d8b554",
-            "scripts/verify-updater-withdrawn-release-guard.mjs": "71eb64235395257297ee37ddc26d3cee486c9b5bb355310d52fcfd7b6d716861"
+            "scripts/verify-updater-withdrawn-release-guard.mjs": "71eb64235395257297ee37ddc26d3cee486c9b5bb355310d52fcfd7b6d716861",
+            "scripts/lib/owned-workspace-fixture.cjs": "f10d24a73d9145125acc0abf3ef5a90236fcff82747a4c8ed6647afd11b1707a",
+            "scripts/lib/owned-main-fixture.cjs": "2731c493fb154d6f3f38d2fd59e20483741fc5642c399d733d68bfe0d2644927",
+            "scripts/lib/owned-node-fixture.cjs": "c05cdcc8ce5c3bb3591e51e865579cb563de997a93cfb14e97c4e0a7f92cc3fa",
+            "scripts/lib/owned-core-fixture.cjs": "be3ef2957f67b21ae9fe20e8de68da77d87d600f86ea477b8991fa032c511262",
+            "scripts/lib/owned-core-bootstrap.py": "f1673de5477328e5234c9006be7a260686adb9b752b9cf7b3c7e972dc08c1c9f",
+            "scripts/run-owned-release-gates.cjs": "e2f77e084287e14afb18800fca901a05bcb05d6f24349a4666e369904ed3d944"
           }));
-          if (manifest.files?.length !== 47 || approvedPins.size !== 47) throw new Error('All 44 original private Mac entries, the sealed R7 sidebar helper, the unanswerable-questions gate and the withdrawn-release guard are required');
+          if (manifest.files?.length !== 53 || approvedPins.size !== 53) throw new Error('All original private Mac verification entries and owned fixture lifecycles are required');
           if (manifest.schema !== 'agentlas.private-release-verification.v1' || !Array.isArray(manifest.files)) throw new Error('Invalid private verification manifest');
           const seen = new Set();
           const sourceCommit = require('node:child_process').execFileSync('git', ['rev-parse', '--verify', 'HEAD^{commit}']).toString().trim();
@@ -443,100 +449,11 @@ jobs:
         shell: bash
         run: |
           node scripts/run-private-release-gate.cjs MAC_PRIVATE_CONTRACTS -- bash -e -o pipefail -s <<'AGENTLAS_PRIVATE_STAGE'
-          node <<'NODE'
-          const cp = require('node:child_process');
-          if (Number(process.versions.node.split('.')[0]) !== 22) throw new Error('Node22 required');
-          const gates = [
-            {
-              "path": "scripts/loadout-editor-contract.cjs",
-              "main": false
-            },
-            {
-              "path": "scripts/ontology-retirement-contract.mjs",
-              "main": false
-            },
-            {
-              "path": "scripts/test-agent-evolution-trust.cjs",
-              "main": false
-            },
-            {
-              "path": "scripts/test-agent-toolbox-contract.cjs",
-              "main": false
-            },
-            {
-              "path": "scripts/test-automation-honesty-contract.cjs",
-              "main": false
-            },
-            {
-              "path": "scripts/test-build-session-contracts.cjs",
-              "main": false
-            },
-            {
-              "path": "scripts/test-chat-ux-contracts.cjs",
-              "main": false
-            },
-            {
-              "path": "scripts/test-experience-i18n-contract.cjs",
-              "main": false
-            },
-            {
-              "path": "scripts/test-experience-p0.cjs",
-              "main": false
-            },
-            {
-              "path": "scripts/test-first-run-roles-from-onboarding.cjs",
-              "main": true
-            },
-            {
-              "path": "scripts/test-hub-bookmark-ux.cjs",
-              "main": false
-            },
-            {
-              "path": "scripts/test-mobile-ontology-bridge.cjs",
-              "main": true
-            },
-            {
-              "path": "scripts/test-one-activity-contract.cjs",
-              "main": false
-            },
-            {
-              "path": "scripts/test-one-sidebar-contract.cjs",
-              "main": false
-            },
-            {
-              "path": "scripts/test-project-first-v84.cjs",
-              "main": true
-            },
-            {
-              "path": "scripts/test-room-isolation-and-owner-turn.cjs",
-              "main": true
-            },
-            {
-              "path": "scripts/test-toolchain-apps.cjs",
-              "main": false
-            },
-            {
-              "path": "scripts/verify-agentlas-one-ui.cjs",
-              "main": false
-            },
-            {
-              "path": "scripts/verify-build-recovery.mjs",
-              "main": false
-            },
-            {
-              "path": "scripts/verify-one-team-surface.mjs",
-              "main": false
-            }
-          ];
-          for (const gate of gates) {
-            const env = { ...process.env };
-            if (gate.main) delete env.ELECTRON_RUN_AS_NODE;
-            const command = gate.main ? require('electron') : process.execPath;
-            const argv = gate.path === 'scripts/test-toolchain-apps.cjs' ? ['--experimental-sqlite', gate.path] : [gate.path];
-              const result = cp.spawnSync(command, argv, { cwd: process.cwd(), env, stdio: 'inherit', timeout: 120000 });
-            if (result.error || result.status !== 0) throw new Error(`Required private gate failed: ${gate.path}; code=${result.status}; signal=${result.signal}; error=${result.error?.code || ''}`);
-          }
-          NODE
+          node -e "if (Number(process.versions.node.split('.')[0]) !== 22) throw new Error('Node22 required')"
+          HEPHAESTUS_PYTHON="$(python3 -I -c 'import os,sys; print(os.path.realpath(sys.executable))')"
+          export HEPHAESTUS_PYTHON
+          test -x "$HEPHAESTUS_PYTHON"
+          node scripts/run-owned-release-gates.cjs
           AGENTLAS_PRIVATE_STAGE
 
       - name: Record successful macOS release preflight
@@ -736,20 +653,20 @@ jobs:
           const cp = require('node:child_process');
           const manifestBytes = cp.execFileSync('git', ['-C', '.release-private-verification', 'show', `${process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_REF}:release-verification/desktop/manifest.json`]);
           const manifestDigest = crypto.createHash('sha256').update(manifestBytes).digest('hex');
-          if (manifestDigest !== process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_MANIFEST_SHA256 || manifestDigest !== 'ced235819e97789de5a6dc353d15319fee10fd644f50f59ad2533d0587203a94') throw new Error('Private Mac verification manifest digest mismatch');
+          if (manifestDigest !== process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_MANIFEST_SHA256 || manifestDigest !== 'e00af3f5a058f536b1841aa9358ff8d46b0fd88c5f14433de71a8332bf09ccca') throw new Error('Private Mac verification manifest digest mismatch');
           const manifest = JSON.parse(manifestBytes);
           const approvedPins = new Map(Object.entries({
             "scripts/composer-event-sync-contract.mjs": "f13850e468e55431cb071b8f9ce83f707d5d00b05697e72bf9debdab00793857",
             "scripts/experience-promotion-contract.cjs": "bff44bfcb268e8d810b5932829867e2e31c1f687141e304c09a3aaf8c7fcb6da",
             "scripts/fixtures/ontology-chip-projection-v1.golden.json": "c68992fdf26305d3273bc1b4bead3b8df7aaa4149c67cb083f8ef4728ee783c1",
             "scripts/fixtures/portable-experience-bundle-v1-golden.json": "95af4082e530bf1503a95e09d4743a87a7a7129f9b6911da525263313270d3a6",
-            "scripts/lib/agent-workspace-test-harness.cjs": "0568cb2ec70e7110671b1d11613abcfd2ba13870d6abd9aeb4ff7569bc1209d8",
+            "scripts/lib/agent-workspace-test-harness.cjs": "97eeb7c23e97ce05c4a906f45af22fe8503dbf222293898e6e1fce8800023379",
             "scripts/lib/agent-workspace-ui-contract.cjs": "679265dbe07d0fc074ed8c6f12451650eef52adf63e04f74294c7f627323253d",
-            "scripts/lib/one-live-contract-harness.cjs": "faf658d01a8c1175872bf8ee577c0ef7697fdf1b2e68e3baa1fd604498ec1073",
+            "scripts/lib/one-live-contract-harness.cjs": "1e74e6f11f3c81e2344c570447b9092c43e77383b9d609247d5852e06c0da8ab",
             "scripts/lib/science-release-archive-validator.cjs": "34c4505e114a405c24dceeef1832afd084db00b9a8176bd397a8021b96520824",
             "scripts/lib/staged-gate-compile.cjs": "c4787def017bc136d7c5a6557a2773b26e6424f14e7c8133f202fd54098d863b",
             "scripts/loadout-editor-contract.cjs": "74780e20e9ebef4092d118c2b6ece4e968cf45cd925931392eff70e474696ada",
-            "scripts/ontology-retirement-contract.mjs": "f4ac3666341407d9e6f90b48ece8841677e9cd93fe3257cf67732f2e51559d98",
+            "scripts/ontology-retirement-contract.mjs": "7907e506e2d2762a042e6d18a9fc77971517a395416df352980eba62a3f9e0e3",
             "scripts/plugin-spec-gate.cjs": "af92c5c2ea039937e65137bc70762b28bcdf25631108cffcae89dcf12fba3adf",
             "scripts/qa-language-switch.cjs": "7d5803d0a1e1476725f9cfa27f3ee9a0533a0b34866bd2ea482bf9b36a17528a",
             "scripts/qa-science-dinosaur-prompt-chain-electron.cjs": "3538a22edf65b568f84e79f573eefb93c1e7495f0ae6c8caca82d5cee5e123ec",
@@ -764,30 +681,36 @@ jobs:
             "scripts/test-build-session-contracts.cjs": "62b4b62a609647d43864e3b32d51cef0c7d1414711aacb941a6c021a43c146c8",
             "scripts/test-chat-ux-contracts.cjs": "98d586ea47d582bec9efa0e786d9ad0c223f9d00ba2be4ff71ef1ffbbc24213d",
             "scripts/test-experience-i18n-contract.cjs": "b25f1d7740febc868cace13690e358e0e08ac764dddc325e27294827d0d32398",
-            "scripts/test-experience-p0.cjs": "1f05ef2ed8a42448a3ee76b62acac2286f0d901c2eaaa7890562dffa4e44eb02",
-            "scripts/test-first-run-roles-from-onboarding.cjs": "a482380530cca91ff82807844cf04878e9d08c847ef9a4106c12abab0b696317",
+            "scripts/test-experience-p0.cjs": "48ba11245bc80394cbc5a129d3283fa8280c7701cd6d33a60a00e8ec9c1ddfba",
+            "scripts/test-first-run-roles-from-onboarding.cjs": "ee7cf2fe9828e8f63a10143177b524590d8f8130eac8576a8cb951686a6b18e8",
             "scripts/test-hub-bookmark-ux.cjs": "782386b1d2687fdd5e90f64bf239009410f55d0f419bac7d0d5482274bf22121",
-            "scripts/test-mobile-ontology-bridge.cjs": "84b5ffdfed2e3d03a3f5146bd1ae7de312bfbf8595e34bbae7c67cabfd010734",
+            "scripts/test-mobile-ontology-bridge.cjs": "76813731fcc4e656d5c9cfe4d087249b0dbc0c6a43203466b0a2c97d76c45fa5",
             "scripts/test-one-activity-contract.cjs": "17cfd9631dc0b15d57ec17ae0d697b933bf686c04adc684c2e0259bb09656277",
             "scripts/test-one-sidebar-contract.cjs": "04d662278f524d51789f9ea733745e7e0a592f734e0587696011e6b1763db75d",
-            "scripts/test-project-first-v84.cjs": "df83cbc572769f4e29466d4d9f735f4d18db3a8110e0a826ecdfa94efdd487cd",
-            "scripts/test-room-isolation-and-owner-turn.cjs": "8d35fdd605c9c5d5441d33abe9ba1c277f2d770da3515839d909c9acf90aff29",
+            "scripts/test-project-first-v84.cjs": "f9d73eb4ee8d9e26dbb85347d55dff1d5a9f56a7bcffd77eff162d50c5e375e2",
+            "scripts/test-room-isolation-and-owner-turn.cjs": "d3e387bf61adb545d597d6295183e27d860932389db8733f591e1550f24e4e9a",
             "scripts/test-system-agent-taste-runtime.cjs": "be6a377c460d29adeb2bb5198ad5727cbbf42f5f3e54aac6864217adb374a3e3",
             "scripts/test-taste-chip-workflow.cjs": "d0f83459c5f4d34f9d969451d2217e6eb8cd465b7bc9d6cd943e5ce5c9ccd19e",
             "scripts/test-taste-runtime-application.cjs": "d8f0fbef5b47d44b7504b8c6eb10231d5edfc3bee094657f53433f951abcb667",
             "scripts/test-terminal-ontology-loadout-feed.cjs": "c157aab78946ae9ef98f6b9af04fe207919dcf7a18e21cc664ee32bb65420e46",
-            "scripts/test-toolchain-apps.cjs": "6966083fb2b3c54b2c346eda44e9091053c8bed3d9637487b03d24d087edadca",
+            "scripts/test-toolchain-apps.cjs": "72285b508f147e440336cc9c33a5029365a9abf656eb2ce6d7de748e0bc0d227",
             "scripts/verify-agentlas-one-ui.cjs": "0c4e5260fd8af704343c2c927413ac13945ae16f1920d792f2496f6dee6559c5",
             "scripts/verify-build-recovery.mjs": "aa62f09ba3511d75762393cb747bf6654ef666c91b0cb90ef6bde61ed037f7fe",
             "scripts/verify-builtin-plugins-degrade.mjs": "47801c16ef3dd39c0da35d56103f8ba3eca3d179f4ce5ca8b73a8f556324eaaf",
             "scripts/verify-one-composer-surface.mjs": "4dc0eec040819d5db15d1e0e48ee866a139e33d8f3ff525cb25b3c75e5445f08",
             "scripts/verify-one-team-permission-boundary.mjs": "9f37775f6caacbe72d6ed5a763cbef4feff9a0fe44504936cf602158803b76c3",
-            "scripts/verify-one-team-surface.mjs": "f5c5bbae6201ba93c4e93762806175ced3dc2f8d13a7cf96b42b109af82eda9b",
+            "scripts/verify-one-team-surface.mjs": "d1e201c792c5378cd0be41080f43e0a74fd3f82db12e37c2c9b31c4ed748aa34",
             "scripts/current-sidebar-route-contract.cjs": "46d8f58f57e0a7a93cbde54582387d4f937e9f2bf07cd50956eb6520eb004f37",
             "scripts/verify-unanswerable-questions-hidden.mjs": "9fb5dbc618cf61511c52b171273939ab6d024bf152039ccf2c8c949c70d8b554",
-            "scripts/verify-updater-withdrawn-release-guard.mjs": "71eb64235395257297ee37ddc26d3cee486c9b5bb355310d52fcfd7b6d716861"
+            "scripts/verify-updater-withdrawn-release-guard.mjs": "71eb64235395257297ee37ddc26d3cee486c9b5bb355310d52fcfd7b6d716861",
+            "scripts/lib/owned-workspace-fixture.cjs": "f10d24a73d9145125acc0abf3ef5a90236fcff82747a4c8ed6647afd11b1707a",
+            "scripts/lib/owned-main-fixture.cjs": "2731c493fb154d6f3f38d2fd59e20483741fc5642c399d733d68bfe0d2644927",
+            "scripts/lib/owned-node-fixture.cjs": "c05cdcc8ce5c3bb3591e51e865579cb563de997a93cfb14e97c4e0a7f92cc3fa",
+            "scripts/lib/owned-core-fixture.cjs": "be3ef2957f67b21ae9fe20e8de68da77d87d600f86ea477b8991fa032c511262",
+            "scripts/lib/owned-core-bootstrap.py": "f1673de5477328e5234c9006be7a260686adb9b752b9cf7b3c7e972dc08c1c9f",
+            "scripts/run-owned-release-gates.cjs": "e2f77e084287e14afb18800fca901a05bcb05d6f24349a4666e369904ed3d944"
           }));
-          if (manifest.files?.length !== 47 || approvedPins.size !== 47) throw new Error('All 44 original private Mac entries, the sealed R7 sidebar helper, the unanswerable-questions gate and the withdrawn-release guard are required');
+          if (manifest.files?.length !== 53 || approvedPins.size !== 53) throw new Error('All original private Mac verification entries and owned fixture lifecycles are required');
           if (manifest.schema !== 'agentlas.private-release-verification.v1' || !Array.isArray(manifest.files)) throw new Error('Invalid private verification manifest');
           const seen = new Set();
           const sourceCommit = require('node:child_process').execFileSync('git', ['rev-parse', '--verify', 'HEAD^{commit}']).toString().trim();
@@ -1135,20 +1058,20 @@ jobs:
           const cp = require('node:child_process');
           const manifestBytes = cp.execFileSync('git', ['-C', '.release-private-verification', 'show', `${process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_REF}:release-verification/desktop/manifest.json`]);
           const manifestDigest = crypto.createHash('sha256').update(manifestBytes).digest('hex');
-          if (manifestDigest !== process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_MANIFEST_SHA256 || manifestDigest !== 'ced235819e97789de5a6dc353d15319fee10fd644f50f59ad2533d0587203a94') throw new Error('Private Mac verification manifest digest mismatch');
+          if (manifestDigest !== process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_MANIFEST_SHA256 || manifestDigest !== 'e00af3f5a058f536b1841aa9358ff8d46b0fd88c5f14433de71a8332bf09ccca') throw new Error('Private Mac verification manifest digest mismatch');
           const manifest = JSON.parse(manifestBytes);
           const approvedPins = new Map(Object.entries({
             "scripts/composer-event-sync-contract.mjs": "f13850e468e55431cb071b8f9ce83f707d5d00b05697e72bf9debdab00793857",
             "scripts/experience-promotion-contract.cjs": "bff44bfcb268e8d810b5932829867e2e31c1f687141e304c09a3aaf8c7fcb6da",
             "scripts/fixtures/ontology-chip-projection-v1.golden.json": "c68992fdf26305d3273bc1b4bead3b8df7aaa4149c67cb083f8ef4728ee783c1",
             "scripts/fixtures/portable-experience-bundle-v1-golden.json": "95af4082e530bf1503a95e09d4743a87a7a7129f9b6911da525263313270d3a6",
-            "scripts/lib/agent-workspace-test-harness.cjs": "0568cb2ec70e7110671b1d11613abcfd2ba13870d6abd9aeb4ff7569bc1209d8",
+            "scripts/lib/agent-workspace-test-harness.cjs": "97eeb7c23e97ce05c4a906f45af22fe8503dbf222293898e6e1fce8800023379",
             "scripts/lib/agent-workspace-ui-contract.cjs": "679265dbe07d0fc074ed8c6f12451650eef52adf63e04f74294c7f627323253d",
-            "scripts/lib/one-live-contract-harness.cjs": "faf658d01a8c1175872bf8ee577c0ef7697fdf1b2e68e3baa1fd604498ec1073",
+            "scripts/lib/one-live-contract-harness.cjs": "1e74e6f11f3c81e2344c570447b9092c43e77383b9d609247d5852e06c0da8ab",
             "scripts/lib/science-release-archive-validator.cjs": "34c4505e114a405c24dceeef1832afd084db00b9a8176bd397a8021b96520824",
             "scripts/lib/staged-gate-compile.cjs": "c4787def017bc136d7c5a6557a2773b26e6424f14e7c8133f202fd54098d863b",
             "scripts/loadout-editor-contract.cjs": "74780e20e9ebef4092d118c2b6ece4e968cf45cd925931392eff70e474696ada",
-            "scripts/ontology-retirement-contract.mjs": "f4ac3666341407d9e6f90b48ece8841677e9cd93fe3257cf67732f2e51559d98",
+            "scripts/ontology-retirement-contract.mjs": "7907e506e2d2762a042e6d18a9fc77971517a395416df352980eba62a3f9e0e3",
             "scripts/plugin-spec-gate.cjs": "af92c5c2ea039937e65137bc70762b28bcdf25631108cffcae89dcf12fba3adf",
             "scripts/qa-language-switch.cjs": "7d5803d0a1e1476725f9cfa27f3ee9a0533a0b34866bd2ea482bf9b36a17528a",
             "scripts/qa-science-dinosaur-prompt-chain-electron.cjs": "3538a22edf65b568f84e79f573eefb93c1e7495f0ae6c8caca82d5cee5e123ec",
@@ -1163,30 +1086,36 @@ jobs:
             "scripts/test-build-session-contracts.cjs": "62b4b62a609647d43864e3b32d51cef0c7d1414711aacb941a6c021a43c146c8",
             "scripts/test-chat-ux-contracts.cjs": "98d586ea47d582bec9efa0e786d9ad0c223f9d00ba2be4ff71ef1ffbbc24213d",
             "scripts/test-experience-i18n-contract.cjs": "b25f1d7740febc868cace13690e358e0e08ac764dddc325e27294827d0d32398",
-            "scripts/test-experience-p0.cjs": "1f05ef2ed8a42448a3ee76b62acac2286f0d901c2eaaa7890562dffa4e44eb02",
-            "scripts/test-first-run-roles-from-onboarding.cjs": "a482380530cca91ff82807844cf04878e9d08c847ef9a4106c12abab0b696317",
+            "scripts/test-experience-p0.cjs": "48ba11245bc80394cbc5a129d3283fa8280c7701cd6d33a60a00e8ec9c1ddfba",
+            "scripts/test-first-run-roles-from-onboarding.cjs": "ee7cf2fe9828e8f63a10143177b524590d8f8130eac8576a8cb951686a6b18e8",
             "scripts/test-hub-bookmark-ux.cjs": "782386b1d2687fdd5e90f64bf239009410f55d0f419bac7d0d5482274bf22121",
-            "scripts/test-mobile-ontology-bridge.cjs": "84b5ffdfed2e3d03a3f5146bd1ae7de312bfbf8595e34bbae7c67cabfd010734",
+            "scripts/test-mobile-ontology-bridge.cjs": "76813731fcc4e656d5c9cfe4d087249b0dbc0c6a43203466b0a2c97d76c45fa5",
             "scripts/test-one-activity-contract.cjs": "17cfd9631dc0b15d57ec17ae0d697b933bf686c04adc684c2e0259bb09656277",
             "scripts/test-one-sidebar-contract.cjs": "04d662278f524d51789f9ea733745e7e0a592f734e0587696011e6b1763db75d",
-            "scripts/test-project-first-v84.cjs": "df83cbc572769f4e29466d4d9f735f4d18db3a8110e0a826ecdfa94efdd487cd",
-            "scripts/test-room-isolation-and-owner-turn.cjs": "8d35fdd605c9c5d5441d33abe9ba1c277f2d770da3515839d909c9acf90aff29",
+            "scripts/test-project-first-v84.cjs": "f9d73eb4ee8d9e26dbb85347d55dff1d5a9f56a7bcffd77eff162d50c5e375e2",
+            "scripts/test-room-isolation-and-owner-turn.cjs": "d3e387bf61adb545d597d6295183e27d860932389db8733f591e1550f24e4e9a",
             "scripts/test-system-agent-taste-runtime.cjs": "be6a377c460d29adeb2bb5198ad5727cbbf42f5f3e54aac6864217adb374a3e3",
             "scripts/test-taste-chip-workflow.cjs": "d0f83459c5f4d34f9d969451d2217e6eb8cd465b7bc9d6cd943e5ce5c9ccd19e",
             "scripts/test-taste-runtime-application.cjs": "d8f0fbef5b47d44b7504b8c6eb10231d5edfc3bee094657f53433f951abcb667",
             "scripts/test-terminal-ontology-loadout-feed.cjs": "c157aab78946ae9ef98f6b9af04fe207919dcf7a18e21cc664ee32bb65420e46",
-            "scripts/test-toolchain-apps.cjs": "6966083fb2b3c54b2c346eda44e9091053c8bed3d9637487b03d24d087edadca",
+            "scripts/test-toolchain-apps.cjs": "72285b508f147e440336cc9c33a5029365a9abf656eb2ce6d7de748e0bc0d227",
             "scripts/verify-agentlas-one-ui.cjs": "0c4e5260fd8af704343c2c927413ac13945ae16f1920d792f2496f6dee6559c5",
             "scripts/verify-build-recovery.mjs": "aa62f09ba3511d75762393cb747bf6654ef666c91b0cb90ef6bde61ed037f7fe",
             "scripts/verify-builtin-plugins-degrade.mjs": "47801c16ef3dd39c0da35d56103f8ba3eca3d179f4ce5ca8b73a8f556324eaaf",
             "scripts/verify-one-composer-surface.mjs": "4dc0eec040819d5db15d1e0e48ee866a139e33d8f3ff525cb25b3c75e5445f08",
             "scripts/verify-one-team-permission-boundary.mjs": "9f37775f6caacbe72d6ed5a763cbef4feff9a0fe44504936cf602158803b76c3",
-            "scripts/verify-one-team-surface.mjs": "f5c5bbae6201ba93c4e93762806175ced3dc2f8d13a7cf96b42b109af82eda9b",
+            "scripts/verify-one-team-surface.mjs": "d1e201c792c5378cd0be41080f43e0a74fd3f82db12e37c2c9b31c4ed748aa34",
             "scripts/current-sidebar-route-contract.cjs": "46d8f58f57e0a7a93cbde54582387d4f937e9f2bf07cd50956eb6520eb004f37",
             "scripts/verify-unanswerable-questions-hidden.mjs": "9fb5dbc618cf61511c52b171273939ab6d024bf152039ccf2c8c949c70d8b554",
-            "scripts/verify-updater-withdrawn-release-guard.mjs": "71eb64235395257297ee37ddc26d3cee486c9b5bb355310d52fcfd7b6d716861"
+            "scripts/verify-updater-withdrawn-release-guard.mjs": "71eb64235395257297ee37ddc26d3cee486c9b5bb355310d52fcfd7b6d716861",
+            "scripts/lib/owned-workspace-fixture.cjs": "f10d24a73d9145125acc0abf3ef5a90236fcff82747a4c8ed6647afd11b1707a",
+            "scripts/lib/owned-main-fixture.cjs": "2731c493fb154d6f3f38d2fd59e20483741fc5642c399d733d68bfe0d2644927",
+            "scripts/lib/owned-node-fixture.cjs": "c05cdcc8ce5c3bb3591e51e865579cb563de997a93cfb14e97c4e0a7f92cc3fa",
+            "scripts/lib/owned-core-fixture.cjs": "be3ef2957f67b21ae9fe20e8de68da77d87d600f86ea477b8991fa032c511262",
+            "scripts/lib/owned-core-bootstrap.py": "f1673de5477328e5234c9006be7a260686adb9b752b9cf7b3c7e972dc08c1c9f",
+            "scripts/run-owned-release-gates.cjs": "e2f77e084287e14afb18800fca901a05bcb05d6f24349a4666e369904ed3d944"
           }));
-          if (manifest.files?.length !== 47 || approvedPins.size !== 47) throw new Error('All 44 original private Mac entries, the sealed R7 sidebar helper, the unanswerable-questions gate and the withdrawn-release guard are required');
+          if (manifest.files?.length !== 53 || approvedPins.size !== 53) throw new Error('All original private Mac verification entries and owned fixture lifecycles are required');
           if (manifest.schema !== 'agentlas.private-release-verification.v1' || !Array.isArray(manifest.files)) throw new Error('Invalid private verification manifest');
           const seen = new Set();
           const sourceCommit = require('node:child_process').execFileSync('git', ['rev-parse', '--verify', 'HEAD^{commit}']).toString().trim();

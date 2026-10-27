@@ -22,6 +22,8 @@ export interface SupervisorWorkExecutorOptions {
   locale(): "ko" | "en";
   leaseMs?: number;
   tickMs?: number;
+  reconcileMs?: number;
+  now?(): number;
   onFailure?(error: unknown): void;
 }
 const terminal = (status: string) => ["completed", "failed", "cancelled", "interrupted"].includes(status);
@@ -37,6 +39,7 @@ export class OneSupervisorWorkExecutor {
   private timer: NodeJS.Timeout | null = null;
   private lastFailure: string | null = null;
   private readonly dispatching = new Set<string>();
+  private readonly reconciled = new Map<string, {version: string; checkedAt: number}>();
   private readonly unsubscribe: () => void;
   constructor(private readonly deps: SupervisorWorkExecutorOptions) {
     if (deps.queue.db !== deps.store.db) throw supervisorError('supervisor_work_store_mismatch');
@@ -46,7 +49,7 @@ export class OneSupervisorWorkExecutor {
         deps.assertOwner();
         const job = deps.queue.forRun(event.runId);
         if (job?.chat_id === event.chatId) this.settle(job, event.receipt);
-        this.tick();
+        this.tick(false);
       } catch (error) { deps.onFailure?.(error); }
     });
   }
@@ -54,7 +57,7 @@ export class OneSupervisorWorkExecutor {
     if (this.closed || this.timer) return;
     this.started = true;
     this.tick();
-    this.timer = setInterval(() => this.tick(), this.deps.tickMs ?? 1_000);
+    this.timer = setInterval(() => this.tick(false), this.deps.tickMs ?? 1_000);
     this.timer.unref?.();
   }
   close(): void {
@@ -62,18 +65,35 @@ export class OneSupervisorWorkExecutor {
     this.started = false;
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
+    this.reconciled.clear();
     this.unsubscribe();
     // A UI disconnect never cancels a worker. Native host shutdown remains the
     // single owner of its child tree, deadlines and terminal interruption receipt.
   }
   kick(): void { this.tick(); }
-  tick(): void {
+  tick(reconcileNow = true): void {
     if (this.closed || this.ticking) return;
     this.ticking = true;
     try {
       this.deps.assertOwner();
       this.deps.queue.recoverUnstarted();
-      for (const job of this.deps.queue.active()) this.reconcile(job);
+      const active = this.deps.queue.active(), retained = new Set<string>();
+      const now = this.deps.now?.() ?? Date.now();
+      // Enqueue/control kicks and settled events stay immediate. The one-second
+      // watchdog still checks ownership and queue claims, but an unchanged job
+      // need not rebuild its full durable receipt on every safety tick.
+      const reconcileMs = Math.max(0, Math.min(this.deps.reconcileMs ?? 5_000, (this.deps.leaseMs ?? 30_000) / 3));
+      for (const job of active) {
+        retained.add(job.command_id);
+        const version = this.deps.queue.version(job), prior = this.reconciled.get(job.command_id);
+        const renewalDue = job.owner_epoch === this.deps.ownerEpoch && (job.phase === "starting" || job.phase === "running")
+          && this.deps.queue.heartbeatDue(job, this.deps.leaseMs);
+        if (reconcileNow || !prior || prior.version !== version || now < prior.checkedAt || now - prior.checkedAt >= reconcileMs || renewalDue) {
+          this.reconcile(job);
+          this.reconciled.set(job.command_id, {version, checkedAt: now});
+        }
+      }
+      for (const id of this.reconciled.keys()) if (!retained.has(id)) this.reconciled.delete(id);
       // One decides which work to delegate. Claim every queued delegation once;
       // native runtime admission owns resource scheduling, not a fixed Work cap.
       for (;;) {
@@ -178,7 +198,7 @@ export class OneSupervisorWorkExecutor {
     if (live && job.owner_epoch === this.deps.ownerEpoch) {
       const running = job.phase === "running" ? job : this.deps.queue.transition(job, "running", "recovered_from_native_receipt");
       if (running) {
-        this.deps.queue.heartbeat(running, this.deps.leaseMs);
+        if (this.deps.queue.heartbeatDue(running, this.deps.leaseMs)) this.deps.queue.heartbeat(running, this.deps.leaseMs);
         const row = this.deps.store.get(job.command_id)!;
         if (["dispatching", "held"].includes(row.state)) this.deps.store.update(row, {
           state: "accepted", acknowledgement: "delivered", reason: "recovered_from_native_receipt",

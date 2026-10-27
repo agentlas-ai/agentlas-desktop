@@ -42,6 +42,40 @@ function descriptor(value: unknown, maxBytes: number): NativeJsonTransferDescrip
     || typeof value.digest !== "string" || !/^[a-f0-9]{64}$/.test(value.digest)) denied("native_json_descriptor_invalid");
   return Object.freeze({ ...value }) as unknown as NativeJsonTransferDescriptor;
 }
+/** Opt-in result transport on the existing authenticated supervisor callback.
+ * Legacy callers retain their original raw-result contract. */
+export const NATIVE_SUPERVISOR_JSON_VERSION = "agentlas.supervisor-json.v1" as const;
+export interface NativeSupervisorJsonResult {
+  readonly version: typeof NATIVE_SUPERVISOR_JSON_VERSION;
+  readonly requestId: string;
+  readonly transfer: NativeJsonTransferDescriptor;
+}
+export function nativeSupervisorJsonResult(value: unknown, maxBytes: number): NativeSupervisorJsonResult {
+  if (!exact(value, ["version", "requestId", "transfer"]) || value.version !== NATIVE_SUPERVISOR_JSON_VERSION
+    || typeof value.requestId !== "string" || !/^[a-f0-9]{64}$/.test(value.requestId)) denied("native_supervisor_result_invalid");
+  const transfer = descriptor(value.transfer, maxBytes);
+  if (transfer.kind !== "checkpoint-value") denied("native_supervisor_result_invalid");
+  return Object.freeze({ version: NATIVE_SUPERVISOR_JSON_VERSION, requestId: value.requestId, transfer });
+}
+export async function importNativeSupervisorJsonResult(value: unknown, options: {
+  maxBytes: number;
+  signal: AbortSignal;
+  assertCurrent(): void;
+  receive(transfer: NativeJsonTransferDescriptor): Promise<unknown>;
+  release(result: NativeSupervisorJsonResult): Promise<unknown>;
+}): Promise<unknown> {
+  options.assertCurrent(); options.signal.throwIfAborted();
+  const result = nativeSupervisorJsonResult(value, options.maxBytes);
+  const imported = await options.receive(result.transfer);
+  options.assertCurrent(); options.signal.throwIfAborted();
+  // Only a fully verified read may release custody. Failed/uncertain reads keep
+  // their immutable result until exact release or the original source settles.
+  const ack = await options.release(result);
+  options.assertCurrent(); options.signal.throwIfAborted();
+  if (!exact(ack, ["version", "requestId", "released"]) || ack.version !== NATIVE_SUPERVISOR_JSON_VERSION
+    || ack.requestId !== result.requestId || ack.released !== true) denied("native_supervisor_result_release_invalid");
+  return imported;
+}
 interface Snapshot {
   owner: object;
   descriptor: NativeJsonTransferDescriptor;
@@ -98,13 +132,19 @@ export function createNativeJsonTransfers(options: {
     snapshot.nextOffset = nextOffset; snapshot.lastChunk = chunk;
     return chunk;
   }
+  /** Exact result custody only; transport data is never a source grant. */
+  function releaseOne(owner: object, transferId: string): void {
+    const snapshot = snapshots.get(transferId);
+    if (!snapshot || snapshot.owner !== owner) denied("native_json_snapshot_unavailable");
+    retainedBytes -= snapshot.bytes.length; snapshots.delete(transferId);
+  }
   /** Private custody owner only. Disconnect is never an automatic release. */
   function release(owner: object): void {
     for (const [id, snapshot] of snapshots) if (snapshot.owner === owner) {
       retainedBytes -= snapshot.bytes.length; snapshots.delete(id);
     }
   }
-  return { issue, read, release, get pendingCount() { return snapshots.size; }, get retainedBytes() { return retainedBytes; } };
+  return { issue, read, release, releaseOne, get pendingCount() { return snapshots.size; }, get retainedBytes() { return retainedBytes; } };
 }
 
 /** Reads original retained operations to settlement. Stop cannot race away an

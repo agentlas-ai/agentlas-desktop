@@ -69,6 +69,11 @@ const TRANSIENT_CODES: ReadonlySet<string> = new Set([
   "native_owner_text_context_unavailable",
   "invocation_current_turn_unavailable",
   "invocation_owner_unavailable",
+  // Another renderer is still preparing a send. Main's durable queued parent waits for that preparation slot.
+  "one_preflight_chat_pending",
+  // Capacity is backpressure before intake, so the owner's text can wait in the durable send queue.
+  "invocation_steer_queue_full",
+  "invocation_current_turn_steer_limit",
 ]);
 
 /**

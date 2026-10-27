@@ -56,6 +56,8 @@ export interface TurnLinePorts {
   processAlive?(pid: number): boolean;
   /** true only when the run of that turn is proven over (released, or a newer lease took the chat). Unknown is false. */
   runEnded?(turn: TurnLineTurn): boolean;
+  /** Recover only this exact recorded lease after independently proving its process is gone. A stale beat is not proof. */
+  recoverDeadRun?(holder: { who: TurnLineWho; turn: TurnLineTurn }): void;
   /** What this process's turn of that chat waits on a person for: "approval", "question", or null. */
   parkedOn?(chatId: string): string | null;
   token?(): string;
@@ -201,6 +203,12 @@ export function createTurnLine(ports: TurnLinePorts) {
           if (!deadHolder(row.key, stored, self)) { live.push(asPlace(false)); continue; }
           let ended = false;
           try { ended = ports.runEnded?.(stored.turn) === true; } catch { ended = false; }
+          if (!ended && stored.turn.leaseId && !alive(stored.who.pid) && ports.recoverDeadRun) {
+            try {
+              ports.recoverDeadRun({ who: stored.who, turn: stored.turn });
+              ended = ports.runEnded?.(stored.turn) === true;
+            } catch { /* Keep the evidence and retry on the next poll; unknown ownership never releases a lease. */ }
+          }
           // The evidence stays while the dead holder's run lease is still open; it goes once that lease is released.
           if (ended || now() - stored.at > DEAD_PLACE_KEEP_MS || (!alive(stored.who.pid) && !stored.turn.leaseId)) toDelete.push({ key: row.key, raw: row.raw });
           else dead.push(asPlace(true));

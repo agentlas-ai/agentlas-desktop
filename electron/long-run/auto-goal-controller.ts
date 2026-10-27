@@ -1,3 +1,4 @@
+import type { GoalExecutionObligations } from "../../shared/goal-execution-obligations";
 import { managedOneConfigured } from "../managed-one/auth";
 /** Main-owned bridge from a judged user request to the existing durable ledger.
  * This module does not dispatch a provider, schedule work or grant permissions.
@@ -47,6 +48,7 @@ export function admitJudgedAutomaticGoal(input: {
   acceptanceCriteria: readonly GoalCriterion[];
   /** Must come from the host's existing authority context, never a model grant. */
   authorityRefs: readonly string[];
+  executionObligations?: GoalExecutionObligations;
   budget: LongRunBudget;
 }): LongRunRecord | null {
   if (managedOneConfigured()) throw new Error("managed_one_goal_unavailable");
@@ -74,7 +76,7 @@ export function admitJudgedAutomaticGoal(input: {
       chat.goal_id = null;
     }
     const revision = createStoredAutomaticGoal({ goalId: input.goalId, source, decision: input.decision,
-      acceptanceCriteria: input.acceptanceCriteria, authorityRefs: input.authorityRefs, createdAt: new Date().toISOString() });
+      acceptanceCriteria: input.acceptanceCriteria, authorityRefs: input.authorityRefs, executionObligations: input.executionObligations, createdAt: new Date().toISOString() });
     if (!revision) return null;
     const run = createLongRun({ goalId: input.goalId, rootChatId: input.chatId, projectId: chat.project_id,
       surface: chat.origin_surface === "one" ? "one" : "work", objective: revision.objective,

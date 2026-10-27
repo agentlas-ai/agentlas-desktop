@@ -3842,6 +3842,10 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         if (decisionAnswer) validateCurrentMobileDecisionAnswer(
           invocation, decisionAnswer, this.options.hostIdentity.hostId,
         );
+        // A normal owner message belongs to the room, even when the run seen
+        // by an older phone just finished. Decision answers remain bound to
+        // the exact question/run and must never transfer to a newer one.
+        const targetRunId = decisionAnswer ? expectedRunId : undefined;
         const mobileOneTurn = isMobileBridgeOneChat(requireChat(invocation.chatId));
         const effectiveInvocation = mobileOneTurn
           ? await bindMobileOneTurn(invocation)
@@ -3849,7 +3853,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         // An attached Desktop run has no remote workspace capability. Keep that
         // Main-owned contract; a new Mobile binding would reject its owner steer.
         const activeDesktopRun = invocationService.activeWorkSummaries().find((run) =>
-          run.runId === expectedRunId && run.chatId === invocation.chatId
+          (!targetRunId || run.runId === targetRunId) && run.chatId === invocation.chatId
           && run.workspaceSource === null && run.executionSource === null);
         const workspaceBinding = activeDesktopRun
           ? undefined
@@ -3864,7 +3868,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
           : null;
         let result;
         try {
-          result = invocationService.steer(effectiveInvocation, expectedRunId, workspaceBinding, { source: "mobile" });
+          result = invocationService.steer(effectiveInvocation, targetRunId, workspaceBinding, { source: "mobile" });
         } catch (error) {
           rollbackQuestionClaim?.();
           throw error;

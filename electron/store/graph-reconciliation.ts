@@ -239,15 +239,9 @@ function boundEventForOccurrence(
      FROM automation_trigger_events
      WHERE id = ? AND automation_id = ?`,
   ).get(eventId, automationId) as BoundEventRow | undefined;
-  // A read-only view is not authority to change or retry its event. Keep the
-  // original run evidence visible without projecting a new event status schema.
-  if (evidenceOnly && (!row || !["pending", "parked"].includes(row.status))) return null;
-  if (!row) throw new Error("automation_graph_reconciliation_bound_event_missing");
-  if (row.status === "claimed") throw new Error("automation_graph_reconciliation_bound_event_active");
-  if (row.status !== "pending" && row.status !== "parked") {
-    throw new Error("automation_graph_reconciliation_bound_event_state_invalid");
-  }
-  return row;
+  // Trigger state does not veto node settlement. A pending/parked trigger can
+  // join the existing atomic reducer; every other trigger keeps its own custody.
+  return row && ["pending", "parked"].includes(row.status) ? row : null;
 }
 
 function stringIds(value: unknown): string[] {
@@ -304,8 +298,9 @@ function revisedNodeDescriptors(
  *   않는다(바뀐 그래프로 이어 붙일 좌표가 없다) — 다음 실행은 새 그래프로 새로 돈다.
  *
  *   잊는 것이 아니다: 결정은 workflow_node_reconciled 로 남고, 옛 실행 기록은 그대로다.
- *   트리거 이벤트에 묶인 발생·시뮬레이션·봉인 없는 레거시 행은 지금처럼 사람 몫으로 둔다
- *   ("unsupported" → graph_drift).
+ *   이벤트 발생도 같은 과거 증거로 정산한다. 바뀐 그래프로 이벤트를 재개하거나 완료 처리하지는
+ *   않는다. 이벤트의 재시도·완료는 기존 이벤트 정산 경로가 별도로 결정한다.
+ *   시뮬레이션·봉인 없는 레거시 행은 기존 경계를 유지한다.
  */
 function loadRevisedGraphReconciliation(
   automation: Automation,
@@ -323,7 +318,7 @@ function loadRevisedGraphReconciliation(
   } catch {
     return "unsupported";
   }
-  if (typeof raw.occurrenceId !== "string" || raw.occurrenceId.startsWith(EVENT_OCCURRENCE_PREFIX)) return "unsupported";
+  if (typeof raw.occurrenceId !== "string") return "unsupported";
   let rawStates: unknown;
   try { rawStates = run.node_states_json ? JSON.parse(run.node_states_json) : {}; } catch { return "unsupported"; }
   const universe = new Set<string>([

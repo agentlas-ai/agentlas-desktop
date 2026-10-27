@@ -7359,7 +7359,7 @@ button[data-toggle-state="on"] {
   width: 100%;
   min-width: 0;
   overflow: visible;
-  padding-top: 3px;
+  padding-top: 0;
   border-top: 0;
 }
 

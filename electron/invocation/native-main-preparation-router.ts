@@ -1,9 +1,11 @@
+import { createHash } from "node:crypto";
 import type { McpInvocationRequest } from "../../shared/types";
 import type { MainInvocationAdmission } from "../runtime/scheduled-root-context";
 import type { InvocationAdmissionIdentity } from "../store/invocation-admissions";
 import { nativeGuiChannelIdentity } from "../daemon/native-auth-channel";
 import type { NativeAuthenticatedIdentity } from "../daemon/native-session-auth";
-import { createNativeJsonTransfers } from "../daemon/native-json-transfer";
+import { nativeAuthCanonical } from "../daemon/native-auth-credentials";
+import { createNativeJsonTransfers, NATIVE_SUPERVISOR_JSON_VERSION, nativeSupervisorJsonResult, type NativeSupervisorJsonResult } from "../daemon/native-json-transfer";
 import { nativePreparationWireRequest, sameNativeStartBinding, type NativeStartDescriptor, type NativePreparationWireRequest } from "../daemon/native-start-protocol";
 import { createNativeMainPreparationIssuer, type NativeMainPreparationIssuerPorts, type NativeMainPreparationHandle } from "./native-main-preparation-issuer";
 
@@ -50,15 +52,20 @@ function preparedCheckpointValue(kind: string, value: unknown): unknown {
   }
   return sourceJsonValue(value);
 }
+interface SupervisorResultRecord {
+  owner: object; digest: string; promise: Promise<NativeSupervisorJsonResult>;
+  result?: NativeSupervisorJsonResult; released: boolean;
+}
 interface RecordState {
   handle: NativeMainPreparationRouterHandle; issuer: NativeMainPreparationHandle; channel: object; identity: NativeAuthenticatedIdentity; start: NativeStartDescriptor;
-  released: boolean; detached: boolean; nonces: Set<string>; snapshot?: ReturnType<ReturnType<typeof createNativeJsonTransfers>["issue"]>;
+  released: boolean; detached: boolean; nonces: Set<string>; supervisorResults: Map<string, SupervisorResultRecord>; snapshot?: ReturnType<ReturnType<typeof createNativeJsonTransfers>["issue"]>;
 }
 /** Main native bootstrap only. No method is an IPC/MCP/AppControl dispatcher. */
 export function createNativeMainPreparationRouter(ports: NativeMainPreparationRouterPorts) {
   for (const limit of [ports.maxRequestBytes, ports.maxCheckpointBytes, ports.maxRetainedBytes, ports.maxRecords ?? 32, ports.maxCallbacks ?? 32]) positive(limit);
   const records = new Map<string, RecordState>(), handles = new WeakMap<NativeMainPreparationRouterHandle, RecordState>();
   const noStartProofs = new WeakMap<object, RecordState>();
+  const resultOwners = new WeakMap<object, RecordState>();
   const closedTerminalRecords = new Map<string, WeakRef<RecordState>>();
   const issuer = createNativeMainPreparationIssuer({ ...ports, maxPending: ports.maxRecords ?? 32,
     nativeChannelIdentity(channel) { const identity = nativeGuiChannelIdentity(channel); return identity ? Object.freeze({ peer: identity, generation: identity.generation, serviceIdentity: identity.serviceIdentity, bootId: identity.bootId, ownerId: identity.bootId, storeIdentity: identity.scope }) : null; },
@@ -68,14 +75,14 @@ export function createNativeMainPreparationRouter(ports: NativeMainPreparationRo
   function assertCurrent(r: RecordState, channel = r.channel, identity = r.identity, terminalOnly = false): void {
     if ((!terminalOnly && issuer.inspect(r.issuer).authorityClosed) || r.released || r.detached || channel !== r.channel || identity !== r.identity || nativeGuiChannelIdentity(channel) !== identity) fail("native_main_router_channel_changed");
   }
-  const transfers = createNativeJsonTransfers({ isCurrent(owner) { const r = handles.get(owner as NativeMainPreparationRouterHandle); return !!r && !r.released && !r.detached && nativeGuiChannelIdentity(r.channel) === r.identity && !issuer.inspect(r.issuer).aborted; }, maxPending: (ports.maxRecords ?? 32) * 24, maxRetainedBytes: ports.maxRetainedBytes });
+  const transfers = createNativeJsonTransfers({ isCurrent(owner) { const r = handles.get(owner as NativeMainPreparationRouterHandle) ?? resultOwners.get(owner); return !!r && !r.released && !r.detached && nativeGuiChannelIdentity(r.channel) === r.identity && !issuer.inspect(r.issuer).aborted; }, maxPending: (ports.maxRecords ?? 32) * 24, maxRetainedBytes: ports.maxRetainedBytes });
   function issue(input: { event: object; hostOrigin?: object; actualChannel: object; request: McpInvocationRequest; mainAdmission: MainInvocationAdmission | undefined; admission: InvocationAdmissionIdentity }) {
     // Issuer consumes original admission even when a downstream guard refuses.
     const privateIssuer = issuer.issue({ ...input, channel: input.actualChannel });
     const identity = nativeGuiChannelIdentity(input.actualChannel); if (!identity) fail("native_main_router_channel_required");
     const p = issuer.projection(privateIssuer), handle = Object.freeze({}) as NativeMainPreparationRouterHandle;
     const start: NativeStartDescriptor = Object.freeze({ version: "agentlas.native-start.v1", handle: p.handle, binding: p.binding });
-    const r: RecordState = { handle, issuer: privateIssuer, channel: input.actualChannel, identity, start, released: false, detached: false, nonces: new Set() };
+    const r: RecordState = { handle, issuer: privateIssuer, channel: input.actualChannel, identity, start, released: false, detached: false, nonces: new Set(), supervisorResults: new Map() };
     records.set(start.handle, r); handles.set(handle, r);
     return Object.freeze({ start, privateHandle: handle });
   }
@@ -95,7 +102,8 @@ export function createNativeMainPreparationRouter(ports: NativeMainPreparationRo
       switch (request.action) {
         case "json.read": {
           if (!exact(p, ["transferId", "offset"]) || typeof p.transferId !== "string" || !Number.isSafeInteger(p.offset)) fail("native_main_router_payload_invalid");
-          return transfers.read(r.handle, p.transferId, p.offset as number);
+          const result = [...r.supervisorResults.values()].find(value => !value.released && value.result?.transfer.transferId === p.transferId);
+          return transfers.read(result?.owner ?? r.handle, p.transferId, p.offset as number);
         }
         case "one.inline.image.read": {
           if (!exact(p, ["imageIndex", "offset"]) || !Number.isSafeInteger(p.imageIndex) || !Number.isSafeInteger(p.offset)) fail("native_main_router_payload_invalid");
@@ -116,11 +124,45 @@ export function createNativeMainPreparationRouter(ports: NativeMainPreparationRo
           return r.snapshot; // Only an immutable original snapshot, never fresh authorization.
         }
       }
-      if(request.action==='supervisor.command') {
-        if(!exact(p,['name','input']) || typeof p.name!=='string' || !p.input || typeof p.input!=='object' || Array.isArray(p.input))fail('native_supervisor_command_invalid');
-        // Tool command IDs are durably deduplicated by Supervisor. This does not
-        // consume a new preparation/claim nonce or restart an original source.
-        return issuer.supervisorCommand(r.issuer,actualChannel,p.name,p.input as Record<string,unknown>);
+      if (request.action === "supervisor.command") {
+        const fields = (keys: readonly string[]): boolean => exact(p, keys);
+        if (fields(["resultTransport", "release"]) && p.resultTransport === NATIVE_SUPERVISOR_JSON_VERSION) {
+          const result = nativeSupervisorJsonResult(p.release, ports.maxCheckpointBytes);
+          const retained = r.supervisorResults.get(result.requestId);
+          if (!retained?.result || (["version", "transferId", "kind", "byteLength", "digest"] as const)
+            .some(key => retained.result!.transfer[key] !== result.transfer[key])) fail("native_supervisor_result_owner_changed");
+          if (!retained.released) {
+            transfers.releaseOne(retained.owner, result.transfer.transferId);
+            retained.released = true; resultOwners.delete(retained.owner);
+          }
+          return Object.freeze({ version: NATIVE_SUPERVISOR_JSON_VERSION, requestId: result.requestId, released: true });
+        }
+        const legacy = fields(["name", "input"]);
+        if ((!legacy && (!fields(["name", "input", "resultTransport"]) || p.resultTransport !== NATIVE_SUPERVISOR_JSON_VERSION
+          || p.name !== "one_app_operations")) || typeof p.name !== "string" || !p.input || typeof p.input !== "object" || Array.isArray(p.input)) fail("native_supervisor_command_invalid");
+        // Other commands and legacy peers retain the exact raw-result contract.
+        if (legacy) return issuer.supervisorCommand(r.issuer, actualChannel, p.name, p.input as Record<string, unknown>);
+        const digest = createHash("sha256").update(nativeAuthCanonical(p)).digest("hex");
+        const prior = r.supervisorResults.get(request.requestId);
+        if (prior) {
+          if (prior.digest !== digest) fail("native_supervisor_result_request_conflict");
+          if (prior.released) fail("native_supervisor_result_released");
+          return prior.promise;
+        }
+        // Released entries remain small tombstones: a repeated request never
+        // executes again after custody ends. No unconfirmed result is evicted.
+        if (r.supervisorResults.size >= (ports.maxCallbacks ?? 32) * 24) fail("native_supervisor_result_capacity");
+        const owner = Object.freeze({}); resultOwners.set(owner, r);
+        let retained: SupervisorResultRecord;
+        const promise = Promise.resolve().then(async () => {
+          const value = await issuer.supervisorCommand(r.issuer, actualChannel, p.name as string, p.input as Record<string, unknown>);
+          assertCurrent(r, actualChannel, actualIdentity);
+          const transfer = transfers.issue(owner, "checkpoint-value", sourceJsonValue(value), ports.maxCheckpointBytes);
+          const result = Object.freeze({ version: NATIVE_SUPERVISOR_JSON_VERSION, requestId: request.requestId, transfer });
+          retained.result = result; return result;
+        });
+        retained = { owner, digest, promise, released: false }; r.supervisorResults.set(request.requestId, retained);
+        return promise;
       }
       if (request.action === "cancel") { if (!exact(p, [])) fail("native_main_router_payload_invalid"); issuer.cancel(r.issuer); assertCurrent(r, r.channel, r.identity, terminal); return ack(r, request, "cancelled"); }
       if (r.nonces.has(request.requestId)) fail("native_main_router_request_replayed");
@@ -158,7 +200,11 @@ export function createNativeMainPreparationRouter(ports: NativeMainPreparationRo
       }
     } finally { terminal ? terminalCallbacks-- : callbacks--; }
   }
-  function release(r: RecordState): void { transfers.release(r.handle); r.released = true; records.delete(r.start.handle); closedTerminalRecords.delete(r.start.handle); }
+  function releaseResults(r: RecordState): void {
+    for (const result of r.supervisorResults.values()) { transfers.release(result.owner); resultOwners.delete(result.owner); }
+    r.supervisorResults.clear();
+  }
+  function release(r: RecordState): void { releaseResults(r); transfers.release(r.handle); r.released = true; records.delete(r.start.handle); closedTerminalRecords.delete(r.start.handle); }
   /** Private actual custody observer. Never exposed as a JSON router action. */
   async function finishForSettlement(handle: NativeMainPreparationRouterHandle, finalStatus: Status) { const r = privateRecord(handle); const result = await issuer.finish(r.issuer, finalStatus); if (result.state === "released") release(r); return result; }
   function disconnect(actualChannel: object): void { issuer.disconnect(actualChannel); for (const r of records.values()) if (r.channel === actualChannel) r.detached = true; }
@@ -166,7 +212,7 @@ export function createNativeMainPreparationRouter(ports: NativeMainPreparationRo
   function closeAuthorityIfSettled(handle: NativeMainPreparationRouterHandle): boolean {
     const r = privateRecord(handle);
     if (!issuer.closeAuthorityIfSettled(r.issuer)) return false;
-    transfers.release(r.handle); records.delete(r.start.handle);
+    releaseResults(r); transfers.release(r.handle); records.delete(r.start.handle);
     // Only the existing original terminal channel can observe old cleanup. The
     // thin weak index cannot retain source buffers or restore business authority.
     closedTerminalRecords.set(r.start.handle, new WeakRef(r));

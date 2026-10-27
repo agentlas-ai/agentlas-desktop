@@ -80,11 +80,13 @@ const RISKY_WORDS = new RegExp([
   // German / French / Spanish
   "papierkorb", "corbeille", "papelera", "passwort", "kennwort", "kreditkarte", "zahlung", "anmelden", "abmelden", "senden", "teilen", "löschen", "beenden", "quitter", "salir", "mot de passe", "carte", "paiement", "connexion", "déconnexion", "envoyer", "partager", "supprimer", "contraseña", "tarjeta", "pago", "iniciar sesión", "cerrar sesión", "enviar", "compartir", "eliminar",
   // erasing, in every language the destructive family is checked in (independent review 4, S1): Clear History, Delete Row, Drop Table, Truncate Table
-  "消去", "消す", "取り除", "クリア", "清除", "清空", "刪除", "移除", "清理", "entfernen", "leeren", "zurücksetzen", "verwerfen", "effacer", "\\bvider\\b", "retirer", "réinitialiser", "borrar", "vaciar", "quitar", "restablecer", "elimina\\b", "cancella", "svuota", "rimuovi", "ripristina", "excluir", "apagar", "remover", "limpar", "esvaziar", "redefinir", "drop (?:table|database|index|column|collection|schema|view)", "truncate", "^drop$",
+  "消去", "(?<!取り)消す", "取り除", "クリア", "清除", "清空", "刪除", "移除", "清理", "entfernen", "leeren", "zurücksetzen", "verwerfen", "effacer", "\\bvider\\b", "retirer", "réinitialiser", "borrar", "vaciar", "quitar", "restablecer", "elimina\\b", "cancella", "svuota", "rimuovi", "ripristina", "excluir", "apagar", "remover", "limpar", "esvaziar", "redefinir", "drop (?:table|database|index|column|collection|schema|view)", "truncate", "^drop$",
   // discarding, overwriting and resetting, in the other languages (independent review 5, T1) - the languages other than English and Korean also hand out nothing by family
   "破棄", "放弃", "丢弃", "丟棄", "descartar", "scarta", "上書き", "覆盖", "覆蓋", "überschreiben", "écraser", "sobrescribir", "sobrescrever", "sovrascrivi", "リセット", "初期化", "重置", "还原", "還原", "리셋",
   // a phone or tablet used as a camera or scanner (Continuity: Import from iPhone or iPad > Take Photo, Scan Documents, Add Sketch), in every language (S5)
   "iphone", "ipad", "continuity", "from device", "take photo", "take picture", "scan document", "add sketch",
+  // what a "show" or "hide" of it would put on screen, in the other languages (independent review 7, V2): passwords, accounts, contacts, debugging, private browsing
+  "senha", "密碼", "連絡先", "联系人", "聯絡人", "kontakte", "contactos", "contatti", "contatos", "konto", "compte", "cuenta", "\\bconta\\b", "\\bconto\\b", "アカウント", "账户", "账号", "帳戶", "帳號", "debug", "private browsing", "incognito", "デバッグ", "调试", "調試", "디버그", "시크릿 ?모드", "비공개 ?브라우징",
   // ... whatever the phone or tablet is called, and in the other languages (independent review 5, T2); an unlocalized placeholder is never a command
   "사진 ?찍기", "문서 ?스캔", "스케치", "写真を撮", "書類をスキャン", "文書をスキャン", "スケッチ", "拍照", "拍摄照片", "扫描文稿", "掃描文件", "foto aufnehmen", "dokumente scannen", "skizze", "prendre une photo", "numériser", "esquisse", "tomar foto", "escanear", "boceto", "scatta foto", "scansiona", "schizzo", "tirar foto", "digitalizar", "esboço", "<<",
 ].join("|"), "i");
@@ -109,16 +111,11 @@ const word = (list: string): RegExp => new RegExp(`^(?:${list})$`, "i");
 // Menus whose whole content is about the look of the text: trusted as a family (a harmful name in them is still refused by the words above, and a command that
 // opens a dialog is cancelled by the runner). View and Help are NOT trusted as families: a View menu may hold Reload, a Help menu Deactivate License or Install
 // Command Line Tool (independent review 2, N1); they hand out their display and help verbs only.
-export const SAFE_TOP_MENUS = word("format|서식|포맷|書式|フォーマット|格式|formato|formatar");
 // Menus that hand out their commands as a family, EXCEPT in an app that says it uses the camera, the microphone or the location (independent review 3, R1:
 // a word list for "Show Camera" reopens through every language it does not cover, so for those apps the open-ended show / hide / toggle commands are not
 // handed out at all, whatever the menu calls them). A harmful name in these menus is still refused by the words above.
-export const SENSOR_UNSAFE_MENUS = word("view|보기|表示|显示|顯示|檢視|查看|ansicht|darstellung|présentation|affichage|visualización|ver|vista|visualizza|visualização|exibir|insert|삽입|挿入|插入|einfügen|insertion|insertar|inserisci|inserir|arrange|정렬|配置|排列|anordnen|organiser|organizar|disponi|table|표|表|表格|tabelle|tableau|tabla|tabella|tabela");
 export const HELP_MENUS = word("help|도움말|ヘルプ|帮助|說明|hilfe|aide|ayuda|aiuto|ajuda");
 export const EDIT_MENUS = word("edit|편집|編集|编辑|編輯|bearbeiten|édition|edición|modifica|editar");
-const INSERT_MENUS = word("insert|삽입|挿入|插入|einfügen|insertion|insertar|inserisci|inserir");
-const FAMILY_LANGUAGE_MENUS = word("format|서식|포맷|view|보기|insert|삽입|arrange|정렬|table|표|edit|편집");
-export const SAFE_EDIT_SUBMENUS = word("find|찾기|検索|查找|尋找|suchen|rechercher|buscar|trova|localizar|spelling and grammar|맞춤법 및 문법|スペルと文法|拼写和语法|拼寫與文法|rechtschreibung und grammatik|orthographe et grammaire|ortografía y gramática|ortografia e grammatica|ortografia e gramática|substitutions|대체|置換|替换|替換|ersetzungen|remplacements|sustituciones|sostituzioni|substituições|transformations|변형|変換|转换|轉換|umwandlungen|transformaciones|trasformazioni|transformações|insert|삽입|挿入|插入|einfügen|insertion|insertar|inserisci|inserir");
 const CLOSED_VERBS = word([
   // new <window | tab | document | file | folder> - a closed list of nouns in every language, so that "New Movie Recording" and "Start New Meeting" are never one of them
   "new(?: window| tab| document| file| folder)?", "신규", "새로 만들기", "새 (?:윈도우|창|탭|문서|파일|폴더)", "新規", "新規(?:ウインドウ|ウィンドウ|タブ|書類|ドキュメント|ファイル|フォルダ)", "新建", "新建(?:窗口|視窗|标签页|標籤頁|文稿|文档|文件|文件夹|文件夾)",
@@ -137,12 +134,49 @@ const CLOSED_VERBS = word([
   // what the review found the allowlist had taken away from Music, Preview, Numbers and games (English, Korean, Japanese, Chinese)
   "sort(?: by .+| ascending| descending)?", "bring (?:to front|forward)", "send (?:to back|backward)", "group", "ungroup", "play", "pause", "next", "previous", "next track", "previous track", "rotate (?:left|right|clockwise|counterclockwise)", "flip (?:horizontal|vertical)", "(?:next|previous|first|last) page", "go to (?:next|previous|first|last) page", "add (?:row|column)(?: above| below| before| after)?", "new game", "take back move",
   "재생", "일시 ?정지", "다음 트랙", "이전 트랙", "(?:왼쪽|오른쪽)으로 회전", "(?:다음|이전|첫|마지막) 페이지", "새 게임", "再生", "一時停止", "次の(?:トラック|ページ)", "前の(?:トラック|ページ)", "播放", "暂停", "下一(?:首|页)", "上一(?:首|页)",
+  // the same navigate / rotate / flip / view-mode names in the other languages (independent review 7, V3: Preview in Japanese lost 27 of 27 down to 9)
+  "(?:左|右)に回転", "(?:最初|最後)のページ", "(?:水平|垂直)方向に反転", "コンテンツのみ", "サムネール", "連続スクロール", "スライドショー", "向(?:左|右)旋[转轉]", "第一页", "最后一页", "(?:水平|垂直)翻[转轉]", "仅内容", "缩略图", "连续滚动", "幻灯片",
+  "nach (?:links|rechts) drehen", "nächste seite", "vorherige seite", "erste seite", "letzte seite", "(?:horizontal|vertikal) spiegeln", "nur inhalt", "miniaturen", "fortlaufender bildlauf", "diashow",
+  "pivoter à (?:gauche|droite)", "page suivante", "page précédente", "première page", "dernière page", "retourner (?:horizontalement|verticalement)", "contenu uniquement", "vignettes", "défilement continu", "diaporama",
+  "girar a la (?:izquierda|derecha)", "página siguiente", "página anterior", "primera página", "última página", "voltear (?:horizontal|verticalmente)", "voltear horizontalmente", "solo contenido", "miniaturas", "desplazamiento continuo", "presentación",
+  "ruota a (?:sinistra|destra)", "pagina successiva", "pagina precedente", "prima pagina", "ultima pagina", "rifletti (?:orizzontalmente|verticalmente)", "solo contenuto", "miniature", "scorrimento continuo", "presentazione",
+  "girar para a (?:esquerda|direita)", "próxima página", "primeira página", "inverter (?:horizontalmente|verticalmente)", "somente conteúdo", "apenas conteúdo", "rolagem contínua", "apresentação de slides",
 ].join("|"));
-// the open-ended forms: "Show <anything>", "Hide <anything>", "Toggle <anything>" and their translations - the ones a camera or microphone switch hides in
-const OPEN_VERBS = word("(?:show|hide|toggle) .+|.+ (?:show|hide)|.+ 보기|.+ 가리기|.+ 표시|.+ 숨기기|.+を表示|.+を非表示|.+を隠す|显示.+|隐藏.+|顯示.+|隱藏.+|.+ einblenden|.+ ausblenden|.+ anzeigen|afficher .+|masquer .+|mostrar .+|ocultar .+|mostra .+|nascondi .+");
+// the open-ended forms: "Show <anything>", "Hide <anything>" and their translations - the ones a camera or microphone switch hides in; "Toggle" only for a closed list of display
+// nouns, because "Toggle <anything>" is how a setting is switched (Firewall, Proxy, VPN, Hotspot, Airplane Mode: independent review 6, U2)
+const OPEN_VERBS = word("(?:show|hide) .+|toggle (?:the )?(?:sidebar|toolbar|tab bar|tab overview|status bar|path bar|ruler|rulers|grid|guides|full screen|word wrap|line numbers|minimap|outline|inspector|navigator|library|thumbnails|bookmarks bar|favorites bar|preview|split view)|.+ (?:show|hide)|.+ 보기|.+ 가리기|.+ 표시|.+ 숨기기|.+を表示|.+を非表示|.+を隠す|显示.+|隐藏.+|顯示.+|隱藏.+|.+ einblenden|.+ ausblenden|.+ anzeigen|afficher .+|masquer .+|mostrar .+|ocultar .+|mostra .+|nascondi .+");
 
 // View: its display verbs and the same show / hide words; Help: help itself and the plain "what is this"
 const VIEW_CLOSED = word("zoom(?: in| out)?|actual size|fit .+|enter full screen|sort by .+|as .+|bigger|smaller|larger|확대|축소|실제 크기|전체 화면.*|정렬.*|拡大|縮小|実際のサイズ|フルスクリーン.*|放大|缩小|实际大小|vergrößern|verkleinern|originalgröße|zoom avant|zoom arrière|taille réelle|ampliar|reducir|tamaño real|ingrandisci|riduci|dimensioni effettive|reduzir|tamanho real");
+// What Format menus hold, recognised by name in the ten languages (independent review 6, U1 and U4): a menu is no longer trusted as a whole, an item is handed out
+// when its own name is one of these, so what nobody listed is withheld in every language.
+const FORMAT_VERBS = word([
+  "bold", "italic", "underline", "outline", "strikethrough", "subscript", "superscript", "bigger", "smaller", "align (?:left|right|center|justified)", "center", "justify", "(?:increase |decrease )?indent", "outdent", "copy style", "paste style", "copy ruler", "paste ruler",
+  "볼드체", "굵게", "이탤릭체", "기울임꼴", "밑줄체", "밑줄", "윤곽체", "크게", "작게", "왼쪽 정렬", "중앙", "가운데 정렬", "좌우 정렬", "양쪽 정렬", "오른쪽 정렬", "스타일 복사하기", "스타일 붙여넣기", "눈금자 복사하기", "눈금자 붙여넣기", "들여쓰기", "내어쓰기", "취소선", "아래 첨자", "위 첨자",
+  "太字", "ボールド", "イタリック", "斜体", "下線", "アウトライン", "大きく", "小さく", "左揃え", "中央揃え", "右揃え", "両端揃え", "スタイルをコピー", "スタイルをペースト", "ルーラをコピー", "ルーラをペースト", "取り消し線", "上付き", "下付き",
+  "粗体", "下划线", "大纲", "较大", "较小", "左对齐", "居中", "右对齐", "两端对齐", "拷贝样式", "粘贴样式", "拷贝标尺", "粘贴标尺", "粗體", "斜體", "底線", "外框", "較大", "較小", "靠左對齊", "置中", "靠右對齊", "左右對齊", "拷貝樣式", "貼上樣式",
+  "fett", "kursiv", "unterstrichen", "kontur", "größer", "kleiner", "linksbündig", "zentriert", "blocksatz", "rechtsbündig", "stil kopieren", "stil einsetzen", "lineal kopieren", "lineal einsetzen",
+  "gras", "italique", "souligné", "contour", "plus grand", "plus petit", "aligner à gauche", "centrer", "justifier", "aligner à droite", "copier le style", "coller le style", "copier la règle", "coller la règle",
+  "negrita", "cursiva", "subrayado", "contorno", "más grande", "más pequeño", "alinear a la izquierda", "centrar", "justificar", "alinear a la derecha", "copiar estilo", "pegar estilo", "copiar regla", "pegar regla",
+  "grassetto", "corsivo", "sottolineato", "più grande", "più piccolo", "allinea a sinistra", "centra", "giustifica", "allinea a destra", "copia stile", "incolla stile", "copia righello", "incolla righello",
+  "negrito", "itálico", "sublinhado", "maior", "menor", "alinhar à esquerda", "centralizar", "alinhar à direita", "copiar régua", "colar régua",
+  // display modes of an app (Calculator, Preview, Books ...), English and Korean
+  "basic", "scientific", "programmer", "rpn(?: mode)?", "content only", "thumbnails", "contact sheet", "single page", "two pages(?: continuous)?", "continuous scroll", "zoom to fit", "slideshow", "table of contents", "highlights and notes",
+  "기본형", "공학용", "프로그래머용", "콘텐츠만", "축소판 그림", "슬라이드 쇼", "한 페이지", "두 페이지", "연속 스크롤", "화면에 맞춤",
+  // parts of the window an app shows or hides (a bare noun with a check mark on Windows and Linux: Status Bar, Word Wrap ...), in the ten languages
+  "status bar", "toolbars?", "sidebar", "rulers?", "word wrap", "line numbers", "gridlines|grid", "guides", "navigation pane", "preview pane", "details pane", "minimap", "breadcrumbs",
+  "상태 표시줄", "도구 모음", "사이드바", "눈금자", "자동 줄 바꿈", "줄 번호", "격자", "안내선", "ステータスバー", "ツールバー", "サイドバー", "ルーラ", "右端で折り返し", "行番号", "状态栏", "工具栏", "侧边栏", "标尺", "自动换行", "行号", "狀態列", "工具列", "側邊欄", "尺標", "自動換行", "行號",
+  "statusleiste", "symbolleiste", "seitenleiste", "lineal", "zeilenumbruch", "zeilennummern", "barre d.état", "barre d.outils", "barre latérale", "règle", "retour à la ligne", "numéros de ligne", "barra de estado", "barra de herramientas", "barra lateral", "regla", "ajuste de línea", "números de línea",
+  "barra di stato", "barra degli strumenti", "righello", "a capo automatico", "numeri di riga", "barra de status", "barra de ferramentas", "régua", "quebra de linha", "números de linha",
+].join("|"));
+// The standard document-editing items of the Edit menu's Find / Spelling and Grammar / Substitutions / Transformations / Insert parts, by name, in English and Korean
+// (independent review 6, U1: the submenu's name used to vouch for anything inside it).
+const EDIT_ITEMS = word([
+  "find", "find and replace", "find next", "find previous", "use selection for find", "jump to selection", "check document now", "check spelling while typing", "check grammar with spelling", "correct spelling automatically",
+  "smart copy/paste", "smart quotes", "smart dashes", "smart links", "data detectors", "text replacement", "make upper case", "make lower case", "capitalize", "line break", "paragraph break", "page break", "section break", "column break",
+  "다음 찾기", "이전 찾기", "선택 부분으로 이동", "선택 부분을 찾기에 사용", "지금 문서 검사", "입력하는 동안 맞춤법 검사", "맞춤법 및 문법 검사", "맞춤법 자동 수정", "스마트 복사하기/붙여넣기", "스마트 인용 부호", "스마트 대시", "스마트 링크", "데이터 탐색기", "텍스트 대치",
+  "대문자로 만들기", "소문자로 만들기", "대문자로 시작", "줄 바꿈", "단락 바꿈", "페이지 바꿈",
+].join("|"));
 const HELP_VERBS = word("help|.+ help|search|keyboard shortcuts|release notes|what.s new|도움말|.+ 도움말|검색|단축키.*|ヘルプ|.+ ヘルプ|帮助|.+ 帮助|說明|hilfe|.+ hilfe|aide|.+ aide|ayuda|.+ ayuda|aiuto|.+ aiuto|ajuda|.+ ajuda|about .+|.+에 관하여|.+について|关于.+|über .+|à propos .+|acerca de .+|informazioni su .+|sobre .+");
 
 // What the system adds to every app's menus, wherever the app's own words put them: the end of the macOS Edit menu (AutoFill ▸, Start Dictation…, Emoji &
@@ -183,21 +217,12 @@ export function isDirectMenuCommandPath(path: readonly string[], options: { sens
   const sensors = options.sensors === true;
   const top = plain(path[0]);
   const last = plain(path[path.length - 1]);
-  // A family (a whole menu trusted for what it holds) is trusted only in the two languages whose list of risky words is complete - English and Korean. Over five
-  // review rounds the same class kept reopening with other words in the other languages (Clear History, Discard Changes, Overwrite, Reset ...), so there the closed
-  // verb lists decide, and a language that is not listed hands out fewer commands, never a harmful one (independent review 5, T1).
-  const trusted = FAMILY_LANGUAGE_MENUS.test(top);
-  const byVerb = (): boolean => CLOSED_VERBS.test(last) || VIEW_CLOSED.test(last) || (!sensors && OPEN_VERBS.test(last));
-  if (SAFE_TOP_MENUS.test(top)) return trusted ? true : byVerb();
+  // No whole menu is trusted for what it holds (Format, View, Insert, Arrange, Table were, until independent review 6, U1: the word list that backed that trust was
+  // bypassed by an item in another language under an English menu name, and by English and Korean synonyms nobody had listed - Abandon Changes, Throw Away Changes,
+  // Drop All Tables, 변경 사항 폐기). An item is handed out when its OWN name is recognised as harmless: the closed verb lists, in every language they cover.
+  // A sensor app (camera, microphone, location) gets no open-ended show / hide.
   if (HELP_MENUS.test(top)) return HELP_VERBS.test(last);
-  // View, Insert, Arrange and Table are trusted as families - except in an app with a camera, microphone or location, which gets its closed verbs only.
-  // Insert holds its direct commands only: a submenu below it is where a phone or a tablet shows up as a camera (Continuity, review 5, T2).
-  if (SENSOR_UNSAFE_MENUS.test(top)) {
-    if (!trusted || (INSERT_MENUS.test(top) && path.length > 2)) return byVerb();
-    return sensors ? CLOSED_VERBS.test(last) || VIEW_CLOSED.test(last) : true;
-  }
-  if (EDIT_MENUS.test(top) && path.length === 3 && trusted && SAFE_EDIT_SUBMENUS.test(plain(path[1]))) return true;
-  return CLOSED_VERBS.test(last) || (!sensors && OPEN_VERBS.test(last));
+  return CLOSED_VERBS.test(last) || VIEW_CLOSED.test(last) || FORMAT_VERBS.test(last) || EDIT_ITEMS.test(last) || (!sensors && OPEN_VERBS.test(last));
 }
 
 // A dialog control the explorer may describe. Content areas (lists, outlines, tables, rows, cells, static text) carry the owner's data

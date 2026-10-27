@@ -1,3 +1,4 @@
+import { currentGoalExecutionObligations, prepareGoalObligationContinuation, goalObligationContinuationPrompt, abandonGoalObligationContinuation } from "./goal-obligation-context";
 /** Recover idle Goals through fresh current-context episodes. Checkpoint and
  * effect failures are advisory facts; only an explicit owner hold stops work.
  * Retry spacing still prevents unavailable runtimes from spinning. */
@@ -191,7 +192,10 @@ function parkForOwnerGrant(run: LongRunRecord, trigger: string): BlockedGoalSwee
   return { runId: run.id, fromReason: run.blockedReason, action: "deferred", detail: GOAL_OWNER_GRANT_REQUIRED };
 }
 
+const goalObligationPreparations = new Set<string>();
 function resume(run: LongRunRecord, dispatcher: EffectObservationDispatcher, trigger: string): BlockedGoalSweepResult {
+  if (goalObligationPreparations.has(run.id)) return { runId: run.id, fromReason: run.blockedReason,
+    action: "deferred", detail: "goal_preflight_preparing" };
   const chatId = run.rootChatId!;
   // Every resume path (sweep, Alive's continue, a released project) asks the one wake policy: the owner first,
   // then the daily barrier. A reached barrier parks the Goal until its window frees, visibly.
@@ -271,6 +275,42 @@ function resume(run: LongRunRecord, dispatcher: EffectObservationDispatcher, tri
     }
   }
   if (!prepared) return { runId: run.id, fromReason: run.blockedReason, action: "deferred", detail: "blocked_goal_resume_unavailable" };
+  const obligationGoal = getChatGoalRevision(run.goalId);
+  if (obligationGoal && currentGoalExecutionObligations(obligationGoal)) {
+    // Keep the public synchronous wake contract. This owned preparation is one
+    // episode, not a second sweep; no runtime dispatch occurs before its CAS.
+    goalObligationPreparations.add(run.id);
+    const claimed = prepared;
+    void (async () => {
+      try {
+        claimed.request = await prepareGoalObligationContinuation(claimed.request, { goalId: obligationGoal.goalId, goalRevision: obligationGoal.revision });
+        assertDesktopLongRunAdmissionOpen();
+        const now = getLongRun(run.id);
+        if (!now || getChat(chatId)?.goalId !== run.goalId || dispatcher.activeChatIds().includes(chatId)
+          || ownerRequestWaiting(chatId, dispatcher) || !automaticGoalResumeRequest(chatId, now.version, "host")) {
+          throw new Error("goal_obligation_preparation_changed");
+        }
+        goalObligationContinuationPrompt(claimed.request);
+        dispatcher.start(claimed.request, undefined, undefined, undefined, "goal-continuation");
+        confirmDesktopLongRunResumeDispatched(claimed.queuedId);
+        recordGoalWake({ runId: run.id, chatId, source, invocationRunId: claimed.request.runId ?? null, cause: run.blockedReason ?? trigger });
+      } catch (error) {
+        abandonGoalObligationContinuation(claimed.request);
+        const typedCode = error && typeof error === "object" && "code" in error ? error.code : null;
+        const code = typeof typedCode === "string" && /^[a-z_]{1,64}$/.test(typedCode)
+          ? `goal_obligation_${typedCode}` : errorCode(error, "goal_obligation_preparation_unavailable");
+        try { failDesktopLongRunResumeDispatch(claimed.queuedId, code); } catch { /* Preserve the original current owner. */ }
+        const now = getLongRun(run.id);
+        if (now && getChat(chatId)?.goalId === run.goalId && !longRunOwnerHold(now.id)
+          && ["queued", "blocked"].includes(now.status)) {
+          const slot = nextBlockedGoalRetrySlot(now.id);
+          scheduleBlockedGoalRetry({ runId: now.id, expectedVersion: now.version, kind: "resume", fromReason: run.blockedReason,
+            retryIndex: slot.retryIndex, nextAt: slot.nextAt, detail: code, trigger, appInstanceId: desktopAppInstanceId() });
+        }
+      } finally { goalObligationPreparations.delete(run.id); }
+    })().catch(error => logSweepFailureCause("goal-obligation-preparation", run.id, "goal_preflight_failed", error));
+    return { runId: run.id, fromReason: run.blockedReason, action: "deferred", detail: "goal_preflight_preparing" };
+  }
   // No chat line for a resume: the resumed run draws its own work line, and the ledger event above is the record.
   // (2026-10-12: the line landed as noise right after the owner's one-line instruction.)
   try {

@@ -1,5 +1,3 @@
-import { ownsHostGoalLoop } from "./host-goal-surface";
-import { prepareCheckpointContinuation } from "./continuation";
 import { claimGoalRuntimeSelection } from "./runtime-handoff";
 import { readInvocationEffectBoundary } from "../invocation/effect-boundary-reader";
 import { listAgentSurfaces } from "../store/agent-surfaces";
@@ -186,69 +184,17 @@ export function claimCheckpointContinuation(goalId: string, checkpointId: string
   recoveryWaitId?: string): boolean {
   return getDb().transaction(() => {
     const checkpoint = latestTaskCheckpoint(goalId);
-    const decision = longRunContinueDecision(goalId);
-    let diagnosticClaim = false;
-    let observationClaim = false;
-    if (checkpoint && recoveryWaitId) {
-      const run = getLongRunByGoalId(goalId);
-      const revision = getChatGoalRevision(goalId);
-      const row = run ? getDb().prepare("SELECT payload_json FROM long_run_events WHERE run_id=? AND kind='run.wait_subscription' ORDER BY seq DESC LIMIT 1")
-        .get(run.id) as { payload_json: string } | undefined : undefined;
-      let wait: Record<string, unknown> | null = null;
-      try { wait = row ? JSON.parse(row.payload_json).subscription : null; } catch { /* malformed wait */ }
-      const priorRow = run && typeof wait?.checkpointId === "string" ? getDb().prepare(`SELECT payload_json FROM long_run_events
-        WHERE run_id=? AND kind='run.task_checkpoint' AND json_extract(payload_json,'$.checkpoint.checkpointId')=? ORDER BY seq DESC LIMIT 1`)
-        .get(run.id, wait.checkpointId) as { payload_json: string } | undefined : undefined;
-      const prior = priorRow ? JSON.parse(priorRow.payload_json).checkpoint as LongRunTaskCheckpoint : null;
-      observationClaim = Boolean(run && revision?.lifecycle === "ongoing"
-        && revision.revision === checkpoint.goalRevision && wait?.state === "pending"
-        && wait.waitId === recoveryWaitId && wait.observationOnly === true
-        && wait.runId === run.id && wait.goalId === goalId && wait.goalRevision === revision.revision
-        && wait.sourceInvocationId === checkpoint.invocationRunId
-        && prior?.checkpointId === wait.checkpointId && prior?.sideEffects.state === "settled"
-        && prior.invocationRunId === checkpoint.invocationRunId
-        && checkpoint.sideEffects.boundary?.snapshotDigest === prior.sideEffects.boundary?.snapshotDigest
-        && checkpoint.sideEffects.boundary?.receiptEventId === prior.sideEffects.boundary?.receiptEventId);
-    }
-    if (checkpoint && recoveryWaitId && decision?.reason === "stall_replan_required"
-      && decision.status === "running" && decision.openTaskCount > 0) {
-      const run = getLongRunByGoalId(goalId);
-      const revision = getChatGoalRevision(goalId);
-      const row = run ? getDb().prepare("SELECT payload_json FROM long_run_events WHERE run_id=? AND kind='run.wait_subscription' ORDER BY seq DESC LIMIT 1")
-        .get(run.id) as { payload_json: string } | undefined : undefined;
-      let wait: Record<string, unknown> | null = null;
-      try { wait = row ? JSON.parse(row.payload_json).subscription : null; } catch { /* Refuse malformed host state. */ }
-      const prior = run && wait?.checkpointId ? getDb().prepare(`SELECT payload_json FROM long_run_events
-        WHERE run_id=? AND kind='run.task_checkpoint' AND json_extract(payload_json,'$.checkpoint.checkpointId')=? ORDER BY seq DESC LIMIT 1`)
-        .get(run.id, wait.checkpointId) as { payload_json: string } | undefined : undefined;
-      const priorCheckpoint = prior ? JSON.parse(prior.payload_json).checkpoint as LongRunTaskCheckpoint : null;
-      const plan = checkpoint.capsule.plan;
-      diagnosticClaim = Boolean(run != null && ownsHostGoalLoop(run.surface) && revision?.lifecycle === "ongoing"
-        && revision.revision === checkpoint.goalRevision
-        && wait?.waitId === recoveryWaitId && wait?.state === "pending"
-        && wait?.runId === run.id && wait?.goalId === goalId && wait?.goalRevision === revision.revision
-        && wait?.sourceInvocationId === checkpoint.invocationRunId
-        && (wait?.recoveryMode === "stall_replan" || wait?.recoveryMode === "stall_backoff")
-        && typeof wait?.recoveryProgressKey === "string"
-        && plan?.stallReplan?.progressKey === wait.recoveryProgressKey
-        && plan.stallReplan.action !== "needs_person"
-        && (wait.recoveryMode !== "stall_replan"
-          || (plan.stallReplan.sourceCheckpointId === wait.checkpointId
-            && plan.stallReplan.action === "inspect_read_only"))
-        && priorCheckpoint && priorCheckpoint.checkpointId === wait.checkpointId
-        && priorCheckpoint.goalRevision === revision.revision
-        && priorCheckpoint.invocationRunId === checkpoint.invocationRunId
-        && priorCheckpoint.sideEffects.state === "settled"
-        && checkpoint.sideEffects.boundary?.snapshotDigest === priorCheckpoint.sideEffects.boundary?.snapshotDigest
-        && checkpoint.sideEffects.boundary?.receiptEventId === priorCheckpoint.sideEffects.boundary?.receiptEventId);
-    }
-    if (!checkpoint || checkpoint.checkpointId !== checkpointId || checkpoint.disposition !== "retry_required"
-      || checkpoint.sideEffects.state !== "settled" || !(decision?.continue || diagnosticClaim || observationClaim)) return false;
-    try { prepareCheckpointContinuation(checkpoint); } catch { return false; }
+    if (!checkpoint || checkpoint.checkpointId !== checkpointId) return false;
+    // Historical recovery observations describe the producer; they do not
+    // re-admit the current request. Claim only this checkpoint identity once.
+    let recoveryDecision: ReturnType<typeof longRunContinueDecision> | null = null;
+    try { recoveryDecision = longRunContinueDecision(goalId); } catch { /* Diagnostic only. */ }
     const db = getDb();
     if (db.prepare("SELECT 1 FROM long_run_events WHERE run_id = ? AND kind = 'run.checkpoint_continuation' AND json_extract(payload_json, '$.checkpointId') = ?")
       .get(checkpoint.capsule.runId, checkpointId)) return false;
-    appendLongRunEvent({ runId: checkpoint.capsule.runId, kind: "run.checkpoint_continuation", actorKind: "host", payload: { checkpointId, invocationRunId } });
+    appendLongRunEvent({ runId: checkpoint.capsule.runId, kind: "run.checkpoint_continuation", actorKind: "host", payload: { checkpointId, invocationRunId,
+      recoveryDiagnostic: { disposition: checkpoint.disposition, sideEffects: checkpoint.sideEffects,
+        decision: recoveryDecision, recoveryWaitId: recoveryWaitId ?? null } } });
     claimGoalRuntimeSelection(checkpoint, invocationRunId);
     return true;
   })();

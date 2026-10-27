@@ -294,7 +294,7 @@ export function buildGoalPanelView(input: GoalPanelBuildInput): GoalPanelView {
     pendingAmendments: input.pendingAmendments,
     nodes,
     agiWorking: input.agiIncident,
-    canShape: !plan || plan.fallback || plan.shape === "single_tactic",
+    canShape: !plan || plan.fallback || plan.shape === "single_tactic" || Boolean(revision && plan.revision < revision.revision),
     shaping: input.shaping,
     shapeFailed: input.shapeFailed,
     limits: { strategies: GOAL_SHAPE_LIMITS.strategies, tactics: GOAL_SHAPE_LIMITS.tactics },

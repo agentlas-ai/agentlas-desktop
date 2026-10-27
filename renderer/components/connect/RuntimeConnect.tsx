@@ -223,27 +223,48 @@ export function RuntimeConnectPopup({
   onDone: (snapshot: RuntimeConnectSnapshot) => void;
 }) {
   const [snap, setSnap] = useState<RuntimeConnectSnapshot | null>(null);
+  const [startUnavailable, setStartUnavailable] = useState(false);
+  const startAttempt = useRef(0);
+  const eventSerial = useRef(0);
+  const latestSnapshot = useRef<RuntimeConnectSnapshot | null>(null);
   const [showLog, setShowLog] = useState(false);
   const sawInstall = useRef(false);
   const doneRef = useRef(onDone);
   doneRef.current = onDone;
 
+  const acceptSnapshot = useCallback((next: RuntimeConnectSnapshot, event: boolean) => {
+    const previous = latestSnapshot.current;
+    if (previous && previous.sessionId !== next.sessionId && previous.startedAt > next.startedAt) return;
+    latestSnapshot.current = next;
+    if (event) eventSerial.current++;
+    setStartUnavailable(false);
+    setSnap(next);
+  }, []);
+
   const start = useCallback(() => {
     const api = ipc();
+    const attempt = ++startAttempt.current;
+    const beforeEvents = eventSerial.current;
     sawInstall.current = false;
     setShowLog(false);
-    void api?.runtime.connectStart?.(spec.kind).then((s) => setSnap(s)).catch(() => undefined);
-  }, [spec.kind]);
+    setStartUnavailable(false);
+    if (!api?.runtime.connectStart) { setStartUnavailable(true); return; }
+    void api.runtime.connectStart(spec.kind).then((s) => {
+      if (startAttempt.current === attempt && eventSerial.current === beforeEvents) acceptSnapshot(s, false);
+    }).catch(() => {
+      if (startAttempt.current === attempt && eventSerial.current === beforeEvents) setStartUnavailable(true);
+    });
+  }, [spec.kind, acceptSnapshot]);
 
   useEffect(() => {
     const api = ipc();
     const off = api?.runtime.onConnectEvent?.((s) => {
       if (s.kind !== spec.kind) return;
-      setSnap((prev) => (prev && prev.sessionId !== s.sessionId && prev.startedAt > s.startedAt ? prev : s));
+      acceptSnapshot(s, true);
     });
     start();
-    return () => { off?.(); };
-  }, [spec.kind, start]);
+    return () => { startAttempt.current++; off?.(); };
+  }, [spec.kind, start, acceptSnapshot]);
 
   if (snap?.step === "installing") sawInstall.current = true;
 
@@ -265,22 +286,22 @@ export function RuntimeConnectPopup({
   }, [snap?.phase, spec.kind, onClose]);
 
   const currentIndex = snap ? STEP_ORDER.indexOf(snap.step) : 0;
-  const failed = snap?.phase === "failed";
+  const failed = startUnavailable || snap?.phase === "failed";
   const cancelled = snap?.phase === "cancelled";
-  const running = !snap || snap.phase === "running";
+  const running = !startUnavailable && (!snap || snap.phase === "running");
   const statusOf = (step: RuntimeConnectStep, index: number): string => {
-    if (!snap) return index === 0 ? "current" : "todo";
+    if (!snap) return index === 0 ? (startUnavailable ? "failed" : "current") : "todo";
     if (snap.phase === "done") return step === "installing" && !sawInstall.current ? "skipped" : "done";
     if (index < currentIndex) return step === "installing" && !sawInstall.current ? "skipped" : "done";
     if (index === currentIndex) return failed || cancelled ? "failed" : "current";
     return "todo";
   };
-  const reasonText = snap?.reasonCode ? copy.reason[snap.reasonCode] : null;
+  const reasonText = startUnavailable ? copy.reason.probe_failed : snap?.reasonCode ? copy.reason[snap.reasonCode] : null;
   const logTail = snap?.log ?? [];
 
   return (
     <div className={styles.scrim} role="presentation">
-      <div className={styles.popup} role="dialog" aria-modal="true" aria-labelledby="runtime-connect-title" data-connect-kind={spec.kind} data-connect-phase={snap?.phase ?? "running"} data-connect-step={snap?.step ?? "checking"}>
+      <div className={styles.popup} role="dialog" aria-modal="true" aria-labelledby="runtime-connect-title" data-connect-kind={spec.kind} data-connect-phase={startUnavailable ? "failed" : snap?.phase ?? "running"} data-connect-step={snap?.step ?? "checking"}>
         <div className={styles.popupHead}>
           <img src={spec.logo} alt="" />
           <h2 id="runtime-connect-title">{copy.title(spec.name)}</h2>

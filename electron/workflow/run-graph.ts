@@ -54,7 +54,7 @@ import { createDegenerateOutputDetector, degenerateOutputReceipt, WORKER_OUTPUT_
 import { graphEffectItemsHeldSummary, graphEffectItemsPromptBlock } from "../one/graph-effect-items";
 import { claimInvocationRunOwner, invocationRunOwners } from "../store/invocation-run-owners";
 import { sameMethodAttemptLimit, MAX_SAME_METHOD_STARTS, type WorkUnit } from "../../shared/work-recovery";
-import { GraphWorkRecovery, WorkRecoveryRefused, type GraphWorkRecoveryScope } from "./work-recovery";
+import { GraphWorkRecovery, type GraphWorkRecoveryScope } from "./work-recovery";
 import { hostRunChildrenEnded } from "../runtime/spawn-registry";
 import { listAutomationGraphReconciliations } from "../store/graph-reconciliation";
 import { runGraphMcpCall, projectGraphMcpArguments } from "./mcp-call";
@@ -2118,7 +2118,8 @@ export async function runGraph(
     opts.permissionCeiling === "read" ? "read"
       : automation.executionPermission === "write" ? "write" : requiredExecutionPermission(graph);
   const initialVars = durableInitialVars(opts.initialVars);
-  const admissionPending = new Map<string, GraphNodeFailure>();
+  // Historical admission analysis is evidence, never the current node scheduling state.
+  const admissionDiagnostics = new Map<string, GraphNodeFailure>();
   const historicalMcpSources = new Map<string, AutomationGraphReconciliation[]>();
   const deferredMcpHolds = new Map<string, GraphNodeFailure>();
   // 자율 전략 진화 — 이 자동화의 현재 실패 스트릭을 1회 수집해, 실패가 이어지는 동안
@@ -2133,7 +2134,7 @@ export async function runGraph(
     .map((node) => ({ nodeId: node.id, target: hubTargetForNode(automation, node) }))
     .filter((row) => row.target && !/^[0-9a-f]{64}$/.test(row.target.version ?? ""));
   if (unpinnedHubTargets.length > 0) {
-    for (const row of unpinnedHubTargets) admissionPending.set(row.nodeId, {
+    for (const row of unpinnedHubTargets) admissionDiagnostics.set(row.nodeId, {
       code: "automation_hub_version_pin_required", reason: L("이 단계가 쓸 Hub 패키지의 버전이 정해지지 않았어요.", "The Hub package version is unresolved for this node."),
       nextAction: L("다른 단계는 계속 진행돼요. 이 패키지를 확인한 뒤 [이 노드부터 재실행]을 눌러 주세요.", "Other branches continue. Check this package, then choose [Rerun from this node]."),
     });
@@ -2158,6 +2159,14 @@ export async function runGraph(
     },
   } : undefined;
   const definitionDigest = getAutomationDefinitionDigest(automation.id);
+  const readPriorReconciliations = (): AutomationGraphReconciliation[] => {
+    try { return listAutomationGraphReconciliations(automation.id, priorEvidenceReadContext); }
+    catch {
+      tryRecordRunEvent({ runId, automationId: automation.id, kind: "workflow_recovery_diagnostic",
+        payload: { disposition: "continue", code: "prior_reconciliation_unreadable" } });
+      return [];
+    }
+  };
   const dryRun = opts.dryRun === true;
   // A workflow graph is browser-backed by default so its authenticated session
   // cookies land in the same Agentlas Browser profile that the node uses. The
@@ -2182,7 +2191,7 @@ export async function runGraph(
   if (!dryRun && !getStoredAutomation(automation.id)) throw new AutomationRunParentMissingError(automation.id);
   // Historical evidence stays visible in its original occurrence. Only a native
   // owning ingress may identify a different authorized logical request.
-  if (!dryRun) for (const held of listAutomationGraphReconciliations(automation.id, priorEvidenceReadContext)) {
+  if (!dryRun) for (const held of readPriorReconciliations()) {
     if (held.simulation) continue;
     for (const node of held.nodes) if (graphNodeIds.has(node.nodeId)) {
       if (!belongsToCurrentOccurrence(held)) {
@@ -2192,7 +2201,7 @@ export async function runGraph(
         continue;
       }
       historicalMcpSources.set(node.nodeId, [...historicalMcpSources.get(node.nodeId) ?? [], held]);
-      admissionPending.set(node.nodeId, {
+      admissionDiagnostics.set(node.nodeId, {
         code: "MUTATION_UNVERIFIED", reason: L("앞선 요청이 이 단계에서 실제로 반영됐는지 아직 확인되지 않았어요.", "An earlier request's effect for this step remains unconfirmed."),
         nextAction: L("실제로 반영됐는지 확인한 뒤 [이 노드부터 재실행] 또는 [건너뛰기]를 고르세요.", "Check whether it actually took effect, then choose [Rerun from this node] or [Skip]."),
       });
@@ -2213,7 +2222,7 @@ export async function runGraph(
         ? ids.filter((id): id is string => typeof id === "string") : []),
       ...Object.entries(waitingSource?.nodeStates ?? {}).filter(([id, state]) => state === "done" && effectNodeIds.has(id)).map(([id]) => id)]);
     if (unknownEffects || held.size === 0) for (const id of effectNodeIds) held.add(id);
-    for (const nodeId of held) if (graphNodeIds.has(nodeId)) admissionPending.set(nodeId, {
+    for (const nodeId of held) if (graphNodeIds.has(nodeId)) admissionDiagnostics.set(nodeId, {
       code: "RESUME_CONFLICT", reason,
       nextAction: L("다른 단계는 계속 진행돼요. 로그인이나 반영 여부를 확인한 뒤 [이 노드부터 재실행]을 눌러 주세요.", "Other nodes continue. Check the login or what was applied, then choose [Rerun from this node]."),
     });
@@ -2221,7 +2230,7 @@ export async function runGraph(
   if (hasGraphLoginWait(automation.id) && !originalWaitingSource) quarantineLoginSource("Login checkpoint is invalid.", true);
   if (waitingSource && (!loginSourceRunId || waitingSource.runId !== loginSourceRunId
       || !graphLoginWaitReady((waitingSource.checkpoint as GraphCheckpoint).loginWaits))) {
-    for (const nodeId of Object.keys((waitingSource.checkpoint as GraphCheckpoint).loginWaits)) admissionPending.set(nodeId, {
+    for (const nodeId of Object.keys((waitingSource.checkpoint as GraphCheckpoint).loginWaits)) admissionDiagnostics.set(nodeId, {
       code: "browser_login_required", reason: L("이 단계에 필요한 로그인이 아직 되어 있지 않아요.", "The login this step needs is not done yet."),
       nextAction: L("다른 단계는 계속 진행돼요. 로그인을 마친 뒤 [이 노드부터 재실행]을 눌러 주세요.", "Other branches continue. Finish the login, then choose [Rerun from this node]."),
     });
@@ -2275,7 +2284,7 @@ export async function runGraph(
         ),
       };
       const held = affectedNodes.length ? affectedNodes : [...effectNodeIds];
-      for (const nodeId of held) if (graphNodeIds.has(nodeId)) admissionPending.set(nodeId, failure);
+      for (const nodeId of held) if (graphNodeIds.has(nodeId)) admissionDiagnostics.set(nodeId, failure);
     }
   }
   // Trigger deliveries carry a stable event occurrence. Never resume the
@@ -2294,21 +2303,10 @@ export async function runGraph(
   let resumedFromCheckpoint = false;
   let checkpoint: GraphCheckpoint | null = null;
   if (latestFailed) {
-    // 재개 좌표는 한 번만 소비된다. 두 실행이 같은 실패 스냅샷을 동시에 집으면
-    // 이미 끝난 단계가 두 번 돌 수 있으므로, 진 쪽은 재개하지 않고 정직하게 멈춘다.
-    if (!consumeGraphResumeCoordinate(latestFailed.runId)) {
-      throw new GraphContractError({
-        code: "RESUME_CONFLICT",
-        reason: L(
-          "다른 실행이 이미 같은 지점에서 이어서 돌고 있습니다. 같은 단계를 두 번 실행하지 않기 위해 이번 요청은 시작하지 않았습니다.",
-          "Another run is already resuming from this same point. This request was not started, to avoid running the same step twice.",
-        ),
-        nextAction: L(
-          "진행 중인 실행이 끝난 뒤 결과를 확인하고, 필요하면 그때 다시 실행하세요.",
-          "Check the result once the in-progress run finishes, and run again then if needed.",
-        ),
-      });
-    }
+    const resumeCoordinateClaimed = consumeGraphResumeCoordinate(latestFailed.runId);
+    if (!resumeCoordinateClaimed) tryRecordRunEvent({ runId, automationId: automation.id,
+      kind: "workflow_recovery_diagnostic", payload: { disposition: "continue", code: "RESUME_CONFLICT",
+        sourceRunId: latestFailed.runId } });
     /*
      * ★여기서부터는 좌표를 쥔 상태다. 아래 검사들 중 하나라도 걸리면 **한 단계도 돌지
      *   않고** 나가는데, 그때 좌표를 쥔 채 나가면 그 표식은 아무도 대신 풀어 주지
@@ -2318,7 +2316,7 @@ export async function runGraph(
      */
     const releaseCoordinateIfNotStarted = (): void => {
       try {
-        releaseGraphResumeCoordinate(latestFailed.runId);
+        if (resumeCoordinateClaimed) releaseGraphResumeCoordinate(latestFailed.runId);
       } catch { /* 놓지 못해도 원래 오류를 가리지 않는다 */ }
     };
     const completedEffectFromSnapshot = latestFailed.graphDigest === graphDigest
@@ -2330,13 +2328,13 @@ export async function runGraph(
       // revised is closed: it cannot resume under the new graph, so this run starts fresh
       // (graph-reconciliation.ts loadRevisedGraphReconciliation).
       if (completedEffectFromSnapshot && !hasRevisedGraphReconciliationClose(latestFailed)) {
-        for (const nodeId of effectNodeIds) admissionPending.set(nodeId, {
+        for (const nodeId of effectNodeIds) admissionDiagnostics.set(nodeId, {
           code: "automation_partial_graph_changed", reason: L("이전 실행이 바깥에 남긴 작업이 지금과 다른 그래프의 것이에요.", "The earlier run changed things outside that belong to a different version of this graph."),
           nextAction: L("다른 단계는 계속 진행돼요. 실제로 반영된 내용을 확인한 뒤 이어가 주세요.", "Other branches continue. Check what was actually applied, then continue."),
         });
         // A direct transport cannot read a prompt note before repeating an effect.
         // Retain its exact failed source through the existing resume lineage.
-        if (graph.nodes.some(node => admissionPending.has(node.id)
+        if (graph.nodes.some(node => admissionDiagnostics.has(node.id)
           && (!["agent", "action"].includes(node.type) || Object.hasOwn(node.config, "mcpCall")))) {
           resumeOfRunId = latestFailed.runId;
         }
@@ -2355,7 +2353,7 @@ export async function runGraph(
         quarantineLoginSource("Login checkpoint cannot be resumed under its saved lifecycle.", true);
       }
       if (!checkpoint && completedEffectFromSnapshot) {
-        for (const nodeId of effectNodeIds) admissionPending.set(nodeId, {
+        for (const nodeId of effectNodeIds) admissionDiagnostics.set(nodeId, {
           code: "automation_partial_reconciliation_required", reason: L("이전 실행이 바깥에 한 작업의 결과 기록이 없어 이어갈 수 없어요.", "The earlier run left no record of its outside change, so it cannot continue from there."),
           nextAction: L("다른 단계는 계속 진행돼요. 실제로 반영됐는지 확인한 뒤 [이 노드부터 재실행]을 눌러 주세요.", "Other branches continue. Check whether it took effect, then choose [Rerun from this node]."),
         });
@@ -2387,7 +2385,7 @@ export async function runGraph(
         }
         if (checkpoint.inFlightNodeIds.length > 0 || checkpoint.ambiguousNodeIds.length > 0) {
           const held = [...new Set([...checkpoint.inFlightNodeIds, ...checkpoint.ambiguousNodeIds])];
-          for (const nodeId of held) admissionPending.set(nodeId, {
+          for (const nodeId of held) admissionDiagnostics.set(nodeId, {
             code: "MUTATION_UNVERIFIED", reason: L("지난 시도가 바깥에 무언가를 반영했는지 확인되지 않았어요.", "It is unconfirmed whether the previous attempt changed anything outside."),
             nextAction: L("다른 단계는 계속 진행돼요. 실제로 반영됐는지 확인한 뒤 [이 노드부터 재실행] 또는 [건너뛰기]를 고르세요.", "Other branches continue. Check whether it took effect, then choose [Rerun from this node] or [Skip]."),
           });
@@ -2400,7 +2398,7 @@ export async function runGraph(
           ? L(` 이 실행에서 이미 게시된 항목 ${publishedSoFar.count}개(${publishedSoFar.keys.join(", ")}${publishedSoFar.count > publishedSoFar.keys.length ? " …" : ""})는 다시 실행해도 다시 게시되지 않아요.`,
             ` ${publishedSoFar.count} item(s) this run already published (${publishedSoFar.keys.join(", ")}${publishedSoFar.count > publishedSoFar.keys.length ? " …" : ""}) are recorded and are not published again on a rerun.`)
           : "";
-        for (const nodeId of interruptedHolds) admissionPending.set(nodeId, {
+        for (const nodeId of interruptedHolds) admissionDiagnostics.set(nodeId, {
           code: "MUTATION_UNVERIFIED", reason: L("앱이 멈출 때 이 단계가 진행 중이었고, 바깥에 이미 반영됐을 수 있어요(게시·업로드·전송).", "The app stopped while this step was running, and it may already have acted outside (post, upload, message).") + publishedNote,
           nextAction: L("자동으로 다시 실행하지 않아요. 실제로 반영됐는지 확인한 뒤 [이 노드부터 재실행] 또는 [건너뛰기]를 고르세요.", "It is not run again automatically. Check whether it took effect, then choose [Rerun from this node] or [Skip]."),
         });
@@ -2432,42 +2430,32 @@ export async function runGraph(
       checkpointDigest: "sha256:" + "0".repeat(64),
     });
   }
-  /*
-   * ★An admission hold on an effect whose outcome is unknown must outlive this run.
-   *   Held nodes do not run here, but the hold used to live only in this run's nodeFailures.
-   *   This run then became the latest failed checkpoint: the next run resumed from it (the held
-   *   node neither completed nor ambiguous) and dispatched the external effect again, and the
-   *   reconciliation view had nothing to show (test-automation-trigger-safety, 2026-10-04: a
-   *   legacy "publish done, no receipt" run → held once → re-dispatched on the second run).
-   *   Recording the hold as ambiguous keeps it held (MUTATION_UNVERIFIED on resume) and visible
-   *   to reconciliation and background observation until someone settles it.
-   */
-  // Invocation-backed nodes can inspect the prior outcome with their existing
-  // read tools. A direct transport cannot act on that instruction, so its hold
-  // remains scoped to that node while independent branches continue.
+  // Preserve prior uncertainty in its sealed source and record it for this request.
+  // Invocation context can still describe that history; direct transports record
+  // the same facts at their runnable boundary without stopping the current call.
   const uncertainEffectNotes = new Map<string, GraphNodeFailure>(historicalEffectNotes);
-  for (const [nodeId, failure] of [...admissionPending.entries()]) {
+  for (const [nodeId, failure] of [...admissionDiagnostics.entries()]) {
     if (!UNCERTAIN_EFFECT_NOTE_CODES.has(failure.code) || interruptedHolds.has(nodeId)) continue;
     const node = graph.nodes.find(candidate => candidate.id === nodeId);
     // A direct call's payload may come from an upstream node. Compare its
     // actual arguments at the runnable boundary, rather than holding a new
     // request merely because it uses the same blueprint node ID.
     if (node && Object.hasOwn(node.config, "mcpCall") && historicalMcpSources.has(nodeId)) {
-      admissionPending.delete(nodeId);
+      admissionDiagnostics.delete(nodeId);
       deferredMcpHolds.set(nodeId, failure);
       continue;
     }
     if (!node || !["agent", "action"].includes(node.type) || Object.hasOwn(node.config, "mcpCall")) continue;
-    admissionPending.delete(nodeId);
+    admissionDiagnostics.delete(nodeId);
     uncertainEffectNotes.set(nodeId, failure);
   }
   // Persist held direct transports in the sealed checkpoint. An empty failed
   // wrapper must not erase the original uncertainty on the following restart.
   checkpoint.ambiguousNodeIds = [...new Set([...checkpoint.ambiguousNodeIds,
-    ...[...admissionPending].filter(([nodeId, failure]) => effectNodeIds.has(nodeId)
+    ...[...admissionDiagnostics].filter(([nodeId, failure]) => effectNodeIds.has(nodeId)
       && UNCERTAIN_EFFECT_NOTE_CODES.has(failure.code)).map(([nodeId]) => nodeId)])].sort();
   if (uncertainEffectNotes.size > 0) {
-    checkpoint.ambiguousNodeIds = checkpoint.ambiguousNodeIds.filter((nodeId) => !uncertainEffectNotes.has(nodeId) || admissionPending.has(nodeId) || deferredMcpHolds.has(nodeId));
+    checkpoint.ambiguousNodeIds = checkpoint.ambiguousNodeIds.filter((nodeId) => !uncertainEffectNotes.has(nodeId) || admissionDiagnostics.has(nodeId) || deferredMcpHolds.has(nodeId));
     tryRecordRunEvent({ runId, kind: "graph_uncertain_effect_noted", automationId: automation.id,
       payload: { nodeIds: [...uncertainEffectNotes.keys()].sort(), codes: [...new Set([...uncertainEffectNotes.values()].map((failure) => failure.code))].sort() } });
   }
@@ -2535,7 +2523,7 @@ export async function runGraph(
      */
     for (const node of graph.nodes) {
       const produced = str(node.config ?? {}, "produces");
-      if (!produced || !completed.has(node.id) || Object.hasOwn(vars, produced) || nodeEffect(node) === "mutation") continue;
+      if (!produced || !completed.has(node.id) || Object.hasOwn(vars, produced)) continue;
       completed.delete(node.id);
       delete outputs[node.id];
       changedNames.push(produced);
@@ -2603,7 +2591,7 @@ export async function runGraph(
   const evalReworkState = new Map<string, { attempt: number; priorFingerprint: string | null; priorEvaluatedDigest: string | null }>();
   /** Eval node → the steps that read its reasons in this run. A resumed rework is scoped to what the check judges. */
   const evalReworkScope = new Map<string, Set<string>>();
-  let automaticRetryStop: { nodeId: string; reasonCode: GraphRetryStopReason; fingerprint: string | null } | null = interruptedHolds.size > 0
+  let automaticRetryDiagnostic: { nodeId: string; reasonCode: GraphRetryStopReason; fingerprint: string | null } | null = interruptedHolds.size > 0
     ? { nodeId: [...interruptedHolds].sort()[0]!, reasonCode: "run_interrupted_effect", fingerprint: null } : null;
   // A check that failed in the run this one resumes: rework what it judges, or stop once. The same
   // output is never judged again (see planEvalRework).
@@ -2613,7 +2601,7 @@ export async function runGraph(
     const labelsOf = (ids: string[]): string =>
       ids.map((id) => graph.nodes.find((candidate) => candidate.id === id)?.label || id).join(", ");
     for (const node of graph.nodes) {
-      if (node.type !== "eval" || completed.has(node.id) || admissionPending.has(node.id)) continue;
+      if (node.type !== "eval" || completed.has(node.id) || admissionDiagnostics.has(node.id)) continue;
       const history = readEvalReworkHistory(lineage, node.id);
       const plan = planEvalRework(graph, node.id, checkpoint, completed, effectNodeIds, lineage);
       if (history.rework && (!history.failure || history.rework.depth < history.failure.depth)) {
@@ -2666,7 +2654,7 @@ export async function runGraph(
         const produces = str(node.config ?? {}, "produces") ?? `${node.id}_verdict`;
         const lastReason = typeof vars[`${produces}_reason`] === "string" ? String(vars[`${produces}_reason`]).trim() : "";
         const label = node.label || node.id;
-        admissionPending.set(node.id, {
+        admissionDiagnostics.set(node.id, {
           code: failure.failureCode,
           reason: L(
             `검증 "${label}"이(가) 지난 시도에서 통과하지 못했고, 같은 결과를 다시 판정하지 않았습니다.${lastReason ? `\n${lastReason}` : ""}`,
@@ -2674,7 +2662,7 @@ export async function runGraph(
           ),
           nextAction: evalReworkNextAction(decision, labelsOf, plan, 0),
         });
-        automaticRetryStop ??= { nodeId: node.id, reasonCode: decision.reasonCode, fingerprint: priorFingerprint };
+        automaticRetryDiagnostic ??= { nodeId: node.id, reasonCode: decision.reasonCode, fingerprint: priorFingerprint };
         continue;
       }
       for (const id of plan.reworkNodeIds) {
@@ -2793,7 +2781,7 @@ export async function runGraph(
   // Older checkpoints preserve results but not counters. An unknown allowance
   // cannot become a fresh allowance merely because the host restarted.
   if (resumeOfRunId && !(checkpoint as unknown as Record<string, unknown>).executionState && loops.length > 0) {
-    for (const nodeId of new Set(loops.flatMap((loop) => loop.body))) admissionPending.set(nodeId, {
+    for (const nodeId of new Set(loops.flatMap((loop) => loop.body))) admissionDiagnostics.set(nodeId, {
       code: "LOOP_COUNTERS_UNCONFIRMED", reason: L("이전 기록에 이 반복이 몇 번 돌았는지 남아 있지 않아요.", "The earlier record does not say how many times this loop ran."),
       nextAction: L("다른 단계는 계속 진행돼요. 처음부터 다시 실행해 주세요.", "Other nodes continue. Please run it again from the start."),
     });
@@ -2832,10 +2820,10 @@ export async function runGraph(
   let ok = true;
   let error: string | undefined;
   /** 노드 id → 실패 3요소(코드·사유 원문·지금 누를 행동). 실패 카드의 정본. */
-  const nodeFailures: Record<string, GraphNodeFailure> = Object.fromEntries(admissionPending);
-  if (admissionPending.size) {
-    ok = false; error = `graph_nodes_pending_background_repair: ${[...new Set([...admissionPending.values()].map(failure => failure.code))].join(", ")}`;
-  }
+  const nodeFailures: Record<string, GraphNodeFailure> = {};
+  if (admissionDiagnostics.size) tryRecordRunEvent({ runId, automationId: automation.id,
+    kind: "workflow_recovery_diagnostic", payload: { disposition: "continue",
+      nodes: [...admissionDiagnostics].map(([nodeId, failure]) => ({ nodeId, code: failure.code })) } });
   /** 선언 순서 인덱스 — append 리듀서의 결정론적 정렬 키(도착 순서 아님). */
   const declarationIndex = new Map<string, number>(graph.nodes.map((n, i) => [n.id, i] as const));
   /** 도달 가능성 — 같은 변수에 동시 overwrite하는 두 노드를 잡아내는 데 쓴다. */
@@ -2899,9 +2887,13 @@ export async function runGraph(
    */
   const settleInterruptedUnit = (node: WorkflowNode, unit: WorkUnit): WorkUnit => {
     const source = interruptedReplay.get(node.id);
-    if (!source || unit.state !== "started" || unit.ownerEpoch === runId) return unit;
-    const failed = commonRecovery.fail(unit);
+    if (!source || (unit.state !== "started" && unit.state !== "failed")
+      || unit.ownerEpoch === runId || unit.ownerEpoch !== source.runId) return unit;
     const workerEnded = source.hostPid !== null && hostRunChildrenEnded(source.hostPid);
+    // A prior resume may already have marked this exact interrupted attempt failed.
+    // Preserve its identity and budget; only the original host's measured end repairs its observation.
+    if (!workerEnded) return unit;
+    const failed = unit.state === "started" ? commonRecovery.fail(unit) : unit;
     const verdict = commonRecovery.retry(failed, { checkpointMatches: true, completed: false,
       evidenceRef: `automation-run-interrupted:${source.runId}`, effectSafe: true, workerEnded }, commonFacts(node));
     tryRecordRunEvent({ runId, automationId: automation.id, nodeId: node.id, kind: "workflow_interrupted_unit_settled",
@@ -2932,7 +2924,7 @@ export async function runGraph(
   const reviseCompletedRequest = (node: WorkflowNode, scope: GraphWorkRecoveryScope): void => {
     if (dryRun || !revisedRequestNodeIds.has(node.id) || commonUnits.has(node.id)) return;
     assertFiniteCurrent();
-    const revised = commonRecovery.reviseCompletedRequest(scope, unit => Boolean(readCompletedCommonUnit(node, unit)),
+    const revised = commonRecovery.reviseCompletedRequest(scope,
       `graph-request:${runId}:${scope.inputDigest}`);
     if (revised) commonUnits.set(node.id, revised);
   };
@@ -3180,7 +3172,7 @@ export async function runGraph(
         if (ref && ref !== automation.targetId) continue;
         const failure = { code: "TARGET_PENDING", reason: L("이 자동화의 기본 실행 대상을 찾을 수 없어요.", "This automation's default target is unavailable."),
           nextAction: L("다른 단계는 계속 진행돼요. 실행 대상을 다시 골라 주세요.", "Other steps continue. Please choose the target again.") };
-        admissionPending.set(node.id, failure);
+        admissionDiagnostics.set(node.id, failure);
         nodeFailures[node.id] = failure;
       }
       ok = false; error ??= "graph_target_pending_background_repair";
@@ -3383,8 +3375,7 @@ export async function runGraph(
   type NodeStatus = WorkflowNodeRunState;
   const status = new Map<string, NodeStatus>();
   for (const n of ordered) {
-    status.set(n.id, admissionPending.has(n.id) ? "failed" : completed.has(n.id) ? "done" : skipped.has(n.id) ? "skipped" : "pending");
-    if (admissionPending.has(n.id)) checkpointNodeState(n.id, "failed");
+    status.set(n.id, completed.has(n.id) ? "done" : skipped.has(n.id) ? "skipped" : "pending");
   }
   const settled = (id: string): boolean => {
     const s = status.get(id);
@@ -3723,7 +3714,7 @@ export async function runGraph(
       // Without the receipt the next attempt cannot count this rework or see an identical result.
       if (decision.disposition === "rework") decision = { disposition: "stop", reasonCode: "eval_rework_unrecorded" };
     }
-    if (decision.disposition === "stop") automaticRetryStop ??= { nodeId: node.id, reasonCode: decision.reasonCode, fingerprint };
+    if (decision.disposition === "stop") automaticRetryDiagnostic ??= { nodeId: node.id, reasonCode: decision.reasonCode, fingerprint };
     const labelsOf = (ids: string[]): string =>
       ids.map((id) => graph.nodes.find((candidate) => candidate.id === id)?.label || id).join(", ");
     return { decision, nextAction: evalReworkNextAction(decision, labelsOf, plan, Math.max(0, MAX_EVAL_REWORKS - reworksDone)) };
@@ -3838,16 +3829,13 @@ export async function runGraph(
       // predecessor's uncertainty before this payload has been checked.
       const sources = [...new Map([
         ...historicalMcpSources.get(node.id) ?? [],
-        ...listAutomationGraphReconciliations(automation.id, priorEvidenceReadContext)
+        ...readPriorReconciliations()
           .filter(source => !source.simulation && belongsToCurrentOccurrence(source) && source.nodes.some(held => held.nodeId === node.id)),
       ].map(source => [source.runId, source] as const)).values()];
-      if (!sources.every(source => historicalMcpInputDiffers(node, source))) {
-        // Preserve a same-occurrence resume's original uncertainty. A distinct
-        // occurrence that made no call must not manufacture its own effect hold.
-        if (sources.some(source => source.occurrenceId === checkpoint!.occurrenceId)) failNode(node.id, true);
-        failGraphNode(node, historicalHold);
-        return;
-      }
+      tryRecordRunEvent({ runId, automationId: automation.id, nodeId: node.id,
+        kind: "workflow_recovery_diagnostic", payload: { disposition: "continue", code: historicalHold.code,
+          sourceRunIds: sources.map(source => source.runId),
+          inputChanged: sources.every(source => historicalMcpInputDiffers(node, source)) } });
     }
     switch (node.type) {
       case "trigger":
@@ -4452,8 +4440,7 @@ export async function runGraph(
           completeNode(node.id); status.set(node.id, "done"); return;
         }
         let previousCodeRun: Awaited<ReturnType<typeof runCodeStep>> | undefined;
-        let codeRecoveryBlocked = false;
-        let inheritedCodeRefusal: WorkRecoveryRefused | null = null;
+        let codeDispatchFailed = false;
         const admitCodeStart = (previous?:Awaited<ReturnType<typeof runCodeStep>>) => {
           assertFiniteCurrent();
           if (dryRun) return;
@@ -4471,14 +4458,9 @@ export async function runGraph(
               effectSafe: codeFailureAllowsAutomaticRetry(ended, executionEffect),
               workerEnded: Boolean(ended.execution && !ended.execution.stopped) }, commonFacts(node));
             commonUnits.set(node.id, unit);
-            if (verdict.action !== "retry") { codeRecoveryBlocked = true; throw new Error(`work_recovery_${verdict.reason}`); }
+            if (verdict.action === "cancel") { codeDispatchFailed = true; throw new Error("work_recovery_user_stopped"); }
           }
-          try { commonUnits.set(node.id, commonRecovery.begin(unit, commonFacts(node))); }
-          catch (error) {
-            // A unit an earlier run of this occurrence left behind: every redelivery or resume reads the same one.
-            if (error instanceof WorkRecoveryRefused && unit.state !== "ready" && unit.ownerEpoch !== runId) inheritedCodeRefusal = error;
-            throw error;
-          }
+          commonUnits.set(node.id, commonRecovery.begin(unit, commonFacts(node)));
         };
         const runOnce = (script: string) => { assertFiniteCurrent(); return runCodeStep({
           code: script, lang,
@@ -4509,27 +4491,30 @@ export async function runGraph(
           let attempt: Awaited<ReturnType<typeof runCodeStep>>;
           try { attempt = await runOnce(script); }
           catch (error) {
-            if (!codeRecoveryBlocked && !(error instanceof Error && error.message.startsWith("work_recovery_"))) throw error;
-            codeRecoveryBlocked = true;
-            /*
-             * The refusal read only the work unit an earlier run of this occurrence left and its last observation; the next
-             * redelivery or resume reads the same ones and is refused the same way. Production 2026-10-19 (1.3.80): two
-             * command graphs whose code step failed twice were redelivered 12-15 times each, every time refused at begin()
-             * (failed unit, no observation of its last attempt), each adding a strategy reflection. Not typed when a stop
-             * or this run's budget took part in the decision: those can change.
-             */
-            if (inheritedCodeRefusal && !runSignal.aborted && budgetGuard(node) === null) {
-              automaticRetryStop ??= { nodeId: node.id, reasonCode: "work_recovery_refused",
-                fingerprint: inheritedCodeRefusal.decision.reason };
-            }
+            if (!codeDispatchFailed && !(error instanceof Error && error.message.startsWith("work_recovery_"))) throw error;
+            codeDispatchFailed = true;
             return { ok: false, isolation: previousCodeRun?.isolation ?? "process-isolated",
-              reason: L("이 단계의 같은 방법 실행 한도에 도달했거나 앞선 결과를 아직 확인하지 못했습니다.",
-                "This step reached its method limit or its earlier outcome is still unconfirmed.") } as Awaited<ReturnType<typeof runCodeStep>>;
+              reason: error instanceof Error ? error.message : String(error) } as Awaited<ReturnType<typeof runCodeStep>>;
           }
           previousCodeRun = attempt;
           // Record the observed result before the finite post-await barrier can
           // reject further work. Stop revokes dispatch, never observed evidence.
           recordCodeEffect(attempt);
+          const currentUnit = commonUnits.get(node.id);
+          if (!dryRun && !attempt.ok && currentUnit?.state === "started") {
+            const failed = commonRecovery.fail(currentUnit);
+            commonUnits.set(node.id, failed);
+            const saved = readCommonCheckpoint(node);
+            // The final failed attempt needs the same durable terminal observation
+            // as an attempt followed by a dependency rescue or rewrite. Recording it
+            // is independent of whether another start is authorized now.
+            commonRecovery.retry(failed, { checkpointMatches: Boolean(saved
+                && saved.occurrenceId === codeScope.occurrenceId && saved.graphDigest === codeScope.graphDigest
+                && saved.nodeInputDigests[node.id] === checkpoint!.nodeInputDigests[node.id]),
+              completed: false, evidenceRef: `graph-checkpoint:${runId}:${saved?.checkpointDigest ?? "missing"}`,
+              effectSafe: codeFailureAllowsAutomaticRetry(attempt, executionEffect),
+              workerEnded: Boolean(attempt.execution && !attempt.execution.stopped) }, commonFacts(node));
+          }
           try { assertFiniteCurrent(); }
           catch (error) {
             if (executionEffect === "mutation" && !codeExecutionProvesNotStarted(attempt, executionEffect)
@@ -4553,7 +4538,7 @@ export async function runGraph(
          *     그래프를 말없이 바꾸면 멈춘 실행의 재개가 digest 불일치로 거부된다.
          *   ★의존성 결손은 다시 짜서 될 일이 아니다(패키지 선언 문제) — 그대로 둔다.
          */
-        if (!opts.immutableImplementation && !run.ok && !codeRecoveryBlocked && codeFailureAllowsAutomaticRetry(run, executionEffect)
+        if (!opts.immutableImplementation && !run.ok && !codeDispatchFailed && codeFailureAllowsAutomaticRetry(run, executionEffect)
           && run.failureCode !== "CODE_DEPENDENCY_MISSING" && !codeRepairAttempted.has(node.id)) {
           codeRepairAttempted.add(node.id);
           assertFiniteCurrent();
@@ -5007,6 +4992,7 @@ export async function runGraph(
         let nodeStoreBusy = false;
         let providerOutputObserved = false;
         let nativeReadOnly = false;
+        let nativeResponseReceived = false;
         let nativeOutput: unknown;
         let restoredCommonOutput = false;
         const readOnlyToolCallIds = new Map<string, string>();
@@ -5069,6 +5055,7 @@ export async function runGraph(
         let graphWorkerReceipt: GraphWorkerFailureReceipt | null = null;
         let modelInvocationFailed = false;
         let modelInvocationStarted = false;
+        let modelInvocationReturned = false;
         // Owner decision 2026-10-16: a step of a graph that a group room's One saved acts with that room's One Team for
         // this step only. Minted (authority re-checked) at step start, revoked when the step ends (graph-team-grant.ts).
         let graphTeamGrant: GraphTeamGrant | null = null;
@@ -5152,11 +5139,13 @@ export async function runGraph(
               const nativeResult = await runGraphMcpCall({ call: node.config.mcpCall, vars, runId, automationId: automation.id,
                 nodeId: node.id, chatId: opts.actingChatId ?? nodeChat.id, effect, permission: effectivePermission, dryRun,
                 workspaceBinding: binding, signal, sink: eventSink,
+                onResponse: () => { nativeResponseReceived = true; },
                 onAdmission: readOnly => {
                   nativeReadOnly = readOnly;
                   if (!dryRun) {
                     const scope = commonScopes.get(node.id)!;
-                    commonUnits.set(node.id, commonRecovery.begin(commonRecovery.unit(scope), commonFacts(node)));
+                    const unit = commonRecovery.unit(scope);
+                    commonUnits.set(node.id, commonRecovery.begin(unit, commonFacts(node)));
                   }
                 } });
               nativeOutput = nativeResult.output;
@@ -5193,7 +5182,10 @@ export async function runGraph(
               if (!nativeMcpCall) commonUnits.set(node.id, commonRecovery.begin(settleInterruptedUnit(node, unit), commonFacts(node)));
             }
             modelInvocationStarted = !nativeMcpCall;
+            modelInvocationReturned = false;
             const result = await invokeNodeRaw(...args);
+            // The invocation can resolve after reporting a runner failure through its event sink.
+            modelInvocationReturned = !nativeMcpCall && !runnerError;
             assertFiniteCurrent();
             return result;
             } finally {
@@ -5796,6 +5788,22 @@ export async function runGraph(
           // failure: the settlement retries it briefly only when nothing was dispatched, and never replays it after.
           const storeBusyProviderCode = !seenRuntimeFailure?.providerCode
             && (nodeStoreBusy || innermostTypedCode(nodeErr) === STORE_BUSY_CODE) ? STORE_BUSY_CODE : undefined;
+          // A Graph's declared read effect does not constrain a general model's tools.
+          // Only the native method admission, simulation, or a fixed read-only
+          // Toolchain supplies an execution-level guarantee that it cannot mutate.
+          const hostEnforcedReadOnly = Boolean(dryRun || (nativeMcpCall && nativeReadOnly)
+            || (opts.immutableImplementation && effectivePermission === "read"));
+          let workerEffectsSettled: boolean = !modelInvocationStarted || providerNeverDispatched
+            || (modelInvocationReturned && !modelInvocationFailed);
+          if (!workerEffectsSettled && graphWorkerReceipt && graphWorkerAttempt) {
+            try {
+              const currentReceipt = readGraphWorkerFailure(graphWorkerReceipt, graphWorkerAttempt);
+              workerEffectsSettled = currentReceipt?.status === "retryable" && currentReceipt.runtimeQuiesced;
+            } catch { /* Changed custody or late effect evidence is not a replay receipt. */ }
+          }
+          const externalEffectsUncertain = checkpointPersistenceError !== null || unsafeToolRequested
+            || unsafeToolObserved || !(noObservedSideEffect || replaySafeObservedReceipts)
+            || (!hostEnforcedReadOnly && !workerEffectsSettled);
           const settlement = decideTurnSettlement({
             outcome: runSignal.aborted ? "cancelled" : "failed",
             ...(providerNeverDispatched ? { delivery: "not-dispatched" as const } : {}),
@@ -5804,10 +5812,11 @@ export async function runGraph(
               : storeBusyProviderCode ? { providerCode: storeBusyProviderCode } : {}),
             retryAfterMs: retryAfterMs(seenRuntimeFailure?.retryAfterAt),
             unattended: true, attempt: attempts - 1, resumeBudget: 0,
-            effectsObserved: providerOutputObserved || unsafeToolObserved || unsafeToolRequested,
+            effectsObserved: providerOutputObserved || externalEffectsUncertain,
+            effectFree: hostEnforcedReadOnly && !externalEffectsUncertain,
             fallbackAvailable: false,
           });
-          const settlementRetry = settlement.action === "retry" && !ambiguous;
+          const settlementRetry = settlement.action === "retry";
           const maxAttempts = settlementRetry
             ? Math.max(RATE_LIMIT_MAX_RETRIES + 1, nodeMaxAttempts(node))
             : claimedWithoutTools || quotaHandoff
@@ -5828,7 +5837,7 @@ export async function runGraph(
             receipt.name.startsWith("error:") &&
             isTypedReplaySafeInvocationError(receipt.name.slice("error:".length)),
           ) || retriesDeclared(node);
-          const retryAdmitted = commonRetryAllowed && transientSignal && (!modelInvocationFailed || quotaHandoff || settlementRetry) && !ambiguous && !nodeTimedOut && !contractStop &&
+          const retryAdmitted = transientSignal && !nodeTimedOut && !contractStop &&
             !runSignal.aborted && attempts < maxAttempts;
           /*
            * A step that provably never reached a provider (providerNeverDispatched) left no worker behind. Its work unit
@@ -5840,7 +5849,7 @@ export async function runGraph(
           let notDispatchedRecoveryAdmitted = true;
           const workerReceiptRecorded = graphWorkerReceipt?.status === "retryable" && graphWorkerReceipt.runtimeQuiesced;
           const failedUnit = commonUnits.get(node.id);
-          if (retryAdmitted && !dryRun && providerNeverDispatched && !workerReceiptRecorded && failedUnit?.state === "failed") {
+          if (!dryRun && !ambiguous && providerNeverDispatched && !workerReceiptRecorded && failedUnit?.state === "failed") {
             const verdict = commonRecovery.retry(failedUnit, { checkpointMatches: true, completed: false,
               evidenceRef: `graph-attempt:${runId}:${node.id}:${attempts}:not-dispatched`, effectSafe: true, workerEnded: true }, {
               userStopped: runSignal.aborted, scopeCurrent: true, authorized: true, budgetAvailable: budgetGuard(node) === null });
@@ -5848,7 +5857,22 @@ export async function runGraph(
             tryRecordRunEvent({ runId, automationId: automation.id, nodeId: node.id, kind: "workflow_common_recovery",
               payload: { unitId: failedUnit.unitId, attemptId: failedUnit.attemptId, methodStarts: failedUnit.methodStarts,
                 action: verdict.action, reason: verdict.reason, attention: verdict.attention, delivery: "not-dispatched" } });
-          } else if (retryAdmitted && !dryRun && claimedWithoutTools && !workerReceiptRecorded && failedUnit?.state === "failed") {
+          } else if (!dryRun && !ambiguous && nativeMcpCall && nativeReadOnly && nativeResponseReceived
+            && failedUnit?.state === "failed") {
+            // A read-only MCP error response (for example a navigation error)
+            // ended at the server. Keep that fact even when this run does not retry.
+            // Timeouts, transport loss, and rejected recovery admission have no response proof.
+            const saved = readCommonCheckpoint(node);
+            const verdict = commonRecovery.retry(failedUnit, { checkpointMatches: Boolean(saved
+                && saved.occurrenceId === checkpoint!.occurrenceId && saved.graphDigest === graphDigest
+                && saved.nodeInputDigests[node.id] === checkpoint!.nodeInputDigests[node.id]),
+              completed: false, evidenceRef: `graph-checkpoint:${runId}:${saved?.checkpointDigest ?? "missing"}`,
+              effectSafe: true, workerEnded: true }, commonFacts(node));
+            notDispatchedRecoveryAdmitted = verdict.action === "retry";
+            tryRecordRunEvent({ runId, automationId: automation.id, nodeId: node.id, kind: "workflow_common_recovery",
+              payload: { unitId: failedUnit.unitId, attemptId: failedUnit.attemptId, methodStarts: failedUnit.methodStarts,
+                action: verdict.action, reason: verdict.reason, attention: verdict.attention, delivery: "mcp-read-response" } });
+          } else if (!dryRun && !ambiguous && claimedWithoutTools && !workerReceiptRecorded && failedUnit?.state === "failed") {
             /*
              * A mutation step that answered without calling a tool proved the same two facts: its invocation returned its
              * final answer (the worker ended) and no external call was observed (the retry lane admits it only when not
@@ -5864,7 +5888,7 @@ export async function runGraph(
               payload: { unitId: failedUnit.unitId, attemptId: failedUnit.attemptId, methodStarts: failedUnit.methodStarts,
                 action: verdict.action, reason: verdict.reason, attention: verdict.attention, delivery: "claimed-without-tools" } });
           }
-          if (retryAdmitted && notDispatchedRecoveryAdmitted) {
+          if (retryAdmitted && !externalEffectsUncertain && notDispatchedRecoveryAdmitted) {
             checkpoint!.inFlightNodeIds = checkpoint!.inFlightNodeIds.filter((id) => id !== node.id);
             status.set(node.id, "pending");
             emitNodeState(node.id, "pending");
@@ -6542,8 +6566,9 @@ export async function runGraph(
         loginWaitSource: { automationId: automation.id, runId, occurrenceId: checkpoint!.occurrenceId, graphDigest }, ...failures, ...budget, ...brokerage }
     : ok
     ? { ok: true, outputs, vars, ...failures, ...simulation, ...budget, ...brokerage }
-    : { ok: false, outputs, vars, error, ...failures, ...simulation, ...budget, ...brokerage,
-        ...(automaticRetryStop ? { automaticRetry: { allowed: false as const, ...automaticRetryStop } } : {}) };
+    : { ok: false, outputs, vars, error, ...failures, ...simulation, ...budget, ...brokerage };
+  if (automaticRetryDiagnostic) tryRecordRunEvent({ runId, automationId: automation.id,
+    kind: "workflow_recovery_diagnostic", payload: { disposition: "continue", ...automaticRetryDiagnostic } });
   // A late advisory check must not mutate the result already delivered to the
   // scheduler. Its child events carry the eventual checked outcome instead.
   result.outputs = { ...outputs };

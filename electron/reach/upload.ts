@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import type { Capability, CapabilityParameter } from "./types";
+import { isCurrentDialogCapability } from "./map";
+import { DIALOG_POLICY_REVISION, type Capability, type CapabilityParameter } from "./types";
 
 // What leaves this machine, and how. The rule is: only descriptions of what an app can do, never anything about the person or their
 // content. Every record is rebuilt field by field from an allowlist (nothing is passed through), every string is screened, and anything
@@ -158,6 +159,9 @@ export function toUploadRecord(app: UploadApp, capability: Capability, day: stri
     evidence = { verification: "published", observations: 1, firstSeenDay: day, lastSeenDay: day };
   } else {
     if (capability.body?.kind !== "steps") return no("no_steps");
+    if (!isCurrentDialogCapability(capability, { name: app.name, bundleId: app.key.startsWith("bundle:") ? app.key.slice(7).split("@")[0] : app.key, platform: app.platform })) return no("risky_path");
+    // An old record cannot prove that the system-inserted menu shape was screened. Re-explore before sharing it.
+    if (capability.dialogPolicyRevision !== DIALOG_POLICY_REVISION) return no("policy_refresh_required");
     if (capability.verification !== "structural" && capability.verification !== "behavioral") return no("verification");
     const seen = capability.evidence;
     if (!seen || seen.observations < MIN_EXPLORED_DAYS || seen.firstSeenDay >= seen.lastSeenDay) return no("seen_once");

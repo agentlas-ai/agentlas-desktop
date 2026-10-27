@@ -4,9 +4,7 @@ import type { WorkflowGraph, GraphVerificationReceipt } from "../../shared/types
 import { sha256Value } from "../../shared/graph-execution-digest";
 import { findGraphContradictions, repairGraphContradictions } from "../../shared/graph-contradictions";
 import { getDb } from "../store/db";
-import { getAutomation, updateAutomationGraph, automationGraphEditEpoch,
-  hasDurableActiveAutomationExecution, hasGraphLoginWait } from "../store/automations";
-import { getAutomationGraphReconciliation } from "../store/graph-reconciliation";
+import { getAutomation, updateAutomationGraph, automationGraphEditEpoch } from "../store/automations";
 import { automationDefinitionDigest } from "../automation-lifecycle";
 import { desktopStoreTransaction } from "../store/change-bus";
 import { getChat } from "../store/chats";
@@ -63,10 +61,6 @@ export function superviseGraph(raw: unknown): { graph: WorkflowGraph; verificati
   return { graph: next, verification: { schemaVersion: "agentlas.graph-verification.v1", graphDigest: sha256Value(next),
     structural: "verified", runtime: "not_checked", saved: false, repairedNodeIds: repaired.movedNodeIds } };
 }
-function editable(id: string): void {
-  if (hasDurableActiveAutomationExecution(id) || hasGraphLoginWait(id) || getAutomationGraphReconciliation(id)
-    || getDb().prepare("SELECT 1 FROM automation_trigger_events WHERE automation_id=? AND status IN ('pending','claimed') LIMIT 1").get(id)) fail("GRAPH_EXECUTION_UNSETTLED");
-}
 function goalControl(id: string): unknown {
   const a = getAutomation(id), chat = a?.monitor?.originChatId ? getChat(a.monitor.originChatId) : null;
   const goalId = a?.goalId ?? chat?.goalId, run = goalId ? getLongRunByGoalId(goalId) : null;
@@ -74,7 +68,7 @@ function goalControl(id: string): unknown {
     generation: peekGoalExecutionControlGeneration({ goalId: run.goalId, rootChatId: run.rootChatId, longRunId: run.id }) } : null;
 }
 export function captureGraphProposalBase(id: string) {
-  schema(); const a = getAutomation(id); if (!a?.graph) fail("PATCH_NO_GRAPH"); editable(id);
+  schema(); const a = getAutomation(id); if (!a?.graph) fail("PATCH_NO_GRAPH");
   return { automationId: id, definitionRevision: automationDefinitionDigest(a), editEpoch: automationGraphEditEpoch(id),
     runtimeSelection: a.runtimeSelection ? structuredClone(a.runtimeSelection) : undefined,
     processId, stopGeneration: peekAutomationStopGeneration(id), control: controls.get(id) ?? 0, goalControl: goalControl(id), graph: structuredClone(a.graph), goal: a.goal };
@@ -84,7 +78,6 @@ export function assertGraphProposalBase(base: ReturnType<typeof captureGraphProp
   if (!a || base.processId !== processId || peekAutomationStopGeneration(base.automationId) !== base.stopGeneration || automationDefinitionDigest(a) !== base.definitionRevision
     || automationGraphEditEpoch(base.automationId) !== base.editEpoch || (controls.get(base.automationId) ?? 0) !== base.control
     || sha256Value(goalControl(base.automationId)) !== sha256Value(base.goalControl)) fail("GRAPH_PROPOSAL_STALE");
-  editable(base.automationId);
 }
 /** Stop never waits for a proposal/model/storage write. */
 export function invalidateGraphSupervision(id: string): void {

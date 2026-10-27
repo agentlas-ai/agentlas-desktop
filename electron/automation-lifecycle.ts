@@ -4,7 +4,6 @@ import type { ParsedAutomation } from "./automation-emitter";
 import { stopAutomationRun } from "./automation-execution-control";
 import { getDb } from "./store/db";
 import { getAutomation, listAutomations, toggleAutomation } from "./store/automations";
-import { getAutomationGraphReconciliation } from "./store/graph-reconciliation";
 
 /** Volatile scheduling cursors and enabled state do not change the definition
  * the user accepted. Content, scope, runtime, expiry and permission do. */
@@ -58,8 +57,8 @@ export function applyAutomationLifecycle(input: { parsed: ParsedAutomation; chat
     if ((limits.end_at && (!Number.isFinite(Date.parse(limits.end_at)) || Date.parse(limits.end_at)<=Date.now()))
       || (current.monitor?.deadline && Date.parse(current.monitor.deadline)<=Date.now())
       || (limits.max_runs!=null && (!Number.isSafeInteger(limits.max_runs) || limits.run_count>=limits.max_runs))) throw new Error("automation_resume_limit_requires_edit");
-    if (getDb().prepare("SELECT 1 FROM automation_runs WHERE automation_id=? AND status='running' LIMIT 1").get(id)) throw new Error("automation_resume_execution_pending");
-    if (getAutomationGraphReconciliation(id)) throw new Error("automation_resume_effect_review_required");
+    // Resume changes scheduling only. The execution lease and graph kernel
+    // preserve active snapshots and unresolved effect coordinates at dispatch.
     return current.enabled ? current : toggleAutomation(id,true);
   })();
   return {automation,action:parsed.action==="pause"?"paused":"resumed",activeRunStopRequested};

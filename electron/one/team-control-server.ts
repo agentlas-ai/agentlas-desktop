@@ -113,7 +113,7 @@ function readJsonBody(req: http.IncomingMessage): Promise<Record<string, unknown
 
 /** Internal capability dispatch shared by the same-process host and the
  * authenticated original native source callback. Not an IPC/HTTP endpoint. */
-export async function dispatchOneSupervisorTool(binding: Pick<OneTeamCapabilityBinding,'chatId'|'supervisorReplyRunId'>,name:string,input:Record<string,unknown>):Promise<unknown> {
+export async function dispatchOneSupervisorTool(binding: Pick<OneTeamCapabilityBinding,'chatId'|'supervisorReplyRunId'|'permission'>,name:string,input:Record<string,unknown>):Promise<unknown> {
     const {isPersonalSupervisorConversation,oneSupervisor} = require("./supervisor") as typeof import("./supervisor");
     if (!binding.chatId || !isPersonalSupervisorConversation(binding.chatId)) throw new Error("supervisor_personal_conversation_required");
     const service = (await import("./supervisor")).supervisorRunsInDaemon() ? oneSupervisor() : (await import("./supervisor-native-runtime")).oneSupervisorEndpoint();
@@ -146,7 +146,7 @@ export async function dispatchOneSupervisorTool(binding: Pick<OneTeamCapabilityB
       // The app-control catalog (every bridge operation) loads only when One first uses it.
       case "one_app_operations": return (require("../app-control/service") as typeof import("../app-control/service")).appControlOperations(input);
       case "one_app_call": return (require("../app-control/service") as typeof import("../app-control/service"))
-        .appControlCall({ownerTurn:await service.ownerTurn(binding.supervisorReplyRunId)},{operation:input.operation,args:input.args});
+        .appControlCall({ownerTurn:await service.ownerTurn(binding.supervisorReplyRunId),permission:binding.permission ?? "read"},{operation:input.operation,args:input.args});
       case "one_supervisor_control": return service.control({commandId:String(input.command_id ?? ""),taskId:String(input.task_id ?? ""),expectedVersion:String(input.control_version ?? ""),action:input.action as "steer"|"cancel",...(input.message ? {text:String(input.message)} : {})});
       default: throw new Error("supervisor_operation_unknown");
     }

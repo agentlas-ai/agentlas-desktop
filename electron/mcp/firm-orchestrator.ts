@@ -1,3 +1,5 @@
+import { compileGoalObligationCheckpoint as compileLongRunCheckpoint, withGoalObligationContextText } from "../long-run/goal-obligation-context";
+import { activeTeamGoalText, assertTeamGoalCheckpoint, assertTeamGoalContext, bindTeamGoalContext, TeamGoalContextError, type TeamGoalContext } from "./team-goal-context";
 import { composeDeclaredPrompt, registerDeclaredPromptModule, type DeclaredPromptPart } from "../runtime/prompt-order";
 import { toolObservationDigest } from "../automation-progress-guard";
 import type { RuntimeToolKind } from "../../shared/runtime-tool-kind";
@@ -30,7 +32,7 @@ import type {
 } from "../../shared/types";
 import { memoryOwnerAgentId } from "../../shared/memory-ownership";
 import { effectiveInvocationPermission } from "../../shared/invocation-permission";
-import { compileLongRunCheckpoint, type LongRunTaskCheckpoint } from "../../shared/long-run-checkpoint";
+import type { LongRunTaskCheckpoint } from "../../shared/long-run-checkpoint";
 import { runnerFailureFromError, type Runner, type RunnerFailure, type RunnerRequest, type RunnerResult } from "../runtime/runner";
 import { ProjectResidencyBusyError, WORK_PROJECT_RESIDENCY_BUSY_CODE } from "../runtime/project-residency";
 import type { RuntimeLocale } from "../runtime/status-i18n";
@@ -183,6 +185,8 @@ export interface FirmRunParams {
   priorHistory?: ChatHistoryEntry[];
   /** Main-owned durable state, never accepted from the renderer request. */
   goalCheckpoint?: LongRunTaskCheckpoint;
+  /** Parent room observation, shared unchanged with nested teams. */
+  goalContext?: TeamGoalContext;
   active: RuntimeStatus;
   runtimes: RuntimeStatus[];
   picked: { runner: Runner; label: string };
@@ -833,7 +837,7 @@ async function runNodeTurnSafe(
     } catch (ticketError) {
       console.error("[memory] firm terminal turn receipt failed:", ticketError);
     }
-    if (p.signal?.aborted) throw err;
+    if (p.signal?.aborted || err instanceof TeamGoalContextError) throw err;
     const failure = err instanceof ObservedRunnerFailureError ? err.failure : runnerFailureFromError(err, p.active.kind);
     const runtimeFailure = runtimeFailureBlocksReplay(failure) ? failure : undefined;
     // 실패/타임아웃 노드도 per-node 완료 신호 → UI에서 ▶ 가 멈추고 정리된다(스턱 방지).
@@ -963,18 +967,20 @@ interface NodeTurn {
  * model continues a durable Goal from host state instead of replaying it.
  * userPrompt reaches both fresh and resumed native sessions. */
 export function firmRunnerConversation(
-  p: Pick<FirmRunParams, "req" | "chat" | "goalCheckpoint">,
+  p: Pick<FirmRunParams, "req" | "chat" | "goalCheckpoint" | "goalContext">,
   turn: Pick<NodeTurn, "history" | "userPrompt" | "userPromptParts">,
   runtime: Pick<RuntimeStatus, "kind">,
 ): Pick<RunnerRequest, "history" | "userPrompt"> {
   const checkpoint = p.req.agentAppMode ? undefined : p.goalCheckpoint;
+  if (!p.req.agentAppMode) assertTeamGoalCheckpoint(p.goalContext, checkpoint);
   if (checkpoint && checkpoint.goalId !== p.chat.goalId) {
     throw new Error("firm_goal_checkpoint_mismatch");
   }
   if (turn.userPromptParts && composeDeclaredPrompt(turn.userPromptParts) !== turn.userPrompt) {
     throw new Error("firm_user_prompt_parts_mismatch");
   }
-  const checkpointText = checkpoint ? compileLongRunCheckpoint(checkpoint, runtime.kind) : "";
+  const checkpointText = checkpoint ? compileLongRunCheckpoint(checkpoint, runtime.kind)
+    : p.req.agentAppMode ? "" : withGoalObligationContextText(activeTeamGoalText(p.goalContext), p.goalContext?.goalId, p.goalContext?.goalRevision);
   return {
     history: p.req.agentAppMode || p.chat.goalId ? [] : turn.history,
     userPrompt: turn.userPromptParts
@@ -1260,10 +1266,15 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
       // including retries on another runtime. A child cannot lower Plan mode.
       const boundedRunner: Runner = async (request, events) => {
         assertAppMemory();
+        if (!p.req.agentAppMode) assertTeamGoalContext(p.goalContext, request.signal ?? turn.signal ?? p.signal);
         runnerCalled = true;
         const planBounded = p.req.planMode === true ? { ...request, permission: "read" as const, planMode: true as const } : request;
         const releaseOwnerAsk = ownerAskWithheld ? withholdTurnAskForRun(p.req.runId) : null;
         try {
+          const runCurrent: Runner = (next, nextEvents) => {
+            if (!p.req.agentAppMode) assertTeamGoalContext(p.goalContext, next.signal ?? turn.signal ?? p.signal);
+            return runObservedRunner(runtimePicked.runner, next, nextEvents);
+          };
           // Same bounded settlement as a room teammate (team-step-settlement.ts): a turn its session acknowledged that ended
           // without a terminal receipt, or a typed output-limit cut, continues once in that session; a transient refusal
           // before dispatch runs once more; anything else surfaces and runNodeTurnSafe closes this node as failed.
@@ -1273,10 +1284,10 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
               {runId:p.req.runId,chatId:p.chat.id,actorId:memoryOwnerId}),
             // A delegated node's own output carries the loop safety net (degenerate-output.ts); planning/synthesis do not.
             dispatch: (next) => phase === "delegate"
-              ? runGuardedTeamStep({ request: next, events, dispatch: (guarded, guardedEvents) => runObservedRunner(runtimePicked.runner, guarded, guardedEvents),
+              ? runGuardedTeamStep({ request: next, events, dispatch: (guarded, guardedEvents) => runCurrent(guarded, guardedEvents),
                 record: (verdict) => tryRecordRunEvent({ runId: p.req.runId ?? `firm:${p.chat.id}`, chatId: p.chat.id, nodeId: node.id,
                   kind: WORKER_OUTPUT_DEGENERATE_CODE, payload: degenerateOutputReceipt(verdict) }) })
-              : runObservedRunner(runtimePicked.runner, next, events),
+              : runCurrent(next, events),
             eligible: !p.req.agentAppMode,
             aborted: () => (turn.signal ?? p.signal)?.aborted === true,
             record: (phase, note) => tryRecordRunEvent({ runId: p.req.runId ?? `firm:${p.chat.id}`, chatId: p.chat.id,
@@ -1398,11 +1409,12 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
         },
       );
       assertAppMemory();
+      if (!p.req.agentAppMode) assertTeamGoalContext(p.goalContext, turn.signal ?? p.signal);
       recordUsage(measuredResult.observedUsage, measuredResult.failure ? "failed" : "completed", measuredResult);
       return measuredResult;
     } catch (error) {
       recordUsage(measuredResult?.observedUsage ?? observedRunnerUsage(error), (turn.signal ?? p.signal)?.aborted ? "cancelled" : "failed", measuredResult ?? error);
-      if (error instanceof WorkerCapabilityError || (turn.signal ?? p.signal)?.aborted) throw error;
+      if (error instanceof TeamGoalContextError || error instanceof WorkerCapabilityError || (turn.signal ?? p.signal)?.aborted) throw error;
       return { text: "", failure: runnerFailureFromError(error, runtime.kind) };
     }
   };
@@ -1783,6 +1795,7 @@ async function runDivision(
 
 /** firm 채팅 진입점 — runMcpInvocation에서 firmId+divisions가 있으면 호출. */
 export async function runFirmInvocation(p: FirmRunParams): Promise<FirmRunResult> {
+  p = bindTeamGoalContext(p);
   if (!p.req.runId) {
     p = { ...p, req: { ...p.req, runId: `firm-direct-${randomUUID()}` } };
   }

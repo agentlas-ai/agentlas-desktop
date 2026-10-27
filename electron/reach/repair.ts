@@ -1,8 +1,8 @@
 import type { Actuator } from "./actuator";
 import { probeDialog, synthesizeDialogCapability } from "./dialog-probe";
-import { isClosingPath, isRiskyMenuPath, labelOpensDialog } from "./explore-policy";
+import { isClosingPath, isRiskyMenuPath, labelOpensDialog, startsWithPath } from "./explore-policy";
 import { withForeground } from "./foreground";
-import { enumerateMenus, menuLeaves, type MenuNode, type MenuTarget } from "./menu-probe";
+import { enumerateMenus, readSystemMenuProof, menuLeaves, type MenuNode, type MenuTarget } from "./menu-probe";
 import type { Capability, CapabilityParameter } from "./types";
 
 // Self-repair. An explored capability breaks when the app's interface moves under it: a menu item is renamed or relocated by an update, a
@@ -111,9 +111,12 @@ export async function repairDialogCapability(ports: RepairPorts, capability: Cap
   const holder: { accepted: { found: MovedCandidate; fresh: Capability } | null; gone: boolean; failure: { reason: "probe_failed" | "not_a_dialog"; code?: string } } = { accepted: null, gone: false, failure: { reason: "probe_failed" } };
   // The menus are read with the app in front: a background app's menus are stale (items switched off, state-dependent ones missing).
   const front = await withForeground(ports.actuator, ports.target, async () => {
+    const safety = await readSystemMenuProof(ports.actuator, ports.target, ports.signal);
+    if (!safety.ok) { holder.failure = { reason: "probe_failed", code: safety.code }; return; }
     const scan = await enumerateMenus(ports.actuator, ports.target, { signal: ports.signal, ...(ports.sleep ? { sleep: ports.sleep } : {}) });
     if (scan.stuck) { holder.failure = { reason: "probe_failed", code: "menu_stuck" }; return; } // a menu that will not close: nothing else is pressed
-    const candidates = candidatePaths(oldPath, menuLeaves(scan.nodes));
+    const system = safety.prefixes;
+    const candidates = candidatePaths(oldPath, menuLeaves(scan.nodes).filter((leaf) => !system.some((prefix) => startsWithPath(leaf.path, prefix))));
     if (candidates.length === 0) { holder.gone = true; return; }
     for (const found of candidates) {
       const probe = await probeDialog({ actuator: ports.actuator, target: ports.target, signal: ports.signal, ...(ports.sleep ? { sleep: ports.sleep } : {}) }, found.path);
@@ -140,6 +143,7 @@ export async function repairDialogCapability(ports: RepairPorts, capability: Cap
     status: "verified",
     // what was proven by a real call no longer applies to a shape that changed; the re-probe proves the entry point again
     verification: "structural",
+    dialogPolicyRevision: fresh.dialogPolicyRevision,
     boundFingerprint: ports.fingerprint,
     revision: (capability.revision ?? 0) + 1,
     evidence: capability.evidence

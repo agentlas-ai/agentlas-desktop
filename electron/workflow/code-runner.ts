@@ -12,8 +12,8 @@
  *     ★macOS에서 샌드박스 구성이 실패하면 **폴백하지 않고 실패**한다 — 조용한 강등이 최악이다.
  *   - Linux: `os-sandboxed` — bubblewrap(linux-sandbox.ts)이 같은 경계를 건다(쓰기 제한·비밀 폴더 가림·
  *     denied면 네트워크 차단). bwrap이 없거나 사용자 네임스페이스가 막힌 호스트는 `process-isolated`.
- *   - Windows: `process-isolated` — 별도 프로세스 + 타임아웃뿐. 관리자 권한 없이 네트워크를 막을
- *     실용 수단이 업계 전체에 없다(Codex도 비관리자 모드에선 포기, Claude Code는 네이티브 윈도우 미지원).
+ *   - Windows: `process-isolated` — 이 실행기는 별도 프로세스와 타임아웃을 제공한다.
+ *     제한 토큰·ACL·WFP 기반 네이티브 경계는 여기에 설치·연동하지 않았으며 격리 성공으로 보고하지 않는다.
  *   - 바깥을 바꾸는 코드(effect: mutation)는 어느 OS든 **실행 전 승인 게이트**를 지난다.
  *   - ★비밀 폴더는 read 코드도 **읽기 차단**(macOS) — 네트워크를 막아도 stdout이 유출 통로다:
  *     읽은 비밀이 결과 JSON에 실리면 LLM을 거쳐 밖으로 나간다.
@@ -45,6 +45,8 @@ import {
 import { userDataPath } from "../runtime-paths";
 import { currentUiLocale } from "../ui-locale";
 import { buildBwrapArgs, linuxSandbox } from "./linux-sandbox";
+import { sandboxChildEnvironment } from "../../shared/sandbox-child-environment";
+import { localSandboxProtectedRelativePaths, localSandboxSecretRelativePaths } from "../../shared/local-sandbox-policy";
 
 const L = (ko: string, en: string): string => (currentUiLocale() === "ko" ? ko : en);
 
@@ -162,19 +164,24 @@ function withRealPaths(paths: string[]): string[] {
 
 export function buildSeatbeltProfile(opts: { writable: string[]; home?: string; network?: "allowed" | "denied"; confineWrites?: boolean }): string {
   const home = opts.home ?? os.homedir();
-  const denyRead = withRealPaths([
-    path.join(home, ".ssh"), path.join(home, ".aws"),
-    path.join(home, ".config", "gh"), path.join(home, ".gnupg"),
-    path.join(home, "Library", "Keychains"),
-  ]);
+  const denyRead = withRealPaths(localSandboxSecretRelativePaths("darwin").map(rel => path.join(home, rel)));
+  const protectedPaths = withRealPaths(opts.writable.flatMap(root =>
+    localSandboxProtectedRelativePaths().map(rel => path.join(root, rel))));
   return [
     "(version 1)",
     "(allow default)",
+    // A subprocess must not ask an unsandboxed OS service to launch work or
+    // read credentials on its behalf. TLS trust evaluation remains available.
+    "(deny appleevent-send)",
+    "(deny lsopen)",
+    '(deny mach-lookup (global-name "com.apple.securityd.xpc") (global-name "com.apple.SecurityServer"))',
     ...(opts.confineWrites === false ? [] : [
       "(deny file-write*)",
+      '(allow file-write-data (literal "/dev/null"))',
       ...withRealPaths(opts.writable).map((p) => `(allow file-write* (subpath ${sbplQuote(p)}))`),
+      ...protectedPaths.map(p => `(deny file-write* (subpath ${sbplQuote(p)}))`),
     ]),
-    ...denyRead.map((p) => `(deny file-read* (subpath ${sbplQuote(p)}))`),
+    ...denyRead.flatMap((p) => [`(deny file-read* (subpath ${sbplQuote(p)}))`, `(deny file-write* (subpath ${sbplQuote(p)}))`]),
     ...(opts.network === "denied" ? ["(deny network*)"] : []),
   ].join("\n");
 }
@@ -407,6 +414,7 @@ export async function runCodeStep(input: CodeRunInput): Promise<CodeRunResult> {
   const timeoutMs = Math.max(1, Math.min(600, input.timeoutSeconds ?? 60)) * 1000;
   const cwd = input.cwd ?? agentRunCwd();
   let executionAttempts = 0;
+  let executionStopped = false;
   const executionReceipt = (): CodeExecutionReceipt => ({
     schemaVersion: "agentlas.code-execution.v1",
     status: executionAttempts > 0 ? "started" : "not-started",
@@ -414,7 +422,7 @@ export async function runCodeStep(input: CodeRunInput): Promise<CodeRunResult> {
     effect: input.effect ?? "unknown",
     replay: executionAttempts === 0 ? "not-started"
       : input.effect === "pure" || input.effect === "read" ? "declared-read" : "unknown-effect",
-    stopped: input.signal?.aborted === true,
+    stopped: executionStopped || input.signal?.aborted === true,
   });
   if (input.signal?.aborted) return { ok: false, isolation: "unavailable", execution: executionReceipt(),
     reason: L("실행이 중지되었습니다.", "The run was stopped.") };
@@ -438,9 +446,11 @@ export async function runCodeStep(input: CodeRunInput): Promise<CodeRunResult> {
 
   const { file, cleanup } = materializeScript(harness, input.lang);
   try {
+    const scratch = path.dirname(file);
+    const childEnv = sandboxChildEnvironment(process.env, scratch);
     const env = input.lang === "python"
-      ? withPythonCacheBoundary({ ...process.env, ...windowsPythonUtf8Env() })
-      : { ...process.env };
+      ? withPythonCacheBoundary({ ...childEnv, ...windowsPythonUtf8Env() })
+      : childEnv;
     const provisionNotes: string[] = [];
     if (input.lang === "python") {
       // 관리 폴더는 항상 PYTHONPATH에 붙는다 — 이전 실행이 설치해 둔 것도 보인다.
@@ -473,7 +483,7 @@ export async function runCodeStep(input: CodeRunInput): Promise<CodeRunResult> {
     let isolation: CodeIsolationLevel = "process-isolated";
     if (wantSandbox && bwrap) {
       command = bwrap.path;
-      args = buildBwrapArgs({ writable: [path.dirname(file), os.tmpdir(), cwd], network: input.network, confineWrites: input.effect !== "mutation" }, interpreter, [file]);
+      args = buildBwrapArgs({ writable: [scratch, cwd], network: input.network, confineWrites: input.effect !== "mutation" }, interpreter, [file]);
       isolation = "os-sandboxed";
     } else if (wantSandbox) {
       /* (allow default) 후 deny — 인터프리터가 자기 dylib·/dev/urandom을 읽어야 해서
@@ -495,7 +505,7 @@ export async function runCodeStep(input: CodeRunInput): Promise<CodeRunResult> {
          바깥으로 HTTP 요청을 보내는 것은 이 기계에 흔적을 남기지 않는다. 나가는 것에
          대한 통제는 여기가 아니라 계약 층이 한다 — 시뮬레이션은 mutation 단계를
          호출조차 하지 않고, 멱등키 없는 mutation 은 재시도하지 않는다. */
-      const profile = buildSeatbeltProfile({ writable: [path.dirname(file), os.tmpdir(), cwd], network: input.network, confineWrites: input.effect !== "mutation" });
+      const profile = buildSeatbeltProfile({ writable: [scratch, cwd], network: input.network, confineWrites: input.effect !== "mutation" });
       command = "/usr/bin/sandbox-exec";
       args = ["-p", profile, interpreter, file];
       isolation = "os-sandboxed";
@@ -508,7 +518,7 @@ export async function runCodeStep(input: CodeRunInput): Promise<CodeRunResult> {
       }
     }
     let previousAttempt: CodeRunResult | undefined;
-    const runOnce = async (): Promise<{ code: number | null; stdout: string; stderr: string }> => {
+    const runOnce = async (): Promise<{ code: number | null; stdout: string; stderr: string; stopReason?: "timeout" | "output-limit" }> => {
       if (input.signal?.aborted) return { code: -1, stdout: "", stderr: "" };
       input.onBeforeStart?.(previousAttempt);
       if (input.signal?.aborted) return { code: -1, stdout: "", stderr: "" };
@@ -522,14 +532,29 @@ export async function runCodeStep(input: CodeRunInput): Promise<CodeRunResult> {
       child.once("spawn", () => { executionAttempts += 1; });
       let stdout = "";
       let stderr = "";
-      child.stdout.on("data", (d: Buffer) => { stdout += d.toString("utf8"); });
-      child.stderr.on("data", (d: Buffer) => { stderr += d.toString("utf8"); });
+      let outputBytes = 0;
+      let stopReason: "timeout" | "output-limit" | undefined;
+      const stop = (reason: "timeout" | "output-limit") => {
+        if (stopReason) return;
+        stopReason = reason;
+        executionStopped = true;
+        killCodeTree(child);
+      };
+      const collect = (data: Buffer, stream: "stdout" | "stderr") => {
+        if (stopReason) return;
+        outputBytes += data.byteLength;
+        if (outputBytes > 8 * 1024 * 1024) { stop("output-limit"); return; }
+        if (stream === "stdout") stdout += data.toString("utf8");
+        else stderr += data.toString("utf8");
+      };
+      child.stdout.on("data", (d: Buffer) => collect(d, "stdout"));
+      child.stderr.on("data", (d: Buffer) => collect(d, "stderr"));
       // 앞 단계 값을 stdin으로 넘긴다 — argv에 실으면 크기·따옴표에서 깨진다.
       // A child that exits before reading its input fails the write asynchronously with EPIPE, which the try/catch cannot
       // see; unhandled, it was an uncaught exception in the host. The exit code below reports the failed step.
       child.stdin.on("error", () => { /* closed pipe: reported by the exit code */ });
       try { child.stdin.write(JSON.stringify({ vars: input.vars })); child.stdin.end(); } catch { /* 프로세스가 이미 죽었을 수 있다 */ }
-      const timer = setTimeout(() => { killCodeTree(child); }, timeoutMs);
+      const timer = setTimeout(() => stop("timeout"), timeoutMs);
       const onAbort = () => killCodeTree(child);
       input.signal?.addEventListener("abort", onAbort, { once: true });
       const code: number | null = await new Promise((resolve) => {
@@ -544,7 +569,7 @@ export async function runCodeStep(input: CodeRunInput): Promise<CodeRunResult> {
       clearTimeout(timer);
       input.signal?.removeEventListener("abort", onAbort);
       previousAttempt = { ok: code === 0, isolation, execution: executionReceipt() };
-      return { code, stdout, stderr };
+      return { code, stdout, stderr, ...(stopReason ? {stopReason} : {}) };
     };
 
     // File evidence can span thousands of files. Yield during I/O so an active
@@ -556,6 +581,9 @@ export async function runCodeStep(input: CodeRunInput): Promise<CodeRunResult> {
       return { ok: false, isolation, execution: executionReceipt(), effectReceipt: await observedFileEffect(),
         reason: L("실행이 중지되었습니다.", "The run was stopped.") };
     }
+    if (run.stopReason) return {ok: false, isolation, execution: executionReceipt(), effectReceipt: await observedFileEffect(),
+      reason: run.stopReason === "timeout" ? L("코드 실행 시간이 초과되었습니다.", "The code execution timed out.")
+        : L("코드 출력이 8MB를 초과해 실행을 중지했습니다.", "The code run was stopped because its output exceeded 8MB.")};
     // ── 미선언 import 구조(救助) — 없는 모듈이면 설치를 시도하고 딱 한 번 다시 돈다 ──
     //   선언이 정답이지만, 이미 저장된 그래프(선언 이전에 지어진 코드)를 원문 traceback으로
     //   죽게 두는 것은 도움이 아니다. 모듈 이름=pip 이름일 때는 이 구조가 그대로 살린다.
@@ -582,6 +610,9 @@ export async function runCodeStep(input: CodeRunInput): Promise<CodeRunResult> {
         }
       }
     }
+    if (run.stopReason) return {ok: false, isolation, execution: executionReceipt(), effectReceipt: await observedFileEffect(),
+      reason: run.stopReason === "timeout" ? L("코드 실행 시간이 초과되었습니다.", "The code execution timed out.")
+        : L("코드 출력이 8MB를 초과해 실행을 중지했습니다.", "The code run was stopped because its output exceeded 8MB.")};
     if (run.code !== 0) {
       const stillMissing = input.lang === "python" ? MISSING_MODULE_RE.exec(run.stderr)?.[1] : null;
       const reason = run.stderr.trim() || L(`코드 스텝이 오류로 끝났습니다 (종료 코드 ${run.code}).`, `The code step ended with an error (exit code ${run.code}).`);

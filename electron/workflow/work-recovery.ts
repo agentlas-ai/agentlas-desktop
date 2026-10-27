@@ -31,7 +31,11 @@ export class GraphWorkRecovery {
     const unitId = workUnitId({ runId, taskId: scope.nodeId, stepId: digest(scope.loops), revision: scope.graphDigest });
     const saved = this.journal.read(runId, unitId);
     if (saved) {
-      if (saved.inputDigest !== scope.inputDigest) throw new Error("work_recovery_input_changed");
+      if (saved.inputDigest !== scope.inputDigest) {
+        const revised = this.journal.reviseInput(saved, scope.inputDigest, `graph-request:${scope.ownerEpoch}:${scope.inputDigest}`);
+        if (!revised) throw new Error("work_recovery_record_changed");
+        return revised;
+      }
       return saved;
     }
     return { runId, unitId, taskId: scope.nodeId, parentUnitId: scope.automationId, revision: scope.graphDigest,
@@ -49,32 +53,35 @@ export class GraphWorkRecovery {
     if (!regenerated) throw new Error("work_recovery_read_regeneration_not_admitted");
     return regenerated;
   }
-  /** Only the authoritative Graph request invalidation path calls this. The
-   * original checkpoint must prove completion; uncertain/failed work stays held. */
-  reviseCompletedRequest(scope: GraphWorkRecoveryScope, completionMatches: (unit: WorkUnit) => boolean,
-    evidenceRef: string): WorkUnit | null {
+  /** Keep the original record and append the current request revision. */
+  reviseCompletedRequest(scope: GraphWorkRecoveryScope, evidenceRef: string): WorkUnit | null {
     const runId = `graph-work:${digest([scope.automationId, scope.occurrenceId])}`;
     const unitId = workUnitId({ runId, taskId: scope.nodeId, stepId: digest(scope.loops), revision: scope.graphDigest });
     const previous = this.journal.read(runId, unitId);
     if (!previous || previous.inputDigest === scope.inputDigest) return null;
-    if (previous.state !== "succeeded" || !completionMatches(previous)) throw new Error("work_recovery_request_revision_unconfirmed");
-    const revised = this.journal.reopenCompletedRequest(previous, scope.inputDigest, evidenceRef);
+    const revised = this.journal.reviseInput(previous, scope.inputDigest, evidenceRef);
     if (!revised) throw new Error("work_recovery_request_revision_not_admitted");
     return revised;
   }
   begin(unit: WorkUnit, facts: Pick<WorkRecoveryFacts, "userStopped" | "authorized" | "budgetAvailable" | "scopeCurrent">): WorkUnit {
-    if (unit.state !== "ready" && unit.state !== "failed") throw new Error("work_recovery_outcome_unconfirmed");
-    if (unit.state === "failed") {
+    if (facts.userStopped) throw new Error("work_recovery_user_stopped");
+    if (unit.state === "succeeded") {
+      const reopened = this.journal.reopenCompletedForContinuation(unit, `graph-result-regeneration:${unit.unitId}`);
+      if (!reopened) throw new Error("work_recovery_record_changed");
+      unit = reopened;
+    }
+    let diagnostic: WorkRecoveryDecision | undefined;
+    if (unit.state !== "ready") {
       const observation = this.journal.latestObservation(unit);
-      const result = decideWorkRecovery(unit, { ...facts, policyVersion: WORK_RECOVERY_POLICY_VERSION,
+      diagnostic = decideWorkRecovery(unit, { ...facts, policyVersion: WORK_RECOVERY_POLICY_VERSION,
         worker: observation?.remoteExecutionEnded ? "terminated" : "unknown", alternateAvailable: false,
         requiresUser: false, methodRefused: false, questionCount: 0, lastAskedAt: null, now: Date.now() }, this.expected(unit), observation);
-      if (result.action !== "retry") throw new WorkRecoveryRefused(result);
-    } else if (facts.userStopped || !facts.authorized || !facts.budgetAvailable || !facts.scopeCurrent) {
-      throw new Error("work_recovery_dispatch_not_admitted");
     }
-    const started = this.journal.transition(unit, "started", { reason: unit.state === "ready" ? "graph_dispatch" : "graph_retry" });
-    if (!started) throw new Error("work_recovery_claim_or_method_limit");
+    // Recovery facts describe the earlier attempt. They never veto the current
+    // request or fabricate its outcome; every new attempt remains in the journal.
+    const started = this.journal.transition(unit, "started", { reason: unit.state === "ready" ? "graph_dispatch" : "graph_continue",
+      ...(diagnostic ? { diagnosticAction: diagnostic.action, diagnosticReason: diagnostic.reason } : {}) });
+    if (!started) throw new Error("work_recovery_record_changed");
     return started;
   }
   /** Import the already durable Graph intent only after its exact Worker receipt proves it ended without effects. */
@@ -98,7 +105,7 @@ export class GraphWorkRecovery {
     if (!failed) throw new Error("work_recovery_failure_owner_changed");
     return failed;
   }
-  /** The caller supplies an actual checkpoint read plus the original quiesced, effect-safe receipt. */
+  /** Preserve the caller's measured checkpoint, effect and worker facts; recovery diagnostics do not veto continuation. */
   retry(unit: WorkUnit, read: {
     checkpointMatches: boolean; completed: boolean; resultRef?: string; evidenceRef: string;
     effectSafe: boolean; workerEnded: boolean;
@@ -108,9 +115,11 @@ export class GraphWorkRecovery {
       resultRef: read.resultRef, evidenceRef: read.evidenceRef, querySucceeded: read.checkpointMatches,
       complete: read.checkpointMatches, fresh: read.checkpointMatches, propagationSettled: read.effectSafe,
       remoteExecutionEnded: read.workerEnded };
-    if (!this.journal.observe(unit, expected, observed)) return { action: "wait", reason: "outcome_not_durable", attention: "none" };
-    return decideWorkRecovery(unit, { ...facts, policyVersion: WORK_RECOVERY_POLICY_VERSION,
+    if (facts.userStopped) return { action: "cancel", reason: "user_stopped", attention: "none" };
+    if (!this.journal.observe(unit, expected, observed)) return { action: "retry", reason: "outcome_not_durable", attention: "none" };
+    const diagnostic = decideWorkRecovery(unit, { ...facts, policyVersion: WORK_RECOVERY_POLICY_VERSION,
       worker: read.workerEnded ? "terminated" : "unknown", alternateAvailable: false, requiresUser: false,
       methodRefused: false, questionCount: 0, lastAskedAt: null, now: Date.now() }, expected, observed);
+    return diagnostic.action === "complete" ? diagnostic : { ...diagnostic, action: "retry", attention: "none" };
   }
 }

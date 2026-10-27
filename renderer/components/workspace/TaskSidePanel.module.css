@@ -1093,7 +1093,14 @@ button.artifactVisual { cursor: pointer; }
 
 .artifactTabClose:hover { color: var(--ink); }
 
-.artifactAddWrap { position: relative; display: inline-flex; flex: 0 0 auto; }
+.artifactAddWrap {
+  position: sticky;
+  right: 0;
+  z-index: 1;
+  background: var(--paper);
+  display: inline-flex;
+  flex: 0 0 auto;
+}
 
 /* + 는 탭 바로 뒤에 붙는다 — 오른쪽 끝에 두면 어느 줄에 속하는지 모른다. */
 .artifactAddWrap > button {

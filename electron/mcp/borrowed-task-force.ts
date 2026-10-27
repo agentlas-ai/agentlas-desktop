@@ -1,3 +1,7 @@
+import { getChatGoalRevision, confirmStoredGoalReviewAssignments } from "../store/chat-goals";
+import { currentGoalExecutionObligations, goalObligationPlannerData, goalObligationDigest, recordGoalObligationExecution } from "../long-run/goal-obligation-context";
+import { goalParticipantTargetRef } from "../../shared/goal-execution-obligations";
+import { activeTeamGoalText, assertTeamGoalContext, bindTeamGoalContext, TeamGoalContextError, type TeamGoalContext } from "./team-goal-context";
 import { composeDeclaredPrompt, registerDeclaredPromptModule, type DeclaredPromptPart } from "../runtime/prompt-order";
 import { getMeta } from "../store/meta";
 import { borrowedSessionMode, borrowedSessionOutgrewWindow, borrowedWorkerSessionIsShared, borrowedWorkerSessionSeed, planBorrowedWorkerTurn, releaseIdleSharedWorkerSession, placeWorkerTurnContext, runClaimedWorkerTurn, splitWorkerSystemParts } from "./borrowed-worker-session";
@@ -42,16 +46,15 @@ import type {
 import type { RuntimeLocale } from "../runtime/status-i18n";
 import type { RuntimeRole } from "../../shared/runtime-roles";
 import type { RuntimeToolKind } from "../../shared/runtime-tool-kind";
-import { compileLongRunCheckpoint, type LongRunTaskCheckpoint } from "../../shared/long-run-checkpoint";
+import type { LongRunTaskCheckpoint } from "../../shared/long-run-checkpoint";
+import { compileGoalObligationCheckpoint as compileLongRunCheckpoint } from "../long-run/goal-obligation-context";
 import { hepCall } from "../hephaestus/commands";
 import {
   appendChatMessage,
   autoTitleFromFirstMessage,
-  getChat,
   getOrCreateFirmSession,
   listChatMessages as readStoredChatMessages,
 } from "../store/chats";
-import { getLongRunByGoalId } from "../store/long-runs";
 import { listCommittedQuestionAnswers } from "../confirm";
 import { getFirm } from "../store/firms";
 import { getResolvedOrg } from "../store/org-spec";
@@ -191,23 +194,15 @@ function mainOneProfileContext(req: McpInvocationRequest): string {
 /**
  * The first task-force turn can create/bind an Automatic Goal immediately
  * before dispatch while the caller's `p.chat` is still its pre-admission
- * snapshot. Read the current Main-owned chat/ledger state here so the planner
- * receives the durable objective and criteria on that first turn too. This is
+ * snapshot. The invocation entry captures current Main-owned chat/ledger state
+ * once for the planner and its nested teams, including that first turn. This is
  * context only: it does not alter the roster, permission ceiling, or packet
  * access decisions.
  */
-function activeGoalContextForPlanner(p: Pick<BorrowedTaskForceParams, "chat">): string {
-  const currentChat = getChat(p.chat.id);
-  const goalId = currentChat?.goalId;
-  if (!goalId) return "";
-  const goal = getLongRunByGoalId(goalId);
-  if (!goal || ["completed", "cancelled", "failed"].includes(goal.status)) return "";
-  return JSON.stringify({
-    schemaVersion: "agentlas.active-goal-context.v1",
-    goalRef: goal.goalId,
-    objective: goal.objective,
-    acceptanceCriteria: goal.acceptanceCriteria,
-  });
+function activeGoalContextForPlanner(p: Pick<BorrowedTaskForceParams, "goalContext">): string {
+  const text = activeTeamGoalText(p.goalContext);
+  if (!text || !p.goalContext?.goalId || p.goalContext.goalRevision == null) return text;
+  return JSON.stringify({ ...JSON.parse(text), ...goalObligationPlannerData(p.goalContext.goalId, p.goalContext.goalRevision) });
 }
 
 const BORROWED_AGENT_TIMEOUT_MS = 30 * 60 * 1000;
@@ -534,6 +529,8 @@ export interface BorrowedTaskForceParams {
   priorHistory?: ChatHistoryEntry[];
   /** Main-owned durable state. Never populated from the renderer request. */
   goalCheckpoint?: LongRunTaskCheckpoint;
+  /** Shared Main-owned Goal observation; carries no execution authority. */
+  goalContext?: TeamGoalContext;
   /** Main-memory-only One snapshot. When present, never reopen package prompt files. */
   orchestratorEffectivePrompt?: string;
   taskForceName?: string;
@@ -1217,6 +1214,7 @@ async function observeTaskForceModelCall<T>(
 ): Promise<T> {
   const assertAppMemory=p.req.agentAppMode?appMemoryRunGuard(p.req.runId,p.chat.id):()=>{};
   assertAppMemory();
+  if (!p.req.agentAppMode) assertTeamGoalContext(p.goalContext, p.signal);
   // UI orchestration ids (`borrow:<slug>`, `*:borrow-orchestrator`) are useful
   // presentation aliases, but they are not durable installed-Agent identity.
   // Bind the receipt only when Main can still resolve the exact installed id.
@@ -1272,6 +1270,7 @@ async function observeTaskForceModelCall<T>(
     const result = requireTaskForceRunnerSuccess(measuredResult, input.runtime) as T;
     const observedModel = taskForceObservedModel(result);
     assertAppMemory();
+    if (!p.req.agentAppMode) assertTeamGoalContext(p.goalContext, p.signal);
     recordUsage(measuredResult.observedUsage, "completed", measuredResult);
     tryRecordRunEvent({
       runId: p.req.runId ?? `task-force:${p.chat.id}`,
@@ -1284,6 +1283,7 @@ async function observeTaskForceModelCall<T>(
     return result;
   } catch (error) {
     recordUsage(measuredResult?.observedUsage ?? observedRunnerUsage(error), p.signal?.aborted ? "cancelled" : "failed", measuredResult ?? error);
+    if (error instanceof TeamGoalContextError) throw error;
     const normalized = taskForceFailureFromError(error, input.runtime);
     const failure = error instanceof TaskForceRuntimeFailureError
       ? error.failure : normalized.source === "marker" ? normalized : null;
@@ -1339,13 +1339,17 @@ function runSettledTaskForceStep(
   /** A teammate's own turn (direct or nested worker): its output carries the loop safety net (degenerate-output.ts). */
   worker = false,
 ): Promise<RunnerResult> {
+  const runCurrent: Runner = (next, nextEvents) => {
+    if (!p.req.agentAppMode) assertTeamGoalContext(p.goalContext, next.signal ?? p.signal);
+    return runObservedRunner(runner, next, nextEvents);
+  };
   return runTeamStepWithSettlement({
     request,
     dispatch: (next) => worker
-      ? runGuardedTeamStep({ request: next, events, dispatch: (guarded, guardedEvents) => runObservedRunner(runner, guarded, guardedEvents),
+      ? runGuardedTeamStep({ request: next, events, dispatch: (guarded, guardedEvents) => runCurrent(guarded, guardedEvents),
         record: (verdict) => tryRecordRunEvent({ runId: p.req.runId ?? `task-force:${p.chat.id}`, chatId: p.chat.id, nodeId,
           kind: WORKER_OUTPUT_DEGENERATE_CODE, payload: degenerateOutputReceipt(verdict) }) })
-      : runObservedRunner(runner, next, events),
+      : runCurrent(next, events),
     eligible: !p.req.agentAppMode,
     aborted: () => request.signal?.aborted === true || p.signal?.aborted === true,
     record: (phase: TeamStepSettlementPhase, note: TeamStepFailureNote) => tryRecordRunEvent({
@@ -1521,6 +1525,7 @@ function taskForcePermissionLabel(permission: RunnerRequest["permission"]): stri
 
 /** Apply after package/capability spreads, immediately before provider dispatch. */
 function taskForceRunnerRequest(p: BorrowedTaskForceParams, request: RunnerRequest, options: { sharedSession?: boolean; runtimeKind?: string } = {}): RunnerRequest {
+  if (!p.req.agentAppMode) assertTeamGoalContext(p.goalContext, request.signal ?? p.signal);
   if(p.req.agentAppMode)assertAppMemoryRun(p.req.runId,p.chat.id);
   const { [TASK_FORCE_SYSTEM_PARTS]: systemParts, ...plainRequest } = request as TaskForcePromptRequest;
   request = plainRequest;
@@ -4548,6 +4553,8 @@ async function parallelCap<I, O>(
 }
 
 interface BorrowedAgentResult {
+  /** Host observation of the exact bounded peer data delivered to this call. */
+  goalReviewedInputDigests?: string[];
   spec: BorrowedAgentSpec;
   packet: BorrowedInputPacket;
   text: string;
@@ -4959,6 +4966,7 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
         },
         chat: { id: teamChat.id, projectId: p.chat.projectId, firmId: firm.id, goalId: p.chat.goalId },
         goalCheckpoint: p.goalCheckpoint,
+        goalContext: p.goalContext,
         org: getResolvedOrg(firm),
         ceoAgent,
         active,
@@ -5038,6 +5046,9 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
           text: redactSensitiveText(withTaskForceOwnerDecisions(firmVisibleText, firmDecisions)),
         ok: firmOk,
         ranWithPermission: workerPermission,
+        completionStatus: firmOutcome.completionStatus,
+        reviewComplete: firmOutcome.reviewComplete,
+        blockingRemaining: firmOutcome.blockingRemaining,
         ...(firmOutcome.accessNeeded ? { accessNeeded: true } : {}),
         ...(firmAppliedChoices.length ? { appliedOwnerChoices: firmAppliedChoices } : {}),
         ...(firmNothingProduced ? { nothingProduced: true as const } : {}),
@@ -5466,6 +5477,7 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
             },
           };
         } catch (error) {
+          if (error instanceof TeamGoalContextError) throw error;
           // A nested worker that did not complete is a failed worker of its team, never the end of the room: the team's
           // manager synthesizes over the workers that finished (same rule as a direct teammate, runBorrowedAgentTurn).
           const typedRuntimeFailure = error instanceof TaskForceRuntimeFailureError ? error
@@ -6012,7 +6024,7 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
       },
     };
   } catch (err) {
-    if (p.signal?.aborted) throw err;
+    if (p.signal?.aborted || err instanceof TeamGoalContextError) throw err;
     /*
      * A step that did not complete is that step's FAILED packet, never the end of the owner turn. Installed 1.3.49 run
      * 5d37e4cc (2026-10-16): four teammates finished, the fifth (codex, after acceptance) hit `max_output_tokens`, this
@@ -7062,6 +7074,26 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
     throw new Error("workforce_runtime_isolation_unverified:codex-collaboration-authority");
   }
   const plan = await runPlanner(p, specs, history);
+  // Only the typed planner review role strengthens an owner-selected seat.
+  // A name such as NoAI is never interpreted as authority or a review verdict.
+  const obligationGoal = p.goalContext?.goalId ? getChatGoalRevision(p.goalContext.goalId) : null;
+  let executionObligations = obligationGoal ? currentGoalExecutionObligations(obligationGoal) : undefined;
+  const specTargetRef = (spec: BorrowedAgentSpec): string | undefined => spec.source === "firm" && spec.firmId
+    ? `local:team:${spec.firmId}` : (spec.source === "installed" || spec.source === "firm-node") && spec.installedAgentId
+      ? `local:agent:${spec.installedAgentId}` : spec.source === "hub" || spec.source === "cloud"
+        ? `${spec.source}:${spec.entityKind ?? "agent"}:${spec.slug}` : undefined;
+  if (executionObligations && obligationGoal && plan.parseSuccess && !plan.fallbackUsed) {
+    assertTeamGoalContext(p.goalContext, p.signal);
+    const selected = new Set(executionObligations.participants.map(participant => goalParticipantTargetRef(participant.target)));
+    const reviewers = plan.packets.filter(taskForcePacketIsReview).flatMap(packet => {
+      const ref = specs.find(spec => spec.slug === packet.agent);
+      const target = ref ? specTargetRef(ref) : undefined;
+      return target && selected.has(target) ? [target] : [];
+    });
+    executionObligations = confirmStoredGoalReviewAssignments({ goalId: obligationGoal.goalId,
+      expectedRevision: obligationGoal.revision, expectedVersion: executionObligations.version,
+      invocationRunId: p.req.runId!, reviewerTargetRefs: reviewers }).executionObligations;
+  }
   // If planner had to leave One's selected model, keep that successful
   // controller runtime for synthesis instead of retrying the failed model.
   const plannedControllerRuntime = plan.controllerRuntime ?? p.active;
@@ -7284,7 +7316,8 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
       recoveryRuntime,
       approvalPartition.gateActive,
       initialDelegationMessageId,
-    );
+    ).then(result => ({ ...result, goalReviewedInputDigests: peerResults.filter(peer => peer.ok).map(peer =>
+      goalObligationDigest(boundedTaskForcePeerContext(stripTaskForceControlEnvelopes(peer.text)))) }));
   };
   const liftTaskForceWorkerAccess = async (
     packet: (typeof plan.packets)[number],
@@ -7876,7 +7909,7 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
             parsed = reparsed;
           }
         } catch (error) {
-          if (p.signal?.aborted) throw error;
+          if (p.signal?.aborted || error instanceof TeamGoalContextError) throw error;
           // Keep the verified prose from the first synthesis. The structural
           // verifier below records the missing Surface and the result remains
           // incomplete instead of losing the usable evidence or inventing a
@@ -8040,6 +8073,32 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
       verifierIssues.push(`blocking_remaining:${stepIds[index]}`);
       unclearedBlockers.push({ result, items: result.blockingRemaining ?? [] });
     }
+  }
+  if (executionObligations && obligationGoal) {
+    assertTeamGoalContext(p.goalContext, p.signal);
+    const observedResults = results.flatMap((result, index) => {
+      const targetRef = specTargetRef(result.spec);
+      if (!targetRef || !result.ok || result.nothingProduced || result.blockingRemaining?.length) return [];
+      // These are canonical receipts of actual runners, including installed
+      // nested teams. Visible report prose cannot manufacture a call witness.
+      const witness = result.spec.source === "firm" && result.spec.firmId
+        ? getDb().prepare(`SELECT e.node_id,e.chat_id FROM run_events e JOIN chats c ON c.id=e.chat_id
+            WHERE e.run_id=? AND c.parent_chat_id=? AND c.firm_id=? AND e.kind IN ('invoke_result','runtime_usage_unmeasured')
+            AND json_extract(e.payload_json,'$.status')='completed' AND json_extract(e.payload_json,'$.phase')='synthesize'
+            ORDER BY e.seq DESC LIMIT 1`).get(p.req.runId, p.chat.id, result.spec.firmId)
+        : getDb().prepare(`SELECT node_id,chat_id FROM run_events WHERE run_id=? AND chat_id=? AND (node_id=? OR substr(node_id,1,?)=?)
+            AND kind='task_force_model_call_completed' AND json_extract(payload_json,'$.status')='completed'
+            ORDER BY seq DESC LIMIT 1`).get(p.req.runId, p.chat.id, agentNodeId(result.spec.slug), agentNodeId(result.spec.slug).length + 1, `${agentNodeId(result.spec.slug)}:`);
+      const call = witness as { node_id: string; chat_id: string } | undefined;
+      if (!call?.node_id || !call.chat_id) return [];
+      return [{ targetRef, stepId: stepIds[index], callNodeId: call.node_id, callChatId: call.chat_id,
+        outputDigest: goalObligationDigest(boundedTaskForcePeerContext(stripTaskForceControlEnvelopes(result.text))),
+        reviewComplete: taskForcePacketIsReview(executionPackets[index]) && result.reviewComplete === true,
+        reviewedInputDigests: result.goalReviewedInputDigests ?? [] }];
+    });
+    if (!recordGoalObligationExecution({ schemaVersion: "agentlas.goal-obligation-execution.v1",
+      goalId: obligationGoal.goalId, goalRevision: obligationGoal.revision, obligationVersion: executionObligations.version,
+      invocationRunId: p.req.runId!, results: observedResults })) verifierIssues.push("goal_execution_obligations_unmet");
   }
   if (!displayText.trim()) verifierIssues.push("empty_synthesis");
   if (requiredSurfaceMissing) verifierIssues.push("required_surface_missing");
@@ -8405,6 +8464,7 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
 }
 
 export async function runBorrowedTaskForceInvocation(p: BorrowedTaskForceParams): Promise<BorrowedTaskForceResult> {
+  p = bindTeamGoalContext(p);
   const ownerBoundParams: BorrowedTaskForceParams = {
     ...p,
     borrowedCareerOwnerScopeKey: p.borrowedCareerOwnerScopeKey ?? activeBorrowedOwnerScopeKey(),

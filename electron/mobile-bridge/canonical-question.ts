@@ -6,6 +6,7 @@ import { readQuestionDecision, commitPendingConfirmationAnswer } from "../confir
 import { invocationService } from "../invocation/service";
 import { getInvocationRunReceipt } from "../store/run-events";
 import { normalizeOneDecision } from "../../shared/one-decision";
+import { ownerAnswerExecutionPermission } from "../../shared/invocation-permission";
 import { composeQuestionDecisionReply } from "../../shared/question-reply";
 import type { QuestionDecisionView } from "../../shared/question-decision";
 import type { PendingConfirmation, QuestionContinuationReceipt } from "../../shared/types";
@@ -107,7 +108,10 @@ export async function answerMobileCanonicalQuestion(params:MobileCanonicalQuesti
     const source=getInvocationRunReceipt(q.sourceRunId);
     if(!source || source.chatId!==q.chatId || !source.executionPermission)return fail("canonical_question_source_invalid");
     capture();
-    commitPendingConfirmationAnswer(q.chatId,reply,q.sourceMessageId,{locale:params.locale,permissions:source.executionPermission});
+    // The phone's tap is the owner's input: a question from a host-written turn (a read-only teammate report) does not
+    // hold the answer to that turn's authority; the owner's own last turn does (shared/invocation-permission.ts).
+    const permissions=ownerAnswerExecutionPermission(source,source.ownerAuthored===false?invocationService.latestOwnerReceipt(q.chatId):null);
+    commitPendingConfirmationAnswer(q.chatId,reply,q.sourceMessageId,{locale:params.locale,permissions});
     receipt=await invocationService.continueCommittedQuestion(q.chatId,q.sourceMessageId,reply);
   }
   input.assertAccount();

@@ -2,8 +2,8 @@ import type { AppControlCatalogEntry } from "./catalog.generated";
 
 // What One may do through the app-control route. Every catalog operation lands in exactly one class:
 //   read / write          any One turn
-//   destructive / consent only a turn the owner wrote. A review or check-in turn reads workers' output, which is data,
-//                         not the owner's word; deleting, installing, publishing, sending or answering waits for the owner.
+//   destructive / consent describe the effect; they do not require a new owner-written turn.
+//                         The host's admitted request carries execution authority across continuations.
 //   denied                never: the owner's own consent boundary (approvals, grants, credentials, payment), views and
 //                         streams that belong to a screen, and One's own run plumbing (it has dedicated tools).
 // A few denied operations are also left out of what the model can find at all (MODEL_CATALOG_OMITTED below).
@@ -277,12 +277,24 @@ export function appControlOmittedFromModelCatalog(entry: Pick<AppControlCatalogE
   return MODEL_CATALOG_OMITTED.some((pattern) => pattern.test(entry.path));
 }
 
+const TERMINAL_APP_OPERATIONS = new Set(["invoke.cancel", "invoke.unsteer", "automations.stopRun", "automations.terminalClose"]);
+/** The existing terminal handler still validates its exact target and current caller. */
+export function isAppControlTerminalOperation(operation: string): boolean {
+  return TERMINAL_APP_OPERATIONS.has(operation);
+}
+
 export function classifyAppControlPolicy(entry: Pick<AppControlCatalogEntry, "path">): AppControlPolicyClassification {
   const explicit = (effect: AppControlEffect): AppControlPolicyClassification => ({ policy: { allowed: true, effect }, basis: "explicit-path" });
   const segmentRule = (effect: AppControlEffect): AppControlPolicyClassification => ({ policy: { allowed: true, effect }, basis: "segment-pattern" });
   // These are the native observation/control routes for existing work, not a second way to start One's own turn.
   if (/^invoke\.(activeChats|goalActiveChats|attach|history|receipt|latestReceipt|admission|workerReport|steeringRecovery|latestOneSurface|replay|preflightSteers|preflightSteerReceipt)$/.test(entry.path)) return explicit("read");
-  if (/^invoke\.(cancel|unsteer|clearHistory)$/.test(entry.path)) return explicit("destructive");
+  // Stopping existing work does not require another owner-written turn. The
+  // handler still checks the exact target and the caller's current authority.
+  if (isAppControlTerminalOperation(entry.path)) return explicit("write");
+  if (entry.path === "invoke.clearHistory") return explicit("destructive");
+  // This only reads the evidence needed to close an old occurrence; it neither
+  // closes it nor changes execution authority.
+  if (entry.path === "automations.terminalCloseCandidate") return explicit("read");
   if (/^science\.composer\.(attach|receipt|steering)$/.test(entry.path)) return explicit("read");
   // Connection state and key presence contain no credential material. They are necessary to operate Settings.
   if (/^(secrets\.hasApiKey|auth\.getSession|runtime\.connectGet|mcpTools\.oauthStatus)$/.test(entry.path)) return explicit("read");
@@ -319,6 +331,6 @@ export function classifyAppControlPolicy(entry: Pick<AppControlCatalogEntry, "pa
   return { policy: { allowed: true, effect: "write" }, basis: "default" };
 }
 
-export function appControlEffectNeedsOwnerTurn(effect: AppControlEffect): boolean {
-  return effect === "destructive" || effect === "consent";
+export function appControlEffectNeedsOwnerTurn(_effect: AppControlEffect): boolean {
+  return false;
 }

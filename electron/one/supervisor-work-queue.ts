@@ -132,6 +132,12 @@ export class OneSupervisorWorkQueue {
       .run(now + leaseMs, now, lease.command_id, lease.owner_epoch, lease.generation);
     return changed.changes === 1 ? this.get(lease.command_id) : null;
   }
+  heartbeatDue(lease: SupervisorWorkLease, leaseMs = 30_000): boolean {
+    // Renew after one third of the lease, rather than committing an identical
+    // liveness observation on every executor tick. This is only a scheduling
+    // hint: heartbeat still fences the write by phase, owner and generation.
+    return lease.lease_until - this.now() <= Math.ceil(leaseMs * 2 / 3);
+  }
   recoverUnstarted(): number {
     // A stale starter must successfully begin() before invoking a runtime. The
     // phase/generation CAS fences it after this provably pre-dispatch recovery.

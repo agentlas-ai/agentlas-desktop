@@ -496,7 +496,7 @@ function toAttention(event: TriggerEventRecord): AutomationTriggerEventAttention
 }
 
 /**
- * Resolve exactly one parked occurrence with an optimistic CAS. A generic
+ * Resolve exactly one admitted occurrence with an optimistic CAS. A generic
  * automation edit/toggle must never call this: `retry` is the user's explicit
  * assertion that the external effect did not happen; `completed` records the
  * opposite assertion and advances without executing again.
@@ -514,60 +514,21 @@ export function reconcileParkedTriggerEvent(input: AutomationTriggerEventReconci
   const nowIso = finiteIso(now);
   const db = getDb();
   const commit = db.transaction(() => {
-    const row = db.prepare(
-      `SELECT e.run_id, r.status AS run_status
-       FROM automation_trigger_events e
-       LEFT JOIN automation_runs r ON r.id = e.run_id
-       WHERE e.id = ? AND e.automation_id = ? AND e.status = 'parked' AND e.updated_at = ?`,
-    ).get(input.eventId, input.automationId, input.expectedUpdatedAt) as {
-      run_id: string | null;
-      run_status: string | null;
-    } | undefined;
-    if (!row) throw new Error("trigger_event_reconciliation_conflict");
-    // A retry can bind a generated run id before runGraph rejects an older
-    // ambiguous checkpoint. Resolve by the stable event occurrence, not that
-    // last (possibly phantom) run id, otherwise the raw event-level action can
-    // bypass node reconciliation after enough retries.
-    const occurrenceRun = db.prepare(
-      `SELECT checkpoint_json
-       FROM automation_runs
-       WHERE automation_id = ? AND occurrence_id = ? AND status = 'error'
-       ORDER BY started_at DESC, rowid DESC
-       LIMIT 1`,
-    ).get(input.automationId, `trigger-event:${input.eventId}`) as {
-      checkpoint_json: string | null;
-    } | undefined;
-    if (occurrenceRun?.checkpoint_json) {
-      try {
-        const checkpoint = JSON.parse(occurrenceRun.checkpoint_json) as {
-          ambiguousNodeIds?: unknown;
-          inFlightNodeIds?: unknown;
-        };
-        const unresolved = [checkpoint.ambiguousNodeIds, checkpoint.inFlightNodeIds]
-          .some((value) => Array.isArray(value) && value.length > 0);
-        if (unresolved) throw new Error("trigger_event_graph_reconciliation_required");
-      } catch (error) {
-        if (error instanceof Error && error.message === "trigger_event_graph_reconciliation_required") throw error;
-        // A malformed checkpoint cannot justify either external completion or retry.
-        throw new Error("trigger_event_graph_reconciliation_required");
-      }
-    }
-    // A mechanically successful graph has no failed checkpoint for safe replay.
-    // Only the explicit "completed" assertion may consume that occurrence.
-    if (input.resolution === "retry" && row.run_id && row.run_status === "ok") {
-      throw new Error("trigger_event_graph_reconciliation_required");
-    }
+    // Explicit reconciliation targets the current event revision, independently
+    // of delivery state or historical graph checkpoints. Keep run evidence intact.
     const result = input.resolution === "completed"
       ? db.prepare(
           `UPDATE automation_trigger_events
-           SET status = 'delivered', delivered_at = ?, last_error = NULL, updated_at = ?
-           WHERE id = ? AND automation_id = ? AND status = 'parked' AND updated_at = ?`,
+           SET status = 'delivered', claim_owner = NULL, claimed_until = NULL,
+               delivered_at = ?, last_error = NULL, updated_at = ?
+           WHERE id = ? AND automation_id = ? AND updated_at = ?`,
         ).run(nowIso, nowIso, input.eventId, input.automationId, input.expectedUpdatedAt)
       : db.prepare(
           `UPDATE automation_trigger_events
-           SET status = 'pending', attempt_count = 0, next_attempt_at = ?,
+           SET status = 'pending', claim_owner = NULL, claimed_until = NULL,
+               attempt_count = 0, next_attempt_at = ?, delivered_at = NULL,
                run_id = NULL, run_outcome = NULL, last_error = NULL, updated_at = ?
-           WHERE id = ? AND automation_id = ? AND status = 'parked' AND updated_at = ?`,
+           WHERE id = ? AND automation_id = ? AND updated_at = ?`,
         ).run(nowIso, nowIso, input.eventId, input.automationId, input.expectedUpdatedAt);
     if (result.changes !== 1) throw new Error("trigger_event_reconciliation_conflict");
   });

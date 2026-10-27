@@ -10,7 +10,7 @@ import { graphCommandInvocationKind, graphCommandRequestMatches } from "../../sh
 import { getDb } from "../store/db";
 import { desktopStoreTransaction } from "../store/change-bus";
 import { getChat } from "../store/chats";
-import { createAutomation, getAutomation, hasDurableActiveAutomationExecution, hasGraphLoginWait,
+import { createAutomation, getAutomation,
   listAutomations, updateAutomation, updateAutomationGraph } from "../store/automations";
 import { listAutomationGraphReconciliations } from "../store/graph-reconciliation";
 import { enqueueTriggerEvent, getTriggerEvent } from "../store/trigger-events";
@@ -101,26 +101,6 @@ function exactOrRequested(caller: OneTeamCaller, id: unknown, eventId: unknown):
 }
 function fresh(a: Automation, expected: unknown): void {
   if (typeof expected !== "string" || expected !== automationDefinitionDigest(a)) throw new Error("one_graph_definition_changed");
-}
-function editable(a: Automation, affectedNodeIds = resolveAutomationGraph(a).nodes.map(node => node.id)): void {
-  if (hasDurableActiveAutomationExecution(a.id) || hasGraphLoginWait(a.id)
-    || getDb().prepare("SELECT 1 FROM automation_trigger_events WHERE automation_id=? AND status IN ('pending','claimed') LIMIT 1").get(a.id)) throw new Error("one_graph_execution_unsettled");
-  const held = new Set(listAutomationGraphReconciliations(a.id).flatMap(view => view.nodes.map(node => node.nodeId)));
-  const affected = affectedNodeIds.filter(id => held.has(id));
-  if (affected.length) throw new Error(`one_graph_leaf_unsettled:${affected.join(",")}`);
-}
-/** Preserve unresolved coordinates while allowing an unrelated branch to be repaired. */
-function changedGraphNodes(before: WorkflowGraph, after: WorkflowGraph): string[] {
-  const changed = new Set([...before.nodes, ...after.nodes].filter(node =>
-    JSON.stringify(before.nodes.find(candidate => candidate.id === node.id))
-      !== JSON.stringify(after.nodes.find(candidate => candidate.id === node.id))).map(node => node.id));
-  for (const edge of [...before.edges, ...after.edges]) {
-    if (JSON.stringify(before.edges.find(candidate => candidate.id === edge.id))
-      !== JSON.stringify(after.edges.find(candidate => candidate.id === edge.id))) {
-      changed.add(edge.source); changed.add(edge.target);
-    }
-  }
-  return [...changed];
 }
 function receipt(a: Automation, extra: Record<string, unknown> = {}) {
   return { schemaVersion: "agentlas.one-graph-receipt.v1", graph_id: a.id, name: a.name,
@@ -543,7 +523,6 @@ export async function oneGraphDispatch(caller: OneTeamCaller, name: string, inpu
           recordOneGraphAuthority(same, chat.id);
           return receipt(same, { ok: true, action: "unchanged" });
         }
-        editable(current, changedGraphNodes(resolveAutomationGraph(current), graph));
         updateAutomationGraph(current.id, graph, { note: "One structured blueprint" });
         // The monitor lives inside the trigger document: replacing the trigger without it dropped the origin binding,
         // so every revision of a saved graph failed its own scope check (measured 2026-10-04, QA app, real model).
@@ -594,7 +573,6 @@ export async function oneGraphDispatch(caller: OneTeamCaller, name: string, inpu
     const graph = structuredClone(resolveAutomationGraph(current));
     const edits = (input.instructions ?? []) as Array<{ node_id: string; instruction: string }>;
     const calls = (input.mcp_calls ?? []) as Array<{ node_id: string; call: GraphBlueprint["steps"][number]["mcpCall"] }>;
-    editable(current, [...edits, ...calls].map(edit => edit.node_id));
     if (!edits.length && !calls.length) throw new Error("one_graph_patch_empty");
     if (new Set(edits.map(edit => edit.node_id)).size !== edits.length) throw new Error("one_graph_duplicate_node_patch");
     for (const edit of edits) {
@@ -625,7 +603,7 @@ export async function oneGraphDispatch(caller: OneTeamCaller, name: string, inpu
     return receipt(saved, { ok: true, action: "updated", changed_node_ids: [...new Set([...edits, ...calls].map(edit => edit.node_id))] });
   }).immediate();
   if (name === "one_graph_set_enabled") {
-    editable(a, []); await connected(caller, a);
+    await connected(caller, a);
     const result = applyAutomationLifecycle({ parsed: { action: "resume", automationId: a.id, expectedDefinitionDigest: input.expected_revision as string,
       name: a.name, prompt: "", schedule: "", scheduleEmitted: false }, chatId: chat.id, canWrite: true });
     markOneGraphEphemeral(result.automation, chat.id);

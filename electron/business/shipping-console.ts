@@ -1,5 +1,5 @@
 import type { BrowserWindow, Session } from 'electron';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import {
   BUSINESS_DASHBOARD_VIEWS, BUSINESS_DESKTOP_CONSOLE_SCHEMA,
   freezeBusinessConsoleMetadata, isBusinessAccountSnapshot, isBusinessConsoleMetadata,
@@ -13,6 +13,8 @@ import type { OrganizationMailTransport } from '../../shared/agent-mail';
 import { organizationMailBrowserRequest, organizationMailBrowserResponse, organizationMailBrowserScript } from './organization-mail-browser';
 import { companyNativeEnrollmentResult, companyNativeEnrollmentScript, type CompanyNativeBrowserPort } from './company-native-browser';
 import { isCompanyNativeEnrollment } from '../../shared/business/company-native';
+
+import { companyBusinessOrigin, companyBusinessUsesLocalServer } from './company-connection';
 
 const ACCOUNT_SCHEMA = 'agentlas.business.desktop-account.v1';
 const AUTH_PARTITION = 'persist:agentlas-auth';
@@ -147,7 +149,7 @@ export function createBusinessShippingConsole(): BusinessShippingConsole {
   };
   const exactPage = (window: BrowserWindow): boolean => {
     try {
-      if (disposed || window !== browser || window.isDestroyed() || window.webContents.isDestroyed() || !origin) return false;
+      if (disposed || window !== browser || window.isDestroyed() || window.webContents.isDestroyed() || !origin || origin !== companyBusinessOrigin()) return false;
       const url = new URL(window.webContents.getURL());
       return url.origin === origin && url.pathname === '/business';
     } catch { return false; }
@@ -165,18 +167,28 @@ export function createBusinessShippingConsole(): BusinessShippingConsole {
     expiryTimer.unref?.();
     return value;
   };
+  const companyPage = (window: BrowserWindow): boolean => {
+    try { const u = new URL(window.webContents.getURL()); return window === browser && !window.isDestroyed() && u.origin === origin && origin === companyBusinessOrigin()
+      && (u.pathname === '/business' || companyBusinessUsesLocalServer() && u.pathname === '/company/login'); } catch { return false; }
+  };
   const ensureBrowser = async (): Promise<BrowserWindow | null> => {
     if (disposed) return null;
-    if (browser && !browser.isDestroyed()) return exactPage(browser) ? browser : null;
+    const configured = companyBusinessOrigin();
+    if (origin !== null && configured !== origin) {
+      const previous = browser; browser = null; removeCookieListener?.(); removeCookieListener = null;
+      invalidate(); finishLogin?.(emptyAccount()); if (previous && !previous.isDestroyed()) previous.close();
+    }
+    if (browser && !browser.isDestroyed()) return companyPage(browser) ? browser : null;
     if (loading) return loading;
     loading = (async () => {
       try {
-        const configured = (require('../auth') as { webBaseUrl(): string }).webBaseUrl();
         const url = new URL(configured);
         if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash || url.pathname !== '/') return null;
         origin = url.origin;
         const electron = require('electron') as typeof import('electron');
-        browserSession = electron.session.fromPartition(AUTH_PARTITION);
+        const companyServer = companyBusinessUsesLocalServer();
+        // Company passwords/cookies never share the personal Cloud partition.
+        browserSession = electron.session.fromPartition(companyServer ? `persist:agentlas-company-${createHash('sha256').update(origin).digest('hex')}` : AUTH_PARTITION);
         const cookieChanged = (_event: unknown, cookie: Pick<Electron.Cookie, 'name' | 'domain'>): void => {
           if (!['agentlas_business_browser', 'agentlas_business_org', 'agentlas_session'].includes(cookie.name)
             || typeof cookie.domain !== 'string' || cookie.domain.replace(/^\./, '') !== url.hostname) return;
@@ -190,7 +202,7 @@ export function createBusinessShippingConsole(): BusinessShippingConsole {
         browser = window;
         window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
         const navigation = (event: Electron.Event, destination: string): void => {
-          try { const next = new URL(destination); if (next.protocol !== 'https:' || next.username || next.password) event.preventDefault(); }
+          try { const next = new URL(destination); if (next.protocol !== 'https:' || next.username || next.password || companyServer && next.origin !== origin) event.preventDefault(); }
           catch { event.preventDefault(); }
           invalidate();
         };
@@ -207,7 +219,7 @@ export function createBusinessShippingConsole(): BusinessShippingConsole {
           invalidate(); finishLogin?.(emptyAccount());
         });
         await window.loadURL(`${origin}/business`);
-        return exactPage(window) ? window : null;
+        return companyPage(window) ? window : null;
       } catch { return null; }
     })();
     try { return await loading; } finally { loading = null; }
@@ -278,6 +290,12 @@ export function createBusinessShippingConsole(): BusinessShippingConsole {
   };
   const companyNativeIdentity: CompanyNativeBrowserPort = Object.freeze({
     async currentSession() { return (await readAccount()).session; },
+    retainsOriginalSession(expected: BusinessSession) {
+      if (disposed || !isBusinessSession(expected) || !origin || origin !== companyBusinessOrigin()
+        || Date.parse(expected.expiresAt) <= Date.now() || closedSessions.has(sessionKey(expected)) || heldSession(expected)) return false;
+      const original = originalSessions.get(JSON.stringify([expected.sessionId, expected.sessionRevision]));
+      return !!original && sameBusinessSession(original, expected);
+    },
     async approve(raw: Parameters<CompanyNativeBrowserPort['approve']>[0], expected: BusinessSession) {
       if (!isCompanyNativeEnrollment(raw) || !isBusinessSession(expected)) return null;
       const input = structuredClone(raw), original = structuredClone(expected), stamp = generation;
@@ -297,7 +315,7 @@ export function createBusinessShippingConsole(): BusinessShippingConsole {
     const dashboardView = view === 'history' || view === 'learning' ? 'personal' : 'organization';
     if (url.searchParams.get('section') !== view || url.searchParams.get('view') !== dashboardView)
       await window.loadURL(`${origin}/business?view=${dashboardView}&section=${encodeURIComponent(view)}`);
-    if (!exactPage(window)) throw Error('business_browser_unavailable');
+    if (!companyPage(window)) throw Error('business_browser_unavailable');
     if (window.isMinimized()) window.restore();
     window.show(); window.focus();
   };

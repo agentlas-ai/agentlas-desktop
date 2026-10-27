@@ -12,12 +12,19 @@ import { classifyGoalSurfaceStatus, goalSurfaceStatusLabel } from "@/lib/goal-su
 import { GoalStrategyStatus } from "./GoalStrategyStatus";
 import { GoalPlanSummary, goalPlanOf } from "@/components/goal/GoalPlanSummary";
 import { goalNextWakeLabel, goalNextWakeOf } from "@shared/goal-wake";
-import { goalHeldForOwnerGrant } from "@shared/goal-display-state";
+import { goalHeldForOwnerGrant, goalOwnerAttention, type GoalOwnerAttention } from "@shared/goal-display-state";
 import { requestGoalPanelOpen } from "@/components/goal/GoalPanel";
 import styles from "./OneGoalControls.module.css";
 import { AgiDefectChip } from "../agi/AgiBugReport";
 
 type GoalAction = "pause" | "delete" | "resume" | "edit";
+
+/** A mounted Goal view owns Retry routing; the binding is not execution authority. */
+export interface OneGoalRetryBinding {
+  chatId: string;
+  goalId: string;
+  retry: () => Promise<void>;
+}
 
 /** Re-read-and-retry passes for a Resume that lost an exact version race to a host write (attempt settlement, a sweep tick). */
 const GOAL_RESUME_VERSION_ATTEMPTS = 3;
@@ -82,7 +89,8 @@ export function goalControlErrorText(input: { code: string | null; kind: "observ
 }
 type GoalView = { goalId: string | null; context: ChatGoalContext | null; continuity: ChatContinuitySnapshot | null; handoff: GoalRuntimeSelectionReceipt | null;
   observedAt: string | null; pending: GoalAction | null; error: string | null;
-  errorKind: "observation" | "action" | null; refreshing: boolean; review: GoalResumeReview | null };
+  errorKind: "observation" | "action" | null; refreshing: boolean; review: GoalResumeReview | null;
+  retryAttention?: GoalOwnerAttention | null; retryReviewGoalId?: string | null };
 type GoalBridge = Pick<AgentlasIpc["chats"], "get" | "getGoalContext" | "getGoalRuntimeSelection" | "pauseGoal" | "deleteGoal" | "resumeGoal" | "getGoalResumeReview" | "reviseGoal">
   & { getContinuitySnapshot?: AgentlasIpc["chats"]["getContinuitySnapshot"] };
 
@@ -142,7 +150,7 @@ export function createOneGoalControlSession(input: {
       }
       const stateChanged = view.goalId !== goalId || view.context?.version !== context?.version;
       publish({ context, continuity, handoff: handoff?.goalId === goalId ? handoff : null,
-        ...(stateChanged ? { review: null } : {}),
+        ...(stateChanged ? { review: null, retryAttention: null, retryReviewGoalId: null } : {}),
         observedAt: new Date().toISOString(), refreshing: false,
         ...(clearError || stateChanged || view.errorKind === "observation"
           ? { error: null, errorKind: null } : {}) });
@@ -150,13 +158,17 @@ export function createOneGoalControlSession(input: {
       if (fresh()) publish({ refreshing: false, error: failureMessage(cause).slice(0, 240), errorKind: "observation" });
     }
   };
-  const act = async (action: GoalAction, confirmation?: GoalResumeConfirmation) => {
+  const act = async (action: GoalAction, confirmation?: GoalResumeConfirmation, retryGoalId?: string) => {
+    // A review opened by Retry keeps that narrower intent when confirmed. Ordinary Resume is unchanged.
+    const expectedRetryGoalId = retryGoalId ?? (confirmation ? view.retryReviewGoalId ?? undefined : undefined);
+    if (expectedRetryGoalId && (!current() || view.goalId !== expectedRetryGoalId)) throw new Error("goal_control_binding_changed");
+    if (expectedRetryGoalId && (view.pending || (!confirmation && view.review))) return;
     if (!current() || !view.goalId || view.pending === action || view.pending === "delete") return;
     const goalId = view.goalId;
     const generation = ++actionGeneration;
     ++readGeneration;
     const fresh = () => current() && generation === actionGeneration;
-    publish({ pending: action, error: null, errorKind: null });
+    publish({ pending: action, error: null, errorKind: null, retryAttention: null });
     try {
       const chat = await input.api.get(input.chatId);
       if (!fresh()) return;
@@ -180,20 +192,42 @@ export function createOneGoalControlSession(input: {
         // replacement Goal or widens the user's command.
         let resumed = false;
         for (let attempt = 0; attempt < GOAL_RESUME_VERSION_ATTEMPTS && !resumed; attempt += 1) {
+          if (expectedRetryGoalId) {
+            const currentChat = await input.api.get(input.chatId);
+            if (!fresh()) return;
+            if (currentChat?.id !== input.chatId || currentChat.goalId !== expectedRetryGoalId) throw new Error("goal_control_binding_changed");
+          }
           const latest = await input.api.getGoalContext(input.chatId);
           if (!fresh()) return;
           if (!latest || latest.goalId !== goalId || !latest.version) {
             throw new Error("goal_control_binding_changed");
           }
+          if (expectedRetryGoalId) {
+            // Continue is not an answer, approval or budget grant. Recheck each CAS pass;
+            // a hold may have appeared while Main was checking the previous version.
+            publish({ context: latest });
+            const attention = goalOwnerAttention({ status: latest.runStatus,
+              pauseReason: latest.pauseReason, blockedReason: latest.blockedReason });
+            // This explicit press may use Main's existing recorded-owner-grant adoption;
+            // it never supplies an answer or approves an actual pending permission.
+            const ownerGrant = goalHeldForOwnerGrant({ status: latest.runStatus, blockedReason: latest.blockedReason });
+            if (attention && attention !== "review" && !ownerGrant) { publish({ retryAttention: attention, review: null, retryReviewGoalId: null }); return; }
+            if (confirmation && (confirmation.version !== latest.version || confirmation.runId !== latest.runId)) {
+              throw new Error("goal_control_binding_changed");
+            }
+            if (!latest.runStatus || !["paused", "blocked", "queued", "running", "waiting_tool", "verifying"].includes(latest.runStatus)) {
+              throw new Error("goal_control_binding_changed");
+            }
+          }
           try {
             if (!confirmation) {
               const review = await input.api.getGoalResumeReview(input.chatId, latest.version, goalId);
               if (!fresh()) return;
-              if (review) { publish({ review }); return; }
+              if (review) { publish({ review, retryReviewGoalId: expectedRetryGoalId ?? null }); return; }
             }
             await input.api.resumeGoal(input.chatId, latest.version, goalId, confirmation);
             resumed = true;
-            if (fresh()) publish({ review: null });
+            if (fresh()) publish({ review: null, retryReviewGoalId: null });
           } catch (cause) {
             if (attempt < GOAL_RESUME_VERSION_ATTEMPTS - 1 && /(?:^|:\s*)long_run_resume_version_conflict$/.test(failureMessage(cause))) continue;
             throw cause;
@@ -215,26 +249,47 @@ export function createOneGoalControlSession(input: {
     }
   };
   const revise = async (objective: string) => {
-    if (!current() || !view.goalId || view.pending || !view.context?.version || !view.context.goalRevision) return;
+    if (!current() || !view.goalId || view.pending || !view.context?.version || !view.context.goalRevision) return false;
     const generation = ++actionGeneration;
     ++readGeneration;
     const fresh = () => current() && generation === actionGeneration;
     publish({ pending: "edit", error: null, errorKind: null });
     try {
-      const context = await input.api.reviseGoal(input.chatId, {
-        expectedGoalId: view.goalId,
-        expectedVersion: view.context.version,
-        expectedGoalRevision: view.context.goalRevision,
-        objective,
-      });
-      if (fresh()) publish({ context });
+      const goalId = view.goalId;
+      // Keep the owner's edit when a settling turn advances the ledger between rendering and saving.
+      for (let attempt = 0; attempt < GOAL_RESUME_VERSION_ATTEMPTS; attempt += 1) {
+        const chat = await input.api.get(input.chatId);
+        if (!fresh()) return false;
+        if (chat?.id !== input.chatId || chat.goalId !== goalId) throw new Error("goal_control_binding_changed");
+        const latest = await input.api.getGoalContext(input.chatId);
+        if (!fresh()) return false;
+        if (!latest || latest.goalId !== goalId) throw new Error("goal_control_binding_changed");
+        if (!latest.version || !latest.goalRevision) throw new Error("goal_edit_state_changed");
+        if (!latest.runStatus || !["paused", "blocked", "queued", "waiting_user", "draft"].includes(latest.runStatus)) throw new Error("goal_edit_state_changed");
+        try {
+          const context = await input.api.reviseGoal(input.chatId, {
+            expectedGoalId: goalId,
+            expectedVersion: latest.version,
+            expectedGoalRevision: latest.goalRevision,
+            objective,
+          });
+          if (fresh()) publish({ context });
+          return fresh();
+        } catch (cause) {
+          if (!fresh()) return false;
+          if (goalErrorCode(failureMessage(cause)) !== "goal_edit_state_changed" || attempt + 1 === GOAL_RESUME_VERSION_ATTEMPTS) throw cause;
+        }
+      }
+      return false;
     } catch (cause) {
       if (fresh()) publish({ error: failureMessage(cause).slice(0, 240), errorKind: "action" });
+      return false;
     } finally {
       if (fresh()) { publish({ pending: null }); await refresh(); }
     }
   };
-  return { refresh, act, revise, closeReview: () => publish({ review: null }), observedRunId: () => view.context?.runId,
+  return { refresh, act, revise, retryUnfinished: (goalId: string) => act("resume", undefined, goalId),
+    closeReview: () => publish({ review: null, retryReviewGoalId: null }), observedRunId: () => view.context?.runId,
     dispose: () => { live = false; ++readGeneration; ++actionGeneration; } };
 }
 
@@ -254,7 +309,7 @@ export function goalModelChangePending(input: {
   return !(handoff.requested.model && input.lastConfirmedModel === handoff.requested.model);
 }
 
-export function OneGoalControls({ chatId, locale, isCurrent, onDeleted, onStopped, lastConfirmedModel, helpContent, handoffRequestKey }: {
+export function OneGoalControls({ chatId, locale, isCurrent, onDeleted, onStopped, lastConfirmedModel, helpContent, handoffRequestKey, registerRetryUnfinished }: {
   chatId: string; locale: "ko" | "en"; isCurrent: () => boolean; onDeleted: () => void;
   /** Called after Main accepted pause or delete; directions queued behind the run were dropped with it. */
   onStopped?: () => void;
@@ -263,6 +318,7 @@ export function OneGoalControls({ chatId, locale, isCurrent, onDeleted, onStoppe
   /** From the latest durable invocation final, never the composer default. */
   lastConfirmedModel?: string | null;
   helpContent?: ReactNode;
+  registerRetryUnfinished?: (binding: OneGoalRetryBinding) => () => void;
 }) {
   const [view, setView] = useState<GoalView>({ goalId: null, context: null, continuity: null, handoff: null, observedAt: null, pending: null, error: null, errorKind: null, refreshing: false, review: null });
   const [helpOpen, setHelpOpen] = useState(false);
@@ -323,6 +379,18 @@ export function OneGoalControls({ chatId, locale, isCurrent, onDeleted, onStoppe
     refresh();
     return () => { disposed = true; owner.dispose(); unsubscribe?.(); clearTimeout(timer); clearInterval(poll); session.current = null; };
   }, [chatId]);
+  useLayoutEffect(() => {
+    const owner = session.current;
+    const goalId = view.goalId;
+    if (!owner || !goalId || !registerRetryUnfinished) return;
+    return registerRetryUnfinished({ chatId, goalId, retry: async () => {
+      if (session.current !== owner || !callbacks.current.isCurrent()) throw new Error("goal_control_binding_changed");
+      await owner.retryUnfinished(goalId);
+      if (session.current !== owner || !callbacks.current.isCurrent()) return;
+      rootRef.current?.scrollIntoView({ block: "nearest" });
+      rootRef.current?.focus({ preventScroll: true });
+    } });
+  }, [chatId, view.goalId, registerRetryUnfinished]);
   // The composer's acknowledgement is not a Goal observation: re-read the
   // durable handoff so the pending chip reflects Main, not the click.
   useEffect(() => {
@@ -452,6 +520,9 @@ export function OneGoalControls({ chatId, locale, isCurrent, onDeleted, onStoppe
   const modelPending = goalModelChangePending({ ongoing, handoff: view.handoff, lastConfirmedModel });
   const pendingModel = view.handoff?.requested.model ?? view.handoff?.requested.kind ?? null;
   const review = view.review;
+  // Capture origin with the rendered review: a background refresh may clear the
+  // live view before a click from that previous render reaches this callback.
+  const reviewRetryGoalId = view.retryReviewGoalId ?? undefined;
   const closeReview = () => { session.current?.closeReview(); };
   // One sentence per state: the person only needs to know what happens if they continue.
   const reviewSentence = !review ? null
@@ -470,7 +541,7 @@ export function OneGoalControls({ chatId, locale, isCurrent, onDeleted, onStoppe
     : surface.automation.held > 0
       ? (ko ? "꺼 둔 예약에 남은 실행은 다시 돌리지 않아요." : "Runs left on a switched-off schedule are not replayed.")
       : null;
-  return <section ref={rootRef} className={styles.root} aria-label={ko ? "목표" : "Goal"} data-one-goal-controls="true"
+  return <section ref={rootRef} tabIndex={-1} className={styles.root} aria-label={ko ? "목표" : "Goal"} data-one-goal-controls="true"
     data-goal-observation={view.error || view.refreshing ? "stale" : observationFresh ? "confirmed" : "pending"}>
     {view.goalId && <div className={styles.bar}>
       <IconTarget size={13} />
@@ -553,16 +624,23 @@ export function OneGoalControls({ chatId, locale, isCurrent, onDeleted, onStoppe
         </button>}
         {!review.blocker && <button type="button" className={styles.reviewPrimary} data-goal-review-primary="true"
           disabled={view.pending !== null}
-          onClick={() => { void session.current?.act("resume", confirmGoalResumeReview(review)); }}>
+          onClick={() => { void session.current?.act("resume", confirmGoalResumeReview(review), reviewRetryGoalId); }}>
           {view.pending === "resume" ? (ko ? "이어가는 중" : "Continuing") : review.automationOwnership
             ? (ko ? "연결 확인 후 이어가기" : "Confirm connection and continue") : ko ? "이어가기" : "Continue"}
         </button>}
       </div>
     </div>}
+    {view.retryAttention && <p role="status" data-goal-retry-attention={view.retryAttention}>
+      {view.retryAttention === "question"
+        ? (ko ? "이 목표는 답변을 기다리고 있어요. 대화의 질문에 답해 주세요." : "This goal is waiting for your answer. Answer its question in the conversation.")
+        : view.retryAttention === "budget"
+          ? (ko ? "계속하기 전에 목표의 예산을 확인해 주세요." : "Review the goal's budget before continuing.")
+          : (ko ? "계속하기 전에 이 대화의 승인 요청이나 목표 제어에서 확인해 주세요." : "Review the approval request or goal controls in this conversation before continuing.")}
+    </p>}
     {editing && <form className={styles.editor} onSubmit={(event) => {
       event.preventDefault();
       if (!editable || !draft.trim()) return;
-      void session.current?.revise(draft.trim()).then(() => setEditing(false));
+      void session.current?.revise(draft.trim()).then((saved) => { if (saved) setEditing(false); });
     }}>
       <textarea value={draft} onChange={(event) => setDraft(event.target.value)} autoFocus
         aria-label={ko ? "목표 내용" : "Goal objective"} maxLength={12000} />

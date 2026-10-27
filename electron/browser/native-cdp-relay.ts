@@ -808,7 +808,16 @@ export async function createNativeBrowserRelayGrant(input: CanonicalNativeBrowse
       || method === "Input.insertText" || (method === "Input.dispatchKeyEvent" && params.type !== "keyUp")
       || (method === "Input.dispatchMouseEvent" && (params.type === "mousePressed" || params.type === "mouseWheel"))) presentAction(guest);
     const gesture = agentGestureInput(method, params);
-    if (gesture) guest.chooser.agentInput += 1;
+    // A queued command and every awaited preparation retain the original grant,
+    // lease and guest; cancellation cannot be discovered only after input ran.
+    const assertCommandCurrent = () => {
+      if (input.signal.aborted || !current() || leases.get(lease.id) !== lease
+        || lease.guests.get(guest.targetId) !== guest || guest.wc.isDestroyed()
+        || nativeBrowserGuest(owner.ownerId, input.chatId, guest.viewId) !== guest.wc
+        || findGuest(lease, sessionId) !== guest) throw new Error("native-browser-grant-revoked");
+    };
+    let gestureAdmitted = false;
+    let gestureDispatched = false;
     let result: unknown;
     try {
       // Issue in client order. Anything awaited before the send (ending the
@@ -816,8 +825,11 @@ export async function createNativeBrowserRelayGrant(input: CanonicalNativeBrowse
       // mouseReleased can never overtake this mousePressed.
       let sent!: Promise<unknown>;
       const step = lease.order.then(async () => {
+        assertCommandCurrent();
+        if (gesture) { guest.chooser.agentInput += 1; gestureAdmitted = true; }
         // The owner's element picker would swallow this agent's input (see annotation.ts).
         if (browserAnnotationActiveOn(guest.wc)) await endBrowserAnnotationsForAgent(guest.wc).catch(() => 0);
+        assertCommandCurrent();
         // ★Chromium's paint holding drops input for a moment after a
         // cross-document navigation, until the page's first contentful paint
         // (or a timeout). An agent's first click on a page it just opened was
@@ -828,22 +840,36 @@ export async function createNativeBrowserRelayGrant(input: CanonicalNativeBrowse
         if (method === "Input.dispatchMouseEvent" && params.type === "mousePressed") {
           const deadline = Date.now() + 1_500;
           while (Date.now() < deadline) {
+            assertCommandCurrent();
             const layoutAge = nativeBrowserGuestLayoutAge(owner.ownerId, input.chatId, guest.viewId);
             const navigationAge = Date.now() - guest.navigatedAt;
             if (layoutAge >= LAYOUT_SETTLE_MS && navigationAge >= PAINT_HOLDING_MS) break;
-            if (layoutAge >= LAYOUT_SETTLE_MS && await firstContentfulPaint(guest)) break;
+            if (layoutAge >= LAYOUT_SETTLE_MS) {
+              const painted = await firstContentfulPaint(guest);
+              assertCommandCurrent();
+              if (painted) break;
+            }
             await new Promise<void>((resolve) => setTimeout(resolve, 50));
+            assertCommandCurrent();
           }
         }
         // Await the enable: Blink holds the interception flag, and its DevTools
         // channel is not ordered with input. Sent back to back, the click won
         // the race about one time in three and the OS "Open" panel appeared.
         if (gesture) await armFileChooser(guest);
+        assertCommandCurrent();
         const root = sessionId === guest.sessionId;
+        gestureDispatched = gesture;
         sent = guest.wc.debugger.sendCommand(method, params, root ? undefined : sessionId).catch((error: unknown) => {
-          // Lost session on a live page: re-attach and retry once (page-level commands only; Target.*/Browser.*
-          // describe the session itself and are not replayed).
-          if (!root || /^(Target|Browser)\./.test(method) || guest.wc.isDestroyed() || guest.wc.debugger.isAttached() || !guest.reattach()) throw error;
+          assertCommandCurrent();
+          // Only Electron's explicit pre-dispatch rejection proves that the
+          // command did not run. A lost response can already have caused input.
+          const notAttached = error instanceof Error && (error.message === "No target available"
+            || /^Debugger is not attached(?: to the target)?[.!]?$/i.test(error.message));
+          if (notAttached) gestureDispatched = false;
+          if (!notAttached || !root || /^(Target|Browser)\./.test(method) || guest.wc.debugger.isAttached() || !guest.reattach()) throw error;
+          assertCommandCurrent();
+          gestureDispatched = gesture;
           return guest.wc.debugger.sendCommand(method, params);
         });
       });
@@ -851,11 +877,15 @@ export async function createNativeBrowserRelayGrant(input: CanonicalNativeBrowse
       await step;
       result = await sent;
     } finally {
-      if (gesture) {
+      if (gestureAdmitted) {
         guest.chooser.agentInput -= 1;
-        guest.chooser.agentEchoUntil = Date.now() + 500;
-        // The activation window starts when the gesture has been delivered.
-        guest.chooser.armedUntil = Math.max(guest.chooser.armedUntil, Date.now() + FILE_CHOOSER_ACTIVATION_MS);
+        if (gestureDispatched && !input.signal.aborted && current() && leases.get(lease.id) === lease
+          && lease.guests.get(guest.targetId) === guest && !guest.wc.isDestroyed()
+          && nativeBrowserGuest(owner.ownerId, input.chatId, guest.viewId) === guest.wc) {
+          guest.chooser.agentEchoUntil = Date.now() + 500;
+          // The activation window starts when the gesture has been delivered.
+          guest.chooser.armedUntil = Math.max(guest.chooser.armedUntil, Date.now() + FILE_CHOOSER_ACTIVATION_MS);
+        } else disarmFileChooser(guest);
       }
     }
     if (!current() || nativeBrowserGuest(owner.ownerId, input.chatId, guest.viewId) !== guest.wc) throw new Error("native-browser-grant-revoked");

@@ -1,3 +1,4 @@
+import { copyGoalExecutionObligations, type GoalExecutionObligations } from "./goal-execution-obligations";
 /** Goal model only. Adapters own intent classification, authority and scheduling. */
 export const AUTO_GOAL_SCHEMA = "agentlas.auto-goal.v1" as const;
 
@@ -119,6 +120,8 @@ export interface GoalRevision {
   acceptanceCriteria: GoalCriterion[];
   /** References to existing host grants; this model cannot issue new grants. */
   authorityRefs: string[];
+  /** Exact owner-selected participation/review intent, not execution authority. */
+  executionObligations?: GoalExecutionObligations;
   /** Present only when a human explicitly approved a typed strategy change. */
   amendment?: GoalAmendment;
   /** Host-authored reauthorization metadata; changing permission is not a model amendment. */
@@ -187,6 +190,7 @@ export function createAutomaticGoalRevision(input: {
   decision: GoalIntakeDecision;
   acceptanceCriteria: readonly GoalCriterion[];
   authorityRefs: readonly string[];
+  executionObligations?: GoalExecutionObligations;
   createdAt: string;
 }): GoalRevision | null {
   if (!admitsAutomaticGoal(input.source, input.decision)) return null;
@@ -209,6 +213,7 @@ export function createAutomaticGoalRevision(input: {
     ...(cadence ? { cadence } : {}),
     acceptanceCriteria: criteriaCopy(input.acceptanceCriteria),
     authorityRefs: [...new Set(input.authorityRefs)],
+    ...(input.executionObligations ? { executionObligations: copyGoalExecutionObligations(input.executionObligations) } : {}),
     createdAt: input.createdAt,
   };
 }
@@ -263,6 +268,7 @@ export function reviseAutomaticGoal(input: {
     lifecycle: resolveGoalLifecycle(current.lifecycle),
     acceptanceCriteria: criteriaCopy([...input.retainedCriteria, ...input.addedCriteria]),
     authorityRefs: [...current.authorityRefs],
+    ...(current.executionObligations ? { executionObligations: copyGoalExecutionObligations(current.executionObligations) } : {}),
     ...(input.amendment ? { amendment: { ...input.amendment } } : {}),
     createdAt: input.createdAt,
   };

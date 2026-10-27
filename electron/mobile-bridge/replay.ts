@@ -148,6 +148,7 @@ export class MobileBridgeRequestReplayStore {
   private readonly maxEntries: number;
   private readonly now: () => Date;
   private readonly instanceId: string;
+  private lastOverflowPruneAt = Number.NEGATIVE_INFINITY;
 
   constructor(
     private readonly userDataPath: string,
@@ -165,12 +166,13 @@ export class MobileBridgeRequestReplayStore {
   begin(deviceId: string, key: string, fingerprint: string): MobileBridgeReplayBeginResult {
     this.assertIdentity(deviceId, key, fingerprint);
     const keyHash = createHash("sha256").update(key, "utf8").digest("hex");
-    const ledger = this.readLedger();
+    let { ledger, target } = this.readLedgerForKey(deviceId, keyHash);
     const now = this.checkedNow();
     const changed = this.prune(ledger, now);
+    this.pruneOverflow(now);
     const existing = ledger.entries.find((entry) => entry.deviceId === deviceId && entry.keyHash === keyHash);
     if (existing) {
-      if (changed) this.writeLedger(ledger);
+      if (changed) this.writeLedger(ledger, target);
       if (existing.fingerprint !== fingerprint) return { kind: "conflict" };
       if (existing.state === "completed" && existing.response) {
         return { kind: "replay", response: existing.response };
@@ -181,8 +183,11 @@ export class MobileBridgeRequestReplayStore {
       return { kind: "in-progress" };
     }
     if (ledger.entries.length >= this.maxEntries) {
-      if (changed) this.writeLedger(ledger);
-      throw new Error("Mobile Bridge replay ledger is full; retry after the safety window expires");
+      if (changed) this.writeLedger(ledger, target);
+      // Keep every unexpired identity. Capacity in the legacy page must never
+      // evict an earlier command or reject a different owner's command.
+      target = this.overflowPath(deviceId, keyHash);
+      ledger = { version: MOBILE_BRIDGE_PROTOCOL_VERSION, entries: [] };
     }
     const timestamp = now.toISOString();
     ledger.entries.push({
@@ -195,7 +200,7 @@ export class MobileBridgeRequestReplayStore {
       createdAt: timestamp,
       updatedAt: timestamp,
     });
-    this.writeLedger(ledger);
+    this.writeLedger(ledger, target);
     return { kind: "execute" };
   }
 
@@ -207,7 +212,7 @@ export class MobileBridgeRequestReplayStore {
   lookup(deviceId: string, key: string, fingerprint: string): MobileBridgeReplayLookupResult {
     this.assertIdentity(deviceId, key, fingerprint);
     const keyHash = createHash("sha256").update(key, "utf8").digest("hex");
-    const ledger = this.readLedger();
+    const { ledger } = this.readLedgerForKey(deviceId, keyHash);
     const now = this.checkedNow().getTime();
     const entry = ledger.entries.find(
       (candidate) => candidate.deviceId === deviceId && candidate.keyHash === keyHash,
@@ -239,7 +244,7 @@ export class MobileBridgeRequestReplayStore {
       this.markUncertain(deviceId, key, fingerprint);
       throw new Error("Mobile Bridge replay response cannot be stored safely");
     }
-    const ledger = this.readLedger();
+    const { ledger, target } = this.readLedgerForKey(deviceId, keyHash);
     const entry = ledger.entries.find((candidate) => candidate.deviceId === deviceId && candidate.keyHash === keyHash);
     if (!entry || entry.fingerprint !== fingerprint || entry.ownerInstanceId !== this.instanceId) {
       throw new Error("Mobile Bridge replay ownership was lost before completion");
@@ -247,7 +252,7 @@ export class MobileBridgeRequestReplayStore {
     entry.state = "completed";
     entry.response = response;
     entry.updatedAt = this.checkedNow().toISOString();
-    this.writeLedger(ledger);
+    this.writeLedger(ledger, target);
   }
 
   /**
@@ -261,30 +266,59 @@ export class MobileBridgeRequestReplayStore {
   release(deviceId: string, key: string, fingerprint: string): void {
     this.assertIdentity(deviceId, key, fingerprint);
     const keyHash = createHash("sha256").update(key, "utf8").digest("hex");
-    const ledger = this.readLedger();
+    const { ledger, target } = this.readLedgerForKey(deviceId, keyHash);
     const index = ledger.entries.findIndex((candidate) => candidate.deviceId === deviceId && candidate.keyHash === keyHash);
     if (index < 0) return;
     const entry = ledger.entries[index];
     if (entry.fingerprint !== fingerprint || entry.ownerInstanceId !== this.instanceId) return;
     if (entry.state === "completed") return;
     ledger.entries.splice(index, 1);
-    this.writeLedger(ledger);
+    this.writeLedger(ledger, target);
   }
 
   markUncertain(deviceId: string, key: string, fingerprint: string): void {
     this.assertIdentity(deviceId, key, fingerprint);
     const keyHash = createHash("sha256").update(key, "utf8").digest("hex");
-    const ledger = this.readLedger();
+    const { ledger, target } = this.readLedgerForKey(deviceId, keyHash);
     const entry = ledger.entries.find((candidate) => candidate.deviceId === deviceId && candidate.keyHash === keyHash);
     if (!entry || entry.fingerprint !== fingerprint || entry.ownerInstanceId !== this.instanceId) return;
     entry.state = "uncertain";
     entry.response = null;
     entry.updatedAt = this.checkedNow().toISOString();
-    this.writeLedger(ledger);
+    this.writeLedger(ledger, target);
   }
 
-  private readLedger(): StoredReplayLedger {
-    const target = mobileBridgeReplayStorePath(this.userDataPath);
+  private overflowPath(deviceId: string, keyHash: string): string {
+    const identity = createHash("sha256").update(`${deviceId}\0${keyHash}`).digest("hex");
+    return path.join(this.userDataPath, BRIDGE_DIR, "request-replays-overflow", `${identity}.json`);
+  }
+
+  private readLedgerForKey(deviceId: string, keyHash: string): { ledger: StoredReplayLedger; target: string } {
+    const overflow = this.overflowPath(deviceId, keyHash);
+    const target = fs.existsSync(overflow) ? overflow : mobileBridgeReplayStorePath(this.userDataPath);
+    return { ledger: this.readLedger(target), target };
+  }
+
+  /** Expired spill records contain no remaining replay guarantee. Never delete
+   * a live entry merely to make room, and never follow a directory symlink. */
+  private pruneOverflow(now: Date): void {
+    if (now.getTime() - this.lastOverflowPruneAt < 60_000) return;
+    const directory = path.join(this.userDataPath, BRIDGE_DIR, "request-replays-overflow");
+    if (!fs.existsSync(directory)) return;
+    if (!fs.lstatSync(directory).isDirectory()) throw new Error("Invalid Mobile Bridge replay overflow directory");
+    for (const name of fs.readdirSync(directory)) {
+      if (!/^[a-f0-9]{64}\.json$/.test(name)) continue;
+      const target = path.join(directory, name);
+      if (!fs.lstatSync(target).isFile()) throw new Error("Invalid Mobile Bridge replay overflow record");
+      const ledger = this.readLedger(target);
+      if (ledger.entries.every((entry) => Date.parse(entry.updatedAt) < now.getTime() - this.ttlMs)) {
+        fs.unlinkSync(target);
+      }
+    }
+    this.lastOverflowPruneAt = now.getTime();
+  }
+
+  private readLedger(target: string): StoredReplayLedger {
     if (!fs.existsSync(target)) return { version: MOBILE_BRIDGE_PROTOCOL_VERSION, entries: [] };
     const parsed: unknown = JSON.parse(fs.readFileSync(target, "utf8"));
     if (
@@ -299,8 +333,8 @@ export class MobileBridgeRequestReplayStore {
     return parsed as unknown as StoredReplayLedger;
   }
 
-  private writeLedger(ledger: StoredReplayLedger): void {
-    writePrivateJsonAtomic(mobileBridgeReplayStorePath(this.userDataPath), ledger);
+  private writeLedger(ledger: StoredReplayLedger, target: string): void {
+    writePrivateJsonAtomic(target, ledger);
   }
 
   private prune(ledger: StoredReplayLedger, now: Date): boolean {

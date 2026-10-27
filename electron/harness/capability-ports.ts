@@ -1031,14 +1031,14 @@ const PORTS: PortDefinition[] = [
     handler: async (args) => ok(await (await import("../app-control/service")).appControlOperations(args)),
   },
   {
-    operationId: "app.call", kind: "command", purpose: "Run one app operation with its exact input_schema (destructive/consent operations need the owner).", required: ["operation"],
+    operationId: "app.call", kind: "command", purpose: "Run one app operation with its exact input_schema.", required: ["operation"],
     handler: async (args, ctx) => {
       if (ctx.dryRun) return refused("dry_run");
       try {
         // The operation's input arrives as `args` (exact key wins) or `input`, the word its input_schema reads as. Dev
         // 2026-10-17 run8 (Haiku automation): {operation:"automations.listRuns", input:{id}} ran with no id and answered 0 runs.
         const appArgs = args.args !== undefined ? args.args : args.input;
-        const result = await (await import("../app-control/service")).appControlCall({ ownerTurn: await harnessOwnerTurn(ctx) }, { operation: args.operation, args: appArgs });
+        const result = await (await import("../app-control/service")).appControlCall({ ownerTurn: await harnessOwnerTurn(ctx), permission: ctx.permission ?? "read" }, { operation: args.operation, args: appArgs });
         return ok(result);
       } catch (error) {
         const code = error && typeof error === "object" && "code" in error ? String((error as { code: unknown }).code) : "operation_failed";

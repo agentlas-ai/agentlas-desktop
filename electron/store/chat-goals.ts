@@ -1,3 +1,4 @@
+import { copyGoalExecutionObligations, confirmGoalReviewAssignments, type GoalExecutionObligations } from "../../shared/goal-execution-obligations";
 import { randomUUID } from "node:crypto";
 import { getDb } from "./db";
 import { emitDesktopStoreChange } from "./change-bus";
@@ -157,6 +158,10 @@ export function completeChatGoalContract(
   if (status === "completed" && getChatGoalRevision(normalized)?.lifecycle === "ongoing") {
     throw new Error("goal_ongoing_cannot_complete");
   }
+  if (status === "completed" && require("./long-runs").getLongRunByGoalId(normalized)?.status !== "completed"
+    && !require("../long-run/goal-obligation-context").currentGoalObligationsSatisfied(normalized)) {
+    throw new Error("goal_execution_obligations_unmet");
+  }
   const now = new Date().toISOString();
   getDb().prepare(
     `UPDATE chat_goal_contracts
@@ -200,7 +205,8 @@ export function correctExplicitGoalLifecycle(goalId: string): boolean {
 
 function parseGoalRevision(payload: string): GoalRevision {
   const revision = JSON.parse(payload) as GoalRevision;
-  return { ...revision, lifecycle: resolveGoalLifecycle(revision.lifecycle) };
+  return { ...revision, lifecycle: resolveGoalLifecycle(revision.lifecycle),
+    ...(revision.executionObligations ? { executionObligations: copyGoalExecutionObligations(revision.executionObligations) } : {}) };
 }
 
 /** Keep absence distinct from explicit finite (and corrupt/null values). This
@@ -365,6 +371,7 @@ export function createStoredAutomaticGoal(input: Parameters<typeof createAutomat
   if (!revision) return null;
   return getDb().transaction(() => {
     assertStoredUserSource(input.source);
+    if (input.executionObligations) assertGoalObligationSource(input.source, input.executionObligations);
     const replay = previouslyAppliedRevision(input.goalId, input.source);
     if (replay) return replay;
     // An existing campaign must be explicitly adopted/revised by its adapter.
@@ -472,4 +479,53 @@ export function reconcileAbandonedGoalContracts(now = new Date()): string[] {
   tx();
   for (const chatId of touchedChats) emitDesktopStoreChange({ entity: "chat", id: chatId });
   return closed;
+}
+
+
+function assertGoalObligationSource(source: GoalSourceMessage, obligations: GoalExecutionObligations): void {
+  const canonical = (require("../long-run/goal-obligation-context") as typeof import("../long-run/goal-obligation-context"))
+    .captureGoalExecutionObligations(obligations.source.runId, source);
+  if (!canonical || JSON.stringify(canonical) !== JSON.stringify(obligations)) throw new Error("goal_obligation_source_unconfirmed");
+}
+
+/** Intent-only legacy recovery: no grant, scheduler or Goal status mutation. */
+export function attachStoredGoalExecutionObligations(goalId: string, expectedRevision: number, obligations: GoalExecutionObligations): GoalRevision {
+  return getDb().transaction(() => {
+    const row = getDb().prepare("SELECT payload_json FROM chat_goal_revisions WHERE goal_id = ? ORDER BY revision DESC LIMIT 1").get(goalId) as { payload_json: string } | undefined;
+    if (!row) throw new Error("goal_revision_missing");
+    const goal = parseGoalRevision(row.payload_json);
+    if (goal.revision !== expectedRevision || (getDb().prepare("SELECT goal_id FROM chats WHERE id=?").get(goal.chatId) as { goal_id?: string } | undefined)?.goal_id !== goalId) throw new Error("goal_revision_conflict");
+    if (goal.executionObligations) return goal;
+    assertGoalObligationSource(goal.originalRequest, obligations);
+    const next = { ...goal, executionObligations: copyGoalExecutionObligations(obligations) };
+    const changed = getDb().prepare("UPDATE chat_goal_revisions SET payload_json = ? WHERE goal_id = ? AND revision = ? AND payload_json = ?")
+      .run(JSON.stringify(next), goalId, expectedRevision, row.payload_json);
+    if (changed.changes !== 1) throw new Error("goal_revision_conflict");
+    return next;
+  }).immediate();
+}
+
+/** The accepted planner can only strengthen the duties of the original
+ * selected targets. Independent review is a typed packet role, never a name. */
+export function confirmStoredGoalReviewAssignments(input: {
+  goalId: string; expectedRevision: number; expectedVersion: number; invocationRunId: string; reviewerTargetRefs: string[];
+}): GoalRevision {
+  return getDb().transaction(() => {
+    const row = getDb().prepare("SELECT payload_json FROM chat_goal_revisions WHERE goal_id = ? ORDER BY revision DESC LIMIT 1").get(input.goalId) as { payload_json: string } | undefined;
+    if (!row) throw new Error("goal_revision_missing");
+    const goal = parseGoalRevision(row.payload_json), contract = readRow(input.goalId);
+    if (goal.revision !== input.expectedRevision || goal.executionObligations?.version !== input.expectedVersion
+      || contract?.status !== "active" || (getDb().prepare("SELECT goal_id FROM chats WHERE id = ?").get(goal.chatId) as { goal_id?: string } | undefined)?.goal_id !== goal.goalId) {
+      throw new Error("goal_obligation_revision_conflict");
+    }
+    const planner = getDb().prepare(`SELECT 1 FROM run_events WHERE run_id = ? AND chat_id = ?
+      AND kind = 'task_force_model_call_completed' AND json_extract(payload_json, '$.phase') = 'planner' LIMIT 1`)
+      .get(input.invocationRunId, goal.chatId);
+    if (!planner) throw new Error("goal_obligation_planner_receipt_missing");
+    const next = { ...goal, executionObligations: confirmGoalReviewAssignments(goal.executionObligations, input.reviewerTargetRefs) };
+    const changed = getDb().prepare("UPDATE chat_goal_revisions SET payload_json = ? WHERE goal_id = ? AND revision = ? AND payload_json = ?")
+      .run(JSON.stringify(next), input.goalId, goal.revision, row.payload_json);
+    if (changed.changes !== 1) throw new Error("goal_revision_conflict");
+    return next;
+  }).immediate();
 }

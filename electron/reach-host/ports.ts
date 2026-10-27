@@ -1,6 +1,6 @@
 import { runAppleScript } from "../reach/applescript";
 import { isSensitiveApp } from "../reach/explore-policy";
-import { isDirectMenuCommand } from "../reach/map";
+import { isDirectMenuCommand, isCurrentDialogCapability, type CapabilityPolicyContext } from "../reach/map";
 import { findLiveCandidates, firstWithWindow } from "../reach/app-match";
 import { exploreApp } from "../reach/explorer";
 import { findMenuWindow } from "../reach/menu-probe";
@@ -90,9 +90,14 @@ function findCapability(list: readonly Capability[], ref: string): { ok: true; c
   return { ok: false, outcome: refused("capability_unknown", "reach.app lists an app's capabilities and their ids") };
 }
 
-function usableNow(capability: Capability): boolean {
+function policyContext(app: AppRecord): CapabilityPolicyContext {
+  return { sensors: app.signals.some((signal) => signal.startsWith("sensor:")), name: app.name, bundleId: bundleOf(app.key) ?? app.key, platform: app.platform };
+}
+
+function usableNow(capability: Capability, context: CapabilityPolicyContext = {}): boolean {
   if (capability.generic || capability.status === "degraded") return false;
-  if (isDirectMenuCommand(capability)) return true; // a menu command: the call resolves the path in the live menu first
+  if (capability.tier === "structure") return isDirectMenuCommand(capability, context); // the live menu confirms each command
+  if (capability.tier === "explored" && !isCurrentDialogCapability(capability, context)) return false;
   if (capability.tier === "published" && capability.status === undefined) return true;
   return capability.status === "verified";
 }
@@ -126,14 +131,14 @@ export function inputSchemaOf(capability: Capability): Record<string, unknown> {
   return { $schema: "https://json-schema.org/draft/2020-12/schema", type: "object", properties, ...(required.length ? { required } : {}), additionalProperties: false };
 }
 
-function row(capability: Capability): Record<string, unknown> {
+function row(capability: Capability, context: CapabilityPolicyContext): Record<string, unknown> {
   return {
     id: capability.id,
     name: cut(capability.name, 120),
     tier: capability.tier,
     kind: capability.kind,
     ...(capability.granularity === "property" ? { granularity: "property" } : {}),
-    usable: usableNow(capability),
+    usable: usableNow(capability, context),
     ...(capability.status ? { status: capability.status } : {}),
     ...(capability.verification ? { verification: capability.verification } : {}),
     effect: capability.effect.class,
@@ -156,7 +161,7 @@ export async function reachMap(args: Record<string, unknown>): Promise<Outcome> 
     .filter((app) => (!query || app.name.toLowerCase().includes(query) || app.key.toLowerCase().includes(query)) && (!level || app.level === level))
     .sort((a, b) => order[a.level] - order[b.level] || b.usableCount - a.usableCount || a.name.localeCompare(b.name));
   const page = apps.slice(offset, offset + limit);
-  const explored = await Promise.all(page.map(async (app) => (await rt.registry.capabilities(app.key)).filter((capability) => capability.tier === "explored" && usableNow(capability)).length));
+  const explored = await Promise.all(page.map(async (app) => (await rt.registry.capabilities(app.key)).filter((capability) => capability.tier === "explored" && usableNow(capability, policyContext(app))).length));
   return {
     status: "ok",
     data: {
@@ -174,14 +179,15 @@ export async function reachApp(args: Record<string, unknown>): Promise<Outcome> 
   const rt = await getReachRuntime();
   const resolved = await resolveApp(rt, str(args.app));
   if (!resolved.ok) return resolved.outcome;
+  const context = policyContext(resolved.app);
   const search = str(args.search).toLowerCase();
   const tier = str(args.tier);
   const limit = clamp(args.limit, 1, 50, 25);
   const offset = clamp(args.offset, 0, 100_000, 0);
   const list = (await allCapabilities(rt, resolved.app)).filter((capability) =>
-    (!search || capability.name.toLowerCase().includes(search)) && (!tier || capability.tier === tier) && (args.usable !== true || usableNow(capability)) && !capability.generic);
+    (!search || capability.name.toLowerCase().includes(search)) && (!tier || capability.tier === tier) && (args.usable !== true || usableNow(capability, context)) && !capability.generic);
   // operations before property reads; usable before candidates
-  list.sort((a, b) => Number(usableNow(b)) - Number(usableNow(a)) || (a.granularity === b.granularity ? 0 : a.granularity === "operation" ? -1 : 1) || a.name.localeCompare(b.name));
+  list.sort((a, b) => Number(usableNow(b, context)) - Number(usableNow(a, context)) || (a.granularity === b.granularity ? 0 : a.granularity === "operation" ? -1 : 1) || a.name.localeCompare(b.name));
   const page = list.slice(offset, offset + limit);
   return {
     status: "ok",
@@ -189,14 +195,14 @@ export async function reachApp(args: Record<string, unknown>): Promise<Outcome> 
       app: { key: resolved.app.key, name: resolved.app.name, level: resolved.app.level },
       total: list.length,
       truncated: offset + page.length < list.length,
-      capabilities: page.map(row),
+      capabilities: page.map((capability) => row(capability, context)),
     },
   };
 }
 
-function runnableReason(capability: Capability, rt: ReachRuntime): string | null {
+function runnableReason(capability: Capability, rt: ReachRuntime, context: CapabilityPolicyContext): string | null {
   if (capability.status === "degraded") return "it failed when last used; Reach re-reads it when the owner is away";
-  if (!usableNow(capability)) return "only seen so far: it becomes callable once an exploration has opened and closed its dialog";
+  if (!usableNow(capability, context)) return "only seen so far: it becomes callable once an exploration has opened and closed its dialog";
   if (capability.body?.kind === "steps") return rt.gui ? null : "this host has no driver for the app's screen";
   if (capability.source.kind === "sdef") return rt.platform === "darwin" ? null : "AppleScript runs only on macOS";
   return `${capability.source.kind} capabilities cannot be called yet`;
@@ -209,7 +215,8 @@ export async function reachDescribe(args: Record<string, unknown>): Promise<Outc
   const found = findCapability(await allCapabilities(rt, resolved.app), str(args.capability));
   if (!found.ok) return found.outcome;
   const capability = found.capability;
-  const reason = runnableReason(capability, rt);
+  const context = policyContext(resolved.app);
+  const reason = runnableReason(capability, rt, context);
   return {
     status: "ok",
     data: {
@@ -219,7 +226,7 @@ export async function reachDescribe(args: Record<string, unknown>): Promise<Outc
       tier: capability.tier,
       kind: capability.kind,
       ...(capability.description ? { description: cut(capability.description, 400) } : {}),
-      usable: usableNow(capability),
+      usable: usableNow(capability, context),
       ...(capability.status ? { status: capability.status } : {}),
       ...(capability.verification ? { verification: capability.verification } : {}),
       effect: capability.effect,
@@ -282,12 +289,21 @@ export async function reachInvoke(args: Record<string, unknown>, ctx: Ctx): Prom
   const found = findCapability(await allCapabilities(rt, resolved.app), str(args.capability));
   if (!found.ok) return found.outcome;
   const capability = found.capability;
-  if (!usableNow(capability)) return refused("capability_not_usable", capability.status === "degraded" ? "it failed when last used; Reach repairs it when the owner is away, or pick another" : "it has only been seen, not proven; reach.app with usable:true lists what is ready");
+  // A menu command stored by an older, looser rule is asked again at the moment of the call - with what is known about this app (a camera, a microphone, a location
+  // makes the rule stricter) - and withdrawn when it no longer passes (independent review 7, V1): nothing is pressed.
+  const context = policyContext(resolved.app);
+  if ((capability.tier === "structure" && capability.traits?.includes("menu-command") && !isDirectMenuCommand(capability, context))
+    || (capability.tier === "explored" && !isCurrentDialogCapability(capability, context))) {
+    if (rt.service) await rt.service.onInvokeOutcome(resolved.app.key, resolved.app.fingerprint, capability.id, { ok: false, code: "rule_tightened" });
+    else await rt.registry.recordOutcome(resolved.app.key, resolved.app.fingerprint, capability.id, { ok: false, code: "rule_tightened" }, rt.day());
+    return refused("capability_not_usable", "the current exploration rule no longer allows this stored capability");
+  }
+  if (!usableNow(capability, context)) return refused("capability_not_usable", capability.status === "degraded" ? "it failed when last used; Reach repairs it when the owner is away, or pick another" : "it has only been seen, not proven; reach.app with usable:true lists what is ready");
   // A read the source itself declares can run under a read-only run; anything whose effect is not declared needs the run's write permission.
   const declaredRead = capability.effect.class === "read" && capability.effect.basis === "declared";
   if (!declaredRead && !writable(ctx)) return refused("permission_required", "this run may only read; what this capability does is not declared, so it needs write permission");
   const parameters = args.parameters && typeof args.parameters === "object" && !Array.isArray(args.parameters) ? (args.parameters as Record<string, unknown>) : {};
-  const reason = runnableReason(capability, rt);
+  const reason = runnableReason(capability, rt, context);
   if (reason) return unavailable("not_runnable", reason);
 
   if (capability.body?.kind === "steps") {

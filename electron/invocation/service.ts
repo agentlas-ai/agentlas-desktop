@@ -1,3 +1,4 @@
+import { goalObligationContinuationPrompt, releaseGoalObligationContinuation, abandonGoalObligationContinuation } from "../long-run/goal-obligation-context";
 import { startPreparedHostQuestionInvocation } from "./host-admission";
 import type { PreparedHostQuestionContinuation } from "./host-question-continuation";
 import { recordInvocationArtifactWorkspace } from "../fs/invocation-workspace";
@@ -2231,6 +2232,7 @@ export class InvocationService {
       }
       return await this.startNativePreparedOwned(req, port, admission, durableAdmission, () => { entry.entered = true; }, workspaceBinding, executionContext, hostNoticePurpose);
     } catch (error) {
+      if (!entry.entered) abandonGoalObligationContinuation(req);
       if (!entry.entered) {
         entry.closed = true; entry.originalFailure = error;
         if (entry.ingress && !entry.ingress.handedOff) this.nativePreparedEntries.delete(token);
@@ -2888,6 +2890,7 @@ export class InvocationService {
       }
       return started;
     } catch (error) {
+      if (!startBoundary.handedOff) abandonGoalObligationContinuation(req);
       // Nothing was handed to a runtime: the same typed fact the daemon's native ingress reports for this refusal.
       if (!startBoundary.handedOff && !(error instanceof RuntimeTurnUnsettledError)) markRefusedBeforeDispatch(error);
       if (startBoundary.crossed && !startBoundary.handedOff && startBoundary.runId) {
@@ -2965,6 +2968,7 @@ export class InvocationService {
     nativeController?: AbortController,
     oneTeamReportCustody?: QueuedTeamReportCustody,
   ): Generator<NativeOneStartCheckpoint, InvocationStartResult, unknown> {
+    const goalContinuationPrompt = goalObligationContinuationPrompt(req);
     const nativePreparation = nativeController ? this.nativePreparing.get(req.runId!) : undefined;
     assertFinanceWorkChatOwner(req.chatId, getAuthenticatedActorIds());
     mainAdmission = takeMainInvocationAdmission(mainAdmission);
@@ -3248,7 +3252,7 @@ export class InvocationService {
         ...invocationRequest,
         runId: preparedOneTeamPreflight.ref.reservedRunId,
         chatId: preparedOneTeamPreflight.chatId,
-        userPrompt: preparedOneTeamPreflight.userPrompt,
+        userPrompt: goalContinuationPrompt ?? preparedOneTeamPreflight.userPrompt,
         oneUserAuthoredPrompt: preparedOneTeamPreflight.userAuthoredPrompt,
         taskIntent: "task",
         oneMode: true,
@@ -6144,6 +6148,7 @@ export class InvocationService {
         }
       })
       .finally(async () => {
+        releaseGoalObligationContinuation(req);
         await releaseWorkAttachmentRun(runId).catch(() => { /* cleanup refusal cannot prevent terminal settlement */ });
         if (record.automaticGoalDeadline && !this.pendingGoalVerifications.has(runId)) clearTimeout(record.automaticGoalDeadline);
         settleGoalControllerAttempt(false);
@@ -6642,7 +6647,26 @@ export class InvocationService {
       throw error;
     }
     if (!expectedGoalId || chat?.goalId !== expectedGoalId) throw new Error("goal_control_binding_changed");
-    if (run && (run.rootChatId !== chatId || run.surface === "science")) throw new Error("goal_control_scope_mismatch");
+    if (run && (run.rootChatId !== chatId || run.surface === "science")) {
+      if (action !== "delete") throw new Error("goal_control_scope_mismatch");
+      // Old shared bindings are removable from this room without cancelling another room's Goal or its contract.
+      // Its own live turns still stop, even if the durable detach fails.
+      const local = [...new Map([...this.browserLoginWaitingRuns, ...this.settlingRuns, ...this.pendingGoalVerifications, ...this.activeRuns.entries()])]
+        .filter(([, record]) => record.chatId === chatId && (!record.automaticGoalId || record.automaticGoalId === expectedGoalId));
+      try {
+        getDb().transaction(() => {
+          if (getChat(chatId)?.goalId !== expectedGoalId) throw new Error("goal_control_binding_changed");
+          cancelQueuedSteersForChat(chatId, false, "goal-stopped");
+          cancelQueuedOnePreflightSteersForChat(chatId);
+          setChatGoalBinding(chatId, null);
+          setChatContinuousMode(chatId, false);
+        })();
+      } finally {
+        this.steerQueues.delete(chatId);
+        for (const [runId] of local) this.cancelWithReason(runId, new Error("goal_deleted_by_user"));
+      }
+      return;
+    }
     if (!run && action === "pause") throw new Error("goal_control_not_started");
     // Actual scheduler controllers keep their immutable creation owner even if
     // their row/receipt has since changed. Fence admissions before persistence.
@@ -7094,7 +7118,7 @@ export class InvocationService {
       throw new Error("invocation_current_turn_unavailable");
     }
     if (record.ownerLease) assertInvocationRunOwner(record.ownerLease);
-    if (countPendingCurrentTurnSteers(input.chatId, input.expectedRunId) >= 64) throw new Error("invocation_current_turn_steer_limit");
+    if (countPendingCurrentTurnSteers(input.chatId, input.expectedRunId) >= 64) throw Object.assign(new Error("invocation_current_turn_steer_limit"), { code: "invocation_current_turn_steer_limit" });
     const intake = claimCurrentTurnSteer(input, { chatId: record.chatId, runId: input.expectedRunId,
       ...(record.ownerLease ? { ownerId: record.ownerLease.ownerId, leaseId: record.ownerLease.leaseId } : {}),
       agentId: record.actualAgentId, workspaceBinding: record.workspaceBinding,
@@ -7371,7 +7395,7 @@ export class InvocationService {
     }
     const queue = this.steerQueues.get(req.chatId) ?? [];
     if (queue.length >= MAX_STEER_QUEUE_DEPTH) {
-      throw new Error("Steering queue is full; wait for the current Desktop run to settle");
+      throw Object.assign(new Error("invocation_steer_queue_full"), { code: "invocation_steer_queue_full" });
     }
     const durable = persistQueuedSteer({
       ...(preflightSteerId ? { id: preflightSteerId } : {}),
@@ -7538,7 +7562,7 @@ export class InvocationService {
    * owner_control_episode_reply_lost) stayed uncertain for five days.
    */
   steeringRecovery(chatId: string): InvocationSteerRecovery[] {
-    const held = listRecoverableQueuedSteers()
+    const held = listRecoverableQueuedSteers(chatId)
       .filter((row) => row.chatId === chatId && row.recoveryState === "held")
       .map(steeringRecoveryFromDurable);
     let uncertain: InvocationSteerRecovery[] = [];

@@ -111,7 +111,7 @@ const SETTINGS_META: Record<OneSettingsKey, { titleKo: string; titleEn: string; 
   briefing: { titleKo: "브리핑 알림", titleEn: "Briefing notifications", descriptionKo: "One이 먼저 알려 주는 빈도와 방식, 방해 금지 시간을 정합니다.", descriptionEn: "Choose how often One reaches out, where it shows up, and when to stay quiet." },
   plugins: { titleKo: "플러그인", titleEn: "Plugins", descriptionKo: "카탈로그에서 설치한 도구를 켜거나 끕니다.", descriptionEn: "Enable or disable tools installed from the catalog." },
   permission: { titleKo: "실행 권한", titleEn: "Execution permission", descriptionKo: "One이 대화와 작업에서 사용할 기본 권한을 정합니다.", descriptionEn: "Choose One's default authority for conversations and work." },
-  models: { titleKo: "모델", titleEn: "Models", descriptionKo: "CEO 오케스트레이터인 One의 기본 모델을 정합니다.", descriptionEn: "Choose the default model for One, the CEO orchestrator." },
+  models: { titleKo: "모델", titleEn: "Models", descriptionKo: "대화에 사용할 One 모델을 선택합니다. 선택은 대화별로 저장됩니다.", descriptionEn: "Choose the One model for a conversation. Each conversation keeps its own selection." },
   multimodal: { titleKo: "멀티모달", titleEn: "Multimodal", descriptionKo: "이미지·영상 작업에 사용할 엔진과 키를 연결합니다.", descriptionEn: "Connect engines and keys for image and video work." },
   media: { titleKo: "결과 미디어", titleEn: "Result media", descriptionKo: "사이드바 결과에서 사진·영상·음성을 표시할지 정합니다.", descriptionEn: "Choose which photos, videos, and audio appear in result sidebars." },
   concurrency: { titleKo: "동시 실행", titleEn: "Concurrency", descriptionKo: "터미널을 쓰는 작업의 동시 실행 수입니다. 등록할 팀원 수와는 별개입니다.", descriptionEn: "Set concurrent terminal runs independently of the number of registered teammates." },
@@ -219,7 +219,7 @@ function ModelSettings({ locale, runtime, models, onSelect }: { locale: string; 
     try { await onSelect(nextRuntime, model); } finally { setBusyKey(null); }
   };
   return <>
-    <div className={styles.policyNote}><IconSparkles size={16} /><div><strong>{locale === "ko" ? "직원 모델은 자동 배정" : "Worker models stay automatic"}</strong><span>{locale === "ko" ? "여기서는 One의 기본 모델을 선택합니다." : "Choose One’s default model here."}</span></div></div>
+    <div className={styles.policyNote}><IconSparkles size={16} /><div><strong>{locale === "ko" ? "직원 모델은 자동 배정" : "Worker models stay automatic"}</strong><span>{locale === "ko" ? "대화에 사용할 One 모델을 선택합니다." : "Choose the One model for a conversation."}</span></div></div>
     {!runtime ? <div className={styles.emptyState}>{locale === "ko" ? "사용 가능한 런타임을 확인하는 중입니다." : "Checking available runtimes."}</div> : <div className={styles.choiceList}>
       {options.map((item) => {
         const active = runtime.kind === item.runtime.kind && runtime.backend === item.runtime.backend && effectiveModelId === item.id;

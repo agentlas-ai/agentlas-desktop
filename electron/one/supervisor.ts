@@ -101,10 +101,12 @@ function bindPersonalFolder(chatId:string):void {
 export function isPersonalSupervisorConversation(chatId:string):boolean {
   return personalSupervisorConversationInDb(getDb(),getOneProfile().oneId,chatId);
 }
-function desktopTasks():SupervisorTask[] {
+function discoveredDesktopTasks() {
   const discovered=new Map(listCanonicalTasks({limit:100,reconcile:false}).map(task=>[task.id,task]));
   for(const chatId of invocationService.activeChatIds()) {const task=getCanonicalTaskForChat(chatId);if(task) discovered.set(task.id,task);}
-  return [...discovered.values()].flatMap(task=>{
+  return discovered;
+}
+function desktopTaskProjection(task:ReturnType<typeof listCanonicalTasks>[number]):SupervisorTask[] {
     const chat=task.originChatId ? getChat(task.originChatId) : null;
     if (!chat || chat.kind==="division") return [];
     const receipt=invocationService.latestReceipt(chat.id);
@@ -120,14 +122,18 @@ function desktopTasks():SupervisorTask[] {
       owner:nativeOwner?.ownerKind==="daemon" ? "work-daemon" as const : "desktop-main" as const,controls:!["cancelling","cancelled","completed","paused","pausing","failed"].includes(state)
         ? active ? ["steer" as const,"cancel" as const] : goal ? ["cancel" as const] : [] : [],
       result,resultVerified:!!result && task.status==="completed" && receipt?.status==="completed" && hasPassedTaskForceExecutionVerification(receipt.runId)}];
-  });
+}
+function desktopTasks():SupervisorTask[] {
+  return [...discoveredDesktopTasks().values()].flatMap(desktopTaskProjection);
 }
 /** Same native task projection as Supervisor controls; no async snapshot cache or new version. */
 export function currentOneNativeWorkControl(row:Readonly<SupervisorRequestRow>,purpose:'active'|'result'='active'):string|null {
   if(!row.task_id||!row.run_id||row.one_id!==getOneProfile().oneId)return null;
   if(getDb().prepare("SELECT 1 FROM one_supervisor_requests WHERE task_id=? AND run_id=? AND kind='cancel' AND state<>'failed'").get(row.task_id,row.run_id))return null;
-  const task=desktopTasks().find(value=>value.taskId===row.task_id&&value.runId===row.run_id);
-  if(!task)return null;
+  // Keep the exact listing eligibility, but read chat/Goal/result custody only for this task.
+  const canonicalTask=discoveredDesktopTasks().get(row.task_id);
+  const task=canonicalTask ? desktopTaskProjection(canonicalTask)[0] : undefined;
+  if(!task || task.runId!==row.run_id)return null;
   if(purpose==='result')return row.state==='completed'&&task.state==='completed'&&task.resultVerified?task.controlVersion:null;
   if(['completed','cancelled','failed','interrupted','cancelling'].includes(task.state))return null;
   const job=nativeWorkQueue?.get(row.command_id);

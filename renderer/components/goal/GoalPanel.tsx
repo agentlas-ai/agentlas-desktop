@@ -10,6 +10,7 @@
  */
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { ipc, ipcEvents } from "@/lib/ipc";
+import { createCoalescedRefresh } from "@/lib/one-refresh-coordinator";
 import { IconArrowUp, IconCheck, IconEdit, IconPlus, IconTrash } from "@/components/Icon";
 import { AgiUnblockLimits } from "@/components/agi/AgiUnblockLimits";
 import type { GoalPanelEdit, GoalPanelEditResult, GoalPanelNode, GoalPanelSuggestion, GoalPanelText, GoalPanelView } from "@shared/goal-panel";
@@ -31,20 +32,41 @@ export function requestGoalPanelOpen(chatId: string | null | undefined): boolean
 export function useGoalPanel(chatId: string | null): { view: GoalPanelView | null; refresh: () => void; replace: (view: GoalPanelView | null) => void } {
   const [view, setView] = useState<GoalPanelView | null>(null);
   const generation = useRef(0);
+  const currentChatId = useRef(chatId);
+  currentChatId.current = chatId;
+  const readerRef = useRef<{ chatId: string | null; request(): void } | null>(null);
   const refresh = useCallback(() => {
-    const read = ipc()?.goalPanel?.view;
-    const current = ++generation.current;
-    if (!chatId || !read) { setView(null); return; }
-    void read(chatId).then((next) => { if (current === generation.current) setView(next ?? null); }).catch(() => undefined);
+    if (currentChatId.current === chatId && readerRef.current?.chatId === chatId) readerRef.current.request();
   }, [chatId]);
   useEffect(() => {
-    refresh();
+    let disposed = false;
+    const currentChat = () => !disposed && currentChatId.current === chatId;
+    const reader = createCoalescedRefresh<number>(async (current) => {
+      if (!currentChat() || current !== generation.current) return;
+      const read = ipc()?.goalPanel?.view;
+      if (!chatId || !read) { setView(null); return; }
+      try {
+        const next = await read(chatId);
+        if (next && next.chatId !== chatId) return;
+        if (currentChat() && current === generation.current) setView(next ?? null);
+      } catch { /* Keep the last confirmed panel when an observation fails. */ }
+    }, (_previous, incoming) => incoming);
+    const owner = { chatId, request() {
+      if (currentChat()) void reader.request(++generation.current);
+    } };
+    readerRef.current = owner;
+    setView(null);
+    owner.request();
     const off = ipcEvents()?.onStoreChanged?.((change) => {
       if ((change.entity === "chat" && (!change.id || change.id === chatId)) || change.entity === "long-run") refresh();
     });
-    return () => { off?.(); };
+    return () => { disposed = true; ++generation.current; reader.dispose(); off?.(); if (readerRef.current === owner) readerRef.current = null; };
   }, [chatId, refresh]);
-  const replace = useCallback((next: GoalPanelView | null) => { generation.current += 1; setView(next); }, []);
+  const replace = useCallback((next: GoalPanelView | null) => {
+    if (currentChatId.current !== chatId || readerRef.current?.chatId !== chatId || (next && next.chatId !== chatId)) return;
+    generation.current += 1;
+    setView(next);
+  }, [chatId]);
   return { view, refresh, replace };
 }
 

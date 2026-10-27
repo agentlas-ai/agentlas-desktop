@@ -257,8 +257,9 @@ export interface UpdaterControllerDependencies {
   /** Fence scheduler dispatch and await live effects before any native quit.
    * Separate from optional backup writer quiescence; never abort active work. */
   prepareAutomationInstall?: () => Promise<() => void>;
-  captureContinuity: (targetVersion: string) => Promise<ContinuitySnapshot>;
+  captureContinuity: (targetVersion: string, signal?: AbortSignal) => Promise<ContinuitySnapshot>;
   verifyContinuity: (snapshot: ContinuitySnapshot) => Promise<ContinuityVerification>;
+  shutdownContinuityWorkers?: () => Promise<void>;
   broadcast: (state: UpdaterState) => void;
   revealPath: (filePath: string) => void;
   logger?: Pick<Console, "log" | "warn" | "error">;
@@ -771,6 +772,8 @@ export class DesktopUpdaterController {
   private downloadPromise: Promise<void> | null = null;
   private availablePromise: Promise<void> | null = null;
   private installPromise: Promise<UpdaterActionResult> | null = null;
+  private disposed = false;
+  private continuityAbort: AbortController | null = null;
   /** True from native quitAndInstall handoff until its terminal resolution. */
   private nativeInstallHandedOff = false;
   private availableVersion: string | null = null;
@@ -1777,7 +1780,9 @@ export class DesktopUpdaterController {
     this.timer.unref?.();
   }
 
-  dispose(): void {
+  async dispose(): Promise<void> {
+    this.disposed = true;
+    this.continuityAbort?.abort();
     this.nativeInstallHandedOff = false;
     this.deferredSessionRestoreRequested = false;
     if (this.initialTimer) clearTimeout(this.initialTimer);
@@ -1794,6 +1799,7 @@ export class DesktopUpdaterController {
     for (const { event, listener } of this.listeners) this.deps.updater.removeListener?.(event, listener);
     this.listeners.length = 0;
     this.initialized = false;
+    await this.deps.shutdownContinuityWorkers?.();
   }
 
   private isNewer(version: string | undefined): boolean {
@@ -2092,7 +2098,7 @@ export class DesktopUpdaterController {
 
   private async installOnce(): Promise<UpdaterActionResult> {
     const version = this.state.version;
-    if (!version) return { accepted: false, state: this.state };
+    if (!version || this.disposed) return { accepted: false, state: this.state };
     // Answer the press at once. The checks below took 42 s with no visible change and no log line on a busy
     // production app (1.3.2 -> 1.3.3, 2026-10-12); the owner's rule is that pressing update visibly updates.
     const pressed = this.state;
@@ -2138,22 +2144,30 @@ export class DesktopUpdaterController {
       // the previous app version is retained by the native updater.
       let continuity: ContinuitySnapshot | undefined;
       let continuityBoundTimer: ReturnType<typeof setTimeout> | undefined;
+      const continuityAbort = new AbortController();
+      if (this.disposed) return refused();
+      this.continuityAbort = continuityAbort;
       try {
-        // The optional recovery copy must never cost the update: past the bound it is abandoned.
-        continuity = await Promise.race([
-          this.deps.captureContinuity(version),
-          new Promise<never>((_resolve, reject) => {
-            continuityBoundTimer = setTimeout(() => reject(new Error("continuity_capture_timed_out")), 120_000);
-            continuityBoundTimer.unref?.();
-          }),
-        ]);
+        // Start the bound before dispatch. The worker adapter aborts and observes
+        // child exit before rejecting; a raced promise could leave a live writer.
+        continuityBoundTimer = setTimeout(() => continuityAbort.abort(), 120_000);
+        continuityBoundTimer.unref?.();
+        continuity = await this.deps.captureContinuity(version, continuityAbort.signal);
+        if (continuityAbort.signal.aborted) throw new Error("continuity_capture_timed_out");
         this.recoveryBackupPath = continuity.backupPath;
       } catch (error) {
+        if (this.disposed) return refused();
+        if ((error as { code?: string }).code === "continuity_worker_exit_unconfirmed") {
+          this.logger.warn("[updater] continuity worker exit unconfirmed; install remains retryable");
+          return refused();
+        }
         this.logger.warn("[updater] continuity backup failed; installing without a recovery copy", error);
         this.recoveryBackupPath = null;
       } finally {
         if (continuityBoundTimer) clearTimeout(continuityBoundTimer);
+        if (this.continuityAbort === continuityAbort) this.continuityAbort = null;
       }
+      if (this.disposed) return refused();
       stage(continuity ? "recovery copy taken" : "recovery copy skipped");
 
       const journal: InstallJournal = {

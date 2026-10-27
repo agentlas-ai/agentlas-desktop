@@ -53,6 +53,9 @@ export type CapabilityBody =
 export type PostconditionKind = "dialog-closed" | "dialog-open" | "window-count-unchanged" | "element-present" | "element-value-equals";
 export interface Postcondition { kind: PostconditionKind; detail?: Record<string, string | number | boolean> }
 
+// Local provenance only: never projected to the upload wire format. Increment when the explorer's admission policy tightens.
+export const DIALOG_POLICY_REVISION = 2;
+
 export interface Capability {
   id: string;
   tier: CapabilityTier;
@@ -71,6 +74,7 @@ export interface Capability {
   // Absent on published entries: the source itself is the proof. Present on everything Reach observed or built.
   status?: CapabilityStatus;
   verification?: CapabilityVerification;
+  dialogPolicyRevision?: number;
   body?: CapabilityBody;
   postconditions?: Postcondition[];
   // The app fingerprint this capability was proven against. A different fingerprint means "re-verify before trusting".
