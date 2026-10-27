@@ -6,7 +6,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const os = require("node:os");
-const { spawn, execFileSync } = require("node:child_process");
+const { spawn, spawnSync, execFileSync } = require("node:child_process");
 
 function portableCommand(command, args, platform = process.platform, executable = process.execPath, env = process.env) {
   if (/^node(?:\.exe)?$/i.test(command)) return { command: executable, args };
@@ -201,6 +201,15 @@ function removeStageTemp(temp) {
   return !fs.existsSync(temp.dir) && !fs.existsSync(temp.marker);
 }
 
+// The owned contracts read the prepared Core tree (dist/embedded-core); no earlier step of the macOS preflight job
+// prepares it, so a clean runner would fail the second gate on a missing receipt. Preparing it is a local, deterministic
+// copy of the pinned Core checkout and the same command the packaging flow runs.
+function prepareStage(stage, env, fd) {
+  if (stage !== "MAC_PRIVATE_CONTRACTS") return 0;
+  const result = spawnSync(process.platform === "win32" ? "npm.cmd" : "npm", ["run", "--silent", "prepare:embedded-core"], { env, stdio: ["ignore", fd, fd] });
+  return Number.isInteger(result.status) ? result.status : 1;
+}
+
 async function run(stage, command, args) {
   let fd;
   try { fd = privateLog(); }
@@ -230,6 +239,13 @@ async function run(stage, command, args) {
     const selected = portableCommand(command, args);
     stageTemp = cleanStageTemp(stage);
     const childEnv = stageTemp ? { ...process.env, TMPDIR: stageTemp.dir } : process.env;
+    const prepared = prepareStage(stage, childEnv, fd);
+    if (prepared !== 0) {
+      process.stdout.write(`RELEASE_STAGE_FAILURE_HINT ${stage} step=prepare:embedded-core\n`);
+      process.stdout.write(`RELEASE_STAGE_FAILED ${stage} exit=${prepared}\n`);
+      process.exitCode = prepared;
+      return;
+    }
     child = spawn(selected.command, selected.args, { env: childEnv, stdio: ["inherit", fd, fd], windowsHide: true, detached: process.platform !== "win32" });
     for (const [signal, handler] of handlers) process.on(signal, handler);
     const closed = new Promise(resolve => {
