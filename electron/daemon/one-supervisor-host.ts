@@ -131,10 +131,6 @@ export function createDaemonOneSupervisorHost(options: { bootId: string; assertO
 
     }
     authority(); if (!service) fail("supervisor_daemon_not_adopted");
-    if(raw.op==='work.source') {
-      authority(); service.assertHostWriteAuthority(identity!.oneId);
-      return (await import('../business/employee-agent-work-dispatch')).readEmployeeAgentWorkOriginal(raw.input);
-    }
     if(raw.op==='personal.command') {
       if(!exact(raw.input,['method','args']) || typeof raw.input.method!=='string' || !Array.isArray(raw.input.args) || raw.input.args.length>1)fail('personal_data_native_command_invalid');
       authority(); service.assertHostWriteAuthority(identity!.oneId);

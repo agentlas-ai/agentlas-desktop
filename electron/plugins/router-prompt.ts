@@ -111,6 +111,23 @@ function listInstalledPlugins(): InstalledPlugin[] {
   return plugins;
 }
 
+/** The SKILL.md of one declared workflow of an installed skill plugin, or null (unknown plugin, undeclared workflow, missing file). */
+export function installedPluginWorkflowPath(slug: string, workflow: string): string | null {
+  const plugin = listInstalledPlugins().find((candidate) => candidate.slug === slug);
+  if (!plugin || !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(workflow) || !plugin.workflows.includes(workflow)) return null;
+  const file = path.join(plugin.skillsDir, workflow, "SKILL.md");
+  try { return fs.statSync(file).isFile() ? file : null; } catch { return null; }
+}
+
+const REQUESTED_WORKFLOW_MAX_CHARS = 6_000;
+/** The owner-requested workflow's skill text without its front matter, or "" when it is missing or larger than the bound. */
+function requestedWorkflowBody(file: string): string {
+  try {
+    const body = fs.readFileSync(file, "utf8").replace(/^\uFEFF/, "").replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, "").trim();
+    return body && body.length <= REQUESTED_WORKFLOW_MAX_CHARS ? body : "";
+  } catch { return ""; }
+}
+
 /** 테스트·진단용 — 캐시를 비운다. */
 export function resetPluginRouterCache(): void {
   cache = null;
@@ -185,8 +202,8 @@ export function pluginRouterPrompt(userPrompt?: string): string {
   return [catalog ? renderPluginCatalog(catalog) : "", explicitPluginRouterPrompt(userPrompt)].filter(Boolean).join("\n");
 }
 
-function routedPointer(p: InstalledPlugin, reason?: string): string {
-  return `- ${p.mention}: read ${p.routerPath}${reason ? ` (${reason.slice(0, 120)})` : ""}`;
+function routedPointer(p: InstalledPlugin, reason?: string, skillPath = p.routerPath): string {
+  return `- ${p.mention}: read ${skillPath}${reason ? ` (${reason.slice(0, 120)})` : ""}`;
 }
 
 /**
@@ -195,14 +212,20 @@ function routedPointer(p: InstalledPlugin, reason?: string): string {
  * 턴 컨텍스트(턴 단위)에 실리므로 다른 대화·다음 턴으로 새지 않는다. 이미 멘션된 플러그인은
  * 현재 턴의 명시 멘션 포인터가 있으므로 뺀다.
  */
-export function selectedPluginRouterPrompt(selected: ReadonlyArray<{ slug: string; reason?: string }>, userPrompt = ""): string {
+export function selectedPluginRouterPrompt(selected: ReadonlyArray<{ slug: string; reason?: string; workflow?: string }>, userPrompt = ""): string {
   if (!selected.length) return "";
   const bySlug = new Map(listInstalledPlugins().map((plugin) => [plugin.slug, plugin]));
   const blocks: string[] = [];
   for (const choice of selected) {
     const plugin = bySlug.get(choice.slug);
     if (!plugin || mentioned(userPrompt, plugin)) continue;
-    blocks.push(routedPointer(plugin, choice.reason));
+    // A workflow the owner asked for from a button or menu (owner-capability-request.ts) is pointed at directly instead of the router,
+    // and its skill text travels with this turn: the owner already chose it, so the model does not have to open it first (real app
+    // 2026-10-28, claude-haiku-5-5: with the pointer alone it wrote the draft as prose 5/5). Only this one owner-chosen workflow,
+    // bounded; every other routed plugin stays a one-line pointer.
+    const workflowPath = choice.workflow ? installedPluginWorkflowPath(plugin.slug, choice.workflow) : null;
+    blocks.push(routedPointer(plugin, choice.reason, workflowPath || plugin.routerPath));
+    if (workflowPath) { const body = requestedWorkflowBody(workflowPath); if (body) blocks.push(body); }
   }
   if (!blocks.length) return "";
   return ["Routed plugins for this turn (open the router, follow it):", ...blocks].join("\n");

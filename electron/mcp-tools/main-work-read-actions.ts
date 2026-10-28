@@ -1,6 +1,7 @@
 import * as path from "node:path";
 import { planMcpToolIsMutating } from "./proxy-server";
 import { workSessionReadPermissionCall } from "../../shared/work-session-tools";
+import { HARNESS_EFFECT_FREE_READ_OPERATIONS } from "../harness/capability-ports";
 
 /*
  * Main-work recovery only (invocation/main-work-recovery.ts): which MCP calls are effect-free reads. A call that ended without its
@@ -15,15 +16,11 @@ import { workSessionReadPermissionCall } from "../../shared/work-session-tools";
  * words in its name. Anything not listed, an unknown tool or an unexpected argument shape, stays an effect (fail closed).
  */
 
-/** harness_call operations (agentlas-turn) that only read: each is a `kind: "query"` port in harness/capability-ports.ts whose
- * handler changes nothing the owner or the outside world sees. A query port that shows a card for the owner to act on
+/** harness_call operations (agentlas-turn) that only read: each port declares effectFreeRead in its own declaration
+ * (harness/capability-ports.ts, finance/tools.ts) and is a `kind: "query"` port. A query port that shows a card for the owner to act on
  * (finance.portfolio.propose), maps or opens apps (reach.map), renders files (document.render) or reads another MCP server
- * (mcp.app.resource.read) is not listed. */
-export const MAIN_WORK_HARNESS_READ_OPERATIONS: ReadonlySet<string> = new Set([
-  "finance.load", "finance.search", "finance.query", "finance.analyst.list", "finance.analyst.read", "finance.receipt.read",
-  "finance.report.read", "finance.archives.list", "finance.archives.read", "finance.monitor.runs",
-  "result.read", "tool.result", "document.read", "document.list", "auth.status",
-]);
+ * (mcp.app.resource.read) does not declare it. The set is still closed: an operation without the declaration is an effect. */
+export const MAIN_WORK_HARNESS_READ_OPERATIONS: ReadonlySet<string> = HARNESS_EFFECT_FREE_READ_OPERATIONS;
 
 /** one-team tools whose first-party definitions declare readOnlyHint (shared/graph-authoring.ts ONE_GRAPH_TOOLS,
  * shared/work-session-tools.ts WORK_SESSION_TOOL_DEFINITIONS). Delegation, steering, cancelling, reporting and enabling are not. */

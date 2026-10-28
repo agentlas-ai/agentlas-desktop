@@ -2,28 +2,25 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useT } from "@/lib/i18n";
 import { navigate } from "@/lib/navigation";
-import { IconRefresh, IconEdit, IconFileUp, IconPaperclip, IconArrowLeft, IconArrowUp } from "@/components/Icon";
+import { IconRefresh, IconEdit, IconFileUp, IconArrowLeft } from "@/components/Icon";
 import { IconSearch, IconClose, IconDownload, IconFileText, IconSparkles, IconCheck } from "@/components/Icon";
 import { ChartBlock } from "@/components/ChartBlock";
 import { useFinanceStore } from "@/lib/finance-store";
-import { FINANCE_WORKSPACE_LIMITS, financeEvidenceMetric, parseFinanceEvidenceMetric, createFinanceDashboard, createFinanceReport, createFinanceWidget, exportFinanceCsv, importFinanceCsv, projectFinanceWidget, effectiveFinanceWidget, financeId, type FinanceArchiveRequest, type FinanceArchiveResult, type FinanceArchiveItem, type FinanceMonitorRunsResult, type FinanceAsset, type FinanceReport, type FinanceReportSection, type FinanceSource, type FinanceOperation, type FinanceWidget, type FinanceMonitor, type FinanceMonitorRun, type FinanceAIResult, type FinanceSearchResult, type FinanceDataRequest, type FinanceDataResult, type FinanceWidgetProjection, type FinanceWorkspace as Workspace, } from "@shared/finance";
+import { FINANCE_WORKSPACE_LIMITS, financeEvidenceMetric, parseFinanceEvidenceMetric, createFinanceDashboard, createFinanceReport, createFinanceWidget, importFinanceCsv, projectFinanceWidget, effectiveFinanceWidget, financeId, type FinanceArchiveRequest, type FinanceArchiveResult, type FinanceArchiveItem, type FinanceMonitorRunsResult, type FinanceAsset, type FinanceReport, type FinanceReportSection, type FinanceSource, type FinanceOperation, type FinanceWidget, type FinanceMonitor, type FinanceMonitorRun, type FinanceSearchResult, type FinanceDataRequest, type FinanceDataResult, type FinanceWidgetProjection, type FinanceWorkspace as Workspace, } from "@shared/finance";
 import styles from "./FinanceWorkspace.module.css";
 import { financeReportCompositionSpec, financeReportCompositionTitle } from "@shared/finance-report-presentation";
-import { FinanceAssetResults, FinanceSelectedAsset } from "./FinanceAssetResults";
-import { FinanceInlineArtifact, FinanceInlineResponseText, financeInlineSnapshots, financeInlineCurrent, type FinanceInlineSnapshot } from "./FinanceInlineArtifact";
-import { FinanceInlineQueryResult, financeInlineQuerySnapshots, type FinanceInlineQuerySnapshot } from "./FinanceInlineQueryResult";
-import { FinanceInlineWidget, financeInlineWidgetSnapshots, financeInlineWidgetCurrent, type FinanceInlineWidgetSnapshot } from "./FinanceInlineWidget";
+import { FinanceAssetResults } from "./FinanceAssetResults";
 import { FinanceDataResultView, financeDataVisual, financeMetricForColumns, financeCompactTreasuryTitle } from "./FinanceDataResultView";
 import { FinanceDataConnections } from "./FinanceDataConnections";
 import { FinanceMonitorReceipts, FinanceBriefText } from "./FinanceMonitorReceipts";
 import { FinanceSettingsDialog, FinanceUsageNotices, type FinanceSettingsCategory } from "./FinanceSettingsDialog";
-import { FinanceArtifactGallery, FinanceArtifactChartViewer, financeArtifactTitle, type FinanceArtifactCard } from "./FinanceArtifactGallery";
+import { FinanceArtifactGallery, financeArtifactTitle } from "./FinanceArtifactGallery";
 import { FinanceComputeView, financeComputeKind, financeComputeMetrics } from "./FinanceComputeView";
 import { FinanceReportView, financeReportExportHtml } from "./FinanceReportView";
 import { FinanceDashboardFeed } from "./FinanceDashboardFeed";
 import type { FinanceDashboardFeedsResult } from "@shared/finance-feeds";
-import type { FinanceAnalyst, FinanceAnalystDraft, FinanceAnalystRef, FinanceAnalystRequest, FinanceAnalystResult } from "@shared/finance-analysts";
-import { FinanceAnalysts, FinanceAnalystComposer, FinanceAnalystDraftEditor, financeAnalystPinsCurrent } from "./FinanceAnalysts";
+import type { FinanceAnalyst, FinanceAnalystDraft, FinanceAnalystRequest, FinanceAnalystResult } from "@shared/finance-analysts";
+import { FinanceAnalysts } from "./FinanceAnalysts";
 import { FinancePortfolioImport } from "./FinancePortfolioImport";
 import { FinancePortfolioPanel } from "./FinancePortfolioPanel";
 import type { FinancePlanningRequest, FinancePlanningResult } from "@shared/finance-planning";
@@ -87,27 +84,11 @@ export function financeSelectedWidgetSeries(workspace:Workspace,dashboardId:stri
     const visual=financeDataVisual(result,financeMetricForColumns(result.columns),selectedSeries);
     return visual.kind==="treasury"?visual.label:undefined;
 }
-export interface FinanceAIContext {
-    selectedAssetIds?:string[];
-    selectedSeries?:string;
-    analystRefs?:FinanceAnalystRef[];
-    analystAuthoring?:boolean;
-    analystDraft?:FinanceAnalystDraft;
-    dashboardId: string | null;
-    reportId?: string | null;
-    selectedSectionId?: string | null;
-    selectedWidgetId: string | null;
-    revision: number;
-    workspace: Workspace;
-    signal: AbortSignal;
-    requestId: string;
-    history?:Array<{role:"user"|"assistant";content:string}>;
-}
 export interface FinanceWorkspaceProps {
     /** Existing Work chat surface; production does not fall back to a separate Finance conversation. */
-    workChat?: ReactNode;
+    workChat: ReactNode;
     /** Put a user-selected shortcut in the shared Work draft; execution still requires Send. */
-    onWorkDraft?: (text:string) => void;
+    onWorkDraft: (text:string, capability?: import("@/lib/work-chat-draft").WorkChatCapabilityRequest) => void;
     onPortfolio?:(request:FinancePortfolioRequest,signal:AbortSignal)=>Promise<FinancePortfolioResult>;
     onPlanning?:(request:FinancePlanningRequest,signal:AbortSignal)=>Promise<FinancePlanningResult>;
     onAnalysts?:(request:FinanceAnalystRequest)=>Promise<FinanceAnalystResult>;
@@ -117,7 +98,6 @@ export interface FinanceWorkspaceProps {
     onWorldMarkets?: ()=>Promise<FinanceWorldMarketsResult>;
     onDashboardFeeds?: ()=>Promise<FinanceDashboardFeedsResult>;
     onSearch?: (query: string, signal: AbortSignal) => Promise<FinanceSearchResult>;
-    onAIRequest?: (request: string, context: FinanceAIContext) => Promise<FinanceAIResult>;
     onExport?: (file: {
         name: string;
         mime: string;
@@ -256,22 +236,21 @@ export function useFinanceDashboardResource<T extends { expiresAt: string }>({ s
     return { data: visible?.data ?? null, loading: visible?.loading ?? false, refresh };
 }
 
-export function FinanceWorkspace({ onSearch, onAIRequest, onExport, onOpenResearch, onRefreshData, onScheduleMonitor, onQueryData, onPauseMonitor, onConnectData, onInspectData, onRunMonitor, onMonitorRuns, onQueryAndSave, onArchives, onExperience, onWorldMarkets, onDashboardFeeds, onAnalysts, onPortfolio, onPlanning, experienceRefreshVersion=0, workChat, onWorkDraft }: FinanceWorkspaceProps) {
+export function FinanceWorkspace({ onSearch, onExport, onOpenResearch, onRefreshData, onScheduleMonitor, onQueryData, onPauseMonitor, onConnectData, onInspectData, onRunMonitor, onMonitorRuns, onQueryAndSave, onArchives, onExperience, onWorldMarkets, onDashboardFeeds, onAnalysts, onPortfolio, onPlanning, experienceRefreshVersion=0, workChat, onWorkDraft }: FinanceWorkspaceProps) {
     const { locale } = useT();
     const ko = locale === "ko";
     const l = (k: string, e: string) => ko ? k : e;
     const store = useFinanceStore();
     const { workspace, loading, saving, error, dispatch, undo, redo, canUndo, canRedo } = store;
-    const [tab,setArtifactTab]=useState<Tab>("dashboard");
+    const [,setArtifactTab]=useState<Tab>("dashboard");
     const [artifactDetail,setArtifactDetail]=useState(false);
-    const [chatArtifact,setChatArtifact]=useState<(FinanceArtifactCard&{snapshot?:FinanceInlineSnapshot})|null>(null);
     const [portfolioOpen,setPortfolioOpen]=useState(false);
     const [portfolioFiles,setPortfolioFiles]=useState<File[]>([]);
     const openPortfolio=(files:File[]=[])=>{setPortfolioFiles(files);setPortfolioOpen(true);};
     const [chatTool,setChatTool]=useState<"watchlist"|"sources"|null>(null);
     const [view,setView]=useState<"dashboard"|"chat"|"artifacts">("dashboard");
-    const openChatDraft=(text:string)=>{
-        setRequest(text);onWorkDraft?.(text);
+    const openChatDraft=(text:string,capability?:import("@/lib/work-chat-draft").WorkChatCapabilityRequest)=>{
+        onWorkDraft(text,capability);
         setChatTool(null);setView("chat");
     };
     const toolDialog=useRef<HTMLDialogElement>(null);
@@ -291,8 +270,7 @@ export function FinanceWorkspace({ onSearch, onAIRequest, onExport, onOpenResear
     const [experiencePreparing,setExperiencePreparing]=useState(false);
     const [experienceError,setExperienceError]=useState("");
     const [dataNotice,setDataNotice]=useState(false);const [aiNotice,setAiNotice]=useState(false);
-    const [messages,setMessages]=useState<Array<{id:string;role:"user"|"assistant";text:string;status?:"pending"|"done"|"failed"|"cancelled";retryText?:string;artifactSnapshots?:FinanceInlineSnapshot[];querySnapshots?:FinanceInlineQuerySnapshot[];widgetSnapshots?:FinanceInlineWidgetSnapshot[];assetSearches?:FinanceAIResult["assetSearches"];assetSearchOwner?:string|null;assetSearchRevision?:number;authoring?:boolean;authoringSession?:number}>>([]);
-    const experienceEpoch=useRef(0),chatPendingId=useRef<string|null>(null);
+    const experienceEpoch=useRef(0);
     const consentAccepted=experience?.consent?.version===FINANCE_NOTICE_VERSION;
     const builtinsReady=experience?.builtins?.ready===true&&experience.builtins.phase==="ready";
     const consentReady=consentAccepted&&builtinsReady;
@@ -326,20 +304,12 @@ export function FinanceWorkspace({ onSearch, onAIRequest, onExport, onOpenResear
     const {data:feeds,loading:feedsLoading,refresh:refreshFeeds}=useFinanceDashboardResource({
         scopeKey:feedScopeKey,enabled:consentReady,active:view==="dashboard",load:onDashboardFeeds,
     });
-    const finishChat=(id:string,text:string,status:"done"|"failed"|"cancelled")=>setMessages(previous=>previous.map(message=>message.id===id?{...message,text,status}:message));
     const [editing, setEditing] = useState(false);
     const [selected, setSelected] = useState("");
     const [savedSeries,setSavedSeries]=useState<Record<string,string>>({});
     const [notice, setNotice] = useState("");
-    const [request, setRequest] = useState("");
-    const [resultContext,setResultContext]=useState<{snapshot:FinanceInlineSnapshot;sectionId?:string;revision:number}|null>(null);
-    const [widgetContext,setWidgetContext]=useState<FinanceInlineWidgetSnapshot|null>(null);
-    const widgetContextCurrent=!!widgetContext&&financeInlineWidgetCurrent(widgetContext,workspace);
-    const resultContextCurrent=!!resultContext&&financeInlineCurrent(resultContext.snapshot,workspace)&&(!resultContext.sectionId||resultContext.snapshot.report.sections.some(section=>section.id===resultContext.sectionId));
-    const [analysts,setAnalysts]=useState<FinanceAnalyst[]>([]),[selectedAnalysts,setSelectedAnalysts]=useState<FinanceAnalyst[]>([]);
+    const [analysts,setAnalysts]=useState<FinanceAnalyst[]>([]);
     const [analystsLoading,setAnalystsLoading]=useState(false),[analystsPending,setAnalystsPending]=useState(false),[analystsError,setAnalystsError]=useState("");
-    const [authoringSession,setAuthoringSession]=useState(0);
-    const [analystAuthoring,setAnalystAuthoring]=useState(false),[analystDraft,setAnalystDraft]=useState<FinanceAnalystDraft|null>(null);
     const analystEpoch=useRef(0),analystMutation=useRef(false),analystOwner=useRef(workspace.ownerScope);analystOwner.current=workspace.ownerScope;
     const refreshAnalysts=async()=>{
         if(analystMutation.current)return;
@@ -356,14 +326,11 @@ export function FinanceWorkspace({ onSearch, onAIRequest, onExport, onOpenResear
         catch{if(epoch===analystEpoch.current&&owner===analystOwner.current)setAnalystsError(l("저장 상태가 변경되었거나 요청에 실패했습니다. 새로 고침 후 작성 내용을 확인하세요.","The saved version changed or the request failed. Refresh and review your draft."));return false;}
         finally{if(epoch===analystEpoch.current&&owner===analystOwner.current){analystMutation.current=false;setAnalystsPending(false);}}
     };
-    useEffect(()=>{analystEpoch.current++;analystMutation.current=false;setAnalysts([]);setSelectedAnalysts([]);setAnalystsPending(false);setAnalystsLoading(false);setAnalystsError("");setAnalystAuthoring(false);setAnalystDraft(null);return()=>{analystEpoch.current++;};},[workspace.ownerScope,onAnalysts]);
+    useEffect(()=>{analystEpoch.current++;analystMutation.current=false;setAnalysts([]);setAnalystsPending(false);setAnalystsLoading(false);setAnalystsError("");return()=>{analystEpoch.current++;};},[workspace.ownerScope,onAnalysts]);
     useEffect(()=>{if(consentReady&&onAnalysts)void refreshAnalysts();},[consentReady,onAnalysts,workspace.ownerScope]);
     useEffect(()=>{if(settingsOpen&&settingsCategory==="analysts"&&consentReady)void refreshAnalysts();},[settingsOpen,settingsCategory]);
-    const selectAnalyst=(item:FinanceAnalyst)=>{if(analystAuthoring)return;setSelectedAnalysts(previous=>previous.some(ref=>ref.id===item.id)?previous.map(ref=>ref.id===item.id?item:ref):previous.length<3?[...previous,item]:previous);};
-    const beginAnalystAuthoring=(draft?:FinanceAnalystDraft)=>{if(!onAnalysts){setAnalystsError(l("이 앱에서는 Analyst 만들기를 사용할 수 없습니다.","Analyst creation is unavailable in this app."));return;}if(busy||analystMutation.current)return;if(onWorkDraft){setSettingsOpen(false);openChatDraft(l("Analyst 함께 만들기","Create an Analyst together")+(draft?"\n"+JSON.stringify(draft):""));return;}setAuthoringSession(previous=>previous+1);setAnalystAuthoring(true);setAnalystDraft(draft??null);setSelectedAnalysts([]);setRequest("");setSettingsOpen(false);setChatTool(null);setView("chat");};
-    const exitAnalystAuthoring=()=>{aiAbort.current?.abort();aiAbort.current=null;if(chatPendingId.current)finishChat(chatPendingId.current,l("요청을 중지했습니다.","Request stopped."),"cancelled");chatPendingId.current=null;setBusy(false);setAnalystAuthoring(false);setAnalystDraft(null);setSelectedAnalysts([]);setRequest("");};
+    const beginAnalystAuthoring=(draft?:FinanceAnalystDraft)=>{if(!onAnalysts){setAnalystsError(l("이 앱에서는 Analyst 만들기를 사용할 수 없습니다.","Analyst creation is unavailable in this app."));return;}if(analystMutation.current)return;setSettingsOpen(false);openChatDraft(l("Analyst 함께 만들기","Create an Analyst together")+(draft?"\n"+JSON.stringify(draft):""),{plugin:"finance",workflow:"analyst"});};
 
-    const [busy, setBusy] = useState(false);
     const [search, setSearch] = useState("");
     const [searchEvidence, setSearchEvidence] = useState<FinanceSearchResult | null>(null);
     const [selectedCandidate,setSelectedCandidate]=useState<{asset:FinanceAsset;ownerScope:string|null;revision:number}|null>(null);
@@ -373,7 +340,6 @@ export function FinanceWorkspace({ onSearch, onAIRequest, onExport, onOpenResear
     const [dataQueryText,setDataQueryText]=useState("");
     const [lastDataRequest,setLastDataRequest]=useState<FinanceDataRequest|null>(null);
     const [dataSaving,setDataSaving]=useState(false);
-    const [aiReceipt,setAIReceipt]=useState<{message:string;runtime?:FinanceAIResult["runtime"];status?:FinanceAIResult["status"];operations:FinanceOperation[];savedRevision:number|null}|null>(null);
     const [dataMetric, setDataMetric] = useState("price");
     const [treasuryMonth, setTreasuryMonth] = useState(() => new Date().toISOString().slice(0, 7));
     const globalDataMetric = ["social", "social_search", "macro_news", "treasury_yields"].includes(dataMetric);
@@ -402,18 +368,13 @@ export function FinanceWorkspace({ onSearch, onAIRequest, onExport, onOpenResear
     const [csv, setCsv] = useState("");
     const [csvName, setCsvName] = useState("");
     const [defaultCurrency, setDefaultCurrency] = useState("");
-    const aiAbort = useRef<AbortController | null>(null);
-    const aiApplying = useRef(false);
     const searchAbort = useRef<AbortController | null>(null);
     const latest = useRef(workspace);
     latest.current = workspace;
     useEffect(()=>{
         searchAbort.current?.abort();searchAbort.current=null;setSearching(false);setSearchEvidence(null);setSelectedCandidate(null);
     },[workspace.ownerScope,workspace.revision]);
-    useEffect(()=>{setMessages([]);setResultContext(null);setWidgetContext(null);setChatArtifact(null);},[workspace.ownerScope]);
-    useEffect(()=>{if(resultContext&&!workspace.reports.some(item=>item.id===resultContext.snapshot.report.id)){setResultContext(null);setNotice(l("선택한 결과가 제거되어 대화 대상에서 해제했습니다.","The selected result was removed and cleared from this conversation."));}},[workspace.reports,resultContext]);
-    useEffect(()=>{if(widgetContext&&!workspace.dashboards.some(dashboard=>dashboard.id===widgetContext.dashboardId&&dashboard.widgets.some(widget=>widget.id===widgetContext.widget.id))){setWidgetContext(null);setNotice(l("선택한 메모가 제거되어 대화 대상에서 해제했습니다.","The selected note was removed and cleared from this conversation."));}},[workspace.dashboards,widgetContext]);
-    useEffect(() => () => { aiAbort.current?.abort(); searchAbort.current?.abort(); queryAbort.current?.abort(); refreshAbort.current?.abort(); }, []);
+    useEffect(() => () => { searchAbort.current?.abort(); queryAbort.current?.abort(); refreshAbort.current?.abort(); }, []);
     const widget = dashboard?.widgets.find(w => w.id === selected);
     const compositionWidget=!!widget&&(widget.type==="allocation"||(()=>{const ref=parseFinanceEvidenceMetric(widget.metric),section=ref?workspace.reports.find(report=>report.id===ref.reportId)?.sections.find(item=>item.id===ref.sectionId):undefined;return !!section&&!!financeReportCompositionTitle(section);})());
     const archivedReport=archiveOpen?archiveRead?.workspaceSnapshot.reports.find(r=>r.id===archiveReportId&&archiveRead.reportIds.includes(r.id)):undefined;
@@ -492,73 +453,6 @@ export function FinanceWorkspace({ onSearch, onAIRequest, onExport, onOpenResear
         finally {
             if (searchAbort.current === controller)
                 setSearching(false);
-        }
-    };
-    const ask = async () => {
-        if(!consentReady)return;
-        if(archivedReport){setNotice(l("보관 원본은 읽기 전용입니다. 편집하려면 보고서를 복원하세요.","Archived originals are read only. Restore the report to edit it."));return;}
-        if (!request.trim() || !onAIRequest || busy || (!analystAuthoring&&selectedAnalysts.length>0&&(analystsLoading||!!analystsError||!financeAnalystPinsCurrent(selectedAnalysts,analysts))))
-            return;
-        if(!analystAuthoring&&view==="chat"&&resultContext&&!resultContextCurrent){setNotice(l("선택한 결과가 변경되었습니다. 현재 결과를 다시 선택하거나 대화 대상에서 해제하세요.","The selected result changed. Select the current result or clear it before sending."));return;}
-        if(!analystAuthoring&&view==="chat"&&widgetContext&&!widgetContextCurrent){setNotice(l("선택한 메모가 변경되었습니다. 현재 메모를 다시 선택하거나 대화 대상에서 해제하세요.","The selected note changed. Select the current note or clear it before sending."));return;}
-        if(view==="dashboard")setView("chat");
-        const controller = new AbortController();
-        aiAbort.current = controller;
-        const base = workspace;
-        const submittedAuthoring=analystAuthoring;
-        const submitted=request.trim(),answerId=crypto.randomUUID();chatPendingId.current=answerId;
-        setMessages(previous=>[...previous,{id:crypto.randomUUID(),role:"user",text:submitted,authoring:submittedAuthoring,authoringSession},{id:answerId,role:"assistant",text:"",status:"pending",retryText:submitted,authoring:submittedAuthoring,authoringSession}]);
-        setRequest("");setBusy(true);
-        setAIReceipt(null);
-        try {
-            const contextDashboardId=!submittedAuthoring&&view==="chat"&&widgetContextCurrent?widgetContext!.dashboardId:tab==="reports"&&artifactDetail?null:dashboard?.id??null;
-            const contextWidgetId=!submittedAuthoring&&view==="chat"&&widgetContextCurrent?widgetContext!.widget.id:tab==="dashboard"?selected||null:null;
-            const contextReportId=!submittedAuthoring&&view==="chat"&&widgetContextCurrent?null:!submittedAuthoring&&view==="chat"&&resultContextCurrent?resultContext!.snapshot.report.id:tab==="reports"&&artifactDetail?report?.id??null:null;
-            const selectedSeries=!submittedAuthoring&&!contextReportId?financeSelectedWidgetSeries(base,contextDashboardId,contextWidgetId,contextWidgetId?savedSeries[contextWidgetId]:undefined):undefined;
-            const response = await onAIRequest(submitted, { analystAuthoring:submittedAuthoring,analystRefs:submittedAuthoring?[]:selectedAnalysts.map(({id,revision})=>({id,revision})),...(submittedAuthoring&&analystDraft?{analystDraft}:{}), selectedAssetIds:submittedAuthoring?[]:selectedAsset?[selectedAsset.id]:[], history:messages.filter(message=>!!message.authoring===submittedAuthoring&&(!submittedAuthoring||message.authoringSession===authoringSession)).filter(message=>message.status!=="pending"&&message.status!=="failed"&&message.status!=="cancelled").slice(-12).map(message=>({role:message.role,content:message.text})), workspace: base, dashboardId: contextDashboardId, selectedWidgetId: contextWidgetId, ...(selectedSeries?{selectedSeries}:{}), revision: base.revision, reportId: contextReportId, selectedSectionId: !submittedAuthoring&&view==="chat"&&widgetContextCurrent ? null : !submittedAuthoring&&view==="chat"&&resultContextCurrent ? resultContext!.sectionId??null : tab === "reports" && artifactDetail ? selectedSection || null : null, signal: controller.signal, requestId: crypto.randomUUID() });
-            if (controller.signal.aborted)
-                return;
-            if (latest.current.ownerScope!==base.ownerScope || !submittedAuthoring&&latest.current.revision !== response.baseRevision) {
-                finishChat(answerId,l("화면이 변경되어 제안을 적용하지 않았습니다. 현재 화면으로 다시 요청하세요.","The screen changed, so the proposal was not applied. Retry with the current screen."),"failed");
-                setNotice(l("화면이 먼저 변경되어 AI 제안을 적용하지 않았습니다. 현재 상태로 다시 요청하세요.", "The screen changed before the response arrived. Ask again using the current state."));
-                return;
-            }
-            if(submittedAuthoring&&response.operations?.length)throw new Error("finance_analyst_authoring_operations_refused");
-            if(response.analystDraft)setAnalystDraft(response.analystDraft);
-            let savedRevision: number | null = null;
-            let committed=base;
-            if (response.operations?.length) {
-                aiApplying.current = true;
-                try { committed=await dispatch(response.operations, response.baseRevision);savedRevision=committed.revision;await markCustomized(response.operations); }
-                finally { aiApplying.current = false; }
-                if(controller.signal.aborted){
-                    if(!aiAbort.current)setNotice(l("중지 전에 시작한 화면 변경이 저장되었습니다. 되돌리기로 취소할 수 있습니다.","A screen change already applying before Stop was saved. Use Undo to revert it."));
-                    return;
-                }
-            }
-            if(controller.signal.aborted||aiAbort.current!==controller||latest.current.ownerScope!==base.ownerScope)return;
-            setNotice(savedRevision === null ? "" : l("변경을 저장했습니다.", "Changes saved."));
-            if(!submittedAuthoring){const snapshots=financeInlineSnapshots(response,committed,savedRevision!==null,base);
-                const querySnapshots=financeInlineQuerySnapshots(response,base.ownerScope,committed.revision,snapshots);
-                const widgetSnapshots=financeInlineWidgetSnapshots(response,committed,savedRevision!==null,base);
-                if(snapshots.length||querySnapshots.length||widgetSnapshots.length)setMessages(previous=>previous.map(message=>message.id===answerId?{...message,artifactSnapshots:snapshots,querySnapshots,widgetSnapshots}:message));
-                if(snapshots.length){const snapshot=snapshots.at(-1)!;setWidgetContext(null);setResultContext({snapshot,sectionId:snapshot.report.sections.find(section=>section.projection&&section.presentation!=="supporting"&&section.presentation!=="comparison")?.id,revision:committed.revision});}
-                else if(widgetSnapshots.length===1){setResultContext(null);setWidgetContext(widgetSnapshots[0]);}
-            }
-            if(!submittedAuthoring&&(!response.status||response.status==="ok")&&response.assetSearches?.length)setMessages(previous=>previous.map(message=>message.id===answerId?{...message,assetSearches:response.assetSearches,assetSearchOwner:base.ownerScope,assetSearchRevision:savedRevision??response.baseRevision}:message));
-            finishChat(answerId,response.message,response.status&&!["ok"].includes(response.status)?"failed":"done");
-            setAIReceipt({message:response.message,runtime:response.runtime,status:response.status,operations:response.operations??[],savedRevision});
-        }
-        catch {
-            if (!controller.signal.aborted){
-                finishChat(answerId,l("요청을 완료하지 못했습니다. 다시 시도할 수 있습니다.","The request did not complete. You can retry."),"failed");
-                setNotice(l("AI 요청을 완료하지 못했습니다. 직접 편집은 계속할 수 있습니다.", "The AI request failed. You can continue editing directly."));}
-        }
-        finally {
-            if (aiAbort.current === controller) {
-                setBusy(false);
-                aiAbort.current = null;chatPendingId.current=null;
-            }
         }
     };
     const exportReport = async () => {
@@ -725,16 +619,6 @@ export function FinanceWorkspace({ onSearch, onAIRequest, onExport, onOpenResear
             setReportId(next.id); setSelected(""); setSelectedSection(""); setTab("reports");
         } catch { setNotice(l("화면 변경이 저장된 뒤 보고서를 다시 만드세요.", "Create the report after the screen changes have been saved.")); }
     };
-    const exportWidget = async (dashboardId: string, widgetId: string) => {
-        try {
-            const current = await store.flush();
-            const selectedDashboard = current.dashboards.find(item => item.id === dashboardId);
-            const selectedWidget = selectedDashboard?.widgets.find(item => item.id === widgetId);
-            if (!selectedDashboard || !selectedWidget) throw new Error("finance_widget_not_found");
-            const projection = projectFinanceWidget(current, effectiveFinanceWidget(selectedDashboard, selectedWidget));
-            await download(`finance-${widgetId}.csv`, exportFinanceCsv(projection), "text/csv;charset=utf-8");
-        } catch { setNotice(l("저장 결과를 확인한 뒤 다시 내보내세요.", "Confirm the saved changes before exporting again.")); }
-    };
     const move = (id: string, index: number) => dashboard && void act({ type: "widget.move", dashboardId: dashboard.id, widgetId: id, index });
     const updateWidget = (patch: Partial<FinanceWidget>) => dashboard && widget && void act({ type: "widget.update", dashboardId: dashboard.id, widgetId: widget.id, patch });
     if(experienceLoading)return <main className={styles.root}><h1 className={styles.title}>Agentlas Finance</h1><p role="status">{l("이용 설정을 여는 중…","Loading usage settings…")}</p></main>;
@@ -773,35 +657,9 @@ export function FinanceWorkspace({ onSearch, onAIRequest, onExport, onOpenResear
         void act({ type: "monitor.upsert", monitor: { ...m, status: "paused", nextCheckAt: null } });
     } }, m.status === 'paused' || m.status === 'draft' || (m.status === 'active' && !onPauseMonitor))}{onOpenResearch && m.assetIds[0] && workspace.watchlist.find(a => a.id === m.assetIds[0]) && btn(l("조사 작업으로 이어가기", "Continue as a research task"), () => { const asset = workspace.watchlist.find(a => a.id === m.assetIds[0]); if (asset)
         void onOpenResearch(asset); })}{btn(l("초안 제거", "Remove draft"), () => { void act({ type: "monitor.remove", monitorId: m.id }); }, m.status === 'active')}</div></details><FinanceMonitorReceipts monitor={m} ko={ko} onRun={onRunMonitor} onLoad={onMonitorRuns} onOpenReport={id=>{void openMonitorReport(id);}}/></article>)}</div>{!workspace.monitors.length && <div className={styles.empty}>{l("저장된 모니터링이 없습니다. 먼저 확인할 조건을 초안으로 남길 수 있습니다.", "No monitors saved. Start by drafting the condition you want to check.")}</div>}</section>;
-    const selectResultContext=(snapshot:FinanceInlineSnapshot,sectionId?:string)=>{
-        if(busy||!financeInlineCurrent(snapshot,latest.current))return;
-        setResultContext({snapshot,sectionId,revision:latest.current.revision});setWidgetContext(null);setSelectedCandidate(null);
-    };
-    const selectWidgetContext=(snapshot:FinanceInlineWidgetSnapshot)=>{
-        if(busy||saving||!financeInlineWidgetCurrent(snapshot,latest.current))return;
-        setWidgetContext(snapshot);setResultContext(null);setSelectedCandidate(null);setView("chat");
-    };
-    const openInlineWidget=(snapshot:FinanceInlineWidgetSnapshot)=>{
-        if(busy||saving||!financeInlineWidgetCurrent(snapshot,latest.current)||latest.current.activeDashboardId!==snapshot.dashboardId)return;
-        setSelected(snapshot.widget.id);setEditing(true);setArtifactTab("dashboard");setView("dashboard");
-    };
-    const openInlineReport=(snapshot:FinanceInlineSnapshot)=>{
-        if(!financeInlineCurrent(snapshot,latest.current)){setNotice(l("저장 결과가 변경되었습니다.","The saved result has changed."));return;}
-        setReportId(snapshot.report.id);setArtifactTab("reports");setArtifactDetail(true);setArchiveOpen(false);setSelectedSection("");setEditing(false);setView("artifacts");
-    };
-    const pinInlineReport=async(snapshot:FinanceInlineSnapshot,sectionId:string)=>{
-        try{const base=await store.flush();if(!financeInlineCurrent(snapshot,base))throw new Error("finance_result_changed");
-            const pin=financePinReportSection(base,snapshot.report.id,sectionId,l("대시보드","Dashboard"));
-            if(pin.operations.length){const saved=await dispatch(pin.operations,base.revision);await markCustomized(pin.operations);setResultContext(current=>current&&financeInlineCurrent(current.snapshot,saved)?{...current,revision:saved.revision}:current);}
-            setNotice(l("대시보드에 고정했습니다.","Pinned to dashboard."));
-        }catch{setNotice(l("결과가 변경되었거나 고정하지 못했습니다. 현재 저장 결과를 확인하세요.","The result changed or could not be pinned. Check the current saved result."));}
-    };
-    const expandInlineReport=(snapshot:FinanceInlineSnapshot,sectionId:string)=>{const section=snapshot.report.sections.find(item=>item.id===sectionId);if(section?.projection)setChatArtifact({id:`inline:${snapshot.report.id}:${section.id}`,reportId:snapshot.report.id,sectionId:section.id,title:financeArtifactTitle(section.title),kind:"chart",summary:"",projection:section.projection,section,language:snapshot.report.language,snapshot});};
-    const chooseCandidate=(asset:FinanceAsset)=>{if(busy)return;setSelectedCandidate(current=>current?.asset.id===asset.id&&current.ownerScope===workspace.ownerScope&&current.revision===workspace.revision?null:{asset,ownerScope:workspace.ownerScope,revision:workspace.revision});};
-    const draftAssetQuestion=(asset:FinanceAsset)=>{if(busy)return;setSelectedCandidate({asset,ownerScope:workspace.ownerScope,revision:workspace.revision});openChatDraft(l(`${asset.name} (${asset.symbol})의 최근 실적과 주요 위험을 정리해줘`, `Summarize recent financial results and key risks for ${asset.name} (${asset.symbol}).`));};
-    const assetResults=(result:FinanceSearchResult,query?:string,disabled=false)=><FinanceAssetResults result={result} query={query} ko={ko} selectedAssetId={selectedAsset?.id} watchlistIds={watchlistIds} disabled={busy||disabled} onSelect={chooseCandidate} onWatchlist={asset=>{void act({type:"watchlist.add",asset});}} onResearch={draftAssetQuestion}/>;
-    const visibleChatMessages=messages.filter(message=>!!message.authoring===analystAuthoring&&(!analystAuthoring||message.authoringSession===authoringSession));
-    const aiComposer = <section className={styles.composer} aria-label={l("Agentlas Finance AI", "Agentlas Finance AI")}>{!analystAuthoring&&selectedAsset&&<FinanceSelectedAsset asset={selectedAsset} ko={ko} onRemove={()=>setSelectedCandidate(null)}/>}{!analystAuthoring&&resultContext&&<div className={styles.resultContext}><span>{financeArtifactTitle(resultContext.snapshot.report.title)}{!resultContextCurrent&&<small>{l("결과가 변경됨","Result changed")}</small>}</span><button type="button" disabled={busy} onClick={()=>setResultContext(null)} aria-label={l("대화 대상 결과 해제","Clear result from conversation")} title={l("대화 대상 해제","Clear result")}><IconClose size={15}/></button></div>} {!analystAuthoring&&widgetContext&&<div className={styles.resultContext}><span>{widgetContext.widget.title}{!widgetContextCurrent&&<small>{l("메모가 변경됨","Note changed")}</small>}</span><button type="button" disabled={busy} onClick={()=>setWidgetContext(null)} aria-label={l("대화 대상 메모 해제","Clear note from conversation")} title={l("대화 대상 해제","Clear note")}><IconClose size={15}/></button></div>}{busy&&<span className={styles.srOnly} role="status">{l("요청 처리 중", "Request running")}</span>}<form className={styles.composerForm} onPaste={event=>{if(!onPortfolio||analystAuthoring)return;const images=Array.from(event.clipboardData.files).filter(file=>file.type.startsWith("image/"));if(images.length){event.preventDefault();openPortfolio(images);}}} onSubmit={e => { e.preventDefault(); void ask(); }}><FinanceAnalystComposer value={request} onChange={setRequest} onSubmit={()=>void ask()} disabled={busy} ko={ko} items={analysts} selected={selectedAnalysts} loading={analystsLoading} error={onAnalysts?analystsError:l("이 앱에서는 Analyst를 사용할 수 없습니다.","Analysts are unavailable in this app.")} available={!!onAnalysts} onSelect={selectAnalyst} onRemove={id=>setSelectedAnalysts(previous=>previous.filter(item=>item.id!==id))} onCreate={()=>beginAnalystAuthoring()} authoring={analystAuthoring}/><div className={styles.composerTools}>{!analystAuthoring&&onPortfolio&&iconButton(l("보유자산 사진·직접 입력","Add holdings from image or manually"),<IconPaperclip size={18}/>,()=>openPortfolio())}{!analystAuthoring&&btn(l("Analyst","Analyst"),()=>{setSettingsCategory("analysts");setSettingsOpen(true);})}{!analystAuthoring&&btn(l("자산 찾기","Find assets"),()=>{setView("chat");setChatTool(current=>current==="watchlist"?null:"watchlist");})}{!analystAuthoring&&btn(l("자료 조회","Query data"),()=>{setView("chat");setChatTool(current=>current==="sources"?null:"sources");})}</div>{busy ? <button key="finance-stop" type="button" className={styles.button} onClick={event => { event.preventDefault(); event.stopPropagation(); aiAbort.current?.abort(); aiAbort.current = null; setSelectedCandidate(null); if(chatPendingId.current)finishChat(chatPendingId.current,l("요청을 중지했습니다.","Request stopped."),"cancelled");chatPendingId.current=null;setBusy(false); setNotice(aiApplying.current?l("요청을 중지했습니다. 이미 저장 중인 변경의 결과는 확인 후 되돌릴 수 있습니다.","Stopped the request. A change already being saved may finish; use Undo after checking the result."):l("요청을 중지했습니다. 새로 도착하는 AI 제안은 적용하지 않습니다.","Stopped the request. New AI proposals from it will not be applied.")); }}>{l("중지", "Stop")}</button> : <button key="finance-send" type="submit" className={`${styles.button} ${styles.primary}`} disabled={!onAIRequest || !request.trim() || !!archivedReport || (!analystAuthoring&&selectedAnalysts.length>0&&(analystsLoading||!!analystsError||!financeAnalystPinsCurrent(selectedAnalysts,analysts)))} aria-label={l("요청하기", "Send request")} title={l("요청하기", "Send request")}><IconArrowUp size={20}/></button>}</form>{editing&&widget&&<div className={styles.context}><span className={styles.badge}>{l("선택", "Selection")}: {widget.title}</span></div>}{!onAIRequest && <p className={styles.muted}>{l("AI 실행 경로가 연결되면 현재 화면 상태로 요청할 수 있습니다. 직접 편집과 CSV 가져오기는 지금 사용할 수 있습니다.", "Connect an AI runtime to ask using the current screen state. Direct editing and CSV import are available now.")}</p>}</section>;
+    const chooseCandidate=(asset:FinanceAsset)=>{setSelectedCandidate(current=>current?.asset.id===asset.id&&current.ownerScope===workspace.ownerScope&&current.revision===workspace.revision?null:{asset,ownerScope:workspace.ownerScope,revision:workspace.revision});};
+    const draftAssetQuestion=(asset:FinanceAsset)=>{setSelectedCandidate({asset,ownerScope:workspace.ownerScope,revision:workspace.revision});openChatDraft(l(`${asset.name} (${asset.symbol})의 최근 실적과 주요 위험을 정리해줘`, `Summarize recent financial results and key risks for ${asset.name} (${asset.symbol}).`));};
+    const assetResults=(result:FinanceSearchResult,query?:string,disabled=false)=><FinanceAssetResults result={result} query={query} ko={ko} selectedAssetId={selectedAsset?.id} watchlistIds={watchlistIds} disabled={disabled} onSelect={chooseCandidate} onWatchlist={asset=>{void act({type:"watchlist.add",asset});}} onResearch={draftAssetQuestion}/>;
     return <main className={styles.root} data-testid="finance-workspace">
     <header className={styles.header}><h1 className={styles.title}>Agentlas Finance</h1><form className={styles.topSearch} onSubmit={event=>{event.preventDefault();setChatTool("watchlist");void runSearch();}}><input aria-label={l("자산 검색","Search assets")} placeholder={l("자산 검색","Search assets")} value={search} onChange={event=>setSearch(event.target.value)}/><button type="submit" disabled={searching||!search.trim()} aria-label={l("검색","Search")} title={l("검색","Search")}><IconSearch size={16}/></button></form><div className={styles.actions}>{saving&&<span className={styles.badge} role="status">{l("저장 중", "Saving")}</span>}{iconButton(l("CSV 가져오기", "Import CSV"),<IconFileUp size={20}/>,()=>setImportOpen(v=>!v))}{iconButton(l("되돌리기", "Undo"),<IconArrowLeft size={20}/>,()=>{void undo();},!canUndo)}{iconButton(l("다시 적용", "Redo"),<span className={styles.flipIcon}><IconArrowLeft size={20}/></span>,()=>{void redo();},!canRedo)}</div></header>
     <nav className={styles.tabs} aria-label={l("Agentlas Finance 보기","Agentlas Finance views")}>
@@ -810,7 +668,6 @@ export function FinanceWorkspace({ onSearch, onAIRequest, onExport, onOpenResear
     </nav>
     {view==="artifacts"&&!artifactDetail&&<><FinanceArtifactGallery reports={workspace.reports} ko={ko} onOpen={(id,sectionId)=>{setReportId(id);setSelectedSection(sectionId??"");setArchiveOpen(false);setEditing(false);setArtifactTab("reports");setArtifactDetail(true);}}/><details className={styles.sectionDetails}><summary>{l("보관함","Archives")}</summary>{archivePanel}{archiveRead&&btn(l("선택한 보관 문서 열기","Open selected archived document"),()=>setArtifactDetail(true))}</details></>}
     {view==="chat"&&workChat}
-    {view==="chat"&&workChat===undefined&&<section className={`${styles.chatView} ${visibleChatMessages.length?styles.chatWithMessages:""}`} aria-label="Agentlas Finance">{analystAuthoring&&<div className={styles.analystAuthoring} role="status"><span>{l("Analyst 함께 만들기","Create an Analyst together")}</span><button type="button" className={styles.iconButton} onClick={exitAnalystAuthoring} aria-label={l("Analyst 만들기 종료","Exit Analyst creation")} title={l("종료","Exit")}><IconClose size={16}/></button></div>}<div className={styles.chatMessages} role="log" aria-live="polite">{!visibleChatMessages.length?<div className={styles.chatWelcome}><h2>{analystAuthoring?l("어떤 기준으로 찾아볼까요?","What criteria should we use?"):l("무엇을 살펴볼까요?","What would you like to explore?")}</h2><div className={styles.chatExamples}>{(analystAuthoring?[l("가치주를 찾는 기준을 함께 정리하고 싶어","Help me define criteria for finding value stocks"),l("꾸준한 배당을 받으려면 어떤 기준을 볼까?","What criteria help assess sustainable dividends?")]:[l("관심 종목의 최근 뉴스를 정리해줘","Summarize recent news for my watchlist"),l("자산배분을 계산해줘","Calculate an asset allocation"),l("가격 시나리오 차트를 만들어줘","Create a price scenario chart"),l("대시보드 구성을 바꿔줘","Edit my dashboard layout")]).map(example=><button type="button" key={example} onClick={()=>setRequest(example)}>{example}</button>)}</div></div>:visibleChatMessages.map(message=><article key={message.id} className={`${styles.chatBubble} ${message.role==="user"?styles.userBubble:styles.assistantBubble}`} aria-label={message.role==="user"?l("내 메시지","Your message"):l("AI 답변","AI response")}> {message.assetSearches?.map((entry,index)=><div key={`${message.id}:assets:${index}`}>{assetResults(entry.result,entry.query,message.assetSearchOwner!==workspace.ownerScope||message.assetSearchRevision!==workspace.revision)}</div>)}{message.querySnapshots?.filter(snapshot=>snapshot.ownerScope===workspace.ownerScope).map((snapshot,index)=><FinanceInlineQueryResult key={`${snapshot.entry.datasetId}:${index}`} snapshot={snapshot} messageId={message.id} locale={locale}/>)}{message.artifactSnapshots?.filter(snapshot=>snapshot.ownerScope===workspace.ownerScope).map(snapshot=><FinanceInlineArtifact key={snapshot.report.id} snapshot={snapshot} messageId={message.id} locale={locale} current={financeInlineCurrent(snapshot,workspace)} busy={busy||saving} onExpand={sectionId=>expandInlineReport(snapshot,sectionId)} onOpen={()=>openInlineReport(snapshot)} onPin={sectionId=>{void pinInlineReport(snapshot,sectionId);}} onContinue={sectionId=>selectResultContext(snapshot,sectionId)}/>)}{message.widgetSnapshots?.filter(snapshot=>snapshot.ownerScope===workspace.ownerScope).map(snapshot=><FinanceInlineWidget key={`${snapshot.dashboardId}:${snapshot.widget.id}`} snapshot={snapshot} messageId={message.id} ko={ko} current={financeInlineWidgetCurrent(snapshot,workspace)} busy={busy||saving} canOpen={snapshot.dashboardId===workspace.activeDashboardId} onOpen={()=>openInlineWidget(snapshot)} onContinue={()=>selectWidgetContext(snapshot)}/>)}{message.status==="pending"?<p role="status">{l("응답을 기다리는 중…","Waiting for a response…")}</p>:<FinanceInlineResponseText text={message.text} ko={ko} progressive={!!message.artifactSnapshots?.length||!!message.querySnapshots?.length||!!message.widgetSnapshots?.length}/>} {(message.status==="failed"||message.status==="cancelled")&&<button type="button" className={styles.button} onClick={()=>setRequest(message.retryText??"")}>{l("다시 요청","Retry request")}</button>}</article>)}</div>{analystDraft&&<><FinanceAnalystDraftEditor draft={analystDraft} onChange={setAnalystDraft} pending={analystsPending} working={busy} available={!!onAnalysts} ko={ko} onClose={()=>setAnalystDraft(null)} onSave={()=>{const draft=analystDraft;void changeAnalyst({action:"save",draft}).then(saved=>{if(saved){setAnalystDraft(current=>current===draft?null:current);setAnalystAuthoring(false);setNotice(l("Analyst를 저장했습니다.","Analyst saved."));}});}}/>{analystsError&&<p role="alert" className={styles.notice}>{analystsError}</p>}</>}{aiComposer}</section>}
 
 
     {(workspace.reports.length >= FINANCE_WORKSPACE_LIMITS.reports * 0.8 || workspace.sources.length >= FINANCE_WORKSPACE_LIMITS.sources * 0.8) && <p className={styles.muted}>{l("저장된 보고서", "Saved reports")} {workspace.reports.length}/{FINANCE_WORKSPACE_LIMITS.reports} · {l("자료 출처", "Sources")} {workspace.sources.length}/{FINANCE_WORKSPACE_LIMITS.sources}{workspace.reports.length >= FINANCE_WORKSPACE_LIMITS.reports * 0.8 && ` · ${l("한도 전에 필요한 보고서를 내보내고 보관 자료를 정리하세요. 기존 자료는 자동 삭제하지 않습니다.", "Export needed reports and manage saved material before reaching capacity. Existing data is never automatically deleted.")}`}</p>}
@@ -830,9 +687,7 @@ export function FinanceWorkspace({ onSearch, onAIRequest, onExport, onOpenResear
         void act({ type: "report.update", reportId: report.id, patch: { title } }); }}/></label> : <h2 className={styles.reportTitle}>{financeArtifactTitle(report.title)}</h2>}{reportEditing&&<details className={styles.sectionDetails}><summary>{l("문서 정보", "Document information")}{report.reviewPending?` · ${l("검토 필요", "Review needed")}`:""}</summary><p className={styles.muted}>{date(report.createdAt)} · {l("자료 판본", "Data revision")} {report.sourceRevision} · {l("대시보드 변경과 독립된 고정 결과", "Frozen results, independent of dashboard edits")}</p>{report.reviewPending && <div className={styles.notice}>{l("서술 검토가 필요한 초안입니다. 숫자·조건·근거와 문장이 일치하는지 확인하세요.", "This draft needs narrative review. Check that its text matches the figures, conditions and evidence.")}{!archivedReport&&btn(l("문장 검토 완료 표시", "Mark narrative reviewed"), () => { void act({ type: "report.update", reportId: report.id, patch: { reviewPending: false } }, l("사용자 검토 표시를 저장했습니다. 자동 사실 검증 결과가 아닙니다.", "Saved your review mark. This is not an automated fact check.")); })}</div>}<div className={styles.actions}>{!archivedReport&&(report.dashboardSnapshot ? btn(l("새 자료로 별도 버전 만들기", "Create a refreshed version"), () => { void dispatch({ type: "report.refresh", reportId: report.id }).then(saved => { setReportId(saved.reports[saved.reports.length - 1].id); setNotice(l("기존 문장과 보고서를 보존하고 새 버전을 만들었습니다.", "Preserved the original report and text in a new version.")); }).catch(() => setNotice(l("보고서를 갱신하지 못했습니다.", "Could not refresh the report."))); }) : btn(l("원자료를 다시 조회", "Retrieve source data again"), () => { setDataResult(null); setTab("sources"); }))}</div></details>}{report.sections.map((section, index) => {if(!reportEditing&&(financeReportMetadataOnly(section)||(report.sections.some(item=>!!financeComputeKind(item))&&section.kind==="sources")))return null;const sectionContent=<section id={`finance-report-section-${section.id}`} className={`${styles.reportSection} ${selectedSection === section.id ? styles.selected : ""}`} key={section.id} onClick={() => setSelectedSection(section.id)}><div className={styles.cardHead}>{reportEditing ? <DraftField value={financeStatus(section.title,ko)} label={l("섹션 제목", "Section title")} onCommit={title => { if (title.trim())
         void act({ type: "report.section.update", reportId: report.id, sectionId: section.id, patch: { title } }); }}/> : <h3>{financeArtifactTitle(financeStatus(section.title,ko))}</h3>}{reportEditing&&<span className={styles.badge}>{section.projection ? l("고정 관측", "Frozen data") : l("서술", "Narrative")}</span>}</div>{reportEditing ? <DraftField multiline value={financeMessage(section.narrative,ko)} label={l("섹션 본문", "Section narrative")} onCommit={narrative => { void act({ type: "report.section.update", reportId: report.id, sectionId: section.id, patch: { narrative } }); }}/> : section.narrative ? <FinanceBriefText value={financeMessage(section.narrative,ko)} ko={ko}/> : section.kind === 'summary' ? <p className={styles.muted}>{l("문서 편집에서 핵심 판단과 확인할 가정을 작성하세요.", "Write your conclusions and assumptions in Edit document.")}</p> : null}{section.projection && <>{reportEditing&&btn(l("고정","Pin"),()=>{void pinReportSection(section);},saving)}{financeComputeKind(section)||financeComputeMetrics(section)?<FinanceComputeView section={section} ko={ko}/>:section.widget&&!parseFinanceEvidenceMetric(section.widget.metric)?<Projection widget={section.widget} projection={section.projection} ko={ko} inspect={reportEditing}/>:<FinanceDataResultView key={`${report.id}:${section.id}`} result={financeFrozenDataResult(section.projection, archivedReport ? archiveRead!.workspaceSnapshot.sources : workspace.sources)} locale={ko?"ko":"en"} compact showVisual={section.widget?.chartType!=="table"} chartType={section.widget?.chartType}/>}</>}{reportEditing && <div className={styles.cardControls}>{btn(l("위로", "Up"), () => { void act({ type: "report.section.move", reportId: report.id, sectionId: section.id, index: index - 1 }); }, index === 0)}{btn(l("아래로", "Down"), () => { void act({ type: "report.section.move", reportId: report.id, sectionId: section.id, index: index + 1 }); }, index === report.sections.length - 1)}{btn(l("섹션 숨기기", "Hide section"), () => { void act({ type: "report.section.remove", reportId: report.id, sectionId: section.id }); })}</div>}</section>;return sectionContent;})}</article> : <div className={styles.empty}>{l("대시보드의 조건과 자료를 고정한 보고서를 만드세요. 제목·서술·섹션 순서를 직접 편집할 수 있습니다.", "Create a frozen report from your dashboard. Edit the title, narrative and section order.")}</div>}</section>}
     {chatTool === "sources" && <dialog key="sources" ref={toolDialog} className={`${styles.toolsPanel} ${styles.toolsDialog}`} aria-label={l("자료 조회 도구","Data query tools")} onCancel={event=>{event.preventDefault();setChatTool(null);}} onClick={event=>{if(event.target!==event.currentTarget)return;const rect=event.currentTarget.getBoundingClientRect();if(event.clientX<rect.left||event.clientX>rect.right||event.clientY<rect.top||event.clientY>rect.bottom)setChatTool(null);}}><div className={`${styles.toolsHead} ${styles.queryHead}`}><h2 className={styles.sectionHeading}>{l("자료 조회","Query data")}</h2>{iconButton(l("닫기","Close"),<IconClose size={18}/>,()=>setChatTool(null))}</div><div className={styles.queryBody}>{globalDataMetric&&<label className={styles.label}>{l("검색어 · 계정","Query or author")}<input className={styles.input} value={dataQueryText} onChange={e=>setDataQueryText(e.target.value)} placeholder={l("예: @federalreserve.gov 또는 조사 키워드","e.g. @federalreserve.gov or research keyword")}/></label>}<form onSubmit={e => { e.preventDefault(); void queryData(); }}>{!globalDataMetric&&<label className={styles.label}>{l("자산", "Asset")}<select className={styles.select} value={dataAssetId || (workspace.watchlist.length === 1 ? workspace.watchlist[0].id : "")} onChange={e => { queryAbort.current?.abort(); setQuerying(false); setDataResult(null); setDataAssetId(e.target.value); }}><option value="">{l("관심 자산을 선택하세요", "Choose a saved asset")}</option>{workspace.watchlist.map(asset => <option key={asset.id} value={asset.id}>{asset.symbol} · {asset.name} · {asset.exchange}</option>)}</select></label>}{dataMetric==="treasury_yields"&&<label className={styles.label}>{l("조회 월","Month")}<input type="month" className={styles.input} min="2000-01" max="2099-12" value={treasuryMonth} onChange={e=>{queryAbort.current?.abort();setQuerying(false);setDataResult(null);setTreasuryMonth(e.target.value);}}/></label>}<div className={styles.actions} style={{ marginTop: 12 }}><select className={styles.select} value={dataMetric} onChange={e => { queryAbort.current?.abort(); setQuerying(false); setDataResult(null); setDataQueryText(""); setDataMetric(e.target.value); }} aria-label={l("자료 종류", "Data category")}>{[["price", l("가격", "Prices")], ["price_history", l("가격 이력", "Price history")], ["news", l("뉴스", "News")], ["filings", l("공시", "Filings")], ["social", l("공식 계정 글", "Author posts")], ["social_search",l("SNS 키워드 검색","Social keyword search")], ["company_facts",l("기업 재무","Company facts")], ["macro_news",l("거시 뉴스","Macro news")], ["treasury_yields",l("국채 수익률","Treasury yields")], ["etf_holdings", l("ETF 편입", "ETF holdings")],["nav",l("펀드 NAV","Fund NAV")]].map(([id, title]) => <option value={id} key={id}>{title}</option>)}</select><button className={`${styles.button} ${styles.primary}`} disabled={!onQueryData || querying || dataSaving || (!dataQueryText.trim()&&!dataAssetId&&workspace.watchlist.length!==1&&!["social","macro_news","treasury_yields"].includes(dataMetric))}>{querying ? l("조회 중…", "Querying…") : l("자료 조회", "Retrieve data")}</button>{querying && btn(l("중지", "Stop"), () => { queryAbort.current?.abort(); setQuerying(false); })}</div></form>{dataResult && <div className={styles.importPreview}>{dataResult.rows.length>0&&btn(onQueryAndSave?l("다시 조회해 저장","Retrieve again and save"):l("저장","Save"),()=>{void (onQueryAndSave?persistDataResult("report"):saveDataReport());},dataSaving||querying)}<FinanceDataResultView key={`${lastDataRequest?.metrics[0]}:${dataResult.retrievedAt}`} result={dataResult} metric={lastDataRequest?.metrics[0]} locale={ko?"ko":"en"} compact/></div>}{!onQueryData && <p className={styles.muted}>{l("자료 조회 실행 경로가 연결되지 않았습니다.", "The data-query runtime is not connected.")}</p>}</div></dialog>}
-    {view==="chat"&&aiReceipt&&<details className={styles.receipt} aria-label={l("AI 실행과 화면 변경 기록","AI execution and screen change record")}><summary>{l("변경 내역","Changes")}</summary><h3>{l("방금 요청한 작업","Your latest request")}</h3><span className={styles.badge}>{financeStatus(aiReceipt.status||"ok",ko)}</span><div className={styles.evidenceChips}><span className={styles.badge}>{aiReceipt.savedRevision===null?l("답변만 · 저장 변경 없음","Answer only · no saved changes"):`${l("저장됨","Saved")} v${aiReceipt.savedRevision}`}</span>{aiReceipt.runtime&&<span className={styles.badge}>{aiReceipt.runtime.kind} · {aiReceipt.runtime.model||l("모델 미확인","Model unspecified")}</span>}<span className={styles.badge}>{aiReceipt.operations.length} {l("개 변경 제안","proposed changes")}</span></div><FinanceMessage value={aiReceipt.message} ko={ko}/>{aiReceipt.operations.length>0&&<details><summary className={styles.muted}>{l("적용 요청 내역","Requested changes")}</summary><ul>{aiReceipt.operations.map((operation,index)=><li key={index} className={styles.muted}>{financeStatus(operation.type,ko)}</li>)}</ul></details>}<p className={styles.muted}>{l("AI가 작성한 문장과 실제 자료 조회·저장 결과를 구분해 확인하세요.","Distinguish generated text from actual data retrieval and saved results.")}</p></details>}
-    {chatArtifact&&<FinanceArtifactChartViewer card={chatArtifact} ko={ko} onClose={()=>setChatArtifact(null)} onOpenDocument={()=>{const id=chatArtifact.reportId;setChatArtifact(null);const saved=workspace.reports.find(report=>report.id===id),section=saved?.sections.find(section=>section.id===chatArtifact.sectionId);if(!saved||chatArtifact.snapshot&&!financeInlineCurrent(chatArtifact.snapshot,workspace)||JSON.stringify(section)!==JSON.stringify(chatArtifact.section)){setNotice(l("문서를 찾을 수 없습니다.","Document not found."));return;}setReportId(id);setArtifactTab("reports");setArtifactDetail(true);setArchiveOpen(false);setSelectedSection("");setEditing(false);setView("artifacts");}}/>}
     {portfolioOpen&&onPortfolio&&<FinancePortfolioImport key={workspace.ownerScope??"local"} ko={ko} locale={locale} revision={workspace.revision} initialFiles={portfolioFiles} onPortfolio={onPortfolio} onClose={()=>{setPortfolioOpen(false);setPortfolioFiles([]);}} onSaved={message=>setNotice(message)}/>}
-    <FinanceSettingsDialog open={settingsOpen} ko={ko} state={experience} pending={experiencePending} preparing={experiencePreparing} error={experienceError} onClose={()=>setSettingsOpen(false)} onChange={updateExperience} initialCategory={settingsCategory} analystContent={<FinanceAnalysts items={analysts} loading={analystsLoading} pending={analystsPending||busy} error={onAnalysts?analystsError:l("이 앱에서는 Analyst를 사용할 수 없습니다.","Analysts are unavailable in this app.")} available={!!onAnalysts} ko={ko} onRefresh={()=>void refreshAnalysts()} onCoCreate={beginAnalystAuthoring} onSave={(draft,id,expectedRevision)=>changeAnalyst({action:"save",draft,...(id?{id,expectedRevision}:{})})} onRemove={item=>changeAnalyst({action:"remove",id:item.id,expectedRevision:item.revision})}/>} dataConnections={<FinanceDataConnections ko={ko} onConnect={onConnectData} onInspect={onInspectData}/>} monitorContent={monitorContent}/>
+    <FinanceSettingsDialog open={settingsOpen} ko={ko} state={experience} pending={experiencePending} preparing={experiencePreparing} error={experienceError} onClose={()=>setSettingsOpen(false)} onChange={updateExperience} initialCategory={settingsCategory} analystContent={<FinanceAnalysts items={analysts} loading={analystsLoading} pending={analystsPending} error={onAnalysts?analystsError:l("이 앱에서는 Analyst를 사용할 수 없습니다.","Analysts are unavailable in this app.")} available={!!onAnalysts} ko={ko} onRefresh={()=>void refreshAnalysts()} onCoCreate={beginAnalystAuthoring} onSave={(draft,id,expectedRevision)=>changeAnalyst({action:"save",draft,...(id?{id,expectedRevision}:{})})} onRemove={item=>changeAnalyst({action:"remove",id:item.id,expectedRevision:item.revision})}/>} dataConnections={<FinanceDataConnections ko={ko} onConnect={onConnectData} onInspect={onInspectData}/>} monitorContent={monitorContent}/>
   </main>;
 }

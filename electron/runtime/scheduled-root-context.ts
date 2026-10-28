@@ -115,6 +115,21 @@ export class MainInvocationLifetime {
     // an arbitrary expired token or a still-running predecessor cannot renew.
     return this.finished && this.root ? admitMainInvocation(chatId, runId) : undefined;
   }
+
+  /**
+   * The start a finished predecessor hands to its exact successor. A rooted predecessor mints a fresh root admission
+   * (successor() above); a predecessor that ran without a Main root — a Mobile One or Telegram turn, a host relay —
+   * hands on the same rootless start it ran with. Asking successor() alone refused every such continuation: the
+   * YouTube room's Mobile turn (2026-10-28 06:07Z, 1.3.101) had its sign-in verified and its continuation refused at
+   * once (browser_login_continuation_scope_changed), so nothing ran until the owner asked again three hours later.
+   * null while the predecessor still runs, or when a rooted predecessor cannot admit here.
+   */
+  successorStart(chatId: string, runId: string): { admission: MainInvocationAdmission | undefined } | null {
+    if (!this.finished) return null;
+    if (!this.root) return { admission: undefined };
+    const admission = admitMainInvocation(chatId, runId);
+    return admission ? { admission } : null;
+  }
 }
 
 /** Capture at the authenticated root before entering an adapter. Only a

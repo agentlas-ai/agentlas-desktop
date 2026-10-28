@@ -1,17 +1,9 @@
 "use client";
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { IconClose, IconEdit, IconRefresh, IconSparkles, IconCopy, IconPlus } from "@/components/Icon";
-import type { FinanceAnalyst, FinanceAnalystDraft, FinanceAnalystRef } from "@shared/finance-analysts";
+import type { FinanceAnalyst, FinanceAnalystDraft } from "@shared/finance-analysts";
 import styles from "./FinanceAnalysts.module.css";
 
-export function financeAnalystMention(text:string,caret:number):{start:number;end:number;query:string}|null {
- const before=text.slice(0,Math.max(0,caret)),match=/(?:^|\s)@([^\s@]*)$/.exec(before);
- return match?{start:before.length-match[1].length-1,end:before.length,query:match[1]}:null;
-}
-export function financeAnalystMatches(items:readonly FinanceAnalyst[],query:string,ko=false):FinanceAnalyst[] {
- const needle=query.normalize('NFKC').toLocaleLowerCase();
- return items.filter(item=>`${item.name} ${financeAnalystName(item,ko)} ${item.description} ${financeAnalystDescription(item,ko)}`.normalize('NFKC').toLocaleLowerCase().includes(needle)).slice(0,8);
-}
 export function financeAnalystName(item:Pick<FinanceAnalyst,'id'|'name'>,ko:boolean):string {
  const names:Record<string,string>={'builtin:value':'가치 분석','builtin:growth':'성장 분석','builtin:income':'배당·인컴','builtin:etf':'ETF 분석'};
  return ko&&Object.prototype.hasOwnProperty.call(names,item.id)?names[item.id]:item.name;
@@ -19,28 +11,6 @@ export function financeAnalystName(item:Pick<FinanceAnalyst,'id'|'name'>,ko:bool
 export function financeAnalystDescription(item:Pick<FinanceAnalyst,'id'|'description'>,ko:boolean):string {
  const descriptions:Record<string,string>={'builtin:value':'기업 가치와 현금흐름, 재무 건전성을 살펴봅니다.','builtin:growth':'지속 가능한 성장과 수익성, 재투자·자금 조달 위험을 살펴봅니다.','builtin:income':'배당·분배금의 충당 능력과 지속 가능성을 살펴봅니다.','builtin:etf':'편입 자산과 비용, 집중도·중복 노출을 살펴봅니다.'};
  return ko&&Object.prototype.hasOwnProperty.call(descriptions,item.id)?descriptions[item.id]:item.description;
-}
-export function financeAnalystPinsCurrent(selected:readonly FinanceAnalystRef[],items:readonly FinanceAnalyst[]):boolean {
- return selected.every(ref=>items.some(item=>item.id===ref.id&&item.revision===ref.revision));
-}
-export function FinanceAnalystComposer({value,onChange,onSubmit,disabled,ko,items,selected,loading,error,onSelect,onRemove,onCreate,authoring=false,available=true}:{value:string;onChange:(value:string)=>void;onSubmit:()=>void;disabled:boolean;ko:boolean;items:FinanceAnalyst[];selected:FinanceAnalyst[];loading:boolean;error:string;onSelect:(item:FinanceAnalyst)=>void;onRemove:(id:string)=>void;onCreate:()=>void;authoring?:boolean;available?:boolean}) {
- const input=useRef<HTMLTextAreaElement>(null),listId=useId();const [caret,setCaret]=useState(value.length),[index,setIndex]=useState(0),[dismissed,setDismissed]=useState<string|null>(null);
- const trigger=authoring?null:financeAnalystMention(value,caret),key=trigger?`${trigger.start}:${trigger.end}:${trigger.query}`:null;
- const open=!!trigger&&key!==dismissed&&!disabled,candidates=loading||error?[]:financeAnalystMatches(items,trigger?.query??'',ko),active=Math.min(index,Math.max(0,candidates.length-1));
- useEffect(()=>{setIndex(0);},[key]);
- const choose=(item:FinanceAnalyst)=>{if(!available||!trigger||disabled||selected.length>=3&&!selected.some(old=>old.id===item.id))return;onSelect(item);const next=value.slice(0,trigger.start)+value.slice(trigger.end);onChange(next);setDismissed(key);const position=trigger.start;requestAnimationFrame(()=>{input.current?.focus();input.current?.setSelectionRange(position,position);setCaret(position);});};
- return <div className={styles.composerInput}>
-  {!authoring&&selected.length>0&&<div className={styles.chips} aria-label={ko?'선택한 Analyst':'Selected Analysts'}>{selected.map(item=>{const stale=!financeAnalystPinsCurrent([item],items);return <span className={styles.chip} key={item.id} data-stale={stale||undefined}><span>{financeAnalystName(item,ko)}</span>{stale&&<span title={ko?'판본을 다시 확인하세요':'Check this version again'}>{ko?'확인 필요':'Check version'}</span>}<button type="button" onClick={()=>onRemove(item.id)} aria-label={`${financeAnalystName(item,ko)} ${ko?'선택 해제':'remove'}`} title={ko?'선택 해제':'Remove'}><IconClose size={13}/></button></span>;})}</div>}
-  <textarea ref={input} maxLength={20000} value={value} onChange={event=>{onChange(event.target.value);setCaret(event.target.selectionStart);setDismissed(null);}} onSelect={event=>setCaret(event.currentTarget.selectionStart)} disabled={disabled} aria-label={ko?'AI에게 요청':'Ask AI'} aria-expanded={open} aria-controls={open?listId:undefined} aria-activedescendant={open&&candidates.length?`${listId}-${active}`:undefined} aria-autocomplete="list" role="combobox" aria-haspopup="listbox" placeholder={authoring?(ko?'어떤 종목을 어떤 기준으로 살펴볼까요?':'Which assets and criteria should this Analyst use?'):(ko?'시장·종목을 분석하거나 @로 Analyst를 선택하세요':'Research markets or choose an Analyst with @')} onKeyDown={event=>{
-    if(event.nativeEvent.isComposing||event.keyCode===229)return;
-    if(open&&event.key==='Escape'){event.preventDefault();event.stopPropagation();setDismissed(key);return;}
-    if(open&&candidates.length&&['ArrowDown','ArrowUp'].includes(event.key)){event.preventDefault();setIndex((active+(event.key==='ArrowDown'?1:-1)+candidates.length)%candidates.length);return;}
-    if(open&&candidates.length&&['Enter','Tab'].includes(event.key)){event.preventDefault();choose(candidates[active]);return;}
-    if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();if(!open||!available)onSubmit();}
-  }}/>
-  {open&&<div className={styles.mentionMenu}><div id={listId} role="listbox" aria-label="Analysts">{loading?<p role="status">{ko?'불러오는 중…':'Loading…'}</p>:error?<p role="alert">{error}</p>:candidates.length?candidates.map((item,i)=><button type="button" role="option" id={`${listId}-${i}`} aria-selected={i===active} key={item.id} onMouseDown={event=>event.preventDefault()} onClick={()=>choose(item)} disabled={selected.length>=3&&!selected.some(old=>old.id===item.id)}><strong>{financeAnalystName(item,ko)}</strong><span>{financeAnalystDescription(item,ko)}</span></button>):<p>{ko?'일치하는 Analyst가 없습니다.':'No matching Analyst.'}</p>}</div>{selected.length>=3&&<p role="status">{ko?"최대 3개까지 선택할 수 있습니다.":"Choose up to 3 Analysts."}</p>}<button type="button" className={styles.create} disabled={!available} onClick={()=>{setDismissed(key);onCreate();}}><IconPlus size={15}/>{ko?'Analyst 함께 만들기':'Create an Analyst together'}</button></div>}
-  {!authoring&&selected.length>0&&!financeAnalystPinsCurrent(selected,items)&&<p role="alert" className={styles.error}>{ko?'변경되었거나 사용할 수 없는 Analyst가 있습니다. 선택을 해제하거나 최신 항목을 다시 선택하세요.':'An Analyst changed or is unavailable. Remove it or explicitly select its latest version.'}</p>}
- </div>;
 }
 const emptyDraft=():FinanceAnalystDraft=>({name:'',description:'',instructions:''});
 export function FinanceAnalystDraftEditor({draft,onChange,onSave,onClose,pending,working=false,available=true,ko,title}:{draft:FinanceAnalystDraft;onChange:(draft:FinanceAnalystDraft)=>void;onSave:()=>void;onClose:()=>void;pending:boolean;working?:boolean;available?:boolean;ko:boolean;title?:string}) {

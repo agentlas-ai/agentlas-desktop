@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.3.103 — 2026-10-28
+
+- Finance: one shared harness now runs Finance, replacing the Finance-only chat loop; research starts in the Finance Work project, Analyst drafts are saved through the common owner confirmation card, company facts gain a revenue fallback, a summary view and a report chart section, and a screen's button (for example Finance "create with AI") opens the plugin workflow its conversation's next turn carries.
+- Tools: a tool that a host prompt names is in that turn's tool list; an empty answer before any tool says that nothing ran; a measured local tool judge sees a meaning shortlist and answers in an enforced shape; a judged browser no longer refuses the turn; Ollama, LM Studio, MLX and the hub's own model get one common tool-choice measurement that runs in the background and only between turns.
+- Goal: the owner's Stop on the Goal card ends the Goal, judgments carry the model that made them, a quota refusal says why, and a missing tool ends the passes.
+- Phone and Telegram: a turn started from the phone or Telegram now continues after its browser sign-in is verified, and a refused continuation is told to the owner with its cause instead of staying silent.
+- Failures and cards: twelve typed failure codes are told by their own line, a host card shows without a reload, and the dashboard says "limit reached".
+- Safety: the command-line tools that would publish or send outside Agentlas (Artifact publishing, remote triggers, scheduled jobs, messaging, push and similar) are off in every product run; connectors ask or run by the owner's rule; and the environment of the session that launched Agentlas (messaging sockets, tokens, base URLs) is no longer passed on to the runs Agentlas starts.
+- Science: Science tools ride the shared tool chain, with one discovery path for Work, One and Science, one host installer serves Main and the daemon, and the Science SDK pin moves to its current main.
+- MCP: each call records one effect checkpoint; the Main proxy no longer records a second one for an in-process loop's call.
+- Business: the old company-server, NAS and enterprise-license code is removed; team plans are managed on the web, the account menu shows your team seat, and the old Business screens point to the web team console.
+- Updates: the updater reads only the official release feed.
+
+This release binds Agentlas OS v1.2.69 at 2b4e27b78d9a1e808142f1e6e510ab7023c7b44d; public runtime asset `hephaestus-runtime-v1.2.69.tar.gz` is pinned at SHA-256 `0bb8ac3eac111fd26bc3a20a7b1657741399b9f87ed8b8f1c87f2402dbd4c283`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.102 — 2026-10-28
 
 - Team seats: the account menu shows your team seat (team name, number of team AI keys, whether Hub sharing is turned off) with a button that opens the team console on the web.

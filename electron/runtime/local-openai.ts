@@ -1,4 +1,5 @@
 import { schemaFallbackPromptPart, observationSystemWithSchema } from "../../shared/runtime-capabilities";
+import { trackTurnActivity } from "./turn-activity";
 import { assertScienceRecoveryRequest } from "../science-host/recovery-authority";
 // OpenAI 호환 로컬 서버(LM Studio / MLX 등) 공용 감지 + 실호출.
 // Ollama(runtime/ollama.ts)와 달리 이들은 "표준 OpenAI" 엔드포인트를 쓴다:
@@ -80,7 +81,7 @@ export function makeLocalOpenAiRunner(
     temperature?: number;
   } = {},
 ): Runner {
-  return async (req: RunnerRequest, events: RunnerEvents): Promise<RunnerResult> => {
+  const run = async (req: RunnerRequest, events: RunnerEvents): Promise<RunnerResult> => {
     assertScienceRecoveryRequest(req, runtimeKind);
     const host = hostFn();
     const model = req.model?.trim();
@@ -220,4 +221,6 @@ export function makeLocalOpenAiRunner(
       messages,
     );
   };
+  // Background measurement on the same server waits while a model call is running (turn-activity.ts).
+  return (req: RunnerRequest, events: RunnerEvents): Promise<RunnerResult> => trackTurnActivity(() => run(req, events));
 }

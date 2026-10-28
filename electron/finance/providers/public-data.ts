@@ -1,4 +1,4 @@
-import type { FinanceAsset, FinanceDataResult } from '../../../shared/finance';
+import type { FinanceAsset, FinanceCompanyFactsOptions, FinanceDataResult } from '../../../shared/finance';
 import { fetchFinanceJson, fetchFinanceText } from './http';
 import { findIsharesFund, type IsharesFundDefinition } from './ishares-catalog';
 
@@ -148,23 +148,76 @@ function dividendSeries(sortedByFiledDesc: Obj[]): Obj[] {
   const newestFirst = (a: Obj, b: Obj) => str(b.end).localeCompare(str(a.end));
   return [...periods.filter(row => within(row, 350, 380)).sort(newestFirst).slice(0, DIVIDEND_YEARS), ...periods.filter(row => within(row, 80, 100)).sort(newestFirst).slice(0, DIVIDEND_QUARTERS)];
 }
-export function parseCompanyFacts(value: unknown, cik: string): FinanceDataResult {
+/**
+ * US-GAAP revenue concepts in fallback order (data, not judgment). Filers use one of them per period: ASC 606 revenue excluding assessed tax
+ * (most filers), including assessed tax (CrowdStrike reports only this one), then the pre-ASC 606 Revenues and SalesRevenueNet, which some
+ * filers keep (NVIDIA's current Revenues). For one reporting period the first concept in this order that the filer used is the revenue.
+ */
+export const US_GAAP_REVENUE_CONCEPTS = ['RevenueFromContractWithCustomerExcludingAssessedTax', 'RevenueFromContractWithCustomerIncludingAssessedTax', 'Revenues', 'SalesRevenueNet'] as const;
+const OTHER_FACT_CONCEPTS = ['NetIncomeLoss', 'OperatingIncomeLoss', 'Assets', 'Liabilities', 'CashAndCashEquivalentsAtCarryingValue', 'NetCashProvidedByUsedInOperatingActivities', 'PaymentsToAcquirePropertyPlantAndEquipment', 'EarningsPerShareDiluted'] as const;
+/** Summary view: one observation per reporting period (the latest filed), newest periods only. Enough for year-over-year and quarter-over-quarter
+ *  comparisons and year-to-date cash-flow differences; the full view keeps every latest filing. */
+const SUMMARY = { years: 3, quarters: 5, yearToDate: 4, instants: 3 } as const;
+function summaryPeriods(sortedByFiledDesc: Obj[]): Obj[] {
+  const latest = new Map<string, Obj>();
+  for (const row of sortedByFiledDesc) { const key = `${str(row.start)}|${str(row.end)}`; if (!latest.has(key)) latest.set(key, row); }
+  const periods = [...latest.values()], newestFirst = (a: Obj, b: Obj) => str(b.end).localeCompare(str(a.end));
+  const length = (row: Obj) => periodDays(date(row.start), date(row.end));
+  const pick = (test: (days: number | null) => boolean, count: number) => periods.filter(row => test(length(row))).sort(newestFirst).slice(0, count);
+  return [...pick(days => days !== null && days >= 350 && days <= 380, SUMMARY.years), ...pick(days => days !== null && days >= 80 && days <= 100, SUMMARY.quarters),
+    ...pick(days => days !== null && days > 100 && days < 350, SUMMARY.yearToDate), ...pick(days => days === null, SUMMARY.instants)];
+}
+type FactRow = { name: string; unit: string; row: Obj };
+function factObservations(facts: Obj, name: string): FactRow[] {
+  if (!facts[name]) return [];
+  const out: FactRow[] = [];
+  for (const [unit, raw] of Object.entries(obj(obj(facts[name]).units))) { if (!Array.isArray(raw)) continue;
+    for (const row of raw.map(obj)) if (date(row.end) && date(row.filed) && num(row.val) !== null) out.push({ name, unit, row }); }
+  return out.sort((a, b) => str(b.row.filed).localeCompare(str(a.row.filed)) || str(b.row.end).localeCompare(str(a.row.end)));
+}
+/** The revenue series of a summary: per period and unit, the observation of the first revenue concept in fallback order that has it. */
+function revenueSummary(facts: Obj): FactRow[] {
+  const chosen = new Map<string, FactRow>();
+  for (const name of US_GAAP_REVENUE_CONCEPTS) for (const fact of factObservations(facts, name)) {
+    const key = `${fact.unit}|${str(fact.row.start)}|${str(fact.row.end)}`; if (!chosen.has(key)) chosen.set(key, fact);
+  }
+  const byUnit = new Map<string, FactRow[]>();
+  for (const fact of chosen.values()) byUnit.set(fact.unit, [...(byUnit.get(fact.unit) ?? []), fact]);
+  return [...byUnit.values()].flatMap(rows => { const kept = new Set(summaryPeriods(rows.map(fact => fact.row))); return rows.filter(fact => kept.has(fact.row)); });
+}
+export function parseCompanyFacts(value: unknown, cik: string, options: FinanceCompanyFactsOptions = {}): FinanceDataResult {
   const data = obj(value); if (String(data.cik).padStart(10, '0') !== cik) throw new Error('finance_source_identity_mismatch');
   const url = `https://data.sec.gov/api/xbrl/companyfacts/CIK${cik}.json`, result = base([url, 'https://www.sec.gov/search-filings/edgar-application-programming-interfaces']);
-  const facts = obj(obj(data.facts)['us-gaap']);
-  const tags = ['RevenueFromContractWithCustomerExcludingAssessedTax','Revenues','SalesRevenueNet','NetIncomeLoss','OperatingIncomeLoss','Assets','Liabilities','CashAndCashEquivalentsAtCarryingValue','NetCashProvidedByUsedInOperatingActivities','PaymentsToAcquirePropertyPlantAndEquipment','EarningsPerShareDiluted',...DIVIDEND_CONCEPTS];
-  result.columns = ['Entity', 'Taxonomy concept', 'Value', 'Unit', 'Period start', 'Period end', 'Filed date', 'Form', 'Accession', 'Fiscal period', 'Original filing'];
+  const facts = obj(obj(data.facts)['us-gaap']), summary = options.view === 'summary';
+  const wanted = (concept: string) => !options.concepts || options.concepts.includes(concept as never);
+  const groups: { concept: string; names: readonly string[] }[] = [{ concept: 'revenue', names: US_GAAP_REVENUE_CONCEPTS }, ...OTHER_FACT_CONCEPTS.map(name => ({ concept: name, names: [name] })), { concept: 'dividends', names: [...DIVIDEND_CONCEPTS] }];
+  // The summary leaves out the two columns that repeat per row (the entity, the filing index link built from the accession); a warning names both.
+  result.columns = summary ? ['Taxonomy concept', 'Value', 'Unit', 'Period start', 'Period end', 'Filed date', 'Form', 'Accession', 'Fiscal period']
+    : ['Entity', 'Taxonomy concept', 'Value', 'Unit', 'Period start', 'Period end', 'Filed date', 'Form', 'Accession', 'Fiscal period', 'Original filing'];
   const rows: Row[] = [];
-  for (const name of tags) {
-    if (!facts[name]) continue; const units = obj(obj(facts[name]).units);
-    for (const [unit, raw] of Object.entries(units)) { if (!Array.isArray(raw)) continue;
-      const sorted = raw.map(obj).filter(row => date(row.end) && date(row.filed) && num(row.val) !== null).sort((a,b) => str(b.filed).localeCompare(str(a.filed)) || str(b.end).localeCompare(str(a.end)));
-      for (const row of DIVIDEND_CONCEPTS.has(name) ? dividendSeries(sorted) : sorted.slice(0, 16)) { const accession = str(row.accn), doc = /^\d{10}-\d{2}-\d{6}$/.test(accession) ? `https://www.sec.gov/Archives/edgar/data/${Number(cik)}/${accession.replace(/-/g,'')}/${accession}-index.html` : null;
-        rows.push([str(data.entityName), name, num(row.val), unit, date(row.start), date(row.end), date(row.filed), str(row.form), accession, str(row.fp), doc]); }
+  const push = ({ name, unit, row }: FactRow) => { const accession = str(row.accn), doc = /^\d{10}-\d{2}-\d{6}$/.test(accession) ? `https://www.sec.gov/Archives/edgar/data/${Number(cik)}/${accession.replace(/-/g,'')}/${accession}-index.html` : null;
+    rows.push(summary ? [name, num(row.val), unit, date(row.start), date(row.end), date(row.filed), str(row.form), accession, str(row.fp)]
+      : [str(data.entityName), name, num(row.val), unit, date(row.start), date(row.end), date(row.filed), str(row.form), accession, str(row.fp), doc]); };
+  const concept = summary ? 0 : 1;
+  for (const group of groups.filter(item => wanted(item.concept))) {
+    if (summary && group.concept === 'revenue') { revenueSummary(facts).forEach(push); continue; }
+    for (const name of group.names) {
+      const observations = factObservations(facts, name);
+      for (const unit of [...new Set(observations.map(fact => fact.unit))]) {
+        const sorted = observations.filter(fact => fact.unit === unit).map(fact => fact.row);
+        for (const row of summary ? summaryPeriods(sorted) : DIVIDEND_CONCEPTS.has(name) ? dividendSeries(sorted) : sorted.slice(0, 16)) push({ name, unit, row });
+      }
     }
   }
   result.rows = rows; result.asOf = null;
-  result.warnings = ['Selected standardized US-GAAP entity-wide concepts, at most 16 latest-filed observations per concept/unit. Missing concepts are omitted, never zero. Custom taxonomy and segment facts are not covered.', 'Raw reporting periods, units, forms and accessions are retained. Quarter/YTD/year and amended observations may coexist; no TTM, fiscal-period alignment, ratio, or comparable-quarter inference is made.', 'This is the current SEC companyfacts feed, not a historical point-in-time vintage. Filed dates are day precision, not availability timestamps. SEC access policy applies; filing exhibits can contain third-party copyrighted material.', ...(rows.some(row => DIVIDEND_CONCEPTS.has(String(row[1]))) ? ['Dividend concepts list one observation per period, the latest filed: up to 12 full-year periods and 8 three-month periods, newest first. Year-to-date and other period lengths are left out, and a concept a filer stopped using may show only older periods.'] : [])];
+  const revenueConcepts = [...new Set(rows.map(row => String(row[concept])).filter(name => (US_GAAP_REVENUE_CONCEPTS as readonly string[]).includes(name)))];
+  result.warnings = [summary
+    ? `Summary view: one observation per reporting period (the latest filed), newest ${SUMMARY.years} full years, ${SUMMARY.quarters} three-month quarters, ${SUMMARY.yearToDate} year-to-date periods and ${SUMMARY.instants} balance-sheet dates per concept/unit. Missing concepts are omitted, never zero. Custom taxonomy and segment facts are not covered.`
+    : 'Selected standardized US-GAAP entity-wide concepts, at most 16 latest-filed observations per concept/unit. Missing concepts are omitted, never zero. Custom taxonomy and segment facts are not covered.',
+    ...(summary ? [`Entity: ${str(data.entityName)} (SEC CIK ${cik}). Each accession's filing index is https://www.sec.gov/Archives/edgar/data/${Number(cik)}/<accession without dashes>/<accession>-index.html.`] : []),
+    ...(options.concepts ? [`Concepts requested: ${options.concepts.join(', ')}.`] : []),
+    ...(revenueConcepts.length ? [`Revenue concepts used: ${revenueConcepts.join(', ')}${summary ? ' (per period, the first in the order RevenueFromContractWithCustomerExcludingAssessedTax, RevenueFromContractWithCustomerIncludingAssessedTax, Revenues, SalesRevenueNet)' : ''}.`] : []),
+    'Raw reporting periods, units, forms and accessions are retained. Quarter/YTD/year and amended observations may coexist; no TTM, fiscal-period alignment, ratio, or comparable-quarter inference is made.', 'This is the current SEC companyfacts feed, not a historical point-in-time vintage. Filed dates are day precision, not availability timestamps. SEC access policy applies; filing exhibits can contain third-party copyrighted material.', ...(!summary && rows.some(row => DIVIDEND_CONCEPTS.has(String(row[1]))) ? ['Dividend concepts list one observation per period, the latest filed: up to 12 full-year periods and 8 three-month periods, newest first. Year-to-date and other period lengths are left out, and a concept a filer stopped using may show only older periods.'] : [])];
   return result;
 }
 

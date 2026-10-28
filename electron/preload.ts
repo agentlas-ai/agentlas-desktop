@@ -132,7 +132,6 @@ const api: AgentlasIpc = {
     load: () => ipcRenderer.invoke("finance:load"),
     save: input => ipcRenderer.invoke("finance:save", input),
     search: input => ipcRenderer.invoke("finance:search", input),
-    ask: input => ipcRenderer.invoke("finance:ask", input),
     cancelAsk: input => ipcRenderer.invoke("finance:cancelAsk", input),
     queryData: input => ipcRenderer.invoke("finance:queryData", input),
     dataConnection: input => ipcRenderer.invoke("finance:dataConnection", input),
@@ -146,33 +145,6 @@ const api: AgentlasIpc = {
     scheduleMonitor: input => ipcRenderer.invoke("finance:scheduleMonitor", input),
     pauseMonitor: input => ipcRenderer.invoke("finance:pauseMonitor", input),
     exportFile: input => ipcRenderer.invoke("finance:exportFile", input),
-  },
-  business: {
-    snapshot: () => ipcRenderer.invoke("business:snapshot"),
-    readEligibility: () => ipcRenderer.invoke("business:eligibility:read"),
-    account: {
-      read: () => ipcRenderer.invoke("business:account:read"),
-      signIn: () => ipcRenderer.invoke("business:account:signIn"),
-      joinOrganization: (input) => ipcRenderer.invoke("business:account:joinOrganization", input),
-      selectOrganization: (input) => ipcRenderer.invoke("business:account:selectOrganization", input),
-      logout: (input) => ipcRenderer.invoke("business:account:logout", input),
-      openAdmin: (input) => ipcRenderer.invoke("business:account:openAdmin", input),
-      selectPersonal: () => ipcRenderer.invoke("business:account:selectPersonal"),
-      subscribeInvalidation: (callback) => {
-        const listener = () => callback();
-        ipcRenderer.on("business:invalidated", listener);
-        return () => ipcRenderer.removeListener("business:invalidated", listener);
-      },
-    },
-    history: null,
-    learning: null,
-    organizationExecution: null,
-    openDashboard: (input) => ipcRenderer.invoke("business:openDashboard", input),
-    onInvalidated: (callback) => {
-      const listener = () => callback();
-      ipcRenderer.on("business:invalidated", listener);
-      return () => ipcRenderer.removeListener("business:invalidated", listener);
-    },
   },
   workStart: {
     create: (input) => ipcRenderer.invoke("workStart:create", input),
@@ -1135,12 +1107,6 @@ const api: AgentlasIpc = {
     setAuto: (enabled) => ipcRenderer.invoke("archive:setAuto", enabled),
     restore: (agentId) => ipcRenderer.invoke("archive:restore", agentId),
   },
-  enterpriseServer: {
-    status: () => ipcRenderer.invoke("enterpriseServer:status"),
-    enroll: (input) => ipcRenderer.invoke("enterpriseServer:enroll", input),
-    recheck: () => ipcRenderer.invoke("enterpriseServer:recheck"),
-    disconnect: (input) => ipcRenderer.invoke("enterpriseServer:disconnect", input),
-  },
   reach: {
     getExplore: () => ipcRenderer.invoke("reach:getExplore"),
     setExplore: (enabled, consent) => ipcRenderer.invoke("reach:setExplore", enabled, consent),
@@ -1152,59 +1118,6 @@ const api: AgentlasIpc = {
     setEnabled: (input) => ipcRenderer.invoke("oneCapabilities:setEnabled", input),
     setSourceEnabled: (input) => ipcRenderer.invoke("oneCapabilities:setSourceEnabled", input),
     setRole: (input) => ipcRenderer.invoke("oneCapabilities:setRole", input),
-  },
-  businessWork: {
-    identity: () => ipcRenderer.invoke('businessWork:identity'),
-    approveAssociation: input => ipcRenderer.invoke('businessWork:approveAssociation', input),
-    reconcile: input => ipcRenderer.invoke('businessWork:reconcile', input),
-    sources: () => ipcRenderer.invoke('businessWork:sources'),
-    files: input => ipcRenderer.invoke('businessWork:files', input),
-    register: input => ipcRenderer.invoke('businessWork:register', input),
-    oracle: input => ipcRenderer.invoke('businessWork:oracle', input),
-    workspaces: () => ipcRenderer.invoke('businessWork:workspaces'),
-    prepare: input => ipcRenderer.invoke('businessWork:prepare', input),
-    review: input => ipcRenderer.invoke('businessWork:review', input),
-    receipt: input => ipcRenderer.invoke('businessWork:receipt', input),
-    revoke: () => ipcRenderer.invoke('businessWork:revoke'),
-    cancel: input => ipcRenderer.invoke('businessWork:cancel', input),
-  },
-  companyMail: {
-    status: input => ipcRenderer.invoke('companyMail:status', input),
-    pending: input => ipcRenderer.invoke('companyMail:pending', input),
-    issue: input => ipcRenderer.invoke('companyMail:issue', input),
-    threads: input => ipcRenderer.invoke('companyMail:threads', input),
-    thread: input => ipcRenderer.invoke('companyMail:thread', input),
-    colleagues: input => ipcRenderer.invoke('companyMail:colleagues', input),
-    send: input => ipcRenderer.invoke('companyMail:send', input),
-    delegate: input => ipcRenderer.invoke('companyMail:delegate', input),
-  },
-  companyNative: {
-    status: () => ipcRenderer.invoke('companyNative:status'),
-    connect: () => ipcRenderer.invoke('companyNative:connect'),
-    disconnect: () => ipcRenderer.invoke('companyNative:disconnect'),
-  },
-  businessCompanyWork: {
-    review: input => ipcRenderer.invoke('businessCompanyWork:review', input),
-    choices: input => ipcRenderer.invoke('businessCompanyWork:choices', input),
-    activate: input => ipcRenderer.invoke('businessCompanyWork:activate', input),
-    stop: () => ipcRenderer.invoke('businessCompanyWork:stop'),
-    status: () => ipcRenderer.invoke('businessCompanyWork:status'),
-  },
-  businessNative: {
-    identity: () => ipcRenderer.invoke('businessNative:identity'),
-    completedWork: () => ipcRenderer.invoke('businessNative:completedWork'),
-    approveAssociation: input => ipcRenderer.invoke('businessNative:approveAssociation', input),
-    reconcileAssociation: input => ipcRenderer.invoke('businessNative:reconcileAssociation', input),
-    shareCompletedResult: input => ipcRenderer.invoke('businessNative:shareCompletedResult', input),
-    receipt: input => ipcRenderer.invoke('businessNative:receipt', input),
-    continuePublication: input => ipcRenderer.invoke('businessNative:continuePublication', input),
-    registerCompanyAgent: input => ipcRenderer.invoke('businessNative:registerCompanyAgent', input),
-    prepareAgentSnapshot: input => ipcRenderer.invoke('businessNative:prepareAgentSnapshot', input),
-    transferInbox: () => ipcRenderer.invoke('businessNative:transferInbox'),
-    exportAgent: input => ipcRenderer.invoke('businessNative:exportAgent', input),
-    transferReceipt: input => ipcRenderer.invoke('businessNative:transferReceipt', input),
-    importAgent: input => ipcRenderer.invoke('businessNative:importAgent', input),
-    revoke: () => ipcRenderer.invoke('businessNative:revoke'),
   },
   onePersonalData: {
     gmailSourceSettings: input => ipcRenderer.invoke('onePersonalData:gmailSourceSettings', input),
@@ -1656,7 +1569,7 @@ const api: AgentlasIpc = {
 // The sandbox cannot import a relative preload module. Keep this role projection
 // inline and retain the original full API for the existing Desktop renderer.
 const oneWindowRole = process.argv.includes("--agentlas-window-role=one");
-const oneGroups = new Set(["oneWindow", "oneHarness", "business", "auth", "app", "config", "runtime", "usage", "media", "menu", "fs", "chats", "tasks", "projects", "invoke",
+const oneGroups = new Set(["oneWindow", "oneHarness", "auth", "app", "config", "runtime", "usage", "media", "menu", "fs", "chats", "tasks", "projects", "invoke",
   "confirm", "attention", "browserUi", "browser", "browserAutofill", "browserAnnotation", "computerUse", "mcpTools", "secrets", "automations", "schedule",
   "agents", "agentRuntime", "skills", "workStart", "goalPanel", "workLiveView", "localModelHub", "env"]);
 const exposedApi = oneWindowRole ? Object.fromEntries(Object.entries(api).filter(([group]) => group.startsWith("one") || oneGroups.has(group))) : api;

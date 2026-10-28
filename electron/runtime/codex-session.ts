@@ -533,6 +533,8 @@ function parseCodexOverrideValue(raw: string): unknown {
   const text = raw.trim();
   if (text === "true") return true;
   if (text === "false") return false;
+  // A TOML integer (a server's startup_timeout_sec: a host tool server's large first launch must not read as "no tools").
+  if (/^[0-9]{1,9}$/.test(text)) return Number(text);
   if (text.startsWith("\"")) {
     const parsed = readBasicString(text, 0);
     return parsed && parsed[1] === text.length ? parsed[0] : undefined;

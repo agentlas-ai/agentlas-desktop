@@ -20,9 +20,13 @@ export interface ScienceRecoveryScope {
 }
 type Grant = Readonly<ScienceRecoveryScope> & { ownerId: string; current: () => void };
 const grants = new WeakMap<object, Grant>();
-const supported = new Set(["codex", "claude-code", "antigravity", "acp", "agentlas", "byok",
-  "lmstudio", "mlx", "agentlas-local", "kimi", "grok", "cursor"]);
-const builtinAcpKinds = new Set(["kimi", "grok", "cursor"]);
+/*
+ * Which runtime kinds may carry a recovery turn is not decided here. The hand list that sat here
+ * left ollama out although its local tool loop has the same entry guard; the admission now reads
+ * the shared runtime table (shared/runtime-recovery.ts RUNTIME_FRESH_RECOVERY) at the one host port that mints
+ * (recovery-runtime-admission.ts, called by science-host/install.ts before recovery-mint).
+ * This module keeps its import surface: an SDK contract loads it from Desktop source with a fixed map.
+ */
 // Only adapters with a stateless provider wire and entry guards are admitted.
 const supportedByok = new Set(["anthropic", "openai", "google", "upstage", "custom", "glm",
   "kimi", "deepseek", "minimax", "xai", "openrouter"]);
@@ -65,7 +69,7 @@ export function issueScienceRecoveryCapability(scope: ScienceRecoveryScope, asse
     // exact hashes and remain part of every subsequent scope comparison.
     || ![scope.science.researchDirectorCatalogSha256, scope.science.researchDirectorBundleSha256]
       .every(value => value === undefined || (typeof value === "string" && /^[a-f0-9]{64}$/.test(value)))
-    || !supported.has(scope.runtimeSelection?.kind) || !scope.runtimeSelection.model?.trim()
+    || typeof scope.runtimeSelection?.kind !== "string" || !scope.runtimeSelection.model?.trim()
     || (scope.runtimeSelection.kind === "byok" && !supportedByok.has(scope.runtimeSelection.backend ?? ""))
     || (scope.runtimeSelection.kind === "agentlas" && !isAgentlasServingModel(scope.runtimeSelection.model))
     || (scope.runtimeSelection.kind === "acp" && !scope.runtimeSelection.acpAgentId?.trim())
@@ -157,8 +161,10 @@ export function assertScienceRecoveryRequest(req: RunnerRequest, runtimeKind?: s
 export function assertScienceRecoveryAcpRequest(req: RunnerRequest, specId: string): boolean {
   if (req.scienceRecoveryCapability === undefined) return assertScienceRecoveryRequest(req);
   const selected = readGrant(req.scienceRecoveryCapability).runtimeSelection;
+  // A legacy kind that pickRunner sends to its built-in ACP seat (the shared ACP routing table).
+  const { ACP_PREFERRED_KINDS } = require("../runtime/acp-kinds") as typeof import("../runtime/acp-kinds");
   const seatMatches = selected.kind === "acp" ? selected.acpAgentId === specId
-    : builtinAcpKinds.has(selected.kind) && selected.kind === specId;
+    : ACP_PREFERRED_KINDS.has(selected.kind) && selected.kind === specId;
   if (!seatMatches || (selected.source != null && req.runtimeSource !== selected.source))
     throw new Error("science_recovery_acp_scope_mismatch");
   return assertScienceRecoveryRequest(req, selected.kind);

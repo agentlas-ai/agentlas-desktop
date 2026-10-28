@@ -1,3 +1,4 @@
+import "./runtime/host-session-env-boot";
 import {createNativeHistoryWorkOwner,type HistoryWorkOwner} from './one/history-work-owner';
 import { startOrgSeatSync } from "./org-seat/org-seat-main";
 import { initializeOneContext } from "./one/context-platform";
@@ -49,7 +50,6 @@ import { startStorageMaintenance } from "./storage/storage-maintenance";
 import { registerOneCapabilitiesIpc } from "./capabilities/one-capabilities-ipc";
 import { registerArchiveIpc } from "./archive/archive-ipc";
 import { registerReachIpc } from "./reach-host/reach-ipc";
-import { registerEnterpriseServerIpc } from "./enterprise-server/enterprise-server-ipc";
 import { startReach, stopReach } from "./reach-host/reach-main";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -76,11 +76,6 @@ import {mcpServerConfigurationDigest} from './mcp-tools/prepared-transport';
 import { registerOneNativeMainComposition, currentOneNativeMainComposition, configureOneNativeMainOwnerFactory } from './one/native-main-composition';
 import { createOneNativeMainFamilyRouter } from './one/native-family-router';
 import { installPersonalToolchainNativeOwner } from './one/toolchain-personal-owner';
-import { registerNativeEmployeeMain } from './business/native-employee-main';
-import { registerCompanyNativeOwnerMain } from './business/company-native-owner';
-import { registerCompanyWorkMain } from './business/company-work-main';
-import { registerCompanyMailMain } from './business/company-mail-main';
-import { registerEmployeeAgentWorkMain } from './business/employee-agent-work-main';
 import {createNativeHistorySourceOwner,type HistorySourceOwner} from './one/history-source-owner';
 import { registerOnePersonalIntegrationMainIpc } from './one/personal-integrations-main';
 import { createNativeGmailPersonalSourceOwner, type GmailPersonalSourceOwner } from './one/gmail-personal-source-owner';
@@ -104,9 +99,6 @@ import { storeIdentityDigest } from "./daemon/diagnostic-log";
 import { mainWindowDevToolsAllowed } from "./devtools-policy";
 import { rememberedMainWindowRoute, rememberMainWindowUrl } from "./main-route-memory";
 import { mainWindowInitialRoute } from "../shared/restorable-route";
-import { COMPANY_ENTRY_ROUTE, isCompanyDeepLink } from "../shared/business/visibility";
-import { inspectCompanyConnection, parseCompanyConnectionLink, saveCompanyBusinessConnection } from "./business/company-connection";
-import { enterpriseServerFetch } from "./enterprise-server/os-trust-fetch";
 import { startMemoryRevocationCleanup, stopMemoryRevocationCleanup } from "./memory/revocation-cleanup";
 import { emitDesktopStoreChange, onDesktopStoreChange } from "./store/change-bus";
 import { watchExternalChatChanges } from "./store/external-chat-changes";
@@ -792,12 +784,6 @@ const STARTUP_PLACEHOLDER_URL = `data:text/html;charset=utf-8,${encodeURICompone
 
 let mainWindow: BrowserWindow | null = null;
 let nativePersonalEntry:ReturnType<typeof createOnePersonalNativeMainEntry>|null=null;
-let nativeBusinessEntry:ReturnType<typeof registerNativeEmployeeMain>|null=null;
-let nativeCompanyEntry:ReturnType<typeof registerCompanyNativeOwnerMain>|null=null;
-let nativeCompanyWorkEntry:ReturnType<typeof registerCompanyWorkMain>|null=null;
-let businessShippingEntry:ReturnType<typeof registerIpcHandlers>['businessShipping']|null=null;
-const nativeCompanyShutdown=new AbortController();
-let nativeWorkEntry:ReturnType<typeof registerEmployeeAgentWorkMain>|null=null;
 let nativeMainFamilyRouter:ReturnType<typeof createOneNativeMainFamilyRouter>|null=null;
 let nativeGmailSourceOwner:GmailPersonalSourceOwner|null=null;
 let nativeHistorySourceOwner:HistorySourceOwner|null=null;
@@ -1190,47 +1176,12 @@ const PLUGIN_DEEP_LINK_RE = /^agentlas:\/\/plugin\/([a-z0-9][a-z0-9-]{0,63})\/([
 // A link that arrives before the main window shows a product document becomes that window's first screen,
 // ahead of the remembered one (mainWindowInitialRoute); delivered once, by whichever comes first.
 let pendingDeepLinkRoute: string | null = null;
-let companyConnectionReviewPending = false;
-async function reviewCompanyConnection(serverUrl: string): Promise<void> {
-  if (companyConnectionReviewPending) return;
-  companyConnectionReviewPending = true;
-  try {
-    await app.whenReady();
-    const company = await inspectCompanyConnection(serverUrl, enterpriseServerFetch);
-    const ko = currentUiLocale() === 'ko';
-    const options: Electron.MessageBoxOptions = { type: 'question', title: ko ? '회사 서버 연결' : 'Connect company server',
-      message: ko ? `${company.companyName}에 연결할까요?` : `Connect to ${company.companyName}?`,
-      detail: company.serverUrl, buttons: ko ? ['취소', '연결'] : ['Cancel', 'Connect'], cancelId: 0, defaultId: 1, noLink: true };
-    const answer = mainWindow && !mainWindow.isDestroyed() ? await dialog.showMessageBox(mainWindow, options) : await dialog.showMessageBox(options);
-    if (answer.response !== 1) return;
-    saveCompanyBusinessConnection(company);
-    nativeCompanyEntry?.invalidate(); businessShippingEntry?.console.invalidate();
-    routeAgentlasDeepLink('agentlas://company/enter');
-  } catch (error) {
-    const ko = currentUiLocale() === 'ko';
-    const managed = error instanceof Error && error.message === 'company_connection_managed';
-    dialog.showErrorBox(ko ? '회사 연결 확인' : 'Check company connection', managed
-      ? (ko ? '이 기기는 회사에서 지정한 서버를 사용합니다. 관리자에게 회사 연결을 확인해 주세요.' : 'This device uses the server set by your company. Ask your administrator to check the connection.')
-      : (ko ? '회사 서버의 연결 정보를 확인하지 못했습니다. 회사에서 받은 링크와 서버 실행 상태를 확인해 주세요.' : 'The company server could not be verified. Check the company link and that the server is running.'));
-  } finally { companyConnectionReviewPending = false; }
-}
-
-/*
- * 회사 링크: agentlas://company/join (또는 /enter). 회사가 직원에게 건네는 진입 링크다 — 조직 계정이 아닌 사용자에게는 조직 화면이 하나도 보이지 않으므로,
- * 회사 직원이 처음 들어오는 길은 이 링크가 연다(shared/business/visibility.ts). 링크 내용은 해석하지 않고 모양만 본다. 렌더러는 고정 경로
- * COMPANY_ENTRY_ROUTE 만 받아 "회사 링크로 열렸다"는 흔적을 남기고 회사 로그인 화면으로 간다 — 링크 문자열은 렌더러로 가지 않는다.
- */
 function routeAgentlasDeepLink(rawUrl: string): void {
   if (developmentEffectsSuppressed()) return;
   const trimmed = rawUrl.trim();
-  const serverUrl = parseCompanyConnectionLink(trimmed);
-  if (serverUrl) { void reviewCompanyConnection(serverUrl); return; }
   const match = PLUGIN_DEEP_LINK_RE.exec(trimmed);
-  const company = !match && isCompanyDeepLink(trimmed);
-  if (!match && !company) return; // 모르는 모양은 무시한다 — 바깥 입력이 임의 경로를 열 수 없다.
-  const route = match
-    ? `/marketplace?install=${encodeURIComponent(match[2])}&family=${encodeURIComponent(match[1])}`
-    : COMPANY_ENTRY_ROUTE;
+  if (!match) return; // 모르는 모양은 무시한다 — 바깥 입력이 임의 경로를 열 수 없다. (회사 링크 agentlas://company/… 는 2026-10-28 폐지)
+  const route = `/marketplace?install=${encodeURIComponent(match[2])}&family=${encodeURIComponent(match[1])}`;
   pendingDeepLinkRoute = route;
   const deliver = (): void => {
     if (!mainWindow || mainWindow.isDestroyed()) return;
@@ -1837,9 +1788,7 @@ function stopQuitServices(): Promise<void> {
   disposeAuthSessionRestoration = null;
   try { currentOneNativeMainComposition()?.invalidate('shutdown'); } catch {}
   nativePersonalShutdown.abort();
-  nativeCompanyShutdown.abort();
-  for(const cleanup of [()=>nativeCompanyWorkEntry?.close(),()=>nativeCompanyEntry?.close(),()=>businessShippingEntry?.dispose()])try{cleanup()}catch{ /* Original company captures are already closed by shutdown. */ }
-  for(const cleanup of [()=>nativePersonalEntry?.close(),()=>nativeBusinessEntry?.closePersonal(),()=>nativeWorkEntry?.close(),()=>nativeMainFamilyRouter?.close(),()=>nativeGmailSourceOwner?.close(),()=>nativeHistorySourceOwner?.close(),()=>nativeHistoryWorkOwner?.close()])try{cleanup()}catch{nativePersonalCleanupUnknown=true}
+  for(const cleanup of [()=>nativePersonalEntry?.close(),()=>nativeMainFamilyRouter?.close(),()=>nativeGmailSourceOwner?.close(),()=>nativeHistorySourceOwner?.close(),()=>nativeHistoryWorkOwner?.close()])try{cleanup()}catch{nativePersonalCleanupUnknown=true}
   try { closeOneVaultMain(); } catch {}
   try { closeOnePersonalIntegrations(); } catch {}
   try { disposeMobileBridgeStateChange?.(); } catch {}
@@ -2905,15 +2854,7 @@ app.whenReady().then(async () => {
       try{const window=assertTrustedSitePublishIpcSender(event as Electron.IpcMainInvokeEvent);return window===mainWindow||window===getOneWindow();}catch{return false;}
     }});
   } catch (error) { console.error("[toolchain] personal native owner unavailable:", error instanceof Error ? error.message : error); }
-  businessShippingEntry=registerIpcHandlers().businessShipping;
-  // This owner is independent of personal login/OneVault. Construction is inert;
-  // explicit focused company connect performs SSO/PKCE and OS-protected enrollment.
-  nativeCompanyEntry=registerCompanyNativeOwnerMain({ipc:ipcMain,browser:businessShippingEntry.console.companyNativeIdentity,
-    assertTrustedSender:assertTrustedSitePublishIpcSender,isOwnerWindow:window=>window===mainWindow||window===getOneWindow(),
-    locale:()=>currentUiLocale()==='ko'?'ko':'en',signal:nativeCompanyShutdown.signal});
-  registerCompanyMailMain({ipc:ipcMain,browser:businessShippingEntry.console.companyNativeIdentity,
-    companyOriginal:()=>nativeCompanyEntry?.original()??null,assertTrustedSender:assertTrustedSitePublishIpcSender,
-    isOwnerWindow:window=>window===mainWindow||window===getOneWindow()});
+  registerIpcHandlers();
   registerOnePersonalIntegrationMainIpc({ipc:ipcMain,assertTrustedSender:assertTrustedSitePublishIpcSender,isOwnerWindow:window=>window===mainWindow||window===getOneWindow(),gmailSourceOwner:nativeGmailSourceOwner,historyWorkOwner:nativeHistoryWorkOwner,lifetime:{ready:()=>!nativePersonalCleanupUnknown&&!nativePersonalShutdown.signal.aborted,currentEpoch:()=>nativePersonalEpoch}});
   registerRoomDiscussionIpc({ipc:ipcMain,assertTrustedSender:assertTrustedSitePublishIpcSender,isOwnerWindow:window=>window===mainWindow||window===getOneWindow()});
   registerOneVaultMainIpc({ipc:ipcMain,host:{preloadPath:path.join(__dirname,'preload.js'),
@@ -2941,31 +2882,7 @@ app.whenReady().then(async () => {
       mappingOwner:null,
       installFactory:factory=>{if(!nativeMainFamilyRouter||nativePersonalCleanupUnknown)throw Error('one_native_main_family_router_unavailable');nativeMainFamilyRouter.installPersonal(factory)},
     });
-    nativeWorkEntry=registerEmployeeAgentWorkMain({ipc:ipcMain,sources:nativeSources,
-      assertTrustedSender:assertTrustedSitePublishIpcSender,isOwnerWindow:window=>window===mainWindow||window===getOneWindow(),
-      locale:()=>currentUiLocale()==='ko'?'ko':'en',signal:nativePersonalShutdown.signal,
-      installationGeneration:nativeComposition.installationGeneration,
-      prepareGeneration:event=>{if(nativePersonalCleanupUnknown)throw Error('one_native_main_cleanup_unknown');return nativeComposition.prepareEmployeeSharingGeneration(event)},
-    });
-
   }
-  // Company transfer enrollment has its own original identity and lifetime.
-  // Personal report methods still require their unchanged personal owner.
-  nativeBusinessEntry=registerNativeEmployeeMain({ipc:ipcMain,assertTrustedSender:assertTrustedSitePublishIpcSender,
-    isOwnerWindow:window=>window===mainWindow||window===getOneWindow(),sources:nativeSources,
-    isCompanyWindow:window=>{try{return new URL(window.webContents.getURL()).pathname==='/business';}catch{return false;}},
-    companyOriginal:()=>nativeCompanyEntry?.original()??null,hostSignal:nativeCompanyShutdown.signal,
-    locale:()=>currentUiLocale()==='ko'?'ko':'en',
-    signal:nativePersonalShutdown.signal,installationGeneration:nativeComposition.installationGeneration,
-    prepareGeneration:event=>{if(nativePersonalCleanupUnknown)throw Error('one_native_main_cleanup_unknown');return nativeComposition.prepareEmployeeSharingGeneration(event)},
-    installStartup:startup=>{if(!nativeMainFamilyRouter||nativePersonalCleanupUnknown)throw Error('one_native_main_family_router_unavailable');nativeMainFamilyRouter.installReport(startup);if(nativeComposition.start().state!=='ready')throw Error('one_native_business_installation_unavailable')},
-  });
-  nativeCompanyWorkEntry=registerCompanyWorkMain({ipc:ipcMain,assertTrustedSender:assertTrustedSitePublishIpcSender,
-    isOwnerWindow:window=>window===mainWindow||window===getOneWindow(),
-    companyAgents:()=>{if(!nativeBusinessEntry)throw Error('company_native_owner_unavailable');return nativeBusinessEntry.companyAgents;},
-    companyDb:()=>{const owner=nativeCompanyEntry?.original();if(!owner)throw Error('company_native_owner_unavailable');owner.assertCurrent();return owner.db;},
-    companyDataPath:(...segments)=>{const owner=nativeCompanyEntry?.original();if(!owner)throw Error('company_native_owner_unavailable');owner.assertCurrent();return owner.userDataPath(...segments);},
-    signal:nativeCompanyShutdown.signal});
   // Construction is inert; absent independently installed native owners remains unavailable.
   nativeComposition.start();
   // DESKTOP_MOBILE_BRIDGE: Desktop main is the sole authority. Renderer IPC
@@ -2974,8 +2891,6 @@ app.whenReady().then(async () => {
   registerOneCapabilitiesIpc(ipcMain);
   registerArchiveIpc(ipcMain);
   registerReachIpc(ipcMain);
-  // Settings → company server card (status, enrollment code, re-check, disconnect). Inert for a personal install.
-  registerEnterpriseServerIpc(ipcMain, { userDataDir: userDataDir(), appVersion: app.getVersion() });
   ipcMain.handle("mobileBridge:status", () => mobileBridgeRuntimeStatus());
   ipcMain.handle("mobileBridge:issuePairing", () => issueMobileBridgePairing());
   ipcMain.handle("mobileBridge:listDevices", () => listMobileBridgeDevices());
@@ -5020,7 +4935,7 @@ app.whenReady().then(async () => {
   // machine with 39 of 39 paired devices revoked and zero usable.
   disposeAuthSessionInvalidation = onAuthSessionInvalidated(() => {
     nativePersonalEpoch++;
-    for(const cleanup of [()=>currentOneNativeMainComposition()?.invalidate('session'),()=>nativeBusinessEntry?.invalidate(),()=>nativeWorkEntry?.invalidate(),()=>nativeGmailSourceOwner?.invalidate(),()=>nativeHistorySourceOwner?.invalidate(),()=>nativeHistoryWorkOwner?.invalidate(),()=>invalidateOneVaultMainAuthority(),()=>invalidateOnePersonalIntegrations()])try{cleanup()}catch{nativePersonalCleanupUnknown=true}
+    for(const cleanup of [()=>currentOneNativeMainComposition()?.invalidate('session'),()=>nativeGmailSourceOwner?.invalidate(),()=>nativeHistorySourceOwner?.invalidate(),()=>nativeHistoryWorkOwner?.invalidate(),()=>invalidateOneVaultMainAuthority(),()=>invalidateOnePersonalIntegrations()])try{cleanup()}catch{nativePersonalCleanupUnknown=true}
     reconcileMobileBridgeDevicesForAccount(userDataDir());
     failCloseActiveHubBookmarks();
     broadcastHubBookmarkSnapshot();

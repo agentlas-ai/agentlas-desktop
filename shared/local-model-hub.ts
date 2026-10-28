@@ -231,7 +231,10 @@ export interface LocalModelCapabilityReceipt {
   hardwareProfileId: string;
   testedAt: string;
   contextTokens: number;
+  /** Runs tools: picks the right tool with correct arguments for tasks that need one (workload routing: supportsTools). */
   toolUse: "verified" | "failed" | "not_tested";
+  /** Judges tools: toolUse AND answers without a tool when none is needed (optional-tool judge). Absent on older receipts. */
+  toolJudgment?: "verified" | "failed" | "not_tested";
   strictJson: "verified" | "failed" | "not_tested";
   imageInput: "verified" | "failed" | "not_tested";
   cancellation: "verified" | "failed" | "not_tested";

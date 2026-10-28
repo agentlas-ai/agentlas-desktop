@@ -1,4 +1,5 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { runToolChoiceProbe, TOOL_USE_PROBE_TOOLS, toolProbeMessages, toolProbeTask } from "./tool-choice-probe";
 import { constants as fsConstants, openSync, fstatSync, lstatSync, readSync, closeSync } from "node:fs";
 import type { LocalModelRuntimeObservation } from "./ports";
 import { spawn, type ChildProcess } from "node:child_process";
@@ -235,18 +236,6 @@ export async function probeLocalEngineHealth(endpoint: string, authToken: string
 }
 
 /** Realistic, unforced tool-selection probes. All must pass; a model that picks the wrong tool is not "verified". */
-const TOOL_USE_PROBE_TOOLS = [
-  { type: "function", function: { name: "browser_navigate", description: "Open a URL in the browser tab", parameters: { type: "object", properties: { url: { type: "string" } }, required: ["url"] } } },
-  { type: "function", function: { name: "write_file", description: "Write text to a file in the project folder", parameters: { type: "object", properties: { path: { type: "string" }, content: { type: "string" } }, required: ["path", "content"] } } },
-  { type: "function", function: { name: "run_shell", description: "Run a shell command in the project folder", parameters: { type: "object", properties: { command: { type: "string" } }, required: ["command"] } } },
-  { type: "function", function: { name: "computer_screenshot", description: "Take a screenshot of the desktop", parameters: { type: "object", properties: {} } } },
-] as const;
-const TOOL_USE_PROBES: ReadonlyArray<{ user: string; expect: string; check: (args: unknown) => boolean }> = [
-  { user: "Open https://example.com in the browser and tell me the page title.", expect: "browser_navigate", check: (args) => /^https?:\/\/example\.com\/?$/.test(String((args as { url?: unknown })?.url ?? "")) },
-  { user: "Create a file named hello.txt in the project folder containing the text hi.", expect: "write_file", check: (args) => /hello\.txt$/.test(String((args as { path?: unknown })?.path ?? "")) && typeof (args as { content?: unknown })?.content === "string" },
-  { user: "Count how many files are in the project folder.", expect: "run_shell", check: (args) => typeof (args as { command?: unknown })?.command === "string" && (args as { command: string }).command.length > 0 },
-];
-
 /** 32×32 단색 빨강 PNG — 이미지 입력 능력 검사용. 모델이 "red" 라고 답하면 프로젝터가 실제로 작동한 것이다. */
 const RED_SQUARE_PNG_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAIAAAD8GO2jAAAAJ0lEQVR42u3NsQkAAAjAsP7/tF7hIASyp6lTCQQCgUAgEAgEgi/BAjLD/C5w/SM9AAAAAElFTkSuQmCC";
 
@@ -1340,6 +1329,37 @@ export class LocalModelHubManager {
     };
   }
 
+  /**
+   * One ask of the shared tool-choice probe (tool-choice-probe.ts) on the resident model, by task id only: the request is
+   * rebuilt here from the fixed task, so this port never carries caller text. Main runs the probe loop (majority, pauses
+   * while a turn runs) and keeps the receipt; this returns the model's first tool call or null.
+   */
+  async toolProbeAsk(installationId: string, taskId: string, signal?: AbortSignal): Promise<{ name: string; arguments: string } | null> {
+    const task = toolProbeTask(String(taskId));
+    if (!task) throw new Error("tool_probe_task_unknown");
+    const active = this.beginActiveInference(signal);
+    try {
+      await this.readyForMutation();
+      const resident = this.residentReceipt;
+      if (!resident || !this.residentProcess || resident.installationId !== installationId) throw new Error("tool_probe_model_not_resident");
+      const model = this.modelPackage(this.residentInstallation().modelPackageId);
+      if (!model) throw new Error("model_package_not_found");
+      const response = await this.fetchImpl(`${resident.endpoint}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "content-type": "application/json", ...this.authorizationHeaders() },
+        body: JSON.stringify({ model: model.fileName, stream: false, max_tokens: 128, chat_template_kwargs: { enable_thinking: false },
+          messages: toolProbeMessages(task), tools: TOOL_USE_PROBE_TOOLS }),
+        signal: active.signal,
+      });
+      if (!response.ok) throw new Error(`tool_probe_http_${response.status}`);
+      const body = await response.json() as { choices?: Array<{ message?: { tool_calls?: Array<{ function?: { name?: string; arguments?: string } }> } }> };
+      const call = body.choices?.[0]?.message?.tool_calls?.[0]?.function;
+      return call?.name ? { name: call.name, arguments: call.arguments ?? "" } : null;
+    } finally {
+      active.finish();
+    }
+  }
+
   async testCapabilities(
     installationId: string,
     selection: LocalCapabilityTestSelection,
@@ -1413,27 +1433,22 @@ export class LocalModelHubManager {
       }
       if (strictJson === "failed") reasonCodes.push("strict_json_probe_failed");
     }
+    let toolJudgment: LocalModelCapabilityReceipt["toolJudgment"] = "not_tested";
     if (selection.toolUse) {
-      // 강제(tool_choice)로 한 도구를 부르게 하면 0.6B 도 "확인됨"이 된다 — 실측 2026-09-13 에서 그 모델은
-      // 실제 과제 4개 중 2개에서 엉뚱한 도구를 골랐다(4B 는 4/4). 그래서 강제 없이 도구 여러 개를 주고
-      // 과제에 맞는 도구를 올바른 인자로 고르는지 본다. 이것이 채팅에서 실제로 겪는 일이다.
+      // One measurement module for every local runtime (tool-choice-probe.ts): majority per task, two markers.
       try {
-        const passed = await Promise.all(TOOL_USE_PROBES.map(async (probe) => {
-          const response = await complete({
-            messages: [
-              { role: "system", content: "You are a desktop agent. Use a tool when the task needs the browser, files or the shell." },
-              { role: "user", content: probe.user },
-            ],
-            tools: TOOL_USE_PROBE_TOOLS,
-          });
+        const probe = await runToolChoiceProbe(async (messages, tools) => {
+          const response = await complete({ messages, tools });
           const call = response.choices?.[0]?.message?.tool_calls?.[0] as { function?: { name?: string; arguments?: string } } | undefined;
-          if (call?.function?.name !== probe.expect) return false;
-          try { return probe.check(JSON.parse(call.function.arguments ?? "")); } catch { return false; }
-        }));
-        toolUse = passed.every(Boolean) ? "verified" : "failed";
-        if (toolUse === "failed") reasonCodes.push(`tool_use_probe_failed:${passed.filter(Boolean).length}/${passed.length}`);
-      } catch {
+          return call?.function?.name ? { name: call.function.name, arguments: call.function.arguments ?? "" } : null;
+        }, { signal });
+        toolUse = probe.toolUse;
+        toolJudgment = probe.toolJudgment;
+        reasonCodes.push(...probe.reasonCodes);
+      } catch (error) {
+        if (signal.aborted) throw error;
         toolUse = "failed";
+        toolJudgment = "failed";
         reasonCodes.push("tool_use_probe_failed");
       }
     }
@@ -1491,6 +1506,7 @@ export class LocalModelHubManager {
       testedAt: new Date().toISOString(),
       contextTokens: resident.contextTokens,
       toolUse,
+      toolJudgment,
       strictJson,
       imageInput,
       cancellation,

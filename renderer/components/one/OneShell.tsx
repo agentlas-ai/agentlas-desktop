@@ -12,7 +12,7 @@ import { subscribeOrderedRunEvents } from "@/lib/ordered-run-events";
 import { createFrameBatcher, isLiveStreamTick, type FrameBatcher } from "@/lib/frame-coalescer";
 import { createKeyedThrottle, stableTurnIds } from "@/lib/store-change-policy";
 import { needsProjectionRefresh, PROJECTION_DIRTY_ENTITIES } from "@/lib/one-projection-refresh";
-import { mergeAutomationHostNotices, mergeRoomWorkRows } from "@/lib/chat-host-notice-refresh";
+import { mergeAutomationHostNotices, mergeOwnerDecisionRows, mergeRoomWorkRows } from "@/lib/chat-host-notice-refresh";
 import { readOneChatHistory, readOneChatHistoryPage, mergeOneChatHistory, oneChatHistoryCursor } from "@/lib/one-chat-history";
 import { OneComposerInput, type OneComposerInputHandle } from "./OneComposerInput";
 import { oneHistoryWindowStart, revealOneHistoryPage } from "@/lib/one-history-window";
@@ -4577,7 +4577,9 @@ function OneSessionsShell() {
               || shownThreadChatIdRef.current !== activeThreadChatId) return current;
             // 단톡방에서는 팀원이 일하며 쓰는 줄(위임 링크·팀원 보고·팀원 메시지)도 방을 다시 열지 않고 붙인다.
             const withReports = mergeAutomationHostNotices(current, notices);
-            const appended = taskforceRoomRef.current && !runIdRef.current ? mergeRoomWorkRows(withReports, toUiMessages(history)) : withReports;
+            const withRoomWork = taskforceRoomRef.current && !runIdRef.current ? mergeRoomWorkRows(withReports, toUiMessages(history)) : withReports;
+            // A card Main posted while no turn of this room runs arrives only by this store change (chat-host-notice-refresh.ts).
+            const appended = !runIdRef.current ? mergeOwnerDecisionRows(withRoomWork, toUiMessages(history)) : withRoomWork;
             // Fence an older in-flight hydration from erasing a new report.
             if (appended !== current) oneTranscriptRevisionRef.current += 1;
             return appended.map((message) => {

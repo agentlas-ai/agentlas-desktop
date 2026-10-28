@@ -11,7 +11,6 @@ import { readMediaDisplayPreferences, writeMediaDisplayPreferences, type MediaDi
 import { readWorkSidebarWidth, clampWorkSidebarWidth, setWorkSidebarWidth } from "@/lib/work-sidebar-width";
 import type { AppControlRendererState } from "@shared/app-control";
 import { isAppUiPreferenceName } from "@shared/app-ui-preferences";
-import { COMPANY_ENTRY_ROUTE } from "@shared/business/visibility";
 import { readAppUiPreferences, writeAppUiPreference } from "@/lib/app-ui-preferences";
 import { PopupFrame } from "./Popup";
 import { IconApps, IconArrowLeft, IconChat, IconClose, IconFolder, IconSettings, IconSidebar, IconStore } from "./Icon";
@@ -113,8 +112,6 @@ export function MenuBridge() {
         setLocalePref(locale as LocalePref);
         return;
       }
-      // 회사 링크 경로는 AuthGate 가 받는다(로그인 전에도 받아야 해서) — 여기서 또 받으면 두 번 이동한다.
-      if (route === COMPANY_ENTRY_ROUTE) return;
       if (route.startsWith("/")) {
         router.push(route);
       }

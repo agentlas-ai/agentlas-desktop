@@ -2,7 +2,7 @@ import { fixedPurposePrompt, purposePrompt } from "../runtime/purpose-prompts";
 import path from "node:path";
 import { BUILTIN_MCP_LAUNCH_ARGV_MAX_CHARS, defineBuiltinMcpLaunch } from "../mcp-tools/builtin-mcp-launch";
 import { MEMORY_KINDS, MEMORY_SCOPES } from "../architecture/manifest";
-import { FINANCE_MONITOR_RUN_TIMEOUT_MS } from "../../shared/finance";
+import { HARNESS_PORT_CALL_TIMEOUTS } from "../harness/capability-ports";
 
 /*
  * agentlas-turn: per-run built-in MCP server holding the typed replacements for the text control blocks a model used
@@ -636,7 +636,9 @@ function allowedTools() {
 function request(operation, args) {
   const info = control();
   const harnessOperation = operation === "harness_call" && args && typeof args === "object" ? [args.operation, args.operationId, args.id, args.name].find(value => typeof value === "string" && value.trim()) : null;
-  const timeout = harnessOperation === "finance.monitor.run" ? ${FINANCE_MONITOR_RUN_TIMEOUT_MS + 10000} : 30000;
+  // A port that declares a longer reply time (harness/capability-ports.ts callTimeoutMs) gets it plus 10 s; every other call 30 s.
+  const callTimeouts = ${JSON.stringify(HARNESS_PORT_CALL_TIMEOUTS)};
+  const timeout = harnessOperation && Object.prototype.hasOwnProperty.call(callTimeouts, harnessOperation) ? callTimeouts[harnessOperation] + 10000 : 30000;
   const body = JSON.stringify({ operation, args, token: info.token, capabilityId: info.capabilityId });
   if (Buffer.byteLength(body, "utf8") > MAX_REQUEST_BYTES) return Promise.reject(new Error("Turn tool request is too large."));
   return new Promise((resolve, reject) => {

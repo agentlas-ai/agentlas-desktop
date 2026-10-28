@@ -37,6 +37,7 @@
 //     So a product run's HOME is a mirror (syncGrokProductUserHome) in which every entry of the person's HOME is a link
 //     (Library too, so the login keychain resolves as for the person; .gitconfig, .ssh and the rest stay the person's
 //     for the tools a turn runs) except `.claude`, `.claude.json`, `.agents` and `.grok`, see GROK_USER_HOME_OWN.
+import { grokBuiltinEgressConfigToml } from "./runtime-builtin-egress-policy";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
@@ -130,7 +131,10 @@ export function productGrokConfig(text: string, keepServers: ReadonlySet<string>
     || (second !== undefined && rest.length === 0 && GROK_OPT_OUTS[`${head}.${second}`]?.has(value.trim()) === true));
   const out = personal && runServers ? `${personal}${runServers}` : personal || runServers;
   const ignore = skillsIgnore.length > 0 ? `[skills]\nignore = [${skillsIgnore.map((p) => JSON.stringify(p)).join(", ")}]\n` : "";
-  return out && ignore ? `${out}\n${ignore}` : out || ignore;
+  const body = out && ignore ? `${out}\n${ignore}` : out || ignore;
+  // Grok's outward built-ins (deploy_app, scheduler_*, send_feedback) are denied in every product home; the person's own
+  // [permission] table is never copied, so this is the only one (runtime-builtin-egress-policy.ts).
+  return body ? `${body}\n${grokBuiltinEgressConfigToml()}` : grokBuiltinEgressConfigToml();
 }
 
 /** user-settings.json keys a product run keeps: the model default (`/model` writes it). Nothing else of the file. */

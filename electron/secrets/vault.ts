@@ -551,7 +551,6 @@ export function apiKeyPresenceHint(backend: RuntimeBackend): "present" | "missin
 
 /** main 내부 사용 — MCP 호출 시 자식 env에 주입. renderer 노출 X */
 export async function readApiKey(backend: RuntimeBackend): Promise<string | null> {
-  await (await import("../business/company-work-provider")).assertCompanyProviderCredential(backend);
   return getPassword(byokAccount(backend));
 }
 

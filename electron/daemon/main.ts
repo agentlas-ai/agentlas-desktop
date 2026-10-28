@@ -1,3 +1,4 @@
+import "../runtime/host-session-env-boot";
 import { NATIVE_INVOCATION_PRODUCTION_RESOURCES, nativeInvocationResourcesFromArgv, parseNativeInvocationResources } from "./native-invocation-config";
 // `agentlasd` is the persistent local host. Desktop is an attachable client;
 // closing the GUI does not end daemon-owned work. Updates and explicit service

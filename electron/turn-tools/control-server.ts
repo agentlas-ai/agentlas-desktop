@@ -432,7 +432,7 @@ export async function handleTurnToolsControlRequest(request: Record<string, unkn
         ...(binding.mcpConfigPath ? { mcpConfigPath: binding.mcpConfigPath } : {}) };
       if (operation === "harness_search") {
         const kind = typeof a.kind === "string" ? a.kind as Parameters<typeof harness.searchHarness>[1] : undefined;
-        const items = await harness.searchHarness(typeof a.query === "string" ? a.query.slice(0, 500) : "", kind);
+        const items = await harness.searchHarness(typeof a.query === "string" ? a.query.slice(0, 500) : "", kind, ctx);
         // A kind outside the list matches nothing of that kind; say so and name the closest kind, and still answer as before
         // (the search is not re-run with a guessed kind).
         const badKind = typeof a.kind === "string" && a.kind !== "" && !(HARNESS_ITEM_KINDS as readonly string[]).includes(a.kind);

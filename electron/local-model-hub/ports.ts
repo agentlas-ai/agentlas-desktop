@@ -8,7 +8,7 @@ import type { LocalModelHubManager } from "./manager";
 export type LocalModelHubControlPort = Pick<LocalModelHubManager,
   "snapshot" | "searchModels" | "inspectRepository" | "addModel"
   | "downloadEngine" | "downloadModel" | "importModel" | "installEngine"
-  | "installDownloadedModel" | "loadModel" | "unload" | "testCapabilities">;
+  | "installDownloadedModel" | "loadModel" | "unload" | "testCapabilities" | "toolProbeAsk">;
 
 export type LocalModelRuntimeInventory = Pick<LocalModelHubSnapshot, "resident" | "modelInstallations" | "capabilityReceipts">;
 
@@ -25,6 +25,8 @@ export interface LocalModelHubRuntimePort extends LocalModelHubSnapshotPort {
   /** Observation never prepares a service or waits for execution admission. */
   observeSnapshot?: () => Promise<LocalModelRuntimeObservation>;
   run: Runner;
+  /** One ask of the shared tool-choice probe on the resident model (task id only). Absent on an older daemon. */
+  toolProbeAsk?: LocalModelHubControlPort["toolProbeAsk"];
 }
 
 /** In-process only: never implement by publishing the engine bearer token. */

@@ -3,13 +3,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import { validateFinanceWorkspace, FinanceDataSaveRequestSchema, FinanceAskRequestSchema, type FinanceWorkspace } from '../../shared/finance';
+import { validateFinanceWorkspace, FinanceDataSaveRequestSchema, type FinanceWorkspace } from '../../shared/finance';
 import { getAuthenticatedSessionBinding, onAuthSessionOwnershipChanged } from '../auth';
 import { userDataPath } from '../runtime-paths';
 import { createWorkStart } from '../work-start';
 import { detectRuntimes } from '../runtime/detect';
 import { FinanceStore, type FinanceScope } from './store';
-import { interpretFinance } from './model';
 import { queryFinanceData, refreshFinanceQuotes } from './data';
 import { financeResearchPrompt } from './prompts';
 import { captureFinanceScope, getFinanceService } from './service';
@@ -100,23 +99,8 @@ export function registerFinanceIpc(input: { ipc: Pick<IpcMain, 'handle'>; assert
     if ((await store.load(scope)).revision !== workspace.revision) return { baseRevision: workspace.revision, status: 'conflict', message: 'The workspace changed while quotes were loading. Refresh again.', operations: [] };
     return result;
   });
-  handle('ask', async(event, raw, scope) => {
-    const arg = FinanceAskRequestSchema.parse(raw);
-    const requestId = arg.requestId ?? randomUUID(); const key = `${event.sender.id}:${requestId}`;
-    if (running.has(key) || [...running.values()].filter(item => item.senderId === event.sender.id).length >= 2) throw new Error('finance_request_busy');
-    const controller = new AbortController(); running.set(key, { controller, senderId: event.sender.id });
-    const onDestroyed = () => controller.abort(); event.sender.once('destroyed', onDestroyed);
-    try {
-      await requireFinanceConsent(scope);
-      controller.signal.throwIfAborted();scope.assertCurrent();
-      const workspace = await store.load(scope); scope.assertCurrent();
-      const result = await service.ask(scope, { ...arg, requestId }, controller.signal);
-      scope.assertCurrent();
-      if (controller.signal.aborted) return { baseRevision: arg.baseRevision, requestId, status: 'cancelled', message: 'Request cancelled.' };
-      if (!arg.analystAuthoring && (await store.load(scope)).revision !== arg.baseRevision) return { baseRevision: arg.baseRevision, requestId, status: 'conflict', message: 'The workspace changed while the model was responding. Nothing was applied.' };
-      scope.assertCurrent(); return result;
-    } finally { event.sender.removeListener('destroyed', onDestroyed); running.delete(key); }
-  });
+  // The Finance conversation is a Work chat in the owner's Finance Work project (FinanceWorkChat, finance:workProject): it runs
+  // through the shared invocation service and runner like every Work turn. There is no second Finance-only model loop here.
   // Cancellation is unconditional with respect to auth, revisions and request completion.
   input.ipc.handle('finance:cancelAsk', (event, raw) => {
     input.assertTrustedSender(event); const arg = z.object({ requestId: boundedId }).strict().parse(raw);
@@ -127,7 +111,10 @@ export function registerFinanceIpc(input: { ipc: Pick<IpcMain, 'handle'>; assert
     const arg = z.object({ assetId: boundedId, question: z.string().max(20000).optional() }).strict().parse(raw);
     const workspace = await store.load(scope); scope.assertCurrent(); const asset = workspace.watchlist.find(item => item.id === arg.assetId);
     if (!asset) throw new Error('finance_asset_not_found');
-    const receipt = await createWorkStart({ intentId: randomUUID(), prompt: financeResearchPrompt(asset, arg.question ?? ''), options: { permissions: 'read' } }, async() => { const runtimes = await detectRuntimes(); scope.assertCurrent(); return runtimes; });
+    // Research runs as a Work chat in the owner's Finance Work project, so it is a Finance conversation like any other:
+    // the Finance tools, the finance.chat line and the owner fence come from the stored project binding (mcp/client.ts).
+    const { projectId } = financeWorkProject(scope); scope.assertCurrent();
+    const receipt = await createWorkStart({ intentId: randomUUID(), prompt: financeResearchPrompt(asset, arg.question ?? ''), projectId, options: { permissions: 'read' } }, async() => { const runtimes = await detectRuntimes(); scope.assertCurrent(); return runtimes; });
     scope.assertCurrent(); return { chatId: receipt.chatId, intentId: receipt.intentId, status: receipt.status };
   });
   for (const action of ['scheduleMonitor','pauseMonitor'] as const) handle(action,async(_event,raw,scope)=>{

@@ -1,7 +1,7 @@
 "use client";
 
 import { useId, useState } from "react";
-import { IconCheck, IconChevronDown, IconChevronRight, IconClose, IconPlus, IconSearch } from "@/components/Icon";
+import { IconCheck, IconChevronDown, IconChevronRight, IconPlus, IconSearch } from "@/components/Icon";
 import type { FinanceAsset, FinanceSearchResult, FinanceSecurityIdentity } from "@shared/finance";
 import styles from "./FinanceAssetResults.module.css";
 
@@ -67,9 +67,4 @@ export function FinanceAssetResults({ result, ko, query, selectedAssetId, watchl
     {query && <p className={styles.query}>{query}</p>}
     {result.assets.length ? <ul className={styles.list}>{result.assets.map(asset => <AssetRow key={asset.id} asset={asset} identity={result.identities?.find(identity => identity.assetId === asset.id)} ko={ko} selected={selectedAssetId === asset.id} added={watchlistIds.has(asset.id)} disabled={disabled} onSelect={onSelect ? () => onSelect(asset) : undefined} onWatchlist={onWatchlist ? () => onWatchlist(asset) : undefined} onResearch={onResearch ? () => onResearch(asset) : undefined}/>)}</ul> : <p className={styles.empty}>{ko ? "검색 결과가 없습니다. 회사명이나 티커를 바꿔보세요." : "No results. Try another company name or symbol."}</p>}
   </section>;
-}
-
-export function FinanceSelectedAsset({ asset, ko, onRemove }: { asset: FinanceAsset; ko: boolean; onRemove: () => void }) {
-  const label = candidateLabel(asset, ko);
-  return <div className={styles.selection} role="group" aria-label={ko ? "질문에 선택한 자산" : "Asset selected for your question"}><span title={label}><strong>{asset.symbol}</strong><span>{asset.name}</span></span><button type="button" className={styles.action} onClick={onRemove} aria-label={`${ko ? "선택 자산 해제" : "Clear selected asset"}: ${label}`} title={`${ko ? "선택 해제" : "Clear selection"}: ${label}`}><IconClose size={14}/></button></div>;
 }

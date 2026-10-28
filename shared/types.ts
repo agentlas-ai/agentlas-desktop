@@ -8,14 +8,7 @@ import type { OneContextAPI } from "./one-context";
 import type { OneCapabilitiesAPI } from "./one-capabilities";
 import type { ArchiveAPI } from "./archive";
 import type { ReachAPI } from "./reach";
-import type { EnterpriseServerAPI } from "./enterprise-server";
 import type { OnePersonalDataNativeAPI } from './one-personal-native';
-import type { EmployeeAgentWorkAPI } from './business/employee-agent-work-api';
-import type { BusinessNativeSharingAPI } from './business/native-sharing-api';
-import type { CompanyNativeAPI } from './business/company-native';
-import type { BusinessCompanyMailAPI } from './business/company-mail';
-import type { CompanyWorkAPI } from './business/company-work';
-import type { BusinessRendererBridge } from './business/console-contracts';
 import type { OneVaultNativeAPI } from './one-vault';
 import type { OneProviderNativeAPI } from './one-provider-native';
 import type { AgentWorkspaceIpc } from "./agent-workspace";
@@ -8312,17 +8305,7 @@ export interface AgentlasIpc {
   archive: ArchiveAPI;
   /** Agentlas Reach: the owner's switch for exploring installed desktop apps in the background, and its status. */
   reach: ReachAPI;
-  /** Settings → company server (Agentlas Enterprise Server): connection status, enrollment code, re-check, disconnect. Status only — no key or token. */
-  enterpriseServer: EnterpriseServerAPI;
   onePersonalData: OnePersonalDataNativeAPI;
-  /** Company account metadata and management use the existing authenticated browser.
-   * Native execution still requires its original registered authority. */
-  business: BusinessRendererBridge;
-  businessWork: EmployeeAgentWorkAPI;
-  businessNative: BusinessNativeSharingAPI;
-  companyNative?: CompanyNativeAPI;
-  companyMail?: BusinessCompanyMailAPI;
-  businessCompanyWork?: CompanyWorkAPI;
   oneVault: OneVaultNativeAPI;
   oneProvider: OneProviderNativeAPI;
   oneProfile: {

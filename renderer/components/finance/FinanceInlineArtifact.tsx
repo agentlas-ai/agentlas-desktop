@@ -1,37 +1,13 @@
 "use client";
-import type { FinanceAIResult, FinanceReport, FinanceWorkspace } from "@shared/finance";
+import type { FinanceReport } from "@shared/finance";
 import { financeReportComputeMetrics, financeReportCompositionTitle, financeReportDirection, financeReportLocale, financeReportProseBlocks, financeReportWarnings, selectFinanceReportSections } from "@shared/finance-report-presentation";
 import { ChartBlock } from "@/components/ChartBlock";
 import { IconExpand, IconPlus, IconChat, IconFileText } from "@/components/Icon";
 import { FinanceReportProse, FinanceReportWarnings, financeLocalizedReportChartSpec } from "./FinanceReportView";
 import { financeArtifactTitle } from "./FinanceArtifactGallery";
-import { FinanceBriefText } from "./FinanceMonitorReceipts";
 import styles from "./FinanceInlineArtifact.module.css";
 
 export interface FinanceInlineSnapshot { report: FinanceReport; ownerScope: string | null; revision: number }
-/** Bind only successful, committed output. Copies keep earlier answers unchanged by later report edits. */
-export function financeInlineSnapshots(response: FinanceAIResult, committed: FinanceWorkspace, operationsApplied: boolean, before: FinanceWorkspace): FinanceInlineSnapshot[] {
-  if (!operationsApplied || response.status && response.status !== "ok") return [];
-  const ids = new Set<string>();
-  for (const operation of response.operations ?? []) {
-    switch (operation.type) {
-      case "report.add": ids.add(operation.report.id); break;
-      case "report.refresh":
-        for (const report of committed.reports) if (report.parentReportId === operation.reportId && !before.reports.some(previous => previous.id === report.id)) ids.add(report.id);
-        break;
-      case "report.update": case "report.section.update": case "report.section.remove": case "report.section.move": ids.add(operation.reportId); break;
-    }
-  }
-  return committed.reports.filter(report => ids.has(report.id)).map(report => ({ report: structuredClone(report), ownerScope: committed.ownerScope, revision: committed.revision }));
-}
-export function financeInlineCurrent(snapshot: FinanceInlineSnapshot, workspace: FinanceWorkspace): boolean {
-  return snapshot.ownerScope === workspace.ownerScope && workspace.reports.some(report => report.id === snapshot.report.id && JSON.stringify(report) === JSON.stringify(snapshot.report));
-}
-export function FinanceInlineResponseText({ text, ko, progressive }: { text: string; ko: boolean; progressive: boolean }) {
-  return progressive && !!text.trim()
-    ? <details className={styles.details}><summary>{ko ? "응답 설명" : "Response explanation"}</summary><FinanceBriefText value={text} ko={ko}/></details>
-    : <FinanceBriefText value={text} ko={ko}/>;
-}
 export function FinanceInlineArtifact({ snapshot, messageId, locale, current, busy, onExpand, onOpen, onPin, onContinue }: {
   snapshot: FinanceInlineSnapshot; messageId: string; locale: string; current?: boolean; busy: boolean;
   onExpand?: (sectionId: string) => void; onOpen?: () => void; onPin?: (sectionId: string) => void; onContinue?: (sectionId?: string) => void;

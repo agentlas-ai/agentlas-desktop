@@ -277,6 +277,7 @@ export function createLocalModelDaemonClient(options: LocalModelDaemonClientOpti
     loadModel: (id, context, signal) => controlCall<"loadModel">({ method: "loadModel", args: [id, context] }, signal),
     unload: (epoch, input) => controlCall<"unload">({ method: "unload", args: [epoch, input] }),
     testCapabilities: (id, selection, signal) => controlCall<"testCapabilities">({ method: "testCapabilities", args: [id, selection] }, signal),
+    toolProbeAsk: (id, taskId, signal) => controlCall<"toolProbeAsk">({ method: "toolProbeAsk", args: [id, taskId] }, signal),
   };
   const runs: RemoteLocalModelRunTransport = {
     start: async input => {
@@ -328,6 +329,7 @@ export function createLocalModelDaemonClient(options: LocalModelDaemonClientOpti
   const runtime: LocalModelHubRuntimePort = {
     snapshot: control.snapshot,
     observeSnapshot,
+    toolProbeAsk: control.toolProbeAsk,
     run: async (request, events) => {
       // Everything up to run.start precedes dispatch: a refusal here is that refusal (markNotDispatched), never an unknown outcome.
       let mcpAdmission: ReturnType<typeof exportPreparedMcpAdmission> | undefined;

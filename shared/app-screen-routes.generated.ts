@@ -12,7 +12,6 @@ export const APP_SCREEN_PAGES: readonly string[] = [
   "/browser",
   "/build",
   "/build/plugin",
-  "/business",
   "/cloud",
   "/dashboard",
   "/finance",

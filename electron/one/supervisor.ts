@@ -199,18 +199,20 @@ export function oneSupervisor():OneSupervisorService {
     if (hostOptions?.executor === "agentlas-cloud" && (req.goalMode || getChat(req.chatId)?.goalId)) throw supervisorError("managed_one_goal_unavailable");
     if (getDb().inTransaction) throw supervisorError('supervisor_native_uncommitted_request');
     hostOptions?.assertAuthority();owner.assert(getOneProfile().oneId);
-    if(req.runId)try { await (await import('../finance/daily-briefing')).assertFinanceDailyReview(req.runId); }
+    // Every domain's check-in admission gate (one/checkin-admission.ts) sees each review run before it starts.
+    if(req.runId)try { await (await import('./checkin-admission')).admitCheckinReview(req.runId); }
     catch(error) {
-      if(error instanceof Error && error.message==='finance_daily_review_denied') {
+      const {CheckinAdmissionDenied,CheckinAdmissionDeferred}=await import('./checkin-admission');
+      if(error instanceof CheckinAdmissionDenied) {
         // This rejection is before budget/native admission: retry only the other notices in a mixed review.
         store.db.transaction(()=>{
           const row=store.db.prepare("SELECT * FROM one_supervisor_requests WHERE one_id=? AND run_id=? AND state='dispatching'").get(getOneProfile().oneId,req.runId) as SupervisorRequestRow|undefined;
-          if(row){store.retryReview(req.runId!,'finance_daily_review_denied');store.update(row,{state:'failed',acknowledgement:'settled',reason:'finance_daily_review_denied'});}
+          if(row){store.retryReview(req.runId!,error.reason);store.update(row,{state:'failed',acknowledgement:'settled',reason:error.reason});}
         }).immediate();
       }
-      // Billing could not be reached: nothing was decided and the schedule is kept. The service returns the review's
+      // A gate that could not be answered: nothing was decided and the schedule is kept. The service returns the review's
       // results to the queue (with backoff) and records this typed cause.
-      if(error instanceof Error && error.message==='finance_daily_access_unavailable')throw new SupervisorStartDeferred('finance_monitoring_access_unavailable');
+      if(error instanceof CheckinAdmissionDeferred)throw new SupervisorStartDeferred(error.reason);
       throw error;
     }
     hostOptions?.assertAuthority();owner.assert(getOneProfile().oneId);
@@ -330,8 +332,8 @@ export function oneSupervisor():OneSupervisorService {
   // delegated to is waiting for the owner. The listener is not an answer surface (it returns false).
   let checkinBusy=false;
   const fireCheckins=async()=>{if(checkinBusy)return;checkinBusy=true;try{
-    // Finance permission/consent is rechecked before the existing One scheduler admits a due briefing.
-    const heldCheckins=await (await import('../finance/daily-briefing')).wakeFinanceDailyBriefing();
+    // Each domain's check-in admission gate is asked before the existing One scheduler admits a due check-in.
+    const heldCheckins=await (await import('./checkin-admission')).heldCheckinIds();
     supervisor?.fireDueCheckins(Date.now(),heldCheckins);recoverOnePersonalDataResults();wakeOnePersonalIntegrationsFromExistingCheckin();
   }catch(error){console.warn("[one-supervisor] check-ins deferred",error instanceof Error ? error.message : "unknown");}finally{checkinBusy=false;}};
   const checkinTimer=setInterval(fireCheckins,30_000);checkinTimer.unref?.();

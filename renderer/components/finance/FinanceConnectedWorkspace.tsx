@@ -6,7 +6,7 @@ import { ipc } from "@/lib/ipc";
 import { navigate } from "@/lib/navigation";
 import { financeStore } from "@/lib/finance-store";
 import { useT } from "@/lib/i18n";
-import { FinanceWorkspace, type FinanceAIContext } from "./FinanceWorkspace";
+import { FinanceWorkspace } from "./FinanceWorkspace";
 import { WorkChatDraftContext, type WorkChatDraftRequest } from "@/lib/work-chat-draft";
 import type { FinanceAPI } from "@shared/finance";
 import type { FinanceAnalystRequest } from "@shared/finance-analysts";
@@ -24,18 +24,6 @@ const FinanceWorkChat = dynamic(() => import("./FinanceWorkChat").then(module =>
 function assertNotCancelled(signal: AbortSignal): void {
   if (signal.aborted) throw new DOMException("Cancelled", "AbortError");
 }
-export function financeScreenContext(context:FinanceAIContext):string {
-  const selection={dashboardId:context.dashboardId,selectedWidgetId:context.selectedWidgetId,
-    reportId:context.reportId??null,selectedSectionId:context.selectedSectionId??null,
-    ...(context.selectedSeries!==undefined?{selectedSeries:context.selectedSeries}:{}),
-    history:context.history?.slice(-6).map(item=>({role:item.role,content:item.content.slice(0,180)}))??[]};
-  // Bound the serialized packet, including JSON escapes, to the host's exact IPC limit.
-  while(JSON.stringify(selection).length>2000&&selection.history.length)selection.history.shift();
-  const serialized=JSON.stringify(selection);
-  if(serialized.length>2000)throw new Error('finance_screen_context_too_large');
-  return serialized;
-}
-
 /** Native account custody is re-established before any saved financial state is displayed. */
 export function FinanceConnectedWorkspace() {
   const { locale } = useT();
@@ -95,6 +83,7 @@ export function FinanceConnectedWorkspace() {
     if (!api?.dashboardFeeds) throw new Error('finance_dashboard_feeds_unavailable');
     return api.dashboardFeeds();
   }, [api]);
+  const listAnalysts = useCallback(async () => { if(!api?.analysts)throw new Error("finance_analysts_unavailable"); return api.analysts({action:"list"}); }, [api]);
   const analysts = useCallback(async (request:FinanceAnalystRequest) => {
     if(!api?.analysts)throw new Error("finance_analysts_unavailable");
     return api.analysts(request);
@@ -107,13 +96,13 @@ export function FinanceConnectedWorkspace() {
 
   const currentOwnerScope = financeStore.getSnapshot().workspace.ownerScope;
   return <WorkChatDraftContext.Provider value={workDraft?.ownerScope === currentOwnerScope ? workDraft.draft : null}><FinanceWorkspace
-    onWorkDraft={text=>{
+    onWorkDraft={(text,capability)=>{
       const ownerScope = financeStore.getSnapshot().workspace.ownerScope;
       if (!ownerScope || !text.trim()) return;
       const id = crypto.randomUUID();
-      setWorkDraft({ ownerScope, draft: { id, text, onConsumed: () => setWorkDraft(current => current?.draft.id === id ? null : current) } });
+      setWorkDraft({ ownerScope, draft: { id, text, ...(capability ? { capability } : {}), onConsumed: () => setWorkDraft(current => current?.draft.id === id ? null : current) } });
     }}
-    workChat={<FinanceWorkChat key={financeStore.getSnapshot().workspace.ownerScope ?? "unbound"} ownerScope={financeStore.getSnapshot().workspace.ownerScope} provisionProject={workProject}/>}
+    workChat={<FinanceWorkChat key={financeStore.getSnapshot().workspace.ownerScope ?? "unbound"} ownerScope={financeStore.getSnapshot().workspace.ownerScope} provisionProject={workProject} listAnalysts={api?.analysts?listAnalysts:undefined}/>}
     experienceRefreshVersion={experienceRefreshVersion}
     onPlanning={api?.planning?async(request,signal)=>{assertNotCancelled(signal);const result=await api.planning!(request);assertNotCancelled(signal);return result;}:undefined}
     onPortfolio={api?.portfolio?async(request,signal)=>{

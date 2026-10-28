@@ -71,7 +71,8 @@ export function KeyStatusBanner({
           <IconShield size={12} />
           {status.health === "error"
             ? ko ? "키 연결 끊김" : "Keys down"
-            : ko ? "사용량 한도 임박" : "Usage near limit"}
+            : status.cause === "limit_reached" ? ko ? "사용량 한도 도달" : "Usage limit reached"
+              : ko ? "사용량 한도 임박" : "Usage near limit"}
         </span>
       );
     }
@@ -87,12 +88,18 @@ export function KeyStatusBanner({
   if (status.health === "ok") return null;
 
   const isError = status.health === "error";
-  const noticeKey = `${status.health}:${affected}`;
+  const noticeKey = `${status.health}:${status.cause ?? ""}:${status.runRefusalCode ?? ""}:${affected}`;
+  // The warning says what Main does, from the machine cause (key-status.ts), never "near" for a limit that is used up.
+  const warningSummary = status.cause === "limit_reached"
+    ? status.runRefusalCode === "subscription_credits_disabled"
+      ? (ko ? "사용량 한도에 도달했고 크레딧 자동 사용이 꺼져 있어 새 실행이 시작되지 않습니다." : "Usage limit reached and automatic credit use is off, so new runs will not start.")
+      : (ko ? "사용량 한도에 도달해 새 실행이 거부될 수 있습니다." : "Usage limit reached; new runs may be refused.")
+    : (ko ? "사용량 한도에 근접했습니다." : "Approaching usage limit.");
   if (compact) {
     if (dismissed === noticeKey) return null;
     const summary = isError
       ? (ko ? "키 연결을 확인하세요." : "Check your key connection.")
-      : (ko ? "사용량 한도에 근접했습니다." : "Approaching usage limit.");
+      : warningSummary;
     const detail = [summary, affected].filter(Boolean).join(" · ");
     return (
       <div role="status" style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0, padding: "4px 12px", background: "var(--paper)", color: "var(--ink-soft)", fontSize: 11, lineHeight: "20px" }}>
@@ -111,7 +118,7 @@ export function KeyStatusBanner({
         <strong>
           {isError
             ? ko ? "키 연결을 확인하세요." : "Check your key connection."
-            : ko ? "사용량 한도에 근접했습니다." : "Approaching usage limit."}
+            : warningSummary}
         </strong>
         <span>
           {affected

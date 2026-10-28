@@ -11,12 +11,18 @@ export function workMainOwnsRouting(input: {
     && input.explicitExecution !== true;
 }
 
-export function workSessionMainPolicy(): string {
+/**
+ * `delegationToolsListed`: the run's config carries the Work-session dispatch tools (mcp-config.ts workSessionTools). The
+ * delegation line names work_session_agents/delegate, so it is sent only then (2026-10-28: a Work chat without a project
+ * got the line but not the tools, which need a project task; a small model then planned to delegate through tools it could
+ * not see and ended the turn empty).
+ */
+export function workSessionMainPolicy(input: { delegationToolsListed: boolean }): string {
   return composeDeclaredPrompt([
     { id: "work.session.main.role", revision: 1, stability: "fixed-policy", changeTriggers: ["release"], order: 0,
       text: "Work: you remain this conversation's main AI; own dialogue, execution choices, progress and recovery. Answer/do work yourself when sufficient; specialists are optional tools, never a mandatory roster." },
-    { id: "work.session.main.delegation", revision: 1, stability: "fixed-policy", changeTriggers: ["release"], order: 10,
-      text: "Delegate independent work through work_session_agents/delegate with focused done criteria and a suitable advertised model/effort. A returned handle is accepted work, not completion. End the turn while children work; their reports return here. Handle new owner messages without restarting the task tree." },
+    { id: "work.session.main.delegation", revision: 2, stability: "fixed-policy", changeTriggers: ["release", "tool-grant"], order: 10,
+      text: !input.delegationToolsListed ? null : "Delegate independent work through work_session_agents/delegate with focused done criteria and a suitable advertised model/effort. A returned handle is accepted work, not completion. End the turn while children work; their reports return here. Handle new owner messages without restarting the task tree." },
     { id: "work.session.main.recovery", revision: 1, stability: "fixed-policy", changeTriggers: ["release"], order: 20,
       text: "Recovery: read typed cause, delivery and effect evidence; fix the smallest failed step, change the plan/tool/runtime when appropriate, preserve verified outputs. A waiting resource is not task failure. Unknown external effects require observation before replay. Ask only for missing owner-only access or decisions; report actual blockers accurately." },
     { id: "work.session.main.goal", revision: 1, stability: "fixed-policy", changeTriggers: ["release"], order: 30,

@@ -73,11 +73,6 @@ export function currentOrganizationMailSelection() {
   const current = organizationTransport?.current();
   return current && Date.parse(current.expiresAt) > Date.now() ? Object.freeze({ ...current }) : null;
 }
-export async function agentMailColleagues(): Promise<import('../../shared/agent-mail').AgentMailResult<{ colleagues: import('../../shared/business/company-mail').BusinessCompanyMailColleague[] }>> {
-  if (captureAgentMailExecutionScope().kind !== 'organization') return err('organization_mail_required', 'Select company mail.', 403);
-  const response = await call<{ colleagues: import('../../shared/business/company-mail').BusinessCompanyMailColleague[] }>('GET', '/api/agent-mail/colleagues');
-  return response.ok ? { ok: true, colleagues: response.json.colleagues } : response;
-}
 let transportGeneration = 0;
 let knownScope = "personal";
 /** Main's explicit scope selection owns this binding. A selected but expired

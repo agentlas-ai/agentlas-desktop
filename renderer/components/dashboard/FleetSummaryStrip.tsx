@@ -7,7 +7,7 @@ import { useCallback, useEffect, useState } from "react";
 import { ipc, ipcEvents } from "@/lib/ipc";
 import { useVisibleInterval } from "@/lib/useVisibleInterval";
 import { useT } from "@/lib/i18n";
-import { deriveKeyStatus, type KeyHealth } from "@/lib/key-status";
+import { deriveKeyStatus, type KeyStatus } from "@/lib/key-status";
 import { navigate } from "@/lib/navigation";
 import { visibleAgents } from "@/lib/agent-visibility";
 import { loadViewData, readViewData, writeViewData } from "@/lib/view-data-cache";
@@ -42,7 +42,8 @@ export function FleetSummaryStrip() {
   const [active, setActive] = useState(() => readViewData<string[]>("dashboard.active-chats")?.value?.length ?? 0);
   const [teamCount, setTeamCount] = useState<number | null>(cachedFirms.length > 0 ? cachedFirms.length : null);
   const [singleCount, setSingleCount] = useState(() => visibleAgents(cachedTeam).filter((agent) => !cachedFirmAgentIds.has(agent.id)).length);
-  const [keyHealth, setKeyHealth] = useState<KeyHealth>(() => deriveKeyStatus(cachedUsage).health);
+  const [keyStatus, setKeyStatus] = useState<KeyStatus>(() => deriveKeyStatus(cachedUsage));
+  const keyHealth = keyStatus.health;
 
   const loadPending = useCallback(async (force = false) => {
     try {
@@ -64,7 +65,7 @@ export function FleetSummaryStrip() {
       const api = ipc();
       if (!api) return;
       const snap = await loadViewData("dashboard.usage", () => api.usage.snapshot(), { maxAgeMs: DATA_MAX_AGE_MS, force });
-      setKeyHealth(deriveKeyStatus(snap ?? null).health);
+      setKeyStatus(deriveKeyStatus(snap ?? null));
     } catch {
       /* 무시 */
     }
@@ -159,7 +160,8 @@ export function FleetSummaryStrip() {
           : keyHealth === "error"
             ? ko ? "키 연결 끊김" : "keys down"
             : keyHealth === "warning"
-              ? ko ? "사용량 임박" : "near limit"
+              // Same machine cause as the banner (key-status.ts): a used-up limit is never "near".
+              ? keyStatus.cause === "limit_reached" ? ko ? "사용량 한도 도달" : "limit reached" : ko ? "사용량 임박" : "near limit"
               : ko ? "키 상태 확인 중" : "checking keys"}
       </span>
     </div>

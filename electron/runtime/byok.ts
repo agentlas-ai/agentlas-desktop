@@ -19,7 +19,6 @@ import { assertScienceRecoveryRequest } from "../science-host/recovery-authority
 //  - 1M 컨텍스트: Anthropic은 beta 헤더(opt-in), OpenAI/Google은 모델 내장(자동)
 //  - 압축: 모델 컨텍스트 윈도우 초과 시 compactHistory로 과거 대화를 다이제스트로 접음
 import { readApiKey } from "../secrets/vault";
-import { companyCustomByokEndpoint } from "../business/company-work-provider";
 import type { Runner, RunnerEvents, RunnerFailure, RunnerRequest, RunnerResult } from "./runner";
 import { cumulativeSurfaceGateText, markRefusedBeforeDispatch, RuntimeTurnUnsettledError, runtimeHttpFailure, workforceZeroToolsEnforcement, wrapSystemPrompt } from "./runner";
 import { applyPlannedMessageBreakpoints, cachedTokensFromGeminiUsage } from "./prompt-cache";
@@ -49,7 +48,7 @@ import { OUTPUT_LIMIT_CONTINUATION_MAX_ROUNDS, outputLimitContinuationTurn } fro
 import { schemaFallbackInstruction, schemaFallbackPromptPart, observationSystemWithSchema } from "../../shared/runtime-capabilities";
 import { compactHistoryToBudget, estimateTransportTokens } from "./compact";
 import { detectRuntimeRefusal } from "./runtime-refusal";
-import { normalEndToolEvidence, settleNormalEnd } from "../../shared/turn-settlement";
+import { EMPTY_NO_TOOL_RAN_CODE, normalEndToolEvidence, settleNormalEnd } from "../../shared/turn-settlement";
 import {
   serverFailure, serverFailureCodeForStatus, serverFailureResendable, serverFailureResendDelayMs, SERVER_FAILURE_RESENDS,
   waitForServerResend,
@@ -931,7 +930,7 @@ async function runAnthropicMessagesInner(
   if (!reachedAnswer) {
     failure = byokFailure("exit", `BYOK tool loop did not reach a final answer after ${toolTurnsTaken} tool turns.`);
   } else if (normalEnd?.outcome === "empty") {
-    failure = byokFailure("empty", `BYOK returned an empty answer for ${model}.`);
+    failure = { ...byokFailure("empty", `BYOK returned an empty answer for ${model}.`), providerCode: EMPTY_NO_TOOL_RAN_CODE };
   } else if (answer) {
     const refusal = detectRuntimeRefusal(answer);
     if (refusal) failure = { ...refusal, runtime: "byok", source: "heuristic" };
@@ -1194,9 +1193,7 @@ export const runCustomByok: Runner = async (
   } catch {}
   const key = await readKeyBeforeDispatch("custom");
   if (!key) return byokCredentialMissing("Custom API key missing (Settings → BYOK)");
-  const reviewedEndpoint = await companyCustomByokEndpoint(baseUrl);
-  return runOpenAiCompletionWithMainToolLoop("custom", reviewedEndpoint, "Custom", key, req, events,
-    async () => { await companyCustomByokEndpoint(reviewedEndpoint); });
+  return runOpenAiCompletionWithMainToolLoop("custom", baseUrl, "Custom", key, req, events);
 };
 
 // ── Google Generative (Gemini) ───────────────────────────
@@ -1637,7 +1634,7 @@ export const runGoogleByok: Runner = async (
   if (!reachedAnswer) {
     failure = byokFailure("exit", `Google BYOK tool loop did not reach a final answer after ${MAX_BYOK_TOOL_TURNS} turns.`);
   } else if (normalEnd?.outcome === "empty") {
-    failure = byokFailure("empty", `Google returned an empty answer for ${model}.`);
+    failure = { ...byokFailure("empty", `Google returned an empty answer for ${model}.`), providerCode: EMPTY_NO_TOOL_RAN_CODE };
   } else if (answer) {
     const refusal = detectRuntimeRefusal(answer);
     if (refusal) failure = { ...refusal, runtime: "byok", source: "heuristic" };

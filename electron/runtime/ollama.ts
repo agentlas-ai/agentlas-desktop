@@ -7,6 +7,7 @@ import { schemaFallbackPromptPart, observationSystemWithSchema } from "../../sha
 //   - 모델 목록: GET  {host}/api/tags        → { models: [{ name }] }
 //   - 서버 버전: GET  {host}/api/version      → { version }
 //   - 채팅 SSE:  POST {host}/v1/chat/completions  (OpenAI Chat Completions 호환)
+import { trackTurnActivity } from "./turn-activity";
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult } from "./runner";
 import { cumulativeSurfaceGateText, wrapSystemPrompt } from "./runner";
 import { tStatus } from "./status-i18n";
@@ -55,7 +56,10 @@ export async function probeOllama(timeoutMs = 1500): Promise<OllamaProbe | null>
   }
 }
 
-export const runOllama: Runner = async (
+// Background measurement on the same server waits while a model call is running (turn-activity.ts).
+export const runOllama: Runner = (req, events) => trackTurnActivity(() => runOllamaCall(req, events));
+
+const runOllamaCall = async (
   req: RunnerRequest,
   events: RunnerEvents,
 ): Promise<RunnerResult> => {

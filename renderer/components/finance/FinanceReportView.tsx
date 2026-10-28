@@ -28,6 +28,7 @@ export function FinanceReportWarnings({lines,dir}:{lines:readonly string[];dir:"
 }
 function data(section:FinanceReportSection):FinanceDataResult|null {const p=section.projection;return p?{status:p.status==="ready"?"ok":p.status==="partial"?"partial":"unconnected",columns:p.columns,rows:p.rows,warnings:p.warnings,asOf:p.asOf,retrievedAt:"",sourceUrls:[]}:null;}
 export function financeReportChartSpec(section:FinanceReportSection):Record<string,unknown>|null {
+ if(section.chart)return section.chart;
  if(financeReportCompositionTitle(section))return financeReportCompositionSpec(section);
  const plan=financeReportFinancialData(section);if(plan)return {data:{values:plan.rows},mark:plan.kind==='cashflow'?{type:'line',filled:false,interpolate:'linear'}:{type:'bar'},encoding:{x:{field:'period',type:plan.kind==='cashflow'?'quantitative':'nominal',title:null,axis:{labelOverlap:true}},y:{field:'value',type:'quantitative',title:plan.currency,axis:{format:',.2~f'},scale:{zero:plan.kind!=='cashflow'}},tooltip:[{field:'period',title:null},{field:'value',type:'quantitative',title:plan.currency,format:',.2~f'}]}};
  const computed=financeComputeSpec(section,false);if(computed)return computed;

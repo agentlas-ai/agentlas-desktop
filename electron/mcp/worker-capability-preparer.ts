@@ -104,6 +104,18 @@ export function createWorkerCapabilityPreparer(deps: PreparationDependencies): P
       }
     }
     assertCurrent();
+    // No qualified judge (an unmeasured or failing local model pin, a runtime that cannot judge without tools, and no
+    // measured pool runtime) is a host fact, not a failed selection: the worker runs with what it already has, like
+    // the parent turn does (need-resolver: the judge must never block the run). A judge that was asked and failed
+    // (timeout, refusal, junk) still refuses below.
+    if (!needs.decided && needs.judgeSkipped === true) {
+      emit({ ...base, status: "retained", reasonCode: "worker-capability-judge-unqualified-baseline-only", selectedIds: [...deps.baselineIds] });
+      if (deps.baselineIds.length === 0) return { runner: {}, assertCurrent, release() {} };
+      const baselineLease = await deps.materialize(input, [...deps.baselineIds], generation);
+      try { assertCurrent(); baselineLease.assertCurrent(); }
+      catch (error) { await baselineLease.release(); throw error; }
+      return { runner: baselineLease.runner, assertCurrent() { assertCurrent(); baselineLease.assertCurrent(); }, release: baselineLease.release };
+    }
     if (!needs.decided) {
       emit({ ...base, status: "unavailable", reasonCode: "worker-capability-selection-unavailable",
         failureKind: needs.failureKind ?? null, decisionFailure: needs.decisionFailure ?? null,

@@ -26,7 +26,7 @@ import {
   runnerRefusedBeforeDispatch as preDispatchRunnerRefused,
   runnerResultRefusedBeforeDispatch as preDispatchRunnerResultRefused,
 } from "./runner-pre-dispatch";
-import { innermostTypedCode, isTypedCode } from "../../shared/turn-settlement";
+import { EMPTY_NO_TOOL_RAN_CODES, innermostTypedCode, isTypedCode } from "../../shared/turn-settlement";
 
 /** Main-only delivery boundary; never serialized into a provider request. */
 export type BeforeMcpToolResult = (input: {
@@ -870,9 +870,15 @@ export class RuntimeTurnUnsettledError extends Error {
    * (Yotube room, 2026-10-13 12:58Z), so the provider's words lead the message.
    */
   constructor(readonly runtimeKind: string, locale?: string, sessionId?: string | null, providerReason?: string | null,
-    turnDelivery?: Exclude<RuntimeTurnDelivery, "not-dispatched">) {
+    turnDelivery?: Exclude<RuntimeTurnDelivery, "not-dispatched">, noToolRan = false) {
     const reason = typeof providerReason === "string" ? providerReason.trim().slice(0, 300) : "";
-    super(locale === "ko"
+    // A host loop that ended empty before dispatching any tool proved nothing ran (EMPTY_NO_TOOL_RAN_CODES): say that,
+    // not "may have acted". The protective code and the no-resend rule stay.
+    super(noToolRan
+      ? (locale === "ko"
+        ? `${reason ? `${runtimeKind}: ${reason} — ` : ""}이 턴에서 실행된 도구가 없어 아무것도 바뀌지 않았습니다. 자동으로 다시 보내지는 않았습니다.`
+        : `${reason ? `${runtimeKind}: ${reason} — ` : ""}No tool ran in this turn, so nothing was changed. It was not sent again automatically.`)
+      : locale === "ko"
       ? `${reason ? `${runtimeKind}: ${reason} — ` : ""}${runtimeKind} 요청을 보낸 뒤 완료 영수증을 받지 못했습니다. 실행 여부가 불확실해 자동 재전송을 멈췄습니다. 작업 기록을 확인한 뒤 이어가세요.`
       : `${reason ? `${runtimeKind}: ${reason} — ` : ""}${runtimeKind} did not return a terminal receipt after dispatch. Automatic replay stopped because the request may have acted. Review the work history before continuing.`);
     this.name = "RuntimeTurnUnsettledError";
@@ -1035,8 +1041,9 @@ export function unsettledTurnError(input: {
   const delivery = input.turnDelivery ?? (causeDelivery === "accepted" || causeDelivery === "not-accepted" ? causeDelivery : undefined);
   const sessionId = input.sessionId ?? (cause && typeof cause === "object" ? (cause as { sessionId?: unknown }).sessionId : undefined);
   const reason = input.providerReason ?? (failure && failure.providerCode !== RUNTIME_TURN_UNSETTLED_CODE ? failure.message : null);
+  const noToolRan = failure?.kind === "empty" && typeof failure.providerCode === "string" && EMPTY_NO_TOOL_RAN_CODES.has(failure.providerCode);
   const error = new RuntimeTurnUnsettledError(input.runtimeKind, input.locale, typeof sessionId === "string" ? sessionId : null, reason,
-    delivery === "accepted" || delivery === "not-accepted" ? delivery : undefined);
+    delivery === "accepted" || delivery === "not-accepted" ? delivery : undefined, noToolRan);
   if (cause !== undefined) Object.defineProperty(error, "cause", { value: cause, configurable: true, writable: true });
   return error;
 }

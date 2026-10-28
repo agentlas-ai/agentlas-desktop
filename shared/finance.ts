@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { FinanceAnalystDraftSchema, FinanceAnalystRefSchema } from "./finance-analysts";
+import { sanitizeChartSpec } from "./chart-spec";
 /** Shared service and MCP transport bound; a transport must outlive the service's terminal receipt. */
 export const FINANCE_MONITOR_RUN_TIMEOUT_MS = 180000;
 
@@ -49,7 +50,13 @@ const ProjectionSchema = z.object({
 export type FinanceWidgetProjection = z.infer<typeof ProjectionSchema>;
 export const FinanceReportLanguageSchema = z.string().min(2).max(80).regex(/^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$/).refine(value=>{try{return Intl.getCanonicalLocales(value).length===1;}catch{return false;}}, "Invalid report language");
 const ReportPresentationSchema = z.enum(["narrative", "chart", "comparison", "supporting"]);
-const SectionSchema = z.object({ id, title: z.string().min(1).max(300), kind: z.enum(["summary", "widget", "narrative", "sources"]), presentation: ReportPresentationSchema.optional(), narrative: text, widget: WidgetSchema.nullable(), projection: ProjectionSchema.nullable() }).strict();
+/** A chart the analysis supplies: the common Vega-Lite contract (shared/chart-spec.ts, the gate every chat chart passes), data inline. Stored sanitized. */
+export const FinanceReportChartSchema = z.record(z.string(), z.unknown()).transform((value, context) => {
+  const checked = sanitizeChartSpec(value);
+  if (!checked.ok) { context.addIssue({ code: z.ZodIssueCode.custom, message: `chart_${checked.code} at ${checked.path}` }); return z.NEVER; }
+  return checked.spec;
+});
+const SectionSchema = z.object({ id, title: z.string().min(1).max(300), kind: z.enum(["summary", "widget", "narrative", "sources"]), presentation: ReportPresentationSchema.optional(), narrative: text, widget: WidgetSchema.nullable(), projection: ProjectionSchema.nullable(), chart: FinanceReportChartSchema.optional() }).strict();
 export type FinanceReportSection = z.infer<typeof SectionSchema>;
 const ReportSchema = z.object({ id, language: FinanceReportLanguageSchema.optional(), title: z.string().min(1).max(300), createdAt: date, sourceRevision: z.number().int().nonnegative(), reviewPending: z.boolean(), sections: z.array(SectionSchema).max(100), dashboardSnapshot: DashboardSchema.nullable().default(null), parentReportId: id.nullable().default(null) }).strict();
 export type FinanceReport = z.infer<typeof ReportSchema>;
@@ -87,7 +94,15 @@ export const FinanceAskRequestSchema = z.object({
   .refine(value => !value.analystAuthoring || !value.selectedAssetIds?.length);
 export type FinanceAskRequest = z.infer<typeof FinanceAskRequestSchema>;
 export interface FinanceExportResult { ok: boolean; path?: string; error?: string; sha256?: string; bytes?: number; savedAt?: string; cancelled?: boolean }
-export interface FinanceDataRequest { query: string; assetIds: string[]; metrics: string[]; period: string }
+/** company_facts concepts a request can name: "revenue" is the revenue series (US-GAAP revenue concepts in their fallback order), "dividends" the dividend concepts. */
+export const FINANCE_COMPANY_FACT_CONCEPTS = ["revenue", "NetIncomeLoss", "OperatingIncomeLoss", "Assets", "Liabilities", "CashAndCashEquivalentsAtCarryingValue", "NetCashProvidedByUsedInOperatingActivities", "PaymentsToAcquirePropertyPlantAndEquipment", "EarningsPerShareDiluted", "dividends"] as const;
+/** company_facts only: which concepts, and whether every latest filing (full) or one observation per period for the newest periods (summary). */
+export const FinanceCompanyFactsOptionsSchema = z.object({
+  concepts: z.array(z.enum(FINANCE_COMPANY_FACT_CONCEPTS)).min(1).max(FINANCE_COMPANY_FACT_CONCEPTS.length).refine(items => new Set(items).size === items.length).optional(),
+  view: z.enum(["summary", "full"]).optional(),
+}).strict();
+export type FinanceCompanyFactsOptions = z.infer<typeof FinanceCompanyFactsOptionsSchema>;
+export interface FinanceDataRequest { query: string; assetIds: string[]; metrics: string[]; period: string; facts?: FinanceCompanyFactsOptions }
 export interface FinanceDataConnectionRequest { action: "status" | "test" }
 export interface FinanceDataConnectionResult {
   providerId: "alpha-vantage";
@@ -122,7 +137,9 @@ export interface FinanceDataSaveRequest extends FinanceDataRequest { expectedRev
 export const FinanceDataSaveRequestSchema = z.object({
   query: z.string().max(2000), assetIds: z.array(id).max(10), metrics: z.array(z.string().min(1).max(80)).min(1).max(10), period: z.string().min(1).max(80),
   expectedRevision: z.number().int().nonnegative().optional(), mode: z.enum(["sources", "report"]), title: z.string().min(1).max(300).optional(), reportId: id.refine(value=>!!value.trim()).optional(),
-}).strict().refine(value=>value.reportId===undefined||(value.mode==="report"&&value.expectedRevision!==undefined), "An existing report requires report mode and expectedRevision");
+  facts: FinanceCompanyFactsOptionsSchema.optional(),
+}).strict().refine(value=>value.reportId===undefined||(value.mode==="report"&&value.expectedRevision!==undefined), "An existing report requires report mode and expectedRevision")
+  .refine(value=>value.facts===undefined||value.metrics.length===1&&value.metrics[0]==="company_facts", "facts applies to the company_facts metric only");
 export interface FinanceDataSaveResult {
   workspace: FinanceWorkspace; reportId?: string; sourceIds: string[]; message: string;
   dashboardActions?: { expectedRevision: number; sections: { sectionId: string; operations: FinanceOperation[] }[] };
@@ -163,7 +180,6 @@ export interface FinanceAPI {
   load(): Promise<FinanceWorkspace>;
   save(input: { workspace: FinanceWorkspace; expectedRevision: number }): Promise<FinanceWorkspace>;
   search?(input: { query: string }): Promise<FinanceSearchResult>;
-  ask?(input: FinanceAskRequest): Promise<FinanceAIResult>;
   cancelAsk?(input: { requestId: string }): Promise<{ cancelled: boolean }>;
   queryData?(input: FinanceDataRequest): Promise<FinanceDataResult>;
   dataConnection?(input: FinanceDataConnectionRequest): Promise<FinanceDataConnectionResult>;
@@ -296,7 +312,8 @@ export type FinanceOperation =
   | { type: "report.update"; reportId: string; patch: { title?: string; reviewPending?: boolean; language?: string } }
   | { type: "report.remove"; reportId: string }
   | { type: "report.refresh"; reportId: string }
-  | { type: "report.section.update"; reportId: string; sectionId: string; patch: { title?: string; narrative?: string; presentation?: FinanceReportSection["presentation"] } }
+  | { type: "report.section.add"; reportId: string; section: { title: string; narrative?: string; chart: Record<string, unknown> }; index?: number }
+  | { type: "report.section.update"; reportId: string; sectionId: string; patch: { title?: string; narrative?: string; presentation?: FinanceReportSection["presentation"]; chart?: Record<string, unknown> } }
   | { type: "report.section.remove"; reportId: string; sectionId: string }
   | { type: "report.section.move"; reportId: string; sectionId: string; index: number }
   | { type: "source.upsert"; source: FinanceSource }
@@ -321,7 +338,8 @@ const operationSchemas: Record<FinanceOperation["type"], z.ZodTypeAny> = {
   "report.update": z.object({ type: z.literal("report.update"), reportId: id, patch: z.object({ title: z.string().min(1).max(300).optional(), reviewPending: z.boolean().optional(), language: FinanceReportLanguageSchema.optional() }).strict() }).strict(),
   "report.remove": z.object({ type: z.literal("report.remove"), reportId: id }).strict(),
   "report.refresh": z.object({ type: z.literal("report.refresh"), reportId: id }).strict(),
-  "report.section.update": z.object({ type: z.literal("report.section.update"), reportId: id, sectionId: id, patch: z.object({ title: z.string().min(1).max(300).optional(), narrative: text.optional(), presentation: ReportPresentationSchema.optional() }).strict() }).strict(),
+  "report.section.add": z.object({ type: z.literal("report.section.add"), reportId: id, section: z.object({ title: z.string().min(1).max(300), narrative: text.optional(), chart: FinanceReportChartSchema }).strict(), index: z.number().int().nonnegative().optional() }).strict(),
+  "report.section.update": z.object({ type: z.literal("report.section.update"), reportId: id, sectionId: id, patch: z.object({ title: z.string().min(1).max(300).optional(), narrative: text.optional(), presentation: ReportPresentationSchema.optional(), chart: FinanceReportChartSchema.optional() }).strict() }).strict(),
   "report.section.remove": z.object({ type: z.literal("report.section.remove"), reportId: id, sectionId: id }).strict(),
   "report.section.move": z.object({ type: z.literal("report.section.move"), reportId: id, sectionId: id, index: z.number().int().nonnegative() }).strict(),
   "source.upsert": z.object({ type: z.literal("source.upsert"), source: SourceSchema }).strict(),
@@ -396,6 +414,11 @@ export function applyFinanceOperations(workspace: FinanceWorkspace, operations: 
           return { ...section, projection: section.widget ? projectFinanceWidget(next, section.widget) : section.kind === "sources" ? projectFinanceWidget(next, createFinanceWidget("sources")) : section.projection };
         });
         next.reports.push(refreshed); break;
+      }
+      case "report.section.add": {
+        // A chart section the analysis drew from values it computed; it sits with the report's other charts and is reviewed like any edit.
+        const report = requireItem(next.reports, op.reportId), section: FinanceReportSection = { id: financeId("section"), title: op.section.title, kind: "narrative", presentation: "chart", narrative: op.section.narrative ?? "", widget: null, projection: null, chart: op.section.chart };
+        report.sections.splice(op.index === undefined ? report.sections.length : Math.min(op.index, report.sections.length), 0, section); break;
       }
       case "report.section.update": Object.assign(requireItem(requireItem(next.reports, op.reportId).sections, op.sectionId), op.patch); break;
       case "report.section.remove": {

@@ -94,7 +94,8 @@ export function financeNativeTranscriptContents(value: unknown, options: { state
       const projection = section.projection, columns = projection?.columns ?? [];
       const series = drawn && projection && (projection.status === 'ready' || projection.status === 'partial') && projection.rows.length
         ? seriesChart(columns, projection.rows, columns.includes('Par curve yield') ? 'treasury_yields' : columns.includes('Close (raw)') ? 'price_history' : undefined) : null;
-      const chart = drawn ? financeReportCompositionSpec(section, locale, 'legend') ?? (series && 'spec' in series ? series.spec : null) : null;
+      // A chart the analysis supplied is already the common chart contract; the phone draws it as the desktop does.
+      const chart = drawn ? section.chart ?? financeReportCompositionSpec(section, locale, 'legend') ?? (series && 'spec' in series ? series.spec : null) : null;
       const metrics = financeReportComputeMetrics(section, locale);
       if (chart) blocks.push({ kind: 'chart', spec: chart });
       const prose = financeReportProseBlocks(section.narrative).map((block): IntellectUiNode => block.kind === 'table' ? { type: 'table', columns: block.columns.map(plainCell), rows: block.rows.map(row => row.map(plainCell)) } : text(block.text));

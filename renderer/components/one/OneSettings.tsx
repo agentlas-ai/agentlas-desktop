@@ -46,11 +46,8 @@ import { runtimeEffectiveModelId } from "@/components/dashboard/RuntimeModelPick
 import { OneBottomSheet, type OneBottomSheetSize } from "./OneBottomSheet";
 import { MediaDisplaySettings } from "../MediaDisplaySettings";
 import styles from "./OneSettings.module.css";
-import { OneBusinessWork } from "./OneBusinessWork";
-import { OneBusinessSharing } from "./OneBusinessSharing";
-import { useOrganizationUiVisibility } from "@/business/organization-visibility";
 
-export type OneSettingsKey = "work" | "business" | "mcp" | "plugins" | "permission" | "models" | "multimodal" | "media" | "concurrency" | "history" | "briefing";
+export type OneSettingsKey = "mcp" | "plugins" | "permission" | "models" | "multimodal" | "media" | "concurrency" | "history" | "briefing";
 
 /**
  * 시트 폭은 내용이 정한다.
@@ -60,9 +57,6 @@ export type OneSettingsKey = "work" | "business" | "mcp" | "plugins" | "permissi
  * 여러 열로 늘어놓을 것이 있는 화면만 넓게 연다.
  */
 const SHEET_WIDTH: Record<OneSettingsKey, OneBottomSheetSize> = {
-  // 조직 공유·조직 업무 변경은 카드 여러 장(연결·공유·전달)과 입력 한 줄 + 주 버튼 배치를 쓰므로 넓게 연다.
-  work: "wide",
-  business: "wide",
   mcp: "compact",
   plugins: "compact",
   models: "wide",
@@ -105,8 +99,6 @@ type SheetProps = {
 };
 
 const SETTINGS_META: Record<OneSettingsKey, { titleKo: string; titleEn: string; descriptionKo: string; descriptionEn: string }> = {
-  work: {titleKo:"조직 업무 변경",titleEn:"Organization WORK changes",descriptionKo:"선택한 업무 파일과 평가 기준을 검토합니다.",descriptionEn:"Review selected WORK files and evaluation criteria."},
-  business: { titleKo: "조직 공유", titleEn: "Organization sharing", descriptionKo: "조직 연결과 검토한 작업 요약의 공유를 관리합니다.", descriptionEn: "Manage your organization connection and reviewed work summaries." },
   mcp: { titleKo: "MCP 서버", titleEn: "MCP servers", descriptionKo: "직접 등록한 MCP 서버의 연결과 실행 상태를 관리합니다.", descriptionEn: "Manage connections and runtime state for custom MCP servers." },
   briefing: { titleKo: "브리핑 알림", titleEn: "Briefing notifications", descriptionKo: "One이 먼저 알려 주는 빈도와 방식, 방해 금지 시간을 정합니다.", descriptionEn: "Choose how often One reaches out, where it shows up, and when to stay quiet." },
   plugins: { titleKo: "플러그인", titleEn: "Plugins", descriptionKo: "카탈로그에서 설치한 도구를 켜거나 끕니다.", descriptionEn: "Enable or disable tools installed from the catalog." },
@@ -138,8 +130,6 @@ function RailRow({ icon, title, detail, badge, onClick }: { icon: ReactNode; tit
 
 export function OneSettingsRail({ locale, profileName, pendingMemoryCount, onBack, onOpen, onOpenProfile, onOpenMemory, onToggleLocale }: RailProps) {
   const ko = locale === "ko";
-  // 조직 항목은 조직 계정에게만 보인다(규칙: shared/business/visibility.ts). 이 목록은 서버를 읽지 않는다 — 같은 계정의 마지막 적격성 기억으로만 정한다.
-  const { management: organization } = useOrganizationUiVisibility({ eligible: null });
   return <section className={styles.railRoot} aria-label={ko ? "One 설정" : "One settings"}>
     <header className={styles.railHeader}>
       <button type="button" onClick={onBack} aria-label={ko ? "조직도로 돌아가기" : "Back to organisation"}><IconArrowLeft size={16} /></button>
@@ -165,8 +155,6 @@ export function OneSettingsRail({ locale, profileName, pendingMemoryCount, onBac
         <RailRow icon={<IconSparkles size={15} />} title={ko ? "브리핑" : "Briefing"} detail={ko ? "주기·데스크탑 알림·방해 금지" : "Cadence, desktop alerts, quiet hours"} onClick={() => onOpen("briefing")} />
       </div>
       <div className={styles.railGroup}><span>{ko ? "개인정보" : "Privacy"}</span>
-        {organization && <RailRow icon={<IconShield size={15} />} title={ko ? "조직 업무 변경" : "Organization WORK changes"} onClick={() => onOpen("work")} />}
-        {organization && <RailRow icon={<IconUsers size={15} />} title={ko ? "조직 공유" : "Organization sharing"} onClick={() => onOpen("business")} />}
         <RailRow icon={<IconLock size={15} />} title={ko ? "컴퓨터 사용 기록" : "Computer History"} onClick={() => onOpen("history")} />
       </div>
       <div className={styles.railGroup}><span>{ko ? "앱" : "App"}</span>
@@ -524,7 +512,6 @@ function BriefingSettings({ locale }: { locale: string }) {
 
 export function OneSettingsSheet({ open, locale, installedPlugins, pluginCatalog, pluginStatuses, permission, runtime, models, history, onClose, onTogglePlugin, onSelectPermission, onSelectModel, onHistoryConsent, onOpenMcpLibrary, onToolTabChange }: SheetProps) {
   const ko = locale === "ko";
-  const { management: organization } = useOrganizationUiVisibility({ eligible: null });
   const meta = open ? SETTINGS_META[open] : SETTINGS_META.mcp;
   const customServers = installedPlugins.filter((item) => !item.catalogId);
   const catalogPlugins = installedPlugins.filter((item) => Boolean(item.catalogId));
@@ -545,8 +532,6 @@ export function OneSettingsSheet({ open, locale, installedPlugins, pluginCatalog
       {open === "media" && <MediaDisplaySettings locale={locale} compact />}
       {open === "concurrency" && <ConcurrencySettings locale={locale} active={open === "concurrency"} />}
       {open === "history" && <HistorySettings locale={locale} state={history} onConsent={onHistoryConsent} />}
-      {open === "work" && organization && <OneBusinessWork locale={locale} />}
-      {open === "business" && organization && <OneBusinessSharing locale={locale} />}
       {open === "briefing" && <BriefingSettings locale={locale} />}
     </div>
   </OneBottomSheet>;

@@ -24,7 +24,6 @@ import { authorizeSupervisorNativeOrigin, supervisorNativeNoticePurpose, dispatc
   configureOneSupervisorNativeRuntime, callOneSupervisorRuntime } from "./one/supervisor-native-runtime";
 import { assertOneWindowChannel } from "./one-window-manager";
 import { registerOnePersonalDataIpc } from './one/personal-data-ipc';
-import { registerBusinessShippingIpc } from './business/shipping-console-ipc';
 import { liveAppControlRendererEvent, recordAppControlRendererEvent, registerAppControlDomainIpc } from "./app-control/ipc-registry";
 import { registerAgentWorkspaceIpc } from "./agents/workspace-ipc";
 import { importDedicatedBrowserCookies, syncConnectBrowserSession } from "./browser/native-session-cookie-import";
@@ -1781,7 +1780,7 @@ function goalAutomationOwnershipReview(automationId: string, goalId: string, roo
   return getAutomationGoalExecutionReview({ automationId, goalId, rootChatId, expectedVersion: version });
 }
 
-export function registerIpcHandlers(): { businessShipping: ReturnType<typeof registerBusinessShippingIpc> } {
+export function registerIpcHandlers(): void {
   const boundary = developmentIpcBoundary(electronIpcMain);
   const ipcMain: typeof boundary = {
     handle(channel, listener) {
@@ -1795,7 +1794,6 @@ export function registerIpcHandlers(): { businessShipping: ReturnType<typeof reg
   registerAgentWorkspaceIpc({ ipc: ipcMain, assertTrustedSender: assertTrustedSitePublishIpcSender });
   registerOneSupervisorIpc({ ipc: ipcMain, assertTrustedSender: assertTrustedSitePublishIpcSender });
   registerOnePersonalDataIpc({ ipc: ipcMain, assertTrustedSender: assertTrustedSitePublishIpcSender });
-  const businessShipping = registerBusinessShippingIpc({ ipc: ipcMain, assertTrustedSender: assertTrustedSitePublishIpcSender });
   registerOneHarnessIpc({ ipc: ipcMain, assertTrustedSender: assertTrustedSitePublishIpcSender });
   registerLiveDocumentIpc({ ipc: ipcMain, assertTrustedSender: assertTrustedSitePublishIpcSender });
   registerFinanceIpc({ ipc: ipcMain, assertTrustedSender: assertTrustedSitePublishIpcSender });
@@ -8011,5 +8009,4 @@ export function registerIpcHandlers(): { businessShipping: ReturnType<typeof reg
   registerAppControlDomainIpc(ipcMain, "hephaestus:stopStudio", () => {
     stopStudio();
   });
-  return { businessShipping };
 }

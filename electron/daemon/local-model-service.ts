@@ -148,9 +148,11 @@ export function createDaemonLocalModelService(options: {
     loadModel: (id, context, parent) => execute(owner => owner.loadModel(id, context, signal(parent))),
     unload: (epoch, input) => execute(owner => owner.unload(epoch, input), true),
     testCapabilities: (id, selection, parent) => execute(owner => owner.testCapabilities(id, selection, signal(parent))),
+    toolProbeAsk: (id, taskId, parent) => execute(owner => owner.toolProbeAsk(id, taskId, signal(parent))),
   };
   const runtime: LocalModelHubRuntimePort = {
     snapshot: control.snapshot,
+    toolProbeAsk: control.toolProbeAsk,
     run: (request, events) => execute(async owner => {
       signal(request.signal).throwIfAborted();
       runnerPromise ??= import("../local-model-hub/runner").then(module => module.createManagedLocalModelRunner(owner));

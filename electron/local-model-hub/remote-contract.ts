@@ -97,7 +97,7 @@ export interface RemoteLocalModelRunPage extends RemoteLocalModelRunScope {
 export type LocalModelControlCommand = {
   [K in keyof LocalModelHubControlPort]: { method: K; args: K extends "snapshot" ? []
     : K extends "searchModels" | "inspectRepository" | "addModel" ? [Parameters<LocalModelHubControlPort[K]>[0]]
-    : K extends "importModel" | "loadModel" | "testCapabilities" ? [Parameters<LocalModelHubControlPort[K]>[0], Parameters<LocalModelHubControlPort[K]>[1]]
+    : K extends "importModel" | "loadModel" | "testCapabilities" | "toolProbeAsk" ? [Parameters<LocalModelHubControlPort[K]>[0], Parameters<LocalModelHubControlPort[K]>[1]]
     : K extends "unload" ? Parameters<LocalModelHubControlPort[K]>
     : [Parameters<LocalModelHubControlPort[K]>[0]] }
 }[keyof LocalModelHubControlPort];

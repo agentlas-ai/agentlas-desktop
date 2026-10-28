@@ -13,16 +13,11 @@ import { financeReportSourceRecords, type FinanceReportSourceRecord } from "../.
 import { FinanceArchives, FinanceArchiveRequestSchema, financeArchivePlan } from './archive';
 import { FinanceRunHistory } from './run-history';
 import { financeReportDashboardActions } from './evidence-actions';
-import { interpretFinance } from "./model";
-import { converseFinance } from './conversation';
 import { FinanceSearchCatalog, financeSearchResult, financeSearchRouteKey } from './search-catalog';
-import { FinancePlanningReviews } from './planning-review';
 import { financeBuiltinPlugin } from './builtin-plugin';
 import { FINANCE_NOTICE_VERSION } from '../../shared/finance-experience';
-import type { FinancePlanningResult } from '../../shared/finance-planning';
 import type { FinancePortfolioValuation, FinancePortfolioValuationPresentation } from './portfolio-valuation';
-import { discoverFinanceAssets } from './discovery';
-import { FinanceAskRequestSchema, type FinanceAsset, type FinanceAskRequest } from '../../shared/finance';
+import type { FinanceAsset } from '../../shared/finance';
 import type { FinanceAnalystRequest, FinanceAnalystRef } from '../../shared/finance-analysts';
 import { FinanceAnalystLibrary } from './analysts';
 import { calculateFromFinanceSources } from './calculation-service';
@@ -188,7 +183,7 @@ export class FinanceService {
     const target=input.reportId===undefined?undefined:before.reports.find(report=>report.id===input.reportId);
     if(input.reportId!==undefined&&!target)throw new Error("finance_report_not_found");
     const route={...await this.experience.consent(savingScope),signal,assertCurrent:()=>savingScope.assertCurrent()};savingScope.assertCurrent();
-    const request:FinanceDataRequest={query:input.query,assetIds:input.assetIds,metrics:input.metrics,period:input.period};
+    const request:FinanceDataRequest={query:input.query,assetIds:input.assetIds,metrics:input.metrics,period:input.period,...(input.facts?{facts:input.facts}:{})};
     const result=await queryFinanceData(request,this.queryAssets(savingScope,route,before.watchlist,request.assetIds),route);savingScope.assertCurrent();
     const batch=dataOperations(result,before,target?.title||input.title||input.query||"Finance 자료",input.mode==="report");
     if(target){
@@ -223,32 +218,6 @@ export class FinanceService {
     const report=createFinanceReport(workspace,dashboard,input.title||dashboard.name);
     if(input.language!==undefined)report.language=input.language;
     return {workspace:await this.apply(scope,{operations:[{type:"report.add",report}],expectedRevision:workspace.revision}),reportId:report.id};
-  }
-  async ask(scope:FinanceScope,raw:FinanceAskRequest,signal:AbortSignal):Promise<FinanceAIResult> {
-    const input=FinanceAskRequestSchema.parse(raw);
-    const selection=await this.experience.consent(scope);scope.assertCurrent();
-    const plugin=await financeBuiltinPlugin().runtime(scope,FINANCE_NOTICE_VERSION);scope.assertCurrent();
-    const route=selection?{...selection,signal,assertCurrent:()=>scope.assertCurrent()}:null;
-    const lease=this.searchCatalog.begin(scope,selection);
-    const assertRoute=async()=>{signal.throwIfAborted();scope.assertCurrent();const current=await this.experience.consent(scope);signal.throwIfAborted();scope.assertCurrent();this.searchCatalog.begin(scope,current);if(financeSearchRouteKey(current)!==lease.route)throw new Error('finance_search_selection_stale');};
-    const analysts=await this.analystLibrary.resolve(scope,input.analystRefs??[]);scope.assertCurrent();signal.throwIfAborted();
-    const workspace=await this.store.load(scope);scope.assertCurrent();signal.throwIfAborted();
-    const selected=this.searchCatalog.resolveSelection(scope,lease,input.selectedAssetIds??[],workspace.watchlist,signal);
-    const result=await converseFinance(input,workspace,signal,{
-      analysts,selectedAssets:selected.assets,selectedAssetIdentities:selected.identities,
-      workflow:name=>financeBuiltinPlugin().workflow(scope,FINANCE_NOTICE_VERSION,name),
-      pure:(action,payload)=>plugin.callPureTool(action,payload),
-      plan:request=>new FinancePlanningReviews().calculate(scope,request,request=>plugin.callPureTool('planning',request) as FinancePlanningResult),
-      portfolio:async()=>{if(!route)throw new Error('finance_analyst_authoring_tool_denied');return this.observedPortfolio(scope,workspace,route,signal,payload=>plugin.callPureTool('valuation',payload) as FinancePortfolioValuation);},
-      discover:async preset=>{if(!route)throw new Error('finance_analyst_authoring_tool_denied');await assertRoute();const result=await discoverFinanceAssets(preset,route);await assertRoute();return result;},
-      assertCurrent:()=>scope.assertCurrent(),
-      search:async(query)=>{scope.assertCurrent();if(!route)throw new Error('finance_analyst_authoring_tool_denied');await assertRoute();const result=financeSearchResult(await searchFinanceAssets(query,route));await assertRoute();return result;},
-      query:async(request,assets)=>{scope.assertCurrent();if(!route)throw new Error('finance_analyst_authoring_tool_denied');await assertRoute();const result=await queryFinanceData(request,assets,route);await assertRoute();return result;},
-      feeds:()=>{if(!selection)throw new Error('finance_analyst_authoring_tool_denied');return this.feedsForSelection(scope,selection,signal);},
-    });scope.assertCurrent();signal.throwIfAborted();await assertRoute();
-    if(!input.analystAuthoring&&(await this.store.load(scope)).revision!==input.baseRevision)return {baseRevision:input.baseRevision,status:"conflict",message:"화면이 변경되어 AI 결과를 적용하지 않았습니다."};
-    if(result.status==='ok')for(const search of result.assetSearches??[])this.searchCatalog.register(scope,lease,search.result,signal);
-    return result;
   }
   async calculate(scope:FinanceScope,input:{request:import('../../shared/finance-compute').FinanceComputeRequest;period?:string;title?:string} & FinanceArtifactPresentation,signal:AbortSignal=AbortSignal.timeout(180000)){
     const route={...await this.experience.consent(scope),signal,assertCurrent:()=>scope.assertCurrent()};scope.assertCurrent();

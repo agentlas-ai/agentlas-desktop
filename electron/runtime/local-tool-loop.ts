@@ -1,4 +1,3 @@
-import { currentCompanyWorkContent,companyOrOriginalEffectLedger,approveCompanyWorkTool } from '../business/company-work-content';
 import { cachedTokensFromOpenAiUsage } from "./prompt-cache";
 import { cacheCapabilityFor, planCache, planRequestFields, segmentOf, type CachePlan, type CacheSegment } from "./cache-planner";
 import { reportModelPayload, reportCachePlan, reportModelEffort, ledgerFromApiBody, type ModelEffortApplication } from "./model-call-ledger";
@@ -31,7 +30,7 @@ import { mcpToolIsMutating, planMcpToolIsMutating } from "../mcp-tools/proxy-ser
 import { oneGraphToolTimeoutMs } from "../../shared/one-graph-tool-permission";
 import { readOnlyBrowserToolIsMutating } from "../../shared/read-only-browser-tools";
 import { mcpToolSchemaDigest } from "../mcp-tools/tool-schema";
-import { mcpToolSurfaceHides } from "../mcp-tools/hephaestus-tool-surface";
+import { mcpToolSurfaceDefers, mcpToolSurfaceHides, mcpToolSurfaceListsFirst } from "../mcp-tools/hephaestus-tool-surface";
 import { installLazyToolMenu, invalidateToolMenu, isDirectEntryTool, isToolMenuDeferred, isToolMenuTool, menuPathHint, resolveToolMenu } from "./tool-menu";
 import { CODE_MODE_TOOL, installMainCodeMode, runMainCodeMode } from "./code-mode";
 import { TOOL_RESULT_READ, foldRetainedToolResult, hasToolResultContext, installToolResultContext, projectToolResult, readToolResult, toolResultReadRequest } from "./tool-result-context";
@@ -73,7 +72,7 @@ import {
 import type { ToolPermission } from "../../shared/builtin-tools";
 import type { ToolInvocationOrigin } from "../../shared/tool-invocation-origin";
 import type { ToolResultTrust } from "../../shared/types";
-import { normalEndToolEvidence, settleNormalEnd } from "../../shared/turn-settlement";
+import { EMPTY_NO_TOOL_RAN_CODE, normalEndToolEvidence, settleNormalEnd } from "../../shared/turn-settlement";
 
 function agentlasDispatchedOrigin(toolName: string): ToolInvocationOrigin {
   return { kind: "agentlas", providerName: "Agentlas", toolName };
@@ -202,6 +201,10 @@ export type ResolvedTool =
       prepared: PreparedMcpBinding;
       /** Canonical Main inventory ID; provider function names may be sanitized. */
       brokerToolId: string;
+      /** Outside its server's first list (a deferred tool surface, host-tool-servers.ts): reached through the lazy menu. */
+      deferred?: true;
+      /** In its server's declared first list: listed directly on every runtime class, never behind the lazy menu. */
+      firstListed?: true;
     }
   | { kind: "builtin"; builtinName: string; brokerToolId: string };
 
@@ -303,13 +306,19 @@ export async function loadMainToolInventory(
   // ★내장 도구 먼저. MCP 설정이 없어도(그게 흔한 경우다) 이 런타임은 일할 수 있어야
   // 한다. 권한 칩보다 위의 도구는 목록에 **아예 없다** — "있는데 거절"이 아니라 "없다".
   const historyWorkTools=currentHistoryRuntimeFence()?(await import("../one/personal-integrations-runtime")).currentOneHistoryWorkTools():[];
-  if (!collectionBinding && ((workspaceRoot && !browserOnly) || canBrowserDownload || historyWorkTools.length)) {
+  // ask_user touches no file: it asks the owner. The system `ask:` line names it on every attended run, so an attended run
+  // lists it with or without a working folder (2026-10-28: a Work chat with no project folder and a Science turn listed it
+  // nowhere; qwen3:1.7b called the named ask_user, Ollama dropped the unlisted call, the turn ended as an empty answer).
+  // A browser-only run (Agentlas browser MCP only) and a history-work run keep their closed tool sets.
+  const askUserListed = canAskUser && !browserOnly && !historyWorkTools.length;
+  if (!collectionBinding && ((workspaceRoot && !browserOnly) || canBrowserDownload || historyWorkTools.length || askUserListed)) {
     // A write run gets `bash` only inside the working-folder sandbox (confined-shell.ts); where none exists it has no shell.
     const canConfineShell = permission === "write" && !!workspaceRoot && !browserOnly
       && (await (await import("./confined-shell")).writeConfinedShell(workspaceRoot)) !== null;
     for (const def of builtinToolsAsOpenAi(permission, { canAskUser, canGenerateImage, canBrowserDownload, historyWorkTools, canConfineShell })) {
       if(historyWorkTools.length&&!historyWorkTools.includes(def.function.name))continue;
-      if ((browserOnly || !workspaceRoot) && def.function.name !== "browser_download"&&!historyWorkTools.includes(def.function.name)) continue;
+      if ((browserOnly || !workspaceRoot) && def.function.name !== "browser_download"&&!historyWorkTools.includes(def.function.name)
+        && !(askUserListed && def.function.name === "ask_user")) continue;
       tools.push(def);
       byName.set(def.function.name, {
         kind: "builtin",
@@ -376,6 +385,9 @@ export async function loadMainToolInventory(
         schemaDigest: mcpToolSchemaDigest(tool),
         prepared,
         brokerToolId: `mcp__${key}__${tool.name}`,
+        // Listed later, on demand: the lazy menu holds it (mainToolSurface), whatever the runtime class.
+        ...(mcpToolSurfaceDefers(mcpConfigPath, key, tool.name) ? { deferred: true as const } : {}),
+        ...(mcpToolSurfaceListsFirst(mcpConfigPath, key, tool.name) ? { firstListed: true as const } : {}),
       });
     }
   }
@@ -470,6 +482,41 @@ export interface MainToolLoopContext {
 /** Run-scoped MCP connections, keyed by the run's own tool map (never shared across runs). */
 const mcpToolCallSessions = new WeakMap<Map<string, ResolvedTool>, import("../mcp-tools/client").McpToolCallSession>();
 
+/**
+ * Whether this run lists the synchronous ask_user tool. Nobody answers an unattended run, Mobile answers later, and a team
+ * worker's questions belong to its orchestrator (RunnerRequest.unattendedNoAsk). A host purpose call (a judgment, a
+ * structured-output step, an effect observation) is not the owner's turn: it never asks the owner either (2026-10-28: once
+ * ask_user stopped depending on a working folder, the Work routing judgment would otherwise have listed it).
+ */
+export function runCanAskOwnerSynchronously(req: Pick<RunnerRequest, "unattended" | "noSynchronousAsk" | "unattendedNoAsk"
+  | "judgmentOnly" | "outputSchema" | "minimalObservation">): boolean {
+  return req.unattended !== true && req.noSynchronousAsk !== true && req.unattendedNoAsk !== true
+    && req.judgmentOnly !== true && !req.outputSchema && !req.minimalObservation;
+}
+
+/**
+ * The tool list a host loop hands its provider, from the admitted inventory: code mode and the on-demand menu where they
+ * apply. One function so Main and the gate that compares host prompts with listed tools read the same surface.
+ */
+export function mainToolSurface(eagerTools: OpenAiToolDef[], byName: Map<string, ResolvedTool>, shape: {
+  runtimeKind: string; collection: boolean; catalogMcpOnly: boolean; workforceRuntimeToolGrant: boolean;
+  untrustedNoTools: boolean; minimalObservation: boolean;
+}): OpenAiToolDef[] {
+  // Small local models (managed Local, Ollama, LM Studio, MLX) get their tools directly: behind agentlas_code they
+  // reached for it first and then flailed (gpt-oss on Ollama, 2026-10-11, measured in the captured requests).
+  const smallLocalModel = shape.runtimeKind === "agentlas-local" || shape.runtimeKind === "ollama" || shape.runtimeKind === "lmstudio" || shape.runtimeKind === "mlx";
+  const indirectToolSurface = !shape.collection && !shape.catalogMcpOnly && !shape.workforceRuntimeToolGrant && !shape.untrustedNoTools && !smallLocalModel
+    && !shape.minimalObservation;
+  // Small managed local models keep their ordinary Browser/file/shell tools
+  // direct. A single large MCP contract still needs on-demand schema discovery:
+  // the statistics server alone has 180 alternatives (>300 KB).
+  // A server's deferred tools (a first list: host-tool-servers.ts) are behind the menu for every runtime class, small local
+  // models included: their first list is what they get directly, the rest is found through the menu or harness_search.
+  const menuAllowed = !shape.collection && !shape.catalogMcpOnly && !shape.workforceRuntimeToolGrant && !shape.untrustedNoTools && !shape.minimalObservation;
+  return installLazyToolMenu(installMainCodeMode(eagerTools, byName, indirectToolSurface), byName, menuAllowed,
+    shape.runtimeKind === "agentlas-local", shape.runtimeKind === "byok" || shape.runtimeKind === "agentlas");
+}
+
 export async function prepareMainToolLoop(
   req: RunnerRequest,
   runtimeKind: string,
@@ -480,7 +527,8 @@ export async function prepareMainToolLoop(
   // ordinary One/Work run gets the same builtins as every host-loop runtime —
   // before 2026-09-24 serving in Work had no file/shell tools at all.
   // BYOK adapters use this same Main loop. A signed Science catalog is the
-  // complete grant there too; API delivery must not add file/shell/download tools.
+  // complete grant there too; API delivery must not add file/shell/download tools. ask_user is none of those: an attended
+  // Science turn lists it as every attended run does (the question reaches the Science view through the shared ask host).
   const catalogMcpOnly = Boolean(req.mcpConfigPath) && req.mcpGrantCatalogOnly === true;
   if (collection) {
     assertScienceCollectionCapability(collection, req.mcpConfigPath);
@@ -493,7 +541,6 @@ export async function prepareMainToolLoop(
   }
   const { tools: eagerTools, byName } = req.untrustedNoTools
     ? { tools: [] as OpenAiToolDef[], byName: new Map<string, ResolvedTool>() }
-    : currentCompanyWorkContent() ? await loadMainToolInventory(req.mcpConfigPath, undefined, "read", false, false, req.signal, false, false)
     : collection ? await loadMainToolInventory(req.mcpConfigPath, undefined, "read", false, false, req.signal, false, false, collection)
     : await (async () => {
         // Tool-surface discovery lives inside this branch so the Main-authored
@@ -504,9 +551,7 @@ export async function prepareMainToolLoop(
           req.mcpConfigPath,
           catalogMcpOnly ? undefined : req.cwd,
           (req.permission ?? "read") as ToolPermission,
-          // Nobody answers an unattended run, Mobile answers later, and a team worker's questions belong to its
-          // orchestrator (RunnerRequest.unattendedNoAsk): none of them lists the synchronous ask_user tool.
-          req.unattended !== true && req.noSynchronousAsk !== true && req.unattendedNoAsk !== true,
+          runCanAskOwnerSynchronously(req),
           imageSlotDiagnosis.state === "ready",
           req.signal,
           req.browserOnly === true,
@@ -528,18 +573,11 @@ export async function prepareMainToolLoop(
       }
     }
   }
-  // Small local models (managed Local, Ollama, LM Studio, MLX) get their tools directly: behind agentlas_code they
-  // reached for it first and then flailed (gpt-oss on Ollama, 2026-10-11, measured in the captured requests).
-  const smallLocalModel = runtimeKind === "agentlas-local" || runtimeKind === "ollama" || runtimeKind === "lmstudio" || runtimeKind === "mlx";
-  const indirectToolSurface = !collection && !catalogMcpOnly && !req.workforceRuntimeToolGrant && !req.untrustedNoTools && !smallLocalModel
-    && !req.minimalObservation;
-  // Small managed local models keep their ordinary Browser/file/shell tools
-  // direct. A single large MCP contract still needs on-demand schema discovery:
-  // the statistics server alone has 180 alternatives (>300 KB).
-  const menuAllowed = !collection && !catalogMcpOnly && !req.workforceRuntimeToolGrant && !req.untrustedNoTools && !req.minimalObservation;
   const sessionKey = toolApprovalSessionKey(runtimeKind, req.sessionFingerprintSeed, req.cwd);
   const tools = installToolResultContext(
-    installLazyToolMenu(installMainCodeMode(eagerTools, byName, indirectToolSurface), byName, menuAllowed, runtimeKind === "agentlas-local", runtimeKind === "byok" || runtimeKind === "agentlas"),
+    mainToolSurface(eagerTools, byName, { runtimeKind, collection: Boolean(collection), catalogMcpOnly,
+      workforceRuntimeToolGrant: Boolean(req.workforceRuntimeToolGrant), untrustedNoTools: req.untrustedNoTools === true,
+      minimalObservation: Boolean(req.minimalObservation) }),
     byName, { runtimeKind, sessionKey, cwd: req.cwd || undefined,
       chatId: (req.approvalChatId ?? req.chatId) || undefined, agentId: req.agentId || undefined },
     !collection && !req.mcpGrantCatalogOnly && !req.workforceRuntimeToolGrant && !req.untrustedNoTools && !req.minimalObservation,
@@ -670,7 +708,7 @@ export async function runMainToolDispatch(
 const effectAckScope = new AsyncLocalStorage<string[]>();
 async function acknowledgeMainEffects(refs: readonly string[]): Promise<void> {
   if (!refs.length) return;
-  try { const ledger = await companyOrOriginalEffectLedger(); for (const ref of refs) await ledger.acknowledgeEffect(ref); } catch { /* never fails a tool result */ }
+  try { const ledger = await import("../harness/effect-ledger"); for (const ref of refs) await ledger.acknowledgeEffect(ref); } catch { /* never fails a tool result */ }
 }
 
 /** Nested code-mode calls consume actual values, not provider projections. */
@@ -759,7 +797,7 @@ async function awaitMcpResultDelivery(
 interface MainEffectSlot { ref?: string; replayedRef?: string; liveAction?: string; effectStarted?: boolean }
 
 async function settleMainEffect(ref: string, state: "settled" | "failed" | "uncertain", resultText?: string): Promise<void> {
-  try { await (await companyOrOriginalEffectLedger()).settleEffect(ref, state, state === "settled" && resultText !== undefined ? { result: resultText } : undefined); } catch { /* the ledger never fails a tool result */ }
+  try { await (await import("../harness/effect-ledger")).settleEffect(ref, state, state === "settled" && resultText !== undefined ? { result: resultText } : undefined); } catch { /* the ledger never fails a tool result */ }
 }
 
 /** Splits the optional Work reference off a call's JSON arguments; null when there is none (or the JSON is not an object). */
@@ -931,7 +969,7 @@ async function dispatchMainToolRawUnchecked(
     : { tool: call.toolName, builtin: resolved.builtinName, arguments: args };
   // The Main-issued collection grant is already exact, unattended consent for
   // these three Science actions, including the bounded source-record write.
-  const collectionDecision = currentCompanyWorkContent() ? await approveCompanyWorkTool(resolved) : approval.scienceCollectionCapability ? "allow_once" as const : null;
+  const collectionDecision = approval.scienceCollectionCapability ? "allow_once" as const : null;
   if (collectionDecision) actionApproval.onApprovalDecision?.(collectionDecision);
   const admittedMcpRead = resolved.kind === "mcp" && !mcpToolIsMutating({
     catalogId: resolved.server.catalogId, toolName: resolved.serverToolName, args,
@@ -1005,7 +1043,7 @@ async function dispatchMainToolRawUnchecked(
   // recovery already owns its own original-outcome custody, so it is not checkpointed twice.
   const mutatingEffect = resolved.kind === "builtin" ? planMutation : !admittedMcpRead;
   if (mutatingEffect && !work && effectSlot) {
-    const ledger = await companyOrOriginalEffectLedger();
+    const ledger = await import("../harness/effect-ledger");
     const effectTool = resolved.kind === "mcp" ? `mcp:${resolved.server.catalogId ?? resolved.server.id}:${resolved.serverToolName}` : `builtin:${resolved.builtinName}`;
     const begun = await ledger.beginEffect({ surface: "main-loop", chatId: approval.chatId ?? null, run: ledger.effectRunId(approval), tool: effectTool, args });
     if (begun.status === "uncertain_prior") {
@@ -1156,7 +1194,6 @@ async function dispatchMainToolRawUnchecked(
     const result = await callServerToolContent(resolved.server, resolved.serverToolName, args, {
       timeoutMs: oneGraphToolTimeoutMs({ catalogId: resolved.server.catalogId, toolName: resolved.serverToolName, args }),
       signal: approval.signal, prepared: resolved.prepared,
-      ...(currentCompanyWorkContent()?.capability ? {companyWorkCapability:currentCompanyWorkContent()!.capability} : {}),
       ...(approval.retainMcpToolResult ? { retainFullResult: true as const } : {}),
       expectedToolSchemaDigest: resolved.schemaDigest, onToolSchemaInvalidated: () => invalidateToolMenu(byName),
       session: mcpToolCallSessions.get(byName),
@@ -1813,7 +1850,7 @@ async function runLocalOpenAiChatInner(
       if (reference) { messages[index] = { ...row, content: reference }; folded += 1; }
     }
     inTurnFolds += folded;
-    if (folded && !currentCompanyWorkContent() && process.env.AGENTLAS_LOCAL_TOOL_DEBUG === "1") console.log("[local-tool-loop] in-turn folds:", folded, "total:", inTurnFolds);
+    if (folded && process.env.AGENTLAS_LOCAL_TOOL_DEBUG === "1") console.log("[local-tool-loop] in-turn folds:", folded, "total:", inTurnFolds);
     return folded;
   };
   let ownerControlPending: string[] | null = null;
@@ -2333,7 +2370,7 @@ async function runLocalOpenAiChatInner(
       }
       finalText = continuedText ? continuedText + (result.rawText ?? result.text) : result.text;
       reachedAnswer = true;
-      if (!currentCompanyWorkContent() && process.env.AGENTLAS_LOCAL_TOOL_DEBUG === "1") console.log("[local-tool-loop] final text:", JSON.stringify(result.text.slice(0, 400)), "summaryTurn:", summaryTurnRequested);
+      if (process.env.AGENTLAS_LOCAL_TOOL_DEBUG === "1") console.log("[local-tool-loop] final text:", JSON.stringify(result.text.slice(0, 400)), "summaryTurn:", summaryTurnRequested);
       break;
     }
     sawAnyToolCall = true;
@@ -2376,7 +2413,8 @@ async function runLocalOpenAiChatInner(
       runtimeKind,
     );
   } else if (normalEnd?.outcome === "empty") {
-    failure = localFailure("empty", tStatus(req.locale, "errLocalEmptyAnswer", { model }), runtimeKind);
+    // "empty" means no text and no tool dispatched in the whole turn (settleNormalEnd): this loop dispatches every tool.
+    failure = { ...localFailure("empty", tStatus(req.locale, "errLocalEmptyAnswer", { model }), runtimeKind), providerCode: EMPTY_NO_TOOL_RAN_CODE };
   } else if (answer) {
     // 표식 없이 완주했는데 산출물이 거절/한도 고지문인 경우 — 판별 규칙은
     // runtime-refusal.ts 한 곳에만 살고, 출처는 heuristic으로 남긴다.

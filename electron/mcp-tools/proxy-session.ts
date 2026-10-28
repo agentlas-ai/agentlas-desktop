@@ -14,6 +14,8 @@ import { mcpToolSchemaDigest } from "./tool-schema";
 import { bindMainToolConsentResource } from "../runtime/tool-consent";
 import { defaultRuntimeToolPermission, getRuntimeToolPermissionArbiter, type RuntimeToolPermissionAsk } from "../runtime/tool-approval";
 import { beginMainMcpEffect } from "./effect-receipts";
+import { RUNTIME_MCP_SUPPORT } from "../../shared/runtime-mcp";
+import type { RuntimeKind } from "../../shared/types";
 import { recordMcpProxyEvent, safeProxyReason } from "./proxy-event-log";
 import { isCanonicalSystemTimeMcpServer } from "./system-time-server";
 import type { BeforeMcpToolResult } from "../runtime/runner";
@@ -36,6 +38,9 @@ export type McpProxyGate = {
    * (schema digests) still see the full upstream list.
    */
   toolSurface?: readonly string[];
+  /** The surface is a first list (host-tool-servers.ts): tools/list is trimmed to it, but a call to another declared tool,
+   *  found through the common search, is admitted and goes through the same arbiter as any call. */
+  toolSurfaceDeferred?: true;
 };
 type Registration = {
   cwd: Readonly<{ path: string; dev: number; ino: number }>;
@@ -792,7 +797,7 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
       const tool = frame.params?.name, args = frame.params?.arguments ?? {};
       if (!initialized || typeof tool !== "string" || !tool || !args || typeof args !== "object" || Array.isArray(args)) throw new Error("mcp_proxy_call_invalid");
       if(gate.historyRuntimeFence){assertHistoryRuntimeFence(gate.historyRuntimeFence);gate.historyRuntimeFence.assertTool(historyToolInput(frame));}
-      if (gate.toolSurface && !gate.toolSurface.includes(tool)) { deny(wireId, "tool_surface_denied"); return; }
+      if (gate.toolSurface && !gate.toolSurfaceDeferred && !gate.toolSurface.includes(tool)) { deny(wireId, "tool_surface_denied"); return; }
       if (!graphAllows(gate, tool)) { deny(wireId, "plan_denied"); return; }
       const mutating = policy.mutating({ catalogId: gate.catalogId, toolName: tool, args });
       if ((gate.simulation && mutating) || (gate.planMode && policy.planMutating({ authority: gate.planReadAuthority, toolName: tool, args }))) { deny(wireId, "plan_denied"); return; }
@@ -814,7 +819,11 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
       const pending = native.get(wireId); if (!pending) return;
       // Pre-effect checkpoint (harness/effect-ledger.ts) for mutating calls: begun before the frame goes upstream,
       // settled from the same terminal hook the effect receipt uses (a cut wire after send is uncertain).
-      if (mutating) {
+      // An in-process Main loop (API and local-model runtimes) already checkpointed this exact call under its own run
+      // (local-tool-loop.ts, same chat + tool + arguments key) before it reached this proxy. A second begin under the
+      // proxy's run found the loop's unsettled begin and answered EFFECT_UNCERTAIN to every mutating call (measured
+      // 2026-10-28: an ollama Science turn on the shared chain, every Science call). One checkpoint per effect: the loop's.
+      if (mutating && RUNTIME_MCP_SUPPORT[gate.runtime as RuntimeKind]?.delivery !== "in-process-loop") {
         const ledger = await import("../harness/effect-ledger");
         const begun = await ledger.beginEffect({ surface: "mcp-proxy", chatId: gate.chatId ?? null, run: ledger.effectRunId(gate),
           tool: `mcp:${gate.catalogId ?? gate.serverKey}:${tool}`, args });

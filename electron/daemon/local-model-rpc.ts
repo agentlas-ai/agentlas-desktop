@@ -195,6 +195,7 @@ export function createDaemonLocalModelRpc(options: {
       case "loadModel": return c.loadModel(command.args[0], command.args[1], signal);
       case "unload": return c.unload(command.args[0], command.args[1]);
       case "testCapabilities": return c.testCapabilities(command.args[0], command.args[1], signal);
+      case "toolProbeAsk": return c.toolProbeAsk(command.args[0], command.args[1], signal);
       default: throw localModelRemoteError("local_model_remote_method_unknown");
     }
   }

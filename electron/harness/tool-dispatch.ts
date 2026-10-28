@@ -245,15 +245,34 @@ export async function runScopedBinding(server: InstalledMcpServer, ctx?: Pick<Ha
   return prepared ? { ok: true, server: prepared.server, prepared } : unavailable;
 }
 
+/** The calling run's prepared binding of host tool server `providerRef` (host-tool-servers.ts); null when it is no host server. */
+async function hostServerBinding(providerRef: string, ctx?: Pick<HarnessCallContext, "mcpConfigPath">): Promise<RunScopedBinding | null> {
+  const key = providerRef.replace(/^connector:/, "").replace(/^tool:/, "");
+  const configPath = str(ctx?.mcpConfigPath);
+  const { hostToolCatalog } = await import("../mcp-tools/host-tool-servers");
+  if (!configPath || !hostToolCatalog(configPath).some((server) => server.configKey === key)) return null;
+  const { preparedMcpBindings } = await import("../mcp-tools/prepared-transport");
+  let bindings: PreparedMcpBinding[];
+  try { bindings = preparedMcpBindings(configPath); } catch {
+    return { ok: false, code: "run_binding_ended", next: "this run's tool binding ended or changed; the next turn binds tools again" };
+  }
+  const prepared = bindings.find((binding) => binding.configKey === key && binding.server.catalogId === key);
+  return prepared ? { ok: true, server: prepared.server, prepared }
+    : { ok: false, code: "not_available_in_this_run", next: `${key} is not attached to this run` };
+}
+
 /** Current tools/list of one installed connector, with the digest tool.call must carry. */
 export async function describeConnectorTools(providerRef: string, ctx?: Pick<HarnessCallContext, "mcpConfigPath" | "signal">): Promise<
   | { ok: true; server: InstalledMcpServer; prepared?: PreparedMcpBinding; tools: Array<{ name: string; description: string; schemaDigest: string; inputSchema: unknown }> }
   | { ok: false; code: string; next?: string }
 > {
   const installed = await findServer(providerRef);
-  if (!installed) return { ok: false, code: "not-installed", next: "connector.search finds installed connectors" };
-  if (!installed.enabled) return { ok: false, code: "disabled", next: "connector.connect switches it on" };
-  const bound = await runScopedBinding(installed, ctx);
+  // A host tool server (Science) is no installed row: it exists for this call only as the calling run's sealed binding.
+  const hosted = installed ? null : await hostServerBinding(providerRef, ctx);
+  if (hosted && !hosted.ok) return { ok: false, code: hosted.code, next: hosted.next };
+  if (!installed && !hosted) return { ok: false, code: "not-installed", next: "connector.search finds installed connectors" };
+  if (installed && !installed.enabled) return { ok: false, code: "disabled", next: "connector.connect switches it on" };
+  const bound = hosted ?? await runScopedBinding(installed!, ctx);
   if (!bound.ok) return { ok: false, code: bound.code, next: bound.next };
   const { server, prepared } = bound;
   const { testServerConnection } = await import("../mcp-tools/client");

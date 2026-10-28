@@ -1,4 +1,5 @@
 import { currentGoalExecutionObligations, prepareGoalObligationContinuation, goalObligationContinuationPrompt, abandonGoalObligationContinuation } from "./goal-obligation-context";
+import { applyHostOwnerCardDecision, hostOwnerCardAnswer, OWNER_CARD_STOP_REASON } from "./goal-owner-card-decision";
 /** Recover idle Goals through fresh current-context episodes. Checkpoint and
  * effect failures are advisory facts; only an explicit owner hold stops work.
  * Retry spacing still prevents unavailable runtimes from spinning. */
@@ -385,14 +386,22 @@ function closeGoalOfDeletedChat(run: LongRunRecord, trigger: string): BlockedGoa
  * Goal would rest for ever. This is the one place that notices: the owner wrote in the Goal's chat after it asked. A live turn
  * in the chat, or an owner request about to start, is the owner's own path and is left to finish first.
  */
-function releaseAnsweredOwnerHold(run: LongRunRecord, dispatcher: EffectObservationDispatcher): LongRunRecord | null {
+function releaseAnsweredOwnerHold(run: LongRunRecord, dispatcher: EffectObservationDispatcher): LongRunRecord | "stopped" | null {
   const chatId = run.rootChatId;
   if (!chatId) return null;
   if (dispatcher.activeChatIds().includes(chatId) || ownerRequestWaiting(chatId, dispatcher)) return null;
   const since = goalOwnerAnswerPendingSince(run.id);
   if (!since) return null;
-  const spoke = getDb().prepare("SELECT 1 FROM chat_messages WHERE chat_id = ? AND role = 'user' AND created_at > ? LIMIT 1").get(chatId, since);
+  const spoke = getDb().prepare("SELECT text FROM chat_messages WHERE chat_id = ? AND role = 'user' AND created_at > ? ORDER BY created_at DESC, rowid DESC LIMIT 1")
+    .get(chatId, since) as { text: string } | undefined;
   if (!spoke) return null;
+  // The owner's newest word picked an option of the Goal's own host card: a stop is applied, never released into a resume.
+  try {
+    const answer = hostOwnerCardAnswer({ goalId: run.goalId, chatId, reply: spoke.text });
+    if (answer && applyHostOwnerCardDecision(answer, { chatId, via: "sweep" }) === "stopped") return "stopped";
+  } catch (error) {
+    logSweepFailureCause("owner-card-decision", run.id, errorCode(error, "owner_card_decision_unavailable"), error);
+  }
   try {
     return releaseGoalOwnerAnswerHold({ runId: run.id, expectedVersion: run.version, reason: "owner-answered-outside-the-composer",
       appInstanceId: desktopAppInstanceId() });
@@ -442,6 +451,7 @@ function sweepOne(input: LongRunRecord, dispatcher: EffectObservationDispatcher,
   // start, no retry, no notice. The owner's answer reopens it; an answer given where a Goal cannot reopen ends the hold below.
   if (goalOwnerAnswerHold(run.id)) {
     const released = releaseAnsweredOwnerHold(run, dispatcher);
+    if (released === "stopped") return { runId: run.id, fromReason: run.blockedReason, action: "cancelled", detail: OWNER_CARD_STOP_REASON };
     if (!released) return defer(GOAL_OWNER_ANSWER_PENDING_CODE);
     run = released;
   }

@@ -66,6 +66,15 @@ interface PortDefinition {
   purpose: string;
   /** Idempotent cancellation of an exact host-bound target; never needs a UI command claim. */
   terminalTargetKeys?: readonly string[];
+  /** A call whose arguments are exactly the terminalTargetKeys stops that bound target, and stopping never waits on the run's
+   *  permission: the approval gate admits it under read permission (mcp-tools/proxy-server.ts). The handler still checks the owner. */
+  terminalUnderReadPermission?: true;
+  /** How long the agentlas-turn gateway waits for this port's reply when the port's work outlasts the gateway's 30 s default. */
+  callTimeoutMs?: number;
+  /** Only reads: the handler changes nothing the owner or the outside world sees, and shows nothing the owner must act on. Main-work
+   *  recovery (mcp-tools/main-work-read-actions.ts) may close a call of this port that lost its answer as a failed read and run its
+   *  identical repeat. Absent means an effect (fail closed). Approval does not read this (mcpToolIsMutating). */
+  effectFreeRead?: true;
   required: readonly string[];
   inputSchema?: Record<string, unknown>;
   /** Absent: the port is declared but its backing service is not wired yet. */
@@ -756,7 +765,7 @@ const PORTS: PortDefinition[] = [
     unavailable: { reason: "video_edit_not_wired", next: "no route here runs video-to-video yet; media.video.extend continues a Luma video, media.video.animate-image starts from a frame" },
   },
   {
-    operationId: "auth.status", kind: "query", purpose: "Read redacted stored auth metadata; do not refresh, probe, or open browser.", required: ["connectionId"],
+    operationId: "auth.status", kind: "query", effectFreeRead: true, purpose: "Read redacted stored auth metadata; do not refresh, probe, or open browser.", required: ["connectionId"],
     handler: async (args) => { const row = await findConnector(args); return row ? ok({ connectionId: row.id, ...(await connectorAuth(row, "discovery")), readiness: await storedConnectionReadiness(row) }) : refused("connector_not_installed"); },
   },
   {
@@ -916,7 +925,7 @@ const PORTS: PortDefinition[] = [
     },
   },
   { operationId: "tool.call", kind: "job", purpose: "Dispatch once through policy/auth/current binding and preserve exact result.", required: ["toolId", "providerRef", "schemaDigest", "arguments"], handler: async (args, ctx) => (await import("./tool-dispatch")).TOOL_PORT_HANDLERS["tool.call"](args, ctx) },
-  { operationId: "tool.result", kind: "query", purpose: "Read exact invocation state and retained result handle.", required: ["callId"], handler: async (args, ctx) => (await import("./tool-dispatch")).TOOL_PORT_HANDLERS["tool.result"](args, ctx) },
+  { operationId: "tool.result", kind: "query", effectFreeRead: true, purpose: "Read exact invocation state and retained result handle.", required: ["callId"], handler: async (args, ctx) => (await import("./tool-dispatch")).TOOL_PORT_HANDLERS["tool.result"](args, ctx) },
   { operationId: "tool.cancel", kind: "command", terminalTargetKeys: ["callId"], purpose: "Cancel original call; settle external outcome without blind replay.", required: ["callId"], handler: async (args, ctx) => (await import("./tool-dispatch")).TOOL_PORT_HANDLERS["tool.cancel"](args, ctx) },
   { operationId: "tool.subscribe", kind: "subscription", purpose: "Resume invocation events from cursor without starting execution.", required: ["callId"], handler: async (args, ctx) => (await import("./tool-dispatch")).TOOL_PORT_HANDLERS["tool.subscribe"](args, ctx) },
   { operationId: "ui.present", kind: "command", purpose: "Project durable results; route actions through the same dispatcher.", required: [], handler: async (args, ctx) => (await import("./ui-instances")).UI_PORT_HANDLERS["ui.present"](args, ctx) },
@@ -924,7 +933,7 @@ const PORTS: PortDefinition[] = [
   { operationId: "ui.close", kind: "command", purpose: "Project durable results; route actions through the same dispatcher.", required: ["instanceId"], handler: async (args, ctx) => (await import("./ui-instances")).UI_PORT_HANDLERS["ui.close"](args, ctx) },
   { operationId: "ui.action", kind: "command", purpose: "Project durable results; route actions through the same dispatcher.", required: ["instanceId", "actionId"], handler: async (args, ctx) => (await import("./ui-instances")).UI_PORT_HANDLERS["ui.action"](args, ctx) },
   { operationId: "ui.subscribe", kind: "subscription", purpose: "Read result UI instance events and revisions.", required: ["instanceId"], handler: async (args, ctx) => (await import("./ui-instances")).UI_PORT_HANDLERS["ui.subscribe"](args, ctx) },
-  { operationId: "result.read", kind: "query", purpose: "Read exact retained original, structured data or artifact part.", required: ["resultRef", "part"], handler: async (args, ctx) => (await import("./tool-dispatch")).TOOL_PORT_HANDLERS["result.read"](args, ctx) },
+  { operationId: "result.read", kind: "query", effectFreeRead: true, purpose: "Read exact retained original, structured data or artifact part.", required: ["resultRef", "part"], handler: async (args, ctx) => (await import("./tool-dispatch")).TOOL_PORT_HANDLERS["result.read"](args, ctx) },
   {
     operationId: "mcp.app.resource.read", kind: "query", purpose: "Read one MCP Apps ui:// view of an installed, enabled connector (HTML for the sandboxed host).", required: ["connectorId", "uri"],
     handler: async (args, ctx) => (await import("./tool-dispatch")).TOOL_PORT_HANDLERS["mcp.app.resource.read"](args, ctx),
@@ -987,6 +996,14 @@ const PORTS: PortDefinition[] = [
     handler: async (args, ctx) => (await import("./thread-service")).turnInterrupt(args, ctx) },
   { operationId: "turn.start", kind: "command", purpose: "Owner only: start a turn with text in an idle Work conversation (permissions read|write|full, default: the last run's).", required: ["threadId", "text"],
     handler: async (args, ctx) => (await import("./thread-service")).turnStart(args, ctx) },
+  // A screen's button or menu tells the next turn of a conversation which installed plugin workflow the owner asked for
+  // (plugins/owner-capability-request.ts); tool selection routes it as "requested". The owner's surface only.
+  { operationId: "turn.capability.request", kind: "command", purpose: "Owner only: the next turn of a conversation carries this installed plugin workflow (chatId, plugin, workflow).", required: ["chatId", "plugin", "workflow"],
+    handler: async (args, ctx) => {
+      if (ctx.chatId !== "ui") return refused("owner_only", "the owner asks for a workflow from a screen's button or menu");
+      try { return ok(await (await import("../plugins/owner-capability-request")).recordOwnerCapabilityRequest({ chatId: str(args.chatId), plugin: str(args.plugin), workflow: str(args.workflow) })); }
+      catch (error) { return refused(error instanceof Error && /^capability_request_[a-z_]+$/.test(error.message) ? error.message : "capability_request_failed"); }
+    } },
   // Doc 12 F6: a capability added only by this port + its FeatureModule (feature-registry.ts "media-quality").
   {
     operationId: "media.quality.probe", kind: "query", purpose: "Measure a local video/audio/image file (size, duration, resolution, fps, audio; optional loudness) and check it against expectations.", required: ["path"],
@@ -1143,13 +1160,13 @@ const PORTS: PortDefinition[] = [
   },
   ...FINANCE_PORTS,
   // Live documents (live-document/ports.ts): the owner watches these edits typed into the Document tab.
-  { operationId: "document.list", kind: "query", purpose: "Office documents (xlsx docx pptx hwpx hwp) open for live editing in this conversation.", required: [],
+  { operationId: "document.list", kind: "query", effectFreeRead: true, purpose: "Office documents (xlsx docx pptx hwpx hwp) open for live editing in this conversation.", required: [],
     handler: async (args, ctx) => (await import("../live-document/ports")).documentList(args, ctx) },
   { operationId: "document.open", kind: "command", purpose: "Open a local xlsx/docx/pptx/hwpx/hwp file for live editing in the owner's Document tab; returns sessionId, addressable outline and the ops its format supports.", required: ["path"],
     inputSchema: LIVE_DOCUMENT_SCHEMAS.open, handler: async (args, ctx) => (await import("../live-document/ports")).documentOpen(args, ctx) },
   { operationId: "document.create", kind: "command", purpose: "Create a new blank A4 docx/xlsx/pptx/hwpx file (Hangul documents are .hwpx) at a path that does not exist yet and open it in the Document tab for live editing.", required: ["path"],
     inputSchema: LIVE_DOCUMENT_SCHEMAS.create, handler: async (args, ctx) => (await import("../live-document/ports")).documentCreate(args, ctx) },
-  { operationId: "document.read", kind: "query", purpose: "Current outline of a live document with the ids its ops address (cells A1, block, table-cell and slide-shape ids) and its revision.", required: ["sessionId"],
+  { operationId: "document.read", kind: "query", effectFreeRead: true, purpose: "Current outline of a live document with the ids its ops address (cells A1, block, table-cell and slide-shape ids) and its revision.", required: ["sessionId"],
     inputSchema: LIVE_DOCUMENT_SCHEMAS.read, handler: async (args, ctx) => (await import("../live-document/ports")).documentRead(args, ctx) },
   { operationId: "document.apply", kind: "command", purpose: "Edit a live document in its original format, all-or-nothing: set_cell, add_sheet, rename_sheet, delete_sheet, set_number_format, add_chart, set_text, insert_text, insert_paragraph, insert_table (docx/hwpx, or on a pptx slide: after = the slide id), delete_block, add_slide, delete_slide, set_notes (pptx speaker notes), set_format (bold/italic/underline/size/color/align/fill, heading), insert_table widths; the owner sees each edit typed.", required: ["sessionId", "ops"],
     inputSchema: LIVE_DOCUMENT_SCHEMAS.apply, handler: async (args, ctx) => (await import("../live-document/ports")).documentApply(args, ctx) },
@@ -1180,6 +1197,33 @@ const PORTS: PortDefinition[] = [
 ];
 
 const PORT_BY_ID = new Map(PORTS.map((port) => [port.operationId, port]));
+
+/** harness_call operations whose port declares effectFreeRead: the closed read set of main-work recovery. */
+export const HARNESS_EFFECT_FREE_READ_OPERATIONS: ReadonlySet<string> = new Set(
+  PORTS.filter((port) => port.effectFreeRead === true && port.kind === "query").map((port) => port.operationId));
+
+/** Ports whose reply can take longer than the agentlas-turn gateway's 30 s default, from each port's own declaration. */
+export const HARNESS_PORT_CALL_TIMEOUTS: Readonly<Record<string, number>> = Object.freeze(Object.fromEntries(
+  PORTS.filter((port) => typeof port.callTimeoutMs === "number" && Number.isInteger(port.callTimeoutMs) && port.callTimeoutMs > 0)
+    .map((port) => [port.operationId, port.callTimeoutMs as number])));
+
+/**
+ * harness_call arguments that stop a port's exact bound target, admitted under read permission when the port declares
+ * terminalUnderReadPermission: { operation, args } and nothing else, args holding exactly the port's terminalTargetKeys, each a
+ * non-empty id of at most 200 characters. No other alias, extra key or edit rides along.
+ */
+export function harnessCallIsReadPermissionTerminal(harnessArgs: unknown): boolean {
+  if (!harnessArgs || typeof harnessArgs !== "object" || Array.isArray(harnessArgs)) return false;
+  const call = harnessArgs as Record<string, unknown>;
+  const keys = Object.keys(call);
+  if (keys.length !== 2 || !keys.every((key) => key === "operation" || key === "args") || typeof call.operation !== "string") return false;
+  const port = PORT_BY_ID.get(call.operation);
+  const targets = port?.terminalUnderReadPermission === true ? port.terminalTargetKeys : undefined;
+  const args = call.args && typeof call.args === "object" && !Array.isArray(call.args) ? call.args as Record<string, unknown> : null;
+  if (!targets?.length || !args || Object.keys(args).length !== targets.length) return false;
+  return targets.every((key) => Object.hasOwn(args, key) && typeof args[key] === "string"
+    && (args[key] as string).trim().length > 0 && (args[key] as string).length <= 200);
+}
 
 /** A host-issued action may always cancel its fixed original target, even when UI claim persistence is unavailable. */
 export function isFixedTerminalHarnessAction(operationId: string, fixedArgs: Record<string, unknown>): boolean {
@@ -1310,9 +1354,28 @@ async function appOperationPaths(query: string): Promise<string[]> {
   } catch { return []; }
 }
 
-export async function searchHarness(query: string, kind?: HarnessItemKind): Promise<Array<{ id: string; kind: HarnessItemKind; name: string; description: string }>> {
-  const out: Array<{ id: string; kind: HarnessItemKind; name: string; description: string; rankTerms?: string[] }> = [];
+/** The calling run's host tool servers (Science), each tool one searchable entry: `tool:<server>/<name>`. */
+async function hostToolRows(ctx?: Pick<HarnessCallContext, "mcpConfigPath">) {
+  const { hostToolCatalog, hostToolRankTerms } = await import("../mcp-tools/host-tool-servers");
+  return hostToolCatalog(ctx?.mcpConfigPath).flatMap((server) => server.declarations.map((tool) => ({
+    id: `tool:${server.configKey}/${tool.name}`, server, tool,
+    name: `${tool.name} (${tool.group.label})`,
+    description: `${tool.description.slice(0, 260)}${server.firstList.includes(tool.name) ? " [listed in this run]" : ""}`,
+    rankTerms: hostToolRankTerms(server, tool),
+    meaningTerms: hostToolRankTerms(server, tool),
+  })));
+}
+
+/** The app's local multilingual embedding for search recall; null when it cannot load (word ranking then stands alone). */
+async function meaningEmbedder(): Promise<import("./search-rank").MeaningEmbedder | null> {
+  try { return await import("../memory/local-embedding"); } catch { return null; }
+}
+
+export async function searchHarness(query: string, kind?: HarnessItemKind, ctx?: Pick<HarnessCallContext, "mcpConfigPath">): Promise<Array<{ id: string; kind: HarnessItemKind; name: string; description: string }>> {
+  const out: Array<{ id: string; kind: HarnessItemKind; name: string; description: string; rankTerms?: string[]; meaningTerms?: string[] }> = [];
   const want = (k: HarnessItemKind) => !kind || kind === k;
+  // The run's own host tool servers lead: their tools are callable in this run now (tool.call), unlike catalog entries.
+  if (want("tool")) for (const row of await hostToolRows(ctx)) out.push({ id: row.id, kind: "tool", name: row.name, description: row.description, rankTerms: row.rankTerms, meaningTerms: row.meaningTerms });
   if (want("plugin")) for (const row of await pluginRows()) if (matches(query, row.slug, row.name, row.description)) out.push({ id: row.id, kind: "plugin", name: row.mention, description: row.description });
   if (want("skill")) for (const row of await skillRows()) if (matches(query, row.id, row.name, row.description)) out.push({ id: row.id, kind: "skill", name: row.name, description: row.description });
   if (want("connector")) for (const row of await connectorRows()) if (matches(query, row.serverId, row.name)) out.push({ id: row.id, kind: "connector", name: row.name, description: `${row.transport}${row.enabled ? "" : ", off"}` });
@@ -1344,8 +1407,9 @@ export async function searchHarness(query: string, kind?: HarnessItemKind): Prom
     out.unshift({ id: port.operationId, kind: "operation", name: port.operationId, description: `${port.purpose}${port.handler ? "" : " (unavailable)"} Operations matching this search: ${appPaths.slice(0, 8).join(", ")}.`, rankTerms: hasHangul(query) ? [...appPaths, query.toLowerCase()] : appPaths });
   }
   // Best match first across every kind (search-rank.ts); the fixed kind order cut the answering operation off (r07).
-  const { rankHarnessItems } = await import("./search-rank");
-  return rankHarnessItems(query, out, 60);
+  // Entries no query word reaches are found by meaning after the word matches (Korean, paraphrase).
+  const { rankHarnessItemsByMeaning } = await import("./search-rank");
+  return rankHarnessItemsByMeaning(query, out, 60, await meaningEmbedder());
 }
 
 /** Exact detail for one id from harness_search; an operation id returns its required fields and status. */
@@ -1363,6 +1427,23 @@ export async function describeHarness(id: string, ctx: HarnessCallContext): Prom
     return feature
       ? { schemaVersion: "agentlas.harness-result.v1", operationId: "describe", status: "ok", data: feature, receiptId: `hr_${randomUUID()}` }
       : { schemaVersion: "agentlas.harness-result.v1", operationId: "describe", status: "refused", reason: "feature_unknown", receiptId: `hr_${randomUUID()}` };
+  }
+  if (ref.startsWith("tool:") && ref.includes("/")) {
+    // A tool of this run's host tool server (Science): its live schema and digest, and the one way to call it.
+    const row = (await hostToolRows(ctx)).find((item) => item.id === ref);
+    if (row) {
+      const live = await (await import("./tool-dispatch")).describeConnectorTools(row.server.configKey, ctx);
+      const tool = live.ok ? live.tools.find((item) => item.name === row.tool.name) : undefined;
+      if (!live.ok || !tool) return { schemaVersion: "agentlas.harness-result.v1", operationId: "describe", status: "refused",
+        reason: live.ok ? "tool_not_listed_by_server" : live.code, next: live.ok ? "the server no longer lists this tool" : live.next, receiptId: `hr_${randomUUID()}` };
+      const listed = row.server.firstList.includes(row.tool.name);
+      return { schemaVersion: "agentlas.harness-result.v1", operationId: "describe", status: "ok", data: {
+        id: ref, name: row.tool.name, server: row.server.configKey, group: row.tool.group, fields: row.tool.fields,
+        artifactKinds: row.tool.artifactKinds, effect: row.tool.effect, description: tool.description,
+        inputSchema: tool.inputSchema, schemaDigest: tool.schemaDigest,
+        next: `${listed ? `listed in this run as mcp__${row.server.configKey}__${row.tool.name}; or ` : ""}harness_call tool.call with {"toolId":"${row.tool.name}","providerRef":"${row.server.configKey}","schemaDigest":"${tool.schemaDigest}","arguments":{…}}`,
+      }, receiptId: `hr_${randomUUID()}` };
+    }
   }
   if (ref.startsWith("plugin:") && !ref.includes("/")) return callHarnessPort("plugin.describe", { packageId: ref }, ctx);
   if (ref.startsWith("plugin:") || ref.startsWith("catalog:")) return callHarnessPort("skill.read", { skillId: ref }, ctx);

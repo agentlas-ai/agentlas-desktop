@@ -12,7 +12,6 @@ import { useT } from "@/lib/i18n";
 import { useDismissibleLayer } from "@/lib/use-dismissible-layer";
 import { loadViewData, readViewData, writeViewData } from "@/lib/view-data-cache";
 import { IconChevronDown, IconArrowLeft } from "./Icon";
-import { BusinessEntryButton } from "../business/BusinessEntryButton";
 
 export function AccountChip() {
   const { t, locale } = useT();
@@ -282,7 +281,6 @@ export function AccountChip() {
               </span>
             </button>
           )}
-          <BusinessEntryButton menu locale={locale} onOpen={() => setPopoverOpen(false)} />
           <button
             role="menuitem" onClick={() => void signOut()}
             style={{

@@ -166,7 +166,7 @@ async function queryFinanceDataRaw(input: FinanceDataRequest, assets: FinanceAss
         else return {...result,warnings:['No sole exact SEC directory ticker match is available. No issuer CIK was inferred from country, currency, name or a similar ticker.']};
       }
       if (!cik) return { ...result, warnings: ['No unambiguous SEC issuer mapping is available.'] };
-      if (metric === 'company_facts') return parseCompanyFacts(await fetchFinanceJson(new URL(`https://data.sec.gov/api/xbrl/companyfacts/CIK${cik}.json`)), cik);
+      if (metric === 'company_facts') return parseCompanyFacts(await fetchFinanceJson(new URL(`https://data.sec.gov/api/xbrl/companyfacts/CIK${cik}.json`)), cik, input.facts);
       const url = `https://data.sec.gov/submissions/CIK${cik}.json`;
       result.sourceUrls = [url];
       const submission=object(await fetchFinanceJson(new URL(url)));

@@ -1,6 +1,5 @@
 import { effectiveInvocationPermission } from "../../shared/invocation-permission";
 import {retainHistoryWorkOrigin} from './history-work-dispatch';
-import {retainEmployeeAgentWorkOrigin} from '../business/employee-agent-work-dispatch';
 import { withOnePersonalNativeOriginal } from "../secrets/one-personal-native-entry";
 import { getAuthenticatedActorIds } from "../auth";
 import { getDb, STORE_SCHEMA_VERSION } from "../store/db";
@@ -73,7 +72,6 @@ export function createSupervisorNativeOrigin(store: OneSupervisorStore, owner: O
       || current.payload_hash !== row.payload_hash || current.source_reply_run_id !== row.source_reply_run_id
       || !["dispatching", "accepted"].includes(current.state)) fail("supervisor_native_command_fenced");
   } });
-  retainEmployeeAgentWorkOrigin(source,request);
   retainHistoryWorkOrigin(source,request);
   return source;
 }
@@ -85,7 +83,7 @@ let handoffTimer:NodeJS.Timeout|undefined;
 let handoffBusy=false;
 let handoffProposal:{oneId:string;ownerEpoch:string;generation:number}|undefined;
 export function supervisorRuntimeMode(){return mode;}
-export async function callOneSupervisorRuntime(op:'status'|'adopt'|'command'|'harness.result'|'harness.action'|'questions.list'|'questions.answer'|'personal.command'|'work.source',input?:unknown):Promise<any> {
+export async function callOneSupervisorRuntime(op:'status'|'adopt'|'command'|'harness.result'|'harness.action'|'questions.list'|'questions.answer'|'personal.command',input?:unknown):Promise<any> {
   const channel=bootstrap?.getChannel(),identity=channel && nativeGuiChannelIdentity(channel);
   if(!channel || !identity)fail('supervisor_native_channel_unavailable');
   const assertCurrent=()=>{if(nativeGuiChannelIdentity(channel)!==identity)fail('supervisor_native_channel_changed');};

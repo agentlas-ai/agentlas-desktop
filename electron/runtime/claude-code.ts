@@ -5,6 +5,7 @@ import { recordNativeCompaction } from "./native-compaction-event";
 import { nativeCompactionLimit, recordObservedContextWindow, runtimeContextWindow } from "./session-generation";
 import { ClaudeTaskPlanTracker, createRuntimePlanEmitter } from "./runtime-plan";
 import { claudeMcpIsolation, withClaudePersonalContext, withDisallowedTools } from "./claude-personal-context";
+import { builtinEgressReceipt, claudeBuiltinEgressDenial } from "./runtime-builtin-egress-policy";
 import { mcpToolSurfaceDenial } from "../mcp-tools/hephaestus-tool-surface";
 import { recordClaudeCapabilityRequest, recordClaudeCapabilityInit } from "./capability-receipt";
 import { claudeBrowserSurfaceArgs, claudeEngineBrowserEnabled } from "./claude-browser-surface";
@@ -1431,8 +1432,8 @@ const runClaudeTurn = async (
         expectedPermissionMode: runReq.browserOnly ? null
           : req.permission === "full" ? "bypassPermissions"
           : req.permission === "write" ? "acceptEdits" : null,
-        deniedTools: !runReq.browserOnly && req.permission !== "write" && req.permission !== "full"
-          ? READ_ONLY_DENIED_TOOLS : [],
+        deniedTools: [...(!runReq.browserOnly && req.permission !== "write" && req.permission !== "full"
+          ? READ_ONLY_DENIED_TOOLS : []), ...claudeBuiltinEgressDenial()],
       })
     : null;
 
@@ -1576,6 +1577,10 @@ const runClaudeTurn = async (
   // a deny by name where strict would also drop a plugin server the run needs (claude-personal-context.ts).
   const mcpIsolation = claudeMcpIsolation(selectionFor(runReq.agentId, undefined, runReq.chatId), runReq.mcpAllowedTools ?? [], browserSurface.pluginBrowserNeeded);
   events.onStatus(mcpIsolation.receipt);
+  // Claude Code's own outward tools (claude.ai Artifact publish, cloud routines, cross-session messaging, push, cron)
+  // never reach the Agentlas arbiter; every spawn denies them from one table (runtime-builtin-egress-policy.ts).
+  const builtinEgressDenial = claudeBuiltinEgressDenial();
+  events.onStatus(builtinEgressReceipt(KIND, builtinEgressDenial.length));
   const alreadyStrict = noToolsArgs.includes("--strict-mcp-config") || minimalObservationArgs.includes("--strict-mcp-config");
   const browserOnlyArgs: string[] = browserSurface.args;
   const mcpIsolationArgs: string[] = [
@@ -1658,7 +1663,7 @@ const runClaudeTurn = async (
           ...permArgs,
           ...noToolsArgs,
           ...minimalObservationArgs,
-          ...withDisallowedTools(browserOnlyArgs, [...mcpIsolation.deny, ...mcpToolSurfaceDenial(runReq.mcpConfigPath)]),
+          ...withDisallowedTools(browserOnlyArgs, [...builtinEgressDenial, ...mcpIsolation.deny, ...mcpToolSurfaceDenial(runReq.mcpConfigPath)]),
           ...mcpIsolationArgs,
           ...isolatedMcpArgs,
           ...mcpArgs,
@@ -1679,7 +1684,7 @@ const runClaudeTurn = async (
           ...permArgs,
           ...noToolsArgs,
           ...minimalObservationArgs,
-          ...withDisallowedTools(browserOnlyArgs, [...mcpIsolation.deny, ...mcpToolSurfaceDenial(runReq.mcpConfigPath)]),
+          ...withDisallowedTools(browserOnlyArgs, [...builtinEgressDenial, ...mcpIsolation.deny, ...mcpToolSurfaceDenial(runReq.mcpConfigPath)]),
           ...mcpIsolationArgs,
           ...isolatedMcpArgs,
           ...mcpArgs,

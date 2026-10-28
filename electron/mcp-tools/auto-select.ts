@@ -87,6 +87,13 @@ export interface HubPluginCandidate {
   score: number;
 }
 
+/**
+ * Typed run-record code: a selection chose the Agentlas Browser, the owner did not bind it, and its host was not ready,
+ * so the run continued without the browser (need-resolver: the judge must never block the run). Only an owner binding
+ * (toolMode "browser", an explicit catalog assignment, an @mention of the plugin) keeps the before-model refusal.
+ */
+export const AGENTLAS_BROWSER_WITHDRAWN_CODE = "agentlas-browser-host-unavailable-continued-without-browser";
+
 /** An installed plugin the relevance routing attached to this turn (skills inlined, tools attached). */
 /** Catalog id of the One Team tool set (plugin agentlas-one-team). */
 export const ONE_TEAM_BASELINE_TOOL_ID = "one-team";
@@ -101,6 +108,8 @@ export interface RoutedPluginSelection {
   source: "judge" | "local-relevance" | "retained" | "requested" | "baseline";
   hasSkills: boolean;
   toolIds: string[];
+  /** A declared workflow of the plugin the owner asked for from a button or menu (plugins/owner-capability-request.ts). */
+  workflow?: string;
 }
 
 export interface AutoSelectedMcpContext {
@@ -110,6 +119,17 @@ export interface AutoSelectedMcpContext {
   goalSelectionIsCurrent?: () => boolean;
   /** Main-computed host binding after exact product-name and judgment rules. */
   effectiveToolMode: AutomationToolMode;
+  /**
+   * The Browser host binding a selection (not the owner) chose, withdrawn because that host was not ready: this run
+   * proceeds without the browser instead of being refused. Value-free; the run record and a tool-use event carry it.
+   */
+  hostBindingWithdrawn?: {
+    code: typeof AGENTLAS_BROWSER_WITHDRAWN_CODE;
+    host: "agentlas-browser";
+    state: AutoSelectedMcpTool["state"] | "not-selected";
+    /** judge = this turn's judgment; carried = an earlier choice in this Goal/conversation (retained or agent-requested). */
+    selectedBy: "judge" | "carried";
+  };
   tools: AutoSelectedMcpTool[];
   localInventory: string[];
   localPluginCount: number;
@@ -574,7 +594,8 @@ export async function autoSelectMcpTools(input: {
    * capability there, so its router rides every turn without an @finance mention (an ordinary question otherwise never reaches
    * the finance.* operations). Main-derived from the stored project binding (assertFinanceWorkChatOwner), never from renderer input.
    */
-  financeChat?: boolean;
+  /** Plugins the conversation's project binding attaches on every turn, with their routing reason (Main-derived). */
+  projectBaselinePlugins?: readonly { readonly slug: string; readonly reason: string }[];
   /**
    * The run is a teammate working on a hand-off from a group room (Main-derived from the dispatch row). It carries
    * One Team's room_say tool only: no router text is inlined, and the control capability offers nothing else.
@@ -591,6 +612,8 @@ export async function autoSelectMcpTools(input: {
    * Only already-installed plugins are honoured; Hub installs keep the owner gate.
    */
   requestedPluginSlugs?: string[];
+  /** A plugin workflow the owner's own gesture asked this turn to carry (plugins/owner-capability-request.ts). Main-read typed data. */
+  ownerRequestedWorkflows?: ReadonlyArray<{ plugin: string; workflow: string }>;
 }, injectedDeps: Partial<AutoSelectMcpDependencies> = {}): Promise<AutoSelectedMcpContext> {
   const deps: AutoSelectMcpDependencies = { ...DEFAULT_AUTO_SELECT_DEPS, ...injectedDeps };
   // The task as written, not lowercased and not tokenized — the resident judge reads it.
@@ -642,7 +665,7 @@ export async function autoSelectMcpTools(input: {
   const conversationId = typeof input.conversationId === "string" ? input.conversationId.trim() : "";
   const structuralKeyFor = (fingerprint: string): string => conversationId
     ? [conversationId, input.toolMode ?? "auto", input.hubMode ?? "auto", runtimeCapabilities.nativeBrowser,
-      input.runtimeOutsideBrowser === true ? "outside-browser" : "", input.groupRoom === true ? "group-room" : "", input.financeChat === true ? "finance-chat" : "", input.roomMember === true ? "room-member" : "", fingerprint, [...(input.requiredToolCatalogIds ?? [])].sort().join(","), pluginFingerprint].join("\u0000")
+      input.runtimeOutsideBrowser === true ? "outside-browser" : "", input.groupRoom === true ? "group-room" : "", (input.projectBaselinePlugins ?? []).map((plugin) => `project-baseline:${plugin.slug}`).sort().join("+"), input.roomMember === true ? "room-member" : "", fingerprint, [...(input.requiredToolCatalogIds ?? [])].sort().join(","), pluginFingerprint].join("\u0000")
     : "";
   const structuralKey = structuralKeyFor(installedFingerprint);
   const goalScopeKeyFor = (fingerprint: string): string => activeGoalScope && structuralKey
@@ -673,7 +696,8 @@ export async function autoSelectMcpTools(input: {
   const goalScopeStillCurrent = (): boolean => goalBindingStillCurrent()
     && registryFingerprint(deps.listInstalledServers()) === expectedInstalledFingerprint;
   const requestedPluginSlugs = [...new Set((input.requestedPluginSlugs ?? []).filter((slug) => pluginBySlug.has(slug)))].sort();
-  const memoKey = structuralKey ? `${structuralKey}\u0000${shortHash(taskText)}\u0000${requestedPluginSlugs.join(",")}` : "";
+  const ownerWorkflows = (input.ownerRequestedWorkflows ?? []).filter((row) => pluginBySlug.has(row.plugin));
+  const memoKey = structuralKey ? `${structuralKey}\u0000${shortHash(taskText)}\u0000${requestedPluginSlugs.join(",")}\u0000${ownerWorkflows.map((row) => `${row.plugin}/${row.workflow}`).join(",")}` : "";
   if (memoKey && !activeGoalScope) {
     const hit = selectionMemo.get(memoKey);
     const selectedRemote = hit && initialInstalledServers.some(server => server.transport !== "stdio"
@@ -904,10 +928,10 @@ export async function autoSelectMcpTools(input: {
 
   // ── Routed plugins: skills inlined for this turn, the plugin's own tools attached with them.
   const routedPlugins: RoutedPluginSelection[] = [];
-  const routePlugin = (slug: string, source: RoutedPluginSelection["source"], reason: string): void => {
+  const routePlugin = (slug: string, source: RoutedPluginSelection["source"], reason: string, workflow?: string): void => {
     const plugin = pluginBySlug.get(slug);
     if (!plugin || routedPlugins.some((routed) => routed.slug === slug)) return;
-    routedPlugins.push({ slug, name: plugin.name, reason, source, hasSkills: plugin.hasSkills, toolIds: [...plugin.toolIds] });
+    routedPlugins.push({ slug, name: plugin.name, reason, source, hasSkills: plugin.hasSkills, toolIds: [...plugin.toolIds], ...(workflow ? { workflow } : {}) });
     for (const toolId of plugin.toolIds) {
       const entry = MCP_TOOL_CATALOG.find((candidate) => candidate.id === toolId);
       if (!entry || blockedByHostBinding(toolId)) continue;
@@ -916,6 +940,8 @@ export async function autoSelectMcpTools(input: {
       neededIds.add(toolId);
     }
   };
+  // The owner's gesture is the strongest signal of this turn: it routes first, with the workflow it named.
+  for (const row of ownerWorkflows) routePlugin(row.plugin, "requested", `requested by the owner: ${row.workflow}`, row.workflow);
   for (const id of needs.needed) {
     const slug = pluginSlugFromCandidateId(id);
     if (slug) routePlugin(slug, "judge", `resident judgment: ${needs.reason || "the task is in this plugin's domain"}`);
@@ -932,7 +958,7 @@ export async function autoSelectMcpTools(input: {
   for (const plugin of pluginCandidates) {
     if (mentionedPlugin(plugin)) routePlugin(plugin.slug, "requested", `explicit ${plugin.mention} mention`);
   }
-  if (input.financeChat === true) routePlugin("finance", "baseline", "baseline capability: Agentlas Finance conversation");
+  for (const plugin of input.projectBaselinePlugins ?? []) routePlugin(plugin.slug, "baseline", plugin.reason);
   if (automaticHostDecision) {
     const choseBrowser = neededIds.has("agentlas-browser");
     const choseComputerUse = neededIds.has("cua-driver");
@@ -1247,6 +1273,29 @@ export async function autoSelectMcpTools(input: {
     });
   }
 
+  // ── A selected Browser binding is not an owner binding ─────────────────────────────────────
+  // An automatic decision lands on "browser" whenever the browser is among the selected ids: this turn's judge, an
+  // earlier choice retained in the Goal, or a plugin the agent asked for last turn. client.ts refuses a "browser" run
+  // whose authenticated host is not ready before any model call — right for the owner's own binding (an automation
+  // or graph bound to the browser, an explicit catalog assignment, an @mention of the plugin), wrong for a selection:
+  // a 0.6B resident judge sent 4/4 plain file/shell Work turns to agentlas-browser and every one was refused
+  // (QA 2026-10-28). A selection that cannot be honored proceeds without the browser; the tool stays in the result
+  // with its real state so the turn context lists it as unavailable, and the withdrawal is a typed record.
+  let hostBindingWithdrawn: AutoSelectedMcpContext["hostBindingWithdrawn"];
+  const browserOwnerBound = input.toolMode === "browser"
+    || explicitlyAssignedIds.has("agentlas-browser")
+    || pluginCandidates.some((plugin) => plugin.toolIds.includes("agentlas-browser") && mentionedPlugin(plugin));
+  if (automaticHostDecision && effectiveToolMode === "browser" && !browserOwnerBound) {
+    const browser = result.find((tool) => tool.id === "agentlas-browser");
+    if (browser?.state !== "ready") {
+      effectiveToolMode = "auto";
+      const judged = needs.needed.includes("agentlas-browser")
+        || routedPlugins.some((plugin) => plugin.source === "judge" && plugin.toolIds.includes("agentlas-browser"));
+      hostBindingWithdrawn = { code: AGENTLAS_BROWSER_WITHDRAWN_CODE, host: "agentlas-browser",
+        state: browser?.state ?? "not-selected", selectedBy: judged ? "judge" : "carried" };
+    }
+  }
+
   // Hub candidates are the plugins the resident judge named — never a word-scored guess.
   // Undecided runs surface none and let the model resolve plugins live through
   // agentlas_resolve_plugins / hephaestus-network instead.
@@ -1301,6 +1350,7 @@ export async function autoSelectMcpTools(input: {
     ...(activeGoalScope ? { goalSelectionIsCurrent: () => Boolean(finalReceiptScope)
       && goalBindingStillCurrent() } : {}),
     effectiveToolMode,
+    ...(hostBindingWithdrawn ? { hostBindingWithdrawn } : {}),
     tools: result,
     localInventory,
     localPluginCount: localInventory.length,
@@ -1341,7 +1391,8 @@ export async function autoSelectMcpTools(input: {
     memoSet(stickySelectionMemo, structuralKey, { context: cloneContext(context), at: Date.now() });
   }
   // 모델이 못 닿아 아무것도 못 정한 실행은 기억하지 않는다 — 그 침묵을 다음 턴까지 굳히면 안 된다.
-  if (!activeGoalScope && memoKey && needs.decided) memoSet(selectionMemo, memoKey, { context: cloneContext(context), at: Date.now() });
+  // A withdrawn browser reflects this moment's host state; the next turn must look at the host again.
+  if (!activeGoalScope && memoKey && needs.decided && !hostBindingWithdrawn) memoSet(selectionMemo, memoKey, { context: cloneContext(context), at: Date.now() });
   return context;
 }
 
@@ -1412,6 +1463,7 @@ export function buildMcpAutoSelectionPrompt(
   return purposePrompt([
     { id: "purpose.mcp.selection.mode", revision: 2, stability: "configuration", changeTriggers: ["runtime", "permission"], text: [modeLine, hubLine].filter(Boolean).join("\n") },
     { id: "purpose.mcp.selection.inventory", revision: 3, stability: "task-context", changeTriggers: ["capability-inventory", "connector-inventory", "plugin-inventory", "tool-grant"], text: inventoryLines },
-    { id: "purpose.mcp.selection.retrieved", revision: 1, stability: "turn-context", changeTriggers: ["retrieval", "plugin-inventory", "owner-input"], text: retrievedLines },
+    // r2 (2026-10-28): an owner-requested plugin workflow (a screen's button or menu) carries its skill text after its pointer.
+    { id: "purpose.mcp.selection.retrieved", revision: 2, stability: "turn-context", changeTriggers: ["retrieval", "plugin-inventory", "owner-input"], text: retrievedLines },
   ]);
 }

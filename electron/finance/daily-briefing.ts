@@ -116,3 +116,19 @@ export async function assertFinanceDailyReview(runId:string):Promise<void>{
     throw new Error('finance_daily_review_denied',{cause:error});
   }
 }
+
+/** Finance's entry in the One check-in admission contract (one/checkin-admission.ts): the scheduler holds a daily briefing whose
+ * entitlement cannot be checked this tick and admits its review only after the entitlement is checked again. */
+export const FINANCE_DAILY_CHECKIN_GATE:import('../one/checkin-admission').CheckinAdmissionGate={
+  heldCheckins:()=>wakeFinanceDailyBriefing(),
+  async admitReview(runId){
+    try{await assertFinanceDailyReview(runId);}
+    catch(error){
+      const {CheckinAdmissionDenied,CheckinAdmissionDeferred}=await import('../one/checkin-admission');
+      // Billing unreachable: nothing was decided and the schedule is kept (the scheduler's typed deferral code is unchanged).
+      if(error instanceof Error&&error.message==='finance_daily_access_unavailable')throw new CheckinAdmissionDeferred('finance_monitoring_access_unavailable',{cause:error});
+      if(error instanceof Error&&error.message==='finance_daily_review_denied')throw new CheckinAdmissionDenied('finance_daily_review_denied',{cause:error});
+      throw error;
+    }
+  },
+};

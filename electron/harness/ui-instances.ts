@@ -21,6 +21,7 @@ import { UiCommandStore, uiCommandBinding, unknownCommand } from "./ui-command-s
  */
 
 import type { UiIntent, UiInstanceState, UiViewKind, UiDisplay, UiReason, UiActionView, UiPresentation, UiInstanceRevision, UiInstanceView, UiEventType, UiInstanceEvent } from "../../shared/ui-instances";
+import { OWNER_CONFIRM_VIEW } from "../../shared/ui-instances";
 import { validateInlineUiPresentationContent, type InlineUiPresentationContent } from "../../shared/inline-ui-presentation";
 export type { UiIntent, UiInstanceState, UiViewKind, UiDisplay, UiReason, UiActionView, UiPresentation, UiInstanceRevision, UiInstanceView, UiEventType, UiInstanceEvent } from "../../shared/ui-instances";
 
@@ -685,7 +686,7 @@ export async function uiAction(args: Record<string, unknown>, ctx: UiCallContext
  * never says "saved" for something nobody saved and a cancelled proposal is never opened again. The host's own bookkeeping calls the handlers below
  * directly, not through a port.
  */
-const HOST_OWNED_VIEWS: ReadonlySet<string> = new Set(["finance.result.v1"]);
+const HOST_OWNED_VIEWS: ReadonlySet<string> = new Set(["finance.result.v1", OWNER_CONFIRM_VIEW]);
 
 async function hostOwnedViewRefusal(operation: "present" | "update" | "close", args: Record<string, unknown>, ctx: UiCallContext): Promise<UiPortOutcome | null> {
   if (ctx.chatId === "ui") return null;

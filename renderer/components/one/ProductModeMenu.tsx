@@ -5,14 +5,12 @@ import { useEffect, useRef, useState, type KeyboardEvent, type MouseEvent } from
 import { tFor, useT } from "@/lib/i18n";
 import { useDismissibleLayer } from "@/lib/use-dismissible-layer";
 import { OneBrandMark } from "./OneBrand";
-import { IconApps, IconBrain, IconBuilding, IconChevronDown, IconDownload, IconPower } from "@/components/Icon";
+import { IconApps, IconBrain, IconChevronDown, IconDownload, IconPower } from "@/components/Icon";
 import { requestScienceInstall, SCIENCE_INSTALL_DISCOVERY_ENABLED } from "@/lib/science-install-entry";
 import { scienceCoreInstalled, scienceCoreReady, useScienceSuiteStatus } from "@/lib/use-science-suite-status";
 import { AttentionDot } from "@/components/AttentionDot";
 import { attentionLabel, openAttentionEntry, useAttention, type AttentionChatEntry } from "@/lib/attention";
 import styles from "./ProductModeMenu.module.css";
-import { useBusinessEligibility } from '@/business/use-business-eligibility';
-import { useOrganizationUiVisibility } from '@/business/organization-visibility';
 
 const ONE_RETURN_ROUTE_KEY = "agentlas.one.return-route.v1";
 
@@ -62,8 +60,6 @@ export function ProductModeMenu({
         ? (activeLocale === "ko" ? "에이전트 빌드" : "Agent build")
         : (activeLocale === "ko" ? "제목 없는 대화" : "Untitled conversation"));
   const [open, setOpen] = useState(false);
-  const businessAccess = useBusinessEligibility({ enabled: open });
-  const organization = useOrganizationUiVisibility({ eligible: businessAccess.eligibility ? businessAccess.eligible : null }).management;
   const [oneHref, setOneHref] = useState("/one");
   const scienceSuite = useScienceSuiteStatus();
   const scienceAvailable = current === "science" || scienceCoreReady(scienceSuite);
@@ -256,11 +252,6 @@ export function ProductModeMenu({
                 )}
             </button>
           )}
-          {organization && <button id="agentlas-product-mode-business" className={styles.option} type="button" role="menuitem" data-business-entry="true"
-            onClick={() => navigate('/business')} onKeyDown={event => handleOptionKeyDown(event, () => navigate('/business'))}>
-            <span className={styles.optionIcon} aria-hidden="true"><IconBuilding size={18} /></span>
-            <span className={styles.optionCopy}><strong>{activeLocale === 'ko' ? '조직 설정' : 'Organization settings'}</strong></span>
-          </button>}
           {attention.entries.length > 0 && (
             <>
               <div className={styles.attentionHead} role="presentation">{activeLocale === "ko" ? "확인이 필요한 곳" : "Needs you"}</div>

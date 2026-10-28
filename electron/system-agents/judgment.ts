@@ -25,6 +25,7 @@ import { hasActiveVerificationSession, markVerificationEffectFailure, runVerific
 
 import { detectRuntimes } from "../runtime/detect";
 import { invocationJudgmentContext } from "../runtime/judgment-context";
+import { JUDGMENT_MODEL_UNRESOLVED, judgmentModelMissing, withJudgmentModel } from "./judgment-model";
 import { createHash } from "node:crypto";
 import { isJudgmentRefusal } from "../runtime/judgment-refusal";
 import { runtimeFailureBlocksReplay, pinnedRuntimeCredentialOrModelUnavailable, pickActive, pickRecoveryRunner, pickRunner, selectExactRuntime } from "../runtime/selection";
@@ -234,11 +235,14 @@ export function __setJudgmentLatenciesForTest(entries: Array<{ selection: Judgme
  * with a measured p50 under `timeoutMs`, or null — then the caller skips judging.
  */
 export function noToolsJudgmentFallback(timeoutMs: number,
-  readPool: () => { state: string; selections: RuntimeSelection[] } = readJudgmentPool): RuntimeSelection | null {
+  readPool: () => { state: string; selections: RuntimeSelection[] } = readJudgmentPool,
+  /** Caller-specific qualification on top of isolation and latency (the tool judge: a measured model, judgment-competence.ts). */
+  eligible: (selection: RuntimeSelection) => boolean = () => true): RuntimeSelection | null {
   const pool = readPool();
   if (pool.state !== "configured") return null;
   for (const selection of pool.selections) {
     if (inspectJudgmentCapability(selection, "no_tools").status !== "verified") continue;
+    if (!eligible(selection)) continue;
     const p50 = measuredJudgmentP50(selection);
     if (p50 !== null && p50 < timeoutMs) return selection;
   }
@@ -972,7 +976,10 @@ async function callJudgmentModelDetailed(opts: {
     timedOut || failure.kind === "timeout" ? "timeout" : opts.signal?.aborted ? "cancelled"
       : failure.kind === "refused" || failure.kind === "unsupported" ? "refused" : "failed";
   for (const candidate of candidates) {
-      const { runtime, route, fingerprint: candidateFingerprint, poolSelection } = candidate;
+      const { route, fingerprint: candidateFingerprint, poolSelection } = candidate;
+      // One model rule for every route (judgment-model.ts): own selection, else the executor's current model on the same
+      // runtime, else the CLI's own configured default. Receipts and the runner request both carry it.
+      const runtime = withJudgmentModel(candidate.runtime, inherited?.executorSelection ?? inherited?.selection);
       const poolRoute = route === "orchestrator_pool" || route === "worker_pool";
       const livePool = !opts.runtimeSelection || poolRoute
         ? readJudgmentPool(route === "worker_pool" ? "worker" : "orchestrator") : null;
@@ -1067,6 +1074,17 @@ async function callJudgmentModelDetailed(opts: {
           remainingAtStartMs: remaining, remainingAtEndMs: remaining };
         attempts.push(skipped);
         console.info("[judgment-runtime-result]", JSON.stringify(skipped));
+        continue;
+      }
+      // A transport that cannot judge without naming its model (codex no-tools) and has none is skipped before dispatch with
+      // a typed code: the next authorized member may judge, and no call is spent on a certain refusal.
+      if (judgmentModelMissing(runtime, requiresNoTools)) {
+        runtimeReceipt = { route, fingerprint: candidateFingerprint, execution: "not_invoked", selection: {
+          ...workerIdentity, kind: runtime.kind, backend: runtime.backend, source: runtime.source, model: undefined,
+        }, ...(opts.selectionPolicy ? { selectionPolicy: opts.selectionPolicy } : {}), ...(capability ? { capability } : {}) };
+        lastFailure = { kind: "unsupported", runtime: runtime.kind, source: "marker",
+          providerCode: JUDGMENT_MODEL_UNRESOLVED, message: JUDGMENT_MODEL_UNRESOLVED };
+        skippedAttempt(lastFailure, "refused");
         continue;
       }
       const picked = pickRunner(runtime);
@@ -1727,6 +1745,8 @@ export interface SubsetSpec<V extends string> {
   locale?: RuntimeLocale;
   /** Preparation can return undecided; it must never acquire tools to select tools. */
   requireNoTools?: true;
+  /** Decoder-enforced answer shape for runners that support it (llama.cpp json_schema); others keep the output line. */
+  outputSchema?: RunnerRequest["outputSchema"];
 }
 
 export interface SubsetVerdict<V extends string> {
@@ -1826,6 +1846,7 @@ export async function judgeSubset<V extends string>(spec: SubsetSpec<V>): Promis
     locale: spec.locale,
     requireNoTools: spec.requireNoTools,
     ...(spec.requireNoTools ? { accept: (text: string) => parseSubset<V>(text, spec.labels) !== null } : {}),
+    ...(spec.outputSchema ? { outputSchema: spec.outputSchema } : {}),
   });
   const text = detailed.text;
   if (text === null) return { ...undecided, reason: detailed.failure?.providerCode ?? undecided.reason,

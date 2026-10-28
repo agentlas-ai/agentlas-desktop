@@ -11,7 +11,9 @@ import type { RuntimeKind } from "../../shared/types";
  *   codex:       ~/.codex/config.toml     model = "gpt-6-astra"
  * 나머지 CLI 는 기기 설정에 모델 칸이 없거나 확인된 형식이 없어 미설정으로 둔다.
  */
-export function cliConfiguredDefaultModel(kind: RuntimeKind, home = os.homedir()): string | undefined {
+export function cliConfiguredDefaultModel(kind: RuntimeKind, home = os.homedir(),
+  /** Codex reads CODEX_HOME when it is set (an isolated or per-account home); the default is the file under `home`. */
+  codexHome = path.join(home, ".codex")): string | undefined {
   try {
     if (kind === "claude-code") {
       const raw = fs.readFileSync(path.join(home, ".claude", "settings.json"), "utf8");
@@ -19,7 +21,7 @@ export function cliConfiguredDefaultModel(kind: RuntimeKind, home = os.homedir()
       return normalize(parsed.model);
     }
     if (kind === "codex") {
-      const raw = fs.readFileSync(path.join(home, ".codex", "config.toml"), "utf8");
+      const raw = fs.readFileSync(path.join(codexHome, "config.toml"), "utf8");
       // 최상위 `model = "..."` 만 본다. 테이블([profiles.x]) 아래의 model 은 기본값이 아니다.
       for (const line of raw.split(/\r?\n/)) {
         const trimmed = line.trim();

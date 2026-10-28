@@ -13,6 +13,9 @@ export interface RankableHarnessItem {
   id: string; name: string; description: string;
   /** Extra id-like words an entry answers to; used for ranking only and removed from the result. */
   rankTerms?: readonly string[];
+  /** Words that say what the entry IS (group, fields, artifact kinds), for meaning recall; removed from the result. Not the
+   *  query-derived rankTerms of the app entries: those name what answered this query and would make any query look near. */
+  meaningTerms?: readonly string[];
 }
 
 /** True when the text contains Hangul: a Korean query, as opposed to any text that merely has accents or other non-ASCII letters. */
@@ -70,8 +73,17 @@ export function englishAppTerms(query: string): string {
   return [...new Set(KOREAN_APP_TERMS.filter(([pattern]) => pattern.test(lower)).flatMap(([, english]) => english.split(" ")))].join(" ");
 }
 
+/*
+ * A query word carries signal at 3 characters, or at 2 when it is Hangul: a two-syllable Korean noun is a whole word
+ * ("구조" structure, "화학" chemistry, "주식" stock), where a two-letter Latin token ("to", "3d") is not. Dropping them made
+ * every short Korean query rank by nothing (2026-10-28 TOOL-EXPOSURE-3D §2.3: "화학 구조" → 0 results).
+ */
+function signalTerms(query: string): string[] {
+  return [...new Set(query.toLowerCase().split(/[^\p{L}\p{N}._-]+/u).filter((term) => term.length >= 3 || (term.length === 2 && hasHangul(term))))];
+}
+
 export function harnessRelevance(query: string, primary: readonly string[], secondary: readonly string[]): number {
-  const terms = [...new Set(query.toLowerCase().split(/[^\p{L}\p{N}._-]+/u).filter((term) => term.length >= 3))];
+  const terms = signalTerms(query);
   if (terms.length === 0) return 0;
   const head = primary.join(" ").toLowerCase();
   const body = secondary.join(" ").toLowerCase();
@@ -82,7 +94,7 @@ export function harnessRelevance(query: string, primary: readonly string[], seco
 
 /** Keep matching entries (score > 0 when the query has words), best first; a stable sort keeps ties in order. */
 export function rankHarnessItems<T extends RankableHarnessItem>(query: string, items: ReadonlyArray<T>, limit = 60): T[] {
-  const hasTerms = query.toLowerCase().split(/[^\p{L}\p{N}._-]+/u).some((term) => term.length >= 3);
+  const hasTerms = signalTerms(query).length > 0;
   if (!hasTerms) return items.slice(0, limit).map(withoutRankTerms);
   return items
     .map((item, index) => ({ item, index, score: harnessRelevance(query, [item.id, item.name, ...(item.rankTerms ?? [])], [item.description]) }))
@@ -93,7 +105,62 @@ export function rankHarnessItems<T extends RankableHarnessItem>(query: string, i
 }
 
 function withoutRankTerms<T extends RankableHarnessItem>(item: T): T {
-  if (!item.rankTerms) return item;
-  const { rankTerms: _rankTerms, ...shown } = item;
+  if (!item.rankTerms && !item.meaningTerms) return item;
+  const { rankTerms: _rankTerms, meaningTerms: _meaningTerms, ...shown } = item;
   return shown as T;
+}
+
+/** The app's local multilingual embedding (memory/local-embedding.ts), injected so this module stays import-free. */
+export interface MeaningEmbedder {
+  autoLocalEmbedding(text: string): { vector: number[]; degraded: boolean; modelSha256: string | null };
+  cosineSimilarity(left: readonly number[], right: readonly number[]): number;
+}
+
+/*
+ * Words find what shares a word with the query; meaning finds the rest. A Korean query shares no word with an English tool
+ * description ("단백질 구조 3D" against "Create a durable source-bound Mol* artifact ... Molecular Structure Lab"), and a
+ * paraphrase ("drug-likeness") shares none with the tool that answers it, so word ranking alone returned nothing or the
+ * wrong tool (TOOL-EXPOSURE-3D §2.3). This keeps word ranking first and adds, after the word matches, the entries nearest
+ * in meaning by the app's local Model2Vec (potion-multilingual, the same embedding memory recall and the tool-need
+ * shortlist use: need-resolver.ts). Recall only: meaning never reorders word matches, it fills what words could not find.
+ * No verified Model2Vec asset (the hashing fallback is not meaning) = word ranking exactly as before.
+ */
+const MEANING_FLOOR = 0.15;
+const MEANING_FLOOR_HANGUL = 0.12;
+const meaningVectors = new Map<string, number[]>();
+
+export function rankHarnessItemsByMeaning<T extends RankableHarnessItem>(query: string, items: ReadonlyArray<T>, limit = 60,
+  embedder?: MeaningEmbedder | null): T[] {
+  const byWords = rankHarnessItems(query, items, limit);
+  if (!embedder || byWords.length >= limit || !query.trim() || items.length === 0) return byWords;
+  let queryVector: { vector: number[]; degraded: boolean; modelSha256: string | null };
+  try { queryVector = embedder.autoLocalEmbedding(query.slice(0, 500)); } catch { return byWords; }
+  if (queryVector.degraded) return byWords;
+  const floor = hasHangul(query) ? MEANING_FLOOR_HANGUL : MEANING_FLOOR;
+  const wordMatched = new Set(rankHarnessItems(query, items, items.length).map((item) => item.id));
+  const near = items.map((item, index) => {
+    if (wordMatched.has(item.id)) return null;
+    // What an entry IS (its name words, group, fields, artifact kinds) and the first sentence of what it does. A whole
+    // description dilutes the meaning with provenance and argument prose: measured on the Science catalogue (2026-10-28,
+    // 7 Korean/English structure queries) whole descriptions put a structure tool in the top 5 for 5 of 7, this for 7 of 7.
+    const words = (value: string) => value.replace(/[_./:-]+/g, " ");
+    const first = item.description.split(/(?<=[.!?。])\s/u)[0]!.slice(0, 120);
+    const text = [words(item.name), ...(item.meaningTerms ?? []).map(words), first].join(". ").slice(0, 600);
+    const key = `${queryVector.modelSha256 ?? ""}\u0000${text}`;
+    let vector = meaningVectors.get(key);
+    if (!vector) {
+      try { vector = embedder.autoLocalEmbedding(text).vector; } catch { return null; }
+      meaningVectors.set(key, vector);
+      if (meaningVectors.size > 4_000) meaningVectors.delete(meaningVectors.keys().next().value!);
+    }
+    const score = embedder.cosineSimilarity(queryVector.vector, vector);
+    return score >= floor ? { item, index, score } : null;
+  }).filter((row): row is { item: T; index: number; score: number } => row !== null)
+    .sort((a, b) => b.score - a.score || a.index - b.index);
+  const out = [...byWords];
+  for (const row of near) {
+    if (out.length >= limit) break;
+    out.push(withoutRankTerms(row.item));
+  }
+  return out;
 }

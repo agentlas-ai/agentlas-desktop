@@ -29,11 +29,7 @@ import {
   repairMacInstalledAppGeneratedPythonCaches,
 } from "./updater/mac-app-trust";
 import { userDataDir, userDataPath } from "./runtime-paths";
-import { enterpriseFeedUrl, enterpriseReleaseMetadataUrl, usesCompanyUpdates } from "./enterprise-server/connection";
-import { enterpriseAuthorizationHeader, enterpriseConnection, noteEnterpriseFeedCheck, startEnterpriseServerConnection } from "./enterprise-server/runtime";
-import { enterpriseServerFetch } from "./enterprise-server/os-trust-fetch";
-import { MIRRORED_RELEASE_MANIFEST_FILE } from "./enterprise-server/release-manifest";
-import { OFFICIAL_RELEASE_TRUST_ROOTS, REVOKED_RELEASE_SIGNING_KIDS } from "./enterprise-server/release-trust-roots";
+import { OFFICIAL_RELEASE_TRUST_ROOTS, REVOKED_RELEASE_SIGNING_KIDS } from "./updater/release-trust-roots";
 import { desktopGenericFeedOptions, readPublisherNames, verifyReleaseIntegrity } from "./updater/release-integrity";
 
 // electron-updater is CommonJS in the main process bundle.
@@ -105,12 +101,9 @@ async function readDesktopReleaseMetadata(): Promise<DesktopReleaseMetadataSnaps
       clearTimeout(timer);
       resolve(value);
     };
-    // A company-managed Desktop (managed config file present, updates: "company") reads the same-shaped registry
-    // from its Enterprise Server. Without that file this is the official URL, exactly as before.
-    const company = enterpriseConnection();
     const request = net.request({
       method: "GET",
-      url: usesCompanyUpdates(company) ? enterpriseReleaseMetadataUrl(company) : OFFICIAL_DESKTOP_RELEASE_METADATA_URL,
+      url: OFFICIAL_DESKTOP_RELEASE_METADATA_URL,
       redirect: "follow",
     });
     const timer = setTimeout(() => {
@@ -120,7 +113,6 @@ async function readDesktopReleaseMetadata(): Promise<DesktopReleaseMetadataSnaps
     timer.unref?.();
     request.setHeader("Accept", "application/json");
     request.setHeader("User-Agent", "Agentlas-Desktop-update-check");
-    if (usesCompanyUpdates(company)) for (const [k, v] of Object.entries(enterpriseAuthorizationHeader())) request.setHeader(k, v);
     request.on("response", (response) => {
       if (response.statusCode !== 200) {
         response.on("data", () => undefined);
@@ -159,19 +151,7 @@ async function readDesktopReleaseMetadata(): Promise<DesktopReleaseMetadataSnaps
 async function configureDesktopReleaseFeed(): Promise<void> {
   const metadata = await readDesktopReleaseMetadata();
   const tag = validatedDesktopReleaseTag(metadata);
-  noteEnterpriseFeedCheck(tag); // Settings → company server: time and result of the last registry read (no URL, no token)
   if (!tag) return;
-  const company = enterpriseConnection();
-  if (usesCompanyUpdates(company)) {
-    // Company mirror (04-UPDATE-CHAIN.md): the same installers, served from the Enterprise Server, which also serves
-    // the latest*.yml carrying their sha512 — a compromised mirror can change both. Only macOS (Squirrel.Mac code
-    // signature) and a Windows build with a configured Authenticode publisher have an OS signature check here; Windows
-    // builds are unsigned today and AppImage has none. Those platforms must verify the Agentlas-signed release
-    // manifest instead (updater/release-integrity.ts, wired as verifyReleaseIntegrity below) or refuse the update.
-    autoUpdater.requestHeaders = { ...enterpriseAuthorizationHeader() };
-    autoUpdater.setFeedURL(desktopGenericFeedOptions(enterpriseFeedUrl(company, tag)));
-    return;
-  }
   autoUpdater.setFeedURL(desktopGenericFeedOptions(
     `https://github.com/${OFFICIAL_DESKTOP_RELEASE_REPOSITORY}/releases/download/${tag}/`,
   ));
@@ -186,45 +166,18 @@ function bundledPublisherNames(): string[] {
   }
 }
 
-const RELEASE_MANIFEST_TIMEOUT_MS = 15_000;
-const RELEASE_MANIFEST_MAX_BYTES = 256 * 1024;
-
-/** The company server's copy of the cloud-signed release list for one version, or null when it cannot be read. */
-async function readMirroredReleaseManifest(version: string): Promise<unknown | null> {
-  const company = enterpriseConnection();
-  if (!usesCompanyUpdates(company)) return null;
-  const url = `${enterpriseFeedUrl(company, `v${version}`)}${MIRRORED_RELEASE_MANIFEST_FILE}`;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), RELEASE_MANIFEST_TIMEOUT_MS);
-  timer.unref?.();
-  try {
-    const response = await enterpriseServerFetch(url, {
-      headers: { Accept: "application/json", ...enterpriseAuthorizationHeader() },
-      signal: controller.signal,
-    });
-    if (!response.ok) return null;
-    const text = await response.text();
-    if (text.length > RELEASE_MANIFEST_MAX_BYTES) return null;
-    return JSON.parse(text) as unknown;
-  } catch {
-    return null;
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
 function releaseIntegrityFor(input: { version: string; stage: "before-download" | "before-install"; downloadedFile: string | null }) {
-  const company = enterpriseConnection();
   return verifyReleaseIntegrity({
     platform: process.platform,
-    feed: usesCompanyUpdates(company) ? { kind: "company", serverUrl: company.serverUrl } : { kind: "official" },
+    feed: { kind: "official" },
     publisherNames: process.platform === "win32" ? bundledPublisherNames() : [],
     version: input.version,
     stage: input.stage,
     downloadedFile: input.downloadedFile,
     roots: OFFICIAL_RELEASE_TRUST_ROOTS,
     revokedKids: REVOKED_RELEASE_SIGNING_KIDS,
-    fetchManifest: () => readMirroredReleaseManifest(input.version),
+    // The company-server mirror was retired (2026-10-28); the official feed needs no mirrored manifest.
+    fetchManifest: async () => null,
   });
 }
 
@@ -500,9 +453,6 @@ export async function initAutoUpdater(options: AutoUpdaterInitOptions = {}): Pro
     return;
   }
   installDesktopFeedResolver();
-  // Inert without a managed company-server config (personal installs): returns false and starts nothing.
-  // Company-server requests go through net.fetch (OS trust store, corporate CA) — enterpriseServerFetch.
-  startEnterpriseServerConnection({ userDataDir: userDataDir(), appVersion: app.getVersion(), fetchImpl: enterpriseServerFetch });
   const hasUpdateConfig = hasBundledUpdateConfig();
   if (!hasUpdateConfig) console.warn(`[updater] app-update.yml missing — automatic checks are disabled (${updateConfigPath()})`);
   const dispatchDeferredAuthRestore = () => {

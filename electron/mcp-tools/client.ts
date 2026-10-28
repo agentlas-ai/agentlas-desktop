@@ -889,8 +889,6 @@ export function normalizeMcpToolContentResult(value: unknown, maxTextChars: numb
 }
 
 export interface McpToolCallOptions {
-  /** Main opaque exact company run; never accepted from MCP/model wire input. */
-  companyWorkCapability?: object;
   prepared?: PreparedMcpBinding;
   /** Exact descriptor observed by the Main-managed inventory, rechecked on
    * this connection before tools/call. Native/legacy callers may omit it. */
@@ -1044,12 +1042,9 @@ async function callServerToolContentInternal(
   const sessionKey = server.id;
   let releaseSession: (() => void) | null = null;
   let sessionEntry: McpSessionEntry | null = null;
-  const companyWork = options?.companyWorkCapability;
-  if (companyWork && (!options?.prepared || require("../business/company-work-content").currentCompanyWorkContent()?.capability !== companyWork)) throw new Error("company_work_tool_grant_required");
-  let registryBound = !companyWork && server.connectionEpoch !== undefined;
+  let registryBound = server.connectionEpoch !== undefined;
   const expectedConfiguration = mcpServerConfigurationDigest(server);
   const assertCurrentConnection = () => {
-    if (companyWork) { require("../business/company-work-grant").assertCompanyWorkGrant(companyWork); preparedMcpTransport(options!.prepared!, server); return; }
     if (!registryBound) return; // Canonical ephemeral native tools have no registry connection session.
     const current = getServer(server.id);
     if (!current || !current.enabled || current.configurationValid === false || mcpServerConfigurationDigest(current) !== expectedConfiguration) {
@@ -1058,8 +1053,7 @@ async function callServerToolContentInternal(
     }
   };
   try {
-    if (!companyWork) registryBound ||= getServer(server.id) !== null;
-    else await require("../business/company-work-content").approveCompanyWorkTool({kind:"mcp",serverToolName:toolName,server});
+    registryBound ||= getServer(server.id) !== null;
     const workforceCall = server.catalogId === HEPHAESTUS_NETWORK_CATALOG_ID &&
       toolName.startsWith("workforce.");
     const timeoutCeiling = workforceCall ? WORKFORCE_TOOL_TIMEOUT_MAX_MS : CONNECT_TIMEOUT_MS;
@@ -1240,14 +1234,14 @@ async function callServerToolContentInternal(
           if (modernInventory && !modernDefinition) throw new Error("mcp_tool_not_in_current_inventory");
           preparation.signal.throwIfAborted();
           if (options?.prepared) preparedMcpTransport(options.prepared, server);
-          const remoteCuration = companyWork ? null : captureRemoteCurationConsumer(options?.prepared, completeRemoteMemoryCuration);
+          const remoteCuration = captureRemoteCurationConsumer(options?.prepared, completeRemoteMemoryCuration);
           const callOriginal = ()=>{
             assertCurrentConnection();
             options?.onDispatch?.();
             return activeClient.callTool({ name: toolName, arguments: args },
               modernDefinition ? { toolDefinition: modernDefinition } : undefined);
           };
-          const res = companyWork ? await callOriginal() : await withCurrentHistoryTool({kind:"mcp",serverId:server.id,catalogId:server.catalogId??null,toolName,args,schemaDigest:options?.expectedToolSchemaDigest??(modernDefinition?mcpToolSchemaDigest(modernDefinition):null)},callOriginal);
+          const res = await withCurrentHistoryTool({kind:"mcp",serverId:server.id,catalogId:server.catalogId??null,toolName,args,schemaDigest:options?.expectedToolSchemaDigest??(modernDefinition?mcpToolSchemaDigest(modernDefinition):null)},callOriginal);
           const projected = remoteCuration ? remoteCuration(res) : res;
           const normalized = normalizeMcpToolContentResult(projected, maxTextChars, options?.retainFullResult === true);
           if (session && sessionEntry) session.touch();

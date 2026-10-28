@@ -51,7 +51,7 @@ import { isAuthenticWorkspacePreviewMcpLaunch } from "../workspace-preview/mcp-s
 import { AGENT_MAIL_CONTROL_ENV, isAuthenticAgentMailMcpLaunch } from "../agent-mail/mcp-server";
 import { AGENT_MAIL_AUTO_RUN_MCP, createAgentMailCapability, isAgentMailAutoRunChat, removeAgentMailCapability } from "../agent-mail/control-server";
 import { agentMailToolsOfferedForRun } from "../agent-mail/client";
-import { AGENT_TURN_CONTROL_ENV, turnToolsFor, isAuthenticTurnToolsMcpLaunch } from "../turn-tools/mcp-server";
+import { AGENT_TURN_CONTROL_ENV, TURN_TOOLS_WAIT, turnToolsFor, isAuthenticTurnToolsMcpLaunch } from "../turn-tools/mcp-server";
 import { createTurnToolsCapability, removeTurnToolsCapability, type TurnScopedGoalWaitResolver } from "../turn-tools/control-server";
 import { GRAPH_EFFECT_ITEM_TOOL_NAMES, ONE_TEAM_CONTROL_ENV, ROOM_MEMBER_TOOL_NAMES, isAuthenticOneTeamMcpLaunch } from "../one/team-mcp-server";
 import { createOneTeamCapability, removeOneTeamCapability } from "../one/team-control-server";
@@ -77,6 +77,9 @@ import {
 import { mcpProxyApprovalPort, READ_ONLY_BROWSER_TOOLS } from "./proxy-server";
 import { userDataPath } from "../runtime-paths";
 import { HEPHAESTUS_NETWORK_WORK_CORE_TOOLS, registerMcpToolSurface, type HephaestusToolSurface, type McpToolSurface } from "./hephaestus-tool-surface";
+import { RUNTIME_MCP_SUPPORT } from "../../shared/runtime-mcp";
+import type { RuntimeKind } from "../../shared/types";
+import { assertHostToolServer, hostToolServerRow, registerHostToolCatalog, type HostToolServer } from "./host-tool-servers";
 import { agentRunCwd } from "../runtime/exec";
 import {
   BROWSER_CDP_LAUNCHER_BASENAME,
@@ -185,6 +188,8 @@ export interface McpConfigResult {
   includedServers?: Array<{ serverId: string; catalogId: string | null; configKey: string }>;
   /** One Team is attached as a Toolchain consumer only (a Work task): search, run, result. */
   toolchainConsumer?: true;
+  /** The Work-session dispatch tools (one-team, work-session scope) are in this config. */
+  workSessionTools?: true;
   /** Remove this run's Main capability file and revoke its in-memory binding. */
   workspacePreviewCapabilityCleanup?: () => void;
   /** Idempotently revoke only this preparation's transports and owned file. */
@@ -237,11 +242,17 @@ export interface McpConfigBuildOptions {
   graphTeamGrant?: GraphTeamGrant;
   /** This run's id: pins the agentlas-turn capability so its notes land in this turn only. */
   turnRunId?: string;
+  /** Main-minted per-turn tool servers of a product domain (host-tool-servers.ts; Science). Serialized beside the selected
+   *  installed servers on the same path; never persisted, never delegated to another host. */
+  hostToolServers?: readonly HostToolServer[];
   /** Goal turns: also offer goal_wait / goal_complete from agentlas-turn. */
   turnGoalTools?: true;
   /** Host-only condition wait capability for a canonical owner outside Chat Goal state.
    * The resolver remains in Main memory; the child receives only goal_wait. */
-  turnGoalWaitOnly?: { resolveGoalWait: TurnScopedGoalWaitResolver };
+  turnGoalWaitOnly?: { resolveGoalWait: TurnScopedGoalWaitResolver;
+    /** The turn's other agentlas-turn tools (harness, ask_form) stay: goal_wait is added beside them (a Science author turn
+     *  on the shared chain), instead of being the server's only tool (the old Science bridge's scoped wait server). */
+    alongside?: true };
   /** Attended runs (a person can answer): also offer ask_form. Never set for unattended or mobile-durable runs. */
   turnAskTool?: true;
   /** Main-minted owner-full evidence for a worker's bounded preview tool. */
@@ -345,6 +356,10 @@ function mcpProxySpec(
   // The observation marker is a config-time input only; the proxy gate carries the
   // resolved per-server profile (readOnlyBrowser), never the raw request flag.
   const { readOnlyObservation: _readOnlyObservation, ...gate } = toolGate;
+  // A deferred first list is the in-process loop's own inventory decision (local-tool-loop.ts: the rest goes behind its lazy
+  // menu), so its proxy lists everything; a CLI behind the proxy (ACP, antigravity) sees the first list and calls the rest.
+  const proxySurface = toolSurface?.rest === "deferred" && RUNTIME_MCP_SUPPORT[gate.runtime as RuntimeKind]?.delivery === "in-process-loop"
+    ? null : toolSurface;
   if (mcpProxyApprovalPort() <= 0) {
     throw new Error(gate.planMode ? "plan_mode_mcp_gate_unavailable" : "mcp_proxy_gate_unavailable");
   }
@@ -360,7 +375,8 @@ function mcpProxySpec(
   const handle = prepareMcpProxyLaunch({ serverKey, ...gate,
     cwd: gate.cwd === undefined ? (opts?.workingFolder ?? agentRunCwd()) : gate.cwd, catalogId, planReadAuthority,
     ...(readOnlyBrowser ? { readOnlyBrowser: true as const } : {}),
-    ...(toolSurface ? { toolSurface: Object.freeze([...toolSurface.allow]) } : {}) });
+    ...(proxySurface ? { toolSurface: Object.freeze([...proxySurface.allow]) } : {}),
+    ...(proxySurface?.rest === "deferred" ? { toolSurfaceDeferred: true as const } : {}) });
   if (isPersistentMcpProxyLaunch(handle)) residentHandles.push(handle);
   else ownedHandles.push(handle);
   return {
@@ -803,6 +819,34 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
     if (server.catalogId) browserAliases.set(server.catalogId, server);
     return false;
   });
+  const hostServers = opts?.hostToolServers ?? [];
+  for (const host of hostServers) {
+    assertHostToolServer(host);
+    if (serializedServers.some((server) => mcpConfigKey(server) === host.configKey || server.id === host.configKey)) throw new Error("host_tool_server_key_collision");
+  }
+  if (new Set(hostServers.map((host) => host.configKey)).size !== hostServers.length) throw new Error("host_tool_server_key_collision");
+  const hostServerByRowId = new Map(hostServers.map((host) => [host.configKey, host] as const));
+  const superseded = new Set(hostServers.flatMap((host) => host.supersedesPlugins ?? []));
+  if (superseded.size) {
+    const { pluginSlugForToolId } = await import("../plugins/builtin");
+    // Installed (non-built-in) plugins name their tools in their own manifests (plugin-candidates.ts).
+    const installedSlugByTool = new Map<string, string>();
+    try {
+      const candidates = await import("../plugins/plugin-candidates");
+      for (const plugin of candidates.listInstalledPluginCandidates(candidates.pluginCandidatesRoot()))
+        for (const toolId of plugin.toolIds) installedSlugByTool.set(toolId, plugin.slug);
+    } catch { /* no installed plugins root: built-in manifests only */ }
+    for (let index = serializedServers.length - 1; index >= 0; index -= 1) {
+      const row = serializedServers[index]!;
+      const slug = row.catalogId ? pluginSlugForToolId(row.catalogId) ?? installedSlugByTool.get(row.catalogId) ?? null : null;
+      // A graph that declared the plugin by name keeps it: a declaration outranks this rule, as an explicit pin does in auto-select.
+      if (!slug || !superseded.has(slug) || requiredToolCatalogIds.has(row.catalogId!) || requiredToolCatalogIds.has(row.id)) continue;
+      console.log(`[mcp-config] ${row.catalogId} not added: its plugin runs inside a host tool server of this turn`);
+      serializedServers.splice(index, 1);
+    }
+  }
+  // Host rows join the same loop as installed rows: same secret aliases, proxy gate, Codex flags and prepared seal.
+  serializedServers.push(...hostServers.map(hostToolServerRow));
   if (serializedServers.length === 0) {
     // 구버전이 0644 JSON에 남긴 vault 평문을 선택 결과가 0개인 실행에서도 방치하지 않는다.
     fs.rmSync(configPath, { force: true });
@@ -815,7 +859,8 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
   const mcpServers: Record<string, unknown> = {};
   const allowedTools: string[] = [];
   const codexConfigArgs: string[] = [];
-  let toolSurface: McpToolSurface | null = null;
+  const toolSurfaces: McpToolSurface[] = [];
+  let releaseHostToolCatalog: (() => void) | undefined;
   const runtimeEnv: Record<string, string> = {};
   const mainOnlyRemoteAliases = new Set<string>();
   let nativeBrowserBound = false;
@@ -842,6 +887,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
     if (released) return;
     released = true;
     releaseToolSurfaceDenial?.();
+    releaseHostToolCatalog?.();
     const ownsFile = releasePrepared?.() === true;
     for (const handle of proxyHandles) revokeMcpProxyLaunch(handle);
     for (const handle of residentProxyHandles) {
@@ -1010,11 +1056,13 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
     let oauthAccessToken: string | null = null;
     const remoteVaultKey = s.transport !== "stdio" && s.url ? vaultUrlKey(s.url) : null;
     let resolvedRemoteUrl: string | null = s.url ?? null;
+    const hostServer = hostServerByRowId.get(s.id) && s.catalogId === s.id ? hostServerByRowId.get(s.id)! : null;
     try {
       for (const rawKey of s.envKeys) {
         const envKey = validateEnvKey(rawKey);
+        // A host tool server's credentials come from the minting domain for this turn, never from the Vault.
         // A connection-owned credential reads its own Vault key; the server still receives it as `envKey` (NH29).
-        const value = await readEnvVar(credentialVaultKey(s, envKey));
+        const value = hostServer ? hostServer.secretEnv[envKey] ?? hostServer.publicEnv[envKey] ?? null : await readEnvVar(credentialVaultKey(s, envKey));
         if (!value) {
           missingRequiredValue = true;
           continue;
@@ -1154,7 +1202,9 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
         try {
           const capabilityConfigKey = opts?.configKey ?? key;
           const capability = await createTurnToolsCapability(
-            { chatId: callerChatId, runId: opts.turnRunId, tools: turnToolsFor(opts.turnGoalTools === true, opts.turnAskTool === true, Boolean(opts.turnGoalWaitOnly)),
+            { chatId: callerChatId, runId: opts.turnRunId, tools: opts.turnGoalWaitOnly?.alongside
+              ? [...new Set([...turnToolsFor(opts.turnGoalTools === true, opts.turnAskTool === true), ...TURN_TOOLS_WAIT])]
+              : turnToolsFor(opts.turnGoalTools === true, opts.turnAskTool === true, Boolean(opts.turnGoalWaitOnly)),
               ...(opts.turnGoalWaitOnly ? { goalWaitResolver: opts.turnGoalWaitOnly.resolveGoalWait } : {}), dryRun: opts?.toolGate?.simulation === true || opts?.toolGate?.planMode === true,
               permission: opts?.toolGate?.permission ?? "read",
               admissionCurrent: opts?.admissionCurrent,
@@ -1213,6 +1263,13 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
         // Nobody can finish a browser sign-in during an unattended run: with an expired or revoked OS token the
         // engine otherwise opens one per call and waits up to 180 s. "0" makes it fail fast as source_unauthorized.
         if (opts?.toolGate?.unattended === true) builtInEnv.HEPHAESTUS_AUTO_AUTH = "0";
+      }
+      if (hostServer) {
+        // Every value the host server declares rides as a runtime alias (below), the way a keyed installed server's do: the
+        // least-privilege wrapper forwards only those and OS necessities (and Node mode for this executable).
+        command = hostServer.command;
+        args = [...hostServer.args];
+        builtInEnv = {};
       }
       if (command === "uv" || command === "uvx") {
         // Preserve the existing managed-uv bootstrap, before its PATH is sealed.
@@ -1329,10 +1386,12 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
         // enabled_tools, Claude Code as --disallowedTools; every runtime that reaches the server through Main's proxy
         // (antigravity, grok, kimi, cursor, copilot, and Claude Code too) gets the same list as the proxy's allow list,
         // which trims tools/list and refuses a call to anything outside it.
-        const hephaestusSurface: McpToolSurface | null = s.catalogId === HEPHAESTUS_NETWORK_CATALOG_ID && opts?.hephaestusToolSurface === "work-core"
-          ? { serverKey: key, allow: HEPHAESTUS_NETWORK_WORK_CORE_TOOLS } : null;
+        const narrowedSurface: McpToolSurface | null = s.catalogId === HEPHAESTUS_NETWORK_CATALOG_ID && opts?.hephaestusToolSurface === "work-core"
+          ? { serverKey: key, allow: HEPHAESTUS_NETWORK_WORK_CORE_TOOLS }
+          // A host tool server lists its first list on every runtime; its other declared tools stay callable (deferred).
+          : hostServer ? { serverKey: key, allow: [...hostServer.firstList], known: hostServer.declarations.map((tool) => tool.name), rest: "deferred" } : null;
         const proxied = mcpProxySpec(key, opts, s.catalogId, proxyHandles, residentProxyHandles,
-          s.catalogId === "cua-driver" ? "cua-driver" : browserRuntime && opts?.nativeBrowser ? "agentlas-browser" : undefined, browserReadOnly, hephaestusSurface);
+          s.catalogId === "cua-driver" ? "cua-driver" : browserRuntime && opts?.nativeBrowser ? "agentlas-browser" : undefined, browserReadOnly, narrowedSurface);
         if (s.catalogId === "cua-driver" && opts?.toolGate && !proxied) throw new Error("computer-use-tool-gate-unavailable");
         if (browserReadOnly && !proxied) throw new Error("browser-read-only-gate-unavailable");
         const browserCodexMainGated = s.catalogId === "agentlas-browser" && agentlasBrowserCodexMainGated(opts?.toolGate);
@@ -1357,11 +1416,16 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
         if (aliases.length > 0) {
           pushCodexConfig(codexConfigArgs, key, "env_vars", tomlStringArray(aliases));
         }
-        if (hephaestusSurface) {
+        if (narrowedSurface) {
           // Fixed for every ordinary turn of a conversation: the thread's MCP table digest (codexMcpThreadConfig)
           // covers this list, so a list that flipped per turn would rebind the thread and break the cached prefix.
-          pushCodexConfig(codexConfigArgs, key, "enabled_tools", tomlStringArray([...HEPHAESTUS_NETWORK_WORK_CORE_TOOLS]));
-          toolSurface = hephaestusSurface;
+          // (A host server's first list is fixed by the project's declared data, so it is just as stable.)
+          pushCodexConfig(codexConfigArgs, key, "enabled_tools", tomlStringArray([...narrowedSurface.allow]));
+          toolSurfaces.push(narrowedSurface);
+        }
+        if (hostServer) {
+          // A slow first launch must not read as "no tools" (the Science child loads a large signed catalogue).
+          pushCodexConfig(codexConfigArgs, key, "startup_timeout_sec", "120");
         }
         if (browserReadOnly && codexLaunch) {
           // Codex's own gate stays "never" for everything else. Only the read-only
@@ -1538,10 +1602,12 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
   }
 
   writePrivateFile(configPath, JSON.stringify({ mcpServers }, null, 2));
-  const configurations = preparedRows.map(({ server }) => [server.id, mcpServerConfigurationDigest(server)] as const);
+  const configurations = preparedRows.filter(({ server }) => !hostServerByRowId.has(server.id) || server.catalogId !== server.id)
+    .map(({ server }) => [server.id, mcpServerConfigurationDigest(server)] as const);
+  const includedHostServers = hostServers.filter((host) => preparedRows.some((row) => row.server.id === host.configKey));
   // graphTeamGrant is an object identity: a delegated host never inherits it (it would not be current there anyway).
   const { turnGoalWaitOnly: _turnGoalWaitOnly, osMemoryCuratorRun: _osMemoryCuratorRun, admissionCurrent: _admissionCurrent, nativeScopedSelection: _nativeScopedSelection,
-    nativeScopedSelectionForServer: _nativeScopedSelectionForServer, graphTeamGrant: _graphTeamGrant, ...delegationBuildOptions } = opts ?? {};
+    nativeScopedSelectionForServer: _nativeScopedSelectionForServer, graphTeamGrant: _graphTeamGrant, hostToolServers: _hostToolServers, ...delegationBuildOptions } = opts ?? {};
   for (const row of preparedRows) {
     const entry = mcpServers[row.configKey] as { env?: Record<string, string> };
     const handle = entry.env?.[MCP_PROXY_LAUNCH_ENV];
@@ -1563,12 +1629,15 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
     endpoint: opts.nativeBrowser.endpoint, token: opts.nativeBrowser.token,
     ...(opts.nativeBrowser.nativeComputerUse ? { nativeComputerUse: opts.nativeBrowser.nativeComputerUse } : {}),
   };
-  releaseToolSurfaceDenial = registerMcpToolSurface(configPath, toolSurface);
+  releaseToolSurfaceDenial = registerMcpToolSurface(configPath, toolSurfaces);
+  releaseHostToolCatalog = registerHostToolCatalog(configPath, includedHostServers);
   // A turn wait resolver belongs to this host's admitted source run. Keep it
   // local; serializing a rebuild intent would either clone a closure or lose its scope.
   releasePrepared = registerPreparedMcpConfig({ path: configPath, servers: preparedRows, runtimeEnv,
     buildOptions: opts?.turnGoalWaitOnly ? undefined : delegationBuildOptions, isCurrent: () => {
     if (opts?.admissionCurrent && !opts.admissionCurrent()) return false;
+    // A host server's grant ends with its turn: the seal fails closed with it.
+    if (!includedHostServers.every((host) => { try { return host.isCurrent(); } catch { return false; } })) return false;
     const current = new Map(listInstalledServers().map((server) => [server.id, mcpServerConfigurationDigest(server)]));
     return configurations.every(([id, digest]) => current.get(id) === digest);
   } });
@@ -1582,6 +1651,8 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
   }
   return { configPath, allowedTools, codexConfigArgs, runtimeEnv: cliMcpRuntimeEnvironment(runtimeEnv, mainOnlyRemoteAliases, mcpServers, codexConfigArgs), includedServerIds, includedServers, cleanup,
     ...(toolchainConsumer && includedServers.some((server) => server.catalogId === "one-team") ? { toolchainConsumer: true as const } : {}),
+    // The Work-session dispatch tools reached this run (one-team in work-session scope): the host may name them.
+    ...(workSessionMain && includedServers.some((server) => server.catalogId === "one-team") ? { workSessionTools: true as const } : {}),
     ...(workspacePreviewCapabilityCleanup ? { workspacePreviewCapabilityCleanup } : {}),
     ...(nativeBrowserBound ? { nativeBrowserBound: true as const } : {}), ...(nativeComputerUseBound ? { nativeComputerUseBound: true as const } : {}) };
   } catch (error) { cleanup(); throw error; }

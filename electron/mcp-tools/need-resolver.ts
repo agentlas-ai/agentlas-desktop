@@ -19,6 +19,8 @@
 
 import { judgeSubset, noToolsJudgmentFallback, type JudgeHint, type SubsetVerdict } from "../system-agents/judgment";
 import { isVerifiedJudgmentCapability } from "../system-agents/judgment-capability";
+import { isToolJudgmentCompetent, readToolChoiceMeasurements, requiresMeasuredToolJudgment, toolJudgmentCompetence,
+  type ToolChoiceMeasurement, type ToolJudgmentCompetence } from "../system-agents/judgment-competence";
 import { invocationJudgmentContext, withInvocationJudgmentContext } from "../runtime/judgment-context";
 import type { RuntimeSelection } from "../../shared/types";
 
@@ -62,6 +64,12 @@ export interface ResolvedMcpNeeds {
   failureKind?: SubsetVerdict<string>["failureKind"];
   decisionFailure?: SubsetVerdict<string>["decisionFailure"];
   attempts?: SubsetVerdict<string>["attempts"];
+  /** No qualified judge was available, so none was asked (planMcpJudgeRoute "skip"). Nothing failed: proceed with the configured set. */
+  judgeSkipped?: true;
+  /** measured-local: a measured local judge (meaning shortlist of the shelf, enforced answer shape). */
+  pipeline?: McpJudgeProfile;
+  /** measured-local only: candidates offered after the meaning shortlist (absent = the whole shelf was offered). */
+  shortlist?: { offered: number; of: number };
 }
 
 export interface McpGoalNeedContext {
@@ -162,20 +170,118 @@ function renderMcpRuntimeCapabilities(capabilities?: McpRuntimeCapabilities): st
  */
 const MCP_NEED_DEFAULT_TIMEOUT_MS = 15_000;
 
+/**
+ * full: the whole shelf in one selection (hosted judges: subscription CLIs, BYOK, Agentlas serving — unchanged).
+ * measured-local: a judge whose competence comes from a measurement of that exact local model (judgment-competence.ts
+ * status measured_pass). Same judgment text and order; a meaning shortlist of the shelf and a decoder-enforced answer shape.
+ */
+export type McpJudgeProfile = "full" | "measured-local";
+
 export type McpJudgeRoute =
-  | { kind: "pin" }
-  | { kind: "fallback"; selection: RuntimeSelection }
+  | { kind: "pin"; profile?: McpJudgeProfile }
+  | { kind: "fallback"; selection: RuntimeSelection; profile?: McpJudgeProfile }
   | { kind: "skip"; reason: string };
 
-/** Pin when it can judge without tools (or there is no pin: the pool route applies). */
+/**
+ * Pin when it can judge without tools AND its model is a measured tool judge (or there is no pin: the pool route
+ * applies). Otherwise borrow a pool runtime that is both, or skip — the run then proceeds with its configured tools.
+ * `competence` defaults to "no measurements": a runtime that needs one (judgment-competence.ts) does not judge.
+ */
 export function planMcpJudgeRoute(timeoutMs: number,
-  deps: { pin?: () => RuntimeSelection | undefined; fallback?: (timeoutMs: number) => RuntimeSelection | null } = {}): McpJudgeRoute {
+  deps: {
+    pin?: () => RuntimeSelection | undefined;
+    fallback?: (timeoutMs: number) => RuntimeSelection | null;
+    competence?: (selection: RuntimeSelection) => ToolJudgmentCompetence;
+  } = {}): McpJudgeRoute {
   const pin = (deps.pin ?? (() => invocationJudgmentContext()?.selection))();
-  if (!pin || isVerifiedJudgmentCapability(pin, "no_tools")) return { kind: "pin" };
-  const fallback = (deps.fallback ?? noToolsJudgmentFallback)(timeoutMs);
+  if (!pin) return { kind: "pin" };
+  const competenceOf = deps.competence ?? ((selection: RuntimeSelection) => toolJudgmentCompetence(selection, []));
+  const isolated = isVerifiedJudgmentCapability(pin, "no_tools");
+  const pinCompetence = competenceOf(pin);
+  const measuredLocal = (competence: ToolJudgmentCompetence) => competence.status === "measured_pass"
+    ? { profile: "measured-local" as const } : {};
+  if (isolated && isToolJudgmentCompetent(pinCompetence)) return { kind: "pin", ...measuredLocal(pinCompetence) };
+  const fallback = (deps.fallback ?? ((ms: number) => noToolsJudgmentFallback(ms, undefined,
+    (selection) => isToolJudgmentCompetent(competenceOf(selection)))))(timeoutMs);
+  const cause = isolated ? pinCompetence.reason : `${pin.kind}_cannot_judge_without_tools`;
   return fallback
-    ? { kind: "fallback", selection: fallback }
-    : { kind: "skip", reason: `judgment_skipped:${pin.kind}_cannot_judge_without_tools_and_no_measured_pool_runtime_under_${timeoutMs}ms` };
+    ? { kind: "fallback", selection: fallback, ...measuredLocal(competenceOf(fallback)) }
+    : { kind: "skip", reason: `judgment_skipped:${cause}_and_no_measured_pool_runtime_under_${timeoutMs}ms` };
+}
+
+/** Measurements are read only when a runtime that needs one can be asked (the pin, or the pool behind it). */
+async function measuredJudgeRoute(timeoutMs: number,
+  readMeasurements: () => Promise<ToolChoiceMeasurement[]> = readToolChoiceMeasurements): Promise<McpJudgeRoute> {
+  const pin = invocationJudgmentContext()?.selection;
+  const consultsPool = Boolean(pin) && (!isVerifiedJudgmentCapability(pin!, "no_tools") || requiresMeasuredToolJudgment(pin!));
+  const measurements = consultsPool ? await readMeasurements() : [];
+  // An owner-served model (Ollama / LM Studio / MLX) without a receipt is measured in the background; this judgment is
+  // skipped as before and a later one uses the receipt (external-tool-judgment.ts).
+  if (pin && toolJudgmentCompetence(pin, measurements).status === "unmeasured") {
+    void import("../system-agents/external-tool-judgment").then((external) => external.ensureExternalToolJudgmentMeasured(pin)).catch(() => {});
+  }
+  return planMcpJudgeRoute(timeoutMs, { competence: (selection) => toolJudgmentCompetence(selection, measurements) });
+}
+
+function renderMcpInventory(candidates: readonly McpNeedCandidate[]): string {
+  return candidates
+    .map(
+      (candidate) =>
+        `- ${candidate.id} (${candidate.origin}${candidate.agentlas ? ", Agentlas" : ""}${candidate.kind === "skill-plugin" ? ", skill plugin" : ""}${candidate.needsCredential ? ", needs credential" : ""}): ${candidate.name} — ${candidate.description}`,
+    )
+    .join("\n");
+}
+
+// ── Measured-local profile: the same judgment with less to choose from and an enforced answer shape ─────────────
+// Code only — no judgment text or order changes (owner rule 2026-10-28: a defect is not fixed by editing prompts).
+// QA 2026-10-28 (docs 2026-10-28-local-model-browser-judge): with the whole shelf (72 entries) a small local judge drifted
+// to salient entries and answered in prose the parser rejects. For a judge whose competence was MEASURED on this machine
+// (judgment-competence.ts measured_pass), the shelf is shortlisted by meaning with the app's local Model2Vec (recall
+// only; the model still decides and may choose none) and the answer shape is enforced by the decoder (json_schema).
+// Hosted judges keep the whole shelf without a schema.
+
+/** Shortlist size for a measured local judge. */
+export const MCP_NEED_SHORTLIST_SIZE = 8;
+
+/**
+ * The enforced answer shape: ids are a closed enum of exactly the offered entries. No length or count caps in the grammar
+ * (scripts/test-provider-schema-no-grammar-caps: a grammar cap makes a strict decoder cut or loop instead of answering);
+ * parseSubset already keeps only offered ids.
+ */
+export function mcpNeedSubsetOutputSchema(labels: readonly string[]): NonNullable<Parameters<typeof judgeSubset>[0]["outputSchema"]> {
+  return { name: "agentlas_tool_need_subset", schema: { type: "object", additionalProperties: false, required: ["selected", "confidence", "reason"],
+    properties: { selected: { type: "array", items: { type: "string", enum: [...labels] } },
+      confidence: { type: "number" }, reason: { type: "string" } } } };
+}
+
+const shelfVectors = new Map<string, number[]>();
+
+/**
+ * Recall only: the candidates whose description is nearest in meaning to the task (the app's local Model2Vec, the same
+ * embedding memory recall uses). Null = offer the whole shelf: no verified Model2Vec asset (the hashing fallback is not
+ * meaning), or nothing to cut. Never decides: the judge still chooses among the shortlist, and may choose none.
+ */
+export async function shortlistMcpCandidatesByMeaning(task: string, candidates: readonly McpNeedCandidate[],
+  size = MCP_NEED_SHORTLIST_SIZE): Promise<McpNeedCandidate[] | null> {
+  if (candidates.length <= size) return null;
+  let embedding: typeof import("../memory/local-embedding");
+  try { embedding = await import("../memory/local-embedding"); } catch { return null; }
+  const taskVector = embedding.autoLocalEmbedding(task);
+  if (taskVector.degraded) return null;
+  const scored = candidates.map((candidate, index) => {
+    const text = `${candidate.name}: ${candidate.description}`;
+    const key = `${taskVector.modelSha256 ?? ""}\u0000${text}`;
+    let vector = shelfVectors.get(key);
+    if (!vector) {
+      vector = embedding.autoLocalEmbedding(text).vector;
+      shelfVectors.set(key, vector);
+      if (shelfVectors.size > 2_000) shelfVectors.delete(shelfVectors.keys().next().value!);
+    }
+    return { candidate, index, score: embedding.cosineSimilarity(taskVector.vector, vector) };
+  });
+  // The offered order stays the shelf's own order (Hub first); only membership changes.
+  return scored.sort((a, b) => b.score - a.score || a.index - b.index).slice(0, size)
+    .sort((a, b) => a.index - b.index).map((row) => row.candidate);
 }
 
 export async function resolveMcpNeeds(input: {
@@ -190,8 +296,10 @@ export async function resolveMcpNeeds(input: {
   timeoutMs?: number;
   /** Injectable judge (tests). Defaults to the resident judgment service. */
   judgeSubsetFn?: typeof judgeSubset;
+  /** Measured-local shortlist size (A/B). Defaults to MCP_NEED_SHORTLIST_SIZE. */
+  shortlistSize?: number;
   /** Injectable route planner (tests). Defaults to the invocation pin + measured pool fallback. */
-  planJudgeRoute?: (timeoutMs: number) => McpJudgeRoute;
+  planJudgeRoute?: (timeoutMs: number) => McpJudgeRoute | Promise<McpJudgeRoute>;
 }): Promise<ResolvedMcpNeeds> {
   const ordered = preferHub(input.candidates);
   const candidates = ordered.slice(0, MAX_CANDIDATES);
@@ -200,48 +308,52 @@ export async function resolveMcpNeeds(input: {
     return { needed: [], decided: false, reason: "no task or no candidates", omitted };
   }
 
-  const inventory = candidates
-    .map(
-      (candidate) =>
-        `- ${candidate.id} (${candidate.origin}${candidate.agentlas ? ", Agentlas" : ""}${candidate.kind === "skill-plugin" ? ", skill plugin" : ""}${candidate.needsCredential ? ", needs credential" : ""}): ${candidate.name} — ${candidate.description}`,
-    )
-    .join("\n");
-
   // The judge must never block the run. When the invocation's pinned runtime cannot
-  // judge without tools (codex: not release-verified), borrow a pool member only if
-  // it is verified and measured to answer inside the deadline; otherwise skip.
-  const route = (input.planJudgeRoute ?? planMcpJudgeRoute)(input.timeoutMs ?? MCP_NEED_DEFAULT_TIMEOUT_MS);
+  // judge without tools (codex: not release-verified), or its model is not a measured
+  // tool judge (an owner-loaded local model without a passing receipt), borrow a pool
+  // member only if it is verified, measured to answer inside the deadline and itself
+  // a measured judge; otherwise skip.
+  const route = await (input.planJudgeRoute ?? measuredJudgeRoute)(input.timeoutMs ?? MCP_NEED_DEFAULT_TIMEOUT_MS);
   if (route.kind === "skip") {
-    return { needed: [], decided: false, reason: route.reason, omitted, decisionFailure: "unavailable" };
+    return { needed: [], decided: false, reason: route.reason, omitted, decisionFailure: "unavailable", judgeSkipped: true };
   }
   const judge = input.judgeSubsetFn ?? judgeSubset;
-  const judgeOnRoute: typeof judgeSubset = route.kind === "fallback"
-    ? (spec) => withInvocationJudgmentContext(route.selection, input.signal ?? invocationJudgmentContext()?.signal, () => judge(spec))
-    : judge;
-  const verdict = await judgeOnRoute({
+  const onRoute = <T>(run: () => Promise<T>): Promise<T> => route.kind === "fallback"
+    ? withInvocationJudgmentContext(route.selection, input.signal ?? invocationJudgmentContext()?.signal, run)
+    : run();
+  const measuredLocal = route.profile === "measured-local";
+  const shortlist = measuredLocal
+    // A Goal's criteria can need a tool the latest turn text does not name: they join the recall query.
+    ? await shortlistMcpCandidatesByMeaning([input.goal?.objective ?? "", ...(input.goal?.acceptanceCriteria ?? []), input.task]
+      .map((part) => part.trim()).filter(Boolean).join("\n"), candidates, input.shortlistSize ?? MCP_NEED_SHORTLIST_SIZE) : null;
+  const offered = shortlist ?? candidates;
+  const verdict = await onRoute(() => judge({
     kind: MCP_NEED_JUDGMENT_KIND,
     // Optional selection is metadata preparation, not authority to run tools.
     // Unsupported isolation returns undecided; configured pins and exact active
     // Goal selections remain governed by auto-select's existing host checks.
     requireNoTools: true,
     question: MCP_NEED_JUDGMENT_QUESTION,
-    labels: candidates.map((candidate) => candidate.id),
+    labels: offered.map((candidate) => candidate.id),
     // Composition order: fixed → variable (docs/PROMPT-COMPOSITION-POLICY.md, ledger desktop.judgment.kind.mcp-need.user).
     input: [
-      `AVAILABLE TOOLS:\n${inventory}`,
+      `AVAILABLE TOOLS:\n${renderMcpInventory(offered)}`,
       renderMcpRuntimeCapabilities(input.runtimeCapabilities),
       renderMcpGoalNeedContext(input.goal),
       ...(input.taskContext ? [renderMcpTaskContext(input.taskContext)] : []),
       `CURRENT TASK${input.taskContext ? " (the user's request for this turn; judge this)" : ""}:\n${input.task.trim()}`,
     ].join("\n\n"),
     guidance: MCP_NEED_JUDGMENT_GUIDANCE,
+    ...(measuredLocal ? { outputSchema: mcpNeedSubsetOutputSchema(offered.map((candidate) => candidate.id)) } : {}),
     maxInputChars: null,
     signal: input.signal,
     ...(input.timeoutMs !== undefined ? { timeoutMs: input.timeoutMs } : {}),
-  });
+  }));
+  const profile = measuredLocal ? { pipeline: "measured-local" as const,
+    ...(shortlist ? { shortlist: { offered: shortlist.length, of: candidates.length } } : {}) } : {};
 
   if (verdict.source !== "llm") {
-    return { needed: [], decided: false, reason: verdict.reason, omitted,
+    return { needed: [], decided: false, reason: verdict.reason, omitted, ...profile,
       ...(verdict.failureKind ? { failureKind: verdict.failureKind } : {}),
       ...(verdict.decisionFailure ? { decisionFailure: verdict.decisionFailure } : {}),
       ...(verdict.attempts ? { attempts: verdict.attempts } : {}) };
@@ -251,6 +363,7 @@ export async function resolveMcpNeeds(input: {
     decided: true,
     reason: verdict.reason,
     omitted,
+    ...profile,
   };
 }
 

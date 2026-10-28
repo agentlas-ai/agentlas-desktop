@@ -54,8 +54,6 @@ import dynamic from "next/dynamic";
 import styles from "./PersonalOneWorkspace.module.css";
 import { Select } from "@/components/Select";
 import { useComposerEnter } from "@/lib/use-composer-enter";
-import { useBusinessEligibility } from '@/business/use-business-eligibility';
-import { useOrganizationUiVisibility } from '@/business/organization-visibility';
 
 const PersonalOneTaskResult=dynamic(()=>import("./PersonalOneTaskResult").then(module=>module.PersonalOneTaskResult),{ssr:false});
 
@@ -83,8 +81,6 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
   const [capabilitiesModal,setCapabilitiesModal]=useState(false);
   const [capabilities,setCapabilities]=useState<PersonalOneCapabilityTab|null>(null);
   const [menuOpen,setMenuOpen]=useState(false);
-  const businessAccess = useBusinessEligibility({ enabled: menuOpen });
-  const organization = useOrganizationUiVisibility({ eligible: businessAccess.eligibility ? businessAccess.eligible : null }).management;
   const [securityOpen,setSecurityOpen]=useState(false);
   // Sidebar: owner choice persists; below 860px it is collapsed unless the owner opens it for this session.
   const [navPref,setNavPref]=useState<"open"|"closed"|null>(()=>{try{const v=window.localStorage.getItem("agentlas.one.personal.nav");return v==="open"||v==="closed"?v:null;}catch{return null;}});
@@ -503,7 +499,6 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
       {menuOpen&&<nav ref={headerMenuRef} id="personal-one-menu" className={styles.headerMenu} aria-label={copy("One 메뉴","One menu")} onKeyDown={event=>{if(event.key==="Escape"){event.stopPropagation();setMenuOpen(false);headerMenuTrigger.current?.focus();}}}>
         <button type="button" onClick={()=>{setMenuOpen(false);setCapabilities("connections");}}>{copy("연결 도구","Connected tools")}</button>
         <button type="button" data-personal-one-security-entry="true" onClick={()=>{setMenuOpen(false);setSecurityOpen(true);}}>{copy("보안과 연결 관리","Security and connections")}</button>
-        {organization&&<button type="button" data-business-entry="true" onClick={()=>{setMenuOpen(false);void openMain('/business');}}><IconSettings size={16}/>{copy("조직 설정","Organization settings")}</button>}
         <button type="button" onClick={()=>{setMenuOpen(false);setCapabilities("repeat");}}>{copy("반복 업무","Recurring work")}</button>
         <button type="button" onClick={()=>{setMenuOpen(false);setBudgetsOpen(true);}}>{copy("실행 예산","Execution budgets")}</button>
         <button type="button" onClick={()=>{setMenuOpen(false);setCheckinsOpen(true);}}>{copy("감시 조건","Monitoring")}</button>

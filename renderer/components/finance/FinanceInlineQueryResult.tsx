@@ -1,22 +1,14 @@
 "use client";
 import { useId, useState } from "react";
-import type { FinanceAIResult, FinanceConversationDataResult, FinanceDataResult } from "@shared/finance";
+import type { FinanceConversationDataResult, FinanceDataResult } from "@shared/finance";
 import { financeQueryScope } from "@shared/finance-query-scope";
 import { IconChevronDown, IconChevronRight, IconChevronLeft } from "@/components/Icon";
 import { FinanceDataResultView, financeDataVisual } from "./FinanceDataResultView";
 import { financeFeedLink } from "./FinanceDashboardFeed";
 import { financeCell, financeColumn } from "./FinanceMessage";
-import type { FinanceInlineSnapshot } from "./FinanceInlineArtifact";
 import styles from "./FinanceInlineQueryResult.module.css";
 
 export interface FinanceInlineQuerySnapshot { entry: FinanceConversationDataResult; ownerScope: string | null; revision: number }
-/** Real returned datasets remain visible even when the model cannot finish its explanation. */
-export function financeInlineQuerySnapshots(response: FinanceAIResult, ownerScope: string | null, revision: number, artifacts: readonly FinanceInlineSnapshot[]): FinanceInlineQuerySnapshot[] {
-  if (response.status === "cancelled" || response.status === "conflict" || response.status === "invalid_output") return [];
-  const reports = new Set(artifacts.filter(item => item.ownerScope === ownerScope).map(item => item.report.id));
-  // A saved report may keep these rows as supporting evidence without displaying them.
-  return (response.dataResults ?? []).filter(entry => entry.presentation !== undefined || !entry.reportIds?.some(id => reports.has(id))).map(entry => ({ entry: structuredClone(entry), ownerScope, revision }));
-}
 /** Resolve only original row references. An explicit empty selection never means all rows. */
 export function financeQuerySelection(entry: FinanceConversationDataResult): { status: "all" | "selected" | "invalid"; result: FinanceDataResult; rowIndices: number[] } {
   const indices = entry.presentation?.rowIndices;

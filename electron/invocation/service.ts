@@ -128,6 +128,7 @@ import {
 } from "./workspace-binding";
 import { pickLocale } from "../runtime/status-i18n";
 import { hostOwnerCardQuestions } from "../long-run/goal-owner-card";
+import { applyHostOwnerCardDecision, hostOwnerCardAnswer, recordHostOwnerCardPosted } from "../long-run/goal-owner-card-decision";
 import { reportOwnerAsk } from "../owner-ask-alerts";
 import { emitDesktopStoreChange } from "../store/change-bus";
 import { permissionEscalationContinuationRequest } from "./permission-escalation-continuation";
@@ -3187,13 +3188,6 @@ export class InvocationService {
       throw new Error("invocation_admission_request_identity_mismatch");
     }
     assertInvocationWorkspaceSourceContext(workspaceBinding, executionContext?.source);
-    const companyWork = executionContext?.source === "company-work" ? executionContext.companyWork : undefined;
-    if (!companyWork && require("../business/company-work-reference").isCompanyWorkReference(getChat(req.chatId)?.agentId)) throw new Error("company_work_original_owner_required");
-    if (executionContext?.source === "company-work") {
-      if (!companyWork) throw new Error("company_work_grant_required");
-      const admitted = require("../business/company-work-grant").assertCompanyWorkGrant(companyWork, req);
-      if (workspaceBinding !== admitted.workspace || getChat(req.chatId)?.agentId !== admitted.asset.agentId || req.oneMode || req.agentAppMode || req.automationId || getChat(req.chatId)?.originSurface !== "work") throw new Error("company_work_invocation_changed");
-    }
     if (!this.acceptingStarts) throw new Error("desktop_execution_admission_closed");
     const backgroundObservation = Boolean(effectObservationTicket(req.runId));
     if ((!nativeController || !nativePreparation || isLocalInvocationPreparationPort(nativePreparation.port)) && !backgroundObservation) {
@@ -3241,13 +3235,12 @@ export class InvocationService {
     } = incoming;
     // A Goal Main admitted for an earlier background-service turn of this chat follows that turn; once it ended the room is
     // not bound to it any more (2026-10-15: both team rooms stayed bound to Goals whose runs had failed).
-    if (!companyWork && !backgroundObservation && invocationProcessOwner().ownerKind !== "daemon") {
+    if (!backgroundObservation && invocationProcessOwner().ownerKind !== "daemon") {
       try { followDaemonTurnGoalOfChat(req.chatId); } catch (error) { console.warn("[invocation] service-turn Goal could not be settled:", error); }
     }
     const storedChat = getChat(req.chatId);
-    if (!companyWork && require("../business/company-work-reference").isCompanyWorkReference(storedChat?.agentId)) throw new Error("company_work_original_owner_required");
     if (!storedChat) throw new Error("Chat not found");
-    const chat = backgroundObservation || companyWork ? { ...storedChat } : repairRootChatSurfaceController(storedChat);
+    const chat = backgroundObservation ? { ...storedChat } : repairRootChatSurfaceController(storedChat);
     let boundGoal = chat.goalId ? getLongRunByGoalId(chat.goalId) : null;
     if (!backgroundObservation && chat.goalId && boundGoal && LONG_RUN_TERMINAL_STATUSES.has(boundGoal.status)) {
       completeChatGoalContract(chat.goalId, boundGoal.status === "completed" ? "completed" : "cancelled");
@@ -3275,6 +3268,25 @@ export class InvocationService {
         } else {
           completeChatGoalContract(orphan.goal_id, orphanRun?.status === "completed" ? "completed" : "cancelled");
         }
+      }
+    }
+    // The owner's answer to the Goal's own host card is a typed decision (long-run/goal-owner-card-decision.ts). "Stop here and
+    // summarize" ends the Goal now, whatever a judge or verifier could say: this turn then runs as an ordinary turn of the
+    // room and writes the summary once, and no automatic Goal is admitted from it. Finance validation 2026-10-28: the choice
+    // reopened the Goal as words, its summary was verified inconclusive and the same card came back three times.
+    let ownerCardStoppedGoalId: string | null = null;
+    if (!backgroundObservation && chat.goalId && req.promptOrigin !== "system" && req.agentAppMode !== true) {
+      try {
+        const answer = hostOwnerCardAnswer({ goalId: chat.goalId, chatId: chat.id, reply: incoming.userPrompt,
+          sourceMessageId: questionContinuation?.sourceMessageId ?? null });
+        const via = questionContinuation ? "question_continuation" : workspaceBinding?.source ?? executionContext?.source ?? "composer";
+        if (answer && applyHostOwnerCardDecision(answer, { chatId: chat.id, via }) === "stopped") {
+          ownerCardStoppedGoalId = answer.run.goalId;
+          chat.goalId = null;
+          boundGoal = null;
+        }
+      } catch (error) {
+        console.warn("[invocation] owner card decision could not be applied; the turn runs as before:", error instanceof Error ? error.message : String(error));
       }
     }
     /* Validate now; reopen only after this turn is durably stored. */
@@ -5537,7 +5549,7 @@ export class InvocationService {
         }
         // Only ordinary local, user-authored root-chat work enters automatic
         // Goal. Science and remote/automation authority keep their own adapters.
-        if (projectionGoalId || runReq.agentAppMode || runWorkspaceBinding || executionContext ||
+        if (projectionGoalId || ownerCardStoppedGoalId || runReq.agentAppMode || runWorkspaceBinding || executionContext ||
             runReq.promptOrigin === "system" || runReq.planMode || chat.kind === "division" || controller.signal.aborted) return;
         // Goal custody is Desktop-only: this process cannot admit a Goal controller (producerAdmission stays
         // null), so a Goal admitted mid-turn would have its first dispatch refused with goal_episode_admission_missing.
@@ -5846,7 +5858,9 @@ export class InvocationService {
             void Promise.resolve(record.completion).then(() => record.mainLifetime
               ? record.mainLifetime.afterSettled(() => this.resumeParkedBrowserLoginWait(runId))
               : this.resumeParkedBrowserLoginWait(runId)).catch(error => {
-              console.warn("[browser-login-wait] continuation refused", error instanceof Error ? error.name : "unknown");
+              const code = refusalCode(error) ?? "browser_login_resume_refused";
+              console.warn(`[browser-login-wait] continuation refused run=${runId} code=${code}`);
+              this.announceBrowserLoginResumeRefused(record, runId, code);
             });
           });
           return;
@@ -6610,8 +6624,9 @@ export class InvocationService {
     this.browserLoginWaitingRuns.delete(runId);
     parked.unsubscribe?.();
     try {
-      const successorAdmission = record.mainLifetime?.successor(record.chatId, successorRunId);
-      if (record.mainLifetime && !successorAdmission) throw new Error("browser_login_continuation_scope_changed");
+      // A source that ran without a Main root (Mobile One, Telegram, a host relay) continues rootless, as it ran.
+      const successorStart = record.mainLifetime ? record.mainLifetime.successorStart(record.chatId, successorRunId) : { admission: undefined };
+      if (!successorStart) throw Object.assign(new Error("browser_login_continuation_scope_changed"), { code: "browser_login_continuation_scope_changed" });
       const goalId = parked.durable.goalId;
       if (goalId && !parked.durable.effectsSettled) {
         // Reconcile the old operation independently while the fresh, read-only
@@ -6634,17 +6649,42 @@ export class InvocationService {
         ...(readOnly ? { permissions: "read", onePermissionMode: "read" } : {}),
         userPrompt: `login restored (source run ${runId}). Inspect results and external state, then do only what remains.${readOnly ? " read-only: report what happened." : ""}`,
       }, record.workspaceBinding, record.executionContext, undefined, "goal-continuation",
-        successorAdmission);
+        successorStart.admission);
       settleInvocationBrowserLoginWait(runId, "dispatched");
     } catch (error) {
-      settleInvocationBrowserLoginWait(runId, "blocked", "browser_login_resume_refused");
-      const goal = parked.durable.goalId ? getLongRunByGoalId(parked.durable.goalId) : null;
-      if (goal?.status === "running") transitionLongRun({ runId: goal.id, to: "blocked", actorKind: "host", reason: "browser_login_resume_refused" });
-      this.scheduleGoalContinuation(goal?.goalId, record, "browser-login-resume-refused");
-      console.warn("[browser-login-wait] resume refused", error instanceof Error ? error.name : "unknown");
+      const code = refusalCode(error) ?? "browser_login_resume_refused";
+      // Every step runs: a store failure in one cannot keep the owner from hearing that the task stopped.
+      try { settleInvocationBrowserLoginWait(runId, "blocked", "browser_login_resume_refused"); }
+      catch (settleError) { console.warn(`[browser-login-wait] refused wait not settled run=${runId} code=${refusalCode(settleError) ?? "none"}`); }
+      try {
+        const goal = parked.durable.goalId ? getLongRunByGoalId(parked.durable.goalId) : null;
+        if (goal?.status === "running") transitionLongRun({ runId: goal.id, to: "blocked", actorKind: "host", reason: "browser_login_resume_refused" });
+        this.scheduleGoalContinuation(goal?.goalId, record, "browser-login-resume-refused");
+      } catch (goalError) { console.warn(`[browser-login-wait] refused Goal not rescheduled run=${runId} code=${refusalCode(goalError) ?? "none"}`); }
+      console.warn(`[browser-login-wait] resume refused run=${runId} code=${code}`);
+      this.announceBrowserLoginResumeRefused(record, runId, code);
     } finally {
       parked.handle.cancel();
     }
+  }
+
+  /**
+   * The parked turn told the owner "after login is verified, the remaining steps can continue". When that continuation
+   * is refused, the owner hears so, with the machine cause and the one step that always works (an owner message runs),
+   * on the same host-status seam the waiting line used — a desktop and a phone both read it. Before, the refusal was
+   * only a log line ("resume refused Error") and the room sat on the waiting line for good.
+   */
+  private announceBrowserLoginResumeRefused(record: RunRecord, runId: string, code: string): void {
+    const message = pickLocale(record.request) === "ko"
+      ? `로그인은 확인됐지만 이 작업을 자동으로 이어가지 못했습니다 (원인: ${code}). 메시지를 보내면 이어서 진행합니다.`
+      : `Sign-in was verified, but this task could not continue on its own (cause: ${code}). Send a message to continue.`;
+    try {
+      appendChatMessage(record.chatId, "assistant", message, { hostNotice: { purpose: "host-status", runId, status: "needs-owner" } });
+    } catch (error) { console.warn(`[browser-login-wait] refusal notice not stored run=${runId} code=${refusalCode(error) ?? "none"}`); }
+    try {
+      this.publishRunEvent(record, { runId, chatId: record.chatId, event: { kind: "notice",
+        notice: { code: "browser-login-resume-refused", level: "warning", message, details: JSON.stringify({ cause: code }) } } });
+    } catch (error) { console.warn(`[browser-login-wait] refusal notice not published run=${runId} code=${refusalCode(error) ?? "none"}`); }
   }
 
   resumeGoalWait(input: GoalWaitDispatch): { runId: string } {
@@ -6683,7 +6723,10 @@ export class InvocationService {
         || input.record.steeringInterruptRequested || this.steerQueues.get(input.chatId)?.length) return false;
       heldVersion = holdGoalForOwnerAnswer({ runId: run.id, invocationRunId: input.runId, appInstanceId: desktopAppInstanceId() }).version;
       // noGoalResult: a host-written card is not the Goal's answer, so it must never wait for a verification verdict.
-      appendChatMessage(input.chatId, "assistant", canonicalAskFenceText(hostOwnerCardQuestions("goal_idle_stop", input.locale)), { noGoalResult: true });
+      const cardMessage = appendChatMessage(input.chatId, "assistant", canonicalAskFenceText(hostOwnerCardQuestions("goal_idle_stop", input.locale)), { noGoalResult: true });
+      // Which message is this Goal's card: the owner's pick on it is read as a typed decision (goal-owner-card-decision.ts).
+      try { recordHostOwnerCardPosted({ longRunId: run.id, cardKind: "goal_idle_stop", sourceMessageId: cardMessage.id, invocationRunId: input.runId }); }
+      catch (error) { console.warn("[long-run] owner card posted but not recorded; its answer reaches the Goal as words:", error); }
       tryRecordRunEvent({ runId: input.runId, chatId: input.chatId, kind: "goal_owner_card_added",
         payload: { source: "goal_idle_pass_yield", after: "verification" } });
       reportOwnerAsk({ chatId: input.chatId, source: "goal", key: input.runId });
@@ -7585,7 +7628,6 @@ export class InvocationService {
     preflightSteerId?: string,
     oneTeamReportSource?: QueuedTeamReportSourceRef,
   ): InvocationSteerResult {
-    if (require("../business/company-work-reference").isCompanyWorkReference(getChat(req.chatId)?.agentId)) throw new Error("company_work_steering_denied");
     mainAdmission = takeMainInvocationAdmission(mainAdmission);
     if (req.oneAttachmentRef) {
       throw new Error("One attachments cannot be added through steering in v1; wait for the active run and send a new request");
@@ -7874,7 +7916,6 @@ export class InvocationService {
   }
 
   history(chatId: string) {
-    if (require("../business/company-work-reference").isCompanyWorkReference(getChat(chatId)?.agentId)) throw new Error("company_work_history_owner_required");
     return listChatMessages(chatId);
   }
 

@@ -45,8 +45,8 @@ function definition(name: string, description: string, properties: Record<string
   return { type: "function", function: { name, description, parameters: { type: "object", properties, required, additionalProperties: false } } };
 }
 const MENU_TOOLS = [
-  definition(LIST, "List MCP tools (page; server filter). Prepare a name before calling.",
-    { server: { type: "string" }, cursor: { type: "integer", minimum: 0 }, limit: { type: "integer", minimum: 1, maximum: 50 } }),
+  definition(LIST, "List MCP tools (page; server filter; query: best matches first). Prepare a name before calling.",
+    { server: { type: "string" }, query: { type: "string" }, cursor: { type: "integer", minimum: 0 }, limit: { type: "integer", minimum: 1, maximum: 50 } }),
   definition(PREPARE, "Full input schema + token for one exact tool name (required for agentlas_tools_call). Large schemas: first variants page.",
     { name: { type: "string" } }, ["name"]),
   definition(VARIANTS, "Page variants of a large tool schema; pick an index for agentlas_tools_prepare_variant.",
@@ -86,21 +86,40 @@ export function toolMenuServerIndex(tools: OpenAiToolDef[], byName: Map<string, 
  * list these names directly; behind the menu an API-lane team worker never opened it (dev 2026-10-18 O6: Haiku workers
  * used only file/shell built-ins and wrote a launchd template, while codex workers registered the automation). */
 const DIRECT_ENTRY_TOOLS = new Set(["harness_search", "harness_describe", "harness_call"]);
+/**
+ * Every app tool a host prompt calls by name stays in the provider's tool list (never behind the menu): the system `ask:`
+ * line names ask_form, the `ui:` line read_ui_schema / read_surface_protocol, automation guidance read_automation_protocol,
+ * Goal turn guidance goal_* (2026-10-28: an instruction that names a tool the model cannot see makes a small model call it
+ * anyway; the provider drops the unlisted call and the turn ends as an empty answer). The private gate
+ * test-prompt-named-tools-exposed.cjs fails when a prompt names an app tool that is not listed here.
+ * A host tool server's declared first list (host-tool-servers.ts; Science: core tools and the project's Labs) is direct for the
+ * same reason: it is what the turn's prompt and project declare the model works with; only the rest waits behind the menu.
+ */
+export const PROMPT_NAMED_APP_TOOLS: Readonly<Record<string, ReadonlySet<string>>> = Object.freeze({
+  "agentlas-turn": new Set([...DIRECT_ENTRY_TOOLS, "ask_form", "goal_wait", "goal_complete", "goal_tactic", "goal_plan_op", "goal_kpi"]),
+  "agentlas-ui": new Set(["read_ui_schema", "read_surface_protocol", "read_automation_protocol"]),
+});
 export function isDirectEntryTool(resolved: ResolvedTool | undefined): boolean {
-  return resolved?.kind === "mcp" && resolved.server.catalogId === "agentlas-turn" && DIRECT_ENTRY_TOOLS.has(resolved.serverToolName);
+  if (resolved?.kind === "mcp" && resolved.firstListed === true) return true;
+  return resolved?.kind === "mcp" && resolved.server.catalogId !== null && resolved.server.catalogId !== undefined
+    && PROMPT_NAMED_APP_TOOLS[resolved.server.catalogId]?.has(resolved.serverToolName) === true;
 }
 
 /** `earlyDeferral`: API-class models (Agentlas serving, BYOK) defer a mid-size MCP set too. Small local models keep the old
  * thresholds on purpose: measured 2026-09 they went wrong behind an indirect surface (5 agentlas_code calls, never reaching
  * the browser) and were exact when handed the tools directly. The harness entry always stays direct. */
 export function installLazyToolMenu(tools: OpenAiToolDef[], byName: Map<string, ResolvedTool>, enabled: boolean, oversizedOnly = false, earlyDeferral = false): OpenAiToolDef[] {
-  const descriptors = new Map(tools.filter(tool => byName.get(tool.function.name)?.kind === "mcp"
-    && !isDirectEntryTool(byName.get(tool.function.name))
+  const isDeferred = (tool: OpenAiToolDef) => { const resolved = byName.get(tool.function.name); return resolved?.kind === "mcp" && resolved.deferred === true; };
+  const usual = new Map(tools.filter(tool => byName.get(tool.function.name)?.kind === "mcp"
+    && !isDirectEntryTool(byName.get(tool.function.name)) && !isDeferred(tool)
     && (!oversizedOnly || bytes(tool) > MAX_PREPARED_SCHEMA_BYTES)).map(tool => [tool.function.name, tool]));
-  const descriptorBytes = bytes([...descriptors.values()]);
-  const small = descriptors.size < 32 && descriptorBytes < MAX_PREPARED_SCHEMA_BYTES
-    && (!earlyDeferral || descriptors.size < LAZY_MIN_TOOLS || descriptorBytes < LAZY_MIN_SCHEMA_BYTES);
-  if (!enabled || !descriptors.size || (!oversizedOnly && small)
+  const usualBytes = bytes([...usual.values()]);
+  const small = usual.size < 32 && usualBytes < MAX_PREPARED_SCHEMA_BYTES
+    && (!earlyDeferral || usual.size < LAZY_MIN_TOOLS || usualBytes < LAZY_MIN_SCHEMA_BYTES);
+  // A deferred tool (outside its server's declared first list) is always behind the menu; the usual size rule decides the rest.
+  const descriptors = new Map([...tools.filter(isDeferred).map(tool => [tool.function.name, tool] as const),
+    ...(!oversizedOnly && small ? [] : [...usual])]);
+  if (!enabled || !descriptors.size
     || [...NAMES].some(name => byName.has(name))) return tools;
   const index = toolMenuServerIndex([...descriptors.values()], byName);
   const menuTools = structuredClone(MENU_TOOLS);
@@ -169,6 +188,17 @@ function keys(args: Record<string, unknown>, allowed: string[], nextAction: Next
   const near = Object.fromEntries(invalidFields.flatMap(key => { const names = closestNames(key, allowed); return names.length ? [[key, names]] : []; }));
   invalidArguments(invalidFields, nextAction, undefined, Object.keys(near).length ? near : undefined);
 }
+function rankMenuRows(query: string, rows: OpenAiToolDef[], byName: Map<string, ResolvedTool>): OpenAiToolDef[] {
+  const { rankHarnessItemsByMeaning } = require("../harness/search-rank") as typeof import("../harness/search-rank");
+  let embedder: import("../harness/search-rank").MeaningEmbedder | null = null;
+  try { embedder = require("../memory/local-embedding") as import("../harness/search-rank").MeaningEmbedder; } catch { embedder = null; }
+  const items = rows.map(tool => {
+    const resolved = byName.get(tool.function.name) as Extract<ResolvedTool, {kind:"mcp"}>;
+    return { id: tool.function.name, name: resolved.serverToolName.replace(/_/g, " "), description: tool.function.description ?? "",
+      rankTerms: [resolved.serverConfigKey, resolved.serverToolName], meaningTerms: [resolved.serverConfigKey], tool };
+  });
+  return rankHarnessItemsByMeaning(query.slice(0, 500), items, 50, embedder).map(item => item.tool);
+}
 export type MenuResolution = { kind: "result"; content: string } | { kind: "call"; toolName: string; arguments: string } | null;
 /** Main-only request-scoped resolution. Tokens never grant authority; the
  * canonical dispatch still checks the prepared transport and approval. */
@@ -186,11 +216,14 @@ export function resolveToolMenu(byName: Map<string, ResolvedTool>, name: string,
   // An auth/config/permission change invalidates even cached metadata.
   for (const resolved of byName.values()) if (resolved.kind === "mcp") preparedMcpTransport(resolved.prepared, resolved.server);
   if (name === LIST) {
-    keys(args, ["server", "cursor", "limit"], { tool: LIST, arguments: {} });
+    keys(args, ["server", "query", "cursor", "limit"], { tool: LIST, arguments: {} });
     if (args.server !== undefined && typeof args.server !== "string") throw new Error("tool_menu_arguments_invalid");
+    if (args.query !== undefined && typeof args.query !== "string") throw new Error("tool_menu_arguments_invalid");
     const cursor = args.cursor ?? 0, limit = args.limit ?? 30;
     if (!Number.isInteger(cursor) || (cursor as number) < 0 || !Number.isInteger(limit) || (limit as number) < 1 || (limit as number) > 50) throw new Error("tool_menu_arguments_invalid");
-    const rows = [...menu.descriptors.values()].filter(tool => args.server === undefined || (byName.get(tool.function.name) as Extract<ResolvedTool, {kind:"mcp"}>).serverConfigKey === args.server);
+    const inServer = [...menu.descriptors.values()].filter(tool => args.server === undefined || (byName.get(tool.function.name) as Extract<ResolvedTool, {kind:"mcp"}>).serverConfigKey === args.server);
+    // The same ranking harness_search uses (search-rank.ts): words first, then meaning for what no word reaches.
+    const rows = typeof args.query === "string" && args.query.trim() ? rankMenuRows(args.query, inServer, byName) : inServer;
     const page = rows.slice(cursor as number, (cursor as number) + (limit as number));
     const response = () => JSON.stringify({ schemaVersion: "agentlas.tool-menu.v1", inventoryDigest: menu.metrics.inventoryDigest, metrics: menu.metrics, total: rows.length,
       tools: page.map(tool => { const resolved = byName.get(tool.function.name) as Extract<ResolvedTool, {kind:"mcp"}>;

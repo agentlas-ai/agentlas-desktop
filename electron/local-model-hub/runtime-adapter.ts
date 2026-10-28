@@ -1,4 +1,5 @@
 import type { RuntimeStatus } from "../../shared/types";
+import { trackTurnActivity } from "../runtime/turn-activity";
 import type { Runner } from "../runtime/runner";
 import { LocalModelHubManager } from "./manager";
 import { createManagedLocalModelRunner } from "./runner";
@@ -17,7 +18,8 @@ export function configureLocalModelRuntime(runtime: LocalModelHubRuntimePort): v
 export function configureLocalModelHubManager(manager: LocalModelHubManager): void {
   if (configured && configured.manager !== manager) throw new Error("local_model_hub_already_configured");
   configured ??= { manager, runtime: { snapshot: () => manager.snapshot(),
-    observeSnapshot: async () => manager.observeRuntimeInventory(), run: createManagedLocalModelRunner(manager) } };
+    observeSnapshot: async () => manager.observeRuntimeInventory(), run: createManagedLocalModelRunner(manager),
+    toolProbeAsk: (id, taskId, signal) => manager.toolProbeAsk(id, taskId, signal) } };
 }
 
 export function requireLocalModelHubManager(): LocalModelHubManager {
@@ -69,6 +71,37 @@ function runtimeFromSnapshot(snapshot: LocalModelRuntimeInventory): RuntimeStatu
   };
 }
 
+/**
+ * The latest measured tool-JUDGMENT receipt per installed model (tool-choice-probe.ts toolJudgment: right tool when one is
+ * needed AND no tool when none is). Receipts without that marker (before 2026-10-28) or "not_tested" are no measurement.
+ * An unconfigured hub or a failed snapshot reads as no measurement — never as a pass. supportsTools (above) keeps reading
+ * toolUse: running tools and judging them are separate markers.
+ */
+export async function readLocalModelToolChoiceReceipts(): Promise<Array<{
+  installationId: string; fileName: string; judgment: "verified" | "failed"; testedAt: string; reasonCodes: string[];
+}>> {
+  if (!configured) return [];
+  try {
+    const snapshot = await configured.runtime.snapshot();
+    const latest = new Map<string, { installationId: string; testedAt: string; judgment: "verified" | "failed"; reasonCodes: string[] }>();
+    for (const receipt of snapshot.capabilityReceipts) {
+      if (receipt.toolJudgment !== "verified" && receipt.toolJudgment !== "failed") continue;
+      const prior = latest.get(receipt.installationId);
+      if (!prior || Date.parse(receipt.testedAt) >= Date.parse(prior.testedAt)) {
+        latest.set(receipt.installationId, { installationId: receipt.installationId, testedAt: receipt.testedAt,
+          judgment: receipt.toolJudgment, reasonCodes: [...receipt.reasonCodes] });
+      }
+    }
+    return [...latest.values()].flatMap((receipt) => {
+      const installation = snapshot.modelInstallations.find((item) => item.installationId === receipt.installationId);
+      return installation ? [{ installationId: receipt.installationId, fileName: installation.fileName, judgment: receipt.judgment,
+        testedAt: receipt.testedAt, reasonCodes: receipt.reasonCodes }] : [];
+    });
+  } catch {
+    return [];
+  }
+}
+
 /** No snapshot call: an unavailable observation remains visible and cannot admit work. */
 export async function observeManagedLocalRuntime(): Promise<RuntimeStatus | null> {
   if (!configured) return null;
@@ -85,7 +118,26 @@ export async function observeManagedLocalRuntime(): Promise<RuntimeStatus | null
   };
 }
 
-export const runManagedLocalModel: Runner = async (request, events) => {
+// Background measurement on the hub waits while a model call is running (turn-activity.ts).
+export const runManagedLocalModel: Runner = (request, events) => trackTurnActivity(() => runManagedLocalModelCall(request, events));
+
+/** The hub's resident model and installations (with file sha256), or null when no hub is configured or readable. */
+export async function readLocalModelInventory(): Promise<{ resident: { installationId: string } | null;
+  modelInstallations: Array<{ installationId: string; fileName: string; fileSha256: string }> } | null> {
+  if (!configured) return null;
+  try {
+    const snapshot = await configured.runtime.snapshot();
+    return { resident: snapshot.resident ? { installationId: snapshot.resident.installationId } : null,
+      modelInstallations: snapshot.modelInstallations.map((item) => ({ installationId: item.installationId, fileName: item.fileName, fileSha256: item.fileSha256 })) };
+  } catch { return null; }
+}
+
+/** One ask of the shared tool-choice probe on the resident hub model, or null when this host cannot (older daemon). */
+export function localModelToolProbeAsk(): NonNullable<LocalModelHubRuntimePort["toolProbeAsk"]> | null {
+  return configured?.runtime.toolProbeAsk ?? null;
+}
+
+const runManagedLocalModelCall: Runner = async (request, events) => {
   if (!configured) throw new Error("local_model_hub_not_configured");
   try { return await configured.runtime.run(request, events); }
   catch (error) {

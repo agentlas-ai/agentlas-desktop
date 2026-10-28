@@ -15,7 +15,7 @@ import { isInterruptedPartial, isLivePartialCommitBoundary, markInterruptedParti
 import { subscribeOrderedRunEvents } from "@/lib/ordered-run-events";
 import { createFrameBatcher, isLiveStreamTick, type FrameBatcher } from "@/lib/frame-coalescer";
 import { seedWorkRunProjections, syncWorkRunProjections, workRunTimelineRequest, WORK_TIMELINE_EVENTS_PER_RUN, WORK_TIMELINE_RUNS, type WorkRunProjectionCache } from "@/lib/work-run-timeline-sync";
-import { mergeAutomationHostNotices } from "@/lib/chat-host-notice-refresh";
+import { mergeAutomationHostNotices, mergeOwnerDecisionRows } from "@/lib/chat-host-notice-refresh";
 import { readRunLateRowsAfterWindow, withLateRunRows } from "@/lib/one-chat-outputs";
 import { outputsOldestToNewest, workRowRecencyMs } from "@/lib/work-latest-output";
 
@@ -2596,6 +2596,11 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
     consumedWorkDraftIds.current.add(draftRequest.id);
     // Reuse ChatInput's append-only draft port: preserve typed text, never start a turn.
     setBrowserDraftRequest({ id: `work-draft:${draftRequest.id}`, chatId, text: draftRequest.text });
+    // The screen's own gesture names the workflow this conversation's next turn carries: typed data recorded in Main, never words in the draft.
+    if (draftRequest.capability) {
+      const harness = (window as unknown as { agentlas?: { harness?: { call: (operation: string, args?: Record<string, unknown>) => Promise<unknown> } } }).agentlas?.harness;
+      void harness?.call("turn.capability.request", { chatId, plugin: draftRequest.capability.plugin, workflow: draftRequest.capability.workflow }).catch(() => undefined);
+    }
     draftRequest.onConsumed();
   }, [chatId, chat?.id, agent, draftRequest]);
   // 델타 partial 누적 버퍼 — main이 증분만 보내므로 여기서 전문을 재조립한다.
@@ -4217,10 +4222,14 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
       void api.invoke.history(chatId).then((history) => {
         if (disposed || requestGeneration !== historyGeneration || !isCurrentChat()) return;
         const states = new Map(history.filter((entry) => entry.goalResult).map((entry) => [entry.durableMessageId ?? entry.id, entry.goalResult]));
-        const notices = history.map(historyEntryToStreamMessage).filter(message => message.hostNotice?.purpose === "automation-report");
+        const rows = history.map(historyEntryToStreamMessage);
+        const notices = rows.filter(message => message.hostNotice?.purpose === "automation-report");
         setMessages((current) => {
           if (disposed || requestGeneration !== historyGeneration || !isCurrentChat()) return current;
-          const appended = mergeAutomationHostNotices(current, notices);
+          const withReports = mergeAutomationHostNotices(current, notices);
+          // A card Main posted while no turn of this chat runs arrives only by this store change (chat-host-notice-refresh.ts).
+          const appended = !runIdRef.current && !current.some(message => message.busy || message.streaming)
+            ? mergeOwnerDecisionRows(withReports, rows) : withReports;
           if (appended !== current) transcriptRevisionRef.current += 1;
           return appended.map((message) => {
             const result = states.get(message.durableMessageId ?? message.id);

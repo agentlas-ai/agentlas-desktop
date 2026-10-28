@@ -277,7 +277,6 @@ function fsyncDirectoryBestEffort(directory: string): void {
 }
 
 export function getRoute(agentId: string): AgentRoute | null {
-  if (require("../business/company-work-reference").isCompanyWorkReference(agentId)) return null;
   return readAll()[agentId] ?? null;
 }
 

@@ -39,6 +39,7 @@ import { installedAgentMentionTarget } from "@/lib/mention-orchestration-target"
 import { pickLocalized, useT, type Locale } from "@/lib/i18n";
 import { loadSkillPluginMentions, matchingSkillPluginMentions, type SkillPluginMention } from "@/lib/skill-plugin-mentions";
 import { ipc, grantForDroppedFile } from "@/lib/ipc";
+import { useComposerMenuExtensions, type ComposerMenuExtension, type ComposerMenuItem } from "@/lib/composer-menu-extensions";
 import { useChatAlwaysApproval, type ChatAlwaysApprovalControl } from "@/lib/use-chat-always-approval";
 import type { ChatFileDraft } from "@/lib/chat-files";
 import { useComposerEnter } from "@/lib/use-composer-enter";
@@ -490,7 +491,8 @@ function ChatInputComponent({
     // input을 deps에 넣지 않는다 — 프리필 값이 바뀔 때만 1회 시도.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [prefillText]);
-  const [plusSubmenu, setPlusSubmenu] = useState<"plugins" | null>(null);
+  const [plusSubmenu, setPlusSubmenu] = useState<PlusSubmenu>(null);
+  const menuExtensions = useComposerMenuExtensions();
   const [planMode, setPlanMode] = useState(false);
   const [goalMode, setGoalMode] = useState(false);
   // goal 칩의 유효 상태 — 부모가 DB 영속 상태(goalActive/onToggleGoal)를 주면 그것이
@@ -1158,6 +1160,18 @@ function ChatInputComponent({
           submenu={plusSubmenu}
           setSubmenu={setPlusSubmenu}
           plugins={plugins}
+          extensions={menuExtensions}
+          onInsertItem={(item) => {
+            // An extension item is text the owner sees in the message and can edit before sending (a programmatic insert, like the @ row).
+            const next = `${input}${input.endsWith(" ") || input === "" ? "" : " "}${item.insert} `;
+            setInput(next);
+            setPlusOpen(false);
+            setPlusSubmenu(null);
+            setTimeout(() => {
+              textareaRef.current?.focus();
+              textareaRef.current?.setSelectionRange(next.length, next.length);
+            }, 0);
+          }}
           onAddFile={() => {
             setPlusOpen(false);
             setPlusSubmenu(null);
@@ -2957,6 +2971,8 @@ function PlusMenu({
   submenu,
   setSubmenu,
   plugins,
+  extensions,
+  onInsertItem,
   onAddFile,
   onAddFolder,
   planMode,
@@ -2977,9 +2993,12 @@ function PlusMenu({
   onToggleSwarm,
   t,
 }: {
-  submenu: "plugins" | null;
-  setSubmenu: (s: "plugins" | null) => void;
+  submenu: PlusSubmenu;
+  setSubmenu: (s: PlusSubmenu) => void;
   plugins: string[];
+  /** Submenus a surface registered for this composer (lib/composer-menu-extensions.tsx). */
+  extensions: readonly ComposerMenuExtension[];
+  onInsertItem: (item: ComposerMenuItem) => void;
   onAddFile: () => void;
   onAddFolder: () => void;
   planMode: boolean;
@@ -3004,6 +3023,8 @@ function PlusMenu({
   onToggleSwarm: () => void;
   t: TFunction;
 }) {
+  const extension = typeof submenu === "string" && submenu.startsWith("ext:") ? extensions.find((item) => `ext:${item.id}` === submenu) : undefined;
+  if (extension) return <ExtensionSubmenu extension={extension} onBack={() => setSubmenu(null)} onPick={onInsertItem} locale={locale} />;
   if (submenu === "plugins") {
     return (
       <Popover dataKind="plus" role="menu" compact ariaLabel={locale === "ko" ? "플러그인" : "Plugins"}>
@@ -3062,6 +3083,16 @@ function PlusMenu({
         right={<IconChevronRight size={11} style={{ color: "var(--muted)" }} />}
         compact
       />
+      {extensions.map((item) => (
+        <Row
+          key={item.id}
+          onClick={() => setSubmenu(`ext:${item.id}`)}
+          icon={item.icon ?? <IconAtSign size={14} />}
+          title={item.label}
+          right={<IconChevronRight size={11} style={{ color: "var(--muted)" }} />}
+          compact
+        />
+      ))}
       <Divider />
       <ToggleRow
         icon={<IconRoute size={14} />}
@@ -3382,6 +3413,34 @@ function GroupLabel({ children }: { children: React.ReactNode }) {
     >
       {children}
     </div>
+  );
+}
+
+type PlusSubmenu = "plugins" | `ext:${string}` | null;
+
+/** One registered extension's items, loaded when its submenu opens. */
+function ExtensionSubmenu({ extension, onBack, onPick, locale }: { extension: ComposerMenuExtension; onBack: () => void; onPick: (item: ComposerMenuItem) => void; locale: string }) {
+  const [items, setItems] = useState<readonly ComposerMenuItem[] | null>(null);
+  const [failed, setFailed] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    setItems(null); setFailed(false);
+    extension.load().then((rows) => { if (alive) setItems(rows); }).catch(() => { if (alive) setFailed(true); });
+    return () => { alive = false; };
+  }, [extension]);
+  const ko = locale === "ko";
+  return (
+    <Popover dataKind="plus" role="menu" compact ariaLabel={extension.label}>
+      <button type="button" role="menuitem" onClick={onBack}
+        style={{ display: "flex", width: "100%", alignItems: "center", gap: 6, padding: "6px 10px", fontSize: 11, color: "var(--muted-deep)", background: "transparent", border: "none" }}>
+        <IconChevronRight size={11} style={{ transform: "rotate(180deg)" }} />
+        {extension.label}
+      </button>
+      {failed ? <EmptyHint>{ko ? "목록을 불러오지 못했습니다." : "Could not load the list."}</EmptyHint>
+        : items === null ? <EmptyHint>{ko ? "불러오는 중…" : "Loading…"}</EmptyHint>
+        : items.length === 0 ? <EmptyHint>{extension.emptyLabel ?? (ko ? "항목이 없습니다." : "Nothing to add.")}</EmptyHint>
+        : items.map((item) => <Row key={item.id} onClick={() => onPick(item)} icon={extension.icon ?? <IconAtSign size={13} />} title={item.label} subtitle={item.description} compact />)}
+    </Popover>
   );
 }
 

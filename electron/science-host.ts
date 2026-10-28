@@ -1,310 +1,48 @@
-import { createScienceQuestionHost } from "./science-host/question-continuation";
-import { scienceAliveCoreHost } from "./science-host/alive-core";
-import { withHostInvocationAdmission } from "./invocation/host-admission";
-import { scienceLocalSpecialistHost } from "./science-host/local-specialists";
-import { scienceLocalEmbeddingHost } from "./science-host/local-embedding";
-import { ScienceQuestionRecoveryPresenter } from "./science-host/work-recovery";
-import { inspectScienceRuntimeSelectionAvailability } from "./science-host/runtime-selection-availability";
-import { installScienceStoreSchemaRejectionReader } from "./invocation/science-schema-rejection";
-import { scienceCriterionReviewHost } from "./science-host/criterion-review";
-import { scienceAliveDesktopTools, scienceDesktopTools } from "./science-host/desktop-tool-bridge";
-import { mintForwardSteeringRecoveryCapability } from "./science-host/recovery-mint";
-import { scienceEvidenceCollectionHost } from "./runtime/science-collection-boundary";
-import { desktopAliveRuntime } from "./alive-runtime";
-import { desktopAliveClock } from "./alive-clock";
-import { projectResearchState } from "./science-host/research-state-projection";
-import { scienceCodexProductConfig } from "./science-host/codex-product-config";
-import { bindScienceCodexProductSessionStore } from "./science-host/codex-session-store";
-import { scienceHostGoalWake, readScienceHostGoalWake, cancelScienceHostGoalWake, recordScienceHostGoalOwnerControl } from "./science-host/goal-wake";
-import { recordSciencePublicationHostOutputs } from "./science-host/publication-outputs";
-import { recordScienceArtifactHostOutputs } from "./science-host/artifact-outputs";
 /*
- * 사이언스가 이 앱에게 요구하는 것을 한 벌로 채워 준다.
+ * 사이언스가 이 앱(Main)에게 요구하는 것을 채워 준다.
  *
- * 사이언스는 이제 자기 저장소(agentlas-science)에 산다. 그쪽 코드 7만 줄은 이 파일
- * 하나만 지나서 데스크탑에 닿는다 — 함수 30개 남짓이 전부다.
+ * 사이언스는 자기 저장소(agentlas-science)에 산다. 그쪽 코드는 SDK 포트를 지나서만
+ * 데스크탑에 닿고, 그 포트는 Main 과 데몬이 같은 설치기 하나로 채운다
+ * (`electron/science-host/install.ts` — docs/2026-10-28-science-harness-unify/PLAN.md §4 S1).
  *
- * OS 권한이 필요해 사이언스가 가져가지 못한 넷(파일 고르기 창 둘, 논문 PDF 렌더,
- * 서명된 실행기)은 `electron/science-host/` 에 남아 있고 여기서 함께 넘긴다.
+ * Main 에만 있는 것은 셋이다: Main 의 실행 울타리(앱 실행 허가), 연구자 질문을 띄우는
+ * 창, 그리고 앱 종료 때 정리. electron 을 싣는 것도 이 파일뿐이다 — 데몬에는 electron 이 없다.
  *
- * 부팅 때 한 번 installScienceHost() 를 부르면 그 뒤로는 사이언스가 알아서 쓴다.
+ * 부팅 때 한 번 installDesktopScienceHost() 를 부른다. 두 번째 설치는 거절된다.
  */
-import fs from "node:fs";
-import path from "node:path";
-import { createHash } from "node:crypto";
 import { app } from "electron";
 
-import { scienceStore, installScienceHost, SCIENCE_HOST_CONTRACT_VERSION, SCIENCE_HOST_REQUIRED_CAPABILITIES } from "agentlas-science";
-import { inspectLegacyForwardRecoveryBoundary, reconcileScienceBoundary, type ScienceRuntimeBoundaryInput } from "./long-run/science-boundary";
-import { projectScienceLoopLongRun } from "./long-run/science-projection";
-
-import { detachedSpawnOpts, killCliTree, probeCliVersion, spawnCli, withCliPath } from "./runtime/exec";
-import { resolveManagedNodeRuntime } from "./runtime/managed-node";
-import { isPackagedRuntime, runtimeResourcesPath, userDataPath } from "./runtime-paths";
-import { currentUiLocale } from "./ui-locale";
-import { ensureScienceRuntimeChat, latestDurableAssistantMessage, setChatRuntimeSelection } from "./store/chats";
-import { getMeta, setMeta } from "./store/meta";
-import { getDb } from "./store/db";
-import { evictRuntimeSessionsForChat } from "./store/runtime-sessions";
-import { listPendingScienceRuntimeOutboxEvents, markScienceRuntimeOutboxDelivered } from "./store/run-events";
-import { agentFolderPath, buildEffectiveAgentSystemPrompt, materializeAgentFiles } from "./agents/files";
-import { invocationService } from "./invocation/service";
-import { captureScienceInvocationBinding } from "./invocation/workspace-binding";
-import { RUNTIME_BACKEND_SET } from "../shared/runtime-backends";
-import { RUNTIME_KIND_SET } from "../shared/runtime-kinds";
-import { productExtensionSignedPayload } from "../shared/product-extension";
-import type { InstalledMcpServer } from "../shared/types";
-import { registerPreparedMcpConfig } from "./mcp-tools/prepared-transport";
-import { notifyScienceResearcherQuestion } from "./extensions/view-host";
-
-/*
- * 사이언스 화면 묶음을 검증해 주는 쪽은 확장 설치기다. 사이언스가 그 판정을 되묻기
- * 때문에 서로를 부르는 모양이 되는데, 아래 위임은 **부를 때** 해석되므로 모듈이
- * 실리는 순서에 걸리지 않는다.
- */
-import {
-  activeScienceExtension,
-  resolveExactVerifiedScienceRenderer,
-  resolveExactVerifiedScienceRendererExecutor,
-  resolveExactVerifiedScienceRendererExecutorBinding,
-  resolveVerifiedScienceRenderer,
-  resolveVerifiedScienceRendererExecutor,
-} from "./extensions/science";
-
-// OS 권한이 필요해 데스크탑에 남은 넷
-import { probePdfLatexProfile } from "./science-host/pdflatex";
-import { configureScienceMathPython } from "./science-host/math-python";
-import { listScienceTypesetProfileCatalog } from "./science-host/typeset-profile-catalog";
-import { renderManuscriptPdf, resolveTectonic } from "./science-host/render-pdf";
-import { persistedWorkbookReadback, readPersistedScienceWorkbook } from "./science-host/workbook-intake-ipc";
-
-import { scienceRuntimeRole } from "agentlas-science";
-import { createScienceCanonicalGoalWaitOwner, installScienceCanonicalGoalWaitOwner } from "./science-host/goal-wait";
-import { readCanonicalGoalWait, holdCanonicalGoalWait, cancelCanonicalGoalWaitScope, setCanonicalGoalWaitOwnerProvider } from "./long-run/canonical-owner-waits";
-import { invocationProcessOwner } from "./store/invocation-run-owners";
+import { installScienceHostFor, type ScienceHostHandle } from "./science-host/install";
 import { assertDesktopLongRunAdmissionOpen } from "./long-run/app-runtime-coordinator";
+import { invocationProcessOwner } from "./store/invocation-run-owners";
 import { onHostShutdown } from "./host-lifecycle";
-let installed = false;
-let registeredResearcherQuestionUiRelease: string | null = null;
-let questionRecovery: ScienceQuestionRecoveryPresenter | null = null;
+import { notifyScienceResearcherQuestion } from "./extensions/view-host";
+import * as workbookIntake from "./science-host/workbook-intake-ipc";
 
-function desktopQuestionRecovery(): ScienceQuestionRecoveryPresenter {
-  if (!questionRecovery) {
-    questionRecovery = new ScienceQuestionRecoveryPresenter({
-      references: () => scienceStore().researcherQuestions().openReferences(),
-      read: ref => scienceStore().researcherQuestions().presentationScope(ref.projectId, ref.conversationId, ref.questionId),
-      available: () => Boolean(registeredResearcherQuestionUiRelease && registeredResearcherQuestionUiRelease === currentScienceUiRelease()),
-      present: notifyScienceResearcherQuestion,
-    });
-    app.once("before-quit", () => questionRecovery?.stop());
-  }
-  return questionRecovery;
-}
+let host: ScienceHostHandle | null = null;
 
-function boundScienceRuntimeChatId(input: Omit<ScienceRuntimeBoundaryInput, "expectedRuntimeChatId">): string {
-  const store = scienceStore();
-  const turn = store.getTurnForProject(input.projectId, input.turnId);
-  const binding = store.getConversationRuntimeBinding(input.projectId, input.conversationId);
-  if (!turn || !binding || turn.conversationId !== input.conversationId
-    || turn.invocationRunId !== input.invocationRunId || turn.runtimeChatId !== binding.runtimeChatId) {
-    throw new Error("science_runtime_boundary_run_binding_mismatch");
-  }
-  return binding.runtimeChatId;
-}
-
-function currentScienceUiRelease(): string | null {
-  const release = activeScienceExtension();
-  return release ? createHash("sha256").update(productExtensionSignedPayload(release.manifest)).digest("hex") : null;
+/** Main is the desktop process owner; it never holds the daemon's lease. */
+function assertDesktopScienceOwner(): void {
+  if (invocationProcessOwner().ownerKind !== "desktop") throw new Error("science_host_owner_changed");
 }
 
 /** Called only by Main after the verified Science renderer registers its answer UI. */
 export function registerDesktopScienceResearcherQuestionUi(): void {
-  registeredResearcherQuestionUiRelease = currentScienceUiRelease();
-  if (!registeredResearcherQuestionUiRelease) throw new Error("science-researcher-question-ui-release-unavailable");
-  desktopQuestionRecovery().restore();
+  if (!host) throw new Error("science-host-not-installed");
+  host.registerQuestionUi();
 }
 
-/**
- * Keep the Desktop side of this bridge structural. The pinned Science package
- * predates its exported name, while newer Science builds call this same shape.
- */
-interface ScienceMcpPreparedRegistration {
-  path: string;
-  configKey: string;
-  command: string;
-  args: string[];
-  env: Record<string, string>;
-  isCurrent: () => boolean;
-}
-
-/**
- * Science's package owns the loopback grant, while Desktop Main owns the
- * prepared-transport admission registry. Keep the bridge here so a renderer
- * or an extension cannot mint a prepared binding by itself.
- */
-function registerScienceMcpPreparedConfig(input: ScienceMcpPreparedRegistration): void {
-  const server: InstalledMcpServer = {
-    id: input.configKey,
-    catalogId: input.configKey,
-    name: "Agentlas Science",
-    nameEn: "Agentlas Science",
-    transport: "stdio",
-    command: input.command,
-    args: [...input.args],
-    url: null,
-    // Prepared transports do not resolve credentials through the global
-    // registry. Their exact values stay in the Main-only WeakMap created by
-    // registerPreparedMcpConfig.
-    envKeys: [],
-    configurationValid: true,
-    enabled: true,
-    installedAt: new Date().toISOString(),
-  };
-  registerPreparedMcpConfig({
-    path: input.path,
-    servers: [{
-      configKey: input.configKey,
-      server,
-      transport: { command: input.command, args: [...input.args], env: { ...input.env } },
-      runtimeRoot: null,
-    }],
-    runtimeEnv: {},
-    isCurrent: input.isCurrent,
-  });
-}
-
-/** 부팅에서 한 번만 부른다. 두 번 불러도 안전하다. */
+/** 부팅에서 한 번만 부른다. */
 export function installDesktopScienceHost(): void {
-  configureScienceMathPython();
-  if (installed) return;
-  const goalWait = createScienceCanonicalGoalWaitOwner({
-    owner: () => { const current = invocationProcessOwner(); return scienceRuntimeRole() === "execution-owner" && current.ownerKind === "desktop"
-      ? { kind: "desktop", epoch: current.ownerId } : null; },
-    assertExecution: assertDesktopLongRunAdmissionOpen,
-    assertCurrentOwner: expected => {
-      assertDesktopLongRunAdmissionOpen();
-      const current = invocationProcessOwner();
-      if (scienceRuntimeRole() !== "execution-owner" || expected.kind !== "desktop"
-        || current.ownerKind !== "desktop" || expected.epoch !== current.ownerId) throw new Error("science_goal_wait_owner_changed");
-    },
-    intake: { read: readCanonicalGoalWait, hold: holdCanonicalGoalWait },
-    cancelScope: cancelCanonicalGoalWaitScope,
-  });
   // The SDK's data-client role remains read-only; this does not promote Main to the execution owner.
-  const compatibility = installScienceHost({
-    ...{ aliveCore: scienceAliveCoreHost },
-    aliveRuntime: desktopAliveRuntime,
-    aliveClock: desktopAliveClock,
-    // 실행
-    spawnCli, killCliTree, probeCliVersion, withCliPath, detachedSpawnOpts,
-    resolveManagedNodeRuntime,
-    // 저장소
-    ensureScienceRuntimeChat, latestDurableAssistantMessage, setChatRuntimeSelection,
-    getMeta, setMeta, getDb, evictRuntimeSessionsForChat,
-    listPendingScienceRuntimeOutboxEvents, markScienceRuntimeOutboxDelivered,
-    // 에이전트 파일
-    agentFolderPath, buildEffectiveAgentSystemPrompt, materializeAgentFiles,
-    // 모델 호출
-    invocationService: withHostInvocationAdmission(invocationService), captureScienceInvocationBinding,
-    // 플랫폼
-    userDataPath, currentUiLocale, productExtensionSignedPayload,
-    RUNTIME_BACKEND_SET, RUNTIME_KIND_SET,
-    registerScienceMcpPreparedConfig,
-    researcherQuestionUi: {
-      // Registration proves that this installed renderer implements durable list + human answer.
-      // The view need not remain open: questions can be read again when it is reopened.
-      isAvailable: () => Boolean(registeredResearcherQuestionUiRelease
-        && registeredResearcherQuestionUiRelease === currentScienceUiRelease()),
-      present: (question: unknown) => { desktopQuestionRecovery().present(question); },
-    },
-    // 확장 검증
-    activeScienceExtension,
-    resolveVerifiedScienceRenderer,
-    resolveExactVerifiedScienceRenderer,
-    resolveVerifiedScienceRendererExecutor,
-    resolveExactVerifiedScienceRendererExecutor,
-    resolveExactVerifiedScienceRendererExecutorBinding,
-    // OS 권한이 필요한 넷
-    isPackagedHost: isPackagedRuntime,
-    renderManuscriptPdf, resolveTectonic,
-    readPersistedScienceWorkbook, persistedWorkbookReadback,
-    /*
-     * 내장 플러그인이 어디 있는지. 사이언스가 자기 위치로 추측하던 자리인데, 저장소가
-     * 갈리면서 그 추측이 빗나갔다. 이 앱은 답을 알고 있으므로 알려 준다.
-     *
-     * ★실측(2026-09-10): `dist/electron/plugins`는 과학 플러그인과 무관한
-     *   `electron/plugins/*.ts`(에이전트 플러그인 빌더/materialize) 컴파일 산출물이며,
-     *   이름만 "plugins"로 같다. 후보 디렉터리 자체의 존재만 보면 이 무관한 폴더가
-     *   먼저 걸려 진짜 위치(`agentlas_desktop/plugins/`)를 절대 못 본다 — 그 안엔
-     *   science 하위 폴더가 하나도 없어 모든 science 플러그인이
-     *   science-plugin-runtime-unavailable 로 죽는다. 반드시 함께 번들되는
-     *   science 플러그인 하나(`agentlas-science-statistics`)를 표식으로 그 후보
-     *   **안에** 있는지까지 확인한다.
-     */
-    sciencePluginRoot: () => {
-      const resources = runtimeResourcesPath();
-      const packaged = resources
-        ? path.join(resources, "app.asar.unpacked", "dist", "plugins")
-        : null;
-      const compiled = path.resolve(__dirname, "plugins");
-      const source = path.resolve(__dirname, "..", "..", "plugins");
-      for (const candidate of [compiled, source, packaged]) {
-        if (candidate && fs.existsSync(path.join(candidate, "agentlas-science-statistics"))) return candidate;
-      }
-      return null;
-    },
-    /** 내장 플러그인 매니페스트 핀. 이 앱의 빌드가 만들고 이 앱이 위치를 안다. */
-    sciencePublicPluginPinsPath: () => {
-      const compiled = path.resolve(__dirname, "public-plugin-manifest-pins.json");
-      return fs.existsSync(compiled) ? compiled : null;
-    },
-    // 런타임 탐색 — 사이언스는 이것을 동적으로만 부른다
-    detectRuntimes: async (...args: unknown[]) => (await import("./runtime/detect")).detectRuntimes(...(args as Parameters<typeof import("./runtime/detect")["detectRuntimes"]>)),
-    listRuntimeModels: async (...args: unknown[]) => (await import("./runtime/providers")).listRuntimeModels(...(args as Parameters<typeof import("./runtime/providers")["listRuntimeModels"]>)),
-  } as never, {
-    contractVersion: SCIENCE_HOST_CONTRACT_VERSION,
-    capabilities: SCIENCE_HOST_REQUIRED_CAPABILITIES,
-    execution: {
-      ...{ decisions: createScienceQuestionHost().port },
-      ...{ goalWait: goalWait.sdkHost },
-      ...{ hostGoalWake: scienceHostGoalWake },
-      ...{ readHostGoalWake: readScienceHostGoalWake, cancelHostGoalWake: cancelScienceHostGoalWake,
-        recordHostGoalOwnerControl: recordScienceHostGoalOwnerControl },
-      ...{ recordPublicationOutputs: recordSciencePublicationHostOutputs },
-      ...{ recordArtifactOutputs: recordScienceArtifactHostOutputs },
-      ...{ projectResearchState },
-      ...{ codexProductConfig: scienceCodexProductConfig },
-      ...{ bindCodexProductSessionStore: bindScienceCodexProductSessionStore },
-      ...{ mintForwardSteeringRecoveryCapability },
-      ...{ evidenceCollection: scienceEvidenceCollectionHost },
-      criterionReview: scienceCriterionReviewHost,
-      localSpecialists: scienceLocalSpecialistHost,
-      ...{ desktopTools: scienceDesktopTools },
-      ...{ aliveDesktopTools: scienceAliveDesktopTools },
-      registerMcpPreparedConfig: registerScienceMcpPreparedConfig,
-      reconcileScienceBoundary: async (input) => {
-        return reconcileScienceBoundary({ ...input, expectedRuntimeChatId: boundScienceRuntimeChatId(input) },
-          { hostLost: (runId) => { const receipt = invocationService.receipt(runId); return receipt === null || receipt.status === "interrupted"; } });
-      },
-      ...{ inspectLegacyForwardRecoveryBoundary: async (input: Omit<ScienceRuntimeBoundaryInput, "expectedRuntimeChatId">) =>
-        inspectLegacyForwardRecoveryBoundary({ ...input, expectedRuntimeChatId: boundScienceRuntimeChatId(input) }) },
-    },
-    ...{ localEmbedding: scienceLocalEmbeddingHost },
-    workspace: { captureInvocationBinding: captureScienceInvocationBinding },
-    render: { renderManuscriptPdf, resolveTectonic, probePdfLatexProfile, listTypesetProfiles: listScienceTypesetProfileCatalog },
-    runtimeCatalog: {
-      // Optional health facade also works while the installed Science declaration
-      // is older; the exact pinned package can consume it without a contract downgrade.
-      ...{ inspectSelectionAvailability: inspectScienceRuntimeSelectionAvailability },
-      detectRuntimes: async () => (await (await import("./runtime/detect")).detectRuntimes()).map((runtime) => ({ ...runtime, availableModels: runtime.availableModels ?? [] })),
-      listRuntimeModels: async (kind, backend, models, timestamp) => (await import("./runtime/providers")).listRuntimeModels(kind, backend, models, timestamp),
-    },
-    projection: { project: (snapshot) => { projectScienceLoopLongRun(snapshot); } },
+  const installed = installScienceHostFor({
+    hostKind: "main",
+    fence: { assertOwner: assertDesktopScienceOwner, assertExecution: assertDesktopLongRunAdmissionOpen },
+    ownerEpoch: () => { const current = invocationProcessOwner(); return current.ownerKind === "desktop" ? current.ownerId : null; },
+    presentQuestion: notifyScienceResearcherQuestion,
+    workbook: () => workbookIntake,
   });
-  if (compatibility.status !== "compatible") throw new Error(compatibility.code);
-  installScienceStoreSchemaRejectionReader(scienceStore);
-  installScienceCanonicalGoalWaitOwner(goalWait);
-  setCanonicalGoalWaitOwnerProvider(goalWait.provider);
-  onHostShutdown(() => { installScienceCanonicalGoalWaitOwner(null); setCanonicalGoalWaitOwnerProvider(null); });
-  installed = true;
+  host = installed;
+  app.once("before-quit", () => installed.stopQuestionPresenter());
+  onHostShutdown(() => installed.stop());
 }

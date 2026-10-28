@@ -1,19 +1,29 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Chat } from "@shared/types";
 import { ipc, ipcEvents } from "@/lib/ipc";
 import { createTrailingDebounce } from "@/lib/store-change-policy";
 import { taskTitleForDisplay } from "@/lib/task-title";
 import { useT } from "@/lib/i18n";
 import { WorkChatSurface } from "@/components/TaskCockpit";
-import { IconPlus, IconRefresh } from "@/components/Icon";
+import { IconPlus, IconRefresh, IconSparkles } from "@/components/Icon";
+import { ComposerMenuExtensions, type ComposerMenuExtension } from "@/lib/composer-menu-extensions";
+import type { FinanceAnalystResult } from "@shared/finance-analysts";
+import { financeAnalystDescription, financeAnalystName } from "./FinanceAnalysts";
 import styles from "./FinanceWorkChat.module.css";
 
 interface FinanceWorkProject { ownerScope: string; projectId: string }
 export interface FinanceWorkChatProps {
   ownerScope: string | null;
   provisionProject: () => Promise<FinanceWorkProject>;
+  /** The owner's Analysts, offered in the Work composer's + menu (a generic composer extension, not a Finance composer). */
+  listAnalysts?: () => Promise<FinanceAnalystResult>;
+}
+
+/** The text an Analyst pick puts in the message: its exact id and revision, which finance.analyst.read takes. */
+export function financeAnalystMentionText(item: { id: string; name: string; revision: string }): string {
+  return `[Analyst: ${item.name} · id ${item.id} · revision ${item.revision}]`;
 }
 
 /** Only real Work chats returned for the owning project enter the selector. */
@@ -55,7 +65,7 @@ export function financeInitialWorkChat(ownerScope: string, projectId: string, br
 }
 
 /** A project/session selector around the unchanged Work harness, not a second conversation store. */
-export function FinanceWorkChat({ ownerScope, provisionProject }: FinanceWorkChatProps) {
+export function FinanceWorkChat({ ownerScope, provisionProject, listAnalysts }: FinanceWorkChatProps) {
   const [project, setProject] = useState<FinanceWorkProject | null>(null);
   const [chats, setChats] = useState<Chat[]>([]);
   const [activeChatId, setActiveChatId] = useState("");
@@ -72,6 +82,10 @@ export function FinanceWorkChat({ ownerScope, provisionProject }: FinanceWorkCha
   const language = useRef(ko), activeChat = useRef(activeChatId);
   language.current = ko; activeChat.current = activeChatId;
   const l = (k: string, e: string) => ko ? k : e;
+  const menuExtensions = useMemo<readonly ComposerMenuExtension[]>(() => listAnalysts ? [{
+    id: "finance-analyst", label: "Analyst", icon: <IconSparkles size={14} />, emptyLabel: ko ? "저장한 Analyst가 없습니다." : "No saved Analysts.",
+    load: async () => (await listAnalysts()).items.map(item => ({ id: item.id, label: financeAnalystName(item, ko), description: financeAnalystDescription(item, ko), insert: financeAnalystMentionText(item) })),
+  }] : [], [listAnalysts, ko]);
 
   useEffect(() => {
     const generation = ++epoch.current, capturedOwner = ownerScope; refreshSequence.current += 1;
@@ -187,6 +201,6 @@ export function FinanceWorkChat({ ownerScope, provisionProject }: FinanceWorkCha
       <button type="button" className={styles.newChat} onClick={() => void newConversation()} disabled={loading || creating || !validProject}><IconPlus size={17}/><span>{creating ? l("만드는 중…", "Creating…") : l("새 대화", "New conversation")}</span></button>
     </header>
     {error && <div className={styles.error} role="alert"><span>{error}</span>{!validProject && <button type="button" onClick={() => setAttempt(value => value + 1)}>{l("다시 시도", "Retry")}</button>}</div>}
-    {loading ? <p className={styles.status} role="status">{l("Finance 대화를 여는 중…", "Opening Finance conversations…")}</p> : validProject && activeChatId ? <div className={styles.surface}><WorkChatSurface key={`${ownerScope}:${activeChatId}`} chatId={activeChatId} embedded onNewSession={newConversation}/></div> : !error && <p className={styles.status}>{l("새 대화로 시작하세요.", "Start a new conversation.")}</p>}
+    {loading ? <p className={styles.status} role="status">{l("Finance 대화를 여는 중…", "Opening Finance conversations…")}</p> : validProject && activeChatId ? <div className={styles.surface}><ComposerMenuExtensions.Provider value={menuExtensions}><WorkChatSurface key={`${ownerScope}:${activeChatId}`} chatId={activeChatId} embedded onNewSession={newConversation}/></ComposerMenuExtensions.Provider></div> : !error && <p className={styles.status}>{l("새 대화로 시작하세요.", "Start a new conversation.")}</p>}
   </section>;
 }

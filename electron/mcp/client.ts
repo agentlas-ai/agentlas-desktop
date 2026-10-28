@@ -161,7 +161,7 @@ import { oneConfirmedRosterTargetsAreExact, oneTeamWorkforceHubMode, oneTeamUses
 import { projectRosterSpecs } from "../../shared/project-roster-specs";
 import { getCargoSource } from "../marketplace";
 import { getAuthenticatedActorIds, getSessionCookieHeader, webBaseUrl } from "../auth";
-import { assertFinanceWorkChatOwner } from "../finance/work-project";
+import { assertProjectDomainOwner } from "../invocation/project-domain-binding";
 import { ExperienceCloudHttpClient } from "../experience/cloud";
 import { prepareProjectCloudRoster, ProjectCloudRosterError } from "./project-cloud-roster";
 import { classifyTurnEscalation, decideProjectRosterTaskForce, describeTurnEscalation } from "../../shared/turn-escalation";
@@ -1737,8 +1737,6 @@ export async function pickActiveRunner(): Promise<
  *  context 미지정(undefined)은 로컬 렌더러 대화형 경로다. 새 원격/헤드리스 통합은 반드시
  *  여기 source를 추가하고 넘겨라 — 안 넘기면 대화형으로 오인된다(fail-open). */
 export interface InvocationExecutionContext {
-  /** Original Graph custody, never renderer/model supplied. */
-  companyWork?: object;
   graphWorkerAttempt?: GraphWorkerAttempt;
   /** Main-minted exact-run capability; future Science recovery writer only. */
   scienceRecovery?: object;
@@ -1747,7 +1745,7 @@ export interface InvocationExecutionContext {
   /** Host-minted custody of an immutable registered helper assignment. */
   scienceSpecialist?: object;
   /** "agent-mail": a One run the inbound-mail loop started for one received message (no person to ask). */
-  source: "company-work" | "automation" | "site-studio" | "telegram" | "trex" | "mobile" | "science" | "alive" | "agent-mail";
+  source: "automation" | "site-studio" | "telegram" | "trex" | "mobile" | "science" | "alive" | "agent-mail";
   /** An Alive wake's attached Science playground, not a Research Director turn. Main-only. */
   aliveScience?: Readonly<{ agentId: string; wakeId: string; controlEpoch: number; attachmentId: string }>;
   /** Main-owned Science turn authority. Never reconstruct this by parsing surfaceContext. */
@@ -2053,13 +2051,6 @@ export function runMcpInvocation(
   onNativeTurnController?: RunnerEvents["onNativeTurnController"],
   ownerControlInbox?: RunnerRequest["ownerControlInbox"],
 ): Promise<McpInvocationResult> {
-  if (executionContext?.source === "company-work") {
-    if (!executionContext.companyWork) throw new Error("company_work_grant_required");
-    const companyWork = executionContext.companyWork;
-    return import("../business/company-work-runner").then(module => module.runCompanyWorkInvocation(req, companyWork, sink, signal));
-  }
-  if (executionContext?.companyWork) throw new Error("company_work_source_required");
-  if (require("../business/company-work-reference").isCompanyWorkReference(getChat(req.chatId)?.agentId)) throw new Error("company_work_original_owner_required");
   if (!req.runId) req = { ...req, runId: `direct-${randomUUID()}` };
   const graphAttempt = executionContext?.graphWorkerAttempt;
   assertGraphWorkerAttempt(graphAttempt);
@@ -2206,7 +2197,7 @@ async function runMcpInvocationInContext(
   ownerControlInbox?: RunnerRequest["ownerControlInbox"],
 ): Promise<McpInvocationResult> {
   assertInvocationWorkspaceSourceContext(workspaceBinding, executionContext?.source);
-  const financeWorkBinding = assertFinanceWorkChatOwner(req.chatId, getAuthenticatedActorIds());
+  const projectDomainBinding = assertProjectDomainOwner(req.chatId, getAuthenticatedActorIds());
   const historyNative = await import('../one/personal-integrations-runtime');
   const historyRun = await historyNative.bindOneHistoryNativeRun({ runId: req.runId!, chatId: req.chatId });
   let nativeBrowserGrant: NativeBrowserRelayGrant | undefined;
@@ -2574,7 +2565,7 @@ async function runMcpInvocationInContext(
     };
   }
   const storedChat = getChat(req.chatId);
-  assertFinanceWorkChatOwner(req.chatId, getAuthenticatedActorIds(), financeWorkBinding);
+  assertProjectDomainOwner(req.chatId, getAuthenticatedActorIds(), projectDomainBinding);
   const chat = storedChat ? repairRootChatSurfaceController(storedChat) : null;
   if (!chat) {
     sink({ kind: "error", error: { code: "no-chat", message: tStatus(locale, "errChatNotFound") } });
@@ -3653,7 +3644,7 @@ async function runMcpInvocationInContext(
   let mcpGoalSelectionIsCurrent: (() => boolean) | undefined;
   let mcpGoalSelectionInvalidated = false;
   const assertMcpGoalSelectionCurrent = (): void => {
-    assertFinanceWorkChatOwner(req.chatId, getAuthenticatedActorIds(), financeWorkBinding);
+    assertProjectDomainOwner(req.chatId, getAuthenticatedActorIds(), projectDomainBinding);
     (require('../one/personal-data-runtime') as typeof import('../one/personal-data-runtime')).assertOnePersonalDataRunCurrent(req.runId);
     historyNative.assertOneHistoryRunCurrent({ runId: req.runId!, chatId: req.chatId });
     assertGraphWorkerAttempt(executionContext?.graphWorkerAttempt);
@@ -3687,18 +3678,72 @@ async function runMcpInvocationInContext(
   // whether this actor speaks to the owner or reports to its dispatcher.
   const questionChannel = deriveSessionChannel(getDb(), chat.id, isAliveControllerRun);
   const ownerQuestionEligible = questionChannel.kind === "direct" || questionChannel.kind === "room";
-  // Science retains its single catalog and discovers shared ask_user through
-  // the Desktop bridge; this flag does not insert another MCP into that catalog.
+  // A Science author turn on the shared chain gets ask_form from agentlas-turn like any attended turn; on the old Science
+  // grant path (an older Science build) the catalog stays single and shared ask_user is reached through the Desktop bridge.
   const turnAskToolOffered = Boolean(req.runId) && !unattendedNoAsk
     && !usesMobileDurableDecision(executionContext) && !req.agentAppMode && ownerQuestionEligible;
   // One Team attached to a Work task as a Toolchain consumer: it may search and run, not author.
   let mcpToolchainConsumer = false;
+  // The Work-session dispatch tools (one-team work_session_*) are in this run's config: the delegation line names them.
+  let mcpWorkSessionTools = false;
   let mcpAutoSelectionPrompt = "";
   // ★한 곳에서만 답한다(shared/runtime-mcp.ts). 예전에는 이 자리에 손으로 적은
   // 여섯 줄이 있었고, ACP 러너가 session/new.mcpServers 번역을 배운 뒤에도 그 목록은
   // 배우지 못해 cursor·kimi·acp 는 mcpConfigPath 자체를 못 받았다 — 번역기는 고쳤는데
   // 넘겨줄 config 가 없어 여전히 도구 0개로 돌았다.
   const runtimeCanUseMcp = runtimeKindCanUseMcp(active.kind);
+  /*
+   * PLAN S2: a Science author turn on the shared tool chain. Science mints its tool server (science-host/tool-server.ts)
+   * and the turn's config is the ordinary one below (auto-select, approval arbiter, Codex home, lazy menu, code mode,
+   * harness_search) with that server beside the others. Plan mode, criterion review and evidence collection keep their
+   * exact narrow Science grants (the branch further down); a Science build without the mint keeps the grant for every turn.
+   */
+  // The author-turn line of the registered purpose.science.session.scope module (both Science tool paths send it).
+  const SCIENCE_AUTHOR_SESSION_SCOPE = "science: Agentlas Science owns this session; pick tools from the live catalog; claims cite returned source ids or receipts; metadata ≠ full text; disclose partial failure; typed receipt before state claims; respect stale grants/Stop; reply as Agentlas Science (no Hope prefix)";
+  let scienceToolServer: import("../science-host/tool-server").ScienceHostToolServer | null = null;
+  let canonicalGoalWaitSource: ReturnType<(typeof import("../science-host/goal-wait"))["captureCanonicalGoalWaitSource"]> = null;
+  let canonicalGoalWaitSourceReader = null as (typeof import("../science-host/goal-wait"))["currentCanonicalGoalWaitSource"] | null;
+  // Assigned inside bindScienceCanonicalGoalWait: the cast keeps TypeScript from narrowing the later reads to null.
+  let refreshCanonicalGoalWaitSource = null as (() => ReturnType<NonNullable<typeof canonicalGoalWaitSourceReader>>) | null;
+  // A formal Science loop's canonical wait source for this run, on either tool path (shared chain or the old grant).
+  const bindScienceCanonicalGoalWait = async () => {
+    const waitHost = await import("../science-host/goal-wait");
+    canonicalGoalWaitSourceReader = waitHost.currentCanonicalGoalWaitSource;
+    // A formal loop may be joined by a tool later in this same source run.
+    // Refresh its snapshot only under the original invocation lease, before any durable wait proposal.
+    const sourceInvocationOwner = invocationRunOwners.getRunOwner(chat.id, req.runId!);
+    const readWaitSource = () => {
+      if (!sourceInvocationOwner) return null;
+      try { assertInvocationRunOwner(sourceInvocationOwner); } catch { return null; }
+      const current = canonicalGoalWaitSource ? canonicalGoalWaitSourceReader!(canonicalGoalWaitSource) : null;
+      if (current) return current;
+      if (canonicalGoalWaitSource && readGoalWaitProposal({ sourceInvocationId: req.runId!, chatId: chat.id })) return null;
+      canonicalGoalWaitSource = waitHost.captureCanonicalGoalWaitSource(executionContext, req.runId!, chat.id, normalizedPermission);
+      return canonicalGoalWaitSource ? canonicalGoalWaitSourceReader!(canonicalGoalWaitSource) : null;
+    };
+    refreshCanonicalGoalWaitSource = normalizedPermission === "full" ? readWaitSource : null;
+    refreshCanonicalGoalWaitSource?.();
+    return readWaitSource;
+  };
+  let scienceGoalWaitResolver: import("../turn-tools/control-server").TurnScopedGoalWaitResolver | undefined;
+  // Read-permission Science turns (research assistants, referees) keep their exact narrow grant too: their whole catalogue
+  // is a reader or two that Science itself bounds, and the shared arbiter would treat an unannotated tool as an effect.
+  // A Science turn context exists only on Science turns (InvocationExecutionContext.science).
+  if (executionContext?.science && !scienceReview && !planReadOnly
+    && !scienceCollectionCurrent && runtimeCanUseMcp && normalizedPermission !== "read") {
+    if (executionContext.science.invocationRunId !== req.runId || req.chatId !== chat.id)
+      throw new Error("science_desktop_tool_run_binding_mismatch");
+    scienceToolServer = await (await import("../science-host/tool-server")).mintScienceHostToolServer(executionContext.science,
+      { runtimeKind: active.kind, cwd: workingFolder ?? agentRunCwd() });
+    if (scienceToolServer) {
+      const readWaitSource = await bindScienceCanonicalGoalWait();
+      if (refreshCanonicalGoalWaitSource) scienceGoalWaitResolver = async (source, _nowMs) => {
+        const current = readWaitSource();
+        return current && current.ref.chatId === source.chatId && current.ref.sourceInvocationId === source.runId
+          ? { goalId: current.goalId, timer: current.timer } : null;
+      };
+    }
+  }
   const agentAppToolGrant = req.agentAppMode ? req.agentAppRuntimeToolGrant : undefined;
   let acceptedAgentAppInlineMcpConfig: string | undefined;
   const markAgentAppMcpRuntimeUnavailable = () => {
@@ -3789,7 +3834,7 @@ async function runMcpInvocationInContext(
   // Science has one signed, turn-scoped tool catalog supplied by its execution
   // owner below. A second generic One/Work MCP config is both redundant and
   // can fail before the Science grant is even attempted in a headless daemon.
-  if (runtimeCanUseMcp && executionContext?.source !== "science" && !isAliveControllerRun
+  if (runtimeCanUseMcp && (executionContext?.source !== "science" || scienceToolServer) && !isAliveControllerRun
     && !workforceOwnsCapabilityChoice && !explicitWorkforceGoal && !scienceReview) {
     // Which preparation step was running when a failure escaped. A thrown plain Error used to
     // log {stage:"unknown",code:"unknown"} (13x in production 2026-09-23) with no way to tell
@@ -3824,6 +3869,8 @@ async function runMcpInvocationInContext(
           // Older stores without One Team tables retain the normal auto mode.
         }
       }
+      // A plugin workflow the owner asked this conversation's next turn to carry from a button or menu (typed, Main-stored).
+      const ownerRequestedWorkflows = await (await import("../plugins/owner-capability-request")).takeOwnerCapabilityRequests(chat.id, req.runId);
       const autoSelectInput = {
         userPrompt: [effectiveUserPrompt, req.attachmentCapabilitySummary].filter(Boolean).join("\n\n"),
         systemPrompt: buildEffectiveAgentSystemPrompt(agent.id, agent.systemPrompt),
@@ -3887,11 +3934,13 @@ async function runMcpInvocationInContext(
         ...(oneRoomMemberRun ? { roomMember: true as const } : {}),
         // A One group room is a team by definition: One Team rides every turn (goal passes too).
         ...(chat.originSurface === "one" && chat.seatKind === "group" && !oneMemberToolPolicy ? { groupRoom: true as const } : {}),
-        // An Agentlas Finance conversation carries the Finance plugin on every turn (Main-derived from the stored project binding).
-        ...(financeWorkBinding ? { financeChat: true as const } : {}),
+        // A domain project's conversation (Agentlas Finance today) carries its domain's plugins on every turn: Main-derived from the
+        // stored project binding (invocation/project-domain-binding.ts), never from renderer input.
+        ...(projectDomainBinding?.baselinePlugins.length ? { projectBaselinePlugins: projectDomainBinding.baselinePlugins } : {}),
         // An installed plugin the agent looked up or opened mid-turn in this
         // conversation's previous run is attached now (never a Hub install).
         requestedPluginSlugs: readMidTurnPluginRequests(chat.id, req.runId),
+        ...(ownerRequestedWorkflows.length ? { ownerRequestedWorkflows } : {}),
       };
       mcpPrepStage = "tool-selection";
       captureOnePersonalNativeOriginal();
@@ -4094,6 +4143,31 @@ async function runMcpInvocationInContext(
             : "The authenticated Agentlas Browser host is unavailable. The automation was blocked before model execution; reconnect Agentlas Browser and retry.",
         ), { code: AGENTLAS_BROWSER_HOST_UNAVAILABLE });
       }
+      // A selection (not the owner) chose the browser and its host was not ready: the run goes on without it. Typed in
+      // the run record and shown as a tool-use row, so the owner sees why there is no browser in this turn.
+      if (selectedContext.hostBindingWithdrawn) {
+        const withdrawn = selectedContext.hostBindingWithdrawn;
+        tryRecordRunEvent({ runId: req.runId ?? `chat:${chat.id}`, chatId: chat.id, kind: "mcp_host_binding_withdrawn",
+          payload: { schemaVersion: 1, code: withdrawn.code, host: withdrawn.host, state: withdrawn.state, selectedBy: withdrawn.selectedBy } });
+        sink({
+          kind: "tool-use",
+          tool: {
+            name: "Agentlas Plugins · browser unavailable",
+            result: `${withdrawn.code}: ${withdrawn.host} (${withdrawn.state}, selected by ${withdrawn.selectedBy === "judge" ? "the tool judgment" : "an earlier turn"}, not by the owner)`,
+          },
+        });
+        // "Agentlas Plugins ·" rows are plumbing the Work/One timeline hides; the owner reads this one as a notice.
+        sink({
+          kind: "notice",
+          notice: {
+            level: "info",
+            code: withdrawn.code,
+            message: locale === "ko"
+              ? "Agentlas Browser 연결을 확인할 수 없어 이번 작업은 브라우저 없이 진행합니다."
+              : "Agentlas Browser is not connected, so this run continues without the browser.",
+          },
+        });
+      }
       if (installedTools.length > 0) {
         sink({
           kind: "tool-use",
@@ -4176,6 +4250,9 @@ async function runMcpInvocationInContext(
         ...(req.runId ? { turnRunId: req.runId } : {}),
         ...(turnGoalToolsOffered ? { turnGoalTools: true as const } : {}),
         ...(turnAskToolOffered ? { turnAskTool: true as const } : {}),
+        ...(scienceToolServer ? { hostToolServers: [scienceToolServer] } : {}),
+        // A Science formal loop's canonical wait reaches agentlas-turn goal_wait here, as it did through the old bridge.
+        ...(scienceGoalWaitResolver ? { turnGoalWaitOnly: { resolveGoalWait: scienceGoalWaitResolver, alongside: true as const } } : {}),
         admissionCurrent: isMcpConfigCurrent,
         ...(nativeBrowserGrant ? { nativeBrowser: nativeBrowserGrant } : {}),
         ...(workspacePreviewOwnerGrant ? { workspacePreviewOwnerGrant } : {}),
@@ -4251,6 +4328,7 @@ async function runMcpInvocationInContext(
         // 선언하므로, 두 이름을 다 아는 유일한 지점이 여기다 — 아래 관문 생성이 이걸 쓴다.
         mcpIncludedServers = cfg.includedServers ?? [];
         mcpToolchainConsumer = cfg.toolchainConsumer === true;
+        mcpWorkSessionTools = cfg.workSessionTools === true;
       }
       // Browser fallback ladder: lend this run's ids and notice sink; a browser run without the browser MCP
       // attached is recorded as a typed ladder stop (one card) instead of silently using another browser.
@@ -4401,14 +4479,19 @@ async function runMcpInvocationInContext(
     }
   }
 
-  let canonicalGoalWaitSource: ReturnType<(typeof import("../science-host/goal-wait"))["captureCanonicalGoalWaitSource"]> = null;
-  let canonicalGoalWaitSourceReader: (typeof import("../science-host/goal-wait"))["currentCanonicalGoalWaitSource"] | null = null;
-  let refreshCanonicalGoalWaitSource: (() => ReturnType<NonNullable<typeof canonicalGoalWaitSourceReader>>) | null = null;
   // Science computation is a daemon-owned, turn-scoped capability. It is not a
   // globally installed MCP row and is never selected from prompt text. The
   // short-lived bridge carries only a loopback endpoint and an opaque grant;
   // project/turn authority remains in the Science owner and is revalidated by ScienceStore.
-  if (executionContext?.source === "science") {
+  if (scienceToolServer) {
+    // The shared chain built this turn's config above (Science server beside the others). What stays Science's own here:
+    // whether the CLI that carries the server may stay resident (a session-scoped token serves the next turn too).
+    ephemeralToolGrant = !scienceToolServer.sessionScoped;
+    mcpAutoSelectionPrompt = purposePrompt([{
+      id: "purpose.science.session.scope", revision: 2, stability: "configuration", changeTriggers: ["release", "profile", "permission", "tool-grant"],
+      text: SCIENCE_AUTHOR_SESSION_SCOPE,
+    }]) + (mcpAutoSelectionPrompt ? `\n${mcpAutoSelectionPrompt}` : "");
+  } else if (executionContext?.source === "science") {
     if (!executionContext.science && !scienceReview) throw new Error("science-execution-context-missing");
     const { materializeScienceMcpGrant, materializeScienceReviewMcpGrant } = await import("agentlas-science");
     // Science turns use the daemon-owned catalog as their single tool boundary.
@@ -4439,22 +4522,7 @@ async function runMcpInvocationInContext(
     if (!scienceReview && !planReadOnly && !scienceCollectionCurrent && executionContext.science) {
       if (executionContext.science.invocationRunId !== req.runId || req.chatId !== chat.id)
         throw new Error("science_desktop_tool_run_binding_mismatch");
-      const waitHost = await import("../science-host/goal-wait");
-      canonicalGoalWaitSourceReader = waitHost.currentCanonicalGoalWaitSource;
-      // A formal loop may be joined by a tool later in this same source run.
-      // Refresh its snapshot only under the original invocation lease, before any durable wait proposal.
-      const sourceInvocationOwner = invocationRunOwners.getRunOwner(chat.id, req.runId!);
-      const readWaitSource = () => {
-        if (!sourceInvocationOwner) return null;
-        try { assertInvocationRunOwner(sourceInvocationOwner); } catch { return null; }
-        const current = canonicalGoalWaitSource ? canonicalGoalWaitSourceReader!(canonicalGoalWaitSource) : null;
-        if (current) return current;
-        if (canonicalGoalWaitSource && readGoalWaitProposal({ sourceInvocationId: req.runId!, chatId: chat.id })) return null;
-        canonicalGoalWaitSource = waitHost.captureCanonicalGoalWaitSource(executionContext, req.runId!, chat.id, normalizedPermission);
-        return canonicalGoalWaitSource ? canonicalGoalWaitSourceReader!(canonicalGoalWaitSource) : null;
-      };
-      refreshCanonicalGoalWaitSource = normalizedPermission === "full" ? readWaitSource : null;
-      refreshCanonicalGoalWaitSource?.();
+      const readWaitSource = await bindScienceCanonicalGoalWait();
       const releaseDesktopTools = bindScienceDesktopToolTurn(executionContext.science, {
         ...(refreshCanonicalGoalWaitSource ? {
           goalWaitCurrent: () => Boolean(readWaitSource()),
@@ -4491,7 +4559,7 @@ async function runMcpInvocationInContext(
       ? "science review: independent, read-only; only read_criterion_review_input; no research state, no borrowed agents; return the exact requested findings JSON"
       : planReadOnly
         ? "science plan: read-only (files, shell, research state); only the granted discovery tools; describe the plan, create no state"
-        : "science: Agentlas Science owns this session; pick tools from the live catalog; claims cite returned source ids or receipts; metadata ≠ full text; disclose partial failure; typed receipt before state claims; respect stale grants/Stop; reply as Agentlas Science (no Hope prefix)",
+        : SCIENCE_AUTHOR_SESSION_SCOPE,
     }]);
   }
 
@@ -5751,7 +5819,8 @@ async function runMcpInvocationInContext(
     }
   };
   if (workSessionMain) {
-    const policy = workSessionMainPolicy();
+    // The delegation line names work_session_agents/delegate: it is sent only when this run lists those tools (2026-10-28).
+    const policy = workSessionMainPolicy({ delegationToolsListed: mcpWorkSessionTools });
     if (persistentAgentContext) {
       turnContextParts.push(policy); keepLastTurnContext("work.session.main", "fixed-policy", ["release"]);
     } else systemContextParts.push(mainHostSystemPart("work-session-main", "fixed-policy", ["release"], policy));
@@ -5800,7 +5869,7 @@ async function runMcpInvocationInContext(
   }
   // An Agentlas Finance conversation: its finance.* operations are reachable only through harness_call, so without this line a model
   // answers market questions from memory or web search. Main-derived from the stored project binding, never from renderer input.
-  if (financeWorkBinding) {
+  if (projectDomainBinding?.domain === "finance") {
     turnContextParts.push("finance: Agentlas Finance chat; answer asset, price, filing, news, macro, portfolio and scenario requests from harness_call finance.* results (plugin:finance/index maps them), not from memory or web search first; a report on finance.query data is a saved Finance report (finance.query.save mode report, then finance.apply); other data goes in a file");
     keepLastTurnContext("finance.chat", "fixed-policy", ["release"]);
   }
@@ -6420,7 +6489,7 @@ async function runMcpInvocationInContext(
       ...(ephemeralToolGrant ? { ephemeralToolGrant: true as const } : {}),
       ...(executionContext?.source === "science" && !scienceReview ? { scienceController: true as const } : {}),
       // Science / Alive-Science grants are the whole catalog; a generic One/Work config is not.
-      ...(mcpConfigPath && (executionContext?.source === "science" || scienceReview
+      ...(mcpConfigPath && !scienceToolServer && (executionContext?.source === "science" || scienceReview
         || (isAliveControllerRun && executionContext?.aliveScience))
         ? { mcpGrantCatalogOnly: true as const } : {}),
       mcpAllowedTools,
@@ -7521,7 +7590,8 @@ async function runMcpInvocationInContext(
     if (imageGenerationRequired && !signal?.aborted) {
       const imageSlot = multimodalImageSlot();
       if (!imageSlot) {
-        throw new Error("image_tool_unavailable: no configured multimodal image runtime");
+        // Typed: the run's outward code names the missing tool (shared/run-failure-notice.ts tool_missing), not "runner-failed".
+        throw Object.assign(new Error("image_tool_unavailable: no configured multimodal image runtime"), { code: "image_tool_unavailable" });
       }
       sink({
         kind: "tool-use",
@@ -7532,12 +7602,12 @@ async function runMcpInvocationInContext(
       // The run's permission reaches the image route's own CLI (multimodal/image.ts ImageAdmission, R-078).
       const generated = await generateImage(imageSlot.model, ownerRequestText, { permission: req.permissions });
       if (!generated.ok || !generated.artifactPath || !generated.src) {
-        throw new Error(`image_tool_unavailable: ${generated.reason ?? "no image was produced"}`);
+        throw Object.assign(new Error(`image_tool_unavailable: ${generated.reason ?? "no image was produced"}`), { code: "image_generation_failed" });
       }
       generatedImageSourcePaths.add(generated.artifactPath);
       collectToolImages([generated.artifactPath]);
       if (!pendingWorkToolImages.length) {
-        throw new Error("image_tool_unavailable: generated bytes failed Main sealing");
+        throw Object.assign(new Error("image_tool_unavailable: generated bytes failed Main sealing"), { code: "image_generation_failed" });
       }
       hostGeneratedImageAttachment = pendingWorkToolImages[0].image;
       runnerEvents.onTool(
@@ -8925,7 +8995,7 @@ async function runMcpInvocationInContext(
       effectObservationRun ? stripEffectObservationMarker(finalDisplay.durableText) : finalDisplay.durableText));
     const finalWorkImages = promotedImages.images;
     if (imageGenerationRequired && (!observedImageArtifactEvidence || finalWorkImages.length === 0) && !signal?.aborted) {
-      throw new Error("image_tool_unavailable: the generated image was not durably bound");
+      throw Object.assign(new Error("image_tool_unavailable: the generated image was not durably bound"), { code: "image_generation_failed" });
     }
     // 찍어 달라고 한 실행이 이미지 하나 없이 끝나면, 답이 무슨 말을 했든 사실이 아니다.
     if (screenCaptureRequired && !blindVisionRuntime && !nativeCaptureBound && finalWorkImages.length === 0 && !signal?.aborted) {

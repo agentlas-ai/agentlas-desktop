@@ -106,6 +106,7 @@ import { answerCodexMcpElicitation } from "./codex-elicitation";
 import { residencyDisabledFor } from "./claude-session";
 import { codexDesktopSurfaceArgs } from "./codex-desktop-surface";
 import { codexPersonalContextArgs, codexPersonalHomeOptions } from "./codex-personal-context";
+import { codexBuiltinEgressConfigArgs } from "./runtime-builtin-egress-policy";
 import { selectionFor } from "../capabilities/one-capabilities";
 import {
   attendedTurnStartsFresh,
@@ -1830,7 +1831,10 @@ async function runCodexResidentTurn(input: {
     const mcpThread = !turnScoped && !req.workforceRuntimeToolGrant && codexThreadMcpRebindSupported()
       ? codexMcpThreadConfig(mcpArgs, env) : null;
     const args = [...CODEX_APP_SERVER_ARGS, "-c", "model_reasoning_summary=auto", ...(compactLimit ? ["-c", `model_auto_compact_token_limit=${compactLimit}`] : []),
-      ...surfaceArgs, ...(mcpThread ? [] : mcpArgs)];
+      ...surfaceArgs,
+      // ChatGPT apps where this thread's approvals reach the Agentlas arbiter or under full access (runtime-builtin-egress-policy.ts).
+      ...codexBuiltinEgressConfigArgs({ approvalsReachArbiter: policy.approvalPolicy === "on-request" && approvalsReviewer === "user", fullAccess: req.permission === "full" }),
+      ...(mcpThread ? [] : mcpArgs)];
     const poolKey = codexPoolKey({
       // A turn-scoped process is never checked out by another turn.
       chatId: `${canonicalContextKey ?? req.approvalChatId ?? chatId}${turnScoped ? `#turn:${crypto.randomUUID()}` : ""}`,
@@ -3727,6 +3731,8 @@ export const runCodex: Runner = async (
     "resume",
     ...isolatedConfigArgs,
     ...browserOnlyConfigArgs,
+    // `codex exec` has no approval loop: ChatGPT apps only under full access (runtime-builtin-egress-policy.ts).
+    ...codexBuiltinEgressConfigArgs({ approvalsReachArbiter: false, fullAccess: runReq.permission === "full" }),
     "--json",
     "--skip-git-repo-check",
     ...resumePermissionArgs(runReq.permission, runReq.approvalsReviewer),
@@ -3944,6 +3950,8 @@ export const runCodex: Runner = async (
     ...approvalArgs,
     ...isolatedConfigArgs,
     ...browserOnlyConfigArgs,
+    // `codex exec` has no approval loop: ChatGPT apps only under full access (runtime-builtin-egress-policy.ts).
+    ...codexBuiltinEgressConfigArgs({ approvalsReachArbiter: false, fullAccess: runReq.permission === "full" }),
     "--json",
     "--skip-git-repo-check",
     ...permArgs,

@@ -26,8 +26,8 @@ import {
   openReleaseManifest,
   ReleaseManifestError,
   type ReleaseManifestPayload,
-} from "../enterprise-server/release-manifest";
-import type { ReleaseTrustRoot } from "../enterprise-server/release-trust-roots";
+} from "./release-manifest";
+import type { ReleaseTrustRoot } from "./release-trust-roots";
 
 export const UPDATE_TRUST_SCHEMA = "agentlas.update-trust.v1" as const;
 

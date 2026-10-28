@@ -44,7 +44,6 @@ import { PersonalAgentFrontPanel } from "@/components/settings/PersonalAgentFron
 import { AgentMailPanel } from "@/components/settings/AgentMailPanel";
 import { ArchivePanel } from "@/components/settings/ArchivePanel";
 import { ReachPanel } from "@/components/settings/ReachPanel";
-import { EnterpriseServerPanel } from "@/components/settings/EnterpriseServerPanel";
 import { PricingPanel } from "@/components/settings/PricingPanel";
 import { ServiceConnectionsButton } from "@/components/connect/ServiceConnectionsButton";
 import { manualSetupFor, manualSetupShellLabel, manualSetupText, setupOsFromNavigator, type ManualSetupRuntime } from "@shared/runtime-manual-setup";
@@ -507,7 +506,6 @@ export default function SettingsPage() {
         <AgentMailPanel locale={locale} />
         <ArchivePanel locale={locale} />
         <ReachPanel locale={locale} />
-        <EnterpriseServerPanel locale={locale} />
 
         {/* 언어 선택 */}
         <h2 style={{ fontFamily: "var(--font-head)", fontSize: 15, margin: "24px 0 12px" }}>

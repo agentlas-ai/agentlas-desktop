@@ -12,14 +12,10 @@ export type AppControlPolicy =
   | { allowed: true; effect: AppControlEffect }
   | { allowed: false; reason: string };
 
-// The Business console's controller (electron/business/shipping-console-ipc.ts): snapshot, eligibility, account selection and the
-// dashboard / admin windows. Owner 2026-10-21 ("비즈니스 조직관리 앱제어는 빼셈 카탈로그에서"): managing the organization (company)
-// account is the owner's own screen. The preload bridge, the IPC handlers and the screens are unchanged; only what the model can
-// find and call here changes.
+// The company-server Business console and the Settings → company server card were removed with the NAS / company-server stack
+// (owner 2026-10-27; Desktop teams now use electron/org-seat). The namespaces stay denied and out of the model's catalog so that
+// nothing re-added under them becomes model-callable by accident.
 const BUSINESS_CONSOLE_OPERATIONS = /^business\./;
-// Settings → company server card (electron/enterprise-server/enterprise-server-ipc.ts): enrolling this device with a one-time code from
-// the company admin, pinning the company server's key, and forgetting the device key are the owner's own acts on their own machine,
-// in the same family as the organization console above. Denied and left out of the model's catalog, like the Business console.
 const ENTERPRISE_SERVER_OPERATIONS = /^enterpriseServer\./;
 
 const DENIED: Array<[RegExp, string, AppControlEffect]> = [
@@ -229,22 +225,22 @@ const EXPLICIT_WRITE_PATHS: ReadonlySet<string> = new Set([
 const DENIED_READ_PATHS: ReadonlySet<string> = new Set([
   "oneMemory.inspector.query", "oneMemory.inspector.detail",
   "billing.checkoutReadiness", "billing.getCredits", "billing.getPlans", "browser.credentialConsent", "browserAutofill.snapshot",
-  "business.account.read", "business.readEligibility", "business.snapshot", "businessNative.completedWork", "businessWork.files", "businessWork.sources", "confirm.committedAnswers", "confirm.listPending",
+  "confirm.committedAnswers", "confirm.listPending",
   "credentialRecovery.list", "env.has", "env.list", "env.preview", "invoke.currentTurn", "invoke.currentTurnSteerReceipt", "invoke.steerReceipt",
   "oneContext.snapshot", "oneContext.targets", "oneHarness.getResult", "oneHarness.readiness", "onePersonalData.bootstrap",
   "onePersonalData.connectorCatalog", "onePersonalData.gmailCatalog", "onePersonalData.gmailSourceSettings", "onePersonalData.historySnapshot",
   "onePersonalData.historyWorkStatus", "onePersonalData.listTargets", "onePersonalData.snapshot", "oneProvider.bootstrap", "oneProvider.status",
   "oneSupervisor.budgets", "oneSupervisor.journal", "oneSupervisor.receipt", "oneSupervisor.snapshot", "oneSupervisor.supervisedRooms", "oneVault.recoverableOperations",
   "oneWindow.getState", "workStart.get", "science.researchCapabilities.catalog", "runLedger.outputsAfter", "oneArtifacts.listEarlier", "runLedger.settleRowsAfter",
-  "liveDocument.snapshot", "liveDocument.entries", "liveDocument.list", "enterpriseServer.status",
+  "liveDocument.snapshot", "liveDocument.entries", "liveDocument.list",
 ]);
 const DENIED_DESTRUCTIVE_PATHS: ReadonlySet<string> = new Set([
   "oneMemory.inspector.forget", "liveDocument.close",
-  "browser.revokeCredentialConsent", "browserAutofill.removeContact", "browserAutofill.removeCredential", "businessNative.revoke",
-  "businessWork.cancel", "businessWork.revoke", "env.remove", "mcpTools.oauthDisconnect", "oneContext.revoke", "oneDiscussion.stop",
+  "browser.revokeCredentialConsent", "browserAutofill.removeContact", "browserAutofill.removeCredential",
+  "env.remove", "mcpTools.oauthDisconnect", "oneContext.revoke", "oneDiscussion.stop",
   "onePersonalData.cancelInference", "onePersonalData.cancelProposal", "onePersonalData.gmailRevoke", "onePersonalData.gmailRevokeSource",
   "onePersonalData.historyWorkRevoke", "oneSupervisor.stopReply", "oneSupervisor.stopTask", "revokeCapabilityGrant", "revokeChatAlwaysApproval",
-  "science.composer.cancel", "secrets.deleteApiKey", "site.removePublishProviderToken", "surfaces.revokeApproval", "enterpriseServer.disconnect",
+  "science.composer.cancel", "secrets.deleteApiKey", "site.removePublishProviderToken", "surfaces.revokeApproval",
 ]);
 
 const CONSENT_SEGMENT = /^(approve|answer|decide|accept|reject|attest|confirm|publish|send|submit|install|upload|unseal|transfer|reauthorize|setTokenLimit|setPrices|bugReportSend|purchase|resume)/;

@@ -253,6 +253,16 @@ export function trackReportedToolCalls<E extends { onTool?: (...args: never[]) =
  */
 export const EMPTY_AFTER_UNUSABLE_TOOLS_CODE = "empty_after_unusable_tools";
 
+/**
+ * A host loop (local models, BYOK, Agentlas serving: Main dispatches every tool) whose turn ended with no reply text and no
+ * tool dispatched in the whole turn (settleNormalEnd "empty"). Nothing ran, so the owner is told so, not "may have acted"
+ * (2026-10-28: an Ollama Science and Work turn ended empty before any tool and read "the request may already have acted").
+ * The turn keeps its protective unsettled code (no automatic resend); only the stated fact changes.
+ */
+export const EMPTY_NO_TOOL_RAN_CODE = "empty_no_tool_ran";
+/** Every host-loop code of an empty answer with zero tools dispatched (Agentlas serving keeps its own two codes). */
+export const EMPTY_NO_TOOL_RAN_CODES: ReadonlySet<string> = new Set([EMPTY_NO_TOOL_RAN_CODE, "agentlas_serving_empty_answer", "empty_answer"]);
+
 const EMPTY_COLLECTION_TEXT_MAX = 8_192;
 const EMPTY_COLLECTION_DEPTH = 2;
 

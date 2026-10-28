@@ -144,3 +144,13 @@ export function assertFinanceWorkChatOwner(chatId: string, actor: FinanceWorkAct
   verify(binding, dependencies);
   return { ownerScope, projectId };
 }
+
+/** Finance's entry in the shared project-domain contract (invocation/project-domain-binding.ts). */
+export const FINANCE_WORK_PROJECT_PLUGINS = [{ slug: 'finance', reason: 'baseline capability: Agentlas Finance conversation' }] as const;
+export function financeWorkProjectDomain(chatId: string, actor: FinanceWorkActor | null,
+  expected?: { domain: string; ownerScope: string; projectId: string } | null) {
+  // A binding read for another domain is not Finance's to check; Finance's own fence then applies to this chat as at a turn start.
+  const own = expected && expected.domain === 'finance' ? { ownerScope: expected.ownerScope, projectId: expected.projectId } : expected === null ? null : undefined;
+  const binding = assertFinanceWorkChatOwner(chatId, actor, own);
+  return binding ? { domain: 'finance', ownerScope: binding.ownerScope, projectId: binding.projectId, baselinePlugins: FINANCE_WORK_PROJECT_PLUGINS } : null;
+}

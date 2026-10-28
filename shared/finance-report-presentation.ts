@@ -127,6 +127,7 @@ export function financeReportComputeMetrics(section:FinanceReportSection,locale=
 }
 /** Conservative legacy recognition: never infer a chart from arbitrary numeric evidence columns. */
 export function financeReportHasChart(section:FinanceReportSection):boolean {
+ if(section.chart)return true;
  if(financeReportCompositionTitle(section))return !!financeReportCompositionSpec(section);
  if(financeReportFinancialData(section))return true;
  const metric=section.widget?.metric;

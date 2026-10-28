@@ -10,22 +10,17 @@
  * runs the same flow — it is not a separate sign-up form we do not have.
  */
 import { useCallback, useRef, useState } from "react";
-import { useRouter } from "next/navigation";
 import { ipc } from "@/lib/ipc";
 import { useT } from "@/lib/i18n";
 import type { AuthSession } from "@/lib/types";
-import { useOrganizationUiVisibility } from "@/business/organization-visibility";
 import styles from "./FirstRun.module.css";
 
 export function FirstRunLogin({ onSignedIn }: { onSignedIn: (session: AuthSession) => void }) {
   const { locale } = useT();
-  const router = useRouter();
   const ko = locale === "ko";
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const cancelled = useRef(false);
-  // 로그인 전이라 서버 적격성은 없다 — 회사 링크로 이 앱을 연 적이 있을 때만 회사 계정 진입을 보인다(규칙: shared/business/visibility.ts).
-  const companyEntry = useOrganizationUiVisibility({ eligible: null }).entry;
 
   const signIn = useCallback(async () => {
     if (busy) return;
@@ -83,9 +78,6 @@ export function FirstRunLogin({ onSignedIn }: { onSignedIn: (session: AuthSessio
               {busy
                 ? <button type="button" className={styles.secondary} onClick={cancel}>{ko ? "로그인 취소" : "Cancel sign-in"}</button>
                 : <button type="button" className={styles.secondary} onClick={() => void signIn()}>{ko ? "계정 만들기" : "Create an account"}</button>}
-              {companyEntry && <button type="button" className={styles.secondary} data-business-entry="true" onClick={() => { cancel(); router.push("/business"); }}>
-                {ko ? "회사 계정으로 로그인" : "Sign in with a company account"}
-              </button>}
             </div>
             {notice && <p className={styles.error} role="status">{notice}</p>}
             <p className={styles.hint}>{ko ? "브라우저에서 로그인하면 자동으로 이어져요." : "Signing in happens in your browser and continues here automatically."}</p>
