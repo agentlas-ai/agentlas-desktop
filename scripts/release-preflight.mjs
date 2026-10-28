@@ -432,6 +432,13 @@ function verifyReleaseSourceContract(runtimeRoot, manifestVersion) {
   }
 }
 
+// Desktop and Science ship together: the pinned Science SDK must be the
+// current agentlas-science main. Checked first because it is cheap and a stale
+// pin invalidates every later Science gate.
+if (!run(process.execPath, [join(root, "scripts", "check-science-pin-latest.mjs")], { cwd: root })) {
+  fail("Science SDK pin is not the current agentlas-science main; Desktop and Science must ship together.");
+}
+
 let runtimeRoot = null;
 
 // Fast path: the developer's own checkout already sits exactly on the pin, so

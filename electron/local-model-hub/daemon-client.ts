@@ -14,8 +14,11 @@ import type { LocalModelHubControlPort, LocalModelHubRuntimePort, LocalModelRunt
 import type { LocalModelHubSnapshot } from "../../shared/local-model-hub";
 import { exportPreparedMcpAdmission, preparedMcpProxyScope, preparedMcpProxyScopeMatchesAsk } from "../mcp-tools/prepared-transport";
 import { assertLocalModelWireValue, localModelRemoteError, remoteLocalModelRequest,
+  LOCAL_MODEL_PRE_LAUNCH_CODES, WORK_RELAY_CHUNK_CHARS, WORK_RELAY_MAX_CHARS,
   type LocalModelControlCommand, type LocalModelControlPage, type LocalModelRpcCommand,
-  type RemoteLocalModelRunPage, type RemoteLocalModelRunTransport } from "./remote-contract";
+  type RemoteLocalModelRunPage, type RemoteLocalModelRunTransport, type RemoteWorkRecoveryRequest } from "./remote-contract";
+import { assertMainWorkRecoveryContext, type MainWorkUnknownEnd } from "../invocation/main-work-recovery";
+import { createMainWorkRecoveryRelayHost, workRelayDigest } from "./work-recovery-relay";
 
 export interface LocalModelDaemonClientOptions extends EnsureDaemonOptions {
   storePath: string;
@@ -47,6 +50,11 @@ export interface LocalModelDaemonClient {
   close(): void;
 }
 type VerifiedDaemon = { bootId: string; serviceIdentity: string };
+const WORK_RELAY_OPS: ReadonlySet<string> = new Set(["admit", "finish", "release", "endDispatch", "packet", "refusalPacket", "unknownOutcomePacket"]);
+const WORK_RELAY_CLOSING_OPS: ReadonlySet<string> = new Set(["finish", "release", "endDispatch"]);
+/** The daemon refused a work read/answer because that request, its run or this client's admission already ended. */
+const WORK_RELAY_ENDED_CODES: ReadonlySet<string> = new Set(["local_model_remote_work_refused", "local_model_remote_admission_closed",
+  "local_model_remote_receipt_unavailable"]);
 const STATES = ["running", "completed", "cancelled", "failed"];
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 function record(value: unknown): Record<string, unknown> | null {
@@ -55,6 +63,15 @@ function record(value: unknown): Record<string, unknown> | null {
 function failure(code: string, outcome: LocalModelDaemonClientError["failure"]["outcome"],
   details: Partial<LocalModelDaemonClientError["failure"]> = {}) {
   return new LocalModelDaemonClientError({ code, outcome, ...details });
+}
+/** RuntimeTurnDelivery "not-dispatched" (runner.ts markRefusedBeforeDispatch, read by runner-pre-dispatch.ts): this refusal came
+ * before the daemon launched anything, so it is that refusal with its own code, never "sent but no completion receipt". */
+function markNotDispatched<T>(error: T): T {
+  if (error && typeof error === "object" && Object.isExtensible(error)) {
+    try { Object.defineProperty(error, "turnDelivery", { value: "not-dispatched", enumerable: true, configurable: true, writable: true }); }
+    catch { /* A sealed error keeps its own code and the caller's previous handling. */ }
+  }
+  return error;
 }
 
 /** Native-host facade, not a renderer-accessible generic RPC client. Uses the
@@ -266,6 +283,7 @@ export function createLocalModelDaemonClient(options: LocalModelDaemonClientOpti
       const request = remoteLocalModelRequest(input.request);
       return checkPage(await command({ op: "run.start", clientId, runId: input.runId, request,
         ...(input.resultBoundaryGeneration ? { resultBoundaryGeneration: input.resultBoundaryGeneration } : {}),
+        ...(input.workRecoveryGeneration ? { workRecoveryGeneration: input.workRecoveryGeneration } : {}),
         ...(input.mcpAdmission ? { mcpAdmission: input.mcpAdmission } : {}) }, input.ownerEpoch), input.runId, "run") as unknown as RemoteLocalModelRunPage;
     },
     read: async input => checkPage(await command({ op: "run.read", clientId, runId: input.runId,
@@ -311,33 +329,68 @@ export function createLocalModelDaemonClient(options: LocalModelDaemonClientOpti
     snapshot: control.snapshot,
     observeSnapshot,
     run: async (request, events) => {
-      // Validate opaque fields before any daemon startup or request dispatch.
-      const mcpAdmission = request.mcpConfigPath ? exportPreparedMcpAdmission(request.mcpConfigPath) : undefined;
-      const proxyScope = request.mcpConfigPath ? preparedMcpProxyScope(request.mcpConfigPath) : undefined;
-      // Move an opaque, validated host admission through the dedicated native
-      // envelope. The ordinary wire contract still refuses any raw MCP path.
-      const resultBoundaryGeneration = request.beforeMcpToolResult ? randomUUID() : undefined;
-      const wire = remoteLocalModelRequest({ ...request, mcpConfigPath: undefined },
-        resultBoundaryGeneration ? { mcpResultRelay: true } : undefined);
-      request.signal?.throwIfAborted();
-      const status = await ensureStarted(); request.signal?.throwIfAborted();
-      const scope = { ownerEpoch: status.ownerEpoch, runId: randomUUID() };
-      if (resultBoundaryGeneration) {
-        // Same version/protocol does not prove this daemon implements the new
-        // boundary. Negotiate before provider dispatch; no silent downgrade.
-        let capability: Record<string, unknown> | null;
-        try {
-          capability = record(await command({ op: "run.result-capability", clientId,
-            runId: scope.runId, generation: resultBoundaryGeneration }, scope.ownerEpoch, 5_000));
-        } catch { throw failure("local_model_daemon_result_boundary_unsupported", "not-dispatched", scope); }
-        if (!capability || capability.schema !== "agentlas.local-model-result-boundary.v1"
-          || capability.supported !== true || capability.ownerEpoch !== scope.ownerEpoch
-          || capability.clientId !== clientId || capability.runId !== scope.runId
-          || capability.generation !== resultBoundaryGeneration) {
-          throw failure("local_model_daemon_result_boundary_unsupported", "not-dispatched", scope);
+      // Everything up to run.start precedes dispatch: a refusal here is that refusal (markNotDispatched), never an unknown outcome.
+      let mcpAdmission: ReturnType<typeof exportPreparedMcpAdmission> | undefined;
+      let proxyScope: ReturnType<typeof preparedMcpProxyScope> | undefined;
+      let resultBoundaryGeneration: string | undefined, workRecoveryGeneration: string | undefined;
+      let workRecoveryHost: ReturnType<typeof createMainWorkRecoveryRelayHost> | null = null;
+      let wire: ReturnType<typeof remoteLocalModelRequest>;
+      let preScope: { ownerEpoch: string; runId: string } | null = null;
+      try {
+        // Validate opaque fields before any daemon startup or request dispatch.
+        mcpAdmission = request.mcpConfigPath ? exportPreparedMcpAdmission(request.mcpConfigPath) : undefined;
+        proxyScope = request.mcpConfigPath ? preparedMcpProxyScope(request.mcpConfigPath) : undefined;
+        // Move an opaque, validated host admission through the dedicated native
+        // envelope. The ordinary wire contract still refuses any raw MCP path.
+        resultBoundaryGeneration = request.beforeMcpToolResult ? randomUUID() : undefined;
+        // The Work journal stays Main's: the daemon's loop gets a relay port answered by this exact context (work-recovery-relay.ts).
+        if (request.canonicalWorkRecovery) {
+          assertMainWorkRecoveryContext(request.canonicalWorkRecovery);
+          workRecoveryGeneration = randomUUID();
         }
+        wire = remoteLocalModelRequest({ ...request, mcpConfigPath: undefined }, {
+          ...(resultBoundaryGeneration ? { mcpResultRelay: true as const } : {}),
+          ...(workRecoveryGeneration ? { workRecoveryRelay: true as const } : {}) });
         request.signal?.throwIfAborted();
+        const status = await ensureStarted(); request.signal?.throwIfAborted();
+        preScope = { ownerEpoch: status.ownerEpoch, runId: randomUUID() };
+        if (resultBoundaryGeneration) {
+          // Same version/protocol does not prove this daemon implements the new
+          // boundary. Negotiate before provider dispatch; no silent downgrade.
+          let capability: Record<string, unknown> | null;
+          try {
+            capability = record(await command({ op: "run.result-capability", clientId,
+              runId: preScope.runId, generation: resultBoundaryGeneration }, preScope.ownerEpoch, 5_000));
+          } catch { throw failure("local_model_daemon_result_boundary_unsupported", "not-dispatched", preScope); }
+          if (!capability || capability.schema !== "agentlas.local-model-result-boundary.v1"
+            || capability.supported !== true || capability.ownerEpoch !== preScope.ownerEpoch
+            || capability.clientId !== clientId || capability.runId !== preScope.runId
+            || capability.generation !== resultBoundaryGeneration) {
+            throw failure("local_model_daemon_result_boundary_unsupported", "not-dispatched", preScope);
+          }
+          request.signal?.throwIfAborted();
+        }
+        if (workRecoveryGeneration) {
+          // A daemon without the relay would run the Work turn with no journal; it must refuse before anything is sent.
+          let capability: Record<string, unknown> | null;
+          try {
+            capability = record(await command({ op: "run.work-recovery-capability", clientId,
+              runId: preScope.runId, generation: workRecoveryGeneration }, preScope.ownerEpoch, 5_000));
+          } catch { throw failure("local_model_daemon_work_recovery_unsupported", "not-dispatched", preScope); }
+          if (!capability || capability.schema !== "agentlas.local-model-work-recovery-relay.v1"
+            || capability.supported !== true || capability.ownerEpoch !== preScope.ownerEpoch
+            || capability.clientId !== clientId || capability.runId !== preScope.runId
+            || capability.generation !== workRecoveryGeneration) {
+            throw failure("local_model_daemon_work_recovery_unsupported", "not-dispatched", preScope);
+          }
+          workRecoveryHost = createMainWorkRecoveryRelayHost(request.canonicalWorkRecovery!);
+          request.signal?.throwIfAborted();
+        }
+      } catch (error) {
+        throw markNotDispatched(error instanceof LocalModelDaemonClientError && preScope
+          ? new LocalModelDaemonClientError({ ...error.failure, ...preScope }) : error);
       }
+      const scope = preScope!;
       let cancelled = false;
       const abort = () => {
         if (detaching || closed || cancelled) return;
@@ -365,6 +418,58 @@ export function createLocalModelDaemonClient(options: LocalModelDaemonClientOpti
             deadline === undefined ? undefined : Math.max(1, deadline - Date.now()));
         }
       };
+      /** Answers the daemon loop's Work journal calls with Main's context (work-recovery-relay.ts). While draining after a stop only
+       * the calls recording how an admitted call ended are answered (finish, release, dispatch end), so the journal keeps the end the
+       * loop saw (a call that never left stays "not sent") instead of an unknown one. */
+      const serveWorkRequests = async (page: RemoteLocalModelRunPage, closingOnly = false, deadline?: number): Promise<void> => {
+        const list: RemoteWorkRecoveryRequest[] = page.workRecoveryRequests ?? [];
+        if (!Array.isArray(list) || list.length > 16) throw failure("local_model_daemon_work_recovery_invalid", "unknown", scope);
+        if (!list.length) return;
+        if (!workRecoveryHost || !workRecoveryGeneration) throw failure("local_model_daemon_work_recovery_scope_mismatch", "unknown", scope);
+        for (const pending of list) {
+          if (!pending || !UUID.test(pending.id) || pending.ownerEpoch !== scope.ownerEpoch || pending.clientId !== clientId
+            || pending.runId !== scope.runId || pending.generation !== workRecoveryGeneration
+            || !Number.isSafeInteger(pending.afterSequence) || pending.afterSequence < 0 || !WORK_RELAY_OPS.has(pending.op)
+            || !Number.isSafeInteger(pending.chars) || pending.chars < 2 || pending.chars > WORK_RELAY_MAX_CHARS
+            || typeof pending.digest !== "string" || !/^[0-9a-f]{64}$/.test(pending.digest)
+            || (pending.payload !== undefined && (typeof pending.payload !== "string" || pending.payload.length !== pending.chars))) {
+            throw failure("local_model_daemon_work_recovery_scope_mismatch", "unknown", scope);
+          }
+          if ((closingOnly && !WORK_RELAY_CLOSING_OPS.has(pending.op)) || pending.afterSequence > cursor) continue;
+          const timeout = deadline === undefined ? undefined : Math.max(1, deadline - Date.now());
+          const ended = (error: unknown) => error instanceof LocalModelDaemonClientError && error.failure.outcome === "rejected"
+            && WORK_RELAY_ENDED_CODES.has(error.code);
+          let callText = pending.payload;
+          try {
+            while (callText === undefined || callText.length < pending.chars) {
+              const chunk = record(await command({ op: "run.work-read", clientId, runId: scope.runId, generation: workRecoveryGeneration,
+                requestId: pending.id, offset: callText?.length ?? 0 }, scope.ownerEpoch, timeout));
+              if (!chunk || typeof chunk.text !== "string" || !chunk.text.length
+                || (callText?.length ?? 0) + chunk.text.length > pending.chars) throw failure("local_model_daemon_work_recovery_invalid", "unknown", scope);
+              callText = (callText ?? "") + chunk.text;
+            }
+          } catch (error) {
+            // The call ended before it was read (its run stopped): there is nothing to answer and nothing was done for it.
+            if (ended(error)) continue;
+            throw error;
+          }
+          if (workRelayDigest(callText) !== pending.digest) throw failure("local_model_daemon_work_recovery_invalid", "unknown", scope);
+          const answer = workRecoveryHost.answer(pending.id, callText, pending.op);
+          const digest = workRelayDigest(answer);
+          try {
+            for (let offset = 0; offset < answer.length;) {
+              const text = answer.slice(offset, offset + WORK_RELAY_CHUNK_CHARS);
+              await command({ op: "run.work", clientId, ownerEpoch: scope.ownerEpoch, runId: scope.runId, generation: workRecoveryGeneration,
+                requestId: pending.id, offset, text, chars: answer.length, digest }, scope.ownerEpoch, timeout);
+              offset += text.length;
+            }
+          } catch (error) {
+            // The daemon refused the answer because its request had already ended: its loop never received it.
+            if (ended(error)) { workRecoveryHost.undelivered(pending.id); continue; }
+            throw error;
+          }
+        }
+      };
       const cancelAndDrain = async (): Promise<void> => {
         const deadline = Date.now() + 6_000;
         try {
@@ -374,6 +479,7 @@ export function createLocalModelDaemonClient(options: LocalModelDaemonClientOpti
             const page = checkPage(await command({ op: "run.read", clientId, runId: scope.runId,
               afterSequence: cursor, limit: 128, waitMs: Math.min(1_000, remaining) }, scope.ownerEpoch, remaining), scope.runId, "run") as unknown as RemoteLocalModelRunPage;
             await consumeEvents(page, deadline);
+            if (workRecoveryHost) await serveWorkRequests(page, true, deadline);
             if (page.state !== "running" && page.events.length === 0) {
               if (page.runtimeQuiesced !== true) markAttemptQuiescenceUnconfirmed();
               return;
@@ -382,9 +488,21 @@ export function createLocalModelDaemonClient(options: LocalModelDaemonClientOpti
         } catch { /* Preserve the original host rejection, but never infer termination. */ }
         markAttemptQuiescenceUnconfirmed();
       };
+      let startRefused = false;
+      let endCause: MainWorkUnknownEnd = "dispatch_ended";
       try {
         if (request.signal?.aborted) abort();
-        let page = await runs.start({ ...scope, request: wire, mcpAdmission, resultBoundaryGeneration });
+        let page: RemoteLocalModelRunPage;
+        try { page = await runs.start({ ...scope, request: wire, mcpAdmission, resultBoundaryGeneration, workRecoveryGeneration }); }
+        catch (error) {
+          // Refused before the daemon registered and launched the run (remote-contract.ts LOCAL_MODEL_PRE_LAUNCH_CODES), or never sent.
+          const code = error && typeof error === "object" && "code" in error ? String(error.code) : "";
+          startRefused = error instanceof LocalModelDaemonClientError
+            ? error.failure.outcome === "not-dispatched" || (error.failure.outcome === "rejected"
+              && (LOCAL_MODEL_PRE_LAUNCH_CODES.has(code) || code === "local_model_daemon_remote_rejected"))
+            : LOCAL_MODEL_PRE_LAUNCH_CODES.has(code);
+          throw error;
+        }
         const answeredPermissions = new Set<string>();
         const answeredResults = new Set<string>();
         for (;;) {
@@ -491,6 +609,7 @@ export function createLocalModelDaemonClient(options: LocalModelDaemonClientOpti
             // Only current/recent page IDs are needed for replay coalescing.
             if (answeredResults.size > 32) answeredResults.delete(answeredResults.values().next().value!);
           }
+          if (workRecoveryHost || (page.workRecoveryRequests?.length ?? 0) > 0) await serveWorkRequests(page);
           // A final page may still have a backlog. Read until an empty final
           // page before returning, so batching never drops the last tool/text.
           if (page.state !== "running" && page.events.length === 0) {
@@ -509,10 +628,17 @@ export function createLocalModelDaemonClient(options: LocalModelDaemonClientOpti
           }
         }
       } catch (error) {
-        if (resultBoundaryGeneration) await cancelAndDrain();
-        if (error instanceof LocalModelDaemonClientError) throw new LocalModelDaemonClientError({ ...error.failure, ...scope });
-        throw error;
-      } finally { request.signal?.removeEventListener("abort", abort); }
+        endCause = request.signal?.aborted ? "aborted"
+          : error instanceof LocalModelDaemonClientError ? error.code === "local_model_daemon_boot_changed" ? "process_lost" : "transport"
+          : "dispatch_ended";
+        if (resultBoundaryGeneration || workRecoveryGeneration) await cancelAndDrain();
+        const rethrown = error instanceof LocalModelDaemonClientError ? new LocalModelDaemonClientError({ ...error.failure, ...scope }) : error;
+        throw startRefused ? markNotDispatched(rethrown) : rethrown;
+      } finally {
+        request.signal?.removeEventListener("abort", abort);
+        // However the run ended here, no action this run admitted stays `started` in Main's journal.
+        workRecoveryHost?.closeOpen(endCause);
+      }
     },
   };
   function close(): void {

@@ -1,4 +1,5 @@
 import {createNativeHistoryWorkOwner,type HistoryWorkOwner} from './one/history-work-owner';
+import { startOrgSeatSync } from "./org-seat/org-seat-main";
 import { initializeOneContext } from "./one/context-platform";
 import { getOneProfile } from "./store/one-profile";
 import { configureOneSupervisorScience } from "./one/supervisor";
@@ -433,6 +434,7 @@ let reconcileAutostartAfterSciencePolicy: (() => Promise<void>) | null = null;
 const AUTH_SESSION_CHANGED_CHANNEL = "auth:sessionChanged";
 let disposeAuthSessionInvalidation: (() => void) | null = null;
 let disposeAuthSessionRestoration: (() => void) | null = null;
+let disposeOrgSeatSync: (() => void) | null = null;
 let disposeMobileBridgeStateChange: (() => void) | null = null;
 let disposeOneTeamNotificationBridge: (() => void) | null = null;
 let deferredAuthRestorePromise: Promise<AuthRestoreResult> | null = null;
@@ -1830,6 +1832,8 @@ function stopQuitServices(): Promise<void> {
   try { disposeAuthSessionInvalidation?.(); } catch {}
   disposeAuthSessionInvalidation = null;
   try { disposeAuthSessionRestoration?.(); } catch {}
+  try { disposeOrgSeatSync?.(); } catch {}
+  disposeOrgSeatSync = null;
   disposeAuthSessionRestoration = null;
   try { currentOneNativeMainComposition()?.invalidate('shutdown'); } catch {}
   nativePersonalShutdown.abort();
@@ -5447,6 +5451,7 @@ app.whenReady().then(async () => {
       () => { if (explicitBridgeRestore === started) explicitBridgeRestore = null; });
     return started;
   };
+  disposeOrgSeatSync?.(); disposeOrgSeatSync = startOrgSeatSync();
   disposeAuthSessionRestoration = onAuthSessionRestored((sessionSnapshot) => {
     if (!shellReadyForWindows || !sessionSnapshot.signedIn || !getAuthSession().signedIn) return;
     wakeWorkSessionRecovery("authentication-restored");

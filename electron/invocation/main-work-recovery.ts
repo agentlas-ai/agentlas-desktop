@@ -10,6 +10,8 @@ import { latestTaskCheckpoint } from "../long-run/checkpoint";
 import { decideWorkRecovery, WORK_RECOVERY_POLICY_VERSION, type WorkUnit, type ExpectedWorkOutcome } from "../../shared/work-recovery";
 
 type Result = { content: string; isError: boolean; visionMessage: unknown; artifactPaths?: readonly string[]; rawMcpResult?: Record<string, unknown> };
+/** A tool result as the journal stores it (finish) and hands back for an identical repeat (admit `reused`). */
+export type MainWorkResult = Result;
 interface Scope { runId: string; taskId: string; revision: string; stepIds: string[]; defaultStepId: string }
 interface Action { actionId: string; stepId: string; taskId: string; revision: string; methodId: string; inputDigest: string;
   originInvocationRunId: string; expected: ExpectedWorkOutcome; observational: boolean }
@@ -21,9 +23,29 @@ export interface MainWorkReference { action_id?: string; step_id?: string; regen
 export type MainWorkUnknownEnd = "timeout" | "aborted" | "transport" | "response_unreadable" | "dispatch_ended" | "process_lost";
 /** `returned`: the tool's own answer came back. `not_sent`: the request never left Main. Otherwise the call ended without its answer. */
 export type MainWorkFinish = "returned" | "not_sent" | "unconfirmed" | MainWorkUnknownEnd;
+/** What the tool loop needs from an admission: whether it runs (`unit`) or reuses the stored original (`reused`), and its identity. */
+export interface MainWorkActionRef { actionId: string; stepId: string }
+export type MainWorkPortAdmission = { unit: unknown; action: MainWorkActionRef } | { reused: MainWorkResult; action: MainWorkActionRef };
+/**
+ * The host port the tool loop (runtime/local-tool-loop.ts) calls. Main's MainWorkRecoveryContext is the only journal writer and answers
+ * synchronously. A loop running in another host process (the managed local model's loop in the daemon) gets a relay port
+ * (local-model-hub/work-recovery-relay.ts) whose every call is answered by that same Main context, so its answers are promises. A
+ * relay port exists only when the receiving host minted it (registerMainWorkRecoveryRelayPort); a JSON value can never be one.
+ */
+export interface MainWorkRecoveryPort {
+  admit(input: { reference?: MainWorkReference; methodId: string; arguments: Record<string,unknown>; observational: boolean; live?: boolean }):
+    MainWorkPortAdmission | Promise<MainWorkPortAdmission>;
+  finish(admission: { unit: unknown; action: MainWorkActionRef }, result: MainWorkResult, outcome?: MainWorkFinish): void | Promise<void>;
+  release(admission: { unit: unknown; action: MainWorkActionRef }): void | Promise<void>;
+  endDispatch(actionId: string, effectStarted: boolean): void | Promise<void>;
+  packet(options?: { always?: boolean }): string | Promise<string>;
+  refusalPacket(stepId?: string): string | Promise<string>;
+  unknownOutcomePacket(actionIds: readonly string[]): string | Promise<string>;
+}
 const UNKNOWN_END = "main_tool_outcome_unknown:";
 const TERMINAL = ["succeeded", "cancelled", "failed"];
 const contexts = new WeakSet<object>();
+const relayPorts = new WeakSet<object>();
 const MAX_RESULT_BYTES = 32 * 1024 * 1024;
 const RESULT_STORAGE = "agentlas.main-work-result-bytes.v1";
 
@@ -57,7 +79,7 @@ function decodeAction(payload:string):Action {
 
 /** Host-only port. Canonical task/plan steps and persisted action ordinals own
  * identity. A provider call id and the broker's ephemeral action UUID never do. */
-export class MainWorkRecoveryContext {
+export class MainWorkRecoveryContext implements MainWorkRecoveryPort {
   private readonly journal = new DesktopWorkRecoveryJournal();
   /**
    * Actions this run dispatched (admit with `live`) whose call has not ended: they are in flight in this process, so their outcome is
@@ -79,7 +101,7 @@ export class MainWorkRecoveryContext {
    * every later call of the step was refused). `effectStarted` false means the request never left Main.
    * Never throws: closing the claim must not hide the dispatch's own error.
    */
-  endDispatch(actionId: string, effectStarted: boolean): void {
+  endDispatch(actionId: string, effectStarted: boolean, cause?: MainWorkUnknownEnd): void {
     const entry = this.live.get(actionId);
     this.live.delete(actionId);
     if (!entry) return;
@@ -87,7 +109,7 @@ export class MainWorkRecoveryContext {
       const current = this.journal.read(entry.unit.runId, entry.unit.unitId);
       if (!current || current.state !== "started" || current.attemptId !== entry.unit.attemptId
         || current.generation !== entry.unit.generation) return;
-      this.close(current, entry.observational, effectStarted ? "dispatch_ended" : "not_sent");
+      this.close(current, entry.observational, effectStarted ? cause ?? "dispatch_ended" : "not_sent");
     } catch { /* the journal stays as it was; the dispatch's own error is what the caller sees */ }
   }
 
@@ -411,6 +433,17 @@ export class MainWorkRecoveryContext {
       this.assertCurrent();
     }).immediate();
   }
+}
+
+/** Called only by the host module that mints a relay port (local-model-hub/work-recovery-relay.ts). */
+export function registerMainWorkRecoveryRelayPort(port:MainWorkRecoveryPort):void {
+  if(!port || typeof port!=="object" || contexts.has(port))throw new Error("main_work_host_port_required");
+  relayPorts.add(port);
+}
+
+/** Main's own context, or a relay port the receiving host minted; anything else (a JSON copy, a model-supplied value) is refused. */
+export function assertMainWorkRecoveryPort(value:unknown):asserts value is MainWorkRecoveryPort {
+  if(!value || typeof value!=="object" || (!contexts.has(value) && !relayPorts.has(value)))throw new Error("main_work_host_port_required");
 }
 
 export function assertMainWorkRecoveryContext(value:unknown):asserts value is MainWorkRecoveryContext {

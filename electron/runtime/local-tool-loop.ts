@@ -24,7 +24,8 @@ import { assertScienceCollectionCapability, assertScienceCollectionTool, SCIENCE
 // mcpConfigPath는 buildMcpConfigFile()이 만든 { mcpServers: { [key]: {...} } } 형식의
 // 파일이다(mcp-config.ts). Main이 작성할 때 봉인한 실제 transport를 사용한다.
 // key만으로 레지스트리 원본에 되돌아가면 실행별 브라우저·승인 경계를 잃는다.
-import { preparedMcpBindings, preparedMcpTransport, preparedMcpConsentResource, type PreparedMcpBinding } from "../mcp-tools/prepared-transport";
+import { preparedMcpBindings, preparedMcpTransport, preparedMcpConsentResource, preparedMcpTargetTransport, type PreparedMcpBinding } from "../mcp-tools/prepared-transport";
+import { MAIN_WORK_BUNDLED_PLUGIN_READS, mainWorkEffectFreeRead, verifiedBundledPluginRelease } from "../mcp-tools/main-work-read-actions";
 import { bindMainToolConsentResource } from "./tool-consent";
 import { mcpToolIsMutating, planMcpToolIsMutating } from "../mcp-tools/proxy-server";
 import { oneGraphToolTimeoutMs } from "../../shared/one-graph-tool-permission";
@@ -52,7 +53,7 @@ import { openAiStrictSchemaOrNull } from "./strict-output-schema";
 import { abortReasonError } from "./abort-reason";
 import { builtinShellEnv } from "./builtin-shell-env";
 import { attestMainToolPreDispatchRejection, withDurableMainToolStart } from "../invocation/adapter-effect-context";
-import { assertMainWorkRecoveryContext, mainWorkToolSchema, type MainWorkFinish, type MainWorkRecoveryContext, type MainWorkReference } from "../invocation/main-work-recovery";
+import { assertMainWorkRecoveryPort, mainWorkToolSchema, type MainWorkFinish, type MainWorkPortAdmission, type MainWorkRecoveryPort, type MainWorkReference } from "../invocation/main-work-recovery";
 import type { InstalledMcpServer } from "../../shared/types";
 import { getRuntimeSession, saveRuntimeSession } from "../store/runtime-sessions";
 import { OUTPUT_LIMIT_CONTINUATION_MAX_ROUNDS, outputLimitContinuationTurn } from "./output-limit-continuation";
@@ -425,7 +426,8 @@ export function mainToolBrokerInventory(
  * (acp.ts answerPermission 과 같은 규칙).
  */
 export interface LocalToolApprovalContext {
-  canonicalWorkRecovery?: MainWorkRecoveryContext;
+  /** Main's journal context, or (agentlas-local in the daemon) the relay port answered by it: its answers may be promises. */
+  canonicalWorkRecovery?: MainWorkRecoveryPort;
   /** Science bridge only: project the exact response envelope after this approved dispatch. */
   retainMcpToolResult?: true;
   beforeMcpToolResult?: RunnerRequest["beforeMcpToolResult"];
@@ -699,7 +701,11 @@ async function dispatchMainToolRaw(
     throw error;
   } finally {
     // Every exit closes this dispatch's journal claim: an attempt still started here is closed with what is known (never left started).
-    if (effectSlot.liveAction) approval.canonicalWorkRecovery?.endDispatch(effectSlot.liveAction, effectSlot.effectStarted === true);
+    if (effectSlot.liveAction) {
+      const ended = approval.canonicalWorkRecovery?.endDispatch(effectSlot.liveAction, effectSlot.effectStarted === true);
+      // Main's context answers at once; a relay port's answer is awaited, so the end reaches the journal before this call returns.
+      if (ended instanceof Promise) await ended.catch(() => {});
+    }
   }
   if (effectSlot.ref) {
     await settleMainEffect(effectSlot.ref, result.isError ? "failed" : "settled", result.content);
@@ -870,7 +876,7 @@ async function dispatchMainToolRawUnchecked(
   }
   let workReference: MainWorkReference | undefined;
   if (approval.canonicalWorkRecovery) {
-    assertMainWorkRecoveryContext(approval.canonicalWorkRecovery);
+    assertMainWorkRecoveryPort(approval.canonicalWorkRecovery);
     const reference=args._agentlas_work;
     if(reference!==undefined) {
       if(!reference || typeof reference!=="object" || Array.isArray(reference)
@@ -951,9 +957,23 @@ async function dispatchMainToolRawUnchecked(
   // item.started the same way). Without it every host-loop Goal turn (serving,
   // agentlas-local, BYOK) read "outcome-pending" and verification stayed inconclusive
   // (isolated live run 2026-09-25, run_80dc1968: 12 inconclusive receipts).
-  let work:ReturnType<MainWorkRecoveryContext["admit"]>|undefined;
+  let work:MainWorkPortAdmission|undefined;
+  // Recovery only, never approval (above): an MCP call is a read here only if it is on the closed effect-free list
+  // (mcp-tools/main-work-read-actions.ts), so its identical repeat after a timeout runs; every other MCP call stays an effect.
+  // Only a listed app-bundled plugin id waits here to verify its release; every other call reaches admit with no await in between.
+  let bundledRelease: string | null = null;
+  if (resolved.kind === "mcp" && approval.canonicalWorkRecovery && MAIN_WORK_BUNDLED_PLUGIN_READS.has(resolved.server.catalogId ?? "")) {
+    bundledRelease = await verifiedBundledPluginRelease(resolved.server.catalogId, () => preparedMcpTargetTransport(resolved.prepared, resolved.server));
+    approval.signal?.throwIfAborted();
+    approval.assertCurrent?.();
+  }
+  const observational = !planMutation || (resolved.kind === "mcp" && !!approval.canonicalWorkRecovery && mainWorkEffectFreeRead({
+    catalogId: resolved.server.catalogId, toolName: resolved.serverToolName, args, bundledRelease,
+  }));
   try {
-    work=approval.canonicalWorkRecovery?.admit({reference:workReference,methodId:brokerToolId,arguments:args,observational:!planMutation,live:true});
+    const admitted=approval.canonicalWorkRecovery?.admit({reference:workReference,methodId:brokerToolId,arguments:args,observational,live:true});
+    // Main's context answers synchronously (no await between its admit and the live record below); a relay port answers later.
+    work=admitted instanceof Promise ? await admitted : admitted;
   } catch(error) {
     const code=error instanceof Error ? error.message : String(error);
     if(!/^main_work_(?:read_original_outcome|same_action_outcome_unknown|action_not_in_task|action_input_conflict|checkpoint_step_invalid|worker_liveness_unknown|outcome_unconfirmed|result_read_unavailable|read_regeneration_required|same_method_limit|same_method_limit_or_claim_changed)/.test(code))throw error;
@@ -962,11 +982,11 @@ async function dispatchMainToolRawUnchecked(
     // packet): a call refused at admission used to stay "started" with no end in the evidence, and a code-mode run that was refused twenty
     // times showed twenty calls that never finished. A blocked step gets the compact view of what blocks it (refusalPacket).
     (currentHistoryRuntimeFence()?.assertCurrent(), events.onTool?.(call.toolName, call.arguments, `Error: ${code.slice(0,300)}`, eventCallId, true));
-    const recovery=code.startsWith("main_work_read_original_outcome")
+    const recovery=await (code.startsWith("main_work_read_original_outcome")
       ? approval.canonicalWorkRecovery!.refusalPacket(workReference?.step_id)
       : code.startsWith("main_work_same_action_outcome_unknown:")
         ? approval.canonicalWorkRecovery!.unknownOutcomePacket(code.slice("main_work_same_action_outcome_unknown:".length).split(","))
-        : approval.canonicalWorkRecovery!.packet({always:true});
+        : approval.canonicalWorkRecovery!.packet({always:true}));
     return {content:JSON.stringify({code,recovery}),visionMessage:null,isError:true};
   }
   // The admitted call is in flight in this run until the wrapper's finally says otherwise (no await between admit and here): a sibling
@@ -1034,7 +1054,7 @@ async function dispatchMainToolRawUnchecked(
           broker?.finishAction(actionId, "failed");
         }
         // The shell never started, so the admitted canonical action closes instead of staying "started" and blocking its step.
-        if (work && "unit" in work) approval.canonicalWorkRecovery!.release(work);
+        if (work && "unit" in work) await approval.canonicalWorkRecovery!.release(work);
         return { content: `Error: ${content}`, visionMessage: null, isError: true };
       }
     }
@@ -1108,7 +1128,7 @@ async function dispatchMainToolRawUnchecked(
       isError: !outcome.ok,
     };
     if(work && "unit" in work) {
-      approval.canonicalWorkRecovery!.finish(work,dispatched);
+      await approval.canonicalWorkRecovery!.finish(work,dispatched);
       dispatched.canonicalWorkAction={action_id:work.action.actionId,step_id:work.action.stepId};
     }
     return dispatched;
@@ -1208,7 +1228,7 @@ async function dispatchMainToolRawUnchecked(
   // The journal records how the call ended before delivery is awaited: delivery can still reject (a run abort is rethrown there),
   // and the outcome must not be lost with it (Finance 1008 rs-Q11/rs7 rs-V40: an aborted code-mode call stayed started).
   if(work && "unit" in work) {
-    approval.canonicalWorkRecovery!.finish(work,mcpOutcome,mcpEnd);
+    await approval.canonicalWorkRecovery!.finish(work,mcpOutcome,mcpEnd);
     mcpOutcome.canonicalWorkAction={action_id:work.action.actionId,step_id:work.action.stepId};
   }
   // Outside the ordinary tool-error catch: rejection belongs to the host run

@@ -153,6 +153,33 @@ function ownedGateHints(text) {
   if (codes.size) parts.push(`codes=${[...codes].slice(0, 6).join(",")}`);
   return parts.join(" ");
 }
+// electron-builder, notarytool and codesign are public tools whose own status lines are safe to surface for the packaging
+// stage: the builder's bullet progress lines, its first failure line (without the stack), and notarization/codesign verdicts.
+const BUILDER_BULLET = /^\s*\u2022\s+([\x20-\x7e]{1,180})/;
+const BUILDER_FAILURE = /^\s*\u2a2f\s+([\x20-\x7e]{1,400})/;
+const NOTARY_VERDICT = /^\s*"?(?:status|statusSummary)"?\s*[:=]\s*"?([A-Za-z0-9 ,.'-]{1,120})/;
+const SIGN_FAILURE = /(code object is not signed|invalid signature|resource fork|a sealed resource is missing|errSecInternalComponent|The specified item could not be found in the keychain|Invalid|rejected|Failed to staple)/i;
+function builderHints(text) {
+  const bullets = [];
+  let failure = null;
+  const verdicts = [];
+  const signs = [];
+  for (const line of text.split(/\r?\n/)) {
+    const b = BUILDER_BULLET.exec(line);
+    if (b) { bullets.push(scrub(b[1])); continue; }
+    const f = BUILDER_FAILURE.exec(line);
+    if (f) { if (!failure) failure = scrub(f[1].split(" failedTask=")[0]); continue; }
+    const v = NOTARY_VERDICT.exec(line);
+    if (v && verdicts.length < 3) { verdicts.push(scrub(v[1])); continue; }
+    if (line.length < 400 && /^\s*(?:Error|error:|codesign|notarytool|stapler|\[package-mac\])/i.test(line) && SIGN_FAILURE.test(line) && signs.length < 3) signs.push(scrub(line.trim()));
+  }
+  const parts = [];
+  if (bullets.length) parts.push(`builder=${bullets.slice(-5).join(" | ")}`);
+  if (failure) parts.push(`builder_error=${failure}`);
+  if (verdicts.length) parts.push(`notary=${verdicts.join(" | ")}`);
+  if (signs.length) parts.push(`sign=${signs.join(" | ")}`);
+  return parts.join(" ");
+}
 function failureHints(file) {
   let text;
   try { text = fs.readFileSync(file, "utf8"); } catch { return ""; }
@@ -173,12 +200,14 @@ function failureHints(file) {
     if (e && !firstError) firstError = e[1];
   }
   const owned = ownedGateHints(text);
+  const builder = builderHints(text);
   const parts = [];
   if (script) parts.push(`script=${script}`);
   if (markers.length) parts.push(`markers=${markers.slice(-6).map(scrub).join(" | ")}`);
   if (diagnostics.length) parts.push(`ts=${diagnostics.map(scrub).join(" | ")}`);
   if (firstError) parts.push(`error=${scrub(firstError)}`);
   if (owned) parts.push(owned);
+  if (builder) parts.push(builder);
   return parts.join(" ");
 }
 
@@ -286,7 +315,10 @@ async function run(stage, command, args) {
   try {
     const selected = portableCommand(command, args);
     stageTemp = cleanStageTemp(stage);
-    const childEnv = stageTemp ? { ...process.env, TMPDIR: stageTemp.dir } : process.env;
+    let childEnv = stageTemp ? { ...process.env, TMPDIR: stageTemp.dir } : process.env;
+    // The Science pin-is-latest check reads the private SDK remote, which this stage's token cannot; the deployer runs it online
+    // before every push. It is skipped (and says so) only for this stage.
+    if (stage === "MAC_PREFLIGHT") childEnv = { ...childEnv, SCIENCE_PIN_CHECK_OFFLINE_OK: "1" };
     if (stageTemp) {
       const python = consistentPython(process.env) || venvPython(process.env, stageTemp.dir);
       pythonSource = python ? python.source : "none_consistent";

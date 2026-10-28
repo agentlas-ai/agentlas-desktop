@@ -59,7 +59,7 @@ export interface ScienceAuthorCompletionProjection {
     contractVersion: number;
     contractContentSha256: string;
     receipts: readonly { criterionIndex: number; receiptId: string; receiptSha256: string; provenanceSha256: string }[];
-    advisories: readonly { code: string; observed: string; nextAction: string; [key: string]: unknown }[];
+    advisories: readonly { code: string; observed: string; nextAction: string }[];
     manuscriptWritingChecklist: Record<string, unknown> | null;
   };
 }

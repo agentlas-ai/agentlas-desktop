@@ -7,9 +7,12 @@ import { createHash } from "node:crypto";
 import type { DaemonLocalModelService } from "./local-model-service";
 import type { RunnerEvents, RunnerResult } from "../runtime/runner";
 import { admitRemoteLocalMcp } from "../local-model-hub/mcp-admission";
+import { createMainWorkRecoveryRelayPort, workRelayDigest } from "../local-model-hub/work-recovery-relay";
 import { assertLocalModelWireValue, localModelRemoteError, remoteLocalModelRequest,
+  WORK_RELAY_CHUNK_CHARS, WORK_RELAY_INLINE_CHARS, WORK_RELAY_MAX_CHARS,
   type LocalModelControlCommand, type LocalModelControlPage, type LocalModelRpcCommand,
-  type LocalModelRpcReply, type RemoteLocalModelRunEvent, type RemoteLocalModelRunPage, type RemoteLocalModelPermissionRequest, type RemoteMcpToolResultRequest } from "../local-model-hub/remote-contract";
+  type LocalModelRpcReply, type RemoteLocalModelRunEvent, type RemoteLocalModelRunPage, type RemoteLocalModelPermissionRequest, type RemoteMcpToolResultRequest,
+  type RemoteWorkRecoveryCall, type RemoteWorkRecoveryRequest } from "../local-model-hub/remote-contract";
 
 type State = LocalModelControlPage["state"];
 type Entry = {
@@ -20,12 +23,18 @@ type Entry = {
 type Run = Entry & { events: Array<{ sequence: number; event: RemoteLocalModelRunEvent; bytes: number }>;
   sequence: number; truncated: number; acknowledged: number; eventBytes: number;
   resultBoundaryGeneration?: string;
+  workRecoveryGeneration?: string;
   runtimeQuiesced?: boolean;
   resultRequests: Map<string, { request: RemoteMcpToolResultRequest; settle(allow: boolean): void }>;
+  /** Pending Work journal calls (work-recovery-relay.ts): `text` is the call, `receive` takes Main's answer in chunks. */
+  workRequests: Map<string, { request: RemoteWorkRecoveryRequest; text: string;
+    receive(offset: number, text: string, chars: number, digest: string): boolean; settle(error: Error): void }>;
   permissions: Map<string, { request: RemoteLocalModelPermissionRequest; settle(decision: RuntimeToolPermissionDecision): void }> };
 const ID = /^[A-Za-z0-9_-]{8,128}$/;
 const MAX_RESULT_BYTES = 2 * 1024 * 1024;
 const MAX_EVENT_BYTES = 512 * 1024;
+/** Journal calls that record how an admitted call ended; they are still carried after Stop. */
+const WORK_CLOSING_OPS: ReadonlySet<string> = new Set(["finish", "release", "endDispatch"]);
 
 function id(value: unknown): string {
   if (typeof value !== "string" || !ID.test(value)) throw localModelRemoteError("local_model_remote_id_invalid");
@@ -149,6 +158,7 @@ export function createDaemonLocalModelRpc(options: {
       truncatedBeforeSequence: Math.max(row.truncated, row.acknowledged),
       permissionRequests: [...row.permissions.values()].map(x => x.request),
       mcpToolResults: [...row.resultRequests.values()].map(x => x.request),
+      workRecoveryRequests: [...row.workRequests.values()].map(x => x.request),
       ...(row.runtimeQuiesced !== undefined ? { runtimeQuiesced: row.runtimeQuiesced } : {}),
       result: row.result as RunnerResult | null, errorCode: row.errorCode, errorMessage: row.errorMessage };
   }
@@ -202,6 +212,7 @@ export function createDaemonLocalModelRpc(options: {
           for (const row of runs.values()) if (row.clientId === clientId) {
             for (const permission of [...row.permissions.values()]) permission.settle("deny");
             for (const result of [...row.resultRequests.values()]) result.settle(false);
+            for (const work of [...row.workRequests.values()]) work.settle(localModelRemoteError("local_model_remote_client_detached"));
           }
           value = { detached: true }; break;
         }
@@ -210,6 +221,12 @@ export function createDaemonLocalModelRpc(options: {
         case "run.result-capability": {
           assertAdmission(clientId);
           value = { schema: "agentlas.local-model-result-boundary.v1", supported: true,
+            ownerEpoch: options.ownerEpoch, clientId, runId: id(command.runId), generation: id(command.generation) };
+          break;
+        }
+        case "run.work-recovery-capability": {
+          assertAdmission(clientId);
+          value = { schema: "agentlas.local-model-work-recovery-relay.v1", supported: true,
             ownerEpoch: options.ownerEpoch, clientId, runId: id(command.runId), generation: id(command.generation) };
           break;
         }
@@ -239,13 +256,16 @@ export function createDaemonLocalModelRpc(options: {
           if (!command.request || Object.prototype.hasOwnProperty.call(command.request, "signal")) throw localModelRemoteError("local_model_remote_request_invalid");
           const request = remoteLocalModelRequest(command.request);
           const resultBoundaryGeneration = command.resultBoundaryGeneration === undefined ? undefined : id(command.resultBoundaryGeneration);
-          const digest = material({ request, mcpAdmission: command.mcpAdmission, resultBoundaryGeneration });
+          const workRecoveryGeneration = command.workRecoveryGeneration === undefined ? undefined : id(command.workRecoveryGeneration);
+          const digest = material({ request, mcpAdmission: command.mcpAdmission, resultBoundaryGeneration,
+            ...(workRecoveryGeneration ? { workRecoveryGeneration } : {}) });
           let row = runs.get(itemKey);
           if (row) {
             if (row.material !== digest) throw localModelRemoteError("local_model_remote_id_conflict");
           } else {
             assertAdmission(clientId); makeRoom(runs, 8);
-            row = { ...entry(clientId, command.runId, digest), events: [], sequence: 0, truncated: 0, acknowledged: 0, eventBytes: 0, permissions: new Map(), resultRequests: new Map(), resultBoundaryGeneration };
+            row = { ...entry(clientId, command.runId, digest), events: [], sequence: 0, truncated: 0, acknowledged: 0, eventBytes: 0, permissions: new Map(), resultRequests: new Map(), resultBoundaryGeneration,
+              workRecoveryGeneration, workRequests: new Map() };
             runs.set(itemKey, row);
             if (cancelled.has(`run:${itemKey}`)) row.controller.abort(localModelRemoteError("local_model_remote_cancelled"));
             const current = row;
@@ -253,6 +273,60 @@ export function createDaemonLocalModelRpc(options: {
             let boundaryRefused = false;
             const closeChildren = () => { children.closing = true; };
             current.controller.signal.addEventListener("abort", closeChildren, { once: true });
+            // The Work journal stays Main's: each call of this run's tool loop waits on the page for Main's answer.
+            const workCall = (input: RemoteWorkRecoveryCall): Promise<unknown> => {
+              // How a dispatched call ended is still told after Stop (Main's drain answers it), so the journal records the end the
+              // tool loop saw, as it does in Main, instead of an unknown one.
+              const closing = WORK_CLOSING_OPS.has(input.op);
+              assertAdmission(clientId);
+              if (!closing) current.controller.signal.throwIfAborted();
+              if (current.state !== "running") throw localModelRemoteError("local_model_remote_work_relay_closed");
+              if (current.workRequests.size >= 16) throw localModelRemoteError("local_model_remote_work_capacity_exceeded");
+              assertLocalModelWireValue(input);
+              const text = JSON.stringify(input);
+              if (text.length > WORK_RELAY_MAX_CHARS) throw localModelRemoteError("local_model_remote_work_too_large");
+              const callDigest = workRelayDigest(text);
+              return new Promise<unknown>((resolve, reject) => {
+                const requestId = randomUUID(); let settled = false;
+                let answer = ""; let expected: { chars: number; digest: string } | null = null;
+                const finish = (error: Error | null, value?: unknown) => {
+                  if (settled) return; settled = true;
+                  clearTimeout(timer); current.controller.signal.removeEventListener("abort", abort);
+                  current.workRequests.delete(requestId);
+                  if (error) reject(error); else resolve(value);
+                  wake(current);
+                };
+                const timeout = () => finish(localModelRemoteError("local_model_remote_work_relay_timeout"));
+                let timer = setTimeout(timeout, closing && current.controller.signal.aborted ? 6_000 : 5 * 60_000);
+                // After Stop a closing call waits only as long as Main's drain (daemon-client.ts cancelAndDrain); anything else ends now.
+                const abort = closing ? () => { clearTimeout(timer); timer = setTimeout(timeout, 6_000); }
+                  : () => finish(localModelRemoteError("local_model_remote_work_relay_closed"));
+                current.controller.signal.addEventListener("abort", abort, { once: true });
+                current.workRequests.set(requestId, {
+                  request: { id: requestId, ownerEpoch: options.ownerEpoch, clientId, runId: current.id,
+                    generation: workRecoveryGeneration!, afterSequence: current.sequence, op: input.op, chars: text.length, digest: callDigest,
+                    ...(text.length <= WORK_RELAY_INLINE_CHARS ? { payload: text } : {}) },
+                  text,
+                  receive(offset, chunk, chars, digest) {
+                    if (offset === 0) { answer = ""; expected = { chars, digest }; }
+                    if (!expected || offset !== answer.length || chars !== expected.chars || digest !== expected.digest
+                      || answer.length + chunk.length > chars) throw localModelRemoteError("local_model_remote_work_refused");
+                    answer += chunk;
+                    if (answer.length < chars) return false;
+                    let reply: Record<string, unknown> | null = null;
+                    try { if (workRelayDigest(answer) === digest) reply = JSON.parse(answer); } catch { reply = null; }
+                    if (!reply || typeof reply !== "object" || (reply.ok === true ? !Object.prototype.hasOwnProperty.call(reply, "value")
+                      : reply.ok !== false || typeof reply.message !== "string")) throw localModelRemoteError("local_model_remote_work_refused");
+                    if (reply.ok === true) finish(null, reply.value);
+                    else finish(new Error(reply.message as string));
+                    return true;
+                  },
+                  settle: error => finish(error),
+                });
+                wake(current);
+              });
+            };
+            const workRecovery = workRecoveryGeneration ? createMainWorkRecoveryRelayPort(workCall) : undefined;
             const events: RunnerEvents = {
               onPartial: (...args) => emit(current, { kind: "onPartial", args }),
               onStatus: (...args) => emit(current, { kind: "onStatus", args }),
@@ -293,6 +367,7 @@ export function createDaemonLocalModelRpc(options: {
                     });
                   },
                 }, admitted?.proxyScope, () => options.service.runtime.run({ ...request,
+                  ...(workRecovery ? { canonicalWorkRecovery: workRecovery } : {}),
                   ...(resultBoundaryGeneration ? { beforeMcpToolResult: (input: RemoteMcpToolResultRequest["input"]) => {
                     assertAdmission(clientId); current.controller.signal.throwIfAborted();
                     if (current.resultRequests.size >= 16) throw localModelRemoteError("local_model_remote_result_capacity_exceeded");
@@ -321,6 +396,7 @@ export function createDaemonLocalModelRpc(options: {
                 admitted?.cleanup();
                 for (const permission of [...current.permissions.values()]) permission.settle("deny");
                 for (const result of [...current.resultRequests.values()]) result.settle(false);
+                for (const work of [...current.workRequests.values()]) work.settle(localModelRemoteError("local_model_remote_work_relay_closed"));
                 if (current.controller.signal.aborted || boundaryRefused) {
                   children.closing = true;
                   current.runtimeQuiesced = await drainAttemptChildren(children);
@@ -352,12 +428,36 @@ export function createDaemonLocalModelRpc(options: {
           }
           pending.settle(command.allow); value = { resolved: true }; break;
         }
+        case "run.work-read": {
+          const row = get(runs, clientId, command.runId);
+          const pending = row.workRequests.get(String(command.requestId));
+          const offset = integer(command.offset, 0, WORK_RELAY_MAX_CHARS);
+          if (!pending || command.generation !== row.workRecoveryGeneration || offset > pending.text.length) {
+            throw localModelRemoteError("local_model_remote_work_refused");
+          }
+          value = { text: pending.text.slice(offset, offset + WORK_RELAY_CHUNK_CHARS) }; break;
+        }
+        case "run.work": {
+          const row = get(runs, clientId, command.runId);
+          const pending = row.workRequests.get(String(command.requestId));
+          assertAdmission(clientId);
+          if (command.ownerEpoch !== options.ownerEpoch || row.state !== "running" || !pending
+            || (row.controller.signal.aborted && !WORK_CLOSING_OPS.has(pending.request.op))
+            || command.generation !== row.workRecoveryGeneration || typeof command.text !== "string"
+            || command.text.length > WORK_RELAY_CHUNK_CHARS || typeof command.digest !== "string" || !/^[0-9a-f]{64}$/.test(command.digest)) {
+            throw localModelRemoteError("local_model_remote_work_refused");
+          }
+          const offset = integer(command.offset, 0, WORK_RELAY_MAX_CHARS);
+          const chars = integer(command.chars, 0, WORK_RELAY_MAX_CHARS);
+          value = { complete: pending.receive(offset, command.text, chars, command.digest) }; break;
+        }
         case "run.read": {
           const row = get(runs, clientId, command.runId);
           const after = integer(command.afterSequence, 0, Number.MAX_SAFE_INTEGER);
           const limit = integer(command.limit, 128, 256);
           if (!limit || after > row.sequence) throw localModelRemoteError("local_model_remote_cursor_invalid");
-          await wait(row, integer(command.waitMs, 0, 25_000), () => row.state !== "running" || row.sequence > after || row.permissions.size > 0 || row.resultRequests.size > 0);
+          await wait(row, integer(command.waitMs, 0, 25_000), () => row.state !== "running" || row.sequence > after || row.permissions.size > 0 || row.resultRequests.size > 0
+            || row.workRequests.size > 0);
           value = runPage(row, after, limit); break;
         }
         case "run.ack": {

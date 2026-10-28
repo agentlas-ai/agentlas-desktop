@@ -5801,7 +5801,7 @@ async function runMcpInvocationInContext(
   // An Agentlas Finance conversation: its finance.* operations are reachable only through harness_call, so without this line a model
   // answers market questions from memory or web search. Main-derived from the stored project binding, never from renderer input.
   if (financeWorkBinding) {
-    turnContextParts.push("finance: Agentlas Finance chat; answer asset, price, filing, news, macro, portfolio and scenario requests from harness_call finance.* results (plugin:finance/index maps them), not from memory or web search first; a written report is a saved Finance report (finance.query.save mode report, then finance.apply), not a file or chat text");
+    turnContextParts.push("finance: Agentlas Finance chat; answer asset, price, filing, news, macro, portfolio and scenario requests from harness_call finance.* results (plugin:finance/index maps them), not from memory or web search first; a report on finance.query data is a saved Finance report (finance.query.save mode report, then finance.apply); other data goes in a file");
     keepLastTurnContext("finance.chat", "fixed-policy", ["release"]);
   }
   // An installed agent's entry file names its own docs by relative path; the run works in the owner's project.

@@ -43,8 +43,9 @@ export interface RunnerOwnerControlInbox {
 
 export interface RunnerRequest {
   ownerControlInbox?: RunnerOwnerControlInbox;
-  /** Private Host port; canonical task/checkpoint/action identities survive model changes. */
-  canonicalWorkRecovery?: import("../invocation/main-work-recovery").MainWorkRecoveryContext;
+  /** Private Host port; canonical task/checkpoint/action identities survive model changes. Main's MainWorkRecoveryContext, or the
+   * relay port a receiving host minted for it (local-model-hub/work-recovery-relay.ts). */
+  canonicalWorkRecovery?: import("../invocation/main-work-recovery").MainWorkRecoveryPort;
   /** Awaited before an MCP result can reach the next provider dispatch. */
   beforeMcpToolResult?: BeforeMcpToolResult;
   /** Native exact-run closure, never serialized into a provider/CLI request. */

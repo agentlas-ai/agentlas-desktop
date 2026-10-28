@@ -90,8 +90,13 @@ export const runManagedLocalModel: Runner = async (request, events) => {
   try { return await configured.runtime.run(request, events); }
   catch (error) {
     const code = error && typeof error === "object" && "code" in error ? error.code : error instanceof Error ? error.message : null;
+    // The daemon's MCP admission (local_model_remote_mcp_admission_*) runs before its loop calls the model; a Main-side
+    // prepared-transport refusal is pre-dispatch only when the client proved it (turnDelivery, daemon-client.ts markNotDispatched).
+    // Either way nothing reached the model: "sent without a completion receipt" would be false.
+    const beforeDispatch = typeof code === "string" && (code.startsWith("local_model_remote_mcp_admission_")
+      || (error as { turnDelivery?: unknown } | null)?.turnDelivery === "not-dispatched");
     if (typeof code === "string" && (code.startsWith("local_model_remote_mcp_admission_")
-      || code.startsWith("mcp_prepared_"))) return { text: "", failure: {
+      || code.startsWith("mcp_prepared_"))) return { text: "", ...(beforeDispatch ? { turnDelivery: "not-dispatched" as const } : {}), failure: {
       kind: "refused", runtime: "agentlas-local", source: "marker",
       providerCode: "local_model_remote_mcp_admission_refused",
       message: request.locale === "ko" ? "선택한 로컬 모델의 도구 권한을 준비하지 못했습니다. 같은 로컬 연결을 유지합니다."

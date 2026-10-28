@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.3.101 — 2026-10-28
+
+- Business teams: a person on an active team seat receives the team's AI keys in the system keychain when signing in or restoring a session and again every ten minutes. Removing the seat, signing out or switching accounts deletes only the keys this feature installed; keys you saved yourself are never overwritten or removed. Offline, the keys stay for at most 24 hours after the last successful check.
+- Science: the Science extension now runs on the unified SDK line, which calls the shared host ports Desktop publishes (goal waits, host goal wake, recorded artifact outputs, decisions and the Codex product session store). The release process now refuses to ship unless the Science pin is the SDK's current main.
+- Finance: the report rule no longer contradicts saving a query, and an unconnected data source no longer sends the conversation toward a step it cannot take.
+- Background reads that hit their time limit can run again with the same input instead of staying blocked.
+- Local models: Work turns on a local model (Agentlas Local) now reach the model instead of being refused before anything was sent; the Work journal stays with the desktop app, which also closes any started action whose end never arrived. A daemon that cannot take part is refused with a clear reason before the turn starts.
+- Release diagnostics: a failed signing or packaging stage now reports the builder's progress, its first failure and the notarization verdict.
+
+This release binds Agentlas OS v1.2.69 at 2b4e27b78d9a1e808142f1e6e510ab7023c7b44d; public runtime asset `hephaestus-runtime-v1.2.69.tar.gz` is pinned at SHA-256 `0bb8ac3eac111fd26bc3a20a7b1657741399b9f87ed8b8f1c87f2402dbd4c283`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.100 — 2026-10-27
 
 - Work: every Work conversation now has one persistent main AI. Delegated sub-sessions run asynchronously, their results come back to the main AI, and a delegation that cannot finish ends with a typed cause instead of a wedge. The main AI no longer fans a request out into a team by default (the escalation stays available when you ask for a team), and the one-CLI-per-project serialization and the child-session cap are gone — run slots and the seat budget queue the work.

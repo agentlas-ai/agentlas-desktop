@@ -147,7 +147,7 @@ const PORTFOLIO_PROPOSAL_NOTE = 'The review card is shown to the owner and nothi
 /** A query that reached no provider data is not a success: the harness said "ok" while the failure sat one level down, where a model skims past it. */
 const DATA_FAILURE = {
   error: { reason: 'finance_data_error', next: 'The data provider returned an error and no rows (see warnings). Tell the owner the data could not be retrieved. If another metric answers the question (rates: treasury_yields; company text: news or filings), try it; otherwise retry later. Do not present anything as retrieved Finance data.' },
-  unconnected: { reason: 'finance_data_unconnected', next: 'The data source for this metric is not connected, so no rows were returned. Tell the owner to connect it in Finance settings, or use another metric.' },
+  unconnected: { reason: 'finance_data_unconnected', next: 'No rows: the source for this metric is not connected, is switched off, or does not cover this request (see warnings). Tell the owner what could not be checked, or use another metric; do not present anything as retrieved Finance data.' },
 } as const;
 export function financeDataFailure(data: unknown): { reason: string; next: string } | null {
   const result = data && typeof data === 'object' ? data as { status?: unknown; rows?: unknown } : null;
@@ -308,7 +308,7 @@ export const FINANCE_PORTS = descriptors.map(({ action, purpose, required, input
     purpose: composeDeclaredPrompt([{ id: `tool.finance.${action}.description`, revision: action === 'query.save' ? 2 : action === 'query' ? 2 : 1, stability: 'fixed-policy', changeTriggers: ['release'], text: purpose }]),
     handler: (args: Record<string, unknown>, ctx: HarnessCallContext) => callFinanceTool(action, args, ctx) };
 });
-const FINANCE_SKILL_REVISION: Record<string, number> = { index: 4, research: 5, workspace: 3, monitor: 3 };
+const FINANCE_SKILL_REVISION: Record<string, number> = { index: 5, research: 5, workspace: 3, monitor: 3 };
 for (const workflow of ['index', 'research', 'workspace', 'monitor']) registerDeclaredPromptModule({ id: `plugin.finance.skill.${workflow}`, revision: FINANCE_SKILL_REVISION[workflow], stability: 'versioned-content', changeTriggers: ['release', 'skill-package'] });
 
 /** Preserve the installed bytes and their hash while declaring the actual skill tool-result channel. */
