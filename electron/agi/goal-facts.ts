@@ -20,6 +20,7 @@ import type Database from "better-sqlite3";
 import { createHash } from "node:crypto";
 import { isGoalObserving } from "../long-run/effect-observation-tickets";
 import { isBrowserDomToolError } from "../browser/fallback-ladder";
+import { CONTINUATION_REFUSED_NOTICE_CODE, continuationRefusalCause } from "../../shared/continuation-refusal-notice";
 import type { AgiBlockerFacts, AgiBlockerSignal, AgiTacticFact } from "./blocker";
 
 /** The scheduler ticks every minute; a due slot missed by more than this with no run started is a miss. */
@@ -212,6 +213,71 @@ function typedReceiptCode(receipt: { errorCode: string | null; errorMessage?: st
  */
 const NOT_A_GOAL_FAILURE = new Set(["goal_waiting_system_start_refused"]);
 
+/**
+ * A continuation the host promised and could not start (shared/continuation-refusal-notice.ts notice codes on the room's run events),
+ * not yet superseded by a later turn of the Goal's own controller. Typed notice code and its bounded cause only.
+ */
+function continuationRefusedSignal(db: Database.Database, run: AgiGoalRow, nowMs: number): { signal: AgiBlockerSignal; ref: string } | null {
+  if (!run.rootChatId || !tableExists(db, "run_events")) return null;
+  const kinds: Array<[string, "browser-login" | "permission-escalation"]> = [
+    [CONTINUATION_REFUSED_NOTICE_CODE["browser-login"], "browser-login"],
+    [CONTINUATION_REFUSED_NOTICE_CODE["permission-escalation"], "permission-escalation"]];
+  const row = db.prepare(`SELECT id, ts, json_extract(payload_json, '$.noticeCode') AS code, json_extract(payload_json, '$.noticeDetails') AS details
+    FROM run_events WHERE chat_id = ? AND kind = 'mcp_notice' AND ts >= ? AND json_extract(payload_json, '$.noticeCode') IN (?, ?)
+    ORDER BY ts DESC, rowid DESC LIMIT 1`).get(run.rootChatId, new Date(nowMs - 24 * 60 * 60_000).toISOString(), kinds[0]![0], kinds[1]![0]) as
+    { id: string; ts: string; code: string; details: string | null } | undefined;
+  const continuation = row ? kinds.find(([code]) => code === row.code)?.[1] : undefined;
+  if (!row || !continuation) return null;
+  if (tableExists(db, "long_run_worker_attempts") && tableExists(db, "long_run_workers") && db.prepare(`SELECT 1 FROM long_run_worker_attempts a
+    JOIN long_run_workers w ON w.id = a.worker_id WHERE a.run_id = ? AND w.role = 'controller' AND a.started_at > ? LIMIT 1`).get(run.id, row.ts)) return null;
+  let cause = "unknown";
+  try { const details = row.details ? JSON.parse(row.details) as { cause?: unknown } : null; cause = continuationRefusalCause(details?.cause); } catch { /* unknown */ }
+  return { signal: { kind: "continuation_refused", continuation, code: cause }, ref: `run_event:${row.id}` };
+}
+
+/** How many of the Goal's own wakes in a row must fail with one typed code before it is a repeated failure, not a retry. */
+export const AGI_REPEATED_WAKE_FAILURES = 3;
+
+/**
+ * The Goal's own wakes (goal_wake_started for this long run; the AGI's teammate starts are not wakes of the Goal's turn) failed the
+ * same way every time. A wake that the start refused before any controller attempt existed never shows in the controller receipt, so
+ * this reads each wake's own terminal event. Any completed wake, a different code, or a refusal that only keeps a waiting Goal
+ * waiting (NOT_A_GOAL_FAILURE) is not a repeated failure.
+ */
+function repeatedWakeFailure(db: Database.Database, run: AgiGoalRow): { signal: AgiBlockerSignal; refs: string[] } | null {
+  if (!run.rootChatId || !tableExists(db, "run_events")) return null;
+  const wakes = db.prepare(`SELECT run_id FROM run_events WHERE chat_id = ? AND kind = 'goal_wake_started'
+    AND json_extract(payload_json, '$.longRunId') = ? AND COALESCE(json_extract(payload_json, '$.source'), '') <> 'agi'
+    ORDER BY ts DESC, rowid DESC LIMIT ?`).all(run.rootChatId, run.id, AGI_REPEATED_WAKE_FAILURES) as Array<{ run_id: string }>;
+  if (wakes.length < AGI_REPEATED_WAKE_FAILURES) return null;
+  let code: string | null = null;
+  for (const wake of wakes) {
+    const end = db.prepare(`SELECT kind, json_extract(payload_json, '$.errorCode') AS code, json_extract(payload_json, '$.errorMessage') AS message
+      FROM run_events WHERE run_id = ? AND kind IN ('invoke_failed', 'invoke_threw', 'invoke_completed') ORDER BY seq DESC LIMIT 1`)
+      .get(wake.run_id) as { kind: string; code: string | null; message: string | null } | undefined;
+    if (!end || end.kind === "invoke_completed" || typeof end.code !== "string" || !end.code) return null;
+    const typed = typedReceiptCode({ errorCode: end.code, errorMessage: end.message });
+    if (!typed || NOT_A_GOAL_FAILURE.has(typed) || (code !== null && typed !== code)) return null;
+    code = typed;
+  }
+  return code ? { signal: { kind: "repeated_failure", code, count: wakes.length }, refs: wakes.map((wake) => `run:${wake.run_id}`) } : null;
+}
+
+/**
+ * The Goal's strategy reflection was refused on its last turns with the same typed reason and never dispatched since (production
+ * 2026-10-28: goal_strategy_checkpoint_missing 18 times, no dispatch since 10-27 12:20Z). A host refusal repeating: a defect finding.
+ */
+function repeatedStrategyRefusal(db: Database.Database, run: AgiGoalRow): { signal: AgiBlockerSignal; ref: string } | null {
+  const rows = db.prepare(`SELECT seq, kind, json_extract(payload_json, '$.reason') AS reason FROM long_run_events
+    WHERE run_id = ? AND kind LIKE 'goal.strategy_%' ORDER BY seq DESC LIMIT 3`).all(run.id) as Array<{ seq: number; kind: string; reason: string | null }>;
+  if (rows.length < 2) return null;
+  const reason = rows[0]!.reason;
+  if (!reason || !/^goal_strategy_[a-z_]{1,80}$/.test(reason)) return null;
+  const same = rows.filter((row) => row.kind === "goal.strategy_reflection_refusal" && row.reason === reason).length;
+  if (same !== rows.length) return null;
+  return { signal: { kind: "repeated_notice", code: reason, count: same }, ref: `long_run_event:${run.id}:${rows[0]!.seq}` };
+}
+
 /** Map a turn receipt error code to the specific typed signal it names (code families only). */
 function receiptSignal(code: string, runId: string | null): AgiBlockerSignal {
   if (/cdp|browser_unavailable|browser_target_closed|agentlas_browser_unreachable/.test(code)) return { kind: "browser_unavailable", code };
@@ -219,6 +285,11 @@ function receiptSignal(code: string, runId: string | null): AgiBlockerSignal {
   if (/^(pre_run|preflight|gate)_/.test(code) || /_gate_refused$/.test(code)) return { kind: "pre_run_refused", code };
   return { kind: "run_failed", code, runId };
 }
+
+/** long_run_events kinds that are a decision about the Goal and so move the AGI action fence (see wakeState). */
+export const AGI_FENCE_BOUNDARY_KINDS: readonly string[] = Object.freeze(["run.user_control", "run.status_changed", "run.goal_revision_bound",
+  "run.owner_goal_amendment_pending", "run.owner_goal_amendment_applied", "run.owner_execution_directive", "run.wait_subscription",
+  "run.paused_app_closed", "run.startup_owner_transferred", "run.checkpoint_continuation"]);
 
 /** Only accepted Goal sources (owner input, owner control, plan/policy authority) wake a spent incident. Role=user and chat-wide
  * tool history are not provenance. Version, heartbeat, diagnostic notices, retry timestamps and completed tool calls are excluded:
@@ -256,9 +327,12 @@ function wakeState(db: Database.Database, run: AgiGoalRow, nowMs: number): Pick<
     WHERE run_id=? AND kind='run.blocked_sweep' AND json_extract(payload_json,'$.action')='retry_scheduled'
     ORDER BY seq DESC LIMIT 1`).get(run.id) as { at: string } | undefined;
   const retryAt = retry?.at ? Date.parse(retry.at) : NaN;
-  const boundaryEvent = db.prepare(`SELECT seq FROM long_run_events WHERE run_id=? AND NOT
-    (kind='run.blocked_sweep' AND json_extract(payload_json,'$.action')='retry_scheduled')
-    ORDER BY seq DESC LIMIT 1`).get(run.id) as { seq: number } | undefined;
+  // The action fence moves on a decision about the Goal (owner control, a status change, a new revision or owner directive, a wait
+  // the host now owns), never on bookkeeping. Every ledger row used to move it: usage, verification receipts, worker and task
+  // attempts, plan and checkpoint snapshots, strategy refusals and sweep retries (one YouTube Goal wrote 7,300 of them), so on
+  // 2026-10-28 every AGI start_work_turn (9 of 9) and its login recovery were refused agi.action.state-changed before running.
+  const boundaryEvent = db.prepare(`SELECT seq FROM long_run_events WHERE run_id=? AND kind IN (${AGI_FENCE_BOUNDARY_KINDS.map(() => "?").join(",")})
+    ORDER BY seq DESC LIMIT 1`).get(run.id, ...AGI_FENCE_BOUNDARY_KINDS) as { seq: number } | undefined;
   /*
    * The blocked condition, not the Goal's bookkeeping (plan R6: one attempt per blocked state; R14: progress is a changed
    * key result or owner input, never a counter). Production 2026-10-12, Yotube room: the authority also hashed
@@ -379,6 +453,12 @@ export function readAgiBlockerFacts(deps: AgiGoalFactsDeps, goalId: string): Agi
       }
       const ladder = run.rootChatId ? browserLadderSignal(db, run.rootChatId, deps.nowMs()) : null;
       if (ladder) { signals.push(ladder.signal); refs.push(ladder.ref); }
+      const refusedContinuation = continuationRefusedSignal(db, run, deps.nowMs());
+      if (refusedContinuation) { signals.push(refusedContinuation.signal); refs.push(refusedContinuation.ref); }
+      const repeated = repeatedWakeFailure(db, run);
+      if (repeated) { signals.push(repeated.signal); refs.push(...repeated.refs); }
+      const strategyRefusal = repeatedStrategyRefusal(db, run);
+      if (strategyRefusal) { signals.push(strategyRefusal.signal); refs.push(strategyRefusal.ref); }
       const due = missedDueRun(db, goalId, deps.nowMs());
       if (due) signals.push({ kind: "missed_due_run", dueAt: due });
     }
@@ -427,17 +507,49 @@ function hasContinuationAutomation(db: Database.Database, goalId: string): boole
   return target === undefined ? undefined : target !== null;
 }
 
+const FAULT_COLUMNS = `id,run_id,kind,
+    json_extract(CASE WHEN json_valid(payload_json) THEN payload_json ELSE '{}' END,'$.errorCode') AS errorCode,
+    json_extract(CASE WHEN json_valid(payload_json) THEN payload_json ELSE '{}' END,'$.toolFailureCode') AS toolFailureCode`;
+const FAULT_PREDICATE = `(kind IN ('invoke_failed','invoke_threw','mcp_error')
+      OR json_type(CASE WHEN json_valid(payload_json) THEN payload_json ELSE '{}' END,'$.errorCode')='text'
+      OR json_type(CASE WHEN json_valid(payload_json) THEN payload_json ELSE '{}' END,'$.toolFailureCode')='text')`;
+/** Below this many room rows the one-statement form is as cheap as the walk. */
+const FAULT_WALK_MIN_ROWS = 30_000;
+const FAULT_WALK_CHUNK = 500;
+
+/**
+ * The room's newest 64 fault rows (rowid DESC): the same rows, columns and order as the single statement
+ * `WHERE chat_id=? AND <predicate> ORDER BY rowid DESC LIMIT 64`. That statement reads every row of the room from the table
+ * and runs json_valid/json_type on each before it can sort (owner store 2026-10-28, YouTube room 132,309 rows: 0.3-0.6 s warm,
+ * 2.4-6.6 s cold, on Main every monitor minute). Here the room's rowids come from a chat_id index alone (no table read), newest
+ * first, and the table is read 500 rows at a time only until 64 rows matched (68 ms on the same room, identical rows on the 8
+ * largest rooms).
+ */
+export function agiRecentChatFaults(db: Database.Database, chatId: string): unknown[] {
+  const rowids = db.prepare("SELECT rowid FROM run_events WHERE chat_id=?").pluck().all(chatId) as number[];
+  // A row the walk reads is re-checked for its room, so a rowid reused in between can never bring in another room.
+  if (rowids.length < FAULT_WALK_MIN_ROWS) {
+    return db.prepare(`SELECT ${FAULT_COLUMNS} FROM run_events WHERE chat_id=? AND ${FAULT_PREDICATE} ORDER BY rowid DESC LIMIT 64`).all(chatId);
+  }
+  rowids.sort((a, b) => b - a);
+  // CROSS JOIN keeps the chunk's rowids as the outer loop: each row is one primary-key read (a chat_id or kind index would
+  // re-walk the whole room per chunk).
+  const chunk = db.prepare(`SELECT ${FAULT_COLUMNS} FROM (SELECT e.rowid AS walk_rowid, e.* FROM json_each(?) AS c
+    CROSS JOIN run_events AS e ON e.rowid = c.value WHERE e.chat_id=?) WHERE ${FAULT_PREDICATE} ORDER BY walk_rowid DESC`);
+  const out: unknown[] = [];
+  for (let at = 0; at < rowids.length && out.length < 64; at += FAULT_WALK_CHUNK) {
+    for (const row of chunk.all(JSON.stringify(rowids.slice(at, at + FAULT_WALK_CHUNK)), chatId)) {
+      if (out.length < 64) out.push(row);
+    }
+  }
+  return out;
+}
+
 function episodeFactSignature(db: Database.Database, longRunId: string | null, chatId: string | null, signals: readonly AgiBlockerSignal[], refs: readonly string[],
   receipt: { status: string; errorCode: string | null; runId?: string | null } | null): string {
   // Typed failure IDs distinguish a new failure with the same code. Successful
   // observations, prompt/context receipts and unrelated ledger sequence churn do not.
-  const faults = chatId ? db.prepare(`SELECT id,run_id,kind,
-    json_extract(CASE WHEN json_valid(payload_json) THEN payload_json ELSE '{}' END,'$.errorCode') AS errorCode,
-    json_extract(CASE WHEN json_valid(payload_json) THEN payload_json ELSE '{}' END,'$.toolFailureCode') AS toolFailureCode
-    FROM run_events WHERE chat_id=? AND (kind IN ('invoke_failed','invoke_threw','mcp_error')
-      OR json_type(CASE WHEN json_valid(payload_json) THEN payload_json ELSE '{}' END,'$.errorCode')='text'
-      OR json_type(CASE WHEN json_valid(payload_json) THEN payload_json ELSE '{}' END,'$.toolFailureCode')='text')
-    ORDER BY rowid DESC LIMIT 64`).all(chatId) : [];
+  const faults = chatId ? agiRecentChatFaults(db, chatId) : [];
   const failures = chatId ? db.prepare(`SELECT id,run_id,source,error_code FROM failure_events
     WHERE chat_id=? ORDER BY rowid DESC LIMIT 64`).all(chatId) : [];
   let status = receipt?.status ?? null;

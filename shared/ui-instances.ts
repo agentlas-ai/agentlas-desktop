@@ -59,6 +59,9 @@ export interface UiInstanceView extends UiInstanceRevision {
 /** The common owner confirmation card (electron/harness/owner-confirm.ts): a tool proposes, only the owner's press saves. Host-owned. */
 export const OWNER_CONFIRM_VIEW = "harness.owner-confirm.v1";
 
+/** The host's card handle grammar (ui-instances mints ui_<hex|uuid>; owner-confirm.ts accepts the same). A handle belongs to one conversation. */
+export const UI_INSTANCE_HANDLE_RE = /\bui_[A-Za-z0-9_-]{1,64}/g;
+
 /** How many settled cards one answer shows before the older ones fold behind a button: a run may present many, the owner reads the newest. */
 export const UI_INSTANCE_FOLD_KEEP = 8;
 /** Folding fewer than this would save less room than the button that opens them takes. */

@@ -701,7 +701,16 @@ export async function releaseCodexResidentThread(session: CodexResidentSession, 
 }
 
 export class CodexSessionContinuityError extends Error {
-  constructor(readonly code: "writer_busy" | "writer_close_timeout" | "resume_failed", message: string) {
+  constructor(
+    readonly code: "writer_busy" | "writer_close_timeout" | "resume_failed",
+    message: string,
+    /**
+     * The typed reason a resume_failed carries when the host observed it as a machine fact rather than words on stderr:
+     * "resume_timed_out" is app-server's own thread/resume (or thread/fork) request timing out (AcpTimeoutError) before any
+     * turn/start, so nothing reached the model (unattended-session-turns.ts rule 5).
+     */
+    readonly resumeRefusal?: "resume_timed_out",
+  ) {
     super(message);
     this.name = "CodexSessionContinuityError";
   }

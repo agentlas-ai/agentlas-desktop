@@ -2,6 +2,7 @@ import type Database from "better-sqlite3";
 import type { McpInvocationRequest } from "../../shared/types";
 import { getDb } from "../store/db";
 import { persistQueuedSteer, type DurableQueuedSteer } from "../store/invocation-steers";
+import { OWNER_INTAKE_STEER_PREFIX } from "./owner-intake";
 
 /**
  * What the owner wrote into a running turn and the turn never took, carried to the chat's next turn.
@@ -111,11 +112,28 @@ export function carryUndeliveredOwnerFollowups(input: {
 }
 
 /**
+ * The owner's message row the owner intake saved when it accepted a message its chat could not start yet
+ * (owner-intake.ts): the first user row with the queued text written at or after the queue row. The run that later takes
+ * the message binds that row instead of writing a second bubble.
+ */
+function ownerIntakeMessageId(db: Database.Database, chatId: string, runId: string): string | null {
+  const steer = db.prepare(`SELECT prompt_text AS text, queued_at AS queuedAt FROM invocation_steers
+    WHERE drained_run_id = ? AND chat_id = ? AND substr(id, 1, ?) = ? LIMIT 1`)
+    .get(runId, chatId, OWNER_INTAKE_STEER_PREFIX.length, OWNER_INTAKE_STEER_PREFIX) as { text: string; queuedAt: string } | undefined;
+  if (!steer) return null;
+  const row = db.prepare(`SELECT id FROM chat_messages WHERE chat_id = ? AND role = 'user' AND text = ? AND created_at >= ?
+    ORDER BY created_at, rowid LIMIT 1`).get(chatId, steer.text, steer.queuedAt) as { id: string } | undefined;
+  return row?.id ?? null;
+}
+
+/**
  * The owner message rows a run started from a carried direction answers, oldest first ([] for any other run). The run
  * binds the last one as its own user message and leaves all of them out of its history (they are its prompt).
  */
 export function carriedFollowupMessageIds(db: Database.Database, chatId: string, runId: string | undefined): string[] {
   if (!runId) return [];
+  const intake = ownerIntakeMessageId(db, chatId, runId);
+  if (intake) return [intake];
   const steer = db.prepare(`SELECT original_run_id AS originalRunId FROM invocation_steers
     WHERE drained_run_id = ? AND chat_id = ? AND substr(id, 1, ?) = ? LIMIT 1`)
     .get(runId, chatId, CARRIED_FOLLOWUP_STEER_PREFIX.length, CARRIED_FOLLOWUP_STEER_PREFIX) as { originalRunId: string } | undefined;

@@ -4,6 +4,7 @@ import { normalizeOneDispatchPresentation } from "./one-dispatch-presentation";
 const HOST_STATUS_KINDS: readonly HostStatusKind[] = [
   "effect-checking", "effect-continuing", "wait-registered", "wait-not-scheduled", "cycle-verified", "goal-resuming",
   "effect-retrying", "goal-paused", "goal-closed", "runtime-kept", "needs-owner", "app-failed", "recovered",
+  "owner-received",
 ];
 /** Host status lines that need nothing from the owner: housekeeping, drawn on no surface (isHousekeepingHostNotice). */
 const QUIET_HOST_STATUSES: ReadonlySet<HostStatusKind> = new Set([
@@ -35,26 +36,27 @@ export function isHousekeepingHostNotice(notice: ChatHostNotice | undefined): bo
     || notice.purpose === "one-delegation-review" || notice.purpose === "one-checkin";
 }
 
-/** Short label for a host status line ("확인 중", "반영 안 됨 → 이어감", "예약 안 함"). */
+/** Short label for a host status line ("확인 중", "반영 안 됨 → 계속함", "예약 안 함"). */
 export function hostStatusLabel(notice: Extract<ChatHostNotice, { purpose: "host-status" }>, locale: "ko" | "en"): string {
   const ko = locale === "ko";
   switch (notice.status) {
     case "effect-checking": return ko ? "확인 중" : "Checking";
     case "effect-continuing":
-      return notice.verdict === "done" ? (ko ? "이미 반영됨 → 이어감" : "Already done → continuing")
-        : notice.verdict === "not_done" ? (ko ? "반영 안 됨 → 이어감" : "Not done → continuing")
-        : (ko ? "확인 → 이어감" : "Checked → continuing");
+      return notice.verdict === "done" ? (ko ? "이미 반영됨 → 계속함" : "Already done → continuing")
+        : notice.verdict === "not_done" ? (ko ? "반영 안 됨 → 계속함" : "Not done → continuing")
+        : (ko ? "확인 → 계속함" : "Checked → continuing");
     case "wait-registered": return ko ? "대기 예약" : "Wait scheduled";
     case "wait-not-scheduled": return ko ? "예약 안 함" : "Not scheduled";
     case "cycle-verified": return ko ? "회차 확인" : "Cycle verified";
-    case "goal-resuming": return ko ? "멈춘 목표 이어감" : "Resuming the goal";
+    case "goal-resuming": return ko ? "멈춘 목표 계속함" : "Resuming the goal";
     case "goal-paused": return ko ? "잠시 멈춤 → 자동 재개" : "Paused → resumes on its own";
     case "goal-closed": return ko ? "목표 마침" : "Goal closed";
-    case "runtime-kept": return ko ? "시작한 모델로 이어감" : "Kept the starting model";
+    case "runtime-kept": return ko ? "시작한 모델로 계속함" : "Kept the starting model";
     case "effect-retrying": return ko ? "확인 못 함 → 다시 확인" : "Could not check → will retry";
     case "needs-owner": return ko ? "확인 필요" : "Needs you";
     case "app-failed": return ko ? "앱 문제" : "App problem";
-    case "recovered": return ko ? "다음 실행이 이어받음" : "Taken over by the next run";
+    case "recovered": return ko ? "다음 실행이 계속함" : "Taken over by the next run";
+    case "owner-received": return ko ? "받음" : "Received";
     default: return "";
   }
 }

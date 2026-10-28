@@ -506,6 +506,20 @@ export function listMemoryEpisodesForContext(
   return rows.map(toEpisode).filter((episode): episode is MemoryEpisode => episode !== null);
 }
 
+/** The run and turn each ticket recorded (episode -> the turn it observed) and its typed failure code (a host receipt such as
+ * turn-failed). Missing tickets are absent from the map. */
+export function memoryTicketTurns(ticketIds: readonly string[]): Map<string, { runId: string | null; turnId: string | null; failureCode: string | null }> {
+  const out = new Map<string, { runId: string | null; turnId: string | null; failureCode: string | null }>();
+  const ids = [...new Set(ticketIds.filter(Boolean))];
+  for (let start = 0; start < ids.length; start += 400) {
+    const slice = ids.slice(start, start + 400);
+    const rows = getDb().prepare(`SELECT ticket_id AS ticketId, run_id AS runId, turn_id AS turnId, failure_code AS failureCode FROM memory_tickets
+      WHERE ticket_id IN (${slice.map(() => "?").join(",")})`).all(...slice) as Array<{ ticketId: string; runId: string | null; turnId: string | null; failureCode: string | null }>;
+    for (const row of rows) out.set(row.ticketId, { runId: row.runId, turnId: row.turnId, failureCode: row.failureCode });
+  }
+  return out;
+}
+
 /**
  * Project-detail timeline read. Unlike recall context, this never includes
  * global observations: a project panel may show only episodes bound to the

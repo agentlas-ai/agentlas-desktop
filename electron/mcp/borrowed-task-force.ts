@@ -44,6 +44,7 @@ import type {
   WorkforcePermissionEnforcementReceipt,
 } from "../runtime/runner";
 import type { RuntimeLocale } from "../runtime/status-i18n";
+import { inferOwnerLocale } from "../../shared/owner-visible-activity-text";
 import type { RuntimeRole } from "../../shared/runtime-roles";
 import type { RuntimeToolKind } from "../../shared/runtime-tool-kind";
 import type { LongRunTaskCheckpoint } from "../../shared/long-run-checkpoint";
@@ -3190,6 +3191,34 @@ function taskForceRemainingForOwner(
  * what happens next. Owner 2026-10-16: "완료되지 않은 담당자: No-AI-Slop Copywriter, Vibecoder, No-AI-Slop Copywriter"
  * named package ids, repeated a worker and said nothing about what to do. Minimal text, the app's UI language, no codes.
  */
+/**
+ * Whether this task-force turn carries the owner's own instruction: the owner wrote it (not a host-started Goal
+ * continuation, a teammate report or an automation). Typed request fields only, never the words.
+ */
+export function taskForceOwnerAuthoredTurn(req: Pick<McpInvocationRequest, "promptOrigin" | "oneTeamReportTurn" | "automationId">): boolean {
+  return req.promptOrigin !== "system" && req.oneTeamReportTurn !== true && !req.automationId;
+}
+
+/**
+ * On the owner's own turn a teammate step that ran and reported, but did not verify (ok=false: an unconfirmed license,
+ * an unchecked preview, a review with findings: completion "partial"), is advice for the steps after it, not a gate: they run with its report
+ * in front of them and the owner is told once which checks were left open. A step that never ran (withheld, not-run)
+ * still holds its dependents: there is no output to act on. YouTube room 2026-10-28 12:44Z: the owner wrote "올리라고"
+ * twice; the review steps came back unverified, the host withheld the publish step, and the reply said nothing was
+ * uploaded. Host-started turns keep the gate.
+ */
+export function taskForceDependencyAdvisory(input: {
+  ownerAuthored: boolean;
+  dependency: Pick<BorrowedAgentResult, "ok" | "model" | "withheldBy" | "completionStatus"> | undefined;
+}): boolean {
+  const dependency = input.dependency;
+  // Ran and handed over work with open items ("partial", or "completed" with checks the host did not accept). A step that
+  // failed outright (no usable output: a missing credential, a dead server) keeps holding its dependents.
+  return Boolean(input.ownerAuthored && dependency && dependency.ok === false && dependency.model !== "not-run"
+    && !(dependency.withheldBy?.length)
+    && (dependency.completionStatus === "partial" || dependency.completionStatus === "completed"));
+}
+
 export function taskForceIncompleteMessage(input: {
   locale: "ko" | "en";
   remaining: TaskForceRemainingRow[];
@@ -3237,14 +3266,14 @@ export function taskForceIncompleteMessage(input: {
   const accessExpired = input.remaining.some((entry) => entry.access?.reason === "approval_expired");
   const onlyLiftedAccess = input.remaining.length > 0 && input.remaining.every(liftedAccess) && !input.requiredSurfaceMissing;
   const closing = accessNeedsChip
-    ? ko ? "작성창에서 권한을 올린 뒤 \"계속해줘\"라고 하시면 남은 일부터 이어서 합니다." : "Raise the permission in the composer, then say \"continue\" and the remaining work picks up from here."
+    ? ko ? "작성창에서 권한을 올린 뒤 \"계속해줘\"라고 하시면 남은 일부터 계속합니다." : "Raise the permission in the composer, then say \"continue\" and the remaining work picks up from here."
     : accessExpired
-      ? ko ? "\"계속해줘\"라고 하시면 권한을 다시 묻고 이어서 합니다." : "Say \"continue\" and it asks for the access again and picks up from here."
+      ? ko ? "\"계속해줘\"라고 하시면 권한을 다시 묻고 계속합니다." : "Say \"continue\" and it asks for the access again and picks up from here."
     : onlyLiftedAccess
       ? ko ? "필요한 권한으로 한 번 더 실행했지만 끝나지 않아 여기서 멈췄습니다." : "It ran once more with the access it needed and still did not finish, so it stopped here."
       : decisionPending
-        ? ko ? "답하시거나 \"계속해줘\"라고 하시면 남은 일부터 이어서 합니다." : "Answer, or say \"continue\", and the remaining work picks up from here."
-        : ko ? "\"계속해줘\"라고 하시면 남은 일부터 이어서 합니다." : "Say \"continue\" and the remaining work picks up from here.";
+        ? ko ? "답하시거나 \"계속해줘\"라고 하시면 남은 일부터 계속합니다." : "Answer, or say \"continue\", and the remaining work picks up from here."
+        : ko ? "\"계속해줘\"라고 하시면 남은 일부터 계속합니다." : "Say \"continue\" and the remaining work picks up from here.";
   return [
     ko ? "이 작업은 아직 완료되지 않았습니다." : "This task is not complete yet.",
     lines.length > 0
@@ -5001,7 +5030,7 @@ async function runBorrowedAgentTurn(
     p.sink(tag({
       kind: "tool-use",
       status: p.locale === "ko"
-        ? `${spec.name}에 지정한 모델을 지금 사용할 수 없어 ${agentRuntimeChoice.fallbackStage === "worker" ? "One의 워커 모델" : "연결된 다른 모델"}로 이어갑니다.`
+        ? `${spec.name}에 지정한 모델을 지금 사용할 수 없어 ${agentRuntimeChoice.fallbackStage === "worker" ? "One의 워커 모델" : "연결된 다른 모델"}로 계속합니다.`
         : `${spec.name}'s selected model is unavailable, so One is continuing with ${agentRuntimeChoice.fallbackStage === "worker" ? "its worker model" : "another connected model"}.`,
     }));
   }
@@ -5427,7 +5456,7 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
             p.sink(teamEvent("manager", spec.name, {
               kind: "tool-use",
               status: p.locale === "ko"
-                ? `${managerPlanActive.model ?? managerPlanActive.kind} 계획 호출이 거절되어 워커 우선순위 다음 모델로 이어갑니다.`
+                ? `${managerPlanActive.model ?? managerPlanActive.kind} 계획 호출이 거절되어 워커 우선순위 다음 모델로 계속합니다.`
                 : `${managerPlanActive.model ?? managerPlanActive.kind} planning was rejected; continuing on the next worker-priority model.`,
             }));
             managerPlanActive = recovery;
@@ -5602,7 +5631,7 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
                 p.sink(teamEvent(worker.id, worker.id, {
                   kind: "tool-use",
                   status: p.locale === "ko"
-                    ? `${observedWorkerRuntime.model ?? observedWorkerRuntime.kind} 실행이 거절되어 워커 우선순위 다음 모델로 이어갑니다.`
+                    ? `${observedWorkerRuntime.model ?? observedWorkerRuntime.kind} 실행이 거절되어 워커 우선순위 다음 모델로 계속합니다.`
                     : `${observedWorkerRuntime.model ?? observedWorkerRuntime.kind} was rejected; continuing on the next worker-priority model.`,
                 }));
                 selectedWorkerRuntime = recovery;
@@ -5852,7 +5881,7 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
           p.sink(teamEvent("manager", spec.name, {
             kind: "tool-use",
             status: p.locale === "ko"
-              ? `${managerSynthesisActive.model ?? managerSynthesisActive.kind} 종합 호출이 거절되어 워커 우선순위 다음 모델로 이어갑니다.`
+              ? `${managerSynthesisActive.model ?? managerSynthesisActive.kind} 종합 호출이 거절되어 워커 우선순위 다음 모델로 계속합니다.`
               : `${managerSynthesisActive.model ?? managerSynthesisActive.kind} synthesis was rejected; continuing on the next worker-priority model.`,
           }));
           managerSynthesisActive = recovery;
@@ -7679,7 +7708,7 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
         p.sink({
           kind: "tool-use",
           status: p.locale === "ko"
-            ? `배정된 실행 환경을 사용할 수 없어 워커 우선순위 다음 모델로 이어갑니다. (${result.spec.name})`
+            ? `배정된 실행 환경을 사용할 수 없어 워커 우선순위 다음 모델로 계속합니다. (${result.spec.name})`
             : `The assigned runtime is unavailable; continuing on the next worker-priority model. (${result.spec.name})`,
         });
         const recoveryPacket = {
@@ -7751,6 +7780,11 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
   const resultByStepId = new Map<string, BorrowedAgentResult>();
   const resultMessageByStepId = new Map<string, string>();
   const pending = new Set(executionPackets.map((_, index) => index));
+  const ownerAuthoredTurn = taskForceOwnerAuthoredTurn(p.req);
+  const advisoryDependency = (dependency: string): boolean =>
+    taskForceDependencyAdvisory({ ownerAuthored: ownerAuthoredTurn, dependency: resultByStepId.get(dependency) });
+  // The owner's own language for what the host tells them in this room (the run locale is the app's).
+  const ownerLocale: RuntimeLocale = inferOwnerLocale(p.req.oneUserAuthoredPrompt ?? p.req.userPrompt, p.locale);
 
   // Execute the local conversational graph in dependency-ready waves. Each
   // callback emits its result before the rest of the wave finishes, so a fast
@@ -7762,7 +7796,7 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
       .filter((dependency) => knownStepIds.has(dependency));
     return dependencies.length > 0
       && dependencies.every((dependency) => resultByStepId.has(dependency))
-      && dependencies.some((dependency) => resultByStepId.get(dependency)?.ok === false);
+      && dependencies.some((dependency) => resultByStepId.get(dependency)?.ok === false && !advisoryDependency(dependency));
   });
   while (pending.size > 0) {
     // Withholding is transitive within the wave (W6, 2026-10-18): a step after a withheld one is withheld too, before the
@@ -7771,7 +7805,7 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
       const packet = executionPackets[index];
       const spec = specBySlug.get(packet.agent) ?? specs[0];
       const blockedDependencies = (packet.dependsOn ?? [])
-        .filter((dependency) => resultByStepId.get(dependency)?.ok === false);
+        .filter((dependency) => resultByStepId.get(dependency)?.ok === false && !advisoryDependency(dependency));
       const skippedId = `task-force-blocked:${randomUUID()}`;
       const skipped: BorrowedAgentResult = {
         spec,
@@ -7808,7 +7842,7 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
     const ready = [...pending].filter((index) => (
       (executionPackets[index].dependsOn ?? [])
         .filter((dependency) => knownStepIds.has(dependency))
-        .every((dependency) => resultByStepId.get(dependency)?.ok === true)
+        .every((dependency) => resultByStepId.get(dependency)?.ok === true || advisoryDependency(dependency))
     ));
     // normalizePacketsForRoster removes local cycles. This final guard keeps a
     // malformed strict/legacy packet from hanging the run forever.
@@ -7817,6 +7851,18 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
     await parallelCap(ready, getAgentConcurrency(), async (index) => {
       const packet = executionPackets[index];
       const dependencies = (packet.dependsOn ?? []).filter((dependency) => resultByStepId.has(dependency));
+      const advisory = ownerAuthoredTurn ? dependencies.filter(advisoryDependency) : [];
+      if (advisory.length) {
+        const names = advisory.map((dependency) => specBySlug.get(resultByStepId.get(dependency)?.packet.agent ?? "")?.name ?? dependency);
+        p.sink({ kind: "tool-use", done: true, agentId: orchestratorId, runtimeAgentId: p.orchestratorAgent.id, agentName: orchestratorName,
+          role: "orchestrator", tier: 1, phase: "delegate",
+          status: ownerLocale === "ko"
+            ? `확인이 끝나지 않은 단계가 있지만 지시대로 다음 단계를 진행합니다 — 미확인: ${names.join(", ")}`
+            : `Some checks are still open, but the next step runs as you instructed — not yet confirmed: ${names.join(", ")}` });
+        tryRecordRunEvent({ runId: p.req.runId ?? `task-force:${p.chat.id}`, chatId: p.chat.id, nodeId: orchestratorId,
+          agentId: p.orchestratorAgent.id, kind: "task_force_owner_directive_advisory",
+          payload: { schemaVersion: 1, stepId: packet.stepId ?? null, unverifiedDependencies: advisory } });
+      }
       const peerResults = dependencies
         .map((dependency) => resultByStepId.get(dependency))
         .filter((result): result is BorrowedAgentResult => Boolean(result));
@@ -8077,7 +8123,7 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
       p.sink({
         kind: "tool-use",
         status: p.locale === "ko"
-          ? "종합에 배정된 실행 환경을 사용할 수 없어 오케스트레이터 우선순위 다음 모델로 이어갑니다."
+          ? "종합에 배정된 실행 환경을 사용할 수 없어 오케스트레이터 우선순위 다음 모델로 계속합니다."
           : "The runtime assigned to synthesis is unavailable; continuing on the next orchestrator-priority model.",
         agentId: orchestratorId,
         agentName: orchestratorName,
@@ -8635,8 +8681,8 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
   }
   if (!taskForceExecutionVerified) {
     const incomplete = taskForceIncompleteMessage({
-      locale: p.locale,
-      remaining: taskForceRemainingForOwner(p.locale, results, unclearedBlockers),
+      locale: ownerLocale,
+      remaining: taskForceRemainingForOwner(ownerLocale, results, unclearedBlockers),
       requiredSurfaceMissing: Boolean(requiredSurfaceMissing),
     });
     // Real work finished: the owner gets the room's synthesis over it, then the host's short note of what is left (typed

@@ -150,7 +150,7 @@ import { isOneQuietReply } from "../../shared/one-supervisor";
 import { listAgentSurfaces } from "../store/agent-surfaces";
 import { listRentAllowedSlugs } from "../store/project-agent-rent";
 import { findCanonicalTaskForChat } from "../store/tasks";
-import { MainWorkRecoveryContext } from "../invocation/main-work-recovery";
+import { MainWorkRecoveryContext, mainWorkRecoveryApplies } from "../invocation/main-work-recovery";
 import { touchRuntimeSession } from "../store/runtime-sessions";
 import { latestTaskCheckpoint } from "../long-run/checkpoint";
 import { bindCreatedAutomationToGoal } from "../long-run/automation-provenance";
@@ -172,6 +172,7 @@ import { EFFECT_OBSERVATION_SYSTEM_PROMPT, effectObservationOutputSchema, stripE
 import { effectObservationTicket } from "../long-run/effect-observation-tickets";
 import { goalExecutionDirectivePromptBlock } from "../long-run/goal-execution-context";
 import { canonicalAskFenceText, extractAskFences } from "../../shared/ask-fence-flatten";
+import { turnOwnerWaitInstanceIds } from "../harness/ui-instances";
 import { AGENT_ASK_OPEN } from "../../shared/agent-control-blocks";
 
 /**
@@ -361,6 +362,7 @@ import { extractBuildInterviewQuestions } from "../../shared/build-turn";
 import {
   oneTeamRuntimeBinding,
   oneTeamRuntimeBindingMatches,
+  resolveOneTeamRuntimeBinding,
   type OneTeamRuntimeBinding,
 } from "../one/team-preflight";
 import {
@@ -1740,6 +1742,10 @@ export interface InvocationExecutionContext {
   graphWorkerAttempt?: GraphWorkerAttempt;
   /** Main-minted exact-run capability; future Science recovery writer only. */
   scienceRecovery?: object;
+  /** Set by a domain build on its own turns when this host advertises the common Work journal (science-host/install.ts
+   *  execution.commonWorkRecovery): the run's tool calls are journaled like Work's (invocation/main-work-recovery.ts
+   *  mainWorkRecoveryApplies). Absent on an older build's turns, which keep their own recovery. */
+  commonWorkRecovery?: true;
   /** Main-minted object identity; serialized fields cannot authorize a reviewer. */
   scienceReview?: object;
   /** Host-minted custody of an immutable registered helper assignment. */
@@ -2080,8 +2086,7 @@ export function runMcpInvocation(
   // directly. Reuse their existing canonical Task and the same private leaf
   // port; the invocation run id only fences this port's lifetime.
   let directWorkOwnerCurrent = true;
-  const workRecovery = canonicalWorkRecovery ?? (executionContext?.source !== "science"
-    && !executionContext?.aliveScience && findCanonicalTaskForChat(req.chatId)
+  const workRecovery = canonicalWorkRecovery ?? (mainWorkRecoveryApplies(executionContext) && findCanonicalTaskForChat(req.chatId)
     ? new MainWorkRecoveryContext(req.chatId, req.runId!, () => {
       if (!directWorkOwnerCurrent) throw new Error("main_work_invocation_owner_ended");
       invocationSignal.throwIfAborted();
@@ -2419,6 +2424,12 @@ async function runMcpInvocationInContext(
             }
           : undefined,
       };
+    }
+    // A card this turn presented that still waits for the owner's press is the owner's move, the same as an ask (typed, read
+    // from the host's card store; Main holds the turn's Goal on it).
+    if (ev.kind === "final" && !ev.agentId && req.runId) {
+      const ownerWaitIds = turnOwnerWaitInstanceIds(req.chatId, req.runId);
+      if (ownerWaitIds.length) ev = { ...ev, ownerWait: { schemaVersion: "agentlas.owner-wait.v1", instanceIds: ownerWaitIds } };
     }
     if (ev.kind === "final" && ev.text?.trim()) {
       finalTextFromSink = ev.text.trim();
@@ -3401,17 +3412,35 @@ async function runMcpInvocationInContext(
     assertScienceCollectionRuntimeSelection(active, req.runtimeSelection);
     if (chat.kind !== "division" || chat.firmId || agent.kind === "team") throw new Error("science_collection_orchestration_denied");
   }
+  /*
+   * The team was confirmed on one runtime and the selection steps above (a cooldown fallback, the orchestrator pool, a
+   * Goal's continuation pin) chose another. Stopping here was a dead end: YouTube room 2026-10-28, 00:07Z-13:00Z, every
+   * one of 16+ Goal continuations ended in 0.4 s before any model ran, while 40 teammate reports waited for a turn that
+   * never came (owner: "don't block me on a runtime choice; continue"). The turn now runs on the confirmed runtime while
+   * it is still in the live inventory with a runner (it passed the inventory check above), and on the current choice
+   * otherwise; a typed receipt names which fields differed. Only a turn with no runnable runtime stops (the !picked
+   * branch below).
+   */
   if (boundOneTeamRuntime && oneTeamRuntimeBinding(active).digest !== boundOneTeamRuntime.digest) {
-    sink({
-      kind: "error",
-      error: {
-        code: "one-team-runtime-selection-changed",
-        message: locale === "ko"
-          ? "확인한 런타임과 실제 실행 런타임이 달라 실행을 중단했습니다."
-          : "The runtime selected for execution differs from the confirmed runtime, so execution was stopped.",
-      },
-    });
-    return earlyResult();
+    const chosen = oneTeamRuntimeBinding(active);
+    const confirmed = resolveOneTeamRuntimeBinding(boundOneTeamRuntime, runtimes);
+    const confirmedPicked = confirmed ? pickRunner(confirmed) : null;
+    const confirmedSelection = confirmed ? selectionForRuntime(confirmed, { longContext: confirmed.longContextEnabled ?? undefined }) : null;
+    const pinHolds = !continuationRuntimePinned || !req.runtimeSelection || Boolean(confirmedSelection
+      && confirmedSelection.kind === req.runtimeSelection.kind && confirmedSelection.backend === req.runtimeSelection.backend
+      && confirmedSelection.source === req.runtimeSelection.source && confirmedSelection.model === req.runtimeSelection.model
+      && (req.runtimeSelection.effort === undefined || confirmedSelection.effort === req.runtimeSelection.effort));
+    const useConfirmed = Boolean(confirmed && confirmedPicked && pinHolds);
+    if (confirmed && confirmedPicked && useConfirmed) {
+      active = confirmed;
+      picked = confirmedPicked;
+      controllerFallbackBeforeRun = null;
+      controllerFallbackCooldownKind = undefined;
+    }
+    if (req.runId) tryRecordRunEvent({ runId: req.runId, chatId: chat.id, kind: "one_team_runtime_rebound",
+      payload: { schemaVersion: 1, ran: useConfirmed ? "confirmed" : "current",
+        differing: (["kind", "backend", "sourceDigest", "version", "model", "effort", "longContextEnabled"] as const)
+          .filter((field) => chosen[field] !== boundOneTeamRuntime[field]) } });
   }
   if (!picked) {
     sink({
@@ -3598,7 +3627,7 @@ async function runMcpInvocationInContext(
   // 에이전트가 이걸 알아야 함? One만 알면 되는 거 아니냐").
   const workSessionChild = chat.kind === "division" && chat.originSurface === "work" && Boolean(req.runId)
     && isWorkSessionChildRun(chat.id, req.runId!, true);
-  const workSessionMain = workMainOwnsRouting({ originSurface: chat.originSurface, kind: chat.kind,
+  const workSessionMain = workMainOwnsRouting({ originSurface: chat.originSurface, kind: chat.kind, firmId: chat.firmId,
     agentAppMode: req.agentAppMode, source: executionContext?.source,
     explicitExecution: Boolean(oneTeamExecutionPolicy || userNamedTargetsThisTurn || explicitWorkforceGoal
       || explicitNetworkGoal || hubWorkforceRequested || borrowedAgentSlugs.length
@@ -7795,7 +7824,11 @@ async function runMcpInvocationInContext(
        */
       const asksUser = turnAsksOwner(continuation.text);
       if (asksUser) passShouldContinue = false;
-      if (activeGoalId && continuousMode && !signal?.aborted && !asksUser) {
+      // A card this turn presented that waits for the owner's press hands the next move to the owner too: another pass would
+      // only draft it again (Finance 2026-10-28: one turn presented the same Analyst card three times, the older ones cancelled).
+      const ownerWait = Boolean(req.runId && turnOwnerWaitInstanceIds(chat.id, req.runId).length);
+      if (ownerWait) passShouldContinue = false;
+      if (activeGoalId && continuousMode && !signal?.aborted && !asksUser && !ownerWait) {
         if (passClaim.claimed && !nativeGoalEpisode) {
           await closeOpenGoalLedgerTasks({
             goalId: activeGoalId,
@@ -7872,7 +7905,7 @@ async function runMcpInvocationInContext(
       // An unfinished ongoing invocation has no terminal/effect checkpoint of
       // its own. Goal unmet and prose/tool counts cannot authorize another pass.
       // Main verification chooses useful follow-up or a durable observation.
-      if (nativeGoalEpisode && !asksUser && !signal?.aborted) {
+      if (nativeGoalEpisode && !asksUser && !ownerWait && !signal?.aborted) {
         goalEpisodeYield = nativeGoalEpisode;
         passShouldContinue = false;
         tryRecordRunEvent({ runId: nativeGoalEpisode.invocationRunId, chatId: chat.id,
@@ -8185,7 +8218,9 @@ async function runMcpInvocationInContext(
       evidence: finalClaim.evidence ?? goalClaimEvidence,
     };
     const finalAsksOwner = turnAsksOwner(finalContinuation.text);
-    let stormbreakerContinueRequested = !req.agentAppMode && !goalWaitRequest && !automationHandoff && !finalAsksOwner
+    // A card of this turn still waiting for the owner is the owner's move here too (the pass loop above stops on it).
+    const finalOwnerWait = Boolean(req.runId && turnOwnerWaitInstanceIds(chat.id, req.runId).length);
+    let stormbreakerContinueRequested = !req.agentAppMode && !goalWaitRequest && !automationHandoff && !finalAsksOwner && !finalOwnerWait
       && finalContinuation.shouldContinue;
     result = { ...result, text: goalCompletion.text };
     // ── persistent goal 최종 판정 (L2: continue = 모델마커 OR goal 미달) ──────
@@ -8228,7 +8263,7 @@ async function runMcpInvocationInContext(
       if (latestGoalDecision) {
         if (goalLiveContinuationParked || parkFiniteGoalContinuation(latestGoalDecision)) {
           stormbreakerContinueRequested = false;
-        } else if (!stormbreakerContinueRequested && latestGoalDecision.continue && !finalAsksOwner) {
+        } else if (!stormbreakerContinueRequested && !finalOwnerWait && latestGoalDecision.continue && !finalAsksOwner) {
           stormbreakerContinueRequested = true;
         } else if (
           stormbreakerContinueRequested &&

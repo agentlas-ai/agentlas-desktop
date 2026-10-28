@@ -2118,7 +2118,9 @@ export type HostStatusKind =
   /** A run failed for a cause inside the app (shared/run-failure-cause.ts): reported, but not the owner's to act on. */
   | "app-failed"
   /** A failed run whose request a later run took over (receipt supersededByRunId). Quiet: drawn nowhere. */
-  | "recovered";
+  | "recovered"
+  /** The owner's message was received and waits for its chat to be free (invocation/owner-intake.ts). */
+  | "owner-received";
 
 export interface ChatMessagesCursor {
   id: string;
@@ -5046,6 +5048,11 @@ export interface McpInvocationEvent {
   text?: string;
   /** Validated semantic ask projection; raw control markers remain hidden. */
   userDecisionRequest?: AgentlasUserDecisionRequest;
+  /**
+   * Final only: cards this turn presented that still wait for the owner's press (host ui-instances, state awaiting-input).
+   * The turn waits for the owner exactly as an ask does (invocation/service.ts invocationEventRequestsDecision). Old readers ignore it.
+   */
+  ownerWait?: { schemaVersion: "agentlas.owner-wait.v1"; instanceIds: string[] };
   /** Main-owned durable image attachment URLs for the completed assistant turn. */
   imageDataUrls?: string[];
   /**

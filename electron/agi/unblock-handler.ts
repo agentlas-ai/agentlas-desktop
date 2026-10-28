@@ -75,6 +75,8 @@ export function createAgiDeterministicHandler(executor: AgiActionExecutor, readF
       const receipt = executor.execute({ schema: AGI_ACTION_SCHEMA, actionId: actionId(input, attempt, action, index), incidentId: input.incidentId,
         attempt, fence: refreshed ?? runFence, action, args, attemptTokensSoFar: 0 }, input);
       done.push({ action, result: receipt.ok ? receipt.code : `refused:${receipt.code}` });
+      // This attempt's own accepted effect is the state its next action expects (monitor.ts acceptOwnEffect).
+      if (receipt.ok) { try { input.acceptOwnEffect?.(); } catch { /* the next refresh reads the store again */ } }
       return receipt;
     };
     // 1. Our defects: one local record each (the chip offers sending; nothing leaves without the owner's press).

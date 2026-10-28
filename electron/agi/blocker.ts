@@ -77,7 +77,19 @@ export type AgiBlockerSignal =
   /** A local tool crashed before doing its work (e.g. Blender Metal init). */
   | { kind: "tool_crash"; tool: string; code: string }
   /** The same host notice/stop code repeated in a row. */
-  | { kind: "repeated_notice"; code: string; count: number };
+  | { kind: "repeated_notice"; code: string; count: number }
+  /**
+   * A continuation the host promised could not start, by its typed notice (shared/continuation-refusal-notice.ts): a verified
+   * sign-in or an approved full access whose successor turn was refused. Production 2026-10-28 06:07Z and 2026-10-27 01:31Z / 05:02Z,
+   * YouTube room: the room sat on its last line for hours. The way on is the Goal's next turn from its checkpoint.
+   */
+  | { kind: "continuation_refused"; continuation: "browser-login" | "permission-escalation"; code: string }
+  /**
+   * The Goal's own wakes (goal_wake_started for this long run) failed this many times in a row with the same typed code. A host retry
+   * of the same wake repeats it. Production 2026-10-28, YouTube room: 14 sweep wakes in a row failed one-team-runtime-selection-changed
+   * before any controller attempt existed, so the controller receipt the AGI read never showed it.
+   */
+  | { kind: "repeated_failure"; code: string; count: number };
 
 export type AgiBlockerSignalKind = AgiBlockerSignal["kind"];
 
@@ -202,7 +214,8 @@ export function agiAppRestartIndication(signals: readonly AgiBlockerSignal[]): {
 /** Paths whose admission depends on the goal's own structure (status, plan, automation), not on the cause. */
 const STRUCTURAL_PATHS: ReadonlySet<AgiActionKind> = new Set(["start_work_turn", "dispatch_teammate", "create_teammate", "replan_tree", "retry_node_with", "switch_runtime"]);
 /** Signals whose only remedies are the structural paths: when none is admissible nothing is left for AGI to try. */
-const STRANDABLE_SIGNALS: ReadonlySet<AgiBlockerSignalKind> = new Set(["run_failed", "pre_run_refused", "stall_detected", "missed_due_run", "blocked_status"]);
+const STRANDABLE_SIGNALS: ReadonlySet<AgiBlockerSignalKind> = new Set(["run_failed", "pre_run_refused", "stall_detected", "missed_due_run", "blocked_status",
+  "continuation_refused"]);
 /** Close reason of an incident whose every path the host refuses by structure (typed, never parsed from prose). */
 export const AGI_NO_ADMISSIBLE_PATH = "no_admissible_path";
 
@@ -246,6 +259,8 @@ function signalKey(signal: AgiBlockerSignal): Record<string, unknown> {
     case "browser_unavailable": return { k: signal.kind, c: signal.code };
     case "tool_crash": return { k: signal.kind, t: signal.tool, c: signal.code };
     case "repeated_notice": return { k: signal.kind, c: signal.code };
+    case "continuation_refused": return { k: signal.kind, n: signal.continuation, c: signal.code };
+    case "repeated_failure": return { k: signal.kind, c: signal.code };
     case "owner_pause": return { k: signal.kind };
   }
 }
@@ -322,6 +337,13 @@ export function agiHarnessBypassAllowed(capability: "browser" | "tool", code: st
   return !HARNESS_VERDICT_CODE.test(code);
 }
 
+/**
+ * Exact typed receipt / provider codes that say the runtime session itself was lost: resume refused or timed out
+ * (runner providerCode "resume_failed", codex-turn-failure.ts "resume_refused"), recovery exhausted its candidates
+ * (mcp/client.ts notice "runtime-recovery-exhausted"). A set of machine codes, never a word pattern.
+ */
+export const AGI_RUNTIME_SESSION_LOST_CODES: ReadonlySet<string> = new Set(["resume_failed", "resume_refused", "thread_resume_failed", "runtime-recovery-exhausted"]);
+
 /** Failed-run receipt codes → cause (typed families only; unknown codes stay unknown). */
 function causeOfRunCode(code: string): { cause: FailureCauseKind; ourDefect: boolean } {
   if (/quota|rate_limit|usage_limit/.test(code)) return { cause: "quota", ourDefect: false };
@@ -331,6 +353,10 @@ function causeOfRunCode(code: string): { cause: FailureCauseKind; ourDefect: boo
   if (/refused|denied|not_allowed|approval/.test(code)) return { cause: "tool_refused", ourDefect: false };
   if (/tool_missing|not_installed|mcp_unavailable/.test(code)) return { cause: "tool_missing", ourDefect: false };
   if (/session_conflict|resume_version_conflict/.test(code)) return { cause: "session_conflict", ourDefect: true };
+  // The runtime's session could not be resumed or ended under the turn (codex thread/resume timed out, recovery exhausted its
+  // candidates). The host already retired that session binding (agent-context "resume_failed"): the next turn opens a new session
+  // from the Goal's checkpoint. Production 2026-10-28 12:19Z and 12:32Z: resume_failed after a 120 s thread/resume timeout.
+  if (AGI_RUNTIME_SESSION_LOST_CODES.has(code)) return { cause: "runtime_unavailable", ourDefect: false };
   if (/crash|internal|unexpected|threw|invariant/.test(code)) return { cause: "unknown", ourDefect: true };
   return { cause: "unknown", ourDefect: false };
 }
@@ -440,6 +466,14 @@ export function classifyAgiBlocker(facts: AgiBlockerFacts): AgiBlockerDiagnosis 
     return base({ display: "needs_owner", attemptDue: true, primarySignal: "boundary", causeKind: "boundary", ownerClass: "human_only",
       boundary: boundary.boundary, altPaths: [...branchWork, "replan_tree", "ask_owner_once"], reasonCode: `boundary_${boundary.boundary}`, signal: boundary });
   }
+  // 2b. A continuation the host promised was refused (sign-in verified or full access approved, successor not started). The owner's
+  //     part is done; the Goal's next turn from its checkpoint is the way on, then the other branches.
+  const refusedContinuation = find("continuation_refused");
+  if (refusedContinuation) {
+    return base({ display: "blocked", attemptDue: true, primarySignal: "continuation_refused", causeKind: "resource_busy", ownerClass: "agent_resolvable",
+      boundary: null, altPaths: ["start_work_turn", ...branchWork, "replan_tree"], reasonCode: `continuation_refused_${refusedContinuation.continuation.replace(/-/g, "_")}`,
+      signal: refusedContinuation });
+  }
   // 3. Login wall: the login-recovery ladder first; its last rung is the only owner card.
   const wall = find("login_wall");
   if (wall) {
@@ -465,16 +499,28 @@ export function classifyAgiBlocker(facts: AgiBlockerFacts): AgiBlockerDiagnosis 
     return base({ display: "blocked", attemptDue: true, primarySignal: "wait_registration_refused", causeKind: "tool_refused", ownerClass: "our_defect",
       boundary: null, altPaths: [...branchWork, "replan_tree"], reasonCode: "wait_registration_refused", signal: waitRefused });
   }
+  // 7b. The Goal's wakes fail the same way every time: the host's retry repeats it, so it is our defect (filed, and One tells the
+  //     owner what and why) while AGI moves the work another way (teammates, a new plan); a turn is still tried first when the
+  //     host would admit one.
+  const repeatedFailure = find("repeated_failure");
+  if (repeatedFailure) {
+    addDefect(`repeated_failure:${repeatedFailure.code}`, "stall", repeatedFailure);
+    const { cause } = causeOfRunCode(repeatedFailure.code);
+    return base({ display: "blocked", attemptDue: true, primarySignal: "repeated_failure", causeKind: cause, ownerClass: "our_defect",
+      boundary: null, altPaths: [...branchWork, "replan_tree", "switch_runtime"], reasonCode: "repeated_failure", signal: repeatedFailure });
+  }
   // 8. A failed or refused turn.
   const failed = find("run_failed");
   if (failed) {
     const { cause, ourDefect } = causeOfRunCode(failed.code);
     if (ourDefect) addDefect(`run_failed:${failed.code}`, "crash", failed);
-    const moves: AgiActionKind[] = cause === "quota" || cause === "auth" || cause === "runtime_unavailable" ? ["switch_runtime", ...branchWork]
+    // A lost session: a new session from the checkpoint first (the host retired the old binding), then another runtime.
+    const moves: AgiActionKind[] = AGI_RUNTIME_SESSION_LOST_CODES.has(failed.code) ? ["start_work_turn", ...branchWork, "switch_runtime"]
+      : cause === "quota" || cause === "auth" || cause === "runtime_unavailable" ? ["switch_runtime", ...branchWork]
       : cause === "tool_refused" || cause === "tool_missing" ? ["retry_node_with", "replan_tree", "switch_runtime"]
         : [...branchWork, "replan_tree", "switch_runtime"];
     return base({ display: "blocked", attemptDue: true, primarySignal: "run_failed", causeKind: cause, ownerClass: ourDefect ? "our_defect" : "agent_resolvable",
-      boundary: null, altPaths: moves, reasonCode: `run_failed_${cause}`, signal: failed });
+      boundary: null, altPaths: moves, reasonCode: AGI_RUNTIME_SESSION_LOST_CODES.has(failed.code) ? "run_failed_session_lost" : `run_failed_${cause}`, signal: failed });
   }
   const gate = find("pre_run_refused");
   if (gate) {

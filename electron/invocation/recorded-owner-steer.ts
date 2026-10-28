@@ -18,12 +18,40 @@ export interface RecordedOwnerSteer {
   steer: InvocationSteerResult;
 }
 
+/**
+ * Rejected rows that are still the owner's text accounted for: withdrawn or returned by the owner, or carried whole into the
+ * chat's next turn (carried-owner-followups.ts). Any other rejection (owner_control_run_settled, owner_control_not_dispatched,
+ * ...) means the text never reached a model (red-blue regression review A, R2, 2026-10-28).
+ */
+const OWNER_SETTLED_REJECTIONS: ReadonlySet<string> = new Set([
+  "native_owner_text_withdrawn", "owner_recovery_returned", "owner_control_next_turn",
+]);
+
+const CARRY_ELIGIBLE_REJECTIONS: ReadonlySet<string> = new Set(["owner_control_run_settled", "owner_control_not_dispatched"]);
+/** The row's text went as the chat's next message through the caller's queue (never carried as well). */
+export const SENT_AS_NEXT_MESSAGE_CODE = "owner_control_sent_as_next_message";
+
 /** The record for exactly this chat and intent, or null when none exists or the store cannot say (never a guess). Never throws. */
 export function readRecordedOwnerSteer(chatId: string, intentId: string): RecordedOwnerSteer | null {
   if (typeof chatId !== "string" || !chatId || typeof intentId !== "string" || !intentId) return null;
   let currentTurn: InvocationCurrentTurnSteerReceipt | null;
   try { currentTurn = getCurrentTurnSteer(chatId, intentId); } catch { return null; } // another chat's intent id, or an unreadable store
   if (!currentTurn) return null;
+  // A direction the turn never took (it ended first, or never dispatched its batch) is not delivered: the queued owner text
+  // goes as the next message instead of being dropped. Only the owner's own take-back and a carry to the next turn count.
+  if (currentTurn.status === "rejected" && !OWNER_SETTLED_REJECTIONS.has(currentTurn.code ?? "")) {
+    // The run's end carries exactly these rows into the next turn (takeUndeliveredOwnerDirections). Take this one for the
+    // next message instead, in one statement: whichever side takes it first delivers it, so it is neither lost nor sent twice.
+    if (!CARRY_ELIGIBLE_REJECTIONS.has(currentTurn.code ?? "")) return null;
+    try {
+      const taken = getDb().prepare(`UPDATE invocation_current_turn_steers SET code = ?, updated_at = ?
+        WHERE intent_id = ? AND chat_id = ? AND status = 'rejected' AND code IN ('owner_control_run_settled','owner_control_not_dispatched')`)
+        .run(SENT_AS_NEXT_MESSAGE_CODE, new Date().toISOString(), intentId, chatId).changes === 1;
+      if (taken) return null;
+      currentTurn = getCurrentTurnSteer(chatId, intentId);
+    } catch { return null; }
+    if (!currentTurn || currentTurn.status !== "rejected" || !OWNER_SETTLED_REJECTIONS.has(currentTurn.code ?? "")) return null;
+  }
   let interruptsCurrent = false;
   try {
     const row = getDb().prepare("SELECT binding_json FROM invocation_current_turn_steers WHERE intent_id = ?").get(intentId) as { binding_json?: string } | undefined;

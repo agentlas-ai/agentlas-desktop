@@ -28,6 +28,12 @@
  *      same error on every later turn of that chat until something cleared the
  *      binding (2026-10-16: 275 Codex bindings on the owner's Mac named rollouts
  *      that no longer existed anywhere).
+ *   5. An attended turn whose resume the runtime's own protocol request timed out on (Codex app-server thread/resume or
+ *      thread/fork, a typed AcpTimeoutError before any turn/start) also continues in a fresh session that replaces the
+ *      binding, under the same condition as rule 4 (the host can hand it the conversation). Nothing reached the model, and
+ *      the stored thread does not open within the bound again: YouTube room 2026-10-28, a 15-day thread whose rollout had
+ *      grown to 1.7 GB timed out at 120 s on the owner's turn, on the model fallback that resumed the same thread, and on
+ *      every later message, while the owner was told only "The run failed ...".
  * Every fresh-session decision emits one machine-readable status receipt.
  */
 
@@ -35,7 +41,8 @@ export type UnattendedFreshSessionReason =
   | "parallel_turn"
   | "writer_busy"
   | "session_not_found"
-  | "resume_failed_before_turn";
+  | "resume_failed_before_turn"
+  | "resume_timed_out";
 
 const activeTurns = new Map<string, number>();
 
@@ -102,7 +109,7 @@ export function classifyCodexResumeFailure(stderr: string): UnattendedFreshSessi
  * binding stays and the turn is returned typed and pre-dispatch (claude-code.ts claudeStartupRefusal, 756939df).
  */
 export function attendedTurnStartsFresh(reason: UnattendedFreshSessionReason, conversationCarried: boolean): boolean {
-  return reason === "session_not_found" && conversationCarried;
+  return (reason === "session_not_found" || reason === "resume_timed_out") && conversationCarried;
 }
 
 /** The one status receipt for a fresh-session decision (parsed by the run ledger as a status line). */

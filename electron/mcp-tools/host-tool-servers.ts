@@ -91,6 +91,18 @@ export function hostToolCatalog(configPath: string | undefined): readonly HostTo
   return configPath ? catalogs.get(configPath) ?? [] : [];
 }
 
+/**
+ * The effect the minting domain declared for one tool of a host tool server in this prepared config, or null when the tool is
+ * not a host-declared tool of that config. Read by Main-work recovery (mcp-tools/main-work-read-actions.ts): Main's own registry,
+ * keyed by the prepared config path, is the authority. A server key equal to a host server's key cannot be an installed row
+ * (mcp-config.ts refuses the collision), and a tool's own annotations, name or result are never read.
+ */
+export function hostToolDeclaredEffect(configPath: string | undefined, configKey: string, toolName: string): "read" | "effect" | null {
+  const server = hostToolCatalog(configPath).find((item) => item.configKey === configKey);
+  const tool = server?.declarations.find((item) => item.name === toolName);
+  return tool ? (tool.effect === "read" ? "read" : "effect") : null;
+}
+
 /** The searchable text of one declaration: its name words, group, fields and artifact kinds rank as id-like terms. */
 export function hostToolRankTerms(server: HostToolServer, tool: HostToolDeclaration): string[] {
   return [server.configKey, tool.group.id, tool.group.label, ...tool.fields, ...tool.artifactKinds, tool.name.replace(/_/g, " ")];

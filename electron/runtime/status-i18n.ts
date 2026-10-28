@@ -27,16 +27,16 @@ const DICT = {
   ko: {
     thinking: "{agent}가 생각 중...",
     sending: "전송 중...",
-    agentContextTurnWait: "같은 에이전트가 다른 대화에서 일하는 중이라, 그 일이 끝나면 이어서 시작합니다. 지금 시작하려면 그 대화에서 중지하세요...",
+    agentContextTurnWait: "같은 에이전트가 다른 대화에서 일하는 중이라, 그 일이 끝나면 계속합니다. 지금 시작하려면 그 대화에서 중지하세요...",
     // Waiting, not refused (no-dead-end sweep 2026-10-25): the turn ahead waits for the owner in another conversation.
     agentContextTurnWaitParkedApproval: "같은 에이전트가 다른 대화에서 승인을 기다리는 중이에요. 그 대화에서 승인하거나 중지하면 이 메시지가 바로 시작됩니다...",
     agentContextTurnWaitParkedQuestion: "같은 에이전트가 다른 대화에서 답을 기다리는 중이에요. 그 대화에서 답하거나 중지하면 이 메시지가 바로 시작됩니다...",
     // The wait stopped without the session (agent-context-turn-order.ts): what is happening and what to do, in words the screen already uses.
-    agentContextTurnParkedApproval: "같은 에이전트가 다른 대화에서 승인을 기다리고 있어서 이어서 시작하지 못했어요. 그 대화에서 승인하거나 중지한 뒤 다시 보내 주세요.",
-    agentContextTurnParkedQuestion: "같은 에이전트가 다른 대화에서 답을 기다리고 있어서 이어서 시작하지 못했어요. 그 대화에서 답하거나 중지한 뒤 다시 보내 주세요.",
-    agentContextTurnStuck: "같은 에이전트가 다른 대화에서 일하다 멈춘 것 같아서 이어서 시작하지 못했어요. Agentlas를 다시 열어 정리한 뒤 다시 보내 주세요.",
+    agentContextTurnParkedApproval: "같은 에이전트가 다른 대화에서 승인을 기다리고 있어서 계속하지 못했어요. 그 대화에서 승인하거나 중지한 뒤 다시 보내 주세요.",
+    agentContextTurnParkedQuestion: "같은 에이전트가 다른 대화에서 답을 기다리고 있어서 계속하지 못했어요. 그 대화에서 답하거나 중지한 뒤 다시 보내 주세요.",
+    agentContextTurnStuck: "같은 에이전트가 다른 대화에서 일하다 멈춘 것 같아서 계속하지 못했어요. Agentlas를 다시 열어 정리한 뒤 다시 보내 주세요.",
     agentContextTurnWaitExpired: "같은 에이전트가 다른 대화에서 오래 일하고 있어서 기다리다 멈췄어요. 그 일이 끝나거나 그 대화에서 중지한 뒤 다시 보내 주세요.",
-    sessionScopeUnavailable: "이 대화에서 이어갈 에이전트의 작업을 확인하지 못해 시작하지 않았어요. 잠시 뒤 다시 보내 주세요.",
+    sessionScopeUnavailable: "이 대화에서 계속할 에이전트의 작업을 확인하지 못해 시작하지 않았어요. 잠시 뒤 다시 보내 주세요.",
     callingBackend: "{backend} 호출 중...",
     schemaInPromptOnly: "이 실행 경로는 출력 형식을 강제할 수 없어 지시문으로만 요청합니다.",
     cliImageReady: "첨부 이미지 {count}개를 파일로 준비했습니다 — {backend}가 해당 경로를 읽습니다",

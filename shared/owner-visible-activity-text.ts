@@ -237,7 +237,7 @@ const KNOWN_FAILURES: readonly KnownFailure[] = [
   {
     match: /agent_context_original_invocation_owner_required|owner_required|liveness_unknown/i,
     reason: {
-      ko: "이 단계를 처음 시작한 실행이 더는 확인되지 않아 이어가지 못했어요.",
+      ko: "이 단계를 처음 시작한 실행이 더는 확인되지 않아 계속하지 못했어요.",
       en: "The run that started this step can no longer be confirmed, so it could not continue.",
     },
     action: FAILURE_RETRY,

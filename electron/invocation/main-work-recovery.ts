@@ -435,6 +435,20 @@ export class MainWorkRecoveryContext implements MainWorkRecoveryPort {
   }
 }
 
+/**
+ * Whether this run's tool calls go through the Work journal below. Every run does, Work, One, Finance and Science alike, except
+ * two old paths kept only for compatibility (PLAN S5 docs/2026-10-28-science-harness-unify, deleted in S11):
+ *   - a Science run whose Science build predates the common journal: such a build keeps its own forward recovery and never
+ *     sets `commonWorkRecovery` (a build that knows the host's `execution.commonWorkRecovery` member sets it on its turns);
+ *   - an Alive wake's Science playground, which still runs on its Science grant.
+ * The flag is Main-process provenance (InvocationExecutionContext), never read from IPC, a model or a renderer.
+ */
+export function mainWorkRecoveryApplies(context: { source?: string; aliveScience?: unknown; commonWorkRecovery?: unknown } | undefined): boolean {
+  if (!context) return true;
+  if (context.aliveScience) return false;
+  return context.source !== "science" || context.commonWorkRecovery === true;
+}
+
 /** Called only by the host module that mints a relay port (local-model-hub/work-recovery-relay.ts). */
 export function registerMainWorkRecoveryRelayPort(port:MainWorkRecoveryPort):void {
   if(!port || typeof port!=="object" || contexts.has(port))throw new Error("main_work_host_port_required");

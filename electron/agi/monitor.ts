@@ -20,6 +20,15 @@ import { AGI_NO_ADMISSIBLE_PATH, AGI_NON_ALTERNATIVE_ACTIONS, type AgiActionKind
 import { AgiIncidentStore, type AgiIncident } from "./incident-store";
 
 export const AGI_MONITOR_INTERVAL_MS = 60_000;
+/** One "[agi-monitor] alive" line per this period: the monitor logged only failures, so a healthy monitor looked dead in main.log. */
+export const AGI_MONITOR_HEARTBEAT_MS = 60 * 60_000;
+/** A wake refused by a busy store is tried again this many times, this far apart (×attempt), instead of waiting for the next beat. */
+const AGI_WAKE_BUSY_RETRIES = 5;
+const AGI_WAKE_BUSY_RETRY_MS = 2_000;
+export function agiStoreBusy(error: unknown): boolean {
+  const code = error && typeof error === "object" && "code" in error ? String((error as { code?: unknown }).code ?? "") : "";
+  return /^SQLITE_BUSY|^SQLITE_LOCKED/.test(code) || /database is locked|database table is locked/i.test(error instanceof Error ? error.message : String(error ?? ""));
+}
 /** Retry the same typed incident at 5, 10, 20, 40, then 60 minute intervals; new evidence has its own digest. */
 /** How far back attempts of one cause count toward the per-goal backoff. */
 const GOAL_CAUSE_WINDOW_MS = 6 * 60 * 60_000;
@@ -78,6 +87,12 @@ export interface AgiUnblockInput {
   trigger: "monitor" | "alive-hook";
   /** Main rereads semantic state before rebasing a version-only ledger change. Never grants authority. */
   refreshFence?(): { goalId: string; runId: string; runVersion: number } | null;
+  /**
+   * After one of this attempt's own actions was accepted: the state it moved is the new expected state for the attempt's next
+   * action. Without it the attempt's first effect (a teammate started, a turn begun) refused every following action as
+   * agi.action.state-changed (production 2026-10-28: dispatch_teammate then start_work_turn, 9 of 9 refused).
+   */
+  acceptOwnEffect?(): void;
 }
 export interface AgiUnblockResult {
   outcome: "acted" | "needs-human" | "failed" | "rested";
@@ -138,6 +153,11 @@ export class AgiGoalMonitor {
   private readonly dueTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private unsubscribe: (() => void) | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
+  private intervalMs = AGI_MONITOR_INTERVAL_MS;
+  private lastTickAtMs = 0;
+  private heartbeatAtMs = 0;
+  private attemptsSinceHeartbeat = 0;
+  private readonly busyRetries = new Map<string, { count: number; timer: ReturnType<typeof setTimeout> | null }>();
   /** Model calls this monitor made. Always 0 — asserted by the contract. */
   readonly modelCalls = 0;
 
@@ -157,10 +177,39 @@ export class AgiGoalMonitor {
 
   state(goalId: string): AgiGoalMonitorState | null { return this.states.get(goalId) ?? null; }
 
+  /** Whether the beat is installed and has run within three intervals (a watchdog restarts a monitor that is not). */
+  liveness(nowMs = this.deps.now()): { running: boolean; lastTickAtMs: number; alive: boolean } {
+    const running = this.timer !== null;
+    return { running, lastTickAtMs: this.lastTickAtMs,
+      alive: running && (this.lastTickAtMs === 0 || nowMs - this.lastTickAtMs < 3 * this.intervalMs) };
+  }
+
+  /**
+   * A reconcile that a busy store refused is tried again shortly, a bounded number of times (production 2026-10-23..24: four wakes
+   * failed "database is locked" and waited for the next beat or change). Any other error is logged once and left to the beat.
+   */
+  private wakeFailed(goalId: string, error: unknown, where: string): void {
+    if (!agiStoreBusy(error) || !this.timer) { console.warn(`[agi-monitor] ${where} failed:`, error); return; }
+    const entry = this.busyRetries.get(goalId) ?? { count: 0, timer: null };
+    if (entry.timer) return;
+    if (entry.count >= AGI_WAKE_BUSY_RETRIES) { this.busyRetries.delete(goalId); console.warn(`[agi-monitor] ${where} failed: store busy after ${entry.count} retries; the next beat tries again`); return; }
+    entry.count += 1;
+    entry.timer = setTimeout(() => {
+      entry.timer = null;
+      if (!this.timer) return;
+      try { this.reconcile(goalId, "monitor"); this.busyRetries.delete(goalId); }
+      catch (retryError) { this.wakeFailed(goalId, retryError, where); }
+    }, AGI_WAKE_BUSY_RETRY_MS * entry.count);
+    entry.timer.unref?.();
+    this.busyRetries.set(goalId, entry);
+  }
+
   start(intervalMs = AGI_MONITOR_INTERVAL_MS): void {
     if (this.timer) return;
+    this.intervalMs = intervalMs;
     this.timer = setInterval(() => { try { this.tick(); } catch (error) { console.warn("[agi-monitor] tick failed:", error); } }, intervalMs);
     this.timer.unref?.();
+    console.info(`[agi-monitor] started intervalMs=${intervalMs}`);
     this.unsubscribe = onDesktopStoreChange((change) => {
       if (!["chat", "long-run", "runtime", "capability-grant", "automation"].includes(change.entity)) return;
       for (const [goalId, source] of this.sources) {
@@ -170,13 +219,14 @@ export class AgiGoalMonitor {
         queueMicrotask(() => {
           this.pending.delete(goalId);
           if (!this.timer) return;
-          try { this.reconcile(goalId, "monitor"); } catch (error) { console.warn("[agi-monitor] wake failed:", error); }
+          try { this.reconcile(goalId, "monitor"); } catch (error) { this.wakeFailed(goalId, error, "wake"); }
         });
       }
     });
   }
 
-  stop(): void { this.invalidateDecisions(); if (this.timer) clearInterval(this.timer); this.timer = null; this.unsubscribe?.(); this.unsubscribe = null; this.pending.clear(); for (const timer of this.dueTimers.values()) clearTimeout(timer); this.dueTimers.clear(); }
+  stop(): void { this.invalidateDecisions(); if (this.timer) clearInterval(this.timer); this.timer = null; this.unsubscribe?.(); this.unsubscribe = null; this.pending.clear(); for (const timer of this.dueTimers.values()) clearTimeout(timer); this.dueTimers.clear();
+    for (const entry of this.busyRetries.values()) if (entry.timer) clearTimeout(entry.timer); this.busyRetries.clear(); }
 
   /** One reconcile pass over every monitored goal. Returns what it did (for contracts and logs). */
   tick(): { goals: number; attempts: number; diagnoses: AgiBlockerDiagnosis[] } {
@@ -189,7 +239,7 @@ export class AgiGoalMonitor {
         const result = this.reconcile(goalId, "monitor");
         if (result.diagnosis) diagnoses.push(result.diagnosis);
         if (result.attempted) attempts += 1;
-      } catch (error) { console.warn("[agi-monitor] goal reconcile failed:", goalId, error); }
+      } catch (error) { this.wakeFailed(goalId, error, `goal ${goalId} reconcile`); }
     }
     // A Goal that left the monitored list (finished, cancelled, deleted, moved off this desktop) leaves nothing behind: its wake timer
     // and its open incidents are closed too. Only its in-memory state was dropped before, so a cancelled Goal's incident stayed open
@@ -201,6 +251,13 @@ export class AgiGoalMonitor {
     for (const { goal_id: goalId } of open) {
       if (seen.has(goalId)) continue;
       if (this.incidents.resolveGoal(goalId, "goal_gone", nowMs) > 0) { try { this.deps.onChanged?.(goalId); } catch { /* refresh only */ } }
+    }
+    this.lastTickAtMs = nowMs;
+    this.attemptsSinceHeartbeat += attempts;
+    if (this.timer && nowMs - this.heartbeatAtMs >= AGI_MONITOR_HEARTBEAT_MS) {
+      this.heartbeatAtMs = nowMs;
+      console.info(`[agi-monitor] alive goals=${seen.size} openIncidents=${open.length} attempts=${this.attemptsSinceHeartbeat}`);
+      this.attemptsSinceHeartbeat = 0;
     }
     return { goals: seen.size, attempts, diagnoses };
   }
@@ -225,7 +282,7 @@ export class AgiGoalMonitor {
     if (this.timer && Number.isFinite(facts.nextWakeAtMs) && facts.nextWakeAtMs! > nowMs) {
       const timer = setTimeout(() => {
         this.dueTimers.delete(goalId);
-        if (this.timer) { try { this.reconcile(goalId, "monitor"); } catch (error) { console.warn("[agi-monitor] due wake failed:", error); } }
+        if (this.timer) { try { this.reconcile(goalId, "monitor"); } catch (error) { this.wakeFailed(goalId, error, "due wake"); } }
       }, Math.min(2_147_483_647, facts.nextWakeAtMs! - nowMs));
       timer.unref?.(); this.dueTimers.set(goalId, timer);
     }
@@ -300,7 +357,10 @@ export class AgiGoalMonitor {
         return true;
       }).immediate();
       if (claimed) {
-        const expectedFenceState = facts.fenceState;
+        let expectedFenceState = facts.fenceState;
+        let expectedDigest = diagnosis.stateDigest;
+        // Work the attempt itself started (a teammate session, a turn) holds the Goal busy; that is not someone else's change.
+        let ownBusyAccepted = false;
         const expectedRunId = facts.runId;
         const handler = this.handler!, generation = this.lifecycleGeneration;
         const claimedAttempt = this.incidents.get(incident.id)?.attempts;
@@ -322,9 +382,16 @@ export class AgiGoalMonitor {
             diagnosis, facts, decisionIngress,
             refreshFence: () => {
               const live = this.deps.readFacts(goalId);
-              if (!live || live.repairInFlight || live.fenceState !== expectedFenceState || live.runId !== expectedRunId || live.runVersion === null
-                || classifyAgiBlocker(live).stateDigest !== diagnosis.stateDigest) return null;
+              if (!live || (live.repairInFlight && !ownBusyAccepted) || live.fenceState !== expectedFenceState || live.runId !== expectedRunId || live.runVersion === null
+                || classifyAgiBlocker(live).stateDigest !== expectedDigest) return null;
               return { goalId, runId: live.runId!, runVersion: live.runVersion };
+            },
+            acceptOwnEffect: () => {
+              const live = this.deps.readFacts(goalId);
+              if (!live || live.runId !== expectedRunId) return;
+              expectedFenceState = live.fenceState;
+              expectedDigest = classifyAgiBlocker(live).stateDigest;
+              ownBusyAccepted = ownBusyAccepted || live.repairInFlight === true;
             } });
         } catch { result = { outcome: "failed", code: "agi.handler-threw" }; }
         finally { decisionIngresses.get(decisionIngress)!.captureOpen = false; }

@@ -71,7 +71,7 @@ import {
   readThreadHealth, recordThreadTurn,
 } from "./session-rotation";
 import { decideGeneration, nativeCompactionLimit, recordObservedContextWindow, runtimeContextWindow } from "./session-generation";
-import { AcpRpcError, classifyAcpFailure, createNativeRuntimeDiagnostic, NativeProtocolDiagnostics, NativeTransportDiagnostics, nativeProcessErrorCode } from "./acp-protocol";
+import { AcpRpcError, AcpTimeoutError, classifyAcpFailure, createNativeRuntimeDiagnostic, NativeProtocolDiagnostics, NativeTransportDiagnostics, nativeProcessErrorCode } from "./acp-protocol";
 import type { NativeEvictionReason, NativeFailureEvidence, NativeProtocolCounters, NativeRuntimeDiagnostic, NativeTurnStartFailure } from "./native-runtime-diagnostics";
 import {
   CODEX_APP_SERVER_ARGS,
@@ -2838,8 +2838,13 @@ async function runCodexResidentTurn(input: {
           if (req.signal?.aborted) throw abortReasonError(req);
           events.onStatus(`[runtime-session] resume_failed kind=${KIND}`);
           if (err instanceof CodexModelSelectionError) throw markRefusedBeforeDispatch(err);
+          // The request's own typed timeout (not its words): the stored thread did not open within the bound, before any
+          // turn/start (YouTube room 2026-10-28: a 1.7 GB rollout timed out on every resume, model fallback included).
+          const resumeTimedOut = err instanceof AcpTimeoutError
+            && (err.method === "thread/resume" || err.method === "thread/fork");
           throw markRefusedBeforeDispatch(err instanceof CodexSessionContinuityError ? err : new CodexSessionContinuityError(
             "resume_failed", `Codex thread resume failed: ${err instanceof Error ? err.message : String(err)}`,
+            resumeTimedOut ? "resume_timed_out" : undefined,
           ));
         } finally {
           releaseResume?.();
@@ -3693,7 +3698,7 @@ export const runCodex: Runner = async (
       // the other's (production 1.2.93, 2026-10-11 03:54Z, "already has an active writer"),
       // and when the thread's rollout is gone (rule 4: refusing repeated the error on every later turn).
       if (runReq.signal?.aborted || !(err instanceof CodexSessionContinuityError)) throw err;
-      const refusal = err.code === "resume_failed" ? classifyCodexResumeFailure(err.message) : "writer_busy";
+      const refusal = err.code === "resume_failed" ? err.resumeRefusal ?? classifyCodexResumeFailure(err.message) : "writer_busy";
       if (!runReq.unattended && refusal !== "writer_busy" && !attendedTurnStartsFresh(refusal, conversationCarried())) throw err;
       freshReason = refusal;
       events.onStatus(unattendedFreshSessionStatus(KIND, freshReason));

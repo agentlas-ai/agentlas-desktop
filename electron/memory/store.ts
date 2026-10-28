@@ -670,27 +670,29 @@ export function supersedeLegacyRequestEchoMemories(): number {
 }
 
 /** 결정론 dedup — scope+kind+content(정규화)가 완전히 같은 live 엔트리 중 최신만 남기고 supersede.
- *  드리밍 1단계(무LLM). 반환: 정리된 개수. */
+ *  드리밍 1단계(무LLM). 반환: 정리된 개수.
+ *
+ *  One pass that groups live entries by the duplicate key and keeps the newest (created_at, id) of each group: every
+ *  other member has a newer duplicate, which is exactly what the earlier pairwise EXISTS selected. That pairwise form
+ *  compared every live entry with every other one in its scope and lower()-ed both texts per pair, synchronously in Main
+ *  on every 5-minute dreaming tick (2.3 s at 10,000 entries, quadratic; the owner's Main sampled 100% busy in lowerFunc
+ *  for 3 s windows at 5-minute spacing, 2026-10-28). PARTITION BY groups NULLs together as the IS comparisons did; the
+ *  project/session key parts only count in those scopes, and the eligibility conditions depend only on the group key. */
 export function dedupExactDuplicateMemories(): number {
   const rows = getDb()
     .prepare(
-      `SELECT m.id FROM memory_entries m LEFT JOIN memory_identity_bindings mb ON mb.memory_id=m.id
-       WHERE m.superseded_at IS NULL AND ${ordinaryRecall("m")}
-         AND EXISTS (
-           SELECT 1 FROM memory_entries n LEFT JOIN memory_identity_bindings nb ON nb.memory_id=n.id
-           WHERE n.superseded_at IS NULL AND ${ordinaryRecall("n")}
-             AND n.scope = m.scope AND n.kind = m.kind
-             AND lower(trim(n.content)) = lower(trim(m.content))
-             AND (n.project_path IS m.project_path)
-             AND (n.agent_id IS m.agent_id)
-             AND (m.scope != 'project' OR n.project_id IS m.project_id)
-             AND (m.scope != 'session' OR n.chat_id IS m.chat_id)
-             AND (m.scope != 'project' OR length(trim(COALESCE(m.project_id,m.project_path,'')))>0)
-             AND (m.scope != 'session' OR length(trim(COALESCE(m.chat_id,'')))>0)
-             AND mb.owner_namespace IS nb.owner_namespace AND mb.actor_id IS nb.actor_id
-             AND mb.applicability_json IS nb.applicability_json
-             AND (n.created_at > m.created_at OR (n.created_at = m.created_at AND n.id > m.id))
-         )`,
+      `SELECT id FROM (
+         SELECT m.id, ROW_NUMBER() OVER (
+             PARTITION BY m.scope, m.kind, lower(trim(m.content)), m.project_path, m.agent_id,
+               CASE WHEN m.scope = 'project' THEN m.project_id END,
+               CASE WHEN m.scope = 'session' THEN m.chat_id END,
+               mb.owner_namespace, mb.actor_id, mb.applicability_json
+             ORDER BY m.created_at DESC, m.id DESC) AS newest_first
+         FROM memory_entries m LEFT JOIN memory_identity_bindings mb ON mb.memory_id=m.id
+         WHERE m.superseded_at IS NULL AND ${ordinaryRecall("m")}
+           AND (m.scope != 'project' OR length(trim(COALESCE(m.project_id,m.project_path,'')))>0)
+           AND (m.scope != 'session' OR length(trim(COALESCE(m.chat_id,'')))>0)
+       ) WHERE newest_first > 1`,
     )
     .all() as Array<{ id: string }>;
   supersedeMemoryEntries(rows.map((r) => r.id));

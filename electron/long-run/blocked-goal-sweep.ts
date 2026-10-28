@@ -379,6 +379,17 @@ function closeGoalOfDeletedChat(run: LongRunRecord, trigger: string): BlockedGoa
   return { runId: run.id, fromReason: run.blockedReason, action: "cancelled", detail };
 }
 
+/** The hold's turn (run.owner_answer_pending invocationRunId) asked through a card, and none of its cards waits any more. */
+function ownerCardHoldSettled(runId: string, chatId: string): boolean {
+  const row = getDb().prepare("SELECT json_extract(payload_json,'$.invocationRunId') AS turn FROM long_run_events WHERE run_id = ? AND kind = 'run.owner_answer_pending' ORDER BY seq DESC LIMIT 1")
+    .get(runId) as { turn: unknown } | undefined;
+  const turn = typeof row?.turn === "string" ? row.turn : "";
+  if (!turn) return false;
+  const { conversationUiFacts, turnOwnerWaitInstanceIds } = require("../harness/ui-instances") as typeof import("../harness/ui-instances");
+  const facts = conversationUiFacts([chatId])?.get(chatId);
+  return Boolean(facts?.ownerWaitTurnIds.has(turn)) && turnOwnerWaitInstanceIds(chatId, turn).length === 0;
+}
+
 /**
  * A Goal held for the owner's answer (store/long-runs.ts holdGoalForOwnerAnswer) is woken by nobody. It leaves the hold
  * when the owner answers: the desktop composer reopens it itself (stoppedGoalMessageReopens), but a message that arrives with
@@ -394,7 +405,19 @@ function releaseAnsweredOwnerHold(run: LongRunRecord, dispatcher: EffectObservat
   if (!since) return null;
   const spoke = getDb().prepare("SELECT text FROM chat_messages WHERE chat_id = ? AND role = 'user' AND created_at > ? ORDER BY created_at DESC, rowid DESC LIMIT 1")
     .get(chatId, since) as { text: string } | undefined;
-  if (!spoke) return null;
+  if (!spoke) {
+    // A turn that waited on its own card (not a chat question) is answered by the owner's press, which writes no chat message:
+    // once none of that turn's cards waits any more (pressed, replaced or closed), the hold ends the same way.
+    if (!ownerCardHoldSettled(run.id, chatId)) return null;
+    try {
+      return releaseGoalOwnerAnswerHold({ runId: run.id, expectedVersion: run.version, reason: "owner-card-settled",
+        appInstanceId: desktopAppInstanceId() });
+    } catch (error) {
+      const code = errorCode(error, "goal_owner_answer_release_unavailable");
+      if (code !== "goal_owner_answer_release_state_changed") logSweepFailureCause("owner-card-release", run.id, code, error);
+      return null;
+    }
+  }
   // The owner's newest word picked an option of the Goal's own host card: a stop is applied, never released into a resume.
   try {
     const answer = hostOwnerCardAnswer({ goalId: run.goalId, chatId, reply: spoke.text });

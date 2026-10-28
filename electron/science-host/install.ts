@@ -359,6 +359,12 @@ export function installScienceHostFor(input: ScienceHostInstallInput): ScienceHo
       // the canonical decision reader above, the phone's canonical question bank): a Science build that knows the member
       // lists no Science-only researcher-question opener.
       ...{ commonQuestions: { version: 1 as const } },
+      // PLAN S5: a Science turn's tool calls go through the common Work journal (invocation/main-work-recovery.ts): admit before
+      // dispatch, finish with how the call ended, an identical repeat of a call whose answer was lost is refused, a lost outcome
+      // blocks only its own step, and the next turn carries the common recovery packet. Which Science tools are effect-free reads
+      // comes from the tool server's own declarations (host-tool-servers.ts). A Science build that knows the member sets
+      // `commonWorkRecovery` on its turns and records no Science forward-recovery basis; an older build keeps its own recovery.
+      ...{ commonWorkRecovery: { version: 1 as const } },
       // One stop wording for Science, Work, One and the phone (shared/invocation-host-stop.ts): the owner's Stop is not a failure.
       ...{ runStopNotice: (facts: { status?: unknown; hostStopCause?: unknown }, locale?: unknown) => {
         const cause = runStopCause(facts ?? {});

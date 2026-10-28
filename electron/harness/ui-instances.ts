@@ -709,6 +709,58 @@ export const UI_PORT_HANDLERS: Record<string, (args: Record<string, unknown>, ct
 
 // ── renderer read model ───────────────────────────────────────────────────────────────────────────────────────────
 
+// ── conversation-bound facts (sync readers) ──────────────────────────────────────────────────────────────────────
+/*
+ * A card is an object of one conversation: its instanceId, its open "awaiting-input" state and the turn that presented it
+ * mean nothing in another conversation. Two host paths need that fact without awaiting: a turn's final event (the runner's
+ * sink is synchronous) and memory recall across a project's conversations. Same fold as listUiInstances; the store path is
+ * resolved the same way, synchronously. null when the store cannot be read (the caller decides its conservative default).
+ */
+function syncedNow(): Folded | null {
+  try {
+    const { userDataPath } = require("../runtime-paths") as typeof import("../runtime-paths");
+    return syncFile(userDataPath(path.join("harness", "ui-instances.jsonl")));
+  } catch { return null; }
+}
+
+/** Instances this turn presented in its chat that still wait for the owner (current revision awaiting-input, not closed). */
+export function turnOwnerWaitInstanceIds(chatId: string, turnId: string): string[] {
+  if (!chatId || !turnId) return [];
+  const state = syncedNow();
+  if (!state) return [];
+  const out: string[] = [];
+  for (const record of state.instances.values()) {
+    if (record.chatId !== chatId || record.closedAt) continue;
+    const current = currentOf(record);
+    if (current?.turnId === turnId && current.state === "awaiting-input") out.push(record.instanceId);
+  }
+  return out;
+}
+
+export interface ConversationUiFacts {
+  /** Every card handle of the conversation. */
+  instanceIds: Set<string>;
+  /** Turns that presented a card which, at any revision, waited for the owner. */
+  ownerWaitTurnIds: Set<string>;
+}
+
+/** Per conversation: its card handles and the turns that asked the owner through a card. null = store unreadable. */
+export function conversationUiFacts(chatIds: Iterable<string>): Map<string, ConversationUiFacts> | null {
+  const wanted = new Set([...chatIds].filter(Boolean));
+  const out = new Map<string, ConversationUiFacts>();
+  for (const id of wanted) out.set(id, { instanceIds: new Set(), ownerWaitTurnIds: new Set() });
+  if (!wanted.size) return out;
+  const state = syncedNow();
+  if (!state) return null;
+  for (const record of state.instances.values()) {
+    const facts = out.get(record.chatId);
+    if (!facts) continue;
+    facts.instanceIds.add(record.instanceId);
+    for (const revision of record.revisions) if (revision.state === "awaiting-input" && revision.turnId) facts.ownerWaitTurnIds.add(revision.turnId);
+  }
+  return out;
+}
+
 /** Latest revision of every instance in a chat, oldest first (closed ones included, flagged). */
 export async function listUiInstances(chatId: string): Promise<UiInstanceView[]> {
   const state = await sync();

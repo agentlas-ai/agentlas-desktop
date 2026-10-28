@@ -438,6 +438,8 @@ export class AgiModelAttempt {
         attempt: attemptNo, fence, action: entry.action, args: entry.args, attemptTokensSoFar: tokensUsed,
         episodeCaptureId, ...(mixedRest ? { episodeRefusal: "goal_episode_mixed_batch" } : {}) }, input);
       receipts.push(receipt);
+      // This attempt's own accepted effect is the state its next action expects (monitor.ts acceptOwnEffect).
+      if (receipt.ok) { try { input.acceptOwnEffect?.(); } catch { /* the next refresh reads the store again */ } }
       if (receipt.ok && !input.refreshFence) {
         const version = d.executor.currentVersion(input.goalId);
         if (version !== null) fence = { ...fence, runVersion: version };

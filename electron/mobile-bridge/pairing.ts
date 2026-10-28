@@ -20,6 +20,8 @@ const BRIDGE_DIR = "mobile-bridge";
 const HOST_IDENTITY_FILE = "identity.json";
 const DEV_BOOTSTRAP_FILE = "dev-bootstrap.json";
 const DEVICE_FILE = "devices.json";
+/** How long a definitive "active" account answer is reused for new phone connections (see accountAuthorityStatusFor). */
+export const ACCOUNT_AUTHORITY_ACTIVE_TTL_MS = 5 * 60_000;
 const ENDPOINT_FILE = "endpoint.json";
 const DEFAULT_PAIRING_TTL_MS = 2 * 60_000;
 const DEFAULT_MAX_PAIRING_ATTEMPTS = 8;
@@ -908,10 +910,7 @@ export class MobileBridgePairingManager {
     }
     let status: AccountAuthorityStatus;
     try {
-      status = await this.validateAccountAuthority({
-        accountSubject: record.accountSubject,
-        accountAuthorityOrigin: record.accountAuthorityOrigin,
-      });
+      status = await this.accountAuthorityStatusFor(record.accountSubject, record.accountAuthorityOrigin);
     } catch {
       status = "unreachable";
     }
@@ -944,6 +943,39 @@ export class MobileBridgePairingManager {
     }
     this.lastAuthenticationRefusal = null;
     return this.publicMetadata(record);
+  }
+
+  /*
+   * Every phone connection used to wait on a network round trip to the account authority, and the relay's local hop gave it
+   * 5 s. A phone that reconnects every 30-160 s (2026-10-28) paid that each time, and one slow answer refused it
+   * (account_authority_unreachable, 09:41Z). A definitive "active" is now reused for ACCOUNT_AUTHORITY_ACTIVE_TTL_MS, and
+   * concurrent checks for the same account share one request. Only "active" is reused: "inactive" revokes as before and
+   * "unreachable" is never remembered. The phone's own credential is still checked on every connection (record lookup and
+   * revocation above); the reuse only spares the account-status call.
+   */
+  private readonly accountAuthorityActiveUntil = new Map<string, number>();
+  private readonly accountAuthorityInFlight = new Map<string, Promise<AccountAuthorityStatus>>();
+
+  private async accountAuthorityStatusFor(accountSubject: string, accountAuthorityOrigin: string): Promise<AccountAuthorityStatus> {
+    const validate = this.validateAccountAuthority;
+    if (!validate) return "unreachable";
+    const key = `${accountAuthorityOrigin}\0${accountSubject}`;
+    const now = Date.now();
+    if ((this.accountAuthorityActiveUntil.get(key) ?? 0) > now) return "active";
+    const pending = this.accountAuthorityInFlight.get(key);
+    if (pending) return pending;
+    const flight = (async () => {
+      try {
+        const status = await validate({ accountSubject, accountAuthorityOrigin });
+        if (status === "active") this.accountAuthorityActiveUntil.set(key, Date.now() + ACCOUNT_AUTHORITY_ACTIVE_TTL_MS);
+        else if (status === "inactive") this.accountAuthorityActiveUntil.delete(key);
+        return status;
+      } finally {
+        this.accountAuthorityInFlight.delete(key);
+      }
+    })();
+    this.accountAuthorityInFlight.set(key, flight);
+    return flight;
   }
 
   /**

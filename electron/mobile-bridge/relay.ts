@@ -19,6 +19,86 @@ const REPAIR_LATCH_MAX_TOKENS = 64;
 const REPAIR_LATCH_TTL_MS = 10 * 60_000;
 
 /*
+ * 데스크탑 Main 스레드가 멈춘 동안의 중계 (2026-10-28, 오너 실사용 main.log 실측).
+ *
+ * ★ 무엇이 있었나
+ *   Main 이 10~77초 멈췄다(같은 시각 `codex login status` 194초, 10분 자동화가 3분 늦게 시작, 12:40:15→12:40:26 로그 공백).
+ *   중계는 폰이 연 통로에 데스크탑 터널이 12초 안에 안 붙으면 통로를 닫는다(mobile-relay.mjs channelTimeoutMs). 멈춘 사이 쌓인
+ *   `relay.device` 5개를 데스크탑이 같은 밀리초에 처리해 터널 5개를 열었고, 통로는 이미 없어 전부 401 "invalid relay tunnel"
+ *   이었다(12:40:29Z). 토큰·기기 인증 문제가 아니다 — 같은 쿠키로 4초 뒤 터널이 붙었다.
+ *   또 멈춘 사이 도착한 pong 이 처리되기 전에 심박 타이머가 먼저 돌면, 멀쩡한 제어 채널을 스스로 끊었다(끊기면 중계가 이
+ *   데스크탑의 폰 통로를 전부 닫는다).
+ *
+ * ★ 지금
+ *   - 한 번에 몰려 온 터널 요청은 폰(기기 토큰)마다 가장 새 것 하나만 연다. 폰은 호스트당 소켓 하나라, 새 요청이 왔다는 건
+ *     앞 요청의 소켓을 폰이 이미 버렸다는 뜻이다.
+ *   - Main 멈춤을 재고(MainLoopStallMonitor), 멈춤 직후의 터널 401 은 "늦게 붙어 통로가 이미 닫힘"으로 적고 아무것도 하지
+ *     않는다(폰은 스스로 다시 붙는다). 멈춤으로 설명되지 않는 401 이 2분 안에 두 번이면 세션을 의심해 제어 채널을 새로
+ *     인증한다 — 새 채널이 열린 뒤 옛 채널을 닫아(make-before-break) 붙어 있는 폰 통로는 끊지 않는다.
+ *   - 로그인 쿠키가 바뀌면(다시 로그인) 같은 방식으로 제어 채널을 새 자격으로 바꾼다.
+ *   - 심박은 자기 자신이 늦게 돌았으면(멈춤) 이번 판정을 건너뛴다.
+ */
+/** 중계가 폰 통로에 데스크탑 터널을 기다리는 시간(mobile-relay.mjs channelTimeoutMs). */
+export const RELAY_CHANNEL_WINDOW_MS = 12_000;
+export const MAIN_LOOP_STALL_TICK_MS = 500;
+/** 이만큼 넘게 늦은 틱만 멈춤으로 센다. */
+export const MAIN_LOOP_STALL_RECORD_MS = 2_000;
+/** 이만큼 넘는 멈춤은 로그 한 줄(분당 한 번). */
+export const MAIN_LOOP_STALL_LOG_MS = 5_000;
+/** 터널 401 직전 이 시간 안에 이만큼 이상 멈췄으면 "늦게 붙음"으로 본다. */
+export const TUNNEL_LATE_STALL_MS = 3_000;
+export const TUNNEL_LATE_LOOKBACK_MS = 30_000;
+/** 멈춤으로 설명되지 않는 터널 인증 거절을 세는 창과 제어 채널 재인증 최소 간격. */
+export const TUNNEL_AUTH_SUSPECT_WINDOW_MS = 120_000;
+export const CONTROL_RENEW_MIN_INTERVAL_MS = 120_000;
+/** 로컬 홉 핸드셰이크: 브리지 인증이 계정 확인(네트워크)을 기다릴 수 있다. 중계 통로는 이미 이어졌으므로 12초 제한이 없다. */
+export const LOCAL_HOP_HANDSHAKE_MS = 20_000;
+
+/** Main 이벤트 루프가 멈췄던 구간을 기록한다(타이머가 늦게 돈 만큼). 네트워크·파일을 쓰지 않는다. */
+export class MainLoopStallMonitor {
+  private timer: NodeJS.Timeout | null = null;
+  private lastTickAt: number;
+  private readonly stalls: Array<{ endedAt: number; ms: number }> = [];
+
+  constructor(
+    private readonly now: () => number = Date.now,
+    private readonly onStall?: (ms: number) => void,
+  ) {
+    this.lastTickAt = now();
+  }
+
+  start(): void {
+    if (this.timer) return;
+    this.lastTickAt = this.now();
+    this.timer = setInterval(() => this.tick(), MAIN_LOOP_STALL_TICK_MS);
+    this.timer.unref?.();
+  }
+
+  stop(): void {
+    if (this.timer) clearInterval(this.timer);
+    this.timer = null;
+  }
+
+  /** 타이머 한 번. 테스트는 직접 부른다. */
+  tick(at: number = this.now()): void {
+    const gap = at - this.lastTickAt - MAIN_LOOP_STALL_TICK_MS;
+    this.lastTickAt = at;
+    if (gap < MAIN_LOOP_STALL_RECORD_MS) return;
+    this.stalls.push({ endedAt: at, ms: gap });
+    if (this.stalls.length > 16) this.stalls.shift();
+    this.onStall?.(gap);
+  }
+
+  /** `withinMs` 안에 끝난(또는 지금 진행 중인) 가장 긴 멈춤. 없으면 0. */
+  recentStallMs(withinMs: number, at: number = this.now()): number {
+    let longest = this.timer ? Math.max(0, at - this.lastTickAt - MAIN_LOOP_STALL_TICK_MS) : 0;
+    if (longest < MAIN_LOOP_STALL_RECORD_MS) longest = 0;
+    for (const stall of this.stalls) if (at - stall.endedAt <= withinMs && stall.ms > longest) longest = stall.ms;
+    return longest;
+  }
+}
+
+/*
  * 제어 채널 재시도 정책 (2026-09-27, main.log 2026-09-25 실측).
  *
  * ★ 무엇이 있었나
@@ -350,6 +430,15 @@ export class MobileBridgeCloudRelay {
   // log. Only transitions are logged, never the cookie or relay secret.
   private lastControlLog: "signed-out" | "connected" | "closed" | "error" | "rejected" | null = null;
   private readonly tunnels = new Set<RelaySocket>();
+  // 새 자격으로 여는 중인 제어 채널(열리면 this.control 과 바뀐다). 옛 채널은 그때 닫는다.
+  private renewing: RelaySocket | null = null;
+  private lastRenewAt = -Infinity;
+  private unexplainedTunnelRefusals: number[] = [];
+  private lastStallLogAt = -Infinity;
+  private readonly stallMonitor = new MainLoopStallMonitor(Date.now, (ms) => this.noteStall(ms));
+  // 한 번에 몰려 온 relay.device 를 기기 토큰별로 모은다(가장 새 것만 연다).
+  private readonly pendingDevices = new Map<string, { channelId: string; deviceToken: string; superseded: number }>();
+  private deviceFlush: NodeJS.Immediate | null = null;
 
   constructor(private readonly options: MobileBridgeCloudRelayOptions) {
     this.endpoint = relayEndpoint(options.relayEndpoint);
@@ -406,11 +495,29 @@ export class MobileBridgeCloudRelay {
   start(): void {
     if (!this.stopped) return;
     this.stopped = false;
+    this.stallMonitor.start();
     this.scheduleConnect(0);
+  }
+
+  private noteStall(ms: number): void {
+    if (ms < MAIN_LOOP_STALL_LOG_MS || Date.now() - this.lastStallLogAt < 60_000) return;
+    this.lastStallLogAt = Date.now();
+    console.warn(
+      `[mobile-bridge-relay] this Desktop's main thread was blocked ${Math.round(ms / 1000)}s; ` +
+        "phone tunnel requests and pings waiting during it were answered late",
+    );
   }
 
   stop(): void {
     this.stopped = true;
+    this.stallMonitor.stop();
+    if (this.deviceFlush) clearImmediate(this.deviceFlush);
+    this.deviceFlush = null;
+    this.pendingDevices.clear();
+    const renewing = this.renewing;
+    this.renewing = null;
+    renewing?.terminate();
+    this.unexplainedTunnelRefusals = [];
     this.settlePushes();
     this.controlCookie = null;
     this.pushPlatforms = [];
@@ -468,10 +575,25 @@ export class MobileBridgeCloudRelay {
     void this.refreshEndpoint().finally(() => this.openControl());
   }
 
-  private openControl(): void {
-    if (this.stopped || this.control) return;
+  /**
+   * 지금 열린 제어 채널을 새 자격으로 바꾼다. 새 채널이 열린 뒤에 옛 채널을 닫는다 — 중계는 같은 hostId 의 새 데스크탑
+   * 연결이 오면 옛 연결을 "replaced" 로 정리하고 폰 통로는 닫지 않는다. 그래서 붙어 있는 폰 터널은 그대로다.
+   */
+  private renewControl(reason: "tunnel_refused" | "credential_changed"): void {
+    if (this.stopped || this.renewing || this.control?.readyState !== WS_OPEN) return;
+    // 터널 거절로 시작한 재인증만 간격을 둔다(같은 거절이 반복돼도 2분에 한 번). 쿠키가 바뀐 경우는 바뀐 동안만 일어나므로
+    // 심박마다(20초) 다시 시도해도 고리가 생기지 않는다.
+    if (reason === "tunnel_refused" && Date.now() - this.lastRenewAt < CONTROL_RENEW_MIN_INTERVAL_MS) return;
+    this.lastRenewAt = Date.now();
+    console.info(`[mobile-bridge-relay] renewing the remote access control channel (${reason}); open phone tunnels stay up`);
+    this.openControl(true);
+  }
+
+  private openControl(renew = false): void {
+    if (this.stopped || (renew ? this.renewing !== null : this.control !== null)) return;
     const authentication = this.authentication();
     const cookie = authentication?.epoch;
+    if (!cookie && renew) return;
     if (!cookie) {
       // The single most common reason remote access silently never works: the
       // relay tunnel requires this Desktop to be signed in to Agentlas.
@@ -480,7 +602,7 @@ export class MobileBridgeCloudRelay {
       this.scheduleConnect(5_000);
       return;
     }
-    if (this.authRefusedCookie !== null) {
+    if (!renew && this.authRefusedCookie !== null) {
       if (cookie !== this.authRefusedCookie) {
         // 다시 로그인했다 — 새 쿠키는 거절된 적이 없으니 지금 바로 붙는다.
         this.clearAuthRefusal();
@@ -499,27 +621,53 @@ export class MobileBridgeCloudRelay {
       handshakeTimeout: 8_000,
       perMessageDeflate: false,
     });
-    this.control = socket;
-    this.controlCookie = cookie;
-    this.pushPlatforms = [];
+    if (renew) {
+      this.renewing = socket;
+    } else {
+      this.control = socket;
+      this.controlCookie = cookie;
+      this.pushPlatforms = [];
+    }
     let opened = false;
     let controlAlive = true;
     socket.on("open", () => {
       opened = true;
+      if (renew) {
+        if (this.renewing !== socket || this.stopped) { socket.terminate(); return; }
+        const previous = this.control;
+        this.renewing = null;
+        this.control = socket;
+        this.controlCookie = cookie;
+        this.pushPlatforms = [];
+        if (this.controlHeartbeatTimer) clearInterval(this.controlHeartbeatTimer);
+        this.controlHeartbeatTimer = null;
+        // previous 의 close 핸들러는 this.control !== previous 라 아무것도 하지 않는다.
+        previous?.close(1000, "desktop control renewed");
+        this.unexplainedTunnelRefusals = [];
+        console.info("[mobile-bridge-relay] remote access control channel renewed");
+      }
       this.retryAttempt = 0;
       this.clearAuthRefusal();
       this.logControl("connected", "remote access control channel connected");
       this.options.onStatusChanged?.();
+      let lastBeatAt = Date.now();
       this.controlHeartbeatTimer = setInterval(() => {
         if (this.stopped || this.control !== socket) {
           if (this.controlHeartbeatTimer) clearInterval(this.controlHeartbeatTimer);
           this.controlHeartbeatTimer = null;
           return;
         }
-        if (!controlAlive) {
+        // 이 판이 늦게 돌았다면(Main 멈춤) 그 사이 온 pong 이 아직 처리되지 않았을 수 있다. 판정하지 않고 다시 잰다.
+        const beatAt = Date.now();
+        const late = beatAt - lastBeatAt > CONTROL_HEARTBEAT_MS * 1.5;
+        lastBeatAt = beatAt;
+        if (!controlAlive && !late) {
           socket.terminate();
           return;
         }
+        // 다시 로그인해 쿠키가 바뀌었으면 새 자격으로 바꾼다(붙어 있는 폰 터널은 유지).
+        const epoch = this.authenticationEpoch();
+        if (epoch !== null && epoch !== this.controlCookie) this.renewControl("credential_changed");
         controlAlive = false;
         try {
           socket.ping();
@@ -564,6 +712,18 @@ export class MobileBridgeCloudRelay {
     });
     socket.on("message", (data) => { if (this.control === socket) this.handleControlMessage(data); });
     const disconnected = (...args: unknown[]) => {
+      if (renew && this.renewing === socket) {
+        // 새 자격으로 못 열었다. 인증 거절이면 지금 채널의 세션도 중계가 받지 않는다는 뜻이므로 그 채널을 닫고
+        // 기존 인증 거절 경로(쿠키가 바뀌면 즉시, 아니면 30분~)로 넘긴다. 일시 장애면 지금 채널을 그대로 쓴다.
+        this.renewing = null;
+        if (refusedStatus !== null && isRelayAuthRefusal(refusedStatus)) {
+          console.warn("[mobile-bridge-relay] the relay refused this Desktop's sign-in while renewing; remote access waits for a new sign-in");
+          this.control?.close(1000, "desktop sign-in refused");
+        } else {
+          console.info("[mobile-bridge-relay] control channel renewal did not open; keeping the current channel");
+        }
+        return;
+      }
       if (this.control !== socket) return;
       this.control = null;
       this.controlCookie = null;
@@ -623,7 +783,43 @@ export class MobileBridgeCloudRelay {
     if (message.type !== "relay.device") return;
     if (typeof message.channelId !== "string" || !CHANNEL_PATTERN.test(message.channelId)) return;
     if (typeof message.deviceToken !== "string" || !TOKEN_PATTERN.test(message.deviceToken)) return;
-    this.openTunnel(message.channelId, message.deviceToken);
+    this.queueDeviceTunnel(message.channelId, message.deviceToken);
+  }
+
+  /**
+   * 같은 틱에 몰려 온 relay.device 를 폰(기기 토큰)마다 모아 가장 새 것 하나만 연다. Main 이 멈췄다 풀리면 그 사이 쌓인
+   * 요청이 한꺼번에 오는데, 폰은 호스트당 소켓 하나라 앞 요청들의 통로는 폰이 이미 버렸다(실측 401 ×5, 같은 밀리초).
+   */
+  private queueDeviceTunnel(channelId: string, deviceToken: string): void {
+    const key = this.repairLatchKey(deviceToken);
+    const previous = this.pendingDevices.get(key);
+    this.pendingDevices.delete(key);
+    this.pendingDevices.set(key, { channelId, deviceToken, superseded: previous ? previous.superseded + 1 : 0 });
+    if (this.deviceFlush) return;
+    this.deviceFlush = setImmediate(() => {
+      this.deviceFlush = null;
+      const batch = [...this.pendingDevices.values()];
+      this.pendingDevices.clear();
+      if (this.stopped) return;
+      for (const entry of batch) {
+        if (entry.superseded > 0) {
+          const stall = this.stallMonitor.recentStallMs(TUNNEL_LATE_LOOKBACK_MS);
+          console.info(
+            `[mobile-bridge-relay] ${entry.superseded} older tunnel request(s) from the same phone not opened: ` +
+              `a newer one arrived with them${stall ? ` (this Desktop's main thread was blocked ${Math.round(stall / 1000)}s)` : ""}`,
+          );
+        }
+        this.openTunnel(entry.channelId, entry.deviceToken);
+      }
+    });
+  }
+
+  /** 멈춤으로 설명되지 않는 터널 인증 거절. 2분 안에 두 번이면(그 사이 성공한 터널 없이) 제어 채널을 새로 인증한다. */
+  private noteUnexplainedTunnelRefusal(): void {
+    const now = Date.now();
+    this.unexplainedTunnelRefusals = this.unexplainedTunnelRefusals.filter((at) => now - at <= TUNNEL_AUTH_SUSPECT_WINDOW_MS);
+    this.unexplainedTunnelRefusals.push(now);
+    if (this.unexplainedTunnelRefusals.length >= 2) this.renewControl("tunnel_refused");
   }
 
   /**
@@ -793,9 +989,11 @@ export class MobileBridgeCloudRelay {
       pending.push({ data, binary: isBinary });
     });
     cloud.on("open", () => {
+      // 터널이 붙었다 = 중계가 지금 이 세션을 받는다. 설명 안 된 거절 횟수를 비운다.
+      this.unexplainedTunnelRefusals = [];
       local = new RelayWebSocket(this.options.localEndpoint, {
         headers: { Authorization: `Bearer ${deviceToken}` },
-        handshakeTimeout: 5_000,
+        handshakeTimeout: LOCAL_HOP_HANDSHAKE_MS,
         perMessageDeflate: false,
         ca: certificatePem(this.options.certificateDer),
         rejectUnauthorized: true,
@@ -836,8 +1034,18 @@ export class MobileBridgeCloudRelay {
     cloud.on("close", (code, reason) => closeBoth("relay side closed", relayCloseDetail(code, reason)));
     cloud.on("error", (error) => closeBoth("relay side failed", error));
     cloud.on("unexpected-response", (_request, response) => {
-      closeBoth(`relay refused the tunnel upgrade (HTTP ${upgradeStatus(response)})`);
+      const status = upgradeStatusCode(response);
+      const stall = isRelayAuthRefusal(status) ? this.stallMonitor.recentStallMs(TUNNEL_LATE_LOOKBACK_MS) : 0;
+      const late = stall >= TUNNEL_LATE_STALL_MS;
+      closeBoth(
+        `relay refused the tunnel upgrade (HTTP ${upgradeStatus(response)})` +
+          (late
+            ? ` — late: this Desktop's main thread was blocked ${Math.round(stall / 1000)}s, so the relay had already ` +
+              `closed this phone channel (${RELAY_CHANNEL_WINDOW_MS / 1000}s window); the phone reconnects on its own`
+            : ""),
+      );
       cloud.terminate();
+      if (isRelayAuthRefusal(status) && !late) this.noteUnexplainedTunnelRefusal();
     });
   }
 }

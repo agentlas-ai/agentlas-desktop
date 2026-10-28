@@ -24,6 +24,7 @@ import { liveAppControlRendererEvent } from "../app-control/ipc-registry";
 import { getInvocationRunReceipt } from "../store/run-events";
 import { readRunTurnPlacement } from "./turn-placement";
 import type { QueuedOwnerInputCustody, QueuedOwnerStartBoundary } from "./queued-owner-input-custody";
+import { OWNER_INTAKE_NOTICE_AFTER_MS, ownerIntakeReceivedNotice } from "./owner-intake";
 
 /**
  * The Main-side wiring of the per-chat send queue (pending-chat-sends.ts) for the messages the renderer sends.
@@ -284,6 +285,23 @@ export function createRendererSendQueue(startNow: RendererStartNow, options: Ren
   // A run that settles in this process decides its message at once (runs settled in the daemon are found by the poll).
   const offSettled=invocationService.onSettled((envelope) => { if (disposed) return; try { resumeCustodiedInputs(); queue.settleRun(envelope.runId); } catch { /* the poll decides it */ } });
 
+  // Owner intake (owner-intake.ts): a message that is still waiting for its chat a moment later gets one received line,
+  // the same typed row the phone path writes, so the owner sees it was taken and runs once the chat is free.
+  const noticeIfStillWaiting = (record: PendingSendRecord, request: McpInvocationRequest): PendingSendRecord => {
+    const timer = setTimeout(() => {
+      if (disposed) return;
+      try {
+        const current = queue.get(record.id);
+        if (!current || current.state !== "queued") return;
+        appendChatMessage(request.chatId, "assistant", ownerIntakeReceivedNotice(pickLocale(request)),
+          { hostNotice: { purpose: "host-status", runId: queuedSendNoticeRunId(current.runId, record.id), status: "owner-received" } });
+        try { emitDesktopStoreChange({ entity: "chat", id: request.chatId }); } catch { /* cosmetic */ }
+      } catch { /* the message itself is saved and queued */ }
+    }, OWNER_INTAKE_NOTICE_AFTER_MS);
+    timer.unref?.();
+    return record;
+  };
+
   const accept = (event: IpcMainInvokeEvent, req: McpInvocationRequest, intentId: string | undefined, cause?: unknown): PendingSendRecord =>
     getDb().transaction(() => {
       const record = queue.enqueue(event, req, { ...(intentId ? { intentId } : {}), ...(cause === undefined ? {} : { cause }) });
@@ -361,7 +379,7 @@ export function createRendererSendQueue(startNow: RendererStartNow, options: Ren
         if (!canQueue(req)) return null;
         if (isTransientSendRefusal(cause)
           && (!req.oneAttachmentRef && !req.oneTeamPreflightRef || options.custody?.placement(req.runId!) === "not-dispatched"))
-          return queuedAnswer(accept(event,req,undefined,cause));
+          return queuedAnswer(noticeIfStillWaiting(accept(event,req,undefined,cause), req));
         if (!options.custody?.canHold(req)) return null;
         // Hard refusals and unknown effects retain owner input, but never enter
         // the retry drain without a later exact positive no-effect boundary.

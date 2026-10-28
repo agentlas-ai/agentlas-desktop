@@ -39,17 +39,17 @@ export function continuationRefusalNotice(input: {
   switch (input.continuation) {
     case "browser-login":
       message = ko
-        ? `로그인은 확인됐지만 이 작업을 자동으로 이어가지 못했습니다 (원인: ${cause}). 메시지를 보내면 이어서 진행합니다.`
+        ? `로그인은 확인됐지만 이 작업을 자동으로 계속하지 못했습니다 (원인: ${cause}). 메시지를 보내면 계속합니다.`
         : `Sign-in was verified, but this task could not continue on its own (cause: ${cause}). Send a message to continue.`;
       break;
     case "permission-escalation":
       message = ko
-        ? `전체 권한 승인은 받았지만 막혔던 작업을 자동으로 이어가지 못했습니다 (원인: ${cause}). 메시지를 보내면 이어서 진행합니다.`
+        ? `전체 권한 승인은 받았지만 막혔던 작업을 자동으로 계속하지 못했습니다 (원인: ${cause}). 메시지를 보내면 계속합니다.`
         : `Full access was approved, but the blocked work could not continue on its own (cause: ${cause}). Send a message to continue.`;
       break;
     case "graph-login":
       message = ko
-        ? `로그인은 확인됐지만 자동화${name ? ` "${name}"` : ""}를 자동으로 이어가지 못했습니다 (원인: ${cause}). 자동화에서 지금 실행을 누르면 다시 실행합니다.`
+        ? `로그인은 확인됐지만 자동화${name ? ` "${name}"` : ""}를 자동으로 계속하지 못했습니다 (원인: ${cause}). 자동화에서 지금 실행을 누르면 다시 실행합니다.`
         : `Sign-in was verified, but the automation${name ? ` "${name}"` : ""} could not continue on its own (cause: ${cause}). Use Run now on the automation to run it again.`;
       break;
   }

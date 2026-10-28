@@ -45,13 +45,13 @@ export function isNonFailureInvocationStop(receipt: Pick<InvocationRunReceipt, "
 export function invocationHostStopCopy(cause: InvocationHostStopCause, locale: "ko" | "en"): { short: string; detail: string } {
   const ko = locale === "ko";
   if (cause === "app_closed") return ko
-    ? { short: "앱 종료로 멈춤", detail: "앱이 종료되어 이 실행이 멈췄습니다. 실행 오류가 아닙니다. Goal 이 있는 대화는 앱을 다시 열면 앱이 이어서 진행합니다." }
+    ? { short: "앱 종료로 멈춤", detail: "앱이 종료되어 이 실행이 멈췄습니다. 실행 오류가 아닙니다. Goal 이 있는 대화는 앱을 다시 열면 앱이 계속합니다." }
     : { short: "stopped when the app closed", detail: "This run stopped because the app closed. It is not a run error. A conversation with a Goal continues on its own after the app reopens." };
   if (cause === "update_restart") return ko
-    ? { short: "업데이트로 멈춤", detail: "업데이트를 설치하려고 이 실행을 잠시 멈췄습니다. 실행 오류가 아닙니다. 앱이 다시 켜지면 이어서 진행합니다." }
+    ? { short: "업데이트로 멈춤", detail: "업데이트를 설치하려고 이 실행을 잠시 멈췄습니다. 실행 오류가 아닙니다. 앱이 다시 켜지면 계속합니다." }
     : { short: "paused for the update", detail: "This run was paused so the update could install. It is not a run error. It continues when the app comes back." };
   if (cause === "goal_paused_by_user") return ko
-    ? { short: "Goal 일시정지로 멈춤", detail: "Goal 을 일시정지해서 이 실행을 멈췄습니다. 실행 오류가 아닙니다. Goal 의 재개를 누르면 이어서 진행합니다." }
+    ? { short: "Goal 일시정지로 멈춤", detail: "Goal 을 일시정지해서 이 실행을 멈췄습니다. 실행 오류가 아닙니다. Goal 의 재개를 누르면 계속합니다." }
     : { short: "stopped when the Goal was paused", detail: "This run stopped because the Goal was paused. It is not a run error. Resume the Goal to continue." };
   return ko
     ? { short: "Goal 삭제로 멈춤", detail: "Goal 을 삭제해서 이 실행을 멈췄습니다. 실행 오류가 아닙니다. 다시 하려면 요청을 새로 보내 주세요." }
@@ -78,6 +78,6 @@ export function runStopCause(facts: { status?: unknown; hostStopCause?: unknown 
 export function runStopCopy(cause: RunStopCause, locale: "ko" | "en"): { short: string; detail: string } {
   if (cause !== OWNER_STOP_CAUSE) return invocationHostStopCopy(cause, locale);
   return locale === "ko"
-    ? { short: "중단됨", detail: "실행을 중단했습니다. 실행 오류가 아닙니다. 새 지시를 보내면 이어서 실행합니다." }
+    ? { short: "중단됨", detail: "실행을 중단했습니다. 실행 오류가 아닙니다. 새 지시를 보내면 계속 실행합니다." }
     : { short: "Stopped", detail: "You stopped this run. It is not a run error. Send a new direction to continue." };
 }

@@ -12,8 +12,9 @@ import { HARNESS_EFFECT_FREE_READ_OPERATIONS } from "../harness/capability-ports
  * This is NOT an approval input. Approval keeps mcpToolIsMutating (proxy-server.ts), which on purpose lets effectful controls run
  * under read permission (work_session_delegate/steer/cancel, finance.monitor.pause, ask_form, memory_note): reusing that set here
  * would run a delegation or a pause again after a timeout. This list is closed and exact, keyed by Main's dispatcher identity (a
- * static first-party catalog id, or an app-bundled plugin release verified by its digest), never by a tool's own claims or by
- * words in its name. Anything not listed, an unknown tool or an unexpected argument shape, stays an effect (fail closed).
+ * static first-party catalog id, an app-bundled plugin release verified by its digest, or a host tool server's own declaration that
+ * Main registered for this run's config: Science's tools, PLAN S5), never by a tool's own claims or by words in its name. Anything
+ * not listed, an unknown tool or an unexpected argument shape, stays an effect (fail closed).
  */
 
 /** harness_call operations (agentlas-turn) that only read: each port declares effectFreeRead in its own declaration
@@ -43,11 +44,15 @@ const plain = (value: unknown): value is Record<string, unknown> => !!value && t
 
 /**
  * True only for a listed effect-free read. `bundledRelease` is the slug of the app-bundled plugin release this server was verified
- * to run (verifiedBundledPluginRelease), or null.
+ * to run (verifiedBundledPluginRelease), or null. `hostEffect` is the effect a host tool server's minting domain declared for this
+ * tool in the run's own prepared config (host-tool-servers.ts hostToolDeclaredEffect), or null for any other server: a declared
+ * tool is classified by its declaration alone, a read only when it says so (Science derives it from the route set its server
+ * already enforces as read-only in plan mode, science-tool-declarations.ts).
  */
 export function mainWorkEffectFreeRead(input: {
-  catalogId?: string | null; toolName: string; args?: unknown; bundledRelease?: string | null;
+  catalogId?: string | null; toolName: string; args?: unknown; bundledRelease?: string | null; hostEffect?: "read" | "effect" | null;
 }): boolean {
+  if (input.hostEffect === "read" || input.hostEffect === "effect") return input.hostEffect === "read";
   const catalogId = input.catalogId ?? "";
   if (catalogId === "agentlas-turn") {
     if (input.toolName === "harness_search" || input.toolName === "harness_describe") return true;

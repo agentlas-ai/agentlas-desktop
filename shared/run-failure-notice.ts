@@ -45,7 +45,7 @@ import { EMPTY_AFTER_UNUSABLE_TOOLS_CODE, EMPTY_NO_TOOL_RAN_CODES } from "./turn
  */
 
 export type RunFailureNoticeLocale = "ko" | "en";
-export type RunFailureNoticeCause = "quota" | "rate_limit" | "auth" | "refused" | "empty" | "empty_no_tool" | "tools_unusable" | "unavailable" | "capacity" | "subscription_credits_off" | "tool_missing" | "tool_failed" | "tools_unprepared" | "runtime_unavailable" | "runtime_changed" | "goal_changed" | "store_busy" | "mobile_boundary" | "project_busy" | "provider_connection" | "browser_host_unavailable" | "unsettled";
+export type RunFailureNoticeCause = "quota" | "rate_limit" | "auth" | "refused" | "empty" | "empty_no_tool" | "tools_unusable" | "unavailable" | "capacity" | "subscription_credits_off" | "tool_missing" | "tool_failed" | "tools_unprepared" | "runtime_unavailable" | "runtime_changed" | "goal_changed" | "store_busy" | "mobile_boundary" | "project_busy" | "provider_connection" | "browser_host_unavailable" | "session_reopen" | "unsettled";
 
 /** The terminal code of a dispatched turn that ended without a terminal receipt (runtime/runner.ts RUNTIME_TURN_UNSETTLED_CODE). */
 export const RUN_FAILURE_UNSETTLED_CODE = "runtime_turn_unsettled";
@@ -65,7 +65,7 @@ export const PROVIDER_REFUSAL_CODES: ReadonlySet<string> = new Set([
   "STOP_REASON_CONTENT_FILTER",
 ]);
 
-type HostFailureClass = "capacity" | "unavailable" | "subscription_credits_off" | "tool_missing" | "tool_failed" | "tools_unprepared" | "runtime_unavailable" | "runtime_changed" | "goal_changed" | "store_busy" | "mobile_boundary" | "project_busy" | "provider_connection" | "browser_host_unavailable";
+type HostFailureClass = "capacity" | "unavailable" | "subscription_credits_off" | "tool_missing" | "tool_failed" | "tools_unprepared" | "runtime_unavailable" | "runtime_changed" | "goal_changed" | "store_busy" | "mobile_boundary" | "project_busy" | "provider_connection" | "browser_host_unavailable" | "session_reopen";
 
 /**
  * Codes whose notice names something only the owner can do (sign in to the Agentlas Browser). A Goal continuation the host
@@ -100,6 +100,11 @@ export const HOST_FAILURE_CODE_CLASSES: ReadonlyMap<string, HostFailureClass> = 
   // mcp/client.ts: the run is bound to the Agentlas Browser (the owner's toolMode / assignment / mention, or an active Goal
   // that has been working in it) and its signed-in host is not ready: refused before the model (2026-10-28).
   ["agentlas-browser-host-unavailable", "browser_host_unavailable"],
+  // The runner could not reopen the conversation's stored CLI session before any turn started (codex.ts / acp.ts
+  // resume_failed, always pre-dispatch). It read "The run failed ..." (YouTube room 2026-10-28, a Codex thread/resume that
+  // timed out at 120 s). A timeout or a gone session already continues fresh inside the runner (unattended-session-turns.ts
+  // rules 4-5); what still reaches here is a refusal that may clear on its own.
+  ["resume_failed", "session_reopen"],
 ]);
 
 /**
@@ -215,12 +220,12 @@ const KO: Record<RunFailureNoticeCause, Copy> = {
   tools_unprepared: { lead: ["이 실행에 쓸 도구 연결을 준비하지 못해 시작하지 않았습니다.", "이 실행에 쓸 도구 연결을 준비하지 못해 시작하지 않은 것으로 보입니다."],
     action: "도구(MCP) 연결 상태를 확인한 뒤 다시 보내 보세요." },
   browser_host_unavailable: { lead: ["로그인된 Agentlas Browser를 확인할 수 없어 브라우저가 필요한 이 작업을 시작하지 않았습니다.", "로그인된 Agentlas Browser를 확인할 수 없어 브라우저가 필요한 이 작업을 시작하지 않은 것으로 보입니다."],
-    action: "Agentlas Browser를 열어 로그인해 두세요. 진행 중인 목표는 잠시 뒤 자동으로 다시 시도하고, 바로 이어가려면 메시지를 보내면 됩니다." },
+    action: "Agentlas Browser를 열어 로그인해 두세요. 진행 중인 목표는 잠시 뒤 자동으로 다시 시도하고, 바로 계속하려면 메시지를 보내면 됩니다." },
   runtime_unavailable: { lead: ["선택한 모델(실행기)을 지금 쓸 수 없어 시작하지 않았습니다.", "선택한 모델(실행기)을 지금 쓸 수 없어 시작하지 않은 것으로 보입니다."],
     action: "설정에서 모델 연결을 확인하거나 다른 모델을 골라 다시 보내 보세요." },
   runtime_changed: { lead: ["확인한 모델과 실제 실행 모델이 달라 실행하지 않았습니다.", "확인한 모델과 실제 실행 모델이 달라 실행하지 않은 것으로 보입니다."],
     action: "모델 선택을 다시 확인한 뒤 같은 요청을 보내 보세요." },
-  goal_changed: { lead: ["목표 상태가 방금 바뀌어 이 메시지로 목표를 이어가지 않았습니다.", "목표 상태가 방금 바뀌어 이 메시지로 목표를 이어가지 않은 것으로 보입니다."],
+  goal_changed: { lead: ["목표 상태가 방금 바뀌어 이 메시지로 목표를 계속하지 않았습니다.", "목표 상태가 방금 바뀌어 이 메시지로 목표를 계속하지 않은 것으로 보입니다."],
     action: "목표 칩에서 상태를 확인한 뒤 다시 보내 보세요." },
   store_busy: { lead: ["Agentlas 저장소가 다른 기록으로 잠겨 있어 이 턴을 끝까지 기록하지 못했습니다.", "Agentlas 저장소가 다른 기록으로 잠겨 있어 이 턴을 끝까지 기록하지 못한 것으로 보입니다."],
     action: "실행 기록을 확인한 뒤 같은 요청을 다시 보내 보세요." },
@@ -230,6 +235,8 @@ const KO: Record<RunFailureNoticeCause, Copy> = {
     action: "지금 실행이 끝난 뒤 다시 보내 주세요." },
   provider_connection: { lead: ["모델 공급자에 연결하지 못해(인증·네트워크) 답변을 완료하지 못했습니다.", "모델 공급자에 연결하지 못해(인증·네트워크) 답변을 완료하지 못한 것으로 보입니다."],
     action: "설정에서 해당 모델의 로그인을 확인한 뒤 다시 보내거나 다른 모델을 골라 보세요." },
+  session_reopen: { lead: ["이 대화의 이전 실행 세션을 다시 열지 못해 답변을 시작하지 못했습니다.", "이 대화의 이전 실행 세션을 다시 열지 못해 답변을 시작하지 못한 것으로 보입니다."],
+    action: "같은 요청을 다시 보내 주세요. 계속 실패하면 이 방의 모델을 다른 실행기로 바꿔 보내 주세요." },
   unsettled: { lead: ["응답이 완료 확인 없이 끝나 답변을 완료하지 못했습니다.", "응답이 완료 확인 없이 끝나 답변을 완료하지 못한 것으로 보입니다."],
     action: "같은 요청을 다시 보내거나 다른 모델을 선택해 보세요." },
 };
@@ -277,6 +284,8 @@ const EN: Record<RunFailureNoticeCause, Copy> = {
     action: "Send it again once that run has finished." },
   provider_connection: { lead: ["The model provider could not be reached (sign-in or network), so the reply could not be completed.", "The model provider appears not to have been reached (sign-in or network), so the reply could not be completed."],
     action: "Check that model's sign-in in Settings and send it again, or choose another model." },
+  session_reopen: { lead: ["This conversation's previous run session could not be reopened, so the reply was not started.", "This conversation's previous run session appears not to have reopened, so the reply was not started."],
+    action: "Send it again. If it keeps failing, switch this room to a model on another runtime and send it." },
   unsettled: { lead: ["The reply ended without a completion receipt, so it could not be completed.", "The reply appears to have ended without a completion receipt, so it could not be completed."],
     action: "Send it again, or choose another model." },
 };

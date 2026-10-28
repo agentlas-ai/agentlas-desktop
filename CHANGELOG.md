@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.3.105 — 2026-10-29
+
+- Owner messages: the owner's message is never refused because of the state of its chat (a Goal that is waiting, a paused or stopped chat), and a direction the turn never took is now sent instead of being dropped. One takes messages through the same intake.
+- Phone and Desktop connection: a Desktop that pauses no longer refuses the phone or cuts its own relay channel, a tunnel that arrives late is bound, a phone whose sign-in has expired signs in again by itself and the messages kept for it are delivered, and a revoked session is not kept. A phone state read that fails, hangs or is slow now leaves one log line naming its stage.
+- Goal and YouTube rooms: a Goal no longer stops because a team turn's chosen runtime differs from the confirmed one; a Codex conversation record that does not open in time gives way to a fresh session that carries the conversation on in the same turn; on the owner's own turn a teammate check that came back open is advice, not a gate.
+- Continuation: every automatic continuation starts the way its source ran, or tells the owner why; one conversation's one-off state no longer leaks into another conversation's memory and a confirmation card that waits for the owner holds its Goal; owner-facing lines say "계속" instead of "이어가기".
+- Teams: a chat bound to an installed team keeps its team orchestrator instead of the Work main AI taking its routing.
+- Responsiveness: the AGI monitor, which runs every minute, no longer scans a whole big room on the main process (a room that took 5.5 seconds now takes 25 milliseconds), it says that it is alive, retries a wake that a busy store refused, is restarted by Main when its beat stops, and reads a lost runtime session from typed codes; dreaming's duplicate pass groups entries once instead of comparing every pair (10.5 seconds for 20,000 entries became 22 milliseconds).
+- Science: a Science tool call is recovered by the common Work journal, classified by its server's own declaration.
+
+This release binds Agentlas OS v1.2.69 at 2b4e27b78d9a1e808142f1e6e510ab7023c7b44d; public runtime asset `hephaestus-runtime-v1.2.69.tar.gz` is pinned at SHA-256 `0bb8ac3eac111fd26bc3a20a7b1657741399b9f87ed8b8f1c87f2402dbd4c283`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.104 — 2026-10-28
 
 - Browser: a browser that a turn inherited, was asked for or got from a default plugin is no longer dropped quietly when the browser host is not ready. The turn is refused before the model is called, with the cause `agentlas-browser-host-unavailable`, and the owner is told once on Desktop and on the phone (sign in, it retries on its own, or send a message to continue). A refused turn no longer erases the browser from the Goal's tool choice, so a Goal turn never runs without the browser it needs.

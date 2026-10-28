@@ -564,7 +564,11 @@ export class AgentlasMobileBridgeServer {
             ? "[mobile-bridge] upgrade refused: authentication could not be decided (authenticate threw); no refusal reason is sent"
             : "[mobile-bridge] upgrade refused: no reason recorded (authentication path is missing a refusal reason)",
       );
-      rejectUpgrade(socket, 401, "unauthorized", refusal);
+      // "Could not decide right now" is not "unauthorized": an account check that did not answer (or an authentication that
+      // threw) is answered 503, which every phone retries with backoff. A 401 latches an older phone on the direct route
+      // until the owner taps retry (mobile WS permanent-failure latch), for an outage that fixes itself.
+      const undecided = authenticationThrew || refusal === "account_authority_unreachable";
+      rejectUpgrade(socket, undecided ? 503 : 401, undecided ? "authentication unavailable" : "unauthorized", refusal);
       return;
     }
     if (!identity.devBootstrap) {
@@ -1633,14 +1637,22 @@ export class AgentlasMobileBridgeServer {
     });
   }
 
+  private lastLivenessAt = Date.now();
+
   private checkLiveness(): void {
+    // A round that runs late (the main thread was blocked, measured 10-77 s on 2026-10-28) may run before the pongs that
+    // arrived meanwhile are read: every healthy phone would read as dead and be cut. A late round judges nobody; it pings
+    // again and the next on-time round decides.
+    const at = Date.now();
+    const late = at - this.lastLivenessAt > this.pingIntervalMs * 1.5;
+    this.lastLivenessAt = at;
     for (const state of this.clients) {
       if (state.revoked) {
         state.socket.terminate();
         this.dropClient(state);
         continue;
       }
-      if (!state.alive) {
+      if (!state.alive && !late) {
         state.socket.terminate();
         this.dropClient(state);
         continue;

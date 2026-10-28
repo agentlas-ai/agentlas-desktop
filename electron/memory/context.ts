@@ -32,7 +32,8 @@ import {
   readActivatedProjectMemoryText,
 } from "./safe-project-read";
 import { autoLocalEmbedding, localEmbeddingTokens, rankHybridLocal } from "./local-embedding";
-import { listMemoryEpisodesForContext } from "./tickets";
+import { listMemoryEpisodesForContext, memoryTicketTurns } from "./tickets";
+import { recallableEpisodes } from "./episode-lifetime";
 import { nativeRecallFor } from "./native-text";
 import { filterSupersededProjectSoul, memoryBlockKey } from "./graph";
 import { filterRevokedProjectSoul } from "./revocations";
@@ -559,9 +560,17 @@ function timelineSection(
   taskPrompt?: string,
   owner?: { agentId?: string | null; chatId?: string | null },
 ): string | null {
-  const episodes = listMemoryEpisodesForContext(projectId ?? null, 120, projectPath)
+  const scoped = listMemoryEpisodesForContext(projectId ?? null, 120, projectPath)
     .filter((episode) => episode.projectId || episode.projectPathHash
       || (Boolean(owner?.chatId) && episode.chatId === owner?.chatId && episode.agentId === (owner?.agentId ?? null)));
+  // Another conversation's turn enters only with its project-lifetime content: the host's receipt of a turn's end, a turn
+  // that left a card waiting for the owner, or a record naming that conversation's card stays in its conversation
+  // (episode-lifetime.ts).
+  const episodes = recallableEpisodes(scoped, owner?.chatId ?? null, (foreign) => ({
+    ticketTurns: memoryTicketTurns(foreign.map((episode) => episode.ticketId)),
+    ui: (require("../harness/ui-instances") as typeof import("../harness/ui-instances"))
+      .conversationUiFacts(foreign.map((episode) => episode.chatId!)),
+  }));
   if (episodes.length === 0) return null;
   const query = String(taskPrompt ?? "").trim();
   const episodeNatives = query ? nativeRecallFor("memory_episode", episodes.map((episode) => episode.id)) : new Map();

@@ -304,6 +304,7 @@ import {
 } from "./sanitize";
 import { MobileScienceChat } from "./science-chat";
 import { inferOwnerLocale, isMachineAgentLabel, ownerActivityText, ownerAgentLabelOrNull } from "../../shared/owner-visible-activity-text";
+import { withMobileRequestTiming } from "./request-timing";
 import type {
   MobileBridgeAuthority,
   MobileBridgeAuthorityEvent,
@@ -591,6 +592,12 @@ function terminalRefusal(
   message: string,
 ): MobileBridgeTerminalRefusalDto {
   return { schemaVersion: 1, status: "refused", code, message };
+}
+
+/** The owner intake key of a phone message: its request idempotency key (hashed to the steer id alphabet), else a fresh id. */
+function mobileOwnerIntakeId(idempotencyKey: string | undefined, fallback: string): string {
+  return typeof idempotencyKey === "string" && idempotencyKey
+    ? `mobile-${createHash("sha256").update(idempotencyKey).digest("hex").slice(0, 40)}` : `mobile-${fallback}`;
 }
 
 function terminalWriteRefusal(
@@ -3046,9 +3053,14 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
       }
       case "one.supervisor.snapshot": {
         noParams(request);
+        // Diagnostics only: a failed, hung or slow read leaves one line naming its stage (request-timing.ts).
+        return withMobileRequestTiming("one.supervisor.snapshot", async (stage) => {
+        stage("supervisor.snapshot");
         const snapshot = await oneSupervisor().snapshot();
+        stage("inline-ui");
         const inline = await mergeMobileInlineUiTranscript(snapshot.conversationChatId, snapshot.messages,
           await listUiInstances(snapshot.conversationChatId));
+        stage("projection");
         // The model Hope's next turn runs: the conversation's chip (room-chip-runtime.ts), else the
         // orchestrator default read from the same ordered role configuration as runtime detection, without
         // launching probes in a frequently polled snapshot. Not a claim about an old/current run's fallback.
@@ -3067,6 +3079,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
           delegations:(snapshot.delegations ?? []).map(item=>({...item,title:boundedRedactedText(item.title,240)})),
           ...(snapshot.legacyHistory?{legacyHistory:{...snapshot.legacyHistory,linked:snapshot.legacyHistory.linked.map(source=>({...source,title:boundedRedactedText(source.title,1_000)}))}}:{}),
         },request.method);
+        });
       }
       case "one.supervisor.send": {
         const params=guardedParams(request,ONE_SUPERVISOR_PARAM_KEYS["one.supervisor.send"]);
@@ -3992,7 +4005,19 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
           : null;
         let result;
         try {
-          result = invocationService.start(effectiveInvocation, workspaceBinding, { source: "mobile" });
+          // A question card's answer is bound to its exact question and starts as before. Any other owner message goes
+          // through the owner intake: into the running turn, now, or right after the chat is free — never refused for
+          // the state of the room (invocation/owner-intake.ts).
+          if (decisionAnswer) {
+            result = invocationService.start(effectiveInvocation, workspaceBinding, { source: "mobile" });
+          } else {
+            const intake = invocationService.intakeOwnerMessage(effectiveInvocation, {
+              intakeId: mobileOwnerIntakeId(request.idempotencyKey, effectiveInvocation.runId!),
+              workspaceBinding, executionContext: { source: "mobile" } });
+            result = intake.kind === "started" ? { runId: intake.runId }
+              : intake.kind === "queued" ? { ...intake.steer, runId: intake.plannedRunId }
+                : { ...intake.steer, runId: intake.steer.runId ?? intake.steer.activeRunId ?? effectiveInvocation.runId! };
+          }
         } catch (error) {
           rollbackQuestionClaim?.();
           throw error;
@@ -4050,7 +4075,16 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
           : null;
         let result;
         try {
-          result = invocationService.steer(effectiveInvocation, targetRunId, workspaceBinding, { source: "mobile" });
+          if (decisionAnswer) {
+            result = invocationService.steer(effectiveInvocation, targetRunId, workspaceBinding, { source: "mobile" });
+          } else {
+            const intake = invocationService.intakeOwnerMessage(effectiveInvocation, {
+              intakeId: mobileOwnerIntakeId(request.idempotencyKey, randomUUID()),
+              workspaceBinding, executionContext: { source: "mobile" } });
+            result = intake.kind === "started"
+              ? { accepted: true as const, chatId: invocation.chatId, queued: false, interruptsCurrent: false, runId: intake.runId }
+              : intake.steer;
+          }
         } catch (error) {
           rollbackQuestionClaim?.();
           throw error;

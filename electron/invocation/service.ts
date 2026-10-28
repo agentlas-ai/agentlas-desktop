@@ -32,7 +32,7 @@ import { withAdapterEffectContext, mainToolStartRequiresDurability } from "./ada
 import { RunEventDeliveryJournal } from "./event-delivery";
 import { replayHostedElsewhere } from "./native-gui-events";
 import { SemanticRunStepProjector } from "../one/semantic-run-step";
-import { MainWorkRecoveryContext } from "./main-work-recovery";
+import { MainWorkRecoveryContext, mainWorkRecoveryApplies } from "./main-work-recovery";
 import { parseRunEventReplayInput, type RunEventReplay } from "../../shared/run-event-delivery";
 import { withInvocationAccounting } from "../long-run/accounting-context";
 import { sameCauseWakeHold, SAME_CAUSE_WAKE_REASON } from "../long-run/wake-arbiter";
@@ -128,6 +128,7 @@ import {
   type InvocationWorkspaceBinding,
 } from "./workspace-binding";
 import { pickLocale } from "../runtime/status-i18n";
+import { inferOwnerLocale } from "../../shared/owner-visible-activity-text";
 import { hostOwnerCardQuestions } from "../long-run/goal-owner-card";
 import { applyHostOwnerCardDecision, hostOwnerCardAnswer, recordHostOwnerCardPosted } from "../long-run/goal-owner-card-decision";
 import { reportOwnerAsk } from "../owner-ask-alerts";
@@ -232,6 +233,7 @@ import {
 import { getOneProfile } from "../store/one-profile";
 import { personalSupervisorConversationInDb } from "../one/supervisor-store";
 import { CARRIED_FOLLOWUP_STEER_PREFIX, carryUndeliveredOwnerFollowups as carryOwnerFollowupsToNextTurn } from "./carried-owner-followups";
+import { OWNER_INTAKE_NOTICE_AFTER_MS, OWNER_INTAKE_STEER_PREFIX, ownerIntakeReceivedNotice, ownerIntakeWaits, ownerMessageSurface } from "./owner-intake";
 import { runTurnMayHaveBeenRead } from "./turn-placement";
 import { personalSupervisorGuidance } from "../../shared/one-supervisor-context";
 import { tryRecordOneDomainEvent } from "../one/domain-events";
@@ -1277,6 +1279,8 @@ export function invocationEventRequestsDecision(event: McpInvocationEvent): bool
     event.userDecisionRequest?.schemaVersion === "agentlas.user-decision-request.v1"
     && event.userDecisionRequest.questions.length > 0
   ) return true;
+  // A card the turn presented still waits for the owner's press (typed, from the host's card store): the owner's move.
+  if (event.ownerWait?.schemaVersion === "agentlas.owner-wait.v1" && event.ownerWait.instanceIds.length > 0) return true;
   // Display hygiene removes ask fences. Re-parse the Main-only durable body so
   // malformed, incomplete, and zero/one-option templates never become waits.
   const body = event.durableTextForVerification ?? event.text;
@@ -3311,12 +3315,10 @@ export class InvocationService {
     // Exactly the shapes those two channels start with (mobile-bridge/authority.ts, telegram/connect.ts): the binding
     // plus that channel's own execution surface (and Telegram's surface text) and nothing else — no company work, graph
     // or recovery custody.
-    const remoteSurfaceOnly = (surface: "mobile" | "telegram") => !executionContext
-      || (executionContext.source === surface && Object.keys(executionContext)
-        .every((key) => key === "source" || (surface === "telegram" && key === "surfaceContext")));
-    const ownerRemoteTurn = req.promptOrigin !== "system" && req.agentAppMode !== true
-      && ((workspaceBinding?.source === "mobile-one" && remoteSurfaceOnly("mobile"))
-        || (workspaceBinding?.source === "telegram-one" && remoteSurfaceOnly("telegram")));
+    // Owner intake (owner-intake.ts): a phone message into a Work room ("mobile" binding) is the owner's too — it was refused
+    // goal_explicit_resume_required on a paused Goal while the One room's phone message ran.
+    const ownerSurface = ownerMessageSurface(req, workspaceBinding, executionContext);
+    const ownerRemoteTurn = ownerSurface === "mobile" || ownerSurface === "mobile-one" || ownerSurface === "telegram-one";
     if (boundGoal?.status === "paused" && !resumesPausedGoal && !ownerRemoteTurn) {
       throw new Error("goal_explicit_resume_required");
     }
@@ -3881,7 +3883,13 @@ export class InvocationService {
         || (runReq.promptOrigin === "system" && !ownerActionCause) || terminalKind === "invoke_cancelled"
         || record.steeringInterruptRequested || isOwnerGoalStopCause(abortReason)) return;
       try {
-        const locale = pickLocale(runReq);
+        // The notice is a reply bubble under the owner's own message, so it is written in the language that message was
+        // written in; the app language is the fallback (a host-started turn has no owner words). The phone and the
+        // desktop sent locale "en" for every turn of the Korean-speaking owner while the room spoke Korean (YouTube
+        // 2026-10-28: "올리라고" was answered "The run failed ..."). One shared rule with the phone's own reading of host
+        // text (shared/owner-visible-activity-text.ts inferOwnerLocale): a Hangul character, never a word list.
+        const locale = runReq.promptOrigin === "system" ? pickLocale(runReq)
+          : inferOwnerLocale(runReq.oneUserAuthoredPrompt ?? runReq.userPrompt, pickLocale(runReq));
         const hostCause = invocationHostStopCause(abortReason);
         const typedFailureText = hostCause || terminalKind === "invoke_interrupted" ? null : runFailureNoticeText({
           locale, errorCode, runtimeFailure: failure?.runtimeFailure, turnDelivery: failure?.turnDelivery,
@@ -4587,7 +4595,7 @@ export class InvocationService {
     }
     const lifetime = record.mainLifetime = new MainInvocationLifetime(mainAdmission, chat.id, runId);
     this.settlingRuns.set(runId, record);
-    const canonicalWorkRecovery = executionContext?.source === "science" || executionContext?.aliveScience ? undefined
+    const canonicalWorkRecovery = !mainWorkRecoveryApplies(executionContext) ? undefined
       : new MainWorkRecoveryContext(chat.id,runId,()=>{
         controller.signal.throwIfAborted();
         if(this.settlingRuns.get(runId)!==record)throw new Error("main_work_invocation_owner_ended");
@@ -5428,7 +5436,9 @@ export class InvocationService {
         if (amendmentGoalId && chat.kind === "user" && ["one", "work"].includes(chat.originSurface ?? "")
           && runReq.promptOrigin !== "system") {
           reviewOwnerDirectionForGoal({ runId, chatId: chat.id, goalId: amendmentGoalId, sourceMessageId,
-            notReviewed: !localUserTurn ? "not_local_user_turn" : ownerDirectionReviewSkip(runReq, runWorkspaceBinding, executionContext) });
+            // The owner's phone or Telegram message is the owner's direction for the room's Goal too (owner intake).
+            notReviewed: ownerRemoteTurn && !runReq.planMode ? null
+              : !localUserTurn ? "not_local_user_turn" : ownerDirectionReviewSkip(runReq, runWorkspaceBinding, executionContext) });
         }
         if (stoppedGoalReactivation) {
           let resumed: ReturnType<typeof getLongRun> = null;
@@ -7659,6 +7669,94 @@ export class InvocationService {
     return this.durableSteerReceipt(getDurableQueuedSteer(id) ?? row, intentId);
   }
 
+  /**
+   * Owner intake (owner-intake.ts): the one entry for an owner's message from a surface without the Desktop composer's own
+   * send queue (the phone; renderer-send-queue.ts is the composer's). It is never refused for the state of the chat:
+   *  - a turn of the chat is running here: the message becomes that turn's queued direction (steer);
+   *  - otherwise it starts now; a start refused only because the chat is not free yet (shared/transient-send-refusal.ts:
+   *    the previous turn settling or preparing, another process holding the chat, an app restart, a Stop draining) keeps the
+   *    message: its row is in the transcript at once, a received line follows when the wait is noticeable, and the durable
+   *    steer queue starts it the moment the chat is free, under the owner's own surface binding.
+   * A refusal that is not about the chat being busy (a request the host cannot run, a missing chat) is thrown as before.
+   * `intakeId` is the caller's idempotency key: the same key never queues the message twice.
+   */
+  intakeOwnerMessage(req: McpInvocationRequest, input: {
+    intakeId: string;
+    workspaceBinding?: InvocationWorkspaceBinding;
+    executionContext?: InvocationExecutionContext;
+  }): { kind: "started"; runId: string } | { kind: "steered"; steer: InvocationSteerResult }
+    | { kind: "queued"; plannedRunId: string; steer: InvocationSteerResult } {
+    const { workspaceBinding, executionContext } = input;
+    if (!ownerMessageSurface(req, workspaceBinding, executionContext)) throw new Error("owner_intake_not_owner_message");
+    if (typeof input.intakeId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/.test(input.intakeId)) {
+      throw new Error("owner_intake_invalid_id");
+    }
+    const id = `${OWNER_INTAKE_STEER_PREFIX}${input.intakeId}`;
+    const queuedReceipt = (row: DurableQueuedSteer) => {
+      const receipt = this.durableSteerReceipt(row);
+      return { kind: "queued" as const, plannedRunId: row.originalRunId,
+        steer: { ...receipt, activeRunId: receipt.activeRunId ?? row.originalRunId, position: receipt.position ?? 1 } };
+    };
+    const existing = getDurableQueuedSteer(id);
+    if (existing) {
+      if (existing.chatId !== req.chatId) throw new Error("invocation_steer_identity_conflict");
+      return queuedReceipt(existing);
+    }
+    const active = [...this.activeRuns.entries(), ...this.settlingRuns.entries(), ...this.browserLoginWaitingRuns.entries()]
+      .find(([, record]) => !record.background && record.chatId === req.chatId);
+    if (active) {
+      // A phone message into a run the Desktop started rides that run's binding, exactly like the phone's own direction.
+      const sameBinding = invocationWorkspaceBindingsEqual(active[1].workspaceBinding, workspaceBinding);
+      try {
+        return { kind: "steered", steer: this.steer(req, active[0], sameBinding ? workspaceBinding : active[1].workspaceBinding, executionContext) };
+      } catch (error) {
+        if (!ownerIntakeWaits(error)) throw error;
+        // A full queue is backpressure, not a refusal: the message waits below for the chat like any other.
+      }
+    }
+    const plannedRunId = req.runId ?? randomUUID();
+    const request: McpInvocationRequest = { ...req, runId: undefined };
+    const row = persistQueuedSteer({ id, chatId: req.chatId, originalRunId: plannedRunId, request,
+      ...(workspaceBinding ? { workspaceBinding: immutableWorkspaceBinding(workspaceBinding) } : {}),
+      ...(executionContext ? { executionContext } : {}) });
+    if (!beginQueuedSteerDrain(id, plannedRunId)) throw new Error("invocation_steer_claim_lost");
+    try {
+      const started = this.start({ ...request, runId: plannedRunId }, workspaceBinding, executionContext);
+      this.settleQueuedSteerDurably(id, "started");
+      return { kind: "started", runId: started.runId };
+    } catch (error) {
+      if (!ownerIntakeWaits(error) || !runnerRefusedBeforeDispatch(error)) {
+        this.settleQueuedSteerDurably(id, "failed", "drain-start-refused");
+        throw error;
+      }
+      this.keepOwnerIntakeMessage(row, request);
+      if (this.queueRefusedIdleSteer(req.chatId, row, plannedRunId, error) !== "scheduled") {
+        holdQueuedSteerForRecovery(id, "drained-run-start-uncertain");
+      }
+      console.info(`[owner-intake] message waits for its chat chat=${req.chatId} steer=${id} code=${refusalCode(error) ?? "none"}`);
+      return queuedReceipt(getDurableQueuedSteer(id) ?? row);
+    }
+  }
+
+  /** The waiting owner message is in the transcript now; a received line follows if it is still waiting a moment later. */
+  private keepOwnerIntakeMessage(row: DurableQueuedSteer, request: McpInvocationRequest): void {
+    try {
+      appendChatMessage(row.chatId, "user", ownerVisiblePrompt(request), request.images?.length ? { images: request.images } : undefined);
+    } catch (error) {
+      console.warn("[owner-intake] waiting message could not be shown yet; it still runs:", error instanceof Error ? error.message : String(error));
+      return;
+    }
+    const timer = setTimeout(() => {
+      try {
+        const current = getDurableQueuedSteer(row.id);
+        if (!current || current.status === "started" || current.status === "cancelled" || current.status === "failed") return;
+        appendChatMessage(row.chatId, "assistant", ownerIntakeReceivedNotice(pickLocale(request)),
+          { hostNotice: { purpose: "host-status", runId: row.originalRunId, status: "owner-received" } });
+      } catch { /* the message itself is saved and queued */ }
+    }, OWNER_INTAKE_NOTICE_AFTER_MS);
+    timer.unref?.();
+  }
+
   steer(
     req: McpInvocationRequest,
     expectedRunId?: string,
@@ -8242,7 +8340,10 @@ export class InvocationService {
     // No-dead-end sweep 2026-10-25: a start refused because the chat or its channel was not ready yet (the same codes the
     // owner's message queue retries) is retried too, with the message queue's backoff and deadline, instead of ending the
     // owner's direction "failed". A waiting Goal's refusal of a system relay keeps its own parking path below.
-    const transient = !storeBusy && typed !== "goal_waiting_system_start_refused" && isTransientSendRefusalCode(typed);
+    // The outward code counts too: invocation_cleanup_pending carries its holder (cleanup_other_admission_pending, ...) as the
+    // innermost code, and that refusal held the owner's message for recovery instead of waiting for the chat (owner intake).
+    const transient = !storeBusy && typed !== "goal_waiting_system_start_refused"
+      && (isTransientSendRefusalCode(typed) || ownerIntakeWaits(error));
     if (!storeBusy && !transient) return "not-retryable";
     if (phase === "start" && storeBusy && !runnerRefusedBeforeDispatch(error)) return "not-retryable";
     const prior = this.steerDrainBackoff.get(next.id);

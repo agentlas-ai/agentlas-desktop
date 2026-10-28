@@ -31,6 +31,7 @@ import { oneGraphToolTimeoutMs } from "../../shared/one-graph-tool-permission";
 import { readOnlyBrowserToolIsMutating } from "../../shared/read-only-browser-tools";
 import { mcpToolSchemaDigest } from "../mcp-tools/tool-schema";
 import { mcpToolSurfaceDefers, mcpToolSurfaceHides, mcpToolSurfaceListsFirst } from "../mcp-tools/hephaestus-tool-surface";
+import { hostToolDeclaredEffect } from "../mcp-tools/host-tool-servers";
 import { installLazyToolMenu, invalidateToolMenu, isDirectEntryTool, isToolMenuDeferred, isToolMenuTool, menuPathHint, resolveToolMenu } from "./tool-menu";
 import { CODE_MODE_TOOL, installMainCodeMode, runMainCodeMode } from "./code-mode";
 import { TOOL_RESULT_READ, foldRetainedToolResult, hasToolResultContext, installToolResultContext, projectToolResult, readToolResult, toolResultReadRequest } from "./tool-result-context";
@@ -205,6 +206,8 @@ export type ResolvedTool =
       deferred?: true;
       /** In its server's declared first list: listed directly on every runtime class, never behind the lazy menu. */
       firstListed?: true;
+      /** A host tool server's declared effect for this tool (host-tool-servers.ts), read by Main-work recovery only. */
+      hostEffect?: "read" | "effect";
     }
   | { kind: "builtin"; builtinName: string; brokerToolId: string };
 
@@ -388,6 +391,7 @@ export async function loadMainToolInventory(
         // Listed later, on demand: the lazy menu holds it (mainToolSurface), whatever the runtime class.
         ...(mcpToolSurfaceDefers(mcpConfigPath, key, tool.name) ? { deferred: true as const } : {}),
         ...(mcpToolSurfaceListsFirst(mcpConfigPath, key, tool.name) ? { firstListed: true as const } : {}),
+        ...((effect) => effect ? { hostEffect: effect } : {})(hostToolDeclaredEffect(mcpConfigPath, key, tool.name)),
       });
     }
   }
@@ -1006,7 +1010,7 @@ async function dispatchMainToolRawUnchecked(
     approval.assertCurrent?.();
   }
   const observational = !planMutation || (resolved.kind === "mcp" && !!approval.canonicalWorkRecovery && mainWorkEffectFreeRead({
-    catalogId: resolved.server.catalogId, toolName: resolved.serverToolName, args, bundledRelease,
+    catalogId: resolved.server.catalogId, toolName: resolved.serverToolName, args, bundledRelease, hostEffect: resolved.hostEffect ?? null,
   }));
   try {
     const admitted=approval.canonicalWorkRecovery?.admit({reference:workReference,methodId:brokerToolId,arguments:args,observational,live:true});

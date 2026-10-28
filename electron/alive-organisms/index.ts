@@ -247,7 +247,7 @@ const lightEdges = {
   noteFailure: (status: Parameters<typeof noteRuntimeFailure>[0], failure: Parameters<typeof noteRuntimeFailure>[1]) => { noteRuntimeFailure(status, failure); },
 };
 
-function mainHostDeps(fence: () => boolean, monitor: AgiGoalMonitor): AliveHostDeps {
+function mainHostDeps(fence: () => boolean): AliveHostDeps {
   return {
     ...sharedHostDeps(fence),
     playground: playgroundDeps,
@@ -259,6 +259,8 @@ function mainHostDeps(fence: () => boolean, monitor: AgiGoalMonitor): AliveHostD
         : typeof input.attachment.scope.goalId === "string" ? input.attachment.scope.goalId : null;
       if (!goalId) return { outcome: "failed", code: "agi.goal-unknown" };
       if (input.admissionCode) return { outcome: "failed", code: "agi.admission-closed" };
+      const monitor = agiMonitor;
+      if (!monitor) return { outcome: "failed", code: "agi.monitor-starting" };
       const { result } = monitor.reconcile(goalId, "alive-hook");
       const outcome = result?.outcome;
       return outcome === "acted" ? { outcome: "acted" } : outcome === "needs-human" ? { outcome: "needs-human", code: result?.code }
@@ -292,15 +294,51 @@ function agiLeaseHoldsChat(chatId: string): boolean {
   } catch { return false; }
 }
 
+let agiMonitorWatchdog: ReturnType<typeof setInterval> | null = null;
+let agiMonitorStartRetry: ReturnType<typeof setTimeout> | null = null;
+/** How often Main checks that its AGI monitor still beats, and how long it waits before trying a failed start again. */
+const AGI_MONITOR_WATCHDOG_MS = 5 * 60_000;
+const AGI_MONITOR_START_RETRY_MS = 30_000;
+
 /**
- * App ready, after DB migration and after the long-run coordinator opened admission. Idempotent.
- * Main always runs the AGI monitor (it owns Goal custody) and takes the organism host only when no background
- * service holds the Alive domain.
+ * The AGI monitor Main always runs. A start that throws (a store busy at schema setup) is tried again, and a watchdog restarts a
+ * monitor whose beat stopped (owner 2026-10-28: "AGI 는 뭐 하냐": the monitor must not be able to stay down unseen).
  */
-export function startAliveOrganisms(): AliveOrganismHost | null {
-  if (participant) return host;
+function ensureAgiMonitor(): AgiGoalMonitor | null {
+  if (agiMonitor) return agiMonitor;
+  try {
+    agiMonitor = createAgiMonitor();
+  } catch (error) {
+    console.warn("[agi-monitor] start failed; trying again in 30 s:", error);
+    if (!agiMonitorStartRetry) {
+      agiMonitorStartRetry = setTimeout(() => { agiMonitorStartRetry = null; if (participant) ensureAgiMonitor(); }, AGI_MONITOR_START_RETRY_MS);
+      agiMonitorStartRetry.unref?.();
+    }
+    return null;
+  }
+  const monitor = agiMonitor;
+  // P3: the typed executor behind the deterministic handler (one attempt per exact blocked state).
+  agiHandler = createAgiHandler();
+  monitor.setHandler(agiHandler);
+  monitor.start();
+  if (!agiMonitorWatchdog) {
+    agiMonitorWatchdog = setInterval(() => {
+      const current = agiMonitor;
+      if (!current || !participant) return;
+      const live = current.liveness();
+      if (live.alive) return;
+      console.warn(`[agi-monitor] beat stopped (running=${live.running} lastTick=${live.lastTickAtMs}); restarting`);
+      try { current.stop(); current.start(); } catch (error) { console.warn("[agi-monitor] restart failed:", error); }
+    }, AGI_MONITOR_WATCHDOG_MS);
+    agiMonitorWatchdog.unref?.();
+  }
+  return monitor;
+}
+let agiHandler: ReturnType<typeof createAgiHandler> | null = null;
+
+function createAgiMonitor(): AgiGoalMonitor {
   // D3 (owner 2026-09-28): every One/Work goal is monitored, with or without an AGI life. No model calls.
-  agiMonitor = new AgiGoalMonitor({
+  return new AgiGoalMonitor({
     db: getDb(),
     now: Date.now,
     listGoalIds: () => listAgiMonitoredGoalIds(getDb()),
@@ -322,13 +360,18 @@ export function startAliveOrganisms(): AliveOrganismHost | null {
       if (run) emitDesktopStoreChange({ entity: "long-run", id: run.id });
     },
   });
-  const monitor = agiMonitor;
-  // P3: the typed executor behind the deterministic handler (one attempt per exact blocked state).
-  const agiHandler = createAgiHandler();
-  monitor.setHandler(agiHandler);
+}
+
+/**
+ * App ready, after DB migration and after the long-run coordinator opened admission. Idempotent.
+ * Main always runs the AGI monitor (it owns Goal custody) and takes the organism host only when no background
+ * service holds the Alive domain.
+ */
+export function startAliveOrganisms(): AliveOrganismHost | null {
+  if (participant) return host;
   const seat = createAliveDomainParticipant({
     kind: "main", db: getDb(),
-    createHost: (_lease, fence) => hostHandle(new AliveOrganismHost(mainHostDeps(fence, monitor))),
+    createHost: (_lease, fence) => hostHandle(new AliveOrganismHost(mainHostDeps(fence))),
     // Without a channel to the service the owner's AGI switches would have nowhere to go: keep the domain here.
     canHandOver: () => Boolean(configuredNativeGuiChannel()),
     log: (line) => console.info(line),
@@ -337,11 +380,11 @@ export function startAliveOrganisms(): AliveOrganismHost | null {
   });
   participant = seat;
   registerAppRuntimeParticipant("alive-organisms", { closeAdmission: () => seat.stop(), interrupt: () => {
-    seat.stop(); monitor.stop();
-    return agiHandler.settled();
+    seat.stop(); stopAgiMonitor();
+    return agiHandler ? agiHandler.settled() : undefined;
   }, isSettled: () => true });
   seat.start();
-  monitor.start();
+  ensureAgiMonitor();
   // D5 offline queue: only reports the owner pressed Send on are retried (same clientReportId, backoff).
   if (!agiBugReportTimer) {
     const flush = () => { void agiBugReportSender().flush().catch((error) => console.warn("[agi-bug-report] flush failed:", error)); };
@@ -353,8 +396,16 @@ export function startAliveOrganisms(): AliveOrganismHost | null {
   return host;
 }
 
+function stopAgiMonitor(): void {
+  agiMonitor?.stop();
+  if (agiMonitorWatchdog) clearInterval(agiMonitorWatchdog);
+  agiMonitorWatchdog = null;
+  if (agiMonitorStartRetry) clearTimeout(agiMonitorStartRetry);
+  agiMonitorStartRetry = null;
+}
+
 export function stopAliveOrganisms(): void {
-  participant?.stop(); agiMonitor?.stop();
+  participant?.stop(); stopAgiMonitor();
   if (agiBugReportTimer) clearInterval(agiBugReportTimer);
   agiBugReportTimer = null;
   if (agiBugReportFirstFlush) clearTimeout(agiBugReportFirstFlush);
