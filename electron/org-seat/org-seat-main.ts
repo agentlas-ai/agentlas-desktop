@@ -1,7 +1,7 @@
 import { fetchWithHubSession, getSessionCookieHeader, onAuthSessionOwnershipChanged, onAuthSessionRestored, webBaseUrl } from "../auth";
 import { userDataDir } from "../runtime-paths";
 import { deleteApiKey, readApiKey, saveApiKey } from "../secrets/vault";
-import { fileStateStore, ORG_SYNC_INTERVAL_MS, revokeOrgSeatKeys, runOrgSeatSync, type OrgSeatDeps } from "./org-seat-sync";
+import { fileStateStore, ORG_SYNC_INTERVAL_MS, orgSeatStatusOf, revokeOrgSeatKeys, runOrgSeatSync, type OrgSeatDeps, type OrgSeatStatus } from "./org-seat-sync";
 
 function realDeps(): OrgSeatDeps {
   return {
@@ -38,4 +38,9 @@ export function startOrgSeatSync(): () => void {
   const timer = setInterval(() => void sync(), ORG_SYNC_INTERVAL_MS); timer.unref?.();
   const first = setTimeout(() => void sync(), 15_000); first.unref?.();
   return () => { clearInterval(timer); clearTimeout(first); stopRestored(); stopOwnership(); };
+}
+
+/** The account menu's team line: read from the local state file, never the network. */
+export async function orgSeatStatus(): Promise<OrgSeatStatus> {
+  return orgSeatStatusOf(await fileStateStore(userDataDir()).loadState());
 }

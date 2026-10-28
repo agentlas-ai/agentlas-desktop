@@ -969,6 +969,7 @@ export const APP_CONTROL_ARGUMENT_SCHEMAS: Readonly<Record<string, Record<string
 "ontology.provision":{"type":"object","properties":{"projectId":{"type":"string"}},"required":["projectId"],"additionalProperties":false},
 "ontology.sync":{"type":"object","properties":{"projectId":{"type":"string"}},"required":["projectId"],"additionalProperties":false},
 "openCrab.readiness":{"type":"object","properties":{},"additionalProperties":false},
+"orgSeat.status":{"type":"object","properties":{},"additionalProperties":false},
 "pluginBuilder.discard":{"type":"object","properties":{"input":{"type":"object","properties":{"sessionId":{"type":"string"}},"required":["sessionId"],"additionalProperties":false}},"required":["input"],"additionalProperties":false},
 "pluginBuilder.draft":{"type":"object","properties":{"input":{"type":"object","properties":{"sessionId":{"type":"string"},
 "answers":{"type":"object","properties":{"slug":{"type":"string"},"name":{"type":"string"},"description":{"type":"string"},"category":{"enum":["communication","custom","data","design","dev","productivity","web"]},"workflows":{"type":"array","items":{"type":"object","properties":{"name":{"type":"string"},"description":{"type":"string"},"steps":{"description":"string[]"},"outputs":{"description":"string[]"},"verification":{"description":"string[]"}},"required":["name","description","steps","outputs","verification"],"additionalProperties":false}},"requiresTools":{"type":"array","items":{"type":"string"}},

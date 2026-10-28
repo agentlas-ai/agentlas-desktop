@@ -371,6 +371,9 @@ const api: AgentlasIpc = {
       return () => ipcRenderer.removeListener("auth:sessionChanged", listener);
     },
   },
+  orgSeat: {
+    status: () => ipcRenderer.invoke("orgSeat:status"),
+  },
   usage: {
     snapshot: (opts?: { force?: boolean }) => ipcRenderer.invoke("usage:snapshot", opts),
     setSubscriptionCreditUse: (enabled: boolean) => ipcRenderer.invoke("usage:setSubscriptionCreditUse", enabled),

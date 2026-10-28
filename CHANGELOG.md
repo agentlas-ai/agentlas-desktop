@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.3.102 — 2026-10-28
+
+- Team seats: the account menu shows your team seat (team name, number of team AI keys, whether Hub sharing is turned off) with a button that opens the team console on the web.
+- Business: the old company-server Business screens and the old account-menu entry now point to the team console on the web instead of the retired in-app screens.
+
+This release binds Agentlas OS v1.2.69 at 2b4e27b78d9a1e808142f1e6e510ab7023c7b44d; public runtime asset `hephaestus-runtime-v1.2.69.tar.gz` is pinned at SHA-256 `0bb8ac3eac111fd26bc3a20a7b1657741399b9f87ed8b8f1c87f2402dbd4c283`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.101 — 2026-10-28
 
 - Business teams: a person on an active team seat receives the team's AI keys in the system keychain when signing in or restoring a session and again every ten minutes. Removing the seat, signing out or switching accounts deletes only the keys this feature installed; keys you saved yourself are never overwritten or removed. Offline, the keys stay for at most 24 hours after the last successful check.

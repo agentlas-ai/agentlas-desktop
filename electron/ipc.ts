@@ -636,6 +636,7 @@ import {
 import { forgetOneDurableMemoryEntry, getOneMemoryMap, listOneDurableMemoryEntries } from "./one/memory-map";
 import { registerDesktopMemoryInspectorIpc } from "./one/memory-inspector";
 import { onAuthSessionOwnershipChanged } from "./auth";
+import { orgSeatStatus } from "./org-seat/org-seat-main";
 import {
   acceptOneSuggestionForReviewFromUser,
   dismissOneSuggestion,
@@ -2953,6 +2954,7 @@ export function registerIpcHandlers(): { businessShipping: ReturnType<typeof reg
 
   // ── auth (agentlas.cloud 구글 로그인) ───────────────────
   registerAppControlDomainIpc(ipcMain, "auth:getSession", () => getAuthSession());
+  registerAppControlDomainIpc(ipcMain, "orgSeat:status", () => orgSeatStatus());
   ipcMain.handle("auth:signInWithGoogle", async (e) => {
     const win = BrowserWindow.fromWebContents(e.sender);
     const session = await signInWithGoogle(win);

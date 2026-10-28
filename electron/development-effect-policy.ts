@@ -140,7 +140,7 @@ export function developmentRendererRequestAllowed(rawUrl: string, devStartUrl?: 
 }
 
 const DEVELOPMENT_LOCAL_IPC_CHANNELS = new Set([
-  "auth:getSession", "app:getLocale", "menu:setLocale", "confirm:listPendingAskUser",
+  "auth:getSession", "orgSeat:status", "app:getLocale", "menu:setLocale", "confirm:listPendingAskUser",
   "surfaces:get", "workspace:get",
   "oneSupervisor:snapshot", "oneSupervisor:journal", "oneSupervisor:receipt", "oneSupervisor:supervisedRooms",
   "oneSupervisor:budgets", "oneContext:snapshot", "oneContext:revoke",

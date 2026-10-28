@@ -7457,6 +7457,10 @@ export interface AgentlasIpc {
     /** Main-authoritative TTL/server invalidation notification. */
     onSessionChanged?: (callback: (session: AuthSession) => void) => () => void;
   };
+  /** Team seat (Agentlas Business): which team this Desktop is on, from the last sync. Display only; no key values. */
+  orgSeat?: {
+    status: () => Promise<{ onTeam: boolean; orgName: string | null; hubBlocked: boolean; teamKeyProviders: string[]; lastVerifiedAt: number }>;
+  };
   /** LLM 엔진 사용량 — 프로바이더 OAuth usage 엔드포인트(Claude/Codex/Gemini)에서
    *  5시간·주간(7일)·모델별·월 크레딧 조회. main에서 60초 캐시; force로 강제 갱신. */
   usage: {

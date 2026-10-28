@@ -30,6 +30,8 @@ export type OrgSeatState = {
   managed: Partial<Record<RuntimeBackend, string>>;
   lastVerifiedAt: number;
   hubBlocked: boolean;
+  /** Display only (account menu). Older state files have none. */
+  orgName?: string | null;
 };
 export const EMPTY_STATE: Readonly<OrgSeatState> = Object.freeze({ schema: 1, orgId: null, managed: {}, lastVerifiedAt: 0, hubBlocked: false });
 
@@ -51,7 +53,7 @@ export function fingerprint(value: string): string {
 }
 
 type TeamKey = { backend: RuntimeBackend; value: string };
-function parseActive(body: unknown): { orgId: string; hubBlocked: boolean; keys: TeamKey[] } | null {
+function parseActive(body: unknown): { orgId: string; orgName: string | null; hubBlocked: boolean; keys: TeamKey[] } | null {
   const o = body as Record<string, any> | null;
   if (!o || typeof o !== "object" || o.schema !== ORG_SYNC_SCHEMA || o.active !== true) return null;
   const orgId = o.org?.id;
@@ -63,7 +65,8 @@ function parseActive(body: unknown): { orgId: string; hubBlocked: boolean; keys:
     if (!backend || typeof value !== "string" || value.length < 8 || value.length > 512 || /\s/.test(value)) continue;
     if (!byBackend.has(backend)) byBackend.set(backend, value); // the first key of a provider wins
   }
-  return { orgId, hubBlocked: o.policy?.hubBlocked === true, keys: [...byBackend].map(([backend, value]) => ({ backend, value })) };
+  const orgName = typeof o.org?.name === "string" && o.org.name.trim() ? o.org.name.trim().slice(0, 80) : null;
+  return { orgId, orgName, hubBlocked: o.policy?.hubBlocked === true, keys: [...byBackend].map(([backend, value]) => ({ backend, value })) };
 }
 
 /** Delete every team key this module wrote, but never one the person has since replaced with their own. */
@@ -117,8 +120,17 @@ export async function runOrgSeatSync(deps: OrgSeatDeps): Promise<OrgSyncOutcome>
     if (current && fingerprint(current) === fp) await deps.deleteKey(backend);
     delete managed[backend]; changed = true;
   }
-  await deps.saveState({ schema: 1, orgId: active.orgId, managed, lastVerifiedAt: now, hubBlocked: active.hubBlocked });
+  await deps.saveState({ schema: 1, orgId: active.orgId, managed, lastVerifiedAt: now, hubBlocked: active.hubBlocked, orgName: active.orgName });
   return changed ? "updated" : "unchanged";
+}
+
+export type OrgSeatStatus = { onTeam: boolean; orgName: string | null; hubBlocked: boolean; teamKeyProviders: RuntimeBackend[]; lastVerifiedAt: number };
+
+/** What the account menu shows. Read from the state file only: no network, no key values. */
+export function orgSeatStatusOf(state: OrgSeatState): OrgSeatStatus {
+  const onTeam = !!state.orgId;
+  return { onTeam, orgName: onTeam ? state.orgName ?? null : null, hubBlocked: onTeam && state.hubBlocked,
+    teamKeyProviders: onTeam ? (Object.keys(state.managed) as RuntimeBackend[]) : [], lastVerifiedAt: state.lastVerifiedAt };
 }
 
 /** Sign-out or a lost session: the keys leave with the person. */
@@ -139,7 +151,8 @@ export function fileStateStore(userData: string): Pick<OrgSeatDeps, "loadState" 
         const managed: OrgSeatState["managed"] = {};
         for (const [k, v] of Object.entries(raw.managed)) if (typeof v === "string" && /^[a-f0-9]{16}$/.test(v) && Object.values(BACKEND_FOR_PROVIDER).includes(k as RuntimeBackend)) managed[k as RuntimeBackend] = v;
         return { schema: 1, orgId: typeof raw.orgId === "string" ? raw.orgId : null, managed,
-          lastVerifiedAt: Number.isFinite(raw.lastVerifiedAt) ? Number(raw.lastVerifiedAt) : 0, hubBlocked: raw.hubBlocked === true };
+          lastVerifiedAt: Number.isFinite(raw.lastVerifiedAt) ? Number(raw.lastVerifiedAt) : 0, hubBlocked: raw.hubBlocked === true,
+          orgName: typeof raw.orgName === "string" ? raw.orgName.slice(0, 80) : null };
       } catch { return { ...EMPTY_STATE, managed: {} }; }
     },
     async saveState(state) {

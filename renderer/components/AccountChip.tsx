@@ -21,6 +21,14 @@ export function AccountChip() {
   ));
   const [busy, setBusy] = useState(false);
   const [popoverOpen, setPopoverOpen] = useState(false);
+  // Team seat (Agentlas Business): read from the last sync's local state when the menu opens. Display only.
+  const [team, setTeam] = useState<{ onTeam: boolean; orgName: string | null; hubBlocked: boolean; teamKeyProviders: string[] } | null>(null);
+  useEffect(() => {
+    if (!popoverOpen || !session.signedIn) return;
+    let live = true;
+    void ipc()?.orgSeat?.status().then((next) => { if (live) setTeam(next); }).catch(() => undefined);
+    return () => { live = false; };
+  }, [popoverOpen, session.signedIn]);
   const rootRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
 
@@ -253,6 +261,26 @@ export function AccountChip() {
             >
               {session.email}
             </div>
+          )}
+          {team?.onTeam && (
+            <button
+              role="menuitem"
+              onClick={() => { setPopoverOpen(false); window.open("https://agentlas.cloud/business", "_blank", "noopener,noreferrer"); }}
+              title={locale === "ko" ? "웹에서 팀 관리 열기" : "Open team management on the web"}
+              style={{
+                display: "block", width: "100%", padding: "8px 10px", background: "transparent", border: "none",
+                borderRadius: 6, textAlign: "left", cursor: "pointer", color: "var(--ink)",
+              }}
+            >
+              <span style={{ display: "block", fontSize: 12, fontWeight: 600 }}>
+                {locale === "ko" ? "팀" : "Team"} · {team.orgName ?? (locale === "ko" ? "이름 없음" : "Unnamed")}
+              </span>
+              <span style={{ display: "block", fontSize: 11, color: "var(--muted-deep)" }}>
+                {locale === "ko"
+                  ? `팀 AI 키 ${team.teamKeyProviders.length}개${team.hubBlocked ? " · Hub 공유 꺼짐" : ""} · 팀 관리 열기`
+                  : `${team.teamKeyProviders.length} team AI key${team.teamKeyProviders.length === 1 ? "" : "s"}${team.hubBlocked ? " · Hub sharing off" : ""} · Manage team`}
+              </span>
+            </button>
           )}
           <BusinessEntryButton menu locale={locale} onOpen={() => setPopoverOpen(false)} />
           <button
