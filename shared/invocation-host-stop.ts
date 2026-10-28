@@ -57,3 +57,27 @@ export function invocationHostStopCopy(cause: InvocationHostStopCause, locale: "
     ? { short: "Goal 삭제로 멈춤", detail: "Goal 을 삭제해서 이 실행을 멈췄습니다. 실행 오류가 아닙니다. 다시 하려면 요청을 새로 보내 주세요." }
     : { short: "stopped when the Goal was deleted", detail: "This run stopped because the Goal was deleted. It is not a run error. Send the request again to start it fresh." };
 }
+
+/**
+ * The owner's own Stop: InvocationService.cancel aborts with STOPPED_BY_USER and the receipt ends `cancelled` with no host
+ * stop cause. A machine fact, not a failure. Before (Science, 2026-10-28), a Science turn the owner stopped read
+ * "실행 실패 · 실행이 중지되었습니다": the Science screen took the cancelled turn's code for a failure and quoted the runner's
+ * abort line after it. Every surface (Work, One, Science, the phone) now names the stop from this one fact and this one copy.
+ */
+export const OWNER_STOP_CAUSE = "cancelled_by_owner" as const;
+export type RunStopCause = typeof OWNER_STOP_CAUSE | InvocationHostStopCause;
+
+/** Why a run stopped without being a failure: the host's own marker first, then the owner's Stop. Null when it did not stop. */
+export function runStopCause(facts: { status?: unknown; hostStopCause?: unknown }): RunStopCause | null {
+  const host = invocationHostStopCause(facts.hostStopCause);
+  if (host) return host;
+  return facts.status === "cancelled" ? OWNER_STOP_CAUSE : null;
+}
+
+/** One line for any stop cause; the owner's Stop says it stopped, that it is not a run error, and what continues it. */
+export function runStopCopy(cause: RunStopCause, locale: "ko" | "en"): { short: string; detail: string } {
+  if (cause !== OWNER_STOP_CAUSE) return invocationHostStopCopy(cause, locale);
+  return locale === "ko"
+    ? { short: "중단됨", detail: "실행을 중단했습니다. 실행 오류가 아닙니다. 새 지시를 보내면 이어서 실행합니다." }
+    : { short: "Stopped", detail: "You stopped this run. It is not a run error. Send a new direction to continue." };
+}

@@ -1506,6 +1506,8 @@ const REPLAY_SAFE_PRE_DISPATCH_ERROR_CODES = new Set([
   "stormbreaker-core-harness-unavailable",
   // mcp/client.ts: this run's tool connections could not be prepared; the runner is never called (earlyResult).
   "mcp-runtime-config-unavailable",
+  // mcp/client.ts: the browser-bound run's signed-in Agentlas Browser host is not ready; refused before the runner (earlyResult).
+  "agentlas-browser-host-unavailable",
   // mcp/client.ts: the node's agent is archived; refused before the runner is called (earlyResult), also on the event as not-dispatched.
   "agent_archived",
 ]);

@@ -77,6 +77,7 @@ import {
 import { invocationHostStopCause, invocationHostStopCopy, isOwnerGoalStopCause, isNonFailureInvocationStop } from "../../shared/invocation-host-stop";
 import { isAppSideRunFailureCode } from "../../shared/run-failure-cause";
 import { runFailureNoticeText } from "../../shared/run-failure-notice";
+import { OWNER_ACTION_FAILURE_CODES } from "../../shared/run-failure-notice";
 import {
   appendLongRunEvent,
   bindCurrentGoalRevisionToLongRun,
@@ -132,6 +133,7 @@ import { applyHostOwnerCardDecision, hostOwnerCardAnswer, recordHostOwnerCardPos
 import { reportOwnerAsk } from "../owner-ask-alerts";
 import { emitDesktopStoreChange } from "../store/change-bus";
 import { permissionEscalationContinuationRequest } from "./permission-escalation-continuation";
+import { continuationRefusalNotice, type RefusedContinuation } from "../../shared/continuation-refusal-notice";
 import { effectiveInvocationPermission } from "../../shared/invocation-permission";
 import { cancelQueuedOnePreflightSteersForChat } from "../store/one-preflight-steers";
 import type { RunnerNativeTurnController, RunnerOwnerControlInbox, RunnerNativeControlState } from "../runtime/runner";
@@ -3872,8 +3874,11 @@ export class InvocationService {
     // (F51, 2026-10-21: a turn blocked by the provider's content safety filters read "The run failed …" + "App problem").
     const persistEmptyFailureNotice = (terminalKind: string, errorCode?: string | null, failure?: McpInvocationEvent["error"]): void => {
       const abortReason = controller.signal.reason instanceof Error ? controller.signal.reason.message : null;
+      // A host-started Goal continuation (promptOrigin "system") stays quiet, except for a cause only the owner can clear
+      // (shared/run-failure-notice.ts OWNER_ACTION_FAILURE_CODES): the waiting Goal says why and what to do (YouTube 2026-10-28).
+      const ownerActionCause = typeof errorCode === "string" && OWNER_ACTION_FAILURE_CODES.has(errorCode);
       if (record.background || emptyFailureNoticePersisted || durableAssistantReplyBound || record.partialText.trim() || runReq.agentAppMode || remoteWorkspaceBinding
-        || runReq.promptOrigin === "system" || terminalKind === "invoke_cancelled"
+        || (runReq.promptOrigin === "system" && !ownerActionCause) || terminalKind === "invoke_cancelled"
         || record.steeringInterruptRequested || isOwnerGoalStopCause(abortReason)) return;
       try {
         const locale = pickLocale(runReq);
@@ -3888,6 +3893,11 @@ export class InvocationService {
               : "The run was interrupted before it could finish a reply. Your request is saved; run history shows the interruption and resume status."
             : typedFailureText ?? (locale === "ko" ? "실행이 실패해 답변을 완료하지 못했습니다. 요청은 저장되어 있습니다. 실행 기록에서 실패 원인과 복구 상태를 확인할 수 있습니다."
               : "The run failed before it could finish a reply. Your request is saved; run history shows the failure and recovery status.");
+        // Each sweep retry of the waiting Goal tells it once: not again while the same notice is still the chat's latest reply
+        // (host-written continuation rows between them do not count; the owner's own turn is not "system" and is always told).
+        const latest = runReq.promptOrigin === "system"
+          ? listChatMessages(chat.id, 20).filter((entry) => entry.role === "assistant").at(-1) : undefined;
+        if (latest?.text === message) { emptyFailureNoticePersisted = true; return; }
         appendChatMessage(chat.id, "assistant", message,
         { hostNotice: { purpose: "host-status", runId, status: hostCause ? "goal-paused" : isAppSideRunFailureCode(errorCode, failure?.runtimeFailure) ? "app-failed" : "needs-owner" } });
         emptyFailureNoticePersisted = true;
@@ -4552,7 +4562,10 @@ export class InvocationService {
     const permissionEscalationEligible =
       !effectObservation
       && !runReq.agentAppMode
-      && !runWorkspaceBinding
+      // A Desktop turn and the owner's own remote surfaces (Mobile One/Work, Telegram One: interactive provenance, the
+      // rule a verified sign-in follows) earn the chip; their continuation keeps that surface (offerPermissionEscalation).
+      // A sealed workspace contract (company work, Science, an automation) never escalates outside itself.
+      && (!runWorkspaceBinding || (remoteWorkspaceBinding && canResumeInvocationBrowserLoginWait(executionContext)))
       && Boolean(runReq.chatId)
       && (runReq.permissions ?? "read") !== "full";
     if (!record.background && !runReq.agentAppMode && (explicitChatFiles.length > 0 || (chat.originSurface === "work" && !requestedOneMode && !runWorkspaceBinding))) {
@@ -5860,7 +5873,7 @@ export class InvocationService {
               : this.resumeParkedBrowserLoginWait(runId)).catch(error => {
               const code = refusalCode(error) ?? "browser_login_resume_refused";
               console.warn(`[browser-login-wait] continuation refused run=${runId} code=${code}`);
-              this.announceBrowserLoginResumeRefused(record, runId, code);
+              this.announceContinuationRefused(record, runId, "browser-login", code);
             });
           });
           return;
@@ -6662,29 +6675,28 @@ export class InvocationService {
         this.scheduleGoalContinuation(goal?.goalId, record, "browser-login-resume-refused");
       } catch (goalError) { console.warn(`[browser-login-wait] refused Goal not rescheduled run=${runId} code=${refusalCode(goalError) ?? "none"}`); }
       console.warn(`[browser-login-wait] resume refused run=${runId} code=${code}`);
-      this.announceBrowserLoginResumeRefused(record, runId, code);
+      this.announceContinuationRefused(record, runId, "browser-login", code);
     } finally {
       parked.handle.cancel();
     }
   }
 
   /**
-   * The parked turn told the owner "after login is verified, the remaining steps can continue". When that continuation
-   * is refused, the owner hears so, with the machine cause and the one step that always works (an owner message runs),
-   * on the same host-status seam the waiting line used — a desktop and a phone both read it. Before, the refusal was
-   * only a log line ("resume refused Error") and the room sat on the waiting line for good.
+   * A continuation the host promised (a verified sign-in, an approved full access) could not start: the owner hears so,
+   * with the machine cause and the one step that always works (an owner message runs), on the same host-status seam the
+   * waiting line used — a desktop and a phone both read it (wording: shared/continuation-refusal-notice.ts). Before, a
+   * refusal was only a log line ("resume refused Error", or nothing at all for an approved full access) and the room sat on
+   * its last line for good.
    */
-  private announceBrowserLoginResumeRefused(record: RunRecord, runId: string, code: string): void {
-    const message = pickLocale(record.request) === "ko"
-      ? `로그인은 확인됐지만 이 작업을 자동으로 이어가지 못했습니다 (원인: ${code}). 메시지를 보내면 이어서 진행합니다.`
-      : `Sign-in was verified, but this task could not continue on its own (cause: ${code}). Send a message to continue.`;
+  private announceContinuationRefused(record: RunRecord, runId: string, continuation: RefusedContinuation, code: string): void {
+    const notice = continuationRefusalNotice({ continuation, cause: code, locale: pickLocale(record.request) });
     try {
-      appendChatMessage(record.chatId, "assistant", message, { hostNotice: { purpose: "host-status", runId, status: "needs-owner" } });
-    } catch (error) { console.warn(`[browser-login-wait] refusal notice not stored run=${runId} code=${refusalCode(error) ?? "none"}`); }
+      appendChatMessage(record.chatId, "assistant", notice.message, { hostNotice: { purpose: "host-status", runId, status: "needs-owner" } });
+    } catch (error) { console.warn(`[continuation] refusal notice not stored run=${runId} kind=${continuation} code=${refusalCode(error) ?? "none"}`); }
     try {
       this.publishRunEvent(record, { runId, chatId: record.chatId, event: { kind: "notice",
-        notice: { code: "browser-login-resume-refused", level: "warning", message, details: JSON.stringify({ cause: code }) } } });
-    } catch (error) { console.warn(`[browser-login-wait] refusal notice not published run=${runId} code=${refusalCode(error) ?? "none"}`); }
+        notice: { code: notice.code, level: "warning", message: notice.message, details: JSON.stringify({ cause: notice.cause }) } } });
+    } catch (error) { console.warn(`[continuation] refusal notice not published run=${runId} kind=${continuation} code=${refusalCode(error) ?? "none"}`); }
   }
 
   resumeGoalWait(input: GoalWaitDispatch): { runId: string } {
@@ -6863,26 +6875,55 @@ export class InvocationService {
     // Approval can arrive before transport drainage. Resume only after the
     // exact originating invocation AND its verifier have released ownership.
     await input.record.completion;
+    const sourceRunId = input.record.request.runId ?? "";
+    // The owner approved: from here a continuation that does not start is told to the owner with its cause (2026-10-27
+    // 01:31Z and 05:02Z, YouTube room: two approvals ended in goal_waiting_system_start_refused and nothing was said).
+    // An owner Stop or Goal control after the approval is itself the owner's answer and stays quiet.
+    const refuse = (code: string) => {
+      console.warn(`[permission-escalation] continuation refused run=${sourceRunId} code=${code}`);
+      this.announceContinuationRefused(input.record, sourceRunId, "permission-escalation", code);
+    };
     if (input.signal.aborted || controlEpoch() !== originalControlEpoch) return;
     if (input.goalId) {
       const current = getLongRunByGoalId(input.goalId);
-      if (getChat(input.chatId)?.goalId !== input.goalId || !current
-        || ["paused", "pausing", "cancelling", "cancelled", "completed", "failed", "blocked"].includes(current.status)) return;
+      if (getChat(input.chatId)?.goalId !== input.goalId || !current) { refuse("permission_escalation_goal_changed"); return; }
+      if (["paused", "pausing", "cancelling", "cancelled", "completed"].includes(current.status)) return;
+      if (["failed", "blocked"].includes(current.status)) { refuse(`permission_escalation_goal_${current.status}`); return; }
     }
+    const resume = (): void => {
+      if (input.signal.aborted || controlEpoch() !== originalControlEpoch) return;
+      if (this.activeChatIds().includes(input.chatId)) throw Object.assign(new Error("permission_escalation_chat_busy"), { code: "permission_escalation_chat_busy" });
+      const successorRunId = randomUUID();
+      // The successor start every continuation uses (browser-login too): a rooted predecessor mints a fresh root; a rootless
+      // one (a phone or Telegram turn, a relay) continues rootless on its own surface, as it ran. successor() alone gave a
+      // rootless source no admission, and the continuation then ran without the source's surface.
+      const successorStart = input.record.mainLifetime
+        ? input.record.mainLifetime.successorStart(input.chatId, successorRunId) : { admission: undefined };
+      if (!successorStart) throw Object.assign(new Error("permission_escalation_continuation_scope_changed"), { code: "permission_escalation_continuation_scope_changed" });
+      // The same provenance rule as a verified sign-in: interactive surfaces (Desktop, Mobile One, Telegram One) carry
+      // their binding to the successor; an independent controller keeps the bare continuation it always had.
+      const carriesSurface = canResumeInvocationBrowserLoginWait(input.record.executionContext);
+      // The read-only turn rested its Goal for the owner's answer (goal_owner_answer_required); the approval is that
+      // answer, so the Goal runs again before its continuation starts, exactly as a restored sign-in resumes it. A Goal
+      // the owner paused (owner hold) is never woken here. Only a Goal turn's own Goal (no execution surface) moves.
+      if (input.goalId && !input.record.executionContext) {
+        const goal = getLongRunByGoalId(input.goalId);
+        if (goal && !longRunOwnerHold(goal.id) && ["waiting_user", "queued", "waiting_tool"].includes(goal.status)) {
+          transitionLongRun({ runId: goal.id, to: "running", actorKind: "host", reason: "permission_escalation_approved" });
+        }
+      }
+      this.start(permissionEscalationContinuationRequest({
+        runId: successorRunId,
+        chatId: input.chatId,
+        oneMode: input.oneMode,
+        locale: input.locale,
+      }), carriesSurface ? input.record.workspaceBinding : undefined, carriesSurface ? input.record.executionContext : undefined,
+      undefined, undefined, successorStart.admission);
+    };
     try {
-      await input.record.mainLifetime?.afterSettled(() => {
-        if (input.signal.aborted || controlEpoch() !== originalControlEpoch || this.activeChatIds().includes(input.chatId)) return;
-        const successorRunId = randomUUID();
-        this.start(permissionEscalationContinuationRequest({
-          runId: successorRunId,
-          chatId: input.chatId,
-          oneMode: input.oneMode,
-          locale: input.locale,
-        }), undefined, undefined, undefined, undefined,
-          input.record.mainLifetime?.successor(input.chatId, successorRunId));
-      });
-    } catch {
-      // 재개 시작 실패는 승격 기회를 잃을 뿐이다 — 다음 요청 때 칩이 다시 묻는다.
+      await (input.record.mainLifetime ? input.record.mainLifetime.afterSettled(resume) : resume());
+    } catch (error) {
+      refuse(refusalCode(error) ?? "permission_escalation_resume_refused");
     }
   }
 

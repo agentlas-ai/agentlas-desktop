@@ -12,6 +12,7 @@ import { formatRuntimeQuotaReset, quotaRetryAfterAt } from "../shared/runtime-qu
 import { queueGraphResultForOne } from "./one/graph-review";
 import { AUTOMATION_RUN_ORIGIN_KIND, AUTOMATION_RUN_ORIGIN_SCHEMA, automationRunOrigin, readSealedAutomationRunOrigin, type AutomationRunOrigin } from "./automation-run-origin";
 import { wakeOneForGraphResult } from "./one/host-alerts";
+import { continuationRefusalNotice } from "../shared/continuation-refusal-notice";
 
 /** Exact current-run host receipts only. Historical prose is not a reset clock. */
 function automationQuotaResetTimes(runId: string, automationId: string): string[] {
@@ -166,4 +167,32 @@ export function deliverAutomationResult(input: AutomationNotificationInput & { o
   // After commit: the review reads the committed notice. Another process hosting One picks it up on its tick.
   if (queuedForOne) queueMicrotask(wakeOneForGraphResult);
   return delivered;
+}
+
+/**
+ * A graph's verified login could not continue on its own (automation-scheduler subscribeGraphLoginWait). The run's waiting
+ * line told the owner it would continue once the login was restored; this tells them it did not, with the machine cause and
+ * Run now, in the run's own conversation when it has one (desktop and phone read the same automation report row). Once per
+ * run: a second refusal of the same run adds nothing. Returns the line written, or null when the run has no conversation
+ * (the caller still raises its OS notification).
+ */
+export function announceAutomationContinuationRefused(input: { automationId: string; runId: string; code: string }): string | null {
+  const automation = getAutomation(input.automationId);
+  const notice = continuationRefusalNotice({ continuation: "graph-login", cause: input.code, locale: currentUiLocale(),
+    automationName: automation?.name });
+  const sourceEventId = `automation-continuation-refused:${input.automationId}:${input.runId}`;
+  return getDb().transaction(() => {
+    const db = getDb();
+    if (db.prepare("SELECT 1 FROM run_events WHERE run_id = ? AND kind = 'automation_continuation_refused' LIMIT 1").get(input.runId)) return null;
+    const sealed = readSealedAutomationRunOrigin(db, input.runId);
+    const origin = sealed !== undefined ? sealed : automation ? automationRunOrigin(automation) : null;
+    const chatId = origin?.originChatId && getChat(origin.originChatId) ? origin.originChatId : null;
+    const message = chatId ? appendChatMessage(chatId, "system", automation ? `${automation.name}\n\n${notice.message}` : notice.message, {
+      hostNotice: { purpose: "automation-report", runId: input.runId, automationId: input.automationId },
+    }) : null;
+    recordRunEvent({ runId: input.runId, automationId: input.automationId, ...(chatId ? { chatId } : {}),
+      kind: "automation_continuation_refused", sourceEventId,
+      payload: { noticeCode: notice.code, cause: notice.cause, messageId: message?.id ?? null } });
+    return notice.message;
+  }).immediate();
 }

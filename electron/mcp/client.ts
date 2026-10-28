@@ -4459,7 +4459,10 @@ async function runMcpInvocationInContext(
       };
       const scopeChanged = err && typeof err === "object" && "code" in err
         && err.code === "mcp-goal-tool-scope-changed";
-      const code = scopeChanged ? "mcp-goal-tool-scope-changed" : "mcp-runtime-config-unavailable";
+      // A browser-bound run whose signed-in host is not ready has its own typed cause (shared/run-failure-notice.ts copy on
+      // desktop and phone; the blocked Goal sweep tries it again), not the generic tool-connection failure.
+      const code = scopeChanged ? "mcp-goal-tool-scope-changed"
+        : thrownCode === AGENTLAS_BROWSER_HOST_UNAVAILABLE ? AGENTLAS_BROWSER_HOST_UNAVAILABLE : "mcp-runtime-config-unavailable";
       console.error("[mcp]", { code, diagnostic });
       tryRecordRunEvent({ runId: req.runId!, chatId: chat.id, kind: "mcp_config_failure",
         payload: { schemaVersion: 1, code, stage: diagnostic.stage, reasonCode: diagnostic.code } });

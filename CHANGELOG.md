@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.3.104 — 2026-10-28
+
+- Browser: a browser that a turn inherited, was asked for or got from a default plugin is no longer dropped quietly when the browser host is not ready. The turn is refused before the model is called, with the cause `agentlas-browser-host-unavailable`, and the owner is told once on Desktop and on the phone (sign in, it retries on its own, or send a message to continue). A refused turn no longer erases the browser from the Goal's tool choice, so a Goal turn never runs without the browser it needs.
+- Continuation: every automatic continuation now starts the way its source ran, or tells the owner why. After a full-access approval the follow-up chip shows on the phone and in Telegram, and a continuation that used to be refused silently while a Goal waited now runs; sign-in continuation for graph triggers and Telegram replies follow the same rule.
+- Science: Science directions, Stop and questions now go through the common steer, cancel and question paths, and the owner's Stop reads "Stopped" instead of a failure.
+
+This release binds Agentlas OS v1.2.69 at 2b4e27b78d9a1e808142f1e6e510ab7023c7b44d; public runtime asset `hephaestus-runtime-v1.2.69.tar.gz` is pinned at SHA-256 `0bb8ac3eac111fd26bc3a20a7b1657741399b9f87ed8b8f1c87f2402dbd4c283`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.103 — 2026-10-28
 
 - Finance: one shared harness now runs Finance, replacing the Finance-only chat loop; research starts in the Finance Work project, Analyst drafts are saved through the common owner confirmation card, company facts gain a revenue fallback, a summary view and a report chart section, and a screen's button (for example Finance "create with AI") opens the plugin workflow its conversation's next turn carries.

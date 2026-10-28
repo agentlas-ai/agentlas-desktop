@@ -1274,8 +1274,8 @@ export async function autoSelectMcpTools(input: {
   }
 
   // ── A selected Browser binding is not an owner binding ─────────────────────────────────────
-  // An automatic decision lands on "browser" whenever the browser is among the selected ids: this turn's judge, an
-  // earlier choice retained in the Goal, or a plugin the agent asked for last turn. client.ts refuses a "browser" run
+  // An automatic decision lands on "browser" whenever the browser is among the selected ids: this turn's judge (or its
+  // local-relevance fallback), an earlier choice retained in the Goal, or a plugin the agent asked for last turn. client.ts refuses a "browser" run
   // whose authenticated host is not ready before any model call — right for the owner's own binding (an automation
   // or graph bound to the browser, an explicit catalog assignment, an @mention of the plugin), wrong for a selection:
   // a 0.6B resident judge sent 4/4 plain file/shell Work turns to agentlas-browser and every one was refused
@@ -1285,16 +1285,23 @@ export async function autoSelectMcpTools(input: {
   const browserOwnerBound = input.toolMode === "browser"
     || explicitlyAssignedIds.has("agentlas-browser")
     || pluginCandidates.some((plugin) => plugin.toolIds.includes("agentlas-browser") && mentionedPlugin(plugin));
-  if (automaticHostDecision && effectiveToolMode === "browser" && !browserOwnerBound) {
+  // Only this turn's fresh guess is withdrawn. A browser the active Goal has been working in (retained), that the agent
+  // asked for in this conversation, or that a room/project baseline carries is treated like the owner's binding: a
+  // browser-bound Goal step (a YouTube upload) must not run without the browser. It is refused before the model with a
+  // typed cause (agentlas-browser-host-unavailable, shared/run-failure-notice.ts), and the blocked Goal is tried again by
+  // the sweep; a message continues at once (2026-10-28, YouTube incident review).
+  const browserCarried = retainedIds.has("agentlas-browser")
+    || routedPlugins.some((plugin) => plugin.source !== "judge" && plugin.source !== "local-relevance" && plugin.toolIds.includes("agentlas-browser"));
+  if (automaticHostDecision && effectiveToolMode === "browser" && !browserOwnerBound && !browserCarried) {
     const browser = result.find((tool) => tool.id === "agentlas-browser");
     if (browser?.state !== "ready") {
       effectiveToolMode = "auto";
-      const judged = needs.needed.includes("agentlas-browser")
-        || routedPlugins.some((plugin) => plugin.source === "judge" && plugin.toolIds.includes("agentlas-browser"));
       hostBindingWithdrawn = { code: AGENTLAS_BROWSER_WITHDRAWN_CODE, host: "agentlas-browser",
-        state: browser?.state ?? "not-selected", selectedBy: judged ? "judge" : "carried" };
+        state: browser?.state ?? "not-selected", selectedBy: "judge" };
     }
   }
+  const carriedBrowserWaiting = browserCarried && effectiveToolMode === "browser"
+    && result.find((tool) => tool.id === "agentlas-browser")?.state !== "ready";
 
   // Hub candidates are the plugins the resident judge named — never a word-scored guess.
   // Undecided runs surface none and let the model resolve plugins live through
@@ -1369,6 +1376,9 @@ export async function autoSelectMcpTools(input: {
   if (goalScopeKey && conversationId && goalScopeStillCurrent()) {
     const selectedIds = [
       ...context.tools.filter((tool) => neededIds.has(tool.id) && tool.state === "ready").map((tool) => tool.id),
+      // A carried browser binding that is waiting for its signed-in host stays the Goal's choice: the refused turn must
+      // not erase it, or the sweep's next resume would run the browser step without the browser (YouTube review 2026-10-28).
+      ...(carriedBrowserWaiting ? ["agentlas-browser"] : []),
       ...routedPlugins.map((plugin) => pluginCandidateId(plugin.slug)),
     ];
     const finalGoalScopeKey = goalScopeKeyFor(expectedInstalledFingerprint);

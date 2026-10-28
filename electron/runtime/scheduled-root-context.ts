@@ -151,6 +151,35 @@ export function captureMainRootContinuation(): (<T>(action: () => T | Promise<T>
   };
 }
 
+/** What a Main-started execution hands on to its continuation, captured at its start (the counterpart of
+ * MainInvocationLifetime.successorStart for a caller that holds no lifetime, such as the automation scheduler). */
+export interface MainContinuation {
+  /** true: the successor admits a fresh root of its own; false: it starts rootless, as its predecessor ran. */
+  readonly rooted: boolean;
+  /** Runs the successor's start in a clean Main context; a rooted one only after the predecessor's root expired. */
+  run<T>(action: () => T | Promise<T>): Promise<T>;
+}
+
+/**
+ * A rooted execution (a schedule slot, a Run now, a desktop turn) hands on captureMainRootContinuation as before. One that
+ * Main started without a root (an event trigger, a chain or a One graph command delivered by the trigger manager) hands on
+ * the same rootless start it ran with. Asking for a root alone left every rootless graph's verified login waiting for good
+ * (the scheduler returned before resuming when no root continuation existed), the same defect
+ * MainInvocationLifetime.successorStart fixed for a Mobile or Telegram turn. undefined inside an adapter frame or an
+ * expired root: a nested tool call cannot hand anything on.
+ */
+export function captureMainContinuation(): MainContinuation | undefined {
+  if ((ancestry.getStore()?.length ?? 0) !== 0) return undefined;
+  const rooted = captureMainRootContinuation();
+  if (rooted) return { rooted: true, run: rooted };
+  if (roots.getStore()) return undefined;
+  return { rooted: false, run: async <T>(action: () => T | Promise<T>): Promise<T> => {
+    // An inherited root is dropped, never used; only a still-active adapter frame (a nested tool call) is refused.
+    if ((ancestry.getStore() ?? []).some(frame => frame.active)) throw new Error("main_wait_continuation_scope_changed");
+    return roots.run(undefined, () => ancestry.run([], action));
+  } };
+}
+
 /** Only the scheduler's native due callback enters a fresh independent root.
  * Re-entry cannot launder inherited/expired authority or an AGY ancestor. */
 export async function withMainScheduledRoot<T>(action: () => Promise<T>): Promise<T> {

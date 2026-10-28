@@ -43,7 +43,7 @@ import type { InvocationPlanEntry } from "@shared/invocation-plan";
 import styles from "./OneTurnWork.module.css";
 import { BoundImageArtifacts } from "../workspace/BoundImageArtifacts";
 import { toolFailureCopy } from "@shared/tool-failure";
-import { invocationHostStopCopy } from "@shared/invocation-host-stop";
+import { invocationHostStopCopy, OWNER_STOP_CAUSE, runStopCopy } from "@shared/invocation-host-stop";
 import { shellExecutionOutcome } from "@/lib/shell-execution-outcome";
 import { toolInvocationOriginLabel, type ToolInvocationOrigin } from "@shared/tool-invocation-origin";
 
@@ -523,7 +523,7 @@ function WorkerWorkCard({ group, active, locale, onInspectWorker }: {
   const stateLabel = status === "recovering" ? (ko ? "복구 재시도" : "Recovery retry")
     : status === "ended" ? (ko ? "이번 실행 종료" : "Run ended")
     : status === "failed" ? (ko ? "실행 실패" : "Run failed")
-    : status === "cancelled" ? (ko ? "중단됨" : "Stopped")
+    : status === "cancelled" ? runStopCopy(OWNER_STOP_CAUSE, ko ? "ko" : "en").short
     : recovery ? (ko ? "복구 재시도" : "Recovery retry")
     : status === "running" ? (ko ? "실행 중" : "Running") : (ko ? "활동 기록" : "Recorded activity");
   const stage = latest.kind === "notice" ? latest.message : latest.kind === "thought" ? latest.headline || cellVerb(latest, locale) : cellVerb(latest, locale);

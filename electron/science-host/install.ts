@@ -47,6 +47,7 @@ import { listScienceTypesetProfileCatalog } from "./typeset-profile-catalog";
 import { renderManuscriptPdf, resolveTectonic } from "./render-pdf";
 import type * as WorkbookIntake from "./workbook-intake-ipc";
 import { withHostInvocationAdmission } from "../invocation/host-admission";
+import { listOwnerDirections, SURFACE_OWNED_DIRECTION_PREFIXES, takeUndeliveredOwnerDirections } from "../invocation/carried-owner-followups";
 import { installScienceStoreSchemaRejectionReader } from "../invocation/science-schema-rejection";
 import { invocationService } from "../invocation/service";
 import { captureScienceInvocationBinding } from "../invocation/workspace-binding";
@@ -72,6 +73,7 @@ import { registerPreparedMcpConfig } from "../mcp-tools/prepared-transport";
 import { RUNTIME_BACKEND_SET } from "../../shared/runtime-backends";
 import { RUNTIME_KIND_SET } from "../../shared/runtime-kinds";
 import { productExtensionSignedPayload } from "../../shared/product-extension";
+import { runStopCause, runStopCopy } from "../../shared/invocation-host-stop";
 import type { InstalledMcpServer } from "../../shared/types";
 
 export type ScienceHostKind = "main" | "daemon";
@@ -114,6 +116,8 @@ interface ScienceMcpPreparedRegistration {
 }
 
 let installedHostKind: ScienceHostKind | null = null;
+/** Science's own owner directions in the common current-turn store (PLAN S3); other surfaces' rows are never Science's. */
+export const SCIENCE_DIRECTION_PREFIX = SURFACE_OWNED_DIRECTION_PREFIXES[0]!;
 
 /** Candidates for the bundled Science plugins, judged by a marker plugin inside (dist/electron/plugins is unrelated). */
 export function scienceHostPluginRootCandidates(dir: string, resources: string | null): string[] {
@@ -198,7 +202,7 @@ export function installScienceHostFor(input: ScienceHostInstallInput): ScienceHo
       const value = Reflect.get(target, key, receiver);
       if (typeof value !== "function") return value;
       return (...args: unknown[]) => {
-        if (key === "start" || key === "steer") fence.assertExecution();
+        if (key === "start" || key === "steer" || key === "steerCurrentTurn") fence.assertExecution();
         return Reflect.apply(value, target, args);
       };
     },
@@ -328,6 +332,38 @@ export function installScienceHostFor(input: ScienceHostInstallInput): ScienceHo
       // PLAN S2: this host takes Science as one server of its shared tool chain (science-host/tool-server.ts). A Science
       // build that knows the member mints that server and names no Science-only discovery tool in its prompts.
       ...{ commonToolServer: { version: 1 as const } },
+      // PLAN S3: a Science owner direction into a running turn is the common current-turn steer (InvocationService
+      // steerCurrentTurn: native mid-turn delivery or the run's next boundary, the same rows Work and One write), and what
+      // the run never took is handed back to Science at its turn's end instead of becoming a Work turn on the hidden chat.
+      // Stop is the common cancel already (SDK cancel -> invocationService.cancel). A Science build that knows the member
+      // writes no Science steering row; an older build keeps its own steering path.
+      ...{ commonSteering: {
+        version: 1 as const,
+        steer: (direction: { runtimeChatId: string; invocationRunId: string; intentId: string; text: string }) => {
+          fence.assertExecution();
+          if (typeof direction?.intentId !== "string" || !direction.intentId.startsWith(SCIENCE_DIRECTION_PREFIX)) throw new Error("science_direction_intent_invalid");
+          return invocationService.steerCurrentTurn({ chatId: direction.runtimeChatId, intentId: direction.intentId,
+            expectedRunId: direction.invocationRunId, text: direction.text });
+        },
+        list: (scope: { runtimeChatId: string }) => {
+          fence.assertOwner();
+          return listOwnerDirections({ chatId: scope.runtimeChatId, intentPrefix: SCIENCE_DIRECTION_PREFIX });
+        },
+        takeUndelivered: (scope: { runtimeChatId: string; invocationRunId: string }) => {
+          fence.assertExecution();
+          return takeUndeliveredOwnerDirections({ chatId: scope.runtimeChatId, runId: scope.invocationRunId, intentPrefix: SCIENCE_DIRECTION_PREFIX })
+            .map(({ intentId, text }) => ({ intentId, text }));
+        },
+      } },
+      // PLAN S4: a question for the owner is the common question ledger (agentlas-turn ask_form / host-loop ask_user ->
+      // the canonical decision reader above, the phone's canonical question bank): a Science build that knows the member
+      // lists no Science-only researcher-question opener.
+      ...{ commonQuestions: { version: 1 as const } },
+      // One stop wording for Science, Work, One and the phone (shared/invocation-host-stop.ts): the owner's Stop is not a failure.
+      ...{ runStopNotice: (facts: { status?: unknown; hostStopCause?: unknown }, locale?: unknown) => {
+        const cause = runStopCause(facts ?? {});
+        return cause ? { cause, ...runStopCopy(cause, locale === "en" ? "en" : "ko") } : null;
+      } },
       reconcileScienceBoundary: boundary => reconcileScienceBoundary({ ...boundary, expectedRuntimeChatId: boundRuntimeChat(boundary) },
         { hostLost: (runId) => { const receipt = invocationService.receipt(runId); return receipt === null || receipt.status === "interrupted"; } }),
       inspectLegacyForwardRecoveryBoundary: boundary => inspectLegacyForwardRecoveryBoundary({ ...boundary, expectedRuntimeChatId: boundRuntimeChat(boundary) }),

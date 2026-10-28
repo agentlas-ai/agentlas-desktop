@@ -38,21 +38,33 @@ export function carriedFollowupRequest(source: McpInvocationRequest, text: strin
   };
 }
 
-/** Carry the run's never-dispatched owner directions as one queued next turn; null when there is none. */
-export function carryUndeliveredOwnerFollowups(input: {
-  chatId: string;
-  runId: string;
-  request: McpInvocationRequest;
-}, db: Database.Database = getDb()): DurableQueuedSteer | null {
+/**
+ * Intent ID prefixes of directions a surface takes back itself at its turn's end: a Science direction belongs to Science's
+ * next turn (its transcript and research record, PLAN S3), never to a Work turn on the hidden runtime chat. The owner of a
+ * direction is in its ID, so the run's end and the restart sweep below carry every other direction unchanged.
+ */
+export const SURFACE_OWNED_DIRECTION_PREFIXES: readonly string[] = ["science-direction:"];
+
+/**
+ * The run's never-dispatched owner directions, settled `rejected` / owner_control_next_turn in one transaction so each is
+ * taken at most once, oldest first. A `dispatching` or `uncertain` row may have reached the model and is never taken.
+ * `intentPrefix` narrows the take to one surface's directions (Science takes only its own `science-direction:` rows);
+ * without it, the directions a surface owns are left for that surface.
+ */
+export function takeUndeliveredOwnerDirections(input: { chatId: string; runId: string; intentPrefix?: string },
+  db: Database.Database = getDb()): Array<{ intentId: string; text: string; messageId: string | null }> {
   return db.transaction(() => {
-    // A receipt read that ran between the run's end and this carry refuses a queued row owner_control_run_settled
+    // A receipt read that ran between the run's end and this take refuses a queued row owner_control_run_settled
     // (invocation-owner-router.ts, InvocationService.currentTurnSteerReceipt), and an episode or loop boundary that
-    // never dispatched its batch settles it owner_control_not_dispatched (owner-control-pump.ts): never sent, so carried.
-    const rows = db.prepare(`SELECT intent_id, prompt_text FROM invocation_current_turn_steers
+    // never dispatched its batch settles it owner_control_not_dispatched (owner-control-pump.ts): never sent, so taken.
+    const prefix = input.intentPrefix ?? "";
+    const rows = (db.prepare(`SELECT intent_id, prompt_text, message_id FROM invocation_current_turn_steers
       WHERE chat_id = ? AND run_id = ? AND (status = 'queued' OR (status = 'rejected' AND code IN ('owner_control_run_settled','owner_control_not_dispatched')))
-      ORDER BY created_at, rowid`).all(input.chatId, input.runId) as Array<{ intent_id: string; prompt_text: string }>;
-    const texts = rows.map((row) => row.prompt_text).filter((text) => typeof text === "string" && text.trim());
-    if (!rows.length || !texts.length) return null;
+        AND substr(intent_id, 1, ?) = ?
+      ORDER BY created_at, rowid`).all(input.chatId, input.runId, prefix.length, prefix) as Array<{ intent_id: string; prompt_text: string; message_id: string | null }>)
+      .filter((row) => typeof row.prompt_text === "string" && row.prompt_text.trim())
+      .filter((row) => input.intentPrefix !== undefined || !SURFACE_OWNED_DIRECTION_PREFIXES.some((owned) => row.intent_id.startsWith(owned)));
+    if (!rows.length) return [];
     const now = new Date().toISOString();
     const settle = db.prepare(`UPDATE invocation_current_turn_steers SET status = 'rejected', code = ?, updated_at = ?
       WHERE intent_id = ? AND chat_id = ? AND run_id = ?
@@ -62,11 +74,38 @@ export function carryUndeliveredOwnerFollowups(input: {
         throw new Error("carried_followup_claim_lost");
       }
     }
+    return rows.map((row) => ({ intentId: row.intent_id, text: row.prompt_text, messageId: row.message_id ?? null }));
+  }).immediate();
+}
+
+/** Read-only: one surface's owner directions in this chat, oldest first, with their common receipt state. */
+export function listOwnerDirections(input: { chatId: string; intentPrefix: string }, db: Database.Database = getDb()): Array<{
+  intentId: string; runId: string; text: string; status: "queued" | "dispatching" | "applied" | "rejected" | "uncertain";
+  code: string | null; createdAt: string; updatedAt: string;
+}> {
+  if (!input.intentPrefix) throw new Error("owner_direction_prefix_required");
+  return (db.prepare(`SELECT intent_id, run_id, prompt_text, status, code, created_at, updated_at FROM invocation_current_turn_steers
+    WHERE chat_id = ? AND substr(intent_id, 1, ?) = ? ORDER BY created_at, rowid LIMIT 500`)
+    .all(input.chatId, input.intentPrefix.length, input.intentPrefix) as Array<{ intent_id: string; run_id: string; prompt_text: string;
+      status: "queued" | "dispatching" | "applied" | "rejected" | "uncertain"; code: string | null; created_at: string; updated_at: string }>)
+    .map((row) => ({ intentId: row.intent_id, runId: row.run_id, text: row.prompt_text, status: row.status, code: row.code ?? null,
+      createdAt: row.created_at, updatedAt: row.updated_at }));
+}
+
+/** Carry the run's never-dispatched owner directions as one queued next turn; null when there is none. */
+export function carryUndeliveredOwnerFollowups(input: {
+  chatId: string;
+  runId: string;
+  request: McpInvocationRequest;
+}, db: Database.Database = getDb()): DurableQueuedSteer | null {
+  return db.transaction(() => {
+    const rows = takeUndeliveredOwnerDirections({ chatId: input.chatId, runId: input.runId }, db);
+    if (!rows.length) return null;
     return persistQueuedSteer({
-      id: `${CARRIED_FOLLOWUP_STEER_PREFIX}${rows[0]!.intent_id}`,
+      id: `${CARRIED_FOLLOWUP_STEER_PREFIX}${rows[0]!.intentId}`,
       chatId: input.chatId,
       originalRunId: input.runId,
-      request: carriedFollowupRequest({ ...input.request, chatId: input.chatId }, texts.join("\n\n")),
+      request: carriedFollowupRequest({ ...input.request, chatId: input.chatId }, rows.map((row) => row.text).join("\n\n")),
     });
   }).immediate();
 }

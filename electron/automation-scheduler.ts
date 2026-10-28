@@ -5,7 +5,8 @@ import { stopAutomationRun as stopExecutionAutomationRun, assertAutomationGoalEx
 import { goalContinuationSourceChat, settleGoalContinuationRun, settleRefusedGoalContinuation, type GoalContinuationSignals } from "./goal-continuation-hold";
 import { selectionForRuntime } from "../shared/runtime-selection";
 import { pollGoalWaitSubscriptions } from "./long-run/wait-subscriptions";
-import { automationRunOrigin, deliverAutomationResult, sealAutomationRunOrigin } from "./automation-delivery";
+import { announceAutomationContinuationRefused, automationRunOrigin, deliverAutomationResult, sealAutomationRunOrigin } from "./automation-delivery";
+import { captureMainContinuation } from "./runtime/scheduled-root-context";
 import { ownerFailureReason } from "../shared/owner-visible-activity-text";
 import { claimAutomationNotification } from "./automation-notifications";
 import { STORE_BUSY_CODE, typedCodeChain } from "../shared/turn-settlement";
@@ -1133,7 +1134,8 @@ async function runOne(
     ownerInitialVars?: Record<string, unknown>;
   },
 ): Promise<TriggerDispatchResult> {
-  const afterSettled = captureMainRootContinuation();
+  // A rootless start (an event trigger, a chain, a One graph command) hands on a rootless continuation, as it ran.
+  const continuation = captureMainContinuation();
   if (dispatchPaused()) return { accepted: false };
   if (running.has(a.id)) return { accepted: false };
   // due[] may have waited behind another run. The controller must belong to
@@ -2186,7 +2188,7 @@ async function runOne(
         subscribeGraphLoginWait(graphLoginWait, controller, () => {
           releaseAutomationRunStop(a.id, controller); activeExecutionControllers.delete(controller);
         }, { advanceSchedule: opts?.advanceSchedule ?? true, fireTime: opts?.fireTime, triggerDelivery: opts?.triggerDelivery, allowDisabledLease: opts?.allowDisabledLease === true,
-          expectedEnabled: a.enabled, stopAlreadyBound: true, afterSettled, isCurrent: () => { try { assertDefinitionCurrent(); assertGoalCurrent(); return true; } catch { return false; } } });
+          expectedEnabled: a.enabled, stopAlreadyBound: true, afterSettled: continuation?.run, continuationRooted: continuation?.rooted, isCurrent: () => { try { assertDefinitionCurrent(); assertGoalCurrent(); return true; } catch { return false; } } });
       }
     }
     // Durable chain fan-out은 markAutomationRun transaction에서 이미 끝났다.
@@ -2362,7 +2364,7 @@ async function runDueAutomations(
 }
 
 /** Main-only exact restoration consumer. The source must already be durably parked. */
-export function subscribeGraphLoginWait(result: RunGraphResult, controller: AbortController, onReleased: () => void = () => {}, resumeOptions?: { advanceSchedule?: boolean; fireTime?: Date; triggerDelivery?: TriggerDeliveryHooks; allowDisabledLease?: boolean; expectedEnabled?: boolean; isCurrent?: () => boolean; stopAlreadyBound?: boolean; afterSettled?: <T>(action: () => T | Promise<T>) => Promise<T> }): () => void {
+export function subscribeGraphLoginWait(result: RunGraphResult, controller: AbortController, onReleased: () => void = () => {}, resumeOptions?: { advanceSchedule?: boolean; fireTime?: Date; triggerDelivery?: TriggerDeliveryHooks; allowDisabledLease?: boolean; expectedEnabled?: boolean; isCurrent?: () => boolean; stopAlreadyBound?: boolean; afterSettled?: <T>(action: () => T | Promise<T>) => Promise<T>; continuationRooted?: boolean }): () => void {
   const source = result.loginWaitSource;
   const waits = result.loginWaits ?? [];
   if (!source || !result.needsInput || !getGraphLoginWaitCheckpoint(source.automationId, source.runId)) {
@@ -2416,25 +2418,46 @@ export function subscribeGraphLoginWait(result: RunGraphResult, controller: Abor
         if (!wait.automaticResumeSafe || !wait.handle.runtimeQuiesced) return;
         const ready = getGraphLoginWaitCheckpoint(source.automationId, source.runId);
         if (!ready || !graphLoginWaitReady((ready.checkpoint as { loginWaits: Record<string, GraphLoginWaitEntry> }).loginWaits)) return;
-        if (resumeQueued || !resumeOptions?.afterSettled) return;
+        if (resumeQueued) return;
         resumeQueued = true;
+        // The waiting line promised a continuation: a refused one tells the owner its cause and Run now (never only a log).
+        const refuse = (code: string) => {
+          console.warn(`[automation] login continuation refused run=${source.runId} code=${code}`);
+          try {
+            const line = announceAutomationContinuationRefused({ automationId: source.automationId, runId: source.runId, code });
+            const automation = line ? getAutomation(source.automationId) : null;
+            if (automation && line) notifyDone(automation, "blocked", line);
+          } catch (error) { console.warn(`[automation] login continuation refusal not delivered run=${source.runId} code=${(error as { code?: unknown })?.code ?? "none"}`); }
+        };
+        // Nothing was handed on (the run started inside a nested tool call or after its root expired).
+        if (!resumeOptions?.afterSettled) { refuse("graph_login_continuation_unavailable"); return; }
+        const rooted = resumeOptions.continuationRooted !== false;
         void resumeOptions.afterSettled(async () => {
           if (closed || controller.signal.aborted) return;
           const currentSource = getGraphLoginWaitCheckpoint(source.automationId, source.runId);
           const automation = getAutomation(source.automationId);
-          if (!currentSource || !graphLoginWaitReady((currentSource.checkpoint as { loginWaits: Record<string, GraphLoginWaitEntry> }).loginWaits)
-            || !automation?.graph || graphExecutionDigest(automation, automation.graph) !== source.graphDigest
-            || (resumeOptions.expectedEnabled !== undefined && automation.enabled !== resumeOptions.expectedEnabled)
-            || (!automation.enabled && resumeOptions.allowDisabledLease !== true)
-            || (resumeOptions.isCurrent && !resumeOptions.isCurrent())) { release(false); return; }
-          const admission = admitMainAutomation(automation.id);
-          if (!admission) return; // An expired/nested callback cannot manufacture a new root.
+          // A newer run took the slot, or the wait is no longer ready: that run owns the work now.
+          if (!currentSource || !graphLoginWaitReady((currentSource.checkpoint as { loginWaits: Record<string, GraphLoginWaitEntry> }).loginWaits)) { release(false); return; }
+          const changed = !automation?.graph || graphExecutionDigest(automation, automation.graph) !== source.graphDigest
+            ? "graph_login_continuation_definition_changed"
+            : (resumeOptions.expectedEnabled !== undefined && automation.enabled !== resumeOptions.expectedEnabled)
+              || (!automation.enabled && resumeOptions.allowDisabledLease !== true) ? "graph_login_continuation_enabled_changed"
+              : resumeOptions.isCurrent && !resumeOptions.isCurrent() ? "graph_login_continuation_owner_changed" : null;
+          if (changed || !automation) { release(false); refuse(changed ?? "graph_login_continuation_definition_changed"); return; }
+          // The same start the source ran with: a rooted run admits a fresh root; a rootless one continues rootless.
+          const admission = rooted ? admitMainAutomation(automation.id) : undefined;
+          if (rooted && !admission) { refuse("graph_login_continuation_root_unavailable"); return; } // a nested callback cannot mint a root
           release(false);
           const lifetime = new MainInvocationLifetime(admission, automation.id, source.runId, "automation");
-          await lifetime.run(() => runOne(automation, { claim: true, advanceSchedule: resumeOptions.advanceSchedule ?? false, fireTime: resumeOptions.fireTime,
+          const resumed = await lifetime.run(() => runOne(automation, { claim: true, advanceSchedule: resumeOptions.advanceSchedule ?? false, fireTime: resumeOptions.fireTime,
             triggerDelivery: resumeOptions.triggerDelivery, allowDisabledLease: resumeOptions.allowDisabledLease === true,
             occurrenceId: source.occurrenceId, resumeLoginWaitRunId: source.runId }));
-        }).catch(() => { /* Sealed waiting authority remains durable; no guessed retry. */ });
+          if (!resumed.accepted) refuse(resumed.error ?? "graph_login_resume_not_accepted");
+        }).catch((error) => {
+          // Sealed waiting authority remains durable; no guessed retry.
+          const typed = (error as { code?: unknown })?.code;
+          refuse(typeof typed === "string" ? typed : error instanceof Error ? error.message : "graph_login_resume_refused");
+        });
       } catch { /* no redispatch when durable restoration or ownership cannot be proven */ }
     });
     if (closed) unsubscribe(); else unsubscribers.push(unsubscribe);

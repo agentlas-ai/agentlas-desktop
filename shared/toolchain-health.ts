@@ -38,6 +38,7 @@ const ENVIRONMENT_CODES = new Set([
   "browser_login_required", "login_required", "LOGIN_REQUIRED", "auth_required", "credential_missing", "needs_input",
   "rate_limited", "RATE_LIMITED", "automation_node_timeout", "NODE_TIMEOUT", "ETIMEDOUT", "ECONNRESET", "ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN",
   "network_unavailable", "runtime_unavailable", "pinned-runtime-unavailable", "mcp-runtime-config-unavailable", "graph_mcp_catalog_unavailable",
+  "agentlas-browser-host-unavailable",
 ]);
 const CODE_TOKEN = /[A-Za-z][A-Za-z0-9]*(?:[_-][A-Za-z0-9]+)+|[A-Z][A-Z0-9]{3,}/g;
 

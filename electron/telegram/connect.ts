@@ -19,6 +19,8 @@ import {
 import { runMcpInvocation } from "../mcp/client";
 import { invocationErrorAsksOwner, invocationService } from "../invocation/service";
 import { captureTelegramOneInvocationBinding } from "../invocation/workspace-binding";
+import { latestInvocationBrowserLoginWait } from "../invocation/browser-login-wait";
+import { CONTINUATION_REFUSED_NOTICE_CODE } from "../../shared/continuation-refusal-notice";
 import { prejudgeOneRequestIntent } from "../one/judged-request-intent";
 import { prejudgeOneMemoryIntent } from "../one/memory-detector";
 import {
@@ -2884,8 +2886,23 @@ async function runOneBindingInvocation(
       callback();
     };
     const unsubscribe = invocationService.onEvent((envelope) => {
-      if (!runId || envelope.runId !== runId) return;
+      if (!runId) return;
+      if (envelope.runId !== runId) {
+        // A turn that met a login wall ends without a reply; once the sign-in is verified the host continues it as a
+        // successor run (InvocationService.resumeParkedBrowserLoginWait, the durable wait names it). This Telegram turn
+        // follows that run, so the continuation's answer comes back here instead of only to the desktop and the phone.
+        if (envelope.chatId !== request.chatId || latestInvocationBrowserLoginWait(runId)?.successorInvocationId !== envelope.runId) return;
+        runId = envelope.runId;
+        activeOneRunByBinding.set(binding.id, runId);
+      }
       const event = envelope.event;
+      // A continuation the host could not start says so on this run (shared/continuation-refusal-notice.ts): that line is
+      // this turn's answer, so Telegram hears it too.
+      if (event.kind === "notice" && event.notice && (Object.values(CONTINUATION_REFUSED_NOTICE_CODE) as string[]).includes(event.notice.code ?? "")) {
+        const told = (event.notice.message ?? "").trim();
+        if (told) { finalText = told; finish(() => resolve(flattenSentinelsForTelegram(told, replyLocale))); }
+        return;
+      }
       if (event.kind === "final") {
         finalText = event.text?.trim() ?? "";
         finish(() => {

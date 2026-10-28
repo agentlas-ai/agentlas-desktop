@@ -766,7 +766,13 @@ export function createDaemonScienceService(options: {
       }
       case "composer.steering": {
         const input = command.input;
-        if (input.requestId === undefined) return store.listSteering(input.projectId, input.conversationId);
+        if (input.requestId === undefined) {
+          // A Science build on the common steering path (PLAN S3) lists its directions from the common current-turn store
+          // too; an older build has only its own rows.
+          const listOwnerDirections = (conversations as Conversations & { listOwnerDirections?: (projectId: string, conversationId: string) => unknown }).listOwnerDirections;
+          return typeof listOwnerDirections === "function" ? listOwnerDirections.call(conversations, input.projectId, input.conversationId)
+            : store.listSteering(input.projectId, input.conversationId);
+        }
         if (typeof input.requestId !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(input.requestId))
           throw Error("science-steering-request-id-required");
         const lookup = (store as Store & { getSteeringByRequestId?: (requestId: string) => ReturnType<Store["listSteering"]>[number] | null }).getSteeringByRequestId;

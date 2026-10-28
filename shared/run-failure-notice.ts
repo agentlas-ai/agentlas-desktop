@@ -45,7 +45,7 @@ import { EMPTY_AFTER_UNUSABLE_TOOLS_CODE, EMPTY_NO_TOOL_RAN_CODES } from "./turn
  */
 
 export type RunFailureNoticeLocale = "ko" | "en";
-export type RunFailureNoticeCause = "quota" | "rate_limit" | "auth" | "refused" | "empty" | "empty_no_tool" | "tools_unusable" | "unavailable" | "capacity" | "subscription_credits_off" | "tool_missing" | "tool_failed" | "tools_unprepared" | "runtime_unavailable" | "runtime_changed" | "goal_changed" | "store_busy" | "mobile_boundary" | "project_busy" | "provider_connection" | "unsettled";
+export type RunFailureNoticeCause = "quota" | "rate_limit" | "auth" | "refused" | "empty" | "empty_no_tool" | "tools_unusable" | "unavailable" | "capacity" | "subscription_credits_off" | "tool_missing" | "tool_failed" | "tools_unprepared" | "runtime_unavailable" | "runtime_changed" | "goal_changed" | "store_busy" | "mobile_boundary" | "project_busy" | "provider_connection" | "browser_host_unavailable" | "unsettled";
 
 /** The terminal code of a dispatched turn that ended without a terminal receipt (runtime/runner.ts RUNTIME_TURN_UNSETTLED_CODE). */
 export const RUN_FAILURE_UNSETTLED_CODE = "runtime_turn_unsettled";
@@ -65,7 +65,14 @@ export const PROVIDER_REFUSAL_CODES: ReadonlySet<string> = new Set([
   "STOP_REASON_CONTENT_FILTER",
 ]);
 
-type HostFailureClass = "capacity" | "unavailable" | "subscription_credits_off" | "tool_missing" | "tool_failed" | "tools_unprepared" | "runtime_unavailable" | "runtime_changed" | "goal_changed" | "store_busy" | "mobile_boundary" | "project_busy" | "provider_connection";
+type HostFailureClass = "capacity" | "unavailable" | "subscription_credits_off" | "tool_missing" | "tool_failed" | "tools_unprepared" | "runtime_unavailable" | "runtime_changed" | "goal_changed" | "store_busy" | "mobile_boundary" | "project_busy" | "provider_connection" | "browser_host_unavailable";
+
+/**
+ * Codes whose notice names something only the owner can do (sign in to the Agentlas Browser). A Goal continuation the host
+ * started (promptOrigin "system") is otherwise quiet on failure; ending with one of these it still tells the owner the cause
+ * and the next action, once while that notice is the chat's latest message (invocation/service.ts; YouTube review 2026-10-28).
+ */
+export const OWNER_ACTION_FAILURE_CODES: ReadonlySet<string> = new Set(["agentlas-browser-host-unavailable"]);
 
 /**
  * Host-owned machine codes that name a class of their own, with the sentence that class gets (F51 follow-up, Finance 1008
@@ -90,6 +97,9 @@ export const HOST_FAILURE_CODE_CLASSES: ReadonlyMap<string, HostFailureClass> = 
   ["one-team-runtime-selection-changed", "runtime_changed"], ["automatic-goal-resume-state-changed", "goal_changed"],
   ["store_busy", "store_busy"], ["mobile-runtime-not-read-sandboxed", "mobile_boundary"],
   ["work_project_residency_busy", "project_busy"], ["codex_http_connection_failed", "provider_connection"],
+  // mcp/client.ts: the run is bound to the Agentlas Browser (the owner's toolMode / assignment / mention, or an active Goal
+  // that has been working in it) and its signed-in host is not ready: refused before the model (2026-10-28).
+  ["agentlas-browser-host-unavailable", "browser_host_unavailable"],
 ]);
 
 /**
@@ -204,6 +214,8 @@ const KO: Record<RunFailureNoticeCause, Copy> = {
     action: "같은 요청을 다시 보내거나 설정에서 다른 이미지 모델을 골라 보세요." },
   tools_unprepared: { lead: ["이 실행에 쓸 도구 연결을 준비하지 못해 시작하지 않았습니다.", "이 실행에 쓸 도구 연결을 준비하지 못해 시작하지 않은 것으로 보입니다."],
     action: "도구(MCP) 연결 상태를 확인한 뒤 다시 보내 보세요." },
+  browser_host_unavailable: { lead: ["로그인된 Agentlas Browser를 확인할 수 없어 브라우저가 필요한 이 작업을 시작하지 않았습니다.", "로그인된 Agentlas Browser를 확인할 수 없어 브라우저가 필요한 이 작업을 시작하지 않은 것으로 보입니다."],
+    action: "Agentlas Browser를 열어 로그인해 두세요. 진행 중인 목표는 잠시 뒤 자동으로 다시 시도하고, 바로 이어가려면 메시지를 보내면 됩니다." },
   runtime_unavailable: { lead: ["선택한 모델(실행기)을 지금 쓸 수 없어 시작하지 않았습니다.", "선택한 모델(실행기)을 지금 쓸 수 없어 시작하지 않은 것으로 보입니다."],
     action: "설정에서 모델 연결을 확인하거나 다른 모델을 골라 다시 보내 보세요." },
   runtime_changed: { lead: ["확인한 모델과 실제 실행 모델이 달라 실행하지 않았습니다.", "확인한 모델과 실제 실행 모델이 달라 실행하지 않은 것으로 보입니다."],
@@ -249,6 +261,8 @@ const EN: Record<RunFailureNoticeCause, Copy> = {
     action: "Send it again, or choose another image model in Settings." },
   tools_unprepared: { lead: ["This run's tool connections could not be prepared, so it was not started.", "This run's tool connections appear not to have been prepared, so it was not started."],
     action: "Check the tool (MCP) connections and send it again." },
+  browser_host_unavailable: { lead: ["The signed-in Agentlas Browser could not be reached, so this browser task was not started.", "The signed-in Agentlas Browser appears not to have been reachable, so this browser task was not started."],
+    action: "Open Agentlas Browser and sign in. An active goal tries again by itself shortly; send a message to continue right away." },
   runtime_unavailable: { lead: ["The selected model (runtime) is not available right now, so it was not started.", "The selected model (runtime) appears not to be available right now, so it was not started."],
     action: "Check the model connection in Settings, or choose another model and send it again." },
   runtime_changed: { lead: ["The model that would run differs from the one you confirmed, so it was not run.", "The model that would run appears to differ from the one you confirmed, so it was not run."],
