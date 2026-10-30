@@ -113,7 +113,7 @@ export interface GoalStrategySettlementGateInput {
 
 export type GoalStrategySettlementGateResult =
   | { eligible: true }
-  | { eligible: false; reason: GoalStrategyReflectionUnavailableReason };
+  | { eligible: false; reason: GoalStrategyReflectionUnavailableReason; nothingToReflect?: true };
 
 /**
  * Fail-closed admission for the first Goal strategy increment. This is a pure
@@ -156,9 +156,17 @@ export function evaluateGoalStrategySettlementGate(
   const strategy = input.episodeStrategy;
   if (!strategy || strategy.schemaVersion !== "agentlas.ongoing-episode-strategy.v1"
     || strategy.goalRevision !== input.expectedGoalRevision
-    || strategy.invocationRunId !== input.sourceInvocationRunId
-    || strategy.state === "unknown"
-    || strategy.effectBoundaryDigest !== input.boundary.snapshotDigest
+    || strategy.invocationRunId !== input.sourceInvocationRunId) {
+    return { eligible: false, reason: "goal_strategy_effect_unsettled" };
+  }
+  // The episode settled and its boundary reads, but it has no strategy evaluation: recordOngoingEpisodeStrategy wrote
+  // state "unknown" (evidence not ready, or a team turn whose run-level effects stay "uncertain" because nested teammate
+  // scopes do not bind to the root run). There is nothing to reflect on, which is the expected result, not a host refusal.
+  // The checkpoint already records why (episodeStrategy.reasonCode), and the next episode with a strategy asks again.
+  // observed in use: all 6 goal_strategy_effect_unsettled refusals that day were this case (5 with run-level effects
+  // "uncertain"), and the AGI monitor filed three in a row as an app defect (repeated_notice).
+  if (strategy.state === "unknown") return { eligible: false, reason: "goal_strategy_effect_unsettled", nothingToReflect: true };
+  if (strategy.effectBoundaryDigest !== input.boundary.snapshotDigest
     || strategy.effectReceiptEventId !== input.boundary.receiptEventId) {
     return { eligible: false, reason: "goal_strategy_effect_unsettled" };
   }
@@ -589,7 +597,7 @@ function readSettledEpisode(input: GoalStrategyReflectionInput): SettledEpisodeE
     boundary,
     episodeStrategy: strategy,
   });
-  if (!gate.eligible) throw new Error(gate.reason);
+  if (!gate.eligible) throw Object.assign(new Error(gate.reason), gate.nothingToReflect ? { nothingToReflect: true } : {});
   if (contract.status !== "active" || goal.lifecycle !== "ongoing") throw new Error("goal_strategy_goal_not_ongoing");
   return strategySnapshot(input, goal, "active", checkpoint, boundary, strategy!);
 }
@@ -603,6 +611,9 @@ function readSettledEpisode(input: GoalStrategyReflectionInput): SettledEpisodeE
  * What is NOT recorded:
  *  - at the `request` stage, a Goal that is not ongoing (a finite Goal never reflects; a finished one has nothing left to
  *    reflect on), whether the host check threw goal_strategy_goal_not_ongoing or the Goal's revision is no longer ongoing;
+ *  - at the `request` stage, an episode with nothing to reflect on: one that ended unsettled (below), and one that settled
+ *    with a readable boundary but whose own verification found no evidence (strategy "unknown"; requestGoalStrategyReflection
+ *    does not call this for it);
  *  - at the `automation_handoff` stage, a hold proposal and a proposal that observed no Graph automation: there was
  *    nothing to hand off (dispatchGoalStrategyAutomation returns early for a hold, and its `refuse` skips this call
  *    when the proposal has no automation observations).
@@ -695,7 +706,9 @@ export function requestGoalStrategyReflection(
     evidence = readSettledEpisode(input);
   } catch (error) {
     // No reflection starts, and the verification that asked for it is unchanged. The cause code the host check threw
-    // stays on the Goal's ledger instead of vanishing (it used to be a bare null).
+    // stays on the Goal's ledger instead of vanishing (it used to be a bare null). An episode with nothing to reflect on
+    // (evaluateGoalStrategySettlementGate: settled, boundary read, strategy "unknown") is the expected result, not a refusal.
+    if ((error as { nothingToReflect?: unknown } | null)?.nothingToReflect === true) return null;
     recordGoalStrategyReflectionRefusal({ stage: "request", reflection: input, reason: unavailableReason(error), now });
     return null;
   }

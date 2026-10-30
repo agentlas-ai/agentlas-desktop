@@ -4475,8 +4475,14 @@ export class InvocationService {
     let producerAdmissionFailure: Error | null = null;
     const rememberProducerAdmissionFailure = (error: unknown, phase: "capture" | "bind"): void => {
       producerAdmissionFailure = preDispatchRefusal(error, `goal-producer-${phase}`, "goal_episode_admission_failed");
+      const code = refusalCode(producerAdmissionFailure) ?? "goal_episode_admission_failed";
+      // Only Main opens Desktop's long-run admission; the background service never does, because Goal custody is Desktop-only.
+      // On a service-hosted turn this is the design, not a cause: it left a refusal on every service turn (25 Hope turns,
+      // observed in use, none bound to a Goal). The turn runs the same; a Goal it names is answered as an ordinary turn
+      // (goal_dispatch_ordinary_turn, service_hosted_turn).
+      if (code === "desktop_long_run_admission_closed" && record.ownerLease?.ownerKind === "daemon") return;
       tryRecordRunEvent({ runId, chatId: chat.id, kind: "goal_episode_admission_refused", payload: {
-        goalId: projectionGoalId, phase, code: refusalCode(producerAdmissionFailure) ?? "goal_episode_admission_failed",
+        goalId: projectionGoalId, phase, code,
       } });
     };
     let producerWorkDispatchSealed = false;

@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.3.109 — 2026-10-30
+
+- Goals: an episode with nothing to reflect on is no longer recorded as a refused strategy reflection, and the AGI monitor no longer files it as an app defect; a turn hosted by the background service no longer records the closed Desktop admission as a refusal (the ledger only; behaviour is unchanged).
+- Tools: `auth.ensure` and `auth.login` read a bare service name such as `{service: "youtube"}` as the owner's saved browser site of that name.
+
+This release binds Agentlas OS v1.2.71 at 54a446cf3a9320409a712d0347afde2bb99d43d1; public runtime asset `hephaestus-runtime-v1.2.71.tar.gz` is pinned at SHA-256 `5d9ff2743a32de44d82d2fc97db67aba628fdd84791869c8244278d98179b084`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.108 — 2026-10-30
 
 - Teams: a full proposal store no longer drops the proposal it has just stored. Once the store was over its cap, every new One team proposal was dropped in the same write that stored it, so team staffing and a Goal's team preparation were refused as "candidate changed". The store now keeps the proposal being added and any proposal holding a reservation, and drops settled proposals first, then started ones, oldest first.

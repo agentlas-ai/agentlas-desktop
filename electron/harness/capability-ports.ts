@@ -376,13 +376,35 @@ const CONNECT_PROBE_MS = 15_000;
  * The site an auth call names. auth.ensure / auth.login read `site`; a model that holds a bare host calls it `domain`
  * ({operation:"auth.ensure", args:{domain:"studio.youtube.com"}} was refused connector_not_installed 10 times in 7 days:
  * the value was there, only under another name). The first non-empty of these, in order; an exact `site` always wins.
+ * A bare service name comes last: {operation:"auth.ensure", args:{service:"youtube"}} was refused connector_not_installed 3 times
+ * (observed in use, one room's team) while the owner's Agentlas browser held a valid youtube.com sign-in, so the Goal kept
+ * "restoring" a session it had. A host or URL there is the site; a bare name is the owner's one saved site of that name.
  */
-function authSite(args: Record<string, unknown>): string {
+async function authSite(args: Record<string, unknown>): Promise<string> {
   for (const key of ["site", "domain", "host", "hostname", "url", "origin"]) {
     const value = str(args[key]);
     if (value) return value;
   }
+  for (const key of ["service", "provider", "platform"]) {
+    const value = str(args[key]);
+    if (!value) continue;
+    return /[.:/]/.test(value) ? value : await savedSiteNamed(value);
+  }
   return "";
+}
+
+/** The owner's saved browser site whose first label (after www.) is `name`; a valid sign-in breaks a tie; "" when none or still several. */
+async function savedSiteNamed(name: string): Promise<string> {
+  const label = name.trim().toLowerCase();
+  if (!/^[a-z0-9][a-z0-9-]{0,62}$/.test(label)) return "";
+  try {
+    const vault = await import("../store/browser-vault");
+    const named = vault.listBrowserSites().filter((row) => row.site.replace(/^www\./, "").split(".")[0] === label);
+    const picked = named.length === 1 ? named : named.filter((row) => row.session.status === "valid");
+    return picked.length === 1 ? picked[0]!.site : "";
+  } catch {
+    return "";
+  }
 }
 
 async function browserSessionFor(site: string): Promise<{ site: string; status: "valid" | "expired" | "none" } | null> {
@@ -805,7 +827,7 @@ const PORTS: PortDefinition[] = [
   {
     operationId: "auth.ensure", kind: "job", purpose: "Reuse matching connector OAuth, Vault keys or a signed-in Agentlas browser session (site); report login need.", required: [],
     handler: async (args) => {
-      const site = authSite(args);
+      const site = await authSite(args);
       const browser = await browserSessionFor(site);
       // A named connection wins; a site with a valid browser sign-in stays on the browser path as before; only a site that has no
       // sign-in of its own is looked up as the origin of one installed connector.
@@ -829,7 +851,7 @@ const PORTS: PortDefinition[] = [
   {
     operationId: "auth.login", kind: "job", purpose: "Open login only after usable assets are absent or service requires reauthentication.", required: [],
     handler: async (args, ctx) => {
-      const site = authSite(args);
+      const site = await authSite(args);
       const row = await findConnector(args) ?? await findConnectorBySite(site);
       if (!row) {
         // A site with no connector behind it signs in in the Agentlas browser, the same answer auth.ensure gives; only a call

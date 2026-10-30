@@ -298,12 +298,23 @@ function repeatedWakeFailure(db: Database.Database, run: AgiGoalRow): { signal: 
  * 2026-10-28: goal_strategy_checkpoint_missing 18 times, no dispatch since 10-27 12:20Z). A host refusal repeating: a defect finding.
  */
 function repeatedStrategyRefusal(db: Database.Database, run: AgiGoalRow): { signal: AgiBlockerSignal; ref: string } | null {
-  const rows = db.prepare(`SELECT seq, kind, json_extract(payload_json, '$.reason') AS reason FROM long_run_events
-    WHERE run_id = ? AND kind LIKE 'goal.strategy_%' ORDER BY seq DESC LIMIT 3`).all(run.id) as Array<{ seq: number; kind: string; reason: string | null }>;
+  // A refusal whose own episode settled with nothing to reflect on (its checkpoint's strategy "unknown") is the expected
+  // result, not a host refusal; the host stopped recording it
+  // (evaluateGoalStrategySettlementGate nothingToReflect). Rows recorded before that still name it, so here it breaks the
+  // streak like a dispatch does. Observed in use: three such rows in a row were filed as an app defect for one Goal.
+  const rows = db.prepare(`SELECT e.seq, e.kind, json_extract(e.payload_json, '$.reason') AS reason,
+      (SELECT json_extract(c.payload_json, '$.checkpoint.sideEffects.state') = 'settled'
+          AND json_extract(c.payload_json, '$.checkpoint.capsule.plan.episodeStrategy.state') = 'unknown'
+        FROM long_run_events c WHERE c.run_id = e.run_id AND c.kind = 'run.task_checkpoint'
+          AND json_extract(c.payload_json, '$.checkpoint.checkpointId') = json_extract(e.payload_json, '$.source.checkpointId')
+        LIMIT 1) AS nothing_to_reflect
+    FROM long_run_events e WHERE e.run_id = ? AND e.kind LIKE 'goal.strategy_%' ORDER BY e.seq DESC LIMIT 3`).all(run.id) as Array<{
+    seq: number; kind: string; reason: string | null; nothing_to_reflect: number | null }>;
   if (rows.length < 2) return null;
   const reason = rows[0]!.reason;
   if (!reason || !/^goal_strategy_[a-z_]{1,80}$/.test(reason)) return null;
-  const same = rows.filter((row) => row.kind === "goal.strategy_reflection_refusal" && row.reason === reason).length;
+  const same = rows.filter((row) => row.kind === "goal.strategy_reflection_refusal" && row.reason === reason
+    && !(row.reason === "goal_strategy_effect_unsettled" && row.nothing_to_reflect === 1)).length;
   if (same !== rows.length) return null;
   return { signal: { kind: "repeated_notice", code: reason, count: same }, ref: `long_run_event:${run.id}:${rows[0]!.seq}` };
 }
