@@ -85,14 +85,24 @@ const READ_ONLY_GIT = new Set(["status", "log", "show", "diff", "rev-parse", "ls
 /** Lookup-only executables whose every form reads (recorded 0b8772c1: `printenv A; printenv B`, `command -v yt-dlp`). */
 const READ_ONLY_LOOKUPS = new Set(["printenv", "type", "whereis"]);
 
+const SHELL_WRAPPER = /^(?:\/usr\/bin\/env\s+)?(?:\/bin\/|\/usr\/bin\/)?(?:ba|z|)sh\s+-l?c\s+/;
+
 function unwrapShell(command: string): string {
   let current = command.trim();
   for (let depth = 0; depth < 2; depth += 1) {
     // The script may not contain its own opening quote: a greedy match would swallow a command that follows the
     // wrapper (`bash -c 'ls' && rm -rf 'x'`) into the first command's quoted argument and call the line read-only.
     const match = /^(?:\/usr\/bin\/env\s+)?(?:\/bin\/|\/usr\/bin\/)?(?:ba|z|)sh\s+-l?c\s+(["'])((?:(?!\1)[\s\S])*)\1$/.exec(current);
-    if (!match) break;
-    current = match[2].trim();
+    if (match) { current = match[2].trim(); continue; }
+    // A script that holds a quote of its own is written as adjacent quoted pieces (codex: `zsh -lc "pwd && rg -g '"'!node_modules'"'"`,
+    // the shell idiom for a quote inside a double-quoted script). The shell joins them into ONE word, which words() reproduces.
+    // Taken only when the whole remainder is exactly that one word and nothing in it expands (no `$`, backtick or backslash), so a
+    // command that follows the wrapper, or a second argument, makes it several words and the line stays unwrapped (not read-only).
+    const prefix = SHELL_WRAPPER.exec(current);
+    const rest = prefix ? current.slice(prefix[0].length) : "";
+    const joined = prefix && !/[\\`$]/u.test(rest) ? words(rest) : null;
+    if (joined?.length !== 1) break;
+    current = joined[0].trim();
   }
   return current;
 }

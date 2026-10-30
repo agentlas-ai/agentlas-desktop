@@ -149,8 +149,10 @@ export async function dispatchOneSupervisorTool(binding: Pick<OneTeamCapabilityB
         ...(input.checkin_id !== undefined ? {checkinId:String(input.checkin_id)} : {})});
       // The app-control catalog (every bridge operation) loads only when One first uses it.
       case "one_app_operations": return (require("../app-control/service") as typeof import("../app-control/service")).appControlOperations(input);
+      // The operation's input as app.call reads it: `args` or its own fields next to `operation` (call-aliases.ts appCallInputOf).
       case "one_app_call": return (require("../app-control/service") as typeof import("../app-control/service"))
-        .appControlCall({ownerTurn:await service.ownerTurn(binding.supervisorReplyRunId),permission:binding.permission ?? "read"},{operation:input.operation,args:input.args});
+        .appControlCall({ownerTurn:await service.ownerTurn(binding.supervisorReplyRunId),permission:binding.permission ?? "read"},
+          {operation:input.operation,args:(require("../app-control/call-aliases") as typeof import("../app-control/call-aliases")).appCallInputOf(input)});
       case "one_supervisor_control": return service.control({commandId:String(input.command_id ?? ""),taskId:String(input.task_id ?? ""),expectedVersion:String(input.control_version ?? ""),action:input.action as "steer"|"cancel",...(input.message ? {text:String(input.message)} : {})});
       // Approvals in the rooms this personal agent oversees (owner 2026-10-27). Main checks room scope, the floor and the
       // owner-message basis; one_app_call to approval operations stays refused (app-control/policy.ts).

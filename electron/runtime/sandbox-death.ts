@@ -16,7 +16,7 @@ import { WRITE_SANDBOX_LAUNCH_DENIAL_CODE } from "../../shared/write-sandbox-lau
 
 export interface SandboxDeathSignal {
   /** 무엇으로 죽었는가 — 화면 문장에 그대로 쓴다. */
-  kind: "SIGILL" | "SIGTRAP" | "SIGSEGV" | "SIGABRT" | "hypervisor" | "gpu";
+  kind: "SIGILL" | "SIGTRAP" | "SIGSEGV" | "SIGABRT" | "hypervisor" | "gpu" | "refused";
   exitCode: number | null;
   /** 판별에 걸린 짧은 근거(한 줄). */
   evidence: string;
@@ -58,8 +58,43 @@ export function detectSandboxDeath(toolResultText: string): SandboxDeathSignal |
   return null;
 }
 
+/*
+ * An operation the sandbox refused is the same permission boundary as a command it killed, and it leaves no signal at all.
+ * Observed in use (one room, codex gpt-6.1-terra, chip full, steps resolved to write): a teammate's
+ * `ffmpeg ... -y /tmp/diffusion-review.jpg` ended "Could not open file : /tmp/... Operation not permitted" (exit 255) in
+ * four runs; nothing read it as the boundary (the 132/133/134/139 table above needs a signal), so the step never asked the
+ * room for the access the owner's chip already covered. Measured offline against the real codex seatbelt
+ * (r4-step-sandbox/measure-tmpdir.cjs): a write to /tmp, to the real $TMPDIR or to a sibling of the project is refused with
+ * EPERM; the same command is fine at full access.
+ *
+ * Only a FAILED shell command counts: the "[exited with code N]" trailer Codex and Claude Code append, Claude Code's
+ * leading "Exit code N" line, or the leading "exit N" head of the API-lane bash tool (shared/builtin-tools.ts). A page, a
+ * file or a log that merely mentions the phrase is not a refusal. The caller decides
+ * where a refusal can happen at all (a run that really sits in a write sandbox); this function reads text only. The phrases
+ * are the OS's own refusals: EPERM on macOS seatbelt and Linux (a write, but also nice(2) and the like), EROFS under a
+ * read-only bind mount, ACCESS_DENIED on Windows.
+ */
+const FAILED_COMMAND_RES: readonly RegExp[] = [/\[exited with code ([1-9]\d{0,2})\]/, /^\s*Exit code ([1-9]\d{0,2})\b/m, /^exit ([1-9]\d{0,2})\b/];
+const SANDBOX_REFUSAL_RE = /Operation not permitted|Read-only file system|Access is denied/i;
+
+export function detectSandboxRefusal(toolResultText: string): SandboxDeathSignal | null {
+  const text = String(toolResultText || "");
+  if (!text) return null;
+  let failed: RegExpExecArray | null = null;
+  for (const re of FAILED_COMMAND_RES) { failed = re.exec(text); if (failed) break; }
+  if (!failed) return null;
+  const refusal = SANDBOX_REFUSAL_RE.exec(text);
+  if (!refusal) return null;
+  return { kind: "refused", exitCode: Number(failed[1]), evidence: refusal[0] };
+}
+
 export function sandboxDeathNotice(signal: SandboxDeathSignal, command: string | undefined, locale: "ko" | "en" | undefined): { ko: string; en: string; message: string } {
   const what = command ? `: ${command}` : "";
+  if (signal.kind === "refused") {
+    const ko = `이 명령이 샌드박스 밖으로 나가려다 거절됐습니다(${signal.evidence})${what}. 이 컴퓨터의 한계가 아니라 이 실행의 권한 경계입니다 — 아래 "전체 액세스로 진행할까요?"에서 허용하면 샌드박스 없이 여기서부터 이어집니다.`;
+    const en = `This command tried to go outside the sandbox and was refused (${signal.evidence})${what}. That is this run's permission boundary, not a limit of this computer — allow it in "Continue with full access?" below and it resumes from here without the sandbox.`;
+    return { ko, en, message: locale === "ko" ? ko : en };
+  }
   const how = signal.exitCode !== null ? `${signal.kind}, exit ${signal.exitCode}` : signal.kind;
   const ko = `이 명령이 샌드박스 안에서 시작하자마자 죽었습니다(${how})${what}. 이 컴퓨터의 한계가 아니라 이 실행의 권한 경계입니다 — 아래 "전체 액세스로 진행할까요?"에서 허용하면 샌드박스 없이 여기서부터 이어집니다.`;
   const en = `This command died as soon as it started inside the sandbox (${how})${what}. That is this run's permission boundary, not a limit of this computer — allow it in "Continue with full access?" below and it resumes from here without the sandbox.`;

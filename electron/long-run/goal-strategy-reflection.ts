@@ -139,9 +139,13 @@ export function evaluateGoalStrategySettlementGate(
     return { eligible: false, reason: "goal_strategy_effect_unsettled" };
   }
   const checkpointBoundary = input.checkpoint.sideEffects.boundary;
+  // A strategy reflection is observation-only: it does nothing outside, so, like a wait (wait-subscriptions.ts, owner
+  // 2026-10-05) and the continuation reader, it needs the producing turn finished and bound (terminal event, receipt and
+  // snapshot below), not every nested adapter scope of a team turn bound to the root chat. Requiring run-level
+  // effects "settled" refused it for every finished team turn (observed in use: 22 of 24 goal_strategy_effect_unsettled refusals came
+  // from turns that ended invoke_completed), and three in a row reached the AGI monitor as a repeated host notice.
   if (!checkpointBoundary || !input.boundary
     || input.boundary.invocationRunId !== input.sourceInvocationRunId
-    || input.boundary.effects !== "settled"
     || !input.boundary.snapshotDigest || !input.boundary.receiptEventId || !input.boundary.terminalEventId
     || checkpointBoundary.invocationRunId !== input.sourceInvocationRunId
     || checkpointBoundary.snapshotDigest !== input.boundary.snapshotDigest

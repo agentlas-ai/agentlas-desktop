@@ -35,7 +35,7 @@ import { codexOutputSchemaFallbackBlock, openAiStrictSchemaOrNull } from "./stri
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult , RunnerFailure } from "./runner";
 import { WORK_PROJECT_RESIDENCY_BUSY_CODE } from "./project-residency";
 import { codexShellEnvironmentArgs } from "./env-key-reach";
-import { ensureSandboxNpmCacheDir, sandboxNpmCacheDir } from "./sandbox-tool-cache";
+import { ensureSandboxNpmCacheDir, ensureSandboxRunTmpDir, sandboxNpmCacheDir, sandboxTmpEnvConfigArgs, sandboxTmpRoot, sandboxTmpScope } from "./sandbox-tool-cache";
 import { imageOutputContract } from "./prompt-sections";
 import { cumulativeSurfaceGateText, ensureChildCloseAfterExit, startCliHeartbeat, startCliSilenceGuard, runtimeSilentTimeoutFailure, cliSilenceWindowMs, cliToolSilenceWindowMs, type CliSilenceGuard, childExitReason, RUNTIME_SILENT_TIMEOUT_CODE, runtimeProtocolUnrecognizedFailure, wrapSystemPrompt, workforceObservedHostAuthorityEnforcement, RuntimeTurnUnsettledError, markRefusedBeforeDispatch, preDispatchRefusal, spawnStartFailureRefusal } from "./runner";
 import { decideTurnSettlement, normalEndToolEvidence, settleNormalEnd, trackReportedToolCalls } from "../../shared/turn-settlement";
@@ -444,8 +444,8 @@ const CODEX_WORKSPACE_WRITE_CONFIG_ARGS = [
   "-c", "sandbox_workspace_write.network_access=true",
   "-c", "sandbox_workspace_write.exclude_tmpdir_env_var=true",
   "-c", "sandbox_workspace_write.exclude_slash_tmp=true",
-  // The working folder is always writable; this adds only the product's sandbox npm cache (sandbox-tool-cache.ts).
-  "-c", `sandbox_workspace_write.writable_roots=${JSON.stringify([sandboxNpmCacheDir()])}`,
+  // The working folder is always writable; this adds only the product's sandbox npm cache and temp root (sandbox-tool-cache.ts).
+  "-c", `sandbox_workspace_write.writable_roots=${JSON.stringify([sandboxNpmCacheDir(), sandboxTmpRoot()])}`,
 ] as const;
 
 /**
@@ -1531,8 +1531,9 @@ export function codexThreadPolicy(
       approvalPolicy: "on-request",
       sandboxPolicy: {
         type: "workspaceWrite",
-        // Plus the product's sandbox npm cache, so `npm install` works in the project (sandbox-tool-cache.ts).
-        writableRoots: [writableRoot, sandboxNpmCacheDir()],
+        // Plus the product's sandbox npm cache, so `npm install` works in the project, and its temp root, which the shell's
+        // TMPDIR points into so tools that need a temp file work (sandbox-tool-cache.ts). Never /tmp or the real TMPDIR.
+        writableRoots: [writableRoot, sandboxNpmCacheDir(), sandboxTmpRoot()],
         networkAccess: true,
         // A selected project may itself live below TMPDIR, but Codex's default
         // temp grants must stay disabled. `writableRoots` re-adds only this
@@ -1830,8 +1831,12 @@ async function runCodexResidentTurn(input: {
   const residentIdentity = () => {
     const mcpThread = !turnScoped && !req.workforceRuntimeToolGrant && codexThreadMcpRebindSupported()
       ? codexMcpThreadConfig(mcpArgs, env) : null;
+    // The shell's temp folder is a function of the pool key's chat component (the same key that shares one process between a
+    // seat's conversations), so equal keys keep equal spawn arguments (sandbox-tool-cache.ts).
+    const sandboxTmp = ensureSandboxRunTmpDir(sandboxTmpScope(canonicalContextKey ?? req.approvalChatId ?? chatId));
     const args = [...CODEX_APP_SERVER_ARGS, "-c", "model_reasoning_summary=auto", ...(compactLimit ? ["-c", `model_auto_compact_token_limit=${compactLimit}`] : []),
       ...surfaceArgs,
+      ...(sandboxTmp ? sandboxTmpEnvConfigArgs(sandboxTmp) : []),
       // ChatGPT apps where this thread's approvals reach the Agentlas arbiter or under full access (runtime-builtin-egress-policy.ts).
       ...codexBuiltinEgressConfigArgs({ approvalsReachArbiter: policy.approvalPolicy === "on-request" && approvalsReviewer === "user", fullAccess: req.permission === "full" }),
       ...(mcpThread ? [] : mcpArgs)];
@@ -2784,7 +2789,7 @@ async function runCodexResidentTurn(input: {
         // workspace-write values that turn/start will use before admitting a
         // Workforce model turn; a requested turn override alone is no proof.
         ...(workforceObservation && req.permission === "write" ? {
-          "sandbox_workspace_write.writable_roots": [path.resolve(cwd), sandboxNpmCacheDir()],
+          "sandbox_workspace_write.writable_roots": [path.resolve(cwd), sandboxNpmCacheDir(), sandboxTmpRoot()],
           "sandbox_workspace_write.network_access": true,
           "sandbox_workspace_write.exclude_tmpdir_env_var": true,
           "sandbox_workspace_write.exclude_slash_tmp": true,
@@ -3550,6 +3555,13 @@ export const runCodex: Runner = async (
   const sandboxNpmCache = ensureSandboxNpmCacheDir();
   const browserOnlyConfigArgs: string[] = [...desktopSurface.args, ...personalContext.args, ...codexShellEnvironmentArgs(),
     ...(sandboxNpmCache ? ["-c", `shell_environment_policy.set.NPM_CONFIG_CACHE=${JSON.stringify(sandboxNpmCache)}`] : [])];
+  // Temp files: TMPDIR points into the writable temp root (sandbox-tool-cache.ts). The folder follows the chat, so one chat's
+  // exec turns share it; the resident app-server derives it from its own pool key (residentIdentity), so the process
+  // identity does not change from turn to turn. Kept out of browserOnlyConfigArgs, which also feeds the context fingerprint.
+  const execShellTmpArgs = (): string[] => {
+    const dir = ensureSandboxRunTmpDir(sandboxTmpScope(runReq.chatId));
+    return dir ? sandboxTmpEnvConfigArgs(dir) : [];
+  };
   // 모델/effort를 CLI에 명시 전달 — 예전엔 세션 지문에만 쓰고 인자로는 안 넘겨서, 앱이
   // 뭘 선택했든 기기의 ~/.codex/config.toml(또는 codex 업데이트가 바꾼 내장 기본값)이
   // 이겼다(2026-07-08: 다른 기기에서 지정한 적 없는 Spark 모델로 조용히 실행된 사고).
@@ -3759,6 +3771,7 @@ export const runCodex: Runner = async (
     "resume",
     ...isolatedConfigArgs,
     ...browserOnlyConfigArgs,
+    ...execShellTmpArgs(),
     // `codex exec` has no approval loop: ChatGPT apps only under full access (runtime-builtin-egress-policy.ts).
     ...codexBuiltinEgressConfigArgs({ approvalsReachArbiter: false, fullAccess: runReq.permission === "full" }),
     "--json",
@@ -3978,6 +3991,7 @@ export const runCodex: Runner = async (
     ...approvalArgs,
     ...isolatedConfigArgs,
     ...browserOnlyConfigArgs,
+    ...execShellTmpArgs(),
     // `codex exec` has no approval loop: ChatGPT apps only under full access (runtime-builtin-egress-policy.ts).
     ...codexBuiltinEgressConfigArgs({ approvalsReachArbiter: false, fullAccess: runReq.permission === "full" }),
     "--json",

@@ -1120,13 +1120,12 @@ const PORTS: PortDefinition[] = [
     handler: async (args, ctx) => {
       if (ctx.dryRun) return refused("dry_run");
       try {
-        // The operation's input arrives as `args` (exact key wins) or `input`, the word its input_schema reads as. Dev
-        // 2026-10-17 run8 (Haiku automation): {operation:"automations.listRuns", input:{id}} ran with no id and answered 0 runs.
-        const appArgs = args.args !== undefined ? args.args : args.input !== undefined ? args.input : args.arguments !== undefined ? args.arguments : args.params;
-        // The call is read the way it was meant before it is judged (app-control/call-aliases.ts): a neighbouring argument
-        // name, `args: []`, a conversation id the call omits, a harness operation named as an app operation. Writes are never
-        // guessed at; the reply lists what was read (`resolved`).
-        const read = (await import("../app-control/call-aliases")).resolveAppCallRequest(args.operation, appArgs, { chatId: ctx.chatId, harnessPorts: new Set(PORT_BY_ID.keys()) });
+        // The operation's input: `args`, `input`, `arguments`, `params`, or its own fields written next to `operation`
+        // (app-control/call-aliases.ts appCallInputOf). The call is then read the way it was meant before it is judged: a
+        // neighbouring argument name, `args: []`, a conversation id the call omits, a harness operation named as an app operation.
+        // Writes are never guessed at; the reply lists what was read (`resolved`).
+        const aliases = await import("../app-control/call-aliases");
+        const read = aliases.resolveAppCallRequest(args.operation, aliases.appCallInputOf(args), { chatId: ctx.chatId, harnessPorts: new Set(PORT_BY_ID.keys()) });
         if (read.kind === "port") {
           const nested = await callHarnessPort(read.port, read.args, ctx);
           return nested.status === "ok" ? ok(nested.data)

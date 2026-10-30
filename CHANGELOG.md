@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.3.107 — 2026-10-30
+
+- Tools: an app call that writes its arguments next to `operation` instead of under `args` now runs instead of answering "needs id" (the harness `app.call` and One's `one_app_call` read the call the same way; the operation's own schema still judges the fields).
+- Teams: a team step that changed nothing outside the app is no longer shown as a failed run (the host no longer invents an "uncertain" outside effect when every observed tool call was local), and the strategy reflection waits for the finished turn like waits and continuations do.
+- Sandbox: a full-permission team step that meets the write sandbox (a Blender crash with exit 139, ffmpeg refused a temporary file under /tmp) gets the access its chip covers, including on the content retry; Codex write runs get a product-owned scoped temporary folder.
+
+This release binds Agentlas OS v1.2.71 at 54a446cf3a9320409a712d0347afde2bb99d43d1; public runtime asset `hephaestus-runtime-v1.2.71.tar.gz` is pinned at SHA-256 `5d9ff2743a32de44d82d2fc97db67aba628fdd84791869c8244278d98179b084`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.106 — 2026-10-30
 
 - Failures that came from inside the app: an owner's `/goal` message is no longer failed by its own Goal creation or by a store lock, and a message that a lock refused is started again; a team that answered is no longer shown as a failed run and full permission reaches the team's steps; a tool call whose intent is clear runs instead of being refused (oversized responses, argument-name slips, app operation names, a 5-second browser timeout); `[quiet]` bubbles and raw `NEEDS-INPUT:` lines no longer show in Hope's conversation or in automation reports, and a result that needs input is no longer judged complete; reasoning effort set on an ACP runtime (grok, kimi, cursor, copilot) is recorded as applied.

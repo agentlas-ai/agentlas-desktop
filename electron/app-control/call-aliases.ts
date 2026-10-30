@@ -77,6 +77,19 @@ function argumentObject(entry: AppControlCatalogEntry, raw: unknown): unknown {
  */
 const APP_OPERATION_PORT: Readonly<Record<string, string>> = { "liveDocument.render": "document.render" };
 
+/**
+ * The operation's input from an app.call / one_app_call request: `args` (the exact key wins), `input` (the word its input_schema
+ * reads as; dev 2026-10-17 run8), `arguments` or `params`. With none of them, the operation's own fields written next to
+ * `operation` are its input: {operation:"automations.listRuns", id, limit} was refused "automations.listRuns needs id; pass them
+ * in args" three times in 30 minutes on the owner's 1.3.106 (2026-10-30) although the call carried the id. Those fields are the
+ * call as written, not a guess; the operation's schema still judges them.
+ */
+export function appCallInputOf(request: Record<string, unknown>): unknown {
+  for (const key of ["args", "input", "arguments", "params"] as const) if (request[key] !== undefined) return request[key];
+  const { operation: _operation, ...fields } = request;
+  return Object.keys(fields).length ? fields : undefined;
+}
+
 export function resolveAppCallRequest(
   operation: unknown,
   rawArgs: unknown,

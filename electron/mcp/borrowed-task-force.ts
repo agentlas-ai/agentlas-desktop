@@ -14,7 +14,7 @@ import { runObservedRunner, observedRunnerUsage, observedRunnerUsageEvidence, Ob
 import { mainWorkAttachmentContext, redactWorkAttachmentText } from "../invocation/work-attachments";
 import { effectiveInvocationPermission } from "../../shared/invocation-permission";
 import { withRuntimeCapabilityReceipt } from "../runtime/capability-receipt";
-import { detectSandboxDeath, type SandboxDeathSignal } from "../runtime/sandbox-death";
+import { detectSandboxDeath, detectSandboxRefusal, type SandboxDeathSignal } from "../runtime/sandbox-death";
 import { currentModelCallScope, withModelCallScope, roleForTaskForcePhase } from "../runtime/model-call-ledger";
 import { workerCapabilityRunner, WorkerCapabilityError, type PrepareWorkerCapabilities, type WorkerCapabilityInput } from "./worker-capabilities";
 import { teamWorkerFailureText, withoutExecutionFailureReport } from "./team-worker-failure-copy";
@@ -168,6 +168,7 @@ import { parseWholeOrTrailingTypedJson } from "../../shared/typed-json-tail";
 import { stripStrayProtocolTokens } from "../../shared/protocol-token-strip";
 import { committedOutsideWorkspace, outwardToolLeaf } from "../outward-effect";
 import { classifyTool } from "../../shared/tool-taxonomy";
+import { callLeftNoOutsideEffect } from "../invocation/no-effect-failure";
 import { maskPrivateKeyBlocks } from "../../shared/secret-patterns";
 import { linkAbort } from "../runtime/linked-abort";
 import os from "node:os";
@@ -642,6 +643,9 @@ function taskForceOneArtifacts(
   return bound.length > 0 ? bound : undefined;
 }
 
+/** Runtimes whose write run sits in no OS sandbox of ours: their permission is a tool-level mode, so a refusal is not the boundary. */
+const RUNTIMES_WITHOUT_OS_SANDBOX: ReadonlySet<string> = new Set(["grok", "kimi", "cursor", "acp"]);
+
 /**
  * A host fact about one worker run: a command it ran died inside its sandbox (runtime/sandbox-death.ts). The worker
  * cannot tell this permission boundary from a broken machine, so the room lifts it from this fact the same way as from
@@ -652,9 +656,12 @@ function taskForceOneArtifacts(
 function workerSandboxDeathWatch(p: BorrowedTaskForceParams, permission: RunnerRequest["permission"], agent: string, stepId: string) {
   let seen: SandboxDeathSignal | null = null;
   return {
-    note(tool: string | undefined, result: string | undefined): void {
+    note(tool: string | undefined, result: string | undefined, runtimeKind?: string): void {
       if (seen || permission === "full" || typeof result !== "string" || !result) return;
-      const signal = detectSandboxDeath(result);
+      // A command the sandbox killed, or (write sandbox only) one it refused: the same boundary, two shapes. A read run
+      // refusing a write is the read-only contract working; its own marker asks for the write.
+      const refusalCanHappen = permission === "write" && !(runtimeKind && RUNTIMES_WITHOUT_OS_SANDBOX.has(runtimeKind));
+      const signal = detectSandboxDeath(result) ?? (refusalCanHappen ? detectSandboxRefusal(result) : null);
       if (!signal || typeof signal.kind !== "string") return;
       seen = signal;
       tryRecordRunEvent({ runId: p.req.runId ?? `task-force:${p.chat.id}`, chatId: p.chat.id, kind: "task_force_worker_sandbox_death",
@@ -2930,6 +2937,45 @@ export function taskForceUnitActedOutward(input: {
   return committedOutsideWorkspace([...(input.calls ?? []), ...(input.usedTools ?? []).map((name) => ({ name }))]);
 }
 
+/** A call the host can prove changed nothing outside, from its recorded name and arguments alone (never its result text): a read-only
+ * browser call, a read-only shell command and the other calls callLeftNoOutsideEffect proves, or a click the model declared UI-only
+ * (effect "none": a filter, a menu, a tab - BROWSER_APPROVAL_CLASSIFIER_SOURCE). Shell and browser are the two classes whose effect
+ * the name cannot tell (`python upload.py`, `git push`, page JavaScript, a click with no declared effect): unproven there means
+ * possibly outward. Any other call is judged by the replay guard's own question (committedOutsideWorkspace) and its commit-by-name list. */
+function taskForceCallIsProvablyLocal(call: TaskForceObservedOutwardCall): boolean {
+  if (callLeftNoOutsideEffect({ toolName: call.name, toolArgs: call.args })) return true;
+  const leaf = outwardToolLeaf(call.name);
+  let args: unknown = call.args;
+  if (typeof args === "string") { try { args = JSON.parse(args); } catch { args = null; } }
+  if (leaf === "browser_click") {
+    const effect = args && typeof args === "object" ? (args as Record<string, unknown>).effect : undefined;
+    return typeof effect === "string" && effect.trim().toLowerCase() === "none";
+  }
+  const action = classifyTool(leaf || call.name);
+  if (action === "command" || action === "browser" || leaf.startsWith("browser_")) return false;
+  return !TASK_FORCE_OUTWARD_COMMIT_TOOL_LEAVES.has(leaf) && !committedOutsideWorkspace([{ name: call.name, args }]);
+}
+
+/**
+ * The state of a REQUIRED outside effect whose worker reported nothing (no typed owner choice names it). The worker's silence says
+ * nothing either way, but the host watched every tool call of the unit (noteOutwardCall, all four execution branches), so it can:
+ * "not-attempted" when every outward-class call of the unit is provably local (taskForceCallIsProvablyLocal: navigation, reads,
+ * UI-only clicks, read-only shell), "uncertain" otherwise. "uncertain" stays whenever the host cannot show that: a call that
+ * commits by name (browser_file_upload, effect_item_record, agent_mail_send/reply) or by declaration (a send/publish/pay/delete
+ * click, an external write verb), a shell command or page script it cannot read as read-only, a call list that overflowed its bound,
+ * or a runner that reports no tool rows at all (the legacy cursor hand driver, ACP disabled). A worker's own typed `effectState`
+ * never comes through here: it is read as stated. Before this, every required step that said nothing was recorded "uncertain": a
+ * step that only opened a page and found the owner signed out ended its turn as a failed run ("완료 여부가 불확실", observed in use
+ * 2026-10-30 04:24 and 04:34).
+ */
+export function taskForceUnreportedEffectState(input: {
+  calls: readonly TaskForceObservedOutwardCall[]; dropped?: boolean; runtimeKinds?: readonly string[];
+}): "not-attempted" | "uncertain" {
+  if (input.dropped) return "uncertain";
+  if ((input.runtimeKinds ?? []).some((kind) => kind === "cursor" && acpDisabledFor("cursor"))) return "uncertain";
+  return input.calls.every(taskForceCallIsProvablyLocal) ? "not-attempted" : "uncertain";
+}
+
 export type TaskForceReviewRepairSkip = "step_missing" | "unit_not_completed" | "review_not_completed"
   | "no_repairable_findings" | "unit_requires_approval" | "unit_not_producer" | "unit_acted_outward";
 
@@ -4066,6 +4112,8 @@ export function settleTaskForceOwnerChoices(
   outcome: TaskForcePacketOutcome,
   verifiedEffectRefs: ReadonlySet<string> = new Set(),
   effectRequirement: ExternalEffectRequirement = "unspecified",
+  /** The host-observed state of a required effect the worker reported nothing about (taskForceUnreportedEffectState). */
+  unreportedEffectState: "not-attempted" | "uncertain" = "uncertain",
 ): { outcome: TaskForcePacketOutcome; applied: TaskForceOwnerChoice[] } {
   const external = outcome.ownerChoices.filter(choice => choice.external);
   const externalEffects = external.map(choice => assessExternalEffect({ requirement: effectRequirement,
@@ -4076,7 +4124,7 @@ export function settleTaskForceOwnerChoices(
     || (choice.external && externalEffects[external.indexOf(choice)].satisfied));
   const owners = outcome.ownerChoices.filter((choice) => !applied.includes(choice));
   const requiredUnreported = effectRequirement === "required" && external.length === 0;
-  if (requiredUnreported) externalEffects.push(assessExternalEffect({ requirement: "required", claimedState: "uncertain", authorization: "unspecified" }));
+  if (requiredUnreported) externalEffects.push(assessExternalEffect({ requirement: "required", claimedState: unreportedEffectState, authorization: "unspecified" }));
   const verifiedQuestions = new Set(applied.filter((choice) => choice.external).map((choice) => choice.question));
   const remaining = outcome.blockingRemaining.filter((item) =>
     !item.startsWith(TASK_FORCE_OWNER_DECISION_PREFIX) || !verifiedQuestions.has(item.slice(TASK_FORCE_OWNER_DECISION_PREFIX.length).trim()));
@@ -5337,6 +5385,9 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
   };
   const unitActedOutward = (): { actedOutward?: true } =>
     outwardCallsDropped || taskForceUnitActedOutward({ calls: observedOutwardCalls }) ? { actedOutward: true } : {};
+  /** What a required outside effect the worker said nothing about is recorded as: the host's own observation of this unit's calls. */
+  const unreportedEffectState = (...runtimeKinds: string[]): "not-attempted" | "uncertain" =>
+    taskForceUnreportedEffectState({ calls: observedOutwardCalls, dropped: outwardCallsDropped, runtimeKinds: [active.kind, ...runtimeKinds] });
   const observedReviewDrafts: TaskForceObservedReviewDraft[] = [];
   const observedMailEffects: TaskForceObservedMailEffect[] = [];
   const recordReviewDrafts = (artifacts: McpInvocationEvent["oneArtifacts"]): void => {
@@ -5462,7 +5513,7 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
       // A CEO that answered in the typed handoff JSON is read like a direct worker's handoff (same envelope).
       const firmRendered = taskForceWorkerHandoffText(teamResult.text);
       const { outcome: firmOutcome, applied: firmAppliedChoices } = settleTaskForceOwnerChoices(
-        taskForcePacketOutcome(redactSensitiveText(firmRendered), packet), new Set(), packet.externalEffectRequirement);
+        taskForcePacketOutcome(redactSensitiveText(firmRendered), packet), new Set(), packet.externalEffectRequirement, unreportedEffectState());
       // ★ D1 (A/B3 room fc53939f, 2026-10-16): the firm's CEO answered this write packet with its read-only plan turn —
       //   a leaked monologue, no Delegate block, no outcome envelope — runFirmInvocation returned ok, and an untyped reply
       //   counted as done here, so the room's verifier passed with nothing built. A seat is done only on its own typed
@@ -5808,7 +5859,7 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
                 onPartial: () => {},
                 onTool: (name, args, toolResult, toolId, isError, artifactPaths, imageDataUrl) => {
                   noteOutwardCall(name, args);
-                  if (role === "worker") teamSandboxDeath.note(name, toolResult);
+                  if (role === "worker") teamSandboxDeath.note(name, toolResult, observedWorkerRuntime.kind);
                   const oneArtifacts = taskForceOneArtifacts(p, toolId, isError, artifactPaths, name);
                   recordReviewDrafts(oneArtifacts);
                   p.sink(teamEvent(worker.id, worker.id, {
@@ -6161,7 +6212,7 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
       const tokens = (managerPlan.tokens ?? 0) + workerResults.reduce((sum, item) => sum + item.tokens, 0) + (managerSynthesis.tokens ?? 0);
       // A nested worker's or the manager's question to the owner leaves the team packet open (PARTIAL), never COMPLETED.
       // The manager's typed owner choices settle as each worker's did.
-      const managerChoices = settleTaskForceOwnerChoices(taskForcePacketOutcome(managerSynthesis.text), new Set(), packet.externalEffectRequirement);
+      const managerChoices = settleTaskForceOwnerChoices(taskForcePacketOutcome(managerSynthesis.text), new Set(), packet.externalEffectRequirement, unreportedEffectState());
       const teamOwnerDecisions = [...new Set([...workerResults.flatMap((item) => item.ownerDecisions),
         ...taskForceOwnerAskQuestions(managerSynthesis.text), ...taskForceOwnerDecisions(managerChoices.outcome.blockingRemaining)])];
       const teamAppliedChoices = [...workerResults.flatMap((item) => item.appliedOwnerChoices), ...managerChoices.applied];
@@ -6356,7 +6407,7 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
           onTool: (name, args, result, toolId, isError, artifactPaths, imageDataUrl) => {
             if (typeof name === "string" && name && !observedTools.includes(name)) observedTools.push(name);
             noteOutwardCall(name, args);
-            if (role === "worker") directSandboxDeath.note(name, result);
+            if (role === "worker") directSandboxDeath.note(name, result, observedDirectRuntime.kind);
             const mailEffect = taskForceObservedMailEffect({ name, args, result, isError,
               chatId: p.chat.id, runId: p.req.runId, stepId: packet.stepId ?? "", invocationId: observedDirectInvocationId,
               permission: role === "worker" ? workerPermission ?? "read" : "read" });
@@ -6409,7 +6460,7 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
       ownerScopeKey: p.borrowedCareerOwnerScopeKey ?? activeBorrowedOwnerScopeKey(), signal: link.signal });
     // A first-party sent-mail witness settles only its exact observed choice. Other external choices stay open.
     const { outcome: packetOutcome, applied: appliedOwnerChoices } = settleTaskForceOwnerChoices(
-      candidateOutcome, verifiedMailEffects, packet.externalEffectRequirement,
+      candidateOutcome, verifiedMailEffects, packet.externalEffectRequirement, unreportedEffectState(observedDirectRuntime.kind),
     );
     // The access request is typed state for the room (liftTaskForceWorkerAccess); its marker line is not room prose.
     const accessNeeded = runtimeOutcome.accessNeeded || curatedOutcome.accessNeeded || directSandboxDeath.observed();
@@ -8024,7 +8075,15 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
     };
     // Content repair stays on the provider that actually answered. A failure
     // here uses the same packet-local exclusion set, never a refused provider.
-    return runWithRecovery(retryPacket);
+    const retried = await runWithRecovery(retryPacket);
+    // The retry runs in the same sandbox as the first attempt and can be the one that meets its wall: a step whose first
+    // report was merely incomplete, then crashed Blender's Metal start in the retry (observed in use:
+    // sandbox death at 04:23:58, chip full, no lift receipt, "execution environment must be recovered") was returned as is.
+    // The lift is the room's, never the owner's, so it applies to this result exactly as to the first one.
+    if (!retried.ok && retried.accessNeeded && !retried.runtimeFailure && !p.signal?.aborted) {
+      return liftTaskForceWorkerAccess(retryPacket, retried, runWithRecovery);
+    }
+    return retried;
   };
 
   const results: BorrowedAgentResult[] = new Array(executionPackets.length);

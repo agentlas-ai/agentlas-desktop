@@ -35,7 +35,7 @@ export interface AppControlCaller {
 
 /**
  * What a call carries. `scope` is set by a harness port that already checked a conversation (document.render), never by the
- * model: app.call and one_app_call build their input from the operation and args fields only.
+ * model: app.call and one_app_call build their input from the operation and its arguments only (call-aliases.ts appCallInputOf).
  */
 export interface AppControlCallInput {
   operation?: unknown;
