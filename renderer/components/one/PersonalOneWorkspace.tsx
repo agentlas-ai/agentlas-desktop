@@ -61,6 +61,10 @@ const PersonalOneTaskResult=dynamic(()=>import("./PersonalOneTaskResult").then(m
 
 const visibleAnswer=(text:string)=>mapInlineVisualProse(text,prose=>stripAgentRoutingBanners(stripAgentIdentityBadges(stripAgentControlBlocks(prose,{streaming:true}))).trim());
 const terminal=(state:string)=>["completed","cancelled","failed","interrupted"].includes(state);
+// Single-row composer: the + and send columns (28px each) plus the pill's 8px side padding; below COMPOSER_MIN_TEXT_PX of text the
+// placeholder no longer fits on one line, so the composer takes its two-row shape.
+const COMPOSER_ROW_FIXED_PX=28+28+16;
+const COMPOSER_MIN_TEXT_PX=200;
 type PersonalOneConversationMessage = ChatHistoryEntry & {
   displayKey: string;
   historyGroupId?: string;
@@ -97,6 +101,10 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
   const composerInput=useRef<HTMLTextAreaElement>(null);
   // One line stays a single pill; a second line (typed or wrapped) opens the two-row composer and it stays open until the draft is empty.
   const [composerExpanded,setComposerExpanded]=useState(false);
+  // A pill too narrow for its own controls also takes the two-row shape. The controls keep their width in one row, so a narrow
+  // window or an open result panel squeezed the text to ~100px and the empty placeholder wrapped to two lines.
+  const [composerNarrow,setComposerNarrow]=useState(false);
+  const composerForm=useRef<HTMLFormElement>(null);const composerTrail=useRef<HTMLDivElement>(null);
   const [snapshot,setSnapshot]=useState<OneSupervisorSnapshot|null>(null);
   const historyScope=snapshot?.conversationChatId ?? null;
   const desiredSelection=useChatSelectionIntent(historyScope);
@@ -200,6 +208,12 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
     observer.observe(input);
     return()=>observer.disconnect();
   },[text,composerExpanded,attachments.length]);
+  useLayoutEffect(()=>{
+    const form=composerForm.current,trail=composerTrail.current;if(!form||!trail)return;
+    // The trail's natural width is the same in both shapes, so this never flips back and forth: only the space left for text decides.
+    const measure=()=>setComposerNarrow(form.clientWidth-trail.scrollWidth-COMPOSER_ROW_FIXED_PX<COMPOSER_MIN_TEXT_PX);
+    measure();const observer=new ResizeObserver(measure);observer.observe(form);observer.observe(trail);return()=>observer.disconnect();
+  },[]);
   useLayoutEffect(()=>{const element=composerDock.current;if(!element)return;const measure=()=>{setComposerHeight(element.getBoundingClientRect().height);if(contextBar.current&&workspaceRoot.current)setContextBottom(contextBar.current.getBoundingClientRect().bottom-workspaceRoot.current.getBoundingClientRect().top);};measure();const observer=new ResizeObserver(measure);observer.observe(element);if(contextBar.current)observer.observe(contextBar.current);if(workspaceRoot.current)observer.observe(workspaceRoot.current);return()=>observer.disconnect();},[]);
   const panelMaxWidth=personalOnePanelMaximum(viewportWidth,detached);
   const shownPanelWidth=Math.min(panelMaxWidth,autoPanelWidth?Math.max(360,Math.round(viewportWidth*0.56)):panelWidth);
@@ -588,7 +602,7 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
         {selectionSendBlocked&&<p role="status" className={styles.feedback}>{copy("모델 선택을 확인한 뒤 보내세요. 작성한 내용과 첨부는 그대로 유지됩니다.","Send after the model selection is confirmed. Your draft and attachments are unchanged.")}</p>}
         <MessageReplyPreview reply={messageReply} locale={locale} onDismiss={()=>setMessageReply(null)}/>
         {front.view&&!front.view.effective&&<p className={styles.feedback} data-one-personal-model-scope="true" title={copy("개인 One과의 대화에 사용할 모델입니다. Work 업무의 실행 모델은 업무별로 선택합니다.","The model for your personal One conversation. Choose the execution model separately for each Work task.")}>{copy("개인 대화 모델","Personal chat model")}</p>}
-        <form className={styles.composer} data-one-composer="true" data-expanded={composerExpanded} data-has-files={attachments.length>0} onSubmit={event=>{event.preventDefault();void send();}}>
+        <form ref={composerForm} className={styles.composer} data-one-composer="true" data-expanded={composerExpanded||composerNarrow} data-has-files={attachments.length>0} onSubmit={event=>{event.preventDefault();void send();}}>
           {attachments.length>0&&<div className={styles.attachmentDrafts} aria-label={copy("선택한 첨부","Selected attachments")}>{attachments.map((item,index)=><div className={styles.attachmentDraft} data-kind={item.preview?"image":"file"} key={index} title={item.draft.name}>
             {item.preview?<img src={item.preview} alt={item.draft.name}/>:<span className={styles.attachmentFile}><IconFileUp size={18}/><strong>{item.draft.name}</strong><small>{formatChatFileSize(item.draft.size)}</small></span>}
             <button type="button" aria-label={copy("첨부 삭제: ","Remove attachment: ")+item.draft.name} onClick={()=>{if(item.preview)URL.revokeObjectURL(item.preview);setAttachments(prior=>prior.filter((_,position)=>position!==index));}}><IconClose size={12}/></button>
@@ -618,7 +632,7 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
             if(!files.length)for(const item of Array.from(clipboard.items))if(item.kind==="file")add(item.getAsFile());
             if(!files.length)return;event.preventDefault();void pickAttachments(files);
           }} maxLength={8000} rows={1} placeholder={copy("메시지 보내기","Send a message")}/>
-          <div className={styles.trail}>
+          <div ref={composerTrail} className={styles.trail}>
             {front.view?.effective?<OneFrontChip locale={ko?"ko":"en"} onOpenSetting={()=>void appearance()}/>:<OneRuntimeChips chatId={snapshot?.conversationChatId ?? null} locale={ko?"ko":"en"} disabled={!snapshot} />}
             <div className={styles.voice}><OneVoiceInputHelp locale={ko?"ko":"en"} composerRef={composerInput} /></div>
           </div>

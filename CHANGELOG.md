@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.3.110 — 2026-10-30
+
+- Composer: text keeps a usable width in every composer. When a composer is too narrow to give the text its share, the controls step aside into a second row instead of squeezing it (Personal One, the Flow chat row, the split pane and the Work input).
+- Hope: a local agent you name by role goes to its teammate session instead of Work, which has no specialist tools without a project.
+- Chat: pictures, videos, audio and documents in a conversation show as themselves (a frameless picture, a video that plays in place, an audio player, a document cover from the system thumbnail) instead of a bare link. A file that cannot be shown stays a link to the right panel.
+- Supervisor: follow-ups no longer fail with "database is locked" while the background service holds the database; a bug report a person sends carries the typed failure code of the run it is about.
+
+This release binds Agentlas OS v1.2.71 at 54a446cf3a9320409a712d0347afde2bb99d43d1; public runtime asset `hephaestus-runtime-v1.2.71.tar.gz` is pinned at SHA-256 `5d9ff2743a32de44d82d2fc97db67aba628fdd84791869c8244278d98179b084`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.109 — 2026-10-30
 
 - Goals: an episode with nothing to reflect on is no longer recorded as a refused strategy reflection, and the AGI monitor no longer files it as an app defect; a turn hosted by the background service no longer records the closed Desktop admission as a refusal (the ledger only; behaviour is unchanged).

@@ -2563,6 +2563,8 @@ return (
                       placeholder={t("auto.flow.architect_placeholder")}
                       disabled={architectBusy}
                     />
+                    {/* 두 버튼은 한 묶음으로 줄을 바꾼다 — 폭이 모자라면 입력칸 아래 오른쪽으로 내려간다. */}
+                    <div className="automation-architect-actions">
                     {/* ★기본 버튼은 입력창이 하는 일을 그대로 한다 — 보내기.
                         예전에는 이 자리에 [고칠 내용 보기]가 있어서, 채팅 입력 옆의
                         기본 버튼이 전혀 다른 동작(그래프 수정 제안)을 했다. 기대와의
@@ -2596,6 +2598,7 @@ return (
                     >
                       {t("auto.flow.architect_ask")}
                     </button>
+                    </div>
                   </div>
                   {proposal ? (
                     <div

@@ -181,6 +181,7 @@ import { startBrowserApprovalServer, stopBrowserApprovalServer } from "./browser
 import { startMcpProxyApprovalServer, stopMcpProxyApprovalServer } from "./mcp-tools/proxy-server";
 import { startComputerUseControlServer, stopComputerUseControlServer } from "./computer-use/control-server";
 import { authorizeLocalMediaPath } from "./fs/access";
+import { serveLocalThumbnail } from "./fs/local-thumbnail";
 import { readChatMessageAttachment } from "./store/chat-message-attachments";
 import { backfillDurableOneArtifactChatImages, serveOneArtifactProtocolRequest } from "./one/artifact-preview";
 import { resolveOneTeamAvatarProtocolPath } from "./one/avatar";
@@ -1339,6 +1340,8 @@ function registerRendererProtocol(): void {
           },
         });
       }
+      // First page or slide of a local document for its tile in the chat; same authorization as the file itself.
+      if (url.hostname === "localthumb") return serveLocalThumbnail(url);
       if (url.hostname === "localfile") {
         const p = url.searchParams.get("p");
         if (p) {

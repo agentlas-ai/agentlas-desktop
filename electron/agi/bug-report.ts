@@ -199,6 +199,13 @@ export class AgiBugReports {
     if (runId) payload.runId = clip(runId, 160);
     if (chatId) payload.chatRef = agiChatRef(chatId);
     const steps = (input.steps ?? []).map((step) => clean(String(step), AGI_BUG_REPORT_LIMITS.step)).filter(Boolean).slice(0, AGI_BUG_REPORT_LIMITS.steps);
+    // A report a person sends has a run but no cause: five "Reply failed" reports could not be told apart. The run's
+    // own typed failure code goes along as a fact, not a classification; a code that is not a plain identifier is left out.
+    if (!defect && input.runId && steps.length < AGI_BUG_REPORT_LIMITS.steps) {
+      const failed = this.deps.db.prepare("SELECT json_extract(payload_json, '$.errorCode') AS code FROM run_events WHERE run_id = ? AND kind = 'invoke_failed' ORDER BY rowid DESC LIMIT 1")
+        .get(input.runId) as { code?: unknown } | undefined;
+      if (typeof failed?.code === "string" && /^[a-z][a-z0-9_.:-]{0,79}$/i.test(failed.code)) steps.push(`run failure code: ${failed.code}`);
+    }
     if (steps.length) payload.steps = steps;
     if (defect && this.deps.logExcerpt) {
       const family = DEFECT_FAMILY.find(([pattern]) => pattern.test(defect!.code))?.[1] ?? "runtime";

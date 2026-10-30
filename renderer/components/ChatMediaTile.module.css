@@ -1,0 +1,46 @@
+/* Outputs in the conversation: no frame, no border, only the soft shadow of a macOS window capture. */
+.group { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 14px; margin: 12px 0 14px; max-width: 100%; }
+
+.picture, .video, .document { box-shadow: 0 14px 34px rgba(0, 0, 0, .22), 0 3px 8px rgba(0, 0, 0, .12); }
+
+.pictureButton { display: block; max-width: 100%; padding: 0; border: 0; background: transparent; cursor: zoom-in; line-height: 0; border-radius: 10px; }
+.picture { display: block; max-width: 100%; max-height: 440px; border-radius: 10px; object-fit: contain; }
+
+.video { display: block; width: min(100%, 560px); max-height: 440px; border-radius: 10px; background: #000; }
+
+.audio { display: flex; align-items: center; gap: 12px; width: min(100%, 360px); padding: 10px 14px 10px 10px; border-radius: 999px; background: var(--paper); box-shadow: 0 8px 22px rgba(0, 0, 0, .14), 0 2px 5px rgba(0, 0, 0, .08); }
+.audioPlay { flex: 0 0 36px; width: 36px; height: 36px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 50%; background: var(--ink); color: var(--paper); cursor: pointer; transition: transform 120ms ease; }
+.audioPlay:hover { transform: scale(1.06); }
+.audioBody { flex: 1 1 auto; min-width: 0; display: grid; gap: 3px; }
+.audioName { overflow: hidden; color: var(--ink); font-size: 12px; font-weight: 600; line-height: 16px; text-overflow: ellipsis; white-space: nowrap; }
+.audioTrack { display: flex; align-items: center; gap: 8px; }
+.audioRange { flex: 1 1 auto; min-width: 0; height: 14px; margin: 0; accent-color: var(--ink); cursor: pointer; }
+.audioTime { flex: 0 0 auto; color: var(--muted-deep); font-size: 11px; font-variant-numeric: tabular-nums; }
+
+.document { position: relative; display: block; overflow: hidden; padding: 0; border: 0; border-radius: 10px; background: var(--paper); cursor: pointer; text-align: left; }
+.document[data-kind="presentation"] { width: min(100%, 320px); aspect-ratio: 16 / 9; }
+.document[data-kind="document"] { width: min(100%, 220px); aspect-ratio: 3 / 4; }
+.document[data-kind="spreadsheet"] { width: min(100%, 280px); aspect-ratio: 4 / 3; }
+.cover { display: block; width: 100%; height: 100%; object-fit: cover; object-position: top center; }
+.blank { display: flex; flex-direction: column; justify-content: flex-end; width: 100%; height: 100%; padding: 14px; background: var(--paper-2); }
+.blankName { display: -webkit-box; overflow: hidden; color: var(--ink); font-size: 12.5px; font-weight: 600; line-height: 17px; overflow-wrap: anywhere; -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
+
+/* The mark comes in with the pointer; a tile with no cover keeps it, there is nothing else to say what it is. */
+.mark { position: absolute; top: 10px; right: 10px; display: grid; place-items: center; min-width: 38px; height: 24px; padding: 0 7px; border-radius: 6px; background: var(--mark, #5f6368); color: #fff; font-size: 11px; font-weight: 700; letter-spacing: .02em; opacity: 0; transform: translateY(-3px); transition: opacity 180ms ease, transform 180ms ease; pointer-events: none; }
+.document:hover .mark, .document:focus-visible .mark, .document[data-blank="true"] .mark { opacity: 1; transform: none; }
+.document[data-mark="PPT"], .document[data-mark="KEY"], .document[data-mark="ODP"] { --mark: #c43e1c; }
+.document[data-mark="DOC"], .document[data-mark="ODT"], .document[data-mark="RTF"], .document[data-mark="PAGES"] { --mark: #185abd; }
+.document[data-mark="HWP"] { --mark: #1f7ae0; }
+.document[data-mark="PDF"] { --mark: #d93025; }
+.document[data-mark="XLS"], .document[data-mark="ODS"], .document[data-mark="NUM"] { --mark: #107c41; }
+
+.lightbox { position: fixed; inset: 0; z-index: 2147483000; display: grid; place-items: center; padding: 40px; background: rgba(0, 0, 0, .82); animation: chatMediaFade 140ms ease; cursor: zoom-out; }
+.lightboxImage { display: block; width: 100%; height: 100%; object-fit: contain; }
+.lightboxClose { position: fixed; top: 14px; right: 16px; width: 36px; height: 36px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 50%; background: transparent; color: #fff; opacity: .28; cursor: pointer; transition: opacity 160ms ease, background 160ms ease; }
+.lightboxClose:hover, .lightboxClose:focus-visible { opacity: 1; background: rgba(255, 255, 255, .14); outline: none; }
+
+@keyframes chatMediaFade { from { opacity: 0; } to { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) {
+  .lightbox { animation: none; }
+  .mark, .lightboxClose, .audioPlay { transition: none; }
+}

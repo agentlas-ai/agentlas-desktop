@@ -6,8 +6,10 @@
 //
 // 의도적으로 단순 — HTML 태그는 모두 escape, 사용자 입력 출처 X (LLM 출력만)이지만 안전 우선.
 "use client";
-import { memo, useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
+import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import { MermaidBlock } from "./MermaidBlock";
+import { ChatMediaGroup, ChatPicture, type ChatMediaItem } from "./ChatMediaTile";
+import { splitChatMediaLinks } from "@/lib/chat-media";
 import { ChartBlock } from "./ChartBlock";
 import { HtmlVisualBlock } from "./HtmlVisualBlock";
 import { isChartFenceLanguage } from "@/lib/chart-spec";
@@ -563,17 +565,18 @@ function renderBlock(
     case "ul":
     case "ol": {
       const renderItem = (it: ListItem, j: number) => {
-        const textLines = it.text.split("\n");
+        const media = chatMediaOfText(it.text, mediaBasePaths);
         const children = it.children;
         const ChildTag = children?.ordered ? "ol" : "ul";
         return (
           <li key={j} style={{ marginBottom: 2 }}>
-            {textLines.map((line, k) => (
+            {media.text ? media.text.split("\n").map((line, k, all) => (
               <span key={k}>
                 {inline(line, onOpenMedia, onOpenLinkedFile, mediaBasePaths)}
-                {k < textLines.length - 1 ? <br /> : null}
+                {k < all.length - 1 ? <br /> : null}
               </span>
-            ))}
+            )) : null}
+            {media.items.length ? <ChatMediaGroup items={media.items} onOpen={onOpenLinkedFile ?? noLinkedFileOwner} /> : null}
             {children ? (
               <ChildTag style={{ paddingLeft: 20, margin: "2px 0" }}>
                 {children.items.map((child, k) => {
@@ -623,16 +626,23 @@ function renderBlock(
       );
     case "p": {
       // 파서가 보존한 개행마다 줄을 나눈다 (blockquote와 동일한 규칙).
-      const lines = b.text.split("\n");
+      // Local outputs sit under the sentence as themselves; a paragraph that was only those links leaves no empty <p>.
+      const media = chatMediaOfText(b.text, mediaBasePaths);
+      const lines = media.text ? media.text.split("\n") : [];
       return (
-        <p key={i} style={{ margin: "6px 0" }}>
-          {lines.map((line, j) => (
-            <span key={j}>
-              {inline(line, onOpenMedia, onOpenLinkedFile, mediaBasePaths)}
-              {j < lines.length - 1 ? <br /> : null}
-            </span>
-          ))}
-        </p>
+        <Fragment key={i}>
+          {lines.length ? (
+            <p style={{ margin: "6px 0" }}>
+              {lines.map((line, j) => (
+                <span key={j}>
+                  {inline(line, onOpenMedia, onOpenLinkedFile, mediaBasePaths)}
+                  {j < lines.length - 1 ? <br /> : null}
+                </span>
+              ))}
+            </p>
+          ) : null}
+          {media.items.length ? <ChatMediaGroup items={media.items} onOpen={onOpenLinkedFile ?? noLinkedFileOwner} /> : null}
+        </Fragment>
       );
     }
   }
@@ -958,12 +968,12 @@ function inline(
       {
         // 이미지: ![alt](src) — http/https/data는 그대로, 로컬 경로는 agentlas://localfile로 서빙
         regex: /^!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/,
-        render: (m) => renderInlineImage(key++, m[2].trim(), m[1], onOpenMedia, mediaBasePaths),
+        render: (m) => renderInlineImage(key++, m[2].trim(), m[1], mediaBasePaths),
       },
       {
         // 모델/CLI가 "created at /abs/path.png"처럼 plain path만 답해도 즉시 이미지로 보여준다.
         regex: /^((?:file:\/\/[^\s`'"<>)]*?|\/[^\s`'"<>)]*?|(?:\.{1,2}\/)?[A-Za-z0-9_. -]+(?:\/[^\s`'"<>)]*)?)\.(?:png|jpe?g|gif|webp|avif|svg))(?=$|[\s).,;:])/i,
-        render: (m) => renderInlineImage(key++, m[1].trim(), imageNameFromSrc(m[1], mediaBasePaths), onOpenMedia, mediaBasePaths),
+        render: (m) => renderInlineImage(key++, m[1].trim(), imageNameFromSrc(m[1], mediaBasePaths), mediaBasePaths),
       },
       {
         /*
@@ -994,7 +1004,7 @@ function inline(
         render: (m) => {
           const codeText = m[1].trim();
           if (isImageLikePath(codeText)) {
-            return renderInlineImage(key++, codeText, imageNameFromSrc(codeText, mediaBasePaths), onOpenMedia, mediaBasePaths);
+            return renderInlineImage(key++, codeText, imageNameFromSrc(codeText, mediaBasePaths), mediaBasePaths);
           }
           return (
             <code
@@ -1124,6 +1134,20 @@ export function linkedFileArtifactsInText(text: string, mediaBasePaths: string[]
   return out;
 }
 
+const noLinkedFileOwner = (): void => {};
+
+/** One text block's local outputs (see lib/chat-media.ts); links that are not local outputs stay in the text untouched. */
+function chatMediaOfText(text: string, mediaBasePaths: string[]): { text: string; items: ChatMediaItem<LinkedFileArtifact>[] } {
+  const split = splitChatMediaLinks(text, (rawHref) => {
+    const href = cleanLinkHref(rawHref);
+    if (/^https?:/i.test(href)) return null;
+    const path = localPathsFromFileRef(href, mediaBasePaths)[0];
+    return path ? { path, href } : null;
+  });
+  return { text: split.text, items: split.media.map(({ label, kind, target }) => ({ kind, label, path: target.path,
+    src: `agentlas://localfile/?p=${encodeURIComponent(target.path)}`, file: linkedFileArtifactFromRef(target.href, label, mediaBasePaths) })) };
+}
+
 function renderInlineLink(
   key: number,
   label: string,
@@ -1179,10 +1203,9 @@ function renderInlineImage(
   key: number,
   rawSrc: string,
   alt: string,
-  onOpenMedia?: (a: MediaArtifact) => void,
   mediaBasePaths: string[] = [],
 ): React.ReactNode {
-  return <InlineChatImage key={key} rawSrc={rawSrc} alt={alt} onOpenMedia={onOpenMedia} mediaBasePaths={mediaBasePaths} />;
+  return <InlineChatImage key={key} rawSrc={rawSrc} alt={alt} mediaBasePaths={mediaBasePaths} />;
 }
 
 /**
@@ -1195,12 +1218,10 @@ function renderInlineImage(
 function InlineChatImage({
   rawSrc,
   alt,
-  onOpenMedia,
   mediaBasePaths,
 }: {
   rawSrc: string;
   alt: string;
-  onOpenMedia?: (a: MediaArtifact) => void;
   mediaBasePaths: string[];
 }) {
   const { locale } = useT();
@@ -1240,41 +1261,11 @@ function InlineChatImage({
       </span>
     );
   }
-  const image = (
-    // eslint-disable-next-line @next/next/no-img-element
-    <img
-      src={src}
-      alt={name}
-      onError={() => setFailed(true)}
-      style={{
-        display: "block",
-        maxWidth: "100%",
-        maxHeight: 420,
-        borderRadius: "var(--radius-md)",
-        border: "1px solid var(--paper-edge)",
-        margin: "8px 0",
-        objectFit: "contain",
-      }}
-    />
-  );
-  if (!onOpenMedia) return image;
+  // No frame: the shadow alone sets the picture off; a click enlarges it in place of the conversation.
   return (
-    <button
-      type="button"
-      onClick={() => onOpenMedia(media)}
-      title={name}
-      style={{
-        display: "block",
-        maxWidth: "100%",
-        padding: 0,
-        border: "none",
-        background: "transparent",
-        cursor: "zoom-in",
-        textAlign: "left",
-      }}
-    >
-      {image}
-    </button>
+    <span style={{ display: "block", margin: "12px 0 14px", maxWidth: "100%" }}>
+      <ChatPicture src={src} name={name} onMissing={() => setFailed(true)} />
+    </span>
   );
 }
 

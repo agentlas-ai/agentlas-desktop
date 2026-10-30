@@ -4304,6 +4304,7 @@
 .splitPaneComposer {
   flex: 0 0 auto;
   display: flex;
+  flex-wrap: wrap;
   align-items: flex-end;
   gap: 6px;
   margin: 8px;
@@ -4316,9 +4317,10 @@
 /* 칸 모서리를 끌어 칸이 좁아지면(창 960 에서 4 칸 · 20% = 칸 146px, 입력칸 51px) 한 줄짜리 입력칸 안에서 자리표시자가 2~3 줄로
    꺾여 둘째 줄 윗부분이 입력칸 아래로 비어져 나왔고, 쓴 글도 꺾이면 높이가 그대로라 잘렸다(오너 2026-10-27 "탭을 움직이면 특정
    사이즈에서 오버플로우"). 입력칸 높이는 쓴 글을 따라 자라고(field-sizing: content, 96px 뒤에는 안에서 스크롤), 자리표시자는 한
-   줄에서 잘린다. 폭은 내용이 아니라 칸이 정한다(basis 0) — 쓰는 동안 입력칸 폭이 출렁이지 않는다. */
+   줄에서 잘린다. 폭은 내용이 아니라 칸이 정한다 — 쓰는 동안 입력칸 폭이 출렁이지 않는다. 칸이 더 좁아 입력칸이 140px 를 못 받으면
+   보내기 버튼이 아래 줄 오른쪽으로 내려가고 입력칸이 줄 전체를 쓴다. */
 .splitPaneComposer > textarea {
-  flex: 1 1 0;
+  flex: 1 1 min(140px, 100%);
   min-width: 0;
   field-sizing: content;
   max-height: 96px;
@@ -4341,6 +4343,7 @@
 
 .splitPaneComposer > button {
   flex: 0 0 auto;
+  margin-left: auto;
   min-height: 28px;
   padding: 0 12px;
   border: 0;

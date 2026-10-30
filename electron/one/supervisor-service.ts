@@ -530,7 +530,7 @@ export class OneSupervisorService {
         else if (receipt.status === "cancelled") this.deps.store.closeReview(row.run_id!, "review_stopped_by_owner");
         else this.deps.store.retryReview(row.run_id!, `review_${receipt.status}`);
       }
-    })();
+    }).immediate();
   }
   /** The question card a settled run left for the owner. Main's envelope is exact; without it, the durable card. */
   private questionWait(receipt: InvocationRunReceipt, event?: SupervisorSettledEvent): {sourceMessageId: string; detail: string} | null {
@@ -678,7 +678,7 @@ export class OneSupervisorService {
       const purpose: SupervisorHostNoticePurpose = notices.every(notice => notice.state === "scheduled") ? "one-checkin" : "one-delegation-review";
       return this.deps.store.receive({commandId,oneId,kind:"reply",originChatId:chatId,runId,
         payload:{commandId,text:this.reviewPrompt(oneId,notices),notices:notices.map(notice=>notice.id),purpose}});
-    })();
+    }).immediate();
   }
   private reviewPrompt(oneId: string, notices: SupervisorNotice[]): string {
     const tasks = new Map(this.deps.tasks().map(task => [task.taskId, task]));
@@ -958,7 +958,7 @@ export class OneSupervisorService {
         ...(rejected ? {} : {runId})});
       this.bindHandoffOrigin(saved,originReplyRunId);
       return saved;
-    })();
+    }).immediate();
     if (rejected) return this.deps.store.update(row,{state:"failed",acknowledgement:"settled",reason:rejected});
     this.deps.store.update(row,{state:"dispatching"});
     try {
@@ -997,7 +997,7 @@ export class OneSupervisorService {
       const saved=this.deps.store.receive({commandId:input.commandId,oneId,kind:"chat-send",payload:input,originChatId:chatId,taskId});
       this.bindHandoffOrigin(saved,originReplyRunId);
       return saved;
-    })();
+    }).immediate();
     if (rejected) return this.deps.store.update(row,{state:"failed",acknowledgement:"settled",reason:rejected});
     this.deps.store.update(row,{state:"dispatching"});
     try {
@@ -1097,7 +1097,7 @@ export class OneSupervisorService {
       const saved=this.deps.store.receive({commandId:input.commandId,oneId,kind:"science",payload:input,originChatId:chatId});
       if(!prior)this.bindHandoffOrigin(saved,originReplyRunId);
       return saved;
-    })();
+    }).immediate();
     if (prior) return JSON.parse(row.receipt_json);
     this.deps.store.update(row,{state:"dispatching"});
     try {
@@ -1328,7 +1328,7 @@ export class OneSupervisorService {
         this.deps.store.db.transaction(()=>{
           this.deps.store.update(row,{state:task.state === "completed" ? "completed" : task.state === "cancelled" ? "cancelled" : "failed",acknowledgement:"settled",reason:null});
           if (row.kind === "science" && this.deps.store.notice(row,task.state)) scienceNoticed = true;
-        })();
+        }).immediate();
       }
     }
     // The review starts now, not on the next snapshot or wake (22 O2); drain() still waits for a live reply.
@@ -1365,6 +1365,6 @@ export class OneSupervisorService {
       if(!this.deps.appearance)throw supervisorError('supervisor_appearance_unavailable');
       this.deps.appearance(input);
       return this.deps.store.update(row,{state:'completed',acknowledgement:'settled'});
-    })();
+    }).immediate();
   }
 }

@@ -2941,13 +2941,17 @@ button.dashboard-local-model-card:hover { color: var(--ink); }
 
 .automation-architect-input-row {
   display: flex;
+  flex-wrap: wrap;
   align-items: flex-end;
   gap: 8px;
   min-width: 0;
 }
 
+/* The text keeps a usable width (220px, or the whole row beside the paperclip when the row is narrower); Send and the graph-edit
+   pill (.automation-architect-actions) move together to their own line, right-aligned, instead of squeezing it. In one row they took
+   ~280px: a 316px row left the text 68px, and a 246px row pushed the buttons out of the canvas. */
 .automation-architect-input-row textarea {
-  flex: 1;
+  flex: 1 1 min(220px, calc(100% - 46px));
   min-width: 0;
   min-height: 38px;
   max-height: 132px;
@@ -2966,6 +2970,7 @@ button.dashboard-local-model-card:hover { color: var(--ink); }
 }
 
 .automation-architect-input-row textarea:focus { outline: none; }
+.automation-architect-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: flex-end; gap: 8px; margin-left: auto; flex: 0 1 auto; max-width: 100%; }
 
 .automation-architect-attach {
   width: 38px;
@@ -7520,6 +7525,11 @@ button[data-toggle-state="on"] {
 .agentlas-chat-streaming-cursor {
   background: var(--ink-soft) !important;
 }
+
+/* An empty draft keeps its one-row height (ChatInput: "a wrapping placeholder is not content"), so a long placeholder (the steering
+   line "Running — add the next instruction…") had its second line cut off under the row in a narrow window. It stays on its one
+   line instead, clipped at the edge, as the split-pane composer's does. */
+.chat-input-shell textarea[data-chat-input]::placeholder { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 .chat-input-shell[data-has-progress="true"] {
   border-top-left-radius: 0 !important;
