@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.3.108 — 2026-10-30
+
+- Teams: a full proposal store no longer drops the proposal it has just stored. Once the store was over its cap, every new One team proposal was dropped in the same write that stored it, so team staffing and a Goal's team preparation were refused as "candidate changed". The store now keeps the proposal being added and any proposal holding a reservation, and drops settled proposals first, then started ones, oldest first.
+- Goals: a failure in the Goal obligation sweep now leaves one log line naming its cause.
+
+This release binds Agentlas OS v1.2.71 at 54a446cf3a9320409a712d0347afde2bb99d43d1; public runtime asset `hephaestus-runtime-v1.2.71.tar.gz` is pinned at SHA-256 `5d9ff2743a32de44d82d2fc97db67aba628fdd84791869c8244278d98179b084`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.107 — 2026-10-30
 
 - Tools: an app call that writes its arguments next to `operation` instead of under `args` now runs instead of answering "needs id" (the harness `app.call` and One's `one_app_call` read the call the same way; the operation's own schema still judges the fields).

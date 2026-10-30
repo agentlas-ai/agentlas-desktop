@@ -306,6 +306,8 @@ function resume(run: LongRunRecord, dispatcher: EffectObservationDispatcher, tri
         const typedCode = error && typeof error === "object" && "code" in error ? error.code : null;
         const code = typeof typedCode === "string" && /^[a-z_]{1,64}$/.test(typedCode)
           ? `goal_obligation_${typedCode}` : errorCode(error, "goal_obligation_preparation_unavailable");
+        // This catch was silent: a preparation refused on every pass for hours left nothing in main.log (2026-10-30).
+        logSweepFailureCause("goal-obligation-preparation", run.id, code, error);
         try { failDesktopLongRunResumeDispatch(claimed.queuedId, code); } catch { /* Preserve the original current owner. */ }
         const now = getLongRun(run.id);
         if (now && getChat(chatId)?.goalId === run.goalId && !longRunOwnerHold(now.id)

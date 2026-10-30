@@ -67,6 +67,10 @@ export const ONE_TEAM_PREFLIGHT_REPAIR_META_KEY = "one.team-preflight.repair.v1"
 
 const STORE_VERSION = 1 as const;
 const MAX_PROPOSALS = 100;
+// The reader's ceiling, above the writer's cap: a store may stand over MAX_PROPOSALS by the proposals that hold a live
+// reservation (boundProposalStore never drops one, nor the proposal being added). Reading such a store as corrupt refused
+// every later team preflight for good, the opposite of keeping the claim.
+const MAX_STORED_PROPOSALS = MAX_PROPOSALS * 2;
 const PROPOSAL_TTL_MS = 30 * 60 * 1_000;
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
 const PROCESS_INSTANCE_ID = randomUUID();
@@ -121,6 +125,31 @@ interface InternalOneTeamPreflight {
     runId: string;
     reservedAt: string;
   } | null;
+}
+
+/**
+ * PRD §4.31 — 예전에는 들어온 순서로만 잘라내서, **예약이 잡혀 실행 중인 제안**도 새 제안에 밀려 사라질 수 있었다.
+ * 그러면 그 예약은 청구도 해제도 못 한다. 살아 있는 예약은 절대 밀어내지 않는다.
+ * 2026-10-30 실측: 시작된 제안(예약 없음)까지 지우지 않게 했더니 저장소가 시작된 제안 100건으로 차서, 방금 만든 제안이
+ * 유일한 '버릴 것'이 되어 저장 즉시 지워졌다. 그 뒤 모든 팀 편성·Goal 팀원 준비가 candidate_changed 로 거절됐다
+ * (유튜브 방 Goal 이 05:03Z 부터 매번 runtime_unavailable 로 조용히 재시도). 그래서 지금 넣는 제안은 버리지 않고,
+ * 종결된 것 → 시작된 것 순으로 오래된 것부터 버린다. 예약만 남아 넘치면 더 버리지 않는다
+ * (축출로 청구를 잃는 것보다 상한을 넘기는 편이 낫다).
+ */
+export function boundProposalStore<T extends Pick<InternalOneTeamPreflight, "proposal" | "reservation">>(
+  existing: readonly T[], adding: T, max: number,
+): { kept: T[]; dropped: T[] } {
+  const appended = [...existing, adding];
+  if (appended.length <= max) return { kept: appended, dropped: [] };
+  const holdsReservation = (item: T): boolean =>
+    Boolean(item.reservation) || ["team_reserved", "workforce_reserved", "solo_reserved"].includes(item.proposal.status);
+  const started = (item: T): boolean => ["team_started", "workforce_started", "solo_started"].includes(item.proposal.status);
+  const evictable = [
+    ...appended.filter((item) => item !== adding && !holdsReservation(item) && !started(item)),
+    ...appended.filter((item) => item !== adding && !holdsReservation(item) && started(item)),
+  ];
+  const dropped = new Set(evictable.slice(0, appended.length - max));
+  return { kept: appended.filter((item) => !dropped.has(item)), dropped: [...dropped] };
 }
 
 interface OneTeamPreflightStoreV1 {
@@ -882,7 +911,7 @@ function parseStore(raw: string): { state: OneTeamPreflightStoreV1; migratedProp
     || !Number.isSafeInteger(item.version)
     || Number(item.version) < 1
     || !Array.isArray(item.proposals)
-    || item.proposals.length > MAX_PROPOSALS
+    || item.proposals.length > MAX_STORED_PROPOSALS
   ) throw new Error("One team preflight store is corrupt; it was not overwritten");
 
   let migratedProposalCount = 0;
@@ -1438,27 +1467,10 @@ async function prepareOneTeamPreflightInternal(
       reservation: null,
     };
     state.version += 1;
-    // PRD §4.31 — 예전에는 들어온 순서로만 잘라내서, **예약이 잡혀 실행 중인 제안**도
-    // 새 제안에 밀려 사라질 수 있었다. 그러면 그 예약은 청구도 해제도 못 한다.
-    // 종결된 것부터 버리고, 살아 있는 예약은 절대 밀어내지 않는다.
-    const appended = [...state.proposals, record];
-    if (appended.length > MAX_PROPOSALS) {
-      const live = (item: InternalOneTeamPreflight): boolean =>
-        Boolean(item.reservation)
-        || ["team_reserved", "workforce_reserved", "solo_reserved", "team_started", "workforce_started", "solo_started"].includes(item.proposal.status);
-      const settled = appended.filter((item) => !live(item));
-      const alive = appended.filter(live);
-      const dropCount = appended.length - MAX_PROPOSALS;
-      // 종결된 것부터, 오래된 순으로 버린다. 그래도 넘치면(살아 있는 예약만 남은 경우)
-      // 더 버리지 않는다 — 축출로 청구를 잃는 것보다 상한을 넘기는 편이 낫다.
-      const keptSettled = settled.slice(Math.min(dropCount, settled.length));
-      for (const dropped of settled.slice(0, Math.min(dropCount, settled.length))) {
-        releaseProcessPrompt(dropped.proposal.proposalId);
-      }
-      state.proposals = appended.filter((item) => alive.includes(item) || keptSettled.includes(item));
-    } else {
-      state.proposals = appended;
-    }
+    // PRD §4.31: never a live reservation, never the proposal being added (boundProposalStore).
+    const bounded = boundProposalStore(state.proposals, record, MAX_PROPOSALS);
+    for (const item of bounded.dropped) releaseProcessPrompt(item.proposal.proposalId);
+    state.proposals = bounded.kept;
     persistStore(state, raw, db);
     return { proposal, waitingTask, created: true as const };
   });
