@@ -495,7 +495,7 @@ export function listAgentEvolutionProposals(agentId: string, limit?: number): Ag
 export function createAgentEvolutionProposal(
   input: CreateAgentEvolutionProposalInput,
 ): AgentEvolutionProposalUi {
-  throw new Error("reviewed_file_diff_required: Generate this change in Agent Workspace.");
+  throw new Error("reviewed_file_diff_required: Generate this change in Agent Workspace (agentWorkspace.prepareFileChange).");
 }
 
 /** Explicit user approval and atomic application of a previously durable candidate. */
@@ -503,7 +503,7 @@ export function approveAndApplyAgentEvolutionProposal(
   proposalId: string,
   decisionNote?: string,
 ): AgentEvolutionProposalUi {
-  throw new Error("reviewed_file_diff_required: Approve the exact file diff in Agent Workspace.");
+  throw new Error("reviewed_file_diff_required: Approve the exact file diff in Agent Workspace (agentWorkspace.getDiff, then agentWorkspace.approveAndApply).");
 }
 
 export function rejectAgentEvolutionProposal(proposalId: string, note?: string): AgentEvolutionProposalUi {
@@ -538,5 +538,5 @@ export function markAgentEvolutionProposalMeasured(proposalId: string, note?: st
 }
 
 export function rollbackAgentEvolutionProposal(proposalId: string): AgentEvolutionProposalUi {
-  throw new Error("reviewed_file_diff_required: Review a restore diff in Agent Workspace.");
+  throw new Error("reviewed_file_diff_required: Review a restore diff in Agent Workspace (agentWorkspace.prepareRollback).");
 }

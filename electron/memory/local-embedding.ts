@@ -61,10 +61,10 @@ const PINNED_MODEL2VEC_SOURCE_FILES: Record<string, AssetFileRecord> = {
   "README.md": { sha256: "9505454b6a3efbb25257124de875cb73e02bd663a822528525a3c29b1c4d91ac", size: 5575 },
 };
 const MODEL_DISCOVERY_MISS_TTL_MS = 5_000;
-// Keep the model across an ordinary working session so a later memory lookup
-// does not pay the verified ~200 ms synchronous reload pause. One hour of true
-// embedding inactivity still returns the large model buffers to the OS.
-const DEFAULT_MODEL_IDLE_EVICTION_MS = 60 * 60_000;
+// Keep the model across a burst of lookups so the next one does not pay the
+// verified ~200 ms synchronous reload pause. Ten minutes of embedding inactivity
+// returns the ~150 MB of model buffers to the OS; Main and the daemon each hold a copy.
+const DEFAULT_MODEL_IDLE_EVICTION_MS = 10 * 60_000;
 const HASH_MIN_VECTOR_SCORE = 0.08;
 // A noise floor, not a precision gate — precision comes from the reciprocal-rank
 // fusion below. Calibrated against the multilingual asset, where a genuine match

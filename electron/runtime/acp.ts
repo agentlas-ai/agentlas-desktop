@@ -785,6 +785,9 @@ export function acpSessionPool(): AcpSessionPool<Session> {
     sessionPool = new AcpSessionPool<Session>({
       alive: acpSessionAlive,
       close: closeAcpSession,
+      rootPid: (session) => session.child.pid,
+      // Without session/load a fresh session gets the transcript re-sent, which is less than the live one holds.
+      resumable: (session) => session.init?.agentCapabilities?.loadSession === true,
       /*
        * ★유휴 상주가 호스트의 종료를 막으면 안 된다. 자식의 stdio 파이프는 부모의
        * 이벤트 루프를 붙잡으므로, 붙들기만 하고 unref 하지 않으면 일을 끝낸 터미널·

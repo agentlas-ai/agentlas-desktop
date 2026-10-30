@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.3.111 — 2026-10-31
+
+- Sign-in: a session in use is renewed before it ends. The app asks the server to reissue a session that has less than 20 days left, at startup and every 6 hours, and hands the result to the background service, so a signed-in app no longer reaches the end of its 30 days. The background service no longer deletes the stored session, which belongs to the app and can be newer than its own copy.
+- Memory: resting CLIs close within minutes on every runner (Codex, Claude and ACP agents). The conversation in use stays warm for 15 minutes, the others for 2; Hope, a running turn, an awake agent, background work and an ACP agent that cannot reload a session are left alone. Idle app and service processes give memory back, the embedding model is released after 10 minutes, and the browser tile cache is capped.
+- Background service: it no longer re-reads the keychain every second (an unchanged credential is trusted for 30 seconds, and any write is seen on the next read). The app and the service each log one resource line a minute and can write a CPU and allocation profile on request; reports hold function names and numbers, never values.
+- Agents: an applied learning keeps its record, and each revision is compared with the one it replaced by kind of work, without a verdict. A refused agent-file change names the operation that does it.
+- Tools: `app.call` accepts loose fields for operations that take `input`, a computer-use action waits up to 8 seconds for input to go quiet before it reads an agent's own click as the owner, and a Work brief whose project id names no project starts without one.
+
+This release binds Agentlas OS v1.2.71 at 54a446cf3a9320409a712d0347afde2bb99d43d1; public runtime asset `hephaestus-runtime-v1.2.71.tar.gz` is pinned at SHA-256 `5d9ff2743a32de44d82d2fc97db67aba628fdd84791869c8244278d98179b084`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.110 — 2026-10-30
 
 - Composer: text keeps a usable width in every composer. When a composer is too narrow to give the text its share, the controls step aside into a second row instead of squeezing it (Personal One, the Flow chat row, the split pane and the Work input).

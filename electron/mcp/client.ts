@@ -143,6 +143,7 @@ import { getChatGoalContract, getChatGoalRevision, getLegacyGoalLifecycleSnapsho
 import { goalDeadlineAt } from "../long-run/goal-deadline";
 import { getLongRunByGoalId, longRunOwnerHold, recordLongRunUsage, transitionLongRun } from "../store/long-runs";
 import { getDb } from "../store/db";
+import { storeRunToolSummary } from "../storage/run-detail-summary";
 import { desktopStoreTransaction } from "../store/change-bus";
 import { supervisorExcludedHistoryMessages, supervisorIngressMessage } from "../one/supervisor-store";
 import { carriedFollowupMessageIds } from "../invocation/carried-owner-followups";
@@ -9413,6 +9414,8 @@ async function runMcpInvocationInContext(
         payload: { schemaVersion: "agentlas.revision-run-receipt.v1", ...pin, status: signal?.aborted ? "cancelled" : "finished" } }); } catch { /* Lease release remains unconditional. */ }
       try { releaseAgentWorkspaceRunLease(agentId, leaseId); } catch { /* A removed route retains a conservative lease until recovery. */ }
     }
+    // The revision comparison reads this summary, not the tool rows the 3-day trim deletes (storage/run-detail-summary.ts).
+    if (workspacePins.size && req.runId) try { storeRunToolSummary(getDb(), req.runId); } catch { /* A view input; the run's own result is unaffected. */ }
     mcpConfigCurrent = false;
     signal?.removeEventListener("abort", revokeMcpConfig);
     if (login?.ownerSignal !== signal) login?.ownerSignal.removeEventListener("abort", revokeMcpConfig);

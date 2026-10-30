@@ -129,6 +129,13 @@ export function onAuthSessionInvalidated(
   return () => sessionInvalidationListeners.delete(listener);
 }
 
+const sessionRenewalListeners = new Set<() => void>();
+/** The same session was reissued with a later end. The owner did not change, so nothing that follows ownership reacts to this. */
+export function onAuthSessionRenewed(listener: () => void): () => void {
+  sessionRenewalListeners.add(listener);
+  return () => sessionRenewalListeners.delete(listener);
+}
+
 /** Main observes explicit restoration/login success without receiving cookies. */
 export function onAuthSessionRestored(listener: (session: AuthSession) => void): () => void {
   sessionRestorationListeners.add(listener);
@@ -628,7 +635,8 @@ function invalidateCachedSession(reason: AuthSessionInvalidationReason): void {
   _cache = null;
   _metaRefreshAt = 0;
   emitAuthSessionOwnershipChanged();
-  void queueCookieMutation(deleteStoredSessionCookie);
+  // The stored cookie is Main's. The daemon holds a handed-over copy, which can be older than the one on disk.
+  if (process.env.ELECTRON_RUN_AS_NODE !== "1") void queueCookieMutation(deleteStoredSessionCookie);
   const event: AuthSessionInvalidationEvent = {
     previousWorkspaceId: previous.workspaceId,
     reason,
@@ -678,6 +686,48 @@ export async function fetchWithHubSession(
   } catch (error) {
     clearTimeout(timer);
     throw error;
+  }
+}
+
+/**
+ * A session ended 30 days after it was issued, however much it was used. A Desktop lost its session mid-work:
+ * the stored cookie was gone and Hope's supervisor calls were refused until a new sign-in. The server reissues a session in use with
+ * less than 20 days left (web src/lib/auth/session.ts), so a running app asks well before the end. A server that does not reissue
+ * answers with no cookie, and nothing changes.
+ */
+const SESSION_RENEW_WITHIN_MS = 20 * 24 * 60 * 60 * 1000;
+export const SESSION_RENEW_CHECK_MS = 6 * 60 * 60 * 1000;
+function reissuedSessionCookie(res: Response): string | null {
+  for (const header of res.headers.getSetCookie()) {
+    const pair = header.split(";", 1)[0];
+    const at = pair.indexOf("=");
+    if (at > 0 && pair.slice(0, at).trim() === COOKIE_NAME) return decodeURIComponent(pair.slice(at + 1).trim()) || null;
+  }
+  return null;
+}
+export async function renewAgingSession(): Promise<boolean> {
+  if (developmentEffectsSuppressed() || managedOneConfigured()) return false;
+  const current = _cache;
+  if (!current?.expiresAt || current.expiresAt - Date.now() > SESSION_RENEW_WITHIN_MS) return false;
+  const generation = _sessionGeneration;
+  try {
+    const res = await fetchWithHubSession(`${COOKIE_NAME}=${current.cookieValue}`, `${webBaseUrl()}/api/auth/session`);
+    const value = res.ok ? reissuedSessionCookie(res) : null;
+    if (!value || value === current.cookieValue) return false;
+    const decoded = decodeSessionCookie(value);
+    if (decoded.status !== "valid" || decoded.value.userId !== current.userId || decoded.value.workspaceId !== current.workspaceId
+      || decoded.value.expiresAt <= current.expiresAt) return false;
+    // A login or logout during the request owns the session; its queued write stays the last one on disk.
+    await queueCookieMutation(async () => { if (generation === _sessionGeneration) await writeStoredSessionCookie(value); });
+    if (generation !== _sessionGeneration || _cache?.cookieValue !== current.cookieValue) return false;
+    _cache = { ..._cache, cookieValue: value, expiresAt: decoded.value.expiresAt };
+    for (const listener of sessionRenewalListeners) {
+      try { listener(); } catch { console.warn("[auth] session renewal listener failed"); }
+    }
+    return true;
+  } catch (error) {
+    console.warn("[auth] session renewal did not complete; the next check retries", error instanceof Error ? error.message : "unknown");
+    return false;
   }
 }
 
@@ -925,9 +975,11 @@ export function adoptHostSessionHandoff(session: HostSessionHandoff | null): boo
   }
   if (session.expiresAt !== undefined && session.expiresAt < Date.now()) return clearSession();
   // A value-free epoch prevents a former A capability reviving after A → B → A.
-  // Reattaching the identical session must not invalidate its ongoing daemon turns.
-  if (!_cache || _cache.cookieValue !== session.cookieValue || _cache.userId !== session.userId
-    || _cache.workspaceId !== session.workspaceId || _cache.expiresAt !== session.expiresAt) _sessionGeneration += 1;
+  // Reattaching the identical session, or the same account's session reissued with a later end, must not invalidate its ongoing daemon turns.
+  const sameAccountLater = !!_cache && _cache.userId !== undefined && _cache.userId === session.userId && _cache.workspaceId === session.workspaceId
+    && _cache.expiresAt !== undefined && session.expiresAt !== undefined && session.expiresAt > _cache.expiresAt;
+  if (!sameAccountLater && (!_cache || _cache.cookieValue !== session.cookieValue || _cache.userId !== session.userId
+    || _cache.workspaceId !== session.workspaceId || _cache.expiresAt !== session.expiresAt)) _sessionGeneration += 1;
   _cache = { cookieValue: session.cookieValue, userId: session.userId, workspaceId: session.workspaceId, expiresAt: session.expiresAt };
   emitAuthSessionOwnershipChanged();
   return true;

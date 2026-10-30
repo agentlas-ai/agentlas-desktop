@@ -154,6 +154,8 @@ import {
   getAuthSession,
   onAuthSessionInvalidated,
   onAuthSessionRestored,
+  renewAgingSession,
+  SESSION_RENEW_CHECK_MS,
   retryTemporaryAuthRestore,
   type AuthRestoreResult,
 } from "./auth";
@@ -2773,6 +2775,8 @@ app.whenReady().then(async () => {
   }
   // Restore/decrypt the account before the post-migration continuity check.
   const initialAuthRestore = await bootAuthFromKeychain();
+  void renewAgingSession();
+  setInterval(() => void renewAgingSession(), SESSION_RENEW_CHECK_MS).unref?.();
   traceUpdaterStartup(`auth-restore-complete:${initialAuthRestore.status}`);
   traceStartup(`auth-${initialAuthRestore.status}`);
   const initialAuthRestoreWasTemporary = initialAuthRestore.status === "temporarily-unavailable";
@@ -5564,6 +5568,24 @@ app.whenReady().then(async () => {
     startDreamingScheduler();
   } catch (err) {
     console.error("[dreaming] scheduler start failed:", err);
+  }
+  try {
+    const { startResourceSampler } = await import("./diagnostics/resource-sampler");
+    const { agentResidencySnapshot } = await import("./runtime/agent-residency");
+    startResourceSampler({
+      role: "main",
+      directory: path.join(app.getPath("userData"), "diagnostics"),
+      idle: () => agentResidencySnapshot().inUse === 0,
+      extra: () => {
+        const metrics = app.getAppMetrics();
+        const workingSetMb = (types: string[]) => Math.round(metrics
+          .filter((metric) => types.includes(metric.type))
+          .reduce((sum, metric) => sum + metric.memory.workingSetSize, 0) / 1024);
+        return { electronProcesses: metrics.length, rendererMb: workingSetMb(["Tab"]), gpuMb: workingSetMb(["GPU"]) };
+      },
+    });
+  } catch (err) {
+    console.error("[diagnostics] resource sampler start failed:", err);
   }
   // 다시 나타난 학습의 변경안을 유휴 때 미리 만들어 둔다. 반영은 오너가 diff를 보고 승인할 때만.
   try {

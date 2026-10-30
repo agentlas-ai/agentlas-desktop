@@ -760,7 +760,7 @@ export async function readAgentFile(agentId: string, absPath: string): Promise<T
 
 export function writeAgentFile(agentId: string, absPath: string, content: string): { ok: boolean } {
   const { dir, safe } = resolveAgentFileTarget(agentId, absPath);
-  if (path.basename(safe).toLowerCase() !== "memory.md") throw new Error("reviewed_file_diff_required: Review the file change in Manage Agent before applying it.");
+  if (path.basename(safe).toLowerCase() !== "memory.md") throw new Error("reviewed_file_diff_required: Review the file change in Manage Agent before applying it (agentWorkspace.prepareFileChange, then agentWorkspace.getDiff and agentWorkspace.approveAndApply).");
   atomicWriteTextFile(safe, content);
   // system-prompt.md 편집은 DB에도 반영해 새 메시지에 즉시 적용.
   if (isCanonicalSystemPrompt(dir, safe)) {

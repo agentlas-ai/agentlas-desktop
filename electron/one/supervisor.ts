@@ -270,9 +270,11 @@ export function oneSupervisor():OneSupervisorService {
       return appendChatMessage(chatId,"user",text,allImages.length ? {images:allImages} : undefined).id;
     },attachmentPrompt:chatFilePrompt,
     createWork:input=>{
-      if (input.projectId && !getProject(input.projectId)) throw supervisorError('supervisor_work_project_missing');
+      // A project id that names no project starts the brief without one: Hope passed its own conversation id and the owner's
+      // brief was refused supervisor_work_project_missing. The receipt reports the chat's real project, so nothing claims the wrong one.
+      const projectId=input.projectId && getProject(input.projectId) ? input.projectId : null;
       const title=input.text.split(/\r?\n/,1)[0].slice(0,120);
-      const chat=input.projectId ? createProjectWorkChat({projectId:input.projectId,title}) : createChat({originSurface:"work",taskMode:"task",title});
+      const chat=projectId ? createProjectWorkChat({projectId,title}) : createChat({originSurface:"work",taskMode:"task",title});
       if (hostOptions?.executor === "agentlas-cloud") bindPersonalFolder(chat.id);
       const task=ensureCanonicalTaskForChat(chat.id);
       if (!task) throw supervisorError('supervisor_work_task_missing');

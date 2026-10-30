@@ -105,6 +105,10 @@ export interface AcpSessionPoolOptions<S> {
   ref?: (session: S) => void;
   /** 붙들 수 있는 상한. 기본은 스웜 예산. */
   budget?: () => number;
+  /** The CLI process, so the registry can see what it holds before closing it at rest. Omitted: only the 12h reaper applies. */
+  rootPid?: (session: S) => number | null | undefined;
+  /** Whether the next turn continues this conversation natively once the process closes. Default true. */
+  resumable?: (session: S) => boolean;
   now?: () => number;
   /** Bound for a retiring Work-project sibling to exit before this pool opens (project-residency default). */
   projectSiblingExitWaitMs?: number;
@@ -269,6 +273,10 @@ export class AcpSessionPool<S> {
         close: (reason) => this.closeEntry(entry, reason),
         now: entry.lastActivityAt,
         admission: residentAdmission,
+        ...(this.opts.rootPid ? { idleProbe: {
+          resumable: () => this.opts.resumable?.(entry.session) ?? true,
+          rootPid: () => this.opts.rootPid?.(entry.session) ?? null,
+        } } : {}),
       });
       entry.registered = true;
       residentAdmission = undefined;

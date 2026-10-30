@@ -33,6 +33,7 @@ import {
 } from "../runtime/agent-residency";
 import { sweepOrphanedRunChildren } from "../runtime/spawn-registry";
 import { sweepUnusedAgents } from "../archive/auto-archive";
+import { startResourceSampler } from "../diagnostics/resource-sampler";
 import { drainRunChildrenForHostShutdown, liveRunChildCount } from "../runtime/exec";
 import { drainInvocationService } from "../runtime/invocation-lifecycle";
 import { MainInvocationLifetime, admitMainAutomation, captureMainRootContinuation } from "../runtime/scheduled-root-context";
@@ -1042,6 +1043,7 @@ export async function startDaemon(options: DaemonStartupOptions = {}): Promise<v
   recordServicePhase("identity_ready");
   console.log(`[agentlasd] identity ready: ${installIdentity.channel}`);
   console.log(`[agentlasd] user data: ${userDataDir()}`);
+  startResourceSampler({ role: "daemon", directory: path.join(userDataDir(), "diagnostics"), idle: () => agentResidencySnapshot().inUse === 0 });
   serviceHeartbeat = setInterval(() => {
     lastHeartbeatAtMs = Date.now();
     goalWaitHeartbeat?.();

@@ -11,6 +11,8 @@ export const APP_BROWSER_CACHE_BYTES = 256 * 1024 * 1024;
 /** Before app ready: Chromium evicts the HTTP cache above this size. */
 export function capAppBrowserCache(): void {
   app.commandLine.appendSwitch("disk-cache-size", String(APP_BROWSER_CACHE_BYTES));
+  // The GPU process reached 779 MB (measured). A 5K window's tiles fit well inside this budget.
+  app.commandLine.appendSwitch("force-gpu-mem-available-mb", "256");
 }
 
 /**

@@ -441,6 +441,8 @@ export function codexSessionPool(): AcpSessionPool<CodexResidentSession> {
     sessionPool = new AcpSessionPool<CodexResidentSession>({
       alive: codexResidentSessionAlive,
       close: closeCodexResidentSession,
+      rootPid: (session) => session.child.pid,
+      resumable: (session) => Boolean(session.threadId),
       /*
        * ★유휴 상주가 호스트의 종료를 막으면 안 된다. 붙든 자식의 stdio 파이프는 부모의
        * 이벤트 루프를 잡으므로, unref 하지 않으면 일을 끝낸 터미널·게이트 스크립트가

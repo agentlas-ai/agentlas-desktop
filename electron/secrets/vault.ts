@@ -14,6 +14,7 @@ import type { RuntimeBackend } from "../../shared/types";
 import { isValidEnvName } from "../../shared/env-key-rename";
 import type { CredentialRecoveryFailure, CredentialRecoveryResult } from "../../shared/credential-recovery";
 import { readCredentialRecoveryRecords, type CredentialRecoveryResource } from "./recovery-state";
+import { bumpCredentialGeneration, readCredentialGeneration } from "./credential-generation";
 import {
   requireConfiguredInstallIdentity,
 } from "../install-identity";
@@ -45,7 +46,10 @@ const memoryVault = new Map<string, string>();
 const keychainCache = new Map<string, string | null>();
 // When each keychainCache entry / the env name list was observed. Only a headless host (the background service) uses it.
 const keychainCacheAt = new Map<string, number>();
+// The write generation each observation started under (credential-generation.ts).
+const keychainCacheGeneration = new Map<string, string | null>();
 let envKeyCacheAt = 0;
+let envKeyCacheGeneration: string | null = null;
 /**
  * The background service is a different process from the window that edits the vault. Its read cache never learns
  * about a key the window saved, renamed or rotated afterwards: a name it once read as missing stayed missing, and a
@@ -57,13 +61,30 @@ export function headlessCredentialCacheTtlMs(): number {
   const raw = Number(process.env.AGENTLAS_HEADLESS_CREDENTIAL_CACHE_MS);
   return Number.isFinite(raw) && raw >= 0 ? Math.min(raw, 60_000) : 1_000;
 }
+/**
+ * How long a headless host trusts an observation while the write generation has not moved. Bounded because a process
+ * outside this app (the terminal engine, the OS keychain editor) can change a credential without moving it.
+ */
+export function headlessCredentialGenerationTtlMs(): number {
+  return process.env.AGENTLAS_HEADLESS_CREDENTIAL_CACHE_MS === undefined ? 30_000 : headlessCredentialCacheTtlMs();
+}
+function observationIsFresh(at: number, generation: string | null | undefined): boolean {
+  const current = readCredentialGeneration();
+  if (current === null || generation === null || generation === undefined) return Date.now() - at <= headlessCredentialCacheTtlMs();
+  return generation === current && Date.now() - at <= headlessCredentialGenerationTtlMs();
+}
 function cachedCredentialIsFresh(key: string): boolean {
   if (keychainPromptsAreAnswerable()) return true;
   const at = keychainCacheAt.get(key);
-  return at !== undefined && Date.now() - at <= headlessCredentialCacheTtlMs();
+  return at !== undefined && observationIsFresh(at, keychainCacheGeneration.get(key));
 }
-function noteCredentialCached(key: string): void {
+function envKeyCacheIsFresh(): boolean {
+  return keychainPromptsAreAnswerable() || observationIsFresh(envKeyCacheAt, envKeyCacheGeneration);
+}
+/** A read passes the generation it started under: a write that lands during the read must leave this entry stale. */
+function noteCredentialCached(key: string, generation: string | null = readCredentialGeneration()): void {
   keychainCacheAt.set(key, Date.now());
+  keychainCacheGeneration.set(key, generation);
 }
 const passwordReads = new Map<string, Promise<string | null>>();
 const passwordOperations = new Map<string, Promise<unknown>>();
@@ -149,8 +170,7 @@ function accountPresence(account: string): CredentialPresence {
     const value = keychainCache.get(key);
     return typeof value === "string" && value.length > 0 ? "present" : "missing";
   }
-  if (account.startsWith(ENV_PREFIX) && envKeyCacheService === service && envKeyCache
-    && (keychainPromptsAreAnswerable() || Date.now() - envKeyCacheAt <= headlessCredentialCacheTtlMs())) {
+  if (account.startsWith(ENV_PREFIX) && envKeyCacheService === service && envKeyCache && envKeyCacheIsFresh()) {
     return envKeyCache.includes(account.slice(ENV_PREFIX.length)) ? "present" : "missing";
   }
   if (keychainPromptsAreAnswerable() && knownAccounts?.service === service && !passwordOperations.has(key)) {
@@ -165,8 +185,7 @@ export function envKeyNamesHint(): readonly string[] | null {
   }
   let service: string;
   try { service = keychainService(); } catch { return null; }
-  return envKeyCacheService === service && envKeyCache
-    && (keychainPromptsAreAnswerable() || Date.now() - envKeyCacheAt <= headlessCredentialCacheTtlMs()) ? envKeyCache : null;
+  return envKeyCacheService === service && envKeyCache && envKeyCacheIsFresh() ? envKeyCache : null;
 }
 /** Value-free presence of a Vault env key (discovery only; a run that needs the value still reads it). */
 export function envVarPresence(key: string): CredentialPresence { return accountPresence(`${ENV_PREFIX}${key}`); }
@@ -234,10 +253,10 @@ function nativeGet(service: string, account: string): Promise<string | null> {
   return keychainGet(service, account, () => keytarApi().getPassword(service, account));
 }
 function nativeSet(service: string, account: string, value: string): Promise<void> {
-  return keychainSet(service, account, value, () => keytarApi().setPassword(service, account, value));
+  return keychainSet(service, account, value, () => keytarApi().setPassword(service, account, value)).then(bumpCredentialGeneration);
 }
 function nativeDelete(service: string, account: string): Promise<void> {
-  return keychainDelete(service, account, async () => { await keytarApi().deletePassword(service, account); });
+  return keychainDelete(service, account, async () => { await keytarApi().deletePassword(service, account); }).then(bumpCredentialGeneration);
 }
 /** The stored value behind `raw` (the head read): itself, or the chunks a manifest names, reassembled and verified. */
 async function resolveChunked(service: string, account: string, raw: string | null): Promise<string | null> {
@@ -300,9 +319,10 @@ async function getPassword(account: string): Promise<string | null> {
   if (!passwordOperations.has(key) && keychainCache.has(key) && cachedCredentialIsFresh(key)) return keychainCache.get(key) ?? null;
   const started = queuePasswordOperation(key, async () => {
     if (keychainCache.has(key) && cachedCredentialIsFresh(key)) return keychainCache.get(key) ?? null;
+    const generation = readCredentialGeneration();
     const value = await resolveChunked(service, account, await nativeGet(service, account));
     keychainCache.set(key, value);
-    noteCredentialCached(key);
+    noteCredentialCached(key, generation);
     credentialStateRevision += 1;
     notePresence(service, account, typeof value === "string" && value.length > 0);
     return value;
@@ -374,9 +394,10 @@ function retryAccountFromUser(service: string, account: string): Promise<string 
   if (current) return current;
   passwordReads.delete(key);
   const started = queuePasswordOperation(key, async () => {
+    const generation = readCredentialGeneration();
     const value = await resolveChunked(service, account, await retryKeychainReadFromUser(service, account, () => keytarApi().getPassword(service, account)));
     keychainCache.set(key, value);
-    noteCredentialCached(key);
+    noteCredentialCached(key, generation);
     credentialStateRevision += 1;
     notePresence(service, account, typeof value === "string" && value.length > 0);
     return value;
@@ -428,11 +449,12 @@ export async function listCredentialRecoveryFailures(): Promise<CredentialRecove
 function retryEnvListFromUser(service: string): Promise<string[]> {
   const current = userListRetries.get(service);
   if (current) return current;
+  const generation = readCredentialGeneration();
   const started = retryKeychainListFromUser(service, async () => (await keytarApi().findCredentials(service)).map((item) => item.account))
     .then((listed) => {
       const accounts = listed.filter((account) => !isChunkAccount(account));
       const keys = accounts.filter((account) => account.startsWith(ENV_PREFIX)).map((account) => account.slice(ENV_PREFIX.length));
-      if (keychainService() === service) { envKeyCacheService = service; envKeyCache = keys; envKeyCacheAt = Date.now(); rememberAccounts(service, accounts); }
+      if (keychainService() === service) { envKeyCacheService = service; envKeyCache = keys; envKeyCacheAt = Date.now(); envKeyCacheGeneration = generation; rememberAccounts(service, accounts); }
       return keys;
     });
   userListRetries.set(service, started);
@@ -685,16 +707,17 @@ export async function listEnvKeys(): Promise<string[]> {
     envKeyCache = null;
     envKeyRead = null;
   }
-  if (envKeyCache && (keychainPromptsAreAnswerable() || Date.now() - envKeyCacheAt <= headlessCredentialCacheTtlMs())) return envKeyCache;
+  if (envKeyCache && envKeyCacheIsFresh()) return envKeyCache;
   if (envKeyRead) return envKeyRead;
   const started = Promise.resolve().then(async () => {
+    const generation = readCredentialGeneration();
     const accounts = developmentEffectsSuppressed() || USE_MEMORY_VAULT
       ? [...memoryVault.keys()]
       : await keychainListAccounts(service, async () =>
           (await keytarApi().findCredentials(service)).map((c) => c.account).filter((account) => !isChunkAccount(account)));
     if (!(developmentEffectsSuppressed() || USE_MEMORY_VAULT)) rememberAccounts(service, accounts);
     const keys = accounts.filter((a) => a.startsWith(ENV_PREFIX)).map((a) => a.slice(ENV_PREFIX.length));
-    if (envKeyCacheService === service) { envKeyCache = keys; envKeyCacheAt = Date.now(); }
+    if (envKeyCacheService === service) { envKeyCache = keys; envKeyCacheAt = Date.now(); envKeyCacheGeneration = generation; }
     return keys;
   });
   envKeyRead = started;

@@ -8,8 +8,9 @@ import { hostRunChildrenEnded, spawnRegistryDirectory } from "../runtime/spawn-r
 import { ownProcessStartToken, processState, proveTerminalOwnerGone } from "../store/terminal-owner-liveness";
 import { getRoute } from "./routes";
 import { AGENT_SKILL_ROOTS, materializeAgentFiles, resolveAgentPackageDir } from "./files";
-import { agentRevisionOutcomes } from "./revision-outcomes";
-import { lessonEvidence } from "./learning-evidence";
+import { agentRevisionOutcomes, compareRevisionOutcomes } from "./revision-outcomes";
+import { lessonEvidence, lessonRunIds } from "./learning-evidence";
+import { runEvidenceRef } from "../memory/run-evidence";
 import { AGENT_LEARNING_POLICY, type LessonEvidence } from "../../shared/agent-learning-policy";
 import { ALWAYS_ON_INSTRUCTION_LIMITS, addedLines, alwaysOnInstructionChange, alwaysOnInstructionSize, learningTriggerAllowance, type AlwaysOnInstructionChange } from "../../shared/agent-instruction-limits";
 import { readCanonicalPromptFromDirectory } from "./prompt-authority";
@@ -27,7 +28,7 @@ import { AgentWorkspaceError, snapshotAgentWorkspace, workspaceTarget, workspace
   decodeWorkspaceText, normalizeWorkspacePath, isWorkspaceAsset, workspaceFileRole, MAX_WORKSPACE_FILE_BYTES, MAX_WORKSPACE_FILES,
   MAX_WORKSPACE_TOTAL_BYTES, type WorkspaceTree, type WorkspaceAsset } from "./workspace-snapshot";
 import type { AgentWorkspaceSnapshot, AgentWorkspaceProposal, AgentWorkspaceRevision, AgentWorkspaceDiff,
-  AgentWorkspaceMemoryCandidate, AgentWorkspaceMemoryCounts, AgentWorkspaceReadFile, AgentWorkspaceFile, AgentWorkspaceLearningCard, AgentWorkspaceChangeSummary } from "../../shared/agent-workspace";
+  AgentWorkspaceMemoryCandidate, AgentWorkspaceMemoryCounts, AgentWorkspaceReadFile, AgentWorkspaceFile, AgentWorkspaceLearningCard, AgentWorkspaceChangeSummary, AgentWorkspaceExperience } from "../../shared/agent-workspace";
 
 export const AGENT_WORKSPACE_CAPABILITY_VERSION = 2;
 interface StoredRevision extends AgentWorkspaceRevision { agentId: string; tree: WorkspaceTree; }
@@ -336,9 +337,37 @@ export function listAgentWorkspaceRevisions(agentId: string): AgentWorkspaceRevi
   }).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
 function withRevisionOutcomes(agentId: string, revisions: AgentWorkspaceRevision[]): AgentWorkspaceRevision[] {
+  revisions = revisions.map(revision => { const experience = readExperience(agentId, revision.id); return experience ? { ...revision, experience } : revision; });
   let outcomes: ReturnType<typeof agentRevisionOutcomes>;
   try { outcomes = agentRevisionOutcomes(agentId); } catch { return revisions; /* Outcomes are a view; the history stays readable without them. */ }
-  return revisions.map(revision => outcomes.has(revision.id) ? { ...revision, outcome: outcomes.get(revision.id) } : revision);
+  return revisions.map(revision => {
+    const outcome = outcomes.get(revision.id), base = revision.parentRevisionIds[0];
+    const comparison = base ? compareRevisionOutcomes(base, outcomes.get(base), outcome) : null;
+    return { ...revision, ...(outcome ? { outcome } : {}), ...(comparison ? { comparison } : {}) };
+  });
+}
+/**
+ * EXPERIENCE: an applied learning keeps when it
+ * applies (the card's situation), what changed (the host's file summary), at most one lesson (the card's behaviour after the
+ * change) and the runs it came from. Without a run to cite there is no record: an uncited lesson would be an invented one.
+ * No effect is written: approval is not evidence the change helped, and the comparison is read from runs each time.
+ */
+const EXPERIENCE_SCHEMA = "agentlas.agent-experience.v1";
+const MAX_EXPERIENCE_EVIDENCE = 50;
+function experienceFile(agentId: string, revisionId: string): string { return path.join(agentWorkspaceStorePath(agentId), "experience", `${revisionId}.json`); }
+function readExperience(agentId: string, revisionId: string): AgentWorkspaceExperience | null {
+  try {
+    const value = readJson<AgentWorkspaceExperience>(experienceFile(agentId, revisionId));
+    return value?.schemaVersion === EXPERIENCE_SCHEMA && value.revisionId === revisionId && Array.isArray(value.evidence) && value.evidence.length ? value : null;
+  } catch { return null; }
+}
+function recordExperience(p: StoredProposal, revisionId: string): void {
+  if (!p.memoryEntryIds.length || fs.existsSync(experienceFile(p.agentId, revisionId))) return;
+  const evidence = [...lessonRunIds(p.memoryEntryIds)].flatMap(id => id.startsWith("turn:") ? [] : runEvidenceRef(id)).slice(0, MAX_EXPERIENCE_EVIDENCE);
+  if (!evidence.length) return;
+  const experience: AgentWorkspaceExperience = { schemaVersion: EXPERIENCE_SCHEMA, revisionId, proposalId: p.id, baseRevisionId: p.baseRevisionId,
+    appliedAt: p.appliedAt ?? iso(), cue: p.card?.situation ?? null, changed: p.changeSummary ?? [], lesson: p.card?.after ?? null, evidence };
+  atomicJson(experienceFile(p.agentId, revisionId), experience);
 }
 function listProposals(agentId: string): StoredProposal[] {
   const dir = proposalsDir(agentId);
@@ -1060,6 +1089,8 @@ function finalizeApply(p: StoredProposal, approval: ApprovalReceipt): AgentWorks
       registration: provenance.registration, expectedRevision: provenance.markerRevision });
   }
   p.status = "applied"; p.appliedAt = p.appliedAt ?? iso(); p.appliedRevisionId = revision.id; saveProposal(p);
+  // The files are already the approved ones; a record that cannot be written never undoes that.
+  try { recordExperience(p, revision.id); } catch (error) { console.warn("[agent-workspace] experience record not written", error instanceof Error ? error.message : error); }
   approval.state = "consumed"; atomicJson(path.join(agentWorkspaceStorePath(p.agentId), "approvals", `${approval.id}.json`), approval);
   const journal = path.join(agentWorkspaceStorePath(p.agentId), "operation.json"); if (fs.existsSync(journal)) fs.unlinkSync(journal);
   return uiProposal(p);

@@ -49,10 +49,48 @@ export interface AgentWorkspaceRevision {
   summary: string;
   /** Runs on this revision and how they ended (electron/agents/revision-outcomes.ts); absent when none were recorded. */
   outcome?: AgentWorkspaceRevisionOutcome;
+  /** Runs on the revision it replaced next to runs on this one, per kind of work; absent when neither side has runs. */
+  comparison?: AgentWorkspaceRevisionComparison;
+  /** What an applied learning was, kept only when it names the runs it came from. Absent on older revisions. */
+  experience?: AgentWorkspaceExperience;
 }
-/** runs: runs on the revision; completed/failed: how they ended; errors: tool errors; steering: owner messages mid-run;
- * attempts: model turn attempts (retries included). */
-export interface AgentWorkspaceRevisionOutcome { runs: number; completed: number; failed: number; errors: number; steering: number; attempts: number; }
+/** The kind of work a run was, from its start record: an automation run, a task, a conversation turn, or unrecorded. */
+export type AgentWorkspaceWorkKind = "automation" | "task" | "conversation" | "other";
+/** runs: runs counted; completed/failed: how they ended; errors: tool errors; steering: owner messages mid-run;
+ * attempts: model turn attempts (retries included); toolCalls: tool calls requested; withOutput: runs whose tools recorded
+ * an output digest. */
+export interface AgentWorkspaceOutcomeCounts { runs: number; completed: number; failed: number; errors: number; steering: number; attempts: number;
+  toolCalls: number; withOutput: number; }
+export interface AgentWorkspaceRevisionOutcome extends AgentWorkspaceOutcomeCounts {
+  byKind: Partial<Record<AgentWorkspaceWorkKind, AgentWorkspaceOutcomeCounts>>;
+}
+/**
+ * One kind of work before and after a revision, counted by the host. There is no verdict: limit says why a row cannot be
+ * read as an effect (no runs on one side, or a single run, which harness2 also treats as confounded).
+ */
+export interface AgentWorkspaceOutcomeComparisonRow {
+  kind: AgentWorkspaceWorkKind;
+  before: AgentWorkspaceOutcomeCounts | null;
+  after: AgentWorkspaceOutcomeCounts | null;
+  limit?: "no_runs_before" | "no_runs_after" | "single_run";
+}
+export interface AgentWorkspaceRevisionComparison { baseRevisionId: string; rows: AgentWorkspaceOutcomeComparisonRow[]; }
+/**
+ * The record of an applied learning (harness2 EXPERIENCE): when it applies, what changed, at most one lesson, and the
+ * runs it came from. No effect is stored: approval is not evidence that the change helped; comparison is read from runs.
+ */
+export interface AgentWorkspaceExperience {
+  schemaVersion: "agentlas.agent-experience.v1";
+  revisionId: string;
+  proposalId: string;
+  baseRevisionId: string;
+  appliedAt: string;
+  cue: string | null;
+  changed: AgentWorkspaceChangeSummary[];
+  lesson: string | null;
+  /** run:<id> lines, at least one. */
+  evidence: string[];
+}
 /** situation: when it applies; observed: what the records show happened; before/after: behaviour without and with the change; limits: when not to apply. */
 export interface AgentWorkspaceLearningCard { situation: string; observed: string; before: string; after: string; limits: string; }
 /** One line per changed file for the owner: what kind of change and how big, without reading the diff. */

@@ -441,6 +441,7 @@ async function runAction(body: Record<string, unknown>): Promise<NativeInputResu
   try {
     if(action!=="status" && action!=="listApps") {
       const broker=configuredOneOsLeaseBroker();
+      await broker?.settleHumanInput();
       if(body.oneOsExecution!==undefined) {
         if(!appName)return {ok:false,error:"one-os-action-target-required"};
         const points=[mapPoint(body),mapPoint(body,"from_"),mapPoint(body,"to_")].filter((point):point is Point=>point!==null);

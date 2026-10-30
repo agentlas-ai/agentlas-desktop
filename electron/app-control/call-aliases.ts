@@ -70,6 +70,35 @@ function argumentObject(entry: AppControlCatalogEntry, raw: unknown): unknown {
   return raw;
 }
 
+/** Words a call wraps an operation's fields in. Each is only a wrapper for an operation with no parameter of that name. */
+const ARGUMENT_ENVELOPES: ReadonlySet<string> = new Set(["args", "arguments", "body", "data", "input", "parameters", "params", "payload", "request"]);
+
+/**
+ * The call's fields in the shape the operation declares. 499 operations take an `input` object, and app.call reads a request's `input`
+ * as the call's own arguments, so {operation:"agentWorkspace.prepareFileChange", input:{agentId,...}} reached the dispatcher flat and was
+ * refused "belong inside input"; {operation, payload:{agentId}} was refused beside the `params` call
+ * that passed. Neither changes which operation runs or any value, and the operation's schema still judges the fields, so a write is
+ * read this way too.
+ */
+function withoutEnvelope(entry: AppControlCatalogEntry, args: Record<string, unknown>, resolved: Array<Record<string, string>>): Record<string, unknown> {
+  const keys = Object.keys(args);
+  const wrapper = keys.length === 1 && ARGUMENT_ENVELOPES.has(keys[0]) && !entry.params.includes(keys[0]) ? keys[0] : null;
+  const fields = wrapper ? args[wrapper] : undefined;
+  if (!wrapper || !isObject(fields)) return args;
+  resolved.push({ kind: "argument", from: wrapper, to: "the operation's fields" });
+  return { ...fields };
+}
+function gatherIntoInput(entry: AppControlCatalogEntry, args: Record<string, unknown>, resolved: Array<Record<string, string>>): void {
+  if (!entry.params.includes("input") || args.input !== undefined) return;
+  const declared = (APP_CONTROL_ARGUMENT_SCHEMAS[entry.path]?.properties as Record<string, { type?: unknown }> | undefined)?.input?.type;
+  if (declared !== undefined && declared !== "object") return;
+  const loose = Object.keys(args).filter((key) => !entry.params.includes(key));
+  if (!loose.length) return;
+  args.input = Object.fromEntries(loose.map((key) => [key, args[key]]));
+  for (const key of loose) delete args[key];
+  resolved.push({ kind: "argument", from: loose.join(", "), to: "input" });
+}
+
 /**
  * App operations that answer only through a harness port, because the port checks the conversation the operation cannot (service.ts
  * CHAT_SCOPED_OPERATIONS). app.call liveDocument.render {sessionId, from, count} was refused "chat-scope-required" with the port's name in
@@ -117,8 +146,9 @@ export function resolveAppCallRequest(
     if (!entry) return passthrough;
     resolved.push({ kind: "operation", from: path, to: entry.path });
   }
-  const args = argumentObject(entry, rawArgs);
-  if (!isObject(args)) return { kind: "call", operation: entry.path, args, resolved };
+  const object = argumentObject(entry, rawArgs);
+  if (!isObject(object)) return { kind: "call", operation: entry.path, args: object, resolved };
+  const args = withoutEnvelope(entry, object, resolved);
 
   const params = new Set(entry.params);
   const required = requiredOf(entry.path);
@@ -142,6 +172,7 @@ export function resolveAppCallRequest(
     delete args[key];
     resolved.push({ kind: "argument", from: key, to: target });
   }
+  gatherIntoInput(entry, args, resolved);
   // The conversation a read is asked from, when it asks for one and the call named none (invoke.latestReceipt {}, goalPanel.view {}).
   if (required.includes("chatId") && args.chatId === undefined && readsOnly(entry) && options.chatId && options.chatId !== "ui") {
     args.chatId = options.chatId;

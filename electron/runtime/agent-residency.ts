@@ -19,6 +19,7 @@
 //     상주 형태를 아직 못 가지는 런타임(일회성 `-p` CLI)을 "상주 중"이라고 말하지 않기
 //     위해서다 — 예산은 붙든 것(holdsSession)만 센다.
 import { onHostShutdown } from "../host-lifecycle";
+import type { ProcessRow } from "./process-table";
 import { AsyncLocalStorage } from "node:async_hooks";
 import type {
   AgentProcessLifecycleReason,
@@ -31,6 +32,14 @@ export const ONE_AGENT_ID = BUILTIN_ONE_AGENT_ID;
 
 /** 마지막 활동 후 이 시간이 지나면 유휴 상주 자원을 거둔다. Goal 원장은 유지한다. */
 export const AGENT_RESIDENCY_IDLE_REAP_MS = 12 * 60 * 60_000;
+/**
+ * A resting CLI holds 150-300 MB with its tool servers, and up to 14 of them could rest for 12 hours: 2.1 GB of a 5.6 GB
+ * peak measured. Every turn on Codex restarts its tool servers anyway, and every runner continues a closed
+ * session, so a resting process only saves a start. The conversation in use stays warm a while; the others go soon.
+ */
+export const AGENT_RESIDENCY_WARM_RECENT_MS = 15 * 60_000;
+export const AGENT_RESIDENCY_WARM_OTHER_MS = 2 * 60_000;
+const AGENT_RESIDENCY_TRIM_INTERVAL_MS = 60_000;
 
 /** 어디서 온 에이전트인가 — 로컬 설치 / 오너 Agent Cloud / 공개 Hub. */
 export type AgentResidencySource = "local" | "cloud" | "hub";
@@ -78,6 +87,8 @@ export interface AgentResidencyEntry {
   holdsSession: boolean;
   /** 붙든 자원을 놓는 방법. holdsSession 인 항목만 가진다. The registry passes the lifecycle reason it closes for. */
   close?: (reason?: AgentProcessLifecycleReason) => void | Promise<void>;
+  /** See RegisterAgentResidencyInput.idleProbe. */
+  idleProbe?: AgentResidencyIdleProbe;
   /** Closing resources still occupy capacity until measured termination. */
   closing?: boolean;
   /** Why the registry is closing it (typed lifecycle reason); set together with `closing`. */
@@ -461,6 +472,15 @@ export interface RegisterAgentResidencyInput {
   close?: (reason?: AgentProcessLifecycleReason) => void | Promise<void>;
   now?: number;
   admission?: AgentResidencyAdmission;
+  /** Present only when this resident may leave before the 12h reaper. */
+  idleProbe?: AgentResidencyIdleProbe;
+}
+
+export interface AgentResidencyIdleProbe {
+  /** The next turn can continue this conversation natively after the process closes. */
+  resumable: () => boolean;
+  /** The CLI's process, to see what else it is holding; null when unknown. */
+  rootPid: () => number | null;
 }
 
 /** 새 상주/활동을 등록하거나 기존 항목을 갱신한다(키가 같으면 upsert). */
@@ -491,9 +511,11 @@ export function registerAgentResidency(input: RegisterAgentResidencyInput): Agen
     holdsSession: input.holdsSession ?? false,
     ...(reservation?.awake ? { awakeAdmission: reservation.awake } : {}),
     ...(input.close ? { close: input.close } : existing?.close ? { close: existing.close } : {}),
+    ...(input.idleProbe ? { idleProbe: input.idleProbe } : existing?.idleProbe ? { idleProbe: existing.idleProbe } : {}),
   };
   entries.set(input.key, entry);
   finishAgentResidencyAdmission(input.admission);
+  if (entry.idleProbe) ensureIdleTrimTimer();
   if (entry.holdsSession && !existing?.holdsSession) {
     emitAgentResidencyChange(entry, "running", "spawned");
   }
@@ -594,6 +616,52 @@ export function sweepIdleAgentResidency(maxIdleMs = AGENT_RESIDENCY_IDLE_REAP_MS
     reaped += 1;
   }
   return reaped;
+}
+
+let idleTrimTimer: ReturnType<typeof setInterval> | null = null;
+let idleTrimRunning = false;
+function ensureIdleTrimTimer(): void {
+  if (idleTrimTimer || process.env.AGENTLAS_RESIDENCY_IDLE_TRIM === "0") return;
+  idleTrimTimer = setInterval(() => {
+    if (idleTrimRunning) return;
+    idleTrimRunning = true;
+    void trimIdleAgentResidency().catch(() => 0).finally(() => { idleTrimRunning = false; });
+  }, AGENT_RESIDENCY_TRIM_INTERVAL_MS);
+  idleTrimTimer.unref?.();
+}
+function stopIdleTrimTimer(): void {
+  if (idleTrimTimer) clearInterval(idleTrimTimer);
+  idleTrimTimer = null;
+}
+
+/**
+ * Closes resting residents the next turn can do without. Never touches a turn in progress, an exempt or awake resident,
+ * one that cannot continue natively, or one holding background work. An unreadable process table closes nothing.
+ */
+export async function trimIdleAgentResidency(
+  now = Date.now(),
+  readTable?: () => Promise<readonly ProcessRow[] | null>,
+): Promise<number> {
+  const trimmable = (entry: AgentResidencyEntry) => entry.holdsSession && !entry.closing && !entry.inUse && !entry.reaperExempt
+    && Boolean(entry.close && entry.idleProbe?.resumable()) && !isAwakeAgentResidencyAdmission(entry.awakeAdmission);
+  const resting = [...entries.values()].filter(trimmable).sort((a, b) => b.lastActivityAt - a.lastActivityAt);
+  const due = resting.filter((entry, index) =>
+    now - entry.lastActivityAt >= (index === 0 ? AGENT_RESIDENCY_WARM_RECENT_MS : AGENT_RESIDENCY_WARM_OTHER_MS));
+  if (due.length === 0) return 0;
+  // Late load, like the budget: this module stays free of anything a small host would not carry.
+  const { hasBackgroundDescendant, readProcessTable } = require("./process-table") as typeof import("./process-table");
+  const table = await (readTable ?? readProcessTable)();
+  if (!table) return 0;
+  let trimmed = 0;
+  for (const entry of due) {
+    // The table read yielded: a turn may have taken this resident since.
+    if (entries.get(entry.key) !== entry || !trimmable(entry)) continue;
+    const rootPid = entry.idleProbe?.rootPid() ?? null;
+    if (rootPid === null || hasBackgroundDescendant(table, rootPid)) continue;
+    dropAgentResidency(entry.key, { close: true, reason: "reaped" });
+    trimmed += 1;
+  }
+  return trimmed;
 }
 
 export interface AgentResidencySnapshot {
@@ -730,6 +798,7 @@ export function disposeAgentResidency(): void {
     dropAgentResidency(entry.key, { close: true, reason: "shutdown" });
   }
   stopSweeper();
+  stopIdleTrimTimer();
   if (shutdownDetach) {
     shutdownDetach();
     shutdownDetach = null;
@@ -744,6 +813,7 @@ export function __resetAgentResidencyForTests(): void {
   openingAdmissions.clear();
   sourceCache.clear();
   stopSweeper();
+  stopIdleTrimTimer();
   if (shutdownDetach) {
     shutdownDetach();
     shutdownDetach = null;

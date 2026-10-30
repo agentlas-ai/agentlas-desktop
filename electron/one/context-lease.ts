@@ -30,6 +30,8 @@ export class OneOsLeaseError extends Error { constructor(readonly code: string) 
 const fail = (code: string): never => { throw new OneOsLeaseError(code); };
 function identifier(value: unknown): value is string { return typeof value === "string" && value.length > 0 && value.length <= 256 && value.trim() === value && !/[\u0000-\u001f]/.test(value); }
 /** Private execution authority is registered only by the original prepared native source, never by renderer IPC. */
+const HUMAN_INPUT_SETTLE_MS = 8_000;
+
 export class OneOsResourceLeaseBroker {
   private executions = new Map<string, Execution>();
   private holder: { leaseId: string; executionId: string; target: OneOsActionTarget; until: number; controller: AbortController; reason?: string } | null = null;
@@ -105,6 +107,15 @@ export class OneOsResourceLeaseBroker {
     const assertCurrent = () => { this.execution(capability); if (this.ports.readiness().session !== "awake") fail("one-os-session-unavailable"); };
     assertCurrent(); await this.ports.validateObservation?.(execution.record.binding, input); assertCurrent();
     return { binding: execution.record.binding, assertCurrent };
+  }
+  /**
+   * Waits briefly for the keyboard and mouse to go quiet before an action asks for the lease. Idle time counts synthesized input too
+   * (context-platform.ts), so an agent's second click inside two seconds of its first read as "the owner is active" and came back
+   * refused, as did a click during a pause in the owner's typing. The lease's own check is unchanged.
+   */
+  async settleHumanInput(timeoutMs = HUMAN_INPUT_SETTLE_MS): Promise<void> {
+    const deadline = this.now() + timeoutMs;
+    while (this.ports.readiness().humanBusy && this.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 200));
   }
   async acquireForAction(capability: unknown, target: OneOsActionTarget): Promise<{ leaseId: string; signal: AbortSignal; checkpoint(): Promise<void>; release(): void }> {
     const execution = this.execution(capability), binding = execution.record.binding;
