@@ -33,7 +33,7 @@ import type {
   RuntimeStatus,
 } from "../../shared/types";
 import { memoryOwnerAgentId } from "../../shared/memory-ownership";
-import { effectiveInvocationPermission } from "../../shared/invocation-permission";
+import { delegatedWorkerAutoReview, effectiveInvocationPermission } from "../../shared/invocation-permission";
 import { attestDelegatedPermission, DelegatedAuthorityError, resolveHostDelegatedPermission, type HostDelegatedGrant } from "./delegated-authority";
 import { executionFailureReport, readExecutionFailureCause, type ExecutionFailureReport } from "../../shared/execution-effect-contract";
 import type { LongRunTaskCheckpoint } from "../../shared/long-run-checkpoint";
@@ -224,6 +224,13 @@ export interface FirmRunParams {
    * is itself a worker and must stay inside the worker fallback pool.
    */
   controllerRuntimeRole?: "orchestrator" | "worker";
+  /**
+   * The owner's own run permission, set by the Taskforce when this firm occupies one of its worker seats: `req.permissions`
+   * is then the seat's own grant (the Taskforce binds it instead of passing the parent's through), so it cannot say whether
+   * the owner chose full. It decides only whether a delegate runs under Codex's automatic reviewer
+   * (delegatedWorkerAutoReview); it never grants a sandbox. Absent: `req.permissions` is the host's own permission.
+   */
+  hostPermission?: "read" | "write" | "full";
   /** True when the visible One composer pin was actually used for this run. */
   runtimePinHonored?: boolean;
   runnerEnv?: NodeJS.ProcessEnv;
@@ -1418,8 +1425,10 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
             // already granted this stage bounded write authority; let the
             // resident reviewer evaluate its concrete calls. Plan/synthesis
             // turns remain read-only and never reach this branch.
-            // write only: a full-access worker has no approval step to review (borrowed-task-force.ts runnerBase).
-            phase === "delegate" && nodePermission === "write"
+            // A write worker of a host that is not full. A full host's delegate is also a write worker (firmNodePermission), so the
+            // decision follows the host, not the worker (shared/invocation-permission.ts; borrowed-task-force.ts runnerBase).
+            phase === "delegate"
+              && delegatedWorkerAutoReview(p.hostPermission ?? effectiveInvocationPermission(p.req.permissions, p.req.planMode), nodePermission)
               ? "auto_review"
               : "user",
           restrictedReadBoundary: p.restrictedReadBoundary,

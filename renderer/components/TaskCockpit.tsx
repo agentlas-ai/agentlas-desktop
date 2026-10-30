@@ -35,7 +35,7 @@ import { InactiveToolNotice } from "@/components/InactiveToolNotice";
 import { LoadingEstimate } from "@/components/LoadingEstimate";
 import { navigate } from "@/lib/navigation";
 import { isPlaceholderTaskTitle, taskTitleForDisplay } from "@/lib/task-title";
-import { detailForUser, failureCode, failureMessage, isChatBusyFailure, knownStartFailureHuman, looksLikeMachineText } from "@/lib/invocation-failure";
+import { detailForUser, failureCode, failureMessage, isCancellationCode, isChatBusyFailure, knownStartFailureHuman, looksLikeMachineText } from "@/lib/invocation-failure";
 import { useContext, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState, useMemo, type CSSProperties, type Dispatch, type SetStateAction } from "react";
 import { WorkChatDraftContext } from "@/lib/work-chat-draft";
 export { WorkChatDraftContext, type WorkChatDraftRequest } from "@/lib/work-chat-draft";
@@ -3967,13 +3967,17 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
         // the replacement run, so this internal cancellation must not become a red
         // user-facing failure card.
         const wasUserCancel = cancelRequestedRef.current;
-        const terminalStatus = wasUserCancel
-          ? (locale === "ko" ? "취소됨" : "Cancelled")
-          : (locale === "ko" ? "중단됨" : "Stopped");
         const failureCode = ev.error?.code?.trim() || "runtime_error";
         const wasSteeringCancel = !wasUserCancel
           && failureCode.toLowerCase() === "cancelled"
           && steerQueueRef.current.length > 0;
+        // A stop this window did not press: Stop in another window or on the phone, or the owner ending the Goal. Main stamps
+        // `cancelled` on that terminal and sends it to every window attached to the run. It is the owner's own act, like Stop
+        // here, and the durable path already draws nothing for it (receiptRecoveryMessage), so it is no failure to show in red.
+        const wasStoppedElsewhere = !wasUserCancel && !wasSteeringCancel && isCancellationCode(failureCode);
+        const terminalStatus = wasUserCancel || wasStoppedElsewhere
+          ? (locale === "ko" ? "취소됨" : "Cancelled")
+          : (locale === "ko" ? "중단됨" : "Stopped");
         /*
          * ★사유가 식별자면 화면에 올리지 않는다. 대괄호 안의 코드도 마찬가지다 —
          *   사용자에게 `[runtime_error]` 는 아무 정보가 아니다(실측 2026-09-08).
@@ -4013,7 +4017,7 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
         transcriptRevisionRef.current += 1;
         setMessages((current) => {
           const settled = keepPlaceholder(current);
-          if (wasUserCancel || wasSteeringCancel || settled.some((message) => message.id === failureId)) return settled;
+          if (wasUserCancel || wasSteeringCancel || wasStoppedElsewhere || settled.some((message) => message.id === failureId)) return settled;
           return [
             ...settled,
             {

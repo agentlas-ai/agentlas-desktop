@@ -705,7 +705,9 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
       if (
         result.automationId !== request.automationId
         || result.runId !== request.runId
-        || result.checkpointDigest !== request.checkpointDigest
+        // The store checks the request's digest in its transaction and answers with the digest of the checkpoint it sealed, so
+        // a successful Rerun or Skip never matched the old one here and read as "the result could not be verified".
+        || !result.checkpointDigest
         || !result.updatedAt
       ) {
         throw new Error("automation_graph_reconciliation_receipt_mismatch");

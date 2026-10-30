@@ -37,7 +37,7 @@ export interface NativeInvocationCapabilities { start: boolean; stop: boolean; e
 export interface NativeInvocationAttachReply { version: "agentlas.native-attach.v1"; bootId: string; serviceIdentity: string; ready: boolean; capabilities: NativeInvocationCapabilities }
 export interface NativeInvocationRuntimeOptions {
   address: string; binding: NativeAuthBinding; credential: NativeCredential; bootId: string;
-  service: InvocationService; assertOwner(): void; resources: NativeInvocationResources;
+  service: InvocationService; assertOwner(): void; restartForOwner?(): void; resources: NativeInvocationResources;
   adoptSession(session: HostSessionHandoff | null): boolean;
   clearDetectCache(): void;
   science?:Pick<import("../science-host/daemon-client").ScienceDaemonClient,"commandObserved">;
@@ -67,7 +67,7 @@ function session(value: unknown): HostSessionHandoff | null {
 export async function createNativeInvocationRuntime(options: NativeInvocationRuntimeOptions) {
   assertNativeAuthBinding(options.binding); options.assertOwner();
   let accepting = true;
-  const supervisor=createDaemonOneSupervisorHost({bootId:options.bootId,assertOwner:options.assertOwner,science:options.science});
+  const supervisor=createDaemonOneSupervisorHost({bootId:options.bootId,assertOwner:options.assertOwner,restartForOwner:options.restartForOwner,science:options.science});
   // Created after the original GUI session is adopted; an unauthenticated
   // startup snapshot cannot bind a later account's context lifetime.
   let alive:ReturnType<typeof createDaemonAliveDecisionPort>|undefined;

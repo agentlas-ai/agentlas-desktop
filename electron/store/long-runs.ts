@@ -1245,7 +1245,16 @@ export function queueOwnerHeldGoalForResume(input: { runId: string; appInstanceI
  * update), so one prompt look is owed. Later failures of the same launch back off normally. */
 export const BLOCKED_GOAL_STARTUP_RETRY_MS = 30_000;
 
-/** Backoff for the next automatic retry: 5 min doubling, capped at 6 h. It counts only the failures this run
+/** Longest wait between automatic retries of a cause inside the app (its own bookkeeping, a binding, a check): nothing the app waits
+ * for can change by waiting, so such a Goal looks again within 30 minutes. Observed in use: goal_obligation_candidate_changed
+ * retried at 39, 80, 159, 319 and 359 min (the Goal sat there for hours); goal_owner_grant_unrecorded reached 360 min the same way. */
+export const BLOCKED_GOAL_INTERNAL_RETRY_CAP_MS = 30 * 60_000;
+/** The long ladder (up to 6 h) is for a provider's typed stop only: goal-pass-stop.ts blocks the Goal as `goal_pass_<reason>`, and a usage
+ * limit or a sign-in failure changes on the provider's or the owner's clock, not the app's. Typed marker only, never prose. */
+const BLOCKED_GOAL_PROVIDER_STOP_REASONS = ["goal_pass_usage_limited", "goal_pass_unauthorized"] as const;
+
+/** Backoff for the next automatic retry: 5 min doubling, capped at 30 min for a cause inside the app and at 6 h when the failures since the
+ * last success include a provider's typed stop. It counts only the failures this run
  * has had since its last success (a settled completed turn or an owner control) within 24 h. A resume that
  * worked is not a failure: counting it made every healthy Goal that resumes every few minutes sit at the 6 h
  * cap after a single restart (measured 2026-10-03: retryIndex 70 on a 37-cycle Goal, 751 on a spinning one).
@@ -1267,7 +1276,11 @@ export function nextBlockedGoalRetrySlot(runId: string, now = Date.now(),
     AND COALESCE(json_extract(payload_json, '$.detail'), '') NOT IN ('host_pause_carried_retry', 'parked_relay_pull_forward')`)
     .get(runId, BLOCKED_GOAL_SWEEP_EVENT_KIND, success.seq, since) as { n: number };
   const retryIndex = prior.n;
-  const backoffMs = Math.min(6 * 60 * 60_000, 5 * 60_000 * 2 ** Math.min(retryIndex, 10));
+  const providerStop = retryIndex > 0 && getDb().prepare(`SELECT 1 FROM long_run_events WHERE run_id = ? AND kind = ? AND seq > ? AND occurred_at > ?
+    AND json_extract(payload_json, '$.action') = 'retry_scheduled'
+    AND json_extract(payload_json, '$.fromReason') IN (${BLOCKED_GOAL_PROVIDER_STOP_REASONS.map(() => "?").join(",")}) LIMIT 1`)
+    .get(runId, BLOCKED_GOAL_SWEEP_EVENT_KIND, success.seq, since, ...BLOCKED_GOAL_PROVIDER_STOP_REASONS) !== undefined;
+  const backoffMs = Math.min(providerStop ? 6 * 60 * 60_000 : BLOCKED_GOAL_INTERNAL_RETRY_CAP_MS, 5 * 60_000 * 2 ** Math.min(retryIndex, 10));
   const delayMs = options.startup && retryIndex === 0 ? BLOCKED_GOAL_STARTUP_RETRY_MS : backoffMs;
   return { retryIndex, nextAt: new Date(now + delayMs).toISOString() };
 }

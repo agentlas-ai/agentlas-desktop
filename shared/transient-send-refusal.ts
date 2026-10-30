@@ -161,6 +161,11 @@ const SQLITE_STORE_BUSY_RE = /^SQLITE_(?:BUSY|LOCKED)(?:_[A-Z]+)?$|^SQLITE_PROTO
  */
 export function isStoreBusyRefusedBeforeDispatch(error: unknown): boolean {
   if (!error || typeof error !== "object" || (error as { turnDelivery?: unknown }).turnDelivery !== "not-dispatched") return false;
+  return isStoreBusyError(error);
+}
+
+/** The shared store stayed locked, anywhere in the error's cause chain. Says nothing about dispatch: the caller proves that. */
+export function isStoreBusyError(error: unknown): boolean {
   const seen = new Set<object>();
   let current: unknown = error;
   for (let depth = 0; depth < 6 && current && typeof current === "object" && !seen.has(current as object); depth += 1) {

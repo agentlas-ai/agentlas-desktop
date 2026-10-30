@@ -8,6 +8,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { grantForDroppedFile, grantForPastedAttachment, grantForPastedImage, ipc, ipcEvents } from "@/lib/ipc";
 import { extractQuestions } from "@/lib/ask-question";
+import { isCancellationCode } from "@/lib/invocation-failure";
 import { useVisibleInterval } from "@/lib/useVisibleInterval";
 import { sameMessageList, sameSnapshotIgnoring } from "@/lib/store-change-policy";
 import { IconArrowLeft, IconClose, IconRefresh } from "@/components/Icon";
@@ -384,6 +385,9 @@ export function AutomationSessionPanel({
             return;
           }
           if (ev.kind === "error") {
+            // A run a person stopped (this panel's Stop, another window, the phone, or the end of a Goal) ends with a
+            // `cancelled` terminal. It is the owner's own act, not a failure for the alert bar (TaskCockpit does the same).
+            if (isCancellationCode(ev.error?.code)) { finish(); return; }
             finish(ev.error?.message || (ko ? "응답을 받지 못했습니다." : "No response was returned."));
           }
         });

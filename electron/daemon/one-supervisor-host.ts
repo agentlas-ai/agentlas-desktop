@@ -20,7 +20,7 @@ function exact(value: unknown, required: string[], optional: string[] = []): val
 }
 /** Constructed only by the enrolled native daemon. The public control socket
  * cannot adopt this domain or dispatch an original command. */
-export function createDaemonOneSupervisorHost(options: { bootId: string; assertOwner(): void; science?:Pick<ScienceDaemonClient,"commandObserved"> }) {
+export function createDaemonOneSupervisorHost(options: { bootId: string; assertOwner(): void; science?:Pick<ScienceDaemonClient,"commandObserved">; restartForOwner?(): void }) {
   let service: OneSupervisorService | undefined;
   let identity: { oneId: string; actor: string } | undefined;
   let adopting:Promise<unknown>|undefined;
@@ -49,7 +49,13 @@ export function createDaemonOneSupervisorHost(options: { bootId: string; assertO
   function authority() {
     options.assertOwner(); const actor = JSON.stringify(getAuthenticatedActorIds());
     bindSignedInActor(actor);
-    if (!identity || actor!==identity.actor || getOneProfile().oneId !== identity.oneId) fail("supervisor_daemon_identity_authority_changed");
+    if (!identity || actor!==identity.actor || getOneProfile().oneId !== identity.oneId) {
+      // A signed-out machine has its own empty One (store/one-profile.ts), so a service that adopted the domain before the person signed
+      // in holds that One, not theirs: the owner's Mac showed an empty Hope and refused every send until the process was replaced
+      // This process stays fenced, and a fresh one adopts the signed-in person's One (recover).
+      if (identity && actor !== "null") options.restartForOwner?.();
+      fail("supervisor_daemon_identity_authority_changed");
+    }
   }
   function owner() {
     const db = getDb();
@@ -108,8 +114,10 @@ export function createDaemonOneSupervisorHost(options: { bootId: string; assertO
     if(!grant || !prior || prior.ownerKind!=="work-daemon" || prior.oneId!==grant.one_id || prior.ownerEpoch!==grant.owner_epoch || prior.generation!==grant.generation)return false;
     if(grant.compatibility_json!==JSON.stringify(compatibility))fail("supervisor_daemon_version_mismatch");
     const actor=JSON.stringify(getAuthenticatedActorIds());
-    if(grant.one_id!==getOneProfile().oneId || (grant.actor_json!==actor && !signedInAfterSignedOut(grant.actor_json,actor)))fail("supervisor_daemon_identity_authority_changed");
-    await initialize(grant.one_id,actor,prior);return true;
+    const oneId=getOneProfile().oneId;
+    // A signed-in person takes the domain for their own One: the prior holder is gone (initialize refuses a live one). Signed out, only the same grant resumes.
+    if(actor==="null" && (grant.one_id!==oneId || grant.actor_json!==actor))fail("supervisor_daemon_identity_authority_changed");
+    await initialize(oneId,actor,prior);return true;
   }
   async function dispatch(raw: unknown): Promise<unknown> {
     options.assertOwner();

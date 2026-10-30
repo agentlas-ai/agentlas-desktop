@@ -18,6 +18,7 @@ import {
   canQueuePendingSend,
   createPendingChatSends,
   pendingSendPromptHash,
+  PendingSendImagesUnsaved,
   PendingSendSourceReadBusy,
   type PendingChatSends,
   type PendingSendRecord,
@@ -395,7 +396,7 @@ export function createRendererSendQueue(startNow: RendererStartNow, options: Ren
 
   const accept = (event: IpcMainInvokeEvent, req: McpInvocationRequest, intentId: string | undefined, cause?: unknown): PendingSendRecord =>
     getDb().transaction(() => {
-      const record = queue.enqueue(event, req, { ...(intentId ? { intentId } : {}), ...(cause === undefined ? {} : { cause }) });
+      const record = queue.enqueue(event, req, { ...(intentId ? { intentId } : {}), ...(cause === undefined ? {} : { cause }), imagesByReference: true });
       options.custody?.adopt(req, record.id);
       options.onQueued?.(req);
       return record;
@@ -470,13 +471,19 @@ export function createRendererSendQueue(startNow: RendererStartNow, options: Ren
       }
       if (canQueue(req) && queue.hasQueued(req.chatId)) {
         // Earlier messages of this chat are still waiting: this one goes behind them, in the order it was typed.
-        return queuedAnswer(accept(event, req, undefined));
+        try { return queuedAnswer(accept(event, req, undefined)); }
+        // Images the transcript store would not take cannot be queued by reference; the start below refuses them on its own terms.
+        catch (error) { if (!(error instanceof PendingSendImagesUnsaved)) throw error; }
       }
       return startOwnerSendOrAcceptRefusal(() => startOwned(event, req, null), (cause) => {
         if (!canQueue(req)) return null;
         if (isTransientSendRefusal(cause)
-          && (!req.oneAttachmentRef && !req.oneTeamPreflightRef || options.custody?.placement(req.runId!) === "not-dispatched"))
-          return queuedAnswer(noticeIfStillWaiting(accept(event,req,undefined,cause), req));
+          && (!req.oneAttachmentRef && !req.oneTeamPreflightRef || options.custody?.placement(req.runId!) === "not-dispatched")) {
+          try { return queuedAnswer(noticeIfStillWaiting(accept(event,req,undefined,cause), req)); }
+          // Images too big to queue inline that could not be tied to the transcript row's stored bytes (an invalid image): the
+          // original refusal stands, as it did before such a message could queue at all.
+          catch (error) { if (!(error instanceof PendingSendImagesUnsaved)) throw error; return null; }
+        }
         if (!options.custody?.canHold(req)) return null;
         // Hard refusals and unknown effects retain owner input, but never enter
         // the retry drain without a later exact positive no-effect boundary.
@@ -493,7 +500,9 @@ export function createRendererSendQueue(startNow: RendererStartNow, options: Ren
     acceptRefusedSteer(event, req, intentId, cause) {
       if (!canQueue(req) || !isTransientSendRefusal(cause)) return null;
       const id = intentId ?? randomUUID();
-      const record = queue.find(req.chatId, id) ?? accept(event, req, id, cause);
+      let record: PendingSendRecord;
+      try { record = queue.find(req.chatId, id) ?? accept(event, req, id, cause); }
+      catch (error) { if (error instanceof PendingSendImagesUnsaved) return null; throw error; }
       return {
         accepted: true, chatId: req.chatId, queued: true, interruptsCurrent: false,
         queuedRequestId: `pending-send:${record.id}`, promptHash: record.promptHash, intentId: id, status: "queued",
@@ -506,7 +515,7 @@ export function createRendererSendQueue(startNow: RendererStartNow, options: Ren
       if (messageId && !userRow) throw new Error("followup_message_custody_missing");
       // The caller owns the IMMEDIATE source-closure transaction. Both records
       // and the exact user row either commit together or all roll back.
-      const record = queue.enqueue(event, req, { intentId, requireUserRow: true, ...(userRow ? {userRow:{...userRow,role:"user"}} : {}) });
+      const record = queue.enqueue(event, req, { intentId, requireUserRow: true, imagesByReference: true, ...(userRow ? {userRow:{...userRow,role:"user"}} : {}) });
       options.onQueued?.(req);
       return record;
     },

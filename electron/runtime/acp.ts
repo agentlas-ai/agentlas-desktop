@@ -303,7 +303,9 @@ export class AcpSessionClient {
     private readonly locale: "ko" | "en",
     private readonly approval: { runtime: string; sessionKey: string; cwd?: string; chatId?: string; agentId?: string; unattended?: boolean; planMode?: true; signal?: AbortSignal;
       /** A native question the agent asked (acpNativeQuestion): recorded for the owner on an attended run. */
-      ownerQuestion?: (question: AgentlasAskQuestion) => void } = { runtime: "acp", sessionKey: "acp" },
+      ownerQuestion?: (question: AgentlasAskQuestion) => void;
+      /** The agent announced its own option state (`config_option_update`, a well-formed one; replayed history excluded). */
+      configOptions?: (options: unknown[], sessionId: string | undefined) => void } = { runtime: "acp", sessionKey: "acp" },
   ) {}
 
   /** Cursor's `cursor/update_todos` / `cursor/create_plan` todo list, projected into the same checklist as ACP `plan`. */
@@ -329,9 +331,17 @@ export class AcpSessionClient {
     this.thinking = false;
   }
 
+  /** A well-formed `config_option_update` (already checked by isAcpSetupMetadata) is the agent's own option state: hand it to the session. */
+  private observeConfigOptions(params: any): void {
+    const update = params?.update ?? params;
+    if (update?.sessionUpdate !== "config_option_update" || !Array.isArray(update.configOptions)) return;
+    try { this.approval.configOptions?.(update.configOptions, typeof params?.sessionId === "string" ? params.sessionId : undefined); }
+    catch { /* option bookkeeping must never end a turn */ }
+  }
+
   onUpdate(params: any, onLiveActivity?: () => void): void {
     if (this.replaying) return;
-    if (isAcpSetupMetadata(params)) return;
+    if (isAcpSetupMetadata(params)) { this.observeConfigOptions(params); return; }
     this.turnActivityObserved = true;
     onLiveActivity?.();
     const update = params?.update ?? params;
@@ -1175,6 +1185,43 @@ export function thoughtLevelConfigOptionFromSession(response: unknown, expectedC
 }
 
 /**
+ * The stored session state once the agent acknowledged `set_config_option(configId, value)`: that option now holds the
+ * acknowledged value. A reused session reads its options back from this state, so a stale `currentValue` here made the
+ * next turn resend a value the agent already had, and skip a change it did need (the agent sat on the last value we
+ * set while the stored option still showed the one it started with, and a request for that old value was reported as
+ * applied without a call). Only the option that was set is touched; the stored object itself is never mutated.
+ */
+export function withAcknowledgedConfigOption(stored: unknown, configId: string, value: string): unknown {
+  if (!stored || typeof stored !== "object") return stored;
+  const options = (stored as { configOptions?: unknown }).configOptions;
+  if (!Array.isArray(options)) return stored;
+  return {
+    ...(stored as object),
+    configOptions: options.map((option) => option && typeof option === "object" && (option as { id?: unknown }).id === configId
+      ? { ...(option as object), currentValue: value }
+      : option),
+  };
+}
+
+/**
+ * The stored session state after the agent announced its own `config_option_update`. The update names the options as
+ * the agent now holds them: each one it lists replaces the stored option of that id, and an option it does not list
+ * stays as it was (an agent that announces only what changed must not make the model option disappear).
+ */
+export function withAgentConfigOptions(stored: unknown, update: readonly unknown[]): unknown {
+  const base = stored && typeof stored === "object" ? stored as { configOptions?: unknown } : {};
+  const current: unknown[] = Array.isArray(base.configOptions) ? base.configOptions : [];
+  const idOf = (option: unknown): string | null => option && typeof option === "object" && typeof (option as { id?: unknown }).id === "string"
+    ? (option as { id: string }).id : null;
+  const updated = new Map<string, unknown>();
+  for (const option of update) { const id = idOf(option); if (id) updated.set(id, option); }
+  const merged = current.map((option) => { const id = idOf(option); return id && updated.has(id) ? updated.get(id) : option; });
+  const known = new Set(current.map(idOf));
+  for (const [id, option] of updated) if (!known.has(id)) merged.push(option);
+  return { ...base, configOptions: merged };
+}
+
+/**
  * Apply a requested effort through the agent's advertised thought_level option with session/set_config_option, only
  * when the agent offers that exact level, and confirm the acknowledgement. Measured 2026-10-16: Grok Build 1.0.51
  * advertises `reasoning_effort` (xhigh, high, medium, low; current high); Kimi Code 0.28.0 advertises `thinking`
@@ -1208,7 +1255,12 @@ export async function configureAcpSessionEffort(
   if (!confirmed || confirmed.currentValue !== value) {
     return { response, application: { status: "unsupported", requested: want, reason: "acp_effort_not_acknowledged" } };
   }
-  return { response: modelConfigOptionFromSession(acknowledged) ? acknowledged : response, application: applied };
+  // The acknowledged state is the one a reused session reads next: the whole reply when it carries the model option (as
+  // before), otherwise the stored state with the acknowledged value written into the option that was set.
+  return {
+    response: modelConfigOptionFromSession(acknowledged) ? acknowledged : withAcknowledgedConfigOption(response, confirmed.configId, value),
+    application: applied,
+  };
 }
 
 /** Runner factory — one Runner per ACP agent spec. */
@@ -1273,6 +1325,12 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
       chatId: req.approvalChatId ?? req.chatId,
       agentId: req.agentId,
       unattended: req.unattended === true,
+      // The agent's own announcement of its options (it changed one itself, or confirmed ours) is what a reused session
+      // must read next; an update for another session is not this one's state.
+      configOptions: (options, announcedSessionId) => {
+        if (!session || (announcedSessionId && session.acpSessionId && announcedSessionId !== session.acpSessionId)) return;
+        session.modelSelectionResponse = withAgentConfigOptions(session.modelSelectionResponse, options);
+      },
     });
     const sessionKind = acpSessionKind(spec.id);
     // Only the host's active delivery keys retained resources. Observable chat,

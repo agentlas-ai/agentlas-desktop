@@ -24,9 +24,9 @@ import { capturePackageSourceOwner, assertOriginalPackageDeclaration, observeAdm
   isGeneratedMemoryDeclaration } from "../memory/package-sources";
 import type { MemorySourceRef } from "../memory/source-catalogue";
 import { looksSecret } from "../../shared/secret-patterns";
-import { AgentWorkspaceError, snapshotAgentWorkspace, workspaceTarget, workspaceHash, workspaceTreeDigest,
+import { AgentWorkspaceError, snapshotAgentWorkspace, snapshotAgentWorkspaceForRun, workspaceTarget, workspaceHash, workspaceTreeDigest,
   decodeWorkspaceText, normalizeWorkspacePath, isWorkspaceAsset, workspaceFileRole, MAX_WORKSPACE_FILE_BYTES, MAX_WORKSPACE_FILES,
-  MAX_WORKSPACE_TOTAL_BYTES, type WorkspaceTree, type WorkspaceAsset } from "./workspace-snapshot";
+  MAX_WORKSPACE_TOTAL_BYTES, type WorkspaceTree, type WorkspaceAsset, type WorkspaceUnverifiedEntry } from "./workspace-snapshot";
 import type { AgentWorkspaceSnapshot, AgentWorkspaceProposal, AgentWorkspaceRevision, AgentWorkspaceDiff,
   AgentWorkspaceMemoryCandidate, AgentWorkspaceMemoryCounts, AgentWorkspaceReadFile, AgentWorkspaceFile, AgentWorkspaceLearningCard, AgentWorkspaceChangeSummary, AgentWorkspaceExperience } from "../../shared/agent-workspace";
 
@@ -697,6 +697,16 @@ function hasRunLease(agentId: string, root: string): boolean {
   }
   return false;
 }
+const MAX_RECORDED_UNVERIFIED = 200;
+const reportedUnverified = new Map<string, string>();
+/** Once per change, never the link text: which entries the hashed tree leaves out, so a missing file is explained, not silent. */
+function noteUnverifiedEntries(agentId: string, unverified: readonly WorkspaceUnverifiedEntry[]): void {
+  const signature = unverified.map(entry => `${entry.kind}:${entry.path}`).join("\n");
+  if (reportedUnverified.get(agentId) === signature) return;
+  if (unverified.length) reportedUnverified.set(agentId, signature); else reportedUnverified.delete(agentId);
+  if (unverified.length) console.info("[agent-workspace] run lease recorded entries it cannot hash, by identity", { agentId, count: unverified.length,
+    first: unverified.slice(0, 5).map(entry => ({ path: entry.path, kind: entry.kind })) });
+}
 /**
  * `holder.ownerId` is a terminal's process owner id (the same id as its run-owner lease and its liveness record). The lease
  * records who took it — host, pid and process start time, and that owner id — so a later process can prove the run over
@@ -713,7 +723,7 @@ export function acquireAgentWorkspaceRunLease(agentId: string, runId: string, ho
     }
     const history=historyRegistration(agentId);if(history&&history.state!=="accepted")throw new AgentWorkspaceError("work_registration_changed","The personal file registration is not active.");
     assertNoUnreviewedNativeCandidates(root);
-    const tree = snapshotAgentWorkspace(root); const revision = currentRevision(agentId, tree);
+    const { tree, unverified } = snapshotAgentWorkspaceForRun(root); const revision = currentRevision(agentId, tree);
     const startToken = ownProcessStartToken();
     // Where THIS host records the CLI children it starts: a later process (another host, or this one after a restart) reads it back to
     // see that none of them is left (proveRunLeaseGone).
@@ -723,7 +733,10 @@ export function acquireAgentWorkspaceRunLease(agentId: string, runId: string, ho
       pid: process.pid, host: os.hostname(), ...(startToken ? { startToken } : {}),
       ...(typeof holder?.ownerId === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(holder.ownerId) ? { ownerId: holder.ownerId } : {}),
       ...(typeof spawnLedger === "string" ? { spawnLedger } : {}),
+      // What the hashed tree does not cover, by identity only (no bytes): an audit trail, not part of any digest or pin.
+      ...(unverified.length ? { unverifiedCount: unverified.length, unverified: unverified.slice(0, MAX_RECORDED_UNVERIFIED) } : {}),
       revisionId: revision.id, treeDigest: tree.treeDigest, createdAt: iso() });
+    noteUnverifiedEntries(agentId, unverified);
     heldRunLeases.add(heldRunLeaseKey(agentId, runId));
     return { revisionId: revision.id, treeDigest: tree.treeDigest };
   });
@@ -784,7 +797,7 @@ export function acknowledgeAgentWorkspaceRunLeases(agentId: string): { released:
 export function getAgentWorkspace(agentId: string): AgentWorkspaceSnapshot {
   recoverAgentWorkspaceOperation(agentId);
   return withLock(agentId, () => {
-    const { root, writable } = rootFor(agentId); const tree = snapshotAgentWorkspace(root, { allowInterruptedEntry: true });
+    const { root, writable } = rootFor(agentId); const { tree } = snapshotAgentWorkspaceForRun(root, { allowInterruptedEntry: true });
     const pending = fs.existsSync(path.join(agentWorkspaceStorePath(agentId), "operation.json"));
     const head = pending && fs.existsSync(headFile(agentId)) ? readJson<{ id: string }>(headFile(agentId)).id : currentRevision(agentId, tree).id;
     const proposals = listProposals(agentId); const marker = readCloudAgentRestoreMarker(root);
@@ -804,7 +817,7 @@ export function readAgentWorkspaceFile(agentId: string, relativePath: string): A
   if (!isWorkspaceAsset(relativePath)) throw new AgentWorkspaceError("private_file", "Private memory and credentials are managed separately.");
   assertAgentWorkspaceActivationReady(agentId);
   const root = rootFor(agentId).root, observation = capturePackageSourceOwner(), route = JSON.stringify(getRoute(agentId) ?? null);
-  const tree = snapshotAgentWorkspace(root), file = tree.files.find(item => item.path === relativePath);
+  const { tree } = snapshotAgentWorkspaceForRun(root), file = tree.files.find(item => item.path === relativePath);
   if (!file) throw new AgentWorkspaceError("file_missing", "This file is no longer available.");
   const identities = tree.files.map(item => { const target = workspaceTarget(root, item.path); return { target, stat: fs.lstatSync(target) }; });
   const content = decodeWorkspaceText(Buffer.from(file.contentBase64, "base64"));

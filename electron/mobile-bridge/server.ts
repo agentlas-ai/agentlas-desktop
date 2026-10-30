@@ -42,7 +42,7 @@ import {
 import { mobileBridgeJsonBytes } from "./sanitize";
 import { mobileBridgeMailReplayMayRerun } from "./mail-replay-policy";
 import { mobileBridgeIsOwnerMessage, mobileBridgeOrphanMayRerun } from "./orphan-rerun-policy";
-import { isTransientSendRefusalCode, sendRefusalCode } from "../../shared/transient-send-refusal";
+import { isTransientSendRefusalCode, sendRefusalCode, isStoreBusyRefusedBeforeDispatch } from "../../shared/transient-send-refusal";
 
 /**
  * A phone write the Desktop refused only because the chat (or its channel) was not ready yet: the codes of
@@ -55,7 +55,8 @@ import { isTransientSendRefusalCode, sendRefusalCode } from "../../shared/transi
 export const MOBILE_BRIDGE_DESKTOP_NOT_READY_CODE = "desktop_not_ready";
 export function mobileBridgeNotReadyRefusal(error: unknown): string | null {
   const code = sendRefusalCode(error);
-  return code && isTransientSendRefusalCode(code) ? code : null;
+  if (code && isTransientSendRefusalCode(code)) return code;
+  return isStoreBusyRefusedBeforeDispatch(error) ? "store_busy" : null;
 }
 import {
   RELAY_PAIR_CODE_PLACEHOLDER,

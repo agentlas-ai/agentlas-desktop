@@ -4,7 +4,7 @@ import type { SupervisorHostNoticePurpose } from "../../shared/one-supervisor";
 import { OneSupervisorStore, supervisorHash, type SupervisorRequestRow } from "./supervisor-store";
 import { OneSupervisorWorkQueue, type SupervisorWorkLease } from "./supervisor-work-queue";
 import {OneBudgetAdmissionDenied} from "./budget-store";
-import {TRANSIENT_SEND_DEADLINE_MS,isTransientSendRefusalCode,sendRefusalCode,transientSendBackoffMs} from "../../shared/transient-send-refusal";
+import {TRANSIENT_SEND_DEADLINE_MS,isTransientSendRefusalCode,sendRefusalCode,transientSendBackoffMs, isStoreBusyError } from "../../shared/transient-send-refusal";
 
 export interface SupervisorWorkRuntime {
   start(request: McpInvocationRequest, hostNoticePurpose?: SupervisorHostNoticePurpose): {runId: string} | Promise<{runId: string}>;
@@ -184,8 +184,9 @@ export class OneSupervisorWorkExecutor {
    * began (`neverBegan`) crossed no boundary at all; after begin() the admission ledger must show no start for the run. */
   private preStartRefusal(job: SupervisorWorkLease, neverBegan: boolean, error: unknown): string | null {
     const code = sendRefusalCode(error);
-    if (!code || !isTransientSendRefusalCode(code)) return null;
-    return neverBegan || (this.deps.runtime.noStartProof?.(job.run_id) ?? true) ? code : null;
+    const refusal = code && isTransientSendRefusalCode(code) ? code : isStoreBusyError(error) ? "store_busy" : null;
+    if (!refusal) return null;
+    return neverBegan || (this.deps.runtime.noStartProof?.(job.run_id) ?? true) ? refusal : null;
   }
   /** Waits out the shared backoff as an unstarted (queued, cancellable) claim, then starts the same run again; gives up at the deadline. */
   private retryAfterRefusal(job: SupervisorWorkLease, code: string): void {

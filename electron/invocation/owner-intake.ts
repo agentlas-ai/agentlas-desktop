@@ -1,6 +1,6 @@
 import type { InvocationSteerResult, McpInvocationRequest } from "../../shared/types";
 import type { InvocationWorkspaceBinding } from "./workspace-binding";
-import { isTransientSendRefusalCode, sendRefusalCode } from "../../shared/transient-send-refusal";
+import { isTransientSendRefusal } from "../../shared/transient-send-refusal";
 
 /**
  * Owner intake: the one rule for a message the owner sends, from every surface (owner 2026-10-28: "내가 뭔 상황에서 유저가
@@ -74,9 +74,17 @@ export function ownerMessageSurface(
   return null;
 }
 
-/** A start refusal that means "the chat is not free yet": the owner's message waits for it instead of being refused. */
+/**
+ * A start refusal that means "the chat is not free yet": the owner's message waits for it instead of being refused.
+ * It is the Desktop composer's own decision (isTransientSendRefusal, used by renderer-send-queue.ts), so the phone and the
+ * composer treat every refusal alike: a typed "not ready yet" code, or a start the host refused BEFORE anything was
+ * dispatched because the shared store stayed locked past its busy wait. That lock is the driver's raw SQLITE_BUSY and
+ * carries no transient code, so a code-only test threw it out of the intake (the phone got authority_error, which it does
+ * not retry, and the durable intake row was settled failed). It waits and starts again like the others; a lock with no
+ * proof that nothing was dispatched (no `turnDelivery: "not-dispatched"`) is still not held.
+ */
 export function ownerIntakeWaits(error: unknown): boolean {
-  return isTransientSendRefusalCode(sendRefusalCode(error));
+  return isTransientSendRefusal(error);
 }
 
 /** Before this long the message usually started on its own; a received line then would only be noise. */

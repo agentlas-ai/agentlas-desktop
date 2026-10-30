@@ -358,9 +358,50 @@ export function registerOngoingGoalCycle(input: { goalId: string; invocationRunI
   })();
 }
 
+/** Checkpoints of one turn scanned back from the newest while looking for a wait's own (a turn writes two or three). */
+const SAME_EPISODE_CHECKPOINT_SCAN = 12;
+/** A stall-replan wait waits at most this long past its due time for the verification of its own turn to settle (see the hold in the poll). */
+const STALL_REPLAN_VERIFICATION_HOLD_MS = 10 * 60_000;
+
+/**
+ * Whether `latest` is the same producing turn's next checkpoint after the wait's own. A wait is registered when its turn ends, before the
+ * turn's attempt is settled (service.ts "ongoing-episode-unverified"), so its own checkpoint says effects are still uncertain; the same
+ * turn's background verification then appends its own, settled one (verifier.ts). That is one episode moving on, not another context:
+ * observed in use 10:21-13:01Z, 15 stall-replan waits retired by their own verifier as goal_wait_context_changed, each with a
+ * "Confirmation is needed" notification and the replan never run. Every checkpoint after the wait's own must be that turn's: one from
+ * another turn (the owner's message, a resumed episode) in between, another Goal revision or run, or a wait whose own checkpoint the
+ * ledger does not hold is a different context and the wait is retired as before.
+ */
+function sameEpisodeSuccessor(wait: GoalWaitSubscription, latest: LongRunTaskCheckpoint): boolean {
+  if (latest.schemaVersion !== "agentlas.task-checkpoint.v2" || latest.goalId !== wait.goalId || latest.capsule.runId !== wait.runId
+    || latest.goalRevision !== wait.goalRevision || latest.invocationRunId !== wait.sourceInvocationId) return false;
+  const rows = getDb().prepare(`SELECT json_extract(payload_json, '$.checkpoint.checkpointId') AS id,
+      json_extract(payload_json, '$.checkpoint.invocationRunId') AS invocation
+    FROM long_run_events WHERE run_id = ? AND kind = 'run.task_checkpoint' ORDER BY seq DESC LIMIT ?`)
+    .iterate(wait.runId, SAME_EPISODE_CHECKPOINT_SCAN) as IterableIterator<{ id: string | null; invocation: string | null }>;
+  for (const row of rows) {
+    if (row.invocation !== wait.sourceInvocationId) return false;
+    if (row.id === wait.checkpointId) return true;
+  }
+  return false;
+}
+
+/** The checkpoint this wait stands on: its own, or the next one of the same producing turn; null when neither is the latest. */
+function waitCheckpoint(wait: GoalWaitSubscription): LongRunTaskCheckpoint | null {
+  const latest = latestTaskCheckpoint(wait.goalId);
+  if (!latest) return null;
+  return latest.checkpointId === wait.checkpointId || sameEpisodeSuccessor(wait, latest) ? latest : null;
+}
+
+/** A background verification of the run is still being judged (its attempt is open until the verifier writes its checkpoint). */
+function verificationInFlight(runId: string): boolean {
+  return Boolean(getDb().prepare(`SELECT 1 FROM long_run_worker_attempts a JOIN long_run_workers w ON w.id = a.worker_id AND w.run_id = a.run_id
+    WHERE a.run_id = ? AND a.state = 'running' AND w.role = 'verifier' LIMIT 1`).get(runId));
+}
+
 function candidateCheckpoint(wait: GoalWaitSubscription): LongRunTaskCheckpoint {
-  const checkpoint = latestTaskCheckpoint(wait.goalId);
-  if (!checkpoint || checkpoint.checkpointId !== wait.checkpointId) throw new Error("goal_wait_checkpoint_changed");
+  const checkpoint = waitCheckpoint(wait);
+  if (!checkpoint) throw new Error("goal_wait_checkpoint_changed");
   // Only the explicitly subscribed artifact may supply a new input. All other
   // artifact versions, original/current user constraints and effects stay exact.
   if (wait.intent.subject.kind !== "artifact") return checkpoint;
@@ -714,6 +755,10 @@ export async function pollGoalWaitSubscriptions(options: { now?: number; clock?:
           || revision.revision !== wait.goalRevision || getChat(wait.chatId)?.goalId !== wait.goalId) {
           failure = "goal_wait_goal_revision_changed";
         }
+        // The replan stands on a settled checkpoint, and only the verification of this wait's own turn writes one. It is still being
+        // judged: look again at the next poll instead of retiring the wait on the unsettled one (bounded; nothing is written here).
+        if (!failure && checkpoint.sideEffects.state !== "settled" && verificationInFlight(current.id)
+          && clock() - Date.parse(wait.intent.subject.kind === "timer" ? wait.intent.subject.notBefore : "") < STALL_REPLAN_VERIFICATION_HOLD_MS) return;
         recordGoalWaitDiagnostics(wait, current, checkpoint, clock());
       } catch { failure = "goal_wait_context_changed"; }
     }
@@ -735,8 +780,8 @@ export async function pollGoalWaitSubscriptions(options: { now?: number; clock?:
       const controller = new AbortController();
       replanInFlight.set(wait.waitId, controller);
       try {
-        const checkpoint = latestTaskCheckpoint(wait.goalId);
-        replan = checkpoint?.checkpointId === wait.checkpointId
+        const checkpoint = waitCheckpoint(wait);
+        replan = checkpoint
           ? await boundedWaitCheck(() => withGoalWaitAccounting({ waitId: wait.waitId, goalId: wait.goalId,
             goalRevision: wait.goalRevision, checkpointId: wait.checkpointId, chatId: wait.chatId },
             () => (options.reflect ?? reflectOngoingStall)({ checkpoint,

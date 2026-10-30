@@ -178,7 +178,7 @@ export function nudgeParkedRelays(chatId: string, ports: RelayNudgePorts = produ
   if (ports.ownerRequestWaiting(chatId)) return "owner_request_waiting";
   const rows = ports.listRows(chatId, NUDGE_TEXT_BUDGET);
   if (!rows.length) return "none";
-  const token = `relay-nudge:${randomUUID()}`;
+  const token = `${relayNudgeClaimPrefix()}${randomUUID()}`;
   if (!ports.claim(rows.map((row) => row.id), token)) return "none";
   try {
     ports.steer(chatId, rows.map((row) => row.text).join("\n\n"));
@@ -192,6 +192,11 @@ export function nudgeParkedRelays(chatId: string, ports: RelayNudgePorts = produ
     if (code && (code === "chat_invocation_active" || code.startsWith("invocation_chat_busy"))) return "busy";
     return code && transientRefusal(code) ? "refused_transient" : "refused";
   }
+}
+
+/** The claim token prefix lives with the store (deferred-system-relays.ts) so the reclaim scan can tell a token from a run id. */
+function relayNudgeClaimPrefix(): string {
+  return (require("./deferred-system-relays") as typeof import("./deferred-system-relays")).NUDGE_CLAIM_PREFIX;
 }
 
 function transientRefusal(code: string): boolean {
@@ -230,6 +235,8 @@ export interface ParkedRelayScanPorts {
   goal: GoalRetryPorts;
   nudge: RelayNudgePorts;
   chats(parkedBefore: number, limit: number): Array<{ chatId: string; oldest: number; count: number }>;
+  /** Gives back relays that a turn claimed and then died with (an app quit or crash) before any model read them. Returns the count. */
+  reclaim?(now: number): number;
 }
 
 interface NudgeSeries { attempts: number; notBefore: number }
@@ -249,6 +256,11 @@ export interface ParkedRelayScanResult { chatId: string; action: "pulled_forward
 /** One pass over the chats that hold parked relays. Pure of timers; the caller chooses the cadence. */
 export function scanParkedRelays(ports: ParkedRelayScanPorts = productionScanPorts(), now: number = Date.now()): ParkedRelayScanResult[] {
   const out: ParkedRelayScanResult[] = [];
+  // A report claimed by a turn that never reached a model is a parked report again before the list below is read.
+  try {
+    const reclaimed = ports.reclaim?.(now) ?? 0;
+    if (reclaimed > 0) console.info(`[parked-relay] ${reclaimed} relay(s) given back from turns that never reached a model`);
+  } catch (error) { console.warn("[parked-relay] reclaim failed:", error instanceof Error ? error.message : error); }
   let work: Array<{ chatId: string; oldest: number; count: number }> = [];
   try { work = ports.chats(now - PARKED_RELAY_MIN_AGE_MS, SCAN_CHATS_PER_PASS); }
   catch (error) { console.warn("[parked-relay] scan could not read the parked relays:", error instanceof Error ? error.message : error); return out; }
@@ -291,6 +303,7 @@ function productionScanPorts(): ParkedRelayScanPorts {
     goal: productionGoalPorts(),
     nudge: productionNudgePorts(),
     chats: (before, limit) => (require("./deferred-system-relays") as typeof import("./deferred-system-relays")).listChatsWithParkedRelays(before, limit),
+    reclaim: (now) => (require("./deferred-system-relays") as typeof import("./deferred-system-relays")).reclaimUnreadDeferredSystemRelays(now),
   };
 }
 

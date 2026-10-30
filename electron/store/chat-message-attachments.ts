@@ -548,6 +548,21 @@ export function validateChatAttachmentSelection(chatId:string,groupId?:string,im
   if (files.reduce((sum,item)=>sum+item.size,0)+imageBytes>ONE_ATTACHMENT_LIMITS.maxTotalBytes) throw new ChatFileSnapshotError("too_large","Selected attachments exceed the Desktop total limit.");
 }
 
+/**
+ * When each of these groups was stored, as the ISO text the store wrote (it sorts in time order). A group this conversation
+ * does not hold is left out. A Work run that lists many attachments uses it to tell the newest from the older ones.
+ */
+export function chatFileGroupCreatedAt(chatId: string, groupIds: readonly string[]): Map<string, string> {
+  ensureChatFileSnapshotTables();
+  const read = getDb().prepare("SELECT created_at FROM chat_file_groups WHERE chat_id = ? AND id = ?");
+  const stored = new Map<string, string>();
+  for (const groupId of groupIds) {
+    const row = read.get(chatId, groupId) as { created_at?: unknown } | undefined;
+    if (typeof row?.created_at === "string") stored.set(groupId, row.created_at);
+  }
+  return stored;
+}
+
 export function listChatFileSnapshot(input: { chatId: string; groupId: string }): StoredChatFile[] {
   if (!input || typeof input !== "object" || !input.chatId || !CHAT_FILE_ID_RE.test(input.groupId)) return [];
   ensureChatFileSnapshotTables();

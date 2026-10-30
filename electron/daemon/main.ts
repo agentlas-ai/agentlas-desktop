@@ -1236,6 +1236,12 @@ export async function startDaemon(options: DaemonStartupOptions = {}): Promise<v
       if (closing) throw new Error("daemon_shutting_down");
       daemonNativeInvocation = await runtime.createNativeInvocationRuntime({ address: channel.nativeAuthSocketPath(dir),
         binding, credential, bootId, service: daemonInvocationService!, assertOwner: assertServiceOwner,
+        // Idle only: work under way keeps this process, and the next supervisor call asks again.
+        restartForOwner: () => {
+          if (closing || daemonActiveWorkReasons(residencyInput()).length > 0) return;
+          recordServicePhase("owner_changed");
+          void performShutdown("the signed-in person's One is not the one this service adopted");
+        },
         resources, adoptSession: auth.adoptHostSessionHandoff, clearDetectCache: detect.clearDetectCache,
         science:{commandObserved:async(command,request)=>{
           assertServiceOwner();

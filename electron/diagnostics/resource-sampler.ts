@@ -37,7 +37,7 @@ export type ResourceSamplerOptions = {
   intervalMs?: number;
 };
 type CallFrame = { functionName?: string; url?: string; lineNumber?: number };
-type CpuNode = { id: number; callFrame: CallFrame };
+type CpuNode = { id: number; callFrame: CallFrame; children?: number[] };
 type CpuProfile = { nodes: CpuNode[]; samples?: number[]; timeDeltas?: number[] };
 type HeapNode = { callFrame: CallFrame; selfSize: number; children?: HeapNode[] };
 export type ProfileFrame = { frame: string; value: number };
@@ -58,9 +58,20 @@ function topFrames(totals: Map<string, number>, scale: (value: number) => number
     .map(([frame, value]) => ({ frame, value: scale(value) }));
 }
 
-export function summarizeCpuProfile(profile: CpuProfile): { totalMs: number; selfMs: ProfileFrame[] } {
+/** A native frame such as a SQLite `get` says nothing alone; `callerMs` charges its time to the JavaScript that called it. */
+export function summarizeCpuProfile(profile: CpuProfile): { totalMs: number; selfMs: ProfileFrame[]; callerMs: ProfileFrame[] } {
   const byNode = new Map(profile.nodes.map((node) => [node.id, node.callFrame]));
+  const parents = new Map<number, number>();
+  for (const node of profile.nodes) for (const child of node.children ?? []) parents.set(child, node.id);
+  const callerOf = (id: number): CallFrame | null => {
+    for (let at: number | undefined = id; at !== undefined; at = parents.get(at)) {
+      const frame = byNode.get(at);
+      if (frame?.url && !frame.url.startsWith("node:")) return frame;
+    }
+    return null;
+  };
   const totals = new Map<string, number>();
+  const callers = new Map<string, number>();
   let totalMicros = 0;
   (profile.samples ?? []).forEach((id, index) => {
     const delta = profile.timeDeltas?.[index] ?? 0;
@@ -69,8 +80,14 @@ export function summarizeCpuProfile(profile: CpuProfile): { totalMs: number; sel
     totalMicros += delta;
     const label = frameLabel(frame);
     totals.set(label, (totals.get(label) ?? 0) + delta);
+    const caller = callerOf(id);
+    if (caller) {
+      const callerLabel = frameLabel(caller);
+      callers.set(callerLabel, (callers.get(callerLabel) ?? 0) + delta);
+    }
   });
-  return { totalMs: Math.round(totalMicros / 1_000), selfMs: topFrames(totals, (micros) => Math.round(micros / 100) / 10) };
+  const milliseconds = (micros: number) => Math.round(micros / 100) / 10;
+  return { totalMs: Math.round(totalMicros / 1_000), selfMs: topFrames(totals, milliseconds), callerMs: topFrames(callers, milliseconds) };
 }
 
 export function summarizeHeapProfile(head: HeapNode): { liveMb: number; selfMb: ProfileFrame[] } {

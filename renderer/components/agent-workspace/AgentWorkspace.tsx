@@ -13,7 +13,7 @@ import { agentWorkspaceFailure } from "@/lib/agent-workspace-error";
 import type { AgentRuntimeOverride, InstalledAgent, InstalledAgentExactBinding, InstalledFirm, MemoryImportPreviewUi, ResolvedOrg, RuntimeStatus } from "@shared/types";
 import type {
   AgentWorkspaceComparison, AgentWorkspaceDiff as WorkspaceDiff, AgentWorkspaceChangeSummary, AgentWorkspaceFile, AgentWorkspaceLearningCard, AgentWorkspaceMemoryCandidate, AgentWorkspaceRevisionOutcome,
-  AgentWorkspaceExperience, AgentWorkspaceOutcomeCounts, AgentWorkspaceRevision, AgentWorkspaceWorkKind, AgentWorkspaceProposal, AgentWorkspaceReadFile, AgentWorkspaceRecovery, AgentWorkspaceSnapshot,
+  AgentWorkspaceProposal, AgentWorkspaceReadFile, AgentWorkspaceRecovery, AgentWorkspaceSnapshot,
 } from "@shared/agent-workspace";
 import { AgentWorkspaceDiff } from "./AgentWorkspaceDiff";
 import { AgentWorkspaceInspector } from "./AgentWorkspaceInspector";
@@ -390,8 +390,7 @@ export function AgentWorkspace({ agent, name, locale, initialView = "files", onT
       {alwaysOnSentence(review.alwaysOn, ko) && <div className={`${styles.banner} ${review.alwaysOn?.overHard ? styles.error : ""}`}>{alwaysOnSentence(review.alwaysOn, ko)}</div>}
       {review.card && <LearningCardView card={review.card} ko={ko} />}
       <ChangeSummaryView changes={review.changeSummary} ko={ko} />
-      {review.status === "applied" && <AppliedRecord revision={snapshot?.history.find((revision) => revision.id === review.appliedRevisionId)} ko={ko} />}
-      {review.status === "review_ready" && review.memoryEntryIds.length > 0 && <Baseline revision={snapshot?.history.find((revision) => revision.id === review.baseRevisionId)} ko={ko} />}
+      {review.status === "applied" && <OutcomeComparison before={snapshot?.history.find((revision) => revision.id === review.baseRevisionId)?.outcome} after={snapshot?.history.find((revision) => revision.id === review.appliedRevisionId)?.outcome} ko={ko} />}
       <AgentWorkspaceDiff files={review.changes} locale={locale} activePath={reviewPath} onPathChange={setReviewPath} />
       <div className={styles.reviewFooter}><span>{ko ? "전체 파일 변경 · 다음 실행부터 적용" : "Whole file changes · Used from the next run"}</span>
         {review.status === "review_ready" && <><button className={styles.button} disabled={Boolean(busy)} onClick={() => void run("reject", async () => { const result = await api().reject({ proposalId: review.id }); setReview({ ...result, reviewedHash: result.proposalDigest }); await refresh(); })}>{ko ? "거절" : "Reject"}</button><button className={`${styles.button} ${styles.primary}`} disabled={Boolean(busy) || !snapshot?.writable || !review.reviewToken || dirty || snapshot.activation === "recovery_required"} onClick={() => void approve()}>{busy === "apply" ? <span className={styles.loading} /> : <IconCheck size={13} />}{ko ? "승인·적용" : "Approve and apply"}</button></>}
@@ -515,51 +514,16 @@ function outcomeSentence(outcome: AgentWorkspaceRevisionOutcome | undefined, ko:
   return ko ? `실행 ${outcome.runs}회 · 완료 ${outcome.completed} · 실패 ${outcome.failed} · 도구 오류 ${outcome.errors} · 중간 정정 ${outcome.steering}`
     : `${outcome.runs} runs · ${outcome.completed} completed · ${outcome.failed} failed · ${outcome.errors} tool errors · ${outcome.steering} mid-run corrections`;
 }
-const WORK_KIND_LABEL: Record<AgentWorkspaceWorkKind, [string, string]> = {
-  task: ["작업", "Tasks"], conversation: ["대화", "Conversations"], automation: ["자동화", "Automations"], other: ["종류 기록 없음", "Kind not recorded"],
-};
-/** One kind of work in one revision, as the host counted it; rates are per run. */
-function countsLine(counts: AgentWorkspaceOutcomeCounts, ko: boolean): string {
-  const per = (value: number) => (value / counts.runs).toFixed(2);
-  return ko ? `실행 ${counts.runs} · 실패 ${counts.failed} · 도구 오류 ${counts.errors} (${per(counts.errors)}/회) · 중간 정정 ${counts.steering} (${per(counts.steering)}/회) · 도구 호출 ${per(counts.toolCalls)}/회 · 산출물 기록 ${counts.withOutput}`
-    : `${counts.runs} runs · ${counts.failed} failed · ${counts.errors} tool errors (${per(counts.errors)}/run) · ${counts.steering} corrections (${per(counts.steering)}/run) · ${per(counts.toolCalls)} tool calls/run · ${counts.withOutput} with output`;
-}
-const LIMIT_LABEL: Record<NonNullable<NonNullable<AgentWorkspaceRevision["comparison"]>["rows"][number]["limit"]>, [string, string]> = {
-  no_runs_before: ["반영 전 실행 없음", "No runs before"], no_runs_after: ["반영 후 실행 없음", "No runs after yet"], single_run: ["한쪽 실행 1회 — 비교 불가", "One run on a side — not comparable"],
-};
-/**
- * The revision a change replaced next to the one it produced, per kind of work, counted by the host. No verdict: being
- * approved is not the same as helping, and the runs before and after were different requests. The owner reads the numbers.
- */
-function OutcomeComparison({ revision, ko }: { revision?: AgentWorkspaceRevision; ko: boolean }) {
-  const rows = revision?.comparison?.rows ?? [];
-  if (!rows.some((row) => row.after)) return <div className={styles.banner}>{ko ? "반영 뒤 실행이 아직 없습니다. 실행이 쌓이면 같은 종류의 일끼리 반영 전과 숫자로 비교합니다." : "No runs since the change yet. Once runs accumulate, each kind of work is compared with the runs before it."}</div>;
-  return <><table className={styles.outcomeTable}><thead><tr><th>{ko ? "일의 종류" : "Kind of work"}</th><th>{ko ? "반영 전" : "Before"}</th><th>{ko ? "반영 후" : "After"}</th></tr></thead>
-    <tbody>{rows.map((row) => <tr key={row.kind}><th>{WORK_KIND_LABEL[row.kind][ko ? 0 : 1]}{row.limit && <div className={styles.meta}><span>{LIMIT_LABEL[row.limit][ko ? 0 : 1]}</span></div>}</th>
-      <td>{row.before ? countsLine(row.before, ko) : "—"}</td><td>{row.after ? countsLine(row.after, ko) : "—"}</td></tr>)}</tbody></table>
-    <div className={styles.meta}><span>{ko ? "앱이 기록한 숫자입니다. 전후 실행은 서로 다른 요청이라 효과를 판정하지 않습니다." : "Numbers the app recorded. Runs before and after were different requests, so no effect is judged."}</span></div></>;
-}
-/** An applied learning: its record (when it names its runs) and how runs went before and after. */
-function AppliedRecord({ revision, ko }: { revision?: AgentWorkspaceRevision; ko: boolean }) {
-  return <>{revision?.experience && <ExperienceView experience={revision.experience} ko={ko} />}<OutcomeComparison revision={revision} ko={ko} /></>;
-}
-/** Before approving a learning: what the current version's runs look like, and how the change that made it went, if any. */
-function Baseline({ revision, ko }: { revision?: AgentWorkspaceRevision; ko: boolean }) {
-  const kinds = Object.entries(revision?.outcome?.byKind ?? {}) as Array<[AgentWorkspaceWorkKind, AgentWorkspaceOutcomeCounts]>;
-  return <div className={styles.changeSummary}><h3>{ko ? "지금 버전의 실제 실행" : "Runs on the current version"}</h3>
-    {kinds.length ? <ul>{kinds.map(([kind, counts]) => <li key={kind}>{WORK_KIND_LABEL[kind][ko ? 0 : 1]} · {countsLine(counts, ko)}</li>)}</ul>
-      : <p className={styles.meta}>{ko ? "지금 버전으로 돈 실행이 아직 없습니다." : "No runs on the current version yet."}</p>}
-    <p className={styles.meta}>{ko ? "승인하면 이 숫자가 반영 전 기준이 됩니다." : "If you approve, these are the numbers the change is compared against."}</p>
-    {revision?.experience && <><h3>{ko ? "직전 변경의 전후" : "The previous change, before and after"}</h3><OutcomeComparison revision={revision} ko={ko} /></>}</div>;
-}
-function ExperienceView({ experience, ko }: { experience: AgentWorkspaceExperience; ko: boolean }) {
-  const rows: Array<[string, string]> = [
-    ...(experience.cue ? [[ko ? "언제" : "When", experience.cue] as [string, string]] : []),
-    ...(experience.lesson ? [[ko ? "교훈" : "Lesson", experience.lesson] as [string, string]] : []),
-    [ko ? "바뀐 것" : "Changed", experience.changed.map((change) => changeLine(change, ko)).join(" · ") || "—"],
-    [ko ? "근거 실행" : "From runs", ko ? `${experience.evidence.length}개 실행` : `${experience.evidence.length} runs`],
+/** Side-by-side numbers for the revision a change replaced and the one it produced. No verdict: the owner judges. */
+function OutcomeComparison({ before, after, ko }: { before?: AgentWorkspaceRevisionOutcome; after?: AgentWorkspaceRevisionOutcome; ko: boolean }) {
+  if (!before?.runs || !after?.runs) return <div className={styles.banner}>{ko ? "반영 전후를 비교할 실행 기록이 아직 없습니다. 반영 뒤 실행이 쌓이면 여기서 숫자로 비교합니다." : "There are no runs to compare yet. Once runs accumulate after the change, they are compared here."}</div>;
+  const per = (outcome: AgentWorkspaceRevisionOutcome, value: number) => (value / outcome.runs).toFixed(2);
+  const rows: Array<[string, (o: AgentWorkspaceRevisionOutcome) => string]> = [
+    [ko ? "실행" : "Runs", (o) => String(o.runs)], [ko ? "실패" : "Failed", (o) => `${o.failed} (${per(o, o.failed)}${ko ? "/회" : "/run"})`],
+    [ko ? "도구 오류" : "Tool errors", (o) => `${o.errors} (${per(o, o.errors)}${ko ? "/회" : "/run"})`], [ko ? "중간 정정" : "Mid-run corrections", (o) => `${o.steering} (${per(o, o.steering)}${ko ? "/회" : "/run"})`],
   ];
-  return <dl className={styles.learningCard}>{rows.map(([label, text]) => <div key={label}><dt>{label}</dt><dd>{text}</dd></div>)}</dl>;
+  return <table className={styles.outcomeTable}><thead><tr><th /><th>{ko ? "반영 전" : "Before"}</th><th>{ko ? "반영 후" : "After"}</th></tr></thead>
+    <tbody>{rows.map(([label, cell]) => <tr key={label}><th>{label}</th><td>{cell(before)}</td><td>{cell(after)}</td></tr>)}</tbody></table>;
 }
 function alwaysOnSentence(change: AgentWorkspaceProposal["alwaysOn"], ko: boolean): string | null {
   if (!change) return null;

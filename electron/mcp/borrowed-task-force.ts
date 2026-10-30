@@ -12,7 +12,7 @@ import { toolObservationDigest } from "../automation-progress-guard";
 import { selectTaskForceConversationContext } from "./task-force-history";
 import { runObservedRunner, observedRunnerUsage, observedRunnerUsageEvidence, ObservedRunnerFailureError, copyObservedRunnerEvidence } from "../runtime/observed-runner";
 import { mainWorkAttachmentContext, redactWorkAttachmentText } from "../invocation/work-attachments";
-import { effectiveInvocationPermission } from "../../shared/invocation-permission";
+import { delegatedWorkerAutoReview, effectiveInvocationPermission } from "../../shared/invocation-permission";
 import { withRuntimeCapabilityReceipt } from "../runtime/capability-receipt";
 import { detectSandboxDeath, detectSandboxRefusal, type SandboxDeathSignal } from "../runtime/sandbox-death";
 import { currentModelCallScope, withModelCallScope, roleForTaskForcePhase } from "../runtime/model-call-ledger";
@@ -5188,14 +5188,18 @@ async function runBorrowedAgentTurn(
     tryRecordRunEvent({ runId: p.req.runId ?? `task-force:${p.chat.id}`, chatId: p.chat.id,
       agentId: workerId, kind: "worker_capability_preparation", payload: { code, attemptId, ceiling: capabilityCeiling } });
   };
-  // The automatic reviewer (Codex's own risk review of each MCP call) belongs to a WRITE worker, whose approvals have nobody to answer
-  // them. A worker the owner gave full access runs like every other full-access run, with no approval step: routing it through the
-  // reviewer let Codex refuse a call under permissions "full" ("rejected due to unacceptable risk", speech.transcribe on the owner's
-  // own video, 2026-10-28) that the same call outside a team would have run.
+  // The automatic reviewer (Codex's own risk review of each MCP call) belongs to a WRITE worker of a host that is not full, whose
+  // approvals have nobody to answer them. Under the owner's full access the worker is still a project-rooted `write` worker
+  // (taskForceChildPermission), so the worker's own permission cannot tell the two apart: the decision follows the HOST. Routing a
+  // full host's worker through the reviewer let Codex refuse a call the owner's full access allows ("rejected due to unacceptable
+  // risk": speech.transcribe on the owner's own video; invoke.replay on the owner's own run, after
+  // 24845818a had tested `workerPermission === "write"`, which a full host's worker also satisfies). Its approvals go to the common
+  // arbiter like every other full-access run's; the sandbox is unchanged.
   const runnerBase = taskForceRunnerBase(
     p,
     workerPermission,
-    workerPermission === "write" || readQaAutoReviewAllowed(p, packet, workerPermission, preApprovalStage),
+    delegatedWorkerAutoReview(taskForcePermission(p), workerPermission)
+      || readQaAutoReviewAllowed(p, packet, workerPermission, preApprovalStage),
   );
   const candidateRuntimes = taskForceCandidateRuntimes(p);
   // (a) the member's own explicit model; its lookup needs every live runtime, not only the room's.
@@ -5497,6 +5501,8 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
         // tier-1 only inside the firm, so recovery must use the worker pool and
         // must not mutate/report the root One controller's fallback chain.
         controllerRuntimeRole: "worker",
+        // req.permissions above is this seat's own grant; the reviewer of the team's delegates follows the owner's run.
+        hostPermission: taskForcePermission(p),
         runnerEnv: p.runnerEnv,
         locale: p.locale,
         sink: nestedSink,

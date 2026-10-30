@@ -41,6 +41,7 @@ import { recordAutomationPinProvenance } from "../automation-runtime-provenance"
 import { assertFiniteGoalLifecycleCurrent, isGoalDispatchRefusal } from "../automation-execution-control";
 import { selectionForRuntime } from "../../shared/runtime-selection";
 import { roomChipRuntimeSelection } from "../runtime/room-chip-runtime";
+import { ownerPickedEffort, effortDeviation, effortDeviationNotice } from "../runtime/effort-deviation";
 import { officeTaskContextForInvocation } from "../office-task-context";
 import { readGoalWaitProposal, recordGoalWaitProposal } from "../long-run/goal-wait-proposal";
 import { assertInvocationRunOwner, invocationRunOwners } from "../store/invocation-run-owners";
@@ -2640,6 +2641,14 @@ async function runMcpInvocationInContext(
     agentAppMode: req.agentAppMode === true,
   });
   if (roomChipSelection) req = { ...req, runtimeSelection: roomChipSelection };
+  // The effort the owner picked for THIS request, fixed before any fallback or Goal normalization rewrites req.runtimeSelection:
+  // when the run cannot honour it, it says so (effort-deviation.ts). Only the owner's own turn or the room chip that governs it
+  // counts; a fast turn asks for the lowest level on purpose, and an automation, Science or Agent App run has no such pick.
+  const pickedEffort = ownerPickedEffort(req.runtimeSelection,
+    req.promptOrigin !== "system" && (Boolean(explicitRuntimeSelection) || Boolean(roomChipSelection))
+    && !isUnattendedExecution(executionContext) && !executionContext?.graphWorkerAttempt && req.agentAppMode !== true && req.fastMode !== true);
+  /** What the owner was last told about the effort of this run: undefined = nothing yet, null = "the runtime's default". */
+  let effortToldRan: string | null | undefined;
   // The screen that shows this chat's approvals: its pack's screen (PLAN S6: a Science conversation and its review chats are tagged
   // with the Science pack), otherwise the surface that opened it.
   const chatPackScreen = surfacePackScreen(chat.surfacePack);
@@ -3566,6 +3575,13 @@ async function runMcpInvocationInContext(
       details: JSON.stringify(confirmedRuntime),
     },
   });
+  // The effort the owner picked is not what selection resolved (the model does not offer it): say so now, plainly, instead of
+  // letting the answer arrive at another level unannounced. The runner may still apply something else; that is told at the end.
+  const startDeviation = effortDeviation({ picked: pickedEffort, runtime: active, ran: active.effort });
+  if (startDeviation) {
+    sink({ kind: "notice", notice: effortDeviationNotice(startDeviation, runtimeLabel, locale) });
+    effortToldRan = startDeviation.ran;
+  }
   let controllerSelectionForFallback: RuntimeSelection = req.runtimeSelection ?? confirmedRuntime;
   const oneControllerFallbackEligible = req.oneMode === true && runtimeResolution.pinHonored && !continuationRuntimePinned;
   const emitControllerRuntimeFallback = (
@@ -9177,6 +9193,16 @@ async function runMcpInvocationInContext(
       sink({ kind: "notice", notice: { level: "warning", code: "requested-file-missing", message: i18n[locale], i18n } });
       tryRecordRunEvent({ runId: req.runId ?? `chat:${chat.id}`, kind: "requested_file_missing", chatId: chat.id, agentId: agent.id,
         payload: { count: missingFiles.length, runtime: active.kind } });
+    }
+    // The runner's own word on the effort it applied (null: none sent, the runtime's default) decides whether the effort the
+    // owner picked reached the provider. Said again only when it differs from what the start of the run already told.
+    if (pickedEffort && !signal?.aborted && !result.failure) {
+      const endDeviation = effortDeviation({ picked: pickedEffort, runtime: active,
+        ran: Object.prototype.hasOwnProperty.call(result, "appliedEffort") ? result.appliedEffort ?? null : active.effort });
+      if (endDeviation && endDeviation.ran !== effortToldRan) {
+        sink({ kind: "notice", notice: effortDeviationNotice(endDeviation, `${runtimeDisplayName(active.kind)}${active.model ? ` · ${active.model}` : ""}`, locale) });
+        effortToldRan = endDeviation.ran;
+      }
     }
     const finalImageOptions = finalWorkImages.length > 0 ? { images: finalWorkImages } : undefined;
     let durableAssistantEntry: ReturnType<typeof appendChatMessage> | null = null;

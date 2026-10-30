@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
-import type { McpInvocationRequest } from "../../shared/types";
+import type { ImageAttachment, McpInvocationRequest } from "../../shared/types";
 import { followupRequestJson } from "../../shared/followup-custody";
+import { ONE_ATTACHMENT_LIMITS } from "../../shared/one-attachments";
 import {
   TRANSIENT_SEND_DEADLINE_MS,
   isTransientRunFailureCode,
@@ -82,6 +83,26 @@ export class PendingSendSourceReadBusy extends Error {
   }
 }
 
+/**
+ * A queued message's image kept as a REFERENCE to the bytes its transcript row already stores (chat_message_attachments,
+ * saved by saveUserRow with the bounded, validated store limits), not as a second inline copy in the queue row. `name` is the
+ * request's own file name (the store keeps a path-stripped one); the bytes are read back, and checked against `sha256`, when
+ * the message starts.
+ */
+export interface PendingSendImageRef { id: string; name?: string; mediaType: string; size: number; sha256: string }
+
+/** The images of a message too big to queue inline could not be tied to bytes the transcript row holds: nothing was queued. */
+export class PendingSendImagesUnsaved extends Error {
+  readonly code = "pending_send_images_unsaved";
+  constructor(readonly detail: string) { super("pending_send_images_unsaved"); }
+}
+
+/** The bytes a queued message refers to are no longer there (the message or chat was removed) or no longer match: it never starts without its images. */
+export class PendingSendImagesUnavailable extends Error {
+  readonly code = "pending_send_images_unavailable";
+  constructor(readonly detail: string) { super("pending_send_images_unavailable"); }
+}
+
 export interface PendingChatSendsDeps<Sender> {
   db: PendingSendDb;
   now(): number;
@@ -148,7 +169,14 @@ export interface PendingChatSendsDeps<Sender> {
   log?(message: string, detail: Record<string, unknown>): void;
 }
 
+/**
+ * What the queue keeps in one row for a request's own fields (text, options). Images are not counted against it once they are
+ * stored by reference (see PendingSendImageRef): they weigh on the transcript, within the attachment store's own limits.
+ */
 const MAX_REQUEST_BYTES = 1_000_000;
+/** The attachment store's bounds (store/chat-message-attachments.ts persistChatMessageImages), as base64 text lengths. */
+const MAX_IMAGE_BASE64_CHARS = Math.ceil(ONE_ATTACHMENT_LIMITS.maxImageBytes / 3) * 4;
+const MAX_IMAGES_BASE64_CHARS = Math.ceil(ONE_ATTACHMENT_LIMITS.maxTotalBytes / 3) * 4;
 /** While the chat is busy we only look; a look is cheap and writes nothing. */
 const BUSY_POLL_MS = 750;
 /** While no window of the app is open, a waiting message looks for one this often (bounded by the deadline). */
@@ -174,7 +202,25 @@ export function canQueuePendingSend(request: McpInvocationRequest | null | undef
   if (typeof request.userPrompt !== "string" || !request.userPrompt.trim()) return false;
   if (request.agentAppMode || (request.oneAttachmentRef || request.oneTeamPreflightRef) && !durableInputCustody) return false;
   if (request.promptOrigin === "system") return false;
-  try { return Buffer.byteLength(JSON.stringify(request), "utf8") <= MAX_REQUEST_BYTES; } catch { return false; }
+  try {
+    if (Buffer.byteLength(JSON.stringify(request), "utf8") <= MAX_REQUEST_BYTES) return true;
+    // Over the cap only because of its images (an image is base64 in the request: ~750 KB of PNG is already over): they are saved
+    // once with the transcript row and queued by reference, so the queue still keeps only the request's own fields.
+    // Custody-owned requests (attachment / team refs) keep their exact inline form.
+    return !request.oneAttachmentRef && !request.oneTeamPreflightRef && imagesFitTranscriptStore(request.images)
+      && Buffer.byteLength(JSON.stringify({ ...request, images: undefined }), "utf8") <= MAX_REQUEST_BYTES;
+  } catch { return false; }
+}
+
+/** Cheap shape and size bounds only (no decoding): the attachment store validates type, encoding and bytes when the row is saved. */
+function imagesFitTranscriptStore(images: unknown): images is ImageAttachment[] {
+  if (!Array.isArray(images) || images.length === 0 || images.length > ONE_ATTACHMENT_LIMITS.maxCount) return false;
+  let total = 0;
+  for (const image of images as Array<Partial<ImageAttachment> | null>) {
+    if (!image || typeof image.data !== "string" || typeof image.mediaType !== "string" || image.data.length > MAX_IMAGE_BASE64_CHARS) return false;
+    total += image.data.length;
+  }
+  return total <= MAX_IMAGES_BASE64_CHARS;
 }
 
 /** Automatic work yields to accepted owner input without making the queue's
@@ -210,6 +256,9 @@ export function createPendingChatSends<Sender>(deps: PendingChatSendsDeps<Sender
   // chat is not a failure and never counts toward the deadline), and the earliest time the next attempt may start.
   if (!columns.has("refused_since")) deps.db.exec("ALTER TABLE pending_chat_sends ADD COLUMN refused_since INTEGER");
   if (!columns.has("not_before")) deps.db.exec("ALTER TABLE pending_chat_sends ADD COLUMN not_before INTEGER");
+  // Images of a message too big to queue inline, by reference to the bytes its transcript row stores (PendingSendImageRef[]);
+  // null for every other message. An older build reads such a row as a message without images (it ignores the column).
+  if (!columns.has("image_refs_json")) deps.db.exec("ALTER TABLE pending_chat_sends ADD COLUMN image_refs_json TEXT");
 
   const senders = new Map<string, Sender>();
   const timers = new Map<string, unknown>();
@@ -219,8 +268,8 @@ export function createPendingChatSends<Sender>(deps: PendingChatSendsDeps<Sender
   const unrecorded = new Map<string, string>();
 
   const insert = deps.db.prepare(`INSERT INTO pending_chat_sends
-    (id, chat_id, intent_id, request_json, user_row_json, prompt_hash, state, attempts, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, 'queued', 0, ?, ?)`);
+    (id, chat_id, intent_id, request_json, user_row_json, prompt_hash, state, attempts, created_at, updated_at, image_refs_json)
+    VALUES (?, ?, ?, ?, ?, ?, 'queued', 0, ?, ?, ?)`);
   const setState = deps.db.prepare("UPDATE pending_chat_sends SET state = ?, last_code = COALESCE(?, last_code), updated_at = ? WHERE id = ?");
   const setAttempt = deps.db.prepare("UPDATE pending_chat_sends SET attempts = attempts + 1, last_code = COALESCE(?, last_code), refused_since = COALESCE(refused_since, ?), updated_at = ? WHERE id = ?");
   const clearRefusedSince = deps.db.prepare("UPDATE pending_chat_sends SET refused_since = NULL WHERE id = ? AND refused_since IS NOT NULL");
@@ -244,7 +293,7 @@ export function createPendingChatSends<Sender>(deps: PendingChatSendsDeps<Sender
 
   type Row = { id: string; seq: number; chat_id: string; intent_id: string | null; request_json: string; user_row_json: string | null;
     prompt_hash: string; state: PendingSendState; attempts: number; last_code: string | null; created_at: number;
-    run_id: string | null; dispatch_retries: number; refused_since: number | null; not_before: number | null };
+    run_id: string | null; dispatch_retries: number; refused_since: number | null; not_before: number | null; image_refs_json?: string | null };
   const record = (row: Row): PendingSendRecord => ({
     id: row.id, seq: row.seq, chatId: row.chat_id, intentId: row.intent_id, promptHash: row.prompt_hash, state: row.state,
     attempts: row.attempts, lastCode: row.last_code, createdAt: row.created_at,
@@ -252,6 +301,62 @@ export function createPendingChatSends<Sender>(deps: PendingChatSendsDeps<Sender
     runId: row.run_id ?? null,
     request: JSON.parse(row.request_json) as McpInvocationRequest,
   });
+
+  /**
+   * The images of `request`, tied to the bytes the saved transcript row `userRow` holds. Every image must match its stored copy by
+   * type, size and sha256 (the bytes are hashed here, from the request). Throws PendingSendImagesUnsaved when they cannot all be
+   * tied: nothing is then queued, and the caller's own refusal stands.
+   */
+  function savedImageRefs(request: McpInvocationRequest, userRow: unknown): PendingSendImageRef[] {
+    const images = request.images ?? [];
+    const messageId = (userRow as { id?: unknown } | null)?.id;
+    if (typeof messageId !== "string" || !messageId) throw new PendingSendImagesUnsaved("no_saved_row");
+    let stored: Array<{ id: string; media_type: string; size_bytes: number; sha256: string }>;
+    try {
+      stored = deps.db.prepare("SELECT id, media_type, size_bytes, sha256 FROM chat_message_attachments WHERE message_id = ? AND chat_id = ? ORDER BY rowid")
+        .all(messageId, request.chatId) as typeof stored;
+    } catch { throw new PendingSendImagesUnsaved("attachments_unreadable"); }
+    if (stored.length !== images.length) throw new PendingSendImagesUnsaved("attachment_count");
+    return images.map((image, index) => {
+      const bytes = Buffer.from(image.data, "base64");
+      const sha256 = createHash("sha256").update(bytes).digest("hex");
+      const saved = stored[index]!;
+      if (saved.media_type !== image.mediaType || saved.size_bytes !== bytes.length || saved.sha256 !== sha256) throw new PendingSendImagesUnsaved("attachment_mismatch");
+      return { id: saved.id, ...(image.name !== undefined ? { name: image.name } : {}), mediaType: image.mediaType, size: bytes.length, sha256 };
+    });
+  }
+  /** Does `images` (a resent request's) carry exactly the bytes these references name? */
+  function imagesMatchRefs(images: ImageAttachment[] | undefined, refs: PendingSendImageRef[]): boolean {
+    if (!images || images.length !== refs.length) return false;
+    return images.every((image, index) => {
+      const ref = refs[index]!;
+      return image.mediaType === ref.mediaType && image.name === ref.name && createHash("sha256").update(Buffer.from(image.data, "base64")).digest("hex") === ref.sha256;
+    });
+  }
+  /**
+   * The image bytes of a message queued by reference, read back for a start. A locked store is not an answer
+   * (PendingSendSourceReadBusy: the message waits); bytes that are gone or no longer match their reference throw
+   * PendingSendImagesUnavailable, so the message never starts without its images.
+   */
+  function loadSavedImages(row: Row, refs: PendingSendImageRef[]): ImageAttachment[] {
+    return refs.map((ref) => {
+      let saved: { media_type: string; size_bytes: number; sha256: string; data: unknown } | undefined;
+      try {
+        saved = deps.db.prepare("SELECT media_type, size_bytes, sha256, data FROM chat_message_attachments WHERE id = ? AND chat_id = ?")
+          .get(ref.id, row.chat_id) as typeof saved;
+      } catch (error) {
+        const busy = PendingSendSourceReadBusy.from(error);
+        if (busy) throw busy;
+        throw new PendingSendImagesUnavailable("attachment_unreadable");
+      }
+      if (!saved || !(saved.data instanceof Uint8Array)) throw new PendingSendImagesUnavailable("attachment_missing");
+      const bytes = Buffer.from(saved.data.buffer, saved.data.byteOffset, saved.data.byteLength);
+      if (saved.media_type !== ref.mediaType || bytes.length !== ref.size || createHash("sha256").update(bytes).digest("hex") !== ref.sha256) {
+        throw new PendingSendImagesUnavailable("attachment_changed");
+      }
+      return { ...(ref.name !== undefined ? { name: ref.name } : {}), mediaType: ref.mediaType, data: bytes.toString("base64") };
+    });
+  }
 
   /*
    * A message accepted by an earlier process (the app quit, crashed, or installed an update while it waited) is still the
@@ -479,12 +584,17 @@ export function createPendingChatSends<Sender>(deps: PendingChatSendsDeps<Sender
           // Every attempt is a new run: a refused start has already closed its own admission.
           const runId = randomUUID();
           attemptedRunId = runId;
+          // A message queued by reference gets its images back from the transcript row before anything is reserved or started:
+          // a locked store or a missing copy is decided below like any other refusal, and nothing is marked "starting" for it.
+          const startRequest: McpInvocationRequest = row.image_refs_json
+            ? { ...request, images: loadSavedImages(row, JSON.parse(row.image_refs_json) as PendingSendImageRef[]) }
+            : request;
           if (request.oneAttachmentRef || request.oneTeamPreflightRef) {
             const markStarting = () => { setStarting.run(runId, deps.now(), row.id); };
             if (deps.reserveStart) deps.reserveStart(row.id,{...request,runId},markStarting);
             else markStarting();
           } else deps.reservePlainStart?.(row.id,{...request,runId},() => { setStarting.run(runId,deps.now(),row.id); });
-          const answer = await deps.start(sender as Sender, { ...request, runId }, rec.userRow, row.id);
+          const answer = await deps.start(sender as Sender, { ...startRequest, runId }, rec.userRow, row.id);
           startedRunId = answer && typeof (answer as { runId?: unknown }).runId === "string" ? (answer as { runId: string }).runId : runId;
         } catch (cause) {
           const code = sendRefusalCode(cause);
@@ -581,10 +691,23 @@ export function createPendingChatSends<Sender>(deps: PendingChatSendsDeps<Sender
      * Accept the message: save its transcript row, persist the request, and start the drain. Returns at once.
      * `cause` is the refusal that sent it here (logged, never shown).
      */
-    enqueue(sender: Sender, request: McpInvocationRequest, options: { intentId?: string; cause?: unknown; userRow?: unknown; requireUserRow?: boolean } = {}): PendingSendRecord {
+    enqueue(sender: Sender, request: McpInvocationRequest, options: { intentId?: string; cause?: unknown; userRow?: unknown; requireUserRow?: boolean;
+      /**
+       * The caller took the message in because canQueuePendingSend() said yes, which for a request over the row cap means "its images
+       * fit the transcript store": they are kept by reference to the bytes of the saved transcript row (PendingSendImageRef), or the
+       * call throws PendingSendImagesUnsaved and queues nothing. Without it a request is stored exactly as given, as before.
+       */
+      imagesByReference?: boolean } = {}): PendingSendRecord {
       const prior = options.intentId ? byIntent.get(request.chatId, options.intentId) as Row | undefined : undefined;
       if (prior) {
-        if (followupRequestJson(JSON.parse(prior.request_json) as McpInvocationRequest) !== followupRequestJson(request)) throw new Error("pending_send_identity_conflict");
+        // A message queued by reference stores its request without the image bytes: the resent request is compared without them,
+        // and its images must be exactly the ones the references name.
+        const priorRefs = prior.image_refs_json ? JSON.parse(prior.image_refs_json) as PendingSendImageRef[] : null;
+        const same = priorRefs
+          ? imagesMatchRefs(request.images, priorRefs)
+            && followupRequestJson(JSON.parse(prior.request_json) as McpInvocationRequest) === followupRequestJson({ ...request, images: undefined })
+          : followupRequestJson(JSON.parse(prior.request_json) as McpInvocationRequest) === followupRequestJson(request);
+        if (!same) throw new Error("pending_send_identity_conflict");
         return record(prior);
       }
       const id = randomUUID();
@@ -593,8 +716,18 @@ export function createPendingChatSends<Sender>(deps: PendingChatSendsDeps<Sender
       if (options.requireUserRow && (!userRow || typeof (userRow as {id?:unknown}).id !== "string")) throw new Error("pending_send_message_custody_missing");
       const now = deps.now();
       const stored = { ...request, runId: undefined };
-      insert.run(id, request.chatId, options.intentId ?? null, JSON.stringify(stored),
-        userRow === null ? null : JSON.stringify(userRow), pendingSendPromptHash(request.userPrompt), now, now);
+      let requestJson = JSON.stringify(stored);
+      let imageRefsJson: string | null = null;
+      if (options.imagesByReference && request.images?.length && !request.oneAttachmentRef && !request.oneTeamPreflightRef
+        && Buffer.byteLength(requestJson, "utf8") > MAX_REQUEST_BYTES) {
+        // Too big to keep inline (canQueuePendingSend lets it in only because of its images): the images are already stored once,
+        // with the transcript row saved just above, so the queue row keeps references to them instead of a second copy.
+        const refs = savedImageRefs(request, userRow);
+        requestJson = JSON.stringify({ ...stored, images: undefined });
+        imageRefsJson = JSON.stringify(refs);
+      }
+      insert.run(id, request.chatId, options.intentId ?? null, requestJson,
+        userRow === null ? null : JSON.stringify(userRow), pendingSendPromptHash(request.userPrompt), now, now, imageRefsJson);
       senders.set(id, sender);
       const code = options.cause === undefined ? undefined : sendRefusalCode(options.cause);
       deps.log?.("pending send accepted", { chatId: request.chatId, sendId: id, code });

@@ -23,7 +23,7 @@ import { canResumeInvocationBrowserLoginWait, claimInvocationBrowserLoginWait, r
 import { isOneQuietReply } from "../../shared/one-supervisor";
 import { bindWorkAttachmentRun, workAttachmentGroupIds, releaseWorkAttachmentRun, redactWorkAttachmentEvent, redactWorkAttachmentText } from "./work-attachments";
 import { stoppedGoalMessageReopens } from "../../shared/goal-display-state";
-import { TRANSIENT_SEND_DEADLINE_MS, isTransientSendRefusalCode, transientSendBackoffMs } from "../../shared/transient-send-refusal";
+import { TRANSIENT_SEND_DEADLINE_MS, isStoreBusyError, isTransientSendRefusalCode, transientSendBackoffMs } from "../../shared/transient-send-refusal";
 import { withBrowserDownloadProofContext } from "../long-run/download-proof";
 import { admitMainInvocation, takeMainInvocationAdmission, MainInvocationLifetime, runMainBackgroundTask, type MainInvocationAdmission } from "../runtime/scheduled-root-context";
 import { withBuiltinFileProofContext } from "../long-run/file-proof";
@@ -184,7 +184,7 @@ import {
   type InvocationAdmissionIdentity,
 } from "../store/invocation-admissions";
 import { ownerVisiblePrompt } from "../one/owner-prompt";
-import { claimDeferredSystemRelays, parkSystemRelay, peekDeferredSystemRelays, releaseDeferredSystemRelays } from "./deferred-system-relays";
+import { claimDeferredSystemRelays, parkSystemRelay, peekDeferredSystemRelays, releaseDeferredSystemRelays, releaseUnreadDeferredSystemRelays } from "./deferred-system-relays";
 import { chatFilePrompt, chatFileImages, validateChatAttachmentSelection, listChatFileSnapshot } from "../store/chat-message-attachments";
 import { findAutomationByGoalId, toggleAutomation } from "../store/automations";
 import { GOAL_CONTINUATION_HOST_WAKE } from "../store/goal-continuation-rows";
@@ -237,7 +237,6 @@ import { personalSupervisorConversationInDb } from "../one/supervisor-store";
 import { CARRIED_FOLLOWUP_STEER_PREFIX, carryUndeliveredOwnerFollowups as carryOwnerFollowupsToNextTurn } from "./carried-owner-followups";
 import { OWNER_INTAKE_NOTICE_AFTER_MS, OWNER_INTAKE_START_HOLD_MAX_MS, OWNER_INTAKE_STEER_PREFIX, OWNER_STEERED_PREFIX, ownerIntakeReceivedNotice, ownerIntakeWaits, ownerMessageSurface, type OwnerIntakeOutcome } from "./owner-intake";
 import { ownerDirectionReviewSkip } from "./owner-direction-review";
-import { runTurnMayHaveBeenRead } from "./turn-placement";
 import { personalSupervisorGuidance } from "../../shared/one-supervisor-context";
 import { tryRecordOneDomainEvent } from "../one/domain-events";
 import {
@@ -1525,6 +1524,15 @@ function closeGoalOnModelJudgment(goalId: string, reason: string): boolean {
 function cleanupPending(holder: string, cause?: unknown): Error {
   return Object.assign(new Error("invocation_cleanup_pending"),
     { cause: Object.assign(new Error(holder), { code: holder }, cause === undefined ? {} : { cause }) });
+}
+
+/** A store lock at a write no model has been reached by is proven not dispatched; every other error passes through unchanged. */
+function beforeDispatch<T>(write: () => T): T {
+  try { return write(); }
+  catch (error) {
+    if (error && typeof error === "object" && isStoreBusyError(error)) Object.assign(error, { turnDelivery: "not-dispatched" });
+    throw error;
+  }
 }
 
 export class InvocationService {
@@ -6582,12 +6590,12 @@ export class InvocationService {
         // while the adapter is still draining tool/transport work.
         try { effectBoundary.persist(); }
         catch (error) { console.warn("[invocation] effect boundary receipt failed:", error); }
-        // Relays this turn carried are Main-only context (never in the transcript): a turn refused before anything reached a
-        // model read none of them, so they wait again before the slot frees (the owner's retry starts the moment it does).
-        if (deferredRelays && turnProvedNotDispatched) {
-          try {
-            if (!runTurnMayHaveBeenRead(runId)) releaseDeferredSystemRelays(runId);
-          } catch (releaseError) { console.warn(`[invocation] deferred relays not released after a refused turn run=${runId} code=${innermostTypedCode(releaseError) ?? "none"}`); }
+        // Relays this turn carried are Main-only context (never in the transcript): a turn that ended before a model read them
+        // (a typed refusal, but also no-runtime, a cancel or any untyped early error) gives them back before the slot frees, so
+        // the owner's retry carries them again. The ledger decides (deferred-system-relays.ts); a quit mid-turn is reclaimed by the scan.
+        if (deferredRelays) {
+          try { releaseUnreadDeferredSystemRelays(runId, turnProvedNotDispatched); }
+          catch (releaseError) { console.warn(`[invocation] deferred relays not released after an unread turn run=${runId} code=${innermostTypedCode(releaseError) ?? "none"}`); }
         }
         if (this.activeRuns.settle(runId)) this.publishActiveChats();
         if (!nativeController || isLocalInvocationPreparationPort(nativePreparation!.port)) releaseOneAttachmentRun(requestedOneAttachmentRef);
@@ -7841,9 +7849,11 @@ export class InvocationService {
     }
     const plannedRunId = req.runId ?? randomUUID();
     const request: McpInvocationRequest = { ...req, runId: undefined };
-    const row = persistQueuedSteer({ id, chatId: req.chatId, originalRunId: plannedRunId, request,
+    // Nothing has reached a model at this write or the claim below, so a store lock at either is the same "not ready yet" as a locked
+    // start. Thrown raw it reached the phone as authority_error, which the phone does not resend. The intake key makes a resend safe.
+    const row = beforeDispatch(() => persistQueuedSteer({ id, chatId: req.chatId, originalRunId: plannedRunId, request,
       ...(workspaceBinding ? { workspaceBinding: immutableWorkspaceBinding(workspaceBinding) } : {}),
-      ...(executionContext ? { executionContext } : {}) });
+      ...(executionContext ? { executionContext } : {}) }));
     if (input.startAfter) {
       // The verdict the start reads is not in yet. The message is taken now (durable row, shown in the transcript) and the
       // drain queue starts it once the judge settles, exactly as for a chat that is not free yet. A restart before that
@@ -7852,7 +7862,17 @@ export class InvocationService {
       this.holdOwnerIntakeStart(req.chatId, row, plannedRunId, input.startAfter);
       return this.ownerIntakeQueuedReceipt(getDurableQueuedSteer(id) ?? row);
     }
-    if (!beginQueuedSteerDrain(id, plannedRunId)) throw new Error("invocation_steer_claim_lost");
+    let claimed: boolean;
+    try { claimed = beforeDispatch(() => beginQueuedSteerDrain(id, plannedRunId)); }
+    catch (error) {
+      if (!isStoreBusyError(error)) throw error;
+      this.keepOwnerIntakeMessage(row, request);
+      if (this.retryQueuedSteerOnLockedStore(req.chatId, queuedSteerFromDurable(row), plannedRunId, "claim", error) !== "scheduled") {
+        holdQueuedSteerForRecovery(id, "drained-run-start-uncertain");
+      }
+      return this.ownerIntakeQueuedReceipt(getDurableQueuedSteer(id) ?? row);
+    }
+    if (!claimed) throw new Error("invocation_steer_claim_lost");
     try {
       const started = this.start({ ...request, runId: plannedRunId }, workspaceBinding, executionContext);
       this.settleQueuedSteerDurably(id, "started");

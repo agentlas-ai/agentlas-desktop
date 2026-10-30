@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.3.112 — 2026-10-31
+
+- Agents: an agent's folder no longer stops it from running. A run's file lease used to refuse a folder with a symlink, a file over 512 KiB or a non-portable file name, so a message to such an agent ended without a model call. It now tries the exact snapshot first, so every folder that works today keeps the same tree and digest; for a refused folder, virtualenvs are skipped and links, oversize files and non-portable names are left out of the hashed tree and recorded by identity. Anything a runtime loads (instructions, skills, tools, hidden config) is still strict, and review, apply and rollback stay exact.
+- Agents: the revision comparison that 1.3.111 added to the agent approval screen is gone again; the screen is as it was before. Applied learnings and revision comparisons are still kept as background data.
+- Sign-in: signing in no longer leaves Hope stuck on a signed-out One. A background service that had adopted the account domain while signed out kept its own separate signed-out One, so after sign-in Hope showed no history and refused every send, and restarting the app did not help because the service outlives it. The service now follows the signed-in account.
+- Goals: a stalled Goal keeps its own replan instead of asking for confirmation, and an internal block retries within 30 minutes; only a provider's typed stop (usage limit, sign-in) keeps the 6-hour wait.
+- Teams: when the owner has chosen full permission, team workers are no longer stopped by an auto-reviewer. Write and read hosts are unchanged.
+- Cockpit and automations: a stop made in another window, on the phone or by the end of a Goal reads as Cancelled instead of a red failure row, and a cancelled automation run is quiet. A successful Rerun or Skip no longer reads as "the result could not be verified".
+- Input: a store lock at the phone or owner intake now waits instead of failing, so the phone resends under the same key. A large screenshot queues behind a busy chat by reference and is read when it starts (if it is gone, the message ends instead of starting without its image), and a held Hope row whose run had settled now settles.
+- Messages: a parked report counts as delivered only when a model read it, and a periodic scan gives back reports held by a dead run. Hope's chat send now retries when the conversation is busy in another host instead of staying held.
+- Work: many attachments no longer refuse a run. The newest stay in the context and older ones are listed by name and path in a manifest file in the run folder; nothing is dropped.
+- Diagnostics: a resource profile charges native time to the JavaScript that called it, so an idle process's cost can be traced to the query or call that caused it.
+- Effort: when a level the owner picked cannot be honoured by the runtime, one plain notice says so (and a second only if the final outcome differs). ACP keeps the level it acknowledged instead of the old stored value.
+
+This release binds Agentlas OS v1.2.71 at 54a446cf3a9320409a712d0347afde2bb99d43d1; public runtime asset `hephaestus-runtime-v1.2.71.tar.gz` is pinned at SHA-256 `5d9ff2743a32de44d82d2fc97db67aba628fdd84791869c8244278d98179b084`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.111 — 2026-10-31
 
 - Sign-in: a session in use is renewed before it ends. The app asks the server to reissue a session that has less than 20 days left, at startup and every 6 hours, and hands the result to the background service, so a signed-in app no longer reaches the end of its 30 days. The background service no longer deletes the stored session, which belongs to the app and can be newer than its own copy.

@@ -7,6 +7,21 @@ export function effectiveInvocationPermission(
   return permission === "write" || permission === "full" ? permission : "read";
 }
 
+/**
+ * Whether a delegated worker (a team member, a firm's delegate) runs under Codex's automatic reviewer
+ * (approvals_reviewer=auto_review): a risk model of Codex's own that judges each approval-bearing call.
+ *
+ * The worker's own permission cannot answer this: a `full` host mints only a project-rooted `write` worker (owner decision,
+ * taskForceChildPermission / firmNodePermission), so a write worker is also what the owner's full access produces. The reviewer
+ * serves a host that is NOT full: a write host's worker has nobody to answer its approvals, and the reviewer is the limit that
+ * host keeps. Under a full host the owner has already decided, and the reviewer refused the owner's own read of a run
+ * ("rejected due to unacceptable risk", invoke.replay), so that worker's approvals go to the common arbiter
+ * like every other full run's. The sandbox is untouched: a full host's worker stays `write`, a read worker stays read.
+ */
+export function delegatedWorkerAutoReview(hostPermission: unknown, workerPermission: unknown): boolean {
+  return workerPermission === "write" && hostPermission !== "full";
+}
+
 export type OnePermissionSelection = "auto" | "read" | "write" | "full";
 
 // Auto resolves to read (conversation) or write (task), so it sits between them: never wider than write,

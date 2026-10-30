@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
 import { getDb } from "../store/db";
+import { RUNTIME_TURN_PLACED_EVENT } from "./turn-placement";
 
 /**
  * Durable parking for a system relay that a waiting Goal refused (goal_waiting_system_start_refused).
@@ -140,6 +141,87 @@ export function releaseDeferredSystemRelays(runId: string, db?: Database.Databas
   return table(db).prepare(
     "UPDATE deferred_system_relays SET claimed_run_id = NULL, delivered_at = NULL WHERE claimed_run_id = ?",
   ).run(runId).changes;
+}
+
+/*
+ * "Delivered" has to mean a model read the report. The claim marks a relay delivered when a turn picks it up, before that turn has
+ * run, so the turn's own end settles whether that was true. Only the typed pre-dispatch refusal used to give a report back
+ * (service.ts turnProvedNotDispatched); every other turn that ended before a model read it lost the report for good: the no-runtime and
+ * one-team-runtime-selection-changed errors of mcp/client.ts carry no such type, an owner Stop or an app quit came first.
+ * Observed in use: 46 of 251 relays were carried by a run with no turn placement (43 failed, 2 interrupted, 1 team turn);
+ * 28 of them by 13 runs that failed one-team-runtime-selection-changed before any model call.
+ *
+ * The proof is the run ledger's typed facts, never prose: a turn placement (invocation/turn-placement.ts), a task-force model call
+ * (its workers carry the same owner context), or a completed turn (the model answered). Anything else that ended is unread.
+ */
+const TASK_FORCE_MODEL_CALL_EVENT = "task_force_model_call_started";
+const COMPLETED_EVENT = "invoke_completed";
+/** Terminal facts of a run that ended without an answer. */
+const FAILED_TERMINAL_EVENTS = ["invoke_failed", "invoke_cancelled", "invoke_interrupted", "invoke_threw", "mcp_error"] as const;
+/** The claim token of parked-relay-delivery.ts nudgeParkedRelays: a token, not a run, so no ledger judges it. */
+export const NUDGE_CLAIM_PREFIX = "relay-nudge:";
+/** A claim older than this is left to the next turn that happens anyway (stale teammate data; parked-relay-delivery.ts). */
+const RECLAIM_WINDOW_MS = 3 * 24 * 3_600_000;
+
+export interface CarrierEvidence { placed: boolean; taskForceCall: boolean; completed: boolean }
+
+/** Whether the turn that carried the relays reached a model. `provedNotDispatched`: the runner typed this turn's failure as sent-nothing. */
+export function relayCarrierRead(evidence: CarrierEvidence, provedNotDispatched = false): boolean {
+  if (evidence.placed) return true;
+  if (provedNotDispatched) return false;
+  return evidence.taskForceCall || evidence.completed;
+}
+
+export function readCarrierEvidence(runId: string, db?: Database.Database): CarrierEvidence {
+  const kinds = new Set((table(db).prepare(
+    "SELECT DISTINCT kind FROM run_events WHERE run_id = ? AND kind IN (?, ?, ?)",
+  ).all(runId, RUNTIME_TURN_PLACED_EVENT, TASK_FORCE_MODEL_CALL_EVENT, COMPLETED_EVENT) as Array<{ kind: string }>).map((row) => row.kind));
+  return { placed: kinds.has(RUNTIME_TURN_PLACED_EVENT), taskForceCall: kinds.has(TASK_FORCE_MODEL_CALL_EVENT), completed: kinds.has(COMPLETED_EVENT) };
+}
+
+/**
+ * The turn that claimed these relays has ended: give them back unless it reached a model. Called from the turn's own settlement
+ * (service.ts); a read the ledger cannot answer throws, and reclaimUnreadDeferredSystemRelays finds the run again.
+ */
+export function releaseUnreadDeferredSystemRelays(runId: string, provedNotDispatched = false, db?: Database.Database): number {
+  if (relayCarrierRead(readCarrierEvidence(runId, db), provedNotDispatched)) return 0;
+  return releaseDeferredSystemRelays(runId, db);
+}
+
+/** Runs whose "read" verdict is final in this process, so the periodic scan does not read their ledger again. */
+const readVerdicts = new Set<string>();
+
+/** A run is over when its lease is released (a crash's lease is released at the next start of that process kind) or it logged a failed terminal. */
+function carrierRunEnded(handle: Database.Database, runId: string): boolean {
+  const owner = handle.prepare("SELECT state FROM invocation_run_owners WHERE run_id = ?").get(runId) as { state: string } | undefined;
+  if (owner) return owner.state === "released";
+  const marks = FAILED_TERMINAL_EVENTS.map(() => "?").join(", ");
+  return Boolean(handle.prepare(`SELECT 1 FROM run_events WHERE run_id = ? AND kind IN (${marks}) LIMIT 1`).get(runId, ...FAILED_TERMINAL_EVENTS));
+}
+
+/**
+ * Relays claimed by a run that is gone and never reached a model go back to the queue. This is what an app quit or a crash in the
+ * middle of a turn needs: nothing in that process settled the run, so its relays stayed "delivered". A live run (lease active or
+ * settling, in this process or the other host) is never touched, nor a run the ledger proves read. Idempotent.
+ */
+export function reclaimUnreadDeferredSystemRelays(now: number = Date.now(), db?: Database.Database): number {
+  const handle = table(db);
+  const runs = handle.prepare(
+    `SELECT DISTINCT claimed_run_id AS runId FROM deferred_system_relays
+      WHERE claimed_run_id IS NOT NULL AND delivered_at IS NOT NULL AND delivered_at >= ? AND claimed_run_id NOT LIKE '${NUDGE_CLAIM_PREFIX}%' LIMIT 200`,
+  ).all(now - RECLAIM_WINDOW_MS) as Array<{ runId: string }>;
+  let released = 0;
+  for (const { runId } of runs) {
+    if (readVerdicts.has(runId)) continue;
+    if (!carrierRunEnded(handle, runId)) continue;
+    if (relayCarrierRead(readCarrierEvidence(runId, handle))) {
+      if (readVerdicts.size >= 1_000) readVerdicts.clear();
+      readVerdicts.add(runId);
+      continue;
+    }
+    released += releaseDeferredSystemRelays(runId, handle);
+  }
+  return released;
 }
 
 

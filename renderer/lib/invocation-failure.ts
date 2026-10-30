@@ -65,6 +65,18 @@ export function failureCode(error: unknown): string | undefined {
   return /^([a-z][a-z0-9_]{2,95}):\s/.exec(message)?.[1];
 }
 
+/**
+ * A run that ended because a person stopped it. Main stamps `cancelled` on the terminal `error` event of every stop a person made
+ * (invocation-lifecycle.ts classifyMainOwnedTerminal: Stop in any window or on the phone, or the owner stopping/deleting the Goal)
+ * and sends it to every window attached to the run; the ledger names the same terminal `invoke_cancelled`. It is the owner's own
+ * act, never a failure to draw in red. Exact codes only: `cancelled_by_policy` or `browser_login_wait_cancelled` are other facts.
+ */
+export function isCancellationCode(code: unknown): boolean {
+  if (typeof code !== "string") return false;
+  const normal = code.trim().toLowerCase();
+  return normal === "cancelled" || normal === "invoke_cancelled";
+}
+
 export function isChatBusyFailure(error: unknown): boolean {
   if (ipcErrorCode(error) === CHAT_BUSY_CODE) return true;
   const message = failureMessage(error);
