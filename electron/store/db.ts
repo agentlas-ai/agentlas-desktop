@@ -24,6 +24,9 @@ import { createAgentContextSchema } from "./agent-context";
 import { createAgentStrategySchema } from "./agent-strategy-schema";
 import { createRoomDiscussionSchema } from "./room-discussion-schema";
 import { GRAPH_CHECKPOINT_SCHEMA, PREVIOUS_GRAPH_CHECKPOINT_SCHEMA, sha256Value } from "../../shared/graph-execution-digest";
+import { tagSurfacePackChatsInDb } from "./surface-conversation-schema";
+import { createChatRuntimeSelectionTicketSchema } from "./chat-runtime-selection-ticket";
+import { createFollowupCustodySchema } from "./followup-custody-schema";
 
 // Picks the Korean or English human-readable string for the current UI locale.
 const L = (ko: string, en: string): string => (currentUiLocale() === "ko" ? ko : en);
@@ -32,7 +35,7 @@ let _db: Database.Database | null = null;
 let _postContinuityRepairsDeferred = false;
 let _openedStoreMigrationRole: StoreMigrationRole | null = null;
 
-const SCHEMA_VERSION = 135;
+const SCHEMA_VERSION = 138;
 
 /**
  * The schema version this binary's migration ladder produces.
@@ -599,6 +602,29 @@ function recoverStaleAutomationRunsInDb(db: Database.Database, now: Date): numbe
   const hasFailureEvents = tableExists(db, "failure_events");
   const hasTriggerEvents = tableExists(db, "automation_trigger_events");
 
+  const candidateSql = `SELECT r.id, r.automation_id, r.started_at, r.last_activity_at,
+              r.node_states_json, r.occurrence_id, r.graph_digest, r.checkpoint_json,
+              a.claimed_at, a.lease_owner,
+              ${hasRunEvents ? "(SELECT MAX(e.ts) FROM run_events e WHERE e.run_id = r.id)" : "NULL"} AS latest_run_event_at,
+              ${hasFailureEvents ? "(SELECT MAX(f.ts) FROM failure_events f WHERE f.run_id = r.id)" : "NULL"} AS latest_failure_event_at
+       FROM automation_runs r
+       JOIN automations a ON a.id = r.automation_id
+       WHERE r.status = 'running'`;
+  const isStale = (candidate: RecoverableAutomationRunRow): boolean =>
+    recoveryOwnerProvenDead(candidate)
+    || (!rowHasFreshActivity(candidate, cutoffMs) && !recoveryOwnerActive(candidate, nowMs));
+
+  // Read-only precheck (WAL readers never wait on a writer). The IMMEDIATE transaction below takes the database write lock, and it
+  // ran every scheduler minute even when there was nothing to close or delete: 64 "store busy" skips in a week against the background
+  // service and the terminal engine, and a needless writer lock on every one of the other minutes. Work found here is read again and
+  // done inside the transaction exactly as before, so a peer that changes a row in between is still handled by the CAS below.
+  const hasOrphans = db.prepare(`SELECT EXISTS (SELECT 1 FROM automation_runs
+      WHERE automation_id IS NULL OR NOT EXISTS (SELECT 1 FROM automations a WHERE a.id = automation_runs.automation_id))
+    OR EXISTS (SELECT 1 FROM run_history
+      WHERE automation_id IS NULL OR NOT EXISTS (SELECT 1 FROM automations a WHERE a.id = run_history.automation_id))`)
+    .pluck().get() === 1;
+  if (!hasOrphans && !(db.prepare(candidateSql).all() as RecoverableAutomationRunRow[]).some(isStale)) return 0;
+
   const recover = db.transaction(() => {
     // Guarded inserts prevent this in the normal path, but a peer running an
     // older binary may still commit a child just after parent deletion.
@@ -610,20 +636,8 @@ function recoverStaleAutomationRunsInDb(db: Database.Database, now: Date): numbe
       WHERE automation_id IS NULL
          OR NOT EXISTS (SELECT 1 FROM automations a WHERE a.id = run_history.automation_id);
     `);
-    const candidates = db.prepare(
-      `SELECT r.id, r.automation_id, r.started_at, r.last_activity_at,
-              r.node_states_json, r.occurrence_id, r.graph_digest, r.checkpoint_json,
-              a.claimed_at, a.lease_owner,
-              ${hasRunEvents ? "(SELECT MAX(e.ts) FROM run_events e WHERE e.run_id = r.id)" : "NULL"} AS latest_run_event_at,
-              ${hasFailureEvents ? "(SELECT MAX(f.ts) FROM failure_events f WHERE f.run_id = r.id)" : "NULL"} AS latest_failure_event_at
-       FROM automation_runs r
-       JOIN automations a ON a.id = r.automation_id
-       WHERE r.status = 'running'`,
-    ).all() as RecoverableAutomationRunRow[];
-    const staleCandidates = candidates.filter((candidate) =>
-      recoveryOwnerProvenDead(candidate)
-      || (!rowHasFreshActivity(candidate, cutoffMs) && !recoveryOwnerActive(candidate, nowMs))
-    );
+    const candidates = db.prepare(candidateSql).all() as RecoverableAutomationRunRow[];
+    const staleCandidates = candidates.filter(isStale);
     if (staleCandidates.length === 0) return 0;
 
     // The IMMEDIATE transaction already prevents a peer writer from entering
@@ -7229,6 +7243,31 @@ export function initStore(options: StoreInitOptions = {}): void {
   if (userVersion < 135) {
     const widened = widenLongRunPauseReasonCheck(_db);
     if (widened === "unrecognized") console.warn("[store] v135 long_runs_pause_reason_check_unrecognized: left as it is");
+  }
+
+  // v136 (Science S6): a screen pack's conversation lives in an ordinary common chat. `chats.surface_pack` names the pack whose
+  // screen shows the chat (Science's hidden per-conversation chat is tagged; Work/One chats stay NULL), and
+  // `chat_messages.row_scope` says what a row is for when a pack keeps two records of one turn: 'view' = shown by the pack's
+  // screen but not runtime input, 'runtime-input' = the composed prompt the runtime took, not shown. NULL (every existing
+  // Work/One row) = both, as before. Additive columns plus a tag on rows whose identity is the exact derived chat id.
+  if (userVersion < 136) {
+    _db.transaction(() => {
+      addColumnIfMissing(_db!, "chats", "surface_pack", "surface_pack TEXT CHECK(surface_pack IS NULL OR (length(surface_pack) BETWEEN 1 AND 40 AND surface_pack NOT GLOB '*[^a-z0-9-]*'))");
+      addColumnIfMissing(_db!, "chat_messages", "row_scope", "row_scope TEXT CHECK(row_scope IS NULL OR row_scope IN ('view','runtime-input'))");
+      tagSurfacePackChatsInDb(_db!);
+    })();
+  }
+
+  // v137: invalidate outstanding runtime-selection intents even when an older
+  // writer updates the chat, including a same-value write or INSERT OR REPLACE.
+  // Additive triggers only: existing chats and preferences are not rewritten.
+  if (userVersion < 137) {
+    _db.transaction(() => { createChatRuntimeSelectionTicketSchema(_db!); })();
+  }
+
+  // v138: immutable renderer follow-up capture and exact next-turn provenance.
+  if (userVersion < 138) {
+    _db.transaction(() => { createFollowupCustodySchema(_db!); })();
   }
 
   } catch (error) {

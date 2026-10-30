@@ -50,6 +50,7 @@ import { installDaemonProcessDiagnostics } from "./process-diagnostics";
 import { installNodeHostSystemNetwork } from "../net/system-network-core";
 import { captureDaemonSocketFence, canonicalDaemonPath, resolveDaemonServiceIdentity } from "./service-identity";
 import { createInvocationOwnerBroker } from "./invocation-owner-broker";
+import { createTerminalBrowserGrants } from "./terminal-browser-grants";
 import { workSessionHostState, currentWorkSessionHost, rememberWorkSessionHost, reconcileDeadWorkSessionHost, type WorkSessionHostClaim } from "../work/session-host";
 import { validateMobileCurrentTurnParams, type MobileBridgeCurrentTurnMethod } from "../../shared/mobile-bridge";
 import type { InvocationRunOwner } from "../store/invocation-owner-core";
@@ -128,6 +129,28 @@ let backgroundTasks: BackgroundTaskRegistry | null = null;
 const backgroundTaskSubscribers = new Set<ControlSocketPeer>();
 let invocationOwners: typeof import("../store/invocation-run-owners")["invocationRunOwners"] | null = null;
 let invocationBroker: ReturnType<typeof createInvocationOwnerBroker> | null = null;
+const terminalBrowserGrants = createTerminalBrowserGrants({
+  current(peer, expected) {
+    if (!invocationBroker?.isRegisteredPeerOwner(peer, expected.ownerId, "terminal")) return false;
+    const owner = invocationOwners?.getRunOwner(expected.chatId, expected.runId);
+    return !!owner && owner.ownerKind === "terminal" && owner.state === "active"
+      && owner.ownerId === expected.ownerId && owner.leaseId === expected.leaseId;
+  },
+  async authorize(peer, expected, approvalDigest) {
+    const owner = invocationOwners?.getRunOwner(expected.chatId, expected.runId);
+    if (!owner || owner.ownerKind !== "terminal" || owner.state !== "active"
+      || owner.ownerId !== expected.ownerId || owner.leaseId !== expected.leaseId
+      || !invocationBroker?.isRegisteredPeerOwner(peer, expected.ownerId, "terminal")) return false;
+    const answer = await invocationBroker.dispatch(owner, "invoke.currentTurn", {
+      chatId: expected.chatId, expectedRunId: expected.runId, nativeBrowserAuthorityProbe: true, approvalDigest,
+    });
+    if (!answer || typeof answer !== "object") return false;
+    const observed = answer as Record<string, unknown>;
+    return observed.runId === expected.runId && observed.leaseId === expected.leaseId
+      && observed.permission === "full" && observed.approvalCurrent === true;
+  },
+  async create(input) { return (await import("../browser/main-browser-channel")).createCanonicalNativeBrowserGrant(input); },
+});
 let daemonInvocationService: typeof import("../invocation/service")["invocationService"] | null = null;
 let daemonNativeInvocation: Awaited<ReturnType<typeof import("./native-invocation-runtime")["createNativeInvocationRuntime"]>> | null = null;
 /** NH21: the One/Work Alive domain (loaded once the enrolled native service is up). */
@@ -439,6 +462,25 @@ async function handleControlMethod(method: string, params: unknown, peer: Contro
         endpoint: mobileBridge?.endpoint ?? null,
       },
     };
+  }
+  if (method === "browser.terminalGrant" || method === "browser.terminalRelease") {
+    assertServiceControl(params);
+    const input = params as Record<string, unknown>;
+    if (method === "browser.terminalRelease") {
+      if (Object.keys(input).some(key => !["serviceIdentity", "bootId", "grantId"].includes(key))
+        || typeof input.grantId !== "string" || !/^[0-9a-f-]{36}$/i.test(input.grantId)) throw new Error("native-browser-task-unbound");
+      return { released: await terminalBrowserGrants.release(peer, input.grantId) };
+    }
+    if (Object.keys(input).some(key => !["serviceIdentity", "bootId", "owner", "grantId", "approvalDigest"].includes(key))
+      || typeof input.grantId !== "string" || !/^[0-9a-f-]{36}$/i.test(input.grantId)
+      || typeof input.approvalDigest !== "string" || !/^[a-f0-9]{64}$/.test(input.approvalDigest)
+      || !input.owner || typeof input.owner !== "object" || Array.isArray(input.owner)) throw new Error("native-browser-task-unbound");
+    const owner = input.owner as Record<string, unknown>;
+    if (Object.keys(owner).length !== 4 || Object.keys(owner).some(key => !["chatId", "runId", "ownerId", "leaseId"].includes(key))
+      || ["chatId", "runId", "ownerId", "leaseId"].some(key => typeof owner[key] !== "string" || !(owner[key] as string).trim())) {
+      throw new Error("native-browser-task-unbound");
+    }
+    return terminalBrowserGrants.acquire(peer, owner as { chatId: string; runId: string; ownerId: string; leaseId: string }, input.grantId, input.approvalDigest);
   }
   if (method === "invoke.ownerRegister" || method === "invoke.ownerComplete"
     || ["invoke.currentTurn", "invoke.steerCurrentTurn", "invoke.currentTurnSteerReceipt", "invoke.cancel", "invoke.ownerSteer"].includes(method)) {
@@ -860,6 +902,7 @@ function performShutdown(reason: string): Promise<void> {
       // bounds this unknown lifetime without releasing its durable run lease.
       return new Promise<boolean>(() => {});
     });
+    terminalBrowserGrants.close();
     invocationBroker?.close();
     // Science closes while it still holds the fence, so it can persist final
     // receipts. A non-settling service must not make explicit stop permanent.

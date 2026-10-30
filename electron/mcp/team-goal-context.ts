@@ -3,10 +3,13 @@ import { latestTaskCheckpoint } from "../long-run/checkpoint";
 import { getChat } from "../store/chats";
 import { getChatGoalContract, getChatGoalRevision } from "../store/chat-goals";
 import { getLongRunByGoalId, getLongRunGoalRevisionBinding } from "../store/long-runs";
+import { isAutoGoalOfRunMessage } from "../long-run/daemon-turn-goal";
 
 /** Host-owned observation, not an execution grant. Nested sessions retain the
  * originating room's binding; they never adopt their hidden session's Goal. */
 export interface TeamGoalContext {
+  /** The invocation this snapshot was captured for. Its own message's automatic Goal may be admitted while it runs. */
+  readonly invocationRunId?: string | null;
   readonly rootChatId: string;
   /** Stored room scope and the invocation's possibly narrower scope. */
   readonly rootProjectId: string | null;
@@ -62,6 +65,22 @@ function readTeamGoalContext(rootChatId: string, projectId: string | null, withC
     ...(withCheckpoint ? { checkpoint: latestTaskCheckpoint(goalId) ?? undefined } : {}) };
 }
 
+/**
+ * A turn the background service hosts hands its Goal intake to Main (goal-intake-forward.ts) and finishes as an ordinary turn;
+ * Main admits the automatic Goal of THIS turn's own message while the planner or a worker is still running, and that Goal
+ * follows the turn (daemon-turn-goal.ts). The room gaining it is the turn's own Goal arriving, not a replacement, so the plan
+ * (which saw no live Goal) keeps running. Observed in use: intake admitted
+ * goal:auto-message:22e9c67e 16 s into the turn, the planner call returned 49 s later and the fence failed the whole turn
+ * team_goal_context_changed ("The run failed before it could finish a reply"). Only the exact transition no live Goal ->
+ * the Goal derived from the run's own prompt message is adopted; any other change still fails the comparison.
+ */
+function adoptsOwnAutomaticGoal(context: TeamGoalContext, current: TeamGoalContext): boolean {
+  if (!context.invocationRunId || context.goalId !== null || context.runId !== null) return false;
+  if (current.rootProjectId !== context.rootProjectId || !current.boundGoalId || current.boundGoalId === context.boundGoalId) return false;
+  try { return isAutoGoalOfRunMessage(context.invocationRunId, current.boundGoalId); }
+  catch { return false; }
+}
+
 export function assertTeamGoalContext(context: TeamGoalContext | undefined, signal?: AbortSignal): void {
   if (signal?.aborted) throw new TeamGoalContextError("team_goal_cancelled");
   if (!context || !observedContexts.has(context)) throw new TeamGoalContextError("team_goal_context_unconfirmed");
@@ -69,6 +88,7 @@ export function assertTeamGoalContext(context: TeamGoalContext | undefined, sign
   if (current.rootProjectId !== context.rootProjectId || current.boundGoalId !== context.boundGoalId || current.boundRunId !== context.boundRunId
     || current.goalId !== context.goalId || current.runId !== context.runId || current.goalRevision !== context.goalRevision
     || current.objective !== context.objective || JSON.stringify(current.acceptanceCriteria) !== JSON.stringify(context.acceptanceCriteria)) {
+    if (adoptsOwnAutomaticGoal(context, current)) return;
     throw new TeamGoalContextError("team_goal_context_changed");
   }
 }
@@ -77,7 +97,7 @@ export function assertTeamGoalContext(context: TeamGoalContext | undefined, sign
  * revision invalidates this invocation; re-reading never rebinds its old plan.
  * Existing MCP/Goal CAS and packet permission checks still own all authority. */
 export function bindTeamGoalContext<T extends {
-  req: { agentAppMode?: unknown };
+  req: { agentAppMode?: unknown; runId?: string };
   chat: { id: string; projectId: string | null; goalId?: string | null };
   signal?: AbortSignal;
   goalContext?: TeamGoalContext;
@@ -87,7 +107,7 @@ export function bindTeamGoalContext<T extends {
   let context = p.goalContext;
   if (!context) {
     if (p.signal?.aborted) throw new TeamGoalContextError("team_goal_cancelled");
-    context = readTeamGoalContext(p.chat.id, p.chat.projectId ?? null, true);
+    context = { ...readTeamGoalContext(p.chat.id, p.chat.projectId ?? null, true), invocationRunId: p.req.runId ?? null };
     context = freezeSnapshot(JSON.parse(JSON.stringify(context)) as TeamGoalContext);
     observedContexts.add(context);
   }

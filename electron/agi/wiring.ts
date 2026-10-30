@@ -30,13 +30,13 @@ import { recordPersistenceDecisionEvent } from "../store/run-events";
 import { aliveGoalContinuationRefusal, continueGoalForAlive } from "../long-run/blocked-goal-sweep";
 import { hostGoalWake } from "../long-run/wake-arbiter";
 import { invocationService } from "../invocation/service";
-import { oneTeamCreateMember, oneTeamInvite, oneTeamList, oneTeamStartSession } from "../one/team-dispatch";
+import { oneTeamCreateMember, oneTeamDispatchAllowedFor, oneTeamInvite, oneTeamList, oneTeamStartSession } from "../one/team-dispatch";
 import { listInstalledServers } from "../mcp-tools/registry";
 import { detectRuntimes } from "../runtime/detect";
 import { pickRunner, runtimeForOwnerSelection } from "../runtime/selection";
 import { noteRuntimeFailure } from "../runtime/runtime-cooldown";
 import { runAliveServingDecision } from "../alive-organisms/serving-wake";
-import { cachedAliveModelOrder } from "../alive-organisms/model-order";
+import { freshAliveModelOrder, type AliveModelOrderEntry } from "../alive-organisms/model-order";
 import { callAgiReadTool } from "./read-tools";
 import { AgiModelAttempt, type AgiModelCandidate } from "./model-attempt";
 import { agiRestartAgentlasBrowser, agiRunLoginRecovery } from "./browser-seams";
@@ -137,6 +137,7 @@ export function createAgiExecutor(): AgiActionExecutor {
     continueGoal: (runId, version) => continueGoalForAlive(runId, version, invocationService),
     continuationRefusal: (runId, version) => aliveGoalContinuationRefusal(runId, version),
     team: {
+      available: (chatId) => oneTeamDispatchAllowedFor(chatId),
       create: (chatId, permission, input) => {
         const made = oneTeamCreateMember({ chatId, permission }, { ...input, invite: true }) as { member_id: string; created?: boolean };
         return { memberId: made.member_id, created: made.created === true };
@@ -213,7 +214,12 @@ export function createAgiExecutor(): AgiActionExecutor {
       }
     },
   };
-  return new AgiActionExecutor(deps);
+  const executor = new AgiActionExecutor(deps);
+  // A claim an earlier process left (it died between claiming an action and settling it) would block that action for the Goal for ever.
+  // Only a claim older than this process AND older than two minutes is dead: the Alive domain moves between Main and the background
+  // service, and the other side may still be inside an action it claimed a moment ago.
+  try { executor.settleInterruptedClaims(Math.min(Date.now() - Math.round(process.uptime() * 1000), Date.now() - 120_000)); } catch (error) { console.warn("[agi] interrupted claims not settled:", error); }
+  return executor;
 }
 
 /** Tool paths retry_node_with may name: enabled installed MCP servers plus the built-in surfaces. */
@@ -271,7 +277,7 @@ export function recordAgiMove(goalId: string, runId: string, move: "switch_runti
 }
 
 /** D4: the goal's own runtime (its latest controller attempt) first, then the owner's role-pool order. */
-async function agiModelCandidates(goalId: string): Promise<AgiModelCandidate[]> {
+export async function agiModelCandidates(goalId: string, pool: () => Promise<AliveModelOrderEntry[]> = freshAliveModelOrder): Promise<AgiModelCandidate[]> {
   const out: AgiModelCandidate[] = [];
   const run = getLongRunByGoalId(goalId);
   if (run) {
@@ -285,7 +291,7 @@ async function agiModelCandidates(goalId: string): Promise<AgiModelCandidate[]> 
       } catch { /* an unreadable binding falls to the pool */ }
     }
   }
-  for (const entry of cachedAliveModelOrder()) {
+  for (const entry of await pool()) {
     if (entry.exhausted || !entry.selection || !entry.status || !entry.selection.model) continue;
     if (out.some((candidate) => candidate.status.kind === entry.status!.kind && candidate.selection.model === entry.selection!.model)) continue;
     out.push({ selection: entry.selection, status: entry.status, label: entry.label, source: "pool" });

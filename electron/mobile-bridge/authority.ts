@@ -18,9 +18,12 @@ import { onGoalControlChange } from "../goal-control-events";
 import { projectOneDecisionOwnerAnswerV4, validateOneDecisionOwnerAnswerV4, type OneDecisionOwnerAnswerV4Binding } from "./one-decision-owner-answer";
 import { parseHubReleasePin } from "../../shared/hub-release-pin";
 import { withInvocationPreflightAccounting } from "../long-run/accounting-context";
+import { mobileBridgeIsOwnerMessage } from "./orphan-rerun-policy";
+import type { OwnerIntakeOutcome } from "../invocation/owner-intake";
 import { createHash, randomUUID } from "node:crypto";
 import { RUNTIME_KINDS } from "../../shared/runtime-kinds";
 import { RUNTIME_BACKENDS } from "../../shared/runtime-backends";
+import { ollamaModelListIncludes } from "../../shared/runtime-connect";
 import { isOneArtifactBindingRequestV1 } from "../../shared/one-artifacts";
 import {
   extractBuildInterviewQuestions,
@@ -50,7 +53,9 @@ import {
   type BrowserPermissionDecision,
 } from "../browser/connect";
 import { getDb } from "../store/db";
-import { onDesktopStoreChange } from "../store/change-bus";
+import { desktopStoreTransaction, onDesktopStoreChange } from "../store/change-bus";
+import { assertChatRuntimeSelectionTicketCurrent, reserveChatRuntimeSelectionTicket } from "../store/chat-runtime-selection-ticket";
+import { handOffPinnedSelectionToOngoingGoal } from "../long-run/runtime-handoff";
 import { oneDispatchParentForRun } from "../one/dispatch-presentation";
 import { assertOwnerMayWriteRoom, isPersonalAgentRoom, PERSONAL_AGENT_ROOM_READ_ONLY } from "../one/personal-agent-rooms";
 import {
@@ -307,6 +312,7 @@ import { inferOwnerLocale, isMachineAgentLabel, ownerActivityText, ownerAgentLab
 import { withMobileRequestTiming } from "./request-timing";
 import type {
   MobileBridgeAuthority,
+  MobileBridgeOwnerMessageVerdict,
   MobileBridgeAuthorityEvent,
   MobileBridgeConnectionContext,
   MobileBridgeConnectionLease,
@@ -430,6 +436,48 @@ export interface AgentlasDesktopMobileBridgeAuthorityOptions {
    * such devices. Omitted in tests that do not exercise the guard.
    */
   mailAccountGuard?: (deviceId: string) => "ok" | "mismatch" | "signed-out" | "unknown";
+  /**
+   * How long an owner message waits for the request-intent judge before it is acknowledged (default 8 s, MOBILE_INTENT_JUDGE_ACK_BOUND_MS).
+   * The phone gives a write 30 s; past this bound the message is taken and acknowledged, and the judge keeps running,
+   * so the verdict the start reads is still there when it starts.
+   */
+  intentJudgeAckBoundMs?: number;
+}
+
+/** Well under the phone's 30 s write timeout, which also has to carry the relay and the Desktop's own work. */
+export const MOBILE_INTENT_JUDGE_ACK_BOUND_MS = 8_000;
+
+function settlesWithin(promise: Promise<unknown>, ms: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(false), ms);
+    timer.unref?.();
+    promise.then(() => { clearTimeout(timer); resolve(true); }, () => { clearTimeout(timer); resolve(true); });
+  });
+}
+
+/**
+ * What an owner message answers, by method: the same value whether the intake just took the message or a restarted
+ * Desktop reads the row it left (reconcileOwnerMessage), so the phone cannot tell the two apart.
+ */
+function ownerIntakeResult(
+  method: "invoke.start" | "invoke.steer",
+  chatId: string,
+  intake: Exclude<OwnerIntakeOutcome, { kind: "failed" }>,
+  fallbackRunId: string,
+): object {
+  if (method === "invoke.start") {
+    return intake.kind === "started" ? { runId: intake.runId }
+      : intake.kind === "queued" ? { ...intake.steer, runId: intake.plannedRunId }
+        : { ...intake.steer, runId: intake.steer.runId ?? intake.steer.activeRunId ?? fallbackRunId };
+  }
+  if (intake.kind === "started") return { accepted: true as const, chatId, queued: false, interruptsCurrent: false, runId: intake.runId };
+  // The phone refuses a steering acknowledgement without the field it draws from: a queued one needs its position, a
+  // settled one needs the run. A receipt read back from the durable row (a resend, a restart) may lack either, because
+  // the row is no longer in this process's queue; that must not turn a delivered message into a failure.
+  const steer = intake.steer;
+  return steer.queued
+    ? { ...steer, position: steer.position ?? 1 }
+    : { ...steer, runId: steer.runId ?? steer.activeRunId ?? fallbackRunId };
 }
 
 /**
@@ -1459,8 +1507,9 @@ function mobileRuntimeSelectionFromValue(
 
 async function resolveMobileRoleSelection(
   selection: RuntimeSelection,
+  detected?: readonly RuntimeStatus[],
 ): Promise<RuntimeSelection> {
-  const candidates = await detectRuntimes();
+  const candidates = detected ?? await detectRuntimes();
   const runtime = candidates.find((candidate) =>
     candidate.kind === selection.kind &&
     (selection.backend === undefined || candidate.backend === selection.backend) &&
@@ -1473,7 +1522,9 @@ async function resolveMobileRoleSelection(
   if (
     selection.model &&
     (runtime.availableModels?.length ?? 0) > 0 &&
-    !runtime.availableModels!.includes(selection.model)
+    !(runtime.kind === "ollama"
+      ? ollamaModelListIncludes(runtime.availableModels!, selection.model)
+      : runtime.availableModels!.includes(selection.model))
   ) {
     throw new Error("The selected model is unavailable on this Desktop runtime");
   }
@@ -1594,6 +1645,7 @@ async function bindMobileOneTurn(
     expectedTaskVersion: task?.version ?? null,
     requestedAgentIds: targets.map((target) => target.agentId),
     permission: invocation.permissions === "read" ? "read" : "write",
+    ...(invocation.runtimeSelection ? { runtimeSelection: invocation.runtimeSelection } : {}),
   });
   if (prepared.kind === "input_unsupported") {
     throw Object.assign(new Error("The selected runtime does not support this input"), { code: prepared.code });
@@ -2404,6 +2456,27 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
     queueMicrotask(() => {
       void resumeMobileOneAutoRecovery(invocationService).catch((error) => this.onError(errorOf(error)));
     });
+  }
+
+  /**
+   * Read-only: what became of an owner message (invoke.start / invoke.steer without a Decision precondition) whose
+   * answer a previous Desktop instance never settled in the request ledger. The owner intake keys its durable rows by the
+   * request's idempotency key, so a row means the message was taken and no row means nothing happened: it can be sent
+   * again under the same key and cannot run twice (server.ts orphanDisposition).
+   */
+  reconcileOwnerMessage(request: MobileBridgeRpcRequest, _context: MobileBridgeConnectionContext): MobileBridgeOwnerMessageVerdict {
+    if (!mobileBridgeIsOwnerMessage(request) || !request.idempotencyKey) return { kind: "unknown" };
+    try {
+      const chatId = requiredIdentifier(request.params, "chatId");
+      const outcome = invocationService.ownerIntakeOutcome(chatId, mobileOwnerIntakeId(request.idempotencyKey, ""));
+      if (outcome === null) return { kind: "never-taken" };
+      if (outcome.kind === "failed") return { kind: "failed" };
+      const result = ownerIntakeResult(request.method as "invoke.start" | "invoke.steer", chatId, outcome, "");
+      return { kind: "taken", result: asJsonValue(result, request.method) };
+    } catch (error) {
+      this.onError(errorOf(error));
+      return { kind: "unknown" };
+    }
   }
 
   /** DESKTOP_MOBILE_BRIDGE: Initial state is always a fresh Desktop projection; no seed fallback. */
@@ -3433,12 +3506,25 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         const id = requiredIdentifier(params, "id");
         requireChat(id);
         const rawSelection = params.selection;
-        const runtimeSelection = rawSelection === null
-          ? null
-          : await resolveMobileRoleSelection(
-              mobileRuntimeSelectionFromValue(rawSelection, "orchestrator"),
-            );
-        const chat = setChatRuntimeSelection(id, runtimeSelection, "mobile");
+        const selection = rawSelection === null ? null : mobileRuntimeSelectionFromValue(rawSelection, "orchestrator");
+        const db = getDb();
+        const ticket = db.transaction(() => reserveChatRuntimeSelectionTicket(db, id)).immediate();
+        let chat: ReturnType<typeof setChatRuntimeSelection>;
+        try {
+          const inventory = selection === null ? [] : await detectRuntimes();
+          const runtimeSelection = selection === null ? null : await resolveMobileRoleSelection(selection, inventory);
+          chat = desktopStoreTransaction(db, () => {
+            assertChatRuntimeSelectionTicketCurrent(db, ticket);
+            const pinned = setChatRuntimeSelection(id, runtimeSelection, "mobile");
+            // The same rule as the desktop chip: while the chat has an ongoing Goal, the phone's choice is also filed
+            // for the Goal's next safe episode (the pin alone only reaches the next new message).
+            if (runtimeSelection) handOffPinnedSelectionToOngoingGoal(id, runtimeSelection, inventory);
+            return pinned;
+          }).immediate();
+        } catch (error) {
+          db.transaction(() => assertChatRuntimeSelectionTicketCurrent(db, ticket)).immediate();
+          throw error;
+        }
         this.scheduleSnapshotUpdated(id);
         return asJsonValue(
           mobileChatDto(chat),
@@ -3983,10 +4069,16 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         );
         // The host keeps this identity through preflight and actual admission.
         invocation.runId ??= randomUUID();
-        await withInvocationPreflightAccounting({ runId: invocation.runId, chatId: invocation.chatId }, () => Promise.all([
+        const judging = withInvocationPreflightAccounting({ runId: invocation.runId, chatId: invocation.chatId }, () => Promise.all([
           prejudgeOneRequestIntent(invocation, { timeoutMs: 300_000 }),
           prejudgeOneMemoryIntent(invocation, { timeoutMs: 300_000 }),
-        ])).catch(() => undefined);
+        ])).then(() => undefined, () => undefined);
+        // The start reads the judge's verdict, so a message still waits for it, but not past the phone's own timeout: an
+        // owner message that the judge is still answering is taken and acknowledged (intakeOwnerMessage startAfter) and
+        // starts the moment the judge settles. A question answer has no such path and waits as before.
+        const judged = decisionAnswer
+          ? (await judging, true)
+          : await settlesWithin(judging, this.options.intentJudgeAckBoundMs ?? MOBILE_INTENT_JUDGE_ACK_BOUND_MS);
         const mobileOneTurn = isMobileBridgeOneChat(requireChat(invocation.chatId));
         const effectiveInvocation = mobileOneTurn
           ? await bindMobileOneTurn(invocation)
@@ -4013,10 +4105,9 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
           } else {
             const intake = invocationService.intakeOwnerMessage(effectiveInvocation, {
               intakeId: mobileOwnerIntakeId(request.idempotencyKey, effectiveInvocation.runId!),
-              workspaceBinding, executionContext: { source: "mobile" } });
-            result = intake.kind === "started" ? { runId: intake.runId }
-              : intake.kind === "queued" ? { ...intake.steer, runId: intake.plannedRunId }
-                : { ...intake.steer, runId: intake.steer.runId ?? intake.steer.activeRunId ?? effectiveInvocation.runId! };
+              workspaceBinding, executionContext: { source: "mobile" },
+              ...(judged ? {} : { startAfter: judging }) });
+            result = ownerIntakeResult("invoke.start", invocation.chatId, intake, effectiveInvocation.runId!);
           }
         } catch (error) {
           rollbackQuestionClaim?.();
@@ -4081,9 +4172,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
             const intake = invocationService.intakeOwnerMessage(effectiveInvocation, {
               intakeId: mobileOwnerIntakeId(request.idempotencyKey, randomUUID()),
               workspaceBinding, executionContext: { source: "mobile" } });
-            result = intake.kind === "started"
-              ? { accepted: true as const, chatId: invocation.chatId, queued: false, interruptsCurrent: false, runId: intake.runId }
-              : intake.steer;
+            result = ownerIntakeResult("invoke.steer", invocation.chatId, intake, effectiveInvocation.runId ?? "");
           }
         } catch (error) {
           rollbackQuestionClaim?.();
@@ -4626,7 +4715,9 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         if (
           model &&
           (runtime.availableModels?.length ?? 0) > 0 &&
-          !runtime.availableModels!.includes(model)
+          !(runtime.kind === "ollama"
+            ? ollamaModelListIncludes(runtime.availableModels!, model)
+            : runtime.availableModels!.includes(model))
         ) {
           throw new Error("The selected model is unavailable on this Desktop runtime");
         }

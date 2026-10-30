@@ -143,6 +143,11 @@ function judgmentFailureCause(detailed: { text: string | null; failure?: RunnerF
   return { code, ...(causeCode && causeCode !== code ? { causeCode } : {}), ...(failure ? { failureKind: failure.kind } : {}),
     ...(receipt ? { route: receipt.route, runtimeKind: receipt.selection.kind, execution: receipt.execution } : {}) };
 }
+/** The custody fence refused the pass because the store's revocation epoch moved (typed code, never the message). */
+function isCustodyMovedByOwner(error: unknown): boolean {
+  return machineCode((error as { code?: unknown } | null)?.code) === "memory_source_custody_changed"
+    || (error instanceof Error && error.message === "memory_source_custody_changed");
+}
 function recordDreamingFailure(cause: DreamingFailureCause, stage: "consolidation" | "pass"): DreamingFailureRecord {
   const failures = (readDreamingFailure()?.failures ?? 0) + 1;
   const backoffMs = dreamingFailureBackoffMs(failures);
@@ -293,6 +298,9 @@ async function tick(): Promise<void> {
       }
     });
   } catch (err) {
+    // The owner edited or forgot a memory entry while the pass ran: that is the owner's own action, not a failure. The pass
+    // ends here and the next tick starts it again against the new store (observed in use 07:23: memory_source_custody_changed).
+    if (isCustodyMovedByOwner(err)) { console.info("[dreaming] pass yielded: memory changed while it ran; it starts again on its own"); return; }
     // A pass that throws outside one agent's consolidation backs off too, with its machine code only.
     recordDreamingFailure(errorFailureCause(err), "pass");
   } finally {
@@ -472,6 +480,9 @@ async function dreamOnce(): Promise<{ completed: boolean; failure?: DreamingFail
       }
       // abort(사용자 복귀/타임아웃) 포함 — 조용히 다음 기회로.
       if (controller.signal.aborted) return { completed };
+      // Memory changed under the pass (the owner's edit or forget moved the custody epoch): not a failure, so no failure record
+      // and no back-off. The source row is released for retry below and the next tick consolidates the new store.
+      if (isCustodyMovedByOwner(err)) { console.info("[dreaming] consolidation yielded: memory changed while it ran"); return { completed }; }
       failureCause = errorFailureCause(err);
       return { completed, failure: failureCause };
     } finally {

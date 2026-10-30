@@ -372,6 +372,10 @@ export interface RunKeyElicitationGateResult<TContext extends { tools: AutoSelec
   fallbackPrompt: string;
 }
 
+function throwIfKeyGateAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw signal.reason ?? new Error("invocation_cancelled");
+}
+
 /** Full pre-launch gate used by runMcpInvocation. Interactive renderer runs
  *  only; every unattended path passes interactive:false and gets the original
  *  context back untouched with zero events emitted. */
@@ -393,10 +397,12 @@ export async function runMcpKeyElicitationGate<TContext extends { tools: AutoSel
     fallbackPrompt: "",
   };
   if (!opts.interactive || !opts.runId) return skipped;
+  throwIfKeyGateAborted(opts.signal);
   let storedNames: string[] = [];
   if (opts.context.tools.some((tool) => tool.state === "missing-key" && tool.missingEnv.length > 0)) {
     try { storedNames = await listEnvKeys(); } catch { /* a locked vault only drops the rename offer */ }
   }
+  throwIfKeyGateAborted(opts.signal);
   const request = buildRunKeyRequest(opts.runId, opts.context.tools, runKeyElicitationTimeoutMs(), storedNames);
   if (!request) return skipped;
   pruneDeferredKeys();
@@ -414,6 +420,7 @@ export async function runMcpKeyElicitationGate<TContext extends { tools: AutoSel
     sink: opts.sink,
     signal: opts.signal,
   });
+  throwIfKeyGateAborted(opts.signal);
   // Abort currently settles the UI promise as declined; it is never a user's
   // credential decision and must not suppress a future request.
   if (identity && scope && !opts.signal?.aborted && scopeIsCurrent(scope)) {
@@ -433,8 +440,10 @@ export async function runMcpKeyElicitationGate<TContext extends { tools: AutoSel
     try {
       refreshed = await opts.reselect();
     } catch {
+      throwIfKeyGateAborted(opts.signal);
       // Keep the original selection; still-missing tools fall through below.
     }
+    throwIfKeyGateAborted(opts.signal);
     const stillMissing = refreshed.tools.filter(
       (tool) =>
         tool.state === "missing-key" &&

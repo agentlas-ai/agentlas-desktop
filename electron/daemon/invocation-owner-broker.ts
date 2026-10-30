@@ -97,6 +97,12 @@ export function createInvocationOwnerBroker(ports: InvocationOwnerBrokerPorts) {
     isRegisteredOwner(ownerId: string): boolean {
       return !closed && registrations.has(ownerId);
     },
+    /** Authority belongs to this live connection, not an owner id supplied by another peer. */
+    isRegisteredPeerOwner(peer: ControlSocketPeer, ownerId: string, ownerKind: "desktop" | "terminal"): boolean {
+      const registration = peers.get(peer);
+      return !closed && !!registration && registration.ownerId === ownerId && registration.ownerKind === ownerKind
+        && registrations.get(ownerId) === registration;
+    },
 
     register(peer: ControlSocketPeer, input: { ownerId: string; ownerKind: "desktop" | "terminal"; ownerPid?: number }) {
       if (closed || !input || !validId(input.ownerId)

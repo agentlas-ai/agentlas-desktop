@@ -92,9 +92,12 @@ export const HOST_FAILURE_CODE_CLASSES: ReadonlyMap<string, HostFailureClass> = 
   // "The run failed …" (audit 2026-10-28, production ledger + client.ts/service.ts throw sites; the table in docs
   // 2026-10-28-common-defects-goal-stop). App-side codes (shared/run-failure-cause.ts) are deliberately not here.
   ["image_tool_unavailable", "tool_missing"], ["image_generation_failed", "tool_failed"],
-  ["mcp-runtime-config-unavailable", "tools_unprepared"], ["mcp-goal-tool-scope-changed", "tools_unprepared"],
+  // The run's tool table could not be built (a gate or host inside the app, not ready): nothing was dispatched. A Goal whose scope
+  // changed while the table was built is the Goal's state, not a tool connection (r3 sweep 2026-10-30).
+  ["mcp-runtime-config-unavailable", "tools_unprepared"], ["mcp-goal-tool-scope-changed", "goal_changed"],
   ["one-runtime-unavailable", "runtime_unavailable"], ["no-runtime", "runtime_unavailable"],
-  ["one-team-runtime-selection-changed", "runtime_changed"], ["automatic-goal-resume-state-changed", "goal_changed"],
+  ["one-team-runtime-selection-changed", "runtime_changed"], ["one-team-runtime-changed", "runtime_changed"],
+  ["automatic-goal-resume-state-changed", "goal_changed"],
   ["store_busy", "store_busy"], ["mobile-runtime-not-read-sandboxed", "mobile_boundary"],
   ["work_project_residency_busy", "project_busy"], ["codex_http_connection_failed", "provider_connection"],
   // mcp/client.ts: the run is bound to the Agentlas Browser (the owner's toolMode / assignment / mention, or an active Goal
@@ -218,7 +221,7 @@ const KO: Record<RunFailureNoticeCause, Copy> = {
   tool_failed: { lead: ["이미지 생성 도구가 결과를 만들지 못해 완료하지 못했습니다.", "이미지 생성 도구가 결과를 만들지 못해 완료하지 못한 것으로 보입니다."],
     action: "같은 요청을 다시 보내거나 설정에서 다른 이미지 모델을 골라 보세요." },
   tools_unprepared: { lead: ["이 실행에 쓸 도구 연결을 준비하지 못해 시작하지 않았습니다.", "이 실행에 쓸 도구 연결을 준비하지 못해 시작하지 않은 것으로 보입니다."],
-    action: "도구(MCP) 연결 상태를 확인한 뒤 다시 보내 보세요." },
+    action: "같은 요청을 다시 보내 보세요. 계속 실패하면 도구(MCP) 연결 상태를 확인해 주세요." },
   browser_host_unavailable: { lead: ["로그인된 Agentlas Browser를 확인할 수 없어 브라우저가 필요한 이 작업을 시작하지 않았습니다.", "로그인된 Agentlas Browser를 확인할 수 없어 브라우저가 필요한 이 작업을 시작하지 않은 것으로 보입니다."],
     action: "Agentlas Browser를 열어 로그인해 두세요. 진행 중인 목표는 잠시 뒤 자동으로 다시 시도하고, 바로 계속하려면 메시지를 보내면 됩니다." },
   runtime_unavailable: { lead: ["선택한 모델(실행기)을 지금 쓸 수 없어 시작하지 않았습니다.", "선택한 모델(실행기)을 지금 쓸 수 없어 시작하지 않은 것으로 보입니다."],
@@ -267,7 +270,7 @@ const EN: Record<RunFailureNoticeCause, Copy> = {
   tool_failed: { lead: ["The image generation tool produced no result, so it could not be completed.", "The image generation tool appears to have produced no result, so it could not be completed."],
     action: "Send it again, or choose another image model in Settings." },
   tools_unprepared: { lead: ["This run's tool connections could not be prepared, so it was not started.", "This run's tool connections appear not to have been prepared, so it was not started."],
-    action: "Check the tool (MCP) connections and send it again." },
+    action: "Send it again. If it keeps failing, check the tool (MCP) connections." },
   browser_host_unavailable: { lead: ["The signed-in Agentlas Browser could not be reached, so this browser task was not started.", "The signed-in Agentlas Browser appears not to have been reachable, so this browser task was not started."],
     action: "Open Agentlas Browser and sign in. An active goal tries again by itself shortly; send a message to continue right away." },
   runtime_unavailable: { lead: ["The selected model (runtime) is not available right now, so it was not started.", "The selected model (runtime) appears not to be available right now, so it was not started."],

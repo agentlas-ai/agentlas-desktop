@@ -6,8 +6,7 @@ import { z } from 'zod';
 import { validateFinanceWorkspace, FinanceDataSaveRequestSchema, type FinanceWorkspace } from '../../shared/finance';
 import { getAuthenticatedSessionBinding, onAuthSessionOwnershipChanged } from '../auth';
 import { userDataPath } from '../runtime-paths';
-import { createWorkStart } from '../work-start';
-import { detectRuntimes } from '../runtime/detect';
+import { createWorkStartForSender as createWorkStart } from '../work-start';
 import { FinanceStore, type FinanceScope } from './store';
 import { queryFinanceData, refreshFinanceQuotes } from './data';
 import { financeResearchPrompt } from './prompts';
@@ -106,7 +105,7 @@ export function registerFinanceIpc(input: { ipc: Pick<IpcMain, 'handle'>; assert
     input.assertTrustedSender(event); const arg = z.object({ requestId: boundedId }).strict().parse(raw);
     const item = running.get(`${event.sender.id}:${arg.requestId}`); item?.controller.abort(); return { cancelled: Boolean(item) };
   });
-  handle('startResearch', async(_event, raw, scope) => {
+  handle('startResearch', async(event, raw, scope) => {
     await requireFinanceConsent(scope);
     const arg = z.object({ assetId: boundedId, question: z.string().max(20000).optional() }).strict().parse(raw);
     const workspace = await store.load(scope); scope.assertCurrent(); const asset = workspace.watchlist.find(item => item.id === arg.assetId);
@@ -114,7 +113,7 @@ export function registerFinanceIpc(input: { ipc: Pick<IpcMain, 'handle'>; assert
     // Research runs as a Work chat in the owner's Finance Work project, so it is a Finance conversation like any other:
     // the Finance tools, the finance.chat line and the owner fence come from the stored project binding (mcp/client.ts).
     const { projectId } = financeWorkProject(scope); scope.assertCurrent();
-    const receipt = await createWorkStart({ intentId: randomUUID(), prompt: financeResearchPrompt(asset, arg.question ?? ''), projectId, options: { permissions: 'read' } }, async() => { const runtimes = await detectRuntimes(); scope.assertCurrent(); return runtimes; });
+    const receipt = await createWorkStart({ intentId: randomUUID(), prompt: financeResearchPrompt(asset, arg.question ?? ''), projectId, options: { permissions: 'read' } }, event, input.assertTrustedSender, scope.assertCurrent);
     scope.assertCurrent(); return { chatId: receipt.chatId, intentId: receipt.intentId, status: receipt.status };
   });
   for (const action of ['scheduleMonitor','pauseMonitor'] as const) handle(action,async(_event,raw,scope)=>{

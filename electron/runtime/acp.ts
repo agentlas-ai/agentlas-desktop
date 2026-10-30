@@ -37,6 +37,7 @@ import {
   AcpConnection,
   ACP_PROTOCOL_VERSION,
   AcpRpcError,
+  AcpTimeoutError,
   acpMcpServersFromConfig,
   chooseAuthMethod,
   isAcpAuthRequired,
@@ -888,6 +889,20 @@ class StaleAcpSessionError extends Error {
 }
 
 /**
+ * The stored session did not open within session/load's bound, before any turn activity (unattended-session-turns.ts rule 5, the
+ * ACP counterpart of Codex's thread/resume timeout: a long-lived conversation whose stored session never loads within the bound
+ * failed the owner's turn, and every later message, at the same step). The agent may still be replaying that history on this
+ * connection, so the turn restarts in a NEW process that skips the stored session and replaces the binding; nothing of the old
+ * connection can reach the new turn's text.
+ */
+class AcpResumeTimedOutError extends Error {
+  constructor(readonly cause: unknown) {
+    super("ACP session/load timed out — restarting the turn in a fresh session");
+    this.name = "AcpResumeTimedOutError";
+  }
+}
+
+/**
  * Model discovery through ACP: session/new configOptions[category=model].
  * Zero text parsing. Used by detect for kinds that speak ACP.
  */
@@ -1136,11 +1151,14 @@ export async function configureAcpSessionModel(
 }
 
 /** An ACP `thought_level` select option (the protocol's reserved category for reasoning effort), if advertised. */
-export function thoughtLevelConfigOptionFromSession(response: unknown): { configId: string; currentValue: string | null; values: string[] } | null {
+export function thoughtLevelConfigOptionFromSession(response: unknown, expectedConfigId?: string): { configId: string; currentValue: string | null; values: string[] } | null {
   const options = (response as { configOptions?: unknown } | null)?.configOptions;
   if (!Array.isArray(options)) return null;
   for (const option of options) {
-    if (!option || typeof option !== "object" || (option as any).category !== "thought_level" || (option as any).type !== "select") continue;
+    if (!option || typeof option !== "object" || (option as any).type !== "select") continue;
+    // Discovery uses the semantic category. An ACK must confirm the exact
+    // option we sent; category/array order can change or be omitted in replies.
+    if (expectedConfigId !== undefined ? (option as any).id !== expectedConfigId : (option as any).category !== "thought_level") continue;
     const id = (option as any).id;
     if (typeof id !== "string" || !id) continue;
     const entries: unknown[] = Array.isArray((option as any).options) ? (option as any).options : [];
@@ -1183,7 +1201,7 @@ export async function configureAcpSessionEffort(
   } catch {
     return { response, application: { status: "unsupported", requested: want, reason: "acp_effort_refused" } };
   }
-  const confirmed = thoughtLevelConfigOptionFromSession(acknowledged);
+  const confirmed = thoughtLevelConfigOptionFromSession(acknowledged, option.configId);
   if (!confirmed || confirmed.currentValue !== value) {
     return { response, application: { status: "unsupported", requested: want, reason: "acp_effort_not_acknowledged" } };
   }
@@ -1197,7 +1215,7 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
    * protocol activity may be replaced once. Empty assistant text cannot prove
    * that the previous attempt did not infer or act.
    */
-  const runTurn = async (req: RunnerRequest, events: RunnerEvents, allowStaleRetry: boolean): Promise<RunnerResult> => {
+  const runTurn = async (req: RunnerRequest, events: RunnerEvents, allowStaleRetry: boolean, skipStoredSession = false): Promise<RunnerResult> => {
     const locale = pickLocale(req);
     const cwd = req.cwd ?? agentRunCwd();
     const configuredCommand = req.runtimeSource ?? spec.command;
@@ -1301,7 +1319,8 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
       : null;
     const storedSessionId = savedSession && conversationFingerprint
       && (savedSession.fingerprint === conversationFingerprint || savedSession.fingerprint === legacyConversationFingerprint) ? savedSession.sessionId : null;
-    const resumeSessionId = req.runtimeSessionId ?? storedSessionId;
+    // After a session/load that timed out the turn restarts without the stored session (AcpResumeTimedOutError).
+    const resumeSessionId = skipStoredSession ? null : req.runtimeSessionId ?? storedSessionId;
 
     /*
      * ★상주 — 이 턴이 끝나도 세션을 닫지 않는다.
@@ -1567,18 +1586,26 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
            *    continues once in a fresh session that carries the automation's capsule, the chat history or the journal
            *    seed. An automation on Copilot, Grok, Kimi or Cursor used to stop here on every run once its stored
            *    session was gone. A dead or silent transport is not a refusal and still surfaces (not dispatched).
-           *  - attended under the agent-context layer (rule 4): only a session the runtime proves gone (or a load the
-           *    agent does not implement, -32601), and only when the journal can seed the new session.
+           *  - attended under the agent-context layer (rules 4 and 6): a session the runtime proves gone, a load the agent
+           *    refused with a JSON-RPC error ("resume_refused": nothing started, so nothing repeats) or does not implement
+           *    (-32601), and only when the journal can seed the new session (-32601 needs no seed, as before).
            *  - an attended per-chat binding re-attaches the chat's own history to a fresh session, as before.
            * Never when the attempt already showed turn activity, a request or an effect.
            */
           const beforeEffects = !client.turnActivityObserved && !agentRequestObserved && !effectRun;
           const gone = beforeEffects && acpLoadedSessionGone(spec.id, err, runEnv, resumeSessionId);
-          const refused = beforeEffects && (gone || err instanceof AcpRpcError);
-          const freshReason: UnattendedFreshSessionReason = gone ? "session_not_found" : "resume_failed_before_turn";
+          // The request's own typed timeout (never its words), before any turn activity: the stored session did not open within the bound.
+          const timedOut = beforeEffects && !gone && err instanceof AcpTimeoutError && err.method === "session/load";
+          const refused = beforeEffects && (gone || timedOut || err instanceof AcpRpcError);
+          // An attended agent-context turn whose load the agent refused for no reason a rule names starts fresh too (rule 6):
+          // session/load starts no turn, `refused` is the proof, the stored binding stays.
+          // A load the agent does not implement at all (-32601) never succeeds: that binding is replaced, as before.
+          const loadUnimplemented = refused && err instanceof AcpRpcError && err.code === -32601;
+          const freshReason: UnattendedFreshSessionReason = gone ? "session_not_found" : timedOut ? "resume_timed_out"
+            : refused && canonicalContextKey && !req.unattended && !loadUnimplemented ? "resume_refused" : "resume_failed_before_turn";
           // The journal can seed the replacement (the same facts-bearing packet the fresh session below starts from).
           let carried = !req.runtimeSessionId;
-          if (!carried && canonicalContextKey && !req.unattended && gone) {
+          if (!carried && canonicalContextKey && !req.unattended && refused) {
             carried = (await agentContextColdBootstrapForRequest(req).catch(() => null)) !== null;
           }
           const fresh = req.unattended ? refused
@@ -1586,6 +1613,8 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
               || (refused && err instanceof AcpRpcError && err.code === -32601)
               : beforeEffects;
           if (!fresh) throw err;
+          // A timed-out load may still be replaying on this connection: restart the turn in a new process (wrapper below).
+          if (timedOut) throw new AcpResumeTimedOutError(err);
           events.onStatus(unattendedFreshSessionStatus(sessionKind, freshReason));
           // The dead binding never seeds a later turn, and context delivered to it is not counted as delivered.
           if (!req.runtimeSessionId && req.chatId && freshSessionReplacesStored(freshReason)) {
@@ -1595,6 +1624,14 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
         } finally {
           client.endReplay();
         }
+      } else if (!sessionId && skipStoredSession) {
+        // The restart after a timed-out session/load: the dead binding never seeds a later turn, and context delivered to it is not
+        // counted as delivered (the in-line fresh-session path above does the same).
+        events.onStatus(unattendedFreshSessionStatus(sessionKind, "resume_timed_out"));
+        if (!req.runtimeSessionId && req.chatId && freshSessionReplacesStored("resume_timed_out")) {
+          clearRuntimeSession(req.chatId, sessionKind, runtimeSessionOwnerId, { isolateOwner: isolateRuntimeSessionOwner });
+        }
+        if (storedSessionId) invalidateStableTurnContext({ chatId: contextChatId, runtimeKind: sessionKind, sessionId: storedSessionId });
       } else if (!sessionId && resumeSessionId) {
         events.onStatus(locale === "ko"
           ? "이 런타임은 세션 복원을 지원하지 않아 대화 기록을 다시 실어 새 세션으로 진행합니다"
@@ -1965,7 +2002,15 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
       return await runTurn(req, events, true);
     } catch (err) {
       // 죽은 상주 세션은 사용자에게 보이지 않는다 — 새 세션으로 조용히 다시 한 번.
-      if (err instanceof StaleAcpSessionError) return runTurn(req, events, false);
+      if (err instanceof StaleAcpSessionError) {
+        try { return await runTurn(req, events, false); }
+        catch (retryError) {
+          if (retryError instanceof AcpResumeTimedOutError) return runTurn(req, events, false, true);
+          throw retryError;
+        }
+      }
+      // The stored session never opened (session/load timed out before any turn activity): one restart without it, in a new process.
+      if (err instanceof AcpResumeTimedOutError) return runTurn(req, events, false, true);
       throw err;
     }
   };

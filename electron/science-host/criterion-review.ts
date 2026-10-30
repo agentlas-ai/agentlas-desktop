@@ -8,6 +8,7 @@ import { listInstalledAgentsReadOnly } from "../mcp/registry";
 import { buildEffectiveAgentSystemPrompt, computeAgentPackageHash, resolveAgentPackageDir } from "../agents/files";
 import { getDb } from "../store/db";
 import { createChat, getChat, setChatRuntimeSelection } from "../store/chats";
+import { SCIENCE_SURFACE_PACK, tagChatSurfacePack } from "../store/surface-conversation-schema";
 import { invocationService } from "../invocation/service";
 import { captureScienceInvocationBinding } from "../invocation/workspace-binding";
 import { readInvocationEffectBoundary } from "../invocation/effect-boundary-reader";
@@ -129,6 +130,8 @@ export const scienceCriterionReviewHost:ScienceCriterionReviewHost={
     const binding=captureScienceInvocationBinding(project.folderPath);
     let chat=getChat(review.runtimeChatId);
     if(!chat)chat=createChat({internalId:review.runtimeChatId,agentId:review.reviewer.agentId,kind:"division",parentChatId:parent.runtimeChatId,title:"Independent scientific review"});
+    // PLAN S6: the review chat is Science's own, like the conversation chat it reviews (store/surface-conversation-schema.ts).
+    tagChatSurfacePack(getDb(),chat.id,SCIENCE_SURFACE_PACK);
     const parentRow=getDb().prepare("SELECT parent_chat_id FROM chats WHERE id=?").get(chat.id) as {parent_chat_id:string};
     if(chat.agentId!==review.reviewer.agentId || chat.kind!=="division" || parentRow.parent_chat_id!==parent.runtimeChatId)throw new Error("science-review-chat-binding-mismatch");
     if(review.basis.runtimeSelection.role!==undefined && !["orchestrator","worker","multimodal"].includes(review.basis.runtimeSelection.role))throw new Error("science-review-runtime-binding-invalid");

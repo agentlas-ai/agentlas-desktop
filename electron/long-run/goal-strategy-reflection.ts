@@ -430,11 +430,6 @@ function record(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
 }
 
-function onlyKeys(value: Record<string, unknown>, allowed: readonly string[]): boolean {
-  const accepted = new Set(allowed);
-  return Object.keys(value).every((key) => accepted.has(key));
-}
-
 function draftText(value: unknown, required = true, limit = 2_000): string | undefined {
   if (value === undefined && !required) return undefined;
   if (typeof value !== "string" || value.length > limit || value.includes("\0")) return undefined;
@@ -442,34 +437,57 @@ function draftText(value: unknown, required = true, limit = 2_000): string | und
   return text || (required ? undefined : undefined);
 }
 
+/*
+ * The draft is advisory: Main persists it observation-only and gives it no authority. The model-facing contract names the
+ * intents but not the field names of `strategy`, `cadence` or an assessment, so a reply that follows it in spirit (a strategy
+ * written as one sentence, a cadence without `kind`, an assessment that echoes the constraint's `source`) used to be refused as a
+ * whole and the reflection was lost ("goal_strategy_invalid_output": 14 of the 24 unavailable reflections in the owner's log
+ * carried it, 1 + 2 + 5 more on 10-26..28 after the rationale slip was fixed). What carries meaning stays exact: the
+ * intent, that a change names its change, the hold-carries-nothing rule, the no-authority and no-graph-patch guards.
+ */
 function parseStrategy(value: unknown): GoalStrategyStrategyDraftV1 | null {
+  if (typeof value === "string") {
+    const text = draftText(value);
+    return text ? { schemaVersion: "agentlas.goal-strategy.v1", summary: text, change: text } : null;
+  }
   const raw = record(value);
-  if (!raw || !onlyKeys(raw, ["schemaVersion", "summary", "change", "rationale"])
-    || (raw.schemaVersion != null && raw.schemaVersion !== "agentlas.goal-strategy.v1")) return null;
-  const summary = draftText(raw.summary);
-  const change = draftText(raw.change);
-  return summary && change ? { schemaVersion: "agentlas.goal-strategy.v1", summary, change } : null;
+  if (!raw || (raw.schemaVersion != null && raw.schemaVersion !== "agentlas.goal-strategy.v1")) return null;
+  const summary = draftText(raw.summary ?? raw.title ?? raw.name ?? raw.description, false);
+  const change = draftText(raw.change ?? raw.changes ?? raw.detail ?? raw.details ?? raw.plan, false);
+  const text = summary ?? change;
+  return text ? { schemaVersion: "agentlas.goal-strategy.v1", summary: summary ?? text, change: change ?? text } : null;
 }
 
 function parseCadence(value: unknown): GoalStrategyCadenceDraftV1 | null {
+  if (typeof value === "string") {
+    const change = draftText(value);
+    return change ? { kind: "suggest", nextWakeAt: null, change } : null;
+  }
   const raw = record(value);
-  if (!raw || !onlyKeys(raw, ["kind", "nextWakeAt", "change"])
-    || (raw.kind !== "keep" && raw.kind !== "suggest")) return null;
-  const change = draftText(raw.change);
-  const nextWakeAt = raw.nextWakeAt === null ? null : draftText(raw.nextWakeAt, true, 128);
-  if (!change || (raw.nextWakeAt !== null && typeof nextWakeAt !== "string")
-    || (typeof nextWakeAt === "string" && !Number.isFinite(Date.parse(nextWakeAt)))) return null;
-  return { kind: raw.kind, nextWakeAt: nextWakeAt ?? null, change };
+  if (!raw) return null;
+  const change = draftText(raw.change ?? raw.summary ?? raw.description ?? raw.suggestion, false);
+  if (!change) return null;
+  // `kind` and `nextWakeAt` are optional descriptive data ("never an apply token"): a missing or unknown kind is a suggestion, and a
+  // value that is not a time is no wake time.
+  const at = typeof raw.nextWakeAt === "string" ? draftText(raw.nextWakeAt, true, 128) : undefined;
+  return { kind: raw.kind === "keep" ? "keep" : "suggest", nextWakeAt: at && Number.isFinite(Date.parse(at)) ? at : null, change };
 }
 
 function parseAssessment(value: unknown): GoalStrategyConstraintAssessmentV1 | null {
   const raw = record(value);
-  if (!raw || !onlyKeys(raw, ["id", "constraintId", "constraint_id", "disposition", "assessment", "note", "reason"])) return null;
+  if (!raw) return null;
   const id = draftText(raw.id ?? raw.constraintId ?? raw.constraint_id, true, MAX_ID_CHARS);
   const note = draftText(raw.note ?? raw.reason, false, 1_000) ?? "The provider supplied a bounded assessment.";
-  const disposition = raw.disposition ?? raw.assessment;
-  if (!id || !note || !["preserved", "conflict", "uncertain"].includes(String(disposition))) return null;
+  const disposition = String(raw.disposition ?? raw.assessment ?? "").trim().toLowerCase();
+  if (!id || !["preserved", "conflict", "uncertain"].includes(disposition)) return null;
   return { id, disposition: disposition as GoalStrategyConstraintDisposition, note };
+}
+
+const DRAFT_INTENTS: readonly GoalStrategyProposalIntent[] = ["hold", "change-strategy", "change-cadence"];
+/** "change_strategy", "Change strategy" and "CHANGE-STRATEGY" name the same intent. */
+function draftIntent(value: unknown): GoalStrategyProposalIntent | null {
+  const key = String(value ?? "").trim().toLowerCase().replace(/[\s_]+/g, "-");
+  return DRAFT_INTENTS.find((intent) => intent === key) ?? null;
 }
 
 /** Providers commonly wrap a JSON-only response in a Markdown fence even
@@ -495,21 +513,30 @@ export function parseGoalStrategyProposalDraft(rawText: string | null | undefine
   const raw = record(parsed);
   // Ignore provider-added provenance/notes fields. They are never copied into
   // the host receipt; only the bounded draft fields below are admitted.
+  // The reply is for the schema this host asked for: a reply that omits schemaVersion is read, one that names another version is not.
+  const intentOf = raw ? draftIntent(raw.intent) : null;
   if (!raw
     || (Object.hasOwn(raw, "authority") && raw.authority !== "observation-only")
     || Object.hasOwn(raw, "graphPatch")
-    || raw.schemaVersion !== GOAL_STRATEGY_PROPOSAL_DRAFT_SCHEMA
-    || !["hold", "change-strategy", "change-cadence"].includes(String(raw.intent))) return null;
-  const rationale = draftText(raw.rationale);
+    || (raw.schemaVersion != null && raw.schemaVersion !== GOAL_STRATEGY_PROPOSAL_DRAFT_SCHEMA)
+    || !intentOf) return null;
   const strategy = raw.strategy == null ? undefined : parseStrategy(raw.strategy);
   const cadence = raw.cadence == null ? undefined : parseCadence(raw.cadence);
-  if (!rationale || (raw.strategy != null && !strategy) || (raw.cadence != null && !cadence)) return null;
+  if ((raw.strategy != null && !strategy) || (raw.cadence != null && !cadence)) return null;
+  // Neither systemPrompt() nor the input's outputContract names a top-level "rationale", yet it was required, so a draft that
+  // followed that contract exactly was goal_strategy_invalid_output (14 of the 24 unavailable reflections in the owner's log
+  // carried that reason; the raw replies are not kept). The draft's own change text states the reason; a bare hold gets a fixed line.
+  const rationale = raw.rationale === undefined
+    ? (strategy?.change ?? cadence?.change ?? "The provider supplied no rationale.")
+    : draftText(raw.rationale);
+  if (!rationale) return null;
   const assessmentValue = raw.fixedConstraints ?? raw.constraintAssessments ?? raw.assessments;
-  const assessments = assessmentValue === undefined ? undefined
-    : Array.isArray(assessmentValue) && assessmentValue.length <= MAX_FIXED_CONSTRAINTS
-      ? assessmentValue.map(parseAssessment) : null;
-  if (assessments === null || assessments?.some((item) => item === null)) return null;
-  const intent = raw.intent as GoalStrategyProposalIntent;
+  // The host fills every constraint the reply did not assess as "uncertain" (assessmentFor), so an assessment that cannot be read
+  // costs nothing but itself; it no longer discards the draft.
+  const assessments = Array.isArray(assessmentValue)
+    ? assessmentValue.slice(0, MAX_FIXED_CONSTRAINTS).map(parseAssessment).filter((item): item is GoalStrategyConstraintAssessmentV1 => item !== null)
+    : undefined;
+  const intent = intentOf;
   if (intent === "hold" && (strategy || cadence)) return null;
   if (intent === "change-strategy" && !strategy) return null;
   if (intent === "change-cadence" && !cadence) return null;
@@ -592,6 +619,14 @@ function recordGoalStrategyReflectionRefusal(input: {
       if (reason === "goal_strategy_goal_not_ongoing") return null;
       const goal = getChatGoalRevision(reflection.goalId, reflection.expectedGoalRevision);
       if (goal && goal.lifecycle !== "ongoing") return null;
+      // An episode that itself ended unsettled (a failed or uncertain turn: its checkpoint says so) has no settled effects to
+      // reflect on. That is the expected result, not a host refusal: the next settled episode asks again, and the checkpoint
+      // already records why this one was not. Recording it made the AGI read every failed turn as a repeating host defect
+      // (repeatedStrategyRefusal). A settled checkpoint whose boundary still would not read is a real defect and is kept.
+      if (reason === "goal_strategy_effect_unsettled") {
+        const checkpoint = latestTaskCheckpoint(reflection.goalId);
+        if (checkpoint?.invocationRunId === reflection.sourceInvocationRunId && checkpoint.sideEffects.state !== "settled") return null;
+      }
     }
     const receipt: GoalStrategyReflectionRefusalV1 = {
       schemaVersion: GOAL_STRATEGY_REFLECTION_REFUSAL_SCHEMA,

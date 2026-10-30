@@ -1,0 +1,75 @@
+{
+  "tools": [
+    {
+      "name": "compute_molecular_properties",
+      "title": "Compute molecular properties and drug-likeness (RDKit)",
+      "description": "Compute RDKit molecular properties and drug-likeness for 1-50 SMILES: formula, molecular weight, cLogP, TPSA, H-bond donors/acceptors, rotatable bonds, aromatic rings, Fsp3, stereocentres, QED, Lipinski/Veber/Egan/Ghose rule results and PAINS/Brenk structural alerts, returned as a comparison table plus per-molecule rows with a Ketcher-ready SMILES handoff. Summary view by default; view \"full\" adds InChI, QED components, alert names and a molfile. (한국어: 분자 물성 계산, 약물유사성, 리핀스키 규칙, QED, 물성 비교표, 화합물 성질)",
+      "annotations": { "title": "Compute molecular properties and drug-likeness (RDKit)", "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false },
+      "_meta": { "agentlas/effect": "effect-free-read", "agentlas/fields": ["chemistry", "drug-discovery", "medicinal-chemistry"], "agentlas/engine": "RDKit" },
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["molecules"],
+        "properties": {
+          "molecules": {
+            "type": "array", "minItems": 1, "maxItems": 50,
+            "items": { "type": "object", "additionalProperties": false, "required": ["smiles"], "properties": { "name": { "type": "string", "maxLength": 120 }, "smiles": { "type": "string", "minLength": 1, "maxLength": 2000 } } }
+          },
+          "include_alerts": { "type": "boolean", "default": true },
+          "view": { "type": "string", "enum": ["summary", "full"], "default": "summary" }
+        }
+      }
+    },
+    {
+      "name": "standardize_smiles",
+      "title": "Standardize SMILES (RDKit MolStandardize)",
+      "description": "Standardize 1-50 SMILES with RDKit MolStandardize (cleanup and normalization, largest fragment to strip salts, neutralization, optional canonical tautomer) and return canonical isomeric SMILES, InChI, InChIKey, formula, the steps that changed each structure and a Ketcher-ready SMILES handoff. (한국어: SMILES 정규화, 구조 표준화, 염 제거, 중성화, InChIKey 변환)",
+      "annotations": { "title": "Standardize SMILES (RDKit MolStandardize)", "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false },
+      "_meta": { "agentlas/effect": "effect-free-read", "agentlas/fields": ["chemistry", "cheminformatics"], "agentlas/engine": "RDKit" },
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["molecules"],
+        "properties": {
+          "molecules": {
+            "type": "array", "minItems": 1, "maxItems": 50,
+            "items": { "type": "object", "additionalProperties": false, "required": ["smiles"], "properties": { "name": { "type": "string", "maxLength": 120 }, "smiles": { "type": "string", "minLength": 1, "maxLength": 2000 } } }
+          },
+          "keep_largest_fragment": { "type": "boolean", "default": true },
+          "neutralize": { "type": "boolean", "default": true },
+          "canonical_tautomer": { "type": "boolean", "default": false }
+        }
+      }
+    },
+    {
+      "name": "draw_compound_grid",
+      "title": "Draw a compound structure grid",
+      "description": "Draw 1-48 molecules as a labelled 2D structure grid with RDKit and save it as SVG and PNG under agentlas-medchem/ in the working folder, returning file paths, hashes, molecules that could not be parsed and Ketcher-ready SMILES handoffs. (한국어: 화합물 구조 격자 그림, 2D 화학 구조 그리기, 분자 구조 이미지, 여러 화합물 한눈에 보기)",
+      "annotations": { "title": "Draw a compound structure grid", "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false },
+      "_meta": { "agentlas/effect": "workspace-write", "agentlas/fields": ["chemistry", "drug-discovery"], "agentlas/engine": "RDKit", "agentlas/artifactKinds": ["image"] },
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["molecules"],
+        "properties": {
+          "molecules": {
+            "type": "array", "minItems": 1, "maxItems": 48,
+            "items": { "type": "object", "additionalProperties": false, "required": ["smiles"], "properties": { "name": { "type": "string", "maxLength": 120 }, "smiles": { "type": "string", "minLength": 1, "maxLength": 2000 } } }
+          },
+          "mols_per_row": { "type": "integer", "minimum": 1, "maximum": 8, "default": 4 },
+          "sub_image_size": { "type": "integer", "minimum": 150, "maximum": 600, "default": 300 },
+          "save_files": { "type": "boolean", "default": true },
+          "title": { "type": "string", "maxLength": 80 }
+        }
+      }
+    },
+    {
+      "name": "describe_medchem_runtime",
+      "title": "Describe or prepare the RDKit runtime",
+      "description": "Report the state of this plugin's managed RDKit environment (ready, installing, failed or absent; RDKit and Python versions; where it lives). prepare=true starts the one-time install from PyPI binary wheels again after a failure. (한국어: RDKit 실행 환경 상태, 화학 계산 런타임 준비)",
+      "annotations": { "title": "Describe or prepare the RDKit runtime", "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": true },
+      "_meta": { "agentlas/effect": "plugin-state-write", "agentlas/fields": ["chemistry"] },
+      "inputSchema": { "type": "object", "additionalProperties": false, "properties": { "prepare": { "type": "boolean", "default": false } } }
+    }
+  ]
+}

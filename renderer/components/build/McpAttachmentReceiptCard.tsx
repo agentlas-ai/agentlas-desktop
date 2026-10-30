@@ -12,6 +12,12 @@ function reasonText(reason: string, ko: boolean): string | null {
   if (reason === "missing_key") return ko ? "API 키 미설정" : "API key not set";
   if (reason === "runtime_incompatible") return ko ? "이 런타임과 호환되지 않음" : "not compatible with this runtime";
   if (reason === "disabled") return ko ? "꺼져 있음" : "turned off";
+  if (reason === "native_browser_scope_missing") return ko
+    ? "이 빌드에 내장 브라우저의 작업 세션이 연결되지 않았습니다"
+    : "this Build has no task session bound to the in-app browser";
+  if (reason === "fallback_blocked_by_configuration") return ko
+    ? "같은 로그인 세션을 보장할 수 없어 다른 연결로 전환하지 않았습니다"
+    : "another connection was not selected because the same sign-in session could not be guaranteed";
   return null;
 }
 

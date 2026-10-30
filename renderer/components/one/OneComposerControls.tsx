@@ -21,6 +21,7 @@ import { PluginLogo, usePluginBrandMap } from "@/components/PluginLogo";
 import { runtimeEffectiveModelId } from "@/components/dashboard/RuntimeModelPicker";
 import { ContextBreakdown } from "@/components/ContextBreakdown";
 import type { ChatAlwaysApprovalControl } from "@/lib/use-chat-always-approval";
+import { sameRuntimeIdentity, selectionText } from "@shared/runtime-selection";
 import type { RuntimeStatus } from "@shared/types";
 import styles from "./OneShell.module.css";
 
@@ -38,6 +39,12 @@ export type OneComposerModelOption = {
    */
   logo?: string | null;
 };
+
+/** Separate profiles and sources even when they offer the same model name. */
+export function oneComposerModelOptionKey(runtime: RuntimeStatus, model: string): string {
+  return JSON.stringify([runtime.kind, selectionText(runtime.backend) ?? null, selectionText(runtime.source) ?? null,
+    selectionText(runtime.acpAgentId) ?? null, model]);
+}
 
 export type OneComposerAgentOption = {
   id: string;
@@ -87,7 +94,8 @@ type Props = {
   onTogglePlugin: (id: string) => void;
   onToggleAgent: (id: string) => void;
   onSelectModel: (runtime: RuntimeStatus, id: string) => void;
-  onSelectEffort: (id: string) => void;
+  selectionIntentId?: string;
+  onSelectEffort: (id: string, runtime: RuntimeStatus | null, intentId?: string) => void;
   onSelectPermission: (permission: OnePermissionMode) => void;
   onToggleTurnOption: (key: OneTurnOptionKey) => void;
 };
@@ -121,6 +129,7 @@ export function OneComposerControls({
   onToggleAgent,
   onSelectModel,
   onSelectEffort,
+  selectionIntentId,
   onSelectPermission,
   onToggleTurnOption,
 }: Props) {
@@ -199,14 +208,20 @@ export function OneComposerControls({
   // 모델을 고르지 않았으면(빈 선택) 실제로 돌 모델 행이 체크된다 — "기본값" 행은 없다.
   const effectiveModelId = useMemo(
     () => runtime
-      ? runtimeEffectiveModelId(runtime, models.filter((item) => item.runtime.kind === runtime.kind && item.runtime.backend === runtime.backend))
+      ? runtimeEffectiveModelId(runtime, models.filter((item) => sameRuntimeIdentity(item.runtime, runtime)))
       : undefined,
     [models, runtime],
   );
-  const filteredModels = useMemo(
-    () => models.filter((item) => !normalizedQuery || `${item.label} ${item.tag ?? ""}`.toLocaleLowerCase().includes(normalizedQuery)),
-    [models, normalizedQuery],
-  );
+  const filteredModels = useMemo(() => {
+    const seen = new Set<string>();
+    return models.filter((item) => {
+      if (normalizedQuery && !`${item.label} ${item.tag ?? ""}`.toLocaleLowerCase().includes(normalizedQuery)) return false;
+      const key = oneComposerModelOptionKey(item.runtime, item.id);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }, [models, normalizedQuery]);
   const filteredAgents = useMemo(
     () => agents.filter((item) => !normalizedQuery || `${item.name} ${item.tagline}`.toLocaleLowerCase().includes(normalizedQuery)),
     [agents, normalizedQuery],
@@ -329,18 +344,18 @@ export function OneComposerControls({
             {activeMenu === "model" && (
               <>
                 {filteredModels.map((item) => (
-                  <ComposerRow key={`${item.runtime.kind}:${item.runtime.backend}:${item.id}`} icon={item.logo
+                  <ComposerRow key={oneComposerModelOptionKey(item.runtime, item.id)} icon={item.logo
                     ? /* eslint-disable-next-line @next/next/no-img-element */
                       <img src={item.logo} alt="" className={styles.modelLogo} />
-                    : <IconSparkles size={15} />} title={item.label} subtitle={item.tag} checked={runtime?.kind === item.runtime.kind && runtime?.backend === item.runtime.backend && effectiveModelId === item.id} onClick={() => onSelectModel(item.runtime, item.id)} />
+                    : <IconSparkles size={15} />} title={item.label} subtitle={item.tag} checked={sameRuntimeIdentity(runtime, item.runtime) && effectiveModelId === item.id} onClick={() => onSelectModel(item.runtime, item.id)} />
                 ))}
               </>
             )}
             {activeMenu === "effort" && (
               <>
-                <ComposerRow icon={<IconRoute size={15} />} title={locale === "ko" ? "기본" : "Default"} checked={!runtime?.effort} onClick={() => onSelectEffort("")} />
+                <ComposerRow icon={<IconRoute size={15} />} title={locale === "ko" ? "기본" : "Default"} checked={!runtime?.effort} onClick={() => onSelectEffort("", runtime, selectionIntentId)} />
                 {efforts.map((item, index) => (
-                  <ComposerRow key={item.id} icon={<span className={styles.effortBars} aria-hidden="true">{[0, 1, 2, 3].map(bar => <i key={bar} data-filled={bar <= Math.round(index * 3 / Math.max(1, efforts.length - 1)) ? "true" : "false"} />)}</span>} title={item.label} checked={runtime?.effort === item.id} onClick={() => onSelectEffort(item.id)} />
+                  <ComposerRow key={item.id} icon={<span className={styles.effortBars} aria-hidden="true">{[0, 1, 2, 3].map(bar => <i key={bar} data-filled={bar <= Math.round(index * 3 / Math.max(1, efforts.length - 1)) ? "true" : "false"} />)}</span>} title={item.label} checked={runtime?.effort === item.id} onClick={() => onSelectEffort(item.id, runtime, selectionIntentId)} />
                 ))}
               </>
             )}

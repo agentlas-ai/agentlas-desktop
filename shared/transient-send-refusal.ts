@@ -148,8 +148,32 @@ export function sendRefusalCode(error: unknown): string | undefined {
   return /^([a-z][a-z0-9_]{2,95})(?::\s|\s\()/.exec(bare)?.[1];
 }
 
+/** The better-sqlite3 lock family; the same set shared/turn-settlement.ts types as `store_busy`. */
+const SQLITE_STORE_BUSY_RE = /^SQLITE_(?:BUSY|LOCKED)(?:_[A-Z]+)?$|^SQLITE_PROTOCOL$/;
+
+/**
+ * A start the host refused BEFORE anything reached a runtime (InvocationService.start marks the thrown error
+ * `turnDelivery: "not-dispatched"`) because the shared store stayed locked past its own 15 s busy wait. The driver's raw
+ * `SQLITE_BUSY` error carries no transient code, so the owner's message was held as a hard refusal and never started again
+ * (observed in use: supersedeGoalWaitForInvocation threw `database is locked` inside start()). A lock is not a verdict
+ * on the message: it waits and starts again like every other "not ready yet" refusal. Only a provably undispatched start qualifies;
+ * a lock after dispatch is the run's own settlement and never reaches this check.
+ */
+export function isStoreBusyRefusedBeforeDispatch(error: unknown): boolean {
+  if (!error || typeof error !== "object" || (error as { turnDelivery?: unknown }).turnDelivery !== "not-dispatched") return false;
+  const seen = new Set<object>();
+  let current: unknown = error;
+  for (let depth = 0; depth < 6 && current && typeof current === "object" && !seen.has(current as object); depth += 1) {
+    seen.add(current as object);
+    const code = (current as { code?: unknown }).code;
+    if (typeof code === "string" && (code === "store_busy" || SQLITE_STORE_BUSY_RE.test(code))) return true;
+    current = (current as { cause?: unknown }).cause;
+  }
+  return false;
+}
+
 export function isTransientSendRefusal(error: unknown): boolean {
-  return isTransientSendRefusalCode(sendRefusalCode(error));
+  return isTransientSendRefusalCode(sendRefusalCode(error)) || isStoreBusyRefusedBeforeDispatch(error);
 }
 
 /**

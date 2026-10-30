@@ -242,7 +242,8 @@ export function decideRuntimeCookieFeed(input: {
  *   - 원본에 그 묶음의 로그인 쿠키가 없으면 → 줄 단위 판정(옮길 로그인이 없다).
  *   - 목적지가 원본이 가진 로그인 쿠키 이름을 **모두** 갖고 있으면 → 묶음 전체를 지킨다(아무것도
  *     넣지 않는다). 목적지 쪽이 그 사이 회전한 살아 있는 세션일 수 있다 — 섞지 않는다.
- *   - 하나라도 빠졌으면(반쪽·없음) → 원본의 그 묶음 쿠키를 **전부** 넣는다(한 세대로 맞춘다).
+ *   - 하나라도 빠졌으면 → 목적지에 로그인 흔적이 없을 때만 원본 묶음을 넣는다. 일부 로그인이나
+ *     회전 쿠키가 남아 있으면 다른 계정과 섞이지 않도록 전체를 보존한다.
  *   - 온전히 있어도 **원본이 더 새것이면** 묶음 전체를 갱신한다(compareSessionGroupFreshness): 묶음 안에서
  *     양쪽에 모두 만료가 있는 같은 쿠키를 견줘, 원본이 더 늦게 만료하는 줄이 있고 목적지가 더 늦은 줄은
  *     하나도 없을 때만이다. 일부 줄만 바꾸지 않고 묶음을 통째로 넣는 원칙은 그대로다(부분 교체는 두 세대를
@@ -396,6 +397,8 @@ export function planSessionGroupFeed<T extends SessionGroupCookie>(input: {
    * site has any, so no complete group is ever refreshed: leaving it out can only suppress a refresh, never swap a login.
    */
   identityNamesFor?: (host: string) => readonly string[] | null;
+  /** Partial sign-in/companion cookies whose presence prevents automatic replacement. */
+  protectionNamesFor?: (host: string) => readonly string[] | null;
 }): {
   feed: T[]; keptGroups: string[]; replacedGroups: string[]; refreshedGroups: string[]; conflictGroups: string[];
   /** Groups whose refresh was refused because the fixed sign-in cookies hold other values (another login). */
@@ -428,26 +431,22 @@ export function planSessionGroupFeed<T extends SessionGroupCookie>(input: {
     const group = input.groupOf(host(cookie.domain))?.group;
     if (!group || decision.has(group)) continue;
     const source = loginNames(input.freshnessContext ?? input.incoming, group);
-    if (source.size === 0) { decision.set(group, "per-cookie"); continue; }
+    const scopeAll = inGroup(input.freshnessContext ?? input.incoming, group), heldAll = inGroup(input.existing, group);
+    const protectedNamesFor = input.protectionNamesFor ?? input.sessionNamesFor;
+    const hasProtectedLogin = heldAll.some((row) => protectedNamesFor(host(row.domain))?.includes(row.name));
+    if (source.size === 0) {
+      decision.set(group, hasProtectedLogin ? "keep-group" : "per-cookie");
+      continue;
+    }
     const destination = loginNames(input.existing, group);
     if (![...source].every((name) => destination.has(name))) {
-      // The destination lacks some of the site's login cookie names. That is a broken login (a leftover piece) when it also lacks the cookies
-      // that are fixed per sign-in, and then the source fills it. But a destination that holds ALL of the source's fixed sign-in cookies, only
-      // without one of the site's other session cookies (youtube.com LOGIN_INFO), is a whole sign-in of its own: when those values differ it is
-      // ANOTHER login and stays.
-      const scopeAll = inGroup(input.freshnessContext ?? input.incoming, group), heldAll = inGroup(input.existing, group);
-      const fixedOf = (cookies: readonly SessionGroupCookie[]) => {
-        const keys = new Set<string>();
-        for (const cookie of cookies) {
-          const h = host(cookie.domain);
-          if (identityNamesFor(h)?.includes(cookie.name)) keys.add(`${input.groupOf(h)?.site ?? h}\u0000${cookie.name}`);
-        }
-        return keys;
-      };
-      const sourceFixed = fixedOf(scopeAll), heldFixed = fixedOf(heldAll);
-      const holdsEveryFixedCookie = sourceFixed.size > 0 && [...sourceFixed].every((key) => heldFixed.has(key));
-      if (holdsEveryFixedCookie && compareSessionGroupIdentity(scopeAll, heldAll, identityNamesFor) === "different") {
-        otherLogin.add(group); decision.set(group, "keep-group"); continue;
+      // A partial login can still belong to another account; companion cookies are not
+      // evidence of logout. Only a destination with no protected sign-in may be seeded.
+      if (hasProtectedLogin) {
+        const identity = compareSessionGroupIdentity(scopeAll, heldAll, identityNamesFor);
+        if (identity === "different") otherLogin.add(group);
+        else if (identity === "unproven") unprovenLogin.add(group);
+        decision.set(group, "keep-group"); continue;
       }
       decision.set(group, "replace-group"); continue;
     }

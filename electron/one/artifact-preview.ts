@@ -1194,6 +1194,78 @@ export function resolveOneArtifactOpenPath(input: unknown): string | null {
   return verified.row.source_path;
 }
 
+/** Main-only review check. Hash the already bound file asynchronously only when a dependent review is ready to run. */
+export async function verifyOneArtifactReviewDraft(
+  input: OneArtifactBindingRequestV1,
+  signal?: AbortSignal,
+): Promise<{ sourcePath: string; sha256: string } | null> {
+  if (signal?.aborted) return null;
+  const binding = bindingVerdict(input);
+  if (!binding.ok) return null;
+  const row = binding.value;
+  if (pathIsArchived(row.source_path)) return null;
+  const spec = ARTIFACT_BY_EXTENSION[path.extname(row.source_path).toLowerCase()];
+  if (!spec || spec.kind !== row.kind || spec.mimeType !== row.mime_type) return null;
+  let resolved: string;
+  let invocationWorkspace = false;
+  try {
+    try { resolved = resolveFsReadPath(row.source_path, { kind: "chat-assets", chatId: row.chat_id }); }
+    catch { resolved = resolveInvocationArtifactReadPath(row.source_path, { chatId: row.chat_id, runId: row.run_id }); invocationWorkspace = true; }
+  } catch { return null; }
+  if (resolved !== row.source_path || pathIsArchived(resolved)) return null;
+  let handle: fs.promises.FileHandle | null = null;
+  try {
+    handle = await fs.promises.open(resolved, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
+    const before = await handle.stat({ bigint: true });
+    const sameIdentity = (stat: typeof before): boolean => stat.isFile()
+      && stat.size === BigInt(row.size_bytes) && stat.size > 0n && stat.size <= BigInt(spec.maxBytes)
+      && String(stat.ino) === row.file_ino && String(stat.mtimeNs) === row.file_mtime_ns
+      && String(stat.ctimeNs) === row.file_ctime_ns;
+    if (!sameIdentity(before)) return null;
+    if (invocationWorkspace) {
+      try { if (resolveInvocationArtifactReadPath(resolved, { chatId: row.chat_id, runId: row.run_id }) !== resolved) return null; }
+      catch { return null; }
+    }
+    const digest = createHash("sha256");
+    const chunk = Buffer.allocUnsafe(1024 * 1024);
+    let offset = 0;
+    while (offset < row.size_bytes) {
+      if (signal?.aborted) return null;
+      const { bytesRead } = await handle.read(chunk, 0, Math.min(chunk.length, row.size_bytes - offset), offset);
+      if (!bytesRead) return null;
+      digest.update(chunk.subarray(0, bytesRead));
+      offset += bytesRead;
+    }
+    const after = await handle.stat({ bigint: true });
+    if (signal?.aborted || !sameIdentity(after) || digest.digest("hex") !== row.sha256) return null;
+    // The open descriptor can still name old bytes after an unlink/rename. Check the named path itself after the
+    // asynchronous read and reject a symlink, replacement, or parent-directory swap before returning the path.
+    const named = await fs.promises.lstat(resolved, { bigint: true });
+    if (signal?.aborted || named.isSymbolicLink() || !sameIdentity(named)
+      || named.dev !== before.dev || named.ino !== before.ino
+      || named.size !== before.size || named.mtimeNs !== before.mtimeNs || named.ctimeNs !== before.ctimeNs) return null;
+    try {
+      const currentPath = invocationWorkspace
+        ? resolveInvocationArtifactReadPath(resolved, { chatId: row.chat_id, runId: row.run_id })
+        : resolveFsReadPath(resolved, { kind: "chat-assets", chatId: row.chat_id });
+      if (currentPath !== resolved || pathIsArchived(currentPath)) return null;
+    } catch { return null; }
+    // Task state, chat ownership, manifest and binding row can change while the stream is awaited.
+    const current = bindingVerdict(input);
+    if (!current.ok) return null;
+    const next = current.value;
+    if (next.id !== row.id || next.task_id !== row.task_id || next.task_version !== row.task_version
+      || next.bound_task_version !== row.bound_task_version || next.chat_id !== row.chat_id
+      || next.run_id !== row.run_id || next.manifest_id !== row.manifest_id || next.artifact_ref !== row.artifact_ref
+      || next.source_path !== row.source_path || next.kind !== row.kind || next.mime_type !== row.mime_type
+      || next.size_bytes !== row.size_bytes || next.file_dev !== row.file_dev || next.file_ino !== row.file_ino
+      || next.file_mtime_ns !== row.file_mtime_ns || next.file_ctime_ns !== row.file_ctime_ns
+      || next.sha256 !== row.sha256 || next.created_at !== row.created_at || signal?.aborted) return null;
+    return { sourcePath: resolved, sha256: row.sha256 };
+  } catch { return null; }
+  finally { await handle?.close().catch(() => undefined); }
+}
+
 /**
  * Mobile receives only bytes from the exact Main-private artifact binding.
  * The 5 MiB cap keeps canonical base64 below the Bridge frame/Flutter decoder

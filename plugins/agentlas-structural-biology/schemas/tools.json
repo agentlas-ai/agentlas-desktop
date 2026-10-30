@@ -1,0 +1,134 @@
+{
+  "tools": [
+    {
+      "name": "search_protein_structures",
+      "title": "Search protein structures (RCSB PDB)",
+      "description": "Search RCSB PDB protein structures by free text, UniProt accession, bound ligand component ID or amino-acid sequence, and return ranked entries with title, method, resolution, organisms, UniProt IDs and bound ligands. Criteria are combined with AND; a drug may appear in PDB under its code name (sotorasib = AMG 510, component MOV). Summary view by default (up to 10 entries); view \"full\" adds ligand SMILES and polymer entities (up to 25). (한국어: 단백질 구조 검색, PDB 검색, 리간드 결합 구조 찾기, 서열로 구조 찾기, 신약개발 표적 구조)",
+      "annotations": { "title": "Search protein structures (RCSB PDB)", "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": true },
+      "_meta": { "agentlas/effect": "effect-free-read", "agentlas/fields": ["structural-biology", "life-science", "chemistry", "drug-discovery"], "agentlas/provider": "rcsb-pdb" },
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "query": { "type": "string", "minLength": 1, "maxLength": 300, "description": "Free text, e.g. \"KRAS G12C covalent inhibitor\"." },
+          "uniprot_accession": { "type": "string", "pattern": "^[A-Z0-9]{6,10}$", "description": "UniProt accession, e.g. P01116 (KRAS)." },
+          "ligand_id": { "type": "string", "pattern": "^[A-Za-z0-9]{1,5}$", "description": "PDB chemical component ID of a bound ligand, e.g. MOV (sotorasib)." },
+          "sequence": { "type": "string", "minLength": 10, "maxLength": 5000, "description": "Protein sequence (one-letter); matches at 90% identity." },
+          "experimental_only": { "type": "boolean", "default": true },
+          "max_results": { "type": "integer", "minimum": 1, "maximum": 25 },
+          "offset": { "type": "integer", "minimum": 0, "maximum": 10000, "default": 0 },
+          "view": { "type": "string", "enum": ["summary", "full"], "default": "summary" }
+        }
+      }
+    },
+    {
+      "name": "fetch_protein_structure",
+      "title": "Fetch a PDB structure for 3D viewing",
+      "description": "Download one exact RCSB PDB entry (mmCIF or PDB) and save it with a Mol* view state and RCSB's rendered assembly image under agentlas-structures/<ID>/ in the working folder, returning entry facts, chains, ligand instances, content SHA-256 and a molstarView artifact in the agentlas.source-to-molstar shape. focus_ligand_id centres the view on a bound ligand. (한국어: 단백질 3D 구조 보기, PDB 구조 가져오기, 분자 구조 3차원 보기, Mol* 보기, mmCIF 다운로드)",
+      "annotations": { "title": "Fetch a PDB structure for 3D viewing", "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": true },
+      "_meta": { "agentlas/effect": "workspace-write", "agentlas/fields": ["structural-biology", "life-science", "chemistry", "drug-discovery"], "agentlas/provider": "rcsb-pdb", "agentlas/artifactKinds": ["protein.structure"] },
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["pdb_id"],
+        "properties": {
+          "pdb_id": { "type": "string", "pattern": "^[0-9][A-Za-z0-9]{3}$", "description": "Four-character PDB ID, e.g. 6OIM." },
+          "format": { "type": "string", "enum": ["mmcif", "pdb"], "default": "mmcif" },
+          "save_files": { "type": "boolean", "default": true },
+          "representation": { "type": "string", "enum": ["cartoon", "ball-and-stick", "surface"], "default": "cartoon" },
+          "color_theme": { "type": "string", "enum": ["chain-id", "element-symbol", "secondary-structure"], "default": "chain-id" },
+          "focus_ligand_id": { "type": "string", "pattern": "^[A-Za-z0-9]{1,5}$" },
+          "include_preview_image": { "type": "boolean", "default": true }
+        }
+      }
+    },
+    {
+      "name": "fetch_alphafold_model",
+      "title": "Fetch an AlphaFold DB predicted structure",
+      "description": "Fetch the AlphaFold DB predicted structure for a UniProt accession, summarize per-residue pLDDT confidence (mean, confidence bands, low-confidence segments) and save the model with a Mol* view state under agentlas-structures/<model ID>/. pLDDT is model confidence, not experimental evidence. (한국어: 알파폴드 예측 구조, AlphaFold 구조 가져오기, 예측 단백질 구조 신뢰도 pLDDT)",
+      "annotations": { "title": "Fetch an AlphaFold DB predicted structure", "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": true },
+      "_meta": { "agentlas/effect": "workspace-write", "agentlas/fields": ["structural-biology", "life-science"], "agentlas/provider": "alphafold-db", "agentlas/artifactKinds": ["protein.structure"] },
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["uniprot_accession"],
+        "properties": {
+          "uniprot_accession": { "type": "string", "pattern": "^[A-Z0-9]{6,10}$" },
+          "format": { "type": "string", "enum": ["mmcif", "pdb"], "default": "mmcif" },
+          "save_files": { "type": "boolean", "default": true },
+          "low_confidence_threshold": { "type": "number", "minimum": 30, "maximum": 90, "default": 50 }
+        }
+      }
+    },
+    {
+      "name": "describe_binding_site",
+      "title": "Describe a ligand binding site",
+      "description": "Compute the residues around a bound ligand in one PDB entry from its deposited coordinates: residues with any heavy atom within the radius (default 4.5 Å) sorted by distance, contact counts, covalent bonds declared in the entry and short heavy-atom pairs, nearby cofactors, plus a Mol* residue-interaction focus on the ligand. (한국어: 리간드 결합 부위, 결합 포켓 잔기, 공유결합 위치, 단백질-리간드 복합체 상호작용 요약)",
+      "annotations": { "title": "Describe a ligand binding site", "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": true },
+      "_meta": { "agentlas/effect": "effect-free-read", "agentlas/fields": ["structural-biology", "chemistry", "drug-discovery"], "agentlas/provider": "rcsb-pdb" },
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["pdb_id", "ligand_id"],
+        "properties": {
+          "pdb_id": { "type": "string", "pattern": "^[0-9][A-Za-z0-9]{3}$" },
+          "ligand_id": { "type": "string", "pattern": "^[A-Za-z0-9]{1,5}$", "description": "PDB chemical component ID, e.g. MOV for sotorasib in 6OIM." },
+          "chain_id": { "type": "string", "pattern": "^[A-Za-z0-9]{1,4}$" },
+          "radius_angstrom": { "type": "number", "minimum": 2, "maximum": 8, "default": 4.5 },
+          "include_waters": { "type": "boolean", "default": false },
+          "view": { "type": "string", "enum": ["summary", "full"], "default": "summary" }
+        }
+      }
+    },
+    {
+      "name": "fetch_chembl_activities",
+      "title": "Fetch ChEMBL bioactivity (IC50, Ki)",
+      "description": "Fetch ChEMBL bioactivity records (IC50, Ki, Kd, EC50, GI50, Inhibition) for a molecule and/or target, resolving names to ChEMBL IDs, optionally keeping only a mutant such as G12C, and return per-molecule aggregates (median nM, pChEMBL) with the strongest records and assay descriptions. Summary view by default. (한국어: 생물활성, IC50 값, 약효 데이터, ChEMBL 활성, 저해 농도 비교)",
+      "annotations": { "title": "Fetch ChEMBL bioactivity (IC50, Ki)", "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": true },
+      "_meta": { "agentlas/effect": "effect-free-read", "agentlas/fields": ["pharmacology", "chemistry", "drug-discovery"], "agentlas/provider": "chembl" },
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "target_chembl_id": { "type": "string", "pattern": "^CHEMBL[0-9]{1,10}$" },
+          "target_query": { "type": "string", "maxLength": 120, "description": "Target name, e.g. KRAS; a human single protein is preferred." },
+          "molecule_chembl_id": { "type": "string", "pattern": "^CHEMBL[0-9]{1,10}$" },
+          "molecule_name": { "type": "string", "maxLength": 120, "description": "Drug or compound name, e.g. sotorasib." },
+          "activity_types": { "type": "array", "minItems": 1, "maxItems": 6, "items": { "type": "string", "enum": ["IC50", "Ki", "Kd", "EC50", "GI50", "Inhibition"] } },
+          "mutation": { "type": "string", "pattern": "^[A-Z][0-9]{1,5}[A-Z*]$", "description": "Keep records for this variant only, e.g. G12C." },
+          "max_results": { "type": "integer", "minimum": 1, "maximum": 500 },
+          "view": { "type": "string", "enum": ["summary", "full"], "default": "summary" }
+        }
+      }
+    },
+    {
+      "name": "fetch_clinical_trials",
+      "title": "Search ClinicalTrials.gov registrations",
+      "description": "Search ClinicalTrials.gov (API v2) registrations by intervention, condition or free term with phase and status filters, returning NCT ID, title, acronym, phase, status, enrollment, dates, sponsor, conditions and interventions; view \"full\" adds summaries, primary outcomes, arms and country counts. Registry entries are protocols, not efficacy results. (한국어: 임상시험 등록 조회, 임상 단계, NCT 번호, 임상 진행 상태)",
+      "annotations": { "title": "Search ClinicalTrials.gov registrations", "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": true },
+      "_meta": { "agentlas/effect": "effect-free-read", "agentlas/fields": ["clinical-research", "drug-discovery"], "agentlas/provider": "clinicaltrials-gov" },
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "intervention": { "type": "string", "maxLength": 200 },
+          "condition": { "type": "string", "maxLength": 200 },
+          "term": { "type": "string", "maxLength": 200 },
+          "phases": { "type": "array", "maxItems": 6, "items": { "type": "string", "enum": ["EARLY_PHASE1", "PHASE1", "PHASE2", "PHASE3", "PHASE4", "NA"] } },
+          "statuses": { "type": "array", "maxItems": 9, "items": { "type": "string", "enum": ["RECRUITING", "NOT_YET_RECRUITING", "ACTIVE_NOT_RECRUITING", "COMPLETED", "TERMINATED", "WITHDRAWN", "SUSPENDED", "ENROLLING_BY_INVITATION", "UNKNOWN"] } },
+          "max_results": { "type": "integer", "minimum": 1, "maximum": 100 },
+          "page_token": { "type": "string", "maxLength": 200 },
+          "view": { "type": "string", "enum": ["summary", "full"], "default": "summary" }
+        }
+      }
+    },
+    {
+      "name": "describe_structural_biology_capabilities",
+      "title": "Describe structural biology capabilities",
+      "description": "Return the providers, guards, artifact contract and limitations of this plugin. (한국어: 구조생물학 플러그인 기능 설명)",
+      "annotations": { "title": "Describe structural biology capabilities", "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false },
+      "_meta": { "agentlas/effect": "effect-free-read", "agentlas/fields": ["structural-biology"] },
+      "inputSchema": { "type": "object", "additionalProperties": false, "properties": {} }
+    }
+  ]
+}

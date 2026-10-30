@@ -19,7 +19,8 @@ import { createDecipheriv, createHash, timingSafeEqual } from "node:crypto";
 import { execFile } from "node:child_process";
 import path from "node:path";
 import { planSessionGroupFeed, type SessionGroupCookie } from "./cookie-merge";
-import { sessionCookieGroupOf, sessionCookieIdentityNamesFor, sessionCookieNamesFor } from "./login-wall";
+import { recoveryCookieDomains, sessionCookieGroupOf, sessionCookieIdentityNamesFor,
+  sessionCookieNamesFor, sessionCookieProtectionNamesFor } from "./login-wall";
 
 const GCM_NONCE_BYTES = 12;
 const GCM_TAG_BYTES = 16;
@@ -144,6 +145,7 @@ export function planSqlStoreCookieGroups(input: {
   groupOf: (host: string) => { group: string; site: string } | null;
   sessionNamesFor: (host: string) => readonly string[] | null;
   identityNamesFor: (host: string) => readonly string[] | null;
+  protectionNamesFor?: (host: string) => readonly string[] | null;
 }): { verdictFor(hostKey: string): SqlStoreGroupVerdict; counts: { keptGroups: number; refreshedGroups: number; replacedGroups: number; otherLoginGroups: number; unprovenLoginGroups: number; conflictGroups: number } } {
   const host = (value: string) => value.replace(/^\./u, "").toLowerCase();
   const toCookie = (row: SqlStoreCookieRow, schemaVersion: number): SessionGroupCookie => {
@@ -161,6 +163,7 @@ export function planSqlStoreCookieGroups(input: {
     groupOf: input.groupOf,
     sessionNamesFor: input.sessionNamesFor,
     identityNamesFor: input.identityNamesFor,
+    protectionNamesFor: input.protectionNamesFor ?? sessionCookieProtectionNamesFor,
     // A cookie of a group the planner does not decide (a site without known login cookies) keeps the per-row rule.
     perCookie: () => "keep",
   });
@@ -200,7 +203,9 @@ export async function planSqlStoreGroupVerdicts(input: {
       WHERE (host_key = ? OR host_key = ? OR host_key LIKE ?) AND (expires_utc IS NULL OR expires_utc <= 0 OR expires_utc > ?)`);
   let statement: ReturnType<typeof select>;
   try { statement = select(true); } catch { statement = select(false); }
-  for (const job of input.jobs) existing.push(...(statement.all(job.domain, `.${job.domain}`, `%.${job.domain}`, nowMicro) as SqlStoreCookieRow[]));
+  for (const domain of recoveryCookieDomains(input.jobs.map((job) => job.domain))) {
+    existing.push(...(statement.all(domain, `.${domain}`, `%.${domain}`, nowMicro) as SqlStoreCookieRow[]));
+  }
   const incoming = input.jobs.flatMap((job) => job.rows) as unknown as SqlStoreCookieRow[];
   // The destination's own schema version decides how ITS rows are read; a missing table or value falls back to the source's.
   let existingSchemaVersion = input.schemaVersion;

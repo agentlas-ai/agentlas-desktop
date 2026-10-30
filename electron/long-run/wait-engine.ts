@@ -78,6 +78,10 @@ export function dispatchWaitClaim<W extends WaitEngineRecord>(input:{
   /** Opt in only when this adapter can retire a provably undispatched claim.
    * A thrown start remains uncertain under failureState, since it may have acted. */
   preStartFailureReason?:string;
+  /** With preStartFailureReason: true only when the adapter can PROVE the thrown start left no trace of the successor anywhere
+   * (no run event, no attempt, no admission, no turn in the room) in the process that made the call. Then nothing was dispatched,
+   * the claim is retired like a refused start, and no request is replayed; otherwise the claim stays uncertain. */
+  provablyUnstarted?:(current:W)=>boolean;
 }):W|null {
   const claim=input.storage.read();
   if(!sameWaitSnapshot(claim,input.expected) || claim!.state!=="claimed"
@@ -101,7 +105,12 @@ export function dispatchWaitClaim<W extends WaitEngineRecord>(input:{
       result=input.start(claim!);
       if(result.start && result.runId!==claim!.successorInvocationId) throw new Error("goal_wait_dispatch_identity_mismatch");
       if(!result.start) {state="pending";reason=result.reason;}
-    } catch {state=input.failureState;reason=input.failureReason;}
+    } catch {
+      let unstarted=false;
+      try {unstarted=Boolean(input.preStartFailureReason && input.provablyUnstarted?.(claim!));} catch {unstarted=false;}
+      if(unstarted) {state="cancelled";reason=input.preStartFailureReason!;}
+      else {state=input.failureState;reason=input.failureReason;}
+    }
   }
   // Finalize an accepted start even if its accounting/notice callback fails,
   // then preserve that callback's original error for the caller.

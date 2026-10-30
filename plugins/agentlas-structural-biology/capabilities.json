@@ -1,0 +1,69 @@
+{
+  "schema": "agentlas.science-capabilities/v1",
+  "domain": "structural-biology",
+  "fields": ["life-science", "chemistry", "drug-discovery", "structural-biology", "pharmacology", "clinical-research"],
+  "guards": {
+    "totalDeadlineMs": 27000,
+    "requestTimeoutMs": 15000,
+    "maximumAttempts": 3,
+    "retryableStatuses": [429, 502, 503, 504],
+    "maximumRetryAfterMs": 5000,
+    "summaryResultBytes": 24000,
+    "fullResultBytes": 120000
+  },
+  "providers": [
+    {
+      "id": "rcsb-pdb",
+      "hosts": ["search.rcsb.org", "data.rcsb.org", "files.rcsb.org", "cdn.rcsb.org"],
+      "authentication": "none",
+      "license": "CC0-1.0",
+      "docsUrl": "https://www.rcsb.org/docs/programmatic-access/web-apis-overview",
+      "operations": ["full-text, UniProt, ligand component and sequence entry search", "entry summary (GraphQL)", "exact mmCIF/PDB download", "assembly preview image", "binding-site residues from deposited coordinates"],
+      "guards": { "minimumRequestIntervalMs": 250, "requestTimeoutMs": 15000, "maxMetadataBytes": 4194304, "maxStructureBytes": 33554432, "maxImageBytes": 4194304 }
+    },
+    {
+      "id": "alphafold-db",
+      "hosts": ["alphafold.ebi.ac.uk"],
+      "authentication": "none",
+      "license": "CC-BY-4.0",
+      "docsUrl": "https://alphafold.ebi.ac.uk/api-docs",
+      "operations": ["prediction metadata by UniProt accession", "model mmCIF/PDB download", "per-residue pLDDT summary"],
+      "guards": { "minimumRequestIntervalMs": 250, "requestTimeoutMs": 15000, "maxMetadataBytes": 2097152, "maxStructureBytes": 33554432 }
+    },
+    {
+      "id": "chembl",
+      "hosts": ["www.ebi.ac.uk"],
+      "authentication": "none",
+      "license": "CC-BY-SA-3.0",
+      "docsUrl": "https://chembl.gitbook.io/chembl-interface-documentation/web-services",
+      "operations": ["molecule name resolution", "target search", "bioactivity records (IC50, Ki, Kd, EC50, GI50, Inhibition)"],
+      "guards": { "minimumRequestIntervalMs": 300, "requestTimeoutMs": 15000, "maxMetadataBytes": 8388608 }
+    },
+    {
+      "id": "clinicaltrials-gov",
+      "hosts": ["clinicaltrials.gov"],
+      "authentication": "none",
+      "license": "public-domain (U.S. National Library of Medicine terms)",
+      "docsUrl": "https://clinicaltrials.gov/data-api/api",
+      "operations": ["study search by intervention, condition or term with phase and status filters"],
+      "guards": { "minimumRequestIntervalMs": 400, "requestTimeoutMs": 15000, "maxMetadataBytes": 8388608 }
+    }
+  ],
+  "artifacts": [
+    {
+      "contract": "agentlas.source-to-molstar",
+      "kind": "protein.structure",
+      "rendererId": "agentlas.molstar",
+      "payload": "structure {sourceRef, contentSha256, format} + representation + colorTheme; optional agentlas.science-residue-interaction/v1",
+      "files": "agentlas-structures/<ID>/<ID>.cif|.pdb, <ID>.molstar.json, <ID>_assembly-1.jpeg (RCSB preview) beneath the run's working folder"
+    }
+  ],
+  "limitations": [
+    "Binding-site residues are a distance criterion on deposited coordinates (first model, altloc blank or A); they are not an interaction-energy or docking result.",
+    "Covalent bonds are reported as declared in the entry (struct_conn covale) and, separately, as heavy-atom pairs closer than 2.2 Å.",
+    "AlphaFold pLDDT is model confidence, not experimental evidence; ligand-bound conformations are not predicted.",
+    "ChEMBL values are reported as curated; units other than molar concentrations are not converted. Mutation filtering uses the variant field first and the assay description second, and says which.",
+    "ClinicalTrials.gov returns registry entries; efficacy endpoints come from posted results or publications.",
+    "The structure view uses the same artifact shape as Agentlas Science's source-to-molstar; inside Science a source version is minted by Science's own retrieval of the same entry, whose bytes carry the same content hash."
+  ]
+}

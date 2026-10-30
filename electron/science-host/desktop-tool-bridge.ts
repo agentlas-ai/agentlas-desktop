@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { scienceStore } from "agentlas-science";
-import { buildMcpConfigFile, type BrowserApprovalScope, type McpConfigResult } from "../mcp-tools/mcp-config";
+import type { BrowserApprovalScope, McpConfigResult } from "../mcp-tools/mcp-config";
+import { buildNativeBrowserMcpConfig } from "../browser/native-mcp-config";
 import { listInstalledServers } from "../mcp-tools/registry";
 import { getCatalogEntry } from "../mcp-tools/catalog";
 import { mcpServerConfigurationDigest } from "../mcp-tools/prepared-transport";
@@ -420,12 +421,15 @@ export const scienceDesktopTools = {
                   try { current(scope); return !binding.goalWaitCurrent || binding.goalWaitCurrent(); }
                   catch { return false; }
                 } } : {};
-          const config = await buildMcpConfigFile({ serverIds: [server.id], skipDefaultSeed: true,
+          const config = await buildNativeBrowserMcpConfig({ serverIds: [server.id], skipDefaultSeed: true,
             ...scopedWait,
             configKey: `science-desktop-${randomUUID()}`,
             toolGate: { runtime: binding.runtimeKind, sessionKey: toolApprovalSessionKey(binding.runtimeKind, binding.chatId),
               permission: binding.permission, cwd: binding.cwd, chatId: binding.chatId,
-              approvalScope: binding.approvalScope, unattended: unattendedScope(binding) } });
+              approvalScope: binding.approvalScope, unattended: unattendedScope(binding) } },
+            server.catalogId === "agentlas-browser" ? { chatId: binding.chatId, runId: runId(binding.scope),
+              permission: binding.permission, signal: binding.signal ?? new AbortController().signal,
+              presentation: "background" } : null);
           if (!config || config.includedServerIds.length !== 1 || config.includedServerIds[0] !== server.id) {
             config?.cleanup?.();
             throw new Error("science_desktop_tool_selected_server_not_prepared");

@@ -35,6 +35,7 @@
 // assignment record that cannot be read is not a failure: it is rewritten (see resolveAssignment).
 import type Database from "better-sqlite3";
 import { BUILTIN_ONE_AGENT_ID } from "../../shared/builtin-agent-ids";
+import { innermostTypedCode, STORE_BUSY_CODE } from "../../shared/turn-settlement";
 
 export type SessionScopeMode = "chat" | "seat" | "full";
 export const SESSION_SCOPE_MODE_KEY = "session-scope.mode";
@@ -423,6 +424,10 @@ export interface ResolvedSessionScope {
   workBinding?: WorkingSessionBinding;
 }
 
+const sessionScopeBusyCauses = new WeakMap<ResolvedSessionScope, unknown>();
+/** Original lock evidence stays local to the exact failed resolution. */
+export function sessionScopeBusyCause(scope: ResolvedSessionScope): unknown { return sessionScopeBusyCauses.get(scope); }
+
 /**
  * The domain every conversation had before scopes existed, byte for byte. The two places that derived it
  * (agent-context-admission.ts and memory/context-generation.ts) now call this through the resolver.
@@ -804,7 +809,12 @@ export function resolveSessionScope(db: Database.Database, input: SessionScopeIn
       operation: input.persist ? "turn-admission" : "read-only-lookup",
       outcome: refused ? (input.persist ? "turn-refused" : "scope-unavailable") : "legacy-fallback",
     });
-    return old("chat", "error", cause, refused);
+    const resolution = old("chat", "error", cause, refused);
+    const ownCode = error && typeof error === "object" && "code" in error && typeof (error as { code: unknown }).code === "string"
+      ? (error as { code: string }).code : "";
+    const ownCodeAllowsRetry = !ownCode || innermostTypedCode({ code: ownCode }) === STORE_BUSY_CODE;
+    if (refused && ownCodeAllowsRetry && innermostTypedCode(error) === STORE_BUSY_CODE) sessionScopeBusyCauses.set(resolution, error);
+    return resolution;
   }
 }
 

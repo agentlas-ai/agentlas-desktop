@@ -10,7 +10,9 @@ import { mainWorkAttachmentContext, redactWorkAttachmentText } from "../invocati
 import { workerCapabilityRunner, WorkerCapabilityError, type PrepareWorkerCapabilities, type WorkerCapabilityInput } from "./worker-capabilities";
 import { runTeamStepWithSettlement } from "./team-step-settlement";
 import { degenerateOutputReceipt, runGuardedTeamStep, WORKER_OUTPUT_DEGENERATE_CODE } from "../runtime/degenerate-output";
-import { withoutMcpTransportEnv } from "../runtime/runner";
+import { RuntimeTurnUnsettledError, withoutMcpTransportEnv } from "../runtime/runner";
+import { ownerVisibleTeamMessage, teamWorkerFailureText } from "./team-worker-failure-copy";
+import { MID_RUN_GOAL_CHANGE_CODES, taskForceGoalChangedReport } from "./task-force-host-report";
 // 멀티 에이전트 firm 오케스트레이터 — 3-tier (CEO → 본부 → 전문가).
 //   PLAN: 리더가 <<Delegate>>로 필요한 하위만 선택 → DELEGATE: 하위 병렬 실행 → SYNTHESIZE.
 //   본부(division)는 지속 세션(숨김 sub-chat, 히스토리·메모리 유지), 전문가는 1회성 worker.
@@ -632,7 +634,7 @@ function emitAgentMessage(
   tier: 1 | 2 | 3,
   text: string,
 ): boolean {
-  const excerpt = boundedAgentMessage(text);
+  const excerpt = boundedAgentMessage(ownerVisibleTeamMessage(text));
   if (!excerpt) return true;
   const guard = handoffGuardFor(p);
   const pair = handoffPairKey(from, to);
@@ -904,13 +906,14 @@ async function runNodeTurnSafe(
         ...(runtimeFailure ? { runtimeFailure } : {}),
       };
     }
-    const msg = err instanceof Error ? err.message : String(err);
+    // The owner reads one plain sentence derived from the failure's typed code (team-worker-failure-copy.ts), never the
+    // exception's own message; the typed execution-failure JSON above stays in the checkpoint for the synthesizer and the ledger.
+    const shown = teamWorkerFailureText({
+      locale: p.locale === "ko" ? "ko" : "en", name: turn.node.name, error: err,
+      runtimeFailure: err instanceof ObservedRunnerFailureError || err instanceof RuntimeTurnUnsettledError ? failure : null,
+    });
     return {
-      text: firmFailureCheckpoint(
-        p.locale === "ko" ? `(${turn.node.name} 응답 실패: ${msg})` : `(${turn.node.name} failed: ${msg})`,
-        partialCheckpoint,
-        evidence,
-      ),
+      text: firmFailureCheckpoint(`(${shown})`, partialCheckpoint, evidence),
       delegations: [],
       synthesisAllocation: null,
       evidence,
@@ -1415,7 +1418,8 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
             // already granted this stage bounded write authority; let the
             // resident reviewer evaluate its concrete calls. Plan/synthesis
             // turns remain read-only and never reach this branch.
-            phase === "delegate" && nodePermission !== "read"
+            // write only: a full-access worker has no approval step to review (borrowed-task-force.ts runnerBase).
+            phase === "delegate" && nodePermission === "write"
               ? "auto_review"
               : "user",
           restrictedReadBoundary: p.restrictedReadBoundary,
@@ -1879,10 +1883,25 @@ async function runDivision(
 /** firm 채팅 진입점 — runMcpInvocation에서 firmId+divisions가 있으면 호출. */
 export async function runFirmInvocation(p: FirmRunParams): Promise<FirmRunResult> {
   const failureReports: ExecutionFailureReport[] = [];
-  const result = await runFirmInvocationInternal({ ...p, onExecutionFailure: (report) => {
-    failureReports.push(report); p.onExecutionFailure?.(report);
-  } });
-  return { ...result, ...(failureReports.length ? { failureReports } : {}) };
+  try {
+    const result = await runFirmInvocationInternal({ ...p, onExecutionFailure: (report) => {
+      failureReports.push(report); p.onExecutionFailure?.(report);
+    } });
+    return { ...result, ...(failureReports.length ? { failureReports } : {}) };
+  } catch (error) {
+    // The Goal changed, paused or ended while the team was working (the owner did it on purpose): the fence stands, so no further
+    // step is started, but the turn ends as a calm reply, never "The run failed". A stop (abort), a nested unit and an Agent App rethrow.
+    if (!(error instanceof TeamGoalContextError) || !MID_RUN_GOAL_CHANGE_CODES.has(error.code)
+      || p.signal?.aborted || p.emitFinal === false || p.req.agentAppMode) throw error;
+    try {
+      const text = redactWorkAttachmentText(p.req, taskForceGoalChangedReport({ locale: p.locale === "ko" ? "ko" : "en", rows: [] }));
+      tryRecordRunEvent({ runId: p.req.runId ?? `firm:${p.chat.id}`, chatId: p.chat.id, kind: "firm_goal_changed_mid_run",
+        payload: { schemaVersion: 1, code: error.code } });
+      appendChatMessage(p.chat.id, "assistant", text);
+      p.sink({ kind: "final", text });
+      return { ok: false, text, ...(failureReports.length ? { failureReports } : {}) };
+    } catch { throw error; } // If the reply itself cannot be written, the original refusal stands exactly as before.
+  }
 }
 
 async function runFirmInvocationInternal(p: FirmRunParams): Promise<FirmRunResult> {
@@ -1969,7 +1988,8 @@ async function runFirmInvocationInternal(p: FirmRunParams): Promise<FirmRunResul
     });
     const settlement = firmRunSettlement("direct", [plan.evidence, solo.evidence]);
     if (!solo.ok) {
-      if (!req.agentAppMode) appendChatMessage(chat.id, "assistant", redactWorkAttachmentText(p.req, solo.text));
+      // The owner's reply bubble is the failure sentence; the recovery evidence and the typed report stay with the error event / ledger.
+      if (!req.agentAppMode) appendChatMessage(chat.id, "assistant", redactWorkAttachmentText(p.req, ownerVisibleTeamMessage(solo.text)));
       sink({ kind: "error", error: firmFailure(req.agentAppMode, "ceo-failed", solo.text) });
       return { ok: false, text: solo.text, settlement };
     }

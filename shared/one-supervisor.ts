@@ -1,4 +1,5 @@
 import type { RuntimeSelection, ChatHistoryEntry, ImageAttachment } from "./types";
+import { endsWithQuietMarker } from "./agent-control-markers";
 import type { OneBubbleColor } from "./one-profile";
 import type { SupervisorControlProgress, SupervisorJournalInput, SupervisorJournalPage, SupervisorRuntimeOwner, SupervisorStopInput } from "./one-supervisor-runtime";
 
@@ -117,8 +118,9 @@ export interface SupervisorScienceInput { commandId: string; text: string; proje
  * the conversation and no alert fires.
  */
 export const ONE_QUIET_REPLY = "[quiet]" as const;
+/** A reply that ends with the marker is quiet even after a progress preamble (shared/agent-control-markers.ts). */
 export function isOneQuietReply(text: string): boolean {
-  return /^\s*\[quiet\]\s*\.?\s*$/i.test(text);
+  return endsWithQuietMarker(text);
 }
 
 /** A check-in the owner asked One to run on its own: every N minutes, or daily at a local HH:MM. */

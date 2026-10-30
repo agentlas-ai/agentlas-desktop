@@ -1369,7 +1369,9 @@ export async function verifyGoalCompletionClaim(input: {
       if (result.verdict === "passed" && notApplicable) {
         // Model decision under a host invariant: waived only with its recorded reason, re-confirmed against the work.
         result = { ...result, reason: `Not applicable: ${contract?.notApplicableReason ?? "conditional requirement not requested"} (recorded ${contract?.ref}; confirmed against the observed work).` };
-      } else if (result.verdict === "passed" && (!contract || !chosenRefs.length || chosenRefs.some(ref => !allowedRefs.includes(ref)))) {
+      } else if (result.verdict === "passed" && (!contract || !chosenRefs.length || chosenRefs.some(ref => !allowedRefs.includes(ref))
+        // The reply named a reference the host never offered for this item: its pass is unproven (the reply is otherwise read).
+        || Boolean(judged.unknownEvidenceRefs?.length))) {
         result = { criterionIndex, verdict: "inconclusive", reason: contract?.requiredProofKind === "download" && downloadRead.reasonCode
           ? `Download proof unavailable (${downloadRead.reasonCode}).` : "The pinned proof contract has no matching host evidence.",
           recoveryClass: "unknown", prerequisiteCode: null, requiredActor: null, nextAction: null };

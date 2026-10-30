@@ -44,6 +44,8 @@ import { bindAgentScreenScope } from "@/lib/agent-screen-scope";
 import { AgiDefectChip, AgiIncidentReportButton } from "../agi/AgiBugReport";
 import { PersonalOneCapabilities, type PersonalOneCapabilityTab } from "./PersonalOneCapabilities";
 import { OneVoiceInputHelp } from "./OneVoiceInputHelp";
+import { useChatSelectionIntent } from "@/lib/chat-selection-intent";
+import { chatSelectionSendBlocked } from "@/lib/chat-selection-send-guard";
 import { OneRuntimeChips } from "./OneRuntimeChips";
 import { OneFrontChip, OneFrontNote, OneFrontNotice, OneFrontSetting, useOneFront } from "./PersonalOneFront";
 import { personalOnePanelMaximum } from "@/lib/personal-one-result";
@@ -97,6 +99,8 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
   const [composerExpanded,setComposerExpanded]=useState(false);
   const [snapshot,setSnapshot]=useState<OneSupervisorSnapshot|null>(null);
   const historyScope=snapshot?.conversationChatId ?? null;
+  const desiredSelection=useChatSelectionIntent(historyScope);
+  const selectionSendBlocked=!front.view?.effective&&Boolean(desiredSelection)&&chatSelectionSendBlocked(historyScope);
   const inlineUi=useInlineUiInstances(snapshot?.conversationChatId);
   const historyScopeRef=useRef(historyScope);historyScopeRef.current=historyScope;
   const groups=useMemo(()=>personalOneTranscript((snapshot?.messages ?? []).filter(message=>message.role!=="system"),snapshot?.turns ?? []),[snapshot?.messages,snapshot?.turns]);
@@ -393,6 +397,9 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
   };
   const enter=useComposerEnter(()=>{void send();});
   const send=async(answer?:string)=>{
+    // An active turn's question answer has its own custody. Only a new composer
+    // submission waits, before attachments, outbox IDs or draft state change.
+    if(answer===undefined&&!front.view?.effective&&chatSelectionSendBlocked(snapshot?.conversationChatId ?? null))return;
     // A question-card answer goes out alone: never with the composer's quotation, draft or attachments.
     const outgoing=answer===undefined?attachments:[];
     if(submitting.current)return;const submittedText=answer??text;const submittedReply=answer===undefined?messageReply:null;const rawMessage=submittedText.trim();const message=composeMessageReply(rawMessage,submittedReply);if((!rawMessage&&!outgoing.length)||!outbox.current||!snapshot||attachmentBusy)return;let intent:PendingSupervisorWrite;
@@ -578,6 +585,7 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
         }} />}
         <input ref={attachmentPicker} type="file" multiple hidden onChange={event=>{if(event.target.files)void pickAttachments(Array.from(event.target.files));event.target.value="";}}/>
         {attachmentError&&<p role="alert" className={styles.feedback}>{attachmentError}</p>}
+        {selectionSendBlocked&&<p role="status" className={styles.feedback}>{copy("모델 선택을 확인한 뒤 보내세요. 작성한 내용과 첨부는 그대로 유지됩니다.","Send after the model selection is confirmed. Your draft and attachments are unchanged.")}</p>}
         <MessageReplyPreview reply={messageReply} locale={locale} onDismiss={()=>setMessageReply(null)}/>
         {front.view&&!front.view.effective&&<p className={styles.feedback} data-one-personal-model-scope="true" title={copy("개인 One과의 대화에 사용할 모델입니다. Work 업무의 실행 모델은 업무별로 선택합니다.","The model for your personal One conversation. Choose the execution model separately for each Work task.")}>{copy("개인 대화 모델","Personal chat model")}</p>}
         <form className={styles.composer} data-one-composer="true" data-expanded={composerExpanded} data-has-files={attachments.length>0} onSubmit={event=>{event.preventDefault();void send();}}>
@@ -614,7 +622,7 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
             {front.view?.effective?<OneFrontChip locale={ko?"ko":"en"} onOpenSetting={()=>void appearance()}/>:<OneRuntimeChips chatId={snapshot?.conversationChatId ?? null} locale={ko?"ko":"en"} disabled={!snapshot} />}
             <div className={styles.voice}><OneVoiceInputHelp locale={ko?"ko":"en"} composerRef={composerInput} /></div>
           </div>
-          <button className={styles.send} type="submit" aria-label={copy("보내기","Send")} disabled={!snapshot||savedRequestError||attachmentBusy||(!text.trim()&&!attachments.length)}><IconArrowUp size={16}/></button>
+          <button className={styles.send} type="submit" aria-label={copy("보내기","Send")} disabled={!snapshot||savedRequestError||attachmentBusy||selectionSendBlocked||(!text.trim()&&!attachments.length)}><IconArrowUp size={16}/></button>
         </form>
         {activeReply?.runId&&<button className={styles.stopReply} onClick={()=>void write("stopReply",{runId:activeReply.runId!}).then(value=>{showReceipt(value);void sync();}).catch(()=>setError(true))}>{copy("이 답변 중지","Stop this reply")}</button>}
       </div>

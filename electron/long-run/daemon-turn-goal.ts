@@ -23,14 +23,16 @@ import { currentGoalExecutionObligations, currentGoalObligationsSatisfied } from
  *    decisionRequested) waits for the owner's answer instead, the same hold a question takes, because the next cycle must never
  *    act on a request nobody has approved (real posting on the owner's account starts only after the owner's approval).
  *  - a team run that did not verify (invoke_failed task-force-verification-failed, or invoke_completed with a failed team
- *    verifier): work is left, and the room already told the owner what and that saying "continue" picks it up
- *    (borrowed-task-force.ts taskForceIncompleteMessage) -> held for the owner's answer: the same hold a question card takes
- *    (waiting_tool + goal_owner_answer_required). Contract and room binding stay, nothing wakes the Goal, and the owner's next
- *    message, "continue" included, resumes THIS Goal (stoppedGoalMessageReopens). Owner 2026-10-21, X marketing room: the Goal
- *    used to be cancelled 31 s after such a turn and the room's promise ended up false.
- *  - invoke_failed / invoke_threw for any other cause (a refusal, a provider or app failure) of a Goal that is not a series ->
- *    cancelling -> cancelled, contract cancelled, room unbound (the service has no controller that could retry it; the owner's
- *    next message starts a fresh Goal). Only the typed unverified-team code holds; no failure is read by its words.
+ *    verifier): work is left -> the Goal continues by itself one minute later as an ordinary Desktop Goal turn (waiting_tool + a
+ *    host retry, under the Main controller's own retry limits and wake budget), or after the capacity wait the failure names.
+ *    Contract and room binding stay, and the owner's next message still resumes THIS Goal at once. Only a turn that ended on the
+ *    owner's question card is held for the answer (waiting_tool + goal_owner_answer_required). In a marketing room:
+ *    the Goal used to be cancelled 31 s after such a turn; waiting for "continue" is a stop nobody asked for.
+ *  - invoke_failed / invoke_threw for any other cause (a refusal, a login or quota limit, a provider or app failure) of a Goal that
+ *    is not a series -> the Goal continues like the unverified team above: a host resume one minute later as an ordinary Desktop
+ *    Goal turn, contract and room binding kept (it used to be cancelled and the room unbound, which made every internal failure of
+ *    a first turn erase the owner's standing request; the Main controller has the retry limits and the same-cause backoff the
+ *    service never had). No failure is read by its words.
  *  - invoke_cancelled -> owner pause (also for a series); invoke_interrupted -> host pause (app_closed) except for a series, which
  *    takes its next slot; both pauses resume on the owner's next message
  * A Goal the host parked (paused app_closed / crash_recovery) while the turn ran on is followed too, from queued: the pause came from
@@ -98,11 +100,18 @@ function promptMessageOfRun(runId: string): string | null {
   return message?.id ?? null;
 }
 
+/** True when `goalId` is the automatic Goal of the user message the run `runId` answers. Identity only: the Goal id is derived
+ * from that message, so no other message's Goal matches. It does not prove admission (goalAdmittedForServiceRun adds that); it is
+ * what a plan that started before the Goal existed needs to tell "my own message's Goal appeared" from "a replacement Goal". */
+export function isAutoGoalOfRunMessage(runId: string, goalId: string): boolean {
+  return goalId.startsWith(AUTO_GOAL_PREFIX) && promptMessageOfRun(runId) === goalId.slice(AUTO_GOAL_PREFIX.length);
+}
+
 /** True when Main admitted `goalId` for the user message the service run `runId` answers. Such a Goal follows every service run
  * of that message (the first one, and the host's retries and recoveries of it, followDaemonTurnGoal), so none of them holds
  * producer custody or is refused for lacking it. A Goal admitted for another message is not covered. */
 export function goalAdmittedForServiceRun(runId: string, goalId: string): boolean {
-  if (!goalId.startsWith(AUTO_GOAL_PREFIX) || promptMessageOfRun(runId) !== goalId.slice(AUTO_GOAL_PREFIX.length)) return false;
+  if (!isAutoGoalOfRunMessage(runId, goalId)) return false;
   return getDb().prepare(`SELECT 1 FROM run_events WHERE kind = 'automatic_goal_intake_completed'
       AND json_extract(payload_json, '$.goalId') = ? AND json_extract(payload_json, '$.outcome') = 'admitted' LIMIT 1`)
     .get(goalId) !== undefined;
@@ -345,31 +354,48 @@ export function followDaemonTurnGoal(goalId: string): DaemonTurnGoalResult {
     recordSettlement(run, source.runId, "completed", { verifier: terminal.verifier });
     return result(goalId, "completed", source.runId);
   }
-  // The team did not verify its work: what is left is the room's reply and "continue" is its promise, so the Goal keeps that promise
-  // (held for the owner's answer, room still bound) instead of being cancelled out from under it.
+  // The team did not verify its work: what is left is the room's reply, and the Goal keeps going instead of being cancelled out
+  // from under it. Only a turn that ended on the owner's question card waits for the answer (nothing may act on a request nobody
+  // approved). Any other work left resumes by itself as an ordinary Goal turn on Desktop, under that controller's own retry limits
+  // and wake budget, exactly as a Main-hosted Goal turn continues: waiting for the owner to type "continue" was a stop the owner
+  // never asked for (a block in some situation is a defect).
   if (taskForceLeftWork(terminal)) {
     if (run.status === "queued") step("running", "daemon-turn-started");
-    // Work left only for a reason nobody has to answer (a wait for capacity, a preparation that never reached a provider): the owner
-    // is not asked. The Goal resumes by itself as an ordinary Goal turn after the wait, under that controller's own retry limits.
-    if (terminal.selfRecoverable) {
-      const waitMs = Math.min(Math.max(terminal.retryAfterMs ?? 60_000, 15_000), 15 * 60_000);
-      const nextAt = new Date(Date.now() + waitMs).toISOString();
-      if (!scheduleNextRun(nextAt, { fromReason: "task_force_capacity_wait", detail: "task_force_capacity_wait", trigger: "daemon-turn-goal" })) return result(goalId, "unchanged", "scheduled_by_another_process");
-      recordSettlement(run, source.runId, "auto_retry_scheduled", { nextAt, errorCode: terminal.errorCode, verifier: terminal.verifier });
-      return result(goalId, "scheduled", nextAt);
+    if (terminal.decisionRequested) {
+      if (!hold()) return result(goalId, "unchanged", "held_by_another_process");
+      recordSettlement(run, source.runId, "held_for_owner", { reason: "owner_question", errorCode: terminal.errorCode, verifier: terminal.verifier });
+      return result(goalId, "held", source.runId);
     }
-    if (!hold()) return result(goalId, "unchanged", "held_by_another_process");
-    recordSettlement(run, source.runId, "held_for_owner", { errorCode: terminal.errorCode, verifier: terminal.verifier });
-    return result(goalId, "held", source.runId);
+    // A wait for capacity keeps its own hint; other work left continues after a short pause.
+    const waitMs = terminal.selfRecoverable ? Math.min(Math.max(terminal.retryAfterMs ?? 60_000, 15_000), 15 * 60_000) : 60_000;
+    const fromReason = terminal.selfRecoverable ? "task_force_capacity_wait" : "task_force_work_left";
+    const nextAt = new Date(Date.now() + waitMs).toISOString();
+    if (!scheduleNextRun(nextAt, { fromReason, detail: fromReason, trigger: "daemon-turn-goal" })) return result(goalId, "unchanged", "scheduled_by_another_process");
+    recordSettlement(run, source.runId, "auto_retry_scheduled", { nextAt, reason: fromReason, errorCode: terminal.errorCode, verifier: terminal.verifier });
+    return result(goalId, "scheduled", nextAt);
   }
-  if (SUCCESS_KINDS.includes(terminal.kind) || FAILURE_KINDS.includes(terminal.kind)) {
-    const reason = terminal.kind === "invoke_completed" ? "task_force_verifier_failed" : terminal.errorCode ?? "invocation_failed";
-    step("cancelling", `daemon-turn-failed:${reason}`.slice(0, 200));
-    step("cancelled", `daemon-turn-failed:${reason}`.slice(0, 200));
+  // The service turn that carried the owner's request FAILED (a refusal, a login or quota limit, a store lock, a bookkeeping
+  // check of the app itself). The Goal is the owner's standing request, not that one turn: it is not cancelled by it. Like a
+  // series (above) and a team that left work, it takes the next slot -- an ordinary Desktop Goal turn one pause later, under
+  // the Main controller's own retry limits, same-cause backoff and wake budget -- and the controller checks outside effects
+  // before repeating any (UNCERTAIN_EFFECT_POLICY). Cancelling here made every internal failure of a first turn erase the
+  // Goal and unbind the room ("the owner's next message starts a fresh Goal"), a terminal end for a cause the owner never chose.
+  if (FAILURE_KINDS.includes(terminal.kind)) {
+    if (run.status === "queued") step("running", "daemon-turn-started");
+    const nextAt = new Date(Date.now() + 60_000).toISOString();
+    if (!scheduleNextRun(nextAt, { fromReason: "daemon_turn_failed", detail: "daemon_turn_failed", trigger: "daemon-turn-goal" })) return result(goalId, "unchanged", "scheduled_by_another_process");
+    recordSettlement(run, source.runId, "auto_retry_scheduled", { nextAt, reason: "daemon_turn_failed", errorCode: terminal.errorCode, verifier: terminal.verifier });
+    return result(goalId, "scheduled", nextAt);
+  }
+  if (SUCCESS_KINDS.includes(terminal.kind)) {
+    // Unreachable for a passed verifier (completed above) and for a failed one (taskForceLeftWork); kept so no terminal kind falls
+    // through to the owner-stop branch below.
+    step("cancelling", "daemon-turn-failed:task_force_verifier_failed");
+    step("cancelled", "daemon-turn-failed:task_force_verifier_failed");
     completeChatGoalContract(goalId, "cancelled");
     releaseChat(chatId, goalId);
     recordSettlement(run, source.runId, "failed", { errorCode: terminal.errorCode, verifier: terminal.verifier });
-    return result(goalId, "cancelled", reason);
+    return result(goalId, "cancelled", "task_force_verifier_failed");
   }
   // Stopped turns: the Goal rests where an owner stop (or the host closing) puts any Goal, and the next owner message resumes it.
   const ownerStop = terminal.kind === "invoke_cancelled";

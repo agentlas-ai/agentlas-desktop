@@ -4,6 +4,7 @@ import { GRAPH_VERBATIM_CODES } from "../shared/graph-vocabulary.generated";
 import type { RuntimeSelection } from "../shared/types";
 import type { ToolFailureCode } from "../shared/tool-failure";
 import { extractAskFences } from "../shared/ask-fence-flatten";
+import { needsInputQuestion } from "../shared/agent-control-markers";
 
 /**
  * 판정 이유는 그대로 사용자 화면에 실린다. 언어와 어휘를 지정하지 않으면 영어 기술 문장이
@@ -113,14 +114,15 @@ export const JUDGMENT_UNAVAILABLE_REASON_CODE = "judgment_unavailable";
 const STRUCTURED_BLOCKED_CODES = ["agent_not_found", "owner_only", "no_cloud_package", "insufficient_credits"] as const;
 
 function structuredOutcome(value: string): AutomationResultClassification | null {
-  // The runner emits this exact prefix for unattended owner questions. Strip
-  // only its optional persona wrapper. Full validated question fences can
-  // follow explanatory prose, as in the ordinary question renderer.
+  // The runner asks unattended owner questions to start a line with this
+  // marker. A model may put a progress preamble line first, so the marker is
+  // read at any line start (shared/agent-control-markers.ts). Full validated
+  // question fences can follow explanatory prose, as in the question renderer.
   const questions = extractAskFences(value).questions;
-  const prefix = /^(?:(?:\*\*)?\[Hope\](?:\*\*)?\s*)?NEEDS-INPUT:\s*/u;
-  if (questions.length > 0 || prefix.test(value.trim())) {
+  const unattendedQuestion = needsInputQuestion(value);
+  if (questions.length > 0 || unattendedQuestion !== null) {
     return { status: "needs_input", outcome: "needs_input", reasonCode: "unattended_question",
-      reason: (questions.length ? questions.map(question => question.question).join("\n") : value.trim().replace(prefix, "").trim()).slice(0, 800) || null,
+      reason: (questions.length ? questions.map(question => question.question).join("\n") : unattendedQuestion ?? "").slice(0, 800) || null,
       evidence: null };
   }
   const code = STRUCTURED_BLOCKED_CODES.find((candidate) => new RegExp(`\\b${candidate}\\b`, "u").test(value));

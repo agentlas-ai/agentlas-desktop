@@ -3,7 +3,7 @@
 //   - 실패/무키: 빈 목록 + UI의 manual model ID 입력 (버전 ID를 앱에 고정하지 않음)
 // 5분 메모리 캐시 — detect/picker가 자주 호출해도 네트워크는 가끔만.
 import { apiKeyPresenceHint, getCredentialStateRevision, readApiKey } from "../secrets/vault";
-import { getDb } from "../store/db";
+import { DEFAULT_CUSTOM_BASE_URL, readCustomBaseUrl } from "./custom-base-url";
 import {
   BYOK_BACKENDS_ALL,
   BYOK_MODELS,
@@ -64,14 +64,24 @@ function isByok(backend: string): backend is ByokBackend {
   return (BYOK_BACKENDS as readonly string[]).includes(backend);
 }
 
-async function fetchWithTimeout(url: string, init: RequestInit, ms = 4000): Promise<Response> {
+async function fetchJsonWithTimeout(url: string, init: RequestInit, ms = 4000): Promise<unknown> {
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), ms);
+  let timer: ReturnType<typeof setTimeout>;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => { ctrl.abort(); reject(new Error("discovery-timeout")); }, ms);
+  });
   try {
-    return await fetch(url, { ...init, signal: ctrl.signal, redirect: "error" });
-  } finally {
-    clearTimeout(timer);
-  }
+    return await Promise.race([(async () => {
+      const res = await fetch(url, { ...init, signal: ctrl.signal, redirect: "error" });
+      // A transport that resolves after the deadline cannot start reading its stale body.
+      if (ctrl.signal.aborted) {
+        try { void res.body?.cancel().catch(() => undefined); } catch { /* best-effort cleanup */ }
+        throw new Error("discovery-timeout");
+      }
+      if (!res.ok) throw new Error(`http:${res.status}`);
+      return await res.json();
+    })(), deadline]);
+  } finally { clearTimeout(timer!); }
 }
 
 // ── provider별 /models 조회 ───────────────────────────────
@@ -85,11 +95,9 @@ async function fetchAnthropic(key: string): Promise<ModelOption[]> {
     const url = new URL("https://api.anthropic.com/v1/models");
     url.searchParams.set("limit", "100");
     if (after) url.searchParams.set("after_id", after);
-    const res = await fetchWithTimeout(url.href, {
+    const json = await fetchJsonWithTimeout(url.href, {
       headers: { "x-api-key": key, "anthropic-version": "2023-06-01" },
-    });
-    if (!res.ok) throw new Error(`http:${res.status}`);
-    const json = await res.json() as { data?: ModelOption[]; has_more?: boolean; last_id?: string };
+    }) as { data?: ModelOption[]; has_more?: boolean; last_id?: string };
     if (!Array.isArray(json.data)) throw new Error("invalid-response");
     models.push(...json.data.map((row: ModelOption & { display_name?: string }) => ({ id: row.id, label: row.display_name || row.id })));
     if (!json.has_more) return models;
@@ -98,17 +106,6 @@ async function fetchAnthropic(key: string): Promise<ModelOption[]> {
     cursors.add(after);
   }
   throw new Error("pagination-limit");
-}
-
-function customBaseUrl(): string | null {
-  try {
-    const row = getDb().prepare("SELECT value FROM meta WHERE key = 'custom_base_url'").get() as
-      | { value?: string }
-      | undefined;
-    return row?.value?.trim().replace(/\/$/, "") || null;
-  } catch {
-    return null;
-  }
 }
 
 function safeBaseUrl(base: string): string | null {
@@ -126,9 +123,7 @@ function safeBaseUrl(base: string): string | null {
 async function fetchOpenAICompatible(baseUrl: string, key: string): Promise<ModelOption[]> {
   const base = safeBaseUrl(baseUrl);
   if (!base) throw new Error("invalid-endpoint");
-  const res = await fetchWithTimeout(`${base}/models`, { headers: { authorization: `Bearer ${key}` } });
-  if (!res.ok) throw new Error(`http:${res.status}`);
-  const json = await res.json() as {
+  const json = await fetchJsonWithTimeout(`${base}/models`, { headers: { authorization: `Bearer ${key}` } }) as {
     data?: Array<{ id?: string; name?: string; display_name?: string }>;
     models?: Array<{ id?: string; name?: string; display_name?: string }>;
   };
@@ -146,9 +141,7 @@ async function fetchGoogle(key: string): Promise<ModelOption[]> {
     const url = new URL("https://generativelanguage.googleapis.com/v1beta/models");
     url.searchParams.set("pageSize", "200");
     if (token) url.searchParams.set("pageToken", token);
-    const res = await fetchWithTimeout(url.href, { headers: { "x-goog-api-key": key } });
-    if (!res.ok) throw new Error(`http:${res.status}`);
-    const json = await res.json() as {
+    const json = await fetchJsonWithTimeout(url.href, { headers: { "x-goog-api-key": key } }) as {
       models?: Array<{ name?: string; displayName?: string; supportedGenerationMethods?: string[] }>;
       nextPageToken?: string;
     };
@@ -164,9 +157,31 @@ async function fetchGoogle(key: string): Promise<ModelOption[]> {
   throw new Error("pagination-limit");
 }
 
-function discoveryIdentity(backend: ByokBackend): Pick<ByokModelDiscovery, "backend" | "credentialRevision" | "customEndpoint"> {
-  return { backend, credentialRevision: getCredentialStateRevision(),
-    customEndpoint: backend === "custom" ? safeBaseUrl(customBaseUrl() ?? "https://api.openai.com/v1") : null };
+type DiscoveryIdentity = Pick<ByokModelDiscovery, "backend" | "credentialRevision" | "customEndpoint"> & {
+  endpointReadFailed?: true;
+};
+
+// A failure or recovery during an in-flight detect invalidates its outer cache,
+// but a persistent failure must not force a fresh probe on every observation.
+let endpointReadFailureEpoch = 0;
+let endpointReadState: "unknown" | "readable" | "failed" = "unknown";
+
+function recordEndpointRead(state: "readable" | "failed"): void {
+  if (endpointReadState !== state) endpointReadFailureEpoch += 1;
+  endpointReadState = state;
+}
+
+function discoveryIdentity(backend: ByokBackend): DiscoveryIdentity {
+  const credentialRevision = getCredentialStateRevision();
+  if (backend !== "custom") return { backend, credentialRevision, customEndpoint: null };
+  try {
+    const customEndpoint = safeBaseUrl(readCustomBaseUrl() ?? DEFAULT_CUSTOM_BASE_URL);
+    recordEndpointRead("readable");
+    return { backend, credentialRevision, customEndpoint };
+  } catch {
+    recordEndpointRead("failed");
+    return { backend, credentialRevision, customEndpoint: null, endpointReadFailed: true };
+  }
 }
 
 function sameIdentity(a: ReturnType<typeof discoveryIdentity>, b: ReturnType<typeof discoveryIdentity>): boolean {
@@ -179,21 +194,35 @@ function cloneDiscovery(value: ByokModelDiscovery): ByokModelDiscovery {
 
 /** Local cache identity, checked before detect/picker reuse; never contains credential material. */
 export function byokDiscoveryIdentity(): string {
-  return JSON.stringify([getCredentialStateRevision(), safeBaseUrl(customBaseUrl() ?? "https://api.openai.com/v1")]);
+  const identity = discoveryIdentity("custom");
+  return JSON.stringify([identity.credentialRevision,
+    identity.endpointReadFailed ? ["endpoint-read-failed"] : identity.customEndpoint, endpointReadFailureEpoch]);
+}
+
+function publicIdentity(identity: DiscoveryIdentity): Pick<ByokModelDiscovery, "backend" | "credentialRevision" | "customEndpoint"> {
+  return { backend: identity.backend, credentialRevision: identity.credentialRevision, customEndpoint: identity.customEndpoint };
+}
+
+function endpointReadFailure(identity: DiscoveryIdentity, now: number): ByokModelDiscovery {
+  return { ...publicIdentity(identity), status: "failed", reason: "endpoint-read-failed",
+    models: [], chatModels: [], stale: false, at: now };
 }
 
 async function discoverByokModels(backend: ByokBackend, now: number): Promise<ByokModelDiscovery> {
   let identity = discoveryIdentity(backend);
+  if (identity.endpointReadFailed) return endpointReadFailure(identity, now);
   const hit = cache.get(backend);
   const previous = hit && sameIdentity(hit, identity) ? hit : undefined;
   if (previous && now - previous.at < TTL_MS) return cloneDiscovery(previous);
   const generation = cacheGeneration;
   const result = (status: ByokModelDiscovery["status"], reason: string | undefined, models: ModelOption[] = [], stale = false): ByokModelDiscovery => {
-    const value: ByokModelDiscovery = { ...identity, status, reason, models, stale, at: now,
+    const value: ByokModelDiscovery = { ...publicIdentity(identity), status, reason, models, stale, at: now,
       chatModels: backend === "anthropic" || backend === "google" ? models.map(model => model.id) : [] };
     // A key/endpoint change during an in-flight request must not return or cache old inventory.
-    if (generation !== cacheGeneration || !sameIdentity(identity, discoveryIdentity(backend))) {
-      return { ...discoveryIdentity(backend), status: "failed", reason: "identity-changed", models: [], chatModels: [], stale: false, at: now };
+    const current = discoveryIdentity(backend);
+    if (current.endpointReadFailed) return endpointReadFailure(current, now);
+    if (generation !== cacheGeneration || !sameIdentity(identity, current)) {
+      return { ...publicIdentity(current), status: "failed", reason: "identity-changed", models: [], chatModels: [], stale: false, at: now };
     }
     cache.set(backend, value);
     return cloneDiscovery(value);
@@ -216,6 +245,7 @@ async function discoverByokModels(backend: ByokBackend, now: number): Promise<By
     keychainFailures.delete(backend);
     // A successful native keychain read itself advances the vault revision.
     const afterRead = discoveryIdentity(backend);
+    if (afterRead.endpointReadFailed) return endpointReadFailure(afterRead, now);
     if (afterRead.customEndpoint !== identity.customEndpoint) return failed("identity-changed");
     identity = afterRead;
     if (!key) return result("unsupported", "missing-key");
@@ -248,7 +278,9 @@ async function discoverByokModels(backend: ByokBackend, now: number): Promise<By
 }
 
 export async function fetchByokModelDiscovery(backend: ByokBackend, now: number): Promise<ByokModelDiscovery> {
-  const identity = JSON.stringify(discoveryIdentity(backend));
+  const current = discoveryIdentity(backend);
+  if (current.endpointReadFailed) return endpointReadFailure(current, now);
+  const identity = JSON.stringify(publicIdentity(current));
   const pending = flights.get(backend);
   if (pending?.identity === identity) return cloneDiscovery(await pending.promise);
   const flight = { identity, promise: discoverByokModels(backend, now) };

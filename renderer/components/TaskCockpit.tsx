@@ -6,10 +6,12 @@ import { composeMessageReply, type MessageReply } from "@/lib/message-reply";
 import { createTrailingDebounce } from "@/lib/store-change-policy";
 
 import { goalPlanOf } from "@/components/goal/GoalPlanSummary";
-import { useWorkStartHandoff } from "@/lib/work-start-intent";
+import { useWorkStartHandoff, useWorkStartRecovery, type WorkStartRecoveryTarget } from "@/lib/work-start-intent";
 import { browserAnnotationDraftText } from "@shared/browser-annotation";
 import { selectionForRuntime } from "@shared/runtime-selection";
 import { chipRuntimeFor } from "@/lib/one-runtime-chip";
+import { useChatSelectionIntent } from "@/lib/chat-selection-intent";
+import { chatSelectionSendBlocked } from "@/lib/chat-selection-send-guard";
 import { OneRuntimeChips } from "@/components/one/OneRuntimeChips";
 import { isInterruptedPartial, isLivePartialCommitBoundary, markInterruptedPartial } from "@shared/interrupted-partial";
 import { subscribeOrderedRunEvents } from "@/lib/ordered-run-events";
@@ -2578,6 +2580,8 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
   }, []);
   // 활성 런타임/모델 — 헤더 칩 표시 + BYOK 인라인 모델 변경. 진행 중 실행의 runId(취소용).
   const [activeRuntime, setActiveRuntime] = useState<RuntimeStatus | null>(null);
+  const desiredSelection = useChatSelectionIntent(chatId);
+  const selectionSendBlocked = Boolean(desiredSelection) && chatSelectionSendBlocked(chatId, chat?.runtimeSelection ?? null);
   const runIdRef = useRef<string | null>(null);
   // Whether this chat was in the last activeChats broadcast. Lets the view see
   // an active -> inactive transition for runs it did not start itself.
@@ -2589,6 +2593,7 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
   const [messageReply, setMessageReply] = useState<MessageReply | null>(null);
   useEffect(() => setMessageReply(null), [chatId]);
   const [composerPrefill, setComposerPrefill] = useState<string | null>(null);
+  const [workStartRecoveryTarget, setWorkStartRecoveryTarget] = useState<WorkStartRecoveryTarget | null>(null);
   const consumedWorkDraftIds = useRef(new Set<string>());
   useEffect(() => {
     if (chat?.id !== chatId || !agent
@@ -5494,7 +5499,11 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
     ],
   );
 
-  useWorkStartHandoff({ intentId: searchParams.get("workStart"), chatId, ready: Boolean(chat && agent), send, prefill: setComposerPrefill, notice: setSessionNotice });
+  const workStartIntentId = searchParams.get("workStart");
+  const visibleWorkStartRecovery = workStartRecoveryTarget?.intentId === workStartIntentId && workStartRecoveryTarget.chatId === chatId
+    ? workStartRecoveryTarget : null;
+  const workStartRecovery = useWorkStartRecovery(visibleWorkStartRecovery);
+  useWorkStartHandoff({ intentId: workStartIntentId, chatId, ready: Boolean(chat?.id === chatId && agent), send, prefill: setComposerPrefill, notice: setSessionNotice, recover: setWorkStartRecoveryTarget });
 
   /*
    * A Work message saved at send time (one-first-send-outbox) that Main had not taken when the renderer went away.
@@ -7729,6 +7738,25 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
           {sessionNotice}
         </div>
       )}
+      {visibleWorkStartRecovery && (
+        <details data-work-start-recovery="true" style={{ width: "min(calc(100% - 32px), 740px)", margin: "7px auto 0", padding: "8px 10px", borderRadius: 8, boxSizing: "border-box", border: "var(--hairline)", background: "var(--paper-2)", color: "var(--ink-soft)", fontSize: 12 }}>
+          <summary>{locale === "ko" ? "시작 요청 원문 확인" : "Review original start request"}</summary>
+          <p>{locale === "ko" ? "실행 여부를 대화에서 확인한 뒤 원문을 사용해 주세요." : "Check the conversation for the run outcome before using this text."}</p>
+          {!workStartRecovery.state || workStartRecovery.state.phase === "loading" ? (
+            <p role="status">{locale === "ko" ? "원문 확인 중…" : "Checking the original text…"}</p>
+          ) : workStartRecovery.state.phase === "unavailable" ? (
+            <p role="status">{locale === "ko" ? "원문을 확인하지 못했습니다." : "The original text could not be checked."}{" "}
+              <button type="button" className="btn" onClick={workStartRecovery.retry}>{locale === "ko" ? "다시 확인" : "Check again"}</button>
+            </p>
+          ) : (
+            <>
+              <pre style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere", maxHeight: 200, overflowY: "auto", font: "inherit" }}>{workStartRecovery.state.prompt}</pre>
+              {workStartRecovery.state.hasAttachments && <p>{locale === "ko" ? "첨부는 입력창에 자동 복원되지 않습니다." : "Attachments are not restored to the composer automatically."}</p>}
+              <p>{locale === "ko" ? "다시 보낼 때 모델과 설정도 확인해 주세요." : "Check the model and settings if you send it again."}</p>
+            </>
+          )}
+        </details>
+      )}
       {goalContext?.automationOwnershipReviewRequired && goalContext.runStatus === "running" && !goalResumeReview && (
         <div style={{ width: "min(calc(100% - 32px), 740px)", margin: "7px auto 0" }}>
           <button type="button" className="btn" data-goal-automation-review-entry="true"
@@ -7789,9 +7817,22 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
             onOpenPersonalAgent={() => router.push(PERSONAL_AGENT_HREF)} />
         ) : <>
         <MessageReplyPreview reply={messageReply} locale={locale} onDismiss={() => setMessageReply(null)} />
+        {selectionSendBlocked && <p role="status" style={{ maxWidth: WORK_COMPOSER_WIDTH_PX, margin: "6px auto", color: "var(--ink-soft)", fontSize: 12 }}>
+          {locale === "ko" ? "모델 선택을 확인한 뒤 보내세요. 작성한 내용과 첨부는 그대로 유지됩니다."
+            : "Send after the model selection is confirmed. Your draft and attachments are unchanged."}
+        </p>}
         <ChatInput
-          runtimeControls={<OneRuntimeChips key={chat.id} chatId={chat.id} locale={locale === "ko" ? "ko" : "en"} disabled={busy || !agent} onSelectionConfirmed={setChat} />}
+          runtimeControls={<OneRuntimeChips key={chat.id} chatId={chat.id} locale={locale === "ko" ? "ko" : "en"} disabled={busy || !agent} onSelectionConfirmed={(updated) => {
+            if (isCurrentChat() && updated.id === chatId) setChat(current => isCurrentChat() && updated.id === chatId ? updated : current);
+          }} />}
           onSend={handleChatInputSend}
+          canSubmit={() => {
+            const current = routingContextRef.current.chat;
+            return current?.id === chat.id && !chatSelectionSendBlocked(current.id, current.runtimeSelection ?? null);
+          }}
+          submitBlockedReason={selectionSendBlocked ? (locale === "ko"
+            ? "모델 선택을 확인한 뒤 보내세요. 작성한 내용과 첨부는 그대로 유지됩니다."
+            : "Send after the model selection is confirmed. Your draft and attachments are unchanged.") : null}
           queuedCount={queuedSteers.length}
           prefillText={composerPrefill} appendDraftRequest={browserDraftRequest}
           activeChatId={chat.id}

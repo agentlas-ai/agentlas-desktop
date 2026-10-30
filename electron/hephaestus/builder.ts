@@ -57,6 +57,7 @@ import { stageAttachments, type ResolvedHephaestusBuildAttachment } from "./buil
 import { contractTargetRoot, verifiedCompletedPackageRoot } from "./build-result-path";
 import { deriveOpenCrabMatchSignal, queryOpenCrabContext } from "../opencrab/ontology";
 import { runBuildRunnerWithMcpRecovery } from "./mcp-runtime-retry";
+import { buildRunMcpRunnerBinding, buildRunRequestWithAttachment, withBuildMcpAttachmentForRun } from "./build-run-attachment";
 import { userDataPath } from "../runtime-paths";
 
 export type BuildSink = (ev: HephaestusBuildEvent) => void;
@@ -857,7 +858,14 @@ export async function runHephaestusBuild(
 ): Promise<void> {
   return withInvocationUsageIfAbsent(async (ownsScope) => {
     try {
-      await runHephaestusBuildInScope(runId, req, sink, signal, locale);
+      await withBuildMcpAttachmentForRun(req.mcpAttachment, runId, signal,
+        attachment => runHephaestusBuildInScope(runId, buildRunRequestWithAttachment(req, attachment), sink, signal, locale));
+    } catch (error) {
+      // The cause (a machine code such as native-browser-task-unbound) belongs in the log, not on the owner's screen.
+      if (!signal.aborted) console.warn("[hephaestus-build] run ended with an error", runId, error instanceof Error ? error.message : String(error));
+      sink({ runId, kind: "error", text: signal.aborted
+        ? (locale === "ko" ? "빌드 취소됨" : "Build cancelled")
+        : (locale === "ko" ? "빌드를 끝내지 못했습니다. 잠시 뒤 다시 시도해 주세요." : "The build could not finish. Please try again in a moment.") });
     } finally {
       const runnerScopeCount = currentInvocationRunnerScopeCount();
       if (ownsScope && runnerScopeCount > 0) {
@@ -1202,10 +1210,10 @@ async function runHephaestusBuildInScope(
         mcpCodexConfigArgs: config?.codexConfigArgs,
         // Full-authority Build and MCP children get only OS/runtime necessities
         // plus Main-generated MCP credential aliases, never all host secrets.
-        env: buildIsolatedBuildRunnerEnv(
+        ...buildRunMcpRunnerBinding(config, buildIsolatedBuildRunnerEnv(
           buildActive.kind,
           config?.runtimeEnv ?? {},
-        ),
+        )),
         signal,
         locale,
       };

@@ -1,0 +1,175 @@
+{
+  "schema": "agentlas.plugin/v2",
+  "slug": "agentlas-medchem",
+  "name": "Agentlas Medchem",
+  "version": "0.1.0",
+  "builtin": false,
+  "publisher": {
+    "name": "Agentlas",
+    "url": "https://agentlas.cloud"
+  },
+  "keywords": [
+    "RDKit",
+    "molecular properties",
+    "drug-likeness",
+    "Lipinski",
+    "rule of five",
+    "QED",
+    "PAINS",
+    "SMILES",
+    "standardization",
+    "cheminformatics",
+    "compound grid",
+    "medicinal chemistry",
+    "분자 물성",
+    "약물유사성",
+    "리핀스키",
+    "화학 구조",
+    "SMILES 정규화",
+    "화합물 비교"
+  ],
+  "surface": {
+    "displayName": "Medchem",
+    "displayNameKo": "의약화학",
+    "tagline": "RDKit properties, drug-likeness, alerts, SMILES standardization and compound grids",
+    "taglineKo": "RDKit 분자 물성·약물유사성·구조 경고·SMILES 정규화·화합물 격자 그림",
+    "description": "Compute molecular properties and drug-likeness (MW, cLogP, TPSA, HBD/HBA, QED, Lipinski/Veber/Egan/Ghose), flag PAINS and Brenk alerts, standardize SMILES and draw labelled compound grids with RDKit running in the plugin's own managed Python environment.",
+    "descriptionKo": "플러그인 전용 관리형 Python 환경의 RDKit 으로 분자 물성과 약물유사성(MW, cLogP, TPSA, HBD/HBA, QED, Lipinski/Veber/Egan/Ghose)을 계산하고 PAINS·Brenk 경고, SMILES 정규화, 화합물 격자 그림을 만듭니다.",
+    "category": "data",
+    "brandColor": "#7A3E9D",
+    "icon": "assets/icon.svg",
+    "defaultPrompts": [
+      "sotorasib 과 adagrasib 의 분자 물성과 약물유사성을 비교표로 보여줘",
+      "이 SMILES 들을 정규화하고 염을 제거해줘",
+      "KRAS G12C 저해제들의 화학 구조를 한 그림에 그려줘"
+    ]
+  },
+  "invocation": {
+    "mention": "@agentlas-medchem",
+    "implicit": "router",
+    "standalone": true
+  },
+  "provides": {
+    "skills": {
+      "router": "skills/index/SKILL.md",
+      "workflows": [
+        "properties",
+        "structures"
+      ]
+    },
+    "tools": [
+      {
+        "id": "agentlas-medchem",
+        "capability": "data",
+        "kind": "stdio",
+        "command": "${node}",
+        "args": [
+          "${pluginDir}/runtime/mcp-server.cjs"
+        ],
+        "envKeys": [],
+        "timeoutMs": 90000,
+        "surface": {
+          "name": "Agentlas 의약화학",
+          "nameEn": "Agentlas Medchem",
+          "description": "compute_molecular_properties·standardize_smiles·draw_compound_grid·describe_medchem_runtime: RDKit 분자 물성·약물유사성·구조 경고, SMILES 정규화, 화합물 격자 그림",
+          "descriptionEn": "compute_molecular_properties, standardize_smiles, draw_compound_grid, describe_medchem_runtime: RDKit molecular properties, drug-likeness (Lipinski, QED), structural alerts, SMILES standardization, compound grids (분자 물성, 약물유사성, 화학 구조)",
+          "category": "data",
+          "brandColor": "#7A3E9D",
+          "mark": "MC",
+          "docsUrl": "https://www.rdkit.org/docs/"
+        }
+      }
+    ]
+  },
+  "requires": {
+    "prereq": [
+      {
+        "id": "node",
+        "provided-by": "app"
+      },
+      {
+        "id": "python",
+        "provided-by": "app"
+      }
+    ],
+    "os": [
+      "darwin",
+      "win32",
+      "linux"
+    ]
+  },
+  "permissions": {
+    "fileWrite": "project-only",
+    "network": "allow",
+    "shell": "deny"
+  },
+  "state": {
+    "files": [],
+    "assets": false
+  },
+  "integrity": {
+    "algo": "sha256",
+    "files": [
+      {
+        "path": "assets/icon.svg",
+        "sha256": "fcbd6978b78a6aa454a1d4ed75f80e21711e1cd175f20b59b0d7779a7aee52ae",
+        "bytes": 498
+      },
+      {
+        "path": "capabilities.json",
+        "sha256": "4f1976c9c12977a9380f77d80fbb52b22464b2a2b00580b9235c8f221bb418e7",
+        "bytes": 2212
+      },
+      {
+        "path": "README.md",
+        "sha256": "94278a7af2bec909fe1b5f5c8ac9152434ab27b8821e4c48d2ba5afc32270ab1",
+        "bytes": 1409
+      },
+      {
+        "path": "runtime/install-rdkit.cjs",
+        "sha256": "ee05b5b8457bd60a7649b85c042e970796dc1cc38d60c4c2687b8c2a08e5e32c",
+        "bytes": 9081
+      },
+      {
+        "path": "runtime/mcp-server.cjs",
+        "sha256": "d5bf2a819fb9e9fd3492d185b61b9271d567c213cfa23f9c0018db59fc388d42",
+        "bytes": 3084
+      },
+      {
+        "path": "runtime/medchem_worker.py",
+        "sha256": "f93891c359c024c00a6486a507638701357ad5900c49cd1d251d4f54e79c0d3e",
+        "bytes": 9511
+      },
+      {
+        "path": "runtime/medchem.cjs",
+        "sha256": "7516f45c61d079d4bfbcfd4c4258b277b919f34da8ac45392d8ca3c556d8fa2e",
+        "bytes": 12827
+      },
+      {
+        "path": "runtime/python-env.cjs",
+        "sha256": "3f9f3d9280a31caa38a9c7c0b85a6150e1e9683db3f43747c05ab46084b41cc4",
+        "bytes": 11026
+      },
+      {
+        "path": "schemas/tools.json",
+        "sha256": "122be80405fe37c63b33d514d63b6e821d371683537b916ff499089de7acf4bd",
+        "bytes": 5754
+      },
+      {
+        "path": "skills/index/SKILL.md",
+        "sha256": "83a13b234c4f446c6cbdedffb80c9b8018b856679e873366c3a41be5963b6b81",
+        "bytes": 928
+      },
+      {
+        "path": "skills/properties/SKILL.md",
+        "sha256": "be9270231126629309e4788bfc13d1d9994b975cdff758eb8ae741a55eb542a0",
+        "bytes": 812
+      },
+      {
+        "path": "skills/structures/SKILL.md",
+        "sha256": "36ceb6660e5ac05fb34fff089128fc97571fa7f094659a3ca7ee6ac12f43b9a9",
+        "bytes": 623
+      }
+    ]
+  }
+}

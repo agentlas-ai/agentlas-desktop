@@ -32,6 +32,16 @@ export class WorkerCapabilityError extends Error {
     this.cleanupFailure = options?.cleanupFailure;
   }
 }
+/**
+ * Codes of a preparation that failed before anything was dispatched and that can clear by themselves (a temp config racing its
+ * cleanup, a tool server still starting, an unexpected exception inside the helper). One shared retry for every team path
+ * (task force, firm, swarm). A changed boundary (scope-changed, a Stop, a vanished baseline) is not here: asking again would only
+ * repeat the refusal.
+ */
+const TRANSIENT_PREPARATION_CODES: ReadonlySet<string> = new Set([
+  "worker-capability-preparation-unavailable", "worker-capability-credential-or-server-unavailable", "worker_capabilities_failed",
+]);
+export const WORKER_PREPARATION_RETRY_DELAY_MS = 300;
 const RUNNER_KEYS = new Set(["mcpConfigPath", "mcpAllowedTools", "mcpCodexConfigArgs", "env", "isolatedMcpConfig", "browserOnly"]);
 
 /** A lease belongs to one actual runner call, including provider retries. */
@@ -46,10 +56,20 @@ export function workerCapabilityRunner(
   return async (request, events) => {
     let lease: WorkerCapabilityLease | undefined;
     let dispatched = false;
+    let completed = false;
     let pendingFailure: unknown;
     try {
       if (request.signal?.aborted) throw new WorkerCapabilityError("worker_capabilities_cancelled");
-      lease = await prepare({ ...input, permission: request.permission, cwd: request.cwd, signal: request.signal });
+      const prepareOnce = () => prepare({ ...input, permission: request.permission, cwd: request.cwd, signal: request.signal });
+      try { lease = await prepareOnce(); }
+      catch (error) {
+        // Nothing was dispatched, so asking once more is safe; once, and never after a Stop.
+        if (!(error instanceof WorkerCapabilityError) || !TRANSIENT_PREPARATION_CODES.has(error.code) || request.signal?.aborted) throw error;
+        report(`${error.code}:retrying`);
+        await new Promise((resolve) => setTimeout(resolve, WORKER_PREPARATION_RETRY_DELAY_MS));
+        if (request.signal?.aborted) throw new WorkerCapabilityError("worker_capabilities_cancelled");
+        lease = await prepareOnce();
+      }
       if (!lease || typeof lease.assertCurrent !== "function" || typeof lease.release !== "function"
         || !lease.runner || typeof lease.runner !== "object" || Array.isArray(lease.runner)
         || Object.keys(lease.runner).some((key) => !RUNNER_KEYS.has(key))) {
@@ -66,7 +86,9 @@ export function workerCapabilityRunner(
       lease.assertCurrent();
       report(input.ceiling === "host" ? "worker_capabilities_prepared" : "worker_capabilities_exact_grant_retained");
       dispatched = true;
-      return await runner({ ...request, ...lease.runner }, events);
+      const result = await runner({ ...request, ...lease.runner }, events);
+      completed = true;
+      return result;
     } catch (error) {
       if (!dispatched) {
         const failure = new WorkerCapabilityError(error instanceof WorkerCapabilityError ? error.code : "worker_capabilities_failed",
@@ -82,9 +104,11 @@ export function workerCapabilityRunner(
         try { await lease.release(); }
         catch (error) {
           report("worker_capabilities_release_failed");
+          // A turn that completed is not undone by failing to clean up after it (a temp config already gone): the result stands and
+          // the ledger records the cleanup failure. Failing the worker here threw away finished work for an internal cause.
           // Release can fail after real execution. Do not label it not-dispatched
           // or discard the original provider/transport observation.
-          throw new WorkerCapabilityError("worker_capabilities_release_failed", "worker_capabilities_release_failed",
+          if (!completed) throw new WorkerCapabilityError("worker_capabilities_release_failed", "worker_capabilities_release_failed",
             { cause: pendingFailure ?? error, ...(pendingFailure ? { cleanupFailure: error } : {}),
               ...(!dispatched ? { turnDelivery: "not-dispatched" as const } : {}) });
         }

@@ -8,6 +8,7 @@ import { getLongRunByGoalId, getLongRunAttemptGoalRevision, getLongRunGoalRevisi
 import { readGoalPlan, withCurrentGoalPlan, goalPlanInvocationReceipts, goalPlanOwnerControlEpoch, recordGoalPlanDecision } from "../store/goal-plans";
 import { readInvocationEffectBoundary } from "../invocation/effect-boundary-reader";
 import { currentUiLocale } from "../ui-locale";
+import { formatAutomationNextRun } from "../../shared/automation-next-run";
 import { parseGoalWaitIntent, type GoalWaitIntent } from "./wait-emitter";
 import { desktopStoreTransaction } from "../store/change-bus";
 import { captureEpisodeQuietBaseline, type AgiGoalFactsDeps } from "../agi/goal-facts";
@@ -15,6 +16,7 @@ import { latestGoalWaitSubscription } from "./wait-subscriptions";
 import type { GoalWaitSubscription } from "./wait-subscriptions";
 import { assertDesktopLongRunAdmissionOpen, desktopAppInstanceId } from "./app-runtime-coordinator";
 import { captureGoalExecutionControlGeneration, assertGoalExecutionControlGeneration, isGoalDispatchRefusal } from "../automation-execution-control";
+import { findOwnerTurnGoalGrant } from "./explicit-goal-authority";
 
 /** Process-local Main custody, captured at root runtime selection and never reconstructed at finish. */
 export interface GoalProducerAdmission { readonly invocationId: string }
@@ -24,6 +26,7 @@ interface ProducerAdmissionSource {
   runEventSeq: number | null;
   goalRevision: number | null; revisionDigest: string | null; taskId: string | null; ownerControlEpoch: string;
   promptMessageId: string | null; taskDigest: string | null; invocationAdmissionDigest: string | null;
+  initialOwnerClaimAuthorityRef: string | null;
 }
 const producerAdmissions = new WeakMap<GoalProducerAdmission, ProducerAdmissionSource>();
 interface AdmittedProducer {
@@ -71,12 +74,17 @@ export function captureGoalProducerAdmission(input: { invocationId: string; chat
   const run = input.goalId ? getLongRunByGoalId(input.goalId) : null;
   const revision = input.goalId ? getChatGoalRevision(input.goalId) : null;
   const task = run ? listLongRunTasks(run.id, true)[0] ?? null : null;
+  // A recovered revision keeps its original grant. A new live owner turn may
+  // separately claim a never-started, NULL-owner run; retain that turn's exact
+  // machine-recorded permission without rewriting the revision's authority.
+  const ownerGrant = input.goalId ? findOwnerTurnGoalGrant(getDb(), input.goalId, input.invocationId) : null;
   const token = Object.freeze({ invocationId: input.invocationId });
   producerAdmissions.set(token, { ...input, ...source, appInstanceId: desktopAppInstanceId(),
     runId: run?.id ?? null, runVersion: run?.version ?? null, goalRevision: revision?.revision ?? null,
     revisionDigest: revision ? digest(revision) : null,
     runEventSeq: run?.lastEventSeq ?? null,
     taskId: task?.id ?? null, taskDigest: task ? digest(task) : null,
+    initialOwnerClaimAuthorityRef: ownerGrant?.authorityRefs[0] ?? null,
     ownerControlEpoch: input.goalId ? goalPlanOwnerControlEpoch(input.goalId) : "[]" });
   return token;
 }
@@ -111,9 +119,17 @@ export function admitGoalProducer(input: { admission: GoalProducerAdmission; goa
       || (custody.runId && (run.id !== custody.runId || (run.version !== custody.runVersion && !ownAdoption)
         || input.worker.taskId !== custody.taskId || digest(task) !== custody.taskDigest))
       || (custody.goalRevision !== null && (revision.revision !== custody.goalRevision || digest(revision) !== custody.revisionDigest))) throw new Error("goal_episode_admission_stale");
-    if ((run.appInstanceId === null || custody.goalRevision === null) && (!source.promptMessageId
-      || revision.sourceMessage.messageId !== source.promptMessageId
-      || !revision.authorityRefs.some(ref => ref === `invocation:${custody.invocationId}:permission:${input.worker.permissionProfile}`))) {
+    const permissionRef = `invocation:${custody.invocationId}:permission:${input.worker.permissionProfile}`;
+    const sameRevisionGrant = Boolean(source.promptMessageId && revision.sourceMessage.messageId === source.promptMessageId
+      && revision.authorityRefs.includes(permissionRef));
+    const currentOwnerGrant = run.appInstanceId === null && custody.goalRevision !== null
+      ? findOwnerTurnGoalGrant(db, input.goalId, custody.invocationId) : null;
+    const initialOwnerClaim = run.appInstanceId === null && custody.goalRevision !== null
+      && custody.initialOwnerClaimAuthorityRef === permissionRef && source.promptMessageId !== null
+      && currentOwnerGrant?.sourceMessage.messageId === source.promptMessageId
+      && currentOwnerGrant.authorityRefs.includes(permissionRef);
+    if ((custody.goalRevision === null && !sameRevisionGrant)
+      || (run.appInstanceId === null && !sameRevisionGrant && !initialOwnerClaim)) {
       throw new Error("goal_episode_admission_source_invalid");
     }
     if (goalPlanInvocationReceipts(input.goalId, custody.invocationId).some(row => row.kind === "marker_context")) {
@@ -479,7 +495,9 @@ export function drainGoalEpisodeNotices(limit = 20): void {
         : receipt.waitState === "dispatched" ? (ko ? "등록된 대기 조건을 확인하고 후속 실행을 접수했어요." : "The registered condition was observed and its successor run was accepted.")
           : receipt.waitState === "claimed" ? (ko ? "대기 조건을 확인했어요. 후속 실행의 접수 여부를 확인 중입니다." : "The wait condition was observed. Successor acceptance is being reconciled.")
             : (ko ? "대기를 등록했어요. 앱 실행 중 확인합니다." : "The wait is registered and checked while the app is running.")
-              + (receipt.nextCheckAt ? ` ${receipt.nextCheckAt}` : "");
+              // The time the owner reads is a local date and clock, never the stored UTC instant ("2026-10-29T06:00:00.000Z").
+              + (receipt.nextCheckAt && Number.isFinite(Date.parse(receipt.nextCheckAt))
+                ? ` ${ko ? "다음 확인" : "Next check"}: ${formatAutomationNextRun(receipt.nextCheckAt, null, ko ? "ko" : "en")}` : "");
       const id = randomUUID();
       insertHostNoticeInTransaction({ id, chatId: item.chat_id, text, createdAt: new Date().toISOString(),
         hostNotice: { purpose: "host-status", runId: capture.custody.producerInvocationId, status: held ? "wait-not-scheduled" : "wait-registered" } });

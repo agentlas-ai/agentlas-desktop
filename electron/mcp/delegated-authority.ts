@@ -1,12 +1,15 @@
 import { realpathSync } from "node:fs";
 import { effectiveInvocationPermission } from "../../shared/invocation-permission";
+import { agentRunCwd } from "../runtime/exec";
 
 type Permission = "read" | "write" | "full";
 declare const hostGrantBrand: unique symbol;
 /** Host-local token. Copying its JSON does not copy its authority. */
 export interface HostDelegatedGrant { readonly [hostGrantBrand]: true }
 interface Grant {
-  runId: string; ownerChatId: string; scopeKey: string; workspace: string;
+  runId: string; ownerChatId: string; scopeKey: string;
+  /** The folder the step runs in. Absent for a run with no bound folder: it executes in the app's agent cwd (see runWorkspace). */
+  workspace?: string | null;
   permission: "write" | "full"; authorizationRef: string;
   source: "owner-approved-step" | "host-step-escalation";
   signal: AbortSignal;
@@ -26,6 +29,13 @@ function fail(code: string, detail: Record<string, string> = {}): never {
 function workspacePath(value: string): string {
   try { return realpathSync.native(value); } catch { return fail("delegated_authority_workspace_unavailable"); }
 }
+/** The workspace a run executes in. A global One chat has no bound folder; every runner then starts in the app's agent cwd
+ * (`req.cwd ?? agentRunCwd()`), so that folder IS the step's workspace and a grant pins to it like to any other. A missing
+ * workspace used to be a refusal on both sides (mint: delegated_authority_scope_missing, check: workspace_mismatch), which
+ * made a full-chip step of a global chat impossible to lift (observed in 1.3.105: 8 of 8 lifts refused). */
+function runWorkspace(value: string | null | undefined): string {
+  return workspacePath(value || agentRunCwd());
+}
 
 /** Call only after the host accepted an exact step escalation, never from a planner value or merely because a parent request
  * contains `full`. The authority is the owner's chip or approval (the executor setting); this token only proves to the nested
@@ -41,7 +51,7 @@ export function mintHostDelegatedGrant(input: Grant): HostDelegatedGrant {
   }
   input.assertCurrent?.();
   const token = Object.freeze({}) as HostDelegatedGrant;
-  grants.set(token, Object.freeze({ ...input, workspace: workspacePath(input.workspace) }));
+  grants.set(token, Object.freeze({ ...input, workspace: runWorkspace(input.workspace) }));
   return token;
 }
 
@@ -63,7 +73,7 @@ export function resolveHostDelegatedPermission(
   grant.signal.throwIfAborted();
   grant.assertCurrent?.();
   if (context.runId !== grant.runId || context.scopeKey !== grant.scopeKey) fail("delegated_authority_step_mismatch");
-  if (!context.workspace || workspacePath(context.workspace) !== grant.workspace) fail("delegated_authority_workspace_mismatch");
+  if (runWorkspace(context.workspace) !== grant.workspace) fail("delegated_authority_workspace_mismatch");
   return ceiling === "full" ? grant.permission : "write";
 }
 
@@ -79,7 +89,7 @@ export function attestDelegatedPermission(input: {
     expectedPermission: permission, actualPermission: String(input.actualPermission),
   });
   if (input.grant && permission !== "read"
-    && (!input.actualWorkspace || workspacePath(input.actualWorkspace) !== workspacePath(input.context.workspace!))) {
+    && runWorkspace(input.actualWorkspace) !== runWorkspace(input.context.workspace)) {
     fail("delegated_authority_runner_workspace_mismatch");
   }
   const grant = input.grant ? grants.get(input.grant) : undefined;

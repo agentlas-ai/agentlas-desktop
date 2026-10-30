@@ -212,9 +212,13 @@ export async function fetchPollValue(source: PollSource): Promise<string | null>
     case "invocation": {
       const rows = getDb().prepare("SELECT kind, chat_id FROM run_events WHERE run_id = ? ORDER BY seq ASC")
         .all(source.runId) as Array<{ kind: string; chat_id: string | null }>;
+      const terminalKinds = ["invoke_completed", "invoke_failed", "invoke_threw", "invoke_cancelled", "invoke_interrupted"];
+      // Only the rows this observation reads (the start and the terminal) must belong to the watched chat. A team's member chats and
+      // the memory curator write their own notes under the parent run id with their own chat id (effect-boundary-reader.ts);
+      // those say nothing about this run's outcome, and must not make a watched team turn "unobservable".
       if (!rows.some(row => row.kind === "invoke_started" && row.chat_id === source.chatId)
-        || rows.some(row => row.chat_id && row.chat_id !== source.chatId)) return null;
-      const terminal = rows.filter(row => ["invoke_completed", "invoke_failed", "invoke_threw", "invoke_cancelled", "invoke_interrupted"].includes(row.kind)).at(-1);
+        || rows.some(row => (row.kind === "invoke_started" || terminalKinds.includes(row.kind)) && row.chat_id && row.chat_id !== source.chatId)) return null;
+      const terminal = rows.filter(row => terminalKinds.includes(row.kind)).at(-1);
       return terminal ? ({ invoke_completed: "completed", invoke_failed: "failed", invoke_threw: "failed",
         invoke_cancelled: "cancelled", invoke_interrupted: "interrupted" } as Record<string, string>)[terminal.kind] : "running";
     }

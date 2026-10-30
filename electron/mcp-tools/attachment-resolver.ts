@@ -13,7 +13,8 @@ import type {
 } from "../../shared/types";
 import { hasEnvVar } from "../secrets/vault";
 import { testServerConnection } from "./client";
-import { buildMcpConfigFile, type McpConfigResult } from "./mcp-config";
+import { isKeylessPlaywrightMcpDuplicate, type McpConfigResult } from "./mcp-config";
+import { buildNativeBrowserMcpConfig } from "../browser/native-mcp-config";
 import { installFromCatalog, listInstalledServers } from "./registry";
 import { installHubPlugin } from "./hub-plugin-bridge";
 import { installedServerMatchesPluginSlug } from "../../shared/plugin-slug";
@@ -52,6 +53,13 @@ export interface ResolvedMcpBuildAttachment {
   runtimeBindings: Array<{ candidateId: string; serverId: string; configKey: string }>;
   /** Main-only single recovery hook. It never broadens the user's selected candidates. */
   recoverRuntimeFailure?: (failedCandidateId: string) => Promise<ResolvedMcpBuildAttachment | null>;
+  /** Main-only closure: renderer consent cannot supply the actual run or a browser grant. */
+  prepareForBuildRun?: (runId: string, signal: AbortSignal) => Promise<ResolvedMcpBuildAttachment>;
+}
+
+export interface NativeBuildMcpRun {
+  runId: string;
+  signal: AbortSignal;
 }
 
 export interface McpAttachmentResolverDependencies {
@@ -64,7 +72,7 @@ export interface McpAttachmentResolverDependencies {
     connected: boolean;
     missingEnv: string[];
   }>;
-  buildConfig: (serverIds: string[], planId: string) => Promise<McpConfigResult | null>;
+  buildConfig: (serverIds: string[], planId: string, nativeBuildRun?: NativeBuildMcpRun) => Promise<McpConfigResult | null>;
 }
 
 const DEFAULT_DEPS: McpAttachmentResolverDependencies = {
@@ -78,23 +86,32 @@ const DEFAULT_DEPS: McpAttachmentResolverDependencies = {
   },
   hasEnv: hasEnvVar,
   testServer: (server) => testServerConnection(server, { timeoutMs: 15_000 }),
-  buildConfig: (serverIds, planId) =>
-    buildMcpConfigFile({
+  buildConfig: async (serverIds, planId, nativeBuildRun) => {
+    const nativeBrowser = listInstalledServers().some(server => serverIds.includes(server.id)
+      && (server.catalogId === "agentlas-browser" || isKeylessPlaywrightMcpDuplicate(server)));
+    const config = await buildNativeBrowserMcpConfig({
       serverIds,
       skipDefaultSeed: true,
-      configKey: `build-${planId}`,
+      configKey: nativeBuildRun ? `build-${nativeBuildRun.runId}-${planId}` : `build-${planId}`,
+      ...(nativeBrowser ? { browserProfileKey: `automation-build-${nativeBuildRun?.runId}`, requiredToolCatalogIds: serverIds } : {}),
+      ...(nativeBuildRun ? { admissionCurrent: () => !nativeBuildRun.signal.aborted } : {}),
       browserApproval: {
         owner: {
           surface: "work",
           context: "build",
           chatId: null,
-          sessionKey: `build:${planId}`,
+          sessionKey: `build:${nativeBuildRun?.runId ?? planId}`,
         },
         // Build has no Full-control switch. Keep irreversible browser actions
         // gated even though the builder itself has filesystem write authority.
         permission: "write",
       },
-    }),
+    }, nativeBrowser && nativeBuildRun ? { chatId: `build-${nativeBuildRun.runId}`, runId: nativeBuildRun.runId,
+      permission: "write", signal: nativeBuildRun.signal, presentation: "background" } : null);
+    if (!config || !nativeBrowser) return config;
+    return { ...config, runtimeEnv: { ...config.runtimeEnv, AGENTLAS_NATIVE_BROWSER_SCOPE: "task" },
+      includedServerIds: [...new Set(config.includedServers?.map(server => server.serverId) ?? config.includedServerIds)] };
+  },
 };
 
 /**
@@ -187,14 +204,38 @@ function createGroupState(candidates: InternalMcpBuildCandidate[]): GroupResolut
   };
 }
 
+function buildBrowserNeedsNativeScope(candidate: InternalMcpBuildCandidate, server: InstalledMcpServer | null): boolean {
+  return server ? server.catalogId === "agentlas-browser" || isKeylessPlaywrightMcpDuplicate(server)
+    : candidate.public.catalogId === "agentlas-browser";
+}
+
+function stopUnboundBuildBrowserGroup(state: GroupResolutionState, candidate: InternalMcpBuildCandidate): void {
+  state.degraded.push(receiptItem(candidate, "degraded", "native_browser_scope_missing"));
+  state.unavailable.push(candidate.public.id);
+  // A Build consent does not carry a chat/run browser grant. It cannot turn
+  // that missing authority into permission to try another browser session.
+  for (const fallback of state.ordered.slice(state.cursor)) {
+    state.degraded.push(receiptItem(fallback, "degraded", "fallback_blocked_by_configuration"));
+    state.unavailable.push(fallback.public.id);
+  }
+  state.cursor = state.ordered.length;
+}
+
 async function advanceFallbackGroup(input: {
   state: GroupResolutionState;
   runtime: RuntimeSelection | null;
   deps: McpAttachmentResolverDependencies;
+  nativeBuildRun?: NativeBuildMcpRun;
 }): Promise<void> {
   while (!input.state.attached && input.state.cursor < input.state.ordered.length) {
+    input.nativeBuildRun?.signal.throwIfAborted();
     const candidate = input.state.ordered[input.state.cursor];
     input.state.cursor += 1;
+    let server = currentServer(candidate, input.deps);
+    if (buildBrowserNeedsNativeScope(candidate, server) && !input.nativeBuildRun) {
+      stopUnboundBuildBrowserGroup(input.state, candidate);
+      return;
+    }
     if (!isRuntimeMcpCompatible(input.runtime, candidate.transport)) {
       input.state.degraded.push(receiptItem(candidate, "degraded", "runtime_incompatible"));
       input.state.unavailable.push(candidate.public.id);
@@ -206,7 +247,6 @@ async function advanceFallbackGroup(input: {
       continue;
     }
 
-    let server = currentServer(candidate, input.deps);
     if (!server && candidate.hub) {
       let hubError: unknown = null;
       try {
@@ -247,6 +287,20 @@ async function advanceFallbackGroup(input: {
       input.state.unavailable.push(candidate.public.id);
       continue;
     }
+    if (buildBrowserNeedsNativeScope(candidate, server) && !input.nativeBuildRun) {
+      stopUnboundBuildBrowserGroup(input.state, candidate);
+      return;
+    }
+    if (buildBrowserNeedsNativeScope(candidate, server)) {
+      // A failed native candidate may try another approved alias of the same
+      // session, but never a custom/empty browser as an automatic fallback.
+      const remaining = input.state.ordered.slice(input.state.cursor);
+      const sameSession = remaining.filter(next => buildBrowserNeedsNativeScope(next, currentServer(next, input.deps)));
+      for (const next of remaining) if (!sameSession.includes(next)) {
+        input.state.degraded.push(receiptItem(next, "degraded", "fallback_blocked_by_configuration"));
+      }
+      input.state.ordered = [...input.state.ordered.slice(0, input.state.cursor), ...sameSession];
+    }
     if (!(await allKeysPresent(server.envKeys, input.deps, server))) {
       input.state.missingKey.push(receiptItem(candidate, "missing_key", "missing_key"));
       input.state.unavailable.push(candidate.public.id);
@@ -259,6 +313,7 @@ async function advanceFallbackGroup(input: {
     } catch {
       status = { connected: false, missingEnv: [] };
     }
+    input.nativeBuildRun?.signal.throwIfAborted();
     if (status.missingEnv.length > 0) {
       input.state.missingKey.push(receiptItem(candidate, "missing_key", "missing_key"));
       input.state.unavailable.push(candidate.public.id);
@@ -333,7 +388,13 @@ export async function resolveApprovedMcpCandidates(input: {
   runtime: RuntimeSelection | null;
   deps?: McpAttachmentResolverDependencies;
   allowRuntimeRecovery?: boolean;
+  /** Main-owned execution context, absent while reviewing the consent plan. */
+  nativeBuildRun?: NativeBuildMcpRun;
 }): Promise<ResolvedMcpBuildAttachment> {
+  if (input.nativeBuildRun) {
+    if (!/^[A-Za-z0-9_:.-]{1,160}$/.test(input.nativeBuildRun.runId)) throw new Error("native-browser-task-unbound");
+    input.nativeBuildRun.signal.throwIfAborted();
+  }
   const deps = input.deps ?? DEFAULT_DEPS;
   const candidateById = new Map(input.candidates.map((candidate) => [candidate.public.id, candidate]));
   const selected = new Set(input.selectedCandidateIds);
@@ -355,7 +416,7 @@ export async function resolveApprovedMcpCandidates(input: {
   const groupEntries = [...groups.values()];
   const groupStates = groupEntries.map(createGroupState);
   const settled = await Promise.allSettled(
-    groupStates.map((state) => advanceFallbackGroup({ state, runtime: input.runtime, deps })),
+    groupStates.map((state) => advanceFallbackGroup({ state, runtime: input.runtime, deps, nativeBuildRun: input.nativeBuildRun })),
   );
   for (let groupIndex = 0; groupIndex < settled.length; groupIndex += 1) {
     const item = settled[groupIndex];
@@ -368,6 +429,7 @@ export async function resolveApprovedMcpCandidates(input: {
   // key disappeared), advance only that group and rebuild. Every rejection
   // consumes one candidate, so the selected-candidate bound prevents loops.
   for (let attempt = 0; attempt <= selectedCandidates.length; attempt += 1) {
+    input.nativeBuildRun?.signal.throwIfAborted();
     const active = groupStates.flatMap((state) => state.attached ? [state.attached] : []);
     if (active.length === 0) {
       config = null;
@@ -375,8 +437,12 @@ export async function resolveApprovedMcpCandidates(input: {
     }
     let nextConfig: McpConfigResult | null = null;
     try {
-      nextConfig = await deps.buildConfig(active.map((entry) => entry.serverId), input.planId);
-    } catch {
+      nextConfig = await deps.buildConfig(active.map((entry) => entry.serverId), input.planId, input.nativeBuildRun);
+    } catch (error) {
+      if (input.nativeBuildRun && active.some(entry => {
+        const candidate = candidateById.get(entry.item.candidateId)!;
+        return buildBrowserNeedsNativeScope(candidate, currentServer(candidate, deps));
+      })) throw error;
       nextConfig = null;
     }
     const included = new Set(nextConfig?.includedServerIds ?? []);
@@ -399,7 +465,7 @@ export async function resolveApprovedMcpCandidates(input: {
       state.attached = null;
     }
     const advanced = await Promise.allSettled(
-      rejectedStates.map((state) => advanceFallbackGroup({ state, runtime: input.runtime, deps })),
+      rejectedStates.map((state) => advanceFallbackGroup({ state, runtime: input.runtime, deps, nativeBuildRun: input.nativeBuildRun })),
     );
     for (let index = 0; index < advanced.length; index += 1) {
       if (advanced[index].status === "rejected") markRemainingGroupHostFailure(rejectedStates[index]);
@@ -475,6 +541,11 @@ export async function resolveApprovedMcpCandidates(input: {
         ),
     runtimeBindings,
   };
+  if (!input.nativeBuildRun && selectedCandidates.some(candidate => buildBrowserNeedsNativeScope(candidate, currentServer(candidate, deps)))) {
+    resolvedAttachment.prepareForBuildRun = (runId, signal) => resolveApprovedMcpCandidates({
+      ...input, nativeBuildRun: { runId, signal },
+    });
+  }
 
   if (input.allowRuntimeRecovery !== false && config && receipt.attached.length > 0) {
     const baseCleanup = config.cleanup;
@@ -494,7 +565,11 @@ export async function resolveApprovedMcpCandidates(input: {
       const healthyCandidateIds = receipt.attached
         .filter((item) => item.candidateId !== failedCandidateId)
         .map((item) => item.candidateId);
-      const remainingSelected = [...selected].filter((candidateId) => candidateId !== failedCandidateId);
+      const failedCandidate = candidateById.get(failedCandidateId)!;
+      const nativeFailed = Boolean(input.nativeBuildRun && buildBrowserNeedsNativeScope(failedCandidate, currentServer(failedCandidate, deps)));
+      const remainingSelected = [...selected].filter(candidateId => candidateId !== failedCandidateId
+        && (!nativeFailed || candidateById.get(candidateId)?.public.fallbackGroup !== failedItem.fallbackGroup
+          || buildBrowserNeedsNativeScope(candidateById.get(candidateId)!, currentServer(candidateById.get(candidateId)!, deps))));
       const recovered = await resolveApprovedMcpCandidates({
         planId: input.planId,
         candidates: input.candidates,
@@ -502,6 +577,7 @@ export async function resolveApprovedMcpCandidates(input: {
         runtime: input.runtime,
         deps,
         allowRuntimeRecovery: false,
+        nativeBuildRun: input.nativeBuildRun,
       });
       const recoveredIds = new Set(recovered.receipt.attached.map((item) => item.candidateId));
       // Every originally healthy capability must remain exact. The failed

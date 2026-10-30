@@ -70,6 +70,117 @@ export function takeGoalSignals(key: string | null | undefined): GoalSignals | n
   return entry && (entry.signals.wait || entry.signals.complete || entry.signals.planLines?.length) ? entry.signals : null;
 }
 
+/** The longest next_action the wait parser takes (long-run/wait-emitter.ts). */
+export const GOAL_WAIT_NEXT_ACTION_MAX = 2000;
+
+/**
+ * next_action as the wait parser takes it: at most 2000 characters. A model that wrote a longer plan for its next cycle was refused
+ * goal_wait_request_invalid (7 times since 10-19; every one of those calls was 2,000+ characters long, cut at the log's 2,014), with a hint
+ * that never said which field or how long. The text is kept whole up to the bound; past it, whitespace is collapsed and the end is cut
+ * with an ellipsis, so the wait is registered with the start of the plan, where a plan puts what to do first.
+ */
+export function fitWaitNextAction(value: unknown): unknown {
+  if (typeof value !== "string" || value.length <= GOAL_WAIT_NEXT_ACTION_MAX) return value;
+  const flat = value.replace(/\s+/g, " ").trim();
+  return flat.length <= GOAL_WAIT_NEXT_ACTION_MAX ? flat : `${flat.slice(0, GOAL_WAIT_NEXT_ACTION_MAX - 1).trimEnd()}\u2026`;
+}
+
+const WAIT_ARG_KEYS = ["subject_kind", "condition", "invocation_run_id", "chat_id", "artifact_id", "automation_id", "not_before", "next_action", "deadline"] as const;
+const squashKey = (key: string): string => key.toLowerCase().replace(/[^a-z0-9]/g, "");
+const WAIT_ARG_BY_SQUASHED = new Map<string, string>([
+  ...WAIT_ARG_KEYS.map((key) => [squashKey(key), key] as [string, string]),
+  // Near misses of the documented names that cannot mean anything else.
+  ["kind", "subject_kind"], ["subject", "subject_kind"], ["invocationid", "invocation_run_id"], ["runid", "invocation_run_id"],
+  ["wakeat", "not_before"], ["resumeat", "not_before"], ["dueat", "not_before"], ["notbeforeat", "not_before"], ["deadlineat", "deadline"],
+]);
+const WAIT_SUBJECT_FIELDS: Record<string, readonly string[]> = { invocation: ["invocation_run_id", "chat_id"], artifact: ["artifact_id"], automation: ["automation_id"], timer: ["not_before"] };
+const WAIT_CONDITION_OF: Record<string, string> = { invocation: "terminal", artifact: "changed", automation: "changed", timer: "due" };
+
+/** A time as the wait parser takes it: an ISO string. Epoch seconds / milliseconds and an empty string are what models write instead. */
+function waitTime(value: unknown): unknown {
+  if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+    const ms = value < 1e11 ? value * 1000 : value;
+    const at = new Date(ms);
+    return Number.isFinite(at.getTime()) ? at.toISOString() : value;
+  }
+  if (typeof value === "string" && !value.trim()) return undefined;
+  return value;
+}
+
+/**
+ * What a goal_wait call means, read the way a person would: `notBefore` / `next-action` / `Kind` are the documented names, a
+ * timer with a `not_before` and no `subject_kind` is a timer wait, a missing `condition` is the one the subject kind has, a time
+ * given as epoch seconds is that time, and a field this tool does not take (`reason`, `note`) says nothing the wait needs. Refused
+ * as before: no readable subject at all, a subject missing its own field, and every value the parser itself rejects
+ * (validateGoalWaitIntent), so the registered wait is always what the text protocol would have registered.
+ */
+export function readGoalWaitArgs(rawArgs: Record<string, unknown>): { args: Record<string, unknown>; ignored: string[] } {
+  const args: Record<string, unknown> = {};
+  const ignored: string[] = [];
+  // The text protocol nests the subject ({"subject":{"kind":"timer","notBefore":...}}); a model that has both in mind writes that here.
+  const { subject: nested, ...flat } = rawArgs;
+  const raw: Record<string, unknown> = nested && typeof nested === "object" && !Array.isArray(nested)
+    ? { ...(nested as Record<string, unknown>), ...flat } : rawArgs;
+  for (const [key, value] of Object.entries(raw)) {
+    const canonical = WAIT_ARG_BY_SQUASHED.get(squashKey(key));
+    if (!canonical) { ignored.push(key); continue; }
+    if (args[canonical] === undefined || canonical === key) args[canonical] = value;
+  }
+  for (const key of ["not_before", "deadline"]) if (key in args) { const t = waitTime(args[key]); if (t === undefined) delete args[key]; else args[key] = t; }
+  if (typeof args.subject_kind === "string") args.subject_kind = args.subject_kind.trim().toLowerCase();
+  if (args.subject_kind === undefined || args.subject_kind === "") {
+    const present = Object.keys(WAIT_SUBJECT_FIELDS).filter((kind) => WAIT_SUBJECT_FIELDS[kind]!.some((field) => args[field] !== undefined));
+    // chat_id alone is also an invocation field; a timer carrying its own chat_id is still the timer (its own field decides).
+    const decided = present.length === 1 ? present[0] : present.includes("timer") && !present.includes("artifact") && !present.includes("automation") ? "timer" : null;
+    if (decided) args.subject_kind = decided;
+  }
+  const kind = typeof args.subject_kind === "string" ? args.subject_kind : "";
+  const own = WAIT_SUBJECT_FIELDS[kind];
+  // The condition follows from the kind. Fill it when absent; when it names another kind's condition and the subject is complete, the subject decides.
+  if (own && own.every((field) => args[field] !== undefined) && args.condition !== WAIT_CONDITION_OF[kind]) args.condition = WAIT_CONDITION_OF[kind];
+  return { args, ignored };
+}
+
+const KPI_ID = /^[a-z0-9][a-z0-9_.-]{0,39}$/;
+const kpiKey = (value: string): string => value.toLowerCase().replace(/[\s_.-]+/g, "");
+function shortHash(text: string): string {
+  let a = 0x811c9dc5, b = 0x1b873593 ^ text.length;
+  for (let i = 0; i < text.length; i += 1) {
+    const c = text.charCodeAt(i);
+    a = Math.imul(a ^ c, 16777619) >>> 0;
+    b = Math.imul(b + c, 2246822519) >>> 0;
+    b ^= b >>> 13;
+  }
+  return `${a.toString(36)}${b.toString(36)}`.slice(0, 12);
+}
+
+/**
+ * The `kpi` of a goal_kpi sample as the KPI parser (shared/agent-strategy.ts kpiIdOf) can read it. The parser takes an ASCII id
+ * (a-z, 0-9, _ . -, at most 40); a model that wrote the KPI's display name (일일_파생_숏폼_게시_수) was refused goal_kpi_invalid four times
+ * in a row, and the retry with name/unit added failed the same way because the id was still the name. A label that is the id or the
+ * name of one of this Goal's KPIs is that KPI; any other label becomes a stable ASCII id (k-<hash of the label>) and, when the sample
+ * names none, its name, so the sample defines a tracked KPI of that name instead of being dropped.
+ */
+export function resolveKpiSampleId(args: Record<string, unknown>, existing: ReadonlyArray<{ kpiId: string; name: string }>): Record<string, unknown> {
+  const raw = typeof args.kpi === "string" ? args.kpi.replace(/\s+/g, " ").trim() : "";
+  if (!raw) return args;
+  const known = existing.find((item) => item.kpiId.toLowerCase() === raw.toLowerCase());
+  if (known) return args;
+  if (KPI_ID.test(raw.toLowerCase().slice(0, 40))) return args;
+  const byLabel = existing.find((item) => kpiKey(item.kpiId) === kpiKey(raw) || (item.name && kpiKey(item.name) === kpiKey(raw)));
+  if (byLabel) return { ...args, kpi: byLabel.kpiId };
+  const named = typeof args.name === "string" && args.name.trim();
+  return { ...args, kpi: `k-${shortHash(kpiKey(raw))}`, ...(named ? {} : { name: raw.replace(/_/g, " ").slice(0, 80) }) };
+}
+
+/** goal_complete's evidence / summary as text: a list of lines, a number or a flag is what it says; anything else is not evidence. */
+export function completionText(value: unknown): string | undefined {
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (Array.isArray(value)) { const parts = value.filter((item): item is string | number => typeof item === "string" || typeof item === "number"); return parts.length ? parts.join("; ") : undefined; }
+  return undefined;
+}
+
 /** The marker the text protocol would carry for this evidence; the payload cannot contain `>` or a line break. */
 export function goalCompleteMarkerText(evidence: string | null): string {
   const clean = (evidence ?? "").replace(/[>\r\n]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 240);

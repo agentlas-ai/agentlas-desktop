@@ -103,6 +103,7 @@ export type McpBuildReceiptReason =
   | "connection_failed"
   | "runtime_startup_failed"
   | "configuration_rejected"
+  | "native_browser_scope_missing"
   | "host_failure"
   | "fallback_blocked_by_configuration";
 

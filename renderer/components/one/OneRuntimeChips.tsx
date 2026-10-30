@@ -9,9 +9,13 @@ import { IconAlertTriangle, IconChevronDown, IconRoute, IconSparkles } from "@/c
 import { runtimeModelDisplayLabel, runtimeModelFallbackLabel } from "@/components/dashboard/RuntimeModelPicker";
 import { ipc, ipcEvents } from "@/lib/ipc";
 import { llmLogoSrc } from "@/lib/llm-logo";
-import { chipRuntimeFor, composerModelLabel, useRunningComposerModel, withOneRuntimeSelection } from "@/lib/one-runtime-chip";
-import { selectionForRuntime } from "@shared/runtime-selection";
+import { beginChatSelection, useChatSelectionIntent, readChatSelectionIntent, reconcileChatSelectionIntent } from "@/lib/chat-selection-intent";
+import { readChatForRuntime } from "@/lib/chat-runtime-read";
+import { goalRuntimeRefusalNotice, isOvertakenSelectionCode } from "@/lib/goal-runtime-refusal";
+import { assertOneExplicitEffort, chipRuntimeFor, composerModelLabel, useRunningComposerModel, withOneRuntimeSelection } from "@/lib/one-runtime-chip";
 import { runtimeSelectionReceiptMatches } from "@shared/runtime-selection-receipt";
+import { ipcErrorCode } from "@shared/ipc-error-code";
+import { sameRuntimeIdentity, selectionForRuntime } from "@shared/runtime-selection";
 import type { Chat, RuntimeSelection, RuntimeStatus } from "@shared/types";
 import { OneComposerControls, type OneComposerMenuKey, type OneComposerModelOption } from "./OneComposerControls";
 import styles from "./OneShell.module.css";
@@ -34,6 +38,7 @@ export function OneRuntimeChips({
   onSelectionConfirmed?: (chat: Chat) => void;
 }) {
   const draft = draftSelection !== undefined;
+  const choice = useChatSelectionIntent(draft ? null : chatId);
   const runningModel = useRunningComposerModel(draft ? null : chatId);
   const [inventory, setInventory] = useState<RuntimeStatus[]>([]);
   const [models, setModels] = useState<OneComposerModelOption[]>([]);
@@ -41,10 +46,22 @@ export function OneRuntimeChips({
   const [revision, setRevision] = useState(0);
   const [menu, setMenu] = useState<"model" | "effort" | null>(null);
   const [failed, setFailed] = useState(false);
+  // Set only for a refusal caused outside the app (signed out, not installed...): the one plain sentence that says which.
+  const [refusal, setRefusal] = useState<string | null>(null);
   const modelTrigger = useRef<HTMLButtonElement>(null);
   const effortTrigger = useRef<HTMLButtonElement>(null);
   const chatRef = useRef(chatId);
+  const pinReadGenerationRef = useRef(0);
   chatRef.current = chatId;
+  const pickerViewRef = useRef({ chatId, generation: 0, mounted: true });
+  if (pickerViewRef.current.chatId !== chatId) {
+    pickerViewRef.current.chatId = chatId;
+    pickerViewRef.current.generation += 1;
+  }
+  useEffect(() => {
+    pickerViewRef.current.mounted = true;
+    return () => { pickerViewRef.current.mounted = false; pickerViewRef.current.generation += 1; };
+  }, []);
 
   useEffect(() => {
     const api = ipc();
@@ -64,7 +81,12 @@ export function OneRuntimeChips({
   useEffect(() => {
     if (draft || !chatId) return;
     return ipcEvents()?.onStoreChanged?.((change) => {
-      if (change.entity === "chat" && change.id === chatId) setRevision((value) => value + 1);
+      if (change.entity === "chat" && change.id === chatId) {
+        const api = ipc();
+        if (api) void reconcileChatSelectionIntent(api, chatId);
+        pinReadGenerationRef.current += 1;
+        setRevision((value) => value + 1);
+      }
     });
   }, [chatId, draft]);
 
@@ -72,14 +94,17 @@ export function OneRuntimeChips({
     if (draft) return;
     const api = ipc();
     setFailed(false);
+    setRefusal(null);
     if (!chatId || !api?.chats?.get) { setPin(null); return; }
     let cancelled = false;
+    const readGeneration = ++pinReadGenerationRef.current;
+    const isCurrent = () => !cancelled && chatRef.current === chatId && pinReadGenerationRef.current === readGeneration;
     void (async () => {
-      const chat = await api.chats.get(chatId);
+      const chat = await readChatForRuntime(api.chats, chatId, isCurrent);
       if (!chat || chat.id !== chatId) throw new Error("chat_runtime_selection_unavailable");
       const selection = chat?.runtimeSelection ?? null;
-      if (!cancelled) setPin({ chatId, selection });
-    })().catch(() => { if (!cancelled) setPin(null); });
+      if (isCurrent()) setPin({ chatId, selection });
+    })().catch(() => { if (isCurrent()) setPin(null); });
     return () => { cancelled = true; };
   }, [chatId, revision, draft]);
 
@@ -105,7 +130,7 @@ export function OneRuntimeChips({
     return () => { cancelled = true; };
   }, [inventory]);
 
-  const shownPin = draft ? draftSelection.value : pin && pin.chatId === chatId ? pin.selection : null;
+  const shownPin = draft ? draftSelection.value : choice?.selection ?? (pin && pin.chatId === chatId ? pin.selection : null);
   const runtime = useMemo(() => draft
     ? chipRuntimeFor(inventory, shownPin)
     : pin && pin.chatId === chatId ? chipRuntimeFor(inventory, shownPin) : null,
@@ -130,45 +155,105 @@ export function OneRuntimeChips({
   }, [menu]);
 
   const apply = useCallback(async (patch: { model?: string; effort?: string }, runtimeOverride?: RuntimeStatus) => {
+    const generation = pickerViewRef.current.generation;
+    const pickerIsCurrent = () => pickerViewRef.current.mounted && pickerViewRef.current.generation === generation
+      && chatRef.current === chatId;
+    if (!pickerIsCurrent()) return;
     const base = runtimeOverride ?? runtime;
-    setMenu(null);
+    setMenu(current => pickerIsCurrent() ? null : current);
     if (!base || disabled) return;
     const nextModel = patch.model !== undefined ? patch.model || null : base.model ?? null;
     const requestedEffort = patch.effort !== undefined ? patch.effort || null : patch.model !== undefined ? undefined : base.effort;
+    if (patch.effort !== undefined) {
+      try { assertOneExplicitEffort(base, nextModel, requestedEffort ?? null); }
+      catch { setFailed(true); return; }
+    }
     const selection = selectionForRuntime(withOneRuntimeSelection(base, nextModel, requestedEffort), { role: "orchestrator", inherit: false, includeSource: false });
     if (draftSelection !== undefined) { draftSelection.onChange(selection); return; }
     const api = ipc();
-    const target = chatRef.current;
+    const target = chatId;
     if (!api?.chats || !target) return;
+    const intent = beginChatSelection(target, selection);
+    let writeStarted = false;
+    let writeAcknowledged = false;
+    const readSavedSelection = () => {
+      // The saved selection is the answer: the chip shows it again.
+      pinReadGenerationRef.current += 1;
+      setRevision((value) => value + 1);
+    };
     try {
-      const goal = await api.chats.getGoalContext(target);
-      if (goal?.lifecycle === "ongoing" && !goal.goalRevision) throw new Error("goal_runtime_selection_revision_changed");
+      // One re-read: a Main busy for a moment is not a reason to refuse the person's choice.
+      let goal: Awaited<ReturnType<typeof api.chats.getGoalContext>>;
+      try { goal = await api.chats.getGoalContext(target); }
+      catch { if (!intent.isCurrent()) return; goal = await api.chats.getGoalContext(target); }
+      if (!intent.isCurrent()) return;
       // An ongoing Goal takes a model change at its next safe episode; the conversation pin is not rewritten under it.
-      const handoff = goal?.lifecycle === "ongoing" && goal.goalRevision
-        ? await api.chats.requestGoalRuntimeSelection(target, { expectedGoalId: goal.goalId, expectedGoalRevision: goal.goalRevision, selection })
+      // A Goal still being created has no revision yet: the choice is the pin. One that moved on is bound by Main at its
+      // current revision, and one that ended is the pin as well.
+      const goalRevision = goal?.lifecycle === "ongoing" ? goal.goalRevision : undefined;
+      if (goal && goalRevision) intent.bindGoalReceiptScope(goal.goalId, goalRevision);
+      writeStarted = true;
+      const handoff = goal && goalRevision
+        ? await api.chats.requestGoalRuntimeSelection(target, { expectedGoalId: goal.goalId, expectedGoalRevision: goalRevision, selection })
         : null;
       const updated = handoff?.chat ?? await api.chats.setRuntimeSelection(target, selection);
       if (!updated || updated.id !== target || !runtimeSelectionReceiptMatches(selection, updated.runtimeSelection)
-        || (handoff && (handoff.goalId !== goal?.goalId || handoff.goalRevision !== goal?.goalRevision || handoff.state !== "pending"))) {
+        || (handoff && handoff.chat.id !== updated.id)) {
         throw new Error("runtime_selection_unacknowledged");
       }
-      if (chatRef.current === target) { onSelectionConfirmed?.(updated); setPin({ chatId: target, selection: updated.runtimeSelection ?? null }); setFailed(false); }
-    } catch {
-      if (chatRef.current === target) setFailed(true);
+      writeAcknowledged = true;
+      if (handoff && !intent.acceptGoalReceipt(handoff)) return;
+      if (!intent.isCurrent()) return;
+      const confirmation = await intent.confirm(api);
+      if (confirmation === "overtaken" && pickerIsCurrent()) readSavedSelection();
+      if (confirmation !== "confirmed") return;
+      if (!intent.isCurrent()) return;
+      if (pickerIsCurrent()) {
+        // A read started before this acknowledged write cannot repaint it.
+        pinReadGenerationRef.current += 1;
+        onSelectionConfirmed?.(updated);
+        setPin(current => pickerIsCurrent() ? { chatId: target, selection: updated.runtimeSelection ?? null } : current);
+        setFailed(current => pickerIsCurrent() ? false : current);
+        setRefusal(current => pickerIsCurrent() ? null : current);
+      }
+    } catch (cause) {
+      if (!intent.isCurrent()) return;
+      const code = ipcErrorCode(cause);
+      // A newer choice overtook this one (or the chat is gone): the saved selection is the latest, the chip shows it,
+      // and nothing is said.
+      if (isOvertakenSelectionCode(code)) {
+        intent.yieldToSaved();
+        if (pickerIsCurrent()) readSavedSelection();
+        return;
+      }
+      // Only a cause outside the app is refused; Main raises it before it writes, so the saved choice is unchanged.
+      const plain = !writeAcknowledged ? goalRuntimeRefusalNotice(code, selection, locale) : null;
+      if (plain) intent.yieldToSaved(); else intent.markUnknown(cause);
+      if (pickerIsCurrent()) {
+        // The refused choice wrote nothing and was dropped above, so the chip already shows the saved one.
+        if (plain) setRefusal(plain);
+        if (writeStarted || intent.isCurrent() || plain) setFailed(current => pickerIsCurrent() ? true : current);
+      }
+    } finally {
+      intent.finish();
     }
-  }, [runtime, draft, draftSelection, disabled, onSelectionConfirmed]);
+  }, [chatId, runtime, draft, draftSelection, disabled, onSelectionConfirmed, locale]);
 
   // Nothing until this conversation's pin is read: a default label first would claim a model the turn may not run.
   if (!draft && (!chatId || pin?.chatId !== chatId)) return null;
   // 선택이 비어 있으면 실제로 돌 모델 이름을 보인다 — "기본값" 문구는 없다.
   const requestedModelLabel = runtime
-    ? runtimeModelDisplayLabel(runtime, locale, models.filter((model) => model.runtime.kind === runtime.kind && model.runtime.backend === runtime.backend))
+    ? runtimeModelDisplayLabel(runtime, locale, models.filter((model) => sameRuntimeIdentity(model.runtime, runtime)))
     : draft
       ? shownPin?.model ?? (shownPin ? runtimeModelFallbackLabel(shownPin.kind, locale) : locale === "ko" ? "모델 확인 중…" : "Checking model…")
       : shownPin?.model ?? (shownPin ? runtimeModelFallbackLabel(shownPin.kind, locale) : locale === "ko" ? "모델 확인 중…" : "Checking model…");
   const modelLabel = composerModelLabel(requestedModelLabel, runningModel, locale);
   const effortLabel = runtime?.efforts?.find((effort) => effort.id === runtime.effort)?.label ?? (locale === "ko" ? "기본" : "Default");
-  const failure = locale === "ko" ? "모델을 바꾸지 못했습니다" : "Model not changed";
+  const waiting = choice?.status === "pending" || choice?.status === "unknown";
+  const failedChoice = failed || choice?.status === "conflicted";
+  const failure = refusal ?? (choice?.status === "conflicted"
+    ? locale === "ko" ? "다른 곳에서 모델이 변경되었습니다. 선택을 확인해 주세요." : "The model changed elsewhere. Review your choice."
+    : locale === "ko" ? "선택한 모델을 확인하지 못했습니다. 작성한 글은 보관됩니다." : "The selected model could not be confirmed. Your draft is kept.");
   const toggle = (next: "model" | "effort") => setMenu((current) => current === next ? null : next);
   return (
     <>
@@ -178,17 +263,18 @@ export function OneRuntimeChips({
         data-one-composer-trigger="model"
         data-fit-chip="model"
         ref={modelTrigger}
-        data-failed={failed ? "true" : undefined}
+        data-failed={failedChoice ? "true" : undefined}
         disabled={disabled}
         aria-expanded={menu === "model"}
         aria-haspopup="dialog"
         aria-controls={menu === "model" ? "one-composer-popover" : undefined}
         aria-label={`${locale === "ko" ? "모델" : "Model"}: ${modelLabel}`}
-        title={failed ? failure : modelLabel}
+        aria-busy={waiting || undefined}
+        title={failedChoice ? failure : modelLabel}
         onClick={() => toggle("model")}
       >
-        {failed ? <IconAlertTriangle size={14} /> : <IconSparkles size={15} />}
-        <span data-fit-label>{modelLabel}</span>
+        {failedChoice ? <IconAlertTriangle size={14} /> : <IconSparkles size={15} />}
+        <span data-fit-label>{modelLabel}{waiting ? locale === "ko" ? " · 확인 중" : " · Confirming" : ""}</span>
         <IconChevronDown size={12} />
       </button>
       {runtime && (runtime.efforts?.length ?? 0) > 0 && (
@@ -214,7 +300,7 @@ export function OneRuntimeChips({
       {draftSelection !== undefined && shownPin && <button type="button" className={styles.composerChip} disabled={disabled}
         aria-label={locale === "ko" ? "작업 모델 선택 해제" : "Clear Work model selection"}
         onClick={() => { setMenu(null); draftSelection.onChange(null); }}>{locale === "ko" ? "기존 Work 설정 사용" : "Use existing Work settings"}</button>}
-      {failed && <span role="alert" className="sr-only">{failure}</span>}
+      {failedChoice && <span role="alert" className="sr-only">{failure}</span>}
       {menu && (
         <OneComposerControls
           activeMenu={menu}
@@ -237,7 +323,11 @@ export function OneRuntimeChips({
           onTogglePlugin={noop}
           onToggleAgent={noop}
           onSelectModel={(selected, model) => { void apply({ model }, selected); }}
-          onSelectEffort={(effort) => { void apply({ effort }); }}
+          selectionIntentId={choice?.requestId}
+          onSelectEffort={(effort, displayed, intentId) => {
+            if (!displayed || !draft && readChatSelectionIntent(chatId)?.requestId !== intentId) return;
+            void apply({ effort }, displayed);
+          }}
           onSelectPermission={noop}
           onToggleTurnOption={noop}
         />

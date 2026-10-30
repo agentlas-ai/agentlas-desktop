@@ -54,6 +54,8 @@ import {
   renderConversationContext,
 } from "./continuity";
 import { agentContextColdBootstrapForRequest, agentContextDeliveryForRequest, agentContextSessionKey } from "./agent-context";
+import { replaceRunnerUserPrompt } from "./runner-turn-context-binding";
+import { registerDeclaredPromptModule } from "./prompt-order";
 import { waitForRetiredCliExit } from "./retired-cli-exit";
 import { tStatus } from "./status-i18n";
 import { selectionFor } from "../capabilities/one-capabilities";
@@ -836,6 +838,34 @@ export function antigravityEmptyRunOutcome(input: {
     return { kind: "empty", message: input.locale === "ko" ? ko : en };
   }
   return undefined;
+}
+
+/**
+ * Host-authored (one line, no tool, runtime or cause named beyond the fact) appended to the request of the single
+ * answer-only retry (antigravityDeniedNothingActed). The first attempt's session rules already say "tools: cannot be
+ * approved here; do not attempt", and the model tried a tool anyway: this line states what happened, last, where the
+ * model reads it last. Observed in use: 8 task-force syntheses (read permission by design) of finished teams
+ * ended "runtime_turn_unsettled" because the synthesis model ran `run_command` once.
+ */
+export const ANTIGRAVITY_ANSWER_ONLY_NOTE =
+  "host note: your previous attempt called tools; every call was denied and nothing ran. Tools cannot be used in this session. Do not call any tool. Write your complete final answer now as plain text, from the information above.";
+
+/**
+ * Whether an agy run that returned no answer provably did nothing, from structural facts only: tools were never allowed
+ * (a read permission: agy has no headless way to approve a read-only tool, so it denies every call and ends the run),
+ * agy itself reported at least one approval denial (result.denied_actions or a tool step in ERROR), no tool call of the
+ * run completed without an error frame (`completedToolCalls`) and the runtime gave no failure of its own (quota, sign-in, safety
+ * block). Then the turn can run once more as an answer-only turn without repeating anything. Pure; no words.
+ */
+export function antigravityDeniedNothingActed(input: {
+  answered: boolean;
+  toolsAllowed: boolean;
+  denials: readonly AntigravityDenial[];
+  completedToolCalls: number;
+  runtimeSaidWhy: boolean;
+}): boolean {
+  return !input.answered && !input.toolsAllowed && !input.runtimeSaidWhy && input.completedToolCalls === 0
+    && input.denials.some((denial) => denial.reason === "approval");
 }
 
 /**
@@ -2315,10 +2345,23 @@ function antigravityBrowserResidentScope(configPath: string | undefined): Antigr
  * with the conversation it lost.
  */
 const AGY_CONVERSATION_LOST = Symbol("agy-conversation-lost");
-type AntigravityAttemptResult = RunnerResult & { [AGY_CONVERSATION_LOST]?: { dispatched: boolean; replayable: boolean } };
+/**
+ * The attempt ended with no answer because agy auto-denied every tool call the model tried under a read permission and NO
+ * tool call of the run completed (antigravityDeniedNothingActed). Nothing acted, so runPreparedAntigravity may run the
+ * same turn once more as an answer-only turn (ANTIGRAVITY_ANSWER_ONLY_NOTE). Internal marker, never a public result field.
+ */
+const AGY_ANSWER_ONLY_RETRY = Symbol("agy-answer-only-retry");
+type AntigravityAttemptResult = RunnerResult & {
+  [AGY_CONVERSATION_LOST]?: { dispatched: boolean; replayable: boolean };
+  [AGY_ANSWER_ONLY_RETRY]?: true;
+};
 
 /** Whether this run already started an agy process or wrote a turn to one (RuntimeTurnDelivery "not-dispatched" otherwise). */
-interface AntigravityDispatchState { attempted: boolean }
+interface AntigravityDispatchState {
+  attempted: boolean;
+  /** The run is the single answer-only re-run (runPreparedAntigravity): its own denials are announced as they come. */
+  answerOnlyRetry?: boolean;
+}
 
 function antigravityConversationLostFailure(locale: string | undefined): RunnerFailure {
   return { kind: "unavailable", runtime: "antigravity", source: "marker", providerCode: "agy_conversation_lost",
@@ -2328,14 +2371,8 @@ function antigravityConversationLostFailure(locale: string | undefined): RunnerF
 }
 
 /**
- * A stored agy conversation can disappear (the owner's 30-day deletion of unused CLI originals, agy's own pruning). agy
- * then answers from a new, empty conversation (measured, antigravity-conversation-metadata.ts antigravityConversationGone);
- * saving that conversation and returning its answer made the turn, and every later one, run without the chat's history
- * (A3 live probe 2026-10-16: 33 of 49 agy bindings named missing conversations). The turn instead continues once in a
- * fresh conversation that carries the conversation (unattended-session-turns.ts rule 4): the chat's own history for a
- * per-chat binding, the agent-context journal for its native handle. The dead binding is replaced and one typed
- * receipt is emitted. A turn that cannot be handed the conversation, or whose lost run already produced text or a tool
- * step (rule 3), fails with the typed agy_conversation_lost and keeps nothing from that run.
+ * One agy turn: runPreparedAntigravityResumable, plus at most one answer-only re-run when agy denied every tool a
+ * read-permission run tried and nothing completed (antigravityDeniedNothingActed).
  */
 async function runPreparedAntigravity(
   req: RunnerRequest,
@@ -2348,6 +2385,48 @@ async function runPreparedAntigravity(
   legacyExecutableFingerprint?: string,
   dispatch: AntigravityDispatchState = { attempted: false },
 ): Promise<RunnerResult> {
+  const run = (next: RunnerRequest) => runPreparedAntigravityResumable(next, events, bin, executableFingerprint,
+    executableGeneration, agyAdditionalDirs, legacyExecutableFingerprint, dispatch);
+  const first = await run(req);
+  const { [AGY_ANSWER_ONLY_RETRY]: retryable, ...settled } = first;
+  if (!retryable || req.signal?.aborted) return settled;
+  /*
+   * ★읽기 권한 실행이 도구를 시도했고 agy 가 전부 자동 거부해 답 없이 끝났다 — 아무것도 실행되지 않았다.
+   * 같은 턴을 **정확히 한 번** 더, 도구를 쓰지 말고 글로만 답하라는 호스트 한 줄을 요청 끝에 붙여 돌린다.
+   * 팀이 끝난 뒤의 종합(읽기 권한이 설계상 기본)이 이 한 번의 실수로 "실행 여부 불확실" 실패가 되어 팀원이 낸 결과를
+   * 오너에게 못 전하던 사고(2026-10-25/26, 8건)의 수리. 첫 시도는 완료된 도구 호출이 0건이라는 구조 증거가 있을 때만
+   * 여기 온다(antigravityDeniedNothingActed). 두 번째도 같은 거부로 끝나면 그 실패가 그대로 나간다(재시도 상한 1).
+   */
+  events.onStatus("[runtime-session] answer_only_retry kind=antigravity reason=tools_denied_headless");
+  dispatch.answerOnlyRetry = true;
+  // The retry's one host-authored line is a declared module (docs/PROMPT-COMPOSITION-POLICY.md): last in the user turn, varies per run.
+  registerDeclaredPromptModule({ id: "desktop.runtime.antigravity.answer-only-retry-note", revision: 1, stability: "turn-context",
+    changeTriggers: ["permission", "model-output"], order: Number.MAX_SAFE_INTEGER });
+  const second = await run(replaceRunnerUserPrompt(req, `${req.userPrompt}\n\n${ANTIGRAVITY_ANSWER_ONLY_NOTE}`));
+  const { [AGY_ANSWER_ONLY_RETRY]: _again, ...final } = second;
+  return final;
+}
+
+/**
+ * A stored agy conversation can disappear (the owner's 30-day deletion of unused CLI originals, agy's own pruning). agy
+ * then answers from a new, empty conversation (measured, antigravity-conversation-metadata.ts antigravityConversationGone);
+ * saving that conversation and returning its answer made the turn, and every later one, run without the chat's history
+ * (A3 live probe 2026-10-16: 33 of 49 agy bindings named missing conversations). The turn instead continues once in a
+ * fresh conversation that carries the conversation (unattended-session-turns.ts rule 4): the chat's own history for a
+ * per-chat binding, the agent-context journal for its native handle. The dead binding is replaced and one typed
+ * receipt is emitted. A turn that cannot be handed the conversation, or whose lost run already produced text or a tool
+ * step (rule 3), fails with the typed agy_conversation_lost and keeps nothing from that run.
+ */
+async function runPreparedAntigravityResumable(
+  req: RunnerRequest,
+  events: RunnerEvents,
+  bin: string,
+  executableFingerprint: string,
+  executableGeneration: string,
+  agyAdditionalDirs: string[],
+  legacyExecutableFingerprint: string | undefined,
+  dispatch: AntigravityDispatchState,
+): Promise<AntigravityAttemptResult> {
   const attempt = (freshReason: "session_not_found" | null) => runPreparedAntigravityAttempt(req, events, bin, executableFingerprint,
     executableGeneration, agyAdditionalDirs, legacyExecutableFingerprint, dispatch, freshReason);
   const first = await attempt(null);
@@ -2910,6 +2989,14 @@ async function runPreparedAntigravityAttempt(
   }, () => hostEffects.size - claimedEffects.size + Number(hostReceiptOverflow), attestAntigravityMetadataSteps,
   { structuredAnswerChannel: Boolean(runReq.outputSchema) });
   let effectExitCode: number | null = null, effectStdoutEnded = false;
+  const holdApprovalNotices = !agyToolsAllowed && !dispatch.answerOnlyRetry;
+  const heldApprovalNotices: Array<() => void> = [];
+  /** The attempt ended: its held denial announcements are shown, unless the answer-only re-run replaces this attempt. */
+  const settleHeldApprovalNotices = (rerun: boolean): void => {
+    const held = heldApprovalNotices.splice(0);
+    if (rerun) return;
+    for (const announce of held) { try { announce(); } catch { /* an announcement never decides the run */ } }
+  };
   return new Promise<AntigravityAttemptResult>((resolve, reject) => {
     const invocationStartedAtMs = Date.now();
     /** Whether an earlier attempt of this run (a dead resident) already reached agy. */
@@ -2979,6 +3066,8 @@ async function runPreparedAntigravityAttempt(
     } = { text: "", inputTokens: 0, outputTokens: 0, schemaBound: Boolean(runReq.outputSchema) };
     const announcedDenials = new Set<string>();
     const reportedAgyTools = new Set<string>();
+    /** Tool calls of this run that completed without an error frame (a denied or failed call is not one). */
+    const succeededAgyTools = new Set<string>();
     const stagedAgyGeneratedImageSources = new Set<string>();
     let agyLineBuf = "";
     let settled = false;
@@ -3046,6 +3135,7 @@ async function runPreparedAntigravityAttempt(
         const key = `${step.tool.id}:${step.tool.done ? "done" : "active"}`;
         if (!reportedAgyTools.has(key)) {
           reportedAgyTools.add(key);
+          if (step.tool.done && !step.tool.failed) succeededAgyTools.add(step.tool.id);
           const toolArtifactPaths = [...(step.tool.artifactPaths ?? [])];
           if (step.tool.done && !step.tool.failed && step.tool.name === "generate_image"
             && runReq.chatId) {
@@ -3111,6 +3201,7 @@ async function runPreparedAntigravityAttempt(
           });
         } else {
           // 시트로도 올린다 — onNotice 는 대화에 남는 사실이고, 이건 지금 결정할 자리다.
+          const announceApproval = (): void => {
           announceToolDenied({
                 ...(runReq.signal ? { signal: runReq.signal } : {}),
             runtime: "antigravity",
@@ -3128,6 +3219,11 @@ async function runPreparedAntigravityAttempt(
             message: runReq.locale === "ko" ? ko : en,
             i18n: { ko, en },
           });
+          };
+          // A read-permission run (agy denies every tool there) that will be re-run as an answer-only turn must not show the
+          // owner "a tool call was auto-denied" for a turn that then answers: held until the attempt ends (flushed unless a
+          // re-run follows). Its re-run, and every run with tools allowed, announces as before.
+          if (holdApprovalNotices) heldApprovalNotices.push(announceApproval); else announceApproval();
         }
       }
       const now = Date.now();
@@ -3387,10 +3483,20 @@ async function runPreparedAntigravityAttempt(
         if (completed && stableContext?.delivery && agyState.conversationId) {
           acknowledgeStableTurnContext(stableContext.delivery, { sessionId: agyState.conversationId, acknowledgementId: randomUUID() });
         }
+        // A read-permission run that agy ended because it denied every tool call the model tried, with no call completed,
+        // did nothing: runPreparedAntigravity runs the same turn once more as an answer-only turn.
+        const answerOnlyRetryable = antigravityDeniedNothingActed({
+          answered: Boolean(trimmed),
+          toolsAllowed: !structural,
+          denials: denied,
+          completedToolCalls: succeededAgyTools.size,
+          runtimeSaidWhy: Boolean(runtimeSaidWhy),
+        });
         resolve({
           text: trimmed,
           ownerControlTerminal: completed ? "completed" : "uncertain",
           ...(failure ? { failure } : {}),
+          ...(answerOnlyRetryable && failure ? { [AGY_ANSWER_ONLY_RETRY]: true as const } : {}),
           ...(completed ? normalEndToolEvidence(agyEnd) : {}),
           // The conversation this turn ran on: the common journal acknowledges it as the binding's native handle (NH11).
           ...(!failure && agyState.conversationId?.trim() ? { sessionId: agyState.conversationId } : {}),
@@ -3490,11 +3596,13 @@ async function runPreparedAntigravityAttempt(
       }
     }
   }).then(result => {
+    settleHeldApprovalNotices(Boolean(result[AGY_ANSWER_ONLY_RETRY]) && req.signal?.aborted !== true);
     effectRun?.complete(effectCoverage.finish({ exitCode: effectExitCode, stdoutEnded: effectStdoutEnded, cancelled: req.signal?.aborted === true, failed: !!result.failure }));
     if (effectRun && !result.failure) recordMainExecutionProofs({scopeId:effectRun.scopeId,bindings:effectBindings,signal:req.signal,claims:executionClaims});
     // The effort level this process ran at (antigravity-effort.ts); null when this runner set none.
     return { ...result, appliedEffort: effortPlan.applied };
   }, error => {
+    settleHeldApprovalNotices(false);
     effectRun?.complete(effectCoverage.finish({ exitCode: effectExitCode, stdoutEnded: effectStdoutEnded, cancelled: req.signal?.aborted === true, failed: true }));
     throw error;
   }).finally(detachEffects);

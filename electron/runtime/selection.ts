@@ -42,7 +42,7 @@ import { markRefusedBeforeDispatch, tagPickedRunnerKind, withNativeBrowserGuidan
 import { getSubscriptionCreditUse, peekProviderQuotaExhausted } from "../usage";
 import { peekAgentlasCreditsAvailable } from "../billing";
 import { listModelRoleMembers } from "../store/model-roles";
-import { CONNECTABLE_RUNTIMES, type ConnectableRuntime } from "../../shared/runtime-connect";
+import { CONNECTABLE_RUNTIMES, ollamaModelListIncludes, ollamaModelNamesEqual, type ConnectableRuntime } from "../../shared/runtime-connect";
 import { probeRuntimeAuthForRun } from "./runtime-connect";
 import { abortReasonError } from "./abort-reason";
 import { withAgentContext } from "./agent-context";
@@ -523,7 +523,9 @@ function runtimeMatchesOverride(runtime: RuntimeStatus, override: AgentRuntimeOv
 
 const LOCAL_AUTHORITATIVE_MODEL_KINDS = new Set<RuntimeStatus["kind"]>(["ollama", "lmstudio", "mlx", "agentlas-local"]);
 
-function runtimeModelUnavailable(runtime: RuntimeStatus, selectedModel: string | null | undefined): boolean {
+/** True only when the runtime's own authoritative inventory proves the model absent. The Goal model handoff admits an
+ * owner's choice by this same test, so a choice it accepts is never one the episode then refuses. */
+export function runtimeModelUnavailable(runtime: RuntimeStatus, selectedModel: string | null | undefined): boolean {
   const model = selectedModel?.trim();
   if (!model || isRuntimeCredentialUnavailable(runtime)) return false;
   const discovery = runtime.modelDiscovery;
@@ -533,7 +535,9 @@ function runtimeModelUnavailable(runtime: RuntimeStatus, selectedModel: string |
   // read succeeds. Preserve the explicit request and let the runtime answer it.
   const authoritative = LOCAL_AUTHORITATIVE_MODEL_KINDS.has(runtime.kind);
   return authoritative && (runtime.availableModels?.length ?? 0) > 0
-    && !runtime.availableModels!.includes(model);
+    && !(runtime.kind === "ollama"
+      ? ollamaModelListIncludes(runtime.availableModels!, model)
+      : runtime.availableModels!.includes(model));
 }
 
 /** Keep exact pins on their selected provider unless its own authoritative
@@ -581,7 +585,7 @@ function runtimeStatusSelection(runtime: RuntimeStatus): import("../../shared/ty
   };
 }
 
-function runtimeMatchesSelection(
+export function runtimeMatchesSelection(
   runtime: RuntimeStatus,
   selection: Pick<RuntimeSelection, "kind" | "backend" | "source" | "acpAgentId">,
 ): boolean {
@@ -692,7 +696,7 @@ export function rolePriorityRuntimes(
     // An attempted entry identifies one executable/model pair. Excluding the
     // whole executable here silently removed the next configured model even
     // though non-auth/non-quota failures are model-scoped below.
-    if (excluded.some((item) => sameRuntimeIdentity(candidate, item) && candidate.model === item.model)) return true;
+    if (excluded.some((item) => sameRuntimeModel(candidate, item))) return true;
     if (
       options.failedRuntime
       && options.failure
@@ -711,7 +715,7 @@ export function rolePriorityRuntimes(
     const unavailable = runtimeSelectionUnavailableReason(candidate, runtimeStatusSelection(candidate));
     if (!options.failure && unavailable === "quota-exceeded" && candidate.kind !== "agentlas") quotaFallbackEligible = true;
     if (unavailable) return;
-    if (!out.some((item) => sameRuntimeIdentity(item, candidate) && item.model === candidate.model)) {
+    if (!out.some((item) => sameRuntimeModel(item, candidate))) {
       out.push(candidate);
     }
   };
@@ -754,6 +758,14 @@ function sameRuntimeIdentity(left: RuntimeStatus, right: RuntimeStatus): boolean
     && left.acpAgentId === right.acpAgentId;
 }
 
+/** One configured model may be written with or without Ollama's default tag. */
+function sameRuntimeModel(left: RuntimeStatus, right: RuntimeStatus): boolean {
+  if (!sameRuntimeIdentity(left, right)) return false;
+  if (left.kind === "ollama" && left.model && right.model)
+    return ollamaModelNamesEqual(left.model, right.model);
+  return left.model === right.model;
+}
+
 /** Quota/rate-limit/auth is provider-wide (for open ACP seats: seat-wide); other failures stay scoped to one runtime/model pair. */
 export function runtimeFailureSharesProviderDomain(
   candidate: RuntimeStatus,
@@ -768,20 +780,37 @@ export function runtimeFailureSharesProviderDomain(
   // A transport/exit failure on one model must still allow the next model
   // configured on the same executable to run. Quota/auth remains provider-wide
   // above because that state is shared by the account, not the model.
-  return sameRuntimeIdentity(candidate, failed) && candidate.model === failed.model;
+  return sameRuntimeModel(candidate, failed);
+}
+
+/**
+ * How the runtime an invocation resolved differs from the runtime a Goal checkpoint pinned.
+ * `identity`: a different engine, executable, model or ACP seat — running it would run something nobody chose.
+ * `tuning`: the same engine and model whose effort or long-context setting the resolution normalized (an effort the
+ * model does not offer, an inventory that changed since the pin). A pin that names no model leaves the model to the
+ * role's pick, which is no difference.
+ */
+export function goalRuntimePinDrift(
+  pinned: Pick<import("../../shared/types").RuntimeSelection, "kind" | "backend" | "source" | "model" | "effort" | "longContext" | "acpAgentId">,
+  confirmed: Pick<import("../../shared/types").RuntimeSelection, "kind" | "backend" | "source" | "model" | "effort" | "longContext">,
+  confirmedAcpAgentId: string | null | undefined,
+): { identity: boolean; tuning: boolean } {
+  return {
+    identity: confirmed.kind !== pinned.kind
+      || confirmed.backend !== pinned.backend
+      || confirmed.source !== pinned.source
+      || (pinned.model !== undefined && confirmed.model !== pinned.model)
+      || (pinned.acpAgentId !== undefined && confirmedAcpAgentId !== pinned.acpAgentId),
+    tuning: (pinned.effort !== undefined && confirmed.effort !== pinned.effort)
+      || (pinned.longContext !== undefined && confirmed.longContext !== pinned.longContext),
+  };
 }
 
 export function selectExactRuntime(
   runtimes: RuntimeStatus[],
   selection: import("../../shared/types").RuntimeSelection,
 ): RuntimeChoice | null {
-  const matched = runtimes.find((runtime) => {
-    if (runtime.kind !== selection.kind) return false;
-    if (selection.backend && runtime.backend !== selection.backend) return false;
-    if (selection.source && runtime.source !== selection.source) return false;
-    if (selection.kind === "acp" && (!selection.acpAgentId || runtime.acpAgentId !== selection.acpAgentId)) return false;
-    return true;
-  });
+  const matched = runtimes.find((runtime) => runtimeMatchesSelection(runtime, selection));
   if (!matched) return null;
   // A graph node override may intentionally pin only the runtime kind. In that
   // case, resolve the model from the requested role instead of borrowing the

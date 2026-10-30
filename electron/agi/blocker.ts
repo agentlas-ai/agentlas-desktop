@@ -110,10 +110,11 @@ export interface AgiBlockerFacts {
   /** An admitted provider, observer, or worker already owns this goal's work. */
   repairInFlight?: boolean;
   /**
-   * Why nothing is due right now although the Goal is not clear: its room or a teammate chat has a turn in flight (chat_busy), or
-   * the host scheduler holds a registered wake for it (host_wait). An open incident is held across this, not closed and reopened.
+   * Why nothing is due right now although the Goal is not clear: its room or a teammate chat has a turn in flight (chat_busy), the
+   * host scheduler holds a registered wake for it (host_wait), or the host has just queued/dispatched the Goal's next turn and it has
+   * not begun yet (host_start). An open incident is held across this, not closed and reopened.
    */
-  heldBy?: "chat_busy" | "host_wait";
+  heldBy?: "chat_busy" | "host_wait" | "host_start";
   /** Exact host schedule transition; not idle time or a retry of an effect. */
   nextWakeAtMs?: number;
   /** Strict action rebase boundary, separate from cost/wake identity. */
@@ -138,6 +139,12 @@ export interface AgiBlockerFacts {
    * host's, so this is false for every Goal today: that move is structurally refused and not proposed. Absent = unknown, not refused.
    */
   continuationAutomation?: boolean;
+  /**
+   * Whether the Goal's room can hand work to teammates (One's own conversation). A Work room cannot: create/invite/dispatch_teammate
+   * throw one-team-depth-limit there every time (observed in use, a Work Goal: 45 attempts on one incident). false removes the
+   * teammate paths from the plan; absent = unknown, never refused.
+   */
+  teamAvailable?: boolean;
 }
 
 /** What the goal chip shows (owner correction D7): only explicit states differ from running. */
@@ -227,7 +234,7 @@ export const AGI_NO_ADMISSIBLE_PATH = "no_admissible_path";
 function pathAdmissible(action: AgiActionKind, facts: AgiBlockerFacts, eligibleTactics: readonly string[]): boolean {
   switch (action) {
     case "start_work_turn": return goalContinuationAdmissible(facts.status, facts.pauseReason);
-    case "dispatch_teammate": case "create_teammate": return eligibleTactics.length > 0;
+    case "dispatch_teammate": case "create_teammate": return eligibleTactics.length > 0 && facts.teamAvailable !== false;
     case "replan_tree": case "retry_node_with": return facts.tactics === undefined || facts.tactics.length > 0;
     case "switch_runtime": return facts.continuationAutomation !== false;
     default: return true;
@@ -399,7 +406,8 @@ export function classifyAgiBlocker(facts: AgiBlockerFacts): AgiBlockerDiagnosis 
     // A path the host refuses by this goal's structure every time is not proposed (switch_runtime without a live automation to move:
     // the host wakes a Goal itself since 034d8584e, so there is nothing to switch). Unknown facts keep it (pathAdmissible).
     let altPaths = rest.altPaths.filter((action, index, list) => list.indexOf(action) === index
-      && (action !== "switch_runtime" || pathAdmissible(action, facts, eligibleTactics)));
+      && (action !== "switch_runtime" || pathAdmissible(action, facts, eligibleTactics))
+      && !((action === "dispatch_teammate" || action === "create_teammate" || action === "invite_teammate") && facts.teamAvailable === false));
     if (altPaths[0] === "ask_owner_once") altPaths = [...altPaths.slice(1), "ask_owner_once"];
     if (altPaths.includes("ask_owner_once") && !altPaths.some((action) => !AGI_NON_ALTERNATIVE_ACTIONS.has(action))) {
       altPaths = eligibleTactics.length && goalContinuationAdmissible(facts.status, facts.pauseReason)
@@ -415,13 +423,13 @@ export function classifyAgiBlocker(facts: AgiBlockerFacts): AgiBlockerDiagnosis 
     if (!goalContinuationAdmissible(facts.status, facts.pauseReason)) altPaths = altPaths.filter((action) => action !== "start_work_turn");
     else if (rest.attemptDue && boundary !== "owner_stop" && !altPaths.includes("start_work_turn")) altPaths.unshift("start_work_turn");
     // Every remaining path is refused by this goal's structure (not by a transient state): nothing AGI can attempt will ever be
-    // admitted. The failure stays visible to the owner as needs_owner (the run failed; sending the message again is theirs),
-    // and the incident settles instead of retrying forever on its backoff.
+    // admitted. Keep the failure visible without inventing an owner decision: only a real human boundary needs the owner.
+    // This exact state settles instead of retrying forever; a new host fact is classified again.
     if (rest.attemptDue && STRANDABLE_SIGNALS.has(rest.primarySignal as AgiBlockerSignalKind) && ownerClass !== "our_defect" && !defects.length
       && boundary !== "owner_stop"
       && altPaths.filter((action) => !AGI_NON_ALTERNATIVE_ACTIONS.has(action)).every((action) => STRUCTURAL_PATHS.has(action) && !pathAdmissible(action, facts, eligibleTactics))) {
       return { schemaVersion: AGI_BLOCKER_SCHEMA, goalId: facts.goalId, stateDigest, eligibleTactics, branchReadiness: facts.planReadiness?.branches.map(({ evidenceRefs: _refs, ...branch }) => branch), defects, evidenceRefs,
-        ...rest, display: "needs_owner", attemptDue: false, ownerClass, boundary, altPaths: [], reasonCode: AGI_NO_ADMISSIBLE_PATH, ...appRestart,
+        ...rest, display: ownerClass === "human_only" && boundary ? "needs_owner" : "blocked", attemptDue: false, ownerClass, boundary, altPaths: [], reasonCode: AGI_NO_ADMISSIBLE_PATH, ...appRestart,
         ...(signalCode ? { signalCode } : {}) };
     }
     return { schemaVersion: AGI_BLOCKER_SCHEMA, goalId: facts.goalId, stateDigest, eligibleTactics, branchReadiness: facts.planReadiness?.branches.map(({ evidenceRefs: _refs, ...branch }) => branch), defects, evidenceRefs,

@@ -59,7 +59,8 @@ import {
   planSessionGroupFeed,
   resolveCookieStoreLayout,
 } from "./cookie-merge";
-import { sessionCookieGroupOf, sessionCookieIdentityNamesFor, sessionCookieNamesFor } from "./login-wall";
+import { recoveryCookieDomains, sessionCookieGroupOf, sessionCookieIdentityNamesFor,
+  sessionCookieNamesFor, sessionCookieProtectionNamesFor } from "./login-wall";
 import { planSqlStoreGroupVerdicts, windowsDpapiUnprotect } from "./chromium-cookie-identity";
 import { currentUiLocale } from "../ui-locale";
 import { reportSystemPermissionIssue } from "../os-permission-guidance";
@@ -961,7 +962,11 @@ async function importMacCookiesThroughDedicatedRuntime(
     // cookie only when the runtime lacks it or the source expires later. An
     // explicit import the user just pressed still makes the source win.
     const runtimeExpires = new Map<string, number>();
-    const runtimeCookies = explicitImport ? [] : await context.cookies(jobs.map((job) => `https://${job.domain}/`));
+    // URLs at the registrable root omit host-only cookies on accounts.google.com and other subdomains.
+    // Observe the owned context as a whole; the group planner narrows it before making any decision.
+    const protectedDomains = new Set(recoveryCookieDomains(jobs.map((job) => job.domain)));
+    const runtimeCookies = explicitImport ? [] : (await context.cookies()).filter((cookie) =>
+      protectedDomains.has(registrableDomain(cookie.domain)));
     for (const cookie of runtimeCookies) {
       runtimeExpires.set(`${cookie.domain}\u0000${cookie.name}\u0000${cookie.path}`, cookie.expires);
     }
@@ -975,6 +980,7 @@ async function importMacCookiesThroughDedicatedRuntime(
       groupOf: sessionCookieGroupOf,
       sessionNamesFor: sessionCookieNamesFor,
       identityNamesFor: sessionCookieIdentityNamesFor,
+      protectionNamesFor: sessionCookieProtectionNamesFor,
       perCookie: (cookie) => decideRuntimeCookieFeed({
         explicitImport,
         existingExpires: runtimeExpires.get(`${cookie.domain}\u0000${cookie.name}\u0000${cookie.path}`) ?? null,

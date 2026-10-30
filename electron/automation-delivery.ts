@@ -13,6 +13,7 @@ import { queueGraphResultForOne } from "./one/graph-review";
 import { AUTOMATION_RUN_ORIGIN_KIND, AUTOMATION_RUN_ORIGIN_SCHEMA, automationRunOrigin, readSealedAutomationRunOrigin, type AutomationRunOrigin } from "./automation-run-origin";
 import { wakeOneForGraphResult } from "./one/host-alerts";
 import { continuationRefusalNotice } from "../shared/continuation-refusal-notice";
+import { stripAgentControlMarkers } from "../shared/agent-control-markers";
 
 /** Exact current-run host receipts only. Historical prose is not a reset clock. */
 function automationQuotaResetTimes(runId: string, automationId: string): string[] {
@@ -54,7 +55,8 @@ export function ownerReportError(error: string | null | undefined): string {
 export function automationOwnerReportBody(input: Pick<AutomationNotificationInput, "status" | "output" | "error" | "outcome">,
   digest: AutomationRunDigest | null, locale: "ko" | "en", approvalRequiredCount = 0): string {
   const ownerNeeded = input.outcome === "needs_input" || input.outcome === "blocked";
-  const body = redactOperationalSecrets((input.status === "ok" && !ownerNeeded ? input.output?.trim() : (ownerReportError(input.error) || input.output?.trim())) ?? "");
+  // The owner reads the words, never the host markers the run used to signal quiet or a question.
+  const body = stripAgentControlMarkers(redactOperationalSecrets((input.status === "ok" && !ownerNeeded ? input.output?.trim() : (ownerReportError(input.error) || input.output?.trim())) ?? ""));
   const approval = approvalRequiredCount > 0 ? (locale === "ko"
     ? `이번 실행에서 도구 요청 ${approvalRequiredCount}건이 승인이 필요하다고 보고했습니다. 대안으로 처리됐는지는 실행 결과를 확인하세요.`
     : `${approvalRequiredCount} tool requests in this run reported that approval was required. Check the run result to see whether an alternative completed the work.`) : "";

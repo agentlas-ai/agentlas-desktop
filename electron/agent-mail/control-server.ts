@@ -37,6 +37,10 @@ import {
   type AgentMailThreadView,
 } from "../../shared/agent-mail";
 import { getCapabilityDecision } from "../store/capability-grants";
+import { getAuthenticatedSessionBinding } from "../auth";
+import { activeBorrowedOwnerScopeKey, DEVICE_LOCAL_BORROWED_OWNER_SCOPE } from "../agents/borrowed-owner-scope";
+import { agentMailEffectAccountDigest, agentMailEffectInputDigest, agentMailEffectMessageDigest, agentMailEffectScopeDigest, type AgentMailEffectInput } from "./effect-witness";
+import type { AgentMailSendResult } from "../../shared/agent-mail";
 
 // The server outlives the turn that first starts it, and Node gives every later request the async context that was
 // live at listen() (one-team and turn-tools control servers, same defect: a later chat's request ran inside the first
@@ -60,11 +64,50 @@ const MAX_REQUEST_BYTES = 512 * 1024;
 export interface AgentMailCapabilityBinding {
   capabilityId: string;
   chatId: string | null;
+  /** Captured by Main for the exact run; old/unbound capabilities never create a Taskforce effect witness. */
+  runId?: string;
+  accountDigest?: string;
+  ownerScopeKey?: string;
+  taskForceEffectWitness?: true;
   permission: "read" | "write" | "full";
   /** The run's folder — attachment downloads land here in write/full runs. */
   cwd?: string | null;
   /** Graph dry-run or plan mode: nothing that changes the mailbox. */
   dryRun?: boolean;
+}
+
+function recordCurrentTaskForceMailSend(
+  binding: AgentMailCapabilityBinding,
+  input: AgentMailEffectInput,
+  result: AgentMailSendResult,
+): string | null {
+  const scope = capabilityMailScopes.get(binding.capabilityId);
+  const current = getAuthenticatedSessionBinding();
+  const message = result.message;
+  if (binding.taskForceEffectWitness !== true || !binding.chatId || !binding.runId || !binding.accountDigest || !binding.ownerScopeKey
+    || binding.ownerScopeKey === DEVICE_LOCAL_BORROWED_OWNER_SCOPE
+    || !scope || !current || agentMailEffectAccountDigest(current) !== binding.accountDigest
+    || activeBorrowedOwnerScopeKey() !== binding.ownerScopeKey
+    || !result.send || !isAgentMailId(result.send.id)
+    || !message || message.direction !== "outbound" || !isAgentMailId(message.id)
+    || typeof message.from !== "string" || !Array.isArray(message.to) || !Array.isArray(message.cc)
+    || typeof message.subject !== "string" || typeof message.text !== "string"
+    || message.sendId !== result.send.id || !["accepted", "delivered"].includes(result.send.status)) return null;
+  // One completed server send has one stable witness even when its acknowledgement is replayed.
+  const key = createHash("sha256").update(JSON.stringify([binding.runId, binding.chatId, result.send.id])).digest("hex");
+  const effectRef = `taskforce-mail:${key.slice(0, 8)}-${key.slice(8, 12)}-${key.slice(12, 16)}-${key.slice(16, 20)}-${key.slice(20, 32)}`;
+  try {
+    const { recordRunEvent } = require("../store/run-events") as typeof import("../store/run-events");
+    recordRunEvent({ runId: binding.runId, chatId: binding.chatId, kind: "task_force_mail_send_effect",
+      sourceEventId: effectRef,
+      payload: { schemaVersion: "agentlas.taskforce-mail-effect.v1", effectRef,
+        operationId: "agent_mail_send", messageId: message.id, sendId: result.send.id,
+        inputDigest: agentMailEffectInputDigest(input), messageDigest: agentMailEffectMessageDigest(message),
+        accountDigest: binding.accountDigest, ownerScopeKey: binding.ownerScopeKey,
+        mailScopeDigest: agentMailEffectScopeDigest(scope), permission: binding.permission,
+        source: "agent-mail-control-server" } });
+    return effectRef;
+  } catch { return null; }
 }
 
 /**
@@ -502,7 +545,8 @@ async function handleScopedAgentMailControlRequest(request: Record<string, unkno
       const intent = a2aIntent(request);
       const idempotencyKey = sendKey(binding, auto, [input.to, input.cc, input.bcc, input.subject, input.text, replyTo ?? null]);
       const result = await autoSend(undefined, async () => { await assertCompanyMailEffect(binding); return unwrap(await agentMailSend({ ...input, ...intent, idempotencyKey }, authorityFor(binding, auto))); });
-      return sendResultForModel(result);
+      const effectRef = recordCurrentTaskForceMailSend(binding, input, result);
+      return sendResultForModel({ ...result, ...(effectRef ? { effectRef } : {}) });
     }
     case "reply": {
       assertCanSend(binding);
@@ -723,7 +767,9 @@ export async function createAgentMailCapability(
 ): Promise<{ path: string; binding: AgentMailCapabilityBinding }> {
   const port = await startAgentMailControlServer();
   if (!port) throw new Error("agent-mail-control-unavailable");
-  const binding: AgentMailCapabilityBinding = { ...input, capabilityId: randomUUID() };
+  const account = getAuthenticatedSessionBinding();
+  const binding: AgentMailCapabilityBinding = { ...input, capabilityId: randomUUID(),
+    ...(account ? { accountDigest: agentMailEffectAccountDigest(account), ownerScopeKey: activeBorrowedOwnerScopeKey() } : {}) };
   capabilities.set(binding.capabilityId, binding);
   const automatic = binding.chatId ? autoRuns.get(binding.chatId)?.mailScope : undefined;
   capabilityMailScopes.set(binding.capabilityId, automatic ?? currentAgentMailExecutionScope() ?? { kind: "personal" });

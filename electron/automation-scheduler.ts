@@ -7,6 +7,7 @@ import { selectionForRuntime } from "../shared/runtime-selection";
 import { pollGoalWaitSubscriptions } from "./long-run/wait-subscriptions";
 import { announceAutomationContinuationRefused, automationRunOrigin, deliverAutomationResult, sealAutomationRunOrigin } from "./automation-delivery";
 import { captureMainContinuation } from "./runtime/scheduled-root-context";
+import { parkAutomationRunStop } from "./automation-execution-control";
 import { ownerFailureReason } from "../shared/owner-visible-activity-text";
 import { claimAutomationNotification } from "./automation-notifications";
 import { STORE_BUSY_CODE, typedCodeChain } from "../shared/turn-settlement";
@@ -402,6 +403,14 @@ const unverifiedAutomationNotices = new Map<string, string>();
 // never authority to classify an app shutdown or replay an uncertain action.
 const activeExecutionControllers = new Set<AbortController>();
 const appClosedControllers = new WeakSet<AbortController>();
+/**
+ * System Optimizer recovery runs whose own total time budget ran out. A maintenance run that did not finish is not a failure
+ * of the owner's work (the automation's own failure notice is written either way, and the next failure starts another
+ * diagnosis), so it ends as an interrupted maintenance run: no failure row, no extra "diagnostic run itself failed" line in
+ * the automation chat (observed in use and 2026-10-22: "System Optimizer total timeout after 600s" as runner-failed).
+ */
+const optimizerTimedOut = new WeakSet<AbortController>();
+export const SYSTEM_OPTIMIZER_TIMEOUT_CODE = "system_optimizer_timeout";
 
 function appCloseClassification(): AutomationResultClassification {
   return { status: "partial", outcome: "partial", reasonCode: "automation_app_closed",
@@ -1000,6 +1009,7 @@ async function handleAutomationFailure(a: Automation, error: string, failedRunId
         removeAbortListener = () => optimizerController.signal.removeEventListener("abort", onAbort);
       });
       const optimizerTimer = setTimeout(() => {
+        optimizerTimedOut.add(optimizerController);
         optimizerController.abort(
           new Error(
             `System Optimizer total timeout after ${Math.round(OPTIMIZER_TIMEOUT_MS / 1000)}s`,
@@ -1020,7 +1030,12 @@ async function handleAutomationFailure(a: Automation, error: string, failedRunId
         const ownerLease = claimInvocationRunOwner(chat.chat.id, runId);
         return runMcpInvocation(
           req,
-          (ev) => recordMcpInvocationEvent(runId, req, ev),
+          // The wind-down of a run that ran out of its own time budget reports itself as an error event; that is the
+          // budget, not a failure, so it is kept as a notice and the run ends through the interrupted record below.
+          (ev) => recordMcpInvocationEvent(runId, req, ev.kind === "error" && optimizerTimedOut.has(optimizerController)
+            ? { kind: "notice", sequence: ev.sequence, observedAt: ev.observedAt, runtimeAgentId: ev.runtimeAgentId,
+              notice: { level: "info", code: "system-optimizer-timeout", message: SYSTEM_OPTIMIZER_TIMEOUT_CODE } }
+            : ev),
           optimizerController.signal,
           captureAutomationWorkspace((() => {
             const current = getAutomation(a.id);
@@ -1044,6 +1059,12 @@ async function handleAutomationFailure(a: Automation, error: string, failedRunId
           if (appClosedControllers.has(optimizerController)) {
             tryRecordRunEvent({ runId, automationId: a.id, kind: "system_optimizer_interrupted",
               payload: { reasonCode: "automation_app_closed", failedRunId: failedRunId ?? null } });
+            return;
+          }
+          if (optimizerTimedOut.has(optimizerController)) {
+            tryRecordRunEvent({ runId, automationId: a.id, kind: "system_optimizer_interrupted",
+              payload: { reasonCode: SYSTEM_OPTIMIZER_TIMEOUT_CODE, timeoutMs: OPTIMIZER_TIMEOUT_MS, failedRunId: failedRunId ?? null } });
+            console.warn(`[automation] system optimizer stopped at its time budget (${SYSTEM_OPTIMIZER_TIMEOUT_CODE})`);
             return;
           }
           console.error("[automation] system optimizer run failed:", err);
@@ -2185,6 +2206,8 @@ async function runOne(
       running.delete(a.id);
       if (graphLoginWait && !controller.signal.aborted) {
         // The lease and execution slot are gone before even an early restoration can fire.
+        // From here the handle belongs to the wait only; a newer run may supersede it (bindAutomationRunStop).
+        parkAutomationRunStop(a.id, controller);
         subscribeGraphLoginWait(graphLoginWait, controller, () => {
           releaseAutomationRunStop(a.id, controller); activeExecutionControllers.delete(controller);
         }, { advanceSchedule: opts?.advanceSchedule ?? true, fireTime: opts?.fireTime, triggerDelivery: opts?.triggerDelivery, allowDisabledLease: opts?.allowDisabledLease === true,
@@ -2373,6 +2396,7 @@ export function subscribeGraphLoginWait(result: RunGraphResult, controller: Abor
   if (!resumeOptions?.stopAlreadyBound) {
     try {
       bindAutomationRunStop(source.automationId, controller, captureAutomationGoalExecutionOwner(source.automationId));
+      parkAutomationRunStop(source.automationId, controller);
       activeExecutionControllers.add(controller);
     } catch {
       waits.forEach(w => w.handle.cancel()); onReleased(); return () => {};

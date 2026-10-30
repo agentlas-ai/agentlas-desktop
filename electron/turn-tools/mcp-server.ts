@@ -618,11 +618,18 @@ const fs = require("node:fs");
 const http = require("node:http");
 const CONTROL_ENV = "AGENTLAS_TURN_CONTROL_FILE";
 const MAX_REQUEST_BYTES = 768 * 1024;
+// A reply is not a request. The 768 KiB request cap was also the reply cap, so a harness_call that handed back images
+// (document.render: up to four 1280 px PNGs as base64) died with "Turn tool response is too large." before the model saw
+// any of it (21 failures in 9 days: 20 document.render, 1 computerUse.capturePreview). The host (turn-tools/control-server.ts TURN_RESPONSE_MAX_BYTES) keeps every reply
+// under this bound itself; this one only protects the child's memory.
+const MAX_RESPONSE_BYTES = 32 * 1024 * 1024;
 `;
 const SOURCE_TAIL = String.raw`function control() {
   const file = process.env[CONTROL_ENV];
   if (!file || file.length > 4096) throw new Error("Turn tools are not connected in this run.");
-  const stat = fs.lstatSync(file);
+  let stat;
+  // The file is removed when the run that granted it ends, is stopped or is replaced: say that, not the raw lstat error.
+  try { stat = fs.lstatSync(file); } catch (e) { throw e && e.code === "ENOENT" ? new Error("Turn tools are no longer available in this turn: the run that granted them has ended or was replaced. Do not call them again in this turn; tell the owner what you could not do.") : e; }
   if (!stat.isFile() || stat.isSymbolicLink() || stat.size <= 0 || stat.size > 8192) throw new Error("Turn tool capability is invalid.");
   if (process.platform !== "win32" && ((stat.mode & 0o077) !== 0 || (typeof process.getuid === "function" && stat.uid !== process.getuid()))) throw new Error("Turn tool capability permissions are invalid.");
   const value = JSON.parse(fs.readFileSync(file, "utf8"));
@@ -645,7 +652,7 @@ function request(operation, args) {
     const req = http.request({ host: "127.0.0.1", port: info.port, path: "/turn", method: "POST", headers: { "content-type": "application/json", "content-length": String(Buffer.byteLength(body)) }, timeout }, (res) => {
       const chunks = [];
       let total = 0;
-      res.on("data", (chunk) => { total += chunk.length; if (total <= MAX_REQUEST_BYTES) chunks.push(chunk); else req.destroy(new Error("Turn tool response is too large.")); });
+      res.on("data", (chunk) => { total += chunk.length; if (total <= MAX_RESPONSE_BYTES) chunks.push(chunk); else req.destroy(new Error("Turn tool response is too large.")); });
       res.on("end", () => { try { const value = JSON.parse(Buffer.concat(chunks).toString("utf8")); if (!value.ok) reject(new Error(value.error || "turn-tool-failed")); else resolve(value.isError === true ? { content: [{ type: "text", text: JSON.stringify(value.result) }], isError: true, _meta: { "agentlas/errorCode": String(value.errorCode || "tool_failed") } } : value.result); } catch { reject(new Error("Turn tool returned an invalid response.")); } });
     });
     req.once("timeout", () => req.destroy(new Error("Turn tool request timed out.")));

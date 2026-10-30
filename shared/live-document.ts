@@ -584,9 +584,11 @@ export function validateLiveDocumentOps(value: unknown, format: LiveDocumentForm
         ops.push({ op: "insert_text", target: op.target, text: op.text, ...(op.at !== undefined ? { at: Number(op.at) } : {}) });
         break;
       case "insert_paragraph":
-        if (!optionalId(op.after) || !str(op.text) || (op.heading !== undefined && (!Number.isSafeInteger(op.heading) || Number(op.heading) < 1 || Number(op.heading) > 6)) || !optionalId(op.id)
-          || (op.pageBreak !== undefined && typeof op.pageBreak !== "boolean")) return bad("insert_paragraph needs text, optional after, heading 1-6 and pageBreak true/false");
-        ops.push({ op: "insert_paragraph", text: op.text, ...(op.after !== undefined ? { after: op.after as string } : {}), ...(op.heading !== undefined ? { heading: Number(op.heading) } : {}), ...(op.pageBreak === true ? { pageBreak: true } : {}), ...(op.id !== undefined ? { id: op.id as string } : {}) });
+        // heading 0 is a body paragraph, the way set_format reads it (heading 0-6): {heading:0, pageBreak:false} was refused op_invalid
+        // for a paragraph that said "no heading, no break" in so many words. 0 is left out of the stored op, like an absent heading.
+        if (!optionalId(op.after) || !str(op.text) || (op.heading !== undefined && (!Number.isSafeInteger(op.heading) || Number(op.heading) < 0 || Number(op.heading) > 6)) || !optionalId(op.id)
+          || (op.pageBreak !== undefined && typeof op.pageBreak !== "boolean")) return bad("insert_paragraph needs text, optional after, heading 0-6 (0 = body text) and pageBreak true/false");
+        ops.push({ op: "insert_paragraph", text: op.text, ...(op.after !== undefined ? { after: op.after as string } : {}), ...(op.heading !== undefined && Number(op.heading) > 0 ? { heading: Number(op.heading) } : {}), ...(op.pageBreak === true ? { pageBreak: true } : {}), ...(op.id !== undefined ? { id: op.id as string } : {}) });
         break;
       case "insert_table": {
         const rows = op.rows;

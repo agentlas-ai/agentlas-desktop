@@ -85,6 +85,21 @@ function exact(caller: OneTeamCaller, id: unknown): Automation {
   if (!automation) throw new Error("one_graph_target_not_in_context");
   return automation;
 }
+/**
+ * one_graph_inspect reads one graph by its exact id. A graph the owner's other conversations made is outside `scoped` (it lists only the
+ * graphs that began in the caller's own conversation), so reading it by id failed one_graph_target_not_in_context 8 times in 7 days --
+ * while the same agent reads that very graph through app.call automations.get, which has no such scope. A read of an exact id the caller
+ * already holds reveals nothing app.call does not; every write (save, run, enable, delete) keeps `exact`. A Work task or teammate (a
+ * Toolchain consumer) owns no graphs and keeps its scope.
+ */
+function exactForRead(caller: OneTeamCaller, id: unknown): Automation {
+  try { return exact(caller, id); }
+  catch (error) {
+    const found = !isToolchainConsumer(caller) && typeof id === "string" ? getAutomation(id) : null;
+    if (found) return found;
+    throw error;
+  }
+}
 /** The caller's own Toolchain request: its result stays readable even if the
  * contract is withdrawn or goes stale after the request was accepted. */
 function requestedByCaller(caller: OneTeamCaller, automationId: string, eventId: unknown): boolean {
@@ -167,12 +182,22 @@ async function waitForResult(caller: OneTeamCaller, a: Automation, input: Record
     if (checkpointDigest !== sha256Value(sealed)) throw new Error("one_graph_result_checkpoint_invalid");
   }
   const outputs = checkpoint?.outputs ?? {};
+  const nodeStates = JSON.parse(row?.node_states_json ?? "{}") as Record<string, unknown>;
+  const nodeFailures = JSON.parse(row?.node_failures_json ?? "{}") as Record<string, unknown>;
   let results: unknown;
   if (typeof input.node_id === "string") {
-    if (typeof outputs[input.node_id] !== "string") throw new Error("one_graph_output_not_available");
+    if (typeof outputs[input.node_id] !== "string") {
+      // The node has no output (yet): the run is still going, the node failed or it writes none. Answer with where it stands (the event
+      // status and node_states below say why) instead of an error that hides them: one_graph_output_not_available x16 in 14 days, each
+      // after wait_seconds 30 on a run that had not reached that node.
+      results = { node_id: input.node_id, available: false, output: null, node_state: nodeStates[input.node_id] ?? null,
+        ...(nodeFailures[input.node_id] !== undefined ? { failure: nodeFailures[input.node_id] } : {}),
+        next: event.status === "pending" || event.status === "claimed" ? "the run has not finished; read this result again later" : "this node produced no output; see node_state and failure" };
+    } else {
     const output = outputs[input.node_id] as string;
     const offset = Number(input.offset ?? 0), limit = Number(input.limit ?? 16000);
-    results = { node_id: input.node_id, output: output.slice(offset, offset + limit), offset, total_characters: output.length, truncated: offset + limit < output.length };
+    results = { node_id: input.node_id, available: true, output: output.slice(offset, offset + limit), offset, total_characters: output.length, truncated: offset + limit < output.length };
+    }
   } else {
     let remaining = 32000;
     results = Object.entries(outputs).slice(-32).map(([nodeId, output]) => {
@@ -183,7 +208,7 @@ async function waitForResult(caller: OneTeamCaller, a: Automation, input: Record
   }
   return { graph_id: a.id, event_id: event.id, run_id: event.runId, event_status: event.status,
     status: event.status === "delivered" ? (event.runOutcome ?? row?.status ?? "delivered") : event.status,
-    ...(row ? { node_states: JSON.parse(row.node_states_json ?? "{}"), failures: JSON.parse(row.node_failures_json ?? "{}"), results } : {}),
+    ...(row ? { node_states: nodeStates, failures: nodeFailures, results } : typeof input.node_id === "string" ? { results } : {}),
     ...(event.lastError ? { error: event.lastError } : {}) };
 }
 
@@ -414,7 +439,7 @@ export async function oneGraphDispatch(caller: OneTeamCaller, name: string, inpu
   if (name.startsWith("toolchain_")) return dispatchToolchain(caller, name, input);
   if (name === "one_graph_inspect") {
     if (!input.graph_id) return { graphs: scoped(caller).map(a => receipt(a, { source: a.graph?.nodes.length ? "stored-graph" : "legacy-prompt", goal: a.goal ?? null })) };
-    const a = exact(caller, input.graph_id);
+    const a = exactForRead(caller, input.graph_id);
     const definition = readAutomationGraphDefinition(a, automationDefinitionDigest(a), input.if_cache_key as string | undefined);
     if (definition.graph && input.node_ids) {
       const ids = input.node_ids as string[];

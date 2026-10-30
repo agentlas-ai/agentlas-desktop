@@ -1,10 +1,12 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { followupRequestJson } from "../../shared/followup-custody";
+import { FOLLOWUP_STOPPED, type FollowupCapture } from "../store/followup-custody-core";
 import type { IpcMainInvokeEvent } from "electron";
 import type { ChatHistoryEntry, InvocationCurrentTurnSteerReceipt, InvocationSteerResult, McpInvocationRequest } from "../../shared/types";
 import { getDb } from "../store/db";
 import { appendChatMessage, autoTitleFromFirstMessage } from "../store/chats";
 import { emitDesktopStoreChange } from "../store/change-bus";
-import { getPendingInvocationAdmissionForChat } from "../store/invocation-admissions";
+import { getInvocationAdmission, getPendingInvocationAdmissionForChat } from "../store/invocation-admissions";
 import { invocationRunOwners, invocationProcessOwner } from "../store/invocation-run-owners";
 import { releaseGoneTerminalOwners } from "../store/terminal-owner-liveness";
 import { userDataDir } from "../runtime-paths";
@@ -16,6 +18,7 @@ import {
   canQueuePendingSend,
   createPendingChatSends,
   pendingSendPromptHash,
+  PendingSendSourceReadBusy,
   type PendingChatSends,
   type PendingSendRecord,
 } from "./pending-chat-sends";
@@ -34,7 +37,8 @@ import { OWNER_INTAKE_NOTICE_AFTER_MS, ownerIntakeReceivedNotice } from "./owner
  * persisted, and started by the queue when the chat is free. The renderer gets an ordinary answer.
  */
 
-export type RendererStartNow = (event: IpcMainInvokeEvent, req: McpInvocationRequest, boundary?: QueuedOwnerStartBoundary) => Promise<{ runId: string }>;
+export type RendererSourceBoundary = QueuedOwnerStartBoundary & { startSource?<T>(start: () => T): T };
+export type RendererStartNow = (event: IpcMainInvokeEvent, req: McpInvocationRequest, boundary?: RendererSourceBoundary) => Promise<{ runId: string }>;
 
 /**
  * What invoke:run answers when the message was accepted but its run starts later (ID-8). `runId` only echoes the
@@ -165,6 +169,8 @@ export function queuedSendEndedNotice(locale: "ko" | "en"): string {
 }
 
 export interface RendererSendQueueOptions {
+  followupAccountDigest?(request: McpInvocationRequest): string;
+  recoverFollowups?(accept: (request: McpInvocationRequest, intentId: string, messageId?: string) => PendingSendRecord): void;
   custody?: QueuedOwnerInputCustody;
   /** Main normalization precedes custody; renderer-only authority is stripped. */
   sanitizeRequest?(request: McpInvocationRequest): McpInvocationRequest;
@@ -191,16 +197,72 @@ export function createRendererSendQueue(startNow: RendererStartNow, options: Ren
   run(event: IpcMainInvokeEvent, req: McpInvocationRequest): Promise<{ runId: string } | QueuedRunAnswer>;
   /** invoke:steer / invoke:steerCurrentTurn: when the steer was refused transiently, accept it as a message that runs next. */
   acceptRefusedSteer(event: IpcMainInvokeEvent, req: McpInvocationRequest, intentId: string | undefined, cause: unknown): InvocationSteerResult | null;
+  acceptCurrentTurnFallback(event: IpcMainInvokeEvent, req: McpInvocationRequest, intentId: string, messageId?: string): PendingSendRecord;
   resumeCustodiedInputs(restoreAuthority?: boolean): void;
   steerReceiptFor(chatId: string, intentId: string): InvocationSteerResult | null;
-  currentTurnReceiptFor(chatId: string, intentId: string, runId: string): InvocationCurrentTurnSteerReceipt | null;
+  currentTurnReceiptFor(chatId: string, intentId: string): InvocationCurrentTurnSteerReceipt | null;
 } {
   let disposed = false;
+  const followupForQueue = (id:string) => getDb().prepare("SELECT * FROM invocation_followup_custody WHERE queue_id=?").get(id) as FollowupCapture|undefined;
+  const placement = (runId:string) => {
+    const captured = getDb().prepare(`SELECT f.chat_id FROM invocation_followup_custody f JOIN pending_chat_sends q ON q.id=f.queue_id WHERE q.run_id=?`).get(runId) as {chat_id:string}|undefined;
+    if (captured) {
+      const closed = getDb().prepare("SELECT 1 FROM invocation_followup_custody WHERE closed_attempt_run_id=?").get(runId);
+      if (closed) return "not-dispatched" as const;
+      const admission = getInvocationAdmission(runId);
+      if (admission?.status === "rejected" && admission.chatId === captured.chat_id) return "not-dispatched" as const;
+    }
+    return options.custody ? options.custody.placement(runId) : queuedSendPlacement(runId);
+  };
   const canQueue = (request: McpInvocationRequest) => canQueuePendingSend(request, options.custody?.canQueue(request) === true);
   const startOwned = (event: IpcMainInvokeEvent, request: McpInvocationRequest, queueId: string | null, before?: () => void | Promise<void>) => {
     const start = async (execution: McpInvocationRequest, boundary?: QueuedOwnerStartBoundary) => {
-      await before?.();
-      return startNow(event, execution, boundary);
+      let captured: unknown;
+      try { captured = queueId ? getDb().prepare("SELECT intent_id FROM invocation_followup_custody WHERE queue_id=?").get(queueId) : undefined; }
+      catch (error) {
+        const busy = PendingSendSourceReadBusy.from(error);
+        if (busy) throw busy;
+        throw error;
+      }
+      if (!captured) {
+        await before?.();
+        return startNow(event, execution, boundary);
+      }
+      let sourceEntered = false;
+      const exactBoundary: RendererSourceBoundary = { startSource<T>(enter: () => T): T {
+        // Keep Stop's shared-store CAS excluded until the synchronous source
+        // capture has installed its cancellation target (before its first await).
+        const entered = getDb().transaction(() => {
+          try { return {result:enter()}; }
+          catch (error) { if (error instanceof Error && error.message === FOLLOWUP_STOPPED) return {error}; throw error; }
+        }).immediate();
+        if ("error" in entered) throw entered.error;
+        return entered.result;
+      }, enterSource() {
+        getDb().transaction(() => {
+          const live = getDb().prepare(`SELECT f.account_digest,f.request_json FROM invocation_followup_custody f JOIN pending_chat_sends q ON q.id=f.queue_id
+            WHERE q.id=? AND q.run_id=? AND q.state='starting' AND f.state='entered'`).get(queueId,execution.runId);
+          if (!live) {
+            // This exact caller has not entered its source. Persist the closure
+            // separately from Stop so explicit same-ID resume need not guess.
+            getDb().prepare("UPDATE invocation_followup_custody SET closed_attempt_run_id=? WHERE queue_id=? AND state='stopped'").run(execution.runId,queueId);
+            return false;
+          }
+          const saved = live as {account_digest:string;request_json:string};
+          if (!options.followupAccountDigest || saved.account_digest !== options.followupAccountDigest(JSON.parse(saved.request_json) as McpInvocationRequest)) throw new Error("followup_owner_changed");
+          boundary?.enterSource();
+          sourceEntered = true;
+          return true;
+        }).immediate() || (() => { throw new Error(FOLLOWUP_STOPPED); })();
+      } };
+      try {
+        await before?.();
+        return await startNow(event, execution, exactBoundary);
+      } catch (error) {
+        if (!sourceEntered) getDb().prepare("UPDATE invocation_followup_custody SET closed_attempt_run_id=? WHERE queue_id=?")
+          .run(execution.runId,queueId);
+        throw error;
+      }
     };
     return options.custody ? options.custody.start(request, queueId, start) : start(request);
   };
@@ -212,8 +274,8 @@ export function createRendererSendQueue(startNow: RendererStartNow, options: Ren
     random: Math.random,
     isChatFree: chatIsFree,
     alreadyDelivered: (chatId, intentId) => options.recordedOwnerSteer?.(chatId, intentId) != null,
-    persistentInput: (id) => options.custody?.persistentInput(id) === true,
-    onHeld: (id,code) => options.custody?.hold(id,code),
+    persistentInput: (id) => Boolean(followupForQueue(id)) || options.custody?.persistentInput(id) === true,
+    onHeld: (id,code) => { if (!followupForQueue(id)) options.custody?.hold(id,code); },
     inputReady: (id, request) => !request.oneAttachmentRef && !request.oneTeamPreflightRef || options.custody?.readyForQueue(id) === true,
     onBusyWait: ({ chatId, waitedMs }) => diagnoseBusyChat(chatId, waitedMs),
     senderAlive: (event) => {
@@ -228,12 +290,24 @@ export function createRendererSendQueue(startNow: RendererStartNow, options: Ren
     },
     senderRefused: (cause) => UNTRUSTED_SENDER_CODES.has(String((cause as { code?: unknown })?.code ?? (cause as { message?: unknown })?.message ?? "")),
     runState: queuedSendRunState,
-    placement: (runId) => options.custody ? options.custody.placement(runId) : queuedSendPlacement(runId),
+    placement,
     reserveStart: (id,request,markStarting) => {
       if (!options.custody) throw new Error("queued_input_custody_required");
       options.custody.reserveStart(id,request,markStarting);
     },
-    canRetryStart: (request, runId) => !request.oneAttachmentRef && !request.oneTeamPreflightRef || options.custody?.placement(runId) === "not-dispatched",
+    reservePlainStart: (id,_request,markStarting) => {
+      getDb().transaction(() => {
+        const captured = getDb().prepare("SELECT state FROM invocation_followup_custody WHERE queue_id=?").get(id) as {state:string}|undefined;
+        if (!captured) return;
+        if (captured.state !== "entered") throw new Error(FOLLOWUP_STOPPED);
+        markStarting();
+      }).immediate();
+    },
+    canRetryStart: (request, runId) => {
+      const captured = getDb().prepare(`SELECT 1 FROM invocation_followup_custody f JOIN pending_chat_sends q ON q.id=f.queue_id WHERE q.run_id=?`).get(runId);
+      if (captured) return placement(runId) === "not-dispatched";
+      return !request.oneAttachmentRef && !request.oneTeamPreflightRef || options.custody?.placement(runId) === "not-dispatched";
+    },
     onPlaced: () => options.custody?.reconcile(),
     failureCode: (runId) => getInvocationRunReceipt(runId)?.errorCode ?? null,
     saveUserRow: (request) => {
@@ -282,6 +356,23 @@ export function createRendererSendQueue(startNow: RendererStartNow, options: Ren
     log: (message, detail) => console.info(`[send-queue] ${message}`, detail),
   });
 
+  const messageCustody = (record: PendingSendRecord): "exact" | "unconfirmed" => {
+    const messageId = (record.userRow as {id?:string}|null)?.id;
+    const request = record.request;
+    if (!messageId || request.fileGroupId || request.oneAttachmentRef || request.oneTeamPreflightRef) return "unconfirmed";
+    const db = getDb();
+    if (!db.prepare("SELECT 1 FROM chat_messages WHERE id=? AND chat_id=? AND role='user' AND text=?")
+      .get(messageId, record.chatId, request.userPrompt)) return "unconfirmed";
+    if (request.images?.length) {
+      const rows = db.prepare("SELECT name,media_type,data FROM chat_message_attachments WHERE message_id=? AND chat_id=? ORDER BY rowid")
+        .all(messageId, record.chatId) as {name:string;media_type:string;data:Buffer}[];
+      if (rows.length !== request.images.length || rows.some((row, index) => row.media_type !== request.images![index].mediaType
+        || row.name !== request.images![index].name || !Buffer.isBuffer(row.data) || row.data.toString("base64") !== request.images![index].data)) return "unconfirmed";
+    }
+    return "exact";
+  };
+  const recordRequestHash = (record: PendingSendRecord) => createHash("sha256").update(followupRequestJson(record.request), "utf8").digest("hex");
+
   // A run that settles in this process decides its message at once (runs settled in the daemon are found by the poll).
   const offSettled=invocationService.onSettled((envelope) => { if (disposed) return; try { resumeCustodiedInputs(); queue.settleRun(envelope.runId); } catch { /* the poll decides it */ } });
 
@@ -316,6 +407,12 @@ export function createRendererSendQueue(startNow: RendererStartNow, options: Ren
   // any opened/unknown attempt is held instead. No synthetic sender can start it.
   const resumeCustodiedInputs = (restoreAuthority=false) => {
     if (disposed) return;
+    options.recoverFollowups?.((request,intentId,messageId) => {
+      const userRow = messageId ? getDb().prepare("SELECT id,text,created_at AS createdAt FROM chat_messages WHERE id=? AND chat_id=? AND role='user' AND text=?")
+        .get(messageId,request.chatId,request.userPrompt) : undefined;
+      if (messageId && !userRow) throw new Error("followup_message_custody_missing");
+      return queue.enqueue(undefined as unknown as IpcMainInvokeEvent,request,{intentId,requireUserRow:true,...(userRow ? {userRow} : {})});
+    });
     for (const request of options.custody?.recoverableRequests(restoreAuthority) ?? []) {
       try { accept(undefined as unknown as IpcMainInvokeEvent, request, undefined); }
       catch { /* Retain exact provisional custody; never invent missing proof. */ }
@@ -402,6 +499,17 @@ export function createRendererSendQueue(startNow: RendererStartNow, options: Ren
         queuedRequestId: `pending-send:${record.id}`, promptHash: record.promptHash, intentId: id, status: "queued",
       };
     },
+    acceptCurrentTurnFallback(event, req, intentId, messageId) {
+      if (!canQueue(req)) throw new Error("followup_fallback_requires_resource_capture");
+      const userRow = messageId ? getDb().prepare("SELECT id,text,created_at AS createdAt FROM chat_messages WHERE id=? AND chat_id=? AND role='user' AND text=?")
+        .get(messageId, req.chatId, req.userPrompt) as {id:string;text:string;createdAt:string}|undefined : undefined;
+      if (messageId && !userRow) throw new Error("followup_message_custody_missing");
+      // The caller owns the IMMEDIATE source-closure transaction. Both records
+      // and the exact user row either commit together or all roll back.
+      const record = queue.enqueue(event, req, { intentId, requireUserRow: true, ...(userRow ? {userRow:{...userRow,role:"user"}} : {}) });
+      options.onQueued?.(req);
+      return record;
+    },
     steerReceiptFor(chatId, intentId) {
       const record = queue.find(chatId, intentId);
       if (!record) return null;
@@ -418,14 +526,21 @@ export function createRendererSendQueue(startNow: RendererStartNow, options: Ren
           : record.state === "uncertain" || record.state === "held" ? "held" : "failed",
       };
     },
-    currentTurnReceiptFor(chatId, intentId, runId) {
+    currentTurnReceiptFor(chatId, intentId) {
       const record = queue.find(chatId, intentId);
       if (!record) return null;
       const userRow = record.userRow as { id?: string } | null;
+      const origin = getDb().prepare("SELECT * FROM invocation_followup_custody WHERE intent_id=? AND chat_id=? AND queue_id=?")
+        .get(intentId, chatId, record.id) as FollowupCapture | undefined;
+      if (origin && (!options.followupAccountDigest || origin.account_digest !== options.followupAccountDigest(JSON.parse(origin.request_json) as McpInvocationRequest))) throw new Error("followup_owner_changed");
       return {
-        chatId, intentId, runId, promptHash: record.promptHash, messageId: userRow?.id ?? record.id,
-        // Accepted and durable; whether it has started is the queue's business, not a state the owner has to see.
-        status: "applied",
+        chatId, intentId, runId: origin?.origin_run_id ?? "", promptHash: record.promptHash, messageId: userRow?.id ?? "",
+        receiptVersion: 2, requestHash: origin?.request_hash ?? recordRequestHash(record),
+        origin: origin ? { kind: "current-turn", runId: origin.origin_run_id } : { kind: "legacy-unconfirmed" },
+        delivery: { kind: "next-turn", queueId: record.id, ...(record.runId ? {runId:record.runId} : {}) },
+        status: record.state === "queued" ? "queued" : record.state === "starting" ? "dispatching"
+          : record.state === "started" ? "applied" : record.state === "held" || record.state === "uncertain" ? "uncertain" : "rejected",
+        messageCustody: messageCustody(record), ...(record.lastCode ? {code:record.lastCode} : {}),
       };
     },
   };

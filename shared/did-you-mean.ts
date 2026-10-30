@@ -175,7 +175,7 @@ const isRecord = (value: unknown): value is SchemaNode => !!value && typeof valu
 /**
  * Hints for an arguments object read against the JSON-schema subset the app's tools declare: a field the schema lists
  * (`properties`, closed with `additionalProperties: false`) that the object does not have, and a string outside a string
- * `enum`. Each hint names the allowed values or fields and the closest one. It only describes; what the tool does with
+ * `enum`, and a nested object missing a field its `required` lists. Each hint names the allowed values or fields and the closest one. It only describes; what the tool does with
  * the arguments is decided elsewhere, so a hint is used on a call that already failed. Unions (`anyOf`/`oneOf`) and open
  * objects are not judged.
  */
@@ -206,6 +206,19 @@ export function schemaArgumentHints(schema: unknown, args: unknown, options: { t
         });
         const takes = `${fields.slice(0, 12).join(", ")}${fields.length > 12 ? ", ..." : ""}`;
         hints.push(path ? `${path} has no field ${named.join(", ")}; it takes ${takes}.` : `Unknown argument ${named.join(", ")}; it takes ${takes || "no arguments"}.`);
+      }
+    }
+    // A nested object that lacks a field its schema requires: the handler answers with a bare code (alive.getState {input:{chatId}} read
+    // "alive-input-invalid" with nothing about `surface`, 10-25). Name the missing field and, when the schema lists them, its values.
+    if (path && Array.isArray(node.required)) {
+      const missing = node.required.filter((field): field is string => typeof field === "string" && !Object.hasOwn(value, field));
+      if (missing.length) {
+        const named = missing.map((field) => {
+          const values = (node.properties as SchemaNode)[field];
+          const listed = isRecord(values) && Array.isArray(values.enum) && values.enum.every((item) => typeof item === "string") && values.enum.length <= 8 ? ` (${(values.enum as string[]).join(" | ")})` : "";
+          return `${field}${listed}`;
+        });
+        hints.push(`${path} needs ${named.join(", ")}.`);
       }
     }
     for (const field of fields) {

@@ -4,7 +4,8 @@ import { createHash, randomUUID } from "node:crypto";
 import type { InstalledMcpServer, RuntimeStatus } from "../../shared/types";
 import type { WorkforceRuntimeToolGrant } from "../runtime/runner";
 import { testServerConnection } from "../mcp-tools/client";
-import { buildMcpConfigFile, mcpConfigKey, type BrowserApprovalScope } from "../mcp-tools/mcp-config";
+import { mcpConfigKey, type BrowserApprovalScope } from "../mcp-tools/mcp-config";
+import { buildNativeBrowserMcpConfig } from "../browser/native-mcp-config";
 import { listInstalledServers } from "../mcp-tools/registry";
 import type { WorkforceExecutionContext, WorkforcePermissionPolicy } from "./workforce-orchestrator";
 import { isHostAuthorityPolicy } from "./workforce-orchestrator";
@@ -541,6 +542,8 @@ export async function finalizeWorkforceCapabilityBinding(input: {
   packets: Array<{ agent: string; allocation: { runtimeId?: string }; capabilityBindings?: WorkforcePlannerCapabilityBinding[];
     gatePermission?: "read" | "write" | "full" }>;
   gateChatId: string;
+  /** Main-owned parent run, never a planner-selected session id. */
+  gateRunId?: string;
   approvalScope?: BrowserApprovalScope;
   gateSimulation?: true;
   signal?: AbortSignal;
@@ -617,7 +620,10 @@ export async function finalizeWorkforceCapabilityBinding(input: {
         if (!packet?.gatePermission || !runtimeKind || !input.gateChatId.trim()) {
           throw new Error("workforce_tool_gate_scope_missing");
         }
-        const config = await buildMcpConfigFile({
+        const browserSelected = listInstalledServers().some(server => serverIds.includes(server.id)
+          && server.catalogId === "agentlas-browser");
+        if (browserSelected && !input.gateRunId?.trim()) throw new Error("native-browser-task-unbound");
+        const config = await buildNativeBrowserMcpConfig({
           serverIds,
           skipDefaultSeed: true,
           configKey: `workforce-${randomUUID()}`,
@@ -631,11 +637,16 @@ export async function finalizeWorkforceCapabilityBinding(input: {
             ...(input.approvalScope ? { approvalScope: input.approvalScope } : {}),
             ...(input.gateSimulation ? { simulation: true as const } : {}),
           },
-        });
+        }, browserSelected ? { chatId: input.gateChatId, runId: input.gateRunId!,
+          permission: packet.gatePermission, signal: input.signal ?? new AbortController().signal,
+          presentation: "background" } : null);
         if (!config || JSON.stringify([...config.includedServerIds].sort()) !== JSON.stringify(serverIds)) {
+          config?.cleanup?.();
           throw new Error("workforce_tool_grant_config_incomplete");
         }
-        const proof = stableConfigProof(config.configPath, expectedServerConfigKeys);
+        let proof: ReturnType<typeof stableConfigProof>;
+        try { proof = stableConfigProof(config.configPath, expectedServerConfigKeys); }
+        catch (error) { config.cleanup?.(); throw error; }
         mcpConfigPath = config.configPath;
         mcpAllowedTools = grantedToolIds;
         // Codex does not consume Claude's per-run JSON config path. It needs
@@ -645,9 +656,9 @@ export async function finalizeWorkforceCapabilityBinding(input: {
         // keeps the worker on Agentlas Browser's shared CDP session, which is
         // also the session streamed into One's task-scoped Browser rail.
         mcpCodexConfigArgs = config.codexConfigArgs;
-        env = { ...config.runtimeEnv };
+        env = { ...config.runtimeEnv, ...(browserSelected ? { AGENTLAS_NATIVE_BROWSER_SCOPE: "task" } : {}) };
         canonicalConfigSha256 = proof.digest;
-        cleanup = () => fs.rmSync(config.configPath, { force: true });
+        cleanup = config.cleanup ?? (() => fs.rmSync(config.configPath, { force: true }));
       }
       grantsByPair.set(key, {
         slotId: row.slotId,

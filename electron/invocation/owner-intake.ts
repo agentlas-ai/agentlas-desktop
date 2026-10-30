@@ -1,4 +1,4 @@
-import type { McpInvocationRequest } from "../../shared/types";
+import type { InvocationSteerResult, McpInvocationRequest } from "../../shared/types";
 import type { InvocationWorkspaceBinding } from "./workspace-binding";
 import { isTransientSendRefusalCode, sendRefusalCode } from "../../shared/transient-send-refusal";
 
@@ -31,6 +31,22 @@ export type OwnerIntakeSurface = "desktop" | "mobile" | "mobile-one" | "telegram
 
 /** Prefix of the durable steer rows the owner intake writes (invocation_steers.id). */
 export const OWNER_INTAKE_STEER_PREFIX = "owner-intake:";
+
+/**
+ * Prefix of the durable row of an owner message that went into a running turn as its direction. It is keyed by the same
+ * intake id as the waiting-message row above, so a message the intake took is findable by its key whichever way it went:
+ * a resend of the same key finds the row instead of steering twice, and a restart can tell "taken" from "never taken".
+ * (It differs from OWNER_INTAKE_STEER_PREFIX because that prefix also marks a message already shown in the transcript,
+ * which a steered direction is not: carried-owner-followups.ts binds the transcript row by it.)
+ */
+export const OWNER_STEERED_PREFIX = "owner-steered:";
+
+/** What the durable rows say became of one intake id (InvocationService.ownerIntakeOutcome). */
+export type OwnerIntakeOutcome =
+  | { kind: "started"; runId: string }
+  | { kind: "steered"; steer: InvocationSteerResult }
+  | { kind: "queued"; plannedRunId: string; steer: InvocationSteerResult }
+  | { kind: "failed" };
 
 type OwnerExecutionContext = object & { readonly source?: string }
 
@@ -65,6 +81,13 @@ export function ownerIntakeWaits(error: unknown): boolean {
 
 /** Before this long the message usually started on its own; a received line then would only be noise. */
 export const OWNER_INTAKE_NOTICE_AFTER_MS = 4_000;
+
+/**
+ * A message the intake took while the request-intent judge was still answering (`startAfter`) starts when the judge
+ * settles. The judges are bounded by their own 5 minute timeout; this is the safety net if one never settles, so a taken
+ * message can never wait on a hung promise.
+ */
+export const OWNER_INTAKE_START_HOLD_MAX_MS = 310_000;
 
 /** The received line for a message that is waiting for its chat. Pure; the phone and the Desktop draw the same stored row. */
 export function ownerIntakeReceivedNotice(locale: "ko" | "en"): string {

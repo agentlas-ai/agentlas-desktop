@@ -276,6 +276,59 @@ export class MobileBridgeRequestReplayStore {
     this.writeLedger(ledger, target);
   }
 
+  /**
+   * Whether this key's entry was left unsettled by a PREVIOUS Desktop instance (it was pending, or marked uncertain, when
+   * that process ended). Nothing alive can ever settle such an entry: it answers "uncertain" until it expires unless the
+   * caller can prove the outcome from the command's own durable footprint (releaseOrphan / adoptOrphan). Read-only.
+   */
+  isOrphan(deviceId: string, key: string, fingerprint: string): boolean {
+    this.assertIdentity(deviceId, key, fingerprint);
+    const keyHash = createHash("sha256").update(key, "utf8").digest("hex");
+    const { ledger } = this.readLedgerForKey(deviceId, keyHash);
+    const entry = ledger.entries.find((candidate) => candidate.deviceId === deviceId && candidate.keyHash === keyHash);
+    return Boolean(entry && entry.fingerprint === fingerprint && entry.state !== "completed" && entry.ownerInstanceId !== this.instanceId
+      && Date.parse(entry.updatedAt) >= this.checkedNow().getTime() - this.ttlMs);
+  }
+
+  /**
+   * Forget an unsettled entry that a PREVIOUS Desktop instance left behind, so the SAME key may run again. Only for a
+   * command whose own downstream layer is idempotent on a key derived from this one (see orphan-rerun-policy.ts):
+   * then re-running it can never run it twice, and the entry would otherwise answer "uncertain" until it expires, with
+   * the phone unable to resend it or to prove it arrived. Never touches a completed entry, an entry of another
+   * fingerprint, or an entry this process owns (a live command settles that one itself). Returns whether it removed one.
+   */
+  releaseOrphan(deviceId: string, key: string, fingerprint: string): boolean {
+    this.assertIdentity(deviceId, key, fingerprint);
+    const keyHash = createHash("sha256").update(key, "utf8").digest("hex");
+    const { ledger, target } = this.readLedgerForKey(deviceId, keyHash);
+    const index = ledger.entries.findIndex((candidate) => candidate.deviceId === deviceId && candidate.keyHash === keyHash);
+    if (index < 0) return false;
+    const entry = ledger.entries[index];
+    if (entry.fingerprint !== fingerprint || entry.ownerInstanceId === this.instanceId || entry.state === "completed") return false;
+    ledger.entries.splice(index, 1);
+    this.writeLedger(ledger, target);
+    return true;
+  }
+
+  /**
+   * Settle an entry a previous Desktop instance left behind with the answer the Desktop's own durable rows prove (the
+   * message was taken), so a resend of the key replays it. Same guards as releaseOrphan. Returns whether it settled one.
+   */
+  adoptOrphan(deviceId: string, key: string, fingerprint: string, response: MobileBridgeReplayResponse): boolean {
+    this.assertIdentity(deviceId, key, fingerprint);
+    if (!validResponse(response) || mobileBridgeJsonBytes(response) > MAX_STORED_RESPONSE_BYTES) return false;
+    const keyHash = createHash("sha256").update(key, "utf8").digest("hex");
+    const { ledger, target } = this.readLedgerForKey(deviceId, keyHash);
+    const entry = ledger.entries.find((candidate) => candidate.deviceId === deviceId && candidate.keyHash === keyHash);
+    if (!entry || entry.fingerprint !== fingerprint || entry.ownerInstanceId === this.instanceId || entry.state === "completed") return false;
+    entry.state = "completed";
+    entry.response = response;
+    entry.ownerInstanceId = this.instanceId;
+    entry.updatedAt = this.checkedNow().toISOString();
+    this.writeLedger(ledger, target);
+    return true;
+  }
+
   markUncertain(deviceId: string, key: string, fingerprint: string): void {
     this.assertIdentity(deviceId, key, fingerprint);
     const keyHash = createHash("sha256").update(key, "utf8").digest("hex");

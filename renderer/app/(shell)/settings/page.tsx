@@ -8,7 +8,7 @@ import { FIRST_RUN_OPEN_EVENT } from "@/lib/first-run-state";
 import { coreAccountState, type CoreAccountState } from "@/lib/core-account-state";
 import { requestWhatsNewReplay } from "@/lib/whats-new";
 import { updaterCanUseOfficialInstaller } from "@shared/types";
-import { useCallback, useEffect, useState, type CSSProperties , useMemo} from "react";
+import { useCallback, useEffect, useRef, useState, type CSSProperties , useMemo} from "react";
 import { ipc, ipcEvents, updaterEvents } from "@/lib/ipc";
 import { detailForUser, failureMessage, humanFailure, looksLikeMachineText } from "@/lib/invocation-failure";
 import { useT, type LocalePref } from "@/lib/i18n";
@@ -172,8 +172,14 @@ export default function SettingsPage() {
     xai: false,
     openrouter: false,
   });
-  const [customBaseUrl, setCustomBaseUrl] = useState("");
+  const [customBaseUrl, setCustomBaseUrl] = useState<string | null>(null);
   const [draftCustomBaseUrl, setDraftCustomBaseUrl] = useState("");
+  const [customBaseUrlLoadFailed, setCustomBaseUrlLoadFailed] = useState(false);
+  const customBaseUrlRead = useRef(0);
+  const customBaseUrlEdit = useRef(0);
+  const customBaseUrlDirty = useRef(false);
+  const savingKeys = useRef(new Set<ByokBackend>());
+  const [savingKeyBackends, setSavingKeyBackends] = useState<Set<ByokBackend>>(() => new Set());
   const [multimodalProviders, setMultimodalProviders] = useState<MultimodalProvider[]>([]);
   const [multimodalSettings, setMultimodalSettings] = useState<MultimodalSettings | null>(null);
   const [multimodalStatus, setMultimodalStatus] = useState<MultimodalProviderStatus[]>([]);
@@ -241,6 +247,21 @@ export default function SettingsPage() {
     return refreshMultimodal();
   }, [multimodalProviders, refreshMultimodal]);
 
+  const refreshCustomBaseUrl = useCallback(async () => {
+    const api = ipc();
+    if (!api) return;
+    const read = ++customBaseUrlRead.current;
+    try {
+      const baseUrl = await api.config.getCustomBaseUrl();
+      if (read !== customBaseUrlRead.current) return;
+      setCustomBaseUrl(baseUrl);
+      if (!customBaseUrlDirty.current) setDraftCustomBaseUrl(baseUrl);
+      setCustomBaseUrlLoadFailed(false);
+    } catch {
+      if (read === customBaseUrlRead.current) setCustomBaseUrlLoadFailed(true);
+    }
+  }, []);
+
   const refresh = useCallback(async () => {
     const api = ipc();
     if (!api) return;
@@ -269,36 +290,19 @@ export default function SettingsPage() {
         openrouter: nextStatuses.some((status) => status.kind === "byok" && status.backend === "openrouter"),
       }));
     });
-    const keyRefresh = Promise.all([
-      api.secrets.hasApiKey("anthropic"),
-      api.secrets.hasApiKey("openai"),
-      api.secrets.hasApiKey("google"),
-      api.secrets.hasApiKey("upstage"),
-      api.secrets.hasApiKey("custom"),
-      api.secrets.hasApiKey("glm"),
-      api.secrets.hasApiKey("kimi"),
-      api.secrets.hasApiKey("deepseek"),
-      api.config.getCustomBaseUrl(),
-    ]).then(([a, o, g, u, c, glmK, kimiK, dsK, baseUrl]) => {
-      setHasKey((current) => ({
-        ...current,
-        anthropic: a,
-        openai: o,
-        google: g,
-        upstage: u,
-        custom: c,
-        glm: glmK,
-        kimi: kimiK,
-        deepseek: dsK,
-      }));
-      setCustomBaseUrl(baseUrl);
-      setDraftCustomBaseUrl(baseUrl);
+    const keyBackends: ByokBackend[] = ["anthropic", "openai", "google", "upstage", "custom", "glm", "kimi", "deepseek"];
+    const keyRefresh = Promise.allSettled(keyBackends.map((backend) => api.secrets.hasApiKey(backend))).then((results) => {
+      setHasKey((current) => {
+        const next = { ...current };
+        results.forEach((result, index) => { if (result.status === "fulfilled") next[keyBackends[index]] = result.value; });
+        return next;
+      });
     });
 
     // 런타임·키·멀티모달은 서로 다른 설정 도메인이다. 한 도메인의 IPC 실패가
     // 나머지 화면까지 초기화하지 못하게 만들지 않도록 각각 독립적으로 정착시킨다.
-    await Promise.allSettled([runtimeRefresh, keyRefresh, refreshMultimodal()]);
-  }, [locale, refreshMultimodal]);
+    await Promise.allSettled([runtimeRefresh, keyRefresh, refreshCustomBaseUrl(), refreshMultimodal()]);
+  }, [locale, refreshCustomBaseUrl, refreshMultimodal]);
 
   useEffect(() => {
     void refresh();
@@ -399,25 +403,49 @@ export default function SettingsPage() {
   // 키 입력칸은 항상 비어 있다. 이때 빈 문자열을 saveApiKey로 넘기면 vault가 기존 키를
   // 삭제해버리므로(electron/secrets/vault.ts saveApiKey), 값이 실제로 입력된 항목만 저장한다.
   function isSaveable(backend: ByokBackend): boolean {
+    if (savingKeyBackends.has(backend)) return false;
     if (draftKey[backend].trim()) return true;
     // 키를 다시 입력하지 않아도 Base URL 변경만으로 저장할 수 있어야 한다.
-    return backend === "custom" && draftCustomBaseUrl.trim() !== customBaseUrl.trim();
+    return backend === "custom" && customBaseUrlDirty.current && customBaseUrl !== null && !customBaseUrlLoadFailed
+      && draftCustomBaseUrl.trim() !== customBaseUrl.trim();
   }
 
   async function saveKey(backend: ByokBackend) {
     const api = ipc();
-    if (!api) return;
-    const key = draftKey[backend].trim();
+    if (!api || savingKeys.current.has(backend)) return;
+    const keyDraft = draftKey[backend];
+    const key = keyDraft.trim();
+    const urlDraft = draftCustomBaseUrl.trim();
+    const urlEdit = customBaseUrlEdit.current;
+    const writeUrl = backend === "custom" && customBaseUrlDirty.current && customBaseUrl !== null && !customBaseUrlLoadFailed
+      && urlDraft !== customBaseUrl.trim();
+    const pendingUrl = backend === "custom" && customBaseUrlDirty.current && (customBaseUrl === null || customBaseUrlLoadFailed);
+    let keySaved = false;
+    savingKeys.current.add(backend);
+    setSavingKeyBackends((current) => new Set(current).add(backend));
     try {
       if (key) {
-        await api.secrets.saveApiKey(backend, draftKey[backend]);
+        await api.secrets.saveApiKey(backend, keyDraft);
+        keySaved = true;
+        setDraftKey((d) => d[backend] === keyDraft ? { ...d, [backend]: "" } : d);
       }
-      if (backend === "custom") {
-        await api.config.setCustomBaseUrl(draftCustomBaseUrl);
+      if (writeUrl) {
+        // Reads started before or during this write may contain the previous URL.
+        customBaseUrlRead.current += 1;
+        await api.config.setCustomBaseUrl(urlDraft);
+        customBaseUrlRead.current += 1;
+        setCustomBaseUrl(urlDraft);
+        if (customBaseUrlEdit.current === urlEdit) {
+          customBaseUrlDirty.current = false;
+          setDraftCustomBaseUrl(urlDraft);
+        }
       }
-      setDraftKey((d) => ({ ...d, [backend]: "" }));
       setRuntimeMessage(
-        key
+        pendingUrl && keySaved
+          ? locale === "ko"
+            ? "키는 저장했습니다. Base URL을 다시 불러온 뒤 변경 사항을 저장해 주세요."
+            : "Key saved. Reload the Base URL before saving its changes."
+          : key
           ? locale === "ko"
             ? "키를 저장했습니다. 값은 화면에 다시 표시하지 않습니다."
             : "Key saved. The value will not be shown again."
@@ -427,7 +455,12 @@ export default function SettingsPage() {
       );
       await refresh();
     } catch (err) {
-      setRuntimeMessage(locale === "ko" ? `키를 저장하지 못했습니다. 이전 값은 그대로입니다. ${detailForUser(err)}` : `Key was not saved. The previous value was kept. ${detailForUser(err)}`);
+      setRuntimeMessage(keySaved
+        ? (locale === "ko" ? `키는 저장했습니다. Base URL 저장 여부는 확인하지 못했습니다. ${detailForUser(err)}` : `The key was saved, but the Base URL save could not be confirmed. ${detailForUser(err)}`)
+        : (locale === "ko" ? `설정 저장 여부를 확인하지 못했습니다. ${detailForUser(err)}` : `The setting save could not be confirmed. ${detailForUser(err)}`));
+    } finally {
+      savingKeys.current.delete(backend);
+      setSavingKeyBackends((current) => { const next = new Set(current); next.delete(backend); return next; });
     }
   }
 
@@ -1014,7 +1047,12 @@ export default function SettingsPage() {
                 <input
                   type="text"
                   value={draftCustomBaseUrl}
-                  onChange={(e) => setDraftCustomBaseUrl(e.target.value)}
+                  disabled={customBaseUrl === null || customBaseUrlLoadFailed}
+                  onChange={(e) => {
+                    customBaseUrlDirty.current = true;
+                    customBaseUrlEdit.current += 1;
+                    setDraftCustomBaseUrl(e.target.value);
+                  }}
                   placeholder="Base URL (e.g. https://api.deepseek.com/v1)"
                   style={{
                     flex: 1,
@@ -1075,6 +1113,14 @@ export default function SettingsPage() {
                 </button>
               )}
             </div>
+            {b === "custom" && customBaseUrlLoadFailed && (
+              <div role="status" style={{ fontSize: 12, color: "var(--muted-deep)" }}>
+                {locale === "ko" ? "저장된 Base URL을 불러오지 못했습니다. " : "The saved Base URL could not be loaded. "}
+                <button type="button" onClick={() => void refreshCustomBaseUrl()}>
+                  {locale === "ko" ? "다시 불러오기" : "Reload"}
+                </button>
+              </div>
+            )}
             {hasKey[b] && (
               <ByokModelControls
                 backend={b}

@@ -221,7 +221,7 @@ export function createDaemonAliveDecisionPort(options: {
   db: Database.Database; bootId: string; ownerBinding(): AliveDecisionOwner; assertOwner(): void; now(): number;
   /** Host resolves the exact installed runtime; returned runner already has
    * the agent-context wrapper. No arbitrary wire runner/config is accepted. */
-  resolveRuntime(choice: AliveDecisionChoice): Promise<{ runner: Runner; label: string; status: RuntimeStatus } | null>;
+  resolveRuntime(choice: AliveDecisionChoice, signal: AbortSignal, assertCurrent: () => void): Promise<{ runner: Runner; label: string; status: RuntimeStatus } | null>;
 }) {
   const owner = options.ownerBinding();
   let closed = false;
@@ -301,15 +301,15 @@ export function createDaemonAliveDecisionPort(options: {
         life.wake = wake; life.controller = controller; lives.set(wake.lifeAgentId, life);
         const heldLife = life;
         life.detach ??= peer.onClose(() => release(heldLife));
-        const picked = await options.resolveRuntime(choice);
-        if (!picked || picked.status.kind !== choice.kind || (picked.status.source ?? null) !== choice.source
-          || (picked.status.backend ?? null) !== choice.backend || (choice.kind === "acp" && picked.status.acpAgentId !== choice.acpAgentId)) fail("alive_decision_runtime_unavailable");
         const assertTurn = () => {
           controller.signal.throwIfAborted(); assertOwner(); peer.assertCurrent(); validateLife(options.db, wake, options.now(), true);
           const row = options.db.prepare("SELECT status FROM alive_light_wakes WHERE wake_id=?").get(wake.wakeId) as { status: string } | undefined;
           if (row?.status !== "running") fail("alive_decision_attempt_changed");
         };
+        const picked = await options.resolveRuntime(choice, controller.signal, assertTurn);
         assertTurn();
+        if (!picked || picked.status.kind !== choice.kind || (picked.status.source ?? null) !== choice.source
+          || (picked.status.backend ?? null) !== choice.backend || (choice.kind === "acp" && picked.status.acpAgentId !== choice.acpAgentId)) fail("alive_decision_runtime_unavailable");
         const bindingKey = digest([choice, "alive-no-tools.v1", ALIVE_GOAL_CONTROLLER_PROMPT, ALIVE_GOAL_DECISION_OUTPUT_SCHEMA]);
         if (life.bindingKey && life.bindingKey !== bindingKey) closeResources(life);
         life.bindingKey = bindingKey;

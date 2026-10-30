@@ -6,6 +6,8 @@ import { onHostShutdown } from "../host-lifecycle";
 
 export type CanonicalNativeBrowserGrantInput = {
   chatId: string; runId: string; permission: "read" | "write" | "full"; signal: AbortSignal;
+  terminalApprovalHash?: string;
+  terminalApprovalLeaseId?: string;
   presentation?: "foreground" | "background";
   onScreenshot?: (capture: { png: Buffer; isCurrent: () => boolean }) => void | Promise<void>;
 };
@@ -151,7 +153,8 @@ export async function createCanonicalNativeBrowserGrant(input: CanonicalNativeBr
   // on Main. This also avoids leaking the created grant when its reply is lost.
   const id = (await import("node:crypto")).randomUUID();
   let released = false;
-  let remoteGrant: NativeBrowserRelayGrant | null = null;
+  let remoteGrant: (NativeBrowserRelayGrant & { releaseAcknowledged(): Promise<void> }) | null = null;
+  let releaseAcknowledgement: Promise<void> | null = null;
   let recoveryRequested = false;
   const expectedRestorations = new Map<string, LoginPrerequisiteRef>();
   const restoredIds = new Set<string>();
@@ -195,7 +198,8 @@ export async function createCanonicalNativeBrowserGrant(input: CanonicalNativeBr
     state.captures.delete(id);
     state.releases.delete(release);
     if (!recoveryRequested || input.signal.aborted) input.signal.removeEventListener("abort", release);
-    void request(state, "release", { id, cancelled: input.signal.aborted }, 3_000).catch(() => {});
+    releaseAcknowledgement = request(state, "release", { id, cancelled: input.signal.aborted }, 3_000).then(() => undefined);
+    void releaseAcknowledgement.catch(() => {});
     if (input.signal.aborted) recoveryEnded();
   };
   state.releases.add(release);
@@ -248,6 +252,8 @@ export async function createCanonicalNativeBrowserGrant(input: CanonicalNativeBr
   try {
     const result = await request<Snapshot & { endpoint: string; token: string; ownerScopeId?: string }>(state, "grant", {
       id, chatId: input.chatId, runId: input.runId, permission: input.permission,
+      ...(input.terminalApprovalHash ? { terminalApprovalHash: input.terminalApprovalHash } : {}),
+      ...(input.terminalApprovalLeaseId ? { terminalApprovalLeaseId: input.terminalApprovalLeaseId } : {}),
       presentation: input.presentation ?? "background", screenshots: Boolean(input.onScreenshot),
     });
     if (released || input.signal.aborted) throw new Error("native-browser-grant-revoked");
@@ -263,7 +269,18 @@ export async function createCanonicalNativeBrowserGrant(input: CanonicalNativeBr
     if (capturePending) await refresh();
     remoteGrant = { endpoint: result.endpoint, token: result.token, ...(result.ownerScopeId ? { ownerScopeId: result.ownerScopeId } : {}),
       ...(result.nativeComputerUse ? { nativeComputerUse: result.nativeComputerUse } : {}),
-      release, pages: () => pages, health: () => health, refresh,
+      release, releaseAcknowledged: async () => {
+        release();
+        if (!releaseAcknowledgement) throw new Error(NATIVE_BROWSER_HOST_UNAVAILABLE);
+        try { await releaseAcknowledgement; }
+        catch (error) {
+          // A lost acknowledgement cannot leave an approval scope live behind
+          // an apparently successful release. Ending the watch revokes all
+          // grants owned by this daemon in Main.
+          if (remote === state) clearCanonicalNativeBrowserCapability();
+          throw error;
+        }
+      }, pages: () => pages, health: () => health, refresh,
       reestablish: async () => { const result = await request<Snapshot>(state, "reestablish", { id }); await update(result); return health; },
       recoverLoginWalls: async (options: { nodeId?: string; onPrerequisiteRestored?: (prerequisite: LoginPrerequisiteRef) => void }) => {
         recoveryRequested = true;

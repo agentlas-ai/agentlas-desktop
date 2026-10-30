@@ -245,7 +245,7 @@ function productionPorts(): RoomChatPorts {
   const locale = () => (require("../ui-locale") as typeof import("../ui-locale")).currentUiLocale();
   const queuedSteerState = (id: string) => (require("../store/invocation-steers") as typeof import("../store/invocation-steers")).queuedSteerState(id);
   const deferSystemRelay = (input: import("../invocation/deferred-system-relays").DeferredRelayInput) =>
-    (require("../invocation/deferred-system-relays") as typeof import("../invocation/deferred-system-relays")).deferSystemRelay(input);
+    (require("../invocation/deferred-system-relays") as typeof import("../invocation/deferred-system-relays")).parkSystemRelay(input);
   const refusalCode = (error: unknown) => (require("../runtime/runner") as typeof import("../runtime/runner")).refusalCode(error);
   const pendingWake = new Map<string, { queuedRequestId: string; notes: RoomNoteForOne[] }>();
 

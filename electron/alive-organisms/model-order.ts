@@ -142,9 +142,8 @@ function exactOk(selection: RuntimeSelection): boolean {
   try { captureLongRunRuntimeSelection(selection, { requireExact: true }); return true; } catch { return false; }
 }
 
-/** Refresh from live detection (cached by detect.ts). Called before each organism beat. */
-export async function refreshAliveModelOrder(nowMs = Date.now(),
-  facts?: (status: RuntimeStatus) => readonly string[]): Promise<AliveModelOrderEntry[]> {
+/** The pool order from live detection (cached by detect.ts), without touching the cache. */
+export async function computeAliveModelOrder(facts?: (status: RuntimeStatus) => readonly string[]): Promise<AliveModelOrderEntry[]> {
   const detected = await detectRuntimes();
   const members = {
     orchestrator: listModelRoleMembers("orchestrator" as RuntimeRole),
@@ -160,12 +159,37 @@ export async function refreshAliveModelOrder(nowMs = Date.now(),
     if (role?.selection) resolved = { selection: role.selection, live: runtimeForOwnerSelection(detected, role.selection) };
   }
   const plan = legacyMembers(members, usable, resolved);
-  const entries = buildAliveModelOrder({ members: plan.members, usable: plan.usable, exact: exactOk, ...(facts ? { facts } : {}) });
+  return buildAliveModelOrder({ members: plan.members, usable: plan.usable, exact: exactOk, ...(facts ? { facts } : {}) });
+}
+
+/** Refresh from live detection (cached by detect.ts). Called before each organism beat. */
+export async function refreshAliveModelOrder(nowMs = Date.now(),
+  facts?: (status: RuntimeStatus) => readonly string[]): Promise<AliveModelOrderEntry[]> {
+  const entries = await computeAliveModelOrder(facts);
   cached = { atMs: nowMs, entries };
   return entries;
 }
 
 export function cachedAliveModelOrder(): AliveModelOrderEntry[] { return cached?.entries ?? []; }
+
+/** How old the host's cached order may be before a reader that is not the Alive host reads the pool again. */
+export const ALIVE_MODEL_ORDER_FRESH_MS = 2 * 60_000;
+
+/**
+ * The pool order for a reader that is not the Alive host (the AGI monitor's model attempt). Only the Alive host's beat refreshes the
+ * cache, and Main's host is stopped whenever the background service holds the Alive domain (every launch hands it over a few seconds
+ * after start, and the service keeps it). The cache then stayed what the first beat read, or empty for ever: the AGI's candidates
+ * were the Goal's own runtime alone, and when that one was cooling there was nobody (agi.model.no-runtime 68 times, production
+ * 2026-10-26..27, while the owner's other runtimes worked). A fresh cache is used as is (the host's own order, with its light-wake
+ * facts); an old or empty one is read again here without being stored, so the host's cache keeps its own filter.
+ */
+export async function freshAliveModelOrder(options: { nowMs?: number; maxAgeMs?: number;
+  compute?: () => Promise<AliveModelOrderEntry[]> } = {}): Promise<AliveModelOrderEntry[]> {
+  const nowMs = options.nowMs ?? Date.now();
+  if (cached && cached.entries.length > 0 && nowMs - cached.atMs <= (options.maxAgeMs ?? ALIVE_MODEL_ORDER_FRESH_MS)) return cached.entries;
+  try { return await (options.compute ?? computeAliveModelOrder)(); }
+  catch { return cached?.entries ?? []; }
+}
 
 /** NEW resolver (pool → exact selection). The first usable entry in owner order, or null. */
 export function aliveSelectionFromPool(entries: AliveModelOrderEntry[] = cachedAliveModelOrder()):

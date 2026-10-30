@@ -17,6 +17,8 @@ import { withRuntimeCapabilityReceipt } from "../runtime/capability-receipt";
 import { detectSandboxDeath, type SandboxDeathSignal } from "../runtime/sandbox-death";
 import { currentModelCallScope, withModelCallScope, roleForTaskForcePhase } from "../runtime/model-call-ledger";
 import { workerCapabilityRunner, WorkerCapabilityError, type PrepareWorkerCapabilities, type WorkerCapabilityInput } from "./worker-capabilities";
+import { teamWorkerFailureText, withoutExecutionFailureReport } from "./team-worker-failure-copy";
+import { MID_RUN_GOAL_CHANGE_CODES, TASK_FORCE_GOAL_CHANGED_ISSUE, TASK_FORCE_SYNTHESIS_UNAVAILABLE_ISSUE, taskForceGoalChangedReport, taskForceHostAssembledReport } from "./task-force-host-report";
 // Borrowed Hub task-force orchestration.
 // Hub "borrow" is not an installed firm: the local orchestrator plans per-agent
 // input packets, runs each borrowed agent as an isolated BYOM local sub-run, then
@@ -86,7 +88,11 @@ import { WORK_PROJECT_RESIDENCY_BUSY_CODE } from "../runtime/project-residency";
 import { runTeamStepWithSettlement, teamStepFailureNote, type TeamStepFailureNote, type TeamStepSettlementPhase } from "./team-step-settlement";
 import { degenerateOutputReceipt, runGuardedTeamStep, WORKER_OUTPUT_DEGENERATE_CODE } from "../runtime/degenerate-output";
 import { validSiteAgentAppMcpGrantTools } from "../site/agent-app-tool-policy";
-import { recordWorkerReport, tryRecordRunEvent } from "../store/run-events";
+import { getRunEventBySource, recordWorkerReport, tryRecordRunEvent } from "../store/run-events";
+import { agentMailGet, selectedAgentMailExecutionScope } from "../agent-mail/client";
+import { agentMailEffectAccountDigest, agentMailEffectInputDigest, agentMailEffectMessageDigest, agentMailEffectScopeDigest } from "../agent-mail/effect-witness";
+import { getAuthenticatedSessionBinding } from "../auth";
+import { isAgentMailId } from "../../shared/agent-mail";
 import {
   defaultWorkloadAllocation,
   normalizeEffort,
@@ -109,6 +115,7 @@ import {
 } from "../runtime/selection";
 import { getAgentById, listInstalledAgentsReadOnly } from "./registry";
 import { getDb } from "../store/db";
+import type { OneArtifactBindingRequestV1 } from "../../shared/one-artifacts";
 import { extractAskFences } from "../../shared/ask-fence-flatten";
 import { withholdTurnAskForRun } from "../turn-tools/control-server";
 import { runFirmInvocation } from "./firm-orchestrator";
@@ -533,6 +540,8 @@ export interface WorkforcePlannerBenchmarkAttemptEvidence {
 export interface BorrowedTaskForceParams {
   /** Main prepares an independent capability lease at each actual worker dispatch. */
   prepareWorkerCapabilities?: PrepareWorkerCapabilities;
+  /** Host-only: lends the run's step results (read at call time) to the entry wrapper, so a stop can report what finished. */
+  observeResults?: (read: () => readonly BorrowedAgentResult[]) => void;
   req: McpInvocationRequest;
   chat: Chat;
   orchestratorAgent: InstalledAgent;
@@ -611,6 +620,11 @@ export interface BorrowedTaskForceParams {
     /** The tool that surfaced the paths: a read-only observation binds nothing (mcp/client.ts). */
     observedBy?: { name: string; kind?: RuntimeToolKind },
   ) => NonNullable<McpInvocationEvent["oneArtifacts"]>;
+  /** Main-owned asynchronous authority check; absent in headless callers, so failed drafts never advance review. */
+  verifyOneRuntimeToolArtifact?: (
+    binding: OneArtifactBindingRequestV1,
+    signal?: AbortSignal,
+  ) => Promise<{ sourcePath: string; sha256: string } | null>;
 }
 
 function taskForceOneArtifacts(
@@ -3186,6 +3200,17 @@ function taskForceRemainingForOwner(
   return rows;
 }
 
+/** What each teammate delivered, as the host-assembled report quotes it (room names; machine envelopes and typed failure data out). */
+function taskForceHostReportRows(results: readonly BorrowedAgentResult[], locale: RuntimeLocale) {
+  let installed: InstalledAgent[] = [];
+  try { installed = listInstalledAgentsReadOnly(); } catch { /* names fall back to the package's own */ }
+  const seats = taskForceSeatNames();
+  return results.filter((result): result is BorrowedAgentResult => Boolean(result)).map((result) => ({
+    name: taskForceRoomName(result.spec, locale, installed, seats), ok: result.ok === true,
+    text: redactSensitiveText(withoutExecutionFailureReport(stripTaskForceControlEnvelopes(result.text ?? ""))),
+  }));
+}
+
 /**
  * The owner sentence of a run that did not pass verification: what is left per worker (room names, each once), then
  * what happens next. Owner 2026-10-16: "완료되지 않은 담당자: No-AI-Slop Copywriter, Vibecoder, No-AI-Slop Copywriter"
@@ -3760,7 +3785,7 @@ export function taskForceWorkerHandoffText(text: string): string {
     "HANDOFF FACTS:", `blocking_remaining: ${parsed.blockingRemaining.length ? parsed.blockingRemaining.join("; ") : "none"}`,
     ...parsed.handoffFacts,
     ...ownerChoices.map((choice) => choice.external
-      ? `owner choice (outside the workspace, not applied): ${choice.question}`
+      ? `owner choice (external effect subject to host verification): ${choice.question}`
       : choice.applied ? `owner choice: ${choice.question} = ${choice.applied}` : `owner choice (no default): ${choice.question}`)].join("\n");
 }
 
@@ -3792,10 +3817,115 @@ export interface TaskForceOwnerChoice {
   question: string;
   applied: string;
   external: boolean;
-  /** Optional opaque effect observation reference; never authority by itself. */
   effectRef?: string;
   /** Missing in legacy output; never assume that no external attempt occurred. */
   effectState?: ExternalEffectState;
+}
+
+interface TaskForceObservedMailEffect {
+  effectRef: string;
+  messageId: string;
+  sendId: string;
+  inputDigest: string;
+  chatId: string;
+  runId: string;
+  stepId: string;
+  invocationId: string;
+  permission: "read" | "write" | "full";
+}
+
+function taskForceMailObject(value: unknown): Record<string, unknown> | null {
+  if (typeof value === "string") {
+    if (value.length > 524_288) return null;
+    try { return taskForceMailObject(JSON.parse(value)); } catch { return null; }
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  if (typeof record.effectRef === "string") return record;
+  if (record.structuredContent) return taskForceMailObject(record.structuredContent);
+  if (Array.isArray(record.content)) {
+    for (const item of record.content.slice(0, 8)) {
+      const parsed = taskForceMailObject(item && typeof item === "object" ? (item as Record<string, unknown>).text : null);
+      if (parsed) return parsed;
+    }
+  }
+  return null;
+}
+
+function taskForceObservedMailEffect(input: {
+  name: unknown; args: unknown; result: unknown; isError: unknown;
+  chatId: string; runId: string | undefined; stepId: string; invocationId: string;
+  permission: "read" | "write" | "full";
+}): TaskForceObservedMailEffect | null {
+  // Only the first-party built-in server may introduce this lookup key. The result is still data until the host checks it.
+  if (input.name !== "mcp__agent-mail__agent_mail_send" || input.isError || !input.runId || !input.stepId) return null;
+  const args = taskForceMailObject(input.args) ?? (input.args && typeof input.args === "object" && !Array.isArray(input.args)
+    ? input.args as Record<string, unknown> : null);
+  const result = taskForceMailObject(input.result);
+  const send = result?.send && typeof result.send === "object" ? result.send as Record<string, unknown> : null;
+  if (!args || !result || !send || typeof result.effectRef !== "string"
+    || !/^taskforce-mail:[0-9a-f-]{36}$/.test(result.effectRef)
+    || !isAgentMailId(result.message && typeof result.message === "object" ? (result.message as Record<string, unknown>).id : null)
+    || !isAgentMailId(send.id) || !["accepted", "delivered"].includes(String(send.status))
+    || !Array.isArray(args.to) || args.to.some((item) => typeof item !== "string")
+    || !Array.isArray(args.cc ?? []) || !Array.isArray(args.bcc ?? [])
+    || typeof args.subject !== "string" || typeof args.text !== "string") return null;
+  return { effectRef: result.effectRef, messageId: (result.message as Record<string, string>).id,
+    sendId: send.id, inputDigest: agentMailEffectInputDigest({ to: args.to as string[],
+      cc: args.cc as string[], bcc: args.bcc as string[], subject: args.subject, text: args.text,
+      ...(isAgentMailId(args.reply_to_message_id) ? { replyToMessageId: args.reply_to_message_id }
+        : typeof args.inReplyTo === "string" ? { inReplyTo: args.inReplyTo } : {}) }),
+    chatId: input.chatId, runId: input.runId, stepId: input.stepId, invocationId: input.invocationId,
+    permission: input.permission };
+}
+
+async function verifiedTaskForceMailEffectRefs(input: {
+  observed: readonly TaskForceObservedMailEffect[]; choices: readonly TaskForceOwnerChoice[];
+  chatId: string; runId: string | undefined; stepId: string; invocationIds: readonly string[];
+  ownerScopeKey: string | undefined; signal?: AbortSignal;
+}): Promise<Set<string>> {
+  const verified = new Set<string>();
+  if (!input.runId || !input.ownerScopeKey || input.signal?.aborted) return verified;
+  const account = getAuthenticatedSessionBinding();
+  if (!account || activeBorrowedOwnerScopeKey() !== input.ownerScopeKey) return verified;
+  const accountDigest = agentMailEffectAccountDigest(account);
+  const mailScopeDigest = agentMailEffectScopeDigest(selectedAgentMailExecutionScope());
+  // One witnessed send is one effect. Two separate external choices that carry the same ref are ambiguous: neither settles
+  // (they stay the owner's, exactly as before any witness existed), so one send cannot settle two different decisions.
+  const refUses = new Map<string, number>();
+  for (const choice of input.choices) if (choice.external && choice.effectRef) refUses.set(choice.effectRef, (refUses.get(choice.effectRef) ?? 0) + 1);
+  for (const choice of input.choices) {
+    const ref = choice.effectRef;
+    if (!choice.external || !ref || input.signal?.aborted) continue;
+    if ((refUses.get(ref) ?? 0) > 1) continue;
+    const observed = input.observed.find((item) => item.effectRef === ref && item.chatId === input.chatId && item.runId === input.runId
+      && item.stepId === input.stepId && input.invocationIds.includes(item.invocationId));
+    if (!observed) continue;
+    let event: ReturnType<typeof getRunEventBySource>;
+    try { event = getRunEventBySource(input.runId, ref); } catch { continue; }
+    const witness = event?.payload;
+    if (event?.kind !== "task_force_mail_send_effect" || event.chatId !== input.chatId
+      || witness?.schemaVersion !== "agentlas.taskforce-mail-effect.v1"
+      || witness.effectRef !== ref || witness.operationId !== "agent_mail_send"
+      || witness.messageId !== observed.messageId || witness.sendId !== observed.sendId
+      || witness.inputDigest !== observed.inputDigest || witness.accountDigest !== accountDigest
+      || witness.ownerScopeKey !== input.ownerScopeKey || witness.mailScopeDigest !== mailScopeDigest
+      || witness.permission !== observed.permission || witness.source !== "agent-mail-control-server") continue;
+    // GET is first-party read-only observation. Never retry agent_mail_send to establish a lost acknowledgement.
+    const fetched = await agentMailGet(observed.messageId).catch(() => null);
+    if (!fetched?.ok || !fetched.message || input.signal?.aborted) continue;
+    const message = fetched.message;
+    if (message.id !== observed.messageId || message.direction !== "outbound" || message.sendId !== observed.sendId
+      || !["accepted", "delivered"].includes(String(message.sendStatus))
+      || typeof message.from !== "string" || !Array.isArray(message.to) || !Array.isArray(message.cc)
+      || typeof message.subject !== "string" || typeof message.text !== "string"
+      || agentMailEffectMessageDigest(message) !== witness.messageDigest
+      || agentMailEffectAccountDigest(getAuthenticatedSessionBinding() ?? { workspaceId: "", userId: "", sessionId: "" }) !== accountDigest
+      || activeBorrowedOwnerScopeKey() !== input.ownerScopeKey
+      || agentMailEffectScopeDigest(selectedAgentMailExecutionScope()) !== mailScopeDigest) continue;
+    verified.add(ref);
+  }
+  return verified;
 }
 
 /** The typed `ownerChoices` list. A missing `external` reads as true: an untyped effect never settles without the owner. */
@@ -3808,7 +3938,7 @@ function taskForceOwnerChoicesFrom(value: unknown): TaskForceOwnerChoice[] {
     const question = cleanString(record.question);
     if (!question || choices.has(question)) continue;
     const applied = cleanString(record.applied);
-    const effectRef = typeof record.effectRef === "string" && /^[A-Za-z0-9][A-Za-z0-9:._/-]{0,255}$/.test(record.effectRef)
+    const effectRef = typeof record.effectRef === "string" && /^taskforce-mail:[0-9a-f-]{36}$/.test(record.effectRef)
       ? record.effectRef
       : undefined;
     const effectState = typeof record.effectRef === "string" && record.effectRef.trim() && !effectRef ? "uncertain"
@@ -3930,8 +4060,7 @@ export function taskForceOwnerDecisions(blockingRemaining: readonly string[] | u
  * write/auto chip would turn builds that used to complete quietly into new "결정 필요" stops).
  * - A choice with a default and no external effect is applied — the worker already finished with it — so it never holds
  *   the packet open; the owner reads it as a "바꾸려면" line (taskForceAppliedChoiceLines).
- * - An external effect (publish, send, pay, delete) or a choice without a default stays the owner's: an owner_decision
- *   blocker, the packet PARTIAL (FAILED stays FAILED), as an ask from a worker is.
+ * - An external effect needs an exact current first-party witness; other external choices stay the owner's.
  */
 export function settleTaskForceOwnerChoices(
   outcome: TaskForcePacketOutcome,
@@ -3975,6 +4104,7 @@ export function taskForceAppliedChoiceLines(locale: RuntimeLocale, choices: read
   const seen = new Set<string>();
   const lines: string[] = [];
   for (const choice of choices) {
+    if (choice.external) continue;
     const question = choice.question.replace(/\s+/g, " ").trim();
     const applied = choice.applied.replace(/\s+/g, " ").trim();
     if (!question || !applied || seen.has(question)) continue;
@@ -4741,6 +4871,10 @@ interface BorrowedAgentResult {
   externalEffects?: readonly ExternalEffectAssessment[];
   /** Host observation of the exact bounded peer data delivered to this call. */
   goalReviewedInputDigests?: string[];
+  /** Main-bound file produced by this exact child invocation; internal review scheduling evidence only. */
+  observedReviewDrafts?: TaskForceObservedReviewDraft[];
+  /** Host-collected retry lineage for this one packet, never planner or worker data. */
+  reviewProducerInvocationIds?: string[];
   spec: BorrowedAgentSpec;
   packet: BorrowedInputPacket;
   text: string;
@@ -4839,6 +4973,61 @@ export function taskForceFailureReport(
   // Aggregate follow-up can be partial while every packet succeeded; never rewrite step receipts here.
   return executionFailureReport({ outcome: results.some(result => result.ok) ? "partial"
     : causes.every(cause => cause.delivery === "not-dispatched" || cause.phase === "effect") ? "blocked" : "failed", causes, effects });
+}
+
+interface TaskForceObservedReviewDraft {
+  producerStepId: string;
+  producerInvocationId: string;
+  binding: OneArtifactBindingRequestV1;
+  sourcePath: string;
+  sha256: string;
+}
+
+function taskForceObservedReviewDraft(
+  artifact: OneArtifactBindingRequestV1,
+  producerStepId: string,
+  producerInvocationId: string,
+): TaskForceObservedReviewDraft | null {
+  try {
+    if (!producerStepId) return null;
+    const binding: OneArtifactBindingRequestV1 = {
+      taskId: artifact.taskId, taskVersion: artifact.taskVersion,
+      chatId: artifact.chatId, runId: artifact.runId,
+      manifestId: artifact.manifestId, artifactRef: artifact.artifactRef,
+    };
+    const row = getDb().prepare(
+      `SELECT source_path, sha256 FROM one_artifact_bindings
+       WHERE task_id = ? AND chat_id = ? AND run_id = ? AND manifest_id = ? AND artifact_ref = ? LIMIT 1`,
+    ).get(binding.taskId, binding.chatId, binding.runId, binding.manifestId, binding.artifactRef) as
+      { source_path: string; sha256: string } | undefined;
+    return row?.source_path && /^[a-f0-9]{64}$/.test(row.sha256)
+      ? { producerStepId, producerInvocationId, binding, sourcePath: row.source_path, sha256: row.sha256 }
+      : null;
+  } catch { return null; }
+}
+
+/** A failed producer may supply one exact draft for review; this never completes the producer or a final packet. */
+export async function taskForceReviewDependencyReady(input: {
+  packet: Pick<BorrowedInputPacket, "phase" | "inputType">;
+  dependencyStepId: string;
+  dependency: Pick<BorrowedAgentResult, "ok" | "packet" | "invocationId" | "observedReviewDrafts" | "reviewProducerInvocationIds">;
+  chatId: string;
+  runId: string;
+  verify: (binding: OneArtifactBindingRequestV1) => Promise<{ sourcePath: string; sha256: string } | null>;
+}): Promise<boolean> {
+  if (input.dependency.ok) return true;
+  if (taskForcePacketPhase(input.packet) !== "review"
+    || taskForcePacketPhase(input.dependency.packet) !== "produce") return false;
+  const drafts = input.dependency.observedReviewDrafts ?? [];
+  // An ambiguous set cannot identify the specific draft this review should inspect.
+  if (drafts.length !== 1) return false;
+  const draft = drafts[0];
+  if (draft.producerStepId !== input.dependencyStepId
+    || input.dependency.packet.stepId !== input.dependencyStepId
+    || !(input.dependency.reviewProducerInvocationIds ?? [input.dependency.invocationId]).includes(draft.producerInvocationId)
+    || draft.binding.chatId !== input.chatId || draft.binding.runId !== input.runId) return false;
+  const current = await input.verify(draft.binding);
+  return current?.sourcePath === draft.sourcePath && current.sha256 === draft.sha256;
 }
 
 interface WorkforceInvocationEvidence {
@@ -4951,10 +5140,14 @@ async function runBorrowedAgentTurn(
     tryRecordRunEvent({ runId: p.req.runId ?? `task-force:${p.chat.id}`, chatId: p.chat.id,
       agentId: workerId, kind: "worker_capability_preparation", payload: { code, attemptId, ceiling: capabilityCeiling } });
   };
+  // The automatic reviewer (Codex's own risk review of each MCP call) belongs to a WRITE worker, whose approvals have nobody to answer
+  // them. A worker the owner gave full access runs like every other full-access run, with no approval step: routing it through the
+  // reviewer let Codex refuse a call under permissions "full" ("rejected due to unacceptable risk", speech.transcribe on the owner's
+  // own video, 2026-10-28) that the same call outside a team would have run.
   const runnerBase = taskForceRunnerBase(
     p,
     workerPermission,
-    workerPermission !== "read" || readQaAutoReviewAllowed(p, packet, workerPermission, preApprovalStage),
+    workerPermission === "write" || readQaAutoReviewAllowed(p, packet, workerPermission, preApprovalStage),
   );
   const candidateRuntimes = taskForceCandidateRuntimes(p);
   // (a) the member's own explicit model; its lookup needs every live runtime, not only the room's.
@@ -5144,6 +5337,18 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
   };
   const unitActedOutward = (): { actedOutward?: true } =>
     outwardCallsDropped || taskForceUnitActedOutward({ calls: observedOutwardCalls }) ? { actedOutward: true } : {};
+  const observedReviewDrafts: TaskForceObservedReviewDraft[] = [];
+  const observedMailEffects: TaskForceObservedMailEffect[] = [];
+  const recordReviewDrafts = (artifacts: McpInvocationEvent["oneArtifacts"]): void => {
+    if (taskForcePacketPhase(packet) !== "produce") return;
+    for (const artifact of artifacts ?? []) {
+      if (artifact.chatId !== p.chat.id || artifact.runId !== p.req.runId) continue;
+      const draft = taskForceObservedReviewDraft(artifact, packet.stepId?.trim() ?? "", invocationId);
+      if (draft && !observedReviewDrafts.some((known) => known.binding.artifactRef === draft.binding.artifactRef)) {
+        observedReviewDrafts.push(draft);
+      }
+    }
+  };
   let observedDirectResult: RunnerResult | undefined;
   let observedDirectRole: WorkerHandoffRole = "worker";
   let observedDirectRuntime = active;
@@ -5175,6 +5380,7 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
         // renew the parent's inactivity guard explicitly before forwarding it.
         recordSemanticActivity(event);
         if (event.kind === "tool-use" && event.tool) noteOutwardCall(event.tool.name, event.tool.args);
+        if (event.kind === "tool-use" && !event.tool?.isError) recordReviewDrafts(event.oneArtifacts);
         const attributed = {
           agentId: event.agentId ? `${teamNodePrefix}:${event.agentId}` : teamNodePrefix,
           nodeId: event.nodeId ? `${teamNodePrefix}:${event.nodeId}` : event.nodeId,
@@ -5296,6 +5502,7 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
         ...resultMeta,
         spec,
         packet,
+        ...(observedReviewDrafts.length ? { observedReviewDrafts: [...observedReviewDrafts] } : {}),
           text: redactSensitiveText(withTaskForceOwnerDecisions(firmVisibleText, firmDecisions)),
         ok: firmOk,
         ...(teamResult.failureReports?.length ? { failureReports: teamResult.failureReports } : {}),
@@ -5431,6 +5638,7 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
             onTool: (name, args, result, toolId, isError, artifactPaths, imageDataUrl) => {
               noteOutwardCall(name, args);
               const oneArtifacts = taskForceOneArtifacts(p, toolId, isError, artifactPaths, name);
+              recordReviewDrafts(oneArtifacts);
               p.sink(teamEvent("manager", spec.name, {
                 kind: "tool-use",
                 tool: { name, args: redactEventValue(args), result: redactEventValue(result), id: toolId, isError, observationDigest: toolObservationDigest(artifactPaths, imageDataUrl) },
@@ -5602,6 +5810,7 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
                   noteOutwardCall(name, args);
                   if (role === "worker") teamSandboxDeath.note(name, toolResult);
                   const oneArtifacts = taskForceOneArtifacts(p, toolId, isError, artifactPaths, name);
+                  recordReviewDrafts(oneArtifacts);
                   p.sink(teamEvent(worker.id, worker.id, {
                     kind: "tool-use",
                     tool: { name, args: redactEventValue(args), result: redactEventValue(toolResult), id: toolId, isError, observationDigest: toolObservationDigest(artifactPaths, imageDataUrl) },
@@ -5764,7 +5973,8 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
             failureReports: [failureReport],
             text: (stepFailure?.settlement === "unsettled"
               ? `failure: ${JSON.stringify(stepFailure)}`
-              : redactSensitiveText(error instanceof Error ? error.message : String(error))) + `\n${JSON.stringify(failureReport)}`,
+              : redactSensitiveText(teamWorkerFailureText({ locale: p.locale === "ko" ? "ko" : "en", name: worker.id, error,
+                runtimeFailure: typedRuntimeFailure?.failure ?? null }))) + `\n${JSON.stringify(failureReport)}`,
             tokens: 0,
             ...(typedRuntimeFailure
               ? { runtimeFailure: typedRuntimeFailure.failure, failedRuntime: typedRuntimeFailure.runtime }
@@ -5856,6 +6066,7 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
           onTool: (name, args, result, toolId, isError, artifactPaths, imageDataUrl) => {
             noteOutwardCall(name, args);
             const oneArtifacts = taskForceOneArtifacts(p, toolId, isError, artifactPaths, name);
+            recordReviewDrafts(oneArtifacts);
             p.sink(teamEvent("manager", spec.name, {
               kind: "tool-use",
               tool: { name, args: redactEventValue(args), result: redactEventValue(result), id: toolId, isError, observationDigest: toolObservationDigest(artifactPaths, imageDataUrl) },
@@ -5998,6 +6209,7 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
         externalEffects: managerOutcome.externalEffects,
         ...unitActedOutward(),
         failureReports: workerResults.flatMap(item => "failureReports" in item ? item.failureReports : []),
+        ...(observedReviewDrafts.length ? { observedReviewDrafts: [...observedReviewDrafts] } : {}),
         text: withTaskForceOwnerDecisions(stripPermissionEscalationMarker(teamText), teamOwnerDecisions),
         ok: teamOk,
         ranWithPermission: workerPermission,
@@ -6145,7 +6357,12 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
             if (typeof name === "string" && name && !observedTools.includes(name)) observedTools.push(name);
             noteOutwardCall(name, args);
             if (role === "worker") directSandboxDeath.note(name, result);
+            const mailEffect = taskForceObservedMailEffect({ name, args, result, isError,
+              chatId: p.chat.id, runId: p.req.runId, stepId: packet.stepId ?? "", invocationId: observedDirectInvocationId,
+              permission: role === "worker" ? workerPermission ?? "read" : "read" });
+            if (mailEffect && !observedMailEffects.some((item) => item.effectRef === mailEffect.effectRef)) observedMailEffects.push(mailEffect);
             const oneArtifacts = taskForceOneArtifacts(p, toolId, isError, artifactPaths, name);
+            recordReviewDrafts(oneArtifacts);
             p.sink(tag({
               kind: "tool-use",
               tool: { name, args: redactEventValue(args), result: redactEventValue(result), id: toolId, isError, observationDigest: toolObservationDigest(artifactPaths, imageDataUrl) },
@@ -6182,12 +6399,17 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
       env: p.runnerEnv,
       signal: link.signal,
       phase: outcome.role === "worker" ? "worker" : "worker-escalation",
-      permission: observedDirectRole === "worker" ? workerPermission : "read",
+      permission: observedDirectRole === "worker" ? workerPermission ?? "read" : "read",
     });
     const curatedOutcome = taskForcePacketOutcome(workerText, packet);
-    // The worker's typed owner choices: a safe default is applied, an external effect or no default asks the owner.
+    const candidateOutcome = runtimeOutcome.completionStatus !== "missing" ? runtimeOutcome : curatedOutcome;
+    const verifiedMailEffects = await verifiedTaskForceMailEffectRefs({ observed: observedMailEffects,
+      choices: candidateOutcome.ownerChoices, chatId: p.chat.id, runId: p.req.runId, stepId: packet.stepId ?? "",
+      invocationIds: [...new Set(observedMailEffects.map((item) => item.invocationId))],
+      ownerScopeKey: p.borrowedCareerOwnerScopeKey ?? activeBorrowedOwnerScopeKey(), signal: link.signal });
+    // A first-party sent-mail witness settles only its exact observed choice. Other external choices stay open.
     const { outcome: packetOutcome, applied: appliedOwnerChoices } = settleTaskForceOwnerChoices(
-      runtimeOutcome.completionStatus !== "missing" ? runtimeOutcome : curatedOutcome, new Set(), packet.externalEffectRequirement,
+      candidateOutcome, verifiedMailEffects, packet.externalEffectRequirement,
     );
     // The access request is typed state for the room (liftTaskForceWorkerAccess); its marker line is not room prose.
     const accessNeeded = runtimeOutcome.accessNeeded || curatedOutcome.accessNeeded || directSandboxDeath.observed();
@@ -6258,6 +6480,7 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
     }));
     return {
       ...resultMeta,
+      ...(observedReviewDrafts.length ? { observedReviewDrafts: [...observedReviewDrafts] } : {}),
       ...(observedTools.length > 0 ? { usedTools: [...observedTools] } : {}),
       ...unitActedOutward(),
       model: modelLabel(observedDirectRuntime),
@@ -6356,8 +6579,8 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
       : null;
     const message = timedOut
       ? p.locale === "ko"
-        ? "응답 시간 초과"
-        : "timed out"
+        ? `${spec.name}의 응답이 오래 없어 이 단계를 멈췄습니다.`
+        : `${spec.name} did not respond in time, so this step was stopped.`
       : quotaFailure
         ? p.locale === "ko"
           ? `${quotaFailure.runtime} 사용 한도가 찼습니다. 다른 모델로 바꾸거나 한도가 풀린 뒤 다시 보내세요. (${quotaFailure.message})`
@@ -6365,9 +6588,10 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
         // An unsettled step is worded by the host, one line (the runner's "review the work history" prose is not owner copy).
         : stepFailure?.settlement === "unsettled"
           ? p.locale === "ko" ? "응답이 끝나기 전에 멈춰 이 단계를 마치지 못했습니다." : "This step stopped before its reply finished."
-          : err instanceof Error
-            ? err.message
-            : String(err);
+          // One plain sentence from the failure's typed code or typed provider failure (team-worker-failure-copy.ts): the
+          // exception's own message is never shown to the owner. The code stays in the typed report below and in the ledger.
+          : teamWorkerFailureText({ locale: p.locale === "ko" ? "ko" : "en", name: spec.name, error: err,
+            runtimeFailure: typedRuntimeFailure?.failure ?? null });
     p.sink(tag({
       kind: "tool-use",
       done: true,
@@ -6387,7 +6611,8 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
       ...resultMeta,
       spec,
       packet,
-      text: redactSensitiveText(`[${spec.slug} ${timedOut ? "timeout" : "error"}] ${message}`) + `\n${JSON.stringify(failureReport)}`,
+      ...(observedReviewDrafts.length ? { observedReviewDrafts: [...observedReviewDrafts] } : {}),
+      text: redactSensitiveText(message) + `\n${JSON.stringify(failureReport)}`,
       failureReports: [failureReport],
       ok: false,
       ...(typedRuntimeFailure
@@ -6768,6 +6993,7 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
             ),
           })),
           gateChatId: p.chat.id,
+          gateRunId: p.req.runId,
           ...(p.browserApprovalScope ? { approvalScope: p.browserApprovalScope } : {}),
           ...(p.req.simulation === true ? { gateSimulation: true as const } : {}),
           signal: p.signal,
@@ -7023,7 +7249,19 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
       normalized = hostNormalized;
     }
     if (semanticSubset && !normalized.parseSuccess) {
-      throw new Error("local_planner_subset_unresolved");
+      // The planner's subset still did not validate after its one same-model repair. This is a failure of the planner helper, not
+      // of the owner's request: normalizePacketsForRoster has already cut everything that cannot run (unknown agents, duplicate steps,
+      // bad edges, cycles), so the remaining packets are executable and the run stays unverified through planner_parse_failed.
+      // Only a plan with nothing executable falls back to the standing-room packets (every member), as a room with no Goal does.
+      const fellBackToRoster = normalized.packets.length === 0;
+      if (fellBackToRoster) {
+        normalized = normalizePacketsForRoster(selectedPlannerPackets, specs, taskForceOwnerRequest(p.req), p.locale,
+          !p.benchmarkMode && !p.req.agentAppMode, false);
+      }
+      tryRecordRunEvent({ runId: p.req.runId ?? `task-force:${p.chat.id}`, chatId: p.chat.id,
+        nodeId: orchestratorId, agentId: p.orchestratorAgent.id, kind: "task_force_planner_subset_degraded",
+        payload: { schemaVersion: 1, reasonCode: "local_planner_subset_unresolved", validationCodes: normalized.validationCodes,
+          packetCount: normalized.packets.length, fellBackToRoster } });
     }
     if (semanticSubset) {
       tryRecordRunEvent({ runId: p.req.runId ?? `task-force:${p.chat.id}`, chatId: p.chat.id,
@@ -7489,7 +7727,9 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
       `^\\s*\\*{0,2}\\[${result.spec.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\]\\*{0,2}\\s*[:：]?\\s*`,
       "u",
     );
-    const fullReport = stripTaskForceControlEnvelopes(result.text.replace(selfTag, ""));
+    // A failed teammate's text ends with the typed execution-failure JSON for the synthesizer and the ledger: machine data,
+    // never room prose.
+    const fullReport = withoutExecutionFailureReport(stripTaskForceControlEnvelopes(result.text.replace(selfTag, "")));
     const text = boundedTaskForceMessage(fullReport);
     if (!text) return null;
     // runBorrowedAgentTurn already emitted this exact worker result. Reuse the
@@ -7640,8 +7880,11 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
     }
     let delegatedGrant: HostDelegatedGrant;
     try {
-      const workspace = p.workspaceBinding ? revalidateInvocationWorkspaceBinding(p.workspaceBinding) : p.workingFolder;
-      if (!p.req.runId || !workspace) throw new DelegatedAuthorityError("delegated_authority_scope_missing");
+      // A global One chat binds no folder: its steps run in the app's agent cwd, which the grant pins like any other
+      // workspace (delegated-authority.ts runWorkspace). An absent folder used to refuse the lift even when the chip covered
+      // it (observed in 1.3.105: 8 of 8 lifts of a full-chip step ended live_grant_unavailable).
+      const workspace = p.workspaceBinding ? revalidateInvocationWorkspaceBinding(p.workspaceBinding) : p.workingFolder ?? null;
+      if (!p.req.runId) throw new DelegatedAuthorityError("delegated_authority_scope_missing");
       delegatedGrant = mintHostDelegatedGrant({ runId: p.req.runId, ownerChatId: p.chat.id,
         scopeKey: packet.stepId ?? packet.agent, workspace, permission: needed,
         authorizationRef: `step-escalation:${packet.stepId ?? packet.agent}:${needed}`,
@@ -7685,9 +7928,19 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
     const initialDelegationMessageId = initialDelegationMessageByPacket.get(packet);
     initialDelegationMessageByPacket.delete(packet);
     const failedRuntimes: RuntimeStatus[] = [];
+    const reviewDrafts: TaskForceObservedReviewDraft[] = [];
+    const producerInvocationIds = new Set<string>();
+    const retainReviewDrafts = (result: BorrowedAgentResult): BorrowedAgentResult => {
+      producerInvocationIds.add(result.invocationId);
+      for (const draft of result.observedReviewDrafts ?? []) {
+        if (!reviewDrafts.some((known) => known.binding.artifactRef === draft.binding.artifactRef
+          && known.sha256 === draft.sha256 && known.producerInvocationId === draft.producerInvocationId)) reviewDrafts.push(draft);
+      }
+      return { ...result, observedReviewDrafts: [...reviewDrafts], reviewProducerInvocationIds: [...producerInvocationIds] };
+    };
     let responseRuntime: RuntimeStatus | undefined;
     const runWithRecovery = async (nextPacket: typeof packet, delegationId?: string) => {
-      let result = await runPacket(nextPacket, peerResults, responseRuntime, delegationId);
+      let result = retainReviewDrafts(await runPacket(nextPacket, peerResults, responseRuntime, delegationId));
       // A replay-blocking cause (the step may have acted) is this packet's FAILED result: never run again anywhere, and
       // never the end of the room (it used to be rethrown here and failed the whole owner turn).
       if (result.runtimeFailure && result.failedRuntime && runtimeFailureBlocksReplay(result.runtimeFailure)) return result;
@@ -7721,7 +7974,7 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
           ],
         };
         responseRuntime = recoveryRuntime;
-        result = await runPacket(recoveryPacket, peerResults, responseRuntime);
+        result = retainReviewDrafts(await runPacket(recoveryPacket, peerResults, responseRuntime));
         if (result.runtimeFailure && result.failedRuntime && runtimeFailureBlocksReplay(result.runtimeFailure)) return result;
         if (result.ok) return result;
       }
@@ -7775,6 +8028,7 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
   };
 
   const results: BorrowedAgentResult[] = new Array(executionPackets.length);
+  p.observeResults?.(() => results.filter((result): result is BorrowedAgentResult => Boolean(result)));
   const stepIds = executionPackets.map((packet, index) => packet.stepId?.trim() || `packet-${index + 1}`);
   const knownStepIds = new Set(stepIds);
   const resultByStepId = new Map<string, BorrowedAgentResult>();
@@ -7785,72 +8039,113 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
     taskForceDependencyAdvisory({ ownerAuthored: ownerAuthoredTurn, dependency: resultByStepId.get(dependency) });
   // The owner's own language for what the host tells them in this room (the run locale is the app's).
   const ownerLocale: RuntimeLocale = inferOwnerLocale(p.req.oneUserAuthoredPrompt ?? p.req.userPrompt, p.locale);
+  const dependencyReady = (
+    packet: BorrowedInputPacket,
+    dependencyStepId: string,
+    waveCache?: Map<string, Promise<boolean>>,
+  ): Promise<boolean> => {
+    const dependency = resultByStepId.get(dependencyStepId);
+    if (!dependency) return Promise.resolve(false);
+    if (taskForceDependencyAdvisory({ ownerAuthored: ownerAuthoredTurn, dependency })) return Promise.resolve(true);
+    const key = `${packet.stepId ?? ""}\u0000${dependencyStepId}`;
+    const cached = waveCache?.get(key);
+    if (cached) return cached;
+    const check = taskForceReviewDependencyReady({
+      packet, dependencyStepId, dependency, chatId: p.chat.id, runId: p.req.runId!,
+      verify: (binding) => p.verifyOneRuntimeToolArtifact?.(binding, p.signal) ?? Promise.resolve(null),
+    });
+    waveCache?.set(key, check);
+    return check;
+  };
 
   // Execute the local conversational graph in dependency-ready waves. Each
   // callback emits its result before the rest of the wave finishes, so a fast
   // teammate speaks in the room immediately instead of waiting behind the
   // slowest sibling. Strict Workforce packets have no local dependency fields
   // and therefore retain their existing parallel execution behavior.
-  const blockedPending = (): number[] => [...pending].filter((index) => {
-    const dependencies = (executionPackets[index].dependsOn ?? [])
-      .filter((dependency) => knownStepIds.has(dependency));
-    return dependencies.length > 0
-      && dependencies.every((dependency) => resultByStepId.has(dependency))
-      && dependencies.some((dependency) => resultByStepId.get(dependency)?.ok === false && !advisoryDependency(dependency));
-  });
+  const blockedPending = async (waveCache: Map<string, Promise<boolean>>): Promise<Array<{ index: number; blockedDependencies: string[] }>> => {
+    const checked = await Promise.all([...pending].map(async (index) => {
+      const dependencies = (executionPackets[index].dependsOn ?? [])
+        .filter((dependency) => knownStepIds.has(dependency));
+      if (!dependencies.length || !dependencies.every((dependency) => resultByStepId.has(dependency))) return null;
+      const verdicts = await Promise.all(dependencies.map((dependency) => dependencyReady(executionPackets[index], dependency, waveCache)));
+      const blockedDependencies = dependencies.filter((_, position) => !verdicts[position]);
+      return blockedDependencies.length ? { index, blockedDependencies } : null;
+    }));
+    return checked.filter((item): item is { index: number; blockedDependencies: string[] } => item !== null);
+  };
+  const withholdPending = (index: number, blockedDependencies: string[]): void => {
+    const packet = executionPackets[index];
+    const spec = specBySlug.get(packet.agent) ?? specs[0];
+    const skippedId = `task-force-blocked:${randomUUID()}`;
+    const skipped: BorrowedAgentResult = {
+      spec,
+      packet,
+      text: p.locale === "ko"
+        ? `선행 단계가 완료되지 않아 이 단계를 실행하지 않았습니다. 먼저 완료할 단계: ${blockedDependencies.join(", ")}`
+        : `This step did not run because a dependency was incomplete. Complete first: ${blockedDependencies.join(", ")}`,
+      ok: false,
+      completionStatus: "missing",
+      invocationId: skippedId,
+      handoffId: skippedId,
+      model: "not-run",
+      provider: "agentlas-desktop",
+      withheldBy: blockedDependencies,
+    };
+    results[index] = skipped;
+    resultByStepId.set(stepIds[index], skipped);
+    pending.delete(index);
+    p.sink({
+      kind: "tool-use",
+      done: true,
+      status: p.locale === "ko"
+        ? `${spec.name} 단계 보류 — 선행 단계 미완료`
+        : `${spec.name} step withheld — dependency incomplete`,
+      agentId: orchestratorId,
+      runtimeAgentId: p.orchestratorAgent.id,
+      agentName: orchestratorName,
+      role: "orchestrator",
+      tier: 1,
+      phase: "delegate",
+    });
+  };
   while (pending.size > 0) {
+    p.signal?.throwIfAborted();
+    const waveCache = new Map<string, Promise<boolean>>();
     // Withholding is transitive within the wave (W6, 2026-10-18): a step after a withheld one is withheld too, before the
     // no-ready guard below could dispatch it as the only pending step without the input it depends on.
-    for (let blocked = blockedPending(); blocked.length > 0; blocked = blockedPending()) for (const index of blocked) {
-      const packet = executionPackets[index];
-      const spec = specBySlug.get(packet.agent) ?? specs[0];
-      const blockedDependencies = (packet.dependsOn ?? [])
-        .filter((dependency) => resultByStepId.get(dependency)?.ok === false && !advisoryDependency(dependency));
-      const skippedId = `task-force-blocked:${randomUUID()}`;
-      const skipped: BorrowedAgentResult = {
-        spec,
-        packet,
-        text: p.locale === "ko"
-          ? `선행 단계가 완료되지 않아 이 단계를 실행하지 않았습니다. 먼저 완료할 단계: ${blockedDependencies.join(", ")}`
-          : `This step did not run because a dependency was incomplete. Complete first: ${blockedDependencies.join(", ")}`,
-        ok: false,
-        completionStatus: "missing",
-        invocationId: skippedId,
-        handoffId: skippedId,
-        model: "not-run",
-        provider: "agentlas-desktop",
-        withheldBy: blockedDependencies,
-      };
-      results[index] = skipped;
-      resultByStepId.set(stepIds[index], skipped);
-      pending.delete(index);
-      p.sink({
-        kind: "tool-use",
-        done: true,
-        status: p.locale === "ko"
-          ? `${spec.name} 단계 보류 — 선행 단계 미완료`
-          : `${spec.name} step withheld — dependency incomplete`,
-        agentId: orchestratorId,
-        runtimeAgentId: p.orchestratorAgent.id,
-        agentName: orchestratorName,
-        role: "orchestrator",
-        tier: 1,
-        phase: "delegate",
-      });
+    for (let blocked = await blockedPending(waveCache); blocked.length > 0; blocked = await blockedPending(waveCache)) {
+      for (const item of blocked) withholdPending(item.index, item.blockedDependencies);
     }
     if (pending.size === 0) break;
-    const ready = [...pending].filter((index) => (
-      (executionPackets[index].dependsOn ?? [])
-        .filter((dependency) => knownStepIds.has(dependency))
-        .every((dependency) => resultByStepId.get(dependency)?.ok === true || advisoryDependency(dependency))
-    ));
+    const readyChecks = await Promise.all([...pending].map(async (index) => {
+      const dependencies = (executionPackets[index].dependsOn ?? []).filter((dependency) => knownStepIds.has(dependency));
+      const verdicts = await Promise.all(dependencies.map((dependency) => dependencyReady(executionPackets[index], dependency, waveCache)));
+      return verdicts.every(Boolean) ? index : null;
+    }));
+    const ready = readyChecks.filter((index): index is number => index !== null);
     // normalizePacketsForRoster removes local cycles. This final guard keeps a
     // malformed strict/legacy packet from hanging the run forever.
-    if (ready.length === 0) ready.push([...pending][0]);
+    if (ready.length === 0) {
+      if ((await blockedPending(waveCache)).length > 0) continue;
+      ready.push([...pending][0]);
+    }
 
     await parallelCap(ready, getAgentConcurrency(), async (index) => {
       const packet = executionPackets[index];
+      if (taskForcePacketPhase(packet) === "review") {
+        const missing = (packet.dependsOn ?? []).filter((dependency) => !resultByStepId.has(dependency));
+        if (missing.length) { withholdPending(index, missing); return; }
+      }
       const dependencies = (packet.dependsOn ?? []).filter((dependency) => resultByStepId.has(dependency));
+      p.signal?.throwIfAborted();
+      // Do not reuse the wave cache here: a file can change while siblings finish.
+      const fresh = await Promise.all(dependencies.map((dependency) => dependencyReady(packet, dependency)));
+      const staleDependencies = dependencies.filter((_, position) => !fresh[position]);
+      if (staleDependencies.length) {
+        withholdPending(index, staleDependencies);
+        return;
+      }
       const advisory = ownerAuthoredTurn ? dependencies.filter(advisoryDependency) : [];
       if (advisory.length) {
         const names = advisory.map((dependency) => specBySlug.get(resultByStepId.get(dependency)?.packet.agent ?? "")?.name ?? dependency);
@@ -8094,6 +8389,8 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
   ));
 
   let final: Awaited<ReturnType<typeof runSynthesisOn>>;
+  // Set when no permitted model could write the synthesis and the host assembled the teammates' results instead.
+  let synthesisHostAssembled: { failure: Readonly<RunnerFailure>; runtime: RuntimeStatus } | null = null;
   let synthesisRuntime = synthesisActive;
   let synthesisRunner = synthesisPicked;
   const failedSynthesisRuntimes: RuntimeStatus[] = [];
@@ -8113,6 +8410,17 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
       // One/Work runs continue on the next configured orchestrator member.
       if (!recovery || failedSynthesisRuntimes.some((runtime) => sameRuntimeModel(runtime, recovery))) {
         if (runtimeFailureBlocksReplay(typed.failure)) throw typed;
+        // The teammates' results exist and the only thing that cannot run is the model that writes the summary. An ordinary
+        // owner/Work turn then gets the teammates' own results assembled by the host (no model is called, so no runtime pin or
+        // permission is crossed) and stays unverified, instead of losing the whole turn. A fixed contract (prepared Workforce,
+        // benchmark, Agent App) fails honestly as before.
+        const hostReport = p.workforceSelectionReceipt || p.benchmarkMode || p.req.agentAppMode ? ""
+          : taskForceHostAssembledReport({ locale: ownerLocale, failure: typed.failure, rows: taskForceHostReportRows(results, ownerLocale) });
+        if (hostReport) {
+          synthesisHostAssembled = { failure: typed.failure, runtime: typed.runtime };
+          final = { text: hostReport, tokens: 0 } as Awaited<ReturnType<typeof runSynthesisOn>>;
+          break;
+        }
         throw new TaskForceRuntimeFailureError({ kind: "refused", runtime: typed.runtime.kind,
           source: "marker", providerCode: "synthesis_runtime_pool_exhausted",
           message: "No permitted untried synthesis runtime remains." }, typed.runtime);
@@ -8274,7 +8582,7 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
       phase: "synthesis",
       agentId: p.orchestratorAgent.id,
     });
-  } else {
+  } else if (!synthesisHostAssembled) {
     try {
       const curationContext = {
         turnId: taskForceMemoryTurnId(p, orchestratorId, "synthesis"),
@@ -8326,18 +8634,33 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
       "executed synthesis allocation",
     );
   }
-  tryRecordRunEvent({
-    runId: p.req.runId ?? `task-force:${p.chat.id}`,
-    kind: "workload_allocation",
-    chatId: p.chat.id,
-    nodeId: orchestratorId,
-    agentId: p.orchestratorAgent.id,
-    payload: workloadAllocationReceipt(executedSynthesisResolution, final.observedUsage),
-  });
+  if (synthesisHostAssembled) {
+    // No model wrote this report: the ledger says so instead of recording an allocation that never ran.
+    tryRecordRunEvent({
+      runId: p.req.runId ?? `task-force:${p.chat.id}`,
+      kind: "task_force_synthesis_host_assembled",
+      chatId: p.chat.id,
+      nodeId: orchestratorId,
+      agentId: p.orchestratorAgent.id,
+      payload: { schemaVersion: 1, reasonCode: "synthesis_runtime_pool_exhausted", runtimeKind: synthesisHostAssembled.runtime.kind,
+        failureKind: synthesisHostAssembled.failure.kind, providerCode: synthesisHostAssembled.failure.providerCode ?? null,
+        reportedTeammates: results.filter((result) => result?.text?.trim()).length },
+    });
+  } else {
+    tryRecordRunEvent({
+      runId: p.req.runId ?? `task-force:${p.chat.id}`,
+      kind: "workload_allocation",
+      chatId: p.chat.id,
+      nodeId: orchestratorId,
+      agentId: p.orchestratorAgent.id,
+      payload: workloadAllocationReceipt(executedSynthesisResolution, final.observedUsage),
+    });
+  }
   const workforce = p.workforceSelectionReceipt;
   const verifierIssues: string[] = [];
   // What each worker said still blocks the result — shown to the owner when the run is not verified.
   const unclearedBlockers: Array<{ result: BorrowedAgentResult; items: string[] }> = [];
+  if (synthesisHostAssembled) verifierIssues.push(TASK_FORCE_SYNTHESIS_UNAVAILABLE_ISSUE);
   if (!plan.parseSuccess) verifierIssues.push("planner_parse_failed");
   if (plan.fallbackUsed) verifierIssues.push("planner_fallback_used");
   // A withheld step never ran: it is named with the step that blocked it, so the failure ledger points at the root step
@@ -8754,8 +9077,8 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
         : {}),
       tokens: final.tokens,
       observedModel: taskForceObservedModel(final) ?? undefined,
-      model: modelLabel(synthesisActive),
-      modelRole: "orchestrator",
+      // A host-assembled report was written by no model: it claims none.
+      ...(synthesisHostAssembled ? {} : { model: modelLabel(synthesisActive), modelRole: "orchestrator" as const }),
     });
   }
   // 종합 턴이 성공했다고 태스크포스가 성공한 것이 아니다. results[]에 워커별 정확한 ok가
@@ -8774,11 +9097,33 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
   }
 }
 
+/** The owner's reply for a team stopped by a mid-run Goal change: the durable message, the final event, and the unverified receipt. */
+function deliverGoalChangedReport(p: BorrowedTaskForceParams, code: string, finished: readonly BorrowedAgentResult[]): BorrowedTaskForceResult {
+  const ownerLocale: RuntimeLocale = inferOwnerLocale(p.req.oneUserAuthoredPrompt ?? p.req.userPrompt, p.locale);
+  const text = redactOneAttachmentText(p.req, taskForceGoalChangedReport({ locale: ownerLocale, rows: taskForceHostReportRows(finished, ownerLocale) }));
+  const verifierIssues = [TASK_FORCE_GOAL_CHANGED_ISSUE];
+  const failureReport = taskForceFailureReport(finished, verifierIssues);
+  const runId = p.req.runId ?? `task-force:${p.chat.id}`;
+  tryRecordRunEvent({ runId, kind: "task_force_goal_changed_mid_run", chatId: p.chat.id,
+    payload: { schemaVersion: 1, code, finishedTeammates: finished.filter((result) => result.ok).length } });
+  // Same ledger row a finished-but-unverified team writes: the Goal follower reads verifierStatus "fail" as work left and continues.
+  tryRecordRunEvent({ runId, kind: "task_force_execution_receipt", chatId: p.chat.id,
+    payload: { schemaVersion: "agentlas.desktop-task-force-execution-summary.v1", verifierStatus: "fail", verifierIssues,
+      childInvocationIds: finished.map((child) => child.invocationId), ...(failureReport ? { failureReport } : {}) } });
+  const durable = appendChatMessage(p.chat.id, "assistant", redactWorkAttachmentText(p.req, text));
+  p.sink({ kind: "tool-use", done: true, status: p.locale === "ko" ? "목표가 바뀌어 여기서 멈춤" : "Stopped: the Goal changed",
+    agentId: `${p.chat.id}:borrow-orchestrator`, role: "orchestrator", tier: 1, phase: "synthesize" });
+  p.sink({ kind: "final", text, durableTextForVerification: durable.text, durableAssistantMessageIdForVerification: durable.id });
+  return { ok: false, text, verifierIssues, ...(failureReport ? { failureReport } : {}) };
+}
+
 export async function runBorrowedTaskForceInvocation(p: BorrowedTaskForceParams): Promise<BorrowedTaskForceResult> {
   p = bindTeamGoalContext(p);
+  const observed: { read: (() => readonly BorrowedAgentResult[]) | null } = { read: null };
   const ownerBoundParams: BorrowedTaskForceParams = {
     ...p,
     borrowedCareerOwnerScopeKey: p.borrowedCareerOwnerScopeKey ?? activeBorrowedOwnerScopeKey(),
+    observeResults: (read) => { observed.read = read; p.observeResults?.(read); },
   };
   // Workers share the run's MCP config; ask_form leaves it while this dispatch is open (taskForceWorkerRunnerRequest).
   // The planner and synthesis carry no MCP config and keep their owner ask.
@@ -8786,7 +9131,17 @@ export async function runBorrowedTaskForceInvocation(p: BorrowedTaskForceParams)
   try {
     return await runBorrowedTaskForceInvocationInternal(ownerBoundParams);
   } catch (error) {
-    if (!ownerBoundParams.req.agentAppMode) throw error;
+    if (!ownerBoundParams.req.agentAppMode) {
+      // The Goal changed, paused or ended while the team was working (the owner did it on purpose): the fence stands, so no
+      // further step is started, but the turn ends as a calm reply with what finished, never "The run failed", and the Goal
+      // follower continues it under the Goal's new state (the unverified receipt below). Nested units and a stop (abort) rethrow.
+      if (error instanceof TeamGoalContextError && MID_RUN_GOAL_CHANGE_CODES.has(error.code) && ownerBoundParams.emitFinal !== false
+        && !ownerBoundParams.signal?.aborted) {
+        // If the reply itself cannot be written, the original refusal stands exactly as before.
+        try { return deliverGoalChangedReport(ownerBoundParams, error.code, observed.read ? observed.read() : []); } catch { throw error; }
+      }
+      throw error;
+    }
     // Planner/synthesis CLI errors can contain stderr, local paths, or runtime
     // details. Agent Apps receive one fixed failure without preserving `cause`.
     throw createUntrustedRuntimeFailure();

@@ -1,6 +1,7 @@
 import { assertGoalObligationPreflightIntent, type GoalObligationPreflightIntent } from "../long-run/goal-obligation-context";
 import { isPrimarilyKorean, preferredLocaleFromText } from "../../shared/detect-language";
 import { isValidRuntimeSelectionInput } from "../../shared/runtime-selection";
+import { ollamaModelNamesEqual } from "../../shared/runtime-connect";
 import { isCallOnlyHubAgent } from "../../shared/call-only-agent";
 import { createHash, randomUUID } from "node:crypto";
 import { detectRuntimes } from "../runtime/detect";
@@ -9,6 +10,7 @@ import { selectAutoRoutedAgent, selectAutoRoutedAgentJudged } from "../agents/au
 import { restoreAgentForUse } from "../archive/auto-archive";
 import { getAgentById, listInstalledAgents } from "../mcp/registry";
 import { getDb } from "../store/db";
+import { desktopStoreTransaction } from "../store/change-bus";
 import { restoredTeamSourceDigest } from "../cloud-agents/team-firm";
 import { listFirms } from "../store/firms";
 import { getChat, retitleAutoTitledChatForTask } from "../store/chats";
@@ -38,6 +40,7 @@ import type {
 import {
   ONE_TEAM_PREFLIGHT_CONTRACT_VERSION,
   ONE_TEAM_PREFLIGHT_EXPIRABLE_STATUSES,
+  isOneTeamPreflightPendingStatus,
   isOneTeamPreflightProposal,
   isOneTeamStaffingScope,
   oneTeamUsesNativeStaffing,
@@ -278,8 +281,13 @@ export function resolveOneTeamRuntimeBinding(
         ...(runtime.allocationModels ?? []),
         ...Object.keys(runtime.allocationModelProfiles ?? {}),
       ].filter((value): value is string => typeof value === "string" && value.length > 0));
-      if (!advertised.has(model)) continue;
-      const supportedEfforts = runtime.allocationModelProfiles?.[model]?.efforts;
+      if (!advertised.has(model) && !(runtime.kind === "ollama"
+        && [...advertised].some(name => ollamaModelNamesEqual(model, name)))) continue;
+      const profiles = runtime.allocationModelProfiles;
+      const supportedEfforts = profiles?.[model]?.efforts ?? (runtime.kind === "ollama"
+        ? Object.entries(profiles ?? {}).find(([name, profile]) => profile.efforts !== undefined
+          && ollamaModelNamesEqual(model, name))?.[1].efforts
+        : undefined);
       if (binding.effort && supportedEfforts && !supportedEfforts.includes(binding.effort)) continue;
     } else if (live.model !== null) {
       continue;
@@ -1656,7 +1664,7 @@ export async function resolveOneTeamPreflight(
       : input.resolution === "continue_solo"
         ? "solo"
         : null;
-  if (goalPreflight(record) && requestedMode && requestedMode !== "team") {
+  if (requestedMode && goalPreflight(record) && requestedMode !== "team") {
     throw new OneTeamPreflightError("invalid_request", "Goal participant obligations require the complete team");
   }
   if (requestedMode && record.reservation) {
@@ -1683,6 +1691,64 @@ export async function resolveOneTeamPreflight(
   if (!["proposed", "blocked", "deferred"].includes(record.proposal.status)) {
     throw new OneTeamPreflightError("already_resolved", "This team proposal has already been resolved");
   }
+  const now = nowFor(deps);
+  if (input.resolution === "later" || input.resolution === "cancel") {
+    // Ending or deferring a decision does not execute a team. A missing runtime
+    // or a changed candidate must not prevent the owner from ending it.
+    const db = getDb();
+    const resolve = desktopStoreTransaction(db, () => {
+      const { state, raw } = readStore(db);
+      const index = state.proposals.findIndex((item) => item.proposal.proposalId === record!.proposal.proposalId);
+      if (index < 0) throw new OneTeamPreflightError("stale_binding", "The team proposal no longer exists");
+      const live = state.proposals[index];
+      if (live.proposal.version !== input.expectedProposalVersion || live.reservation
+        || !["proposed", "blocked", "deferred"].includes(live.proposal.status)) {
+        throw new OneTeamPreflightError("stale_binding", "The team proposal changed before resolution");
+      }
+
+      let task: CanonicalTask | null = null;
+      try { task = (deps.getTask ?? getCanonicalTask)(live.proposal.binding.taskId); }
+      catch { /* A missing Task projection must not prevent cancelling the proposal. */ }
+      const sameTask = task && task.id === live.proposal.binding.taskId
+        && task.originChatId === live.proposal.binding.chatId ? task : null;
+      let chat: Chat | null = null;
+      try { if (sameTask) chat = (deps.getChat ?? getChat)(live.proposal.binding.chatId); }
+      catch { /* Without the chat's current ownership, leave the Task untouched. */ }
+      const otherDecisionOwnsTask = sameTask && state.proposals.some((other) =>
+        other.proposal.proposalId !== live.proposal.proposalId
+        && other.proposal.binding.taskId === sameTask.id
+        && other.proposal.binding.taskVersion === sameTask.version
+        && (isOneTeamPreflightPendingStatus(other.proposal.status) || other.proposal.status === "recovery_required"),
+      );
+      // An owner lease can precede a Task's running status. If it cannot be
+      // inspected, preserve the Task and cancel only this proposal.
+      let ownerAbsent = false;
+      try { if (input.resolution === "cancel") {
+        ownerAbsent = !db.prepare("SELECT 1 FROM invocation_run_owners WHERE chat_id = ? AND state IN ('active','settling') LIMIT 1")
+          .get(live.proposal.binding.chatId);
+      } } catch { /* unknown ownership never authorizes a Task state change */ }
+      let goalAbsent = false;
+      try { if (chat) goalAbsent = !goalOwnsChat(chat, deps.getGoalStatus); }
+      catch { /* unknown Goal ownership never authorizes a Task state change */ }
+
+      const proposal = mutateProposal(live.proposal, input.resolution === "later" ? "deferred" : "cancelled", now);
+      state.version += 1;
+      state.proposals[index] = { ...live, proposal, reservation: null };
+      persistStore(state, raw, db);
+      if (input.resolution === "cancel" && sameTask && chat
+        && sameTask.version === live.proposal.binding.taskVersion && sameTask.status === "waiting-decision"
+        && !GOAL_PREFLIGHTS.has(live.proposal.proposalId) && goalAbsent
+        && !otherDecisionOwnsTask && ownerAbsent) {
+        (deps.setTaskStatus ?? setCanonicalTaskStatus)(sameTask.id, "open");
+      }
+      return { proposal, task: sameTask };
+    });
+    const resolved = resolve.immediate();
+    if (input.resolution === "cancel") releaseProcessPrompt(resolved.proposal.proposalId);
+    if (resolved.task) resolutionEvent(resolved.proposal, resolved.task, input.resolution, actor);
+    return { kind: "resolved", proposal: resolved.proposal };
+  }
+
   const bound = await exactRevalidation(record, deps);
   if (input.resolution === "confirm_team" && !record.proposal.canConfirmTeam) {
     throw new OneTeamPreflightError(
@@ -1699,32 +1765,6 @@ export async function resolveOneTeamPreflight(
       "This proposal already has an exact installed roster; confirm that roster instead",
     );
   }
-  const now = nowFor(deps);
-  if (input.resolution === "later" || input.resolution === "cancel") {
-    const db = getDb();
-    const resolve = db.transaction(() => {
-      const { state, raw } = readStore(db);
-      const index = state.proposals.findIndex((item) => item.proposal.proposalId === record!.proposal.proposalId);
-      if (index < 0) throw new OneTeamPreflightError("stale_binding", "The team proposal no longer exists");
-      const live = state.proposals[index];
-      if (live.proposal.version !== input.expectedProposalVersion || live.reservation) {
-        throw new OneTeamPreflightError("stale_binding", "The team proposal changed before resolution");
-      }
-      const proposal = mutateProposal(live.proposal, input.resolution === "later" ? "deferred" : "cancelled", now);
-      state.version += 1;
-      state.proposals[index] = { ...live, proposal, reservation: null };
-      persistStore(state, raw, db);
-      return proposal;
-    });
-    const proposal = resolve.immediate();
-    if (input.resolution === "cancel") {
-      (deps.setTaskStatus ?? setCanonicalTaskStatus)(bound.task.id, "open");
-      releaseProcessPrompt(proposal.proposalId);
-    }
-    resolutionEvent(proposal, bound.task, input.resolution, actor);
-    return { kind: "resolved", proposal };
-  }
-
   const runId = input.requestedRunId as string;
   const db = getDb();
   const reserve = db.transaction(() => {

@@ -68,7 +68,9 @@ const MAX_REQUEST_BYTES = 64 * 1024;
 function control() {
   const file = process.env[CONTROL_ENV];
   if (!file || file.length > 4096) throw new Error("One team tools are not connected in this run.");
-  const stat = fs.lstatSync(file);
+  let stat;
+  // The file is removed when the run that granted it ends, is stopped or is replaced: say that, not the raw lstat error.
+  try { stat = fs.lstatSync(file); } catch (e) { throw e && e.code === "ENOENT" ? new Error("One team tools are no longer available in this turn: the run that granted them has ended or was replaced. Do not call them again in this turn; tell the owner what you could not do.") : e; }
   if (!stat.isFile() || stat.isSymbolicLink() || stat.size <= 0 || stat.size > 8192) throw new Error("One team capability is invalid.");
   if (process.platform !== "win32" && ((stat.mode & 0o077) !== 0 || (typeof process.getuid === "function" && stat.uid !== process.getuid()))) throw new Error("One team capability permissions are invalid.");
   const value = JSON.parse(fs.readFileSync(file, "utf8"));

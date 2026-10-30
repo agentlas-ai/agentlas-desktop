@@ -12,6 +12,7 @@ import {
 } from "../store/agent-context";
 import type { Runner, RunnerRequest, RunnerEvents, RunnerResult } from "./runner";
 import { markRefusedBeforeDispatch, runnerRefusedBeforeDispatch } from "./runner";
+import { innermostTypedCode, STORE_BUSY_CODE } from "../../shared/turn-settlement";
 import type { ChatHistoryEntry, RuntimeSelection } from "../../shared/types";
 import { redactOperationalSecrets } from "../invocation/event-secret-redaction";
 import { redactSecrets } from "../../shared/secret-patterns";
@@ -59,7 +60,11 @@ function checkpointTask(req: RunnerRequest): SessionTaskBoundary | null {
 }
 function fail(code: string): never { throw Object.assign(new Error(code), { code }); }
 // A host refusal before the native runner was entered: RuntimeTurnDelivery "not-dispatched" (runner.ts), its code kept.
-function refuseBeforeDispatch(code: string): never { throw markRefusedBeforeDispatch(Object.assign(new Error(code), { code })); }
+function refuseBeforeDispatch(code: string, cause?: unknown): never {
+  const error = Object.assign(new Error(code), { code });
+  if (cause !== undefined) Object.defineProperty(error, "cause", { value: cause, configurable: true, writable: true });
+  throw markRefusedBeforeDispatch(error);
+}
 // Process-local high-water marks of allocated turn ordinals: two binds of one [chat, run] that have not appended yet.
 const reservedTurnOrdinals = new Map<string, number>();
 /**
@@ -111,7 +116,8 @@ const contextRef = (key: string): string => key.slice(0, 16);
 export function agentContextAdoptionCause(error: unknown): string {
   const code = error && typeof error === "object" && "code" in error && typeof (error as { code: unknown }).code === "string"
     ? (error as { code: string }).code : "";
-  if (/^SQLITE_(?:BUSY|LOCKED)/.test(code)) return "agent_context_adoption_busy";
+  if (/^SQLITE_(?:BUSY|LOCKED)/.test(code) || code === "SQLITE_PROTOCOL" || code === STORE_BUSY_CODE
+    || (!code && innermostTypedCode(error) === STORE_BUSY_CODE)) return "agent_context_adoption_busy";
   if (/^SQLITE_CONSTRAINT/.test(code)) return "agent_context_adoption_conflict";
   if (/^agent_context_[a-z0-9_]+$/.test(code)) return code;
   return "agent_context_adoption_failed";
@@ -150,7 +156,7 @@ function adoptPriorJournal(identity: AgentContextIdentity, turnId: string): void
     failedAdoptions.set(key, causeCode);
     if (failedAdoptions.size > 1024) failedAdoptions.delete(failedAdoptions.keys().next().value!);
     if (firstReport(`failed\0${key}\0${causeCode}`)) event({ outcome: "failed", causeCode, ...(sqliteCode ? { sqliteCode } : {}) });
-    if (causeCode === "agent_context_adoption_busy") refuseBeforeDispatch(causeCode);
+    if (causeCode === "agent_context_adoption_busy") refuseBeforeDispatch(causeCode, error);
     return;
   }
   const recoveredFrom = failedAdoptions.get(key);

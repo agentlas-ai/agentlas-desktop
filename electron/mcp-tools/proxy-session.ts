@@ -648,11 +648,13 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
     return true;
   };
   const historyToolInput = (frame:Frame,schemaDigest:string|null=null):HistoryRuntimeToolInput=>({kind:"mcp",serverId:binding.server.id,catalogId:gate.catalogId,toolName:String(frame.params?.name??""),args:frame.params?.arguments??{},schemaDigest});
-  const up = async (frame: Frame) => {
+  const up = async (frame: Frame, replayGuard?: () => void) => {
+    replayGuard?.();
     const terminal=frame.method==="notifications/cancelled";validate(terminal);
     // Only a provisional-adoption swap ever sets this; frames queued behind it
     // resume in arrival order once the fresh upstream has started.
     if (swapping) { await swapping; validate(terminal); }
+    replayGuard?.();
     if (!transport) throw new Error("mcp_proxy_not_ready");
     if(!terminal&&gate.historyRuntimeFence){assertHistoryRuntimeFence(gate.historyRuntimeFence);if(typeof frame.method==="string")gate.historyRuntimeFence.assertMcpMethod(frame.method);if(frame.method==="tools/call")gate.historyRuntimeFence.assertTool(historyToolInput(frame));}
     await transport.send(frame as JSONRPCMessage);
@@ -664,12 +666,28 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
     // bounded ladder, which may bring the surface back (then a read-only call is replayed once) or annotate the
     // error with a machine block and one line for the agent. Never more than one ladder per call.
     const browserCall = pending.browserCall;
-    if (browserCall && !browserCall.laddered && browserFailureNeedsRecovery(frame, String(browserCall.frame.params?.name ?? ""))) {
+    if (browserCall && !pending.controller?.signal.aborted && !browserCall.laddered && browserFailureNeedsRecovery(frame, String(browserCall.frame.params?.name ?? ""))) {
       browserCall.laddered = true;
       void browserLadderAnswer(frame, browserCall).then((answer) => {
-        if (closed || native.get(wireId) !== pending) return;
+        if (closed || native.get(wireId) !== pending || pending.resultFinishing) return;
+        // Cancellation ends replay eligibility; retain the upstream result for the sent call.
+        if (pending.controller?.signal.aborted) { finishNow(wireId, frame); return; }
+        const replaySafe = !browserCall.mutating && browserRequestReplaySafe(browserCall.frame);
+        if (!replaySafe && answer?.replay) {
+          // The browser came back but this call is not safe to repeat for the model: hand it the original failure WITH the
+          // ladder's line ("Call the browser tool again"), so the model repeats it deliberately instead of reading a bare error.
+          finishNow(wireId, annotateBrowserFailure(frame, answer));
+          return;
+        }
         if (answer?.replay) {
-          void up({ ...browserCall.frame, id: wireId }).catch(() => finishNow(wireId, annotateBrowserFailure(frame, answer)));
+          const replayGuard = () => {
+            if (closed || native.get(wireId) !== pending || pending.resultFinishing) throw new Error("mcp_proxy_browser_replay_stale");
+            pending.controller?.signal.throwIfAborted();
+          };
+          void up({ ...browserCall.frame, id: wireId }, replayGuard).catch(() => {
+            if (closed || native.get(wireId) !== pending || pending.resultFinishing) return;
+            finishNow(wireId, pending.controller?.signal.aborted ? frame : annotateBrowserFailure(frame, answer));
+          });
           return;
         }
         finishNow(wireId, answer ? annotateBrowserFailure(frame, answer) : frame);
@@ -753,8 +771,14 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
       try { deliver(); } catch (error) { close(error, "deliver"); }
     }
   };
+  // The owner's read-only boundary is real, so a click or page script under it stays refused; what the model was told ("not authorized")
+  // did not say why, and it retried browser_evaluate / browser_click 27 times in 7 days, every one on a read run (permissions "read").
+  // The code stays the machine-readable cause (_meta.agentlasProxyFailure); the text names the permission and the way out.
+  const denyReason: Record<string, string> = {
+    read_only_denied: " This turn has read-only permission: the browser may only look (navigate, snapshot, take_screenshot, wait_for, find, console and network reads), not click, type, run page code or upload. Do the reading part and ask the owner to switch to execute permission for the rest; retrying this call will not change that.",
+  };
   const deny = (wireId: string, code: string) => finish(wireId, { jsonrpc: "2.0", result: { isError: true,
-    _meta: { agentlasProxyFailure: code }, content: [{ type: "text", text: `MCP_PROXY_${code.toUpperCase()}: Tool execution was not authorized.` }] } });
+    _meta: { agentlasProxyFailure: code }, content: [{ type: "text", text: `MCP_PROXY_${code.toUpperCase()}: Tool execution was not authorized.${denyReason[code] ?? ""}` }] } });
   function query(method: string, params: Frame, signal: AbortSignal): Promise<Frame> {
     signal.throwIfAborted();
     return new Promise((resolve, reject) => {
@@ -1026,4 +1050,41 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
     });
     req.resume();
   })().catch((error) => close(error, "open"));
+}
+
+/** Automatic retry is narrower than read permission. Navigation/history,
+ * tab creation/selection/closing and arbitrary code may change browser state
+ * even when ordinary permission policy classifies them as reads. */
+function browserRequestReplaySafe(frame: Frame): boolean {
+  if (frame.method !== "tools/call" || typeof frame.params?.name !== "string") return false;
+  const args = frame.params.arguments ?? {};
+  if (!args || typeof args !== "object" || Array.isArray(args)) return false;
+  const a = args as Record<string, unknown>;
+  const keys = (...allowed: string[]) => Object.keys(a).every(key => allowed.includes(key));
+  const optional = (key: string, type: string) => a[key] === undefined || typeof a[key] === type;
+  switch (frame.params.name) {
+    case "browser_tabs": return keys("action") && a.action === "list";
+    case "browser_snapshot": return keys("target", "depth", "boxes")
+      && optional("target", "string") && optional("boxes", "boolean")
+      && (a.depth === undefined || (Number.isSafeInteger(a.depth) && Number(a.depth) >= 0));
+    case "browser_find": return keys("text", "regex")
+      && optional("text", "string") && optional("regex", "string")
+      && ((typeof a.text === "string" && Boolean(a.text) && a.regex === undefined)
+        || (typeof a.regex === "string" && Boolean(a.regex) && a.text === undefined));
+    case "browser_take_screenshot": return keys("element", "target", "type", "fullPage", "scale")
+      && optional("element", "string") && optional("target", "string") && optional("fullPage", "boolean")
+      && (a.type === undefined || a.type === "png" || a.type === "jpeg")
+      && (a.scale === undefined || (typeof a.scale === "number" && Number.isFinite(a.scale) && a.scale > 0));
+    case "browser_wait_for": return keys("time", "text", "textGone")
+      && optional("text", "string") && optional("textGone", "string")
+      && (a.time === undefined || (typeof a.time === "number" && Number.isFinite(a.time) && a.time >= 0));
+    case "browser_console_messages": return keys("level", "all") && optional("all", "boolean")
+      && (a.level === undefined || ["error", "warning", "info", "debug"].includes(String(a.level)));
+    case "browser_network_requests": return keys("static", "filter")
+      && optional("static", "boolean") && optional("filter", "string");
+    case "browser_network_request": return keys("index", "part") && Number.isSafeInteger(a.index) && Number(a.index) > 0
+      && (a.part === undefined || ["request-headers", "request-body", "response-headers", "response-body"].includes(String(a.part)));
+    case "browser_skill_list": return keys();
+    default: return false;
+  }
 }

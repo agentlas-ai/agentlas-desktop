@@ -777,7 +777,15 @@ export function createDaemonScienceService(options: {
           throw Error("science-steering-request-id-required");
         const lookup = (store as Store & { getSteeringByRequestId?: (requestId: string) => ReturnType<Store["listSteering"]>[number] | null }).getSteeringByRequestId;
         if (typeof lookup !== "function") throw Error("science-steering-admission-unavailable");
-        const receipt = lookup.call(store, input.requestId);
+        let receipt = lookup.call(store, input.requestId);
+        if (!receipt) {
+          // A direction sent on the common steering path (PLAN S3) has no Science steering row: its receipt is the host's. The
+          // phone's lost-reply recovery asks for it by request ID, so answer from the merged list or it would wait for ever.
+          const listOwnerDirections = (conversations as Conversations & { listOwnerDirections?: (projectId: string, conversationId: string) => ReturnType<Store["listSteering"]> }).listOwnerDirections;
+          receipt = typeof listOwnerDirections === "function"
+            ? listOwnerDirections.call(conversations, input.projectId, input.conversationId).find(row => row.requestId === input.requestId) ?? null
+            : null;
+        }
         if (!receipt) return [];
         const target = store.getTurnForProject(input.projectId, receipt.targetTurnId);
         const message = store.getMessageForProject(input.projectId, input.conversationId, receipt.messageId);

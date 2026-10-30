@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { fixedPurposePrompt, purposePrompt } from "../runtime/purpose-prompts";
 /**
  * 골 구조 판단 → 계획 → 실행 연결(One·Work 공통, ownsHostGoalLoop).
@@ -242,6 +243,42 @@ export async function ensureGoalShapeBeforeTurn(input: {
 }): Promise<LiveGoalPlan | null> {
   const run = getLongRunByGoalId(input.goalId);
   if (!run || !ownsHostGoalLoop(run.surface)) return null;
+  // One planner call per goal at a time. A turn start, the panel's "나누기" and the panel's own re-division after a goal
+  // revision can all ask at once; a second caller waits and then reads what the first saved instead of judging again
+  // (a second plan_seq would also leave the first caller's turn holding a plan that no longer exists).
+  return withGoalShapeLock(input.goalId, input.signal, () => ensureGoalShapeLocked(input));
+}
+
+type EnsureGoalShapeInput = Parameters<typeof ensureGoalShapeBeforeTurn>[0];
+
+/** The longest a caller waits for another caller's planner call: a few of its own timeouts. A call that never settles must not hold the goal's next turn. */
+const SHAPE_LOCK_WAIT_MS = 4 * GOAL_SHAPE_TIMEOUT_MS;
+const shapeLocks = new Map<string, Promise<void>>();
+async function withGoalShapeLock<T>(goalId: string, signal: AbortSignal | undefined, work: () => Promise<T>): Promise<T> {
+  const prior = shapeLocks.get(goalId) ?? Promise.resolve();
+  let release!: () => void;
+  const mine = new Promise<void>((resolve) => { release = resolve; });
+  const tail = prior.then(() => mine);
+  shapeLocks.set(goalId, tail);
+  try {
+    // Waiting is cancelled with the caller (an aborted turn must not sit behind someone else's planner call), and bounded.
+    await new Promise<void>((resolve, reject) => {
+      if (signal?.aborted) { reject(signal.reason ?? new Error("goal_shape_cancelled")); return; }
+      const done = () => { clearTimeout(timer); signal?.removeEventListener("abort", onAbort); };
+      const onAbort = () => { done(); reject(signal?.reason ?? new Error("goal_shape_cancelled")); };
+      const timer = setTimeout(() => { done(); resolve(); }, SHAPE_LOCK_WAIT_MS);
+      timer.unref?.();
+      signal?.addEventListener("abort", onAbort, { once: true });
+      void prior.then(() => { done(); resolve(); });
+    });
+    return await work();
+  } finally {
+    release();
+    void tail.then(() => { if (shapeLocks.get(goalId) === tail) shapeLocks.delete(goalId); });
+  }
+}
+
+async function ensureGoalShapeLocked(input: EnsureGoalShapeInput): Promise<LiveGoalPlan | null> {
   const nowMs = input.nowMs ?? Date.now();
   const createdAt = new Date(nowMs).toISOString();
   const { revision, ownerText } = goalOwnerText(input.goalId, input.objective);
@@ -539,6 +576,28 @@ export interface GoalPlanMarkerOutcome {
   applied: Array<{ kind: "tactic" | "plan_op"; id: string; result: string }>;
 }
 
+/**
+ * The plan's own spelling of a node id a report names: exact, else the one node whose id differs only in case ("T1" for "t1").
+ * Two nodes that differ only in case cannot be told apart, so that stays unresolved.
+ */
+function planNodeId(plan: LiveGoalPlan, id: string | null, kind: "tactic" | "strategy"): string | null {
+  if (!id) return id;
+  const ids = (kind === "tactic" ? plan.tactics : plan.strategies).map((node) => node.id);
+  if (ids.includes(id)) return id;
+  const same = ids.filter((candidate) => candidate.toLowerCase() === id.toLowerCase());
+  return same.length === 1 ? same[0]! : id;
+}
+
+function withPlanNodeIds(plan: LiveGoalPlan, item: { kind: "tactic"; value: TacticMarker } | { kind: "plan_op"; value: PlanOp }):
+  { kind: "tactic"; value: TacticMarker } | { kind: "plan_op"; value: PlanOp } {
+  if (item.kind === "tactic") return { kind: "tactic", value: { ...item.value, id: planNodeId(plan, item.value.id, "tactic")! } };
+  const op = item.value;
+  if (op.op === "replace_tactic") return { kind: "plan_op", value: { ...op, id: planNodeId(plan, op.id, "tactic")! } };
+  if (op.op === "retire_strategy") return { kind: "plan_op", value: { ...op, id: planNodeId(plan, op.id, "strategy")! } };
+  if (op.op === "add_tactic") return { kind: "plan_op", value: { ...op, strategy_id: planNodeId(plan, op.strategy_id, "strategy") } };
+  return item;
+}
+
 function applyTacticMarker(plan: LiveGoalPlan, marker: TacticMarker, runId: string | null, nowMs: number): string {
   const tactic = plan.tactics.find((t) => t.id === marker.id);
   if (!tactic) return "tactic_not_found";
@@ -582,7 +641,28 @@ function nextId(plan: LiveGoalPlan, prefix: "t" | "s", taken: Set<string>): stri
   return id;
 }
 
-function applyPlanOp(plan: LiveGoalPlan, op: PlanOp, runId: string | null, nowMs: number): string {
+/**
+ * A tactic a plan change adds may be ordered after tactics the plan has. A dependency on one it does not have, or (replace_tactic) on the
+ * tactic being replaced, can never be met, so it is left out instead of rejecting the change (checkPlanOp still refuses what is left that
+ * is unreadable). A draft that names only such dependencies says nothing about order.
+ */
+function withReadableDependencies(plan: LiveGoalPlan, op: PlanOp): PlanOp {
+  const known = new Set(plan.tactics.map((tactic) => tactic.id));
+  const clean = <T extends { depends_on?: string[] }>(draft: T, retiring: string | null): T => {
+    if (!draft.depends_on) return draft;
+    const kept = draft.depends_on.filter((dep) => known.has(dep) && dep !== retiring);
+    if (kept.length === draft.depends_on.length) return draft;
+    const { depends_on: _dropped, ...rest } = draft;
+    return (kept.length || draft.depends_on.length === 0 ? { ...rest, depends_on: kept } : rest) as T;
+  };
+  if (op.op === "replace_tactic") return { ...op, with: op.with.map((draft) => clean(draft, op.id)) };
+  if (op.op === "add_tactic") return clean(op, null);
+  if (op.op === "add_strategy") return { ...op, tactics: op.tactics.map((draft) => clean(draft, null)) };
+  return op;
+}
+
+function applyPlanOp(plan: LiveGoalPlan, rawOp: PlanOp, runId: string | null, nowMs: number): string {
+  const op = withReadableDependencies(plan, rawOp);
   const checked = checkPlanOp(plan, op, nowMs);
   const at = new Date(nowMs).toISOString();
   const receipt = (result: string, extra: Record<string, unknown> = {}) => recordGoalPlanDecision({ goalId: plan.goalId, revision: plan.revision,
@@ -642,13 +722,56 @@ function applyPlanOp(plan: LiveGoalPlan, op: PlanOp, runId: string | null, nowMs
   }
 }
 
+/**
+ * What a node means to a report about it: the words the model read in its turn context, whether it is still open, and the
+ * owner's pause. Position, run counters, evidence and AGI guidance are bookkeeping that moves while a turn runs and do not
+ * change what a "done" or a plan change on that node says.
+ */
+function nodeMeaningDigest(parts: ReadonlyArray<string | number | boolean | null>): string {
+  return createHash("sha256").update(JSON.stringify(parts)).digest("hex").slice(0, 16);
+}
+
+function planNodeMeaning(plan: LiveGoalPlan): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const s of plan.strategies) out[s.id] = nodeMeaningDigest(["strategy", s.status, s.ownerPaused === true, s.hypothesis, s.kpi]);
+  for (const t of plan.tactics) out[t.id] = nodeMeaningDigest(["tactic", t.strategy_id, t.status, t.ownerPaused === true, t.description, t.done_when]);
+  return out;
+}
+
 /** Bind the exact host projection immediately before the real runtime dispatch; no activity is counted. */
 export function bindGoalPlanDispatch(plan: LiveGoalPlan, runId: string | null): void {
   if (!runId || !plan.mutationIdentity) return;
   withCurrentGoalPlan(plan.goalId, plan.mutationIdentity, current => {
     recordGoalPlanDecision({ goalId: current.goalId, revision: current.revision, planSeq: current.planSeq,
-      kind: "marker_context", payload: { runId, mutationIdentity: current.mutationIdentity, ownerControlEpoch: goalPlanOwnerControlEpoch(current.goalId) } });
+      kind: "marker_context", payload: { runId, mutationIdentity: current.mutationIdentity, ownerControlEpoch: goalPlanOwnerControlEpoch(current.goalId),
+        // What the model was shown, per node: a report is applied to a plan that moved meanwhile only when the nodes it names still mean the same.
+        fence: { revision: current.revision, planSeq: current.planSeq, nodes: planNodeMeaning(current) } } });
   });
+}
+
+/** The nodes a turn's reports name (tactic reports, plan-op targets). A plan-wide op (add_strategy) names none and is checked against the current plan by checkPlanOp. */
+function reportedNodeIds(tactics: readonly TacticMarker[], ops: readonly PlanOp[]): string[] {
+  const ids = new Set<string>();
+  for (const marker of tactics) ids.add(marker.id);
+  for (const op of ops) {
+    if (op.op === "replace_tactic" || op.op === "retire_strategy") ids.add(op.id);
+    else if (op.op === "add_tactic" && op.strategy_id) ids.add(op.strategy_id);
+  }
+  return [...ids];
+}
+
+/**
+ * The plan moved while the turn ran. True when it is still the plan the model reported on: same revision and plan_seq as at
+ * dispatch, and every node a report names means what it meant when the model read it. A receipt written before this fence
+ * existed carries no digests and keeps the exact-identity rule.
+ */
+function reportsStillValid(fence: unknown, current: LiveGoalPlan, named: readonly string[]): boolean {
+  if (!fence || typeof fence !== "object") return false;
+  const seen = fence as { revision?: unknown; planSeq?: unknown; nodes?: unknown };
+  if (seen.revision !== current.revision || seen.planSeq !== current.planSeq || !seen.nodes || typeof seen.nodes !== "object") return false;
+  const before = seen.nodes as Record<string, unknown>;
+  const now = planNodeMeaning(current);
+  return named.every((id) => typeof before[id] === "string" && before[id] === now[id]);
 }
 
 /**
@@ -675,7 +798,10 @@ export function applyGoalPlanMarkers(input: { goalId: string | null; text: strin
     const rebase = [...receipts].reverse().find(row => row.kind === "marker_apply" && row.payload.contextId === context.id);
     const expected = typeof rebase?.payload.mutationIdentity === "string" ? rebase.payload.mutationIdentity : context.payload.mutationIdentity;
     const seen = new Set(receipts.filter(row => row.kind === "marker_apply").flatMap(row => Array.isArray(row.payload.markerKeys) ? row.payload.markerKeys as string[] : []));
+    const named = reportedNodeIds(extracted.tactics, extracted.ops);
+    let healed = false;
     const result = withCurrentGoalPlan(input.goalId, expected, (sourcePlan) => {
+      healed = sourcePlan.mutationIdentity !== expected;
       if (input.signal?.aborted) throw new Error("goal_plan_dispatch_cancelled");
       if (context.payload.ownerControlEpoch !== goalPlanOwnerControlEpoch(input.goalId!)) throw new Error("goal_plan_owner_control_changed");
       const run = getLongRunByGoalId(input.goalId!);
@@ -690,12 +816,13 @@ export function applyGoalPlanMarkers(input: { goalId: string | null; text: strin
         const id = item.kind === "tactic" ? item.value.id : item.value.op;
         if (seen.has(key)) { outcome.push({ kind: item.kind, id, result: "duplicate" }); continue; }
         const plan = readGoalPlan(input.goalId!)!;
-        const branchId = item.kind === "tactic" ? item.value.id : "id" in item.value ? item.value.id : null;
+        const named = withPlanNodeIds(plan, item);
+        const branchId = named.kind === "tactic" ? named.value.id : "id" in named.value ? named.value.id : null;
         const branch = projectGoalPlanReadiness(plan, { nowMs }).branches.find(branch => branch.nodeId === branchId);
-        const strategyId = item.kind === "plan_op" && item.value.op === "add_tactic" ? item.value.strategy_id : branchId;
-        const pausedStrategy = item.kind === "plan_op" && (item.value.op === "retire_strategy" || item.value.op === "add_tactic") && plan.strategies.find(s => s.id === strategyId)?.ownerPaused;
+        const strategyId = named.kind === "plan_op" && named.value.op === "add_tactic" ? named.value.strategy_id : branchId;
+        const pausedStrategy = named.kind === "plan_op" && (named.value.op === "retire_strategy" || named.value.op === "add_tactic") && plan.strategies.find(s => s.id === strategyId)?.ownerPaused;
         if (branch?.ownerHeld || pausedStrategy) throw new Error("goal_plan_owner_held");
-        const value = item.kind === "tactic" ? applyTacticMarker(plan, item.value, input.runId!, nowMs) : applyPlanOp(plan, item.value, input.runId!, nowMs);
+        const value = named.kind === "tactic" ? applyTacticMarker(plan, named.value, input.runId!, nowMs) : applyPlanOp(plan, named.value, input.runId!, nowMs);
         outcome.push({ kind: item.kind, id, result: value }); keys.push(key); seen.add(key);
       }
       for (const shift of shifts) {
@@ -707,9 +834,9 @@ export function applyGoalPlanMarkers(input: { goalId: string | null; text: strin
       const after = readGoalPlan(input.goalId!)!;
       recordGoalPlanDecision({ goalId: after.goalId, revision: after.revision, planSeq: after.planSeq, kind: "marker_apply",
         createdAt: new Date(nowMs).toISOString(), payload: { runId: input.runId, contextId: context.id,
-          sourceIdentity: expected, mutationIdentity: after.mutationIdentity, markerKeys: keys } });
+          sourceIdentity: expected, mutationIdentity: after.mutationIdentity, markerKeys: keys, ...(healed ? { appliedToMovedPlan: true } : {}) } });
       return outcome;
-    });
+    }, (current) => reportsStillValid(context.payload.fence, current, named));
     applied.push(...result);
   } catch (error) {
     const known = new Set(["goal_plan_context_missing", "goal_plan_stale", "goal_revision_stale", "goal_plan_owner_held",

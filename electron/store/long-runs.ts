@@ -428,7 +428,9 @@ export function liveLongRunAttemptCount(runId: string): number {
 export function appendLongRunEvent(input: Omit<Parameters<typeof appendEventInDb>[0], "at"> & { at?: string }): number {
   const db = getDb();
   const run = db.transaction(() => appendEventInDb({ ...input, at: input.at ?? new Date().toISOString() }));
-  const seq = run();
+  // IMMEDIATE: the append reads the run's last seq then writes; a deferred read-then-write is refused at once (SQLITE_BUSY) when the
+  // daemon wrote in between, without waiting the busy timeout.
+  const seq = run.immediate();
   emitDesktopStoreChange({ entity: "long-run", id: input.runId });
   return seq;
 }
@@ -535,7 +537,7 @@ export function createLongRun(input: {
       payload: { status, surface: input.surface, executionLocation, hostOwnerKind },
       at: now,
     });
-  })();
+  }).immediate();
   emitDesktopStoreChange({ entity: "long-run", id });
   const created = getLongRun(id);
   if (!created) throw new Error("long_run_create_readback_failed");
@@ -828,7 +830,7 @@ export function settleAutomaticGoalAtRetryCap(input: {
     appendEventInDb({ runId: current.id, kind: "run.status_changed", actorKind: "host",
       payload: { from: current.status, to, reason: input.outcome, retries: input.retries,
         evidenceRefs: [...input.evidenceRefs].slice(0, 32), receiptIds: [...input.receiptIds].slice(0, 32) }, at: now });
-  })();
+  }).immediate();
   emitDesktopStoreChange({ entity: "long-run", id: input.runId });
   const next = getLongRun(input.runId);
   if (!next) throw new Error("long_run_transition_readback_failed");
@@ -880,7 +882,7 @@ export function transitionLongRun(input: {
         if (claimed.changes !== 1) throw new Error("long_run_transition_owner_conflict");
         appendEventInDb({ runId: current.id, kind: "run.owner_claimed", actorKind: input.actorKind ?? "host",
           payload: { status: current.status, appInstanceId: input.appInstanceId, from: null }, at: new Date().toISOString() });
-      })();
+      }).immediate();
       emitDesktopStoreChange({ entity: "long-run", id: current.id });
       return getLongRun(current.id) ?? current;
     }
@@ -928,7 +930,7 @@ export function transitionLongRun(input: {
       payload: { requestedStatus: requestedTo, status: input.to, reason: input.reason ?? null,
         outcome: "unknown", continueIndependentWork: true, replayUncertainEffects: false }, at: now });
     if (input.to === "cancelled" || input.to === "failed") closeOpenTasksOfEndedRun(current.id, now);
-  })();
+  }).immediate();
   emitDesktopStoreChange({ entity: "long-run", id: current.id });
   const next = getLongRun(current.id);
   if (!next) throw new Error("long_run_transition_readback_failed");
@@ -973,7 +975,7 @@ export function blockHostPausedClaimedGoalWait(runId: string, expectedVersion: n
     if (changed.changes !== 1) throw new Error("goal_wait_claimed_recovery_state_changed");
     appendEventInDb({ runId, kind: "run.status_changed", actorKind: "host",
       payload: { from: "paused", to: "queued", skippedStatus: "blocked", reason }, at: now });
-  })();
+  }).immediate();
   emitDesktopStoreChange({ entity: "long-run", id: runId });
   const blocked = getLongRun(runId);
   if (!blocked) throw new Error("goal_wait_claimed_recovery_readback_failed");
@@ -1107,7 +1109,7 @@ export function scheduleBlockedGoalRetry(input: {
         detail: input.detail.slice(0, 120), trigger: input.trigger.slice(0, 80),
         appInstanceId: input.appInstanceId ?? null,
         ...(input.requestedBy === "model" ? { requestedBy: "model" } : {}) }, at: now });
-  })();
+  }).immediate();
   emitDesktopStoreChange({ entity: "long-run", id: input.runId });
   const next = getLongRun(input.runId);
   if (!next) throw new Error("blocked_goal_retry_readback_failed");
@@ -1178,7 +1180,7 @@ export function holdGoalForOwnerAnswer(input: { runId: string; expectedVersion?:
       payload: { from: "running", to: "waiting_tool", reason: GOAL_OWNER_ANSWER_REQUIRED }, at: now });
     appendEventInDb({ runId: current.id, kind: "run.owner_answer_pending", actorKind: "host",
       payload: { reason: GOAL_OWNER_ANSWER_REQUIRED, ...(input.invocationRunId ? { invocationRunId: input.invocationRunId } : {}) }, at: now });
-  })();
+  }).immediate();
   emitDesktopStoreChange({ entity: "long-run", id: input.runId });
   const next = getLongRun(input.runId);
   if (!next) throw new Error("goal_owner_answer_hold_readback_failed");
@@ -1206,7 +1208,7 @@ export function releaseGoalOwnerAnswerHold(input: { runId: string; expectedVersi
     if (changed.changes !== 1) throw new Error("goal_owner_answer_release_state_changed");
     appendEventInDb({ runId: current.id, kind: "run.status_changed", actorKind: "host",
       payload: { from: "waiting_tool", to: "queued", reason: input.reason.slice(0, 120) }, at: now });
-  })();
+  }).immediate();
   emitDesktopStoreChange({ entity: "long-run", id: input.runId });
   const next = getLongRun(input.runId);
   if (!next) throw new Error("goal_owner_answer_release_readback_failed");
@@ -1233,7 +1235,7 @@ export function queueOwnerHeldGoalForResume(input: { runId: string; appInstanceI
     appendEventInDb({ runId: current.id, kind: "run.status_changed", actorKind: "user",
       payload: { from: "waiting_tool", to: "queued", reason: "user-resume", heldFor: current.blockedReason }, at: now });
     return true;
-  })();
+  }).immediate();
   if (!queued) return null;
   emitDesktopStoreChange({ entity: "long-run", id: input.runId });
   return getLongRun(input.runId);
@@ -1247,7 +1249,8 @@ export const BLOCKED_GOAL_STARTUP_RETRY_MS = 30_000;
  * has had since its last success (a settled completed turn or an owner control) within 24 h. A resume that
  * worked is not a failure: counting it made every healthy Goal that resumes every few minutes sit at the 6 h
  * cap after a single restart (measured 2026-10-03: retryIndex 70 on a 37-cycle Goal, 751 on a spinning one).
- * Carried copies of an existing retry never count either — they re-write the same schedule.
+ * Carried copies of an existing retry never count either — they re-write the same schedule; so does a retry pulled forward because
+ * a relay waits for the Goal's next turn (invocation/parked-relay-delivery.ts): it moves the same retry earlier, it is no failure.
  * The owner's authority being (re)established also starts a fresh count: an adopted grant (run.goal_revision_bound) or
  * a status change the owner made (Resume/Start). Retries before it stood on a host cause that is now gone; counting them
  * put the Yotube Goal's next retry 5 h 20 min out right after 1.3.64 resumed it (2026-10-17: six goal_owner_grant_unrecorded
@@ -1261,7 +1264,7 @@ export function nextBlockedGoalRetrySlot(runId: string, now = Date.now(),
     .get(runId) as { seq: number };
   const prior = getDb().prepare(`SELECT COUNT(*) AS n FROM long_run_events WHERE run_id = ? AND kind = ? AND seq > ? AND occurred_at > ?
     AND json_extract(payload_json, '$.action') = 'retry_scheduled'
-    AND COALESCE(json_extract(payload_json, '$.detail'), '') <> 'host_pause_carried_retry'`)
+    AND COALESCE(json_extract(payload_json, '$.detail'), '') NOT IN ('host_pause_carried_retry', 'parked_relay_pull_forward')`)
     .get(runId, BLOCKED_GOAL_SWEEP_EVENT_KIND, success.seq, since) as { n: number };
   const retryIndex = prior.n;
   const backoffMs = Math.min(6 * 60 * 60_000, 5 * 60_000 * 2 ** Math.min(retryIndex, 10));
@@ -1285,7 +1288,7 @@ export function reopenDueBlockedGoalRetry(runId: string, expectedVersion: number
     if (changed.changes !== 1) throw new Error("blocked_goal_retry_state_changed");
     appendEventInDb({ runId, kind: "run.status_changed", actorKind: "host",
       payload: { from: current.status, to: "queued", skippedStatus: "blocked", reason, retryDue: true, retryIndex: retry.retryIndex }, at: now });
-  })();
+  }).immediate();
   emitDesktopStoreChange({ entity: "long-run", id: runId });
   const next = getLongRun(runId);
   if (!next) throw new Error("blocked_goal_retry_readback_failed");
@@ -1386,7 +1389,7 @@ export function addLongRunTask(input: {
       payload: { taskId: id, parentTaskId: input.parentTaskId ?? null },
       at: now,
     });
-  })();
+  }).immediate();
   emitDesktopStoreChange({ entity: "long-run", id: input.runId });
   const task = getDb().prepare("SELECT * FROM long_run_tasks WHERE run_id = ? AND id = ?")
     .get(input.runId, id) as LongRunTaskRow | undefined;
@@ -1449,7 +1452,7 @@ export function setLongRunTaskState(input: {
       payload: { taskId: input.taskId, from: current.state, to: input.state },
       at: now,
     });
-  })();
+  }).immediate();
   emitDesktopStoreChange({ entity: "long-run", id: input.runId });
   const row = db.prepare("SELECT * FROM long_run_tasks WHERE run_id = ? AND id = ?")
     .get(input.runId, input.taskId) as LongRunTaskRow;
@@ -1788,7 +1791,7 @@ export function settleLongRunMessage(input: {
       });
     }
     return changed;
-  })();
+  }).immediate();
   if (result.changes === 1) emitDesktopStoreChange({ entity: "long-run", id: row.run_id });
   return result.changes === 1;
 }
@@ -2252,7 +2255,7 @@ export function applyScienceLongRunProjectionStatus(input: {
       },
       at: now,
     });
-  })();
+  }).immediate();
   emitDesktopStoreChange({ entity: "long-run", id: current.id });
   const next = getLongRun(current.id);
   if (!next) throw new Error("science_projection_status_readback_failed");
@@ -2615,7 +2618,7 @@ export function requestLongRunVerification(goalId: string, evidence?: string | n
       reason: evidence?.slice(0, 500) ?? "model-requested-verification",
     });
     return true;
-  })();
+  }).immediate();
 }
 
 function pauseDesktopRuns(reason: "app-quit" | "startup-recovery", appInstanceId?: string,

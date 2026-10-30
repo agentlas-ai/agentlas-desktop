@@ -65,6 +65,13 @@ function untypedReason(error: unknown): string {
   return redactSecrets(raw).replace(/(?:\/Users|\/home|[A-Za-z]:\\Users)[\\/][^\\/\s]+/g, "~").replace(/\s+/g, " ").trim().slice(0, 120);
 }
 export const AGI_TACTIC_DAILY_LIMIT_CODE = "agi.team.tactic-daily-limit";
+/**
+ * How far back an action counts as "already taken" for the repeat escalation. An incident outlives its digests (a repeated failure
+ * lasted 20+ hours, 19 attempts, still open), and a count over its whole life left it with nothing but the work turn the host defers
+ * (observed in use: after two teammate dispatches on 10-28, 31 of 31 later dispatches were replaced by agi.turn.deferred).
+ * The same window the per-tactic dispatch limit uses: the next day the move is open again, so a long incident is not a dead end.
+ */
+export const AGI_REPEAT_WINDOW_MS = 24 * 60 * 60_000;
 /** An owner ask whose notice did not reach the room: refused, not counted as asked, free to be asked again. */
 export const AGI_ASK_NOT_DELIVERED_CODE = "agi.ask.not-delivered";
 /** A model-briefed teammate is never started on an incident that waits for the owner (payment, credential, consent, purpose). */
@@ -195,6 +202,8 @@ export interface AgiExecutorDeps {
    */
   continuationRefusal?(runId: string, expectedVersion: number): string | null;
   team?: {
+    /** Can this room hand work to teammates (One's own conversation)? false: the three team actions are refused agi.team.unavailable (typed), never thrown. */
+    available?(chatId: string): boolean;
     create(chatId: string, permission: AgiGoalView["permission"], input: { name: string; role?: string; personality?: string }): { memberId: string; created: boolean };
     invite(chatId: string, permission: AgiGoalView["permission"], member: string): { memberId: string; joined: boolean; memberName?: string };
     /** runId: the Goal's long run; the host start goes through its wake budget (wake-arbiter, source "agi"). */
@@ -269,6 +278,20 @@ export class AgiActionExecutor {
     this.incidents = new AgiIncidentStore(deps.db);
   }
 
+  /**
+   * Startup: a claim a previous process left behind (it died between claiming the action and settling it). The effect may or may not
+   * have happened, so it is never run again, but the claim must not stand for ever: a 'claimed' row blocks every later action of
+   * that kind for the Goal (the claim insert below skips while one exists), and nothing else ever settles it. It is settled as
+   * interrupted: not an executed move, not a failure that rules the action out. `beforeMs` is the moment this process took over;
+   * a claim made by this process is never touched.
+   */
+  settleInterruptedClaims(beforeMs: number): number {
+    const nowMs = this.deps.now();
+    return this.deps.db.prepare(`UPDATE agi_action_receipts SET status = 'settled', ok = 0, code = 'agi.action.interrupted', settled_at_ms = ?,
+      result_json = json_object('actionId', action_id, 'action', action, 'ok', json('false'), 'code', 'agi.action.interrupted')
+      WHERE status = 'claimed' AND created_at_ms < ?`).run(nowMs, beforeMs).changes;
+  }
+
   /** A model attempt settled after the monitor recorded "dispatched": write its end onto the state's attempt row. */
   recordAttemptResult(goalId: string, stateDigest: string, result: { outcome: string; code?: string }, attempt?: number): void {
     try {
@@ -297,10 +320,16 @@ export class AgiActionExecutor {
    * Executed actions on an incident (G1, circuit breaker, per-attempt cap): an effect that ran (ok) or ran and failed.
    * An argument/precondition refusal never reached the product and is not counted.
    */
-  private history(incidentId: string): Array<{ action: string; ok: boolean; attempt: number }> {
-    return (this.deps.db.prepare(`SELECT action, ok, attempt FROM agi_action_receipts WHERE incident_id = ? AND status = 'settled' AND attempt >= 1
-      AND (ok = 1 OR code LIKE '%failed%' OR code LIKE '%unavailable%' OR code LIKE 'agi.turn.%')`).all(incidentId) as Array<{ action: string; ok: number; attempt: number }>)
-      .map((row) => ({ action: row.action, ok: row.ok === 1, attempt: row.attempt }));
+  private history(incidentId: string): Array<{ action: string; ok: boolean; attempt: number; at: number }> {
+    return (this.deps.db.prepare(`SELECT action, ok, attempt, COALESCE(settled_at_ms, created_at_ms) AS at FROM agi_action_receipts WHERE incident_id = ? AND status = 'settled' AND attempt >= 1
+      AND (ok = 1 OR code LIKE '%failed%' OR code LIKE '%unavailable%' OR code LIKE 'agi.turn.%')`).all(incidentId) as Array<{ action: string; ok: number; attempt: number; at: number }>)
+      .map((row) => ({ action: row.action, ok: row.ok === 1, attempt: row.attempt, at: row.at }));
+  }
+
+  /** The executed moves of the repeat window (AGI_REPEAT_WINDOW_MS); what counts toward "taken too often". */
+  private recentHistory(incidentId: string): Array<{ action: string; ok: boolean; attempt: number; at: number }> {
+    const since = this.deps.now() - AGI_REPEAT_WINDOW_MS;
+    return this.history(incidentId).filter((entry) => entry.at > since);
   }
 
   captureEpisode(captureId: string, goalId: string): void { this.deps.captureEpisode?.(captureId, goalId); }
@@ -333,7 +362,7 @@ export class AgiActionExecutor {
       if (!goal || goal.runId !== batch.plan.fence.runId || goal.version !== batch.plan.fence.runVersion) return "agi.action.stale";
       if (goal.status !== "running" || (goal.pauseReason && OWNER_BOUNDARY_PAUSES.has(goal.pauseReason))) return "agi.action.owner-boundary";
       if (goal.permission !== "write" && goal.permission !== "full") return "agi.plan.permission-read";
-      const history = this.history(incident.id);
+      const history = this.recentHistory(incident.id);
       // A repeated or failed replan does not run again as part of this batch. The code is not a stop: a model attempt
       // whose actions all come back refused hands the incident to the deterministic path, which escalates
       // (repeatEscalation: the runtime's own tools, another runtime, the next work turn). A rest is never limited.
@@ -443,10 +472,11 @@ export class AgiActionExecutor {
     }
     // Owner 2026-10-12: a repeat is not refused. It used to be (agi.action.circuit-open 2,376 times in production, almost
     // all of them a rest), which left the goal where it was; the next deterministic move runs instead.
-    const repeated = history.filter((entry) => entry.action === request.action).length >= MAX_SAME_MOVE_PER_CAUSE;
+    const recent = this.recentHistory(incident.id);
+    const repeated = recent.filter((entry) => entry.action === request.action).length >= MAX_SAME_MOVE_PER_CAUSE;
     const failedHere = this.incidents.ruledOut(incident.id).has(request.action);
     if ((repeated || failedHere) && !NEVER_ESCALATED.has(request.action)) {
-      const next = repeatEscalation(incident, request.action, history, { nativeHarness: goal.permission === "write" || goal.permission === "full",
+      const next = repeatEscalation(incident, request.action, recent, { nativeHarness: goal.permission === "write" || goal.permission === "full",
         runtimeSwitch: this.deps.canSwitchRuntime?.(goal.goalId) });
       request = { ...request, action: next.action, args: { ...next.args, escalatedFrom: request.action } };
     }
@@ -568,7 +598,7 @@ export class AgiActionExecutor {
     const writeCapable = goal.permission === "write" || goal.permission === "full";
     switch (request.action) {
       case "create_teammate": {
-        if (!this.deps.team || !goal.chatId) return no("agi.team.unavailable");
+        if (!this.deps.team || !goal.chatId || this.deps.team.available?.(goal.chatId) === false) return no("agi.team.unavailable");
         if (!writeCapable) return no("agi.team.permission-read");
         if (this.incidents.get(incidentId)?.diagnosis.ownerClass === "human_only") return no(AGI_HUMAN_ONLY_INCIDENT_CODE);
         const name = text(args.name, 80);
@@ -578,7 +608,7 @@ export class AgiActionExecutor {
         return ok(made.created ? "agi.team.created" : "agi.team.already-exists", { memberId: made.memberId, name });
       }
       case "invite_teammate": {
-        if (!this.deps.team || !goal.chatId) return no("agi.team.unavailable");
+        if (!this.deps.team || !goal.chatId || this.deps.team.available?.(goal.chatId) === false) return no("agi.team.unavailable");
         if (!writeCapable) return no("agi.team.permission-read");
         const member = text(args.member, 120);
         if (!member) return no("agi.team.member-required");
@@ -587,7 +617,7 @@ export class AgiActionExecutor {
           ...(joined.memberName ? { memberName: joined.memberName } : {}) });
       }
       case "dispatch_teammate": {
-        if (!this.deps.team || !goal.chatId) return no("agi.team.unavailable");
+        if (!this.deps.team || !goal.chatId || this.deps.team.available?.(goal.chatId) === false) return no("agi.team.unavailable");
         if (!writeCapable) return no("agi.team.permission-read");
         if (this.incidents.get(incidentId)?.diagnosis.ownerClass === "human_only") return no(AGI_HUMAN_ONLY_INCIDENT_CODE);
         const member = text(args.member, 120);

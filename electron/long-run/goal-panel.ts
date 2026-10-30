@@ -294,7 +294,7 @@ function amendObjective(chatId: string, goalId: string, text: string, liveTurn: 
   return applied.applied ? "revised" : "amendment_pending";
 }
 
-export function editGoalPanel(rawRequest: unknown, deps: { activeChatIds: () => string[]; nowMs?: number }): GoalPanelEditResult {
+export function editGoalPanel(rawRequest: unknown, deps: { activeChatIds: () => string[]; nowMs?: number; shape?: typeof ensureGoalShapeBeforeTurn }): GoalPanelEditResult {
   const request = rawRequest && typeof rawRequest === "object" ? rawRequest as Record<string, unknown> : {};
   const chatId = typeof request.chatId === "string" ? request.chatId : "";
   const view = () => { try { return readGoalPanel(chatId); } catch { return null; } };
@@ -337,9 +337,17 @@ export function editGoalPanel(rawRequest: unknown, deps: { activeChatIds: () => 
     const plan = readGoalPlan(goalId);
     if (!plan) refuse("goal_panel_no_plan");
     const revision = getChatGoalRevision(goalId);
-    if (revision && plan!.revision < revision.revision) refuse("goal_panel_plan_behind_revision");
+    if (revision && plan!.revision < revision.revision) {
+      // The plan still belongs to the goal as it was before its last revision; the planner divides the revised goal before the
+      // next run. Do not leave that to the next run alone: start it now (the panel, the phone and an agent all see the plan
+      // being re-divided, and edits resume on the new plan as soon as it lands).
+      healGoalPanelPlan(chatId, deps.shape ? { shape: deps.shape } : {});
+      refuse("goal_panel_plan_behind_revision");
+    }
+    // A caller that names no plan (an agent calling the panel without a view) edits the latest plan by node id; a caller that
+    // names one (the panel, the phone) is held to it, because node ids of an older plan can mean other nodes in a newer one.
     const expected = request.expectedPlan && typeof request.expectedPlan === "object" ? request.expectedPlan as Record<string, unknown> : null;
-    if (!expected || expected.revision !== plan!.revision || expected.planSeq !== plan!.planSeq) refuse("goal_panel_plan_changed");
+    if (expected && (expected.revision !== plan!.revision || expected.planSeq !== plan!.planSeq)) refuse("goal_panel_plan_changed");
     getDb().transaction(() => {
       const detail = applyPlanEdit(plan!, edit as Parameters<typeof applyPlanEdit>[1], at);
       recordGoalPlanDecision({ goalId, revision: plan!.revision, planSeq: plan!.planSeq, kind: "owner_edit", createdAt: at,
@@ -361,6 +369,24 @@ function goalRuntimeSelection(runId: string): RuntimeSelection | undefined {
   try { return JSON.parse(row.runtime_selection_json) as RuntimeSelection; } catch { return undefined; }
 }
 
+/** The planner call behind "나누기" and behind the automatic re-division of a revised goal. */
+function startGoalShape(chatId: string, goalId: string, run: NonNullable<ReturnType<typeof getLongRunByGoalId>>, opts: {
+  shape?: typeof ensureGoalShapeBeforeTurn; ownerRequested: boolean;
+}): Promise<void> {
+  const before = readGoalPlan(goalId);
+  shaping.set(goalId, { running: true, failed: false });
+  notify(chatId, run.id);
+  const objective = getChatGoalRevision(goalId)?.objective ?? run.objective;
+  const runtimeSelection = (() => { try { return goalRuntimeSelection(run.id); } catch { return undefined; } })();
+  return (opts.shape ?? ensureGoalShapeBeforeTurn)({ goalId, objective, ...(opts.ownerRequested ? { ownerRequested: true } : {}),
+    ...(runtimeSelection ? { runtimeSelection } : {}) })
+    .then((plan) => {
+      const shaped = Boolean(plan && !plan.fallback && (!before || plan.planSeq !== before.planSeq || plan.revision !== before.revision));
+      shaping.set(goalId, { running: false, failed: !shaped });
+    }, () => { shaping.set(goalId, { running: false, failed: true }); })
+    .finally(() => notify(chatId, run.id));
+}
+
 /** "나누기": ask the planner to shape this goal into a tree. Returns at once; the view refreshes when it lands. */
 export function requestGoalPanelShape(chatId: string, expectedGoalId: unknown, deps: {
   shape?: typeof ensureGoalShapeBeforeTurn;
@@ -373,16 +399,35 @@ export function requestGoalPanelShape(chatId: string, expectedGoalId: unknown, d
   if (!run || run.rootChatId !== chatId || !ownsHostGoalLoop(run.surface)) return { ok: false, code: "goal_panel_shape_unavailable", view: view() };
   if (TERMINAL.has(run.status)) return { ok: false, code: "goal_panel_goal_ended", view: view() };
   if (shaping.get(goalId)?.running) return { ok: true, outcome: "applied", view: view() };
-  const before = readGoalPlan(goalId);
-  shaping.set(goalId, { running: true, failed: false });
-  notify(chatId, run.id);
-  const objective = getChatGoalRevision(goalId)?.objective ?? run.objective;
-  const runtimeSelection = (() => { try { return goalRuntimeSelection(run.id); } catch { return undefined; } })();
-  const done = (deps.shape ?? ensureGoalShapeBeforeTurn)({ goalId, objective, ownerRequested: true, ...(runtimeSelection ? { runtimeSelection } : {}) })
-    .then((plan) => {
-      const shaped = Boolean(plan && !plan.fallback && (!before || plan.planSeq !== before.planSeq || plan.revision !== before.revision));
-      shaping.set(goalId, { running: false, failed: !shaped });
-    }, () => { shaping.set(goalId, { running: false, failed: true }); })
-    .finally(() => notify(chatId, run.id));
+  const done = startGoalShape(chatId, goalId, run, { ...deps, ownerRequested: true });
   return { ok: true, outcome: "applied", view: view(), done };
+}
+
+/** Goal revisions the panel already asked the planner to re-divide in this process (goalId:revision). Bounded: one try each. */
+const redivisionAsked = new Set<string>();
+
+/**
+ * A goal that was revised keeps showing its previous plan (read-only, "re-divided before the next run") until the planner has
+ * divided the new revision, and that only happened when the next turn started — hours for a Goal waiting on a timer. Ask the
+ * planner now, once per revision, for a goal that is still going to run (not paused by the owner, not ended, run by this app's
+ * goal loop). It is the same call the next turn would make (ensureGoalShapeBeforeTurn is single-flight per goal), only earlier;
+ * a failure leaves the provisional plan the next turn retries, exactly as before.
+ */
+export function healGoalPanelPlan(chatId: string, deps: { shape?: typeof ensureGoalShapeBeforeTurn } = {}): Promise<void> | null {
+  try {
+    const chat = getChat(chatId);
+    const goalId = chat?.goalId ?? null;
+    if (!chat || !goalId) return null;
+    const run = getLongRunByGoalId(goalId);
+    const revision = getChatGoalRevision(goalId);
+    if (!run || !revision || run.rootChatId !== chatId || !ownsHostGoalLoop(run.surface)) return null;
+    if (TERMINAL.has(run.status) || run.status === "paused" || run.status === "pausing") return null;
+    const plan = readGoalPlan(goalId);
+    if (!plan || plan.revision >= revision.revision) return null;
+    const key = `${goalId}:${revision.revision}`;
+    if (redivisionAsked.has(key) || shaping.get(goalId)?.running) return null;
+    redivisionAsked.add(key);
+    if (redivisionAsked.size > 256) redivisionAsked.delete(redivisionAsked.values().next().value as string);
+    return startGoalShape(chatId, goalId, run, { ...deps, ownerRequested: false });
+  } catch { return null; }
 }

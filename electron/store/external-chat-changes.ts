@@ -15,46 +15,82 @@ import { emitDesktopStoreChange } from "./change-bus";
  */
 export function watchExternalChatChanges(currentDb: () => Database.Database, options: { intervalMs?: number } = {}): () => void {
   let watcher = createWatcher(currentDb());
-  const timer = setInterval(() => {
+  const intervalMs = options.intervalMs ?? 400;
+  let stopped = false;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const schedule = (delay: number) => {
+    timer = setTimeout(poll, delay);
+    timer.unref?.();
+  };
+  const poll = () => {
+    if (stopped) return;
+    let delay = intervalMs;
     try {
       // A reopened store (update preflight, recovery) gets fresh statements; its first tick only takes a baseline.
       const db = currentDb();
-      if (db !== watcher.db) { watcher = createWatcher(db); return; }
-      watcher.tick();
+      if (db !== watcher.db) watcher = createWatcher(db);
+      else if (watcher.tick()) delay = Math.min(intervalMs, 10);
     } catch { /* A busy or closing store skips one tick; the next commit is observed again. */ }
-  }, options.intervalMs ?? 400);
-  timer.unref?.();
-  return () => clearInterval(timer);
+    if (!stopped) schedule(delay);
+  };
+  schedule(intervalMs);
+  return () => { stopped = true; if (timer) clearTimeout(timer); };
 }
 
-function createWatcher(db: Database.Database): { db: Database.Database; tick(): void } {
+function createWatcher(db: Database.Database): { db: Database.Database; tick(): boolean } {
   const dataVersion = db.prepare("PRAGMA data_version").pluck();
   const maxMessageRowid = db.prepare("SELECT COALESCE(MAX(rowid), 0) FROM chat_messages").pluck();
   const maxEventRowid = db.prepare("SELECT COALESCE(MAX(rowid), 0) FROM run_events").pluck();
-  const changedMessageChats = db.prepare(
-    "SELECT DISTINCT chat_id FROM chat_messages WHERE rowid > ? LIMIT 200").pluck();
-  // A Goal result presentation re-labels an existing message; the message row itself does not change.
-  const changedPresentationChats = db.prepare(`SELECT DISTINCT chat_id FROM run_events
-    WHERE rowid > ? AND kind = 'goal_result_presentation' AND chat_id IS NOT NULL LIMIT 200`).pluck();
+  const changedMessages = db.prepare(
+    "SELECT rowid, chat_id FROM chat_messages WHERE rowid > ? AND rowid <= ? ORDER BY rowid LIMIT 200");
+  // Scan bounded rowid ranges: an index on (kind, ts) can otherwise force a
+  // sort of all historical presentations on every external commit.
+  const changedEvents = db.prepare(
+    "SELECT rowid, chat_id, kind FROM run_events WHERE rowid > ? AND rowid <= ? ORDER BY rowid LIMIT 512");
   let version = dataVersion.get() as number;
   let messageRowid = maxMessageRowid.get() as number;
   let eventRowid = maxEventRowid.get() as number;
-  const tick = (): void => {
+  let backlog = false;
+  const notified = new Set<string>();
+  const tick = (): boolean => {
     const next = dataVersion.get() as number;
-    if (next === version) return;
-    version = next;
+    if (next === version && !backlog) return false;
     const chatIds = new Set<string>();
     const nextMessageRowid = maxMessageRowid.get() as number;
-    if (nextMessageRowid > messageRowid) {
-      for (const id of changedMessageChats.all(messageRowid) as string[]) chatIds.add(id);
-    }
-    messageRowid = Math.max(messageRowid, nextMessageRowid);
     const nextEventRowid = maxEventRowid.get() as number;
-    if (nextEventRowid > eventRowid) {
-      for (const id of changedPresentationChats.all(eventRowid) as string[]) chatIds.add(id);
+    let observedMessageRowid = messageRowid;
+    let observedEventRowid = eventRowid;
+    let more = false;
+    if (nextMessageRowid > messageRowid) {
+      const rows = changedMessages.all(messageRowid, nextMessageRowid) as Array<{ rowid: number; chat_id: string }>;
+      for (const row of rows) chatIds.add(row.chat_id);
+      observedMessageRowid = rows.length === 200 ? rows[rows.length - 1].rowid : nextMessageRowid;
+      more ||= observedMessageRowid < nextMessageRowid;
     }
-    eventRowid = Math.max(eventRowid, nextEventRowid);
-    for (const id of chatIds) emitDesktopStoreChange({ entity: "chat", id });
+    if (nextEventRowid > eventRowid) {
+      const rows = changedEvents.all(eventRowid, nextEventRowid) as Array<{ rowid: number; chat_id: string | null; kind: string }>;
+      // A Goal result presentation re-labels an existing message.
+      for (const row of rows) if (row.kind === "goal_result_presentation" && row.chat_id !== null) chatIds.add(row.chat_id);
+      observedEventRowid = rows.length === 512 ? rows[rows.length - 1].rowid : nextEventRowid;
+      more ||= observedEventRowid < nextEventRowid;
+    }
+    // Publish cursors only after every query succeeds. Otherwise a transient
+    // busy/closing read would permanently skip both rows and their notices.
+    if (next !== version) notified.clear();
+    version = next;
+    messageRowid = observedMessageRowid;
+    eventRowid = observedEventRowid;
+    backlog = more;
+    for (const id of chatIds) {
+      if (notified.has(id)) continue;
+      // The set only avoids repeated invalidation during one backlog. A cap
+      // bounds memory; clearing it can only produce an extra invalidation.
+      if (notified.size >= 4096) notified.clear();
+      notified.add(id);
+      emitDesktopStoreChange({ entity: "chat", id });
+    }
+    if (!backlog) notified.clear();
+    return backlog;
   };
   return { db, tick };
 }

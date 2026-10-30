@@ -399,13 +399,41 @@ const idOf = (value: unknown): string => {
 const num = (value: unknown): number | null =>
   typeof value === "number" && Number.isFinite(value) ? value : typeof value === "string" && value.trim() && Number.isFinite(Number(value)) ? Number(value) : null;
 
+/** A measured value as a person writes it: 1,234.5 · 12% · $5 · ₩3,000. Anything else with letters in it is not a number. */
+const kpiValueOf = (value: unknown): number | null => {
+  const plain = num(value);
+  if (plain !== null || typeof value !== "string") return plain;
+  const text = value.trim().replace(/^[$€£¥₩]\s*/, "").replace(/\s*%$/, "").replace(/[\s_]/g, "");
+  // A comma is a thousands separator only in the 1,234,567 form; "1,5" (a decimal comma) is not read as 15.
+  const cleaned = /^[+-]?\d{1,3}(,\d{3})+(\.\d+)?$/.test(text) ? text.replace(/,/g, "") : text;
+  return /^[+-]?\d+(\.\d+)?$/.test(cleaned) ? Number(cleaned) : null;
+};
+
+/**
+ * When the measurement was made. The tool says "record an observation now", so a time the host cannot read (a zone name, a word)
+ * is "now" — it used to reject the sample (observed_at_invalid) and the measurement was lost without the model hearing of it.
+ * Epoch seconds / milliseconds are that time.
+ */
+const observedAtOf = (value: unknown): string | null => {
+  if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+    const at = new Date(value < 1e11 ? value * 1000 : value);
+    return Number.isFinite(at.getTime()) ? at.toISOString() : null;
+  }
+  const text = clip(value, 40);
+  return text && Number.isFinite(Date.parse(text)) ? text : null;
+};
+
+/** Evidence given as a list of lines is those lines. */
+const evidenceTextOf = (value: unknown): unknown =>
+  Array.isArray(value) ? value.filter((item): item is string => typeof item === "string").join("; ") : value;
+
 function parseKpiMarker(raw: Record<string, unknown>): KpiMarker | null {
   const kpi = kpiIdOf(raw.kpi);
-  const value = num(raw.value);
+  const value = kpiValueOf(raw.value);
   if (!kpi || value === null) return null;
   const name = clip(raw.name, 80);
-  return { kpi, value, observedAt: clip(raw.observed_at, 40) || null, source: scrubStrategyText(raw.source, 80),
-    evidence: scrubStrategyText(raw.evidence, AGENT_STRATEGY_LIMITS.evidenceMaxChars),
+  return { kpi, value, observedAt: observedAtOf(raw.observed_at), source: scrubStrategyText(raw.source, 80),
+    evidence: scrubStrategyText(evidenceTextOf(raw.evidence), AGENT_STRATEGY_LIMITS.evidenceMaxChars),
     define: name ? { name, unit: clip(raw.unit, 40), direction: raw.direction === "down" ? "down" : "up" } : null };
 }
 
@@ -512,7 +540,8 @@ export function checkKpiSample(marker: KpiMarker, ctx: KpiSampleCheckContext): K
   // 비교할 기준(목표·기준선·이전 표본)이 하나도 없는 첫 표본은 상한이 없다 — 첫 값이 얼마든 받는다.
   const references = [ctx.target, ctx.baseline, ...ctx.recent.map((s) => s.value)].filter((v): v is number => finiteNumber(v)).map(Math.abs);
   const ceiling = references.length ? AGENT_STRATEGY_LIMITS.valueCeilingMultiple * Math.max(1, ...references) : Infinity;
-  if (marker.value < 0 || marker.value > ceiling) return { ok: false, reason: "value_out_of_range" };
+  // A measurement may be below zero (net change, profit, a score): only its size is bounded.
+  if (Math.abs(marker.value) > ceiling) return { ok: false, reason: "value_out_of_range" };
   const observedAt = new Date(observedMs).toISOString();
   if (ctx.recent.some((s) => Date.parse(s.observedAt) === observedMs)) return { ok: false, reason: "duplicate_observation" };
   const day = observedAt.slice(0, 10);

@@ -312,6 +312,7 @@ export function createQueuedOwnerInputCustody(options: QueuedOwnerInputCustodyOp
         if (ownsInput(request)) throw new Error("queued_input_custody_required");
         return start(request,{enterSource(){}});
       }
+      if (row.request_digest !== queuedInputRequestDigest(request)) throw new Error("queued_input_owner_changed");
       const owner=store.ownerOf(row);
       assertOwner(owner,queueId,"attempt");
       if (!request.runId) throw new Error("queued_input_run_required");

@@ -39,7 +39,8 @@ import { ONE_DECISION_JUDGE_TIMEOUT_MS } from "../shared/one-decision";
 import { goalResumeRecoveryBlockerCode } from "../shared/long-run";
 import { acknowledgeAutomationGoalExecutionReview, getAutomationGoalExecutionReview } from "./automation-goal-owner-review";
 import { currentAutomationGoalExecutionOwnerMatches } from "./automation-execution-control";
-import { getGoalRuntimeSelection, requestGoalRuntimeSelection } from "./long-run/runtime-handoff";
+import { getGoalRuntimeSelection, requestGoalRuntimeSelection, reserveGoalRuntimeSelection } from "./long-run/runtime-handoff";
+import { assertChatRuntimeSelectionTicketCurrent } from "./store/chat-runtime-selection-ticket";
 import { getChatContinuitySnapshot } from "./long-run/continuity-snapshot";
 // IPC 핸들러 일괄 등록. main.ts 앱 ready 직후 호출.
 // 각 도메인 모듈(runtime, secrets, team, marketplace, projects, chats, automations, invoke)을 thin wrapping.
@@ -92,6 +93,7 @@ import { setAcpProfileReader } from "./runtime/acp-agents";
 import { sanitizeTerminalProfiles } from "../shared/terminal-profiles";
 import { tryAcquireRuntimeMaintenance } from "./runtime/run-slots";
 import { clearModelCache, listRuntimeModels } from "./runtime/providers";
+import { readCustomBaseUrl } from "./runtime/custom-base-url";
 import { fireRunAlert, getRunAlerts, setRunAlerts, windowWatched } from "./run-alerts";
 import { installCli, openCliLogin, updateCli, type InstallableCli, type ManageableCli } from "./runtime/install-cli";
 import { defaultRuntimeConnector, probeAllRuntimeAuth, probeRuntimeAuthCached, setRuntimeConnectEmitter } from "./runtime/runtime-connect";
@@ -274,7 +276,8 @@ import {
 import { configureRunKeyOwnerHost, observeHostedRunKeyEvent, resolveRunKeyElicitationAnywhere, resolveRunKeyWithStoredName } from "./mcp/run-key-elicitation";
 import { onNativeGuiInvocationEvent } from "./invocation/native-gui-events";
 import { invocationService } from "./invocation/service";
-import { createRendererSendQueue } from "./invocation/renderer-send-queue";
+import { createRendererSendQueue, type RendererSourceBoundary } from "./invocation/renderer-send-queue";
+import { createFollowupCustodyStore } from "./store/followup-custody-core";
 import { canQueuePendingSend } from "./invocation/pending-chat-sends";
 import { createQueuedOwnerInputCustody, type QueuedOwnerStartBoundary } from "./invocation/queued-owner-input-custody";
 import { queuedSendRunState, queuedSendPlacement } from "./invocation/renderer-send-queue";
@@ -3351,9 +3354,11 @@ export function registerIpcHandlers(): void {
   // ── custom backend config ───────────────────────────────
   registerAppControlDomainIpc(ipcMain, "config:getCustomBaseUrl", () => {
     try {
-      const row = getDb().prepare("SELECT value FROM meta WHERE key = 'custom_base_url'").get() as { value: string } | undefined;
-      return row?.value ?? "";
-    } catch { return ""; }
+      return readCustomBaseUrl() ?? "";
+    } catch {
+      // Unknown is not an empty setting: callers must not overwrite the saved URL.
+      throw new Error("Custom API base URL could not be loaded");
+    }
   });
   // 보안: 이 값은 byok.ts가 BYOK API 키를 Bearer로 보내는 baseUrl이 된다. 손상된 렌더러가
   // 임의 origin으로 재지정해 키를 탈취하지 못하게, 저장 전에 스킴/호스트를 검증한다.
@@ -4863,7 +4868,21 @@ export function registerIpcHandlers(): void {
   );
   registerAppControlDomainIpc(ipcMain, "chats:requestGoalRuntimeSelection", async (id: string, input: {
     expectedGoalId: string; expectedGoalRevision: number; selection: RuntimeSelection;
-  }) => requestGoalRuntimeSelection({ chatId: id, ...input }, await detectRuntimes()));
+  }) => {
+    const request = { ...input, chatId: id };
+    // Domain callers can share an object with Main; keep the accepted choice
+    // stable while runtime detection is pending, as Electron IPC does.
+    request.selection = structuredClone(request.selection);
+    const ticket = reserveGoalRuntimeSelection(request);
+    try {
+      return requestGoalRuntimeSelection(request, await detectRuntimes(), ticket);
+    } catch (error) {
+      // A stale detector error belongs to the superseded request, not to the
+      // newer choice. Preserve the original error when this ticket is current.
+      getDb().transaction(() => assertChatRuntimeSelectionTicketCurrent(getDb(), ticket)).immediate();
+      throw error;
+    }
+  });
   registerAppControlDomainIpc(ipcMain, "chats:getGoalRuntimeSelection", (id: string) => getGoalRuntimeSelection(id));
   registerAppControlDomainIpc(ipcMain, "chats:getContinuitySnapshot", (id: string) =>
     getChatContinuitySnapshot(id, invocationService.attach(id, { includeEvents: false })?.runId ?? null));
@@ -5476,11 +5495,13 @@ export function registerIpcHandlers(): void {
       /* 매니저 미기동(헤드리스 등)이면 무시 */
     }
   };
+  // goalId is the owner's link between an automation and a Goal; an agent cannot set it, so retrying with it changes nothing.
+  const GOAL_ASSOCIATION_OWNER_ONLY = "goalId is the host's own link between an automation and a Goal and cannot be set from here; send the call without goalId. To follow a Goal, use workspaceMode follow_goal with workspaceGoalId (a Goal this automation is already tied to); if it is refused, tell the owner which link is missing.";
   registerAppControlDomainIpc(ipcMain, "automations:list", () => listAutomations().map(automationWorkspaceView));
   registerAppControlDomainIpc(
     ipcMain, "automations:create",
     async (input: AutomationCreateInput) => {
-      if (Object.hasOwn(input, "goalId")) throw new AutomationWorkspaceError("automation_workspace_goal_association_untrusted");
+      if (Object.hasOwn(input, "goalId")) throw new AutomationWorkspaceError("automation_workspace_goal_association_untrusted", GOAL_ASSOCIATION_OWNER_ONLY);
       // The connected model decides the tool mode at creation; warm it before the
       // synchronous store write peeks the verdict (see prejudgeAutomationComputerUse).
       await prejudgeAutomationComputerUse(
@@ -5523,7 +5544,7 @@ export function registerIpcHandlers(): void {
     return next;
   });
   registerAppControlDomainIpc(ipcMain, "automations:update", async (id: string, patch: AutomationUpdatePatch) => {
-    if (Object.hasOwn(patch, "goalId")) throw new AutomationWorkspaceError("automation_workspace_goal_association_untrusted");
+    if (Object.hasOwn(patch, "goalId")) throw new AutomationWorkspaceError("automation_workspace_goal_association_untrusted", GOAL_ASSOCIATION_OWNER_ONLY);
     await prejudgeAutomationComputerUse(
       { toolMode: patch.toolMode, name: patch.name, promptTemplate: patch.promptTemplate, targetLabel: patch.targetType },
       { timeoutMs: 6_000 },
@@ -7118,9 +7139,35 @@ export function registerIpcHandlers(): void {
     running: runId => queuedSendRunState(runId) === "running", placement: queuedSendPlacement,
   });
   let rendererSendQueueInstance: ReturnType<typeof createRendererSendQueue> | undefined;
+  const followupOwnerDigest = (request: McpInvocationRequest) => {
+    const session = getAuthSession(), chat = getChat(request.chatId);
+    if (session.signedIn && !session.accountFingerprint) throw new Error("followup_account_unknown");
+    if (!chat || chat.archivedAt) throw new Error("followup_chat_unavailable");
+    return createHash("sha256").update(JSON.stringify({signedIn:session.signedIn,account:session.accountFingerprint ?? null,workspace:session.workspaceId ?? null,
+      chat:{agentId:chat.agentId,firmId:chat.firmId,projectId:chat.projectId,seatId:chat.seatId,originSurface:chat.originSurface}})).digest("hex");
+  };
+  const followupCustody = () => createFollowupCustodyStore({
+    db: getDb(),
+    accountDigest: followupOwnerDigest,
+    appendUserMessage: request => appendChatMessage(request.chatId,"user",request.userPrompt,request.images?.length ? {images:request.images} : undefined),
+  });
   const rendererSendQueue = () => rendererSendQueueInstance ??= createRendererSendQueue(
     (event, req, boundary) => startRendererInvocation(event, req, boundary) as Promise<{ runId: string }>,
     {
+      followupAccountDigest: followupOwnerDigest,
+      recoverFollowups: accept => {
+        const custody = followupCustody();
+        for (const row of custody.recoverable()) {
+          try {
+            const original = JSON.parse(row.request_json) as McpInvocationRequest;
+            const request = rendererInvocationRequestForStart(original);
+            custody.handoff({chatId:row.chat_id,intentId:row.intent_id,expectedRunId:row.origin_run_id,text:original.userPrompt,fallbackRequest:original},(_saved,messageId) => {
+              const accepted=accept(request,row.intent_id,messageId);
+              return {id:accepted.id,messageId:(accepted.userRow as {id:string}).id};
+            });
+          } catch { /* Changed account/resources remain captured and inert. */ }
+        }
+      },
       custody: queuedOwnerCustody(),
       sanitizeRequest: rendererInvocationRequestForStart,
       senderTrusted: (event) => { try { assertTrustedSitePublishIpcSender(event); return true; } catch { return false; } },
@@ -7134,7 +7181,7 @@ export function registerIpcHandlers(): void {
         resumeQueuedOnePreflightSubmission(request, epoch);
       },
     });
-  const startRendererInvocation = async (_event: IpcMainInvokeEvent, req: McpInvocationRequest, queuedBoundary?: QueuedOwnerStartBoundary) => {
+  const startRendererInvocation = async (_event: IpcMainInvokeEvent, req: McpInvocationRequest, queuedBoundary?: RendererSourceBoundary) => {
     assertTrustedSitePublishIpcSender(_event);
     noteInvocationRunReceived(req?.runId);
     const configuredOwner = configuredNativeGuiOwner();
@@ -7283,10 +7330,13 @@ export function registerIpcHandlers(): void {
     }
     try {
       const localPreparation = nativeOwner ? undefined : createRendererInvocationPreparation(acceptedAdmission);
-      queuedBoundary?.enterSource();
-      const startResult = reservationFrontier!.enterSource(() => nativeOwner
-        ? nativeOwner.startReserved(_event, request, mainAdmission, acceptedAdmission)
-        : invocationService.startNativePrepared(request, localPreparation!, mainAdmission, acceptedAdmission));
+      const enterSource = () => {
+        queuedBoundary?.enterSource();
+        return reservationFrontier!.enterSource(() => nativeOwner
+          ? nativeOwner.startReserved(_event, request, mainAdmission, acceptedAdmission)
+          : invocationService.startNativePrepared(request, localPreparation!, mainAdmission, acceptedAdmission));
+      };
+      const startResult = queuedBoundary?.startSource ? queuedBoundary.startSource(enterSource) : enterSource();
       // Parent capture and ordered signed start packet precede this wakeup.
       // Intake is independent of the preparation/start result ACK.
       if (nativeOwner && preflightSubmissionId) dispatchOnePreflightSteers(preflightSubmissionId);
@@ -7385,12 +7435,74 @@ export function registerIpcHandlers(): void {
     }
     return invocationCurrentTurnControl.steerCurrentTurn(input);
   };
+  ipcMain.handle("invoke:followupCustodyVersion", (_event) => {
+    assertTrustedSitePublishIpcSender(_event);
+    if (!getDb().prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='invocation_followup_custody'").get()) throw new Error("followup_custody_unavailable");
+    return 2 as const;
+  });
   ipcMain.handle("invoke:steerCurrentTurn", async (_event, input: import("../shared/types").InvocationCurrentTurnSteerRequest) => {
     assertTrustedSitePublishIpcSender(_event);
     assertOwnerMayWriteRoom(input?.chatId);
     const queued = rendererSendQueue();
-    const waiting = input && typeof input.chatId === "string" ? queued.currentTurnReceiptFor(input.chatId, input.intentId, input.expectedRunId) : null;
+    if (input?.fallbackRequest) {
+      // Validate/strip renderer authority exactly as invoke:run does. Capture
+      // hashes the immutable wire intention; only this normalized copy executes.
+      const request = rendererInvocationRequestForStart(input.fallbackRequest);
+      const custody = followupCustody(), captured = custody.capture(input);
+      const observe = () => queued.currentTurnReceiptFor(input.chatId,input.intentId) ?? custody.receipt(input.chatId,input.intentId)!;
+      const controls = configuredNativeGuiControls(), guiOwner = configuredNativeGuiOwner();
+      let currentTurnCompatible = invocationService.followupCurrentTurnMatches(input.chatId,input.expectedRunId,request);
+      const locallyOwned = invocationService.currentTurn(input.chatId)?.runId === input.expectedRunId;
+      let daemonOwned = false;
+      if (!locallyOwned) {
+        try { daemonOwned = Boolean(controls?.hasChat(input.chatId) || guiOwner?.activeAuthorityChatIds().includes(input.chatId)
+          || controls?.durableDaemonTextBinding(_event,input.chatId,{expectedRunId:input.expectedRunId})); }
+        catch { daemonOwned = Boolean(controls || guiOwner); }
+      }
+      // Capability is per authenticated peer and exact shared-store capture,
+      // not Main's version. Unknown older peers keep the saved input inert.
+      if (daemonOwned) {
+        let compatible = false;
+        try {
+          const peer = await controls?.followupCustodyVersion(_event,input.chatId,input.intentId,captured.row.request_hash);
+          compatible = Boolean(peer);
+          currentTurnCompatible = peer?.currentTurnCompatible === true;
+        } catch { /* no original intake was attempted */ }
+        if (!compatible) return {...observe(),code:"followup_owner_capability_unconfirmed",messageCustody:"unconfirmed" as const};
+      }
+      const handoff = () => {
+        const id = custody.handoff(input, (_original, messageId) => {
+          const accepted = queued.acceptCurrentTurnFallback(_event,request,input.intentId,messageId);
+          return {id:accepted.id,messageId:(accepted.userRow as {id:string}).id};
+        });
+        if (id) void queued.queue.pumpNow(input.chatId).catch(() => { /* Durable queue owns recovery. */ });
+        return observe();
+      };
+      if (!captured.fresh) return input.resume === true ? handoff() : observe();
+      // Current-turn controls are text-only. Inline image bytes take the exact
+      // next-turn request; opaque refs stay captured until their own reprepare.
+      if (!currentTurnCompatible || request.images?.length || request.fileGroupId || request.oneAttachmentRef || request.oneTeamPreflightRef) return handoff();
+      try {
+        const original = {chatId:input.chatId,intentId:input.intentId,expectedRunId:input.expectedRunId,text:input.text};
+        if (locallyOwned) invocationService.steerCurrentTurn(original);
+        else await steerCurrentTurnFromRenderer(_event, original);
+        return observe();
+      } catch (cause) {
+        if (isTransientSendRefusal(cause)) return handoff();
+        // Even a failed reply cannot undo durable capture or authorize replay.
+        // An exact saved source, if present, is authoritative; otherwise unknown.
+        return observe();
+      }
+    }
+    const waiting = input && typeof input.chatId === "string" ? queued.currentTurnReceiptFor(input.chatId, input.intentId) : null;
     if (waiting) return waiting;
+    // A stale/older renderer may still hold the same v2 intent. Observing that
+    // original cannot create a second source through the legacy entry point.
+    const capturedLegacy = input && typeof input.chatId === "string" ? followupCustody().receipt(input.chatId,input.intentId) : null;
+    if (capturedLegacy) {
+      if (capturedLegacy.messageCustody !== "exact" || ["rejected","uncertain"].includes(capturedLegacy.status)) throw new Error("followup_original_preserved");
+      return capturedLegacy;
+    }
     try { return await steerCurrentTurnFromRenderer(_event, input); }
     catch (cause) {
       if (!isTransientSendRefusal(cause) || typeof input?.text !== "string") throw cause;
@@ -7403,11 +7515,27 @@ export function registerIpcHandlers(): void {
       // execution choices the owner's last turn ran with (a host-written turn, e.g. a read-only teammate report, is not one).
       let permissions: McpInvocationRequest["permissions"] = "read";
       try { permissions = invocationService.latestOwnerReceipt(input.chatId)?.executionPermission ?? "read"; } catch { /* read-only is the safe default */ }
-      const accepted = queued.acceptRefusedSteer(_event, {
+      const fallbackRequest = {
         chatId: input.chatId, userPrompt: input.text, oneMode: true, taskIntent: "conversation",
         locale: currentUiLocale(), onePermissionMode: "auto", permissions, sessionRouting: false,
-      } as McpInvocationRequest, input.intentId, cause);
-      const receipt = accepted ? queued.currentTurnReceiptFor(input.chatId, input.intentId, input.expectedRunId) : null;
+      } as McpInvocationRequest;
+      const legacyInput = {...input,fallbackRequest}, custody = followupCustody();
+      const captured = custody.capture(legacyInput);
+      const controls = configuredNativeGuiControls();
+      let daemonOwned = false;
+      try { daemonOwned = Boolean(controls?.hasChat(input.chatId) || configuredNativeGuiOwner()?.activeAuthorityChatIds().includes(input.chatId)
+        || controls?.durableDaemonTextBinding(_event,input.chatId,{expectedRunId:input.expectedRunId})); }
+      catch { daemonOwned = Boolean(controls || configuredNativeGuiOwner()); }
+      if (daemonOwned) {
+        let compatible = false;
+        try { compatible = Boolean(await controls?.followupCustodyVersion(_event,input.chatId,input.intentId,captured.row.request_hash)); } catch { /* original remains captured */ }
+        if (!compatible) throw cause;
+      }
+      custody.handoff(legacyInput, (request,messageId) => {
+        const accepted = queued.acceptCurrentTurnFallback(_event,rendererInvocationRequestForStart(request),input.intentId,messageId);
+        return {id:accepted.id,messageId:(accepted.userRow as {id:string}).id};
+      });
+      const receipt = queued.currentTurnReceiptFor(input.chatId, input.intentId);
       if (receipt) return receipt;
       throw cause;
     }
@@ -7416,8 +7544,10 @@ export function registerIpcHandlers(): void {
     assertTrustedSitePublishIpcSender(_event);
     if (!input || typeof input.chatId !== "string" || !input.chatId || typeof input.intentId !== "string"
       || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/.test(input.intentId)) throw new Error("invocation_steer_invalid_lookup");
-    const pendingReceipt = rendererSendQueue().currentTurnReceiptFor(input.chatId, input.intentId, "");
+    const pendingReceipt = rendererSendQueue().currentTurnReceiptFor(input.chatId, input.intentId);
     if (pendingReceipt) return pendingReceipt;
+    const capturedReceipt = followupCustody().receipt(input.chatId,input.intentId);
+    if (capturedReceipt) return capturedReceipt;
     try {
     const durable = await durableOwnerTextRoutes().currentTurnSteerReceipt(_event, input);
     if (durable !== NOT_DAEMON_OWNED) return durable;
@@ -7498,6 +7628,15 @@ export function registerIpcHandlers(): void {
     assertTrustedSitePublishIpcSender(_event);
     const native = configuredNativeGuiOwner();
     if (native && isAppControlEvent(_event)) throw new Error("native_gui_original_renderer_required");
+    try {
+      const successorRuns = followupCustody().stopRun(runId);
+      for (const successorRun of successorRuns) if (successorRun !== runId) {
+        const recovered = configuredNativeGuiControls(), capture = native?.inspect(successorRun);
+        const stop = capture?.retained && !(capture.unavailable && recovered?.hasRun(successorRun)) ? native!.cancel(successorRun)
+          : recovered?.hasRun(successorRun) ? recovered.cancel(_event,successorRun) : cancelInvocationOwnerRun(successorRun);
+        void stop.catch(() => { /* Captured Stop remains durable; outcome stays unknown. */ });
+      }
+    } catch (error) { console.warn("[followup-custody] Stop persistence unavailable", {runId}); }
     // Stop the exact saved input too; cleanup never depends on sign-in or native ACK.
     let queuedAttemptRunId: string | null | undefined;
     try { queuedAttemptRunId = queuedOwnerCustodyInstance?.currentRunId(runId); } catch { /* Stop remains unconditional. */ }
@@ -7536,10 +7675,21 @@ export function registerIpcHandlers(): void {
   };
   // "Not attachable right now" (the run just ended, the channel is reattaching) is the same answer as "no run": nothing to show.
   ipcMain.handle("invoke:attach", async (_event, chatId: string, options?: { includeEvents?: boolean }) => {
+    // An agent's app.call (invoke.attach) is not the owner's window: a run a daemon owns is bound to that original renderer
+    // (native_gui_original_renderer_required, 4 in 7 days), and an agent has no window to attach. It reads what Main's own service
+    // holds for the conversation -- the run if Main runs it, otherwise "nothing to show" (null), the same answer a finished run gives.
+    if (isAppControlEvent(_event)) {
+      try { return await invocationService.attach(chatId, { includeEvents: options?.includeEvents !== false }); }
+      catch (cause) { if (isTransientSendRefusal(cause)) return null; throw cause; }
+    }
     try { return await attachFromRenderer(_event, chatId, options); }
     catch (cause) { if (isTransientSendRefusal(cause)) return null; throw cause; }
   });
   ipcMain.handle("invoke:receipt", async (_event, runId: string) => {
+    // A receipt is a read of the durable run record (the same row for a Main-owned and a daemon-owned run). An agent's app.call
+    // (invoke.receipt) asks for it through the app-control event; the original-renderer proof is for the owner's window
+    // (native-gui-controls.ts), so the read takes the service path directly, not the custody route that proof guards.
+    if (isAppControlEvent(_event)) return invocationService.receipt(runId);
     const durable = await durableOwnerTextRoutes().receipt(_event, runId);
     if (durable !== NOT_DAEMON_OWNED) return durable;
     const native = configuredNativeGuiControls();

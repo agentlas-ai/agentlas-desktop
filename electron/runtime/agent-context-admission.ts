@@ -11,7 +11,7 @@ import { invocationProcessOwner, invocationRunOwners, assertInvocationRunOwner }
 import { createAgentContextCapability, agentContextHostBinding, bootstrapAgentContextHistory, markAgentContextHostAuthored, copyAgentContextHostAuthored,
   markAgentContextChannel, copyAgentContextChannel, copyAgentContextForwardGeneration, reconcileInterruptedAgentContext, nextAgentContextTurnOrdinal, openAgentContextTurnId, recordAgentContextScopeAdoption, recordAgentContextScopeFailure, importSharedChatHistory, type AgentContextCapability } from "./agent-context";
 import { markRefusedBeforeDispatch, type Runner, type RunnerEvents, type RunnerRequest } from "./runner";
-import { resolveSessionScope, rosterSessionIsCurrent, workingSessionIsCurrent, taskforceSessionScopeIsCurrent, assertProjectWorkSessionFacts, assertWorkingSessionBindingCurrent, requiresProjectWorkingSessionScope } from "./session-scope";
+import { resolveSessionScope, sessionScopeBusyCause, rosterSessionIsCurrent, workingSessionIsCurrent, taskforceSessionScopeIsCurrent, assertProjectWorkSessionFacts, assertWorkingSessionBindingCurrent, requiresProjectWorkingSessionScope } from "./session-scope";
 import { acquireAgentContextTurnSlot, AgentContextTurnWaitError, type AgentContextTurnSlot } from "./agent-context-turn-order";
 import { createTurnLine, type TurnLineDb } from "./agent-context-turn-line";
 import { releaseDeadSessionTurn } from "./agent-context-dead-holder";
@@ -58,7 +58,10 @@ export function bindInvocationAgentContext(request: RunnerRequest, input: {
     // that turn would be missing from the shared session for good. The cause is a run event; the owner reads a plain sentence and sends again.
     recordAgentContextScopeFailure(`agent-context-turn:${JSON.stringify([input.chatId, input.runId, input.attempt])}`, input.agentId,
       { scopeKind: row.kind === "division" ? "roster" : "seat", causeCode: scope.failure?.causeCode ?? "session_scope_resolve_failed" });
-    throw markRefusedBeforeDispatch(Object.assign(new Error(tStatus(request.locale === "ko" ? "ko" : "en", "sessionScopeUnavailable")), { code: "session_scope_unavailable" }));
+    const refusal = Object.assign(new Error(tStatus(request.locale === "ko" ? "ko" : "en", "sessionScopeUnavailable")), { code: "session_scope_unavailable" });
+    const cause = sessionScopeBusyCause(scope);
+    if (cause !== undefined) Object.defineProperty(refusal, "cause", { value: cause, configurable: true, writable: true });
+    throw markRefusedBeforeDispatch(refusal);
   }
   const visibilityDomain = scope.visibilityDomain;
   const assertCurrent = () => {

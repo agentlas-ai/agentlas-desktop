@@ -19,7 +19,8 @@ import { NATIVE_BROWSER_PARTITION } from "../work-live-view";
 import { browserCredentialConsentRevision } from "./credential-sync";
 import { googleSessionTraceRecord, withAgentlasCookieWrite } from "./google-session-trace";
 import { decideNativeCookieWrite, groupFreshnessLogCounts, persistentCookieExpiry, planSessionGroupFeed } from "./cookie-merge";
-import { sessionCookieGroupOf, sessionCookieIdentityNamesFor, sessionCookieNamesFor } from "./login-wall";
+import { automaticRecoveryDestination, sessionCookieGroupOf, sessionCookieIdentityNamesFor,
+  sessionCookieNamesFor, sessionCookieProtectionNamesFor } from "./login-wall";
 import { listBrowserSites } from "../store/browser-vault";
 import { getMeta, setMeta } from "../store/meta";
 import { getDb } from "../store/db";
@@ -88,6 +89,7 @@ interface CookieWriteSummary {
   updated?: number;
   skipped: NativeBrowserCookieImportResult["skipped"];
   preserved?: number;
+  recoveryState?: "protected" | "unreadable";
 }
 
 type NativeCookieSession = Pick<Session, "cookies" | "flushStorageData">;
@@ -375,6 +377,10 @@ export async function writeNativeBrowserCookies(
     beginMigration?: () => void;
     /** 사용자가 방금 "가져오기"를 눌렀는가. 그때는 가져온 값이 낡은 세션을 이긴다. */
     explicitImport?: boolean;
+    /** Automatic login recovery may seed an empty store, never replace a partial or existing login. */
+    recoveryImport?: boolean;
+    /** Include the complete identity-provider group, even when this batch is split by domain. */
+    recoveryDomains?: readonly string[];
     /**
      * 호출자가 도메인별로 나눠 부르더라도 같은 로그인 묶음(google.com + youtube.com)의 신선도는 한 번에
      * 판정하도록, 이번 가져오기 전체 원본 쿠키를 준다. 쓰는 줄은 여전히 이 호출의 cookies 뿐이며,
@@ -403,9 +409,31 @@ export async function writeNativeBrowserCookies(
    */
   let groupFeed: Set<CdpCookie> | null = null;
   let destinationUnreadable = false;
-  if (connect && connect.explicitImport !== true) {
+  let recoverySnapshot: readonly Cookie[] | undefined;
+  const recoveryDomains = connect?.recoveryDomains ?? cookies.map((cookie) => typeof cookie.domain === "string" ? cookie.domain : "");
+  const recoveryWrites = new Map<string, string>();
+  const recoveryKey = (cookie: { domain?: string | null; name: string; path?: string | null }) =>
+    `${(cookie.domain ?? "").replace(/^\./u, "").toLowerCase()}\u0000${cookie.name}\u0000${cookie.path ?? "/"}`;
+  const recoveryMetadata = (rows: readonly Cookie[]) => rows.map((cookie) => ({
+    domain: cookie.domain ?? "", name: cookie.name,
+    expires: cookie.session === true ? null : persistentCookieExpiry(cookie.expirationDate),
+  }));
+  if (connect?.recoveryImport) {
+    let snapshot: readonly Cookie[] | null = null;
+    try { snapshot = await destination.cookies.get({}); } catch { /* unknown is not empty */ }
+    const state = automaticRecoveryDestination(snapshot ? recoveryMetadata(snapshot) : null, recoveryDomains, nowSeconds);
+    if (state !== "empty") {
+      counts.recoveryState = state;
+      if (state === "protected") counts.preserved = cookies.length;
+      else counts.skipped.writeFailed = cookies.length;
+      return counts;
+    }
+    recoverySnapshot = snapshot ?? undefined;
+  }
+  const explicitImport = connect?.explicitImport === true && !connect.recoveryImport;
+  if (connect && !explicitImport) {
     const text = (value: unknown) => typeof value === "string" ? value : "";
-    let snapshot: readonly Cookie[] | null = connect.groupExisting ?? null;
+    let snapshot: readonly Cookie[] | null = recoverySnapshot ?? connect.groupExisting ?? null;
     if (!snapshot) {
       try { snapshot = await destination.cookies.get({}); } catch { snapshot = null; }
     }
@@ -425,6 +453,7 @@ export async function writeNativeBrowserCookies(
       groupOf: sessionCookieGroupOf,
       sessionNamesFor: sessionCookieNamesFor,
       identityNamesFor: sessionCookieIdentityNamesFor,
+      protectionNamesFor: sessionCookieProtectionNamesFor,
       perCookie: (row) => {
         const host = (value: string) => value.replace(/^\./u, "").toLowerCase();
         const matches = existing.filter((item) => host(item.domain) === host(row.domain) && item.name === row.name && item.path === row.path);
@@ -460,6 +489,18 @@ export async function writeNativeBrowserCookies(
     try {
       if (connect) {
         if (!(await connect.isCurrent())) throw new CookieImportError("authorization-required", counts);
+        if (connect.recoveryImport) {
+          let current: readonly Cookie[] | null = null;
+          try { current = await destination.cookies.get({}); } catch { /* unknown is not empty */ }
+          const foreign = current?.filter((row) => !recoveryWrites.has(recoveryKey(row)) || recoveryWrites.get(recoveryKey(row)) !== row.value);
+          const state = automaticRecoveryDestination(foreign ? recoveryMetadata(foreign) : null, recoveryDomains, nowSeconds);
+          if (state !== "empty") {
+            counts.recoveryState = state;
+            if (state === "protected") counts.preserved = (counts.preserved ?? 0) + 1;
+            else counts.skipped.writeFailed += 1;
+            break;
+          }
+        }
         const existing = await destination.cookies.get({ name: converted.details.name });
         if (!(await connect.isCurrent())) throw new CookieImportError("authorization-required", counts);
         const host = (value: string) => value.replace(/^\./u, "").toLowerCase();
@@ -471,7 +512,7 @@ export async function writeNativeBrowserCookies(
          * 그러나 사용자가 방금 가져오기를 눌렀다면 가져온 값이 이겨야 한다 — 그러지 않으면
          * "가져왔는데 여전히 로그아웃"이 되고, 사용자 눈에는 가져오기가 안 된 것이다.
          */
-        const write = groupFeed ? groupFeed.has(cookie) : decideNativeCookieWrite({ hasExisting, explicitImport: connect.explicitImport === true }) === "write";
+        const write = groupFeed ? groupFeed.has(cookie) : decideNativeCookieWrite({ hasExisting, explicitImport }) === "write";
         if (!write) {
           counts.preserved = (counts.preserved ?? 0) + 1;
           continue;
@@ -482,6 +523,8 @@ export async function writeNativeBrowserCookies(
         begun = true;
       }
       await withAgentlasCookieWrite(() => destination.cookies.set(converted.details));
+      if (connect?.recoveryImport) recoveryWrites.set(recoveryKey({ domain: String(cookie.domain), name: String(cookie.name),
+        path: converted.details.path }), String(cookie.value));
       counts.imported += 1;
       if (replacing) counts.updated = (counts.updated ?? 0) + 1;
       else counts.added = (counts.added ?? 0) + 1;

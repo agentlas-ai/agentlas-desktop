@@ -29,6 +29,12 @@ let starting: Promise<number> | null = null;
 let pendingServer: http.Server | null = null;
 let pendingResolve: ((port: number) => void) | null = null;
 let generation = 0;
+/**
+ * True from stopMcpProxyApprovalServer() until the next explicit start: the host is shutting this gate down (app quit, daemon
+ * drain, managed host stop). ensureMcpProxyApprovalServer never re-opens a retired gate, so a run that is still preparing while
+ * the host quits keeps failing closed instead of re-binding a loopback port nobody will stop again.
+ */
+let retired = false;
 
 function readBody(req: http.IncomingMessage, maxBytes = 256 * 1024): Promise<string> {
   return new Promise((resolve) => {
@@ -227,6 +233,7 @@ export function allowLongLivedBridgeWires(srv: http.Server): http.Server {
 export function startMcpProxyApprovalServer(): Promise<number> {
   if (server && boundPort) return Promise.resolve(boundPort);
   if (starting) return starting;
+  retired = false;
   const startingGeneration = ++generation;
   token = randomUUID();
   const capabilityToken = token;
@@ -310,6 +317,7 @@ export function startMcpProxyApprovalServer(): Promise<number> {
 }
 
 export function stopMcpProxyApprovalServer(): void {
+  retired = true;
   generation += 1;
   pendingResolve?.(0);
   pendingResolve = null;
@@ -330,4 +338,22 @@ export function stopMcpProxyApprovalServer(): void {
 /** 서버가 실제로 떠 있는가 — 프록시를 붙일지 결정하는 유일한 근거. */
 export function mcpProxyApprovalPort(): number {
   return boundPort;
+}
+
+/**
+ * The approval gate's port for a run that is about to need it, binding or re-binding the gate when it is not listening yet.
+ *
+ * A config build used to read the port once and refuse the whole run with mcp_proxy_gate_unavailable when it was 0
+ * (observed in use 23:08-23:09, three runs in a row: "Could not prepare this run's tool connections"). The port is 0
+ * in three states that are not a refusal of anything: the boot start has not bound yet (it is started without waiting), a
+ * start is in flight, or the listener went away on its own (a server error clears it). This waits for a start in flight,
+ * otherwise starts the gate once, so the build sees the port it needs. The invariant is unchanged: a build that gets no
+ * port still refuses (never an ungated launch), and a gate the host has retired (stopMcpProxyApprovalServer: quit, drain,
+ * managed host stop) is not re-opened here, so a run preparing during shutdown still fails closed. Bounded: one bind per call.
+ */
+export async function ensureMcpProxyApprovalServer(): Promise<number> {
+  if (boundPort > 0) return boundPort;
+  if (starting) return starting;
+  if (retired) return 0;
+  return startMcpProxyApprovalServer();
 }

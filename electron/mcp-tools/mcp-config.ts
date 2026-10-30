@@ -74,7 +74,7 @@ import {
   MCP_PROXY_LAUNCH_ENV,
   mcpProxyControlInfoPath,
 } from "./proxy-channel";
-import { mcpProxyApprovalPort, READ_ONLY_BROWSER_TOOLS } from "./proxy-server";
+import { ensureMcpProxyApprovalServer, mcpProxyApprovalPort, READ_ONLY_BROWSER_TOOLS } from "./proxy-server";
 import { userDataPath } from "../runtime-paths";
 import { HEPHAESTUS_NETWORK_WORK_CORE_TOOLS, registerMcpToolSurface, type HephaestusToolSurface, type McpToolSurface } from "./hephaestus-tool-surface";
 import { RUNTIME_MCP_SUPPORT } from "../../shared/runtime-mcp";
@@ -242,6 +242,8 @@ export interface McpConfigBuildOptions {
   graphTeamGrant?: GraphTeamGrant;
   /** This run's id: pins the agentlas-turn capability so its notes land in this turn only. */
   turnRunId?: string;
+  /** Main-minted borrowed Taskforce child; only these capabilities record a send-effect witness. */
+  taskForceMailEffectWitness?: boolean;
   /** Main-minted per-turn tool servers of a product domain (host-tool-servers.ts; Science). Serialized beside the selected
    *  installed servers on the same path; never persisted, never delegated to another host. */
   hostToolServers?: readonly HostToolServer[];
@@ -742,6 +744,10 @@ const TURN_TOOL_IMAGE_RUNTIMES: ReadonlySet<string> = new Set(["claude-code", "c
 
 export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<McpConfigResult | null> {
   const historyFence=currentHistoryRuntimeFence();if(historyFence){if(!opts?.toolGate)throw new Error("history_native_mcp_gate_required");opts={...opts,toolGate:{...opts.toolGate,historyRuntimeFence:historyFence}};}
+  // mcpProxySpec below is synchronous and refuses at port 0 (mcp_proxy_gate_unavailable). A gate that is not listening yet
+  // (the boot start is not awaited, a start in flight, a listener that went away) is bound here first, once; a gate the host
+  // retired stays closed, so the refusal below still holds and nothing falls back to an ungated launch.
+  if (opts?.toolGate && mcpProxyApprovalPort() <= 0) await ensureMcpProxyApprovalServer();
   // Automation must start the canonical Agentlas Browser wrapper itself. A
   // generic Playwright process attached directly to 9222 has no lease,
   // guardian, page cap or idle cleanup and can therefore orphan the browser.
@@ -1185,6 +1191,8 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
           const capability = await createAgentMailCapability(
             {
               chatId: callerChatId ?? null,
+              ...(opts?.turnRunId ? { runId: opts.turnRunId } : {}),
+              ...(opts?.taskForceMailEffectWitness === true ? { taskForceEffectWitness: true } : {}),
               permission: opts?.toolGate?.permission ?? "read",
               cwd: canonicalCallerCwd,
               dryRun: opts?.toolGate?.simulation === true || opts?.toolGate?.planMode === true,

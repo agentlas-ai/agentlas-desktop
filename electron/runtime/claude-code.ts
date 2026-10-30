@@ -610,7 +610,6 @@ async function inspectWorkforceMcpConfig(req: RunnerRequest): Promise<{
     !req.untrustedNoTools ||
     !req.mcpConfigPath ||
     !path.isAbsolute(req.mcpConfigPath) ||
-    req.mcpCodexConfigArgs?.length ||
     JSON.stringify(req.mcpAllowedTools) !== JSON.stringify(grant.grantedToolIds) ||
     JSON.stringify(req.untrustedAllowedMcpTools) !== JSON.stringify(grant.grantedToolIds)
   ) return null;

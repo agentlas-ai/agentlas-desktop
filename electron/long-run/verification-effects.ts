@@ -116,10 +116,10 @@ class EffectSession implements VerificationSession {
     }
   }
 
-  fail(reason: string): void {
+  fail(reason: string, diagnostic?: Record<string, unknown>): void {
     if (!this.failures.has(reason)) {
       this.failures.add(reason);
-      this.record("verifier_effect_failure", { reasonCode: reason });
+      this.record("verifier_effect_failure", { reasonCode: reason, ...(diagnostic ? { diagnostic } : {}) });
     }
     for (const dispatch of this.dispatches) if (!dispatch.settled && !dispatch.controller.signal.aborted) {
       dispatch.controller.abort(new VerificationEffectsError(reason));
@@ -144,11 +144,19 @@ class EffectSession implements VerificationSession {
     const failuresBefore = new Set(this.failures);
     // Even an accidentally unwrapped nested adapter must never inherit the
     // task's sealed ledger. It is an uncovered verifier dispatch, not success.
-    const untracked = () => this.fail("verification_effects_untracked_dispatch");
+    const untracked = (phase: "begin" | "finish", adapterKind?: string) => {
+      // Local code positions only: never prompts, arguments, credentials, or absolute paths.
+      const callerFrames = (new Error().stack ?? "").split("\n").slice(2, 10).map(line => {
+        const named = /^\s*at ([\w.$ <>]+) \((.*)\)$/u.exec(line);
+        const location = (named?.[2] ?? line.replace(/^\s*at\s+/u, "")).replace(/^.*[\\/]/u, "");
+        return { name: named?.[1] ?? null, location };
+      });
+      this.fail("verification_effects_untracked_dispatch", { stage: name, phase, adapterKind: adapterKind ?? null, callerFrames });
+    };
     try {
       const result = await active.run({ session: this, stage }, () => withAdapterEffectContext({
         runId: this.executionId, chatId: this.binding.chatId, rootAgentId: null,
-        purpose: "preparation", begin: untracked, finish: untracked,
+        purpose: "preparation", begin: admission => untracked("begin", admission.adapterKind), finish: () => untracked("finish"),
       }, action));
       if (this.dispatches.length === startCount) this.fail("verification_effects_dispatch_missing");
       this.assertSettledEmpty();

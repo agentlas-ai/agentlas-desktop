@@ -10,6 +10,29 @@ type Authority = {
   release?: () => void;
 };
 const authorities = new Map<string, Authority>();
+type TerminalScope = { chatId: string; runId: string; leaseId: string; signal: AbortSignal };
+const terminalScopes = new Map<string, TerminalScope>();
+const usedTerminalHashes = new Set<string>();
+
+/** Main-only admission: a terminal approval is live only alongside its exact browser grant. */
+export function registerTerminalBrowserApprovalScope(hash: string, scope: TerminalScope): void {
+  if (!/^[a-f0-9]{64}$/.test(hash) || !scope.chatId || !scope.runId || !scope.leaseId || scope.signal.aborted
+    || usedTerminalHashes.has(hash) || usedTerminalHashes.size >= 65_536) {
+    throw new Error("native-browser-approval-scope-invalid");
+  }
+  usedTerminalHashes.add(hash);
+  terminalScopes.set(hash, scope);
+  scope.signal.addEventListener("abort", () => { if (terminalScopes.get(hash) === scope) terminalScopes.delete(hash); }, { once: true });
+  if (scope.signal.aborted) { terminalScopes.delete(hash); throw new Error("native-browser-approval-scope-invalid"); }
+}
+
+function terminalScope(hash: string, owner: Authority["owner"]): TerminalScope | null | undefined {
+  if (!owner || typeof owner.sessionKey !== "string" || !owner.sessionKey.startsWith("terminal:")) return undefined;
+  const scope = terminalScopes.get(hash);
+  if (!scope || scope.signal.aborted || owner.chatId !== scope.chatId
+    || owner.sessionKey !== `terminal:${scope.runId}:${scope.leaseId}`) return null;
+  return scope;
+}
 
 /**
  * Authorities are also recorded in the shared store, so the process that serves approvals can resolve one minted by
@@ -102,17 +125,26 @@ function liveRow(db: Db, hash: string): Row | null {
 
 export function resolveBrowserApprovalAuthority(token: unknown): Authority | null {
   if (typeof token !== "string" || !token) return null;
+  const hash = tokenHash(token);
   const local = authorities.get(token);
-  if (local) return local;
+  if (local) {
+    const scope = terminalScope(hash, local.owner);
+    if (scope === null) return null;
+    return scope ? Object.freeze({ ...local, signal: AbortSignal.any([local.signal, scope.signal]) }) : local;
+  }
   const db = store();
   if (!db) return null;
-  const hash = tokenHash(token);
   let row: Row | null;
   try { row = liveRow(db, hash); } catch { return null; }
   if (!row) return null;
   let owner: Authority["owner"];
   try { owner = JSON.parse(row.owner_json) as Authority["owner"]; } catch { return null; }
+  if (!owner || typeof owner !== "object" || !["one", "work", "science"].includes(owner.surface)
+    || typeof owner.sessionKey !== "string" || !owner.sessionKey
+    || (owner.chatId !== null && typeof owner.chatId !== "string")) return null;
   if (row.permission !== "read" && row.permission !== "write" && row.permission !== "full") return null;
+  const scope = terminalScope(hash, owner);
+  if (scope === null) return null;
   // The minting process revokes its authority when its run ends; a pending approval sheet ends with it.
   const controller = new AbortController();
   const timer = setInterval(() => {
@@ -124,7 +156,7 @@ export function resolveBrowserApprovalAuthority(token: unknown): Authority | nul
   return Object.freeze({
     owner: Object.freeze({ ...owner }),
     permission: row.permission,
-    signal: controller.signal,
+    signal: scope ? AbortSignal.any([controller.signal, scope.signal]) : controller.signal,
     unattended: row.unattended === 1,
     release: () => clearInterval(timer),
   });

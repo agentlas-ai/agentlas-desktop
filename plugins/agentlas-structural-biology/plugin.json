@@ -1,0 +1,175 @@
+{
+  "schema": "agentlas.plugin/v2",
+  "slug": "agentlas-structural-biology",
+  "name": "Agentlas Structural Biology",
+  "version": "0.1.0",
+  "builtin": false,
+  "publisher": {
+    "name": "Agentlas",
+    "url": "https://agentlas.cloud"
+  },
+  "keywords": [
+    "protein structure",
+    "PDB",
+    "RCSB",
+    "AlphaFold",
+    "3D structure",
+    "Mol*",
+    "binding site",
+    "ligand",
+    "covalent inhibitor",
+    "drug discovery",
+    "ChEMBL",
+    "IC50",
+    "bioactivity",
+    "clinical trials",
+    "ClinicalTrials.gov",
+    "단백질 구조",
+    "3D 구조",
+    "결합 부위",
+    "신약개발",
+    "생물활성",
+    "임상시험"
+  ],
+  "surface": {
+    "displayName": "Structural Biology",
+    "displayNameKo": "구조생물학",
+    "tagline": "PDB and AlphaFold structures in 3D, binding sites, ChEMBL potency and clinical trials",
+    "taglineKo": "PDB·AlphaFold 구조 3D 보기, 결합 부위, ChEMBL 활성, 임상시험 등록",
+    "description": "Search RCSB PDB by text, UniProt, ligand or sequence; save a structure with a Mol* view state for 3D viewing; fetch AlphaFold DB models with pLDDT; list ligand binding-site residues and covalent bonds from deposited coordinates; pull ChEMBL bioactivity (IC50, Ki) and ClinicalTrials.gov registrations, with provenance receipts.",
+    "descriptionKo": "RCSB PDB 를 글·UniProt·리간드·서열로 찾고, 구조를 Mol* 보기 상태와 함께 저장해 3D 로 보고, AlphaFold 예측 구조와 pLDDT, 리간드 결합 부위 잔기와 공유결합, ChEMBL 생물활성(IC50 등), ClinicalTrials.gov 임상 등록을 출처 영수증과 함께 가져옵니다.",
+    "category": "data",
+    "brandColor": "#1F6F8B",
+    "icon": "assets/icon.svg",
+    "defaultPrompts": [
+      "KRAS G12C 와 sotorasib 결합 구조(PDB 6OIM)를 3D 로 보여 주고 결합 부위 잔기를 정리해줘",
+      "sotorasib 의 KRAS G12C IC50 를 ChEMBL 에서 찾아줘",
+      "KRAS G12C 저해제 3상 임상시험 등록 현황을 표로 보여줘"
+    ]
+  },
+  "invocation": {
+    "mention": "@agentlas-structural-biology",
+    "implicit": "router",
+    "standalone": true
+  },
+  "provides": {
+    "skills": {
+      "router": "skills/index/SKILL.md",
+      "workflows": [
+        "structure-3d",
+        "binding-site",
+        "bioactivity-trials"
+      ]
+    },
+    "tools": [
+      {
+        "id": "agentlas-structural-biology",
+        "capability": "data",
+        "kind": "stdio",
+        "command": "${node}",
+        "args": [
+          "${pluginDir}/runtime/mcp-server.cjs"
+        ],
+        "envKeys": [],
+        "timeoutMs": 45000,
+        "surface": {
+          "name": "Agentlas 구조생물학",
+          "nameEn": "Agentlas Structural Biology",
+          "description": "fetch_protein_structure·search_protein_structures·describe_binding_site·fetch_alphafold_model·fetch_chembl_activities·fetch_clinical_trials: PDB·AlphaFold 구조 3D(Mol*) 보기 파일, 리간드 결합 부위, ChEMBL 생물활성, 임상시험 등록",
+          "descriptionEn": "fetch_protein_structure, search_protein_structures, describe_binding_site, fetch_alphafold_model, fetch_chembl_activities, fetch_clinical_trials: PDB/AlphaFold 3D structures with Mol* view files, ligand binding sites, ChEMBL IC50, clinical trials (단백질 구조 3D, 결합 부위, 임상시험)",
+          "category": "data",
+          "brandColor": "#1F6F8B",
+          "mark": "SB",
+          "docsUrl": "https://www.rcsb.org/docs/programmatic-access/web-apis-overview"
+        }
+      }
+    ]
+  },
+  "requires": {
+    "prereq": [
+      {
+        "id": "node",
+        "provided-by": "app"
+      }
+    ],
+    "os": [
+      "darwin",
+      "win32",
+      "linux"
+    ]
+  },
+  "permissions": {
+    "fileWrite": "project-only",
+    "network": "allow",
+    "shell": "deny"
+  },
+  "state": {
+    "files": [],
+    "assets": false
+  },
+  "integrity": {
+    "algo": "sha256",
+    "files": [
+      {
+        "path": "assets/icon.svg",
+        "sha256": "26fa024950b1b52ab9d19d6a8ef75972fe3406a803b6b56e7ef8b03de23983cf",
+        "bytes": 468
+      },
+      {
+        "path": "capabilities.json",
+        "sha256": "bce5f4b8f51636b29e3ca0f7ce5f6a636531ee7091bf0a83976f8ae5e2ccc4a2",
+        "bytes": 3948
+      },
+      {
+        "path": "README.md",
+        "sha256": "c8840fde6d479009e73e4f663209a300495ebfeb45caa732755e60788744257d",
+        "bytes": 1853
+      },
+      {
+        "path": "runtime/mcp-server.cjs",
+        "sha256": "7053443f48862ba91e40956f74d60636acbd435423e365c5457d51b7a8416297",
+        "bytes": 3478
+      },
+      {
+        "path": "runtime/mmcif.cjs",
+        "sha256": "10ce3c17de166b3f42e4f884e79f7942c77236903f46affc0d46143d68eae499",
+        "bytes": 6461
+      },
+      {
+        "path": "runtime/polite-http.cjs",
+        "sha256": "d8781b4873000023a0995ab667dd560cc1c278c1100a99d3519d2751f6d93fd2",
+        "bytes": 7655
+      },
+      {
+        "path": "runtime/structural-biology.cjs",
+        "sha256": "45df755e009a85f9e34bc3f2f4a7fca2a9f9c823a59a6a2b152d25e225521118",
+        "bytes": 51608
+      },
+      {
+        "path": "schemas/tools.json",
+        "sha256": "c848d64193e8d6af36868f911e2a558491a14931b850ecfa5d4bdbc75052a1a5",
+        "bytes": 11540
+      },
+      {
+        "path": "skills/binding-site/SKILL.md",
+        "sha256": "13381af2b15af5cdc575099ec07ec8a0bcc5c28ed0e0fa25198e9b06db94bdf4",
+        "bytes": 897
+      },
+      {
+        "path": "skills/bioactivity-trials/SKILL.md",
+        "sha256": "7877aea62dcd9fb889f37e9b92018eedc4f2e613d149107d2f24e2b3d44768f5",
+        "bytes": 1023
+      },
+      {
+        "path": "skills/index/SKILL.md",
+        "sha256": "2b0d8b05eca1b6b0b4d28aeda601618b32cc8f5f12a7c3512e488a1388ddf101",
+        "bytes": 1324
+      },
+      {
+        "path": "skills/structure-3d/SKILL.md",
+        "sha256": "1ce1a08acb2759aa8d686478fc1d5689943fa5fae5729450857e881f3f296b1d",
+        "bytes": 1348
+      }
+    ]
+  }
+}

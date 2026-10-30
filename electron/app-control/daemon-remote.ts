@@ -1,6 +1,7 @@
 import type { AppControlCaller } from "./service";
 import { DEVICE_BRIDGE_UNAVAILABLE_MESSAGE, DeviceBridgeError, daemonDeviceBridge, type DaemonDeviceBridge } from "../daemon/device-bridge";
 import { AppControlError } from "./ipc-registry";
+import { APP_CALL_ANSWER_WINDOW_MS, appCallPendingNotice, isAppCallPending } from "./pending-calls";
 
 // The background service runs One/Hope turns but owns no window and no IPC handler, so it cannot run an app-control
 // operation (production 1.3.3, 2026-10-12: every operation "available": false, and Hope fell back to osascript on the
@@ -28,14 +29,34 @@ export async function remoteAppControlOperations<T extends object>(input: Record
   }
 }
 
-export async function remoteAppControlCall(caller: AppControlCaller, input: { operation?: unknown; args?: unknown; scope?: { chatId?: unknown } }, bridge: AppBridge = daemonDeviceBridge()): Promise<Record<string, unknown>> {
+export async function remoteAppControlCall(caller: AppControlCaller, input: { operation?: unknown; args?: unknown; scope?: { chatId?: unknown } }, bridge: AppBridge = daemonDeviceBridge(), windowMs: number = APP_CALL_ANSWER_WINDOW_MS): Promise<Record<string, unknown>> {
   let answer;
   // An absent args stays absent: { args: undefined } is not a wire value (dev 2026-10-18 run9, app.call automations.list).
   // A scope (the conversation a harness port checked) travels in the same input object; an absent one stays absent.
   const request = { operation: input.operation, ...(input.args !== undefined ? { args: input.args } : {}),
     ...(typeof input.scope?.chatId === "string" ? { scope: { chatId: input.scope.chatId } } : {}) };
-  try { answer = await bridge.appControl({ kind: "call", ownerTurn: caller.ownerTurn === true, permission: caller.permission ?? "read", input: request }); }
-  catch (error) { const { code, message } = unavailable(error); throw new AppControlError(code, message); }
+  // Main answers a call that is still running with a notice, and the same request asked again joins it (pending-calls.ts); so does a
+  // request this side gave up on at its own deadline while Main was busy. Ask again until the model-facing window is spent, then say
+  // "running": the operation was neither refused nor lost, and the model's repeat of the call reaches the same run.
+  const operation = typeof input.operation === "string" ? input.operation.trim() : "";
+  const deadline = Date.now() + windowMs;
+  for (;;) {
+    try { answer = await bridge.appControl({ kind: "call", ownerTurn: caller.ownerTurn === true, permission: caller.permission ?? "read", input: request }); }
+    catch (error) {
+      if (error instanceof DeviceBridgeError && error.code === "device_bridge_timeout") {
+        if (deadline - Date.now() < 1500) return appCallPendingNotice(operation) as unknown as Record<string, unknown>;
+        continue;
+      }
+      const { code, message } = unavailable(error); throw new AppControlError(code, message);
+    }
+    if (answer.outcome === "value" && isAppCallPending(answer.value)) {
+      // Another ask would outlive the window (Main holds one up to its own budget): say "running" now.
+      if (deadline - Date.now() < 1500) return answer.value as unknown as Record<string, unknown>;
+      await new Promise<void>((resolve) => { const t = setTimeout(resolve, 100); t.unref?.(); });
+      continue;
+    }
+    break;
+  }
   if (answer.outcome === "value") return answer.value as Record<string, unknown>;
   // Main's AppControlError text already leads with its code ("operation-not-allowed: ..."); keep it once.
   const prefix = `${answer.code}: `;

@@ -2,7 +2,7 @@
  * 로그인 복구 사다리의 실제 손발 — 저장소 측정, 겨냥 가져오기, 다시 읽기, 카드, 세션 감시.
  * 판정과 순서는 login-recovery.ts(순수)에 있고, 여기서는 그 결정을 실행만 한다.
  *
- * 값 경계: 측정은 쿠키 DB 사본에서 이름·도메인·만료만 고른다(readCookieStoreMetadata).
+ * 값 경계: 측정은 사용 중인 네이티브 세션 또는 쿠키 DB 사본에서 이름·도메인·만료만 고른다.
  * 가져오기는 기존 복호화 경로(decryptMacSourceCookies)를 그대로 쓰고 값은 메모리에서 브라우저로만
  * 간다. 로그·사건·알림에는 수치와 사유 코드만 실린다. Login Data·비밀번호는 읽지 않는다.
  */
@@ -14,7 +14,7 @@ import type { McpInvocationEvent } from "../../shared/types";
 import { registrableDomain } from "../../shared/registrable-domain";
 import type { NativeBrowserRelayGrant } from "./native-cdp-relay";
 import type { BrowserCookieSurface, CookieMetadata } from "./login-wall";
-import { detectLoginWall, sessionCookieNamesFor } from "./login-wall";
+import { automaticRecoveryDestination, detectLoginWall, recoveryCookieDomains, sessionCookieNamesFor } from "./login-wall";
 import { productionVaultSource, vaultFillSignIn } from "./vault-login";
 import {
   createLoginRecoveryLadder,
@@ -55,25 +55,23 @@ function consentDomains(domains: readonly string[]): Promise<{ profileId: string
   });
 }
 
-function nativeCookieFile(): string | null {
-  const storage = electronSession.fromPartition(NATIVE_PARTITION).storagePath;
-  if (!storage) return null;
-  for (const file of [path.join(storage, "Network", "Cookies"), path.join(storage, "Cookies")]) {
-    if (fs.existsSync(file)) return file;
-  }
-  return null;
-}
-
 async function readStore(surface: BrowserCookieSurface, domains: readonly string[]): Promise<CookieMetadata[] | null> {
-  const { readCookieStoreMetadata, dedicatedCookieStoreFile } = await import("./credential-import");
+  const recoveryDomains = recoveryCookieDomains(domains);
   if (surface === "native-partition") {
-    // The partition writes its DB lazily; flush so the measurement sees what the guest sees.
-    try { await electronSession.fromPartition(NATIVE_PARTITION).flushStorageData(); } catch { /* measure what is on disk */ }
-    const file = nativeCookieFile();
-    return file ? readCookieStoreMetadata(file, domains) : null;
+    // The live session is authoritative, including an empty store which may not yet have a SQLite file.
+    try {
+      const rows = await electronSession.fromPartition(NATIVE_PARTITION).cookies.get({});
+      if (rows.some((cookie) => !cookie.domain)) return null;
+      const roots = new Set(recoveryDomains);
+      return rows.filter((cookie) => roots.has(registrableDomain(cookie.domain!))).map((cookie) => ({
+        domain: cookie.domain!, name: cookie.name,
+        expires: cookie.session === true ? null : typeof cookie.expirationDate === "number" ? cookie.expirationDate : null,
+      }));
+    } catch { return null; }
   }
+  const { readCookieStoreMetadata, dedicatedCookieStoreFile } = await import("./credential-import");
   const file = dedicatedCookieStoreFile();
-  return file ? readCookieStoreMetadata(file, domains) : null;
+  return file ? readCookieStoreMetadata(file, recoveryDomains) : null;
 }
 
 async function readSource(domains: readonly string[]): Promise<CookieMetadata[] | null> {
@@ -184,7 +182,7 @@ async function cdpSession<T>(wsUrl: string, work: (call: (method: string, params
         const message = JSON.stringify({ id, method, params });
         if (settled) throw new Error("cdp-session-closed");
         assertLoginImportCurrent(scope);
-        if (scope) scope.effect = "unknown";
+        if (scope && method === "Storage.setCookies") scope.effect = "unknown";
         socket.send(message);
       } catch (error) { pending.delete(id); rej(error as Error); }
     });
@@ -226,17 +224,22 @@ async function cdpSession<T>(wsUrl: string, work: (call: (method: string, params
 
 async function reloadCdpPage(target: CdpPageTarget): Promise<string | null> {
   try {
-    await cdpSession(target.webSocketDebuggerUrl, async (call, waitFor) => {
+    const completed = await cdpSession(target.webSocketDebuggerUrl, async (call, waitFor) => {
       await call("Page.enable");
       const loaded = waitFor("Page.loadEventFired", 20_000);
       await call("Page.reload", { ignoreCache: false });
-      await loaded;
+      return loaded;
     });
+    if (!completed) return null;
   } catch { return null; }
   // Give same-page redirects (accounts → site) a beat, then read where the page actually is.
   await new Promise((resolve) => setTimeout(resolve, 1_500));
   const page = (await cdpPages()).find((entry) => entry.id === target.id);
-  return page?.url ?? null;
+  if (!page) return null;
+  const status = await evaluateCdpPage(page,
+    "(() => { const n = performance.getEntriesByType('navigation')[0]; return typeof n?.responseStatus === 'number' ? n.responseStatus : null; })()",
+  ).catch(() => null);
+  return typeof status === "number" && status >= 200 && status < 300 ? page.url : null;
 }
 
 /** Main-only evaluation in a dedicated-Chrome page (vault fill, structural probes). Returns the JSON value. */
@@ -298,10 +301,89 @@ async function settledCdpPage(target: CdpPageTarget): Promise<string | null> {
   return last;
 }
 
+/** Only an explicitly requested Studio channel can establish channel identity. */
+function requestedStudioChannel(value: string | null | undefined, depth = 0): string | null {
+  if (!value || depth > 4 || value.length > 8_192) return null;
+  try {
+    let candidate = value;
+    let url: URL | null = null;
+    for (let attempt = 0; attempt < 3 && !url; attempt += 1) {
+      try { url = new URL(candidate); }
+      catch { const decoded = decodeURIComponent(candidate); if (decoded === candidate) return null; candidate = decoded; }
+    }
+    if (!url) return null;
+    if (url.hostname.toLowerCase() === "studio.youtube.com") {
+      const match = /^\/channel\/([A-Za-z0-9_-]+)(?:\/|$)/u.exec(url.pathname);
+      if (match) return match[1];
+    }
+    for (const key of ["continue", "followup", "next", "redirect_uri", "url"]) {
+      const nested = requestedStudioChannel(url.searchParams.get(key), depth + 1);
+      if (nested) return nested;
+    }
+  } catch { /* unknown target is not an account assertion */ }
+  return null;
+}
+
+// This executes only in the already-authorized guest. It returns a boolean, never page text or credentials.
+const GOOGLE_SESSION_EVIDENCE = String.raw`(() => {
+  const host = location.hostname.toLowerCase();
+  const visible = (element) => !!element && element.getClientRects().length > 0 && getComputedStyle(element).visibility !== 'hidden';
+  const findVisible = (selectors) => selectors.some((selector) => Array.from(document.querySelectorAll(selector)).some(visible));
+  const text = (document.body?.innerText || '').slice(0, 8000);
+  const denied = /you (?:don't|do not) have (?:the )?(?:required )?(?:access|permission)|access (?:is )?denied|permission denied|접근\s*권한이?\s*없|권한이?\s*없/i.test(text);
+  if (denied || document.querySelector('input[type="password"]')) return false;
+  const account = findVisible(['ytcp-account-button', '#avatar-btn', 'a[href*="accounts.google.com/SignOutOptions"]',
+    '[aria-label^="Google Account:" i]', '[aria-label^="Google 계정:"]', 'button[aria-label="Account" i]', 'button[aria-label="계정"]']);
+  if (!account) return false;
+  if (host === 'studio.youtube.com') {
+    const nav = document.querySelector('ytcp-navigation-drawer, ytcp-sidebar, #left-menu, #navigation-drawer');
+    if (!visible(nav)) return false;
+    if (expectedChannel) {
+      const markers = nav.querySelectorAll('[data-channel-id], a#channel-logo, a#channel-avatar, a[aria-label="Your channel" i], a[aria-label="내 채널"]');
+      const matches = Array.from(markers).some((marker) => {
+        if (!visible(marker)) return false;
+        if (marker.getAttribute('data-channel-id') === expectedChannel) return true;
+        try {
+          const href = marker.getAttribute('href');
+          if (!href) return false;
+          const link = new URL(href, location.href);
+          return (link.hostname === 'youtube.com' || link.hostname.endsWith('.youtube.com'))
+            && link.pathname === '/channel/' + expectedChannel;
+        } catch { return false; }
+      });
+      if (!matches) return false;
+    }
+    return true;
+  }
+  return host === 'youtube.com' || host.endsWith('.youtube.com') || host === 'google.com' || host.endsWith('.google.com') || host === 'google.co.kr' || host.endsWith('.google.co.kr');
+})()`;
+
+/** A URL or HTTP 200 is not evidence of a signed-in account or the requested Studio channel. */
+export async function verifyGoogleBrowserSession(
+  evaluate: (expression: string) => Promise<unknown>,
+  input: { site: string; url: string; returnUrl?: string | null },
+): Promise<boolean> {
+  try {
+    const url = new URL(input.url);
+    const host = url.hostname.toLowerCase();
+    if (url.protocol !== "https:") return false;
+    if (input.site !== "youtube.com" && input.site !== "google.com") return false;
+    if (input.site === "youtube.com" && host !== "youtube.com" && !host.endsWith(".youtube.com")) return false;
+    if (input.site === "google.com" && host !== "google.com" && !host.endsWith(".google.com")
+      && host !== "google.co.kr" && !host.endsWith(".google.co.kr")) return false;
+    const expectedChannel = requestedStudioChannel(input.returnUrl);
+    if (expectedChannel && (host !== "studio.youtube.com"
+      || !new RegExp(`^/channel/${expectedChannel}(?:/|$)`, "u").test(url.pathname))) return false;
+    // Bind the DOM evidence to the exact page measured by reload, not a later navigation.
+    const measuredUrl = JSON.stringify(url.href).replace(/\u2028/gu, "\\u2028").replace(/\u2029/gu, "\\u2029");
+    return await evaluate(`(() => { if (location.href !== ${measuredUrl}) return false; const expectedChannel = ${JSON.stringify(expectedChannel)}; return ${GOOGLE_SESSION_EVIDENCE}; })()`) === true;
+  } catch { return false; }
+}
+
 type CdpCookieParam = { name: string; value: string; domain: string; path: string; secure: boolean; httpOnly: boolean; sameSite?: "Strict" | "Lax" | "None"; expires?: number };
 
 /** Feed cookies into the running, owned dedicated browser without closing it. */
-async function feedLiveDedicatedBrowser(cookies: CdpCookieParam[], scope?: LoginImportScope): Promise<number | null> {
+async function feedLiveDedicatedBrowser(cookies: CdpCookieParam[], domains: readonly string[], scope?: LoginImportScope): Promise<TargetedImportReport | null> {
   assertLoginImportCurrent(scope);
   const launcher = await import("../mcp-tools/browser-cdp-launcher");
   assertLoginImportCurrent(scope);
@@ -310,9 +392,10 @@ async function feedLiveDedicatedBrowser(cookies: CdpCookieParam[], scope?: Login
   if (!ready) return null;
   const owned = await launcher.reconcileBrowserCdpOwnerWithRetry();
   assertLoginImportCurrent(scope);
-  if (owned.state !== "owned") return null;
+  if (owned.state !== "owned") return { state: "destination-unreadable", written: 0 };
   const lease = await launcher.acquireBrowserCdpLease("login-recovery").catch(() => null);
   if (!lease) { assertLoginImportCurrent(scope); return null; }
+  let writeDispatched = false;
   try {
     assertLoginImportCurrent(scope);
     const { fetchCdpJson } = await import("./native-session-cookie-import");
@@ -322,19 +405,32 @@ async function feedLiveDedicatedBrowser(cookies: CdpCookieParam[], scope?: Login
     assertLoginImportCurrent(scope);
     const ws = loopbackWs(version?.webSocketDebuggerUrl, port);
     if (!ws) return null;
-    await cdpSession(ws, async (call) => { await call("Storage.setCookies", { cookies }); }, scope);
+    const report = await cdpSession(ws, async (call): Promise<TargetedImportReport> => {
+      const result = await call("Storage.getCookies") as { cookies?: Array<{ domain?: string; name?: string; expires?: number }> } | null;
+      if (!result || !Array.isArray(result.cookies) || result.cookies.some((cookie) => !cookie.domain || !cookie.name)) {
+        return { state: "destination-unreadable", written: 0 };
+      }
+      const state = automaticRecoveryDestination(result.cookies.map((cookie) => ({
+        domain: cookie.domain!, name: cookie.name!, expires: typeof cookie.expires === "number" && cookie.expires > 0 ? cookie.expires : null,
+      })), domains, Date.now() / 1_000);
+      if (state !== "empty") return { state: state === "protected" ? "destination-protected" : "destination-unreadable", written: 0 };
+      assertLoginImportCurrent(scope);
+      writeDispatched = true;
+      await call("Storage.setCookies", { cookies });
+      return { state: "imported", written: cookies.length };
+    }, scope);
     assertLoginImportCurrent(scope);
-    return cookies.length;
+    return report;
   } catch (error) {
     // A guarded transport failure/cancel is never permission for maintenance import.
     if (scope) throw error;
-    return null;
+    return { state: writeDispatched ? "effect-unknown" : "destination-unreadable", written: 0 };
   } finally {
     launcher.releaseBrowserCdpLease(lease);
   }
 }
 
-// ── 겨냥 가져오기: 원본 → 에이전트가 쓰는 저장소, 그 도메인만 원본이 이긴다 ──────────────
+// ── 겨냥 가져오기: 기존 로그인이 없는 실제 대상 저장소만 채운다 ──────────────────────────────
 async function targetedImport(input: { domains: string[]; surface: BrowserCookieSurface; isCurrent?: () => boolean }, custody?: LoginImportScope): Promise<TargetedImportReport> {
   assertLoginImportCurrent(custody);
   const { browserCredentialConsentRevision, getBrowserCredentialConsent } = await import("./credential-sync");
@@ -342,7 +438,7 @@ async function targetedImport(input: { domains: string[]; surface: BrowserCookie
   const revision = browserCredentialConsentRevision();
   const scope = await consentDomains(input.domains);
   assertLoginImportCurrent(custody);
-  if (!scope) return { state: "not-consented", written: 0 };
+  if (!scope || input.domains.some((domain) => !scope.domains.includes(registrableDomain(domain)))) return { state: "not-consented", written: 0 };
   const isCurrent = () => {
     const consent = getBrowserCredentialConsent();
     return browserCredentialConsentRevision() === revision && (input.isCurrent?.() ?? true)
@@ -352,27 +448,28 @@ async function targetedImport(input: { domains: string[]; surface: BrowserCookie
   if (custody) custody.consentCurrent = isCurrent;
   assertLoginImportCurrent(custody);
   if (!isCurrent()) return { state: "not-consented", written: 0 };
+  const destinationState = automaticRecoveryDestination(await readStore(input.surface, input.domains), input.domains, Date.now() / 1_000);
+  assertLoginImportCurrent(custody);
+  if (destinationState !== "empty") return { state: destinationState === "protected" ? "destination-protected" : "destination-unreadable", written: 0 };
   const credential = await import("./credential-import");
   assertLoginImportCurrent(custody);
   if (!isCurrent()) return { state: "not-consented", written: 0 };
   const source = await credential.readSourceSessionCookies(scope.profileId, scope.domains);
   if (!source.ok) {
-    if (source.reason !== "unsupported-platform") return { state: "failed", written: 0 };
-    // The explicitly selected dedicated surface keeps its maintenance-window importer.
-    if (input.surface === "cdp-profile") {
+    if (source.reason === "unsupported-platform" && input.surface === "native-partition") {
+      // Windows and Linux have no direct source reader, so this was the only way their login wall ever recovered. The
+      // destination was just measured empty above, and the native partition is the app's own: nothing live is closed.
+      // (The dedicated Chrome is left alone: the maintenance importer may close it under a running session.)
       assertLoginImportCurrent(custody);
       if (custody) custody.effect = "unknown";
-      const result = await credential.importBrowserCredentials(scope.profileId, scope.domains, { automatic: false, destination: "dedicated" });
+      const result = await credential.importBrowserCredentials(scope.profileId, scope.domains, { automatic: false, destination: "native" });
       if (custody && result.ok) { custody.acknowledgedWritten += result.cookiesAdded + (result.cookiesUpdated ?? 0); custody.effect = "imported"; }
       assertLoginImportCurrent(custody);
       return result.ok ? { state: "imported", written: result.cookiesAdded + (result.cookiesUpdated ?? 0) } : { state: "failed", written: 0 };
     }
-    assertLoginImportCurrent(custody);
-    if (custody) custody.effect = "unknown";
-    const result = await credential.importBrowserCredentials(scope.profileId, scope.domains, { automatic: false, destination: "native" });
-    if (custody && result.ok) { custody.acknowledgedWritten += result.cookiesAdded + (result.cookiesUpdated ?? 0); custody.effect = "imported"; }
-    assertLoginImportCurrent(custody);
-    return result.ok ? { state: "imported", written: result.cookiesAdded + (result.cookiesUpdated ?? 0) } : { state: "failed", written: 0 };
+    // The maintenance importer may close the owned browser. An automatic recovery cannot
+    // interrupt a user's live session merely because the direct reader is unavailable.
+    return { state: source.reason === "unsupported-platform" ? "unsupported" : "failed", written: 0 };
   }
   try {
     if (input.surface === "native-partition") {
@@ -406,11 +503,13 @@ async function targetedImport(input: { domains: string[]; surface: BrowserCookie
         expires: cookie.expires ?? -1, session: cookie.expires === undefined,
         httpOnly: cookie.httpOnly, secure: cookie.secure, sameSite: cookie.sameSite,
       })), destination, Date.now() / 1_000,
-      { isCurrent: custody ? nativeCurrent : isCurrent, explicitImport: true });
+      { isCurrent: custody ? nativeCurrent : isCurrent, recoveryImport: true, recoveryDomains: input.domains });
       // Successful native sets were already counted by the adapter exactly once.
       if (custody && counts.skipped.writeFailed > 0) custody.effect = "unknown";
       assertLoginImportCurrent(custody);
-      return counts.imported > 0 ? { state: "imported", written: counts.imported } : { state: "failed", written: 0 };
+      return counts.recoveryState ? { state: counts.recoveryState === "protected" ? "destination-protected" : "destination-unreadable", written: counts.imported }
+        : counts.skipped.writeFailed > 0 ? { state: "effect-unknown", written: counts.imported }
+        : counts.imported > 0 ? { state: "imported", written: counts.imported } : { state: "failed", written: 0 };
     }
     const params: CdpCookieParam[] = source.cookies.map((cookie) => ({
       name: cookie.name, value: cookie.value, domain: cookie.domain, path: cookie.path,
@@ -418,18 +517,13 @@ async function targetedImport(input: { domains: string[]; surface: BrowserCookie
       ...(cookie.sameSite ? { sameSite: cookie.sameSite } : {}),
       ...(cookie.expires !== undefined ? { expires: cookie.expires } : {}),
     }));
-    const live = await feedLiveDedicatedBrowser(params, custody);
-    if (live !== null) return { state: "imported", written: live };
+    const live = await feedLiveDedicatedBrowser(params, input.domains, custody);
+    if (live !== null) return live;
   } finally {
     source.wipe();
   }
-  // Dedicated browser not running: nothing to close, so the maintenance import is safe here.
-  assertLoginImportCurrent(custody);
-  if (custody) custody.effect = "unknown";
-  const result = await credential.importBrowserCredentials(scope.profileId, scope.domains, { automatic: false, destination: "dedicated" });
-  if (custody && result.ok) { custody.acknowledgedWritten += result.cookiesAdded + (result.cookiesUpdated ?? 0); custody.effect = "imported"; }
-  assertLoginImportCurrent(custody);
-  return result.ok ? { state: "imported", written: result.cookiesAdded + (result.cookiesUpdated ?? 0) } : { state: "failed", written: 0 };
+  // No live, owned destination: preserve it and wait for the ordinary sign-in/Connect flow.
+  return { state: "destination-unreadable", written: 0 };
 }
 
 async function feedStore(input: { from: BrowserCookieSurface; to: BrowserCookieSurface; domains: string[] }): Promise<TargetedImportReport> {
@@ -437,7 +531,9 @@ async function feedStore(input: { from: BrowserCookieSurface; to: BrowserCookieS
   if (!scope) return { state: "not-consented", written: 0 };
   if (input.from === "cdp-profile" && input.to === "native-partition") {
     const { syncConnectBrowserSession } = await import("./native-session-cookie-import");
-    const receipt = await syncConnectBrowserSession({ domains: scope.domains, reason: "connect-import" });
+    const state = automaticRecoveryDestination(await readStore(input.to, input.domains), input.domains, Date.now() / 1_000);
+    if (state !== "empty") return { state: state === "protected" ? "destination-protected" : "destination-unreadable", written: 0 };
+    const receipt = await syncConnectBrowserSession({ domains: scope.domains, reason: "refresh" });
     return receipt.ok && receipt.imported > 0 ? { state: "imported", written: receipt.imported } : { state: "failed", written: 0 };
   }
   if (input.from === "native-partition" && input.to === "cdp-profile") {
@@ -453,8 +549,8 @@ async function feedStore(input: { from: BrowserCookieSurface; to: BrowserCookieS
       }
     }
     if (params.length === 0) return { state: "failed", written: 0 };
-    const written = await feedLiveDedicatedBrowser(params);
-    return written === null ? { state: "failed", written: 0 } : { state: "imported", written };
+    const written = await feedLiveDedicatedBrowser(params, input.domains);
+    return written ?? { state: "failed", written: 0 };
   }
   return { state: "unsupported", written: 0 };
 }
@@ -671,6 +767,7 @@ export async function recoverLoginWallsNow(input: {
       const evaluate = page.evaluate;
       const outcome = await sharedLadder().observe(page.url, {
         surface: "native-partition", reload: page.reload, runId: input.runId, chatId: input.chatId,
+        ...(evaluate ? { verifyAuthenticated: (evidence) => verifyGoogleBrowserSession(evaluate, evidence) } : {}),
         nodeId: input.nodeId, signal: input.signal, slotId, profileId: opaqueProfileId(NATIVE_PARTITION),
         onPendingScopeReleased: batch.callback(slotId), onPrerequisiteRestored: input.onPrerequisiteRestored,
         consentGeneration, isCurrent: () => {
@@ -679,7 +776,11 @@ export async function recoverLoginWallsNow(input: {
         },
         isPendingCurrent: consentCurrent,
         canonicalSession: true,
-        ...(page.retainLoginVerification ? { retainVerification: () => page.retainLoginVerification!(verificationSignal) } : {}),
+        ...(page.retainLoginVerification ? { retainVerification: () => {
+          const lease = page.retainLoginVerification!(verificationSignal);
+          return { ...lease, ...(lease.evaluate ? { verifyAuthenticated: (evidence: { site: string; url: string; returnUrl?: string | null }) =>
+            verifyGoogleBrowserSession(lease.evaluate!, evidence) } : {}) };
+        } } : {}),
         notify: input.notify, openSignIn: (card) => page.navigate(card.signInUrl),
         ...(evaluate ? { vaultFill: () => vaultFillSignIn({ url: async () => String(await evaluate("location.href") || "") || null, evaluate,
           settled: async () => { await new Promise((r) => setTimeout(r, 1_500)); return String(await evaluate("location.href").catch(() => "") || "") || null; } },
@@ -698,6 +799,7 @@ export async function recoverLoginWallsNow(input: {
   for (const page of pages) {
     const outcome = await sharedLadder().observe(page.url, {
       surface: "cdp-profile", reload: () => reloadCdpPage(page), runId: input.runId, chatId: input.chatId,
+      verifyAuthenticated: (evidence) => verifyGoogleBrowserSession((expression) => evaluateCdpPage(page, expression), evidence),
       nodeId: input.nodeId, signal: input.signal, slotId: page.id, profileId,
       onPendingScopeReleased: batch.callback(page.id), onPrerequisiteRestored: input.onPrerequisiteRestored,
       consentGeneration, isCurrent: consentCurrent,

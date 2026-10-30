@@ -1,7 +1,7 @@
 import { claimGoalRuntimeSelection } from "./runtime-handoff";
 import { readInvocationEffectBoundary } from "../invocation/effect-boundary-reader";
 import { listAgentSurfaces } from "../store/agent-surfaces";
-import { compileProjectInstructionSnapshot } from "./instructions";
+import { compileProjectInstructionSnapshot, recordInvocationInstructionSnapshot } from "./instructions";
 import { latestRuntimePlan, recordRuntimePlan } from "./plan";
 import { createHash } from "node:crypto";
 import type { CheckpointCriterion, GoalVerificationDisposition, LongRunTaskCheckpoint } from "../../shared/long-run-checkpoint";
@@ -23,6 +23,28 @@ function producerInstructionSnapshot(invocationRunId: string | null | undefined,
       && typeof snapshot.environmentId === "string" && Array.isArray(snapshot.sources)
       && snapshot.sources.every(source => typeof source.sourceRef === "string" && typeof source.contentHash === "string")
       ? snapshot : null;
+  } catch { return null; }
+}
+
+/**
+ * A producer that never prepared its own instruction snapshot (it failed before dispatch, or took an early team route:
+ * mcp/client.ts records the snapshot only on the single-runner path) left a checkpoint that latestTaskCheckpoint and
+ * prepareCheckpointContinuation both refuse, so the Goal could neither reflect, wait nor hand its planner a retry
+ * checkpoint ("checkpoint_missing" / "checkpoint_instructions_changed"). Observed in use: 172 of 437 checkpoints,
+ * every one of them from a failed Goal turn. Record the workspace's snapshot against that invocation now, through the one
+ * writer every turn uses (idempotent per run and revision), so the checkpoint carries the instructions in force and later
+ * change detection works. This never mints settled replay authority: that still needs the snapshot the producer recorded
+ * itself (instructionBindingExact below). An unreadable or oversized instruction source leaves the snapshot absent, as before.
+ */
+function materializeProducerInstructionSnapshot(invocationRunId: string | null | undefined, chatId: string | null,
+  projectDir: string | null): InstructionSnapshot | null {
+  if (!invocationRunId || !chatId || !projectDir) return null;
+  try {
+    // One savepoint: a receipt that fails validation leaves no half-written snapshot row behind.
+    return getDb().transaction(() => {
+      recordInvocationInstructionSnapshot({ runId: invocationRunId, chatId, projectDir });
+      return producerInstructionSnapshot(invocationRunId, chatId);
+    })();
   } catch { return null; }
 }
 
@@ -52,7 +74,7 @@ export function recordTaskCheckpoint(input: {
       catch { /* Missing or foreign producer evidence stays uncertain. */ }
     }
     const requestedWorkspacePath = input.projectDir?.trim() || null;
-    const instructionSnapshot = producerInstructionSnapshot(input.invocationRunId, run.rootChatId);
+    const recordedInstructionSnapshot = producerInstructionSnapshot(input.invocationRunId, run.rootChatId);
     const currentPlan = latestRuntimePlan(run.id);
     const plan = !currentPlan || currentPlan.goalRevision !== (getLongRunGoalRevisionBinding(run.id)?.revision ?? null)
       || JSON.stringify(currentPlan.steps) !== JSON.stringify(tasks.map((task) => ({ taskId: task.id, title: task.title, state: task.state })))
@@ -76,7 +98,6 @@ export function recordTaskCheckpoint(input: {
       .all(run.id) as Array<{ id: string; invocation_run_id: string | null; native_coordinate_json: string | null }>;
     const nativeAttempt = attemptRows.find((attempt) => attempt.invocation_run_id === input.invocationRunId);
     const nativeCoordinate = nativeAttempt?.native_coordinate_json ? JSON.parse(nativeAttempt.native_coordinate_json) : null;
-    const observedFiles = instructionSnapshot?.sources.map(({ sourceRef, contentHash }) => ({ sourceRef, contentHash })) ?? [];
     const producer = getDb().prepare(
       `SELECT a.id, a.invocation_run_id, a.state, w.workspace_binding_json
        FROM long_run_worker_attempts AS a
@@ -91,12 +112,15 @@ export function recordTaskCheckpoint(input: {
       producerWorkspace = typeof value === "string" && value.trim() ? value.trim() : value === null ? null : undefined;
     } catch { producerWorkspace = undefined; }
     const workspacePath = requestedWorkspacePath ?? producerWorkspace ?? null;
+    const instructionSnapshot = recordedInstructionSnapshot
+      ?? materializeProducerInstructionSnapshot(input.invocationRunId, run.rootChatId, workspacePath);
+    const observedFiles = instructionSnapshot?.sources.map(({ sourceRef, contentHash }) => ({ sourceRef, contentHash })) ?? [];
     let instructionBindingExact = false;
-    if (workspacePath && instructionSnapshot) {
+    if (workspacePath && recordedInstructionSnapshot) {
       try {
         const current = compileProjectInstructionSnapshot({ projectDir: workspacePath }).snapshot;
-        instructionBindingExact = current.environmentId === instructionSnapshot.environmentId
-          && current.revision === instructionSnapshot.revision;
+        instructionBindingExact = current.environmentId === recordedInstructionSnapshot.environmentId
+          && current.revision === recordedInstructionSnapshot.revision;
       } catch { /* Changed or unavailable instructions cannot mint settled authority. */ }
     }
     // Only the newest completed Main controller run with an exact workspace and a finished

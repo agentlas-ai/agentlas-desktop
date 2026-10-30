@@ -5461,6 +5461,10 @@ app.whenReady().then(async () => {
       const timer = setInterval(() => sweep("periodic"), BLOCKED_GOAL_SWEEP_INTERVAL_MS);
       timer.unref?.();
       sweep("startup");
+      // A relay a waiting Goal or a refused steer parked waits for a turn that nothing starts: hurry the Goal's own retry, or wake
+      // the room (also recovers relays parked before this launch or by the background service).
+      try { (await import("./invocation/parked-relay-delivery")).startParkedRelayRecovery(); }
+      catch (error) { console.warn("[parked-relay] recovery not started:", error instanceof Error ? error.message : error); }
       setGoalWaitHost({
         dispatch: (input) => invocationService.resumeGoalWait(input),
         isChatBusy: (chatId) => invocationService.activeChatIds().includes(chatId),

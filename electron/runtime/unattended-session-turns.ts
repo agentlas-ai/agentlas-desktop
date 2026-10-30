@@ -34,6 +34,15 @@
  *      the stored thread does not open within the bound again: YouTube room 2026-10-28, a 15-day thread whose rollout had
  *      grown to 1.7 GB timed out at 120 s on the owner's turn, on the model fallback that resumed the same thread, and on
  *      every later message, while the owner was told only "The run failed ...".
+ *   6. An attended turn whose resume the runtime REFUSED before any turn started, for a reason none of the above names (Codex
+ *      app-server `thread/resume` answered with an error or lost its transport; an ACP agent answered `session/load` with a
+ *      JSON-RPC error), continues in a fresh session too, under the same condition (the host can hand it the conversation),
+ *      with the reason "resume_refused". Only a caller that PROVES the refusal came before any turn started may use that
+ *      reason, so nothing reached the model and nothing can be repeated. The stored binding is kept (unlike rules 4 and 5):
+ *      the refusal may be transient ("database is locked" while another process holds the state store), the next turn
+ *      tries the stored thread again and the gap-replay fills in this turn. An owner who was told "The run failed ..." had
+ *      nothing to do but resend into the same refusal. A `codex exec resume` failure is NOT such a proof (its stdin was
+ *      already dispatched) and keeps its refusal.
  * Every fresh-session decision emits one machine-readable status receipt.
  */
 
@@ -42,7 +51,8 @@ export type UnattendedFreshSessionReason =
   | "writer_busy"
   | "session_not_found"
   | "resume_failed_before_turn"
-  | "resume_timed_out";
+  | "resume_timed_out"
+  | "resume_refused";
 
 const activeTurns = new Map<string, number>();
 
@@ -109,7 +119,7 @@ export function classifyCodexResumeFailure(stderr: string): UnattendedFreshSessi
  * binding stays and the turn is returned typed and pre-dispatch (claude-code.ts claudeStartupRefusal, 756939df).
  */
 export function attendedTurnStartsFresh(reason: UnattendedFreshSessionReason, conversationCarried: boolean): boolean {
-  return (reason === "session_not_found" || reason === "resume_timed_out") && conversationCarried;
+  return (reason === "session_not_found" || reason === "resume_timed_out" || reason === "resume_refused") && conversationCarried;
 }
 
 /** The one status receipt for a fresh-session decision (parsed by the run ledger as a status line). */
@@ -123,5 +133,5 @@ export function unattendedFreshSessionStatus(kind: string, reason: UnattendedFre
  * it; a session that no longer exists (or could not be reopened) is replaced.
  */
 export function freshSessionReplacesStored(reason: UnattendedFreshSessionReason): boolean {
-  return reason !== "parallel_turn" && reason !== "writer_busy";
+  return reason !== "parallel_turn" && reason !== "writer_busy" && reason !== "resume_refused";
 }

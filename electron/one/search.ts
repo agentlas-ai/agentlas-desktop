@@ -321,6 +321,12 @@ function matchingParticipant(taskId: string, terms: string[]): string | null {
   return containsAll(text, terms) ? safeSnippet(text, terms) : null;
 }
 
+/** The screen pack whose conversation the chat is (store/surface-conversation-schema.ts), for the hit's label. */
+function chatSurfacePack(chatId: string): string | null {
+  const row = getDb().prepare("SELECT surface_pack FROM chats WHERE id = ?").get(chatId) as { surface_pack: string | null } | undefined;
+  return row?.surface_pack ?? null;
+}
+
 function taskHit(row: TaskCandidateRow, terms: string[]): OneSearchHitV1 {
   const matchedBy: OneSearchMatchKind[] = [];
   const titleMatch = containsAll(row.title, terms);
@@ -353,6 +359,7 @@ function taskHit(row: TaskCandidateRow, terms: string[]): OneSearchHitV1 {
   const status = row.archived_at !== null
     ? "archived"
     : row.status as OneSearchHitV1["status"];
+  const surfacePack = chatSurfacePack(row.origin_chat_id);
   return {
     contractVersion: ONE_SEARCH_CONTRACT_VERSION,
     hitId: `${kind}:${row.id}`,
@@ -365,6 +372,7 @@ function taskHit(row: TaskCandidateRow, terms: string[]): OneSearchHitV1 {
     updatedAt: row.updated_at,
     archived: status === "archived" || row.archived_at !== null,
     matchedBy: [...new Set(matchedBy)],
+    ...(surfacePack ? { surfacePack } : {}),
   };
 }
 

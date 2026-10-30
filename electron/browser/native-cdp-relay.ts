@@ -150,6 +150,12 @@ const MAX_MESSAGE_BYTES = Math.ceil(PLAYWRIGHT_UPLOAD_LIMIT_BYTES * 4 / 3) + 4 *
 /** One page an agent is currently driving through this grant. URL is read from the guest itself. */
 export interface LoginVerificationLease {
   reload: () => Promise<string | null>;
+  /** Inspect a completed document without reloading an owner's sign-in or upload form. */
+  inspectCurrent?: () => Promise<string | null>;
+  /** Main-only page evidence; still bound to this exact retained guest. */
+  evaluate?: (expression: string) => Promise<unknown>;
+  /** Observe actual navigation in this guest without polling another task's page. */
+  watchNavigation?: (onNavigation: () => void) => () => void;
   current: () => boolean;
   release: () => void;
 }
@@ -246,17 +252,23 @@ export function settledLoginVerificationUrl(wc: WebContents, signal: AbortSignal
   return new Promise(resolve => {
     if (wc.isDestroyed() || signal.aborted) { resolve(null); return; }
     let done = false;
+    let responseStatus: number | null = null;
     const finish = (successful: boolean) => {
       if (done) return;
       done = true;
       clearTimeout(timer);
       wc.removeListener("did-finish-load", loaded);
       wc.removeListener("did-fail-load", failed);
+      wc.removeListener("did-navigate", navigated);
       wc.removeListener("destroyed", destroyed);
       signal.removeEventListener("abort", destroyed);
       resolve(successful && !signal.aborted && !wc.isDestroyed() ? wc.getURL() : null);
     };
-    const loaded = () => finish(true);
+    // did-finish-load also fires for an HTTP 403/500. Unknown is not proof of an authenticated page.
+    const loaded = () => finish(responseStatus !== null && responseStatus >= 200 && responseStatus < 300);
+    const navigated = (_event: unknown, _url: string, status: number) => {
+      responseStatus = Number.isInteger(status) ? status : null;
+    };
     const failed = (_event: unknown, _code: number, _description: string, _url: string, isMainFrame: boolean) => {
       if (isMainFrame !== false) finish(false);
     };
@@ -264,6 +276,7 @@ export function settledLoginVerificationUrl(wc: WebContents, signal: AbortSignal
     const timer = setTimeout(destroyed, timeoutMs);
     wc.once("did-finish-load", loaded);
     wc.on("did-fail-load", failed);
+    wc.on("did-navigate", navigated);
     wc.once("destroyed", destroyed);
     signal.addEventListener("abort", destroyed, { once: true });
   });
@@ -1076,6 +1089,7 @@ export async function createNativeBrowserRelayGrant(input: CanonicalNativeBrowse
               && !wc.isDestroyed() && nativeBrowserGuest(owner.ownerId, input.chatId, guest.viewId) === wc;
             const verificationHold = openAgentBrowserHold({ runId: input.runId, isLive: valid });
             let offRevoke = () => {}, offShutdown = () => {};
+            const navigationStops = new Set<() => void>();
             const timeout = setTimeout(() => cleanup(), 6 * 60 * 60 * 1000);
             timeout.unref?.();
             const cleanup = () => {
@@ -1084,6 +1098,7 @@ export async function createNativeBrowserRelayGrant(input: CanonicalNativeBrowse
               clearTimeout(timeout);
               signal.removeEventListener("abort", cleanup);
               offRevoke(); offShutdown();
+              for (const stop of navigationStops) stop();
               settleAgentBrowserHold(verificationHold);
               reclaimOrphanAgentBrowserTabs(owner.ownerId);
               lease.release();
@@ -1094,7 +1109,25 @@ export async function createNativeBrowserRelayGrant(input: CanonicalNativeBrowse
             signal.addEventListener("abort", cleanup, { once: true });
             offRevoke = lease.onRevoke(cleanup);
             offShutdown = onHostShutdown(cleanup);
-            return { current: valid, release: cleanup, reload: async () => {
+            return { current: valid, release: cleanup, inspectCurrent: async () => {
+              if (!valid()) return null;
+              const url = wc.getURL();
+              const expected = JSON.stringify(url).replace(/\u2028/gu, "\\u2028").replace(/\u2029/gu, "\\u2029");
+              const ok = await wc.executeJavaScript(`(() => { const n = performance.getEntriesByType('navigation')[0]; return location.href === ${expected} && typeof n?.responseStatus === 'number' && n.responseStatus >= 200 && n.responseStatus < 300; })()`, true).catch(() => false);
+              return valid() && ok === true && wc.getURL() === url ? url : null;
+            }, watchNavigation: (onNavigation) => {
+              if (!valid()) return () => {};
+              const onLoaded = () => { if (valid()) { try { onNavigation(); } catch { /* observer cannot break navigation */ } } };
+              wc.on("did-finish-load", onLoaded);
+              let active = true;
+              const stop = () => { if (!active) return; active = false; wc.removeListener("did-finish-load", onLoaded); navigationStops.delete(stop); };
+              navigationStops.add(stop);
+              return stop;
+            }, evaluate: async (expression) => {
+              if (!valid()) return null;
+              const result = await wc.executeJavaScript(expression, true);
+              return valid() ? result : null;
+            }, reload: async () => {
               if (!valid()) return null;
               const settled = settledLoginVerificationUrl(wc, signal);
               wc.reload();

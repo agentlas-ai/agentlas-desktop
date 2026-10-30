@@ -18,6 +18,14 @@ import type {CanonicalGoalWaitOwnerRef,CanonicalGoalWaitOwnerProvider,CanonicalG
 export type CanonicalGoalWaitScope=Pick<CanonicalGoalWaitOwnerRef,"domain"|"projectId"|"conversationId"|"chatId">;
 export const CANONICAL_GOAL_WAIT_KIND="goal_wait_subscription";
 const canonical=(value:unknown)=>JSON.stringify(value);
+/** One broken source must not starve unrelated owners on every timer tick.
+ * Keep exact wait state intact and log only a bounded machine cause. */
+function deferredCandidate(stage:"poll"|"reconcile"|"proposal",waitId:string,error:unknown):void {
+  const typed=error && typeof error==="object" && "code" in error ? error.code : null;
+  const raw=typeof typed==="string" ? typed : error instanceof Error ? error.message : null;
+  const reasonCode=typeof raw==="string" && /^[a-z][a-z0-9_.:-]{0,119}$/.test(raw) ? raw : "goal_wait_candidate_unavailable";
+  try {console.warn("[goal-wait] candidate deferred",JSON.stringify({stage,waitId:waitId.slice(0,128),reasonCode}));}catch{}
+}
 
 function latest(ref:Readonly<CanonicalGoalWaitOwnerRef>):CanonicalGoalWaitRecord|null {
   const row=getDb().prepare(`SELECT payload_json FROM run_events WHERE run_id=? AND chat_id=? AND kind=? ORDER BY seq DESC LIMIT 1`)
@@ -140,6 +148,7 @@ export function createCanonicalGoalWaitOwner(provider:CanonicalGoalWaitOwnerProv
       api.reconcile(options.owner);
       const clock=options.clock??(()=>options.now??Date.now());
       for(const expected of candidates()) {
+        try {
         if(expected.registrationOwner.kind!==options.owner.kind || expected.registrationOwner.epoch!==options.owner.epoch)continue;
         if(expected.state==="expired") {
           const adapter=expiredStorage(expected.ref,options.owner),current=adapter.read();
@@ -207,6 +216,7 @@ export function createCanonicalGoalWaitOwner(provider:CanonicalGoalWaitOwnerProv
         dispatchWaitClaim({storage:adapter,expected:claim,owner:source.owner,
           assertStart:current=>{if(!adapter.current(current))throw new Error("goal_wait_owner_changed");},
           start:()=>provider.admitAndStart(packet!),onStarted:()=>{},failureState:"claimed",failureReason:"goal_wait_dispatch_unknown"});
+        }catch(error){deferredCandidate("poll",expected.waitId,error);}
       }
     },
     reconcile(owner) {
@@ -217,14 +227,17 @@ export function createCanonicalGoalWaitOwner(provider:CanonicalGoalWaitOwnerProv
         AND e.seq=(SELECT MAX(s.seq) FROM run_events s WHERE s.kind=e.kind AND s.run_id=e.run_id AND s.chat_id=e.chat_id) ORDER BY e.seq`)
         .all() as Array<{run_id:string;chat_id:string|null}>;
       for(const proposal of proposals) {
+        try {
         if(!proposal.chat_id)continue;
         const ref=provider.resolveSource({chatId:proposal.chat_id,sourceInvocationId:proposal.run_id});
         if(!ref || ref.chatId!==proposal.chat_id || ref.sourceInvocationId!==proposal.run_id)continue;
         const source=provider.readOwner(ref);
         if(!source || source.owner.kind!==owner.kind || source.owner.epoch!==owner.epoch)continue;
         if(!latest(ref))api.hold({ref});
+        }catch(error){deferredCandidate("proposal",proposal.run_id,error);}
       }
       for(const expected of candidates()) {
+        try {
         const adapter=expected.state==="expired"?expiredStorage(expected.ref,owner):storage(expected.ref,owner);
         if(expected.state==="expired") {
           if(expected.registrationOwner.kind!==owner.kind)continue;
@@ -262,6 +275,7 @@ export function createCanonicalGoalWaitOwner(provider:CanonicalGoalWaitOwnerProv
           if(receipt.runId!==current.successorInvocationId) throw new Error("goal_wait_receipt_identity_mismatch");
           return {next:{...current,revision:current.revision+1,state:"dispatched",wakeReason:"goal_wait_exact_successor_receipt",nextCheckAt:null}};
         }});
+        }catch(error){deferredCandidate("reconcile",expected.waitId,error);}
       }
     },
     cancelScope(scope,reason="goal_wait_owner_control") {

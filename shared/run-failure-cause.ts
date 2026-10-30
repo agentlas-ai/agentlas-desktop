@@ -42,6 +42,10 @@ export const APP_SIDE_RUN_FAILURE_FAMILIES: readonly AppSideRunFailureFamily[] =
     reason: "Channel: the background service was not ready to take turns from the app window." },
   { match: "exact", code: "native_auth_not_provisioned",
     reason: "Channel: the background service started before its signed channel was provisioned." },
+  { match: "exact", code: "automation_goal_execution_owner_changed",
+    reason: "Custody: the automation's Goal execution moved to another owner while the run was starting." },
+  { match: "exact", code: "memory_source_custody_changed",
+    reason: "Custody: the memory source was changed or forgotten by the owner while a background step read it." },
 ]);
 
 const CODE_RE = /^[A-Za-z][A-Za-z0-9_.:-]{0,95}$/;

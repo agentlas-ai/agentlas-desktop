@@ -28,6 +28,20 @@ export interface InvocationEffectBoundary {
 }
 interface EventRow { id: string; seq: number; kind: string; chat_id: string | null; agent_id?: string | null; node_id?: string | null; payload_json: string }
 const terminalKinds = new Set(["invoke_completed", "invoke_waiting", "invoke_failed", "invoke_threw", "invoke_cancelled", "invoke_interrupted"]);
+/**
+ * Every ledger kind this reader consumes as effect evidence of the invocation's own chat (the start/terminal rows, the sealed
+ * effect receipt, tool rows, adapter scopes, Science witnesses, and the audit rows a host-control observation names). A row of one
+ * of these kinds that carries another chat's id is a real binding violation. Any other kind (memory_curation, invoke_result,
+ * delegated_authority, workload_allocation, worker_capability_preparation, firm_plan_direct_execution, firm_verification_repair_round,
+ * team_step_settlement, runtime_usage_unmeasured) is a note a team member's chat or the curator wrote under the PARENT run id with
+ * the member's own chat id: it is not evidence this reader looks at and says nothing about the root chat's effects.
+ * Observed in use: those 9 kinds in 48 runs; no kind this reader consumes ever carried a foreign chat id.
+ */
+const effectEvidenceKinds = new Set([...terminalKinds, "invoke_started", "runtime_effect_boundary", "mcp_tool-use",
+  "runtime_adapter_effect_started", "runtime_adapter_effect_completed", "runtime_science_schema_rejection_verified",
+  "runtime_science_tool_correlation", "runtime_science_native_failure_observed", "workforce_schema_attempt",
+  "workforce_hub_tool_observation", "workforce_hub_tool_supersession", "workforce_leader_decision_supersession",
+  "workforce_work_order_refinement"]);
 function payload(row: EventRow): Record<string, unknown> {
   const value: unknown = JSON.parse(row.payload_json);
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("runtime_effect_boundary_event_invalid");
@@ -39,13 +53,18 @@ function payload(row: EventRow): Record<string, unknown> {
 export function readInvocationEffectBoundary(input: InvocationEffectBoundaryInput): InvocationEffectBoundary {
   for (const value of Object.values(input).filter(value => value !== undefined)) if (typeof value !== "string" || !value.trim() || value.length > 512) throw new Error("runtime_effect_boundary_identity_invalid");
   return getDb().transaction(() => {
-    const rows = getDb().prepare("SELECT id, seq, kind, chat_id, agent_id, node_id, payload_json FROM run_events WHERE run_id = ? ORDER BY seq ASC")
+    const ledger = getDb().prepare("SELECT id, seq, kind, chat_id, agent_id, node_id, payload_json FROM run_events WHERE run_id = ? ORDER BY seq ASC")
       .all(input.invocationRunId) as EventRow[];
-    const start = rows.find((row) => row.kind === "invoke_started");
+    const start = ledger.find((row) => row.kind === "invoke_started");
     if (!start || start.chat_id !== input.expectedChatId || (input.expectedSource !== undefined && payload(start).invocationSource !== input.expectedSource)) {
       throw new Error("runtime_effect_boundary_run_binding_mismatch");
     }
-    if (rows.some((row) => row.chat_id !== null && row.chat_id !== input.expectedChatId)) throw new Error("runtime_effect_boundary_event_binding_mismatch");
+    // Effect evidence of another chat under this run id is a binding violation; a team member's own bookkeeping rows are not
+    // this chat's ledger and are read past, never turned into an unreadable boundary (every wait, verification and checkpoint
+    // of a team turn used to fail on exactly this: observed in use, 10 of 102 invocations of one room).
+    const foreign = ledger.filter((row) => row.chat_id !== null && row.chat_id !== input.expectedChatId);
+    if (foreign.some((row) => effectEvidenceKinds.has(row.kind))) throw new Error("runtime_effect_boundary_event_binding_mismatch");
+    const rows = foreign.length ? ledger.filter((row) => row.chat_id === null || row.chat_id === input.expectedChatId) : ledger;
     const terminal = [...rows].reverse().find((row) => terminalKinds.has(row.kind));
     let runtimeQuiesced = terminal?.kind === "invoke_completed"
       || (terminal?.kind === "invoke_waiting" && payload(terminal).runtimeQuiesced === true);

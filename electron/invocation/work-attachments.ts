@@ -57,13 +57,11 @@ function ensureDirectory(root: string, relative: string): string {
  * The owner's attached files are copied into <cwd>/.agentlas/work-inputs/<uuid>/ for the run and removed by releaseWorkAttachmentRun,
  * which works from this process's memory. A process that dies mid-run (a crash, an update, a power cut) never reaches it, so the
  * private copies stayed in the project folder for good, where the owner may commit them. Every directory now carries a small owner
- * marker, and the next staging in that folder (and the app's start, work-inputs-startup-sweep.ts) removes the directories whose
- * owner is provably gone. A live owner is never touched: the daemon and Desktop can share a working folder.
+ * marker, and the next staging in that folder (and the app's start, work-inputs-startup-sweep.ts) considers owner liveness.
+ * Unknown ownership is retained; a missing owner process alone does not establish that every child reader has stopped.
  */
 const PROCESS_EPOCH = randomUUID();
 const OWNER_MARKER = ".agentlas-owner.json";
-/** An owner that cannot be proven alive or gone (another machine, an unreadable start time, no marker) is given this long. */
-const ORPHAN_AGE_MS = 24 * 60 * 60 * 1000;
 /** Looking at one folder costs a directory read and, for a live foreign owner, a process lookup: not more often than this. */
 const SWEEP_EVERY_MS = 60_000;
 const STAGING_DIR_NAME = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -75,7 +73,7 @@ function writeOwnerMarker(directory: string, runId: string): void {
   try {
     const marker: WorkInputOwnerMarker = { schemaVersion: 1, runId, epoch: PROCESS_EPOCH, pid: process.pid, startToken: ownProcessStartToken(), host: os.hostname(), createdAt: Date.now() };
     fs.writeFileSync(path.join(directory, OWNER_MARKER), JSON.stringify(marker), { flag: "wx", mode: 0o600 });
-  } catch { /* best effort: a directory without a marker is still reclaimed by age */ }
+  } catch { /* Without an owner marker, later sweeps must preserve the directory. */ }
 }
 
 async function readOwnerMarker(directory: string): Promise<WorkInputOwnerMarker | null> {
@@ -91,10 +89,10 @@ async function readOwnerMarker(directory: string): Promise<WorkInputOwnerMarker 
   } catch { return null; }
 }
 
-export type WorkInputSweepReason = "own_process_untracked" | "owner_gone" | "stale" | "run_live" | "owner_alive" | "young" | "identity_changed" | "unreadable";
+export type WorkInputSweepReason = "own_process_untracked" | "owner_gone" | "stale" | "run_live" | "owner_alive" | "young" | "identity_changed" | "unreadable" | "ownership_unknown";
 
-/** One staging directory: remove it only when nothing alive can still be reading it. Machine codes only. */
-async function orphanVerdict(directory: string, now: number): Promise<{ remove: boolean; reason: WorkInputSweepReason }> {
+/** Decide from the currently known owner state. The dead-owner cases still need a child-reader settlement fence. */
+async function orphanVerdict(directory: string): Promise<{ remove: boolean; reason: WorkInputSweepReason }> {
   // Looked up fresh for every directory: a run of this process that started staging meanwhile is never taken for an orphan.
   for (const record of runs.values()) if (record.directory === directory) return { remove: false, reason: "run_live" };
   const marker = await readOwnerMarker(directory);
@@ -105,8 +103,9 @@ async function orphanVerdict(directory: string, now: number): Promise<{ remove: 
     if (owner === "gone") return { remove: true, reason: "owner_gone" };
     if (owner === "alive") return { remove: false, reason: "owner_alive" };
   }
-  const since = marker ? marker.createdAt : (await fs.promises.lstat(directory)).mtimeMs;
-  return now - since > ORPHAN_AGE_MS ? { remove: true, reason: "stale" } : { remove: false, reason: "young" };
+  // Age is not evidence that an unreadable, remote, or otherwise unknown
+  // owner has stopped using the copy. Preserve it for ownership recovery.
+  return { remove: false, reason: "ownership_unknown" };
 }
 
 /**
@@ -138,7 +137,7 @@ export async function sweepOrphanedWorkInputs(cwd: string, options: { now?: numb
     try {
       const before = await fs.promises.lstat(directory);
       if (!before.isDirectory() || before.isSymbolicLink() || await fs.promises.realpath(directory) !== directory) { note("unreadable", false); continue; }
-      const verdict = await orphanVerdict(directory, now);
+      const verdict = await orphanVerdict(directory);
       if (!verdict.remove) { note(verdict.reason, false); continue; }
       const again = await fs.promises.lstat(directory);
       if (again.dev !== before.dev || again.ino !== before.ino) { note("identity_changed", false); continue; }

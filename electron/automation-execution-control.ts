@@ -23,7 +23,9 @@ export type NativeGoalStopOwner = Readonly<{ goalId: string; rootChatId: string;
   [nativeGoalStopOwnerBrand]: true }>;
 const nativeGoalOwners = new WeakMap<NativeGoalStopOwner, { goalId: string; rootChatId: string; longRunId: string }>();
 const owners = new WeakMap<AutomationGoalExecutionOwner, GoalOwner>();
-interface StopEntry { controller: AbortController; owner?: GoalOwner; definitionSnapshot?: string }
+/** parkedForLogin: the run that owned this handle ended in a browser-login wait. It executes nothing; the handle only lets Stop
+ * reach the wait's subscription. A newer run of the same automation supersedes it (see bindAutomationRunStop). */
+interface StopEntry { controller: AbortController; owner?: GoalOwner; definitionSnapshot?: string; parkedForLogin?: true }
 const controllers = new Map<string, StopEntry>();
 const automationStopGenerations = new Map<string, number>();
 interface DecisionStopEntry { identity: { goalId: string; rootChatId: string; longRunId: string }; controller: AbortController }
@@ -324,8 +326,15 @@ function currentDefinitionSnapshot(automationId: string): string | undefined {
 }
 export function bindAutomationRunStop(automationId: string, controller: AbortController,
   owner?: AutomationGoalExecutionOwner): void {
-  const prior = controllers.get(automationId);
+  let prior = controllers.get(automationId);
   const identity = owner && owners.get(owner);
+  // A parked browser-login wait keeps its Stop handle until the owner signs in. Every scheduled occurrence in that time used to
+  // fail here with automation_stop_handle_already_bound (observed in use: 10 consecutive 15-minute runs of one automation,
+  // each recorded as an error and announced) although the graph kernel is built for the newer run (login-dependent nodes report
+  // browser_login_required, other branches continue) and the wait's subscription already releases itself when a newer run took
+  // the slot. Drop only the registry relation: the wait stays durable, and it is not resumed if a newer run replaced it
+  // (subscribeGraphLoginWait: currentSource). This is the state a restart leaves (waits recovered with no handle).
+  if (prior?.parkedForLogin && prior.controller !== controller) { controllers.delete(automationId); prior = undefined; }
   if (prior && (prior.controller !== controller || prior.owner !== identity)) throw new Error("automation_stop_handle_already_bound");
   if (owner && (!identity || identity.automationId !== automationId)) refused();
   try { assertAutomationGoalExecutionOwner(owner); }
@@ -335,6 +344,11 @@ export function bindAutomationRunStop(automationId: string, controller: AbortCon
 }
 export function releaseAutomationRunStop(automationId: string, controller: AbortController): void {
   if (controllers.get(automationId)?.controller === controller) controllers.delete(automationId);
+}
+/** Mark this run's handle as held only by a parked browser-login wait (called when the run ends needing the owner's sign-in). */
+export function parkAutomationRunStop(automationId: string, controller: AbortController): void {
+  const entry = controllers.get(automationId);
+  if (entry?.controller === controller) entry.parkedForLogin = true;
 }
 /** Local preparation may observe Stop without gaining execution authority.
  * The epoch advances even when no run currently owns a Stop handle. */

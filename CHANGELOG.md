@@ -1,5 +1,24 @@
 # Changelog
 
+## 1.3.106 — 2026-10-30
+
+- Failures that came from inside the app: an owner's `/goal` message is no longer failed by its own Goal creation or by a store lock, and a message that a lock refused is started again; a team that answered is no longer shown as a failed run and full permission reaches the team's steps; a tool call whose intent is clear runs instead of being refused (oversized responses, argument-name slips, app operation names, a 5-second browser timeout); `[quiet]` bubbles and raw `NEEDS-INPUT:` lines no longer show in Hope's conversation or in automation reports, and a result that needs input is no longer judged complete; reasoning effort set on an ACP runtime (grok, kimi, cursor, copilot) is recorded as applied.
+- Goal: bookkeeping stays readable for team and failed turns; a model change during a Goal takes effect instead of being refused, and a phone's model change reaches the Goal; a team turn that left work continues by itself instead of waiting for "continue".
+- Responsiveness: the hourly 5–16 second main-thread stall is gone (a full scan of a 0.5 GB table became a 6 ms read), an automation's Stop handle no longer sticks and fails ten runs in a row, the one-minute database write lock and the repeated 50 MB context-map parse are removed.
+- Phone: a message from the phone is settled against the ledger and sent again under the same key instead of staying "unconfirmed", a message left in flight when Desktop restarts is settled or run once, the phone's acknowledgement never waits for the intent judge, and raw codes are not shown on the phone screen.
+- Models and runtimes: a pending model choice survives choosing an effort, a superseded or unreadable model choice never blocks sending, Ollama default-tag and custom API (BYOK) endpoints survive a failed read, exact runtime pins refresh without blocking Stop, provider model responses are size-bounded, and a Codex conversation carries on across a model change.
+- Browser and tools: browser sessions survive recovery and agent tools, Build and terminal agents share the native browser session and a terminal's browser approvals end with their native grant, and a browser replay is guarded against repeating a step.
+- One and Work: follow-ups keep their custody across turn handoffs, undelivered team reports are kept, attachments survive folder, metadata and staging updates, a send saved before a storage read failure is not lost, and a team proposal can be dismissed while the runtime changes.
+- Science: a Science conversation's visible rows are committed to and read from its common chat (Science schema 80 and the app store schema 138 are one-way; the Science schema can be restored to 79 with `scripts/science-v80-to-v79.cjs`), the chat's screen pack decides where its approvals and search hits show, and the Science SDK pin moves to the SDK main, and a phone's lost-reply lookup finds a direction sent on the common path.
+- Plugins: two common drug-discovery plugins (structural biology and medicinal chemistry) join the built-in set, and a daemon turn attaches the tools of a routed plugin on its first turn.
+- Reach: Calendar, Reminders, Notes and Contacts keep their scripting path.
+- Goals and tools: Goals, the Goal tree and the AGI monitor keep going on causes inside the app (an internal-cause repeat waits minutes instead of six hours, ended teammate reports no longer block verification, a revised Goal re-divides once instead of leaving a read-only panel); slow app calls answer instead of timing out; tool refusals name the field to fix and near-miss calls read plainly.
+- Runs: causes inside the app no longer end a run as failed or show raw host text; a read-only turn whose tool calls were all denied gets one answer-only re-run; a Codex or ACP turn whose stored session cannot reopen starts a fresh session seeded with the history; parked teammate reports reach One promptly.
+- Store: Goal ledger and steer queue writes wait for the database lock instead of failing "database is locked", and the v136 and v137 upgrade steps no longer stop on an older store shape.
+- Update feed: the feed's target schema matches the store (138).
+
+This release binds Agentlas OS v1.2.71 at 54a446cf3a9320409a712d0347afde2bb99d43d1; public runtime asset `hephaestus-runtime-v1.2.71.tar.gz` is pinned at SHA-256 `5d9ff2743a32de44d82d2fc97db67aba628fdd84791869c8244278d98179b084`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.105 — 2026-10-29
 
 - Owner messages: the owner's message is never refused because of the state of its chat (a Goal that is waiting, a paused or stopped chat), and a direction the turn never took is now sent instead of being dropped. One takes messages through the same intake.

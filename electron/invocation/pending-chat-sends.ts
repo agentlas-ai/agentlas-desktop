@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { McpInvocationRequest } from "../../shared/types";
+import { followupRequestJson } from "../../shared/followup-custody";
 import {
   TRANSIENT_SEND_DEADLINE_MS,
   isTransientRunFailureCode,
@@ -62,10 +63,24 @@ export interface PendingSendRecord {
   userRow: unknown | null;
   /** The run that took the message (from "starting" on); null while queued. */
   runId: string | null;
+  request: McpInvocationRequest;
 }
 
 /** A settled run's placement, from durable facts only (turn-placement.ts; a completed run counts as placed). */
 export type PendingSendPlacement = "placed" | "not-dispatched" | "unconfirmed";
+
+/** Main may mint this only for its own failed store read before calling the
+ * original source. A provider error string or lost ACK cannot grant retry. */
+export class PendingSendSourceReadBusy extends Error {
+  private constructor(readonly sqliteCode: string) {
+    super("pending_send_source_read_busy");
+  }
+  static from(error: unknown): PendingSendSourceReadBusy | null {
+    const code = (error as {code?:unknown})?.code;
+    return typeof code === "string" && ["SQLITE_BUSY","SQLITE_BUSY_RECOVERY","SQLITE_BUSY_SNAPSHOT","SQLITE_BUSY_TIMEOUT",
+      "SQLITE_LOCKED","SQLITE_LOCKED_SHAREDCACHE","SQLITE_LOCKED_VTAB"].includes(code) ? new PendingSendSourceReadBusy(code) : null;
+  }
+}
 
 export interface PendingChatSendsDeps<Sender> {
   db: PendingSendDb;
@@ -112,6 +127,9 @@ export interface PendingChatSendsDeps<Sender> {
   start(sender: Sender, request: McpInvocationRequest, userRow: unknown | null, sendId: string): Promise<unknown>;
   /** A Main custody adapter can veto a transient retry whose effect is unknown. */
   reserveStart?(sendId: string, request: McpInvocationRequest, markStarting: () => void): void;
+  /** V2 follow-up custody reserves its cancellation target before the first
+   * asynchronous source wait. Legacy plain sends retain their prior contract. */
+  reservePlainStart?(sendId: string, request: McpInvocationRequest, markStarting: () => void): void;
   canRetryStart?(request: McpInvocationRequest, runId: string): boolean;
   onPlaced?(sendId: string, runId: string): void;
   /**
@@ -232,6 +250,7 @@ export function createPendingChatSends<Sender>(deps: PendingChatSendsDeps<Sender
     attempts: row.attempts, lastCode: row.last_code, createdAt: row.created_at,
     userRow: row.user_row_json ? JSON.parse(row.user_row_json) as unknown : null,
     runId: row.run_id ?? null,
+    request: JSON.parse(row.request_json) as McpInvocationRequest,
   });
 
   /*
@@ -359,7 +378,11 @@ export function createPendingChatSends<Sender>(deps: PendingChatSendsDeps<Sender
    */
   function recordStart(row: Row, runId: string): boolean {
     for (let attempt = 0; attempt < START_RECORD_TRIES; attempt += 1) {
-      try { recordStarted.run(runId, deps.now(), row.id); unrecorded.delete(row.id); return true; }
+      try {
+        const current = byId.get(row.id) as Row | undefined;
+        if (!current || !["queued","starting"].includes(current.state)) { unrecorded.delete(row.id); return true; }
+        recordStarted.run(runId, deps.now(), row.id); unrecorded.delete(row.id); return true;
+      }
       catch { /* a locked or full store: try again, then keep the run in memory */ }
     }
     if (!unrecorded.has(row.id)) deps.log?.("pending send admitted, record deferred", { chatId: row.chat_id, sendId: row.id, runId });
@@ -451,18 +474,37 @@ export function createPendingChatSends<Sender>(deps: PendingChatSendsDeps<Sender
         }
         const rec = record(row);
         let startedRunId = "";
+        let attemptedRunId: string | undefined;
         try {
           // Every attempt is a new run: a refused start has already closed its own admission.
           const runId = randomUUID();
+          attemptedRunId = runId;
           if (request.oneAttachmentRef || request.oneTeamPreflightRef) {
             const markStarting = () => { setStarting.run(runId, deps.now(), row.id); };
             if (deps.reserveStart) deps.reserveStart(row.id,{...request,runId},markStarting);
             else markStarting();
-          }
+          } else deps.reservePlainStart?.(row.id,{...request,runId},() => { setStarting.run(runId,deps.now(),row.id); });
           const answer = await deps.start(sender as Sender, { ...request, runId }, rec.userRow, row.id);
           startedRunId = answer && typeof (answer as { runId?: unknown }).runId === "string" ? (answer as { runId: string }).runId : runId;
         } catch (cause) {
           const code = sendRefusalCode(cause);
+          const current = byId.get(row.id) as Row | undefined;
+          // Stop may run while start awaits. Its exact held row and known run
+          // identity win over late success/refusal, including transient errors.
+          if (!current || !["queued","starting"].includes(current.state)) { senders.delete(row.id); continue; }
+          if (cause instanceof PendingSendSourceReadBusy && attemptedRunId) {
+            // This caller never entered its source. Preserve FIFO and input;
+            // store availability is not a model refusal and has no deadline.
+            // If this write is locked too, the outer pump retries observation;
+            // a restart never guesses about an unrecorded v2 closure.
+            const delay = transientSendBackoffMs(row.attempts);
+            deps.db.prepare(`UPDATE pending_chat_sends SET state='queued',run_id=NULL,last_code=?,attempts=attempts+1,
+              refused_since=NULL,not_before=?,updated_at=? WHERE id=? AND state IN ('queued','starting')
+              AND (run_id IS NULL OR run_id=?)`).run(cause.message,deps.now()+delay,deps.now(),row.id,attemptedRunId);
+            deps.log?.("pending send waits for source store",{chatId,sendId:row.id,code:cause.sqliteCode});
+            kick(chatId,delay);
+            return;
+          }
           // A source may report a native failure after delivery. Queue transport
           // is already complete; its separate run receipt owns the failure UI.
           const failedRun=(byId.get(row.id) as Row).run_id;
@@ -478,6 +520,7 @@ export function createPendingChatSends<Sender>(deps: PendingChatSendsDeps<Sender
           let refusedSender = false;
           try { refusedSender = deps.senderRefused?.(cause) === true; } catch { refusedSender = false; }
           if (refusedSender) {
+            deps.db.prepare("UPDATE pending_chat_sends SET run_id=NULL WHERE id=?").run(row.id);
             setState.run("queued", null, deps.now(), row.id);
             senders.delete(row.id);
             deps.log?.("pending send waits for a usable window", { chatId, sendId: row.id, code });
@@ -485,6 +528,7 @@ export function createPendingChatSends<Sender>(deps: PendingChatSendsDeps<Sender
             return;
           }
           if (isTransientSendRefusal(cause) && (!deps.canRetryStart || deps.canRetryStart(request, (byId.get(row.id) as Row).run_id ?? ""))) {
+            deps.db.prepare("UPDATE pending_chat_sends SET run_id=NULL WHERE id=?").run(row.id);
             setState.run("queued", null, deps.now(), row.id);
             setAttempt.run(code ?? null, deps.now(), deps.now(), row.id);
             const base = transientSendBackoffMs(row.attempts);
@@ -537,10 +581,16 @@ export function createPendingChatSends<Sender>(deps: PendingChatSendsDeps<Sender
      * Accept the message: save its transcript row, persist the request, and start the drain. Returns at once.
      * `cause` is the refusal that sent it here (logged, never shown).
      */
-    enqueue(sender: Sender, request: McpInvocationRequest, options: { intentId?: string; cause?: unknown } = {}): PendingSendRecord {
+    enqueue(sender: Sender, request: McpInvocationRequest, options: { intentId?: string; cause?: unknown; userRow?: unknown; requireUserRow?: boolean } = {}): PendingSendRecord {
+      const prior = options.intentId ? byIntent.get(request.chatId, options.intentId) as Row | undefined : undefined;
+      if (prior) {
+        if (followupRequestJson(JSON.parse(prior.request_json) as McpInvocationRequest) !== followupRequestJson(request)) throw new Error("pending_send_identity_conflict");
+        return record(prior);
+      }
       const id = randomUUID();
       let userRow: unknown | null = null;
-      try { userRow = deps.saveUserRow(request); } catch { userRow = null; }
+      try { userRow = options.userRow ?? deps.saveUserRow(request); } catch (error) { if (options.requireUserRow) throw error; }
+      if (options.requireUserRow && (!userRow || typeof (userRow as {id?:unknown}).id !== "string")) throw new Error("pending_send_message_custody_missing");
       const now = deps.now();
       const stored = { ...request, runId: undefined };
       insert.run(id, request.chatId, options.intentId ?? null, JSON.stringify(stored),

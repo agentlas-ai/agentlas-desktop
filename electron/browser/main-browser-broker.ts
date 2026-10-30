@@ -5,6 +5,7 @@ import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import type { NativeBrowserRelayGrant, NativeBrowserRelayHealth, NativeBrowserRelayPage } from "./native-cdp-relay";
 import type { CanonicalNativeBrowserGrantInput, NativeBrowserDaemonBinding, NativeBrowserMainCapability } from "./main-browser-channel";
 import type { LoginRecoveryOutcome, LoginPrerequisiteRef } from "./login-recovery";
+import { registerTerminalBrowserApprovalScope } from "./approval-authority";
 
 const MAX_REQUEST = 128 * 1024;
 const MAX_GRANTS = 8;
@@ -149,12 +150,18 @@ export async function startMainBrowserBroker(options: {
       else if (operation === "grant") {
         if (!safeId(body.chatId) || !safeId(body.runId) || !["read", "write", "full"].includes(String(body.permission))
           || !["foreground", "background"].includes(String(body.presentation)) || typeof body.screenshots !== "boolean"
+          || (body.terminalApprovalHash !== undefined && (typeof body.terminalApprovalHash !== "string"
+            || !/^[a-f0-9]{64}$/.test(body.terminalApprovalHash)))
+          || ((body.terminalApprovalHash === undefined) !== (body.terminalApprovalLeaseId === undefined))
+          || (body.terminalApprovalLeaseId !== undefined && !safeId(body.terminalApprovalLeaseId))
           || candidate.grants.has(id) || candidate.grants.size >= MAX_GRANTS) throw new Error("native-browser-broker-payload-invalid");
         if (candidate.cancelled.has(id)) throw new Error("native-browser-grant-revoked");
         pendingId = id;
         const entry: Entry = { controller: new AbortController(), grant: null, chatId: body.chatId, runId: body.runId,
           expiresAt: now() + 20_000, sequence: 0, pages: new Map() };
         candidate.grants.set(id, entry);
+        if (typeof body.terminalApprovalHash === "string") registerTerminalBrowserApprovalScope(body.terminalApprovalHash,
+          { chatId: body.chatId, runId: body.runId, leaseId: body.terminalApprovalLeaseId as string, signal: entry.controller.signal });
         const disconnect = () => { if (!res.writableEnded) release(candidate, id); };
         res.once("close", disconnect);
         const grant = await options.createGrant({ chatId: body.chatId, runId: body.runId,

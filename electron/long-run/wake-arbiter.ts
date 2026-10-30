@@ -111,8 +111,16 @@ function tellBudgetOnce(runId: string, chatId: string, window: { count: number; 
 export const SAME_CAUSE_WAKE_REASON = "same_cause_backoff";
 /** Wait before the same move after the 1st and the 2nd consecutive failure with one cause. */
 export const SAME_CAUSE_RETRY_DELAYS_MS: readonly number[] = [5 * 60_000, 30 * 60_000];
-/** After the same move was made twice for one cause: the Goal waits with that cause and looks again at this spacing. */
+/** After the same move was made twice for one cause: the Goal waits with that cause and looks again at this spacing. This long
+ * wait is for a cause outside the app (the provider's typed quota, rate limit or sign-in failure): nothing the app does shortens it. */
 export const SAME_CAUSE_WAIT_MS = 6 * 60 * 60_000;
+/** A cause inside the app (its own bookkeeping, a team verifier, a runtime-selection check ...) is ours to heal, so after the two
+ * steps above it keeps a bounded spacing instead of the external wait. Observed in use: of 480
+ * counted Goal wakes only 1 failed on an external cause, yet the Goals sat 6 h at a time on task-force-verification-failed,
+ * one-team-runtime-selection-changed and runtime_turn_unsettled (run_2e7c4394 "shorts two a day": 00:57->06:57->13:01->19:05->01:10). */
+export const SAME_CAUSE_INTERNAL_WAIT_MS = 60 * 60_000;
+/** Typed provider failures (marker / exit evidence, never a heuristic guess) that only time or the owner can change. */
+const EXTERNAL_FAILURE_KINDS: ReadonlySet<string> = new Set(["quota", "rate_limit", "auth"]);
 const SAME_CAUSE_SCAN_LIMIT = 12;
 const PROCESS_STARTED_AT = new Date(Date.now() - Math.round(process.uptime() * 1000)).toISOString();
 const TERMINAL_KINDS = ["invoke_completed", "invoke_failed", "invoke_cancelled", "invoke_interrupted", "invoke_threw"] as const;
@@ -123,6 +131,8 @@ export interface SameCauseWakeHold {
   failures: number;
   lastFailedAt: string;
   retryAt: string;
+  /** The newest failure was the provider's typed quota / rate-limit / auth failure (the long wait applies). */
+  external?: boolean;
 }
 
 /** Consecutive failed host starts of this Goal with one machine cause, newest first; null when the last one did not fail. */
@@ -133,25 +143,28 @@ export function sameCauseFailureStreak(runId: string, chatId: string, now = Date
     .all(chatId, GOAL_WAKE_EVENT_KIND, floor, runId, SAME_CAUSE_SCAN_LIMIT) as Array<{ invocationRunId: string }>;
   const terminalOf = getDb().prepare(`SELECT kind, ts, payload_json FROM run_events WHERE run_id = ? AND kind IN (${TERMINAL_KINDS.map(() => "?").join(",")})
     ORDER BY seq DESC LIMIT 1`);
-  let cause: string | null = null, failures = 0, lastFailedAt: string | null = null;
+  let cause: string | null = null, failures = 0, lastFailedAt: string | null = null, external = false;
   for (const wake of wakes) {
     const terminal = terminalOf.get(wake.invocationRunId, ...TERMINAL_KINDS) as { kind: string; ts: string; payload_json: string } | undefined;
     if (!terminal || (terminal.kind !== "invoke_failed" && terminal.kind !== "invoke_threw")) break;
-    let payload: { errorCode?: unknown; hostStopCause?: unknown } = {};
+    let payload: { errorCode?: unknown; hostStopCause?: unknown; runtimeFailureKind?: unknown; runtimeFailureSource?: unknown } = {};
     try { payload = JSON.parse(terminal.payload_json); } catch { /* an unreadable receipt is still a failure */ }
     if (payload.hostStopCause) break; // the app or the owner stopped it: not the move failing
     const code = typeof payload.errorCode === "string" && /^[A-Za-z0-9_.:-]{1,120}$/.test(payload.errorCode) ? payload.errorCode : "invoke_failed_uncoded";
     if (cause !== null && code !== cause) break;
+    // Newest failure decides: the provider reported it itself (typed kind from a marker or the exit), not a heuristic reading of prose.
+    if (cause === null) external = typeof payload.runtimeFailureKind === "string" && EXTERNAL_FAILURE_KINDS.has(payload.runtimeFailureKind)
+      && payload.runtimeFailureSource !== "heuristic";
     cause = code; failures += 1; lastFailedAt ??= terminal.ts;
   }
-  return cause && lastFailedAt ? { cause, failures, lastFailedAt } : null;
+  return cause && lastFailedAt ? { cause, failures, lastFailedAt, external } : null;
 }
 
 /** When the same move may next be made for this Goal; null = now. */
 export function sameCauseWakeHold(runId: string, chatId: string, now = Date.now()): SameCauseWakeHold | null {
   const streak = sameCauseFailureStreak(runId, chatId, now);
   if (!streak) return null;
-  const delay = SAME_CAUSE_RETRY_DELAYS_MS[streak.failures - 1] ?? SAME_CAUSE_WAIT_MS;
+  const delay = SAME_CAUSE_RETRY_DELAYS_MS[streak.failures - 1] ?? (streak.external ? SAME_CAUSE_WAIT_MS : SAME_CAUSE_INTERNAL_WAIT_MS);
   const retryAt = Date.parse(streak.lastFailedAt) + delay;
   return Number.isFinite(retryAt) && retryAt > now ? { ...streak, retryAt: new Date(retryAt).toISOString() } : null;
 }

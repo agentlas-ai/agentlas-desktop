@@ -77,10 +77,17 @@ export async function createNativeInvocationRuntime(options: NativeInvocationRun
     if(aliveOwnerBinding!==binding){alive?.close();alive=undefined;aliveOwnerBinding=binding;}
     return alive??(alive=createDaemonAliveDecisionPort({db:getDb(),bootId:options.bootId,
     assertOwner:options.assertOwner,ownerBinding:agentContextOwnerBinding,now:Date.now,
-    async resolveRuntime(choice){
-      const status=(await detectRuntimes()).find(value=>value.kind===choice.kind
+    async resolveRuntime(choice, signal, assertCurrent){
+      const exact=(value: import("../../shared/types").RuntimeStatus)=>value.kind===choice.kind
         && (value.backend??null)===choice.backend && (value.source??null)===choice.source
-        && (choice.kind!=="acp" || value.acpAgentId===choice.acpAgentId));
+        && (choice.kind!=="acp" || value.acpAgentId===choice.acpAgentId);
+      assertCurrent();
+      let status=(await detectRuntimes(false, signal)).find(exact);
+      if(!status){
+        assertCurrent();
+        status=(await detectRuntimes(true, signal)).find(exact);
+      }
+      assertCurrent();
       if(!status)return null;
       const selected={...status,model:choice.model};
       const picked=selected.kind==="agentlas"?{runner:withAgentContext(runAliveServingDecision,{kind:"agentlas"}),label:"Agentlas"}:pickRunner(selected);
@@ -140,6 +147,18 @@ export async function createNativeInvocationRuntime(options: NativeInvocationRun
   async function dispatch(method: string, params: unknown, peer: ControlSocketPeer): Promise<unknown> {
     options.assertOwner();
     if (method === "native.attach") {
+      if (params && typeof params === "object" && (params as {version?:unknown}).version === "agentlas.followup-custody.v2") {
+        current(peer);
+        if (!exact(params,["version","chatId","intentId","requestHash"]) || typeof params.chatId !== "string"
+          || typeof params.intentId !== "string" || typeof params.requestHash !== "string") fail("native_followup_custody_invalid");
+        // A content-free challenge proves this exact authenticated owner sees
+        // Main's original capture in the same SQLite authority as its intake.
+        const row = getDb().prepare("SELECT request_hash,request_json,origin_run_id FROM invocation_followup_custody WHERE intent_id=? AND chat_id=?")
+          .get(params.intentId,params.chatId) as {request_hash:string;request_json:string;origin_run_id:string}|undefined;
+        if (!row || row.request_hash !== params.requestHash) fail("native_followup_custody_store_mismatch");
+        return {version:"agentlas.followup-custody.v2",bootId:options.bootId,chatId:params.chatId,intentId:params.intentId,requestHash:row.request_hash,
+          currentTurnCompatible:options.service.followupCurrentTurnMatches(params.chatId,row.origin_run_id,JSON.parse(row.request_json))};
+      }
       if (params && typeof params === "object" && (params as {version?:unknown}).version === "agentlas.native-observation-reset.v1") {
         const record = current(peer);
         if (!exact(params, ["version"])) fail("native_observation_reset_invalid");

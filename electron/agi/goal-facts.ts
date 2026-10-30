@@ -57,6 +57,8 @@ export interface AgiGoalFactsDeps {
   continuationParkedForOwner?(goalId: string): boolean;
   /** A pending tool approval in the goal chat (an owner consent, surfaced by its own card). */
   pendingApproval?(chatId: string): boolean;
+  /** The room can hand work to teammates (One's own conversation). Absent: unknown, the teammate paths stay. */
+  teamAvailable?(chatId: string): boolean;
 }
 
 export interface AgiGoalRow {
@@ -233,6 +235,34 @@ function continuationRefusedSignal(db: Database.Database, run: AgiGoalRow, nowMs
   let cause = "unknown";
   try { const details = row.details ? JSON.parse(row.details) as { cause?: unknown } : null; cause = continuationRefusalCause(details?.cause); } catch { /* unknown */ }
   return { signal: { kind: "continuation_refused", continuation, code: cause }, ref: `run_event:${row.id}` };
+}
+
+/**
+ * How long after the host queued or dispatched a Goal's next turn the AGI leaves it to the host. The blocked-goal sweep re-queues a
+ * due retry (status_changed to queued, reason same_cause_backoff:*), resumes it seconds later (resume-dispatched) and the controller
+ * attempt begins a second after that. The Goal's earlier failures are still the typed signals in that window, so the AGI claimed an
+ * attempt (a paid model call) the instant the host started the retry, and every action of it was refused agi.action.state-changed
+ * when the Goal woke: observed in use, 10 of the 11 attempts whose fence moved were this, one per sweep retry. A turn that
+ * has not begun after the grace is not being started by anyone, and the AGI looks at it again.
+ */
+export const AGI_HOST_START_GRACE_MS = 2 * 60_000;
+
+/**
+ * When the host is starting this Goal's next turn: the moment until which the AGI holds back, else null. The newest status change is
+ * the host queueing the Goal (to queued) or resuming it (resume-dispatched), it is younger than the grace, and no worker attempt has
+ * started since (a running attempt makes the room busy, which holds the AGI on its own).
+ */
+function hostStartingUntil(db: Database.Database, run: AgiGoalRow, nowMs: number): number | null {
+  if (run.status !== "queued" && run.status !== "running") return null;
+  const last = db.prepare(`SELECT seq, occurred_at AS at, json_extract(payload_json, '$.to') AS toStatus, json_extract(payload_json, '$.reason') AS reason
+    FROM long_run_events WHERE run_id = ? AND kind = 'run.status_changed' ORDER BY seq DESC LIMIT 1`)
+    .get(run.id) as { seq: number; at: string; toStatus: string | null; reason: string | null } | undefined;
+  if (!last || !(last.toStatus === "queued" || last.reason === "resume-dispatched")) return null;
+  if (last.toStatus !== run.status) return null;
+  const at = Date.parse(last.at);
+  if (!Number.isFinite(at) || nowMs - at >= AGI_HOST_START_GRACE_MS) return null;
+  const began = db.prepare("SELECT 1 FROM long_run_events WHERE run_id = ? AND kind = 'worker.attempt_started' AND seq > ? LIMIT 1").get(run.id, last.seq);
+  return began ? null : at + AGI_HOST_START_GRACE_MS;
 }
 
 /** How many of the Goal's own wakes in a row must fail with one typed code before it is a repeated failure, not a retry. */
@@ -419,8 +449,11 @@ export function readAgiBlockerFacts(deps: AgiGoalFactsDeps, goalId: string): Agi
     : false;
   const terminal = ["completed", "failed", "cancelled", "cancelling"].includes(run.status);
   const latest = goalTurnReceipt(deps, run.id, run.rootChatId);
+  // The host is starting the next turn right now (a due retry re-queued, a resume dispatched): the Goal's earlier failures are not
+  // a blocker of this moment, and an attempt started now only has its actions refused when the turn begins.
+  const startingUntil = !terminal && !busy && !heldByOwner ? hostStartingUntil(db, run, deps.nowMs()) : null;
   if (heldByOwner && !terminal) signals.push({ kind: "owner_pause" });
-  if (!terminal && !busy && !heldByOwner) {
+  if (!terminal && !busy && !heldByOwner && startingUntil === null) {
     if ((run.status === "paused" && run.pauseReason === "user") || ((run.status === "paused" || run.status === "blocked") && ownerHold(db, run.id))) {
       signals.push({ kind: "owner_pause" });
     } else {
@@ -475,15 +508,18 @@ export function readAgiBlockerFacts(deps: AgiGoalFactsDeps, goalId: string): Agi
   // The stall stays a host fact; it is not an AGI incident. Applied after the quiet baseline so that comparison is unchanged.
   const hostWait = !terminal && !heldByOwner && !busy && signals.some(signal => signal.kind === "stall_detected") ? registeredHostWait(db, run) : null;
   const current = quiet ? [] : hostWait ? signals.filter(signal => signal.kind !== "stall_detected") : signals;
-  const heldBy: AgiBlockerFacts["heldBy"] = terminal || heldByOwner ? undefined : busy ? "chat_busy" : hostWait ? "host_wait" : undefined;
-  return { goalId, chatId: run.rootChatId, ...wake, ...(heldBy ? { heldBy } : {}),
+  const heldBy: AgiBlockerFacts["heldBy"] = terminal || heldByOwner ? undefined : busy ? "chat_busy" : startingUntil !== null ? "host_start" : hostWait ? "host_wait" : undefined;
+  // Look again the moment the grace ends (the one-minute beat would otherwise be the first look).
+  const nextWakeAtMs = startingUntil !== null && !(wake.nextWakeAtMs! <= startingUntil) ? startingUntil : wake.nextWakeAtMs;
+  return { goalId, chatId: run.rootChatId, ...wake, nextWakeAtMs, ...(heldBy ? { heldBy } : {}),
     fenceState: JSON.stringify([wake.fenceState, latest?.runId ?? null, latest?.status ?? null, plan.readiness?.mutationIdentity ?? null]),
     repairInFlight: busy || isGoalObserving(goalId), runId: run.id, runVersion: run.version, status: busy && !terminal && !heldByOwner ? "running" : run.status,
     pauseReason: run.pauseReason, blockedReason: run.blockedReason,
     // Audit rows and evidence refs remain intact. Only baseline blockers already
     // superseded by this exact registered wait leave the current diagnosis.
     signals: current, tactics: plan.tactics, planReadiness: plan.readiness,
-    blockedNodeId: plan.blockedNodeId, evidenceRefs: refs, continuationAutomation: hasContinuationAutomation(db, goalId) };
+    blockedNodeId: plan.blockedNodeId, evidenceRefs: refs, continuationAutomation: hasContinuationAutomation(db, goalId),
+    ...(run.rootChatId && deps.teamAvailable ? { teamAvailable: (() => { try { return deps.teamAvailable!(run.rootChatId!); } catch { return true; } })() } : {}) };
 }
 
 /**

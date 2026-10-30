@@ -30,6 +30,13 @@ const NON_GIT_IGNORED_DIRS = new Set([
 // avoid a full Core scan on every turn while reopening the refresh gate as soon
 // as tracked or untracked source changes are observed.
 const refreshTriggered = new Map<string, string>();
+// A refresh that failed (a 15 s timeout on a 209k-file project, or a map that is not canonical afterwards) was retried on the very next
+// context build, killed again at 15 s and so on: 150 failed refreshes in 40 h on one project (observed in use). A failed
+// project now waits 5 min, doubling to 6 h, before another child is spawned; slices keep being served from the last map
+// (`--allow-stale`), and a success clears the wait.
+const REFRESH_FAILURE_BASE_MS = 5 * 60_000;
+const REFRESH_FAILURE_CAP_MS = 6 * 60 * 60_000;
+const refreshFailures = new Map<string, { failures: number; until: number }>();
 const sourceSignatureJobs = new Map<string, SharedJob<string>>();
 const refreshJobs = new Map<string, SharedJob<boolean>>();
 
@@ -380,7 +387,29 @@ async function contextLaunch(args: string[], signal?: AbortSignal): Promise<{
       };
 }
 
+// hasCanonicalCodeMap reads and JSON.parses the whole project map on Main to check a handful of header fields (50 MB / ~0.15-0.3 s of
+// Main per context build on the owner's largest project). The verdict only depends on the two files, so it is remembered per file
+// identity (size + mtime of the map and its manifest) and recomputed exactly when either changes.
+const canonicalMapVerdicts = new Map<string, { stamp: string; valid: boolean }>();
+async function canonicalMapStamp(projectPath: string): Promise<string | null> {
+  try {
+    const dir = path.join(projectPath, ".agentlas", "code-map");
+    const [map, manifest] = await Promise.all([fs.promises.stat(path.join(dir, "project-map.json")), fs.promises.stat(path.join(dir, "manifest.json"))]);
+    return `${map.size}:${map.mtimeMs}:${manifest.size}:${manifest.mtimeMs}`;
+  } catch { return null; }
+}
 async function hasCanonicalCodeMap(projectPath: string): Promise<boolean> {
+  const stamp = await canonicalMapStamp(projectPath);
+  const known = canonicalMapVerdicts.get(projectPath);
+  if (stamp && known?.stamp === stamp) return known.valid;
+  const valid = await readCanonicalCodeMap(projectPath);
+  // A file that changed while it was read is not remembered: the stamp must be the same before and after.
+  if (stamp && stamp === await canonicalMapStamp(projectPath)) canonicalMapVerdicts.set(projectPath, { stamp, valid });
+  else canonicalMapVerdicts.delete(projectPath);
+  return valid;
+}
+
+async function readCanonicalCodeMap(projectPath: string): Promise<boolean> {
   try {
     const payload = JSON.parse(
       await fs.promises.readFile(
@@ -509,6 +538,7 @@ export async function triggerProjectContextMapRefresh(
     && !options.signal?.aborted
     && verifyActivatedFolderIdentity(projectPath)
   ) return true;
+  if ((refreshFailures.get(projectPath)?.until ?? 0) > Date.now()) return false;
   const signatureDigest = createHash("sha256").update(sourceSignature).digest("hex");
   const key = `${projectPath}\0${signatureDigest}`;
   const job = createSharedJob(refreshJobs, key, async (jobSignal) => {
@@ -544,6 +574,11 @@ export async function triggerProjectContextMapRefresh(
       if (!canonical) {
         if (refreshTriggered.get(projectPath) === sourceSignature) refreshTriggered.delete(projectPath);
         if (!result.aborted) {
+          const failures = (refreshFailures.get(projectPath)?.failures ?? 0) + 1;
+          refreshFailures.set(projectPath, { failures,
+            until: Date.now() + Math.min(REFRESH_FAILURE_CAP_MS, REFRESH_FAILURE_BASE_MS * 2 ** Math.min(failures - 1, 10)) });
+        }
+        if (!result.aborted) {
           console.warn(
             `[memory] context-map refresh failed (${projectPath}): `
             + JSON.stringify(contextRefreshFailure(result, projectIdentityValid, canonicalMapValid)),
@@ -552,6 +587,7 @@ export async function triggerProjectContextMapRefresh(
         return false;
       }
       refreshTriggered.set(projectPath, sourceSignature);
+      refreshFailures.delete(projectPath);
       return true;
     } catch {
       if (refreshTriggered.get(projectPath) === sourceSignature) refreshTriggered.delete(projectPath);

@@ -1893,6 +1893,12 @@ export interface Chat {
   originSurface?: "one" | "work";
   /** Exact chat-scoped orchestrator pin. null means follow the role default. */
   runtimeSelection?: RuntimeSelection | null;
+  /**
+   * The screen pack that shows this chat (PLAN Science S6): "science" for a Science conversation's common record. Its own
+   * screen lists it; Work lists never do (they list `user` chats), and One and the phone label it with the pack. Absent on
+   * ordinary Work/One chats and on older hosts.
+   */
+  surfacePack?: string;
   /** 좌석 상호참조 — 끊길 수 있는 참조(좌석 해체·소멸 후에도 세션은 유효). */
   seatId?: string | null;
   /** 좌석 표시 스냅샷(쓰는 시점 기록) — 좌석 테이블 조인 없이 이 칸만으로 렌더한다. */
@@ -4828,6 +4834,10 @@ export interface InvocationCurrentTurnSteerRequest {
   intentId: string;
   expectedRunId: string;
   text: string;
+  /** Exact frozen owner request for a same-intent next-turn handoff. */
+  fallbackRequest?: McpInvocationRequest;
+  /** Only an explicit owner recovery action may resume a stopped input. */
+  resume?: true;
 }
 
 /** Main's durable receipt distinguishes intake from native application. */
@@ -4839,6 +4849,11 @@ export interface InvocationCurrentTurnSteerReceipt {
   messageId: string;
   status: "queued" | "dispatching" | "applied" | "rejected" | "uncertain";
   code?: string;
+  receiptVersion?: 2;
+  requestHash?: string;
+  origin?: { kind: "current-turn"; runId: string } | { kind: "legacy-unconfirmed" };
+  delivery?: { kind: "current-turn"; runId: string } | { kind: "next-turn"; queueId: string; runId?: string };
+  messageCustody?: "exact" | "unconfirmed";
 }
 
 export interface InvocationSteerResult {
@@ -4858,6 +4873,10 @@ export interface InvocationSteerResult {
   intentId?: string;
   /** Durable handoff state, not the eventual model-run completion state. */
   status?: "queued" | "draining" | "started" | "cancelled" | "failed" | "held";
+  receiptVersion?: 2;
+  requestHash?: string;
+  messageId?: string;
+  messageCustody?: "exact" | "unconfirmed";
 }
 
 export interface MobileBridgeDeviceSummary {
@@ -8895,6 +8914,7 @@ export interface AgentlasIpc {
   invoke: {
     /** Current harness invocation only; never silently starts a replacement run. */
     steerCurrentTurn: (input: InvocationCurrentTurnSteerRequest) => Promise<InvocationCurrentTurnSteerReceipt>;
+    followupCustodyVersion: () => Promise<2>;
     currentTurnSteerReceipt: (input: { chatId: string; intentId: string }) => Promise<InvocationCurrentTurnSteerReceipt | null>;
     currentTurn: (chatId: string) => Promise<{ runId: string } | null>;
     replay: (input: import("./run-event-delivery").RunEventReplayInput) => Promise<import("./run-event-delivery").RunEventReplay>;

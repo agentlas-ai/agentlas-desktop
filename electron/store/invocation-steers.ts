@@ -294,7 +294,8 @@ export function hasQueuedOwnerSteer(chatId: string): boolean {
   });
 }
 
-/** The current original host guard runs inside the same canonical queue CAS. */
+/** The current original host guard runs inside the same canonical queue CAS. IMMEDIATE: the CAS reads then writes, and a
+ * deferred one is refused at once (SQLITE_BUSY) when the other process wrote in between. */
 export function beginQueuedSteerDrain(id: string, drainedRunId: string, reportGuard?: (row: DurableQueuedSteer) => boolean): boolean {
   const db=getDb();return db.transaction(()=>{
     const raw=db.prepare("SELECT * FROM invocation_steers WHERE id=? AND status IN ('queued','draining') AND recovery_state='ready'").get(id) as Row|undefined;
@@ -303,7 +304,7 @@ export function beginQueuedSteerDrain(id: string, drainedRunId: string, reportGu
     if(row.request.oneTeamReportTurn===true && (!reportGuard || !reportGuard(row))){holdQueuedSteerForRecovery(id,"one-team-report-owner-unbound");return false;}
     return db.prepare(`UPDATE invocation_steers SET status='draining',drained_run_id=?,updated_at=?
       WHERE id=? AND status IN ('queued','draining') AND recovery_state='ready'`).run(drainedRunId,new Date().toISOString(),id).changes===1;
-  })();
+  }).immediate();
 }
 /** Seal unknown legacy only after actual host proof; known custody never changes. */
 export function bindQueuedTeamReportCustody(id:string,custody:QueuedTeamReportCustody):boolean {

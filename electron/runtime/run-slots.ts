@@ -54,9 +54,31 @@ function queuedCount(): number {
 }
 
 /** Owner: any free slot, or the reserved one while other work holds slots. Others: a free slot only. */
+let concurrencySettingUnavailable = false;
+/** The configured CLI minimum is one; a failed settings read may reduce capacity, never increase it. */
+function concurrencyLimit(): number {
+  try {
+    const limit = getAgentConcurrency();
+    if (concurrencySettingUnavailable) try { console.info("[run-slots]", JSON.stringify({ code: "runtime_concurrency_setting_restored" })); } catch { /* Diagnostics cannot refuse admission. */ }
+    concurrencySettingUnavailable = false;
+    return limit;
+  } catch (error) {
+    if (!concurrencySettingUnavailable) {
+      let causeCode = "unknown";
+      try {
+        const rawCode = error && typeof error === "object" ? Object.getOwnPropertyDescriptor(error, "code")?.value : undefined;
+        if (typeof rawCode === "string" && /^[A-Za-z][A-Za-z0-9_-]{0,95}$/.test(rawCode)) causeCode = rawCode;
+      } catch { /* An unreadable diagnostic supplies no cause code. */ }
+      try { console.warn("[run-slots]", JSON.stringify({ code: "runtime_concurrency_setting_unavailable", causeCode, fallbackLimit: 1 })); } catch { /* Diagnostics cannot refuse admission. */ }
+    }
+    concurrencySettingUnavailable = true;
+    return 1;
+  }
+}
+
 function canAdmit(priority: RunPriority): boolean {
   if (maintenance) return false;
-  const limit = getAgentConcurrency();
+  const limit = concurrencyLimit();
   if (inUse < limit) return true;
   return priority === "owner" && inUse - ownerInUse > 0 && inUse < limit + OWNER_RESERVED_SLOTS;
 }
@@ -174,7 +196,7 @@ export function runSlotsQuietForMs(now = Date.now()): number {
 }
 
 export function runSlotStats(): { inUse: number; queued: number; limit: number; maintenance: boolean } {
-  return { inUse, queued: queuedCount(), limit: getAgentConcurrency(), maintenance };
+  return { inUse, queued: queuedCount(), limit: concurrencyLimit(), maintenance };
 }
 
 /** 우선순위별 대기 인원 — 새 진단 표면(기존 runSlotStats 모양은 건드리지 않는다). */

@@ -8,7 +8,8 @@
  *    read back from run_events (kind browser_login_recovery) under a trace run id. If no live page is on a wall
  *    (e.g. the goal ran on the native partition, whose pages this entry cannot see), rung 1 runs directly through
  *    the ladder's own production deps: a consent-scoped targeted re-import of the domain + its identity provider
- *    into both cookie stores, then a value-free session-cookie check. The owner card stays the ladder's alone.
+ *    only into empty stores. A write or cookie count does not establish authentication; only the page observer can.
+ *    The owner card stays the ladder's alone.
  *  - Agentlas Browser restart (D6: allowed without asking; the app itself is only ever asked): close the dedicated
  *    browser only when no other run holds a lease, then ensure the host is up and its CDP port answers.
  */
@@ -20,7 +21,7 @@ const LADDER_WAIT_MS = 20_000;
 
 function ladderSteps(traceRunId: string): string[] {
   try {
-    return (getDb().prepare("SELECT json_extract(payload_json, '$.step') AS step FROM run_events WHERE run_id = ? AND kind = 'browser_login_recovery' ORDER BY seq")
+    return (getDb().prepare("SELECT CASE WHEN json_extract(payload_json, '$.reason') = 'authentication-transition' THEN 'authentication-transition' ELSE json_extract(payload_json, '$.step') END AS step FROM run_events WHERE run_id = ? AND kind = 'browser_login_recovery' ORDER BY seq")
       .all(traceRunId) as Array<{ step: string | null }>).map((row) => row.step ?? "");
   } catch { return []; }
 }
@@ -48,7 +49,8 @@ export async function agiRunLoginRecovery(input: { domain: string; goalId: strin
     acceptedObserver = () => {
       const steps = ladderSteps(traceRunId);
       return steps.includes("recovered") || steps.includes("session-restored") ? "recovered"
-        : steps.includes("owner-card") ? "awaiting-owner" : null;
+        : steps.includes("owner-card") ? "awaiting-owner"
+          : steps.includes("authentication-transition") ? "not-a-wall" : null;
     };
     // Own the admitted observer Promise, not its pending-card watcher. The latter
     // keeps its existing scope/consent lifetime, independently of this decision.
@@ -72,8 +74,6 @@ export async function agiRunLoginRecovery(input: { domain: string; goalId: strin
     const deps = runtime.productionLoginRecoveryDeps();
     const probe = wall.detectLoginWall({ url: wall.signInUrlFor(input.domain) });
     const domains = probe.kind === "login-wall" ? probe.targetDomains : [input.domain];
-    let imported = false;
-    let consented = true;
     for (const surface of ["cdp-profile", "native-partition"] as const) {
       current();
       if (control) {
@@ -84,24 +84,15 @@ export async function agiRunLoginRecovery(input: { domain: string; goalId: strin
         else if (report.effect === "imported" && directEffect !== "unknown") directEffect = "imported";
         if (report.state === "cancelled" || report.state === "unknown") return finish(report.state);
         current();
-        if (report.state === "imported") imported = true;
-        if (report.state === "not-consented") consented = false;
       } else {
         try {
-          const report = await deps.targetedImport({ domains, surface });
-          if (report.state === "imported") imported = true;
-          if (report.state === "not-consented") consented = false;
+          await deps.targetedImport({ domains, surface });
         } catch { /* legacy callers retain their cross-store behavior */ }
       }
     }
-    if (!consented && !imported) return finish("unavailable");
-    for (const surface of ["cdp-profile", "native-partition"] as const) {
-      current();
-      const cookies = await deps.readStore(surface, domains).catch(() => null);
-      current();
-      if (wall.evaluateSessionCookies(cookies, domains, Date.now() / 1_000) === "present") return finish("recovered");
-    }
-    return finish("not-a-wall");
+    // Cookie presence or a successful write is not proof that the site accepted this account.
+    // Only the observer above may report restoration after the actual browser page is checked.
+    return finish("unavailable");
   } catch (error) {
     if (!control) throw error;
     await observer?.catch(() => undefined);

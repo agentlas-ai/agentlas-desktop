@@ -153,25 +153,43 @@ interface Decision {
   reflection: string;
 }
 
-/** Phase rules are host-owned: requesting evidence never authorizes actions, and the final round cannot read again. */
-function agiDecisionPhaseRefusal(decision: Decision, round: number):
-  "agi.model.mixed-reads-actions" | "agi.model.final-round-reads" | null {
-  if (decision.reads.length && decision.actions.length) return "agi.model.mixed-reads-actions";
-  if (round === 2 && decision.reads.length) return "agi.model.final-round-reads";
-  return null;
+/**
+ * Phase rules are host-owned: requesting evidence never authorizes actions, and the final round cannot read again. A decision that
+ * breaks them is not thrown away (it used to fail the whole attempt, a paid call for nothing): round 1 that asks for reads AND
+ * proposes actions keeps the reads and drops the actions, which were written before that evidence and are asked for again in round
+ * 2; round 2 keeps its actions and drops the reads it can no longer make.
+ */
+export function agiNormalizeDecisionPhase(decision: Decision, round: number): Decision {
+  if (round === 1 && decision.reads.length && decision.actions.length) return { ...decision, actions: [] };
+  if (round === 2 && decision.reads.length) return { ...decision, reads: [] };
+  return decision;
 }
 
 function parseArgs(entry: Record<string, unknown>): Record<string, unknown> | null {
-  // New wire object wins only when it is the sole representation. Conflicting old/new fields are refused.
-  if ("args" in entry && "argsJson" in entry) return null;
+  // The object form wins when both forms are given (it used to refuse the whole decision); argsJson alone is parsed; neither means no args.
   let value: unknown = entry.args;
-  if (!("args" in entry)) {
+  if (value === undefined || value === null) {
+    if (entry.argsJson === undefined || entry.argsJson === null) return {};
     if (typeof entry.argsJson !== "string") return null;
     try { value = JSON.parse(entry.argsJson); } catch { return null; }
   }
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
 }
 
+/** Arguments the schema names; a key it does not name is dropped (a model's extra "reason"/"note" key is not a different request). */
+function knownArgs(schema: Record<string, unknown> | undefined, args: Record<string, unknown>): Record<string, unknown> {
+  const properties = schema && typeof schema.properties === "object" && schema.properties ? schema.properties as Record<string, unknown> : null;
+  if (!properties) return args;
+  return Object.fromEntries(Object.entries(args).filter(([key]) => key in properties));
+}
+
+/**
+ * Reads the model's decision. It accepts any reasonable shape of it and refuses only what it cannot read: a missing list is an empty
+ * one, a list over its bound is cut to it, an entry with an extra key or extra argument keeps its meaning, and one entry that does not
+ * validate is left out instead of voiding the others (a model without native structured output, or one extra key, used to cost the
+ * whole paid attempt: agi.model.answer-invalid). Every action is validated again by the executor. A wrong schema marker, text that is
+ * not a JSON object, or a decision whose every entry was unreadable is still null.
+ */
 export function parseAgiDecision(text: string): Decision | null {
   let raw: unknown;
   try {
@@ -180,21 +198,29 @@ export function parseAgiDecision(text: string): Decision | null {
   } catch { return null; }
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
   const value = raw as Record<string, unknown>;
-  if (value.schema !== AGI_MODEL_ATTEMPT_SCHEMA || !Array.isArray(value.reads) || !Array.isArray(value.actions)
-    || value.reads.length > AGI_MAX_EXTRA_READS || value.actions.length > AGI_MAX_ACTIONS_STRUCTURAL) return null;
+  if (value.schema !== undefined && value.schema !== AGI_MODEL_ATTEMPT_SCHEMA) return null;
+  const list = (field: unknown): unknown[] | null => field === undefined || field === null ? [] : Array.isArray(field) ? field : null;
+  const readList = list(value.reads), actionList = list(value.actions);
+  if (!readList || !actionList) return null;
   const reads: Decision["reads"] = [], actions: Decision["actions"] = [];
-  for (const [entries, validators, discriminator, target] of [
-    [value.reads, readArgsValidators, "tool", reads], [value.actions, actionArgsValidators, "action", actions],
+  let dropped = 0;
+  for (const [entries, cap, validators, schemas, discriminator, target] of [
+    [readList, AGI_MAX_EXTRA_READS, readArgsValidators, AGI_READ_ARGS_SCHEMAS, "tool", reads],
+    [actionList, AGI_MAX_ACTIONS_STRUCTURAL, actionArgsValidators, AGI_ACTION_ARGS_SCHEMAS, "action", actions],
   ] as const) {
-    for (const item of entries) {
-      if (!item || typeof item !== "object" || Array.isArray(item)) return null;
+    for (const item of entries.slice(0, cap)) {
+      if (!item || typeof item !== "object" || Array.isArray(item)) { dropped += 1; continue; }
       const entry = item as Record<string, unknown>;
-      if (Object.keys(entry).some(key => ![discriminator, "args", "argsJson"].includes(key))) return null;
-      const key = String(entry[discriminator]), args = parseArgs(entry), validate = validators.get(key);
-      if (!validate || !args || !validate(args)) return null;
+      const key = String(entry[discriminator]), validate = validators.get(key), parsed = parseArgs(entry);
+      if (!validate || !parsed) { dropped += 1; continue; }
+      // replan_tree keeps its ops exactly as written: an op that carries an intent/end-state edit must reach the executor, which
+      // refuses it as the owner's purpose change and keeps it as the owner's suggestion (R9). Every other action drops unknown keys.
+      const args = key === "replan_tree" ? parsed : knownArgs((schemas as Record<string, Record<string, unknown>>)[key], parsed);
+      if (!validate(args)) { dropped += 1; continue; }
       (target as Array<Record<string, unknown>>).push({ [discriminator]: key, args });
     }
   }
+  if (dropped > 0 && !reads.length && !actions.length) return null;
   return { reads, actions, reflection: typeof value.reflection === "string" ? value.reflection.slice(0, 400) : "" };
 }
 
@@ -392,11 +418,7 @@ export class AgiModelAttempt {
         settle("failed", "agi.model.answer-invalid", { runtime: used.selection, rounds, input: inputTokens, output: outputTokens });
         return { attemptId, outcome: "failed", code: "agi.model.answer-invalid", tokens: tokensUsed };
       }
-      const phaseRefusal = agiDecisionPhaseRefusal(decision, round);
-      if (phaseRefusal) {
-        settle("failed", phaseRefusal, { runtime: used.selection, rounds, input: inputTokens, output: outputTokens });
-        return { attemptId, outcome: "failed", code: phaseRefusal, tokens: tokensUsed };
-      }
+      decision = agiNormalizeDecisionPhase(decision, round);
       if (round === 1 && decision.reads.length && !decision.actions.length) {
         const readRefusal = controlRefusal();
         if (readRefusal) {

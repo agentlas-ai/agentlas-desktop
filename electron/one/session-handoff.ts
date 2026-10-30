@@ -128,16 +128,21 @@ function readRecordedTurnDigest(source: TeamHandoffSource): ReadResult {
     if (!receiverBound) return {allowed:false,reason:"receiver_unbound"};
     let digest: TurnDigest | null = null;
     if (hasJournal && source.status === "completed" && source.result !== null) {
+      // Join order is fixed with CROSS JOIN (heads -> deliveries -> entries by its UNIQUE(context_key,event_id) index). Left to the
+      // planner, this statement drove from agent_context_entries ("SCAN e": every row of the journal, ~0.5 GB on the owner store)
+      // once per completed dispatch, and oneTeamList asks for up to 20 of them on Main: 2.3 s cold / 0.08 s warm each, i.e. the 5-16 s
+      // hourly stalls that lined up with the AGI team_roster read (observed in use). Same rows, same order; e.rowid ASC
+      // reproduces the tie order the entries scan produced (SQLite's sorter keeps input order for equal keys).
       const rows = db.prepare(`SELECT e.event_id,json_extract(e.payload_json,'$.turnSummary') AS summary,d.turn_id
-        FROM agent_context_entries e JOIN agent_context_heads h ON h.context_key=e.context_key
-        JOIN agent_context_deliveries d ON d.context_key=e.context_key AND e.producer_binding=d.binding_key
+        FROM agent_context_heads h CROSS JOIN agent_context_deliveries d CROSS JOIN agent_context_entries e
+        WHERE d.context_key=h.context_key AND e.context_key=d.context_key AND e.producer_binding=d.binding_key
           AND e.event_id='turn:'||d.turn_id||':output'
-        WHERE e.kind='message' AND json_extract(h.identity_json,'$.ownerScope')=?
+          AND e.kind='message' AND json_extract(h.identity_json,'$.ownerScope')=?
           AND json_extract(h.identity_json,'$.agentId')=? AND json_extract(h.identity_json,'$.visibilityDomain') IN (${marks})
           AND json_extract(e.payload_json,'$.turnSummarySource')='emitter'
           AND json_extract(e.payload_json,'$.role')='assistant' AND json_extract(e.payload_json,'$.turnId')=d.turn_id
           AND d.status='acknowledged' AND d.receipt_id='completed:'||d.turn_id AND ${runWhere}
-        ORDER BY h.updated_at DESC,e.seq DESC LIMIT 8`).all(owner.ownerScope,recorded.member_agent_id,...domains,...runArgs) as
+        ORDER BY h.updated_at DESC,e.seq DESC,e.rowid ASC LIMIT 8`).all(owner.ownerScope,recorded.member_agent_id,...domains,...runArgs) as
           Array<{event_id:string;summary:unknown;turn_id:string}>;
       for (const row of rows) {
         if (typeof row.summary === "string" && row.summary.trim() && jsonBytes(row.summary) <= 1024

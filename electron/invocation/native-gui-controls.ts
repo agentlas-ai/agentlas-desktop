@@ -358,6 +358,13 @@ export function createNativeGuiControls(ports: { authorizeRenderer(event: object
     const raw = await call("native.attach", {version:"agentlas.native-owner-text.v1",...binding,intentId,deliveryKind:kind,text});
     const result = textReceipt(raw,binding,intentId,{text,kind});if(!result)fail("native_gui_text_receipt_missing");return result;
   }
+  async function followupCustodyVersion(event: object, chatId: string, intentId: string, requestHash: string): Promise<{currentTurnCompatible:boolean}|null> {
+    human(event);
+    const raw = await call("native.attach",{version:"agentlas.followup-custody.v2",chatId,intentId,requestHash});
+    return exact(raw,["version","bootId","chatId","intentId","requestHash","currentTurnCompatible"]) && raw.version === "agentlas.followup-custody.v2"
+      && raw.bootId === identity!.bootId && raw.chatId === chatId && raw.intentId === intentId && raw.requestHash === requestHash
+      && typeof raw.currentTurnCompatible === "boolean" ? {currentTurnCompatible:raw.currentTurnCompatible} : null;
+  }
   async function ownerTextReceipt(event: object, binding: NativeOwnerTextBinding, intentId: string, expected?:{text:string;kind:NativeOwnerTextKind}) {
     human(event);return textReceipt(await call("native.attach",{version:"agentlas.native-owner-text-receipt.v1",...binding,intentId}),binding,intentId,expected);
   }
@@ -439,7 +446,7 @@ export function createNativeGuiControls(ports: { authorizeRenderer(event: object
     const value=await importNativeJsonValue(wire.transfer,{kind:"checkpoint-value",maxBytes:NATIVE_MAIN_PREPARATION_POLICY.maxCheckpointBytes,signal:controller.signal,assertCurrent:()=>{current()},read:(transferId,offset)=>call("native.attach",{version:"agentlas.native-recovery-read.v1",read:{transferId,offset}})});
     const d=wire.transfer as {transferId:unknown;digest:unknown};if(await call("native.attach",{version:"agentlas.native-recovery-ack.v1",ack:{transferId:d.transferId,digest:d.digest}})!==null)fail("native_gui_recovery_ack_invalid");return value;
   }
-  const control = Object.freeze({ bind, resetObservation, refresh, accept, cancel, runKeyOutcome, resolveApproval, approvalReceipt, mobileApprovalPort, ownerText, ownerTextReceipt, observedTextBinding, recoveredTextBinding, ownerTextUnsteer, durableDaemonTextBinding, durableDaemonTextBindingForRequest, durableCurrentTurn, durableReceipt,
+  const control = Object.freeze({ bind, resetObservation, refresh, accept, cancel, runKeyOutcome, resolveApproval, approvalReceipt, mobileApprovalPort, ownerText, ownerTextReceipt, followupCustodyVersion, observedTextBinding, recoveredTextBinding, ownerTextUnsteer, durableDaemonTextBinding, durableDaemonTextBindingForRequest, durableCurrentTurn, durableReceipt,
     ownerTextAttach:(event:object,binding:NativeOwnerTextBinding,includeEvents:boolean)=>recoveryValue(event,binding,"agentlas.native-owner-text-attach.v1",{includeEvents}),
     ownerTextRecovery:(event:object,binding:NativeOwnerTextBinding)=>recoveryValue(event,binding,"agentlas.native-owner-text-recovery.v1"),
     hasRun: (runId: string) => captures.has(runId), hasChat: (chatId: string) => [...captures.values()].some(r => r.chatId === chatId && activeCustody(r)), hasApproval: (requestId: string) => approvals.has(requestId),

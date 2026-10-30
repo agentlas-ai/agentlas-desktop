@@ -266,10 +266,54 @@ function tacticsFrom(raw: unknown, notes: string[]): GoalTactic[] {
     seen.add(id);
     tactics.push({ id, strategy_id: idOf(item.strategy_id) || null, description, done_when: doneWhen,
       kind: item.kind === "recurring" ? "recurring" : "one_off",
-      ...readTacticRequirements(item, notes, id) });
+      ...readTacticRequirements(repairTacticRequirements(item), notes, id) });
   }
   if (tactics.length > GOAL_SHAPE_LIMITS.tactics) notes.push("tactics_capped");
   return tactics.slice(0, GOAL_SHAPE_LIMITS.tactics);
+}
+
+const PREREQUISITE_BLOCKS: ReadonlyArray<GoalPrerequisite["blocks"][number]> = ["prepare", "local_write", "external_effect"];
+
+/**
+ * A model-written tactic draft carries optional prerequisite fields whose exact shape the host stores. A slip in one (an id one or two
+ * characters over the 40 the pattern allows, a reference longer than 600 characters, a "met" with no reference, no `blocks`, a duplicate
+ * label) used to reject the whole plan change or plan: the owner's DB shows three `goal_plan_op_invalid` refusals (10-16, 10-21, 10-25),
+ * all three a prerequisite id of 41-42 characters, with a hint that never said which field. What the prerequisite means is kept:
+ * a label is a label (cleaned, shortened, made unique); a "met" without a reference is "unknown" — which is what the readiness projection
+ * already makes of every model-written "met" (projectGoalPlanReadiness: "a model-written reference is not a resolved host evidence
+ * receipt"); no `blocks` blocks every work class that waits (the conservative reading). The repaired object is then read by the strict
+ * readTacticRequirements, so what is stored is always the shape the store validates.
+ */
+export function repairTacticRequirements(raw: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...raw };
+  if (raw.depends_on !== undefined) {
+    const listed = Array.isArray(raw.depends_on) ? raw.depends_on : typeof raw.depends_on === "string" ? [raw.depends_on] : [];
+    const kept = [...new Set(listed.filter((dep): dep is string => typeof dep === "string").map((dep) => dep.trim()).filter((dep) => idOf(dep) === dep))]
+      .slice(0, GOAL_SHAPE_LIMITS.tactics);
+    // Every entry unreadable: say nothing about order (absent), do not claim independence ([]).
+    if (kept.length || (Array.isArray(raw.depends_on) && raw.depends_on.length === 0)) out.depends_on = kept; else delete out.depends_on;
+  }
+  if (raw.prerequisites !== undefined) {
+    if (!Array.isArray(raw.prerequisites)) delete out.prerequisites;
+    else {
+      const taken = new Set<string>();
+      const repaired: GoalPrerequisite[] = [];
+      for (const item of raw.prerequisites.slice(0, GOAL_SHAPE_LIMITS.tactics)) {
+        if (!isRecord(item)) continue;
+        const cleaned = (typeof item.id === "string" ? item.id : "").trim().replace(/[^A-Za-z0-9_.-]+/g, "_").replace(/^[^A-Za-z]+/, "").slice(0, 40);
+        let id = cleaned || `prerequisite_${repaired.length + 1}`;
+        for (let n = 2; taken.has(id); n += 1) id = `${(cleaned || "prerequisite").slice(0, 40 - String(n).length - 1)}_${n}`;
+        taken.add(id);
+        const refs = [...new Set((Array.isArray(item.evidence_refs) ? item.evidence_refs : []).filter((ref): ref is string => typeof ref === "string" && ref.trim().length > 0)
+          .map((ref) => ref.trim().slice(0, 600)))].slice(0, GOAL_SHAPE_LIMITS.tactics);
+        const stated = item.state === "met" || item.state === "unmet" ? item.state : "unknown";
+        const blocks = [...new Set((Array.isArray(item.blocks) ? item.blocks : []).filter((kind): kind is GoalPrerequisite["blocks"][number] => PREREQUISITE_BLOCKS.includes(kind as never)))];
+        repaired.push({ id, state: stated === "met" && !refs.length ? "unknown" : stated, evidence_refs: refs, blocks: blocks.length ? blocks : [...PREREQUISITE_BLOCKS] });
+      }
+      out.prerequisites = repaired;
+    }
+  }
+  return out;
 }
 
 /** Typed fields only. Invalid persisted fields remain explicitly unknown in the live projection. */
@@ -297,6 +341,39 @@ export function readTacticRequirements(raw: Record<string, unknown>, notes: stri
     }
   }
   return out;
+}
+
+/**
+ * "Do this after that" between the plan's own tactics. An edge to a tactic the plan does not have can never be met (the readiness
+ * projection reads a missing dependency as unknown, which holds the tactic's writes for ever), and an edge that closes a cycle can never
+ * be met either; both used to reject the whole plan. Dropping the edge keeps the plan and the rest of its order; a tactic left with
+ * no readable edge says nothing about order (absent) instead of claiming independence.
+ */
+export function repairTacticDependencies(tactics: GoalTactic[], notes: string[]): void {
+  const byId = new Map(tactics.map((tactic) => [tactic.id, tactic]));
+  for (const tactic of tactics) {
+    if (!tactic.depends_on) continue;
+    const kept = tactic.depends_on.filter((dep) => dep !== tactic.id && byId.has(dep));
+    if (kept.length === tactic.depends_on.length) continue;
+    notes.push(`tactic_dependency_dropped:${tactic.id}`);
+    if (kept.length || tactic.depends_on.length === 0) tactic.depends_on = kept; else delete tactic.depends_on;
+  }
+  const state = new Map<string, 1 | 2>();
+  const visit = (id: string): void => {
+    state.set(id, 1);
+    const node = byId.get(id)!;
+    if (node.depends_on) {
+      const kept = node.depends_on.filter((dep) => {
+        const seen = state.get(dep);
+        if (seen === 1) { notes.push(`tactic_dependency_cycle_broken:${id}->${dep}`); return false; }
+        if (seen === undefined) visit(dep);
+        return true;
+      });
+      if (kept.length !== node.depends_on.length) { if (kept.length) node.depends_on = kept; else delete node.depends_on; }
+    }
+    state.set(id, 2);
+  };
+  for (const tactic of tactics) if (!state.has(tactic.id)) visit(tactic.id);
 }
 
 export function validateTacticDependencies(tactics: readonly GoalTactic[]): string | null {
@@ -446,6 +523,7 @@ export function validateGoalShape(raw: unknown, ownerText: string, createdAtIso:
     if (shape === "single_tactic" && tactics.length > 1) { notes.push("single_with_many_tactics_recorded_as_list"); shape = "tactic_list"; }
     if (shape === "tactic_list" && tactics.length === 1) { notes.push("list_with_one_tactic_recorded_as_single"); shape = "single_tactic"; }
   }
+  repairTacticDependencies(tactics, notes);
   const dependencyError = validateTacticDependencies(tactics);
   if (dependencyError) return { ok: false, reason: dependencyError };
   if (NATURE_SHAPE[nature] !== shape) notes.push(`nature_shape_mismatch:${nature}->${shape}`);
@@ -729,6 +807,18 @@ export type PlanOp =
   | { op: "add_strategy"; hypothesis: string; serves_krs: string[]; kpi: string; timebox_hours: number; observation_window_hours: number;
       actions_per_day: number | null; tactics: Array<Pick<GoalTactic, "description" | "done_when" | "kind" | "depends_on" | "prerequisites">> };
 
+const TACTIC_DONE_WORDS = new Set(["done", "complete", "completed", "finished", "success", "succeeded"]);
+const TACTIC_BLOCKED_WORDS = new Set(["blocked", "block", "failed", "failure", "stuck", "error"]);
+/** The report's status as the model writes it: "completed" is done, "failed" is blocked. Anything else is no report. */
+function tacticStatusOf(value: unknown): "done" | "blocked" | null {
+  const word = typeof value === "string" ? value.trim().toLowerCase() : "";
+  return TACTIC_DONE_WORDS.has(word) ? "done" : TACTIC_BLOCKED_WORDS.has(word) ? "blocked" : null;
+}
+/** Evidence written as a list of lines is those lines. */
+function evidenceOf(value: unknown): string {
+  return str(Array.isArray(value) ? value.filter((item): item is string => typeof item === "string").join("; ") : value);
+}
+
 function parseMarkerJson(line: string): Record<string, unknown> | null {
   try { const value = JSON.parse(line); return isRecord(value) ? value : null; } catch { return null; }
 }
@@ -738,7 +828,7 @@ function tacticDraft(value: unknown): Pick<GoalTactic, "description" | "done_whe
   const description = str(value.description);
   const doneWhen = str(value.done_when);
   const notes: string[] = [];
-  const requirements = readTacticRequirements(value, notes, "draft");
+  const requirements = readTacticRequirements(repairTacticRequirements(value), notes, "draft");
   return description && doneWhen && !notes.length ? { description, done_when: doneWhen, kind: value.kind === "recurring" ? "recurring" : "one_off", ...requirements } : null;
 }
 
@@ -787,16 +877,52 @@ export function extractGoalPlanMarkers(text: string): { text: string; tactics: T
     if (!raw) { malformed += 1; continue; }
     if (isTactic) {
       const id = idOf(raw.id);
-      const status = raw.status === "done" || raw.status === "blocked" ? raw.status : null;
+      const status = tacticStatusOf(raw.status);
       if (!id || !status) { malformed += 1; continue; }
       const cause = TACTIC_BLOCK_CAUSES.includes(raw.cause as TacticBlockCause) ? raw.cause as TacticBlockCause : "unknown";
-      tactics.push({ id, status, evidence: str(raw.evidence), cause, boundary: str(raw.boundary, 40) || null });
+      tactics.push({ id, status, evidence: evidenceOf(raw.evidence), cause, boundary: str(raw.boundary, 40) || null });
     } else {
       const op = planOpOf(raw);
       if (op) ops.push(op); else malformed += 1;
     }
   }
   return { text: kept.join("\n").replace(/\n{3,}/g, "\n\n"), tactics, ops, malformed };
+}
+
+/**
+ * Why a goal_plan_op / goal_tactic call did not read, naming the field to fix. extractGoalPlanMarkers drops a malformed marker without a
+ * word (a tactic missing done_when, an id with a space), and the tool answered "could not read this plan change; check the required
+ * fields" (goal_plan_op_invalid x3, 10-21..25), so the model resent the same shape. Pure: it only describes; the parser still decides.
+ */
+export function explainMalformedGoalMarker(kind: "goal_plan_op" | "goal_tactic", raw: unknown): string | null {
+  if (!isRecord(raw)) return "send one JSON object.";
+  if (kind === "goal_tactic") {
+    if (!idOf(raw.id)) return "id must be the exact tactic id from the plan (letters, digits, _ . -; at most 40, starting with a letter).";
+    if (raw.status !== "done" && raw.status !== "blocked") return "status must be done or blocked.";
+    return null;
+  }
+  const ops = ["replace_tactic", "add_tactic", "retire_strategy", "add_strategy"];
+  if (!ops.includes(String(raw.op))) return `op must be one of ${ops.join(", ")}.`;
+  const draft = (value: unknown, where: string): string | null => {
+    if (!isRecord(value)) return `${where} must be an object with description and done_when.`;
+    if (!str(value.description)) return `${where}.description is required.`;
+    if (!str(value.done_when)) return `${where}.done_when is required (the evidence that proves the tactic done).`;
+    const notes: string[] = [];
+    readTacticRequirements(value, notes, "draft");
+    if (notes.length) return `${where}.depends_on must list ids of tactics in the plan (letters, digits, _ . -), and each prerequisites entry needs id, state (met | unmet | unknown), evidence_refs and blocks.`;
+    return null;
+  };
+  const drafts = (list: unknown, where: string): string | null => {
+    if (!Array.isArray(list) || !list.length) return `${where} must list 1-6 tactics.`;
+    for (let i = 0; i < Math.min(list.length, 6); i += 1) { const problem = draft(list[i], `${where}[${i}]`); if (problem) return problem; }
+    return null;
+  };
+  switch (raw.op) {
+    case "replace_tactic": return idOf(raw.id) ? drafts(raw.with, "with") : "id (the open tactic being replaced) is required.";
+    case "add_tactic": return draft(raw, "the tactic");
+    case "retire_strategy": return idOf(raw.id) ? null : "id (the strategy being retired) is required.";
+    default: return str(raw.hypothesis) ? drafts(raw.tactics, "tactics") : "hypothesis is required.";
+  }
 }
 
 export function stripGoalPlanMarkers(text: string): string {

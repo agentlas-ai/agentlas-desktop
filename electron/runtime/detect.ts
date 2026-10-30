@@ -4,6 +4,7 @@ import { managedOneConfigured, managedOneAuthentication } from "../managed-one/a
 import { probeClaudeCode, probeClaudeEfforts } from "./claude-code";
 import { canonicalRuntimeBackend } from "../../shared/runtime-backends";
 import { runtimeMatchesSelection as exactRuntimeMatchesSelection } from "../../shared/runtime-selection";
+import { ollamaModelListIncludes } from "../../shared/runtime-connect";
 import { byokDiscoveryIdentity, fetchByokModelDiscovery } from "./providers";
 import { allocationAdvertisement } from "./model-advertisement";
 import { clearCodexBinCache, probeCodex } from "./codex";
@@ -343,7 +344,34 @@ function managedServingRuntimes(): RuntimeStatus[] {
   return [{ kind:"agentlas", backend:"agentlas", source:"agentlas:serving", version:null, active:true, label:"Agentlas", model:AGENTLAS_SERVING_DEFAULT_MODEL, availableModels:AGENTLAS_SERVING_MODELS.map(model=>model.id) }];
 }
 
-export async function detectRuntimes(force = false): Promise<RuntimeStatus[]> {
+/** Stop only this caller's wait: a shared probe still owns its cache and cleanup. */
+async function waitForRuntimeDetection<T>(start: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (signal?.aborted) throw signal.reason ?? new Error("invocation_cancelled");
+  if (!signal) return start();
+  let onAbort: (() => void) | undefined;
+  const cancelled = new Promise<never>((_resolve, reject) => {
+    onAbort = () => reject(signal.reason ?? new Error("invocation_cancelled"));
+    signal.addEventListener("abort", onAbort, { once: true });
+    if (signal.aborted) onAbort();
+  });
+  try {
+    return await Promise.race([
+      Promise.resolve().then(() => {
+        if (signal.aborted) throw signal.reason ?? new Error("invocation_cancelled");
+        return start();
+      }),
+      cancelled,
+    ]);
+  } finally {
+    if (onAbort) signal.removeEventListener("abort", onAbort);
+  }
+}
+
+export function detectRuntimes(force = false, signal?: AbortSignal): Promise<RuntimeStatus[]> {
+  return waitForRuntimeDetection(() => detectRuntimesCore(force, signal), signal);
+}
+
+async function detectRuntimesCore(force = false, signal?: AbortSignal): Promise<RuntimeStatus[]> {
   if (managedOneConfigured()) return managedServingRuntimes();
   if (process.env.AGENTLAS_DISABLE_RUNTIME_PROBES === "1") return [];
   hydrateResolvedAliasesOnce();
@@ -352,10 +380,19 @@ export async function detectRuntimes(force = false): Promise<RuntimeStatus[]> {
     // make the explicit "Run checks" action stale even after cache invalidation.
     // Let that generation settle, then clear both layers again and start (or
     // join) the first post-request generation.
+    const previousGeneration = detectGeneration;
     const previousFlight = detectInFlight;
-    if (previousFlight) await previousFlight.catch(() => []);
-    clearDetectCache();
-    clearCliVersionProbeCache();
+    if (previousFlight) await waitForRuntimeDetection(() => previousFlight.catch(() => []), signal);
+    // A stopped waiter must not invalidate the cache or start a replacement after the shared flight settles.
+    if (signal?.aborted) throw signal.reason ?? new Error("invocation_cancelled");
+    // Another overlapping forced request or a store change may already have
+    // invalidated this generation while we waited. Its next probe started
+    // after our request too, so join that generation instead of cancelling
+    // its cache and launching a duplicate probe.
+    if (detectGeneration === previousGeneration) {
+      clearDetectCache();
+      clearCliVersionProbeCache();
+    }
   }
   const now = Date.now();
   const providerIdentity = byokDiscoveryIdentity();
@@ -803,7 +840,7 @@ async function detectRuntimesUncached(observationOnly = false): Promise<RuntimeS
   }
   if (ollama && ollama.models.length > 0) {
     const remembered = active?.kind === "ollama" ? active.model : recallRuntimeSelection("ollama", "ollama")?.model;
-    const preferred = remembered && ollama.models.includes(remembered) ? remembered : ollama.models[0] ?? null;
+    const preferred = remembered && ollamaModelListIncludes(ollama.models, remembered) ? remembered : ollama.models[0] ?? null;
     list.push({ kind: "ollama", backend: "ollama", source: "ollama", version: ollama.version,
       active: active?.kind === "ollama", model: preferred, availableModels: ollama.models,
       ...conservativeLocalRuntimeAllocation(ollama.models) });

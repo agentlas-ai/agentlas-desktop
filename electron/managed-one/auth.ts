@@ -4,6 +4,17 @@ import { MANAGED_ONE_BOOTSTRAP_SCHEMA, type ManagedOneBootstrap, type ManagedOne
 
 const PURPOSES = ["serving", "relay", "pairing", "control"] as const;
 let current: Readonly<ManagedOneBootstrap> | undefined;
+const ownershipListeners = new Set<() => void>();
+/** Invalidates in-flight work when a managed host owner disappears or becomes active. */
+export function onManagedOneOwnershipChanged(listener: () => void): () => void {
+  ownershipListeners.add(listener);
+  return () => ownershipListeners.delete(listener);
+}
+function notifyOwnershipChanged(): void {
+  for (const listener of ownershipListeners) {
+    try { listener(); } catch { /* A listener must not prevent host authentication changes. */ }
+  }
+}
 function fail(): never { throw new Error("managed_one_bootstrap_invalid"); }
 function record(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype;
@@ -30,7 +41,10 @@ export function validateManagedOneBootstrap(value: unknown, now = Date.now()): R
 export function configureManagedOneAuthentication(value: unknown): Readonly<ManagedOneBootstrap> {
   const next = validateManagedOneBootstrap(value);
   if (current && ["hostId", "generation", "userId", "workspaceId", "webBaseUrl", "userDataDir", "controlBearer"].some(key => current![key as keyof ManagedOneBootstrap] !== next[key as keyof ManagedOneBootstrap])) throw new Error("managed_one_host_identity_changed");
-  current = next; return next;
+  const wasActive = Boolean(current && current.expiresAt > Date.now());
+  current = next;
+  if (!wasActive) notifyOwnershipChanged();
+  return next;
 }
 export function managedOneConfigured(): boolean { return !!current; }
 export function managedOneAuthentication(): Readonly<ManagedOneBootstrap> | null { return current && current.expiresAt > Date.now() ? current : null; }
@@ -43,4 +57,8 @@ export function managedOneAuthenticationEpoch(purpose: ManagedOnePurpose): strin
   const value = managedOneAuthentication();
   return value ? createHash("sha256").update(value.credentials[purpose]).digest("hex") : null;
 }
-export function clearManagedOneAuthentication(): void { current = undefined; }
+export function clearManagedOneAuthentication(): void {
+  if (!current) return;
+  current = undefined;
+  notifyOwnershipChanged();
+}

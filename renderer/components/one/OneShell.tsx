@@ -6,7 +6,7 @@ import { composeMessageReply, displayMessageReply, type MessageReply } from "@/l
 import { hasInlineVisualBlock } from "@/lib/visual-html";
 import { LinkedLocalFiles } from "@/components/LinkedLocalFiles";
 import { browserAnnotationDraftText } from "@shared/browser-annotation";
-import { runtimeMatchesSelection, selectionForRuntime } from "@shared/runtime-selection";
+import { runtimeMatchesSelection, sameRuntimeIdentity, selectionForRuntime } from "@shared/runtime-selection";
 import { createOneScrollFollow, oneRunReceiptIsTerminal } from "@/lib/one-scroll-follow";
 import { subscribeOrderedRunEvents } from "@/lib/ordered-run-events";
 import { createFrameBatcher, isLiveStreamTick, type FrameBatcher } from "@/lib/frame-coalescer";
@@ -18,7 +18,8 @@ import { OneComposerInput, type OneComposerInputHandle } from "./OneComposerInpu
 import { oneHistoryWindowStart, revealOneHistoryPage } from "@/lib/one-history-window";
 import { createCoalescedRefresh } from "@/lib/one-refresh-coordinator";
 import { ChatContinuationProjector } from "@/lib/chat-continuations";
-import { readOneFollowupOutbox, saveOneFollowupIntent, removeOneFollowupIntent, pauseOneFollowupOutbox, pauseOneFollowupIntent, resumeOneFollowupIntent, waitForOneFollowupDelivery, type OneFollowupIntent } from "@/lib/one-followup-outbox";
+import { readOneFollowupOutbox, saveOneFollowupIntent, removeOneFollowupIntent, pauseOneFollowupOutbox, pauseOneFollowupIntent, resumeOneFollowupIntent, waitForOneFollowupDelivery, bindOneFollowupCapture, releaseOneFollowupCapture, followupReceiptCanRetire, observeOneFollowupIntent, type OneFollowupIntent } from "@/lib/one-followup-outbox";
+import { followupRequestJson } from "@shared/followup-custody";
 import { ONE_PREFLIGHT_STEER_REQUEST_KEYS, normalizeOnePreflightSteerRequest } from "@shared/one-preflight-steers";
 import { firstSendEchoed, firstSendRowId, firstSendsToDraw, moveFirstSendToChat, patchFirstSend, readFirstSends, removeFirstSend, resumeFirstSends, saveFirstSend, type FirstSendEntry, type FirstSendHold } from "@/lib/one-first-send-outbox";
 
@@ -29,6 +30,7 @@ import { mergeGoalResults, type GoalResultPresentation } from "../../../shared/g
 import { GoalResultReport } from "../GoalResultReport";
 import type { ChatHostNotice, InvocationAdmissionReceipt, InvocationSteerRecovery, McpInvocationRequest } from "../../../shared/types";
 import { agiActionNoticeLine, isHousekeepingHostNotice, normalizeChatHostNotice } from "../../../shared/chat-host-notice";
+import { endsWithQuietMarker, stripAgentControlMarkers } from "../../../shared/agent-control-markers";
 import { HostContinuationNotice } from "../HostContinuationNotice";
 import { AutomationLiveRows, AutomationReportSummary } from "../automation/AutomationChatActivity";
 import { OneGoalControls, type OneGoalRetryBinding } from "./OneGoalControls";
@@ -64,8 +66,12 @@ import {
   type AskActionBlock,
 } from "@shared/ask-action-bar";
 import { OneDocumentCard } from "@/components/one/OneDocumentCard";
-import { runtimeModelDisplayLabel, runtimeModelFallbackLabel } from "@/components/dashboard/RuntimeModelPicker";
-import { chipRuntimeFor, composerModelLabel, useRunningComposerModel } from "@/lib/one-runtime-chip";
+import { runtimeModelDisplayLabel } from "@/components/dashboard/RuntimeModelPicker";
+import { assertOneExplicitEffort, chipRuntimeFor, composerModelLabel, useRunningComposerModel } from "@/lib/one-runtime-chip";
+import { chatSelectionSendBlocked } from "@/lib/chat-selection-send-guard";
+import { beginChatSelection, useChatSelectionIntent, readChatSelectionIntent, invalidateChatSelectionIntent, reconcileChatSelectionIntent } from "@/lib/chat-selection-intent";
+import { goalReceiptIsQueued, goalRuntimeRefusalNotice, isOvertakenSelectionCode } from "@/lib/goal-runtime-refusal";
+import { readChatForRuntime } from "@/lib/chat-runtime-read";
 import { useToolbarFit } from "@/lib/use-toolbar-fit";
 import { readOneDocumentMark } from "@/lib/one-document-mark";
 import { OneSplitPane } from "@/components/one/OneSplitPane";
@@ -577,7 +583,8 @@ function withOneRuntimeSelection(
 ): RuntimeStatus {
   const profile = model ? runtime.allocationModelProfiles?.[model] : undefined;
   const supported = profile?.efforts;
-  const effort = supported === undefined
+  // Null is the owner's explicit Default choice; undefined keeps existing default behavior.
+  const effort = requestedEffort === null ? null : supported === undefined
     ? requestedEffort ?? runtime.effort ?? null
     : requestedEffort && supported.includes(requestedEffort)
       ? requestedEffort
@@ -1003,8 +1010,8 @@ function attachmentTypeLabel(mediaType: string, name: string): string {
 // 선택이 비어 있으면 실제로 돌 모델 이름을 보인다 — "기본값" 문구는 없다 (OneRuntimeChips modelLabel 과 같은 식).
 function oneModelChipLabel(runtime: RuntimeStatus | null, models: readonly OneComposerModelOption[], locale: "ko" | "en"): string {
   return runtime
-    ? runtimeModelDisplayLabel(runtime, locale, models.filter((model) => model.runtime.kind === runtime.kind && model.runtime.backend === runtime.backend))
-    : runtimeModelFallbackLabel("agentlas", locale);
+    ? runtimeModelDisplayLabel(runtime, locale, models.filter((model) => sameRuntimeIdentity(model.runtime, runtime)))
+    : locale === "ko" ? "모델 확인 필요" : "Model unconfirmed";
 }
 
 function toUiMessages(history: ChatHistoryEntry[]): UiMessage[] {
@@ -1038,11 +1045,16 @@ function toUiMessages(history: ChatHistoryEntry[]): UiMessage[] {
       suppressRecoveryReply = false;
       userTurnAwaitingAnswer = true;
     }
+    const answersOwnerTurn = entry.role === "assistant" && userTurnAwaitingAnswer;
     if (entry.role === "assistant") userTurnAwaitingAnswer = false;
     // A completed turn that worked only through its tools has no text (R-065): its work block is the record, never a
     // blank bubble.
     if (entry.role === "assistant" && !entry.text.trim() && !entry.imageDataUrls?.length && !entry.goalResult && !entry.hostNotice) continue;
-    const parsedFiles = parseChatFileMessage(entry.text);
+    // Replies saved before the host read markers after a preamble (1.3.105 and earlier): a quiet host-started review
+    // was never meant to be shown, and a marker is never part of what the owner reads (shared/agent-control-markers.ts).
+    if (entry.role === "assistant" && !entry.hostNotice && !entry.goalResult && !entry.imageDataUrls?.length
+      && endsWithQuietMarker(entry.text) && !answersOwnerTurn) continue;
+    const parsedFiles = parseChatFileMessage(entry.role === "assistant" && !entry.hostNotice ? stripAgentControlMarkers(entry.text) : entry.text);
     visible.push({
       hostNotice: normalizeChatHostNotice(entry.role, entry.hostNotice),
       id: entry.id,
@@ -1717,6 +1729,16 @@ function OneSessionsShell() {
   const preflightSubmissionRef = useRef<{ submissionId: string; chatId: string; ready?: Promise<void> } | null>(null);
   const preflightSubmissionGenerationRef = useRef(0);
   const [localFollowupIntents, setLocalFollowupIntents] = useState<OneFollowupIntent[]>([]);
+  const unconfirmedFollowupCapturesRef = useRef(new Map<string, OneFollowupIntent>());
+  function readLocalFollowupIntents(chatId: string): OneFollowupIntent[] {
+    const saved = readOneFollowupOutbox(window.localStorage, chatId);
+    // A release write may succeed while its readback fails. Keep this view's
+    // unconfirmed capture visible until an explicit recovery confirms it.
+    return [...saved.map(item => unconfirmedFollowupCapturesRef.current.has(item.intentId)
+      ? { ...item, capturePending: true, autoDeliveryPaused: true } : item),
+      ...[...unconfirmedFollowupCapturesRef.current.values()]
+        .filter(item => item.chatId === chatId && !saved.some(row => row.intentId === item.intentId))];
+  }
   // Sends Main has not taken yet (one-first-send-outbox): drawn in the transcript and resumed after a reload.
   const [firstSends, setFirstSends] = useState<FirstSendEntry[]>([]);
   // Driven by a submit of this renderer right now; never resumed underneath it.
@@ -1862,7 +1884,89 @@ function OneSessionsShell() {
     }
   }, [appLocale]);
 
+  const deliverCustodiedCurrentTurnFollowup = useCallback((intent: OneFollowupIntent, bridge: ReturnType<typeof ipc>, explicitResume = false) => {
+    if (intent.followupCustodyVersion !== 2 || !bridge || !intent.currentTurnRunId || currentTurnDeliveriesRef.current.has(intent.intentId)) return;
+    if ((locallyStoppedFollowupIdsRef.current.has(intent.intentId) || intent.autoDeliveryPaused || intent.capturePending || intent.requiresReprepare)
+      && !(explicitResume && intent.deliveryObserved)) return;
+    // The room's 3 s outbox tick re-entered here for every failure. After an app restart the
+    // run stays owned by the previous process, so Main refused each attempt
+    // (`invocation_owner_unavailable`) — 1,260 refusals in one day in Youtube launch, 2026-10-10.
+    // Back off per intent and stop automatic delivery once the refusal is definitive.
+    const backoff = currentTurnBackoffRef.current.get(intent.intentId);
+    if (backoff && Date.now() < backoff.nextAt) return;
+    const task = (async () => {
+      try {
+        // Issue each captured gesture immediately. Main's durable identity makes
+        // a repeated IPC read the same receipt; it never repeats native dispatch.
+        if (!intent.deliveryObserved) {
+          if (typeof bridge.invoke.followupCustodyVersion !== "function"
+            || await waitForOneFollowupDelivery(bridge.invoke.followupCustodyVersion()) !== 2) {
+            throw new Error("one_followup_custody_unavailable");
+          }
+          // Stop may have arrived during capability negotiation. Never send a
+          // stale captured callback after its original has been paused.
+          const saved = readOneFollowupOutbox(window.localStorage, intent.chatId).find(item => item.intentId === intent.intentId);
+          if (!saved || saved.autoDeliveryPaused || saved.capturePending
+            || locallyStoppedFollowupIdsRef.current.has(intent.intentId)) return;
+        }
+        const nativeReceipt = intent.deliveryObserved
+          ? await waitForOneFollowupDelivery(bridge.invoke.currentTurnSteerReceipt({ chatId: intent.chatId, intentId: intent.intentId }))
+          : await waitForOneFollowupDelivery(bridge.invoke.steerCurrentTurn({ chatId: intent.chatId,
+            intentId: intent.intentId, expectedRunId: intent.currentTurnRunId!, text: intent.userPrompt, fallbackRequest: intent.request, ...(explicitResume ? { resume: true } : {}) }));
+        if (!nativeReceipt) throw new Error("one_followup_receipt_unavailable");
+        const legacyUnconfirmed = nativeReceipt.receiptVersion !== 2 || nativeReceipt.origin?.kind === "legacy-unconfirmed";
+        if (nativeReceipt.chatId !== intent.chatId || nativeReceipt.intentId !== intent.intentId
+          || nativeReceipt.promptHash !== await onePreflightTextDigest(intent.userPrompt)
+          || !legacyUnconfirmed && (nativeReceipt.runId !== intent.currentTurnRunId
+          || nativeReceipt.receiptVersion === 2 && (nativeReceipt.origin?.kind !== "current-turn"
+            || nativeReceipt.origin.runId !== intent.currentTurnRunId
+            || nativeReceipt.requestHash !== await onePreflightTextDigest(followupRequestJson(intent.request))))) {
+          throw new Error("one_followup_receipt_mismatch");
+        }
+        if (activeThreadChatIdRef.current === intent.chatId) {
+          if (!legacyUnconfirmed && nativeReceipt.messageCustody === "exact" && (!["rejected", "uncertain"].includes(nativeReceipt.status) || followupReceiptCanRetire(nativeReceipt))) setMessages(current => current.map(message => message.id === `followup:${intent.intentId}`
+            ? { ...message, id: nativeReceipt.messageId, durableMessageId: nativeReceipt.messageId } : message));
+          setCurrentTurnFollowups(current => [...current.filter(item => item.intent.intentId !== intent.intentId),
+            { intent, receipt: nativeReceipt }].slice(-64));
+        }
+        currentTurnBackoffRef.current.delete(intent.intentId);
+        // Receipt polling owns queued/dispatching progress; do not keep dispatching on outbox ticks.
+        terminalFollowupIdsRef.current.add(intent.intentId);
+        if (legacyUnconfirmed) {
+          observeOneFollowupIntent(window.localStorage, intent.chatId, intent.intentId);
+        } else if (followupReceiptCanRetire(nativeReceipt)) {
+          // Applied, started, or carried whole into the next turn: delivered, nothing left to continue. The carried case was
+          // paused here as "rejected" and left a "Saved follow-up / Continue" card for a message that had already run.
+          removeOneFollowupIntent(window.localStorage, intent.chatId, intent.intentId);
+        } else if (nativeReceipt.status === "rejected" || nativeReceipt.status === "uncertain") {
+          pauseOneFollowupIntent(window.localStorage, intent.chatId, intent.intentId);
+        } else if (nativeReceipt.status === "applied") {
+          observeOneFollowupIntent(window.localStorage, intent.chatId, intent.intentId);
+        }
+        if (activeThreadChatIdRef.current === intent.chatId) setLocalFollowupIntents(readLocalFollowupIntents(intent.chatId));
+      } catch (cause) {
+        const failures = (currentTurnBackoffRef.current.get(intent.intentId)?.failures ?? 0) + 1;
+        const failureCode = (cause as Error | undefined)?.message;
+        const definitive = failureCode === "invocation_owner_unavailable" || failureCode === "one_followup_custody_unavailable";
+        currentTurnBackoffRef.current.set(intent.intentId, { failures, nextAt: Date.now() + Math.min(120_000, 3_000 * 2 ** failures) });
+        if (definitive || failures >= 6) {
+          terminalFollowupIdsRef.current.add(intent.intentId);
+          // The text is kept; only the automatic retry stops. The owner resends or discards it.
+          try { pauseOneFollowupIntent(window.localStorage, intent.chatId, intent.intentId); } catch { /* retried on the next read */ }
+        }
+        if (activeThreadChatIdRef.current !== intent.chatId) return;
+        if (failureCode === "one_followup_custody_unavailable") setActionNotice(appLocale === "ko"
+          ? "연결된 앱이 추가 지시 보관을 지원하지 않습니다. 원문을 보관했습니다. 앱 연결을 갱신한 뒤 같은 지시를 이어서 전달하세요."
+          : "The connected app does not support saved follow-ups. The original is retained. Reconnect an updated app, then continue this same input.");
+        setDelayedFollowupIds(current => current.has(intent.intentId) ? current : new Set([...current, intent.intentId]));
+        try { setLocalFollowupIntents(readLocalFollowupIntents(intent.chatId)); } catch { /* Keep the visible original while storage is unavailable. */ }
+      }
+    })().finally(() => { currentTurnDeliveriesRef.current.delete(intent.intentId); });
+    currentTurnDeliveriesRef.current.set(intent.intentId, task);
+  }, [appLocale]);
+
   const deliverCurrentTurnFollowup = useCallback((intent: OneFollowupIntent, bridge: ReturnType<typeof ipc>) => {
+    if (intent.followupCustodyVersion === 2) { deliverCustodiedCurrentTurnFollowup(intent, bridge); return; }
     if (!bridge || !intent.currentTurnRunId || currentTurnDeliveriesRef.current.has(intent.intentId)) return;
     if (locallyStoppedFollowupIdsRef.current.has(intent.intentId) || intent.autoDeliveryPaused || intent.requiresReprepare) return;
     // The room's 3 s outbox tick re-entered here for every failure. After an app restart the
@@ -1904,7 +2008,7 @@ function OneSessionsShell() {
       }
     })().finally(() => { currentTurnDeliveriesRef.current.delete(intent.intentId); });
     currentTurnDeliveriesRef.current.set(intent.intentId, task);
-  }, []);
+  }, [deliverCustodiedCurrentTurnFollowup]);
 
   const reconcileUncertainPreflightSteer = useCallback(async (chatId: string, bridge = ipc()): Promise<void> => {
     followupBridgesRef.current.set(chatId, bridge);
@@ -1914,7 +2018,7 @@ function OneSessionsShell() {
         const bridge = followupBridgesRef.current.get(chatId);
         const showLocal = () => {
           if (activeThreadChatIdRef.current !== chatId) return;
-          const remaining = readOneFollowupOutbox(window.localStorage, chatId);
+          const remaining = readLocalFollowupIntents(chatId);
           setLocalFollowupIntents(current => JSON.stringify(current) === JSON.stringify(remaining) ? current : remaining);
           const ownedNotice = followupDeliveryNoticeRef.current;
           if (!remaining.length && ownedNotice?.chatId === chatId) {
@@ -1932,7 +2036,8 @@ function OneSessionsShell() {
           if (!bridge) return;
           for (const intent of readOneFollowupOutbox(window.localStorage, chatId)) {
             try {
-              if (deliveryPaused(intent) || terminalFollowupIdsRef.current.has(intent.intentId)) continue;
+              if (deliveryPaused(intent) || (intent.followupCustodyVersion === 2 && intent.capturePending)
+                || terminalFollowupIdsRef.current.has(intent.intentId)) continue;
               if (intent.requiresReprepare) {
                 showDeliveryNotice();
                 break;
@@ -2073,7 +2178,26 @@ function OneSessionsShell() {
       try {
         const receipts = await Promise.all(currentTurnFollowups.filter(item => item.intent.chatId === chatId
           && (item.receipt.status === "queued" || item.receipt.status === "dispatching"))
-          .map(item => waitForOneFollowupDelivery(api.invoke.currentTurnSteerReceipt({ chatId, intentId: item.intent.intentId })).catch(() => null)));
+          .map(async ({ intent }) => {
+            const found = await waitForOneFollowupDelivery(api.invoke.currentTurnSteerReceipt({ chatId, intentId: intent.intentId })).catch(() => null);
+            // Existing pending entries retain their original receipt behavior.
+            if (intent.followupCustodyVersion !== 2) return found;
+            if (!found || found.chatId !== chatId || found.intentId !== intent.intentId
+              || found.runId !== intent.currentTurnRunId || found.promptHash !== await onePreflightTextDigest(intent.userPrompt)
+              || found.receiptVersion !== 2 || found.origin?.kind !== "current-turn" || found.origin.runId !== intent.currentTurnRunId
+              || found.requestHash !== await onePreflightTextDigest(followupRequestJson(intent.request))) return null;
+            if (followupReceiptCanRetire(found)) {
+              if (!disposed && activeThreadChatIdRef.current === chatId) setMessages(current => current.map(message => message.id === `followup:${intent.intentId}`
+                ? { ...message, id: found.messageId, durableMessageId: found.messageId } : message));
+              try { removeOneFollowupIntent(window.localStorage, chatId, intent.intentId); } catch { /* Preserve cleanup evidence. */ }
+            } else if (found.status === "rejected" || found.status === "uncertain") {
+              try { pauseOneFollowupIntent(window.localStorage, chatId, intent.intentId); } catch { /* Original remains. */ }
+            } else if (found.status === "applied") {
+              try { observeOneFollowupIntent(window.localStorage, chatId, intent.intentId); } catch { /* Original remains. */ }
+            }
+            if (!disposed && activeThreadChatIdRef.current === chatId) setLocalFollowupIntents(readLocalFollowupIntents(chatId));
+            return found;
+          }));
         if (receipts.length && receipts.every(item => item === null)) {
           failures += 1;
           quietUntil = Date.now() + Math.min(60_000, 1_000 * 2 ** failures);
@@ -2103,7 +2227,7 @@ function OneSessionsShell() {
 
   useEffect(() => {
     const chatId = selected?.chatId ?? conversation?.id ?? null;
-    const retryHead = localFollowupIntents.find(intent => intent.chatId === chatId && !intent.autoDeliveryPaused
+    const retryHead = localFollowupIntents.find(intent => intent.chatId === chatId && !intent.autoDeliveryPaused && !(intent.followupCustodyVersion === 2 && intent.capturePending)
       && !locallyStoppedFollowupIdsRef.current.has(intent.intentId) && !terminalFollowupIdsRef.current.has(intent.intentId));
     if (!chatId || !retryHead || retryHead.requiresReprepare) return;
     // The same head still waiting means Main could not take it yet: wait 3 s, 6 s, 12 s ... up to 60 s between tries
@@ -2113,7 +2237,7 @@ function OneSessionsShell() {
       if (activeThreadChatIdRef.current !== chatId) return;
       if (skip > 0) { skip -= 1; return; }
       try {
-        const next = readOneFollowupOutbox(window.localStorage, chatId).find(intent => !intent.autoDeliveryPaused
+        const next = readOneFollowupOutbox(window.localStorage, chatId).find(intent => !intent.autoDeliveryPaused && !(intent.followupCustodyVersion === 2 && intent.capturePending)
           && !locallyStoppedFollowupIdsRef.current.has(intent.intentId) && !terminalFollowupIdsRef.current.has(intent.intentId));
         if (!next || next.requiresReprepare) { window.clearInterval(timer); return; }
         span = next.intentId === lastHead ? Math.min(span * 2, 20) : 1;
@@ -2154,12 +2278,22 @@ function OneSessionsShell() {
   const [turnAgentIds, setTurnAgentIds] = useState<string[]>([]);
   const [turnOverrides, setTurnOverrides] = useState<OneTurnOverrides>({});
   const goalControlEpochRef = useRef(0);
-  const [oneRuntime, setOneRuntime] = useState<RuntimeStatus | null>(null);
+  const [confirmedOneRuntime, setOneRuntime] = useState<RuntimeStatus | null>(null);
+  const selectionDraftEpochRef = useRef(0);
+  const [restoredRuntimeDraft, setRestoredRuntimeDraft] = useState<{ chatId: string; intentId: string; selection: RuntimeSelection | null } | null>(null);
+  const restoredRuntimeSubmissionsRef = useRef(new Map<string, { chatId: string; intentId: string }>());
+  const selectionChoice = useChatSelectionIntent(selected?.chatId ?? conversation?.id ?? null);
   const [oneRuntimePinned, setOneRuntimePinned] = useState(false);
   // Room whose pin the chip currently shows (null = no room open yet).
   const oneRuntimeOwnerChatIdRef = useRef<string | null>(null);
+  const oneRuntimeReadGenerationRef = useRef(0);
   const [oneModelOptions, setOneModelOptions] = useState<OneComposerModelOption[]>([]);
   const [oneRuntimeInventory, setOneRuntimeInventory] = useState<RuntimeStatus[]>([]);
+  const shownRestoredRuntimeDraft = restoredRuntimeDraft?.chatId === (selected?.chatId ?? conversation?.id ?? null) ? restoredRuntimeDraft : null;
+  const oneRuntime = selectionChoice ? chipRuntimeFor(oneRuntimeInventory, selectionChoice.selection) ?? confirmedOneRuntime
+    : shownRestoredRuntimeDraft ? chipRuntimeFor(oneRuntimeInventory, shownRestoredRuntimeDraft.selection) : confirmedOneRuntime;
+  const oneRuntimeInventoryRef = useRef(oneRuntimeInventory);
+  oneRuntimeInventoryRef.current = oneRuntimeInventory;
   const [oneRuntimePreferenceRevision, setOneRuntimePreferenceRevision] = useState(0);
   // One is the owner's personal agent. Full access is the explicit product
   // default; the chip remains the per-turn authority control for narrowing it.
@@ -3618,7 +3752,10 @@ function OneSessionsShell() {
     let sessionListRefreshTimer: ReturnType<typeof setTimeout> | null = null;
     const unsubscribe = events.onStoreChanged((change) => {
       if (PROJECTION_DIRTY_ENTITIES.has(change.entity)) projectionReadRef.current.dirty = true;
-      if (change.entity === "runtime") setOneRuntimePreferenceRevision((revision) => revision + 1);
+      if (change.entity === "runtime") {
+        oneRuntimeReadGenerationRef.current += 1;
+        setOneRuntimePreferenceRevision((revision) => revision + 1);
+      }
       const api = ipc();
       if (!api) return;
       if (change.entity === "one-org") {
@@ -3632,6 +3769,14 @@ function OneSessionsShell() {
       } else if (change.entity === "one-taskforce") {
         void refreshAll({ includeOrg: false });
       } else if (change.entity === "chat") {
+        if (change.id === activeThreadChatIdRef.current) {
+          // A choice a newer one overtook is dropped; read the saved selection back into the chip.
+          void reconcileChatSelectionIntent(api, change.id).then((dropped) => {
+            if (!dropped || change.id !== activeThreadChatIdRef.current) return;
+            oneRuntimeReadGenerationRef.current += 1;
+            setOneRuntimePreferenceRevision((revision) => revision + 1);
+          });
+        }
         // 다른 방에 답·자동화 보고가 떨어지면 5초 폴링을 기다리지 않고 목록만 다시 읽는다.
         // 정렬 키(lastActivityAt)는 Main 이 보이는 줄로만 계산하므로 조용한 변경은 순서를 안 바꾼다.
         if (sessionListRefreshTimer) return;
@@ -4535,6 +4680,11 @@ function OneSessionsShell() {
     outcome: { status: string } | null | undefined) => {
     if (!submissionId || !outcome) return;
     if (outcome.status === "started" || outcome.status === "queued" || outcome.status === "reconciled") {
+      const restored = restoredRuntimeSubmissionsRef.current.get(submissionId);
+      if (restored?.chatId === chatId) {
+        setRestoredRuntimeDraft(current => current?.chatId === chatId && current.intentId === restored.intentId ? null : current);
+        restoredRuntimeSubmissionsRef.current.delete(submissionId);
+      }
       settleFirstSend(chatId, submissionId);
     } else if (outcome.status === "rejected") {
       holdFirstSend(chatId, submissionId, "refused");
@@ -5178,6 +5328,9 @@ function OneSessionsShell() {
     const api = ipc();
     if (!api) { setActiveThreadChat(conversation); return; }
     let cancelled = false;
+    const readGeneration = ++oneRuntimeReadGenerationRef.current;
+    const isCurrent = () => !cancelled && oneRuntimeReadGenerationRef.current === readGeneration
+      && activeThreadChatIdRef.current === activeThreadChatId && goalControlViewKeyRef.current === goalControlViewKey;
     // The chip belongs to the open room. Opening another room must not keep
     // showing the previous room's model while this room's pin is being read.
     if (oneRuntimeOwnerChatIdRef.current !== activeThreadChatId) {
@@ -5186,13 +5339,38 @@ function OneSessionsShell() {
       setOneRuntimePinned(false);
     }
     // 대화 조회는 런타임 탐지(느릴 수 있다)를 기다리지 않는다 — 머리말·담당 판정이 이 값을 쓴다.
-    const chatRead = activeThreadChatId ? api.chats.get(activeThreadChatId).catch(() => null) : Promise.resolve(null);
-    void chatRead.then((chat) => { if (!cancelled) setActiveThreadChat(chat); });
+    const chatRead = activeThreadChatId
+      ? readChatForRuntime(api.chats, activeThreadChatId, isCurrent)
+      : Promise.resolve(null);
+    let detectionFailed = false;
+    let chatObserved = false;
+    void chatRead.then((chat) => {
+      if (!isCurrent()) return;
+      chatObserved = true;
+      setActiveThreadChat(chat);
+      if (activeThreadChatId && !chat) {
+        setOneRuntime(null);
+        setOneRuntimePinned(false);
+      } else if (chat) {
+        // A slow detector must not leave this room showing its previous pin.
+        // Only an exact saved pin can be projected from the earlier inventory.
+        const selection = chat.runtimeSelection ?? null;
+        setOneRuntime(selection && !detectionFailed ? chipRuntimeFor(oneRuntimeInventoryRef.current, selection) : null);
+        setOneRuntimePinned(Boolean(selection));
+      }
+    });
     void Promise.all([
       api.runtime.detect(),
       chatRead,
     ]).then(([runtimes, chat]) => {
-      if (cancelled) return;
+      if (!isCurrent()) return;
+      if (activeThreadChatId && !chat) {
+        // The room's pin is unknown, not an explicit choice of the default.
+        setOneRuntime(null);
+        setOneRuntimePinned(false);
+        setOneRuntimeInventory(runtimes);
+        return;
+      }
       // An open room shows its own durable pin; an unpinned room shows the
       // default orchestrator runtime, never another room's last choice. The
       // current role setting initializes a room that does not exist yet.
@@ -5201,15 +5379,17 @@ function OneSessionsShell() {
       setOneRuntimePinned(Boolean(selection));
       setOneRuntimeInventory(runtimes);
     }).catch(() => {
-      if (!cancelled) {
-        setActiveThreadChat(null);
+      if (isCurrent()) {
+        detectionFailed = true;
+        // A failed inventory probe does not invalidate an independently read chat.
+        if (!chatObserved) setActiveThreadChat(null);
         setOneRuntime(null);
         setOneRuntimePinned(false);
         setOneRuntimeInventory([]);
       }
     });
     return () => { cancelled = true; };
-  }, [activeThreadChatId, conversation, oneRuntimePreferenceRevision]);
+  }, [activeThreadChatId, conversation, goalControlViewKey, oneRuntimePreferenceRevision]);
 
   useEffect(() => {
     const api = ipc();
@@ -5643,40 +5823,66 @@ function OneSessionsShell() {
   }, [armedOneMemoryUseOnce]);
 
   const oneRuntimeSelection = useMemo<RuntimeSelection | undefined>(() => {
-    if (!oneRuntime || !oneRuntimePinned) return undefined;
-    return selectionForRuntime(oneRuntime, { role: "orchestrator", inherit: false, includeSource: false });
-  }, [oneRuntime, oneRuntimePinned]);
+    if (shownRestoredRuntimeDraft) return shownRestoredRuntimeDraft.selection ?? undefined;
+    if (!confirmedOneRuntime || !oneRuntimePinned) return undefined;
+    return selectionForRuntime(confirmedOneRuntime, { role: "orchestrator", inherit: false, includeSource: false });
+  }, [confirmedOneRuntime, oneRuntimePinned, shownRestoredRuntimeDraft]);
 
   const applyOneRuntimeSelection = useCallback(async (patch: { model?: string; effort?: string }, runtimeOverride?: RuntimeStatus) => {
     const baseRuntime = runtimeOverride ?? oneRuntime;
     if (!baseRuntime) return;
+    // A route can change before its next chat object finishes loading. Keep
+    // both the route and the chat that owned this picker invocation.
+    const selectionDraftEpoch = selectionDraftEpochRef.current;
+    const selectionViewIsCurrent = () => selectionDraftEpochRef.current === selectionDraftEpoch
+      && goalControlViewKeyRef.current === goalControlViewKey
+      && activeThreadChatIdRef.current === activeThreadChatId;
+    if (!selectionViewIsCurrent()) return;
     const nextModel = patch.model !== undefined ? patch.model || null : baseRuntime.model ?? null;
     const requestedEffort = patch.effort !== undefined
       ? patch.effort || null
       : patch.model !== undefined
         ? undefined
         : baseRuntime.effort;
+    if (patch.effort !== undefined) {
+      try { assertOneExplicitEffort(baseRuntime, nextModel, requestedEffort ?? null); }
+      catch {
+        setActionNotice(appLocale === "ko" ? "이 모델은 선택한 추론 강도를 지원하지 않습니다." : "This model does not support that effort.");
+        return;
+      }
+    }
     const nextRuntime = withOneRuntimeSelection(baseRuntime, nextModel, requestedEffort);
     const selection: RuntimeSelection = selectionForRuntime(nextRuntime, { role: "orchestrator", inherit: false, includeSource: false });
     const api = ipc();
     let acknowledgedSelection = selection;
-    let acknowledgedRuntime = nextRuntime;
+    let acknowledgedRuntimeValue = nextRuntime;
     if (activeThreadChatId) {
       if (!api) {
-        setActionNotice(appLocale === "ko"
+        const notice = appLocale === "ko"
           ? "Desktop에 연결되지 않아 모델 선택을 저장하지 못했습니다. 기존 선택을 유지합니다."
-          : "The model selection was not saved because Desktop is unavailable. The previous selection is unchanged.");
+          : "The model selection was not saved because Desktop is unavailable. The previous selection is unchanged.";
+        setActionNotice(current => selectionViewIsCurrent() ? notice : current);
         return;
       }
+      const intent = beginChatSelection(activeThreadChatId, selection);
+      setComposerMenu(null);
+      let writeStarted = false;
+      let writeAcknowledged = false;
       try {
-        const goalContext = await api.chats.getGoalContext(activeThreadChatId);
-        if (goalContext?.lifecycle === "ongoing" && !goalContext.goalRevision) {
-          throw new Error("goal_runtime_selection_revision_changed");
-        }
-        const goalHandoff = goalContext?.lifecycle === "ongoing" && goalContext.goalRevision
+        // One re-read: a Main busy for a moment is not a reason to refuse the person's choice.
+        let goalContext: Awaited<ReturnType<typeof api.chats.getGoalContext>>;
+        try { goalContext = await api.chats.getGoalContext(activeThreadChatId); }
+        catch { if (!intent.isCurrent()) return; goalContext = await api.chats.getGoalContext(activeThreadChatId); }
+        if (!intent.isCurrent()) return;
+        // A Goal still being created has no revision yet: there is nothing to hand off to, so the choice is the chat's
+        // pin. A Goal that moved on since this read is bound by Main at its current revision (or, if it ended, the pin).
+        const goalRevision = goalContext?.lifecycle === "ongoing" ? goalContext.goalRevision : undefined;
+        if (goalContext && goalRevision) intent.bindGoalReceiptScope(goalContext.goalId, goalRevision);
+        writeStarted = true;
+        const goalHandoff = goalContext && goalRevision
           ? await api.chats.requestGoalRuntimeSelection(activeThreadChatId, {
             expectedGoalId: goalContext.goalId,
-            expectedGoalRevision: goalContext.goalRevision,
+            expectedGoalRevision: goalRevision,
             selection,
           })
           : null;
@@ -5686,41 +5892,63 @@ function OneSessionsShell() {
           !updated
           || updated.id !== activeThreadChatId
           || !runtimeSelectionReceiptMatches(selection, receipt)
-          || (goalHandoff && (goalHandoff.chat.id !== updated.id || goalHandoff.goalId !== goalContext?.goalId
-            || goalHandoff.goalRevision !== goalContext.goalRevision || goalHandoff.state !== "pending"))
+          || (goalHandoff && goalHandoff.chat.id !== updated.id)
         ) {
           throw new Error("Desktop did not acknowledge the exact chat runtime selection");
         }
-        const receiptRuntime = oneRuntimeInventory.find((runtime) => (
-          runtime.kind === receipt.kind
-          && (!receipt.backend || runtime.backend === receipt.backend)
-          && (!receipt.source || runtime.source === receipt.source)
-        ));
+        writeAcknowledged = true;
+        // "pending"/"claimed": queued for the Goal's next safe episode. "applied": no Goal needed it (it ended meanwhile).
+        const queued = goalReceiptIsQueued(goalHandoff);
+        if (goalHandoff && !intent.acceptGoalReceipt(goalHandoff)) return;
+        if (!intent.isCurrent()) return;
+        const confirmation = await intent.confirm(api);
+        if (confirmation === "overtaken" && selectionViewIsCurrent()) {
+          // A newer choice (the phone, another window) is the saved one now; the chip shows it, nothing is said.
+          oneRuntimeReadGenerationRef.current += 1;
+          setOneRuntimePreferenceRevision((revision) => revision + 1);
+          setGoalHandoffRequestKey((key) => key + 1);
+        }
+        if (confirmation !== "confirmed") return;
+        if (!intent.isCurrent() || !selectionViewIsCurrent()) return;
+        const receiptRuntime = oneRuntimeInventory.find((runtime) => runtimeMatchesSelection(runtime, receipt))
+          ?? (runtimeMatchesSelection(nextRuntime, receipt) ? nextRuntime : undefined);
         if (!receiptRuntime) throw new Error("Desktop acknowledged an unavailable runtime selection");
         acknowledgedSelection = receipt;
-        if (goalHandoff) {
+        if (queued && selectionViewIsCurrent()) {
           // A queued Goal change is a pending state, not an alert: the Goal bar
           // shows it as a chip (details on demand) until Main reports applied.
           infoActionNoticeRef.current = null;
-          setActionNotice(null);
-          setGoalHandoffRequestKey((key) => key + 1);
-        } else {
+          setActionNotice(current => selectionViewIsCurrent() ? null : current);
+          setGoalHandoffRequestKey((key) => selectionViewIsCurrent() ? key + 1 : key);
+        } else if (!queued && selectionViewIsCurrent()) {
           const selectionNotice = appLocale === "ko"
             ? "이 대화의 다음 새 메시지부터 새 모델을 씁니다. 이 대화에서 만든 자동화도 다음 실행부터 따라갑니다(직접 모델을 지정한 자동화는 그대로)."
             : "This conversation's next new message uses the new model. Automations created in this chat follow from their next run (automations with a model you set yourself stay unchanged).";
           infoActionNoticeRef.current = selectionNotice;
-          setActionNotice(selectionNotice);
+          setActionNotice(current => selectionViewIsCurrent() ? selectionNotice : current);
         }
-        acknowledgedRuntime = withOneRuntimeSelection(
-          { ...receiptRuntime, active: true },
-          receipt.model ?? receiptRuntime.model ?? null,
-          receipt.effort ?? (receipt.model ? undefined : receiptRuntime.effort),
-        );
-        setActiveThreadChat(updated);
-        const runtimeChanged = !goalHandoff
+        // Inventory values may still describe an earlier pick. Preserve the
+        // acknowledged default/model/effort rather than rebuilding a new pin.
+        acknowledgedRuntimeValue = {
+          ...withOneRuntimeSelection(
+            { ...receiptRuntime, active: true, longContextEnabled: receipt.kind === "byok"
+              ? Boolean(receipt.longContext) : receipt.longContext ?? receiptRuntime.longContextEnabled },
+            receipt.model ?? null,
+            receipt.effort ?? null,
+          ),
+          effort: receipt.effort ?? null,
+        };
+        if (selectionViewIsCurrent()) {
+          // A room read started before this acknowledged write is now stale.
+          oneRuntimeReadGenerationRef.current += 1;
+          setActiveThreadChat(current => selectionViewIsCurrent() ? updated : current);
+        }
+        const runtimeChanged = !queued
           && !runtimeSelectionReceiptMatches(acknowledgedSelection, oneRuntimeSelection);
-        if (runtimeChanged) preflightSubmissionGenerationRef.current += 1;
         const preparing = preflightSubmissionRef.current;
+        if (runtimeChanged && (selectionViewIsCurrent() || preparing?.chatId === activeThreadChatId)) {
+          preflightSubmissionGenerationRef.current += 1;
+        }
         if (runtimeChanged && preparing?.chatId === activeThreadChatId) {
           // The old submission may no longer attach a follow-up after this
           // model change. Main's runtime pin check also fails closed if this
@@ -5729,28 +5957,54 @@ function OneSessionsShell() {
           if (preflightSubmissionRef.current?.submissionId === preparing.submissionId) {
             preflightSubmissionRef.current = null;
           }
-          setPreflightSteerReceipts(await api.invoke.preflightSteers(activeThreadChatId).catch(() => []));
+          const receipts = await api.invoke.preflightSteers(activeThreadChatId).catch(() => []);
+          if (selectionViewIsCurrent()) setPreflightSteerReceipts(current => selectionViewIsCurrent() ? receipts : current);
         }
+        if (!intent.isCurrent()) return;
       } catch (cause) {
-        const unavailable = /goal_runtime_(?:selection_unavailable|model_unverified)/.test(failureMessage(cause));
-        setActionNotice(appLocale === "ko"
-          ? unavailable
-            ? "선택한 모델의 사용 가능 여부를 확인하지 못해 변경하지 않았습니다. 기존 모델을 유지합니다."
-            : "모델 변경을 저장하지 못했습니다. 기존 선택을 유지한 채 목표 상태를 새로고침하고 다시 시도해 주세요."
-          : unavailable
-            ? "The selected model could not be verified as available. The previous model remains in use."
-            : "The model change was not saved. The previous selection remains; refresh the Goal status and try again.");
+        if (!intent.isCurrent()) return;
+        const code = ipcErrorCode(cause);
+        // A newer choice overtook this one (or the chat is gone): the saved selection is the latest, the chip shows it,
+        // and nothing is said.
+        if (isOvertakenSelectionCode(code)) {
+          intent.yieldToSaved();
+          if (selectionViewIsCurrent()) {
+            oneRuntimeReadGenerationRef.current += 1;
+            setOneRuntimePreferenceRevision((revision) => revision + 1);
+            setGoalHandoffRequestKey((key) => key + 1);
+          }
+          return;
+        }
+        // The only refusals left are causes outside the app (signed out, not installed, credentials unreadable, model not
+        // installed); Main raises them before it writes anything, so the saved choice is unchanged and the chip shows it.
+        // A lost mutation ACK or a failed confirmation read does not establish a refusal.
+        const refusal = !writeAcknowledged ? goalRuntimeRefusalNotice(code, selection, appLocale) : null;
+        if (refusal) intent.yieldToSaved(); else intent.markUnknown(cause);
+        if (!selectionViewIsCurrent()) return;
+        const notice = refusal ?? (appLocale === "ko"
+          ? !writeStarted
+            ? "이 대화의 상태를 확인하지 못해 모델 변경 요청을 보내지 않았습니다. 연결과 목표 상태를 확인해 주세요. 작성한 글과 첨부는 보관됩니다."
+            : "이 대화의 모델 변경 결과를 아직 확인하지 못했습니다. 작성한 글과 첨부는 그대로 보내실 수 있으며, 모델은 다시 선택할 수 있습니다."
+          : !writeStarted
+            ? "The model change was not requested because this conversation's state could not be checked. Check the connection and Goal state. Your text and attachments are kept."
+            : "The result of this conversation's model change is not yet confirmed. You can still send your text and attachments, and you can choose a model again.");
+        setActionNotice(current => selectionViewIsCurrent() ? notice : current);
         return;
+      } finally {
+        intent.finish();
       }
     }
+    // The saved pin belongs to its original chat even if navigation happened
+    // during IPC. Only its still-open view may update the global picker.
+    if (!selectionViewIsCurrent()) return;
+    setRestoredRuntimeDraft(current => current?.chatId === activeThreadChatId ? null : current);
     writeStoredOneRuntimeSelection(acknowledgedSelection);
-    setComposerMenu(null);
-    // The pin call above awaited Main; the person may have opened another room
-    // meanwhile. That room's chip is not this room's choice.
+    setComposerMenu(current => selectionViewIsCurrent() ? null : current);
+    const acknowledgedRuntime = (current: RuntimeStatus | null) => selectionViewIsCurrent() ? acknowledgedRuntimeValue : current;
     if (activeThreadChatIdRef.current !== activeThreadChatId) return;
     setOneRuntime(acknowledgedRuntime);
-    setOneRuntimePinned(true);
-  }, [activeThreadChatId, appLocale, busy, oneRuntime, oneRuntimeInventory, oneRuntimeSelection]);
+    setOneRuntimePinned(current => selectionViewIsCurrent() ? true : current);
+  }, [activeThreadChatId, appLocale, busy, goalControlViewKey, oneRuntime, oneRuntimeInventory, oneRuntimeSelection]);
 
   const restoreUnsentFollowup = useCallback(async (intent: OneFollowupIntent) => {
     // Only this explicit local state proves there has been no Main handoff.
@@ -5781,6 +6035,9 @@ function OneSessionsShell() {
       // Read the exact local row again, so a stale card cannot delete another draft.
       const saved = readOneFollowupOutbox(window.localStorage, intent.chatId).find(item => item.intentId === intent.intentId);
       if (!saved || JSON.stringify(saved) !== JSON.stringify(intent)) return;
+      selectionDraftEpochRef.current += 1;
+      invalidateChatSelectionIntent(intent.chatId);
+      setRestoredRuntimeDraft({ chatId: intent.chatId, intentId: intent.intentId, selection: selection ?? null });
       setComposer(intent.userPrompt);
       setMessageReply(null); // The frozen prompt already contains its quoted context.
       setTurnAgentIds(intent.agentIds ?? []);
@@ -5792,6 +6049,8 @@ function OneSessionsShell() {
         ...(intent.request.sessionRouting ? { sessionRouting: true } : {}),
       });
       if (intent.request.onePermissionMode) setOnePermission(intent.request.onePermissionMode);
+      // A previously started room read must not replace the restored draft's model.
+      oneRuntimeReadGenerationRef.current += 1;
       setOneRuntimePinned(Boolean(selection));
       if (matched && selection) setOneRuntime(withOneRuntimeSelection({ ...matched, active: true,
         longContextEnabled: selection.longContext ?? matched.longContextEnabled }, selection.model ?? matched.model ?? null,
@@ -5807,6 +6066,29 @@ function OneSessionsShell() {
 
   const submitTextRef = useRef<((text: string, resume?: FirstSendEntry) => Promise<void>) | null>(null);
   const resumePausedFollowup = useCallback(async (intent: OneFollowupIntent) => {
+    if (intent.followupCustodyVersion === 2) {
+      if (activeThreadChatIdRef.current !== intent.chatId) return;
+      try {
+        if (intent.deliveryObserved) {
+          currentTurnBackoffRef.current.delete(intent.intentId);
+          deliverCustodiedCurrentTurnFollowup(intent, ipc(), true);
+          return;
+        }
+        if (intent.capturePending) saveOneFollowupIntent(window.localStorage, intent);
+        resumeOneFollowupIntent(window.localStorage, intent.chatId, intent.intentId);
+        unconfirmedFollowupCapturesRef.current.delete(intent.intentId);
+        locallyStoppedFollowupIdsRef.current.delete(intent.intentId);
+        terminalFollowupIdsRef.current.delete(intent.intentId);
+        currentTurnBackoffRef.current.delete(intent.intentId);
+        const resumed = readOneFollowupOutbox(window.localStorage, intent.chatId).find(item => item.intentId === intent.intentId);
+        setLocalFollowupIntents(readLocalFollowupIntents(intent.chatId));
+        if (resumed) deliverCustodiedCurrentTurnFollowup(resumed, ipc(), true);
+      } catch {
+        setActionNotice(appLocale === "ko" ? "추가 지시 저장을 확인하지 못했습니다. 같은 원문을 유지했습니다."
+          : "The saved follow-up could not be confirmed. The same original is retained.");
+      }
+      return;
+    }
     // "Send again" on a direction for a turn that has since ended cannot reach that turn any more; retrying it only
     // re-paused the card (room "Youtube launch", 2026-10-11). The owner asked to send it, so it goes as a new message.
     if (intent.currentTurnRunId && activeThreadChatIdRef.current === intent.chatId) {
@@ -5832,7 +6114,7 @@ function OneSessionsShell() {
     } catch {
       setActionNotice(appLocale === "ko" ? "추가 지시 전달 재개를 저장하지 못했습니다. 자동 전달은 계속 중단합니다." : "Delivery resume could not be saved. Automatic delivery remains paused.");
     }
-  }, [appLocale, reconcileUncertainPreflightSteer]);
+  }, [appLocale, deliverCustodiedCurrentTurnFollowup, reconcileUncertainPreflightSteer]);
 
   // 실행 타깃 결정: 좌석(설치행)이 call-only Hub 자산이면 로컬 프롬프트 실행이 아니라
   // Hub borrow 경로로 보낸다({source:"hub", slug}) — 로컬 프롬프트가 없으므로 local 타깃은
@@ -6769,6 +7051,13 @@ function OneSessionsShell() {
   const submit = useCallback(async (text: string, resume?: FirstSendEntry) => {
     // `resume` is this room's own saved send after a reload: it runs with the choices frozen when the owner pressed
     // send, never the composer's current state, and it never touches what the owner is typing now.
+    if (!resume && chatSelectionSendBlocked(activeThreadChatIdRef.current, oneRuntimeSelection ?? null)) {
+      setActionNotice(appLocale === "ko"
+        ? "모델 선택을 아직 확인하지 못해 실행을 시작하지 않았습니다. 글과 첨부는 그대로 있으며, 다른 모델을 선택하거나 확인 후 다시 보낼 수 있습니다."
+        : "Execution has not started because the model selection is not confirmed. Your text and attachments remain; choose another model or send again after confirmation.");
+      return;
+    }
+    const restoredDraftAtSubmit = shownRestoredRuntimeDraft;
     const attachmentSnapshot = resume ? [] : attachmentDraftsRef.current.slice();
     // Repetition is configured in One's automation surface, not in the chat
     // composer. Keeping a third scheduling sheet here duplicated that product
@@ -6825,7 +7114,7 @@ function OneSessionsShell() {
         ...(overrideSnapshot.fastMode ? { fastMode: true } : {}),
         sessionRouting: overrideSnapshot.sessionRouting === true,
       };
-      const intent: OneFollowupIntent = {
+      const captured: OneFollowupIntent = {
         intentId: uid(), chatId, userPrompt: followupPrompt,
         createdAt: new Date().toISOString(), request, ...binding,
         agentIds: turnAgentIds.slice(),
@@ -6834,21 +7123,43 @@ function OneSessionsShell() {
         ...(turnAgentIds.length !== activeTaskforceAgentIds.length
           || turnAgentIds.some(agentId => !activeTaskforceAgentIds.includes(agentId)) ? { requiresReprepare: true } : {}),
       };
+      const intent = captured.currentTurnRunId && !captured.requiresReprepare
+        ? bindOneFollowupCapture(window.localStorage, { ...captured, followupCustodyVersion: 2, composerText: text })
+        : captured;
       try {
         saveOneFollowupIntent(window.localStorage, intent);
         if (activeThreadChatIdRef.current === chatId) {
           setLocalFollowupIntents(readOneFollowupOutbox(window.localStorage, chatId));
           setComposer(current => current === text || current === rawReply ? "" : current);
+          if (intent.followupCustodyVersion === 2) {
+            const remaining = composerHandleRef.current?.getValue() ?? composerValueRef.current;
+            if (remaining && (remaining === text || remaining === rawReply)) throw new Error("one_followup_composer_not_released");
+          }
           setMessageReply(current => current === submittedReply ? null : current);
           setMessages(current => current.some(message => message.id === `followup:${intent.intentId}`) ? current
             : [...current, { id: `followup:${intent.intentId}`, intellectUiMessageId: `followup:${intent.intentId}`, role: "user", text: intent.userPrompt, createdAt: intent.createdAt }]);
           followupDeliveryNoticeRef.current = null;
           setActionNotice(null);
         }
-        if (intent.currentTurnRunId && !intent.requiresReprepare) deliverCurrentTurnFollowup(intent, ipc());
+        const released = intent.followupCustodyVersion === 2 ? releaseOneFollowupCapture(window.localStorage, intent) : intent;
+        if (restoredDraftAtSubmit?.chatId === chatId) {
+          setRestoredRuntimeDraft(current => current?.intentId === restoredDraftAtSubmit.intentId && current.chatId === chatId ? null : current);
+        }
+        unconfirmedFollowupCapturesRef.current.delete(intent.intentId);
+        if (released.currentTurnRunId && !released.requiresReprepare) deliverCurrentTurnFollowup(released, ipc());
         else void reconcileUncertainPreflightSteer(chatId);
         scrollToLatest();
       } catch {
+        if (intent.followupCustodyVersion === 2) {
+          unconfirmedFollowupCapturesRef.current.set(intent.intentId, intent);
+          locallyStoppedFollowupIdsRef.current.add(intent.intentId);
+          if (activeThreadChatIdRef.current === chatId) setLocalFollowupIntents(current =>
+            [...current.filter(item => item.intentId !== intent.intentId), intent]);
+          setActionNotice(appLocale === "ko"
+            ? "추가 지시 저장 확인이 필요합니다. 자동 전달을 멈췄습니다. 보관한 원문에서 같은 지시를 이어서 전달하세요."
+            : "The saved follow-up needs confirmation. Automatic delivery is paused. Continue the same input from its retained original.");
+          return;
+        }
         setActionNotice(appLocale === "ko"
           ? "추가 지시를 보관하지 못해 보내지 않았습니다. 작성한 글은 그대로입니다."
           : "The follow-up could not be saved or sent. Your draft remains.");
@@ -7322,6 +7633,12 @@ function OneSessionsShell() {
       setComposerMenu(null);
       clearAttachmentDrafts({ preserveSubmittedPreviews: true });
     }
+    if (restoredDraftAtSubmit?.chatId === firstSend.chatId) {
+      for (const [id, prior] of restoredRuntimeSubmissionsRef.current) {
+        if (prior.intentId === restoredDraftAtSubmit.intentId) restoredRuntimeSubmissionsRef.current.delete(id);
+      }
+      restoredRuntimeSubmissionsRef.current.set(preflightSubmissionId, { chatId: restoredDraftAtSubmit.chatId, intentId: restoredDraftAtSubmit.intentId });
+    }
     liveFirstSendIdsRef.current.add(preflightSubmissionId);
     sessionFirstSendIdsRef.current.add(preflightSubmissionId);
     showFirstSends(firstSend.chatId);
@@ -7449,23 +7766,34 @@ function OneSessionsShell() {
           ) {
             throw new Error("Desktop did not acknowledge the fresh chat runtime selection");
           }
-          const receiptRuntime = oneRuntimeInventory.find((runtime) => (
-            runtime.kind === receipt.kind
-            && (!receipt.backend || runtime.backend === receipt.backend)
-          ));
+          const receiptRuntime = oneRuntimeInventory.find((runtime) => runtimeMatchesSelection(runtime, receipt))
+            ?? (oneRuntime && runtimeMatchesSelection(oneRuntime, receipt) ? oneRuntime : undefined);
           if (!receiptRuntime) throw new Error("Desktop acknowledged an unavailable fresh chat runtime");
           submissionRuntimeSelection = receipt;
           chat = pinned;
-          setConversation((current) => current?.id === pinned.id ? pinned : current);
-          setActiveThreadChat(pinned);
-          setOneRuntime(withOneRuntimeSelection(
-            { ...receiptRuntime, active: true },
-            receipt.model ?? receiptRuntime.model ?? null,
-            receipt.effort ?? (receipt.model ? undefined : receiptRuntime.effort),
-          ));
-          setOneRuntimePinned(true);
-          oneRuntimeOwnerChatIdRef.current = chat.id;
-          writeStoredOneRuntimeSelection(receipt);
+          // The pin is saved for this chat even if the owner has since opened
+          // another conversation or a new draft. Only the current view may
+          // project that receipt into its composer and global preference.
+          const freshPinViewIsCurrent = () => refreshAllMountedRef.current && navigationEpochRef.current === submissionNavigationEpoch
+            && !homeTransitionPendingRef.current && selectedTaskIdRef.current === null
+            && selectedConversationIdRef.current === pinned.id;
+          if (freshPinViewIsCurrent()) {
+            oneRuntimeReadGenerationRef.current += 1;
+            setConversation((current) => freshPinViewIsCurrent() && current?.id === pinned.id ? pinned : current);
+            setActiveThreadChat(current => freshPinViewIsCurrent() ? pinned : current);
+            setOneRuntime(current => freshPinViewIsCurrent() ? {
+              ...withOneRuntimeSelection(
+                { ...receiptRuntime, active: true, longContextEnabled: receipt.kind === "byok"
+                  ? Boolean(receipt.longContext) : receipt.longContext ?? receiptRuntime.longContextEnabled },
+                receipt.model ?? null,
+                receipt.effort ?? null,
+              ),
+              effort: receipt.effort ?? null,
+            } : current);
+            setOneRuntimePinned(current => freshPinViewIsCurrent() ? true : current);
+            oneRuntimeOwnerChatIdRef.current = chat.id;
+            writeStoredOneRuntimeSelection(receipt);
+          }
         } catch {
           // The empty chat already exists and is now the visible recovery
           // target, but no invocation may start without the exact pin receipt.
@@ -7620,7 +7948,7 @@ function OneSessionsShell() {
       liveFirstSendIdsRef.current.delete(preflightSubmissionId);
       showFirstSends(firstSend.chatId);
     }
-  }, [messageReply, activeTaskforce, discussion.refresh, oneProfile, activeTaskforceAgentIds, autoStartTeamPreflight, busy, clearAttachmentDrafts, conversation, appLocale, normalizedLocale, onePermission, oneRuntimeInventory, oneRuntimeSelection, orchestrationTargetForAgentId, reconcileUncertainPreflightSteer, resolveActivationConcern, router, scrollToLatest, selected, startRun, pendingTeamPrompt, teamPreflight, teamPreflightBusy, turnAgentIds, turnOverrides, workspaceGrant]);
+  }, [shownRestoredRuntimeDraft, messageReply, activeTaskforce, discussion.refresh, oneProfile, activeTaskforceAgentIds, autoStartTeamPreflight, busy, clearAttachmentDrafts, conversation, appLocale, normalizedLocale, onePermission, oneRuntimeInventory, oneRuntimeSelection, orchestrationTargetForAgentId, reconcileUncertainPreflightSteer, resolveActivationConcern, router, scrollToLatest, selected, startRun, pendingTeamPrompt, teamPreflight, teamPreflightBusy, turnAgentIds, turnOverrides, workspaceGrant]);
   submitTextRef.current = submit;
 
   /*
@@ -8505,11 +8833,11 @@ function OneSessionsShell() {
     const model = originalModel?.trim();
     if (!model || !oneRuntimeSelection || oneRuntimeSelection.model === model) return oneRuntimeSelection;
     const known = oneModelOptions.some((option) =>
-      option.runtime.kind === oneRuntimeSelection.kind
-      && option.runtime.backend === oneRuntimeSelection.backend
+      sameRuntimeIdentity(option.runtime, oneRuntime)
+      && runtimeMatchesSelection(option.runtime, oneRuntimeSelection)
       && option.id === model);
     return known ? { ...oneRuntimeSelection, model } : oneRuntimeSelection;
-  }, [oneModelOptions, oneRuntimeSelection]);
+  }, [oneModelOptions, oneRuntime, oneRuntimeSelection]);
 
   const retryUnansweredTurn = useCallback((promptText: string, originalModel?: string | null) => {
     const chatId = selected?.chatId ?? conversation?.id;
@@ -10649,7 +10977,6 @@ function OneSessionsShell() {
               }}
               onClose={() => setSplitChatIds((ids) => ids.filter((id) => id !== pane.id))}
               permissionMode={onePermission}
-              runtimeSelection={oneRuntimeSelection}
               appLocale={appLocale}
             />
           ))}
@@ -10766,6 +11093,22 @@ function OneSessionsShell() {
               </div>
             )}
             {attachmentError && <p className={styles.attachmentError} role="alert">{attachmentError}</p>}
+            {localFollowupIntents.filter(intent => intent.chatId === activeThreadChatId && intent.followupCustodyVersion === 2
+              && (intent.capturePending || intent.autoDeliveryPaused || delayedFollowupIds.has(intent.intentId))).map(intent => (
+              <details key={intent.intentId} className={styles.teamPreflightConsent} data-one-followup-recovery={intent.intentId} data-followup-state={intent.capturePending ? "capture-pending" : intent.deliveryObserved ? "observed" : "paused"}>
+                <summary>{intent.capturePending
+                  ? (appLocale === "ko" ? "추가 지시 저장 확인" : "Confirm saved follow-up")
+                  : (appLocale === "ko" ? "보관한 추가 지시" : "Saved follow-up")}</summary>
+                <p style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{parseChatFileMessage(intent.userPrompt).visibleText}</p>
+                <p>{appLocale === "ko" ? "모델·첨부·원래 전달 대상을 유지합니다. 작성창의 글은 바꾸지 않습니다." : "The saved model, attachments and original target are retained. The current draft stays unchanged."}</p>
+                <div className={styles.teamPreflightConsentActions}>
+                  <button type="button" onClick={() => { void resumePausedFollowup(intent); }}>
+                    {intent.deliveryObserved ? (appLocale === "ko" ? "전달 상태 확인" : "Check delivery")
+                      : (appLocale === "ko" ? "같은 지시 이어서 전달" : "Continue this follow-up")}
+                  </button>
+                </div>
+              </details>
+            ))}
             {actionNotice && <p className={styles.attachmentError} role="status" aria-live="polite" data-one-action-notice="true" data-tone="info">{actionNotice}</p>}
             {/* 좁은 대화 열(결과 패널을 연 440px)에서 단추 두 개가 1fr 칸에 0px 로 눌려 글자가
                 서로 겹쳐 그려졌다(오너 1.2.41). 문장 한 덩이 + 단추 묶음으로 두고, 자리가 모자라면
@@ -10965,7 +11308,11 @@ function OneSessionsShell() {
                   });
                 }}
                 onSelectModel={(runtime, model) => { void applyOneRuntimeSelection({ model }, runtime); }}
-                onSelectEffort={(effort) => { void applyOneRuntimeSelection({ effort }); }}
+                selectionIntentId={selectionChoice?.requestId}
+                onSelectEffort={(effort, displayed, intentId) => {
+                  if (!displayed || readChatSelectionIntent(activeThreadChatId)?.requestId !== intentId) return;
+                  void applyOneRuntimeSelection({ effort }, displayed);
+                }}
                 onSelectPermission={(permission) => {
                   setOnePermission(permission);
                   setComposerMenu(null);
@@ -11206,7 +11553,7 @@ function OneSessionsShell() {
                       onClick={() => setComposerMenu((current) => current === "model" ? null : "model")}
                     >
                       <IconSparkles size={15} />
-                      <span>{composerModelLabel(oneModelChipLabel(oneRuntime, oneModelOptions, appLocale), runningComposerModel, appLocale)}</span>
+                      <span>{composerModelLabel(oneModelChipLabel(oneRuntime, oneModelOptions, appLocale), runningComposerModel, appLocale)}{selectionChoice?.status === "pending" || selectionChoice?.status === "unknown" ? appLocale === "ko" ? " · 확인 중" : " · Confirming" : ""}</span>
                       <IconChevronDown size={12} />
                     </button>
                   )}
@@ -11854,6 +12201,11 @@ function SearchHitRow({ hit, active, locale, mutationBusy, onOpenTask, onOpenCon
     conversation: "one.shell.searchhit.kind.conversation",
     team: "one.shell.searchhit.kind.team",
   } as const;
+  // A screen pack's conversation (PLAN Science S6) carries its pack's label; Work/One hits carry none.
+  const packKeys: Partial<Record<string, "one.shell.searchhit.pack.science">> = {
+    science: "one.shell.searchhit.pack.science",
+  };
+  const packKey = hit.surfacePack ? packKeys[hit.surfacePack] : undefined;
   const matchKeys = {
     task_title: "one.shell.searchhit.match.task_title",
     conversation_title: "one.shell.searchhit.match.conversation_title",
@@ -11877,7 +12229,7 @@ function SearchHitRow({ hit, active, locale, mutationBusy, onOpenTask, onOpenCon
   return (
     <article className={styles.searchHit} data-active={active ? "true" : "false"} data-archived={hit.archived ? "true" : "false"}>
       <button type="button" className={styles.searchHitOpen} onClick={open}>
-        <span className={styles.searchHitHeading}><span className={styles.searchKind}>{tFor(locale, kindKeys[hit.kind])}</span><strong>{hit.title}</strong></span>
+        <span className={styles.searchHitHeading}><span className={styles.searchKind}>{tFor(locale, kindKeys[hit.kind])}</span>{packKey && <span className={styles.searchKind} data-surface-pack={hit.surfacePack}>{tFor(locale, packKey)}</span>}<strong>{hit.title}</strong></span>
         {hit.detail && <span className={styles.searchHitDetail}>{hit.detail}</span>}
         <small>{hit.archived ? tFor(locale, "one.shell.searchhit.status.archived") : tFor(locale, statusKeys[hit.status])} · {formatTimestamp(hit.updatedAt, locale)} · {hit.matchedBy.map((kind) => tFor(locale, matchKeys[kind])).join(" · ")}</small>
       </button>

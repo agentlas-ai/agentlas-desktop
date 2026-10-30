@@ -41,11 +41,11 @@ import { runtimeFailureBlocksReplay } from "../runtime/selection";
 import { runtimeFailureBlocksNextAutomaticTurn } from "../../shared/runtime-turn-admission";
 import { captureGoalEpisode, applyGoalEpisodeRest, drainGoalEpisodeNotices,
   captureGoalProducerAdmission, admitGoalProducer, assertGoalProducerDispatch, latestGoalEpisodeProducer, type GoalProducerAdmission } from "../long-run/episode-disposition";
-import { latestGoalWaitSubscription, registerGoalWaitSubscription, registerOngoingGoalCycle, restoreGoalWaitAfterUndispatchedStart, supersedeGoalWaitForInvocation, type GoalWaitDispatch } from "../long-run/wait-subscriptions";
+import { latestGoalWaitSubscription, goalWaitContinuationPermission, registerGoalWaitSubscription, registerOngoingGoalCycle, restoreGoalWaitAfterUndispatchedStart, supersedeGoalWaitForInvocation, type GoalWaitDispatch } from "../long-run/wait-subscriptions";
 import { recordGoalWaitProposal } from "../long-run/goal-wait-proposal";
 import type { ParsedGoalWait } from "../long-run/wait-emitter";
 import { finiteGoalTimerRefusalEndsTurn, finiteGoalTimerRefusalMessage, goalWaitRefusalAlreadyNotified, goalWaitRefusalMessage, GOAL_WAIT_FINITE_TIMER_NOTICE } from "../long-run/goal-wait-refusal";
-import { ensureOngoingEpisodeTask } from "../long-run/ongoing-episode-task";
+import { ensureGoalEpisodeTask } from "../long-run/ongoing-episode-task";
 import { settleNativeGoalEpisode } from "../long-run/native-goal-pass";
 import { GOAL_RESUME_EFFECT_BOUNDARY_UNCERTAIN, goalResumeRecoveryBlockerCode } from "../../shared/long-run";
 import { prepareCheckpointContinuation } from "../long-run/continuation";
@@ -77,6 +77,7 @@ import {
 import { invocationHostStopCause, invocationHostStopCopy, isOwnerGoalStopCause, isNonFailureInvocationStop } from "../../shared/invocation-host-stop";
 import { isAppSideRunFailureCode } from "../../shared/run-failure-cause";
 import { runFailureNoticeText } from "../../shared/run-failure-notice";
+import { hostInternalFailureMessage, isHostInternalException } from "./host-internal-failure";
 import { OWNER_ACTION_FAILURE_CODES } from "../../shared/run-failure-notice";
 import {
   appendLongRunEvent,
@@ -152,6 +153,8 @@ import { advanceMainLivePartial, markInterruptedPartial } from "./interrupted-pa
 import { untrustedRuntimeFailurePayload } from "../runtime/untrusted-error";
 import { validatedRunnerNativeControlState, markRefusedBeforeDispatch, outwardFailureCode, preDispatchRefusal, RuntimeTurnUnsettledError, refusalCode, runnerRefusedBeforeDispatch } from "../runtime/runner";
 import { innermostTypedCode, STORE_BUSY_CODE } from "../../shared/turn-settlement";
+import { canonicalFinalBody, confirmDurableAssistantResult } from "./durable-result";
+import { runWithStoreBusyRetry } from "../store/store-busy-retry";
 import {
   getInvocationRunReceipt,
   getLatestInvocationRunReceipt,
@@ -181,7 +184,7 @@ import {
   type InvocationAdmissionIdentity,
 } from "../store/invocation-admissions";
 import { ownerVisiblePrompt } from "../one/owner-prompt";
-import { claimDeferredSystemRelays, deferSystemRelay, peekDeferredSystemRelays, releaseDeferredSystemRelays } from "./deferred-system-relays";
+import { claimDeferredSystemRelays, parkSystemRelay, peekDeferredSystemRelays, releaseDeferredSystemRelays } from "./deferred-system-relays";
 import { chatFilePrompt, chatFileImages, validateChatAttachmentSelection, listChatFileSnapshot } from "../store/chat-message-attachments";
 import { findAutomationByGoalId, toggleAutomation } from "../store/automations";
 import { GOAL_CONTINUATION_HOST_WAKE } from "../store/goal-continuation-rows";
@@ -210,11 +213,10 @@ import {
 } from "../store/invocation-steers";
 import {
   appendChatMessage,
-  bindGoalResultMessage,
+  bindGoalResultMessageSettling,
   settleGoalResultMessages,
   getChat,
   getChatWorkingFolder,
-  hasDurableAssistantMessage,
   latestDurableAssistantMessage,
   listChatMessages,
   repairRootChatSurfaceController,
@@ -233,7 +235,8 @@ import {
 import { getOneProfile } from "../store/one-profile";
 import { personalSupervisorConversationInDb } from "../one/supervisor-store";
 import { CARRIED_FOLLOWUP_STEER_PREFIX, carryUndeliveredOwnerFollowups as carryOwnerFollowupsToNextTurn } from "./carried-owner-followups";
-import { OWNER_INTAKE_NOTICE_AFTER_MS, OWNER_INTAKE_STEER_PREFIX, ownerIntakeReceivedNotice, ownerIntakeWaits, ownerMessageSurface } from "./owner-intake";
+import { OWNER_INTAKE_NOTICE_AFTER_MS, OWNER_INTAKE_START_HOLD_MAX_MS, OWNER_INTAKE_STEER_PREFIX, OWNER_STEERED_PREFIX, ownerIntakeReceivedNotice, ownerIntakeWaits, ownerMessageSurface, type OwnerIntakeOutcome } from "./owner-intake";
+import { ownerDirectionReviewSkip } from "./owner-direction-review";
 import { runTurnMayHaveBeenRead } from "./turn-placement";
 import { personalSupervisorGuidance } from "../../shared/one-supervisor-context";
 import { tryRecordOneDomainEvent } from "../one/domain-events";
@@ -556,6 +559,8 @@ interface QueuedSteer {
   drainedRunId?: string;
   /** A planned run of this direction whose start a locked store refused after recording it: retried under a new id. */
   spentRunId?: string;
+  /** An owner message taken while the request-intent judge was answering: it starts as a direct start would, not as a queued turn that inherits its room's roster. */
+  judgeHold?: true;
   recoveryState?: "ready" | "held";
   recoveryReason?: DurableQueuedSteerRecoveryReason;
 }
@@ -780,16 +785,6 @@ export function promptBoundUserCursor(chatId: string, runId: string, promptMessa
   } catch {
     return {};
   }
-}
-
-/** Why an owner message in this run context gets no Goal review (null: it is reviewed). The start path adds not_local_user_turn. */
-function ownerDirectionReviewSkip(request: Pick<McpInvocationRequest, "planMode" | "agentAppMode">,
-  workspaceBinding: InvocationWorkspaceBinding | undefined, executionContext: InvocationExecutionContext | undefined): string | null {
-  return request.planMode ? "plan_mode"
-    : request.agentAppMode ? "agent_app_mode"
-      : workspaceBinding ? "workspace_binding"
-        : executionContext ? "execution_context"
-          : null;
 }
 
 /**
@@ -3031,6 +3026,17 @@ export class InvocationService {
         }
         continue;
       }
+      // An owner-intake row that never crossed beginQueuedSteerDrain names a run it only PLANNED (intakeOwnerMessage): no
+      // start was ever attempted, so there is no original run whose outcome could be uncertain. Holding it left a message
+      // the Desktop had taken (waiting for its chat, or for the request-intent judge) undelivered for good after a restart.
+      // It starts exactly once, like any rehydrated direction (the drain claim is a compare-and-set on the row).
+      if (row.id.startsWith(OWNER_INTAKE_STEER_PREFIX) && row.status === "queued" && !row.drainedRunId) {
+        const intakeQueue = this.steerQueues.get(row.chatId) ?? [];
+        if (!intakeQueue.some((queued) => queued.id === row.id)) this.enqueueSteer(row.chatId, intakeQueue, queuedSteerFromDurable(row));
+        this.steerQueues.set(row.chatId, intakeQueue);
+        resumed += 1;
+        continue;
+      }
       const originalReceipt = getInvocationRunReceipt(row.originalRunId);
       if (!steerReceiptIsTerminal(originalReceipt) && !previousExecutionClosed) {
         // An active lease (or a run live in this process) is a running owner, not a restart's uncertainty: that owner holds this
@@ -3750,7 +3756,11 @@ export class InvocationService {
      * Relays a waiting Goal refused earlier (deferred-system-relays.ts) ride on this turn's Main-only context, once.
      * Only a turn that can claim them reads them; the claim is made right after the waiting-Goal guard below.
      */
-    const deferredRelayEligible = !backgroundObservation && !executionContext && !workspaceBinding
+    // The owner's phone or Telegram One turn is the owner talking to the same One chat: its workspace binding names the channel, not a
+    // Work folder, and its execution context is the channel too (ownerMessageSurface checks both agree). It carries the parked relays like
+    // a composer turn; an owner who only writes from the phone otherwise never saw a parked teammate report.
+    const remoteOwnerOneTurn = ownerSurface === "mobile-one" || ownerSurface === "telegram-one";
+    const deferredRelayEligible = !backgroundObservation && ((!executionContext && !workspaceBinding) || remoteOwnerOneTurn)
       && req.agentAppMode !== true && !effectObservation;
     let deferredRelays: ReturnType<typeof peekDeferredSystemRelays> = null;
     if (deferredRelayEligible) {
@@ -3838,6 +3848,9 @@ export class InvocationService {
       ...(runWorkspaceBinding ? { workspaceBinding: runWorkspaceBinding } : {}),
     };
     let recoverablePartialPersisted = false;
+    // The turn's final answer was found (or written) as a saved row. Whatever fails after that is about the turn's own
+    // bookkeeping, and the streamed text it would save as an "Interrupted answer" is the same text the saved row already holds.
+    let finalAnswerConfirmedDurable = false;
     // Main-stream events carry the resolved installed author. Worker events
     // must never replace it when an interrupted partial becomes durable.
     let mainSpeakerAgentId: string | null = null;
@@ -3845,6 +3858,7 @@ export class InvocationService {
       if (
         record.background
         || recoverablePartialPersisted
+        || finalAnswerConfirmedDurable
         || runReq.agentAppMode
         || remoteWorkspaceBinding
         || !record.partialText.trim()
@@ -3879,7 +3893,7 @@ export class InvocationService {
       // A host-started Goal continuation (promptOrigin "system") stays quiet, except for a cause only the owner can clear
       // (shared/run-failure-notice.ts OWNER_ACTION_FAILURE_CODES): the waiting Goal says why and what to do (YouTube 2026-10-28).
       const ownerActionCause = typeof errorCode === "string" && OWNER_ACTION_FAILURE_CODES.has(errorCode);
-      if (record.background || emptyFailureNoticePersisted || durableAssistantReplyBound || record.partialText.trim() || runReq.agentAppMode || remoteWorkspaceBinding
+      if (record.background || emptyFailureNoticePersisted || durableAssistantReplyBound || finalAnswerConfirmedDurable || record.partialText.trim() || runReq.agentAppMode || remoteWorkspaceBinding
         || (runReq.promptOrigin === "system" && !ownerActionCause) || terminalKind === "invoke_cancelled"
         || record.steeringInterruptRequested || isOwnerGoalStopCause(abortReason)) return;
       try {
@@ -4270,6 +4284,7 @@ export class InvocationService {
     // A read-only effect observation looks at the outside world for a blocked
     // Goal; it is not a Goal cycle. It must not bind a controller attempt, claim
     // completion, register waits or run the verifier on that Goal.
+    const desktopProducerAdmission = !record.background && !executionContext && !runReq.agentAppMode && !effectObservation;
     let projectionGoalId = effectObservation ? null : chat.goalId;
     /** This owner turn does not run the chat's stopped Goal (a conversational message, or a resume that could not apply). */
     let ordinaryTurnOnStoppedGoal = false;
@@ -4351,7 +4366,11 @@ export class InvocationService {
       }
     }
     let goalLongRun = projectionGoalId ? getLongRunByGoalId(projectionGoalId) : null;
-    if (!stoppedGoalReactivation && !executionContext && goalLongRun?.rootChatId === chat.id) {
+    // A turn the background service hosts can never be the Goal's episode (Goal custody is Desktop-only, so it holds no producer
+    // admission). Cancelling the Goal's wait for it flipped a waiting Goal to running with nobody to run it, and the turn was then
+    // refused goal_episode_admission_missing at its dispatch (One dispatch brief into the Thread Marketing room, run be048553,
+    // 2026-10-26T03:22Z): the Goal keeps its wait, and this turn runs as an ordinary one beside it.
+    if (!stoppedGoalReactivation && !executionContext && record.ownerLease?.ownerKind !== "daemon" && goalLongRun?.rootChatId === chat.id) {
       const superseded = supersedeGoalWaitForInvocation(goalLongRun.goalId, runId);
       // A start that fails before any provider runs gives the Goal its wait back (releaseUndispatchedStart runs this).
       if (superseded) startBoundary.cleanups?.push(() => { restoreGoalWaitAfterUndispatchedStart(superseded); });
@@ -4362,7 +4381,11 @@ export class InvocationService {
     // only an owner message may resume a Goal that waits for the owner or a scheduled retry. A system turn arriving
     // then (a One relay drained after the Goal's turn asked the owner a question: Youtube launch 2026-10-10 07:00Z,
     // run 7f8c7a55) spent 37 s of model calls and failed goal_episode_admission_missing. Refuse it before any call.
-    if (!localUserTurn && !record.background && !executionContext && !runReq.agentAppMode && !effectObservation
+    // A turn the background service hosts did not supersede the Goal's pending wait (above) and never takes the Goal's episode, so
+    // a wait that is still pending is simply not in its way: the turn runs beside it as an ordinary one.
+    const serviceTurnBesideWait = record.ownerLease?.ownerKind === "daemon" && goalLongRun?.status === "waiting_tool"
+      && latestGoalWaitSubscription(goalLongRun.goalId)?.state === "pending";
+    if (!localUserTurn && !record.background && !executionContext && !runReq.agentAppMode && !effectObservation && !serviceTurnBesideWait
       && goalLongRun?.rootChatId === chat.id && goalLongRun.surface !== "science"
       && ["waiting_tool", "blocked", "waiting_user"].includes(goalLongRun.status)) {
       /*
@@ -4372,7 +4395,7 @@ export class InvocationService {
        */
       if (invocationRequest.oneMode && invocationRequest.taskIntent === "conversation") {
         try {
-          deferSystemRelay({ chatId: chat.id, text: invocationRequest.userPrompt, cause: `goal_${goalLongRun.status}`,
+          parkSystemRelay({ chatId: chat.id, text: invocationRequest.userPrompt, cause: `goal_${goalLongRun.status}`,
             goalStatus: goalLongRun.status, originRunId: runId });
         } catch (deferError) { console.warn("[invocation] refused system relay could not be parked:", deferError); }
       }
@@ -4384,10 +4407,11 @@ export class InvocationService {
       } catch (claimError) { console.warn("[invocation] deferred relays were claimed by another turn first:", claimError); }
     }
     let goalLongRunTask = goalLongRun ? listLongRunTasks(goalLongRun.id, true)[0] ?? null : null;
-    // An ongoing Goal's episode needs an open task, or no controller attempt is bound and its cycle wait is refused
+    // A running Goal needs an open controller task even after its earlier tasks closed.
 
-    if (!goalLongRunTask && goalLongRun && !executionContext && goalLongRun.rootChatId === chat.id) {
-      try { goalLongRunTask = ensureOngoingEpisodeTask({ longRunId: goalLongRun.id, invocationRunId: runId }); }
+    if (!goalLongRunTask && goalLongRun && desktopProducerAdmission
+      && record.ownerLease?.ownerKind !== "daemon" && goalLongRun.rootChatId === chat.id) {
+      try { goalLongRunTask = ensureGoalEpisodeTask({ longRunId: goalLongRun.id, invocationRunId: runId, rootChatId: chat.id }); }
       catch (error) { console.warn("[long-run] ongoing episode task unavailable:", error); }
     }
     let goalInvocationProjection: DesktopLongRunInvocationProjection | null = null;
@@ -4447,8 +4471,14 @@ export class InvocationService {
      * Goal projection exists.
      */
     let lastControllerSelection: RuntimeSelection | null = null;
-    const desktopProducerAdmission = !record.background && !executionContext && !runReq.agentAppMode && !effectObservation;
     let producerAdmission: GoalProducerAdmission | null | undefined;
+    let producerAdmissionFailure: Error | null = null;
+    const rememberProducerAdmissionFailure = (error: unknown, phase: "capture" | "bind"): void => {
+      producerAdmissionFailure = preDispatchRefusal(error, `goal-producer-${phase}`, "goal_episode_admission_failed");
+      tryRecordRunEvent({ runId, chatId: chat.id, kind: "goal_episode_admission_refused", payload: {
+        goalId: projectionGoalId, phase, code: refusalCode(producerAdmissionFailure) ?? "goal_episode_admission_failed",
+      } });
+    };
     let producerWorkDispatchSealed = false;
     const assertProducerServiceLifetime = (): void => {
       if (!desktopProducerAdmission || producerWorkDispatchSealed || controller.signal.aborted
@@ -4514,7 +4544,10 @@ export class InvocationService {
           state: "idle",
         };
         if (desktopProducerAdmission) {
-          if (!producerAdmission) throw new Error("goal_episode_admission_missing");
+          // Selection metadata can precede the canonical runtime-selected notice.
+          // Only that notice captures custody; wait for it without fabricating a failure.
+          if (producerAdmission === undefined) return;
+          if (!producerAdmission) throw producerAdmissionFailure ?? new Error("goal_episode_admission_missing");
           goalControllerAttemptId = admitGoalProducer({ admission: producerAdmission, goalId: goalLongRun.goalId,
             worker: workerBinding }, assertProducerServiceLifetime).attemptId;
           // The first owner claim advances the run version without a synthetic status transition.
@@ -4527,12 +4560,15 @@ export class InvocationService {
           }).attemptId;
         }
         goalInvocationProjection?.bindController(workerId, chat.agentId ?? `controller:${chat.id}`);
+        producerAdmissionFailure = null;
       } catch (error) {
+        if (desktopProducerAdmission) rememberProducerAdmissionFailure(error, "bind");
         console.warn("[long-run] controller attempt binding failed:", error);
       }
     };
     const settleGoalControllerAttempt = (completed: boolean): void => {
       if (!goalControllerAttemptId || goalControllerAttemptSettled) return;
+      const attemptId = goalControllerAttemptId;
       goalControllerAttemptSettled = true;
       const terminalDisposition = classifyMainOwnedTerminal({
         eventKind: completed ? "final" : "error",
@@ -4540,13 +4576,15 @@ export class InvocationService {
         signalAborted: controller.signal.aborted,
         abortReason: controller.signal.reason,
       });
-      settleLongRunWorkerAttempt({
-        attemptId: goalControllerAttemptId,
+      // The terminal has been (or is being) published: a lock that refuses this write for a moment must not turn an
+      // answered turn into a second, failed terminal. The statement runs again (bounded); the flag above stays set.
+      runWithStoreBusyRetry(() => settleLongRunWorkerAttempt({
+        attemptId,
         state: completed ? "completed" : "interrupted",
         ...(!completed
           ? { errorCode: terminalDisposition.errorCode ?? observedRuntimeErrorCode ?? "runtime_interrupted" }
           : {}),
-      });
+      }));
       goalInvocationProjection?.settleOpenWorkers(completed);
     };
     /*
@@ -4712,10 +4750,17 @@ export class InvocationService {
             && event.kind === "notice" && event.notice?.code === "runtime-selected") {
             if (!goalControllerAttemptId && !goalControllerAttemptSettled) adoptRecordedExplicitGrant();
             try {
+              // Adoption/resume can make a task-less finite Goal runnable. Do
+              // this before capture so its immutable task digest is the one admitted.
+              if (goalLongRun && !goalLongRunTask && record.ownerLease?.ownerKind !== "daemon") {
+                ensureGoalEpisodeTask({ longRunId: goalLongRun.id, invocationRunId: runId, rootChatId: chat.id });
+                refreshGoalProjection();
+              }
               producerAdmission = captureGoalProducerAdmission({ invocationId: runId, chatId: chat.id,
                 goalId: projectionGoalId ?? getChat(chat.id)?.goalId ?? null }, assertProducerServiceLifetime);
             } catch (error) {
               producerAdmission = null;
+              rememberProducerAdmissionFailure(error, "capture");
               console.warn("[long-run] producer admission capture unavailable:", error);
             }
           }
@@ -5112,6 +5157,13 @@ export class InvocationService {
             console.warn("[long-run] child worker projection failed:", error);
           }
         }
+        // The body the producer saved (carried as durableTextForVerification), else the displayed body without the marker line.
+        const verifiedBody = event.kind === "final" && typeof event.text === "string"
+          ? typeof durableTextForVerification === "string" && durableTextForVerification.trim()
+            ? durableTextForVerification
+            : stripPermissionEscalationMarker(event.text)
+          : "";
+        let confirmedResult: ReturnType<typeof confirmDurableAssistantResult> = null;
         if (
           event.kind === "final"
           && !runReq.agentAppMode
@@ -5122,17 +5174,36 @@ export class InvocationService {
           // durable record is the one_quiet_reply run event, not a transcript row. Treating it as a lost result
           // failed every quiet turn and retried the review until its attempts ran out (QA 2026-10-04).
           && !((hostNoticePurpose === "one-delegation-review" || hostNoticePurpose === "one-checkin") && isOneQuietReply(event.text))
-          && !hasDurableAssistantMessage(
-            runReq.chatId,
-            typeof durableTextForVerification === "string" && durableTextForVerification.trim()
-              ? durableTextForVerification
-              : stripPermissionEscalationMarker(event.text),
-            startedAt,
-          )
         ) {
-          // A native/IO failure can occur between model completion and the
-          // transcript write. Never publish or ledger a successful completion
-          // unless reopening this chat can read the exact result back.
+          // A native/IO failure can occur between model completion and the transcript write. Never publish or ledger a
+          // successful completion unless reopening this chat can read the result back. Reading it back does not demand a
+          // byte-equal body (the saved copy and the event's copy differ legitimately), a lock on the store is waited out
+          // for the statement and never for the model turn, and a main-stream answer whose row is really missing is
+          // saved once more from the verified body: only an answer that still cannot be saved fails (result-not-durable).
+          confirmedResult = confirmDurableAssistantResult({
+            chatId: runReq.chatId,
+            text: verifiedBody,
+            notBefore: startedAt,
+            messageId: durableMessageId ?? null,
+            canonical: (value) => canonicalFinalBody(value, pickLocale(runReq)),
+            restore: !event.agentId && !effectObservation ? { speakerAgentId: mainSpeakerAgentId } : null,
+          });
+          if (confirmedResult && confirmedResult.via !== "exact" && confirmedResult.via !== "message-id") {
+            // Diagnostic only: how the answer was found when its body was not byte-equal (or had to be written again).
+            tryRecordRunEvent({ runId, chatId: runReq.chatId, kind: "result_row_confirmed",
+              payload: { via: confirmedResult.via, messageId: confirmedResult.messageId } });
+          }
+          if (confirmedResult) finalAnswerConfirmedDurable = true;
+        }
+        if (
+          event.kind === "final"
+          && !runReq.agentAppMode
+          && !remoteWorkspaceBinding
+          && typeof event.text === "string"
+          && event.text.trim()
+          && !((hostNoticePurpose === "one-delegation-review" || hostNoticePurpose === "one-checkin") && isOneQuietReply(event.text))
+          && !confirmedResult
+        ) {
           event = {
             kind: "error",
             runtimeAgentId: record.actualAgentId,
@@ -5148,9 +5219,10 @@ export class InvocationService {
         if (resultGoalId && !event.agentId && (event.kind === "partial" || event.kind === "final")) {
           event = { ...event, goalResult: { goalId: resultGoalId, runId, status: "pending" } };
           if (event.kind === "final" && typeof event.text === "string") {
-            const messageId = bindGoalResultMessage({ chatId: runReq.chatId, goalId: resultGoalId, runId,
-              text: typeof durableTextForVerification === "string" && durableTextForVerification.trim()
-                ? durableTextForVerification : stripPermissionEscalationMarker(event.text), notBefore: startedAt });
+            // The row is saved; the binding only names the invocation whose verdict it waits for. A store that stays locked
+            // after the bounded re-runs leaves the binding to two deferred re-runs and never fails the answered turn.
+            const messageId = bindGoalResultMessageSettling({ chatId: runReq.chatId, goalId: resultGoalId, runId,
+              text: confirmedResult?.text ?? verifiedBody, notBefore: startedAt });
             if (messageId) event = { ...event, durableMessageId: messageId };
           }
         }
@@ -5214,13 +5286,15 @@ export class InvocationService {
           // intentionally not used: a renderer-visible completion without a
           // durable terminal receipt would become "running"/missing after a
           // restart even though the user already saw success.
-          recordRunEvent({
+          // A refused statement left no row (recordRunEvent is one rolled-back IMMEDIATE transaction), so it is this insert,
+          // not the turn, that runs again when another connection held the lock for a moment (bounded: runWithStoreBusyRetry).
+          runWithStoreBusyRetry(() => recordRunEvent({
             runId,
             kind: "invoke_completed",
             chatId: runReq.chatId,
             agentId: attributedAgentId ?? record.actualAgentId,
             payload: { resultFolder: record.resultFolder },
-          });
+          }));
         }
         try {
           recordMcpInvocationEvent(runId, runReq, event, { requireDurable: true, hostControl });
@@ -5714,10 +5788,14 @@ export class InvocationService {
           // goal_episode_admission_missing ("App problem") for every such message (no-dead-end sweep 2026-10-25).
           if (goalId && !goalControllerAttemptId) {
             const named = getLongRunByGoalId(goalId);
-            if (ordinaryTurnOnStoppedGoal || !named || named.status !== "running") {
+            // A turn hosted by the background service holds no producer custody and never will (the Goal's own episodes run on
+            // Desktop), whatever state the Goal is in at this instant: it runs as an ordinary turn instead of being refused.
+            const serviceHosted = record.ownerLease?.ownerKind === "daemon";
+            if (ordinaryTurnOnStoppedGoal || serviceHosted || !named || named.status !== "running") {
               if (projectionGoalId === goalId) { projectionGoalId = null; record.automaticGoalId = undefined; record.longRunProjection = undefined; }
               tryRecordRunEvent({ runId, chatId: chat.id, kind: "goal_dispatch_ordinary_turn", payload: {
-                goalId, goalStatus: named?.status ?? null, cause: ordinaryTurnOnStoppedGoal ? "owner_turn_not_goal_episode" : "goal_not_running" } });
+                goalId, goalStatus: named?.status ?? null,
+                cause: ordinaryTurnOnStoppedGoal ? "owner_turn_not_goal_episode" : serviceHosted && named?.status === "running" ? "service_hosted_turn" : "goal_not_running" } });
               return;
             }
           }
@@ -5731,8 +5809,28 @@ export class InvocationService {
           // this dispatch names a durable Goal, however, an unbound controller
           // cannot execute and then fabricate episode custody at completion.
           if (goalId) {
-            if (!producerAdmission || !goalControllerAttemptId) throw Object.assign(
-              new Error("goal_episode_admission_missing"), { code: "goal_episode_admission_missing" });
+            if (producerAdmissionFailure) throw producerAdmissionFailure;
+            if (!producerAdmission || !goalControllerAttemptId) {
+              const code = !goalLongRunTask ? "goal_episode_admission_task_missing" : "goal_episode_admission_missing";
+              // Main never established its own custody record for this Goal turn (none captured, none bound). The owner's own
+              // message in the chat (desktop or phone: any origin but a host-started turn) is answered all the same, as an
+              // ordinary turn that holds no Goal custody and leaves the Goal untouched, exactly like a message on a stopped
+              // Goal above; refusing it left the room with "App problem" and nothing to do (observed in use, 10-24,
+              // 10-26). Nothing is fabricated: no producer admission is created late (that would bless a Goal that moved
+              // during preparation). A host-started continuation, whose purpose is the Goal's own episode, still refuses
+              // and the Goal sweep retries it.
+              if (runReq.promptOrigin !== "system") {
+                if (projectionGoalId === goalId) { projectionGoalId = null; record.automaticGoalId = undefined; record.longRunProjection = undefined; }
+                // Which of the three states it was (none captured / capture failed / captured but no controller bound), so the next
+                // occurrence names its own root cause instead of one code for all three.
+                tryRecordRunEvent({ runId, chatId: chat.id, kind: "goal_dispatch_ordinary_turn", payload: {
+                  goalId, goalStatus: getLongRunByGoalId(goalId)?.status ?? null, cause: "goal_admission_unavailable", code,
+                  admissionCaptured: producerAdmission === undefined ? "none" : producerAdmission === null ? "failed" : "held",
+                  controllerBound: Boolean(goalControllerAttemptId), taskBound: Boolean(goalLongRunTask), runtimeSelected: Boolean(lastControllerSelection) } });
+                return;
+              }
+              throw Object.assign(new Error(code), { code });
+            }
             assertGoalProducerDispatch({ admission: producerAdmission, goalId,
               attemptId: goalControllerAttemptId }, assertProducerServiceLifetime);
           }
@@ -6347,7 +6445,10 @@ export class InvocationService {
               ...(terminalDisposition.errorCode ? { code: terminalDisposition.errorCode } : {}),
             }
           // The thrown failure's own machine code; the wrapper code only when it carries none (audit A7 M10).
-          : { code: terminalDisposition.errorCode ?? outwardFailureCode(error) ?? "invoke-threw", message: rawMessage };
+          // The app's own unexpected exception (class / SQLite driver / syscall facts, never its words) is not read out in the
+          // error event the chat and the phone draw; the diagnostic above keeps its bounded, redacted cause.
+          : { code: terminalDisposition.errorCode ?? outwardFailureCode(error) ?? "invoke-threw",
+              message: !terminalDisposition.errorCode && isHostInternalException(error) ? hostInternalFailureMessage(pickLocale(runReq)) : rawMessage };
         const message = safeFailure.message;
         tryRecordRunEvent({
           runId,
@@ -6715,9 +6816,9 @@ export class InvocationService {
       || wait.successorInvocationId !== input.invocationRunId || wait.checkpointId !== input.checkpointId
       || !run || run.status !== "running" || getChat(wait.chatId)?.goalId !== input.goalId
       || input.request.chatId !== wait.chatId || input.request.runId !== input.invocationRunId
-      || ((wait.recoveryMode || wait.observationOnly) && (input.request.permissions !== "read"
-        || (run.surface === "one" && input.request.onePermissionMode !== "read")))
       || this.activeChatIds().includes(wait.chatId) || this.steerQueues.get(wait.chatId)?.length) throw new Error("goal_wait_dispatch_state_changed");
+    const sourcePermission=goalWaitContinuationPermission(wait.chatId,wait.sourceInvocationId,getChatGoalRevision(input.goalId));
+    if(sourcePermission && (input.request.permissions!==sourcePermission || run.surface==="one" && input.request.onePermissionMode!==sourcePermission))throw new Error("goal_wait_source_permission_changed");
     const checkpoint = latestTaskCheckpoint(input.goalId);
     if (!checkpoint || checkpoint.checkpointId !== input.checkpointId) throw new Error("goal_wait_checkpoint_changed");
     const prepared = prepareCheckpointContinuation(checkpoint, input.invocationRunId);
@@ -7435,6 +7536,17 @@ export class InvocationService {
     }
   }
 
+  /** Read-only compatibility for the exact captured follow-up. A different
+   * model/permission/roster waits as its own full next-turn request. */
+  followupCurrentTurnMatches(chatId: string, runId: string, request: McpInvocationRequest): boolean {
+    const record = this.activeRuns.get(runId), preparing = this.nativePreparing.get(runId);
+    const original = preparing?.request ?? record?.request;
+    if (!original || original.chatId !== chatId || (preparing?.controller ?? record?.controller)?.signal.aborted) return false;
+    const choices = preparing ? canonicalInvocationRequestJson(nativeOwnerTextChoices(preparing.request) as unknown as McpInvocationRequest)
+      : record?.nativeOwnerTextChoices;
+    return Boolean(choices && choices === canonicalInvocationRequestJson(nativeOwnerTextChoices(request) as unknown as McpInvocationRequest));
+  }
+
   /** Durable local intake returns promptly. Only the exact native ACK marks it applied. */
   steerCurrentTurn(input: InvocationCurrentTurnSteerRequest): InvocationCurrentTurnSteerReceipt {
     if (existingCurrentTurnSteer(input)) return this.currentTurnSteerReceipt(input.chatId, input.intentId)!;
@@ -7678,12 +7790,17 @@ export class InvocationService {
    *    message: its row is in the transcript at once, a received line follows when the wait is noticeable, and the durable
    *    steer queue starts it the moment the chat is free, under the owner's own surface binding.
    * A refusal that is not about the chat being busy (a request the host cannot run, a missing chat) is thrown as before.
-   * `intakeId` is the caller's idempotency key: the same key never queues the message twice.
+   * `intakeId` is the caller's idempotency key: the same key never queues the message twice, and never steers it twice
+   * either: both ways of taking a message leave a durable row keyed by it (OWNER_INTAKE_STEER_PREFIX for a waiting or
+   * started message, OWNER_STEERED_PREFIX for a direction into a running turn), found again by ownerIntakeOutcome.
+   * `startAfter` is a promise the start must wait for (the request-intent judge, whose verdict the start reads): the
+   * message is then taken at once, like a message waiting for its chat, and starts when the promise settles.
    */
   intakeOwnerMessage(req: McpInvocationRequest, input: {
     intakeId: string;
     workspaceBinding?: InvocationWorkspaceBinding;
     executionContext?: InvocationExecutionContext;
+    startAfter?: Promise<unknown>;
   }): { kind: "started"; runId: string } | { kind: "steered"; steer: InvocationSteerResult }
     | { kind: "queued"; plannedRunId: string; steer: InvocationSteerResult } {
     const { workspaceBinding, executionContext } = input;
@@ -7692,15 +7809,16 @@ export class InvocationService {
       throw new Error("owner_intake_invalid_id");
     }
     const id = `${OWNER_INTAKE_STEER_PREFIX}${input.intakeId}`;
-    const queuedReceipt = (row: DurableQueuedSteer) => {
-      const receipt = this.durableSteerReceipt(row);
-      return { kind: "queued" as const, plannedRunId: row.originalRunId,
-        steer: { ...receipt, activeRunId: receipt.activeRunId ?? row.originalRunId, position: receipt.position ?? 1 } };
-    };
+    const steeredId = `${OWNER_STEERED_PREFIX}${input.intakeId}`;
     const existing = getDurableQueuedSteer(id);
     if (existing) {
       if (existing.chatId !== req.chatId) throw new Error("invocation_steer_identity_conflict");
-      return queuedReceipt(existing);
+      return this.ownerIntakeQueuedReceipt(existing);
+    }
+    const steeredExisting = getDurableQueuedSteer(steeredId);
+    if (steeredExisting) {
+      if (steeredExisting.chatId !== req.chatId) throw new Error("invocation_steer_identity_conflict");
+      return { kind: "steered", steer: this.durableSteerReceipt(steeredExisting) };
     }
     const active = [...this.activeRuns.entries(), ...this.settlingRuns.entries(), ...this.browserLoginWaitingRuns.entries()]
       .find(([, record]) => !record.background && record.chatId === req.chatId);
@@ -7708,7 +7826,8 @@ export class InvocationService {
       // A phone message into a run the Desktop started rides that run's binding, exactly like the phone's own direction.
       const sameBinding = invocationWorkspaceBindingsEqual(active[1].workspaceBinding, workspaceBinding);
       try {
-        return { kind: "steered", steer: this.steer(req, active[0], sameBinding ? workspaceBinding : active[1].workspaceBinding, executionContext) };
+        // The direction's durable row carries the intake key, so a resend of this key finds it (steeredExisting above).
+        return { kind: "steered", steer: this.steer(req, active[0], sameBinding ? workspaceBinding : active[1].workspaceBinding, executionContext, undefined, steeredId) };
       } catch (error) {
         if (!ownerIntakeWaits(error)) throw error;
         // A full queue is backpressure, not a refusal: the message waits below for the chat like any other.
@@ -7719,6 +7838,14 @@ export class InvocationService {
     const row = persistQueuedSteer({ id, chatId: req.chatId, originalRunId: plannedRunId, request,
       ...(workspaceBinding ? { workspaceBinding: immutableWorkspaceBinding(workspaceBinding) } : {}),
       ...(executionContext ? { executionContext } : {}) });
+    if (input.startAfter) {
+      // The verdict the start reads is not in yet. The message is taken now (durable row, shown in the transcript) and the
+      // drain queue starts it once the judge settles, exactly as for a chat that is not free yet. A restart before that
+      // finds the row queued and starts it without the verdict, like any other waiting message.
+      this.keepOwnerIntakeMessage(row, request, false);
+      this.holdOwnerIntakeStart(req.chatId, row, plannedRunId, input.startAfter);
+      return this.ownerIntakeQueuedReceipt(getDurableQueuedSteer(id) ?? row);
+    }
     if (!beginQueuedSteerDrain(id, plannedRunId)) throw new Error("invocation_steer_claim_lost");
     try {
       const started = this.start({ ...request, runId: plannedRunId }, workspaceBinding, executionContext);
@@ -7734,18 +7861,71 @@ export class InvocationService {
         holdQueuedSteerForRecovery(id, "drained-run-start-uncertain");
       }
       console.info(`[owner-intake] message waits for its chat chat=${req.chatId} steer=${id} code=${refusalCode(error) ?? "none"}`);
-      return queuedReceipt(getDurableQueuedSteer(id) ?? row);
+      return this.ownerIntakeQueuedReceipt(getDurableQueuedSteer(id) ?? row);
     }
   }
 
+  private ownerIntakeQueuedReceipt(row: DurableQueuedSteer): { kind: "queued"; plannedRunId: string; steer: InvocationSteerResult } {
+    const receipt = this.durableSteerReceipt(row);
+    return { kind: "queued", plannedRunId: row.originalRunId,
+      steer: { ...receipt, activeRunId: receipt.activeRunId ?? row.originalRunId, position: receipt.position ?? 1 } };
+  }
+
+  /**
+   * Read-only: what the durable rows say became of one intake id, for a caller that lost the answer of intakeOwnerMessage
+   * (the phone's request ledger after a Desktop restart). null means NO row exists, so the message was never taken and
+   * the same id may be sent again; any row means the message was taken and must not be sent again.
+   */
+  ownerIntakeOutcome(chatId: string, intakeId: string): OwnerIntakeOutcome | null {
+    if (typeof intakeId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/.test(intakeId)) throw new Error("owner_intake_invalid_id");
+    const row = getDurableQueuedSteer(`${OWNER_INTAKE_STEER_PREFIX}${intakeId}`);
+    if (row) {
+      if (row.chatId !== chatId) throw new Error("invocation_steer_identity_conflict");
+      if (row.status === "failed") return { kind: "failed" };
+      if (row.status === "started") return { kind: "started", runId: row.drainedRunId ?? row.originalRunId };
+      return this.ownerIntakeQueuedReceipt(row);
+    }
+    const steered = getDurableQueuedSteer(`${OWNER_STEERED_PREFIX}${intakeId}`);
+    if (steered) {
+      if (steered.chatId !== chatId) throw new Error("invocation_steer_identity_conflict");
+      return { kind: "steered", steer: this.durableSteerReceipt(steered) };
+    }
+    return null;
+  }
+
+  /**
+   * Keep a taken owner message out of the drain queue until `ready` settles. The row waits at the head of its chat's drain
+   * queue with a "not before" that never arrives, so nothing else drains it early; settling (or failing, or the safety net
+   * in OWNER_INTAKE_START_HOLD_MAX_MS) lifts the hold and the ordinary drain starts it under the run id the owner was told.
+   */
+  private holdOwnerIntakeStart(chatId: string, row: DurableQueuedSteer, plannedRunId: string, ready: Promise<unknown>): void {
+    const queue = this.steerQueues.get(chatId) ?? [];
+    if (!queue.some((queued) => queued.id === row.id)) this.enqueueSteer(chatId, queue, { ...queuedSteerFromDurable(row), drainedRunId: plannedRunId, judgeHold: true });
+    this.steerQueues.set(chatId, queue);
+    this.steerDrainBackoff.set(row.id, { chatId, attempt: 0, notBefore: Number.MAX_SAFE_INTEGER, firstAt: Date.now() });
+    let lifted = false;
+    const lift = (): void => {
+      if (lifted) return;
+      lifted = true;
+      clearTimeout(safetyNet);
+      this.steerDrainBackoff.delete(row.id);
+      this.drainSteerQueue(chatId);
+    };
+    const safetyNet = setTimeout(lift, OWNER_INTAKE_START_HOLD_MAX_MS);
+    safetyNet.unref?.();
+    ready.then(lift, lift);
+  }
+
   /** The waiting owner message is in the transcript now; a received line follows if it is still waiting a moment later. */
-  private keepOwnerIntakeMessage(row: DurableQueuedSteer, request: McpInvocationRequest): void {
+  private keepOwnerIntakeMessage(row: DurableQueuedSteer, request: McpInvocationRequest, receivedLine = true): void {
     try {
       appendChatMessage(row.chatId, "user", ownerVisiblePrompt(request), request.images?.length ? { images: request.images } : undefined);
     } catch (error) {
       console.warn("[owner-intake] waiting message could not be shown yet; it still runs:", error instanceof Error ? error.message : String(error));
       return;
     }
+    // A message that only waits for the judge starts within moments; "the previous work is cleaning up" would be untrue.
+    if (!receivedLine) return;
     const timer = setTimeout(() => {
       try {
         const current = getDurableQueuedSteer(row.id);
@@ -8296,7 +8476,7 @@ export class InvocationService {
               next.workspaceBinding,
               next.executionContext,
               undefined, undefined, next.mainAdmission, undefined,
-              next.request.oneMode && next.request.promptOrigin !== "system" ? QUEUED_ONE_ROOM_INHERITANCE : undefined,
+              next.request.oneMode && next.request.promptOrigin !== "system" && !next.judgeHold ? QUEUED_ONE_ROOM_INHERITANCE : undefined,
               next.oneTeamReportCustody,
             ));
           }
@@ -8458,7 +8638,7 @@ export class InvocationService {
     try {
       const goalId = getChat(chatId)?.goalId;
       const status = goalId ? getLongRunByGoalId(goalId)?.status : undefined;
-      return deferSystemRelay({ chatId, text, cause: status ? `goal_${status}` : "goal_waiting", goalStatus: status ?? null,
+      return parkSystemRelay({ chatId, text, cause: status ? `goal_${status}` : "goal_waiting", goalStatus: status ?? null,
         originRunId: drainedRunId }) || relayCopyParked(chatId, text);
     } catch (error) {
       console.warn(`[invocation] refused queued relay could not be parked steer=${next.id} chat=${chatId} code=${innermostTypedCode(error) ?? "none"}`);

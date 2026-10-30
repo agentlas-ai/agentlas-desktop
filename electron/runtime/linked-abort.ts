@@ -7,9 +7,12 @@ import { registerNativeApprovalChildSignal } from "./native-approval-provenance"
  * read one file, because the task force and firm worker turns each ran under a fresh unregistered controller). */
 export function linkAbort(parent?: AbortSignal) {
   const ctrl = new AbortController();
-  const onParent = () => ctrl.abort();
+  // The parent's reason travels with its abort. A bare abort() gave every worker the DOM default "This operation was aborted"
+  // in place of why the run stopped (app_closed, update_restart, the owner's stop, a steering interrupt): production
+  // 2026-10-02..25 recorded that sentence as the cause of 12 interrupted runs and in the teammates' own failure lines.
+  const onParent = () => ctrl.abort(parent?.reason);
   if (parent) {
-    if (parent.aborted) ctrl.abort();
+    if (parent.aborted) ctrl.abort(parent.reason);
     else {
       registerNativeApprovalChildSignal(parent, ctrl.signal);
       parent.addEventListener("abort", onParent, { once: true });

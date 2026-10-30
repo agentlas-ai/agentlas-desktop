@@ -11,6 +11,7 @@
 import {
   APP_CONTROL_MAIN_BUDGET_MS, DEVICE_BRIDGE_VERSION, DEVICE_STATE_VERSION, type DeviceOp, type DeviceSession,
 } from "../daemon/device-bridge";
+import { answerAppCallWithin, appCallKey, appCallPendingNotice } from "../app-control/pending-calls";
 
 type Channel = object & { dispatch(method: string, params: unknown): Promise<unknown>; onClose(listener: () => void): () => void };
 type Identity = object & { bootId: string };
@@ -22,11 +23,16 @@ export interface DeviceBridgeMainPorts {
   /** A2: release this process's idle resident runtime sessions of a chat; the service is taking the chat over. */
   releaseChat?(chatId: string, deadlineMs: number): Promise<{ busy: boolean; released: number; pending: number }>;
   /** Goal intake handed over by the service (2026-10-11): validate against durable rows and answer at once; the work runs in the background. */
-  forwardGoalIntake?(input: { runId: string; chatId: string; sourceMessageId: string; permission: "read" | "write" | "full" }): { ok: true; status: "accepted" | "duplicate" } | { ok: false; error: string };
+  forwardGoalIntake?(input: { runId: string; chatId: string; sourceMessageId: string; permission: "read" | "write" | "full" }, signal?: AbortSignal): { ok: true; status: "accepted" | "duplicate" } | { ok: false; error: string };
   /** One's app-control, run by Main exactly as for a Main-hosted turn (same policy, same owner-turn rule, same handlers). */
   appControl?(input: { kind: "operations" | "call"; ownerTurn: boolean; permission?: "read" | "write" | "full"; input: Record<string, unknown> }): Promise<{ outcome: "value"; value: unknown } | { outcome: "error"; code: string; message: string }>;
+  /** Gate-only: Main's answer budget for an app-control request, in place of APP_CONTROL_MAIN_BUDGET_MS. */
+  appControlBudgetMs?: number;
   /** Run every intake the service could not hand over while this process was away. Called on each successful attach. */
-  drainGoalIntake?(): void;
+  drainGoalIntake?(signal?: AbortSignal): void;
+  /** Runtime installation, availability or configuration changed; the store notification carries no private content. */
+  subscribeRuntimeChange?(listener: () => void): () => void;
+  pendingGoalIntakeRetryDelay?(): number;
   /** NH21: execute a Goal action the service's Alive host reserved (Main owns Goal custody). Answers a value, never throws. */
   aliveAction?(input: { domain: "work" | "one"; actionId: string }): { ok: true; result: unknown } | { ok: false; error: string };
   /** NH21: a life changed in the service; refresh this process's screens. */
@@ -55,6 +61,38 @@ export function createDeviceBridgeMain(ports: DeviceBridgeMainPorts) {
   const watched = new WeakSet<object>();
   let unsubscribePower: (() => void) | undefined, lastChannel: Channel | undefined;
   let powerEvent: DeviceSession = "awake";
+  let intakeLifetime = new AbortController();
+  let unsubscribeRuntime: (() => void) | undefined, intakeRetryWake: ReturnType<typeof setTimeout> | undefined;
+  const cancelIntake = (): void => {
+    intakeLifetime.abort();
+    if (intakeRetryWake) clearTimeout(intakeRetryWake);
+    intakeRetryWake = undefined;
+  };
+  const drainIntake = (): void => {
+    if (intakeLifetime.signal.aborted) return;
+    try { ports.drainGoalIntake?.(intakeLifetime.signal); }
+    catch (error) { ports.log?.(`[device-bridge] goal intake drain failed: ${codeOf(error)}`); }
+  };
+  const scheduleRuntimeWake = (delay: number): void => {
+    if (intakeRetryWake || intakeLifetime.signal.aborted) return;
+    intakeRetryWake = setTimeout(() => {
+      intakeRetryWake = undefined;
+      if (intakeLifetime.signal.aborted) return;
+      try {
+        const remaining = ports.pendingGoalIntakeRetryDelay?.() ?? 0;
+        // A classification admitted before the runtime changed may still be finishing. Wait for it rather than overlap it.
+        if (remaining > 0) scheduleRuntimeWake(remaining);
+        else drainIntake();
+      } catch (error) { ports.log?.(`[device-bridge] goal intake wake failed: ${codeOf(error)}`); }
+    }, delay);
+    intakeRetryWake.unref?.();
+  };
+  const runtimeChanged = (): void => {
+    if (intakeLifetime.signal.aborted) return;
+    // Defer reads until the notifying store transaction commits. One delayed wake also respects durable intake cooldowns.
+    setImmediate(drainIntake);
+    scheduleRuntimeWake(60_000);
+  };
   const session = (): DeviceSession => powerEvent !== "awake" ? powerEvent : ports.session();
   function disposeFor(channel: object): void {
     for (const [executionId, entry] of [...executions]) if (entry.channel === channel) { executions.delete(executionId); try { entry.dispose(); } catch { /* already revoked */ } }
@@ -70,11 +108,23 @@ export function createDeviceBridgeMain(ports: DeviceBridgeMainPorts) {
   }
   /** One successful attach (initial or re-attach): revoke on close, forward power events, push the current state. */
   function attached(channel: Channel): void {
+    if (lastChannel !== channel || intakeLifetime.signal.aborted) {
+      cancelIntake();
+      intakeLifetime = new AbortController();
+    }
     lastChannel = channel;
-    if (!watched.has(channel)) { watched.add(channel); channel.onClose(() => disposeFor(channel)); }
+    if (!watched.has(channel)) { watched.add(channel); channel.onClose(() => {
+      disposeFor(channel);
+      if (lastChannel === channel) cancelIntake();
+    }); }
     unsubscribePower ??= ports.subscribePower(onPower);
+    unsubscribeRuntime ??= ports.subscribeRuntimeChange?.(runtimeChanged);
     void pushState(channel);
-    try { ports.drainGoalIntake?.(); } catch (error) { ports.log?.(`[device-bridge] goal intake drain failed: ${codeOf(error)}`); }
+    try {
+      const delay = ports.pendingGoalIntakeRetryDelay?.() ?? 0;
+      if (delay > 0) scheduleRuntimeWake(delay);
+    } catch (error) { ports.log?.(`[device-bridge] goal intake cooldown read failed: ${codeOf(error)}`); }
+    drainIntake();
   }
   async function handle(raw: unknown, channel: object, identity: object): Promise<Record<string, unknown>> {
     const live = ports.channelIdentity(channel);
@@ -94,16 +144,28 @@ export function createDeviceBridgeMain(ports: DeviceBridgeMainPorts) {
       if (op === "forwardGoalIntake") {
         if (!exactKeys(payload, ["runId", "chatId", "sourceMessageId", "permission"]) || !id(payload.runId) || !id(payload.chatId) || !id(payload.sourceMessageId)
           || !["read", "write", "full"].includes(String(payload.permission)) || !ports.forwardGoalIntake) return { ok: false, error: "device_bridge_refused" };
-        return ports.forwardGoalIntake({ runId: payload.runId, chatId: payload.chatId, sourceMessageId: payload.sourceMessageId, permission: payload.permission as "read" | "write" | "full" });
+        return ports.forwardGoalIntake({ runId: payload.runId, chatId: payload.chatId, sourceMessageId: payload.sourceMessageId, permission: payload.permission as "read" | "write" | "full" }, intakeLifetime.signal);
       }
       if (op === "appControl") {
         if (!exactKeys(payload, Object.hasOwn(payload, "permission") ? ["kind", "ownerTurn", "permission", "input"] : ["kind", "ownerTurn", "input"]) || !["operations", "call"].includes(String(payload.kind)) || typeof payload.ownerTurn !== "boolean"
           || (payload.permission !== undefined && (typeof payload.permission !== "string" || !["read", "write", "full"].includes(payload.permission)))
           || !payload.input || typeof payload.input !== "object" || Array.isArray(payload.input) || JSON.stringify(payload.input).length > 65536 || !ports.appControl) return { ok: false, error: "device_bridge_refused" };
-        // Main answers within the channel's limit; a longer call is reported, not left to close the channel.
-        const answer = await Promise.race([ports.appControl({ kind: payload.kind as "operations" | "call", ownerTurn: payload.ownerTurn, permission: payload.permission as "read" | "write" | "full" | undefined, input: payload.input as Record<string, unknown> }),
-          new Promise<{ outcome: "error"; code: string; message: string }>(resolve => { const t = setTimeout(() => resolve({ outcome: "error", code: "operation-timeout",
-            message: "Agentlas did not finish this within the time allowed for a background request; it may still be running, so read its state before repeating it." }), APP_CONTROL_MAIN_BUDGET_MS); t.unref?.(); })]);
+        // Main answers within the channel's limit (it closes for good on a request that outlives 10 s). A catalog read that runs longer is
+        // reported; an operation call that runs longer keeps running here and the daemon asks again with the same payload: the call is
+        // keyed by what it is, so the repeat joins the running operation (or takes its finished result once) instead of starting a second
+        // one (app-control/pending-calls.ts). An older daemon passes the notice on to the model, which repeats the call the same way.
+        const control = ports.appControl, kind = payload.kind as "operations" | "call", ownerTurn = payload.ownerTurn as boolean;
+        const permission = payload.permission as "read" | "write" | "full" | undefined, request = payload.input as Record<string, unknown>;
+        const budgetMs = ports.appControlBudgetMs ?? APP_CONTROL_MAIN_BUDGET_MS;
+        const run = () => control({ kind, ownerTurn, permission, input: request });
+        const operation = typeof request.operation === "string" ? request.operation.trim() : "";
+        const answer = kind === "call"
+          ? await answerAppCallWithin(appCallKey({ via: "bridge", kind, operation, args: request.args, scope: (request.scope as { chatId?: unknown } | undefined)?.chatId ?? null,
+              ownerTurn, permission: permission ?? "read" }), run, budgetMs,
+              () => ({ outcome: "value" as const, value: appCallPendingNotice(operation) }))
+          : await Promise.race([run(),
+              new Promise<{ outcome: "error"; code: string; message: string }>(resolve => { const t = setTimeout(() => resolve({ outcome: "error", code: "operation-timeout",
+                message: "Agentlas did not finish this within the time allowed for a background request; it may still be running, so read its state before repeating it." }), budgetMs); t.unref?.(); })]);
         if (answer.outcome === "value" && JSON.stringify(answer.value ?? null).length > 600_000) return { ok: true, outcome: "error", code: "result-too-large", message: "The result is too large; narrow the query." };
         return { ok: true, ...answer };
       }
@@ -138,7 +200,7 @@ export function createDeviceBridgeMain(ports: DeviceBridgeMainPorts) {
     }
   }
   return Object.freeze({ attached, handle, pushState, onPower, session, get executionCount() { return executions.size; },
-    dispose(): void { unsubscribePower?.(); unsubscribePower = undefined; for (const entry of [...executions.values()]) { try { entry.dispose(); } catch { /* */ } } executions.clear(); } });
+    dispose(): void { cancelIntake(); unsubscribeRuntime?.(); unsubscribeRuntime = undefined; unsubscribePower?.(); unsubscribePower = undefined; for (const entry of [...executions.values()]) { try { entry.dispose(); } catch { /* */ } } executions.clear(); } });
 }
 
 let instance: ReturnType<typeof createDeviceBridgeMain> | undefined;
@@ -158,8 +220,13 @@ export async function deviceBridgeMain(): Promise<ReturnType<typeof createDevice
       return out;
     },
     releaseChat: (chatId, deadlineMs) => releaseLocalChatSessions(chatId, deadlineMs),
-    forwardGoalIntake: input => goalIntake.acceptForwardedGoalIntake(input),
-    drainGoalIntake: () => goalIntake.drainPendingGoalIntakes(),
+    forwardGoalIntake: (input, signal) => goalIntake.acceptForwardedGoalIntake(input, signal),
+    drainGoalIntake: signal => goalIntake.drainPendingGoalIntakes(signal),
+    pendingGoalIntakeRetryDelay: () => goalIntake.pendingGoalIntakeRetryDelay(),
+    subscribeRuntimeChange: listener => {
+      const { onDesktopStoreChange } = require("../store/change-bus") as typeof import("../store/change-bus");
+      return onDesktopStoreChange(change => { if (change.entity === "runtime") listener(); });
+    },
     aliveAction: input => {
       try { return require("../alive-organisms").executeForwardedAliveAction(input); }
       catch (error) { return { ok: false, error: codeOf(error) === "device_bridge_refused" ? "alive_action_failed" : codeOf(error) }; }

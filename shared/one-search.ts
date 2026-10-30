@@ -36,6 +36,8 @@ export interface OneSearchHitV1 {
   updatedAt: string;
   archived: boolean;
   matchedBy: OneSearchMatchKind[];
+  /** The screen pack whose conversation this is (PLAN Science S6: "science"); absent for Work/One and on older hosts. */
+  surfacePack?: string;
 }
 
 export interface OneSearchPageV1 {

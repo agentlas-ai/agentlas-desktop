@@ -64,6 +64,8 @@ import { currentUiLocale } from "../ui-locale";
 import { ensureScienceRuntimeChat, latestDurableAssistantMessage, setChatRuntimeSelection } from "../store/chats";
 import { getMeta, setMeta } from "../store/meta";
 import { getDb } from "../store/db";
+import { commitSurfaceViewMessage, importSurfaceConversation, readSurfaceConversation, surfaceRuntimeInputRows } from "../store/surface-conversation";
+import { SCIENCE_SURFACE_PACK } from "../store/surface-conversation-schema";
 import { evictRuntimeSessionsForChat } from "../store/runtime-sessions";
 import { listPendingScienceRuntimeOutboxEvents, markScienceRuntimeOutboxDelivered } from "../store/run-events";
 import { agentFolderPath, buildEffectiveAgentSystemPrompt, materializeAgentFiles } from "../agents/files";
@@ -365,6 +367,32 @@ export function installScienceHostFor(input: ScienceHostInstallInput): ScienceHo
       // comes from the tool server's own declarations (host-tool-servers.ts). A Science build that knows the member sets
       // `commonWorkRecovery` on its turns and records no Science forward-recovery basis; an older build keeps its own recovery.
       ...{ commonWorkRecovery: { version: 1 as const } },
+      // PLAN S6: a Science conversation's record is its common chat (the hidden chat Desktop already keeps for it, tagged with the
+      // Science pack). Science commits what its screen shows there first, under its own message ID (store/surface-conversation.ts),
+      // reads its conversation back from there, and copies a conversation recorded before the switch once. Its own message table
+      // stays as the read model its research records point to. A Science build that knows the member marks its turns
+      // `surfaceConversation`; an older build keeps its own message table as its only record.
+      ...{ commonConversation: {
+        version: 1 as const,
+        commit: (row: { runtimeChatId: string; messageId: string; role: "user" | "assistant" | "system"; text: string; createdAt: string }) => {
+          fence.assertExecution();
+          return commitSurfaceViewMessage({ pack: SCIENCE_SURFACE_PACK, chatId: row?.runtimeChatId, messageId: row?.messageId,
+            role: row?.role, text: row?.text, createdAt: row?.createdAt });
+        },
+        read: (scope: { runtimeChatId: string; messageIds: string[] }) => {
+          fence.assertOwner();
+          return readSurfaceConversation({ pack: SCIENCE_SURFACE_PACK, chatId: scope?.runtimeChatId, messageIds: scope?.messageIds ?? [] });
+        },
+        runtimeInputRows: (scope: { runtimeChatId: string; runIds: string[] }) => {
+          fence.assertOwner();
+          return surfaceRuntimeInputRows({ pack: SCIENCE_SURFACE_PACK, chatId: scope?.runtimeChatId, runIds: scope?.runIds ?? [] });
+        },
+        importLegacy: (input: { runtimeChatId: string; rows: Array<{ messageId: string; role: "user" | "assistant" | "system"; text: string; createdAt: string }>; runtimeInputRowIds: string[] }) => {
+          fence.assertExecution();
+          return importSurfaceConversation({ pack: SCIENCE_SURFACE_PACK, chatId: input?.runtimeChatId, rows: input?.rows ?? [],
+            runtimeInputRowIds: input?.runtimeInputRowIds ?? [] });
+        },
+      } },
       // One stop wording for Science, Work, One and the phone (shared/invocation-host-stop.ts): the owner's Stop is not a failure.
       ...{ runStopNotice: (facts: { status?: unknown; hostStopCause?: unknown }, locale?: unknown) => {
         const cause = runStopCause(facts ?? {});

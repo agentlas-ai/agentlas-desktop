@@ -1,4 +1,5 @@
 import { stableScienceRuntimeChatId } from "../runtime/science-transport-identity";
+import { SCIENCE_SURFACE_PACK, tagSurfacePackChatsInDb } from "./surface-conversation-schema";
 // Chat CRUD + chat_messages.
 // 사이드바 "최근 채팅" 섹션은 listRecent로 채운다.
 // 프로젝트 페이지는 listByProject로, 회사 페이지는 listByFirm으로 채운다.
@@ -8,6 +9,7 @@ import { invocationFailureNoticeStatuses } from "./run-events";
 import { RUNTIME_KINDS } from "../../shared/runtime-kinds";
 import { RUNTIME_BACKENDS } from "../../shared/runtime-backends";
 import { getDb } from "./db";
+import { isStoreBusyError, runWithStoreBusyRetry } from "./store-busy-retry";
 import { takePreparedUserRow } from "./prepared-user-rows";
 import { oneDispatchSidebarPredicate, createOneDispatchNoticeProjector } from "../one/dispatch-presentation";
 import { personalAgentRoomIdsAmong } from "../one/personal-agent-rooms";
@@ -62,6 +64,7 @@ interface ChatRow {
   participants_json: string | null;
   last_message_preview?: string | null;
   last_activity_at?: string | null;
+  surface_pack?: string | null;
 }
 
 const CHAT_RUNTIME_KINDS = new Set<RuntimeKind>(RUNTIME_KINDS);
@@ -182,6 +185,7 @@ function toChat(row: ChatRow, resolvedTaskId?: string | null, supervisedRooms?: 
     seatLabel: row.seat_label ?? null,
     seatKind: row.seat_kind === "solo" || row.seat_kind === "group" ? row.seat_kind : null,
     participants: parseChatParticipants(row.participants_json),
+    ...(row.surface_pack ? { surfacePack: row.surface_pack } : {}),
     ...((supervisedRooms ?? personalAgentRooms([row.id])).has(row.id) ? { supervisedByPersonalAgent: true as const } : {}),
   };
 }
@@ -599,9 +603,12 @@ export function ensureScienceRuntimeChat(input: {
   const marker = `⟦science⟧${input.conversationId}`;
   const existing = getChat(chatId);
   if (existing) {
-    if (existing.kind !== "division" || existing.originSurface !== "work" || existing.title !== marker) {
+    if (existing.kind !== "division" || existing.originSurface !== "work" || existing.title !== marker
+      || (existing.surfacePack !== undefined && existing.surfacePack !== SCIENCE_SURFACE_PACK)) {
       throw new Error("Science runtime chat binding conflict");
     }
+    // PLAN S6: the chat is the conversation's common record; its pack names the screen that shows it (Work lists only `user` chats).
+    if (existing.surfacePack === undefined) tagSurfacePackChatsInDb(getDb());
     if (input.workingScope) {
       bindManagedWorkingSessionScope(getDb(), existing.id, input.workingScope, {kind:"external-logical",logicalId:input.conversationId});
       ensureCanonicalTaskForChat(existing.id);
@@ -620,6 +627,7 @@ export function ensureScienceRuntimeChat(input: {
   if (chat.id !== chatId || chat.kind !== "division" || chat.title !== marker) {
     throw new Error("Science runtime chat create receipt mismatch");
   }
+  tagSurfacePackChatsInDb(getDb());
   if (input.workingScope) {
     bindManagedWorkingSessionScope(getDb(), chat.id, input.workingScope, {kind:"external-logical",logicalId:input.conversationId});
     ensureCanonicalTaskForChat(chat.id);
@@ -1103,8 +1111,9 @@ export function appendChatMessage(
   let persistedImageUrls: string[] | undefined;
   const write = db.transaction(() => {
     db.prepare(
-      "INSERT INTO chat_messages (id, chat_id, role, text, created_at, host_notice_json, speaker_agent_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
-    ).run(id, chatId, role, text, now, hostNotice ? JSON.stringify(hostNotice) : null, speakerAgentId);
+      "INSERT INTO chat_messages (id, chat_id, role, text, created_at, host_notice_json, speaker_agent_id, row_scope) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    ).run(id, chatId, role, text, now, hostNotice ? JSON.stringify(hostNotice) : null, speakerAgentId,
+      options?.rowScope === "runtime-input" && role !== "assistant" ? "runtime-input" : null);
     if (goalResult) persistGoalResult(chatId, id, goalResult);
     if (options?.images?.length) {
       const persisted = persistChatMessageImages({ messageId: id, chatId, images: options.images, createdAt: now });
@@ -1112,9 +1121,17 @@ export function appendChatMessage(
     }
     db.prepare("UPDATE chats SET updated_at = ?, used_at = COALESCE(used_at, ?) WHERE id = ?").run(now, now, chatId);
   });
-  write();
-  const chat = getChat(chatId);
-  if (chat?.projectId) touchProject(chat.projectId);
+  // A refused write left nothing behind (the transaction rolled back), so it is the same write, with the same id, that runs
+  // again. Everything after it is bookkeeping about a row that is already committed: a lock there must not turn a saved
+  // answer into a failed turn, and (worse) must not make a caller write the row a second time.
+  runWithStoreBusyRetry(write);
+  try {
+    const chat = getChat(chatId);
+    if (chat?.projectId) touchProject(chat.projectId);
+  } catch (error) {
+    if (!isStoreBusyError(error)) throw error;
+    console.warn(`[chats] project recency not updated after a saved message: store busy chat=${chatId}`);
+  }
   emitDesktopStoreChange({ entity: "chat", id: chatId });
   return {
     id,
@@ -1133,6 +1150,11 @@ export function appendChatMessage(
 
 type ChatMessageAppendOptions = {
   images?: readonly ImageAttachment[];
+  /**
+   * A screen pack's composed prompt (PLAN Science S6): what the runtime took, not what the pack's screen shows; the pack's own
+   * 'view' row carries the owner's words (store/surface-conversation.ts). Ignored for an assistant row.
+   */
+  rowScope?: "runtime-input";
   hostNotice?: ChatHostNotice;
   /** Exact installed author from the producer, never inferred from stream order. */
   speakerAgentId?: string;
@@ -1145,11 +1167,75 @@ export function hasDurableAssistantMessage(chatId: string, text: string, notBefo
   if (!chatId || !text.trim()) return false;
   const row = getDb().prepare(
     `SELECT 1 AS found FROM chat_messages
-     WHERE chat_id = ? AND role = 'assistant' AND text = ?
+     WHERE chat_id = ? AND role = 'assistant' AND text = ? AND row_scope IS NOT 'view'
        AND (? IS NULL OR created_at >= ?)
      ORDER BY created_at DESC LIMIT 1`,
   ).get(chatId, text, notBefore ?? null, notBefore ?? null) as { found?: number } | undefined;
   return row?.found === 1;
+}
+
+/** What both sides of a saved-answer comparison are reduced to when the saved body is not byte-equal to the event's. */
+function defaultCanonicalAssistantBody(value: string): string {
+  return repairAskOpenMarkers(value).replace(/\r\n/g, "\n").trim();
+}
+
+/** The most recent assistant rows of a chat that the canonical comparison reads, newest first. */
+const CANONICAL_MATCH_SCAN_LIMIT = 40;
+
+export interface DurableAssistantMatch {
+  id: string;
+  /** The body as saved, which is what a binding to this row must name. */
+  text: string;
+  via: "message-id" | "exact" | "canonical";
+}
+
+/**
+ * Find the saved row of a turn's final answer. Completion may be published only after reopening the chat can read the answer
+ * back; this finds that row without demanding a byte-equal body, because the saved body and the event's body legitimately
+ * differ in ways that are not a lost write:
+ *  1. `messageId`: the id the producer got back when it saved the answer (client.ts durableAssistantMessageIdForVerification)
+ *     names the row exactly, whatever was done to the text on the way in (appendChatMessage repairs mistyped ask markers).
+ *  2. the exact body, as hasDurableAssistantMessage.
+ *  3. the same body after the cleaning both sides share (`canonical`, default: ask markers repaired, CRLF, trimmed). A producer
+ *     that saves the model's raw text (a firm or swarm final) and an event that carries the displayed copy meet here (2026-09-02:
+ *     a finished answer with question fences was replaced by result-not-durable one millisecond after its row was saved).
+ * Rows older than `notBefore` and 'view' rows never match, as before.
+ */
+export function findDurableAssistantMessage(
+  chatId: string,
+  text: string,
+  options: { notBefore?: string; messageId?: string | null; canonical?: (value: string) => string } = {},
+): DurableAssistantMatch | null {
+  if (!chatId || !text.trim()) return null;
+  const db = getDb();
+  const notBefore = options.notBefore ?? null;
+  const messageId = typeof options.messageId === "string" ? options.messageId.trim() : "";
+  if (messageId) {
+    const byId = db.prepare(
+      `SELECT id, text FROM chat_messages WHERE id = ? AND chat_id = ? AND role = 'assistant' AND row_scope IS NOT 'view' LIMIT 1`,
+    ).get(messageId, chatId) as { id: string; text: string } | undefined;
+    if (byId) return { id: byId.id, text: byId.text, via: "message-id" };
+  }
+  const exact = db.prepare(
+    `SELECT id, text FROM chat_messages
+     WHERE chat_id = ? AND role = 'assistant' AND text = ? AND row_scope IS NOT 'view'
+       AND (? IS NULL OR created_at >= ?)
+     ORDER BY created_at DESC, rowid DESC LIMIT 1`,
+  ).get(chatId, text, notBefore, notBefore) as { id: string; text: string } | undefined;
+  if (exact) return { id: exact.id, text: exact.text, via: "exact" };
+  const canonical = options.canonical ?? defaultCanonicalAssistantBody;
+  const wanted = canonical(text);
+  if (!wanted) return null;
+  const rows = db.prepare(
+    `SELECT id, text FROM chat_messages
+     WHERE chat_id = ? AND role = 'assistant' AND text <> '' AND row_scope IS NOT 'view'
+       AND (? IS NULL OR created_at >= ?)
+     ORDER BY created_at DESC, rowid DESC LIMIT ?`,
+  ).all(chatId, notBefore, notBefore, CANONICAL_MATCH_SCAN_LIMIT) as { id: string; text: string }[];
+  for (const row of rows) {
+    if (canonical(row.text) === wanted) return { id: row.id, text: row.text, via: "canonical" };
+  }
+  return null;
 }
 
 /** Canonical final body already committed by the runtime before it emits final. */
@@ -1160,7 +1246,7 @@ export function latestDurableAssistantMessage(
   if (!chatId) return null;
   const row = getDb().prepare(
     `SELECT id, text, created_at, speaker_agent_id FROM chat_messages
-     WHERE chat_id = ? AND role = 'assistant' AND text <> ''
+     WHERE chat_id = ? AND role = 'assistant' AND text <> '' AND row_scope IS NOT 'view'
        AND (? IS NULL OR created_at >= ?)
      ORDER BY created_at DESC, rowid DESC LIMIT 1`,
   ).get(chatId, notBefore ?? null, notBefore ?? null) as {
@@ -1203,6 +1289,11 @@ function storedGoalResults(chatId: string, messageIds: string[]): Map<string, Go
 /** Bind by exact persisted body and invocation interval, never by "latest answer" alone. */
 export function bindGoalResultMessage(p: { chatId: string; goalId: string; runId: string; text: string; notBefore: string }): string | undefined {
   const db = getDb();
+  // IMMEDIATE: this transaction reads (the answer's row, the stored presentation of a Goal chat that has thousands of them:
+  // tens of milliseconds) and only then writes. Deferred, the daemon's commit in that window made the upgrade to a write fail
+  // at once with SQLITE_BUSY_SNAPSHOT ("database is locked", which busy_timeout never waits out) and a finished Goal turn
+  // ended as a failed run (observed in use 11:05 and 2026-10-27 00:29, both an answered Goal turn). Same cure as
+  // recordRunEvent and saveGoalPlan: take the write lock first and let the other writer wait its turn.
   const id = db.transaction(() => {
     const rows = db.prepare(`SELECT id FROM chat_messages WHERE chat_id = ? AND role = 'assistant' AND text = ? AND created_at >= ? ORDER BY rowid DESC`).all(p.chatId, p.text, p.notBefore) as {id: string}[];
     if (rows.length !== 1) return undefined;
@@ -1211,9 +1302,46 @@ export function bindGoalResultMessage(p: { chatId: string; goalId: string; runId
     if (existing?.status === "verified") return rows[0].id;
     persistGoalResult(p.chatId, rows[0].id, { goalId: p.goalId, runId: p.runId, status: "pending" });
     return rows[0].id;
-  })();
+  }).immediate();
   if (id) emitDesktopStoreChange({ entity: "chat", id: p.chatId });
   return id;
+}
+
+/** Deferred re-runs of a Goal result binding that a locked store refused (see bindGoalResultMessageSettling): 1.5 s, then 6 s. */
+const GOAL_RESULT_BIND_REPAIR_DELAYS_MS: readonly number[] = process.env.AGENTLAS_TEST_GOAL_BIND_REPAIR_FAST === "1" ? [5, 10] : [1_500, 6_000];
+
+/**
+ * Bind an answered Goal turn's row to its invocation (bindGoalResultMessage) without letting a locked store end the turn.
+ * The answer's row is already saved and the binding only decides which invocation's verification verdict the row waits for.
+ * A refused write is re-run (runWithStoreBusyRetry: 3 re-runs, 520 ms at most); if the store is still locked the binding is
+ * left to two deferred re-runs (1.5 s and 6 s, each also bounded) and the turn settles unbound, the same state an ambiguous
+ * body already settles in. The binding is idempotent (an existing binding for this run is kept, a verified one never reset).
+ */
+export function bindGoalResultMessageSettling(p: { chatId: string; goalId: string; runId: string; text: string; notBefore: string }): string | undefined {
+  try {
+    return runWithStoreBusyRetry(() => bindGoalResultMessage(p));
+  } catch (error) {
+    if (!isStoreBusyError(error)) throw error;
+    console.warn(`[chats] goal result binding deferred: store busy chat=${p.chatId} run=${p.runId}`);
+    scheduleGoalResultBindRepair(() => bindGoalResultMessage(p), p.chatId);
+    return undefined;
+  }
+}
+
+function scheduleGoalResultBindRepair(operation: () => unknown, chatId: string, attempt = 0): void {
+  if (attempt >= GOAL_RESULT_BIND_REPAIR_DELAYS_MS.length) {
+    console.warn(`[chats] goal result binding gave up after ${attempt} deferred attempts chat=${chatId}`);
+    return;
+  }
+  const timer = setTimeout(() => {
+    try {
+      operation();
+    } catch (error) {
+      if (isStoreBusyError(error)) scheduleGoalResultBindRepair(operation, chatId, attempt + 1);
+      else console.warn(`[chats] goal result binding repair failed chat=${chatId}:`, error);
+    }
+  }, GOAL_RESULT_BIND_REPAIR_DELAYS_MS[attempt]!);
+  timer.unref?.();
 }
 
 /** Bind a producer-owned durable message directly; copy and time are not identities. */
@@ -1230,7 +1358,7 @@ export function bindGoalResultMessageId(p: { chatId: string; messageId: string; 
     if (existing?.runId === p.runId) return true;
     persistGoalResult(p.chatId, p.messageId, { goalId: p.goalId, runId: p.runId, status: "pending" });
     return true;
-  })();
+  }).immediate(); // reads before it writes: see bindGoalResultMessage
   if (bound) emitDesktopStoreChange({ entity: "chat", id: p.chatId });
   return bound;
 }
@@ -1283,7 +1411,20 @@ export function appendInvocationAssistantResult(p: {
   const entry = appendChatMessage(p.chatId, "assistant", p.text,
     { ...p.options, ...(p.speakerAgentId ? { speakerAgentId: p.speakerAgentId } : {}) });
   if (!hasExactInvocation) return entry;
-  return bindGoalResultMessageId({ chatId: p.chatId, messageId: entry.id, goalId: p.goalId!, runId: p.runId! })
+  // The row is saved. The binding only names the invocation whose verification verdict it waits for, so a locked store must
+  // not end an answered turn here: it is re-run (bounded), then left to two deferred re-runs, and the entry stays as saved
+  // (the service binds the same row by its exact body when the turn publishes: bindGoalResultMessageSettling).
+  const bindRow = () => bindGoalResultMessageId({ chatId: p.chatId, messageId: entry.id, goalId: p.goalId!, runId: p.runId! });
+  let bound: boolean;
+  try {
+    bound = runWithStoreBusyRetry(bindRow);
+  } catch (error) {
+    if (!isStoreBusyError(error)) throw error;
+    console.warn(`[chats] goal result binding deferred: store busy chat=${p.chatId} message=${entry.id}`);
+    scheduleGoalResultBindRepair(bindRow, p.chatId);
+    return entry;
+  }
+  return bound
     ? { ...entry, goalResult: { goalId: p.goalId!, runId: p.runId!, status: "pending" } }
     : entry;
 }
@@ -1348,7 +1489,7 @@ export function settleGoalResultMessages(p: { chatId: string; goalId: string; ru
         ? { ...phase, verificationScope: "episode", verificationState: "passed" } : phase);
       changed = true;
     }
-  })();
+  }).immediate(); // reads before it writes: see bindGoalResultMessage
   if (changed) emitDesktopStoreChange({ entity: "chat", id: p.chatId });
 }
 
@@ -1372,6 +1513,11 @@ function legacyGoalResults(chatId: string, messageIds: string[]): Map<string, Go
   return result;
 }
 
+/**
+ * The chat as its runtime sees it: the run's history, its prior-context test, every Work/One reader of a chat. A screen pack's
+ * 'view' rows (PLAN Science S6, store/surface-conversation.ts) are the pack's own record of what its screen shows; the runtime
+ * never took them as input, so they are not here (the pack reads them through readSurfaceConversation). A Work/One chat has none.
+ */
 export function listChatMessages(chatId: string, limit = 200): ChatHistoryEntry[] {
   const rows = getDb()
     .prepare(
@@ -1380,6 +1526,7 @@ export function listChatMessages(chatId: string, limit = 200): ChatHistoryEntry[
            FROM chat_messages
           WHERE chat_id = ?
             AND NOT (role = 'user' AND instr(text, ?) > 0)
+            AND row_scope IS NOT 'view'
           ORDER BY created_at DESC, rowid DESC
           LIMIT ?
        ) ORDER BY created_at ASC, seq ASC`,

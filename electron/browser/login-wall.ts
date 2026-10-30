@@ -7,8 +7,8 @@
  *   그래서 판정은 두 가지 구조적 사실로만 한다:
  *     1) 에이전트가 실제로 도착한 **주소**가 그 사이트의 알려진 로그인 경로이거나 신원 제공자(IdP)다.
  *     2) 에이전트가 **실제로 쓴 저장소**에 그 사이트의 세션 쿠키가 있는가(이름·만료만, 값은 안 본다).
- *   (2)는 벽 여부가 아니라 "왜 벽인가"를 가른다 — 쿠키가 있는데도 벽이면 서버가 그 세션을 버린 것이다
- *   (실측 2026-09-27T21:52Z: 전용 크롬에 21:45 에 새로 넣은 구글 SID 가 있었는데도 accountchooser).
+ *   (2)는 벽 여부가 아니라 보존할 로그인 흔적을 보여준다. 쿠키가 있어도 벽은 생길 수 있으며,
+ *   그 사실만으로 서버 거절이나 특정 계정의 로그아웃을 단정할 수 없다.
  *
  * 표는 **데이터**다(어느 호스트·경로가 로그인 화면인가, 어느 쿠키 이름이 세션인가). 의도 판정이 아니다.
  */
@@ -65,7 +65,7 @@ interface IdentityProviderRule {
 const IDENTITY_PROVIDERS: IdentityProviderRule[] = [
   {
     host: /^accounts\.google\.com$/u,
-    path: /^\/(?:v\d+\/)?(?:signin|ServiceLogin|AccountChooser|InteractiveLogin|o\/oauth2\/auth(?:chooser)?|CheckCookie)(?:[/?#]|$)/iu,
+    path: /^\/(?:v\d+\/)?(?:signin|ServiceLogin|AccountChooser|InteractiveLogin|o\/oauth2\/(?:v\d+\/)?auth(?:chooser)?|CheckCookie)(?:[/?#]|$)/iu,
     domain: "google.com",
     returnParams: ["continue", "followup", "next", "redirect_uri"],
     serviceSites: { youtube: "youtube.com", mail: "google.com", cl: "google.com", wise: "google.com" },
@@ -127,8 +127,24 @@ const SESSION_COOKIE_NAMES: Record<string, readonly string[]> = {
   "chatgpt.com": ["__Secure-next-auth.session-token"],
 };
 
+// A partially surviving Google sign-in can contain only rotating or companion
+// cookies. They are not sufficient proof of authentication, but are still
+// enough reason not to splice another profile into the shared session.
+const GOOGLE_RECOVERY_PROTECTED_NAMES = new Set([
+  "SID", "HSID", "SSID", "APISID", "SAPISID", "LSID", "LOGIN_INFO", "1PAPISID", "3PAPISID",
+  "__Secure-1PAPISID", "__Secure-3PAPISID", "__Secure-1PSID", "__Secure-3PSID",
+  "__Secure-1PSIDTS", "__Secure-3PSIDTS", "__Secure-1PSIDCC", "__Secure-3PSIDCC",
+  "__Secure-1PSIDRTS", "__Secure-3PSIDRTS",
+]);
+
 export function sessionCookieNamesFor(domain: string): readonly string[] | null {
   return SESSION_COOKIE_NAMES[registrableDomain(domain)] ?? null;
+}
+
+/** Broader than authentication evidence: partial companion cookies still need protection. */
+export function sessionCookieProtectionNamesFor(domain: string): readonly string[] | null {
+  const site = registrableDomain(domain);
+  return site === "google.com" || site === "google.co.kr" || site === "youtube.com" ? [...GOOGLE_RECOVERY_PROTECTED_NAMES] : sessionCookieNamesFor(site);
 }
 
 /**
@@ -169,11 +185,11 @@ export function identityDomainsFor(site: string): string[] {
 /**
  * 로그인을 함께 발급하는 도메인 묶음(쿠키 투입을 묶음 단위로 판정할 때, cookie-merge.ts
  * planSessionGroupFeed). youtube.com 과 google.com 은 한 묶음, threads 와 instagram 도 한 묶음.
- * 로그인 쿠키 이름을 아는 사이트만 묶음을 가진다 — 모르는 사이트는 null(줄 단위 판정).
+ * 로그인 쿠키를 알거나 보호할 Google 계열 사이트만 묶음을 가진다 — 모르는 사이트는 null.
  */
 export function sessionCookieGroupOf(host: string): { group: string; site: string } | null {
   const site = registrableDomain(host);
-  if (!site || !SESSION_COOKIE_NAMES[site]) return null;
+  if (!site || (!SESSION_COOKIE_NAMES[site] && site !== "google.co.kr")) return null;
   const members = new Set<string>([site]);
   const walk = (domain: string) => {
     for (const next of SITE_IDENTITY_DOMAINS[domain] ?? []) {
@@ -185,6 +201,51 @@ export function sessionCookieGroupOf(host: string): { group: string; site: strin
   };
   walk(site);
   return { group: [...members].sort()[0], site };
+}
+
+/** The whole login group must be inspected even if a caller requested only one member. */
+export function recoveryCookieDomains(domains: readonly string[]): string[] {
+  const sites = new Set(domains.map(registrableDomain).filter(Boolean));
+  const groups = new Set([...sites].map((site) => sessionCookieGroupOf(site)?.group).filter((group): group is string => Boolean(group)));
+  for (const site of new Set([...Object.keys(SESSION_COOKIE_NAMES), ...Object.keys(SITE_IDENTITY_DOMAINS)])) {
+    const group = sessionCookieGroupOf(site)?.group;
+    if (group && groups.has(group)) sites.add(site);
+  }
+  return [...sites];
+}
+
+/**
+ * An automatic recovery may seed a genuinely empty destination, but it must not
+ * replace even a partial sign-in. A cookie with no known session vocabulary is
+ * also protected: absence of a provider-specific name is not proof of logout.
+ * Only cookie metadata is needed; values never leave the browser store.
+ */
+export function automaticRecoveryDestination(
+  cookies: readonly CookieMetadata[] | null | undefined,
+  domains: readonly string[],
+  nowSeconds: number,
+): "empty" | "protected" | "unreadable" {
+  if (!cookies) return "unreadable";
+  const sites = new Set(domains.map(registrableDomain).filter(Boolean));
+  if (sites.size === 0) return "unreadable";
+  const groups = new Set([...sites].map((site) => sessionCookieGroupOf(site)?.group).filter((group): group is string => Boolean(group)));
+  for (const cookie of cookies) {
+    const site = registrableDomain(cookie.domain.replace(/^\./u, "").toLowerCase());
+    if (!site) continue;
+    const group = sessionCookieGroupOf(site)?.group;
+    if (!sites.has(site) && !(group && groups.has(group))) continue;
+    if (cookie.expires !== null && cookie.expires <= nowSeconds) continue;
+    const names = sessionCookieProtectionNamesFor(site);
+    if (!names || names.includes(cookie.name)) return "protected";
+  }
+  return "empty";
+}
+
+/** Interactive Google authentication steps are not evidence of a failed login. */
+export function isGoogleAuthenticationTransition(value: string | null | undefined): boolean {
+  const url = parseHttpUrl(value);
+  if (!url || url.hostname.toLowerCase() !== "accounts.google.com") return false;
+  return /^\/(?:v\d+\/)?(?:accountchooser|signin\/accountchooser|signin\/oauth\/consent|checkcookie|o\/oauth2\/(?:v\d+\/)?auth(?:chooser)?)(?:\/|$)/iu.test(url.pathname);
 }
 
 function parseHttpUrl(value: string | null | undefined): URL | null {

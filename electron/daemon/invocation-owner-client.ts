@@ -1,4 +1,5 @@
 import net from "node:net";
+import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { canonicalDaemonPath, daemonControlSocketPath, resolveDaemonServiceIdentity, type DaemonServiceOptions } from "./service-identity";
 import type { InvocationRunOwner } from "../store/invocation-owner-core";
@@ -160,6 +161,43 @@ export function createInvocationOwnerClient(options: InvocationOwnerClientOption
 
   return {
     connect,
+    /** The token travels over this already registered local owner connection and is never serialized into argv. */
+    async acquireNativeBrowser(owner: InvocationRunOwner, signal: AbortSignal, approvalDigest: string): Promise<{
+      endpoint: string; token: string; executable: string; release(): Promise<void>;
+    }> {
+      if (options.ownerKind !== "terminal" || owner.ownerId !== options.ownerId || owner.ownerKind !== "terminal"
+        || owner.state !== "active" || signal.aborted || !/^[a-f0-9]{64}$/.test(approvalDigest)) throw unavailable();
+      await connect();
+      if (signal.aborted || !guard) throw unavailable();
+      const id = randomUUID();
+      let started = false, released = false;
+      let releasePromise: Promise<void> | null = null;
+      const onAbort = () => { void release().catch(() => {}); };
+      const release = (): Promise<void> => {
+        if (releasePromise) return releasePromise;
+        released = true;
+        signal.removeEventListener("abort", onAbort);
+        releasePromise = started && guard
+          ? rpc("browser.terminalRelease", { ...guard, grantId: id }).then(value => {
+            if (record(value)?.released !== true) throw unavailable();
+          })
+          : Promise.resolve();
+        return releasePromise;
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+      try {
+        if (signal.aborted) throw unavailable();
+        started = true;
+        const response = record(await rpc("browser.terminalGrant", { ...guard, grantId: id,
+          approvalDigest,
+          owner: { chatId: owner.chatId, runId: owner.runId, ownerId: owner.ownerId, leaseId: owner.leaseId } }));
+        if (released || signal.aborted || !response || response.id !== id
+          || typeof response.endpoint !== "string" || !/^http:\/\/127\.0\.0\.1:[1-9][0-9]{0,4}$/.test(response.endpoint)
+          || typeof response.token !== "string" || !/^[a-f0-9]{64}$/i.test(response.token)
+          || typeof response.executable !== "string" || !path.isAbsolute(response.executable)) throw unavailable();
+        return { endpoint: response.endpoint, token: response.token, executable: response.executable, release };
+      } catch (error) { await release(); throw error; }
+    },
     async dispatch(owner: InvocationRunOwner, method: InvocationOwnerBrokerMethod, params: unknown): Promise<unknown> {
       if (!METHODS.includes(method) || (owner.state !== "active" && owner.state !== "settling")) throw unavailable();
       await connect();

@@ -59,11 +59,20 @@ export function takeUndeliveredOwnerDirections(input: { chatId: string; runId: s
     // (invocation-owner-router.ts, InvocationService.currentTurnSteerReceipt), and an episode or loop boundary that
     // never dispatched its batch settles it owner_control_not_dispatched (owner-control-pump.ts): never sent, so taken.
     const prefix = input.intentPrefix ?? "";
+    const hasFollowupCustody = Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='invocation_followup_custody'").get());
+    // V2 owns the exact model/options and original identity. At this terminal
+    // boundary release only never-dispatched rows to its own single-input queue;
+    // they must not join the legacy text batch or inherit the ended run's model.
+    if (hasFollowupCustody && input.intentPrefix === undefined) db.prepare(`UPDATE invocation_current_turn_steers
+      SET status='rejected',code='owner_control_run_settled',updated_at=? WHERE chat_id=? AND run_id=? AND status='queued'
+      AND intent_id IN (SELECT intent_id FROM invocation_followup_custody WHERE state='entered' AND queue_id IS NULL)`)
+      .run(new Date().toISOString(),input.chatId,input.runId);
     const rows = (db.prepare(`SELECT intent_id, prompt_text, message_id FROM invocation_current_turn_steers
       WHERE chat_id = ? AND run_id = ? AND (status = 'queued' OR (status = 'rejected' AND code IN ('owner_control_run_settled','owner_control_not_dispatched')))
         AND substr(intent_id, 1, ?) = ?
       ORDER BY created_at, rowid`).all(input.chatId, input.runId, prefix.length, prefix) as Array<{ intent_id: string; prompt_text: string; message_id: string | null }>)
       .filter((row) => typeof row.prompt_text === "string" && row.prompt_text.trim())
+      .filter((row) => !hasFollowupCustody || !db.prepare("SELECT 1 FROM invocation_followup_custody WHERE intent_id=?").get(row.intent_id))
       .filter((row) => input.intentPrefix !== undefined || !SURFACE_OWNED_DIRECTION_PREFIXES.some((owned) => row.intent_id.startsWith(owned)));
     if (!rows.length) return [];
     const now = new Date().toISOString();

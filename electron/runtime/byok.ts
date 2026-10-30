@@ -1176,7 +1176,7 @@ export const runUpstageByok: Runner = async (
   );
 };
 
-import { getDb } from "../store/db";
+import { DEFAULT_CUSTOM_BASE_URL, readCustomBaseUrl } from "./custom-base-url";
 
 // ── Custom OpenAI-compatible ─────────────────────────────
 export const runCustomByok: Runner = async (
@@ -1184,13 +1184,12 @@ export const runCustomByok: Runner = async (
   events: RunnerEvents,
 ): Promise<RunnerResult> => {
   assertScienceRecoveryRequest(req, "byok", "custom");
-  let baseUrl = "https://api.openai.com/v1";
+  let baseUrl: string;
   try {
-    const row = getDb().prepare("SELECT value FROM meta WHERE key = 'custom_base_url'").get() as { value: string } | undefined;
-    if (row?.value) {
-      baseUrl = row.value.trim().replace(/\/$/, "");
-    }
-  } catch {}
+    baseUrl = readCustomBaseUrl() ?? DEFAULT_CUSTOM_BASE_URL;
+  } catch (error) {
+    throw markRefusedBeforeDispatch(error);
+  }
   const key = await readKeyBeforeDispatch("custom");
   if (!key) return byokCredentialMissing("Custom API key missing (Settings → BYOK)");
   return runOpenAiCompletionWithMainToolLoop("custom", baseUrl, "Custom", key, req, events);

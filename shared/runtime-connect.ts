@@ -6,6 +6,23 @@ export type ConnectableRuntime = "codex" | "claude-code" | "antigravity" | "grok
 
 export const CONNECTABLE_RUNTIMES: readonly ConnectableRuntime[] = ["codex", "claude-code", "antigravity", "grok", "kimi", "cursor"];
 
+/** Ollama defaults a missing tag to `latest`. Compare inventory names without
+ * rewriting the selected model sent to the server. */
+export function ollamaModelNamesEqual(left: string, right: string): boolean {
+  if (!left || !right) return false;
+  if (left === right) return true;
+  // Do not equate digest or URL-like references with a different name.
+  if ([left, right].some(name => /[@?#\s]/.test(name) || name.includes("://")
+    || name.endsWith(":") || name.endsWith("/"))) return false;
+  const withDefaultTag = (name: string): string =>
+    name.lastIndexOf(":") > name.lastIndexOf("/") ? name : `${name}:latest`;
+  return withDefaultTag(left) === withDefaultTag(right);
+}
+
+export function ollamaModelListIncludes(models: readonly string[], requested: string): boolean {
+  return models.some(model => ollamaModelNamesEqual(requested, model));
+}
+
 /**
  * 온보딩의 "로컬 모델" 칸이 세는 런타임 — 칸과 첫 역할 배정(first-run-roles)이 같은 목록을 읽는다.
  * detect.ts 가 로컬 런타임으로 내는 네 종류 전부다. ollama 는 1.3.43(2026-10-15)부터 실제로 감지·실행되는

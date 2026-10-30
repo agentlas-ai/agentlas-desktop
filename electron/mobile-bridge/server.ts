@@ -41,6 +41,7 @@ import {
 } from "./replay";
 import { mobileBridgeJsonBytes } from "./sanitize";
 import { mobileBridgeMailReplayMayRerun } from "./mail-replay-policy";
+import { mobileBridgeIsOwnerMessage, mobileBridgeOrphanMayRerun } from "./orphan-rerun-policy";
 import { isTransientSendRefusalCode, sendRefusalCode } from "../../shared/transient-send-refusal";
 
 /**
@@ -152,6 +153,19 @@ export interface MobileBridgeAuthorityEvent {
 }
 
 /**
+ * What the Desktop's durable rows say became of an owner message whose request-ledger entry a previous Desktop instance
+ * left unsettled (MobileBridgeAuthority.reconcileOwnerMessage).
+ */
+export type MobileBridgeOwnerMessageVerdict =
+  /** The intake took the message; `result` is what the original call answered. */
+  | { kind: "taken"; result: MobileBridgeJsonValue }
+  /** The intake took the message and could not start it: the original call was refused. */
+  | { kind: "failed" }
+  /** No durable row exists: nothing happened, the same key may be sent again. */
+  | { kind: "never-taken" }
+  | { kind: "unknown" };
+
+/**
  * DESKTOP_MOBILE_BRIDGE: main.ts must inject the same authority used by Electron
  * IPC. The server never opens SQLite, creates an independent active-run registry,
  * or calls a model directly.
@@ -172,6 +186,11 @@ export interface MobileBridgeAuthority {
     context: MobileBridgeConnectionContext,
   ): Promise<MobileBridgeJsonValue | undefined>;
   capabilities?(): MobileBridgeJsonValue;
+  /** Read-only. Absent: an unsettled owner message of a previous Desktop instance keeps answering "uncertain". */
+  reconcileOwnerMessage?(
+    request: MobileBridgeRpcRequest,
+    context: MobileBridgeConnectionContext,
+  ): MobileBridgeOwnerMessageVerdict;
   visualFrame?(
     request: MobileBridgeRpcRequest,
     context: MobileBridgeConnectionContext,
@@ -1046,11 +1065,25 @@ export class AgentlasMobileBridgeServer {
         return;
       }
       try {
-        const replay = this.replayStore.begin(
+        let replay = this.replayStore.begin(
           state.context.deviceId,
           replayKey,
           replayFingerprint,
         );
+        if (replay.kind === "uncertain" && this.replayStore.isOrphan(state.context.deviceId, replayKey, replayFingerprint)) {
+          // A previous Desktop instance left this entry unsettled and nothing alive can ever settle it. Where the command's
+          // own durable footprint proves the outcome, settle it from that; where it proves nothing ran, or the command is
+          // keyed downstream, let the same key run once more. Anything else stays uncertain, as before.
+          const orphan = this.orphanDisposition(state.context, request);
+          if (orphan.kind === "settled") {
+            this.replayStore.adoptOrphan(state.context.deviceId, replayKey, replayFingerprint, orphan.response);
+          } else if (orphan.kind === "rerun") {
+            this.replayStore.releaseOrphan(state.context.deviceId, replayKey, replayFingerprint);
+          }
+          // Ask the ledger again either way: a concurrent resend may have settled or re-admitted the key first, and the
+          // answer must describe that (replay / in-progress), not the stale "uncertain" read above.
+          if (orphan.kind !== "keep") replay = this.replayStore.begin(state.context.deviceId, replayKey, replayFingerprint);
+        }
         if (replay.kind === "replay") {
           this.send(state, responseForRequest(replay.response, request.id));
           return;
@@ -1191,6 +1224,34 @@ export class AgentlasMobileBridgeServer {
     }
   }
 
+  /**
+   * What to do with a ledger entry a previous Desktop instance left unsettled (replay.ts isOrphan):
+   *  - settled: the Desktop's durable rows prove the message was taken; this is what the original call answered;
+   *  - rerun: nothing ran (`proven`), or the command is keyed downstream (science.chat.send by its request id), so
+   *    running the same key again cannot run it twice;
+   *  - keep: not provable, so it stays "uncertain" and is never run again.
+   */
+  private orphanDisposition(
+    context: MobileBridgeConnectionContext,
+    request: MobileBridgeRpcRequest,
+  ): { kind: "settled"; response: MobileBridgeReplayResponse } | { kind: "rerun"; proven: boolean } | { kind: "keep" } {
+    if (!mobileBridgeOrphanMayRerun(request)) return { kind: "keep" };
+    if (!mobileBridgeIsOwnerMessage(request)) return { kind: "rerun", proven: false };
+    let verdict: MobileBridgeOwnerMessageVerdict | undefined;
+    try {
+      verdict = this.authority.reconcileOwnerMessage?.(request, context);
+    } catch (error) {
+      this.onError(errorOf(error));
+      return { kind: "keep" };
+    }
+    switch (verdict?.kind) {
+      case "never-taken": return { kind: "rerun", proven: true };
+      case "taken": return { kind: "settled", response: this.responseFromAuthority(request.id, verdict.result) };
+      case "failed": return { kind: "settled", response: mobileBridgeFailure(request.id, "authority_error", "Desktop rejected the request") };
+      default: return { kind: "keep" };
+    }
+  }
+
   private dispatchRequestStatus(state: ConnectionState, request: MobileBridgeRpcRequest): void {
     if (!this.replayStore) {
       this.send(state, mobileBridgeFailure(
@@ -1209,11 +1270,21 @@ export class AgentlasMobileBridgeServer {
       params: request.params.params as MobileBridgeRpcRequest["params"],
     };
     try {
-      const result = this.replayStore.lookup(
+      let result = this.replayStore.lookup(
         state.context.deviceId,
         originalRequest.idempotencyKey!,
         fingerprintMobileBridgeRequest(originalRequest),
       );
+      if (result.kind === "uncertain" && this.replayStore.isOrphan(
+        state.context.deviceId,
+        originalRequest.idempotencyKey!,
+        fingerprintMobileBridgeRequest(originalRequest),
+      )) {
+        // Read-only: the ledger is not changed here. A resend of the same key settles it (dispatch).
+        const orphan = this.orphanDisposition(state.context, originalRequest);
+        if (orphan.kind === "settled") result = { kind: "completed", response: orphan.response };
+        else if (orphan.kind === "rerun" && orphan.proven) result = { kind: "missing" };
+      }
       const statusResult = {
         schemaVersion: 1,
         status: result.kind,

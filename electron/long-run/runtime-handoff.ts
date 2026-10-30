@@ -1,14 +1,17 @@
 import { ownsHostGoalLoop } from "./host-goal-surface";
 import type { GoalRuntimeSelectionReceipt, RuntimeSelection, RuntimeStatus } from "../../shared/types";
+import { ollamaModelListIncludes } from "../../shared/runtime-connect";
 import type { LongRunTaskCheckpoint } from "../../shared/long-run-checkpoint";
-import { getChat, setChatRuntimeSelection } from "../store/chats";
+import { getChat, normalizeChatRuntimeSelection, setChatRuntimeSelection } from "../store/chats";
 import { getChatGoalRevision } from "../store/chat-goals";
 import { appendLongRunEvent, getLongRunByGoalId, getLongRunGoalRevisionBinding } from "../store/long-runs";
 import { getDb } from "../store/db";
+import { desktopStoreTransaction } from "../store/change-bus";
+import { assertChatRuntimeSelectionTicketCurrent, reserveChatRuntimeSelectionTicket,
+  type ChatRuntimeSelectionTicket } from "../store/chat-runtime-selection-ticket";
 import { captureLongRunRuntimeSelection } from "./exact-runtime-binding";
 import { resolveDesktopRuntimeAdapter } from "./runtime-adapters";
-import { pickRunner } from "../runtime/selection";
-import { rolePriorityRuntimes } from "../runtime/selection";
+import { pickRunner, rolePriorityRuntimes, runtimeModelUnavailable, selectExactRuntime } from "../runtime/selection";
 import { runtimeCooldownForSelection } from "../runtime/runtime-cooldown";
 import { readInvocationEffectBoundary } from "../invocation/effect-boundary-reader";
 
@@ -118,59 +121,156 @@ function claimedForDispatch(runId: string, checkpointId: string, successorInvoca
   try { return JSON.parse(row.payload_json) as HandoffEvent; } catch { return null; }
 }
 
-export function resolveRequestedGoalRuntimeSelection(requested: RuntimeSelection, inventory: readonly RuntimeStatus[]): RuntimeSelection {
-  const candidates = inventory.filter(runtime => runtime.kind === requested.kind
+/** Fixed Goal handoff failures retain a machine code through the common IPC boundary.
+ * An owner's choice is refused only for a cause outside the app: the runtime is not installed or cannot run
+ * (unavailable), it is signed out (sign_in_required), its credential store cannot be read (credential_unavailable),
+ * or the runtime's own authoritative model list proves the model absent (model_unverified). The other codes belong
+ * to the unattended path, whose guesses nobody confirmed. */
+function goalRuntimeSelectionError(code:
+  | "goal_runtime_selection_ambiguous"
+  | "goal_runtime_selection_unavailable"
+  | "goal_runtime_sign_in_required"
+  | "goal_runtime_credential_unavailable"
+  | "goal_runtime_model_required"
+  | "goal_runtime_model_unverified"
+): Error & { code: string } {
+  return Object.assign(new Error(code), { code });
+}
+
+/** `owner`: the person picked this runtime and model from the app's own list (the chip). The unattended callers (a quota
+ * fallback) keep every guard: nobody confirmed what they pick, so a failed or stale model discovery cannot authorize it. */
+export function resolveRequestedGoalRuntimeSelection(requested: RuntimeSelection, inventory: readonly RuntimeStatus[],
+  options: { owner?: boolean } = {}): RuntimeSelection {
+  const owner = options.owner === true;
+  let candidates = inventory.filter(runtime => runtime.kind === requested.kind
     && (!requested.backend || runtime.backend === requested.backend)
     && (!requested.source || runtime.source === requested.source)
     && (requested.kind !== "acp" || requested.acpAgentId === runtime.acpAgentId));
-  if (candidates.length !== 1) throw new Error(candidates.length ? "goal_runtime_selection_ambiguous" : "goal_runtime_selection_unavailable");
+  // A source-less pin names an engine, not a binary (the chip omits the path). When several detected entries share
+  // that engine, the invocation takes the first match (selectExactRuntime); prefer one that can run so the exact binding
+  // names a real executable. The kind, backend and (for ACP) seat are already fixed by the filter above.
+  if (owner && candidates.length > 1) {
+    const runnable = candidates.filter(runtime => pickRunner(runtime));
+    candidates = [(runnable.length ? runnable : candidates)[0]];
+  }
+  if (candidates.length !== 1) throw goalRuntimeSelectionError(candidates.length ? "goal_runtime_selection_ambiguous" : "goal_runtime_selection_unavailable");
   const runtime = candidates[0];
-  if (!pickRunner(runtime) || runtime.credentialAccess?.status === "unavailable" || runtime.signInRequired)
-    throw new Error("goal_runtime_selection_unavailable");
-  const model = requested.model ?? runtime.model ?? undefined;
-  if (!model) throw new Error("goal_runtime_model_required");
-  // A failed/stale live discovery cannot authorize an unattended change. Some
-  // CLIs have no list protocol: their host catalogue can admit a pending
-  // request, but only the actual pinned invocation can prove execution.
-  if ((runtime.modelDiscovery?.status === "failed" || runtime.modelDiscovery?.stale)
-    || (runtime.availableModels?.length && !runtime.availableModels.includes(model)))
-    throw new Error("goal_runtime_model_unverified");
-  const selection: RuntimeSelection = { ...requested, model, backend: runtime.backend, source: runtime.source,
-    acpAgentId: runtime.acpAgentId, longContext: requested.longContext ?? runtime.longContextEnabled,
-    role: "orchestrator", inherit: false };
-  resolveDesktopRuntimeAdapter(selection);
-  captureLongRunRuntimeSelection(selection, { requireExact: true });
+  if (!pickRunner(runtime)) throw goalRuntimeSelectionError("goal_runtime_selection_unavailable");
+  if (runtime.credentialAccess?.status === "unavailable") throw goalRuntimeSelectionError("goal_runtime_credential_unavailable");
+  if (runtime.signInRequired) throw goalRuntimeSelectionError("goal_runtime_sign_in_required");
+  // The effective model, effort and long-context are what the episode's own runtime resolution will compute for this
+  // pin (selectExactRuntime). Recording them here keeps the handoff equal to what really runs: an effort the model
+  // does not offer, or a model-less "Default" pick, is settled now instead of failing the episode later.
+  const effective = owner ? selectExactRuntime([runtime], { ...requested, source: runtime.source, role: "orchestrator" })?.active : undefined;
+  const model = effective ? effective.model ?? undefined : requested.model ?? runtime.model ?? undefined;
+  if (!model && !owner) throw goalRuntimeSelectionError("goal_runtime_model_required");
+  // Unattended: a failed/stale live discovery cannot authorize an unattended change. Owner: the person picked the model
+  // from the app's own list, so only a runtime whose own list is authoritative (local models) can prove it absent.
+  // Some CLIs have no list protocol; their host catalogue can admit a pending request, and only the actual pinned
+  // invocation can prove execution (runtimeModelUnavailable is the very test the episode applies).
+  if (owner ? runtimeModelUnavailable(runtime, model)
+    : ((runtime.modelDiscovery?.status === "failed" || runtime.modelDiscovery?.stale)
+      || (model && runtime.availableModels?.length && !(runtime.kind === "ollama"
+        ? ollamaModelListIncludes(runtime.availableModels, model)
+        : runtime.availableModels.includes(model)))))
+    throw goalRuntimeSelectionError("goal_runtime_model_unverified");
+  const selection: RuntimeSelection = { ...requested, ...(model ? { model } : {}), backend: runtime.backend, source: runtime.source,
+    acpAgentId: runtime.acpAgentId, longContext: requested.longContext ?? effective?.longContextEnabled ?? runtime.longContextEnabled,
+    ...(effective ? { effort: effective.effort ?? undefined } : {}), role: "orchestrator", inherit: false };
+  if (!model) delete selection.model;
+  if (selection.effort === undefined) delete selection.effort;
+  try {
+    resolveDesktopRuntimeAdapter(selection);
+    captureLongRunRuntimeSelection(selection, { requireExact: true });
+  } catch { throw goalRuntimeSelectionError("goal_runtime_selection_unavailable"); }
   return selection;
 }
 
-/** Explicit Goal-scoped request. Ordinary chat pins remain a new-message
- * preference; they never silently rewrite the active Goal's execution model. */
-export function requestGoalRuntimeSelection(input: {
+export type GoalRuntimeSelectionRequest = {
   chatId: string; expectedGoalId: string; expectedGoalRevision: number;
   selection: RuntimeSelection;
-}, inventory: readonly RuntimeStatus[]): GoalRuntimeSelectionReceipt {
-  const requested = resolveRequestedGoalRuntimeSelection(input.selection, inventory);
-  return getDb().transaction(() => {
-    const chat = getChat(input.chatId), run = getLongRunByGoalId(input.expectedGoalId);
-    const revision = getChatGoalRevision(input.expectedGoalId);
-    if (!chat || chat.goalId !== input.expectedGoalId || !run || run.rootChatId !== chat.id
-      || run.surface === "science" || revision?.lifecycle !== "ongoing"
-      || revision.revision !== input.expectedGoalRevision
-      || getLongRunGoalRevisionBinding(run.id)?.revision !== input.expectedGoalRevision
-      || ["completed", "failed", "cancelled"].includes(run.status)) throw new Error("goal_runtime_selection_revision_changed");
-    const previous = latest(run.id);
-    const selectionRevision = (previous?.selectionRevision ?? 0) + 1;
+};
+
+/** The ongoing Goal this chat itself owns right now, or null. `expectedGoalId`/`expectedGoalRevision` are what the
+ * caller last read; they are never a reason to refuse. The person's intent is "use this model from now on", so a Goal
+ * that moved on (a newer revision, a replacement Goal in this chat) is bound at its CURRENT revision, and a Goal that
+ * ended, is no longer ongoing, or belongs to another chat is simply not a handoff target: the choice is the chat's
+ * pin (the next message) and nothing of another chat is touched. */
+function goalHandoffTarget(chatId: string) {
+  const chat = getChat(chatId);
+  if (!chat?.goalId) return null;
+  const run = getLongRunByGoalId(chat.goalId);
+  const revision = getChatGoalRevision(chat.goalId);
+  if (!run || run.rootChatId !== chat.id || run.surface === "science" || revision?.lifecycle !== "ongoing"
+    || ["completed", "failed", "cancelled"].includes(run.status)) return null;
+  return { chat, run, revision };
+}
+
+/** Reserve the ticket that fences an older in-flight choice behind a newer one, synchronously before runtime
+ * detection. Whether a Goal handoff applies is decided later, in the writing transaction, at the then-current binding. */
+export function reserveGoalRuntimeSelection(input: GoalRuntimeSelectionRequest): ChatRuntimeSelectionTicket {
+  if (!normalizeChatRuntimeSelection(input.selection)) throw new TypeError("Invalid Goal runtime selection");
+  const db = getDb();
+  return db.transaction(() => reserveChatRuntimeSelectionTicket(db, input.chatId)).immediate();
+}
+
+function fileGoalHandoff(target: NonNullable<ReturnType<typeof goalHandoffTarget>>, requested: RuntimeSelection,
+  actorKind: "user" | "host"): { selectionRevision: number } {
+  const previous = latest(target.run.id);
+  const selectionRevision = (previous?.selectionRevision ?? 0) + 1;
+  appendLongRunEvent({ runId: target.run.id, kind: "run.goal_runtime_selection", actorKind,
+    payload: { goalId: target.run.goalId, goalRevision: target.revision.revision, chatId: target.chat.id,
+      selectionRevision, state: "pending", requested } satisfies HandoffEvent });
+  return { selectionRevision };
+}
+
+/** The person's model choice for a chat. A chat with an ongoing Goal gets a handoff for the Goal's next safe episode
+ * (state "pending"); otherwise the choice is the chat's pin for the next message and nothing is queued — the receipt
+ * then says state "applied" with selectionRevision 0. The chat's pin is written in both cases, never an executable path.
+ * Only a cause outside the app refuses a request that needs a handoff (see goalRuntimeSelectionError); the refusal
+ * leaves pin and Goal unchanged. */
+export function requestGoalRuntimeSelection(input: GoalRuntimeSelectionRequest,
+  inventory: readonly RuntimeStatus[], ticket?: ChatRuntimeSelectionTicket): GoalRuntimeSelectionReceipt {
+  let requested: RuntimeSelection | null = null, refusal: unknown = null;
+  try { requested = resolveRequestedGoalRuntimeSelection(input.selection, inventory, { owner: true }); }
+  catch (error) { refusal = error; }
+  const db = getDb();
+  return desktopStoreTransaction(db, () => {
+    if (ticket) {
+      if (ticket.chatId !== input.chatId) throw Object.assign(new Error("chat_runtime_selection_superseded"), { code: "chat_runtime_selection_superseded" });
+      assertChatRuntimeSelectionTicketCurrent(db, ticket);
+    }
     // The chat's next-message preference is not an executable-path lease.
     // Preserve the semantic preference, never an executable path. Only the
     // Goal handoff event owns the inventory-confirmed source for this episode.
     const { source: _exactSource, ...chatPreference } = input.selection;
+    const target = goalHandoffTarget(input.chatId);
+    if (!target) {
+      const pinned = setChatRuntimeSelection(input.chatId, chatPreference, "desktop-ui");
+      const shown = pinned.runtimeSelection ? publicSelection(pinned.runtimeSelection) : publicSelection(input.selection);
+      return { chat: pinned, goalId: input.expectedGoalId, goalRevision: input.expectedGoalRevision,
+        selectionRevision: 0, state: "applied" as const, requested: shown, effective: shown };
+    }
+    if (!requested) throw refusal;
+    const { chat, run, revision } = target;
     const updated = setChatRuntimeSelection(chat.id, chatPreference, "runtime-handoff");
-    appendLongRunEvent({ runId: run.id, kind: "run.goal_runtime_selection", actorKind: "user",
-      payload: { goalId: run.goalId, goalRevision: revision.revision, chatId: chat.id,
-        selectionRevision, state: "pending", requested } satisfies HandoffEvent });
+    const { selectionRevision } = fileGoalHandoff(target, requested, "user");
     return { chat: updated, goalId: run.goalId, goalRevision: revision.revision,
       selectionRevision, state: "pending" as const, requested: publicSelection(requested), effective: null };
   }).immediate();
+}
+
+/** For a surface that wrote the chat's pin itself inside its own fenced transaction (the phone): the same rule as the
+ * chip. When the chat has an ongoing Goal the choice is also filed for the Goal's next safe episode. Call it in that
+ * transaction; it never throws — a choice the handoff cannot take (a runtime signed out) stays the chat's pin only. */
+export function handOffPinnedSelectionToOngoingGoal(chatId: string, selection: RuntimeSelection,
+  inventory: readonly RuntimeStatus[]): "pending" | null {
+  try {
+    const target = goalHandoffTarget(chatId);
+    if (!target) return null;
+    fileGoalHandoff(target, resolveRequestedGoalRuntimeSelection(selection, inventory, { owner: true }), "user");
+    return "pending";
+  } catch { return null; }
 }
 
 export function getGoalRuntimeSelection(chatId: string): GoalRuntimeSelectionReceipt | null {
@@ -186,8 +286,11 @@ export function getGoalRuntimeSelectionEvidence(chatId: string, goalId: string):
   const run = getLongRunByGoalId(goalId);
   if (!run || run.rootChatId !== chatId || run.surface === "science") return null;
   const event = latest(run.id);
-  if (!event || event.chatId !== chatId || event.goalId !== run.goalId
-    || getChatGoalRevision(run.goalId)?.revision !== event.goalRevision) return null;
+  const current = getChatGoalRevision(run.goalId)?.revision;
+  // A pending choice made under an earlier revision still waits for the Goal's next episode (it is re-bound to the
+  // revision that episode runs under when it is claimed). A claimed one belongs to the revision it was claimed under.
+  if (!event || !current || event.chatId !== chatId || event.goalId !== run.goalId
+    || (event.state === "claimed" ? current !== event.goalRevision : current < event.goalRevision)) return null;
   let state: GoalRuntimeSelectionReceipt["state"] = event.state;
   let effective: RuntimeSelection | null = null;
   if (event.state === "claimed" && event.successorInvocationId) {
@@ -212,7 +315,7 @@ export function getGoalRuntimeSelectionEvidence(chatId: string, goalId: string):
       } catch { /* Invalid receipt never becomes applied. */ }
     }
   }
-  return { goalRevision: event.goalRevision,
+  return { goalRevision: event.state === "pending" ? current : event.goalRevision,
     selectionRevision: event.selectionRevision, state, requested: publicSelection(event.requested),
     effective: effective ? publicSelection(effective) : null };
 }
@@ -225,7 +328,10 @@ export function goalRuntimeSelectionForCheckpoint(checkpoint: LongRunTaskCheckpo
   const event = dispatchInvocationId
     ? claimedForDispatch(checkpoint.capsule.runId, checkpoint.checkpointId, dispatchInvocationId)
     : latest(checkpoint.capsule.runId);
-  if (!event || event.goalId !== checkpoint.goalId || event.goalRevision !== checkpoint.goalRevision
+  // A checkpoint that names no Goal revision (v1) cannot take a handoff. A pending choice filed under an EARLIER revision
+  // still waits for this Goal's next episode and is re-bound to this checkpoint's revision when claimed.
+  if (!event || event.goalId !== checkpoint.goalId || checkpoint.goalRevision == null
+    || (event.state === "claimed" ? event.goalRevision !== checkpoint.goalRevision : event.goalRevision > checkpoint.goalRevision)
     || event.chatId !== checkpoint.capsule.historyRangeRef?.chatId) return null;
   if (event.state === "claimed" && (event.checkpointId !== checkpoint.checkpointId
     || event.successorInvocationId !== dispatchInvocationId)) return null;
@@ -233,17 +339,34 @@ export function goalRuntimeSelectionForCheckpoint(checkpoint: LongRunTaskCheckpo
   return { selection: event.requested, selectionRevision: event.selectionRevision };
 }
 
+function sameExactSelection(left: RuntimeSelection, right: RuntimeSelection): boolean {
+  try {
+    return JSON.stringify(captureLongRunRuntimeSelection(left, { requireExact: true }))
+      === JSON.stringify(captureLongRunRuntimeSelection(right, { requireExact: true }));
+  } catch { return JSON.stringify(left) === JSON.stringify(right); }
+}
+
 /** Called inside the same transaction as the successor claim. No asynchronous
- * gap can assign a newer user selection to an older claim. */
-export function claimGoalRuntimeSelection(checkpoint: LongRunTaskCheckpoint, successorInvocationId: string): void {
+ * gap can assign a newer user selection to an older claim.
+ * The claim never fails the episode. The choice it records is the one the episode was prepared with (the choice
+ * is the person's, so a Goal that has since changed shape does not unmake it); a choice filed after the episode was
+ * prepared (`prepared` differs) stays pending for the next episode; a pending choice from an earlier revision is
+ * re-bound to the revision of this checkpoint. */
+export function claimGoalRuntimeSelection(checkpoint: LongRunTaskCheckpoint, successorInvocationId: string,
+  prepared?: RuntimeSelection): void {
   const selected = goalRuntimeSelectionForCheckpoint(checkpoint);
   if (!selected) return;
-  const run = getLongRunByGoalId(checkpoint.goalId), revision = getChatGoalRevision(checkpoint.goalId);
+  const run = getLongRunByGoalId(checkpoint.goalId);
   const event = run ? latest(run.id) : null;
-  if (!run || !revision || revision.revision !== checkpoint.goalRevision || revision.lifecycle !== "ongoing"
-    || !event || event.state !== "pending" || event.selectionRevision !== selected.selectionRevision)
-    throw new Error("goal_runtime_selection_revision_changed");
+  if (!run || !event || event.state !== "pending" || event.selectionRevision !== selected.selectionRevision) {
+    // Unreachable inside one transaction; if it ever happens the episode runs on its prepared binding and says why.
+    if (run) appendLongRunEvent({ runId: run.id, kind: "run.goal_runtime_selection_skipped", actorKind: "host",
+      payload: { goalId: checkpoint.goalId, checkpointId: checkpoint.checkpointId, successorInvocationId,
+        reason: "handoff_event_changed" } });
+    return;
+  }
+  if (prepared && !sameExactSelection(prepared, selected.selection)) return;
   appendLongRunEvent({ runId: run.id, kind: "run.goal_runtime_selection", actorKind: "host",
-    payload: { ...event, state: "claimed", checkpointId: checkpoint.checkpointId,
+    payload: { ...event, goalRevision: checkpoint.goalRevision as number, state: "claimed", checkpointId: checkpoint.checkpointId,
       successorInvocationId } satisfies HandoffEvent });
 }

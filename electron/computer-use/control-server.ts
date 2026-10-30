@@ -206,14 +206,22 @@ function boundedInteger(value: unknown, min: number, max: number, fallback: numb
   return Number.isInteger(value) && Number(value) >= min && Number(value) <= max ? Number(value) : null;
 }
 
+/** A size limit the model asked for, read as the largest the host allows when it asks for more (and the smallest when for less). */
+function clampedInteger(value: unknown, min: number, max: number, fallback: number): number | null {
+  if (value === undefined || value === null) return fallback;
+  const n = typeof value === "number" ? value : typeof value === "string" && value.trim() ? Number(value) : NaN;
+  return Number.isFinite(n) ? Math.min(max, Math.max(min, Math.round(n))) : null;
+}
+
 async function observeApp(body: Record<string, unknown>): Promise<Record<string, unknown>> {
   const app = safeString(body.app, 160);
-  const maxDepth = boundedInteger(body.maxDepth, 1, 32, 24);
-  const maxNodes = boundedInteger(body.maxNodes, 1, 300, 200);
+  // maxDepth 16 with maxNodes 450 was refused (4 of 4 in 14 days; 1500, 1000, 500 in 2026-10-05): the intent is "a large tree", so a limit above the
+  // host's range is the host's range, not an error. Only a value that is no number at all is refused.
+  const maxDepth = clampedInteger(body.maxDepth, 1, 32, 24);
+  const maxNodes = clampedInteger(body.maxNodes, 1, 300, 200);
   if (!app) return { ok: false, error: "invalid-app", message: "app is required and must be under 160 characters." };
   if (maxDepth === null || maxNodes === null) {
-    // Name the range: without it a model retried 1500, 1000, 500 and failed each time (production 2026-10-05 20:29 UTC).
-    return { ok: false, error: "invalid-arguments", message: "maxDepth must be 1-32 and maxNodes 1-300 (omit them for 24 and 200)." };
+    return { ok: false, error: "invalid-arguments", message: "maxDepth and maxNodes must be numbers (the host uses 1-32 and 1-300; omit them for 24 and 200)." };
   }
   const denied = await checkComputerUseWindowScope({ route: "observe", app });
   if (denied) { recordAudit("observeApp", denied as NativeInputResult); return denied; }

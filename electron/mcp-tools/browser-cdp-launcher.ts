@@ -2013,6 +2013,40 @@ async function uploadWithoutChooser(reply, args, lastClickRef, callChildWithin) 
 }
 `;
 
+/*
+ * browser_wait_for {text} waits for the FIRST element in page order whose text matches (Playwright's getByText(text).first()) to become
+ * visible. A page that holds the same words twice, the first inside a hidden template or collapsed panel ("Total", "Published" on YouTube
+ * Studio), never satisfies it though the words are on screen: 23 of 53 browser_wait_for failures in 30 days read "locator resolved to
+ * hidden". The intent is "until this text is visible", so after exactly that failure the wait is repeated once against the visible
+ * matches only. A text that is absent, or visible nowhere, still times out as before.
+ */
+export const BROWSER_WAIT_FALLBACK_SOURCE = String.raw`
+function waitedOnHiddenFirstMatch(reply) {
+  if (!reply || reply.error || !(reply.result && reply.result.isError) || !Array.isArray(reply.result.content)) return false;
+  const text = reply.result.content.map((item) => item && typeof item.text === 'string' ? item.text : '').join('\n');
+  return /waiting for getByText\([\s\S]*?\)\.first\(\) to be visible/.test(text) && /locator resolved to hidden/.test(text);
+}
+function waitForVisibleCode(text, timeoutMs) {
+  const ms = Math.max(1000, Math.min(30000, Number(timeoutMs) || 15000));
+  return 'async (page) => {\n'
+    + '  const text = ' + JSON.stringify(String(text)) + ';\n'
+    + '  try { await page.getByText(text).filter({ visible: true }).first().waitFor({ state: "visible", timeout: ' + ms + ' }); return { ok: true }; }\n'
+    + '  catch (e) { return { ok: false }; }\n'
+    + '}';
+}
+/** Returns a replacement result for a browser_wait_for that timed out on a hidden first match, or null to keep the original error. */
+async function waitForVisibleMatch(reply, args, callChildWithin) {
+  if (!waitedOnHiddenFirstMatch(reply) || !args || typeof args.text !== 'string' || !args.text || args.textGone) return null;
+  const answer = await callChildWithin('browser_run_code_unsafe', { code: waitForVisibleCode(args.text, 15000) }, 20000);
+  const text = answer && answer.result && Array.isArray(answer.result.content)
+    ? answer.result.content.map((item) => item && typeof item.text === 'string' ? item.text : '').join('\n') : '';
+  if (!answer || answer.error || (answer.result && answer.result.isError) || !/"ok"\s*:\s*true/.test(text)) return null;
+  return { content: [{ type: 'text', text: 'Waited for ' + args.text + ' (a visible match appeared; an earlier match in the page source is hidden). Take a browser_snapshot to read the page.' }],
+    _meta: { agentlasWaitFor: { via: 'visible-match' } } };
+}
+`;
+
+
 export const BROWSER_FIND_GUIDANCE_SOURCE = String.raw`
 // Playwright refs are lowercase (e123, f1e2). "E2" (a spreadsheet cell) is page text.
 const SNAPSHOT_REF_TEXT = /^\s*(?:\[?\s*[Rr][Ee][Ff]\s*[=:]\s*)?((?:f\d{1,4})?e\d{1,6})\s*\]?\s*$/;
@@ -2026,6 +2060,20 @@ function snapshotRefShapedQuery(args) {
     if (match) return match[1];
   }
   return null;
+}
+// browser_find searches page text: text, or regex. A model that named the query pattern/query/search ({"pattern":"Filter"}, 3 of 3 in 14 days) said
+// what it wanted; the word is the query, so it is read as text (or as regex when the key says so). Only a query key is renamed, nothing else.
+const BROWSER_FIND_TEXT_ALIASES = ['pattern', 'query', 'search', 'q', 'term', 'keyword', 'phrase', 'string'];
+const BROWSER_FIND_REGEX_ALIASES = ['regexp', 'regex_pattern', 'regexPattern'];
+function browserFindQueryAlias(name, args) {
+  if (name !== 'browser_find' || !args || typeof args !== 'object' || Array.isArray(args) || args.text || args.regex) return args;
+  const rename = (aliases, to) => {
+    for (const key of aliases) {
+      if (typeof args[key] === 'string' && args[key].trim()) { const next = { ...args, [to]: args[key] }; delete next[key]; return next; }
+    }
+    return null;
+  };
+  return rename(BROWSER_FIND_TEXT_ALIASES, 'text') || rename(BROWSER_FIND_REGEX_ALIASES, 'regex') || args;
 }
 function browserFindArgumentFailure(name, args) {
   if (name !== 'browser_find') return null;
@@ -3166,6 +3214,11 @@ const MAX_PAGES = boundedLimit('AGENTLAS_CDP_MAX_PAGES', DEFAULT_LIMITS.pages, 4
 const MAX_RENDERERS = boundedLimit('AGENTLAS_CDP_MAX_RENDERERS', DEFAULT_LIMITS.renderers, 4, 128);
 const MAX_RSS_BYTES = boundedLimit('AGENTLAS_CDP_MAX_RSS_MB', DEFAULT_LIMITS.rssBytes / 1024 / 1024, 512, 16384) * 1024 * 1024;
 const BACKOFF_MS = boundedLimit('AGENTLAS_CDP_BACKOFF_MS', DEFAULT_LIMITS.backoffMs, 1000, 300000);
+// How long one browser action (click, fill, wait_for text...) waits for its element to be visible, enabled and stable. @playwright/mcp
+// stops after 5 s unless told otherwise: 45 of the 127 browser tool failures in 7 days were "Timeout 5000ms exceeded" (37 browser_wait_for
+// text, 8 browser_click) on a page that was still loading or animating (YouTube Studio, X's composer). browser_wait_for {text} waits no
+// longer than this, so "wait for the page to show X" could never wait more than 5 s. Navigation keeps the CLI's own 60 s.
+const ACTION_TIMEOUT_MS = boundedLimit('AGENTLAS_BROWSER_ACTION_TIMEOUT_MS', 15000, 1000, 120000);
 // Agent-run browsing is presented in One's Browser rail, so the automation
 // host is non-windowed by default even if a caller omits the env hint. The
 // explicit Browser login action uses browserOpenLogin() and never this launch
@@ -3353,6 +3406,7 @@ ${BROWSER_SOCIAL_ENGAGE_SOURCE}
 ${BROWSER_APPROVAL_CONTEXT_SOURCE}
 ${BROWSER_FIND_GUIDANCE_SOURCE}
 ${BROWSER_UPLOAD_FALLBACK_SOURCE}
+${BROWSER_WAIT_FALLBACK_SOURCE}
 ${BROWSER_SITE_LEARNING_CORE_SOURCE}
 ${BROWSER_SITE_LEARNING_GLUE_SOURCE}
 function readCdpPageUrl() {
@@ -3550,6 +3604,7 @@ async function main() {
     '--cdp-endpoint', nativeLeaseEndpoint || 'http://127.0.0.1:' + PORT,
     '--output-dir', OUTPUT_DIR,
     '--output-max-size', '268435456',
+    '--timeout-action', String(ACTION_TIMEOUT_MS),
   ], {
     stdio: ['pipe', 'pipe', 'inherit'],
     env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', ...(nativeLeaseEndpoint ? { PLAYWRIGHT_MCP_CDP_HEADERS: 'Authorization: Bearer ' + NATIVE_TOKEN } : {}) },
@@ -3597,6 +3652,7 @@ async function main() {
   const waiters = new Map();       // 내부(replay) tools/call: id -> resolve
   const engageHooks = new Map();   // client click id -> post-click state check (social engage)
   const uploadHooks = new Map();   // client browser_file_upload id -> args (direct-input retry when no chooser)
+  const waitHooks = new Map();     // client browser_wait_for id -> args (visible-match retry when the first match is hidden)
   ${BROWSER_GATE_LIFECYCLE_SOURCE}
   const gateLifecycle = createGateLifecycle();
   let currentUrl = '';
@@ -3638,6 +3694,7 @@ async function main() {
       if (next === args) next = { ...args };
       next.action = 'list';
     }
+    next = browserFindQueryAlias(name, next);
     return next;
   };
 
@@ -4085,6 +4142,7 @@ async function main() {
           return;
         }
         if (RECORDABLE.has(name)) pending.set(msg.id, { name, arguments: args });
+        if (name === 'browser_wait_for' && typeof args.text === 'string' && args.text && !args.textGone) waitHooks.set(msg.id, args);
         forwardRaw(forwardedLine);
       }).catch((error) => writeBrowserStartFailure(msg.id, error));
       return;
@@ -4098,6 +4156,16 @@ async function main() {
     let msg; try { msg = JSON.parse(line); } catch (e) { writeOutput(line); return; }
     // 내부 replay 응답 → waiter 로, client 로는 안 보냄.
     if (msg && typeof msg.id === 'string' && waiters.has(msg.id)) { const r = waiters.get(msg.id); waiters.delete(msg.id); r(msg); return; }
+    // A wait whose first text match is hidden is repeated once against the visible matches.
+    if (msg && msg.id != null && waitHooks.has(msg.id)) {
+      const waitArgs = waitHooks.get(msg.id); waitHooks.delete(msg.id);
+      if (waitedOnHiddenFirstMatch(msg)) {
+        void waitForVisibleMatch(msg, waitArgs, callChildWithin).then((replacement) => {
+          if (replacement) writeClient({ jsonrpc: '2.0', id: msg.id, result: replacement }); else writeOutput(line);
+        }, () => writeOutput(line));
+        return;
+      }
+    }
     // A failed upload (no chooser open) is retried once directly on the page's file input.
     if (msg && msg.id != null && uploadHooks.has(msg.id)) {
       const uploadArgs = uploadHooks.get(msg.id); uploadHooks.delete(msg.id);

@@ -318,6 +318,8 @@ function ChatInputComponent({
   onStop,
   busy,
   disabled,
+  canSubmit,
+  submitBlockedReason,
   context,
   runtime,
   modelOptions,
@@ -367,6 +369,10 @@ function ChatInputComponent({
   stopRequested?: boolean;
   busy: boolean;
   disabled?: boolean;
+  /** Check immediately before dispatch/clearing, including after async recommendations. */
+  canSubmit?: () => boolean;
+  /** Submission-only hold: typing, attachments and Stop remain available. */
+  submitBlockedReason?: string | null;
   context?: MentionContext;
   /** 활성 런타임 — 모델/작업량 picker용. */
   runtime?: RuntimeStatus | null;
@@ -614,7 +620,11 @@ function ChatInputComponent({
   // 큐에 쌓아 현재 턴 뒤에 전달한다. 중지 요청 뒤에만 새 지시를 잠시 막아 의도를 충돌시키지 않는다.
   const nothingToSend =
     !input.trim() && images.length === 0 && fileGrants.length === 0 && pastedTexts.length === 0;
-  const submitDisabled = nothingToSend || disabled || (busy && (stopRequested || stagedSteering !== null));
+  const composerActionText = withAttachmentContext(input.trim());
+  const composerAppRoute = parseAppSlashRoute(composerActionText);
+  const navigationOnly = Boolean(composerAppRoute && !composerAppRoute.request)
+    || /(^|\s)@plugin-make\b/i.test(composerActionText);
+  const submitDisabled = nothingToSend || disabled || (Boolean(submitBlockedReason) && !navigationOnly) || (busy && (stopRequested || stagedSteering !== null));
   /*
    * ★보내기가 회색인데 **왜인지 알 길이 없었다** (마우스 실측 2026-09-08).
    *   "아무것도 안 썼다" 는 보면 알지만, 나머지 세 사유는 화면에 아무 말도 없다:
@@ -623,7 +633,9 @@ function ChatInputComponent({
    */
   const submitDisabledReason = !submitDisabled || nothingToSend
     ? null
-    : disabled
+    : submitBlockedReason && !navigationOnly
+      ? submitBlockedReason
+      : disabled
       ? (locale === "ko" ? "지금은 이 대화에 보낼 수 없습니다." : "This conversation cannot accept messages right now.")
       : stopRequested
         ? (locale === "ko" ? "중지를 요청했습니다. 멈춘 뒤에 보낼 수 있습니다." : "Stop was requested. You can send once it has stopped.")
@@ -826,8 +838,11 @@ function ChatInputComponent({
   }
 
   const composerEnter = useComposerEnter(() => submit());
+  function submissionIsHeld(): boolean {
+    return canSubmit ? canSubmit() === false : Boolean(submitBlockedReason);
+  }
   function submit() {
-    if (submitDisabled) return;
+    if (nothingToSend || disabled || (busy && (stopRequested || stagedSteering !== null))) return;
     const text = withAttachmentContext(input.trim());
     /*
      * 앱 슬래시 명령(/site, /document-studio, /startup …).
@@ -839,6 +854,7 @@ function ChatInputComponent({
      */
     const appRoute = parseAppSlashRoute(text);
     if (appRoute) {
+      if (appRoute.request && submissionIsHeld()) return;
       finishComposerAfterSend();
       if (appRoute.request) {
         // 할 말이 붙어 있으면 그 앱에 시키는 요청이다.
@@ -860,6 +876,7 @@ function ChatInputComponent({
       router.push(`/build/plugin${params.toString() ? `?${params.toString()}` : ""}`);
       return;
     }
+    if (submissionIsHeld()) return;
     if (busy) {
       // Codex-shaped steering: the round send control immediately queues the
       // next instruction. Main preserves the active model turn.
@@ -885,7 +902,7 @@ function ChatInputComponent({
   }
 
   function sendStagedSteering() {
-    if (!stagedSteering) return;
+    if (!stagedSteering || submissionIsHeld()) return;
     const staged = stagedSteering;
     setStagedSteering(null);
     onSend(staged.text, staged.opts);
@@ -912,6 +929,7 @@ function ChatInputComponent({
     opts: SendOptions,
     engine?: { stormbreakerAuto: boolean; networkAuto: boolean } | null,
   ) {
+    if (submissionIsHeld()) return;
     const routerAgent = preview.routerAgent;
     if (preview.mode === "pipeline") {
       if (engine?.stormbreakerAuto === true) {
@@ -966,7 +984,7 @@ function ChatInputComponent({
     ]);
     setAutoRouting(false);
     // 그새 채팅이 바뀌었으면 이 세션에 콜하지 않는다(세션 격리).
-    if (activeChatIdRef.current !== chatIdAtStart) return;
+    if (activeChatIdRef.current !== chatIdAtStart || submissionIsHeld()) return;
 
     // 1) 세션 우선 호스트의 정상 경로. routePreview는 전역검색 없이 none을
     // 반환하고, 현재 세션 roster와 LLM의 동적 gap 판단을 main에 명시한다.
@@ -997,7 +1015,7 @@ function ChatInputComponent({
   /** 게이트 시트에서 "그냥/에이전트 없이 보내기" — 고용 없이 원문 전송. */
   function gateSendPlain() {
     const gate = gateSheet;
-    if (!gate) return;
+    if (!gate || submissionIsHeld()) return;
     setGateSheet(null);
     onRecommendExecute?.({ kind: "plain", routerAgent: gate.routerAgent }, gate.text, gate.opts);
     finishComposerAfterSend();

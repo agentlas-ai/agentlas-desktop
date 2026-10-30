@@ -308,8 +308,11 @@ function ownerMessage(ko: string, en: string): string {
 
 /** A system turn cannot enter a teammate session that holds a paused Goal (or whose Stop is still settling): a new session can. */
 const SESSION_GOAL_REFUSAL = /goal_(?:explicit_resume_required|stop_in_progress)|auto_goal_/;
-/** The machine code of a thrown start error: its own message when that is a code, otherwise a generic one. */
+/** The machine code of a thrown start error, preserving its typed code when the host proved it did not dispatch. */
 function refusalCodeOf(error: unknown): string {
+  const refusal = error && typeof error === "object" ? error as { code?: unknown; turnDelivery?: unknown } : null;
+  if (refusal?.turnDelivery === "not-dispatched" && typeof refusal.code === "string"
+    && /^[A-Za-z][A-Za-z0-9_.:-]{0,95}$/.test(refusal.code)) return refusal.code;
   const raw = error instanceof Error ? error.message : String(error);
   return /^[a-z][a-z0-9_]{2,80}$/.test(raw) ? raw : "start_failed";
 }
@@ -909,7 +912,7 @@ function parkOwnerWait(dispatch: OneDispatchRow, runId: string, wait: NonNullabl
     const relays = require("../invocation/deferred-system-relays") as typeof import("../invocation/deferred-system-relays");
     const code = (wait.notice_code ?? wait.reason).replace(/[^A-Za-z0-9_.-]/g, "_").slice(0, 80);
     // false = the same text is already parked and undelivered: still kept.
-    relays.deferSystemRelay({ chatId: dispatch.parent_chat_id, text, cause: `owner_wait_${code}`, originRunId: runId });
+    relays.parkSystemRelay({ chatId: dispatch.parent_chat_id, text, cause: `owner_wait_${code}`, originRunId: runId });
     return true;
   } catch (error) {
     console.warn("[one-team] owner-wait notice not parked:", error instanceof Error ? error.message : error);
@@ -1219,7 +1222,7 @@ export function oneTeamList(caller: OneTeamCaller) {
   ensureTable();
   const open = getDb().prepare(
     "SELECT * FROM one_team_dispatches WHERE parent_chat_id = ? ORDER BY created_at DESC LIMIT 20",
-  ).all(caller.chatId) as OneDispatchRow[];
+  ).all(ownerChatId) as OneDispatchRow[];
   return {
     conversation: {
       chat_id: ownerChatId,

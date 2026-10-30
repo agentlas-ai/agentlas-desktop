@@ -23,7 +23,17 @@ const AGENTS_PER_TICK = 2;
 const LESSONS_PER_PROPOSAL = 3;
 const MEMORIES_PER_PROPOSAL = 12;
 
-interface ProposerState { day: string; attempts: number; lastCode: string | null }
+interface ProposerState { day: string; attempts: number; lastCode: string | null; movedOn?: number }
+/**
+ * The compiler works from a snapshot of the lesson's memories and takes up to 90 s. The dreaming consolidation of the same agent
+ * (every 5 minutes while the agent is active) retires those memories into a rule in that time, so the proposal is refused when
+ * its sources are re-read ("memory_ineligible" / "memory_changed"): nothing was shown or applied, the lesson is not wrong, and the
+ * day's single attempt was spent (owner log 2026-10-29T00:26:27Z dreaming consolidated 3 entries of shorts-metrics-operator, 00:26:30Z
+ * "[learning-proposer] failed memory_ineligible"; the agent kept consolidating and tried again only the next day).
+ */
+const MEMORY_MOVED_ON_CODES: ReadonlySet<string> = new Set(["memory_ineligible", "memory_changed"]);
+/** Attempts a day are given back this many times, so a lesson that really is ineligible cannot spend the model all day. */
+const MOVED_ON_RETRIES_PER_DAY = 3;
 let timer: NodeJS.Timeout | null = null;
 let running = false;
 
@@ -52,7 +62,13 @@ export async function proposeLearningsForAgent(agentId: string, now = new Date()
     return { outcome: "proposed", proposalId: proposal.id };
   } catch (error) {
     const code = typeof (error as { code?: unknown })?.code === "string" ? (error as { code: string }).code : "proposal_failed";
-    try { writeAgentWorkspaceRecord(stateFile(agentId), { day, attempts: attempts + 1, lastCode: code } satisfies ProposerState); } catch { /* The attempt was already counted. */ }
+    const movedOn = state?.day === day ? state.movedOn ?? 0 : 0;
+    if (MEMORY_MOVED_ON_CODES.has(code) && movedOn < MOVED_ON_RETRIES_PER_DAY) {
+      // The memories moved on while the compiler read them. Give the attempt back: the next tick proposes from the current lessons.
+      try { writeAgentWorkspaceRecord(stateFile(agentId), { day, attempts, lastCode: code, movedOn: movedOn + 1 } satisfies ProposerState); } catch { /* The attempt stays counted. */ }
+      return { outcome: "skipped", code: "memory_moved_on" };
+    }
+    try { writeAgentWorkspaceRecord(stateFile(agentId), { day, attempts: attempts + 1, lastCode: code, ...(movedOn ? { movedOn } : {}) } satisfies ProposerState); } catch { /* The attempt was already counted. */ }
     // "No change" and "needs more evidence" are normal answers, not failures worth reporting.
     return { outcome: ["semantic_review_deferred", "learning_not_recurring"].includes(code) ? "skipped" : "failed", code };
   }

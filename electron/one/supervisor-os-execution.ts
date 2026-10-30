@@ -105,8 +105,17 @@ export async function prepareSupervisorOsExecutionAsync(input:{runId?:string;cha
   if (screenExecutionDenied) return { kind:"unavailable", reason:screenExecutionDenied };
   if(!input.runId || !input.chatId)return null;
   if(configuredOneOsLeaseBroker()){
-    const local=prepareSupervisorOsExecution(input);
-    return local?{kind:"scoped",capability:local.capability,dispose:local.dispose}:null;
+    // A window process whose broker is configured but whose OS host is down (locked screen, control server stopped) is the
+    // same state as a service whose window is not attached: the run keeps going and only its computer-use calls fail with
+    // this typed reason. It used to refuse the whole run (production 1.2.95, 2026-10-11: four Hope turns ended
+    // "Could not prepare this run's tool connections (supervisor_os_host_unavailable)"). Every other refusal stays a refusal.
+    try {
+      const local=prepareSupervisorOsExecution(input);
+      return local?{kind:"scoped",capability:local.capability,dispose:local.dispose}:null;
+    } catch(error) {
+      if((error as {code?:unknown}|null)?.code==="supervisor_os_host_unavailable")return {kind:"unavailable",reason:"supervisor_os_host_unavailable"};
+      throw error;
+    }
   }
   const rows=supervisorRequestRows(input.runId);
   if(!rows.length)return null;

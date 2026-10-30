@@ -49,7 +49,7 @@ import {
   renderGapContext,
   unseenHistoryGap, dedupeStableTurnContext, acknowledgeStableTurnContext, invalidateStableTurnContext,
   type StableTurnContextDelivery } from "./continuity";
-import { agentContextBootstrapForRequest, agentContextColdBootstrapForRequest, agentContextSessionKey } from "./agent-context";
+import { agentContextBootstrapForRequest, agentContextColdBootstrapForRequest, agentContextDeliveryForRequest, agentContextSessionKey } from "./agent-context";
 import { tStatus } from "./status-i18n";
 import { agentRunCwd, detachedSpawnOpts, firstExistingCli, killCliTree, probeCliVersion, spawnCli, trackRunChild, writeStdin } from "./exec";
 import { nativeCliCandidates } from "./native-cli";
@@ -1894,6 +1894,12 @@ async function runCodexResidentTurn(input: {
     }
   };
 
+  // Only an active host delivery can identify a canonical journal resume.
+  const canonicalDelivery = (() => {
+    try { return agentContextDeliveryForRequest(req); }
+    catch (error) { throw preDispatchRefusal(error, "codex-canonical-delivery"); }
+  })();
+  const canonicalResume = Boolean(req.runtimeSessionId && canonicalDelivery?.nativeHandle === req.runtimeSessionId);
   const acquired = await acquireResident();
   if (!("session" in acquired)) return acquired;
   let lease: AcpSessionLease<CodexResidentSession> = acquired;
@@ -1907,6 +1913,8 @@ async function runCodexResidentTurn(input: {
    * the turn.
    */
   let rebindThread = false;
+  /** The thread the preflight below already released for this turn's table (it must not be released twice). */
+  let releasedForRebind: string | null = null;
   /** The thread this process held, still subscribed, that a model-change fork leaves behind (released after the fork). */
   let forkSourceToRelease: string | null = null;
   if (!lease.fresh && lease.session.threadId) {
@@ -1921,7 +1929,7 @@ async function runCodexResidentTurn(input: {
       if (state === "not-loaded") {
         rebindThread = true;
       } else if (tableChanged) {
-        const forks = heldModelChanged && !req.runtimeSessionId;
+        const forks = heldModelChanged && (!req.runtimeSessionId || (canonicalResume && req.runtimeSessionId === heldThreadId));
         const resumesOther = Boolean(req.runtimeSessionId && req.runtimeSessionId !== heldThreadId);
         if (forks) {
           forkSourceToRelease = heldThreadId;
@@ -1937,6 +1945,7 @@ async function runCodexResidentTurn(input: {
             // No longer subscribed: only a thread/resume (which re-subscribes) may follow, never a bare turn/start.
             held.mcpConfigDigest = null;
             rebindThread = true;
+            releasedForRebind = heldThreadId;
           }
         }
       }
@@ -2800,10 +2809,20 @@ async function runCodexResidentTurn(input: {
       // same-fingerprint pool entry is only an optimization and cannot replace
       // that explicit continuity target.
       const threadToResume = req.runtimeSessionId ?? (reusing ? session.threadId : resumeThreadId);
-      const forkHeldThreadForModel = Boolean(reusing && modelChanged && !explicitResume && threadToResume);
+      const forkHeldThreadForModel = Boolean(reusing && modelChanged && threadToResume
+        && (!explicitResume || (canonicalResume && threadToResume === session.threadId)));
       if (threadToResume) {
         let releaseResume: (() => void) | undefined;
         try {
+          // A thread this process still has loaded keeps the table it was loaded with, whatever table this resume carries: codex-cli
+          // 0.166.0 relaunches its servers from the OLD table (measured offline, thread/resume of a subscribed thread), so the one-team
+          // and agentlas-turn children of a revoked invocation read a capability file that is gone ("ENOENT ... capability-invocation-*.json",
+          // production 10-18 x2 and 10-26: each run began within 0.2 s of a failed run in the same chat). A named thread on a warm process
+          // is therefore released first when it is not the held thread on this very table; "notLoaded" is the common, cheap answer.
+          if (!lease.fresh && mcpThread && Object.keys(mcpThread.servers).length > 0 && !forkHeldThreadForModel && threadToResume !== releasedForRebind
+            && (threadToResume !== session.threadId || session.mcpConfigDigest !== mcpThread.digest)) {
+            await releaseCodexResidentThread(session, threadToResume, { timeoutMs: 2_000, ...(req.signal ? { signal: req.signal } : {}) }).catch(() => undefined);
+          }
           releaseResume = await prepareCodexThreadResume(session, threadToResume, req.signal);
           const response = await session.conn.request(
             forkHeldThreadForModel ? "thread/fork" : "thread/resume",
@@ -2827,7 +2846,8 @@ async function runCodexResidentTurn(input: {
             // Before turn/start: nothing of this turn was sent (RuntimeTurnDelivery "not-dispatched", its own code kept).
             throw markRefusedBeforeDispatch(new CodexModelSelectionError("resolution_unverified", "Codex model fork returned the previous thread instead of a new one."));
           }
-          workforceObservation?.acknowledgeThread(response, modelAcknowledgement, policy, cwd, approvalsReviewer, threadToResume);
+          workforceObservation?.acknowledgeThread(response, modelAcknowledgement, policy, cwd, approvalsReviewer,
+            forkHeldThreadForModel ? undefined : threadToResume);
           session.threadId = forkHeldThreadForModel ? response.thread.id : threadToResume;
           session.modelAcknowledgement = modelAcknowledgement;
           session.mcpConfigDigest = mcpThread?.digest ?? null;
@@ -3698,7 +3718,10 @@ export const runCodex: Runner = async (
       // the other's (production 1.2.93, 2026-10-11 03:54Z, "already has an active writer"),
       // and when the thread's rollout is gone (rule 4: refusing repeated the error on every later turn).
       if (runReq.signal?.aborted || !(err instanceof CodexSessionContinuityError)) throw err;
-      const refusal = err.code === "resume_failed" ? err.resumeRefusal ?? classifyCodexResumeFailure(err.message) : "writer_busy";
+      const classified = err.code === "resume_failed" ? err.resumeRefusal ?? classifyCodexResumeFailure(err.message) : "writer_busy";
+      // resume_failed is thrown only from the thread/resume (or thread/fork) request, before any turn/start: an owner's turn whose
+      // resume was refused for a reason no rule names starts fresh and keeps the stored binding (rule 6).
+      const refusal = !runReq.unattended && err.code === "resume_failed" && classified === "resume_failed_before_turn" ? "resume_refused" : classified;
       if (!runReq.unattended && refusal !== "writer_busy" && !attendedTurnStartsFresh(refusal, conversationCarried())) throw err;
       freshReason = refusal;
       events.onStatus(unattendedFreshSessionStatus(KIND, freshReason));

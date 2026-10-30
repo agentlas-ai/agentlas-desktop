@@ -12,7 +12,7 @@ import {
 import os from "node:os";
 import path from "node:path";
 import { pluginSlugForToolId, supersededByLivePeer } from "../plugins/builtin";
-import { MCP_TOOL_CATALOG } from "./catalog";
+import { MCP_TOOL_CATALOG, refreshDedicatedPluginToolCatalog } from "./catalog";
 import { installFromCatalog, listInstalledServers } from "./registry";
 import { testServerConnection, requiredMcpManualEnvKeys } from "./client";
 import { resolveMcpOAuthAccessToken } from "./oauth";
@@ -299,7 +299,16 @@ const DEFAULT_AUTO_SELECT_DEPS: AutoSelectMcpDependencies = {
       : server.catalogId === "agentlas-browser" || server.catalogId === "playwright" ? 20_000 : 12_000,
   }),
   resolveNeeds: resolveMcpNeeds,
-  listPluginCandidates: () => listInstalledPluginCandidates(),
+  listPluginCandidates: () => {
+    const plugins = listInstalledPluginCandidates();
+    // A process that has not run the startup seed (the desktop daemon, which hosts Science turns) holds no dedicated
+    // plugin tool rows until its first MCP config build, so its first turn routed a plugin's skills without the plugin's
+    // tools (real app 2026-10-28, Science + agentlas-structural-biology). Load the installed rows before routing.
+    if (plugins.some((plugin) => plugin.toolIds.some((id) => !MCP_TOOL_CATALOG.some((entry) => entry.id === id)))) {
+      try { refreshDedicatedPluginToolCatalog(); } catch { /* routing proceeds with the rows it has */ }
+    }
+    return plugins;
+  },
 };
 
 // Tool selection is decided by resolveMcpNeeds() (electron/mcp-tools/need-resolver.ts),

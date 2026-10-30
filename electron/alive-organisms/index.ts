@@ -1,4 +1,5 @@
 import { AliveOwnerIntentGate, DurableAliveOwnerIntents, type DurableAliveOwnerIntent } from "./owner-intent";
+import { oneTeamDispatchAllowedFor } from "../one/team-dispatch";
 import { isAppControlEvent } from "../app-control/ipc-registry";
 import { emitGoalControlChange } from "../goal-control-events";
 /**
@@ -354,6 +355,8 @@ function createAgiMonitor(): AgiGoalMonitor {
       childChatIds: (chatId) => (getDb().prepare("SELECT id FROM chats WHERE parent_chat_id = ? ORDER BY updated_at DESC LIMIT 200").all(chatId) as Array<{ id: string }>).map((row) => row.id),
       continuationParkedForOwner,
       pendingApproval: (chatId) => listPendingToolApprovals().some((request) => request.chatId === chatId),
+      // Only One's own conversation hands work to teammates; a Work room's team calls are refused one-team-depth-limit.
+      teamAvailable: (chatId) => oneTeamDispatchAllowedFor(chatId),
     }, goalId),
     onChanged: (goalId) => {
       const run = getLongRunByGoalId(goalId);

@@ -10,8 +10,8 @@ import { outsideInvocationJudgmentContext } from "../runtime/judgment-context";
 import { memoryNoteToEvent } from "../memory/events";
 import { recordTurnAsk, recordTurnMemoryNote, turnNotesKey, TURN_ASK_LIMIT, TURN_MEMORY_NOTE_LIMIT } from "./notes";
 import { parseAskFenceBody, type AgentlasAskQuestion } from "../../shared/ask-fence-flatten";
-import { GOAL_PLAN_LINE_LIMIT, recordGoalCompleteSignal, recordGoalPlanLine, recordGoalWaitSignal, validateGoalWaitIntent } from "./goal-signals";
-import { extractGoalPlanMarkers } from "../../shared/goal-shape";
+import { completionText, fitWaitNextAction, GOAL_PLAN_LINE_LIMIT, readGoalWaitArgs, recordGoalCompleteSignal, recordGoalPlanLine, recordGoalWaitSignal, resolveKpiSampleId, validateGoalWaitIntent } from "./goal-signals";
+import { explainMalformedGoalMarker, extractGoalPlanMarkers } from "../../shared/goal-shape";
 import { extractAgentStrategyMarkers } from "../../shared/agent-strategy";
 import { stripGoalCompleteMarker } from "../hephaestus/loop-engineering";
 import { goalCompleteMarkerText } from "./goal-signals";
@@ -170,6 +170,21 @@ export function harnessArgs(a: Record<string, unknown>): Record<string, unknown>
   return {};
 }
 
+/** harness_search result-size hints; the first one present is read as the number of items to return (1-60). */
+const HARNESS_SEARCH_LIMIT_KEYS = ["limit", "maxResults", "max_results", "top_k", "topK", "count"] as const;
+/** harness_describe detail switches: the answer always carries the whole schema; `live` is read for a tool id (tool.describe live). */
+const HARNESS_DESCRIBE_DETAIL_KEYS = ["includeSchema", "include_schema", "schema", "verbose", "full", "detail", "details", "live"] as const;
+
+/** The result-size hint of a harness_search call as an integer 1-60, or null when it carries none that reads as a number. */
+export function harnessSearchLimit(a: Record<string, unknown>): number | null {
+  for (const key of HARNESS_SEARCH_LIMIT_KEYS) {
+    const value = a[key];
+    const n = typeof value === "number" ? value : typeof value === "string" && value.trim() ? Number(value) : NaN;
+    if (Number.isFinite(n) && n >= 1) return Math.min(60, Math.floor(n));
+  }
+  return null;
+}
+
 /**
  * The top-level keys each harness tool reads. `declared` are the ones its schema lists (turn-tools/mcp-server.ts); `ids` are
  * the keys that carry the operation or item id, in the order harnessId reads them, and `containers` the keys that carry the
@@ -180,10 +195,14 @@ export function harnessArgs(a: Record<string, unknown>): Record<string, unknown>
  * required argument never complains about a missing one, so that wrong answer was silent. One rule here serves every runtime:
  * they all reach this handler through the same child.
  */
-const HARNESS_TOOL_KEYS: ReadonlyMap<string, { operationId: string; declared: readonly string[]; ids: readonly string[]; containers: readonly string[] }> = new Map([
-  ["harness_search", { operationId: "search", declared: ["query", "kind"], ids: [], containers: [] }],
-  ["harness_describe", { operationId: "describe", declared: ["id"], ids: ["id", "operationId", "operation", "name"], containers: [] }],
-  ["harness_call", { operationId: "", declared: ["operation", "args"], ids: ["operation", "operationId", "id", "name"], containers: ["args", "input", "arguments"] }],
+const HARNESS_TOOL_KEYS: ReadonlyMap<string, { operationId: string; declared: readonly string[]; ids: readonly string[]; containers: readonly string[]; accepted: readonly string[] }> = new Map([
+  // `accepted`: keys a model adds that cannot change which items or which operation the call means, and that the handler either
+  // honours (a result-size hint: limit) or already satisfies (describe always returns the full schema). They were refused
+  // arguments_misplaced although nothing they said was lost by reading the call without them (harness_search {limit:8},
+  // harness_describe {includeSchema:true}, 6 failures in 7 days). A key that could narrow or redirect a call stays refused.
+  ["harness_search", { operationId: "search", declared: ["query", "kind"], ids: [], containers: [], accepted: HARNESS_SEARCH_LIMIT_KEYS }],
+  ["harness_describe", { operationId: "describe", declared: ["id"], ids: ["id", "operationId", "operation", "name"], containers: [], accepted: HARNESS_DESCRIBE_DETAIL_KEYS }],
+  ["harness_call", { operationId: "", declared: ["operation", "args"], ids: ["operation", "operationId", "id", "name"], containers: ["args", "input", "arguments"], accepted: [] }],
 ]);
 /** Most unknown names a refusal spells out, and the longest one; a request can carry thousands of keys of any length. */
 const HARNESS_UNKNOWN_SHOWN = 5;
@@ -220,7 +239,7 @@ export function harnessArgumentsRefusal(tool: string, a: Record<string, unknown>
     operationId: tool === "harness_call" ? harnessId(a, keys.ids) : keys.operationId,
     status: "refused", reason, next, receiptId: `hr_${randomUUID()}`,
   });
-  const known = new Set([...keys.declared, ...keys.ids, ...keys.containers]);
+  const known = new Set([...keys.declared, ...keys.ids, ...keys.containers, ...keys.accepted]);
   const unknown = Object.keys(a).filter((key) => !known.has(key));
   const usedId = harnessId(a, keys.ids);
   for (const key of keys.ids) if (typeof a[key] === "string" && (a[key] as string).trim() && (a[key] as string).trim() !== usedId) unknown.push(key);
@@ -257,6 +276,16 @@ export function harnessCallFailureCode(operation: unknown, result: unknown): str
 
 const RESULT_IMAGE_LIMIT = 4;
 const RESULT_IMAGE_MAX_BYTES = 5 * 1024 * 1024;
+/** Raw bytes of all images in one reply (base64 adds a third). document.render hands back up to four 1280 px PNGs. */
+const RESULT_IMAGES_TOTAL_MAX_BYTES = 12 * 1024 * 1024;
+/**
+ * The most one reply to the agentlas-turn child may weigh on the wire. It stays under the child's own cap (mcp-server.ts
+ * MAX_RESPONSE_BYTES, 32 MiB), which used to be the 768 KiB request cap: a reply with two slide images already crossed it and the call
+ * failed as "Turn tool response is too large." instead of reaching the model. A reply over this bound is cut here, in order:
+ * the image blocks first (the JSON names every capture's path, so nothing is lost), then the text itself.
+ */
+export const TURN_RESPONSE_MAX_BYTES = 24 * 1024 * 1024;
+const TURN_TEXT_PREVIEW_CHARS = 400_000;
 
 /**
  * A harness_call whose app.call answer held images (app-control/service.ts saveResultImages saved each as a host capture
@@ -274,6 +303,7 @@ export function harnessResultWithImages(operation: unknown, result: unknown): un
   let root: string;
   try { root = fs.realpathSync.native(observationCaptureDir()); } catch { return result; }
   const blocks: Array<{ type: "image"; data: string; mimeType: string }> = [];
+  let imageBytes = 0;
   for (const image of listed.slice(0, RESULT_IMAGE_LIMIT)) {
     const { file, mediaType } = (image && typeof image === "object" ? image : {}) as { file?: unknown; mediaType?: unknown };
     if (typeof file !== "string" || (mediaType !== "image/png" && mediaType !== "image/jpeg")) continue;
@@ -281,10 +311,32 @@ export function harnessResultWithImages(operation: unknown, result: unknown): un
       const real = fs.realpathSync.native(file);
       const stat = fs.statSync(real);
       if (path.dirname(real) !== root || !stat.isFile() || stat.size === 0 || stat.size > RESULT_IMAGE_MAX_BYTES) continue;
+      // An image that would take the reply past the total stays a path in the JSON; later, smaller ones may still fit.
+      if (imageBytes + stat.size > RESULT_IMAGES_TOTAL_MAX_BYTES) continue;
+      imageBytes += stat.size;
       blocks.push({ type: "image", data: fs.readFileSync(real).toString("base64"), mimeType: mediaType });
     } catch { /* a capture that is gone is still named in the JSON */ }
   }
   return blocks.length ? { content: [{ type: "text", text: JSON.stringify(result) }, ...blocks] } : result;
+}
+
+/**
+ * The reply that goes on the wire, never heavier than TURN_RESPONSE_MAX_BYTES. `wire` is `result` with image blocks, or
+ * `result` itself. An over-size reply loses its image blocks first; if the text alone is still over, it is replaced by a
+ * bounded preview that says it was cut (and how big it was), so the model gets an answer it can act on, not a transport error.
+ */
+export function fitTurnResponse(wire: unknown, result: unknown): unknown {
+  let size: number;
+  try { size = Buffer.byteLength(JSON.stringify(wire) ?? "null", "utf8"); } catch { return wire; }
+  if (size <= TURN_RESPONSE_MAX_BYTES) return wire;
+  let plain: string;
+  try { plain = JSON.stringify(result) ?? "null"; } catch { return wire; }
+  if (Buffer.byteLength(plain, "utf8") <= TURN_RESPONSE_MAX_BYTES) return result;
+  const head = result && typeof result === "object" ? result as Record<string, unknown> : {};
+  return { schemaVersion: head.schemaVersion ?? "agentlas.harness-result.v1", ...(typeof head.operationId === "string" ? { operationId: head.operationId } : {}),
+    status: "ok", truncated: true, bytes: Buffer.byteLength(plain, "utf8"),
+    preview: plain.slice(0, TURN_TEXT_PREVIEW_CHARS),
+    next: "the reply was larger than one tool answer can carry; this is its first part. Ask for a narrower slice (a range, a page, a smaller limit)." };
 }
 
 // Constant-time, like the computer-use and workspace-preview control servers: a local process (or a DNS-rebound page)
@@ -308,19 +360,24 @@ export async function handleTurnToolsControlRequest(request: Record<string, unkn
   switch (request.operation) {
     case "goal_wait": {
       if (!binding.tools?.includes("goal_wait")) throw new Error("turn-tools-operation-invalid");
-      const a = request.args && typeof request.args === "object" && !Array.isArray(request.args) ? request.args as Record<string, unknown> : null;
+      let a = request.args && typeof request.args === "object" && !Array.isArray(request.args) ? request.args as Record<string, unknown> : null;
       const refuse = (reason: string): never => { throw new Error(`${reason}: ${GOAL_WAIT_HINTS[reason] ?? "The wait was not registered."}`); };
       if (!a) return refuse("goal_wait_request_invalid");
-      const allowed = ["subject_kind", "condition", "invocation_run_id", "chat_id", "artifact_id", "automation_id", "not_before", "next_action", "deadline"];
-      const unknown = Object.keys(a).find((key) => !allowed.includes(key));
-      if (unknown) throw new Error(`goal_wait_unknown_field: ${unknown}.${didYouMean(unknown, allowed)}`);
+      // Names and shapes read as a person would (goal-signals.ts readGoalWaitArgs); a field this tool does not take is left out and reported.
+      const read = readGoalWaitArgs(a);
+      const ignoredFields = read.ignored;
+      a = read.args;
       // Only the fields of the chosen subject kind may be present: the parser refuses unknown subject keys.
       const subjectFields: Record<string, string[]> = { invocation: ["invocation_run_id", "chat_id"], artifact: ["artifact_id"], automation: ["automation_id"], timer: ["not_before"] };
       const kind = typeof a.subject_kind === "string" ? a.subject_kind : "";
       const own = subjectFields[kind];
       if (!own) throw new Error(`goal_wait_subject_unsupported: ${invalidValueMessage("subject_kind", a.subject_kind, Object.keys(subjectFields))} ${GOAL_WAIT_HINTS.goal_wait_subject_unsupported}`);
-      const stray = ["invocation_run_id", "chat_id", "artifact_id", "automation_id", "not_before"].find((key) => a[key] !== undefined && !own.includes(key));
-      if (stray) throw new Error(`goal_wait_subject_field_mismatch: ${stray} does not belong to subject_kind ${kind}. ${GOAL_WAIT_HINTS.goal_wait_subject_unsupported}`);
+      // A field of another subject kind beside a complete subject of the chosen kind (a timer wait that also carries the chat_id it was
+      // made in, 3 in 7 days) says nothing the subject needs: the kind is explicit and its own fields are all there, so the stray one is
+      // left out. Only a subject missing its own field stays refused, where the stray field makes the intended kind ambiguous.
+      const strays = ["invocation_run_id", "chat_id", "artifact_id", "automation_id", "not_before"].filter((key) => a[key] !== undefined && !own.includes(key));
+      const ownMissing = own.filter((key) => a[key] === undefined);
+      if (strays.length && ownMissing.length) throw new Error(`goal_wait_subject_field_mismatch: ${strays[0]} does not belong to subject_kind ${kind}. ${GOAL_WAIT_HINTS.goal_wait_subject_unsupported}`);
       const subject: Record<string, unknown> = { kind };
       if (kind === "invocation") { subject.invocationRunId = a.invocation_run_id; subject.chatId = a.chat_id; }
       else if (kind === "artifact") subject.artifactId = a.artifact_id;
@@ -328,7 +385,7 @@ export async function handleTurnToolsControlRequest(request: Record<string, unkn
       else subject.notBefore = a.not_before;
       const validated = validateGoalWaitIntent({
         schemaVersion: "agentlas.goal-wait-intent.v1", subject, condition: a.condition,
-        nextAction: a.next_action, deadline: a.deadline === undefined ? null : a.deadline,
+        nextAction: fitWaitNextAction(a.next_action), deadline: a.deadline === undefined ? null : a.deadline,
       });
       if (!validated.ok) return refuse(validated.reason);
       if (binding.dryRun) return { recorded: false, reason: "dry_run" };
@@ -349,15 +406,17 @@ export async function handleTurnToolsControlRequest(request: Record<string, unkn
       if (validated.intent.subject.kind === "timer" && !goal.timer.ok) return refuse(goal.timer.reason);
       const outcome = recordGoalWaitSignal(turnNotesKey(binding.chatId, binding.runId), validated.intent);
       if (outcome !== "recorded") throw new Error(`goal_wait_${outcome}: one wait per turn, and not together with goal_complete.`);
-      return { registered: "pending_host", note: "End this turn now; the host registers the wait and wakes this Goal when it is met." };
+      return { registered: "pending_host", note: "End this turn now; the host registers the wait and wakes this Goal when it is met.",
+        ...(ignoredFields.length ? { ignored_fields: ignoredFields.slice(0, 10) } : {}) };
     }
     case "goal_complete": {
       if (!binding.tools?.includes("goal_complete")) throw new Error("turn-tools-operation-invalid");
-      const a = request.args && typeof request.args === "object" && !Array.isArray(request.args) ? request.args as Record<string, unknown> : null;
+      let a = request.args && typeof request.args === "object" && !Array.isArray(request.args) ? request.args as Record<string, unknown> : null;
       if (!a) throw new Error("goal_complete_invalid: arguments must be an object");
-      const unknown = Object.keys(a).find((key) => key !== "evidence" && key !== "summary");
-      if (unknown) throw new Error(`goal_complete_unknown_field: ${unknown}.${didYouMean(unknown, ["evidence", "summary"])}`);
-      for (const key of ["evidence", "summary"]) if (a[key] !== undefined && typeof a[key] !== "string") throw new Error(`goal_complete_invalid: ${key} must be a string`);
+      // Only the evidence is the claim's content: another field (`status`, `confidence`) is left out, and evidence written as a list
+      // or a number is the text it says. goal-signals.ts completionText.
+      const ignoredFields = Object.keys(a).filter((key) => key !== "evidence" && key !== "summary");
+      a = { ...(a.evidence !== undefined ? { evidence: completionText(a.evidence) } : {}), ...(a.summary !== undefined ? { summary: completionText(a.summary) } : {}) };
       if (binding.dryRun) return { recorded: false, reason: "dry_run" };
       const goal = await goalResolver(binding.chatId, Date.now());
       if (!goal) throw new Error("goal_complete_no_goal: No Goal is bound to this chat.");
@@ -365,7 +424,8 @@ export async function handleTurnToolsControlRequest(request: Record<string, unkn
       const claim = stripGoalCompleteMarker(goalCompleteMarkerText(((a.evidence as string | undefined) || (a.summary as string | undefined) || "").trim() || null));
       const outcome = recordGoalCompleteSignal(turnNotesKey(binding.chatId, binding.runId), claim.evidence);
       if (outcome !== "recorded") throw new Error(`goal_complete_${outcome}: a turn either requests a wait or declares completion, once.`);
-      return { declared: true, note: "The host closes the Goal only if its ledger also shows no open work." };
+      return { declared: true, note: "The host closes the Goal only if its ledger also shows no open work.",
+        ...(ignoredFields.length ? { ignored_fields: ignoredFields.slice(0, 10) } : {}) };
     }
     case "goal_tactic":
     case "goal_plan_op":
@@ -374,13 +434,25 @@ export async function handleTurnToolsControlRequest(request: Record<string, unkn
       if (!binding.tools?.includes(operation)) throw new Error("turn-tools-operation-invalid");
       const a = request.args && typeof request.args === "object" && !Array.isArray(request.args) ? request.args as Record<string, unknown> : null;
       if (!a) throw new Error(`${operation}_invalid: arguments must be an object`);
+      // A KPI sample that names its KPI by display name is read as that KPI (or defines one): goal-signals.ts resolveKpiSampleId.
+      let sample = a;
+      if (operation === "goal_kpi") {
+        try {
+          const bound = await goalResolver(binding.chatId, Date.now());
+          if (bound) sample = resolveKpiSampleId(a, (await import("../store/agent-strategy")).listGoalKpis(bound.goalId));
+        } catch { /* the sample is then read as it was sent */ }
+      }
       // The line the text protocol would carry; the unchanged parser decides whether it is well formed.
-      const line = GOAL_PLAN_TOOL_MARKERS[operation] + JSON.stringify(a);
+      const line = GOAL_PLAN_TOOL_MARKERS[operation] + JSON.stringify(sample);
       const parsed = operation === "goal_kpi" ? extractAgentStrategyMarkers(line).kpis.length : (() => {
         const result = extractGoalPlanMarkers(line);
         return operation === "goal_tactic" ? result.tactics.length : result.ops.length;
       })();
-      if (parsed !== 1) throw new Error(`${operation}_invalid: the host could not read this ${operation === "goal_kpi" ? "KPI sample" : operation === "goal_tactic" ? "tactic report" : "plan change"}; check the required fields`);
+      if (parsed !== 1) {
+        // Name the field the parser dropped the marker for (shared/goal-shape.ts explainMalformedGoalMarker); the KPI parser keeps the generic line.
+        const why = operation === "goal_kpi" ? null : explainMalformedGoalMarker(operation, a);
+        throw new Error(`${operation}_invalid: the host could not read this ${operation === "goal_kpi" ? "KPI sample" : operation === "goal_tactic" ? "tactic report" : "plan change"}; ${why ?? "check the required fields"}`);
+      }
       if (binding.dryRun) return { recorded: false, reason: "dry_run" };
       const goal = await goalResolver(binding.chatId, Date.now());
       if (!goal) throw new Error(`${operation}_no_goal: No Goal is bound to this chat.`);
@@ -432,7 +504,9 @@ export async function handleTurnToolsControlRequest(request: Record<string, unkn
         ...(binding.mcpConfigPath ? { mcpConfigPath: binding.mcpConfigPath } : {}) };
       if (operation === "harness_search") {
         const kind = typeof a.kind === "string" ? a.kind as Parameters<typeof harness.searchHarness>[1] : undefined;
-        const items = await harness.searchHarness(typeof a.query === "string" ? a.query.slice(0, 500) : "", kind, ctx);
+        const found = await harness.searchHarness(typeof a.query === "string" ? a.query.slice(0, 500) : "", kind, ctx);
+        const cap = harnessSearchLimit(a);
+        const items = cap === null ? found : found.slice(0, cap);
         // A kind outside the list matches nothing of that kind; say so and name the closest kind, and still answer as before
         // (the search is not re-run with a guessed kind).
         const badKind = typeof a.kind === "string" && a.kind !== "" && !(HARNESS_ITEM_KINDS as readonly string[]).includes(a.kind);
@@ -442,6 +516,11 @@ export async function handleTurnToolsControlRequest(request: Record<string, unkn
       // harness_call {id:"media.listen",args} (harness_search items are {id}) and then {operationId:"media.listen",
       // input:"{…}"} (harness_describe answers {operationId}); both were refused operation_unknown before it found
       // `operation`. The id is the same under any of these keys, and arguments may arrive as an object or a JSON string.
+      // `live: true` on a connector tool id is tool.describe's own switch (the server's current tools and schema digests).
+      if (operation === "harness_describe" && a.live === true) {
+        const liveId = harnessId(a, ["id", "operationId", "operation", "name"]);
+        if (liveId.startsWith("tool:") && !liveId.includes("/")) return harness.callHarnessPort("tool.describe", { toolId: liveId, live: true }, ctx);
+      }
       if (operation === "harness_describe") return harness.describeHarness(harnessId(a, ["id", "operationId", "operation", "name"]), ctx);
       // Cancellation crosses the host boundary; no signal or authority comes from model JSON.
       const checkAdmission = () => {
@@ -488,7 +567,7 @@ export function startTurnToolsControlServer(): Promise<number> {
           // A failed harness call reaches the model and every receipt as an MCP tool error with its typed code.
           const errorCode = harnessCallFailureCode(body.operation, result);
           const imageResults = typeof body.capabilityId === "string" && capabilities.get(body.capabilityId)?.imageResults === true;
-          const wire = errorCode || !imageResults ? result : harnessResultWithImages(body.operation, result);
+          const wire = fitTurnResponse(errorCode || !imageResults ? result : harnessResultWithImages(body.operation, result), result);
           if (!res.destroyed) writeJson(res, 200, { ok: true, result: wire, ...(errorCode ? { isError: true, errorCode } : {}) });
         } catch (error) {
           if (!res.destroyed) writeJson(res, 409, { ok: false, error: error instanceof Error ? error.message : "turn-tool-failed" });

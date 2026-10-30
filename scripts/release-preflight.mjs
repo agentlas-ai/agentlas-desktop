@@ -589,4 +589,5 @@ if (!run(process.execPath, [unanswerableGate], { cwd: root })) {
   fail("unanswerable questions failed: a question the bot never filled in can still reach the user");
 }
 
-console.log(`[release-preflight] PASS — v${pkg.version} satisfies the release contract`);
+console.log(`[release-preflight] PASS — v${pkg.version} passed the release-contract checks run here`);
+console.log("[release-preflight] NOT VERIFIED here: the full private release-tier suite and real Windows/Linux runs");

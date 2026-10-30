@@ -1,4 +1,5 @@
 import type { RunnerFailure } from "./runner";
+import { ollamaModelNamesEqual } from "../../shared/runtime-connect";
 
 /*
  * A model server that answers 5xx is a typed failure, never a prose throw (native-harness 07 G24). The cause is read from
@@ -112,8 +113,8 @@ export async function localModelResident(input: {
   if (input.runtimeKind === "ollama") {
     const value = await probeJson(`${input.host}/api/ps`, input.signal, fetchImpl);
     if (!record(value) || !Array.isArray(value.models)) return null;
-    const names = new Set([model, model.includes(":") ? model : `${model}:latest`]);
-    return value.models.some((row) => record(row) && (names.has(String(row.name)) || names.has(String(row.model))));
+    return value.models.some((row) => record(row) && [row.name, row.model]
+      .some(name => typeof name === "string" && ollamaModelNamesEqual(model, name)));
   }
   if (input.runtimeKind === "lmstudio") {
     const value = await probeJson(`${input.host}/api/v1/models`, input.signal, fetchImpl);

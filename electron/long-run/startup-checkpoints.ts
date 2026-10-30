@@ -472,7 +472,7 @@ export async function resumeLegacyOngoingBlockedGoals(dispatcher: CheckpointStar
           appendLongRunEvent({ runId: id, kind: "run.legacy_lifecycle_startup", actorKind: "host",
             payload: { appInstanceId, status: "claimed", checkpointId: checkpoint.checkpointId,
               invocationRunId: successorRunId } });
-          claimGoalRuntimeSelection(checkpoint, successorRunId);
+          claimGoalRuntimeSelection(checkpoint, successorRunId, continuation.runtimeSelection);
           return { checkpoint, request: { ...request, runId: successorRunId,
             runtimeSelection: continuation.runtimeSelection, userPrompt: continuation.userPrompt } };
         }).immediate();
@@ -685,7 +685,8 @@ export async function resumeSettledGoalCheckpoints(dispatcher: CheckpointStartup
           reason: "checkpoint-startup-resume", expectedVersion: current.version, appInstanceId });
         appendLongRunEvent({ runId: current.id, kind: "run.checkpoint_startup", actorKind: "host",
           payload: { appInstanceId, checkpointId: checkpoint.checkpointId, invocationRunId: successorRunId, status: "claimed" } });
-        claimGoalRuntimeSelection(checkpoint, successorRunId!);
+        // `selection` was prepared before the awaits above: a choice filed since then waits for the next episode.
+        claimGoalRuntimeSelection(checkpoint, successorRunId!, selection);
       })();
       /*
        * 재시작 자동 재개는 그 실행의 런타임을 정확히 복원한다(설계). 그 사이 사람이 대화의 모델을 바꿔 두었다면

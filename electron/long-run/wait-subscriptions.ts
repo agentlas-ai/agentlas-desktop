@@ -540,6 +540,36 @@ export function reconcileClaimedGoalWaitsAtStartup(target: GoalWaitHost | null =
   return reconciled;
 }
 
+/**
+ * Whether the successor of a claim may have reached a provider: a live controller attempt, a run event under its id, an attempt
+ * row, or an admission row. Another turn in the same room says nothing about the successor (the owner's own message is the usual
+ * reason the start was refused). The one exception to "any run event counts" is the service's own proof that it dispatched nothing
+ * (its terminal invoke_threw / invoke_failed carries providerDispatched:false or turnDelivery "not-dispatched"): a start refused
+ * before any provider ran leaves its events behind and is still provably unstarted. Any read that fails counts as a trace (the
+ * claim then stays uncertain, as before).
+ */
+function successorLeftStartTrace(successorId: string): boolean {
+  try {
+    const db = getDb();
+    const live = db.prepare(`SELECT 1 FROM long_run_worker_attempts WHERE invocation_run_id = ? AND state = 'running' LIMIT 1`).get(successorId);
+    if (live) return true;
+    const terminal = db.prepare(`SELECT kind, payload_json FROM run_events WHERE run_id = ?
+      AND kind IN ('invoke_threw','invoke_failed','invoke_completed','invoke_waiting','invoke_cancelled','invoke_interrupted') ORDER BY seq DESC LIMIT 1`)
+      .get(successorId) as { kind: string; payload_json: string } | undefined;
+    if (terminal) {
+      if (terminal.kind !== "invoke_threw" && terminal.kind !== "invoke_failed") return true;
+      let payload: { providerDispatched?: unknown; turnDelivery?: unknown } = {};
+      try { payload = JSON.parse(terminal.payload_json); } catch { return true; }
+      return !(payload.providerDispatched === false || payload.turnDelivery === "not-dispatched");
+    }
+    if (db.prepare("SELECT 1 FROM run_events WHERE run_id = ? LIMIT 1").get(successorId)) return true;
+    if (db.prepare("SELECT 1 FROM long_run_worker_attempts WHERE invocation_run_id = ? LIMIT 1").get(successorId)) return true;
+    if (db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='invocation_admissions'").get()
+      && db.prepare("SELECT 1 FROM invocation_admissions WHERE run_id = ? LIMIT 1").get(successorId)) return true;
+    return false;
+  } catch { return true; }
+}
+
 /** Scheduler is only the timer. The installed Main service remains the only
  * dispatcher; compare-and-swap snapshots prevent duplicate wakes and Stop races. */
 const RECOVERABLE_RETIRED_WAIT_REASONS = new Set(["goal_wait_pre_dispatch_refused", "goal_wait_dispatch_failed", "goal_wait_deadline"]);
@@ -938,6 +968,10 @@ export async function pollGoalWaitSubscriptions(options: { now?: number; clock?:
         },
         start: () => ({ start: true, runId: target.dispatch(claimed).runId }),
         preStartFailureReason: "goal_wait_pre_dispatch_refused",
+        // The host's call threw (a turn or a queued direction took the room, the owner moved the model between claim and start ...).
+        // When nothing of the successor exists anywhere the start provably never began: retire the claim and let a fresh episode
+        // follow, instead of an "unknown" claim that blocks the sweep, every later wait and the Goal itself until a restart.
+        provablyUnstarted: () => !successorLeftStartTrace(claimed.invocationRunId),
         failureState: expected.episodeRequestId ? "claimed" : "cancelled",
         failureReason: expected.episodeRequestId ? "goal_episode_dispatch_unknown" : "goal_wait_dispatch_failed",
         onStarted: () => recordGoalWake({ runId: expected.runId, chatId: claimed.request.chatId ?? "", source: "wait",
@@ -946,8 +980,12 @@ export async function pollGoalWaitSubscriptions(options: { now?: number; clock?:
       });
       if (!notice || (notice as GoalWaitSubscription).state !== "dispatched") abandonGoalObligationContinuation(claimed.request);
     }
-    // Routine timed cycles are quiet; failures still ask for attention once.
-    if (notice && ownsCandidate(getLongRun(candidate.id))
+    // Routine timed cycles are quiet; failures still ask for attention once. A claim retired because its start never began
+    // (goal_wait_pre_dispatch_refused: the room or the owner moved first) is healed by the fresh episode the host just scheduled: there
+    // is nothing for the owner to confirm, so no "confirmation is needed" notification.
+    const retiredBeforeStart = (notice as GoalWaitSubscription | null)?.state === "cancelled"
+      && (notice as GoalWaitSubscription | null)?.wakeReason === "goal_wait_pre_dispatch_refused";
+    if (notice && !retiredBeforeStart && ownsCandidate(getLongRun(candidate.id))
       && !(wait.intent.subject.kind === "timer" && (notice as GoalWaitSubscription).state === "dispatched")
       && !["paused", "pausing", "cancelling", "cancelled"].includes(getLongRun(candidate.id)?.status ?? "")) attention(notice, target);
   };

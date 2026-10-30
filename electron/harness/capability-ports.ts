@@ -372,23 +372,57 @@ async function storedConnectionReadiness(row: Awaited<ReturnType<typeof connecto
 const CONNECT_PROBE_MS = 15_000;
 
 /** The Agentlas browser's own sign-in record for a site (browser_sessions); never a probe or a page load (21 G5). */
+/**
+ * The site an auth call names. auth.ensure / auth.login read `site`; a model that holds a bare host calls it `domain`
+ * ({operation:"auth.ensure", args:{domain:"studio.youtube.com"}} was refused connector_not_installed 10 times in 7 days:
+ * the value was there, only under another name). The first non-empty of these, in order; an exact `site` always wins.
+ */
+function authSite(args: Record<string, unknown>): string {
+  for (const key of ["site", "domain", "host", "hostname", "url", "origin"]) {
+    const value = str(args[key]);
+    if (value) return value;
+  }
+  return "";
+}
+
 async function browserSessionFor(site: string): Promise<{ site: string; status: "valid" | "expired" | "none" } | null> {
   if (!site) return null;
   try {
     const vault = await import("../store/browser-vault");
     const norm = vault.normalizeSite(/^https?:\/\//i.test(site) ? site : `https://${site}`);
     if (!norm) return null;
-    return { site: norm, status: vault.getBrowserSite(norm)?.session.status ?? "none" };
+    // A sign-in kept for youtube.com is the sign-in of studio.youtube.com: the site is looked up as named, then under each parent
+    // domain that is still a domain (two labels at least). The owner's vault holds youtube.com, so a call that named
+    // studio.youtube.com used to find nothing and report a login the owner had already done.
+    const labels = norm.split(".");
+    for (let at = 0; labels.length - at >= 2; at += 1) {
+      const candidate = labels.slice(at).join(".");
+      const known = vault.getBrowserSite(candidate);
+      if (known) return { site: candidate, status: known.session.status ?? "none" };
+    }
+    return { site: norm, status: "none" };
   } catch {
     return null;
   }
 }
 
 async function findConnector(args: Record<string, unknown>) {
-  const ref = str(args.connectionId) || str(args.connectorId);
+  const ref = str(args.connectionId) || str(args.connectorId) || str(args.connection) || str(args.connector);
   if (!ref) return null;
   const id = ref.replace(/^connector:/, "");
   return (await connectorRows()).find((row) => row.serverId === id || row.catalogId === id) ?? null;
+}
+
+/** The one installed connector whose own origin is exactly the named site's host; null when none or more than one matches. */
+async function findConnectorBySite(site: string) {
+  if (!site) return null;
+  let host: string;
+  try { host = new URL(/^https?:\/\//i.test(site) ? site : `https://${site}`).hostname.toLowerCase(); } catch { return null; }
+  const rows = (await connectorRows()).filter((row) => {
+    if (!row.url) return false;
+    try { return new URL(row.url).hostname.toLowerCase() === host; } catch { return false; }
+  });
+  return rows.length === 1 ? rows[0] : null;
 }
 
 // ── tools ─────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -771,8 +805,11 @@ const PORTS: PortDefinition[] = [
   {
     operationId: "auth.ensure", kind: "job", purpose: "Reuse matching connector OAuth, Vault keys or a signed-in Agentlas browser session (site); report login need.", required: [],
     handler: async (args) => {
-      const browser = await browserSessionFor(str(args.site));
-      const row = await findConnector(args);
+      const site = authSite(args);
+      const browser = await browserSessionFor(site);
+      // A named connection wins; a site with a valid browser sign-in stays on the browser path as before; only a site that has no
+      // sign-in of its own is looked up as the origin of one installed connector.
+      const row = await findConnector(args) ?? (browser?.status === "valid" ? null : await findConnectorBySite(site));
       if (!row) {
         if (!browser) return refused("connector_not_installed", "pass connectionId, or site for a browser sign-in");
         return ok({ site: browser.site, state: browser.status === "valid" ? "ready" : "login_may_be_required", reused: browser.status === "valid" ? "browser_session" : "none",
@@ -790,15 +827,23 @@ const PORTS: PortDefinition[] = [
     },
   },
   {
-    operationId: "auth.login", kind: "job", purpose: "Open login only after usable assets are absent or service requires reauthentication.", required: ["connectionId"],
+    operationId: "auth.login", kind: "job", purpose: "Open login only after usable assets are absent or service requires reauthentication.", required: [],
     handler: async (args, ctx) => {
-      const row = await findConnector(args);
-      if (!row) return refused("connector_not_installed");
+      const site = authSite(args);
+      const row = await findConnector(args) ?? await findConnectorBySite(site);
+      if (!row) {
+        // A site with no connector behind it signs in in the Agentlas browser, the same answer auth.ensure gives; only a call
+        // that names neither a connection nor a site has nothing to log in to.
+        const browser = await browserSessionFor(site);
+        if (!browser) return refused("arguments_missing", "required: connectionId, or site for a browser sign-in");
+        return ok({ site: browser.site, state: browser.status === "valid" ? "ready_in_browser" : "login_may_be_required",
+          ...(browser.status === "valid" ? { note: "signed in in agentlas-browser; no login opened" } : { next: "open the site in agentlas-browser; the owner signs in there" }) });
+      }
       const auth = await connectorAuth(row, "use");
       if (auth.credentialState === "ready") return ok({ connectionId: row.id, state: auth.state, credentialState: auth.credentialState, sessionState: auth.sessionState, note: "usable credentials already exist; no login opened", ...(auth.sessionState !== "enabled" ? { next: "connector.connect explicitly reconnects this exact connection" } : {}) });
       const keyedRoute = await keyedRouteForConnector(row);
       if (keyedRoute) return ok({ connectionId: row.id, state: "ready_via_key", routeId: keyedRoute, note: `the owner's saved key already serves this provider through routeId ${keyedRoute}; no sign-in opened` });
-      const browser = await browserSessionFor(str(args.site));
+      const browser = await browserSessionFor(site);
       if (browser?.status === "valid") return ok({ connectionId: row.id, state: "ready_in_browser", site: browser.site, note: "signed in in agentlas-browser; no login opened" });
       if (row.transport === "stdio" || !row.url) return refused("vault_input_required", `the owner saves ${auth.missingEnv.join(", ") || "the key"} in the Vault input`);
       if (ctx.dryRun) return refused("dry_run");
@@ -907,18 +952,33 @@ const PORTS: PortDefinition[] = [
   {
     operationId: "tool.describe", kind: "query", purpose: "Read exact schema, provider, availability and result/UI contract.", required: ["toolId"],
     handler: async (args, ctx) => {
-      const id = str(args.toolId).replace(/^tool:/, "");
-      const row = (await toolRows()).find((item) => item.providerRef === id);
+      const id = str(args.toolId).replace(/^tool:/, "").replace(/^mcp__/, "");
+      const rows = await toolRows();
+      let row = rows.find((item) => item.providerRef === id);
+      // A tool named the way its MCP name reads (one-team.one_supervisor_steer, one-team__one_supervisor_steer): its connector.
+      let requestedTool: string | null = null;
+      if (!row) {
+        const named = /^([A-Za-z0-9-]+)(?:[./]|__)(.+)$/.exec(id);
+        row = named ? rows.find((item) => item.providerRef === named[1]) : undefined;
+        requestedTool = row && named ? named[2] : null;
+      }
       if (!row) return refused("tool_not_in_catalog");
       const dispatch = await import("./tool-dispatch");
       // A host-channel built-in exists for this call only through the calling run's sealed binding (no launch here).
       const installed = row.enabled ? await dispatch.findServer(row.providerRef) : null;
       const bound = installed ? await dispatch.runScopedBinding(installed, ctx) : null;
-      if (bound && !bound.ok) return { status: "refused", reason: bound.code, next: bound.next, data: { ...row, availability: bound.code } };
+      // Describing is an inert read. A host-channel tool this run does not carry is still a tool with a description: the answer says what
+      // it is and that THIS run cannot call it (availability + next), not a refusal that reads as a failed call (12 in 7 days).
+      // live: true asks for the callable inventory (the server's current tools and digests), which only the run's own sealed binding
+      // can give, so that one stays a typed refusal (and nothing is launched for a run that does not carry the tool).
+      if (bound && !bound.ok) {
+        if (args.live === true) return { status: "refused", reason: bound.code, next: bound.next, data: { ...row, availability: bound.code } };
+        return ok({ ...row, availability: bound.code, next: bound.next, ...(requestedTool ? { requestedTool } : {}) });
+      }
       // Live tool names and schema digests (tool.call requires the digest it was described with).
       // Opt-in (live: true): it starts the server once; plain describe stays inert.
       const live = row.enabled && args.live === true ? await dispatch.describeConnectorTools(row.providerRef, ctx) : null;
-      return ok({ ...row, availability: bound?.ok && bound.prepared ? "attached_to_this_run" : row.enabled ? "attached_when_the_run_needs_it" : row.installed ? "installed_off" : "not_installed",
+      return ok({ ...row, ...(requestedTool ? { requestedTool } : {}), availability: bound?.ok && bound.prepared ? "attached_to_this_run" : row.enabled ? "attached_when_the_run_needs_it" : row.installed ? "installed_off" : "not_installed",
         ...(live?.ok ? { tools: live.tools.map(({ name, description, schemaDigest, inputSchema }) => ({ name, description, schemaDigest, inputSchema })) }
           : live ? { liveState: live.code } : {}),
         next: row.enabled ? "call it by its MCP tool name, or describe with live: true and tool.call with providerRef + schemaDigest" : "connector.connect" });
@@ -1062,9 +1122,18 @@ const PORTS: PortDefinition[] = [
       try {
         // The operation's input arrives as `args` (exact key wins) or `input`, the word its input_schema reads as. Dev
         // 2026-10-17 run8 (Haiku automation): {operation:"automations.listRuns", input:{id}} ran with no id and answered 0 runs.
-        const appArgs = args.args !== undefined ? args.args : args.input;
-        const result = await (await import("../app-control/service")).appControlCall({ ownerTurn: await harnessOwnerTurn(ctx), permission: ctx.permission ?? "read" }, { operation: args.operation, args: appArgs });
-        return ok(result);
+        const appArgs = args.args !== undefined ? args.args : args.input !== undefined ? args.input : args.arguments !== undefined ? args.arguments : args.params;
+        // The call is read the way it was meant before it is judged (app-control/call-aliases.ts): a neighbouring argument
+        // name, `args: []`, a conversation id the call omits, a harness operation named as an app operation. Writes are never
+        // guessed at; the reply lists what was read (`resolved`).
+        const read = (await import("../app-control/call-aliases")).resolveAppCallRequest(args.operation, appArgs, { chatId: ctx.chatId, harnessPorts: new Set(PORT_BY_ID.keys()) });
+        if (read.kind === "port") {
+          const nested = await callHarnessPort(read.port, read.args, ctx);
+          return nested.status === "ok" ? ok(nested.data)
+            : { status: nested.status, reason: nested.reason ?? nested.status, ...(nested.next ? { next: nested.next } : {}), ...(nested.data !== undefined ? { data: nested.data } : {}) };
+        }
+        const result = await (await import("../app-control/service")).appControlCall({ ownerTurn: await harnessOwnerTurn(ctx), permission: ctx.permission ?? "read" }, { operation: read.operation, args: read.args });
+        return ok(read.resolved.length ? { ...result, resolved: read.resolved } : result);
       } catch (error) {
         const code = error && typeof error === "object" && "code" in error ? String((error as { code: unknown }).code) : "operation_failed";
         // 600, not 300: the handler's own text can lead and the argument hint (service.ts withArgumentHints) follows it.
@@ -1259,6 +1328,39 @@ async function harnessOwnerTurn(ctx: HarnessCallContext): Promise<boolean> {
 }
 
 /**
+ * Neighbouring names for an operation's required argument, per operation: the value is there under another name.
+ * Observed in use (failure_events harness_call): thread.read {chatId} and turn.status {} (required threadId), result.read
+ * {ref} (resultRef), tool.describe {providerRef} (toolId) and app.call {op, input} (operation) were each refused arguments_missing.
+ * A chat is a thread, and a read of "the conversation" from inside it means this one. Same rule as withRequiredIdAliases: only
+ * when the real name is absent, only a non-empty string, an exact name always wins; nothing here widens what an operation may touch.
+ */
+const HARNESS_ARGUMENT_ALIASES: Readonly<Record<string, Readonly<Record<string, readonly string[]>>>> = {
+  "app.call": { operation: ["op", "name", "path", "method"] },
+  "thread.read": { threadId: ["chatId", "conversationId"] },
+  "turn.status": { threadId: ["chatId", "conversationId"] },
+  "turn.interrupt": { threadId: ["chatId", "conversationId"] },
+  "turn.start": { threadId: ["chatId", "conversationId"] },
+  "result.read": { resultRef: ["ref", "result", "resultId"] },
+  "tool.describe": { toolId: ["providerRef", "provider"] },
+};
+/** Reads whose thread defaults to the conversation the call is made from. */
+const CURRENT_THREAD_READS: ReadonlySet<string> = new Set(["thread.read", "turn.status"]);
+
+function withHarnessArgumentAliases(operationId: string, args: Record<string, unknown>, ctx: Pick<HarnessCallContext, "chatId">): Record<string, unknown> {
+  const present = (value: unknown): boolean => typeof value === "string" && value.trim() !== "";
+  let out = args;
+  for (const [key, names] of Object.entries(HARNESS_ARGUMENT_ALIASES[operationId] ?? {})) {
+    if (present(out[key])) continue;
+    const alias = names.find((name) => present(out[name]));
+    if (alias) out = { ...out, [key]: out[alias] };
+  }
+  if (CURRENT_THREAD_READS.has(operationId) && !present(out.threadId) && present(ctx.chatId) && ctx.chatId !== "ui") out = { ...out, threadId: ctx.chatId };
+  // A read of a retained result without saying which part is a read of what the tool returned.
+  if (operationId === "result.read" && !present(out.part)) out = { ...out, part: "original" };
+  return out;
+}
+
+/**
  * A required "<x>Id" also arrives as "<x>", or as "id" when it is the operation's only required id. Production 2026-10-17
  * (Yotube room, 1.3.61): skill.read {skill:"motion-explainer-video-producer"} and tool.describe {id:"provider.request"} were
  * refused as arguments_missing although the value was right there, and each refusal cost the model another turn. The
@@ -1299,6 +1401,16 @@ function withReachListingAliases(operationId: string, required: readonly string[
   return out;
 }
 
+/** The app.call arguments for an id that is exactly a model-visible app operation (catalog path), or null when it is not one. */
+async function appOperationCall(id: string, args: Record<string, unknown>): Promise<Record<string, unknown> | null> {
+  if (!id || !id.includes(".")) return null;
+  try {
+    const { APP_CONTROL_CATALOG } = await import("../app-control/catalog.generated");
+    const { appControlOmittedFromModelCatalog } = await import("../app-control/policy");
+    return APP_CONTROL_CATALOG.some((entry) => entry.path === id && !appControlOmittedFromModelCatalog(entry)) ? { operation: id, args } : null;
+  } catch { return null; }
+}
+
 /**
  * `. Did you mean x?` (or nothing) for a refused operation id; hint text only, the refused id is never run as the near one.
  * An id that is exactly an app operation (automations.listRuns) is a call to app.call, not a port: say so.
@@ -1317,6 +1429,17 @@ async function nearOperations(id: string): Promise<string> {
 
 export async function callHarnessPort(operationId: string, rawArgs: Record<string, unknown>, ctx: HarnessCallContext): Promise<HarnessPortResult> {
   const port = PORT_BY_ID.get(operationId);
+  // The value is often there under a neighbouring name (HARNESS_ARGUMENT_ALIASES); every later read of the arguments sees the real one.
+  rawArgs = withHarnessArgumentAliases(operationId, rawArgs, ctx);
+  if (!port) {
+    // An id that is exactly an app operation (invoke.latestReceipt, toolchains.listAssets, document.available) is a call to app.call: it is
+    // run as one, with the sent arguments as the operation's arguments, instead of being refused with the instruction to do just that.
+    const asApp = await appOperationCall(operationId, rawArgs);
+    if (asApp) {
+      const routed = await callHarnessPort("app.call", asApp, ctx);
+      return routed.status === "ok" && routed.data && typeof routed.data === "object" && !Array.isArray(routed.data) ? { ...routed, data: { ...routed.data, routed_from: operationId } } : routed;
+    }
+  }
   const base = { schemaVersion: "agentlas.harness-result.v1" as const, operationId };
   // A misspelled id names the closest operation ids; the refused id is never run as one of them.
   if (!port) return { ...base, status: "refused", reason: "operation_unknown", next: `harness_search with kind "operation" lists them${await nearOperations(operationId)}`, receiptId: `hr_${randomUUID()}` };
@@ -1450,5 +1573,15 @@ export async function describeHarness(id: string, ctx: HarnessCallContext): Prom
   if (ref.startsWith("connector:")) return callHarnessPort("connector.describe", { connectorId: ref }, ctx);
   if (ref.startsWith("tool:")) return callHarnessPort("tool.describe", { toolId: ref }, ctx);
   if (ref.startsWith("agentlas.") || ref.startsWith("check.")) return callHarnessPort("tool.canonical.describe", { canonicalId: ref }, ctx);
+  // An id as harness_search writes some of them ("operation:tool.call"): the operation itself.
+  const bare = ref.replace(/^(?:operation|op):/, "");
+  if (bare !== ref && bare) return describeHarness(bare, ctx);
+  // An app operation (chats.getGoalContext, automations.list): its arguments, schema and effect, the one place app.operations also reads.
+  if (await appOperationCall(ref, {})) {
+    try {
+      const found = await (await import("../app-control/service")).appControlOperations({ operation: ref }) as { operations?: unknown[] };
+      if (found.operations?.length) return { schemaVersion: "agentlas.harness-result.v1", operationId: "describe", status: "ok", data: { ...found, next: `harness_call app.call with {"operation":"${ref}","args":{…}} (the arguments are the operation's input_schema)` }, receiptId: `hr_${randomUUID()}` };
+    } catch { /* the id is then answered as unknown, as before */ }
+  }
   return { schemaVersion: "agentlas.harness-result.v1", operationId: "describe", status: "refused", reason: "id_unknown", next: `use an id returned by harness_search${await nearOperations(ref)}`, receiptId: `hr_${randomUUID()}` };
 }

@@ -305,6 +305,13 @@ function safeRegularProjectFile(identity: RootIdentity, relative: string): boole
 
 export class FirmExecutionEvidenceCollector {
   private readonly rootIdentity: RootIdentity | null;
+  /**
+   * A project folder was named for this run. A global One chat names none: it executes in the app's agent cwd, so there is
+   * no project boundary for a path or a command's cwd to be "outside" of. Observed in 1.3.105: every Codex
+   * `bash` call carries its `cwd`, and with no project that read as `command-cwd-outside-project`, so a team CEO that
+   * answered in full ended as `ceo-failed`. A folder that was named but cannot be verified stays an evidence issue.
+   */
+  private readonly projectNamed: boolean;
   private readonly pending = new Map<string, PendingTool>();
   private readonly artifacts = new Set<string>();
   private readonly deletedArtifacts = new Set<string>();
@@ -315,6 +322,7 @@ export class FirmExecutionEvidenceCollector {
   private successfulCommandCount = 0;
 
   constructor(projectRoot: string | null | undefined) {
+    this.projectNamed = Boolean(projectRoot);
     this.rootIdentity = canonicalRoot(projectRoot);
     if (projectRoot && !this.rootIdentity) this.invalidCodes.add("project-root-unverifiable");
   }
@@ -404,6 +412,7 @@ export class FirmExecutionEvidenceCollector {
   }
 
   private commandCwdInsideProject(rawCwd: string | null): boolean {
+    if (!this.projectNamed) return true;
     if (!this.rootIdentity) return rawCwd === null;
     if (!rawCwd) return rootStable(this.rootIdentity);
     try {
@@ -417,6 +426,8 @@ export class FirmExecutionEvidenceCollector {
   }
 
   private recordProjectArtifact(rawCandidate: string, args: string | undefined, toolName: string): void {
+    // No project folder, no project artifact list: a file written in the agent cwd is real work, not unverifiable evidence.
+    if (!this.projectNamed) return;
     if (!this.rootIdentity || !path.isAbsolute(rawCandidate)) {
       this.invalidCodes.add("artifact-path-unverifiable");
       return;

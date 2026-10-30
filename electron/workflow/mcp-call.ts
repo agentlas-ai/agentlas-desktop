@@ -3,7 +3,9 @@ import type { Chat, McpInvocationEvent } from "../../shared/types";
 import type { McpInvocationResult } from "../mcp/client";
 import type { InvocationWorkspaceBinding } from "../invocation/workspace-binding";
 import { revalidateInvocationWorkspaceBinding } from "../invocation/workspace-binding";
-import { buildMcpConfigFile, type BrowserApprovalScope } from "../mcp-tools/mcp-config";
+import { isKeylessPlaywrightMcpDuplicate, type BrowserApprovalScope } from "../mcp-tools/mcp-config";
+import { buildNativeBrowserMcpConfig } from "../browser/native-mcp-config";
+import { listInstalledServers } from "../mcp-tools/registry";
 import { mcpToolIsMutating } from "../mcp-tools/proxy-server";
 import { isReadOnlyGraphBrowserObservation } from "../../shared/graph-browser-observation";
 import { READ_ONLY_BROWSER_TOOLS } from "../../shared/read-only-browser-tools";
@@ -106,6 +108,14 @@ function graphBrowserApprovalScope(chatId: string): BrowserApprovalScope {
   return Object.freeze({ surface, chatId });
 }
 
+/** Match only the same unconfigured aliases the config builder canonicalizes.
+ * A custom profile, endpoint or credential keeps its owner's explicit binding. */
+function graphUsesNativeBrowser(catalogId: string): boolean {
+  return catalogId === "agentlas-browser" || listInstalledServers().some(server => server.enabled
+    && (server.catalogId === catalogId || server.id === catalogId)
+    && (server.catalogId === "agentlas-browser" || isKeylessPlaywrightMcpDuplicate(server)));
+}
+
 /** Inventory is read from the same prepared Main binding used for dispatch.
  * No tool is invoked and no remote definition is accepted as an authority. */
 export async function inspectGraphMcpTools(input: {
@@ -114,18 +124,25 @@ export async function inspectGraphMcpTools(input: {
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(input.catalogId)) throw new Error("graph_mcp_catalog_invalid");
   input.signal?.throwIfAborted();
   const workingFolder = getChatWorkingFolder(input.chat.id);
-  const config = await buildMcpConfigFile({ catalogIds: [input.catalogId], requiredToolCatalogIds: [input.catalogId],
-    skipDefaultSeed: true, configKey: `graph-inventory-${randomUUID()}`,
+  const inventoryId = `graph-inventory-${randomUUID()}`;
+  const nativeBrowser = graphUsesNativeBrowser(input.catalogId);
+  const config = await buildNativeBrowserMcpConfig({ catalogIds: [input.catalogId], requiredToolCatalogIds: [input.catalogId],
+    skipDefaultSeed: true, configKey: inventoryId,
+    ...(nativeBrowser ? { browserProfileKey: `automation-${inventoryId}` } : {}),
     ...(workingFolder ? { workingFolder } : {}),
     toolGate: { runtime: "graph-mcp", sessionKey: `graph-inventory:${randomUUID()}`, permission: input.permission,
       cwd: workingFolder ?? agentRunCwd(), chatId: input.chat.id, unattended: true,
       approvalScope: graphBrowserApprovalScope(input.chat.id) },
-    admissionCurrent: () => !input.signal?.aborted });
+    admissionCurrent: () => !input.signal?.aborted }, nativeBrowser ? {
+      chatId: input.chat.id, runId: inventoryId, permission: input.permission,
+      signal: input.signal ?? new AbortController().signal, presentation: "background",
+    } : null);
   if (!config) throw new Error("graph_mcp_catalog_unavailable");
   try {
     const inventory = await loadMainToolInventory(config.configPath, undefined, input.permission, false, false, input.signal);
     let schemaBytes = 0;
-    const tools = [...inventory.byName].filter(([, tool]) => tool.kind === "mcp" && tool.server.catalogId === input.catalogId)
+    const tools = [...inventory.byName].filter(([, tool]) => tool.kind === "mcp"
+      && (tool.server.catalogId === input.catalogId || nativeBrowser && tool.server.catalogId === "agentlas-browser"))
       .slice(0, 128).map(([name, tool]) => {
         if (tool.kind !== "mcp") throw new Error("graph_mcp_binding_invalid");
         const shape = inventory.tools.find(def => def.function.name === name)?.function.parameters;
@@ -205,19 +222,23 @@ export async function runGraphMcpCall(input: GraphMcpCallOptions): Promise<Graph
   const cwd = workingFolder ?? agentRunCwd();
   const permission = input.dryRun || input.effect !== "mutation" ? "read" : input.permission;
   const sessionKey = `graph-mcp:${input.runId}:${input.nodeId}:${randomUUID()}`;
-  const config = await buildMcpConfigFile({ catalogIds: [raw.catalogId], requiredToolCatalogIds: [raw.catalogId], turnRunId: input.runId,
+  const nativeBrowser = graphUsesNativeBrowser(raw.catalogId);
+  const config = await buildNativeBrowserMcpConfig({ catalogIds: [raw.catalogId], requiredToolCatalogIds: [raw.catalogId], turnRunId: input.runId,
     skipDefaultSeed: true, configKey: sessionKey, admissionCurrent: () => {
       try { assertCurrent(); return true; } catch { return false; }
     }, ...(workingFolder ? { workingFolder } : {}), browserProfileKey: `automation-${input.automationId}`,
     toolGate: { runtime: "graph-mcp", sessionKey, permission, cwd, chatId, unattended: true,
       approvalScope: graphBrowserApprovalScope(chatId),
-      ...(input.dryRun ? { simulation: true } : {}), ...(permission === "read" ? { readOnlyObservation: true } : {}) } });
+      ...(input.dryRun ? { simulation: true } : {}), ...(permission === "read" ? { readOnlyObservation: true } : {}) } },
+    nativeBrowser ? { chatId, runId: input.runId, permission,
+      signal: input.signal, presentation: "background" } : null);
   if (!config) throw new Error("graph_mcp_catalog_unavailable");
   try {
     assertCurrent();
     const inventory = await loadMainToolInventory(config.configPath, undefined, permission, false, false, input.signal);
     const matches = [...inventory.byName].filter(([, tool]) => tool.kind === "mcp"
-      && tool.server.catalogId === raw.catalogId && tool.serverToolName === raw.toolName);
+      && (tool.server.catalogId === raw.catalogId || nativeBrowser && tool.server.catalogId === "agentlas-browser")
+      && tool.serverToolName === raw.toolName);
     if (matches.length !== 1) throw new Error(matches.length ? "graph_mcp_tool_ambiguous" : "graph_mcp_tool_unavailable");
     const [toolName, tool] = matches[0];
     if (tool.kind !== "mcp") throw new Error("graph_mcp_binding_invalid");

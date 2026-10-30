@@ -95,6 +95,16 @@ function validateItem(value: unknown): void {
     }
   }
 }
+/**
+ * The refusal stays exactly codex_no_tools_frame_unknown. Only machine tokens leave this function (never frame content): which of the four
+ * checks refused and the frame's own type string when it is a plain identifier, so a provider frame we have not allowlisted is named in
+ * main.log the first time it appears (dreaming consolidation 2026-10-26 x2 and 10-29 refused with no way to tell which frame).
+ */
+function unknownFrame(frame: Record<string, any> | null, reason: "not_object" | "type" | "event_mismatch" | "after_terminal" | "metadata_payload"): Error {
+  const type = typeof frame?.type === "string" && /^[A-Za-z0-9_.-]{1,64}$/.test(frame.type) ? frame.type : "unprintable";
+  try { console.warn(`[codex-no-tools] frame refused reason=${reason} type=${type}`); } catch { /* diagnostics never change the refusal */ }
+  return new Error("codex_no_tools_frame_unknown");
+}
 /** Complete buffering is essential: not one unvalidated frame reaches Codex's native dispatcher. */
 export function validateCodexNoToolsResponse(body: string): string {
   const normalized = body.replace(/\r\n/g, "\n");
@@ -110,10 +120,10 @@ export function validateCodexNoToolsResponse(body: string): string {
     const frame = object(JSON.parse(data));
     const event = lines.find(line => line.startsWith("event:"))?.slice(6).trim();
     if (!frame || !FRAME_TYPES.has(frame.type) || (event && event !== frame.type) || terminal) {
-      throw new Error("codex_no_tools_frame_unknown");
+      throw unknownFrame(frame, !frame ? "not_object" : !FRAME_TYPES.has(frame.type) ? "type" : (event && event !== frame.type) ? "event_mismatch" : "after_terminal");
     }
     if (frame.type === "response.metadata" && (frame.item !== undefined || frame.part !== undefined || frame.response !== undefined)) {
-      throw new Error("codex_no_tools_frame_unknown");
+      throw unknownFrame(frame, "metadata_payload");
     }
     if (frame.item !== undefined) validateItem(frame.item);
     if (frame.type === "response.output_item.done" && frame.item?.type === "message") completedMessages.push(frame.item);

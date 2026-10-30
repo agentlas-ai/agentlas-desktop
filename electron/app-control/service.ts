@@ -13,6 +13,7 @@ import { appUiPreferenceDefinitions, isAppUiPreferenceName, normalizeAppUiPrefer
 import { closestNames, invalidValueMessage, nameSimilarity, schemaArgumentHints, unknownArgumentMessage } from "../../shared/did-you-mean";
 import { decodeAppControlArguments } from "./argument-codec";
 import { remoteAppControlCall, remoteAppControlOperations } from "./daemon-remote";
+import { APP_CALL_ANSWER_WINDOW_MS, answerAppCallWithin, appCallKey, appCallPendingNotice } from "./pending-calls";
 import { saveObservationCaptureArtifact } from "../media/capture-artifacts";
 
 // One's app-control route: find an operation, then call it as the owner's own screens would. The catalog is generated
@@ -207,8 +208,15 @@ export type AppControlOperationsResult = {
 export function appControlOperations(input: OperationsInput): AppControlOperationsResult | Promise<AppControlOperationsResult> {
   return host ? appControlOperationsLocal(input) : remoteAppControlOperations(input, appControlOperationsLocal);
 }
-export async function appControlCall(caller: AppControlCaller, input: AppControlCallInput): Promise<Record<string, unknown>> {
-  return host ? appControlCallLocal(caller, input) : remoteAppControlCall(caller, input);
+export async function appControlCall(caller: AppControlCaller, input: AppControlCallInput, answerWindowMs: number = APP_CALL_ANSWER_WINDOW_MS): Promise<Record<string, unknown>> {
+  if (!host) return remoteAppControlCall(caller, input);
+  // The window process answers within the model's tool timeout: an operation that runs longer (automations.runNow awaits the whole
+  // run) keeps running here and the same call asked again joins it or receives its result (app-control/pending-calls.ts).
+  const operation = typeof input.operation === "string" ? input.operation.trim() : "";
+  const key = appCallKey({ via: "router", kind: "call", operation, args: input.args, scope: typeof input.scope?.chatId === "string" ? input.scope.chatId : null,
+    ownerTurn: caller.ownerTurn === true, permission: effectiveInvocationPermission(caller.permission, false) });
+  return answerAppCallWithin(key, () => appControlCallLocal(caller, input), answerWindowMs,
+    () => appCallPendingNotice(operation) as unknown as Record<string, unknown>);
 }
 
 export function appControlOperationsLocal(input: OperationsInput): AppControlOperationsResult {

@@ -4,12 +4,19 @@
  * The renderer refreshes on store:changed {chat|long-run} — no polling.
  */
 import type { IpcMain, IpcMainInvokeEvent } from "electron";
-import { editGoalPanel, readGoalPanel, requestGoalPanelShape } from "./long-run/goal-panel";
+import { editGoalPanel, healGoalPanelPlan, readGoalPanel, requestGoalPanelShape } from "./long-run/goal-panel";
 import { invocationService } from "./invocation/service";
 
 export function registerGoalPanelIpc(deps: { ipc: Pick<IpcMain, "handle">; assertTrustedSender: (event: IpcMainInvokeEvent) => unknown }): void {
   const ipcMain = deps.ipc;
-  ipcMain.handle("goalPanel:view", (event, chatId: unknown) => { deps.assertTrustedSender(event); return typeof chatId === "string" && chatId ? readGoalPanel(chatId) : null; });
+  ipcMain.handle("goalPanel:view", (event, chatId: unknown) => {
+    deps.assertTrustedSender(event);
+    if (typeof chatId !== "string" || !chatId) return null;
+    const view = readGoalPanel(chatId);
+    // A revised goal's plan is re-divided now instead of at the next turn (long-run/goal-panel.ts healGoalPanelPlan); once per revision.
+    if (view?.planBehindRevision) void healGoalPanelPlan(chatId);
+    return view;
+  });
   ipcMain.handle("goalPanel:edit", (event, request: unknown) => { deps.assertTrustedSender(event);
     return editGoalPanel(request, { activeChatIds: () => invocationService.activeChatIds() }); });
   ipcMain.handle("goalPanel:shape", (event, chatId: unknown, expectedGoalId: unknown) => {

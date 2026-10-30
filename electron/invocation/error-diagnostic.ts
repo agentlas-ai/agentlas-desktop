@@ -5,7 +5,7 @@ import { redactOperationalSecrets } from "./event-secret-redaction";
 const nativeStackGetter = Object.getOwnPropertyDescriptor(new Error(), "stack")?.get;
 
 export interface InvocationErrorDiagnosticContext {
-  phase: "completion-chain-catch" | "undispatched-start";
+  phase: "completion-chain-catch" | "undispatched-start" | "runner-catch-all";
   executionSource?: string;
   runtimeKind?: string;
   scienceProjectId?: string;

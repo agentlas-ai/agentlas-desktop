@@ -1494,6 +1494,7 @@ const api: AgentlasIpc = {
   },
   invoke: {
     steerCurrentTurn: (input) => ipcRenderer.invoke("invoke:steerCurrentTurn", input),
+    followupCustodyVersion: () => ipcRenderer.invoke("invoke:followupCustodyVersion"),
     currentTurnSteerReceipt: (input) => ipcRenderer.invoke("invoke:currentTurnSteerReceipt", input),
     currentTurn: (chatId) => ipcRenderer.invoke("invoke:currentTurn", chatId),
     run: (req: McpInvocationRequest) => ipcRenderer.invoke("invoke:run", req),

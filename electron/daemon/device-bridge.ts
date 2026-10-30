@@ -41,7 +41,7 @@ export function deviceStateSnapshot(value: unknown): DeviceStateSnapshot {
 export interface DeviceTransport { request(frame: DeviceFrame): Promise<unknown> }
 type Pending = { reject(error: DeviceBridgeError): void; timer: ReturnType<typeof setTimeout> };
 
-export function createDaemonDeviceBridge(options: { now?: () => number; newRequestId?: () => string; deadlineMs?: number } = {}) {
+export function createDaemonDeviceBridge(options: { now?: () => number; newRequestId?: () => string; deadlineMs?: number; appControlDeadlineMs?: number } = {}) {
   let transport: DeviceTransport | null = null, owner: object | null = null;
   let snapshot: DeviceStateSnapshot = { session: "unknown", idleSeconds: null, observedAt: new Date(0).toISOString() };
   const pending = new Set<Pending>();
@@ -141,7 +141,7 @@ export function createDaemonDeviceBridge(options: { now?: () => number; newReque
     /** One's app-control (one_app_operations / one_app_call) belongs to Main: it owns the IPC handlers and the owner's windows.
      * Main answers with an outcome, never an exception, so an app-control error keeps its code and text. */
     async appControl(input: { kind: "operations" | "call"; ownerTurn: boolean; permission?: "read" | "write" | "full"; input: Record<string, unknown> }): Promise<{ outcome: "value"; value: unknown } | { outcome: "error"; code: string; message: string }> {
-      const reply = await ask("appControl", { kind: input.kind, ownerTurn: input.ownerTurn, permission: input.permission ?? "read", input: input.input }, APP_CONTROL_DEADLINE_MS);
+      const reply = await ask("appControl", { kind: input.kind, ownerTurn: input.ownerTurn, permission: input.permission ?? "read", input: input.input }, options.appControlDeadlineMs ?? APP_CONTROL_DEADLINE_MS);
       if (reply.outcome === "value") return { outcome: "value", value: reply.value };
       if (reply.outcome === "error" && typeof reply.code === "string" && typeof reply.message === "string") return { outcome: "error", code: reply.code, message: reply.message };
       throw new DeviceBridgeError("device_bridge_refused", "app_control_reply_invalid");

@@ -58,17 +58,29 @@ function keepAcceptedResumeOwned(chatId: string, goalId: string, requestRunId: s
   }
 }
 
+/** Run `attempt` at the Goal's current version; when a host event moves the version under it (the one conflict that says nothing
+ * about the Goal's state), read the version again and repeat, a few times. Any other refusal is returned as it is. */
+const RESUME_VERSION_ATTEMPTS = 3;
+async function withFreshVersion<T>(current: () => number, attempt: (version: number) => T | Promise<T>): Promise<T> {
+  for (let n = 0; ; n += 1) {
+    try { return await attempt(current()); }
+    catch (error) {
+      if (n + 1 >= RESUME_VERSION_ATTEMPTS || !(error instanceof Error) || error.message !== "long_run_resume_version_conflict") throw error;
+    }
+  }
+}
+
 export async function resumeGoalAsOwner(input: { chatId: string; expectedGoalId: string; expectedVersion: number | null },
   dispatcher: GoalOwnerResumeDispatcher): Promise<GoalOwnerResumeOutcome> {
   const { chatId, expectedGoalId } = input;
   if (!expectedGoalId || getChat(chatId)?.goalId !== expectedGoalId) throw new Error("goal_control_binding_changed");
-  let fence = input.expectedVersion ?? getLongRunByGoalId(expectedGoalId)?.version ?? 0;
-  if (!getChatGoalRevision(expectedGoalId)) {
-    const before = getLongRunByGoalId(expectedGoalId);
-    const adopted = adoptExplicitGoalGrant(expectedGoalId, undefined, { ownerResume: true });
-    const after = getLongRunByGoalId(expectedGoalId);
-    if (adopted && before && after && before.version === fence) fence = after.version;
-  }
+  // The press is the owner's instruction to continue THIS Goal (the id above fences it). The version the button was drawn
+  // with is advisory: any host event (a sweep re-stamp, usage accounting, a wait note) moves it between the paint and the
+  // press, and refusing on that made the Work cockpit answer "press resume once more" for a Goal that was plainly stopped
+  // (the phone already passes null). The version is read here, and again if it moves under this call.
+  const currentVersion = (): number => getLongRunByGoalId(expectedGoalId)?.version ?? 0;
+  // Adopting the owner's grant appends one ledger event; the version is read again afterwards.
+  if (!getChatGoalRevision(expectedGoalId)) adoptExplicitGoalGrant(expectedGoalId, undefined, { ownerResume: true });
   const run = getLongRunByGoalId(expectedGoalId);
   if (!run) return "no_run";
   if (!getChatGoalRevision(expectedGoalId)) throw Object.assign(new Error("goal_owner_grant_required"), { code: "goal_owner_grant_required" });
@@ -80,11 +92,10 @@ export async function resumeGoalAsOwner(input: { chatId: string; expectedGoalId:
       return queueOwnerHeldGoalForResume({ runId: run.id, appInstanceId: desktopAppInstanceId() }) ? "queued_after_turn" : "not_stopped";
     }
     if (run.status !== "paused" && run.status !== "blocked") return "not_stopped";
-    resumeDesktopLongRunManually(run.id, fence);
-    return "queued_after_turn";
+    return withFreshVersion(currentVersion, (version) => { resumeDesktopLongRunManually(run.id, version); return "queued_after_turn" as const; });
   }
   const revision = getChatGoalRevision(expectedGoalId);
-  const { request, queued } = await queueAutomaticGoalResume(chatId, fence);
+  const { request, queued } = await withFreshVersion(currentVersion, (version) => queueAutomaticGoalResume(chatId, version));
   try {
     if (revision) acknowledgeGoalExecutionResume({ goalId: expectedGoalId, rootChatId: chatId, expectedRevision: revision.revision });
     confirmDesktopLongRunResumeDispatched(queued.id);

@@ -47,9 +47,12 @@ export function isSensitiveApp(app: Pick<ActuatorApp, "name" | "bundleId">): boo
 
 // An app whose own scripting interface (a published capability) Reach never calls. The screen-driving screen above applies to the scripting
 // path too: Terminal's `do script` runs a shell command and Mail's message bodies are declared reads, so a run's write ceiling or read-only
-// grant would otherwise be the only fence. Finder is the one app the scripting path keeps (its dictionary is the documented real-app case,
-// ARCHITECTURE §13.20); driving Finder's screen stays off limits.
-const PUBLISHED_ALLOWED_BUNDLES = new Set(["com.apple.finder"]);
+// grant would otherwise be the only fence. Finder (its dictionary is the documented real-app case, ARCHITECTURE §13.20) and the four personal
+// organiser apps keep the scripting path: Calendar, Reminders, Notes and Contacts publish their dictionaries for exactly this, each capability
+// is classified read or write and the run's permission decides it, and the repair that closed Terminal and Mail had also closed these four for
+// "read tomorrow's events" / "add a reminder" (regression review 2026-10-28, R2-D18-F3). Browsers, messengers, mail, system tools and
+// terminals stay off limits here. Driving any of these apps' screens stays off limits above.
+const PUBLISHED_ALLOWED_BUNDLES = new Set(["com.apple.finder", "com.apple.iCal", "com.apple.reminders", "com.apple.Notes", "com.apple.AddressBook"]);
 export function isPublishedOffLimits(app: Pick<ActuatorApp, "name" | "bundleId">): boolean {
   if (app.bundleId !== undefined && PUBLISHED_ALLOWED_BUNDLES.has(app.bundleId)) return false;
   return isSensitiveApp(app);

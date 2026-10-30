@@ -111,7 +111,7 @@ export function withModelCallScope<T>(scope: ModelCallScope, fn: () => T): T {
   const parent = scopes.getStore();
   const merged: ModelCallScope = { ...parent };
   for (const [key, value] of Object.entries(scope)) if (value !== undefined) (merged as Record<string, unknown>)[key] = value;
-  return withMemorySourceScope(scope, () => scopes.run(merged, fn));
+  return withMemorySourceScope(scope, () => scopes.run(merged, fn), { ownerTurnRoot: scope.role === "main" });
 }
 export function currentModelCallScope(): ModelCallScope | undefined { return scopes.getStore(); }
 

@@ -68,7 +68,8 @@ export function withOneRuntimeSelection(
 ): RuntimeStatus {
   const profile = model ? runtime.allocationModelProfiles?.[model] : undefined;
   const supported = profile?.efforts;
-  const effort = supported === undefined
+  // Null is the owner's explicit Default choice; undefined keeps existing default behavior.
+  const effort = requestedEffort === null ? null : supported === undefined
     ? requestedEffort ?? runtime.effort ?? null
     : requestedEffort && supported.includes(requestedEffort)
       ? requestedEffort
@@ -95,7 +96,7 @@ export function chipRuntimeFor(runtimes: readonly RuntimeStatus[], pin: RuntimeS
   return withOneRuntimeSelection(
     { ...matched, active: true, longContextEnabled: selection?.longContext ?? matched.longContextEnabled },
     selection ? selection.model ?? null : matched.model ?? null,
-    selection?.effort ?? (selection?.model ? undefined : matched.effort),
+    pin ? pin.effort ?? null : selection?.effort ?? (selection?.model ? undefined : matched.effort),
   );
 }
 
@@ -129,4 +130,14 @@ export async function adoptStoredOneRuntimeOnce(api: ChatPinApi, chatId: string,
   }
   mark();
   return updated.runtimeSelection;
+}
+
+/** Explicit effort is an exact user choice, never a request for a fallback. */
+export function assertOneExplicitEffort(runtime: RuntimeStatus, model: string | null, effort: string | null): void {
+  if (!effort) return;
+  const supported = (model ? runtime.allocationModelProfiles?.[model]?.efforts : undefined)
+    ?? runtime.efforts?.map(item => item.id);
+  if (!supported?.includes(effort)) {
+    throw Object.assign(new Error("runtime_selection_effort_unsupported"), { code: "runtime_selection_effort_unsupported" });
+  }
 }

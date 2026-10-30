@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Structural Biology">
+  <rect width="64" height="64" rx="15" fill="#1F6F8B"/>
+  <path d="M18 14c14 6 14 14 0 20s-14 14 0 20M46 14c-14 6-14 14 0 20s14 14 0 20" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round"/>
+  <path d="M22 22h20M22 46h20M24 34h16" stroke="#BDE7F2" stroke-width="2.5" stroke-linecap="round"/>
+  <circle cx="32" cy="34" r="4.5" fill="#FFD166"/>
+</svg>

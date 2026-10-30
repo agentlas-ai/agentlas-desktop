@@ -231,12 +231,18 @@ function hashFd(sourceFd: number, maxBytes: number): { size: number; digest: `sh
   return { size: offset, digest: `sha256:${hash.digest("hex")}` };
 }
 
-function stableDirectorySnapshot(sourceRoot: string, targetRoot?: string): { size: number; digest: `sha256:${string}`; entries: number } {
+function stableDirectorySnapshot(sourceRoot: string, targetRoot?: string, expectedRoot?: SourceIdentity): { size: number; digest: `sha256:${string}`; entries: number } {
   const aggregate = createHash("sha256");
   let totalBytes = 0;
   let entries = 0;
   if (targetRoot) fs.mkdirSync(targetRoot, { mode: 0o700 });
-  const visit = (sourceDir: string, targetDir: string | null) => {
+  const visit = (sourceDir: string, targetDir: string | null, expected?: SourceIdentity) => {
+    let before: fs.BigIntStats;
+    try { before = fs.lstatSync(sourceDir, { bigint: true }); }
+    catch { throw new OneAttachmentError("changed_source", "A folder disappeared while it was read."); }
+    if (before.isSymbolicLink() || !before.isDirectory() || (expected && !identitiesEqual(statIdentity(before), expected))) {
+      throw new OneAttachmentError("changed_source", "A folder changed while it was read.");
+    }
     let names: string[];
     try { names = fs.readdirSync(sourceDir).sort((left, right) => left.localeCompare(right, "en")); }
     catch { throw new OneAttachmentError("stale_grant", "The approved folder could not be read."); }
@@ -246,15 +252,15 @@ function stableDirectorySnapshot(sourceRoot: string, targetRoot?: string): { siz
       if (Buffer.byteLength(relative, "utf8") > ONE_ATTACHMENT_LIMITS.maxRelativePathBytes) {
         throw new OneAttachmentError("invalid_request", `A folder entry path is too long: ${relative.slice(0, 120)}`);
       }
-      let stat: fs.Stats;
-      try { stat = fs.lstatSync(source); }
+      let stat: fs.BigIntStats;
+      try { stat = fs.lstatSync(source, { bigint: true }); }
       catch { throw new OneAttachmentError("changed_source", `A folder entry disappeared: ${relative}`); }
       if (stat.isSymbolicLink()) throw new OneAttachmentError("unsupported_type", `Symbolic links are not supported in folder attachments: ${relative}`);
       if (stat.isDirectory()) {
         aggregate.update(`D\u0000${relative}\n`, "utf8");
         const nextTarget = targetDir ? path.join(targetDir, name) : null;
         if (nextTarget) fs.mkdirSync(nextTarget, { mode: 0o700 });
-        visit(source, nextTarget);
+        visit(source, nextTarget, statIdentity(stat));
         continue;
       }
       if (!stat.isFile()) throw new OneAttachmentError("unsupported_type", `Unsupported folder entry: ${relative}`);
@@ -262,21 +268,36 @@ function stableDirectorySnapshot(sourceRoot: string, targetRoot?: string): { siz
       if (entries > ONE_ATTACHMENT_LIMITS.maxDirectoryEntries) {
         throw new OneAttachmentError("too_many", `A folder attachment may contain at most ${ONE_ATTACHMENT_LIMITS.maxDirectoryEntries} files.`);
       }
-      totalBytes += stat.size;
-      if (totalBytes > ONE_ATTACHMENT_LIMITS.maxTotalBytes) throw new OneAttachmentError("too_large", "The folder attachment exceeds One's safe total size limit.");
+      const entrySize = Number(stat.size);
+      totalBytes += entrySize;
+      if (!Number.isSafeInteger(entrySize) || totalBytes > ONE_ATTACHMENT_LIMITS.maxTotalBytes) throw new OneAttachmentError("too_large", "The folder attachment exceeds One's safe total size limit.");
       const opened = openStableRegularFile(source);
       try {
+        if (!identitiesEqual(statIdentity(stat), opened.identity)) throw new OneAttachmentError("changed_source", `A folder entry changed while it was opened: ${relative}`);
         const measured = targetDir
           ? copyAndHashFd(opened.fd, path.join(targetDir, name), ONE_ATTACHMENT_LIMITS.maxFileBytes)
           : hashFd(opened.fd, ONE_ATTACHMENT_LIMITS.maxFileBytes);
-        if (measured.size !== stat.size) throw new OneAttachmentError("changed_source", `A folder entry changed while it was read: ${relative}`);
+        let finalStat: fs.BigIntStats;
+        try { finalStat = fs.lstatSync(source, { bigint: true }); }
+        catch { throw new OneAttachmentError("changed_source", `A folder entry disappeared while it was read: ${relative}`); }
+        if (finalStat.isSymbolicLink() || !finalStat.isFile() || measured.size !== entrySize
+          || !identitiesEqual(statIdentity(finalStat), opened.identity)
+          || !identitiesEqual(statIdentity(fs.fstatSync(opened.fd, { bigint: true })), opened.identity)) {
+          throw new OneAttachmentError("changed_source", `A folder entry changed while it was read: ${relative}`);
+        }
         aggregate.update(`F\u0000${relative}\u0000${measured.size}\u0000${measured.digest}\n`, "utf8");
       } finally {
         fs.closeSync(opened.fd);
       }
     }
+    let after: fs.BigIntStats;
+    try { after = fs.lstatSync(sourceDir, { bigint: true }); }
+    catch { throw new OneAttachmentError("changed_source", "A folder disappeared while it was read."); }
+    if (after.isSymbolicLink() || !after.isDirectory() || !identitiesEqual(statIdentity(after), statIdentity(before))) {
+      throw new OneAttachmentError("changed_source", "A folder changed while it was read.");
+    }
   };
-  visit(sourceRoot, targetRoot ?? null);
+  visit(sourceRoot, targetRoot ?? null, expectedRoot);
   return { size: totalBytes, entries, digest: `sha256:${aggregate.digest("hex")}` };
 }
 
@@ -307,14 +328,9 @@ function createSafeRunDirectory(resultFolder: string, runId: string): string {
       fs.mkdirSync(directory, { mode: 0o700 });
     }
   }
-  const staleBefore = Date.now() - ONE_ATTACHMENT_LIMITS.capabilityTtlMs;
-  for (const name of fs.readdirSync(attachmentsDir)) {
-    const candidate = path.join(attachmentsDir, name);
-    try {
-      const stat = fs.lstatSync(candidate);
-      if (!stat.isSymbolicLink() && stat.isDirectory() && stat.mtimeMs < staleBefore) safeRemove(candidate);
-    } catch {}
-  }
+  // A run may still be using its staged attachments after the capability TTL.
+  // Directory age alone does not establish ownership or that a run has ended.
+  // The owning attachment record removes its directory when the run is released.
   const runDir = path.join(attachmentsDir, runId.replace(/[^A-Za-z0-9._-]/g, "_"));
   if (fs.existsSync(runDir)) throw new OneAttachmentError("already_used", "This run already has an attachment staging directory.");
   fs.mkdirSync(runDir, { mode: 0o700 });
@@ -444,7 +460,7 @@ export function prepareOneAttachments(input: PrepareOneAttachmentsInput): Prepar
         const stagedName = `${String(index + 1).padStart(2, "0")}-${originalName}`;
         usedNames.add(stagedName.toLowerCase());
         const pendingPath = path.join(pendingDir, stagedName);
-        const copied = stableDirectorySnapshot(sourcePath, pendingPath);
+        const copied = stableDirectorySnapshot(sourcePath, pendingPath, statIdentity(rootStat));
         totalBytes += copied.size;
         if (totalBytes > ONE_ATTACHMENT_LIMITS.maxTotalBytes) throw new OneAttachmentError("too_large", "The selected attachments exceed One's safe total size limit.");
         const safe: OneAttachmentSafeItem = {
@@ -534,18 +550,46 @@ function revalidatePreparedItem(item: PreparedItemRecord): void {
     let currentStat: fs.BigIntStats;
     try { currentStat = fs.lstatSync(currentPath, { bigint: true }); }
     catch { throw new OneAttachmentError("changed_source", "The approved folder is no longer available."); }
-    if (currentStat.isSymbolicLink() || !currentStat.isDirectory() || !identitiesEqual(statIdentity(currentStat), item.identity)) {
+    const currentIdentity = statIdentity(currentStat);
+    // Directory timestamps can change without changing the selected object or
+    // its contents. Bind to the same directory and verify the snapshot instead.
+    if (currentStat.isSymbolicLink() || !currentStat.isDirectory()
+      || currentIdentity.dev !== item.identity.dev || currentIdentity.ino !== item.identity.ino
+      || currentIdentity.size !== item.identity.size || currentIdentity.mode !== item.identity.mode) {
       throw new OneAttachmentError("changed_source", "A folder attachment changed after it was selected.");
     }
-    const current = stableDirectorySnapshot(currentPath);
-    if (current.size !== item.safe.size || current.digest !== item.safe.digest) throw new OneAttachmentError("changed_source", "A folder attachment's contents changed after it was selected.");
+    const current = stableDirectorySnapshot(currentPath, undefined, currentIdentity);
+    const finalPath = pathFromGrant(item.grant, expectedKind);
+    if (finalPath !== item.sourcePath) throw new OneAttachmentError("changed_source", "The approved attachment path changed.");
+    let finalStat: fs.BigIntStats;
+    try { finalStat = fs.lstatSync(finalPath, { bigint: true }); }
+    catch { throw new OneAttachmentError("changed_source", "The approved folder changed while it was read."); }
+    if (finalStat.isSymbolicLink() || !finalStat.isDirectory()
+      || !identitiesEqual(statIdentity(finalStat), currentIdentity)
+      || current.size !== item.safe.size || current.digest !== item.safe.digest) {
+      throw new OneAttachmentError("changed_source", "A folder attachment's contents changed after it was selected.");
+    }
     return;
   }
   const opened = openStableRegularFile(currentPath);
   try {
-    if (!identitiesEqual(opened.identity, item.identity)) throw new OneAttachmentError("changed_source", "An attachment changed after it was selected.");
+    // Metadata timestamps may change without changing the selected object or
+    // its contents. Keep the object binding and verify the bytes instead of
+    // treating a timestamp-only change as a different attachment.
+    if (opened.identity.dev !== item.identity.dev || opened.identity.ino !== item.identity.ino
+      || opened.identity.size !== item.identity.size || opened.identity.mode !== item.identity.mode) {
+      throw new OneAttachmentError("changed_source", "An attachment changed after it was selected.");
+    }
     const current = hashFd(opened.fd, item.safe.kind === "image" ? ONE_ATTACHMENT_LIMITS.maxImageBytes : ONE_ATTACHMENT_LIMITS.maxFileBytes);
-    if (current.size !== item.safe.size || current.digest !== item.safe.digest) {
+    const finalPath = pathFromGrant(item.grant, expectedKind);
+    if (finalPath !== item.sourcePath) throw new OneAttachmentError("changed_source", "The approved attachment path changed.");
+    let finalStat: fs.BigIntStats;
+    try { finalStat = fs.lstatSync(finalPath, { bigint: true }); }
+    catch { throw new OneAttachmentError("changed_source", "The approved attachment changed while it was read."); }
+    if (finalStat.isSymbolicLink() || !finalStat.isFile()
+      || !identitiesEqual(statIdentity(finalStat), opened.identity)
+      || !identitiesEqual(statIdentity(fs.fstatSync(opened.fd, { bigint: true })), opened.identity)
+      || current.size !== item.safe.size || current.digest !== item.safe.digest) {
       throw new OneAttachmentError("changed_source", "An attachment's contents changed after it was selected.");
     }
   } finally {

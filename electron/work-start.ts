@@ -13,6 +13,8 @@ import { bindManagedWorkingSessionScope } from './runtime/session-scope';
 import { getCanonicalTaskForChat } from './store/tasks';
 import { listInstalledAgentsReadOnly } from './mcp/registry';
 import { detectRuntimes } from './runtime/detect';
+import { getAuthenticatedSessionBinding, onAuthSessionOwnershipChanged } from './auth';
+import { onManagedOneOwnershipChanged } from './managed-one/auth';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 type Row = { intent_id: string; input_digest: string; project_id: string; chat_id: string; task_id: string; prompt_text: string; options_json: string; runtime_selection_json: string; status: WorkStartReceipt['status']; claim_token: string | null; error_code: string | null };
@@ -67,17 +69,35 @@ function replayWorkingReceipt(row: Row): WorkStartReceipt {
   return receipt(confirmed);
 }
 /** Only persists local project/chat/task intent. Actual provider execution stays in the existing Work send authority. */
-export async function createWorkStart(raw: WorkStartInput, detect = detectRuntimes): Promise<WorkStartReceipt> {
+export async function createWorkStart(raw: WorkStartInput, detect = detectRuntimes, assertCurrent:()=>void = ()=>{}): Promise<WorkStartReceipt> {
+  assertCurrent();
   const input=normalize(raw), digest=createHash('sha256').update(canonical(input)).digest('hex'),db=getDb();
-  const prior=db.prepare('SELECT * FROM work_start_intents WHERE intent_id=?').get(input.intentId) as Row | undefined;
-  if (prior) { if (prior.input_digest !== digest) throw new Error('work_start_intent_conflict');return replayWorkingReceipt(prior); }
-  const runtimes=await detect();const requested=input.runtimeSelection?normalizeRuntimeSelectionInput(input.runtimeSelection):undefined;
-  const runtime=requested ? runtimes.find(r=>runtimeMatchesSelection(r,requested)) : runtimes.find(r=>r.active);
+  const existing=():WorkStartReceipt|null=>{
+    assertCurrent();
+    const row=db.prepare('SELECT * FROM work_start_intents WHERE intent_id=?').get(input.intentId) as Row | undefined;
+    if (!row) return null;
+    if (row.input_digest !== digest) throw new Error('work_start_intent_conflict');
+    assertCurrent();return replayWorkingReceipt(row);
+  };
+  const prior=existing();if(prior)return prior;
+  const requested=input.runtimeSelection?normalizeRuntimeSelectionInput(input.runtimeSelection):undefined;
+  const choose=(runtimes:RuntimeStatus[])=>requested ? runtimes.find(r=>runtimeMatchesSelection(r,requested)) : runtimes.find(r=>r.active);
+  let runtimes=await detect();assertCurrent();
+  const afterFirst=existing();if(afterFirst)return afterFirst;
+  let runtime=choose(runtimes);
+  // A cached inventory can temporarily omit the selected runtime. Re-probe once without substituting another pin.
+  if(!runtime){
+    runtimes=await detect(true);assertCurrent();
+    const afterRefresh=existing();if(afterRefresh)return afterRefresh;
+    runtime=choose(runtimes);
+  }
   if (!runtime || runtime.credentialAccess?.status === 'unavailable' || runtime.signInRequired) throw new Error('work_start_runtime_unavailable');
   const selection=pin(runtime,input.runtimeSelection);
   const controller=listInstalledAgentsReadOnly().find(a=>a.slug==='agentlas-orchestrator');if (!controller) throw new Error('work_start_orchestrator_unavailable');
   let createdFolder: string | null = null;
+  assertCurrent();
   try { return db.transaction(()=>{
+    assertCurrent();
     const replay=db.prepare('SELECT * FROM work_start_intents WHERE intent_id=?').get(input.intentId) as Row | undefined;
     if (replay) { if (replay.input_digest !== digest) throw new Error('work_start_intent_conflict');return replayWorkingReceipt(replay); }
     const title=input.prompt.replace(/\s+/g,' ').trim().slice(0,80);
@@ -107,6 +127,41 @@ export async function createWorkStart(raw: WorkStartInput, detect = detectRuntim
     throw error;
   }
 }
+
+/** Keep each renderer-owned creation bound to its original sender and account across detection waits. */
+export async function createWorkStartForSender(
+  input:WorkStartInput,
+  event:IpcMainInvokeEvent,
+  assertTrustedSender:(event:IpcMainInvokeEvent)=>unknown,
+  assertScope:()=>void = ()=>{},
+):Promise<WorkStartReceipt> {
+  assertTrustedSender(event);assertScope();
+  const original=getAuthenticatedSessionBinding();
+  const controller=new AbortController();
+  const sameOwner=()=>{
+    const now=getAuthenticatedSessionBinding();
+    return !original ? !now : Boolean(now && now.workspaceId===original.workspaceId && now.userId===original.userId && now.sessionId===original.sessionId);
+  };
+  const ownerChanged=()=>{if(!sameOwner())controller.abort(new Error('work_start_owner_changed'));};
+  const senderClosed=()=>controller.abort(new Error('work_start_origin_closed'));
+  const offAuth=onAuthSessionOwnershipChanged(ownerChanged);
+  const offManaged=onManagedOneOwnershipChanged(ownerChanged);
+  let listening=false;
+  try {
+    event.sender.once('destroyed',senderClosed);listening=true;
+    const assertCurrent=()=>{
+      if(controller.signal.aborted)throw controller.signal.reason;
+      assertTrustedSender(event);
+      if(!sameOwner()){controller.abort(new Error('work_start_owner_changed'));throw controller.signal.reason;}
+      assertScope();
+    };
+    const result=await createWorkStart(input,(force)=>detectRuntimes(force,controller.signal),assertCurrent);
+    // A committed intent may already exist if the owner changed after its transaction; never return it to a new owner.
+    assertCurrent();return result;
+  } finally {
+    offAuth();offManaged();if(listening)event.sender.removeListener('destroyed',senderClosed);
+  }
+}
 export function getWorkStart(input: Parameters<WorkStartAPI['get']>[0]): WorkStartReceipt { exactKeys(input,['intentId','chatId']);return receipt(owned(input.intentId,input.chatId)); }
 export function claimWorkStart(input: Parameters<WorkStartAPI['claim']>[0]): { receipt: WorkStartReceipt; claimToken: string | null } {
   exactKeys(input,['intentId','chatId']);return getDb().transaction(()=>{ const row=owned(input.intentId,input.chatId);replayWorkingReceipt(row);if(row.status!=='queued')return {receipt:receipt(row),claimToken:null};if(canonical(getChat(input.chatId)?.runtimeSelection)!==canonical(storedPin(row.runtime_selection_json)))throw new Error('work_start_runtime_binding_changed');const token=randomUUID();getDb().prepare("UPDATE work_start_intents SET status='claimed',claim_token=?,updated_at=? WHERE intent_id=? AND status='queued'").run(token,new Date().toISOString(),row.intent_id);return {receipt:receipt(owned(input.intentId,input.chatId)),claimToken:token}; }).immediate();
@@ -116,7 +171,7 @@ export function settleWorkStart(input: Parameters<WorkStartAPI['settle']>[0]): W
   return getDb().transaction(()=>{const row=owned(input.intentId,input.chatId);if(row.status==='claimed'&&row.claim_token===input.claimToken)getDb().prepare("UPDATE work_start_intents SET status=?,error_code=?,claim_token=NULL,updated_at=? WHERE intent_id=?").run(input.accepted?'accepted':'failed',input.accepted?null:'work_start_not_admitted',new Date().toISOString(),row.intent_id);return receipt(owned(input.intentId,input.chatId));}).immediate();
 }
 export function registerWorkStartIpc({ipc,assertTrustedSender}:{ipc:Pick<IpcMain,'handle'>;assertTrustedSender:(event:IpcMainInvokeEvent)=>BrowserWindow}):void {
-  ipc.handle('workStart:create',(event,input:WorkStartInput)=>{assertTrustedSender(event);return createWorkStart(input)});
+  ipc.handle('workStart:create',(event,input:WorkStartInput)=>createWorkStartForSender(input,event,assertTrustedSender));
   ipc.handle('workStart:get',(event,input:Parameters<WorkStartAPI['get']>[0])=>{assertTrustedSender(event);return getWorkStart(input)});
   ipc.handle('workStart:claim',(event,input:Parameters<WorkStartAPI['claim']>[0])=>{assertTrustedSender(event);return claimWorkStart(input)});
   ipc.handle('workStart:settle',(event,input:Parameters<WorkStartAPI['settle']>[0])=>{assertTrustedSender(event);return settleWorkStart(input)});

@@ -254,12 +254,18 @@ export function insertGoalPlanNode(plan: Pick<LiveGoalPlan, "goalId" | "revision
 export { tacticPayload as goalPlanTacticPayload };
 
 /** Main-only exact compare-and-apply. The callback is synchronous local work, never provider/network work. */
-export function withCurrentGoalPlan<T>(goalId: string, expectedIdentity: string, apply: (plan: LiveGoalPlan) => T): T {
+export function withCurrentGoalPlan<T>(goalId: string, expectedIdentity: string, apply: (plan: LiveGoalPlan) => T,
+  /**
+   * The plan moved since `expectedIdentity` was taken (any node write moves it: an owner panel edit, an AGI hint, another
+   * branch's report). When the caller can show, from the CURRENT plan, that what its work names is unchanged, it returns
+   * true and the work applies to the current plan by node id instead of being dropped as stale. Runs inside the transaction.
+   */
+  stillValid?: (current: LiveGoalPlan) => boolean): T {
   const db = getDb();
   // IMMEDIATE like saveGoalPlan: it reads the current plan, then the callback writes its decision (every Goal turn).
   return db.transaction(() => {
     const current = readGoalPlan(goalId);
-    if (!current || current.mutationIdentity !== expectedIdentity) throw new Error("goal_plan_stale");
+    if (!current || (current.mutationIdentity !== expectedIdentity && !(stillValid && stillValid(current)))) throw new Error("goal_plan_stale");
     const revisionTable = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='chat_goal_revisions'").get();
     if (revisionTable) {
       const latest = db.prepare("SELECT MAX(revision) revision FROM chat_goal_revisions WHERE goal_id=?").get(goalId) as { revision: number | null };

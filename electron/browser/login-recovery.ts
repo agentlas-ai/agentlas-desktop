@@ -18,14 +18,12 @@
  *
  * 순서(각 단계는 타입 있는 사건으로 남는다 — AGI/진단이 나중에 읽는다):
  *   0) detected      — 주소가 로그인 벽. 저장소의 세션 쿠키 유무를 함께 적는다.
- *   1) targeted-reimport — 그 사이트 + 신원 제공자 도메인만, 에이전트가 **실제로 쓴 저장소**에,
- *                      원본이 이기게(그 도메인에 한해). 3일 주기 안에서도 허용하되 도메인당 N분에 1회.
- *                      다시 읽기 → 재판정.
+ *   1) targeted-reimport — 기존 로그인이 없는 저장소에만 동의된 사이트와 신원 제공자 쿠키를 넣는다.
+ *                      기존·부분 로그인이나 읽기 불가는 보존한다. 도메인당 N분에 1회, 실제 페이지를 재검증한다.
  *   2) store-check   — 두 저장소의 세션 쿠키 수를 비교. 쓰는 쪽이 비었고 다른 쪽에 있으면 그건 우리
  *                      결함이다 → 쓰는 쪽을 채운다 → 다시 읽기 → 재판정.
- *   3) source-check  — 원본(평소 크롬)의 세션 쿠키가 없거나 만료됐으면 오너가 크롬에서도 로그아웃된
- *                      것이다. 그때, 그리고 그때만 오너에게 **한 번** 묻는다. 원본이 살아 있는데도
- *                      사이트가 거절하면 남은 수단이 없으므로 같은 카드를 다른 사유 코드로 한 번 낸다.
+ *   3) source-check  — 원본 및 대상의 상태와 페이지 확인 결과를 구분한다. 쿠키의 존재나 URL만으로
+ *                      사이트가 로그인을 수락했다고 판단하지 않는다.
  *   4) owner-card    — 사이트당 하나. 세션이 생기면(이벤트) 목표를 스스로 이어 간다.
  *
  * 안전: 비밀번호·Login Data 는 읽지 않는다. 비밀번호를 치지 않는다. 쿠키 값은 이 파일을 지나지 않는다.
@@ -37,7 +35,8 @@ import type {
   SessionCookieEvidence,
   SourceSessionState,
 } from "./login-wall";
-import { detectLoginWall, evaluateSessionCookies, evaluateSourceSession, signInUrlFor, siteDisplayName } from "./login-wall";
+import { automaticRecoveryDestination, detectLoginWall, evaluateSessionCookies, evaluateSourceSession,
+  isGoogleAuthenticationTransition, signInUrlFor, siteDisplayName } from "./login-wall";
 import { createHash, randomUUID } from "node:crypto";
 
 export const LOGIN_RECOVERY_EVENT_SCHEMA = "agentlas.login-recovery.v1" as const;
@@ -61,6 +60,11 @@ export type LoginRecoveryReason =
   | "source-missing"
   | "source-expired"
   | "source-rejected-by-site"
+  | "destination-protected"
+  | "destination-unreadable"
+  | "authentication-transition"
+  | "site-auth-unverified"
+  | "import-effect-unknown"
   | "store-mismatch"
   | "store-consistent"
   | "import-failed"
@@ -103,7 +107,7 @@ export interface VaultFillReport {
 }
 
 export interface TargetedImportReport {
-  state: "imported" | "not-consented" | "failed" | "unsupported";
+  state: "imported" | "not-consented" | "failed" | "unsupported" | "destination-protected" | "destination-unreadable" | "effect-unknown";
   /** 실제로 쓴 쿠키 수(값 없음). */
   written: number;
 }
@@ -111,7 +115,7 @@ export interface TargetedImportReport {
 export interface OwnerLoginCard {
   site: string;
   surface: BrowserCookieSurface;
-  reason: Extract<LoginRecoveryReason, "source-missing" | "source-expired" | "source-rejected-by-site" | "second-factor-required">;
+  reason: Extract<LoginRecoveryReason, "source-missing" | "source-expired" | "source-rejected-by-site" | "second-factor-required" | "destination-protected" | "destination-unreadable" | "site-auth-unverified">;
   signInUrl: string;
   /** 오너에게 보이는 한 줄. */
   message: { ko: string; en: string };
@@ -132,12 +136,16 @@ export interface LoginRecoveryContext {
   surface: BrowserCookieSurface;
   /** 에이전트가 서 있는 페이지를 다시 읽고, 다시 읽은 뒤의 주소를 돌려준다. */
   reload: () => Promise<string | null>;
+  /** Optional host-owned evidence that the actual Google/YouTube page is signed in. */
+  verifyAuthenticated?: (input: { site: string; url: string; returnUrl?: string | null }) => Promise<boolean>;
   /** 이 실행에 알림을 붙인다(카드 포함). 실행이 끝났으면 아무것도 안 해도 된다. */
   notify?: (card: OwnerLoginCard) => void;
   /** 세션이 돌아왔을 때 목표를 이어 간다. */
   resume?: (prerequisite?: LoginPrerequisiteRef) => void;
   onPrerequisiteRestored?: (prerequisite: LoginPrerequisiteRef) => void;
-  retainVerification?: () => { reload: () => Promise<string | null>; current: () => boolean; release: () => void };
+  retainVerification?: () => { reload: () => Promise<string | null>; current: () => boolean; release: () => void;
+    inspectCurrent?: () => Promise<string | null>; verifyAuthenticated?: LoginRecoveryContext["verifyAuthenticated"];
+    watchNavigation?: (onNavigation: () => void) => () => void };
   /** 저장된 자격증명으로 Main 에서 채우고 제출한다(값은 이 파일을 지나지 않는다). 없으면 이 단계는 건너뛴다. */
   vaultFill?: (input: { site: string; domains: string[] }) => Promise<VaultFillReport>;
   /** 이 표면에서 로그인 창을 여는 방법(네이티브: 같은 탭에서 로그인 주소). 없으면 deps.openSignIn. */
@@ -165,9 +173,9 @@ export interface LoginRecoveryDeps {
   readStore: (surface: BrowserCookieSurface, domains: readonly string[]) => Promise<CookieMetadata[] | null>;
   /** 원본(평소 크롬) 쿠키 메타데이터. 값은 읽지 않는다. 못 읽으면 null. */
   readSource: (domains: readonly string[]) => Promise<CookieMetadata[] | null>;
-  /** 승인 범위 안의 도메인만, 원본이 이기게, 지정한 저장소에 넣는다. */
+  /** 승인 범위 안의 도메인만, 기존 로그인이 없는 저장소에 넣는다. */
   targetedImport: (input: { domains: string[]; surface: BrowserCookieSurface; isCurrent?: () => boolean }) => Promise<TargetedImportReport>;
-  /** 한 저장소의 쿠키를 다른 저장소로 옮긴다(가져온 쪽이 이긴다). */
+  /** 기존 로그인이 없는 저장소에만 다른 저장소의 쿠키를 넣는다. */
   feedStore: (input: { from: BrowserCookieSurface; to: BrowserCookieSurface; domains: string[] }) => Promise<TargetedImportReport>;
   /** 로그인 창을 연다(카드의 동작). */
   openSignIn: (card: OwnerLoginCard) => Promise<void>;
@@ -230,11 +238,19 @@ export function ownerLoginCardFor(input: {
   const name = siteDisplayName(input.site);
   const ko = input.reason === "second-factor-required"
     ? `${name} 로그인에 2단계 인증 코드가 필요합니다 — 이 창에서 코드를 한 번 입력해 주세요`
+    : input.reason === "site-auth-unverified"
+      ? `${name}의 로그인 상태를 자동으로 확인하지 못했습니다 — 이 창에서 계정을 확인해 주세요`
+    : input.reason === "destination-protected" || input.reason === "destination-unreadable"
+      ? `${name}의 기존 브라우저 세션을 보존했습니다 — 이 창에서 계정과 로그인 상태를 확인해 주세요`
     : input.reason === "source-rejected-by-site"
       ? `${name} 로그인이 크롬에서 가져온 세션으로도 열리지 않습니다 — 이 창에서 한 번 로그인해 주세요`
       : `${name} 로그인이 크롬에도 없습니다 — 이 창에서 한 번 로그인해 주세요`;
   const en = input.reason === "second-factor-required"
     ? `${name} needs a one-time sign-in code — please enter it once in this window`
+    : input.reason === "site-auth-unverified"
+      ? `Could not verify the ${name} sign-in automatically — please check the account in this window`
+    : input.reason === "destination-protected" || input.reason === "destination-unreadable"
+      ? `The existing ${name} browser session was preserved — please check the account and sign-in in this window`
     : input.reason === "source-rejected-by-site"
       ? `${name} rejected even the session imported from Chrome — please sign in once in this window`
       : `${name} is not signed in in Chrome either — please sign in once in this window`;
@@ -262,7 +278,7 @@ export function createLoginRecoveryLadder(deps: LoginRecoveryDeps): LoginRecover
   const pendingCards = new Map<string, { card: OwnerLoginCard; stop: () => void; resumers: Set<(prerequisite?: LoginPrerequisiteRef) => void> }>();
   const inFlight = new Map<string, Promise<LoginRecoveryOutcome>>();
   type Scope = { key: string; base: string; ctx: LoginRecoveryContext; createdAt: number;
-    verification?: { reload: () => Promise<string | null>; current: () => boolean; release: () => void }; prerequisite?: LoginPrerequisiteRef; signature?: string; pending: boolean; releasePending?: () => void; closed: boolean; stopAbort: () => void; stopExpiration: () => void };
+    verification?: ReturnType<NonNullable<LoginRecoveryContext["retainVerification"]>>; prerequisite?: LoginPrerequisiteRef; signature?: string; pending: boolean; releasePending?: () => void; closed: boolean; stopAbort: () => void; stopExpiration: () => void };
   const scopes = new Map<string, Scope>();
   type ScopedContext = LoginRecoveryContext & { recoveryScope: Scope };
   const current = (ctx: LoginRecoveryContext) => !ctx.signal?.aborted && (ctx.isCurrent?.() ?? true);
@@ -346,15 +362,21 @@ export function createLoginRecoveryLadder(deps: LoginRecoveryDeps): LoginRecover
     } catch { /* 기록 실패가 복구를 막지 않는다 */ }
   };
 
-  const recheck = async (ctx: LoginRecoveryContext, domains: readonly string[]): Promise<boolean> => {
+  const recheck = async (ctx: LoginRecoveryContext, domains: readonly string[], site: string): Promise<"verified" | "wall" | "unverified"> => {
     let url: string | null = null;
-    try { url = await ctx.reload(); } catch { return false; }
-    if (typeof url !== "string" || !url.trim()) return false;
+    try { url = await ctx.reload(); } catch { return "unverified"; }
+    if (typeof url !== "string" || !url.trim()) return "unverified";
     try {
       const measured = new URL(url);
-      if (!["http:", "https:"].includes(measured.protocol) || !domains.some(domain => sameSite(measured.hostname, domain))) return false;
-    } catch { return false; }
-    return detectLoginWall({ url }).kind !== "login-wall";
+      if (!["http:", "https:"].includes(measured.protocol) || !domains.some(domain => sameSite(measured.hostname, domain))) return "unverified";
+    } catch { return "unverified"; }
+    if (detectLoginWall({ url }).kind === "login-wall") return "wall";
+    if (site === "youtube.com" || site === "google.com" || site === "google.co.kr") {
+      if (!ctx.verifyAuthenticated) return "unverified";
+      try { return await ctx.verifyAuthenticated({ site: site === "google.co.kr" ? "google.com" : site, url, returnUrl: ctx.returnUrl }) ? "verified" : "unverified"; }
+      catch { return "unverified"; }
+    }
+    return "verified";
   };
 
   const run = async (
@@ -371,10 +393,19 @@ export function createLoginRecoveryLadder(deps: LoginRecoveryDeps): LoginRecover
     });
     let sourceCookies: CookieMetadata[] | null = null;
     let sourceState: SourceSessionState = "unknown";
-    try { sourceCookies = await deps.readSource(domains); } catch { sourceCookies = null; }
+    let destinationCookies: CookieMetadata[] | null = null;
+    try { destinationCookies = await deps.readStore(ctx.surface, domains); } catch { destinationCookies = null; }
     if (!current(ctx)) return { state: "not-a-wall" };
-    sourceState = evaluateSourceSession(sourceCookies, domains, nowSeconds());
-    if (allowed.length === 0) {
+    const destination = automaticRecoveryDestination(destinationCookies, domains, nowSeconds());
+    let destinationBlocked: "protected" | "unreadable" | null = destination === "empty" ? null : destination;
+    if (!destinationBlocked) {
+      try { sourceCookies = await deps.readSource(domains); } catch { sourceCookies = null; }
+      if (!current(ctx)) return { state: "not-a-wall" };
+      sourceState = evaluateSourceSession(sourceCookies, domains, nowSeconds());
+    }
+    if (destinationBlocked) {
+      event(ctx, "targeted-reimport", wall, { reason: destinationBlocked === "protected" ? "destination-protected" : "destination-unreadable" });
+    } else if (allowed.length !== domains.length) {
       event(ctx, "targeted-reimport", wall, { reason: "rate-limited", sourceSession: sourceState });
     } else if (sourceState === "missing" || sourceState === "expired") {
       // 원본에 가져올 로그인이 없다 — 가져오기는 아무것도 못 고친다. 도메인 시계도 건드리지 않는다.
@@ -385,11 +416,17 @@ export function createLoginRecoveryLadder(deps: LoginRecoveryDeps): LoginRecover
       try { report = await deps.targetedImport({ domains: allowed, surface: ctx.surface, isCurrent: () => current(ctx) }); }
       catch { report = { state: "failed", written: 0 }; }
       if (!current(ctx)) return { state: "not-a-wall" };
-      const cleared = report.state === "imported" && await recheck(ctx, wall.targetDomains);
+      if (report.state === "destination-protected") destinationBlocked = "protected";
+      if (report.state === "destination-unreadable") destinationBlocked = "unreadable";
+      if (report.state === "effect-unknown") destinationBlocked = "unreadable";
+      const check = report.state === "imported" ? await recheck(ctx, wall.targetDomains, wall.site) : "unverified";
+      const cleared = check === "verified";
       event(ctx, "targeted-reimport", wall, {
         reason: report.state === "not-consented" ? "not-consented"
+          : report.state === "destination-protected" || report.state === "destination-unreadable" ? report.state
+          : report.state === "effect-unknown" ? "import-effect-unknown"
           : report.state !== "imported" ? "import-failed"
-            : cleared ? "cleared" : "still-walled",
+            : cleared ? "cleared" : check === "wall" ? "still-walled" : "site-auth-unverified",
         counts: { domains: allowed.length, written: report.written },
         sourceSession: sourceState,
       });
@@ -401,14 +438,15 @@ export function createLoginRecoveryLadder(deps: LoginRecoveryDeps): LoginRecover
     }
 
     // ── 1b) 저장된 자격증명(오너 금고) — Main 에서 채우고 제출, 모델은 값을 모른다 ──────────
-    if (ctx.vaultFill) {
+    if (ctx.vaultFill && !destinationBlocked) {
       if (!current(ctx)) return { state: "not-a-wall" };
       let report: VaultFillReport;
       try { report = await ctx.vaultFill({ site: wall.site, domains }); }
       catch { report = { state: "failed" }; }
       if (!current(ctx)) return { state: "not-a-wall" };
       const cleared = report.state === "submitted" && typeof report.urlAfter === "string"
-        && detectLoginWall({ url: report.urlAfter }).kind !== "login-wall";
+        && detectLoginWall({ url: report.urlAfter }).kind !== "login-wall"
+        && await recheck(ctx, wall.targetDomains, wall.site) === "verified";
       event(ctx, "vault-autofill", wall, {
         reason: report.state === "no-credential" ? "vault-no-credential"
           : report.state === "unavailable" ? "vault-unavailable"
@@ -433,7 +471,7 @@ export function createLoginRecoveryLadder(deps: LoginRecoveryDeps): LoginRecover
       try { cookies = await deps.readStore(store, domains); } catch { cookies = null; }
       counts[store] = sessionCookieCount(cookies, domains, nowSeconds());
     }
-    const feed = ctx.canonicalSession ? { action: "none" as const } : decideStoreFeed({ surface: ctx.surface, counts });
+    const feed = ctx.canonicalSession || destinationBlocked ? { action: "none" as const } : decideStoreFeed({ surface: ctx.surface, counts });
     event(ctx, "store-check", wall, {
       reason: feed.action === "feed" ? "store-mismatch" : "store-consistent",
       counts: ctx.canonicalSession ? { nativePartition: counts["native-partition"] }
@@ -445,9 +483,15 @@ export function createLoginRecoveryLadder(deps: LoginRecoveryDeps): LoginRecover
       try { report = await deps.feedStore({ from: feed.from, to: feed.to, domains }); }
       catch { report = { state: "failed", written: 0 }; }
       if (!current(ctx)) return { state: "not-a-wall" };
-      const cleared = report.state === "imported" && await recheck(ctx, wall.targetDomains);
+      if (report.state === "destination-protected") destinationBlocked = "protected";
+      if (report.state === "destination-unreadable") destinationBlocked = "unreadable";
+      if (report.state === "effect-unknown") destinationBlocked = "unreadable";
+      const check = report.state === "imported" ? await recheck(ctx, wall.targetDomains, wall.site) : "unverified";
+      const cleared = check === "verified";
       event(ctx, "store-check", wall, {
-        reason: cleared ? "cleared" : report.state === "imported" ? "still-walled" : "import-failed",
+        reason: cleared ? "cleared" : report.state === "imported" ? check === "wall" ? "still-walled" : "site-auth-unverified"
+          : report.state === "effect-unknown" ? "import-effect-unknown"
+          : report.state === "destination-protected" || report.state === "destination-unreadable" ? report.state : "import-failed",
         counts: { written: report.written },
       });
       if (!current(ctx)) return { state: "not-a-wall" };
@@ -458,11 +502,13 @@ export function createLoginRecoveryLadder(deps: LoginRecoveryDeps): LoginRecover
     }
 
     // ── 3) 원본 확인 ─────────────────────────────────────────────────
-    const reason: OwnerLoginCard["reason"] = sourceState === "missing" ? "source-missing"
+    const reason: OwnerLoginCard["reason"] = destinationBlocked === "protected" ? "destination-protected"
+      : destinationBlocked === "unreadable" ? "destination-unreadable"
+      : sourceState === "missing" ? "source-missing"
       : sourceState === "expired" ? "source-expired"
-        : "source-rejected-by-site";
+        : "site-auth-unverified";
     event(ctx, "source-check", wall, {
-      reason: sourceCookies === null ? "source-unreadable" : reason,
+      reason: destinationBlocked ? reason : sourceCookies === null ? "source-unreadable" : reason,
       sourceSession: sourceState,
     });
 
@@ -498,15 +544,17 @@ export function createLoginRecoveryLadder(deps: LoginRecoveryDeps): LoginRecover
     const arm = () => {
       if (done || !pendingCurrent(ctx)) return;
       entry.stop();
-      entry.stop = deps.watchSession({ surface: ctx.surface, domains: wall.targetDomains, since,
-        onRestored: () => {
+      const stops: Array<() => void> = [];
+      entry.stop = () => { for (const stop of stops.splice(0)) stop(); };
+      const onRestored = () => {
           if (done) return;
           if (checking) return;
           checking = (async () => {
             if (!pendingCurrent(ctx)) { closeScope(ctx.recoveryScope); return; }
             const verification = ctx.recoveryScope.verification;
             if (ctx.retainVerification && (!verification || !verification.current())) { closeScope(ctx.recoveryScope); return; }
-            const cleared = await recheck(verification ? { ...ctx, reload: verification.reload } : ctx, wall.targetDomains);
+            const cleared = await recheck(verification ? { ...ctx, reload: verification.inspectCurrent ?? verification.reload,
+              verifyAuthenticated: verification.verifyAuthenticated } : ctx, wall.targetDomains, wall.site) === "verified";
             if (verification && !verification.current()) { closeScope(ctx.recoveryScope); return; }
             if (!pendingCurrent(ctx)) { closeScope(ctx.recoveryScope); return; }
             if (!cleared) return;
@@ -528,8 +576,11 @@ export function createLoginRecoveryLadder(deps: LoginRecoveryDeps): LoginRecover
             // Re-arm once after a failed verification, disposing the previous watcher.
             if (!done && pendingCurrent(ctx)) arm();
           });
-        },
-      });
+      };
+      stops.push(deps.watchSession({ surface: ctx.surface, domains: wall.targetDomains, since, onRestored }));
+      if (ctx.recoveryScope.verification?.watchNavigation) {
+        stops.push(ctx.recoveryScope.verification.watchNavigation(onRestored));
+      }
       if (done) entry.stop();
     };
     arm();
@@ -537,7 +588,9 @@ export function createLoginRecoveryLadder(deps: LoginRecoveryDeps): LoginRecover
     if (!current(ctx)) return { state: "not-a-wall" };
     event(ctx, "owner-card", wall, { reason });
     try { ctx.notify?.(card); } catch { /* 알림 실패가 카드를 없애지 않는다 */ }
-    try { await (ctx.openSignIn ?? deps.openSignIn)(card); } catch { /* 창 열기 실패 — 카드는 남는다 */ }
+    if (reason !== "destination-protected" && reason !== "destination-unreadable" && reason !== "site-auth-unverified") {
+      try { await (ctx.openSignIn ?? deps.openSignIn)(card); } catch { /* 창 열기 실패 — 카드는 남는다 */ }
+    }
     return done || !pendingCurrent(ctx) ? { state: "not-a-wall" }
       : { state: "awaiting-owner", site: wall.site, card, newCard: true, ...(ctx.recoveryScope.prerequisite ? { prerequisite: ctx.recoveryScope.prerequisite } : {}) };
   };
@@ -552,6 +605,10 @@ export function createLoginRecoveryLadder(deps: LoginRecoveryDeps): LoginRecover
       }
       let storeCookies: CookieMetadata[] | null = null;
       const probe = detectLoginWall({ url });
+      if (probe.kind === "login-wall" && isGoogleAuthenticationTransition(url)) {
+        event(ctx, "detected", probe, { reason: "authentication-transition" });
+        return { state: "not-a-wall" };
+      }
       if (probe.kind !== "login-wall") {
         for (const scope of scopes.values()) {
           if (scope.ctx.surface === ctx.surface && scope.ctx.slotId === ctx.slotId && scope.ctx.profileId === ctx.profileId

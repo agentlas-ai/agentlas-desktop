@@ -45,7 +45,8 @@ function isMode(value: unknown): value is AutomationWorkspaceMode {
   return value === "follow_goal" || value === "project" || value === "standalone";
 }
 export class AutomationWorkspaceError extends Error {
-  constructor(readonly code: string) { super(code); this.name = "AutomationWorkspaceError"; }
+  /** `detail` is the plain reason a model or owner reads after the code; the code stays the machine-readable cause. */
+  constructor(readonly code: string, detail?: string) { super(detail ? `${code}: ${detail}` : code); this.name = "AutomationWorkspaceError"; }
 }
 
 export function automationWorkspaceOwnerText(error: AutomationWorkspaceError, locale: string): string {

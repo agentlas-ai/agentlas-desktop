@@ -82,7 +82,7 @@ function validEntry(value: unknown, surface: FirstSendSurface, chatId: string | 
 /** Tolerant: a malformed record is dropped, never allowed to block every later send of the chat. */
 export function readFirstSends(storage: StoragePort, surface: FirstSendSurface, chatId: string | null): FirstSendEntry[] {
   let raw: string | null;
-  try { raw = storage.getItem(firstSendStorageKey(surface, chatId)); } catch { return []; }
+  try { raw = readStorageWithRetry(storage, firstSendStorageKey(surface, chatId)); } catch { return []; }
   if (!raw) return [];
   let values: unknown;
   try { values = JSON.parse(raw); } catch { return []; }
@@ -90,54 +90,126 @@ export function readFirstSends(storage: StoragePort, surface: FirstSendSurface, 
   return values.filter((value): value is FirstSendEntry => validEntry(value, surface, chatId));
 }
 
-function write(storage: StoragePort, surface: FirstSendSurface, chatId: string | null, items: FirstSendEntry[]): void {
+/** Keep each existing JSON element's original text, including unknown fields and escapes. */
+type MutationSlot = { values: unknown[]; elements: string[]; prefix: string; suffix: string };
+
+/** Retry a transient read once; a second failure propagates to the caller. */
+function readStorageWithRetry(storage: StoragePort, key: string): string | null {
+  try { return storage.getItem(key); } catch { return storage.getItem(key); }
+}
+
+function readMutationSlot(storage: StoragePort, surface: FirstSendSurface, chatId: string | null): MutationSlot {
+  const raw = readStorageWithRetry(storage, firstSendStorageKey(surface, chatId));
+  // An empty string has always meant no saved entries; it contains no record to preserve.
+  const empty: MutationSlot = { values: [], elements: [], prefix: "", suffix: "" };
+  if (raw === null || raw === "") return empty;
+  // A blob that is not a JSON array holds no recoverable record. It is dropped, as readFirstSends does: it must never
+  // block every later send of the chat (only a failed READ of the slot is refused above, never a malformed value).
+  let values: unknown;
+  try { values = JSON.parse(raw); } catch { return empty; }
+  if (!Array.isArray(values)) return empty;
+  const list: unknown[] = values;
+  const exact = (): MutationSlot => ({ values: list, elements: list.map(value => JSON.stringify(value)), prefix: "", suffix: "" });
+  const open = raw.search(/\S/u);
+  if (open < 0 || raw[open] !== "[") return exact();
+  let depth = 0, quoted = false, escaped = false, partStart = open + 1, close = -1;
+  const elements: string[] = [];
+  for (let index = open; index < raw.length; index += 1) {
+    const char = raw[index];
+    if (quoted) {
+      if (escaped) escaped = false;
+      else if (char === "\\") escaped = true;
+      else if (char === '"') quoted = false;
+      continue;
+    }
+    if (char === '"') { quoted = true; continue; }
+    if (char === "[" || char === "{") { depth += 1; continue; }
+    if (char === "]" || char === "}") {
+      depth -= 1;
+      if (depth === 0) { close = index; break; }
+      continue;
+    }
+    if (char === "," && depth === 1) { elements.push(raw.slice(partStart, index)); partStart = index + 1; }
+  }
+  if (close < 0) return exact();
+  if (values.length > 0) elements.push(raw.slice(partStart, close));
+  else if (raw.slice(partStart, close).trim()) return exact();
+  if (elements.length !== values.length) return exact();
+  return { values, elements, prefix: raw.slice(0, open), suffix: raw.slice(close + 1) };
+}
+
+function writeMutationSlot(storage: StoragePort, surface: FirstSendSurface, chatId: string | null, slot: MutationSlot): void {
   const key = firstSendStorageKey(surface, chatId);
-  const serialized = items.length ? JSON.stringify(items) : null;
-  if (serialized) storage.setItem(key, serialized);
-  else storage.removeItem(key);
-  if (storage.getItem(key) !== serialized) throw new Error("first_send_not_persisted");
+  const serialized = slot.elements.length ? slot.prefix + "[" + slot.elements.join(",") + "]" + slot.suffix : null;
+  if (serialized === null) storage.removeItem(key); else storage.setItem(key, serialized);
+  if (readStorageWithRetry(storage, key) !== serialized) throw new Error("first_send_not_persisted");
+}
+
+function uniqueValidIndex(slot: MutationSlot, surface: FirstSendSurface, chatId: string | null, intentId: string): number {
+  const indices = slot.values.flatMap((value, index) => value && typeof value === "object" && !Array.isArray(value)
+    && (value as { intentId?: unknown }).intentId === intentId ? [index] : []);
+  if (indices.length > 1) throw new Error("first_send_identity_conflict");
+  if (!indices.length) return -1;
+  if (!validEntry(slot.values[indices[0]], surface, chatId)) throw new Error("first_send_identity_conflict");
+  return indices[0];
+}
+
+function canonicalChoices(value: FirstSendEntry["choices"]): string {
+  return JSON.stringify(value, (_key, item: unknown) => item && typeof item === "object" && !Array.isArray(item)
+    ? Object.fromEntries(Object.entries(item).sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)) : item) ?? "";
 }
 
 /** Throws when the text cannot be kept durably; the caller then keeps the draft and sends nothing. */
 export function saveFirstSend(storage: StoragePort, entry: FirstSendEntry): void {
   if (!validEntry(entry, entry.surface, entry.chatId)) throw new Error("first_send_invalid");
-  const items = readFirstSends(storage, entry.surface, entry.chatId);
-  const existing = items.find(item => item.intentId === entry.intentId);
-  if (existing) {
-    if (existing.userPrompt !== entry.userPrompt) throw new Error("first_send_identity_conflict");
+  const slot = readMutationSlot(storage, entry.surface, entry.chatId);
+  const index = uniqueValidIndex(slot, entry.surface, entry.chatId, entry.intentId);
+  if (index >= 0) {
+    const old = slot.values[index] as FirstSendEntry;
+    // createdAt is not identity: a reload resume re-enters with the SAME intent (the Work run id) and a fresh clock
+    // reading, and it must find its own record, not a conflict (TaskCockpit send -> resumeRunId).
+    if (old.userPrompt !== entry.userPrompt
+      || old.replayable !== entry.replayable || canonicalChoices(old.choices) !== canonicalChoices(entry.choices)) {
+      throw new Error("first_send_identity_conflict");
+    }
     return;
   }
-  if (items.length >= MAX_ENTRIES) throw new Error("first_send_outbox_full");
-  write(storage, entry.surface, entry.chatId, [...items, entry]);
+  // Count every existing element, including an unrecognized old row; do not silently evict it.
+  if (slot.values.length >= MAX_ENTRIES) throw new Error("first_send_outbox_full");
+  slot.values.push(entry); slot.elements.push(JSON.stringify(entry));
+  writeMutationSlot(storage, entry.surface, entry.chatId, slot);
 }
 
-/** Metadata only: the text, the chat and the gesture's choices never change after capture. */
+/** Metadata only: the text, chat and gesture's choices never change after capture. */
 export function patchFirstSend(storage: StoragePort, surface: FirstSendSurface, chatId: string | null, intentId: string,
   patch: Partial<Pick<FirstSendEntry, "runId" | "runIdAt" | "notSent" | "ready">>): FirstSendEntry | null {
-  const items = readFirstSends(storage, surface, chatId);
-  const index = items.findIndex(item => item.intentId === intentId);
+  const slot = readMutationSlot(storage, surface, chatId);
+  const index = uniqueValidIndex(slot, surface, chatId, intentId);
   if (index < 0) return null;
-  const next = { ...items[index], ...patch };
+  const next = { ...(slot.values[index] as FirstSendEntry), ...patch };
   if (patch.notSent === undefined && "notSent" in patch) delete next.notSent;
-  items[index] = next;
-  write(storage, surface, chatId, items);
+  slot.values[index] = next; slot.elements[index] = JSON.stringify(next);
+  writeMutationSlot(storage, surface, chatId, slot);
   return next;
 }
 
-/** A fresh conversation now exists: the record moves from the "new" slot to that chat in one verified step. */
+/** A fresh conversation now exists: copy first, then remove the original. */
 export function moveFirstSendToChat(storage: StoragePort, surface: FirstSendSurface, intentId: string, chatId: string): FirstSendEntry | null {
-  const entry = readFirstSends(storage, surface, null).find(item => item.intentId === intentId);
-  if (!entry) return null;
-  const moved: FirstSendEntry = { ...entry, chatId };
+  const slot = readMutationSlot(storage, surface, null);
+  const index = uniqueValidIndex(slot, surface, null, intentId);
+  if (index < 0) return null;
+  const moved: FirstSendEntry = { ...(slot.values[index] as FirstSendEntry), chatId };
   saveFirstSend(storage, moved);
   removeFirstSend(storage, surface, null, intentId);
   return moved;
 }
 
 export function removeFirstSend(storage: StoragePort, surface: FirstSendSurface, chatId: string | null, intentId: string): void {
-  const items = readFirstSends(storage, surface, chatId);
-  if (!items.some(item => item.intentId === intentId)) return;
-  write(storage, surface, chatId, items.filter(item => item.intentId !== intentId));
+  const slot = readMutationSlot(storage, surface, chatId);
+  const index = uniqueValidIndex(slot, surface, chatId, intentId);
+  if (index < 0) return;
+  slot.values.splice(index, 1); slot.elements.splice(index, 1);
+  writeMutationSlot(storage, surface, chatId, slot);
 }
 
 /** Main's answer for the run the entry recorded (invoke:admission), reduced to the fields the decision reads. */

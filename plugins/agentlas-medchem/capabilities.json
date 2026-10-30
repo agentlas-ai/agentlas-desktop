@@ -1,0 +1,49 @@
+{
+  "schema": "agentlas.science-capabilities/v1",
+  "domain": "medicinal-chemistry",
+  "fields": ["chemistry", "drug-discovery", "medicinal-chemistry", "cheminformatics", "pharmacology"],
+  "runtime": {
+    "engine": "RDKit",
+    "python": ">=3.10,<3.15",
+    "acceptedPythonMinors": ["3.10", "3.11", "3.12", "3.13", "3.14"],
+    "packages": {
+      "default": "rdkit==2026.3.6",
+      "darwin-x64": "rdkit==2025.9.3"
+    },
+    "packagesNote": "RDKit stopped publishing macOS x86_64 wheels after 2025.9.3; Intel Macs pin that release.",
+    "indexUrl": "https://pypi.org/simple",
+    "onlyBinaryWheels": true,
+    "location": "<installed plugin>/.state/python/<requirement>-<platform>-<arch>/",
+    "installTimeoutMs": 900000,
+    "retryAfterFailureMs": 300000,
+    "firstCallWaitMs": 20000,
+    "workerTimeoutMs": 60000,
+    "network": "PyPI download once, at first start of this plugin's server; computations never use the network"
+  },
+  "guards": {
+    "maxMolecules": 50,
+    "maxGridMolecules": 48,
+    "maxSmilesLength": 2000,
+    "summaryResultBytes": 24000,
+    "fullResultBytes": 120000
+  },
+  "artifacts": [
+    {
+      "contract": "agentlas.smiles-to-ketcher",
+      "kind": "chemistry.document",
+      "rendererId": "agentlas.ketcher",
+      "payload": "ketcher handoff {title, smiles} per molecule: exactly the input of Agentlas Science's smiles-to-ketcher; full view adds an RDKit V2000 molfile"
+    },
+    {
+      "contract": "agentlas.medchem.compound-grid/v1",
+      "kind": "image",
+      "files": "agentlas-medchem/<name>-<hash>.svg and .png beneath the run's working folder"
+    }
+  ],
+  "limitations": [
+    "Properties are RDKit calculations (Crippen cLogP, Ertl TPSA, Bickerton QED), not measurements.",
+    "Rule filters (Lipinski, Veber, Egan, Ghose) and structural alerts (PAINS, Brenk) are triage heuristics; covalent warheads are flagged by Brenk as reactive groups by design.",
+    "Standardization uses RDKit MolStandardize (cleanup, largest fragment, uncharge, optional canonical tautomer); it does not resolve stereochemistry that the input does not specify.",
+    "The first call after installation may wait while RDKit is downloaded once from PyPI; the result says so."
+  ]
+}

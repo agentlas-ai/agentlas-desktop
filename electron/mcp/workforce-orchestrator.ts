@@ -3484,6 +3484,7 @@ async function runValidatedLeaderTurn(options: {
   let previousValidationIssues: Array<{ path: string; code: string }> | undefined;
   let previousOutput = "";
   for (let attempt = 1; attempt <= MAX_SCHEMA_ATTEMPTS; attempt += 1) {
+    throwIfAborted(options.p.signal);
     const invocationId = `workforce-leader:${randomUUID()}`;
     const schemaRepair = attempt > 1;
     const systemPrompt = schemaRepair
@@ -3502,6 +3503,7 @@ async function runValidatedLeaderTurn(options: {
       ...(schemaRepair ? [{ id: "workforce.leader.repair.user.validation", revision: 1, stability: "turn-context" as const, changeTriggers: ["validation-result"] as const, order: 20,
         text: `Schema repair validation error (sanitized): ${previousError}` }] : []),
     ]);
+    throwIfAborted(options.p.signal);
     const text = await options.p.leader({
       phase: options.stage,
       invocationId,
@@ -3515,41 +3517,12 @@ async function runValidatedLeaderTurn(options: {
     throwIfAborted(options.p.signal);
     const outputDigest = `sha256:${createHash("sha256").update(text, "utf8").digest("hex")}`;
     const outputBytes = Buffer.byteLength(text, "utf8");
+    let value: JsonObject;
     try {
-      const value = options.validate(parseLeaderJson(text, options.heading));
-      const audit: WorkforceSchemaAttempt = {
-        schemaVersion: "agentlas.workforce-schema-attempt.v1",
-        stage: options.stage,
-        attempt,
-        maxAttempts: MAX_SCHEMA_ATTEMPTS,
-        invocationId,
-        modelId: options.modelId,
-        runtimeId: options.runtimeId,
-        status: "accepted",
-        rawOutputIncluded: false,
-        outputDigest,
-        outputBytes,
-        sameModelRetry: schemaRepair,
-      };
-      const receiptPhase = options.stage === "selection" ? "selection" : "work-order";
-      const leaderInvocation: WorkforceSelectionReceipt["leaderInvocations"][number] = {
-        phase: receiptPhase,
-        invocationId,
-        modelId: options.modelId,
-        runtimeId: options.runtimeId,
-        status: "completed" as const,
-      };
-      if (options.leaderInvocationMode === "replace-work-order") {
-        const index = options.leaderInvocations.findIndex((row) => row.phase === "work-order");
-        if (index >= 0) options.leaderInvocations.splice(index, 1, leaderInvocation);
-        else options.leaderInvocations.push(leaderInvocation);
-      } else if (options.leaderInvocationMode !== "none") {
-        options.leaderInvocations.push(leaderInvocation);
-      }
-      options.schemaAttempts.push(audit);
-      emitSchemaAttempt(options.p, audit);
-      return value;
+      value = options.validate(parseLeaderJson(text, options.heading));
+      throwIfAborted(options.p.signal);
     } catch (error) {
+      throwIfAborted(options.p.signal);
       previousError = sanitizeSchemaValidationError(error);
       previousValidationMessage = sanitizeSchemaValidationMessage(error);
       previousValidationIssues = error instanceof RepairableWorkforceDecisionError ? error.issues : undefined;
@@ -3572,13 +3545,49 @@ async function runValidatedLeaderTurn(options: {
       };
       options.schemaAttempts.push(audit);
       emitSchemaAttempt(options.p, audit);
+      throwIfAborted(options.p.signal);
       if (error instanceof NonRepairableWorkforceDecisionError) {
         throw new Error(`${error.code}: ${previousError}`);
       }
       if (attempt === MAX_SCHEMA_ATTEMPTS) {
         throw new Error(`workforce_${options.stage}_schema_repair_exhausted: ${previousError}`);
       }
+      continue;
     }
+    const audit: WorkforceSchemaAttempt = {
+      schemaVersion: "agentlas.workforce-schema-attempt.v1",
+      stage: options.stage,
+      attempt,
+      maxAttempts: MAX_SCHEMA_ATTEMPTS,
+      invocationId,
+      modelId: options.modelId,
+      runtimeId: options.runtimeId,
+      status: "accepted",
+      rawOutputIncluded: false,
+      outputDigest,
+      outputBytes,
+      sameModelRetry: schemaRepair,
+    };
+    const receiptPhase = options.stage === "selection" ? "selection" : "work-order";
+    const leaderInvocation: WorkforceSelectionReceipt["leaderInvocations"][number] = {
+      phase: receiptPhase,
+      invocationId,
+      modelId: options.modelId,
+      runtimeId: options.runtimeId,
+      status: "completed" as const,
+    };
+    if (options.leaderInvocationMode === "replace-work-order") {
+      const index = options.leaderInvocations.findIndex((row) => row.phase === "work-order");
+      if (index >= 0) options.leaderInvocations.splice(index, 1, leaderInvocation);
+      else options.leaderInvocations.push(leaderInvocation);
+    } else if (options.leaderInvocationMode !== "none") {
+      options.leaderInvocations.push(leaderInvocation);
+    }
+    options.schemaAttempts.push(audit);
+    emitSchemaAttempt(options.p, audit);
+    throwIfAborted(options.p.signal);
+    return value;
+
   }
   throw new Error(`workforce_${options.stage}_schema_repair_exhausted`);
 }
@@ -3898,6 +3907,7 @@ export function workforcePrepareAttempt(
 }
 
 export async function runWorkforceSelection(p: RunWorkforceSelectionParams): Promise<WorkforceSelectionResult> {
+  throwIfAborted(p.signal);
   const goal = p.goal.trim();
   if (!goal) throw new Error("Workforce goal is required.");
   const sourcePolicy = p.sourcePolicy ?? "network";
@@ -3933,35 +3943,15 @@ export async function runWorkforceSelection(p: RunWorkforceSelectionParams): Pro
         : Number.POSITIVE_INFINITY,
     );
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      throwIfAborted(p.signal);
       const invocationId = `mcp:${randomUUID()}`;
       const startedAt = new Date().toISOString();
       emitMcpStatus(p.sink, tool, invocationId, false);
+      let result: unknown;
       try {
-        const result = await hub.call(tool, args, p.signal);
         throwIfAborted(p.signal);
-        const observation: WorkforceHubToolObservation = {
-          schemaVersion: "agentlas.workforce-hub-tool-observation.v1",
-          tool,
-          invocationId,
-          status: "succeeded",
-          attempt,
-          maxAttempts,
-          retryScheduled: false,
-          replaySafety: tool === "workforce.search_candidates"
-            ? "deterministic-selection-session-replace-upsert"
-            : tool === "workforce.prepare_execution"
-              ? "exact-pin-idempotency-receipt-cache"
-              : "not-retried",
-          authoritativeChain: true,
-          startedAt,
-          completedAt: new Date().toISOString(),
-          requestDigest,
-          responseDigest: sha256Json(result),
-        };
-        hubToolObservations.push(observation);
-        emitMcpStatus(p.sink, tool, invocationId, true);
-        emitHubToolObservation(p, observation);
-        return result;
+        result = await hub.call(tool, args, p.signal);
+        throwIfAborted(p.signal);
       } catch (error) {
         const code = hubErrorCode(error);
         const prepareBusy = tool === "workforce.prepare_execution" && code === "prepare_receipt_cache_busy";
@@ -4007,7 +3997,33 @@ export async function runWorkforceSelection(p: RunWorkforceSelectionParams): Pro
           if (remaining <= 0) throw error;
           await waitForWorkforceRetry(Math.min(hubRetryAfterMs(error), remaining), p.signal);
         }
+        continue;
       }
+      const observation: WorkforceHubToolObservation = {
+        schemaVersion: "agentlas.workforce-hub-tool-observation.v1",
+        tool,
+        invocationId,
+        status: "succeeded",
+        attempt,
+        maxAttempts,
+        retryScheduled: false,
+        replaySafety: tool === "workforce.search_candidates"
+          ? "deterministic-selection-session-replace-upsert"
+          : tool === "workforce.prepare_execution"
+            ? "exact-pin-idempotency-receipt-cache"
+            : "not-retried",
+        authoritativeChain: true,
+        startedAt,
+        completedAt: new Date().toISOString(),
+        requestDigest,
+        responseDigest: sha256Json(result),
+      };
+      hubToolObservations.push(observation);
+      emitMcpStatus(p.sink, tool, invocationId, true);
+      emitHubToolObservation(p, observation);
+      throwIfAborted(p.signal);
+      return result;
+
     }
     throw new Error(`${tool} retry loop exited unexpectedly.`);
   };

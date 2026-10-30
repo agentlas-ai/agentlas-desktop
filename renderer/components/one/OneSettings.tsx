@@ -41,8 +41,9 @@ import type {
 } from "@shared/types";
 import type { ComputerHistoryState } from "@shared/computer-history";
 import type { OneBriefingCadence, OneBriefingPreferences } from "@shared/one-briefing";
-import type { OneComposerModelOption, OnePermissionMode } from "./OneComposerControls";
+import { oneComposerModelOptionKey, type OneComposerModelOption, type OnePermissionMode } from "./OneComposerControls";
 import { runtimeEffectiveModelId } from "@/components/dashboard/RuntimeModelPicker";
+import { sameRuntimeIdentity } from "@shared/runtime-selection";
 import { OneBottomSheet, type OneBottomSheetSize } from "./OneBottomSheet";
 import { MediaDisplaySettings } from "../MediaDisplaySettings";
 import styles from "./OneSettings.module.css";
@@ -191,7 +192,7 @@ function ModelSettings({ locale, runtime, models, onSelect }: { locale: string; 
   const options = useMemo(() => {
     const seen = new Set<string>();
     return models.filter((item) => {
-      const key = `${item.runtime.kind}:${item.runtime.backend}:${item.id}`;
+      const key = oneComposerModelOptionKey(item.runtime, item.id);
       if (seen.has(key)) return false;
       seen.add(key);
       return true;
@@ -199,10 +200,10 @@ function ModelSettings({ locale, runtime, models, onSelect }: { locale: string; 
   }, [models]);
   // 모델을 고르지 않았으면 실제로 돌 모델 행이 체크된다 — "기본값" 행은 없다.
   const effectiveModelId = runtime
-    ? runtimeEffectiveModelId(runtime, options.filter((item) => item.runtime.kind === runtime.kind && item.runtime.backend === runtime.backend))
+    ? runtimeEffectiveModelId(runtime, options.filter((item) => sameRuntimeIdentity(item.runtime, runtime)))
     : undefined;
   const choose = async (nextRuntime: RuntimeStatus, model: string) => {
-    const key = `${nextRuntime.kind}:${nextRuntime.backend}:${model}`;
+    const key = oneComposerModelOptionKey(nextRuntime, model);
     setBusyKey(key);
     try { await onSelect(nextRuntime, model); } finally { setBusyKey(null); }
   };
@@ -210,8 +211,8 @@ function ModelSettings({ locale, runtime, models, onSelect }: { locale: string; 
     <div className={styles.policyNote}><IconSparkles size={16} /><div><strong>{locale === "ko" ? "직원 모델은 자동 배정" : "Worker models stay automatic"}</strong><span>{locale === "ko" ? "대화에 사용할 One 모델을 선택합니다." : "Choose the One model for a conversation."}</span></div></div>
     {!runtime ? <div className={styles.emptyState}>{locale === "ko" ? "사용 가능한 런타임을 확인하는 중입니다." : "Checking available runtimes."}</div> : <div className={styles.choiceList}>
       {options.map((item) => {
-        const active = runtime.kind === item.runtime.kind && runtime.backend === item.runtime.backend && effectiveModelId === item.id;
-        return <button type="button" key={`${item.runtime.kind}:${item.runtime.backend}:${item.id}`} data-active={active ? "true" : "false"} disabled={busyKey !== null} onClick={() => void choose(item.runtime, item.id)}><span><strong>{item.label}</strong><small>{item.tag || `${item.runtime.kind} · ${item.runtime.backend}`}</small></span>{active && <IconCheck size={15} />}</button>;
+        const active = sameRuntimeIdentity(runtime, item.runtime) && effectiveModelId === item.id;
+        return <button type="button" key={oneComposerModelOptionKey(item.runtime, item.id)} data-active={active ? "true" : "false"} disabled={busyKey !== null} onClick={() => void choose(item.runtime, item.id)}><span><strong>{item.label}</strong><small>{item.tag || `${item.runtime.kind} · ${item.runtime.backend}`}</small></span>{active && <IconCheck size={15} />}</button>;
       })}
     </div>}
   </>;
