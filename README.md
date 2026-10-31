@@ -5,18 +5,11 @@
 <h1 align="center">Agentlas Desktop</h1>
 
 <p align="center">
-  <strong>We are Agent Trust. Your agent is not a program. It is an asset. — Agentlas —</strong>
+  <strong>Beyond tasks. Agents built to lead projects.</strong><br>
+  <sub>Any model. Any runtime. For companies and individuals alike, Agentlas headhunts specialist teams and drives long-horizon projects through every checkpoint to completion.</sub>
 </p>
 
-<p align="center">
-  Build the agent you need, use a public Hub specialist for free, and run it through a supported LLM and computer you choose.<br>
-  Agentlas Desktop is the primary local GUI runtime: model calls, tool use, file access, and credentials stay under that host's permissions.
-</p>
-
-<p align="center">
-  Agent Cloud stores and restores your private, owner-scoped agent packages. Hub publication is a separate public action.<br>
-  <sub><strong>Agent Trust</strong> is a product principle for ownership and portability, not a financial, legal, custody, or fiduciary service.</sub>
-</p>
+<p align="center"><a href="https://agentlas.cloud"><img src="https://agentlas.cloud/landing/v3/readme-hero-en.gif" alt="One working through spreadsheet, slide, chat, photo, video, and 3D apps on a desktop" width="860"></a></p>
 
 <!-- ── Download (primary action) ───────────────────────────────────────── -->
 <p align="center">
@@ -57,6 +50,68 @@
   <img alt="Platforms" src="https://img.shields.io/badge/macOS%20%C2%B7%20Windows%20%C2%B7%20Linux-lightgrey">
   <img alt="Runtime" src="https://img.shields.io/badge/runtime-Claude%20Code%20%7C%20Codex%20%7C%20Antigravity%20%7C%20Grok%20%7C%20Ollama%20%7C%20BYOK-black">
 </p>
+
+<!-- agentlas:landing-block -->
+## Five products, from personal work to company teams
+
+One, the personal agent. Mobile for your phone. Finance for investment research. Science for research. Business for organizations.
+
+<table>
+<tr>
+<td width="50%" valign="top"><a href="https://agentlas.cloud/docs/introduction/agentlas-one"><img src="https://agentlas.cloud/landing/v3/one-desktop.jpg" alt="Agentlas One on the Desktop"></a><br><strong>One</strong><br>A personal agent that runs on your computer. It opens a Work session, assigns agents, sends question cards, and attaches results as files.</td>
+<td width="50%" valign="top"><a href="https://agentlas.cloud/docs/introduction/agentlas-one"><img src="https://agentlas.cloud/landing/v3/readme-mobile-en.jpg" alt="Agentlas Mobile"></a><br><strong>Mobile</strong><br>Agentlas Desktop runs the work on your paired computer. The phone reads the same conversation and answers question cards.</td>
+</tr>
+<tr>
+<td width="50%" valign="top"><a href="https://agentlas.cloud/updates/agentlas-finance-build-your-own-analyst"><img src="https://agentlas.cloud/landing/v3/finance-en.jpg" alt="Agentlas Finance"></a><br><strong>Finance</strong><br>Save research criteria as an Analyst. Reports keep the inputs behind each calculation.</td>
+<td width="50%" valign="top"><a href="https://agentlas.cloud/science"><img src="https://agentlas.cloud/landing/v3/science.jpg" alt="Agentlas Science"></a><br><strong>Science</strong><br>Molecular views and typeset manuscripts in one app, as a signed Agentlas Desktop extension.</td>
+</tr>
+<tr>
+<td width="50%" valign="top"><a href="https://agentlas.cloud/business"><img src="https://agentlas.cloud/landing/v3/business-en.jpg" alt="Agentlas Business"></a><br><strong>Business</strong><br>Members, API keys, usage policies, and billing for a team. $18 per seat per month, from 2 seats.</td>
+<td width="50%" valign="top"><a href="https://agentlas.cloud/desktop"><img src="https://agentlas.cloud/landing/v3/goal-tree-en.jpg" alt="Goal Tree on Agentlas Desktop"></a><br><strong>Goal Tree</strong><br>Long goals split into strategic goals and sub-goals, and the plan can change mid-run.</td>
+</tr>
+</table>
+
+<sub>Names and figures on screen are examples.</sub>
+
+## Elsewhere, a split-out task is a prompt. Here, it is a job opening
+
+Your host model splits the brief into roles, searches for candidates for each role, and assembles a Task Force for this project.
+
+- **3-tier talent scouting.** Searches your machine, your private Agent Cloud, and the public Hub for each role.
+- **3-level org chart.** Mixes single agents, a Task Force built for this project, and Packaged Teams with their own manager.
+- **Accountable selection.** The model you chose makes the selection. Each role records the reason and the release version, and missing tools are shown on screen.
+
+## Goal Trees, checkpoints, and separate verification for long projects
+
+Long goals split into a tree of strategic goals and sub-goals, progress is saved at checkpoints, and a run separate from the work checks the result.
+
+- **Goal Tree.** When something blocks the work, branches change and new sub-goals are added.
+- **Checkpoints.** Planning, execution, and synthesis run separately and progress is saved. A goal paused by closing Agentlas Desktop resumes from the saved point. Your computer must stay on while it runs.
+- **Receipt & Verifier.** A separate run checks the result and records the evidence. A goal with a confirmed failure does not close as complete.
+- **Agent Learning.** When three different runs produce the same lesson, it is proposed as a change to the agent's files. You read the diff and decide.
+
+## The model reasons. Your method leads
+
+LLM, Runtime, and Agent are separate layers. Switch models or coding tools and keep the same agent package.
+
+| Layer | What you get |
+| --- | --- |
+| **LLM** | Connect Claude, GPT, Gemini, or local models. When a quota runs out, supported chat runs switch to the next model in your priority list, and long goals switch at the next checkpoint. |
+| **Runtime** | Claude Code, Codex, Cursor, Antigravity, Grok, Kimi, GitHub Copilot CLI, Agentlas Desktop, Ollama, LM Studio, and MLX. It runs on the computer that has your files and tools. |
+| **Agent** | Skills, verification loops, and memory live in one package. Every package gets an A2A Agent Card and moves between hosts with the same procedures. |
+
+## Four memory scopes, so you stop re-explaining the project
+
+Memory is stored in local SQLite and project files across four scopes: personal, project, agent, and team. Only the parts of your Project Soul, Code Map, and past decisions related to the task load automatically.
+
+## Delegate your first project
+
+Install Agentlas Desktop or Agentlas OS, sign in, and connect a model to start.
+
+<p align="center"><a href="https://agentlas.cloud"><strong>agentlas.cloud</strong></a></p>
+
+---
+<!-- /agentlas:landing-block -->
 
 ## Agent Hub and billing
 
