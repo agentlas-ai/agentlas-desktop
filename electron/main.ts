@@ -559,6 +559,8 @@ if (!app.isReady()) {
         secure: true,
         supportFetchAPI: true,
         corsEnabled: true,
+        // Without this Chromium refuses a media element on this scheme: every video and audio in the app failed to load.
+        stream: true,
       },
     },
   ]);

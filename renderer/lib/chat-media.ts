@@ -52,10 +52,11 @@ export function splitChatMediaLinks<T extends { path: string }>(
   const media: ChatMediaLink<T>[] = [];
   const seen = new Set<string>();
   const stripped = text.replace(/`[^`]*`|(!?)\[([^\]]+)\]\(([^)]+)\)/g, (whole, bang: string | undefined, label: string | undefined, href: string | undefined) => {
-    if (bang || label === undefined || href === undefined) return whole;
+    if (label === undefined || href === undefined) return whole;
     const target = resolve(href, label);
     const kind = target ? chatMediaKindOfPath(target.path) : null;
-    if (!target || !kind) return whole;
+    // Image syntax stays an image, unless it names something an image element cannot show (a model writes ![clip](clip.mp4) too).
+    if (!target || !kind || (bang && kind === "image")) return whole;
     if (!seen.has(target.path)) { seen.add(target.path); media.push({ label, kind, target }); }
     return `\u0000${label}\u0001`;
   });

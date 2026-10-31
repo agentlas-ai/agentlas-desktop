@@ -967,8 +967,9 @@ function inline(
   }> = [
       {
         // 이미지: ![alt](src) — http/https/data는 그대로, 로컬 경로는 agentlas://localfile로 서빙
-        regex: /^!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/,
-        render: (m) => renderInlineImage(key++, m[2].trim(), m[1], mediaBasePaths),
+        // A path with spaces is written ![alt](<path>); every One output sits under "Application Support".
+        regex: MARKDOWN_IMAGE_AT_START,
+        render: (m) => renderInlineImage(key++, (m[2] ?? m[3]!).trim(), m[1], mediaBasePaths),
       },
       {
         // 모델/CLI가 "created at /abs/path.png"처럼 plain path만 답해도 즉시 이미지로 보여준다.
@@ -1098,7 +1099,7 @@ function inline(
  *  final 답변에 산출물이 있으면 챗 페이지가 우측 패널을 자동으로 열어 보여준다. */
 export function firstMediaArtifactInText(text: string, mediaBasePaths: string[] = []): MediaArtifact | null {
   const resolvedMediaBasePaths = mediaBasePathsWithTextHints(text, mediaBasePaths);
-  const mdImg = text.match(/!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/);
+  const mdImg = text.match(MARKDOWN_IMAGE);
   const plain = text.match(
     /(?:file:\/\/[^\s`'"<>)]*?|\/[^\s`'"<>)]*?|(?:\.{1,2}\/)?[A-Za-z0-9_. -]+(?:\/[^\s`'"<>)]*)?)\.(?:png|jpe?g|gif|webp|avif|svg)(?=$|[\s).,;:])/i,
   );
@@ -1110,7 +1111,7 @@ export function firstMediaArtifactInText(text: string, mediaBasePaths: string[] 
   const codeIdx = codeImage?.index ?? Number.POSITIVE_INFINITY;
   if (mdImg && mdIdx <= plainIdx && mdIdx <= codeIdx) {
     alt = mdImg[1];
-    rawSrc = mdImg[2].trim();
+    rawSrc = (mdImg[2] ?? mdImg[3]!).trim();
   } else if (codeImage && codeIdx <= plainIdx) {
     rawSrc = codeImage[1].trim();
   } else if (plain) {
@@ -1386,6 +1387,9 @@ function isInlineServablePath(value: string): boolean {
 function cleanImageSrcCandidate(value: string): string {
   return value.trim().replace(/^[\s(]+/, "").replace(/[).,;:]+$/, "");
 }
+
+const MARKDOWN_IMAGE = /!\[([^\]]*)\]\((?:<([^>\n]+)>|([^)\s]+))(?:\s+"[^"]*")?\)/;
+const MARKDOWN_IMAGE_AT_START = new RegExp(`^${MARKDOWN_IMAGE.source}`);
 
 function cleanLinkHref(value: string): string {
   return value.trim().replace(/^<|>$/g, "");

@@ -2921,14 +2921,16 @@ function invocationSupersedingRunId(runId: string, chatId: string, startTs: stri
   }
   if (cursor === null && !promptMessageId) return undefined;
   const s = supersessionObject("s"), b = supersessionObject("b");
+  // The bound rows are read once through the chat index. Probing them per candidate walked every later run's whole ledger,
+  // because run_events has no (run_id, kind) index: measured on an 842k-row store, up to 1 s of Main per receipt.
   const later = invocationReceiptStatement(`SELECT s.run_id FROM run_events s
     WHERE s.chat_id = ? AND s.kind = 'invoke_started' AND s.run_id <> ? AND s.ts > ?
       AND COALESCE(json_extract(${s}, '$.background'), 0) != 1
       AND ((? IS NOT NULL AND json_extract(${s}, '$.latestUserMessageRowId') = ?
             AND NOT EXISTS (SELECT 1 FROM run_events b WHERE b.run_id = s.run_id AND b.kind = 'invoke_prompt_bound'))
-        OR (? IS NOT NULL AND EXISTS (SELECT 1 FROM run_events b WHERE b.run_id = s.run_id AND b.kind = 'invoke_prompt_bound'
-            AND json_extract(${b}, '$.promptMessageId') = ?)))
-    ORDER BY s.ts ASC, s.rowid ASC LIMIT 1`).get(chatId, runId, startTs, cursor, cursor, promptMessageId, promptMessageId) as { run_id: string } | undefined;
+        OR s.run_id IN (SELECT b.run_id FROM run_events b WHERE b.chat_id = ? AND b.kind = 'invoke_prompt_bound'
+            AND json_extract(${b}, '$.promptMessageId') = ?))
+    ORDER BY s.ts ASC, s.rowid ASC LIMIT 1`).get(chatId, runId, startTs, cursor, cursor, chatId, promptMessageId) as { run_id: string } | undefined;
   return later?.run_id && boundedReceiptIdentifier(later.run_id) ? later.run_id : undefined;
 }
 

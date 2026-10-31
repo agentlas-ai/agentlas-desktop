@@ -29,8 +29,8 @@
 .root{position:relative;width:100%;height:100dvh;display:flex;background:var(--im-side);color:var(--im-ink);overflow:hidden;font:14px/1.5 var(--im-font)}
 .root *{box-sizing:border-box}
 .root button:not(:where([data-intellect-ui] *)),.root textarea:not(:where([data-intellect-ui] *)),.root select:not(:where([data-intellect-ui] *)),.root input:not(:where([data-intellect-ui] *)){font:inherit;color:inherit}
-.navigation button,.header button,.composerDock button:not(:where(.decisionStack *)),.taskContents button{cursor:pointer;border:1px solid var(--im-hair);border-radius:12px;background:var(--im-bg);padding:9px 12px;text-align:left;display:inline-flex;align-items:center;gap:8px}
-.navigation button:hover,.header button:hover,.composerDock button:not(:where(.decisionStack *)):hover,.taskContents button:hover{color:var(--ink)}
+.navigation button:not(:where([id=agentlas-product-mode-menu] *)),.header button,.composerDock button:not(:where(.decisionStack *)),.taskContents button{cursor:pointer;border:1px solid var(--im-hair);border-radius:12px;background:var(--im-bg);padding:9px 12px;text-align:left;display:inline-flex;align-items:center;gap:8px}
+.navigation button:not(:where([id=agentlas-product-mode-menu] *)):hover,.header button:hover,.composerDock button:not(:where(.decisionStack *)):hover,.taskContents button:hover{color:var(--ink)}
 .root button:not(:where([data-intellect-ui] *)):focus-visible,.root textarea:not(:where([data-intellect-ui] *)):focus-visible,.root input:not(:where([data-intellect-ui] *)):focus-visible,.root select:not(:where([data-intellect-ui] *)):focus-visible{outline:2px solid var(--personal-bubble);outline-offset:2px}
 .root button:not(:where([data-intellect-ui] *)):disabled{opacity:.5;cursor:default}
 .root textarea:not(:where([data-intellect-ui] *)),.root select:not(:where([data-intellect-ui] *)),.root input:not(:where([data-intellect-ui] *)){border:1px solid var(--im-hair);border-radius:12px;background:var(--im-bg);padding:10px;width:100%}
@@ -38,8 +38,8 @@
 
 /* ── Sidebar: the Messages list's gray column; Hope is the selected row ── */
 .navigation{width:218px;flex:0 0 218px;padding:14px 10px;display:flex;flex-direction:column;gap:10px;background:var(--im-side);border-right:1px solid var(--im-hair)}
-.navigation button{background:transparent;border-color:transparent}
-.navigation button:hover{background:color-mix(in srgb,var(--im-ink) 6%,transparent)}
+.navigation button:not(:where([id=agentlas-product-mode-menu] *)){background:transparent;border-color:transparent}
+.navigation button:not(:where([id=agentlas-product-mode-menu] *)):hover{background:color-mix(in srgb,var(--im-ink) 6%,transparent)}
 .personalEntry{width:100%;flex-direction:row;align-items:center!important;gap:10px!important;background:var(--personal-bubble)!important;color:var(--white)!important;border-color:transparent!important;border-radius:14px!important;min-height:56px;padding:8px 12px!important}
 .personalIdentity{display:flex;flex-direction:column;gap:2px;min-width:0;line-height:1.35}
 .personalIdentity strong{font-size:14px;font-weight:600}
@@ -154,36 +154,32 @@
 .root .delegationMeta>svg:first-child:not(:last-child){color:var(--ok)}
 
 /* ── Composer: a round + beside a thin-bordered pill; the pill is drawn behind the grid cells it spans ── */
-.composerDock{flex:0 0 auto;width:min(100%,784px);align-self:center;padding:6px 24px 14px}
+.composerDock{flex:0 0 auto;width:min(100%,784px);align-self:center;padding:6px 24px 8px}
 .composerDock button:not(:where(.decisionStack *)){background:transparent}
-.composer{position:relative;width:100%;min-height:36px;display:grid;grid-template-columns:28px minmax(0,1fr) auto 28px;grid-template-areas:"plus text mic send";align-items:center;column-gap:0;border:0;padding:0;background:transparent}
-.composer::before{content:"";grid-column:2 / 5;grid-row:1 / -1;align-self:stretch;margin-left:8px;border:1px solid var(--im-hair);border-radius:20px;background:var(--im-bg);pointer-events:none}
+.composer{position:relative;width:100%;min-height:42px;display:grid;grid-template-columns:28px minmax(0,1fr) auto 28px;grid-template-areas:"plus text mic send";align-items:end;column-gap:0;border:0;padding:0;background:transparent}
+.composer::before{content:"";grid-column:2 / 5;grid-row:1 / -1;align-self:stretch;margin-left:8px;border:1px solid var(--im-hair);border-radius:21px;background:var(--im-bg);pointer-events:none}
 .composer:focus-within::before{border-color:color-mix(in srgb,var(--im-sub) 60%,var(--im-hair))}
-/* Two rows (a second line, attachments, or too narrow for one row): the pill takes the whole width, the + waits outside it. */
-.composer[data-expanded=true],.composer[data-has-files=true]{padding-left:36px}
-.composer[data-expanded=true]::before,.composer[data-has-files=true]::before{grid-column:1 / -1;margin-left:0;border-radius:22px}
-.composer[data-expanded=true]{grid-template-areas:"text text text text" "plus . mic send";grid-template-rows:auto 34px;row-gap:0}
-.composer[data-expanded=true] .plus,.composer[data-has-files=true] .plus{margin-left:-36px}
-.composer .plus{grid-area:plus;align-self:center}
+/* One shape only: the text keeps its place and the pill grows around it. The model and effort sit under the pill, so they never take room from the text. */
+.composer .plus{grid-area:plus;align-self:end;margin-bottom:7px}
 .composer .plus .iconButton{width:28px;height:28px;flex:0 0 28px;padding:0;border:0;background:var(--im-in);color:var(--im-sub);border-radius:50%;display:grid;place-items:center}
 .composer .plus .iconButton:hover{background:var(--im-in-strong);color:var(--im-ink)}
-.composer .voice{grid-area:mic;margin-right:6px;display:grid;place-items:center}
-.composer .trail{grid-area:mic;display:flex;align-items:center;justify-content:flex-end;gap:2px;min-width:0}
-/* With nothing to send there is no send arrow, so the controls take its place at the pill's right edge. */
-.composer:not([data-ready=true]) .trail{grid-column:3 / 5}
+.composer .voice{grid-area:mic;margin:0 6px 7px 0;display:grid;place-items:center}
+.composerFoot{display:flex;align-items:center;justify-content:flex-end;gap:8px;min-width:0;min-height:28px;padding:4px 2px 0 36px}
+.composerFoot .feedback{flex:0 1 auto;min-width:0;margin:0 auto 0 0}
+.composerFoot .trail{display:flex;align-items:center;justify-content:flex-end;gap:2px;min-width:0}
+/* With nothing to send there is no send arrow, so the mic takes its place at the pill's right edge. */
+.composer:not([data-ready=true]) .voice{grid-column:3 / 5;justify-self:end}
 .composer:not([data-ready=true]) .send{display:none}
-.composer .trail [data-one-composer-trigger]{min-height:28px;height:28px;padding:0 9px;border:0;border-radius:14px;background:transparent;color:var(--im-sub);font-size:12px;line-height:16px;gap:5px}
-.composer .trail [data-one-composer-trigger]:hover,.composer .trail [data-one-composer-trigger][aria-expanded=true]{background:var(--im-in);color:var(--im-ink)}
-.composer .trail [data-one-composer-trigger] span{max-width:120px}
-.composer .trail [data-one-composer-trigger][data-failed=true]{color:var(--danger)}
+.composerFoot .trail [data-one-composer-trigger]{min-height:28px;height:28px;padding:0 9px;border:0;border-radius:14px;background:transparent;color:var(--im-sub);font-size:12px;line-height:16px;gap:5px}
+.composerFoot .trail [data-one-composer-trigger]:hover,.composerFoot .trail [data-one-composer-trigger][aria-expanded=true]{background:var(--im-in);color:var(--im-ink)}
+.composerFoot .trail [data-one-composer-trigger] span{max-width:120px}
+.composerFoot .trail [data-one-composer-trigger][data-failed=true]{color:var(--danger)}
 .composer .voice button{width:28px;min-height:28px;height:28px;padding:0;border:0;border-radius:50%;background:transparent;color:var(--im-sub);font-size:12px;outline:0}
 .composer .voice button:hover{color:var(--im-ink)}
 .composer .voice svg{width:16px;height:16px}
-.root .composer textarea{grid-area:text;min-height:28px;max-height:140px;width:100%;resize:none;border:0;background:transparent;margin:0;padding:3px 4px 3px 22px;line-height:22px;font-size:15px;border-radius:0;outline:0;overflow:auto;position:relative}
-.composer[data-expanded=true] textarea{min-height:48px;margin:0;padding:10px 14px 0 14px}
-.composer[data-has-files=true] textarea{min-height:28px;margin:0;padding:2px 14px 2px 14px}
+.root .composer textarea{grid-area:text;min-height:42px;max-height:140px;width:100%;resize:none;border:0;background:transparent;margin:0;padding:10px 4px 10px 22px;line-height:22px;font-size:15px;border-radius:0;outline:0;overflow:auto;position:relative}
 .root .composer textarea::placeholder{color:var(--im-sub);opacity:.8}
-.root .send{grid-area:send;border:0;border-radius:50%;padding:0;width:28px;height:28px;display:grid;place-items:center;background:var(--personal-bubble);color:var(--white);translate:-4px 0;animation:hopeSendIn .14s ease-out}
+.root .send{grid-area:send;border:0;border-radius:50%;padding:0;width:28px;height:28px;display:grid;place-items:center;background:var(--personal-bubble);color:var(--white);translate:-4px 0;margin-bottom:7px;animation:hopeSendIn .14s ease-out}
 .root .send:disabled{opacity:.4}
 @keyframes hopeSendIn{from{opacity:0;scale:.6}to{opacity:1;scale:1}}
 @media(prefers-reduced-motion:reduce){.root .send{animation:none}}
@@ -192,8 +188,8 @@
 .feedback{font-size:12px;color:var(--im-sub);margin:4px 0 8px;line-height:1.5}
 .root .retry{background:transparent;padding:4px 8px;margin-bottom:6px;font-size:11px}
 /* Attachments sit inside the composer as square tiles above the text (owner 2026-10-14, the Codex composer). */
-.composer[data-has-files=true]{grid-template-areas:"files files files files" "text text text text" "plus . mic send";grid-template-rows:auto auto 34px;row-gap:4px}
-.attachmentDrafts { grid-area:files; display:flex; gap:8px; overflow-x:auto; padding:12px 14px 4px; scrollbar-width:thin; }
+.composer[data-has-files=true]{grid-template-areas:"plus files files files" "plus text mic send";grid-template-rows:auto auto}
+.attachmentDrafts { grid-area:files; display:flex; gap:8px; overflow-x:auto; margin-left:8px; padding:12px 14px 0; scrollbar-width:thin; }
 .attachmentDraft { position:relative; flex:0 0 auto; width:112px; height:112px; overflow:hidden; border:1px solid var(--im-hair); border-radius:14px; background:var(--im-in); }
 .attachmentDraft img { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; display:block; }
 .attachmentFile { position:absolute; inset:0; display:grid; align-content:end; gap:3px; padding:10px; color:var(--im-ink); }
@@ -319,8 +315,6 @@
 }
 @media(prefers-reduced-motion:reduce){.root *{scroll-behavior:auto}}
 /* Narrow windows (the companion): the effort chip keeps its icon; the model name stays readable. */
-@media (max-width:520px){.composer .trail [data-one-composer-trigger=effort] span,.composer .trail [data-one-composer-trigger=effort]>svg:last-child{display:none}.composer .trail [data-one-composer-trigger=effort]{padding:0 8px}.composer .trail [data-one-composer-trigger] span{max-width:84px}}
-/* Two-row shape (typed, attachments, or too narrow for one row): when the controls row is still short of room, the model name gives
-   way, ending in an ellipsis, instead of the right-aligned chips sliding under the +. The trail column stays
-   `auto`, so its width is its content's whenever that fits, which is what the narrow measure in PersonalOneWorkspace reads. */
-.composer[data-expanded=true] .trail [data-one-composer-trigger=model],.composer[data-has-files=true] .trail [data-one-composer-trigger=model]{flex:0 1 auto}.composer .voice{flex:0 0 auto}
+@media (max-width:520px){.composerFoot .trail [data-one-composer-trigger=effort] span,.composerFoot .trail [data-one-composer-trigger=effort]>svg:last-child{display:none}.composerFoot .trail [data-one-composer-trigger=effort]{padding:0 8px}.composerFoot .trail [data-one-composer-trigger] span{max-width:84px}}
+/* When the row under the pill is short of room, the model name gives way, ending in an ellipsis. */
+.composerFoot .trail [data-one-composer-trigger=model]{flex:0 1 auto}.composer .voice{flex:0 0 auto}

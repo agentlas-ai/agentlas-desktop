@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.3.114 — 2026-10-31
+
+- Hope: the personal composer keeps one shape. It used to fold into a second shape once a line wrapped, and that shape sat a few pixels above the text. Model and effort now sit under the pill, as in other chat apps, so they never take room from the text, and the pill grows around the text instead.
+- Chat: videos and audio now play inside the app. The app's own file scheme was registered without streaming, so every video and audio element failed to load whatever the file was; it is now registered as streaming. Images on paths with spaces (every One output) now show as images instead of a "!" and a link, image syntax that names a video shows the video, and the mode menu keeps its own look in the personal window instead of inheriting the sidebar's bordered buttons.
+- Run receipts: reading a failed run no longer walks every later run's ledger. The takeover lookup probed each later run for its prompt row, and the event table has no index for that probe, so one receipt could hold the main process for up to a second on a large store. The bound rows are now read once through the chat index; a read-only comparison of 661 real runs found the same result and cut the read from 9,081 ms to 216 ms. The background service reads the same receipts.
+
+This release binds Agentlas OS v1.2.71 at 54a446cf3a9320409a712d0347afde2bb99d43d1; public runtime asset `hephaestus-runtime-v1.2.71.tar.gz` is pinned at SHA-256 `5d9ff2743a32de44d82d2fc97db67aba628fdd84791869c8244278d98179b084`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.113 — 2026-10-31
 
 - Windows: the installer and the executables it ships are signed through Azure Artifact Signing (publisher AppBridge Inc.), and a release that would ship an unsigned Windows file fails instead of publishing. Pinned runtime files that are already validly signed by their vendor are left as they are.
