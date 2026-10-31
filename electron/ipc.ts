@@ -283,7 +283,7 @@ import { createQueuedOwnerInputCustody, type QueuedOwnerStartBoundary } from "./
 import { queuedSendRunState, queuedSendPlacement } from "./invocation/renderer-send-queue";
 import { isPossiblyRecordedSendRefusal, isTransientSendRefusal } from "../shared/transient-send-refusal";
 import { readRecordedOwnerSteer } from "./invocation/recorded-owner-steer";
-import { cancelInvocationOwnerRun, invocationCurrentTurnControl } from "./runtime/invocation-owner-control";
+import { cancelInvocationOwnerRun, invocationCurrentTurnControl, stopInvocationGoal } from "./runtime/invocation-owner-control";
 // ── Hephaestus 엔진 브리지 — 데스크탑↔엔진 연결은 전부 electron/hephaestus/* 에서만 일어난다. ──
 import { hepAuthLogin, hepAuthStatus } from "./hephaestus/commands";
 import { hephaestusAvailable, hephaestusDoctor, hephaestusRoot, readHephaestusUpdateJournal, runHephaestusRuntimeUpdate } from "./hephaestus/engine";
@@ -4639,7 +4639,7 @@ export function registerIpcHandlers(): void {
     const goalId = getChat(id)?.goalId;
     const goalRun = goalId ? getLongRunByGoalId(goalId) : null;
     if (goalId && goalRun && goalRun.rootChatId === id && goalRun.surface !== "science"
-      && !["completed", "failed", "cancelled"].includes(goalRun.status)) invocationService.deleteGoal(id, goalId);
+      && !["completed", "failed", "cancelled"].includes(goalRun.status)) stopInvocationGoal(id, goalId, "delete");
     removeChat(id);
     try { releaseIdleAgentResidencyForChat(id); } catch { /* the chat is already gone */ }
     forgetOneRecoveryJudgment(id);
@@ -4685,16 +4685,16 @@ export function registerIpcHandlers(): void {
       // the objective; a chat title is only navigation copy and must never
       // become (or later overwrite) the user's durable goal.
     } else if (chat.goalId) {
-      invocationService.deleteGoal(id, chat.goalId);
+      stopInvocationGoal(id, chat.goalId, "delete");
     }
     return getChat(id);
   });
   registerAppControlDomainIpc(ipcMain, "chats:pauseGoal", (id: string, goalId: string) => {
-    invocationService.pauseGoal(id, goalId);
+    stopInvocationGoal(id, goalId, "pause");
     return getGoalLedgerGoal(goalId, getChatWorkingFolder(id));
   });
   registerAppControlDomainIpc(ipcMain, "chats:deleteGoal", (id: string, goalId: string) => {
-    invocationService.deleteGoal(id, goalId);
+    stopInvocationGoal(id, goalId, "delete");
     return getChat(id);
   });
   registerAppControlDomainIpc(ipcMain, "chats:getGoalContext", async (id: string) => {

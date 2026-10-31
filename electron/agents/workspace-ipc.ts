@@ -5,6 +5,7 @@ import { AgentWorkspaceError } from "./workspace-snapshot";
 import { getAgentWorkspace, getAgentWorkspaceMemoryCounts, listAgentWorkspaceFiles, readAgentWorkspaceFile, prepareAgentWorkspaceFromMemory,
   prepareAgentWorkspaceFileChange, prepareAgentWorkspaceRollback, prepareAgentWorkspaceFileOperation, getAgentWorkspaceDiff, issueAgentWorkspaceApprovalReceipt,
   applyAgentWorkspaceProposal, rejectAgentWorkspaceProposal, getAgentWorkspaceRecoveryDiff, acknowledgeAgentWorkspaceRecovery } from "./workspace-service";
+import { setAutoEvolution } from "./auto-evolution";
 import { prepareAgentWorkspaceComparison, receiveAgentWorkspace, sendAgentWorkspace, type AgentWorkspaceRemoteReview } from "./workspace-remote";
 
 type Input<K extends keyof AgentWorkspaceIpc> = Parameters<AgentWorkspaceIpc[K]>[0];
@@ -45,6 +46,8 @@ export function registerAgentWorkspaceIpc(input: { ipc: Pick<IpcMain, "handle">;
     return applyAgentWorkspaceProposal({ proposalId: value.proposalId, reviewedHash: value.reviewedHash, approvalReceiptId });
   });
   handle("agentWorkspace:reject", (_event, value: Input<"reject">) => rejectAgentWorkspaceProposal(value.proposalId));
+  // The owner's standing permission to apply the narrow kind of learning change without a diff review (auto-evolution.ts).
+  handle("agentWorkspace:setAutoEvolution", (_event, value: Input<"setAutoEvolution">) => setAutoEvolution(value.agentId, value.enabled));
   handle("agentWorkspace:getRecoveryDiff", (event, id: string) => {
     const diff = getAgentWorkspaceRecoveryDiff(id); return { ...diff, reviewToken: issue(event, { kind: "recovery", id, hash: diff.reviewedHash }) };
   });

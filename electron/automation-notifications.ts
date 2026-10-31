@@ -9,6 +9,22 @@ export interface AutomationNotificationInput {
   output?: string; error?: string | null; observationDigest?: string; unchanged?: boolean;
   /** The judge's answer for this run (accepted / rejected / needs_input / blocked / unjudged). */
   outcome?: string | null;
+  /** Whether the run recorded anything done outside the app (a post, a send), when that was measured. A recorded effect is always reported. */
+  outward?: boolean;
+}
+
+/**
+ * How often one repeating automation may say the same thing again: the same unanswered question, or the same failure. A 15-minute tracker
+ * asked the same question 101 times in two days, and every report also woke the agent. The run stays in the automation's
+ * own timeline. A plain result is what an automation exists to deliver, so it is never spaced.
+ */
+export const AUTOMATION_REPORT_SPACING_MS = 6 * 60 * 60_000;
+
+function repeatsLastReport(last: { status?: string; outcome?: string | null; observationDigest?: string }, input: AutomationNotificationInput, digest: string): boolean {
+  if (last.status !== input.status || (last.outcome ?? null) !== (input.outcome ?? null)) return false;
+  // A model words the same question differently each run, so the judge's answer identifies it, not the text.
+  if ([input.status, input.outcome].some((value) => value === "needs_input" || value === "blocked")) return true;
+  return input.status !== "ok" && last.observationDigest === digest;
 }
 /** Claim a durable notification attempt before delivery. This guarantees one
  * attempt per run, not an unobservable exactly-once OS notification receipt. */
@@ -35,9 +51,21 @@ export function claimAutomationNotification(input: AutomationNotificationInput):
         return false;
       }
     }
+    // Only what repeats on its own is spaced, and only a run measured to have recorded nothing outward: a command run, a person's or an
+    // agent's, is waiting for this answer, and a monitor alert or an interrupted run reaches this claim unmeasured.
+    if (input.outward === false && automation.triggerType !== "command") {
+      const prior = getDb().prepare("SELECT ts, payload_json FROM run_events WHERE automation_id = ? AND kind = 'automation_notification_attempt' ORDER BY ts DESC, rowid DESC LIMIT 1")
+        .get(automation.id) as { ts: string; payload_json: string } | undefined;
+      if (prior && repeatsLastReport(JSON.parse(prior.payload_json), input, digest) && Date.now() - Date.parse(prior.ts) < AUTOMATION_REPORT_SPACING_MS) {
+        recordRunEvent({ runId: input.runId, automationId: automation.id, kind: "automation_notification_suppressed",
+          sourceEventId: `automation-notification:${automation.id}:${input.runId}`, evidencePhase: "observed",
+          payload: { status: input.status, observationDigest: digest, reason: "spaced", deliveryState: "suppressed" } });
+        return false;
+      }
+    }
     recordRunEvent({ runId: input.runId, automationId: automation.id, kind: "automation_notification_attempt",
       sourceEventId: `automation-notification:${automation.id}:${input.runId}`, evidencePhase: "requested",
-      payload: { status: input.status, observationDigest: digest, policy: automation.monitor?.notificationPolicy ?? "every_run",
+      payload: { status: input.status, outcome: input.outcome ?? null, observationDigest: digest, policy: automation.monitor?.notificationPolicy ?? "every_run",
         deliveryState: "attempted", executionAvailability: "app-running" } });
     return true;
   }).immediate();

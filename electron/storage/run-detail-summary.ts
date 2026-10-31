@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
 
 /**
@@ -7,12 +6,13 @@ import type Database from "better-sqlite3";
  * digests the tools recorded (automation-progress-guard.ts toolObservationDigest). Arguments, results and text are not
  * kept.
  *
- * One row per run, written when a run on an agent-file revision finishes (mcp/client.ts, next to its revision receipt) and
- * refreshed by the trim just before it deletes the rows, so a run that went on after its first finish is summarized whole.
- * The revision comparison (electron/agents/revision-outcomes.ts) reads only this row: reading the tool rows themselves
- * took about 250 ms for one agent's 329 runs on one ledger, and the workspace is read at every run start.
+ * It lives on the run's own `agent_revision_run_finished` receipt (payload.toolSummary), the row the revision comparison
+ * already reads for each run. No new kind of event exists, and the comparison needs no further query: a separate summary row
+ * had to be looked up per run, and a lookup that finds nothing reads every event of the run (73,626 events took 297 ms on the
+ * a real ledger), at every run start. The receipt gets the summary when the run finishes (mcp/client.ts); the trim adds it
+ * to a receipt that has none (a run that finished before the summary existed) just before it deletes the tool rows.
  */
-export const RUN_DETAIL_SUMMARY_KIND = "run_detail_summary";
+const RECEIPT_KIND = "agent_revision_run_finished";
 const SCHEMA = "agentlas.run-detail-summary.v1";
 const MAX_TOOLS = 24;
 const MAX_DIGESTS = 16;
@@ -35,10 +35,13 @@ const text = (value: unknown): string => String(value).slice(0, MAX_TEXT);
 
 /** From the live tool-call rows; null when the run has none (never had any, or they were trimmed). */
 export function summarizeRunToolDetail(db: Database.Database, runId: string): RunToolSummary | null {
-  const rows = db.prepare(`SELECT json_extract(payload_json, '$.toolName') AS name, json_extract(payload_json, '$.toolCompleted') AS done,
+  // The valid rows are set apart first (MATERIALIZED): SQL does not promise to test json_valid before json_extract in one WHERE,
+  // and one unreadable payload would throw out of the whole read.
+  const rows = db.prepare(`WITH tools AS MATERIALIZED (SELECT seq, payload_json FROM run_events WHERE run_id = ? AND kind = 'mcp_tool-use' AND json_valid(payload_json))
+    SELECT json_extract(payload_json, '$.toolName') AS name, json_extract(payload_json, '$.toolCompleted') AS done,
     json_extract(payload_json, '$.toolIsError') AS isError, json_extract(payload_json, '$.toolFailureCode') AS code,
     json_extract(payload_json, '$.toolObservationDigest') AS digest
-    FROM run_events WHERE run_id = ? AND kind = 'mcp_tool-use' AND json_extract(payload_json, '$.toolName') IS NOT NULL ORDER BY seq`)
+    FROM tools WHERE json_extract(payload_json, '$.toolName') IS NOT NULL ORDER BY seq`)
     .all(runId) as ToolRow[];
   if (!rows.length) return null;
   const tools = new Map<string, { name: string; calls: number; errors: number }>();
@@ -62,48 +65,22 @@ export function summarizeRunToolDetail(db: Database.Database, runId: string): Ru
   return summary;
 }
 
-function storedRow(db: Database.Database, runId: string): { id: string; payload_json: string } | undefined {
-  return db.prepare(`SELECT id, payload_json FROM run_events WHERE run_id = ? AND kind = '${RUN_DETAIL_SUMMARY_KIND}' ORDER BY seq DESC LIMIT 1`)
-    .get(runId) as { id: string; payload_json: string } | undefined;
-}
-
-/** The kept summary; null for a run that never had one (no tools, or finished before summaries were kept). */
-export function readRunToolSummary(db: Database.Database, runId: string): RunToolSummary | null {
-  const row = storedRow(db, runId);
-  if (!row) return null;
-  try {
-    const value = JSON.parse(row.payload_json) as RunToolSummary;
-    return value?.schemaVersion === SCHEMA ? value : null;
-  } catch { return null; }
-}
-
 /**
- * Writes or refreshes the run's summary from its live tool rows; returns whether it wrote. Tool rows are only added (a run
- * that went on) or deleted (the trim, which may take a large run over several slices), so a summary that would count
- * fewer calls than the kept one is a partly trimmed run and the kept one stays. A new row takes the run's last timestamp,
- * so a settled run stays settled for the trim.
+ * Called by the trim inside its write transaction, before a run's tool-call rows are deleted: puts the summary on the run's
+ * receipts that have none. A receipt that already carries one (written when the run finished) is left as it is.
  */
-export function storeRunToolSummary(db: Database.Database, runId: string): boolean {
+export function keepRunToolSummary(db: Database.Database, runId: string): boolean {
+  const select = (hint: string) => db.prepare(`WITH receipts AS MATERIALIZED (SELECT id, payload_json FROM run_events ${hint} WHERE kind = '${RECEIPT_KIND}' AND run_id = ? AND json_valid(payload_json))
+    SELECT id FROM receipts WHERE json_type(payload_json, '$.toolSummary') IS NULL`);
+  let missing: Array<{ id: string }>;
+  // The kind index reads the few hundred receipts; without it the run's own index would read every event of a very large run.
+  try { missing = select("INDEXED BY idx_run_events_kind_ts").all(runId) as Array<{ id: string }>; }
+  catch { missing = select("").all(runId) as Array<{ id: string }>; }
+  if (!missing.length) return false;
   const summary = summarizeRunToolDetail(db, runId);
   if (!summary) return false;
-  const payload = JSON.stringify(summary), existing = storedRow(db, runId);
-  if (existing) {
-    if (existing.payload_json === payload) return false;
-    const kept = readRunToolSummary(db, runId);
-    if (kept && summary.toolCalls + summary.toolErrors < kept.toolCalls + kept.toolErrors) return false;
-    db.prepare("UPDATE run_events SET payload_json = ? WHERE id = ?").run(payload, existing.id);
-    return true;
-  }
-  const last = db.prepare("SELECT seq, ts, chat_id FROM run_events WHERE run_id = ? ORDER BY seq DESC LIMIT 1").get(runId) as
-    { seq: number; ts: string; chat_id: string | null };
-  db.prepare(`INSERT INTO run_events (id, run_id, seq, ts, kind, chat_id, automation_id, node_id, agent_id, payload_json)
-    VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?)`)
-    .run(`evt_${randomUUID()}`, runId, Number(last.seq) + 1, last.ts, RUN_DETAIL_SUMMARY_KIND, last.chat_id, payload);
+  const update = db.prepare("UPDATE run_events SET payload_json = json_set(payload_json, '$.toolSummary', json(?)) WHERE id = ?");
+  const payload = JSON.stringify(summary);
+  for (const row of missing) update.run(payload, row.id);
   return true;
-}
-
-/** Called by the trim inside its write transaction, before a run's tool-call rows are deleted: only revision runs keep one. */
-export function keepRunToolSummary(db: Database.Database, runId: string): boolean {
-  if (!db.prepare("SELECT 1 FROM run_events WHERE run_id = ? AND kind = 'agent_revision_run_finished' LIMIT 1").get(runId)) return false;
-  return storeRunToolSummary(db, runId);
 }

@@ -599,6 +599,14 @@ export async function autoSelectMcpTools(input: {
    */
   groupRoom?: boolean;
   /**
+   * The conversation is One's own (the personal agent's, or a goal continuation it owns): the only conversation that may hand work to
+   * a teammate, so it carries One Team on every turn instead of waiting for the judge to name it. Observed in use (Hope,
+   * "make it with the improved agent"): the judge picked no One Team tool, `team.start` answered not_available_in_this_run, the plugin
+   * was only recorded as a mid-turn request, and the owner had to write again for the next turn to carry it. Main-derived from the
+   * stored chat (oneTeamDispatchAllowedFor), never from renderer input; the control capability still enforces who may dispatch.
+   */
+  oneOwnConversation?: boolean;
+  /**
    * The conversation is Agentlas Finance: a Work chat of the signed-in owner's Finance project. The Finance plugin is a baseline
    * capability there, so its router rides every turn without an @finance mention (an ordinary question otherwise never reaches
    * the finance.* operations). Main-derived from the stored project binding (assertFinanceWorkChatOwner), never from renderer input.
@@ -674,7 +682,7 @@ export async function autoSelectMcpTools(input: {
   const conversationId = typeof input.conversationId === "string" ? input.conversationId.trim() : "";
   const structuralKeyFor = (fingerprint: string): string => conversationId
     ? [conversationId, input.toolMode ?? "auto", input.hubMode ?? "auto", runtimeCapabilities.nativeBrowser,
-      input.runtimeOutsideBrowser === true ? "outside-browser" : "", input.groupRoom === true ? "group-room" : "", (input.projectBaselinePlugins ?? []).map((plugin) => `project-baseline:${plugin.slug}`).sort().join("+"), input.roomMember === true ? "room-member" : "", fingerprint, [...(input.requiredToolCatalogIds ?? [])].sort().join(","), pluginFingerprint].join("\u0000")
+      input.runtimeOutsideBrowser === true ? "outside-browser" : "", input.groupRoom === true ? "group-room" : "", input.oneOwnConversation === true ? "one-own" : "", (input.projectBaselinePlugins ?? []).map((plugin) => `project-baseline:${plugin.slug}`).sort().join("+"), input.roomMember === true ? "room-member" : "", fingerprint, [...(input.requiredToolCatalogIds ?? [])].sort().join(","), pluginFingerprint].join("\u0000")
     : "";
   const structuralKey = structuralKeyFor(installedFingerprint);
   const goalScopeKeyFor = (fingerprint: string): string => activeGoalScope && structuralKey
@@ -1025,10 +1033,14 @@ export async function autoSelectMcpTools(input: {
   // stays "auto", so a failed probe keeps the old fallback instead of blocking the run.
   const writableGoalRun = activeGoalScope !== null && activeGoalScope.permission !== "read";
   const oneTeamMemberRun = input.autoSelectTools === true;
+  // One's own conversation gets it too: the personal agent asked for the browser (harness_describe tool:agentlas-browser) and was
+  // answered not_available_in_this_run in 5 runs, so it told the owner the browser was not connected and the plugin
+  // was only attached from the next turn.
+  const oneOwnRun = input.oneOwnConversation === true;
   if (
     automaticHostDecision
     && effectiveToolMode === "auto"
-    && (writableGoalRun || oneTeamMemberRun)
+    && (writableGoalRun || oneTeamMemberRun || oneOwnRun)
     && canonicalBrowserAvailable
     && !blockedByHostBinding("agentlas-browser")
     && !neededIds.has("agentlas-browser")
@@ -1036,21 +1048,27 @@ export async function autoSelectMcpTools(input: {
     neededIds.add("agentlas-browser");
     pinnedReasons.set("agentlas-browser", writableGoalRun
       ? "baseline capability: runs under a writable Goal always carry the Agentlas browser"
-      : "baseline capability: One Team member runs always carry the Agentlas browser");
+      : oneTeamMemberRun
+        ? "baseline capability: One Team member runs always carry the Agentlas browser"
+        : "baseline capability: One's own conversation always carries the Agentlas browser");
   }
 
   // Baseline capability: a group room is a team by definition (see AutoSelect input.groupRoom).
   // Carried by every turn, not only by turns whose judge or earlier request named it. It is
   // exempt from the probe cap (like an explicit assignment) so other picks cannot crowd it out.
   const baselineIds = new Set<string>();
-  if (input.groupRoom === true && !blockedByHostBinding(ONE_TEAM_BASELINE_TOOL_ID)
+  // One's own conversation is the same: it is the dispatcher, so the team tools are never a mid-turn request away.
+  if ((input.groupRoom === true || input.oneOwnConversation === true) && !blockedByHostBinding(ONE_TEAM_BASELINE_TOOL_ID)
     && MCP_TOOL_CATALOG.some((entry) => entry.id === ONE_TEAM_BASELINE_TOOL_ID)) {
+    const scope = input.groupRoom === true ? "group room" : "One's own conversation";
     baselineIds.add(ONE_TEAM_BASELINE_TOOL_ID);
     neededIds.add(ONE_TEAM_BASELINE_TOOL_ID);
-    pinnedReasons.set(ONE_TEAM_BASELINE_TOOL_ID, "baseline capability: a group room is a team, so every turn carries One Team");
+    pinnedReasons.set(ONE_TEAM_BASELINE_TOOL_ID, input.groupRoom === true
+      ? "baseline capability: a group room is a team, so every turn carries One Team"
+      : "baseline capability: One's own conversation hands work to teammates, so every turn carries One Team");
     const owner = pluginCandidates.find((plugin) => plugin.toolIds.includes(ONE_TEAM_BASELINE_TOOL_ID));
     if (owner && !routedPlugins.some((routed) => routed.slug === owner.slug)) {
-      routedPlugins.push({ slug: owner.slug, name: owner.name, reason: "baseline capability: group room", source: "baseline",
+      routedPlugins.push({ slug: owner.slug, name: owner.name, reason: `baseline capability: ${scope}`, source: "baseline",
         hasSkills: owner.hasSkills, toolIds: [...owner.toolIds] });
     }
   }

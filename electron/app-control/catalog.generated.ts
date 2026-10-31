@@ -83,6 +83,7 @@ export const APP_CONTROL_CATALOG: readonly AppControlCatalogEntry[] = [
   {"path":"agentWorkspace.prepareRollback","surface":"desktop","channel":"agentWorkspace:prepareRollback","params":["input"],"invokeArgs":[{"param":"input"}],"signature":"(input)","doc":""},
   {"path":"agentWorkspace.readFile","surface":"desktop","channel":"agentWorkspace:readFile","params":["agentId","relativePath"],"invokeArgs":[{"param":"agentId"},{"param":"relativePath"}],"signature":"(agentId, relativePath)","doc":""},
   {"path":"agentWorkspace.reject","surface":"desktop","channel":"agentWorkspace:reject","params":["input"],"invokeArgs":[{"param":"input"}],"signature":"(input)","doc":""},
+  {"path":"agentWorkspace.setAutoEvolution","surface":"desktop","channel":"agentWorkspace:setAutoEvolution","params":["input"],"invokeArgs":[{"param":"input"}],"signature":"(input)","doc":""},
   {"path":"agentWorkspace.sync","surface":"desktop","channel":"agentWorkspace:sync","params":["input"],"invokeArgs":[{"param":"input"}],"signature":"(input)","doc":""},
   {"path":"agi.bugReportList","surface":"desktop","channel":"agi:bugReportList","params":[],"invokeArgs":[],"signature":"()","doc":""},
   {"path":"agi.bugReportPreview","surface":"desktop","channel":"agi:bugReportPreview","params":["input"],"invokeArgs":[{"param":"input"}],"signature":"(input: import(\"./agi\").AgiBugReportDraftInput)","doc":"Builds and stores the exact redacted payload; sends nothing."},

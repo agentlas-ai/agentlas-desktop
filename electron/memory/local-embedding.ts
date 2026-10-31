@@ -65,6 +65,7 @@ const MODEL_DISCOVERY_MISS_TTL_MS = 5_000;
 // verified ~200 ms synchronous reload pause. Ten minutes of embedding inactivity
 // returns the ~150 MB of model buffers to the OS; Main and the daemon each hold a copy.
 const DEFAULT_MODEL_IDLE_EVICTION_MS = 10 * 60_000;
+const HASH_CHUNK_BYTES = 1024 * 1024;
 const HASH_MIN_VECTOR_SCORE = 0.08;
 // A noise floor, not a precision gate — precision comes from the reciprocal-rank
 // fusion below. Calibrated against the multilingual asset, where a genuine match
@@ -244,8 +245,37 @@ function exactFileRecords(value: unknown, expected: Record<string, AssetFileReco
   });
 }
 
+/**
+ * Loading the 128 MB matrix used to hold it three times at once: whole files to hash them, whole files again to keep
+ * them, and the concatenated copy. Main reached 860 MB RSS on a first load, and a load can land on a turn.
+ */
 function sha256File(file: string): string {
-  return createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+  const digest = createHash("sha256");
+  const chunk = Buffer.allocUnsafe(HASH_CHUNK_BYTES);
+  const descriptor = fs.openSync(file, "r");
+  try {
+    for (let read = fs.readSync(descriptor, chunk); read > 0; read = fs.readSync(descriptor, chunk)) {
+      digest.update(chunk.subarray(0, read));
+    }
+  } finally {
+    fs.closeSync(descriptor);
+  }
+  return digest.digest("hex");
+}
+
+function readFilesTogether(files: string[]): Buffer {
+  const whole = Buffer.allocUnsafe(files.reduce((sum, file) => sum + fs.statSync(file).size, 0));
+  let offset = 0;
+  for (const file of files) {
+    const descriptor = fs.openSync(file, "r");
+    try {
+      for (let read = -1; read !== 0; offset += read) read = fs.readSync(descriptor, whole, offset, whole.length - offset, null);
+    } finally {
+      fs.closeSync(descriptor);
+    }
+  }
+  if (offset !== whole.length) throw new Error("model asset changed while loading");
+  return whole;
 }
 
 function verifiedFile(root: string, name: string, record: AssetFileRecord): string {
@@ -386,7 +416,7 @@ function verifyModelDirectory(directory: string): ModelDescriptor | null {
       vocabSize,
       vocab,
       unknownTokenId,
-      embeddings: Buffer.concat(embeddingParts.map((name) => fs.readFileSync(resolved[name]))),
+      embeddings: readFilesTogether(embeddingParts.map((name) => resolved[name])),
       scales: fs.readFileSync(resolved["scales.f32le"]),
     };
   } catch {

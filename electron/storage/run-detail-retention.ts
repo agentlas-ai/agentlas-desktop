@@ -24,7 +24,8 @@ import { keepRunToolSummary } from "./run-detail-summary";
  *
  * Domain events, effects, results, accounting and errors are never touched.
  * Before a run on an agent-file revision loses its tool-call rows, a small summary of them (tool names, first failure,
- * output digests) is kept (run-detail-summary.ts), so the revision comparison still counts that run the same way.
+ * output digests) goes onto the run's revision receipt (run-detail-summary.ts), so the revision comparison still counts that
+ * run the same way.
  */
 
 export const RUN_DETAIL_TEXT_KINDS = ["mcp_reasoning", "mcp_thinking"] as const;
@@ -106,7 +107,7 @@ export function retireRunDetailSlice(
   const updatePayload = db.prepare("UPDATE run_events SET payload_json = ? WHERE id = ?");
   let budget = options.maxRows ?? 300;
   const trimChunk = db.transaction((runId: string): void => {
-    keepRunToolSummary(db, runId);
+    try { keepRunToolSummary(db, runId); } catch { /* The summary is best effort; the trim itself must go on. */ }
     const removedText = deleteText.run(runId, budget).changes;
     budget -= removedText;
     const removedCalls = budget > 0 ? deleteChatCalls.run(runId, budget).changes : 0;

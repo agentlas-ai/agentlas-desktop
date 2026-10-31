@@ -1,116 +1,323 @@
-.root{height:100dvh;display:flex;background:var(--paper-3);color:var(--ink);overflow:hidden;font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.root *{box-sizing:border-box}.root button:not(:where([data-intellect-ui] *)),.root textarea:not(:where([data-intellect-ui] *)),.root select:not(:where([data-intellect-ui] *)),.root input:not(:where([data-intellect-ui] *)){font:inherit;color:inherit}.navigation button,.header button,.composerDock button,.taskContents button{cursor:pointer;border:1px solid var(--paper-edge);border-radius:10px;background:var(--paper);padding:9px 12px;text-align:left;display:inline-flex;align-items:center;gap:8px}.navigation button:hover,
-.header button:hover,
-.composerDock button:hover,
-.taskContents button:hover { color: var(--ink); }.root button:not(:where([data-intellect-ui] *)):focus-visible,.root textarea:not(:where([data-intellect-ui] *)):focus-visible,.root input:not(:where([data-intellect-ui] *)):focus-visible,.root select:not(:where([data-intellect-ui] *)):focus-visible{outline:2px solid var(--personal-bubble);outline-offset:2px}.root button:not(:where([data-intellect-ui] *)):disabled{opacity:.5;cursor:default}.root textarea:not(:where([data-intellect-ui] *)),.root select:not(:where([data-intellect-ui] *)),.root input:not(:where([data-intellect-ui] *)){border:1px solid var(--paper-edge);border-radius:10px;background:var(--paper);padding:10px;width:100%}.root textarea:not(:where([data-intellect-ui] *)){resize:vertical;min-height:64px}
-.navigation{width:218px;flex:0 0 218px;padding:14px 10px;display:flex;flex-direction:column;gap:10px;border-right:1px solid var(--paper-edge)}.personalEntry{width:100%;flex-direction:row;align-items:center!important;gap:10px!important;background:var(--paper)!important;border-color:transparent!important;min-height:52px;padding:9px 12px!important}.personalIdentity{display:flex;flex-direction:column;gap:2px;min-width:0;line-height:1.35}.personalIdentity strong{font-size:13px;font-weight:600}.personalEntry small{font-size:11px;color:var(--muted)}.tabs{display:flex;background:var(--paper-3);border-radius:10px;padding:3px}.tabs button{border:0;background:transparent;font-size:11px;padding:8px 4px;flex:1;justify-content:center;white-space:nowrap}.navigationLinks{display:flex;flex-direction:column;gap:3px;margin-top:16px}.navigationLinks button{background:transparent;border:0;font-size:12px}.localLabel{margin:auto 10px 0;color:var(--muted);font-size:11px}
-.conversation{display:flex;flex:1;flex-direction:column;min-height:0;min-width:0;margin:8px 8px 8px 0;background:var(--paper);border:1px solid var(--paper-edge);border-radius:14px;overflow:hidden}.header{height:54px;flex:0 0 54px;padding:10px 22px;display:flex;align-items:center;justify-content:space-between}.header h1{font-size:14px;font-weight:600;line-height:20px;margin:0}.header>div{display:flex;align-items:center;gap:6px}.header button{min-height:32px;line-height:16px;border:0;background:transparent;font-size:12px;justify-content:center;padding:6px 8px}.root .iconButton{display:inline-flex;align-items:center;justify-content:center;border:0;background:transparent;width:32px;height:32px;padding:6px;flex:0 0 32px}
-.transcript{flex:1;overflow:auto;min-height:0;overscroll-behavior:contain;padding:12px 24px 20px}.thread{max-width:736px;margin:auto;display:flex;flex-direction:column;gap:14px;min-height:100%;justify-content:flex-end}.turn{display:flex;flex-direction:column;gap:14px}.turn>.delivery{margin-top:-9px}.bubble{background:var(--paper-3);padding:11px 16px;border-radius:22px;width:fit-content;max-width:88%;overflow-wrap:anywhere;align-self:flex-start;line-height:1.65}.bubble[data-role=user]{background:var(--personal-bubble);color:var(--white);align-self:flex-end;max-width:88%}.bubble p:not(:where([data-intellect-ui] *)){margin:0 0 8px}.bubble p:not(:where([data-intellect-ui] *)):last-child{margin-bottom:0}.bubble ul:not(:where([data-intellect-ui] *)),.bubble ol:not(:where([data-intellect-ui] *)){margin-block:6px;padding-left:22px}.bubble pre:not(:where([data-intellect-ui] *)){max-width:100%;overflow:auto}.bubble[data-role=user] a{color:var(--white);text-decoration:underline}.delivery{margin:0 12px;align-self:flex-end;color:var(--muted);font-size:11px}.empty{margin:auto;text-align:center;color:var(--muted)}.empty h2{font-size:22px;font-weight:500;color:var(--ink)}.empty p{font-size:14px}
-.activity{align-self:flex-start;max-width:88%;border:1px solid var(--paper-edge);border-radius:12px;padding:6px 12px;font-size:12px;color:var(--muted-deep)}.activity summary{cursor:pointer}.activity>div{display:grid;grid-template-columns:1fr auto;gap:4px 14px;margin-top:10px}.activity p{grid-column:1/-1;white-space:pre-wrap;margin:0}.activity small{color:var(--muted)}.activity [data-activity-state=failed]{color:var(--danger)}
-.composerDock{flex:0 0 auto;width:min(100%,784px);align-self:center;padding:0 24px 12px}.composer{width:100%;display:grid;grid-template-columns:28px minmax(0,1fr) auto 28px;grid-template-areas:"plus text mic send";align-items:center;column-gap:0;border:1px solid var(--paper-edge);border-radius:23px;padding:8px;background:var(--paper);box-shadow:0 0 16px rgba(0,0,0,.04),0 2px 6px rgba(0,0,0,.03)}.composer[data-expanded=true]{grid-template-areas:"text text text text" "plus . mic send";grid-template-rows:auto 28px;row-gap:3px;padding:3px 8px 8px;border-radius:20px}.composer .plus{grid-area:plus;align-self:center}.composer .plus .iconButton{width:28px;height:28px;flex:0 0 28px;padding:0;border:0;background:transparent;display:grid;place-items:center}.composer .voice{grid-area:mic;margin-right:8px;display:grid;place-items:center}.composer .trail{grid-area:mic;display:flex;align-items:center;justify-content:flex-end;gap:2px;min-width:0}.composer .trail [data-one-composer-trigger]{min-height:28px;height:28px;padding:0 10px;border:0;border-radius:8px;background:transparent;color:var(--muted-deep);font-size:12px;line-height:16px;gap:5px}.composer .trail [data-one-composer-trigger]:hover,.composer .trail [data-one-composer-trigger][aria-expanded=true]{background:var(--paper-3);color:var(--ink)}.composer .trail [data-one-composer-trigger] span{max-width:120px}.composer .trail [data-one-composer-trigger][data-failed=true]{color:var(--danger)}.composer .voice button{width:28px;min-height:28px;height:28px;padding:0;border:0;border-radius:50%;background:transparent;font-size:12px;outline:0}.composer .voice button:hover { color: var(--ink); }.composer .voice svg{width:12px;height:12px}.root .composer textarea{grid-area:text;min-height:28px;max-height:140px;width:100%;resize:none;border:0;background:transparent;margin:0 0 0 1px;padding:2px 4px;line-height:24px;border-radius:0;outline:0;overflow:auto}.composer[data-expanded=true] textarea{min-height:48px;margin:0;padding:0 4px}.root .composer textarea::placeholder{color:var(--muted)}.root .send{grid-area:send;border:0;border-radius:50%;padding:0;width:28px;height:28px;display:grid;place-items:center;background:var(--personal-bubble);color:var(--white)}.root .stopReply{background:transparent;border:0;display:block;margin:5px auto 0;padding:3px 8px;font-size:11px;color:var(--muted-deep)}.taskChips{display:flex;gap:6px;overflow:auto;padding:0 0 8px}.taskChips button{padding:5px 9px;font-size:11px;white-space:nowrap;background:transparent}.taskChips span{max-width:160px;overflow:hidden;text-overflow:ellipsis}.taskChips small{color:var(--muted)}.feedback{font-size:12px;color:var(--muted-deep);margin:4px 0 8px;line-height:1.5}.root .retry{background:transparent;padding:4px 8px;margin-bottom:6px;font-size:11px}
-.taskContents{padding:16px;display:flex;flex-direction:column;gap:12px;line-height:1.6}.taskContents header{display:flex;justify-content:space-between;align-items:center}.taskContents h2,.taskContents h3{font-size:15px;font-weight:600;margin:0}.taskContents label,.appearance label{display:flex;flex-direction:column;gap:7px;font-size:12px}.taskList{display:flex;flex-direction:column;gap:8px}.taskList button{flex-direction:column;align-items:flex-start;gap:4px}.taskList button[data-selected=true]{border-color:var(--personal-bubble)}.taskList span,.taskList small{font-size:11px;color:var(--muted-deep)}.detail{border-top:1px solid var(--paper-edge);padding-top:12px;display:flex;flex-direction:column;gap:9px;overflow-wrap:anywhere}.appearance{display:flex;flex-direction:column;gap:16px}.preview{align-self:flex-end;border-radius:20px;color:var(--white);padding:10px 16px;margin:0}
-@media(max-width:1050px){.navigation{width:190px;flex-basis:190px}}
-@media(max-width:780px){.root{flex-direction:column}.navigation{width:100%;flex:0 0 auto;padding:6px 10px;display:flex;gap:5px;border:0}.navigation>div:first-child,.navigationLinks,.localLabel{display:none}.personalEntry{min-height:34px}.personalEntry small{display:none}.tabs{min-height:30px}.conversation{margin:0;flex:1;border-radius:12px 12px 0 0}.header{height:44px;flex-basis:44px;padding:6px 16px}.transcript{padding:10px 16px}.composerDock{padding:0 12px 10px}.outputPanel[data-visible=true]{display:block;position:absolute;right:0;bottom:var(--personal-composer-height,96px);top:156px;z-index:10;width:100%;box-shadow:var(--shadow-2)}.outputPanel>aside{width:100%!important;max-width:100%;height:100%}.bubble{max-width:94%}.taskChips span{max-width:115px}}
-@media(prefers-reduced-motion:reduce){.root *{scroll-behavior:auto}}
-.root .delegation{align-self:flex-start;max-width:88%;padding:8px 12px;background:transparent;border-radius:12px;gap:10px}.root .goToTask{justify-content:center;border-radius:24px;background:var(--black);color:var(--white);margin-top:12px}.filePanel{width:clamp(360px,44vw,800px);flex:0 0 clamp(360px,44vw,800px);min-height:0;display:flex;flex-direction:column;border-left:1px solid var(--paper-edge);background:var(--paper)}.filePanel>header{height:54px;display:flex;align-items:center;justify-content:space-between;padding:10px 16px;gap:8px;border-bottom:1px solid var(--paper-edge)}.filePanel>header>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px}.fileStage{flex:1;min-height:0;overflow:auto;padding:12px}.fileStage pre{white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.6 var(--font-mono,monospace)}.fileStage>p{color:var(--muted-deep);font-size:13px}.bubble table:not(:where([data-intellect-ui] *)){display:block;overflow:auto;border-collapse:collapse;max-width:100%}.bubble td:not(:where([data-intellect-ui] *)),.bubble th:not(:where([data-intellect-ui] *)){border:1px solid var(--paper-edge);padding:6px 9px;text-align:left}.bubble img:not(:where([data-intellect-ui] *)){max-width:100%}
-@media(max-width:780px){.filePanel{position:absolute;inset:145px 0 0;width:100%;z-index:12;box-shadow:var(--shadow-2)}.root .delegation{max-width:94%}.header h1{max-width:140px;overflow:hidden;text-overflow:ellipsis}.header>div{gap:1px}}
-.appearance input,.appearance select{width:100%;min-height:44px;border:1px solid var(--paper-edge-strong);border-radius:10px;background:var(--paper);color:var(--ink);font:inherit;padding:10px}.appearance input:focus-visible,.appearance select:focus-visible{outline:none}.saveAppearance:focus-visible{outline:2px solid var(--accent);outline-offset:2px}.saveAppearance{border:0;border-radius:22px;background:var(--black);color:var(--white);font:inherit;padding:10px 22px;cursor:pointer;min-height:44px}.saveAppearance:disabled{opacity:.5;cursor:default}
-.decisionStack{max-height:min(400px,45dvh);overflow:auto;overscroll-behavior:contain}
-.root{--personal-bubble:var(--accent)}
+/*
+ * Hope (the personal agent) screen, in iMessage's look: a centred round avatar with a glass name pill and round glass
+ * buttons over a transcript that scrolls under a soft blur; gray incoming and saturated outgoing bubbles with a tail on the last bubble
+ * of a run; centred gray time stamps; a round + beside a thin-bordered pill that holds the text, the model chips and the mic, with the
+ * round send arrow only when there is something to send; gray cards with pill buttons for questions and approvals.
+ * Style and layout only: every control and its behaviour is the one the screen had before.
+ */
+
+/* The palette. A `:root` block is a token block (scripts/gate-colour-tokens.cjs); the shared token block in globals.css is outside
+   this screen's files, so the iMessage values live here, once, and every rule below reads them. Dark follows the app's own switch
+   (<html data-theme="dark">, renderer/lib/theme.tsx): iMessage dark is pure black with a dark-gray incoming bubble. */
+:root .root{
+  --im-bg:#ffffff;--im-side:#f2f2f7;--im-in:#e9e9eb;--im-in-strong:#dedee2;--im-ink:#000000;--im-sub:#636366;--im-hair:#d1d1d6;
+  --im-font:-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI Variable Text","Segoe UI","Apple SD Gothic Neo","Malgun Gothic","Noto Sans KR","Pretendard Variable",system-ui,sans-serif;
+}
+:root[data-theme="dark"] .root{
+  --im-bg:#000000;--im-side:#1c1c1e;--im-in:#262629;--im-in-strong:#3a3a3e;--im-ink:#ffffff;--im-sub:#98989f;--im-hair:#38383a;
+  --paper:#000000;--paper-2:#1c1c1e;--paper-3:#262629;--paper-edge:#38383a;--paper-edge-strong:#48484a;--ink:#ffffff;--ink-soft:#c7c7cc;--muted:#8e8e93;--muted-deep:#98989f;
+}
+.root{
+  --personal-bubble:var(--accent);
+  --im-glass:color-mix(in srgb,var(--im-bg) 70%,transparent);
+  --im-glass-edge:color-mix(in srgb,var(--im-ink) 9%,transparent);
+  --im-lift:0 1px 5px color-mix(in srgb,var(--im-ink) 16%,transparent);
+  --hope-header-h:92px;
+  --font-body:var(--im-font);--font-head:var(--im-font);--design-font-sans:var(--im-font);
+}
+
+.root{position:relative;width:100%;height:100dvh;display:flex;background:var(--im-side);color:var(--im-ink);overflow:hidden;font:14px/1.5 var(--im-font)}
+.root *{box-sizing:border-box}
+.root button:not(:where([data-intellect-ui] *)),.root textarea:not(:where([data-intellect-ui] *)),.root select:not(:where([data-intellect-ui] *)),.root input:not(:where([data-intellect-ui] *)){font:inherit;color:inherit}
+.navigation button,.header button,.composerDock button:not(:where(.decisionStack *)),.taskContents button{cursor:pointer;border:1px solid var(--im-hair);border-radius:12px;background:var(--im-bg);padding:9px 12px;text-align:left;display:inline-flex;align-items:center;gap:8px}
+.navigation button:hover,.header button:hover,.composerDock button:not(:where(.decisionStack *)):hover,.taskContents button:hover{color:var(--ink)}
+.root button:not(:where([data-intellect-ui] *)):focus-visible,.root textarea:not(:where([data-intellect-ui] *)):focus-visible,.root input:not(:where([data-intellect-ui] *)):focus-visible,.root select:not(:where([data-intellect-ui] *)):focus-visible{outline:2px solid var(--personal-bubble);outline-offset:2px}
+.root button:not(:where([data-intellect-ui] *)):disabled{opacity:.5;cursor:default}
+.root textarea:not(:where([data-intellect-ui] *)),.root select:not(:where([data-intellect-ui] *)),.root input:not(:where([data-intellect-ui] *)){border:1px solid var(--im-hair);border-radius:12px;background:var(--im-bg);padding:10px;width:100%}
+.root textarea:not(:where([data-intellect-ui] *)){resize:vertical;min-height:64px}
+
+/* ── Sidebar: the Messages list's gray column; Hope is the selected row ── */
+.navigation{width:218px;flex:0 0 218px;padding:14px 10px;display:flex;flex-direction:column;gap:10px;background:var(--im-side);border-right:1px solid var(--im-hair)}
+.navigation button{background:transparent;border-color:transparent}
+.navigation button:hover{background:color-mix(in srgb,var(--im-ink) 6%,transparent)}
+.personalEntry{width:100%;flex-direction:row;align-items:center!important;gap:10px!important;background:var(--personal-bubble)!important;color:var(--white)!important;border-color:transparent!important;border-radius:14px!important;min-height:56px;padding:8px 12px!important}
+.personalIdentity{display:flex;flex-direction:column;gap:2px;min-width:0;line-height:1.35}
+.personalIdentity strong{font-size:14px;font-weight:600}
+.personalEntry small{font-size:11.5px;color:var(--white-soft)}
+.tabs{display:flex;background:color-mix(in srgb,var(--im-ink) 7%,transparent);border-radius:10px;padding:3px}
+.tabs button{border:0;background:transparent;font-size:11.5px;padding:7px 4px;flex:1;justify-content:center;white-space:nowrap;border-radius:8px}
+.navigationLinks{display:flex;flex-direction:column;gap:2px;margin-top:14px}
+.navigationLinks button{background:transparent;border:0;font-size:13px;border-radius:10px}
+.localLabel{margin:auto 10px 0;color:var(--im-sub);font-size:11px}
+.navigation[hidden]{display:none}
+
+/* ── The conversation: no card, the pane is the page; the header floats over it ── */
+.conversation{position:relative;display:flex;flex:1;flex-direction:column;min-height:0;min-width:0;margin:0;background:var(--im-bg);overflow:hidden}
+.header{position:absolute;inset:0 0 auto 0;z-index:6;height:var(--hope-header-h);padding:10px 16px 0;display:grid;grid-template-columns:minmax(0,1fr) auto minmax(0,1fr);align-items:start;pointer-events:none}
+/* Content scrolls under a soft blur: the glass fades out below the header instead of ending on a line. */
+.header::before{content:"";position:absolute;inset:0 0 -24px 0;z-index:-1;-webkit-backdrop-filter:blur(20px) saturate(1.7);backdrop-filter:blur(20px) saturate(1.7);background:linear-gradient(to bottom,color-mix(in srgb,var(--im-bg) 92%,transparent) 0,color-mix(in srgb,var(--im-bg) 82%,transparent) 70%,transparent);-webkit-mask-image:linear-gradient(to bottom,black 74%,transparent);mask-image:linear-gradient(to bottom,black 74%,transparent)}
+.header>*{pointer-events:auto}
+.headerSide{display:flex;align-items:center;gap:8px;min-width:0;padding-top:2px}
+.headerSide[data-side=end]{justify-content:flex-end}
+.headerIdentity{display:flex;flex-direction:column;align-items:center;min-width:0;max-width:100%}
+.headerAvatar{display:grid;place-items:center;width:46px;height:46px;border-radius:50%;overflow:hidden;background:color-mix(in srgb,var(--personal-bubble) 16%,var(--im-bg));box-shadow:0 0 0 .5px var(--im-glass-edge)}
+.headerAvatar>span{transform:scale(1)}
+.header h1{position:relative;margin:-9px 0 0;padding:3px 12px;max-width:min(240px,100%);border-radius:999px;background:var(--im-glass);-webkit-backdrop-filter:blur(14px) saturate(1.8);backdrop-filter:blur(14px) saturate(1.8);box-shadow:var(--im-lift),0 0 0 .5px var(--im-glass-edge);font-size:13px;font-weight:600;line-height:20px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.headerIdentity small{margin-top:3px;max-width:100%;font-size:10.5px;line-height:13px;color:var(--im-sub);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.header button{min-height:32px;line-height:16px;border:0;background:transparent;font-size:12px;justify-content:center;padding:6px 8px}
+.root .iconButton{display:inline-flex;align-items:center;justify-content:center;border:0;background:transparent;width:32px;height:32px;padding:6px;flex:0 0 32px}
+/* Round glass buttons, left and right of the avatar. */
+.root .header .iconButton{width:40px;height:40px;flex:0 0 40px;padding:0;border-radius:50%;background:var(--im-glass);-webkit-backdrop-filter:blur(14px) saturate(1.8);backdrop-filter:blur(14px) saturate(1.8);box-shadow:var(--im-lift),0 0 0 .5px var(--im-glass-edge);color:var(--im-ink)}
+.root .header .iconButton:hover{background:var(--im-bg)}
+.root .header .iconButton[aria-pressed=true],.root .header .iconButton[aria-expanded=true]{color:var(--personal-bubble)}
+.headerMenu{position:absolute;z-index:18;right:14px;top:calc(var(--hope-header-h) - 14px);display:flex;flex-direction:column;gap:2px;padding:6px;min-width:210px;max-width:calc(100% - 28px);background:var(--im-bg);border:1px solid var(--im-hair);border-radius:18px;box-shadow:var(--shadow-2)}
+.headerMenu button{display:flex;gap:8px;align-items:center;justify-content:space-between;background:transparent;border:0;border-radius:12px;min-height:38px;padding:8px 12px;color:var(--im-ink);font:inherit;text-align:left;cursor:pointer}
+.headerMenu button:hover{background:var(--im-in)}
+
+/* ── Transcript ── */
+.transcript{flex:1;overflow:auto;min-height:0;overscroll-behavior:contain;padding:calc(var(--hope-header-h) + 4px) 24px 12px}
+.thread{max-width:736px;margin:auto;display:flex;flex-direction:column;min-height:100%;justify-content:flex-end}
+.thread>button[data-personal-one-history]{align-self:center;margin:6px 0}
+.empty{margin:auto;text-align:center;color:var(--im-sub)}
+.empty h2{font-size:22px;font-weight:500;color:var(--im-ink)}
+.empty p{font-size:14px}
+/* Time groups: the gap between groups is wide, the gap inside a run is tight. */
+.stamp{align-self:center;margin:22px 0 10px;font-size:11px;line-height:14px;color:var(--im-sub)}
+.stamp b{font-weight:600}
+.turn{display:flex;flex-direction:column;gap:3px;margin-top:12px}
+.stamp+.turn{margin-top:0}
+.turn[data-role=user]+.turn[data-role=user],.turn[data-role=assistant]+.turn[data-role=assistant]{margin-top:2px}
+.sender{align-self:flex-start;margin:0 0 1px 14px;font-size:11px;line-height:14px;color:var(--im-sub)}
+.turn[data-role=user]>img{align-self:flex-end}
+.turn[data-role=assistant]>img{align-self:flex-start}
+
+.bubble{--accent:var(--personal-bubble);position:relative;background:var(--im-in);color:var(--im-ink);padding:8px 14px;border-radius:19px;width:fit-content;max-width:min(76%,560px);overflow-wrap:anywhere;word-break:keep-all;align-self:flex-start;font-size:15px;line-height:1.4}
+.bubble[data-role=user]{--ink:var(--white);--ink-soft:var(--white-soft);background:var(--personal-bubble);color:var(--white);align-self:flex-end}
+/* The inline design surface of each Markdown block sets 14px / 1.65 itself; a bubble reads at message size. */
+.bubble [data-design-surface]{font-size:15px!important;line-height:1.42!important}
+.bubble>[data-design-surface]{position:relative;z-index:2}
+.bubble>[data-design-surface]:first-of-type>:first-child{margin-top:0!important}
+.bubble>[data-design-surface]:last-of-type>:last-child{margin-bottom:0!important}
+.bubble p:not(:where([data-intellect-ui] *)){margin:0 0 8px}
+.bubble p:not(:where([data-intellect-ui] *)):last-child{margin-bottom:0}
+.bubble ul:not(:where([data-intellect-ui] *)),.bubble ol:not(:where([data-intellect-ui] *)){margin-block:6px;padding-left:22px}
+.bubble pre:not(:where([data-intellect-ui] *)){max-width:100%;overflow:auto}
+.bubble[data-role=user] a{color:var(--white);text-decoration:underline}
 .bubble[data-role=user] [data-design-surface="report"]{color:inherit}
+.bubble table:not(:where([data-intellect-ui] *)){display:block;overflow:auto;border-collapse:collapse;max-width:100%}
+.bubble td:not(:where([data-intellect-ui] *)),.bubble th:not(:where([data-intellect-ui] *)){border:1px solid var(--im-hair);padding:6px 9px;text-align:left}
+.bubble img:not(:where([data-intellect-ui] *)){max-width:100%}
+.bubble :is(p,li):not(:where([data-intellect-ui] *)){line-height:1.45}
+/* A long structured answer (headings, lists, tables, code, quotes, or many blocks) takes a wide bubble. */
+.bubble:is(:has(pre,table,h1,h2,h3,ul,ol,blockquote),:has(>[data-design-surface]:nth-of-type(4))){max-width:min(100%,720px)}
+.bubble:is(:has(pre,table,h1,h2,h3,ul,ol,blockquote),:has(>[data-design-surface]:nth-of-type(4))) [data-design-surface]{line-height:1.55!important}
+/* An interactive surface answers on the page, not in a bubble. */
+.bubble[data-role=assistant]:has([data-intellect-ui]){width:100%;max-width:100%;padding:0;border:0;border-radius:0;background:transparent;box-shadow:none}
+.bubble[data-role=assistant]:has([data-intellect-ui])::before,.bubble[data-role=assistant]:has([data-intellect-ui])::after{display:none}
 
-.outputPanel{display:block;flex:0 0 var(--personal-panel-width,360px);width:var(--personal-panel-width,360px);min-width:0;margin:8px 8px 8px 0}.outputPanel>aside{position:relative!important;inset:auto!important;width:100%!important;height:100%;margin:0}.outputPanel[data-visible=false]{display:none}.taskContents p{margin:0;line-height:1.6}.taskContents .detail{border-top:1px solid var(--paper-edge)}
+/* Outputs (pictures, video, audio, slide and document tiles) keep their frameless shadow look and have no bubble around them. A
+   :has() cannot hold another :has(), so a "words" block is one whose child is not the output group itself. */
+.bubble:has(>[data-design-surface]>[data-chat-media]):not(:has(>[data-design-surface]>:not([data-chat-media]))){background:transparent;padding:0;border-radius:0;max-width:100%}
+/* Words and an output in one message: the words keep a bubble of their own, the output sits under it. */
+.bubble[data-role=assistant]:has(>[data-design-surface]>[data-chat-media]):has(>[data-design-surface]>:not([data-chat-media])){background:transparent;padding:0;max-width:100%;display:flex;flex-direction:column;align-items:flex-start;gap:2px}
+.bubble[data-role=assistant]:has(>[data-design-surface]>[data-chat-media])>[data-design-surface]:not(:has(>[data-chat-media])){background:var(--im-in);padding:8px 14px;border-radius:19px;max-width:min(76%,560px)}
+.bubble[data-role=assistant]:has(>[data-design-surface]>[data-chat-media])>[data-design-surface]>:is(p:first-child,p:last-child){margin-block:0!important}
 
-.bubble :is(p,li):not(:where([data-intellect-ui] *)){line-height:1.65}.taskContents :is(h2,h3){line-height:1.4}
+/* The tail: only the last bubble of a run, drawn with two quarter-discs (one in the bubble's colour, one in the page's). */
+.bubble::before,.bubble::after{content:"";position:absolute;bottom:0;display:none}
+.turn[data-role=user]:not(:has(+.turn[data-role=user]))>.bubble[data-role=user]::before{display:block;z-index:0;right:-8px;width:20px;height:20px;background:var(--personal-bubble);border-bottom-left-radius:16px 14px}
+.turn[data-role=user]:not(:has(+.turn[data-role=user]))>.bubble[data-role=user]::after{display:block;z-index:1;right:-11px;width:11px;height:20px;background:var(--im-bg);border-bottom-left-radius:10px}
+.turn[data-role=assistant]:not(:has(+.turn[data-role=assistant]))>.bubble[data-role=assistant]::before{display:block;z-index:0;left:-8px;width:20px;height:20px;background:var(--im-in);border-bottom-right-radius:16px 14px}
+.turn[data-role=assistant]:not(:has(+.turn[data-role=assistant]))>.bubble[data-role=assistant]::after{display:block;z-index:1;left:-11px;width:11px;height:20px;background:var(--im-bg);border-bottom-right-radius:10px}
+.bubble:has(>[data-design-surface]>[data-chat-media])::before,.bubble:has(>[data-design-surface]>[data-chat-media])::after,.bubble:has([data-intellect-ui])::before,.bubble:has([data-intellect-ui])::after{display:none!important}
 
-/* Hand-off link (owner 2026-10-04: a 14px status dot squeezed into a blue bar, and filler text). */
-.root .delegation{display:flex;align-items:center;gap:10px;align-self:flex-start;width:min(100%,440px);max-width:100%;margin:2px 0 4px;padding:9px 10px;border:1px solid var(--paper-edge);border-radius:12px;background:var(--paper);color:var(--ink);text-align:left;cursor:pointer}
-.root .delegation:hover { border-color:var(--paper-edge-strong); color: var(--ink); }
-.root .delegation:focus-visible {background:var(--paper-2);border-color:var(--paper-edge-strong)}
-.delegationIcon{display:grid;place-items:center;width:30px;height:30px;flex:0 0 30px;border-radius:8px;background:var(--paper-3);color:var(--ink-soft)}
-.delegationCopy{display:grid;gap:2px;min-width:0;flex:1 1 auto}
-.delegationCopy strong{font-size:13px;font-weight:560;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.delegationCopy small{font-size:11px;color:var(--muted-deep)}
-.root .delegationMeta{display:flex;flex-direction:row;flex:0 0 auto;align-items:center;gap:6px;color:var(--muted-deep)}
-.root .delegationMeta>svg{display:block}
-.root .delegationMeta>svg:first-child:not(:last-child){color:var(--ok)}
-/* The + menu, in the composer menu's look (OneShell .composerPopover). */
-.plus{position:relative;display:flex;align-self:flex-end}
-.root .plusMenu{position:absolute;left:0;bottom:calc(100% + 10px);z-index:20;width:240px;padding:6px;border:1px solid var(--paper-edge);border-radius:12px;background:var(--paper);box-shadow:0 14px 38px rgba(20,25,20,.12);display:grid}
-.root .plusMenu button{width:100%;min-height:36px;display:flex;align-items:center;gap:9px;padding:6px 10px;border:0;border-radius:8px;background:transparent;color:var(--ink);font-size:12.5px;text-align:left;cursor:pointer}
-.root .plusMenu button:hover,.root .plusMenu button:focus-visible{background:var(--paper-3);outline:none}
-.root .plusMenu button strong{font-weight:500}
-.plusIcon{display:grid;place-items:center;width:22px;color:var(--ink-soft)}
-.plusSection{padding:6px 8px 3px;color:var(--muted-deep);font-size:10.5px;font-weight:650}
-.plusDivider{height:1px;margin:5px 6px;background:var(--paper-3)}
-/* While One answers: three dots in a reply bubble, nothing else. */
-.typing{align-self:flex-start;display:inline-flex;gap:5px;padding:12px 14px;border-radius:16px;background:var(--paper-3)}
-.typing span{width:6px;height:6px;border-radius:50%;background:var(--muted-deep);opacity:.35;animation:personalTyping 1.2s infinite ease-in-out}
+/* While Hope answers: the three typing dots, in an incoming bubble. */
+.typing{position:relative;align-self:flex-start;display:inline-flex;gap:5px;padding:14px 16px;border-radius:19px;background:var(--im-in)}
+.typing::before,.typing::after{content:"";position:absolute;bottom:0}
+.typing::before{left:-8px;width:20px;height:20px;background:var(--im-in);border-bottom-right-radius:16px 14px}
+.typing::after{left:-11px;width:11px;height:20px;background:var(--im-bg);border-bottom-right-radius:10px}
+.typing span{width:7px;height:7px;border-radius:50%;background:var(--im-sub);opacity:.35;animation:personalTyping 1.2s infinite ease-in-out}
 .typing span:nth-child(2){animation-delay:.15s}.typing span:nth-child(3){animation-delay:.3s}
 @keyframes personalTyping{0%,80%,100%{opacity:.25}40%{opacity:.85}}
 @media (prefers-reduced-motion:reduce){.typing span{animation:none;opacity:.5}}
 
+/* A hand-off is a gray card with an icon, like iMessage's app cards. */
+.root .delegation{display:flex;align-items:center;gap:12px;align-self:flex-start;width:min(100%,380px);max-width:100%;margin:4px 0 2px;padding:10px 12px;border:0;border-radius:20px;background:var(--im-in);color:var(--im-ink);text-align:left;cursor:pointer}
+.root .delegation:hover{background:var(--im-in-strong);color:var(--im-ink)}
+.root .delegation:focus-visible{background:var(--im-in-strong)}
+.delegationIcon{display:grid;place-items:center;width:36px;height:36px;flex:0 0 36px;border-radius:50%;background:var(--im-bg);color:var(--personal-bubble)}
+.delegationCopy{display:grid;gap:2px;min-width:0;flex:1 1 auto}
+.delegationCopy strong{font-size:13.5px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.delegationCopy small{font-size:11.5px;color:var(--im-sub)}
+.root .delegationMeta{display:flex;flex-direction:row;flex:0 0 auto;align-items:center;gap:6px;color:var(--im-sub)}
+.root .delegationMeta>svg{display:block}
+.root .delegationMeta>svg:first-child:not(:last-child){color:var(--ok)}
+
+/* ── Composer: a round + beside a thin-bordered pill; the pill is drawn behind the grid cells it spans ── */
+.composerDock{flex:0 0 auto;width:min(100%,784px);align-self:center;padding:6px 24px 14px}
+.composerDock button:not(:where(.decisionStack *)){background:transparent}
+.composer{position:relative;width:100%;min-height:36px;display:grid;grid-template-columns:28px minmax(0,1fr) auto 28px;grid-template-areas:"plus text mic send";align-items:center;column-gap:0;border:0;padding:0;background:transparent}
+.composer::before{content:"";grid-column:2 / 5;grid-row:1 / -1;align-self:stretch;margin-left:8px;border:1px solid var(--im-hair);border-radius:20px;background:var(--im-bg);pointer-events:none}
+.composer:focus-within::before{border-color:color-mix(in srgb,var(--im-sub) 60%,var(--im-hair))}
+/* Two rows (a second line, attachments, or too narrow for one row): the pill takes the whole width, the + waits outside it. */
+.composer[data-expanded=true],.composer[data-has-files=true]{padding-left:36px}
+.composer[data-expanded=true]::before,.composer[data-has-files=true]::before{grid-column:1 / -1;margin-left:0;border-radius:22px}
+.composer[data-expanded=true]{grid-template-areas:"text text text text" "plus . mic send";grid-template-rows:auto 34px;row-gap:0}
+.composer[data-expanded=true] .plus,.composer[data-has-files=true] .plus{margin-left:-36px}
+.composer .plus{grid-area:plus;align-self:center}
+.composer .plus .iconButton{width:28px;height:28px;flex:0 0 28px;padding:0;border:0;background:var(--im-in);color:var(--im-sub);border-radius:50%;display:grid;place-items:center}
+.composer .plus .iconButton:hover{background:var(--im-in-strong);color:var(--im-ink)}
+.composer .voice{grid-area:mic;margin-right:6px;display:grid;place-items:center}
+.composer .trail{grid-area:mic;display:flex;align-items:center;justify-content:flex-end;gap:2px;min-width:0}
+/* With nothing to send there is no send arrow, so the controls take its place at the pill's right edge. */
+.composer:not([data-ready=true]) .trail{grid-column:3 / 5}
+.composer:not([data-ready=true]) .send{display:none}
+.composer .trail [data-one-composer-trigger]{min-height:28px;height:28px;padding:0 9px;border:0;border-radius:14px;background:transparent;color:var(--im-sub);font-size:12px;line-height:16px;gap:5px}
+.composer .trail [data-one-composer-trigger]:hover,.composer .trail [data-one-composer-trigger][aria-expanded=true]{background:var(--im-in);color:var(--im-ink)}
+.composer .trail [data-one-composer-trigger] span{max-width:120px}
+.composer .trail [data-one-composer-trigger][data-failed=true]{color:var(--danger)}
+.composer .voice button{width:28px;min-height:28px;height:28px;padding:0;border:0;border-radius:50%;background:transparent;color:var(--im-sub);font-size:12px;outline:0}
+.composer .voice button:hover{color:var(--im-ink)}
+.composer .voice svg{width:16px;height:16px}
+.root .composer textarea{grid-area:text;min-height:28px;max-height:140px;width:100%;resize:none;border:0;background:transparent;margin:0;padding:3px 4px 3px 22px;line-height:22px;font-size:15px;border-radius:0;outline:0;overflow:auto;position:relative}
+.composer[data-expanded=true] textarea{min-height:48px;margin:0;padding:10px 14px 0 14px}
+.composer[data-has-files=true] textarea{min-height:28px;margin:0;padding:2px 14px 2px 14px}
+.root .composer textarea::placeholder{color:var(--im-sub);opacity:.8}
+.root .send{grid-area:send;border:0;border-radius:50%;padding:0;width:28px;height:28px;display:grid;place-items:center;background:var(--personal-bubble);color:var(--white);translate:-4px 0;animation:hopeSendIn .14s ease-out}
+.root .send:disabled{opacity:.4}
+@keyframes hopeSendIn{from{opacity:0;scale:.6}to{opacity:1;scale:1}}
+@media(prefers-reduced-motion:reduce){.root .send{animation:none}}
+.root .stopReply{background:transparent;border:0;display:block;margin:6px auto 0;padding:4px 12px;font-size:11.5px;color:var(--im-sub);border-radius:999px}
+.root .stopReply:hover{background:var(--im-in)}
+.feedback{font-size:12px;color:var(--im-sub);margin:4px 0 8px;line-height:1.5}
+.root .retry{background:transparent;padding:4px 8px;margin-bottom:6px;font-size:11px}
 /* Attachments sit inside the composer as square tiles above the text (owner 2026-10-14, the Codex composer). */
-.composer[data-has-files=true]{grid-template-areas:"files files files files" "text text text text" "plus . mic send";grid-template-rows:auto auto 28px;row-gap:6px;padding:8px 8px 8px;border-radius:20px}
-.composer[data-has-files=true] textarea{min-height:28px;margin:0;padding:2px 4px}
-.attachmentDrafts { grid-area:files; display:flex; gap:8px; overflow-x:auto; padding:2px 2px 4px; scrollbar-width:thin; }
-.attachmentDraft { position:relative; flex:0 0 auto; width:112px; height:112px; overflow:hidden; border:1px solid var(--paper-edge); border-radius:12px; background:var(--paper-3); }
+.composer[data-has-files=true]{grid-template-areas:"files files files files" "text text text text" "plus . mic send";grid-template-rows:auto auto 34px;row-gap:4px}
+.attachmentDrafts { grid-area:files; display:flex; gap:8px; overflow-x:auto; padding:12px 14px 4px; scrollbar-width:thin; }
+.attachmentDraft { position:relative; flex:0 0 auto; width:112px; height:112px; overflow:hidden; border:1px solid var(--im-hair); border-radius:14px; background:var(--im-in); }
 .attachmentDraft img { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; display:block; }
-.attachmentFile { position:absolute; inset:0; display:grid; align-content:end; gap:3px; padding:10px; color:var(--ink); }
-.attachmentFile svg { color:var(--muted-deep); margin-bottom:auto; }
+.attachmentFile { position:absolute; inset:0; display:grid; align-content:end; gap:3px; padding:10px; color:var(--im-ink); }
+.attachmentFile svg { color:var(--im-sub); margin-bottom:auto; }
 .attachmentFile strong { display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; font-size:11px; font-weight:600; line-height:1.3; word-break:break-all; }
-.attachmentFile small { font-size:10px; color:var(--muted-deep); }
-.attachmentDraft button { position:absolute; top:6px; right:6px; width:22px; height:22px; min-height:22px; display:grid; place-items:center; padding:0; border:0; border-radius:50%; background:rgba(20,22,26,.62); color:var(--white); cursor:pointer; opacity:0; transition:opacity .12s ease; }
+.attachmentFile small { font-size:10px; color:var(--im-sub); }
+.attachmentDraft button { position:absolute; top:6px; right:6px; width:22px; height:22px; min-height:22px; display:grid; place-items:center; padding:0; border:0; border-radius:50%; background:color-mix(in srgb,var(--black) 62%,transparent); color:var(--white); cursor:pointer; opacity:0; transition:opacity .12s ease; }
 .attachmentDraft:hover button, .attachmentDraft:focus-within button { opacity:1; }
 
-.bubbleChoices{border:0;padding:0;margin:0;min-width:0}.bubbleChoices legend{font-size:12px;color:var(--ink-soft);margin-bottom:9px}.bubbleChoices>div{display:flex;gap:10px;flex-wrap:wrap}.bubbleChoices button{display:grid;place-items:center;width:40px;height:40px;border-radius:50%;border:2px solid transparent;color:var(--white);cursor:pointer}.bubbleChoices button[aria-checked=true]{outline:2px solid var(--ink-soft);outline-offset:3px}.historyItem{display:flex;gap:10px;align-items:center;min-height:52px;border:1px solid var(--paper-edge);border-radius:12px;background:var(--popup-control-bg);color:var(--ink);padding:10px;text-align:left}.historyItem>span{min-width:0;flex:1;font-size:13px}.historyItem small{display:block;color:var(--muted-deep);font-size:11px;margin-top:4px}
+/* The + menu, in the composer menu's look (OneShell .composerPopover). */
+.plus{position:relative;display:flex;align-self:flex-end}
+.root .plusMenu{position:absolute;left:0;bottom:calc(100% + 10px);z-index:20;width:240px;padding:6px;border:1px solid var(--im-hair);border-radius:18px;background:var(--im-bg);box-shadow:var(--shadow-2);display:grid;text-align:left}
+.root .plusMenu button{width:100%;min-height:38px;display:flex;align-items:center;gap:9px;padding:6px 10px;border:0;border-radius:12px;background:transparent;color:var(--im-ink);font-size:13px;text-align:left;cursor:pointer}
+.root .plusMenu button:hover,.root .plusMenu button:focus-visible{background:var(--im-in);outline:none}
+.root .plusMenu button strong{font-weight:500}
+.plusIcon{display:grid;place-items:center;width:22px;color:var(--im-sub)}
+.plusSection{padding:6px 8px 3px;color:var(--im-sub);font-size:10.5px;font-weight:650}
+.plusDivider{height:1px;margin:5px 6px;background:var(--im-hair)}
 
-.bubble[data-role=assistant]:has([data-intellect-ui]){width:100%;max-width:100%;padding:0;border:0;border-radius:0;background:transparent;box-shadow:none}
+/* Questions and approvals: the cards that wait above the composer read as gray cards in the conversation, with pill buttons. The
+   shared card (AskCard, the approval card) draws itself from --ask-* tokens, so only the tokens change here. */
+.decisionStack{max-height:min(400px,45dvh);overflow:auto;overscroll-behavior:contain;width:min(100%,520px);margin-right:auto;
+  --ask-card-radius:22px;--ask-card-bg:var(--im-in);--ask-card-line:transparent;--ask-card-shadow:none;--ask-head-bg:transparent;--ask-divider:var(--im-hair);
+  --ask-row-hover:color-mix(in srgb,var(--im-ink) 5%,transparent);--ask-row-hover-strong:color-mix(in srgb,var(--im-ink) 10%,transparent);
+  --ask-button-radius:999px;--ask-button-height:34px;--ask-button-size:14px;--ask-head-pad-y:12px;--ask-row-pad-y:11px;--ask-row-pad-x:16px;--ask-card-max-height:min(36dvh,350px);--ask-secondary-bg:var(--im-in-strong);--ask-secondary-hover:color-mix(in srgb,var(--im-ink) 14%,var(--im-in));
+  --ask-primary-bg:var(--personal-bubble);--ask-primary-ink:var(--white);--ask-radio-on:var(--personal-bubble);
+  --ask-title-ink:var(--im-ink);--ask-option-title-ink:var(--im-ink);--ask-option-note-ink:var(--im-sub);--ask-footer-ink:var(--im-sub);--ask-skip-ink:var(--im-ink);--ask-skip-line:transparent;--ask-radio-line:var(--im-sub)}
+.decisionStack:empty{display:none}
+.decisionStack>*{margin-bottom:8px}
+/* The tool-permission card is drawn by globals.css (numbered rows, not the shared AskCard), so it is re-skinned by its own data hooks:
+   the same gray rounded card, with each choice a pill. The choices and their shortcuts are the ones the card always had. */
+.decisionStack [data-testid="tool-approval-inline"]{margin:0 0 8px;width:100%;max-width:none}
+.decisionStack [data-testid="tool-approval-card"]{border:0;border-radius:22px;background:var(--im-in);box-shadow:none;padding:16px 8px 8px;color:var(--im-ink)}
+.decisionStack [data-testid="tool-approval-card"] div:has(>div>pre){background:var(--im-bg);border-radius:14px}
+.decisionStack [data-testid="tool-approval-card"] div:has(>pre),.decisionStack [data-testid="tool-approval-card"] pre{background:transparent}
+.decisionStack [data-testid="tool-approval-card"] [data-approval-row]{border-radius:999px;color:var(--im-ink)}
+.decisionStack [data-testid="tool-approval-card"] [data-approval-row]:hover:not(:disabled),.decisionStack [data-testid="tool-approval-card"] [data-approval-row][data-sel="true"]{background:var(--im-in-strong)}
 
-/* One's detached surface has a minimum only; all larger window sizes reflow. */
-.root{position:relative;width:100%;font-family:var(--font-sans,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif)}
-.root[data-detached=true]{background:var(--paper);container-type:inline-size;flex-direction:row;min-width:0}
+/* ── Task drawer (results and work): the Messages details pane ── */
+.outputPanel{display:block;flex:0 0 var(--personal-panel-width,360px);width:var(--personal-panel-width,360px);min-width:0;margin:0;border-left:1px solid var(--im-hair);background:var(--im-bg)}
+.outputPanel>aside{position:relative!important;inset:auto!important;width:100%!important;height:100%;margin:0;border-radius:0!important}
+.outputPanel[data-visible=false]{display:none}
+.taskContents{padding:16px;display:flex;flex-direction:column;gap:12px;line-height:1.6}
+.taskContents header{display:flex;justify-content:space-between;align-items:center}
+.taskContents h2,.taskContents h3{font-size:15px;font-weight:600;margin:0;line-height:1.4}
+.taskContents p{margin:0;line-height:1.6}
+.taskContents label,.appearance label{display:flex;flex-direction:column;gap:7px;font-size:12px}
+.taskContents button{border-color:transparent;background:var(--im-in);border-radius:999px;padding:8px 14px}
+.taskContents button:hover{background:var(--im-in-strong)}
+.taskContents header button{background:transparent;padding:6px 8px}
+.taskList{display:flex;flex-direction:column;gap:8px}
+.taskList button{flex-direction:column;align-items:flex-start;gap:4px;border-radius:16px;padding:10px 14px}
+.taskList button[data-selected=true]{outline:2px solid var(--personal-bubble);outline-offset:-2px}
+.taskList span,.taskList small{font-size:11px;color:var(--im-sub)}
+.detail{border-top:1px solid var(--im-hair);padding-top:12px;display:flex;flex-direction:column;gap:9px;overflow-wrap:anywhere}
+.taskContents .detail{border-top:1px solid var(--im-hair)}
+.taskContents :is(label,p){font-size:14px}
+.taskContents .feedback{font-size:12px}
+.taskContents :is(h2,h3){line-height:1.4}
+.root .goToTask{justify-content:center;border-radius:999px;background:var(--personal-bubble);color:var(--white);margin-top:12px}
+.root .goToTask:hover{color:var(--white);background:var(--personal-bubble)}
+.appearance{display:flex;flex-direction:column;gap:16px}
+.preview{align-self:flex-end;border-radius:20px;color:var(--white);padding:10px 16px;margin:0}
+.appearance input,.appearance select{width:100%;min-height:44px;border:1px solid var(--paper-edge-strong);border-radius:12px;background:var(--paper);color:var(--ink);font:inherit;padding:10px}
+.appearance input:focus-visible,.appearance select:focus-visible{outline:none}
+.saveAppearance:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.saveAppearance{border:0;border-radius:22px;background:var(--black);color:var(--white);font:inherit;padding:10px 22px;cursor:pointer;min-height:44px}
+.saveAppearance:disabled{opacity:.5;cursor:default}
+.bubbleChoices{border:0;padding:0;margin:0;min-width:0}.bubbleChoices legend{font-size:12px;color:var(--ink-soft);margin-bottom:9px}.bubbleChoices>div{display:flex;gap:10px;flex-wrap:wrap}.bubbleChoices button{display:grid;place-items:center;width:40px;height:40px;border-radius:50%;border:2px solid transparent;color:var(--white);cursor:pointer}.bubbleChoices button[aria-checked=true]{outline:2px solid var(--ink-soft);outline-offset:3px}
+.historyItem{display:flex;gap:10px;align-items:center;min-height:52px;border:1px solid var(--paper-edge);border-radius:12px;background:var(--popup-control-bg);color:var(--ink);padding:10px;text-align:left}.historyItem>span{min-width:0;flex:1;font-size:13px}.historyItem small{display:block;color:var(--muted-deep);font-size:11px;margin-top:4px}
+
+.resultContents{display:flex;flex-direction:column;gap:14px;min-width:0;overflow-wrap:anywhere}.resultContents :is(img,video,audio){max-width:100%}.resultContents :is(pre,table){max-width:100%;overflow:auto}.resultState{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;font-size:12px;color:var(--im-sub)}.resultState small{margin-left:auto}.resultDirection{display:flex;flex-direction:column;gap:8px;padding-top:12px;border-top:1px solid var(--im-hair)}.resultDirection label{display:flex;flex-direction:column;gap:6px}.selectionChip{display:flex;align-items:center;gap:8px;padding:7px 9px;border:1px solid var(--im-hair);border-radius:12px;font-size:12px}.selectionChip span{flex:1;min-width:0;overflow-wrap:anywhere}
+/* Keep the selected result mounted when the drawer closes or the window reflows. */
+.taskDrawer{position:relative;height:100%;overflow:auto;overscroll-behavior:contain;background:var(--im-bg);min-width:0;scrollbar-gutter:stable}.taskDrawer[hidden]{display:none}.taskDrawer .taskContents>header{position:sticky;top:0;z-index:2;background:var(--im-bg);padding:4px 0}.panelResize{position:absolute;left:0;top:0;bottom:0;width:6px;cursor:col-resize;touch-action:none;z-index:4}.panelResize:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}.resultContents :is(button,textarea):focus-visible,.root button:focus-visible{outline:2px solid var(--personal-bubble);outline-offset:2px}.root .resultContents :is(table,pre){display:block;max-width:100%;overflow:auto}.resultContents textarea{font-size:14px}.taskDrawer .taskContents{min-height:100%}
+.rangePicker{border:1px solid var(--im-hair);border-radius:12px;padding:10px;font-size:13px}.rangePicker summary{cursor:pointer;min-height:30px}.rangePicker label{margin-top:9px}.rangeFields{display:flex;flex-direction:column;gap:8px}.resultContents :is(input,select){min-width:0;width:100%;min-height:36px;border:1px solid var(--paper-edge-strong);border-radius:10px;background:var(--paper);color:var(--ink);padding:7px;font:inherit}.resultContents :is(input,select):focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+
+/* ── Detached (the companion window): no sidebar, the same conversation ── */
+.root[data-detached=true]{background:var(--im-bg);container-type:inline-size;flex-direction:row;min-width:0}
 .root[data-detached=true] .navigation{display:none}
 .root[data-detached=true] .conversation{margin:0;border:0;border-radius:0}
-.root[data-detached=true] .header{min-height:52px;height:auto;flex-basis:52px;padding:8px 14px;border-bottom:1px solid var(--paper-edge)}
-.root[data-detached=true] .headerIdentity{display:flex;flex:1;min-width:0;align-items:baseline;gap:8px;flex-wrap:wrap}
-.headerIdentity small{font-size:11px;color:var(--muted-deep);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.headerIdentity h1{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:160px}
-.headerMenu{position:absolute;z-index:18;right:10px;top:52px;display:flex;flex-direction:column;gap:3px;padding:8px;max-width:calc(100% - 20px);background:var(--paper);border:1px solid var(--paper-edge-strong);border-radius:12px;box-shadow:var(--shadow-2)}
-.headerMenu button{display:flex;gap:8px;align-items:center;justify-content:space-between;background:transparent;border:0;border-radius:7px;min-height:36px;padding:8px 12px;color:var(--ink);font:inherit;text-align:left;cursor:pointer}.headerMenu button:hover{background:var(--paper-3)}
-.contextBar{display:flex;align-items:center;gap:7px;flex:0 0 auto;flex-wrap:wrap;padding:7px 24px;border-bottom:1px solid var(--paper-edge);font-size:11px;color:var(--muted-deep);min-width:0}.contextBar span:first-child{font-weight:600;color:var(--ink)}.contextBar>span:last-child{margin-left:auto}.contextBar button{font:inherit;background:var(--paper-3);color:var(--ink);border:1px solid var(--paper-edge);border-radius:12px;min-height:24px;padding:2px 10px;cursor:pointer}.root[data-detached=true] .contextBar{padding-left:18px;padding-right:18px}
-.root[data-detached=true] .transcript{padding:16px 18px 20px;scrollbar-gutter:stable}
+.root[data-detached=true] .transcript{padding-left:18px;padding-right:18px;scrollbar-gutter:stable}
 .root[data-detached=true] .thread{max-width:780px}
-.root[data-detached=true] .bubble{max-width:100%;border-radius:16px;min-width:0}.root[data-detached=true] .bubble[data-role=assistant]{width:100%;background:transparent;padding:5px 0}.root[data-detached=true] .bubble[data-role=user]{max-width:92%;padding:11px 14px}
-.root[data-detached=true] .composerDock{width:100%;max-width:820px;padding:0 14px 12px}
-.root[data-detached=true] .outputPanel{margin:0;border-left:1px solid var(--paper-edge);flex:0 0 var(--personal-panel-width);width:var(--personal-panel-width)}
+.root[data-detached=true] .composerDock{width:100%;max-width:820px;padding:6px 14px 12px}
+.root[data-detached=true] .outputPanel{margin:0;border-left:1px solid var(--im-hair);flex:0 0 var(--personal-panel-width);width:var(--personal-panel-width)}
 .root[data-detached=true] .outputPanel>aside{border-radius:0!important}
 .root[data-detached=true] .taskContents{min-width:0}
 .root[data-detached=true] .decisionStack{max-height:min(40dvh,360px)}
-.root[data-detached=true] .header .iconButton{width:34px;height:34px;flex-basis:34px}
-.root[data-detached=true] .composer textarea{font-size:14px}
+.root[data-detached=true] .composer textarea{font-size:15px}
 .root[data-detached=true] .taskContents :is(button,textarea){max-width:100%}
+
+@media(max-width:1050px){.navigation{width:190px;flex-basis:190px}}
 @media(max-width:859px){
   .root[data-detached=true]{flex-direction:column}
-  .root[data-detached=true] .outputPanel[data-visible=true]{position:absolute;display:block;inset:86px 0 var(--personal-composer-height,96px);width:100%;max-width:none;z-index:12;border:0;margin:0;background:var(--paper);box-shadow:var(--shadow-2)}
+  .root[data-detached=true] .outputPanel[data-visible=true]{position:absolute;display:block;inset:var(--personal-context-bottom,92px) 0 var(--personal-composer-height,96px);width:100%;max-width:none;z-index:12;border:0;margin:0;background:var(--im-bg);box-shadow:var(--shadow-2)}
   .root[data-detached=true] .outputPanel>aside{height:100%;border-radius:0!important}
-  .root[data-detached=true] .transcript{padding:12px 16px 16px}
-  .root[data-detached=true] .headerIdentity{gap:3px;flex-direction:column;align-items:flex-start}
-  .root[data-detached=true] .headerIdentity h1{font-size:14px;max-width:170px}
+  .root[data-detached=true] .transcript{padding-left:16px;padding-right:16px}
+  .panelResize{display:none}
+  .taskDrawer .taskContents{padding:12px 16px}
 }
-@media(prefers-reduced-motion:reduce){.root .typing span{animation:none}}
-.resultContents{display:flex;flex-direction:column;gap:14px;min-width:0;overflow-wrap:anywhere}.resultContents :is(img,video,audio){max-width:100%}.resultContents :is(pre,table){max-width:100%;overflow:auto}.resultState{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;font-size:12px;color:var(--muted-deep)}.resultState small{margin-left:auto}.resultDirection{display:flex;flex-direction:column;gap:8px;padding-top:12px;border-top:1px solid var(--paper-edge)}.resultDirection label{display:flex;flex-direction:column;gap:6px}.selectionChip{display:flex;align-items:center;gap:8px;padding:7px 9px;border:1px solid var(--paper-edge);border-radius:9px;font-size:12px}.selectionChip span{flex:1;min-width:0;overflow-wrap:anywhere}
-/* Keep the selected result mounted when the drawer closes or the window reflows. */
-.taskDrawer{position:relative;height:100%;overflow:auto;overscroll-behavior:contain;background:var(--paper);min-width:0;scrollbar-gutter:stable}.taskDrawer[hidden]{display:none}.taskDrawer .taskContents>header{position:sticky;top:0;z-index:2;background:var(--paper);padding:4px 0}.panelResize{position:absolute;left:0;top:0;bottom:0;width:6px;cursor:col-resize;touch-action:none;z-index:4}.panelResize:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}.resultContents :is(button,textarea):focus-visible,.root button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}.root .resultContents :is(table,pre){display:block;max-width:100%;overflow:auto}.resultContents textarea{font-size:14px}.taskContents :is(label,p){font-size:14px}.taskContents .feedback{font-size:12px}.taskDrawer .taskContents{min-height:100%}
-@media(max-width:859px){.panelResize{display:none}.root[data-detached=true] .outputPanel[data-visible=true]{top:var(--personal-context-bottom,92px)}.taskDrawer .taskContents{padding:12px 16px}.root[data-detached=true] .headerIdentity h1{max-width:130px}.root[data-detached=true] .headerIdentity small{max-width:170px}}
-.rangePicker{border:1px solid var(--paper-edge);border-radius:10px;padding:10px;font-size:13px}.rangePicker summary{cursor:pointer;min-height:30px}.rangePicker label{margin-top:9px}.rangeFields{display:flex;flex-direction:column;gap:8px}.resultContents :is(input,select){min-width:0;width:100%;min-height:36px;border:1px solid var(--paper-edge-strong);border-radius:8px;background:var(--paper);color:var(--ink);padding:7px;font:inherit}.resultContents :is(input,select):focus-visible{outline:2px solid var(--accent);outline-offset:2px}
-
-.contextSharing{margin-left:auto;display:flex;gap:5px;align-items:center;min-width:0}.contextSharing button:first-child{min-width:0;max-width:240px}.contextSharing button:first-child span{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:400}.contextSharing button:last-child{flex-shrink:0}@media(max-width:859px){.contextSharing button:first-child{max-width:148px}}
-.navigation[hidden]{display:none}
-.header .headerIdentity{flex:1;min-width:0;gap:6px}
-.header .headerIdentity h1{flex:0 1 auto;min-width:0}
-.header .headerIdentity small{flex:0 1 auto;min-width:0}
-.header .headerIdentity .iconButton{flex:0 0 32px}
-@media(max-width:480px){.header .headerIdentity small{display:none}.header{padding-left:10px;padding-right:10px}.contextBar,.root[data-detached=true] .contextBar{padding:6px 10px}.transcript{padding:10px}.composerDock{padding:0 8px 8px}}
+@media(max-width:780px){
+  .root{flex-direction:column}
+  .navigation{width:100%;flex:0 0 auto;padding:6px 10px;display:flex;gap:5px;border:0}
+  .navigation>div:first-child,.navigationLinks,.localLabel{display:none}
+  .personalEntry{min-height:40px}
+  .personalEntry small{display:none}
+  .tabs{min-height:30px}
+  .transcript{padding-left:16px;padding-right:16px}
+  .composerDock{padding:6px 12px 10px}
+  .outputPanel[data-visible=true]{display:block;position:absolute;right:0;bottom:var(--personal-composer-height,96px);top:var(--personal-context-bottom,92px);z-index:10;width:100%;border:0;box-shadow:var(--shadow-2)}
+  .outputPanel>aside{width:100%!important;max-width:100%;height:100%}
+  .bubble{max-width:90%}
+  .bubble:is(:has(pre,table,h1,h2,h3,ul,ol,blockquote),:has(>[data-design-surface]:nth-of-type(4))){max-width:100%}
+  .header h1{max-width:160px}
+}
+@media(max-width:480px){
+  .header{padding-left:10px;padding-right:10px;--hope-header-h:80px}
+  .root{--hope-header-h:80px}
+  .headerIdentity small{display:none}
+  .transcript,.root[data-detached=true] .transcript{padding-left:12px;padding-right:12px}
+  .composerDock,.root[data-detached=true] .composerDock{padding:4px 10px 8px}
+  .root .header .iconButton{width:36px;height:36px;flex-basis:36px}
+  .headerSide{gap:6px}
+}
+@media(prefers-reduced-motion:reduce){.root *{scroll-behavior:auto}}
 /* Narrow windows (the companion): the effort chip keeps its icon; the model name stays readable. */
 @media (max-width:520px){.composer .trail [data-one-composer-trigger=effort] span,.composer .trail [data-one-composer-trigger=effort]>svg:last-child{display:none}.composer .trail [data-one-composer-trigger=effort]{padding:0 8px}.composer .trail [data-one-composer-trigger] span{max-width:84px}}
 /* Two-row shape (typed, attachments, or too narrow for one row): when the controls row is still short of room, the model name gives

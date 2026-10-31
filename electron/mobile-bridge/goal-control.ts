@@ -30,6 +30,7 @@ export function desktopGoalControlServices(): MobileGoalControlServices {
   const { getChat } = require("../store/chats") as typeof import("../store/chats");
   const { isMobileBridgeOneChat } = require("./projector") as typeof import("./projector");
   const { invocationService } = require("../invocation/service") as typeof import("../invocation/service");
+  const { stopInvocationGoal } = require("../runtime/invocation-owner-control") as typeof import("../runtime/invocation-owner-control");
   return {
     ...alive,
     chatSurface(chatId) {
@@ -39,8 +40,8 @@ export function desktopGoalControlServices(): MobileGoalControlServices {
       return chat.originSurface === "work" || chat.projectId ? "work" : null;
     },
     readGoalPanel: goals.readGoalPanel,
-    pauseGoal: (chatId, goalId) => invocationService.pauseGoal(chatId, goalId),
-    deleteGoal: (chatId, goalId) => invocationService.deleteGoal(chatId, goalId),
+    pauseGoal: (chatId, goalId) => stopInvocationGoal(chatId, goalId, "pause"),
+    deleteGoal: (chatId, goalId) => stopInvocationGoal(chatId, goalId, "delete"),
     resumeGoal: (chatId, goalId) => {
       const { resumeGoalAsOwner } = require("../long-run/goal-owner-resume") as typeof import("../long-run/goal-owner-resume");
       return resumeGoalAsOwner({ chatId, expectedGoalId: goalId, expectedVersion: null }, invocationService);

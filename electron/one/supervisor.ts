@@ -15,6 +15,7 @@ import { grantChatAlwaysApproval } from "../store/capability-grants";
 import { queuedSteerState } from "../store/invocation-steers";
 import { getLongRunByGoalId } from "../store/long-runs";
 import { invocationService } from "../invocation/service";
+import { stopInvocationGoal } from "../runtime/invocation-owner-control";
 import { admitMainInvocation } from "../runtime/scheduled-root-context";
 import { canonicalInvocationRequestJson, getInvocationAdmission, INVOCATION_ADMISSION_DIGEST_VERSION } from '../store/invocation-admissions';
 import { currentUiLocale } from "../ui-locale";
@@ -293,8 +294,8 @@ export function oneSupervisor():OneSupervisorService {
     legacyHistory:(oneId,chatId)=>legacy.inventory(oneId,chatId,new Set(invocationService.activeChatIds()),['inherited','machine'].includes(getOneProfileOrigin())),
     runtime:{
       start:startNative,attach,receipt,noStartProof,
-      cancel:runId=>!hostOptions && (invocationRunOwners.getOwnerByRunId(runId)?.ownerKind==='daemon' || nativeRuntime?.ownsPending(runId)) ? nativeRuntime!.cancel(runId) : invocationService.cancel(runId),pauseGoal:(chatId,goalId)=>invocationService.pauseGoal(chatId,goalId),
-      cancelGoal:(chatId,goalId)=>invocationService.deleteGoal(chatId,goalId),
+      cancel:runId=>!hostOptions && (invocationRunOwners.getOwnerByRunId(runId)?.ownerKind==='daemon' || nativeRuntime?.ownsPending(runId)) ? nativeRuntime!.cancel(runId) : invocationService.cancel(runId),pauseGoal:(chatId,goalId)=>stopInvocationGoal(chatId,goalId,"pause"),
+      cancelGoal:(chatId,goalId)=>stopInvocationGoal(chatId,goalId,"delete"),
       steer:(req,runId)=>!hostOptions && invocationRunOwners.getOwnerByRunId(runId)?.ownerKind==='daemon' ? nativeRuntime!.steer(req,runId) : invocationService.steerFromSupervisor(req,runId,admitMainInvocation(req.chatId)),
       steerState:id=>queuedSteerState(id),
       onSettled,

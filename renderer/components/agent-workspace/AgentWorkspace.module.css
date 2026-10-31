@@ -224,3 +224,5 @@
 .importFacts > dl{grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}.importFacts > dl > div{grid-template-columns:1fr;justify-items:center;gap:5px;padding:10px 6px;text-align:center}.importFacts dd{font-size:20px!important;font-weight:650;color:var(--ink)!important}.importFacts dt{font-size:11px!important}.importRows{max-height:38dvh}
 
 .fileMenu button{display:flex;align-items:center;gap:9px;min-height:42px}.fileMenu{border-radius:12px!important;background:var(--popup-card-bg)!important;box-shadow:var(--popup-shadow)!important}
+.autoEvolve { display: flex; align-items: center; gap: 7px; padding: 6px 12px; font-size: 12px; color: var(--muted-deep); cursor: pointer; }
+.autoEvolve input { margin: 0; }

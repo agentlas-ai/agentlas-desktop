@@ -14,7 +14,7 @@ import { randomUUID } from "node:crypto";
 import { mcpProxyControlInfoPath } from "./proxy-channel";
 import { readOnlyBrowserToolIsMutating } from "../../shared/read-only-browser-tools";
 import { oneGraphReadPermissionCall } from "../../shared/one-graph-tool-permission";
-import { harnessCallIsReadPermissionTerminal } from "../harness/capability-ports";
+import { harnessCallIsEffectFreeRead, harnessCallIsReadPermissionTerminal } from "../harness/capability-ports";
 import {
   defaultRuntimeToolPermission,
   getRuntimeToolPermissionArbiter,
@@ -116,13 +116,16 @@ export function mcpToolIsMutating(input: {
   // agentlas-turn memory_note only queues a note for the Memory Curator (ask_form a choice card for the person) in this run (Main re-checks the run capability and
   // a read-permission turn discards it): no outward effect, so it needs no write approval.
   const turnNoteRead = input.catalogId === "agentlas-turn" && (input.toolName === "memory_note" || input.toolName === "ask_form");
-  // harness_search / harness_describe are inert discovery (no install, login or run); harness_call stays gated.
+  // harness_search / harness_describe are inert discovery (no install, login or run).
   const harnessRead = input.catalogId === "agentlas-turn" && (input.toolName === "harness_search" || input.toolName === "harness_describe");
   // Stopping an exact bound target stays reachable after permission drops, for any port that declares it
   // (harness/capability-ports.ts terminalUnderReadPermission). The port's handler still checks the captured owner and refuses
   // dry runs; no enable/edit alias is admitted.
   const terminalStop = input.catalogId === "agentlas-turn" && input.toolName === "harness_call" && harnessCallIsReadPermissionTerminal(input.args);
-  return !(browserRead || nativeRead || uiSchemaRead || turnNoteRead || harnessRead || terminalStop || oneGraphReadPermissionCall(input));
+  // A read through the one gateway, told apart by its own arguments: every runtime applies what codex-mcp-admission.ts applies on Codex,
+  // so a read-permission turn never waits on a card for it. A call without arguments stays an effect.
+  const gatewayRead = input.catalogId === "agentlas-turn" && input.toolName === "harness_call" && harnessCallIsEffectFreeRead(input.args);
+  return !(browserRead || nativeRead || uiSchemaRead || turnNoteRead || harnessRead || terminalStop || gatewayRead || oneGraphReadPermissionCall(input));
 }
 
 /** Plan observation authority is minted from the actual host launcher, not a

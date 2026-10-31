@@ -103,6 +103,7 @@ import {
 } from "./codex-session";
 import { CodexWorkforceObservation, inspectCodexWorkforceGrant, readCodexWorkforceInventory, waitForCodexWorkforceInventory } from "./codex-workforce";
 import { answerCodexMcpElicitation } from "./codex-elicitation";
+import { codexMcpCallIsMutating } from "./codex-mcp-admission";
 import { residencyDisabledFor } from "./claude-session";
 import { codexDesktopSurfaceArgs } from "./codex-desktop-surface";
 import { codexPersonalContextArgs, codexPersonalHomeOptions } from "./codex-personal-context";
@@ -2602,7 +2603,7 @@ async function runCodexResidentTurn(input: {
           isCurrent,
           // Codex's own MCP tool approvals are answered by the same arbiter as its bash approvals
           // (codex-elicitation.ts codexMcpToolApprovalFrom), not by an owner question sheet.
-          decideToolApproval: async ({ serverName, toolName }) => {
+          decideToolApproval: async ({ serverName, toolName, toolParams }) => {
             const ask: RuntimeToolPermissionAsk = {
               ...(req.planMode ? { planMode: true as const } : {}),
               signal: elicitationAbort.signal,
@@ -2612,8 +2613,9 @@ async function runCodexResidentTurn(input: {
               kind: "other",
               cwd,
               permission: req.permission,
-              // Codex only asks for calls it judged not read-only (mcp_tool_call.rs:2466-2497).
-              mutating: true,
+              // Codex only asks for calls it judged not read-only (mcp_tool_call.rs:2466-2497), and it judges every call of
+              // our one-gateway tools that way: a first-party read is told apart from its own arguments (codex-mcp-admission.ts).
+              mutating: await codexMcpCallIsMutating({ serverName, toolName, ...(toolParams ? { toolParams } : {}) }),
               chatId: req.approvalChatId ?? chatId,
               ...(req.agentId ? { agentId: req.agentId } : {}),
               ...(req.unattended || req.noSynchronousAsk ? { unattended: true as const } : {}),

@@ -1,5 +1,4 @@
 import { getDb } from "../store/db";
-import { readRunToolSummary } from "../storage/run-detail-summary";
 import type { AgentWorkspaceOutcomeComparisonRow, AgentWorkspaceOutcomeCounts, AgentWorkspaceRevisionComparison,
   AgentWorkspaceRevisionOutcome, AgentWorkspaceWorkKind } from "../../shared/agent-workspace";
 
@@ -7,8 +6,8 @@ import type { AgentWorkspaceOutcomeComparisonRow, AgentWorkspaceOutcomeCounts, A
  * What the runs on each agent-file revision ended with, so an applied learning can be compared with the revision it
  * replaced. Every run on a revision writes agent_revision_run_finished with its revisionId (mcp/client.ts). The counted
  * kinds survive the 3-day run-detail trim (storage/run-detail-retention.ts keeps terminals and errors and only removes
- * reasoning text and chat tool-call rows); tool calls and output digests come from the per-run summary written when the
- * run finished and refreshed before the trim (storage/run-detail-summary.ts). A run shared by several agents counts for each
+ * reasoning text and chat tool-call rows); tool calls and output digests come from the summary on the run's own receipt
+ * (storage/run-detail-summary.ts), read by the same query that lists the runs. A run shared by several agents counts for each
  * of them.
  *
  * Runs are also split by the kind of work their start record names (automation, task, conversation), so a change is
@@ -18,6 +17,7 @@ import type { AgentWorkspaceOutcomeComparisonRow, AgentWorkspaceOutcomeCounts, A
  */
 const COUNTED = ["invoke_completed", "invoke_failed", "mcp_error", "user_steering", "runtime_turn_attempt"] as const;
 const MAX_RUNS = 2_000;
+const START_WINDOW = 64;
 const KIND_ORDER: AgentWorkspaceWorkKind[] = ["task", "conversation", "automation", "other"];
 
 const COUNT_KEYS = ["runs", "completed", "failed", "errors", "steering", "attempts", "toolCalls", "withOutput"] as const satisfies ReadonlyArray<keyof AgentWorkspaceOutcomeCounts>;
@@ -36,22 +36,30 @@ export function agentRevisionOutcomes(agentId: string): Map<string, AgentWorkspa
   const outcomes = new Map<string, AgentWorkspaceRevisionOutcome>();
   if (!agentId) return outcomes;
   const db = getDb();
-  const runs = db.prepare(`SELECT run_id AS runId, json_extract(payload_json, '$.revisionId') AS revisionId FROM run_events
-    WHERE agent_id = ? AND kind = 'agent_revision_run_finished' ORDER BY ts DESC LIMIT ?`).all(agentId, MAX_RUNS) as Array<{ runId: string; revisionId: unknown }>;
+  const runs = db.prepare(`SELECT run_id AS runId, json_extract(payload_json, '$.revisionId') AS revisionId,
+    json_extract(payload_json, '$.toolSummary.toolCalls') AS toolCalls, json_array_length(json_extract(payload_json, '$.toolSummary.outputDigests')) AS digests FROM run_events
+    WHERE agent_id = ? AND kind = 'agent_revision_run_finished' ORDER BY ts DESC LIMIT ?`).all(agentId, MAX_RUNS) as
+    Array<{ runId: string; revisionId: unknown; toolCalls: unknown; digests: unknown }>;
   const revisionOf = new Map<string, string>();
-  for (const run of runs) if (typeof run.revisionId === "string" && run.revisionId && !revisionOf.has(run.runId)) revisionOf.set(run.runId, run.revisionId);
+  const tools = new Map<string, { calls: number; withOutput: number }>();
+  for (const run of runs) if (typeof run.revisionId === "string" && run.revisionId && !revisionOf.has(run.runId)) {
+    revisionOf.set(run.runId, run.revisionId);
+    tools.set(run.runId, { calls: Number(run.toolCalls) || 0, withOutput: Number(run.digests) > 0 ? 1 : 0 });
+  }
   if (!revisionOf.size) return outcomes;
   const counts = db.prepare(`SELECT kind, COUNT(*) AS n FROM run_events WHERE run_id = ? AND kind IN (${COUNTED.map(() => "?").join(",")}) GROUP BY kind`);
+  // invoke_started is one of a run's first events (seq 13 at most on a real ledger), so the lookup stops early; without a
+  // bound a run that has none would be read to its end.
   const start = db.prepare(`SELECT automation_id AS automationId, json_extract(payload_json, '$.taskIntent') AS intent FROM run_events
-    WHERE run_id = ? AND kind = 'invoke_started' ORDER BY seq LIMIT 1`);
+    WHERE run_id = ? AND seq <= ${START_WINDOW} AND kind = 'invoke_started' ORDER BY seq LIMIT 1`);
   for (const [runId, revisionId] of revisionOf) {
     const outcome = outcomes.get(revisionId) ?? { ...emptyCounts(), byKind: {} };
     const byKind = new Map((counts.all(runId, ...COUNTED) as Array<{ kind: string; n: number }>).map(row => [row.kind, Number(row.n)]));
-    const tools = readRunToolSummary(db, runId);
+    const summary = tools.get(runId);
     const run: AgentWorkspaceOutcomeCounts = { ...emptyCounts(), runs: 1,
       failed: byKind.get("invoke_failed") ? 1 : 0, completed: !byKind.get("invoke_failed") && byKind.get("invoke_completed") ? 1 : 0,
       errors: byKind.get("mcp_error") ?? 0, steering: byKind.get("user_steering") ?? 0, attempts: byKind.get("runtime_turn_attempt") ?? 0,
-      toolCalls: tools?.toolCalls ?? 0, withOutput: tools?.outputDigests.length ? 1 : 0 };
+      toolCalls: summary?.calls ?? 0, withOutput: summary?.withOutput ?? 0 };
     add(outcome, run);
     const kind = workKind(start.get(runId) as { automationId: string | null; intent: unknown } | undefined);
     add(outcome.byKind[kind] ??= emptyCounts(), run);

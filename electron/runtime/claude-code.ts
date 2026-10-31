@@ -1599,8 +1599,12 @@ const runClaudeTurn = async (
   //    fingerprint가 바뀌면 storedSessionId도 함께 버려지므로(위 clearRuntimeSession)
   //    낡은 내용이 재사용될 수 없다. 앱 재시작 등으로 파일이 사라졌으면 append 없이
   //    재개한다(그 턴만 재작성, 다음 세션 생성 때 파일 재생성).
+  //  - 권한은 그 키에 들어간다. 세션 지문은 권한을 무시하지만(칩을 바꿔도 대화는 이어진다) 이 파일 안에는 권한이 정하는 글이
+  //    있다 — 읽기 전용/쓰기 안내와 권한에 따라 갈리는 모듈들(runner.ts wrapSystemPrompt). 칩을 올려도 파일이 그대로면 CLI 인자는
+  //    쓰기를 열어 놓았는데 모델은 "[Read-only run] write/edit/shell: removed"를 계속 읽는다(반대도 같다). 권한이 다르면 다른 파일:
+  //    칩이 바뀐 턴에만 한 번 새로 쓰이고(캐시 한 번 재작성), 같은 권한으로 돌아오면 그 권한의 파일을 바이트 그대로 다시 쓴다.
   const stableSysKey = contextChatId && fingerprint
-    ? crypto.createHash("sha256").update(`${contextChatId}\0${KIND}\0${fingerprint}`).digest("hex").slice(0, 20)
+    ? crypto.createHash("sha256").update(`${contextChatId}\0${KIND}\0${fingerprint}\0${runReq.permission ?? ""}\0${req.permission ?? ""}`).digest("hex").slice(0, 20)
     : null;
   const sysPromptFile = stableSysKey
     ? path.join(os.tmpdir(), `agentlas-claude-sys-${stableSysKey}.txt`)

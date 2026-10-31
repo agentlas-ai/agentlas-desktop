@@ -144,7 +144,7 @@ import { getChatGoalContract, getChatGoalRevision, getLegacyGoalLifecycleSnapsho
 import { goalDeadlineAt } from "../long-run/goal-deadline";
 import { getLongRunByGoalId, longRunOwnerHold, recordLongRunUsage, transitionLongRun } from "../store/long-runs";
 import { getDb } from "../store/db";
-import { storeRunToolSummary } from "../storage/run-detail-summary";
+import { summarizeRunToolDetail } from "../storage/run-detail-summary";
 import { desktopStoreTransaction } from "../store/change-bus";
 import { supervisorExcludedHistoryMessages, supervisorIngressMessage } from "../one/supervisor-store";
 import { carriedFollowupMessageIds } from "../invocation/carried-owner-followups";
@@ -272,6 +272,7 @@ import type { RuntimeToolKind } from "../../shared/runtime-tool-kind";
 import { automationRegistrationMonitoring, hasAutomationRegistrationHandoff, resolveAutomationRegistrationTarget } from "../automation-registration";
 import { createAutomation, getAutomation, listAutomations, updateAutomation, updateAutomationGraph } from "../store/automations";
 import { graphTeamGrantCurrent, type GraphTeamGrant } from "../one/graph-team-grant";
+import { oneTeamDispatchAllowedFor } from "../one/team-dispatch";
 import { isCompletedToolEvent, previousTurnObservation, projectContextKey, recordContextSourceMarker, recordRunEvent, tryRecordRunEvent } from "../store/run-events";
 import { RUNTIME_TURN_ATTEMPT_EVENT, RUNTIME_TURN_PLACED_EVENT } from "../invocation/turn-placement";
 import { validSiteAgentAppMcpGrantTools } from "../site/agent-app-tool-policy";
@@ -4045,6 +4046,9 @@ async function runMcpInvocationInContext(
         ...(oneRoomMemberRun ? { roomMember: true as const } : {}),
         // A One group room is a team by definition: One Team rides every turn (goal passes too).
         ...(chat.originSurface === "one" && chat.seatKind === "group" && !oneMemberToolPolicy ? { groupRoom: true as const } : {}),
+        // One's own conversation (and a goal it owns) carries One Team the same way: it is the only place work is handed to a teammate
+        // (team-dispatch.ts oneTeamDispatchAllowedFor, the same gate mcp-config.ts applies when it builds the config).
+        ...(req.oneMode && !req.agentAppMode && !oneMemberToolPolicy && oneTeamDispatchAllowedFor(chat.id) ? { oneOwnConversation: true as const } : {}),
         // A domain project's conversation (Agentlas Finance today) carries its domain's plugins on every turn: Main-derived from the
         // stored project binding (invocation/project-domain-binding.ts), never from renderer input.
         ...(projectDomainBinding?.baselinePlugins.length ? { projectBaselinePlugins: projectDomainBinding.baselinePlugins } : {}),
@@ -6994,6 +6998,14 @@ async function runMcpInvocationInContext(
             }
           } catch { /* Optional routing hint; never breaks the run. */ }
         }
+        // What One just did shows as a card in its own conversation: the host presents it from the finished tool event, so it never
+        // depends on the model choosing to call ui.present (operation-cards.ts). Only One's own conversation, only a finished call.
+        if (result !== undefined && req.runId && req.oneMode && !req.agentAppMode && oneTeamDispatchAllowedFor(chat.id)) {
+          void (async () => {
+            const { presentOperationCard } = await import("../one/operation-cards");
+            await presentOperationCard({ chatId: chat.id, runId: req.runId! }, { name, args, result, isError }, locale === "ko" ? "ko" : "en");
+          })().catch(() => undefined);
+        }
         const completedToolOutcome = oneToolFailures.note({ name, args, result, id, isError });
         modelToolOutcomes.note({ id, isError, result, produced: Boolean(artifactPaths?.length) || Boolean(imageDataUrl) });
         observedOneToolFailure = oneToolFailures.unresolved();
@@ -9434,14 +9446,15 @@ async function runMcpInvocationInContext(
     if (!modelTurnStarted && !preparationDispatched && innermostTypedCode(err) === STORE_BUSY_CODE) markRefusedBeforeDispatch(err);
     throw err;
   } finally {
+    // The revision comparison reads this from the receipt, not from the tool rows the 3-day trim deletes (storage/run-detail-summary.ts).
+    let toolSummary: ReturnType<typeof summarizeRunToolDetail> = null;
+    if (workspacePins.size && req.runId) try { toolSummary = summarizeRunToolDetail(getDb(), req.runId); } catch { /* A view input; the run's own result is unaffected. */ }
     for (const [agentId, leaseId] of workspaceLeases) {
       const pin = workspacePins.get(agentId);
       try { if (pin) recordRunEvent({ runId: req.runId ?? leaseId, chatId: req.chatId, agentId, kind: "agent_revision_run_finished",
-        payload: { schemaVersion: "agentlas.revision-run-receipt.v1", ...pin, status: signal?.aborted ? "cancelled" : "finished" } }); } catch { /* Lease release remains unconditional. */ }
+        payload: { schemaVersion: "agentlas.revision-run-receipt.v1", ...pin, status: signal?.aborted ? "cancelled" : "finished", ...(toolSummary ? { toolSummary } : {}) } }); } catch { /* Lease release remains unconditional. */ }
       try { releaseAgentWorkspaceRunLease(agentId, leaseId); } catch { /* A removed route retains a conservative lease until recovery. */ }
     }
-    // The revision comparison reads this summary, not the tool rows the 3-day trim deletes (storage/run-detail-summary.ts).
-    if (workspacePins.size && req.runId) try { storeRunToolSummary(getDb(), req.runId); } catch { /* A view input; the run's own result is unaffected. */ }
     mcpConfigCurrent = false;
     signal?.removeEventListener("abort", revokeMcpConfig);
     if (login?.ownerSignal !== signal) login?.ownerSignal.removeEventListener("abort", revokeMcpConfig);

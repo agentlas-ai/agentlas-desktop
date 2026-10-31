@@ -142,6 +142,8 @@ export interface AgentWorkspaceSnapshot {
   cloudId: string | null;
   hubRef: string | null;
   activation: "ready" | "run_active" | "recovery_required";
+  /** Owner opt-in: lessons of the host-checkable kind apply without a diff review and are rolled back if runs get worse. Absent on older cores. */
+  autoEvolution?: { enabled: boolean };
 }
 export interface AgentWorkspaceReadFile {
   path: string;
@@ -196,6 +198,7 @@ export interface AgentWorkspaceIpc {
   getDiff(proposalId: string): Promise<AgentWorkspaceDiff>;
   approveAndApply(input: { proposalId: string; reviewedHash: string; reviewToken: string }): Promise<AgentWorkspaceProposal>;
   reject(input: { proposalId: string }): Promise<AgentWorkspaceProposal>;
+  setAutoEvolution(input: { agentId: string; enabled: boolean }): Promise<{ enabled: boolean }>;
   compare(input: { agentId: string; target: "cloud" | "hub"; direction?: AgentWorkspaceSyncDirection }): Promise<AgentWorkspaceComparison>;
   sync(input: { agentId: string; target: "cloud" | "hub"; direction: AgentWorkspaceSyncDirection; reviewedHash: string; reviewToken: string }): Promise<AgentWorkspaceComparison | AgentWorkspaceProposal>;
 }

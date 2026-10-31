@@ -648,6 +648,7 @@ const api: AgentlasIpc = {
     getDiff: (proposalId) => ipcRenderer.invoke("agentWorkspace:getDiff", proposalId),
     approveAndApply: (input) => ipcRenderer.invoke("agentWorkspace:approveAndApply", input),
     reject: (input) => ipcRenderer.invoke("agentWorkspace:reject", input),
+    setAutoEvolution: (input) => ipcRenderer.invoke("agentWorkspace:setAutoEvolution", input),
     compare: (input) => ipcRenderer.invoke("agentWorkspace:compare", input),
     sync: (input) => ipcRenderer.invoke("agentWorkspace:sync", input),
   },

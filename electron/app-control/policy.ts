@@ -32,6 +32,9 @@ const DENIED: Array<[RegExp, string, AppControlEffect]> = [
   // The owner's consent boundary. One granting itself (or a worker) permission would be self-escalation.
   [/^(resolveToolApproval|grantChatAlwaysApproval|revokeChatAlwaysApproval|revokeCapabilityGrant)$/, "approvals and grants are the owner's decision", "consent"],
   [/^confirm\./, "the owner answers questions agents ask", "consent"],
+  // The owner's standing permission to apply learning changes without reading the diff. An agent switching it on for itself would
+  // be self-escalation (the review grant exists so no tool can approve a diff), so it is the owner's own switch only.
+  [/^agentWorkspace\.setAutoEvolution$/, "applying learning changes without the owner reading the diff is the owner's own switch", "consent"],
   // Where the personal agent's conversation is processed (Agentlas server and its model provider, or the owner's own CLI) is
   // the owner's decision, and the one-time notice that makes it effective is the owner's to answer. getState is a read.
   [/^oneFront\.(setFront|acknowledgeNotice)$/, "where the personal agent's replies are processed, and the notice that confirms it, are the owner's own act", "consent"],

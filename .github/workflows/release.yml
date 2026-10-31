@@ -6,7 +6,9 @@
 # The embedded Hephaestus engine is git-ignored, so a fresh checkout has no
 # engine — `npm run ensure:engine` clones the public engine repo before build.
 #
-# These builds are UNSIGNED (no Windows certificate required). macOS is
+# The Windows installer, portable executable, uninstaller and application executable are signed with Azure Artifact
+# Signing (GitHub OIDC, no client secret) and the release FAILS if any of them is unsigned; Linux packages are
+# unsigned. macOS is
 # intentionally excluded here: public Mac releases must come from
 # scripts/package-mac.sh with Developer ID signing + notarization, otherwise
 # users can get a "newer" DMG that cannot safely auto-update.
@@ -50,6 +52,13 @@ jobs:
             builder_args: --linux
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
+    # The Azure sign-in values (client, tenant, subscription, endpoint, account, profile, publisher) are variables of this
+    # environment; no secret is stored. `id-token: write` lets the Windows job exchange its GitHub identity for an Azure
+    # token (federated credential on the Azure app registration); the caller job must grant the same permission.
+    environment: windows-signing
+    permissions:
+      contents: read
+      id-token: write
     env:
       # Public verification keys only; absence blocks packaging before release.
       AGENTLAS_PRODUCT_EXTENSION_TRUSTED_KEYS_JSON: ${{ vars.AGENTLAS_PRODUCT_EXTENSION_TRUSTED_KEYS_JSON }}
@@ -199,6 +208,24 @@ jobs:
           EOF
           GIT_CONFIG_GLOBAL="$git_config" GIT_TERMINAL_PROMPT=0 GCM_INTERACTIVE=never npm ci --no-audit
 
+      - name: Azure sign-in for Windows code signing (GitHub OIDC, no client secret)
+        if: runner.os == 'Windows'
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          # the app holds only the signer role on the certificate profile, not a subscription role
+          allow-no-subscriptions: true
+
+      - name: Install the Artifact Signing PowerShell module (pinned version)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -Scope CurrentUser | Out-Null
+          Install-Module -Name TrustedSigning -RequiredVersion 0.5.8 -Force -Scope CurrentUser -Repository PSGallery -AllowClobber
+
       - name: Fetch SHA-256-pinned standalone Python for the package
         shell: bash
         run: |
@@ -276,13 +303,39 @@ jobs:
 
       - name: Package verified Actions artifacts only
         shell: bash
+        env:
+          # Windows only: every signed file goes through build-resources/windows-sign-azure.cjs, which fails the build
+          # instead of shipping an unsigned file. Pinned vendor runtimes keep their own signatures.
+          AGENTLAS_WINDOWS_SIGNING: ${{ runner.os == 'Windows' && 'required' || 'off' }}
+          AZURE_ARTIFACT_SIGNING_ENDPOINT: ${{ vars.AZURE_ARTIFACT_SIGNING_ENDPOINT }}
+          AZURE_ARTIFACT_SIGNING_ACCOUNT: ${{ vars.AZURE_ARTIFACT_SIGNING_ACCOUNT }}
+          AZURE_ARTIFACT_SIGNING_PROFILE: ${{ vars.AZURE_ARTIFACT_SIGNING_PROFILE }}
+          AGENTLAS_WINDOWS_PUBLISHER_NAME: ${{ vars.AZURE_ARTIFACT_SIGNING_PUBLISHER }}
+          AGENTLAS_WINDOWS_SIGN_LEDGER: ${{ runner.temp }}/windows-signing-ledger.jsonl
         run: |
           node scripts/run-private-release-gate.cjs PORTABLE_PACKAGE_BUILDER -- bash -e -o pipefail -s <<'AGENTLAS_PRIVATE_STAGE'
-          npx electron-builder ${{ matrix.builder_args }} --publish never
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            test -n "$AGENTLAS_WINDOWS_PUBLISHER_NAME"
+            node -e "require('fs').writeFileSync('electron-builder.win-release.json', JSON.stringify({ extends: './electron-builder.yml', win: { signtoolOptions: { sign: 'build-resources/windows-sign-azure.cjs', signingHashAlgorithms: ['sha256'], publisherName: [process.env.AGENTLAS_WINDOWS_PUBLISHER_NAME] } } }))"
+            npx electron-builder ${{ matrix.builder_args }} --publish never --config electron-builder.win-release.json
+          else
+            npx electron-builder ${{ matrix.builder_args }} --publish never
+          fi
           AGENTLAS_PRIVATE_STAGE
           node scripts/run-private-release-gate.cjs PORTABLE_PACKAGE_STAMP -- bash -e -o pipefail -s <<'AGENTLAS_PRIVATE_STAGE'
           node scripts/stamp-update-feeds.mjs --release-dir=release --require
           AGENTLAS_PRIVATE_STAGE
+
+      - name: Verify Windows Authenticode signatures and the update feed (release gate)
+        if: runner.os == 'Windows'
+        shell: powershell
+        env:
+          AGENTLAS_WINDOWS_SIGN_LEDGER: ${{ runner.temp }}/windows-signing-ledger.jsonl
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & powershell -NoProfile -File scripts/verify-windows-authenticode.ps1 -ReleaseDir release -Publisher '${{ vars.AZURE_ARTIFACT_SIGNING_PUBLISHER }}' -Report "$env:RUNNER_TEMP/windows-signing-report.json"
+          if ($LASTEXITCODE -ne 0) { throw 'Windows signature gate failed: an unsigned or mismatched artifact must not ship' }
+          Get-Content "$env:RUNNER_TEMP/windows-signing-report.json" -Raw | Write-Host
 
       - name: Verify packaged Windows Python and Workforce MCP
         if: runner.os == 'Windows'

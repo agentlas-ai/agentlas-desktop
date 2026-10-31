@@ -10,6 +10,7 @@ import type { FinanceReceiptReference } from "../finance/receipts";
 import type { FinanceNativePresentation } from "../../shared/finance-native-ui";
 import { composeDeclaredPrompt, registerDeclaredPromptModule } from "../runtime/prompt-order";
 import { didYouMean, missingArgumentsMessage } from "../../shared/did-you-mean";
+import { classifyAppControlPolicy } from "../app-control/policy";
 
 /*
  * Agentlas harness capability ports (docs/2026-10-13-native-harness/15 §8, contracts/harness-capability-ports.json).
@@ -1313,6 +1314,35 @@ export function harnessCallIsReadPermissionTerminal(harnessArgs: unknown): boole
   if (!targets?.length || !args || Object.keys(args).length !== targets.length) return false;
   return targets.every((key) => Object.hasOwn(args, key) && typeof args[key] === "string"
     && (args[key] as string).trim().length > 0 && (args[key] as string).length <= 200);
+}
+
+/**
+ * harness_call arguments that only read, so a read-permission turn never needs an approval card for them. The caller is the Codex
+ * MCP approval (runtime/codex-mcp-admission.ts), where Codex judges every harness_call "not read-only" because the tool is one gateway
+ * for reads and effects alike; a woken One turn (permission read: a review of finished work) then waited five minutes for a card
+ * nobody could see and every internal read came back "user rejected MCP tool call".
+ *
+ * Closed on purpose: { operation, args } and nothing else (no operationId/input aliases), and only
+ *   - a port that declares effectFreeRead (the closed set main-work recovery already trusts),
+ *   - app.operations (a listing),
+ *   - app.call of an operation the app-control policy classifies as an allowed read.
+ * Anything else, including an unknown operation or an unexpected shape, stays an effect and keeps asking.
+ */
+export function harnessCallIsEffectFreeRead(harnessArgs: unknown): boolean {
+  const plain = (value: unknown): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value);
+  if (!plain(harnessArgs)) return false;
+  if (!Object.keys(harnessArgs).every((key) => key === "operation" || key === "args")) return false;
+  const operation = harnessArgs.operation;
+  if (typeof operation !== "string" || operation !== operation.trim()) return false;
+  if (harnessArgs.args !== undefined && !plain(harnessArgs.args)) return false;
+  if (HARNESS_EFFECT_FREE_READ_OPERATIONS.has(operation) || operation === "app.operations") return true;
+  if (operation !== "app.call") return false;
+  const inner = harnessArgs.args;
+  if (!plain(inner) || typeof inner.operation !== "string" || inner.operation !== inner.operation.trim() || !inner.operation) return false;
+  if (!Object.keys(inner).every((key) => key === "operation" || key === "args")) return false;
+  if (inner.args !== undefined && !plain(inner.args)) return false;
+  const policy = classifyAppControlPolicy({ path: inner.operation }).policy;
+  return policy.allowed === true && policy.effect === "read";
 }
 
 /** A host-issued action may always cancel its fixed original target, even when UI claim persistence is unavailable. */

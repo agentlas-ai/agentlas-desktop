@@ -99,6 +99,65 @@ export async function cancelInvocationOwnerRun(runId: string): Promise<"requeste
   throw invocationOwnerUnavailable();
 }
 
+/** The control names a Goal this chat no longer runs, so the turn there is not its to stop. */
+const GOAL_CONTROL_REFUSALS = new Set(["goal_control_binding_changed", "goal_control_scope_mismatch", "goal_control_not_started"]);
+
+/**
+ * A Goal's Stop reaches the turn wherever it runs: stopGoal only sees the runs in this process's memory, so a turn the background service
+ * held kept working under a Goal that read paused. The owner row is read before the stop, so a turn started after it is never touched.
+ */
+export function createGoalStopRouter(ports: {
+  otherHostOwner(chatId: string): InvocationRunOwner | null;
+  stop(chatId: string, goalId: string, action: "pause" | "delete"): void;
+  deliver(owner: InvocationRunOwner): void;
+}) {
+  return (chatId: string, goalId: string, action: "pause" | "delete"): void => {
+    let other: InvocationRunOwner | null = null;
+    try { other = ports.otherHostOwner(chatId); } catch { /* The local stop never waits on this read. */ }
+    try { ports.stop(chatId, goalId, action); }
+    catch (error) {
+      if (other && !(error instanceof Error && GOAL_CONTROL_REFUSALS.has(error.message))) ports.deliver(other);
+      throw error;
+    }
+    if (other) ports.deliver(other);
+  };
+}
+
+/** Bounded and never throws: the Goal is already stopped in the ledger, so a cancel that cannot land only lets that one turn end by itself. */
+export async function deliverGoalStop(owner: InvocationRunOwner, ports: {
+  current(owner: InvocationRunOwner): InvocationRunOwner | null;
+  dispatch(owner: InvocationRunOwner, params: { chatId: string; runId: string }): Promise<unknown>;
+  wait(ms: number): Promise<void>;
+}): Promise<void> {
+  for (const delayMs of [0, 500, 2_000]) {
+    if (delayMs) await ports.wait(delayMs);
+    try {
+      const current = ports.current(owner);
+      // Another lease is a newer turn; a released one has ended.
+      if (!current || current.leaseId !== owner.leaseId || current.state === "released") return;
+      await ports.dispatch(current, { chatId: owner.chatId, runId: owner.runId });
+      return;
+    } catch { /* The next attempt reads the owner again. */ }
+  }
+  console.warn("[invocation] a Goal stop did not reach the other host", { chatId: owner.chatId, runId: owner.runId, ownerKind: owner.ownerKind });
+}
+
+export const stopInvocationGoal = createGoalStopRouter({
+  otherHostOwner: (chatId) => {
+    const owner = invocationRunOwners.getActiveOwner(chatId);
+    return owner && owner.ownerId !== invocationProcessOwner().ownerId && (owner.state === "active" || owner.state === "settling") ? owner : null;
+  },
+  stop: (chatId, goalId, action) => { if (action === "pause") invocationService.pauseGoal(chatId, goalId); else invocationService.deleteGoal(chatId, goalId); },
+  deliver: (owner) => { void deliverGoalStop(owner, {
+    current: (expected) => invocationRunOwners.getRunOwner(expected.chatId, expected.runId),
+    dispatch: (target, params) => {
+      if (!remoteDispatch) throw invocationOwnerUnavailable();
+      return remoteDispatch(target, "invoke.cancel", params);
+    },
+    wait: (ms) => new Promise((resolve) => { setTimeout(resolve, ms).unref?.(); }),
+  }); },
+});
+
 function router() {
   return createInvocationOwnerRouter({ owners: invocationRunOwners, localOwnerId: invocationProcessOwner().ownerId,
     inbox: { existingCurrentTurnSteer, getCurrentTurnSteer, validateCurrentTurnSteer, settleCurrentTurnSteer }, local: invocationService,

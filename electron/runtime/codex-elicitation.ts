@@ -36,6 +36,8 @@ export type CodexMcpToolApprovalDecision = "allow_once" | "allow_session" | "den
 export type CodexMcpToolApprovalDecider = (input: {
   serverName: string;
   toolName: string;
+  /** The call's own arguments from the approval meta, when Codex sent them. */
+  toolParams?: Record<string, unknown>;
 }) => Promise<CodexMcpToolApprovalDecision>;
 
 export interface CodexMcpElicitationResult {
@@ -271,7 +273,7 @@ function questionFor(message: string, field: Field, retry: boolean): AskUserRequ
  * appeared over Settings. The approval is a tool permission, not a question, so it is answered by
  * the permission arbiter exactly like Codex's bash approval.
  */
-export function codexMcpToolApprovalFrom(params: Record<string, unknown>): { serverName: string; toolName: string; persistSession: boolean } | null {
+export function codexMcpToolApprovalFrom(params: Record<string, unknown>): { serverName: string; toolName: string; persistSession: boolean; toolParams?: Record<string, unknown> } | null {
   const meta = record(params._meta);
   if (!meta || meta.codex_approval_kind !== "mcp_tool_call") return null;
   if (params.mode !== "form") return null;
@@ -287,7 +289,12 @@ export function codexMcpToolApprovalFrom(params: Record<string, unknown>): { ser
   const toolName = boundedText(meta.tool_name, 200) ?? boundedText(quoted, 200) ?? boundedText(meta.tool_title, 200) ?? "unknown";
   const persist = meta.persist;
   const persistSession = persist === "session" || (Array.isArray(persist) && persist.includes("session"));
-  return { serverName, toolName: toolName.replace(/[^a-zA-Z0-9_.:-]/g, "_"), persistSession };
+  // The call's own arguments ride in the approval meta (`tool_params`); they only ever lower a prompt for a first-party read, so an
+  // absent, non-object or oversized value is simply "unknown" (codex-mcp-admission.ts).
+  const rawParams = meta.tool_params;
+  const toolParams = rawParams && typeof rawParams === "object" && !Array.isArray(rawParams) && JSON.stringify(rawParams).length <= 16_384
+    ? rawParams as Record<string, unknown> : undefined;
+  return { serverName, toolName: toolName.replace(/[^a-zA-Z0-9_.:-]/g, "_"), persistSession, ...(toolParams ? { toolParams } : {}) };
 }
 
 function finish(
@@ -330,7 +337,8 @@ export async function answerCodexMcpElicitation(
   if (toolApproval && context.decideToolApproval) {
     let decision: CodexMcpToolApprovalDecision;
     try {
-      decision = await context.decideToolApproval({ serverName: toolApproval.serverName, toolName: toolApproval.toolName });
+      decision = await context.decideToolApproval({ serverName: toolApproval.serverName, toolName: toolApproval.toolName,
+        ...(toolApproval.toolParams ? { toolParams: toolApproval.toolParams } : {}) });
     } catch {
       decision = "deny"; // an arbiter failure is never an approval
     }

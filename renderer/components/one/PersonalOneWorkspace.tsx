@@ -1,7 +1,7 @@
 "use client";
 import { MessageActions, MessageReplyPreview } from "../MessageActions";
 import { composeMessageReply, displayMessageReply, type MessageReply } from "@/lib/message-reply";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { ipc, ipcEvents, grantForDroppedFile, grantForPastedAttachment, grantForPastedImage } from "@/lib/ipc";
 import { fitImageUnder } from "@/lib/attachment-image-fit";
@@ -34,6 +34,7 @@ import { TaskSidePanel } from "@/components/workspace/TaskSidePanel";
 import { linkedLocalFileItem } from "@/lib/linked-local-file";
 import { requestChatFileOpen, chatFilesBridge, chatFileItem, parseChatFileMessage, formatChatFileSize, type ChatFileDraft, type ChatFileItem } from "@/lib/chat-files";
 import { ChatFileCards } from "@/components/ChatFileExperience";
+import { HostContinuationNotice } from "@/components/HostContinuationNotice";
 import { ONE_ATTACHMENT_LIMITS } from "../../../shared/one-attachments";
 import { ComposerDecisionSlot } from "@/components/ComposerDecisionPortal";
 import { ToolApprovalInline } from "@/components/ToolApprovalInline";
@@ -61,10 +62,26 @@ const PersonalOneTaskResult=dynamic(()=>import("./PersonalOneTaskResult").then(m
 
 const visibleAnswer=(text:string)=>mapInlineVisualProse(text,prose=>stripAgentRoutingBanners(stripAgentIdentityBadges(stripAgentControlBlocks(prose,{streaming:true}))).trim());
 const terminal=(state:string)=>["completed","cancelled","failed","interrupted"].includes(state);
-// Single-row composer: the + and send columns (28px each) plus the pill's 8px side padding; below COMPOSER_MIN_TEXT_PX of text the
-// placeholder no longer fits on one line, so the composer takes its two-row shape.
-const COMPOSER_ROW_FIXED_PX=28+28+16;
+// Single-row composer: the + and send columns (28px each), the 8px between the + and the pill and the pill's 22px of inner
+// padding before the text; below COMPOSER_MIN_TEXT_PX of text the placeholder no longer fits on one line, so the composer takes
+// its two-row shape.
+const COMPOSER_ROW_FIXED_PX=28+28+8+22;
 const COMPOSER_MIN_TEXT_PX=200;
+// The saved `blue` is iMessage's own blue (the shared ONE_BUBBLE_COLORS.blue stays what the phone and the web read); every other
+// saved colour is the owner's choice and stays exactly as saved.
+const IMESSAGE_BLUE="#0a84ff"; // colour-literal-allowed: the saved "blue" bubble is iMessage's blue; the design token block (globals.css) is outside this screen's files
+const bubbleHex=(color:OneBubbleColor|undefined)=>(color ?? "blue")==="blue"?IMESSAGE_BLUE:ONE_BUBBLE_COLORS[color ?? "blue"];
+// A new time group opens after this much quiet, or on another day (the centred gray stamp between groups).
+const STAMP_GAP_MS=30*60_000;
+const sameDay=(a:number,b:number)=>new Date(a).toDateString()===new Date(b).toDateString();
+function stampLabel(at:number,ko:boolean):{day:string;time:string}{
+  const when=new Date(at),now=new Date();
+  const time=when.toLocaleTimeString(ko?"ko-KR":"en-US",{hour:"numeric",minute:"2-digit"});
+  const days=Math.round((new Date(now.getFullYear(),now.getMonth(),now.getDate()).getTime()-new Date(when.getFullYear(),when.getMonth(),when.getDate()).getTime())/86_400_000);
+  if(days===0)return {day:ko?"오늘":"Today",time};
+  if(days===1)return {day:ko?"어제":"Yesterday",time};
+  return {day:when.toLocaleDateString(ko?"ko-KR":"en-US",{month:"long",day:"numeric",...(when.getFullYear()!==now.getFullYear()?{year:"numeric"}:{})}),time};
+}
 type PersonalOneConversationMessage = ChatHistoryEntry & {
   displayKey: string;
   historyGroupId?: string;
@@ -308,6 +325,11 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
     for(const group of groups)if(group===active||group.turn&&ownIds.has(group.turn.commandId))included.add(group.message.id);
     return groups.filter(group=>included.has(group.message.id));
   },[groups,historyGroups,activeReply?.runId,historyScope,ownVisibleCommands]);
+  // A teammate session One handed work to is a host receipt in this conversation (team-dispatch.ts appendParentNotice), drawn as a live
+  // card with its status, progress, result, question and Open session. This window filtered out every system row, so a hand-off to a
+  // teammate left nothing to see here, while One's group rooms and the phone drew it.
+  const dispatchNotices=useMemo(()=>(snapshot?.messages ?? []).filter(message=>message.role==="system"
+    &&(message.hostNotice?.purpose==="one-dispatch-link"||message.hostNotice?.purpose==="one-dispatch-result")),[snapshot?.messages]);
   const continuationProjector=useRef(new ChatContinuationProjector());
   const observedReplyTexts=useRef(new Map<string,string>());
   const conversationMessages=useMemo(()=>{
@@ -342,6 +364,22 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
       createdAt:message=>message.createdAt || undefined,run:message=>message.replyTurn?.runId,
     }).filter(row=>Boolean(row.message.pendingCommandId)||visible.has(row.message.historyGroupId!));
   },[activeReply?.runId,conversationMessages,historyScope,visibleGroups]);
+  // Receipts sit between the rows by time: before the first row written after them, the rest at the end.
+  const timeline=useMemo(()=>{
+    if(!dispatchNotices.length)return conversationRows.map(row=>({row}));
+    // The window shows the recent turns only: a receipt older than its first row belongs to history that is folded away.
+    const firstAt=conversationRows.map(row=>row.createdAt?Date.parse(row.createdAt):Number.NaN).find(Number.isFinite);
+    const pending=dispatchNotices.filter(notice=>firstAt===undefined||Date.parse(notice.createdAt)>=firstAt)
+      .sort((left,right)=>Date.parse(left.createdAt)-Date.parse(right.createdAt));
+    const merged:Array<{row:typeof conversationRows[number];notice?:undefined}|{row?:undefined;notice:ChatHistoryEntry}>=[];
+    for(const row of conversationRows){
+      const at=row.createdAt?Date.parse(row.createdAt):Number.NaN;
+      while(pending.length&&Number.isFinite(at)&&Date.parse(pending[0].createdAt)<=at)merged.push({notice:pending.shift()!});
+      merged.push({row});
+    }
+    for(const notice of pending)merged.push({notice});
+    return merged;
+  },[conversationRows,dispatchNotices]);
   const captureHistoryAnchor=()=>{
     const element=transcript.current;if(!element)return;
     const top=element.getBoundingClientRect().top;
@@ -500,7 +538,7 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
       <span className={styles.delegationMeta} aria-hidden="true">{state==="completed"&&<IconCheck size={14}/>}<IconChevronRight size={14}/></span>
     </button>;
   };
-  return <div ref={workspaceRoot} className={styles.root} data-personal-one-workspace="true" data-detached={detached} data-layout={viewportWidth>=860?"workbench":"companion"} onDragOver={event=>{if(event.dataTransfer.types.includes("Files")){event.preventDefault();event.dataTransfer.dropEffect="copy";}}} onDrop={event=>{if(event.dataTransfer.files.length){event.preventDefault();void pickAttachments(Array.from(event.dataTransfer.files));}}} style={{"--personal-bubble":ONE_BUBBLE_COLORS[snapshot?.bubbleColor ?? "blue"]} as CSSProperties}>
+  return <div ref={workspaceRoot} className={styles.root} data-personal-one-workspace="true" data-detached={detached} data-layout={viewportWidth>=860?"workbench":"companion"} onDragOver={event=>{if(event.dataTransfer.types.includes("Files")){event.preventDefault();event.dataTransfer.dropEffect="copy";}}} onDrop={event=>{if(event.dataTransfer.files.length){event.preventDefault();void pickAttachments(Array.from(event.dataTransfer.files));}}} style={{"--personal-bubble":bubbleHex(snapshot?.bubbleColor)} as CSSProperties}>
     {!detached&&<aside id="personal-one-navigation" className={styles.navigation} data-collapsed={navCollapsed} hidden={navCollapsed} aria-label={copy("One 탐색","One navigation")}>
       <div className="titlebar-drag" style={{height:28}}/><ProductModeMenu current="one" locale={ko?"ko":"en"}/>
       <button className={styles.personalEntry} data-personal-one-entry="true" aria-current="page"><OneAgentPortrait label={name} status="quiet" size="small" tone={snapshot?.avatarIcon ?? "character:orange-dino"}/><span className={styles.personalIdentity}><strong>{name}</strong><small>{copy("개인 에이전트","Personal agent")}</small></span></button>
@@ -509,9 +547,10 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
       <p className={styles.localLabel}>{copy("이 컴퓨터에서 실행","Runs on this computer")}</p>
     </aside>}
     <main className={styles.conversation}>
-      <header ref={contextBar} className={`${styles.header} ${detached?"titlebar-drag":""}`}>
-        <div className={styles.headerIdentity}>{!detached&&<button type="button" className={styles.iconButton} data-personal-one-nav-toggle="true" aria-label={navCollapsed?copy("사이드바 열기","Open sidebar"):copy("사이드바 접기","Collapse sidebar")} title={navCollapsed?copy("사이드바 열기","Open sidebar"):copy("사이드바 접기","Collapse sidebar")} aria-expanded={!navCollapsed} aria-controls="personal-one-navigation" onClick={toggleNav}><IconSidebar size={18}/></button>}<h1>{name}</h1><small role="status">{!snapshot?copy("연결 확인 중","Checking connection"):error?copy("마지막 관측 표시","Last observation"):copy("이 컴퓨터에 연결됨","Connected to this computer")}</small></div>
-        <div className="titlebar-nodrag">
+      <header ref={contextBar} className={`${styles.header} ${detached?"titlebar-drag":""}`} data-personal-one-header="true">
+        <div className={`${styles.headerSide} titlebar-nodrag`}>{!detached&&<button type="button" className={styles.iconButton} data-personal-one-nav-toggle="true" aria-label={navCollapsed?copy("사이드바 열기","Open sidebar"):copy("사이드바 접기","Collapse sidebar")} title={navCollapsed?copy("사이드바 열기","Open sidebar"):copy("사이드바 접기","Collapse sidebar")} aria-expanded={!navCollapsed} aria-controls="personal-one-navigation" onClick={toggleNav}><IconSidebar size={18}/></button>}</div>
+        <div className={styles.headerIdentity}><span className={styles.headerAvatar} aria-hidden="true"><OneAgentPortrait label={name} status="quiet" size="small" tone={snapshot?.avatarIcon ?? "character:orange-dino"}/></span><h1>{name}</h1><small role="status">{!snapshot?copy("연결 확인 중","Checking connection"):error?copy("마지막 관측 표시","Last observation"):copy("이 컴퓨터에 연결됨","Connected to this computer")}</small></div>
+        <div className={`${styles.headerSide} titlebar-nodrag`} data-side="end">
           {detached&&<button className={styles.iconButton} type="button" aria-label={copy("항상 위에 두기","Always on top")} aria-pressed={pinned} title={copy("항상 위에 두기","Always on top")} onClick={()=>void togglePinned()}><span aria-hidden="true">⌖</span></button>}
           <button type="button" className={styles.iconButton} aria-label={copy("결과·작업 보기","Show results and work")} aria-expanded={taskDrawerVisible} title={copy("결과·작업 보기","Show results and work")} onClick={()=>{if(taskDrawerVisible)setTasksOpen(false);else showTaskDrawer();setTaskPreviewOnly(Boolean(selected));}}><IconPanelRight size={17}/></button>
           <button ref={headerMenuTrigger} type="button" className={styles.iconButton} aria-label={copy("One 메뉴","One menu")} aria-expanded={menuOpen} aria-controls="personal-one-menu" onClick={()=>setMenuOpen(value=>!value)}><IconMoreHorizontal size={19}/></button>
@@ -540,7 +579,14 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
           {!snapshot?.messages.length&&!pendingMessages.length&&<div className={styles.empty}><h2>{copy("무엇을 함께 할까요?","What shall we work on?")}</h2></div>}
           {historyStart>0&&<button type="button" style={historyButtonStyle} data-personal-one-history="earlier" onClick={()=>revealHistory("earlier")}>{copy("이전 대화 24개 보기","Show 24 earlier turns")}</button>}
           {groups.length>24&&<button type="button" style={historyButtonStyle} data-personal-one-history="collapse" onClick={latestHistory}>{copy("최근 대화로 접기","Fold to recent turns")}</button>}
-          {conversationRows.map(row=>{
+          {(()=>{
+            // Runs and time groups, read off the rows that actually draw: a gray stamp opens a group after 30 quiet minutes or on another day.
+            let shownAt:number|null=null;let shownRole:string|null=null;
+            return timeline.map(entry=>{
+            const row=entry.row;
+            if(!row){const notice=entry.notice!;return <div key={`dispatch-notice:${notice.id}`} className={styles.turn} data-role="notice" data-personal-one-dispatch-notice={notice.id}>
+              <HostContinuationNotice text={notice.text} locale={ko?"ko":"en"} notice={notice.hostNotice} onOpenChat={chatId=>void openMain(`/one?chat=${encodeURIComponent(chatId)}`)}/>
+            </div>;}
             const message=row.message,turn=message.replyTurn;
             const sourceMessageId=row.sourceId;
             const displayId=row.continuation?row.id:message.displayKey;
@@ -555,7 +601,13 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
             const failed=row.tail&&turn?.state==="failed";
             const ownedUi=message.role==="assistant"&&turn&&!row.continuation ? inlineUiForReply(inlineUi,turn.runId,message.text) : [];
             if(!ownedUi.length&&!markdownText&&!typing&&!failed&&!delegated.length&&!imageUrls.length&&!fileGroups.length)return null;
-            return <div className={styles.turn} key={displayId} data-personal-one-message-id={displayId} data-personal-one-source-id={sourceMessageId} data-personal-one-history-id={message.historyGroupId} data-command-id={turn?.commandId} data-optimistic-message={message.pendingCommandId}>
+            const at=row.createdAt?Date.parse(row.createdAt):Number.NaN;
+            const stamp=Number.isFinite(at)&&(shownAt===null||!sameDay(shownAt,at)||at-shownAt>=STAMP_GAP_MS)?stampLabel(at,ko):null;
+            // The sender's name goes above a reply only where it says something: Hope speaking first in a time group (a check-in or a hand-off result).
+            const sender=message.role==="assistant"&&!row.continuation&&(stamp!==null||shownRole===null)?name:"";
+            if(Number.isFinite(at))shownAt=at;shownRole=message.role;
+            return <Fragment key={displayId}>{stamp&&<div className={styles.stamp}><time dateTime={row.createdAt}><b>{stamp.day}</b> {stamp.time}</time></div>}<div className={styles.turn} data-role={message.role} data-personal-one-message-id={displayId} data-personal-one-source-id={sourceMessageId} data-personal-one-history-id={message.historyGroupId} data-command-id={turn?.commandId} data-optimistic-message={message.pendingCommandId}>
+            {sender&&<small className={styles.sender}>{sender}</small>}
             {(markdownText||ownedUi.length>0)&&<MessageActions messageId={sourceMessageId} author={message.role==="user"?copy("나","You"):name} text={displayedText} locale={locale} onReply={reply=>{setMessageReply(reply);composerDock.current?.querySelector("textarea")?.focus();}}><article className={styles.bubble} data-role={message.role} data-run-id={turn?.runId}>
               {message.role==="assistant"&&turn
                 ?<StreamingMarkdown text={markdownText} messageId={contentId} chatId={snapshot?.conversationChatId} onOpenLinkedFile={openConversationFile} onUiFollowup={prepareUiFollowup} uiActionsDisabled={Boolean(activeReply||attachmentBusy)}/>
@@ -572,7 +624,7 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
               title:"[Supervisor] Reply failed",summary:"The Supervisor reply failed before normal completion.",
               steps:["Send a message to Supervisor","The reply state became failed"],
             }} />}
-          </div>})}
+          </div></Fragment>;});})()}
           {historyEnd<groups.length&&<button type="button" style={historyButtonStyle} data-personal-one-history="later" onClick={()=>revealHistory("later")}>{copy("다음 대화 24개 보기","Show 24 later turns")}</button>}
           {snapshot?.delegations?.filter(item=>!item.originReplyRunId || !snapshot.turns?.some(turn=>turn.runId===item.originReplyRunId)).map(delegation)}
         </div>
@@ -602,7 +654,7 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
         {selectionSendBlocked&&<p role="status" className={styles.feedback}>{copy("모델 선택을 확인한 뒤 보내세요. 작성한 내용과 첨부는 그대로 유지됩니다.","Send after the model selection is confirmed. Your draft and attachments are unchanged.")}</p>}
         <MessageReplyPreview reply={messageReply} locale={locale} onDismiss={()=>setMessageReply(null)}/>
         {front.view&&!front.view.effective&&<p className={styles.feedback} data-one-personal-model-scope="true" title={copy("개인 One과의 대화에 사용할 모델입니다. Work 업무의 실행 모델은 업무별로 선택합니다.","The model for your personal One conversation. Choose the execution model separately for each Work task.")}>{copy("개인 대화 모델","Personal chat model")}</p>}
-        <form ref={composerForm} className={styles.composer} data-one-composer="true" data-expanded={composerExpanded||composerNarrow} data-has-files={attachments.length>0} onSubmit={event=>{event.preventDefault();void send();}}>
+        <form ref={composerForm} className={styles.composer} data-one-composer="true" data-expanded={composerExpanded||composerNarrow} data-has-files={attachments.length>0} data-ready={Boolean(text.trim())||attachments.length>0} onSubmit={event=>{event.preventDefault();void send();}}>
           {attachments.length>0&&<div className={styles.attachmentDrafts} aria-label={copy("선택한 첨부","Selected attachments")}>{attachments.map((item,index)=><div className={styles.attachmentDraft} data-kind={item.preview?"image":"file"} key={index} title={item.draft.name}>
             {item.preview?<img src={item.preview} alt={item.draft.name}/>:<span className={styles.attachmentFile}><IconFileUp size={18}/><strong>{item.draft.name}</strong><small>{formatChatFileSize(item.draft.size)}</small></span>}
             <button type="button" aria-label={copy("첨부 삭제: ","Remove attachment: ")+item.draft.name} onClick={()=>{if(item.preview)URL.revokeObjectURL(item.preview);setAttachments(prior=>prior.filter((_,position)=>position!==index));}}><IconClose size={12}/></button>
@@ -679,7 +731,7 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
       <TaskSidePanel key={panelChatId ?? "one-files"} items={[]} locale={ko?'ko':'en'} visible={!!file||artifactOpen} onEmptyChange={setOutputPanelEmpty} screenChatId={panelChatId} browserScopeKey={panelChatId ?? 'personal-one-unbound'} width={shownPanelWidth} minWidth={280} maxWidth={panelMaxWidth} onResize={resizePanel} onRequestReadableWidth={resizePanel} onRequestOpen={()=>setArtifactOpen(true)} onClose={()=>{setFile(null);setArtifactOpen(false);}}/>
     </div>
     <OneBottomSheet open={appearanceOpen} onClose={()=>setAppearanceOpen(false)} closeLabel={copy("설정 닫기","Close appearance")} ariaLabel={copy("나의 One","Your One")} title={copy("나의 One","Your One")} icon={<IconSettings size={20} />} size="compact" footer={<button className={styles.saveAppearance} disabled={!profile||savingProfile||!profileName.trim()} onClick={()=>void saveAppearance()}>{copy("저장","Save")}</button>}>
-      <div className={styles.appearance}>{profileError&&<p role="status">{copy("저장을 확인하지 못했습니다. 최신 설정을 확인하고 다시 저장해 주세요.","The save could not be confirmed. Review the latest settings and save again.")}</p>}<label>{copy("이름","Name")}<input aria-label={copy("One 이름","One name")} value={profileName} onChange={event=>setProfileName(event.target.value)} maxLength={64}/></label><fieldset className={styles.bubbleChoices}><legend>{copy("말풍선 색","Bubble color")}</legend><div role="radiogroup" aria-label={copy("말풍선 색","Bubble color")}>{Object.keys(ONE_BUBBLE_COLORS).map(color=><button type="button" key={color} role="radio" aria-checked={bubbleColor===color} aria-label={({blue:copy("파랑","Blue"),green:copy("초록","Green"),purple:copy("보라","Purple"),rose:copy("장미","Rose"),amber:copy("호박","Amber"),slate:copy("회색","Slate")} as Record<string,string>)[color]} onClick={()=>setBubbleColor(color as OneBubbleColor)} style={{background:ONE_BUBBLE_COLORS[color as OneBubbleColor]}}>{bubbleColor===color&&<IconCheck size={18}/>}</button>)}</div></fieldset><p className={styles.preview} style={{background:ONE_BUBBLE_COLORS[bubbleColor]}}>{profileName||name}</p><OneFrontSetting controller={front} locale={ko?"ko":"en"}/></div>
+      <div className={styles.appearance}>{profileError&&<p role="status">{copy("저장을 확인하지 못했습니다. 최신 설정을 확인하고 다시 저장해 주세요.","The save could not be confirmed. Review the latest settings and save again.")}</p>}<label>{copy("이름","Name")}<input aria-label={copy("One 이름","One name")} value={profileName} onChange={event=>setProfileName(event.target.value)} maxLength={64}/></label><fieldset className={styles.bubbleChoices}><legend>{copy("말풍선 색","Bubble color")}</legend><div role="radiogroup" aria-label={copy("말풍선 색","Bubble color")}>{Object.keys(ONE_BUBBLE_COLORS).map(color=><button type="button" key={color} role="radio" aria-checked={bubbleColor===color} aria-label={({blue:copy("파랑","Blue"),green:copy("초록","Green"),purple:copy("보라","Purple"),rose:copy("장미","Rose"),amber:copy("호박","Amber"),slate:copy("회색","Slate")} as Record<string,string>)[color]} onClick={()=>setBubbleColor(color as OneBubbleColor)} style={{background:bubbleHex(color as OneBubbleColor)}}>{bubbleColor===color&&<IconCheck size={18}/>}</button>)}</div></fieldset><p className={styles.preview} style={{background:bubbleHex(bubbleColor)}}>{profileName||name}</p><OneFrontSetting controller={front} locale={ko?"ko":"en"}/></div>
     </OneBottomSheet>
     <OneFrontNotice controller={front} locale={ko?"ko":"en"}/>
     <PersonalOneBudget open={budgetsOpen} oneId={snapshot?.oneId} locale={ko?"ko":"en"} items={budgets.items} unconfirmed={budgets.unconfirmed} onRefresh={budgets.refresh} onClose={()=>setBudgetsOpen(false)}/>

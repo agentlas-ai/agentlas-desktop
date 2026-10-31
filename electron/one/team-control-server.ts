@@ -527,12 +527,32 @@ export function removeOneTeamCapability(configKey: string, capabilityId: string)
   }
 }
 
+/**
+ * A write that met another connection's lock ("database is locked", SQLITE_BUSY) changed nothing: the statement that hit the lock is
+ * rolled back, and every One tool that writes is idempotent on its own key (command_id, expected_revision, the member/brief receipt).
+ * It reached One as a plain failure twice in three weeks (one_graph_set_enabled, one_supervisor_follow_up) and
+ * One reported the action as not done. Two short retries, only for this error and never for a run that carries a history command.
+ */
+export async function retryWhenStoreBusy<T>(run: () => Promise<T>, waitsMs: readonly number[] = [400, 1_200]): Promise<T> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await run();
+    } catch (error) {
+      const code = (error as { code?: unknown } | null)?.code;
+      const message = error instanceof Error ? error.message : String(error);
+      const busy = code === "SQLITE_BUSY" || code === "SQLITE_BUSY_SNAPSHOT" || /database is locked|SQLITE_BUSY/i.test(message);
+      if (!busy || attempt >= waitsMs.length) throw error;
+      await new Promise((resolve) => setTimeout(resolve, waitsMs[attempt]));
+    }
+  }
+}
+
 /** Bind only the original authenticated native capability before dispatch; renderer/model JSON supplies no native identity. */
 export async function handleOneTeamControlRequest(request:Record<string,unknown>):Promise<unknown>{
   if(!tokenMatches(request.token,serverToken))throw new Error("one-team-capability-invalid");
   const binding=typeof request.capabilityId==="string"?capabilities.get(request.capabilityId):undefined;
   if(!binding)throw new Error("one-team-capability-invalid");
-  if(!binding.historySource)return handleOneTeamControlRequestUnchecked(request);
+  if(!binding.historySource)return retryWhenStoreBusy(()=>handleOneTeamControlRequestUnchecked(request));
   const original=binding.historySource;if(!binding.chatId)throw personalDataError("history_native_original_command_required");
   const operations:Record<string,string>={list:"one_team_list",start:"one_team_start_session",steer:"one_team_steer",status:"one_team_session_status",create:"one_team_create_member",invite:"one_team_invite",compose_group:"one_team_compose_group"};
   const operation=String(request.operation??""),name=["graph","history","personal","supervisor"].includes(operation)?String(request.name??""):operations[operation];

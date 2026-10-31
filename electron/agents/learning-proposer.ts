@@ -4,13 +4,15 @@ import { powerMonitor } from "electron";
 import { runSlotStats } from "../runtime/run-slots";
 import { agentWorkspaceStorePath } from "./workspace-guard";
 import { AGENT_LEARNING_POLICY } from "../../shared/agent-learning-policy";
+import { autoApplyLearningProposal, runAutoEvolutionPass } from "./auto-evolution";
 import { hasOpenLearningProposal, learningAgentIds, prepareAgentWorkspaceFromMemory, readyLessonsFor, writeAgentWorkspaceRecord } from "./workspace-service";
 
 /**
  * Prepares a reviewable change for lessons that came back from enough runs, without the owner opening the agent first.
  *
- * Nothing is applied here. The result is a "review ready" proposal the owner reads as a diff and approves or rejects, as when
- * the owner asks for it. The proposer only decides when to ask, never whether the change is good: that stays with the
+ * Nothing is applied here unless the owner switched auto-evolution on for the agent, and then only the narrow kind of change
+ * auto-evolution.ts allows (a new on-demand skill from procedure lessons with a host-recorded failure or correction). Otherwise
+ * the result is a "review ready" proposal the owner reads as a diff and approves or rejects, as when the owner asks for it. The proposer only decides when to ask, never whether the change is good: that stays with the
  * compiler's judgment (which may answer "no change") and the owner's reading.
  *
  * Cost limits: Main process only, idle machine, free run slots, at most AGENT_LEARNING_POLICY.proposalsPerAgentPerDay
@@ -48,7 +50,7 @@ function idleSeconds(): number {
 }
 
 /** One agent: record the attempt first (a crash must not retry in a loop), then ask the compiler. */
-export async function proposeLearningsForAgent(agentId: string, now = new Date()): Promise<{ outcome: "proposed" | "skipped" | "failed"; code?: string; proposalId?: string }> {
+export async function proposeLearningsForAgent(agentId: string, now = new Date()): Promise<{ outcome: "proposed" | "skipped" | "failed"; code?: string; proposalId?: string; autoApplied?: boolean }> {
   const day = today(now), state = readState(agentId);
   const attempts = state?.day === day ? state.attempts : 0;
   if (attempts >= AGENT_LEARNING_POLICY.proposalsPerAgentPerDay) return { outcome: "skipped", code: "daily_limit" };
@@ -59,7 +61,9 @@ export async function proposeLearningsForAgent(agentId: string, now = new Date()
   writeAgentWorkspaceRecord(stateFile(agentId), { day, attempts: attempts + 1, lastCode: null } satisfies ProposerState);
   try {
     const proposal = await prepareAgentWorkspaceFromMemory({ agentId, memoryEntryIds: memoryIds });
-    return { outcome: "proposed", proposalId: proposal.id };
+    // Off by default: the call answers "auto_evolution_off" and the change waits for the owner's diff review.
+    const auto = autoApplyLearningProposal(proposal.id);
+    return { outcome: "proposed", proposalId: proposal.id, ...(auto.applied ? { autoApplied: true } : {}) };
   } catch (error) {
     const code = typeof (error as { code?: unknown })?.code === "string" ? (error as { code: string }).code : "proposal_failed";
     const movedOn = state?.day === day ? state.movedOn ?? 0 : 0;
@@ -81,6 +85,8 @@ async function tick(): Promise<void> {
   if (slots.inUse > 0 || slots.queued > 0) return;
   running = true;
   try {
+    // Host-only work first (no model): settle changes being watched, retry one that waited on a busy run.
+    for (const pass of runAutoEvolutionPass()) console.log(`[auto-evolution] ${pass.evaluated.map(item => `${item.result}:${item.reason}`).join(" ")}${pass.applied ? " applied" : ""}`);
     let tried = 0;
     for (const agentId of learningAgentIds()) {
       if (tried >= AGENTS_PER_TICK) break;

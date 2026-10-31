@@ -25,3 +25,14 @@ export interface LessonEvidence {
   /** A few concrete failures (time, error code) the card can cite. */
   samples: Array<{ at: string; kind: string; code: string | null }>;
 }
+
+/**
+ * Auto-evolution (an opt-in per agent): a lesson of the narrow, host-checkable kind may be applied without the
+ * owner reading the diff, and is taken back when the agent's own runs get worse. Everything else keeps the owner's diff review.
+ * Nothing here is a quality threshold: the window only bounds how long one change is watched before the next may be applied.
+ */
+export const AUTO_EVOLUTION_POLICY = Object.freeze({
+  /** Days one auto-applied change is watched (and may be rolled back) before it counts as kept and the next may be applied. */
+  watchDays: 14,
+});
+

@@ -11,6 +11,7 @@ import { AGENT_SKILL_ROOTS, materializeAgentFiles, resolveAgentPackageDir } from
 import { agentRevisionOutcomes, compareRevisionOutcomes } from "./revision-outcomes";
 import { lessonEvidence, lessonRunIds } from "./learning-evidence";
 import { runEvidenceRef } from "../memory/run-evidence";
+import { readAutoEvolutionEnabled, readAutoEvolutionLog } from "./auto-evolution-store";
 import { AGENT_LEARNING_POLICY, type LessonEvidence } from "../../shared/agent-learning-policy";
 import { ALWAYS_ON_INSTRUCTION_LIMITS, addedLines, alwaysOnInstructionChange, alwaysOnInstructionSize, learningTriggerAllowance, type AlwaysOnInstructionChange } from "../../shared/agent-instruction-limits";
 import { readCanonicalPromptFromDirectory } from "./prompt-authority";
@@ -337,7 +338,11 @@ export function listAgentWorkspaceRevisions(agentId: string): AgentWorkspaceRevi
   }).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
 function withRevisionOutcomes(agentId: string, revisions: AgentWorkspaceRevision[]): AgentWorkspaceRevision[] {
-  revisions = revisions.map(revision => { const experience = readExperience(agentId, revision.id); return experience ? { ...revision, experience } : revision; });
+  // One directory read, then only the revisions that have a record: the history is built at every run start, and a missing file
+  // per revision would be an exception per revision.
+  let recorded: Set<string>;
+  try { recorded = new Set(fs.readdirSync(path.join(agentWorkspaceStorePath(agentId), "experience"))); } catch { recorded = new Set(); }
+  if (recorded.size) revisions = revisions.map(revision => { const experience = recorded.has(`${revision.id}.json`) ? readExperience(agentId, revision.id) : null; return experience ? { ...revision, experience } : revision; });
   let outcomes: ReturnType<typeof agentRevisionOutcomes>;
   try { outcomes = agentRevisionOutcomes(agentId); } catch { return revisions; /* Outcomes are a view; the history stays readable without them. */ }
   return revisions.map(revision => {
@@ -413,11 +418,13 @@ function memoryCandidates(agentId: string, proposals: StoredProposal[], options:
     WHERE superseded_at IS NULL AND agent_id = ? AND scope = 'agent_repo' AND project_id IS NULL AND project_path IS NULL
     ORDER BY created_at DESC LIMIT 300`).all(agentId) as Array<{ id: string; kind: string; scope: string; content: string; sensitivity: string; evidence_json: string }>;
   const natives = nativeTextsFor("memory_entry", memories.map(entry => entry.id)); const deferred = readDeferred(agentId);
+  // A change auto-evolution took back no longer stands for its lessons: they are not "applied".
+  const takenBack = new Set(readAutoEvolutionLog(agentId).filter(entry => entry.state === "rolled_back").map(entry => entry.proposalId));
   const candidates = memories.filter(memory => memory.sensitivity !== "secret" && !looksSecret(memory.content) && !looksSecret(natives.get(memory.id) ?? "")).map((memory): AgentWorkspaceMemoryCandidate => {
     let evidence: string[] = [];
     try { const parsed: unknown = JSON.parse(memory.evidence_json); if (Array.isArray(parsed) && parsed.every(item => typeof item === "string" && item.trim())) evidence = parsed; } catch { /* Corrupt evidence is ineligible. */ }
     let state: AgentWorkspaceMemoryCandidate["state"] = evidence.length ? "eligible" : "needs_evidence";
-    const linked = proposals.find(p => p.memoryEntryIds.includes(memory.id) && ["review_ready", "applied"].includes(p.status));
+    const linked = proposals.find(p => !takenBack.has(p.id) && p.memoryEntryIds.includes(memory.id) && ["review_ready", "applied"].includes(p.status));
     if (state === "eligible" && deferred[memory.id] === deferFingerprint(memory.content, natives.get(memory.id) ?? undefined, evidence)) state = "needs_evidence";
     if (linked) state = linked.status === "applied" ? "applied" : "proposed";
     const content = natives.get(memory.id) ?? memory.content;
@@ -495,6 +502,32 @@ export function readyLessonsFor(agentId: string): Array<{ groupId: string; memor
 /** True while a learning change waits for the owner, so the proposer does not stack another on top of it. */
 export function hasOpenLearningProposal(agentId: string): boolean {
   return listProposals(agentId).some(proposal => proposal.status === "review_ready" && proposal.memoryEntryIds.length > 0);
+}
+/**
+ * What the host knows about the memories behind a learning change, for the auto-evolution gate (auto-evolution.ts): their kinds,
+ * and what the host recorded in the runs they came from. Throws like any proposal read when a source memory is gone.
+ */
+export function learningSourceFacts(agentId: string, memoryIds: string[]): { kinds: string[]; evidence: LessonEvidence } {
+  return { kinds: sourceMemories(agentId, memoryIds).candidates.map(candidate => candidate.kind), evidence: lessonEvidence(memoryIds) };
+}
+/** Takes lessons out of the candidate list until their content changes (the same record a "needs more evidence" answer writes). */
+export function deferAgentLearnings(agentId: string, memoryIds: string[]): void {
+  if (!memoryIds.length) return;
+  const marks = memoryIds.map(() => "?").join(",");
+  const rows = getDb().prepare(`SELECT id, content, evidence_json FROM memory_entries WHERE agent_id = ? AND id IN (${marks})`).all(agentId, ...memoryIds) as
+    Array<{ id: string; content: string; evidence_json: string }>;
+  const natives = nativeTextsFor("memory_entry", rows.map(row => row.id)), entries: Record<string, string> = {};
+  for (const row of rows) {
+    let evidence: string[] = [];
+    try { const parsed: unknown = JSON.parse(row.evidence_json); if (Array.isArray(parsed)) evidence = parsed.filter((line): line is string => typeof line === "string"); } catch { /* fingerprint of no evidence */ }
+    entries[row.id] = deferFingerprint(row.content, natives.get(row.id) ?? undefined, evidence);
+  }
+  recordDeferred(agentId, entries);
+}
+/** Installed agents whose files this host edits (not built-in, not background). The auto-evolution pass filters these by its own records. */
+export function editableAgentIds(limit = 500): string[] {
+  const rows = getDb().prepare("SELECT id FROM installed_agents WHERE builtin = 0 AND visibility <> 'background' LIMIT ?").all(limit) as Array<{ id: string }>;
+  return rows.map(row => row.id);
 }
 /** Agents that hold learnings of their own and can be edited. */
 export function learningAgentIds(limit = 250): string[] {
@@ -805,7 +838,8 @@ export function getAgentWorkspace(agentId: string): AgentWorkspaceSnapshot {
       files: tree.files.map(({ contentBase64: _bytes, ...file }) => file), memoryCandidates: memoryCandidates(agentId, proposals),
       proposals: proposals.map(uiProposal), history: withRevisionOutcomes(agentId, listAgentWorkspaceRevisions(agentId)), cloudId: marker?.registrations?.["owner-private"]?.cloudId ?? null,
       hubRef: marker?.registrations?.["hub-public"]?.slug ?? (getRoute(agentId)?.source === "hub" ? marker?.slug ?? null : null),
-      activation: pending ? "recovery_required" : hasRunLease(agentId, root) ? "run_active" : "ready" };
+      activation: pending ? "recovery_required" : hasRunLease(agentId, root) ? "run_active" : "ready",
+      autoEvolution: { enabled: readAutoEvolutionEnabled(agentId) } };
   });
 }
 export function listAgentWorkspaceFiles(agentId: string, relativeDir = ""): AgentWorkspaceFile[] {

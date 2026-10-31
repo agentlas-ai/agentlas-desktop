@@ -23,8 +23,9 @@ const MAX_CPU_SECONDS = 120;
 const DEFAULT_HEAP_SECONDS = 120;
 const MAX_HEAP_SECONDS = 1_800;
 const HEAP_SAMPLING_INTERVAL_BYTES = 64 * 1024;
-const IDLE_COLLECT_MIN_INTERVAL_MS = 5 * 60_000;
+const IDLE_COLLECT_MIN_INTERVAL_MS = 10 * 60_000;
 const IDLE_COLLECT_MIN_HEAP_BYTES = 256 * 1024 * 1024;
+const IDLE_COLLECT_MIN_WORK_CPU_MS = 20_000;
 
 export type ResourceSamplerRole = "main" | "daemon";
 export type ResourceSamplerOptions = {
@@ -170,18 +171,33 @@ export function resourceSample(role: ResourceSamplerRole, cpuPrevious: NodeJS.Cp
   });
 }
 
-let collectGarbage: (() => void) | null | undefined;
-/** V8 gives memory back only under pressure, and a 4 GB limit on a large machine is rarely pressure. */
+type CollectGarbage = (options: { type: "major"; flavor: "last-resort"; execution: "sync" }) => void;
+let collectGarbage: CollectGarbage | null | undefined;
+/**
+ * V8 gives memory back only under pressure, and a 4 GB limit on a large machine is rarely pressure. A plain `gc()` is not
+ * enough: it frees objects but V8's page pool keeps their pages. Measured on Electron 43: after a 345 MB
+ * spike heapTotal fell to 56 MB and footprint stayed at 360 MB, the daemon idled at a 600 MB footprint with heapTotal
+ * 204 MB, and "last-resort" took the same spike to 14 MB. It paused about 65 ms with 74 MB live.
+ */
 function fullCollection(): boolean {
   if (collectGarbage === undefined) {
     try {
       v8.setFlagsFromString("--expose-gc");
-      collectGarbage = vm.runInNewContext("gc") as () => void;
+      collectGarbage = vm.runInNewContext("gc") as CollectGarbage;
     } catch { collectGarbage = null; }
   }
   if (!collectGarbage) return false;
-  collectGarbage();
+  collectGarbage({ type: "major", flavor: "last-resort", execution: "sync" });
   return true;
+}
+
+/**
+ * heapTotal alone cannot ask this, because pooled pages are outside it. CPU spent since the last collection stands for
+ * "pages may be pooled" on every OS, and leaves a resting host alone: "last-resort" also drops compiled code.
+ */
+export function idleCollectionDue(input: { now: number; collectedAt: number; workedCpuMs: number; heapTotalBytes: number }): boolean {
+  if (input.now - input.collectedAt < IDLE_COLLECT_MIN_INTERVAL_MS) return false;
+  return input.workedCpuMs >= IDLE_COLLECT_MIN_WORK_CPU_MS || input.heapTotalBytes >= IDLE_COLLECT_MIN_HEAP_BYTES;
 }
 
 /** Never throws into its host. Returns a stop function; the timer never holds a process open. */
@@ -194,11 +210,15 @@ export function startResourceSampler(options: ResourceSamplerOptions): () => voi
   let sampledAt = Date.now();
   let profiling = false;
   let collectedAt = 0;
+  let collectedCpu = process.cpuUsage();
 
   const collectWhenIdle = (now: number): boolean => {
-    if (profiling || !options.idle || now - collectedAt < IDLE_COLLECT_MIN_INTERVAL_MS) return false;
-    if (process.memoryUsage().heapTotal < IDLE_COLLECT_MIN_HEAP_BYTES || !options.idle()) return false;
+    if (profiling || !options.idle) return false;
+    const worked = process.cpuUsage(collectedCpu);
+    const workedCpuMs = (worked.user + worked.system) / 1_000;
+    if (!idleCollectionDue({ now, collectedAt, workedCpuMs, heapTotalBytes: process.memoryUsage().heapTotal }) || !options.idle()) return false;
     collectedAt = now;
+    collectedCpu = process.cpuUsage();
     return fullCollection();
   };
 

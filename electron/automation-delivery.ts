@@ -124,7 +124,9 @@ export function deliverAutomationResult(input: AutomationNotificationInput & { o
         observationDigest: input.observationDigest ?? null,
         outputDigest: createHash("sha256").update(input.output ?? "").digest("hex"),
       })).digest("hex") } : input;
-    if (!claimAutomationNotification(notificationInput)) return false;
+    let recorded: number | undefined;
+    try { recorded = automationRunDigest(input.runId)?.outwardTotal; } catch { recorded = undefined; }
+    if (!claimAutomationNotification({ ...notificationInput, ...(recorded === undefined ? {} : { outward: recorded > 0 }) })) return false;
     const automation = getAutomation(input.automationId);
     if (!automation) return true;
     // The run's own sealed origin, never a monitor that changed while it ran (native-harness notyet NH16 4th audit).
