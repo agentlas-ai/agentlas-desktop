@@ -359,6 +359,7 @@ export async function reachInvoke(args: Record<string, unknown>, ctx: Ctx): Prom
     bad_value: "the parameters do not fit the capability; reach.describe shows them",
     missing_parameter: "reach.describe lists the required parameters",
     timeout: "the app did not answer in time; it may be showing a dialog",
+    applescript_error: "the app refused this call; read the message and correct the parameters, or do it on the app's screen with the computer tools if this run has them",
     app_does_not_support_command: "this app lists the command in its dictionary but does not implement it; reach.describe lists the capabilities that do, or use the app's screen",
   };
   return { status: "refused", reason: result.code ?? "applescript_error", ...(result.code && next[result.code] ? { next: next[result.code] } : {}), data: { ok: false, message: cut(result.message ?? "", 300) } };

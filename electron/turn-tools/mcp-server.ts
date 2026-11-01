@@ -604,13 +604,15 @@ export const AGENTLAS_TURN_TOOLS = ([
 // called reach.* 0/4 either way, and "explore 1Password" (off limits) never reached reach.explore in 4/4 either way (the port refuses it).
 // Local models (ollama, 8 per cell): gpt-oss:20b reach use 1/48 -> 17/48 and qwen3:30b-a3b 0/48 -> 28/48 over the tasks, with few
 // completed tasks (small models); the line is not what limits them.
+// Reach r2 (owner, Hope told to show Finder): r1 ended "Do not script or drive the app yourself", so a run holding the computer
+// tools never used them on an app, in any app, and a refused reach.invoke ended with the owner told to do it by hand.
 const AGENTLAS_TURN_INSTRUCTIONS = purposePrompt([
   { id: "tool.agentlas-turn.server-instructions", revision: 1, stability: "fixed-policy",
     changeTriggers: ["release"], text: "harness_call media.listen hears a local audio or video file for you." },
   { id: "tool.agentlas-turn.server-instructions.document", revision: 2, stability: "fixed-policy",
     changeTriggers: ["release"], text: "When asked to change an existing local xlsx/docx/pptx/hwpx/hwp file, use harness_call document.open, then document.apply and document.save: the owner watches the edit in the Document tab. Do not rewrite that file with a script." },
-  { id: "tool.agentlas-turn.server-instructions.reach", revision: 1, stability: "fixed-policy",
-    changeTriggers: ["release"], text: "When asked to do something in an app installed on this computer (export, print, read or change a value in it), use harness_call reach.map to find the app, then reach.app, reach.describe and reach.invoke. Do not script or drive the app yourself." },
+  { id: "tool.agentlas-turn.server-instructions.reach", revision: 2, stability: "fixed-policy",
+    changeTriggers: ["release"], text: "When asked to do something in an app installed on this computer (export, print, read or change a value in it), use harness_call reach.map to find the app, then reach.app, reach.describe and reach.invoke. Do not write your own scripts for the app. If Reach cannot do it, do it on the app's screen with the computer tools when this run has them, unless Reach says the app is off limits." },
 ]);
 
 const SOURCE_HEAD = String.raw`"use strict";

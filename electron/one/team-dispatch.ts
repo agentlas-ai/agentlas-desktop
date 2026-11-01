@@ -388,13 +388,20 @@ function rowForSession(sessionId: string, parentChatId: string): OneDispatchRow 
  * same chat (new_session:false reuses a chat; a failed run writes nothing). `sinceIso`
  * is when the dispatch was started or last reopened by a steer.
  */
+/** The report up to the bound, ending at a line end when one is near: a cut at a character left half a link as raw markdown on the card. */
+function boundedResult(text: string): string {
+  if (text.length <= MAX_RESULT) return text;
+  const lineEnd = text.lastIndexOf("\n", MAX_RESULT);
+  return text.slice(0, lineEnd > MAX_RESULT / 2 ? lineEnd : MAX_RESULT).trimEnd();
+}
+
 function lastAssistantText(chatId: string, sinceIso: string): string | null {
   const since = Date.parse(sinceIso);
   const messages = runtime().chats.listChatMessages(chatId, 40);
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index];
     if (Number.isFinite(since) && Date.parse(message.createdAt) < since) break;
-    if (message.role === "assistant" && message.text.trim()) return message.text.trim().slice(0, MAX_RESULT);
+    if (message.role === "assistant" && message.text.trim()) return boundedResult(message.text.trim());
   }
   return null;
 }

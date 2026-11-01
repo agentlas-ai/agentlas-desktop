@@ -19,8 +19,8 @@ description: Carry out one capability of an installed app with typed parameters 
 
 - `permission_required`: the run may only read. A command the app declares as a read (a value, a name) is allowed; everything else needs a write run. Ask the owner for write access; do not look for another way in.
 - `automation_denied`: macOS has not allowed Agentlas to control this app. Tell the owner to allow it in System Settings → Privacy & Security → Automation, then call again.
-- `app_not_running` / `app_has_no_window`: Reach drives only an app that is already open. Ask the owner to open it.
-- `no_driver_in_this_host` / `cua_download_failed`: the app's screen cannot be driven from here. A script command still works; say which part did not.
+- `app_not_running` / `app_has_no_window`: Reach drives only an app that is already open. Open it from the shell (`open -a "<app name>"`) and call again. Ask the owner only if this run cannot run a command.
+- `no_driver_in_this_host` / `cua_download_failed`: Reach cannot drive the app's screen from here. A script command still works, and so do the computer tools when the run has them. Say which part did not.
 - A dialog capability brings its app to the front for a moment and puts the owner's app back. On a failure the dialog it opened is closed again; `next` says whether the screen seems to have changed.
 
 # Verification

@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.3.116 — 2026-11-01
+
+- One can use the computer tools in any app when an app command fails. When an app refuses or fails a command, One now tries what the refusal suggests and then works on the app's screen with the computer tools, if the run has them, instead of asking you to do it by hand. An app that is off limits still stops it, and an app that is not running is opened for you.
+- A file named by its path can be shown in Finder, and the Finder window now comes to the front.
+- A long teammate report now ends cleanly instead of in a cut-off link, and the pictures it names by a relative path show in the card.
+
+This release binds Agentlas OS v1.2.72 at ac497f990d8b7274fae6b927e08fd24779807571; public runtime asset `hephaestus-runtime-v1.2.72.tar.gz` is pinned at SHA-256 `54c7f8e4f4a923e6a58ff84fb89f1aa474aa67d3dd9cc7f48efdaae24f7dffc7`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.115 — 2026-11-01
 
 - Messages: a message the app has to send again by itself after an internal hiccup is now sent again quietly. It shows a Stop in the gap between attempts and the Stop ends it on every route, a message you stopped is never started again, and a message the app lost twice with no cause ends with one calm line instead of a red failure. A message whose run was lost with no cause from the provider, or whose turn ended with an unknown outcome, is sent once more with a short note to the model. A message sent behind one that is still being prepared waits for its turn and sends itself, with a wait line and a Stop; a Stop on a reply whose start is still on its way ends it, and "Stopped" is shown only when the message was not handed over. The personal window in One has a Stop for a reply the app is sending again by itself. "Run failed" no longer pops up for each attempt, only for the one that finally fails.

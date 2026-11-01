@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import type { ChatHostNotice } from "@shared/types";
 import { stripAgentControlBlocks } from "@shared/agent-control-blocks";
 import { flattenAskFences } from "@shared/ask-fence-flatten";
+import { withoutCutLink } from "@shared/report-text-cut";
 import { ipc, ipcEvents } from "@/lib/ipc";
 import { ipcErrorCode } from "@shared/ipc-error-code";
 import { createDirtyGate } from "@/lib/store-change-policy";
@@ -29,6 +30,18 @@ export function OneDispatchNotice({ notice, locale, onOpenChat }: { notice: Noti
   const [stopNote, setStopNote] = useState<"saved" | "failed" | null>(null);
   useEffect(() => setCurrent(notice), [notice]);
   const dispatch = current.dispatch;
+  // The teammate wrote its report from its own folder: `./clip/preview.gif` means that folder, not this conversation's.
+  const [memberFolders, setMemberFolders] = useState<string[]>([]);
+  useEffect(() => {
+    const api = ipc();
+    let live = true;
+    void Promise.all([api?.workspace?.get?.(current.chatId), api?.workspace?.defaultRunFolder?.()])
+      .then(([saved, runFolder]) => {
+        const folder = saved || runFolder;
+        if (live && folder) setMemberFolders([folder]);
+      }).catch(() => { /* A relative picture then shows as missing; the rest of the report still reads. */ });
+    return () => { live = false; };
+  }, [current.chatId]);
   useEffect(() => {
     if (dispatch && current.purpose === "one-dispatch-link" && ["running", "waiting_input"].includes(dispatch.status)) {
       // Existing question/approval sheets answer the original child request in this room's composer.
@@ -144,7 +157,7 @@ export function OneDispatchNotice({ notice, locale, onOpenChat }: { notice: Noti
         <span style={{ opacity: .65 }}>{item.kind === "tool" ? (ko ? "도구 · " : "Tool · ") : ""}</span>{item.text}
       </div>)}
     </details>}
-    {dispatch?.resultText && <Markdown text={stripAgentControlBlocks(flattenAskFences(dispatch.resultText, locale))} messageId={`one-dispatch-result:${dispatch.dispatchId}:${current.runId}`} />}
+    {dispatch?.resultText && <Markdown text={withoutCutLink(stripAgentControlBlocks(flattenAskFences(dispatch.resultText, locale)))} messageId={`one-dispatch-result:${dispatch.dispatchId}:${current.runId}`} mediaBasePaths={memberFolders} />}
     {question && answeredSource !== question.sourceMessageId && <ChatQuestionSheet
       questions={(question.questionBank?.questions ?? question.questions).map((item,index) => ({...item,id:`${question.sourceMessageId}-q${index}`}))}
       initialReply={question.committedReply}

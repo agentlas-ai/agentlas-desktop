@@ -2,7 +2,7 @@
   "schema": "agentlas.plugin/v2",
   "slug": "agentlas-reach",
   "name": "Agentlas Reach",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "builtin": true,
   "publisher": {
     "name": "Agentlas",

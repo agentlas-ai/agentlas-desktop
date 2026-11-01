@@ -47,6 +47,10 @@ function number(value: unknown, integer: boolean): string {
   return String(value);
 }
 
+// A class that names something on disk. `file "/Users/a/b.mp4"` reads the text as a Mac path and fails with -1728, and an absolute path is
+// what a model writes for Finder's `reveal` ("show it in Finder" ended with the owner told to paste the path by hand).
+const DISK_CLASSES: ReadonlySet<string> = new Set(["file", "alias", "alias file", "document file", "folder", "item", "disk item"]);
+
 export function renderSpecifier(value: unknown, knownClasses: ReadonlySet<string>): string {
   if (!Array.isArray(value) || value.length === 0 || value.length > 8) throw new AppleScriptRefusal("bad_value", "a specifier is 1 to 8 segments");
   const parts = value.map((raw) => {
@@ -56,7 +60,10 @@ export function renderSpecifier(value: unknown, knownClasses: ReadonlySet<string
     keyword(cls);
     if (cls === "application" && value.length === 1) return "application";
     if (typeof segment.index === "number") return `${cls} ${number(segment.index, true)}`;
-    if (typeof segment.name === "string") return `${cls} ${quoteString(segment.name)}`;
+    if (typeof segment.name === "string") {
+      if (value.length === 1 && DISK_CLASSES.has(cls) && segment.name.startsWith("/")) return `POSIX file ${quoteString(segment.name)}`;
+      return `${cls} ${quoteString(segment.name)}`;
+    }
     if (typeof segment.id === "number") return `${cls} id ${number(segment.id, true)}`;
     if (typeof segment.id === "string") return `${cls} id ${quoteString(segment.id)}`;
     throw new AppleScriptRefusal("bad_value", "a specifier segment needs an index, a name or an id");
@@ -119,6 +126,8 @@ export function buildAppleScript(request: AppleScriptRequest): string {
       parts.push(parameter.name === "direct" ? rendered : `${keyword(parameter.name)} ${rendered}`);
     }
     body = parts.join(" ");
+    // `reveal` means "bring into view": behind the owner's window it has not done that.
+    if (capability.name === "reveal") body += "\n  activate";
   }
   return `tell application id ${quoteString(bundleId)}\n  ${body}\nend tell`;
 }
