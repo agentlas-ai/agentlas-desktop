@@ -33,6 +33,27 @@ export const HEPHAESTUS_NETWORK_WORK_CORE_TOOLS: readonly string[] = Object.free
 ]);
 
 /**
+ * The Context Map tools. They gate a change to a source project (the engine's own instructions: work that changes no source code
+ * does not use the Context Map). A run whose folder is the app's scratch folder has no source project, and the model called them
+ * anyway on its output files: 503 failed calls in 68 chats over one month (`context_changed_target_unknown` 237, `context_map_stale`
+ * 119, `project_not_initialized` 44), 444 of them naming the scratch folder `agent-cwd`.
+ */
+export const HEPHAESTUS_NETWORK_CONTEXT_MAP_TOOLS: readonly string[] = Object.freeze([
+  "context.refresh", "context.locate", "context.refs", "context.slice", "context.impact", "context.verify",
+]);
+
+/**
+ * The `work-core` tools one run carries: all of them, except the Context Map for a run that has no source project to map. The one
+ * list every runtime binds (Codex `enabled_tools`, Claude Code's deny list, the proxy allow list, the in-process inventory), so no
+ * runtime offers a tool another hides.
+ */
+export function hephaestusWorkCoreTools(input: { sourceProject: boolean }): readonly string[] {
+  return input.sourceProject
+    ? HEPHAESTUS_NETWORK_WORK_CORE_TOOLS
+    : HEPHAESTUS_NETWORK_WORK_CORE_TOOLS.filter((name) => !HEPHAESTUS_NETWORK_CONTEXT_MAP_TOOLS.includes(name));
+}
+
+/**
  * Every tool the engine 1.2.66 lists. Claude Code has no allow filter, so the deny list is this set minus the core;
  * a tool a newer engine adds simply stays visible there (extra schema, never a missing one). Codex's allow list is
  * fail-closed instead. `scripts/test-hephaestus-tool-surface.cjs` compares both against the live `tools/list`.

@@ -77,6 +77,44 @@ function adoptShownRuntime(chatId: string, shown: RuntimeSelection | null | unde
   setChatRuntimeSelection(chatId, { ...shown, role: "orchestrator", inherit: false });
   console.info(`[one-preflight] chat ${chatId} runtime pin follows the shown selection (was ${before})`);
 }
+/*
+ * The model pin moved between opening the submission and sending (the owner switched the model chip, another window or the phone wrote the
+ * pin) or the request carries a different shown selection than the one the submission opened with. The owner pressed send on the model the
+ * composer shows, so the submission follows it exactly like the open step does (adoptShownRuntime): the live pin and the submission's
+ * recorded runtime are re-read to that selection and the send goes on, instead of "run settings changed while sending, send it again".
+ * Every other difference (another text, another chat, another owner epoch, a submission that is no longer open) keeps its own refusal, and
+ * a live ongoing Goal keeps its runtime (adoptShownRuntime declines), so that refusal stands too.
+ */
+function followShownRuntime(submissionId: string, request: McpInvocationRequest): void {
+  const row = submissionRow(submissionId);
+  if (!row || row.state !== "open" || row.chat_id !== request.chatId || row.prompt_digest !== hash(request.userPrompt)) return;
+  const shown = canonicalOnePreflightRuntime(request.runtimeSelection);
+  const shownHash = hash(shown);
+  if (row.runtime_digest === shownHash && liveRuntimeJson(row.chat_id) === (row.runtime_selection_json ?? "null")) return;
+  /*
+   * The window still shows the very selection this submission opened with, but the chat's pin is another one now: it moved while this window
+   * was not looking (a pick on the phone, or in another window). That pick is newer than what this window shows, so it wins: the pin is NOT
+   * written back to the stale selection, and the send goes on with the live pin (the submission's record and the request follow it). A
+   * window that changed its own pick (it shows something else than it opened with) keeps the rule below: the owner pressed send on the model
+   * the composer shows (regression review 2, N8).
+   */
+  const pinNow = liveRuntimeJson(row.chat_id);
+  if (row.runtime_digest === shownHash && pinNow !== (row.runtime_selection_json ?? "null")) {
+    const chat = getChat(row.chat_id);
+    if (!chat || chat.archivedAt) return;
+    if (chat.runtimeSelection) request.runtimeSelection = { ...chat.runtimeSelection }; else delete request.runtimeSelection;
+    getDb().prepare("UPDATE one_preflight_submissions SET runtime_digest = ?, runtime_selection_json = ?, updated_at = ? " +
+      "WHERE submission_id = ? AND state = 'open'")
+      .run(hash(pinNow), pinNow === "null" ? null : pinNow, new Date().toISOString(), submissionId);
+    console.info(`[one-preflight] chat ${row.chat_id} keeps the pin picked elsewhere; the stale window's selection is not written back`);
+    return;
+  }
+  if (liveRuntimeJson(row.chat_id) !== shown) adoptShownRuntime(row.chat_id, request.runtimeSelection);
+  if (liveRuntimeJson(row.chat_id) !== shown) return;
+  getDb().prepare("UPDATE one_preflight_submissions SET runtime_digest = ?, runtime_selection_json = ?, updated_at = ? " +
+    "WHERE submission_id = ? AND state = 'open'")
+    .run(shownHash, shown === "null" ? null : shown, new Date().toISOString(), submissionId);
+}
 function submissionRow(id: string): SubmissionRow | undefined {
   return getDb().prepare("SELECT * FROM one_preflight_submissions WHERE submission_id = ?")
     .get(id) as SubmissionRow | undefined;
@@ -199,6 +237,7 @@ export function assertOnePreflightSubmissionReady(
   submissionId: string, request: McpInvocationRequest, ownerProcessEpoch: string,
 ): void {
   validId(submissionId, "submission_id");
+  followShownRuntime(submissionId, request);
   const row = submissionRow(submissionId);
   if (!row || row.state !== "open" || row.chat_id !== request.chatId
     || row.owner_process_epoch !== ownerProcessEpoch
@@ -252,6 +291,7 @@ export function reserveOnePreflightParent(
   validId(submissionId, "submission_id");
   validId(parentRunId, "parent_run_id");
   return getDb().transaction(() => {
+    followShownRuntime(submissionId, request);
     const row = submissionRow(submissionId);
     if (!row || row.state !== "open" || row.chat_id !== request.chatId
       || row.owner_process_epoch !== ownerProcessEpoch

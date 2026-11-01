@@ -1,6 +1,8 @@
-import { isTransientSendRefusalCode } from "./transient-send-refusal";
-import { RUN_FAILURE_UNSETTLED_CODE, isTypedProviderRunFailure } from "./run-failure-notice";
+import { isTransientSendRefusalCode, startRefusalNeedsOwner } from "./transient-send-refusal";
+import { HOST_FAILURE_CODE_CLASSES, OWNER_ACTION_FAILURE_CODES, RUN_FAILURE_UNSETTLED_CODE, isTypedProviderRunFailure } from "./run-failure-notice";
 import type { RunFailureNoticeFacts } from "./run-failure-notice";
+import { isNonFailureInvocationStop } from "./invocation-host-stop";
+import type { InvocationRunReceipt } from "./types";
 
 /**
  * Run failure codes whose cause is inside the app: Main's own custody, ledger, process or channel state. The owner has
@@ -70,4 +72,41 @@ export function appSideRunFailure(
 
 export function isAppSideRunFailureCode(code: unknown, runtimeFailure?: RunFailureNoticeFacts["runtimeFailure"]): boolean {
   return appSideRunFailure(code, runtimeFailure) !== null;
+}
+
+/**
+ * A run that ended before anything reached a model, for a reason no table here names: an internal cause.
+ *
+ * The host's own delivery fact says "not-dispatched" (the error's turnDelivery marker, or every runner attempt in the run ledger
+ * recorded as refused: electron/invocation/turn-placement.ts). The model provider never saw the request, so the failure cannot be
+ * its refusal, quota, rate limit or sign-in, and a typed provider failure (`runtimeFailure`) rules the case out. Nor is it a code the
+ * owner acts on (signing in to the Agentlas Browser) or one with a sentence of its own
+ * (HOST_FAILURE_CODE_CLASSES). What is left is the app's own state: the owner has nothing to fix, and sending the same words again
+ * is safe because nothing ran. Evidence only: no word of any message is read (the code is matched exactly, as everywhere in this file).
+ */
+export function undispatchedInternalFailure(input: { code?: unknown; runtimeFailure?: RunFailureNoticeFacts["runtimeFailure"]; delivery?: unknown }): boolean {
+  if (input.delivery !== "not-dispatched" || input.runtimeFailure) return false;
+  const code = typeof input.code === "string" && CODE_RE.test(input.code) ? input.code : null;
+  if (!code) return true;
+  if (OWNER_ACTION_FAILURE_CODES.has(code) || HOST_FAILURE_CODE_CLASSES.has(code)) return false;
+  // The start path excludes the same refusals the owner acts on (transient-send-refusal.ts startRefusalNeedsOwner: a cost cap, a stopped Goal,
+  // a settings change, an attachment limit), each with a sentence of its own. A run that fails after admission with one of them is that
+  // refusal, not the app's own state: it must not be retried 12 times behind "the app will try again" (regression review C9).
+  // The app-side families (Goal custody's goal_episode_admission_*, a ledger or channel state) share the `goal_` prefix or none: they stay internal.
+  return !(startRefusalNeedsOwner(code) && appSideRunFailure(code) === null);
+}
+
+/**
+ * A settled run the owner must not be told "failed" about: their own Stop (cancelled), a steering interrupt, a host stop
+ * (app closing, update restart, Goal paused/deleted), or a failure whose code is the app's own custody/channel state.
+ * Those either continue by themselves or were the owner's own act; an OS toast "Run failed" for them is the app calling
+ * its own state or the owner's own click a failure (observed in use: Stop, new direction and update restart all toasted).
+ * A real provider/tool failure, or a failure code this file does not know, still reads as a failure (conservative default).
+ */
+export function settledRunIsNotAFailure(
+  receipt: Pick<InvocationRunReceipt, "status" | "interruptionCause" | "hostStopCause" | "errorCode" | "runtimeFailure">,
+): boolean {
+  if (receipt.status === "completed") return false;
+  if (isNonFailureInvocationStop(receipt)) return true;
+  return receipt.status === "failed" && appSideRunFailure(receipt.errorCode, receipt.runtimeFailure) !== null;
 }

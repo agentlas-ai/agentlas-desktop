@@ -13,6 +13,7 @@ import { appUiPreferenceDefinitions, isAppUiPreferenceName, normalizeAppUiPrefer
 import { closestNames, invalidValueMessage, nameSimilarity, schemaArgumentHints, unknownArgumentMessage } from "../../shared/did-you-mean";
 import { decodeAppControlArguments } from "./argument-codec";
 import { remoteAppControlCall, remoteAppControlOperations } from "./daemon-remote";
+import { daemonServesAppControlChannel } from "./daemon-reads";
 import { APP_CALL_ANSWER_WINDOW_MS, answerAppCallWithin, appCallKey, appCallPendingNotice } from "./pending-calls";
 import { saveObservationCaptureArtifact } from "../media/capture-artifacts";
 
@@ -208,8 +209,17 @@ export type AppControlOperationsResult = {
 export function appControlOperations(input: OperationsInput): AppControlOperationsResult | Promise<AppControlOperationsResult> {
   return host ? appControlOperationsLocal(input) : remoteAppControlOperations(input, appControlOperationsLocal);
 }
+/** True for a catalog operation whose Main handler only reads the database and that the background service lists as its own. */
+function daemonServesCall(input: AppControlCallInput): boolean {
+  const path = typeof input.operation === "string" ? input.operation.trim() : "";
+  const entry = APP_CONTROL_CATALOG.find((candidate) => candidate.path === path && !appControlOmittedFromModelCatalog(candidate));
+  if (!entry || entry.surface !== "desktop") return false;
+  const policy = appControlPolicy(entry);
+  return policy.allowed && policy.effect === "read" && daemonServesAppControlChannel(entry.channel);
+}
 export async function appControlCall(caller: AppControlCaller, input: AppControlCallInput, answerWindowMs: number = APP_CALL_ANSWER_WINDOW_MS): Promise<Record<string, unknown>> {
-  if (!host) return remoteAppControlCall(caller, input);
+  // The background service answers a database-only read itself (daemon-reads.ts); everything else is the window process's.
+  if (!host && !daemonServesCall(input)) return remoteAppControlCall(caller, input);
   // The window process answers within the model's tool timeout: an operation that runs longer (automations.runNow awaits the whole
   // run) keeps running here and the same call asked again joins it or receives its result (app-control/pending-calls.ts).
   const operation = typeof input.operation === "string" ? input.operation.trim() : "";

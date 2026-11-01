@@ -16,7 +16,7 @@ import type { IntellectUiNode } from "../../shared/intellect-ui";
 
 export type OperationCardLocale = "ko" | "en";
 export type OperationCardKind =
-  | "team.list" | "team.steer" | "team.start" | "graph.run" | "graph.result" | "graph.save" | "graph.set_enabled" | "app.change";
+  | "team.list" | "team.steer" | "team.stop" | "team.start" | "graph.run" | "graph.result" | "graph.save" | "graph.set_enabled" | "app.change";
 
 export interface OperationCard {
   kind: OperationCardKind;
@@ -37,12 +37,12 @@ export interface OperationToolEvent {
 
 /** harness_call operation -> the One Team tool that backs it (canonical-registry.ts). */
 const HARNESS_OPERATION_TOOL: Readonly<Record<string, string>> = {
-  "team.list": "one_team_list", "team.steer": "one_team_steer", "team.start": "one_team_start_session",
+  "team.list": "one_team_list", "team.steer": "one_team_steer", "team.stop": "one_team_stop", "team.start": "one_team_start_session",
   "graph.run": "one_graph_run", "graph.result": "one_graph_result", "graph.build": "one_graph_save",
   "graph.set_enabled": "one_graph_set_enabled", "settings.propose": "one_app_call", "app.call": "one_app_call",
 };
 const TOOL_KIND: Readonly<Record<string, OperationCardKind>> = {
-  one_team_list: "team.list", one_team_steer: "team.steer", one_team_start_session: "team.start",
+  one_team_list: "team.list", one_team_steer: "team.steer", one_team_stop: "team.stop", one_team_start_session: "team.start",
   one_graph_run: "graph.run", one_graph_result: "graph.result", one_graph_save: "graph.save",
   one_graph_set_enabled: "graph.set_enabled", one_app_call: "app.change",
 };
@@ -113,6 +113,7 @@ function failureOf(body: Record<string, unknown> | null, isError: boolean | unde
 const LABEL: Record<OperationCardKind, { ko: string; en: string }> = {
   "team.list": { ko: "팀원 목록", en: "Teammates" },
   "team.steer": { ko: "팀원에게 방향 전달", en: "Direction sent to a teammate" },
+  "team.stop": { ko: "팀원의 일 중지", en: "Teammate job stopped" },
   "team.start": { ko: "팀원에게 일 맡기기", en: "Handing work to a teammate" },
   "graph.run": { ko: "자동화 실행", en: "Automation run" },
   "graph.result": { ko: "자동화 결과", en: "Automation result" },
@@ -197,6 +198,21 @@ export function operationCardFor(event: OperationToolEvent, locale: OperationCar
     ], "ready", "result");
   }
 
+  if (kind === "team.stop") {
+    // A stop the app did not take because the turn was not written by the owner changed nothing: no card says "stopped" or "already ended".
+    if (body.owner_turn_required === true) return null;
+    const teammate = clip(body.teammate, 60);
+    // A stop that took effect says so; one that was saved for the service, or found the job already over, says that instead. Never a failure.
+    const stopped = body.stopped === true;
+    return card(kind, ko, stopped ? (ko ? `${teammate || "팀원"}의 일을 중지했어요` : `Stopped ${teammate || "the teammate"}'s job`)
+        : body.stop_saved === true ? (ko ? `${teammate || "팀원"}의 일을 멈추도록 저장했어요` : `Stop saved for ${teammate || "the teammate"}'s job`)
+        : (ko ? `${teammate || "팀원"}의 일은 이미 끝나 있어요` : `${teammate || "The teammate"}'s job had already ended`), [
+      text(stopped ? (ko ? "이 일은 더 이어지지 않고, 결과도 따로 보고하지 않아요." : "It does not continue and nothing is reported for it.")
+        : body.stop_saved === true ? (ko ? "서비스가 응답하면 바로 멈춰요." : "It stops as soon as the service answers.")
+        : (ko ? "멈출 일이 없었어요." : "There was nothing left to stop."), stopped ? "success" : "muted"),
+    ], stopped || body.already_ended === true ? "ready" : "running", "result");
+  }
+
   if (kind === "team.start") {
     // A started session already has its own live card (the dispatch notice with Open session). Only a queued job has none.
     if (body.queued !== true) return null;
@@ -206,6 +222,8 @@ export function operationCardFor(event: OperationToolEvent, locale: OperationCar
       text(ko ? `지금 다른 일을 하고 있어요${position ? ` · 대기 ${position}번째` : ""}. 앞 일이 끝나면 자동으로 시작해요.` : `Busy with another job${position ? ` · position ${position}` : ""}. It starts when that one ends.`),
       ...(clip(body.brief, 240) ? [text(clip(body.brief, 240), "muted")] : []),
       followup(ko ? "진행 상황 보기" : "Check progress", ko ? `${teammate || "팀원"} 작업 진행 상황 알려줘.` : `How is ${teammate || "the teammate"}'s work going?`),
+      // A queued job has no hand-off card of its own (that card is drawn when the job starts); this is where the owner can withdraw it.
+      followup(ko ? "줄에 선 일 취소하기" : "Cancel this queued job", ko ? `${teammate || "팀원"}에게 줄 세운 일은 시작하지 말고 취소해줘.` : `Cancel the job queued for ${teammate || "the teammate"}; do not start it.`),
     ], "running", "result");
   }
 

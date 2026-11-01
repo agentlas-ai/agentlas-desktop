@@ -27,6 +27,7 @@ import {
   runnerResultRefusedBeforeDispatch as preDispatchRunnerResultRefused,
 } from "./runner-pre-dispatch";
 import { EMPTY_NO_TOOL_RAN_CODES, innermostTypedCode, isTypedCode } from "../../shared/turn-settlement";
+import { HOST_FAILURE_CODE_CLASSES } from "../../shared/run-failure-notice";
 
 /** Main-only delivery boundary; never serialized into a provider request. */
 export type BeforeMcpToolResult = (input: {
@@ -1013,13 +1014,23 @@ function runnerFailureOfCause(cause: unknown): RunnerFailure | undefined {
 }
 
 /**
- * The runner's own typed failure behind an unfinished turn (unsettledTurnError keeps the returned result as the standard
- * `cause`), when the error is one and its cause carries a failure. Facts only: nothing here reads a message.
+ * The runner's own typed failure behind an unfinished turn (unsettledTurnError keeps the returned result, or the typed failure
+ * a runner held when its child or transport ended without a terminal, as the standard `cause`), when the error is one and its
+ * cause carries a failure. Facts only: nothing here reads a message.
+ *
+ * The run event's cause can name only the four provider verdicts and `empty` (InvocationRuntimeFailure.cause). A failure the
+ * runner typed `unavailable` or `exit` whose own machine code the host table names (shared/run-failure-notice.ts
+ * HOST_FAILURE_CODE_CLASSES: the provider could not take the request, a Codex HTTP connection failure, the Agentlas serving
+ * 503) is therefore carried as `refused` under that same code, and the notice words the class. The kind alone never decides:
+ * `unavailable` is also the app's own refusal (a busy MCP scope), which must not be told as the provider's outage. Everything
+ * else is returned as the runner typed it.
  */
 export function unsettledTurnCauseFailure(error: unknown): RunnerFailure | undefined {
   if (!(error instanceof RuntimeTurnUnsettledError)) return undefined;
   const failure = runnerFailureOfCause((error as { cause?: unknown }).cause);
-  return failure && typeof failure.kind === "string" ? failure : undefined;
+  if (!failure || typeof failure.kind !== "string") return undefined;
+  const named = typeof failure.providerCode === "string" && HOST_FAILURE_CODE_CLASSES.has(failure.providerCode);
+  return named && (failure.kind === "unavailable" || failure.kind === "exit") ? { ...failure, kind: "refused" } : failure;
 }
 
 /**

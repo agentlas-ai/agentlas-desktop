@@ -152,7 +152,8 @@ function projectDispatchNotice(parentChatId: string, notice: DispatchNotice, con
     WHERE chat_id=? AND json_valid(host_notice_json) AND json_extract(host_notice_json,'$.purpose')='one-dispatch-result'
       AND json_extract(host_notice_json,'$.runId')=? AND json_extract(host_notice_json,'$.chatId')=? LIMIT 1`)
     .get(parentChatId, notice.runId, notice.chatId);
-  const pendingQuestion = !hasResultNotice && dispatchParentForRun(db, notice.chatId,notice.runId) === parentChatId
+  // A job the owner stopped asks nothing any more: its last question is moot (answering would start it again).
+  const pendingQuestion = !hasResultNotice && row.status !== "cancelled" && dispatchParentForRun(db, notice.chatId,notice.runId) === parentChatId
     ? oneDispatchPendingQuestion(notice.chatId,notice.runId) : undefined;
   const dispatch = normalizeOneDispatchPresentation({ dispatchId:row.id, parentChatId, memberAgentId:row.member_agent_id,
     memberIcon:row.member_icon ?? "", status:(row.status === "completed" && pendingQuestion)

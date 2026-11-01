@@ -16,7 +16,7 @@ import { TaskSidePanel } from "../workspace/TaskSidePanel";
 import styles from "./OneShell.module.css";
 import { useComposerEnter } from "@/lib/use-composer-enter";
 import { useChatSelectionIntent } from "@/lib/chat-selection-intent";
-import { chatSelectionSendBlocked } from "@/lib/chat-selection-send-guard";
+import { chatSelectionSendBlocked, sendWhenChatSelectionSettles } from "@/lib/chat-selection-send-guard";
 
 /**
  * 분할 보기의 "보고만 있는" 칸.
@@ -59,8 +59,11 @@ export function OneSplitPane({
   const [messages, setMessages] = useState<OneSplitPaneMessage[] | null>(null);
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
-  const desiredSelection = useChatSelectionIntent(chatId);
-  const selectionSendBlocked = Boolean(desiredSelection) && chatSelectionSendBlocked(chatId);
+  useChatSelectionIntent(chatId); // keeps this view registered as the owner of the conversation's pending pick
+  // A send pressed while the model pick is still on its way to Main waits for it (a moment) and then sends by itself.
+  const [sendWaiting, setSendWaiting] = useState(false);
+  const settleWaitRef = useRef<(() => void) | null>(null);
+  const sendRef = useRef<((selectionSettled?: boolean) => Promise<void>) | null>(null);
   const [railOpen, setRailOpen] = useState(false);
   // The panel reports an open state with nothing to draw (no view, file or worker); the column is then not reserved
   // (the same rule as the full One view's outputRailTakesSpace).
@@ -183,11 +186,21 @@ export function OneSplitPane({
     }
   }, [chatId, hasOlder, historyStart, loadingOlder, messageIds, olderCursor]);
 
-  const send = useCallback(async () => {
+  const send = useCallback(async (selectionSettled?: boolean) => {
     const text = draft.trim();
-    // The live target-chat intent can change before this render catches up.
-    // Hold before optimistic rows, draft clearing or request identity creation.
-    if (!text || sending || chatIdRef.current !== chatId || chatSelectionSendBlocked(chatId)) return;
+    if (!text || sending || chatIdRef.current !== chatId) return;
+    // The live target-chat intent can change before this render catches up. Wait before optimistic rows, draft clearing or
+    // request identity creation; the wait ends by sending the draft as it is then (not a refusal, Send stays pressable).
+    if (!selectionSettled && chatSelectionSendBlocked(chatId)) {
+      settleWaitRef.current?.();
+      setSendWaiting(true);
+      settleWaitRef.current = sendWhenChatSelectionSettles(chatId, () => undefined, () => {
+        settleWaitRef.current = null;
+        setSendWaiting(false);
+        void sendRef.current?.(true);
+      });
+      return;
+    }
     const api = ipc();
     if (!api) return;
     const chatEpoch = chatEpochRef.current;
@@ -229,6 +242,9 @@ export function OneSplitPane({
       if (chatIdRef.current === chatId && chatEpochRef.current === chatEpoch) setSending(false);
     }
   }, [appLocale, chatId, draft, locale, permissionMode, sending]);
+  sendRef.current = send;
+  useEffect(() => () => { settleWaitRef.current?.(); settleWaitRef.current = null; }, []);
+  useEffect(() => { settleWaitRef.current?.(); settleWaitRef.current = null; setSendWaiting(false); }, [chatId]);
   const enter = useComposerEnter(() => { void send(); });
 
   return (
@@ -325,8 +341,8 @@ export function OneSplitPane({
           />
         </div>
       </div>
-      {selectionSendBlocked && <p role="status" className={styles.splitPaneNote}>
-        {locale === "ko" ? "모델 선택을 확인한 뒤 보내세요. 작성한 내용은 그대로 유지됩니다." : "Send after the model selection is confirmed. Your draft is unchanged."}
+      {sendWaiting && <p role="status" className={styles.splitPaneNote}>
+        {locale === "ko" ? "모델 선택을 확인하는 중이에요. 확인되면 바로 보냅니다." : "Checking the model selection. It sends as soon as that is confirmed."}
       </p>}
       <form
         className={styles.splitPaneComposer}
@@ -341,7 +357,7 @@ export function OneSplitPane({
           onCompositionEnd={enter.onCompositionEnd}
           onKeyDown={(event) => { enter.handleEnter(event); }}
         />
-        <button type="submit" disabled={!draft.trim() || sending || selectionSendBlocked}>
+        <button type="submit" disabled={!draft.trim() || sending}>
           {sending ? (locale === "ko" ? "보내는 중" : "Sending") : (locale === "ko" ? "보내기" : "Send")}
         </button>
       </form>

@@ -4,6 +4,23 @@ import { ONE_ATTACHMENT_LIMITS } from "../../shared/one-attachments";
 import { CHAT_FILE_MEDIA_BY_EXTENSION, hasExpectedImageSignature, persistChatFileBytes } from "../store/chat-message-attachments";
 
 const CHUNK_BYTES = 1024 * 1024;
+/**
+ * Two files with the same name are two files, not an error. A phone's picker hands over `image.jpg` twice (two shots with the same
+ * name from different albums, a second `report.pdf` from another folder), and the whole send used to fail with
+ * attachment_name_collision, on every retry, in every phone build. The second keeps its bytes under `name (2).ext`; the phone still finds
+ * it by `sourceName` (its own name), which is unchanged. Names compare case-insensitively, as before.
+ */
+function uniqueAttachmentName(name: string, taken: ReadonlySet<string>): string {
+  const key = (value: string) => value.toLocaleLowerCase("en-US");
+  if (!taken.has(key(name))) return name;
+  const extension = path.extname(name), stem = name.slice(0, name.length - extension.length);
+  for (let n = 2; n < 1000; n += 1) {
+    const suffix = ` (${n})${extension}`;
+    const candidate = `${stem.slice(0, Math.max(1, 180 - suffix.length))}${suffix}`;
+    if (!taken.has(key(candidate))) return candidate;
+  }
+  throw new TypeError("attachment_name_collision");
+}
 type Upload = { deviceId: string; chatId?: string; groupId: string; finished: boolean; expiresAt: number; files: Array<{name:string;sourceName:string;size:number;received:number;chunks:Buffer[]}>; result?: ReturnType<typeof persistChatFileBytes> };
 /** Process-local, device-bound uploads. Partial bytes never become a conversation attachment. */
 export class MobileChatAttachmentUploads {
@@ -18,10 +35,10 @@ export class MobileChatAttachmentUploads {
     const names = new Set<string>();
     const prepared = files.map(file => {
       if (!file || typeof file.name !== "string" || !file.name || file.name.length > 180 || /[\\/:\u0000-\u001f\u007f]/u.test(file.name) || file.name.startsWith(".")) throw new TypeError("attachment_name_invalid");
-      const name=file.name.normalize("NFKC").trim();
-      if (!name || /[\\/:\u0000-\u001f\u007f]/u.test(name) || name.startsWith(".")) throw new TypeError("attachment_name_invalid");
-      const key = name.toLocaleLowerCase("en-US");
-      if (names.has(key)) throw new TypeError("attachment_name_collision"); names.add(key);
+      const picked=file.name.normalize("NFKC").trim();
+      if (!picked || /[\\/:\u0000-\u001f\u007f]/u.test(picked) || picked.startsWith(".")) throw new TypeError("attachment_name_invalid");
+      const name=uniqueAttachmentName(picked,names);
+      names.add(name.toLocaleLowerCase("en-US"));
       const mediaType = CHAT_FILE_MEDIA_BY_EXTENSION[path.extname(name).toLowerCase()];
       if (!mediaType) throw new TypeError("attachment_type_unsupported");
       const limit = ["image/png","image/jpeg","image/gif","image/webp"].includes(mediaType) ? ONE_ATTACHMENT_LIMITS.maxImageBytes : ONE_ATTACHMENT_LIMITS.maxFileBytes;

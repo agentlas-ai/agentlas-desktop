@@ -94,6 +94,8 @@ const PROVIDER_SENTENCE: Partial<Record<RunFailureNoticeCause, { ko: (name: stri
     en: (name) => `Every tool call ${name} made failed and no answer followed, so this step could not finish.` },
   unavailable: { ko: (name) => `${name}이(가) 쓰는 Agentlas 모델 서비스를 지금 사용할 수 없어 이 단계를 마치지 못했습니다.`,
     en: (name) => `The Agentlas model service ${name} uses is unavailable right now, so this step could not finish.` },
+  provider_unavailable: { ko: (name) => `${name}이(가) 쓰는 모델 공급자가 지금 요청을 받을 수 없어(서비스 장애 또는 수용 한도 초과) 이 단계를 마치지 못했습니다. 잠시 뒤 다시 보내거나 다른 모델을 선택해 보세요.`,
+    en: (name) => `The provider of the model ${name} uses could not take the request right now (an outage or no free capacity), so this step could not finish. Send it again in a moment, or choose another model.` },
   provider_connection: { ko: (name) => `${name}이(가) 쓰는 모델 공급자에 연결하지 못해 이 단계를 마치지 못했습니다.`,
     en: (name) => `The model provider ${name} uses could not be reached, so this step could not finish.` },
   runtime_unavailable: { ko: (name) => `${name}에 배정된 모델을 지금 쓸 수 없어 이 단계를 마치지 못했습니다.`,

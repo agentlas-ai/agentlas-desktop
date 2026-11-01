@@ -21,6 +21,7 @@ const REASON: Partial<Record<RunFailureNoticeCause, { ko: string; en: string }>>
   auth: { ko: "로그인 필요 또는 만료", en: "its sign-in is needed or expired" },
   refused: { ko: "공급자의 응답 거절", en: "the provider declined" },
   unavailable: { ko: "모델 서비스 사용 불가", en: "the model service is unavailable" },
+  provider_unavailable: { ko: "모델 공급자가 요청을 받을 수 없음", en: "the provider could not take the request" },
   provider_connection: { ko: "모델 공급자에 연결하지 못함", en: "the provider could not be reached" },
   runtime_unavailable: { ko: "모델을 지금 쓸 수 없음", en: "the model is not available right now" },
   subscription_credits_off: { ko: "구독 한도 도달", en: "the subscription limit is reached" },

@@ -40,6 +40,7 @@ import type {
   CloudAgentVisibility,
 } from "../../shared/types";
 import { userDataPath } from "../runtime-paths";
+import { firstUsableParagraph } from "../../shared/agent-description";
 import {
   PACKAGE_MAX_TOTAL_BYTES,
   PACKAGE_MAX_FILE_BYTES,
@@ -1051,7 +1052,7 @@ export async function packageAndReviewCloudAgent(
   }
   const finalSnapshot = packageSnapshot(scan.included);
   const name = readName(finalSnapshot, path.basename(rootPath));
-  const tagline = readTagline(finalSnapshot);
+  const tagline = readTagline(finalSnapshot, name);
   let localized = readLocalizedListing(finalSnapshot);
   // Public publish auto-translates missing bilingual metadata with the user's
   // connected model by default — never a dead-end that demands hand-editing
@@ -2959,7 +2960,7 @@ function readName(snapshot: PackageSnapshot, fallbackName: string): string {
   return (heading || fallbackName).replace(/\s+/g, " ").slice(0, 80);
 }
 
-function readTagline(snapshot: PackageSnapshot): string {
+function readTagline(snapshot: PackageSnapshot, name = ""): string {
   const manifest = readPackageJson(snapshot);
   const explicit = firstString(
     manifest.agentlas.summary,
@@ -2969,11 +2970,10 @@ function readTagline(snapshot: PackageSnapshot): string {
     manifest.routingCard.summary,
   );
   if (explicit) return explicit.replace(/\s+/g, " ").slice(0, 160);
-  const text = readFirst(snapshot, ["README.md", "agent.md", "AGENT.md"], 3000);
-  for (const line of text.split(/\r?\n/)) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("#") || trimmed.startsWith(">")) continue;
-    return trimmed.slice(0, 160);
+  // The package's own prose, never a thin adapter's list step or file instruction ("1. Read [`AGENTS.md`]...": shared/agent-description.ts).
+  for (const file of ["README.md", "AGENTS.md", "agent.md", "AGENT.md"]) {
+    const found = firstUsableParagraph(readFirst(snapshot, [file], 3000), [name], 160);
+    if (found) return found;
   }
   return "Portable Agentlas cloud agent package.";
 }

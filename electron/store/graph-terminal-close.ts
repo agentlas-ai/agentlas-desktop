@@ -147,7 +147,13 @@ function loadCandidate(
 export function getAutomationGraphTerminalCloseCandidate(
   automationId: string,
 ): AutomationGraphTerminalCloseCandidate | null {
-  return loadCandidate(automationId);
+  // A failed run whose checkpoint cannot be read offers no close: it is set aside (the record stays), the same as the reconciliation
+  // listing, and the next run starts fresh. The explicit close below keeps its typed refusal for exact coordinates.
+  try { return loadCandidate(automationId); }
+  catch (error) {
+    if (error instanceof Error && error.message === "automation_graph_terminal_close_checkpoint_malformed") return null;
+    throw error;
+  }
 }
 
 function parseTerminalClosePayload(raw: string | null): TerminalCloseEventPayload | null {
@@ -175,7 +181,8 @@ function existingTerminalClose(
   ).all(runId, GRAPH_TERMINAL_CLOSE_EVENT_KIND) as Array<{ payload_json: string | null }>;
   for (const row of rows) {
     const payload = parseTerminalClosePayload(row.payload_json);
-    if (!payload) throw new Error("automation_graph_terminal_close_event_malformed");
+    // An unreadable close record proves no earlier close: it is set aside and the others are read.
+    if (!payload) continue;
     if (payload.automationId !== expected.automationId) continue;
     if (
       payload.runId !== expected.runId || payload.occurrenceId !== expected.occurrenceId ||

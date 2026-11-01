@@ -22,7 +22,7 @@ import { observedRunnerReturnedResult } from "../runtime/observed-runner";
 import { parseRetryHint } from "../runtime/runtime-cooldown";
 import { unsettledContinuationPrompt } from "../runtime/unsettled-continuation";
 import { carryRunnerTurnContext, replaceRunnerUserPrompt } from "../runtime/runner-turn-context-binding";
-import { decideTurnSettlement, RATE_LIMIT_MAX_RETRIES, type TurnFailureKind } from "../../shared/turn-settlement";
+import { decideTurnSettlement, PREPARATION_RETRY_CODES, RATE_LIMIT_MAX_RETRIES, type TurnFailureKind } from "../../shared/turn-settlement";
 
 /** The fields of the shared TurnSettlementInput this layer can supply. */
 export interface TeamStepSettlementInput {
@@ -161,7 +161,10 @@ export function teamStepSettlementInput(facts: TeamStepFacts, used: { continued:
     outcome: facts.aborted ? "cancelled" : facts.unsettled || outputLimit ? "unsettled" : "failed",
     ...(outputLimit ? { delivery: "accepted" as const } : facts.delivery ? { delivery: facts.delivery } : {}),
     ...(facts.failure ? { kind: facts.failure.kind } : {}),
-    ...(facts.failure?.providerCode ? { providerCode: facts.failure.providerCode } : {}),
+    // The step's own typed failure; else, only for the host's own preparation of the worker's tools, the thrown error's machine code. Any
+    // other error code is not an input (an unsettled turn's code would read as a replay block and end its continuation).
+    ...((facts.failure?.providerCode ?? (facts.errorCode && PREPARATION_RETRY_CODES.has(facts.errorCode) ? facts.errorCode : undefined))
+      ? { providerCode: (facts.failure?.providerCode ?? facts.errorCode)! } : {}),
     resumable: Boolean(facts.sessionId),
     resumeBudget: used.continued ? 0 : 1,
     attempt: used.retries,

@@ -113,7 +113,10 @@ function installDialogGuard(): void {
   if (dialogGuardInstalled) return;
   dialogGuardInstalled = true;
   // Loaded here, not at import: developmentIpcBoundary imports this module and also runs in plain-Node gates.
-  const target = (require("electron") as typeof import("electron")).dialog as unknown as Record<string, unknown> | undefined;
+  // The background service has no electron module and no dialogs to guard (it answers only the closed read list, daemon-reads.ts).
+  let target: Record<string, unknown> | undefined;
+  try { target = (require("electron") as typeof import("electron")).dialog as unknown as Record<string, unknown> | undefined; }
+  catch { return; }
   if (!target || typeof target !== "object") return;
   for (const name of DIALOG_METHODS) {
     const original = target[name];

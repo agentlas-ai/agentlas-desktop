@@ -278,12 +278,12 @@ import { onNativeGuiInvocationEvent } from "./invocation/native-gui-events";
 import { invocationService } from "./invocation/service";
 import { createRendererSendQueue, type RendererSourceBoundary } from "./invocation/renderer-send-queue";
 import { createFollowupCustodyStore } from "./store/followup-custody-core";
-import { canQueuePendingSend } from "./invocation/pending-chat-sends";
+import { abandonWaitingRetries, canQueuePendingSend, waitingRetryCount } from "./invocation/pending-chat-sends";
 import { createQueuedOwnerInputCustody, type QueuedOwnerStartBoundary } from "./invocation/queued-owner-input-custody";
-import { queuedSendRunState, queuedSendPlacement } from "./invocation/renderer-send-queue";
+import { queuedSendRunState, queuedSendPlacement, undispatchedStartWaits } from "./invocation/renderer-send-queue";
 import { isPossiblyRecordedSendRefusal, isTransientSendRefusal } from "../shared/transient-send-refusal";
 import { readRecordedOwnerSteer } from "./invocation/recorded-owner-steer";
-import { cancelInvocationOwnerRun, invocationCurrentTurnControl, stopInvocationGoal } from "./runtime/invocation-owner-control";
+import { abandonOwnerWaitingRetries, cancelInvocationOwnerRun, invocationCurrentTurnControl, stopInvocationGoal } from "./runtime/invocation-owner-control";
 // ── Hephaestus 엔진 브리지 — 데스크탑↔엔진 연결은 전부 electron/hephaestus/* 에서만 일어난다. ──
 import { hepAuthLogin, hepAuthStatus } from "./hephaestus/commands";
 import { hephaestusAvailable, hephaestusDoctor, hephaestusRoot, readHephaestusUpdateJournal, runHephaestusRuntimeUpdate } from "./hephaestus/engine";
@@ -1579,9 +1579,11 @@ function rendererInvocationRequestForStart(req: McpInvocationRequest): McpInvoca
       // Query by run ID alone: a row bound to another chat is also unresolved.
       if (getInvocationAdmission(req.runId) || hasInvocationRunReceipt(req.runId)) throw error;
     } catch { throw error; }
-    throw Object.assign(new Error("The runtime selection was refused before this request could start.", { cause: error }), {
-      code: "invocation_pre_reservation_validation_refused",
-    });
+    // The shape of the renderer's model pick could not be read (a window older or newer than Main, or a picker defect) and nothing was
+    // reserved. The owner's message is not refused for that and no one is asked to review a setting they cannot see: it starts without
+    // the unreadable pick, so the conversation's saved selection is what runs (the same rule as a pick that never answers,
+    // renderer/lib/chat-selection-send-guard.ts). Everything else in the request is validated exactly as before.
+    try { return rendererInvocationRequest({ ...req, runtimeSelection: undefined }); } catch { throw error; }
   }
 }
 
@@ -1743,20 +1745,6 @@ async function desktopRuntimeRolePoolState(): Promise<RuntimeRolePoolState> {
   };
 }
 
-/** A mutable legacy goal_id is only a candidate for an explicit owner review. */
-function parkedGoalAutomationReview(goalId: string) {
-  const automation = findAutomationByGoalId(goalId);
-  if (!automation || automation.enabled) return null;
-  const latest = getDb().prepare(`SELECT kind, payload_json FROM run_events WHERE automation_id = ?
-    AND kind IN ('automation_goal_execution_review_required', 'automation_goal_execution_owner_reviewed')
-    ORDER BY rowid DESC LIMIT 1`).get(automation.id) as { kind: string; payload_json: string } | undefined;
-  if (latest?.kind !== "automation_goal_execution_review_required") return null;
-  try {
-    const value = JSON.parse(latest.payload_json);
-    return value?.automationId === automation.id && value.automationCreatedAt === automation.createdAt ? automation : null;
-  } catch { return null; }
-}
-
 function goalAutomationSetup(automation: Automation): GoalResumeReview["automationSetup"] {
   const stored = getAutomationExecutionContractState(automation.id);
   if (!stored || stored.runtimeSelection !== "valid") return { automationId: automation.id, reason: "runtime" };
@@ -1766,21 +1754,6 @@ function goalAutomationSetup(automation: Automation): GoalResumeReview["automati
     return { automationId: automation.id, reason: "hub" };
   }
   return undefined;
-}
-
-function goalAutomationOwnershipReview(automationId: string, goalId: string, rootChatId: string, longRunId: string, version: number) {
-  // A new parked notice requires a fresh explicit review even when its prior
-  // receipt still describes the same relationship.
-  if (parkedGoalAutomationReview(goalId)?.id === automationId) {
-    return getAutomationGoalExecutionReview({ automationId, goalId, rootChatId, expectedVersion: version });
-  }
-  try {
-    if (currentAutomationGoalExecutionOwnerMatches(automationId, goalId, rootChatId, longRunId)) return undefined;
-  } catch (error) {
-    if (!(error instanceof Error) || !["automation_goal_execution_owner_unverified", "automation_goal_execution_owner_changed",
-      "automation_goal_execution_review_changed"].includes(error.message)) throw error;
-  }
-  return getAutomationGoalExecutionReview({ automationId, goalId, rootChatId, expectedVersion: version });
 }
 
 export function registerIpcHandlers(): void {
@@ -4308,6 +4281,8 @@ export function registerIpcHandlers(): void {
         ...(enabled && actual.installed !== enabled && daemonAutostartUnavailableReason() ? { reason: daemonAutostartUnavailableReason() } : {}) };
     } catch (error) {
       // OS 등록이나 preference 저장이 실패했다. 성공으로 포장하지 않는다.
+      // 코드는 로그에만 남는다. 설정 화면은 이 reason 을 한 문장으로 바꿔 보여준다(shared/daemon-autostart-notice.ts).
+      console.warn("[daemon-autostart] the login item could not be updated:", error instanceof Error ? error.message : String(error));
       return {
         enabled: getDaemonAutostartEnabled(),
         reconciled: false,
@@ -4707,10 +4682,10 @@ export function registerIpcHandlers(): void {
     catch (error) { console.warn("[effect-observation] dispatch failed:", error); }
     const loaded = await getGoalLedgerGoal(chat.goalId, getChatWorkingFolder(id));
     if (getChat(id)?.goalId !== chat.goalId) throw new Error("goal_control_binding_changed");
+    // No review gate parks a Goal's automation any more (the park was removed in 1.2.54), so nothing marks a running
+    // Goal as waiting for an automation review; a marker left in an old database must not draw one.
     const context = loaded ? { ...loaded,
-      ...(isGoalObserving(chat.goalId) ? { effectObservation: "checking" as const } : {}),
-      ...(loaded.runStatus === "running" && parkedGoalAutomationReview(chat.goalId)
-        ? { automationOwnershipReviewRequired: true } : {}) } : loaded;
+      ...(isGoalObserving(chat.goalId) ? { effectObservation: "checking" as const } : {}) } : loaded;
     const wait = latestGoalWaitSubscription(chat.goalId);
     if (!context || !wait || wait.chatId !== id) return context;
     return { ...context, wait: { waitId: wait.waitId, state: wait.state, subjectKind: wait.intent.subject.kind,
@@ -5764,6 +5739,9 @@ export function registerIpcHandlers(): void {
     try {
       const base=supervision.captureGraphProposalBase(id);
       let feedback="", lastCode="GRAPH_REPAIR_UNAVAILABLE";
+      // A repair model that cannot be reached right now (pool and pin both unanswered) is asked again after a short wait, inside the
+      // same 300 s budget, before the owner reads "unavailable": two more asks, 15 s and 30 s later. A cancel ends the wait.
+      let unavailableAsks=0;
       const generationRounds: import("./workflow/graph-supervision").GraphGenerationEvidence["rounds"] = [];
       for (let round=0;round<=MAX_SELF_CORRECTIONS;round++) {
         supervision.assertGraphProposalBase(base);
@@ -5781,6 +5759,11 @@ export function registerIpcHandlers(): void {
           throw new supervision.GraphSupervisionError("GRAPH_PROPOSAL_TIMEOUT");
         }
         if (controller.signal.aborted) throw new supervision.GraphSupervisionError("GRAPH_PROPOSAL_CANCELLED");
+        if (detailed.text===null && unavailableAsks<2 && deadline-Date.now()>90_000 && !controller.signal.aborted) {
+          unavailableAsks+=1;
+          await new Promise<void>((resolve)=>{ const wake=setTimeout(resolve,15_000*unavailableAsks); controller.signal.addEventListener("abort",()=>{clearTimeout(wake);resolve();},{once:true}); });
+          round-=1; continue;
+        }
         generationRounds.push({ round: round + 1, runtimeReceipt: detailed.runtimeReceipt, attempts: detailed.attempts ?? [] });
         if (detailed.text===null) return {ok:false as const,code:"ARCHITECT_UNAVAILABLE",reason:detailed.failure?.message ?? L("수정 모델을 사용할 수 없습니다.","The repair model is unavailable."),nextAction:""};
         const parsed=architect.parseGraphPatchProposal(detailed.text);
@@ -5825,7 +5808,7 @@ export function registerIpcHandlers(): void {
       callConnectedModelDetailed,
       awaitConnectedModelRunnerWithAbortGrace,
     } = require("./system-agents/judgment") as typeof import("./system-agents/judgment");
-    const { MAX_SELF_CORRECTIONS } = require("./workflow/graph-interview") as typeof import("./workflow/graph-interview");
+    const { MAX_SELF_CORRECTIONS, interviewSelfCorrectionProblem } = require("./workflow/graph-interview") as typeof import("./workflow/graph-interview");
     // One owner answer shares a five-minute deadline across repair attempts;
     // retries never renew the request's cancellation and lifetime boundary.
     const interviewDeadline = requestOwner.deadline;
@@ -5846,6 +5829,18 @@ export function registerIpcHandlers(): void {
       .filter((row) => row.graph && row.graph.nodes?.length)
       .map((row) => ({ id: row.id, name: row.name }));
     let attempt = { ...current, knownGraphs, attempts: [...(current.attempts ?? [])] };
+    // A model that cannot be reached right now (pool and pin unanswered, or the call itself failed) is asked again after a short wait,
+    // inside the interview's own deadline, before the owner reads "unavailable": two more asks, 15 s and 30 s later. A provider's usage
+    // limit or login refusal is not asked again at once (its own time decides), and a cancel ends the wait.
+    let unavailableAsks = 0;
+    const askAgainLater = async (): Promise<boolean> => {
+      if (unavailableAsks >= 2 || interviewDeadline - Date.now() < 90_000 || requestOwner.signal.aborted) return false;
+      unavailableAsks += 1;
+      await new Promise<void>((resolve) => { const wake = setTimeout(resolve, 15_000 * unavailableAsks);
+        requestOwner.signal.addEventListener("abort", () => { clearTimeout(wake); resolve(); }, { once: true }); });
+      requestOwner.assertCurrent();
+      return true;
+    };
     for (let round = 0; round <= MAX_SELF_CORRECTIONS; round += 1) {
       requestOwner.assertCurrent();
       let text: string | null = null;
@@ -5894,6 +5889,7 @@ export function registerIpcHandlers(): void {
          * 폴백으로 강등됐다. 런타임이 이유를 말하며 거절했으면 그 문장을 그대로.
          */
         if (text === null && detailedTurn.failure) {
+          if (detailedTurn.failure.kind !== "quota" && detailedTurn.failure.kind !== "auth" && await askAgainLater()) { round -= 1; continue; }
           return {
             ok: false,
             code: "INTERVIEW_MODEL_UNAVAILABLE",
@@ -5905,6 +5901,7 @@ export function registerIpcHandlers(): void {
         }
       } catch (error) {
         requestOwner.assertCurrent();
+        if (await askAgainLater()) { round -= 1; continue; }
         return {
           ok: false,
           code: "INTERVIEW_MODEL_UNAVAILABLE",
@@ -5913,6 +5910,7 @@ export function registerIpcHandlers(): void {
         };
       }
       if (!text) {
+        if (await askAgainLater()) { round -= 1; continue; }
         return {
           ok: false,
           code: "INTERVIEW_MODEL_UNAVAILABLE",
@@ -5930,18 +5928,13 @@ export function registerIpcHandlers(): void {
          * 주세요"가 떴다 — 사람 문장이 틀린 것처럼(실측 2026-08-06, 연속 3회 재현).
          * 형식 문제는 이미 스스로 고치게 하는 장치가 있다. 같은 예산 안에서 그쪽으로 보낸다.
          */
-        if (parsed.code !== "INTERVIEW_OUTPUT_UNREADABLE" || attempt.attempts.length >= MAX_SELF_CORRECTIONS) {
+        const selfCorrection = interviewSelfCorrectionProblem(parsed.code, attempt);
+        if (selfCorrection === null || attempt.attempts.length >= MAX_SELF_CORRECTIONS) {
           return parsed;
         }
         attempt = {
           ...attempt,
-          attempts: [...attempt.attempts, {
-            round: attempt.round,
-            problems: [L(
-              "지난 답이 JSON 하나로 읽히지 않았습니다. 설명 없이 JSON 객체 하나만 내보내세요.",
-              "The previous answer did not parse as a single JSON object. Output only one JSON object, with no explanation.",
-            )],
-          }],
+          attempts: [...attempt.attempts, { round: attempt.round, problems: [selfCorrection] }],
         };
         continue;
       }
@@ -5976,8 +5969,8 @@ export function registerIpcHandlers(): void {
         const {superviseGraph}=await import("./workflow/graph-supervision");
         built.graph=superviseGraph(built.graph).graph;
       } catch(error) {
-        const code=error instanceof Error ? error.message : "GRAPH_SHAPE_INVALID";
-        attempt={...attempt,attempts:[...attempt.attempts,{round:attempt.round,problems:[JSON.stringify({code})]}]};
+        const {graphSupervisionProblem}=await import("./workflow/graph-supervision");
+        attempt={...attempt,attempts:[...attempt.attempts,{round:attempt.round,problems:[graphSupervisionProblem(error)]}]};
         continue;
       }
       // ★슬롯 편성 — 단계가 선언한 역할을 **실물 에이전트**로 채운다.
@@ -6071,7 +6064,8 @@ export function registerIpcHandlers(): void {
     }
     const {superviseGraph,GraphSupervisionError}=await import("./workflow/graph-supervision");
     let checked:ReturnType<typeof superviseGraph>;
-    try {checked=superviseGraph(input.graph);} catch(error) {return {ok:false as const,code:error instanceof GraphSupervisionError?error.code:"GRAPH_SHAPE_INVALID",blocked:null,recovery:null};}
+    try {checked=superviseGraph(input.graph);} catch(error) {return {ok:false as const,code:error instanceof GraphSupervisionError?error.code:"GRAPH_SHAPE_INVALID",blocked:null,recovery:null,
+      ...(error instanceof GraphSupervisionError && error.detail ? { reason:error.detail.reason,nextAction:error.detail.nextAction } : {})};}
     const graph = checked.graph;
     const { verifyGraphBeforeSaveWithKernel } = await import("./workflow/verify-before-save");
     requestOwner.assertCurrent();
@@ -6228,7 +6222,9 @@ export function registerIpcHandlers(): void {
     }
     const { superviseGraph,GraphSupervisionError }=require("./workflow/graph-supervision") as typeof import("./workflow/graph-supervision");
     let verified:ReturnType<typeof superviseGraph>;
-    try {verified=superviseGraph(input.graph);} catch(error) {return {ok:false as const,code:error instanceof GraphSupervisionError?error.code:"GRAPH_SHAPE_INVALID",reason:L("그래프 구조를 검증하지 못해 저장하지 않았습니다.","The graph was not saved because structural verification did not pass."),nextAction:""};}
+    try {verified=superviseGraph(input.graph,{ promptTemplate: input.name.trim() });} catch(error) {return {ok:false as const,code:error instanceof GraphSupervisionError?error.code:"GRAPH_SHAPE_INVALID",
+      reason:error instanceof GraphSupervisionError && error.detail ? error.detail.reason : L("그래프 구조를 검증하지 못해 저장하지 않았습니다.","The graph was not saved because structural verification did not pass."),
+      nextAction:error instanceof GraphSupervisionError && error.detail ? error.detail.nextAction : ""};}
     input.graph=verified.graph;
     const {desktopStoreTransaction}=require("./store/change-bus") as typeof import("./store/change-bus");
     const {getDb}=require("./store/db") as typeof import("./store/db");
@@ -6240,7 +6236,7 @@ export function registerIpcHandlers(): void {
     if (existing) {
       const prior = getAutomation(existing.id);
       if (prior?.graph && JSON.stringify(prior.graph) === JSON.stringify(input.graph)) {
-        return { ok: true as const, id: existing.id, name: existing.name, renamed: false, reused: true, verification:{...verified.verification,saved:true} };
+        return { ok: true as const, id: existing.id, name: existing.name, renamed: false, reused: true, verification:{...verified.verification,saved:true}, ...(verified.warnings.length ? { warnings: verified.warnings } : {}) };
       }
     }
     const name = existing ? `${input.name!.trim()} (2)` : input.name!.trim();
@@ -6261,7 +6257,7 @@ export function registerIpcHandlers(): void {
       ...(input.goal?.trim() ? { goal: input.goal.trim() } : {}),
     });
     if (JSON.stringify(created.graph)!==JSON.stringify(verified.graph)) throw new GraphSupervisionError("GRAPH_READBACK_MISMATCH");
-    return { ok: true as const, id: created.id, name, renamed: !!existing, verification:{...verified.verification,saved:true} };
+    return { ok: true as const, id: created.id, name, renamed: !!existing, verification:{...verified.verification,saved:true}, ...(verified.warnings.length ? { warnings: verified.warnings } : {}) };
     }).immediate();
   });
 
@@ -7359,7 +7355,7 @@ export function registerIpcHandlers(): void {
       // source owns its actual no-start proof, including synchronous throws.
       reservationFrontier!.closeBeforeSource();
       // A refusal that only means "not ready yet" is retried by the send queue, which saves the message once itself.
-      if (isTransientSendRefusal(cause) && canQueuePendingSend(request, queuedOwnerCustody().canQueue(request))) throw cause;
+      if ((isTransientSendRefusal(cause) || undispatchedStartWaits(cause, request.runId)) && canQueuePendingSend(request, queuedOwnerCustody().canQueue(request))) throw cause;
       // The renderer has already accepted and displayed this turn. Several
       // Main-owned start gates (participant snapshot, capability claim, durable
       // run receipt) execute before runMcpInvocation reaches its normal
@@ -7624,10 +7620,28 @@ export function registerIpcHandlers(): void {
       throw cause;
     }
   });
+  // The gap between two attempts of a message the app is retrying by itself has no live run, so the usual Stop is not drawn there. The
+  // composer reads how many messages wait (a count, nothing else) and offers the owner's Stop for them: the same abandonWaitingRetries
+  // that invoke:cancel and the phone's Stop call. It is the owner's own act, so an app-control caller (an agent) cannot press it.
+  ipcMain.handle("invoke:waitingRetries", (_event, chatId: string) => {
+    assertTrustedSitePublishIpcSender(_event);
+    return { waiting: typeof chatId === "string" && chatId ? waitingRetryCount(getDb(), chatId) : 0 };
+  });
+  ipcMain.handle("invoke:stopWaitingRetries", (_event, chatId: string) => {
+    assertTrustedSitePublishIpcSender(_event);
+    if (isAppControlEvent(_event)) throw new Error("native_gui_original_renderer_required");
+    if (typeof chatId !== "string" || !chatId) return { stopped: 0 };
+    const stopped = abandonWaitingRetries(getDb(), chatId);
+    if (stopped > 0) { try { emitDesktopStoreChange({ entity: "chat", id: chatId }); } catch { /* cosmetic */ } }
+    return { stopped };
+  });
   ipcMain.handle("invoke:cancel", async (_event, runId: string) => {
     assertTrustedSitePublishIpcSender(_event);
     const native = configuredNativeGuiOwner();
     if (native && isAppControlEvent(_event)) throw new Error("native_gui_original_renderer_required");
+    // The owner's Stop ends this chat's messages that wait out an internal retry, whoever hosts the run: this process, the background service
+    // (the captured and recovered routes below never pass cancelInvocationOwnerRun) or a recovered run. Never blocks the Stop.
+    abandonOwnerWaitingRetries(runId);
     try {
       const successorRuns = followupCustody().stopRun(runId);
       for (const successorRun of successorRuns) if (successorRun !== runId) {

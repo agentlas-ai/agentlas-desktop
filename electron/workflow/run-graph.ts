@@ -322,6 +322,12 @@ export interface RunGraphResult {
    * 사유 원문 없이 코드만 보여주거나, 지금 누를 행동 없이 실패만 알리는 표면은 결함이다.
    */
   nodeFailures?: Record<string, GraphNodeFailure>;
+  /**
+   * One plain line for each step the run skipped for an internal reason (an unfinished step that does nothing, a connection that does not
+   * say true or false, a check whose subject was never produced). The scheduler writes them into the automation's run history; the run keeps
+   * its result and nothing is asked or notified (Decided).
+   */
+  stepNotes?: string[];
   /** 시뮬레이션 실행이었는가. 결과를 실전 결과로 오해하지 않도록 항상 함께 전달한다. */
   dryRun?: boolean;
   /** 시뮬레이션에서 막은 부수효과 목록(실전이었으면 일어났을 일). */
@@ -335,8 +341,7 @@ export interface RunGraphResult {
    * safely, already returned the same output with the same failing items, or used their rework budget.
    * Schedulers and trigger outboxes do not retry it automatically (production 2026-10-16: three resumes
    * re-judged one unchanged output). Typed; never derived from prose.
-   * `run_interrupted_effect`: the host died while a step that may have acted outside was running; that step waits
-   * for the owner's [Rerun from this node] / [Skip], so a retry could only hold it again.
+   * A step the host died in the middle of is not one of these (decided): it runs again, see runGraph.
    */
   automaticRetry?: { allowed: false; reasonCode: GraphRetryStopReason; nodeId: string; fingerprint: string | null };
 }
@@ -361,7 +366,7 @@ export interface RunGraphResult {
  * 5로 둔 근거: 조사한 제품들이 서브워크플로 중첩을 3~10 사이로 두고, 5면 실사용 구성을
  * 담으면서도 사고가 났을 때 금방 멈춘다.
  */
-const MAX_SUBGRAPH_DEPTH = 5;
+export const MAX_SUBGRAPH_DEPTH = 5;
 
 const NON_ROUTABLE_FAILURES = new Set([
   "MUTATION_UNVERIFIED",
@@ -1106,11 +1111,14 @@ export function reconcileReadOnlyInterruptedAgentNodes(
 
 // ── A run whose host died mid-step (automation_run_interrupted, store/db.ts recovery) ────────────
 /*
- * Owner decision 2026-10-16 (YouTube daily upload): when the app dies mid-run the occurrence is interrupted, the
- * owner is told, and the resume re-runs only steps proven replay-safe. A step that may already have acted outside
- * (declared mutation, a non-read receipt, a tool request that never reported a result) is never re-run
- * automatically: it is held until the owner chooses [Rerun from this node] or [Skip]. Its unknown outcome is never
- * turned into a prompt note (UNCERTAIN_EFFECT_NOTE_CODES), which would dispatch the upload again.
+ * Decision (a daily upload): when the app dies mid-run the occurrence is interrupted and the
+ * owner is told. A later decision replaced the second half: the resume used to hold a step that may already
+ * have acted outside (declared mutation, a non-read receipt, a tool request that never reported a result) until the
+ * owner chose [Rerun from this node] or [Skip]; an unknown outcome never stops to ask, and a duplicate is accepted.
+ * Every interrupted step runs again on the resume. A step proven replay-safe runs as it was; any other AI step is told
+ * once, in one line, that the earlier attempt may have partly happened (the uncertain-effect note) and checks the
+ * current state first. The cap is the one every unknown outcome has: 3 attempts of the occurrence, then the app closes
+ * it by itself (automation-scheduler.ts, store/unconfirmed-occurrence.ts).
  */
 export type InterruptedRunSource = { runId: string; hostPid: number | null };
 
@@ -1178,6 +1186,31 @@ export function reconcileReplaySafePreparedWorkforceNodes(checkpoint: GraphCheck
  * may already have acted outside (no double publish), when the rework returned the input already
  * judged (it is not judged again), when the budget is used, or when the judged value is run input.
  */
+/**
+ * A verification whose judge could not answer right now (every judge in its pool and the pin unreachable, a limit, a login) is
+ * asked again after a short wait before the step fails EVAL_UNAVAILABLE: the cause is outside the graph and passes, and the
+ * step failing is what the owner would otherwise read ("Run again shortly"). Two more attempts, 15 s and 45 s later; a stop or
+ * an abort ends the wait at once; the last answer or error is the one that stands.
+ */
+export const EVAL_JUDGE_RETRY_WAITS_MS: readonly number[] = [15_000, 45_000];
+async function askJudgeAgain<T>(attempt: () => Promise<T>, answered: (value: T) => boolean, signal: AbortSignal | undefined,
+  beforeRetry: () => void): Promise<T> {
+  for (let retry = 0; ; retry += 1) {
+    let value: T | undefined, failure: unknown, failed = false;
+    try { value = await attempt(); } catch (error) { failed = true; failure = error; }
+    if (!failed && answered(value as T)) return value as T;
+    if (retry >= EVAL_JUDGE_RETRY_WAITS_MS.length || signal?.aborted) {
+      if (failed) throw failure;
+      return value as T;
+    }
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(() => { signal?.removeEventListener("abort", stop); resolve(); }, EVAL_JUDGE_RETRY_WAITS_MS[retry]);
+      const stop = (): void => { clearTimeout(timer); resolve(); };
+      signal?.addEventListener("abort", stop, { once: true });
+    });
+    beforeRetry();
+  }
+}
 export const MAX_EVAL_REWORKS = 2;
 export const EVAL_FAILURE_EVENT_KIND = "workflow_eval_failure";
 export const EVAL_REWORK_EVENT_KIND = "workflow_eval_rework";
@@ -1193,9 +1226,9 @@ const EVAL_REWORK_STOP_REASONS = [
   "eval_rework_unrecorded",
 ] as const;
 export type EvalReworkStopReason = (typeof EVAL_REWORK_STOP_REASONS)[number];
-/** Why a failed run must not be retried automatically: a check that cannot change, an interrupted effect, or a code
- * step whose recovery refused it on this occurrence's durable work unit. */
-export type GraphRetryStopReason = EvalReworkStopReason | "run_interrupted_effect" | "work_recovery_refused";
+/** Why a failed run must not be retried automatically: a check that cannot change, or a code step whose recovery
+ * refused it on this occurrence's durable work unit. */
+export type GraphRetryStopReason = EvalReworkStopReason | "work_recovery_refused";
 export type EvalReworkPlan = {
   /** Steps on every path from what the check reads back to the check, in graph order. */
   reworkNodeIds: string[];
@@ -1991,54 +2024,108 @@ function buildReachability(graph: WorkflowGraph): Map<string, Set<string>> {
   return cache;
 }
 
+/**
+ * Result names that two steps able to run at the same time both overwrite. The kernel keeps the value of the step declared LATER in
+ * the graph (applyProduces), so the run goes on with the same value every time; this lists them so the save receipt can warn the author.
+ */
+export function concurrentOverwriteWriters(graph: WorkflowGraph): { name: string; nodeIds: string[]; keptNodeId: string }[] {
+  const reach = buildReachability(graph);
+  const order = new Map<string, number>(graph.nodes.map((n, i) => [n.id, i] as const));
+  const byName = new Map<string, WorkflowNode[]>();
+  for (const n of graph.nodes) {
+    if (reducerPolicyOf(n) !== "overwrite") continue;
+    const name = str(n.config, "produces") || (n.type === "transform" ? str(n.config, "to") : undefined);
+    if (!name) continue;
+    byName.set(name, [...(byName.get(name) ?? []), n]);
+  }
+  const found: { name: string; nodeIds: string[]; keptNodeId: string }[] = [];
+  for (const [name, writers] of byName) {
+    const involved = new Set<string>();
+    for (let i = 0; i < writers.length; i += 1) for (let j = i + 1; j < writers.length; j += 1) {
+      const a = writers[i]!.id, b = writers[j]!.id;
+      if (!reach.get(a)?.has(b) && !reach.get(b)?.has(a)) { involved.add(a); involved.add(b); }
+    }
+    if (involved.size < 2) continue;
+    const nodeIds = [...involved].sort((x, y) => (order.get(x) ?? 0) - (order.get(y) ?? 0));
+    found.push({ name, nodeIds, keptNodeId: nodeIds[nodeIds.length - 1]! });
+  }
+  return found;
+}
+
 /** transform 노드 — 변수 백을 순수 함수로 reshape(extract/format/json). */
 /** 커널이 실제로 아는 가공 방식. 화면 선택지·레지스트리와 **같은 집합**이어야 한다. */
 export const TRANSFORM_MODES = ["identity", "format", "json", "extract"] as const;
 
+/** A step that reaches run time unfinished is skipped or run as far as it can run, with this note; it never fails the run. */
+export interface GraphStepNote { code: string; reason: string }
+
 /**
- * 값을 가공한다. **실패하면 사유를 돌려준다** — 예전처럼 조용히 아무것도 안 하고 성공으로
- * 남으면, 값이 없어 죽는 것은 다음 단계이고 화면에서 원인 노드는 초록불이 된다.
+ * 값을 가공한다. 끝나지 않은 단계는 **실행을 실패시키지 않는다** — 하는 일이 없으면(가져올 값이 없음)
+ * 건너뛰고 사유를 기록으로 남기고, 방식을 모르면 값을 그대로 옮기면서 사유를 남긴다.
+ * (끝나지 않은 단계를 찾아 고치게 하는 자리는 저장 시점이다 — graph-supervision.ts. 이미 저장된 그래프가
+ * 여기까지 오면 돌릴 수 있는 만큼 돌린다.) 사유가 없으면 null.
  */
-function applyTransform(node: WorkflowNode, vars: Record<string, unknown>): GraphNodeFailure | null {
+/** Step notes that are not a skip: the ledger keeps them, the run history needs no line (the path ended by design, or a value was kept or empty). */
+const QUIET_STEP_NOTE_CODES: ReadonlySet<string> = new Set(["NO_MATCHING_EDGE", "REDUCER_WRITE_CONFLICT"]);
+const MAX_STEP_NOTE_LINES = 5;
+
+/**
+ * A repair that spends a model call on a code step (rewriting a script that failed or returned nothing) runs at most once per saved graph
+ * version (Decided), not once per run. The first run that needs it pays for the rewrite; a rewritten script that worked is
+ * remembered with the version, so every later run uses it with no model call. The saved graph is not touched (a silent change would make
+ * the resume of a stopped run refuse on a digest mismatch); the next saved version starts again. Kept in `meta`.
+ */
+export interface CodeRepairForVersion { spent: boolean; code: string | null }
+export const codeRepairMetaKey = (automationId: string, graphDigest: string, nodeId: string): string => `graph-code-repair:${automationId}:${graphDigest}:${nodeId}`;
+export function readCodeRepairForVersion(key: string): CodeRepairForVersion {
+  try {
+    const row = getDb().prepare("SELECT value FROM meta WHERE key = ?").get(key) as { value?: string } | undefined;
+    if (!row?.value) return { spent: false, code: null };
+    const parsed = JSON.parse(row.value) as { spent?: unknown; code?: unknown };
+    return { spent: parsed.spent === true, code: typeof parsed.code === "string" && parsed.code.trim() ? parsed.code : null };
+  } catch { return { spent: false, code: null }; }
+}
+export function writeCodeRepairForVersion(automationId: string, graphDigest: string, nodeId: string, state: CodeRepairForVersion): void {
+  try {
+    const db = getDb();
+    const key = codeRepairMetaKey(automationId, graphDigest, nodeId);
+    // An older version's rewrite of this step is dead weight: only the current version's is kept.
+    db.prepare("DELETE FROM meta WHERE key LIKE ? AND key <> ?").run(`graph-code-repair:${automationId}:%:${nodeId}`, key);
+    db.prepare("INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)")
+      .run(key, JSON.stringify({ spent: state.spent, code: state.code && state.code.length <= 200_000 ? state.code : null }));
+  } catch { /* a repair that cannot be remembered is paid for again on the next run, never refused */ }
+}
+
+function applyTransform(node: WorkflowNode, vars: Record<string, unknown>): GraphStepNote | null {
   const cfg = node.config;
   const from = str(cfg, "from");
   // ★`produces`를 결과 이름으로 적는 사람이 있다 — 다른 모든 노드가 그 이름을 쓰기 때문이다.
   //   레지스트리도 transform에 `produces`가 붙는다고 선언해 왔다. 별칭으로 받는다.
   const to = str(cfg, "to") ?? str(cfg, "produces") ?? from;
   const label = node.label || node.id;
-  if (!from) {
+  if (!from || !to) {
+    // 가져올 값이 없으면 가공할 것이 없다: 이 단계는 하는 일이 없으므로 건너뛴다.
     return {
       code: "TRANSFORM_NODE_UNCONFIGURED",
-      reason: L(`"${label}"에 어떤 값을 가공할지(from)가 없습니다.`, `"${label}" has no value to transform (from) set.`),
-      nextAction: L(
-        "앞 단계가 만든 값 이름을 이 단계의 '가져올 값'에 적어 주세요.",
-        "Enter the name of a value from a previous step into this step's 'value to take' field.",
-      ),
-    };
-  }
-  if (!to) {
-    return {
-      code: "TRANSFORM_NODE_UNCONFIGURED",
-      reason: L(`"${label}"에 결과를 어느 이름으로 둘지(to)가 없습니다.`, `"${label}" has no name set for where to put the result (to).`),
-      nextAction: L("이 단계가 만들 값의 이름을 적어 주세요.", "Enter the name of the value this step creates."),
+      reason: L(`"${label}"에 가공할 값(from)이 없어 이 단계는 건너뛰었습니다.`, `"${label}" has no value to transform (from), so this step was skipped.`),
     };
   }
   const source = vars[from];
-  const mode = str(cfg, "mode") ?? "identity";
-  if (!TRANSFORM_MODES.includes(mode as (typeof TRANSFORM_MODES)[number])) {
-    // 모르는 방식을 그냥 복사로 처리하면, 사람이 고른 가공이 조용히 사라진 채 통과한다.
-    return {
-      code: "TRANSFORM_MODE_UNKNOWN",
-      reason: L(
-        `"${label}"의 가공 방식 "${mode}"을(를) 이 제품이 모릅니다.`,
-        `This product does not know the transform mode "${mode}" used by "${label}".`,
-      ),
-      nextAction: L(
-        `가공 방식을 ${TRANSFORM_MODES.join(" · ")} 중 하나로 바꿔 주세요.`,
-        `Change the transform mode to one of: ${TRANSFORM_MODES.join(" · ")}.`,
-      ),
-    };
-  }
+  const rawMode = str(cfg, "mode");
+  const knownMode = (candidate: string): candidate is (typeof TRANSFORM_MODES)[number] =>
+    TRANSFORM_MODES.includes(candidate as (typeof TRANSFORM_MODES)[number]);
+  // A mode written with other letter case or spaces is the same mode; a mode the product does not know copies the value on.
+  const spelled = rawMode?.trim().toLowerCase() ?? "";
+  const mode: (typeof TRANSFORM_MODES)[number] = spelled === "" ? "identity" : knownMode(spelled) ? spelled : "identity";
+  const note: GraphStepNote | null = spelled !== "" && !knownMode(spelled)
+    ? {
+        code: "TRANSFORM_MODE_UNKNOWN",
+        reason: L(
+          `"${label}"의 가공 방식 "${rawMode}"을(를) 이 제품이 몰라 값을 그대로 옮겼습니다.`,
+          `This product does not know the transform mode "${rawMode}" used by "${label}", so the value was passed on unchanged.`,
+        ),
+      }
+    : null;
   switch (mode) {
     case "json":
       try {
@@ -2067,10 +2154,10 @@ function applyTransform(node: WorkflowNode, vars: Record<string, unknown>): Grap
       break;
     }
     default:
-      // identity — 그대로 옮긴다. 위에서 모르는 방식은 이미 걸렀다.
+      // identity — 그대로 옮긴다. 모르는 방식도 여기로 온다(위의 note가 사유를 남긴다).
       vars[to] = source;
   }
-  return null;
+  return note;
 }
 
 /**
@@ -2302,7 +2389,7 @@ export async function runGraph(
   let resumeOfRunId: string | undefined;
   /** Steps a dead host left in flight: begun again only when admission let them run (interruptedRunFacts). */
   const interruptedReplay = new Map<string, InterruptedRunSource>();
-  /** Interrupted steps that may have acted outside: held for the owner, never turned into a prompt note. */
+  /** Interrupted steps that may have acted outside: they run again, an AI step with the uncertain-effect note. */
   const interruptedHolds = new Set<string>();
   /** The failed run's own sealed checkpoint was restored (not a changed-graph lineage). */
   let resumedFromCheckpoint = false;
@@ -2379,7 +2466,7 @@ export async function runGraph(
           }
           tryRecordRunEvent({ runId, kind: "workflow_interrupted_resume", automationId: automation.id, payload: {
             schemaVersion: "agentlas.graph-interrupted-resume.v1", interruptedRunIds: [...new Set([...interrupted.values()].map((s) => s.runId))],
-            replayNodeIds: replayed.sort(), heldNodeIds: [...interruptedHolds].sort() } });
+            replayNodeIds: replayed.sort(), unconfirmedNodeIds: [...interruptedHolds].sort() } });
         }
         reconcileReplaySafePreparedWorkforceNodes(checkpoint);
         const readOnlyReplayable = reconcileReadOnlyInterruptedAgentNodes(checkpoint, latestFailed.runId, graph);
@@ -2405,7 +2492,7 @@ export async function runGraph(
           : "";
         for (const nodeId of interruptedHolds) admissionDiagnostics.set(nodeId, {
           code: "MUTATION_UNVERIFIED", reason: L("앱이 멈출 때 이 단계가 진행 중이었고, 바깥에 이미 반영됐을 수 있어요(게시·업로드·전송).", "The app stopped while this step was running, and it may already have acted outside (post, upload, message).") + publishedNote,
-          nextAction: L("자동으로 다시 실행하지 않아요. 실제로 반영됐는지 확인한 뒤 [이 노드부터 재실행] 또는 [건너뛰기]를 고르세요.", "It is not run again automatically. Check whether it took effect, then choose [Rerun from this node] or [Skip]."),
+          nextAction: L("이 단계는 이어서 다시 실행돼요. AI 단계는 지난 시도가 반영됐는지 먼저 확인해요.", "This step runs again; an AI step first checks whether the last attempt took effect."),
         });
         if (interruptedHolds.size > 0) checkpoint.ambiguousNodeIds = [...new Set([...checkpoint.ambiguousNodeIds, ...interruptedHolds])].sort();
         resumeOfRunId = latestFailed.runId;
@@ -2440,7 +2527,7 @@ export async function runGraph(
   // the same facts at their runnable boundary without stopping the current call.
   const uncertainEffectNotes = new Map<string, GraphNodeFailure>(historicalEffectNotes);
   for (const [nodeId, failure] of [...admissionDiagnostics.entries()]) {
-    if (!UNCERTAIN_EFFECT_NOTE_CODES.has(failure.code) || interruptedHolds.has(nodeId)) continue;
+    if (!UNCERTAIN_EFFECT_NOTE_CODES.has(failure.code)) continue;
     const node = graph.nodes.find(candidate => candidate.id === nodeId);
     // A direct call's payload may come from an upstream node. Compare its
     // actual arguments at the runnable boundary, rather than holding a new
@@ -2594,10 +2681,13 @@ export async function runGraph(
   }
   /** Eval node → the rework this run continues for it, with what the previous failure looked like. */
   const evalReworkState = new Map<string, { attempt: number; priorFingerprint: string | null; priorEvaluatedDigest: string | null }>();
+  /** Eval node → the failure a stopped check carries when its unchanged output is met again (the stop's own reason and next action). */
+  const evalHistoricalStop = new Map<string, GraphNodeFailure>();
   /** Eval node → the steps that read its reasons in this run. A resumed rework is scoped to what the check judges. */
   const evalReworkScope = new Map<string, Set<string>>();
-  let automaticRetryDiagnostic: { nodeId: string; reasonCode: GraphRetryStopReason; fingerprint: string | null } | null = interruptedHolds.size > 0
-    ? { nodeId: [...interruptedHolds].sort()[0]!, reasonCode: "run_interrupted_effect", fingerprint: null } : null;
+  // An interrupted step is not a retry stop (decided): the run that resumes it fails or succeeds like any other, and the
+  // scheduler's attempt cap and the outbox's unknown-outcome cap bound the repeats.
+  let automaticRetryDiagnostic: { nodeId: string; reasonCode: GraphRetryStopReason; fingerprint: string | null } | null = null;
   // A check that failed in the run this one resumes: rework what it judges, or stop once. The same
   // output is never judged again (see planEvalRework).
   if (resumedFromCheckpoint && latestFailed) {
@@ -2659,15 +2749,22 @@ export async function runGraph(
         const produces = str(node.config ?? {}, "produces") ?? `${node.id}_verdict`;
         const lastReason = typeof vars[`${produces}_reason`] === "string" ? String(vars[`${produces}_reason`]).trim() : "";
         const label = node.label || node.id;
-        admissionDiagnostics.set(node.id, {
+        const stopFailure: GraphNodeFailure = {
           code: failure.failureCode,
           reason: L(
             `검증 "${label}"이(가) 지난 시도에서 통과하지 못했고, 같은 결과를 다시 판정하지 않았습니다.${lastReason ? `\n${lastReason}` : ""}`,
             `Check "${label}" did not pass on the last attempt, and the same result was not judged again.${lastReason ? `\n${lastReason}` : ""}`,
           ),
           nextAction: evalReworkNextAction(decision, labelsOf, plan, 0),
-        });
+        };
+        admissionDiagnostics.set(node.id, stopFailure);
         automaticRetryDiagnostic ??= { nodeId: node.id, reasonCode: decision.reasonCode, fingerprint: priorFingerprint };
+        // The check still runs (a stop is a diagnostic, never a hold on requested work), but it runs with the memory the stop was made
+        // from: the rework budget already used and the output already judged. The same output is not judged again, and a different
+        // output that fails again stops at the budget instead of starting another rework cycle (before the budget reset
+        // here, so a failing check re-ran its judged steps and the judge on every deferred retry and every redelivery).
+        evalReworkState.set(node.id, { attempt: failure.reworksDone, priorFingerprint, priorEvaluatedDigest: failure.evaluatedDigest });
+        evalHistoricalStop.set(node.id, stopFailure);
         continue;
       }
       for (const id of plan.reworkNodeIds) {
@@ -2953,6 +3050,12 @@ export async function runGraph(
   const codeRepairAttempted = new Set<string>();
   // 도구 0건으로 되돌린 노드 — 재시도 프롬프트에 그 사실을 실어 보낸다.
   const toolProofRetryNodes = new Set<string>();
+  /** Model steps that already got their one same-run retry after an unknown outside effect (decided). */
+  const unknownOutcomeRetryNodes = new Set<string>();
+  /** Steps whose write to a shared result name lost to a concurrent step declared later (applyProduces): a typed copy must not undo that. */
+  const droppedWrites = new Set<string>();
+  /** Model steps asked once more because they ended with no result at all (one per attempt chain; cleared when the step settles). */
+  const noResultAskedNodes = new Map<string, { noted: boolean; prior: GraphNodeFailure | undefined }>();
   /** 저널 한 줄. 관측 실패가 실행을 멈추지는 않는다. */
   const journal = (
     kind: Parameters<typeof appendGraphJournal>[1],
@@ -2971,6 +3074,8 @@ export async function runGraph(
   const toolBrokerByNode = new Map<string, { level: ToolBrokerLevel; reason: string }>();
   /** 런타임이 보고한 토큰 누계(실행 전체 / 노드별). 보고가 없으면 상한을 집행할 수 없다. */
   let runTokensUsed = restoredExecution?.tokensUsed ?? 0;
+  /** Plain lines for the steps skipped for an internal reason (RunGraphResult.stepNotes). */
+  const stepNotes: string[] = [];
   /** 관측된 노드 1회 최대 사용량 — 다음 노드를 띄워도 되는지 판단하는 예약치. */
   let maxObservedNodeTokens = restoredExecution?.maxObservedNodeTokens ?? 0;
   const nodeTokensUsed = new Map<string, number>(Object.entries(restoredExecution?.nodeTokensUsed ?? {}));
@@ -3147,6 +3252,10 @@ export async function runGraph(
    *   자동화를 실행하면 세션을 만들다 SQLite 가 그대로 튀어나왔다 —
    *   `FOREIGN KEY constraint failed`. 사람은 자기가 지운 에이전트 이야기라는 걸
    *   알 방법이 없고, 자동화 이름조차 없는 문장을 본다.
+   *
+   * 지워진 대상은 **실행을 멈추는 이유가 아니다**: 그 대상을 쓰던 단계는 고정된 런타임(자동화의 핀)에서
+   *   그 에이전트의 페르소나 없이 돈다. 사람이 에이전트를 지운 것은 자동화를 멈추라는 뜻이 아니다.
+   *   (예전에는 그 단계가 "백그라운드에서 고치는 중"이라며 실패했는데, 그 수리는 어디에도 없어 매 실행 같은 실패였다.)
    */
   /*
    * ★대상 id 가 **비어 있는 것**과 **없어진 것**은 다르다. 실측 2026-08-20: 처음 판이
@@ -3171,16 +3280,9 @@ export async function runGraph(
     })();
     if (!present) {
       defaultTargetMissing = true;
-      for (const node of graph.nodes) {
-        if (!["agent", "action", "output", "eval"].includes(node.type)) continue;
-        const ref = str(node.config, "ref");
-        if (ref && ref !== automation.targetId) continue;
-        const failure = { code: "TARGET_PENDING", reason: L("이 자동화의 기본 실행 대상을 찾을 수 없어요.", "This automation's default target is unavailable."),
-          nextAction: L("다른 단계는 계속 진행돼요. 실행 대상을 다시 골라 주세요.", "Other steps continue. Please choose the target again.") };
-        admissionDiagnostics.set(node.id, failure);
-        nodeFailures[node.id] = failure;
-      }
-      ok = false; error ??= "graph_target_pending_background_repair";
+      tryRecordRunEvent({ runId, automationId: automation.id, kind: "workflow_recovery_diagnostic",
+        payload: { disposition: "continue", code: "TARGET_PENDING", targetType: automation.targetType,
+          reason: "The default target no longer exists; steps that use it run on the pinned runtime without its persona." } });
     }
   }
 
@@ -3202,13 +3304,9 @@ export async function runGraph(
         ? { agentId: automation.targetId }
         : {}),
   }).chat;
-  // The unavailable default must not prevent an explicitly bound sibling from
-  // creating its own session. Only a node actually reading the default fails.
-  const chat = defaultTargetMissing
-    ? new Proxy({} as ReturnType<typeof createRootChat>, { get() {
-        throw new Error("automation_target_missing: the default target is pending background repair");
-      } })
-    : createRootChat();
+  // A deleted default target gives a session with no agent or firm (the host session, the one a Hub-targeted automation uses):
+  // the step runs on the automation's pinned runtime without the persona.
+  const chat = createRootChat();
 
   // 노드별 타깃 세션 — agent 노드의 config.ref(에이전트/회사/그룹 id)를 그 타깃에 바인딩된
   // division 세션으로 실행한다(설계 §4.4: agent(agent)→agent.id). ref 없음/미해석이면 자동화
@@ -3523,26 +3621,35 @@ export async function runGraph(
     const text = machineReadableValue(rawText, machineReadVars.has(produces));
     const policy = reducerPolicyOf(node);
     const writers = varWriters.get(produces) ?? [];
+    droppedWrites.delete(node.id);
     if (policy === "overwrite") {
-      const rival = writers.find((other) =>
+      const rivals = writers.filter((other) =>
         other !== node.id &&
         !reachability.get(other)?.has(node.id) &&
         !reachability.get(node.id)?.has(other),
       );
-      if (rival) {
-        return {
+      if (rivals.length > 0) {
+        // Two steps that can run at the same time write one name. Which one finishes first changes from run to run, so the arrival
+        // order decides nothing: the step declared LATER in the graph keeps the name (documented in graph-registry/fields.json, reducer). The run goes on, the
+        // value is the same on every run, and the ledger says which step's value was kept. The save receipt warns the author.
+        const mine = declarationIndex.get(node.id) ?? 0;
+        const keptRival = rivals.find((other) => (declarationIndex.get(other) ?? 0) > mine);
+        noteUnfinishedStep(node, {
           code: "REDUCER_WRITE_CONFLICT",
-          reason: L(
-            `노드 "${node.label || node.id}"와 "${rival}"이(가) 동시에 실행될 수 있는데 같은 결과 이름 "${produces}"에 덮어쓰기로 저장합니다. 어느 쪽이 남을지는 먼저 끝나는 쪽에 따라 매번 달라집니다.`,
-            `Node "${node.label || node.id}" and "${rival}" can run at the same time, and both overwrite the same result name "${produces}". Which one survives depends on which finishes first, and that can change every time.`,
-          ),
-          nextAction: L(
-            "두 노드의 결과 이름을 다르게 하거나, 저장 규칙을 '이어붙이기'로 바꾸세요.",
-            "Give the two nodes different result names, or change the save rule to 'append'.",
-          ),
-        };
+          reason: keptRival
+            ? L(
+              `"${node.label || node.id}"와 "${keptRival}"이(가) 동시에 같은 결과 이름 "${produces}"에 덮어쓰기로 저장합니다. 더 뒤에 놓인 "${keptRival}"의 값을 남겼습니다.`,
+              `"${node.label || node.id}" and "${keptRival}" can run at the same time and both overwrite "${produces}". The value of "${keptRival}", the step placed later in the graph, was kept.`,
+            )
+            : L(
+              `"${node.label || node.id}"와 "${rivals[0]}"이(가) 동시에 같은 결과 이름 "${produces}"에 덮어쓰기로 저장합니다. 더 뒤에 놓인 "${node.label || node.id}"의 값을 남겼습니다.`,
+              `"${node.label || node.id}" and "${rivals[0]}" can run at the same time and both overwrite "${produces}". The value of "${node.label || node.id}", the step placed later in the graph, was kept.`,
+            ),
+        });
+        if (keptRival) droppedWrites.add(node.id); else vars[produces] = text;
+      } else {
+        vars[produces] = text;
       }
-      vars[produces] = text;
     } else if (policy === "append") {
       const prior = vars[produces];
       const bucket: { order: number; nodeId: string; value: string }[] = Array.isArray(prior)
@@ -3563,22 +3670,21 @@ export async function runGraph(
         parsed = text;
       }
       if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-        return {
+        // A result that is not an object cannot be merged into the objects other steps already put there. The run goes on: what was merged so far
+        // stays untouched (overwriting it would destroy other steps' contributions), the result stays on this step's own output, and the ledger says so.
+        noteUnfinishedStep(node, {
           code: "REDUCER_MERGE_CONFLICT",
           reason: L(
-            `노드 "${node.label || node.id}"의 저장 규칙이 '합치기'인데 결과가 객체가 아닙니다(받은 값: ${typeof parsed}).`,
-            `Node "${node.label || node.id}"'s save rule is 'merge', but the result is not an object (received: ${typeof parsed}).`,
+            `노드 "${node.label || node.id}"의 저장 규칙이 '합치기'인데 결과가 객체가 아니어서(받은 값: ${typeof parsed}) "${produces}"에 합치지 않았습니다. 결과는 이 단계의 출력에 남아 있습니다.`,
+            `Node "${node.label || node.id}"'s save rule is 'merge', but its result is not an object (received: ${typeof parsed}), so it was not merged into "${produces}". The result stays on this step's own output.`,
           ),
-          nextAction: L(
-            "저장 규칙을 '덮어쓰기'나 '이어붙이기'로 바꾸거나, 앞에 transform 노드로 JSON 객체를 만드세요.",
-            "Change the save rule to 'overwrite' or 'append', or add a transform node before this to build a JSON object.",
-          ),
-        };
+        });
+      } else {
+        const base = prior && typeof prior === "object" && !Array.isArray(prior)
+          ? (prior as Record<string, unknown>)
+          : {};
+        vars[produces] = { ...base, ...(parsed as Record<string, unknown>) };
       }
-      const base = prior && typeof prior === "object" && !Array.isArray(prior)
-        ? (prior as Record<string, unknown>)
-        : {};
-      vars[produces] = { ...base, ...(parsed as Record<string, unknown>) };
     }
     varWriters.set(produces, [...writers, node.id]);
     return null;
@@ -3688,6 +3794,55 @@ export async function runGraph(
   };
 
   /**
+   * An unfinished step that does nothing is skipped, and one that can partly run runs as far as it can: the run goes on and the
+   * ledger keeps the reason. Finding such a step is the save gate's work (graph-supervision.ts); a graph saved before that gate
+   * existed must not fail every scheduled run for it.
+   */
+  const noteUnfinishedStep = (node: WorkflowNode, note: GraphStepNote): void => {
+    tryRecordRunEvent({ runId, automationId: automation.id, nodeId: node.id, kind: "workflow_recovery_diagnostic",
+      payload: { disposition: "continue", code: note.code, skipped: true, nodeType: node.type, reason: note.reason } });
+    // A diagnostic row no screen reads is not visible: the skip also leaves one plain line for the automation's run history.
+    if (!QUIET_STEP_NOTE_CODES.has(note.code) && stepNotes.length < MAX_STEP_NOTE_LINES && !stepNotes.includes(note.reason)) stepNotes.push(note.reason);
+  };
+  const askedProducerOnce = new Set<string>();
+  /**
+   * Asks the step that writes `varName` once more, in this run. Only when exactly one finished step writes it, it is an agent, action or
+   * code step, and it cannot have acted outside (running it again is replay-safe). Returns whether it ran again; a failure of that second
+   * run is the producing step's own typed failure.
+   */
+  const askProducerOnce = async (asker: WorkflowNode, varName: string, signal: AbortSignal): Promise<boolean> => {
+    if (askedProducerOnce.has(asker.id) || signal.aborted) return false;
+    const producers = graph.nodes.filter((candidate) => candidate.id !== asker.id && graphNodeProducedVar(candidate) === varName && completed.has(candidate.id));
+    if (producers.length !== 1) return false;
+    const producer = producers[0];
+    if (!["agent", "action", "code"].includes(producer.type) || effectNodeIds.has(producer.id)) return false;
+    askedProducerOnce.add(asker.id);
+    completed.delete(producer.id);
+    skipped.delete(producer.id);
+    status.set(producer.id, "running");
+    journal("node_intent", producer.id, { askedAgain: `the value "${varName}" was missing when "${asker.id}" needed it` });
+    await runNode(producer, signal);
+    return true;
+  };
+
+  /**
+   * A check that has nothing it can judge (no value to look at, no criteria, or a value its own branch declared may be empty) did not run.
+   * The run goes on; the check is recorded as not run with its reason, and its verdict name holds "not_run", which no branch, rework loop
+   * or goal reads as a pass.
+   */
+  const completeCheckNotRun = (node: WorkflowNode, note: GraphStepNote): void => {
+    noteUnfinishedStep(node, note);
+    const verdictName = str(node.config, "produces") ?? `${node.id}_verdict`;
+    vars[verdictName] = "not_run";
+    vars[`${verdictName}_reason`] = note.reason;
+    envelopes[node.id] = declaredEnvelope(node.id, node.label || node.id, { json: { verdict: "not_run", reason: note.reason } });
+    outputs[node.id] = `not_run: ${note.reason}`;
+    journal("node_settled", node.id, { verdict: "not_run", reason: note.reason.slice(0, 600) });
+    completeNode(node.id);
+    status.set(node.id, "done");
+  };
+
+  /**
    * A check failed and nothing in the graph receives the failure. Decide, once, what a resume may do:
    * rework the judged steps (bounded, replay-safe only) or stop with a typed reason. The receipt lets
    * the next attempt continue the same budget and recognise an identical result.
@@ -3732,6 +3887,8 @@ export async function runGraph(
     const settled = settleEvalFailure(node, { evaluatedDigest, verdictCode: "unjudged:unchanged", failureCode: "EVAL_FAILED" });
     const lastReason = typeof vars[`${produces}_reason`] === "string" ? String(vars[`${produces}_reason`]).trim() : "";
     journal("node_settled", node.id, { verdict: "fail", unchangedRework: true });
+    const earlierStop = evalHistoricalStop.get(node.id);
+    if (earlierStop) { failGraphNode(node, earlierStop); return; }
     failGraphNode(node, {
       code: "EVAL_FAILED",
       reason: L(
@@ -3860,18 +4017,17 @@ export async function runGraph(
         // 통과시키지 않는다.
         const undeclared = outgoing.filter((edge) => !edge.handle || !CONDITION_HANDLES.has(edge.handle));
         if (undeclared.length > 0) {
-          failGraphNode(node, {
+          // A connection that does not say which side it is can be followed on neither: it is not followed (the other, declared
+          // connections are), and the ledger says so. Stopping the run for it would stop a graph that is otherwise sound; the save
+          // gate is where the author is asked to declare the side (graph-supervision.ts, EDGE_CONDITION_UNRESOLVED).
+          noteUnfinishedStep(node, {
             code: "EDGE_CONDITION_UNRESOLVED",
             reason: L(
-              `조건 노드 "${label}"에서 나가는 연결 ${undeclared.length}개가 참/거짓 중 어느 쪽인지 선언하지 않았습니다.`,
-              `${undeclared.length} connection(s) leaving condition node "${label}" do not declare whether they are the true or false side.`,
-            ),
-            nextAction: L(
-              "캔버스에서 해당 연결을 지우고 조건 노드의 참·거짓 출구에서 다시 이으세요.",
-              "Delete that connection on the canvas and reconnect it from the condition node's true/false output.",
+              `조건 노드 "${label}"에서 나가는 연결 ${undeclared.length}개가 참/거짓 중 어느 쪽인지 선언하지 않아 따라가지 않았습니다.`,
+              `${undeclared.length} connection(s) leaving condition node "${label}" do not declare the true or false side, so they were not followed.`,
             ),
           });
-          return;
+          for (const edge of undeclared) blockedEdges.add(edge.edgeId);
         }
         const outcome = evalCondition(node, vars);
         if (!outcome.ok) {
@@ -3880,20 +4036,17 @@ export async function runGraph(
         }
         const take = outcome.value ? "true" : "false";
         const drop = outcome.value ? "false" : "true";
-        // 갈 곳이 선언돼 있는데 이번 판정과 맞는 출구가 하나도 없으면 조용히 흘리지 않는다.
-        if (outgoing.length > 0 && !outgoing.some((edge) => edge.handle === take)) {
-          failGraphNode(node, {
+        // 이번 판정과 맞는 출구가 없으면 이 길은 여기서 끝난다 — 실패가 아니다. 조용한 날(알릴 것이 없는 날)마다 이 자리에서
+        // 죽던 감시 자동화가 있었다(실측). 끝났다는 사실은 기록에 남긴다.
+        const declaredOutgoing = outgoing.filter((edge) => edge.handle && CONDITION_HANDLES.has(edge.handle));
+        if (declaredOutgoing.length > 0 && !declaredOutgoing.some((edge) => edge.handle === take)) {
+          noteUnfinishedStep(node, {
             code: "NO_MATCHING_EDGE",
             reason: L(
-              `조건 노드 "${label}"이 ${take === "true" ? "참" : "거짓"}으로 판정됐지만 그쪽으로 이어진 연결이 없습니다.`,
-              `Condition node "${label}" resolved to ${take === "true" ? "true" : "false"}, but no connection leads that way.`,
-            ),
-            nextAction: L(
-              `조건 노드의 ${take === "true" ? "참" : "거짓"} 출구에 다음 작업을 연결하거나, 여기서 끝나는 게 맞다면 종료 노드를 이으세요.`,
-              `Connect a next step to the condition node's ${take === "true" ? "true" : "false"} output, or connect an end node if it is meant to stop here.`,
+              `조건 노드 "${label}"이 ${take === "true" ? "참" : "거짓"}으로 판정됐고 그쪽으로 이어진 연결이 없어, 이 길은 여기서 끝났습니다.`,
+              `Condition node "${label}" resolved to ${take === "true" ? "true" : "false"} and no connection leads that way, so this path ended here.`,
             ),
           });
-          return;
         }
         // 이번 판정이 되돌아가는 쪽이면 한 바퀴를 더 돈다. 상한에 닿으면 돌지 않고
         // 그 사실을 말한다 — 조용히 멈추면 사용자는 왜 결과가 없는지 알 수 없다.
@@ -3973,21 +4126,19 @@ export async function runGraph(
             && ((entry as { text: string }).text.trim() !== ""));
         // 기준은 채점표(items) 또는 한 문장(criteria) 어느 쪽이든 된다 — 둘 다 없을 때만 미완성.
         if (!subject || (!criteria && !hasItems)) {
-          failGraphNode(node, {
+          // Nothing to judge: the check did not run (the save gate refuses this shape, graph-supervision.ts; a graph saved before it
+          // goes on). It is never read as a pass.
+          completeCheckNotRun(node, {
             code: "EVAL_INCOMPLETE",
             reason: L(
-              `검증 단계 "${node.label || node.id}"에 무엇을(subject) 어떤 기준으로(채점표 또는 criteria) 볼지가 없습니다.`,
-              `Verification step "${node.label || node.id}" has no value to check (subject) or criteria to check it against (checklist or criteria).`,
-            ),
-            nextAction: L(
-              "검증할 값과 통과 기준을 적어 주세요.",
-              "Enter the value to check and the pass criteria.",
+              `검증 단계 "${node.label || node.id}"에 무엇을(subject) 어떤 기준으로(채점표 또는 criteria) 볼지가 없어 검증하지 않았습니다. 통과로 보지 않습니다.`,
+              `Verification step "${node.label || node.id}" has no value to check (subject) or criteria to check it against (checklist or criteria), so it did not run. It is not counted as a pass.`,
             ),
           });
           return;
         }
-        const value = vars[subject];
-        const subjectText = judgeableText(value);
+        let value = vars[subject];
+        let subjectText = judgeableText(value);
         if (value == null || subjectText.trim() === "") {
           /*
            * ★"값이 비어 있다" 와 "값이 없다" 는 다르다. 앞 단계가 **정상적으로 돌아
@@ -4003,32 +4154,34 @@ export async function runGraph(
             ? findGraphContradictions(graph, planGraphLoops).find((c) => c.nodeId === node.id)
             : undefined;
           if (contradiction) {
-            failGraphNode(node, {
+            // A branch of this graph says the value may be empty, and this check says it must not be: with an empty value there is
+            // nothing to judge, so the check did not run. The save gate refuses the contradiction; a graph saved before it goes on.
+            completeCheckNotRun(node, {
               code: "EVAL_CONTRADICTS_BRANCH",
-              reason: contradiction.reason,
-              nextAction: contradiction.fix,
+              reason: L(`${contradiction.reason} 값이 비어 있어 검증하지 않았습니다. 통과로 보지 않습니다.`,
+                `${contradiction.reason} The value is empty, so the check did not run. It is not counted as a pass.`),
             });
             return;
           }
-          failGraphNode(node, {
-            code: "NODE_INPUT_MISSING",
-            reason: value == null
-              ? L(
-                  `검증할 "${subject}" 값을 앞 단계가 만들어 주지 않았습니다.`,
-                  `The value "${subject}" to verify was not produced by an earlier step.`,
-                )
-              : L(
-                  `검증할 "${subject}" 값을 앞 단계가 만들기는 했지만 비어 있습니다.`,
-                  `The value "${subject}" to verify was produced by an earlier step, but it is empty.`,
-                ),
-            nextAction: value == null
-              ? L("앞 단계가 이 값을 만들어 내는지 확인하세요.", "Check that an earlier step produces this value.")
-              : L(
-                  "비어 있는 것이 정상인 값이라면, 이 검증을 값이 있는 쪽 가지 안으로 옮기세요.",
-                  "If it being empty is expected, move this verification inside the branch where the value exists.",
-                ),
-          });
-          return;
+          // Decided. A check whose subject was never produced does not fail the run and is never read as passed: the producing step is
+          // asked once more (when exactly one finished step writes this value and cannot have acted outside); if the value is still missing, the
+          // check is recorded as NOT RUN with the reason (verdict "not_run"), and the run goes on.
+          if (await askProducerOnce(node, subject, runSignal)) { value = vars[subject]; subjectText = judgeableText(value); }
+          if (value == null || subjectText.trim() === "") {
+            completeCheckNotRun(node, {
+              code: "EVAL_NOT_RUN_INPUT_MISSING",
+              reason: value == null
+                ? L(
+                    `검증 "${node.label || node.id}"은(는) 검증할 "${subject}" 값을 앞 단계가 만들지 않아 하지 않았습니다. 통과로 보지 않습니다.`,
+                    `Verification "${node.label || node.id}" was not run: the value "${subject}" to verify was not produced by an earlier step. It is not counted as a pass.`,
+                  )
+                : L(
+                    `검증 "${node.label || node.id}"은(는) 검증할 "${subject}" 값이 비어 있어 하지 않았습니다. 통과로 보지 않습니다.`,
+                    `Verification "${node.label || node.id}" was not run: the value "${subject}" to verify is empty. It is not counted as a pass.`,
+                  ),
+            });
+            return;
+          }
         }
         const produces = str(node.config, "produces") ?? `${node.id}_verdict`;
 
@@ -4055,20 +4208,20 @@ export async function runGraph(
           //   "주가가 실제와 일치하나"류는 대상만 보고는 판정 불가이고, 같은 모델이 자기
           //   산출물을 판정하는 편향의 최대 완화책이 reference 제공이다(실패율 70%→15% 실측).
           const evidenceVar = str(node.config, "evidence");
-          const evidenceValue = evidenceVar ? vars[evidenceVar] : undefined;
+          let evidenceValue = evidenceVar ? vars[evidenceVar] : undefined;
           if (evidenceVar && (evidenceValue == null || judgeableText(evidenceValue).trim() === "")) {
-            failGraphNode(node, {
-              code: "NODE_INPUT_MISSING",
-              reason: L(
-                `판정 근거로 선언된 "${evidenceVar}" 값을 앞 단계가 만들어 주지 않았습니다.`,
-                `The value "${evidenceVar}" declared as evidence for the verdict was not produced by an earlier step.`,
-              ),
-              nextAction: L(
-                "근거를 만드는 재조회 단계가 이 검증보다 앞에 있는지 확인하세요.",
-                "Check that a step producing this evidence runs before this verification.",
-              ),
-            });
-            return;
+            // The same rule as the subject above: ask the producer once more, then record the check as not run.
+            if (await askProducerOnce(node, evidenceVar, runSignal)) evidenceValue = vars[evidenceVar];
+            if (evidenceValue == null || judgeableText(evidenceValue).trim() === "") {
+              completeCheckNotRun(node, {
+                code: "EVAL_NOT_RUN_INPUT_MISSING",
+                reason: L(
+                  `검증 "${node.label || node.id}"은(는) 판정 근거로 선언된 "${evidenceVar}" 값을 앞 단계가 만들지 않아 하지 않았습니다. 통과로 보지 않습니다.`,
+                  `Verification "${node.label || node.id}" was not run: the value "${evidenceVar}" declared as evidence was not produced by an earlier step. It is not counted as a pass.`,
+                ),
+              });
+              return;
+            }
           }
           // 사람의 교정 기록 — 판정이 그래프 주인의 기준을 배우는 통로.
           //   (1차 판정과 흔들림 재판정이 같은 교정을 봐야 하므로 시도 블록 밖에서 읽는다.)
@@ -4083,7 +4236,7 @@ export async function runGraph(
           try {
             const { judgeChecklist } = await import("../system-agents/judgment");
             assertFiniteCurrent();
-            list = await withFiniteDispatch(() => withAutomationNodeAccounting({ runId, automationId: automation.id, nodeId: node.id, chatId: chat.id }, () => judgeChecklist({
+            list = await askJudgeAgain(() => withFiniteDispatch(() => withAutomationNodeAccounting({ runId, automationId: automation.id, nodeId: node.id, chatId: chat.id }, () => judgeChecklist({
               kind: `graph-eval-list:${sha256Value({ items: checklist }).slice(0, 24)}`,
               items: checklist,
               subjectText,
@@ -4094,7 +4247,7 @@ export async function runGraph(
                 ? { evidence: judgeableText(evidenceValue) }
                 : {}),
               ...(runSignal ? { signal: runSignal } : {}),
-            })));
+            }))), (answer) => answer.verdict !== null, runSignal, assertFiniteCurrent);
           } catch (error) {
             recordEvalJudgment(node, "checklist");
             assertFiniteCurrent();
@@ -4264,7 +4417,7 @@ export async function runGraph(
         try {
           const { judgeRequired } = await import("../system-agents/judgment");
           assertFiniteCurrent();
-          verdict = await withFiniteDispatch(() => withAutomationNodeAccounting({ runId, automationId: automation.id, nodeId: node.id, chatId: chat.id }, () => judgeRequired<"pass" | "fail">({
+          verdict = await askJudgeAgain(() => withFiniteDispatch(() => withAutomationNodeAccounting({ runId, automationId: automation.id, nodeId: node.id, chatId: chat.id }, () => judgeRequired<"pass" | "fail">({
             kind: `graph-eval:${sha256Value({ criteria: criteria ?? "" }).slice(0, 24)}`,
             question: "Does this result meet the stated criteria?",
             labels: ["pass", "fail"] as const,
@@ -4277,7 +4430,7 @@ export async function runGraph(
             ].join("\n"),
             scanSecrets: true,
             ...(runSignal ? { signal: runSignal } : {}),
-          })));
+          }))), (answer) => answer.verdict !== null, runSignal, assertFiniteCurrent);
         } catch (error) {
           recordEvalJudgment(node, "criteria");
           assertFiniteCurrent();
@@ -4353,16 +4506,13 @@ export async function runGraph(
         return;
       }
       case "transform": {
-        // ★값 가공은 **조용히 아무것도 안 할 수 없다**.
-        //
-        // 예전에는 `applyTransform`이 void였고 호출부가 무조건 done으로 적었다. 그래서
-        // `from`이 비었거나 모르는 mode를 쓰면 노드는 초록불인데 값은 안 생겼고, 다음 단계가
-        // NODE_INPUT_MISSING으로 죽었다. 사람이 보는 화면에서는 **성공한 단계 다음이
-        // 실패**하는 모양이라, 원인을 의심할 곳이 없다.
-        // 이 저장소는 같은 병을 tool 노드와 빈 프롬프트 agent 노드에서 이미 두 번 고쳤다.
+        // ★값 가공은 **조용히 아무것도 안 하지 않는다**: 끝나지 않은 단계(가져올 값이 없음, 모르는 방식)는
+        //   건너뛰거나 값을 그대로 옮기면서 **사유를 기록에 남긴다**(applyTransform의 note).
+        //   예전에는 호출부가 무조건 done으로 적어 기록도 없이 초록불이었고, 그 뒤에는 이 단계를
+        //   실패시켜 저장된 그래프가 매 실행 죽었다. 고치게 하는 자리는 저장 시점이다(graph-supervision.ts).
         beginNode(node);
         const applied = applyTransform(node, vars);
-        if (applied) { failGraphNode(node, applied); return; }
+        if (applied) noteUnfinishedStep(node, applied);
         completeNode(node.id);
         status.set(node.id, "done");
         return;
@@ -4531,7 +4681,11 @@ export async function runGraph(
           }
           return attempt;
         };
-        let run = await withFiniteDispatch(() => dispatchCode(codeText));
+        // A rewrite paid for earlier in this saved graph version is reused with no model call, and the repair is not paid for again.
+        const versionRepair: CodeRepairForVersion = !opts.immutableImplementation && !dryRun
+          ? readCodeRepairForVersion(codeRepairMetaKey(automation.id, graphDigest, node.id)) : { spent: false, code: null };
+        if (versionRepair.spent) codeRepairAttempted.add(node.id);
+        let run = await withFiniteDispatch(() => dispatchCode(versionRepair.code ?? codeText));
         assertFiniteCurrent();
         /*
          * ★빌더가 짠 스크립트는 **한 번도 돌아 본 적이 없다.** 실측 2026-08-20: 새로 만든
@@ -4563,6 +4717,35 @@ export async function runGraph(
             journal("node_intent", node.id, { codeRepair: "rewrote the script after it failed once" });
             run = await withFiniteDispatch(() => dispatchCode(rewritten));
           }
+          if (!dryRun && rewritten && rewritten.trim()) {
+            writeCodeRepairForVersion(automation.id, graphDigest, node.id, { spent: true, code: run.ok && rewritten.trim() !== codeText.trim() ? rewritten : null });
+          }
+        }
+        // A script that ran to the end but left no value for the variable it declares (it forgot to set `result`) is repaired the same
+        // way a failed one is: once, inside this run, never by rerunning a script that could have acted outside. This used to stop the
+        // run (CODE_PRODUCED_NOTHING) and ask the owner to press [Have AI fix it].
+        if (!opts.immutableImplementation && run.ok && str(node.config, "produces") && run.result == null && executionEffect !== "mutation"
+          && !codeDispatchFailed && !codeRepairAttempted.has(node.id)) {
+          codeRepairAttempted.add(node.id);
+          assertFiniteCurrent();
+          const producesName = str(node.config, "produces")!;
+          const rewritten = await withFiniteDispatch(() => rewriteFailedCodeStep({
+            instruction: str(node.config, "note") || node.label || node.id,
+            lang,
+            code: codeText,
+            failure: `The script finished but returned no value for "${producesName}". It must set result to that value as its last step.`,
+            varNames: Object.keys(codeVars),
+            runtimeSelection: runtimeSelectionForNode(node),
+            signal: runSignal,
+          }));
+          if (rewritten && rewritten.trim() && rewritten.trim() !== codeText.trim()) {
+            journal("node_intent", node.id, { codeRepair: "rewrote the script after it returned nothing" });
+            run = await withFiniteDispatch(() => dispatchCode(rewritten));
+          }
+          if (!dryRun && rewritten && rewritten.trim()) {
+            writeCodeRepairForVersion(automation.id, graphDigest, node.id, { spent: true,
+              code: run.ok && run.result != null && rewritten.trim() !== codeText.trim() ? rewritten : null });
+          }
         }
         if (run.stdout?.trim()) journal("node_intent", node.id, { codeLog: run.stdout.slice(0, 500) });
         if (!run.ok) {
@@ -4571,9 +4754,10 @@ export async function runGraph(
             failGraphNode(node, {
               code: "MUTATION_UNVERIFIED",
               reason: codeFailureHeadline(run.reason),
+              // Not a stop: the next run resumes this step, and a repair can be prepared meanwhile.
               nextAction: L(
-                "남긴 결과를 먼저 확인합니다. 수정안은 준비할 수 있지만 이 작업은 자동으로 반복하지 않습니다.",
-                "Check the effects already left behind. A repair can be prepared, but this operation is not automatically repeated.",
+                "이 단계는 다음 실행에서 이어서 진행돼요. 그 사이 수정안을 준비할 수 있어요.",
+                "This step continues on the next run. A repair can be prepared meanwhile.",
               ),
             });
             return;
@@ -4652,7 +4836,7 @@ export async function runGraph(
           //   다음 코드 노드가 vars[x]["sum"]으로 읽는다. applyProduces가 문자열로
           //   덮어써 버리면 계산 결과가 문자열이 돼 조용히 어긋난다(실측).
           //   말 노드는 {{x}} 치환 때 substitute가 객체를 JSON으로 바꿔 준다.
-          if (reducerPolicyOf(node) === "overwrite" && run.result != null) {
+          if (reducerPolicyOf(node) === "overwrite" && run.result != null && !droppedWrites.has(node.id)) {
             vars[codeProduces] = run.result;
           }
         }
@@ -4662,20 +4846,22 @@ export async function runGraph(
       }
       case "tool": {
         // 툴은 러너가 직접 호출하지 않는다 — 인접 agent 런타임 선언(커넥터 C06).
-        // 다만 **조용히 통과시키지 않는다**: 어느 에이전트에도 안 붙었거나 무엇을
-        // 붙일지 안 골랐으면, 사용자는 도구를 붙였다고 믿는데 실제로는 아무 일도
-        // 일어나지 않는다. 그 상태를 사유와 함께 세운다.
+        // 어느 에이전트에도 안 붙었거나 무엇을 붙일지 안 골랐으면 이 단계가 하는 일은 없다.
+        // 실행을 실패시키지 않고 **사유를 기록에 남기며** 지나간다(그 상태를 고치게 하는 자리는
+        // 저장 시점이다 — graph-supervision.ts).
         beginNode(node);
         const catalog = str(node.config, "catalog");
+        // A tool step that names no tool, or that no agent step uses, does nothing: it is skipped with a note.
         if (!catalog) {
-          failGraphNode(node, {
+          noteUnfinishedStep(node, {
             code: "TOOL_NODE_UNCONFIGURED",
             reason: L(
-              `도구 단계 "${node.label || node.id}"에 어떤 도구를 쓸지가 없습니다.`,
-              `Tool step "${node.label || node.id}" has no tool selected.`,
+              `도구 단계 "${node.label || node.id}"에 어떤 도구를 쓸지가 없어 건너뛰었습니다.`,
+              `Tool step "${node.label || node.id}" has no tool selected, so it was skipped.`,
             ),
-            nextAction: L("이 단계에서 쓸 도구를 골라 주세요.", "Choose a tool for this step to use."),
           });
+          completeNode(node.id);
+          status.set(node.id, "done");
           return;
         }
         const attached = (graph.nodes ?? []).some((candidate) =>
@@ -4684,18 +4870,13 @@ export async function runGraph(
             (edge.source === node.id && edge.target === candidate.id)
             || (edge.target === node.id && edge.source === candidate.id)));
         if (!attached) {
-          failGraphNode(node, {
+          noteUnfinishedStep(node, {
             code: "TOOL_NODE_UNATTACHED",
             reason: L(
-              `도구 "${catalog}"가 어느 에이전트 단계에도 이어져 있지 않아 아무 데도 쓰이지 않습니다.`,
-              `The tool "${catalog}" is not connected to any agent step, so it is not used anywhere.`,
-            ),
-            nextAction: L(
-              "이 도구를 쓸 에이전트 단계와 선으로 이어 주세요.",
-              "Connect this tool to the agent step that will use it.",
+              `도구 "${catalog}"가 어느 에이전트 단계에도 이어져 있지 않아 쓰이지 않았습니다.`,
+              `The tool "${catalog}" is not connected to any agent step, so it was not used.`,
             ),
           });
-          return;
         }
         completeNode(node.id);
         status.set(node.id, "done");
@@ -4721,18 +4902,17 @@ export async function runGraph(
         const declaredText = str(node.config, "text") ?? str(node.config, "prompt")
           ?? automation.promptTemplate;
         if (!declaredText) {
+          // An output step with nothing written to send out does nothing: it is skipped with a note.
           beginNode(node);
-          failGraphNode(node, {
+          noteUnfinishedStep(node, {
             code: "OUTPUT_NODE_EMPTY",
             reason: L(
-              `내보낼 것이 적혀 있지 않은 출력 단계입니다 ("${node.label || node.id}").`,
-              `This output step has nothing to send out ("${node.label || node.id}").`,
-            ),
-            nextAction: L(
-              "이 단계에서 무엇을 결과로 남길지 한 줄 적어 주세요.",
-              "Write a line describing what this step should leave as its result.",
+              `내보낼 것이 적혀 있지 않은 출력 단계라 건너뛰었습니다 ("${node.label || node.id}").`,
+              `This output step has nothing to send out, so it was skipped ("${node.label || node.id}").`,
             ),
           });
+          completeNode(node.id);
+          status.set(node.id, "done");
           return;
         }
         // ★"안 적힌 것"은 read가 아니다.
@@ -5568,6 +5748,37 @@ export async function runGraph(
           // 예전엔 `finished without an assistant result` 한 줄이 전부라, 사람은 왜인지도
           // 다음에 무엇을 할지도 알 수 없었다(페르소나가 실제로 여기서 막혔다).
           if (envelope.result.kind === "none") {
+            /*
+             * A model that ended with no result at all is asked once more in the same run (decided, the same rule
+             * as an unknown outside effect): it may have used a tool before it stopped, so the second ask carries the host's one-line
+             * note and the model checks the current state before it acts. One more ask per attempt chain, never after the owner's
+             * Stop, a spent budget or a deadline; the second empty answer ends the step with the typed failure below.
+             */
+            const usedATool = notes.some((note) => note.at === "tool") || (externalToolCallsByNode.get(node.id) ?? 0) > 0;
+            if (["agent", "action"].includes(node.type) && !nativeMcpCall && !noResultAskedNodes.has(node.id)
+              && !runSignal.aborted && !nodeTimedOut && budgetGuard(node) === null) {
+              const noted = usedATool || effect === "mutation";
+              noResultAskedNodes.set(node.id, { noted, prior: uncertainEffectNotes.get(node.id) });
+              if (noted) {
+                uncertainEffectNotes.set(node.id, {
+                  code: "MUTATION_UNVERIFIED",
+                  reason: L("지난 시도가 결과 없이 끝나, 바깥에 무언가를 반영했는지 확인되지 않았어요.", "The previous attempt ended with no result, so it is unconfirmed whether it changed anything outside."),
+                  nextAction: L("먼저 현재 상태를 확인한 뒤 이어서 진행해요.", "Check the current state first, then continue."),
+                });
+                tryRecordRunEvent({ runId, kind: "graph_uncertain_effect_noted", automationId: automation.id, nodeId: node.id,
+                  payload: { nodeIds: [node.id], codes: ["MUTATION_UNVERIFIED"], sameRun: true, noResult: true } });
+              }
+              const endedUnit = commonUnits.get(node.id);
+              if (endedUnit?.state === "started") commonUnits.set(node.id, commonRecovery.fail(endedUnit));
+              checkpoint!.inFlightNodeIds = checkpoint!.inFlightNodeIds.filter((id) => id !== node.id);
+              delete envelopes[node.id];
+              status.set(node.id, "pending");
+              emitNodeState(node.id, "pending");
+              journal("node_retry", node.id, { attempt: (nodeAttempts.get(node.id) ?? 0) + 1, noResult: true });
+              tryRecordRunEvent({ runId, kind: "workflow_node_retry", automationId: automation.id, nodeId: node.id,
+                payload: { attempt: (nodeAttempts.get(node.id) ?? 0) + 1, reason: "NODE_NO_RESULT", noResult: true, ...(usedATool || effect === "mutation" ? { unknownOutcome: true } : {}) } });
+              return;
+            }
             failGraphNode(node, {
               code: "NODE_NO_RESULT",
               reason: envelope.result.reason,
@@ -5612,7 +5823,7 @@ export async function runGraph(
               failGraphNode(node, applied);
               return;
             }
-            if (nativeMcpCall && envelope.result.kind === "json" && reducerPolicyOf(node) === "overwrite") {
+            if (nativeMcpCall && envelope.result.kind === "json" && reducerPolicyOf(node) === "overwrite" && !droppedWrites.has(node.id)) {
               vars[produces] = envelope.result.json;
             }
           }
@@ -5620,6 +5831,12 @@ export async function runGraph(
           status.set(node.id, "done");
           workerFallbackState.delete(node.id);
           quotaRuntimeOverrides.delete(node.id);
+          // The note and the one extra ask belonged to this attempt chain; a later loop turn of the step starts clean.
+          const askedAgain = noResultAskedNodes.get(node.id);
+          if (askedAgain) {
+            noResultAskedNodes.delete(node.id);
+            if (askedAgain.noted) { if (askedAgain.prior) uncertainEffectNotes.set(node.id, askedAgain.prior); else uncertainEffectNotes.delete(node.id); }
+          }
         } catch (nodeErr) {
           if (nodeErr instanceof AutomationWorkspaceError) throw nodeErr;
           const currentCommonUnit = commonUnits.get(node.id);
@@ -5896,7 +6113,36 @@ export async function runGraph(
               payload: { unitId: failedUnit.unitId, attemptId: failedUnit.attemptId, methodStarts: failedUnit.methodStarts,
                 action: verdict.action, reason: verdict.reason, attention: verdict.attention, delivery: "claimed-without-tools" } });
           }
-          if (retryAdmitted && !externalEffectsUncertain && notDispatchedRecoveryAdmitted) {
+          /*
+           * Decision: a step whose outcome is
+           * unknown keeps running, and the owner accepted the risk of a duplicate. This run asks the same step once more, with the
+           * existing uncertain-effect note: the prompt already tells it to check the current state first (latest posts, sent
+           * folder), do nothing twice, and leave the step pending when it cannot confirm. The per-item record (effect_item_check /
+           * effect_item_record) refuses an item this occurrence already published. Only a step a model runs can read that note
+           * (agent and action, not a direct tool call or code). What stays a plain external failure: the owner's stop, a deadline,
+           * and a provider that answered with its own typed refusal (usage limit, rate limit, login, unsupported): those wait for
+           * the provider's cooldown on the next run instead of asking again at once.
+           */
+          const providerAnsweredForItself = markedQuotaFailure
+            || (seenRuntimeFailure?.kind !== undefined
+              && ["quota", "rate_limit", "auth", "refused", "unsupported"].includes(seenRuntimeFailure.kind));
+          const unknownOutcomeRetry = ambiguous && externalEffectsUncertain && !dryRun && !opts.immutableImplementation
+            && ["agent", "action"].includes(node.type) && !nativeMcpCall && !Object.hasOwn(node.config ?? {}, "mcpCall")
+            && !providerAnsweredForItself && !nodeTimedOut && !runSignal.aborted && checkpointPersistenceError === null
+            // The previous worker must have ended: two live workers on one step are not a duplicate post, they are a race.
+            && !(graphWorkerReceipt && graphWorkerReceipt.runtimeQuiesced === false)
+            && !unknownOutcomeRetryNodes.has(node.id) && budgetGuard(node) === null;
+          if (unknownOutcomeRetry) {
+            unknownOutcomeRetryNodes.add(node.id);
+            uncertainEffectNotes.set(node.id, {
+              code: "MUTATION_UNVERIFIED",
+              reason: L("지난 시도가 바깥에 무언가를 반영했는지 확인되지 않았어요.", "It is unconfirmed whether the previous attempt changed anything outside."),
+              nextAction: L("먼저 현재 상태를 확인한 뒤 이어서 진행해요.", "Check the current state first, then continue."),
+            });
+            tryRecordRunEvent({ runId, kind: "graph_uncertain_effect_noted", automationId: automation.id, nodeId: node.id,
+              payload: { nodeIds: [node.id], codes: ["MUTATION_UNVERIFIED"], sameRun: true } });
+          }
+          if ((retryAdmitted && !externalEffectsUncertain && notDispatchedRecoveryAdmitted) || unknownOutcomeRetry) {
             checkpoint!.inFlightNodeIds = checkpoint!.inFlightNodeIds.filter((id) => id !== node.id);
             status.set(node.id, "pending");
             emitNodeState(node.id, "pending");
@@ -5906,7 +6152,7 @@ export async function runGraph(
               kind: "workflow_node_retry",
               automationId: automation.id,
               nodeId: node.id,
-              payload: { attempt: attempts, maxAttempts, reason: rawMessage.slice(0, 240) },
+              payload: { attempt: attempts, maxAttempts, reason: rawMessage.slice(0, 240), ...(unknownOutcomeRetry ? { unknownOutcome: true } : {}) },
             });
             const backoffMs = settlementRetry && settlement.action === "retry" ? settlement.delayMs : retryBackoffMs(attempts);
             await new Promise<void>((resolve) => {
@@ -5943,9 +6189,11 @@ export async function runGraph(
                   `노드 "${node.label || node.id}"이 외부에 무언가를 반영했는지 확인되지 않은 채로 멈췄습니다. 원문: ${rawMessage}`,
                   `Node "${node.label || node.id}" stopped without confirming whether it applied anything externally. Original: ${rawMessage}`,
                 ),
+                // Not a stop-and-ask: the next run resumes this step, and an AI step first checks
+                // whether the last attempt took effect. [Rerun from this node] and [Skip] stay available but are not required.
                 nextAction: L(
-                  "실제로 반영됐는지 확인한 뒤 [이 노드부터 재실행] 또는 [건너뛰기]를 고르세요.",
-                  "Check whether it actually took effect, then choose [Rerun from this node] or [Skip].",
+                  "다른 단계는 계속 진행돼요. 이 단계는 다음 실행에서 이어서 진행되고, AI 단계는 지난 시도가 반영됐는지 먼저 확인해요.",
+                  "Other branches continue. This step continues on the next run; an AI step first checks whether the last attempt took effect.",
                 ),
               }
             : {
@@ -6033,7 +6281,7 @@ export async function runGraph(
           if (produces) {
             const conflict = applyProduces(node, produces, text);
             if (conflict) { failGraphNode(node, conflict); return; }
-            if (reducerPolicyOf(node) === "overwrite") vars[produces] = receipt.result;
+            if (reducerPolicyOf(node) === "overwrite" && !droppedWrites.has(node.id)) vars[produces] = receipt.result;
           }
           completeNode(node.id);
           status.set(node.id, "done");
@@ -6083,17 +6331,17 @@ export async function runGraph(
         }
         const depth = (opts.depth ?? 0) + 1;
         if (depth > MAX_SUBGRAPH_DEPTH) {
-          failGraphNode(node, {
+          // The nesting limit is a resource bound, not a fault of this run: the call is not made, the run goes on with the rest and the
+          // ledger says the call did not run. The save gate refuses a graph whose own calls nest past the limit (graph-supervision.ts).
+          noteUnfinishedStep(node, {
             code: "SUBGRAPH_DEPTH_EXCEEDED",
             reason: L(
-              `자동화가 자동화를 부른 깊이가 ${MAX_SUBGRAPH_DEPTH}단을 넘었습니다.`,
-              `Automations calling automations went ${MAX_SUBGRAPH_DEPTH} levels deep, past the limit.`,
-            ),
-            nextAction: L(
-              "부르는 단계를 줄이거나, 안쪽 자동화를 하나로 합쳐 주세요.",
-              "Reduce the number of calling steps, or merge the inner automations into one.",
+              `"${node.label || node.id}"의 자동화 호출이 ${MAX_SUBGRAPH_DEPTH}단을 넘게 겹쳐 부르지 않았습니다.`,
+              `The call in "${node.label || node.id}" nests more than ${MAX_SUBGRAPH_DEPTH} levels deep, so it was not made.`,
             ),
           });
+          skipNode(node.id);
+          status.set(node.id, "skipped");
           return;
         }
         const { getAutomation: loadAutomation } = require("../store/automations") as typeof import("../store/automations");
@@ -6149,6 +6397,8 @@ export async function runGraph(
             if (!current?.graph || graphExecutionDigest(current, current.graph) !== childBinding.graphDigest) throw new Error("graph_occurrence_custody_changed");
           }, executeChild)
           : await executeChild();
+        // The plain lines of the steps the called graph skipped belong to the run the owner reads: a called graph has no run history of its own.
+        for (const line of innerResult.stepNotes ?? []) if (stepNotes.length < MAX_STEP_NOTE_LINES && !stepNotes.includes(line)) stepNotes.push(line);
         // ★안쪽 사유를 그대로 들고 온다 — 바깥에서 "그냥 실패"로 뭉개면 어디서 왜 죽었는지
         //   사람이 알 수 없다. 안쪽 실행 기록으로 가는 길도 함께 준다.
         if (innerResult.needsInput && innerResult.loginWaitSource) {
@@ -6257,18 +6507,20 @@ export async function runGraph(
         const chosen = pool.slice().sort(
           (a, b) => (innerOrder.get(a.id) ?? 0) - (innerOrder.get(b.id) ?? 0),
         ).pop();
+        // The called automation ran to the end and none of its steps left a value (every step skipped, or only steps with nothing to say).
+        // That is not a failure of this step and not a value either: the call produced nothing, so this step is skipped with a note, the steps
+        // that only depend on it do not run on an empty string, and the rest of the run goes on. Its own model steps were already asked once more
+        // when they ended empty (NODE_NO_RESULT), so asking the whole called graph again would repeat what it did outside.
         if (!chosen) {
-          failGraphNode(node, {
+          noteUnfinishedStep(node, {
             code: "SUBGRAPH_NO_RESULT",
             reason: L(
-              `부른 자동화 "${inner.name}"이(가) 끝까지 돌았지만 가져올 결과를 남기지 않았습니다.`,
-              `The called automation "${inner.name}" ran to completion but left no result to bring back.`,
-            ),
-            nextAction: L(
-              "안쪽 자동화의 마지막 단계에 '무엇을 결과로 남길지'를 정해 주세요.",
-              "Set 'what to leave as the result' on the last step of the inner automation.",
+              `부른 자동화 "${inner.name}"이(가) 끝까지 돌았지만 가져올 결과를 남기지 않아, 이 단계는 결과 없이 넘어갔습니다.`,
+              `The called automation "${inner.name}" ran to completion but left no result to bring back, so this step passed with no result.`,
             ),
           });
+          skipNode(node.id);
+          status.set(node.id, "skipped");
           return;
         }
         const innerText = String((innerResult.outputs ?? {})[chosen.id] ?? "");
@@ -6571,12 +6823,19 @@ export async function runGraph(
     tokensUsed: runTokensUsed,
     ...(budgetUnmeasured ? { budgetUnmeasured: true as const } : {}),
   };
+  const notesField = stepNotes.length ? { stepNotes: [...stepNotes] } : {};
+  // A failed check that a retry cannot change (its output is the one already judged, its rework budget is used, or a judged step may
+  // have acted outside) ends the automatic retries of this occurrence: no deferred retry, no redelivery. The owner's explicit resume
+  // still runs. Only when that check is what failed now: an unrelated failure of the same run keeps its retries.
+  const retryStop = !ok && !needsInput && automaticRetryDiagnostic
+    && EVAL_FAILURE_CODES.has(nodeFailures[automaticRetryDiagnostic.nodeId]?.code ?? "")
+    ? { automaticRetry: { allowed: false as const, ...automaticRetryDiagnostic } } : {};
   const result: RunGraphResult = needsInput
     ? { ok: false, needsInput: true, outputs, vars, error: "browser_login_required", loginWaits,
         loginWaitSource: { automationId: automation.id, runId, occurrenceId: checkpoint!.occurrenceId, graphDigest }, ...failures, ...budget, ...brokerage }
     : ok
-    ? { ok: true, outputs, vars, ...failures, ...simulation, ...budget, ...brokerage }
-    : { ok: false, outputs, vars, error, ...failures, ...simulation, ...budget, ...brokerage };
+    ? { ok: true, outputs, vars, ...failures, ...simulation, ...budget, ...brokerage, ...notesField }
+    : { ok: false, outputs, vars, error, ...failures, ...simulation, ...budget, ...brokerage, ...notesField, ...retryStop };
   if (automaticRetryDiagnostic) tryRecordRunEvent({ runId, automationId: automation.id,
     kind: "workflow_recovery_diagnostic", payload: { disposition: "continue", ...automaticRetryDiagnostic } });
   // A late advisory check must not mutate the result already delivered to the

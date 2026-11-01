@@ -541,6 +541,7 @@ const TEXT = {
       ? "reply to the new mail"
       : "draft a reply to the new mail; save as draft only",
     autoTitle: (subject: string) => `메일: ${subject || "(제목 없음)"}`,
+    gaveUp: { title: "메일에 답장을 만들지 못했어요", body: "받은 메일 1통을 자동으로 처리하지 못했어요. 메일함에서 직접 확인해 주세요." },
   },
   en: {
     one: (from: string, subject: string) => ({ title: `New mail · ${from}`, body: subject || "(no subject)" }),
@@ -551,6 +552,7 @@ const TEXT = {
       ? "reply to the new mail"
       : "draft a reply to the new mail; save as draft only",
     autoTitle: (subject: string) => `Mail: ${subject || "(no subject)"}`,
+    gaveUp: { title: "Couldn't prepare a reply", body: "A received email could not be handled automatically. Open your mailbox to answer it yourself." },
   },
 } as const;
 
@@ -581,6 +583,34 @@ function notifyNewMail(received: Array<{ messageId: string; threadId: string | n
       window.show();
       window.focus();
       window.webContents.send("agentMail:open", { threadId: first.threadId ?? null });
+    });
+    notification.show();
+  } catch {
+    // Notifications are best effort.
+  }
+}
+
+/**
+ * An inbound mail the owner asked to be drafted or answered was given up for good (the mail could not be read, the run could
+ * not start, or it never got to start within the wait limit). The only trace used to be a log line, so the mail sat unanswered
+ * with nothing telling the owner. This says so once, with no mail content (the same notice for a company mailbox), and a click
+ * opens the thread. Best effort, like the new-mail notice; it respects the owner's notification setting.
+ */
+function notifyInboundGaveUp(item: { messageId: string; threadId: string | null }): void {
+  try {
+    const { BrowserWindow, Notification } = require("electron") as typeof import("electron");
+    if (!Notification.isSupported()) return;
+    const { oneDesktopNotificationAllowed } = require("../one/briefing") as typeof import("../one/briefing");
+    if (!oneDesktopNotificationAllowed()) return;
+    const copy = text().gaveUp;
+    const notification = new Notification({ title: copy.title, body: copy.body, silent: true });
+    notification.on("click", () => {
+      const window = BrowserWindow.getAllWindows().find((candidate) => !candidate.isDestroyed());
+      if (!window) return;
+      if (window.isMinimized()) window.restore();
+      window.show();
+      window.focus();
+      window.webContents.send("agentMail:open", { threadId: item.threadId ?? null });
     });
     notification.show();
   } catch {
@@ -686,6 +716,8 @@ function rememberPending(item: { messageId: string; threadId: string | null }, c
     // Gone (deleted) or failing for good: stop trying, and say so once.
     console.warn(`[agent-mail] inbound handling dropped after ${attempts} attempt(s): ${code}`);
     saved.pending = rest;
+    // A mail the owner deleted meanwhile needs no answer; any other reason leaves a mail nobody will answer.
+    if (!/not_found/.test(code)) notifyInboundGaveUp(item);
   } else {
     saved.pending = [...rest, { messageId: item.messageId, threadId: item.threadId, attempts }].slice(-PENDING_KEEP);
   }
@@ -722,18 +754,23 @@ function queueReceivedPending(saved: SyncState, received: Array<{ messageId: str
  * "handled" and wait for a later pass without spending a read retry. Bounded by the same 2 h the owner's send queue
  * uses; past it the mail is recorded as handled with the refusal code as the reason.
  */
-function requeueRefusedInbound(item: { messageId: string; threadId: string | null }, code: string | undefined, since: string | undefined): void {
+function requeueRefusedInbound(item: { messageId: string; threadId: string | null }, code: string | undefined, since: string | undefined,
+  /** A refusal that is not on the "not ready yet" list (refusals().startRefusedBeforeDispatchWaits): the tries already spent on this mail;
+   * each wait spends one more of UNDISPATCHED_START_MAX_ATTEMPTS. (markHandled has already taken the mail out of `pending`, so the caller reads it before.) */
+  triesSpent?: number): void {
   const saved = loadState();
   saved.handled = saved.handled.filter((entry) => entry.messageId !== item.messageId);
   const now = Date.now();
   const waitedMs = since ? now - Date.parse(since) : 0;
+  const attempts = triesSpent === undefined ? 0 : triesSpent + 1;
   const rest = (saved.pending ?? []).filter((entry) => entry.messageId !== item.messageId);
-  if (waitedMs > refusals().TRANSIENT_SEND_DEADLINE_MS) {
+  if (waitedMs > refusals().TRANSIENT_SEND_DEADLINE_MS || (triesSpent !== undefined && attempts > refusals().UNDISPATCHED_START_MAX_ATTEMPTS)) {
     console.warn(`[agent-mail] inbound run never started within the wait limit: ${code ?? "unknown"}`);
+    notifyInboundGaveUp(item);
     saved.pending = rest;
     saved.handled = [...saved.handled, { messageId: item.messageId, at: new Date(now).toISOString(), chatId: null, reason: code ?? "start_refused" }].slice(-HANDLED_KEEP);
   } else {
-    saved.pending = [...rest, { messageId: item.messageId, threadId: item.threadId, attempts: 0, since: since ?? new Date(now).toISOString() }].slice(-PENDING_KEEP);
+    saved.pending = [...rest, { messageId: item.messageId, threadId: item.threadId, attempts, since: since ?? new Date(now).toISOString() }].slice(-PENDING_KEEP);
   }
   // Memory is already right; a write that fails here is repeated by the next pass's save.
   try { saveState(); } catch (error) { console.warn("[agent-mail] pending state not saved yet:", error instanceof Error ? error.message : error); }
@@ -782,7 +819,8 @@ async function handleScopedInbound(received: Array<{ messageId: string; threadId
     }
     // The mail stays pending until it ends up handled (markHandled moves it in one write) or needs no run at all.
     // Where it began waiting for a run to be admitted (see requeueRefusedInbound):
-    const waitingSince = saved.pending?.find((entry) => entry.messageId === item.messageId)?.since;
+    const waitingEntry = saved.pending?.find((entry) => entry.messageId === item.messageId);
+    const waitingSince = waitingEntry?.since;
     const mode = effectiveInboundMode(modeForSender(mailbox, message.message.from), agentMailLastKnownEntitlement()?.mailbox.send);
     if (mode === "notify") { forgetPending(item.messageId); continue; }
     const skip = inboundSkipReason(message.message, own);
@@ -808,7 +846,16 @@ async function handleScopedInbound(received: Array<{ messageId: string; threadId
       markHandled(item.messageId, chatId);
     } catch (error) {
       console.warn("[agent-mail] inbound run not started:", error instanceof Error ? error.message : error);
-      if (scopeStillSelected(scope) && refusals().isTransientSendRefusal(error)) requeueRefusedInbound(item, refusals().sendRefusalCode(error), waitingSince);
+      if (scopeStillSelected(scope)) {
+        if (refusals().isTransientSendRefusal(error)) requeueRefusedInbound(item, refusals().sendRefusalCode(error), waitingSince);
+        // The start was refused before anything was dispatched for the app's own state (the composer's rule for every other surface):
+        // the mail waits for a later pass, bounded, instead of being given up as a mail nobody will answer.
+        else if (refusals().startRefusedBeforeDispatchWaits(error)) requeueRefusedInbound(item, refusals().sendRefusalCode(error), waitingSince, waitingEntry?.attempts ?? 0);
+        // The company-work port was gone before the run was handed to it (nothing started): the same "not ready yet" as above.
+        else if (error instanceof Error && error.message === "organization_mail_work_binding_required") requeueRefusedInbound(item, error.message, waitingSince);
+        // Anything else leaves a mail that was recorded as handled and will never be answered.
+        else notifyInboundGaveUp({ messageId: item.messageId, threadId });
+      }
     }
   }
 }

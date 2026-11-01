@@ -9,13 +9,15 @@
  *  - "나누기"          → goal-shaping.ts ensureGoalShapeBeforeTurn({ ownerRequested }) (the planner, no tools).
  *
  * Pause is explicit (owner 2026-09-28 "명시적 멈춤이 멈춤"): a branch is paused only by pause_node here, and a paused
- * branch is skipped by selectActiveTactics. The last dispatchable branch is never paused or removed here — the whole
- * goal has its own pause.
+ * branch is skipped by selectActiveTactics. The last open branch may be paused or removed here like any other (round 3,
+ *refusing the owner's own edit was a dead end); the turn context then tells the Goal that every remaining item is
+ * owner-paused, or that every tactic is done or retired, and the Goal's own loop (stall window, verification) takes it from there.
  */
 import { getDb } from "../store/db";
 import { appendChatMessage, getChat } from "../store/chats";
 import { emitDesktopStoreChange } from "../store/change-bus";
 import { getChatGoalRevision } from "../store/chat-goals";
+import { adoptExplicitGoalGrant } from "./explicit-goal-authority";
 import { getLongRunByGoalId } from "../store/long-runs";
 import {
   goalPlanTacticPayload,
@@ -139,6 +141,8 @@ export function readGoalPanel(chatId: string, nowMs = Date.now()): GoalPanelView
     suggestions: (() => { try { return agiSuggestions(goalId); } catch { return []; } })(),
     shaping: shape?.running === true,
     shapeFailed: shape?.failed === true && shape.running === false,
+    // "Divide" is offered only where this app's goal loop runs the Goal (Science and another room's Goal answer goal_panel_shape_unavailable).
+    hostRunsGoal: !run || (run.rootChatId === chatId && ownsHostGoalLoop(run.surface)),
   });
 }
 
@@ -150,20 +154,44 @@ function notify(chatId: string, runId: string | null): void {
   emitDesktopStoreChange({ entity: "chat", id: chatId });
 }
 
-/** Open tactics the next turn may be given (not paused, parent strategy live and not paused). */
-function dispatchable(plan: LiveGoalPlan, overrides: { pausedTactics?: Set<string>; pausedStrategies?: Set<string>; removed?: Set<string> } = {}): LiveTactic[] {
-  const pausedS = new Set([...plan.strategies.filter((s) => s.ownerPaused).map((s) => s.id), ...(overrides.pausedStrategies ?? [])]);
-  const liveS = new Set(plan.strategies.filter((s) => s.status !== "retired" && !(overrides.removed?.has(s.id))).map((s) => s.id));
-  return plan.tactics.filter((t) => (t.status === "active" || t.status === "proposed") && !t.ownerPaused
-    && !overrides.pausedTactics?.has(t.id) && !overrides.removed?.has(t.id)
-    && (t.strategy_id === null || (liveS.has(t.strategy_id) && !pausedS.has(t.strategy_id))));
-}
-
 function nextNodeId(plan: LiveGoalPlan, prefix: "t" | "s"): string {
   const taken = new Set([...plan.tactics.map((t) => t.id), ...plan.strategies.map((s) => s.id)]);
   let n = (prefix === "t" ? plan.tactics.length : plan.strategies.length) + 1;
   while (taken.has(`${prefix}${n}`)) n += 1;
   return `${prefix}${n}`;
+}
+
+/** The items a plan edit names (its node, and the strategy a new sub-goal goes under). */
+function editedItemIds(edit: GoalPanelEdit): string[] {
+  const ids: string[] = [];
+  if ("nodeId" in edit && typeof edit.nodeId === "string") ids.push(edit.nodeId);
+  if (edit.op === "add_tactic" && edit.strategyId) ids.push(edit.strategyId);
+  return ids;
+}
+
+/**
+ * Whether every item the edit names is, in `now`, the same item it was in `seen`: same kind, same place, same words. Null when it is;
+ * otherwise the refusal. A strategy edit that acts on the strategy's CHILDREN (remove_node retires them, mark_done marks them done as
+ * "Marked done by the owner") also requires those children to be the ones the owner saw: after a re-division the same strategy words
+ * can head tactics the owner never looked at, and completing them would record work as done that nobody judged (regression review C5,
+ *). That case is the old plan_changed refusal; the view returned with it shows the current plan.
+ */
+function planEditMismatch(seen: LiveGoalPlan, now: LiveGoalPlan, edit: GoalPanelEdit): "goal_panel_node_not_found" | "goal_panel_plan_changed" | null {
+  let childrenChanged = false;
+  const sameItems = editedItemIds(edit).every((id) => {
+    const a = seen.tactics.find((t) => t.id === id), b = now.tactics.find((t) => t.id === id);
+    if (a || b) return Boolean(a && b && a.strategy_id === b.strategy_id && a.description === b.description && a.done_when === b.done_when);
+    const x = seen.strategies.find((s) => s.id === id), y = now.strategies.find((s) => s.id === id);
+    if (!(x && y && x.hypothesis === y.hypothesis && JSON.stringify(x.kpi ?? null) === JSON.stringify(y.kpi ?? null))) return false;
+    if ((edit.op === "remove_node" || edit.op === "mark_done") && "nodeId" in edit && edit.nodeId === id) {
+      const children = (plan: LiveGoalPlan): string => JSON.stringify(plan.tactics.filter((t) => t.strategy_id === id && t.status !== "retired")
+        .map((t) => [t.id, t.description, t.done_when]).sort());
+      if (children(seen) !== children(now)) childrenChanged = true;
+    }
+    return true;
+  });
+  if (!sameItems) return "goal_panel_node_not_found";
+  return childrenChanged ? "goal_panel_plan_changed" : null;
 }
 
 function applyPlanEdit(plan: LiveGoalPlan, edit: Exclude<GoalPanelEdit, { op: "amend_objective" | "accept_suggestion" | "dismiss_suggestion" }>, at: string): Record<string, unknown> {
@@ -218,7 +246,9 @@ function applyPlanEdit(plan: LiveGoalPlan, edit: Exclude<GoalPanelEdit, { op: "a
     case "remove_node": {
       const target = node();
       const removed = new Set([target.id, ...(strategy ? plan.tactics.filter((t) => t.strategy_id === strategy.id).map((t) => t.id) : [])]);
-      if (dispatchable(plan, { removed }).length === 0 && dispatchable(plan).length > 0) refuse("goal_panel_last_open_node");
+      // Removing the last open item is the owner's decision and is applied: the Goal then reads "every tactic done or retired: verify
+      // the acceptance criteria; add a tactic if work remains" (goal-shaping.ts turn context) and re-plans or finishes through its own
+      // loop. It used to be refused ("cannot be paused or removed here") although nothing in the loop needs an open item.
       if (strategy) {
         for (const t of plan.tactics.filter((t) => t.strategy_id === strategy.id && open(t))) updateGoalPlanNode(key, t.id, { status: "retired", payload: { retiredBy: "owner" } });
       }
@@ -247,8 +277,8 @@ function applyPlanEdit(plan: LiveGoalPlan, edit: Exclude<GoalPanelEdit, { op: "a
     case "pause_node": {
       const target = node();
       if (target.status === "done") refuse("goal_panel_node_done");
-      const overrides = tactic ? { pausedTactics: new Set([target.id]) } : { pausedStrategies: new Set([target.id]) };
-      if (dispatchable(plan, overrides).length === 0) refuse("goal_panel_last_open_node");
+      // Pausing the last open item is applied as well: the turn context then says every remaining item is owner-paused (skip them, do
+      // not claim completion, report briefly) and the loop's stall window ends repeated idle turns; the owner lifts it with resume.
       updateGoalPlanNode(key, target.id, { payload: { ownerPaused: true, ownerPausedAt: at } });
       return { nodeId: target.id };
     }
@@ -273,7 +303,15 @@ function applyPlanEdit(plan: LiveGoalPlan, edit: Exclude<GoalPanelEdit, { op: "a
 
 /** Owner intent edit of the final goal: an owner message + the owner-amendment path → a goal revision. */
 function amendObjective(chatId: string, goalId: string, text: string, liveTurn: boolean, suggestionId?: string): "revised" | "amendment_pending" {
-  const revision = getChatGoalRevision(goalId);
+  let revision = getChatGoalRevision(goalId);
+  if (!revision) {
+    // A Goal defined before it had a contract (chats:defineGoal during an ordinary turn) has a ledger row and no revision. The owner
+    // editing it here is the owner's own act, the same as pressing Resume: the permission the owner's newest turn in this room recorded
+    // is its grant (goal-owner-resume.ts does exactly this). Only a room where the owner never had a turn has no permission on record, and
+    // then the edit is refused with the sentence that tells the owner to say it in the conversation (an owner message there is the grant).
+    try { adoptExplicitGoalGrant(goalId, undefined, { ownerResume: true }); } catch { /* the Goal is kept as it is */ }
+    revision = getChatGoalRevision(goalId);
+  }
   if (!revision) refuse("goal_panel_no_revision");
   const run = getLongRunByGoalId(goalId);
   if (!run || run.rootChatId !== chatId) refuse("goal_control_binding_changed");
@@ -347,7 +385,18 @@ export function editGoalPanel(rawRequest: unknown, deps: { activeChatIds: () => 
     // A caller that names no plan (an agent calling the panel without a view) edits the latest plan by node id; a caller that
     // names one (the panel, the phone) is held to it, because node ids of an older plan can mean other nodes in a newer one.
     const expected = request.expectedPlan && typeof request.expectedPlan === "object" ? request.expectedPlan as Record<string, unknown> : null;
-    if (expected && (expected.revision !== plan!.revision || expected.planSeq !== plan!.planSeq)) refuse("goal_panel_plan_changed");
+    if (expected && expected.revision !== plan!.revision) refuse("goal_panel_plan_changed");
+    // A new shape of the SAME goal revision replaced the plan the owner was looking at (the planner upgrading a fallback plan, a
+    // re-division the owner asked for). The edit is no longer refused for that alone: it goes through when every item it names is
+    // still that same item in the current plan. Node ids are minted per shape, so an id alone can mean another item now; an item
+    // that is gone, or became another one, is "not found" (the view returned with the refusal already shows the current plan).
+    if (expected && expected.planSeq !== plan!.planSeq) {
+      const seen = typeof expected.planSeq === "number" && Number.isSafeInteger(expected.planSeq)
+        ? (() => { try { return readGoalPlan(goalId, plan!.revision, getDb(), expected.planSeq as number); } catch { return null; } })() : null;
+      if (!seen) refuse("goal_panel_plan_changed");
+      const mismatch = planEditMismatch(seen!, plan!, edit as GoalPanelEdit);
+      if (mismatch) refuse(mismatch);
+    }
     getDb().transaction(() => {
       const detail = applyPlanEdit(plan!, edit as Parameters<typeof applyPlanEdit>[1], at);
       recordGoalPlanDecision({ goalId, revision: plan!.revision, planSeq: plan!.planSeq, kind: "owner_edit", createdAt: at,

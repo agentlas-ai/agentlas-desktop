@@ -262,8 +262,8 @@ const KNOWN_FAILURES: readonly KnownFailure[] = [
       en: "An earlier message in this chat was still starting.",
     },
     action: {
-      ko: "앞 메시지가 시작된 뒤 다시 시도해 주세요.",
-      en: "Try again once the earlier message has started.",
+      ko: "앞 메시지가 시작되면 이 메시지가 저절로 이어서 보내져요.",
+      en: "This message goes by itself once the earlier one has started.",
     },
   },
   {
@@ -332,6 +332,26 @@ export function ownerFailureReasonOrNull(raw: string | null | undefined, locale:
   const body = text.replace(/^[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)+\s*:\s*/, "");
   if (body && isOwnerSentence(body, locale)) return tidySentence(body) || null;
   return null;
+}
+
+const FAILURE_RUN_GENERIC_REASON: FailureSentence = {
+  ko: "이 실행이 끝까지 진행되지 못했어요.",
+  en: "This run could not finish.",
+};
+/** A reason that is only a machine token (`automation_goal_execution_review_required`, `code:detail`), with no sentence around it. */
+const BARE_MACHINE_REASON_RE = /^\[?(?:[a-z][a-z0-9]*(?:_[a-z0-9]+)+|[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+)\]?(?::\S*)?$/;
+
+/**
+ * The reason line stored on a run result. A sentence passes through untouched (whatever its language: the judge wrote it for the
+ * owner). A reason that is nothing but a machine token never reaches the owner: it becomes the plain sentence of a known code, or a
+ * generic one (the code stays in the run's own reasonCode column and in the raw record). observed in use: two runs showed
+ * `automation_goal_execution_review_required` as their reason.
+ */
+export function plainRunReason(raw: string | null | undefined, locale: OwnerActivityLocale): string | null {
+  if (raw == null) return null;
+  const text = String(raw).trim();
+  if (!BARE_MACHINE_REASON_RE.test(text)) return raw;
+  return ownerFailureReasonOrNull(text, locale, text.replace(/^\[|\]$/g, "").split(":")[0]) ?? localized(FAILURE_RUN_GENERIC_REASON, locale);
 }
 
 /** 실패 사유 한 줄을 오너 언어의 평문으로. 기계 코드·다른 언어 문장은 새지 않는다. */

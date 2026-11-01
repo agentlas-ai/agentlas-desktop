@@ -24,6 +24,7 @@ import { resolveAutomationToolMode } from "../../shared/automation-tool-policy";
 import { MAX_AUTOMATION_ACTIVE_TOOL_STALL_MS } from "../automation-watchdog";
 import { evaluateCondition } from "../triggers/condition";
 import { currentUiLocale } from "../ui-locale";
+import { plainRunReason } from "../../shared/owner-visible-activity-text";
 import { GOAL_CONTINUATION_RETIRED_CODE, goalContinuationRowSql, isGoalContinuationAutomation } from "./goal-continuation-rows";
 
 const L = (ko: string, en: string): string => (currentUiLocale() === "ko" ? ko : en);
@@ -1702,6 +1703,59 @@ export function reconcileDurableChainDeliveries(limit = 200): { receipts: number
   return { receipts, inserted };
 }
 
+/** The same digest a terminal receipt carries (`outputDigest`): sha256 of the full, untruncated final output. */
+export function automationOutputDigest(output: string | null | undefined): string {
+  return sha256Text(output ?? "");
+}
+
+export interface PreviousAutomationRunOutput {
+  runId: string;
+  /** The sealed final output (bounded to the receipt budget; `outputTruncated` says when it was cut). */
+  output: string;
+  /** Digest of the original output, equal to `automationOutputDigest` of what the run produced. */
+  outputDigest: string;
+  outputTruncated: boolean;
+  /** What run history says the judge concluded for that run, or null while it has no verdict. */
+  outcome: string | null;
+}
+
+/**
+ * The final output of this automation's last run that finished `ok`, read from its scheduler terminal receipt.
+ * A change watch needs it: "did the measurement change" cannot be answered from this run's output alone.
+ * Looks at the six most recent runs through the (automation_id, started_at) index and each run's own receipt by run id,
+ * so it costs a handful of indexed reads however large the event table is. Null when none of them has one.
+ */
+export function previousSuccessfulRunOutput(automationId: string, beforeRunId: string): PreviousAutomationRunOutput | null {
+  const db = getDb();
+  const runs = db.prepare(
+    `SELECT id FROM automation_runs
+     WHERE automation_id = ? AND id != ? AND dry_run = 0
+     ORDER BY started_at DESC LIMIT 6`,
+  ).all(automationId, beforeRunId) as Array<{ id: string }>;
+  for (const run of runs) {
+    const row = db.prepare(
+      `SELECT payload_json FROM run_events
+       WHERE run_id = ? AND automation_id = ? AND kind = ?
+       ORDER BY seq ASC LIMIT 1`,
+    ).get(run.id, automationId, AUTOMATION_TERMINAL_RECEIPT_KIND) as { payload_json: string } | undefined;
+    if (!row) continue;
+    let raw: unknown;
+    try { raw = JSON.parse(row.payload_json); } catch { raw = null; }
+    const receipt = parseAutomationTerminalReceipt(raw);
+    if (!receipt || receipt.sourceAutomationId !== automationId || receipt.sourceRunId !== run.id || receipt.status !== "ok") continue;
+    const history = db.prepare("SELECT outcome FROM run_history WHERE id = ? AND automation_id = ?")
+      .get(run.id, automationId) as { outcome: string | null } | undefined;
+    return {
+      runId: run.id,
+      output: receipt.output,
+      outputDigest: receipt.outputDigest,
+      outputTruncated: receipt.outputTruncated,
+      outcome: history?.outcome ?? null,
+    };
+  }
+  return null;
+}
+
 /** run_history 행 1개 기록. 놓친 실행/스킵/에러를 가시화(설계 §2.7). */
 export function recordRun(input: {
   automationId: string;
@@ -1728,7 +1782,7 @@ export function recordRun(input: {
       input.skippedCount ?? 0,
       input.error ?? null,
       input.outcome ?? null,
-      input.outcomeReason ?? null,
+      plainRunReason(input.outcomeReason, currentUiLocale() === "ko" ? "ko" : "en"),
     );
 }
 
@@ -2057,7 +2111,7 @@ export function markAutomationRun(
     ).run(
       sourceRunId ?? randomUUID(), id, row.next_run_at, atIso, terminalStatus,
       skipped > 0 ? skipped : 0, opts?.error == null ? null : redactOperationalSecrets(opts.error),
-      opts?.outcome ?? null, opts?.outcomeReason == null ? null : redactOperationalSecrets(opts.outcomeReason),
+      opts?.outcome ?? null, opts?.outcomeReason == null ? null : redactOperationalSecrets(plainRunReason(opts.outcomeReason, currentUiLocale() === "ko" ? "ko" : "en") ?? opts.outcomeReason),
     );
     if (sourceRunId) {
       recordAutomationTerminalReceipt(id, sourceRunId, terminalStatus, opts?.output, atIso);

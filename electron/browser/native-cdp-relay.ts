@@ -23,6 +23,7 @@ interface RelaySocketServer {
 const { WebSocketServer } = require("ws") as { WebSocketServer: new (options: { noServer: true; maxPayload: number }) => RelaySocketServer };
 import type { WebContents } from "electron";
 import { onHostShutdown } from "../host-lifecycle";
+import type { NativeBrowserTaskLease } from "../work-live-view";
 import { createWorkBrowserTab, listWorkBrowserTabs, nativeBrowserGuest, acquireNativeBrowserTask, focusNativeBrowserTask,
   closeWorkLiveView, sanitizeWorkLiveUrl, captureNativeBrowserGuest, nativeBrowserGuestViewport, presentNativeBrowserGuest,
   openAgentBrowserHold, claimNativeBrowserGuest, settleAgentBrowserHold, onAgentBrowserPopup, nativeBrowserGuestLayoutAge, agentBrowserTabsOfHold, reclaimOrphanAgentBrowserTabs } from "../work-live-view";
@@ -189,6 +190,12 @@ export interface NativeBrowserRelayHealth {
   revived: number;
   /** Connections are being served by the dedicated Agentlas Chrome (switch-surface rung). */
   failedOver: boolean;
+  /**
+   * The grant is not current only because the task's hidden execution window was destroyed under a run that is still alive: reestablish gives
+   * the same run, chat and permission a fresh lease and a replacement tab on the site it was on. False for a run that ended, a chat that was
+   * deleted and a grant that was released. Optional; older readers treat an absent value as false.
+   */
+  revivable?: boolean;
 }
 
 export interface NativeBrowserRelayFailover {
@@ -290,7 +297,7 @@ export function reloadNativeBrowserPage(wc: WebContents, signal: AbortSignal, ti
 }
 
 export async function createNativeBrowserRelayGrant(input: CanonicalNativeBrowserGrantInput): Promise<NativeBrowserRelayGrant> {
-  const taskLease = acquireNativeBrowserTask({ taskScopeId: input.chatId, runId: input.runId,
+  let taskLease = acquireNativeBrowserTask({ taskScopeId: input.chatId, runId: input.runId,
     permission: input.permission, signal: input.signal });
   const owner = { ownerId: taskLease.ownerId };
   const ownerScopeId = randomUUID();
@@ -298,6 +305,7 @@ export async function createNativeBrowserRelayGrant(input: CanonicalNativeBrowse
   const leases = new Map<string, Lease>();
   const nativeInputGuests = new Map<string, WebContents>();
   let releaseNativeInput: (() => void) | null = null;
+  let rebindNativeInput: ((ownerId: number) => void) | null = null;
   const pdfStreams = new Map<string, { data: Buffer; offset: number }>();
   let closed = false;
   // Assigned below; addGuest's owner-input listener needs it before the helpers.
@@ -321,6 +329,13 @@ export async function createNativeBrowserRelayGrant(input: CanonicalNativeBrowse
   let revived = 0;
   let lastRefusal: NativeBrowserRelayHealth["lastRefusal"] = null;
   let failoverTarget: NativeBrowserRelayFailover | null = null;
+  // The task's hidden execution window was destroyed while this run is alive (task-lease reason "anchor-closed"). The grant, its token and its
+  // session URLs stay; reestablish gives the same chat, run and permission a fresh lease (rebindTask). The page the agent acted on last is
+  // remembered so the replacement tab opens on that site, once.
+  let anchorLost = false;
+  let lastActedUrl: string | null = null;
+  let resumeUrl: string | null = null;
+  let rebound = 0;
   const holdId = openAgentBrowserHold({ runId: input.runId, isLive: () => !closed && !input.signal.aborted
     && (Boolean(releaseNativeInput) || [...leases.values()].some((lease) => lease.socket?.readyState === 1 || lease.connecting) || Date.now() - lastActivity < HOLD_IDLE_MS) });
   const server = http.createServer();
@@ -591,10 +606,15 @@ export async function createNativeBrowserRelayGrant(input: CanonicalNativeBrowse
     const own = available ? undefined : agentBrowserTabsOfHold(owner.ownerId, input.chatId, holdId).find((viewId) => !reservedGuests.has(`${owner.ownerId}:${viewId}`));
     if (available) await addGuest(lease, available.viewId);
     else if (own) await addGuest(lease, own);
-    else await createGuest(lease);
+    else {
+      // After a rebind the replacement tab opens on the site the run was on (once); an ordinary reconnect opens a blank tab as before.
+      const site = resumeUrl; resumeUrl = null;
+      await createGuest(lease, site ?? "about:blank");
+    }
   };
   const presentAction = (guest: Pick<Guest, "wc" | "viewId" | "lastPresentationAt">) => {
     lastActedViewId = guest.viewId;
+    try { const url = guest.wc.isDestroyed() ? "" : guest.wc.getURL(); if (url && url !== "about:blank" && sanitizeWorkLiveUrl(url)) lastActedUrl = url; } catch { /* the site is a convenience */ }
     if (!current() || input.presentation === "background") return;
     const now = Date.now(), previous = guest.lastPresentationAt;
     guest.lastPresentationAt = now;
@@ -1062,7 +1082,17 @@ export async function createNativeBrowserRelayGrant(input: CanonicalNativeBrowse
   };
   unregisterShutdown = onHostShutdown(release);
   input.signal.addEventListener("abort", release, { once: true });
-  offTaskRevoke = taskLease.onRevoke(release);
+  // A lease revoked because its hidden execution window was destroyed, while the run lives, does not end the grant: the sessions are dropped
+  // (their tabs went with the window) and reestablish rebinds. Every other reason (the run's abort, a deleted chat) ends it, as it always did.
+  const watchTaskLease = (lease: NativeBrowserTaskLease): (() => void) => lease.onRevoke((reason) => {
+    if (reason === "anchor-closed" && !closed && !input.signal.aborted && lease === taskLease) {
+      anchorLost = true;
+      for (const open of [...leases.values()]) { const socket = open.socket; resetLease(open); try { socket?.close(); } catch { /* already closed */ } }
+      return;
+    }
+    release();
+  });
+  offTaskRevoke = watchTaskLease(taskLease);
   try {
     await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", () => resolve()); });
   } catch { release(); throw new Error("native-browser-relay-unavailable"); }
@@ -1166,8 +1196,33 @@ export async function createNativeBrowserRelayGrant(input: CanonicalNativeBrowse
     liveSockets: [...leases.values()].filter((lease) => lease.socket?.readyState === 1).length,
     revived,
     failedOver: failoverTarget !== null,
+    ...(anchorLost && !closed && !input.signal.aborted ? { revivable: true } : {}),
   });
+  /**
+   * The task's execution window is gone and the run is not: take the same authority again, no more. The lease is requested with exactly what
+   * this grant was created with (chat, run, permission, the run's own abort signal), so it can only be the run's own, for the run's own chat;
+   * it fails once the run was aborted. The old tabs went with the window; the sessions this grant issued stay and reconnect to a replacement
+   * tab on the site the run was on.
+   */
+  const rebindTask = (): boolean => {
+    if (!anchorLost || closed || input.signal.aborted) return false;
+    let fresh: NativeBrowserTaskLease;
+    try { fresh = acquireNativeBrowserTask({ taskScopeId: input.chatId, runId: input.runId, permission: input.permission, signal: input.signal }); }
+    catch { return false; }
+    offTaskRevoke();
+    taskLease = fresh;
+    owner.ownerId = fresh.ownerId;
+    // Computer use on this grant reads the same owner: without this it kept the destroyed window's id and failed closed on the replacement tab.
+    rebindNativeInput?.(fresh.ownerId);
+    anchorLost = false;
+    offTaskRevoke = watchTaskLease(fresh);
+    resumeUrl = lastActedUrl;
+    rebound += 1;
+    lastRefusal = null;
+    return true;
+  };
   const reestablish = (): NativeBrowserRelayHealth => {
+    if (anchorLost) rebindTask();
     if (current()) {
       for (const lease of leases.values()) {
         if (lease.socket && lease.socket.readyState !== 1) resetLease(lease);
@@ -1204,6 +1259,7 @@ export async function createNativeBrowserRelayGrant(input: CanonicalNativeBrowse
       pages: () => [...nativeInputGuests].filter(([id, wc]) => !wc.isDestroyed()
         && nativeInputOwners.get(wc) === ownerScopeId && nativeBrowserGuest(owner.ownerId, input.chatId, id) === wc).map(([id, wc]) => ({ id, wc })) });
     releaseNativeInput = native.release;
+    rebindNativeInput = native.rebind;
     grant.nativeComputerUse = { endpoint: `http://127.0.0.1:${controlPort}`, token: native.token, scopeId: native.scopeId };
   } catch { /* Browser tools remain available; this optional recovery path fails closed. */ }
   if (!current()) { release(); throw new Error("native-browser-grant-revoked"); }

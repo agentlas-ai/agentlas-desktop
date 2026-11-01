@@ -29,6 +29,23 @@ function codeOf(error: unknown): string {
   return /agi\.[a-z0-9.-]+/.exec(text)?.[0] ?? text.slice(0, 160);
 }
 
+/** One plain sentence per report error; the machine code stays on the line's hover title (support reads it there), never in the text. */
+const REPORT_ERROR: Record<string, [string, string]> = {
+  "agi.bug-report.defect-unknown": ["그 결함 기록을 찾지 못했어요. 창을 닫았다가 다시 열어 주세요.", "That defect record was not found. Close this window and open it again."],
+  "agi.bug-report.title-required": ["제목을 적어 주세요.", "Write a title."],
+  "agi.bug-report.summary-required": ["내용을 적어 주세요.", "Write what went wrong."],
+  "agi.bug-report.unknown": ["그 보고를 찾지 못했어요. 창을 닫았다가 다시 열어 주세요.", "That report was not found. Close this window and open it again."],
+  "agi.bug-report.send-timeout": ["보냈는지 확인하는 데 시간이 걸렸어요. 보낸 보고 목록을 보고, 없을 때만 다시 보내 주세요.", "Confirming the send took too long. Check the sent list and send again only if it is not there."],
+  "agi.bug-report.acknowledgement-missing": ["받았다는 확인이 아직 없어요. 보낸 보고 목록을 보고, 없을 때만 다시 보내 주세요.", "There is no receipt yet. Check the sent list and send again only if it is not there."],
+  "agi.bug-report.duplicate-of": ["같은 내용의 보고가 이미 있어요.", "A report with the same content already exists."],
+};
+function plainReportError(error: unknown, ko: boolean): { text: string; code: string } {
+  const code = codeOf(error);
+  const known = REPORT_ERROR[code];
+  return { code, text: known ? known[ko ? 0 : 1]
+    : (ko ? "보고를 처리하지 못했어요. 잠시 뒤에 다시 시도해 주세요." : "The report could not be processed. Try again in a moment.") };
+}
+
 export function acknowledgedBugReport(row: AgiBugReportRow): boolean {
   return row.status === "sent" && Boolean(row.serverId?.trim());
 }
@@ -56,6 +73,8 @@ export function AgiBugReportDialog({ open, onClose, draft, locale, onReportUpdat
   const [preview, setPreview] = useState<AgiBugReportPreview | null>(null);
   const [result, setResult] = useState<AgiBugReportRow | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [errorCode, setErrorCode] = useState("");
+  const failWith = useCallback((e: unknown) => { const plain = plainReportError(e, ko); setError(plain.text); setErrorCode(plain.code); }, [ko]);
   const [busy, setBusy] = useState(false);
   const [sending, setSending] = useState(false);
   const [sent, setSent] = useState<AgiBugReportRow[] | null>(null);
@@ -89,9 +108,9 @@ export function AgiBugReportDialog({ open, onClose, draft, locale, onReportUpdat
       setPreview(next);
       setResult(next.report && next.report.status !== "draft" ? next.report : null);
       if (next.report) reportedCallback.current?.(next.report);
-    } catch (e) { if (epoch === generation.current) setError(codeOf(e)); }
+    } catch (e) { if (epoch === generation.current) failWith(e); }
     finally { if (operation.current === ticket) { operation.current = null; setBusy(false); } }
-  }, [ko]);
+  }, [ko, failWith]);
 
   useEffect(() => {
     if (!open) return;
@@ -109,7 +128,7 @@ export function AgiBugReportDialog({ open, onClose, draft, locale, onReportUpdat
 
   useEffect(() => {
     if (!open || tab !== "sent") return;
-    void ipc()?.agi?.bugReportList().then(setSent).catch((e) => setError(codeOf(e)));
+    void ipc()?.agi?.bugReportList().then(setSent).catch((e) => failWith(e));
   }, [open, tab]);
 
   if (!open) return null;
@@ -127,7 +146,7 @@ export function AgiBugReportDialog({ open, onClose, draft, locale, onReportUpdat
         setResult(next);
         reportedCallback.current?.(next);
       }
-    } catch (e) { if (epoch === generation.current) setError(codeOf(e)); }
+    } catch (e) { if (epoch === generation.current) failWith(e); }
     finally { if (operation.current === ticket) { operation.current = null; setBusy(false); setSending(false); } }
   };
 
@@ -170,7 +189,7 @@ export function AgiBugReportDialog({ open, onClose, draft, locale, onReportUpdat
         {!sending && result && <p className={styles.result} role="status" data-agi-bug-report-result={result.status}>{acknowledgedBugReport(result)
           ? (ko ? `보냈어요 · 번호 ${result.serverId ?? "-"}` : `Sent · id ${result.serverId ?? "-"}`)
           : statusLabel(result, ko)}</p>}
-        {error && <p className={styles.error} role="alert">{error}</p>}
+        {error && <p className={styles.error} role="alert" title={errorCode || undefined}>{error}</p>}
         <footer className={styles.foot}>
           {!sending && result?.status !== "sent" && result?.status !== "queued" && <button type="button" onClick={onClose}>
             {result ? (ko ? "닫기" : "Close") : (ko ? "보내지 않기" : "Don't send")}</button>}

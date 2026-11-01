@@ -1243,9 +1243,36 @@ export function createAutomationStrategyProposalForRun(
 const STALE_DEFINITION_REVIEW_REASONS = new Set([
   "proposal_review_boundary_changed",
   "proposal_review_source_definition_unavailable",
+  // The Goal this draft was made under has ended or been revised: the draft belongs to a Goal state that no longer exists.
+  "proposal_review_goal_unavailable",
   "proposal_origin_adoption_stale",
   "proposal_apply_stale",
 ]);
+
+/**
+ * A draft whose review boundary is gone is closed as stale at the owner's click as well, not only by the backlog sweep: the click
+ * can never apply it, so leaving the card on the review sheet is a dead end. Nothing about the graph, schedule, Goal or authority
+ * changes; the receipt is retired and the next run under the current definition drafts a fresh one.
+ */
+function retireStaleProposal(current: AutomationStrategyProposalReceipt, code: string): void {
+  const now = new Date().toISOString();
+  try {
+    saveReceipt({
+      ...current,
+      status: "rejected",
+      reviewStatus: "rejected",
+      adjudication: {
+        status: "judged",
+        decision: "uncertain",
+        reason: `proposal_stale_definition: ${code}`,
+        reviewedAt: now,
+        authorization: null,
+        runtimeReceipt: current.adjudication.runtimeReceipt,
+      },
+      updatedAt: now,
+    }, current.status);
+  } catch { /* another writer settled it first: nothing is left to retire */ }
+}
 
 export interface AutomationStrategyProposalBacklogResult {
   liveProposalId: string | null;
@@ -1333,7 +1360,8 @@ export function listAutomationStrategyProposals(
     `SELECT receipt_json FROM automation_strategy_proposals
       WHERE automation_id = ? ORDER BY created_at DESC, rowid DESC`,
   ).all(id) as Array<{ receipt_json: string }>;
-  const receipts = rows.map((row) => parseReceipt(row.receipt_json));
+  // One receipt that cannot be read is left out of the list (its row stays where it is); it must not take the whole review sheet down.
+  const receipts = rows.flatMap((row) => { try { return [parseReceipt(row.receipt_json)]; } catch { return []; } });
   let currentGraphDigest: string | null = null;
   let currentDefinitionDigest: string | null = null;
   try {
@@ -2040,9 +2068,29 @@ export async function adjudicateAutomationStrategyProposal(
   }
 }
 
+/** Failures of the amendment transaction that come from the app's own state and leave nothing behind (it rolled back whole). */
+const AMENDMENT_RETRYABLE: ReadonlySet<string> = new Set([
+  "proposal_goal_amendment_failed", "proposal_goal_amendment_run_binding_failed", "proposal_goal_amendment_run_unavailable",
+]);
+
 /** Main review surface. Apply is permitted only after an independent judged
  * conflict, or an explicit user decision on a judged approval-required row. */
 export async function reviewAutomationStrategyProposal(input: {
+  automationId: string;
+  proposalId: string;
+  decision: "apply" | "reject";
+  goalAmendment?: AutomationStrategyGoalAmendmentInput;
+}): Promise<AutomationStrategyProposalReceipt> {
+  // The owner's click lost a race: another writer (a second click, the daemon) moved the row between this read and this write. The row is
+  // read again and the click is asked once more, up to 3 times; a row that is already applied or rejected answers with that receipt.
+  for (let attempt = 1; ; attempt += 1) {
+    try { return await reviewAutomationStrategyProposalOnce(input); }
+    catch (error) {
+      if (!(error instanceof AutomationStrategyProposalError) || error.code !== "proposal_transition_conflict" || attempt >= 3) throw error;
+    }
+  }
+}
+async function reviewAutomationStrategyProposalOnce(input: {
   automationId: string;
   proposalId: string;
   decision: "apply" | "reject";
@@ -2080,6 +2128,7 @@ export async function reviewAutomationStrategyProposal(input: {
     boundary = readStrategyReviewBoundary(current);
   } catch (error) {
     if (error instanceof AutomationStrategyProposalError) {
+      if (STALE_DEFINITION_REVIEW_REASONS.has(error.code)) retireStaleProposal(current, error.code);
       throw new AutomationStrategyProposalError("proposal_review_stale", error.message);
     }
     throw error;
@@ -2104,11 +2153,19 @@ export async function reviewAutomationStrategyProposal(input: {
       });
     }
     if (!input.goalAmendment) throw new AutomationStrategyProposalError("proposal_goal_amendment_required");
-    try {
-      return applyProposalWithGoalAmendment(current, input.goalAmendment);
-    } catch (error) {
-      if (error instanceof AutomationStrategyProposalError) throw error;
-      throw new AutomationStrategyProposalError("proposal_goal_amendment_failed", error instanceof Error ? error.message : undefined);
+    // The amendment is one atomic transaction the owner has already approved: when it fails for the app's own state (a store that was
+    // busy, a Goal run that was not readable yet, a run binding that did not advance) it rolled back whole, so it is applied again,
+    // up to 3 times, before the owner hears anything. A typed refusal about the owner's own input or about a moved Goal revision
+    // (stale, invalid, already applied) is not retried.
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        return applyProposalWithGoalAmendment(current, input.goalAmendment);
+      } catch (error) {
+        const code = error instanceof AutomationStrategyProposalError ? error.code : "proposal_goal_amendment_failed";
+        if (attempt < 3 && AMENDMENT_RETRYABLE.has(code)) continue;
+        if (error instanceof AutomationStrategyProposalError) throw error;
+        throw new AutomationStrategyProposalError("proposal_goal_amendment_failed", error instanceof Error ? error.message : undefined);
+      }
     }
   }
   if (input.goalAmendment !== undefined) {

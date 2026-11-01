@@ -31,6 +31,18 @@ export function goalResumeRecoveryBlockerCode(_reason: string | null | undefined
   return null;
 }
 
+/**
+ * A paused Goal the HOST stopped (the app closed, a crash, the runtime was unavailable, the Goal's own agent paused it): it comes back by
+ * itself (startup checkpoints and the blocked-goal sweep resume it), so a request that is not the owner's own message does not have to wait for
+ * the owner's "resume". The owner's pause (`user`, an unreleased owner hold), the cost cap (`budget`) and an approval wait (`approval_required`)
+ * are not the host's to lift: a host request into those Goals is still refused (goal_explicit_resume_required).
+ */
+export const HOST_STOP_GOAL_PAUSES: ReadonlySet<string> = new Set(["app_closed", "crash_recovery", "runtime_unavailable", "agent_paused"]);
+
+export function goalStoppedByHost(run: { status: string; pauseReason?: string | null }, ownerHold: boolean): boolean {
+  return run.status === "paused" && !ownerHold && HOST_STOP_GOAL_PAUSES.has(run.pauseReason ?? "");
+}
+
 /** Internal failures and checks are advisory to the host-owned Goal lifecycle. */
 export function resolveNonBlockingGoalStatus(from: LongRunStatus, requested: LongRunStatus,
   reason?: string | null, actorKind: string = "host"): LongRunStatus {

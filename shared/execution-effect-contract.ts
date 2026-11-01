@@ -60,8 +60,22 @@ export interface ExecutionFailureCause {
   requiredPermission?: "read" | "write" | "full";
   actualPermission?: "read" | "write" | "full";
   blockedBy?: readonly string[];
+  /** The failure kind the provider-facing runner typed for this step (RunnerFailure.kind), when the cause carried one. Read by the team
+   * turn's cause class (mcp/task-force-settlement.ts taskForceCauseClass); optional, older readers ignore it. */
+  providerKind?: ExecutionProviderKind;
+  /** How the runner decided `providerKind`: a marker or the exit status are evidence, a heuristic is a guess from prose. */
+  providerSource?: "marker" | "exit" | "heuristic";
+  /**
+   * The step threw the app's own exception (a TypeError, a SQLite driver error, a syscall error: host-internal-failure.ts) after
+   * which it had not acted outward, and carries no provider evidence. Set by the team engine only (borrowed-task-force.ts
+   * taskForceErrorReport). It is the app's to heal, so a team turn that ends with it settles as work left, not a failed run
+   * (task-force-settlement.ts). Optional; older readers ignore it.
+   */
+  internal?: true;
   recovery: ExecutionRecoveryAction;
 }
+export type ExecutionProviderKind = "quota" | "rate_limit" | "auth" | "refused" | "empty" | "exit" | "timeout" | "unavailable" | "unsupported";
+const EXECUTION_PROVIDER_KINDS: ReadonlySet<string> = new Set(["quota", "rate_limit", "auth", "refused", "empty", "exit", "timeout", "unavailable", "unsupported"]);
 /** Read machine fields only, including wrappers' original causes. Never infer
  * an HTTP status, authority, or delivery state from an error's prose. */
 export function readExecutionFailureCause(error: unknown, input: {
@@ -71,6 +85,7 @@ export function readExecutionFailureCause(error: unknown, input: {
   const seen = new Set<object>(), queue: unknown[] = [error], codes: string[] = [];
   let providerCode: string | undefined, httpStatus: number | undefined, retryAfterMs: number | undefined;
   let retryAfterHint: string | undefined, delivery = input.delivery, throttled = false;
+  let providerKind: ExecutionProviderKind | undefined, providerSource: ExecutionFailureCause["providerSource"];
   let requiredPermission: ExecutionFailureCause["requiredPermission"], actualPermission: ExecutionFailureCause["actualPermission"];
   const code = (value: unknown): string | undefined => typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(value) ? value : undefined;
   const permission = (value: unknown) => value === "read" || value === "write" || value === "full" ? value : undefined;
@@ -87,6 +102,10 @@ export function readExecutionFailureCause(error: unknown, input: {
     if (retryAfterMs === undefined && typeof row.retryAfterMs === "number" && Number.isFinite(row.retryAfterMs) && row.retryAfterMs >= 0) retryAfterMs = row.retryAfterMs;
     // A runtime failure (InvocationRuntimeFailure) types throttling as kind "rate_limit" and carries its wait as `retryAfterAt`.
     if (row.kind === "rate_limit") throttled = true;
+    if (providerKind === undefined && typeof row.kind === "string" && EXECUTION_PROVIDER_KINDS.has(row.kind)) {
+      providerKind = row.kind as ExecutionProviderKind;
+      if (row.source === "marker" || row.source === "exit" || row.source === "heuristic") providerSource = row.source;
+    }
     if (retryAfterHint === undefined && typeof row.retryAfterHint === "string") retryAfterHint = row.retryAfterHint.slice(0, 256);
     if (retryAfterHint === undefined && typeof row.retryAfterAt === "string") retryAfterHint = row.retryAfterAt.slice(0, 256);
     if (!delivery && (row.turnDelivery === "not-dispatched" || row.delivery === "not-dispatched")) delivery = "not-dispatched";
@@ -104,7 +123,8 @@ export function readExecutionFailureCause(error: unknown, input: {
     ...(providerCode ? { providerCode } : {}), ...(httpStatus !== undefined ? { httpStatus } : {}),
     ...(retryAfterMs !== undefined ? { retryAfterMs } : {}), ...(retryAfterHint ? { retryAfterHint } : {}),
     ...(codes.length > 1 ? { causeCodes: codes.slice(1) } : {}), delivery: delivery ?? "unknown",
-    ...(requiredPermission ? { requiredPermission } : {}), ...(actualPermission ? { actualPermission } : {}), recovery };
+    ...(requiredPermission ? { requiredPermission } : {}), ...(actualPermission ? { actualPermission } : {}),
+    ...(providerKind ? { providerKind } : {}), ...(providerKind && providerSource ? { providerSource } : {}), recovery };
 }
 export interface ExecutionFailureReport {
   schemaVersion: "agentlas.execution-failure.v1";

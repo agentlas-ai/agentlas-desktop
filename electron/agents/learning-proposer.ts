@@ -74,7 +74,7 @@ export async function proposeLearningsForAgent(agentId: string, now = new Date()
     }
     try { writeAgentWorkspaceRecord(stateFile(agentId), { day, attempts: attempts + 1, lastCode: code, ...(movedOn ? { movedOn } : {}) } satisfies ProposerState); } catch { /* The attempt was already counted. */ }
     // "No change" and "needs more evidence" are normal answers, not failures worth reporting.
-    return { outcome: ["semantic_review_deferred", "learning_not_recurring"].includes(code) ? "skipped" : "failed", code };
+    return { outcome: ["semantic_review_deferred", "learning_not_recurring", "learning_stays_memory"].includes(code) ? "skipped" : "failed", code };
   }
 }
 

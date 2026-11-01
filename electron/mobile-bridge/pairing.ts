@@ -894,7 +894,11 @@ export class MobileBridgePairingManager {
     }
     if (this.desktopSessionActive && !this.desktopSessionActive()) {
       this.lastAuthenticationRefusal = "desktop_signed_out";
-      console.warn("[mobile-bridge] refusing device: this Desktop is signed out (credentials kept)");
+      // The bridge answers this 503, so every open phone retries it with backoff: one line a minute is enough.
+      if (Date.now() - this.signedOutLoggedAt >= 60_000) {
+        this.signedOutLoggedAt = Date.now();
+        console.warn("[mobile-bridge] refusing device: this Desktop is signed out (credentials kept)");
+      }
       return null;
     }
     // A credential minted before account binding shipped cannot be validated,
@@ -985,6 +989,7 @@ export class MobileBridgePairingManager {
    * from "cloud is down" from "your account was closed".
    */
   lastAuthenticationRefusal: MobileBridgeAuthenticationRefusal | null = null;
+  private signedOutLoggedAt = 0;
 
   /**
    * The workspace a live (unrevoked) device credential was issued under, or

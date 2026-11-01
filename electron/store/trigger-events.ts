@@ -10,6 +10,9 @@ import { getDb } from "./db";
 import { emitDesktopStoreChange } from "./change-bus";
 
 export const TRIGGER_EVENT_MAX_ATTEMPTS = 48;
+// Deliveries of one occurrence whose outside effect stayed unknown: one number for the outbox and the boot recovery (store/unconfirmed-occurrence.ts).
+export { UNCONFIRMED_OCCURRENCE_MAX_DELIVERIES } from "./unconfirmed-occurrence";
+import { UNCONFIRMED_OCCURRENCE_MAX_DELIVERIES } from "./unconfirmed-occurrence";
 export const TRIGGER_EVENT_LEASE_MS = 2 * 60 * 1000;
 export const TRIGGER_EVENT_MAX_PAYLOAD_BYTES = 256 * 1024;
 const TRIGGER_EVENT_RETRY_BASE_MS = 5_000;
@@ -38,6 +41,9 @@ export interface TriggerEventRecord {
   runStatus: string | null;
   runOutcome: AutomationRunRecord["status"] | null;
   lastError: string | null;
+  /** Deliveries that ended with an unknown outside effect (see UNCONFIRMED_OCCURRENCE_MAX_DELIVERIES). */
+  unknownOutcomeCount: number;
+  unknownOutcomeSignature: string | null;
   createdAt: string;
   updatedAt: string;
   deliveredAt: string | null;
@@ -58,6 +64,8 @@ interface TriggerEventRow {
   run_status: string | null;
   run_outcome: AutomationRunRecord["status"] | null;
   last_error: string | null;
+  unknown_outcome_count?: number | null;
+  unknown_outcome_signature?: string | null;
   created_at: string;
   updated_at: string;
   delivered_at: string | null;
@@ -84,9 +92,20 @@ export interface TriggerDispatchResult {
   output?: string;
   /** The run's failure is typed as one a resume cannot change; the event is not redelivered automatically. */
   automaticRetry?: false;
+  /**
+   * The failure is a check that stopped (the kernel's typed retry stop: its output was already judged, its rework budget is used, or a judged
+   * step may have acted outside), not the owner's Stop. The outbox closes the occurrence itself instead of parking it for the owner.
+   */
+  checkStopped?: { reasonCode: string };
   /** The run holds a step whose outside effect is unconfirmed (MUTATION_UNVERIFIED). Only the owner's node
    *  reconciliation releases it, so the event is parked for that choice instead of being redelivered. */
   effectsUnconfirmed?: true;
+  /**
+   * Host-measured facts about the unconfirmed step(s), from the run's own node failures (never from prose): `signature` names the
+   * held nodes and their codes; `askableAgain` is true when one of them is a step a model runs (agent/action), the only kind that
+   * reads the uncertain-effect note on a redelivery. Absent facts count as askable, so only the delivery cap applies.
+   */
+  unconfirmed?: { signature: string; askableAgain: boolean };
 }
 
 function parsePayload(raw: string): { payload: TriggerEventPayload; valid: boolean } {
@@ -119,6 +138,8 @@ function toRecord(row: TriggerEventRow): TriggerEventRecord {
     runStatus: row.run_status,
     runOutcome: row.run_outcome,
     lastError: row.last_error,
+    unknownOutcomeCount: row.unknown_outcome_count ?? 0,
+    unknownOutcomeSignature: row.unknown_outcome_signature ?? null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     deliveredAt: row.delivered_at,
@@ -416,6 +437,25 @@ export function acknowledgeTriggerEvent(id: string, owner: string, now: Date = n
   return result.changes === 1;
 }
 
+/**
+ * A waiting occurrence of an automation the owner switched off is never claimed (claimNextTriggerEvent joins `enabled = 1`), so it used to sit in
+ * the queue for ever, and switching the automation on again days later would deliver an occurrence that old. After this long it is closed by the
+ * app: `delivered` with a typed reason, the same way an occurrence the app gave up on is closed. Within the window a switched-off automation
+ * that is switched on again still gets its waiting occurrence. Occurrences that need the owner's repair (`parked`) are not touched.
+ */
+export const DISABLED_AUTOMATION_EVENT_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+export function expireStaleEventsOfDisabledAutomations(now: Date = new Date(), ttlMs: number = DISABLED_AUTOMATION_EVENT_TTL_MS): number {
+  const nowIso = finiteIso(now);
+  const cutoff = finiteIso(new Date(now.getTime() - Math.max(60_000, ttlMs)));
+  return getDb().prepare(
+    `UPDATE automation_trigger_events
+     SET status = 'delivered', claim_owner = NULL, claimed_until = NULL, delivered_at = ?, updated_at = ?,
+         last_error = 'trigger_event_expired_automation_disabled'
+     WHERE status = 'pending' AND updated_at <= ?
+       AND automation_id IN (SELECT id FROM automations WHERE enabled = 0)`,
+  ).run(nowIso, nowIso, cutoff).changes;
+}
+
 /** Lease contention is not an execution attempt and must never consume retry budget. */
 export function deferTriggerEventClaim(
   id: string,
@@ -433,6 +473,11 @@ export function deferTriggerEventClaim(
   return result.changes === 1;
 }
 
+function triggerEventRetryDelayMs(attemptCount: number): number {
+  const exponent = Math.max(0, Math.min(attemptCount - 1, 16));
+  return Math.min(TRIGGER_EVENT_RETRY_BASE_MS * 2 ** exponent, TRIGGER_EVENT_RETRY_MAX_MS);
+}
+
 export function failTriggerEventAttempt(
   id: string,
   owner: string,
@@ -445,9 +490,7 @@ export function failTriggerEventAttempt(
   ).get(id, owner) as { attempt_count: number } | undefined;
   if (!row) throw new Error("trigger_event_claim_lost_after_execution");
   const parked = row.attempt_count >= TRIGGER_EVENT_MAX_ATTEMPTS;
-  const exponent = Math.max(0, Math.min(row.attempt_count - 1, 16));
-  const delay = Math.min(TRIGGER_EVENT_RETRY_BASE_MS * 2 ** exponent, TRIGGER_EVENT_RETRY_MAX_MS);
-  const nextAttemptAt = parked ? null : new Date(now.getTime() + delay).toISOString();
+  const nextAttemptAt = parked ? null : new Date(now.getTime() + triggerEventRetryDelayMs(row.attempt_count)).toISOString();
   const updated = db.prepare(
     `UPDATE automation_trigger_events
      SET status = ?, claim_owner = NULL, claimed_until = NULL,
@@ -463,6 +506,144 @@ export function failTriggerEventAttempt(
   );
   if (updated.changes !== 1) throw new Error("trigger_event_claim_lost_after_execution");
   return { parked, nextAttemptAt };
+}
+
+export type UnconfirmedSettlement =
+  | { closed: false; parked: boolean; nextAttemptAt: string | null; deliveries: number }
+  | { closed: true; reason: "cap" | "repeat"; deliveries: number; runId: string | null };
+
+/**
+ * A delivery ended with an unknown outside effect. The occurrence keeps running (Decision: no stop-and-ask, a
+ * duplicate is accepted), but only within bounds, decided here in one commit:
+ *  - cap: the 3rd delivery that ends unconfirmed closes it (the scheduled-occurrence cap, UNCONFIRMED_OCCURRENCE_MAX_DELIVERIES);
+ *  - repeat: a redelivery that ends with the same held steps as the one before closes it at once when no model step is among them
+ * (a direct tool call or a code step reads no note, so asking again can only fail the same way: observed in use, three
+ *    command graphs redelivered 17-20 times each).
+ * "Closes" means status delivered with the typed reason kept in last_error: the owner is asked nothing, and the next occurrence of
+ * the automation is a different event that runs normally. Otherwise the event goes back to pending on the usual backoff.
+ */
+export function settleUnconfirmedTriggerEventAttempt(
+  id: string,
+  owner: string,
+  error: string,
+  facts: { signature: string | null; askableAgain: boolean },
+  now: Date = new Date(),
+): UnconfirmedSettlement {
+  const db = getDb();
+  const nowIso = finiteIso(now);
+  const settle = db.transaction((): UnconfirmedSettlement => {
+    const row = db.prepare(
+      `SELECT attempt_count, unknown_outcome_count, unknown_outcome_signature, run_id
+       FROM automation_trigger_events WHERE id = ? AND status = 'claimed' AND claim_owner = ?`,
+    ).get(id, owner) as {
+      attempt_count: number; unknown_outcome_count: number | null; unknown_outcome_signature: string | null; run_id: string | null;
+    } | undefined;
+    if (!row) throw new Error("trigger_event_claim_lost_after_execution");
+    const deliveries = (row.unknown_outcome_count ?? 0) + 1;
+    const repeated = !facts.askableAgain && facts.signature !== null && row.unknown_outcome_signature === facts.signature;
+    if (deliveries >= UNCONFIRMED_OCCURRENCE_MAX_DELIVERIES || repeated) {
+      const reason = repeated ? "repeat" : "cap";
+      const closed = db.prepare(
+        `UPDATE automation_trigger_events
+         SET status = 'delivered', claim_owner = NULL, claimed_until = NULL, delivered_at = ?,
+             last_error = ?, unknown_outcome_count = ?, unknown_outcome_signature = ?, updated_at = ?
+         WHERE id = ? AND status = 'claimed' AND claim_owner = ?`,
+      ).run(nowIso, `trigger_event_unconfirmed_closed:${reason}: ${error}`.slice(0, 4_000), deliveries, facts.signature, nowIso, id, owner);
+      if (closed.changes !== 1) throw new Error("trigger_event_claim_lost_after_execution");
+      return { closed: true, reason, deliveries, runId: row.run_id };
+    }
+    const parked = row.attempt_count >= TRIGGER_EVENT_MAX_ATTEMPTS;
+    const nextAttemptAt = parked ? null : new Date(now.getTime() + triggerEventRetryDelayMs(row.attempt_count)).toISOString();
+    const updated = db.prepare(
+      `UPDATE automation_trigger_events
+       SET status = ?, claim_owner = NULL, claimed_until = NULL, next_attempt_at = COALESCE(?, next_attempt_at),
+           last_error = ?, unknown_outcome_count = ?, unknown_outcome_signature = ?, updated_at = ?
+       WHERE id = ? AND status = 'claimed' AND claim_owner = ?`,
+    ).run(parked ? "parked" : "pending", nextAttemptAt, error.slice(0, 4_000), deliveries, facts.signature, nowIso, id, owner);
+    if (updated.changes !== 1) throw new Error("trigger_event_claim_lost_after_execution");
+    return { closed: false, parked, nextAttemptAt, deliveries };
+  });
+  return settle.immediate();
+}
+
+/**
+ * The automation's own timeline is its run history. When the app closes an occurrence by itself, the runs of that occurrence need
+ * no answer from the owner (their rows are acknowledged) and the last of them gets one plain line saying so. Rows stay in the list.
+ */
+export function noteClosedOccurrenceInTimeline(automationId: string, eventId: string, runId: string | null, line: string, now: Date = new Date()): void {
+  const db = getDb();
+  const nowIso = finiteIso(now);
+  db.transaction(() => {
+    db.prepare(
+      `UPDATE run_history SET acknowledged_at = ?
+       WHERE automation_id = ? AND acknowledged_at IS NULL
+         AND id IN (SELECT id FROM automation_runs WHERE automation_id = ? AND occurrence_id = ?)`,
+    ).run(nowIso, automationId, automationId, `trigger-event:${eventId}`);
+    if (runId) {
+      db.prepare(
+        `UPDATE run_history SET error = CASE WHEN error IS NULL OR error = '' THEN ? ELSE error || char(10) || ? END
+         WHERE id = ? AND automation_id = ?`,
+      ).run(line, line, runId, automationId);
+    }
+  }).immediate();
+  emitDesktopStoreChange({ entity: "automation", id: automationId });
+}
+
+export type StoppedCheckClosure = { id: string; automationId: string; runId: string | null };
+
+/**
+ * A check that failed and cannot change by running the occurrence again (the kernel's typed retry stop: the output it judged is the one it
+ * would judge again, its rework budget is used, or a judged step may already have acted outside) ends the occurrence. decision
+ *the app closes it by itself, like an occurrence whose step stayed unconfirmed at its cap: status delivered with the typed
+ * reason kept in last_error, the owner is asked nothing, and the next occurrence of the automation is another event that runs normally.
+ * Parked, it showed the owner a Retry that could only judge the same result again and park it again.
+ */
+export function closeTriggerEventAfterStoppedCheck(
+  id: string,
+  owner: string,
+  reasonCode: string,
+  error: string,
+  now: Date = new Date(),
+): StoppedCheckClosure | null {
+  const db = getDb();
+  const nowIso = finiteIso(now);
+  const row = db.prepare(
+    "SELECT automation_id, run_id FROM automation_trigger_events WHERE id = ? AND status = 'claimed' AND claim_owner = ?",
+  ).get(id, owner) as { automation_id: string; run_id: string | null } | undefined;
+  if (!row) return null;
+  const closed = db.prepare(
+    `UPDATE automation_trigger_events
+     SET status = 'delivered', claim_owner = NULL, claimed_until = NULL, delivered_at = ?,
+         last_error = ?, updated_at = ?
+     WHERE id = ? AND status = 'claimed' AND claim_owner = ?`,
+  ).run(nowIso, `trigger_event_check_stopped_closed:${reasonCode}: ${error}`.slice(0, 4_000), nowIso, id, owner);
+  return closed.changes === 1 ? { id, automationId: row.automation_id, runId: row.run_id } : null;
+}
+
+/**
+ * Occurrences the app parked for a failed check before it closed them itself (the owner's database holds two of and 10-21).
+ * They are closed the same way the next time the outbox drains, through the app's own path and never by hand: only a parked row whose
+ * stored failure is the check's (EVAL_FAILED / EVAL_STUCK) and that did not exhaust the ordinary retry budget. Each closure is compare-and-set
+ * on the row it read, so an owner's reconcile in between wins.
+ */
+export function closeParkedStoppedCheckEvents(now: Date = new Date(), limit = 20): StoppedCheckClosure[] {
+  const db = getDb();
+  const nowIso = finiteIso(now);
+  const rows = db.prepare(
+    `SELECT id, automation_id, run_id, last_error, updated_at FROM automation_trigger_events
+     WHERE status = 'parked' AND attempt_count < ? AND (last_error LIKE 'EVAL_FAILED:%' OR last_error LIKE 'EVAL_STUCK:%')
+     ORDER BY created_at ASC, id ASC LIMIT ?`,
+  ).all(TRIGGER_EVENT_MAX_ATTEMPTS, Math.max(1, Math.floor(limit))) as Array<{ id: string; automation_id: string; run_id: string | null; last_error: string; updated_at: string }>;
+  const closed: StoppedCheckClosure[] = [];
+  for (const row of rows) {
+    const changed = db.prepare(
+      `UPDATE automation_trigger_events
+       SET status = 'delivered', claim_owner = NULL, claimed_until = NULL, delivered_at = ?, last_error = ?, updated_at = ?
+       WHERE id = ? AND status = 'parked' AND updated_at = ?`,
+    ).run(nowIso, `trigger_event_check_stopped_closed:parked_earlier: ${row.last_error}`.slice(0, 4_000), nowIso, row.id, row.updated_at);
+    if (changed.changes === 1) closed.push({ id: row.id, automationId: row.automation_id, runId: row.run_id });
+  }
+  return closed;
 }
 
 /** Preserve an occurrence whose external completion is ambiguous; never replay it automatically. */
@@ -526,7 +707,8 @@ export function reconcileParkedTriggerEvent(input: AutomationTriggerEventReconci
       : db.prepare(
           `UPDATE automation_trigger_events
            SET status = 'pending', claim_owner = NULL, claimed_until = NULL,
-               attempt_count = 0, next_attempt_at = ?, delivered_at = NULL,
+               attempt_count = 0, unknown_outcome_count = 0, unknown_outcome_signature = NULL,
+               next_attempt_at = ?, delivered_at = NULL,
                run_id = NULL, run_outcome = NULL, last_error = NULL, updated_at = ?
            WHERE id = ? AND automation_id = ? AND updated_at = ?`,
         ).run(nowIso, nowIso, input.eventId, input.automationId, input.expectedUpdatedAt);

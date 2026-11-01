@@ -235,6 +235,27 @@ export function weakenedAgainstLastAttempt(
   return null;
 }
 
+/**
+ * A refused interview turn the model can correct on its own, with the line it is told next. The person gave their answers and did nothing wrong:
+ * an unreadable output and a question list made only of questions they already answered are the model's to redo within the same correction
+ * budget (MAX_SELF_CORRECTIONS), not a dead end handed to the person.
+ */
+export function interviewSelfCorrectionProblem(code: string, state: Pick<InterviewState, "asked">): string | null {
+  if (code === "INTERVIEW_OUTPUT_UNREADABLE") {
+    return L(
+      "지난 답이 JSON 하나로 읽히지 않았습니다. 설명 없이 JSON 객체 하나만 내보내세요.",
+      "The previous answer did not parse as a single JSON object. Output only one JSON object, with no explanation.",
+    );
+  }
+  if (code === "INTERVIEW_REPEATED_QUESTIONS") {
+    return L(
+      `지난 답은 이미 답을 받은 질문만 다시 물었습니다(${state.asked.join(", ") || "-"}). 위 답변을 그대로 쓰고, 정말 빠진 것만 묻거나 청사진을 내세요.`,
+      `Your last answer only asked questions the person had already answered (${state.asked.join(", ") || "-"}). Use the answers above; ask only what is truly missing, or return the blueprint.`,
+    );
+  }
+  return null;
+}
+
 export function parseInterviewTurn(text: string | null | undefined, state: InterviewState): InterviewParse {
   const raw = firstJsonObject(String(text ?? ""));
   if (!raw) return unreadable(text);

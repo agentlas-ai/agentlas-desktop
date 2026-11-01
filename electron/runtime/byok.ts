@@ -39,6 +39,7 @@ import {
   createToolLoopUsage,
   noModelSelectedResult,
   refusedBeforeDispatch,
+  TOOLS_DONE_ANSWER_NUDGE,
   type ChatMessage,
   type LocalChatContent,
   type MainToolDispatchResult,
@@ -582,6 +583,8 @@ async function runAnthropicMessagesInner(
   // ★도구 왕복. 모델이 tool_use 로 멈추면 실행하고 tool_result 로 답한 뒤 다시 부른다.
   // 상한을 두는 이유는 로컬/저가 모델이 같은 도구를 무한 반복하는 실측 때문이다.
   let toolTurnsTaken = 0;
+  /** The last permitted turn asks for the answer with tool use switched off (the run kept calling tools for the whole bound). */
+  let answerOnlyPass = false;
   /** Tool calls the host ran in this turn: settleNormalEnd evidence (R-065). */
   let toolCallsRun = 0;
   /** G24: resends spent on an overloaded endpoint before anything streamed or ran in this invocation (provider-overload.ts). */
@@ -590,6 +593,12 @@ async function runAnthropicMessagesInner(
   try {
   for (let turn = 0; turn < MAX_BYOK_TOOL_TURNS; turn += 1) {
     if (req.signal?.aborted) throw abortReasonError(req);
+    // A run that used every permitted turn on tools gets one last turn to say what it did: the registered repair nudge of the empty-answer turn
+    // (local-tool-loop.ts TOOLS_DONE_ANSWER_NUDGE) and tool use switched off with tool_choice none (the tools stay declared: the history holds tool_use blocks).
+    if (turn === MAX_BYOK_TOOL_TURNS - 1 && turn > 0 && toolTurnsTaken > 0 && !answerOnlyPass && !req.untrustedNoTools) {
+      answerOnlyPass = true;
+      messages.push({ role: "user", content: TOOLS_DONE_ANSWER_NUDGE });
+    }
     if (turn > 0) {
       const batch = ownerControl.take();
       // Keep tool_result blocks together before appending ordinary user text.
@@ -598,6 +607,7 @@ async function runAnthropicMessagesInner(
     const outgoingWire = () => anthropicWire({ native: backend === "anthropic", model, system, tools: anthropicTools, messages });
     const outgoingBody = () => { const wire = outgoingWire(); return { model, max_tokens: outputLimit, stream: true, system: wire.system,
       messages: wire.messages, ...(anthropicTools.length > 0 ? { tools: anthropicTools } : {}),
+      ...(anthropicTools.length > 0 && answerOnlyPass ? { tool_choice: { type: "none" } } : {}),
       ...(outputEffort ? { output_config: { effort: outputEffort } } : {}) }; };
     // Rotation at this settled boundary (turn start, or after a tool step whose results are all in): the request's INPUT
     // against 80% of the window. Input + output reserve is admission, checked next, and never records a generation.
@@ -1284,6 +1294,8 @@ export const runGoogleByok: Runner = async (
   let reachedAnswer = false;
   /** Function calls the host ran in this turn: settleNormalEnd evidence (R-065). */
   let googleToolCallsRun = 0;
+  /** The last permitted turn asks for the answer with function calling switched off (the run kept calling tools for the whole bound). */
+  let answerOnlyPass = false;
   let includeTools = functionDeclarations.length > 0;
   // Effort (A4 C6.3): generationConfig.thinkingConfig.thinkingLevel. The API reference says it is for Gemini 3 or later and
   // "use with earlier models results in an error": a structured field violation on the thinking config drops it for the
@@ -1316,6 +1328,11 @@ export const runGoogleByok: Runner = async (
   try {
   for (let turn = 0; turn < MAX_BYOK_TOOL_TURNS; turn += 1) {
     if (req.signal?.aborted) throw abortReasonError(req);
+    // Same last turn as the other host loops: the registered nudge, and function calling switched off (mode NONE; the declarations stay for the history).
+    if (turn === MAX_BYOK_TOOL_TURNS - 1 && turn > 0 && googleToolCallsRun > 0 && !answerOnlyPass && !req.untrustedNoTools) {
+      answerOnlyPass = true;
+      contents.push({ role: "user", parts: [{ text: TOOLS_DONE_ANSWER_NUDGE }] });
+    }
     if (turn > 0) {
       for (const entry of ownerControl.take()) contents.push({ role: "user", parts: [{ text: entry.text }] });
     }
@@ -1325,6 +1342,7 @@ export const runGoogleByok: Runner = async (
       generationConfig: { maxOutputTokens: outputLimit,
         ...(thinkingLevel && !thinkingRejected ? { thinkingConfig: { thinkingLevel } } : {}) },
       ...(includeTools ? { tools: [{ functionDeclarations }] } : {}),
+      ...(includeTools && answerOnlyPass ? { toolConfig: { functionCallingConfig: { mode: "NONE" } } } : {}),
     });
     // Rotation at this settled boundary: input against 80% of the window (admission, next, is a separate check).
     const rotation = await generations.boundary({ boundary: turn === 0 ? "turn-start" : "tool-step", step: turn,

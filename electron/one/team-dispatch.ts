@@ -103,6 +103,8 @@ const MAX_RESULT = 12_000;
 const MAX_RUNNING_PER_PARENT = 3;
 /** Sessions one One conversation may start per rolling hour. */
 const MAX_STARTS_PER_PARENT_PER_HOUR = 8;
+/** Hand-overs one One conversation may keep waiting in the queue behind the two brakes above; the next one is refused (typed). */
+const MAX_QUEUED_PER_PARENT = 12;
 /** The same brief to the same teammate is one session only while it runs or within this window. */
 const DUPLICATE_WINDOW_MS = 10 * 60_000;
 
@@ -538,7 +540,7 @@ function orphanState(dispatch: OneDispatchRow, graceMs: number): OrphanState {
 }
 
 /** Running rows whose child no process holds any more: settled from the durable receipt, or closed as interrupted. */
-function settleOrphanedDispatches(graceMs: number): void {
+export function settleOrphanedDispatches(graceMs: number): void {
   try {
     ensureTable();
     const running = getDb().prepare("SELECT * FROM one_team_dispatches WHERE status = 'running'").all() as OneDispatchRow[];
@@ -564,6 +566,7 @@ function armOrphanSweep(): void {
   if (orphanSweep) return;
   orphanSweep = setInterval(() => {
     settleOrphanedDispatches(ORPHAN_GRACE_MS);
+    void retryWantedStops().catch(() => undefined);
     retryFailedReports(undefined, HELD_REPORT_CODES);
     // A queued job has no settle event of its own to wake it when the seat freed in the other process, when this sweep
     // just finalized the session in front of it, or when its start was refused for a reason that has since cleared.
@@ -734,6 +737,13 @@ function finalStatus(receiptStatus: string): OneDispatchStatus {
 function finalizeDispatch(id: string, receiptStatus: string, runId: string, restartInterrupted = false): void {
   const current = row(id);
   if (!current || current.status !== "running") return;
+  // The owner asked to stop this job and the service did not answer (or the stop is still on its way): however the run ended, it ends as
+  // stopped and nothing is reported. A job that completed anyway reports as it always did.
+  const wanted = stopWantedRun(id);
+  if (wanted !== null) {
+    if (wanted === current.child_run_id && receiptStatus !== "completed") { closeStoppedDispatch(id); return; }
+    clearStopWanted(id);
+  }
   const status = finalStatus(receiptStatus);
   const result = lastAssistantText(current.child_chat_id, current.updated_at);
   const now = new Date().toISOString();
@@ -1159,13 +1169,17 @@ function startedByGraphStep(dispatch: OneDispatchRow, owner: string): boolean {
   return Boolean(dispatch.parent_run_id) && owner.startsWith(`${dispatch.parent_run_id}#`);
 }
 
-/** Cancels a teammate's run wherever it is held (this process or the background service): the entry the owner's own Stop uses. */
+/**
+ * Cancels a teammate's run wherever it is held (this process or the background service): the entry the owner's own Stop uses.
+ * The run only: the caller closes the dispatch itself (a graph step's end below, the stop of a job further down), so the owner-stop
+ * bookkeeping that cancelInvocationOwnerRun does for a Stop from a screen is switched off here.
+ */
 async function cancelChildRun(runId: string): Promise<"requested" | "already-requested" | "not-found"> {
-  type Cancel = (id: string) => Promise<"requested" | "already-requested" | "not-found"> | "requested" | "already-requested" | "not-found";
+  type Cancel = (id: string, options?: { dispatchBookkeeping?: boolean }) => Promise<"requested" | "already-requested" | "not-found"> | "requested" | "already-requested" | "not-found";
   let cancel: Cancel;
   try { cancel = (require("../runtime/invocation-owner-control") as typeof import("../runtime/invocation-owner-control")).cancelInvocationOwnerRun; }
   catch { cancel = (id) => runtime().invocationService.cancel(id); } // a host without the owner router: this process's runs only
-  return await cancel(runId);
+  return await cancel(runId, { dispatchBookkeeping: false });
 }
 
 /**
@@ -1215,6 +1229,228 @@ export async function cancelGraphStepOwnedWork(owner: string, cause: string): Pr
   return done;
 }
 
+// ── The owner stops a job ────────────────────────────────────────────────────────────────────────────────────────
+//
+// Production 1.3.113: the personal agent handed a video to the wrong teammate, the owner said so, it started the right one too, and both
+// ran (both runs held by the background service). Nothing could stop the first: the card had Open session and no stop, the session
+// opens read-only for the owner because the personal agent started it (its composer, where the stop lives, is replaced by a notice), and
+// the team tools had no stop (cancelChildRun above served graph steps only). Of the owner's 360 dispatches none was ever `cancelled`.
+//
+// One close path for all three ways in: the owner's Stop on the card or in the session (cancelInvocationOwnerRun, the one owner Stop of
+// the app, which finds the job by its run id), and the personal agent's one_team_stop at the owner's word. It closes the job
+// `cancelled`, marks it reported (no report turn is made about a job the owner stopped, nothing is retried) and says plainly that it was
+// stopped. A graph step's end keeps its own close (cancelGraphStepOwnedWork); a step still open that started this job hears it ended
+// like any other, and decides itself.
+
+/** report_error of a job the owner stopped. Typed; read by the start check below, never parsed from prose. */
+export const ONE_TEAM_JOB_STOPPED = "job_stopped";
+/** meta key: the owner asked to stop this dispatch's job (value = its recorded run id). It outlives a service that did not answer. */
+const STOP_WANTED_KEY_PREFIX = "one-team.stop-wanted:";
+/** How often the sweep asks again for a Stop the service did not answer (a minute apart); then the saved wish still closes the job when it ends. */
+const STOP_RETRY_MAX = 10;
+const stopRetries = new Map<string, number>();
+
+type CancelOutcome = "requested" | "already-requested" | "not-found";
+export type TeamJobStop =
+  | { kind: "stopped"; cancel: CancelOutcome; dispatch: OneDispatchRow }
+  | { kind: "ended"; dispatch: OneDispatchRow }
+  | { kind: "pending"; dispatch: OneDispatchRow };
+
+function stoppedJobText(): string {
+  return ownerMessage("중지했어요. 이 일은 끝나기 전에 멈췄어요.", "Stopped. This job was stopped before it finished.");
+}
+function markStopWanted(id: string, runId: string): void {
+  try { getDb().prepare("INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)").run(`${STOP_WANTED_KEY_PREFIX}${id}`, runId); }
+  catch (error) { console.warn("[one-team] stop wish not kept:", error instanceof Error ? error.message : error); }
+}
+function stopWantedRun(id: string): string | null {
+  try { return (getDb().prepare("SELECT value FROM meta WHERE key = ?").get(`${STOP_WANTED_KEY_PREFIX}${id}`) as { value: string } | undefined)?.value ?? null; }
+  catch { return null; }
+}
+function clearStopWanted(id: string): void {
+  stopRetries.delete(id);
+  try { getDb().prepare("DELETE FROM meta WHERE key = ?").run(`${STOP_WANTED_KEY_PREFIX}${id}`); } catch { /* a stale wish is ignored: it names a run id */ }
+}
+
+/**
+ * The running dispatch this run belongs to: the job's recorded run, or the run that took over from it when a queued direction drained
+ * (latestChildRun). Null for every other run (the common case): a Stop of a Work task or a chat reaches no teammate job.
+ */
+function runningDispatchOfRun(runId: string): OneDispatchRow | null {
+  try {
+    ensureTable();
+    const db = getDb();
+    const direct = db.prepare("SELECT * FROM one_team_dispatches WHERE status = 'running' AND child_run_id = ? LIMIT 1").get(runId) as OneDispatchRow | undefined;
+    if (direct) return direct;
+    const started = db.prepare("SELECT chat_id FROM run_events WHERE run_id = ? AND kind = 'invoke_started' LIMIT 1").get(runId) as { chat_id: string } | undefined;
+    if (!started) return null;
+    const candidate = db.prepare("SELECT * FROM one_team_dispatches WHERE status = 'running' AND child_chat_id = ? ORDER BY created_at DESC LIMIT 1")
+      .get(started.chat_id) as OneDispatchRow | undefined;
+    return candidate && latestChildRun(candidate).runId === runId ? candidate : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Closes a running job as stopped, once (a second call finds it closed). Same bookkeeping as a graph step's end; no report turn. */
+function closeStoppedDispatch(id: string): OneDispatchRow | null {
+  const current = row(id);
+  if (!current || current.status !== "running") return null;
+  const now = new Date().toISOString();
+  const changed = getDb().prepare("UPDATE one_team_dispatches SET status = 'cancelled', result_text = ?, reported_at = ?, report_error = ?, updated_at = ? WHERE id = ? AND status = 'running'")
+    .run(stoppedJobText(), now, ONE_TEAM_JOB_STOPPED, now, id);
+  if (changed.changes !== 1) return null;
+  clearStopWanted(id);
+  const settled = row(id)!;
+  console.info(`[one-team] job stopped dispatch=${id} run=${settled.child_run_id} cause=${ONE_TEAM_JOB_STOPPED}`);
+  retainDispatchResult(settled);
+  withdrawQueuedOneTeamReport(id);
+  const pending = waiters.get(id);
+  if (pending && pending.size > 0) {
+    waiters.delete(id);
+    for (const waiter of pending) waiter.resolve(settled);
+  } else if (graphTeamStepOpen(settled.graph_owner)) {
+    // A step still open that started this job hears it ended like any other result of its sessions, and decides (own owner rules).
+    deliverGraphTeamStepEvent(settled.graph_owner, { kind: "settled", dispatchId: id });
+  }
+  try {
+    emitDesktopStoreChange({ entity: "chat", id: settled.parent_chat_id });
+    if (settled.child_chat_id && !settled.child_chat_id.startsWith(QUEUED_CHAT_PREFIX)) emitDesktopStoreChange({ entity: "chat", id: settled.child_chat_id });
+  } catch { /* the card also re-reads on its own */ }
+  // The seat is free: a job queued behind this one starts (it waits by itself while the stopped run is still winding down).
+  setTimeout(() => startQueuedDispatches(), 0).unref?.();
+  return settled;
+}
+
+/**
+ * Stops one dispatched job wherever its run lives. `cancelRun` reaches the run (this process or the background service); it throws when
+ * the service does not answer, which is asked again after short waits and then kept as a wish: the sweep asks again, and the job closes
+ * as stopped when it ends by any means. Not found: the run finished on its own (left to report as completed) or is parked on a question
+ * and holds no process (closed as stopped). Compare by run: a job that took over this session after the one pressed on is never touched.
+ */
+export async function stopTeamDispatch(dispatch: OneDispatchRow, cancelRun: (runId: string) => Promise<CancelOutcome> | CancelOutcome): Promise<TeamJobStop> {
+  let current = row(dispatch.id) ?? dispatch;
+  if (current.status === "queued") {
+    cancelQueuedDispatch(current, ONE_TEAM_JOB_STOPPED, stoppedJobText());
+    const after = row(current.id) ?? current;
+    if (after.status === "cancelled") {
+      try { emitDesktopStoreChange({ entity: "chat", id: after.parent_chat_id }); } catch { /* the owner's screens re-read anyway */ }
+      return { kind: "stopped", cancel: "requested", dispatch: after };
+    }
+    current = after; // it started in the meantime: stop the job that now runs
+  }
+  if (current.status !== "running") return { kind: "ended", dispatch: current };
+  const recorded = current.child_run_id;
+  markStopWanted(current.id, recorded);
+  const live = latestChildRun(current).runId;
+  let outcome: CancelOutcome | null = null;
+  for (const wait of [0, 400, 1_500]) {
+    if (wait) await new Promise((resolve) => setTimeout(resolve, wait));
+    try { outcome = await cancelRun(live); break; }
+    catch (error) { console.warn(`[one-team] stop could not reach the run dispatch=${current.id} run=${live}:`, error instanceof Error ? error.message : error); }
+  }
+  if (outcome === null) {
+    armOrphanSweep(); // the minute sweep asks again (it is armed by the first team call of a process, and a Stop from the window may be that call)
+    return { kind: "pending", dispatch: row(current.id) ?? current };
+  }
+  if (outcome === "not-found") {
+    // Nothing holds the run. A finished run is a finished job (it reports as it always did); anything else is moot, and the owner said stop.
+    const receiptStatus = latestChildRun(row(current.id) ?? current).receipt?.status;
+    if (receiptStatus === "completed") { clearStopWanted(current.id); return { kind: "ended", dispatch: row(current.id) ?? current }; }
+  }
+  const closed = closeStoppedDispatch(current.id);
+  // Closed here, or by the other half of a double press, or the job ended by itself in between.
+  const now = row(current.id) ?? current;
+  return closed || (now.status === "cancelled" && now.report_error === ONE_TEAM_JOB_STOPPED)
+    ? { kind: "stopped", cancel: outcome, dispatch: now } : { kind: "ended", dispatch: now };
+}
+
+/**
+ * The owner's Stop of a run (cancelInvocationOwnerRun): when it is a teammate job's run, the job is stopped and closed here and the
+ * answer is the cancel's. Null when the run is not a teammate job (the Stop goes on as it always did).
+ */
+export async function stopTeamDispatchOfRun(runId: string, cancelRun: (runId: string) => Promise<CancelOutcome> | CancelOutcome):
+  Promise<{ status: CancelOutcome } | { pending: true } | null> {
+  const dispatch = runningDispatchOfRun(runId);
+  if (!dispatch) return null;
+  const result = await stopTeamDispatch(dispatch, cancelRun);
+  if (result.kind === "pending") return { pending: true };
+  // Stopped: the cancel reached the run, or nothing held a parked run and the job was closed all the same (the Stop took effect).
+  return { status: result.kind === "stopped" ? (result.cancel === "not-found" ? "requested" : result.cancel) : "not-found" };
+}
+
+/** A stop the service did not answer is asked again by the minute sweep, a few times; the saved wish then closes the job when it ends. */
+export async function retryWantedStops(): Promise<void> {
+  const running = getDb().prepare("SELECT * FROM one_team_dispatches WHERE status = 'running'").all() as OneDispatchRow[];
+  for (const dispatch of running) {
+    const wanted = stopWantedRun(dispatch.id);
+    if (wanted === null) continue;
+    if (wanted !== dispatch.child_run_id) { clearStopWanted(dispatch.id); continue; } // a later job of this session: the wish is stale
+    const tries = stopRetries.get(dispatch.id) ?? 0;
+    if (tries >= STOP_RETRY_MAX) continue;
+    stopRetries.set(dispatch.id, tries + 1);
+    try { await stopTeamDispatch(dispatch, cancelChildRun); }
+    catch (error) { console.warn("[one-team] saved stop not delivered yet:", error instanceof Error ? error.message : error); }
+  }
+}
+
+/** Hope's tool: stop a job this conversation started, at the owner's word. Works for a queued job and a running one, with any permission. */
+export async function oneTeamStop(caller: OneTeamCaller, input: { sessionId?: unknown }) {
+  const parentChatId = assertCaller(caller.chatId);
+  recoverOneTeamDispatches();
+  ensureTable();
+  const sessionId = typeof input.sessionId === "string" ? input.sessionId.trim() : "";
+  // Found like rowForSession finds it, but a stop never waits on the account check: it only ends work this conversation started.
+  const dispatch = sessionId && !sessionId.startsWith(QUEUED_CHAT_PREFIX)
+    ? getDb().prepare("SELECT * FROM one_team_dispatches WHERE (id = ? OR child_chat_id = ?) AND parent_chat_id = ? ORDER BY created_at DESC LIMIT 1")
+      .get(sessionId, sessionId, parentChatId) as OneDispatchRow | undefined : undefined;
+  if (!dispatch) throw new Error("one-team-session-not-found: this conversation did not start that teammate session.");
+  const result = await stopTeamDispatch(dispatch, cancelChildRun);
+  const name = dispatch.member_name;
+  if (result.kind === "stopped") {
+    return {
+      ...view(result.dispatch), stopped: true, confirmed: true,
+      owner_message: ownerMessage(`팀원 ${name}의 일을 중지했어요.`, `Stopped ${name}'s job.`),
+      note: "stopped at the owner's word; nothing will be reported back and nothing restarts by itself. Tell the owner it was stopped. Start other work only if the owner asked.",
+    };
+  }
+  if (result.kind === "pending") {
+    return {
+      ...view(result.dispatch), stopped: false, stop_saved: true,
+      owner_message: ownerMessage(
+        `${name}의 일을 멈추라는 요청을 저장했어요. 백그라운드 서비스가 응답하면 바로 멈추고, 그 뒤에는 결과를 보고하지 않아요.`,
+        `The stop for ${name}'s job is saved. It takes effect as soon as the background service answers, and nothing is reported afterwards.`),
+      note: "the service holding the run did not answer yet; the stop is kept and is tried again by itself. Tell the owner; do not call this again.",
+    };
+  }
+  return {
+    ...view(result.dispatch), stopped: false, already_ended: true,
+    owner_message: ownerMessage(`${name}의 일은 이미 끝나 있어서 멈출 게 없어요.`, `${name}'s job had already ended, so there was nothing to stop.`),
+    note: "the job is not running; read status and result. Nothing was stopped.",
+  };
+}
+
+/**
+ * What a teammate is, for the model that chooses one (observed in use: the personal agent handed a video to the teammate whose NAME sounded
+ * like the job, because the list carried names and ids only, and the one the owner uses for it had a name that does not say so).
+ * `description`: one plain line of what it does, at most 160 characters, from the package's own words (shared/agent-description.ts;
+ * the stored tagline is already read from the package when it was boot text, mcp/registry.ts). `package_name`: the agent's own name,
+ * only when the owner's name for the teammate differs from it. Data the owner can see on the roster, never a rule about whom to pick.
+ * The shared helper is read lazily, as the other shared helpers are in this file (contract runs load it without the shared list).
+ */
+function teammateIdentity(member: OneOrgMember): { package_name?: string; description?: string } {
+  const out: { package_name?: string; description?: string } = {};
+  const packageName = clip(member.nameEn, 80);
+  if (packageName && normalizeName(packageName) !== normalizeName(member.displayName)) out.package_name = packageName;
+  try {
+    const lib = require("../../shared/agent-description") as typeof import("../../shared/agent-description");
+    const names = [member.displayName, member.nameEn, member.agentSlug];
+    const text = lib.usableAgentDescription(member.title, names) ?? lib.usableAgentDescription(member.description, names);
+    if (text) out.description = lib.clampAgentDescription(text);
+  } catch { /* the list is still the list without a description */ }
+  return out;
+}
+
 export function oneTeamList(caller: OneTeamCaller) {
   const ownerChatId = assertCaller(caller.chatId);
   const group = groupOf(ownerChatId);
@@ -1238,6 +1474,7 @@ export function oneTeamList(caller: OneTeamCaller) {
       member_id: member.id,
       name: member.displayName,
       name_en: member.nameEn,
+      ...teammateIdentity(member),
       now: member.statusKind === "working" ? "working" : member.statusKind === "waiting" ? "waiting_for_owner"
         : member.statusKind === "locked" ? "locked" : "idle",
       last_activity_at: member.lastActivityAt,
@@ -1318,7 +1555,7 @@ export function oneTeamStartSession(caller: OneTeamCaller, input: { member?: unk
   // Work that was never started is not "the same work already started": a job closed out of the queue (it has a queue-closed run id)
   // and a session the starting graph step cancelled when it ended are handed over again when the brief comes again.
   const neverStarted = duplicate !== undefined && (duplicate.child_run_id.startsWith(QUEUE_CLOSED_RUN_PREFIX)
-    || (duplicate.status === "cancelled" && duplicate.report_error === ONE_TEAM_GRAPH_STEP_ENDED));
+    || (duplicate.status === "cancelled" && (duplicate.report_error === ONE_TEAM_GRAPH_STEP_ENDED || duplicate.report_error === ONE_TEAM_JOB_STOPPED)));
   if (duplicate && !neverStarted && dispatchReceiverCurrent(duplicate)
     && (viaContinuation || isLive(duplicate) || Date.now() - Date.parse(duplicate.created_at) < DUPLICATE_WINDOW_MS)) {
     assertDispatchReceiver(duplicate);
@@ -1337,11 +1574,11 @@ export function oneTeamStartSession(caller: OneTeamCaller, input: { member?: unk
   const runningNow = (getDb().prepare(
     "SELECT COUNT(*) AS n FROM one_team_dispatches WHERE parent_chat_id = ? AND status = 'running'",
   ).get(parentChatId) as { n: number }).n;
-  if (runningNow >= MAX_RUNNING_PER_PARENT) {
-    throw new Error(ko()
-      ? `one-team-too-many-running: 이 대화에서 맡긴 일이 이미 ${runningNow}개 진행 중이에요. 하나가 끝난 뒤 맡기거나 one_team_steer 로 방향을 더하세요.`
-      : `one-team-too-many-running: ${runningNow} teammate sessions from this conversation are still running. Wait for one to finish or use one_team_steer.`);
-  }
+  // The running cap is a brake on how many sessions work at once, not a reason to refuse the owner's work: the job is queued like
+  // the busy-seat case below and starts by itself when one finishes (the drain keeps the cap, startQueuedDispatches). Only a queue that
+  // already holds MAX_QUEUED_PER_PARENT jobs refuses, with the typed code: a loop of hand-overs still cannot grow without bound.
+  const capped: "running" | "rate" | null = runningNow >= MAX_RUNNING_PER_PARENT ? "running" : null;
+  if (capped) refuseWhenQueueFull(parentChatId, runningNow);
   // Per-seat cap: one teammate never has two runs at once for the same parent (also with new_session=true, which would
   // otherwise open a second child chat for the same seat). A session parked on the owner has no live turn and is exempt
   // (new work for that teammate gets its own session, see `parked` below). A second request is not refused: it is accepted
@@ -1351,11 +1588,11 @@ export function oneTeamStartSession(caller: OneTeamCaller, input: { member?: unk
   const startedLastHour = (getDb().prepare(
     "SELECT COUNT(*) AS n FROM one_team_dispatches WHERE parent_chat_id = ? AND created_at >= ?",
   ).get(parentChatId, new Date(Date.now() - 3_600_000).toISOString()) as { n: number }).n;
-  if (startedLastHour >= MAX_STARTS_PER_PARENT_PER_HOUR) {
-    throw new Error(ko()
-      ? `one-team-rate-limit: 이 대화에서 한 시간에 ${MAX_STARTS_PER_PARENT_PER_HOUR}개까지 맡길 수 있어요. 결과를 오너에게 먼저 보고하세요.`
-      : `one-team-rate-limit: at most ${MAX_STARTS_PER_PARENT_PER_HOUR} teammate sessions per hour from one conversation. Report the results to the owner first.`);
-  }
+  // The hourly brake keeps its bound: the job waits in the queue and the drain starts it only while the hour has room
+  // (startQueuedDispatches), so a loop of hand-overs is slowed, never refused and never unbounded.
+  const rateCapped = !capped && startedLastHour >= MAX_STARTS_PER_PARENT_PER_HOUR;
+  if (rateCapped) refuseWhenQueueFull(parentChatId, runningNow);
+  const capReason: "running" | "rate" | null = capped ?? (rateCapped ? "rate" : null);
   const { chats } = runtime();
   const title = brief.split(/\r?\n/, 1)[0]!.slice(0, 120);
   const fresh = input.newSession === true;
@@ -1381,13 +1618,24 @@ export function oneTeamStartSession(caller: OneTeamCaller, input: { member?: unk
   const reusedBusy = Boolean(reused && !parked && (settling || chatLiveAnywhere(reused.id)));
   const graphOwner = graphOwnerOf(caller);
   const parentRunId = dispatchParentRunId(caller);
-  if (blocker || reusedBusy) {
-    return enqueueDispatch({ parentChatId, member, brief, hash, blocker, chatId: reused && !parked && !fresh ? reused.id : null, graphOwner, parentRunId,
+  if (blocker || reusedBusy || capReason) {
+    return enqueueDispatch({ cap: blocker || reusedBusy ? null : capReason, parentChatId, member, brief, hash, blocker, chatId: reused && !parked && !fresh ? reused.id : null, graphOwner, parentRunId,
       delegationPermission: host?.delegationPermission, fresh });
   }
   const continuing = parked ? null : reused;
-  const { created, createdHere } = launchDispatch({ parentChatId, member, brief, hash, title, continuing, graphOwner, parentRunId,
-    delegationPermission: host?.delegationPermission, isolated: fresh });
+  let launched: ReturnType<typeof launchDispatch>;
+  try {
+    launched = launchDispatch({ parentChatId, member, brief, hash, title, continuing, graphOwner, parentRunId,
+      delegationPermission: host?.delegationPermission, isolated: fresh });
+  } catch (error) {
+    // A start the host refused for a reason that clears by itself (the teammate session still cleaning up, the app restarting, the channel
+    // reattaching) started nothing; the model is not told "try again": the job waits in the queue like a busy seat and starts when it can.
+    const refusalCode = startRefusalCodeOf(error);
+    if (!refusalCode || transientRefusalCode({ code: refusalCode }) === null) throw error;
+    return enqueueDispatch({ cap: null, parentChatId, member, brief, hash, blocker: null, chatId: continuing && !fresh ? continuing.id : null, graphOwner, parentRunId,
+      delegationPermission: host?.delegationPermission, fresh });
+  }
+  const { created, createdHere } = launched;
   return {
     ...view(created),
     confirmed: true,
@@ -1520,7 +1768,20 @@ function launchDispatch(input: { parentChatId: string; member: OneOrgMember; bri
  * Accept work for a teammate whose seat is busy. Nothing runs yet; the row is `queued` and the model gets an immediate,
  * non-error "queued behind <session>" answer. `chatId` is the session to continue (null = a new session when it starts).
  */
-function enqueueDispatch(input: { fresh?: boolean; parentChatId: string; member: OneOrgMember; brief: string; hash: string; blocker: OneDispatchRow | null; chatId: string | null; graphOwner?: string | null; parentRunId?: string | null; delegationPermission?: string | null }) {
+/** The queue ceiling: a conversation whose queue is already this long is refused with the typed code (never unbounded growth). */
+function refuseWhenQueueFull(parentChatId: string, runningNow: number): void {
+  const waiting = (getDb().prepare(
+    "SELECT COUNT(*) AS n FROM one_team_dispatches WHERE parent_chat_id = ? AND status = 'queued'",
+  ).get(parentChatId) as { n: number }).n;
+  if (waiting < MAX_QUEUED_PER_PARENT) return;
+  throw new Error(ko()
+    ? `one-team-too-many-running: 이 대화에서 맡긴 일이 ${runningNow}개 진행 중이고 ${waiting}개가 줄에 서 있어요. 일부가 끝난 뒤 맡기거나 one_team_steer 로 방향을 더하세요.`
+    : `one-team-too-many-running: ${runningNow} teammate sessions from this conversation are running and ${waiting} more are queued. Wait for some to finish or use one_team_steer.`);
+}
+
+function enqueueDispatch(input: { fresh?: boolean; parentChatId: string; member: OneOrgMember; brief: string; hash: string; blocker: OneDispatchRow | null; chatId: string | null; graphOwner?: string | null; parentRunId?: string | null; delegationPermission?: string | null;
+  /** Queued because a brake (not a busy seat) was reached: "running" = the concurrent cap, "rate" = the hourly cap. */
+  cap?: "running" | "rate" | null }) {
   const { parentChatId, member, brief, hash, blocker } = input;
   const id = `dispatch-${randomUUID()}`;
   const now = new Date().toISOString();
@@ -1549,11 +1810,21 @@ function enqueueDispatch(input: { fresh?: boolean; parentChatId: string; member:
     queued: true,
     queued_behind: blocker?.id ?? null,
     queue_position: ahead + 1,
-    owner_message: ownerMessage(
-      `팀원 ${member.displayName}은 지금 다른 일을 하고 있어 이 일은 줄에 세웠어요. 앞 일이 끝나면 자동으로 시작하고, 결과는 이 대화로 알려 드릴게요.`,
-      `Teammate ${member.displayName} is busy with another job, so this one is queued. It starts by itself when the earlier job finishes, and the result comes back to this conversation.`,
-    ),
-    note: `queued behind ${blocker ? `session ${blocker.id}` : "the teammate's current session"}; not an error and nothing to retry. It starts automatically, in order. Progress and result arrive here and wake this conversation. Do not poll; end the turn. Never show session_id or quote the result.`,
+    owner_message: input.cap === "running"
+      ? ownerMessage(
+        `이 대화에서 동시에 맡길 수 있는 일(${MAX_RUNNING_PER_PARENT}개)이 모두 진행 중이라 이 일은 줄에 세웠어요. 하나가 끝나면 자동으로 시작하고, 결과는 이 대화로 알려 드릴게요.`,
+        `${MAX_RUNNING_PER_PARENT} teammate sessions are already running from this conversation, so this one is queued. It starts by itself when one finishes, and the result comes back to this conversation.`,
+      )
+      : input.cap === "rate"
+        ? ownerMessage(
+          `한 시간에 맡길 수 있는 일(${MAX_STARTS_PER_PARENT_PER_HOUR}개)에 닿아 이 일은 줄에 세웠어요. 여유가 생기면 자동으로 시작하고, 결과는 이 대화로 알려 드릴게요.`,
+          `The hourly limit of ${MAX_STARTS_PER_PARENT_PER_HOUR} hand-overs was reached, so this one is queued. It starts by itself when there is room, and the result comes back to this conversation.`,
+        )
+        : ownerMessage(
+          `팀원 ${member.displayName}은 지금 다른 일을 하고 있어 이 일은 줄에 세웠어요. 앞 일이 끝나면 자동으로 시작하고, 결과는 이 대화로 알려 드릴게요.`,
+          `Teammate ${member.displayName} is busy with another job, so this one is queued. It starts by itself when the earlier job finishes, and the result comes back to this conversation.`,
+        ),
+    note: `queued ${input.cap === "running" ? `because ${MAX_RUNNING_PER_PARENT} sessions are already running` : input.cap === "rate" ? "because the hourly hand-over limit was reached" : `behind ${blocker ? `session ${blocker.id}` : "the teammate's current session"}`}; not an error and nothing to retry. It starts automatically, in order. Progress and result arrive here and wake this conversation. Do not poll; end the turn. Never show session_id or quote the result.`,
   };
 }
 
@@ -1593,6 +1864,11 @@ export function startQueuedDispatches(): void {
       if (seatBlocker(item.parent_chat_id, member)) continue;
       const running = (getDb().prepare("SELECT COUNT(*) AS n FROM one_team_dispatches WHERE parent_chat_id = ? AND status = 'running'").get(item.parent_chat_id) as { n: number }).n;
       if (running >= MAX_RUNNING_PER_PARENT) continue;
+      // The hourly brake holds for a queued job too: it starts only while the hour has room (jobs already started, not the queue itself).
+      const startedThisHour = (getDb().prepare(
+        "SELECT COUNT(*) AS n FROM one_team_dispatches WHERE parent_chat_id = ? AND created_at >= ? AND status != 'queued'",
+      ).get(item.parent_chat_id, new Date(Date.now() - 3_600_000).toISOString()) as { n: number }).n;
+      if (startedThisHour >= MAX_STARTS_PER_PARENT_PER_HOUR) continue;
       let continuing: ReturnType<typeof chats.getChat> | null = null;
       if (!item.child_chat_id.startsWith(QUEUED_CHAT_PREFIX)) {
         const candidate = chats.getChat(item.child_chat_id);
@@ -1790,17 +2066,28 @@ export function oneTeamSteer(caller: OneTeamCaller, input: { sessionId?: unknown
   const { invocationService } = runtime();
   installSettleListener();
   retainDispatchResult(dispatch);
-  const result = invocationService.steer({
-    chatId: dispatch.child_chat_id,
-    userPrompt: message,
-    promptOrigin: "system",
-    locale: currentUiLocale(),
-    // A session the AGI started stays capped when One steers it (the cap is the session's, not the sender's).
-    permissions: teamDelegationPermission(dispatch.delegation_permission),
-    onePermissionMode: teamDelegationPermission(dispatch.delegation_permission),
-    taskIntent: "conversation",
-    oneMode: true,
-  });
+  let result: ReturnType<typeof invocationService.steer>;
+  try {
+    result = invocationService.steer({
+      chatId: dispatch.child_chat_id,
+      userPrompt: message,
+      promptOrigin: "system",
+      locale: currentUiLocale(),
+      // A session the AGI started stays capped when One steers it (the cap is the session's, not the sender's).
+      permissions: teamDelegationPermission(dispatch.delegation_permission),
+      onePermissionMode: teamDelegationPermission(dispatch.delegation_permission),
+      taskIntent: "conversation",
+      oneMode: true,
+    });
+  } catch (error) {
+    // The teammate's own direction queue is full (it is working through eight already). That is backpressure, not a failed tool: the
+    // direction is kept with the chat's deferred relays and rides on the next turn the chat starts, which is the next queued
+    // direction (the owner's text takes the same wait through the durable send queue). Anything else still fails as before.
+    const parked = steerQueueFullParked(error, dispatch, message);
+    if (!parked) throw error;
+    return { ...view(row(dispatch.id)!), queued: true, parked: true as const,
+      note: "The teammate already has its direction queue full; your direction is kept and reaches it with its next step. Nothing to retry; end the turn if nothing else." };
+  }
   const now = new Date().toISOString();
   // A steer on a finished session reopens it: the report comes back again — and the older
   // report still waiting in One's queue is withdrawn (One already saw that result).
@@ -1814,6 +2101,21 @@ export function oneTeamSteer(caller: OneTeamCaller, input: { sessionId?: unknown
   return { ...view(continued), queued: result.queued, note: waiting
     ? "The session is waiting for the owner (see waiting_for_owner); this direction applies only after that. Work that does not need it can go to the same teammate with one_team_dispatch, which starts its own session."
     : result.queued ? "Queued after the teammate's current step." : "Sent; the teammate is working on it." };
+}
+
+/** `invocation_steer_queue_full` from a steer into a teammate's session: park the direction as a deferred relay of that chat. True when kept. */
+function steerQueueFullParked(error: unknown, dispatch: OneDispatchRow, message: string): boolean {
+  try {
+    const refusal = require("../../shared/transient-send-refusal") as typeof import("../../shared/transient-send-refusal");
+    if (refusal.sendRefusalCode(error) !== "invocation_steer_queue_full") return false;
+    const relays = require("../invocation/deferred-system-relays") as typeof import("../invocation/deferred-system-relays");
+    // false = the same text is already parked and undelivered: still kept.
+    relays.parkSystemRelay({ chatId: dispatch.child_chat_id, text: message, cause: "team_steer_queue_full", originRunId: dispatch.child_run_id || null });
+    return true;
+  } catch (parkError) {
+    console.warn("[one-team] direction not parked:", parkError instanceof Error ? parkError.message : parkError);
+    return false;
+  }
 }
 
 /** Reads of a still-running session allowed per capability (= one One run) before One must end its turn. */
@@ -1855,7 +2157,9 @@ export async function oneTeamSessionStatus(caller: OneTeamCaller, input: { sessi
     if (!reads) { reads = { total: 0, perSession: new Map() }; runningReads.set(caller, reads); }
     const same = reads.perSession.get(dispatch.id) ?? 0;
     if (same >= MAX_RUNNING_STATUS_READS_PER_SESSION || reads.total >= MAX_RUNNING_STATUS_READS_PER_RUN) {
-      throw new Error(`one-team-wait-for-wake: ${waitingNext(dispatch).note} (next=end_turn)`);
+      // Not an error: the answer is the same "still working, end your turn" the uncapped read gives, with the cap named. It used to be
+      // thrown (`one-team-wait-for-wake`), so a wait was drawn as a failed tool step 35 times. The counters still bite.
+      return { ...view(dispatch), ...waitingNext(dispatch), poll_limit_reached: true as const };
     }
     reads.perSession.set(dispatch.id, same + 1);
     reads.total += 1;

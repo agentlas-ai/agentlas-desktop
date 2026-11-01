@@ -14,6 +14,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type { Runner, RunnerEvents, RunnerFailure, RunnerRequest, RunnerResult } from "./runner";
 import { ensureChildCloseAfterExit, startCliHeartbeat, startCliSilenceGuard, runtimeSilentTimeoutFailure, runtimeProtocolUnrecognizedFailure, cliToolSilenceWindowMs, RuntimeTurnUnsettledError, preDispatchRefusal, runnerRefusedBeforeDispatch } from "./runner";
 import { cumulativeSurfaceGateText, wrapSystemPrompt } from "./runner";
+import { acpUsageRefusalKind } from "./usage-refusal";
 import { cliHistoryContextTokens, composeResumeTurnPrompt, renderConversationContext } from "./continuity";
 import { tStatus } from "./status-i18n";
 import { abortReasonError } from "./abort-reason";
@@ -716,10 +717,14 @@ async function runGrokTurn(req: RunnerRequest, events: RunnerEvents, dispatch: {
     let settled = false;
     let spawned = Number.isSafeInteger(child.pid) && Number(child.pid) > 0;
     child.once("spawn", () => { spawned = true; });
-    const failedResult = (code?: number | null, quota = false): RunnerResult => ({
+    const failedResult = (code?: number | null, quota = false): RunnerResult => {
+      // The provider's own words say why the turn ended: a spent allowance or a throttle reads as that (the same wording reading the
+      // ACP path uses, source "heuristic"), not as a refusal with no cause. HTTP 402 stays the typed marker below.
+      const spentKind = quota ? null : acpUsageRefusalKind(stderr.slice(0, 800));
+      return {
       text: text.trim(), tokens, sessionId,
       failure: {
-        kind: quota ? "quota" : "refused", runtime: KIND, source: "marker",
+        kind: quota ? "quota" : spentKind ?? "refused", runtime: KIND, source: spentKind ? "heuristic" : "marker",
         providerCode: "runtime_turn_unsettled",
         ...(typeof code === "number" ? { exitCode: code } : {}),
         message: [
@@ -730,7 +735,8 @@ async function runGrokTurn(req: RunnerRequest, events: RunnerEvents, dispatch: {
           stderr.slice(0, 500),
         ].filter(Boolean).join("\n"),
       },
-    });
+      };
+    };
 
     const handle = (ev: GrokEvent): void => {
       if (grokEventRecognized(ev)) recognizedEvents += 1;

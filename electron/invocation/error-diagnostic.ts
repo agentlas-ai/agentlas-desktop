@@ -1,8 +1,12 @@
 import { redactOperationalSecrets } from "./event-secret-redaction";
+import { isHostInternalException } from "./host-internal-failure";
 
 // Recent V8 versions expose Error.stack through one intrinsic lazy accessor.
 // Recognize its identity rather than treating an arbitrary custom getter as safe.
 const nativeStackGetter = Object.getOwnPropertyDescriptor(new Error(), "stack")?.get;
+
+/** The diagnostic payload field the run receipt reads (run-events.ts invocationRunReceiptSnapshot). */
+export const HOST_INTERNAL_DIAGNOSTIC_FIELD = "hostInternalException";
 
 export interface InvocationErrorDiagnosticContext {
   phase: "completion-chain-catch" | "undispatched-start" | "runner-catch-all";
@@ -52,6 +56,10 @@ export function invocationErrorDiagnostic(error: unknown, options: {
     diagnosticPhase: options.context.phase,
     thrownType: error === null ? "null" : typeof error,
   };
+  // The app's own unexpected exception, told by class / SQLite driver / syscall facts (host-internal-failure.ts), never by its words.
+  // The run's receipt reads this one boolean (run-events.ts hostInternalFailure) so the queue can treat the failed run as the app's
+  // own fault; the bounded cause fields below stay in the run record only.
+  if (isHostInternalException(error)) diagnostic[HOST_INTERNAL_DIAGNOSTIC_FIELD] = true;
   for (const [property, field] of [["name", "exceptionName"], ["message", "exceptionMessage"]] as const) {
     const value = text(dataProperty(error, property), property === "name" ? 160 : 800);
     if (value !== undefined) diagnostic[field] = value;

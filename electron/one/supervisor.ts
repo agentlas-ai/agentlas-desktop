@@ -5,6 +5,7 @@ import { supervisorError } from "../../shared/one-supervisor";
 import { createHash } from 'node:crypto';
 import { chatFilePrompt, chatFileImages, validateChatAttachmentSelection } from "../store/chat-message-attachments";
 import { getDb, openedStoreMigrationRole } from "../store/db";
+import { readRunTurnPlacement } from "../invocation/turn-placement";
 import { getOneProfile, getOneProfileOrigin, updateOneProfile } from "../store/one-profile";
 import { oneFrontRuntimeSelection } from "./front";
 import { createChat, createProjectWorkChat, getChat, appendChatMessage, listChatMessages, normalizeChatRuntimeSelection, getChatWorkingFolder, setChatWorkingFolder } from "../store/chats";
@@ -293,7 +294,7 @@ export function oneSupervisor():OneSupervisorService {
     appearance:input=>{updateOneProfile({expectedVersion:input.expectedVersion,patch:{displayName:input.displayName,bubbleColor:input.bubbleColor}});},
     legacyHistory:(oneId,chatId)=>legacy.inventory(oneId,chatId,new Set(invocationService.activeChatIds()),['inherited','machine'].includes(getOneProfileOrigin())),
     runtime:{
-      start:startNative,attach,receipt,noStartProof,
+      start:startNative,attach,receipt,noStartProof,placement:readRunTurnPlacement,
       cancel:runId=>!hostOptions && (invocationRunOwners.getOwnerByRunId(runId)?.ownerKind==='daemon' || nativeRuntime?.ownsPending(runId)) ? nativeRuntime!.cancel(runId) : invocationService.cancel(runId),pauseGoal:(chatId,goalId)=>stopInvocationGoal(chatId,goalId,"pause"),
       cancelGoal:(chatId,goalId)=>stopInvocationGoal(chatId,goalId,"delete"),
       steer:(req,runId)=>!hostOptions && invocationRunOwners.getOwnerByRunId(runId)?.ownerKind==='daemon' ? nativeRuntime!.steer(req,runId) : invocationService.steerFromSupervisor(req,runId,admitMainInvocation(req.chatId)),

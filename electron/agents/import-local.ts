@@ -29,6 +29,7 @@ import { currentUiLocale } from "../ui-locale";
 import { readCanonicalPromptFromDirectory } from "./prompt-authority";
 import { detectRuntimeLabels } from "./runtime-labels";
 import { computeLocalAgentDefinitionHash } from "./definition-hash";
+import { readPackageDescription } from "./package-description";
 
 export { detectRuntimeLabels } from "./runtime-labels";
 
@@ -509,14 +510,14 @@ function readName(dir: string): string {
   return prettyFromDir(dir);
 }
 
-function readTagline(dir: string): string {
-  const text = readFirst(dir, ["README.md", "TEAM.md", "soul.md", "AGENT.md"], 2000);
-  // 첫 번째 헤더가 아닌 비어있지 않은 줄
-  for (const line of text.split("\n")) {
-    const t = line.trim();
-    if (t && !t.startsWith("#") && !t.startsWith(">")) return t.slice(0, 140);
-  }
-  return "";
+/**
+ * The one-line description stored as the agent's tagline: what the package itself says it does (its cards, then its own prose).
+ * The first non-heading line of the first markdown file stored "Read AGENTS.md with the package file reader ..." and
+ * "1. Read [`AGENTS.md`]..." for 13 of the owner's 189 agents, and the model that staffs work chose teammates by name alone
+ * (observed in use). A thin adapter, a list step or a file instruction is never a tagline; see shared/agent-description.ts.
+ */
+function readTagline(dir: string, names: readonly string[]): string {
+  return readPackageDescription(dir, { names }) ?? "";
 }
 
 function uniqueSlug(base: string): string {
@@ -705,7 +706,7 @@ async function importLocalFolderOnce(
       }
     }
   }
-  const tagline = readTagline(dir) || (kind === "team" ? "Imported local team" : "Imported local agent");
+  const tagline = readTagline(dir, [name, localized?.titleEn ?? "", localized?.titleKo ?? ""]) || (kind === "team" ? "Imported local team" : "Imported local agent");
   const nameEn = localized?.titleEn || name;
   const nameKo = localized?.titleKo || name;
   const taglineEn = localized?.descriptionEn || tagline;

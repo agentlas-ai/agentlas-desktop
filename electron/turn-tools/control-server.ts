@@ -405,8 +405,11 @@ export async function handleTurnToolsControlRequest(request: Record<string, unkn
       if (validated.intent.deadline && Date.parse(validated.intent.deadline) <= now) return refuse("goal_wait_deadline_elapsed");
       if (validated.intent.subject.kind === "timer" && !goal.timer.ok) return refuse(goal.timer.reason);
       const outcome = recordGoalWaitSignal(turnNotesKey(binding.chatId, binding.runId), validated.intent);
-      if (outcome !== "recorded") throw new Error(`goal_wait_${outcome}: one wait per turn, and not together with goal_complete.`);
-      return { registered: "pending_host", note: "End this turn now; the host registers the wait and wakes this Goal when it is met.",
+      if (outcome !== "recorded" && outcome !== "replaced_earlier_wait") throw new Error(`goal_wait_${outcome}: one wait per turn, and not together with goal_complete.`);
+      return { registered: "pending_host", note: outcome === "replaced_earlier_wait"
+        ? "This wait replaces the one you asked for earlier in this turn (one wait per turn). End this turn now; the host registers it and wakes this Goal when it is met."
+        : "End this turn now; the host registers the wait and wakes this Goal when it is met.",
+        ...(outcome === "replaced_earlier_wait" ? { ignored_earlier_wait: true } : {}),
         ...(ignoredFields.length ? { ignored_fields: ignoredFields.slice(0, 10) } : {}) };
     }
     case "goal_complete": {

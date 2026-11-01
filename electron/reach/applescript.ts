@@ -84,6 +84,10 @@ export function renderValue(parameter: CapabilityParameter, value: unknown, know
     return keyword(value);
   }
   if (type === "specifier" || type.startsWith("specifier:")) return renderSpecifier(value, knownClasses);
+  // A parameter typed as one of the app's own dictionary classes (QuickTime `play` takes a `document`) is an object reference: the model
+  // names it as a specifier, and renderSpecifier keeps the class, keyword and quoting checks. Before, it was refused as unsupported
+  // (3 events) and the model gave up on the app.
+  if (knownClasses.has(type)) return renderSpecifier(value, knownClasses);
   throw new AppleScriptRefusal("unsupported_capability", `the type ${type.slice(0, 40)} cannot be rendered yet`);
 }
 
@@ -132,7 +136,10 @@ export async function runAppleScript(exec: ExecFn, request: AppleScriptRequest, 
   if (run.code !== 0) {
     // -1743 is "not authorized to send Apple events": the Automation permission is missing or was refused.
     const denied = /-1743|not authorized/i.test(run.stderr);
-    return { ok: false, code: denied ? "automation_denied" : "applescript_error", message: run.stderr.trim().slice(0, 300) };
+    // -1708 is "the app does not understand the message": the dictionary lists the command but this app does not implement it (QuickTime
+    // `save as`, 2 events). That is a fact about the app, told as a code the model can act on (use another capability), not a raw error.
+    const notUnderstood = !denied && /\(-1708\)|-1708\b/.test(run.stderr);
+    return { ok: false, code: denied ? "automation_denied" : notUnderstood ? "app_does_not_support_command" : "applescript_error", message: run.stderr.trim().slice(0, 300) };
   }
   return { ok: true, value: run.stdout.replace(/\n$/, "").slice(0, 64 * 1024) };
 }

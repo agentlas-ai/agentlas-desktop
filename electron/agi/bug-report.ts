@@ -131,12 +131,14 @@ export class AgiBugReports {
     return candidates.find((row) => reportIdentity(JSON.parse(row.payload_json) as AgiBugReportPayload, row.defect_id) === identity);
   }
 
-  /** Defects AGI filed for this chat (the chip), with the local state of any report the owner sent. */
+  /** Defects AGI filed for this chat (the chip), with the local state of any report the owner sent. A defect whose incident closed is
+   *  over: its chip only stays if the owner reported it or a fix was stamped on it. */
   defectsForChat(chatId: string): AgiDefectChip[] {
     const hasTable = this.deps.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='agi_defect_reports'").get();
     if (!hasTable) return [];
     const columns = new Set((this.deps.db.prepare("PRAGMA table_info(agi_defect_reports)").all() as Array<{ name: string }>).map((column) => column.name));
     const hasResolution = columns.has("resolved_at_ms");
+    const hasIncidents = Boolean(this.deps.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='agi_incidents'").get());
     const rows = this.deps.db.prepare(`SELECT d.id, d.code, d.category, d.goal_id, d.created_at_ms,
         ${hasResolution ? "d.resolved_at_ms, d.resolved_commit, d.resolution_note," : "NULL AS resolved_at_ms, NULL AS resolved_commit, NULL AS resolution_note,"}
         (SELECT CASE WHEN q.status='sent' AND length(trim(coalesce(q.server_id,'')))=0 THEN NULL ELSE q.status END
@@ -144,7 +146,11 @@ export class AgiBugReports {
             (json_extract(q.payload_json, '$.runId') = (SELECT id FROM long_runs WHERE goal_id=d.goal_id LIMIT 1)
               AND json_extract(q.payload_json, '$.failureCode') = d.code AND json_extract(q.payload_json, '$.chatRef') = ?))
           ORDER BY CASE q.status WHEN 'sent' THEN 0 WHEN 'queued' THEN 1 ELSE 2 END, q.updated_at_ms DESC LIMIT 1) AS report_status
-      FROM agi_defect_reports d WHERE d.chat_id = ? ORDER BY d.created_at_ms DESC LIMIT 5`).all(agiChatRef(chatId), chatId) as Array<{ id: string; code: string;
+      FROM agi_defect_reports d WHERE d.chat_id = ?
+        ${hasIncidents ? `AND NOT EXISTS (SELECT 1 FROM agi_incidents i WHERE i.id = d.incident_id AND i.status = 'resolved'
+          AND ${hasResolution ? "d.resolved_at_ms IS NULL" : "1"}
+          AND NOT EXISTS (SELECT 1 FROM agi_bug_report_queue q WHERE q.status <> 'draft' AND q.defect_id = d.id))` : ""}
+      ORDER BY d.created_at_ms DESC LIMIT 5`).all(agiChatRef(chatId), chatId) as Array<{ id: string; code: string;
       category: string; goal_id: string; created_at_ms: number; report_status: AgiBugReportRow["status"] | null;
       resolved_at_ms: number | null; resolved_commit: string | null; resolution_note: string | null }>;
     return rows.map((row) => ({ defectId: row.id, code: row.code, goalId: row.goal_id, createdAt: new Date(row.created_at_ms).toISOString(),

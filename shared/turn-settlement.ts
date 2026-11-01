@@ -118,7 +118,8 @@ export type TurnSettlementReason =
   | "owner_stopped" | "replay_blocked" | "rate_limited" | "rate_limit_exhausted" | "no_model_work"
   | "accepted_continue" | "unacknowledged_resend" | "not_resumable" | "continuation_budget_exhausted"
   | "accepted_no_idempotency" | "effects_observed" | "provider_capability" | "no_fallback"
-  | "store_busy" | "store_busy_exhausted" | "store_busy_after_dispatch";
+  | "store_busy" | "store_busy_exhausted" | "store_busy_after_dispatch" | "empty_reply"
+  | "preparation_retry" | "preparation_exhausted";
 
 export type TurnSettlementDecision =
   /** Run the same request on the same runtime again after `delayMs`. Only for work that provably did not run. */
@@ -140,6 +141,23 @@ const RATE_LIMIT_MAX_WAIT_MS = { attended: 60_000, unattended: 15 * 60_000 } as 
 /** At most this many same-runtime retries for a store lock refused before dispatch (STORE_BUSY_CODE), 250 ms then 500 ms. */
 export const STORE_BUSY_MAX_RETRIES = 2;
 const STORE_BUSY_BASE_MS = 250;
+/**
+ * Typed refusals of the host's OWN preparation of a worker's tools, raised before anything reached a model (worker-capabilities.ts,
+ * worker-capability-preparer.ts): the tool list could not be prepared or chosen right now, the inventory moved while it was chosen, the
+ * lease went away. Nothing ran, so the same step goes again after a short wait, a few times, instead of ending the step with "its tool
+ * connections were not ready". Not in this set, on purpose: the authority checks (invalid lease, widened boundary, a ceiling not
+ * revalidated, a selection outside the ceiling), the owner's Stop, a changed scope, a credential or server the owner has to fix.
+ */
+export const PREPARATION_RETRY_CODES: ReadonlySet<string> = new Set([
+  "worker-capability-preparation-unavailable", "worker-capability-selection-unavailable", "worker-capability-selection-timeout",
+  "worker-capability-inventory-changed", "worker-capability-lease-released", "worker_capabilities_failed",
+]);
+/** At most this many same-step retries for a preparation refused before dispatch: 500 ms then 1 s. */
+export const PREPARATION_MAX_RETRIES = 2;
+const PREPARATION_BASE_MS = 500;
+/** A host loop's model that answered with nothing at all is asked once more (no tool ran, so nothing is repeated). */
+export const EMPTY_REPLY_MAX_RETRIES = 1;
+const EMPTY_REPLY_RETRY_MS = 400;
 /** Codes whose turn must never be replayed by anyone (the host already knows it may have acted or is looping). */
 const REPLAY_BLOCKING_CODES: ReadonlySet<string> = new Set(["runtime_turn_unsettled", "serving_reconciliation_required", "automation_no_progress_loop"]);
 
@@ -181,8 +199,20 @@ export function decideTurnSettlement(input: TurnSettlementInput): TurnSettlement
       ? { action: "retry", delayMs: STORE_BUSY_BASE_MS * 2 ** Math.max(0, input.attempt), reason: "store_busy" }
       : { action: "surface", reason: "store_busy_exhausted" };
   }
+  // The host's own preparation of the worker's tools refused before anything was sent: the same step again after a short bounded wait.
+  if (noModelWork && input.providerCode && PREPARATION_RETRY_CODES.has(input.providerCode)) {
+    return input.attempt < PREPARATION_MAX_RETRIES
+      ? { action: "retry", delayMs: PREPARATION_BASE_MS * 2 ** Math.max(0, input.attempt), reason: "preparation_retry" }
+      : { action: "surface", reason: "preparation_exhausted" };
+  }
   // A typed failure. Output or tool activity after dispatch means the work may have acted: never replayed elsewhere.
   if (!noModelWork && input.effectsObserved && input.effectFree !== true) return { action: "surface", reason: "effects_observed" };
+  // A host loop (local models, BYOK, Agentlas serving) whose model ended the turn with no text and no tool call, with no tool
+  // dispatched in the whole turn (EMPTY_NO_TOOL_RAN_CODES): the provider produced nothing, so nothing ran and nothing can
+  // repeat. The same request goes out once more on the same runtime before the owner is told the model had no answer. A
+  // second empty answer (or any runner that cannot prove "no tool ran") falls through to the rules below, unchanged.
+  if (input.kind === "empty" && input.providerCode && EMPTY_NO_TOOL_RAN_CODES.has(input.providerCode)
+    && input.attempt < EMPTY_REPLY_MAX_RETRIES) return { action: "retry", delayMs: EMPTY_REPLY_RETRY_MS, reason: "empty_reply" };
   const accepted = input.delivery === "accepted";
   if (input.kind === "rate_limit" && (noModelWork || !accepted || idempotent) && (!input.effectsObserved || input.effectFree === true)) {
     const cap = input.unattended ? RATE_LIMIT_MAX_WAIT_MS.unattended : RATE_LIMIT_MAX_WAIT_MS.attended;

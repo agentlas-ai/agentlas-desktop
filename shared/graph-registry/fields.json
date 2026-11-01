@@ -148,7 +148,7 @@
       ],
       "writer": "저작자",
       "reader": "커널 상태 병합",
-      "unknown": "overwrite로 간주 — 다만 동시 실행 가능한 두 노드가 같은 이름에 overwrite면 REDUCER_WRITE_CONFLICT",
+      "unknown": "overwrite로 간주 — 동시에 실행될 수 있는 두 노드가 같은 이름에 overwrite하면 **선언 순서로 더 뒤에 놓인 노드의 값이 남는다**(실행은 계속되고 매번 같은 값, 저장 시 경고 REDUCER_WRITE_CONFLICT)",
       "status": "implemented",
       "note": "append 정렬은 도착 순서가 아니라 **노드 선언 순서**. LangGraph 문서가 병렬 쓰기 순서를 arbitrary라고 못박은 것과 같은 이유. ★transform에서는 `to`가 결과 이름이다. `produces`로 적어도 같은 뜻으로 읽는다(커널이 별칭 처리)."
     },

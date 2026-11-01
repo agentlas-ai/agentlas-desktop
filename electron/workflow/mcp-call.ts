@@ -108,6 +108,12 @@ function graphBrowserApprovalScope(chatId: string): BrowserApprovalScope {
   return Object.freeze({ surface, chatId });
 }
 
+/** The code first (callers read the token), then what it means: no connected server provides this tool catalog on this machine. */
+function catalogUnavailableMessage(catalogId: string): string {
+  return `graph_mcp_catalog_unavailable: no connected tool server provides "${catalogId}" on this machine (it is not installed, not enabled, or still missing a login or key). `
+    + "Use a tool catalog that is connected here, or connect this one first.";
+}
+
 /** Match only the same unconfigured aliases the config builder canonicalizes.
  * A custom profile, endpoint or credential keeps its owner's explicit binding. */
 function graphUsesNativeBrowser(catalogId: string): boolean {
@@ -137,7 +143,7 @@ export async function inspectGraphMcpTools(input: {
       chatId: input.chat.id, runId: inventoryId, permission: input.permission,
       signal: input.signal ?? new AbortController().signal, presentation: "background",
     } : null);
-  if (!config) throw new Error("graph_mcp_catalog_unavailable");
+  if (!config) throw new Error(catalogUnavailableMessage(input.catalogId));
   try {
     const inventory = await loadMainToolInventory(config.configPath, undefined, input.permission, false, false, input.signal);
     let schemaBytes = 0;
@@ -191,7 +197,27 @@ export function graphMcpEffectProblems(graph: Pick<WorkflowGraph, "nodes">, loca
   return problems;
 }
 
+/** The launcher's typed mark on the answer it gives when the browser itself did not start (electron/mcp-tools/browser-cdp-launcher.ts). */
+export const BROWSER_START_FAILED_META = "agentlas/browserStartFailed";
+
+/** Pauses before the second and third ask of a read-only call that got no answer (graph_mcp_call_failed "timed out", observed in use). */
+export const GRAPH_READ_CALL_RETRY_WAITS_MS: readonly number[] = [3_000, 9_000];
+
+/**
+ * A tool step declared `read` whose actual call (tool and arguments together) is not read-only - the browser's URL-dependent reads
+ * are the case - used to be refused on every run (graph_mcp_effect_mismatch: 6 nodes and 5 graph runs, observed in use).
+ * The label cannot grant read authority and the host measured the call, so a write-permitted automation runs it as the mutation it
+ * is: a second pass with the effect set to mutation, the same approvals and the same kernel treatment (onAdmission reports
+ * readOnly=false) as a step authored as a mutation. A read-only automation, a simulation and a `pure` step are still refused.
+ */
 export async function runGraphMcpCall(input: GraphMcpCallOptions): Promise<GraphMcpCallResult> {
+  const first = await runGraphMcpCallOnce(input);
+  return first === ESCALATE_TO_MUTATION ? runGraphMcpCallOnce({ ...input, effect: "mutation" }, false) as Promise<GraphMcpCallResult> : first;
+}
+
+const ESCALATE_TO_MUTATION = Symbol("graph-mcp-escalate-to-mutation");
+
+async function runGraphMcpCallOnce(input: GraphMcpCallOptions, mayEscalate = true): Promise<GraphMcpCallResult | typeof ESCALATE_TO_MUTATION> {
   const raw = input.call as Partial<GraphMcpCall> | null;
   if (!raw || typeof raw !== "object" || Array.isArray(raw)
     || Object.keys(raw).some(key => !["catalogId", "toolName", "arguments", "schemaDigest"].includes(key))
@@ -232,7 +258,7 @@ export async function runGraphMcpCall(input: GraphMcpCallOptions): Promise<Graph
       ...(input.dryRun ? { simulation: true } : {}), ...(permission === "read" ? { readOnlyObservation: true } : {}) } },
     nativeBrowser ? { chatId, runId: input.runId, permission,
       signal: input.signal, presentation: "background" } : null);
-  if (!config) throw new Error("graph_mcp_catalog_unavailable");
+  if (!config) throw new Error(catalogUnavailableMessage(raw.catalogId));
   try {
     assertCurrent();
     const inventory = await loadMainToolInventory(config.configPath, undefined, permission, false, false, input.signal);
@@ -242,34 +268,59 @@ export async function runGraphMcpCall(input: GraphMcpCallOptions): Promise<Graph
     if (matches.length !== 1) throw new Error(matches.length ? "graph_mcp_tool_ambiguous" : "graph_mcp_tool_unavailable");
     const [toolName, tool] = matches[0];
     if (tool.kind !== "mcp") throw new Error("graph_mcp_binding_invalid");
-    if (raw.schemaDigest && raw.schemaDigest !== tool.schemaDigest) throw new Error("graph_mcp_schema_changed");
     // Remote annotations and the blueprint's effect label cannot grant read
     // authority. Reuse Main's exact catalog policy and argument-aware browser
     // contract; an unknown tool requires ordinary write approval.
     const readOnly = !mcpToolIsMutating({ catalogId: tool.server.catalogId, toolName: tool.serverToolName, args })
       && (tool.server.catalogId !== "agentlas-browser" || isReadOnlyGraphBrowserObservation(`mcp__agentlas-browser__${tool.serverToolName}`, JSON.stringify(args)))
       && !(tool.server.catalogId === "one-team" && tool.serverToolName === "one_graph_set_enabled");
+    // The step was saved against the tool's schema at that time. A tool the host measures as read-only (the measurement above does
+    // not depend on the digest) cannot change anything, and its server validates the arguments itself, so a schema that moved
+    // under it (an app update re-describing a browser tool) is followed instead of refusing every run until someone saves the
+    // step again (graph_mcp_schema_changed). A call that can change something outside still has to match what was authored.
+    if (raw.schemaDigest && raw.schemaDigest !== tool.schemaDigest && !readOnly) throw new Error("graph_mcp_schema_changed");
+    if (input.effect === "read" && !readOnly && mayEscalate && !input.dryRun && input.permission === "write") return ESCALATE_TO_MUTATION;
     if (input.effect === "pure" || (input.effect === "read" && !readOnly)) throw new Error("graph_mcp_effect_mismatch");
     if (input.dryRun && !readOnly) throw new Error("graph_mcp_simulation_mutation_denied");
     input.onAdmission(readOnly);
     assertCurrent();
-    const callId = `graph-mcp-${randomUUID()}`;
-    let started = false;
-    const result = await runMainToolDispatch(new Map([[toolName, tool]]),
-      { toolName, arguments: JSON.stringify(args), providerCallId: callId }, {
-        onPartial: () => {},
-        onStatus: () => {},
-        onTool: (name, argumentsText, resultText, id, isError) => {
-          if (resultText === undefined) started = true;
-          // A denied call has only an error result and never left Main. Do not
-          // manufacture an uncertain external request for that refusal.
-          if (!started) return;
-          input.sink({ kind: "tool-use", tool: { name, id, args: argumentsText,
-            ...(resultText !== undefined ? { result: resultText, isError } : {}) },
-            ...(resultText !== undefined ? { done: true } : {}) });
-        },
-      }, { runtimeKind: "graph-mcp", sessionKey, permission, cwd, chatId,
-        unattended: true, signal: input.signal, assertCurrent, retainMcpToolResult: true });
+    const dispatchOnce = async () => {
+      let started = false;
+      return runMainToolDispatch(new Map([[toolName, tool]]),
+        { toolName, arguments: JSON.stringify(args), providerCallId: `graph-mcp-${randomUUID()}` }, {
+          onPartial: () => {},
+          onStatus: () => {},
+          onTool: (name, argumentsText, resultText, id, isError) => {
+            if (resultText === undefined) started = true;
+            // A denied call has only an error result and never left Main. Do not
+            // manufacture an uncertain external request for that refusal.
+            if (!started) return;
+            input.sink({ kind: "tool-use", tool: { name, id, args: argumentsText,
+              ...(resultText !== undefined ? { result: resultText, isError } : {}) },
+              ...(resultText !== undefined ? { done: true } : {}) });
+          },
+        }, { runtimeKind: "graph-mcp", sessionKey, permission, cwd, chatId,
+          unattended: true, signal: input.signal, assertCurrent, retainMcpToolResult: true });
+    };
+    let result = await dispatchOnce();
+    // A read-only call that was sent and never answered (its time limit ran out, or the transport dropped: `callEnd`, read from the
+    // error's type) changed nothing, so asking again is safe and is what the owner would otherwise do by hand. A slow page or a busy
+    // server passes; the last answer stands. A call that can change something outside is never repeated here.
+    // The one exception is typed by the browser launcher itself (`_meta["agentlas/browserStartFailed"]`, never read from words): the browser did
+    // not start, so no page was reached and nothing was done, for a call that changes things as much as for one that reads.
+    const browserNeverStarted = (answer: typeof result): boolean => answer.isError
+      && (answer.rawMcpResult as { _meta?: Record<string, unknown> } | undefined)?._meta?.[BROWSER_START_FAILED_META] === true;
+    for (const waitMs of GRAPH_READ_CALL_RETRY_WAITS_MS) {
+      const again = browserNeverStarted(result) || (readOnly && result.isError && result.callEnd && !result.rawMcpResult);
+      if (!again) break;
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(() => { input.signal.removeEventListener("abort", stop); resolve(); }, waitMs);
+        const stop = (): void => { clearTimeout(timer); resolve(); };
+        input.signal.addEventListener("abort", stop, { once: true });
+      });
+      assertCurrent();
+      result = await dispatchOnce();
+    }
     // Main's transport-error catch returns an error without rawMcpResult. A server
     // error response still has the retained original and settles the remote call.
     if (result.rawMcpResult) input.onResponse?.();

@@ -115,7 +115,7 @@ import { goalPassStopCause } from "../long-run/goal-pass-stop";
 import { goalPassBudgetStep, GOAL_PASS_WALL_CLOCK_BUDGET_MS } from "../long-run/goal-pass-budget";
 import { captureNativeGoalEpisode, type NativeGoalEpisodeBinding } from "../long-run/native-goal-pass";
 import { agentPromptFolder, buildEffectiveAgentSystemPrompt } from "../agents/files";
-import { acquireAgentWorkspaceRunLease, releaseAgentWorkspaceRunLease, getAgentWorkspace, readAgentWorkspaceFile } from "../agents/workspace-service";
+import { acquireAgentWorkspaceRunLease, releaseAgentWorkspaceRunLease, getAgentWorkspace, readAgentWorkspaceFile, waitForAgentWorkspaceLock } from "../agents/workspace-service";
 import {
   autoRouteStatus,
   autoRouteSystemPreamble,
@@ -148,17 +148,20 @@ import { summarizeRunToolDetail } from "../storage/run-detail-summary";
 import { desktopStoreTransaction } from "../store/change-bus";
 import { supervisorExcludedHistoryMessages, supervisorIngressMessage } from "../one/supervisor-store";
 import { carriedFollowupMessageIds } from "../invocation/carried-owner-followups";
+import { runtimeCostClass } from "../runtime/model-pricing";
+import { EARLIER_ATTEMPT_LINE, hasEarlierAttempt } from "../invocation/earlier-attempt";
 import { isOneQuietReply } from "../../shared/one-supervisor";
 import { listAgentSurfaces } from "../store/agent-surfaces";
 import { stripAgentControlMarkers } from "../../shared/agent-control-markers";
 import { listRentAllowedSlugs } from "../store/project-agent-rent";
 import { findCanonicalTaskForChat } from "../store/tasks";
 import { MainWorkRecoveryContext, mainWorkRecoveryApplies } from "../invocation/main-work-recovery";
-import { hostInternalFailureMessage, isHostInternalException } from "../invocation/host-internal-failure";
-import { invocationErrorDiagnostic } from "../invocation/error-diagnostic";
+import { hostInternalFailureMessage, isHostInternalException, isMissingWorkingFolderError, storeLockedMessage, workingFolderMissingMessage } from "../invocation/host-internal-failure";
+import { forecastAppResend } from "../invocation/resend-forecast";
+import { HOST_INTERNAL_DIAGNOSTIC_FIELD, invocationErrorDiagnostic } from "../invocation/error-diagnostic";
 import { touchRuntimeSession } from "../store/runtime-sessions";
 import { latestTaskCheckpoint } from "../long-run/checkpoint";
-import { bindCreatedAutomationToGoal } from "../long-run/automation-provenance";
+import { bindCreatedAutomationToGoal, goalStoppedByOwner, liveGoalForAutomationCreation } from "../long-run/automation-provenance";
 import { compileLongRunCheckpoint } from "../../shared/long-run-checkpoint";
 import { getInterviewMode } from "../store/interview-mode";
 import { isUserFacingProjectAgent } from "../../shared/project-agent-pool";
@@ -205,7 +208,8 @@ import {
   type BorrowedAgentSpec,
   type WorkforceLeaderRunnerEvidence,
 } from "./borrowed-task-force";
-import { taskForceUnverifiedSettlesAsReport } from "./task-force-settlement";
+import { taskForceCauseClass, taskForceProviderFailure, taskForceUnverifiedSettlesAsReport } from "./task-force-settlement";
+import { retryMcpConfigBuild } from "./config-build-retry";
 import {
   emitWorkforceBenchmarkSelectionArtifacts,
   workforceLeaderRunnerBoundary,
@@ -264,7 +268,7 @@ import { bindOneRuntimeToolArtifacts, oneArtifactAlreadyBoundInChat, promoteBoun
 import { hasRunProducedFiles, openRunProducedFiles, takeRunProducedFiles } from "../harness/run-produced-files";
 import { missingRequestedFiles, requestedFileCorrection } from "./requested-file-check";
 import { requestedMediaCorrection, requestedMediaNotice, type MissingRequestedMedia } from "./requested-media-check";
-import { runWithStoreBusyRetry } from "../store/store-busy-retry";
+import { runWithStoreBusyPatience, runWithStoreBusyRetry } from "../store/store-busy-retry";
 import { classifyToolFailure, toolFailureCopy } from "../../shared/tool-failure";
 import { resolveToolInvocationOrigin } from "../invocation/tool-origin";
 import type { ToolInvocationOrigin } from "../../shared/tool-invocation-origin";
@@ -281,7 +285,7 @@ import {
 } from "../site/agent-app-mcp-config-policy";
 import { listInstalledServers as listInstalledMcpServers } from "../mcp-tools/registry";
 import { getAgentApp } from "../store/agent-apps";
-import { autoSelectMcpTools, buildMcpAutoSelectionPrompt, describeScopedMcpOutcome, selectUntilGoalScopeSettled, type GoalToolSelectionReceipt } from "../mcp-tools/auto-select";
+import { autoSelectMcpTools, buildMcpAutoSelectionPrompt, describeScopedMcpOutcome, selectionKeepsTools, selectUntilGoalScopeSettled, type GoalToolSelectionReceipt } from "../mcp-tools/auto-select";
 import { runMcpKeyElicitationGate } from "./run-key-elicitation";
 import { getEnvConfigurationRevision } from "../secrets/vault";
 import { bridgeHubPluginCandidates } from "../mcp-tools/hub-plugin-bridge";
@@ -358,6 +362,7 @@ import {
   pickRunner,
   pinnedRuntimeCredentialOrModelUnavailable,
   goalRuntimePinDrift,
+  nextRunnableRuntime,
   rolePriorityRuntimes,
   runtimeFailureBlocksReplay,
   runtimeDisplayName,
@@ -954,24 +959,42 @@ function invocationRuntimeFailure(error: unknown, now = Date.now()): InvocationR
   return cause ? { ...facts, cause } : facts;
 }
 
-/** The bounded, redacted cause of an exception whose own words are not shown to the owner (invoke_error_diagnostic, run record only). */
-function recordInternalFailureCause(req: McpInvocationRequest, error: unknown): void {
+/**
+ * The bounded, redacted cause of an exception whose own words are not shown to the owner (invoke_error_diagnostic, run record only).
+ * `ownerCause`: the exception is the owner's or an outside change (a working folder that is gone), not the app's own fault, so the run is not
+ * marked as the app's own exception and the app does not send the message again for it (the receipt's hostInternalFailure reads that mark).
+ */
+function recordInternalFailureCause(req: McpInvocationRequest, error: unknown, ownerCause = false): void {
   if (!req.runId || req.agentAppMode) return;
   const diagnostic = invocationErrorDiagnostic(error, { context: { phase: "runner-catch-all", runtimeKind: req.runtimeSelection?.kind },
     redactText: (value) => value });
+  if (diagnostic && ownerCause) delete diagnostic[HOST_INTERNAL_DIAGNOSTIC_FIELD];
   if (diagnostic) tryRecordRunEvent({ runId: req.runId, chatId: req.chatId, kind: "invoke_error_diagnostic", payload: diagnostic });
+}
+
+/** The chat's working folder is gone (the owner moved or deleted it): a file-system error on a path inside it while the folder no longer exists. */
+function vanishedWorkingFolder(req: McpInvocationRequest, error: unknown): boolean {
+  let folder: string | null = null;
+  try { folder = getChatWorkingFolder(req.chatId) ?? null; } catch { folder = null; }
+  return isMissingWorkingFolderError(error, folder, (candidate) => fs.existsSync(candidate), path.sep);
 }
 
 /** The words an error event may carry for an exception the caller already typed with its own code: its message, unless the app's own bug. */
 function ownerSafeErrorMessage(req: McpInvocationRequest, error: unknown): string {
   if (isHostInternalException(error)) {
+    // A folder the owner removed is told as that (and is not sent again); the app's own exception says what the app does about the message.
+    if (vanishedWorkingFolder(req, error)) {
+      recordInternalFailureCause(req, error, true);
+      return workingFolderMissingMessage(pickLocale(req));
+    }
     recordInternalFailureCause(req, error);
-    return hostInternalFailureMessage(pickLocale(req));
+    return hostInternalFailureMessage(pickLocale(req), forecastAppResend(getDb(), req.runId, { hostInternalFailure: true }));
   }
   return error instanceof Error ? error.message : String(error);
 }
 
-function invocationFailure(
+/** The error event's code and sentence for a failure thrown inside a run (exported so a gate can drive the real function). */
+export function invocationFailure(
   req: McpInvocationRequest,
   fallbackCode: string,
   error: unknown,
@@ -1004,17 +1027,15 @@ function invocationFailure(
    */
   const typedCode = (isTypedCode(typedFailure?.providerCode) ? typedFailure!.providerCode : undefined) ?? outwardFailureCode(error);
   if (typedCode === STORE_BUSY_CODE) {
-    // The local store stayed locked by another write (R-067): its own code, never runner-failed, and whether it can be sent again.
+    // The local store stayed locked by another write (R-067): its own code, never runner-failed, and what the app does about the message.
     const beforeDispatch = runnerRefusedBeforeDispatch(error);
-    const ko = beforeDispatch
-      ? "Agentlas 저장소가 다른 기록으로 잠겨 있어 모델에 보내기 전에 멈췄습니다. 모델에는 아무것도 보내지 않았으니 다시 보내도 됩니다."
-      : "Agentlas 저장소가 다른 기록으로 잠겨 있어 이 턴을 끝까지 기록하지 못했습니다. 이미 실행됐을 수 있어 자동으로 다시 보내지 않았습니다.";
-    const en = beforeDispatch
-      ? "The Agentlas store stayed locked by another write, so this turn stopped before anything was sent to the model. Nothing reached the model; it is safe to send again."
-      : "The Agentlas store was locked by another write, so this turn could not be fully recorded. It may already have run, so it was not sent again automatically.";
-    // The driver's own words ("database is locked") are system text; they stay in the run record, not in the owner's sentence.
+    // The driver's own words ("database is locked") are system text; they stay in the run record, not in the owner's sentence. The driver's
+    // error is the app's own exception, so the run is marked as such here and the queue sends the message once more after a dispatch: the
+    // sentence is told from the same forecast, so it never says "not sent again" while the app sends it.
     recordInternalFailureCause(req, error);
-    return { code: STORE_BUSY_CODE, message: pickLocale(req) === "ko" ? ko : en, ...(runtimeFailure ? { runtimeFailure } : {}) };
+    const resend = forecastAppResend(getDb(), req.runId, { errorCode: STORE_BUSY_CODE,
+      ...(isHostInternalException(error) ? { hostInternalFailure: true as const } : {}), ...(runtimeFailure ? { runtimeFailure } : {}) });
+    return { code: STORE_BUSY_CODE, message: storeLockedMessage(pickLocale(req), beforeDispatch, resend), ...(runtimeFailure ? { runtimeFailure } : {}) };
   }
   if (runtimeFailure?.kind === "auth" || runtimeFailure?.kind === "refused") {
     return { code: typedCode ?? (runtimeFailure.kind === "auth" ? "runtime_auth" : "runtime_refused"), message: raw, runtimeFailure };
@@ -1054,8 +1075,16 @@ function invocationFailure(
   // the owner: "Cannot read properties of undefined", "ENOENT ... open '<user path>'" are system text with nothing to act on.
   // The code stays the caller's fallback code; the cause is kept, bounded and redacted, in the run record.
   if (!typedFailure && !runtimeFailure && isHostInternalException(error)) {
+    // A vanished working folder is the owner's folder, not the app's bug: the sentence the runner uses for the same fact, and the run is not
+    // marked as the app's own exception, so the app does not send the message again for a folder that is still gone.
+    if (vanishedWorkingFolder(req, error)) {
+      recordInternalFailureCause(req, error, true);
+      return { code: "project_folder_missing", message: workingFolderMissingMessage(pickLocale(req)) };
+    }
     recordInternalFailureCause(req, error);
-    return { code: fallbackCode, message: hostInternalFailureMessage(pickLocale(req)) };
+    // The app sends the message once more by itself for an exception after dispatch (earlier-attempt.ts): the sentence says so (or that it
+    // already did), instead of telling the owner to send it again while the queue does.
+    return { code: fallbackCode, message: hostInternalFailureMessage(pickLocale(req), forecastAppResend(getDb(), req.runId, { hostInternalFailure: true })) };
   }
   return { code: fallbackCode, message: raw };
 }
@@ -2184,9 +2213,7 @@ export function runMcpInvocation(
       ...(decision.nodeId ? { nodeId: decision.nodeId } : {}),
       payload: { rule: decision.rule, tool: decision.tool, fingerprint: decision.fingerprint, count: decision.count,
         goalId: admittedGoal?.goalId ?? null, action: "change_strategy", backgroundRepair: true } });
-    sink({ kind: "notice", notice: { level: "warning", code: "invocation-no-progress-advisory",
-      message: pickLocale(req) === "ko" ? "같은 결과가 반복돼 다음 단계에서 접근을 바꾸고 독립 작업을 이어갑니다."
-        : "Repeated results detected. The next step will change strategy and continue independent work." } });
+    // The advisory goes to the model through progressAdvisory and to the ledger above; the owner is not shown the host's own bookkeeping.
   };
   // Context-reduction C01: every model call this owner turn causes is recorded against this run (model-call-ledger.ts).
   const runOwnedInvocation = () => withModelCallScope({ runId: req.runId, chatId: req.chatId, userTurnId: req.runId, role: "main" }, runOwnedInvocationScoped);
@@ -2255,13 +2282,33 @@ async function runMcpInvocationInContext(
   let nativeBrowserGrant: NativeBrowserRelayGrant | undefined;
   const workspaceLeases = new Map<string, string>();
   const workspacePins = new Map<string, { revisionId: string; treeDigest: string }>();
+  // The agent's files are taken without waiting (a file lock): while the owner's editor or a learning change holds them for a moment, a run
+  // that starts on the agent waits for them here, asynchronously and for a bounded time, instead of failing with update_busy.
+  const pinWorkspaceWaiting = async (candidate: InstalledAgent): Promise<void> => {
+    try {
+      const row = getDb().prepare("SELECT builtin FROM installed_agents WHERE id = ?").get(candidate.id) as { builtin: number } | undefined;
+      // The wait can take up to about 4.6 s per agent: the run is shown as preparing meanwhile, said once, instead of looking stuck.
+      if (row && !row.builtin && !isCallOnlyHubAgent(candidate) && !workspaceLeases.has(candidate.id)) await waitForAgentWorkspaceLock(candidate.id, () => {
+        sink({ kind: "tool-use", status: pickLocale(req) === "ko" ? "에이전트 파일을 다른 작업이 쓰고 있어 잠시 기다리는 중이에요" : "Another change is using this agent's files; waiting a moment" });
+      });
+    } catch { /* the pin below reports whatever is really wrong */ }
+    pinWorkspace(candidate);
+  };
   const pinWorkspace = (candidate: InstalledAgent) => {
     const row = getDb().prepare("SELECT builtin, system_prompt FROM installed_agents WHERE id = ?").get(candidate.id) as { builtin: number; system_prompt: string } | undefined;
     if (!row || row.builtin || isCallOnlyHubAgent(candidate) || workspaceLeases.has(candidate.id)) return;
-    const leaseId = `${req.runId ?? "invocation"}:${candidate.id}:${randomUUID()}`;
-    const pin = acquireAgentWorkspaceRunLease(candidate.id, leaseId); workspaceLeases.set(candidate.id, leaseId); workspacePins.set(candidate.id, pin);
-    const workspace = getAgentWorkspace(candidate.id);
-    if (workspace.treeDigest !== pin.treeDigest || workspace.currentRevisionId !== pin.revisionId) throw new Error("agent_revision_changed_before_dispatch");
+    // An edit that lands between the lease and the read (the agent's own previous process finishing a write, the owner saving in an
+    // editor) moves the revision once; the lease is taken again on the new files. A second move in a row is a real conflict.
+    let leaseId = "", pin = { revisionId: "", treeDigest: "" }, workspace!: ReturnType<typeof getAgentWorkspace>;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      leaseId = `${req.runId ?? "invocation"}:${candidate.id}:${randomUUID()}`;
+      pin = acquireAgentWorkspaceRunLease(candidate.id, leaseId); workspaceLeases.set(candidate.id, leaseId); workspacePins.set(candidate.id, pin);
+      workspace = getAgentWorkspace(candidate.id);
+      if (workspace.treeDigest === pin.treeDigest && workspace.currentRevisionId === pin.revisionId) break;
+      if (attempt === 1) throw new Error("agent_revision_changed_before_dispatch");
+      try { releaseAgentWorkspaceRunLease(candidate.id, leaseId); } catch { /* a lease that cannot be released stays conservative until recovery */ }
+      workspaceLeases.delete(candidate.id); workspacePins.delete(candidate.id);
+    }
     const canonical = workspace.canonicalEntry ? readAgentWorkspaceFile(candidate.id, workspace.canonicalEntry) : null;
     if (canonical?.binary) throw new Error("agent_revision_entry_binary");
     candidate.systemPrompt = canonical?.content ?? row.system_prompt;
@@ -2796,9 +2843,9 @@ async function runMcpInvocationInContext(
     sink({ kind: "error", error: { code: "no-agent", message: tStatus(locale, "errAgentNotFound") } });
     return earlyResult();
   }
-  pinWorkspace(agent);
+  await pinWorkspaceWaiting(agent);
   for (const target of req.taskForceTargets ?? []) {
-    if (target.source === "local" && target.entityKind === "agent") { const participant = getAgentById(target.agentId); if (participant) pinWorkspace(participant); }
+    if (target.source === "local" && target.entityKind === "agent") { const participant = getAgentById(target.agentId); if (participant) await pinWorkspaceWaiting(participant); }
   }
   // A call-only Hub seat has no local instructions: its direct chat must run as
   // a Hub borrow (BYOM bundle), never as a local empty-prompt spawn. Explicit
@@ -3116,18 +3163,9 @@ async function runMcpInvocationInContext(
     runtimes = await detectRuntimes(true);
     throwIfInvocationAborted(signal, locale);
   }
-  if (boundOneTeamRuntime && !oneTeamRuntimeBindingMatches(boundOneTeamRuntime, runtimes)) {
-    sink({
-      kind: "error",
-      error: {
-        code: "one-team-runtime-changed",
-        message: locale === "ko"
-          ? "팀 확인에 사용한 런타임을 더 이상 사용할 수 없습니다. 현재 상태로 팀을 다시 검토해주세요."
-          : "The runtime selected for team confirmation is no longer available. Review the team again against the current inventory.",
-      },
-    });
-    return earlyResult();
-  }
+  // Still missing after two probes (uninstalled, signed out, moved): a runtime choice never blocks the owner's work, so the turn goes
+  // on with the current choice. The selection-changed case below records the typed one_team_runtime_rebound receipt (the confirmed
+  // runtime resolves to nothing, so `ran` is "current"); a turn with no runnable runtime at all still stops at the !picked branch.
   const installedAgents = listInstalledAgents();
   // Agent Apps are request/response surfaces, not durable chat continuations.
   // An earlier browser request must not influence a later caller's routing.
@@ -3159,7 +3197,7 @@ async function runMcpInvocationInContext(
     : null;
   if (autoRoute) {
     agent = autoRoute.agent;
-    pinWorkspace(agent);
+    await pinWorkspaceWaiting(agent);
     runtimeAgentId = agent.id;
     sink({ kind: "tool-use", status: autoRouteStatus(autoRoute, locale) });
   }
@@ -3309,6 +3347,12 @@ async function runMcpInvocationInContext(
   // decision for this turn.  Library role assignments may fill an Auto choice,
   // but must not replace this explicit pin.
   const directUserRuntimePinRequested = req.promptOrigin !== "system" && Boolean(explicitRuntimeSelection);
+  // A probe that ran out of time under load can leave the cached inventory with nothing usable in it (the same reason the pinned and
+  // One-team runtimes are read again above). "No connected model" is only said after the inventory was read again once.
+  if (!runtimes.some((runtime) => pickRunner(runtime))) {
+    runtimes = await detectRuntimes(true);
+    throwIfInvocationAborted(signal, locale);
+  }
   const runtimeResolution = selectInvocationRuntime(runtimes, runtimeTargets, {
     pin: req.runtimeSelection,
     // The room chip has the authority the owner's own turn gives it.
@@ -3419,21 +3463,39 @@ async function runMcpInvocationInContext(
       controllerFallbackBeforeRun = fallback;
     }
   }
+  /*
+   * The chosen runtime is listed but has no runner (an open ACP seat whose profile was removed, a provider this host no longer
+   * allows): the turn used to end with "Unsupported runtime combination" (catalog runtime-tools 195). Nothing the owner pinned is
+   * swapped (the unpinned condition below); any other turn runs on the next runnable runtime and says so, as it does for an
+   * unavailable Library assignment.
+   */
+  if (runtimeChoice && !runtimeChoice.picked && !runtimeResolution.pinHonored
+    && !aliveRuntimePinned && !scienceRuntimePinned && !continuationRuntimePinned) {
+    const next = nextRunnableRuntime(runtimes, runtimeChoice.active);
+    const nextPicked = next ? pickRunner(next) : null;
+    if (req.runId) tryRecordRunEvent({ runId: req.runId, chatId: req.chatId, kind: "runtime_selection_fallback",
+      payload: { schemaVersion: 1, reasonCode: "runtime_without_runner", refusedKind: runtimeChoice.active.kind, fallbackKind: next?.kind ?? null } });
+    if (next && nextPicked) {
+      runtimeChoice = { active: next, picked: nextPicked, override: null, unavailableOverride: null,
+        fallbackStage: "connected", fallbackReason: "runtime-unavailable" };
+      controllerFallbackBeforeRun = next;
+    }
+  }
+  // One answer for "the runtime this turn must use cannot run": the owner's pinned runtime is named, anything else is the
+  // plain "no connected model" sentence (never the internal combination text).
+  const runtimeUnavailableError = (): { code: string; message: string } => ({
+    code: aliveRuntimePinned ? "alive-runtime-unavailable" : scienceRuntimePinned ? "science-runtime-unavailable" : continuationRuntimePinned
+      ? "goal-runtime-unavailable" : req.oneMode
+      ? "one-runtime-unavailable"
+      : runtimeResolution.pinHonored
+        ? "pinned-runtime-unavailable"
+        : "no-runtime",
+    message: runtimeResolution.pinHonored && req.runtimeSelection
+      ? `Pinned ${aliveRuntimePinned ? "Alive" : scienceRuntimePinned ? "Science" : continuationRuntimePinned ? "Goal checkpoint" : "automation"} runtime is unavailable: ${req.runtimeSelection.kind}${req.runtimeSelection.model ? ` · ${req.runtimeSelection.model}` : ""}`
+      : tStatus(locale, "errNoRuntime"),
+  });
   if (!runtimeChoice) {
-    sink({
-      kind: "error",
-      error: {
-        code: aliveRuntimePinned ? "alive-runtime-unavailable" : scienceRuntimePinned ? "science-runtime-unavailable" : continuationRuntimePinned
-          ? "goal-runtime-unavailable" : req.oneMode
-          ? "one-runtime-unavailable"
-          : runtimeResolution.pinHonored
-            ? "pinned-runtime-unavailable"
-            : "no-runtime",
-        message: runtimeResolution.pinHonored && req.runtimeSelection
-          ? `Pinned ${aliveRuntimePinned ? "Alive" : scienceRuntimePinned ? "Science" : continuationRuntimePinned ? "Goal checkpoint" : "automation"} runtime is unavailable: ${req.runtimeSelection.kind}${req.runtimeSelection.model ? ` · ${req.runtimeSelection.model}` : ""}`
-          : tStatus(locale, "errNoRuntime"),
-      },
-    });
+    sink({ kind: "error", error: runtimeUnavailableError() });
     return earlyResult();
   }
 
@@ -3450,7 +3512,7 @@ async function runMcpInvocationInContext(
     });
   }
 
-  if (runtimeChoice.unavailableOverride) {
+  if (runtimeChoice.unavailableOverride || runtimeChoice.fallbackStage) {
     const fallbackLabel = runtimeChoice.fallbackStage === "worker"
       ? (locale === "ko" ? "Worker 런타임" : "the worker runtime")
       : (locale === "ko" ? "연결된 정상 런타임" : "another connected working runtime");
@@ -3512,16 +3574,7 @@ async function runMcpInvocationInContext(
           .filter((field) => chosen[field] !== boundOneTeamRuntime[field]) } });
   }
   if (!picked) {
-    sink({
-      kind: "error",
-      error: {
-        code: aliveRuntimePinned ? "alive-runtime-unavailable" : scienceRuntimePinned ? "science-runtime-unavailable" : "no-runner",
-        message: tStatus(locale, "errNoRunner", {
-          kind: active.kind,
-          backend: active.backend,
-        }),
-      },
-    });
+    sink({ kind: "error", error: runtimeUnavailableError() });
     return earlyResult();
   }
   const pickedForWorkforceLeader = picked;
@@ -3765,6 +3818,12 @@ async function runMcpInvocationInContext(
       throw Object.assign(new Error("mcp_goal_tool_scope_changed"), { code: "mcp-goal-tool-scope-changed" });
     }
   };
+  /**
+   * The assertion above, for the places between the tool selection and the first dispatch where the run can wait (the Hub bridge, the
+   * browser grant, the tool-table build): when the Goal moved meanwhile, the selection is made again under its present state, and the run
+   * goes on when that chose the same tools (auto-select.ts selectionKeepsTools). Replaced once the selection exists.
+   */
+  let settleGoalScope: () => Promise<void> = async () => assertMcpGoalSelectionCurrent();
   let mcpAllowedTools: string[] | undefined;
   let mcpCodexConfigArgs: string[] | undefined;
   let mcpRuntimeEnv: Record<string, string> | undefined;
@@ -4075,7 +4134,7 @@ async function runMcpInvocationInContext(
       const scopedSelectionDeps = { probeScopedServer: scopedMcpPreflight.probe };
       // The Goal can end or be revised while tool needs are judged (the previous turn's background verifier settling it);
       // the selection is made again under the Goal's present state rather than failing this turn.
-      const selectUnderCurrentGoal = (stage: "tool-selection" | "key-gate") => selectUntilGoalScopeSettled(
+      const selectUnderCurrentGoal = (stage: "tool-selection" | "key-gate" | "config-build") => selectUntilGoalScopeSettled(
         () => autoSelectMcpTools(autoSelectInput, scopedSelectionDeps),
         { onReselect: (attempt) => tryRecordRunEvent({ runId: req.runId!, chatId: chat.id, kind: "mcp_goal_scope_reselected",
           payload: { schemaVersion: 1, stage, attempt, reasonCode: "goal-scope-moved-during-selection" } }) },
@@ -4125,21 +4184,26 @@ async function runMcpInvocationInContext(
       if (selectedContext.goalSelectionIsCurrent?.() === false) selectedContext = await selectUnderCurrentGoal("key-gate");
       mcpGoalSelectionIsCurrent = selectedContext.goalSelectionIsCurrent;
       assertMcpGoalSelectionCurrent();
+      const preparedSelection = selectedContext;
+      settleGoalScope = async () => {
+        if (mcpGoalSelectionIsCurrent && !mcpGoalSelectionIsCurrent()) {
+          const again = await selectUnderCurrentGoal("config-build");
+          if (selectionKeepsTools(preparedSelection, again)) {
+            mcpGoalSelectionIsCurrent = again.goalSelectionIsCurrent;
+            mcpGoalSelectionInvalidated = false;
+          }
+        }
+        assertMcpGoalSelectionCurrent();
+      };
       // A selection failure does not establish that a provider is disconnected
       // or authorize suggesting a runtime outside the user's configured pool.
       const needsOutcome = selectedContext.needsOutcome;
       const undecidedCostSomething = !selectedContext.needsDecided && (needsOutcome?.candidateCount ?? 0) > 0;
       if (undecidedCostSomething) {
-        sink({
-          kind: "notice",
-          notice: {
-            level: "info",
-            code: "mcp-selection-undecided",
-            message: locale === "ko"
-              ? "연결된 도구로 작업을 계속합니다. 추가 도구 확인은 이번에 완료되지 않았습니다."
-              : "Continuing with the configured tools. The check for additional tools did not finish this time.",
-          },
-        });
+        // Internal bookkeeping, not news for the owner (441 such lines in 26 rooms in 30 days, "Continuing with the configured tools ..."):
+        // the run goes on with the configured tools either way. The ledger keeps the fact for diagnosis; nothing is drawn in the room.
+        tryRecordRunEvent({ runId: req.runId!, chatId: chat.id, kind: "mcp_selection_undecided",
+          payload: { schemaVersion: 1, reasonCode: "mcp-selection-undecided", candidateCount: needsOutcome?.candidateCount ?? 0 } });
       }
       isolatedMcpConfig = selectedContext.effectiveToolMode === "browser";
       if (keyGate.outcome !== "skipped") {
@@ -4332,7 +4396,7 @@ async function runMcpInvocationInContext(
       }
       // Hub/credential setup may await user or network work. Re-check the
       // selected server bindings before materializing their runtime config.
-      assertMcpGoalSelectionCurrent();
+      await settleGoalScope();
       // Every owner task uses the same native login session. Visibility and
       // executionContext choose presentation/authority, never another cookie store.
       // AgentApp sessions retain their explicitly separate runtime boundary.
@@ -4352,11 +4416,15 @@ async function runMcpInvocationInContext(
         && graphTeamGrantCurrent(executionContext.graphTeamGrant) && executionContext.graphTeamGrant.runId === req.runId
         && executionContext.graphTeamGrant.chatId === req.chatId && executionContext.graphTeamGrant.automationId === req.automationId
         && executionContext.graphTeamGrant.nodeId === executionContext.nodeId ? executionContext.graphTeamGrant : null;
-      const cfg = await buildMcpConfigFile({
+      // Captured once: an opaque handle for this run, not something a second build should mint again.
+      const osMemoryCuratorRun = captureNativeOsCuratorRun({ runId: req.runId!, model: confirmedRuntime.model ?? "",
+        current: isMcpConfigCurrent, signal });
+      // A function, so a build that failed because the app's own host was not ready yet can be made again with a fresh sealed config
+      // (retryMcpConfigBuild below); everything it reads is already decided.
+      const buildConfig = () => buildMcpConfigFile({
         ...(workSessionMain && req.runId ? { workSession: { runId: req.runId, runtimes, runtimeSelection: req.runtimeSelection, workspace: resolvedResultFolder } } : {}),
         ...(graphTeamGrant ? { graphTeamGrant } : {}),
-        osMemoryCuratorRun: captureNativeOsCuratorRun({ runId: req.runId!, model: confirmedRuntime.model ?? "",
-          current: isMcpConfigCurrent, signal }),
+        osMemoryCuratorRun,
         supervisorReplyRunId: req.runId,
         nativeScopedSelectionForServer: scopedMcpPreflight.selectionForServer,
         // Graph nodes can share a runId. Every preparation, including doctor
@@ -4424,12 +4492,18 @@ async function runMcpInvocationInContext(
           ...(req.oneTeamReportTurn === true ? { oneTeamReport: true as const } : {}),
         },
       });
+      // The app's own host not being ready (tool gate not listening, OS host restarting, store lock) is waited out here, a few seconds
+      // at most, before the run is given up; nothing has reached the model either way (turnDelivery "not-dispatched" below).
+      const cfg = await retryMcpConfigBuild(buildConfig, {
+        code: mcpConfigFailureCode, signal, current: isMcpConfigCurrent,
+        onRetry: ({ attempt, delayMs, code }) => console.info("[mcp] tool table not ready, building again", { runId: req.runId, attempt, delayMs, code }),
+      });
       mcpConfigCleanup = cfg?.cleanup;
       if (!isMcpConfigCurrent()) {
         mcpConfigCleanup?.();
         throw new Error("mcp_invocation_scope_ended");
       }
-      assertMcpGoalSelectionCurrent();
+      await settleGoalScope();
       if (nativeBrowserGrant && !cfg?.nativeBrowserBound) {
         throw new Error("native-browser-config-unbound");
       }
@@ -4456,7 +4530,9 @@ async function runMcpInvocationInContext(
           if (browserAttached) {
             const unbind = ladder.bindBrowserLadderRun({ chatId: ladderChatId, runId: ladderRunId, locale: pickLocale(req), notify: ladderNotify,
               nativeGrant: nativeBrowserGrant ?? null, nativeRequired: !req.agentAppMode,
-              nativeComputerUseAvailable: cfg?.nativeComputerUseBound === true });
+              nativeComputerUseAvailable: cfg?.nativeComputerUseBound === true,
+              // The browser self-mend is the run's: the owner's Stop (or the end of the run) ends it.
+              isLive: () => !browserLadderSettled && isMcpConfigCurrent() });
             if (browserLadderSettled) unbind(); else unbindBrowserLadder = unbind;
           } else if (browserNeeded) {
             ladder.recordBrowserMcpNotAttached({ chatId: ladderChatId, runId: ladderRunId, locale: pickLocale(req), notify: ladderNotify,
@@ -4843,7 +4919,7 @@ async function runMcpInvocationInContext(
   // last shared point before any direct, group, firm, swarm, or borrowed runner
   // can start. A deleted/replaced directory cannot inherit the earlier check.
   if (workspaceBinding) revalidateInvocationWorkspaceBinding(workspaceBinding);
-  assertMcpGoalSelectionCurrent();
+  await settleGoalScope();
   let coreStormbreakerHarnessPromise: ReturnType<typeof stormbreakerHarness> | null = null;
   const loadCoreStormbreakerHarness = () => {
     coreStormbreakerHarnessPromise ??= stormbreakerHarness({
@@ -5002,6 +5078,11 @@ async function runMcpInvocationInContext(
       if (finalEvent?.durableAssistantMessageIdForVerification) params.sink({
         kind: "partial", text: "", durableMessageId: finalEvent.durableAssistantMessageIdForVerification,
       });
+      // The class of the cause, read from the typed report (task-force-settlement.ts taskForceCauseClass). The code below stays the one
+      // label the Goal follower holds on; the class and, for a sign-in or capacity cause, the provider's own typed failure ride beside it
+      // so the Goal wake and the transcript can tell an outside cause from the app's own.
+      const causeClass = taskForceCauseClass(result.failureReport);
+      const providerFailure = causeClass === "login" || causeClass === "capacity" ? taskForceProviderFailure(result.failureReport) : null;
       params.sink({
         ...finalEvent, kind: "error",
         text: finalEvent?.text ?? result.text,
@@ -5013,6 +5094,8 @@ async function runMcpInvocationInContext(
           code: "task-force-verification-failed",
           message: finalEvent?.text?.trim() || result.text?.trim()
             || (locale === "ko" ? "남은 작업과 원인을 확인하고 있습니다." : "Reviewing the remaining work and its cause."),
+          ...(causeClass ? { causeClass } : {}),
+          ...(providerFailure ? { runtimeFailure: providerFailure } : {}),
           ...(result.failureReport?.causes.length && result.failureReport.causes.every(cause => cause.delivery === "not-dispatched")
             && !result.failureReport.effects.some(effect => ["attempted", "uncertain", "verified"].includes(effect.state))
             ? { turnDelivery: "not-dispatched" as const } : {}),
@@ -6049,6 +6132,9 @@ async function runMcpInvocationInContext(
   if (approvedOneAttachmentContext) { turnContextParts.push(approvedOneAttachmentContext); declareLastTurnContext("attachments.one", "turn-context", ["attachments"]); }
   const approvedWorkAttachmentContext = mainWorkAttachmentContext(req, resolvedResultFolder);
   if (approvedWorkAttachmentContext) { turnContextParts.push(approvedWorkAttachmentContext); declareLastTurnContext("attachments.work", "turn-context", ["attachments"]); }
+  // The send queue's second send of an owner message whose first run was lost without a cause (invocation/earlier-attempt.ts): one line, so the
+  // model checks what already happened before it acts. Only the queue sets the marker; the renderer's own requests never carry it.
+  if (hasEarlierAttempt(req)) { turnContextParts.push(EARLIER_ATTEMPT_LINE); declareLastTurnContext("attempt.earlier", "turn-context", ["owner-input"]); }
   if (autoRoute) {
     const routePreamble = autoRouteSystemPreamble(
       autoRoute,
@@ -7334,8 +7420,8 @@ async function runMcpInvocationInContext(
           ? (originalFailure ?? failure).runtime
           : null;
         if (signedOutRuntime) {
-          const koAuth = `${signedOutRuntime} 로그인이 만료됐거나 되어 있지 않습니다. 아래 로그인 버튼을 누르면 로그인 창이 열리고, 끝나면 같은 요청을 다시 보내면 됩니다.`;
-          const enAuth = `${signedOutRuntime} is not signed in, or its session expired. Use the sign-in button below, then send the same request again.`;
+          const koAuth = `${runtimeDisplayName(signedOutRuntime)} 로그인이 만료됐거나 되어 있지 않습니다. 아래 로그인 버튼을 누르면 로그인 창이 열리고, 끝나면 같은 요청을 다시 보내면 됩니다.`;
+          const enAuth = `${runtimeDisplayName(signedOutRuntime)} is not signed in, or its session expired. Use the sign-in button below, then send the same request again.`;
           sink({
             kind: "notice",
             model: failure.runtime,
@@ -7354,8 +7440,15 @@ async function runMcpInvocationInContext(
           });
           return result;
         }
-        const koMessage = `실행 ${attemptCount}회 시도 후 복구를 멈췄습니다. 중단 이유와 원래 실패 원인은 자세히에서 확인하세요.`;
-        const enMessage = `Recovery stopped after ${attemptCount} execution attempt${attemptCount === 1 ? "" : "s"}. See details for the stopping reason and original failure.`;
+        // The cause is the provider's (nothing else lands here: a sign-in has its own card above, a keychain refusal returned earlier), so the
+        // sentence names whose it was and what to do; the stopping reason and the original failure stay in the details.
+        // The runtime is named as the owner knows it ("Claude Code"), never by its machine id, and an engine on the owner's own machine (Ollama,
+        // LM Studio, MLX) is not a provider: the sentence does not blame one (regression review C13).
+        const stoppedRuntime = (originalFailure ?? failure).runtime;
+        const stoppedName = runtimeDisplayName(stoppedRuntime);
+        const ownMachine = runtimeCostClass(stoppedRuntime) === "local";
+        const koMessage = `${stoppedName} ${ownMachine ? "모델이" : "쪽 문제로"} ${attemptCount}번 시도했지만 답을 받지 못했습니다. 요청은 저장돼 있으니 잠시 뒤 다시 보내거나 다른 모델을 골라 주세요. 자세한 원인은 자세히에서 볼 수 있어요.`;
+        const enMessage = `${stoppedName} did not answer after ${attemptCount} attempt${attemptCount === 1 ? "" : "s"}${ownMachine ? "" : " (a provider-side problem)"}. Your request is saved: send it again in a moment or pick another model. The details hold the cause.`;
         sink({
           kind: "notice",
           model: failure.runtime,
@@ -7386,12 +7479,35 @@ async function runMcpInvocationInContext(
           unattended: isUnattendedExecution(executionContext), attempt: storeBusyRetries, resumeBudget: 0, fallbackAvailable: false });
         if (settlement.action !== "retry") return false;
         storeBusyRetries += 1;
-        const koRetry = "Agentlas 저장소가 다른 기록으로 잠시 잠겨 있어 같은 요청을 곧 다시 보냅니다. 모델에는 아직 아무것도 보내지 않았습니다.";
-        const enRetry = "The Agentlas store was briefly locked by another write; sending the same request again shortly. Nothing has reached the model yet.";
-        runnerEvents.onNotice({ level: "info", code: "runtime-store-busy-retry", message: locale === "ko" ? koRetry : enRetry,
-          i18n: { ko: koRetry, en: enRetry },
-          details: JSON.stringify({ runtime: active.kind, providerCode: STORE_BUSY_CODE, attempt: storeBusyRetries,
-            delayMs: settlement.delayMs, reason: settlement.reason }) });
+        // The app's own store lock, waited out before any model call: not news for the owner. The ledger keeps the fact (a room line used to say it).
+        if (req.runId) tryRecordRunEvent({ runId: req.runId, chatId: chat.id, kind: "runtime_store_busy_retry",
+          payload: { schemaVersion: 1, runtime: active.kind, providerCode: STORE_BUSY_CODE, attempt: storeBusyRetries,
+            delayMs: settlement.delayMs, reason: settlement.reason } });
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(() => { signal?.removeEventListener("abort", stop); resolve(); }, settlement.delayMs);
+          const stop = (): void => { clearTimeout(timer); resolve(); };
+          signal?.addEventListener("abort", stop, { once: true });
+        });
+        throwIfInvocationAborted(signal, locale);
+        return true;
+      };
+      /*
+       * A host loop's model (local models, BYOK, Agentlas serving) that ended its turn with no text and no tool call, with no tool
+       * dispatched in the whole turn, produced nothing: no tool ran, so nothing can repeat. The same request goes out once more on
+       * the same runtime before the owner is told the model had no answer (shared/turn-settlement.ts decideTurnSettlement, kind
+       * "empty" with an EMPTY_NO_TOOL_RAN_CODES code). A graph step is left to its graph and an Alive wake keeps its single
+       * provider-usage marker, as for the store lock above. True when the caller should run the attempt again.
+       */
+      let emptyReplyRetries = 0;
+      const retryEmptyReply = async (failure: RunnerFailure | undefined): Promise<boolean> => {
+        if (!failure || signal?.aborted || executionContext?.graphWorkerAttempt || executionContext?.source === "alive") return false;
+        const settlement = decideTurnSettlement({ outcome: "failed", kind: failure.kind, providerCode: failure.providerCode,
+          unattended: isUnattendedExecution(executionContext), attempt: emptyReplyRetries, resumeBudget: 0, effectsObserved: false });
+        if (settlement.action !== "retry" || settlement.reason !== "empty_reply") return false;
+        emptyReplyRetries += 1;
+        // Like a throttle or store-lock retry, it must not use up the attempt that moves to the next runtime.
+        throttleRetriesSpent += 1;
+        runnerEvents.onStatus(locale === "ko" ? "모델이 아무 답도 하지 않아 같은 요청을 한 번 더 보냅니다…" : "The model returned nothing; sending the same request once more…");
         await new Promise<void>((resolve) => {
           const timer = setTimeout(() => { signal?.removeEventListener("abort", stop); resolve(); }, settlement.delayMs);
           const stop = (): void => { clearTimeout(timer); resolve(); };
@@ -7549,6 +7665,7 @@ async function runMcpInvocationInContext(
         if (result.text.trim()) { creditRetryBlocked = true; noteGraphWorkerActivity(executionContext?.graphWorkerAttempt); }
         if (!runnerResultRefusedBeforeDispatch(result) && (result.turnDelivery === "accepted" || result.ownerControlTerminal === "completed")) recordTurnPlacement("terminal");
         persistGoalUsage(result.observedUsage);
+        if (result.failure?.kind === "empty" && await retryEmptyReply(result.failure)) continue;
         // A partial reply without a proven terminal is an unknown effect,
         // never permission to retry this request on another brain.
         // "Cannot use it now" is a fact, not a retry: a runner-typed quota / rate limit / sign-in refusal still cools the
@@ -8729,20 +8846,28 @@ async function runMcpInvocationInContext(
             } else {
               startedTool = "automation.create";
               sink({kind:"tool-use",tool:{id:registrationOperationId,name:"automation.create",args:JSON.stringify({name:a.name})}});
-              const creationRevision = activeGoalId ? getChatGoalRevision(activeGoalId) : null;
-              const finiteCreation = creationRevision?.lifecycle === "finite";
               // A failed finite binding must roll back creation, never leave an independent automation behind.
               const { created, unboundReason } = desktopStoreTransaction(getDb(), () => {
+                // The Goal is read fresh here, inside the transaction that creates the automation: it may have moved (an amendment or
+                // a re-plan raised its revision) or ended since this turn began (graph row 436, owner). A moved Goal is
+                // bound at the revision it has now, so the automation still stops with it; one that no longer exists for this chat
+                // leaves nothing to stop the automation with, so it is created unbound. Neither sends the request back.
+                // The owner's Stop wins: a turn that was stopped meanwhile, or a Goal the owner stopped or deleted during it, registers nothing.
+                if (signal?.aborted || (activeGoalId && goalStoppedByOwner(activeGoalId, chat.id))) throw new Error("goal_automation_owner_stopped");
+                const creationRevision = activeGoalId ? liveGoalForAutomationCreation(activeGoalId, chat.id) : null;
+                const goalEnded = Boolean(activeGoalId) && !creationRevision && getChatGoalRevision(activeGoalId!) !== null;
+                const finiteCreation = creationRevision?.lifecycle === "finite";
                 const finiteDeadline = finiteCreation && activeGoalId ? goalDeadlineAt(activeGoalId) : null;
                 // A Goal-made automation ends at its finite Goal's deadline. A finite Goal with no host-resolved deadline
                 // (a single-tactic shape has none) was asked for standing work that outlives it, so that automation is
                 // created unbound (harness decision 2026-10-17; dev A/B4 O2 was refused here). Each refusal cause keeps
                 // its own code for the owner's refusal text.
                 const boundFinite = finiteCreation && finiteDeadline !== null;
-                const unboundReason = finiteCreation && !boundFinite ? "goal_automation_unbound_no_deadline" as const : null;
+                const unboundReason = finiteCreation && !boundFinite ? "goal_automation_unbound_no_deadline" as const
+                  : goalEnded ? "goal_automation_unbound_goal_ended" as const : null;
                 if (boundFinite && Date.parse(finiteDeadline!) <= Date.now()) throw new Error("goal_automation_finite_deadline_passed");
-                if (boundFinite && (creationRevision.chatId !== chat.id || typeof req.runId !== "string"))
-                  throw new Error("goal_automation_binding_source_unverified");
+                // The Goal read above belongs to this chat by construction; only a turn without a run id cannot be bound.
+                if (boundFinite && typeof req.runId !== "string") throw new Error("goal_automation_binding_source_unverified");
                 if (boundFinite) assertFiniteGoalLifecycleCurrent({ goalId: activeGoalId!,
                   rootChatId: chat.id, expectedRevision: creationRevision.revision });
                 const created = createAutomation({
@@ -9217,7 +9342,11 @@ async function runMcpInvocationInContext(
       }
     }
     const finalImageOptions = finalWorkImages.length > 0 ? { images: finalWorkImages } : undefined;
-    let durableAssistantEntry: ReturnType<typeof appendChatMessage> | null = null;
+    let durableAssistantEntry = null as ReturnType<typeof appendChatMessage> | null;
+    // The turn already ran and its answer is held here: a store that stays locked past its busy wait is waited out, and the whole saving block
+    // runs again (it writes nothing before the answer's own row, so a refused attempt leaves nothing behind). The turn never runs again
+    // (catalog runtime-tools row 40: "could not be fully recorded ... it was not sent again" for a finished answer).
+    const saveFinalAnswer = async (): Promise<void> => {
     if (!effectObservationRun && !req.agentAppMode) {
       /*
        * ★빈 답은 빈 말풍선으로 남기지 않는다 — 대화창 하단에 아무것도 안 적힌 잔해만
@@ -9257,6 +9386,8 @@ async function runMcpInvocationInContext(
       // gap-replay가 자기 답변을 중복 주입하지 않고, 스웜/다른 러너 턴만 메우게 된다.
       if (sessionCapableRuntime) touchRuntimeSession(chat.id, active.kind, agent.id);
     }
+    };
+    await runWithStoreBusyPatience(saveFinalAnswer);
     /*
      * ★어느 세대가 실제로 돌았는지 기록한다 (오너 2026-09-07: "버전 바뀌어도 알아서
      * 읽게 해라"). claude-code 는 모델 목록 명령이 없어 우리가 보낼 수 있는 것이 벤더

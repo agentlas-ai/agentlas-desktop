@@ -510,7 +510,7 @@ export async function applyAutomationFix(
     const { getDb }=await import("./store/db");
     const { updateAutomationGraph }=await import("./store/automations");
     try {
-      const base=captureGraphProposalBase(automationId), checked=superviseGraph(base.graph);
+      const base=captureGraphProposalBase(automationId), checked=superviseGraph(base.graph,{ prior: base.graph });
       if (!checked.verification.repairedNodeIds.length) return {ok:false,message:ko?"적용할 구조 수정이 없습니다.":"There is no structural repair to apply.",navigate:null,plan:null};
       desktopStoreTransaction(getDb(),()=>{assertGraphProposalBase(base);updateAutomationGraph(automationId,checked.graph,{note:"Verified structural repair",strictSnapshot:true});}).immediate();
       return {ok:true,message:ko?"그래프 구조를 검증하고 수정본을 저장했습니다. 실제 실행 결과는 아직 확인하지 않았습니다.":"The repaired graph passed structural verification and was saved. Its runtime outcome has not been checked.",

@@ -97,6 +97,24 @@ export const HUMAN_CHECK_POLL_MS = 2_000;
 export const LADDER_STOP_COOLDOWN_MS = 5 * 60_000;
 
 /**
+ * Stops the app can mend by itself in the background: a Chrome that can be started again, an in-app relay session that can be revived,
+ * a bridge wire that reconnects, a port a foreign program may release. The owner is not asked until the app has tried again by itself:
+ * while the run that hit the stop is alive the app re-establishes the browser after SELF_HEAL_DELAYS_MS, a recovery clears the cached stop,
+ * and the owner's card is raised only if every try failed and the run is still alive. The mend belongs to the run: the owner's Stop or the
+ * end of the run ends it (no relaunch, no alert). The cached stop keeps the full LADDER_STOP_COOLDOWN_MS, so the full ladder (a Chrome
+ * relaunch among its rungs) runs no more often than it always did. The other stops need the owner's window or panel, or are
+ * not ours to fix (a closed in-app window, a full tab list, a run with no browser attached), a login wall or a human check is the
+ * owner's, and a page that never loaded is the site's or the network's: their card is not delayed.
+ */
+export const SELF_HEALING_BROWSER_CODES: ReadonlySet<BrowserFailureCode> = new Set<BrowserFailureCode>([
+  "bridge-wire-dropped", "chrome-launch-failed", "chrome-crashed", "ownership-unverifiable", "port-foreign", "native-session-ended",
+]);
+export const SELF_HEAL_DELAYS_MS: readonly number[] = Object.freeze([30_000, 90_000, 240_000]);
+export function isSelfHealingBrowserFailure(code: BrowserFailureCode): boolean {
+  return SELF_HEALING_BROWSER_CODES.has(code);
+}
+
+/**
  * Ordered rungs per failure. Human checks never switch surface (a different browser to get past a check would
  * be evasion); they wait for the owner. A foreign port is re-inspected, never killed.
  */

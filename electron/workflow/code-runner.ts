@@ -41,6 +41,7 @@ import {
   killCliTree,
   nodeExecPathForCode,
   trackRunChild,
+  withCliPath,
 } from "../runtime/exec";
 import { userDataPath } from "../runtime-paths";
 import { currentUiLocale } from "../ui-locale";
@@ -334,6 +335,26 @@ function safePipName(name: string): string | null {
   return /^[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9,._-]+\])?(==[A-Za-z0-9.*+!_-]+)?$/.test(v) ? v : null;
 }
 
+/**
+ * Import names whose pip distribution is named differently. A step declares (or the missing-module rescue reads from the traceback)
+ * the name Python imports, and `pip install PIL` or `pip install cv2` finds nothing: the step failed CODE_DEPENDENCY_MISSING for a
+ * package that exists under another name. The table is a fact about the Python ecosystem, closed and small; a name it does not
+ * know goes to pip unchanged, as before. A version pin or extras suffix is kept.
+ */
+const PIP_DISTRIBUTION_FOR_IMPORT: Readonly<Record<string, string>> = Object.freeze({
+  pil: "Pillow", cv2: "opencv-python", sklearn: "scikit-learn", skimage: "scikit-image", yaml: "PyYAML", bs4: "beautifulsoup4",
+  dateutil: "python-dateutil", dotenv: "python-dotenv", docx: "python-docx", pptx: "python-pptx", jwt: "PyJWT", serial: "pyserial",
+  usb: "pyusb", crypto: "pycryptodome", openssl: "pyOpenSSL", git: "GitPython", nacl: "PyNaCl", zmq: "pyzmq", fitz: "PyMuPDF",
+  telegram: "python-telegram-bot", slugify: "python-slugify", magic: "python-magic", attr: "attrs", mysqldb: "mysqlclient",
+  fonttools: "fonttools", markdown: "Markdown", jinja2: "Jinja2", ruamel: "ruamel.yaml", win32com: "pywin32", wx: "wxPython",
+});
+export function pipDistributionFor(declared: string): string {
+  const match = /^([A-Za-z0-9._-]+)(\[[A-Za-z0-9,._-]+\])?(==[A-Za-z0-9.*+!_-]+)?$/.exec(declared);
+  if (!match) return declared;
+  const known = PIP_DISTRIBUTION_FOR_IMPORT[match[1].toLowerCase()];
+  return known ? `${known}${match[2] ?? ""}${match[3] ?? ""}` : declared;
+}
+
 function pythonDepsDir(): string {
   try {
     // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -373,7 +394,8 @@ async function ensurePythonPackages(
   const have = readInstalled(dir);
   const installedNow: string[] = [];
   for (const raw of packages) {
-    const name = safePipName(raw);
+    const safe = safePipName(raw);
+    const name = safe ? pipDistributionFor(safe) : null;
     if (!name) return { ok: false, installedNow, failed: { name: String(raw), reason: L("패키지 이름 형식이 올바르지 않습니다.", "The package name is not valid.") } };
     if (have.has(name.toLowerCase())) continue;
     const r = await new Promise<{ code: number | null; err: string }>((resolve) => {
@@ -447,7 +469,11 @@ export async function runCodeStep(input: CodeRunInput): Promise<CodeRunResult> {
   const { file, cleanup } = materializeScript(harness, input.lang);
   try {
     const scratch = path.dirname(file);
-    const childEnv = sandboxChildEnvironment(process.env, scratch);
+    // The PATH the CLI runtimes get (runtime/exec.ts withCliPath): an app opened from the Dock inherits launchd's minimal PATH
+    // (/usr/bin:/bin:/usr/sbin:/sbin), so a step that runs `ffmpeg` or `ffprobe` died with FileNotFoundError although
+    // /opt/homebrew/bin has them (observed on one machine: both were installed). The credential and startup-hook
+    // scrub of sandboxChildEnvironment still applies after the PATH is built.
+    const childEnv = sandboxChildEnvironment(withCliPath(process.env), scratch);
     const env = input.lang === "python"
       ? withPythonCacheBoundary({ ...childEnv, ...windowsPythonUtf8Env() })
       : childEnv;

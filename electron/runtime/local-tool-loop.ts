@@ -142,6 +142,10 @@ export interface MainToolDispatchResult {
   content: string;
   visionMessage: ChatMessage | null;
   isError: boolean;
+  /** An MCP call that was sent and got no answer back: its time limit ran out ("timeout") or the transport was lost ("transport").
+   * Machine fact read from the error's type, never from its text. A read-only caller may ask again; absent for every answer, a
+   * refusal before the request left, and an abort. */
+  callEnd?: "timeout" | "transport";
   /** Provenance of `content` (docs native-harness 07 G02): tool output is data and never drives grants, goals or consent. */
   trust?: ToolResultTrust;
   /** The effect already ran before a crash; this is its recorded result, not a new execution (effect ledger G12). */
@@ -219,6 +223,8 @@ export type ResolvedTool =
  * 사용자는 언제든 중지할 수 있고(req.signal), 각 왕복은 사용자가 보는 중에 일어난다.
  */
 const MAX_TOOL_LOOP_TURNS = 200;
+/** The repair nudge of the empty-answer turn and of the last turn of the bound (ledger part "repair nudge user message 'tools: done. Answer the user ...'"). */
+export const TOOLS_DONE_ANSWER_NUDGE = "tools: done. Answer the user: what was done + result, brief prose. No tools, no Memory Events, no JSON.";
 /** Shared host-loop progress consumes completed outcomes, never a request alone. */
 export function createToolLoopProgress(runtimeKind: string, req: RunnerRequest, target: RunnerEvents): {
   events: RunnerEvents;
@@ -1264,6 +1270,7 @@ async function dispatchMainToolRawUnchecked(
       content: `Error: ${message}`,
       visionMessage: null,
       isError: true,
+      ...(mcpEnd === "timeout" || mcpEnd === "transport" ? { callEnd: mcpEnd } : {}),
     };
   }
   // The journal records how the call ended before delivery is awaited: delivery can still reject (a run abort is rethrown there),
@@ -1786,6 +1793,8 @@ async function runLocalOpenAiChatInner(
   let finalText = "";
   let sawAnyToolCall = false;
   let summaryTurnRequested = false;
+  /** The last permitted turn asks for the answer with no tools offered (the run kept calling tools for the whole bound). */
+  let answerOnlyPass = false;
   let sawUnsupportedToolCallAttempt = false;
   /** 루프가 답에 도달해서 끝났는가. false로 빠져나오면 도구 왕복만 하다 멈춘 것. */
   let reachedAnswer = false;
@@ -1932,6 +1941,14 @@ async function runLocalOpenAiChatInner(
   try {
   for (let turn = 0; turn < MAX_TOOL_LOOP_TURNS; turn += 1) {
     if (req.signal?.aborted) throw abortReasonError(req);
+    // A run that used every permitted turn on tools gets one last turn to say what it did: the same registered turn-context line the empty-answer
+    // nudge uses (ledger desktop.main.local-tool-loop.system-adjustments), and no tools offered, so the model can only answer. Only a run that
+    // really worked through tools; if even this turn asks for a tool, the run ends as before.
+    if (turn === MAX_TOOL_LOOP_TURNS - 1 && turn > 0 && sawAnyToolCall && !summaryTurnRequested && !req.untrustedNoTools) {
+      summaryTurnRequested = true;
+      answerOnlyPass = true;
+      messages.push({ role: "user", content: TOOLS_DONE_ANSWER_NUDGE });
+    }
     if (turn > 0 && req.ownerControlInbox) {
       const batch = req.ownerControlInbox.take("current-boundary").filter((entry) => {
         if (ownerControlSeen.has(entry.intentId)) return false;
@@ -1968,7 +1985,7 @@ async function runLocalOpenAiChatInner(
               ? { [outputField]: Math.max(outputTokenFloor ?? 0, turnReserve ?? Math.min(8_192, Math.floor(opts.estimatedContextWindow / 4))) }
               : {}),
             ...("send" in effortPlan && !effortRejected ? { reasoning_effort: effortPlan.send } : {}),
-            ...(tools.length > 0 ? { tools } : {}),
+            ...(tools.length > 0 && !answerOnlyPass ? { tools } : {}),
             /*
              * ★제약 디코딩 — 형식 붕괴를 배선으로 없앤다.
              *
@@ -2369,7 +2386,7 @@ async function runLocalOpenAiChatInner(
       if ((!(continuedText + result.text).trim() || envelopeOnly) && sawAnyToolCall && !req.untrustedNoTools && !summaryTurnRequested) {
         summaryTurnRequested = true;
         messages.push({ role: "assistant", content: result.text });
-        messages.push({ role: "user", content: "tools: done. Answer the user: what was done + result, brief prose. No tools, no Memory Events, no JSON." });
+        messages.push({ role: "user", content: TOOLS_DONE_ANSWER_NUDGE });
         continue;
       }
       finalText = continuedText ? continuedText + (result.rawText ?? result.text) : result.text;

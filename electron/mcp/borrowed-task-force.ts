@@ -84,6 +84,7 @@ import {
 } from "../runtime/untrusted-error";
 import { isJudgmentRefusal } from "../runtime/judgment-refusal";
 import { runnerFailureFromError, RuntimeTurnUnsettledError, SURFACE_INTENT_MARKER } from "../runtime/runner";
+import { isHostInternalException } from "../invocation/host-internal-failure";
 import { WORK_PROJECT_RESIDENCY_BUSY_CODE } from "../runtime/project-residency";
 import { runTeamStepWithSettlement, teamStepFailureNote, type TeamStepFailureNote, type TeamStepSettlementPhase } from "./team-step-settlement";
 import { degenerateOutputReceipt, runGuardedTeamStep, WORKER_OUTPUT_DEGENERATE_CODE } from "../runtime/degenerate-output";
@@ -2972,8 +2973,18 @@ export function taskForceUnreportedEffectState(input: {
   calls: readonly TaskForceObservedOutwardCall[]; dropped?: boolean; runtimeKinds?: readonly string[];
 }): "not-attempted" | "uncertain" {
   if (input.dropped) return "uncertain";
-  if ((input.runtimeKinds ?? []).some((kind) => kind === "cursor" && acpDisabledFor("cursor"))) return "uncertain";
+  if (taskForceRunnerReportsNoToolRows(input.runtimeKinds)) return "uncertain";
   return input.calls.every(taskForceCallIsProvablyLocal) ? "not-attempted" : "uncertain";
+}
+
+/**
+ * A runner that reports no tool rows at all (the legacy cursor hand driver, with ACP disabled): the host sees no call from it, so "no
+ * call seen" proves nothing there. One definition for both questions asked of a unit's observed calls: the state of an effect the worker
+ * said nothing about (taskForceUnreportedEffectState) and whether the step may be run again after the app's own exception (the team's
+ * `unitActedOutward`: a blind runner is treated as having acted, regression review C11).
+ */
+export function taskForceRunnerReportsNoToolRows(runtimeKinds: readonly string[] | undefined): boolean {
+  return (runtimeKinds ?? []).some((kind) => kind === "cursor" && acpDisabledFor("cursor"));
 }
 
 export type TaskForceReviewRepairSkip = "step_missing" | "unit_not_completed" | "review_not_completed"
@@ -4978,12 +4989,55 @@ interface BorrowedAgentResult {
   nestedExecutionEvidence?: WorkforceNestedExecutionEvidence;
 }
 
-function taskForceErrorReport(error: unknown, stepId: string): ExecutionFailureReport {
-  return executionFailureReport({ outcome: "failed", causes: [readExecutionFailureCause(error, {
+/**
+ * The app's own exception behind a step failure (host-internal-failure.ts: an exception class, a SQLite driver error or a syscall
+ * error, never prose), found on the error or on its standard `cause` chain; null when there is none. A failure the runner typed
+ * itself (a returned result) is never this: the runner's wrapper (observeTaskForceModelCall) puts the original exception on `cause`
+ * and types the wrapper as an "exit" failure from its message, which is a guess about the provider, not a fact about it.
+ */
+export function taskForceInternalException(error: unknown): object | null {
+  const seen = new Set<unknown>();
+  for (let link: unknown = error, depth = 0; link && typeof link === "object" && depth < 4 && !seen.has(link); depth += 1) {
+    seen.add(link);
+    if (isHostInternalException(link)) return link as object;
+    try { link = (link as { cause?: unknown }).cause; } catch { return null; }
+  }
+  return null;
+}
+
+/**
+ * `ownException` is the app's own exception behind the step (taskForceInternalException) when the caller's replay guard allows
+ * calling it that: the step did not act outward before it threw. The cause is then read from that exception, not from the
+ * runner wrapper's guess about the provider, and typed `internal` so the room settles it as work left (task-force-settlement.ts).
+ */
+function taskForceErrorReport(error: unknown, stepId: string, ownException: object | null = null): ExecutionFailureReport {
+  const cause = readExecutionFailureCause(ownException ?? error, {
     phase: error instanceof DelegatedAuthorityError ? "admission"
       : error instanceof WorkerCapabilityError && error.turnDelivery === "not-dispatched" ? "preparation" : "execution",
     stepId, fallbackCode: "task_force_step_failed",
-  })] });
+  });
+  const own = ownException !== null && cause.phase === "execution" && cause.httpStatus === undefined && cause.retryAfterMs === undefined
+    && cause.retryAfterHint === undefined && cause.recovery === "none";
+  return executionFailureReport({ outcome: "failed", causes: [own ? { ...cause, internal: true } : cause] });
+}
+
+/** The pause before the room runs a step once more after the app's own exception (a store lock, a transient file error). */
+const OWN_EXCEPTION_RETRY_PAUSE_MS = 400;
+/** A pause that ends the moment the room is stopped. */
+function taskForceStepPause(ms: number, signal: AbortSignal | undefined): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal?.aborted) { resolve(); return; }
+    const done = (): void => { clearTimeout(timer); signal?.removeEventListener("abort", done); resolve(); };
+    const timer = setTimeout(done, ms);
+    signal?.addEventListener("abort", done, { once: true });
+  });
+}
+
+/** True when a failed step's only cause is the app's own exception (taskForceErrorReport ownException), so the room may run it once more. */
+function taskForceStepFailedByOwnException(result: Pick<BorrowedAgentResult, "ok" | "failureReports" | "runtimeFailure">): boolean {
+  if (result.ok || result.runtimeFailure) return false;
+  const causes = (result.failureReports ?? []).flatMap((report) => report.causes);
+  return causes.length > 0 && causes.every((cause) => cause.internal === true);
 }
 
 /** Host facts delivered to the owner model and local execution receipt.
@@ -5387,8 +5441,9 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
     if (observedOutwardCalls.length < 2_000) observedOutwardCalls.push(call);
     else outwardCallsDropped = true;
   };
-  const unitActedOutward = (): { actedOutward?: true } =>
-    outwardCallsDropped || taskForceUnitActedOutward({ calls: observedOutwardCalls }) ? { actedOutward: true } : {};
+  const unitActedOutward = (...runtimeKinds: string[]): { actedOutward?: true } =>
+    outwardCallsDropped || taskForceRunnerReportsNoToolRows([active.kind, ...runtimeKinds]) || taskForceUnitActedOutward({ calls: observedOutwardCalls })
+      ? { actedOutward: true } : {};
   /** What a required outside effect the worker said nothing about is recorded as: the host's own observation of this unit's calls. */
   const unreportedEffectState = (...runtimeKinds: string[]): "not-attempted" | "uncertain" =>
     taskForceUnreportedEffectState({ calls: observedOutwardCalls, dropped: outwardCallsDropped, runtimeKinds: [active.kind, ...runtimeKinds] });
@@ -6008,7 +6063,9 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
           if (error instanceof TeamGoalContextError) throw error;
           // A nested worker that did not complete is a failed worker of its team, never the end of the room: the team's
           // manager synthesizes over the workers that finished (same rule as a direct teammate, runBorrowedAgentTurn).
-          const typedRuntimeFailure = error instanceof TaskForceRuntimeFailureError ? error
+          // The app's own exception is not a provider failure (see the direct catch below): no runtime pool walk, no wrapper guess.
+          const ownException = unitActedOutward(observedWorkerRuntime.kind).actedOutward ? null : taskForceInternalException(error);
+          const typedRuntimeFailure = ownException ? null : error instanceof TaskForceRuntimeFailureError ? error
             : error instanceof RuntimeTurnUnsettledError
               ? (() => {
                 const typed = new TaskForceRuntimeFailureError(
@@ -6020,7 +6077,7 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
               })()
               : null;
           const stepFailure = typedRuntimeFailure ? teamStepFailureNote(error) : null;
-          const failureReport = taskForceErrorReport(error, `${packet.stepId ?? packet.agent}:${worker.id}`);
+          const failureReport = taskForceErrorReport(error, `${packet.stepId ?? packet.agent}:${worker.id}`, ownException);
           return {
             worker,
             ok: false,
@@ -6587,7 +6644,11 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
      * (runSettledTaskForceStep). Nothing here replays it: a replay-blocking cause keeps its typed runtimeFailure, so the
      * room's recovery never runs it again anywhere, its dependants are withheld, and the room synthesizes over the rest.
      */
-    const typedRuntimeFailure = err instanceof TaskForceRuntimeFailureError ? err
+    // The app's own exception (a TypeError, a SQLite driver error, a syscall error) is not a provider failure: the runner wrapper
+    // typed it "exit" from its message, which would walk the room's runtime pool and replay the step elsewhere, and could read
+    // "login" out of a word in the message. A step that already acted outward keeps the old reading (its effects are unknown).
+    const ownException = unitActedOutward(observedDirectRuntime.kind).actedOutward ? null : taskForceInternalException(err);
+    const typedRuntimeFailure = ownException ? null : err instanceof TaskForceRuntimeFailureError ? err
       : (err instanceof ObservedRunnerFailureError && runtimeFailureBlocksReplay(err.failure)) || err instanceof RuntimeTurnUnsettledError
         ? (() => {
           const typed = new TaskForceRuntimeFailureError(err instanceof ObservedRunnerFailureError
@@ -6598,7 +6659,7 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
         })()
         : null;
     const stepFailure = typedRuntimeFailure ? teamStepFailureNote(err) ?? undefined : undefined;
-    const failureReport = taskForceErrorReport(err, packet.stepId ?? packet.agent);
+    const failureReport = taskForceErrorReport(err, packet.stepId ?? packet.agent, ownException);
     // Agent App 실패는 원인을 남기지 않기로 한 자리다 — 관측한 도구 이름도 여기서는
     // 싣지 않는다(고정 실패 한 벌이라는 계약).
     if (p.req.agentAppMode) {
@@ -6672,6 +6733,8 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
       text: redactSensitiveText(message) + `\n${JSON.stringify(failureReport)}`,
       failureReports: [failureReport],
       ok: false,
+      // What the unit did before it threw: the room's replay guards read it (a step that acted outward is not run again).
+      ...unitActedOutward(),
       ...(typedRuntimeFailure
         ? {
             runtimeFailure: { ...typedRuntimeFailure.failure },
@@ -7215,14 +7278,7 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
       tryRecordRunEvent({ runId: p.req.runId ?? `task-force:${p.chat.id}`, chatId: p.chat.id,
         nodeId: orchestratorId, agentId: p.orchestratorAgent.id,
         kind: "task_force_planner_schema_attempt", payload: repairReceipt });
-      p.sink({ kind: "notice", agentId: orchestratorId, agentName: orchestratorName,
-        role: "orchestrator", tier: 1, phase: "plan",
-        notice: { code: "task-force-planner-schema-repair", level: "info", display: "row",
-          message: p.locale === "ko" ? `계획 검증 실패 · ${modelLabel(plannerRuntime)}에서 계획 수정 중`
-            : `Plan validation failed · repairing with ${modelLabel(plannerRuntime)}`,
-          details: normalized.validationCodes.join(", "),
-        },
-      });
+      // The first plan was rejected and is repaired once with the same model: the ledger row above records it; the room is not told (an internal retry).
       const firstPlannerInvocationId = plannerInvocationId;
       plannerInvocationId = `${plannerInvocationBaseId}:room-plan-repair:${randomUUID()}`;
       const validationError = normalized.validationErrors.join("; ") || "the plan did not cover the selected room";
@@ -8063,13 +8119,27 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
     ) {
       return result;
     }
-    p.sink({
-      kind: "tool-use",
-      status: p.locale === "ko"
-        ? `한 단계가 막혀 다시 진행하는 중… (${result.spec.slug})`
-        : `Retrying a blocked step… (${result.spec.slug})`,
-    });
-    const retryPacket = {
+    // The app's own exception inside this step (it threw before acting outward, and no provider is to blame): the room runs the
+    // step once more as it was, after a short pause for a lock to clear. This is not a content repair, so the worker is not told
+    // its report was rejected, and the room says nothing about it. A second failure is the step's FAILED packet; the turn then
+    // settles as work left (task-force-settlement.ts), and the cause stays typed in the report and the ledger.
+    const ownExceptionRetry = taskForceStepFailedByOwnException(result);
+    if (ownExceptionRetry) {
+      tryRecordRunEvent({ runId: p.req.runId ?? `task-force:${p.chat.id}`, chatId: p.chat.id, nodeId: orchestratorId,
+        agentId: p.orchestratorAgent.id, kind: "task_force_step_own_exception_retry",
+        payload: { schemaVersion: "agentlas.task-force-step-own-exception-retry.v1", stepId: packet.stepId ?? null, agent: packet.agent,
+          code: result.failureReports?.[0]?.causes[0]?.code ?? null } });
+      await taskForceStepPause(OWN_EXCEPTION_RETRY_PAUSE_MS, p.signal);
+      if (p.signal?.aborted) return result;
+    } else {
+      p.sink({
+        kind: "tool-use",
+        status: p.locale === "ko"
+          ? `한 단계가 막혀 다시 진행하는 중… (${result.spec.slug})`
+          : `Retrying a blocked step… (${result.spec.slug})`,
+      });
+    }
+    const retryPacket = ownExceptionRetry ? packet : {
       ...packet,
       context: [
         ...(packet.context ?? []),

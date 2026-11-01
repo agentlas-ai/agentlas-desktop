@@ -37,7 +37,7 @@ import { WORK_PROJECT_RESIDENCY_BUSY_CODE } from "./project-residency";
 import { codexShellEnvironmentArgs } from "./env-key-reach";
 import { ensureSandboxNpmCacheDir, ensureSandboxRunTmpDir, sandboxNpmCacheDir, sandboxTmpEnvConfigArgs, sandboxTmpRoot, sandboxTmpScope } from "./sandbox-tool-cache";
 import { imageOutputContract } from "./prompt-sections";
-import { cumulativeSurfaceGateText, ensureChildCloseAfterExit, startCliHeartbeat, startCliSilenceGuard, runtimeSilentTimeoutFailure, cliSilenceWindowMs, cliToolSilenceWindowMs, type CliSilenceGuard, childExitReason, RUNTIME_SILENT_TIMEOUT_CODE, runtimeProtocolUnrecognizedFailure, wrapSystemPrompt, workforceObservedHostAuthorityEnforcement, RuntimeTurnUnsettledError, markRefusedBeforeDispatch, preDispatchRefusal, spawnStartFailureRefusal } from "./runner";
+import { cumulativeSurfaceGateText, ensureChildCloseAfterExit, startCliHeartbeat, startCliSilenceGuard, runtimeSilentTimeoutFailure, cliSilenceWindowMs, cliToolSilenceWindowMs, type CliSilenceGuard, childExitReason, RUNTIME_SILENT_TIMEOUT_CODE, runtimeProtocolUnrecognizedFailure, wrapSystemPrompt, workforceObservedHostAuthorityEnforcement, RuntimeTurnUnsettledError, unsettledTurnError, markRefusedBeforeDispatch, preDispatchRefusal, spawnStartFailureRefusal } from "./runner";
 import { decideTurnSettlement, normalEndToolEvidence, settleNormalEnd, trackReportedToolCalls } from "../../shared/turn-settlement";
 import { detectRuntimeRefusal } from "./runtime-refusal";
 import { abortReasonError } from "./abort-reason";
@@ -3128,7 +3128,9 @@ async function runCodexResidentTurn(input: {
         events.onStatus(`[residency] disabled kind=${KIND} reason=app-server-unsupported`);
       }
       // The exact turn/start receipt was received above: the session holds this turn's request.
-      throw new RuntimeTurnUnsettledError(KIND, req.locale, session.threadId, null, "accepted");
+      // The error notification this turn already carried (a provider "at capacity", a sign-in or limit verdict) rides along
+      // as the typed cause: the host words the run from it, not from "no completion receipt".
+      throw unsettledTurnError({ runtimeKind: KIND, locale: req.locale, sessionId: session.threadId, cause: failure ?? undefined, turnDelivery: "accepted" });
     }
     const recoverable = Boolean(failure) && terminalObserved && !broken && !interrupted && !workforceObservation
       && !modelSelectionError && !req.signal?.aborted && codexResidentSessionAlive(session);
@@ -3225,10 +3227,14 @@ async function runCodexResidentTurn(input: {
     try {
       if (turnDispatchAttempted) persistTurnCounters();
       if (req.signal?.aborted) throw abortReasonError(req);
-      if (turnDispatchAttempted && !terminalObserved) throw new RuntimeTurnUnsettledError(KIND, req.locale, session.threadId, failure?.message ?? childExitReason(session.child?.exitCode, session.conn?.lastStderr),
+      if (turnDispatchAttempted && !terminalObserved) throw unsettledTurnError({ runtimeKind: KIND, locale: req.locale, sessionId: session.threadId,
+        // The typed failure the app-server reported before it went silent (the `error` notification) stays the cause; the
+        // provider's own words lead the message, else the CLI's stderr.
+        cause: failure ?? undefined,
+        providerReason: failure?.message ?? childExitReason(session.child?.exitCode, session.conn?.lastStderr),
         // Protocol fact: the turn/start receipt or this turn's turn/started notification is the session's acknowledgement.
         // A host continuation that never reached its own receipt still follows a turn this session accepted (cutResult).
-        acknowledgedTurnId || confirmedTurnId || requestEchoed || cutResult ? "accepted" : "not-accepted");
+        turnDelivery: acknowledgedTurnId || confirmedTurnId || requestEchoed || cutResult ? "accepted" : "not-accepted" });
       if (req.workforceRuntimeToolGrant) throw err;
       if (err instanceof CodexModelSelectionError) throw err;
       if (err instanceof CodexSessionContinuityError) throw err;
@@ -3354,7 +3360,8 @@ async function runCodexMinimalObservation(bin: string, req: RunnerRequest, event
     if (!run.terminalObserved && isSilentTimeoutRun(run)) {
       return { text: run.text.trim(), ownerControlTerminal: "uncertain", failure: run.failure! };
     }
-    if (!run.terminalObserved) throw new RuntimeTurnUnsettledError(KIND, req.locale, undefined, childExitReason(run.code, run.stderr));
+    if (!run.terminalObserved) throw unsettledTurnError({ runtimeKind: KIND, locale: req.locale, cause: run.failure,
+      providerReason: childExitReason(run.code, run.stderr) });
     if (run.code !== 0 && !run.text.trim()) throw new Error(`codex CLI exit ${run.code}${run.stderr ? `\n${run.stderr.slice(0, 500)}` : ""}`);
     return { text: run.text.trim(), tokens: run.tokens, ...codexExecSettlement(run),
       ...(run.observedUsage ? { observedUsage: run.observedUsage } : {}) };
@@ -3938,7 +3945,8 @@ export const runCodex: Runner = async (
       }
       const refused = codexExecRefusedBeforeTurn(r);
       if (refused) return { ...refused, ...(resumeSessionId ? { sessionId: resumeSessionId } : {}), appliedEffort };
-      throw new RuntimeTurnUnsettledError(KIND, runReq.locale, r.threadId ?? resumeSessionId, childExitReason(r.code, r.stderr));
+      throw unsettledTurnError({ runtimeKind: KIND, locale: runReq.locale, sessionId: r.threadId ?? resumeSessionId, cause: r.failure,
+        providerReason: childExitReason(r.code, r.stderr) });
     }
     if (r.code === 0) {
       if (runReq.chatId && fingerprint && r.threadId && persistSession()) {
@@ -4025,7 +4033,8 @@ export const runCodex: Runner = async (
     }
     const refused = codexExecRefusedBeforeTurn(created);
     if (refused) return { ...refused, appliedEffort };
-    throw new RuntimeTurnUnsettledError(KIND, runReq.locale, created.threadId, childExitReason(created.code, created.stderr));
+    throw unsettledTurnError({ runtimeKind: KIND, locale: runReq.locale, sessionId: created.threadId, cause: created.failure,
+      providerReason: childExitReason(created.code, created.stderr) });
   }
   if (created.code === 0) {
     if (runReq.chatId && fingerprint && created.threadId && persistSession()) {

@@ -61,8 +61,12 @@ export function supervisorReplyTurns(db:Database.Database,chatId:string,requests
     // Preserve the turn and its observed activity, without projecting it as
     // still thinking or executing tools on clients that display the activity.
     const inactive=['completed','cancelled','failed','held'].includes(row.state);
+    // A reply the app's quit or a crash cut short is stored `failed` (reason interrupted_requires_review) so One reviews it afterwards. To the
+    // owner it is a stopped turn, not a failed one: no "failed" mark, no incident-report button (catalog work row 91).
+    let state=row.state;
+    if (state==='failed') { try { if (JSON.parse(row.receipt_json).reason==='interrupted_requires_review') state='cancelled'; } catch { /* a malformed receipt stays failed */ } }
     return {commandId:row.command_id,runId:row.run_id!,userMessageId:row.user_message_id!,
-      assistantMessageId:supervisorExactResult(db,chatId,row.run_id)?.id ?? null,state:row.state,createdAt:row.created_at,
+      assistantMessageId:supervisorExactResult(db,chatId,row.run_id)?.id ?? null,state,createdAt:row.created_at,
       activity:[...activity.values()].slice(-20).map(item=>inactive && item.state==='running'?{...item,state:'interrupted' as const}:item)};
   });
 }

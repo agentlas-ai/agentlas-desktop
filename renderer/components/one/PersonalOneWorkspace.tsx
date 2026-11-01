@@ -25,7 +25,7 @@ import { OneMemorySheet } from "./OneMemorySheet";
 import { OneCapabilitiesModal } from "./OneCapabilitiesModal";
 import { OneAgentPortrait } from "./OneAgentPortrait";
 import type { ChatHistoryEntry, OneMemoryState, RuntimeSelection } from "@/lib/types";
-import { SupervisorOutbox, type PendingSupervisorWrite, type SupervisorWrite } from "@/lib/one-supervisor-outbox";
+import { SupervisorOutbox, openSupervisorOutbox, type PendingSupervisorWrite, type SupervisorWrite } from "@/lib/one-supervisor-outbox";
 import { personalOnePendingAsk, personalOneReplyPresentation, personalOneTranscript } from "@/lib/personal-one-transcript";
 import { PersonalOneAskCard } from "./PersonalOneAsk";
 import { usePersonalOneReply } from "@/lib/use-personal-one-reply";
@@ -46,7 +46,7 @@ import { AgiDefectChip, AgiIncidentReportButton } from "../agi/AgiBugReport";
 import { PersonalOneCapabilities, type PersonalOneCapabilityTab } from "./PersonalOneCapabilities";
 import { OneVoiceInputHelp } from "./OneVoiceInputHelp";
 import { useChatSelectionIntent } from "@/lib/chat-selection-intent";
-import { chatSelectionSendBlocked } from "@/lib/chat-selection-send-guard";
+import { chatSelectionSendBlocked, sendWhenChatSelectionSettles } from "@/lib/chat-selection-send-guard";
 import { OneRuntimeChips } from "./OneRuntimeChips";
 import { OneFrontChip, OneFrontNote, OneFrontNotice, OneFrontSetting, useOneFront } from "./PersonalOneFront";
 import { personalOnePanelMaximum } from "@/lib/personal-one-result";
@@ -90,7 +90,7 @@ type PersonalOneConversationMessage = ChatHistoryEntry & {
 // With the owner's opt-in front (shared/one-front.ts) Main runs the conversation on Agentlas's light model instead, and
 // the chip is a fixed label that opens the setting.
 export function PersonalOneWorkspace({ detached = false }: { detached?: boolean }) {
-  const router=useRouter();const routeParams=useSearchParams();const requestedTaskId=routeParams.get("task");const consumedTask=useRef<string|null>(null);
+  const router=useRouter();const routeParams=useSearchParams();const requestedTaskId=routeParams.get("task");const consumedTask=useRef<string|null>(null);const taskReread=useRef<string|null>(null);
   const {locale}=useT(); const ko=locale==="ko"; const copy=(a:string,b:string)=>ko?a:b;
   const front=useOneFront();
   useEffect(()=>{registerRouter(router); return ()=>registerRouter(null);},[router]);
@@ -113,8 +113,7 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
   const composerInput=useRef<HTMLTextAreaElement>(null);
   const [snapshot,setSnapshot]=useState<OneSupervisorSnapshot|null>(null);
   const historyScope=snapshot?.conversationChatId ?? null;
-  const desiredSelection=useChatSelectionIntent(historyScope);
-  const selectionSendBlocked=!front.view?.effective&&Boolean(desiredSelection)&&chatSelectionSendBlocked(historyScope);
+  useChatSelectionIntent(historyScope); // keeps this view registered as the owner of the conversation's pending pick
   const inlineUi=useInlineUiInstances(snapshot?.conversationChatId);
   const historyScopeRef=useRef(historyScope);historyScopeRef.current=historyScope;
   const groups=useMemo(()=>personalOneTranscript((snapshot?.messages ?? []).filter(message=>message.role!=="system"),snapshot?.turns ?? []),[snapshot?.messages,snapshot?.turns]);
@@ -160,6 +159,9 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
   useEffect(()=>setMessageReply(null),[snapshot?.conversationChatId]);
   const [text,setText]=useState(""); const [work,setWork]=useState("");
   const submitting=useRef(false);
+  // A send pressed while the model pick is still on its way to Main waits for it (a moment) instead of being refused.
+  const settleWait=useRef<(()=>void)|null>(null); const sendRef=useRef<((answer?:string,selectionSettled?:boolean)=>Promise<void>)|null>(null);
+  const [sendWaiting,setSendWaiting]=useState(false);
   const draftIdentity=useRef<string|null>(null);
   const initialDraftEdit=useRef<{edited:boolean;value:string}>({edited:false,value:""});
   useEffect(()=>{
@@ -173,7 +175,7 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
   },[snapshot?.oneId,detached]);
   useEffect(()=>{if(draftIdentity.current)try{window.sessionStorage.setItem(draftIdentity.current,text);}catch{}},[text]);
   const [scienceProject,setScienceProject]=useState(""); const [selected,setSelected]=useState<string|null>(null); const [direction,setDirection]=useState("");
-  const [error,setError]=useState(false);const [savedRequestError,setSavedRequestError]=useState(false); const [receipt,setReceipt]=useState<SupervisorCommandReceipt|null>(null);
+  const [error,setError]=useState(false);const [savedRequestError,setSavedRequestError]=useState(false);const [setAsideRequests,setSetAsideRequests]=useState(0); const [receipt,setReceipt]=useState<SupervisorCommandReceipt|null>(null);
   const [stopPending,setStopPending]=useState<string|null>(null);
   const [workRuntime,setWorkRuntime]=useState<RuntimeSelection|null>(null);
   useEffect(()=>{setWorkRuntime(null);},[snapshot?.oneId]);
@@ -185,7 +187,14 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
   const taskDrawerVisible=tasksOpen&&!file&&!artifactOpen;
   const outputPanelVisible=taskDrawerVisible||((!!file||artifactOpen)&&!outputPanelEmpty);
   const showTaskDrawer=useCallback(()=>{setTasksOpen(true);setArtifactOpen(false);setFile(null);},[]);
-  useEffect(()=>{if(!requestedTaskId||!snapshot||consumedTask.current===requestedTaskId)return;const exact=snapshot.tasks.find(item=>item.taskId===requestedTaskId);if(!exact){setRequestedTaskUnavailable(true);return;}consumedTask.current=requestedTaskId;setRequestedTaskUnavailable(false);setSelected(exact.taskId);setSelectedHandoff(null);setTaskPreviewOnly(true);showTaskDrawer();},[requestedTaskId,snapshot,showTaskDrawer]);
+  useEffect(()=>{if(!requestedTaskId||!snapshot||consumedTask.current===requestedTaskId)return;const exact=snapshot.tasks.find(item=>item.taskId===requestedTaskId);
+    if(!exact){
+      // A notification can name a task the snapshot has not caught up with yet: read again once and say nothing for a few seconds;
+      // the note appears only if the task is still not listed after that.
+      if(taskReread.current!==requestedTaskId){taskReread.current=requestedTaskId;void refreshCoordinator.current?.request(undefined);}
+      const timer=window.setTimeout(()=>setRequestedTaskUnavailable(true),4000);return()=>window.clearTimeout(timer);
+    }
+    consumedTask.current=requestedTaskId;setRequestedTaskUnavailable(false);setSelected(exact.taskId);setSelectedHandoff(null);setTaskPreviewOnly(true);showTaskDrawer();},[requestedTaskId,snapshot,showTaskDrawer]);
   const [panelWidth,setPanelWidth]=useState(360);const [autoPanelWidth,setAutoPanelWidth]=useState(true);
   const [viewportWidth,setViewportWidth]=useState(()=>typeof window==='undefined'?1360:window.innerWidth);
   const [composerHeight,setComposerHeight]=useState(96);
@@ -216,9 +225,15 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
   const panelMaxWidth=personalOnePanelMaximum(viewportWidth,detached);
   const shownPanelWidth=Math.min(panelMaxWidth,autoPanelWidth?Math.max(360,Math.round(viewportWidth*0.56)):panelWidth);
   const resizePanel=(width:number)=>{setAutoPanelWidth(false);setPanelWidth(Math.max(280,Math.min(panelMaxWidth,width)));};
-  useEffect(()=>{if(!detached)return;let current=true;void ipc()?.oneWindow?.getState().then(value=>{if(current)setPinned(value.alwaysOnTop);}).catch(()=>{if(current)setWindowError(true);});return()=>{current=false;};},[detached]);
-  const togglePinned=async()=>{try{const value=await ipc()?.oneWindow?.setAlwaysOnTop({value:!pinned});if(!value)throw new Error("window_controller_unavailable");setPinned(value.alwaysOnTop);setWindowError(false);}catch{setWindowError(true);}};
-  const openMain=async(route:string)=>{if(!detached){router.push(route);return;}try{const value=await ipc()?.oneWindow?.showMain({route});if(!value)throw new Error("window_controller_unavailable");setMenuOpen(false);}catch{setWindowError(true);}};
+  useEffect(()=>{if(!detached)return;let current=true;void ipc()?.oneWindow?.getState().then(value=>{if(current)setPinned(value.alwaysOnTop);}).catch(()=>{/* reading the pin state is background work; the pin shows as off until the owner touches it */});return()=>{current=false;};},[detached]);
+  // A window action that did not go through is tried once more before the owner is told (the window controller may be answering a
+  // previous request).
+  const windowAction=async<T,>(run:()=>Promise<T|undefined>|undefined):Promise<T|undefined>=>{
+    for(let attempt=0;;attempt+=1){try{const value=await run();if(value)return value;throw new Error("window_controller_unavailable");}
+      catch(cause){if(attempt>=1)throw cause;await new Promise(resolve=>window.setTimeout(resolve,400));}}
+  };
+  const togglePinned=async()=>{try{const value=await windowAction(()=>ipc()?.oneWindow?.setAlwaysOnTop({value:!pinned}));if(!value)throw new Error("window_controller_unavailable");setPinned(value.alwaysOnTop);setWindowError(false);}catch{setWindowError(true);}};
+  const openMain=async(route:string)=>{if(!detached){router.push(route);return;}try{const value=await windowAction(()=>ipc()?.oneWindow?.showMain({route}));if(!value)throw new Error("window_controller_unavailable");setMenuOpen(false);}catch{setWindowError(true);}};
   const [appearanceOpen,setAppearanceOpen]=useState(false); const [profile,setProfile]=useState<OneProfile|null>(null); const [profileName,setProfileName]=useState("");
   const [bubbleColor,setBubbleColor]=useState<OneBubbleColor>("blue"); const [savingProfile,setSavingProfile]=useState(false);
   const [profileError,setProfileError]=useState(false);
@@ -247,8 +262,14 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
       const value=await api.snapshot();if(!mounted.current || current!==generation.current)return;
       // A read that found nothing new keeps the same object, so the whole workspace does not re-render.
       setSnapshot(prior=>sameSnapshotIgnoring(prior,value,["observedAt"])?prior:value);setError(false);
-      try{if(outboxOneId.current!==value.oneId){outbox.current=new SupervisorOutbox(value.oneId,window.localStorage);outboxOneId.current=value.oneId;setOptimistic([]);}
-        outbox.current!.reconcile(value.requests);setSavedRequests(outbox.current!.list());setSavedRequestError(false);
+      // The retry cache never decides whether the owner can send: a saved request that cannot be read is set aside by the outbox,
+      // and a store that cannot be used at all continues in memory (openSupervisorOutbox).
+      try{if(outboxOneId.current!==value.oneId){let storage:Storage|null=null;try{storage=window.localStorage;}catch{/* blocked profile: memory */}
+          outbox.current=openSupervisorOutbox(value.oneId,storage);outboxOneId.current=value.oneId;setOptimistic([]);}
+        try{outbox.current!.reconcile(value.requests);}catch{outbox.current=openSupervisorOutbox(value.oneId,null);outbox.current.reconcile(value.requests);}
+        setSavedRequests(outbox.current!.list());setSavedRequestError(false);
+        // A saved request that could not be read was set aside and left the list: the owner is told (nothing they typed may vanish without a line).
+        const aside=outbox.current!.takeSetAside();if(aside>0)setSetAsideRequests(count=>count+aside);
       }catch{outbox.current=null;outboxOneId.current=null;setSavedRequestError(true);}
       const visible=new Set(value.messages.map(message=>message.id));
       const observed=new Set(value.turns?.filter(turn=>visible.has(turn.userMessageId)).map(turn=>turn.commandId));
@@ -289,6 +310,9 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
     return [...optimistic,...savedRequests.filter(intent=>intent.method==="send"&&!observedCommands.has(intent.commandId)&&!optimisticIds.has(intent.commandId)).map(intent=>({commandId:intent.commandId,text:String(intent.input.text),acknowledged:false}))];
   },[optimistic,savedRequests,observedCommands]);
   const activeReply=snapshot?.requests.find(item=>item.kind==="reply" && ["dispatching","accepted"].includes(item.state));
+  // The owner's reply the app is sending again by itself (its start was refused before anything reached a model, so it is stored again with the
+  // typed cause and waits for the next try): no run is live in that gap, so the live reply's Stop below is not drawn. Main's stopReply takes it back.
+  const waitingReply=activeReply?undefined:snapshot?.requests.find(item=>item.kind==="reply" && item.state==="stored" && item.runId && item.reason);
   const pendingAsk=useMemo(()=>personalOnePendingAsk(groups,pendingMessages.length),[groups,pendingMessages.length]);
   const [dismissedAskId,setDismissedAskId]=useState<string|null>(null);
   const prepareUiFollowup=useCallback((prompt:string)=>{
@@ -429,10 +453,15 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
     const value=await outbox.current.deliver(ipc()!.oneSupervisor,intent);setSavedRequests(outbox.current.list());return value;
   };
   const enter=useComposerEnter(()=>{void send();});
-  const send=async(answer?:string)=>{
+  const send=async(answer?:string,selectionSettled?:boolean)=>{
     // An active turn's question answer has its own custody. Only a new composer
-    // submission waits, before attachments, outbox IDs or draft state change.
-    if(answer===undefined&&!front.view?.effective&&chatSelectionSendBlocked(snapshot?.conversationChatId ?? null))return;
+    // submission waits, before attachments, outbox IDs or draft state change. It waits for the model pick that is still on its
+    // way to Main (a moment) and then sends by itself, with the draft as it is then; it is not refused and Send stays pressable.
+    if(answer===undefined&&!selectionSettled&&!front.view?.effective&&chatSelectionSendBlocked(snapshot?.conversationChatId ?? null)){
+      settleWait.current?.();setSendWaiting(true);
+      settleWait.current=sendWhenChatSelectionSettles(snapshot?.conversationChatId ?? null,()=>undefined,()=>{settleWait.current=null;setSendWaiting(false);void sendRef.current?.(undefined,true);});
+      return;
+    }
     // A question-card answer goes out alone: never with the composer's quotation, draft or attachments.
     const outgoing=answer===undefined?attachments:[];
     if(submitting.current)return;const submittedText=answer??text;const submittedReply=answer===undefined?messageReply:null;const rawMessage=submittedText.trim();const message=composeMessageReply(rawMessage,submittedReply);if((!rawMessage&&!outgoing.length)||!outbox.current||!snapshot||attachmentBusy)return;let intent:PendingSupervisorWrite;
@@ -451,6 +480,9 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
       setOptimistic(prior=>prior.map(item=>item.commandId===intent.commandId?{...item,acknowledged:value.acknowledgement!=="unknown"}:item));void sync();
     }catch{if(mounted.current)setError(true);}finally{inFlight.current.delete(intent.commandId);}
   };
+  sendRef.current=send;
+  useEffect(()=>()=>{settleWait.current?.();settleWait.current=null;},[]);
+  useEffect(()=>{settleWait.current?.();settleWait.current=null;setSendWaiting(false);},[historyScope]);
   const startWork=async(science=false)=>{
     if(!work.trim()||workPending||science&&!scienceProject||!science&&budgetSelectionUnconfirmed)return;setWorkPending(true);
     try{showReceipt(await write(science?"startScience":"startWork",{text:work.trim(),...(science?{projectId:scienceProject}:{...(budgetId?{budgetId}:{}),...(workRuntime?{runtimeSelection:workRuntime}:{})})}));setWork("");if(!science)setWorkRuntime(null);void sync();}
@@ -469,7 +501,12 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
   const appearance=async()=>{setProfileError(false);setAppearanceOpen(true);try{const value=await ipc()!.oneProfile.get();setProfile(value);setProfileName(value.displayName);setBubbleColor(value.bubbleColor ?? "blue");}catch{setProfileError(true);}};
   const saveAppearance=async()=>{
     if(!profile||savingProfile)return;setSavingProfile(true);
-    try{const value=await write('appearance',{oneId:profile.oneId,expectedVersion:profile.version,displayName:profileName,bubbleColor});showReceipt(value);
+    try{let value=await write('appearance',{oneId:profile.oneId,expectedVersion:profile.version,displayName:profileName,bubbleColor});
+      // The profile moved on another window or the phone while this sheet was open: the owner's name and colour are what they asked
+      // for, so they are saved once more on the profile as it is now instead of asking them to save again.
+      if(value.state!=='completed'&&value.reason==='supervisor_profile_version_conflict'){const fresh=await ipc()!.oneProfile.get();setProfile(fresh);
+        value=await write('appearance',{oneId:fresh.oneId,expectedVersion:fresh.version,displayName:profileName,bubbleColor});}
+      showReceipt(value);
       if(value.state==='completed')setAppearanceOpen(false);else {setProfileError(true);setProfile(await ipc()!.oneProfile.get());}void sync();}
     catch{setProfileError(true);}finally{setSavingProfile(false);}
   };
@@ -501,8 +538,14 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
   const openTask=(taskId:string|null,handoffId:string|null=null)=>{setSelected(taskId);setSelectedHandoff(handoffId);setTaskPreviewOnly(true);showTaskDrawer();};
   const taskRoute=(item:SupervisorTask)=>item.surface==='science'?'/science':item.surface==='one'?'/one?chat='+encodeURIComponent(item.chatId!):'/workspace/task?id='+encodeURIComponent(item.chatId!);
   const stateLabel=(state:string)=>({stored:copy("접수됨","Received"),dispatching:copy("시작 중","Starting"),accepted:copy("진행 중","In progress"),running:copy("진행 중","In progress"),queued:copy("대기 중","Queued"),cancelling:copy("정리 중","Stopping"),cancelled:copy("취소됨","Cancelled"),completed:copy("실행 종료","Run settled"),failed:copy("확인 필요","Needs review"),held:copy("실행 확인 필요","Checking execution"),interrupted:copy("중단됨","Interrupted"),paused:copy("일시 정지","Paused")} as Record<string,string>)[state] ?? copy("진행 중","In progress"); // an internal state name (waiting_tool…) is never shown
-  const receiptCopy=(value:SupervisorCommandReceipt)=>value.reason==="supervisor_task_version_conflict"||value.reason==="supervisor_reply_target_stale"||value.reason==="supervisor_profile_version_conflict"
-    ?copy("상태가 바뀌었습니다. 최신 상태를 확인해 주세요.","The state changed. Review the latest observation.")
+  const receiptCopy=(value:SupervisorCommandReceipt)=>value.reason==="supervisor_reply_target_stale"
+    ?copy("이미 끝난 답변이라 멈출 것이 없습니다.","That reply had already ended, so there was nothing to stop.")
+    :value.reason==="supervisor_task_version_conflict"
+    ?copy("이 작업은 이미 끝났거나 목록에서 사라졌습니다.","That task has already ended or is no longer listed.")
+    :value.reason==="supervisor_profile_version_conflict"
+    ?copy("설정이 다른 곳에서 바뀌었습니다. 최신 설정을 불러왔습니다.","The settings were changed elsewhere. The latest settings are loaded.")
+    :value.reason==="not_started"?copy("이 요청은 실행되지 않았고, 다시 보내지도 않았습니다.","This request did not run, and it was not sent again.")
+    :value.kind==="stop-reply"&&value.reason==="retry_withdrawn"?copy("멈췄어요. 이 메시지는 다시 보내지 않아요.","Stopped. This message will not be sent again.")
     :value.state==="held"?copy("요청은 저장되었습니다. 실행 결과를 확인해야 합니다.","The request is saved. Its execution outcome needs confirmation.")
     :value.kind==="appearance"?copy("설정을 저장했습니다.","Settings saved.")
     :value.kind==="steer"&&value.reason==="applied_in_next_run"?copy("지시가 작업의 다음 실행에 들어갔습니다.","The direction went into the task's next run.")
@@ -550,8 +593,9 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
         <button type="button" onClick={()=>{setMenuOpen(false);void sync();}}>{copy("연결 상태 다시 확인","Refresh connection")}</button>
         {detached&&<button type="button" onClick={()=>void openMain("/one?personal=1")}>{copy("Desktop 열기","Open Desktop")}<IconExpand size={14}/></button>}
       </nav>}
+      {setAsideRequests>0&&<p role="status" data-testid="outbox-set-aside" className={styles.feedback}>{copy("저장해 둔 요청 하나를 읽을 수 없어 보내지 못했습니다.","A request saved earlier could not be read, so it was not sent.")}</p>}
       {savedRequestError&&<p role="status" className={styles.feedback}>{copy("저장된 요청을 읽지 못했습니다. 새 요청은 잠시 보류하며 작업 중지는 계속 사용할 수 있습니다.","Saved requests could not be read. New requests are held while task stopping remains available.")}</p>}
-      {requestedTaskUnavailable&&<p role="status" className={styles.feedback}>{copy("알림이 가리킨 작업을 현재 관측에서 찾지 못했습니다. 같은 작업의 관측을 기다리고 있습니다.","The task referenced by the notification is absent from the current observation. Waiting for that exact task.")}</p>}
+      {requestedTaskUnavailable&&<p role="status" className={styles.feedback}>{copy("알림이 가리킨 작업은 이미 끝나 목록에서 사라졌습니다.","The task the notification pointed to has already ended and is no longer listed.")}</p>}
       {windowError&&<p role="status" className={styles.feedback}>{copy("창 동작을 확인하지 못했습니다. 창 크기는 가장자리를 끌어 조절할 수 있습니다.","The window action was not confirmed. Drag the window edge to resize it.")}</p>}
 
       <IntellectUiActions.Provider value={{prepareFollowup:prepareUiFollowup,disabled:Boolean(activeReply||attachmentBusy)}}>
@@ -625,14 +669,14 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
             composerWidth={Math.max(300,Math.min(736,viewportWidth-(detached?32:250)))} onOpenRoom={href=>void openMain(href)} />
         </div>
         <AgiDefectChip chatId={snapshot?.conversationChatId ?? null} locale={ko?"ko":"en"} />
-        {receipt?.state==="failed"&&receipt.kind!=="reply"&&<AgiIncidentReportButton key={receipt.commandId} locale={ko?"ko":"en"} draft={{
+        {receipt?.state==="failed"&&receipt.kind!=="reply"&&receipt.reason!=="interrupted_requires_review"&&receipt.reason!=="cancel_raced_terminal_outcome"&&<AgiIncidentReportButton key={receipt.commandId} locale={ko?"ko":"en"} draft={{
           chatId:snapshot?.conversationChatId,runId:receipt.runId ?? receipt.commandId,failureCode:"one_supervisor_command_failed",category:"other",
           title:"[Supervisor] Request failed",summary:receipt.reason || "The Supervisor request state became failed.",
           steps:["Submit a Supervisor request",`Request kind: ${receipt.kind}`],
         }} />}
         <input ref={attachmentPicker} type="file" multiple hidden onChange={event=>{if(event.target.files)void pickAttachments(Array.from(event.target.files));event.target.value="";}}/>
         {attachmentError&&<p role="alert" className={styles.feedback}>{attachmentError}</p>}
-        {selectionSendBlocked&&<p role="status" className={styles.feedback}>{copy("모델 선택을 확인한 뒤 보내세요. 작성한 내용과 첨부는 그대로 유지됩니다.","Send after the model selection is confirmed. Your draft and attachments are unchanged.")}</p>}
+        {sendWaiting&&<p role="status" className={styles.feedback}>{copy("모델 선택을 확인하는 중이에요. 확인되면 바로 보냅니다.","Checking the model selection. It sends as soon as that is confirmed.")}</p>}
         <MessageReplyPreview reply={messageReply} locale={locale} onDismiss={()=>setMessageReply(null)}/>
         <form className={styles.composer} data-one-composer="true" data-has-files={attachments.length>0} data-ready={Boolean(text.trim())||attachments.length>0} onSubmit={event=>{event.preventDefault();void send();}}>
           {attachments.length>0&&<div className={styles.attachmentDrafts} aria-label={copy("선택한 첨부","Selected attachments")}>{attachments.map((item,index)=><div className={styles.attachmentDraft} data-kind={item.preview?"image":"file"} key={index} title={item.draft.name}>
@@ -665,13 +709,14 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
             if(!files.length)return;event.preventDefault();void pickAttachments(files);
           }} maxLength={8000} rows={1} placeholder={copy("메시지 보내기","Send a message")}/>
           <div className={styles.voice}><OneVoiceInputHelp locale={ko?"ko":"en"} composerRef={composerInput} /></div>
-          <button className={styles.send} type="submit" aria-label={copy("보내기","Send")} disabled={!snapshot||savedRequestError||attachmentBusy||selectionSendBlocked||(!text.trim()&&!attachments.length)}><IconArrowUp size={16}/></button>
+          <button className={styles.send} type="submit" aria-label={copy("보내기","Send")} disabled={!snapshot||savedRequestError||attachmentBusy||(!text.trim()&&!attachments.length)}><IconArrowUp size={16}/></button>
         </form>
         <div className={styles.composerFoot}>
           {front.view&&!front.view.effective&&<p className={styles.feedback} data-one-personal-model-scope="true" title={copy("개인 One과의 대화에 사용할 모델입니다. Work 업무의 실행 모델은 업무별로 선택합니다.","The model for your personal One conversation. Choose the execution model separately for each Work task.")}>{copy("개인 대화 모델","Personal chat model")}</p>}
           <div className={styles.trail}>{front.view?.effective?<OneFrontChip locale={ko?"ko":"en"} onOpenSetting={()=>void appearance()}/>:<OneRuntimeChips chatId={snapshot?.conversationChatId ?? null} locale={ko?"ko":"en"} disabled={!snapshot} />}</div>
         </div>
         {activeReply?.runId&&<button className={styles.stopReply} onClick={()=>void write("stopReply",{runId:activeReply.runId!}).then(value=>{showReceipt(value);void sync();}).catch(()=>setError(true))}>{copy("이 답변 중지","Stop this reply")}</button>}
+        {waitingReply?.runId&&<div role="status" data-waiting-retry-stop="true" className={styles.feedback}><span>{copy("메시지를 앱이 다시 보내는 중이에요.","The app is sending your message again.")}</span> <button className={styles.stopReply} data-waiting-retry-stop-button="true" onClick={()=>void write("stopReply",{runId:waitingReply.runId!}).then(value=>{showReceipt(value);void sync();}).catch(()=>setError(true))}>{copy("중지","Stop")}</button></div>}
       </div>
     </main>
     <BrowserActionApprovalSheet chatId={snapshot?.conversationChatId ?? null} />

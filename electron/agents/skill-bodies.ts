@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { skillIsLeftOut, skillsLeftOut } from "./skill-candidates";
 
 /*
  * Package skills for a run that cannot read files (native-harness notyet NH04).
@@ -29,6 +30,7 @@ interface SkillFile { root: string; slug: string; bytes: Buffer }
 function listSkills(dir: string): Array<{ root: string; slug: string }> {
   const entries: Array<{ root: string; slug: string }> = [];
   const seen = new Set<string>();
+  const leftOut = skillsLeftOut(dir);
   for (const root of NO_READER_SKILL_ROOTS) {
     const skillsDir = path.join(dir, root);
     let names: string[];
@@ -42,7 +44,9 @@ function listSkills(dir: string): Array<{ root: string; slug: string }> {
     } catch { continue; }
     for (const slug of names) {
       if (seen.has(slug.toLowerCase())) continue;
+      // A left-out slug stays left out under every later root (agent/files.ts listAgentSkillEntries, the same rule).
       seen.add(slug.toLowerCase());
+      if (skillIsLeftOut(leftOut, root, slug)) continue;
       entries.push({ root, slug });
     }
   }

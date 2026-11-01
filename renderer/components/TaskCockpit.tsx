@@ -1,6 +1,7 @@
 "use client";
 import { writeAppUiPreference, subscribeAppUiPreference } from "@/lib/app-ui-preferences";
 import { MessageReplyPreview } from "./MessageActions";
+import { WaitingRetryStop } from "./WaitingRetryStop";
 import { alertPopup, confirmPopup } from "@/lib/popup";
 import { composeMessageReply, type MessageReply } from "@/lib/message-reply";
 import { createTrailingDebounce } from "@/lib/store-change-policy";
@@ -10,8 +11,7 @@ import { useWorkStartHandoff, useWorkStartRecovery, type WorkStartRecoveryTarget
 import { browserAnnotationDraftText } from "@shared/browser-annotation";
 import { selectionForRuntime } from "@shared/runtime-selection";
 import { chipRuntimeFor } from "@/lib/one-runtime-chip";
-import { useChatSelectionIntent } from "@/lib/chat-selection-intent";
-import { chatSelectionSendBlocked } from "@/lib/chat-selection-send-guard";
+import { chatSelectionSendBlocked, sendWhenChatSelectionSettles } from "@/lib/chat-selection-send-guard";
 import { OneRuntimeChips } from "@/components/one/OneRuntimeChips";
 import { isInterruptedPartial, isLivePartialCommitBoundary, markInterruptedPartial } from "@shared/interrupted-partial";
 import { subscribeOrderedRunEvents } from "@/lib/ordered-run-events";
@@ -347,16 +347,17 @@ function startFailureText(cause: unknown, locale: string, hadImages: boolean): s
       ? `작업을 시작하지 못해 이 턴은 기록에 남지 않았습니다. ${restored} ${known}`
       : `The task did not start, so this turn was not recorded. ${restored} ${known}`;
   }
-  // 결정적 거절(기계 코드)에는 "이유가 오지 않았다"가 거짓이다 — 코드를 보여 준다.
-  const code = raw ? undefined : failureCode(cause);
+  /*
+   * A machine code is not something the owner can act on, so it is not drawn (the line used to end in a raw code and
+   * "send it again" for the app's own state). Main already queues the refusals it proved internal (renderer-send-queue.ts
+   * undispatchedStartWaits); what reaches here has no sentence of its own. The code stays in the run ledger and the incident report.
+   */
   const why = raw
     ? (ko ? ` 이유: ${raw}` : ` Reason: ${raw}`)
-    : code
-      ? (ko ? ` 사유 코드: ${code}.` : ` Reason code: ${code}.`)
-      : (ko ? " 이유가 오지 않았습니다." : " No reason came back.");
+    : "";
   return ko
-    ? `작업을 시작하지 못해 이 턴은 기록에 남지 않았습니다. ${restored}${why} 다시 보내 주세요.`
-    : `The task did not start, so this turn was not recorded. ${restored}${why} Send it again.`;
+    ? `작업을 시작하지 못해 이 턴은 기록에 남지 않았습니다. ${restored}${why} 잠시 뒤 다시 보내 주세요.`
+    : `The task did not start, so this turn was not recorded. ${restored}${why} Please send it again in a moment.`;
 }
 
 function taskTitleFromFirstPrompt(value: string): string {
@@ -389,10 +390,13 @@ function receiptRecoveryMessage(
       : "The task stopped.");
   const errorCode = receipt.errorCode?.trim();
   const errorMessage = receipt.errorMessage?.trim();
-  const failure = isFailure && (errorCode || errorMessage)
+  // An interruption with no typed cause (a runner that vanished, a raw "This operation was aborted") is an internal state, not a failure of
+  // the owner's work: one calm line, no red row and no raw runtime text. A typed cause, and every failed receipt, keep their detail.
+  const untypedInterruption = receipt.status === "interrupted" && !errorCode;
+  const failure = isFailure && !untypedInterruption && (errorCode || errorMessage)
     ? { code: errorCode || "runtime_error", message: errorMessage || baseText }
     : undefined;
-  const text = (isFailure && errorMessage ? detailForUser(errorMessage) : "") || baseText;
+  const text = (isFailure && !untypedInterruption && errorMessage ? detailForUser(errorMessage) : "") || baseText;
   return {
     id: `run-recovery:${receipt.runId}:${receipt.status}`,
     role: "system",
@@ -2580,8 +2584,7 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
   }, []);
   // 활성 런타임/모델 — 헤더 칩 표시 + BYOK 인라인 모델 변경. 진행 중 실행의 runId(취소용).
   const [activeRuntime, setActiveRuntime] = useState<RuntimeStatus | null>(null);
-  const desiredSelection = useChatSelectionIntent(chatId);
-  const selectionSendBlocked = Boolean(desiredSelection) && chatSelectionSendBlocked(chatId, chat?.runtimeSelection ?? null);
+  const [selectionSendWaiting, setSelectionSendWaiting] = useState(false);
   const runIdRef = useRef<string | null>(null);
   // Whether this chat was in the last activeChats broadcast. Lets the view see
   // an active -> inactive transition for runs it did not start itself.
@@ -2695,9 +2698,19 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
           setSessionNotice(current => current === ownedNotice.text ? null : current);
         }
       } else if (receipt && ["held", "failed", "cancelled"].includes(receipt.status ?? "")) {
-        const notice = locale === "ko"
-          ? "추가 지시를 실행하지 못했습니다. 보낸 내용은 대화에 남아 있습니다."
-          : "The follow-up could not run. Your message remains in the conversation.";
+        // Three different facts, three sentences: the owner's own Stop is a stop, not a failure; a held direction was saved but its delivery
+        // was not confirmed (so it is never sent twice); only a failed one "could not run".
+        const notice = receipt.status === "cancelled"
+          ? (locale === "ko"
+            ? "추가 지시를 중지했습니다. 보낸 내용은 대화에 남아 있습니다."
+            : "The follow-up was stopped. Your message remains in the conversation.")
+          : receipt.status === "held"
+            ? (locale === "ko"
+              ? "추가 지시는 저장됐지만 전달됐는지 확인되지 않아 다시 보내지 않았습니다. 보낸 내용은 대화에 남아 있습니다."
+              : "The follow-up is saved, but its delivery was not confirmed, so it was not sent again. Your message remains in the conversation.")
+            : (locale === "ko"
+              ? "추가 지시를 실행하지 못했습니다. 보낸 내용은 대화에 남아 있습니다."
+              : "The follow-up could not run. Your message remains in the conversation.");
         workFollowupNoticeRef.current = { intentId: intent.intentId, text: notice };
         setSessionNotice(notice);
       }
@@ -4950,6 +4963,12 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
         } catch { /* Unknown stays unknown: the reconciliation below keeps the fence. */ }
       }
       if (unresolvedRunId && !unresolvedProvenNotStarted) {
+        // ChatInput empties the composer the moment it hands the text over, and this branch sends nothing: the text goes back to the
+        // composer first, so no path below can drop what the owner typed (it is not a run, so a resend cannot double anything).
+        setComposerPrefill(userPrompt);
+        const textBack = ((opts?.images?.length ?? 0) > 0 || (opts?.files?.length ?? 0) > 0)
+          ? (locale === "ko" ? " 입력은 작성창에 되돌려 놓았습니다(첨부는 다시 붙여 주세요)." : " Your text is back in the composer (attach the files again).")
+          : (locale === "ko" ? " 입력은 작성창에 되돌려 놓았습니다." : " Your text is back in the composer.");
         // A response-loss retry may have started external work. Reconcile the
         // original Main identity; never turn the same composer text into a new
         // run ID in this send call, including after an app restart.
@@ -4957,32 +4976,32 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
           const admission = await api.invoke.admission(unresolvedRunId);
           if (admission.status === "rejected" && admission.chatId === chat.id) {
             clearWorkUncertainAdmission(chat.id, unresolvedRunId);
-            setSessionNotice(locale === "ko"
+            setSessionNotice((locale === "ko"
               ? "이전 요청은 실행되지 않은 것으로 확인됐습니다. 내용을 확인하고 다시 보내세요."
-              : "The previous request was confirmed not to have started. Review it before sending again.");
+              : "The previous request was confirmed not to have started. Review it before sending again.") + textBack);
             return false;
           }
           if (admission.status === "admitted" && admission.chatId === chat.id) {
             const receipt = await api.invoke.receipt(unresolvedRunId);
             if (receipt?.runId === unresolvedRunId && receipt.chatId === chat.id) {
               clearWorkUncertainAdmission(chat.id, unresolvedRunId);
-              setSessionNotice(locale === "ko"
+              setSessionNotice((locale === "ko"
                 ? "이전 요청의 실행 기록을 찾았습니다. 기록을 확인하세요. 이번 전송은 실행하지 않았습니다."
-                : "The previous run was found. Review its record; this send was not executed.");
+                : "The previous run was found. Review its record; this send was not executed.") + textBack);
               return false;
             }
           }
-          setSessionNotice(locale === "ko"
+          setSessionNotice((locale === "ko"
             ? admission.status === "pending"
               ? "이전 요청이 접수 대기 중입니다. 중복 실행을 막기 위해 새 요청을 보내지 않았습니다."
               : "이전 요청의 실행 여부가 불확실합니다. 새 요청을 보내지 않았습니다."
             : admission.status === "pending"
               ? "The previous request is pending admission. No new request was sent."
-              : "The previous run is unresolved. No new request was sent.");
+              : "The previous run is unresolved. No new request was sent.") + textBack);
         } catch {
-          setSessionNotice(locale === "ko"
+          setSessionNotice((locale === "ko"
             ? "이전 요청의 실행 여부를 확인할 수 없습니다. 새 요청을 보내지 않았습니다."
-            : "The previous run could not be checked. No new request was sent.");
+            : "The previous run could not be checked. No new request was sent.") + textBack);
         }
         return false;
       }
@@ -5606,7 +5625,12 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
           if (frozenOpts?.files?.length) {
             const bridge = chatFilesBridge();
             if (!bridge) throw new Error(locale === "ko" ? "Desktop 파일 연결을 사용할 수 없습니다." : "The Desktop file bridge is unavailable.");
-            const snapshot = await bridge.snapshot({ chatId: chat.id, files: frozenOpts.files });
+            // A file connection that blinks once (Main busy with another write) is asked again before the follow-up is given back.
+            let snapshot: Awaited<ReturnType<typeof bridge.snapshot>> | undefined;
+            for (let attempt = 0; snapshot === undefined; attempt += 1) {
+              try { snapshot = await bridge.snapshot({ chatId: chat.id, files: frozenOpts.files }); }
+              catch (cause) { if (attempt >= 2) throw cause; await new Promise<void>(resolve => setTimeout(resolve, 300 * (attempt + 1))); }
+            }
             attachedChatFiles = snapshot.files.map((file) => chatFileItem(file, "user-attachment"));
             if (isCurrentChat()) hydratedChatFileGroupsRef.current.set(snapshot.groupId, attachedChatFiles);
             boundText = appendChatFileMarker(text, snapshot.groupId);
@@ -5634,8 +5658,9 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
             request: JSON.parse(JSON.stringify(request)),
             ...((workFollowupStopEpochs.get(chat.id) ?? 0) !== followupStopEpoch ? { autoDeliveryPaused: true } : {}),
           };
-          saveOneFollowupIntent(window.localStorage, intent);
-          refreshWorkFollowupDrafts();
+          // The renderer's own copy is a safety net for a lost IPC answer; Main's durable steer queue is the record. A browser store that is full
+          // or refuses the write (quota, 64 undelivered follow-ups) no longer gives the owner's follow-up back as "could not be saved": it is sent.
+          try { saveOneFollowupIntent(window.localStorage, intent); refreshWorkFollowupDrafts(); } catch { /* sent without the renderer copy */ }
           // Local preservation also preserves the reply selection's exact text.
           onAccepted?.();
           await dispatchWorkFollowup(intent, { automatic: true, stopEpoch: followupStopEpoch });
@@ -7821,10 +7846,11 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
             onOpenPersonalAgent={() => router.push(PERSONAL_AGENT_HREF)} />
         ) : <>
         <MessageReplyPreview reply={messageReply} locale={locale} onDismiss={() => setMessageReply(null)} />
-        {selectionSendBlocked && <p role="status" style={{ maxWidth: WORK_COMPOSER_WIDTH_PX, margin: "6px auto", color: "var(--ink-soft)", fontSize: 12 }}>
-          {locale === "ko" ? "모델 선택을 확인한 뒤 보내세요. 작성한 내용과 첨부는 그대로 유지됩니다."
-            : "Send after the model selection is confirmed. Your draft and attachments are unchanged."}
+        {selectionSendWaiting && <p role="status" style={{ maxWidth: WORK_COMPOSER_WIDTH_PX, margin: "6px auto", color: "var(--ink-soft)", fontSize: 12 }}>
+          {locale === "ko" ? "모델 선택을 확인하는 중이에요. 확인되면 바로 보냅니다."
+            : "Checking the model selection. It sends as soon as that is confirmed."}
         </p>}
+        <WaitingRetryStop chatId={chat.id} locale={locale === "ko" ? "ko" : "en"} live={busy} maxWidth={WORK_COMPOSER_WIDTH_PX} />
         <ChatInput
           runtimeControls={<OneRuntimeChips key={chat.id} chatId={chat.id} locale={locale === "ko" ? "ko" : "en"} disabled={busy || !agent} onSelectionConfirmed={(updated) => {
             if (isCurrentChat() && updated.id === chatId) setChat(current => isCurrentChat() && updated.id === chatId ? updated : current);
@@ -7834,9 +7860,15 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
             const current = routingContextRef.current.chat;
             return current?.id === chat.id && !chatSelectionSendBlocked(current.id, current.runtimeSelection ?? null);
           }}
-          submitBlockedReason={selectionSendBlocked ? (locale === "ko"
-            ? "모델 선택을 확인한 뒤 보내세요. 작성한 내용과 첨부는 그대로 유지됩니다."
-            : "Send after the model selection is confirmed. Your draft and attachments are unchanged.") : null}
+          disabledReason={!agent && allAgents.length > 0 ? (locale === "ko"
+            ? "이 대화의 에이전트가 더 이상 설치되어 있지 않아요. 에이전트를 다시 설치하거나 새 대화를 시작해 주세요."
+            : "This conversation's agent is no longer installed. Reinstall it or start a new conversation.") : null}
+          onHeldSubmit={(again) => {
+            // A model pick still on its way to Main does not grey Send or refuse the press: the send waits for it (at most a few seconds) and goes.
+            setSelectionSendWaiting(true);
+            const stop = sendWhenChatSelectionSettles(chat.id, () => routingContextRef.current.chat?.runtimeSelection ?? null, () => { setSelectionSendWaiting(false); again(); });
+            return () => { stop(); setSelectionSendWaiting(false); };
+          }}
           queuedCount={queuedSteers.length}
           prefillText={composerPrefill} appendDraftRequest={browserDraftRequest}
           activeChatId={chat.id}

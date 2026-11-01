@@ -111,7 +111,7 @@ export async function mediaListen(args: Record<string, unknown>, ctx: { chatId: 
     try {
       if (!kp.mediaEngineBin("ffmpeg")) return refused("media_engine_missing", "ffmpeg is not installed on this computer");
       const track = await kp.speechTrack(file, work);
-      if (!track) return refused("audio_track_unavailable", "ffmpeg could not read an audio track from this file");
+      if (!track) return refused("audio_track_unavailable", kp.noSpeechTrackMessage(await kp.audioStreamFact(file)));
       const heard = await kp.transcribeFile(routeId, track, ctx, str(args.languageCode) || undefined);
       if (!heard.ok) return heard.outcome;
       const t = heard.transcript;
@@ -182,7 +182,7 @@ export async function speechTranscribePort(args: Record<string, unknown>, ctx: {
     try {
       if (!kp.mediaEngineBin("ffmpeg")) return refused("media_engine_missing", "ffmpeg is not installed on this computer");
       const track = await kp.speechTrack(file, work);
-      if (!track) return refused("audio_track_unavailable", "ffmpeg could not read an audio track from this file");
+      if (!track) return refused("audio_track_unavailable", kp.noSpeechTrackMessage(await kp.audioStreamFact(file)));
       const heard = await kp.transcribeFile(routeId, track, ctx, str(args.languageCode) || undefined);
       if (!heard.ok) return heard.outcome;
       return { status: "ok", data: { ...heard.transcript, fileSha256: fileSha, words: heard.transcript.words.slice(0, 4000) } };

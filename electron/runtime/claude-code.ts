@@ -37,7 +37,7 @@ import {
   workforceNativeToolEnforcement,
   workforceZeroToolsEnforcement,
   wrapSystemPrompt,
-  RuntimeTurnUnsettledError,
+  unsettledTurnError,
   childExitReason,
   markRefusedBeforeDispatch,
   spawnStartFailureRefusal,
@@ -319,9 +319,26 @@ export const WRITE_MODE_PRE_ALLOWED_TOOLS = ["Bash", "BashOutput", "KillShell", 
  * Reads of ~/.agentlas/agentlas-agent/motion-explainer-video-producer/docs/stage-guide.md and AGENTS.md came back
  * "requested permissions to read … but you haven't granted it yet". A codex worker at write reads them through its
  * sandbox. The rule is read only: the package is never added as a working folder, so the run cannot edit it.
- * POSIX absolute paths only (Claude's `//` rule form); a Windows run gets no rule (a remaining gap).
+ * Both forms of Claude's `//` absolute rule: POSIX `//Users/a/pkg`, and Windows `//c/Users/a/pkg` (Claude normalizes `C:\Users\a`
+ * to `/c/Users/a` before matching: code.claude.com permissions, "Windows path normalization"). A Windows worker used to get
+ * no rule at all and could not read its own package (round 3, runtime-tools 134).
  */
-export function claudeAgentPackageReadRules(agentId: string | null | undefined): string[] {
+export function claudeAgentPackageReadRule(dir: string, platform: NodeJS.Platform = process.platform): string | null {
+  if (/[(),]/.test(dir)) return null;
+  if (platform === "win32") {
+    // A drive path only. A UNC path is a network path (Claude asks about it whatever the rules say) and `C:\` alone would open the whole drive.
+    const normalized = path.win32.normalize(dir);
+    const match = /^([A-Za-z]):\\(.+)$/.exec(normalized);
+    if (!match) return null;
+    const rest = match[2].replace(/\\/g, "/").replace(/\/+$/, "");
+    if (!rest || rest.split("/").includes("..")) return null;
+    return `Read(//${match[1].toLowerCase()}/${rest}/**)`;
+  }
+  if (!dir.startsWith("/")) return null;
+  return `Read(//${dir.replace(/^\/+/, "").replace(/\/+$/, "")}/**)`;
+}
+
+export function claudeAgentPackageReadRules(agentId: string | null | undefined, platform: NodeJS.Platform = process.platform): string[] {
   if (!agentId) return [];
   let dir: string | null = null;
   try {
@@ -334,8 +351,9 @@ export function claudeAgentPackageReadRules(agentId: string | null | undefined):
   } catch {
     dir = null;
   }
-  if (!dir || !path.isAbsolute(dir) || !dir.startsWith("/") || /[(),]/.test(dir) || !(require("node:fs") as typeof import("node:fs")).existsSync(dir)) return [];
-  return [`Read(//${dir.replace(/^\/+/, "").replace(/\/+$/, "")}/**)`];
+  if (!dir || !(platform === "win32" ? path.win32 : path.posix).isAbsolute(dir) || !(require("node:fs") as typeof import("node:fs")).existsSync(dir)) return [];
+  const rule = claudeAgentPackageReadRule(dir, platform);
+  return rule ? [rule] : [];
 }
 
 export function claudeBuiltinPreAllowedTools(
@@ -3086,7 +3104,8 @@ const runClaudeTurn = async (
       const notStarted = req.signal?.aborted ? null : spawnStartFailureRefusal(child, err, { runtimeKind: KIND, cwd: runCwd, locale: req.locale });
       if (notStarted) turnDispatchAttempted = false;
       rejectRuntime(notStarted ?? (turnDispatchAttempted && !sawResult && !req.signal?.aborted
-        ? new RuntimeTurnUnsettledError(KIND, req.locale, sessionId, runnerFailure?.message, turnDeliveryFact()) : err));
+        ? unsettledTurnError({ runtimeKind: KIND, locale: req.locale, sessionId, cause: runnerFailure ?? undefined,
+          providerReason: runnerFailure?.message, turnDelivery: turnDeliveryFact() }) : err));
     };
     const settle = (code: number | null) => {
       if (settled) return;
@@ -3149,12 +3168,17 @@ const runClaudeTurn = async (
       // turns with no visible text. Only an unattempted resident write may fall
       // back to one-shot without risking another model or external action.
       if (turnDispatchAttempted && !sawResult) {
-        rejectRuntime(new RuntimeTurnUnsettledError(KIND, req.locale, sessionId, runnerFailure?.message ?? childExitReason(code, stderr || session?.stderrTail),
-          turnDeliveryFact()));
+        // The failure the stream reported before it ended (sign-in, limit, rate limit) stays the typed cause; the provider's
+        // own words lead the message, else the CLI's stderr.
+        rejectRuntime(unsettledTurnError({ runtimeKind: KIND, locale: req.locale, sessionId, cause: runnerFailure ?? undefined,
+          providerReason: runnerFailure?.message ?? childExitReason(code, stderr || session?.stderrTail), turnDelivery: turnDeliveryFact() }));
         return;
       }
       if (aliveProfile && (!sawResult || !terminalSucceeded)) {
-        broken = true; rejectRuntime(new RuntimeTurnUnsettledError(KIND, req.locale, sessionId, runnerFailure?.message, turnDeliveryFact())); return;
+        broken = true;
+        rejectRuntime(unsettledTurnError({ runtimeKind: KIND, locale: req.locale, sessionId, cause: runnerFailure ?? undefined,
+          providerReason: runnerFailure?.message, turnDelivery: turnDeliveryFact() }));
+        return;
       }
       if (session && !sawResult && !combined() && !finalText) {
         broken = true;
@@ -3377,7 +3401,8 @@ const runClaudeTurn = async (
           events.onStatus(`[runtime-session] resume_failed kind=${KIND} exit=${code}`);
           // A settled failure alone does not prove that earlier tool effects
           // were absent. The typed zero-turn result above is the safe exception.
-          rejectRuntime(new RuntimeTurnUnsettledError(KIND, req.locale, sessionId, undefined, turnDeliveryFact()));
+          rejectRuntime(unsettledTurnError({ runtimeKind: KIND, locale: req.locale, sessionId, cause: runnerFailure ?? undefined,
+            turnDelivery: turnDeliveryFact() }));
           return;
         }
         reject(new Error(`claude CLI exit ${code}${stderr ? `\n${stderr.slice(0, 500)}` : ""}`));

@@ -36,9 +36,11 @@ import {
   type PersistenceDecisionPayload,
 } from "../../shared/persistence-policy";
 import { classifyToolFailure } from "../../shared/tool-failure";
-import { appSideRunFailure } from "../../shared/run-failure-cause";
+import { appSideRunFailure, undispatchedInternalFailure } from "../../shared/run-failure-cause";
+import { readRunTurnPlacement } from "../invocation/turn-placement";
 import { boundInvocationPlan } from "../../shared/invocation-plan";
 import type { ObservedToolActivity } from "../automation-result";
+import { BROWSER_LADDER_EVENT_KIND } from "../browser/fallback-ladder";
 import { decodeToolInvocationOrigin } from "../../shared/tool-invocation-origin";
 import { emitTaskStoreChange } from "./change-bus";
 import { projectObservedTaskParticipantInDb } from "./task-participant-projection";
@@ -2317,6 +2319,7 @@ export function recordMcpInvocationEvent(runId: string, req: McpInvocationReques
     runtimeFailureSource: runtimeFailure?.source,
     runtimeFailureProviderCode: runtimeFailure?.providerCode,
     runtimeFailureRetryAfterAt: runtimeFailure?.retryAfterAt,
+    causeClass: ev.error?.causeClass,
     reasoningPhase: ev.reasoning?.phase,
     reasoningDurationMs: ev.reasoning?.durationMs,
     // end에만 전문이 온다(delta는 live 전용 — 아래에서 원장에 안 남긴다).
@@ -2586,6 +2589,33 @@ export function observedApprovalRequiredToolCount(runId: string): number {
   return Number(row?.n ?? 0);
 }
 
+/**
+ * A sign-in wall or human check the browser met in this run and did not get past, from the run's own browser-ladder rows (the last final row of
+ * each ladder decides; a later ladder that recovered the same wall on the same site lifts it). Null when there is none. Facts only.
+ */
+export function observedBrowserWall(runId: string): NonNullable<ObservedToolActivity["browserWall"]> | null {
+  if (!runId) return null;
+  try {
+    const rows = getDb().prepare("SELECT payload_json FROM run_events WHERE run_id = ? AND kind = ? AND json_valid(payload_json) AND json_extract(payload_json, '$.step') = 'final' ORDER BY seq ASC LIMIT 200")
+      .all(runId, BROWSER_LADDER_EVENT_KIND) as { payload_json: string }[];
+    const lastByLadder = new Map<string, { code: string; site: string | null; final: string }>();
+    const open = new Map<string, NonNullable<ObservedToolActivity["browserWall"]>>();
+    for (const row of rows) {
+      const payload = JSON.parse(row.payload_json) as { ladderId?: unknown; code?: unknown; site?: unknown; final?: unknown };
+      if (typeof payload.ladderId !== "string" || typeof payload.code !== "string" || typeof payload.final !== "string") continue;
+      const site = typeof payload.site === "string" && payload.site.length <= 253 ? payload.site : null;
+      lastByLadder.set(payload.ladderId, { code: payload.code, site, final: payload.final });
+    }
+    for (const entry of lastByLadder.values()) {
+      if (entry.code !== "login-wall" && entry.code !== "human-check-required") continue;
+      const key = `${entry.code}:${entry.site ?? ""}`;
+      if (entry.final === "recovered") open.delete(key);
+      else open.set(key, { code: entry.code, site: entry.site });
+    }
+    return [...open.values()].at(-1) ?? null;
+  } catch { return null; }
+}
+
 /** Read tool observations from the ledger rather than the model's final prose. */
 export function observedToolActivity(runId: string): ObservedToolActivity {
   if (!runId) return { callCount: 0, toolNames: [] };
@@ -2633,8 +2663,10 @@ export function observedToolActivity(runId: string): ObservedToolActivity {
         ...(failed ? { failureCode: classifyToolFailure({ explicitCode: payload.toolFailureCode, result: payload.toolResultPreview }) } : {}) });
     } catch { /* Corrupt rows cannot establish a tool result. */ }
   }
+  const browserWall = observedBrowserWall(runId);
   return { callCount: external.length, toolNames: [...new Set(external)], results: results.slice(-40),
-    resultsTruncated: recent.length > 500 || results.length > 40, approvalRequiredCount: observedApprovalRequiredToolCount(runId) };
+    resultsTruncated: recent.length > 500 || results.length > 40, approvalRequiredCount: observedApprovalRequiredToolCount(runId),
+    ...(browserWall ? { browserWall } : {}) };
 }
 
 export function listRunEvents(runId: string, limit?: number): RunEventUi[] {
@@ -2940,6 +2972,9 @@ function invocationSupersedingRunId(runId: string, chatId: string, startTs: stri
  * (shared/run-failure-cause.ts) is "app-failed" (reported, never an owner ask). The receipt's typed provider failure is read
  * the same way the line was written: a provider's own outcome is never "app-failed". Other runs are left as written.
  */
+function ledgerDelivery(runId: string): "not-dispatched" | undefined {
+  try { return readRunTurnPlacement(runId) === "not-dispatched" ? "not-dispatched" : undefined; } catch { return undefined; }
+}
 export function invocationFailureNoticeStatuses(chatId: string, runIds: readonly string[]): ReadonlyMap<string, "recovered" | "app-failed"> {
   const out = new Map<string, "recovered" | "app-failed">();
   for (const runId of new Set(runIds)) {
@@ -2948,7 +2983,9 @@ export function invocationFailureNoticeStatuses(chatId: string, runIds: readonly
     try { receipt = getInvocationRunReceipt(runId); } catch { continue; }
     if (!receipt || receipt.chatId !== chatId || (receipt.status !== "failed" && receipt.status !== "interrupted")) continue;
     if (receipt.supersededByRunId) out.set(runId, "recovered");
-    else if (receipt.status === "failed" && appSideRunFailure(receipt.errorCode, receipt.runtimeFailure)) out.set(runId, "app-failed");
+    else if (receipt.status === "failed" && (appSideRunFailure(receipt.errorCode, receipt.runtimeFailure)
+      // A failure no table names, whose ledger proves nothing reached a model, is the app's own state too (undispatchedInternalFailure).
+      || undispatchedInternalFailure({ code: receipt.errorCode, runtimeFailure: receipt.runtimeFailure, delivery: ledgerDelivery(runId) }))) out.set(runId, "app-failed");
   }
   return out;
 }
@@ -3125,10 +3162,22 @@ function invocationRunReceiptSnapshot(runId: string): InvocationRunReceipt | nul
         ? { errorMessage: stringPayload(terminalPayload, "errorMessage") }
         : {}),
     ...(status === "failed" && runtimeFailure ? { runtimeFailure } : {}),
+    ...(status === "failed" && !runtimeFailure && runFailedByHostInternalException(runId) ? { hostInternalFailure: true as const } : {}),
     ...(interruptionCause ? { interruptionCause } : {}),
     ...(hostStopCause ? { hostStopCause } : {}),
     ...(supersededByRunId ? { supersededByRunId } : {}),
   };
+}
+
+/**
+ * Whether the app's own unexpected exception ended this run: the diagnostic row written when such an exception reached the run's
+ * terminal handling carries the typed flag (error-diagnostic.ts). Only the flag is read; one indexed probe, and only for a failed run.
+ */
+export function runFailedByHostInternalException(runId: string): boolean {
+  try {
+    return Boolean(invocationReceiptStatement(`SELECT 1 FROM run_events WHERE run_id = ? AND kind = 'invoke_error_diagnostic'
+      AND json_valid(payload_json) AND json_extract(payload_json, '$.hostInternalException') = 1 LIMIT 1`).get(runId));
+  } catch { return false; }
 }
 
 export function getLatestInvocationRunReceipt(chatId: string): InvocationRunReceipt | null {

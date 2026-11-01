@@ -9,6 +9,7 @@ import { getSource as getMarketSource, getCargoSource } from "../marketplace";
 import { agentFolderPath, materializeAgentFiles } from "../agents/files";
 import { getRoute, removeRoute, setRoute, type AgentRoute, type RuntimeLabel } from "../agents/routes";
 import { isPrivateWebOnlyAgent, publicAgentVisibility } from "../agents/policy";
+import { resolveInstalledDescription } from "../agents/package-description";
 import { isScratchImportPath } from "./scratch-import";
 import { recoverRestoredTeamFirms } from "../cloud-agents/team-firm";
 import { deriveListingEntityKind, entityKindAfterRefresh } from "../agents/entity-kind";
@@ -45,6 +46,7 @@ function toAgent(row: AgentRow): InstalledAgent {
   }
   // 로컬 임포트 라우팅이 있으면 런타임 라벨/원본 경로/종류를 병합.
   const route = getRoute(row.id);
+  const names = [row.name, row.name_en, row.local_display_name ?? ""];
   const asset = routeAssetState(route);
   // A definition fingerprint is not proof that its folder still exists.
   // Measure only this directory; inventory reads never rewrite routes or walk the package.
@@ -70,8 +72,10 @@ function toAgent(row: AgentRow): InstalledAgent {
     name: row.name,
     nameEn: row.name_en || row.name,
     ...(row.local_display_name ? { localDisplayName: row.local_display_name } : {}),
-    tagline: row.tagline,
-    taglineEn: row.tagline_en || row.tagline,
+    // The description every screen shows. A tagline an older build stored as package boot text is read from the package
+    // instead (agents/package-description.ts); a good one is returned as it is. Nothing is rewritten in the database.
+    tagline: resolveInstalledDescription(row.tagline, { dir: route?.path, names }),
+    taglineEn: resolveInstalledDescription(row.tagline_en || row.tagline, { dir: route?.path, names }),
     systemPrompt: row.system_prompt,
     mcpServers: JSON.parse(row.mcp_servers_json) as string[],
     envRequirements: envReqs,

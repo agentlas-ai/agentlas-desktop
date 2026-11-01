@@ -1,3 +1,4 @@
+import { boundedWaitRefusalCause } from "./wait-refusal-cause";
 import { prepareGoalObligationContinuation, abandonGoalObligationContinuation } from "./goal-obligation-context";
 import { appendGoalWaitObservation, createGoalWaitObservationData, goalWaitSubjectRef as identity } from "./goal-wait-observation";
 import { pollCanonicalGoalWaits, reconcileCanonicalGoalWaits } from "./canonical-owner-waits";
@@ -760,7 +761,14 @@ export async function pollGoalWaitSubscriptions(options: { now?: number; clock?:
         if (!failure && checkpoint.sideEffects.state !== "settled" && verificationInFlight(current.id)
           && clock() - Date.parse(wait.intent.subject.kind === "timer" ? wait.intent.subject.notBefore : "") < STALL_REPLAN_VERIFICATION_HOLD_MS) return;
         recordGoalWaitDiagnostics(wait, current, checkpoint, clock());
-      } catch { failure = "goal_wait_context_changed"; }
+      } catch (error) {
+        // A locked store says nothing about the Goal: the exact pending wait is read again at the next poll (as for the observation above).
+        // Any other exception keeps its own typed code, or is recorded with a short redacted cause instead of vanishing into the catch-all.
+        const code = error && typeof error === "object" && "code" in error ? error.code : null;
+        if (typeof code === "string" && /^SQLITE_(?:BUSY|LOCKED)(?:_|$)/.test(code)) return;
+        failure = error instanceof Error && /^checkpoint_[a-z_]+$/.test(error.message) ? error.message : "goal_wait_context_changed";
+        console.warn("[goal-wait] the wait's context check threw", { waitId: wait.waitId, cause: boundedWaitRefusalCause(error) });
+      }
     }
     let quotaInventory: Awaited<ReturnType<typeof detectRuntimes>> | null = null;
     let quotaWaitUntil: number | null = null;
@@ -812,7 +820,10 @@ export async function pollGoalWaitSubscriptions(options: { now?: number; clock?:
       }
       let checkpoint: LongRunTaskCheckpoint | null = null;
       try { checkpoint = candidateCheckpoint(wait); prepareCheckpointContinuation(checkpoint); }
-      catch (error) { failure = error instanceof Error && /^checkpoint_[a-z_]+$/.test(error.message) ? error.message : "goal_wait_context_changed"; }
+      catch (error) {
+        failure = error instanceof Error && /^checkpoint_[a-z_]+$/.test(error.message) ? error.message : "goal_wait_context_changed";
+        console.warn("[goal-wait] the wait's context check threw", { waitId: wait.waitId, cause: boundedWaitRefusalCause(error) });
+      }
       if (!failure && checkpoint && quotaInventory && quotaWaitUntil && !wait.recoveryMode) {
         const current = prepareCheckpointContinuation(checkpoint).runtimeSelection;
         const handoff = autoHandoffGoalRuntimeAtWait({ checkpoint, currentSelection: current,

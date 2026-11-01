@@ -46,8 +46,19 @@ export type FirstSendEntry = {
   /** Local clock when runId was recorded (compared with Main's process start, never trusted as a receipt). */
   runIdAt?: number;
   notSent?: FirstSendHold;
+  /**
+   * The send is only waiting for its turn: an earlier message of the room is still being prepared (one_preflight_chat_pending) or a run of
+   * this window is not over. It is not held and not refused: the resume loop sends it by itself the moment the room is free, it survives a
+   * reload like every saved send, and the owner can Stop it. Cleared when the entry is settled or held.
+   */
+  waiting?: true;
   choices: FirstSendChoices;
 };
+
+/** The one line a send shows while it waits for the room (no codes, no process names). */
+export function firstSendWaitLine(ko: boolean): string {
+  return ko ? "이전 메시지를 준비하는 중이라 끝나면 저절로 보내요" : "Waiting for the earlier message, then it sends itself";
+}
 
 type StoragePort = Pick<Storage, "getItem" | "setItem" | "removeItem">;
 
@@ -76,6 +87,7 @@ function validEntry(value: unknown, surface: FirstSendSurface, chatId: string | 
     && (item.runId === undefined || typeof item.runId === "string")
     && (item.runIdAt === undefined || (typeof item.runIdAt === "number" && Number.isFinite(item.runIdAt)))
     && (item.notSent === undefined || HOLDS.has(item.notSent))
+    && (item.waiting === undefined || item.waiting === true)
     && !!item.choices && typeof item.choices === "object" && !Array.isArray(item.choices);
 }
 
@@ -182,12 +194,13 @@ export function saveFirstSend(storage: StoragePort, entry: FirstSendEntry): void
 
 /** Metadata only: the text, chat and gesture's choices never change after capture. */
 export function patchFirstSend(storage: StoragePort, surface: FirstSendSurface, chatId: string | null, intentId: string,
-  patch: Partial<Pick<FirstSendEntry, "runId" | "runIdAt" | "notSent" | "ready">>): FirstSendEntry | null {
+  patch: Partial<Pick<FirstSendEntry, "runId" | "runIdAt" | "notSent" | "ready" | "waiting">>): FirstSendEntry | null {
   const slot = readMutationSlot(storage, surface, chatId);
   const index = uniqueValidIndex(slot, surface, chatId, intentId);
   if (index < 0) return null;
   const next = { ...(slot.values[index] as FirstSendEntry), ...patch };
   if (patch.notSent === undefined && "notSent" in patch) delete next.notSent;
+  if (patch.waiting === undefined && "waiting" in patch) delete next.waiting;
   slot.values[index] = next; slot.elements[index] = JSON.stringify(next);
   writeMutationSlot(storage, surface, chatId, slot);
   return next;
@@ -210,6 +223,38 @@ export function removeFirstSend(storage: StoragePort, surface: FirstSendSurface,
   if (index < 0) return;
   slot.values.splice(index, 1); slot.elements.splice(index, 1);
   writeMutationSlot(storage, surface, chatId, slot);
+}
+
+/**
+ * A submit of this document has taken the send over: it is being sent now, so it is no longer only waiting. The wait line and its Stop
+ * go with the flag (a Stop that "takes the message back" while the send goes through would be a false confirmation). If Main answers that
+ * an earlier message is still being prepared, the submit sets the flag again.
+ */
+export function firstSendWentLive(storage: StoragePort, surface: FirstSendSurface, chatId: string | null, intentId: string): void {
+  const entry = readFirstSends(storage, surface, chatId).find(item => item.intentId === intentId);
+  if (entry?.waiting) patchFirstSend(storage, surface, chatId, intentId, { waiting: undefined });
+}
+
+/**
+ * What the owner's Stop on the wait line does, decided at the moment of the press from what is saved and from whether a submit of this
+ * document is driving the send:
+ * - "taken-back": it had not been handed to Main (no submit drives it, no run ID recorded, still waiting). It is removed and will not be sent.
+ * - "too-late": a submit is sending it, a run ID shows it may already have reached Main, or it is gone (Main took it). It is not removed and
+ *   nothing says it was stopped; the owner's Stop for the answer is the run Stop once the answer starts.
+ * - "none": it is not waiting any more (held as not sent): the row already shows what it is and offers its own buttons.
+ * - "not-saved": the removal could not be written, so the send still waits and will go: it is not called stopped.
+ */
+export type FirstSendStopOutcome = "taken-back" | "too-late" | "none" | "not-saved";
+
+export function takeBackWaitingFirstSend(storage: StoragePort, surface: FirstSendSurface, chatId: string | null, intentId: string,
+  isLive: (intentId: string) => boolean): FirstSendStopOutcome {
+  if (isLive(intentId)) return "too-late";
+  const entry = readFirstSends(storage, surface, chatId).find(item => item.intentId === intentId);
+  if (!entry) return "too-late";
+  if (entry.notSent) return "none";
+  if (entry.runId || !entry.waiting) return "too-late";
+  try { removeFirstSend(storage, surface, chatId, intentId); } catch { return "not-saved"; }
+  return readFirstSends(storage, surface, chatId).some(item => item.intentId === intentId) ? "not-saved" : "taken-back";
 }
 
 /** Main's answer for the run the entry recorded (invoke:admission), reduced to the fields the decision reads. */
@@ -345,8 +390,12 @@ export async function resumeFirstSends(deps: FirstSendResumeDeps): Promise<"idle
     if (entry.runId) deps.clearUncertain(entry.runId);
     try { if (await deps.chatActive()) return "waiting"; } catch { return "waiting"; }
     if (!deps.stillOpen() || deps.blocked() || deps.isLive(entry.intentId)) return "waiting";
+    // The entry was read before the awaits above. The owner's Stop on a waiting send removes it meanwhile, and a Stop must win: what is
+    // saved now decides, not the copy read earlier.
+    const current = deps.entries().find(item => item.intentId === entry.intentId);
+    if (!current || current.notSent) continue;
     deps.setTries(entry.intentId, tries + 1);
-    await deps.resume(entry);
+    await deps.resume(current);
     return "resumed";
   }
   return "idle";

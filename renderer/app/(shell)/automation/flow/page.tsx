@@ -13,7 +13,8 @@ import { useAppUiPreference } from "@/lib/app-ui-preferences";
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { navigate } from "@/lib/navigation";
 import { humanSchedule } from "@shared/graph-blueprint";
-import { ownerFailureText } from "@shared/owner-visible-activity-text";
+import { ownerFailureText, ownerFailureReasonOrNull } from "@shared/owner-visible-activity-text";
+import { retryQuietly, isTransientIpcError, QUIET_LOAD_DELAYS_MS, QUIET_READBACK_DELAYS_MS, QUIET_WRITE_DELAYS_MS } from "@shared/quiet-retry";
 import { resolveAutomationGraphForEditing } from "@shared/automation-graph-definition";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
@@ -535,7 +536,8 @@ function AutomationFlowPage() {
       return;
     }
     try {
-      const found = await api.automations.get(id);
+      // A store or IPC hiccup is asked again quietly (about 4 s in all) before the owner is told anything.
+      const found = await retryQuietly(() => api.automations.get(id), { delaysMs: QUIET_LOAD_DELAYS_MS });
       if (!found) {
         router.replace("/automation");
         return;
@@ -1213,7 +1215,10 @@ function AutomationFlowPage() {
       setMessage(t("auto.flow.saved"));
     } catch {
       try {
-        const current = exactAutomationProjection(await api.automations.get(previous.id), previous.id);
+        // The read-back is asked again quietly (about 22 s in all) and only then reconciled with what was saved.
+        const current = await retryQuietly(
+          async () => exactAutomationProjection(await api.automations.get(previous.id), previous.id),
+          { delaysMs: QUIET_READBACK_DELAYS_MS, accept: (value) => value !== null });
         if (!current) throw new Error("automation_save_readback_missing");
         if (sameWorkflowGraph(current.graph, requestedGraph)) {
           skipNextHydrationRef.current = true;
@@ -1254,7 +1259,9 @@ function AutomationFlowPage() {
       ? (locale === "en" ? "Turning it off…" : "끄는 중입니다…")
       : (locale === "en" ? "Turning it on — checking what it needs…" : "켜는 중입니다 — 필요한 연결을 확인합니다…"));
     try {
-      const receipt = await api.automations.toggle(previous.id, requestedEnabled);
+      // Setting the same status twice is the same as setting it once, so a busy store is asked again quietly.
+      const receipt = await retryQuietly(() => api.automations.toggle(previous.id, requestedEnabled),
+        { delaysMs: QUIET_WRITE_DELAYS_MS, retryOn: isTransientIpcError });
       const next = exactAutomationProjection(receipt, previous.id);
       if (!next || next.enabled !== requestedEnabled) throw new Error("automation_toggle_receipt_mismatch");
       setAutomation(next);
@@ -1267,7 +1274,9 @@ function AutomationFlowPage() {
       const raw = error instanceof Error ? error.message : String(error ?? "");
       const notConnected = raw.includes("AUTOMATION_NOT_CONNECTED") || raw.includes("연결되지 않은");
       try {
-        const current = exactAutomationProjection(await api.automations.get(previous.id), previous.id);
+        const current = await retryQuietly(
+          async () => exactAutomationProjection(await api.automations.get(previous.id), previous.id),
+          { delaysMs: QUIET_READBACK_DELAYS_MS, accept: (value) => value !== null });
         if (!current) throw new Error("automation_toggle_readback_missing");
         if (current.enabled === requestedEnabled) {
           setAutomation(current);
@@ -1280,9 +1289,12 @@ function AutomationFlowPage() {
             setMessage(raw.replace(/^Error:\s*/, "").replace(/^.*AUTOMATION_NOT_CONNECTED[^:]*:\s*/, ""));
             setConnectionsOpen(true);
           } else {
-            setMessage(locale === "en"
+            // The refusal's own sentence when the app wrote one for the owner (for example a past one-time automation); never a code.
+            const sentence = raw.replace(/^Error invoking remote method '[^']+':\s*/, "").replace(/^Error:\s*/, "").trim();
+            const plain = sentence.length <= 240 ? ownerFailureReasonOrNull(sentence, locale === "en" ? "en" : "ko") ?? "" : "";
+            setMessage(plain || (locale === "en"
               ? "The saved status did not change. You can try this action again."
-              : "저장된 상태는 바뀌지 않았습니다. 이 작업은 다시 시도할 수 있습니다.");
+              : "저장된 상태는 바뀌지 않았습니다. 이 작업은 다시 시도할 수 있습니다."));
           }
         } else {
           setAutomation(current);

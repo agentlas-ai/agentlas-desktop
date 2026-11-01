@@ -9,6 +9,7 @@
 //   - 경로는 항상 에이전트 폴더 내부로 제한 (escape 방지).
 import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
+import { skillIsLeftOut, skillsLeftOut } from "./skill-candidates";
 import path from "node:path";
 import { app } from "electron";
 import { getDb } from "../store/db";
@@ -566,6 +567,8 @@ export const AGENT_SKILL_ROOTS = ["skills", ".claude/skills", ".codex/skills", "
 export function listAgentSkillEntries(dir: string): Array<{ root: string; name: string }> {
   const entries: Array<{ root: string; name: string }> = [];
   const seen = new Set<string>();
+  // Unreviewed legacy candidates in the native root are left out of the list, not a reason to refuse the run (skill-candidates.ts).
+  const leftOut = skillsLeftOut(dir);
   for (const root of AGENT_SKILL_ROOTS) {
     // An optional root we cannot safely read is simply not a source of skills.
     // Skipping it beats throwing: a package that symlinks `.claude/skills` at
@@ -586,7 +589,10 @@ export function listAgentSkillEntries(dir: string): Array<{ root: string; name: 
     for (const name of names) {
       const key = name.toLowerCase();
       if (seen.has(key)) continue;
+      // A left-out slug stays left out: the same name under a later root is not a way back in for the candidate the owner never reviewed
+      // (regression review C10: `.codex/skills/<slug>` was listed as a reviewed skill once `.claude/skills/<slug>` was dropped).
       seen.add(key);
+      if (skillIsLeftOut(leftOut, root, name)) continue;
       entries.push({ root, name });
     }
   }

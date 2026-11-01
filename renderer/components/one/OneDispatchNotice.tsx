@@ -5,6 +5,7 @@ import type { ChatHostNotice } from "@shared/types";
 import { stripAgentControlBlocks } from "@shared/agent-control-blocks";
 import { flattenAskFences } from "@shared/ask-fence-flatten";
 import { ipc, ipcEvents } from "@/lib/ipc";
+import { ipcErrorCode } from "@shared/ipc-error-code";
 import { createDirtyGate } from "@/lib/store-change-policy";
 import { readOneChatHistory } from "@/lib/one-chat-history";
 import { markChatVisible } from "@/lib/tool-approvals";
@@ -24,6 +25,8 @@ export function OneDispatchNotice({ notice, locale, onOpenChat }: { notice: Noti
   const [answerBusy, setAnswerBusy] = useState(false);
   const [answerError, setAnswerError] = useState<string | null>(null);
   const [answeredSource, setAnsweredSource] = useState<string | null>(null);
+  const [stopBusy, setStopBusy] = useState(false);
+  const [stopNote, setStopNote] = useState<"saved" | "failed" | null>(null);
   useEffect(() => setCurrent(notice), [notice]);
   const dispatch = current.dispatch;
   useEffect(() => {
@@ -61,6 +64,36 @@ export function OneDispatchNotice({ notice, locale, onOpenChat }: { notice: Noti
     return () => { cancelled = true; clearInterval(timer); stopWatching?.(); };
   }, [dispatch?.dispatchId, dispatch?.parentChatId, dispatch?.status, current.purpose, current.runId, current.chatId]);
   const ko = locale === "ko";
+  /*
+   * Stop: a job handed to a teammate could not be stopped from where it was handed over. The session opens read-only
+   * for the owner when the personal agent started it, and its composer, where Stop lives, is replaced by a notice. This is the owner's
+   * own Stop of the run (invoke.cancel): Main finds the teammate job by its run, closes it as stopped and reports nothing about it. It
+   * stays while the job runs or waits for an answer, in the personal agent's room and in group rooms alike, and needs no open session.
+   */
+  const stopRun = async () => {
+    const api = ipc();
+    if (stopBusy || !api?.invoke?.cancel || !dispatch || current.purpose !== "one-dispatch-link") return;
+    setStopBusy(true); setStopNote(null);
+    let refused: "saved" | "failed" | null = null;
+    try {
+      await api.invoke.cancel(current.runId);
+    } catch (error) {
+      // The service holding the run did not answer: Main kept the stop and asks again by itself, so this is not the job's failure.
+      refused = ipcErrorCode(error) === "invocation_owner_unavailable" ? "saved" : "failed";
+    }
+    try {
+      const history = await readOneChatHistory(api, dispatch.parentChatId);
+      const updated = history.find(row => row.hostNotice?.purpose === current.purpose
+        && "dispatch" in row.hostNotice && row.hostNotice.dispatch?.dispatchId === dispatch.dispatchId
+        && "runId" in row.hostNotice && row.hostNotice.runId === current.runId)?.hostNotice;
+      if (updated) setCurrent(updated as Notice);
+      // A Stop pressed as the job ended is answered with the job's end, not with a note about the Stop.
+      const updatedStatus = updated && "dispatch" in updated ? updated.dispatch?.status : undefined;
+      if (updatedStatus && updatedStatus !== "running" && updatedStatus !== "waiting_input") refused = null;
+    } catch { /* the next store change re-reads it */ }
+    setStopNote(refused);
+    setStopBusy(false);
+  };
   const labels = {
     running: ko ? "작업 중" : "Working", waiting_input: ko ? "응답 대기" : "Waiting for input",
     completed: ko ? "완료" : "Completed", failed: ko ? "실패" : "Failed",
@@ -94,7 +127,17 @@ export function OneDispatchNotice({ notice, locale, onOpenChat }: { notice: Noti
         style={{ marginLeft: "auto", border: 0, background: "transparent", padding: 0, color: "var(--accent)", font: "inherit", fontSize: 12, cursor: "pointer", flexShrink: 0 }}>
         {ko ? "세션 열기" : "Open session"}
       </button>}
+      {dispatch && current.purpose === "one-dispatch-link" && (status === "running" || status === "waiting_input") && <button type="button" data-one-dispatch-stop={current.chatId}
+        disabled={stopBusy} onClick={() => { void stopRun(); }} aria-label={ko ? `${current.memberName} 작업 중지` : `Stop ${current.memberName}'s job`}
+        style={{ marginLeft: onOpenChat ? 0 : "auto", border: 0, background: "transparent", padding: 0, color: "var(--muted-deep)", font: "inherit", fontSize: 12, cursor: stopBusy ? "default" : "pointer", flexShrink: 0, opacity: stopBusy ? .6 : 1 }}>
+        {stopBusy ? (ko ? "중지하는 중…" : "Stopping…") : (ko ? "중지" : "Stop")}
+      </button>}
     </div>
+    {stopNote && <p role="status" data-one-dispatch-stop-note={stopNote} style={{ fontSize: 12, color: "var(--muted-deep)", margin: "0 0 6px" }}>
+      {stopNote === "saved"
+        ? (ko ? "중지 요청을 저장했어요. 작업을 맡은 서비스가 응답하면 바로 멈춰요." : "The stop is saved. It takes effect as soon as the service running the job answers.")
+        : (ko ? "중지하지 못했어요. 다시 눌러 주세요." : "Could not stop it. Press Stop again.")}
+    </p>}
     {!!dispatch?.activity?.length && <details open={status === "running" || status === "waiting_input"} style={{ fontSize: 12, color: "var(--muted-deep)", marginBottom: 8 }}>
       <summary>{ko ? "진행 기록" : "Work activity"}</summary>
       {dispatch.activity.map(item => <div key={item.id} style={{ margin: "6px 0", whiteSpace: "pre-wrap" }}>

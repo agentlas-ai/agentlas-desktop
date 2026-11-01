@@ -112,7 +112,7 @@ function stableBytes(root: string, relativePath: string): { bytes: Buffer; execu
 export interface WorkspaceUnverifiedEntry {
   path: string;
   /** unportable: the name cannot be a portable package path (not NFC, reserved character, trailing dot, ...). */
-  kind: "symlink" | "oversize" | "multilink" | "special" | "unportable";
+  kind: "symlink" | "oversize" | "multilink" | "special" | "unportable" | "beyond-limit";
   byteLength?: number;
   mtimeMs?: number;
   /** The link text exactly as stored. The link is never resolved or opened. */
@@ -187,7 +187,10 @@ function collectWorkspace(root: string, options: { allowInterruptedEntry?: boole
   if (entry && !isWorkspaceAsset(entry) && !options.allowInterruptedEntry) throw new AgentWorkspaceError("private_entry", "The agent entry cannot be private memory, credentials or run state.");
   const files: WorkspaceAsset[] = []; const unverified: WorkspaceUnverifiedEntry[] = []; const collisions = new Set<string>(); let total = 0;
   const visit = (dir: string, prefix: string) => {
-    for (const item of fs.readdirSync(dir, { withFileTypes: true })) {
+    // The run view fixes which files fit the hashed tree by walking in name order, so the lease and every later read pick the same ones.
+    const items = fs.readdirSync(dir, { withFileTypes: true });
+    if (tolerate) items.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+    for (const item of items) {
       const relativePath = prefix + item.name;
       // Tolerated only in the run view and only outside runtimeLoaded paths; the entry is recorded, never opened, read or followed.
       const record = (unportableName = false): boolean => {
@@ -213,6 +216,11 @@ function collectWorkspace(root: string, options: { allowInterruptedEntry?: boole
       if (item.isSymbolicLink()) { if (record()) continue; throw new AgentWorkspaceError("unsafe_path", "Linked files cannot be included in a version."); }
       if (item.isDirectory()) { visit(path.join(dir, item.name), relativePath + "/"); continue; }
       if (!item.isFile()) { if (record()) continue; throw new AgentWorkspaceError("unsafe_path", "Special files cannot be included in a version."); }
+      // Past the file count the run view does not open the rest (a folder of thousands of renders is not read file by file).
+      if (tolerate && files.length >= MAX_WORKSPACE_FILES && !runtimeLoaded(relativePath, entry)) {
+        let size: number | undefined; try { size = fs.lstatSync(path.join(dir, item.name)).size; } catch { /* identity only */ }
+        unverified.push({ path: relativePath, kind: "beyond-limit", ...(size !== undefined ? { byteLength: size } : {}) }); continue;
+      }
       let read: { bytes: Buffer; executable: boolean };
       try { read = stableBytes(root, relativePath); }
       catch (error) {
@@ -220,8 +228,15 @@ function collectWorkspace(root: string, options: { allowInterruptedEntry?: boole
         if (tolerate && error instanceof AgentWorkspaceError && (error.code === "file_limit" || error.code === "unsafe_path") && record()) continue;
         throw error;
       }
-      const { bytes, executable } = read; total += bytes.length;
-      if (files.length >= MAX_WORKSPACE_FILES || total > MAX_WORKSPACE_TOTAL_BYTES) throw new AgentWorkspaceError("tree_limit", "This agent has too many or too large files to compare safely.");
+      const { bytes, executable } = read;
+      if (files.length >= MAX_WORKSPACE_FILES || total + bytes.length > MAX_WORKSPACE_TOTAL_BYTES) {
+        // An agent that keeps what it makes (renders, frames, downloads) outgrows the hashed tree. In the run view the files past the
+        // limit are recorded by identity and left out, like a link or an oversize file; what the runtime loads (instructions, skills,
+        // tools, manifest, hidden config) is always hashed. The exact snapshot, the one a review is built on, still refuses.
+        if (tolerate && !runtimeLoaded(relativePath, entry)) { unverified.push({ path: relativePath, kind: "beyond-limit", byteLength: bytes.length }); continue; }
+        if (!tolerate) throw new AgentWorkspaceError("tree_limit", "This agent has too many or too large files to compare safely.");
+      }
+      total += bytes.length;
       files.push({ path: relativePath, role: workspaceFileRole(relativePath, entry), blobHash: workspaceHash(bytes), byteLength: bytes.length,
         executable, kind: "file", binary: decodeWorkspaceText(bytes) === null, contentBase64: bytes.toString("base64") });
     }

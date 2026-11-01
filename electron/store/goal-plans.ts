@@ -183,15 +183,18 @@ export function saveGoalPlan(input: {
   }).immediate();
 }
 
-/** 가장 최근 개정(또는 지정 개정)의 가장 최근 차수 계획. */
-export function readGoalPlan(goalId: string, revision?: number, db: Db = getDb()): LiveGoalPlan | null {
+/** 가장 최근 개정(또는 지정 개정)의 가장 최근 차수 계획. `planSeq` 를 주면 그 차수의 계획(교체되기 전에 보던 계획을 다시 읽을 때). */
+export function readGoalPlan(goalId: string, revision?: number, db: Db = getDb(), planSeq?: number): LiveGoalPlan | null {
   ensureGoalPlanTables(db);
   const rev = revision ?? (db.prepare("SELECT MAX(revision) AS r FROM goal_plan_decisions WHERE goal_id = ? AND kind IN ('shape','shape_fallback')")
     .get(goalId) as { r: number | null } | undefined)?.r;
   if (rev === null || rev === undefined) return null;
-  const decision = db.prepare(`SELECT kind, plan_seq, payload_json, created_at FROM goal_plan_decisions
-    WHERE goal_id = ? AND revision = ? AND kind IN ('shape','shape_fallback') ORDER BY plan_seq DESC LIMIT 1`)
-    .get(goalId, rev) as { kind: string; plan_seq: number; payload_json: string; created_at: string } | undefined;
+  const decision = (planSeq === undefined
+    ? db.prepare(`SELECT kind, plan_seq, payload_json, created_at FROM goal_plan_decisions
+    WHERE goal_id = ? AND revision = ? AND kind IN ('shape','shape_fallback') ORDER BY plan_seq DESC LIMIT 1`).get(goalId, rev)
+    : db.prepare(`SELECT kind, plan_seq, payload_json, created_at FROM goal_plan_decisions
+    WHERE goal_id = ? AND revision = ? AND plan_seq = ? AND kind IN ('shape','shape_fallback') LIMIT 1`).get(goalId, rev, planSeq)
+  ) as { kind: string; plan_seq: number; payload_json: string; created_at: string } | undefined;
   if (!decision) return null;
   const nodes = db.prepare("SELECT * FROM goal_plan_nodes WHERE goal_id = ? AND revision = ? AND plan_seq = ? ORDER BY ord, created_at")
     .all(goalId, rev, decision.plan_seq) as Array<{ node_id: string; kind: string; parent_id: string | null; status: PlanNodeStatus; ord: number; payload_json: string }>;

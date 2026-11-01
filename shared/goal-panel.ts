@@ -128,6 +128,8 @@ export interface GoalPanelBuildInput {
   suggestions: GoalPanelSuggestion[];
   shaping: boolean;
   shapeFailed: boolean;
+  /** False when another surface or room runs this Goal: the "Divide" action is then not offered (it could only be refused). */
+  hostRunsGoal?: boolean;
 }
 
 const BOUNDARY_TEXT: Record<string, GoalPanelText> = {
@@ -294,7 +296,7 @@ export function buildGoalPanelView(input: GoalPanelBuildInput): GoalPanelView {
     pendingAmendments: input.pendingAmendments,
     nodes,
     agiWorking: input.agiIncident,
-    canShape: !plan || plan.fallback || plan.shape === "single_tactic" || Boolean(revision && plan.revision < revision.revision),
+    canShape: input.hostRunsGoal !== false && (!plan || plan.fallback || plan.shape === "single_tactic" || Boolean(revision && plan.revision < revision.revision)),
     shaping: input.shaping,
     shapeFailed: input.shapeFailed,
     limits: { strategies: GOAL_SHAPE_LIMITS.strategies, tactics: GOAL_SHAPE_LIMITS.tactics },

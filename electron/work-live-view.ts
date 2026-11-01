@@ -51,6 +51,12 @@ export const MAX_NATIVE_BROWSER_TABS_PER_OWNER = 8;
 type NativeTaskPresentation = { ownerId: number; window: BrowserWindow; taskScopeId: string; send: (status: WorkLiveViewStatus) => void };
 type NativeTaskOwner = { ownerId: number; window: BaseWindow; taskScopeId: string; send: (status: WorkLiveViewStatus) => void;
   presentation?: NativeTaskPresentation; leases: Set<NativeBrowserTaskLease> };
+/**
+ * Why a task lease ended. "anchor-closed": the task's hidden execution window was destroyed under a run that is still alive (the only reason a
+ * run may be given a fresh lease for the same chat, run and permission); "aborted": the run's own signal; "task-ended": the task was removed
+ * on purpose (its chat was deleted) or the lease was revoked without a reason. Only "anchor-closed" is ever recovered.
+ */
+export type NativeBrowserRevokeReason = "anchor-closed" | "aborted" | "task-ended";
 export interface NativeBrowserTaskLease {
   readonly ownerId: number;
   readonly taskScopeId: string;
@@ -58,9 +64,9 @@ export interface NativeBrowserTaskLease {
   readonly permission: "read" | "write" | "full";
   current: () => boolean;
   release: () => void;
-  onRevoke: (listener: () => void) => () => void;
+  onRevoke: (listener: (reason: NativeBrowserRevokeReason) => void) => () => void;
   /** Main-only terminal task removal. */
-  revoke: () => void;
+  revoke: (reason?: NativeBrowserRevokeReason) => void;
 }
 // Reserved Main-only identity space; renderer IDs are never accepted as execution ownership.
 let nextNativeTaskOwnerId = 1_000_000_000;
@@ -267,10 +273,10 @@ function browserCapacityGroup(ownerId: number): number {
   return task ? task.presentation?.ownerId ?? 0 : ownerId;
 }
 
-function removeNativeTask(task: NativeTaskOwner): void {
+function removeNativeTask(task: NativeTaskOwner, reason: NativeBrowserRevokeReason = "task-ended"): void {
   if (nativeTaskOwners.get(task.taskScopeId) !== task) return;
   nativeTaskOwners.delete(task.taskScopeId);
-  for (const lease of [...task.leases]) lease.revoke();
+  for (const lease of [...task.leases]) lease.revoke(reason);
   for (const active of [...activeViews.values()]) {
     if (active.mode === "browser" && active.ownerId === task.ownerId) closeActive(active);
   }
@@ -291,7 +297,7 @@ function ensureNativeTask(taskScopeId: string, presentationOwnerId?: number): Na
   if (!/^[A-Za-z0-9_:.-]{8,200}$/.test(taskScopeId)) throw new Error("native-browser-task-scope-invalid");
   const existing = nativeTaskOwners.get(taskScopeId);
   if (existing && !existing.window.isDestroyed()) return existing;
-  if (existing) removeNativeTask(existing);
+  if (existing) removeNativeTask(existing, "anchor-closed");
   if (!app.isReady()) throw new Error("native-browser-host-unavailable");
   // Preserve the per-presentation binding limit, with a separate bounded background pool.
   ensureTaskBindingCapacity(presentationOwnerId);
@@ -301,7 +307,7 @@ function ensureNativeTask(taskScopeId: string, presentationOwnerId?: number): Na
   const task: NativeTaskOwner = { ownerId: nextNativeTaskOwnerId++, window, taskScopeId, leases: new Set(),
     send: (status) => { const p = task.presentation; if (p && !p.window.isDestroyed()) p.send(status); } };
   nativeTaskOwners.set(taskScopeId, task);
-  window.once("closed", () => removeNativeTask(task));
+  window.once("closed", () => removeNativeTask(task, "anchor-closed"));
   return task;
 }
 
@@ -332,27 +338,28 @@ export function acquireNativeBrowserTask(input: {
   }
   const task = ensureNativeTask(input.taskScopeId);
   const taskScopeId = input.taskScopeId, runId = input.runId, permission = input.permission;
-  const listeners = new Set<() => void>();
+  const listeners = new Set<(reason: NativeBrowserRevokeReason) => void>();
   let released = false;
+  const onAbort = () => revoke("aborted");
   const release = () => {
     if (released) return;
     released = true;
-    input.signal.removeEventListener("abort", revoke);
+    input.signal.removeEventListener("abort", onAbort);
     task.leases.delete(lease);
     listeners.clear();
     if (!task.leases.size && !task.presentation) removeNativeTask(task);
   };
-  const revoke = () => {
+  const revoke = (reason: NativeBrowserRevokeReason = "task-ended") => {
     const callbacks = [...listeners];
     release();
-    for (const callback of callbacks) { try { callback(); } catch { /* Terminal cleanup remains unconditional. */ } }
+    for (const callback of callbacks) { try { callback(reason); } catch { /* Terminal cleanup remains unconditional. */ } }
   };
   const lease: NativeBrowserTaskLease = { ownerId: task.ownerId, taskScopeId, runId, permission,
     current: () => !released && !input.signal.aborted && nativeTaskOwners.get(taskScopeId) === task
       && task.leases.has(lease) && !task.window.isDestroyed(), release, revoke,
-    onRevoke: (listener) => { if (released) { listener(); return () => {}; } listeners.add(listener); return () => { listeners.delete(listener); }; } };
+    onRevoke: (listener) => { if (released) { listener("task-ended"); return () => {}; } listeners.add(listener); return () => { listeners.delete(listener); }; } };
   task.leases.add(lease);
-  input.signal.addEventListener("abort", revoke, { once: true });
+  input.signal.addEventListener("abort", onAbort, { once: true });
   return lease;
 }
 
@@ -1111,9 +1118,51 @@ export type NativeBrowserDocumentCapture = {
 const MAX_CAPTURE_DIMENSION = 32_768;
 const MAX_CAPTURE_PIXELS = 32_000_000;
 
+const GUEST_READY_WAIT_MS = 5_000;
+/**
+ * A tab that is still opening or loading is not a tab that cannot be captured: the next poll sees it ready. Waits for that, bounded,
+ * and returns whether the guest is ready. A guest that failed to load ("error"), is gone, or whose caller stopped is not waited for.
+ */
+export async function awaitNativeBrowserGuestReady(ownerId: number, taskScopeId: string, viewId: string, signal?: AbortSignal): Promise<boolean> {
+  const deadline = Date.now() + GUEST_READY_WAIT_MS;
+  for (;;) {
+    const active = registeredGuest(ownerId, viewId, taskScopeId);
+    if (!active || active.mode !== "browser") return false;
+    if (active.state === "ready") return true;
+    if ((active.state !== "opening" && active.state !== "loading") || signal?.aborted || Date.now() >= deadline) return false;
+    await new Promise<void>((resolve) => setTimeout(resolve, 100));
+  }
+}
+
+/**
+ * The same pixels through the page's own debugger when the view's capturePage gave nothing twice (a never-shown host can lack a paint surface for it).
+ * Attaches only when nobody has, and detaches what it attached. Returns null on any failure: the caller then reports the capture as unavailable.
+ */
+async function captureGuestThroughDebugger(wc: WebContents, rect: Rectangle | undefined): Promise<NativeImage | null> {
+  let attachedHere = false;
+  try {
+    if (wc.isDestroyed()) return null;
+    if (!wc.debugger.isAttached()) { wc.debugger.attach("1.3"); attachedHere = true; }
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const result = await Promise.race([
+      wc.debugger.sendCommand("Page.captureScreenshot", {
+        format: "png", fromSurface: true,
+        ...(rect && rect.width > 0 && rect.height > 0 ? { clip: { x: rect.x, y: rect.y, width: rect.width, height: rect.height, scale: 1 } } : {}),
+      }),
+      new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("native-browser-capture-timeout")), 3000); }),
+    ]).finally(() => { if (timer) clearTimeout(timer); });
+    if (typeof result?.data !== "string" || result.data.length > MAX_CAPTURE_PIXELS * 6) return null;
+    const image = nativeImage.createFromBuffer(Buffer.from(result.data, "base64"));
+    const size = image.isEmpty() ? null : image.getSize();
+    return size && size.width <= MAX_CAPTURE_DIMENSION && size.height <= MAX_CAPTURE_DIMENSION && size.width * size.height <= MAX_CAPTURE_PIXELS ? image : null;
+  } catch { return null; }
+  finally { if (attachedHere) { try { wc.debugger.detach(); } catch { /* already detached */ } } }
+}
+
 /** Main-only pixels from the exact guest, including when its task panel is hidden. */
 export async function captureNativeBrowserGuest(ownerId: number, taskScopeId: string, viewId: string,
   rect?: Rectangle, signal?: AbortSignal, document?: NativeBrowserDocumentCapture): Promise<NativeImage> {
+  await awaitNativeBrowserGuestReady(ownerId, taskScopeId, viewId, signal);
   const active = registeredGuest(ownerId, viewId, taskScopeId);
   if (!active || active.mode !== "browser" || active.state !== "ready") throw new Error("native-browser-capture-unavailable");
   const wc = active.view.webContents;
@@ -1194,7 +1243,16 @@ export async function captureNativeBrowserGuest(ownerId: number, taskScopeId: st
         break;
       } catch {
         if (!current()) throw new Error("native-browser-capture-stale");
-        if (attempt === 1) throw new Error("native-browser-capture-unavailable");
+        if (attempt === 1) {
+          // capturePage gave nothing twice. A plain screenshot (no document capture, which has its own debugger path below) asks the page
+          // for the same pixels through its debugger before it reports the capture as unavailable.
+          if (!document) {
+            const viaDebugger = await captureGuestThroughDebugger(wc, rect);
+            if (viaDebugger && current()) return viaDebugger;
+            if (!current()) throw new Error("native-browser-capture-stale");
+          }
+          throw new Error("native-browser-capture-unavailable");
+        }
       } finally { if (timer) clearTimeout(timer); }
       await new Promise<void>((resolve) => setTimeout(resolve, 16));
       if (!current()) throw new Error("native-browser-capture-stale");

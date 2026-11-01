@@ -43,22 +43,33 @@ export function submitGraphRunRequest(request: {
 
   const automation = automations.find((row) => row.id === decision.automationId)!;
   const eventId = randomUUID();
-  try {
-    enqueueTriggerEvent({
-      id: eventId,
-      automationId: decision.automationId,
-      triggerKind: "command",
-      // 같은 요청을 두 번 보내도 두 번 돌지 않게 하는 열쇠. 요청마다 새로 만드는 이유:
-      // 바깥에서 "같은 요청"을 판정할 근거가 없다 — 같은 값으로 두 번 돌리는 것이
-      // 정당한 경우가 있다(사람이 다시 눌렀다). 중복 제거는 재전송 사고만 막는다.
-      dedupeKey: `graph-surface:${request.source}:${eventId}`,
-      payload: {
-        source: request.source,
-        input: decision.input,
-        ...(request.dryRun ? { dryRun: true } : {}),
-      },
-    });
-  } catch (err) {
+  // The enqueue is one SQLite write with a fixed dedupe key, so asking again is the same as asking once: a store that was busy for a
+  // moment is asked up to 3 times before the request is refused.
+  let queueFailure: unknown = null;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      enqueueTriggerEvent({
+        id: eventId,
+        automationId: decision.automationId,
+        triggerKind: "command",
+        // 같은 요청을 두 번 보내도 두 번 돌지 않게 하는 열쇠. 요청마다 새로 만드는 이유:
+        // 바깥에서 "같은 요청"을 판정할 근거가 없다 — 같은 값으로 두 번 돌리는 것이
+        // 정당한 경우가 있다(사람이 다시 눌렀다). 중복 제거는 재전송 사고만 막는다.
+        dedupeKey: `graph-surface:${request.source}:${eventId}`,
+        payload: {
+          source: request.source,
+          input: decision.input,
+          ...(request.dryRun ? { dryRun: true } : {}),
+        },
+      });
+      queueFailure = null;
+      break;
+    } catch (err) {
+      queueFailure = err;
+    }
+  }
+  if (queueFailure !== null) {
+    const err = queueFailure;
     return {
       ok: false,
       code: "RUN_REQUEST_QUEUE_UNAVAILABLE",

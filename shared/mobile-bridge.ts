@@ -1,6 +1,7 @@
 import { MOBILE_CANONICAL_QUESTION_CONTRACT, validateMobileCanonicalQuestionAnswer, type MobileCanonicalQuestionDecisionDto } from "./mobile-question-decision";
 import type {OneVaultErrorCode} from "./one-vault";
 import type {OneProviderRemoteErrorCode} from "./one-provider-remote";
+import type { MobileBridgeSpecificRefusalCode } from "./mobile-bridge-refusal";
 import { MOBILE_GOAL_CONTROL_METHODS, MOBILE_GOAL_CONTROL_WRITE_METHODS, isMobileGoalControlMethod, validateMobileGoalControlParams } from "./mobile-goal-control";
 import type { OneSurfaceManifestV1 } from "./one-surface";
 import { supervisorIdentifier, supervisorObject, supervisorText } from "./one-supervisor";
@@ -262,12 +263,17 @@ export const MOBILE_BRIDGE_METHODS = [
  *   landed at the chat's updatedAt, a pile under the newest messages — and (b) `hostNotice` of purpose
  *   "automation-report" on the system rows of invoke.historyPage, so a scheduled run's report is drawn instead of
  *   hidden as an unmarked system row.
+ * - "refusal.specific.v1": the phone has a sentence for the typed refusal codes of shared/mobile-bridge-refusal.ts
+ *   (a project with no folder, a runtime whose sign-in ended, a conversation still running). Only such a phone receives
+ *   them; every other phone keeps `authority_error`.
  */
 export const MOBILE_CLIENT_CAPABILITIES = [
   "decision.rowSkip.v1",
   "text.sanitize.v3",
   "plan.checklist.v1",
   "thread.composition.v1",
+  /** Reads the typed refusal codes of shared/mobile-bridge-refusal.ts instead of authority_error. */
+  "refusal.specific.v1",
 ] as const;
 export type MobileClientCapability = (typeof MOBILE_CLIENT_CAPABILITIES)[number];
 
@@ -991,6 +997,8 @@ export interface MobileBridgeRpcErrorBody {
     // An owner message into a room the personal agent runs (capability personalAgentRoomsV1). Not retryable: the phone points
     // the owner at the personal agent. An older phone reads it as an ordinary refusal.
     | "supervised_room_read_only"
+    // A refusal the owner can act on, for a phone that reported refusal.specific.v1 (shared/mobile-bridge-refusal.ts).
+    | MobileBridgeSpecificRefusalCode
     | OneVaultErrorCode
     | OneProviderRemoteErrorCode;
   message: string;

@@ -3447,6 +3447,10 @@ function browserApprovalFailure(denied) {
               const message = code === 'approval_expired' ? 'APPROVAL_EXPIRED: The approval deadline elapsed without a decision. The action was not executed; the user did not decline it.'
                 : code === 'cancelled' ? 'CANCELLED: This browser approval request was cancelled. The action was not executed.'
                 : denied === 'approval-required' ? 'APPROVAL_REQUIRED: This unattended run needs an explicit browser approval. The action was not executed. Continue in an interactive chat to approve it.'
+                // The two causes behind one code are told apart, because the right next step differs: the approval service is not running (retrying cannot help
+                // until the Agentlas app is open) versus the page address could not be read this once (read the page again and retry).
+                : denied === 'approval-unavailable' ? 'APPROVAL_REQUIRED: The Agentlas app that asks for approval could not be reached just now (it may be closed or restarting). The action was not executed. Retrying will not help until the app is open; tell the user to open Agentlas.'
+                : denied === 'unverified-site' ? 'APPROVAL_REQUIRED: The address of the current page could not be read just now, so the site could not be verified. The action was not executed. Read the page again (for example browser_snapshot) and try the action once more.'
                 : code === 'approval_required' ? 'APPROVAL_REQUIRED: The approval service or current site could not be verified. The action was not executed.'
                 : 'DENIED: The user declined this ' + denied + ' browser action. The action was not executed. Do not say approval is still pending and do not retry it in this run.';
   return { code, content: [{ type: 'text', text: message }], isError: true };
@@ -3666,6 +3670,8 @@ async function main() {
     result: {
       content: [{ type: 'text', text: 'Agentlas Browser could not start safely: ' + String(error && error.message || error) }],
       isError: true,
+      // Typed: the browser itself did not start, so no page was reached and no call ran. A graph step asks again on this mark, never on the words.
+      _meta: { 'agentlas/browserStartFailed': true },
     },
   });
 
@@ -3914,7 +3920,7 @@ async function main() {
   });
   const nativeToolCall = async (name, args, signal) => {
     if (signal?.aborted) throw new Error('unified-cua-cancelled');
-    if (!unifiedNativeGate) throw new Error('unified-cua-native-gate-unavailable');
+    if (!unifiedNativeGate) throw new Error('unified-cua-native-gate-unavailable: screen control is not connected to this run (the Agentlas app window is not attached). Do not call it again in this run: continue with the other tools, or tell the owner to open Agentlas and send the request again.');
     await unifiedNativeGate.authorize(name, signal);
     if (name === 'list_apps') {
       const os = await nativeControlRequest('/action', { action: 'listApps' }, signal);
@@ -3974,7 +3980,7 @@ async function main() {
     ]);
     if (process.env.AGENTLAS_NATIVE_GUEST_COMPUTER_USE || process.env.AGENTLAS_COMPUTER_USE_CONTROL_FILE) {
       let session;
-      try { session = JSON.parse(process.env.AGENTLAS_UNIFIED_CUA_GATE_SESSION || ''); } catch { throw new Error('unified-cua-native-gate-unavailable'); }
+      try { session = JSON.parse(process.env.AGENTLAS_UNIFIED_CUA_GATE_SESSION || ''); } catch { throw new Error('unified-cua-native-gate-unavailable: screen control is not connected to this run (the Agentlas app window is not attached). Do not call it again in this run: continue with the other tools, or tell the owner to open Agentlas and send the request again.'); }
       unifiedNativeGate = createNativeCuaToolGate({ controlFile: process.env.AGENTLAS_UNIFIED_CUA_GATE_CONTROL || '',
         serverKey: process.env.AGENTLAS_UNIFIED_CUA_GATE_SERVER_KEY || '', session,
         ...(process.env.AGENTLAS_UNIFIED_CUA_GATE_PLAN ? { planPath: process.env.AGENTLAS_UNIFIED_CUA_GATE_PLAN } : {}) });

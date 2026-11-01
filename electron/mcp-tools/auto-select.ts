@@ -560,6 +560,18 @@ export async function selectUntilGoalScopeSettled(
   return context;
 }
 
+/**
+ * Whether a selection made again under the Goal's present state chose the same tools as the one the run was prepared with: the same
+ * tool ids in the same states. The Goal moving after the first selection (a revision, the verifier settling it) then changes nothing the
+ * run built, so the run goes on under the new binding instead of failing with "send the same request again". A different set means the
+ * prepared tool table is not the Goal's, and the run stops as before (mcp-goal-tool-scope-changed).
+ */
+export function selectionKeepsTools(prepared: Pick<AutoSelectedMcpContext, "tools">, again: Pick<AutoSelectedMcpContext, "tools">): boolean {
+  const key = (context: Pick<AutoSelectedMcpContext, "tools">) =>
+    context.tools.map((tool) => `${tool.id}\u0000${tool.state}\u0000${tool.installed ? 1 : 0}`).sort().join("\u0001");
+  return key(prepared) === key(again);
+}
+
 export async function autoSelectMcpTools(input: {
   userPrompt: string;
   systemPrompt: string;

@@ -292,26 +292,60 @@ export async function sendAgentWorkspace(review: AgentWorkspaceRemoteReview): Pr
     markerRevision: review.markerRevision, markerSlug: review.markerSlug, ...(review.publication ? {
       publicTargetId: review.publication.publicTargetId, publicSlug: review.publication.publicSlug,
       publicPackageHash: review.publication.packageHash, publicTreeDigest: review.publication.proposedTreeDigest } : {}) } satisfies PendingRegistration);
+  // The apply request may or may not have reached the server (a dropped connection leaves the same doubt as a slow one), and the server
+  // verifies the write a moment after it answers. Either way the answer is the server's own record of this operation, asked for again
+  // a few times (SYNC_RECONCILE_WAITS_MS) before the owner is told to refresh: applied and verified is the success it always was, a
+  // conflict or a failure means nothing changed remotely and the comparison is reviewed again, and only an answer that still does not
+  // come is the pending outcome (the journal stays, so the next refresh settles it).
+  let applyFailed = false;
   try {
     await request(`${proposalEndpoint}/apply`, { proposalDigest: proposal.proposalDigest, reviewGrant: grant.reviewGrant, idempotencyKey }, review.publication ? undefined : review.remote.etag);
-    await reconcilePendingSync(review.agentId);
-  } catch (error) {
-    throw new AgentWorkspaceError("sync_outcome_pending", "The sync outcome needs remote reconciliation. Refresh to check the recorded operation.");
+  } catch { applyFailed = true; }
+  let settled: SyncReconcileOutcome = "pending";
+  try { settled = await reconcilePendingSyncPatiently(review.agentId); } catch { settled = "pending"; }
+  if (settled === "not_applied") throw new AgentWorkspaceError("remote_changed", "The remote version changed, so nothing was sent. Review a fresh comparison.");
+  if (settled === "pending" || fs.existsSync(journal)) {
+    throw new AgentWorkspaceError("sync_outcome_pending", applyFailed
+      ? "The sync outcome needs remote reconciliation. Refresh to check the recorded operation."
+      : "The server has not confirmed this operation yet. Refresh to check it.");
   }
-  if (fs.existsSync(journal)) throw new AgentWorkspaceError("sync_outcome_pending", "The server has not confirmed this operation yet. Refresh to check it.");
   if (review.publication) return { agentId: review.agentId, target: "hub", direction: "send", state: "unknown", reason: "public_release_verified",
     localTreeDigest: review.local.treeDigest, remoteTreeDigest: review.publication.proposedTreeDigest, changes: [], outgoingChanges: [], canSend: false, canReceive: false };
   return (await prepareAgentWorkspaceComparison(review.agentId, review.target, "send")).comparison;
 }
-async function reconcilePendingSync(agentId: string): Promise<void> {
-  const journal = path.join(agentWorkspaceStorePath(agentId), "pending-sync.json"); if (!fs.existsSync(journal)) return;
+/** How long a send waits, asynchronously, for the server to confirm the operation it just applied: 1 s, 2 s, 4 s. A gate may shorten it. */
+export const SYNC_RECONCILE_WAITS_MS: number[] = [1_000, 2_000, 4_000];
+export type SyncReconcileOutcome = "applied" | "not_applied" | "pending";
+/**
+ * Asks the server for the recorded operation again while it is only not yet verified (sync_outcome_pending), then answers what is true:
+ * "applied" (verified, the journal is settled), "not_applied" (the server says conflict or failed: nothing changed remotely) or "pending"
+ * (still not confirmed after the waits, or the server cannot be reached: the journal stays for the next refresh). Any other refusal (a
+ * receipt that belongs to another operation or differs from the approved version) is thrown unchanged.
+ */
+export async function reconcilePendingSyncPatiently(agentId: string): Promise<SyncReconcileOutcome> {
+  const journal = path.join(agentWorkspaceStorePath(agentId), "pending-sync.json");
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      const outcome = await reconcilePendingSync(agentId);
+      return outcome;
+    } catch (error) {
+      const pending = error instanceof AgentWorkspaceError && (error.code === "sync_outcome_pending" || error.code === "remote_unavailable");
+      const unreachable = !(error instanceof AgentWorkspaceError);
+      if (!pending && !unreachable) throw error;
+      if (attempt >= SYNC_RECONCILE_WAITS_MS.length) return fs.existsSync(journal) ? "pending" : "applied";
+      await new Promise<void>((resolve) => { setTimeout(resolve, SYNC_RECONCILE_WAITS_MS[attempt]); });
+    }
+  }
+}
+async function reconcilePendingSync(agentId: string): Promise<"applied" | "not_applied"> {
+  const journal = path.join(agentWorkspaceStorePath(agentId), "pending-sync.json"); if (!fs.existsSync(journal)) return "applied";
   const pending = JSON.parse(fs.readFileSync(journal, "utf8")) as PendingRegistration;
   if (pending.agentId !== agentId || !/^awo_/.test(pending.operationId)) throw new AgentWorkspaceError("sync_journal_invalid", "The saved sync operation needs review.");
   const operation = await request<{ id: string; manifestId: string; state: string; destination?: string; snapshot?: RemoteSnapshot;
     receipt?: { publicHubPublished: boolean; cloudId: string; slug: string; revision: string; packageHash: string; packageHashVersion: string;
       treeDigest: string; agentDefinitionId: string; agentReleaseId: string } }>(`/api/agent-cloud/operations/${encodeURIComponent(pending.operationId)}`);
   if (operation.id !== pending.operationId || operation.manifestId !== pending.cloudId) throw new AgentWorkspaceError("sync_receipt_invalid", "The sync receipt belongs to another operation.");
-  if (operation.state === "conflict" || operation.state === "failed") { fs.unlinkSync(journal); return; }
+  if (operation.state === "conflict" || operation.state === "failed") { fs.unlinkSync(journal); return "not_applied"; }
   if (operation.state !== "applied_verified") throw new AgentWorkspaceError("sync_outcome_pending", "This sync is awaiting verified remote readback.");
   if (pending.target === "hub") {
     const receipt = operation.receipt;
@@ -325,7 +359,7 @@ async function reconcilePendingSync(agentId: string): Promise<void> {
     if (pending.rootPath && pending.markerRevision) updateCloudAgentRegistrationBaseline({ rootPath: pending.rootPath, expectedRevision: pending.markerRevision,
       registration: { cloudId: receipt.cloudId, slug: receipt.slug, scope: "hub-public", packageHash: receipt.packageHash,
         packageHashVersion: "path-sha256-executable-v2", revision: receipt.revision } });
-    fs.unlinkSync(journal); return;
+    fs.unlinkSync(journal); return "applied";
   }
   if (!operation.snapshot) throw new AgentWorkspaceError("sync_outcome_pending", "This sync is awaiting verified remote readback.");
   validateRemote(operation.snapshot);
@@ -337,4 +371,5 @@ async function reconcilePendingSync(agentId: string): Promise<void> {
   if (pending.rootPath && pending.markerRevision && remoteRegistration) updateCloudAgentRegistrationBaseline({
     rootPath: pending.rootPath, expectedRevision: pending.markerRevision, registration: remoteRegistration });
   fs.unlinkSync(journal);
+  return "applied";
 }

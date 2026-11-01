@@ -1,5 +1,5 @@
 import * as path from "node:path";
-import { planMcpToolIsMutating } from "./proxy-server";
+import { mcpToolIsMutating, planMcpToolIsMutating } from "./proxy-server";
 import { workSessionReadPermissionCall } from "../../shared/work-session-tools";
 import { HARNESS_EFFECT_FREE_READ_OPERATIONS } from "../harness/capability-ports";
 
@@ -70,6 +70,9 @@ export function mainWorkEffectFreeRead(input: {
     return !planMcpToolIsMutating({ authority: catalogId, toolName: input.toolName, args: input.args });
   }
   if (catalogId === "agentlas-ui") return UI_READ_TOOLS.has(input.toolName);
+  // The built-in file reader and clock: the same closed lists approval uses (proxy-server.ts mcpToolIsMutating). Their identical repeat
+  // after a timeout must run, not wait on an outcome that cannot be unknown for a read.
+  if (catalogId === "filesystem" || catalogId === "agentlas-time") return !mcpToolIsMutating({ catalogId, toolName: input.toolName });
   if (catalogId === "one-team") {
     if (!MAIN_WORK_ONE_TEAM_READ_TOOLS.has(input.toolName)) return false;
     return input.toolName.startsWith("work_session_") ? workSessionReadPermissionCall(input) : true;

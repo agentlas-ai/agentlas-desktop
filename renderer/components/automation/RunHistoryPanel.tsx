@@ -701,7 +701,32 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
         expectedEventUpdatedAt: reconciliation.triggerEvent?.updatedAt ?? null,
         decisions,
       };
-      const result = await api.automations.reconcileGraph(request);
+      // The state moved between the card and the click (another runner changed it, or the run was being handled elsewhere): read the
+      // fresh state and apply the owner's same decisions to the same held steps once or twice before saying anything.
+      let sent = request;
+      let result = null as Awaited<ReturnType<typeof api.automations.reconcileGraph>> | null;
+      for (let attempt = 0; result === null; attempt += 1) {
+        try {
+          result = await api.automations.reconcileGraph(sent);
+        } catch (conflictError) {
+          if (!/conflict|stale|bound_event_active/.test(String(conflictError)) || attempt >= 2) throw conflictError;
+          await new Promise((resolve) => setTimeout(resolve, 700 * (attempt + 1)));
+          const fresh = await api.automations.getGraphReconciliation(automation.id);
+          if (!fresh) {
+            // Nothing is held any more: it was settled elsewhere, which is what the click was asking for.
+            setMessage(ko ? "다른 곳에서 이미 정리됐어요. 최신 기록을 불러왔습니다." : "It was already settled elsewhere. Loaded the latest history.");
+            await load({ reportFailure: false, forceReconciliation: true });
+            return;
+          }
+          const sameHeld = fresh.runId === request.runId && fresh.nodes.length === decisions.length
+            && fresh.nodes.every((node) => decisions.some((decision) => decision.nodeId === node.nodeId));
+          if (!sameHeld) throw conflictError;
+          sent = {
+            ...request, graphDigest: fresh.graphDigest, checkpointDigest: fresh.checkpointDigest, expectedUpdatedAt: fresh.updatedAt,
+            eventId: fresh.triggerEvent?.id ?? null, expectedEventUpdatedAt: fresh.triggerEvent?.updatedAt ?? null,
+          };
+        }
+      }
       if (
         result.automationId !== request.automationId
         || result.runId !== request.runId
@@ -1188,8 +1213,8 @@ function reconciliationErrorMessage(error: unknown, ko: boolean, reloaded = fals
   const raw = String(error);
   if (/graph_drift/.test(raw)) {
     return ko
-      ? "워크플로우가 실패 후 변경되어 이 기록을 자동 조정할 수 없습니다. 변경 전 그래프를 복원하거나 새 자동화로 분리해 주세요."
-      : "The workflow changed after this failure. Restore the prior graph or separate it into a new automation before reconciling.";
+      ? "워크플로우가 실패 후 변경되어 이 실패 기록은 이어갈 수 없어요. 아래 [이전 실패는 잊고 새 그래프로 처음부터]를 누르면 지금 그래프로 바로 다시 시작해요."
+      : "The workflow changed after this failure, so that failure cannot be continued. Choose [Forget the earlier failure and start fresh] below to start again on the current graph.";
   }
   if (/output_required/.test(raw)) {
     return ko ? "완료된 노드의 실제 결과를 입력해 주세요." : "Enter the actual output for every completed node.";
@@ -1203,9 +1228,10 @@ function reconciliationErrorMessage(error: unknown, ko: boolean, reloaded = fals
     return ko ? "다른 곳에서 이 실행을 처리하고 있습니다. 잠시 후 다시 확인해 주세요." : "This run is being handled elsewhere. Try again shortly.";
   }
   if (/checkpoint_(?:malformed|not_v3)|node_states_malformed/.test(raw)) {
+    // The listing sets an unreadable record aside, so this only reaches the owner when a card went stale between loading and the click.
     return ko
-      ? "복구 기록이 손상됐거나 구버전이라 안전하게 판단할 수 없습니다. 자동 재실행은 차단된 상태입니다."
-      : "The recovery record is malformed or from an older schema. Automatic replay remains blocked.";
+      ? "이 실행 기록은 읽을 수 없어 이어가지 않고 따로 두었어요. 다시 실행하면 지금 그래프로 처음부터 시작해요."
+      : "This run's record cannot be read, so it is set aside. Run it again to start fresh on the current graph.";
   }
   return ko
     ? "조정의 최종 결과를 확인하지 못했습니다. 이미 반영됐을 수 있으니 반복하지 말고 실행 기록을 다시 열어 확인해 주세요."

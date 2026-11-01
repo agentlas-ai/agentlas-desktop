@@ -71,6 +71,10 @@ const TRANSIENT_CODES: ReadonlySet<string> = new Set([
   "invocation_owner_unavailable",
   // Another renderer is still preparing a send. Main's durable queued parent waits for that preparation slot.
   "one_preflight_chat_pending",
+  // The parent's admission was no longer pending when its preparation slot was reserved (the app began closing, or a Stop closed the admission
+  // in between). The refusal closed that admission and held the submission before anything started, and the queue's start rebinds the held
+  // submission (resumeQueuedOnePreflightSubmission), so the owner's message waits instead of coming back as "send it again".
+  "one_preflight_parent_not_pending",
   // Capacity is backpressure before intake, so the owner's text can wait in the durable send queue.
   "invocation_steer_queue_full",
   "invocation_current_turn_steer_limit",
@@ -81,6 +85,37 @@ const TRANSIENT_CODES: ReadonlySet<string> = new Set([
   "supervisor_native_channel_unavailable",
   "supervisor_runtime_handoff_pending",
 ]);
+
+/**
+ * The transient run failures that are a fault of the app's own host rather than an occupied chat: they do not clear by waiting for
+ * another conversation to end, so the queue gives them UNDISPATCHED_START_MAX_ATTEMPTS tries and then holds the message (kept, never
+ * lost), like a start refused before dispatch on every bounded retry. The rest of the set frees up as the holder's turn ends and is only
+ * bounded by TRANSIENT_SEND_DEADLINE_MS. Regression review C3: without the cap a persistent host fault retried for the whole
+ * 2 hours, 60 s of in-run waiting per cycle and a failure line each time.
+ */
+const HOST_NOT_READY_RUN_FAILURE_CODES: ReadonlySet<string> = new Set([
+  // The run's tool table could not be built after the in-run waits (mcp/config-build-retry.ts): the app's own host was not ready.
+  // Thrown before any model call with turnDelivery "not-dispatched"; the message is started again after a backoff.
+  "mcp-runtime-config-unavailable",
+  // The Goal moved while the run's tool table was being prepared and a new selection chose different tools (mcp/client.ts settleGoalScope),
+  // so the table built for the old Goal is not this Goal's. Thrown before any model call with turnDelivery "not-dispatched": the message
+  // is started again and selects its tools under the Goal as it now is.
+  "mcp-goal-tool-scope-changed",
+]);
+
+/**
+ * Run failures the owner (or something outside the app) must clear: the chat's working folder is missing, is not a folder, or cannot be
+ * opened (runtime/runner.ts spawnStartFailureRefusal). Refused before dispatch like the others, but nothing the app does by itself changes
+ * them, so the queue neither retries them as the app's own state nor gives them the one legacy start-again, and no line promises that it will.
+ */
+const OWNER_FIXABLE_RUN_FAILURE_CODES: ReadonlySet<string> = new Set(["project_folder_missing", "project_folder_not_directory", "project_folder_unreadable"]);
+export function isOwnerFixableRunFailureCode(code: string | null | undefined): boolean {
+  return !!code && OWNER_FIXABLE_RUN_FAILURE_CODES.has(code);
+}
+
+export function isHostNotReadyRunFailureCode(code: string | null | undefined): boolean {
+  return !!code && HOST_NOT_READY_RUN_FAILURE_CODES.has(code);
+}
 
 /**
  * A run that was admitted and then refused BEFORE anything reached a model (turnDelivery "not-dispatched") for one of
@@ -110,6 +145,7 @@ const TRANSIENT_RUN_FAILURE_CODES: ReadonlySet<string> = new Set([
   // The CLI process could not be created for lack of descriptors, processes or memory (EMFILE/ENFILE/EAGAIN/ENOMEM):
   // nothing was sent, and the shortage clears by itself (runtime/runner.ts spawnStartFailureRefusal).
   "runtime_spawn_resource_busy",
+  ...HOST_NOT_READY_RUN_FAILURE_CODES,
 ]);
 
 export function isTransientRunFailureCode(code: string | null | undefined): boolean {
@@ -162,6 +198,58 @@ const SQLITE_STORE_BUSY_RE = /^SQLITE_(?:BUSY|LOCKED)(?:_[A-Z]+)?$|^SQLITE_PROTO
 export function isStoreBusyRefusedBeforeDispatch(error: unknown): boolean {
   if (!error || typeof error !== "object" || (error as { turnDelivery?: unknown }).turnDelivery !== "not-dispatched") return false;
   return isStoreBusyError(error);
+}
+
+/**
+ * Start refusals the owner can act on. Each has its own sentence on screen (renderer/lib/invocation-failure.ts
+ * goalAdmissionControlFailureForCode) or a custody rule of its own (queued-owner-input-custody.ts), so waiting for them
+ * would hide what the owner has to do. Everything else a start refuses before dispatch is the app's own state.
+ */
+const OWNER_ACTION_REFUSAL_PREFIXES: readonly string[] = [
+  "budget_cost_", "goal_", "auto_goal_", "long_run_resume_", "work_attachment_", "one_preflight_",
+  "invocation_pre_reservation_validation_", "queued_input_",
+];
+
+/**
+ * Codes under those prefixes that are Main's own custody state, not the owner's: the Goal turn's admission record (missing, stale, closed,
+ * replaced, claimed twice). The run path already says so (shared/run-failure-cause.ts APP_SIDE_RUN_FAILURE_FAMILIES keeps them internal:
+ * undispatchedInternalFailure); the start path used to read them as "the owner acts" only because they share the `goal_` prefix, so a
+ * message the host proved was refused before dispatch with one of them came back to the composer as "send the same text again in a moment"
+ * (OneShell's generic line) instead of waiting. The owner has no Goal action that clears a record Main lost.
+ */
+const APP_SIDE_START_REFUSAL_PREFIXES: readonly string[] = ["goal_episode_admission_"];
+
+/** A start refusal whose code is one the owner acts on (a cost cap, a stopped Goal, a settings change). Undefined = not named. */
+export function startRefusalNeedsOwner(code: string | null | undefined): boolean {
+  if (!code) return false;
+  if (APP_SIDE_START_REFUSAL_PREFIXES.some((prefix) => code.startsWith(prefix) && code.length > prefix.length)) return false;
+  return OWNER_ACTION_REFUSAL_PREFIXES.some((prefix) => code.startsWith(prefix));
+}
+
+/**
+ * The host's own proof that a thrown start sent nothing to any runtime: InvocationService.start marks every throw that precedes
+ * the hand-off with `turnDelivery: "not-dispatched"` (runtime/runner.ts markRefusedBeforeDispatch). The marker lives on the error
+ * object, so it exists only where the error was thrown (Main), never across IPC. The second proof, a rejected admission row for the
+ * run, is read by the caller (renderer-send-queue.ts undispatchedStartWaits).
+ */
+export function isRefusedBeforeDispatch(error: unknown): boolean {
+  return !!error && typeof error === "object" && (error as { turnDelivery?: unknown }).turnDelivery === "not-dispatched";
+}
+
+/** Bounded retries of a start refused before dispatch for a reason that is not on the allowlist, before the message is held (kept, never lost). */
+export const UNDISPATCHED_START_MAX_ATTEMPTS = 12;
+
+/**
+ * The rule of the Desktop composer's queue (renderer-send-queue.ts undispatchedStartWaits) for every surface that has only the thrown
+ * error: the start was refused before anything reached a runtime (the error's own `turnDelivery: "not-dispatched"`), for a reason that
+ * is off the transient list and that the owner has nothing to do about. The message then waits (bounded by UNDISPATCHED_START_MAX_ATTEMPTS)
+ * instead of coming back as a code. Without the marker (a refusal over IPC, or after the hand-off) it is never taken: that message could
+ * have acted. The composer also accepts a rejected admission row as the proof; the phone and the mail intake have the marker only.
+ */
+export function startRefusedBeforeDispatchWaits(error: unknown): boolean {
+  if (isTransientSendRefusal(error)) return false;
+  if (startRefusalNeedsOwner(sendRefusalCode(error))) return false;
+  return isRefusedBeforeDispatch(error);
 }
 
 /** The shared store stayed locked, anywhere in the error's cause chain. Says nothing about dispatch: the caller proves that. */

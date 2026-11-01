@@ -14,6 +14,7 @@ import {
   type MobileScienceOwnerRequestDto,
 } from "../../shared/mobile-bridge";
 import { sanitizeMobileBridgeText, stripMobileBridgeControlFences } from "./sanitize";
+import { scienceChatRefusalPassesByItself } from "../../shared/science-chat-retry";
 
 type Row = Record<string, unknown>;
 type Client = Pick<ScienceDaemonClient, "commandObserved">;
@@ -252,7 +253,7 @@ export class MobileScienceChat {
       return { ...identity, ...scopeFields, ok: false, code,
         message: outcome === "unknown" ? "The Science command outcome is unknown. Read the conversation before trying again."
           : "The existing Science conversation is unavailable or the request was refused.",
-        outcome, retryable: outcome === "not-dispatched" && /(?:unavailable|not_ready|connection|timeout|closed)/.test(code),
+        outcome, retryable: outcome === "not-dispatched" && scienceChatRefusalPassesByItself(code),
       } as MobileScienceChatRefusalDto;
     }
   }

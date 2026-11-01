@@ -90,7 +90,7 @@ function tellBudgetOnce(runId: string, chatId: string, window: { count: number; 
     appendChatMessage(chatId, "assistant", currentUiLocale() === "ko"
       ? `이 목표를 지난 24시간 동안 직접 입력 없이 ${window.count}번 깨웠습니다. ${clock}까지 더 깨우지 않습니다. 말을 걸거나 목표에서 이어가기를 누르면 바로 이어갑니다.`
       : `This goal was woken ${window.count} times in the last 24 hours without your input. It will not be woken again before ${clock}. Send a message or resume the goal to continue now.`,
-    { hostNotice: { purpose: "host-status", runId: noticeRunId, status: "needs-owner" } });
+    { hostNotice: { purpose: "host-status", runId: noticeRunId, status: "goal-paused" } });
   } catch (error) { console.warn("[wake-arbiter] budget notice failed:", error); }
 }
 

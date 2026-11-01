@@ -29,6 +29,11 @@ export function abortReasonError(req: { signal?: AbortSignal; locale?: unknown }
   if (reason instanceof Error && reason.message === STOPPED_BY_USER) {
     return new Error(tStatus(req.locale as never, "aborted"));
   }
+  // The DOM's own default reason is what a bare abort() leaves ("This operation was aborted", name AbortError). It names no cause and reads as an English
+  // machine sentence on any screen: it is the same as no reason, and is worded as such (round 4, runtime-tools row 33).
+  if (reason instanceof Error && reason.name === "AbortError" && reason.message === "This operation was aborted") {
+    return new Error(tStatus(req.locale as never, "aborted"));
+  }
   if (reason instanceof Error && reason.message.trim()) return reason;
   if (typeof reason === "string" && reason.trim()) return new Error(reason);
   return new Error(tStatus(req.locale as never, "aborted"));

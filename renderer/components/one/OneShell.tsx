@@ -1,6 +1,7 @@
 "use client";
 import { writeAppUiPreference, subscribeAppUiPreference } from "@/lib/app-ui-preferences";
 import { MessageActions, MessageReplyPreview } from "../MessageActions";
+import { WaitingRetryStop } from "../WaitingRetryStop";
 import { composeMessageReply, displayMessageReply, type MessageReply } from "@/lib/message-reply";
 
 import { hasInlineVisualBlock } from "@/lib/visual-html";
@@ -21,7 +22,7 @@ import { ChatContinuationProjector } from "@/lib/chat-continuations";
 import { readOneFollowupOutbox, saveOneFollowupIntent, removeOneFollowupIntent, pauseOneFollowupOutbox, pauseOneFollowupIntent, resumeOneFollowupIntent, waitForOneFollowupDelivery, bindOneFollowupCapture, releaseOneFollowupCapture, followupReceiptCanRetire, observeOneFollowupIntent, type OneFollowupIntent } from "@/lib/one-followup-outbox";
 import { followupRequestJson } from "@shared/followup-custody";
 import { ONE_PREFLIGHT_STEER_REQUEST_KEYS, normalizeOnePreflightSteerRequest } from "@shared/one-preflight-steers";
-import { firstSendEchoed, firstSendRowId, firstSendsToDraw, moveFirstSendToChat, patchFirstSend, readFirstSends, removeFirstSend, resumeFirstSends, saveFirstSend, type FirstSendEntry, type FirstSendHold } from "@/lib/one-first-send-outbox";
+import { firstSendEchoed, firstSendRowId, firstSendsToDraw, firstSendWaitLine, firstSendWentLive, moveFirstSendToChat, patchFirstSend, readFirstSends, removeFirstSend, resumeFirstSends, saveFirstSend, takeBackWaitingFirstSend, type FirstSendEntry, type FirstSendHold } from "@/lib/one-first-send-outbox";
 
 import { AutomationMonitorStrip } from "../AutomationMonitorStrip";
 import { ContinuityStatus } from "../ContinuityStatus";
@@ -68,7 +69,7 @@ import {
 import { OneDocumentCard } from "@/components/one/OneDocumentCard";
 import { runtimeModelDisplayLabel } from "@/components/dashboard/RuntimeModelPicker";
 import { assertOneExplicitEffort, chipRuntimeFor, composerModelLabel, useRunningComposerModel } from "@/lib/one-runtime-chip";
-import { chatSelectionSendBlocked } from "@/lib/chat-selection-send-guard";
+import { chatSelectionSendBlocked, sendWhenChatSelectionSettles } from "@/lib/chat-selection-send-guard";
 import { beginChatSelection, useChatSelectionIntent, readChatSelectionIntent, invalidateChatSelectionIntent, reconcileChatSelectionIntent } from "@/lib/chat-selection-intent";
 import { goalReceiptIsQueued, goalRuntimeRefusalNotice, isOvertakenSelectionCode } from "@/lib/goal-runtime-refusal";
 import { readChatForRuntime } from "@/lib/chat-runtime-read";
@@ -4672,7 +4673,7 @@ function OneSessionsShell() {
   }, [showFirstSends]);
   /** Not sent and not retried automatically: the text stays in the transcript with a one-tap resend. */
   const holdFirstSend = useCallback((chatId: string | null, intentId: string, reason: FirstSendHold) => {
-    try { patchFirstSend(window.localStorage, "one", chatId, intentId, { notSent: reason }); } catch { /* kept as it was */ }
+    try { patchFirstSend(window.localStorage, "one", chatId, intentId, { notSent: reason, waiting: undefined }); } catch { /* kept as it was */ }
     showFirstSends(chatId);
   }, [showFirstSends]);
   /** The run start answered for a saved send. "uncertain" keeps it with its run ID: Main's admission decides later. */
@@ -5822,11 +5823,13 @@ function OneSessionsShell() {
     return () => window.clearTimeout(timer);
   }, [armedOneMemoryUseOnce]);
 
+  const oneRuntimeSelectionRef = useRef<RuntimeSelection | undefined>(undefined);
   const oneRuntimeSelection = useMemo<RuntimeSelection | undefined>(() => {
     if (shownRestoredRuntimeDraft) return shownRestoredRuntimeDraft.selection ?? undefined;
     if (!confirmedOneRuntime || !oneRuntimePinned) return undefined;
     return selectionForRuntime(confirmedOneRuntime, { role: "orchestrator", inherit: false, includeSource: false });
   }, [confirmedOneRuntime, oneRuntimePinned, shownRestoredRuntimeDraft]);
+  oneRuntimeSelectionRef.current = oneRuntimeSelection;
 
   const applyOneRuntimeSelection = useCallback(async (patch: { model?: string; effort?: string }, runtimeOverride?: RuntimeStatus) => {
     const baseRuntime = runtimeOverride ?? oneRuntime;
@@ -6064,7 +6067,11 @@ function OneSessionsShell() {
     }
   }, [appLocale, busy, composer, oneRuntimeInventory, reconcileUncertainPreflightSteer, setOnePermission, teamPreflightBusy]);
 
-  const submitTextRef = useRef<((text: string, resume?: FirstSendEntry) => Promise<void>) | null>(null);
+  const submitTextRef = useRef<((text: string, resume?: FirstSendEntry, selectionSettled?: boolean) => Promise<void>) | null>(null);
+  // A send pressed while the model pick is still on its way to Main waits for it (a moment) and then sends by itself.
+  const selectionSettleWaitRef = useRef<(() => void) | null>(null);
+  useEffect(() => { selectionSettleWaitRef.current?.(); selectionSettleWaitRef.current = null; }, [activeThreadChatId]);
+  useEffect(() => () => { selectionSettleWaitRef.current?.(); selectionSettleWaitRef.current = null; }, []);
   const resumePausedFollowup = useCallback(async (intent: OneFollowupIntent) => {
     if (intent.followupCustodyVersion === 2) {
       if (activeThreadChatIdRef.current !== intent.chatId) return;
@@ -6266,12 +6273,12 @@ function OneSessionsShell() {
             ? directionVisible
               ? "새 지시는 대화에 기록됐지만 실행되지 않았습니다. Goal 상태를 확인한 뒤 목표 수정 또는 재개를 직접 선택해 주세요. 자동으로 다시 보내지 않습니다."
               : "새 지시는 저장됐지만 대화 기록을 아직 확인하지 못했습니다. 작성창의 글을 다시 보내지 말고 Goal 상태와 기록을 확인해 주세요."
-            : "이 메시지는 실행되지 못했어요. 모델 연결과 사용 한도를 확인한 뒤 다시 보내 주세요."
+            : "이 메시지는 아직 실행되지 못했어요. 잠시 뒤 같은 내용을 다시 보내 주세요."
           : goalDirection
             ? directionVisible
               ? "Your direction is in the conversation, but did not run. Review the Goal, then choose whether to revise or resume it. Nothing was resent automatically."
               : "Your direction was saved, but its conversation row could not be checked yet. Do not resend the draft; review the Goal and history first."
-            : "This message could not run. Check the model connection and usage limits, then send it again.") + codeSuffix);
+            : "This message has not run yet. Send the same text again in a moment.") + codeSuffix);
         return { status: "rejected", runId: candidateRunId };
       }
       if (!exactReceipt) {
@@ -6727,8 +6734,8 @@ function OneSessionsShell() {
       setActionNotice(controlFailure?.message ?? (options?.promptOrigin
         ? (normalizedLocale === "ko" ? "이 대화의 자동 이어가기를 시작하지 못했습니다." : "Automatic continuation could not start in this conversation.")
         : normalizedLocale === "ko"
-        ? "이 메시지는 실행되지 못했어요. 모델 연결과 사용 한도를 확인한 뒤 다시 보내 주세요."
-        : "This message could not run. Check the model connection and usage limits, then send it again."));
+        ? "이 메시지는 아직 실행되지 못했어요. 잠시 뒤 같은 내용을 다시 보내 주세요."
+        : "This message has not run yet. Send the same text again in a moment."));
       await refreshAll();
       // A recovery turn may only be about this request. The owner's own message qualifies only when Main kept it in
       // the transcript (a refusal after reservation saves it); otherwise the recovery could only read the room's
@@ -7048,13 +7055,23 @@ function OneSessionsShell() {
     setOneActivationState(current);
   }, [appLocale, oneActivationState]);
 
-  const submit = useCallback(async (text: string, resume?: FirstSendEntry) => {
+  const submit = useCallback(async (text: string, resume?: FirstSendEntry, selectionSettled?: boolean) => {
     // `resume` is this room's own saved send after a reload: it runs with the choices frozen when the owner pressed
     // send, never the composer's current state, and it never touches what the owner is typing now.
-    if (!resume && chatSelectionSendBlocked(activeThreadChatIdRef.current, oneRuntimeSelection ?? null)) {
-      setActionNotice(appLocale === "ko"
-        ? "모델 선택을 아직 확인하지 못해 실행을 시작하지 않았습니다. 글과 첨부는 그대로 있으며, 다른 모델을 선택하거나 확인 후 다시 보낼 수 있습니다."
-        : "Execution has not started because the model selection is not confirmed. Your text and attachments remain; choose another model or send again after confirmation.");
+    if (!resume && !selectionSettled && chatSelectionSendBlocked(activeThreadChatIdRef.current, oneRuntimeSelection ?? null)) {
+      // The pick is still on its way to Main (a moment). The send is not refused: it waits for the pick and then runs through
+      // the LATEST submit, so it uses the model that was just chosen and the draft as it is by then.
+      const waitingNotice = appLocale === "ko"
+        ? "모델 선택을 확인하는 중이에요. 확인되면 바로 보냅니다."
+        : "Checking the model selection. It sends as soon as that is confirmed.";
+      const fromComposer = composerInputRef.current?.value === text;
+      selectionSettleWaitRef.current?.();
+      setActionNotice(waitingNotice);
+      selectionSettleWaitRef.current = sendWhenChatSelectionSettles(activeThreadChatIdRef.current, () => oneRuntimeSelectionRef.current ?? null, () => {
+        selectionSettleWaitRef.current = null;
+        setActionNotice(current => current === waitingNotice ? null : current);
+        void submitTextRef.current?.(fromComposer ? (composerInputRef.current?.value ?? text) : text, undefined, true);
+      });
       return;
     }
     const restoredDraftAtSubmit = shownRestoredRuntimeDraft;
@@ -7641,6 +7658,9 @@ function OneSessionsShell() {
     }
     liveFirstSendIdsRef.current.add(preflightSubmissionId);
     sessionFirstSendIdsRef.current.add(preflightSubmissionId);
+    // The send is being sent now: it no longer waits, so its wait line and Stop go (a Stop that "takes the message back" while the send goes
+    // through would be a false confirmation). If Main says an earlier message is still being prepared, the catch below sets the wait again.
+    if (resume?.waiting) { try { firstSendWentLive(window.localStorage, "one", firstSend.chatId, preflightSubmissionId); } catch { /* the Stop re-checks when pressed */ } }
     showFirstSends(firstSend.chatId);
     freshChatSubmissionPendingRef.current = !(
       (selected?.chatId && !homeTransitionPendingRef.current && selectedTaskIdRef.current === selected.taskId)
@@ -7817,8 +7837,12 @@ function OneSessionsShell() {
         setMessages((current) => current.filter((item) => item.id !== preflightId));
         if (isOneSendOwnedElsewhere(cause)) return; // the window that has it finishes it
         if (isPreviousOneSendPending(cause)) {
-          // Another message of this room is still being prepared: this one is looked at again once it settles.
+          // Another message of this room is still being prepared: this one waits (it shows the wait line) and is looked at again once it
+          // settles. The look does not spend one of the resume tries: waiting is not a failed attempt.
           sessionFirstSendIdsRef.current.delete(resume.intentId);
+          firstSendResumeTriesRef.current.set(resume.intentId, Math.max(0, (firstSendResumeTriesRef.current.get(resume.intentId) ?? 1) - 1));
+          try { patchFirstSend(window.localStorage, "one", resume.chatId, resume.intentId, { waiting: true }); } catch { /* shown without the line */ }
+          showFirstSends(resume.chatId);
           return;
         }
         holdFirstSend(resume.chatId, resume.intentId, "refused");
@@ -7833,10 +7857,24 @@ function OneSessionsShell() {
         // operational recovery turn starts (release peer 2026-10-16: the refusal became recovery run 14815f00 and
         // the owner's resent text was never saved).
         setMessages((current) => current.filter((item) => item.id !== preflightId));
-        holdFirstSend(firstSend.chatId, preflightSubmissionId, "previous_pending");
-        setActionNotice(appLocale === "ko"
-          ? "이전 메시지를 아직 준비하는 중이라 이 메시지는 보내지 않았어요. 글은 대화에 남아 있어요 — 준비가 끝나면 다시 보내기를 눌러 주세요."
-          : "An earlier message is still being prepared, so this one was not sent. Its text stays in the conversation; press Send again once that finishes.");
+        if (attachmentSnapshot.length > 0) {
+          // Files are not kept for a later send (they are not stored): the words and the files go back to the composer, said plainly.
+          const restored = attachmentSnapshot.map((item) => ({ ...item, previewUrl: null }));
+          attachmentDraftsRef.current = restored;
+          setAttachmentDrafts(restored);
+          setComposer(value);
+          settleFirstSend(firstSend.chatId, preflightSubmissionId);
+          setActionNotice(appLocale === "ko"
+            ? "이전 메시지를 아직 준비하는 중이라, 이 메시지와 첨부를 작성창에 되돌려 두었어요."
+            : "An earlier message is still being prepared, so this message and its files are back in the composer.");
+          setError(null);
+          return;
+        }
+        // The text waits for its turn and sends itself the moment the room is free: still saved (it survives a reload), one wait line,
+        // and a Stop. Nothing for the owner to press (the resume loop below looks again every few seconds).
+        try { patchFirstSend(window.localStorage, "one", firstSend.chatId, preflightSubmissionId, { waiting: true }); } catch { /* the saved send resumes as before */ }
+        sessionFirstSendIdsRef.current.delete(preflightSubmissionId);
+        showFirstSends(firstSend.chatId);
         setError(null);
         return;
       }
@@ -8016,7 +8054,9 @@ function OneSessionsShell() {
     // Main may still be admitting a recorded run; look again a few times instead of guessing.
     let ticks = 0;
     const timer = window.setInterval(() => {
-      if ((ticks += 1) > 24 || activeThreadChatIdRef.current !== chatId) { window.clearInterval(timer); return; }
+      // A send that waits for an earlier message keeps being looked at for as long as it may still be sent (the resume window, 10 minutes).
+      const waitingTicks = readFirstSends(window.localStorage, "one", chatId).some(entry => entry.waiting && !entry.notSent) ? 130 : 24;
+      if ((ticks += 1) > waitingTicks || activeThreadChatIdRef.current !== chatId) { window.clearInterval(timer); return; }
       const pending = readFirstSends(window.localStorage, "one", chatId)
         .some(entry => !entry.notSent && !liveFirstSendIdsRef.current.has(entry.intentId));
       if (!pending) { window.clearInterval(timer); return; }
@@ -8046,8 +8086,9 @@ function OneSessionsShell() {
   const resendFirstSend = useCallback(async (entry: FirstSendEntry) => {
     const chatId = entry.chatId;
     if (!chatId || activeThreadChatIdRef.current !== chatId) return;
-    if (busy || teamPreflightBusy || runIdRef.current || preflightSubmissionRef.current) {
-      setActionNotice(appLocale === "ko" ? "지금 진행 중인 작업이 끝나면 다시 보내 주세요." : "Send it again once the current work finishes.");
+    const roomBusy = busy || teamPreflightBusy || Boolean(runIdRef.current) || Boolean(preflightSubmissionRef.current);
+    if (roomBusy && entry.notSent === "attachments") {
+      setActionNotice(appLocale === "ko" ? "지금 진행 중인 작업이 끝나면 가져올 수 있어요." : "You can move it to the composer once the current work finishes.");
       return;
     }
     if (entry.notSent === "attachments") {
@@ -8067,7 +8108,7 @@ function OneSessionsShell() {
       clearOneUncertainAdmission(chatId, entry.runId);
     }
     const again: FirstSendEntry = { intentId: uid(), surface: "one", chatId, userPrompt: entry.userPrompt,
-      createdAt: new Date().toISOString(), ready: true, replayable: true, choices: entry.choices };
+      createdAt: new Date().toISOString(), ready: true, replayable: true, ...(roomBusy ? { waiting: true as const } : {}), choices: entry.choices };
     try {
       saveFirstSend(window.localStorage, again);
       removeFirstSend(window.localStorage, "one", chatId, entry.intentId);
@@ -8075,13 +8116,35 @@ function OneSessionsShell() {
       setActionNotice(appLocale === "ko" ? "다시 보내기를 보관하지 못했어요. 글은 그대로 있어요." : "The resend could not be kept. The text is unchanged.");
       return;
     }
-    firstSendResumeTriesRef.current.set(again.intentId, 1);
     showFirstSends(chatId);
+    // The room is busy with other work: the resend is kept as a waiting send and goes by itself when the room is free (no "send it again later").
+    if (roomBusy) return;
+    firstSendResumeTriesRef.current.set(again.intentId, 1);
     await submitTextRef.current?.(again.userPrompt, again);
   }, [appLocale, busy, settleFirstSend, showFirstSends, teamPreflightBusy]);
   const discardFirstSend = useCallback((entry: FirstSendEntry) => {
     settleFirstSend(entry.chatId, entry.intentId);
   }, [settleFirstSend]);
+  /** The owner's Stop on a send that waits for the room: it is taken back and will not be sent. */
+  const stopWaitingFirstSend = useCallback((entry: FirstSendEntry) => {
+    // Decided at the press, from what is saved and from whether a submit is sending it right now: "Stopped" is said only when the message
+    // was not handed over. A look of the resume loop that already took it over, or a run ID that shows it may have reached Main, is
+    // "too late", and nothing is removed or called stopped.
+    const outcome = takeBackWaitingFirstSend(window.localStorage, "one", entry.chatId, entry.intentId,
+      (intentId) => liveFirstSendIdsRef.current.has(intentId));
+    showFirstSends(entry.chatId);
+    if (outcome === "taken-back") {
+      setActionNotice(appLocale === "ko" ? "멈췄어요. 이 메시지는 보내지 않아요." : "Stopped. This message will not be sent.");
+    } else if (outcome === "too-late") {
+      setActionNotice(appLocale === "ko"
+        ? "이미 보내는 중이라 되돌리지 못했어요. 답이 시작되면 중지를 눌러 멈출 수 있어요."
+        : "It is already being sent, so it could not be taken back. Press Stop once the answer starts.");
+    } else if (outcome === "not-saved") {
+      setActionNotice(appLocale === "ko"
+        ? "멈추지 못했어요. 이 메시지는 아직 기다리는 중이라 곧 보내져요."
+        : "The stop could not be saved. The message is still waiting and will be sent.");
+    }
+  }, [appLocale, showFirstSends]);
 
   const stopRun = useCallback(() => {
     // Stop is terminal for the visible work item: Main drops the directions
@@ -10653,6 +10716,16 @@ function OneSessionsShell() {
                             )}
                             {message.role === "user" && sourceMessageId.startsWith("first-send:") && (() => {
                               const entry = firstSends.find(item => firstSendRowId(item.intentId) === sourceMessageId);
+                              if (entry?.waiting && !entry.notSent) {
+                                return (
+                                  <p className={styles.firstSendStatus} role="status" data-one-first-send="waiting">
+                                    <span>{firstSendWaitLine(appLocale === "ko")}</span>
+                                    <button type="button" data-one-first-send-action="stop" onClick={() => stopWaitingFirstSend(entry)}>
+                                      {appLocale === "ko" ? "중지" : "Stop"}
+                                    </button>
+                                  </p>
+                                );
+                              }
                               if (!entry?.notSent) return null;
                               return (
                                 <p className={styles.firstSendStatus} role="status" data-one-first-send="not-sent" data-one-first-send-reason={entry.notSent}>
@@ -11405,6 +11478,7 @@ function OneSessionsShell() {
               <OneFirstRequestCards locale={appLocale} entry={firstRequestEntry} cards={firstRequestCards} onInsert={insertFirstRequestPrompt} hasDraft={composerHasText} />
             )}
             <MessageReplyPreview reply={messageReply} locale={appLocale} onDismiss={() => setMessageReply(null)} />
+            {!activeSeatDissolved && !activePersonalAgentRoom && <WaitingRetryStop chatId={activeThreadChatId} locale={appLocale === "ko" ? "ko" : "en"} live={busy} />}
             <form className={styles.composer} data-one-composer="true" data-has-files={attachmentDrafts.length > 0 ? "true" : undefined} data-unavailable={activeDirectSessionUnavailable ? "true" : undefined} style={activeSeatDissolved || activePersonalAgentRoom ? { display: "none" } : undefined} onSubmit={(event) => {
               event.preventDefault();
               if (activeSeatDissolved || activeDirectSessionUnavailable || activePersonalAgentRoom) return;

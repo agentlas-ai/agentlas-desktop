@@ -10,6 +10,7 @@ import {
 import { AgentAvatar } from "@/components/AgentAvatar";
 import { ipc } from "@/lib/ipc";
 import { agentWorkspaceFailure } from "@/lib/agent-workspace-error";
+import { approveReviewedChange } from "@/lib/agent-workspace-review";
 import type { AgentRuntimeOverride, InstalledAgent, InstalledAgentExactBinding, InstalledFirm, MemoryImportPreviewUi, ResolvedOrg, RuntimeStatus } from "@shared/types";
 import type {
   AgentWorkspaceComparison, AgentWorkspaceDiff as WorkspaceDiff, AgentWorkspaceChangeSummary, AgentWorkspaceFile, AgentWorkspaceLearningCard, AgentWorkspaceMemoryCandidate, AgentWorkspaceRevisionOutcome,
@@ -315,8 +316,20 @@ export function AgentWorkspace({ agent, name, locale, initialView = "files", onT
   };
   const approve = () => run("apply", async () => {
     if (!review?.reviewToken || review.status !== "review_ready") return;
-    const result = await api().approveAndApply({ proposalId: review.id, reviewedHash: review.reviewedHash, reviewToken: review.reviewToken });
-    await verifyApplied(result);
+    // A review pass that ran out while the owner was away asks Main for the same diff again (agent-workspace-review.ts).
+    const result = await approveReviewedChange(api(), review);
+    if (result.kind === "changed") {
+      setReview(result.review); setReviewPath(result.review.changes[0]?.path ?? null);
+      setNotice(ko ? "그 사이 변경안이 바뀌어 새 내용을 보여 드려요. 확인한 뒤 다시 승인해 주세요." : "The change moved meanwhile, so the new one is shown. Review it and approve again.");
+      return;
+    }
+    if (result.proposal.applyWhenIdle) {
+      // A run holds this agent's files; Main keeps the approval for this exact change and applies it when the run ends.
+      await openReview(result.proposal.id);
+      setNotice(ko ? "실행 중인 작업이 끝나면 이 변경을 자동으로 적용해요. 승인은 기억해 두었어요." : "A run is using this agent. This change will be applied automatically when it ends; your approval is kept.");
+      return;
+    }
+    await verifyApplied(result.proposal);
   });
   const memoryCandidates = useMemo(() => (snapshot?.memoryCandidates ?? []).filter((candidate) => {
     return (memoryState === "all" || candidate.state === memoryState) && (!memoryQuery.trim() || [candidate.title, candidate.content, candidate.contentNative ?? ""].some((text) => text.toLocaleLowerCase().includes(memoryQuery.trim().toLocaleLowerCase())));

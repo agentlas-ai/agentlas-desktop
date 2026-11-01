@@ -751,6 +751,29 @@ export function rolePriorityRuntimes(
   return out;
 }
 
+/**
+ * The runtime that takes a turn over when the one it was going to use is listed but has no runner (an open ACP seat whose
+ * profile was removed, a provider this host no longer allows). The owner's pool order first (rolePriorityRuntimes already
+ * leaves out what is cooling down, exhausted or without a runner), then any other connected runtime that can take a dispatch
+ * by the same test an unavailable Library assignment uses. Null = nothing can run. Never used for a runtime the owner pinned.
+ */
+export function nextRunnableRuntime(
+  runtimes: RuntimeStatus[],
+  unrunnable: RuntimeStatus,
+  role: RuntimeRole = "orchestrator",
+): RuntimeStatus | null {
+  const pooled = rolePriorityRuntimes(runtimes, role, { exclude: [unrunnable] })[0];
+  if (pooled) return pooled;
+  for (const candidate of runtimes) {
+    if (sameRuntimeModel(candidate, unrunnable) || isRuntimeCredentialUnavailable(candidate)
+      || candidate.signInRequired || runtimeCooldown(candidate)) continue;
+    const active = { ...candidate, active: true };
+    if (runtimeSelectionUnavailableReason(active, runtimeStatusSelection(active))) continue;
+    return active;
+  }
+  return null;
+}
+
 function sameRuntimeIdentity(left: RuntimeStatus, right: RuntimeStatus): boolean {
   return left.kind === right.kind
     && left.backend === right.backend

@@ -26,6 +26,7 @@ import {
 import { emitDesktopStoreChange } from "./change-bus";
 import { computeNextRun, getAutomation, hasDurableActiveAutomationExecution } from "./automations";
 import { getDb } from "./db";
+import { currentUiLocale } from "../ui-locale";
 import { recordRunEvent, tryRecordRunEvent } from "./run-events";
 import { resolveAutomationGraph } from "../../shared/automation-graph-definition";
 import { getAutomationDefinitionDigest } from "../long-run/automation-provenance";
@@ -608,7 +609,31 @@ const UNREADABLE_PRIOR_EVIDENCE = new Set([
   "automation_graph_reconciliation_time_invalid",
   "automation_graph_reconciliation_bound_event_missing", "automation_graph_reconciliation_bound_event_malformed",
   "automation_graph_reconciliation_conflict",
+  // The automation's current graph cannot be read back into a strict graph: there is nothing to reconcile an earlier run against.
+  "automation_graph_reconciliation_graph_malformed", "automation_graph_reconciliation_graph_unavailable",
 ]);
+/**
+ * a record that cannot be read is set aside and the rest keeps working; it never stops a listing, and it never stops a
+ * run, which starts fresh on the current graph. This used to throw for the occurrence the new run belongs to ("same-source recovery stays
+ * strict"), so the run history showed "the recovery record is malformed, automatic replay remains blocked" and the whole listing failed
+ * for one bad run. Now it is returned as no held view, and a read context is told (the kernel then gives the model of each outside-acting
+ * step the one line that an earlier attempt may have partly happened).
+ */
+/**
+ * One plain line on the run's own row of the automation's run history, once: its recovery record could not be read and was set aside, and running
+ * again starts fresh on the current graph. The row stays as it was (status, outcome); only the line is added, and a second listing finds it there.
+ */
+function noteRunRecordSetAside(automationId: string, runId: string): void {
+  try {
+    const line = currentUiLocale() === "ko"
+      ? "이 실행의 복구 기록을 읽을 수 없어 따로 치워 두었어요. 다시 실행하면 현재 그래프로 새로 시작합니다."
+      : "This run's recovery record could not be read, so it was set aside. Running again starts fresh on the current graph.";
+    getDb().prepare(
+      `UPDATE run_history SET error = CASE WHEN error IS NULL OR error = '' THEN ? ELSE error || char(10) || ? END
+       WHERE id = ? AND automation_id = ? AND instr(COALESCE(error, ''), ?) = 0`,
+    ).run(line, line, runId, automationId, line);
+  } catch { /* the listing never fails for its line */ }
+}
 function loadHeldReconciliation(
   automationId: string,
   exact?: { runId: string; occurrenceId: string },
@@ -618,22 +643,24 @@ function loadHeldReconciliation(
     return loadReconciliation(automationId, exact, true);
   } catch (error) {
     if (error instanceof Error && error.message === "automation_graph_reconciliation_graph_drift") return null;
-    if (readContext && error instanceof Error && UNREADABLE_PRIOR_EVIDENCE.has(error.message)) {
-      // Prove the original source identity from storage, never the failed caller's
-      // requested coordinate. Same-source recovery and explicit reducers stay strict.
+    if (error instanceof Error && UNREADABLE_PRIOR_EVIDENCE.has(error.message)) {
+      // Prove the original source identity from storage, never the failed caller's requested coordinate.
       const row = exact
         ? getDb().prepare("SELECT id,automation_id,occurrence_id,checkpoint_json FROM automation_runs WHERE automation_id=? AND id=?").get(automationId, exact.runId)
         : getDb().prepare("SELECT id,automation_id,occurrence_id,checkpoint_json FROM automation_runs WHERE automation_id=? ORDER BY started_at DESC,rowid DESC LIMIT 1").get(automationId);
       const source = row as Pick<LatestRunRow, "id" | "automation_id" | "occurrence_id" | "checkpoint_json"> | undefined;
-      if (source) {
-        let savedOccurrence: unknown;
-        try { savedOccurrence = source.checkpoint_json && JSON.parse(source.checkpoint_json)?.occurrenceId; } catch { /* original row remains untouched */ }
-        const occurrenceId = source.occurrence_id ?? (typeof savedOccurrence === "string" ? savedOccurrence : legacyOccurrenceId(source));
-        if (occurrenceId !== readContext.unrelatedToOccurrence) {
-          readContext.onUnreadablePriorEvidence?.({ runId: source.id, occurrenceId, code: error.message });
-          return null;
+      // The owner's run history asks with no read context: it gets no card for a record that cannot be read, and the run's own row says so once
+      // (regression review 2, N12: the record was set aside and the history showed nothing for it).
+      if (!readContext?.onUnreadablePriorEvidence && source) noteRunRecordSetAside(automationId, source.id);
+      if (readContext?.onUnreadablePriorEvidence) {
+        if (source) {
+          let savedOccurrence: unknown;
+          try { savedOccurrence = source.checkpoint_json && JSON.parse(source.checkpoint_json)?.occurrenceId; } catch { /* original row remains untouched */ }
+          const occurrenceId = source.occurrence_id ?? (typeof savedOccurrence === "string" ? savedOccurrence : legacyOccurrenceId(source));
+          readContext.onUnreadablePriorEvidence({ runId: source.id, occurrenceId, code: error.message });
         }
       }
+      return null;
     }
     throw error;
   }
@@ -969,7 +996,8 @@ export function reconcileAutomationGraph(
         : db.prepare(
             `UPDATE automation_trigger_events
              SET status = 'pending', claim_owner = NULL, claimed_until = NULL,
-                 attempt_count = 0, next_attempt_at = ?, run_id = NULL, run_outcome = NULL,
+                 attempt_count = 0, unknown_outcome_count = 0, unknown_outcome_signature = NULL,
+                 next_attempt_at = ?, run_id = NULL, run_outcome = NULL,
                  delivered_at = NULL, last_error = NULL, updated_at = ?
              WHERE id = ? AND automation_id = ? AND status = ? AND updated_at = ?`,
           ).run(
@@ -1311,23 +1339,6 @@ function scheduleCursorHold(automation: Automation): ScheduleCursorHold | null {
   const runnableNodeIds = graphRevised ? [] : graphCheckpointRunnableNodes(graph, projection);
   const observationOnly = heldNodeIds.length > 0 && runnableNodeIds.length === 0;
   return { run, checkpoint, graphRevised, heldNodeIds, replaySafeNodeIds, runnableNodeIds, observationOnly };
-}
-
-/**
- * Whether this schedule can wake by itself (W1, 2026-10-18): "held" when the cursor recovery quarantines it on its
- * uncertain effects (it clears next_run_at before any dispatch), "unarmed" when it is enabled with no cursor and nothing
- * held, else "ok" (armed, or disabled — enabling computes a cursor). Production: "Goal continuation · Yotube" sat
- * enabled with next_run_at NULL under such a hold and was re-bound to the next /goal Goal, so every turn end of that
- * Goal fell to goal_continuation_unarmed (Yotube 95 + 19 times, 2026-10-12..18).
- */
-export function graphScheduleWakeState(automation: Automation): "ok" | "unarmed" | "held" {
-  try {
-    if (scheduleCursorHold(automation)?.observationOnly) return "held";
-  } catch {
-    // An unreadable historical occurrence is skipped by the recovery too; it does not hold the cursor.
-  }
-  return automation.enabled && (automation.triggerType ?? "schedule") === "schedule" && !automation.nextRunAt
-    ? "unarmed" : "ok";
 }
 
 /**

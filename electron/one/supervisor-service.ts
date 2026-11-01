@@ -21,6 +21,7 @@ import { ONE_BUBBLE_COLORS, type OneBubbleColor } from '../../shared/one-profile
 import type { OneSupervisorWorkQueue } from "./supervisor-work-queue";
 import { runtimeFailureBlocksNextAutomaticTurn } from "../../shared/runtime-turn-admission";
 import { isTypedCode, STORE_BUSY_CODE } from "../../shared/turn-settlement";
+import { UNCONFIRMED_MAX_RESENDS, unconfirmedRunShouldBeSentAgain, withEarlierAttempt } from "../invocation/earlier-attempt";
 import type { OneSupervisorOwner } from "./supervisor-owner";
 import type { SupervisorJournalInput, SupervisorJournalPage, SupervisorStopInput } from "../../shared/one-supervisor-runtime";
 import {OneBudgetAdmissionDenied,type OneBudgetStore} from "./budget-store";
@@ -44,6 +45,8 @@ export interface SupervisorRuntime {
    * with no ledger leaves the refusal's typed code as the whole proof, as the owner-message queue does.
    */
   noStartProof?(runId: string): boolean;
+  /** The durable placement fact of a run (invocation/turn-placement.ts): "unconfirmed" = dispatched, not proven in the conversation. */
+  placement?(runId: string): "placed" | "not-dispatched" | "unconfirmed";
 }
 /** A host check that could not be answered right now (billing unreachable). Nothing started and nothing was decided. */
 export class SupervisorStartDeferred extends Error {
@@ -119,6 +122,10 @@ const clip = (value: unknown, max: number) => {
 };
 /** Follow-ups One may send to one delegated task on its own before the owner decides (shared with the overlay and tool). */
 export const SUPERVISOR_FOLLOW_UP_LIMIT = ONE_SUPERVISOR_FOLLOW_UP_LIMIT;
+/** How often recover() starts one held, never-started row again before it waits for the shared deadline. */
+const MAX_NEVER_STARTED_RESTARTS = 3;
+/** The typed reason of a request proven never started and given up on (not started again, nothing sent twice). */
+export const NEVER_STARTED_REASON = "not_started";
 /** A start answers within the native start bound (180 s); a dispatch older than this is judged like a lost one. */
 const DISPATCH_IN_FLIGHT_MAX_MS = 200_000;
 /**
@@ -161,6 +168,8 @@ export class OneSupervisorService {
   private readonly dispatchFrames = new Map<string, { locale: "ko" | "en"; runtimeSelection: RuntimeSelection | undefined }>();
   /** Held commands whose "refused before dispatch" proof may still arrive from the admission ledger (a daemon's rejection lands after its reply). */
   private readonly lateProof = new Set<string>();
+  /** How many times recover() started a held, never-started row again in this process (neverStartedHold): a cause that does not clear stops being tried. */
+  private readonly neverStartedRestarts = new Map<string, number>();
   private reviewHoldOffUntil = 0;
   private retryTimer: ReturnType<typeof setTimeout> | undefined;
   /** The retry of a chat-send refused before dispatch has its own timer, so it never replaces (or is replaced by) a reply's or a review's. */
@@ -244,7 +253,7 @@ export class OneSupervisorService {
     };
     const observation: OrdinaryNativeTurnObservation = Object.freeze({ origin, request,
       onAdmitted: () => { readOrdinaryOneTurn(source,"execution"); const value=actualRow();
-        if (value.state === "dispatching") this.deps.store.update(value,{state:"accepted",acknowledgement:"delivered"});
+        if (value.state === "dispatching") { this.deps.store.update(value,{state:"accepted",acknowledgement:"delivered"}); this.carryOutReplyStop(value); }
         else if (value.state !== "accepted") throw supervisorError("ordinary_one_turn_source_changed"); },
       onPromptBound: () => {
         const message=readOrdinaryOneTurn(source,"message").state.messageId!, value=actualRow();
@@ -260,7 +269,9 @@ export class OneSupervisorService {
         this.ordinaryNativeTurns.delete(row.command_id);
       },
       onPreparationClosed: () => { readOrdinaryOneTurn(source,"closed"); const value=actualRow(true);
-        if (["dispatching","accepted"].includes(value.state)) this.deps.store.update(value,{state:"held",acknowledgement:"unknown",reason:"ordinary_preparation_closed"});
+        // Preparation ended before a run began and the owner had pressed Stop meanwhile: the turn is withdrawn, not held for confirmation.
+        if (value.state === "dispatching" && this.pendingReplyStops(value).length > 0 && !this.replyMayBeRunning(value)) this.withdrawStoppedReply(value);
+        else if (["dispatching","accepted"].includes(value.state)) this.deps.store.update(value,{state:"held",acknowledgement:"unknown",reason:"ordinary_preparation_closed"});
         this.ordinaryNativeTurns.delete(row.command_id); },
     });
     this.ordinaryNativeTurns.set(row.command_id,{source,observation});
@@ -374,23 +385,35 @@ export class OneSupervisorService {
     const accept=(value: unknown)=>{
       const saved=current();
       if(!control && (!value || typeof value!=='object' || (value as {runId?:string}).runId!==row.run_id))throw supervisorError('supervisor_native_run_mismatch');
-      if(control && value==='not-found')throw supervisorError('supervisor_reply_target_stale');
+      // The run a Stop or a cancel names is already gone: nothing is left to stop, which is what was asked. Settled, not held for confirmation.
+      if(control && value==='not-found'){
+        if(saved.state==='dispatching')this.deps.store.update(saved,{state:'completed',acknowledgement:'settled',reason:'supervisor_reply_target_stale'});
+        this.refusals.delete(row.command_id);this.dispatchFrames.delete(row.command_id);
+        return;
+      }
       if(saved.state==='dispatching')this.deps.store.update(saved,{state:'accepted',acknowledgement:'delivered',...(acceptedReason?{reason:acceptedReason}:{})});
       this.refusals.delete(row.command_id);this.dispatchFrames.delete(row.command_id);
+      // The owner pressed Stop while this start was still on its way (no run attached yet): the run exists now, so the Stop ends it.
+      if(!control)this.carryOutReplyStop(saved);
     };
     const reject=(error:unknown)=>{
       const saved=current();
       // Budget admission is refused before the native dispatch function exists; a deferred host check never decided anything.
       const denied=error instanceof OneBudgetAdmissionDenied || error instanceof SupervisorStartDeferred;
       let awaitingProof:string|null=null;
+      // The owner pressed Stop while this start was on its way. Nothing is started again for a reply the owner stopped: if nothing runs, the
+      // reply is withdrawn and the Stop says so; if the start threw after a run began, the Stop is carried out on that run below.
+      const stopped=!control&&saved.state==='dispatching'&&this.pendingReplyStops(saved).length>0;
+      if(stopped&&!this.replyMayBeRunning(saved)){this.withdrawStoppedReply(saved);return;}
       if(saved.state==='dispatching'){
-        const refusal=redispatch?this.preStartRefusal(saved,error):null;
+        const refusal=redispatch&&!stopped?this.preStartRefusal(saved,error):null;
         if(refusal){this.requeueRefused(saved,refusal);return;}
         this.deps.store.update(saved,{state:denied?'failed':'held',acknowledgement:denied?'settled':'unknown',reason:error instanceof Error?error.message.slice(0,240):'supervisor_dispatch_unconfirmed'});
         // A "not ready yet" code the ledger cannot vouch for yet: the owner's rejection may land just after the reply.
-        const code=redispatch&&!denied&&(saved.kind==='reply'||saved.kind==='chat-send'||saved.kind==='follow-up')&&!ordinaryNativeMarker(saved)?retryableRefusalCode(error):null;
+        const code=redispatch&&!stopped&&!denied&&(saved.kind==='reply'||saved.kind==='chat-send'||saved.kind==='follow-up')&&!ordinaryNativeMarker(saved)?retryableRefusalCode(error):null;
         if(code&&this.deps.runtime.noStartProof)awaitingProof=code;
       }
+      if(stopped)this.carryOutReplyStop(saved);
       this.refusals.delete(saved.command_id);this.dispatchFrames.delete(saved.command_id);
       if(awaitingProof){this.awaitLateProof(saved.command_id,awaitingProof);return;}
       if(isReview(saved)){
@@ -524,6 +547,7 @@ export class OneSupervisorService {
   private settle(row: SupervisorRequestRow, receipt: InvocationRunReceipt, ordinary = false, event?: SupervisorSettledEvent): void {
     if (ordinaryNativeMarker(row) && !ordinary) return;
     if (!settled(receipt)) return;
+    if (this.resendUnconfirmedReply(row, receipt)) return;
     if (row.kind==='cancel' && JSON.parse(row.payload_json).boundGoalId) return;
     if (row.kind === "chat-send" && JSON.parse(row.receipt_json).reason === "legacy_chat_delivery_unverified") return;
     // A desktop direction belongs to its successor, never the run it was queued
@@ -558,6 +582,38 @@ export class OneSupervisorService {
       }
     }).immediate();
   }
+  /**
+   * The owner's reply (typed in the personal window) whose run was dispatched and ended with an unknown outcome: it was lost without a cause
+   * (interrupted), or it failed unsettled or by the app's own exception with no provider cause (earlier-attempt.ts, decision
+   *). It is sent once more under a new run id with the earlier-attempt line, so the model checks what was done first, and a second
+   * loss ends as it always did. Never for the owner's Stop, a steering interrupt, a host stop, a run the runtime proved in the conversation or
+   * one that provably sent nothing (those have their own rules), a review, a message the owner has since followed with another, or a message
+   * that was already sent once more.
+   */
+  private resendUnconfirmedReply(row: SupervisorRequestRow, receipt: InvocationRunReceipt): boolean {
+    if (this.closed || row.kind !== "reply" || isReview(row) || ordinaryNativeMarker(row) || !row.user_message_id) return false;
+    if (receipt.status !== "failed" && receipt.status !== "interrupted") return false;
+    let payload: Record<string, unknown>;
+    try { payload = JSON.parse(row.payload_json) as Record<string, unknown>; } catch { return false; }
+    if (Number(payload.unconfirmedResends ?? 0) >= UNCONFIRMED_MAX_RESENDS || payload.boundGoalId) return false;
+    if (!unconfirmedRunShouldBeSentAgain(receipt)) return false;
+    try {
+      if (this.deps.runtime.placement?.(receipt.runId) !== "unconfirmed") return false;
+      if (this.deps.store.db.prepare("SELECT 1 FROM one_supervisor_requests WHERE one_id=? AND kind='stop-reply' AND run_id=? LIMIT 1").get(row.one_id, receipt.runId)) return false;
+      const newest = [...this.deps.history(row.origin_chat_id)].reverse().find(entry => entry.role === "user");
+      if (!newest || newest.id !== row.user_message_id) return false;
+      const nextRunId = randomUUID();
+      this.deps.store.db.transaction(() => {
+        this.deps.store.db.prepare("UPDATE one_supervisor_requests SET payload_json=? WHERE command_id=?")
+          .run(JSON.stringify({...payload, unconfirmedResends: 1}), row.command_id);
+        this.deps.store.update(row, {state: "stored", acknowledgement: "stored", reason: "resent_unconfirmed", runId: nextRunId});
+      }).immediate();
+    } catch { return false; }
+    this.refusals.delete(row.command_id); this.dispatchFrames.delete(row.command_id); this.lateProof.delete(row.command_id);
+    console.warn("[one-supervisor] reply ended with an unknown outcome; sent once more", {commandId: row.command_id, from: receipt.runId});
+    this.armDrain(250);
+    return true;
+  }
   /** The question card a settled run left for the owner. Main's envelope is exact; without it, the durable card. */
   private questionWait(receipt: InvocationRunReceipt, event?: SupervisorSettledEvent): {sourceMessageId: string; detail: string} | null {
     if (event?.pendingQuestion === false) return null;
@@ -584,6 +640,8 @@ export class OneSupervisorService {
       // The run ended while nobody observed it (the app restarted, the preparation closed): its own durable receipt is the end.
       if (!live && this.settleUnobservedOrdinaryTurn(row)) continue;
       if (!live && ["dispatching","accepted"].includes(row.state)) this.deps.store.update(row,{state:"held",acknowledgement:"unknown",reason:"ordinary_native_capture_unavailable"});
+      // The ledger proves the attempt never reached a model (rejected): nothing is unconfirmed, and its caller owns any retry.
+      if (!live) { const held = this.deps.store.get(row.command_id); if (held && this.neverStartedHold(held) === "expire") this.expireNeverStarted(held); }
     }
     if (observed.length && observed.every(ordinaryNativeMarker)) return;
     const {oneId} = this.binding();
@@ -597,6 +655,9 @@ export class OneSupervisorService {
       if (row.kind === "steer" && JSON.parse(row.receipt_json).reason !== "applied_in_next_run") continue;
       const refused = this.refusedHoldRecoverable(row);
       if (refused) { this.deps.store.update(row, {state:"stored",acknowledgement:"stored",reason:refused}); continue; }
+      const never = this.neverStartedHold(row);
+      if (never === "restart") { this.restartNeverStarted(row); continue; }
+      if (never === "expire") { this.expireNeverStarted(row); continue; }
       const receipt = this.deps.runtime.receipt(row.run_id);
       if (settled(receipt)) this.settle(row, receipt!);
       else if (row.state === "held" && (row.kind === "reply" || row.kind === "work" || row.kind === "follow-up") && receipt?.status === "running"
@@ -647,6 +708,41 @@ export class OneSupervisorService {
     if (Date.now() - Date.parse(row.updated_at) > TRANSIENT_SEND_DEADLINE_MS) return null;
     if (this.deps.runtime.receipt(row.run_id)) return null;
     return this.deps.runtime.noStartProof(row.run_id) ? reason : null;
+  }
+  /**
+   * A held row whose run left no receipt, and which the admission ledger proves never started (runtime.noStartProof: no row, or a
+   * rejected one). However it came to be held (a closed preparation, a capture lost in a restart, an unconfirmed liveness, a refusal
+   * an older build parked) nothing reached a model, so there is no effect to be unsure of and no reason to leave it on "Checking
+   * execution" for ever (observed in use: 14 rows, the oldest 26 days, 9 of them owner replies that no model had read).
+   *   restart  a reply, a chat send or a follow-up not older than the shared deadline starts again under the SAME run id (the run id
+   *            is the admission ledger's key, so it can never run twice); at most MAX_NEVER_STARTED_RESTARTS times per process,
+   *            so a cause that does not clear stops being tried and waits for the deadline.
+   *   expire   an older one is not started now (an old message must not arrive in a conversation hours later) and a host review that
+   *            was held is not revived: it is settled as not started, without a notice to Hope.
+   *   expire   also an ordinary native turn (the owner's composer message): the attempt closed before any model, and its caller (the
+   *            composer and its send queue) owns the retry under a run id of its own, so starting this one would answer twice.
+   * Anything else (a receipt exists, no ledger, a kind the executor owns) is left to the rules above and below.
+   */
+  private neverStartedHold(row: SupervisorRequestRow): "restart" | "expire" | null {
+    if (row.state !== "held" || !row.run_id || !this.deps.runtime.noStartProof) return null;
+    if (row.kind !== "reply" && row.kind !== "chat-send" && row.kind !== "follow-up") return null;
+    if (this.deps.runtime.receipt(row.run_id) || !this.deps.runtime.noStartProof(row.run_id)) return null;
+    if (ordinaryNativeMarker(row)) return "expire";
+    if (Date.now() - Date.parse(row.created_at) > TRANSIENT_SEND_DEADLINE_MS) return "expire";
+    if (isReview(row)) return null;
+    return (this.neverStartedRestarts.get(row.command_id) ?? 0) < MAX_NEVER_STARTED_RESTARTS ? "restart" : null;
+  }
+  private restartNeverStarted(row: SupervisorRequestRow): void {
+    this.neverStartedRestarts.set(row.command_id, (this.neverStartedRestarts.get(row.command_id) ?? 0) + 1);
+    let reason: string | null = null;
+    try { reason = (JSON.parse(row.receipt_json) as SupervisorCommandReceipt).reason ?? null; } catch { /* the cause stays as it was */ }
+    this.deps.store.update(row, {state: "stored", acknowledgement: "stored", reason});
+    console.warn("[one-supervisor] held request that never started is started again", {kind: row.kind, restarts: this.neverStartedRestarts.get(row.command_id)});
+  }
+  private expireNeverStarted(row: SupervisorRequestRow): void {
+    if (row.kind === "reply" && row.run_id && this.pendingReplyStops(row).length > 0) { this.withdrawStoppedReply(row); return; }
+    this.deps.store.update(row, {state: "failed", acknowledgement: "settled", reason: NEVER_STARTED_REASON});
+    this.refusals.delete(row.command_id); this.dispatchFrames.delete(row.command_id); this.lateProof.delete(row.command_id); this.neverStartedRestarts.delete(row.command_id);
   }
   /** A held dispatch with no receipt does not prove that no brain ran. */
   private unconfirmedReview(runId: string): void {
@@ -739,6 +835,8 @@ export class OneSupervisorService {
       // New review claims wait out a refused review's backoff (holdOffReviews) so its results keep their three attempts.
       const row = stored.find(item => !isReview(item)) ?? stored[0] ?? (Date.now() < this.reviewHoldOffUntil ? null : this.queueReview(oneId, chatId));
       if (!row) return;
+      // The owner stopped this reply (a Stop taken while its start was on its way, or before a restart brought it back): it is not started.
+      if (row.run_id && this.pendingReplyStops(row).length > 0) { this.withdrawStoppedReply(row); this.armDrain(0); return; }
       // A start refused before dispatch waits out its backoff in the stored state; the timer drains again at its end.
       const refused = this.refusals.get(row.command_id);
       if (refused && refused.notBefore > Date.now()) { this.armDrain(refused.notBefore - Date.now()); return; }
@@ -755,10 +853,13 @@ export class OneSupervisorService {
       this.dispatchFrames.set(row.command_id,frame);
       // The previous attempt's refusal cause is history, not the state of this attempt (an accepted reply keeps no stale cause).
       this.deps.store.update(row,{state:"dispatching",reason:null});
-      this.observeDispatch(row, () => this.deps.runtime.start({runId:row.run_id!,chatId,userPrompt:payload.text,promptOrigin:"system",oneMode:true,
-          taskIntent:"conversation",permissions:reportOnly ? "read" : "full",onePermissionMode:reportOnly ? "read" : "full",
+      const startRequest = {runId:row.run_id!,chatId,userPrompt:payload.text,promptOrigin:"system" as const,oneMode:true,
+          taskIntent:"conversation" as const,permissions:reportOnly ? "read" as const : "full" as const,onePermissionMode:reportOnly ? "read" as const : "full" as const,
           ...(reportOnly ? {} : {toolMode:"computer-use" as const}),locale:frame.locale,runtimeSelection:frame.runtimeSelection,
-          images:payload.images,fileGroupId:payload.fileGroupId},
+          images:payload.images,fileGroupId:payload.fileGroupId};
+      // A reply sent once more after an unknown outcome tells the model so (earlier-attempt.ts): it reads what was done before doing anything.
+      const resent = Number((payload as {unconfirmedResends?: unknown}).unconfirmedResends ?? 0) > 0;
+      this.observeDispatch(row, () => this.deps.runtime.start(resent ? withEarlierAttempt(startRequest) : startRequest,
           isReview(row) ? (payload as {purpose?: SupervisorHostNoticePurpose}).purpose ?? "one-delegation-review" : undefined), undefined, false, true);
     } finally { this.draining = false; }
   }
@@ -1265,7 +1366,11 @@ export class OneSupervisorService {
       if(!task&&this.deps.science&&input.taskId.startsWith('science-'))task=(await this.deps.science.tasks()).find(item=>item.taskId===input.taskId&&this.taskInIdentity(item,oneId));
     } else task=(await this.snapshot()).tasks.find(item=>item.taskId===input.taskId);
     if(this.binding(oneId,input.action==='cancel').chatId!==chatId)throw supervisorError('supervisor_identity_changed');
-    const rejected = !task || task.controlVersion !== input.expectedVersion || input.runId!==undefined&&task.runId!==input.runId ? "supervisor_task_version_conflict"
+    // The version the owner (or Hope) read is not what decides a control: a worker that finished a step since then moved it. A direction is
+    // a queued next instruction and a Stop is the owner ending that task, so both act on the task as it is now whenever it exists and
+    // still lists the action ("Stop always wins": the owner's Stop was refused "the state changed" because the task had advanced while
+    // the button was on screen). Only a task that no longer exists is a conflict.
+    const rejected = !task ? "supervisor_task_version_conflict"
       : !task.controls.includes(input.action) ? "supervisor_task_control_unavailable"
       // A direction through the personal agent into a room the owner took back; stopping stays available.
       : input.action === "steer" && task.chatId && personalAgentRoomReleased(task.chatId, this.deps.store.db) ? PERSONAL_AGENT_ROOM_RELEASED : null;
@@ -1328,9 +1433,83 @@ export class OneSupervisorService {
     const prior=this.deps.store.get(input.commandId);
     if (prior) return JSON.parse(this.deps.store.receive({commandId:input.commandId,oneId,kind:"stop-reply",payload:input,originChatId:chatId,runId:input.runId}).receipt_json);
     const row=this.deps.store.receive({commandId:input.commandId,oneId,kind:"stop-reply",payload:input,originChatId:chatId,runId:input.runId});
-    if (this.deps.runtime.attach(chatId)?.runId !== input.runId) return this.deps.store.update(row,{state:"failed",acknowledgement:"settled",reason:"supervisor_reply_target_stale"});
+    // The owner's own reply whose start was refused before anything reached a model waits for its next try with no run live (requeueRefused):
+    // the owner's Stop takes it back instead of failing as "stale". Whoever hosts the retry, the row is read from the shared store.
+    const waiting = this.waitingReplyRetry(oneId, input.runId);
+    if (waiting) {
+      this.refusals.delete(waiting.command_id); this.dispatchFrames.delete(waiting.command_id); this.lateProof.delete(waiting.command_id);
+      this.deps.store.update(waiting,{state:"cancelled",acknowledgement:"settled",reason:"owner_stopped"});
+      return this.deps.store.update(row,{state:"completed",acknowledgement:"settled",reason:"retry_withdrawn"});
+    }
+    if (this.deps.runtime.attach(chatId)?.runId !== input.runId) {
+      // The reply is still being started: its row is dispatching, but the budget check, the owner admission and the preparation run before its run
+      // is attached. A Stop in that window is kept on the row and carried out the moment the start lands (the run is cancelled, or the reply is
+      // withdrawn if the start fails): never answered "had already ended" for a reply that is about to run.
+      if (this.startingReply(oneId, input.runId)) {
+        this.deps.store.update(row,{state:"dispatching"});
+        this.dispatchInFlight.set(row.command_id,Date.now()); // recover() must not read this waiting Stop as a lost one
+        return JSON.parse(this.deps.store.get(row.command_id)!.receipt_json);
+      }
+      // The reply the owner pressed Stop on has already ended: what they asked for (it not running) is true, so the Stop is settled, not failed.
+      return this.deps.store.update(row,{state:"completed",acknowledgement:"settled",reason:"supervisor_reply_target_stale"});
+    }
     this.deps.store.update(row,{state:"dispatching"});
     return this.observeDispatch(row,()=>this.deps.runtime.cancel(input.runId),'reply_cleanup_pending',true);
+  }
+  /** The reply whose start is on its way: dispatching, with no run attached to the conversation yet. */
+  private startingReply(oneId: string, runId: string): SupervisorRequestRow | null {
+    return (this.deps.store.db.prepare("SELECT * FROM one_supervisor_requests WHERE one_id=? AND kind='reply' AND run_id=? AND state='dispatching' LIMIT 1")
+      .get(oneId, runId) as SupervisorRequestRow | undefined) ?? null;
+  }
+  /** The owner's Stops on this reply that are not carried out yet (taken while the start was on its way; held if a restart found them mid-way). */
+  private pendingReplyStops(reply: SupervisorRequestRow): SupervisorRequestRow[] {
+    if (reply.kind !== "reply" || !reply.run_id) return [];
+    return this.deps.store.db.prepare("SELECT * FROM one_supervisor_requests WHERE one_id=? AND kind='stop-reply' AND run_id=? AND state IN ('stored','dispatching','held') ORDER BY rowid")
+      .all(reply.one_id, reply.run_id) as SupervisorRequestRow[];
+  }
+  /** The start has landed (or failed after a run began): the Stop taken meanwhile ends that run through the runtime, like a Stop on a live reply. */
+  private carryOutReplyStop(reply: SupervisorRequestRow): void {
+    if (!reply.run_id) return;
+    for (const stop of this.pendingReplyStops(reply)) {
+      try {
+        this.dispatchInFlight.delete(stop.command_id);
+        if (stop.state === "stored") this.deps.store.update(stop, {state: "dispatching"});
+        this.observeDispatch(this.deps.store.get(stop.command_id)!, () => this.deps.runtime.cancel(reply.run_id!), "reply_cleanup_pending", true);
+      } catch { /* The Stop row stays pending; the next recover() reads it again. */ }
+    }
+  }
+  /** A run of this reply exists or may exist: attached to the conversation, or with a receipt that has not settled. */
+  private replyMayBeRunning(reply: SupervisorRequestRow): boolean {
+    if (!reply.run_id) return false;
+    try {
+      if (this.deps.runtime.attach(reply.origin_chat_id)?.runId === reply.run_id) return true;
+      const receipt = this.deps.runtime.receipt(reply.run_id);
+      return !!receipt && !settled(receipt);
+    } catch { return true; }
+  }
+  /** The reply never ran and the owner stopped it: it is cancelled for good (never started again) and each Stop on it says so. */
+  private withdrawStoppedReply(reply: SupervisorRequestRow): void {
+    const stops = this.pendingReplyStops(reply);
+    this.refusals.delete(reply.command_id); this.dispatchFrames.delete(reply.command_id); this.lateProof.delete(reply.command_id); this.neverStartedRestarts.delete(reply.command_id);
+    this.deps.store.db.transaction(() => {
+      this.deps.store.update(reply, {state: "cancelled", acknowledgement: "settled", reason: "owner_stopped"});
+      for (const stop of stops) this.deps.store.update(stop, {state: "completed", acknowledgement: "settled", reason: "retry_withdrawn"});
+    }).immediate();
+    for (const stop of stops) this.dispatchInFlight.delete(stop.command_id);
+    if (isReview(reply)) this.deps.store.closeReview(reply.run_id!, "review_stopped_by_owner");
+  }
+  /**
+   * The owner's reply (never a host review, never One's own message into a room) that is stored again after a start refused before dispatch
+   * and waits for its next try under `runId`. Read from the shared store (state stored + the typed refusal on the receipt), so a retry
+   * armed by an earlier process is found too.
+   */
+  private waitingReplyRetry(oneId: string, runId: string): SupervisorRequestRow | null {
+    const row = this.deps.store.db.prepare("SELECT * FROM one_supervisor_requests WHERE one_id=? AND kind='reply' AND state='stored' AND run_id=? LIMIT 1")
+      .get(oneId, runId) as SupervisorRequestRow | undefined;
+    if (!row || isReview(row)) return null;
+    let reason: unknown = null;
+    try { reason = (JSON.parse(row.receipt_json) as SupervisorCommandReceipt).reason; } catch { reason = null; }
+    return typeof reason === "string" && reason ? row : null;
   }
   /** Received, delivered and applied are different facts (I13). A direction is applied once the worker's next run
    * started with it; until then the receipt says "not yet observed". Withdrawn or failed directions say so. */

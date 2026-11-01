@@ -81,13 +81,26 @@ function adoptsOwnAutomaticGoal(context: TeamGoalContext, current: TeamGoalConte
   catch { return false; }
 }
 
+/**
+ * How the room's Goal differs now from the one a team run captured at admission:
+ *  - "none": the same Goal, the same revision;
+ *  - "revised": the same Goal and run, amended by the owner mid-run (its revision, objective or criteria moved). A revision bump is never by itself
+ * a reason to stop (decided): the step goes on, and the new revision governs the Goal's next turn and its verification;
+ *  - "replaced": another Goal or run, or the room's project/binding moved: the plan must not adopt it.
+ */
+export function teamGoalContextChange(context: TeamGoalContext, current: TeamGoalContext): "none" | "revised" | "replaced" {
+  if (current.rootProjectId !== context.rootProjectId || current.boundGoalId !== context.boundGoalId || current.boundRunId !== context.boundRunId
+    || current.goalId !== context.goalId || current.runId !== context.runId) return "replaced";
+  if (current.goalRevision !== context.goalRevision || current.objective !== context.objective
+    || JSON.stringify(current.acceptanceCriteria) !== JSON.stringify(context.acceptanceCriteria)) return "revised";
+  return "none";
+}
+
 export function assertTeamGoalContext(context: TeamGoalContext | undefined, signal?: AbortSignal): void {
   if (signal?.aborted) throw new TeamGoalContextError("team_goal_cancelled");
   if (!context || !observedContexts.has(context)) throw new TeamGoalContextError("team_goal_context_unconfirmed");
   const current = readTeamGoalContext(context.rootChatId, context.projectId, false);
-  if (current.rootProjectId !== context.rootProjectId || current.boundGoalId !== context.boundGoalId || current.boundRunId !== context.boundRunId
-    || current.goalId !== context.goalId || current.runId !== context.runId || current.goalRevision !== context.goalRevision
-    || current.objective !== context.objective || JSON.stringify(current.acceptanceCriteria) !== JSON.stringify(context.acceptanceCriteria)) {
+  if (teamGoalContextChange(context, current) === "replaced") {
     if (adoptsOwnAutomaticGoal(context, current)) return;
     throw new TeamGoalContextError("team_goal_context_changed");
   }

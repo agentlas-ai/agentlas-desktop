@@ -69,9 +69,76 @@ export function isHostInternalException(error: unknown): boolean {
   return true;
 }
 
-/** The one sentence the owner reads for an unexpected internal exception: what happened to the request, no cause text, no code. */
-export function hostInternalFailureMessage(locale: "ko" | "en"): string {
+/**
+ * The one sentence the owner reads for an unexpected internal exception: what happened to the request, no cause text, no code, and the true
+ * thing about what happens next. `resend` is the forecast of resend-forecast.ts: "now" = the app sends the same message again by itself,
+ * "spent" = it already did once and nothing more is sent automatically, "none" = nothing is sent automatically (the owner sends it).
+ */
+export function hostInternalFailureMessage(locale: "ko" | "en", resend: "now" | "spent" | "none" = "none"): string {
+  if (resend === "now") {
+    return locale === "ko"
+      ? "앱 안에서 예상하지 못한 문제가 생겨 이번 실행을 끝내지 못했습니다. 요청은 저장되어 있고, 앱이 같은 요청을 스스로 한 번 더 보냅니다."
+      : "Something unexpected happened inside the app, so this run could not finish. Your request is saved, and the app is sending it again by itself.";
+  }
+  if (resend === "spent") {
+    return locale === "ko"
+      ? "앱 안에서 예상하지 못한 문제가 생겨 이번 실행을 끝내지 못했습니다. 요청은 저장되어 있습니다. 앱이 이미 한 번 다시 보냈지만 같은 문제가 났습니다. 같은 요청을 다시 보내 주세요."
+      : "Something unexpected happened inside the app, so this run could not finish. Your request is saved. The app already sent it once more and it ended the same way. Please send it again.";
+  }
   return locale === "ko"
     ? "앱 안에서 예상하지 못한 문제가 생겨 이번 실행을 끝내지 못했습니다. 요청은 저장되어 있습니다. 같은 요청을 다시 보내 주세요."
     : "Something unexpected happened inside the app, so this run could not finish. Your request is saved. Please send it again.";
+}
+
+/**
+ * The sentence for a store that stayed locked by another write (code store_busy), with the true thing about what happens next.
+ * `beforeDispatch`: nothing reached the model. `resend` is the forecast of resend-forecast.ts: "now" = the app sends the same message again by
+ * itself, "spent" = it already did once, "none" = nothing is sent automatically.
+ */
+export function storeLockedMessage(locale: "ko" | "en", beforeDispatch: boolean, resend: "now" | "spent" | "none" = "none"): string {
+  const ko = locale === "ko";
+  if (beforeDispatch) {
+    return resend === "now"
+      ? ko ? "Agentlas 저장소가 다른 기록으로 잠겨 있어 모델에 보내기 전에 멈췄습니다. 모델에는 아무것도 보내지 않았고, 앱이 같은 요청을 스스로 다시 보냅니다."
+        : "The Agentlas store stayed locked by another write, so this turn stopped before anything was sent to the model. Nothing reached the model, and the app is sending it again by itself."
+      : ko ? "Agentlas 저장소가 다른 기록으로 잠겨 있어 모델에 보내기 전에 멈췄습니다. 모델에는 아무것도 보내지 않았으니 다시 보내도 됩니다."
+        : "The Agentlas store stayed locked by another write, so this turn stopped before anything was sent to the model. Nothing reached the model; it is safe to send again.";
+  }
+  if (resend === "now") {
+    return ko ? "Agentlas 저장소가 다른 기록으로 잠겨 있어 이 턴을 끝까지 기록하지 못했습니다. 이미 실행됐을 수 있어, 앱이 같은 요청을 스스로 한 번 더 보내면서 앞선 시도가 일부 실행됐을 수 있다고 모델에 알립니다."
+      : "The Agentlas store was locked by another write, so this turn could not be fully recorded. It may already have run, so the app is sending it once more by itself and telling the model the earlier attempt may have partly happened.";
+  }
+  if (resend === "spent") {
+    return ko ? "Agentlas 저장소가 다른 기록으로 잠겨 있어 이 턴을 끝까지 기록하지 못했습니다. 이미 실행됐을 수 있습니다. 앱이 이미 한 번 다시 보냈지만 같은 식으로 끝났고, 더 보내지 않습니다. 같은 요청을 다시 보내 주세요."
+      : "The Agentlas store was locked by another write, so this turn could not be fully recorded. It may already have run. The app already sent it once more and it ended the same way, so it sends nothing more. Please send the same request again.";
+  }
+  return ko ? "Agentlas 저장소가 다른 기록으로 잠겨 있어 이 턴을 끝까지 기록하지 못했습니다. 이미 실행됐을 수 있어 자동으로 다시 보내지 않았습니다."
+    : "The Agentlas store was locked by another write, so this turn could not be fully recorded. It may already have run, so it was not sent again automatically.";
+}
+
+/**
+ * A working folder that is gone: a file-system error (ENOENT / ENOTDIR) on a path that is the chat's folder or inside it, while the folder
+ * itself no longer exists. The folder was moved or deleted by the owner (a mobile folder under /tmp, a removed project), so the sentence is
+ * "the working folder was not found", not "something unexpected happened inside the app" (2 runs). Platform fields only: the error's
+ * `code` and `path` (own or on its cause chain) against the folder; no message text is read.
+ */
+export function isMissingWorkingFolderError(error: unknown, folder: string | null | undefined, exists: (candidate: string) => boolean,
+  separator: string = "/"): boolean {
+  if (!error || typeof error !== "object" || typeof folder !== "string" || !folder) return false;
+  let present: boolean;
+  try { present = exists(folder); } catch { return false; }
+  if (present) return false;
+  const root = folder.length > 1 && folder.endsWith(separator) ? folder.slice(0, -1) : folder;
+  return causeChain(error).some((link) => {
+    const code = dataProperty(link, "code");
+    const where = dataProperty(link, "path");
+    return (code === "ENOENT" || code === "ENOTDIR") && typeof where === "string" && (where === root || where.startsWith(root + separator));
+  });
+}
+
+/** The sentence for a working folder that is gone: what happened, what to do, no path and no code. */
+export function workingFolderMissingMessage(locale: "ko" | "en"): string {
+  return locale === "ko"
+    ? "이 대화의 작업 폴더를 찾을 수 없어 실행하지 못했습니다. 폴더가 옮겨졌거나 지워졌는지 확인하고, 작업 폴더를 다시 지정한 뒤 같은 요청을 보내 주세요. 요청은 저장되어 있습니다."
+    : "This chat's working folder was not found, so the run could not start. Check whether the folder was moved or deleted, set the working folder again, then send the same request. Your request is saved.";
 }

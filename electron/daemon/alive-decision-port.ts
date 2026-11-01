@@ -35,6 +35,10 @@ declare const bindingBrand: unique symbol;
 export interface AliveDecisionBinding { readonly [bindingBrand]: true }
 const bindings = new WeakMap<AliveDecisionBinding, { wake: AliveDecisionWake; assertCurrent(): void }>();
 const digest = (value: unknown): string => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+/** The owner binding as one comparable value: the two named fields in one fixed order. A comparison that digested the whole
+ * object compared its JSON text, so the same two values in the other key order never matched and every wake the background
+ * service hosted refused alive_decision_owner_changed before it reached a model (12 of 12 observed). */
+const ownerKey = (owner: AliveDecisionOwner): string => digest([owner.ownerScope, owner.serviceIdentity]);
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 function fail(code: string): never { throw Object.assign(new Error(code), { code }); }
 function exact(value: unknown, keys: readonly string[]): value is Record<string, unknown> {
@@ -91,7 +95,7 @@ export function createAliveDecisionBinding(input: {
     wakeId: input.start.wakeId, controlEpoch: input.start.controlEpoch, attachmentDigest: digest(attached(input.store.db, input.start.agentId)) });
   const assertCurrent = () => {
     input.assertCurrent();
-    if (!input.store.owns(wake.lifeAgentId) || digest(input.ownerBinding()) !== digest(owner)) fail("alive_decision_owner_changed");
+    if (!input.store.owns(wake.lifeAgentId) || ownerKey(input.ownerBinding()) !== ownerKey(owner)) fail("alive_decision_owner_changed");
     validateLife(input.store.db, wake, input.now(), true);
   };
   assertCurrent();
@@ -164,7 +168,7 @@ export function createLocalAliveDecisionTransport(options: {
       active.set(wake.lifeAgentId, controller);
       const assert = () => {
         controller.signal.throwIfAborted(); if (closed || active.get(wake.lifeAgentId) !== controller) fail("alive_decision_port_closed");
-        if (digest(options.ownerBinding()) !== digest({ ownerScope: wake.ownerScope, serviceIdentity: wake.serviceIdentity })) fail("alive_decision_owner_changed");
+        if (ownerKey(options.ownerBinding()) !== ownerKey(wake)) fail("alive_decision_owner_changed");
         held.assertCurrent(); custody?.assertCurrent();
         const event = options.db.prepare("SELECT payload_json FROM alive_events WHERE agent_id=? AND kind='wake.runtime-selected' AND json_extract(payload_json,'$.wakeId')=? ORDER BY sequence DESC LIMIT 1").get(wake.lifeAgentId,wake.wakeId) as {payload_json:string}|undefined;
         const pin = event ? JSON.parse(event.payload_json) : null;
@@ -233,7 +237,7 @@ export function createDaemonAliveDecisionPort(options: {
   const assertOwner = () => {
     if (closed) fail("alive_decision_port_closed");
     options.assertOwner();
-    if (digest(options.ownerBinding()) !== digest(owner)) fail("alive_decision_owner_changed");
+    if (ownerKey(options.ownerBinding()) !== ownerKey(owner)) fail("alive_decision_owner_changed");
   };
   const actor = createDaemonAgentContextHost({ bootId: options.bootId, ...owner, assertOwner,
     awakeLifetime(identity) {

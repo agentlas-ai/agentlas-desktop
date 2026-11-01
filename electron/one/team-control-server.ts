@@ -32,6 +32,7 @@ import {
   oneTeamSessionStatus,
   oneTeamStartSession,
   oneTeamSteer,
+  oneTeamStop,
   type OneTeamCaller,
 } from "./team-dispatch";
 
@@ -173,10 +174,63 @@ export async function dispatchOneSupervisorTool(binding: Pick<OneTeamCapabilityB
 }
 
 /**
+ * Whether the owner wrote the turn that is calling a tool: the personal agent's reply to a message the owner wrote (the supervisor's own fact,
+ * the one one_app_call and the personal-data edits read), or, in any other conversation, a run whose ledger has the owner's message as its
+ * origin (graph-origin.ts: a host-written turn such as a teammate report, a check-in or a Goal continuation has none). Unknown is not the owner.
+ */
+export async function ownerWroteThisTurn(binding: Pick<OneTeamCapabilityBinding, "chatId" | "supervisorReplyRunId">): Promise<boolean> {
+  try {
+    if (!binding.chatId || !binding.supervisorReplyRunId) return false;
+    const host = await import("./supervisor");
+    if (host.isPersonalSupervisorConversation(binding.chatId)) {
+      const service = host.supervisorRunsInDaemon() ? host.oneSupervisor() : (await import("./supervisor-native-runtime")).oneSupervisorEndpoint();
+      return Boolean(await service.ownerTurn(binding.supervisorReplyRunId));
+    }
+    return (await import("./graph-origin")).resolveGraphOriginMessage(getDb(), binding.chatId, binding) !== null;
+  } catch { return false; }
+}
+
+/**
+ * one_team_stop: Hope stops a teammate job only in a turn the owner wrote (consent owner_turn_required in the registry, like team.chat).
+ * A report or check-in turn the app started that finds a job slow or odd is not the owner's word: it is told so in a sentence the model can act
+ * on, as an answer (nothing failed, nothing was changed), and the job keeps running. The job lookup stays bound to the calling conversation
+ * (team-dispatch.ts oneTeamStop), so another conversation's job is never reachable whoever wrote the turn.
+ */
+export async function oneTeamStopOnOwnerTurn(
+  binding: OneTeamCapabilityBinding,
+  input: { sessionId?: unknown },
+  ownerTurn: (binding: OneTeamCapabilityBinding) => Promise<boolean> = ownerWroteThisTurn,
+): Promise<unknown> {
+  if (!(await ownerTurn(binding))) {
+    return {
+      stopped: false, owner_turn_required: true,
+      note: "Not stopped, and nothing was changed: the job keeps running. A teammate job is stopped only on the owner's word, and this turn was not written by the owner (it is a report, a check-in or another turn the app started). If the job looks wrong, tell the owner what you saw and ask; when the owner says to stop it, call this again in that turn.",
+    };
+  }
+  return oneTeamStop(binding, input);
+}
+
+/**
  * The code of a One team tool result that refused as data, or null. Graph and Toolchain dispatch return a refusal as
  * { ok: false, code, … } (one/graph-dispatch.ts: nothing saved or applied); answered as {ok:true} it reached the model
  * and the receipts as an MCP success (same defect as harness_call, production 2026-10-16).
  */
+/**
+ * A teammate the model named wrongly, or one that cannot join a group, is an answer, not a failed tool step: nothing was started or changed
+ * and the message already lists what is possible. It comes back as a normal result (no `ok:false`, so the step is not drawn failed) that
+ * says so, and the model chooses again in the same turn (observed in use: the model corrected itself every time).
+ */
+const TEAM_REFUSALS_AS_ANSWER: readonly string[] = ["one-team-member-not-found", "one-team-member-ambiguous", "one-team-invite-refused", "one-team-group-compose-refused"];
+export function oneTeamRefusalAsAnswer(error: unknown): Record<string, unknown> | null {
+  const message = error instanceof Error ? error.message : "";
+  const code = TEAM_REFUSALS_AS_ANSWER.find((prefix) => message.startsWith(`${prefix}:`));
+  return code ? { done: false, refusal: code, message: message.slice(code.length + 1).trim(),
+    note: "nothing was started or changed; choose from the teammates named in the message (or create one), then call again in this turn" } : null;
+}
+function teamAnswer<T>(run: () => T): T | Record<string, unknown> {
+  try { return run(); } catch (error) { const answer = oneTeamRefusalAsAnswer(error); if (answer) return answer; throw error; }
+}
+
 export function oneTeamResultFailureCode(result: unknown): string | null {
   if (!result || typeof result !== "object" || Array.isArray(result)) return null;
   const r = result as { ok?: unknown; code?: unknown };
@@ -335,12 +389,13 @@ async function handleOneTeamControlRequestUnchecked(request: Record<string, unkn
         ? withOneToolchainNativeInvocation(binding, execute) : execute();
     }
     case "list": return oneTeamList(binding);
-    case "start": return oneTeamStartSession(binding, { member: request.member, brief: request.brief, newSession: request.newSession });
-    case "steer": return oneTeamSteer(binding, { sessionId: request.sessionId, message: request.message });
+    case "start": return teamAnswer(() => oneTeamStartSession(binding, { member: request.member, brief: request.brief, newSession: request.newSession }));
+    case "steer": return teamAnswer(() => oneTeamSteer(binding, { sessionId: request.sessionId, message: request.message }));
+    case "stop": return oneTeamStopOnOwnerTurn(binding, { sessionId: request.sessionId });
     case "status": return oneTeamSessionStatus(binding, { sessionId: request.sessionId, waitSeconds: request.waitSeconds });
     case "create": return oneTeamCreateMember(binding, { name: request.name, role: request.role, personality: request.personality, invite: request.invite });
-    case "invite": return oneTeamInvite(binding, { member: request.member });
-    case "compose_group": return oneTeamComposeGroup(binding, { members: request.members });
+    case "invite": return teamAnswer(() => oneTeamInvite(binding, { member: request.member }));
+    case "compose_group": return teamAnswer(() => oneTeamComposeGroup(binding, { members: request.members }));
     default: throw new Error("one-team-unknown-operation");
   }
 }
@@ -554,7 +609,7 @@ export async function handleOneTeamControlRequest(request:Record<string,unknown>
   if(!binding)throw new Error("one-team-capability-invalid");
   if(!binding.historySource)return retryWhenStoreBusy(()=>handleOneTeamControlRequestUnchecked(request));
   const original=binding.historySource;if(!binding.chatId)throw personalDataError("history_native_original_command_required");
-  const operations:Record<string,string>={list:"one_team_list",start:"one_team_start_session",steer:"one_team_steer",status:"one_team_session_status",create:"one_team_create_member",invite:"one_team_invite",compose_group:"one_team_compose_group"};
+  const operations:Record<string,string>={list:"one_team_list",start:"one_team_start_session",steer:"one_team_steer",stop:"one_team_stop",status:"one_team_session_status",create:"one_team_create_member",invite:"one_team_invite",compose_group:"one_team_compose_group"};
   const operation=String(request.operation??""),name=["graph","history","personal","supervisor"].includes(operation)?String(request.name??""):operations[operation];
   if(!name||!(AGENTLAS_ONE_TEAM_TOOL_NAMES as readonly string[]).includes(name)||binding.tools&&!binding.tools.includes(name))throw personalDataError("history_native_tool_not_granted");
   const input=["graph","history","personal","supervisor"].includes(operation)?request.input??{}:Object.fromEntries(Object.entries(request).filter(([key])=>!["token","capabilityId","operation"].includes(key)));

@@ -473,7 +473,13 @@ export function validateBlueprint(
   const checkVerdicts = new Set<string>();
   for (const check of bp.checks ?? []) {
     const at = `${(check.afterStep ?? 0) + 1}번째 단계 뒤의 검증`;
-    if (!steps[check.afterStep]) { push(`${at}가 없는 단계를 가리킵니다.`); continue; }
+    if (!steps[check.afterStep]) {
+      // The sentence the authoring model reads must say what is wrong and what a valid value is: "the check after step N points to no step" alone
+      // sent one chat through the same refusal five times in a day (afterStep counts from 0, so the last step of a K-step blueprint is K-1).
+      push(`checks[]의 afterStep ${JSON.stringify(check.afterStep)}이(가) 가리키는 단계가 없습니다. afterStep은 0부터 세고, 이 청사진은 단계가 ${steps.length}개이므로 `
+        + `0~${Math.max(0, steps.length - 1)} 중에서 "검증할 값을 만드는 단계"의 번호를 쓰세요.`);
+      continue;
+    }
     if (!check.subject || !produced.has(check.subject)) {
       push(`${at}가 볼 "${check.subject}" 값을 아무도 만들지 않습니다.`);
     }
@@ -671,7 +677,11 @@ export function validateBlueprint(
   // 갈림길·반복
   for (const branch of bp.branches ?? []) {
     const at = `${(branch.afterStep ?? 0) + 1}번째 단계 뒤의 갈림길`;
-    if (!steps[branch.afterStep]) { push(`${at}가 없는 단계를 가리킵니다.`); continue; }
+    if (!steps[branch.afterStep]) {
+      push(`branches[]의 afterStep ${JSON.stringify(branch.afterStep)}이(가) 가리키는 단계가 없습니다. afterStep은 0부터 세고, 이 청사진은 단계가 ${steps.length}개이므로 `
+        + `0~${Math.max(0, steps.length - 1)} 중에서 "갈림길이 볼 값을 만드는 단계"의 번호를 쓰세요.`);
+      continue;
+    }
     if (!OPS.has(branch.op)) { push(`${at}의 판단 방법을 알 수 없습니다.`); continue; }
     if (!branch.var || !produced.has(branch.var)) {
       push(`${at}가 보는 "${branch.var}" 값을 아무도 만들지 않습니다.`);

@@ -131,11 +131,11 @@ walk(apiObject(science, "agentlasScience"), "science", science, "science");
 
 // Signatures and doc comments from AgentlasIpc (best effort: an operation without a typed member keeps its names).
 const typed = new Map();
-function docOf(node) {
-  const ranges = ts.getLeadingCommentRanges(typesSource, node.getFullStart()) ?? [];
-  const text = ranges.map((range) => typesSource.slice(range.pos, range.end)).join("\n")
+function docOf(node, text = typesSource) {
+  const ranges = ts.getLeadingCommentRanges(text, node.getFullStart()) ?? [];
+  const text_ = ranges.map((range) => text.slice(range.pos, range.end)).join("\n")
     .replace(/^\s*\/\*\*?|\*\/\s*$/gm, "").replace(/^\s*\*\s?/gm, "").replace(/^\s*\/\/\s?/gm, "").replace(/\s+/g, " ").trim();
-  return text.slice(0, 280);
+  return text_.slice(0, 280);
 }
 function walkType(members, prefix) {
   for (const member of members) {
@@ -155,6 +155,22 @@ let ipcInterface = null;
 ts.forEachChild(types, (node) => { if (ts.isInterfaceDeclaration(node) && node.name.text === "AgentlasIpc") ipcInterface = node; });
 if (!ipcInterface) throw new Error("AgentlasIpc interface not found");
 walkType(ipcInterface.members, "");
+// AgentlasIpc names `agentWorkspace: AgentWorkspaceIpc`, an interface in shared/agent-workspace.ts. Its method docs are the only words a
+// model searching the catalog for "edit an agent's file" can match, so they are read from there (docs only: the signatures stay the bridge's).
+const workspaceDocs = new Map();
+{
+  const workspaceFile = path.join(root, "shared/agent-workspace.ts");
+  const workspaceSource = fs.readFileSync(workspaceFile, "utf8");
+  const workspaceTypes = ts.createSourceFile("agent-workspace.ts", workspaceSource, ts.ScriptTarget.Latest, true);
+  ts.forEachChild(workspaceTypes, (node) => {
+    if (!ts.isInterfaceDeclaration(node) || node.name.text !== "AgentWorkspaceIpc") return;
+    for (const member of node.members) {
+      if (!ts.isMethodSignature(member) || !member.name || !ts.isIdentifier(member.name)) continue;
+      const doc = docOf(member, workspaceSource);
+      if (doc) workspaceDocs.set(`agentWorkspace.${member.name.text}`, doc);
+    }
+  });
+}
 // Field names of the shared types an operation takes or returns, so "sound" finds runAlerts.set (Partial<RunAlertSettings>).
 const typeFields = new Map();
 ts.forEachChild(types, (node) => {
@@ -176,13 +192,22 @@ function returnTypeText(path) {
   if (ts.isMethodSignature(found)) return found.type ? found.type.getText(types) : "";
   return found.type && ts.isFunctionTypeNode(found.type) ? found.type.type.getText(types) : "";
 }
+// What the model reads for operations whose renderer-facing comment is no help to it: the working route is named where a model searching for "edit an
+// agent's file" lands (observed in use). Declared here, not inferred; the denied ones are only listed as restricted.
+const DOC_OVERRIDES = {
+  "agentFiles.write": "Saves memory.md only. Any other file of an agent changes through agentWorkspace.prepareFileChange, then getDiff, then approveAndApply.",
+  "agentFiles.promptSource": "Main-owned canonical runtime prompt source for this package. To change it: agentWorkspace.prepareFileChange with targetPath = relativePath, never the absolute path.",
+  "agentEvolution.createProposal": "Retired: always refuses. Stage a change with agentWorkspace.prepareFileChange.",
+  "agentEvolution.approveAndApply": "Retired: always refuses. Apply a staged change with agentWorkspace.getDiff, then agentWorkspace.approveAndApply.",
+  "agentEvolution.rollback": "Retired: always refuses. Restore with agentWorkspace.prepareRollback, then getDiff and approveAndApply.",
+};
 for (const operation of operations) {
   const info = operation.surface === "desktop" ? typed.get(operation.path) : null;
   const referenced = `${info?.signature ?? ""} ${operation.surface === "desktop" ? returnTypeText(operation.path) : ""}`.match(/\b[A-Z][A-Za-z0-9]+\b/g) ?? [];
   const keywords = [...new Set(referenced.flatMap((name) => typeFields.get(name) ?? []))].slice(0, 24);
   if (keywords.length) operation.keywords = keywords;
   operation.signature = (info?.signature ?? operation.bridgeSignature).replace(/\s+/g, " ").slice(0, 320);
-  operation.doc = info?.doc ?? "";
+  operation.doc = DOC_OVERRIDES[operation.path] ?? (info?.doc || (operation.surface === "desktop" ? workspaceDocs.get(operation.path) : "") || "");
   delete operation.bridgeSignature;
 }
 operations.sort((a, b) => a.path.localeCompare(b.path));

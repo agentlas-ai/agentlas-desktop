@@ -123,6 +123,8 @@ export interface AgentWorkspaceProposal {
   appliedAt?: string;
   appliedRevisionId?: string;
   lastError?: string;
+  /** The owner approved while a run held the agent; Main applies exactly this reviewed change when the run ends. */
+  applyWhenIdle?: boolean;
 }
 export interface AgentWorkspaceDiff extends AgentWorkspaceProposal {
   reviewedHash: string;
@@ -185,18 +187,28 @@ export interface AgentWorkspaceMemoryCounts {
   unavailableAgentIds: string[];
 }
 export interface AgentWorkspaceIpc {
+  /** An installed agent's folder: files, proposals, history, and whether a run holds it. */
   getWorkspace(agentId: string): Promise<AgentWorkspaceSnapshot>;
   memoryCounts(agentIds: string[]): Promise<AgentWorkspaceMemoryCounts>;
+  /** List the files of an installed agent's folder as paths relative to the folder (AGENTS.md, skills/x/SKILL.md). */
   listFiles(agentId: string, relativeDir?: string): Promise<AgentWorkspaceFile[]>;
+  /** Read one file of an agent's folder by relative path; send its content as currentContent to prepareFileChange. */
   readFile(agentId: string, relativePath: string): Promise<AgentWorkspaceReadFile>;
+  /** Stage learnings from memory as a change to an agent's instruction or skill files. Then getDiff and approveAndApply. */
   prepareFromMemory(input: { agentId: string; memoryEntryIds: string[]; targetPath?: string }): Promise<AgentWorkspaceProposal>;
+  /** Edit an installed agent's instruction, skill or knowledge file: stage currentContent to proposedContent. targetPath is relative to the agent folder (AGENTS.md). Then getDiff, then approveAndApply. */
   prepareFileChange(input: { agentId: string; targetPath: string; currentContent: string; proposedContent: string }): Promise<AgentWorkspaceProposal>;
+  /** Stage a restore of an earlier version of an agent's folder. Then getDiff and approveAndApply. */
   prepareRollback(input: { agentId: string; revisionId: string }): Promise<AgentWorkspaceProposal>;
+  /** Stage a rename or delete of one file in an agent's folder. Then getDiff and approveAndApply. */
   prepareFileOperation(input: { agentId: string; operation: "rename" | "delete"; path: string; newPath?: string }): Promise<AgentWorkspaceProposal>;
   getRecoveryDiff(agentId: string): Promise<AgentWorkspaceRecovery>;
   acknowledgeRecovery(input: { agentId: string; reviewedHash: string; reviewToken: string }): Promise<AgentWorkspaceSnapshot>;
+  /** Read a staged change as a diff; returns reviewedHash and reviewToken for approveAndApply. */
   getDiff(proposalId: string): Promise<AgentWorkspaceDiff>;
+  /** Apply a staged change with the reviewedHash and reviewToken that getDiff returned. */
   approveAndApply(input: { proposalId: string; reviewedHash: string; reviewToken: string }): Promise<AgentWorkspaceProposal>;
+  /** Discard a staged change. */
   reject(input: { proposalId: string }): Promise<AgentWorkspaceProposal>;
   setAutoEvolution(input: { agentId: string; enabled: boolean }): Promise<{ enabled: boolean }>;
   compare(input: { agentId: string; target: "cloud" | "hub"; direction?: AgentWorkspaceSyncDirection }): Promise<AgentWorkspaceComparison>;

@@ -4,10 +4,9 @@ import { getDb } from "./store/db";
 import { getAutomation } from "./store/automations";
 import { getProject } from "./store/projects";
 import { getChatGoalRevision } from "./store/chat-goals";
-import { getLongRunGoalRevisionBinding } from "./store/long-runs";
 import { recordRunEvent } from "./store/run-events";
 import { invocationMatchesGoalRevision } from "./long-run/verification-boundary";
-import { getAutomationDefinitionDigest, isCurrentGoalAutomationBinding, readCurrentGoalAutomationBinding } from "./long-run/automation-provenance";
+import { getAutomationDefinitionDigest, readCurrentGoalAutomationBinding } from "./long-run/automation-provenance";
 import { captureAutomationInvocationBinding, invocationWorkspaceBindingsEqual, revalidateInvocationWorkspaceBinding, type InvocationWorkspaceBinding } from "./invocation/workspace-binding";
 
 const INTENT_EVENT = "automation_workspace_intent";
@@ -119,10 +118,37 @@ function currentGoalSource(owner: GoalOwner): { working_folder: string | null; p
   if (!row || row.status !== "active" || !row.objective?.trim()
     || (row.surface !== "one" && row.surface !== "work") || row.origin_surface !== row.surface
     || row.run_status === "completed" || row.run_status === "cancelled") return null;
+  // The Goal's revision is not part of who owns the folder: an amendment moves it while the Goal, its room and its folder stay.
+  // Only a Goal that now belongs to another room is not this owner's Goal.
   const revision = getChatGoalRevision(owner.goalId);
-  if ((revision?.revision ?? null) !== owner.revision || revision && revision.chatId !== owner.chatId) return null;
-  if (revision && getLongRunGoalRevisionBinding(row.run_id)?.revision !== revision.revision) return null;
+  if (revision && revision.chatId !== owner.chatId) return null;
   return row;
+}
+
+/**
+ * The folder a Goal's room points at, read without asking whether the Goal is still running. A follow-the-Goal automation whose Goal
+ * ended, was archived or lost its authority keeps running in the folder it was already following (the room's own folder, or its
+ * project's), as a plain automation. That is the same folder it was bound to, so no scope is added; a room or folder that is gone
+ * gives no folder at all, which is narrower.
+ */
+function lastKnownGoalFolder(chatId: string | null): string | null {
+  if (!chatId) return null;
+  const row = getDb().prepare("SELECT working_folder, project_id FROM chats WHERE id = ?")
+    .get(chatId) as { working_folder: string | null; project_id: string | null } | undefined;
+  if (!row) return null;
+  if (row.working_folder) return row.working_folder;
+  return row.project_id ? getProject(row.project_id)?.folderPath ?? null : null;
+}
+
+/** The room of the Goal an agent-made automation was bound to by Main's binding receipt. The mutable goal_id column is never read
+ * for a folder: a legacy association is a review candidate, not authority over a directory. */
+function priorGoalChatId(a: Automation): string | null {
+  const bound = getDb().prepare(`SELECT json_extract(e.payload_json, '$.chatId') AS chat_id FROM long_runs r CROSS JOIN long_run_events e
+    WHERE e.run_id = r.id AND e.kind = 'goal.automation_provenance_bound'
+    AND json_extract(e.payload_json, '$.automationId') = ?
+    AND json_extract(e.payload_json, '$.automationCreatedAt') = ? ORDER BY e.occurred_at DESC, e.rowid DESC LIMIT 1`)
+    .get(a.id, a.createdAt) as { chat_id: string | null } | undefined;
+  return bound?.chat_id ?? null;
 }
 
 function eligibleGoalOwner(a: Automation, intent: IntentReceipt | null): GoalOwner | null {
@@ -223,20 +249,28 @@ export function captureAutomationWorkspace(a: Automation): AutomationWorkspaceSn
     goalOwner = eligibleGoalOwner(a, intent);
     const selected = intent.value.goalOwner;
     if (!goalOwner || !selected || goalOwner.goalId !== selected.goalId || goalOwner.chatId !== selected.chatId) {
-      throw new AutomationWorkspaceError("automation_workspace_goal_authority_changed");
-    }
-    mode = "follow_goal";
+      // The Goal the owner picked ended, was archived or lost its authority. The automation goes on in the folder it was
+      // following (the picked Goal's room, never another Goal's) as a plain automation; it does not stop to ask for a folder.
+      goalOwner = null;
+      folder = lastKnownGoalFolder(selected?.chatId ?? null);
+    } else mode = "follow_goal";
   } else if (!intent) {
     goalOwner = eligibleGoalOwner(a, null);
     if (goalOwner) mode = "follow_goal";
-    else if (hasPriorGoalBinding(a)) throw new AutomationWorkspaceError("automation_workspace_goal_authority_changed");
+    else if (hasPriorGoalBinding(a)) folder = lastKnownGoalFolder(priorGoalChatId(a));
   }
   if (goalOwner) {
     const source = currentGoalSource(goalOwner);
-    if (!source) throw new AutomationWorkspaceError("automation_workspace_goal_authority_changed");
-    const project = source.project_id && !source.working_folder ? getProject(source.project_id) : null;
-    if (source.project_id && !source.working_folder && !project) throw new AutomationWorkspaceError("automation_workspace_project_unavailable");
-    folder = source.working_folder ?? project?.folderPath ?? null;
+    if (!source) {
+      // The Goal ended between choosing the owner and reading it: same carry, same folder.
+      folder = lastKnownGoalFolder(goalOwner.chatId);
+      goalOwner = null;
+      mode = "standalone";
+    } else {
+      const project = source.project_id && !source.working_folder ? getProject(source.project_id) : null;
+      if (source.project_id && !source.working_folder && !project) throw new AutomationWorkspaceError("automation_workspace_project_unavailable");
+      folder = source.working_folder ?? project?.folderPath ?? null;
+    }
   }
   let binding: InvocationWorkspaceBinding;
   try { binding = captureAutomationInvocationBinding(folder); }
@@ -250,14 +284,10 @@ export function captureAutomationWorkspace(a: Automation): AutomationWorkspaceSn
 export function revalidateAutomationWorkspace(snapshot: AutomationWorkspaceSnapshot): void {
   const a = getAutomation(snapshot.automationId);
   if (!a || a.createdAt !== snapshot.automationCreatedAt) throw new AutomationWorkspaceError("automation_workspace_owner_changed");
-  if (snapshot.goalOwner?.authority === "ongoing" && !isCurrentGoalAutomationBinding({
-    automationId: a.id, goalId: snapshot.goalOwner.goalId, chatId: snapshot.goalOwner.chatId,
-    expectedGoalRevision: snapshot.goalOwner.revision!,
-  })) throw new AutomationWorkspaceError("automation_workspace_goal_authority_changed");
+  // The scope is the folder. A Goal that moved on (a new revision, an end) or an edited choice that lands in the same folder is not a
+  // change of scope; the capture below already carries the folder when the Goal is gone. Only another folder is.
   const current = captureAutomationWorkspace(a);
-  if (snapshot.mode !== current.mode || snapshot.projectId !== current.projectId || snapshot.intentId !== current.intentId
-    || JSON.stringify(snapshot.goalOwner) !== JSON.stringify(current.goalOwner)
-    || !invocationWorkspaceBindingsEqual(snapshot.binding, current.binding)) {
+  if (!invocationWorkspaceBindingsEqual(snapshot.binding, current.binding)) {
     throw new AutomationWorkspaceError("automation_workspace_scope_changed");
   }
   try { revalidateInvocationWorkspaceBinding(snapshot.binding); }
@@ -296,31 +326,62 @@ export function withOwnerAutomationWorkspaceIntent(
   })();
 }
 
+/**
+ * The latest receipt of one occurrence. SQLite's json_extract throws "malformed JSON" for the whole query when a single stored row
+ * of that kind is unreadable, which would stop every occurrence of the automation for one bad record: that row is skipped and the
+ * rest are read one by one.
+ */
+function previousOccurrenceReceipt(automationId: string, occurrenceId: string): { payload_json: string } | undefined {
+  try {
+    return getDb().prepare(`SELECT payload_json FROM run_events WHERE automation_id = ? AND kind = ?
+      AND json_extract(payload_json, '$.occurrenceId') = ? ORDER BY rowid DESC LIMIT 1`)
+      .get(automationId, OCCURRENCE_EVENT, occurrenceId) as { payload_json: string } | undefined;
+  } catch {
+    const rows = getDb().prepare("SELECT payload_json FROM run_events WHERE automation_id = ? AND kind = ? ORDER BY rowid DESC LIMIT 500")
+      .all(automationId, OCCURRENCE_EVENT) as Array<{ payload_json: string }>;
+    for (const row of rows) {
+      try { if ((JSON.parse(row.payload_json) as { occurrenceId?: unknown })?.occurrenceId === occurrenceId) return row; } catch { /* set aside */ }
+    }
+    return undefined;
+  }
+}
+
 /** One receipt per logical occurrence, including resumed runs. No per-node/poll ledger amplification. */
 export function bindAutomationWorkspaceOccurrence(snapshot: AutomationWorkspaceSnapshot, input: {
   runId: string; occurrenceId: string; unboundResume: boolean;
 }): void {
   revalidateAutomationWorkspace(snapshot);
+  // A receipt seals the folder an occurrence runs in. `scopeDigest` is the older whole-snapshot digest (mode, Goal revision, intent
+  // id); it stays in the receipt so an older build reads it, but it is only compared for a receipt that has no `bindingDigest`.
+  const bindingDigest = digest(snapshot.binding);
   const payload = { schemaVersion: "agentlas.automation-workspace-occurrence.v1", occurrenceId: input.occurrenceId,
     scopeDigest: digest({ automationId: snapshot.automationId, automationCreatedAt: snapshot.automationCreatedAt,
       occurrenceId: input.occurrenceId, mode: snapshot.mode, projectId: snapshot.projectId,
-      goalOwner: snapshot.goalOwner, intentId: snapshot.intentId, binding: snapshot.binding }) };
+      goalOwner: snapshot.goalOwner, intentId: snapshot.intentId, binding: snapshot.binding }), bindingDigest };
   getDb().transaction(() => {
-    const previous = getDb().prepare(`SELECT payload_json FROM run_events WHERE automation_id = ? AND kind = ?
-      AND json_extract(payload_json, '$.occurrenceId') = ? ORDER BY rowid DESC LIMIT 1`)
-      .get(snapshot.automationId, OCCURRENCE_EVENT, input.occurrenceId) as { payload_json: string } | undefined;
+    const previous = previousOccurrenceReceipt(snapshot.automationId, input.occurrenceId);
+    let resealed: "legacy-receipt" | "unreadable-receipt" | "unsealed-checkpoint" | undefined;
     if (previous) {
-      let raw: Record<string, unknown>;
-      try { raw = JSON.parse(previous.payload_json); } catch { throw new AutomationWorkspaceError("automation_workspace_occurrence_changed"); }
-      if (!raw || raw.schemaVersion !== payload.schemaVersion || raw.occurrenceId !== payload.occurrenceId
-        || raw.scopeDigest !== payload.scopeDigest) throw new AutomationWorkspaceError("automation_workspace_occurrence_changed");
-      return;
+      let raw: Record<string, unknown> | null = null;
+      try { raw = JSON.parse(previous.payload_json); } catch { raw = null; }
+      const sound = !!raw && typeof raw === "object" && raw.schemaVersion === payload.schemaVersion && raw.occurrenceId === payload.occurrenceId;
+      if (sound && typeof raw!.bindingDigest === "string") {
+        // The folder this occurrence was sealed with is the folder it continues in. Another folder is the owner's own change.
+        if (raw!.bindingDigest !== bindingDigest) throw new AutomationWorkspaceError("automation_workspace_occurrence_changed");
+        return;
+      }
+      if (sound && raw!.scopeDigest === payload.scopeDigest) return;
+      // A receipt from before folder sealing whose Goal part moved since, or one that cannot be read: it cannot prove the folder, so
+      // this run seals the current one (the one record is set aside, everything else keeps working) and the occurrence continues.
+      resealed = sound ? "legacy-receipt" : "unreadable-receipt";
+    } else if (input.unboundResume) {
+      // An old checkpoint has no sealed workspace authority; the host starts the occurrence on the current folder itself, as the
+      // owner's [Start a fresh run] would, instead of stopping to ask. The earlier attempt's effects stay in the run record.
+      resealed = "unsealed-checkpoint";
     }
-    // An old checkpoint has no sealed workspace authority. Missing tool rows
-    // or settled effects cannot prove which cwd it used. Never retrofit scope.
-    if (input.unboundResume) throw new AutomationWorkspaceError("automation_workspace_reconciliation_required");
     recordRunEvent({ runId: input.runId, automationId: snapshot.automationId,
-      kind: OCCURRENCE_EVENT, sourceEventId: `automation-workspace:${input.occurrenceId}`, payload });
+      kind: OCCURRENCE_EVENT, sourceEventId: `automation-workspace:${input.occurrenceId}`,
+      payload: resealed ? { ...payload, resealed } : payload });
     // IMMEDIATE: this transaction reads first and then writes. A deferred one that reads, loses a race with the daemon's
     // commit and then upgrades to a write fails at once with SQLITE_BUSY_SNAPSHOT ("database is locked"), which busy_timeout
     // cannot wait out. That killed a scheduled occurrence on 2026-10-11 13:20 KST. Taking the write lock first makes the

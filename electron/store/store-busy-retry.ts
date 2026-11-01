@@ -69,3 +69,35 @@ export function runWithStoreBusyRetry<T>(operation: () => T, options: StoreBusyR
     }
   }
 }
+
+export const STORE_BUSY_PATIENCE_DELAYS_MS: readonly number[] = [1_000, 3_000, 8_000];
+
+export interface StoreBusyPatienceOptions {
+  delaysMs?: readonly number[];
+  /** Test seam: replaces the timer wait (the wait never blocks Main). */
+  wait?: (milliseconds: number) => Promise<void>;
+  onRetry?: (retry: number, error: unknown) => void;
+  /** Test seam: replaces the open-transaction check. */
+  inTransaction?: () => boolean;
+}
+
+/**
+ * The same rule as runWithStoreBusyRetry for the ONE write whose content exists only in memory and has to land: the turn's answer. The turn
+ * already ran, so a store that stayed locked past its whole busy wait (the first attempt) must not turn a finished answer into a failed run
+ * ("this turn could not be fully recorded", observed in use and). The write runs again after 1 s, 3 s and 8 s, the waits
+ * between attempts yield to the event loop (Main is not blocked while it waits), and the answer is held by the caller the whole time. Only a
+ * store lock is retried, never inside an open transaction; any other error, and the last lock, are rethrown unchanged.
+ */
+export async function runWithStoreBusyPatience<T>(operation: () => T | Promise<T>, options: StoreBusyPatienceOptions = {}): Promise<T> {
+  const delays = options.delaysMs ?? STORE_BUSY_PATIENCE_DELAYS_MS;
+  const wait = options.wait ?? ((milliseconds: number) => new Promise<void>((resolve) => { const id = setTimeout(resolve, milliseconds); (id as { unref?: () => void }).unref?.(); }));
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error) {
+      if (attempt >= delays.length || !isStoreBusyError(error) || (options.inTransaction ?? insideTransaction)()) throw error;
+      options.onRetry?.(attempt + 1, error);
+      await wait(delays[attempt]!);
+    }
+  }
+}

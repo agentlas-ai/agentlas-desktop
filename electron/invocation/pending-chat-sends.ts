@@ -4,11 +4,15 @@ import { followupRequestJson } from "../../shared/followup-custody";
 import { ONE_ATTACHMENT_LIMITS } from "../../shared/one-attachments";
 import {
   TRANSIENT_SEND_DEADLINE_MS,
+  UNDISPATCHED_START_MAX_ATTEMPTS,
+  isHostNotReadyRunFailureCode,
+  isOwnerFixableRunFailureCode,
   isTransientRunFailureCode,
   isTransientSendRefusal,
   sendRefusalCode,
   transientSendBackoffMs,
 } from "../../shared/transient-send-refusal";
+import { UNCONFIRMED_MAX_RESENDS, withEarlierAttempt } from "./earlier-attempt";
 
 /**
  * Per-chat durable send queue: whatever the owner types is accepted, shown once, and run.
@@ -17,7 +21,9 @@ import {
  * placed in the transcript). Admission alone used to mark it "started" (audit 31 A5), so a run refused or lost before
  * the runtime placed the turn took the message with it. Now: admitted → "starting"; the run settles → its durable
  * placement facts (turn-placement.ts, written by mcp/client.ts) decide: placed → "started"; every attempt provably sent
- * nothing → back to "queued" once, then "failed"; anything else → "uncertain", never re-sent (receipt status "held").
+ * nothing → back to "queued" once, then "failed"; anything else → "uncertain" (receipt status "held"). An owner message whose run
+ * was lost without a stated cause is sent once more with one line telling the model so (earlier-attempt.ts); the owner's Stop,
+ * a steering interrupt and a host stop are never sent again.
  * The queue is Main-owned: a closed window no longer abandons its messages; they start from another live window of the
  * app, or wait for one until the deadline.
  *
@@ -142,6 +148,18 @@ export interface PendingChatSendsDeps<Sender> {
    * for a "chat or session occupied" code (shared/transient-send-refusal.ts isTransientRunFailureCode) is started again.
    */
   failureCode?(runId: string): string | null;
+  /**
+   * True when the settled run that sent nothing to any model failed for the app's own state: no typed provider failure and no code the
+   * owner acts on (shared/run-failure-cause.ts undispatchedInternalFailure, read from the run's receipt). The message is then started
+   * again with the queue's backoff, silently, up to UNDISPATCHED_START_MAX_ATTEMPTS times, instead of being left for the owner to resend.
+   */
+  internalFailure?(runId: string): boolean;
+  /**
+   * True when the OWNER ended this settled run on purpose (their Stop, a newer direction steered over it, a Goal they paused or deleted:
+   * shared/invocation-host-stop.ts isOwnerEndedInvocation). Such a run's message is never started again, whatever else the ledger says:
+   * a Stop pressed before the runner was entered leaves only not-dispatched attempt rows, which is the very fact that restarts a message.
+   */
+  endedByOwner?(runId: string): boolean;
   /** Saves the owner's message to the transcript now. Null when it could not be saved (the run will save it). */
   saveUserRow(request: McpInvocationRequest): unknown | null;
   /** Starts the run. Throws the start refusal unchanged. `userRow` is the row saved by saveUserRow. */
@@ -152,14 +170,34 @@ export interface PendingChatSendsDeps<Sender> {
    * asynchronous source wait. Legacy plain sends retain their prior contract. */
   reservePlainStart?(sendId: string, request: McpInvocationRequest, markStarting: () => void): void;
   canRetryStart?(request: McpInvocationRequest, runId: string): boolean;
+  /**
+   * A start the host refused BEFORE anything reached a runtime, for a reason the owner has nothing to do about (the app's own
+   * state: a handshake, a ledger or a preparation step), which is not on the transient list. The message is retried with the same
+   * backoff and kept, instead of ending as a code on the screen; after UNDISPATCHED_START_MAX_ATTEMPTS it is held (kept, never
+   * lost, never run on its own). Absent = only the transient list waits.
+   */
+  waitsBeforeDispatch?(cause: unknown, runId: string | null): boolean;
   onPlaced?(sendId: string, runId: string): void;
+  /**
+   * The settled run ended without placement evidence and may have done nothing: true when the message should be sent once more
+   * (earlier-attempt.ts unconfirmedRunShouldBeSentAgain, read from the run's receipt; `runId` is null when no run took the message).
+   * Called at most UNCONFIRMED_MAX_RESENDS times per message and never for a custody-owned input. Absent = never sent again.
+   */
+  resendWhenUnconfirmed?(runId: string | null): boolean;
+  /**
+   * Whether the owner pressed Stop on this chat after `sinceMs` (a steering interrupt is not a Stop). Checked before a message that is
+   * being sent again starts: Stop always wins over a resend. Absent = no check.
+   */
+  ownerStoppedSince?(chatId: string, sinceMs: number): boolean;
   /**
    * The wait ended without a placed run: a permanent refusal, the deadline, a restart, or a run that ended with its
    * placement unconfirmed ("uncertain": never re-sent; `runId` names that run). Never called for a transient refusal.
    */
-  onEnded?(event: { chatId: string; request: McpInvocationRequest; reason: "permanent" | "deadline" | "closed" | "uncertain"; code?: string; runId?: string;
+  onEnded?(event: { chatId: string; request: McpInvocationRequest; reason: "permanent" | "deadline" | "closed" | "uncertain" | "held"; code?: string; runId?: string;
     /** The pending_chat_sends row id: the message's identity when no run ever took it (ID-8). */
-    sendId: string }): void;
+    sendId: string;
+    /** "uncertain" only: the message had already been sent once more after an unconfirmed first run. */
+    resent?: boolean }): void;
   onChange?(chatId: string): void;
   /**
    * Called on every look while the head message waits for a busy chat (cheap, no writes expected). Lets the wiring
@@ -187,6 +225,112 @@ const STARTING_POLL_MS = 2_000;
 const MAX_NOT_DISPATCHED_RETRIES = 1;
 /** Immediate tries to write down a run that started, before it is kept in memory and written at the next look. */
 const START_RECORD_TRIES = 3;
+
+/**
+ * Whether the queue will start this run's message again by itself: the run is the live attempt of a queued owner message that still
+ * has tries left. Read by the run's own failure line (invocation/service.ts) to say "the app tries again" instead of asking the owner
+ * to resend, and to write that line once rather than once per attempt.
+ *
+ * The bounded tries are not the last word: when they are spent, the one start-again every message that provably sent nothing gets
+ * (MAX_NOT_DISPATCHED_RETRIES, settleStarting) still follows, so the line of the last bounded try must not invite a resend that would
+ * overlap it (regression review C13: "Sending it again is safe" was written for the 12th and again for the 13th run). Two
+ * messages get no such extra try: an input the queue keeps in custody, and the app's own host being not ready, which the queue holds at its
+ * cap (pass the run's error code).
+ */
+export function pendingSendRetriesAfterInternalFailure(
+  db: { prepare(sql: string): { get(...args: unknown[]): unknown } },
+  runId: string,
+  code?: string | null,
+): boolean {
+  try {
+    const row = db.prepare("SELECT attempts, dispatch_retries, request_json FROM pending_chat_sends WHERE run_id = ? AND state = 'starting'")
+      .get(runId) as { attempts: number; dispatch_retries: number | null; request_json: string } | undefined;
+    if (!row) return false;
+    // The owner's folder is gone: the queue starts nothing again, so no line may say that it will.
+    if (isOwnerFixableRunFailureCode(code)) return false;
+    if (row.attempts + 1 < UNDISPATCHED_START_MAX_ATTEMPTS) return true;
+    if (isHostNotReadyRunFailureCode(code)) return false;
+    const request = JSON.parse(row.request_json) as { oneAttachmentRef?: unknown; oneTeamPreflightRef?: unknown };
+    return !request.oneAttachmentRef && !request.oneTeamPreflightRef && (row.dispatch_retries ?? 0) < MAX_NOT_DISPATCHED_RETRIES;
+  } catch { return false; }
+}
+
+/**
+ * The owner stopped a chat whose message is waiting out an internal retry (it failed before any model call for the app's own state and
+ * the queue will start it again after a backoff): that retry is cancelled. Only a row that already had an attempt (attempts > 0), is back
+ * in the queue (no live run) and is an ordinary message is touched: a message still waiting for a busy chat was never retried, and a
+ * custody-owned input (one-use refs) has its own Stop (queued-owner-input-custody.ts). SQL only, so any host holding the shared store can
+ * call it; the queue reads its rows afresh on every look. Returns how many messages were set aside (regression review C8).
+ */
+export function abandonWaitingRetries(
+  db: { prepare(sql: string): { all(...args: unknown[]): unknown[]; run(...args: unknown[]): { changes?: number } } },
+  chatId: string,
+  nowMs: number = Date.now(),
+): number {
+  try {
+    let abandoned = 0;
+    for (const id of ordinaryWaitingRetryIds(db, chatId)) {
+      const moved = db.prepare("UPDATE pending_chat_sends SET state = 'abandoned', last_code = 'owner_stopped', updated_at = ? WHERE id = ? AND state = 'queued' AND run_id IS NULL")
+        .run(nowMs, id);
+      if ((moved.changes ?? 0) > 0) abandoned += 1;
+    }
+    return abandoned;
+  } catch { return 0; }
+}
+
+/** The ordinary messages of a chat that are waiting out an internal retry (see abandonWaitingRetries for what that means). */
+function ordinaryWaitingRetryIds(db: { prepare(sql: string): { all(...args: unknown[]): unknown[] } }, chatId: string): string[] {
+  const rows = db.prepare("SELECT id, request_json FROM pending_chat_sends WHERE chat_id = ? AND state = 'queued' AND run_id IS NULL AND attempts > 0")
+    .all(chatId) as Array<{ id: string; request_json: string }>;
+  const ids: string[] = [];
+  for (const row of rows) {
+    let custody = false;
+    try { const request = JSON.parse(row.request_json) as { oneAttachmentRef?: unknown; oneTeamPreflightRef?: unknown }; custody = Boolean(request.oneAttachmentRef || request.oneTeamPreflightRef); }
+    catch { custody = true; }
+    if (!custody) ids.push(row.id);
+  }
+  return ids;
+}
+
+/**
+ * How many messages of this chat are waiting out an internal retry right now. The composer reads it to show the owner a Stop in the gap
+ * between two attempts, when no run is live and the usual Stop button is not drawn; that Stop ends them with abandonWaitingRetries.
+ */
+export function waitingRetryCount(
+  db: { prepare(sql: string): { all(...args: unknown[]): unknown[] } },
+  chatId: string,
+): number {
+  try { return ordinaryWaitingRetryIds(db, chatId).length; } catch { return 0; }
+}
+
+/**
+ * The chat a run belongs to, from the shared store (SQL only), for a Stop that carries only the run id: the run ledger, else the run's
+ * admission (a run still being prepared has no ledger row yet), else the queue row that took it. Null when none knows it.
+ */
+export function chatOfRun(db: { prepare(sql: string): { get(...args: unknown[]): unknown } }, runId: string): string | null {
+  for (const sql of [
+    "SELECT chat_id AS chatId FROM run_events WHERE run_id = ? AND chat_id IS NOT NULL LIMIT 1",
+    "SELECT chat_id AS chatId FROM invocation_admissions WHERE run_id = ? LIMIT 1",
+    "SELECT chat_id AS chatId FROM pending_chat_sends WHERE run_id = ? LIMIT 1",
+  ]) {
+    try {
+      const row = db.prepare(sql).get(runId) as { chatId?: string } | undefined;
+      if (row?.chatId) return row.chatId;
+    } catch { /* a table this store does not have: the next source */ }
+  }
+  return null;
+}
+
+/** The chat a run belonged to (chatOfRun), for a Stop that carries only the run id. */
+export function abandonWaitingRetriesOfRun(
+  db: { prepare(sql: string): { all(...args: unknown[]): unknown[]; get(...args: unknown[]): unknown; run(...args: unknown[]): { changes?: number } } },
+  runId: string,
+): number {
+  try {
+    const chatId = chatOfRun(db, runId);
+    return chatId ? abandonWaitingRetries(db, chatId) : 0;
+  } catch { return 0; }
+}
 
 export function pendingSendPromptHash(text: string): string {
   return createHash("sha256").update(text, "utf8").digest("hex");
@@ -259,6 +403,10 @@ export function createPendingChatSends<Sender>(deps: PendingChatSendsDeps<Sender
   // Images of a message too big to queue inline, by reference to the bytes its transcript row stores (PendingSendImageRef[]);
   // null for every other message. An older build reads such a row as a message without images (it ignores the column).
   if (!columns.has("image_refs_json")) deps.db.exec("ALTER TABLE pending_chat_sends ADD COLUMN image_refs_json TEXT");
+  // How many times this message was sent again after a run that ended without proof the runtime took it (bounded by UNCONFIRMED_MAX_RESENDS).
+  if (!columns.has("uncertain_resends")) deps.db.exec("ALTER TABLE pending_chat_sends ADD COLUMN uncertain_resends INTEGER NOT NULL DEFAULT 0");
+  // When it was sent again: a Stop of the chat after this moment withdraws the second send (ownerStoppedSince).
+  if (!columns.has("resend_since")) deps.db.exec("ALTER TABLE pending_chat_sends ADD COLUMN resend_since INTEGER");
 
   const senders = new Map<string, Sender>();
   const timers = new Map<string, unknown>();
@@ -293,7 +441,8 @@ export function createPendingChatSends<Sender>(deps: PendingChatSendsDeps<Sender
 
   type Row = { id: string; seq: number; chat_id: string; intent_id: string | null; request_json: string; user_row_json: string | null;
     prompt_hash: string; state: PendingSendState; attempts: number; last_code: string | null; created_at: number;
-    run_id: string | null; dispatch_retries: number; refused_since: number | null; not_before: number | null; image_refs_json?: string | null };
+    run_id: string | null; dispatch_retries: number; refused_since: number | null; not_before: number | null; image_refs_json?: string | null;
+    uncertain_resends?: number; resend_since?: number | null; updated_at?: number };
   const record = (row: Row): PendingSendRecord => ({
     id: row.id, seq: row.seq, chatId: row.chat_id, intentId: row.intent_id, promptHash: row.prompt_hash, state: row.state,
     attempts: row.attempts, lastCode: row.last_code, createdAt: row.created_at,
@@ -391,9 +540,28 @@ export function createPendingChatSends<Sender>(deps: PendingChatSendsDeps<Sender
       deps.log?.(`pending send ${state}`, { chatId, sendId: row.id, runId: row.run_id, ...(code ? { code } : {}) });
       deps.onChange?.(chatId);
     };
+    // A message with no proof the runtime took it, whose run was lost without a stated cause, is sent once more (earlier-attempt.ts).
+    // Never for a custody-owned input (its one-use refs have their own re-reservation), never past the cap, never when the run ended by
+    // the owner's Stop, a steering interrupt or a host stop (the wiring answers from the run's receipt).
+    const sendAgain = (code: string): boolean => {
+      const resends = row.uncertain_resends ?? 0;
+      if (!deps.resendWhenUnconfirmed || resends >= UNCONFIRMED_MAX_RESENDS || persistent(row, request)) return false;
+      let again = false;
+      try { again = deps.resendWhenUnconfirmed(row.run_id) === true; } catch { again = false; }
+      if (!again) return false;
+      const now = deps.now();
+      const moved = deps.db.prepare(`UPDATE pending_chat_sends SET state = 'queued', run_id = NULL, uncertain_resends = uncertain_resends + 1,
+        last_code = ?, refused_since = NULL, not_before = ?, resend_since = ?, updated_at = ? WHERE id = ? AND state = 'starting'`)
+        .run(code, now + transientSendBackoffMs(0), now, now, row.id) as { changes?: number } | undefined;
+      if (moved && moved.changes === 0) return false;
+      deps.log?.("pending send unconfirmed, sent once more", { chatId, sendId: row.id, runId: row.run_id, code });
+      deps.onChange?.(chatId);
+      return true;
+    };
     if (!row.run_id) {
+      if (sendAgain("run_unknown")) return "done";
       finish("uncertain", "run_unknown");
-      deps.onEnded?.({ chatId, request, reason: "uncertain", code: "run_unknown", sendId: row.id });
+      deps.onEnded?.({ chatId, request, reason: "uncertain", code: "run_unknown", sendId: row.id, resent: (row.uncertain_resends ?? 0) > 0 });
       return "done";
     }
     let runState: "running" | "settled";
@@ -402,15 +570,35 @@ export function createPendingChatSends<Sender>(deps: PendingChatSendsDeps<Sender
     let placement: PendingSendPlacement;
     try { placement = deps.placement(row.run_id); } catch { placement = "unconfirmed"; }
     if (placement === "placed") { finish("started", null); deps.onPlaced?.(row.id, row.run_id); return "done"; }
+    // The owner's Stop ends the retries on every path: nothing below (the occupied-chat wait, the app's-own-state retry, the one
+    // legacy start-again) may start a message whose run the owner ended.
+    if (placement === "not-dispatched") {
+      let endedByOwner = false;
+      try { endedByOwner = deps.endedByOwner?.(row.run_id) === true; } catch { endedByOwner = false; }
+      if (endedByOwner) { finish("abandoned", "owner_stopped"); return "done"; }
+    }
     let failureCode: string | null = null;
     if (placement === "not-dispatched") { try { failureCode = deps.failureCode?.(row.run_id) ?? null; } catch { failureCode = null; } }
-    if (placement === "not-dispatched" && (!opts.restarted || persistent(row,request)) && isTransientRunFailureCode(failureCode)) {
+    // The app's own host was not ready for the run (its tool table): the same attempt cap as a start refused before dispatch, then the
+    // message is held (kept, never lost) and said once, instead of retrying for the whole refusal window with a line every cycle.
+    if (placement === "not-dispatched" && isHostNotReadyRunFailureCode(failureCode) && row.attempts + 1 >= UNDISPATCHED_START_MAX_ATTEMPTS) {
+      finish("held", failureCode);
+      deps.onHeld?.(row.id, failureCode ?? "host_not_ready");
+      deps.onEnded?.({ chatId, request, reason: "held", ...(failureCode ? { code: failureCode } : {}), runId: row.run_id, sendId: row.id });
+      return "done";
+    }
+    let internalCause = false;
+    if (placement === "not-dispatched" && !isTransientRunFailureCode(failureCode) && row.attempts + 1 < UNDISPATCHED_START_MAX_ATTEMPTS) {
+      try { internalCause = deps.internalFailure?.(row.run_id) === true; } catch { internalCause = false; }
+    }
+    if (placement === "not-dispatched" && (!opts.restarted || persistent(row,request)) && (isTransientRunFailureCode(failureCode) || internalCause)) {
       // Refused before dispatch because the chat or its shared session was occupied (another chat of the Work project, a
       // turn of another conversation on the same seat session, a locked store). Nothing reached a model; the message keeps
       // its place and starts again after a backoff. This is not one of the bounded not-dispatched retries below.
       const now = deps.now();
-      requeueOccupied.run(failureCode, now, now + transientSendBackoffMs(row.attempts), now, row.id);
-      deps.log?.("pending send refused before dispatch (occupied), queued again", { chatId, sendId: row.id, runId: row.run_id, code: failureCode });
+      requeueOccupied.run(failureCode ?? "not_dispatched_internal", now, now + transientSendBackoffMs(row.attempts), now, row.id);
+      deps.log?.(internalCause ? "pending send failed before dispatch (the app's own state), queued again" : "pending send refused before dispatch (occupied), queued again",
+        { chatId, sendId: row.id, runId: row.run_id, code: failureCode });
       deps.onChange?.(chatId);
       return "done";
     }
@@ -420,7 +608,7 @@ export function createPendingChatSends<Sender>(deps: PendingChatSendsDeps<Sender
       return "done";
     }
     // After a restart nothing of that run reached a model either: it is the same message, started again (never silently dropped).
-    if (placement === "not-dispatched" && (row.dispatch_retries ?? 0) < MAX_NOT_DISPATCHED_RETRIES) {
+    if (placement === "not-dispatched" && (row.dispatch_retries ?? 0) < MAX_NOT_DISPATCHED_RETRIES && !isOwnerFixableRunFailureCode(failureCode)) {
       // Nothing reached a model: the message keeps its place (its seq) and starts again once the chat is free.
       requeue.run("not_dispatched", deps.now(), row.id);
       deps.log?.("pending send not dispatched, queued again", { chatId, sendId: row.id, runId: row.run_id });
@@ -437,10 +625,12 @@ export function createPendingChatSends<Sender>(deps: PendingChatSendsDeps<Sender
       deps.onEnded?.({ chatId, request, reason: "permanent", code: failureCode ?? "not_dispatched", runId: row.run_id, sendId: row.id });
       return "done";
     }
-    // Sent without an acknowledgement we can prove, or by a path that leaves no placement fact: never re-sent.
+    // Sent without an acknowledgement we can prove, or by a path that leaves no placement fact: sent once more when the run was lost
+    // without a stated cause (above), otherwise left as it is and never re-sent.
     const code = opts.restarted ? "process_restarted" : "placement_unconfirmed";
+    if (sendAgain(code)) return "done";
     finish("uncertain", code);
-    deps.onEnded?.({ chatId, request, reason: "uncertain", code, runId: row.run_id, sendId: row.id });
+    deps.onEnded?.({ chatId, request, reason: "uncertain", code, runId: row.run_id, sendId: row.id, resent: (row.uncertain_resends ?? 0) > 0 });
     return "done";
   }
 
@@ -516,6 +706,18 @@ export function createPendingChatSends<Sender>(deps: PendingChatSendsDeps<Sender
           continue;
         }
         const request = JSON.parse(row.request_json) as McpInvocationRequest;
+        // A message being sent again after an unconfirmed run yields to the owner's Stop: Stop always wins over a resend.
+        if ((row.uncertain_resends ?? 0) > 0 && deps.ownerStoppedSince) {
+          let stopped = false;
+          try { stopped = deps.ownerStoppedSince(chatId, row.resend_since ?? row.updated_at ?? 0) === true; } catch { stopped = false; }
+          if (stopped) {
+            setState.run("abandoned", "owner_stopped", deps.now(), row.id);
+            senders.delete(row.id);
+            deps.log?.("pending send not sent again, the owner stopped the chat", { chatId, sendId: row.id });
+            deps.onChange?.(chatId);
+            continue;
+          }
+        }
         // Only continuous refusals count: a message waiting for a busy chat, a window or a restart never gives up.
         if (row.refused_since !== null && row.refused_since !== undefined && deps.now() - row.refused_since > TRANSIENT_SEND_DEADLINE_MS) {
           if (persistent(row,request)) {
@@ -580,15 +782,18 @@ export function createPendingChatSends<Sender>(deps: PendingChatSendsDeps<Sender
         const rec = record(row);
         let startedRunId = "";
         let attemptedRunId: string | undefined;
+        const attemptStartedAt = deps.now();
         try {
           // Every attempt is a new run: a refused start has already closed its own admission.
           const runId = randomUUID();
           attemptedRunId = runId;
           // A message queued by reference gets its images back from the transcript row before anything is reserved or started:
           // a locked store or a missing copy is decided below like any other refusal, and nothing is marked "starting" for it.
-          const startRequest: McpInvocationRequest = row.image_refs_json
+          const loaded: McpInvocationRequest = row.image_refs_json
             ? { ...request, images: loadSavedImages(row, JSON.parse(row.image_refs_json) as PendingSendImageRef[]) }
             : request;
+          // The second send of a message the first run lost: the model is told once, in one line (earlier-attempt.ts).
+          const startRequest: McpInvocationRequest = (row.uncertain_resends ?? 0) > 0 ? withEarlierAttempt(loaded) : loaded;
           if (request.oneAttachmentRef || request.oneTeamPreflightRef) {
             const markStarting = () => { setStarting.run(runId, deps.now(), row.id); };
             if (deps.reserveStart) deps.reserveStart(row.id,{...request,runId},markStarting);
@@ -627,6 +832,21 @@ export function createPendingChatSends<Sender>(deps: PendingChatSendsDeps<Sender
             deps.onChange?.(chatId);
             continue;
           }
+          // The owner pressed Stop on this chat while this attempt was starting. A Stop of a run still being prepared closes its admission
+          // and writes no cancel event, so the refusal that follows (one_preflight_parent_not_pending, a closed entry) looks transient and
+          // would start the message again after the Stop. Stop always wins (regression review 2, N7). A one-use input has its own Stop.
+          if (!persistent(row, request) && deps.ownerStoppedSince) {
+            let stopped = false;
+            try { stopped = deps.ownerStoppedSince(chatId, attemptStartedAt) === true; } catch { stopped = false; }
+            if (stopped) {
+              deps.db.prepare("UPDATE pending_chat_sends SET run_id=NULL WHERE id=? AND state IN ('queued','starting')").run(row.id);
+              setState.run("abandoned", "owner_stopped", deps.now(), row.id);
+              senders.delete(row.id);
+              deps.log?.("pending send not started again, the owner stopped the chat during the attempt", { chatId, sendId: row.id, code });
+              deps.onChange?.(chatId);
+              continue;
+            }
+          }
           let refusedSender = false;
           try { refusedSender = deps.senderRefused?.(cause) === true; } catch { refusedSender = false; }
           if (refusedSender) {
@@ -637,7 +857,21 @@ export function createPendingChatSends<Sender>(deps: PendingChatSendsDeps<Sender
             kick(chatId, SENDER_WAIT_POLL_MS);
             return;
           }
-          if (isTransientSendRefusal(cause) && (!deps.canRetryStart || deps.canRetryStart(request, (byId.get(row.id) as Row).run_id ?? ""))) {
+          const transient = isTransientSendRefusal(cause);
+          let undispatched = false;
+          if (!transient) { try { undispatched = deps.waitsBeforeDispatch?.(cause, attemptedRunId ?? null) === true; } catch { undispatched = false; } }
+          if ((transient || undispatched) && (!deps.canRetryStart || deps.canRetryStart(request, (byId.get(row.id) as Row).run_id ?? ""))) {
+            if (undispatched && row.attempts + 1 >= UNDISPATCHED_START_MAX_ATTEMPTS) {
+              // The refusal outlasted every bounded retry. The message was never sent anywhere and stays in the transcript: it is
+              // held (not failed, no code on screen), and the one calm line below says so. The ledger keeps the code.
+              setState.run("held", code ?? "start_refused_before_dispatch", deps.now(), row.id);
+              senders.delete(row.id);
+              deps.log?.("pending send held after repeated refusal before dispatch", { chatId, sendId: row.id, attempts: row.attempts + 1, code });
+              deps.onHeld?.(row.id, code ?? "start_refused_before_dispatch");
+              deps.onEnded?.({ chatId, request, reason: "held", ...(code ? { code } : {}), sendId: row.id });
+              deps.onChange?.(chatId);
+              continue;
+            }
             deps.db.prepare("UPDATE pending_chat_sends SET run_id=NULL WHERE id=?").run(row.id);
             setState.run("queued", null, deps.now(), row.id);
             setAttempt.run(code ?? null, deps.now(), deps.now(), row.id);
@@ -697,7 +931,13 @@ export function createPendingChatSends<Sender>(deps: PendingChatSendsDeps<Sender
        * fit the transcript store": they are kept by reference to the bytes of the saved transcript row (PendingSendImageRef), or the
        * call throws PendingSendImagesUnsaved and queues nothing. Without it a request is stored exactly as given, as before.
        */
-      imagesByReference?: boolean } = {}): PendingSendRecord {
+      imagesByReference?: boolean;
+      /**
+       * The owner's message was started directly (not through this queue) and its run ended with an unknown outcome (earlier-attempt.ts):
+       * the row is born as the ONE resend the cap allows, so it carries the earlier-attempt line, honours a Stop pressed after it, and a
+       * second loss ends it with one calm line instead of a third send.
+       */
+      resentUnconfirmed?: boolean } = {}): PendingSendRecord {
       const prior = options.intentId ? byIntent.get(request.chatId, options.intentId) as Row | undefined : undefined;
       if (prior) {
         // A message queued by reference stores its request without the image bytes: the resent request is compared without them,
@@ -715,7 +955,8 @@ export function createPendingChatSends<Sender>(deps: PendingChatSendsDeps<Sender
       try { userRow = options.userRow ?? deps.saveUserRow(request); } catch (error) { if (options.requireUserRow) throw error; }
       if (options.requireUserRow && (!userRow || typeof (userRow as {id?:unknown}).id !== "string")) throw new Error("pending_send_message_custody_missing");
       const now = deps.now();
-      const stored = { ...request, runId: undefined };
+      // The marker is added only when the queue starts a message again; a request that arrives with it never keeps it (earlier-attempt.ts).
+      const stored = { ...request, runId: undefined, earlierAttemptUncertain: undefined };
       let requestJson = JSON.stringify(stored);
       let imageRefsJson: string | null = null;
       if (options.imagesByReference && request.images?.length && !request.oneAttachmentRef && !request.oneTeamPreflightRef
@@ -728,6 +969,9 @@ export function createPendingChatSends<Sender>(deps: PendingChatSendsDeps<Sender
       }
       insert.run(id, request.chatId, options.intentId ?? null, requestJson,
         userRow === null ? null : JSON.stringify(userRow), pendingSendPromptHash(request.userPrompt), now, now, imageRefsJson);
+      if (options.resentUnconfirmed) {
+        deps.db.prepare("UPDATE pending_chat_sends SET uncertain_resends = 1, resend_since = ?, last_code = ? WHERE id = ?").run(now, "run_unsettled", id);
+      }
       senders.set(id, sender);
       const code = options.cause === undefined ? undefined : sendRefusalCode(options.cause);
       deps.log?.("pending send accepted", { chatId: request.chatId, sendId: id, code });

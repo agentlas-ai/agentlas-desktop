@@ -58,17 +58,51 @@ export class MobilePushService {
     this.registry = this.read();
     this.prune();
   }
+  /**
+   * The store is a cache of what the phones told us: a phone registers again every time it connects. So a file that cannot
+   * be trusted (unparseable, oversize, a bad record, written by another host identity) is never a reason to switch push
+   * off for the whole session, and never a reason to throw at start-up: the bad part is set aside (not read, not printed)
+   * and the rest keeps working. Round 3, mobile 183: one such file used to disable push on every launch.
+   */
   private read(): Registry {
-    if (!fs.existsSync(this.file)) return { version: 1, registrations: [], delivered: [] };
-    if (fs.statSync(this.file).size > 4 * 1024 * 1024) throw new Error("mobile_push_store_invalid");
-    const raw = JSON.parse(fs.readFileSync(this.file, "utf8")) as Registry;
-    if (raw.version !== 1 || !Array.isArray(raw.registrations) || raw.registrations.length > 128 ||
-      !Array.isArray(raw.delivered) || raw.delivered.length > 2048 || raw.delivered.some(id => typeof id !== "string" || id.length > 1024) ||
-      raw.registrations.some(item => !item || typeof item.deviceId !== "string" || typeof item.workspaceId !== "string" ||
-        item.hostId !== this.options.hostId || validateMobilePushParams("notifications.register", {
-          schemaVersion: item.schemaVersion, token: item.token, platform: item.platform, locale: item.locale, preferences: item.preferences,
-        }) !== null)) throw new Error("mobile_push_store_invalid");
-    return raw;
+    const empty = (): Registry => ({ version: 1, registrations: [], delivered: [] });
+    if (!fs.existsSync(this.file)) return empty();
+    let raw: unknown;
+    try {
+      if (fs.statSync(this.file).size > 4 * 1024 * 1024) throw new Error("mobile_push_store_invalid");
+      raw = JSON.parse(fs.readFileSync(this.file, "utf8"));
+    } catch { this.setAside(); return empty(); }
+    const stored = raw as Partial<Registry> | null;
+    if (!stored || typeof stored !== "object" || stored.version !== 1 || !Array.isArray(stored.registrations) || !Array.isArray(stored.delivered)) {
+      this.setAside();
+      return empty();
+    }
+    const registrations = (stored.registrations as unknown[]).filter((item): item is Registration => this.validRecord(item)).slice(-128);
+    const delivered = (stored.delivered as unknown[]).filter((id): id is string => typeof id === "string" && id.length <= 1024).slice(-2048);
+    if (registrations.length === stored.registrations.length && delivered.length === stored.delivered.length) return { version: 1, registrations, delivered };
+    this.setAside();
+    const kept: Registry = { version: 1, registrations, delivered };
+    if (registrations.length > 0 || delivered.length > 0) { try { this.persist(kept); } catch { /* kept in memory; the next write replaces the file */ } }
+    return kept;
+  }
+  private validRecord(item: unknown): item is Registration {
+    if (!item || typeof item !== "object") return false;
+    const record = item as Registration;
+    return typeof record.deviceId === "string" && typeof record.workspaceId === "string" && record.hostId === this.options.hostId &&
+      validateMobilePushParams("notifications.register", {
+        schemaVersion: record.schemaVersion, token: record.token, platform: record.platform, locale: record.locale, preferences: record.preferences,
+      }) === null;
+  }
+  /** Moves the store to `push.json.quarantine-<time>` (same private mode, never read or printed) and keeps the newest three. */
+  private setAside(): void {
+    const directory = path.dirname(this.file);
+    const prefix = `${path.basename(this.file)}.quarantine-`;
+    try { fs.renameSync(this.file, path.join(directory, `${prefix}${Date.now()}`)); } catch { /* the next write replaces the file anyway */ }
+    try {
+      const old = fs.readdirSync(directory).filter(name => name.startsWith(prefix)).sort();
+      for (const name of old.slice(0, Math.max(0, old.length - 3))) { try { fs.unlinkSync(path.join(directory, name)); } catch {} }
+    } catch {}
+    console.warn("[mobile-push] the push registration store could not be used as it was; it was set aside and push starts empty (phones register again when they connect)");
   }
   private persist(next: Registry): void {
     fs.mkdirSync(path.dirname(this.file), { recursive: true, mode: 0o700 });

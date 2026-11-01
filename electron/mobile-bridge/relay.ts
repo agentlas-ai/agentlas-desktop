@@ -2,6 +2,7 @@ import type { Agent as HttpAgent } from "node:http";
 import { webSocketAgentFor } from "../net/system-network-core";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
 import { getSessionCookieHeader, webBaseUrl } from "../auth";
@@ -58,18 +59,27 @@ export const LOCAL_HOP_HANDSHAKE_MS = 20_000;
 export class MainLoopStallMonitor {
   private timer: NodeJS.Timeout | null = null;
   private lastTickAt: number;
+  private lastCpuMs: number;
   private readonly stalls: Array<{ endedAt: number; ms: number }> = [];
 
+  /**
+   * `cpuMs` reads this process's CPU time (user + system) in ms. A stall during which the process used almost none was not our code running:
+   * the machine did not schedule it (a frozen disk, a sleeping or throttled system). A stall in which it used the whole span was our own
+   * synchronous work. The two are told apart in the log line so the next occurrence names its cause.
+   */
   constructor(
     private readonly now: () => number = Date.now,
-    private readonly onStall?: (ms: number) => void,
+    private readonly onStall?: (ms: number, facts: { cpuMs: number }) => void,
+    private readonly cpuMs: () => number = () => { const usage = process.cpuUsage(); return (usage.user + usage.system) / 1000; },
   ) {
     this.lastTickAt = now();
+    this.lastCpuMs = cpuMs();
   }
 
   start(): void {
     if (this.timer) return;
     this.lastTickAt = this.now();
+    this.lastCpuMs = this.cpuMs();
     this.timer = setInterval(() => this.tick(), MAIN_LOOP_STALL_TICK_MS);
     this.timer.unref?.();
   }
@@ -83,10 +93,13 @@ export class MainLoopStallMonitor {
   tick(at: number = this.now()): void {
     const gap = at - this.lastTickAt - MAIN_LOOP_STALL_TICK_MS;
     this.lastTickAt = at;
+    const cpuNow = this.cpuMs();
+    const cpuMs = Math.max(0, cpuNow - this.lastCpuMs);
+    this.lastCpuMs = cpuNow;
     if (gap < MAIN_LOOP_STALL_RECORD_MS) return;
     this.stalls.push({ endedAt: at, ms: gap });
     if (this.stalls.length > 16) this.stalls.shift();
-    this.onStall?.(gap);
+    this.onStall?.(gap, { cpuMs });
   }
 
   /** `withinMs` 안에 끝난(또는 지금 진행 중인) 가장 긴 멈춤. 없으면 0. */
@@ -499,12 +512,18 @@ export class MobileBridgeCloudRelay {
     this.scheduleConnect(0);
   }
 
-  private noteStall(ms: number): void {
+  private noteStall(ms: number, facts: { cpuMs: number } = { cpuMs: 0 }): void {
     if (ms < MAIN_LOOP_STALL_LOG_MS || Date.now() - this.lastStallLogAt < 60_000) return;
     this.lastStallLogAt = Date.now();
+    // The cause is told by the process's own CPU use over the stall (round 4, hourly stalls): near all of it = this app's synchronous work; near none =
+    // the machine did not run the app (disk, sleep, throttling), and the load average says how busy the machine was.
+    const busyPercent = Math.min(100, Math.round((facts.cpuMs / Math.max(1, ms)) * 100));
+    let load = "n/a";
+    try { load = os.loadavg()[0].toFixed(1); } catch { /* not available */ }
     console.warn(
       `[mobile-bridge-relay] this Desktop's main thread was blocked ${Math.round(ms / 1000)}s; ` +
-        "phone tunnel requests and pings waiting during it were answered late",
+        "phone tunnel requests and pings waiting during it were answered late " +
+        `(app CPU ${busyPercent}% of the stall, system load ${load}: ${busyPercent >= 60 ? "the app's own work" : "the machine did not run the app"})`,
     );
   }
 

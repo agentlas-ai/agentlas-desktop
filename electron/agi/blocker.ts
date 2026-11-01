@@ -21,6 +21,7 @@ import type { PlanBranchReadiness, PlanReadiness } from "../../shared/goal-shape
 import { createHash } from "node:crypto";
 import type { FailureCauseKind, PersistenceBoundaryKind } from "../../shared/persistence-policy";
 import { goalContinuationAdmissible } from "../../shared/goal-continuation";
+import { appSideRunFailure } from "../../shared/run-failure-cause";
 
 export const AGI_BLOCKER_SCHEMA = "agentlas.agi-blocker.v1" as const;
 
@@ -464,7 +465,8 @@ export function classifyAgiBlocker(facts: AgiBlockerFacts): AgiBlockerDiagnosis 
   const waitRefused = find("wait_registration_refused");
   const repeated = find("repeated_notice");
   if (waitRefused) addDefect(`wait_registration_refused:${waitRefused.code}`, "stall", waitRefused);
-  if (repeated && repeated.count >= 2) addDefect(`repeated_notice:${repeated.code}`, "ui", repeated);
+  // Strategy reflection is advisory: an episode without its checkpoint yet is not an app defect.
+  if (repeated && repeated.count >= 2 && !repeated.code.startsWith("goal_strategy_")) addDefect(`repeated_notice:${repeated.code}`, "ui", repeated);
   const browser = find("browser_unavailable");
   if (browser) addDefect(`browser_unavailable:${browser.code}`, "crash", browser);
 
@@ -507,14 +509,15 @@ export function classifyAgiBlocker(facts: AgiBlockerFacts): AgiBlockerDiagnosis 
     return base({ display: "blocked", attemptDue: true, primarySignal: "wait_registration_refused", causeKind: "tool_refused", ownerClass: "our_defect",
       boundary: null, altPaths: [...branchWork, "replan_tree"], reasonCode: "wait_registration_refused", signal: waitRefused });
   }
-  // 7b. The Goal's wakes fail the same way every time: the host's retry repeats it, so it is our defect (filed, and One tells the
-  //     owner what and why) while AGI moves the work another way (teammates, a new plan); a turn is still tried first when the
-  //     host would admit one.
+  // 7b. The Goal's wakes fail the same way every time: AGI moves the work another way (teammates, a new plan); a turn is still tried
+  //     first when the host would admit one. Only a cause on our side is filed as a defect: a signed-out site or a provider limit
+  //     repeated three times is still that (observed in use: 23 attempts filed as ours while a site was signed out).
   const repeatedFailure = find("repeated_failure");
   if (repeatedFailure) {
-    addDefect(`repeated_failure:${repeatedFailure.code}`, "stall", repeatedFailure);
-    const { cause } = causeOfRunCode(repeatedFailure.code);
-    return base({ display: "blocked", attemptDue: true, primarySignal: "repeated_failure", causeKind: cause, ownerClass: "our_defect",
+    const { cause, ourDefect } = causeOfRunCode(repeatedFailure.code);
+    const ours = ourDefect || appSideRunFailure(repeatedFailure.code) !== null;
+    if (ours) addDefect(`repeated_failure:${repeatedFailure.code}`, "stall", repeatedFailure);
+    return base({ display: "blocked", attemptDue: true, primarySignal: "repeated_failure", causeKind: cause, ownerClass: ours ? "our_defect" : "agent_resolvable",
       boundary: null, altPaths: [...branchWork, "replan_tree", "switch_runtime"], reasonCode: "repeated_failure", signal: repeatedFailure });
   }
   // 8. A failed or refused turn.

@@ -42,7 +42,8 @@ import {
 import { mobileBridgeJsonBytes } from "./sanitize";
 import { mobileBridgeMailReplayMayRerun } from "./mail-replay-policy";
 import { mobileBridgeIsOwnerMessage, mobileBridgeOrphanMayRerun } from "./orphan-rerun-policy";
-import { isTransientSendRefusalCode, sendRefusalCode, isStoreBusyRefusedBeforeDispatch } from "../../shared/transient-send-refusal";
+import { isTransientSendRefusalCode, sendRefusalCode, isStoreBusyRefusedBeforeDispatch, transientSendBackoffMs } from "../../shared/transient-send-refusal";
+import { mobileBridgeSpecificRefusal } from "../../shared/mobile-bridge-refusal";
 
 /**
  * A phone write the Desktop refused only because the chat (or its channel) was not ready yet: the codes of
@@ -122,6 +123,16 @@ const MAX_CONNECTIONS = 24;
 const MAX_CONNECTIONS_PER_DEVICE = 1;
 const SUPERSEDED_CONNECTION_CLOSE_CODE = 4001;
 const SUPERSEDED_CONNECTION_CLOSE_REASON = "superseded by a newer connection";
+// "Try again later" (RFC 6455 1013). The phone treats close code 1008 (policy violation) as a permanent rejection in every build
+// in older app versions (web_socket_desktop_transport.dart onDone): it stops reconnecting until the app returns to the foreground or the
+// owner taps retry. A socket this Desktop closes because its own secure channel could not be set up, or was closed, says nothing
+// about the phone; a fresh connection starts from the full device authentication again. Those closes use this code instead.
+const RETRY_LATER_CLOSE_CODE = 1013;
+// How long a phone READ waits for the Desktop to become ready before it is answered desktop_not_ready (readWhenReady).
+// Below the phone's own 30 s request timeout, so the phone is answered rather than timing out.
+const DEFAULT_READ_NOT_READY_WAIT_MS = 20_000;
+// A refused-because-signed-out upgrade is retried by every open phone; log it at most this often.
+const SIGNED_OUT_REFUSAL_LOG_INTERVAL_MS = 60_000;
 const MAX_REQUESTS_PER_MINUTE = 300;
 const MAX_PAIR_ATTEMPTS_PER_MINUTE = 10;
 const MAX_INITIAL_EVENT_QUEUE = 512;
@@ -240,6 +251,8 @@ export interface AgentlasMobileBridgeServerOptions {
   tls?: https.ServerOptions;
   pingIntervalMs?: number;
   requestTimeoutMs?: number;
+  /** Longest a phone read waits for a not-ready Desktop before it is answered desktop_not_ready (default 20 s). */
+  readNotReadyWaitMs?: number;
   relayPairingInfo?: () => { endpoint: string; secret: string } | null;
   onError?: (error: Error) => void;
 }
@@ -389,6 +402,8 @@ export class AgentlasMobileBridgeServer {
   private readonly tls?: https.ServerOptions;
   private readonly pingIntervalMs: number;
   private readonly requestTimeoutMs: number;
+  private readonly readNotReadyWaitMs: number;
+  private signedOutRefusalLoggedAt = 0;
   private readonly relayPairingInfo?: () => { endpoint: string; secret: string } | null;
   private readonly onError: (error: Error) => void;
   private readonly onePhoneOwners = new WeakMap<ConnectionState,OneMobileSocketOwner>();
@@ -432,6 +447,7 @@ export class AgentlasMobileBridgeServer {
     this.tls = options.tls;
     this.pingIntervalMs = Math.max(5_000, options.pingIntervalMs ?? DEFAULT_PING_INTERVAL_MS);
     this.requestTimeoutMs = Math.max(1_000, options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS);
+    this.readNotReadyWaitMs = Math.max(0, options.readNotReadyWaitMs ?? DEFAULT_READ_NOT_READY_WAIT_MS);
     this.relayPairingInfo = options.relayPairingInfo;
     this.onError = options.onError ?? ((error) => console.error("[mobile-bridge]", error.message));
     this.webSocketServer = new WebSocketServer({
@@ -577,7 +593,8 @@ export class AgentlasMobileBridgeServer {
       // 사유가 비어 있다는 사실 자체가 결함 신호이므로 그것도 적는다 —
       // 로그에 아무것도 없는 상태로는 다음에도 같은 시간을 쓴다.
       const refusal = authenticationThrew ? null : this.pairing?.lastAuthenticationRefusal ?? null;
-      console.warn(
+      const signedOut = refusal === "desktop_signed_out";
+      if (!signedOut || this.signedOutRefusalLogDue()) console.warn(
         refusal
           ? `[mobile-bridge] upgrade refused: ${refusal}`
           : authenticationThrew
@@ -587,7 +604,11 @@ export class AgentlasMobileBridgeServer {
       // "Could not decide right now" is not "unauthorized": an account check that did not answer (or an authentication that
       // threw) is answered 503, which every phone retries with backoff. A 401 latches an older phone on the direct route
       // until the owner taps retry (mobile WS permanent-failure latch), for an outage that fixes itself.
-      const undecided = authenticationThrew || refusal === "account_authority_unreachable";
+      // The same holds for a Desktop that is signed out: the credentials are kept (pairing.ts authenticate) and the pairing
+      // comes back as-is when the owner signs in again (a session that ended after 30 days included), so the phone must keep
+      // trying instead of latching. Only a credential this Desktop will never accept again (device_unknown_or_revoked,
+      // device_repair_required, account_inactive, token_*) stays 401.
+      const undecided = authenticationThrew || refusal === "account_authority_unreachable" || signedOut;
       rejectUpgrade(socket, undecided ? 503 : 401, undecided ? "authentication unavailable" : "unauthorized", refusal);
       return;
     }
@@ -629,7 +650,7 @@ export class AgentlasMobileBridgeServer {
     const identity = this.upgradeIdentities.get(request);
     this.upgradeIdentities.delete(request);
     if (!identity) {
-      socket.close(1008, "authentication required");
+      socket.close(RETRY_LATER_CLOSE_CODE, "authentication required");
       return;
     }
     const state: ConnectionState = {
@@ -659,7 +680,7 @@ export class AgentlasMobileBridgeServer {
     this.clients.add(state);
     const connectionLease = Object.freeze({ current: () => this.clients.has(state) && !state.revoked && !state.revocationPending && !state.transportFailed && state.socket.readyState === WS_OPEN });
     try { this.authority.connectionOpened?.(state.context, connectionLease); }
-    catch { this.clients.delete(state); socket.close(1008, "secure channel unavailable"); return; }
+    catch { this.clients.delete(state); socket.close(RETRY_LATER_CLOSE_CODE, "secure channel unavailable"); return; }
     const phoneOwner = currentOneMobileSocketOwner();
     if (phoneOwner) {
       this.onePhoneOwners.set(state, phoneOwner);
@@ -672,8 +693,8 @@ export class AgentlasMobileBridgeServer {
           if (!current() || !stillCurrent()) { finish(new Error('secure_route_unavailable')); return; }
           this.send(state, frame as MobileBridgeServerMessage, finish);
         }),
-        close: () => { try { state.socket.close(1008, 'secure channel closed'); } finally { this.dropClient(state); } },
-      }); } catch { state.socket.close(1008, 'secure route unavailable'); this.dropClient(state); return; }
+        close: () => { try { state.socket.close(RETRY_LATER_CLOSE_CODE, 'secure channel closed'); } finally { this.dropClient(state); } },
+      }); } catch { state.socket.close(RETRY_LATER_CLOSE_CODE, 'secure route unavailable'); this.dropClient(state); return; }
     }
     this.syncAuthoritySubscription();
     socket.on("pong", () => {
@@ -1126,7 +1147,10 @@ export class AgentlasMobileBridgeServer {
     }
 
     if (selfRevocation) this.markDeviceRevocationPending(state.context.deviceId);
-    const authorityPromise = this.authority.request(request, state.context);
+    // Writes are refused-and-queued by the phone (desktop_not_ready below); a read waits here instead (readWhenReady).
+    const authorityPromise = writeRequest || secureRequest || selfRevocation
+      ? this.authority.request(request, state.context)
+      : this.readWhenReady(state, request);
     try {
       const result = await withTimeout(authorityPromise, this.requestTimeoutMs);
       let response = this.responseFromAuthority(request.id, result);
@@ -1181,8 +1205,15 @@ export class AgentlasMobileBridgeServer {
           },
         ).catch((ledgerError) => this.onError(errorOf(ledgerError)));
       }
-      const notReady = !timeout && writeRequest && !secureRequest ? mobileBridgeNotReadyRefusal(error) : null;
-      if (notReady && this.replayStore && replayFingerprint) {
+      const notReady = !timeout && !secureRequest ? mobileBridgeNotReadyRefusal(error) : null;
+      if (notReady && !writeRequest && !selfRevocation) {
+        // A read that stayed not ready for its whole wait: still not a verdict. Retryable, nothing to release (reads have no ledger entry).
+        if (state.revoked || state.revocationPending || !this.clients.has(state)) return;
+        this.send(state, mobileBridgeFailure(request.id, MOBILE_BRIDGE_DESKTOP_NOT_READY_CODE,
+          "Desktop was not ready to answer this yet. It can be asked again.", true));
+        return;
+      }
+      if (notReady && writeRequest && this.replayStore && replayFingerprint) {
         let released = false;
         try { this.replayStore.release(state.context.deviceId, replayKey, replayFingerprint); released = true; }
         catch (ledgerError) { this.onError(errorOf(ledgerError)); }
@@ -1196,9 +1227,16 @@ export class AgentlasMobileBridgeServer {
       const uncertainWrite = timeout && writeRequest;
       // An owner message into a room the personal agent runs (one/personal-agent-rooms.ts): a typed refusal, nothing ran.
       const personalAgentRoom = !timeout && !secureRequest && (error as { code?: unknown } | null)?.code === "supervised_room_read_only";
+      // A refusal the owner can act on keeps its own code for a phone that has a sentence for it (shared/mobile-bridge-refusal.ts).
+      // The One supervisor and history paging keep authority_error: the phone reads exactly that code there.
+      const specific = !timeout && !secureRequest && !personalAgentRoom && !request.method.startsWith("one.supervisor.")
+        && this.authority.clientHasCapability?.(state.context.deviceId, "refusal.specific.v1") === true
+        ? mobileBridgeSpecificRefusal(error) : null;
       let response: MobileBridgeReplayResponse = personalAgentRoom
         ? mobileBridgeFailure(request.id, "supervised_room_read_only",
           "This room is run by your personal agent. Talk to the personal agent instead.", false)
+        : specific
+        ? mobileBridgeFailure(request.id, specific.code, specific.message, false)
         : mobileBridgeFailure(
         request.id,
         secureRequest ? (timeout && request.method === "one.vault.submit" ? "store_unknown"
@@ -1222,6 +1260,44 @@ export class AgentlasMobileBridgeServer {
       }
       if (state.revoked || state.revocationPending || !this.clients.has(state)) return;
       this.send(state, response);
+    }
+  }
+
+  /** A signed-out Desktop is retried by every open phone (answered 503): log it once a minute, not on every attempt. */
+  private signedOutRefusalLogDue(): boolean {
+    const now = Date.now();
+    if (now - this.signedOutRefusalLoggedAt < SIGNED_OUT_REFUSAL_LOG_INTERVAL_MS) return false;
+    this.signedOutRefusalLoggedAt = now;
+    return true;
+  }
+
+  private phoneStillThere(state: ConnectionState): boolean {
+    return this.clients.has(state) && !state.revoked && !state.revocationPending;
+  }
+
+  /**
+   * A READ the Desktop refused only because something it needs is not ready yet (the codes of shared/transient-send-refusal.ts:
+   * the One supervisor's channel to the background service during a hand-off, a chat still settling, ...) is not a verdict on the
+   * request. Writes were already answered `desktop_not_ready` and queued by the phone; reads got a final non-retryable
+   * `authority_error`, so the Hope screen failed about three times a second for the whole minute of a daemon hand-off (219 failed
+   * reads in four windows) and showed its "needs review" banner. The read waits here instead, with the backoff the
+   * send queue uses, and asks again, for at most readNotReadyWaitMs (below the phone's 30 s request timeout). Every other refusal
+   * is thrown at once, as before; a read still not ready after the wait is answered desktop_not_ready (retryable) by dispatch.
+   * Only refused-before-anything codes qualify (mobileBridgeNotReadyRefusal), so asking again can never run a request twice.
+   */
+  private async readWhenReady(state: ConnectionState, request: MobileBridgeRpcRequest): Promise<MobileBridgeJsonValue | undefined> {
+    const deadline = Date.now() + Math.min(this.readNotReadyWaitMs, Math.floor(this.requestTimeoutMs / 2));
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        return await this.authority.request(request, state.context);
+      } catch (error) {
+        if (!mobileBridgeNotReadyRefusal(error)) throw error;
+        const remaining = deadline - Date.now();
+        if (remaining <= 0 || !this.phoneStillThere(state)) throw error;
+        const delay = Math.min(transientSendBackoffMs(attempt), remaining);
+        await new Promise<void>((resolve) => { const timer = setTimeout(resolve, delay); timer.unref?.(); });
+        if (!this.phoneStillThere(state)) throw error;
+      }
     }
   }
 

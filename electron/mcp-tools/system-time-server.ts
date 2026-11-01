@@ -74,12 +74,11 @@ const READ_ONLY = { readOnlyHint: true, destructiveHint: false, idempotentHint: 
 const tools = [
   {
     name: "get_current_time",
-    description: "Get the current time in one IANA timezone.",
+    description: "Get the current time in one IANA timezone (this computer's timezone when none is given).",
     annotations: READ_ONLY,
     inputSchema: {
       type: "object",
       properties: { timezone: { type: "string", maxLength: 160 } },
-      required: ["timezone"],
       additionalProperties: false,
     },
   },
@@ -117,8 +116,11 @@ function handle(request) {
     ? request.params.arguments
     : {};
   if (name === "get_current_time") {
-    const timezone = validZone(args.timezone);
-    if (!timezone) return errorResult("A valid IANA timezone is required.");
+    // No timezone asked: this computer's own zone (a call with {} is the common one). A zone that was asked for and is not valid
+    // still fails, so a typo is never answered with a different zone.
+    const asked = typeof args.timezone === "string" ? args.timezone.trim() : "";
+    const timezone = asked ? validZone(asked) : validZone(Intl.DateTimeFormat().resolvedOptions().timeZone);
+    if (!timezone) return errorResult(asked ? "A valid IANA timezone is required." : "This computer's timezone could not be read; pass an IANA timezone such as Asia/Seoul.");
     const now = new Date();
     return textResult({ timezone, datetime: zonedIso(now, timezone) });
   }

@@ -34,6 +34,41 @@ const WORK_ATTACHMENT_CONTEXT_HEADER = ["[Work input attachments — Main verifi
 const WORK_ATTACHMENT_CONTEXT_CLOSING = "[/Work input attachments]";
 const workAttachmentContextOf = (lines: readonly string[]): string => [...WORK_ATTACHMENT_CONTEXT_HEADER, ...lines, WORK_ATTACHMENT_CONTEXT_CLOSING].join("\n");
 const fail = (code: string): never => { throw Object.assign(new Error(code), { code }); };
+/*
+ * What one run copies into the project folder. A person who attaches files over a long conversation used to meet
+ * `work_attachment_group_limit` / `work_attachment_total_limit` here, and the run was refused though the files they meant were few. The
+ * bound stays (it limits the disk writes in the user's project folder), but it now chooses instead of refusing: the newest attachment
+ * groups are copied while they fit; any others are named, with their size, in the manifest file beside the copies and in the context, and
+ * the context says they were not copied. Nothing is dropped without being named.
+ */
+export const WORK_ATTACHMENT_MAX_GROUPS = 32;
+export const WORK_ATTACHMENT_MAX_BYTES = 96 * 1024 * 1024;
+export function chooseWorkAttachmentsToStage<T extends { groupId: string; size: number }>(
+  items: readonly T[], createdAt: ReadonlyMap<string, string>,
+): { staged: T[]; omitted: T[] } {
+  const groupOrder: string[] = [];
+  const bytesOf = new Map<string, number>();
+  for (const item of items) {
+    if (!bytesOf.has(item.groupId)) groupOrder.push(item.groupId);
+    bytesOf.set(item.groupId, (bytesOf.get(item.groupId) ?? 0) + item.size);
+  }
+  if (groupOrder.length <= WORK_ATTACHMENT_MAX_GROUPS && [...bytesOf.values()].reduce((sum, size) => sum + size, 0) <= WORK_ATTACHMENT_MAX_BYTES) {
+    return { staged: [...items], omitted: [] };
+  }
+  const position = new Map(groupOrder.map((id, index) => [id, index]));
+  const newestFirst = [...groupOrder].sort((a, b) => {
+    const left = createdAt.get(a) ?? "", right = createdAt.get(b) ?? "";
+    return left < right ? 1 : left > right ? -1 : position.get(a)! - position.get(b)!;
+  });
+  const kept = new Set<string>();
+  let total = 0;
+  for (const id of newestFirst) {
+    const size = bytesOf.get(id)!;
+    if (kept.size >= WORK_ATTACHMENT_MAX_GROUPS || total + size > WORK_ATTACHMENT_MAX_BYTES) continue;
+    kept.add(id); total += size;
+  }
+  return { staged: items.filter((item) => kept.has(item.groupId)), omitted: items.filter((item) => !kept.has(item.groupId)) };
+}
 function owner(req: Pick<McpInvocationRequest, "runId" | "chatId">): WorkInputRun | null {
   if (!req.runId) return null;
   const record = runs.get(req.runId);
@@ -44,6 +79,28 @@ function owner(req: Pick<McpInvocationRequest, "runId" | "chatId">): WorkInputRu
 }
 export function workAttachmentGroupIds(text: string): string[] {
   return [...new Set([...text.matchAll(/<!--\s*agentlas-chat-files:v1:([0-9a-f-]{36})\s*-->/giu)].map(match => match[1]))];
+}
+
+/**
+ * The attachment groups a Goal-bound run also stages: the ones named by the Goal's original request and by its source message, read from
+ * the Goal's CURRENT revision when the attachments are prepared. A revision that moved while the run was being prepared is not a reason to
+ * refuse the run (decided): the groups follow the Goal as it is now. A source whose transcript message is not what the Goal
+ * recorded (removed, another chat or role, other text) contributes nothing, so a file is never staged from a message the Goal did not name.
+ */
+export function goalSourceAttachmentGroupIds(input: {
+  chatId: string;
+  revision: { chatId: string; originalRequest: { messageId: string; chatId: string; text: string }; sourceMessage: { messageId: string; chatId: string; text: string } } | null | undefined;
+  readMessage(messageId: string): { chat_id: string; role: string; text: string } | undefined;
+}): string[] {
+  const { revision } = input;
+  if (!revision || revision.chatId !== input.chatId) return [];
+  const groups: string[] = [];
+  for (const source of [revision.originalRequest, revision.sourceMessage]) {
+    const message = input.readMessage(source.messageId);
+    if (!message || message.chat_id !== input.chatId || source.chatId !== input.chatId || message.role !== "user" || message.text !== source.text) continue;
+    groups.push(...workAttachmentGroupIds(source.text));
+  }
+  return groups;
 }
 
 /** Called by the invocation service only, never accepted from an IPC request. */
@@ -184,10 +241,11 @@ export async function prepareWorkAttachmentContext(req: McpInvocationRequest, cw
   record.pending = (async () => {
     check();
     const groups = [...new Set(record.readGroups())];
-    if (groups.length > 32) fail("work_attachment_group_limit");
     if (!groups.length) return;
-    const items = groups.flatMap(groupId => workChatFileInputs(record.chatId, groupId));
-    if (items.reduce((sum, item) => sum + item.size, 0) > 96 * 1024 * 1024) fail("work_attachment_total_limit");
+    const allItems = groups.flatMap(groupId => workChatFileInputs(record.chatId, groupId));
+    let storedAt = new Map<string, string>();
+    try { storedAt = chatFileGroupCreatedAt(record.chatId, groups); } catch { /* without stored times the order of the conversation stands */ }
+    const { staged: items, omitted } = chooseWorkAttachmentsToStage(allItems, storedAt);
     const parent = ensureDirectory(canonical, path.join(".agentlas", "work-inputs"));
     // Copies a stopped process left in this folder are removed before a new one is staged (a failed look never fails the run).
     await sweepOrphanedWorkInputs(canonical).catch(() => undefined);
@@ -246,40 +304,49 @@ export async function prepareWorkAttachmentContext(req: McpInvocationRequest, cw
     // Detect metadata changes during async disk preparation rather than silently pinning stale refs.
     const after = groups.flatMap(groupId => workChatFileInputs(record.chatId, groupId));
     const digest = (value: WorkChatFileInput[]) => createHash("sha256").update(JSON.stringify(value.map(({ id, groupId, sha256, entries }) => ({ id, groupId, sha256, entries })))).digest("hex");
-    if (digest(after) !== digest(items) || JSON.stringify([...new Set(record.readGroups())]) !== JSON.stringify(groups)) fail("work_attachment_snapshot_changed");
+    if (digest(after) !== digest(allItems) || JSON.stringify([...new Set(record.readGroups())]) !== JSON.stringify(groups)) fail("work_attachment_snapshot_changed");
     let context = workAttachmentContextOf(listed.flatMap(entry => entry.lines));
-    if (context.length > WORK_ATTACHMENT_CONTEXT_LIMIT) {
-      // Too long to list in full. The newest attachments (by when their group was stored; ties keep the staging order) are
-      // listed in the context while they fit; every other item is listed, as the same lines, in a manifest file inside
-      // this run's folder, and the context says so and counts them. Nothing is dropped and nothing is refused.
-      let stored = new Map<string, string>();
-      try { stored = chatFileGroupCreatedAt(record.chatId, groups); } catch { /* without stored times the staging order stands */ }
-      const newestFirst = listed.map((entry, index) => ({ index, at: stored.get(entry.item.groupId) ?? "" }))
+    if (context.length > WORK_ATTACHMENT_CONTEXT_LIMIT || omitted.length > 0) {
+      // Too long to list in full, or some attachments were not copied (chooseWorkAttachmentsToStage). The newest attachments (by when
+      // their group was stored; ties keep the staging order) are listed in the context while they fit; every other copied item is
+      // listed, as the same lines, in a manifest file inside this run's folder, and so is every attachment that was not copied (its
+      // name, size and checksum); the context says so and counts them. Nothing is dropped and nothing is refused.
+      const newestFirst = listed.map((entry, index) => ({ index, at: storedAt.get(entry.item.groupId) ?? "" }))
         .sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : a.index - b.index)).map(entry => entry.index);
       const manifestTarget = path.join(directory, WORK_ATTACHMENT_MANIFEST);
       const manifestRelative = path.relative(canonical, manifestTarget).split(path.sep).join("/");
-      const pointer = (count: number) => `older attachments: ${count} of ${listed.length}; listed as "name": "path" lines in ${JSON.stringify(manifestRelative)}`;
+      const pointer = (olderCount: number, omittedCount: number): string[] => [
+        ...(olderCount > 0 ? [`older attachments: ${olderCount} of ${listed.length}; listed as "name": "path" lines in ${JSON.stringify(manifestRelative)}`] : []),
+        ...(omittedCount > 0 ? [`not copied into this run (more than ${WORK_ATTACHMENT_MAX_GROUPS} attachment groups or ${WORK_ATTACHMENT_MAX_BYTES / (1024 * 1024)} MB for one run): ${omittedCount}; named with sizes in ${JSON.stringify(manifestRelative)}; say so if the request needs one of them`] : []),
+      ];
       // The pointer is longest when it counts every item, so room is reserved for that and the context can never exceed the limit.
-      let room = WORK_ATTACHMENT_CONTEXT_LIMIT - workAttachmentContextOf([pointer(listed.length)]).length;
+      let room = WORK_ATTACHMENT_CONTEXT_LIMIT - workAttachmentContextOf(pointer(listed.length, omitted.length)).length;
       const inline = new Set<number>();
-      for (const index of newestFirst) {
-        const size = listed[index].lines.reduce((total, line) => total + line.length + 1, 0);
-        if (size > room) break;
-        inline.add(index); room -= size;
+      if (context.length <= WORK_ATTACHMENT_CONTEXT_LIMIT && room >= context.length - workAttachmentContextOf([]).length) {
+        listed.forEach((_, index) => inline.add(index));
+      } else {
+        for (const index of newestFirst) {
+          const size = listed[index].lines.reduce((total, line) => total + line.length + 1, 0);
+          if (size > room) break;
+          inline.add(index); room -= size;
+        }
       }
       const older = listed.filter((_, index) => !inline.has(index));
+      const notCopied = omitted.map(item => `${JSON.stringify(item.name)}: not copied into this run; ${item.size} bytes; sha256 ${item.sha256}`);
       check();
-      const manifestFd = await fs.promises.open(manifestTarget, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | (fs.constants.O_NOFOLLOW ?? 0), 0o400);
-      try {
-        await manifestFd.writeFile(older.flatMap(entry => entry.lines).join("\n") + "\n", "utf8");
-        await manifestFd.sync(); check();
-        const stat = await manifestFd.stat();
-        const live = fs.lstatSync(manifestTarget);
-        if (!stat.isFile() || stat.dev !== live.dev || stat.ino !== live.ino || fs.realpathSync(manifestTarget) !== manifestTarget) fail("work_attachment_copy_changed");
-        record.inputs.set(manifestTarget, { dev: stat.dev, ino: stat.ino });
-      } finally { await manifestFd.close(); }
-      record.aliases.push({ path: manifestTarget, replacement: "[Input attachment list]" }, { path: manifestRelative, replacement: "[Input attachment list]" });
-      context = workAttachmentContextOf([...listed.filter((_, index) => inline.has(index)).flatMap(entry => entry.lines), pointer(older.length)]);
+      if (older.length > 0 || notCopied.length > 0) {
+        const manifestFd = await fs.promises.open(manifestTarget, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | (fs.constants.O_NOFOLLOW ?? 0), 0o400);
+        try {
+          await manifestFd.writeFile([...older.flatMap(entry => entry.lines), ...notCopied].join("\n") + "\n", "utf8");
+          await manifestFd.sync(); check();
+          const stat = await manifestFd.stat();
+          const live = fs.lstatSync(manifestTarget);
+          if (!stat.isFile() || stat.dev !== live.dev || stat.ino !== live.ino || fs.realpathSync(manifestTarget) !== manifestTarget) fail("work_attachment_copy_changed");
+          record.inputs.set(manifestTarget, { dev: stat.dev, ino: stat.ino });
+        } finally { await manifestFd.close(); }
+        record.aliases.push({ path: manifestTarget, replacement: "[Input attachment list]" }, { path: manifestRelative, replacement: "[Input attachment list]" });
+      }
+      context = workAttachmentContextOf([...listed.filter((_, index) => inline.has(index)).flatMap(entry => entry.lines), ...pointer(older.length, omitted.length)]);
     }
     record.context = context;
   })().catch(async error => { await releaseWorkAttachmentRun(record.runId); throw error; });

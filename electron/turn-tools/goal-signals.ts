@@ -34,15 +34,18 @@ function entryFor(key: string): { at: number; signals: GoalSignals } {
   return entry;
 }
 
-export type GoalSignalOutcome = "recorded" | "wait_already_requested" | "complete_already_declared" | "conflicts_with_wait" | "conflicts_with_complete";
+export type GoalSignalOutcome = "recorded" | "replaced_earlier_wait" | "complete_already_declared" | "conflicts_with_wait" | "conflicts_with_complete";
 
 export function recordGoalWaitSignal(key: string, intent: GoalWaitIntent): GoalSignalOutcome {
   const entry = entryFor(key);
-  if (entry.signals.wait) return "wait_already_requested";
   // The text protocol says: never declare the Goal complete in the response that requests a wait.
   if (entry.signals.complete) return "conflicts_with_complete";
+  // One wait per turn, and the last one the model asks for is the one it means. Nothing is registered until the host reads the
+  // turn's signals at its end, so the earlier proposal is simply replaced (a second goal_wait used to be refused, and the model
+  // then repeated or dropped the wait it had just corrected: goal_wait_wait_already_requested, 10-18).
+  const replaced = entry.signals.wait !== undefined;
   entry.signals.wait = intent;
-  return "recorded";
+  return replaced ? "replaced_earlier_wait" : "recorded";
 }
 
 export function recordGoalCompleteSignal(key: string, evidence: string | null): GoalSignalOutcome {

@@ -198,6 +198,8 @@ import { backgroundHoldActive, enterBackgroundHold, leaveBackgroundHold } from "
 import { fitWindowToWorkArea, secondInstanceWindowAction, watchWindowForLastVisibleClose } from "./window-lifecycle";
 import { cleanupDoneExit, createQuitStepClock, createRelaunchAfterQuit, relaunchArgsForLaunchDuringQuit, relaunchExecPath, type QuitStepClock } from "./quit-exit";
 import { anyWindowWatched, decideRunAlert, fireRunAlert, getRunAlerts } from "./run-alerts";
+import { settledRunIsNotAFailure } from "../shared/run-failure-cause";
+import { queueWillStartRunAgain } from "./invocation/queue-retry-fact";
 import { onOwnerAsk } from "./owner-ask-alerts";
 import { supervisorQuietRun } from "./one/supervisor-presentation";
 import { currentUiLocale, readUiLocaleCore, setCurrentUiLocale } from "./ui-locale";
@@ -988,6 +990,10 @@ function startRunAlertBridge(): void {
         finishedAt: envelope.receipt.finishedAt ?? envelope.receipt.updatedAt,
         focused,
         pendingQuestion: envelope.pendingQuestion === true,
+        // The owner's Stop, a steering interrupt, an update restart and the app's own custody codes are not "Run failed".
+        receipt: envelope.receipt,
+        // An attempt the send queue starts again by itself is not the end of the message: told once, if it finally does not go through.
+        retriedBySelf: queueWillStartRunAgain(getDb(), envelope.receipt),
       });
       // One machine line per settled run: which rule decided (VM check: a minimized window must read alert:true).
       console.info("[run-alert]", JSON.stringify({ runId: envelope.receipt.runId, status: envelope.receipt.status,
@@ -1040,7 +1046,7 @@ function startOneTeamNotificationBridge(): void {
     const receipt = envelope.receipt;
     const reason = envelope.pendingQuestion
       ? "approval"
-      : receipt.status === "failed"
+      : receipt.status === "failed" && !settledRunIsNotAFailure(receipt) && !queueWillStartRunAgain(getDb(), receipt)
         ? "failure"
         : receipt.status === "completed" && Date.parse(receipt.finishedAt || receipt.updatedAt) - Date.parse(receipt.startedAt) >= 5 * 60 * 1_000
           ? "long-complete"
@@ -2734,10 +2740,12 @@ app.whenReady().then(async () => {
     if (interrupted.settled > 0) {
       console.log("[tasks] settled interrupted runs on boot", { count: interrupted.settled });
       for (const taskId of interrupted.taskIds) {
+        // The owner closed or restarted the app while this task ran: an interruption, not a failure. The ledger names it so
+        // (hostStopCause app_closed), which every reader of a terminal row already treats as "not a run error" and never alerts on.
         tryRecordRunEvent({
           runId: `boot-settle:${taskId}`,
-          kind: "invoke_failed",
-          payload: { errorCode: "host-restarted-mid-run", taskId },
+          kind: "invoke_interrupted",
+          payload: { errorCode: "host-restarted-mid-run", hostStopCause: "app_closed", taskId },
         });
       }
     }
@@ -5478,14 +5486,11 @@ app.whenReady().then(async () => {
         dispatch: (input) => invocationService.resumeGoalWait(input),
         isChatBusy: (chatId) => invocationService.activeChatIds().includes(chatId),
         notify: (attention) => {
-          if (!Notification.isSupported()) return;
+          // A wait ended for an internal cause continues on its own next pass: there is nothing for the owner to confirm.
+          if (!Notification.isSupported() || (attention.state !== "dispatched" && attention.state !== "expired")) return;
           const body = currentUiLocale() === "ko"
-            ? (attention.state === "dispatched" ? "기다리던 결과가 도착해 작업을 이어갑니다."
-              : attention.state === "expired" ? "기다리던 결과가 제한 시간 안에 도착하지 않았습니다."
-              : "기다리던 작업을 이어가기 전에 확인이 필요합니다.")
-            : (attention.state === "dispatched" ? "The result you were waiting for arrived, so the task is resuming."
-              : attention.state === "expired" ? "The result you were waiting for did not arrive within the time limit."
-              : "Confirmation is needed before the waiting task continues.");
+            ? (attention.state === "dispatched" ? "기다리던 결과가 도착해 작업을 이어갑니다." : "기다리던 결과가 제한 시간 안에 도착하지 않았습니다.")
+            : (attention.state === "dispatched" ? "The result you were waiting for arrived, so the task is resuming." : "The result you were waiting for did not arrive within the time limit.");
           const notification = new Notification({ title: "Agentlas", body, silent: true });
           notification.on("click", () => { void openNotificationOrigin({ chatId: attention.chatId }); });
           retainNotification(notification).show();

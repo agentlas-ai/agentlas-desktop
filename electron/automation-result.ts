@@ -4,7 +4,7 @@ import { GRAPH_VERBATIM_CODES } from "../shared/graph-vocabulary.generated";
 import type { RuntimeSelection } from "../shared/types";
 import type { ToolFailureCode } from "../shared/tool-failure";
 import { extractAskFences } from "../shared/ask-fence-flatten";
-import { needsInputQuestion } from "../shared/agent-control-markers";
+import { endsWithQuietMarker, needsInputQuestion } from "../shared/agent-control-markers";
 
 /**
  * 판정 이유는 그대로 사용자 화면에 실린다. 언어와 어휘를 지정하지 않으면 영어 기술 문장이
@@ -186,6 +186,11 @@ export interface ObservedToolActivity {
   resultsTruncated?: boolean;
   /** Main's closed failure code across this run, independent of the detail cap. */
   approvalRequiredCount?: number;
+  /**
+   * The browser met a sign-in wall or a site's human check in this run and did not get past it (read from the run's own browser-ladder
+   * rows, never from the reply). A monitor that could not read what it watches may still answer [quiet]; the judge is told it was blind.
+   */
+  browserWall?: { code: "login-wall" | "human-check-required"; site: string | null };
 }
 
 /**
@@ -209,23 +214,50 @@ export interface ObservedRunRecord {
   steps: { label: string; output: string }[];
 }
 
+/** What the judge may read of every step together. A step that made a long table (a 20-file comparison) used to be cut to 600 characters, and
+ * the judge answered "the record is cut off, a person must check" (observed in use). Short steps stay whole; the rest share the budget. */
+const RUN_RECORD_BUDGET = 14_000;
+const RUN_RECORD_MAX_STEPS = 24;
+
+/** A text clipped at both ends: counts and reasons sit at the front or the back, so neither end is dropped. */
+function clipBothEnds(text: string, max: number, headShare = 0.7): string {
+  if (text.length <= max) return text;
+  const head = Math.floor(max * headShare);
+  return `${text.slice(0, head)} …(중략)… ${text.slice(-(max - head))}`;
+}
+
 function runRecordBlock(record: ObservedRunRecord | undefined): string {
   const steps = (record?.steps ?? []).filter((s) => String(s.output ?? "").trim());
   if (steps.length === 0) return "";
-  const lines = steps.slice(0, 20).map((step) => {
-    const raw = String(step.output).trim().replace(/\s+/g, " ");
+  const shown = steps.slice(0, RUN_RECORD_MAX_STEPS).map((step) => ({
+    label: String(step.label || "step").slice(0, 80),
+    raw: String(step.output).trim().replace(/\s+/g, " "),
+  }));
+  // Fair share of the budget, handing what short steps do not use to the long ones.
+  const caps = new Map<number, number>();
+  let remaining = RUN_RECORD_BUDGET, open = shown.map((_, index) => index);
+  while (open.length > 0) {
+    const share = Math.max(600, Math.floor(remaining / open.length));
+    const fits = open.filter((index) => shown[index].raw.length <= share);
+    if (fits.length === 0) { for (const index of open) caps.set(index, share); break; }
+    for (const index of fits) { caps.set(index, shown[index].raw.length); remaining -= shown[index].raw.length; }
+    open = open.filter((index) => !fits.includes(index));
+  }
+  const lines = shown.map((step, index) => {
     // ★자를 때 **양 끝을 남긴다.** 건수와 사유는 앞이나 뒤에 있는데, 뒤만 버리면
     //   `"filedCount":0` 같은 결정적인 한 칸이 사라진다 — 판정이 다시 눈을 잃는다.
-    const body = raw.length <= 600 ? raw : `${raw.slice(0, 420)} …(중략)… ${raw.slice(-180)}`;
-    return `- ${String(step.label || "step").slice(0, 80)}: ${body}`;
+    return `- ${step.label}: ${clipBothEnds(step.raw, caps.get(index) ?? 600, 0.7)}`;
   });
+  const omitted = steps.length - shown.length;
   return [
     "",
     "[HOST-OBSERVED RUN RECORD — what each step produced, recorded by the host]",
     ...lines,
+    ...(omitted > 0 ? [`(${omitted} more steps not shown)`] : []),
     "[/HOST-OBSERVED RUN RECORD]",
   ].join("\n");
 }
+
 
 /**
  * 사람이 승인한 **이 자동화의 목표**. 저장할 때 기록된 것이고, 모델이 이번에 지어낸 말이 아니다.
@@ -260,13 +292,17 @@ function goalBlock(goal: DeclaredAutomationGoal | undefined): string {
   ].join("\n");
 }
 
-function toolActivityBlock(activity: ObservedToolActivity | undefined): string {
+function toolActivityBlock(activity: ObservedToolActivity | undefined, quietReply = false): string {
   if (!activity) return "";
   return [
     "",
     "[HOST-OBSERVED TOOL ACTIVITY — this is measured by the host, not claimed by the model]",
     `tool calls: ${activity.callCount}`,
     activity.toolNames.length > 0 ? `tools used: ${activity.toolNames.slice(0, 20).join(", ")}` : "tools used: (none)",
+    // The host read the reply's last token: the run itself reported that nothing is for the owner (the owner's own instruction defines it).
+    ...(quietReply ? ["reply ends with the quiet marker [quiet]: the run reported that there is nothing for the owner this time"] : []),
+    // Measured from the run's own record: a reply that says nothing happened is weighed against a browser that could not read the page.
+    ...(activity.browserWall ? [`browser: the run met ${activity.browserWall.code === "login-wall" ? "a sign-in wall" : "a site's human check"}${activity.browserWall.site ? ` (${activity.browserWall.site})` : ""} and did not get past it, so the pages behind it were not read`] : []),
     ...(activity.approvalRequiredCount ? [`tool requests recorded as requiring approval: ${activity.approvalRequiredCount}`] : []),
     ...(activity.results?.length ? [
       `recent tool observations: ${JSON.stringify(activity.results.slice(-40))}`,
@@ -293,6 +329,40 @@ export function graphIsHostComputedOnly(graph: { nodes: ReadonlyArray<{ type: st
   return Boolean(graph?.nodes.length) && graph!.nodes.every((node) => HOST_COMPUTED_NODE_TYPES.has(node.type));
 }
 
+/**
+ * The model-run steps of a graph: the ones whose success is a model's say-so. A code step is run by the host and leaves its own
+ * receipt; an eval step is a judgment, not an actor. Same set the kernel treats as model steps (workflow/run-graph.ts).
+ */
+const MODEL_ACTOR_NODE_TYPES: ReadonlySet<string> = new Set(["agent", "action", "output"]);
+
+/**
+ * Can this automation's success report claim an outside effect that zero tool calls would disprove?
+ *
+ * The host overturns a judged `ok` when it observed zero tool calls (claimed_without_tools) because a model can write "posted and
+ * confirmed" without posting (12 accepted runs, 0 posts). That is only a contradiction when a model-run step is
+ * allowed to reach outside. It is not when the graph itself says none does: measured on one install, 86 runs over 11 automations
+ * were turned into "result fell short" by it - a daily "ask me my 3 tasks" whose one agent step is declared `read` and whose goal is
+ * to ask a question (24 of 24 runs, six days running, never clearing because its model is pinned), and ten code-and-check graphs
+ * whose only mutation is a code step the host ran itself.
+ *
+ * A model step is declared not to reach outside only when its `effect` says `read` or `pure`. An undeclared agent or action step
+ * reaches outside when the owner permitted writes (a prompt-only automation's agent has no declaration); an undeclared output
+ * step always does. Nothing here lifts the judge's own duty: its guidance still rejects an outside effect claimed with zero calls.
+ */
+export function graphModelStepsMayReachOutside(
+  graph: { nodes: ReadonlyArray<{ type: string; config?: Record<string, unknown> | null }> } | null | undefined,
+  executionPermission: "read" | "write" | null | undefined,
+): boolean {
+  const actors = (graph?.nodes ?? []).filter((node) => MODEL_ACTOR_NODE_TYPES.has(node.type));
+  if (actors.length === 0) return false;
+  return actors.some((node) => {
+    const declared = typeof node.config?.effect === "string" ? node.config.effect.trim() : "";
+    if (declared === "mutation") return true;
+    if (declared === "read" || declared === "pure") return false;
+    return node.type === "output" || executionPermission !== "read";
+  });
+}
+
 function hostComputedBlock(hostComputedGraph: boolean | undefined): string {
   if (!hostComputedGraph) return "";
   return [
@@ -301,6 +371,61 @@ function hostComputedBlock(hostComputedGraph: boolean | undefined): string {
     "Tool calls are not expected here, so their absence is not evidence either way. Judge whether the output itself plausibly meets the goal; a claimed outside effect (posted, sent, saved elsewhere) that the output cannot show is unverified, not ok.",
     "[/HOST-COMPUTED GRAPH]",
   ].join("\n");
+}
+
+/**
+ * The last successful run of the same automation, as the host recorded it (store/automations.ts previousSuccessfulRunOutput).
+ *
+ * A change watch ("tell me when the measurement changes") cannot be judged from one run's output: the judge was asked
+ * "did it change?" with no earlier value and answered "a person must compare" on every run (measured on one install:
+ * 586 `needs_input` rows on one 10-minute tracker, every one of them unanswerable by the owner). The host owns the
+ * comparison; the judge keeps the meaning.
+ */
+export interface PreviousRunObservation {
+  /** The previous run's final output (bounded by the receipt budget). */
+  output: string;
+  /** The host compared this run's output digest with the previous run's: true when they are identical. */
+  unchanged: boolean;
+  /** What run history concluded for the previous run, when known (accepted / rejected / blocked / needs_input / unjudged). */
+  outcome?: string | null;
+}
+
+function previousRunBlock(previous: PreviousRunObservation | undefined): string {
+  if (!previous) return "";
+  const raw = String(previous.output ?? "").trim();
+  return [
+    "",
+    `[HOST-OBSERVED PREVIOUS RUN — the last successful run's final output; the host compared it with this run's: ${previous.unchanged ? "identical" : "different"}]`,
+    raw.length <= 8_000 ? raw : `${raw.slice(0, 5_600)} …(truncated)… ${raw.slice(-2_400)}`,
+    "[/HOST-OBSERVED PREVIOUS RUN]",
+  ].join("\n");
+}
+
+/**
+ * A graph made only of host-executed steps, run again on the same data, gives the same output. When it does, the earlier
+ * run was already judged on that exact output: asking a model again answers nothing new and costs a call on every tick
+ * (144 a day for one tracker). A repeated rejection or block is not washed into success by the repetition, so those still
+ * go to the judge. Only graphs the host computes entirely qualify; for a model's steps the same words can hide different work.
+ */
+function unchangedSinceLastRun(opts: { hostComputedGraph?: boolean; previousRun?: PreviousRunObservation }): boolean {
+  if (opts.hostComputedGraph !== true || opts.previousRun?.unchanged !== true) return false;
+  const prior = opts.previousRun.outcome ?? null;
+  return prior !== "rejected" && prior !== "blocked";
+}
+
+/** Host marker on an accepted run that repeated the previous run's exact output. Not a hold: the work was done and found unchanged. */
+export const UNCHANGED_SINCE_LAST_RUN_REASON_CODE = "unchanged_since_last_run";
+
+function unchangedClassification(locale: "ko" | "en"): AutomationResultClassification {
+  return {
+    status: "ok",
+    outcome: "ok",
+    reasonCode: UNCHANGED_SINCE_LAST_RUN_REASON_CODE,
+    reason: locale === "ko"
+      ? "지난 확인과 결과가 같습니다. 바뀐 것이 없습니다."
+      : "Same result as the last check. Nothing changed.",
+    evidence: null,
+  };
 }
 
 /**
@@ -314,12 +439,14 @@ export function automationJudgeInput(
     runRecord?: ObservedRunRecord;
     declaredGoal?: DeclaredAutomationGoal;
     hostComputedGraph?: boolean;
+    previousRun?: PreviousRunObservation;
   } = {},
 ): string {
   // Composition order: fixed → variable (docs/PROMPT-COMPOSITION-POLICY.md, ledger desktop.judgment.kind.automation-outcome.user).
   const goal = goalBlock(opts.declaredGoal);
-  return `${goal ? `${goal.slice(1)}\n` : ""}${value.slice(0, 8_000)}`
-    + `${runRecordBlock(opts.runRecord)}${toolActivityBlock(opts.toolActivity)}${hostComputedBlock(opts.hostComputedGraph)}`;
+  // The end of a long result is usually its conclusion: both ends are kept (the old cut kept only the first 8,000 characters).
+  return `${goal ? `${goal.slice(1)}\n` : ""}${clipBothEnds(value, 8_000, 0.7)}`
+    + `${runRecordBlock(opts.runRecord)}${previousRunBlock(opts.previousRun)}${toolActivityBlock(opts.toolActivity, endsWithQuietMarker(value))}${hostComputedBlock(opts.hostComputedGraph)}`;
 }
 
 export async function classifyAutomationOutcome(
@@ -333,6 +460,13 @@ export async function classifyAutomationOutcome(
     declaredGoal?: DeclaredAutomationGoal;
     /** Every step is host-executed (graphIsHostComputedOnly); no tool observation is passed for it. */
     hostComputedGraph?: boolean;
+    /** The last successful run of this automation, for a host-computed graph (see PreviousRunObservation). */
+    previousRun?: PreviousRunObservation;
+    /**
+     * Whether zero observed tool calls contradict a reported success (see graphModelStepsMayReachOutside). Absent means
+     * they do: only a caller that knows the graph declares no model step reaching outside lifts the inversion.
+     */
+    zeroToolCallsContradictSuccess?: boolean;
   } = {},
 ): Promise<AutomationResultClassification> {
   const value = text?.trim() ?? "";
@@ -347,6 +481,8 @@ export async function classifyAutomationOutcome(
   const structured = structuredOutcome(value);
   if (structured) return structured;
   const locale = currentUiLocale();
+  // Same exact output as the last successful run of a host-computed graph: nothing new to judge, so no model is asked.
+  if (unchangedSinceLastRun(opts)) return unchangedClassification(locale);
   const verdict = await judgeRequired<AutomationResultStatus>({
     // 캐시 키는 kind+input이므로 언어를 kind에 포함해야 언어를 바꿔도 옛 문장이 재사용되지 않는다.
     kind: `automation-outcome:${locale}`,
@@ -412,7 +548,8 @@ export async function classifyAutomationOutcome(
    * skipped 는 뒤집지 않는다 — "할 일이 없었다" 는 도구를 안 쓰는 것이 정상이다.
    * 그 외 상태(partial/blocked/needs_input/error)도 그대로 둔다: 이미 성공이 아니다.
    */
-  if (verdict.verdict === "ok" && opts.toolActivity && opts.toolActivity.callCount === 0) {
+  if (verdict.verdict === "ok" && opts.toolActivity && opts.toolActivity.callCount === 0
+    && opts.zeroToolCallsContradictSuccess !== false) {
     return withJudge({
       status: "error",
       outcome: "error",

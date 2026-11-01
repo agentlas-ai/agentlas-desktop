@@ -13,6 +13,7 @@ import { attendedTurnStartsFresh, unattendedFreshSessionStatus } from "./unatten
 import { kimiSessionGone } from "./kimi-journal";
 import { realCliHome } from "./cli-product-homes";
 import { cumulativeSurfaceGateText, wrapSystemPrompt } from "./runner";
+import { acpUsageRefusalKind } from "./usage-refusal";
 import { schemaFallbackPromptPart } from "../../shared/runtime-capabilities";
 import { composeDeclaredPrompt } from "./prompt-order";
 import {
@@ -621,8 +622,11 @@ async function runKimiTurn(req: RunnerRequest, events: RunnerEvents, dispatch: {
   // Dispatch already happened. Neither exit failure nor a missing terminal
   // frame proves that the resumed request made no model/tool call.
   const error = new RuntimeTurnUnsettledError(KIND, runReq.locale);
+  // The provider's own words say why the turn ended: a spent allowance or a throttle reads as that (the same wording reading the ACP path
+  // uses, source "heuristic"), not as "no completion receipt". Any other stderr stays the standard unfinished-turn cause.
+  const spentKind = acpUsageRefusalKind(result.stderr.slice(0, 800));
   return { text: result.text, sessionId: result.sessionId ?? resumeSessionId ?? undefined,
-    ownerControlTerminal: "uncertain", failure: { kind: "exit", runtime: KIND, source: "marker",
+    ownerControlTerminal: "uncertain", failure: { kind: spentKind ?? "exit", runtime: KIND, source: spentKind ? "heuristic" : "marker",
       providerCode: error.code, ...(result.code != null ? { exitCode: result.code } : {}),
       message: `${error.message}${result.stderr ? `\n${result.stderr.slice(0, 500)}` : ""}` } };
 }

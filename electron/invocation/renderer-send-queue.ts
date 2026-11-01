@@ -12,7 +12,7 @@ import { releaseGoneTerminalOwners } from "../store/terminal-owner-liveness";
 import { userDataDir } from "../runtime-paths";
 import { withPreparedUserRow } from "../store/prepared-user-rows";
 import { pickLocale } from "../runtime/status-i18n";
-import { invocationService } from "./service";
+import { invocationService, type InvocationSettledEnvelope } from "./service";
 import { withoutOnePersonalNativeOriginal } from "../secrets/one-personal-native-entry";
 import {
   canQueuePendingSend,
@@ -23,10 +23,16 @@ import {
   type PendingChatSends,
   type PendingSendRecord,
 } from "./pending-chat-sends";
-import { isTransientSendRefusal, sendRefusalCode, startOwnerSendOrAcceptRefusal } from "../../shared/transient-send-refusal";
+import { isRefusedBeforeDispatch, isTransientSendRefusal, sendRefusalCode, startOwnerSendOrAcceptRefusal, startRefusalNeedsOwner } from "../../shared/transient-send-refusal";
 import { liveAppControlRendererEvent } from "../app-control/ipc-registry";
 import { getInvocationRunReceipt } from "../store/run-events";
+import { isOwnerEndedInvocation } from "../../shared/invocation-host-stop";
+import { queuedSendInternalFailure } from "./queue-retry-fact";
 import { readRunTurnPlacement } from "./turn-placement";
+import { hasEarlierAttempt, ownerStoppedChatSince, unconfirmedRunShouldBeSentAgain } from "./earlier-attempt";
+import { forgetDirectStartKept, noteDirectStartKept } from "./resend-forecast";
+import { queuedSendUnansweredNotice } from "./queued-send-notices";
+export { queuedSendUnansweredNotice };
 import type { QueuedOwnerInputCustody, QueuedOwnerStartBoundary } from "./queued-owner-input-custody";
 import { OWNER_INTAKE_NOTICE_AFTER_MS, ownerIntakeReceivedNotice } from "./owner-intake";
 
@@ -155,18 +161,37 @@ export function queuedSendPlacement(runId: string): "placed" | "not-dispatched" 
   return readRunTurnPlacement(runId);
 }
 
-/** One neutral line for a message whose run ended without proof that it reached the model (never re-sent). */
-export function queuedSendUncertainNotice(locale: "ko" | "en"): string {
-  return locale === "ko"
-    ? "이 메시지가 모델에 전달됐는지 확인되지 않아 다시 보내지 않았어요. 작업 기록을 확인하고 필요하면 다시 보내 주세요."
-    : "It is not confirmed that this message reached the model, so it was not sent again. Check the work history and send it again if needed.";
+/**
+ * Whether a start the host refused is only the app's own state, and the message should wait for it instead of ending on the screen
+ * as a code. Both must hold: the host proved nothing reached a runtime (the error's own `turnDelivery: "not-dispatched"` marker, or the
+ * run's admission row decided `rejected` with its no-start proof), and the refusal is not one the owner acts on
+ * (startRefusalNeedsOwner). The transient allowlist (shared/transient-send-refusal.ts) is handled before this and is not repeated here.
+ * A refusal with no proof, or after the hand-off, is never taken: that message could have acted.
+ */
+export function undispatchedStartWaits(cause: unknown, runId: string | null | undefined): boolean {
+  if (isTransientSendRefusal(cause)) return false;
+  if (startRefusalNeedsOwner(sendRefusalCode(cause))) return false;
+  if (isRefusedBeforeDispatch(cause)) return true;
+  if (!runId) return false;
+  try { return getInvocationAdmission(runId)?.status === "rejected"; } catch { return false; }
 }
 
-/** The neutral line for a message that could not run and needs the owner (one line, no codes, no process names). */
+/** One calm line for a message that was saved and retried but still could not start: no code, and nothing was sent anywhere. */
+export function queuedSendHeldNotice(locale: "ko" | "en"): string {
+  return locale === "ko"
+    ? "메시지는 저장됐지만 아직 시작하지 못했어요. 아무것도 실행되지 않았으니 같은 내용을 한 번 더 보내 주세요."
+    : "Your message is saved, but it has not started yet. Nothing ran, so please send it once more.";
+}
+
+/**
+ * The neutral line for a message that could not run (one line, no codes, no process names). It names no cause: "check the model connection
+ * and usage limits" was said for every cause, including the app's own state, which the owner has nothing to fix. A refusal the owner acts
+ * on (a cost cap, a stopped Goal) is told with its own sentence when it happens, not here.
+ */
 export function queuedSendEndedNotice(locale: "ko" | "en"): string {
   return locale === "ko"
-    ? "이 메시지는 실행되지 못했어요. 모델 연결과 사용 한도를 확인한 뒤 다시 보내 주세요."
-    : "This message could not run. Check the model connection and usage limits, then send it again.";
+    ? "이 메시지는 아직 실행되지 못했어요. 잠시 뒤 같은 내용을 다시 보내 주세요."
+    : "This message has not run yet. Send the same text again in a moment.";
 }
 
 export interface RendererSendQueueOptions {
@@ -304,13 +329,27 @@ export function createRendererSendQueue(startNow: RendererStartNow, options: Ren
         markStarting();
       }).immediate();
     },
+    waitsBeforeDispatch: undispatchedStartWaits,
     canRetryStart: (request, runId) => {
       const captured = getDb().prepare(`SELECT 1 FROM invocation_followup_custody f JOIN pending_chat_sends q ON q.id=f.queue_id WHERE q.run_id=?`).get(runId);
       if (captured) return placement(runId) === "not-dispatched";
       return !request.oneAttachmentRef && !request.oneTeamPreflightRef || options.custody?.placement(runId) === "not-dispatched";
     },
     onPlaced: () => options.custody?.reconcile(),
+    // A message whose run was lost without a stated cause is sent once more with the earlier-attempt line; the owner's Stop, a steering
+    // interrupt, a host stop and a run the owner already saw fail are never sent again (earlier-attempt.ts reads the receipt).
+    resendWhenUnconfirmed: (runId) => {
+      if (!runId) return unconfirmedRunShouldBeSentAgain(null);
+      try { return unconfirmedRunShouldBeSentAgain(getInvocationRunReceipt(runId)); } catch { return false; }
+    },
+    ownerStoppedSince: (chatId, sinceMs) => ownerStoppedChatSince(getDb(), chatId, sinceMs),
     failureCode: (runId) => getInvocationRunReceipt(runId)?.errorCode ?? null,
+    // The owner's Stop, a direction steered over the run, a Goal they paused or deleted: that run's message is never started again.
+    endedByOwner: (runId) => {
+      const receipt = getInvocationRunReceipt(runId);
+      return !!receipt && isOwnerEndedInvocation(receipt);
+    },
+    internalFailure: (runId) => queuedSendInternalFailure(getInvocationRunReceipt(runId)),
     saveUserRow: (request) => {
       if (request.promptOrigin === "system") return null;
       const row = options.custody?.savedUserRow(request)
@@ -329,16 +368,31 @@ export function createRendererSendQueue(startNow: RendererStartNow, options: Ren
       // The message stays in the transcript. A message that could not run because a restart happened is not announced;
       // one that hit a refusal the owner must fix gets one neutral line.
       if (reason === "closed") return;
-      if (reason === "uncertain") {
-        // Never re-sent. The run already showed its own failure or the owner stopped it; otherwise say it once.
-        if (code === "process_restarted") return;
-        let status: string | undefined;
-        try { status = runId ? getInvocationRunReceipt(runId)?.status : undefined; } catch { status = undefined; }
-        if (status === "failed" || status === "cancelled") return;
+      if (reason === "held") {
+        // The start was refused before dispatch on every bounded retry. Held, not failed: said once, without the code.
         try {
-          appendChatMessage(chatId, "assistant", queuedSendUncertainNotice(pickLocale(request)),
-            { hostNotice: { purpose: "host-status", runId: queuedSendNoticeRunId(runId, sendId), status: "needs-owner" } });
+          appendChatMessage(chatId, "assistant", queuedSendHeldNotice(pickLocale(request)),
+            { hostNotice: { purpose: "host-status", runId: queuedSendNoticeRunId(null, sendId), status: "needs-owner" } });
         } catch { /* the saved message and the log remain */ }
+        return;
+      }
+      if (reason === "uncertain") {
+        // Nothing is asked of the owner. The owner's Stop, a steering interrupt, a host stop, a failure the run already showed and a run a
+        // later turn took over speak for themselves. A run lost WITHOUT a stated cause that is not sent again (the one resend is spent, or a
+        // one-use input) has nothing that speaks for it: one calm line, so the message does not end with no line at all. The ledger keeps
+        // the row (state "uncertain", its code) and the log line.
+        let lostWithoutCause = false;
+        // A failed run (an unsettled turn) already showed its own failure line; only a run that left no line of its own gets this one.
+        try {
+          const receipt = runId ? getInvocationRunReceipt(runId) : null;
+          lostWithoutCause = receipt?.status !== "failed" && unconfirmedRunShouldBeSentAgain(receipt);
+        } catch { lostWithoutCause = false; }
+        if (lostWithoutCause) {
+          try {
+            appendChatMessage(chatId, "assistant", queuedSendUnansweredNotice(pickLocale(request)),
+              { hostNotice: { purpose: "host-status", runId: queuedSendNoticeRunId(runId, sendId), status: "app-failed" } });
+          } catch { /* the saved message and the log remain */ }
+        }
         return;
       }
       // A run that took the message and failed has already shown its own typed failure (persistEmptyFailureNotice);
@@ -374,8 +428,53 @@ export function createRendererSendQueue(startNow: RendererStartNow, options: Ren
   };
   const recordRequestHash = (record: PendingSendRecord) => createHash("sha256").update(followupRequestJson(record.request), "utf8").digest("hex");
 
+  /**
+   * A message the composer started directly (the chat was free) has no queue row, so when its run is lost or its turn ends unsettled the
+   * queue could not send it again (earlier-attempt.ts decides from the receipt, a2979948a built that half for queued rows). The request
+   * of a direct start is kept here only until its run settles; if the run ended with an unknown outcome, the message is queued as the one
+   * resend the cap allows: same transcript row (no second copy of the message), the earlier-attempt line for the model, and the owner's
+   * Stop, a newer message of the owner or a message already waiting each cancel it. Decision (E2): an unknown outcome
+   * never stops to ask. One and Work rooms, and a room that holds a Goal, all send through this path.
+   */
+  const directStarts = new Map<string, { event: IpcMainInvokeEvent; request: McpInvocationRequest }>();
+  const DIRECT_STARTS_KEPT = 16;
+  const rememberDirectStart = (runId: string | undefined, event: IpcMainInvokeEvent, request: McpInvocationRequest): void => {
+    if (!runId || hasEarlierAttempt(request) || request.oneAttachmentRef || request.oneTeamPreflightRef || !canQueue(request)) return;
+    directStarts.set(runId, { event, request });
+    noteDirectStartKept(runId);
+    while (directStarts.size > DIRECT_STARTS_KEPT) {
+      const oldest = directStarts.keys().next().value as string;
+      directStarts.delete(oldest);
+      forgetDirectStartKept(oldest);
+    }
+  };
+  const resendLostDirectRun = (envelope: InvocationSettledEnvelope): void => {
+    const held = directStarts.get(envelope.runId);
+    if (!held) return;
+    directStarts.delete(envelope.runId);
+    forgetDirectStartKept(envelope.runId);
+    const { event, request } = held;
+    const chatId = request.chatId;
+    if (!unconfirmedRunShouldBeSentAgain(envelope.receipt)) return;
+    // A turn proven in the conversation is not lost; only an unconfirmed placement is sent again.
+    if (queuedSendPlacement(envelope.runId) !== "unconfirmed") return;
+    if (queue.hasQueued(chatId)) return;
+    const db = getDb();
+    // The owner moved on: this is no longer the newest thing they said here.
+    const newest = db.prepare("SELECT id, text, created_at AS createdAt FROM chat_messages WHERE chat_id = ? AND role = 'user' ORDER BY created_at DESC, rowid DESC LIMIT 1")
+      .get(chatId) as { id: string; text: string; createdAt: string } | undefined;
+    if (!newest || newest.text !== request.userPrompt) return;
+    if (ownerStoppedChatSince(db, chatId, Date.parse(envelope.receipt.startedAt) || 0)) return;
+    // A consumed preparation submission cannot be bound again; the message prepares as any other would.
+    queue.enqueue(event, { ...request, preflightSubmissionId: undefined }, { userRow: { ...newest, role: "user" }, resentUnconfirmed: true, imagesByReference: true });
+  };
+
   // A run that settles in this process decides its message at once (runs settled in the daemon are found by the poll).
-  const offSettled=invocationService.onSettled((envelope) => { if (disposed) return; try { resumeCustodiedInputs(); queue.settleRun(envelope.runId); } catch { /* the poll decides it */ } });
+  const offSettled=invocationService.onSettled((envelope) => {
+    if (disposed) return;
+    try { resumeCustodiedInputs(); queue.settleRun(envelope.runId); } catch { /* the poll decides it */ }
+    try { resendLostDirectRun(envelope); } catch { /* the message and the run's own line remain */ }
+  });
 
   // Owner intake (owner-intake.ts): a message that is still waiting for its chat a moment later gets one received line,
   // the same typed row the phone path writes, so the owner sees it was taken and runs once the chat is free.
@@ -447,6 +546,8 @@ export function createRendererSendQueue(startNow: RendererStartNow, options: Ren
     async run(event, req) {
       const rawSubmission = req.preflightSubmissionId;
       req = options.sanitizeRequest ? options.sanitizeRequest(req) : { ...req };
+      // Only this queue marks a second send (earlier-attempt.ts); a request coming in from a window never carries the marker.
+      delete (req as { earlierAttemptUncertain?: unknown }).earlierAttemptUncertain;
       if (rawSubmission !== undefined) req.preflightSubmissionId = rawSubmission;
       const previous = options.custody?.existing(req);
       const queuedAnswer = (record: PendingSendRecord): QueuedRunAnswer => ({ runId: req.runId ?? "", chatId: req.chatId, queued: true,
@@ -475,9 +576,9 @@ export function createRendererSendQueue(startNow: RendererStartNow, options: Ren
         // Images the transcript store would not take cannot be queued by reference; the start below refuses them on its own terms.
         catch (error) { if (!(error instanceof PendingSendImagesUnsaved)) throw error; }
       }
-      return startOwnerSendOrAcceptRefusal(() => startOwned(event, req, null), (cause) => {
+      return startOwnerSendOrAcceptRefusal(() => startOwned(event, req, null).then((started) => { rememberDirectStart(started?.runId, event, req); return started; }), (cause) => {
         if (!canQueue(req)) return null;
-        if (isTransientSendRefusal(cause)
+        if ((isTransientSendRefusal(cause) || undispatchedStartWaits(cause, req.runId))
           && (!req.oneAttachmentRef && !req.oneTeamPreflightRef || options.custody?.placement(req.runId!) === "not-dispatched")) {
           try { return queuedAnswer(noticeIfStillWaiting(accept(event,req,undefined,cause), req)); }
           // Images too big to queue inline that could not be tied to the transcript row's stored bytes (an invalid image): the

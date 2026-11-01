@@ -310,6 +310,7 @@ import {
 import { MobileScienceChat } from "./science-chat";
 import { inferOwnerLocale, isMachineAgentLabel, ownerActivityText, ownerAgentLabelOrNull } from "../../shared/owner-visible-activity-text";
 import { withMobileRequestTiming } from "./request-timing";
+import { MobileBridgeRefusal } from "../../shared/mobile-bridge-refusal";
 import type {
   MobileBridgeAuthority,
   MobileBridgeOwnerMessageVerdict,
@@ -1515,9 +1516,9 @@ async function resolveMobileRoleSelection(
     (selection.backend === undefined || candidate.backend === selection.backend) &&
     (selection.kind !== "acp" || candidate.acpAgentId === selection.acpAgentId),
   );
-  if (!runtime) throw new Error("The selected Desktop runtime is unavailable");
+  if (!runtime) throw new MobileBridgeRefusal("runtime_unavailable", "The selected Desktop runtime is unavailable");
   if (runtimeCredentialUnavailable(runtime)) {
-    throw new Error("The selected Desktop runtime credential is unavailable");
+    throw new MobileBridgeRefusal("runtime_credential_unavailable", "The selected Desktop runtime credential is unavailable");
   }
   if (
     selection.model &&
@@ -1526,14 +1527,14 @@ async function resolveMobileRoleSelection(
       ? ollamaModelListIncludes(runtime.availableModels!, selection.model)
       : runtime.availableModels!.includes(selection.model))
   ) {
-    throw new Error("The selected model is unavailable on this Desktop runtime");
+    throw new MobileBridgeRefusal("runtime_unavailable", "The selected model is unavailable on this Desktop runtime");
   }
   if (
     selection.effort &&
     (runtime.efforts?.length ?? 0) > 0 &&
     !runtime.efforts!.some((item) => item.id === selection.effort)
   ) {
-    throw new Error("The selected effort is unavailable on this Desktop runtime");
+    throw new MobileBridgeRefusal("runtime_unavailable", "The selected effort is unavailable on this Desktop runtime");
   }
   return {
     ...selection,
@@ -3230,7 +3231,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
       case "projects.get": {
         const params = guardedParams(request, ["id"]);
         const project = getProject(requiredIdentifier(params, "id"));
-        if (!project) throw new Error("The selected Desktop project is unavailable");
+        if (!project) throw new MobileBridgeRefusal("project_unavailable", "The selected Desktop project is unavailable");
         const projected = await projectMobileBridgeProjectAsync(project);
         return asJsonValue(
           {
@@ -3249,7 +3250,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         const projectId = requiredIdentifier(params, "projectId");
         const fileRef = requiredIdentifier(params, "fileRef", /^file_[a-f0-9]{32}$/u);
         const project = getProject(projectId);
-        if (!project) throw new Error("The selected Desktop project is unavailable");
+        if (!project) throw new MobileBridgeRefusal("project_unavailable", "The selected Desktop project is unavailable");
         const projected = await projectMobileBridgeProjectAsync(project);
         return asJsonValue(
           await this.projectFilePreviews.read({
@@ -3269,7 +3270,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
       case "projects.setAgentPool": {
         const params = guardedParams(request, ["projectId", "members", "expectedMemberKeys"]);
         const project = getProject(requiredIdentifier(params, "projectId"));
-        if (!project) throw new Error("The selected Desktop project is unavailable");
+        if (!project) throw new MobileBridgeRefusal("project_unavailable", "The selected Desktop project is unavailable");
 
         const observedKeys = params.expectedMemberKeys;
         if (!Array.isArray(observedKeys)) throw new TypeError("expectedMemberKeys must be an array");
@@ -3411,10 +3412,10 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         const projectId = requiredIdentifier(params, "projectId");
         const title = optionalIdentifier(params, "title", 200) ?? "New task";
         const project = getProject(projectId);
-        if (!project) throw new Error("The selected Desktop project is unavailable");
-        if (!project.folderPath) throw new Error("The selected project has no connected working folder");
+        if (!project) throw new MobileBridgeRefusal("project_unavailable", "The selected Desktop project is unavailable");
+        if (!project.folderPath) throw new MobileBridgeRefusal("project_folder_missing", "The selected project has no connected working folder");
         const canonicalProjectFolder = captureInvocationWorkspaceBinding(project.folderPath).canonicalPath;
-        if (!canonicalProjectFolder) throw new Error("The selected project has no connected working folder");
+        if (!canonicalProjectFolder) throw new MobileBridgeRefusal("project_folder_missing", "The selected project has no connected working folder");
         const chat = createProjectWorkChat({
           projectId: project.id,
           title,
@@ -3536,7 +3537,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         const id = requiredIdentifier(params, "id");
         requireChat(id);
         if (invocationService.activeChatIds().includes(id)) {
-          throw new Error("This conversation is still running. Stop it before clearing it.");
+          throw new MobileBridgeRefusal("chat_still_running", "This conversation is still running. Stop it before clearing it.");
         }
         clearChatContext(id);
         // The stored session pointers are gone; an idle resident process of this chat would still hold the cleared conversation.
@@ -3822,8 +3823,8 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
           throw new Error("A project task cannot be moved to another project");
         }
         const project = getProject(projectId);
-        if (!project) throw new Error("The selected Desktop project is unavailable");
-        if (!project.folderPath) throw new Error("The selected project has no working folder");
+        if (!project) throw new MobileBridgeRefusal("project_unavailable", "The selected Desktop project is unavailable");
+        if (!project.folderPath) throw new MobileBridgeRefusal("project_folder_missing", "The selected project has no working folder");
         setChatWorkingFolder(chatId, project.folderPath);
         this.scheduleSnapshotUpdated(chatId);
         return asJsonValue({
@@ -4192,7 +4193,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         const result = this.options.cancelInvocationRun
           ? await this.options.cancelInvocationRun(runId)
           : invocationService.cancel(runId);
-        if (result === "not-found") throw new Error("Invocation run is no longer active");
+        if (result === "not-found") throw new MobileBridgeRefusal("run_no_longer_active", "Invocation run is no longer active");
         if (result === "requested") this.scheduleSnapshotUpdated();
         return result;
       }
@@ -4707,9 +4708,9 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
           candidate.kind === kind &&
           (backend === undefined || candidate.backend === backend) &&
           (kind !== "acp" || candidate.acpAgentId === acpAgentId));
-        if (!runtime) throw new Error("The selected Desktop runtime is unavailable");
+        if (!runtime) throw new MobileBridgeRefusal("runtime_unavailable", "The selected Desktop runtime is unavailable");
         if (runtimeCredentialUnavailable(runtime)) {
-          throw new Error("The selected Desktop runtime credential is unavailable");
+          throw new MobileBridgeRefusal("runtime_credential_unavailable", "The selected Desktop runtime credential is unavailable");
         }
         const model = optionalIdentifier(params, "model", 200);
         if (
@@ -4719,11 +4720,11 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
             ? ollamaModelListIncludes(runtime.availableModels!, model)
             : runtime.availableModels!.includes(model))
         ) {
-          throw new Error("The selected model is unavailable on this Desktop runtime");
+          throw new MobileBridgeRefusal("runtime_unavailable", "The selected model is unavailable on this Desktop runtime");
         }
         const effort = optionalIdentifier(params, "effort", 80);
         if (effort && (runtime.efforts?.length ?? 0) > 0 && !runtime.efforts!.some((item) => item.id === effort)) {
-          throw new Error("The selected effort is unavailable on this Desktop runtime");
+          throw new MobileBridgeRefusal("runtime_unavailable", "The selected effort is unavailable on this Desktop runtime");
         }
         const longContext = optionalBoolean(params, "longContext");
         const list = await setActiveRuntime({

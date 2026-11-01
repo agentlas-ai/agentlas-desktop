@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { getDb } from "../store/db";
 import { getAutomation } from "../store/automations";
 import { getChatGoalContract, getChatGoalRevision } from "../store/chat-goals";
-import { appendLongRunEvent, getLongRunByGoalId, getLongRunGoalRevisionBinding, longRunOwnerHold } from "../store/long-runs";
+import { appendLongRunEvent, getLongRunAttemptGoalRevision, getLongRunByGoalId, getLongRunGoalRevisionBinding, longRunOwnerHold } from "../store/long-runs";
 import { invocationMatchesGoalRevision } from "./verification-boundary";
 import type { GoalAutomationObservation } from "../../shared/runtime-plan";
 import { goalDeadlineAt } from "./goal-deadline";
@@ -25,6 +25,9 @@ interface BindingReceipt {
   deadlineAt?: string;
   schemaVersion: "agentlas.goal-automation-provenance.v1";
   goalId: string; goalRevision: number; chatId: string; invocationRunId: string;
+  /** The Goal revision the invocation's attempt began under, recorded only when the Goal moved on while the turn ran (so it is
+   * lower than goalRevision). The binding is at the Goal's revision of the moment; this keeps the turn provably one of its attempts. */
+  invocationGoalRevision?: number;
   automationId: string; automationCreatedAt: string; definitionDigest: string; graphDigest: string | null;
   /** A later Goal revision may carry this explicit human authority. */
   amendmentMessageId?: string;
@@ -40,6 +43,7 @@ export interface CurrentGoalAutomationBinding {
   goalRevision: number;
   chatId: string;
   invocationRunId: string;
+  invocationGoalRevision?: number;
   automationId: string;
   automationCreatedAt: string;
   definitionDigest: string;
@@ -96,7 +100,21 @@ function runGraphDigest(automationId: string): string | null {
   return automation?.graph ? graphExecutionDigest(automation, automation.graph) : null;
 }
 
-function currentGoal(goalId: string, expectedGoalRevision: number, chatId: string, invocationRunId: string): {
+/** The Goal revision the invocation's attempt(s) began under, or null when the invocation is no attempt of this Goal or its
+ * attempts disagree. Read from the same durable attempt-start binding as invocationMatchesGoalRevision. */
+function invocationAttemptRevision(invocationRunId: string, goalId: string): number | null {
+  const rows = getDb().prepare(`SELECT a.id, a.run_id FROM long_run_worker_attempts a
+    JOIN long_runs r ON r.id = a.run_id WHERE a.invocation_run_id = ? AND r.goal_id = ?`)
+    .all(invocationRunId, goalId) as Array<{ id: string; run_id: string }>;
+  if (rows.length === 0) return null;
+  const revisions = new Set(rows.map(row => getLongRunAttemptGoalRevision(row.run_id, row.id)));
+  const [only] = [...revisions];
+  return revisions.size === 1 && Number.isSafeInteger(only) && (only as number) >= 1 ? only as number : null;
+}
+
+function currentGoal(goalId: string, expectedGoalRevision: number, chatId: string, invocationRunId: string,
+  /** Set when the binding is at a later revision than the one the invocation began under (the Goal moved during the turn). */
+  invocationGoalRevision?: number): {
   runId: string;
 } | null {
   const goal = getChatGoalRevision(goalId);
@@ -109,8 +127,40 @@ function currentGoal(goalId: string, expectedGoalRevision: number, chatId: strin
     || goal.chatId !== chatId || (!finite && contract?.status !== "active") || !run || run.surface === "science"
     || run.rootChatId !== chatId || getLongRunGoalRevisionBinding(run.id)?.revision !== expectedGoalRevision
     || !chat || chat.goal_id !== goalId || chat.origin_surface !== run.surface
-    || !invocationMatchesGoalRevision(invocationRunId, goalId, expectedGoalRevision)) return null;
+    || !invocationMatchesGoalRevision(invocationRunId, goalId, invocationGoalRevision ?? expectedGoalRevision)) return null;
   return { runId: run.id };
+}
+
+/**
+ * The Goal an automation created right now can belong to, read fresh (call it inside the creation transaction): the Goal's live
+ * revision, or null when the Goal no longer exists for this chat (removed, another chat's, completed, cancelled or failed). Nothing is
+ * left to stop such an automation with, so it is created unbound and nobody is asked again. A Goal that only moved (its revision
+ * rose after the turn began, by an amendment or a re-plan) is still the Goal: bindCreatedAutomationToGoal binds to this revision.
+ * Only a positive end counts: a Goal row without a contract or a run row is not "ended" (older rows keep the rule they had).
+ * Graph error row 436, decision.
+ */
+export function liveGoalForAutomationCreation(goalId: string, chatId: string): ReturnType<typeof getChatGoalRevision> {
+  const revision = getChatGoalRevision(goalId);
+  if (!revision || revision.chatId !== chatId) return null;
+  const contract = getChatGoalContract(goalId);
+  if (contract && ["completed", "cancelled"].includes(contract.status)) return null;
+  const run = getLongRunByGoalId(goalId);
+  if (run && ["completed", "failed", "cancelled"].includes(run.status)) return null;
+  return revision;
+}
+
+/**
+ * The owner stopped this Goal while the turn that is registering an automation ran: it was cancelled (or is being cancelled), or deleted (no
+ * revision or contract row is left for it). The owner's Stop wins: such a turn registers nothing, so no standing automation outlives the Goal the
+ * owner just stopped. A Goal that completed or failed is not the owner's Stop (liveGoalForAutomationCreation: it creates the automation unbound).
+ */
+export function goalStoppedByOwner(goalId: string, chatId: string): boolean {
+  const revision = getChatGoalRevision(goalId), contract = getChatGoalContract(goalId);
+  if (!revision && !contract) return true;
+  if (revision && revision.chatId !== chatId) return false;
+  if (contract && contract.status === "cancelled") return true;
+  const run = getLongRunByGoalId(goalId);
+  return Boolean(run && ["cancelling", "cancelled"].includes(run.status));
 }
 
 /**
@@ -155,7 +205,13 @@ export function bindCreatedAutomationToGoal(input: {
     throw new Error("goal_automation_binding_identity_invalid");
   }
   return getDb().transaction(() => {
-    const owner = currentGoal(input.goalId, input.expectedGoalRevision, input.chatId, input.invocationRunId);
+    // The Goal may have moved while this turn ran: its revision rose after the attempt began (an owner amendment, a re-plan). A
+    // Goal revision bump is never by itself a reason to refuse ; the automation binds to the revision the
+    // Goal has NOW, with the revision the turn began under recorded beside it. An invocation that is no attempt of this Goal
+    // (null) proves nothing and stays unverified.
+    const attempt = invocationAttemptRevision(input.invocationRunId, input.goalId);
+    const movedFrom = attempt !== null && attempt < input.expectedGoalRevision ? attempt : undefined;
+    const owner = currentGoal(input.goalId, input.expectedGoalRevision, input.chatId, input.invocationRunId, movedFrom);
     const revision = getChatGoalRevision(input.goalId), run = getLongRunByGoalId(input.goalId);
     const finiteDeadline = revision?.lifecycle === "finite" ? goalDeadlineAt(input.goalId) : null;
     if (revision?.lifecycle === "finite" && (!finiteDeadline || Date.parse(finiteDeadline) <= Date.now()
@@ -176,6 +232,7 @@ export function bindCreatedAutomationToGoal(input: {
       ...(finiteDeadline ? { lifecycle: "finite" as const, deadlineAt: finiteDeadline } : {}),
       goalId: input.goalId, goalRevision: input.expectedGoalRevision,
       chatId: input.chatId, invocationRunId: input.invocationRunId,
+      ...(movedFrom !== undefined ? { invocationGoalRevision: movedFrom } : {}),
       automationId: row.id, automationCreatedAt: row.created_at,
       definitionDigest: definitionDigest(row),
       graphDigest: runGraphDigest(row.id),
@@ -200,6 +257,8 @@ function parseBinding(raw: string): BindingReceipt | null {
       || typeof value.invocationRunId !== "string" || typeof value.automationId !== "string"
       || typeof value.automationCreatedAt !== "string"
       || !Number.isSafeInteger(value.goalRevision) || typeof value.definitionDigest !== "string"
+      || (value.invocationGoalRevision !== undefined && (!Number.isSafeInteger(value.invocationGoalRevision)
+        || (value.invocationGoalRevision as number) < 1 || (value.invocationGoalRevision as number) >= (value.goalRevision as number)))
       || !/^[a-f0-9]{64}$/.test(value.definitionDigest)
       || !(value.graphDigest === null || typeof value.graphDigest === "string" && /^sha256:[a-f0-9]{64}$/.test(value.graphDigest))
       || ((value.amendmentMessageId !== undefined || value.amendmentProposalId !== undefined || value.amendmentProposalInputDigest !== undefined)
@@ -217,7 +276,7 @@ function bindingCurrent(binding: BindingReceipt, goalId: string, goalRevision: n
       amendmentMessageId: binding.amendmentMessageId,
       amendmentProposalId: binding.amendmentProposalId,
       amendmentProposalInputDigest: binding.amendmentProposalInputDigest })
-    : currentGoal(goalId, goalRevision, chatId, binding.invocationRunId);
+    : currentGoal(goalId, goalRevision, chatId, binding.invocationRunId, binding.invocationGoalRevision);
   return binding.goalId === goalId && binding.goalRevision === goalRevision && binding.chatId === chatId
     && Boolean(authority)
     && automation?.created_at === binding.automationCreatedAt
@@ -283,6 +342,7 @@ export function appendGoalAutomationRevisionBinding(input: {
       goalRevision: input.binding.goalRevision,
       chatId: input.binding.chatId,
       invocationRunId: input.binding.invocationRunId,
+      ...(input.binding.invocationGoalRevision !== undefined ? { invocationGoalRevision: input.binding.invocationGoalRevision } : {}),
       automationId: input.binding.automationId,
       automationCreatedAt: input.binding.automationCreatedAt,
       definitionDigest: input.definitionDigest,
@@ -345,6 +405,7 @@ export function appendGoalAutomationAmendmentBinding(input: {
       goalRevision: next.goalRevision,
       chatId: next.chatId,
       invocationRunId: next.invocationRunId,
+      ...(next.invocationGoalRevision !== undefined ? { invocationGoalRevision: next.invocationGoalRevision } : {}),
       automationId: next.automationId,
       automationCreatedAt: next.automationCreatedAt,
       definitionDigest: next.definitionDigest,

@@ -83,8 +83,9 @@ export function goalControlErrorText(input: { code: string | null; kind: "observ
     case "goal_objective_invalid":
       return ko ? "목표 문장을 확인해 주세요." : "Check the goal text.";
     default:
-      return ko ? `목표를 바꾸지 못했어요${code ? ` (${code})` : ""}. 위에 보이는 것이 지금 상태예요.`
-        : `The goal was not changed${code ? ` (${code})` : ""}. What is shown above is its current state.`;
+      // The raw machine message is on the line's hover title (the ⓘ beside it), never in the sentence.
+      return ko ? "목표를 바꾸지 못했어요. 위에 보이는 것이 지금 상태예요."
+        : "The goal was not changed. What is shown above is its current state.";
   }
 }
 type GoalView = { goalId: string | null; context: ChatGoalContext | null; continuity: ChatContinuitySnapshot | null; handoff: GoalRuntimeSelectionReceipt | null;

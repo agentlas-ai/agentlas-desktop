@@ -43,8 +43,19 @@ function unwrap(result: ToolCallResult | unknown): unknown {
   return result;
 }
 
+/**
+ * What the model reads when a run has no connection to the screen it asked for. The machine code stays first (logs and the AGI
+ * blocker match it); the sentence says what is missing and what to do, so the call is not retried in a loop. A turn served by the
+ * background service has no app window to drive (round 3, runtime-tools `unified-cua-native-transport-unavailable`).
+ */
+export function missingTransportMessage(kind: "browser" | "native"): string {
+  return kind === "native"
+    ? "unified-cua-native-transport-unavailable: this run has no connection to the Agentlas app window (it is closed or still attaching), so it cannot see or drive the screen. Do not call it again in this run: continue with the other tools, or tell the owner to open Agentlas and send the request again."
+    : "unified-cua-browser-transport-unavailable: this run has no connection to the Agentlas browser. Do not call it again in this run: continue with the other tools, or tell the owner to open Agentlas and send the request again.";
+}
+
 async function call(transport: ScopedToolTransport | undefined, tool: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> {
-  if (!transport) throw new Error(`unified-cua-${tool.startsWith("browser_") ? "browser" : "native"}-transport-unavailable`);
+  if (!transport) throw new Error(missingTransportMessage(tool.startsWith("browser_") ? "browser" : "native"));
   signal?.throwIfAborted();
   return unwrap(await transport.call(tool, args, signal));
 }

@@ -18,6 +18,8 @@
 import { app, BrowserWindow, Notification } from "electron";
 import { getMeta, setMeta } from "./store/meta";
 import { retainNotification } from "./notification-target";
+import { settledRunIsNotAFailure } from "../shared/run-failure-cause";
+import type { InvocationRunReceipt } from "../shared/types";
 
 const META_KEY = "run_alerts.v1";
 
@@ -93,10 +95,20 @@ export interface RunAlertInput {
   focused: boolean;
   /** 호스트가 관측한 '사람 입력 대기' — 상태 어휘가 아니라 별도 신호로 온다. */
   pendingQuestion?: boolean;
+  /**
+   * The settled receipt's own causes. When given, a run the owner stopped, a steering interrupt, a host stop (app closing,
+   * update restart) or a failure that is the app's own state is "not-a-failure": nothing toasts "Run failed" for it.
+   */
+  receipt?: Pick<InvocationRunReceipt, "status" | "interruptionCause" | "hostStopCause" | "errorCode" | "runtimeFailure">;
+  /**
+   * The owner's send queue will start this run's message again by itself (invocation/queue-retry-fact.ts). Not a failure the owner
+   * has to hear: they are told once, if the message finally does not go through (regression review C4).
+   */
+  retriedBySelf?: boolean;
 }
 
 export type RunAlertDecision =
-  | { alert: false; reason: "disabled" | "focused" | "too-short" | "failure-muted" | "not-terminal" }
+  | { alert: false; reason: "disabled" | "focused" | "too-short" | "failure-muted" | "not-terminal" | "not-a-failure" | "will-retry" }
   | { alert: true; kind: "done" | "failed" | "attention" };
 
 /**
@@ -115,6 +127,11 @@ export function decideRunAlert(settings: RunAlertSettings, input: RunAlertInput)
    */
   const terminal = new Set(["completed", "failed", "cancelled", "interrupted"]);
   if (!terminal.has(input.status)) return { alert: false, reason: "not-terminal" };
+  // The owner's own Stop, a steering interrupt, an update restart and the app's own custody codes are not failures; the owner
+  // must not hear "Run failed" for what they did themselves or for what the app continues by itself.
+  if (input.receipt && settledRunIsNotAFailure(input.receipt)) return { alert: false, reason: "not-a-failure" };
+  // An attempt the queue starts again by itself is not the end of the message: no "Run failed" for it, whatever the settings.
+  if (input.retriedBySelf === true && input.status === "failed") return { alert: false, reason: "will-retry" };
   const failed = input.status === "failed" || input.status === "cancelled" || input.status === "interrupted";
   const waiting = input.pendingQuestion === true;
   if (failed && !settings.alsoOnFailure) return { alert: false, reason: "failure-muted" };

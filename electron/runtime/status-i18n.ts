@@ -48,7 +48,6 @@ const DICT = {
     errAgentArchived: "보관된 에이전트입니다. 설정 › 저장공간에서 복구하세요.",
     errNoRuntime:
       "연결된 LLM 백엔드가 없습니다. 설정에서 Claude Code/Codex/Antigravity 또는 API 키를 연결해 주세요.",
-    errNoRunner: "지원하지 않는 런타임 조합: {kind}/{backend}",
     errKeyMissingAnthropic: "Anthropic API 키가 저장되어 있지 않습니다. 설정에서 추가하세요.",
     errKeyMissingOpenAI: "OpenAI API 키가 저장되어 있지 않습니다. 설정에서 추가하세요.",
     errKeyMissingGoogle: "Google API 키가 저장되어 있지 않습니다. 설정에서 추가하세요.",
@@ -117,7 +116,6 @@ const DICT = {
     errAgentArchived: "This agent is archived. Restore it in Settings › Storage.",
     errNoRuntime:
       "No LLM backend connected. Connect Claude Code, Codex, Antigravity, or an API key in Settings.",
-    errNoRunner: "Unsupported runtime combination: {kind}/{backend}",
     errKeyMissingAnthropic: "Anthropic API key is not saved. Add it in Settings.",
     errKeyMissingOpenAI: "OpenAI API key is not saved. Add it in Settings.",
     errKeyMissingGoogle: "Google API key is not saved. Add it in Settings.",

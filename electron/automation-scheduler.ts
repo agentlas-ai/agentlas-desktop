@@ -8,7 +8,7 @@ import { pollGoalWaitSubscriptions } from "./long-run/wait-subscriptions";
 import { announceAutomationContinuationRefused, automationRunOrigin, deliverAutomationResult, sealAutomationRunOrigin } from "./automation-delivery";
 import { captureMainContinuation } from "./runtime/scheduled-root-context";
 import { parkAutomationRunStop } from "./automation-execution-control";
-import { ownerFailureReason } from "../shared/owner-visible-activity-text";
+import { ownerFailureReason, plainRunReason } from "../shared/owner-visible-activity-text";
 import { claimAutomationNotification } from "./automation-notifications";
 import { STORE_BUSY_CODE, typedCodeChain } from "../shared/turn-settlement";
 import { getDb } from "./store/db";
@@ -48,6 +48,8 @@ import {
   pinLegacyAutomationHubVersions,
   consumeRunInput,
   updateAutomation,
+  automationOutputDigest,
+  previousSuccessfulRunOutput,
 } from "./store/automations";
 import { checkComputerUsePermissions, reportComputerUsePermissionIssues } from "./mac-permissions";
 import { appendChatMessage } from "./store/chats";
@@ -172,7 +174,7 @@ function classifyInBackground(input: {
             : verdict === "needs_input" ? "needs_input" : verdict === "blocked" ? "blocked" : "rejected";
           historyChanged = db.prepare(`UPDATE run_history SET outcome = ?, outcome_reason = ?
             WHERE id = ? AND automation_id = ? AND outcome = 'unjudged'`)
-            .run(outcome, classified.reason == null ? null : redactOperationalSecrets(classified.reason), runId, automation.id).changes === 1;
+            .run(outcome, classified.reason == null ? null : redactOperationalSecrets(plainRunReason(classified.reason, currentUiLocale()) ?? classified.reason), runId, automation.id).changes === 1;
           final = { outcome, reasonCode: classified.reasonCode ?? null };
         }
         if (classified && phase !== "reflection") recordAutomationJudgeReceipt(runId, automation.id, phase, classified);
@@ -222,8 +224,10 @@ import {
   classifyAutomationFailure,
   classifyAutomationOutcome,
   graphIsHostComputedOnly,
+  graphModelStepsMayReachOutside,
   isJudgmentUnavailable,
   type AutomationJudgeReceipt,
+  type PreviousRunObservation,
   type AutomationResultClassification,
   type AutomationResultStatus,
 } from "./automation-result";
@@ -281,6 +285,8 @@ import { automationServesOngoingGoal, declaredGoalForAutomation } from "./automa
 import { goalExecutionDirectivePromptBlock } from "./long-run/goal-execution-context";
 import { redactOperationalSecrets } from "./invocation/event-secret-redaction";
 import { maybeSweepEphemeralGraphs } from "./one/ephemeral-graphs";
+import { UNCONFIRMED_OCCURRENCE_MAX_DELIVERIES } from "./store/trigger-events";
+import { unconfirmedEffectFacts } from "./triggers/unconfirmed-effect";
 import type {
   TriggerDeliveryHooks,
   TriggerDispatchResult,
@@ -290,7 +296,8 @@ import type {
 /** 무활동 감시견이 멈춘 실행의 타입 원인 — 사용자 중지(automation_stopped_by_user)와 다르다. */
 export const AUTOMATION_WATCHDOG_STALL = "automation_watchdog_stall";
 
-const MAX_SCHEDULE_OCCURRENCE_ATTEMPTS = 3;
+// One cap for a scheduled occurrence and for an event occurrence whose outside effect stayed unknown (the trigger outbox).
+const MAX_SCHEDULE_OCCURRENCE_ATTEMPTS = UNCONFIRMED_OCCURRENCE_MAX_DELIVERIES;
 const SCHEDULE_RETRY_BASE_MS = 15 * 60_000;
 
 /** Preflight can fail before a graph row exists. Never fabricate a run to pay a judge. */
@@ -414,7 +421,7 @@ export const SYSTEM_OPTIMIZER_TIMEOUT_CODE = "system_optimizer_timeout";
 
 function appCloseClassification(): AutomationResultClassification {
   return { status: "partial", outcome: "partial", reasonCode: "automation_app_closed",
-    reason: "The app closed before this run settled. Review its recorded effects before restarting.", evidence: null };
+    reason: L("앱이 닫히면서 이 실행이 중간에 멈췄어요. 다음 실행에서 이어서 진행돼요.", "The app closed before this run finished. It continues on the next run."), evidence: null };
 }
 
 /**
@@ -1291,6 +1298,8 @@ async function runOne(
   /** 이번 실행이 "실패"가 아니라 "판정 불가"로 끝났는가 — 복구 워커·실패 표시의 억제 조건. */
   let judgmentUnavailableRun = false;
   let runError: string | null = null;
+  /** Plain lines for the steps the graph skipped for an internal reason (RunGraphResult.stepNotes): they ride the run history row of an ok run. */
+  let graphStepNotes: string | null = null;
   /**
    * 커널이 남긴 원문 실패 문자열. runError는 사용자에게 보여줄 문장으로 교체되므로
    * 기계 판단(부수효과 모호 → 재실행 정지)은 반드시 이 값으로 한다.
@@ -1301,6 +1310,8 @@ async function runOne(
    * steps cannot run again safely, returned the same output, or used their rework budget). No deferred retry.
    */
   let automaticRetryStopped: NonNullable<RunGraphResult["automaticRetry"]> | null = null;
+  /** Which steps stayed unconfirmed, from the kernel's node failures (the trigger outbox closes an occurrence on a repeat). */
+  let unconfirmedFacts: ReturnType<typeof unconfirmedEffectFacts> = undefined;
   let workspaceFailure: AutomationWorkspaceError | null = null;
   let output: string | undefined;
   let currentRunId: string | null = null;
@@ -1744,8 +1755,10 @@ async function runOne(
       const graphError = graphStall
         ? automationWatchdogError(graphStall)
         : result.error ?? null;
+      unconfirmedFacts = unconfirmedEffectFacts(result.nodeFailures, a.graph);
       runStatus = result.ok && !graphStall ? "ok" : "error";
       runError = graphError;
+      graphStepNotes = result.ok && !graphStall && result.stepNotes?.length ? result.stepNotes.join("\n").slice(0, 1_000) : null;
       if (!result.ok && !graphStall && result.automaticRetry?.allowed === false) {
         automaticRetryStopped = result.automaticRetry;
         tryRecordRunEvent({ runId, automationId: a.id, nodeId: result.automaticRetry.nodeId, kind: "automation_retry_stopped",
@@ -1802,12 +1815,30 @@ async function runOne(
           const hostComputedGraph = graphIsHostComputedOnly(a.graph);
           const evidenceActivity = currentRunId && !hostComputedGraph
             ? structuredClone(observedToolActivity(currentRunId)) : undefined;
+          // Zero tool calls disprove a success report only where a model step may reach outside (automation-result.ts).
+          const zeroToolCallsContradictSuccess = graphModelStepsMayReachOutside(a.graph, a.executionPermission);
+          // A change watch is judged against its own last successful output, which only the host can supply. The comparison is
+          // the host's: identical output on a host-computed graph is accepted without a model call (automation-result.ts).
+          let previousRun: PreviousRunObservation | undefined;
+          if (hostComputedGraph && currentRunId) {
+            try {
+              const previous = previousSuccessfulRunOutput(a.id, currentRunId);
+              if (previous) {
+                previousRun = { output: previous.output, outcome: previous.outcome,
+                  unchanged: previous.outputDigest === automationOutputDigest(evidenceOutput) };
+              }
+            } catch (previousError) {
+              // Advisory evidence: without it the judge sees this run alone, as before.
+              console.warn("[automation] previous run output unavailable:", previousError);
+            }
+          }
           const evidenceRecord = structuredClone(runRecord);
           const evidenceGoal = structuredClone(declaredGoalForAutomation(a));
           const judgedRunId = currentRunId;
           pendingClassifications.push(() => classifyInBackground({ automation: a, runId: currentRunId, phase: "outcome", sourceSignal: controller.signal,
             assertCurrent: assertGoalCurrent, classify: signal => classifyAutomationOutcome(evidenceOutput, {
               runtimeSelection: a.runtimeSelection, signal, toolActivity: evidenceActivity, hostComputedGraph,
+              zeroToolCallsContradictSuccess, ...(previousRun ? { previousRun } : {}),
               ...(evidenceRecord.steps.length > 0 ? { runRecord: evidenceRecord } : {}), declaredGoal: evidenceGoal,
             }),
             afterJudged: (final) => {
@@ -1865,7 +1896,7 @@ async function runOne(
       : appClosedControllers.has(controller)
       ? appCloseClassification()
       : controller.signal.aborted
-      ? { status: "partial" as const, reasonCode: "automation_stopped_by_user", reason: "The run was stopped. Review its recorded effects before restarting." }
+      ? { status: "partial" as const, reasonCode: "automation_stopped_by_user", reason: L("직접 멈춘 실행이에요. 다시 실행하면 멈춘 자리부터 이어서 해요.", "You stopped this run. Run it again to continue from where it stopped.") }
       : watchdogStopped
       // 호스트가 잰 사실(무활동 시간)이다 — 판정 모델에게 묻지 않고, 사용자 중지로도 적지 않는다. 복구 경로로 간다.
       ? { status: "error" as const, reasonCode: AUTOMATION_WATCHDOG_STALL, reason: automationWatchdogOwnerText(watchdogStall!, currentUiLocale()) }
@@ -1882,7 +1913,7 @@ async function runOne(
     // A failure judge may have yielded while Main closed or the owner stopped.
     if (appClosedControllers.has(controller)) classified = appCloseClassification();
     else if (controller.signal.aborted) classified = { status: "partial", reasonCode: "automation_stopped_by_user",
-      reason: "The run was stopped. Review its recorded effects before restarting." };
+      reason: L("직접 멈춘 실행이에요. 다시 실행하면 멈춘 자리부터 이어서 해요.", "You stopped this run. Run it again to continue from where it stopped.") };
     if ("judge" in classified) recordAutomationJudgeReceipt(currentRunId, a.id, "failure", classified);
     runStatus = controller.signal.aborted ? "partial" : classified.status;
     runReasonCode = classified.reasonCode ?? null;
@@ -1956,7 +1987,9 @@ async function runOne(
           try {
             markAutomationRun(a.id, opts?.fireTime ?? new Date(), {
               status: runStatus,
-              error: runError,
+              // An ok run that skipped a step for an internal reason keeps its result and shows one plain line per step in the run history
+              // (no failure, no notification: runError itself stays null).
+              error: runError ?? (runStatus === "ok" ? graphStepNotes : null),
               advanceSchedule: graphLoginWait ? false : opts?.advanceSchedule ?? true,
               // 판정이 "사람 손이 필요하다"고 본 실행은 지금까지처럼 발생을 소진하지 않는다
               // (max_runs 보존). status가 ok로 남아도 이 정책은 그대로다 — 정책은 판정을 본다.
@@ -2123,12 +2156,10 @@ async function runOne(
       // 외부 mutation의 성패가 확인되지 않은 실행도 복구를 보류하지 않는다(1.2.54부터). 위에서
       // graph_effect_check_pending 사실을 남기고, 복구 사유에 "모르는 결과는 보존하고 그 미확인
       // 외부 행동은 반복하지 말라"를 항상 붙여 System Optimizer가 같은 효과를 재시도하지 않게 한다.
-      // An interrupted step that may have acted waits for the owner's choice. No recovery worker is sent to "redo
-      // what has not happened" in its place: that is the same repeat the hold exists to prevent.
       if (
         (runStatus !== "ok" && runStatus !== "skipped") &&
         !shutdownDispatchClosed && !controller.signal.aborted && getAutomation(a.id)?.enabled === true &&
-        !parentMissing && !leaseOwnershipLost && automaticRetryStopped?.reasonCode !== "run_interrupted_effect"
+        !parentMissing && !leaseOwnershipLost
       ) {
         try {
           const repairReason = `${runError ?? "Result check is pending"}. Check the current external state yourself and decide what still needs doing; redo only what has not happened.`;
@@ -2320,11 +2351,13 @@ async function runOne(
     }
   }
   return { accepted: true, automationId: a.id, runId: currentRunId, status: runStatus, error: runError, output,
-    // An owner Stop is the same boundary for an event delivery: the outbox parks it for the owner instead of redelivering it.
+    // An owner Stop is the same boundary for an event delivery: the outbox parks it for the owner instead of redelivering it. A check that
+    // stopped is not the owner's Stop: it says so, and the outbox closes that occurrence by itself (nothing to repair, nothing to ask).
     ...(automaticRetryStopped || stoppedByOwner(controller) ? { automaticRetry: false as const } : {}),
+    ...(automaticRetryStopped && !stoppedByOwner(controller) ? { checkStopped: { reasonCode: automaticRetryStopped.reasonCode } } : {}),
     // The same typed boundary graph_effect_check_pending records above; the trigger outbox parks on it.
     ...(runStatus !== "ok" && runStatus !== "skipped" && requiresGraphReconciliation(machineError ?? runError)
-      ? { effectsUnconfirmed: true as const } : {}) };
+      ? { effectsUnconfirmed: true as const, ...(unconfirmedFacts ? { unconfirmed: unconfirmedFacts } : {}) } : {}) };
 }
 
 export async function runDueAutomationsNow(now: Date = new Date()): Promise<void> {
@@ -2493,6 +2526,10 @@ export function subscribeGraphLoginWait(result: RunGraphResult, controller: Abor
 export async function runAutomationNow(id: string, opts?: { dryRun?: boolean; fresh?: boolean; ownerInitialVars?: Record<string, unknown> }, mainAdmission?: MainInvocationAdmission): Promise<TriggerDispatchResult> {
   mainAdmission = takeMainInvocationAdmission(mainAdmission);
   if (shutdownDispatchClosed) throw new Error("Automation execution is closed because the app is quitting");
+  // An update being prepared holds new dispatch for the drain (at most 45 s) and then either installs, which restarts the app, or lets go.
+  // Run now waits that window out instead of failing at once, and is refused only if the hold outlasts the wait.
+  for (let waited = 0; installQuiescing && !shutdownDispatchClosed && waited < 20_000; waited += 250) await new Promise((resolve) => setTimeout(resolve, 250));
+  if (shutdownDispatchClosed) throw new Error("Automation execution is closed because the app is quitting");
   if (installQuiescing) throw new Error("Automation execution is paused while an update is prepared");
   const a = getAutomation(id);
   if (!a) throw new Error(`Automation not found: ${id}`);
@@ -2619,8 +2656,8 @@ export async function notifyPendingInterruptedRuns(): Promise<void> {
   for (const row of rows) {
     const automation = getAutomation(row.automation_id);
     if (!automation) continue;
-    const error = L("앱이 멈춰 실행이 중단됐어요. 다시 해도 안전한 단계만 이어서 하고, 바깥에 이미 반영됐을 수 있는 단계는 실행 기록에서 고르실 때까지 기다려요.",
-      "The app stopped during this run. Only steps that are safe to repeat continue; a step that may already have acted outside waits for your choice in run history.");
+    const error = L("앱이 멈춰 실행이 중단됐어요. 끝난 단계는 그대로 두고 멈춘 단계부터 이어서 실행해요. 바깥에 이미 반영됐을 수 있는 단계는 현재 상태를 먼저 확인해요.",
+      "The app stopped during this run. It continues from the step that was running; finished steps stay as they are, and a step that may already have acted outside first checks the current state.");
     if (!claimAutomationNotification({ automationId: automation.id, runId: row.run_id, status: "partial", error })) continue;
     notifyDone(automation, "partial", error, true);
     await notifyTelegramAutomationDone(automation, "partial", { error, output: "", at: new Date().toISOString() });

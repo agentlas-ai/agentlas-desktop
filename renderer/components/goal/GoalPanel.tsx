@@ -120,8 +120,9 @@ const ERROR_TEXT: Record<string, [string, string]> = {
 function errorText(code: string, locale: Locale): string {
   const known = ERROR_TEXT[code];
   if (known) return known[locale === "ko" ? 0 : 1];
-  return locale === "ko" ? `바꾸지 못했어요${code ? ` (${code})` : ""}. 위에 보이는 것이 지금 저장된 상태예요.`
-    : `That change did not go through${code ? ` (${code})` : ""}. What is shown above is what is saved now.`;
+  // The machine code is not part of the sentence; it stays on the line's hover title (support reads it there).
+  return locale === "ko" ? "바꾸지 못했어요. 위에 보이는 것이 지금 저장된 상태예요."
+    : "That change did not go through. What is shown above is what is saved now.";
 }
 
 function relative(at: string, nowMs: number, locale: Locale): string {
@@ -198,7 +199,7 @@ export function GoalRailPanel({ view, locale, onView, nowMs: fixedNow }: {
   const [editing, setEditing] = useState<string | null>(null);
   const [adding, setAdding] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [notice, setNotice] = useState<{ kind: "error" | "ok"; text: string } | null>(null);
+  const [notice, setNotice] = useState<{ kind: "error" | "ok"; text: string; code?: string } | null>(null);
   const [confirmRemove, setConfirmRemove] = useState<string | null>(null);
   const [expanded, setExpanded] = useState(false);
   const [limitsOpen, setLimitsOpen] = useState(false);
@@ -214,7 +215,7 @@ export function GoalRailPanel({ view, locale, onView, nowMs: fixedNow }: {
     try {
       const result = await api.edit({ chatId: view.chatId, expectedGoalId: view.goalId, expectedPlan: view.plan, edit });
       if (result.view) onView(result.view);
-      if (!result.ok) { setNotice({ kind: "error", text: errorText(result.code, locale) }); return false; }
+      if (!result.ok) { setNotice({ kind: "error", text: errorText(result.code, locale), code: result.code }); return false; }
       const text = okText?.(result) ?? null;
       if (text) setNotice({ kind: "ok", text });
       return true;
@@ -231,7 +232,7 @@ export function GoalRailPanel({ view, locale, onView, nowMs: fixedNow }: {
     try {
       const result = await api.shape(view.chatId, view.goalId);
       if (result.view) onView(result.view);
-      if (!result.ok) setNotice({ kind: "error", text: errorText(result.code, locale) });
+      if (!result.ok) setNotice({ kind: "error", text: errorText(result.code, locale), code: result.code });
     } catch {
       // A thrown shape call left no notice at all (the button just stopped spinning).
       setNotice({ kind: "error", text: errorText("", locale) });
@@ -403,6 +404,6 @@ export function GoalRailPanel({ view, locale, onView, nowMs: fixedNow }: {
       </ol>
     </section>}
 
-    {notice && <p className={notice.kind === "error" ? styles.error : styles.ok} role={notice.kind === "error" ? "alert" : "status"} data-goal-notice={notice.kind}>{notice.text}</p>}
+    {notice && <p className={notice.kind === "error" ? styles.error : styles.ok} role={notice.kind === "error" ? "alert" : "status"} data-goal-notice={notice.kind} title={notice.code || undefined}>{notice.text}</p>}
   </div>;
 }

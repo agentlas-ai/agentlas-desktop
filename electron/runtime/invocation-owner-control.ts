@@ -1,4 +1,7 @@
 import { invocationService } from "../invocation/service";
+import { abandonWaitingRetries, chatOfRun } from "../invocation/pending-chat-sends";
+import { recordOwnerStop } from "../invocation/earlier-attempt";
+import { getDb } from "../store/db";
 import { invocationProcessOwner, invocationRunOwners } from "../store/invocation-run-owners";
 import { existingCurrentTurnSteer, getCurrentTurnSteer, settleCurrentTurnSteer, validateCurrentTurnSteer } from "../store/current-turn-steers";
 import { createInvocationOwnerRouter, invocationOwnerUnavailable } from "./invocation-owner-router";
@@ -79,6 +82,31 @@ export const steerInvocationOwnerNextTurn = createInvocationOwnerNextTurnRouter(
   },
 });
 
+/**
+ * The owner's own Stop ends the messages of that chat that are waiting out an internal retry (a run that failed before any model call for the
+ * app's own state, started again after a backoff): the retry would otherwise run them after the Stop. SQL on the shared store, so it does not
+ * matter which process hosts the run: the window's invoke:cancel calls it once before it routes the Stop (this process, the background
+ * service, a recovered run), and the phone reaches it through stopInvocationRunByOwner. A cancel the host issues for its own reasons (a graph
+ * step's end, a teammate's run closed with its job, a Work session) never calls it: that is not the owner stopping their messages.
+ * Never blocks the Stop.
+ */
+export function abandonOwnerWaitingRetries(runId: string): number {
+  try {
+    const db = getDb();
+    const chatId = chatOfRun(db, runId);
+    if (!chatId) return 0;
+    // The marker is what a start that fails because of this Stop reads (a Stop of a run still being prepared writes no cancel event).
+    recordOwnerStop(db, chatId);
+    return abandonWaitingRetries(db, chatId);
+  } catch { return 0; }
+}
+
+/** The phone's Stop: the same as the window's (waiting retries ended first, then the run cancelled wherever it is held). */
+export async function stopInvocationRunByOwner(runId: string): Promise<"requested" | "already-requested" | "not-found"> {
+  abandonOwnerWaitingRetries(runId);
+  return cancelInvocationOwnerRun(runId);
+}
+
 /** Shared client ingress; it never reconciles another process's pending row. */
 export const invocationCurrentTurnControl = {
   currentTurn: (chatId: string) => router().currentTurn(chatId),
@@ -86,7 +114,31 @@ export const invocationCurrentTurnControl = {
   currentTurnSteerReceipt: (chatId: string, intentId: string) => router().currentTurnSteerReceipt(chatId, intentId),
 };
 
-export async function cancelInvocationOwnerRun(runId: string): Promise<"requested" | "already-requested" | "not-found"> {
+/**
+ * Cancels a run wherever it is held (the window's third route, the phone, the team, a Work session). Besides the run, when the run is a
+ * teammate's job (one_team_dispatches), that job is closed as stopped and marked reported, so nobody reports to One about a job the owner
+ * stopped. `dispatchBookkeeping: false` is for a caller that closes the job itself (a graph step's end, the stop of a job in
+ * one/team-dispatch.ts): it cancels the run only. It never touches the owner's queued messages: those end only with the owner's own Stop,
+ * which calls abandonOwnerWaitingRetries (the window) or stopInvocationRunByOwner (the phone).
+ */
+export async function cancelInvocationOwnerRun(runId: string, options: { dispatchBookkeeping?: boolean } = {}): Promise<"requested" | "already-requested" | "not-found"> {
+  if (options.dispatchBookkeeping !== false) {
+    let stopped: Awaited<ReturnType<typeof import("../one/team-dispatch").stopTeamDispatchOfRun>> = null;
+    try {
+      stopped = await (require("../one/team-dispatch") as typeof import("../one/team-dispatch")).stopTeamDispatchOfRun(runId, (id) => cancelRunWhereHeld(id));
+    } catch (error) {
+      // The bookkeeping never stands between the owner and the Stop: the run is cancelled below as it always was.
+      console.warn("[owner-stop] teammate job bookkeeping skipped:", error instanceof Error ? error.message : error);
+    }
+    if (stopped) {
+      if ("pending" in stopped) throw invocationOwnerUnavailable(); // saved; the card says so, and it is asked again by itself
+      return stopped.status;
+    }
+  }
+  return cancelRunWhereHeld(runId);
+}
+
+async function cancelRunWhereHeld(runId: string): Promise<"requested" | "already-requested" | "not-found"> {
   const local = invocationService.cancel(runId);
   if (local !== "not-found") return local;
   const owner = invocationRunOwners.getOwnerByRunId(runId);

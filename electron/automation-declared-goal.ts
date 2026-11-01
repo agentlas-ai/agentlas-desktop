@@ -15,7 +15,9 @@ import { readCurrentGoalAutomationBinding } from "./long-run/automation-provenan
 import { getAutomationStrategyGoalOrigin } from "./store/automation-strategy-proposals";
 import type { DeclaredAutomationGoal } from "./automation-result";
 
-const GOAL_TEXT_MAX = 1_800;
+const GOAL_TEXT_MAX = 1_000;
+/** The run's own instruction, when the automation has no saved goal: it defines the replies the run may give (for example "[quiet]"). */
+const INSTRUCTION_TEXT_MAX = 900;
 
 function owningGoalRevision(a: Pick<Automation, "id" | "goalId">) {
   const goalId = readCurrentGoalAutomationBinding(a.id)?.goalId
@@ -39,21 +41,25 @@ export function automationServesOngoingGoal(a: Pick<Automation, "id" | "goalId">
   }
 }
 
-export function declaredGoalForAutomation(a: Pick<Automation, "id" | "name" | "goal" | "goalId">): DeclaredAutomationGoal {
+export function declaredGoalForAutomation(a: Pick<Automation, "id" | "name" | "goal" | "goalId"> & { promptTemplate?: string | null }): DeclaredAutomationGoal {
   const saved = String(a.goal ?? "").trim();
   if (saved) return { name: a.name ?? null, goal: saved };
+  // With no saved goal the judge used to see a name and, at best, the owning Goal. It never saw what the run was told to do, so a reply the
+  // instruction itself defines ("nothing changed: answer exactly [quiet]") read as "no result in the record" and went to the owner every
+  // 15 minutes (64 of 103 needs_input rows of one tracker, observed in use).
+  const instruction = String(a.promptTemplate ?? "").replace(/\s+/g, " ").trim();
+  const instructionLine = instruction && instruction !== String(a.name ?? "").trim()
+    ? `Instruction given to every run: ${instruction.slice(0, INSTRUCTION_TEXT_MAX)}` : null;
   try {
     const revision = owningGoalRevision(a);
-    if (!revision) return { name: a.name ?? null, goal: null };
+    if (!revision) return { name: a.name ?? null, goal: instructionLine };
     const lifecycle = revision.lifecycle === "ongoing"
       ? "ongoing (retained until the owner stops it; each run is one episode toward it)"
       : "finite";
     const objective = revision.objective.replace(/\s+/g, " ").trim().slice(0, GOAL_TEXT_MAX);
-    return {
-      name: a.name ?? null,
-      goal: `Owning Goal (revision ${revision.revision}, ${lifecycle}): ${objective}`,
-    };
+    const owning = `Owning Goal (revision ${revision.revision}, ${lifecycle}): ${objective}`;
+    return { name: a.name ?? null, goal: instructionLine ? `${instructionLine}\n${owning}` : owning };
   } catch {
-    return { name: a.name ?? null, goal: null };
+    return { name: a.name ?? null, goal: instructionLine };
   }
 }

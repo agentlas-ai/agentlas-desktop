@@ -8,7 +8,25 @@ import { APP_CALL_ANSWER_WINDOW_MS, appCallPendingNotice, isAppCallPending } fro
 // owner's screen). It asks Main over the device bridge instead; Main runs the very same service with its own policy,
 // owner-turn rule and handlers. No electron import: the service loads this without Electron.
 
-type AppBridge = Pick<DaemonDeviceBridge, "appControl">;
+type AppBridge = Pick<DaemonDeviceBridge, "appControl"> & Partial<Pick<DaemonDeviceBridge, "attached" | "whenAttached">>;
+
+// The window process is not attached for a few seconds at app start and while its channel re-attaches (main.log "re-attach
+// scheduled"); a call made in that gap used to be refused at once with app-window-unavailable (observed in use: 35 refusals in two
+// chats). Nothing has been sent while Main is not attached, so the call may wait for it. A window that is really closed stays closed:
+// the first call to find none waits this long, and the next ones within the memo are refused at once, as before.
+const MAIN_ATTACH_WAIT_MS = 6_000;
+const MAIN_ABSENT_MEMO_MS = 30_000;
+const mainAbsentAt = new WeakMap<object, number>();
+
+async function waitForMain(bridge: AppBridge, withinMs: number): Promise<void> {
+  if (bridge.attached !== false) { mainAbsentAt.delete(bridge); return; }
+  if (!bridge.whenAttached || !(withinMs > 0)) return;
+  const gaveUpAt = mainAbsentAt.get(bridge);
+  if (gaveUpAt !== undefined && Date.now() - gaveUpAt < MAIN_ABSENT_MEMO_MS) return;
+  const waitMs = Math.min(MAIN_ATTACH_WAIT_MS, withinMs);
+  if (await bridge.whenAttached(waitMs)) mainAbsentAt.delete(bridge);
+  else if (waitMs >= MAIN_ATTACH_WAIT_MS) mainAbsentAt.set(bridge, Date.now()); // only a full wait proves the window is not coming
+}
 
 function unavailable(error: unknown): { code: string; message: string } {
   const code = error instanceof DeviceBridgeError ? error.code : "device_bridge_unavailable";
@@ -20,6 +38,7 @@ function unavailable(error: unknown): { code: string; message: string } {
 
 export async function remoteAppControlOperations<T extends object>(input: Record<string, unknown>, listLocally: (input: any) => T, bridge: AppBridge = daemonDeviceBridge()): Promise<T & { app_window?: { available: false; code: string; message: string } }> {
   try {
+    await waitForMain(bridge, MAIN_ATTACH_WAIT_MS);
     const answer = await bridge.appControl({ kind: "operations", ownerTurn: false, input });
     if (answer.outcome === "value") return answer.value as T;
     // Main refused or failed: say so, with the catalog this process can describe (nothing in it is runnable here).
@@ -40,6 +59,7 @@ export async function remoteAppControlCall(caller: AppControlCaller, input: { op
   // "running": the operation was neither refused nor lost, and the model's repeat of the call reaches the same run.
   const operation = typeof input.operation === "string" ? input.operation.trim() : "";
   const deadline = Date.now() + windowMs;
+  await waitForMain(bridge, deadline - Date.now() - 1500);
   for (;;) {
     try { answer = await bridge.appControl({ kind: "call", ownerTurn: caller.ownerTurn === true, permission: caller.permission ?? "read", input: request }); }
     catch (error) {

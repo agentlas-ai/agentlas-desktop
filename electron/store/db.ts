@@ -27,6 +27,7 @@ import { GRAPH_CHECKPOINT_SCHEMA, PREVIOUS_GRAPH_CHECKPOINT_SCHEMA, sha256Value 
 import { tagSurfacePackChatsInDb } from "./surface-conversation-schema";
 import { createChatRuntimeSelectionTicketSchema } from "./chat-runtime-selection-ticket";
 import { createFollowupCustodySchema } from "./followup-custody-schema";
+import { settleDeadHostTriggerEvent } from "./unconfirmed-occurrence";
 
 // Picks the Korean or English human-readable string for the current UI locale.
 const L = (ko: string, en: string): string => (currentUiLocale() === "ko" ? ko : en);
@@ -714,17 +715,14 @@ function recoverStaleAutomationRunsInDb(db: Database.Database, now: Date): numbe
                WHERE id = ? AND status = 'claimed'`,
             ).run(now.toISOString(), now.toISOString(), event.id);
           } else {
-            db.prepare(
-              `UPDATE automation_trigger_events
-               SET status = 'parked', claim_owner = NULL, claimed_until = NULL,
-                   run_id = ?, last_error = ?, updated_at = ?
-               WHERE id = ? AND status = 'claimed'`,
-            ).run(
-              candidate.id,
-              "trigger_event_stale_run_reconciliation_required",
-              now.toISOString(),
-              event.id,
-            );
+            // The host died while this occurrence ran and the checkpoint cannot prove the step in flight only read. decision
+            //: an unknown outcome never stops to ask (this used to park the event for the owner). The occurrence is
+            // delivered again and resumes where it was; the dead run counts as one delivery with an unknown outcome and the third
+            // closes it by itself (store/unconfirmed-occurrence.ts).
+            settleDeadHostTriggerEvent(db, {
+              eventId: event.id, automationId: candidate.automation_id, runId: candidate.id,
+              occurrenceId: candidate.occurrence_id, now, hasRunEvents,
+            });
           }
         }
       }
@@ -4089,6 +4087,15 @@ export function initStore(options: StoreInitOptions = {}): void {
     const eventColumns = new Set(schemaColumns(_db, "automation_trigger_events").map((column) => column.name));
     if (!eventColumns.has("run_outcome")) {
       _db.exec("ALTER TABLE automation_trigger_events ADD COLUMN run_outcome TEXT");
+    }
+    // Deliveries of this occurrence that ended with an unknown outside effect, and the fingerprint of the last one. The outbox
+    // closes an occurrence whose outcome stays unknown after 3 deliveries (the scheduled-occurrence cap), or at the first repeat
+    // of the same failure for a step no model can re-read (store/trigger-events.ts settleUnconfirmedTriggerEventAttempt).
+    if (!eventColumns.has("unknown_outcome_count")) {
+      _db.exec("ALTER TABLE automation_trigger_events ADD COLUMN unknown_outcome_count INTEGER NOT NULL DEFAULT 0");
+    }
+    if (!eventColumns.has("unknown_outcome_signature")) {
+      _db.exec("ALTER TABLE automation_trigger_events ADD COLUMN unknown_outcome_signature TEXT");
     }
   }
 

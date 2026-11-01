@@ -1,6 +1,6 @@
 import {currentOneMobileSecureAdapter} from "../secrets/one-mobile-secure";
 import { MobilePushService } from "./push";
-import { cancelInvocationOwnerRun, invocationCurrentTurnControl } from "../runtime/invocation-owner-control";
+import { invocationCurrentTurnControl, stopInvocationRunByOwner } from "../runtime/invocation-owner-control";
 import { desktopGoalControlServices } from "./goal-control";
 import { startWithRetainedMobileBridgePort } from "./port-retry";
 import os from "node:os";
@@ -317,7 +317,7 @@ async function startBridgeInternal(
     ...(nativeToolApprovals ? { nativeToolApprovals } : {}),
     oneSecure: currentOneMobileSecureAdapter,
     currentTurnControl: invocationCurrentTurnControl,
-    cancelInvocationRun: cancelInvocationOwnerRun,
+    cancelInvocationRun: stopInvocationRunByOwner,
     ...(push ? { mobilePush: push } : {}),
     goalControl: options.hostAuthority?.goalControl === false ? undefined : desktopGoalControlServices(),
     hostIdentity: identity,

@@ -8,6 +8,7 @@ import { hostRunChildrenEnded, spawnRegistryDirectory } from "../runtime/spawn-r
 import { ownProcessStartToken, processState, proveTerminalOwnerGone } from "../store/terminal-owner-liveness";
 import { getRoute } from "./routes";
 import { AGENT_SKILL_ROOTS, materializeAgentFiles, resolveAgentPackageDir } from "./files";
+import { skillsLeftOut } from "./skill-candidates";
 import { agentRevisionOutcomes, compareRevisionOutcomes } from "./revision-outcomes";
 import { lessonEvidence, lessonRunIds } from "./learning-evidence";
 import { runEvidenceRef } from "../memory/run-evidence";
@@ -98,10 +99,46 @@ function acquireWriteLock(agentId: string): WorkspaceWriteLock {
   try {
     fd = fs.openSync(lock, "wx", 0o600); original = fs.fstatSync(fd);
     fs.writeFileSync(fd, JSON.stringify({ pid: process.pid, createdAt: iso() })); fs.fsyncSync(fd);
-  } catch (error) { release(); throw new AgentWorkspaceError("update_busy", "Another process is changing this agent. Refresh after it finishes."); }
+  } catch (error) {
+    release();
+    // `contended`: the lock file is there because another change holds it (EEXIST). Any other failure to take it (a read-only or full disk, no
+    // permission) is not going to clear in a few seconds: it keeps the code its callers know, and the wait below does not wait it out.
+    throw Object.assign(new AgentWorkspaceError("update_busy", "Another process is changing this agent. Refresh after it finishes."),
+      { contended: (error as NodeJS.ErrnoException | undefined)?.code === "EEXIST" });
+  }
   return { assertHeld() {
     if (fd === undefined || !sameFile()) throw new AgentWorkspaceError("mutation_lease_changed", "The original workspace change lock is no longer held.");
   }, release };
+}
+/**
+ * How long a change of an agent's files waits for another change of the same agent to finish before it reports update_busy. The write
+ * lock is a file taken without waiting (acquireWriteLock is synchronous, and a synchronous wait here would freeze Main and the very change
+ * it waits for), so the wait is made around it, asynchronously, by the callers that can await: the owner's editor (workspace-ipc.ts), a
+ * mutation lease, and a run that starts on the agent (waitForAgentWorkspaceLock). About 4.6 s in all. The array is exported so a gate can
+ * shorten it.
+ */
+export const WORKSPACE_LOCK_WAITS_MS: number[] = [150, 300, 600, 1_200, 2_400];
+/**
+ * Runs `action`, and again after a short wait each time it was refused with update_busy (the lock was held, nothing of the action had run:
+ * acquireWriteLock throws before any of it), without ever blocking the event loop. Any other error, and the last update_busy, are
+ * rethrown unchanged. Only for an action whose first step is taking the lock.
+ */
+export async function withWorkspaceLockPatience<T>(action: () => T | Promise<T>, onWait?: () => void): Promise<T> {
+  for (let attempt = 0; ; attempt += 1) {
+    try { return await action(); }
+    catch (error) {
+      if (!(error instanceof AgentWorkspaceError) || error.code !== "update_busy" || attempt >= WORKSPACE_LOCK_WAITS_MS.length) throw error;
+      // A failure to take the lock that is not another change holding it (acquireWriteLock marks it) is not waited out.
+      if ((error as { contended?: boolean }).contended === false) throw error;
+      // Said once, when the wait really starts, so a caller that can show progress does not leave the owner looking at a silent run.
+      if (attempt === 0) { try { onWait?.(); } catch { /* progress is a courtesy */ } }
+      await new Promise<void>((resolve) => { setTimeout(resolve, WORKSPACE_LOCK_WAITS_MS[attempt]); });
+    }
+  }
+}
+/** Waits (bounded, asynchronously) until no other change holds this agent's files, so the synchronous step that follows takes the lock. */
+export async function waitForAgentWorkspaceLock(agentId: string, onWait?: () => void): Promise<void> {
+  await withWorkspaceLockPatience(() => { acquireWriteLock(agentId).release(); }, onWait);
 }
 function withLock<T>(agentId: string, action: () => T): T {
   if (mutationCall) {
@@ -134,7 +171,7 @@ export async function withAgentWorkspaceMutationLease<T>(agentId: string,
   action: (lease: AgentWorkspaceMutationLease) => T | Promise<T>): Promise<T> {
   if (typeof agentId !== "string" || !agentId || typeof action !== "function" || mutationCall)
     throw new AgentWorkspaceError("mutation_lease_invalid", "An original agent and change callback are required.");
-  const lock = acquireWriteLock(agentId); let active = true;
+  const lock = await withWorkspaceLockPatience(() => acquireWriteLock(agentId)); let active = true;
   function assertHeld(receiver: unknown): void {
     if (!active || receiver !== lease) throw new AgentWorkspaceError("mutation_lease_expired", "This workspace change lock is no longer available.");
     lock.assertHeld();
@@ -411,6 +448,25 @@ function recordDeferred(agentId: string, entries: Record<string, string>): void 
   const dir = agentWorkspaceStorePath(agentId); fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   atomicJson(deferredFile(agentId), { ...readDeferred(agentId), ...entries });
 }
+/**
+ * Lessons deferred for want of room in the always-on instructions (a second instruction_growth / instruction_limit refusal) are kept next to
+ * their fingerprint with a `room:` mark holding the digest of that instruction file at the time. The line the owner reads says they are
+ * proposed again when the instructions are shorter: this is what keeps it true. The next look at an agent whose instruction file is not that
+ * file any more (shortened, or edited at all) releases them, so the proposer offers them once more; an unchanged file keeps them deferred.
+ */
+function releaseRoomDeferrals(agentId: string, entryText?: string): void {
+  try {
+    const deferred = readDeferred(agentId);
+    const held = Object.keys(deferred).filter(key => key.startsWith("room:"));
+    if (!held.length) return;
+    let text = entryText;
+    if (text === undefined) { const tree = snapshotAgentWorkspace(rootFor(agentId).root); text = treeText(tree, tree.canonicalEntry); }
+    const digest = workspaceHash(text);
+    const next = { ...deferred }; let changed = false;
+    for (const key of held) if (deferred[key] !== digest) { delete next[key]; delete next[key.slice("room:".length)]; changed = true; }
+    if (changed) atomicJson(deferredFile(agentId), next);
+  } catch { /* the lessons stay deferred; the next look tries again */ }
+}
 function memoryCandidates(agentId: string, proposals: StoredProposal[], options: { events?: boolean } = {}): AgentWorkspaceMemoryCandidate[] {
   // UI projections do not need embeddings. The general memory reader lazily
   // computes and writes legacy embeddings, so use a bounded read-only query.
@@ -493,6 +549,7 @@ function eligibleLessonCount(candidates: AgentWorkspaceMemoryCandidate[]): numbe
 }
 /** Lessons that came back often enough and have no change yet, most recurring first. The background proposer reads this. */
 export function readyLessonsFor(agentId: string): Array<{ groupId: string; memoryIds: string[]; runs: number }> {
+  releaseRoomDeferrals(agentId);
   const groups = new Map<string, AgentWorkspaceMemoryCandidate[]>();
   for (const candidate of memoryCandidates(agentId, listProposals(agentId), { events: false })) groups.set(candidate.groupId ?? candidate.id, [...(groups.get(candidate.groupId ?? candidate.id) ?? []), candidate]);
   return [...groups].filter(([, members]) => members.every(member => member.state === "eligible"))
@@ -755,7 +812,7 @@ export function acquireAgentWorkspaceRunLease(agentId: string, runId: string, ho
       if (work && work.state !== "accepted") throw new AgentWorkspaceError("work_registration_changed", "The original WORK registration is not active.");
     }
     const history=historyRegistration(agentId);if(history&&history.state!=="accepted")throw new AgentWorkspaceError("work_registration_changed","The personal file registration is not active.");
-    assertNoUnreviewedNativeCandidates(root);
+    noteSkillsLeftOut(agentId, root);
     const { tree, unverified } = snapshotAgentWorkspaceForRun(root); const revision = currentRevision(agentId, tree);
     const startToken = ownProcessStartToken();
     // Where THIS host records the CLI children it starts: a later process (another host, or this one after a restart) reads it back to
@@ -774,27 +831,62 @@ export function acquireAgentWorkspaceRunLease(agentId: string, runId: string, ho
     return { revisionId: revision.id, treeDigest: tree.treeDigest };
   });
 }
-function assertNoUnreviewedNativeCandidates(root: string): void {
-  const registryPath = path.join(privateDirectory(root, ".agentlas"), "skill-registry.json"); if (!fs.existsSync(registryPath)) return;
-  const registryStat = fs.lstatSync(registryPath);
-  if (!registryStat.isFile() || registryStat.isSymbolicLink() || registryStat.nlink !== 1) throw new AgentWorkspaceError("skill_registry_unsafe", "Review this agent's skill registry before running.");
-  const registry = readJson<{ kind?: string; skills?: Array<{ slug?: string; tier?: string; state?: string }> }>(registryPath);
-  if (registry.kind !== "agentlas-skill-lifecycle-registry" || !Array.isArray(registry.skills)) return;
-  for (const skill of registry.skills) {
-    if (skill.tier !== "candidate" || !["candidate", "local_candidate"].includes(skill.state ?? "") || !skill.slug || !/^[a-z0-9][a-z0-9_-]{0,100}$/.test(skill.slug)) continue;
-    if (fs.existsSync(path.join(root, ".claude", "skills", skill.slug, "SKILL.md"))) throw new AgentWorkspaceError("unreviewed_native_skill", "A legacy candidate is in a runtime skill folder. Review its removal or promotion before running.");
-  }
+const reportedSkillsLeftOut = new Map<string, string>();
+/**
+ * A legacy candidate in the native skill root, or a registry that cannot be read as a plain file, no longer refuses the run
+ * (unreviewed_native_skill, skill_registry_unsafe): the run's skill list leaves those skills out (skill-candidates.ts). Said once per
+ * change, by identity only.
+ */
+function noteSkillsLeftOut(agentId: string, root: string): void {
+  const leftOut = skillsLeftOut(root);
+  const signature = leftOut.nativeRootUntrusted ? "untrusted-registry" : [...leftOut.slugs].sort().join(",");
+  if (reportedSkillsLeftOut.get(agentId) === signature) return;
+  if (signature) reportedSkillsLeftOut.set(agentId, signature); else reportedSkillsLeftOut.delete(agentId);
+  if (signature) console.info("[agent-workspace] skills left out of this run's list", { agentId, ...(leftOut.nativeRootUntrusted ? { registry: "not a plain file: skills found only in .claude/skills are left out" } : { candidates: [...leftOut.slugs].slice(0, 10) }) });
+}
+const runLeaseReleaseListeners = new Set<(agentId: string) => void>();
+/**
+ * Called, after the current turn, when a run of this process gave its agent's files back (releaseAgentWorkspaceRunLease). The owner's
+ * approval that waited for the files (deferred-apply.ts) applies the moment the run is over instead of at a poll. A lease whose holder
+ * died is released by no one in this process: the caller keeps a slow check for that.
+ */
+export function onAgentWorkspaceRunLeaseReleased(listener: (agentId: string) => void): () => void {
+  runLeaseReleaseListeners.add(listener);
+  return () => { runLeaseReleaseListeners.delete(listener); };
 }
 export function releaseAgentWorkspaceRunLease(agentId: string, runId: string): void {
   // The run is over for this process whether or not the file can be removed below: a lease this release could not delete is then
   // reconciled like any other whose holder is gone (proveRunLeaseGone), instead of reading as a live run until the app restarts.
   heldRunLeases.delete(heldRunLeaseKey(agentId, runId));
-  const { root } = rootFor(agentId); const file = path.join(leaseDir(agentId, root), workspaceHash(runId) + ".json");
-  if (fs.existsSync(file)) {
-    const stat = fs.lstatSync(file);
-    if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) throw new AgentWorkspaceError("unsafe_run_state", "Review the saved run lease before releasing it.");
-    const lease = readJson<{ runId: string; pid: number }>(file); if (lease.runId === runId && lease.pid === process.pid) fs.unlinkSync(file);
+  try {
+    const { root } = rootFor(agentId); const file = path.join(leaseDir(agentId, root), workspaceHash(runId) + ".json");
+    if (fs.existsSync(file)) {
+      const stat = fs.lstatSync(file);
+      if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) throw new AgentWorkspaceError("unsafe_run_state", "Review the saved run lease before releasing it.");
+      const lease = readJson<{ runId: string; pid: number }>(file); if (lease.runId === runId && lease.pid === process.pid) fs.unlinkSync(file);
+    }
+  } finally {
+    if (runLeaseReleaseListeners.size) setImmediate(() => { for (const listener of [...runLeaseReleaseListeners]) { try { listener(agentId); } catch { /* a listener never changes the release */ } } });
   }
+}
+/** Whether a run holds the agent's files right now (what applyAgentWorkspaceProposal would answer `run_active` to), without issuing or hashing anything. */
+export function agentWorkspaceProposalHeldByRun(proposalId: string): boolean {
+  try { const p = getProposal(proposalId); return hasRunLease(p.agentId, p.rootPath); } catch { return false; }
+}
+/**
+ * The owner's approval that waited for a run was dropped (the change moved, the files changed under it). The screen said "your approval
+ * is kept", so the change itself carries the one plain line the owner reads when they open it. Never overwrites an error already
+ * recorded, never touches a change that is applied or rejected, never throws.
+ */
+export function noteDroppedAgentWorkspaceApproval(proposalId: string, line: string): void {
+  try {
+    const owner = getProposal(proposalId).agentId;
+    withLock(owner, () => {
+      const p = getProposal(proposalId);
+      if (p.lastError || (p.status !== "review_ready" && p.status !== "stale")) return;
+      p.lastError = line; saveProposal(p);
+    });
+  } catch { /* the change is gone or locked: there is nothing left to annotate */ }
 }
 /**
  * The owner's own release of the leases whose holder process is gone — for what no automatic proof settles (a lease written by an
@@ -833,6 +925,7 @@ export function getAgentWorkspace(agentId: string): AgentWorkspaceSnapshot {
     const { root, writable } = rootFor(agentId); const { tree } = snapshotAgentWorkspaceForRun(root, { allowInterruptedEntry: true });
     const pending = fs.existsSync(path.join(agentWorkspaceStorePath(agentId), "operation.json"));
     const head = pending && fs.existsSync(headFile(agentId)) ? readJson<{ id: string }>(headFile(agentId)).id : currentRevision(agentId, tree).id;
+    releaseRoomDeferrals(agentId, treeText(tree, tree.canonicalEntry));
     const proposals = listProposals(agentId); const marker = readCloudAgentRestoreMarker(root);
     return { agentId, rootPath: root, writable, currentRevisionId: head, treeDigest: tree.treeDigest, canonicalEntry: tree.canonicalEntry,
       files: tree.files.map(({ contentBase64: _bytes, ...file }) => file), memoryCandidates: memoryCandidates(agentId, proposals),
@@ -1024,12 +1117,22 @@ export async function prepareAgentWorkspaceFromMemory(input: { agentId: string; 
       expectedBaseTreeDigest: before.treeDigest, expectedSourceHashes: Object.fromEntries(accepted.map(id => [id, hashes[id]])) };
     semanticPreparations.add(prepared); return prepareAgentWorkspaceProposal(prepared);
   };
+  const noRoom = (error: unknown): error is AgentWorkspaceError => error instanceof AgentWorkspaceError && ["instruction_growth", "instruction_limit"].includes(error.code);
   try { return prepare(await compile()); }
   catch (error) {
     // One repair round with the host's own refusal text (harness2: validation errors are the retry feedback).
-    // A second refusal keeps the agent unchanged.
-    if (!(error instanceof AgentWorkspaceError) || !["instruction_growth", "instruction_limit"].includes(error.code)) throw error;
-    return prepare(await compile(error.message));
+    if (!noRoom(error)) throw error;
+    try { return prepare(await compile(error.message)); }
+    catch (second) {
+      if (!noRoom(second)) throw second;
+      // The second refusal is not a failure the owner has to read ("learning cannot lengthen instructions"): the lesson has no room in the
+      // always-on file right now, so it stays memory, exactly as a lesson that needs more evidence does. The agent is unchanged, these
+      // memories are not proposed again until they change, and the proposer counts it as a normal answer, not an error.
+      const stays: Record<string, string> = {}, instructionDigest = workspaceHash(entryText);
+      for (const candidate of candidates) { stays[candidate.id] = deferFingerprint(candidate.content, candidate.contentNative, candidate.evidence); stays[`room:${candidate.id}`] = instructionDigest; }
+      recordDeferred(input.agentId, stays);
+      throw new AgentWorkspaceError("learning_stays_memory", "These lessons have no room in the always-on instructions, so they stay memory. They are proposed again when the instructions are shorter or the lessons change.");
+    }
   }
 }
 interface CompilerOutput { eligibleMemoryIds?: string[]; summary?: string; changes?: Array<{ path: string; afterContent: string }>; card?: unknown }
@@ -1066,11 +1169,35 @@ function learningCard(raw: unknown, accepted: AgentWorkspaceMemoryCandidate[], r
   if (fields.some(field => looksSecret(String(value[field])))) return undefined;
   return Object.fromEntries(fields.map(field => [field, String(value[field]).trim()])) as unknown as AgentWorkspaceLearningCard;
 }
+/** The realpath of the nearest existing ancestor with the missing rest appended, so a file that is not there yet still resolves. */
+function realpathOfPossiblyMissing(target: string): string {
+  const rest: string[] = []; let current = path.resolve(target);
+  for (;;) {
+    try { return path.join(fs.realpathSync.native(current), ...rest.reverse()); }
+    catch { const parent = path.dirname(current); if (parent === current) return path.resolve(target); rest.push(path.basename(current)); current = parent; }
+  }
+}
+/**
+ * The path a caller names for a file of the agent folder, as the relative portable path the workspace uses. agentFiles.promptSource and
+ * agentFiles.list answer with absolute paths and a model sends one back; the file under the folder is the same file, so it is read as
+ * its relative path (10-30 run d5ba21ec: the absolute path was looked up verbatim, found nothing, and was reported as "the file changed").
+ * An absolute path outside the folder stays as given and the path rules below refuse it.
+ */
+function relativeToAgentFolder(root: string, target: string): string {
+  if (typeof target !== "string" || !path.isAbsolute(target)) return target;
+  const relative = path.relative(root, realpathOfPossiblyMissing(target));
+  if (!relative || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) return target;
+  return relative.split(path.sep).join("/");
+}
 export function prepareAgentWorkspaceFileChange(input: { agentId: string; targetPath: string; currentContent: string; proposedContent: string }): AgentWorkspaceProposal {
-  const root = assertWritable(input.agentId); const tree = snapshotAgentWorkspace(root); const current = tree.files.find(file => file.path === input.targetPath);
+  const root = assertWritable(input.agentId); const targetPath = relativeToAgentFolder(root, input.targetPath);
+  const tree = snapshotAgentWorkspace(root); const current = tree.files.find(file => file.path === targetPath);
   const content = current ? decodeWorkspaceText(Buffer.from(current.contentBase64, "base64")) : "";
-  if (content !== input.currentContent) throw new AgentWorkspaceError("base_changed", "The file changed outside this editor. Refresh before reviewing your edit.");
-  return prepareAgentWorkspaceProposal({ agentId: input.agentId, changes: [{ path: input.targetPath, afterContent: input.proposedContent }], summary: `Edit ${input.targetPath}`, expectedBaseTreeDigest: tree.treeDigest });
+  // No file at the path is not "the file changed": the caller named a path the folder does not have.
+  if (!current && input.currentContent !== "") throw new AgentWorkspaceError("file_missing",
+    "This agent has no file at that path. Paths are relative to the agent folder, for example AGENTS.md (list them with agentWorkspace.listFiles); to create a new file send an empty currentContent.");
+  if (content !== input.currentContent) throw new AgentWorkspaceError("base_changed", "The file changed since it was read. Read it again (agentWorkspace.readFile) and review your edit against that content.");
+  return prepareAgentWorkspaceProposal({ agentId: input.agentId, changes: [{ path: targetPath, afterContent: input.proposedContent }], summary: `Edit ${targetPath}`, expectedBaseTreeDigest: tree.treeDigest });
 }
 export function prepareAgentWorkspaceRollback(input: { agentId: string; revisionId: string }): AgentWorkspaceProposal {
   if (!/^awr_[a-f0-9-]{36}$/.test(input.revisionId)) throw new AgentWorkspaceError("revision_missing", "Choose a recorded version.");

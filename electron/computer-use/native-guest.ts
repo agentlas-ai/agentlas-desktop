@@ -2,7 +2,7 @@
 // or renderer-provided WebContents is accepted by this adapter.
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import type { WebContents } from "electron";
-import { captureNativeBrowserGuest, dispatchNativeBrowserGuestInput, releaseNativeBrowserGuestPressedInput, nativeBrowserGuestInputFrame, type NativeGuestDirectInput } from "../work-live-view";
+import { awaitNativeBrowserGuestReady, captureNativeBrowserGuest, dispatchNativeBrowserGuestInput, releaseNativeBrowserGuestPressedInput, nativeBrowserGuestInputFrame, type NativeGuestDirectInput } from "../work-live-view";
 import { saveScreenCaptureArtifact } from "../media/capture-artifacts";
 
 export interface NativeGuestComputerUseCapability { endpoint: string; token: string; scopeId: string }
@@ -28,14 +28,17 @@ function finite(value: unknown, low: number, high: number): value is number { re
 export function registerNativeGuestComputerUseScope(input: {
   ownerId: number; chatId: string; runId: string; permission: "read" | "write" | "full"; signal: AbortSignal;
   current: () => boolean; pages: () => Page[];
-}): { scopeId: string; token: string; release: () => void } {
+}): { scopeId: string; token: string; release: () => void; rebind: (ownerId: number) => void } {
   if (!input.runId || !input.chatId || input.signal.aborted || !input.current() || scopes.size >= 128) throw new Error("native-guest-scope-unavailable");
   const id = randomUUID(), token = randomBytes(32).toString("hex");
   const release = () => { scopes.delete(id); scope.capture = null; input.signal.removeEventListener("abort", release); };
   const scope: Scope = { ...input, id, token, capture: null, order: Promise.resolve(), queued: 0, dispose: release };
   scopes.set(id, scope);
   input.signal.addEventListener("abort", release, { once: true });
-  return { scopeId: id, token, release };
+  // The run's browser grant was given a fresh task lease (its hidden window was destroyed and replaced, native-cdp-relay.ts rebindTask): the
+  // scope keeps its run, chat, permission and token, and reads the new owner's tabs. The capture it holds belonged to a tab that is gone.
+  const rebind = (ownerId: number) => { scope.ownerId = ownerId; scope.capture = null; };
+  return { scopeId: id, token, release, rebind };
 }
 
 /** Only this separate Main control route accepts the run-scoped token. */
@@ -59,6 +62,8 @@ export async function handleNativeGuestComputerUse(route: string, authorization:
   const operation = async () => {
     if (!valid()) return failure("native-guest-scope-denied");
     if (route === "capture") {
+      // A tab that is still opening has no frame yet: wait for it, bounded, before reading its measured frame.
+      await awaitNativeBrowserGuestReady(scope.ownerId, scope.chatId, page.id, scope.signal);
       const before = frame();
       if (!before || before.width < 1 || before.height < 1) return failure("native-guest-capture-unavailable");
       const image = await captureNativeBrowserGuest(scope.ownerId, scope.chatId, page.id, undefined, scope.signal);

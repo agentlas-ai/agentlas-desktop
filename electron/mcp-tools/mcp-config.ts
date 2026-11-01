@@ -76,7 +76,7 @@ import {
 } from "./proxy-channel";
 import { ensureMcpProxyApprovalServer, mcpProxyApprovalPort, READ_ONLY_BROWSER_TOOLS } from "./proxy-server";
 import { userDataPath } from "../runtime-paths";
-import { HEPHAESTUS_NETWORK_WORK_CORE_TOOLS, registerMcpToolSurface, type HephaestusToolSurface, type McpToolSurface } from "./hephaestus-tool-surface";
+import { hephaestusWorkCoreTools, registerMcpToolSurface, type HephaestusToolSurface, type McpToolSurface } from "./hephaestus-tool-surface";
 import { RUNTIME_MCP_SUPPORT } from "../../shared/runtime-mcp";
 import type { RuntimeKind } from "../../shared/types";
 import { assertHostToolServer, hostToolServerRow, registerHostToolCatalog, type HostToolServer } from "./host-tool-servers";
@@ -711,14 +711,25 @@ function browserUploadRoots(opts?: McpConfigBuildOptions): string[] {
   return [...new Set(roots.filter((root): root is string => typeof root === "string" && path.isAbsolute(root)).map((root) => path.resolve(root)))];
 }
 
-/** Narrow default roots before sealing the exact per-run launch transport. */
-function argsWithToolGateWorkingFolder(
+/**
+ * Narrow default roots before sealing the exact per-run launch transport. Exported for a gate.
+ *
+ * A run with no working folder works in the app's scratch folder (the runners' cwd, agentRunCwd). The trusted `filesystem` catalog
+ * server is installed with the whole home folder as its root, and its reads need no approval (mcpToolIsMutating): left at `~`, a
+ * projectless read-permission turn (Hope, a graph tool step) could read anything under the home folder with no card, where it used to
+ * be refused. A read stays inside the run's own scope: with no folder the root is the scratch folder, never `~` (regression review
+ * C12). A custom server's explicit arguments keep their meaning; a run with a folder is scoped to it as before.
+ */
+export function argsWithToolGateWorkingFolder(
   server: InstalledMcpServer,
   args: string[],
   opts?: McpConfigBuildOptions,
 ): string[] {
   const rawFolder = opts?.workingFolder ?? opts?.toolGate?.cwd;
-  if (!rawFolder) return args.map(expandHome);
+  if (!rawFolder) {
+    if (server.catalogId !== "filesystem" || args.length === 0) return args.map(expandHome);
+    return [...args.slice(0, -1).map(expandHome), agentRunCwd()];
+  }
   const folder = path.resolve(rawFolder);
   if (!fs.statSync(folder).isDirectory()) throw new Error("mcp_workspace_not_directory");
   // Preserve the local tool loop's established literal-tilde narrowing for
@@ -727,6 +738,21 @@ function argsWithToolGateWorkingFolder(
   if (server.catalogId !== "filesystem") return scoped;
   // The trusted catalog places its allowed root in the final argument.
   return scoped.length > 0 ? [...scoped.slice(0, -1), folder] : [folder];
+}
+
+/**
+ * True when the run works in the app's scratch folder (agentRunCwd: videos, posts, notes, generated files) or in none: there is no
+ * source project to map, so the Context Map tools are not offered (hephaestus-tool-surface.ts). A folder the owner points a Work
+ * turn at is its own folder and keeps them. Folders are compared by real path.
+ */
+export function runIsInScratchFolder(opts?: Pick<McpConfigBuildOptions, "workingFolder" | "toolGate">): boolean {
+  const raw = opts?.workingFolder ?? opts?.toolGate?.cwd;
+  if (!raw) return true;
+  const real = (value: string): string => { try { return fs.realpathSync(path.resolve(value)); } catch { return path.resolve(value); } };
+  const scratch = real(agentRunCwd());
+  const folder = real(raw);
+  const relative = path.relative(scratch, folder);
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
 /**
@@ -1395,7 +1421,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
         // (antigravity, grok, kimi, cursor, copilot, and Claude Code too) gets the same list as the proxy's allow list,
         // which trims tools/list and refuses a call to anything outside it.
         const narrowedSurface: McpToolSurface | null = s.catalogId === HEPHAESTUS_NETWORK_CATALOG_ID && opts?.hephaestusToolSurface === "work-core"
-          ? { serverKey: key, allow: HEPHAESTUS_NETWORK_WORK_CORE_TOOLS }
+          ? { serverKey: key, allow: hephaestusWorkCoreTools({ sourceProject: !runIsInScratchFolder(opts) }) }
           // A host tool server lists its first list on every runtime; its other declared tools stay callable (deferred).
           : hostServer ? { serverKey: key, allow: [...hostServer.firstList], known: hostServer.declarations.map((tool) => tool.name), rest: "deferred" } : null;
         const proxied = mcpProxySpec(key, opts, s.catalogId, proxyHandles, residentProxyHandles,

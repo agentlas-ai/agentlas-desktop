@@ -1,6 +1,6 @@
 import type { InvocationSteerResult, McpInvocationRequest } from "../../shared/types";
 import type { InvocationWorkspaceBinding } from "./workspace-binding";
-import { isTransientSendRefusal } from "../../shared/transient-send-refusal";
+import { isTransientSendRefusal, startRefusedBeforeDispatchWaits } from "../../shared/transient-send-refusal";
 
 /**
  * Owner intake: the one rule for a message the owner sends, from every surface (owner 2026-10-28: "내가 뭔 상황에서 유저가
@@ -75,16 +75,25 @@ export function ownerMessageSurface(
 }
 
 /**
- * A start refusal that means "the chat is not free yet": the owner's message waits for it instead of being refused.
- * It is the Desktop composer's own decision (isTransientSendRefusal, used by renderer-send-queue.ts), so the phone and the
- * composer treat every refusal alike: a typed "not ready yet" code, or a start the host refused BEFORE anything was
- * dispatched because the shared store stayed locked past its busy wait. That lock is the driver's raw SQLITE_BUSY and
- * carries no transient code, so a code-only test threw it out of the intake (the phone got authority_error, which it does
- * not retry, and the durable intake row was settled failed). It waits and starts again like the others; a lock with no
- * proof that nothing was dispatched (no `turnDelivery: "not-dispatched"`) is still not held.
+ * A start refusal that means "the chat is not free yet" or "the app is not ready yet": the owner's message waits for it instead of being
+ * refused. It is the Desktop composer's own decision, so the phone, Telegram, mail and the composer treat every refusal alike:
+ *  - a typed "not ready yet" code, or a start the host refused BEFORE anything was dispatched because the shared store stayed locked
+ *    past its busy wait (isTransientSendRefusal, used by renderer-send-queue.ts). That lock is the driver's raw SQLITE_BUSY and carries no
+ *    transient code, so a code-only test threw it out of the intake (the phone got authority_error, which it does not retry);
+ *  - any other start the host refused BEFORE anything was dispatched (`turnDelivery: "not-dispatched"`), unless the owner has to act on
+ *    it (a cost cap, a Goal state, a settings change: startRefusalNeedsOwner). A handshake, ledger or preparation step of the app is not
+ *    the owner's to fix, so the message is kept and started again, bounded (UNDISPATCHED_START_MAX_ATTEMPTS), then held, never shown as a code.
+ * A refusal with no proof that nothing was dispatched is still not held.
  */
 export function ownerIntakeWaits(error: unknown): boolean {
-  return isTransientSendRefusal(error);
+  return isTransientSendRefusal(error) || startRefusedBeforeDispatchWaits(error);
+}
+
+/** The one calm line for an owner message the intake kept, retried and still could not start: no code, nothing ran. Same words as the composer's. */
+export function ownerIntakeHeldNotice(locale: "ko" | "en"): string {
+  return locale === "ko"
+    ? "메시지는 저장됐지만 아직 시작하지 못했어요. 아무것도 실행되지 않았으니 같은 내용을 한 번 더 보내 주세요."
+    : "Your message is saved, but it has not started yet. Nothing ran, so please send it once more.";
 }
 
 /** Before this long the message usually started on its own; a received line then would only be noise. */

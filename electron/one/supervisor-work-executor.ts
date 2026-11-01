@@ -30,6 +30,10 @@ export interface SupervisorWorkExecutorOptions {
   onFailure?(error: unknown): void;
 }
 const terminal = (status: string) => ["completed", "failed", "cancelled", "interrupted"].includes(status);
+/** Holds the executor wrote itself when it lost track of a start (a restart, an owner that went away): no refusal of the brief. */
+const BOOKKEEPING_HOLDS: ReadonlySet<string> = new Set(["work_owner_unconfirmed", "native_dispatch_outcome_unknown"]);
+/** The typed reason of a job proven never started and given up on (same word as the supervisor's replies and chat sends). */
+const NEVER_STARTED_REASON = "not_started";
 
 /** Claims and dispatches real native invocations independently of a renderer.
  * The adapter's lifetime determines whether this is a Main host worker or a
@@ -208,11 +212,32 @@ export class OneSupervisorWorkExecutor {
     if (row && ["dispatching", "held"].includes(row.state)) this.deps.store.update(row, {state: "stored", acknowledgement: "stored", reason: code});
     if (attempts === 1) this.deps.onFailure?.(Object.assign(new Error(code), {code}));
   }
-  /** A job held by an older build for such a refusal (nothing ever started it again), with the ledger proving no start. */
+  /** A held job whose hold is a refusal that clears by itself, or the executor's own lost-track bookkeeping, and for which the run left no
+   * receipt and the admission ledger proves no start: nothing ever started it again. */
+  private heldNeverStarted(job: SupervisorWorkLease): boolean {
+    if (job.phase !== "held" || !job.reason || !(isTransientSendRefusalCode(job.reason) || BOOKKEEPING_HOLDS.has(job.reason)) || !this.deps.runtime.noStartProof) return false;
+    if (this.deps.runtime.receipt(job.run_id)) return false;
+    return this.deps.runtime.noStartProof(job.run_id);
+  }
+  /** Such a job inside the shared deadline starts again under the same run id; the typed cause stays on its request. */
   private heldRefusalRecoverable(job: SupervisorWorkLease): string | null {
-    if (job.phase !== "held" || !job.reason || !isTransientSendRefusalCode(job.reason) || !this.deps.runtime.noStartProof) return null;
-    if ((this.deps.now?.() ?? Date.now()) - job.updated_at > TRANSIENT_SEND_DEADLINE_MS || this.deps.runtime.receipt(job.run_id)) return null;
-    return this.deps.runtime.noStartProof(job.run_id) ? job.reason : null;
+    if ((this.deps.now?.() ?? Date.now()) - job.updated_at > TRANSIENT_SEND_DEADLINE_MS) return null;
+    return this.heldNeverStarted(job) ? job.reason : null;
+  }
+  /** Such a job older than the deadline is not started now (an old brief must not begin hours later): it is settled as not started, with
+   * no notice to One, so the drawer stops showing it as in progress. */
+  private heldNeverStartedExpired(job: SupervisorWorkLease): boolean {
+    return (this.deps.now?.() ?? Date.now()) - job.updated_at > TRANSIENT_SEND_DEADLINE_MS && this.heldNeverStarted(job);
+  }
+  private expireNeverStarted(job: SupervisorWorkLease): void {
+    this.deps.queue.db.transaction(() => {
+      const current = this.deps.queue.get(job.command_id)!;
+      if (terminal(current.phase)) return;
+      this.deps.queue.transition(current, "failed", NEVER_STARTED_REASON);
+      const row = this.deps.store.get(job.command_id)!;
+      if (["stored", "dispatching", "accepted", "held"].includes(row.state)) this.deps.store.update(row, {state: "failed", acknowledgement: "settled", reason: NEVER_STARTED_REASON});
+    }).immediate();
+    this.refusals.delete(job.command_id);
   }
   private settle(job: SupervisorWorkLease, receipt: InvocationRunReceipt): void {
     if (receipt.runId !== job.run_id || receipt.chatId !== job.chat_id || !terminal(receipt.status)) return;
@@ -234,6 +259,7 @@ export class OneSupervisorWorkExecutor {
     if (job.phase === "queued" || job.phase === "claimed" || terminal(job.phase)) return;
     const refused = this.heldRefusalRecoverable(job);
     if (refused) { this.retryAfterRefusal(job, refused); return; }
+    if (this.heldNeverStartedExpired(job)) { this.expireNeverStarted(job); return; }
     const receipt = this.deps.runtime.receipt(job.run_id);
     if (receipt && receipt.runId === job.run_id && receipt.chatId === job.chat_id && terminal(receipt.status)) {
       this.settle(job, receipt);

@@ -18,6 +18,9 @@ export type AppControlPolicy =
 const BUSINESS_CONSOLE_OPERATIONS = /^business\./;
 const ENTERPRISE_SERVER_OPERATIONS = /^enterpriseServer\./;
 
+// The one route that changes an installed agent's files: stage the change, read its diff, apply it. Paths are relative to the agent folder.
+const AGENT_FILE_CHANGE_ROUTE = "this call cannot change an agent; edit an agent's files with agentWorkspace.prepareFileChange (restore an earlier version with agentWorkspace.prepareRollback), then agentWorkspace.getDiff, then agentWorkspace.approveAndApply";
+
 const DENIED: Array<[RegExp, string, AppControlEffect]> = [
   [/^oneMemory\.inspector\./, "private memory inspection and correction belong to the owner renderer", "write"],
   [/^businessWork\./, "WORK changes require the focused native employee owner", "write"],
@@ -35,6 +38,13 @@ const DENIED: Array<[RegExp, string, AppControlEffect]> = [
   // The owner's standing permission to apply learning changes without reading the diff. An agent switching it on for itself would
   // be self-escalation (the review grant exists so no tool can approve a diff), so it is the owner's own switch only.
   [/^agentWorkspace\.setAutoEvolution$/, "applying learning changes without the owner reading the diff is the owner's own switch", "consent"],
+  // Operations that can never succeed (observed in use: four refused calls and five minutes before the working route
+  // was found). Their handlers throw for every caller and no screen calls them; a call by name is answered with the route that works,
+  // and a search does not list them. The handlers keep refusing, so nothing can reach the old storage path.
+  [/^agentEvolution\.createProposal$/, AGENT_FILE_CHANGE_ROUTE, "write"],
+  [/^agentEvolution\.approveAndApply$/, AGENT_FILE_CHANGE_ROUTE, "consent"],
+  [/^agentEvolution\.rollback$/, AGENT_FILE_CHANGE_ROUTE, "destructive"],
+  [/^oneMemory\.(propose|save|editAndSave|useOnce|updateAsset)$/, "this memory approval was retired and saves nothing; durable memory is written by the host's memory curator after each answer", "write"],
   // Where the personal agent's conversation is processed (Agentlas server and its model provider, or the owner's own CLI) is
   // the owner's decision, and the one-time notice that makes it effective is the owner's to answer. getState is a read.
   [/^oneFront\.(setFront|acknowledgeNotice)$/, "where the personal agent's replies are processed, and the notice that confirms it, are the owner's own act", "consent"],
@@ -53,7 +63,7 @@ const DENIED: Array<[RegExp, string, AppControlEffect]> = [
   [/^(hephaestus\.coreAuthLogin|runtime\.(openCliLogin|connectStart|connectCancel|connectGet)|mobileBridge\.issuePairing)$/, "sign-in and device pairing stay with the owner", "consent"],
   [/^(agentLeases\.purchase|cloudAgents\.setPrices|appFactory\.(approveProviderPayment|resolveProviderCredentials|captureProviderBrowserSessions|launchProviderBrowserSession|openProviderBrowser))$/, "payments, prices and provider accounts stay with the owner", "consent"],
   // One's own run plumbing: it has dedicated tools for these.
-  [/^(invoke|oneSupervisor|oneHarness|oneWindow|oneContext|workStart|oneTeamPreflight|attention)\./, "One's own conversation plumbing; use the one_supervisor_* / one_team_* tools", "write"],
+  [/^(invoke|oneSupervisor|oneHarness|oneWindow|oneContext|workStart|oneTeamPreflight|attention)\./, "One's own conversation plumbing: starting or steering a run by hand would bypass admission, grants and run ownership. Hope uses the one_supervisor_* / one_team_* tools; a run that does not carry them cannot start another run, so it finishes its own task and reports the missing capability", "write"],
   [/^chats\.appendOneUserMessage$/, "never write a message as the owner", "write"],
   // A model saves a graph through one_graph_save, which checks that the work comes back and is not a tool or a copy.
   [/^automations\.(createFromBlueprint|updateGraph)$/, "save graphs through one_graph_save, which checks the work comes back and is not a tool", "write"],
@@ -143,7 +153,7 @@ const EXPLICIT_WRITE_PATHS: ReadonlySet<string> = new Set([
   // goal-panel-ipc.ts
   "goalPanel.edit", "goalPanel.shape",
   // ipc.ts
-  "agentEvolution.createProposal", "agentEvolution.markMeasured", "agentFiles.promptSource", "agentFiles.write", "agentMemory.importApply",
+  "agentEvolution.markMeasured", "agentFiles.promptSource", "agentFiles.write", "agentMemory.importApply",
   "agentRuntime.set", "agents.setBookmark", "appFactory.materializeAssets", "appFactory.openLaunchTarget", "appFactory.restore",
   "appFactory.runAutopilot", "appFactory.runProviderTasks", "appFactory.runSmoke", "appFactory.scaffold", "appFactory.syncCloudManifest",
   "appFactory.syncProviderBrowserResults", "automations.acknowledgeAttention", "automations.acknowledgeRun", "automations.applyBuildRecovery",
@@ -164,8 +174,7 @@ const EXPLICIT_WRITE_PATHS: ReadonlySet<string> = new Set([
   "multimodal.openVideoOutput", "multimodal.saveSettings", "multimodal.startVideo", "oneActivation.resolveConcern", "oneActivation.resolveMobile",
   "oneActivation.resolveWork", "oneActivation.skip", "oneAttachments.bindToTeam", "oneAttachments.prepare", "oneAutoRecovery.judge",
   "oneAutoRecovery.verify", "oneBriefing.feedback", "oneBriefing.openTask", "oneBriefing.prepareAction", "oneBriefing.setPreferences",
-  "oneBriefing.startAction", "oneFeatureIntro.acknowledge", "oneFeatureIntro.defer", "oneMemory.editAndSave", "oneMemory.propose", "oneMemory.save",
-  "oneMemory.setAssetEnabled", "oneMemory.updateAsset", "oneMemory.useOnce", "oneOrg.add", "oneOrg.createAgent", "oneOrg.markRead", "oneOrg.rename",
+  "oneBriefing.startAction", "oneFeatureIntro.acknowledge", "oneFeatureIntro.defer", "oneMemory.setAssetEnabled", "oneOrg.add", "oneOrg.createAgent", "oneOrg.markRead", "oneOrg.rename",
   "oneOrg.reorder", "oneOrg.replace", "oneOrg.restore", "oneOrg.setTools", "oneOrg.suggestions", "oneOrg.update", "oneProfile.addPrinciple",
   "oneProfile.origin", "oneProfile.setAvatarImage", "oneProfile.setPrincipleEnabled", "oneProfile.update", "oneProfile.updatePrinciple",
   "oneRequestIntent.resolve", "oneSuggestions.dismiss", "oneSuggestions.neverAsk", "oneSuggestions.snooze", "oneTaskforces.create",

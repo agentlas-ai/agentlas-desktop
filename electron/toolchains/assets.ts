@@ -42,14 +42,24 @@ export function toolchainVersionHash(version: Pick<ToolchainAssetVersion, "contr
     ...(version.definitionFingerprint ? { definitionFingerprint: version.definitionFingerprint } : {}),
     ...(version.implementationFingerprint ? { implementationFingerprint: version.implementationFingerprint } : {}) });
 }
+const setAside = new Set<string>();
+/** A stored asset that cannot be trusted (unreadable JSON, a different identity, a release whose content hash does not match) is set
+ * aside: it reads as not found, its bytes stay where they are, and one warning names it. It must not take the rest down with it - one
+ * bad record used to throw for every listing, every generalization round and every creation (toolchain_asset_corrupt / _release_corrupt). */
+function setAsideAsset(id: string, code: "toolchain_asset_corrupt" | "toolchain_release_corrupt"): null {
+  if (!setAside.has(`${id}:${code}`)) { setAside.add(`${id}:${code}`); console.warn(`[toolchains] asset ${id} is set aside (${code}); the other assets are unaffected`); }
+  return null;
+}
 export function getToolchainAsset(id: string): ToolchainAsset | null {
   if (typeof id !== "string" || !/^[a-zA-Z0-9_-]{1,100}$/.test(id)) return null;
   const row = getDb().prepare("SELECT value FROM meta WHERE key=?").get(`${PREFIX}${id}`) as { value: string } | undefined;
   if (!row) return null;
-  const asset = JSON.parse(row.value) as ToolchainAsset;
-  if (asset.schemaVersion !== "agentlas.toolchain-asset.v1" || asset.id !== id) throw new Error("toolchain_asset_corrupt");
-  for (const version of asset.versions) if (version.contentHash !== toolchainVersionHash(version)) throw new Error("toolchain_release_corrupt");
-  return asset;
+  try {
+    const asset = JSON.parse(row.value) as ToolchainAsset;
+    if (!asset || asset.schemaVersion !== "agentlas.toolchain-asset.v1" || asset.id !== id || !Array.isArray(asset.versions)) return setAsideAsset(id, "toolchain_asset_corrupt");
+    for (const version of asset.versions) if (version.contentHash !== toolchainVersionHash(version)) return setAsideAsset(id, "toolchain_release_corrupt");
+    return asset;
+  } catch { return setAsideAsset(id, "toolchain_asset_corrupt"); }
 }
 export function listToolchainAssets(): ToolchainAsset[] {
   const rows = getDb().prepare("SELECT key FROM meta WHERE key >= ? AND key < ? ORDER BY key").all(PREFIX, `${PREFIX}\uffff`) as Array<{ key: string }>;
@@ -146,7 +156,9 @@ function indexedAsset(key: string): ToolchainAsset | null {
   const row = getDb().prepare("SELECT value FROM meta WHERE key=?").get(key) as { value: string } | undefined;
   if (!row) return null;
   const asset = getToolchainAsset(row.value);
-  if (!asset) throw new Error("toolchain_identity_index_corrupt");
+  // An identity entry pointing at an asset that is gone or set aside is derived data, not a second copy of the asset: it is dropped
+  // (callers are write transactions) so the capability can be created again, instead of refusing every creation that names it.
+  if (!asset) { getDb().prepare("DELETE FROM meta WHERE key=?").run(key); return null; }
   return asset;
 }
 function reserveIdentity(key: string, id: string): void {

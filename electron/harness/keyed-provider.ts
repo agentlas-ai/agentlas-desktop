@@ -217,6 +217,26 @@ export async function speechTrack(input: string, workDir: string): Promise<strin
   } catch { return null; }
 }
 
+/**
+ * Why no speech track came out of a file: ffprobe lists its audio streams. "none" means the file really has no sound (a video-only
+ * cut), which is a fact about the file, not a fault of the tool; "present" means ffmpeg could not decode a stream that exists;
+ * "unknown" means ffprobe could not tell. The refusal keeps its code and now says which (audio_track_unavailable, 8 events).
+ */
+export async function audioStreamFact(input: string): Promise<"none" | "present" | "unknown"> {
+  try {
+    const r = await runTool("ffprobe", ["-v", "error", "-protocol_whitelist", "file", "-select_streams", "a", "-show_entries", "stream=index", "-of", "csv=p=0", input], 30_000);
+    if (r.status !== 0) return "unknown";
+    return String(r.stdout ?? "").trim() ? "present" : "none";
+  } catch { return "unknown"; }
+}
+
+/** The sentence for a refused speech track, from the fact above. */
+export function noSpeechTrackMessage(fact: "none" | "present" | "unknown"): string {
+  return fact === "none" ? "this file has no audio stream (it is video-only), so there is nothing to hear in it"
+    : fact === "present" ? "this file has an audio stream that ffmpeg could not decode"
+    : "ffmpeg could not read an audio track from this file";
+}
+
 /** Word-timed transcript of one audio file through a keyed adapter (the key stays in Main). */
 export async function transcribeFile(routeId: string, audioFile: string, ctx: KeyedCallContext, languageCode?: string): Promise<{ ok: true; transcript: Transcript } | { ok: false; outcome: Outcome }> {
   if (!(TRANSCRIBE_ROUTES as readonly string[]).includes(routeId)) return { ok: false, outcome: refused("route_not_transcribe_capable", `transcribe routes: ${TRANSCRIBE_ROUTES.join(", ")}`) };

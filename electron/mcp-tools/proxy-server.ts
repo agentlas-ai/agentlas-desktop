@@ -110,6 +110,15 @@ export function mcpToolIsMutating(input: {
     && AGENTLAS_BROWSER_READ_TOOLS.has(input.toolName);
   const nativeRead = input.catalogId === "cua-driver"
     && AGENTLAS_COMPUTER_USE_READ_TOOLS.has(input.toolName);
+  // The app's two built-in servers whose tools only read (closed lists, literal ids, inside the function because gates lift it out of
+  // the file). `filesystem` is the trusted catalog install (a custom server never carries a catalog id; mcp-config.ts scopes its one
+  // allowed root to the run's folder), and write_file / edit_file / create_directory / move_file stay effects. `agentlas-time` is
+  // the app's own clock (mcp-config.ts offers it only for its canonical launch): reading the time and converting it change nothing.
+  // Before this, a plain read_text_file or list_directory was an "effect": a read-permission turn waited on a card nobody saw
+  // (approval_declined) and a write turn checkpointed it, so its identical repeat was refused EFFECT_UNCERTAIN (21 events, 2026-10).
+  const filesystemRead = input.catalogId === "filesystem" && ["read_file", "read_text_file", "read_media_file", "read_multiple_files",
+    "list_directory", "list_directory_with_sizes", "directory_tree", "search_files", "get_file_info", "list_allowed_directories"].includes(input.toolName);
+  const timeRead = input.catalogId === "agentlas-time" && (input.toolName === "get_current_time" || input.toolName === "convert_time");
   // agentlas-ui's tools return constant reference text: no input, no effect.
   // (Literal ids, as for the other reads here: gates lift this function out of the file.)
   const uiSchemaRead = input.catalogId === "agentlas-ui" && (input.toolName === "read_ui_schema" || input.toolName === "read_surface_protocol" || input.toolName === "read_automation_protocol");
@@ -125,7 +134,7 @@ export function mcpToolIsMutating(input: {
   // A read through the one gateway, told apart by its own arguments: every runtime applies what codex-mcp-admission.ts applies on Codex,
   // so a read-permission turn never waits on a card for it. A call without arguments stays an effect.
   const gatewayRead = input.catalogId === "agentlas-turn" && input.toolName === "harness_call" && harnessCallIsEffectFreeRead(input.args);
-  return !(browserRead || nativeRead || uiSchemaRead || turnNoteRead || harnessRead || terminalStop || gatewayRead || oneGraphReadPermissionCall(input));
+  return !(browserRead || nativeRead || filesystemRead || timeRead || uiSchemaRead || turnNoteRead || harnessRead || terminalStop || gatewayRead || oneGraphReadPermissionCall(input));
 }
 
 /** Plan observation authority is minted from the actual host launcher, not a

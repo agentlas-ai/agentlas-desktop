@@ -5102,7 +5102,11 @@ export interface McpInvocationEvent {
   error?: { code: string; message: string; runtimeFailure?: InvocationRuntimeFailure;
     /** Present only when the failed attempt provably sent nothing to a provider (RuntimeTurnDelivery in runtime/runner.ts):
      *  a definite non-execution, never an unknown effect. Optional; older readers ignore it. */
-    turnDelivery?: "not-dispatched" };
+    turnDelivery?: "not-dispatched";
+    /** A team turn that did not verify (code `task-force-verification-failed`, kept as the compatibility label): the class of the cause
+     *  read from its typed failure report. "login" and "capacity" are outside causes; "execution" is the app's own side until shown
+     *  otherwise. Optional; older readers ignore it. */
+    causeClass?: "login" | "capacity" | "execution" };
   /** kind:"notice" 전용 — 호스트 고지. 답변 본문과 절대 합치지 않는다. */
   notice?: {
     level: "info" | "success" | "warning" | "error";
@@ -6861,6 +6865,13 @@ export interface InvocationRunReceipt {
   errorCode?: string;
   errorMessage?: string;
   runtimeFailure?: InvocationRuntimeFailure;
+  /**
+   * The run failed because of the app's own unexpected exception (a TypeError, a SQLite driver error, a syscall error: told by class
+   * and the platform's own fields, never by words; electron/invocation/host-internal-failure.ts), with no cause from a provider.
+   * The turn may have reached the runtime before it happened, so the send queue treats it like any other unknown outcome
+   * (earlier-attempt.ts). Optional; older readers ignore it.
+   */
+  hostInternalFailure?: true;
   /**
    * Tool authority this run executed under, replayed from the durable start
    * record. Automatic recovery needs it: a `read` run cannot have mutated
@@ -8931,6 +8942,10 @@ export interface AgentlasIpc {
     eventChannel: (runId: string) => string;
     /** 진행 중인 실행을 취소 — CLI 자식 프로세스 kill / API fetch abort. 병렬 세션 각각 독립 취소. */
     cancel: (runId: string) => Promise<InvocationCancelReceipt>;
+    /** How many of this chat's messages wait out the app's own internal retry (no run is live in that gap, so no usual Stop is drawn). */
+    waitingRetries: (chatId: string) => Promise<{ waiting: number }>;
+    /** The owner's Stop for those messages: they are not sent again. `stopped` is how many were ended (0 when one just started). */
+    stopWaitingRetries: (chatId: string) => Promise<{ stopped: number }>;
     /** Pull a queued direction back before its run starts (1-based queue position + exact text). */
     unsteer: (req: { chatId: string; position: number; text: string }) => Promise<boolean>;
     history: (chatId: string) => Promise<ChatHistoryEntry[]>;

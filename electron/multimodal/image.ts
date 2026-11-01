@@ -75,6 +75,20 @@ export interface ImageResult {
   lineage?: { sourceSha256: string; outputSha256: string };
 }
 
+/**
+ * Why one engine produced no image, as a machine code (never the CLI's prose): the route is not installed, its product home is not
+ * available on this host, its process could not start, it ran out of time, or it ended without writing an image. The caller's
+ * ImageResult.reason names every engine's code, so "all-engines-unavailable" says what to fix (14 events, 5 chats: it
+ * said nothing about quota, sign-in or a missing install).
+ */
+type EngineNote = { reason?: string };
+
+/** `all-engines-unavailable` followed by each tried engine's own code, in the order tried: `codex=cli-not-installed, gemini=cli-timed-out`. */
+export function allEnginesUnavailableReason(tried: ReadonlyArray<{ engine: string; reason?: string }>): string {
+  const parts = tried.map((entry) => `${entry.engine}=${entry.reason ?? "no-image-produced"}`);
+  return parts.length ? `all-engines-unavailable: ${parts.join(", ")}` : "all-engines-unavailable";
+}
+
 function resolveBin(name: "agy" | "codex", extra: string[]): string | null {
   // Platform PATH delimiter and Windows PATHEXT (NH31): a POSIX ":" split read every Windows CLI as absent.
   // The runners' CLI PATH (withCliPath) and the Agentlas-installed native codex come first (2026-10-24 audit F6).
@@ -86,13 +100,14 @@ const IMAGE_FILE = /\.(?:png|jpe?g|webp)$/i;
 
 /** Spawns a CLI with stdin closed and stdout read line by line; resolves when it exits or after `timeoutMs`. */
 function runCliLines(bin: string, args: string[], options: { cwd: string; env: NodeJS.ProcessEnv; timeoutMs: number },
-  onLine: (line: string) => void): Promise<void> {
-  return new Promise<void>((resolve) => {
+  onLine: (line: string) => void): Promise<{ spawnFailed: boolean; timedOut: boolean; exitCode: number | null }> {
+  return new Promise((resolve) => {
     let done = false;
+    const outcome = { spawnFailed: false, timedOut: false, exitCode: null as number | null };
     const finish = () => {
       if (done) return;
       done = true;
-      resolve();
+      resolve(outcome);
     };
     let child;
     try {
@@ -102,6 +117,7 @@ function runCliLines(bin: string, args: string[], options: { cwd: string; env: N
       child = spawnCli(bin, args, { cwd: options.cwd, env: options.env, stdio: ["ignore", "pipe", "ignore"], ...detachedSpawnOpts() });
       trackRunChild(child);
     } catch {
+      outcome.spawnFailed = true;
       finish();
       return;
     }
@@ -116,6 +132,7 @@ function runCliLines(bin: string, args: string[], options: { cwd: string; env: N
       }
     });
     const timer = setTimeout(() => {
+      outcome.timedOut = true;
       try {
         if (child) killCliTree(child, 250);
       } catch {
@@ -123,16 +140,25 @@ function runCliLines(bin: string, args: string[], options: { cwd: string; env: N
       }
       finish();
     }, options.timeoutMs);
-    child.on("close", () => {
+    child.on("close", (code) => {
+      outcome.exitCode = typeof code === "number" ? code : null;
       clearTimeout(timer);
       if (pending.trim()) { try { onLine(pending.trim()); } catch { /* ignore */ } }
       finish();
     });
     child.on("error", () => {
+      outcome.spawnFailed = true;
       clearTimeout(timer);
       finish();
     });
   });
+}
+
+/** Why a CLI that ran left no image: it could not start, ran out of time, or ended (with its exit code) without writing one. */
+function noteCliOutcome(note: EngineNote | undefined, ran: { spawnFailed: boolean; timedOut: boolean; exitCode: number | null }): void {
+  if (!note) return;
+  note.reason = ran.spawnFailed ? "cli-start-failed" : ran.timedOut ? "cli-timed-out"
+    : ran.exitCode !== null && ran.exitCode !== 0 ? `cli-exit-${ran.exitCode}-no-image` : "no-image-produced";
 }
 
 /** The newest image file directly in `dir` (an exclusive folder of this attempt, never a shared one). */
@@ -164,15 +190,15 @@ function placeAt(found: string | null, target: string): string | null {
   }
 }
 
-async function runCodexImage(prompt: string, target: string, inputImage?: string, permission?: "write" | "full"): Promise<string | null> {
+async function runCodexImage(prompt: string, target: string, inputImage?: string, permission?: "write" | "full", note?: EngineNote): Promise<string | null> {
   // A gate or script (no install identity) in the account's own HOME would run the person's codex and sign-in.
-  if (productHomeRefusedOnThisHost(os.homedir())) return null;
+  if (productHomeRefusedOnThisHost(os.homedir())) { if (note) note.reason = "product-home-unavailable"; return null; }
   const bin = resolveBin("codex", [
     path.join(os.homedir(), ".local/bin/codex"),
     "/opt/homebrew/bin/codex",
     "/usr/local/bin/codex",
   ]);
-  if (!bin) return null;
+  if (!bin) { if (note) note.reason = "cli-not-installed"; return null; }
   const cwd = path.dirname(target);
   const instruction = inputImage
     // Edit: the attached image is the source; the instruction says what changes (NH34).
@@ -189,7 +215,7 @@ async function runCodexImage(prompt: string, target: string, inputImage?: string
     // `--json` names this exec's thread; codex keeps that thread's images in <CODEX_HOME>/generated_images/<thread id>/.
     let threadId: string | null = null;
     // 실측: codex image_gen은 콜드 스타트 시 2~4분 — 150s는 완성 직전에 죽인다(all-engines 오탐 원인).
-    await runCliLines(bin, ["exec", "--json", "-s", "workspace-write", "--skip-git-repo-check", ...(inputImage ? ["-i", inputImage] : []), instruction],
+    const ran = await runCliLines(bin, ["exec", "--json", "-s", "workspace-write", "--skip-git-repo-check", ...(inputImage ? ["-i", inputImage] : []), instruction],
       { cwd, env, timeoutMs: 300_000 }, (line) => {
         const event = JSON.parse(line) as { type?: unknown; thread_id?: unknown };
         if (event?.type === "thread.started" && typeof event.thread_id === "string" && /^[A-Za-z0-9-]{8,64}$/.test(event.thread_id)) threadId ??= event.thread_id;
@@ -197,7 +223,9 @@ async function runCodexImage(prompt: string, target: string, inputImage?: string
     if (fs.existsSync(target)) return target;
     const codexHome = env.CODEX_HOME || path.join(os.homedir(), ".codex");
     // What the model saved in this attempt's folder, else this thread's own image copied in.
-    return newestImageIn(cwd) ?? placeAt(threadId ? newestImageIn(path.join(codexHome, "generated_images", threadId)) : null, target);
+    const found = newestImageIn(cwd) ?? placeAt(threadId ? newestImageIn(path.join(codexHome, "generated_images", threadId)) : null, target);
+    if (!found) noteCliOutcome(note, ran);
+    return found;
   });
 }
 
@@ -225,15 +253,15 @@ async function runGeminiImage(prompt: string, target: string, apiKey: string): P
  * 모델이 target에 저장하지 않았으면 이 실행 자신의 대화(stream-json 의 conversation_id)에서 generate_image 가 만든
  * 바로 그 파일(stageFreshAgyGeneratedImage)을 가져온다. 공유 폴더(scratch 등)를 시간 창으로 뒤지지 않는다.
  */
-async function runAgyNanoBanana(prompt: string, target: string, inputImage?: string, permission?: "write" | "full"): Promise<string | null> {
+async function runAgyNanoBanana(prompt: string, target: string, inputImage?: string, permission?: "write" | "full", note?: EngineNote): Promise<string | null> {
   // A gate or script (no install identity) in the account's own HOME would run the person's agy in their own ~/.gemini.
-  if (productHomeRefusedOnThisHost(os.homedir())) return null;
+  if (productHomeRefusedOnThisHost(os.homedir())) { if (note) note.reason = "product-home-unavailable"; return null; }
   const bin = resolveBin("agy", [
     path.join(os.homedir(), ".local/bin/agy"),
     "/opt/homebrew/bin/agy",
     "/usr/local/bin/agy",
   ]);
-  if (!bin) return null;
+  if (!bin) { if (note) note.reason = "cli-not-installed"; return null; }
   const outDir = path.dirname(target);
   const instruction = inputImage
     ? `Use your image generation capability (Nano Banana / Gemini image) to edit the image at the absolute path ${inputImage}: ${prompt}. ` +
@@ -252,7 +280,7 @@ async function runAgyNanoBanana(prompt: string, target: string, inputImage?: str
     const state: Parameters<typeof reduceAgyLine>[1] = { text: "", inputTokens: 0, outputTokens: 0 };
     let imageName: string | undefined;
     // stdin ignore — codex와 동일한 stdin-EOF 대기 블록 방지. stream-json names the conversation and the tool's image.
-    await runCliLines(bin, [...permissionArgs, "--output-format", "stream-json", "--add-dir", outDir,
+    const ran = await runCliLines(bin, [...permissionArgs, "--output-format", "stream-json", "--add-dir", outDir,
       ...(inputImage ? ["--add-dir", path.dirname(inputImage)] : []), "--print", instruction], { cwd: outDir, env, timeoutMs: 300_000 }, (line) => {
       const step = reduceAgyLine(line, state);
       if (step.tool?.done && !step.tool.failed && step.tool.name === "generate_image" && step.tool.args) {
@@ -266,13 +294,15 @@ async function runAgyNanoBanana(prompt: string, target: string, inputImage?: str
         destinationRoot: outDir, home: env.HOME })
       : null;
     // Both live in this attempt's own folder: the staged copy of the exact generated file, or what the model saved there.
-    return staged?.artifactPath ?? newestImageIn(outDir);
+    const found = staged?.artifactPath ?? newestImageIn(outDir);
+    if (!found) noteCliOutcome(note, ran);
+    return found;
   });
 }
 
 /** The subscription route never falls through to a paid API transport. */
-async function tryGemini(clean: string, target: string, permission?: "write" | "full"): Promise<string | null> {
-  return runAgyNanoBanana(clean, target, undefined, permission);
+async function tryGemini(clean: string, target: string, permission?: "write" | "full", note?: EngineNote): Promise<string | null> {
+  return runAgyNanoBanana(clean, target, undefined, permission, note);
 }
 
 // auto 페일오버 상태 — 한 엔진이 실패(쿼터 소진/미설치)하면 세션 내 잠시 뒤로 미룬다(15분).
@@ -286,12 +316,13 @@ const COOLDOWN_MS = 15 * 60 * 1000;
  * 슬롯에서 온 선택을 몰래 다른 공급자로 바꾸면 저장된 선택과 실제 영수증이 달라진다.
  */
 /** Grok Imagine (official CLI, OAuth subscription only — runGrokImagine refuses an API key) into the exact target. */
-async function tryGrok(prompt: string, target: string, permission?: "write" | "full"): Promise<string | null> {
+async function tryGrok(prompt: string, target: string, permission?: "write" | "full", note?: EngineNote): Promise<string | null> {
   const { runGrokImagine } = await import("./grok-imagine");
   // Grok Imagine keeps its own media-only boundary (--sandbox strict, shell/edit denied) for every permission; it
   // harvests by its own session id, in this attempt's folder.
   return runImageEngine("grok", "multimodal-image", prompt, permission, async () => {
     const produced = await runGrokImagine({ prompt, cwd: path.dirname(target), kind: "image", targetPath: target });
+    if (!(produced && fs.existsSync(target)) && note) note.reason = "no-image-produced";
     return produced && fs.existsSync(target) ? target : null;
   });
 }
@@ -324,15 +355,17 @@ export async function generateImage(model: ImageModel, prompt: string, admission
         : preferred;
 
     let engine: "codex" | "gemini" | "grok" | null = null;
+    const tried: Array<{ engine: string; reason?: string }> = [];
     for (const e of order) {
       const attemptDir = newAttemptDir(dir);
       const attemptTarget = path.join(attemptDir, fileName);
+      const note: EngineNote = {};
       const produced =
         e === "codex"
-          ? await runCodexImage(clean, attemptTarget, undefined, permission)
+          ? await runCodexImage(clean, attemptTarget, undefined, permission, note)
           : e === "grok"
-            ? await tryGrok(clean, attemptTarget, permission)
-            : await tryGemini(clean, attemptTarget, permission);
+            ? await tryGrok(clean, attemptTarget, permission, note)
+            : await tryGemini(clean, attemptTarget, permission, note);
       if (produced) {
         target = produced;
         engine = e;
@@ -341,10 +374,11 @@ export async function generateImage(model: ImageModel, prompt: string, admission
       }
       dropEmptyAttemptDir(attemptDir);
       engineCooldown[e] = now + COOLDOWN_MS;
+      tried.push({ engine: e, ...(note.reason ? { reason: note.reason } : {}) });
     }
     if (!engine || !target) {
       // Retain partial media in its attempt folder for inspection and recovery.
-      return { ok: false, reason: "all-engines-unavailable" };
+      return { ok: false, reason: allEnginesUnavailableReason(tried) };
     }
 
     const buf = fs.readFileSync(target);
@@ -388,18 +422,20 @@ export async function editImage(model: Exclude<ImageModel, "grok">, imagePath: s
     fs.mkdirSync(dir, { recursive: true });
     const fileName = `edit_${Date.now()}_${Math.floor(Math.random() * 1e6)}.png`;
     const order: Array<"codex" | "gemini"> = model === "codex" ? ["codex"] : model === "gemini" ? ["gemini"] : ["codex", "gemini"];
+    const tried: Array<{ engine: string; reason?: string }> = [];
     for (const engine of order) {
       const attemptDir = newAttemptDir(dir);
       const target = path.join(attemptDir, fileName);
-      const produced = engine === "codex" ? await runCodexImage(clean, target, imagePath, permission) : await runAgyNanoBanana(clean, target, imagePath, permission);
-      if (!produced || !fs.existsSync(produced)) { dropEmptyAttemptDir(attemptDir); continue; }
+      const note: EngineNote = {};
+      const produced = engine === "codex" ? await runCodexImage(clean, target, imagePath, permission, note) : await runAgyNanoBanana(clean, target, imagePath, permission, note);
+      if (!produced || !fs.existsSync(produced)) { dropEmptyAttemptDir(attemptDir); tried.push({ engine, ...(note.reason ? { reason: note.reason } : {}) }); continue; }
       const output = fs.readFileSync(produced);
       const outputSha256 = createHash("sha256").update(output).digest("hex");
       // A route that copied the input back unchanged did not edit anything.
-      if (outputSha256 === sourceSha256) { fs.rmSync(produced, { force: true }); dropEmptyAttemptDir(attemptDir); continue; }
+      if (outputSha256 === sourceSha256) { fs.rmSync(produced, { force: true }); dropEmptyAttemptDir(attemptDir); tried.push({ engine, reason: "input-returned-unchanged" }); continue; }
       return { ok: true, engine, artifactPath: produced, src: `data:${sniffImageMime(output)};base64,${output.toString("base64")}`, lineage: { sourceSha256, outputSha256 } };
     }
-    return { ok: false, reason: "all-engines-unavailable" };
+    return { ok: false, reason: allEnginesUnavailableReason(tried) };
   } catch (e) {
     return { ok: false, reason: e instanceof Error ? e.message.slice(0, 200) : String(e) };
   }

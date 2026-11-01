@@ -4,7 +4,10 @@ import { randomUUID, createHash } from "node:crypto";
 import type Database from "better-sqlite3";
 import type { ChatHistoryEntry, McpInvocationRequest } from "../../shared/types";
 import { getAuthSession } from "../auth";
-import { getChat, getChatWorkingFolder } from "../store/chats";
+import { appendChatMessage, getChat, getChatWorkingFolder } from "../store/chats";
+import { unconfirmedRunShouldBeSentAgain } from "./earlier-attempt";
+import { queuedSendUnansweredNotice } from "./queued-send-notices";
+import { pickLocale } from "../runtime/status-i18n";
 import { getProject } from "../store/projects";
 import { getSeatForChat } from "../store/seats";
 import { ensureCanonicalTaskForChat } from "../store/tasks";
@@ -33,6 +36,11 @@ function currentAccountDigest(): string {
   if (session.signedIn && !session.accountFingerprint) throw new Error("queued_input_account_unknown");
   return queuedInputDigest({ signedIn: session.signedIn, account: session.accountFingerprint ?? null, workspace: session.workspaceId ?? null });
 }
+/** The room still exists and is not archived. */
+function chatAvailable(request: McpInvocationRequest): boolean {
+  const chat = getChat(request.chatId);
+  return Boolean(chat && !chat.archivedAt);
+}
 function currentScopeDigest(request: McpInvocationRequest): string {
   const chat = getChat(request.chatId);
   const seat = getSeatForChat(request.chatId);
@@ -59,7 +67,10 @@ export function createQueuedOwnerInputCustody(options: QueuedOwnerInputCustodyOp
     // changed room. Neither grants another execution capability.
     if (operation === "cancel") return;
     if (row.queue_id !== queueId) throw new Error("queued_input_queue_changed");
-    if (row.state !== "active" || operation !== "complete" && (row.account_digest !== account() || row.scope_digest !== currentScopeDigest(original(row)))) {
+    // The account is the authority. The room's settings (model pin, seat, participants, project, folder) are not: the owner changing the
+    // room's model while a message with attachments waited must not strand it (decided). A room that was archived or
+    // removed is the owner's own act and still revokes. The scope digest is still recorded at capture, but no longer compared.
+    if (row.state !== "active" || operation !== "complete" && (row.account_digest !== account() || !chatAvailable(original(row)))) {
       throw new Error("queued_input_owner_changed");
     }
     if (queueId) {
@@ -132,6 +143,41 @@ export function createQueuedOwnerInputCustody(options: QueuedOwnerInputCustodyOp
       if (refs.oneAttachmentRef) discardOneAttachments({ref:refs.oneAttachmentRef});
     }
   };
+  /**
+   * The input's last run is over and cannot be started again, so the custody has done its job. A team run has no runtime placement fact (its
+   * turn does not pass the direct runner), so a team run that FAILED stayed "unconfirmed" for ever: the input kept its sealed bytes and its
+   * `active` row (two owner rows of sat so for days). The run showed its own failure; the input is released, never started again.
+   * Not for a run that provably sent nothing (it can still be queued again), a run that is still live, or an input whose queue row is still
+   * waiting or starting.
+   */
+  const runEndedWithoutRetry = (row: QueuedOwnerInputRow, runId: string): boolean => {
+    if (options.running(runId)) return false;
+    let status: string | undefined;
+    try { status = getInvocationRunReceipt(runId)?.status; } catch { return false; }
+    if (!status || !["completed", "failed", "cancelled", "interrupted", "waiting_input"].includes(status)) return false;
+    if (placement(runId) === "not-dispatched") return false;
+    if (row.queue_id) {
+      const queued = db.prepare("SELECT state FROM pending_chat_sends WHERE id=?").get(row.queue_id) as {state:string}|undefined;
+      if (queued && ["queued", "starting", "held"].includes(queued.state)) return false;
+    }
+    return true;
+  };
+  /**
+   * The input was released (its sealed bytes are gone) and nothing will send it: when its run was lost WITHOUT a stated cause (the app died, the
+   * runner vanished) and no queue row speaks for it (a queue row that ended unconfirmed already said so through the send queue), the owner gets
+   * the one calm line. The owner's Stop, a failure the run showed and a run a later turn took over say nothing of their own here (regression review
+   * 2, N6: the bytes of an undelivered attachment were deleted with no line).
+   */
+  const tellOwnerWhenLostWithoutCause = (row: QueuedOwnerInputRow, runId: string): void => {
+    try {
+      if (row.queue_id) return;
+      const receipt = getInvocationRunReceipt(runId);
+      // A failed run (an unsettled turn, the app's own exception) already showed its own failure line: only a run that left none gets this one.
+      if (receipt?.status === "failed" || !unconfirmedRunShouldBeSentAgain(receipt)) return;
+      appendChatMessage(row.chat_id, "assistant", queuedSendUnansweredNotice(pickLocale(original(row))),
+        { hostNotice: { purpose: "host-status", runId, status: "app-failed" } });
+    } catch { /* the release stands; the line is a courtesy */ }
+  };
   const reconcile = () => {
     for (const row of store.active()) {
       if (row.state === "cancelled") { try { cancelResources(row); finish(row,"cancelled"); } catch { /* Retry exact cleanup later. */ } continue; }
@@ -142,6 +188,15 @@ export function createQueuedOwnerInputCustody(options: QueuedOwnerInputCustodyOp
             .run(Date.now(),row.queue_id,attempts.run_id);
           finish(row,"placed");
         } catch { /* Exact ownership/cleanup remains pending; never replay. */ }
+        continue;
+      }
+      if (row.capture_complete === 1 && runEndedWithoutRetry(row, attempts?.run_id ?? row.origin_run_id)) {
+        const endedRunId = attempts?.run_id ?? row.origin_run_id;
+        // Released through the owner's own cancel path (cleanup is unconditional there); the next pass finishes it if a lock stops this one.
+        try {
+          store.stop(store.ownerOf(row)); cancelResources({ ...row, state: "cancelled" }); finish(row, "cancelled");
+          tellOwnerWhenLostWithoutCause(row, endedRunId);
+        } catch { /* Retried by the next pass. */ }
       }
     }
   };

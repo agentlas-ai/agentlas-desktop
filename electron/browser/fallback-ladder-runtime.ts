@@ -24,11 +24,13 @@ import {
   HUMAN_CHECK_POLL_MS,
   HUMAN_CHECK_WATCH_MS,
   LADDER_STOP_COOLDOWN_MS,
+  SELF_HEAL_DELAYS_MS,
   agentlasBrowserMarkers,
   classifyBrowserFailure,
   detectHumanCheck,
   isBrowserErrorPage,
   isBrowserDomToolError,
+  isSelfHealingBrowserFailure,
   ladderOwnerCard,
   runBrowserLadder,
   type BrowserFailureCode,
@@ -50,13 +52,23 @@ import type { NativeBrowserRelayGrant, NativeBrowserRelayPage, NativeBrowserRela
 type Notice = NonNullable<McpInvocationEvent["notice"]>;
 
 interface RunBinding { chatId: string; runId: string; locale: "ko" | "en"; notify?: (notice: Notice) => void;
-  nativeGrant?: NativeBrowserRelayGrant | null; nativeRequired?: boolean; nativeComputerUseAvailable?: boolean }
+  nativeGrant?: NativeBrowserRelayGrant | null; nativeRequired?: boolean; nativeComputerUseAvailable?: boolean;
+  /** False once the owner stopped the run or it ended. What the app does in the background for this run (the browser self-mend) ends with it. */
+  isLive?: () => boolean }
 const runs = new Map<string, RunBinding>();
+
+/** The run is still the chat's current run and has not been stopped or ended. */
+function runStillLive(binding: RunBinding | undefined): binding is RunBinding {
+  if (!binding || runs.get(binding.chatId) !== binding) return false;
+  try { return binding.isLive?.() !== false; } catch { return false; }
+}
 
 /** The run lends its ids and notice sink; returns the unbind. */
 export function bindBrowserLadderRun(binding: RunBinding): () => void {
   runs.set(binding.chatId, binding);
   return () => {
+    // The run ended or was stopped: the background mend that was started for it ends with it, in every case.
+    cancelSelfHealsOfRun(binding);
     if (runs.get(binding.chatId) !== binding) return;
     runs.delete(binding.chatId);
     // The run ended: its computer-use window grant ends with it.
@@ -224,11 +236,12 @@ async function reestablish(code: BrowserFailureCode, scope: LadderScope): Promis
   const grant = scope.grant;
   if (grant) {
     const before = grant.health?.();
-    if (!before?.current || before.failedOver) return { result: "unavailable", detail: { reason: "grant-not-current" } };
+    // A grant that is not current only because the run's hidden browser window was destroyed under it is brought back by reestablish itself.
+    if ((!before?.current && before?.revivable !== true) || before.failedOver) return { result: "unavailable", detail: { reason: "grant-not-current" } };
     // A full tab list is not fixed by reconnecting; the other surface has no such limit.
     if (code === "native-tab-limit") return { result: "unavailable", detail: { reason: "tab-limit" } };
     const after = await grant.reestablish?.();
-    return after?.current ? { result: "recovered", detail: { revived: after.revived, leases: after.leases } } : { result: "failed" };
+    return after?.current ? { result: "recovered", detail: { revived: after.revived, leases: after.leases, ...(before.current ? {} : { rebound: true }) } } : { result: "failed" };
   }
   const launcher = await import("../mcp-tools/browser-cdp-launcher");
   const owned = await launcher.reconcileBrowserCdpOwnerWithRetry().catch(() => ({ state: "unverifiable" as const, pid: null, reason: "inspect-failed" }));
@@ -361,7 +374,7 @@ async function humanCheckWait(scope: LadderScope, ladderId: string): Promise<Run
 // ── Ladder flights (one per surface key; a stopped ladder cools down) ────────────────────────────────────────
 
 const flights = new Map<string, Promise<LadderRunResult>>();
-const stopped = new Map<string, { at: number; result: LadderRunResult }>();
+const stopped = new Map<string, { at: number; result: LadderRunResult; /** Times this cached stop was answered again: a model that keeps asking is told so. */ repeats: number }>();
 
 export interface BrowserLadderAnswer {
   replay: boolean;
@@ -371,7 +384,7 @@ export interface BrowserLadderAnswer {
 
 const REPLAY_RUNGS: ReadonlySet<LadderRung> = new Set(["reestablish", "switch-surface", "login-recovery"]);
 
-function answerFor(result: LadderRunResult, input: { mutating: boolean }, scope: LadderScope): BrowserLadderAnswer {
+function answerFor(result: LadderRunResult, input: { mutating: boolean }, scope: LadderScope, again: { mendInMs: number | null; repeats: number } = { mendInMs: null, repeats: 0 }): BrowserLadderAnswer {
   const state = result.state;
   const meta = { schema: BROWSER_LADDER_SCHEMA, code: state.code, final: state.final, rung: state.finalRung, surface: state.surface,
     tried: state.tried.map((t) => `${t.rung}:${t.result}`), ...(result.card ? { reasonCode: result.card.reasonCode } : {}),
@@ -394,9 +407,104 @@ function answerFor(result: LadderRunResult, input: { mutating: boolean }, scope:
       : "Agentlas browser ladder: the site needs the owner's sign-in; one card is open and the run resumes when the session appears. Continue other work.";
   } else {
     const suggestion = scope.suggestions.length ? ` Try the tool resolver: agentlas_resolve_plugins with need "${scope.suggestions[0].replace(/ \(agentlas_resolve_plugins\)$/, "")}"; installing stays the owner's decision.` : "";
-    text = `Agentlas browser ladder stopped: ${result.card?.reasonCode ?? state.code}. Tried: ${state.tried.map((t) => `${t.rung}=${t.result}`).join(", ")}.${suggestion} The owner has one card; continue with work that does not need this browser.`;
+    const tried = `Tried: ${state.tried.map((t) => `${t.rung}=${t.result}`).join(", ")}.`;
+    const head = `Agentlas browser ladder stopped: ${result.card?.reasonCode ?? state.code}. ${tried}${suggestion}`;
+    if (!isSelfHealingBrowserFailure(state.code)) text = `${head} The owner has one card; continue with work that does not need this browser.`;
+    else if (again.mendInMs === null) text = `${head} The app tried to re-establish this browser and could not; continue with work that does not need it.`;
+    else {
+      // The app re-establishes the browser by itself while this run lives. A call before its next try is answered from the cache and tries
+      // nothing, so the model is told how long that is and that repeating the call does not help (it used to be told "call it again").
+      const seconds = Math.max(1, Math.round(again.mendInMs / 1000));
+      text = `${again.repeats > 0 ? "Same answer as the last browser call; that call tried nothing. " : ""}${head} The app is re-establishing this browser by itself and the owner has not been asked to do anything; its next try is in about ${seconds} s. Until it works, browser calls only return this message, so repeating the call does not help: continue with work that does not need this browser. If nothing else is left, wait about ${seconds} s if you can, then call the browser tool once more.`;
+    }
   }
   return { replay, meta, text };
+}
+
+/** One tells the owner instead of a "press Retry" card in this room. The run itself never stopped (the agent was told to
+ * continue other work); the card stays only when One cannot take the report. */
+function announceStopCard(card: LadderOwnerCard, scope: LadderScope): void {
+  const binding = scope.binding;
+  if (binding && reportHostAlertToOne({ chatId: binding.chatId, code: card.reasonCode,
+    detail: binding.locale === "ko" ? card.summary.ko : card.summary.en })) return;
+  try { binding?.notify?.(cardNotice(card, binding.locale, "error", scope)); } catch { /* run ended */ }
+}
+
+const ladderKey = (grant: NativeBrowserRelayGrant | null, code: BrowserFailureCode): string => `${grant?.endpoint ?? "dedicated"}:${code}`;
+/** One background mend per surface key, bound to the run that started it. */
+interface SelfHealState { binding: RunBinding; nextAt: number; cancelTimer?: () => void }
+const selfHeals = new Map<string, SelfHealState>();
+let selfHealDelays: readonly number[] = SELF_HEAL_DELAYS_MS;
+/** Starts a timer; returns how to cancel it (a seam that returns nothing cannot be cancelled, the run check at the firing covers that). */
+type SelfHealTimer = (fn: () => void, ms: number) => (() => void) | void;
+const realSelfHealTimer: SelfHealTimer = (fn, ms) => { const id = setTimeout(fn, ms); (id as { unref?: () => void }).unref?.(); return () => clearTimeout(id); };
+let selfHealTimer: SelfHealTimer = realSelfHealTimer;
+const startSelfHealTimer = (fn: () => void, ms: number): (() => void) | undefined => {
+  const cancel = selfHealTimer(fn, ms);
+  return typeof cancel === "function" ? cancel : undefined;
+};
+
+/** Ends a mend. The cached stop goes with it: its answer promised the app is mending, and the next live caller runs the ladder itself. */
+function endSelfHeal(key: string, state?: SelfHealState): void {
+  const current = selfHeals.get(key);
+  if (!current || (state && current !== state)) return;
+  selfHeals.delete(key);
+  stopped.delete(key);
+  try { current.cancelTimer?.(); } catch { /* the timer is already gone */ }
+}
+
+/** The owner stopped the run, or it ended: nothing it started in the background goes on. */
+function cancelSelfHealsOfRun(binding: RunBinding): void {
+  for (const [key, state] of [...selfHeals]) if (state.binding === binding) endSelfHeal(key, state);
+}
+
+/**
+ * After a stop the app can mend by itself: re-establish the same way the ladder's first rung (and the card's Retry) does, after each delay of
+ * SELF_HEAL_DELAYS_MS. A recovery clears the cached stop, so the next browser call goes straight through, and the owner is never told. Only when
+ * every try failed is the card raised, once.
+ *
+ * The mend belongs to the run that hit the failure (owner rule: Stop always wins, a background actor never outlives its run). Before every try and
+ * before the card it checks that the run is still the chat's current run and was not stopped; otherwise it ends without relaunching the browser
+ * and without any alert. A stop with no live run to mend for (no run bound to the chat) schedules nothing. One schedule per surface key; a second
+ * run that hits the same stop rides on it. Returns whether a mend is running for this key.
+ */
+function scheduleSelfHeal(code: BrowserFailureCode, scope: LadderScope, card: LadderOwnerCard): boolean {
+  const key = ladderKey(scope.grant, code);
+  const binding = scope.binding;
+  if (!runStillLive(binding)) return false;
+  if (selfHealDelays.length === 0) { announceStopCard(card, scope); return false; }
+  const running = selfHeals.get(key);
+  if (running) {
+    if (runStillLive(running.binding)) return true;
+    endSelfHeal(key, running);
+  }
+  const state: SelfHealState = { binding, nextAt: Date.now() + selfHealDelays[0] };
+  selfHeals.set(key, state);
+  let step = 0;
+  const attempt = (): void => {
+    void (async () => {
+      if (selfHeals.get(key) !== state) return;
+      if (!runStillLive(state.binding)) { endSelfHeal(key, state); return; }
+      let healed = false;
+      try { healed = (await reestablish(code, scope)).result === "recovered"; } catch { healed = false; }
+      if (selfHeals.get(key) !== state) return;
+      // Stopped or ended while the try ran: it was the last one, and nobody is told.
+      if (!runStillLive(state.binding)) { endSelfHeal(key, state); return; }
+      if (healed) { endSelfHeal(key, state); return; }
+      step += 1;
+      if (step < selfHealDelays.length) { state.nextAt = Date.now() + selfHealDelays[step]; state.cancelTimer = startSelfHealTimer(attempt, selfHealDelays[step]); return; }
+      selfHeals.delete(key);
+      announceStopCard(card, scope);
+    })();
+  };
+  state.cancelTimer = startSelfHealTimer(attempt, selfHealDelays[0]);
+  return true;
+}
+
+/** How soon the running mend tries next, or null when none runs for this key (or its run is gone). */
+function mendInMs(key: string): number | null {
+  const state = selfHeals.get(key);
+  return state && runStillLive(state.binding) ? Math.max(0, state.nextAt - Date.now()) : null;
 }
 
 function productionDeps(code: BrowserFailureCode, scope: LadderScope, ladderId: string): BrowserLadderDeps {
@@ -418,11 +526,9 @@ function productionDeps(code: BrowserFailureCode, scope: LadderScope, ladderId: 
     stop: (card) => {
       // A DOM tool error with no other way in is the agent's to handle, not an owner card (see below).
       if (isBrowserDomToolError(code)) return;
-      // Owner 2026-10-05: One tells the owner instead of a "press Retry" card in this room. The run itself never
-      // stopped (the agent was told to continue other work); the card stays only when One cannot take the report.
-      if (binding && reportHostAlertToOne({ chatId: binding.chatId, code: card.reasonCode,
-        detail: binding.locale === "ko" ? card.summary.ko : card.summary.en })) return;
-      try { binding?.notify?.(cardNotice(card, binding.locale, "error", scope)); } catch { /* run ended */ }
+      // A stop the app can mend by itself is not the owner's yet: it tries again in the background and raises the card only if every try fails.
+      if (isSelfHealingBrowserFailure(code)) { scheduleSelfHeal(code, scope, card); return; }
+      announceStopCard(card, scope);
     },
     suggestions: () => scope.suggestions,
   };
@@ -431,10 +537,14 @@ function productionDeps(code: BrowserFailureCode, scope: LadderScope, ladderId: 
 /** Test seam: the contract swaps the rung executors and the measurement. */
 let depsOverride: ((code: BrowserFailureCode, scope: LadderScope, ladderId: string) => BrowserLadderDeps) | null = null;
 let measureOverride: typeof measureBrowserFailure | null = null;
-export function setBrowserLadderTestSeams(seams: { deps?: typeof depsOverride; measure?: typeof measureOverride } | null): void {
+export function setBrowserLadderTestSeams(seams: { deps?: typeof depsOverride; measure?: typeof measureOverride;
+  selfHealDelaysMs?: readonly number[]; selfHealTimer?: SelfHealTimer } | null): void {
   depsOverride = seams?.deps ?? null;
   measureOverride = seams?.measure ?? null;
-  flights.clear(); stopped.clear();
+  selfHealDelays = seams?.selfHealDelaysMs ?? SELF_HEAL_DELAYS_MS;
+  selfHealTimer = seams?.selfHealTimer ?? realSelfHealTimer;
+  for (const state of selfHeals.values()) { try { state.cancelTimer?.(); } catch { /* gone */ } }
+  flights.clear(); stopped.clear(); selfHeals.clear();
 }
 
 /**
@@ -457,14 +567,19 @@ export async function onAgentlasBrowserToolFailure(input: {
   const code = classifyBrowserFailure(measured.facts) ?? (grant && !/permission|approval|denied|cancelled|plan-mode|simulation/i.test(input.resultText)
     ? "native-tool-failed" : null);
   if (!code) return null;
-  const key = `${grant?.endpoint ?? "dedicated"}:${code}`;
+  const key = ladderKey(grant, code);
   const pageUrl = measured.facts.page?.url ?? null;
   const wall = measured.facts.page?.loginWall ? detectLoginWall({ url: pageUrl }) : null;
   // A sign-in wall names the site it guards (youtube.com behind accounts.google.com), not the identity host.
   const site = wall && wall.kind === "login-wall" ? wall.site : siteOf(pageUrl);
   const scope: LadderScope = { grant, binding, page: measured.page, site, suggestions: [] };
   const cooled = stopped.get(key);
-  if (cooled && Date.now() - cooled.at < LADDER_STOP_COOLDOWN_MS) return answerFor(cooled.result, input, scope);
+  // A stopped ladder is not re-run inside the cooldown, whoever mends it: the full ladder (a Chrome relaunch among its rungs) runs at the rate it always did.
+  // A browser that comes back sooner is noticed by the background mend, whose recovery clears this cache.
+  if (cooled && Date.now() - cooled.at < LADDER_STOP_COOLDOWN_MS) {
+    cooled.repeats += 1;
+    return answerFor(cooled.result, input, scope, { mendInMs: mendInMs(key), repeats: cooled.repeats });
+  }
   let flight = flights.get(key);
   if (!flight) {
     const ladderId = randomUUID();
@@ -482,7 +597,9 @@ export async function onAgentlasBrowserToolFailure(input: {
             : binding.locale === "ko" ? `사이트 로그인이 필요합니다${site}. 열린 로그인 카드에서 로그인하면 작업이 이어집니다.`
               : `The site needs the owner's sign-in${site}. Signing in from the open login card lets the run continue.` });
       }
-      if (result.state.final === "stopped" && !isBrowserDomToolError(code)) stopped.set(key, { at: Date.now(), result });
+      if (result.state.final === "stopped" && !isBrowserDomToolError(code)) stopped.set(key, { at: Date.now(), result, repeats: 0 });
+      // The browser works again: a mend still waiting for its next try has nothing left to do.
+      if (result.state.final === "recovered") endSelfHeal(key);
       return result;
     }).finally(() => { if (flights.get(key) === flight) flights.delete(key); });
     flights.set(key, flight);
@@ -496,7 +613,7 @@ export async function onAgentlasBrowserToolFailure(input: {
    * (browser_unavailable:browser_ladder:native-tool-failed, 1.2.55 and 1.2.57). Now the agent gets its own error back.
    */
   if (isBrowserDomToolError(code) && result.state.final === "stopped") return null;
-  return answerFor(result, input, scope);
+  return answerFor(result, input, scope, { mendInMs: mendInMs(key), repeats: 0 });
 }
 
 const PAGE_CHANGING = new Set(["browser_navigate", "browser_navigate_back", "browser_click", "browser_snapshot", "browser_wait_for", "browser_tabs", "browser_press_key"]);

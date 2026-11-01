@@ -5,11 +5,13 @@
  *
  * Every continuation the host promises ("after sign-in the remaining steps continue", "full access approved, finishing the
  * blocked work", "the automation continues once the login is restored") either starts or says here, with the machine cause
- * and the one step that always works, that it did not. Before, a refused continuation was a log line only: the Mobile turn
+ * and the one step that always works, that it did not (the machine cause is in the returned `cause` and in the notice details, not
+ * in the sentence the owner reads). Before, a refused continuation was a log line only: the Mobile turn
  * whose sign-in was verified (2026-10-28 06:07Z, YouTube room) and the two approved full-access continuations refused while
  * the Goal waited for that very answer (2026-10-27 01:31Z and 05:02Z, same room) left the room on its last line for hours.
  *
- * The cause is the refusal's typed code, never prose; anything that is not a bounded machine code is written "unknown".
+ * The cause is the refusal's typed code, never prose; anything that is not a bounded machine code is "unknown". The sentence names
+ * the step to take; the code goes to the ledger and the notice details.
  */
 export type RefusedContinuation = "browser-login" | "permission-escalation" | "graph-login";
 
@@ -39,18 +41,18 @@ export function continuationRefusalNotice(input: {
   switch (input.continuation) {
     case "browser-login":
       message = ko
-        ? `로그인은 확인됐지만 이 작업을 자동으로 계속하지 못했습니다 (원인: ${cause}). 메시지를 보내면 계속합니다.`
-        : `Sign-in was verified, but this task could not continue on its own (cause: ${cause}). Send a message to continue.`;
+        ? "로그인은 확인됐지만 이 작업을 자동으로 계속하지 못했습니다. 메시지를 보내면 계속합니다."
+        : "Sign-in was verified, but this task could not continue on its own. Send a message to continue.";
       break;
     case "permission-escalation":
       message = ko
-        ? `전체 권한 승인은 받았지만 막혔던 작업을 자동으로 계속하지 못했습니다 (원인: ${cause}). 메시지를 보내면 계속합니다.`
-        : `Full access was approved, but the blocked work could not continue on its own (cause: ${cause}). Send a message to continue.`;
+        ? "전체 권한 승인은 받았지만 막혔던 작업을 자동으로 계속하지 못했습니다. 메시지를 보내면 계속합니다."
+        : "Full access was approved, but the blocked work could not continue on its own. Send a message to continue.";
       break;
     case "graph-login":
       message = ko
-        ? `로그인은 확인됐지만 자동화${name ? ` "${name}"` : ""}를 자동으로 계속하지 못했습니다 (원인: ${cause}). 자동화에서 지금 실행을 누르면 다시 실행합니다.`
-        : `Sign-in was verified, but the automation${name ? ` "${name}"` : ""} could not continue on its own (cause: ${cause}). Use Run now on the automation to run it again.`;
+        ? `로그인은 확인됐지만 자동화${name ? ` "${name}"` : ""}를 자동으로 계속하지 못했습니다. 자동화에서 지금 실행을 누르면 다시 실행합니다.`
+        : `Sign-in was verified, but the automation${name ? ` "${name}"` : ""} could not continue on its own. Use Run now on the automation to run it again.`;
       break;
   }
   return { code: CONTINUATION_REFUSED_NOTICE_CODE[input.continuation], cause, message };

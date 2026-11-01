@@ -33,13 +33,41 @@ export class SupervisorOutbox {
     this.migrateLegacy(); this.refresh();
   }
   private acknowledged(id: string): boolean { return this.storage.getItem(`${this.legacyKey}.received.${id}`) !== null; }
+  /** A saved request that cannot be read is set aside, never fatal: one damaged record must not stop the composer from sending,
+   * and the other saved requests keep working. The bytes stay under a `.quarantine.` key (named by their content, so a record
+   * met again is not copied twice) for support; they are never replayed. */
+  private setAside(raw: string | null): void {
+    if (raw === null) return;
+    let hash = 5381;
+    for (let i = 0; i < raw.length; i++) hash = ((hash * 33) ^ raw.charCodeAt(i)) >>> 0;
+    const key = `${this.legacyKey}.quarantine.${hash.toString(36)}.${raw.length}`;
+    // A record met again is not counted twice: the owner is told once about each damaged request.
+    try { if (this.storage.getItem(key) === null) this.setAsideCount += 1; } catch { this.setAsideCount += 1; }
+    try { this.storage.setItem(key, raw); }
+    catch { /* a full store cannot hold the copy; the damaged record is still skipped */ }
+  }
+  private setAsideCount = 0;
+  /**
+   * How many unreadable saved requests were set aside since this was last asked. The set-aside request leaves the list, so the composer says
+   * so once (nothing the owner typed may disappear with no line); the bytes stay in the quarantine key, never replayed.
+   */
+  takeSetAside(): number { const count = this.setAsideCount; this.setAsideCount = 0; return count; }
+  private quarantine(key: string, raw: string | null): void {
+    this.setAside(raw);
+    try {
+      if (this.storage.removeItem) this.storage.removeItem(key);
+      else this.storage.setItem(key, "null");
+    } catch { /* the record stays unreadable but is skipped on every read */ }
+  }
   private migrateLegacy(): void {
     const raw = this.storage.getItem(this.legacyKey);
     if (!raw) return;
-    const value: unknown = JSON.parse(raw);
-    if (!Array.isArray(value)) throw new Error("supervisor_saved_request_invalid");
+    let value: unknown;
+    try { value = JSON.parse(raw); } catch { this.quarantine(this.legacyKey, raw); return; }
+    if (!Array.isArray(value)) { this.quarantine(this.legacyKey, raw); return; }
     for (const item of value) {
-      const intent = readIntent(JSON.stringify(item));
+      let intent: PendingSupervisorWrite | null;
+      try { intent = readIntent(JSON.stringify(item)); } catch { this.setAside(JSON.stringify(item) ?? null); continue; }
       if (!intent || this.acknowledged(intent.commandId)) continue;
       const key = this.prefix + intent.commandId;
       if (this.storage.getItem(key) === null) this.storage.setItem(key, JSON.stringify(intent));
@@ -51,12 +79,17 @@ export class SupervisorOutbox {
   private refresh(): void {
     if (typeof this.storage.key === "function" && typeof this.storage.length === "number") {
       const next = new Map<string, PendingSupervisorWrite>();
+      const damaged: Array<[string, string | null]> = [];
       for (let i = 0; i < this.storage.length; i++) {
         const key = this.storage.key(i);
         if (!key?.startsWith(this.prefix)) continue;
-        const intent = readIntent(this.storage.getItem(key));
+        const raw = this.storage.getItem(key);
+        let intent: PendingSupervisorWrite | null;
+        try { intent = readIntent(raw); } catch { damaged.push([key, raw]); continue; }
         if (intent && key === this.prefix + intent.commandId && !this.acknowledged(intent.commandId)) next.set(intent.commandId, intent);
       }
+      // Set aside after the scan: removing a key while indexing the store shifts the indexes.
+      for (const [key, raw] of damaged) this.quarantine(key, raw);
       this.pending.clear();
       for (const [id, intent] of next) this.pending.set(id, intent);
     } else {
@@ -100,4 +133,28 @@ export class SupervisorOutbox {
     if (receipt.commandId !== intent.commandId) throw new Error("supervisor_receipt_identity_unconfirmed");
     this.reconcile([receipt]); return receipt;
   }
+}
+
+/** In-memory stand-in for a store that cannot be used at all (blocked by the browser profile, full). */
+function memoryOutboxStorage(): OutboxStorage {
+  const map = new Map<string, string>();
+  return {
+    getItem: (key) => map.get(key) ?? null,
+    setItem: (key, value) => { map.set(key, value); },
+    removeItem: (key) => { map.delete(key); },
+    key: (index) => Array.from(map.keys())[index] ?? null,
+    get length() { return map.size; },
+  };
+}
+
+/**
+ * Opens the retry cache for a conversation so that sending never depends on it. A damaged saved request is set aside by the
+ * outbox itself; a store that cannot be used at all (private profile, quota) continues in memory, which only loses the retry after
+ * a restart. The composer is never disabled for a stored request that could not be read.
+ */
+export function openSupervisorOutbox(oneId: string, storage: OutboxStorage | null): SupervisorOutbox {
+  if (storage) {
+    try { return new SupervisorOutbox(oneId, storage); } catch { /* memory below */ }
+  }
+  return new SupervisorOutbox(oneId, memoryOutboxStorage());
 }

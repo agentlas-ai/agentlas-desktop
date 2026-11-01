@@ -45,6 +45,7 @@ export function createDaemonDeviceBridge(options: { now?: () => number; newReque
   let transport: DeviceTransport | null = null, owner: object | null = null;
   let snapshot: DeviceStateSnapshot = { session: "unknown", idleSeconds: null, observedAt: new Date(0).toISOString() };
   const pending = new Set<Pending>();
+  const attachWaiters = new Set<() => void>();
   const requestId = options.newRequestId ?? (() => randomBytes(32).toString("hex"));
   function failAll(code: DeviceBridgeErrorCode): void {
     for (const p of [...pending]) { pending.delete(p); clearTimeout(p.timer); p.reject(new DeviceBridgeError(code)); }
@@ -83,6 +84,19 @@ export function createDaemonDeviceBridge(options: { now?: () => number; newReque
     attach(peer: object, next: DeviceTransport): void {
       if (owner && owner !== peer) failAll("device_bridge_disconnected");
       owner = peer; transport = next;
+      for (const wake of [...attachWaiters]) wake();
+    },
+    /** For a caller that has sent nothing yet: true as soon as a Main peer is attached (at once when one is), false after timeoutMs.
+     * A window process that is restarting or re-attaching its channel is back within seconds; a closed one never is. */
+    whenAttached(timeoutMs: number): Promise<boolean> {
+      if (transport) return Promise.resolve(true);
+      if (!(timeoutMs > 0)) return Promise.resolve(false);
+      return new Promise<boolean>((resolve) => {
+        const wake = () => { clearTimeout(timer); attachWaiters.delete(wake); resolve(true); };
+        // A caller is awaiting this answer, so the timer keeps the process up for it; it is bounded by timeoutMs.
+        const timer = setTimeout(() => { attachWaiters.delete(wake); resolve(false); }, timeoutMs);
+        attachWaiters.add(wake);
+      });
     },
     /** Channel closed. Only the current owner detaches; pending requests fail at once; the lock state is unknown again. */
     detach(peer: object): void {

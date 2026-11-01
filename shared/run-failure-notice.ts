@@ -40,15 +40,32 @@ import { EMPTY_AFTER_UNUSABLE_TOOLS_CODE, EMPTY_NO_TOOL_RAN_CODES } from "./turn
  *  - capacity / unavailable: a host-owned machine code that names its class (HOST_FAILURE_CODE_CLASSES), read from the
  *    failure's code or, when the event carries no typed failure (the serving 503 is kind `exit`), from the terminal code.
  *    The code is the whole reason, so nothing is quoted. Any other host-owned code still returns null.
+ *  - provider_unavailable: the provider could not take the request (PROVIDER_UNAVAILABLE_CODES): an outage or "Selected model is
+ *    at capacity". An external cause, told as such. As the terminal code of a turn that did no work it says so; as the cause
+ *    behind an unfinished turn the unfinished-turn sentences stay (tools may have run). Nothing is quoted.
  *
  * `source: "heuristic"` is worded as a likelihood, never a verdict.
  */
 
 export type RunFailureNoticeLocale = "ko" | "en";
-export type RunFailureNoticeCause = "quota" | "rate_limit" | "auth" | "refused" | "empty" | "empty_no_tool" | "tools_unusable" | "unavailable" | "capacity" | "subscription_credits_off" | "tool_missing" | "tool_failed" | "tools_unprepared" | "runtime_unavailable" | "runtime_changed" | "goal_changed" | "store_busy" | "mobile_boundary" | "project_busy" | "provider_connection" | "browser_host_unavailable" | "session_reopen" | "unsettled";
+export type RunFailureNoticeCause = "quota" | "rate_limit" | "auth" | "refused" | "empty" | "empty_no_tool" | "tools_unusable" | "unavailable" | "provider_unavailable" | "capacity" | "subscription_credits_off" | "tool_missing" | "tool_failed" | "tools_unprepared" | "runtime_unavailable" | "runtime_changed" | "goal_changed" | "store_busy" | "project_busy" | "provider_connection" | "browser_host_unavailable" | "session_reopen" | "working_folder" | "unsettled";
 
 /** The terminal code of a dispatched turn that ended without a terminal receipt (runtime/runner.ts RUNTIME_TURN_UNSETTLED_CODE). */
 export const RUN_FAILURE_UNSETTLED_CODE = "runtime_turn_unsettled";
+
+/**
+ * Codes with which a runner types "the model provider could not take the request" (RunnerFailureKind "unavailable" for a cause
+ * outside the app): the Codex CodexErrorInfo values for an overloaded or failing server and a lost response stream
+ * (runtime/codex-turn-failure.ts: "Selected model is at capacity" is serverOverloaded) and the API lane's server failures
+ * (runtime/provider-overload.ts: a 502/503/504/529, any other 5xx). A closed list of machine codes, never a word search: the
+ * kind `unavailable` is also what the app uses for its own refusals (a busy MCP scope, a lost local session), which must
+ * never be told as the provider's outage. A gate keeps this list equal to those two tables.
+ */
+export const PROVIDER_UNAVAILABLE_CODES: readonly string[] = Object.freeze([
+  "codex_server_overloaded", "codex_internal_server_error", "codex_flex_unavailable",
+  "codex_response_stream_connection_failed", "codex_response_stream_disconnected", "codex_response_too_many_failed_attempts",
+  "runtime_overloaded", "runtime_server_error",
+]);
 
 /**
  * Machine codes with which a provider (or its API) reports a response it declined or blocked: the codex policy and
@@ -65,7 +82,7 @@ export const PROVIDER_REFUSAL_CODES: ReadonlySet<string> = new Set([
   "STOP_REASON_CONTENT_FILTER",
 ]);
 
-type HostFailureClass = "capacity" | "unavailable" | "subscription_credits_off" | "tool_missing" | "tool_failed" | "tools_unprepared" | "runtime_unavailable" | "runtime_changed" | "goal_changed" | "store_busy" | "mobile_boundary" | "project_busy" | "provider_connection" | "browser_host_unavailable" | "session_reopen";
+type HostFailureClass = "capacity" | "unavailable" | "provider_unavailable" | "subscription_credits_off" | "tool_missing" | "tool_failed" | "tools_unprepared" | "runtime_unavailable" | "runtime_changed" | "goal_changed" | "store_busy" | "project_busy" | "provider_connection" | "browser_host_unavailable" | "session_reopen" | "working_folder";
 
 /**
  * Codes whose notice names something only the owner can do (sign in to the Agentlas Browser). A Goal continuation the host
@@ -84,6 +101,9 @@ export const OWNER_ACTION_FAILURE_CODES: ReadonlySet<string> = new Set(["agentla
 export const HOST_FAILURE_CODE_CLASSES: ReadonlyMap<string, HostFailureClass> = new Map<string, HostFailureClass>([
   ["model_context_capacity_exceeded", "capacity"], ["codex_context_window_exceeded", "capacity"],
   ["serving_unavailable", "unavailable"],
+  // The provider (not the app) could not take the request: as the terminal code of a turn that never started work, or as the
+  // cause behind an unfinished one (runtime/runner.ts unsettledTurnCauseFailure).
+  ...PROVIDER_UNAVAILABLE_CODES.map((code) => [code, "provider_unavailable"] as const),
   // The host refused the run before dispatch: the subscription limit is reached and the owner's automatic credit use is off
   // (runtime/selection.ts withRuntimeAuthProbe, claude-code and codex). Finance validation 2026-10-28: a codex run refused
   // for exactly this read "The run failed …" with no reason while the banner said the limit was only near.
@@ -98,7 +118,7 @@ export const HOST_FAILURE_CODE_CLASSES: ReadonlyMap<string, HostFailureClass> = 
   ["one-runtime-unavailable", "runtime_unavailable"], ["no-runtime", "runtime_unavailable"],
   ["one-team-runtime-selection-changed", "runtime_changed"], ["one-team-runtime-changed", "runtime_changed"],
   ["automatic-goal-resume-state-changed", "goal_changed"],
-  ["store_busy", "store_busy"], ["mobile-runtime-not-read-sandboxed", "mobile_boundary"],
+  ["store_busy", "store_busy"],
   ["work_project_residency_busy", "project_busy"], ["codex_http_connection_failed", "provider_connection"],
   // mcp/client.ts: the run is bound to the Agentlas Browser (the owner's toolMode / assignment / mention, or an active Goal
   // that has been working in it) and its signed-in host is not ready: refused before the model (2026-10-28).
@@ -108,6 +128,10 @@ export const HOST_FAILURE_CODE_CLASSES: ReadonlyMap<string, HostFailureClass> = 
   // timed out at 120 s). A timeout or a gone session already continues fresh inside the runner (unattended-session-turns.ts
   // rules 4-5); what still reaches here is a refusal that may clear on its own.
   ["resume_failed", "session_reopen"],
+  // The chat's working folder is gone, is not a folder, or cannot be opened (runtime/runner.ts spawnStartFailureRefusal, always pre-dispatch).
+  // The folder is the owner's (moved, deleted, permissions): nothing the app does by itself changes that, so it is not retried as the app's own
+  // state (shared/run-failure-cause.ts) and the line says what to fix (owner, regression review 3 F4).
+  ["project_folder_missing", "working_folder"], ["project_folder_not_directory", "working_folder"], ["project_folder_unreadable", "working_folder"],
 ]);
 
 /**
@@ -136,6 +160,11 @@ export interface RunFailureNoticeFacts {
   turnDelivery?: string | null;
   /** The failure's own message as the run reported it. Quoted, never read. */
   detail?: string | null;
+  /**
+   * What the app does about an unfinished turn (electron/invocation/resend-forecast.ts): "now" = it sends the same message once more by
+   * itself, "spent" = it already did and the second attempt ended the same way. Absent or "none": nothing is sent automatically.
+   */
+  resend?: "now" | "spent" | "none";
 }
 
 /** A typed provider failure (quota, rate limit, sign-in, refusal): the owner may have something to do. */
@@ -212,6 +241,8 @@ const KO: Record<RunFailureNoticeCause, Copy> = {
     action: "같은 요청을 다시 보내거나 다른 모델을 선택해 보세요." },
   unavailable: { lead: ["Agentlas 모델 서비스를 지금 사용할 수 없어 답변을 완료하지 못했습니다.", "Agentlas 모델 서비스를 지금 사용할 수 없어 답변을 완료하지 못한 것으로 보입니다."],
     action: "잠시 뒤 같은 요청을 다시 보내거나 다른 모델을 선택해 보세요." },
+  provider_unavailable: { lead: ["모델 공급자가 지금 요청을 받을 수 없어(서비스 장애 또는 수용 한도 초과) 답변을 완료하지 못했습니다.", "모델 공급자가 지금 요청을 받을 수 없어(서비스 장애 또는 수용 한도 초과) 답변을 완료하지 못한 것으로 보입니다."],
+    action: "잠시 뒤 같은 요청을 다시 보내거나 다른 모델을 선택해 보세요." },
   capacity: { lead: ["요청이 모델의 입력(컨텍스트) 한도를 넘어 답변을 완료하지 못했습니다.", "요청이 모델의 입력(컨텍스트) 한도를 넘어 답변을 완료하지 못한 것으로 보입니다."],
     action: "새 대화를 시작하거나 요청·첨부를 줄여 다시 보내 보세요." },
   subscription_credits_off: { lead: ["구독 사용 한도에 도달했고 크레딧 자동 사용이 꺼져 있어 이 실행을 시작하지 않았습니다.", "구독 사용 한도에 도달했고 크레딧 자동 사용이 꺼져 있어 이 실행을 시작하지 않은 것으로 보입니다."],
@@ -232,14 +263,14 @@ const KO: Record<RunFailureNoticeCause, Copy> = {
     action: "목표 칩에서 상태를 확인한 뒤 다시 보내 보세요." },
   store_busy: { lead: ["Agentlas 저장소가 다른 기록으로 잠겨 있어 이 턴을 끝까지 기록하지 못했습니다.", "Agentlas 저장소가 다른 기록으로 잠겨 있어 이 턴을 끝까지 기록하지 못한 것으로 보입니다."],
     action: "실행 기록을 확인한 뒤 같은 요청을 다시 보내 보세요." },
-  mobile_boundary: { lead: ["이 모델은 폰에서 쓰는 읽기 전용 경계가 검증되지 않아 실행하지 않았습니다.", "이 모델은 폰에서 쓰는 읽기 전용 경계가 검증되지 않아 실행하지 않은 것으로 보입니다."],
-    action: "데스크탑에서 BYOK 또는 Ollama 모델을 골라 다시 보내 보세요." },
   project_busy: { lead: ["이 Work 프로젝트의 다른 채팅에서 에이전트가 아직 실행 중이라 시작하지 않았습니다.", "이 Work 프로젝트의 다른 채팅에서 에이전트가 아직 실행 중이라 시작하지 않은 것으로 보입니다."],
     action: "지금 실행이 끝난 뒤 다시 보내 주세요." },
   provider_connection: { lead: ["모델 공급자에 연결하지 못해(인증·네트워크) 답변을 완료하지 못했습니다.", "모델 공급자에 연결하지 못해(인증·네트워크) 답변을 완료하지 못한 것으로 보입니다."],
     action: "설정에서 해당 모델의 로그인을 확인한 뒤 다시 보내거나 다른 모델을 골라 보세요." },
   session_reopen: { lead: ["이 대화의 이전 실행 세션을 다시 열지 못해 답변을 시작하지 못했습니다.", "이 대화의 이전 실행 세션을 다시 열지 못해 답변을 시작하지 못한 것으로 보입니다."],
     action: "같은 요청을 다시 보내 주세요. 계속 실패하면 이 방의 모델을 다른 실행기로 바꿔 보내 주세요." },
+  working_folder: { lead: ["이 대화의 작업 폴더를 쓸 수 없어(없거나, 폴더가 아니거나, 열 수 없습니다) 실행을 시작하지 못했습니다.", "이 대화의 작업 폴더를 쓸 수 없어(없거나, 폴더가 아니거나, 열 수 없는 것으로 보입니다) 실행을 시작하지 못했습니다."],
+    action: "폴더가 옮겨졌거나 지워졌는지 확인하고, 작업 폴더를 다시 지정한 뒤 같은 요청을 보내 주세요." },
   unsettled: { lead: ["응답이 완료 확인 없이 끝나 답변을 완료하지 못했습니다.", "응답이 완료 확인 없이 끝나 답변을 완료하지 못한 것으로 보입니다."],
     action: "같은 요청을 다시 보내거나 다른 모델을 선택해 보세요." },
 };
@@ -261,6 +292,8 @@ const EN: Record<RunFailureNoticeCause, Copy> = {
     action: "Send it again, or choose another model." },
   unavailable: { lead: ["The Agentlas model service is unavailable right now, so the reply could not be completed.", "The Agentlas model service appears to be unavailable right now, so the reply could not be completed."],
     action: "Send it again in a moment, or choose another model." },
+  provider_unavailable: { lead: ["The model provider could not take the request right now (an outage or no free capacity), so the reply could not be completed.", "The model provider appears to be unable to take the request right now (an outage or no free capacity), so the reply could not be completed."],
+    action: "Send it again in a moment, or choose another model." },
   capacity: { lead: ["The request is larger than the model's input (context) limit, so the reply could not be completed.", "The request appears to be larger than the model's input (context) limit, so the reply could not be completed."],
     action: "Start a new conversation, or shorten the request or attachments, and send it again." },
   subscription_credits_off: { lead: ["The subscription usage limit is reached and automatic credit use is off, so this run was not started.", "The subscription usage limit appears to be reached with automatic credit use off, so this run was not started."],
@@ -281,14 +314,14 @@ const EN: Record<RunFailureNoticeCause, Copy> = {
     action: "Check the goal chip and send it again." },
   store_busy: { lead: ["The Agentlas store was locked by another write, so this turn could not be fully recorded.", "The Agentlas store appears to have been locked by another write, so this turn could not be fully recorded."],
     action: "Check the run history, then send the same request again." },
-  mobile_boundary: { lead: ["This model's read-only boundary for the phone is not verified, so it was not run.", "This model's read-only boundary for the phone appears not to be verified, so it was not run."],
-    action: "On the desktop, choose a BYOK or Ollama model and send it again." },
   project_busy: { lead: ["An agent is still running in another chat of this Work project, so this was not started.", "An agent appears to be still running in another chat of this Work project, so this was not started."],
     action: "Send it again once that run has finished." },
   provider_connection: { lead: ["The model provider could not be reached (sign-in or network), so the reply could not be completed.", "The model provider appears not to have been reached (sign-in or network), so the reply could not be completed."],
     action: "Check that model's sign-in in Settings and send it again, or choose another model." },
   session_reopen: { lead: ["This conversation's previous run session could not be reopened, so the reply was not started.", "This conversation's previous run session appears not to have reopened, so the reply was not started."],
     action: "Send it again. If it keeps failing, switch this room to a model on another runtime and send it." },
+  working_folder: { lead: ["This chat's working folder cannot be used (it is missing, is not a folder, or cannot be opened), so the run could not start.", "This chat's working folder appears not to be usable (it is missing, is not a folder, or cannot be opened), so the run could not start."],
+    action: "Check whether the folder was moved or deleted, set the working folder again, then send the same request." },
   unsettled: { lead: ["The reply ended without a completion receipt, so it could not be completed.", "The reply appears to have ended without a completion receipt, so it could not be completed."],
     action: "Send it again, or choose another model." },
 };
@@ -297,6 +330,8 @@ const SAVED = { ko: "요청은 저장되어 있습니다.", en: "Your request is
 const NOT_SENT = { ko: "모델 공급자에는 아무것도 보내지 않았습니다.", en: "Nothing was sent to the model provider." } as const;
 const MAY_HAVE_ACTED = { ko: "요청이 이미 실행됐을 수 있어 자동으로 다시 보내지 않았습니다.", en: "The request may already have acted, so it was not sent again automatically." } as const;
 const NOTHING_RAN = { ko: "실행된 도구가 없어 아무것도 바뀌지 않았고, 자동으로 다시 보내지는 않았습니다.", en: "No tool ran, so nothing was changed; it was not sent again automatically." } as const;
+const RESENDING = { ko: "요청이 이미 실행됐을 수 있어, 앱이 같은 요청을 스스로 한 번 더 보내면서 앞선 시도가 일부 실행됐을 수 있다고 모델에 알립니다.", en: "The request may already have acted, so the app is sending it once more by itself and telling the model the earlier attempt may have partly happened." } as const;
+const RESENT_ONCE = { ko: "요청이 이미 실행됐을 수 있습니다. 앱이 이미 한 번 다시 보냈지만 같은 식으로 끝났고, 더 보내지 않습니다.", en: "The request may already have acted. The app already sent it once more and it ended the same way, so it sends nothing more." } as const;
 const CHECK_HISTORY = { ko: "실행 기록에서 어디까지 실행됐는지 확인하세요.", en: "Check the run history for what already ran." } as const;
 const DETAIL_LABEL = { ko: "보고된 사유", en: "Reported reason" } as const;
 
@@ -323,15 +358,22 @@ export function runFailureNoticeText(facts: RunFailureNoticeFacts): string | nul
   // tail says why it was empty, while Agentlas serving's own code already is the whole reason.
   const quoted = resolved.cause === "refused" || resolved.cause === "unsettled" || (resolved.cause === "quota" && reset === null)
     || (resolved.cause === "empty" && !resolved.failure.providerCode);
-  const detail = quoted ? boundedFailureDetail(facts.detail) : null;
+  // An unfinished turn with no cause from the provider: the app sends it once more by itself (said, and no instruction to send it), or
+  // already did (said, and the owner is asked). Only this class is ever forecast; every other cause keeps its own remedy line.
+  // A store lock after dispatch (store_busy) is the same case: the turn may have run, and the app's own exception that the lock raised is sent once more.
+  const resend = (resolved.cause === "unsettled" || resolved.cause === "store_busy") && facts.turnDelivery !== "not-dispatched" ? facts.resend : undefined;
+  // The runner's own "automatic replay stopped" words are not quoted beside "the app is sending it again".
+  const detail = quoted && resend !== "now" ? boundedFailureDetail(facts.detail) : null;
   return [
     copy.lead[hedged ? 1 : 0],
     facts.turnDelivery === "not-dispatched" ? NOT_SENT[locale]
-      : resolved.cause === "empty_no_tool" ? NOTHING_RAN[locale] : resolved.unfinished ? MAY_HAVE_ACTED[locale] : undefined,
+      : resend === "now" ? RESENDING[locale]
+        : resend === "spent" ? RESENT_ONCE[locale]
+          : resolved.cause === "empty_no_tool" ? NOTHING_RAN[locale] : resolved.unfinished ? MAY_HAVE_ACTED[locale] : undefined,
     reset,
     SAVED[locale],
-    resolved.unfinished && resolved.cause !== "empty_no_tool" ? CHECK_HISTORY[locale] : undefined,
-    copy.action,
+    resolved.unfinished && resolved.cause !== "empty_no_tool" && resend !== "now" ? CHECK_HISTORY[locale] : undefined,
+    resend === "now" ? undefined : copy.action,
     detail ? `${DETAIL_LABEL[locale]}: “${detail}”` : undefined,
   ].filter(Boolean).join(" ");
 }

@@ -21,9 +21,11 @@ import { assertNativeOneStartPort, isLocalInvocationPreparationPort, driveLocalO
 import { canResumeInvocationBrowserLoginWait, claimInvocationBrowserLoginWait, registerInvocationBrowserLoginWait, settleInvocationBrowserLoginWait,
   type BrowserLoginWaitHandle, type InvocationBrowserLoginWait } from "./browser-login-wait";
 import { isOneQuietReply } from "../../shared/one-supervisor";
-import { bindWorkAttachmentRun, workAttachmentGroupIds, releaseWorkAttachmentRun, redactWorkAttachmentEvent, redactWorkAttachmentText } from "./work-attachments";
+import { decideOneExecutionLane, ONE_LANE_REFUSAL_MESSAGE } from "./one-execution-lane";
+import { bindWorkAttachmentRun, goalSourceAttachmentGroupIds, workAttachmentGroupIds, releaseWorkAttachmentRun, redactWorkAttachmentEvent, redactWorkAttachmentText } from "./work-attachments";
 import { stoppedGoalMessageReopens } from "../../shared/goal-display-state";
-import { TRANSIENT_SEND_DEADLINE_MS, isStoreBusyError, isTransientSendRefusalCode, transientSendBackoffMs } from "../../shared/transient-send-refusal";
+import { pendingSendRetriesAfterInternalFailure } from "./pending-chat-sends";
+import { TRANSIENT_SEND_DEADLINE_MS, UNDISPATCHED_START_MAX_ATTEMPTS, isHostNotReadyRunFailureCode, isStoreBusyError, isTransientSendRefusalCode, transientSendBackoffMs } from "../../shared/transient-send-refusal";
 import { withBrowserDownloadProofContext } from "../long-run/download-proof";
 import { admitMainInvocation, takeMainInvocationAdmission, MainInvocationLifetime, runMainBackgroundTask, type MainInvocationAdmission } from "../runtime/scheduled-root-context";
 import { withBuiltinFileProofContext } from "../long-run/file-proof";
@@ -43,11 +45,12 @@ import { captureGoalEpisode, applyGoalEpisodeRest, drainGoalEpisodeNotices,
   captureGoalProducerAdmission, admitGoalProducer, assertGoalProducerDispatch, latestGoalEpisodeProducer, type GoalProducerAdmission } from "../long-run/episode-disposition";
 import { latestGoalWaitSubscription, goalWaitContinuationPermission, registerGoalWaitSubscription, registerOngoingGoalCycle, restoreGoalWaitAfterUndispatchedStart, supersedeGoalWaitForInvocation, type GoalWaitDispatch } from "../long-run/wait-subscriptions";
 import { recordGoalWaitProposal } from "../long-run/goal-wait-proposal";
+import { boundedWaitRefusalCause } from "../long-run/wait-refusal-cause";
 import type { ParsedGoalWait } from "../long-run/wait-emitter";
 import { finiteGoalTimerRefusalEndsTurn, finiteGoalTimerRefusalMessage, goalWaitRefusalAlreadyNotified, goalWaitRefusalMessage, GOAL_WAIT_FINITE_TIMER_NOTICE } from "../long-run/goal-wait-refusal";
 import { ensureGoalEpisodeTask } from "../long-run/ongoing-episode-task";
 import { settleNativeGoalEpisode } from "../long-run/native-goal-pass";
-import { GOAL_RESUME_EFFECT_BOUNDARY_UNCERTAIN, goalResumeRecoveryBlockerCode } from "../../shared/long-run";
+import { GOAL_RESUME_EFFECT_BOUNDARY_UNCERTAIN, goalResumeRecoveryBlockerCode, goalStoppedByHost } from "../../shared/long-run";
 import { prepareCheckpointContinuation } from "../long-run/continuation";
 import { parkGoalAfterPassStopWithPool } from "../long-run/goal-pass-stop";
 import { captureLongRunRuntimeSelection } from "../long-run/exact-runtime-binding";
@@ -62,6 +65,7 @@ import { assertInvocationRunOwner, claimInvocationRunOwner, invocationProcessOwn
 import { CHAT_BUSY_OTHER_HOST_CODE, ensureChatHostHandover } from "../runtime/chat-host-handover";
 import type { InvocationRunOwner } from "../store/invocation-owner-core";
 import path from "node:path";
+import { existsSync } from "node:fs";
 import { agentRunCwd } from "../runtime/exec";
 import { resolveInvocationRunId } from "../runtime/run-id";
 import {
@@ -75,10 +79,12 @@ import {
   STOPPED_BY_USER,
 } from "../runtime/invocation-lifecycle";
 import { invocationHostStopCause, invocationHostStopCopy, isOwnerGoalStopCause, isNonFailureInvocationStop } from "../../shared/invocation-host-stop";
-import { isAppSideRunFailureCode } from "../../shared/run-failure-cause";
+import { isAppSideRunFailureCode, undispatchedInternalFailure } from "../../shared/run-failure-cause";
+import { readRunTurnPlacement } from "./turn-placement";
 import { runFailureNoticeText } from "../../shared/run-failure-notice";
-import { hostInternalFailureMessage, isHostInternalException } from "./host-internal-failure";
-import { OWNER_ACTION_FAILURE_CODES } from "../../shared/run-failure-notice";
+import { hostInternalFailureMessage, isHostInternalException, isMissingWorkingFolderError, workingFolderMissingMessage } from "./host-internal-failure";
+import { forecastAppResend } from "./resend-forecast";
+import { OWNER_ACTION_FAILURE_CODES, RUN_FAILURE_UNSETTLED_CODE } from "../../shared/run-failure-notice";
 import {
   appendLongRunEvent,
   bindCurrentGoalRevisionToLongRun,
@@ -162,6 +168,7 @@ import {
   recordMcpInvocationEvent,
   recordRunEvent,
   recordScienceRuntimeOutboxEvent,
+  runFailedByHostInternalException,
   type ScienceRuntimeOutboxEvent,
   USER_STEERING_EVENT_KIND,
   tryRecordFailureEvent,
@@ -235,7 +242,7 @@ import {
 import { getOneProfile } from "../store/one-profile";
 import { personalSupervisorConversationInDb } from "../one/supervisor-store";
 import { CARRIED_FOLLOWUP_STEER_PREFIX, carryUndeliveredOwnerFollowups as carryOwnerFollowupsToNextTurn } from "./carried-owner-followups";
-import { OWNER_INTAKE_NOTICE_AFTER_MS, OWNER_INTAKE_START_HOLD_MAX_MS, OWNER_INTAKE_STEER_PREFIX, OWNER_STEERED_PREFIX, ownerIntakeReceivedNotice, ownerIntakeWaits, ownerMessageSurface, type OwnerIntakeOutcome } from "./owner-intake";
+import { OWNER_INTAKE_NOTICE_AFTER_MS, OWNER_INTAKE_START_HOLD_MAX_MS, OWNER_INTAKE_STEER_PREFIX, OWNER_STEERED_PREFIX, ownerIntakeHeldNotice, ownerIntakeReceivedNotice, ownerIntakeWaits, ownerMessageSurface, type OwnerIntakeOutcome } from "./owner-intake";
 import { ownerDirectionReviewSkip } from "./owner-direction-review";
 import { personalSupervisorGuidance } from "../../shared/one-supervisor-context";
 import { tryRecordOneDomainEvent } from "../one/domain-events";
@@ -285,7 +292,7 @@ import {
 } from "../one/attachments";
 import { redactMcpInvocationEventSecrets } from "./event-secret-redaction";
 import { redactSecrets } from "../../shared/secret-patterns";
-import { invocationErrorDiagnostic, nativePreparationErrorDiagnostic, preparationRefusalCause, type NativePreparationDiagnosticPhase } from "./error-diagnostic";
+import { HOST_INTERNAL_DIAGNOSTIC_FIELD, invocationErrorDiagnostic, nativePreparationErrorDiagnostic, preparationRefusalCause, type NativePreparationDiagnosticPhase } from "./error-diagnostic";
 import { normalizeOneRecurrenceSelectionV1 } from "../../shared/one-recurrence";
 import { classifyOneRequestIntent } from "../../shared/one-request-intent";
 import { oneVersionPinRosterIds } from "../../shared/one-team-preflight";
@@ -2991,6 +2998,14 @@ export class InvocationService {
           || row.recoveryReason === "original-run-effect-boundary-unconfirmed")) {
         if (releaseQueuedSteerRecoveryHold(row.id, row.recoveryReason)) row = getDurableQueuedSteer(row.id)!;
       }
+      // The owner's own direction held behind an original run that nothing alive owns any more (no live owner here or in the other
+      // host, no terminal receipt): the hold protects nobody. Decision: an unknown outcome never stops to ask; the
+      // direction runs as the next turn. Host relays (promptOrigin "system") keep their hold and its retirement below.
+      if (row.request.promptOrigin !== "system" && row.status === "queued" && !row.drainedRunId && row.recoveryState === "held"
+        && row.recoveryReason === "original-run-start-uncertain" && !previousExecutionClosed
+        && !this.queuedSteerRunHeldByLiveOwner(row.originalRunId, row.chatId)) {
+        if (releaseQueuedSteerRecoveryHold(row.id, "original-run-start-uncertain")) row = getDurableQueuedSteer(row.id)!;
+      }
       if (row.recoveryState === "held") {
         // A held relay One wrote to a teammate has no owner to decide on it: measured 2026-10-12, two such rows sat
         // for days after their run ended in a browser-login wait without a receipt. Once that run's lease is released
@@ -3046,19 +3061,24 @@ export class InvocationService {
         continue;
       }
       const originalReceipt = getInvocationRunReceipt(row.originalRunId);
+      // The owner's own direction behind an original run that nothing alive owns and that never settled: it runs as the next turn.
+      let ownerOriginalGone = false;
       if (!steerReceiptIsTerminal(originalReceipt) && !previousExecutionClosed) {
         // An active lease (or a run live in this process) is a running owner, not a restart's uncertainty: that owner holds this
         // direction in its own queue and drains it when its run ends (a background-service turn survives the window closing).
         // Holding it here failed that drain's claim and dropped the owner's direction until the next window start.
         if (this.queuedSteerRunHeldByLiveOwner(row.originalRunId, row.chatId)) continue;
-        holdQueuedSteerForRecovery(row.id, "original-run-start-uncertain");
-        held += 1;
-        continue;
+        if (row.request.promptOrigin === "system") {
+          holdQueuedSteerForRecovery(row.id, "original-run-start-uncertain");
+          held += 1;
+          continue;
+        }
+        ownerOriginalGone = true;
       }
       // While execution custody is still live, use its exact boundary. Once
       // released, historical effect uncertainty is the next model's context.
       let originalBoundary: ReturnType<typeof readInvocationEffectBoundary>;
-      if (!previousExecutionClosed) try {
+      if (!previousExecutionClosed && !ownerOriginalGone) try {
         originalBoundary = readInvocationEffectBoundary({
           invocationRunId: row.originalRunId,
           expectedChatId: row.chatId,
@@ -3069,7 +3089,7 @@ export class InvocationService {
         continue;
       }
       // The owner's own message is never held on an unknown outside outcome, only on a run that has not finished.
-      if (!previousExecutionClosed && !originalBoundary!.terminal) {
+      if (!previousExecutionClosed && !ownerOriginalGone && !originalBoundary!.terminal) {
         holdQueuedSteerForRecovery(row.id, "original-run-effect-boundary-unconfirmed");
         held += 1;
         continue;
@@ -3333,7 +3353,12 @@ export class InvocationService {
     // goal_explicit_resume_required on a paused Goal while the One room's phone message ran.
     const ownerSurface = ownerMessageSurface(req, workspaceBinding, executionContext);
     const ownerRemoteTurn = ownerSurface === "mobile" || ownerSurface === "mobile-one" || ownerSurface === "telegram-one";
-    if (boundGoal?.status === "paused" && !resumesPausedGoal && !ownerRemoteTurn) {
+    // A Goal the HOST stopped (the app closed, a crash, the runtime was unavailable, the Goal's own agent paused it) comes back by itself
+    // (startup checkpoints and the blocked-goal sweep resume it), so a host or remote request that reaches it meanwhile is not told to wait
+    // for the owner: it runs as an ordinary turn of the room and the Goal keeps its state, exactly like the owner's phone does. Only the
+    // owner's own pause (user, an unreleased owner hold), the cost cap and an approval wait refuse it: those are not the host's to lift.
+    const hostStoppedGoal = !!boundGoal && goalStoppedByHost(boundGoal, longRunOwnerHold(boundGoal.id));
+    if (boundGoal?.status === "paused" && !resumesPausedGoal && !ownerRemoteTurn && !hostStoppedGoal) {
       throw new Error("goal_explicit_resume_required");
     }
     let stoppedGoalReactivation: { runId: string; version: number; status: "paused" | "blocked" | "waiting_tool" | "queued"; ownerAnswer?: boolean } | null = null;
@@ -3346,16 +3371,12 @@ export class InvocationService {
     // One boundaries keep One mode; only the Mobile one may carry a team
     // preflight capability, because only Mobile has a surface that mints one.
     const remoteOneBoundary = mobileOneBoundary || workspaceBinding?.source === "telegram-one";
-    if (incoming.oneMode === true && chat.originSurface !== "one") {
-      throw new Error("One execution is valid only for a One-owned conversation");
-    }
-    if (chat.originSurface === "one" && incoming.oneMode !== true) {
-      throw new Error("A One-owned conversation cannot run through the Work execution contract");
-    }
-    const requestedOneMode = incoming.oneMode === true
-      && chat.originSurface === "one"
-      && (!workspaceBinding || remoteOneBoundary)
-      && req.agentAppMode !== true;
+    // The lane follows the conversation's own origin (one-execution-lane.ts): a One room reached with no One flag runs under the One contract
+    // instead of being refused; a One request into a Work conversation is still refused.
+    const oneLane = decideOneExecutionLane({ originSurface: chat.originSurface, requestedOneMode: incoming.oneMode === true,
+      oneLaneAllowedForBinding: !workspaceBinding || remoteOneBoundary, agentAppMode: req.agentAppMode === true });
+    if ("refuse" in oneLane) throw new Error(ONE_LANE_REFUSAL_MESSAGE[oneLane.refuse]);
+    const requestedOneMode = oneLane.oneMode;
     const selectedOnePermissionMode = requestedOneMode
       ? normalizeOnePermissionMode(incoming.onePermissionMode)
       : null;
@@ -3816,12 +3837,19 @@ export class InvocationService {
       // A new task message must not silently reactivate a claimed wait whose
       // successor may already have reached an external runtime before crash.
       if (boundGoal.surface === "science" || boundGoal.rootChatId !== chat.id) {
-        throw new Error("goal_control_scope_mismatch");
+        // This room is not where the Goal lives (Science owns it, or another room is its root), so this message may
+        // not reactivate it from here. It was refused for that (goal_control_scope_mismatch, shown as "the goal state
+        // changed"), although the owner only wrote to the room. It runs as an ordinary turn and the Goal keeps its state;
+        // Science and the Goal's own room stay the places that resume it.
+        tryRecordRunEvent({ runId, chatId: chat.id, kind: "goal_dispatch_ordinary_turn", payload: {
+          goalId: boundGoal.goalId, goalStatus: boundGoal.status,
+          cause: boundGoal.surface === "science" ? "goal_owned_by_science" : "goal_rooted_in_another_room" } });
+      } else {
+        // Admission is read-only. The durable-message hook records the user's
+        // resume authority atomically with the state transition, not before it.
+        stoppedGoalReactivation = { runId: boundGoal.id, version: boundGoal.version, status: boundGoal.status,
+          ...(ownerAnswersGoalQuestion ? { ownerAnswer: true } : {}) };
       }
-      // Admission is read-only. The durable-message hook records the user's
-      // resume authority atomically with the state transition, not before it.
-      stoppedGoalReactivation = { runId: boundGoal.id, version: boundGoal.version, status: boundGoal.status,
-        ...(ownerAnswersGoalQuestion ? { ownerAnswer: true } : {}) };
     }
     const record: RunRecord = {
       ...(oneTeamReportCustody ? {oneTeamReportCustody,oneTeamReportOriginalRequest:Object.freeze(structuredClone(req))} : {}),
@@ -3896,7 +3924,9 @@ export class InvocationService {
     // `failure` is the run's error event when it has one: its typed provider failure (quota, rate limit, sign-in, refusal, an
     // unfinished provider turn) is worded by shared/run-failure-notice.ts, and is the provider's outcome, never an app problem
     // (F51, 2026-10-21: a turn blocked by the provider's content safety filters read "The run failed …" + "App problem").
-    const persistEmptyFailureNotice = (terminalKind: string, errorCode?: string | null, failure?: McpInvocationEvent["error"]): void => {
+    // `delivery` is the host's fact that this failed attempt sent nothing to a model, where the throwing site knows it (the error event's
+    // turnDelivery, or runnerRefusedBeforeDispatch); the run ledger's attempt rows say the same for the rest (turn-placement.ts).
+    const persistEmptyFailureNotice = (terminalKind: string, errorCode?: string | null, failure?: McpInvocationEvent["error"], delivery?: "not-dispatched"): void => {
       const abortReason = controller.signal.reason instanceof Error ? controller.signal.reason.message : null;
       // A host-started Goal continuation (promptOrigin "system") stays quiet, except for a cause only the owner can clear
       // (shared/run-failure-notice.ts OWNER_ACTION_FAILURE_CODES): the waiting Goal says why and what to do (YouTube 2026-10-28).
@@ -3913,23 +3943,65 @@ export class InvocationService {
         const locale = runReq.promptOrigin === "system" ? pickLocale(runReq)
           : inferOwnerLocale(runReq.oneUserAuthoredPrompt ?? runReq.userPrompt, pickLocale(runReq));
         const hostCause = invocationHostStopCause(abortReason);
+        // The app's own tool host was not ready and the queue starts this message again by itself (it waits a minute in the run, then
+        // tries up to the same cap as any pre-dispatch refusal, shared/transient-send-refusal.ts HOST_NOT_READY_RUN_FAILURE_CODES): the
+        // owner is told once that the app tries again, not once per cycle with the typed reason. The last attempt, when the queue holds the
+        // message instead, and a run the queue does not own, keep the typed reason (below).
+        // (A store that stayed locked before dispatch is the same: the queue starts the message again by itself, so the line says that and
+        // not "send it again".)
+        if (!hostCause && terminalKind !== "invoke_interrupted" && (isHostNotReadyRunFailureCode(errorCode) || errorCode === STORE_BUSY_CODE)
+          && (delivery ?? failure?.turnDelivery) === "not-dispatched" && pendingSendRetriesAfterInternalFailure(getDb(), runId, errorCode)) {
+          const retrying = locale === "ko"
+            ? "이 메시지는 아직 실행되지 못했습니다. 모델 공급자에는 아무것도 보내지 않았고 요청은 저장되어 있습니다. 앱이 스스로 다시 시도합니다."
+            : "This message has not run yet. Nothing was sent to the model provider, and your request is saved. The app will try again by itself.";
+          const lastLine = listChatMessages(chat.id, 20).filter((entry) => entry.role === "assistant").at(-1);
+          if (lastLine?.text !== retrying) {
+            appendChatMessage(chat.id, "assistant", retrying, { hostNotice: { purpose: "host-status", runId, status: "app-failed" } });
+          }
+          emptyFailureNoticePersisted = true;
+          return;
+        }
+        // An unfinished turn with no cause from the provider is sent once more by the owner's send queue (earlier-attempt.ts): the line says
+        // so, or says that it already was, instead of telling the owner to send it again while the app does.
+        // A store lock after dispatch is the same case when the driver's own exception raised it (the run carries the app-exception mark).
+        const storeLockAfterDispatch = errorCode === STORE_BUSY_CODE && (delivery ?? failure?.turnDelivery) !== "not-dispatched";
+        const resend = !hostCause && terminalKind !== "invoke_interrupted" && !failure?.runtimeFailure?.cause
+          && (errorCode === RUN_FAILURE_UNSETTLED_CODE || storeLockAfterDispatch)
+          ? forecastAppResend(getDb(), runId, { errorCode, runtimeFailure: failure?.runtimeFailure,
+              ...(storeLockAfterDispatch && runFailedByHostInternalException(runId) ? { hostInternalFailure: true as const } : {}) }) : undefined;
         const typedFailureText = hostCause || terminalKind === "invoke_interrupted" ? null : runFailureNoticeText({
-          locale, errorCode, runtimeFailure: failure?.runtimeFailure, turnDelivery: failure?.turnDelivery,
+          locale, errorCode, runtimeFailure: failure?.runtimeFailure, turnDelivery: failure?.turnDelivery, resend,
           detail: failure?.message ? redactWorkAttachmentText(runReq, redactOneAttachmentText(runReq, failure.message)) : undefined,
         });
+        // A failure no table names, with the host's proof that nothing reached a model: the app's own state (shared/run-failure-cause.ts
+        // undispatchedInternalFailure). The owner has nothing to fix and nothing ran, so it is neither the generic "run failed" ask nor red.
+        let ledgerDelivery: "not-dispatched" | undefined;
+        if (!hostCause && !typedFailureText && terminalKind !== "invoke_interrupted" && !delivery && failure?.turnDelivery !== "not-dispatched") {
+          try { ledgerDelivery = readRunTurnPlacement(runId) === "not-dispatched" ? "not-dispatched" : undefined; } catch { ledgerDelivery = undefined; }
+        }
+        const internalUndispatched = !hostCause && !typedFailureText && terminalKind !== "invoke_interrupted"
+          && undispatchedInternalFailure({ code: errorCode, runtimeFailure: failure?.runtimeFailure, delivery: delivery ?? failure?.turnDelivery ?? ledgerDelivery });
+        // The queue starts this owner message again by itself (pending-chat-sends.ts): say so, and say it once, not once per attempt.
+        const queueRetriesBySelf = internalUndispatched && pendingSendRetriesAfterInternalFailure(getDb(), runId, errorCode);
         const message = hostCause ? invocationHostStopCopy(hostCause, locale).detail
           : terminalKind === "invoke_interrupted"
             ? locale === "ko" ? "실행이 중단되어 답변을 완료하지 못했습니다. 요청은 저장되어 있습니다. 실행 기록에서 중단 원인과 재개 상태를 확인할 수 있습니다."
               : "The run was interrupted before it could finish a reply. Your request is saved; run history shows the interruption and resume status."
-            : typedFailureText ?? (locale === "ko" ? "실행이 실패해 답변을 완료하지 못했습니다. 요청은 저장되어 있습니다. 실행 기록에서 실패 원인과 복구 상태를 확인할 수 있습니다."
-              : "The run failed before it could finish a reply. Your request is saved; run history shows the failure and recovery status.");
+            : typedFailureText ?? (internalUndispatched
+              ? queueRetriesBySelf
+                ? locale === "ko" ? "이 메시지는 아직 실행되지 못했습니다. 모델 공급자에는 아무것도 보내지 않았고 요청은 저장되어 있습니다. 앱이 스스로 다시 시도합니다."
+                  : "This message has not run yet. Nothing was sent to the model provider, and your request is saved. The app will try again by itself."
+              : locale === "ko" ? "이 메시지는 아직 실행되지 못했습니다. 모델 공급자에는 아무것도 보내지 않았고 요청은 저장되어 있습니다. 같은 내용을 다시 보내도 안전합니다."
+                : "This message has not run yet. Nothing was sent to the model provider, and your request is saved. Sending it again is safe."
+              : locale === "ko" ? "실행이 실패해 답변을 완료하지 못했습니다. 요청은 저장되어 있습니다. 실행 기록에서 실패 원인과 복구 상태를 확인할 수 있습니다."
+                : "The run failed before it could finish a reply. Your request is saved; run history shows the failure and recovery status.");
         // Each sweep retry of the waiting Goal tells it once: not again while the same notice is still the chat's latest reply
         // (host-written continuation rows between them do not count; the owner's own turn is not "system" and is always told).
-        const latest = runReq.promptOrigin === "system"
+        const latest = runReq.promptOrigin === "system" || queueRetriesBySelf || internalUndispatched
           ? listChatMessages(chat.id, 20).filter((entry) => entry.role === "assistant").at(-1) : undefined;
         if (latest?.text === message) { emptyFailureNoticePersisted = true; return; }
         appendChatMessage(chat.id, "assistant", message,
-        { hostNotice: { purpose: "host-status", runId, status: hostCause ? "goal-paused" : isAppSideRunFailureCode(errorCode, failure?.runtimeFailure) ? "app-failed" : "needs-owner" } });
+        { hostNotice: { purpose: "host-status", runId, status: hostCause ? "goal-paused" : internalUndispatched || isAppSideRunFailureCode(errorCode, failure?.runtimeFailure) ? "app-failed" : "needs-owner" } });
         emptyFailureNoticePersisted = true;
       } catch { /* The failure ledger remains authoritative if the transcript write fails. */ }
     };
@@ -4580,6 +4652,29 @@ export class InvocationService {
         console.warn("[long-run] controller attempt binding failed:", error);
       }
     };
+    /*
+     * A host-started Goal continuation (promptOrigin "system") can reach its first dispatch without producer custody: the canonical
+     * runtime-selected notice had not arrived (the selection came as metadata first) or its capture raced a host event. It was
+     * refused goal_episode_admission_missing and drawn "App problem" until the Goal sweep's next retry (observed in use,
+     * 10-24, 10-26). Admit it ONCE more from the Goal's state now, through the same capture and the same admitGoalProducer a
+     * canonical selection uses (bindGoalControllerAttempt): its custody checks, the Goal's own state and the dispatch re-check
+     * below still decide, so a Goal that really moved, or belongs to another app instance, is refused again. A second refusal stands.
+     */
+    let hostProducerReadmitted = false;
+    const readmitHostProducerOnce = (goalId: string): void => {
+      if (hostProducerReadmitted || runReq.promptOrigin !== "system" || !desktopProducerAdmission
+        || goalControllerAttemptId || goalControllerAttemptSettled || !lastControllerSelection) return;
+      hostProducerReadmitted = true;
+      try {
+        producerAdmission = captureGoalProducerAdmission({ invocationId: runId, chatId: chat.id, goalId }, assertProducerServiceLifetime);
+        producerAdmissionFailure = null;
+      } catch (error) {
+        producerAdmission = null;
+        rememberProducerAdmissionFailure(error, "capture");
+        return;
+      }
+      bindGoalControllerAttempt(lastControllerSelection);
+    };
     const settleGoalControllerAttempt = (completed: boolean): void => {
       if (!goalControllerAttemptId || goalControllerAttemptSettled) return;
       const attemptId = goalControllerAttemptId;
@@ -4629,17 +4724,16 @@ export class InvocationService {
       && Boolean(runReq.chatId)
       && (runReq.permissions ?? "read") !== "full";
     if (!record.background && !runReq.agentAppMode && (explicitChatFiles.length > 0 || (chat.originSurface === "work" && !requestedOneMode && !runWorkspaceBinding))) {
-      const pinnedRevision = goalLongRun ? getChatGoalRevision(goalLongRun.goalId) : null;
       bindWorkAttachmentRun({ runId, chatId: chat.id, signal: controller.signal, readGroups: () => {
         const groups = explicitChatFiles.length ? [invocationRequest.fileGroupId!] : workAttachmentGroupIds(runReq.userPrompt);
-        if (pinnedRevision && goalLongRun) {
-          const current = getChatGoalRevision(goalLongRun.goalId);
-          if (!current || current.revision !== pinnedRevision.revision || current.chatId !== chat.id) throw new Error("work_attachment_goal_revision_changed");
-          for (const source of [current.originalRequest, current.sourceMessage]) {
-            const message = getDb().prepare("SELECT chat_id, role, text FROM chat_messages WHERE id = ?").get(source.messageId) as { chat_id: string; role: string; text: string } | undefined;
-            if (!message || message.chat_id !== chat.id || source.chatId !== chat.id || message.role !== "user" || message.text !== source.text) throw new Error("work_attachment_goal_source_changed");
-            groups.push(...workAttachmentGroupIds(source.text));
-          }
+        // The Goal's own sources are read from its revision as it is when the attachments are prepared: a revision bump while they
+        // were prepared no longer refuses the run (decided).
+        if (goalLongRun) {
+          groups.push(...goalSourceAttachmentGroupIds({
+            chatId: chat.id,
+            revision: getChatGoalRevision(goalLongRun.goalId),
+            readMessage: (messageId) => getDb().prepare("SELECT chat_id, role, text FROM chat_messages WHERE id = ?").get(messageId) as { chat_id: string; role: string; text: string } | undefined,
+          }));
         }
         return [...new Set(groups)];
       } });
@@ -5330,7 +5424,7 @@ export class InvocationService {
           // bounded remote workspaces retain their stricter isolation rules.
           if (event.kind === "error") persistRecoverableAssistantPartial();
           const terminalKind = terminalDisposition!.terminalKind;
-          if (event.kind === "error" && !event.agentId) persistEmptyFailureNotice(terminalKind, event.error?.code, event.error);
+          if (event.kind === "error" && !event.agentId) persistEmptyFailureNotice(terminalKind, event.error?.code, event.error, event.error?.turnDelivery);
           if (event.kind === "error" && !event.agentId && event.error?.turnDelivery === "not-dispatched") turnProvedNotDispatched = true;
           settleGoalControllerAttempt(terminalKind === "invoke_completed");
           canonicalTask = projectTaskStatus(
@@ -5365,6 +5459,8 @@ export class InvocationService {
                 runtimeFailureSource: event.error?.runtimeFailure?.source,
                 runtimeFailureProviderCode: event.error?.runtimeFailure?.providerCode,
                 runtimeFailureRetryAfterAt: event.error?.runtimeFailure?.retryAfterAt,
+                // A team turn that did not verify: the class of its cause (login / capacity / execution), beside the one compatibility code.
+                ...(event.error?.causeClass ? { causeClass: event.error.causeClass } : {}),
               },
             });
           }
@@ -5823,6 +5919,7 @@ export class InvocationService {
           // this dispatch names a durable Goal, however, an unbound controller
           // cannot execute and then fabricate episode custody at completion.
           if (goalId) {
+            if (!producerAdmission || !goalControllerAttemptId) readmitHostProducerOnce(goalId);
             if (producerAdmissionFailure) throw producerAdmissionFailure;
             if (!producerAdmission || !goalControllerAttemptId) {
               const code = !goalLongRunTask ? "goal_episode_admission_task_missing" : "goal_episode_admission_missing";
@@ -6073,6 +6170,10 @@ export class InvocationService {
             // hid the actual projectless-One continuity failure in native QA.
             const reason = error instanceof Error && /^(?:goal_episode|goal_plan|goal_revision|goal_wait|checkpoint)_[a-z_]+$/.test(error.message)
               ? error.message : "goal_wait_registration_failed";
+            // An exception the host has no code for is recorded as the generic code above; its own name and first words
+            // go with the row, or a lock, an authority gap and a bug cannot be told apart afterwards (168 rows).
+            const unknownCause = reason === "goal_wait_registration_failed" && !(error instanceof Error && error.message === reason)
+              ? boundedWaitRefusalCause(error) : null;
             const current = goalLongRun ? getLongRun(goalLongRun.id) : null;
             const revision = current ? getChatGoalRevision(current.goalId) : null;
             const requestedIntent = result.goalWaitRequest.status === "requested" ? result.goalWaitRequest.intent : null;
@@ -6133,16 +6234,18 @@ export class InvocationService {
                 && !controller.signal.aborted) transitionLongRun({ runId: latest.id, expectedVersion: latest.version,
                   to: "blocked", actorKind: "host", reason });
               tryRecordRunEvent({ runId, chatId: chat.id, kind: "goal_wait_refused", payload: {
-                goalId: current?.goalId ?? null, reasonCode: reason, disposition: episodeDecisionRecorded ? "decision_recorded" : "refused", scheduled: false } });
+                goalId: current?.goalId ?? null, reasonCode: reason, disposition: episodeDecisionRecorded ? "decision_recorded" : "refused", scheduled: false,
+                ...(unknownCause ? { cause: unknownCause } : {}) } });
+              // The failure ledger had this cause only on the path below, which no exception after the episode capture reaches.
+              if (unknownCause) tryRecordFailureEvent({ runId, chatId: chat.id, source: "invoke", errorCode: reason, errorMessage: `${reason}: ${unknownCause}` });
               return;
             }
             if (!finiteTimerEndsTurn) {
               const latest = current ? getLongRun(current.id) : null;
               if (latest?.status === "running") transitionLongRun({ runId: latest.id, to: "blocked", actorKind: "host", reason });
               // The generic code hides the cause (owner DB 2026-10-04: 39 refusals in an hour, all generic).
-              const cause = error instanceof Error ? error.message : String(error);
               tryRecordFailureEvent({ runId, chatId: chat.id, source: "invoke", errorCode: reason,
-                errorMessage: reason === "goal_wait_registration_failed" && cause !== reason ? `${reason}: ${cause.slice(0, 200)}` : reason });
+                errorMessage: unknownCause ? `${reason}: ${unknownCause}` : reason });
               // Say what was refused and what the owner can do — the old sentence ("Review the requested subject
               // and the execution state") named neither (2026-09-27).
               const message = pickLocale(runReq) === "ko"
@@ -6428,6 +6531,15 @@ export class InvocationService {
             scienceTurnId: record.executionContext?.science?.turnId },
           redactText: value => redactWorkAttachmentText(runReq, redactOneAttachmentText(runReq, value)),
         });
+        // A working folder the owner moved or deleted is not the app's own fault: it is told as that, and the run is not marked as the app's
+        // own exception, so the app does not send the message again for a folder that is still gone (same rule as mcp/client.ts).
+        let folderGone = false;
+        if (isHostInternalException(error)) {
+          let folder: string | null = null;
+          try { folder = getChatWorkingFolder(runReq.chatId) ?? null; } catch { folder = null; }
+          folderGone = isMissingWorkingFolderError(error, folder, (candidate) => existsSync(candidate), path.sep);
+        }
+        if (diagnostic && folderGone) delete diagnostic[HOST_INTERNAL_DIAGNOSTIC_FIELD];
         if (diagnostic) tryRecordRunEvent({ runId, chatId: runReq.chatId, agentId: record.actualAgentId,
           kind: "invoke_error_diagnostic", payload: diagnostic });
         settleGoalControllerAttempt(false);
@@ -6461,8 +6573,10 @@ export class InvocationService {
           // The thrown failure's own machine code; the wrapper code only when it carries none (audit A7 M10).
           // The app's own unexpected exception (class / SQLite driver / syscall facts, never its words) is not read out in the
           // error event the chat and the phone draw; the diagnostic above keeps its bounded, redacted cause.
-          : { code: terminalDisposition.errorCode ?? outwardFailureCode(error) ?? "invoke-threw",
-              message: !terminalDisposition.errorCode && isHostInternalException(error) ? hostInternalFailureMessage(pickLocale(runReq)) : rawMessage };
+          : { code: terminalDisposition.errorCode ?? (folderGone ? "project_folder_missing" : outwardFailureCode(error)) ?? "invoke-threw",
+              message: !terminalDisposition.errorCode && isHostInternalException(error)
+                ? folderGone ? workingFolderMissingMessage(pickLocale(runReq))
+                  : hostInternalFailureMessage(pickLocale(runReq), forecastAppResend(getDb(), runId, { hostInternalFailure: true })) : rawMessage };
         const message = safeFailure.message;
         tryRecordRunEvent({
           runId,
@@ -6497,7 +6611,7 @@ export class InvocationService {
           );
           taskMaterialized = Boolean(canonicalTask);
           persistRecoverableAssistantPartial();
-          persistEmptyFailureNotice(terminalDisposition.terminalKind, safeFailure.code);
+          persistEmptyFailureNotice(terminalDisposition.terminalKind, safeFailure.code, undefined, turnProvedNotDispatched ? "not-dispatched" : undefined);
           const observableStepSequence = nextObservableSequence(record);
           const event: McpInvocationEvent = {
             kind: "error",
@@ -8552,10 +8666,14 @@ export class InvocationService {
       && (isTransientSendRefusalCode(typed) || ownerIntakeWaits(error));
     if (!storeBusy && !transient) return "not-retryable";
     if (phase === "start" && storeBusy && !runnerRefusedBeforeDispatch(error)) return "not-retryable";
+    // A start refused before dispatch for a reason that is not on the "not ready yet" list (the app's own state: a handshake, a
+    // ledger or a preparation step) waits only a bounded number of tries, then the message is held, as the composer's queue does.
+    const undispatchedOnly = transient && !isTransientSendRefusalCode(typed);
     const prior = this.steerDrainBackoff.get(next.id);
     const attempt = (prior?.attempt ?? 0) + 1;
     const firstAt = prior?.firstAt ?? Date.now();
-    if (storeBusy ? attempt > STEER_DRAIN_STORE_BUSY_DELAYS_MS.length : Date.now() - firstAt > TRANSIENT_SEND_DEADLINE_MS) return "exhausted";
+    if (storeBusy ? attempt > STEER_DRAIN_STORE_BUSY_DELAYS_MS.length
+      : undispatchedOnly ? attempt > UNDISPATCHED_START_MAX_ATTEMPTS : Date.now() - firstAt > TRANSIENT_SEND_DEADLINE_MS) return "exhausted";
     let retry = next;
     if (phase === "start") {
       // The admission was consumed by the refused start; a recovered direction starts without one, like this retry.
@@ -8613,14 +8731,17 @@ export class InvocationService {
       console.info(`[invocation] queued steer parked for the waiting Goal steer=${next.id} chat=${chatId} cause=parked-for-waiting-goal code=${code}`);
       return;
     }
-    const cause: DurableQueuedSteerTerminalCause = storeBusyExhausted ? "drain-store-busy-exhausted" : code ? "drain-start-refused" : "drain-start-error";
+    // Exhausted for a locked store, or for an app-side refusal that was retried and still did not start (nothing ran; no code is shown).
+    const storeLock = storeBusyExhausted && isStoreBusyError(error);
+    const cause: DurableQueuedSteerTerminalCause = storeLock ? "drain-store-busy-exhausted" : code ? "drain-start-refused" : "drain-start-error";
     this.settleQueuedSteerDurably(next.id, "failed", cause);
-    const message = error instanceof Error ? error.message : String(error);
+    const detail = error instanceof Error ? error.message : String(error);
+    const message = storeBusyExhausted && !storeLock ? ownerIntakeHeldNotice(pickLocale(next.request)) : detail;
     // The queued direction was never a chat message (start() persists it), so a failed start used
     // to erase the owner's sentence and leave no trace of why (Youtube room, 2026-10-10 08:55).
     // Log the cause marker with the typed code, keep the sentence as the owner's own turn, and say so briefly.
     console.warn(`[invocation] queued steer failed to start steer=${next.id} chat=${chatId} cause=${cause} code=${code ?? "none"} `
-      + `detail=${redactSecrets(message).replace(/\s+/g, " ").slice(0, 400)}`);
+      + `detail=${redactSecrets(detail).replace(/\s+/g, " ").slice(0, 400)}`);
     try {
       const request = next.request;
       const text = typeof request.userPrompt === "string" ? request.userPrompt : "";

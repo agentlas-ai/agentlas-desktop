@@ -47,12 +47,10 @@ export async function readToolInventory(): Promise<ToolInventory> {
   let runtimeCapabilities: string[] = [];
   try {
     const { detectRuntimes } = await import("../runtime/detect");
-    const { RUNTIME_NATIVE_CAPABILITIES } = await import("../runtime/native-capabilities");
+    const { runtimeCapabilitiesFor } = await import("../runtime/native-capabilities");
     const runtimes = await detectRuntimes();
-    runtimeCapabilities = [...new Set(
-      // detectRuntimes가 돌려주는 것은 이미 "이 컴퓨터에서 감지된" 런타임들이다.
-      runtimes.flatMap((runtime) => RUNTIME_NATIVE_CAPABILITIES[runtime.kind] ?? []),
-    )];
+    // detectRuntimes가 돌려주는 것은 이미 "이 컴퓨터에서 감지된" 런타임들이다.
+    runtimeCapabilities = runtimeCapabilitiesFor(runtimes.map((runtime) => runtime.kind));
   } catch (error) {
     console.error("[graph] runtime capabilities could not be read:", error);
   }

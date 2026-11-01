@@ -19,6 +19,21 @@ export const RUNTIME_NATIVE_CAPABILITIES: Record<string, string[]> = {
   antigravity: ["web.search", "image.generate", "shell", "file.edit"],
 };
 
+/**
+ * What every runtime that can run a step provides, whatever its kind: reading and writing files on this computer. The CLIs
+ * read and edit files themselves; an API or local-model lane gets the host's read_file / write_file / edit_file built-in tools
+ * (shared/builtin-tools.ts). `files.read` / `files.write` were met only by the optional `filesystem` MCP server, so a graph
+ * step that declared them could not be turned on or run until the owner installed it: "Not connected yet, so this cannot be
+ * turned on: This computer" (one_graph_run, observed in use). Empty when no runtime is detected: nothing could run.
+ */
+export const RUNTIME_BASELINE_CAPABILITIES: readonly string[] = ["files.read", "files.write"];
+
+/** The graph capabilities the detected runtimes provide themselves (tool-inventory.ts hands this to requirementStatus). */
+export function runtimeCapabilitiesFor(kinds: readonly string[]): string[] {
+  if (kinds.length === 0) return [];
+  return [...new Set([...kinds.flatMap((kind) => RUNTIME_NATIVE_CAPABILITIES[kind] ?? []), ...RUNTIME_BASELINE_CAPABILITIES])];
+}
+
 const ABILITY_WORDS: Record<string, string> = {
   "web.search": "web search",
   "web.fetch": "web fetch",

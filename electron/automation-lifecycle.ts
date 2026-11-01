@@ -66,7 +66,7 @@ export function applyAutomationLifecycle(input: { parsed: ParsedAutomation; chat
 
 export function automationLifecycleRefusalText(reason: string, locale: "ko"|"en"): string {
   const copy: Record<string, [string,string]> = {
-    automation_lifecycle_target_not_in_context:["이 대화에서 확인한 자동화를 찾지 못했습니다. 대상 자동화를 선택한 뒤 다시 요청해 주세요.","The automation is not available in this conversation. Select the intended automation and try again."],
+    automation_lifecycle_target_not_in_context:["이 대화에서 만든 자동화만 여기서 켜고 끌 수 있습니다. 다른 대화에서 만든 자동화는 자동화 탭에서 켜고 끄거나, 만든 대화에서 요청해 주세요.","Only automations made in this conversation can be switched here. Switch one made elsewhere from the Automations tab, or ask in the conversation that made it."],
     automation_session_identity_mismatch:["현재 선택한 자동화와 요청 대상이 다릅니다. 대상 자동화를 다시 확인해 주세요.","The requested automation differs from the selected one. Check the target automation."],
     automation_resume_write_permission_required:["다시 켜려면 쓰기 권한이 필요합니다.","Write permission is required to resume the automation."],
     automation_resume_definition_changed:["설정이 바뀌어 다시 켜지 않았습니다. 최신 설정을 확인한 뒤 다시 요청해 주세요.","The definition changed, so the automation was not resumed. Review its current settings and try again."],
@@ -87,6 +87,7 @@ export function automationRegistrationReasonCode(error: unknown): string {
 export function automationRegistrationRefusalText(reason: string, locale: "ko"|"en"): string {
   const copy: Record<string, [string,string]> = {
     goal_automation_finite_deadline_passed:["진행 중인 목표의 마감 시각이 지나 자동화를 만들지 않았습니다.","The active Goal's deadline has passed, so no automation was created."],
+    goal_automation_owner_stopped:["멈추셨기 때문에 이 자동화는 만들지 않았습니다.","You stopped this, so no automation was created."],
     goal_automation_binding_source_unverified:["진행 중인 목표가 이 요청을 확인하지 못해 자동화를 만들지 않았습니다. 다시 요청해 주세요.","The active Goal could not confirm this request, so no automation was created. Ask again."],
   };
   const fallback: [string,string] = ["자동화를 저장하지 못했습니다. 자동화 탭에서 현재 상태를 확인해 주세요.","The automation could not be saved. Check its current state in Automations."];

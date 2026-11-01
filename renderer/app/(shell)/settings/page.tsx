@@ -29,6 +29,8 @@ import {
 } from "@shared/models";
 import { AUTO_PROVIDER, MULTIMODAL_PROVIDERS } from "@shared/multimodal";
 import { credentialRetryTargets } from "@shared/credential-recovery";
+import { daemonAutostartSentence } from "@shared/daemon-autostart-notice";
+import { pairingQrShouldRenew } from "@shared/pairing-qr-renewal";
 import { navigate } from "@/lib/navigation";
 import { IconCheck, IconFilm, IconImage, IconKey, IconLock, IconWand } from "@/components/Icon";
 import { MigrationPanel } from "@/components/MigrationPanel";
@@ -847,10 +849,8 @@ export default function SettingsPage() {
                           : "Login autostart is not supported in this app version. Automations run while the app is open.",
                       );
                     } else if (result && result.reconciled === false) {
-                      setDaemonAutostartNotice(
-                        (locale === "ko" ? "설정은 저장했지만 부팅 항목을 바꾸지 못했습니다: " : "Saved, but the login item could not be updated: ")
-                        + (result.reason ?? ""),
-                      );
+                      // 코드는 Main 로그에만 남는다. 화면에는 할 일이 담긴 한 문장만 보인다.
+                      setDaemonAutostartNotice(daemonAutostartSentence(result.reason, locale === "ko" ? "ko" : "en"));
                     } else {
                       setDaemonAutostartNotice(null);
                     }
@@ -1217,6 +1217,8 @@ function MobileBridgePanel() {
       } else if (reason === "challenge-expired" || reason === "challenge-invalidated") {
         setPairing(null);
         setQrDataUrl("");
+        // The card is still on screen: make the next QR instead of leaving a blank card (R10, shared/pairing-qr-renewal.ts).
+        if (reason === "challenge-expired" && renewPairingQr()) return;
         setMessage(locale === "ko" ? "연결 QR이 만료됐습니다. 새 QR을 만들어 주세요." : "The pairing QR expired. Create a new one.");
       } else if (reason === "runtime-rebinding" || reason === "runtime-stopped") {
         setPairing(null);
@@ -1235,6 +1237,7 @@ function MobileBridgePanel() {
     const timer = window.setTimeout(() => {
       setPairing(null);
       setQrDataUrl("");
+      if (renewPairingQr()) return;
       setMessage(locale === "ko" ? "연결 QR이 만료됐습니다. 새 QR을 만들어 주세요." : "The pairing QR expired. Create a new one.");
       void refresh();
     }, Math.max(0, expiresAt - Date.now()));
@@ -1269,9 +1272,22 @@ function MobileBridgePanel() {
     }
   }
 
-  async function issuePairing() {
+  // Automatic renewals since the last manual request; the expiry timer and the Main event both call renewPairingQr, one of them wins.
+  const pairingRenewals = useRef(0);
+  const pairingRenewing = useRef(false);
+  function renewPairingQr(): boolean {
+    if (pairingRenewing.current) return true;
+    if (!pairingQrShouldRenew({ visible: document.visibilityState === "visible", renewals: pairingRenewals.current })) return false;
+    pairingRenewals.current += 1;
+    pairingRenewing.current = true;
+    void issuePairing({ automatic: true }).finally(() => { pairingRenewing.current = false; });
+    return true;
+  }
+
+  async function issuePairing(options: { automatic?: boolean } = {}) {
     const api = ipc();
-    if (!api || busy) return;
+    if (!api || (busy && !options.automatic)) return;
+    if (!options.automatic) pairingRenewals.current = 0;
     setBusy(true);
     setMessage("");
     try {

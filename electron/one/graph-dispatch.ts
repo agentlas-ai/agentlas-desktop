@@ -43,6 +43,9 @@ import { graphStructure } from "../../shared/graph-structure";
 import { occasionMarkers, sameWorkName } from "../../shared/graph-instance-advice";
 import { graphPurpose } from "../../shared/graph-purpose";
 
+/** How long toolchain_create waits for a generation before it answers "still generating" (toolchain_publish waits the same). */
+const TOOLCHAIN_CREATE_WAIT_MS = 45_000;
+
 /** A Work task's capability (team-control-server scope "toolchain-consumer"). */
 /**
  * The owner message a graph's reports answer (22 O3). Run delivery only reports into the origin conversation against a
@@ -369,8 +372,19 @@ async function dispatchToolchain(caller: OneTeamCaller, name: string, input: Rec
         checkReports();
         return native.withPreparedCommit(proposal, () => { checkReports(); return commit(); });
       }};
-    const result = await preparation.run(() => withCurrentHistoryProducer("toolchain",ports=>ports.toolchain.generateToolchain(generationInput,generationActor),()=>generateToolchain(generationInput,generationActor)));
-    await native.registerProduced(result);
+    // Generalizing can outlast the 200 s request the One-team tool server gives a call (observed in use twice: the AI read
+    // "One team request timed out" for a creation that kept running in Main, and could start it a second time). Same answer as
+    // toolchain_publish: wait a bounded time, then say it is still generating and keep the work going. The registration of what it
+    // produced belongs to the work, so it runs when the generation settles, whoever is still waiting. A repeat of this call with
+    // the same request_id joins the running generation or reads its recorded result (generateToolchain is idempotent on it).
+    const pending = preparation.run(() => withCurrentHistoryProducer("toolchain",ports=>ports.toolchain.generateToolchain(generationInput,generationActor),()=>generateToolchain(generationInput,generationActor)))
+      .then(async (produced) => { await native.registerProduced(produced); return produced; });
+    pending.catch(() => undefined);
+    const result = await Promise.race([pending, new Promise<null>(resolve => { const timer = setTimeout(() => resolve(null), TOOLCHAIN_CREATE_WAIT_MS); timer.unref?.(); })]);
+    if (!result) return { schemaVersion: "agentlas.toolchain-create.v2", state: "generating", generating: true, request_id: String(input.request_id),
+      next: currentUiLocale() === "ko"
+        ? "만드는 중입니다. 이 만들기는 이 턴이 끝나면 함께 멈춥니다 — 턴을 끝내지 말고 같은 request_id로 toolchain_create를 다시 호출해 결과가 나올 때까지 확인하세요."
+        : "It is still being generated. The work stops when this turn ends, so do not end the turn: call toolchain_create again with the same request_id until it returns the result." };
     return { schemaVersion: "agentlas.toolchain-create.v2", ...assetManifest(result.asset, result.version),
       decision: result.decision, rationale: result.rationale, generalization_id: result.generalizationId };
   }
@@ -395,7 +409,9 @@ async function dispatchToolchain(caller: OneTeamCaller, name: string, input: Rec
     return { schemaVersion: "agentlas.toolchain-publish.v2", ...assetManifest(settled ?? getToolchainAsset(asset.id)!, version),
       ...(repaired ? { repaired_report: repaired } : {}),
       ...(settled ? toolchainPublicationSummary(settled, version, asset) : { testing: true, state: "testing",
-        next: currentUiLocale() === "ko" ? "테스트가 진행 중입니다. 같은 툴체인의 결과를 다시 확인하세요." : "Testing is in progress. Check the same Toolchain result again." }) };
+        next: currentUiLocale() === "ko"
+          ? "테스트가 진행 중입니다. 이 테스트는 이 턴이 끝나면 함께 멈춥니다 — 턴을 끝내지 말고 같은 툴체인의 결과를 다시 확인하세요."
+          : "Testing is in progress. It stops when this turn ends, so do not end the turn: check the same Toolchain result again until it settles." }) };
   }
   throw new Error("toolchain_unknown_operation");
 }
@@ -425,7 +441,30 @@ export async function validateOneGraphBlueprint(caller: OneTeamCaller, bp: Graph
   return { ok: true };
 }
 
+/**
+ * A graph made in another of the owner's conversations is outside this one's graph tools (its reports, grants and authority receipt belong
+ * to the conversation it began in), and the tool used to answer that with the bare code. The same owner can still run, switch, edit and read
+ * it by its exact id through the app operations, so the answer names that route. Only the answer changed: nothing here widens what the graph
+ * tools may touch, and an id that does not exist anywhere gets the list to choose from instead.
+ */
+function outOfContextAnswer(caller: OneTeamCaller, error: unknown, input: Record<string, unknown>): Record<string, unknown> | null {
+  if (!(error instanceof Error) || error.message !== "one_graph_target_not_in_context" || isToolchainConsumer(caller)) return null;
+  const id = typeof input.graph_id === "string" ? input.graph_id : null;
+  const elsewhere = id ? getAutomation(id) : null;
+  if (!elsewhere) return { ok: false, code: "one_graph_target_not_in_context", ...(id ? { graph_id: id } : {}),
+    next: "No graph with this id belongs to this conversation. List this conversation's graphs with one_graph_inspect (no graph_id), or save the blueprint here with one_graph_save (no graph_id)." };
+  return { ok: false, code: "one_graph_target_not_in_context", graph_id: elsewhere.id, name: elsewhere.name,
+    next: "This graph was made in another conversation of yours, so the graph tools here do not change or run it. It is still yours to operate by its exact id with the app operations (app.call): automations.runNow {id}, automations.toggle {id, enabled}, automations.updateGraph {id, graph}, automations.get {id}. To keep your own copy in this conversation, save the blueprint here with one_graph_save (no graph_id)." };
+}
 export async function oneGraphDispatch(caller: OneTeamCaller, name: string, input: Record<string, unknown>): Promise<unknown> {
+  try { return await dispatchOneGraph(caller, name, input); }
+  catch (error) {
+    const answered = outOfContextAnswer(caller, error, input);
+    if (answered) return answered;
+    throw error;
+  }
+}
+async function dispatchOneGraph(caller: OneTeamCaller, name: string, input: Record<string, unknown>): Promise<unknown> {
   if (isToolchainConsumer(caller) && !TOOLCHAIN_CONSUMER_TOOLS.includes(name)) throw new Error("one_graph_consumer_scope");
   const tool = ONE_GRAPH_TOOLS.find(t => t.name === name);
   if (!tool) throw new Error("one_graph_unknown_operation");

@@ -38,7 +38,8 @@ import { callableHubBookmarks } from "@/lib/hub-bookmark-events";
 import { installedAgentMentionTarget } from "@/lib/mention-orchestration-target";
 import { pickLocalized, useT, type Locale } from "@/lib/i18n";
 import { loadSkillPluginMentions, matchingSkillPluginMentions, type SkillPluginMention } from "@/lib/skill-plugin-mentions";
-import { ipc, grantForDroppedFile } from "@/lib/ipc";
+import { ipc, grantForDroppedFile, grantForPastedAttachment } from "@/lib/ipc";
+import { fitImageUnder } from "@/lib/attachment-image-fit";
 import { useComposerMenuExtensions, type ComposerMenuExtension, type ComposerMenuItem } from "@/lib/composer-menu-extensions";
 import { useChatAlwaysApproval, type ChatAlwaysApprovalControl } from "@/lib/use-chat-always-approval";
 import type { ChatFileDraft } from "@/lib/chat-files";
@@ -319,7 +320,9 @@ function ChatInputComponent({
   busy,
   disabled,
   canSubmit,
+  onHeldSubmit,
   submitBlockedReason,
+  disabledReason,
   context,
   runtime,
   modelOptions,
@@ -371,8 +374,16 @@ function ChatInputComponent({
   disabled?: boolean;
   /** Check immediately before dispatch/clearing, including after async recommendations. */
   canSubmit?: () => boolean;
+  /**
+   * A send pressed while `canSubmit` says the conversation is not ready for a moment (a model pick still on its way to Main) is not refused
+   * and does not grey the button: the parent waits and calls `again` when it has settled (or after its own limit), and the composer then sends
+   * what it holds at that moment. The parent returns a function that drops the wait. Absent = the press is ignored, as before.
+   */
+  onHeldSubmit?: (again: () => void) => () => void;
   /** Submission-only hold: typing, attachments and Stop remain available. */
   submitBlockedReason?: string | null;
+  /** Why `disabled` is on, when the parent knows (the conversation's agent is no longer installed); absent = the general sentence. */
+  disabledReason?: string | null;
   context?: MentionContext;
   /** 활성 런타임 — 모델/작업량 picker용. */
   runtime?: RuntimeStatus | null;
@@ -559,6 +570,7 @@ function ChatInputComponent({
   useEffect(() => {
     if (activeChatIdRef.current === activeChatId) return;
     activeChatIdRef.current = activeChatId;
+    heldSubmitCancelRef.current?.(); heldSubmitCancelRef.current = null;
     const restored = readChatComposerDraft(activeChatId);
     setInputState(restored.input);
     setStagedSteeringState(null);
@@ -624,7 +636,9 @@ function ChatInputComponent({
   const composerAppRoute = parseAppSlashRoute(composerActionText);
   const navigationOnly = Boolean(composerAppRoute && !composerAppRoute.request)
     || /(^|\s)@plugin-make\b/i.test(composerActionText);
-  const submitDisabled = nothingToSend || disabled || (Boolean(submitBlockedReason) && !navigationOnly) || (busy && (stopRequested || stagedSteering !== null));
+  // A second direction is never blocked behind the first: each one is saved and queued on its own (TaskCockpit submitOrQueue). Only the owner's
+  // own Stop blocks sending while the run settles.
+  const submitDisabled = nothingToSend || disabled || (Boolean(submitBlockedReason) && !navigationOnly) || (busy && stopRequested);
   /*
    * ★보내기가 회색인데 **왜인지 알 길이 없었다** (마우스 실측 2026-09-08).
    *   "아무것도 안 썼다" 는 보면 알지만, 나머지 세 사유는 화면에 아무 말도 없다:
@@ -636,10 +650,8 @@ function ChatInputComponent({
     : submitBlockedReason && !navigationOnly
       ? submitBlockedReason
       : disabled
-      ? (locale === "ko" ? "지금은 이 대화에 보낼 수 없습니다." : "This conversation cannot accept messages right now.")
-      : stopRequested
-        ? (locale === "ko" ? "중지를 요청했습니다. 멈춘 뒤에 보낼 수 있습니다." : "Stop was requested. You can send once it has stopped.")
-        : (locale === "ko" ? "보낼 지시가 이미 대기 중입니다. 그 지시가 전달된 뒤에 보낼 수 있습니다." : "An instruction is already queued. You can send again once it is delivered.");
+      ? (disabledReason ?? (locale === "ko" ? "지금은 이 대화에 보낼 수 없습니다." : "This conversation cannot accept messages right now."))
+      : (locale === "ko" ? "중지를 요청했습니다. 멈춘 뒤에 보낼 수 있습니다." : "Stop was requested. You can send once it has stopped.");
   const hepHint = [...hepToggles]
     .map((id) => {
       const toggle = HEP_TOGGLES.find((t) => t.id === id);
@@ -659,8 +671,13 @@ function ChatInputComponent({
     const grantedFiles: ChatFileDraft[] = [];
     const rejected: string[] = [];
     const errors: string[] = [];
-    for (const file of Array.from(files)) {
-      const grant = await grantForDroppedFile(file);
+    for (const original of Array.from(files)) {
+      // A large screenshot or photo is shrunk to fit the image limit instead of refused (the One composers' rule, attachment-image-fit.ts).
+      const file = await fitImageUnder(original, 5 * 1024 * 1024);
+      // A file with no path on disk (dragged from a browser, mail or chat, or pasted) gets the exact-file grant Main pins from its bytes,
+      // as the One composers do; only an image may stay a bare multimodal payload.
+      const grant = await grantForDroppedFile(file)
+        ?? (file.type.startsWith("image/") ? null : await grantForPastedAttachment(file));
       if (grant?.path) {
         grantedFiles.push({
           grant,
@@ -838,11 +855,16 @@ function ChatInputComponent({
   }
 
   const composerEnter = useComposerEnter(() => submit());
+  // A send that waited for the conversation to be ready runs once without asking again (the parent's wait has its own limit).
+  const skipHoldRef = useRef(false);
+  const heldSubmitCancelRef = useRef<(() => void) | null>(null);
+  const submitRef = useRef<() => void>(() => undefined);
   function submissionIsHeld(): boolean {
+    if (skipHoldRef.current) return false;
     return canSubmit ? canSubmit() === false : Boolean(submitBlockedReason);
   }
   function submit() {
-    if (nothingToSend || disabled || (busy && (stopRequested || stagedSteering !== null))) return;
+    if (nothingToSend || disabled || (busy && stopRequested)) return;
     const text = withAttachmentContext(input.trim());
     /*
      * 앱 슬래시 명령(/site, /document-studio, /startup …).
@@ -876,7 +898,17 @@ function ChatInputComponent({
       router.push(`/build/plugin${params.toString() ? `?${params.toString()}` : ""}`);
       return;
     }
-    if (submissionIsHeld()) return;
+    if (submissionIsHeld()) {
+      if (onHeldSubmit) {
+        heldSubmitCancelRef.current?.();
+        heldSubmitCancelRef.current = onHeldSubmit(() => {
+          heldSubmitCancelRef.current = null;
+          skipHoldRef.current = true;
+          try { submitRef.current(); } finally { skipHoldRef.current = false; }
+        });
+      }
+      return;
+    }
     if (busy) {
       // Codex-shaped steering: the round send control immediately queues the
       // next instruction. Main preserves the active model turn.
@@ -900,6 +932,9 @@ function ChatInputComponent({
     // 모드 토글(에이전트 찾기/Stormbreaker)은 리셋하지 않는다 — 계속 켜둘 수 있음.
     setTrigger(null);
   }
+
+  submitRef.current = submit;
+  useEffect(() => () => { heldSubmitCancelRef.current?.(); heldSubmitCancelRef.current = null; }, []);
 
   function sendStagedSteering() {
     if (!stagedSteering || submissionIsHeld()) return;

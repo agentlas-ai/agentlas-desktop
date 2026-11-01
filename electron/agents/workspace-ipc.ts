@@ -4,8 +4,10 @@ import type { AgentWorkspaceIpc } from "../../shared/agent-workspace";
 import { AgentWorkspaceError } from "./workspace-snapshot";
 import { getAgentWorkspace, getAgentWorkspaceMemoryCounts, listAgentWorkspaceFiles, readAgentWorkspaceFile, prepareAgentWorkspaceFromMemory,
   prepareAgentWorkspaceFileChange, prepareAgentWorkspaceRollback, prepareAgentWorkspaceFileOperation, getAgentWorkspaceDiff, issueAgentWorkspaceApprovalReceipt,
-  applyAgentWorkspaceProposal, rejectAgentWorkspaceProposal, getAgentWorkspaceRecoveryDiff, acknowledgeAgentWorkspaceRecovery } from "./workspace-service";
+  applyAgentWorkspaceProposal, rejectAgentWorkspaceProposal, getAgentWorkspaceRecoveryDiff, acknowledgeAgentWorkspaceRecovery,
+  withWorkspaceLockPatience } from "./workspace-service";
 import { setAutoEvolution } from "./auto-evolution";
+import { deferOwnerApproval } from "./deferred-apply";
 import { prepareAgentWorkspaceComparison, receiveAgentWorkspace, sendAgentWorkspace, type AgentWorkspaceRemoteReview } from "./workspace-remote";
 
 type Input<K extends keyof AgentWorkspaceIpc> = Parameters<AgentWorkspaceIpc[K]>[0];
@@ -33,26 +35,33 @@ export function registerAgentWorkspaceIpc(input: { ipc: Pick<IpcMain, "handle">;
   handle("agentWorkspace:listFiles", (_event, id: string, dir?: string) => listAgentWorkspaceFiles(id, dir));
   handle("agentWorkspace:readFile", (_event, id: string, file: string) => readAgentWorkspaceFile(id, file));
   handle("agentWorkspace:prepareFromMemory", (_event, value: Input<"prepareFromMemory">) => prepareAgentWorkspaceFromMemory(value));
-  handle("agentWorkspace:prepareFileChange", (_event, value: Input<"prepareFileChange">) => prepareAgentWorkspaceFileChange(value));
-  handle("agentWorkspace:prepareRollback", (_event, value: Input<"prepareRollback">) => prepareAgentWorkspaceRollback(value));
-  handle("agentWorkspace:prepareFileOperation", (_event, value: Input<"prepareFileOperation">) => prepareAgentWorkspaceFileOperation(value));
-  handle("agentWorkspace:getDiff", (event, id: string) => {
-    const diff = getAgentWorkspaceDiff(id);
+  handle("agentWorkspace:prepareFileChange", (_event, value: Input<"prepareFileChange">) => withWorkspaceLockPatience(() => prepareAgentWorkspaceFileChange(value)));
+  handle("agentWorkspace:prepareRollback", (_event, value: Input<"prepareRollback">) => withWorkspaceLockPatience(() => prepareAgentWorkspaceRollback(value)));
+  handle("agentWorkspace:prepareFileOperation", (_event, value: Input<"prepareFileOperation">) => withWorkspaceLockPatience(() => prepareAgentWorkspaceFileOperation(value)));
+  handle("agentWorkspace:getDiff", async (event, id: string) => {
+    const diff = await withWorkspaceLockPatience(() => getAgentWorkspaceDiff(id));
     return { ...diff, ...(diff.status === "review_ready" ? { reviewToken: issue(event, { kind: "apply", id, hash: diff.reviewedHash }) } : {}) };
   });
-  handle("agentWorkspace:approveAndApply", (event, value: Input<"approveAndApply">) => {
+  handle("agentWorkspace:approveAndApply", async (event, value: Input<"approveAndApply">) => {
     consume(event, value.reviewToken, "apply", value.proposalId, value.reviewedHash);
-    const approvalReceiptId = issueAgentWorkspaceApprovalReceipt(value.proposalId, value.reviewedHash);
-    return applyAgentWorkspaceProposal({ proposalId: value.proposalId, reviewedHash: value.reviewedHash, approvalReceiptId });
+    // The review grant is spent above, once; only the two lock-taking steps wait (each refused before it ran anything).
+    const approvalReceiptId = await withWorkspaceLockPatience(() => issueAgentWorkspaceApprovalReceipt(value.proposalId, value.reviewedHash));
+    try { return await withWorkspaceLockPatience(() => applyAgentWorkspaceProposal({ proposalId: value.proposalId, reviewedHash: value.reviewedHash, approvalReceiptId })); }
+    catch (error) {
+      // A run holds the agent: keep the owner's approval for this exact diff and apply it when the run ends (deferred-apply.ts).
+      if (!(error instanceof AgentWorkspaceError) || error.code !== "run_active") throw error;
+      deferOwnerApproval(value.proposalId, value.reviewedHash);
+      return { ...(await withWorkspaceLockPatience(() => getAgentWorkspaceDiff(value.proposalId))), applyWhenIdle: true };
+    }
   });
-  handle("agentWorkspace:reject", (_event, value: Input<"reject">) => rejectAgentWorkspaceProposal(value.proposalId));
+  handle("agentWorkspace:reject", (_event, value: Input<"reject">) => withWorkspaceLockPatience(() => rejectAgentWorkspaceProposal(value.proposalId)));
   // The owner's standing permission to apply the narrow kind of learning change without a diff review (auto-evolution.ts).
   handle("agentWorkspace:setAutoEvolution", (_event, value: Input<"setAutoEvolution">) => setAutoEvolution(value.agentId, value.enabled));
-  handle("agentWorkspace:getRecoveryDiff", (event, id: string) => {
-    const diff = getAgentWorkspaceRecoveryDiff(id); return { ...diff, reviewToken: issue(event, { kind: "recovery", id, hash: diff.reviewedHash }) };
+  handle("agentWorkspace:getRecoveryDiff", async (event, id: string) => {
+    const diff = await withWorkspaceLockPatience(() => getAgentWorkspaceRecoveryDiff(id)); return { ...diff, reviewToken: issue(event, { kind: "recovery", id, hash: diff.reviewedHash }) };
   });
-  handle("agentWorkspace:acknowledgeRecovery", (event, value: Input<"acknowledgeRecovery">) => {
-    consume(event, value.reviewToken, "recovery", value.agentId, value.reviewedHash); return acknowledgeAgentWorkspaceRecovery(value.agentId, value.reviewedHash);
+  handle("agentWorkspace:acknowledgeRecovery", async (event, value: Input<"acknowledgeRecovery">) => {
+    consume(event, value.reviewToken, "recovery", value.agentId, value.reviewedHash); return withWorkspaceLockPatience(() => acknowledgeAgentWorkspaceRecovery(value.agentId, value.reviewedHash));
   });
   handle("agentWorkspace:compare", async (event, value: Input<"compare">) => {
     if (!["cloud", "hub"].includes(value.target)) throw new AgentWorkspaceError("invalid_target", "Choose Cloud or Hub.");

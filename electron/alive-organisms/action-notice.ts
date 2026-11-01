@@ -28,8 +28,8 @@ function why(from: GoalActionNotice["from"], locale: "ko" | "en"): string {
   if (from.status === "paused" && from.pauseReason && (locale === "ko" ? PAUSE_KO : PAUSE_EN)[from.pauseReason]) {
     return (locale === "ko" ? PAUSE_KO : PAUSE_EN)[from.pauseReason];
   }
-  const code = from.blockedReason ?? from.pauseReason ?? from.status;
-  return locale === "ko" ? `막혀 멈춰 있었어요 (${code})` : `it was stopped (${code})`;
+  // No machine code in the owner's line: the typed facts (status, pause and blocked reason) travel with the notice itself.
+  return locale === "ko" ? "막혀 멈춰 있었어요" : "it was stopped";
 }
 
 /** automation-report body: first paragraph is the name (automation-report-display.ts), then the line. */

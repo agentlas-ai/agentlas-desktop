@@ -1,5 +1,6 @@
 "use client";
 
+import { keptEditAfterRefresh, memorySheetFailureText, memorySheetKeptEditText, memorySheetOutcome, type KeptEdit } from "@/lib/memory-sheet-failure";
 import {
   useCallback,
   useEffect,
@@ -174,7 +175,7 @@ function LegacyOneMemoryView({open,locale}:{open:boolean;locale:"ko"|"en"}) {
         setError(null);
       }
     } catch (cause) {
-      if (request === durableRequest.current) setError(cause instanceof Error ? cause.message : String(cause));
+      if (request === durableRequest.current) setError(memorySheetFailureText(cause, locale));
     } finally {
       if (request === durableRequest.current) setBusyId(null);
     }
@@ -282,17 +283,21 @@ function DesktopMemoryInspector({open,locale,revisionHint}:{open:boolean;locale:
   const [text,setText]=useState(""),[editing,setEditing]=useState(false),[busy,setBusy]=useState(false),[error,setError]=useState<string|null>(null),[notice,setNotice]=useState<string|null>(null),[retry,setRetry]=useState(0);
   const [appSharing,setAppSharing]=useState<AgentAppMemorySharing|null>(null),[appChoice,setAppChoice]=useState("");
   const generation=useRef(0),detailGeneration=useRef(0);
-  const errorText=(cause:unknown)=>{
-    const message=cause instanceof Error?cause.message:String(cause);
-    return message.includes("memory_owner_")?(locale==="ko"?"기억 상태가 바뀌었거나 사용할 수 없습니다. 다시 불러와 주세요.":"The memory changed or is unavailable. Reload it before continuing."):message;
-  };
+  const errorText=(cause:unknown)=>memorySheetFailureText(cause,locale);
+  // A memory that changed under the sheet is not an error to reload by hand: the list is read again here and the owner is told so. Only an
+  // action the owner just took does this (never the effects that read the list, which would loop on a memory that keeps changing).
+  // The words the owner typed into the editor survive that reload: they come back in the editor of the same memory once it is read again.
+  const keptEdit=useRef<KeptEdit|null>(null);
+  const settleFailure=(cause:unknown,kept:KeptEdit|null=null)=>{const outcome=memorySheetOutcome(cause,locale);if(outcome.refresh){keptEdit.current=kept;setError(null);setNotice(kept?memorySheetKeptEditText(locale):outcome.text);setRetry(value=>value+1);}else setError(outcome.text);};
   useEffect(()=>{
     const current=++generation.current;++detailGeneration.current;setResult(null);setDetail(null);setSelected(null);setEditing(false);setError(null);
-    if(!open)return;
+    if(!open){keptEdit.current=null;return;}
     const api=ipc()?.oneMemory.inspector;
     if(!api){setError(locale==="ko"?"기억 정보를 불러올 수 없습니다.":"Memory information is unavailable.");return;}
     void api.query({actorId:actor==="*"?null:actor,projectId:project||null,scope:(scope||null) as OneMemoryMapSnapshot["nodes"][number]["scope"]|null,status})
-      .then(value=>{if(current===generation.current){if(value.schemaVersion!=="agentlas.desktop-memory-inspector.v1")throw Error("Memory information is unavailable");setResult(value);}})
+      .then(value=>{if(current===generation.current){if(value.schemaVersion!=="agentlas.desktop-memory-inspector.v1")throw Error("Memory information is unavailable");setResult(value);
+        // The memory the owner was editing is still listed: open it again so its detail (and the typed words) come back; otherwise nothing to keep.
+        const kept=keptEdit.current;if(kept){if(value.entries.some(row=>row.memoryId===kept.memoryId))setSelected(kept.memoryId);else keptEdit.current=null;}}})
       .catch(cause=>{if(current===generation.current)setError(errorText(cause));});
     return ()=>{++generation.current;++detailGeneration.current;};
   },[open,actor,project,scope,status,retry,locale,revisionHint]);
@@ -303,7 +308,8 @@ function DesktopMemoryInspector({open,locale,revisionHint}:{open:boolean;locale:
     const current=++detailGeneration.current;setDetail(null);setEditing(false);
     if(!open||!selected||!result)return;
     const api=ipc()?.oneMemory.inspector;if(!api)return;
-    void api.detail({memoryId:selected,ownerRef:result.ownerRef}).then(value=>{if(current===detailGeneration.current)setDetail(value);})
+    void api.detail({memoryId:selected,ownerRef:result.ownerRef}).then(value=>{if(current===detailGeneration.current){setDetail(value);
+      const kept=keptEdit.current;if(kept){keptEdit.current=null;if(kept.memoryId===value.memoryId&&value.editable&&value.status==="active"){setText(kept.text);setEditing(true);}}}})
       .catch(cause=>{if(current===detailGeneration.current)setError(errorText(cause));});
     return ()=>{++detailGeneration.current;};
   },[open,selected,result]);
@@ -320,7 +326,7 @@ function DesktopMemoryInspector({open,locale,revisionHint}:{open:boolean;locale:
     const current=generation.current;setBusy(true);setError(null);setNotice(null);
     try{await api.setAppSharing({memoryId:detail.memoryId,ownerRef:detail.ownerRef,actorId:detail.actorId,expectedRevision:detail.expectedRevision,expectedEpoch:detail.expectedEpoch,receiver});
       if(current===generation.current){setNotice(revoke?(locale==="ko"?"이 기억의 App 공유를 회수했어요.":"Removed App sharing for this memory."):(locale==="ko"?"선택한 App 멤버에게 이 기억만 공유했어요.":"Shared this memory with the selected App member."));setRetry(value=>value+1);}
-    }catch(cause){if(current===generation.current)setError(errorText(cause));}finally{setBusy(false);}
+    }catch(cause){if(current===generation.current)settleFailure(cause);}finally{setBusy(false);}
   };
   const describe=useCallback((id:string)=>{const row=result?.entries.find(value=>value.memoryId===id);return row?{label:`${row.actorName} · ${kindLabel(row.kind,locale)}`,text:row.content}:null;},[result,locale]);
   const mutate=async(action:"edit"|"forget")=>{
@@ -333,7 +339,7 @@ function DesktopMemoryInspector({open,locale,revisionHint}:{open:boolean;locale:
       setNotice(action==="edit"?(locale==="ko"?"수정했어요. 이전 내용은 이력으로 남습니다.":"Updated. The previous content remains in history.")
         :(locale==="ko"?`${receipt.affectedMemoryIds.length}개 기억을 잊었어요.`:`Forgot ${receipt.affectedMemoryIds.length} memories.`));
       setRetry(value=>value+1);
-    }catch(cause){if(current===generation.current)setError(errorText(cause));}
+    }catch(cause){if(current===generation.current)settleFailure(cause,keptEditAfterRefresh(action,detail,text,memorySheetOutcome(cause,locale)));}
     finally{setBusy(false);}
   };
   const recallLabel=(value:string)=>({user_identity:locale==="ko"?"개인 공통":"Personal",team_memory:locale==="ko"?"팀":"Team",agent_repo:locale==="ko"?"이 Agent":"This agent",agent_team:locale==="ko"?"Agent 팀":"Agent team",project:locale==="ko"?"프로젝트":"Project",session:locale==="ko"?"이 대화":"This conversation"}[value]??value);
