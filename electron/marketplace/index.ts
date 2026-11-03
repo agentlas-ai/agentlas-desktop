@@ -8,7 +8,7 @@ import path from "node:path";
 import { McpSource, PartialHubResultError } from "./mcp-source";
 import type { OwnerCloudShelfSnapshot } from "./mcp-source";
 import type { MarketplaceSource, SeedListingFull } from "./source";
-import { getAuthenticatedActorIds, getSessionCookieHeader } from "../auth";
+import { getAuthenticatedActorIds, getAuthenticatedSessionBinding, getSessionCookieHeader } from "../auth";
 import { isPublicDesktopAgent } from "../agents/policy";
 import { userDataPath } from "../runtime-paths";
 import type {
@@ -87,6 +87,8 @@ class HubOnlySource implements MarketplaceSource {
   private listingCache = new Map<string, TimedCache<(SeedListingFull & MarketplaceListing) | null>>();
   private firmBySlugCache = new Map<string, TimedCache<FirmListing | null>>();
   private searchInFlight = new Map<string, Promise<MarketplaceListing[]>>();
+  private freshSearchInFlight: Promise<MarketplaceListing[]> | null = null;
+  private searchGeneration = 0;
 
   constructor(
     private primary: McpSource,
@@ -147,15 +149,25 @@ class HubOnlySource implements MarketplaceSource {
     return this.startSearch(q);
   }
 
-  private startSearch(q: string): Promise<MarketplaceListing[]> {
+  freshBuilderSearch(): Promise<MarketplaceListing[]> {
+    if (this.freshSearchInFlight) return this.freshSearchInFlight;
+    ++this.searchGeneration;
+    let request!: Promise<MarketplaceListing[]>;
+    request = this.startSearch("", true).finally(() => {
+      if (this.freshSearchInFlight === request) this.freshSearchInFlight = null;
+    });
+    this.freshSearchInFlight = request;
+    return request;
+  }
+  private startSearch(q: string, force = false): Promise<MarketplaceListing[]> {
     const key = q.trim().toLowerCase();
     const existing = this.searchInFlight.get(key);
-    if (existing) return existing;
+    if (existing && !force) return existing;
+    const generation = this.searchGeneration;
     let request!: Promise<MarketplaceListing[]>;
-    request = this.tryPrimary(
-      (source) => source.searchAgents(q),
-      "searchAgents",
-      [],
+    request = (force
+      ? this.primary.searchAgents(q, true).then(value => ({ value, cacheable: true }))
+      : this.tryPrimary((source) => source.searchAgents(q), "searchAgents", [])
     ).then((attempt) => {
       const live = publicListings(attempt.value);
       const byIdentity = new Map<string, MarketplaceListing>();
@@ -176,7 +188,7 @@ class HubOnlySource implements MarketplaceSource {
         } else byIdentity.set(identity, row);
       }
       const listings = [...byIdentity.values()];
-      if (attempt.cacheable) this.searchCache.set(key, { value: listings, at: Date.now() });
+      if (attempt.cacheable && generation === this.searchGeneration) this.searchCache.set(key, { value: listings, at: Date.now() });
       return listings;
     }).finally(() => {
       if (this.searchInFlight.get(key) === request) this.searchInFlight.delete(key);
@@ -231,6 +243,7 @@ const OWNER_CLOUD_SHELF_CACHE_SCHEMA = "agentlas.owner-cloud-shelf-cache.v1";
 type OwnerCloudShelfDiskCache = {
   schema: typeof OWNER_CLOUD_SHELF_CACHE_SCHEMA;
   workspaceId: string;
+  userId: string;
   updatedAt: number;
   agents: MarketplaceListing[];
   /** 끝까지 받은 선반인가. 없거나 false 면(옛 파일 포함) 보여 주되 곧바로 다시 읽는다. */
@@ -251,12 +264,13 @@ function ownerCloudShelfCachePath(): string {
  * the authenticated workspace so switching accounts can never expose another
  * owner's shelf.
  */
-function readOwnerCloudShelfCache(workspaceId: string): TimedCache<MarketplaceListing[]> | null {
+function readOwnerCloudShelfCache(workspaceId: string, userId: string): TimedCache<MarketplaceListing[]> | null {
   try {
     const parsed = JSON.parse(fs.readFileSync(ownerCloudShelfCachePath(), "utf8")) as Partial<OwnerCloudShelfDiskCache>;
     if (
       parsed.schema !== OWNER_CLOUD_SHELF_CACHE_SCHEMA
       || parsed.workspaceId !== workspaceId
+      || parsed.userId !== userId
       || !Number.isFinite(parsed.updatedAt)
       || !Array.isArray(parsed.agents)
     ) return null;
@@ -271,7 +285,7 @@ function readOwnerCloudShelfCache(workspaceId: string): TimedCache<MarketplaceLi
   }
 }
 
-function writeOwnerCloudShelfCache(workspaceId: string, agents: MarketplaceListing[]): void {
+function writeOwnerCloudShelfCache(workspaceId: string, userId: string, agents: MarketplaceListing[]): void {
   const target = ownerCloudShelfCachePath();
   const parent = path.dirname(target);
   const temporary = `${target}.${process.pid}.tmp`;
@@ -280,6 +294,7 @@ function writeOwnerCloudShelfCache(workspaceId: string, agents: MarketplaceListi
     fs.writeFileSync(temporary, `${JSON.stringify({
       schema: OWNER_CLOUD_SHELF_CACHE_SCHEMA,
       workspaceId,
+      userId,
       updatedAt: Date.now(),
       agents,
       complete: true,
@@ -313,17 +328,67 @@ export function getCargoSource(): McpSource | null {
  * 그리고 동시 호출은 하나로 합친다. 예전에는 dedup 이 없어 IPC 핸들러와 모바일
  * 브리지 프로젝터가 동시에 만료를 만나면 **각자** 전체 순회를 돌았다.
  */
+type ShelfBinding = ReturnType<typeof getAuthenticatedSessionBinding>;
+let shelfBinding: ShelfBinding = null;
+let shelfGeneration = 0;
+let freshShelf: { cookie: string; binding: NonNullable<ShelfBinding>; generation: number; promise: Promise<MarketplaceListing[]> } | null = null;
+function sameShelfBinding(a: ShelfBinding, b: ShelfBinding): boolean {
+  return a === null ? b === null : b !== null && a.userId === b.userId && a.workspaceId === b.workspaceId && a.sessionId === b.sessionId;
+}
+export async function listMyAgentsFresh(): Promise<MarketplaceListing[]> {
+  const source = getCargoSource();
+  const cookie = getSessionCookieHeader();
+  const binding = getAuthenticatedSessionBinding();
+  if (!source || !cookie || !binding) throw new Error("Agent Cloud session unavailable");
+  if (freshShelf && freshShelf.generation === shelfGeneration && freshShelf.cookie === cookie && sameShelfBinding(freshShelf.binding, binding)) return freshShelf.promise;
+  if (_myAgentsCache && (_myAgentsCache.value.cookie !== cookie || !sameShelfBinding(shelfBinding, binding))) {
+    _myAgentsCache = null;
+    shelfBinding = null;
+    _myAgentsShelfSnapshot = null;
+    _myAgentsShelfWalkedAt = 0;
+  }
+  const generation = ++shelfGeneration;
+  const promise = source.listMyCloudPackages(undefined, { requireComplete: true }).then(result => {
+    if (generation !== shelfGeneration || getSessionCookieHeader() !== cookie || !sameShelfBinding(binding, getAuthenticatedSessionBinding())) throw new Error("Agent Cloud session changed during read");
+    if (!result.complete) throw new Error("Agent Cloud listing incomplete");
+    const agents = result.rows.filter(isPublicDesktopAgent);
+    shelfBinding = binding;
+    _myAgentsCache = { value: { cookie, agents }, at: Date.now() };
+    _myAgentsShelfSnapshot = result.snapshot;
+    _myAgentsShelfWalkedAt = Date.now();
+    writeOwnerCloudShelfCache(binding.workspaceId, binding.userId, agents);
+    return agents;
+  }).finally(() => { if (freshShelf?.promise === promise) freshShelf = null; });
+  freshShelf = { cookie, binding, generation, promise };
+  return promise;
+}
+export async function listFreshBuilderHubAgents(): Promise<MarketplaceListing[]> {
+  const source = getSource();
+  if (!(source instanceof HubOnlySource)) throw new Error("Hub is unavailable");
+  return source.freshBuilderSearch();
+}
 export async function listMyAgentsCached(): Promise<MarketplaceListing[]> {
   const source = getCargoSource();
   if (!source) return [];
   const cookie = getSessionCookieHeader();
   const actor = getAuthenticatedActorIds();
   let entry = _myAgentsCache;
-  let sameSession = entry?.value.cookie === cookie;
+  const binding = getAuthenticatedSessionBinding();
+  if (!cookie || !binding) {
+    _myAgentsCache = null;
+    shelfBinding = null;
+    _myAgentsShelfSnapshot = null;
+    _myAgentsShelfWalkedAt = 0;
+    shelfGeneration++;
+    return [];
+  }
+  let sameSession = entry?.value.cookie === cookie && sameShelfBinding(shelfBinding, binding);
   if (entry && sameSession && cacheFresh(entry)) return entry.value.agents;
   // 로그인 상태가 바뀌었으면 이전 세션의 선반은 남의 것이다 — 즉시 버린다.
   if (entry && !sameSession) {
     _myAgentsCache = null;
+    shelfBinding = null;
+    shelfGeneration++;
     _myAgentsShelfSnapshot = null;
     _myAgentsShelfWalkedAt = 0;
     entry = null;
@@ -332,17 +397,18 @@ export async function listMyAgentsCached(): Promise<MarketplaceListing[]> {
   // Renderer route cache is process-local. Hydrate the last verified,
   // account-scoped shelf before starting any network work so a cold launch is
   // just as immediate as a route change.
-  if (!entry && cookie && actor?.workspaceId) {
-    const disk = readOwnerCloudShelfCache(actor.workspaceId);
+  if (!entry && cookie && actor?.workspaceId && binding) {
+    const disk = readOwnerCloudShelfCache(actor.workspaceId, binding.userId);
     if (disk) {
       entry = { value: { cookie, agents: disk.value }, at: disk.at };
       _myAgentsCache = entry;
+      shelfBinding = binding;
       sameSession = true;
       if (cacheFresh(entry)) return entry.value.agents;
     }
   }
   const stale = sameSession ? entry?.value.agents : undefined;
-  const refresh = refreshMyAgentsShelf(source, cookie, actor?.workspaceId ?? null);
+  const refresh = refreshMyAgentsShelf(source, cookie, actor?.workspaceId ?? null, binding);
   // 오래된 값이라도 있으면 그것을 주고 갱신은 뒤에서 끝낸다. 없을 때만 기다린다.
   if (stale) {
     refresh.catch(() => {});
@@ -353,7 +419,7 @@ export async function listMyAgentsCached(): Promise<MarketplaceListing[]> {
 
 let _myAgentsShelfSnapshot: OwnerCloudShelfSnapshot | null = null;
 let _myAgentsShelfWalkedAt = 0;
-let _myAgentsInFlight: { cookie: string | null; promise: Promise<MarketplaceListing[]> } | null = null;
+let _myAgentsInFlight: { cookie: string | null; binding: ShelfBinding; generation: number; promise: Promise<MarketplaceListing[]> } | null = null;
 
 /**
  * 전체 순회를 이만큼은 다시 한다.
@@ -370,9 +436,12 @@ function refreshMyAgentsShelf(
   source: McpSource,
   cookie: string | null,
   workspaceId: string | null,
+  binding: ShelfBinding,
 ): Promise<MarketplaceListing[]> {
+  const generation = shelfGeneration;
+  if (freshShelf && freshShelf.generation === generation && freshShelf.cookie === cookie && sameShelfBinding(freshShelf.binding, binding)) return freshShelf.promise;
   const inFlight = _myAgentsInFlight;
-  if (inFlight && inFlight.cookie === cookie) return inFlight.promise;
+  if (inFlight && inFlight.cookie === cookie && inFlight.generation === generation && sameShelfBinding(inFlight.binding, binding)) return inFlight.promise;
   // 지문이 못 보는 뒤쪽 변화를 회수하기 위해 주기적으로 전체를 다시 읽는다.
   const stale = Date.now() - _myAgentsShelfWalkedAt >= OWNER_SHELF_FULL_WALK_MS;
   const probe = stale ? undefined : (_myAgentsShelfSnapshot ?? undefined);
@@ -381,9 +450,11 @@ function refreshMyAgentsShelf(
     .then((result) => {
       const currentActor = getAuthenticatedActorIds();
       if (
-        getSessionCookieHeader() !== cookie
+        generation !== shelfGeneration || !sameShelfBinding(binding, getAuthenticatedSessionBinding())
+        || getSessionCookieHeader() !== cookie
         || (workspaceId !== null && currentActor?.workspaceId !== workspaceId)
       ) return [];
+      shelfBinding = binding;
       const fetched = result.rows.filter((agent) => isPublicDesktopAgent(agent));
       if (!result.complete) {
         // 순회가 중간에 끊겼다. 받은 만큼은 보여 주되 이미 알던 뒤쪽 행을 지우지 않고,
@@ -403,13 +474,13 @@ function refreshMyAgentsShelf(
       if (!result.revalidatedOnly) _myAgentsShelfWalkedAt = Date.now();
       const agents = fetched;
       _myAgentsCache = { value: { cookie, agents }, at: Date.now() };
-      if (workspaceId) writeOwnerCloudShelfCache(workspaceId, agents);
+      if (workspaceId && binding) writeOwnerCloudShelfCache(workspaceId, binding.userId, agents);
       return agents;
     })
     .finally(() => {
       if (_myAgentsInFlight?.promise === promise) _myAgentsInFlight = null;
     });
-  _myAgentsInFlight = { cookie, promise };
+  _myAgentsInFlight = { cookie, binding, generation, promise };
   return promise;
 }
 
@@ -418,6 +489,8 @@ function refreshMyAgentsShelf(
  * 방금 한 일이 반영되지 않은 목록을 최대 5분 동안 본다.
  */
 export function invalidateMyAgentsCache(): void {
+  shelfGeneration++;
+  shelfBinding = null;
   _myAgentsCache = null;
   _myAgentsShelfSnapshot = null;
   _myAgentsShelfWalkedAt = 0;

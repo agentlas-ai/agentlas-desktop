@@ -8,7 +8,6 @@ export interface ResolvedHephaestusBuildAttachment {
 
 const ATTACH_DIR = "_attachments";
 const ATTACH_SKIP = new Set(["node_modules", ".git", ".next", "dist", "__pycache__", ".DS_Store", ".venv"]);
-const ATTACH_MAX_TOTAL = 200 * 1024 * 1024;
 
 function isInsidePath(child: string, parent: string): boolean {
   const rel = path.relative(parent, child);
@@ -43,7 +42,6 @@ export function stageAttachments(
   const canonicalWorkspace = fs.realpathSync.native(path.resolve(workspace));
   const destRoot = path.join(canonicalWorkspace, ATTACH_DIR);
   const resolvedDestRoot = path.resolve(destRoot);
-  let copied = 0;
   for (const att of attachments) {
     try {
       const src = fs.realpathSync.native(path.resolve(att.path || ""));
@@ -70,13 +68,6 @@ export function stageAttachments(
                 errors.push(`${path.relative(src, candidate) || path.basename(candidate)}: symbolic links are not staged`);
                 return false;
               }
-              if (candidateStat.isFile()) {
-                if (copied + candidateStat.size > ATTACH_MAX_TOTAL) {
-                  errors.push(`${path.relative(src, candidate) || path.basename(candidate)}: size cap exceeded`);
-                  return false;
-                }
-                copied += candidateStat.size;
-              }
             } catch {
               return false;
             }
@@ -85,11 +76,7 @@ export function stageAttachments(
         });
         lines.push(`- ${ATTACH_DIR}/${path.basename(dest)}/ (folder — likely an existing agent/skill package; explore its files)`);
       } else {
-        if (copied + st.size > ATTACH_MAX_TOTAL) {
-          errors.push(`${name}: size cap exceeded`);
-          continue;
-        }
-        copied += st.size;
+        // No size cap: a copy that runs out of disk fails with its own error below, never silently.
         fs.copyFileSync(src, dest);
         const ext = path.extname(name).toLowerCase();
         const kind = [".png", ".jpg", ".jpeg", ".gif", ".webp"].includes(ext)

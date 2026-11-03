@@ -1,5 +1,5 @@
 import { captureOneContextExecution } from "../one/context-platform";
-import { configuredOneOsLeaseBroker, oneOsLeaseBroker, markOneOsHostAvailable } from "../one/context-lease";
+import { configuredOneOsLeaseBroker, oneOsLeaseBroker, markOneOsHostAvailable, HUMAN_INPUT_ACTION_WAIT_MS, HUMAN_INPUT_ARRANGE_WAIT_MS } from "../one/context-lease";
 import { handleNativeGuestComputerUse, revokeNativeGuestComputerUseScopes } from "./native-guest";
 import http from "node:http";
 import fs from "node:fs";
@@ -23,6 +23,7 @@ import { currentUiLocale } from "../ui-locale";
 import { checkComputerUseWindowScope } from "./window-scope";
 import { supervisorDock } from "./supervisor-dock";
 import { invalidValueMessage } from "../../shared/did-you-mean";
+import { assertRequestCurrent, linkedAbortSignals } from "./request-lifetime";
 
 const MAX_REQUEST_BYTES = 64 * 1024;
 const MAX_AUDIT_ROWS = 200;
@@ -61,6 +62,7 @@ const observations = new Map<string, {
   refs: NativeElementReference[];
   frames: Array<{x:number;y:number;width:number;height:number}|undefined>;
 }>();
+const pendingRequests = new Set<AbortController>();
 
 function pruneObservations(now = Date.now()): void {
   for (const [id, observation] of observations) {
@@ -184,7 +186,16 @@ function dockRunOf(capability: unknown): { runId: string; hasContextGrant: boole
   try { const binding = oneOsLeaseBroker().executionBinding(capability); return { runId: binding.runId, hasContextGrant: Boolean(binding.contextGrantId) }; }
   catch { return null; }
 }
+/** A refusal the One OS lease, the context grant or the request lifetime raised with its own code. */
+function typedOsRefusal(error: unknown): boolean {
+  const code = error && typeof error === "object" && "code" in error ? String((error as { code: unknown }).code) : "";
+  return /^(?:one-os-|one-context-|computer-use-request-aborted$)/.test(code);
+}
 function osFailure(error: unknown): NativeInputResult { return {ok:false,error:error && typeof error === "object" && "code" in error ? String(error.code) : "one-os-authority-unavailable"}; }
+function executionLifetime(body: Record<string, unknown>, signal?: AbortSignal) {
+  assertRequestCurrent(signal);
+  return linkedAbortSignals([signal, body.oneOsExecution === undefined ? undefined : oneOsLeaseBroker().executionSignal(body.oneOsExecution)]);
+}
 async function observationAuthority(body:Record<string,unknown>):Promise<{assertCurrent():void;binding?:import("../one/context-lease").OneOsExecutionBinding}> {
   if(body.oneOsExecution!==undefined)return oneOsLeaseBroker().authorizeObservation(body.oneOsExecution,{appTarget:typeof body.app==="string"?body.app:undefined,sourceId:typeof body.sourceId==="string"?body.sourceId:undefined});
   return {assertCurrent:()=>{if(configuredOneOsLeaseBroker()?.snapshot().state==="held")throw Object.assign(new Error("one-os-resource-busy"),{code:"one-os-resource-busy"});}};
@@ -213,7 +224,12 @@ function clampedInteger(value: unknown, min: number, max: number, fallback: numb
   return Number.isFinite(n) ? Math.min(max, Math.max(min, Math.round(n))) : null;
 }
 
-async function observeApp(body: Record<string, unknown>): Promise<Record<string, unknown>> {
+async function observeApp(body: Record<string, unknown>, requestSignal?: AbortSignal): Promise<Record<string, unknown>> {
+  const lifetime = executionLifetime(body, requestSignal);
+  try { return await observeAppWithin(body, lifetime.signal); } finally { lifetime.dispose(); }
+}
+async function observeAppWithin(body: Record<string, unknown>, requestSignal: AbortSignal): Promise<Record<string, unknown>> {
+  assertRequestCurrent(requestSignal);
   const app = safeString(body.app, 160);
   // maxDepth 16 with maxNodes 450 was refused (4 of 4 in 14 days; 1500, 1000, 500 in 2026-10-05): the intent is "a large tree", so a limit above the
   // host's range is the host's range, not an error. Only a value that is no number at all is refused.
@@ -224,15 +240,41 @@ async function observeApp(body: Record<string, unknown>): Promise<Record<string,
     return { ok: false, error: "invalid-arguments", message: "maxDepth and maxNodes must be numbers (the host uses 1-32 and 1-300; omit them for 24 and 200)." };
   }
   const denied = await checkComputerUseWindowScope({ route: "observe", app });
+  assertRequestCurrent(requestSignal);
   if (denied) { recordAudit("observeApp", denied as NativeInputResult); return denied; }
   let authority;try {authority=await observationAuthority(body);authority.assertCurrent();}catch(error){return osFailure(error) as unknown as Record<string,unknown>;}
-  const dockRun = dockRunOf(body.oneOsExecution);
-  if (dockRun) { const docked = await supervisorDock()?.begin({ ...dockRun, app }); if (docked?.layoutChanged) sourceGeometries.clear(); }
-  const result = await invokeNativeInputDriver({ action: "observeApp", app, maxDepth, maxNodes });
-  try {authority.assertCurrent();}catch(error){return osFailure(error) as unknown as Record<string,unknown>;}
-  recordAudit("observeApp", result);
-  if (!result.ok || !result.observation) return result as unknown as Record<string, unknown>;
-  return serializeObservation(app, result.observation);
+  const scopedDockRun = dockRunOf(body.oneOsExecution);
+  let lease: { signal: AbortSignal; checkpoint(): Promise<void>; release(): void } | undefined;
+  let nativeLifetime: ReturnType<typeof linkedAbortSignals> | undefined;
+  const checkpoint = async () => { assertRequestCurrent(requestSignal); authority.assertCurrent(); await lease?.checkpoint(); assertRequestCurrent(requestSignal); };
+  try {
+    // Keep the existing first-observation dock, but only an input-authorized
+    // execution may rearrange windows, under the same human/resource fence.
+    const readOnly = authority.binding?.permissions === "read";
+    // Arranging the windows needs the input lease; observing does not (observationAuthority above admitted it). A lease the target
+    // cannot have right now (it is not in front, the owner is typing, another run holds it) skips the arrangement and the app is
+    // still observed. e8be532bc made every observation of an app behind the One window fail with a bare 500 "observe-failed".
+    let arrange = Boolean(scopedDockRun);
+    if (scopedDockRun && !readOnly) {
+      const broker = configuredOneOsLeaseBroker()?.forRequest(requestSignal);
+      await broker?.settleHumanInput(HUMAN_INPUT_ARRANGE_WAIT_MS);
+      try { lease = await oneOsLeaseBroker().acquireForAction(body.oneOsExecution, { appTarget: app }); }
+      catch (error) { if (!typedOsRefusal(error)) throw error; arrange = false; }
+    }
+    nativeLifetime = linkedAbortSignals([requestSignal, lease?.signal]);
+    await checkpoint();
+    const dockRun = scopedDockRun && arrange ? { ...scopedDockRun, hasContextGrant: scopedDockRun.hasContextGrant || readOnly, signal: nativeLifetime.signal, checkpoint } : null;
+    if (dockRun) { const docked = await supervisorDock()?.begin({ ...dockRun, app }); await checkpoint(); if (docked?.layoutChanged) sourceGeometries.clear(); }
+    const result = await invokeNativeInputDriver({ action: "observeApp", app, maxDepth, maxNodes }, undefined, nativeLifetime.signal);
+    await checkpoint();
+    recordAudit("observeApp", result);
+    if (!result.ok || !result.observation) return result as unknown as Record<string, unknown>;
+    return serializeObservation(app, result.observation);
+  } catch (error) {
+    // A typed refusal (the owner started typing, the lease ended, the request was stopped) is answered with its code, not a 500.
+    if (typedOsRefusal(error)) return osFailure(error) as unknown as Record<string, unknown>;
+    throw error;
+  } finally { nativeLifetime?.dispose(); lease?.release(); }
 }
 
 function sourceGeometry(sourceId: string | null): {
@@ -275,7 +317,12 @@ function mapPoint(body: Record<string, unknown>, prefix = ""): Point | null {
   };
 }
 
-async function runAction(body: Record<string, unknown>): Promise<NativeInputResult> {
+async function runAction(body: Record<string, unknown>, requestSignal?: AbortSignal): Promise<NativeInputResult> {
+  const lifetime = executionLifetime(body, requestSignal);
+  try { return await runActionWithin(body, lifetime.signal); } finally { lifetime.dispose(); }
+}
+async function runActionWithin(body: Record<string, unknown>, requestSignal: AbortSignal): Promise<NativeInputResult> {
+  assertRequestCurrent(requestSignal);
   const action = safeString(body.action, 40);
   if (!action) return { ok: false, error: "invalid-action", message: "A valid action is required." };
 
@@ -438,10 +485,19 @@ async function runAction(body: Record<string, unknown>): Promise<NativeInputResu
   }
   let lease: {signal?:AbortSignal;checkpoint():Promise<void>;release():void}|undefined;
   let actionTarget:import("../one/context-lease").OneOsActionTarget|undefined;
+  let nativeLifetime: ReturnType<typeof linkedAbortSignals> | undefined;
+  const checkpoint = async () => {
+    assertRequestCurrent(requestSignal);
+    await lease?.checkpoint();
+    assertRequestCurrent(requestSignal);
+  };
+  const nativeSignal = () => (nativeLifetime ??= linkedAbortSignals([requestSignal, lease?.signal])).signal;
   try {
+    assertRequestCurrent(requestSignal);
     if(action!=="status" && action!=="listApps") {
-      const broker=configuredOneOsLeaseBroker();
-      await broker?.settleHumanInput();
+      const broker=configuredOneOsLeaseBroker()?.forRequest(requestSignal);
+      await broker?.settleHumanInput(HUMAN_INPUT_ACTION_WAIT_MS);
+      assertRequestCurrent(requestSignal);
       if(body.oneOsExecution!==undefined) {
         if(!appName)return {ok:false,error:"one-os-action-target-required"};
         const points=[mapPoint(body),mapPoint(body,"from_"),mapPoint(body,"to_")].filter((point):point is Point=>point!==null);
@@ -451,11 +507,11 @@ async function runAction(body: Record<string, unknown>): Promise<NativeInputResu
         actionTarget={appTarget:appName,allowFocus:action==="focusApp" || oneOsLeaseBroker().hasContextGrant(body.oneOsExecution),sourceId:typeof body.sourceId==="string"?body.sourceId:undefined,points,...(frame?{elementFrame:frame}:{})};
         lease=await oneOsLeaseBroker().acquireForAction(body.oneOsExecution,actionTarget);
       } else if(broker)lease=broker.acquireLegacyAction();
-      await lease?.checkpoint();
+      await checkpoint();
       if(appName && action!=="focusApp" && (body.oneOsExecution===undefined || actionTarget?.allowFocus)) {
-        const focused=await invokeNativeInputDriver({action:"focusApp",app:actionTarget?.resolvedPid?`pid:${actionTarget.resolvedPid}`:appName,...(actionTarget?{windowId:actionTarget.resolvedWindowId,processStartMs:actionTarget.resolvedProcessStartMs}:{})},undefined,lease?.signal);
+        const focused=await invokeNativeInputDriver({action:"focusApp",app:actionTarget?.resolvedPid?`pid:${actionTarget.resolvedPid}`:appName,...(actionTarget?{windowId:actionTarget.resolvedWindowId,processStartMs:actionTarget.resolvedProcessStartMs}:{})},undefined,nativeSignal());
         if(actionTarget)actionTarget.allowFocus=false;
-        await lease?.checkpoint();recordAudit("focusApp",focused);if(!focused.ok)return focused;
+        await checkpoint();recordAudit("focusApp",focused);if(!focused.ok)return focused;
         if(typeof focused.pid==="number"&&Number.isInteger(focused.pid)&&focused.pid>0)targetPid=focused.pid;
         if(request.action==="typeText"||request.action==="selectText")request={...request,...(targetPid?{targetPid}:{})};
         if(action!=="elementAction")await new Promise(resolve=>setTimeout(resolve,280));
@@ -463,14 +519,15 @@ async function runAction(body: Record<string, unknown>): Promise<NativeInputResu
       if(dockRun && appName && action!=="focusApp") {
         // Right-dock layout before the first effect on this app. Screen points were mapped from a capture taken before
         // the windows moved, so a point action stops here and asks for a fresh capture instead of pressing a stale spot.
-        const docked=await supervisorDock()?.begin({...dockRun,app:targetPid?`pid:${targetPid}`:actionTarget?.resolvedPid?`pid:${actionTarget.resolvedPid}`:appName});
+        const docked=await supervisorDock()?.begin({...dockRun,app:targetPid?`pid:${targetPid}`:actionTarget?.resolvedPid?`pid:${actionTarget.resolvedPid}`:appName,signal:nativeSignal(),checkpoint});
+        await checkpoint();
         if(docked?.layoutChanged){
           sourceGeometries.clear();
           if(request.action==="move"||request.action==="click"||request.action==="drag")return {ok:false,error:"screen-layout-changed",message:"The windows were just arranged beside the assistant panel. Capture the screen again, then repeat this action."};
         }
       }
     } else if(body.oneOsExecution!==undefined) { const authority=await observationAuthority(body);authority.assertCurrent(); }
-    await lease?.checkpoint();
+    await checkpoint();
     if(action!=="status"&&action!=="listApps"&&action!=="move")observations.clear();
     if(request.action==="focusApp" && actionTarget)request={...request,app:`pid:${actionTarget.resolvedPid}`,windowId:actionTarget.resolvedWindowId,processStartMs:actionTarget.resolvedProcessStartMs};
     if(dockRun){
@@ -479,20 +536,22 @@ async function runAction(body: Record<string, unknown>): Promise<NativeInputResu
       else if(request.action==="drag")dock?.pointer({x:request.toX,y:request.toY});
       else if(dockElementFrame)dock?.pointer({x:dockElementFrame.x+dockElementFrame.width/2,y:dockElementFrame.y+dockElementFrame.height/2});
     }
-    const result=await invokeNativeInputDriver(request,undefined,lease?.signal);
+    const result=await invokeNativeInputDriver(request,undefined,nativeSignal());
+    assertRequestCurrent(requestSignal);
     if(dockRun){
       const dock=supervisorDock();
       if(action==="focusApp"&&result.ok&&typeof result.pid==="number"){
-        const docked=await dock?.begin({...dockRun,app:`pid:${result.pid}`});
+        const docked=await dock?.begin({...dockRun,app:`pid:${result.pid}`,signal:nativeSignal(),checkpoint});
+        await checkpoint();
         if(docked?.layoutChanged)sourceGeometries.clear();
       } else dock?.step();
     }
-    if(actionTarget?.allowFocus){actionTarget.allowFocus=false;await lease?.checkpoint();}
+    if(actionTarget?.allowFocus){actionTarget.allowFocus=false;await checkpoint();}
     // Revocation cannot persist audit/history after native work returns.
     if(body.oneOsExecution!==undefined)oneOsLeaseBroker().assertExecutionCurrent(body.oneOsExecution);
     recordAudit(action,result,action==="typeText"&&typeof body.text==="string"?body.text.length:undefined);
     return result;
-  } catch(error) {return osFailure(error);} finally {lease?.release();}
+  } catch(error) {return osFailure(error);} finally {nativeLifetime?.dispose();lease?.release();}
 
 }
 
@@ -523,6 +582,15 @@ export function startComputerUseControlServer(): Promise<number> {
   token = randomUUID();
   const pending = new Promise<number>((resolve) => {
     const srv = http.createServer((req, res) => {
+      // A request's body normally closes before its response. Only an aborted
+      // upload or an unfinished response disconnect cancels the queued/native work.
+      const requestController = new AbortController();
+      pendingRequests.add(requestController);
+      const cleanup = () => { pendingRequests.delete(requestController); req.removeListener("aborted", disconnected); res.removeListener("close", disconnected); };
+      const disconnected = () => { if (!res.writableFinished) requestController.abort(); cleanup(); };
+      req.once("aborted", disconnected);
+      res.once("close", disconnected);
+      res.once("finish", cleanup);
       // Separate authority namespace. Invalid scoped requests never reach OS routes.
       if (req.url?.startsWith("/native-guest/")) {
         if (req.method !== "POST" || req.headers.origin) { req.resume(); writeJson(res, 403, { ok: false, error: "native-guest-route-denied" }); return; }
@@ -530,7 +598,7 @@ export function startComputerUseControlServer(): Promise<number> {
         void readJsonBody(req).then(async body => {
           clearTimeout(deadline);
           if (!body) return writeJson(res, 400, { ok: false, error: "native-guest-input-invalid" });
-          const result = await handleNativeGuestComputerUse(req.url!.slice("/native-guest/".length), req.headers.authorization, body);
+          const result = await handleNativeGuestComputerUse(req.url!.slice("/native-guest/".length), req.headers.authorization, body, requestController.signal);
           writeJson(res, 200, result);
         }).catch(() => { clearTimeout(deadline); writeJson(res, 500, { ok: false, error: "native-guest-operation-failed" }); });
         return;
@@ -562,9 +630,15 @@ export function startComputerUseControlServer(): Promise<number> {
         }
         if (req.url === "/capture") {
           const sourceId = typeof body.sourceId === "string" ? body.sourceId.slice(0, 256) : undefined;
+          let lifetime: ReturnType<typeof linkedAbortSignals>;
+          try { lifetime = executionLifetime(body, requestController.signal); }
+          catch (error) { writeJson(res, 409, osFailure(error)); return; }
+          const checkpoint = () => assertRequestCurrent(lifetime.signal);
           void observationAuthority(body).then(async authority=>{
+            checkpoint();
             authority.assertCurrent();
-            const preview=authority.binding?.contextGrantId ? await captureOneContextExecution(authority.binding) : await captureComputerUsePreview(sourceId);
+            const preview=authority.binding?.contextGrantId ? await captureOneContextExecution(authority.binding, lifetime.signal) : await captureComputerUsePreview(sourceId);
+            checkpoint();
             authority.assertCurrent();
             for (const source of preview.sources) {
               if (source.bounds && source.width > 0 && source.height > 0) {
@@ -594,7 +668,7 @@ export function startComputerUseControlServer(): Promise<number> {
              */
             let savedPath: string | null = null;
             try {
-              if(!authority.binding?.contextGrantId){authority.assertCurrent();savedPath = saveScreenCaptureArtifact(preview.dataUrl);}
+              if(!authority.binding?.contextGrantId){checkpoint();authority.assertCurrent();savedPath = saveScreenCaptureArtifact(preview.dataUrl);}
             } catch {
               // 증거 파일을 못 남겨도 에이전트는 화면을 받아야 한다.
             }
@@ -602,20 +676,20 @@ export function startComputerUseControlServer(): Promise<number> {
               // Computer History has a separate, explicit-consent retention
               // policy. General CUA evidence remains governed by its own 300-file
               // cap; only an opted-in capture receives the seven-day local copy.
-              if(!authority.binding?.contextGrantId){authority.assertCurrent();recordComputerHistoryCapture(preview.dataUrl);}
+              if(!authority.binding?.contextGrantId){checkpoint();authority.assertCurrent();recordComputerHistoryCapture(preview.dataUrl);}
             } catch {
               // 보관은 동의 기반 부가 기능이다 — 실패해도 캡처를 삼키지 않는다.
             }
-            authority.assertCurrent();
+            checkpoint();authority.assertCurrent();
             writeJson(res, 200, { ok: true, preview: savedPath ? { ...preview, savedPath } : preview });
           }).catch((error) => {
             // 여기까지 왔다면 응답 쓰기 자체가 실패한 것이다. 그래도 매달아 두지 않는다.
             try { writeJson(res, 409, osFailure(error)); } catch { /* 소켓이 이미 닫혔다 */ }
-          });
+          }).finally(() => lifetime.dispose());
           return;
         }
         if (req.url === "/observe") {
-          const execute = actionQueue.then(() => observeApp(body), () => observeApp(body));
+          const execute = actionQueue.then(() => observeApp(body, requestController.signal), () => observeApp(body, requestController.signal));
           actionQueue = execute.then(() => undefined, () => undefined);
           void execute.then((result) => writeJson(res, result.ok ? 200 : 409, result), () => {
             writeJson(res, 500, { ok: false, error: "observe-failed" });
@@ -623,7 +697,7 @@ export function startComputerUseControlServer(): Promise<number> {
           return;
         }
         if (req.url === "/action") {
-          const execute = actionQueue.then(() => runAction(body), () => runAction(body));
+          const execute = actionQueue.then(() => runAction(body, requestController.signal), () => runAction(body, requestController.signal));
           actionQueue = execute.then(() => undefined, () => undefined);
           void execute.then((result) => writeJson(res, result.ok ? 200 : 409, result), () => {
             writeJson(res, 500, { ok: false, error: "action-failed" });
@@ -666,6 +740,8 @@ export function startComputerUseControlServer(): Promise<number> {
 }
 
 export function stopComputerUseControlServer(): void {
+  for (const request of pendingRequests) request.abort();
+  pendingRequests.clear();
   markOneOsHostAvailable(false); configuredOneOsLeaseBroker()?.suspend("one-os-host-unavailable");
   generation++; starting = null; revokeNativeGuestComputerUseScopes();
   if (server) {

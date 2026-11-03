@@ -213,6 +213,8 @@ import {
   getCargoSource,
   invalidateMyAgentsCache,
   listMyAgentsCached,
+  listMyAgentsFresh,
+  listFreshBuilderHubAgents,
   refreshSourceStatus as refreshMarketSourceStatus,
 } from "./marketplace";
 import {
@@ -397,6 +399,7 @@ import {
   getAuthSession,
   onAuthSessionRestored,
   getAuthenticatedActorIds,
+  getAuthenticatedSessionBinding,
   getSessionCookieHeader,
   signInWithBrowser,
   signInWithGoogle,
@@ -546,7 +549,7 @@ import {
   getCanonicalTaskForChat,
   listCanonicalTasks,
 } from "./store/tasks";
-import { ONE_SELF_AVATAR_ICON, decodeOneTeamAvatarDataUrl, writeOneSelfAvatar } from "./one/avatar";
+import { setOneSelfAvatarImage } from "./one/avatar";
 import { mutateOneTaskArchive, searchOneHistory } from "./one/search";
 import { importExternalCliSession, listExternalCliSessions } from "./external-cli-sessions";
 import {
@@ -582,6 +585,8 @@ import {
 import {
   issueOneArtifactPreviewCapability,
   revokeOneArtifactPreview,
+  issueGeneratedMessageVideos,
+  revokeGeneratedMessageVideo,
 } from "./one/artifact-preview";
 import {
   addOneOperatingPrinciple,
@@ -974,6 +979,8 @@ import {
 } from "./store/capability-grants";
 import type { ToolApprovalDecision } from "../shared/types";
 import { installHostToolPermissionPolicy } from "./runtime/host-tool-permission-policy";
+import { readBuilderConversation, readLatestBuilderConversation, writeBuilderConversation, type StoredBuilderConversation } from "./hephaestus/builder-conversation-store";
+import { isCompletedBuildTurn } from "../shared/build-turn";
 import {
   installApprovalOwnerNoteSender,
   resolveBrowserApprovalWithOwnerNote,
@@ -983,6 +990,19 @@ import {
 // DESKTOP_MOBILE_BRIDGE: live invocation authority moved to invocation/service.ts.
 // Hephaestus 빌더(hep-build) 진행 중 실행 — 취소용 AbortController 레지스트리.
 const activeBuilds = new Map<string, AbortController>();
+let builderAuthGeneration = 0;
+function builderOwnerBinding() {
+  const account = getAuthenticatedSessionBinding();
+  return account
+    ? { ...account, scope: "account" as const }
+    : { userId: "desktop-installation", workspaceId: "local", sessionId: `local:${builderAuthGeneration}`, scope: "local" as const };
+}
+function builderWorkspaceIdentity(workspace: string): StoredBuilderConversation["workspaceIdentity"] {
+  const realPath = fs.realpathSync(workspace);
+  const info = fs.statSync(realPath, { bigint: true });
+  if (!info.isDirectory()) throw new Error("BUILD_WORKSPACE_UNAVAILABLE");
+  return { realPath, dev: String(info.dev), ino: String(info.ino), birthtimeNs: String(info.birthtimeNs) };
+}
 /**
  * 실행 중(또는 마지막) 빌드의 전사(轉寫).
  *
@@ -999,6 +1019,8 @@ const buildTranscripts = new Map<string, {
   startedAt: string;
   running: boolean;
   events: HephaestusBuildEvent[];
+  /** Validated turn input, kept in Main and returned only to a trusted app frame. */
+  recoveryRequest?: HephaestusBuildRequest;
   /** Events dropped from the front by the window below: events[i] is event number firstSeq + i of this build. */
   firstSeq: number;
 }>();
@@ -1769,6 +1791,11 @@ export function registerIpcHandlers(): void {
   };
   registerAgentWorkspaceIpc({ ipc: ipcMain, assertTrustedSender: assertTrustedSitePublishIpcSender });
   registerOneSupervisorIpc({ ipc: ipcMain, assertTrustedSender: assertTrustedSitePublishIpcSender });
+  ipcMain.handle("oneDispatch:resultPage", (event, input) => {
+    assertTrustedSitePublishIpcSender(event);
+    const { readOneDispatchResultPage } = require("./one/dispatch-presentation") as typeof import("./one/dispatch-presentation");
+    return readOneDispatchResultPage(input);
+  });
   registerOnePersonalDataIpc({ ipc: ipcMain, assertTrustedSender: assertTrustedSitePublishIpcSender });
   registerOneHarnessIpc({ ipc: ipcMain, assertTrustedSender: assertTrustedSitePublishIpcSender });
   registerLiveDocumentIpc({ ipc: ipcMain, assertTrustedSender: assertTrustedSitePublishIpcSender });
@@ -3891,6 +3918,7 @@ export function registerIpcHandlers(): void {
   // ── marketplace (agentlas.cloud Hub-only; no in-memory fallback catalog) ─
   registerAppControlDomainIpc(ipcMain, "marketplace:listBundles", () => getMarketSource().listBundles());
   registerAppControlDomainIpc(ipcMain, "marketplace:search", (q: string) => getMarketSource().searchAgents(q));
+  registerAppControlDomainIpc(ipcMain, "marketplace:builderSearchFresh", async () => ({ fresh: true, rows: await listFreshBuilderHubAgents() }));
   registerAppControlDomainIpc(ipcMain, "marketplace:listFirms", () => getMarketSource().listFirms());
   registerAppControlDomainIpc(ipcMain, "marketplace:status", (force?: boolean) => refreshMarketSourceStatus(force === true));
   registerAppControlDomainIpc(ipcMain, "marketplace:bookmarks", () => listHubAgentBookmarks());
@@ -3918,6 +3946,7 @@ export function registerIpcHandlers(): void {
     void syncHubBookmarks({ rerunIfBusy: true });
   });
   // 내 에이전트(cargo) — 미로그인/오프라인/실패면 빈 배열(팝업이 안내 처리).
+  registerAppControlDomainIpc(ipcMain, "marketplace:builderListMineFresh", async () => ({ fresh: true, rows: await listMyAgentsFresh() }));
   registerAppControlDomainIpc(ipcMain, "marketplace:listMine", async () => {
     try {
       return await listMyAgentsCached();
@@ -5085,6 +5114,8 @@ export function registerIpcHandlers(): void {
     revoked: revokeOneArtifactPreview(input),
   }));
   registerAppControlDomainIpc(ipcMain, "oneArtifacts:listEarlier", (input: unknown) => listEarlierOneOutputs(input));
+  registerAppControlDomainIpc(ipcMain, "oneArtifacts:listMessageVideos", (input: unknown) => issueGeneratedMessageVideos(input));
+  registerAppControlDomainIpc(ipcMain, "oneArtifacts:revokeMessageVideo", (input: unknown) => ({revoked:revokeGeneratedMessageVideo(input)}));
   registerAppControlDomainIpc(ipcMain, "oneProfile:get", () => getOneProfile());
   registerAppControlDomainIpc(ipcMain, "oneProfile:origin", () => getOneProfileOrigin());
   registerAppControlDomainIpc(ipcMain, "oneProfile:update", (input: OneProfileUpdateInput) => updateOneProfile(input));
@@ -5094,13 +5125,8 @@ export function registerIpcHandlers(): void {
    * 이미지는 먼저 디스크에 쓰고, 그다음 프로필이 그 자리를 가리키게 한다. 순서를 뒤집으면
    * 저장이 실패했을 때 프로필만 없는 그림을 가리킨다.
    */
-  registerAppControlDomainIpc(ipcMain, "oneProfile:setAvatarImage", (input: { dataUrl: string; expectedVersion: number }) => {
-    const decoded = decodeOneTeamAvatarDataUrl(String(input?.dataUrl ?? ""));
-    writeOneSelfAvatar(decoded);
-    return updateOneProfile({
-      expectedVersion: Number(input?.expectedVersion),
-      patch: { avatarIcon: ONE_SELF_AVATAR_ICON },
-    });
+  registerAppControlDomainIpc(ipcMain, "oneProfile:setAvatarImage", (input: { dataUrl: string; expectedVersion: number; oneId?: string }) => {
+    return setOneSelfAvatarImage({ dataUrl: String(input?.dataUrl ?? ""), expectedVersion: Number(input?.expectedVersion), ...(input?.oneId !== undefined ? { oneId: input.oneId } : {}) });
   });
   registerAppControlDomainIpc(ipcMain, "oneProfile:addPrinciple", (input: OneOperatingPrincipleCreateInput) =>
     addOneOperatingPrinciple(input));
@@ -7145,7 +7171,10 @@ export function registerIpcHandlers(): void {
   const followupCustody = () => createFollowupCustodyStore({
     db: getDb(),
     accountDigest: followupOwnerDigest,
-    appendUserMessage: request => appendChatMessage(request.chatId,"user",request.userPrompt,request.images?.length ? {images:request.images} : undefined),
+    appendUserMessage: request => appendChatMessage(request.chatId, "user", request.userPrompt,
+      request.images?.length || request.fileGroupId
+        ? { ...(request.images?.length ? { images: request.images } : {}), ...(request.fileGroupId ? { fileGroupId: request.fileGroupId } : {}) }
+        : undefined),
   });
   const rendererSendQueue = () => rendererSendQueueInstance ??= createRendererSendQueue(
     (event, req, boundary) => startRendererInvocation(event, req, boundary) as Promise<{ runId: string }>,
@@ -7267,7 +7296,9 @@ export function registerIpcHandlers(): void {
         {
           let departed = false;
           let directAgentChanged = false;
-          if (seat && seat.kind === "solo" && seat.occupants.length === 0) {
+          // A delegated division keeps its parent's seat; that seat's occupant
+          // is the parent agent, not proof that the delegated teammate left.
+          if (seat && seat.inheritedFromParent !== true && seat.kind === "solo" && seat.occupants.length === 0) {
             try {
               departed = listSeatOccupantHistory(seat.id).length > 0;
             } catch {
@@ -7291,7 +7322,7 @@ export function registerIpcHandlers(): void {
               // 조직 상태를 못 읽으면 증명이 없는 것이다 — 막지 않는다.
             }
           }
-          if (seat && seat.kind === "solo" && seat.occupants.length > 0) {
+          if (seat && seat.inheritedFromParent !== true && seat.kind === "solo" && seat.occupants.length > 0) {
             const sessionAgentId = getChat(request.chatId)?.agentId;
             directAgentChanged = Boolean(
               sessionAgentId
@@ -7378,7 +7409,9 @@ export function registerIpcHandlers(): void {
       catch { /* Unknown is not proof that this is a fresh rejected prompt. */ }
       if (!previouslyRecorded && !request.agentAppMode && request.chatId && request.promptOrigin !== "system") {
         const row = appendChatMessage(request.chatId, "user", request.userPrompt,
-          request.images?.length ? { images: request.images } : undefined);
+          request.images?.length || request.fileGroupId
+            ? { ...(request.images?.length ? { images: request.images } : {}), ...(request.fileGroupId ? { fileGroupId: request.fileGroupId } : {}) }
+            : undefined);
         autoTitleFromFirstMessage(request.chatId, request.userPrompt);
         if (request.runId) {
           // The preflight marker is Main-owned and captures the Goal before
@@ -8088,29 +8121,133 @@ export function registerIpcHandlers(): void {
     };
   });
 
+  // Unlike activeBuild, this may contain native path capabilities and is not
+  // registered as an app-control tool. Only the trusted Desktop renderer may
+  // restore the latest validated turn; every later start revalidates the grant.
+  ipcMain.handle("hephaestus:recoverBuildTurn", (event, runId: unknown) => {
+    assertTrustedSitePublishIpcSender(event);
+    if (typeof runId !== "string") return null;
+    const latest = [...buildTranscripts.values()].at(-1);
+    if (!latest || latest.runId !== runId || !latest.recoveryRequest) return null;
+    return latest.recoveryRequest;
+  });
+
+  ipcMain.handle("hephaestus:readBuilderConversation", (event, buildId: unknown) => {
+    assertTrustedSitePublishIpcSender(event);
+    const owner = builderOwnerBinding();
+    if (typeof buildId !== "string") return null;
+    return readBuilderConversation(getDb(), owner, buildId);
+  });
+
+  ipcMain.handle("hephaestus:readLatestBuilderConversation", (event) => {
+    assertTrustedSitePublishIpcSender(event);
+    return readLatestBuilderConversation(getDb(), builderOwnerBinding());
+  });
+
+  onAuthSessionOwnershipChanged(() => {
+    builderAuthGeneration += 1;
+    for (const controller of activeBuilds.values()) controller.abort();
+    buildTranscripts.clear();
+    buildReadySignals.clear();
+    for (const window of BrowserWindow.getAllWindows()) {
+      if (!window.isDestroyed() && !window.webContents.isDestroyed()) {
+        try { window.webContents.send("hephaestus:builderOwnerChanged"); } catch { /* window closed */ }
+      }
+    }
+  });
+
   ipcMain.handle("hephaestus:build", async (event, req: HephaestusBuildRequest) => {
-    // Renderer가 보낸 절대경로는 권한이 아니다. Native picker / trusted drop이
-    // 발급한 capability를 main에서 다시 검증하고 그 경로만 builder에 전달한다.
-    const resolvedRequest = await resolveHephaestusBuildRequestForRun(req);
-    const runId = randomUUID();
+    const initialBinding = builderOwnerBinding();
+    // Reserve before the first async boundary. A second renderer must not start
+    // another build or replace the transcript while authorization is pending.
+    // New renderers provide an opaque id so Stop can reach this reservation
+    // before invoke() returns; older renderers continue to use a Main id.
+    const requestedId = (req as HephaestusBuildRequest & { clientRunId?: unknown }).clientRunId;
+    if (requestedId !== undefined && (typeof requestedId !== "string"
+      || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(requestedId))) {
+      throw new Error("Invalid build request identifier.");
+    }
+    if (activeBuilds.size > 0) throw new Error("BUILD_ALREADY_ACTIVE");
+    const runId = typeof requestedId === "string" ? requestedId : randomUUID();
+    if (buildTranscripts.has(runId)) throw new Error("Build request identifier was already used.");
     const channel = `hephaestus:build:${runId}`;
     const win = BrowserWindow.fromWebContents(event.sender);
     const controller = new AbortController();
     activeBuilds.set(runId, controller);
-    buildTranscripts.clear();
     buildTranscripts.set(runId, {
       runId,
       request: String(req.request ?? ""),
-      workspace: resolvedRequest.workspace,
+      workspace: "",
       startedAt: new Date().toISOString(),
       running: true,
       events: [],
       firstSeq: 0,
     });
+    // Keep a few finished records; never clear a live record to admit a new one.
+    while (buildTranscripts.size > 10) {
+      const oldestFinished = [...buildTranscripts].find(([, item]) => !item.running)?.[0];
+      if (!oldestFinished) break;
+      buildTranscripts.delete(oldestFinished);
+    }
+    let resolvedRequest: Awaited<ReturnType<typeof resolveHephaestusBuildRequestForRun>>;
+    let savedConversation: StoredBuilderConversation | null = null;
+    let previousConversation: StoredBuilderConversation | null = null;
+    try {
+      const preliminary = resolveHephaestusBuildRequest(req);
+      if (req.runtimeSessionId) {
+        if (!initialBinding) throw new Error("BUILD_SESSION_OWNER_REQUIRED");
+        previousConversation = readLatestBuilderConversation(getDb(), initialBinding);
+        const workspace = preliminary.workspace;
+        if (!previousConversation || previousConversation.runtimeSessionId !== req.runtimeSessionId
+          || previousConversation.workspace !== workspace || !previousConversation.runtime
+          || JSON.stringify(previousConversation.workspaceIdentity) !== JSON.stringify(builderWorkspaceIdentity(workspace))
+          || req.runtimePinned !== true || JSON.stringify(previousConversation.runtime) !== JSON.stringify(req.runtime)
+          || !["waiting-user", "completed"].includes(previousConversation.status)) throw new Error("BUILD_SESSION_RECEIPT_REQUIRED");
+      }
+      if (initialBinding) {
+        const current = builderOwnerBinding();
+        if (current.scope !== initialBinding.scope || current.userId !== initialBinding.userId || current.workspaceId !== initialBinding.workspaceId || current.sessionId !== initialBinding.sessionId) throw new Error("BUILD_OWNER_CHANGED");
+        savedConversation = {
+          schema: 1, revision: 0, buildId: runId, workspace: preliminary.workspace,
+          workspaceIdentity: builderWorkspaceIdentity(preliminary.workspace),
+          request: String(req.request ?? ""), history: structuredClone(req.history ?? []),
+          runtimeSessionId: req.runtimeSessionId ?? null, hostAuthoredContinuation: req.hostAuthoredContinuation === true,
+          conversationTurn: req.conversationTurn ?? null,
+          terminalText: null, supplementalQuestion: null, mode: req.mode ?? null,
+          runtime: null, runtimePinned: false,
+          status: "unknown", updatedAt: new Date().toISOString(),
+        };
+        writeBuilderConversation(getDb(), initialBinding, savedConversation, null);
+      }
+      // Record the pending input before consent application can have effects.
+      resolvedRequest = await resolveHephaestusBuildRequestForRun(req, controller.signal);
+      controller.signal.throwIfAborted();
+      const current = builderOwnerBinding();
+      if (current.scope !== initialBinding.scope || current.userId !== initialBinding.userId || current.workspaceId !== initialBinding.workspaceId || current.sessionId !== initialBinding.sessionId) throw new Error("BUILD_OWNER_CHANGED");
+      if (savedConversation && (resolvedRequest.workspace !== savedConversation.workspace
+        || JSON.stringify(builderWorkspaceIdentity(resolvedRequest.workspace)) !== JSON.stringify(savedConversation.workspaceIdentity))) throw new Error("BUILD_WORKSPACE_CHANGED");
+      const transcript = buildTranscripts.get(runId);
+      if (transcript) {
+        transcript.workspace = resolvedRequest.workspace;
+        transcript.recoveryRequest = structuredClone(req);
+      }
+    } catch (error) {
+      if (savedConversation && controller.signal.aborted) {
+        try { writeBuilderConversation(getDb(), initialBinding, { ...savedConversation, revision: 1, status: "stopped", updatedAt: new Date().toISOString() }, 0); } catch { /* unknown remains */ }
+      }
+      activeBuilds.delete(runId);
+      const transcript = buildTranscripts.get(runId);
+      if (transcript) {
+        transcript.running = false;
+        transcript.events.push({ runId, kind: "error", text: controller.signal.aborted ? "Build cancelled" : "Build preparation failed" });
+      }
+      throw error;
+    }
     // 렌더러는 build() 응답을 await 한 뒤에야 채널을 구독하므로, 그 사이에 발생한 첫 이벤트
     // (예: 'build' stage 틱)가 유실될 수 있다. 렌더러가 buildReady 로 구독 완료를 알릴 때까지
     // 이벤트를 버퍼링했다가 한 번에 flush 한다(첫 stage 틱 손실 방지).
     const pending: HephaestusBuildEvent[] = [];
+    const terminalEvents: HephaestusBuildEvent[] = [];
     let ready = false;
     let readyExpiry: NodeJS.Timeout | null = null;
     // 창이 닫힌 뒤 send는 throw하므로 destroyed 가드(빌드 종료와 닫기가 겹치는 경우).
@@ -8119,7 +8256,9 @@ export function registerIpcHandlers(): void {
         try { win.webContents.send(channel, ev); } catch {}
       }
     };
-    const emit = (ev: HephaestusBuildEvent) => {
+    const publish = (ev: HephaestusBuildEvent) => {
+      const current = builderOwnerBinding();
+      if (current.scope !== initialBinding.scope || current.userId !== initialBinding.userId || current.workspaceId !== initialBinding.workspaceId || current.sessionId !== initialBinding.sessionId) return;
       const transcript = buildTranscripts.get(runId);
       if (transcript) {
         transcript.events.push(ev);
@@ -8135,6 +8274,12 @@ export function registerIpcHandlers(): void {
         pending.push(ev);
       }
     };
+    // A continuation can start as soon as it receives done/error. Deliver those
+    // events only after the preceding runner has released its reservation.
+    const emit = (ev: HephaestusBuildEvent) => {
+      if (ev.kind === "done" || ev.kind === "error") terminalEvents.push(ev);
+      else publish(ev);
+    };
     buildReadySignals.set(runId, () => {
       if (ready) return;
       ready = true;
@@ -8143,10 +8288,52 @@ export function registerIpcHandlers(): void {
       pending.length = 0;
       buildReadySignals.delete(runId);
     });
-    void runHephaestusBuild(runId, resolvedRequest, emit, controller.signal, pickLocale(req)).finally(() => {
+    void runHephaestusBuild(runId, resolvedRequest, emit, controller.signal, pickLocale(req), (runtime) => {
+      controller.signal.throwIfAborted();
+      const current = builderOwnerBinding();
+      if (current.scope !== initialBinding.scope || current.userId !== initialBinding.userId || current.workspaceId !== initialBinding.workspaceId || current.sessionId !== initialBinding.sessionId) throw new Error("BUILD_OWNER_CHANGED");
+      if (savedConversation && JSON.stringify(builderWorkspaceIdentity(resolvedRequest.workspace)) !== JSON.stringify(savedConversation.workspaceIdentity)) throw new Error("BUILD_WORKSPACE_CHANGED");
+      if (previousConversation && JSON.stringify(previousConversation.runtime) !== JSON.stringify(runtime)) throw new Error("BUILD_SESSION_RUNTIME_MISMATCH");
+      if (savedConversation && initialBinding) {
+        savedConversation = { ...savedConversation, revision: 1, runtime, runtimePinned: true, updatedAt: new Date().toISOString() };
+        writeBuilderConversation(getDb(), initialBinding, savedConversation, 0);
+      }
+    }).catch(() => {
+      emit({ runId, kind: "error", text: controller.signal.aborted ? "Build cancelled" : "Build failed" });
+    }).finally(() => {
       activeBuilds.delete(runId);
       const finished = buildTranscripts.get(runId);
       if (finished) finished.running = false;
+      // A cleanup failure after an apparent done must win over that earlier
+      // success; consumers detach after the first terminal event.
+      const terminal = terminalEvents.at(-1) ?? {
+        runId,
+        kind: "error" as const,
+        text: controller.signal.aborted ? "Build cancelled" : "Build ended without a completion receipt",
+      };
+      let conversationSaveFailed = false;
+      if (savedConversation && initialBinding) {
+        const done = [...terminalEvents].reverse().find((item) => item.kind === "done");
+        const result = done?.result as { supplementalQuestion?: unknown } | undefined;
+        const status = controller.signal.aborted ? "stopped" : terminal.kind === "done"
+          ? (isCompletedBuildTurn(terminal.text ?? "") ? "completed" : "waiting-user") : "unknown";
+        try {
+          writeBuilderConversation(getDb(), initialBinding, {
+            ...savedConversation, revision: savedConversation.revision + 1, status,
+            terminalText: done?.text ?? null,
+            supplementalQuestion: result?.supplementalQuestion ?? null,
+            runtimeSessionId: done?.sessionId ?? savedConversation.runtimeSessionId,
+            updatedAt: new Date().toISOString(),
+          }, savedConversation.revision);
+        } catch {
+          // Preserve the earlier unknown record; a failed checkpoint is not completion.
+          conversationSaveFailed = true;
+        }
+      }
+      if (conversationSaveFailed) publish({ runId, kind: "log", text: pickLocale(req) === "ko"
+        ? "대화 복원 기록을 저장하지 못했습니다. 앱을 다시 시작하기 전에 현재 결과를 확인해 주세요."
+        : "The conversation recovery record could not be saved. Review this result before restarting the app." });
+      publish(terminal);
       // If buildReady already fired, its callback removed the signal. Otherwise
       // retain the buffered terminal event long enough for invoke() to resolve,
       // the renderer to subscribe, and buildReady() to flush it.
@@ -8165,7 +8352,6 @@ export function registerIpcHandlers(): void {
   });
   registerAppControlDomainIpc(ipcMain, "hephaestus:cancelBuild", (runId: string) => {
     activeBuilds.get(runId)?.abort();
-    activeBuilds.delete(runId);
   });
 
   // Startup Founder Studio — 패키지 자체 런처를 spawn 해 실제 SPA 를 로컬 서빙, iframe URL 반환.

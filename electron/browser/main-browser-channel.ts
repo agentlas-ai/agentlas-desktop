@@ -231,8 +231,16 @@ export async function createCanonicalNativeBrowserGrant(input: CanonicalNativeBr
     const capture = snapshot.screenshot;
     if (capture && capture.sequence > screenshotSequence && input.onScreenshot) {
       screenshotSequence = capture.sequence;
-      await input.onScreenshot({ png: Buffer.from(capture.png, "base64"), isCurrent: () => !released && !state.closed && !input.signal.aborted
-        && health.current && screenshotCurrentSequence === capture.sequence });
+      // Publishing a capture to the run's record is not the browser's authority. A capture that could not be published used to
+      // reject this update, and refresh then released the whole grant: observed in use, a delegated Work child's first
+      // screenshot killed its browser mid-step and the ladder told the owner "the in-app browser window closed". Main's relay
+      // keeps its grant in the same case; both hosts now only log it.
+      try {
+        await input.onScreenshot({ png: Buffer.from(capture.png, "base64"), isCurrent: () => !released && !state.closed && !input.signal.aborted
+          && health.current && screenshotCurrentSequence === capture.sequence });
+      } catch (error) {
+        console.warn(`[native-browser] capture not published: ${error instanceof Error ? error.message.slice(0, 120) : "unknown"}`);
+      }
     }
   };
   let refreshing: Promise<void> | null = null;

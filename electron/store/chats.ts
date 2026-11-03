@@ -11,6 +11,7 @@ import { RUNTIME_BACKENDS } from "../../shared/runtime-backends";
 import { getDb } from "./db";
 import { isStoreBusyError, runWithStoreBusyRetry } from "./store-busy-retry";
 import { takePreparedUserRow } from "./prepared-user-rows";
+import { bindChatFileGroupToMessage } from "./chat-file-message-bindings";
 import { oneDispatchSidebarPredicate, createOneDispatchNoticeProjector } from "../one/dispatch-presentation";
 import { personalAgentRoomIdsAmong } from "../one/personal-agent-rooms";
 import { getChatGoalRevision } from "./chat-goals";
@@ -1114,6 +1115,9 @@ export function appendChatMessage(
       "INSERT INTO chat_messages (id, chat_id, role, text, created_at, host_notice_json, speaker_agent_id, row_scope) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
     ).run(id, chatId, role, text, now, hostNotice ? JSON.stringify(hostNotice) : null, speakerAgentId,
       options?.rowScope === "runtime-input" && role !== "assistant" ? "runtime-input" : null);
+    if (role === "user" && options?.fileGroupId) {
+      bindChatFileGroupToMessage(db, { chatId, messageId: id, groupId: options.fileGroupId });
+    }
     if (goalResult) persistGoalResult(chatId, id, goalResult);
     if (options?.images?.length) {
       const persisted = persistChatMessageImages({ messageId: id, chatId, images: options.images, createdAt: now });
@@ -1149,6 +1153,8 @@ export function appendChatMessage(
 }
 
 type ChatMessageAppendOptions = {
+  /** Exact group selected by the owner at intake; never inferred from message text. */
+  fileGroupId?: string;
   images?: readonly ImageAttachment[];
   /**
    * A screen pack's composed prompt (PLAN Science S6): what the runtime took, not what the pack's screen shows; the pack's own

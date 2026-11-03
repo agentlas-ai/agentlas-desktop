@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { assertManagedOneTeamAvailable } from "../managed-one/auth";
 import { bindOneTaskforceSessionScope } from "../runtime/session-scope";
 import type {
   CreateOneTaskforceInput,
@@ -149,6 +150,7 @@ export function listOneTaskforces(): OneTaskforce[] {
 }
 
 export function createOneTaskforce(input: CreateOneTaskforceInput): OneTaskforce {
+  assertManagedOneTeamAvailable();
   const title = normalizeTitle(input?.title);
   const description = normalizeDescription(input?.description);
   const memberAgentIds = normalizeMemberIds(input?.memberAgentIds, { allowUnavailable: false });
@@ -175,6 +177,7 @@ export function createOneTaskforce(input: CreateOneTaskforceInput): OneTaskforce
 }
 
 export function updateOneTaskforce(input: UpdateOneTaskforceInput): OneTaskforce {
+  assertManagedOneTeamAvailable();
   const id = assertId(input?.id, "id");
   const row = rowFor(id);
   assertExpectedRevision(row, input.expectedRevision);
@@ -263,6 +266,7 @@ export function oneTaskforceRemovalPreview(input: { id: string }): { sessionCoun
  * The caller owns the reservation transaction; no provider runs here.
  */
 export function ensureOneTaskforceForPreflight(input: { chatId: string; memberAgentIds: string[] }): OneTaskforceReceipt {
+  assertManagedOneTeamAvailable();
   // A member whose last task failed still takes new work in a room the owner composed; the failure stays on record.
   // Refusing it blocked every message in that room for good (production 2026-10-11, room "Yotube": a teammate
   // failed on 10-05, each send died in team preparation with one_group_member_unavailable).
@@ -307,6 +311,7 @@ export function notifyOneTaskforceFromPreflight(receipt: OneTaskforceReceipt): v
 export function composeOneTaskforceForChat(input: { chatId: string; memberAgentIds: string[] }): {
   group: OneTaskforceReceipt; created: boolean; addedMemberAgentIds: string[];
 } {
+  assertManagedOneTeamAvailable();
   const db = getDb();
   const result = db.transaction(() => {
     const chatId = assertId(input.chatId, "chatId");

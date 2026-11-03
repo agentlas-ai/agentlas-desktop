@@ -1938,6 +1938,8 @@ export interface OneSeatView {
   dissolvedAt: string | null;
   /** 현재 점유(열린 행)만 — 빈 배열이면 빈 좌석. */
   occupants: OneSeatOccupancy[];
+  /** Present only when Main proved that this division uses its parent's seat. */
+  inheritedFromParent?: true;
 }
 
 /**
@@ -2046,6 +2048,12 @@ export interface CanonicalTask {
   updatedAt: string;
   archivedAt: string | null;
   participants: CanonicalTaskParticipant[];
+  /**
+   * Set only on a `failed` Task that the app closing or restarting cut off mid-run (store/tasks.ts settleInterruptedTasksOnBoot), read from the
+   * `boot-settle:<taskId>` ledger row that names it (hostStopCause app_closed). The status stays `failed` (no new status value); readers that
+   * draw a state say "interrupted by the app restart" instead of a failure. Optional and additive: a reader that does not know it keeps `failed`.
+   */
+  interruption?: "app_closed";
 }
 
 /** Main-verified Work destination for one Task. Never derived in the renderer. */
@@ -6187,6 +6195,8 @@ export interface OberonSheetRequest {
  */
 export interface HephaestusUpdateJournal {
   status: string | null;
+  /** Structured failure reported by the updater, when present. */
+  errorCode?: string;
   reason: string | null;
   current: string | null;
   latest: string | null;
@@ -6214,6 +6224,7 @@ export interface HephaestusUpdateResult {
   outcome:
     | "applied"
     | "current"
+    | "failed"
     | "unknown"
     | "working"
     | "busy"
@@ -6315,6 +6326,8 @@ export interface BuildAllocationPreview {
 export interface HephaestusBuildResult {
   workspace: string;
   securityScan: unknown;
+  /** sha256 of the package content `securityScan` was run on (absent when the scan is unverified or no scan ran). */
+  securityScanPackageDigest?: string;
   /** 엔진 package-contract verify 결과(JSON) — blockers가 비면 routing-ready 패키지. */
   packageContract?: unknown;
   mcpReceipt: McpBuildAttachmentReceipt;
@@ -6331,6 +6344,10 @@ export interface HephaestusBuildAttachment {
 export interface HephaestusBuildRequest {
   /** 이번 턴의 사용자 입력(자연어). 1턴=원 요청, 인터뷰 답변 턴=사용자의 답변. */
   request: string;
+  /** Opaque reservation lets Stop reach Main before build() resolves. */
+  clientRunId?: string;
+  /** Renderer turn index for restoring the existing interview display, not execution authority. */
+  conversationTurn?: number;
   /** 첨부 파일/폴더 — 첫 턴에만 유효. 워크스페이스 `_attachments/`로 복사되고 프롬프트에 참조가 주입된다. */
   attachments?: HephaestusBuildAttachment[];
   /** single | team | package(repair) — 미지정 시 엔진 mode-classification 에 위임. */
@@ -7982,6 +7999,9 @@ export interface AgentlasIpc {
   };
   marketplace: {
     listBundles: () => Promise<TeamBundle[]>;
+    builderCatalogFresh?: true;
+    searchBuilderFresh?: () => Promise<{ fresh: true; rows: MarketplaceListing[] }>;
+    listMineFresh?: () => Promise<{ fresh: true; rows: MarketplaceListing[] }>;
     search: (q: string) => Promise<MarketplaceListing[]>;
     listFirms: () => Promise<FirmListing[]>;
     status: (force?: boolean) => Promise<MarketplaceSourceStatus>;
@@ -8320,6 +8340,8 @@ export interface AgentlasIpc {
   };
   /** Desktop-only opaque previews for exact Main-bound One result artifacts. */
   oneArtifacts: {
+    listMessageVideos?: (input: {chatId:string;messageId:string}) => Promise<OneArtifactPreviewCapabilityV1[]>; // Optional on older Desktop preloads; exact Main-owned message binding only.
+    revokeMessageVideo?: (input: {chatId:string;messageId:string;capabilityUrl:string}) => Promise<{revoked:boolean}>;
     /** A capability, or the code of the one check that refused it (shared/one-artifacts.ts). */
     issuePreview: (input: OneArtifactBindingRequestV1) => Promise<OneArtifactPreviewCapabilityV1 | OneArtifactPreviewRefusalV1>;
     revokePreview: (input: OneArtifactPreviewRevokeV1) => Promise<{ revoked: boolean }>;
@@ -8351,7 +8373,7 @@ export interface AgentlasIpc {
     origin?: () => Promise<"inherited" | "fresh" | "machine" | "signed-out">;
     update: (input: OneProfileUpdateInput) => Promise<OneProfile>;
     /** One 자신의 초상(생성·업로드 이미지)을 저장하고 프로필이 그것을 가리키게 한다. */
-    setAvatarImage: (input: { dataUrl: string; expectedVersion: number }) => Promise<OneProfile>;
+    setAvatarImage: (input: { dataUrl: string; expectedVersion: number; oneId?: string }) => Promise<OneProfile>;
     addPrinciple: (input: OneOperatingPrincipleCreateInput) => Promise<OneProfile>;
     updatePrinciple: (input: OneOperatingPrincipleUpdateInput) => Promise<OneProfile>;
     setPrincipleEnabled: (input: OneOperatingPrincipleEnabledInput) => Promise<OneProfile>;
@@ -9093,6 +9115,27 @@ export interface AgentlasIpc {
       /** Absolute number of events[0] (events before it fell out of Main's 4,000-event window). Absent on older hosts. */
       firstSeq?: number;
     } | null>;
+    readBuilderConversation?: (buildId: string) => Promise<{
+      schema: 1;
+      revision: number;
+      buildId: string;
+      workspace: string;
+      workspaceIdentity: { realPath: string; dev: string; ino: string; birthtimeNs: string };
+      request: string;
+      history: Array<{ role: "user" | "assistant"; text: string }>;
+      runtimeSessionId: string | null;
+      hostAuthoredContinuation: boolean;
+      conversationTurn: number | null;
+      terminalText: string | null;
+      supplementalQuestion: unknown;
+      mode: "single" | "team" | "package" | null;
+      runtime: RuntimeSelection | null;
+      runtimePinned: boolean;
+      status: "waiting-user" | "completed" | "unknown" | "stopped";
+      updatedAt: string;
+    } | null>; // Optional on older Desktop hosts; a conversation is not a registration receipt.
+    readLatestBuilderConversation?: () => ReturnType<NonNullable<AgentlasIpc["hephaestus"]["readBuilderConversation"]>>;
+    onBuilderOwnerChanged?: (callback: () => void) => () => void;
     /**
      * 패키지 계약 게이트를 직접 물어본다. 모델의 완료 선언과 무관하게 사실을 잰다.
      * blockers가 빈 배열이면 통과, null이면 검증 자체가 불가(통과로 간주 금지).

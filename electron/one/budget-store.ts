@@ -115,7 +115,17 @@ export class OneBudgetStore {
     return this.db.transaction(()=>{
       this.assertOwner(input.oneId);
       const prior=this.db.prepare("SELECT * FROM one_budget_reservations WHERE command_id=?").get(input.commandId) as OneBudgetReservation|undefined;
-      if(prior){if(prior.binding_hash!==digest)throw supervisorError("supervisor_budget_reservation_conflict");return prior;}
+      let key=input.commandId;
+      if(prior&&prior.binding_hash!==digest){
+        // A later attempt of the same command: the supervisor sends a reply whose outcome was unknown once more, under a new run id
+        // (supervisor-service resendUnconfirmedReply). It gets a reservation of its own, so the first attempt's spending stays counted;
+        // with the single row per command every resend was refused as a conflict and the reply failed (412362229, 1.3.116). Another
+        // conversation, task or One under the same command id still conflicts.
+        if(prior.one_id!==input.oneId||(prior.task_id??null)!==(input.taskId??null)||prior.chat_id!==input.chatId||prior.run_id===input.runId)throw supervisorError("supervisor_budget_reservation_conflict");
+        const attempt=this.forRun(input.runId);
+        if(attempt){if(attempt.binding_hash!==digest)throw supervisorError("supervisor_budget_reservation_conflict");return attempt;}
+        key=`${input.commandId}@${input.runId}`;
+      } else if(prior) return prior;
       const budgetId=input.taskId?this.taskBudget(input.oneId,input.taskId):null,policy=budgetId?this.row(input.oneId,budgetId):null;
       if(budgetId&&!policy)throw supervisorError("supervisor_budget_missing");
       if(policy?.limit_micros!=null){
@@ -123,7 +133,7 @@ export class OneBudgetStore {
         if(totals.known+totals.reserved+policy.reserve_micros>policy.limit_micros)throw supervisorError("supervisor_budget_reservation_exhausted");
       }
       this.db.prepare("INSERT INTO one_budget_reservations VALUES(?,?,?,?,?,?,?,?,?,'attempted',?,NULL)")
-        .run(input.commandId,input.oneId,input.taskId,input.runId,input.chatId,budgetId,digest,policy?.revision??null,policy?.reserve_micros??0,this.now()+(policy?.ttl_ms??3_600_000));
+        .run(key,input.oneId,input.taskId,input.runId,input.chatId,budgetId,digest,policy?.revision??null,policy?.reserve_micros??0,this.now()+(policy?.ttl_ms??3_600_000));
       return this.forRun(input.runId)!;
     }).immediate();
   }

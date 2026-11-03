@@ -1,6 +1,6 @@
 {
   "name": "agentlas-desktop",
-  "version": "1.3.116",
+  "version": "1.3.117",
   "description": "Agentlas Desktop — local Apps OS for AI-native tools and agent teams. BYOC: 사용자 Claude/ChatGPT/Antigravity 구독 그대로.",
   "private": true,
   "license": "Apache-2.0",
@@ -15,15 +15,15 @@
     "minimumSourceAppVersion": "0.7.0",
     "minimumRuntimeVersion": "1.0.4",
     "minimumSchemaVersion": 35,
-    "targetSchemaVersion": 138,
-    "bundledRuntimeVersion": "1.2.72"
+    "targetSchemaVersion": 139,
+    "bundledRuntimeVersion": "1.2.73"
   },
   "agentlasBundledRuntimeSource": {
     "repository": "https://github.com/agentlas-ai/Agentlas-OS.git",
-    "ref": "v1.2.72",
-    "commit": "ac497f990d8b7274fae6b927e08fd24779807571",
-    "assetName": "hephaestus-runtime-v1.2.72.tar.gz",
-    "assetSha256": "54c7f8e4f4a923e6a58ff84fb89f1aa474aa67d3dd9cc7f48efdaae24f7dffc7"
+    "ref": "os-v1.2.73",
+    "commit": "fa8d4d820bf952f88628ea7c0a4ea32ded9e96e5",
+    "assetName": "agentlas-os-runtime-v1.2.73.tar.gz",
+    "assetSha256": "b4d717bdd370cd6d59e52f2b79b1beb9a2287fa595baf664277ff99ec114fc74"
   },
   "scripts": {
     "dev": "concurrently -k --success first -n NEXT,ELECTRON -c blue,magenta \"npm:dev:renderer\" \"npm:dev:electron\"",
@@ -78,7 +78,7 @@
     "@playwright/mcp": "0.0.78",
     "@rive-app/canvas": "^2.40.1",
     "@xyflow/react": "^12.11.1",
-    "agentlas-science": "git+ssh://git@github.com/agentlas-ai/agentlas-science.git#789b7cebc0202718ef6fc869b24826ba4d49854c",
+    "agentlas-science": "git+ssh://git@github.com/agentlas-ai/agentlas-science.git#584325378cbfdf812436f09468d1cca570688d01",
     "ajv": "8.20.0",
     "beautiful-mermaid": "^1.1.3",
     "better-sqlite3": "^12.11.1",
@@ -95,6 +95,7 @@
     "maplibre-gl": "^6.5.0",
     "molstar": "5.11.0",
     "node-pty": "^1.1.0",
+    "playwright": "^1.60.0",
     "pptxgenjs": "4.0.1",
     "proper-lockfile": "4.1.2",
     "qrcode": "^1.5.4",
@@ -123,7 +124,7 @@
     "@vitejs/plugin-react": "6.0.1",
     "concurrently": "^9.0.1",
     "cross-env": "^7.0.3",
-    "electron": "43.7.6",
+    "electron": "43.8.1",
     "electron-builder": "^26.15.6",
     "flint-chart": "0.5.1",
     "indigo-ketcher": "^1.45.1",
@@ -131,9 +132,9 @@
     "ketcher-react": "3.17.2",
     "ketcher-standalone": "3.17.2",
     "next": "^15.5.24",
-    "playwright": "^1.60.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
+    "tar": "7.5.22",
     "typescript": "^5.6.2",
     "vega": "6.4.0",
     "vega-interpreter": "2.3.2",
@@ -149,7 +150,7 @@
     "sharp": ">=0.35.5 <0.36.0",
     "fast-uri": "4.1.5",
     "brace-expansion": "5.0.12",
-    "tar": "^7.5.22",
+    "tar": "$tar",
     "@electron/get": {
       "undici": "7.29.1"
     },

@@ -1938,7 +1938,7 @@ async function runFirmInvocationInternal(p: FirmRunParams): Promise<FirmRunResul
       appendChatMessage(chat.id, "system", req.userPrompt);
     } else {
       // 첨부도 그 사람의 턴이다 — client.ts 의 같은 자리 주석 참고.
-      appendChatMessage(chat.id, "user", ownerVisiblePrompt(req), req.images?.length ? { images: req.images } : undefined);
+      appendChatMessage(chat.id, "user", ownerVisiblePrompt(req), { ...(req.images?.length ? { images: req.images } : {}), ...(req.fileGroupId ? { fileGroupId: req.fileGroupId } : {}) });
       if (history.length === 0) autoTitleFromFirstMessage(chat.id, ownerVisiblePrompt(req));
     }
   }

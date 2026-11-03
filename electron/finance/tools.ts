@@ -1,4 +1,6 @@
 import { createHash } from 'node:crypto';
+import { wasManagedOneConfigured } from '../managed-one/auth';
+import { installManagedFinanceHostPolicy } from './cloud-provider';
 import { z } from 'zod';
 import { FINANCE_WIDGET_TYPES, FINANCE_MONITOR_RUN_TIMEOUT_MS, FINANCE_COMPANY_FACT_CONCEPTS, FinanceCompanyFactsOptionsSchema, FinanceReportLanguageSchema, FinanceDataSaveRequestSchema, financeId, validateFinanceOperation, type FinanceOperation } from '../../shared/finance';
 import type { HarnessCallContext } from '../harness/capability-ports';
@@ -50,7 +52,7 @@ const inputSchemas = {
   'monitor.pause': z.object({ monitorId: id }).strict(),
 };
 type Action = keyof typeof inputSchemas;
-/** Pure reads (main-work recovery may repeat one that lost its answer). portfolio.propose shows a card the owner acts on; it is not one. */
+/** Pure reads (main-work recovery may repeat one that lost its answer). Managed provider reads are excluded below. */
 const effectFreeReads = new Set<Action>(['load', 'search', 'query', 'analyst.list', 'analyst.read', 'receipt.read', 'report.read', 'archives.list', 'archives.read', 'monitor.runs']);
 const writes = new Set<Action>(['analyst.save','portfolio.value','calculate','asset.add', 'query.save', 'apply', 'report.create', 'archives.create', 'archives.restore', 'monitor.create', 'monitor.update', 'monitor.run', 'monitor.schedule', 'monitor.pause']);
 const editTypes = new Set<FinanceOperation['type']>(['watchlist.remove', 'dashboard.add', 'dashboard.rename', 'dashboard.update', 'dashboard.remove', 'dashboard.select', 'widget.add', 'widget.update', 'widget.remove', 'widget.move', 'report.update', 'report.remove', 'report.refresh', 'report.section.add', 'report.section.update', 'report.section.remove', 'report.section.move']);
@@ -218,12 +220,12 @@ export async function callFinanceTool(action: Action, raw: Record<string, unknow
         await settleOwnerConfirmation(ownerCard!,(await financeOwnerKorean())?`Analyst 「${args.draft.name}」을(를) 저장했습니다.`:`Saved Analyst "${args.draft.name}".`);
         break;
       }
-      case 'search': data = await finance.search(scope, inputSchemas.search.parse(raw)); break;
+      case 'search': data = await finance.search(scope, inputSchemas.search.parse(raw), ctx.signal); break;
       case 'dashboard.feeds':inputSchemas['dashboard.feeds'].parse(raw);data=await finance.dashboardFeeds(scope,ctx.signal);break;
       case 'portfolio.value':data=await finance.valuePortfolio(scope,inputSchemas['portfolio.value'].parse(raw),ctx.signal);break;
       case 'calculate':data=await finance.calculate(scope,inputSchemas.calculate.parse(raw),ctx.signal);break;
-      case 'asset.add': data = await finance.addAsset(scope, inputSchemas['asset.add'].parse(raw)); break;
-      case 'query': data = await finance.query(scope, inputSchemas.query.parse(raw)); break;
+      case 'asset.add': data = await finance.addAsset(scope, inputSchemas['asset.add'].parse(raw), ctx.signal); break;
+      case 'query': data = await finance.query(scope, inputSchemas.query.parse(raw), ctx.signal); break;
       case 'portfolio.propose': data = { ...await finance.proposePortfolio(scope, inputSchemas['portfolio.propose'].parse(raw)), note: PORTFOLIO_PROPOSAL_NOTE }; break;
       case 'query.save': data = await finance.queryAndSave(scope, inputSchemas['query.save'].parse(raw), ctx.signal); break;
       case 'apply': {
@@ -353,15 +355,19 @@ const descriptors: { action: Action; purpose: string; required: string[]; inputS
   { action: 'monitor.schedule', purpose: 'Enable an existing Finance monitor through the host scheduler.', required: ['monitorId', 'scheduleHuman'], inputSchema: schema(['monitorId', 'scheduleHuman'], { monitorId: key, scheduleHuman: { enum: ['daily-09:00', 'weekday-09:00', 'hourly', 'every-5m'] } }) },
   { action: 'monitor.pause', purpose: 'Pause future executions of the bound Finance monitor without requiring a view revision.', required: ['monitorId'], inputSchema: schema(['monitorId'], { monitorId: key }) },
 ];
+const managedFinanceHostAtImport=wasManagedOneConfigured();
 export const FINANCE_PORTS = descriptors.map(({ action, purpose, required, inputSchema }) => {
   composeDeclaredPrompt([{ id: `tool.finance.${action}.schema`, revision: action==='query.save'?6:action==='query'?5:action==='apply'?3:['calculate','report.create','portfolio.propose'].includes(action)?2:1, stability: 'versioned-content', changeTriggers: ['release', 'output-schema'], text: JSON.stringify(inputSchema) }]);
   return { operationId: `finance.${action}`, kind: writes.has(action) ? 'command' as const : 'query' as const, required, inputSchema,
     ...(action === 'monitor.pause' ? { terminalTargetKeys: ['monitorId'] as const, terminalUnderReadPermission: true as const } : {}),
     ...(action === 'monitor.run' ? { callTimeoutMs: FINANCE_MONITOR_RUN_TIMEOUT_MS } : {}),
-    ...(effectFreeReads.has(action) ? { effectFreeRead: true as const } : {}),
+    // The provider client accepts requests only after these actual Managed metadata are latched below.
+    ...(managedFinanceHostAtImport&&['search','query','asset.add','query.save'].includes(action)?{callTimeoutMs:60000}:{}),
+    ...(effectFreeReads.has(action)&&!(managedFinanceHostAtImport&&['search','query'].includes(action)) ? { effectFreeRead: true as const } : {}),
     purpose: composeDeclaredPrompt([{ id: `tool.finance.${action}.description`, revision: action === 'query.save' ? 2 : action === 'query' ? 2 : 1, stability: 'fixed-policy', changeTriggers: ['release'], text: purpose }]),
     handler: (args: Record<string, unknown>, ctx: HarnessCallContext) => callFinanceTool(action, args, ctx) };
 });
+installManagedFinanceHostPolicy(FINANCE_PORTS);
 // analyst r2 (2026-10-28): the retired analyst_draft name corrected to the declared finance.analyst.draft; first registered here (its bytes reached the model through skill.read unregistered).
 const FINANCE_SKILL_REVISION: Record<string, number> = { index: 5, research: 5, workspace: 3, monitor: 3, analyst: 2 };
 for (const workflow of ['index', 'research', 'workspace', 'monitor', 'analyst']) registerDeclaredPromptModule({ id: `plugin.finance.skill.${workflow}`, revision: FINANCE_SKILL_REVISION[workflow], stability: 'versioned-content', changeTriggers: ['release', 'skill-package'] });

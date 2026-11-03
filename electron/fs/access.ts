@@ -3,6 +3,7 @@
 // The renderer may name a target path, but it never names the root that makes
 // that target readable. Roots come from either an opaque picker/drop grant or
 // main-owned state (the chat working folder and app-generated asset folders).
+import { CHAT_FILE_STORE_MAX_BYTES } from "../../shared/one-attachments";
 import { app } from "electron";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
@@ -80,9 +81,9 @@ const PASTED_ATTACHMENT_EXTENSIONS: Readonly<Record<string, string>> = Object.fr
   "text/csv": ".csv",
   "application/json": ".json",
 });
-/** One 첨부 상한과 맞춘다. 이미지만 더 작은 상한을 유지한다. */
-const PASTED_IMAGE_MAX_BYTES = 5 * 1024 * 1024;
-const PASTED_FILE_MAX_BYTES = 64 * 1024 * 1024;
+/** No size limit beyond the conversation store's largest value (shared/one-attachments.ts). */
+const PASTED_IMAGE_MAX_BYTES = CHAT_FILE_STORE_MAX_BYTES;
+const PASTED_FILE_MAX_BYTES = CHAT_FILE_STORE_MAX_BYTES;
 /** 첨부로 태우지 않고 남은 붙여넣기 원본을 방치하지 않는다. */
 const PASTED_ATTACHMENT_TTL_MS = 6 * 60 * 60 * 1_000;
 
@@ -295,7 +296,7 @@ export function grantPastedAttachment(input: { mediaType?: unknown; bytes?: unkn
   }
   const maxBytes = mediaType.startsWith("image/") ? PASTED_IMAGE_MAX_BYTES : PASTED_FILE_MAX_BYTES;
   if (bytes.byteLength > maxBytes) {
-    throw new FsAccessDeniedError("The pasted attachment exceeds One's safe size limit.");
+    throw new FsAccessDeniedError(`The pasted attachment is ${Math.round(bytes.byteLength / 1_000_000)} MB; one attachment can be at most ${CHAT_FILE_STORE_MAX_BYTES / 1_000_000} MB.`);
   }
   if (!looksLikeDeclaredPastedAttachment(mediaType, bytes)) {
     throw new FsAccessDeniedError("The pasted content does not match the file type it claims to be.");
@@ -362,6 +363,49 @@ function chatWorkspaceRule(chatId: string): RootRule | null {
   }
 }
 
+/**
+ * Working folders of the conversations this chat handed work to: Work and messages One delegated (one_supervisor_requests), teammates
+ * a room started (one_team_dispatches), and the sessions those Work rooms delegated (work_session_dispatches). A result the owner opens
+ * from this chat lives there. observed in use: One relayed a Work report whose README.md, WORK.md and skill-check .md lay in the
+ * Work project folder; opening them from One's conversation was refused "outside the approved scope" (main.log 13:47:45Z), while the
+ * PNG beside them showed, because media already admit every chat's working folder (authorizeLocalMediaPath). Read-only, bounded.
+ */
+function delegatedChatWorkspaceRules(chatId: string): RootRule[] {
+  if (!chatId || chatId.length > 256) return [];
+  try {
+    const db = getDb();
+    const has = (name: string) => Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(name));
+    const reached = new Set<string>();
+    if (has("one_supervisor_requests")) {
+      const rows = db.prepare(`SELECT json_extract(payload_json,'$.workerChatId') AS worker,json_extract(payload_json,'$.chatId') AS target
+        FROM one_supervisor_requests WHERE origin_chat_id=? AND kind IN ('work','chat-send') ORDER BY rowid DESC LIMIT 200`).all(chatId) as Array<{ worker: unknown; target: unknown }>;
+      for (const row of rows) for (const id of [row.worker, row.target]) if (typeof id === "string" && id && id !== chatId) reached.add(id);
+    }
+    if (has("one_team_dispatches")) {
+      for (const row of db.prepare("SELECT child_chat_id AS id FROM one_team_dispatches WHERE parent_chat_id=? ORDER BY rowid DESC LIMIT 200").all(chatId) as Array<{ id: unknown }>) {
+        if (typeof row.id === "string" && row.id) reached.add(row.id);
+      }
+    }
+    if (has("work_session_dispatches")) {
+      const child = db.prepare("SELECT child_chat_id AS id FROM work_session_dispatches WHERE parent_chat_id=? ORDER BY rowid DESC LIMIT 50");
+      for (const parent of [chatId, ...reached]) for (const row of child.all(parent) as Array<{ id: unknown }>) if (typeof row.id === "string" && row.id) reached.add(row.id);
+    }
+    // A Work room in a project keeps its files in the project folder; its own working_folder is empty.
+    const folder = has("projects")
+      ? db.prepare("SELECT COALESCE(c.working_folder,p.folder_path) AS path FROM chats c LEFT JOIN projects p ON p.id=c.project_id WHERE c.id=?")
+      : db.prepare("SELECT working_folder AS path FROM chats WHERE id=?");
+    const seen = new Set<string>();
+    const rules: RootRule[] = [];
+    for (const id of reached) {
+      const found = (folder.get(id) as { path: unknown } | undefined)?.path;
+      if (typeof found === "string" && path.isAbsolute(found) && !seen.has(found)) { seen.add(found); rules.push({ path: found, mode: "tree", canonical: true }); }
+    }
+    return rules;
+  } catch {
+    return [];
+  }
+}
+
 function allChatWorkspaceRules(): RootRule[] {
   try {
     const rows = getDb()
@@ -396,6 +440,7 @@ function rulesForScope(scope: FsReadScope): RootRule[] {
     const workspace = chatWorkspaceRule(scope.chatId);
     return [
       ...(workspace ? [workspace] : []),
+      ...delegatedChatWorkspaceRules(scope.chatId),
       ...generatedRootRules(),
       // Native CLI captures use the same Main-owned store already admitted by
       // the local-file renderer. Task artifact binding must admit it too.
@@ -403,6 +448,19 @@ function rulesForScope(scope: FsReadScope): RootRule[] {
     ];
   }
   return [];
+}
+
+/**
+ * The real folders the desktop shows this chat's files from (the chat-assets scope). The phone's "find this message's video"
+ * (mobile-bridge/legacy-chat-video.ts) uses the same folders, so a teammate's result the desktop plays also opens on the phone.
+ */
+export function chatAssetRoots(chatId: string): string[] {
+  const roots = new Set<string>();
+  for (const rule of rulesForScope({ kind: "chat-assets", chatId })) {
+    const real = rule.mode === "tree" ? realRule(rule) : null;
+    if (real) roots.add(real.path);
+  }
+  return [...roots];
 }
 
 function realRule(rule: RootRule): RootRule | null {

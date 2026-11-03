@@ -69,6 +69,8 @@ export interface OneTaskProjectionReadSources {
   chatOriginSurface(chatId: string): "one" | "work" | null;
   /** Whether the chat is the personal One's own conversation (the one_supervisor_conversations binding row). */
   personalOneConversation(chatId: string): boolean;
+  /** Whether a Work conversation's turn that ended still owns sessions it delegated, or their undelivered reports. */
+  delegatedWorkOpen?(chatId: string, runId: string): boolean;
 }
 
 export interface CreateOneTaskProjectionRuntimeOptions {
@@ -119,6 +121,8 @@ const DEFAULT_SOURCES: OneTaskProjectionReadSources = {
   listPendingOperations: () => [],
   chatOriginSurface,
   personalOneConversation,
+  delegatedWorkOpen: (chatId, runId) => (require("../work/session-dispatch") as typeof import("../work/session-dispatch"))
+    .workSessionParentHasPendingChildren(chatId, runId),
 };
 
 /**
@@ -162,7 +166,13 @@ function canonicalTask(value: unknown): CanonicalTask | null {
   if (!isRecord(value) || !hasRequiredAndOnlyKeys(value, [
     "id", "version", "title", "projectId", "firmId", "status", "originChatId",
     "createdAt", "updatedAt", "archivedAt", "participants",
-  ])) return null;
+  ], ["originSurface", "supervisedByPersonalAgent", "interruption"])) return null;
+  if (Object.prototype.hasOwnProperty.call(value, "interruption")
+    && (value.interruption !== "app_closed" || value.status !== "failed")) return null;
+  if (Object.prototype.hasOwnProperty.call(value, "originSurface")
+    && value.originSurface !== "one" && value.originSurface !== "work") return null;
+  if (Object.prototype.hasOwnProperty.call(value, "supervisedByPersonalAgent")
+    && value.supervisedByPersonalAgent !== true) return null;
   if (
     !isSafeIdentifier(value.id)
     || !Number.isSafeInteger(value.version)
@@ -362,7 +372,9 @@ function defaultSummary(task: CanonicalTask): string {
     case "waiting-decision": return "A user decision is required before work can continue.";
     case "partial": return "A result is ready for review before Task completion is accepted.";
     case "completed": return "The canonical Task is complete.";
-    case "failed": return "The latest authoritative Task step failed and needs review.";
+    case "failed": return task.interruption === "app_closed"
+      ? "The app was closed or restarted while this Task was running, so it stopped before finishing. Its prior progress remains available to review or run again."
+      : "The latest authoritative Task step failed and needs review.";
     case "cancelled": return "The user stopped this Task. Its prior progress remains available to review or resume.";
     case "archived": return "This Task is stopped and archived.";
   }
@@ -496,7 +508,7 @@ function availableActions(input: {
     actions.push({
       actionId: "action:retry-task",
       intent: "retry_failed_step",
-      label: "Retry failed step",
+      label: input.task.interruption === "app_closed" ? "Run the interrupted step again" : "Retry failed step",
       targetRef: input.task.id,
       enabled,
       ...(!enabled ? { blockedReason: "Reconnect to the authoritative host before retrying." } : {}),
@@ -575,7 +587,10 @@ function buildProjection(
   );
   if (!operations) return null;
 
-  const value = statusValue(task.status);
+  // A Task whose turn ended (partial: "waiting for review") while sessions it delegated still run is still working: the Work card
+  // said "waiting for review" over a Sweet Designer session that ran for six more minutes (observed in use).
+  const delegatedOpen = task.status === "partial" && !!receipt && safeRead(() => sources.delegatedWorkOpen?.(chatId!, receipt.runId)) === true;
+  const value = delegatedOpen ? "working" : statusValue(task.status);
   const preferredSummary = confirmations[0]?.question
     ?? surface?.manifest.summary
     ?? closure?.closure.valueItems[0]?.statement

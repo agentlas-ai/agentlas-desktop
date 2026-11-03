@@ -1,3 +1,4 @@
+import { registerAgentAppearanceIpc } from "./appearance-ipc";
 import { randomUUID } from "node:crypto";
 import type { IpcMain, IpcMainInvokeEvent } from "electron";
 import type { AgentWorkspaceIpc } from "../../shared/agent-workspace";
@@ -10,10 +11,11 @@ import { setAutoEvolution } from "./auto-evolution";
 import { deferOwnerApproval } from "./deferred-apply";
 import { prepareAgentWorkspaceComparison, receiveAgentWorkspace, sendAgentWorkspace, type AgentWorkspaceRemoteReview } from "./workspace-remote";
 
-type Input<K extends keyof AgentWorkspaceIpc> = Parameters<AgentWorkspaceIpc[K]>[0];
+type Input<K extends keyof AgentWorkspaceIpc> = Parameters<NonNullable<AgentWorkspaceIpc[K]>>[0];
 interface ReviewGrant { senderId: number; frameUrl: string; expiresAt: number; kind: "apply" | "sync" | "recovery"; id: string; hash: string; remote?: AgentWorkspaceRemoteReview; }
 /** No Main automation, MCP, or Terminal wrapper exposes the owner review grant issuer. */
 export function registerAgentWorkspaceIpc(input: { ipc: Pick<IpcMain, "handle">; assertTrustedSender: (event: IpcMainInvokeEvent) => unknown }): void {
+  registerAgentAppearanceIpc(input);
   const grants = new Map<string, ReviewGrant>();
   const issue = (event: IpcMainInvokeEvent, grant: Omit<ReviewGrant, "senderId" | "frameUrl" | "expiresAt">) => {
     for (const [token, value] of grants) if (value.expiresAt < Date.now()) grants.delete(token);

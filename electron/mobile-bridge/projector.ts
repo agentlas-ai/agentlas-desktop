@@ -175,6 +175,7 @@ const CHAT_ATTACHMENT_MARKDOWN_RE = new RegExp(
   `!\\[[^\\]\\n]*\\]\\(\\s*agentlas://chat-attachment/(${CHAT_ATTACHMENT_ID_PATTERN})(?:\\s+"[^"\\n]*")?\\s*\\)`,
   "giu",
 );
+const MOBILE_PROJECTED_CHAT_FILES_PER_MESSAGE = 512;
 const CHAT_FILE_GROUP_MARKER_RE = /<!--\s*agentlas-chat-files:v1:([0-9a-f-]{36})\s*-->/giu;
 const CHAT_FILE_SHA256_RE = /^[0-9a-f]{64}$/iu;
 const CHAT_FILE_NAME_RE = /^(?!\.{1,2}$)[^/\\\u0000-\u001f\u007f]{1,180}$/u;
@@ -233,7 +234,6 @@ function mobileBridgeChatFiles(
         || !CHAT_FILE_MEDIA_TYPE_RE.test(file.mediaType)
         || !Number.isSafeInteger(file.size)
         || file.size < 0
-        || file.size > 96 * 1024 * 1024
         || !CHAT_FILE_SHA256_RE.test(file.sha256)
         || (file.kind !== "file" && file.kind !== "directory")
       ) continue;
@@ -249,7 +249,9 @@ function mobileBridgeChatFiles(
         kind: file.kind,
         ...(entryCount !== undefined ? { entryCount } : {}),
       });
-      if (files.length >= 8) return files;
+      // chat-attachments-v2: a message may carry any number of files. The bound keeps one message's projection small
+      // (≈250 bytes a file); older phones read their first 8 themselves and skip a file over 96 MB on their own.
+      if (files.length >= MOBILE_PROJECTED_CHAT_FILES_PER_MESSAGE) return files;
     }
   }
   return files;
@@ -498,6 +500,11 @@ function hostDto(options: MobileBridgeProjectionOptions): MobileBridgeHostDto {
       "steering",
       "composer-modes",
       "attachments",
+      // media-carousel: unlimited chunked attachments + file previews, phone files for remote Builds, Build mode.
+      // The optional request keys these unlock are listed in shared/mobile-bridge-media.ts.
+      "chat-attachments-v2",
+      "remote-build-attachments-v1",
+      "remote-build-options-v1",
       "chat-runtime-selection",
       "hub-borrow",
       "route-preview",

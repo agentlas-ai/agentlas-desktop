@@ -38,6 +38,10 @@ const MEDIA_BY_EXTENSION: Readonly<Record<string, string>> = Object.freeze({
   ".zip": "application/zip", ".gz": "application/gzip", ".tar": "application/x-tar",
   ".mp3": "audio/mpeg", ".wav": "audio/wav", ".m4a": "audio/mp4", ".aac": "audio/aac", ".flac": "audio/flac", ".ogg": "audio/ogg",
   ".mp4": "video/mp4", ".mov": "video/quicktime", ".webm": "video/webm", ".m4v": "video/x-m4v",
+  // media-carousel: phone and camera formats. Only PNG/JPEG/GIF/WEBP go to a model as pictures (PROVIDER_PICTURES);
+  // these stay files the run can open by path.
+  ".heic": "image/heic", ".heif": "image/heif", ".avif": "image/avif", ".bmp": "image/bmp", ".tif": "image/tiff", ".tiff": "image/tiff", ".svg": "image/svg+xml",
+  ".ogv": "video/ogg", ".3gp": "video/3gpp", ".3g2": "video/3gpp2", ".mkv": "video/x-matroska", ".avi": "video/x-msvideo",
   ".js": "text/javascript", ".jsx": "text/jsx", ".ts": "text/typescript", ".tsx": "text/tsx", ".css": "text/css",
   ".py": "text/x-python", ".rb": "text/x-ruby", ".go": "text/x-go", ".rs": "text/x-rust", ".java": "text/x-java-source",
   ".c": "text/x-c", ".h": "text/x-c", ".cpp": "text/x-c++", ".hpp": "text/x-c++", ".sql": "application/sql",
@@ -173,13 +177,17 @@ function safeBasename(raw: string, fallback: string): string {
   return (sanitized || fallback).slice(0, 96);
 }
 
+/** Every file may be attached; an unknown extension is application/octet-stream, read by path. */
 function canonicalMediaType(filePath: string): string {
-  const mediaType = MEDIA_BY_EXTENSION[path.extname(filePath).toLowerCase()];
-  if (!mediaType || !SAFE_MEDIA_RE.test(mediaType)) {
+  const mediaType = MEDIA_BY_EXTENSION[path.extname(filePath).toLowerCase()] ?? "application/octet-stream";
+  if (!SAFE_MEDIA_RE.test(mediaType)) {
     throw new OneAttachmentError("unsupported_type", "This file type is not supported in One attachments.");
   }
   return mediaType;
 }
+
+/** The picture types every runtime's provider decodes; other images stay files (a HEIC photo is opened by path). */
+const PROVIDER_PICTURES: ReadonlySet<string> = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
 
 function openStableRegularFile(filePath: string): { fd: number; identity: SourceIdentity } {
   let fd: number | null = null;
@@ -475,7 +483,7 @@ export function prepareOneAttachments(input: PrepareOneAttachmentsInput): Prepar
         continue;
       }
       const canonicalType = canonicalMediaType(sourcePath);
-      const kind: OneAttachmentKind = canonicalType.startsWith("image/") ? "image" : "file";
+      const kind: OneAttachmentKind = PROVIDER_PICTURES.has(canonicalType) ? "image" : "file";
       const maxBytes = kind === "image" ? ONE_ATTACHMENT_LIMITS.maxImageBytes : ONE_ATTACHMENT_LIMITS.maxFileBytes;
       const opened = openStableRegularFile(sourcePath);
       let pendingPath = "";

@@ -1,5 +1,6 @@
 import type { NativeInputAction, NativeInputResult } from "./native-driver";
 import { planSupervisorRightDock, supervisorDockName, type DockRect } from "./supervisor-dock-layout";
+import { assertRequestCurrent } from "./request-lifetime";
 
 /*
  * Supervisor right-dock controller (owner reference promo, 2026-10-16).
@@ -26,7 +27,7 @@ export type DockBadgeState = "working" | "done";
 export interface DockPorts {
   platform: NodeJS.Platform;
   selfPid: number;
-  driver(request: NativeInputAction): Promise<NativeInputResult>;
+  driver(request: NativeInputAction, signal?: AbortSignal): Promise<NativeInputResult>;
   /** Work area of the display that holds (most of) this rectangle, DIP. */
   workAreaFor(rect: DockRect): DockRect | null;
   oneWindow(): DockOneWindow | null;
@@ -40,7 +41,7 @@ export interface DockPorts {
   setTimer(callback: () => void, ms: number): unknown;
   clearTimer(handle: unknown): void;
 }
-export interface DockBeginInput { runId: string; app: string; hasContextGrant: boolean }
+export interface DockBeginInput { runId: string; app: string; hasContextGrant: boolean; signal?: AbortSignal; checkpoint?: () => Promise<void> }
 export interface DockBeginOutcome {
   /** True when the operated app was moved or resized: earlier screen captures no longer match the screen. */
   layoutChanged: boolean;
@@ -87,8 +88,12 @@ export class SupervisorDock {
     const none = (reason: string): DockBeginOutcome => ({ layoutChanged: false, docked: false, reason });
     try {
       const { ports } = this;
+      const { signal } = input;
+      const checkpoint = async () => { assertRequestCurrent(signal); await input.checkpoint?.(); assertRequestCurrent(signal); };
+      await checkpoint();
       if (ports.platform !== "darwin") return none("platform-unsupported");
-      const read = await ports.driver({ action: "windowFrame", app: input.app });
+      const read = await ports.driver({ action: "windowFrame", app: input.app }, signal);
+      await checkpoint();
       const frame = frameOf(read);
       if (!frame) return none("window-unavailable");
       if (frame.pid === ports.selfPid) return none("own-window");
@@ -107,11 +112,13 @@ export class SupervisorDock {
       // The owner picked the exact window (context grant) or has already seen this layout, or there is no panel to
       // dock beside, or the app is full screen or minimized: leave every window alone, still show the badge.
       if (input.hasContextGrant || done.has(frame.pid) || !one || !one.visible || one.fullScreen || !workArea || frame.fullScreen || frame.minimized) {
+        await checkpoint();
         shown(frame);
         return none(input.hasContextGrant ? "context-grant" : done.has(frame.pid) ? "already-docked" : "not-dockable");
       }
       const plan = planSupervisorRightDock({ workArea, target: frame, currentOne: one.bounds });
-      if (!plan.ok) { shown(frame); return none(plan.reason); }
+      if (!plan.ok) { await checkpoint(); shown(frame); return none(plan.reason); }
+      await checkpoint();
       done.add(frame.pid); this.docked.set(input.runId, done);
       if (plan.oneChanged) {
         one.setBounds(plan.one);
@@ -120,14 +127,16 @@ export class SupervisorDock {
       }
       let finalFrame: DockRect = frame, changed = false;
       if (plan.targetChanged) {
-        const set = await ports.driver({ action: "setWindowFrame", app: `pid:${frame.pid}`, ...plan.target });
+        await checkpoint();
+        const set = await ports.driver({ action: "setWindowFrame", app: `pid:${frame.pid}`, ...plan.target }, signal);
+        await checkpoint();
         const applied = frameOf(set);
         if (applied) {
           finalFrame = applied;
           changed = Math.abs(applied.x - frame.x) > 2 || Math.abs(applied.y - frame.y) > 2 || Math.abs(applied.width - frame.width) > 2 || Math.abs(applied.height - frame.height) > 2;
         }
       }
-      shown(finalFrame);
+      await checkpoint();shown(finalFrame);
       return { layoutChanged: changed, docked: true };
     } catch (error) {
       return none(error && typeof error === "object" && "code" in error ? String((error as { code: unknown }).code) : "dock-failed");

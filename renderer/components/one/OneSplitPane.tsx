@@ -308,7 +308,7 @@ export function OneSplitPane({
             const notice = normalizeChatHostNotice(message.role, message.hostNotice);
             // A system row without a typed notice is a host-written harness request (Goal resume, continuation): it is
             // not drawn, like in the full One view. Interrupted answers below are internal states too (owner 2026-10-14).
-            return notice ? <HostContinuationNotice key={message.id} text={text} locale={locale === "ko" ? "ko" : "en"} notice={notice} /> : null;
+            return notice ? <HostContinuationNotice key={message.id} text={text} locale={locale === "ko" ? "ko" : "en"} notice={notice} chatId={chatId} /> : null;
           }
           if (message.role === "assistant" && isInterruptedPartial(message.text ?? "")) return null;
           return (

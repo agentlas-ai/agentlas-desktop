@@ -25,6 +25,7 @@ import { getInvocationAdmission } from "../store/invocation-admissions";
 import { tryRecordOneDomainEvent } from "./domain-events";
 import { ensureOneGroupLocalStaff, oneOrgExecutionGuidance } from "./org";
 import { ensureOneTaskforceForPreflight, notifyOneTaskforceFromPreflight, listOneTaskforces } from "./taskforces";
+import { assertManagedOneTeamAvailable } from "../managed-one/auth";
 import { inspectOneAttachmentInput } from "./attachments";
 import type { QueuedInputAttempt, QueuedInputEscrow, QueuedInputOwner } from "./queued-input-escrow";
 import { oneTeamDispatchOwnerChat } from "./team-dispatch";
@@ -1190,6 +1191,7 @@ async function prepareOneTeamPreflightInternal(
   deps: OneTeamPreflightDependencies,
   goalIntent?: GoalObligationPreflightIntent,
 ): Promise<PrepareOneTeamPreflightResult> {
+  assertManagedOneTeamAvailable();
   if (goalIntent) assertGoalObligationPreflightIntent(goalIntent);
   const inputKeys = Object.keys((input ?? {}) as unknown as Record<string, unknown>);
   const allowedInputKeys = new Set(["chatId", "expectedTaskId", "expectedTaskVersion", "userPrompt", "requestedAgentIds", "requestedAgentIdsSource", "dynamicTeamRequested", "permission", "runtimeSelection", "attachmentRef"]);
@@ -1653,6 +1655,7 @@ export async function resolveOneTeamPreflight(
   deps: OneTeamPreflightDependencies = {},
   actor: "user" | "one" = "user",
 ): Promise<ResolveOneTeamPreflightResult> {
+  if (input?.resolution === "confirm_team" || input?.resolution === "confirm_workforce") assertManagedOneTeamAvailable();
   if (
     !input || typeof input !== "object"
     || Object.keys(input as unknown as Record<string, unknown>).sort().join(",") !== "confirmedByUser,expectedProposalVersion,proposalId,requestedRunId,resolution"
@@ -1866,6 +1869,7 @@ export async function autoResolveOneTeamPreflight(
   input: AutoResolveOneTeamPreflightInput,
   deps: OneTeamPreflightDependencies = {},
 ): Promise<ResolveOneTeamPreflightResult> {
+  assertManagedOneTeamAvailable();
   if (
     !input || typeof input !== "object"
     || Object.keys(input as unknown as Record<string, unknown>).sort().join(",") !== "expectedProposalVersion,proposalId,requestedRunId"
@@ -2027,6 +2031,7 @@ export function prepareOneTeamPreflightClaim(
   chatId: string,
   deps: OneTeamPreflightDependencies = {},
 ): PreparedOneTeamPreflightClaim {
+  if (ref?.mode !== "solo") assertManagedOneTeamAvailable();
   if (
     !ref || typeof ref !== "object"
     || Object.keys(ref as unknown as Record<string, unknown>).sort().join(",") !== "contractVersion,expectedTaskId,expectedTaskVersion,mode,proposalId,reservedRunId"
@@ -2094,6 +2099,7 @@ export function claimPreparedOneTeamPreflight(
   prepared: PreparedOneTeamPreflightClaim,
   now = new Date(),
 ): OneTeamPreflightProposal {
+  if (prepared?.mode !== "solo") assertManagedOneTeamAvailable();
   const db = getDb();
   const claim = db.transaction(() => {
     const { state, raw } = readStore(db);
@@ -2224,6 +2230,7 @@ export async function reissueQueuedOneTeamPreflight(
 ): Promise<OneTeamPreflightRef> {
   const resource = escrow.resource(owner, "team", attempt);
   const snapshot = resource.payload as QueuedTeamSnapshot;
+  if (snapshot?.ref?.mode !== "solo") assertManagedOneTeamAvailable();
   if (!snapshot || snapshot.schemaVersion !== 1 || !snapshot.ref || !snapshot.record || !snapshot.prompt
     || !isOneTeamPreflightProposal(snapshot.record.proposal)
     || snapshot.ref.contractVersion !== ONE_TEAM_PREFLIGHT_CONTRACT_VERSION

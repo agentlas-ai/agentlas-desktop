@@ -1,0 +1,167 @@
+/*
+ * Pictures, videos and files of one message or one composer as a horizontal strip ("좌우 스와이프 되면서
+ * 사진 보여지게"). Tokens only; the light theme is the product theme and the dark tokens keep it readable.
+ */
+.strip {
+  display: flex;
+  gap: 6px;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-x: contain;
+  scroll-snap-type: x proximity;
+  scrollbar-width: thin;
+  padding: 2px 2px 6px;
+  outline: none;
+}
+/* The frame follows its column (a percentage bound, applied at layout); the strip inside has an absolute bound, so it never
+   widens a column that sizes to its content. Both scroll sideways instead of growing. */
+.frame { display: flex; min-width: 0; max-width: 100%; }
+.frame[data-align="end"] { justify-content: flex-end; }
+/* In a composer the strip takes the composer's width and lends none of its own: a long row of tiles never widens the
+   form, the page grid or the build panel around it. */
+.frame[data-variant="composer"] { width: 100%; flex: 1 1 auto; }
+.strip[data-variant="composer"] { contain: inline-size; width: 100%; }
+.strip:focus-visible { box-shadow: 0 0 0 2px var(--accent); border-radius: 12px; }
+/* A message strip sits in a bubble column that sizes to its content: an absolute bound keeps it from widening the page,
+   the strip itself scrolls sideways instead. */
+.strip[data-variant="message"] { margin-bottom: 6px; width: fit-content; max-width: min(640px, calc(100vw - 340px)); }
+
+.strip .tile {
+  position: relative;
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 132px;
+  height: 132px;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--paper-edge);
+  border-radius: 12px;
+  background: var(--paper-2);
+  color: var(--ink);
+  cursor: zoom-in;
+  scroll-snap-align: start;
+  text-align: left;
+}
+.strip[data-variant="composer"] .tile { width: 76px; height: 76px; border-radius: 10px; }
+.strip .tile:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.strip .tile[data-kind="file"], .strip .tile[data-kind="folder"] { cursor: pointer; place-items: stretch; }
+
+.thumb { display: block; width: 100%; height: 100%; object-fit: cover; }
+video.thumb { background: #000; pointer-events: none; }
+
+.play {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 34px;
+  height: 34px;
+  margin: -17px 0 0 -17px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, .55);
+  color: #fff;
+  pointer-events: none;
+}
+.play::before { content: ""; margin-left: 3px; border-style: solid; border-width: 7px 0 7px 11px; border-color: transparent transparent transparent #fff; }
+.strip[data-variant="composer"] .play { width: 24px; height: 24px; margin: -12px 0 0 -12px; }
+.strip[data-variant="composer"] .play::before { border-width: 5px 0 5px 8px; }
+
+.fileBody { display: flex; flex-direction: column; justify-content: space-between; gap: 6px; width: 100%; height: 100%; padding: 10px; min-width: 0; }
+.strip[data-variant="composer"] .fileBody { padding: 7px; gap: 3px; }
+.fileIcon { color: var(--muted-deep); }
+.fileName {
+  display: -webkit-box;
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 15px;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+.strip[data-variant="composer"] .fileName { font-size: 10.5px; line-height: 13px; -webkit-line-clamp: 2; }
+.fileMeta { color: var(--muted-deep); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.strip[data-variant="composer"] .fileMeta { display: none; }
+
+.badge {
+  position: absolute;
+  left: 6px;
+  bottom: 6px;
+  max-width: calc(100% - 12px);
+  padding: 1px 6px;
+  overflow: hidden;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, .55);
+  color: #fff;
+  font-size: 10.5px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  pointer-events: none;
+}
+
+.strip .remove {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, .62);
+  color: #fff;
+  cursor: pointer;
+}
+.strip .remove:hover, .strip .remove:focus-visible { background: rgba(0, 0, 0, .85); outline: none; }
+
+.count { flex: 0 0 auto; align-self: center; padding: 0 4px; color: var(--muted-deep); font-size: 11px; white-space: nowrap; }
+
+/* Full-screen viewer: one item at a time, ←/→, swipe, Esc. */
+.viewer {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483000;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  background: rgba(0, 0, 0, .9);
+  color: #fff;
+  animation: mediaViewerFade 140ms ease;
+  touch-action: pan-y;
+}
+.viewerBar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 16px; font-size: 13px; }
+.viewerTitle { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; opacity: .86; }
+.viewerCount { flex: 0 0 auto; font-variant-numeric: tabular-nums; opacity: .7; }
+.viewerStage { position: relative; min-height: 0; overflow: hidden; display: grid; place-items: center; padding: 0 64px; }
+.viewerImage, .viewerVideo { display: block; max-width: calc(100vw - 140px); max-height: calc(100vh - 128px); width: auto; height: auto; object-fit: contain; user-select: none; -webkit-user-drag: none; }
+.viewerVideo { background: #000; }
+.viewerFile { display: grid; gap: 10px; justify-items: center; text-align: center; font-size: 14px; }
+.viewerFile button { padding: 8px 14px; border: 1px solid rgba(255, 255, 255, .4); border-radius: 999px; background: transparent; color: #fff; cursor: pointer; }
+.viewer .viewerNav, .viewer .viewerClose {
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, .1);
+  color: #fff;
+  cursor: pointer;
+}
+.viewerNav { position: absolute; top: 50%; margin-top: -20px; }
+.viewerNav[data-dir="prev"] { left: 14px; }
+.viewerNav[data-dir="next"] { right: 14px; }
+.viewerNav:disabled { opacity: .2; cursor: default; }
+.viewerNav:not(:disabled):hover, .viewerClose:hover, .viewerNav:focus-visible, .viewerClose:focus-visible { background: rgba(255, 255, 255, .24); outline: none; }
+.viewerDots { display: flex; justify-content: center; gap: 6px; padding: 12px 0 16px; }
+.viewerDot { width: 6px; height: 6px; border-radius: 50%; background: rgba(255, 255, 255, .35); }
+.viewerDot[data-active="true"] { background: #fff; }
+
+@keyframes mediaViewerFade { from { opacity: 0; } to { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .viewer { animation: none; } }

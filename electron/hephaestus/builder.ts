@@ -20,6 +20,7 @@ import { app } from "electron";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { detectRuntimes } from "../runtime/detect";
+import { selectionForRuntime } from "../../shared/runtime-selection";
 import { pickActive, pickRunner } from "../runtime/selection";
 import { measureBuildSystemPrompt, composeBuildSystemPrompt } from "../runtime/runner";
 import { buildIsolatedBuildRunnerEnv } from "../runtime/build-env";
@@ -53,6 +54,7 @@ import { emptyMcpBuildReceipt } from "../mcp-tools/attachment-resolver";
 import { hephaestusRoot } from "./engine";
 import { cardsMigrate, contractComplete, contractScaffold, contractVerify, securityScan } from "./commands";
 import { isCompletedBuildTurn } from "./build-turn";
+import { packageContentDigest, settleScanAgainstPackage } from "./scan-binding";
 import { stageAttachments, type ResolvedHephaestusBuildAttachment } from "./build-attachments";
 import { contractTargetRoot, verifiedCompletedPackageRoot } from "./build-result-path";
 import { deriveOpenCrabMatchSignal, queryOpenCrabContext } from "../opencrab/ontology";
@@ -855,11 +857,12 @@ export async function runHephaestusBuild(
   sink: BuildSink,
   signal: AbortSignal,
   locale: RuntimeLocale = "en",
+  onRuntimeResolved?: (runtime: RuntimeSelection) => void,
 ): Promise<void> {
   return withInvocationUsageIfAbsent(async (ownsScope) => {
     try {
       await withBuildMcpAttachmentForRun(req.mcpAttachment, runId, signal,
-        attachment => runHephaestusBuildInScope(runId, buildRunRequestWithAttachment(req, attachment), sink, signal, locale));
+        attachment => runHephaestusBuildInScope(runId, buildRunRequestWithAttachment(req, attachment), sink, signal, locale, onRuntimeResolved));
     } catch (error) {
       // The cause (a machine code such as native-browser-task-unbound) belongs in the log, not on the owner's screen.
       if (!signal.aborted) console.warn("[hephaestus-build] run ended with an error", runId, error instanceof Error ? error.message : String(error));
@@ -889,6 +892,7 @@ async function runHephaestusBuildInScope(
   sink: BuildSink,
   signal: AbortSignal,
   locale: RuntimeLocale = "en",
+  onRuntimeResolved?: (runtime: RuntimeSelection) => void,
 ): Promise<void> {
   const ko = locale === "ko";
   const root = resolveBuilderPromptRoot(hephaestusRoot());
@@ -934,11 +938,17 @@ async function runHephaestusBuildInScope(
     return;
   }
   const buildActive = workload.runtime;
-  const buildPicked = (
+  const selectedRunner = (
     buildActive.kind === picked.active.kind &&
     buildActive.backend === picked.active.backend &&
     buildActive.source === picked.active.source
-  ) ? picked : pickRunner(buildActive) ?? picked;
+  ) ? picked : pickRunner(buildActive);
+  const buildPicked = selectedRunner ?? picked;
+  onRuntimeResolved?.(selectionForRuntime(selectedRunner ? buildActive : picked.active, {
+    model: buildActive.model ?? null,
+    effort: buildActive.effort ?? null,
+    longContext: buildActive.longContextEnabled ?? false,
+  }));
   sink({
     runId,
     kind: "log",
@@ -947,9 +957,10 @@ async function runHephaestusBuildInScope(
       : `Build model ${buildActive.model ?? buildActive.kind}${buildActive.effort ? ` · ${buildActive.effort}` : ""}${workload.source === "manual-override" ? " · user-pinned" : " · parent-AI assigned"}`,
   });
 
-  // 첨부 스테이징(첫 턴만) — 인터뷰 resume 턴에는 이미 스테이징돼 있고 세션이 맥락을 유지한다.
+  // 첨부 스테이징 — 첨부가 실린 턴에만 한다. 데스크탑 화면은 한 빌드에 한 번만 싣고, 폰 빌드는 인터뷰 답변 턴에도 새 파일을
+  // 실을 수 있다(remote-build-attachments-v1). 이미 스테이징된 파일은 세션이 맥락을 유지하므로 다시 싣지 않는다.
   let userPrompt = req.request;
-  if (!req.runtimeSessionId && req.attachments && req.attachments.length > 0) {
+  if (req.attachments && req.attachments.length > 0) {
     sink({ runId, kind: "stage", stage: "attach", text: ko ? `첨부 자료 준비 (${req.attachments.length}개)` : `Preparing attachments (${req.attachments.length})` });
     const staged = stageAttachments(req.workspace, req.attachments);
     if (staged.lines.length > 0) {
@@ -1341,6 +1352,9 @@ async function runHephaestusBuildInScope(
     // 인터뷰 turn은 질문만 반환하고 파일을 만들지 않는다. 완료 신호가 있는 실제 생성 턴에만
     // security stage를 방출해야 UI가 답변 전에 3단계 완료로 뛰거나 무의미한 스캔을 하지 않는다.
     let scan: unknown = null;
+    // Digest of the package content taken just before the scan ran; undefined = no scan ran. The scan is only reported
+    // for the content it scanned (see scan-binding.ts): files change after it (contract complete, repair rounds, cards migrate).
+    let scannedPackageDigest: string | null | undefined;
     let resultText = result.text;
 
     // ── 인터뷰 계약 게이트 ────────────────────────────────────────────────
@@ -1431,6 +1445,7 @@ async function runHephaestusBuildInScope(
             : `Security scan unverified: ${completedPackage.error} — do not treat as passing`,
         });
       } else try {
+        scannedPackageDigest = packageContentDigest(completedPackageRoot);
         const scanRes = await securityScan(completedPackageRoot, { signal, timeoutMs: 120_000 });
         scan = scanRes?.json ?? null;
         if (scan === null) {
@@ -1650,6 +1665,28 @@ async function runHephaestusBuildInScope(
       }
     }
 
+    // The scan above saw the package as the model first wrote it. Everything after it may have rewritten files, so the
+    // reported scan must be the one of the final content: kept when the digest is equal, otherwise rescanned, otherwise unverified.
+    let reportedScanDigest: string | null = null;
+    if (scannedPackageDigest !== undefined && scan !== null) {
+      const bound = await settleScanAgainstPackage({
+        scan,
+        scannedDigest: scannedPackageDigest,
+        root: completedPackageRoot,
+        aborted: () => signal.aborted,
+        rescan: async () => {
+          markActivity(ko ? "패키지가 바뀌어 보안 스캔을 다시 합니다" : "Package changed — rescanning");
+          sink({ runId, kind: "stage", stage: "security", text: ko ? "스캔 뒤 패키지가 바뀌어 정적 보안 스캔을 다시 합니다" : "The package changed after the scan — running the static security scan again" });
+          return (await securityScan(completedPackageRoot, { signal, timeoutMs: 120_000 }))?.json ?? null;
+        },
+      });
+      scan = bound.scan;
+      reportedScanDigest = bound.digest;
+      if (bound.binding === "unverified_changed" || bound.binding === "unverified_rescan_failed") {
+        sink({ runId, kind: "stage", stage: "security", text: ko ? "보안 스캔 미검증: 스캔 뒤 패키지가 바뀌었습니다 — 통과로 간주하지 말 것" : "Security scan unverified: the package changed after the scan — do not treat as passing" });
+      }
+    }
+
     sink({
       runId,
       kind: "done",
@@ -1658,6 +1695,7 @@ async function runHephaestusBuildInScope(
       result: {
         workspace: completedPackageRoot,
         securityScan: scan,
+        ...(reportedScanDigest ? { securityScanPackageDigest: reportedScanDigest } : {}),
         ...(contractReport !== null ? { packageContract: contractReport } : {}),
         mcpReceipt,
         ...(supplementalQuestion ? { supplementalQuestion } : {}),

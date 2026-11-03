@@ -7639,6 +7639,7 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
           onReply={handleMessageReply}
           onInspectWorker={inspectWorkerPanel}
           agentName="Agentlas"
+          agentId={displayAgent && displayAgent.id === chat.agentId ? displayAgent.id : undefined}
           agentTone={displayAgent?.tone ?? "blue"}
           emptyDirectory={chatEmptyDirectory}
           onOpenArtifact={handleOpenArtifact}

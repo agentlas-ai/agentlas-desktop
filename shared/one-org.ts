@@ -87,6 +87,11 @@ export interface OneOrgMember {
    * Present only when this seat's agent can no longer work (not installed, or its source folder is gone).
    * `code` is machine-only; show `reason` in the owner's language and offer to replace the seat.
    */
+  /**
+   * Machine code (never shown) for why this seat cannot be added to a group conversation; absent when it can join.
+   * Same answer as the host's join guard (`oneGroupJoinRefusal`), so a picker greys the seats the guard would refuse.
+   */
+  groupJoinRefusal?: "agent_not_installed" | "source_missing" | "hidden_agent" | "seat_archived" | "seat_task_failed" | "seat_locked" | "seat_lease_invalid" | "group_requires_local";
   unavailable?: {
     code: "agent_not_installed" | "source_missing" | "hidden_agent" | "seat_archived" | "seat_task_failed" | "seat_locked" | "seat_lease_invalid";
     reason: { ko: string; en: string };

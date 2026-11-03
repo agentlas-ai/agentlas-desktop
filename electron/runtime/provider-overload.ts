@@ -1,5 +1,6 @@
 import type { RunnerFailure } from "./runner";
 import { ollamaModelNamesEqual } from "../../shared/runtime-connect";
+import { httpRetryAfterIso, httpRetryAfterTimestamp } from "./http-retry-after";
 
 /*
  * A model server that answers 5xx is a typed failure, never a prose throw (native-harness 07 G24). The cause is read from
@@ -40,13 +41,11 @@ export function serverFailureResendable(code: ServerFailureCode): boolean {
   return code === RUNTIME_OVERLOADED_CODE || code === LOCAL_MODEL_UNLOADED_CODE;
 }
 
-/** The provider's Retry-After (seconds or an HTTP date), bounded; otherwise a short fixed wait. */
-export function serverFailureResendDelayMs(retryAfter: string | null | undefined, now = Date.now()): number {
-  const text = String(retryAfter ?? "").trim();
-  let ms = DEFAULT_RESEND_DELAY_MS;
-  if (/^\d{1,7}$/.test(text)) ms = Number(text) * 1_000;
-  else if (text && Number.isFinite(Date.parse(text))) ms = Date.parse(text) - now;
-  return Math.max(0, Math.min(MAX_RESEND_DELAY_MS, Number.isFinite(ms) ? ms : DEFAULT_RESEND_DELAY_MS));
+/** A bounded inline resend, or null when the provider requires a longer wait. Never shorten Retry-After. */
+export function serverFailureResendDelayMs(retryAfter: string | null | undefined, now = Date.now()): number | null {
+  const at = httpRetryAfterTimestamp(retryAfter, now);
+  const ms = at === null ? DEFAULT_RESEND_DELAY_MS : at - now;
+  return ms > MAX_RESEND_DELAY_MS ? null : Math.max(0, ms);
 }
 
 /** Waits, or ends early on Stop (the caller then reads the abort reason). */
@@ -72,16 +71,9 @@ export function serverFailure(input: {
       : ko ? `${input.providerLabel} 서버 오류(HTTP ${input.status})로 답을 받지 못했습니다.`
         : `${input.providerLabel} returned a server error (HTTP ${input.status}).`;
   const detail = String(input.body ?? "").replace(/\s+/g, " ").trim().slice(0, 300);
-  const retryAfterHint = input.code === RUNTIME_OVERLOADED_CODE ? retryAfterIso(input.retryAfter) : undefined;
+  const retryAfterHint = httpRetryAfterIso(input.retryAfter);
   return { kind: "unavailable", runtime: input.runtime, source: "marker", providerCode: input.code,
     message: detail ? `${sentence} ${detail}` : sentence, ...(retryAfterHint ? { retryAfterHint } : {}) };
-}
-
-function retryAfterIso(value: string | null | undefined, now = Date.now()): string | undefined {
-  const text = String(value ?? "").trim();
-  if (/^\d{1,7}$/.test(text)) return new Date(now + Number(text) * 1_000).toISOString();
-  const at = Date.parse(text);
-  return text && Number.isFinite(at) ? new Date(at).toISOString() : undefined;
 }
 
 type Fetch = typeof fetch;

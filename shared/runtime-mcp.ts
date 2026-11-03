@@ -73,7 +73,7 @@ export const RUNTIME_MCP_SUPPORT: Record<RuntimeKind, RuntimeMcpSupport | null> 
   cursor: {
     delivery: "acp-session-new",
     extraTransports: "negotiated",
-    evidence: "ACP_PREFERRED_KINDS routes cursor to createAcpRunner; acpMcpServersFromConfig translates our config into session/new.mcpServers",
+    evidence: "ACP_PREFERRED_KINDS routes cursor to createAcpRunner; acpMcpServersFromConfig translates our config into session/new.mcpServers; the legacy electron/runtime/cursor.ts (AGENTLAS_DISABLE_ACP) has no MCP channel and refuses a run that carries a config (cursor_legacy_mcp_unsupported)",
   },
   kimi: {
     delivery: "acp-session-new",

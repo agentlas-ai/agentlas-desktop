@@ -557,6 +557,7 @@ async function runKimiTurn(req: RunnerRequest, events: RunnerEvents, dispatch: {
       )
     : buildPrompt(runReq);
   const baseArgs = ["-p", prompt, "--output-format", "stream-json"];
+  if (runReq.mcpConfigPath) baseArgs.push("--mcp-config-file", runReq.mcpConfigPath);
   if (runReq.model) baseArgs.push("--model", runReq.model);
   const args = resumeSessionId ? ["--session", resumeSessionId, ...baseArgs] : baseArgs;
 

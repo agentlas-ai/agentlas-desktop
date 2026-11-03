@@ -52,7 +52,7 @@ export interface ResolvedMcpBuildAttachment {
   /** Exact value-free binding between a consented candidate and one serialized MCP key. */
   runtimeBindings: Array<{ candidateId: string; serverId: string; configKey: string }>;
   /** Main-only single recovery hook. It never broadens the user's selected candidates. */
-  recoverRuntimeFailure?: (failedCandidateId: string) => Promise<ResolvedMcpBuildAttachment | null>;
+  recoverRuntimeFailure?: (failedCandidateId: string, signal?: AbortSignal) => Promise<ResolvedMcpBuildAttachment | null>;
   /** Main-only closure: renderer consent cannot supply the actual run or a browser grant. */
   prepareForBuildRun?: (runId: string, signal: AbortSignal) => Promise<ResolvedMcpBuildAttachment>;
 }
@@ -66,9 +66,9 @@ export interface McpAttachmentResolverDependencies {
   listInstalled: () => InstalledMcpServer[];
   installCatalog: (catalogId: string) => InstalledMcpServer;
   /** Hub plugin install. Same host path the Hub screen uses. */
-  installHub: (input: { slug: string; manifestUrl: string }) => Promise<InstalledMcpServer | null>;
+  installHub: (input: { slug: string; manifestUrl: string; signal?: AbortSignal }) => Promise<InstalledMcpServer | null>;
   hasEnv: (key: string) => Promise<boolean>;
-  testServer: (server: InstalledMcpServer) => Promise<{
+  testServer: (server: InstalledMcpServer, signal?: AbortSignal) => Promise<{
     connected: boolean;
     missingEnv: string[];
   }>;
@@ -78,14 +78,14 @@ export interface McpAttachmentResolverDependencies {
 const DEFAULT_DEPS: McpAttachmentResolverDependencies = {
   listInstalled: listInstalledServers,
   installCatalog: installFromCatalog,
-  installHub: async ({ slug, manifestUrl }) => {
-    const result = await installHubPlugin({ slug, manifestUrl, approveLocalExecution: true });
+  installHub: async ({ slug, manifestUrl, signal }) => {
+    const result = await installHubPlugin({ slug, manifestUrl, approveLocalExecution: true, signal });
     const connected = result.receipts.find((entry) => entry.action === "connected" || entry.action === "already-installed");
     if (!connected) return null;
     return listInstalledServers().find((server) => installedServerMatchesPluginSlug(server, slug)) ?? null;
   },
   hasEnv: hasEnvVar,
-  testServer: (server) => testServerConnection(server, { timeoutMs: 15_000 }),
+  testServer: (server, signal) => testServerConnection(server, { timeoutMs: 15_000, signal }),
   buildConfig: async (serverIds, planId, nativeBuildRun) => {
     const nativeBrowser = listInstalledServers().some(server => serverIds.includes(server.id)
       && (server.catalogId === "agentlas-browser" || isKeylessPlaywrightMcpDuplicate(server)));
@@ -226,9 +226,11 @@ async function advanceFallbackGroup(input: {
   runtime: RuntimeSelection | null;
   deps: McpAttachmentResolverDependencies;
   nativeBuildRun?: NativeBuildMcpRun;
+  signal?: AbortSignal;
 }): Promise<void> {
+  const signal = input.nativeBuildRun?.signal ?? input.signal;
   while (!input.state.attached && input.state.cursor < input.state.ordered.length) {
-    input.nativeBuildRun?.signal.throwIfAborted();
+    signal?.throwIfAborted();
     const candidate = input.state.ordered[input.state.cursor];
     input.state.cursor += 1;
     let server = currentServer(candidate, input.deps);
@@ -241,7 +243,9 @@ async function advanceFallbackGroup(input: {
       input.state.unavailable.push(candidate.public.id);
       continue;
     }
-    if (!(await allKeysPresent(candidate.envKeys, input.deps))) {
+    const candidateKeysPresent = await allKeysPresent(candidate.envKeys, input.deps);
+    signal?.throwIfAborted();
+    if (!candidateKeysPresent) {
       input.state.missingKey.push(receiptItem(candidate, "missing_key", "missing_key"));
       input.state.unavailable.push(candidate.public.id);
       continue;
@@ -250,11 +254,12 @@ async function advanceFallbackGroup(input: {
     if (!server && candidate.hub) {
       let hubError: unknown = null;
       try {
-        server = await input.deps.installHub(candidate.hub);
+        server = await input.deps.installHub({ ...candidate.hub, signal });
       } catch (err) {
         server = null;
         hubError = err;
       }
+      signal?.throwIfAborted();
       if (!server) {
         // 스킬 묶음(연결할 MCP 서버가 없는 플러그인)은 고장이 아니다. 설치가
         // 깨진 것과 같은 칸에 넣으면 정상 자산이 빨간 실패로 보고된다.
@@ -301,7 +306,9 @@ async function advanceFallbackGroup(input: {
       }
       input.state.ordered = [...input.state.ordered.slice(0, input.state.cursor), ...sameSession];
     }
-    if (!(await allKeysPresent(server.envKeys, input.deps, server))) {
+    const serverKeysPresent = await allKeysPresent(server.envKeys, input.deps, server);
+    signal?.throwIfAborted();
+    if (!serverKeysPresent) {
       input.state.missingKey.push(receiptItem(candidate, "missing_key", "missing_key"));
       input.state.unavailable.push(candidate.public.id);
       continue;
@@ -309,11 +316,11 @@ async function advanceFallbackGroup(input: {
 
     let status: { connected: boolean; missingEnv: string[] };
     try {
-      status = await input.deps.testServer(server);
+      status = await input.deps.testServer(server, signal);
     } catch {
       status = { connected: false, missingEnv: [] };
     }
-    input.nativeBuildRun?.signal.throwIfAborted();
+    signal?.throwIfAborted();
     if (status.missingEnv.length > 0) {
       input.state.missingKey.push(receiptItem(candidate, "missing_key", "missing_key"));
       input.state.unavailable.push(candidate.public.id);
@@ -388,9 +395,13 @@ export async function resolveApprovedMcpCandidates(input: {
   runtime: RuntimeSelection | null;
   deps?: McpAttachmentResolverDependencies;
   allowRuntimeRecovery?: boolean;
+  /** Optional owner cancellation while the reviewed MCP plan is applied. */
+  signal?: AbortSignal;
   /** Main-owned execution context, absent while reviewing the consent plan. */
   nativeBuildRun?: NativeBuildMcpRun;
 }): Promise<ResolvedMcpBuildAttachment> {
+  const signal = input.nativeBuildRun?.signal ?? input.signal;
+  signal?.throwIfAborted();
   if (input.nativeBuildRun) {
     if (!/^[A-Za-z0-9_:.-]{1,160}$/.test(input.nativeBuildRun.runId)) throw new Error("native-browser-task-unbound");
     input.nativeBuildRun.signal.throwIfAborted();
@@ -416,8 +427,9 @@ export async function resolveApprovedMcpCandidates(input: {
   const groupEntries = [...groups.values()];
   const groupStates = groupEntries.map(createGroupState);
   const settled = await Promise.allSettled(
-    groupStates.map((state) => advanceFallbackGroup({ state, runtime: input.runtime, deps, nativeBuildRun: input.nativeBuildRun })),
+    groupStates.map((state) => advanceFallbackGroup({ state, runtime: input.runtime, deps, nativeBuildRun: input.nativeBuildRun, signal })),
   );
+  signal?.throwIfAborted();
   for (let groupIndex = 0; groupIndex < settled.length; groupIndex += 1) {
     const item = settled[groupIndex];
     if (item.status === "rejected") markRemainingGroupHostFailure(groupStates[groupIndex]);
@@ -429,7 +441,7 @@ export async function resolveApprovedMcpCandidates(input: {
   // key disappeared), advance only that group and rebuild. Every rejection
   // consumes one candidate, so the selected-candidate bound prevents loops.
   for (let attempt = 0; attempt <= selectedCandidates.length; attempt += 1) {
-    input.nativeBuildRun?.signal.throwIfAborted();
+    signal?.throwIfAborted();
     const active = groupStates.flatMap((state) => state.attached ? [state.attached] : []);
     if (active.length === 0) {
       config = null;
@@ -444,6 +456,10 @@ export async function resolveApprovedMcpCandidates(input: {
         return buildBrowserNeedsNativeScope(candidate, currentServer(candidate, deps));
       })) throw error;
       nextConfig = null;
+    }
+    if (signal?.aborted) {
+      nextConfig?.cleanup?.();
+      signal.throwIfAborted();
     }
     const included = new Set(nextConfig?.includedServerIds ?? []);
     const rejectedStates = groupStates.filter(
@@ -465,8 +481,9 @@ export async function resolveApprovedMcpCandidates(input: {
       state.attached = null;
     }
     const advanced = await Promise.allSettled(
-      rejectedStates.map((state) => advanceFallbackGroup({ state, runtime: input.runtime, deps, nativeBuildRun: input.nativeBuildRun })),
+      rejectedStates.map((state) => advanceFallbackGroup({ state, runtime: input.runtime, deps, nativeBuildRun: input.nativeBuildRun, signal })),
     );
+    signal?.throwIfAborted();
     for (let index = 0; index < advanced.length; index += 1) {
       if (advanced[index].status === "rejected") markRemainingGroupHostFailure(rejectedStates[index]);
     }
@@ -543,7 +560,7 @@ export async function resolveApprovedMcpCandidates(input: {
   };
   if (!input.nativeBuildRun && selectedCandidates.some(candidate => buildBrowserNeedsNativeScope(candidate, currentServer(candidate, deps)))) {
     resolvedAttachment.prepareForBuildRun = (runId, signal) => resolveApprovedMcpCandidates({
-      ...input, nativeBuildRun: { runId, signal },
+      ...input, signal, nativeBuildRun: { runId, signal },
     });
   }
 
@@ -559,7 +576,9 @@ export async function resolveApprovedMcpCandidates(input: {
         recoveryCleanups.clear();
       }
     };
-    resolvedAttachment.recoverRuntimeFailure = async (failedCandidateId) => {
+    resolvedAttachment.recoverRuntimeFailure = async (failedCandidateId, runSignal) => {
+      const recoverySignal = runSignal ?? signal;
+      recoverySignal?.throwIfAborted();
       const failedItem = receipt.attached.find((item) => item.candidateId === failedCandidateId);
       if (!failedItem || !selected.has(failedCandidateId)) return null;
       const healthyCandidateIds = receipt.attached
@@ -577,8 +596,15 @@ export async function resolveApprovedMcpCandidates(input: {
         runtime: input.runtime,
         deps,
         allowRuntimeRecovery: false,
-        nativeBuildRun: input.nativeBuildRun,
+        nativeBuildRun: input.nativeBuildRun && recoverySignal
+          ? { ...input.nativeBuildRun, signal: recoverySignal }
+          : input.nativeBuildRun,
+        signal: recoverySignal,
       });
+      if (recoverySignal?.aborted) {
+        recovered.config?.cleanup?.();
+        recoverySignal.throwIfAborted();
+      }
       const recoveredIds = new Set(recovered.receipt.attached.map((item) => item.candidateId));
       // Every originally healthy capability must remain exact. The failed
       // capability may use an approved same-group fallback; without one it is

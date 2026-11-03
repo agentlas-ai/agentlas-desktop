@@ -84,6 +84,10 @@ export interface MobileBridgeBuildRunInput {
   workspace?: string;
   runtimeSessionId?: string;
   history?: Array<{ role: "user" | "assistant"; text: string }>;
+  /** remote-build-attachments-v1: files the phone uploaded for this turn, already Main-owned paths (chat-attachment-upload.ts). */
+  attachments?: Array<{ path: string; name: string }>;
+  /** remote-build-options-v1: the same choice as the Desktop Build screen's mode; absent = the engine decides. */
+  mode?: "single" | "team" | "package";
 }
 
 export interface MobileBridgeBuildApprovalInput {
@@ -263,6 +267,8 @@ export function createDesktopMobileBridgeBuildActions(): MobileBridgeBuildAction
         mcpAttachment: applied?.attachment,
         ...(input.runtimeSessionId ? { runtimeSessionId: input.runtimeSessionId } : {}),
         ...(input.history?.length ? { history: input.history } : {}),
+        ...(input.attachments?.length ? { attachments: input.attachments } : {}),
+        ...(input.mode ? { mode: input.mode } : {}),
         locale: input.locale,
       };
       transferMobileBuildInterviewWitness(input, request);

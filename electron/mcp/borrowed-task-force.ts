@@ -2072,11 +2072,17 @@ export function extractAgentDirective(raw: Record<string, unknown>): string {
   // 리스/배지 계약은 output.next_step에 실려 온다. 이 형태를 못 읽으면 빌린 에이전트가
   // 전문성·기억 없는 제네릭 3줄 프롬프트로 도는 결함으로 회귀한다 — 떨구지 말 것.
   const output = asObject(raw.output);
-  const grounding = asObject(output.grounding);
+  const memory = asObject(raw.memory);
+  // An explicit engine feature veto is authoritative even if an older path is
+  // present in the same response. Missing/null legacy fields are not a veto.
+  const memoryDisabled = memory.status === "skipped"
+    && memory.reason === "feature_disabled"
+    && memory.feature === "memory-hooks";
+  const grounding = memoryDisabled ? {} : asObject(output.grounding);
   const parts: string[] = [];
   const entry = cleanString(output.entry_excerpt);
   if (entry) parts.push(`### Hub entry instructions (excerpt)\n${entry}`);
-  const memoryRoot = cleanString(grounding.memory_root) || cleanString(asObject(raw.memory).memory_root);
+  const memoryRoot = memoryDisabled ? "" : cleanString(grounding.memory_root) || cleanString(memory.memory_root);
   const groundingDirective = cleanString(grounding.directive);
   const groundingCommands = asObject(grounding.commands);
   if (groundingDirective) {
@@ -2099,7 +2105,7 @@ export function extractAgentDirective(raw: Record<string, unknown>): string {
       ...readOnlyCommands.map(([name, command]) => `${name}: ${command}`),
     ].join("\n"));
   }
-  const nextStep = cleanString(output.next_step);
+  const nextStep = memoryDisabled ? "" : cleanString(output.next_step);
   if (nextStep) parts.push(`### Runtime contract\n${nextStep}`);
   return parts.join("\n\n");
 }
@@ -7674,7 +7680,7 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
     if (systemAuthored) {
       appendChatMessage(p.chat.id, "system", p.req.userPrompt);
     } else {
-      appendChatMessage(p.chat.id, "user", ownerVisiblePrompt(p.req), p.req.images?.length ? { images: p.req.images } : undefined);
+      appendChatMessage(p.chat.id, "user", ownerVisiblePrompt(p.req), { ...(p.req.images?.length ? { images: p.req.images } : {}), ...(p.req.fileGroupId ? { fileGroupId: p.req.fileGroupId } : {}) });
       if (history.length === 0) autoTitleFromFirstMessage(p.chat.id, ownerVisiblePrompt(p.req));
     }
   }

@@ -32,6 +32,8 @@ const MAX_REQUEST_BYTES = 768 * 1024;
 const hostRootContext = AsyncLocalStorage.snapshot();
 
 export interface TurnToolsCapabilityBinding {
+  /** Main-only; omitted from the capability file. */
+  hostVideoCustody?: import("../invocation/host-video-custody").HostVideoCustody;
   /** Main-only admission check. Never written to the child capability file. */
   admissionCurrent?: () => boolean;
   /** Host-only resolver for this exact source run; never serialized to the MCP child.
@@ -503,6 +505,7 @@ export async function handleTurnToolsControlRequest(request: Record<string, unkn
       const ctx = { chatId: binding.chatId, runId: binding.runId, dryRun: binding.dryRun === true,
         signal: requestSignal ? AbortSignal.any([lifetime.signal, requestSignal]) : lifetime.signal,
         hostAccountBinding: binding.hostAccountBinding ?? null,
+        ...(binding.hostVideoCustody ? { hostVideoCustody: binding.hostVideoCustody } : {}),
         ...(binding.permission ? { permission: binding.permission } : {}), ...(binding.graphAuthoring === true ? { graphAuthoring: true } : {}),
         ...(binding.mcpConfigPath ? { mcpConfigPath: binding.mcpConfigPath } : {}) };
       if (operation === "harness_search") {

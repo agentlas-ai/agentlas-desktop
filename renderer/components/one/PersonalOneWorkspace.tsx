@@ -4,7 +4,6 @@ import { composeMessageReply, displayMessageReply, type MessageReply } from "@/l
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { ipc, ipcEvents, grantForDroppedFile, grantForPastedAttachment, grantForPastedImage } from "@/lib/ipc";
-import { fitImageUnder } from "@/lib/attachment-image-fit";
 import { createCoalescedRefresh } from "@/lib/one-refresh-coordinator";
 import { createStoreChangeThrottle, sameSnapshotIgnoring } from "@/lib/store-change-policy";
 import { ChatContinuationProjector } from "@/lib/chat-continuations";
@@ -33,7 +32,8 @@ import { personalOneFile, type PersonalOneFile } from "@/lib/personal-one-file-p
 import { TaskSidePanel } from "@/components/workspace/TaskSidePanel";
 import { linkedLocalFileItem } from "@/lib/linked-local-file";
 import { requestChatFileOpen, chatFilesBridge, chatFileItem, parseChatFileMessage, formatChatFileSize, type ChatFileDraft, type ChatFileItem } from "@/lib/chat-files";
-import { ChatFileCards } from "@/components/ChatFileExperience";
+import { MessageAttachments } from "@/components/media/MessageAttachments";
+import { MediaStrip, mediaKindOf, type MediaStripItem } from "@/components/media/MediaStrip";
 import { HostContinuationNotice } from "@/components/HostContinuationNotice";
 import { ONE_ATTACHMENT_LIMITS } from "../../../shared/one-attachments";
 import { ComposerDecisionSlot } from "@/components/ComposerDecisionPortal";
@@ -57,6 +57,8 @@ import dynamic from "next/dynamic";
 import styles from "./PersonalOneWorkspace.module.css";
 import { Select } from "@/components/Select";
 import { useComposerEnter } from "@/lib/use-composer-enter";
+
+const OneIdentityEditor=dynamic(()=>import("./OneCreateAgentDialog").then(module=>module.OneCreateAgentDialog),{ssr:false});
 
 const PersonalOneTaskResult=dynamic(()=>import("./PersonalOneTaskResult").then(module=>module.PersonalOneTaskResult),{ssr:false});
 
@@ -94,6 +96,10 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
   const {locale}=useT(); const ko=locale==="ko"; const copy=(a:string,b:string)=>ko?a:b;
   const front=useOneFront();
   useEffect(()=>{registerRouter(router); return ()=>registerRouter(null);},[router]);
+  const [identityProfile,setIdentityProfile]=useState<OneProfile|null>(null);
+  const [identityLoading,setIdentityLoading]=useState(false);
+  const [identityError,setIdentityError]=useState(false);
+  const identityTrigger=useRef<HTMLButtonElement>(null);
   const [checkinsOpen,setCheckinsOpen]=useState(false);
   const [budgetsOpen,setBudgetsOpen]=useState(false);const [budgetId,setBudgetId]=useState("");
   const [capabilitiesModal,setCapabilitiesModal]=useState(false);
@@ -143,15 +149,14 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
   useEffect(()=>()=>{for(const item of attachmentsRef.current)if(item.preview)URL.revokeObjectURL(item.preview);},[]);
   const pickAttachments=async(files:File[])=>{
     if(attachmentBusy)return;const next=[...attachments];
-    try{for(const original of files){
-      // A large photo or screenshot is shrunk to fit the image limit instead of refused (owner 2026-10-14).
-      const item=await fitImageUnder(original,ONE_ATTACHMENT_LIMITS.maxImageBytes);
+    try{for(const item of files){
+      // No count or size limit: the original goes as a conversation file; a model gets a fitted copy.
       // A Finder file carries its path; a pasted screenshot, clip or generated file has none, so Main pins its bytes to
       // a private file and issues the same exact-file grant (the One composer's path).
       const grant=await grantForDroppedFile(item)??await grantForPastedAttachment(item)??(item.type.startsWith("image/")?await grantForPastedImage(item):null);
       if(!grant)throw new Error(copy("이 파일을 읽을 수 없습니다.","This file is unavailable."));
-      if(next.length>=ONE_ATTACHMENT_LIMITS.maxCount || item.size>(item.type.startsWith("image/")?ONE_ATTACHMENT_LIMITS.maxImageBytes:ONE_ATTACHMENT_LIMITS.maxFileBytes) || next.reduce((sum,file)=>sum+file.draft.size,0)+item.size>ONE_ATTACHMENT_LIMITS.maxTotalBytes)throw new Error(copy("첨부는 최대 8개, 이미지 5 MB, 파일 64 MB, 전체 96 MB까지 가능합니다.","Attachments allow 8 items, 5 MB images, 64 MB files and 96 MB total."));
-      next.push({draft:{grant,name:item.name,mediaType:item.type||"application/octet-stream",size:item.size,kind:"file"},...(item.type.startsWith("image/")?{preview:URL.createObjectURL(item)}:{})});
+      if(item.size>ONE_ATTACHMENT_LIMITS.maxFileBytes)throw new Error(copy(`${item.name}: 한 파일은 대화 저장소 한계(1 GB)까지 넣을 수 있습니다.`,`${item.name}: one file can be up to the conversation store's 1 GB.`));
+      next.push({draft:{grant,name:item.name,mediaType:item.type||"application/octet-stream",size:item.size,kind:"file"},...(item.type.startsWith("image/")||item.type.startsWith("video/")?{preview:URL.createObjectURL(item)}:{})});
     }setAttachmentError(null);}catch(cause){setAttachmentError(cause instanceof Error?cause.message:String(cause));}
     setAttachments(next);
   };
@@ -183,10 +188,12 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
   const [taskPreviewOnly,setTaskPreviewOnly]=useState(false); const [selectedHandoff,setSelectedHandoff]=useState<string|null>(null); const [file,setFile]=useState<PersonalOneFile|null>(null);
   const [requestedTaskUnavailable,setRequestedTaskUnavailable]=useState(false);
   const [artifactOpen,setArtifactOpen]=useState(false);
+  const [browserChatId,setBrowserChatId]=useState<string|null>(null);
+  const [pendingWebLink,setPendingWebLink]=useState<{file:LinkedFileArtifact;chatId:string}|null>(null);
   const [outputPanelEmpty,setOutputPanelEmpty]=useState(false);
   const taskDrawerVisible=tasksOpen&&!file&&!artifactOpen;
   const outputPanelVisible=taskDrawerVisible||((!!file||artifactOpen)&&!outputPanelEmpty);
-  const showTaskDrawer=useCallback(()=>{setTasksOpen(true);setArtifactOpen(false);setFile(null);},[]);
+  const showTaskDrawer=useCallback(()=>{setTasksOpen(true);setArtifactOpen(false);setFile(null);setBrowserChatId(null);setPendingWebLink(null);},[]);
   useEffect(()=>{if(!requestedTaskId||!snapshot||consumedTask.current===requestedTaskId)return;const exact=snapshot.tasks.find(item=>item.taskId===requestedTaskId);
     if(!exact){
       // A notification can name a task the snapshot has not caught up with yet: read again once and say nothing for a few seconds;
@@ -498,6 +505,12 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
     try{showReceipt(await write(task.runId?"stopTask":"control",{oneId:snapshot?.oneId,taskId:task.taskId,expectedVersion:task.controlVersion,...(task.runId?{runId:task.runId}:{action:"cancel"})}));void sync();}
     catch{setError(true);void sync();}finally{setStopPending(null);}
   };
+  const openIdentity=async()=>{
+    if(identityLoading)return;
+    setIdentityLoading(true);setIdentityError(false);
+    try{setIdentityProfile(await ipc()!.oneProfile.get());}catch{setIdentityError(true);}finally{setIdentityLoading(false);}
+  };
+  const closeIdentity=()=>{setIdentityProfile(null);requestAnimationFrame(()=>identityTrigger.current?.focus());};
   const appearance=async()=>{setProfileError(false);setAppearanceOpen(true);try{const value=await ipc()!.oneProfile.get();setProfile(value);setProfileName(value.displayName);setBubbleColor(value.bubbleColor ?? "blue");}catch{setProfileError(true);}};
   const saveAppearance=async()=>{
     if(!profile||savingProfile)return;setSavingProfile(true);
@@ -511,12 +524,26 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
     catch{setProfileError(true);}finally{setSavingProfile(false);}
   };
   const openMemory=async()=>{setMemoryOpen(true);try{setMemory(await ipc()!.oneMemory.getState());}catch{setError(true);}};
-  const openFile=useCallback((reference:LinkedFileArtifact,chatId:string)=>{try{setFile(personalOneFile(reference,chatId));setTasksOpen(false);}catch{setError(true);}},[]);
+  const openFile=useCallback((reference:LinkedFileArtifact,chatId:string)=>{
+    if (/^https?:\/\//iu.test(reference.href)) {
+      // The panel may currently belong to a task or a local file. Switch its
+      // owner first; dispatch only after the matching panel has mounted.
+      setFile(null);setTasksOpen(false);setBrowserChatId(chatId);setArtifactOpen(true);
+      setPendingWebLink({file:reference,chatId});
+      return;
+    }
+    try{setBrowserChatId(null);setPendingWebLink(null);setFile(personalOneFile(reference,chatId));setTasksOpen(false);}catch{setError(true);}
+  },[]);
   const openConversationFile=useCallback((reference:LinkedFileArtifact)=>{
     if(snapshot?.conversationChatId)openFile(reference,snapshot.conversationChatId);
   },[openFile,snapshot?.conversationChatId]);
   const task=snapshot?.tasks.find(item=>item.taskId===selected);const name=snapshot?.displayName||"One";
-  const panelChatId=file?.chatId ?? task?.chatId ?? snapshot?.conversationChatId ?? null;
+  const panelChatId=file?.chatId ?? browserChatId ?? task?.chatId ?? snapshot?.conversationChatId ?? null;
+  useEffect(()=>{
+    if(!pendingWebLink || pendingWebLink.chatId!==panelChatId)return;
+    window.dispatchEvent(new CustomEvent("agentlas:in-app-linked-file", {detail:{...pendingWebLink.file,chatId:pendingWebLink.chatId}}));
+    setPendingWebLink(null);
+  },[pendingWebLink,panelChatId]);
   useEffect(()=>{
     if(!file || file.chatId!==panelChatId)return;
     const linked=linkedLocalFileItem({path:file.path,name:file.name},file.chatId);
@@ -565,7 +592,7 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
   return <div ref={workspaceRoot} className={styles.root} data-personal-one-workspace="true" data-detached={detached} data-layout={viewportWidth>=860?"workbench":"companion"} onDragOver={event=>{if(event.dataTransfer.types.includes("Files")){event.preventDefault();event.dataTransfer.dropEffect="copy";}}} onDrop={event=>{if(event.dataTransfer.files.length){event.preventDefault();void pickAttachments(Array.from(event.dataTransfer.files));}}} style={{"--personal-bubble":bubbleHex(snapshot?.bubbleColor)} as CSSProperties}>
     {!detached&&<aside id="personal-one-navigation" className={styles.navigation} data-collapsed={navCollapsed} hidden={navCollapsed} aria-label={copy("One 탐색","One navigation")}>
       <div className="titlebar-drag" style={{height:28}}/><ProductModeMenu current="one" locale={ko?"ko":"en"}/>
-      <button className={styles.personalEntry} data-personal-one-entry="true" aria-current="page"><OneAgentPortrait label={name} status="quiet" size="small" tone={snapshot?.avatarIcon ?? "character:orange-dino"}/><span className={styles.personalIdentity}><strong>{name}</strong><small>{copy("개인 에이전트","Personal agent")}</small></span></button>
+      <button className={styles.personalEntry} data-personal-one-entry="true" aria-current="page"><OneAgentPortrait label={name} status="quiet" size="small" tone={snapshot?.avatarIcon ?? "character:orange-dino"} revision={snapshot?.profileVersion}/><span className={styles.personalIdentity}><strong>{name}</strong><small>{copy("개인 에이전트","Personal agent")}</small></span></button>
       <nav className={styles.tabs}><button onClick={()=>navigateRail("organisation")}>{copy("에이전트","Agents")}</button><button onClick={()=>navigateRail("sessions")}>{copy("세션","Session")}</button><button onClick={()=>navigateRail("mail")}>{copy("메일","Mail")}</button></nav>
       <div className={styles.navigationLinks}><button onClick={()=>navigateRail("sessions")}>{copy("One으로 돌아가기","Back to One")}</button><button onClick={()=>void appearance()}><IconSettings size={16}/>{copy("이름과 말풍선","Name and bubbles")}</button><button onClick={()=>void openMemory()}><IconBrain size={16}/>{copy("메모리","Memory")}</button><button type="button" data-one-capabilities-entry="true" onClick={()=>setCapabilitiesModal(true)}><IconPuzzle size={16}/>{copy("능력","Capabilities")}</button><button onClick={()=>setHistoryOpen(true)}>{copy("지난 One 대화","Previous One conversations")}</button></div>
       <p className={styles.localLabel}>{copy("이 컴퓨터에서 실행","Runs on this computer")}</p>
@@ -573,7 +600,7 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
     <main className={styles.conversation}>
       <header ref={contextBar} className={`${styles.header} ${detached?"titlebar-drag":""}`} data-personal-one-header="true">
         <div className={`${styles.headerSide} titlebar-nodrag`}>{!detached&&<button type="button" className={styles.iconButton} data-personal-one-nav-toggle="true" aria-label={navCollapsed?copy("사이드바 열기","Open sidebar"):copy("사이드바 접기","Collapse sidebar")} title={navCollapsed?copy("사이드바 열기","Open sidebar"):copy("사이드바 접기","Collapse sidebar")} aria-expanded={!navCollapsed} aria-controls="personal-one-navigation" onClick={toggleNav}><IconSidebar size={18}/></button>}</div>
-        <div className={styles.headerIdentity}><span className={styles.headerAvatar} aria-hidden="true"><OneAgentPortrait label={name} status="quiet" size="small" tone={snapshot?.avatarIcon ?? "character:orange-dino"}/></span><h1>{name}</h1><small role="status">{!snapshot?copy("연결 확인 중","Checking connection"):error?copy("마지막 관측 표시","Last observation"):copy("이 컴퓨터에 연결됨","Connected to this computer")}</small></div>
+        <div className={styles.headerIdentity}><button ref={identityTrigger} type="button" className={`${styles.headerIdentityButton} titlebar-nodrag`} onClick={()=>void openIdentity()} disabled={identityLoading} aria-label={copy("이름과 사진 편집","Edit name and photo")} aria-haspopup="dialog" aria-busy={identityLoading}><span className={styles.headerAvatar} aria-hidden="true"><OneAgentPortrait label={name} status="quiet" size="small" tone={snapshot?.avatarIcon ?? "character:orange-dino"} revision={snapshot?.profileVersion}/></span><span className={styles.headerIdentityName}>{name}</span></button><small role="status">{!snapshot?copy("연결 확인 중","Checking connection"):error?copy("마지막 관측 표시","Last observation"):copy("이 컴퓨터에 연결됨","Connected to this computer")}</small></div>
         <div className={`${styles.headerSide} titlebar-nodrag`} data-side="end">
           {detached&&<button className={styles.iconButton} type="button" aria-label={copy("항상 위에 두기","Always on top")} aria-pressed={pinned} title={copy("항상 위에 두기","Always on top")} onClick={()=>void togglePinned()}><span aria-hidden="true">⌖</span></button>}
           <button type="button" className={styles.iconButton} aria-label={copy("결과·작업 보기","Show results and work")} aria-expanded={taskDrawerVisible} title={copy("결과·작업 보기","Show results and work")} onClick={()=>{if(taskDrawerVisible)setTasksOpen(false);else showTaskDrawer();setTaskPreviewOnly(Boolean(selected));}}><IconPanelRight size={17}/></button>
@@ -610,7 +637,7 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
             return timeline.map(entry=>{
             const row=entry.row;
             if(!row){const notice=entry.notice!;return <div key={`dispatch-notice:${notice.id}`} className={styles.turn} data-role="notice" data-personal-one-dispatch-notice={notice.id}>
-              <HostContinuationNotice text={notice.text} locale={ko?"ko":"en"} notice={notice.hostNotice} onOpenChat={chatId=>void openMain(`/one?chat=${encodeURIComponent(chatId)}`)}/>
+              <HostContinuationNotice text={notice.text} locale={ko?"ko":"en"} notice={notice.hostNotice} onOpenChat={chatId=>void openMain(`/one?chat=${encodeURIComponent(chatId)}`)} chatId={snapshot?.conversationChatId} onOpenLinkedFile={openConversationFile}/>
             </div>;}
             const message=row.message,turn=message.replyTurn;
             const sourceMessageId=row.sourceId;
@@ -639,8 +666,8 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
                 :<Markdown text={markdownText} messageId={contentId} chatId={snapshot?.conversationChatId} onOpenLinkedFile={openConversationFile} onUiFollowup={message.role==="assistant"?prepareUiFollowup:undefined} uiActionsDisabled={Boolean(activeReply||attachmentBusy)}/>}
               <InlineUiInstances chatId={snapshot?.conversationChatId} instances={ownedUi} turnIds={turn?[turn.runId]:[]} locale={ko?"ko":"en"}/>
             </article></MessageActions>}
-            {imageUrls.map((src,index)=><img key={src} src={src} alt={copy("첨부 이미지 ","Attached image ")+(index+1)} style={{maxWidth:240,maxHeight:180,borderRadius:10}}/>)}
-            {fileGroups.map(group=><ChatFileCards key={group} files={messageFiles[group] ?? []} locale={ko?"ko":"en"} onOpen={requestChatFileOpen}/>)}
+            {/* media-carousel: pictures and videos as one swipeable strip, other files as cards (components/media). */}
+            {(imageUrls.length>0||fileGroups.length>0)&&<MessageAttachments files={fileGroups.flatMap(group=>messageFiles[group] ?? [])} imageUrls={imageUrls} locale={ko?"ko":"en"} onOpenFile={requestChatFileOpen} align={message.role==="user"?"end":"start"}/>}
             {delegated.map(delegation)}
             {/* Owner 2026-10-04: while One answers, three dots without an activity log. */}
             {typing&&<div className={styles.typing} role="status" aria-label={copy("답하는 중","Answering")}><span/><span/><span/></div>}
@@ -679,10 +706,14 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
         {sendWaiting&&<p role="status" className={styles.feedback}>{copy("모델 선택을 확인하는 중이에요. 확인되면 바로 보냅니다.","Checking the model selection. It sends as soon as that is confirmed.")}</p>}
         <MessageReplyPreview reply={messageReply} locale={locale} onDismiss={()=>setMessageReply(null)}/>
         <form className={styles.composer} data-one-composer="true" data-has-files={attachments.length>0} data-ready={Boolean(text.trim())||attachments.length>0} onSubmit={event=>{event.preventDefault();void send();}}>
-          {attachments.length>0&&<div className={styles.attachmentDrafts} aria-label={copy("선택한 첨부","Selected attachments")}>{attachments.map((item,index)=><div className={styles.attachmentDraft} data-kind={item.preview?"image":"file"} key={index} title={item.draft.name}>
-            {item.preview?<img src={item.preview} alt={item.draft.name}/>:<span className={styles.attachmentFile}><IconFileUp size={18}/><strong>{item.draft.name}</strong><small>{formatChatFileSize(item.draft.size)}</small></span>}
-            <button type="button" aria-label={copy("첨부 삭제: ","Remove attachment: ")+item.draft.name} onClick={()=>{if(item.preview)URL.revokeObjectURL(item.preview);setAttachments(prior=>prior.filter((_,position)=>position!==index));}}><IconClose size={12}/></button>
-          </div>)}</div>}
+          {attachments.length>0&&<div className={styles.attachmentDrafts} aria-label={copy("선택한 첨부","Selected attachments")}>
+            {/* One horizontal strip of thumbnails and file tiles, each with × (media-carousel). */}
+            <MediaStrip variant="composer" locale={ko?"ko":"en"} items={attachments.map((item,index):MediaStripItem=>({
+              key:`${item.draft.grant.scope.token}:${index}`,kind:item.preview?mediaKindOf(item.draft.mediaType,item.draft.name):"file",name:item.draft.name,
+              src:item.preview,thumbSrc:item.preview&&item.draft.mediaType.startsWith("image/")?item.preview:undefined,meta:formatChatFileSize(item.draft.size),
+              onRemove:()=>{if(item.preview)URL.revokeObjectURL(item.preview);setAttachments(prior=>prior.filter((_,position)=>position!==index));},
+            }))}/>
+          </div>}
           <div ref={plusMenu} className={styles.plus}>
             <button type="button" className={styles.iconButton} aria-label={copy("추가","Add")} aria-haspopup="menu" aria-expanded={plusOpen} data-hover="own" onClick={()=>setPlusOpen(value=>!value)}><IconPlus size={20}/></button>
             {plusOpen&&<div className={styles.plusMenu} role="menu" aria-label={copy("추가","Add")}>
@@ -754,8 +785,10 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
       </section>}
     </div>
       </aside>
-      <TaskSidePanel key={panelChatId ?? "one-files"} items={[]} locale={ko?'ko':'en'} visible={!!file||artifactOpen} onEmptyChange={setOutputPanelEmpty} screenChatId={panelChatId} browserScopeKey={panelChatId ?? 'personal-one-unbound'} width={shownPanelWidth} minWidth={280} maxWidth={panelMaxWidth} onResize={resizePanel} onRequestReadableWidth={resizePanel} onRequestOpen={()=>setArtifactOpen(true)} onClose={()=>{setFile(null);setArtifactOpen(false);}}/>
+      <TaskSidePanel key={panelChatId ?? "one-files"} items={[]} locale={ko?'ko':'en'} visible={!!file||artifactOpen} onEmptyChange={setOutputPanelEmpty} screenChatId={panelChatId} browserScopeKey={panelChatId ?? 'personal-one-unbound'} width={shownPanelWidth} minWidth={280} maxWidth={panelMaxWidth} onResize={resizePanel} onRequestReadableWidth={resizePanel} onRequestOpen={()=>setArtifactOpen(true)} onClose={()=>{setFile(null);setArtifactOpen(false);setBrowserChatId(null);setPendingWebLink(null);}}/>
     </div>
+    {identityError&&<p role="alert" className={styles.feedback}>{copy("프로필을 열지 못했습니다. 다시 눌러 주세요.","Could not open the profile. Please try again.")}</p>}
+    {identityProfile&&<OneIdentityEditor open identityOnly locale={ko?"ko":"en"} editOne={{oneId:identityProfile.oneId,displayName:identityProfile.displayName,role:identityProfile.role,profileContext:identityProfile.profileContext,avatarIcon:identityProfile.avatarIcon ?? "character:orange-dino",expectedVersion:identityProfile.version}} onClose={closeIdentity} onCreated={()=>{}} onAddExisting={()=>{}} onSavedOne={async()=>{await sync();}}/>}
     <OneBottomSheet open={appearanceOpen} onClose={()=>setAppearanceOpen(false)} closeLabel={copy("설정 닫기","Close appearance")} ariaLabel={copy("나의 One","Your One")} title={copy("나의 One","Your One")} icon={<IconSettings size={20} />} size="compact" footer={<button className={styles.saveAppearance} disabled={!profile||savingProfile||!profileName.trim()} onClick={()=>void saveAppearance()}>{copy("저장","Save")}</button>}>
       <div className={styles.appearance}>{profileError&&<p role="status">{copy("저장을 확인하지 못했습니다. 최신 설정을 확인하고 다시 저장해 주세요.","The save could not be confirmed. Review the latest settings and save again.")}</p>}<label>{copy("이름","Name")}<input aria-label={copy("One 이름","One name")} value={profileName} onChange={event=>setProfileName(event.target.value)} maxLength={64}/></label><fieldset className={styles.bubbleChoices}><legend>{copy("말풍선 색","Bubble color")}</legend><div role="radiogroup" aria-label={copy("말풍선 색","Bubble color")}>{Object.keys(ONE_BUBBLE_COLORS).map(color=><button type="button" key={color} role="radio" aria-checked={bubbleColor===color} aria-label={({blue:copy("파랑","Blue"),green:copy("초록","Green"),purple:copy("보라","Purple"),rose:copy("장미","Rose"),amber:copy("호박","Amber"),slate:copy("회색","Slate")} as Record<string,string>)[color]} onClick={()=>setBubbleColor(color as OneBubbleColor)} style={{background:bubbleHex(color as OneBubbleColor)}}>{bubbleColor===color&&<IconCheck size={18}/>}</button>)}</div></fieldset><p className={styles.preview} style={{background:bubbleHex(bubbleColor)}}>{profileName||name}</p><OneFrontSetting controller={front} locale={ko?"ko":"en"}/></div>
     </OneBottomSheet>

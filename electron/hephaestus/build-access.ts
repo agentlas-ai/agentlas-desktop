@@ -1,5 +1,5 @@
 import type { HephaestusBuildRequest } from "../../shared/types";
-import { FsAccessDeniedError, pathFromGrant } from "../fs/access";
+import { pathFromGrant } from "../fs/access";
 import { applyMcpBuildConsent } from "../mcp-tools/build-plan";
 import type { ResolvedHephaestusBuildRequest } from "./builder";
 
@@ -10,9 +10,6 @@ import type { ResolvedHephaestusBuildRequest } from "./builder";
 export function resolveHephaestusBuildRequest(
   request: HephaestusBuildRequest,
 ): ResolvedHephaestusBuildRequest {
-  if ((request.attachments?.length ?? 0) > 64) {
-    throw new FsAccessDeniedError("A build can include at most 64 attachments.");
-  }
   const workspace = pathFromGrant(request.workspaceGrant, "directory");
   const attachments = request.attachments?.map((attachment) => ({
     path: pathFromGrant(attachment.grant),
@@ -38,7 +35,9 @@ export function resolveHephaestusBuildRequest(
  */
 export async function resolveHephaestusBuildRequestForRun(
   request: HephaestusBuildRequest,
+  signal?: AbortSignal,
 ): Promise<ResolvedHephaestusBuildRequest> {
+  signal?.throwIfAborted();
   const resolved = resolveHephaestusBuildRequest(request);
   const originalRequest = request.history?.find((entry) => entry.role === "user")?.text ?? request.request;
   const applied = await applyMcpBuildConsent({
@@ -46,7 +45,9 @@ export async function resolveHephaestusBuildRequestForRun(
     mode: request.mode,
     runtime: request.runtime,
     consent: request.mcpConsent,
+    signal,
   });
+  signal?.throwIfAborted();
   return {
     ...resolved,
     runtime: applied.runtime ?? request.runtime,

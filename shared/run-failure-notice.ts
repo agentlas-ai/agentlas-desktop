@@ -152,6 +152,8 @@ type NamedClass = Exclude<RunFailureNoticeCause, "unsettled">;
 
 export interface RunFailureNoticeFacts {
   locale: RunFailureNoticeLocale;
+  /** At this attempt's failure, the same queued run was eligible for another try. */
+  queuedRetry?: boolean;
   /** The run's terminal machine code (event.error.code, receipt.errorCode). */
   errorCode?: string | null;
   /** The host-observed provider failure (event.error.runtimeFailure, receipt.runtimeFailure). */
@@ -208,8 +210,16 @@ function resolve(facts: Pick<RunFailureNoticeFacts, "errorCode" | "runtimeFailur
       const named = causeClass(failure.cause);
       return named ? { cause: named, unfinished: true, failure: failure.cause! } : { cause: "unsettled", unfinished: true, failure };
     }
+    // A bare `refused` (the provider gave no code) beside a host-owned terminal code is the host's refusal, not the provider's: the
+    // code names the cause (E22,: the owner read "the provider refused" for a tool or Goal state that never reached it).
+    const hostOwned = failure.kind === "refused" && !failure.providerCode ? hostClassOfCode(facts.errorCode) : null;
+    if (hostOwned) return { cause: hostOwned, unfinished: false, failure: { source: "marker" } };
     const named = causeClass(failure);
-    return named ? { cause: named, unfinished: false, failure } : null;
+    if (named) return { cause: named, unfinished: false, failure };
+    // The typed failure names no class of its own (a refusal under a host-owned code, an exit kind): the run's terminal machine code still
+    // may, so the cause is not lost to the generic line (E22). A typed provider verdict above always wins.
+    const hostNamed = hostClassOfCode(facts.errorCode);
+    return hostNamed ? { cause: hostNamed, unfinished: false, failure: { source: "marker" } } : null;
   }
   // No typed provider failure (a failure of kind `exit` is not carried by the event): the run's own terminal machine code,
   // when it is one of the host-owned codes that name a class. An unfinished turn never gets here (it needs its failure).
@@ -264,7 +274,7 @@ const KO: Record<RunFailureNoticeCause, Copy> = {
   store_busy: { lead: ["Agentlas 저장소가 다른 기록으로 잠겨 있어 이 턴을 끝까지 기록하지 못했습니다.", "Agentlas 저장소가 다른 기록으로 잠겨 있어 이 턴을 끝까지 기록하지 못한 것으로 보입니다."],
     action: "실행 기록을 확인한 뒤 같은 요청을 다시 보내 보세요." },
   project_busy: { lead: ["이 Work 프로젝트의 다른 채팅에서 에이전트가 아직 실행 중이라 시작하지 않았습니다.", "이 Work 프로젝트의 다른 채팅에서 에이전트가 아직 실행 중이라 시작하지 않은 것으로 보입니다."],
-    action: "지금 실행이 끝난 뒤 다시 보내 주세요." },
+    action: "다시 보내기 전에 요청의 현재 상태를 확인해 주세요." },
   provider_connection: { lead: ["모델 공급자에 연결하지 못해(인증·네트워크) 답변을 완료하지 못했습니다.", "모델 공급자에 연결하지 못해(인증·네트워크) 답변을 완료하지 못한 것으로 보입니다."],
     action: "설정에서 해당 모델의 로그인을 확인한 뒤 다시 보내거나 다른 모델을 골라 보세요." },
   session_reopen: { lead: ["이 대화의 이전 실행 세션을 다시 열지 못해 답변을 시작하지 못했습니다.", "이 대화의 이전 실행 세션을 다시 열지 못해 답변을 시작하지 못한 것으로 보입니다."],
@@ -315,7 +325,7 @@ const EN: Record<RunFailureNoticeCause, Copy> = {
   store_busy: { lead: ["The Agentlas store was locked by another write, so this turn could not be fully recorded.", "The Agentlas store appears to have been locked by another write, so this turn could not be fully recorded."],
     action: "Check the run history, then send the same request again." },
   project_busy: { lead: ["An agent is still running in another chat of this Work project, so this was not started.", "An agent appears to be still running in another chat of this Work project, so this was not started."],
-    action: "Send it again once that run has finished." },
+    action: "Check the request's current status before sending it again." },
   provider_connection: { lead: ["The model provider could not be reached (sign-in or network), so the reply could not be completed.", "The model provider appears not to have been reached (sign-in or network), so the reply could not be completed."],
     action: "Check that model's sign-in in Settings and send it again, or choose another model." },
   session_reopen: { lead: ["This conversation's previous run session could not be reopened, so the reply was not started.", "This conversation's previous run session appears not to have reopened, so the reply was not started."],
@@ -332,6 +342,7 @@ const MAY_HAVE_ACTED = { ko: "요청이 이미 실행됐을 수 있어 자동으
 const NOTHING_RAN = { ko: "실행된 도구가 없어 아무것도 바뀌지 않았고, 자동으로 다시 보내지는 않았습니다.", en: "No tool ran, so nothing was changed; it was not sent again automatically." } as const;
 const RESENDING = { ko: "요청이 이미 실행됐을 수 있어, 앱이 같은 요청을 스스로 한 번 더 보내면서 앞선 시도가 일부 실행됐을 수 있다고 모델에 알립니다.", en: "The request may already have acted, so the app is sending it once more by itself and telling the model the earlier attempt may have partly happened." } as const;
 const RESENT_ONCE = { ko: "요청이 이미 실행됐을 수 있습니다. 앱이 이미 한 번 다시 보냈지만 같은 식으로 끝났고, 더 보내지 않습니다.", en: "The request may already have acted. The app already sent it once more and it ended the same way, so it sends nothing more." } as const;
+const QUEUE_RETRIES = { ko: "앱이 이 메시지를 스스로 다시 시도하므로 다시 보내지 않아도 됩니다.", en: "The app will try this message again by itself, so you do not need to send it again." } as const;
 const CHECK_HISTORY = { ko: "실행 기록에서 어디까지 실행됐는지 확인하세요.", en: "Check the run history for what already ran." } as const;
 const DETAIL_LABEL = { ko: "보고된 사유", en: "Reported reason" } as const;
 
@@ -364,6 +375,7 @@ export function runFailureNoticeText(facts: RunFailureNoticeFacts): string | nul
   const resend = (resolved.cause === "unsettled" || resolved.cause === "store_busy") && facts.turnDelivery !== "not-dispatched" ? facts.resend : undefined;
   // The runner's own "automatic replay stopped" words are not quoted beside "the app is sending it again".
   const detail = quoted && resend !== "now" ? boundedFailureDetail(facts.detail) : null;
+  const queuedByApp = facts.queuedRetry === true && facts.turnDelivery === "not-dispatched" && !resolved.unfinished;
   return [
     copy.lead[hedged ? 1 : 0],
     facts.turnDelivery === "not-dispatched" ? NOT_SENT[locale]
@@ -373,7 +385,10 @@ export function runFailureNoticeText(facts: RunFailureNoticeFacts): string | nul
     reset,
     SAVED[locale],
     resolved.unfinished && resolved.cause !== "empty_no_tool" && resend !== "now" ? CHECK_HISTORY[locale] : undefined,
-    resend === "now" ? undefined : copy.action,
+    // The send queue starts this message again by itself (queueWillStartRunAgain, read at the failure): whatever the cause, the line says
+    // that and does not ask the owner to send it again, which would overlap the app's own retry (E20).
+    queuedByApp ? QUEUE_RETRIES[locale]
+      : resend === "now" ? undefined : copy.action,
     detail ? `${DETAIL_LABEL[locale]}: “${detail}”` : undefined,
   ].filter(Boolean).join(" ");
 }

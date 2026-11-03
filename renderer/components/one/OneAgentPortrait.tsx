@@ -10,11 +10,13 @@ export function OneAgentPortrait({
   label,
   size = "medium",
   tone = "character:orange-dino",
+  revision,
 }: {
   status: OneOrgStatusKind;
   label: string;
   size?: "small" | "medium" | "large";
   tone?: string;
+  revision?: number;
 }) {
   const character = oneCharacterForTone(tone);
   const customAvatarId = tone.startsWith("one-avatar:") ? tone.slice("one-avatar:".length) : "";
@@ -26,7 +28,7 @@ export function OneAgentPortrait({
   const storedAvatarUrl = /^(https?:\/\/|\/)/.test(tone) ? tone : "";
   const custom = Boolean(customAvatarId || storedAvatarUrl);
   const customSrc = customAvatarId
-    ? `agentlas://one-avatar/${encodeURIComponent(customAvatarId)}`
+    ? `agentlas://one-avatar/${encodeURIComponent(customAvatarId)}${Number.isSafeInteger(revision) && Number(revision)>0 ? `?v=${revision}` : ""}`
     : storedAvatarUrl;
   /*
    * 직접 넣은 얼굴 파일이 없거나(다른 사본·삭제·권한) 주소가 안 열리면 브라우저의 깨진 그림

@@ -7,7 +7,6 @@ import { getDb } from "../store/db";
 import { nativeOwnerTextChoices } from "./native-owner-text";
 import type { NativeOwnerTextBinding, NativeOwnerTextKind, NativeOwnerTextReceipt } from "./native-owner-text";
 import type { McpInvocationRequest } from "../../shared/types";
-import { BrowserWindow } from "electron";
 import type { ToolApprovalDecision, ToolApprovalRequestEvent, ToolApprovalResolutionReceipt } from "../../shared/types";
 import { toolApprovalActionId } from "../../shared/tool-approval-action";
 import { importNativeJsonValue } from "../daemon/native-json-transfer";
@@ -62,10 +61,25 @@ function card(v: unknown, requestId: string, chatId: string): ToolApprovalReques
     || !["read", "write", "full"].includes(String(v.consentBinding.permissionScope)))) fail("native_gui_approval_card_invalid");
   return v as unknown as ToolApprovalRequestEvent;
 }
-function broadcast(channel: string, payload: unknown) { for (const window of BrowserWindow.getAllWindows()) {
+function broadcast(channel: string, payload: unknown) {
+  // The daemon can reach the shared approval module without having Electron.
+  // Only a GUI host needs windows; don't make merely importing this module
+  // depend on Electron being present in the daemon process.
+  let browserWindow: typeof import("electron").BrowserWindow | undefined;
+  try { browserWindow = (require("electron") as typeof import("electron")).BrowserWindow; } // eslint-disable-line @typescript-eslint/no-require-imports
+  catch (error) {
+    if (process.type !== "browser" && (error as NodeJS.ErrnoException)?.code === "MODULE_NOT_FOUND") return;
+    throw error;
+  }
+  if (!browserWindow) {
+    if (process.type === "browser") throw new Error("native_gui_windows_unavailable");
+    return;
+  }
+  for (const window of browserWindow.getAllWindows()) {
   if (window.isDestroyed() || window.webContents.isDestroyed()) continue;
   try { window.webContents.send(channel, payload); } catch { /* Viewer loss does not cancel custody. */ }
-} }
+  }
+}
 let configured: ReturnType<typeof createNativeGuiControls> | undefined;
 /** Native Main-only. Captures readonly source snapshot; never creates a private
  * preparation handle, reissues starts, or treats a missing row as no execution. */

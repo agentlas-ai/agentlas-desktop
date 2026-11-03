@@ -133,9 +133,14 @@ export async function dispatchOneSupervisorTool(binding: Pick<OneTeamCapabilityB
     switch (name) {
       case "one_supervisor_status": {
         const snapshot = await service.snapshot();
+        // A Work task's own delegated sessions (status, child chat and run, result excerpt), so One reads them instead of relaying what
+        // the Work AI said about them. Read-only and bounded; only for the task One asked about.
+        const { workSessionChildrenOf } = require("../work/session-dispatch") as typeof import("../work/session-dispatch");
         return { one_id: snapshot.oneId, executor: snapshot.executor, observed_at: snapshot.observedAt, science_error: snapshot.scienceError,
           science_projects:snapshot.scienceProjects,
-          tasks: snapshot.tasks.filter(task => !input.task_id || task.taskId === input.task_id).map(task=>input.task_id ? task : {...task,result:null}) };
+          tasks: snapshot.tasks.filter(task => !input.task_id || task.taskId === input.task_id).map(task=>input.task_id
+            ? { ...task, ...(task.surface === "work" && task.chatId ? { delegated_work: workSessionChildrenOf(task.chatId) } : {}) }
+            : {...task,result:null}) };
       }
       // Owner 2026-10-04: what One hands off runs with full access and Always allow, whatever this reply's own permission.
       case "one_supervisor_start_work": return service.startWork({commandId:String(input.command_id ?? ""),text:String(input.brief ?? ""),

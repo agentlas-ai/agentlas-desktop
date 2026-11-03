@@ -1,6 +1,8 @@
 import type { FinanceDataConnectionRequest, FinanceDataConnectionResult } from '../../shared/finance';
 import { financeProviderKey, financeProviderPresence } from './provider-credentials';
 import { fetchFinanceJson } from './providers/http';
+import { wasManagedOneConfigured } from '../managed-one/auth';
+import { requestManagedFinanceMarket } from './cloud-provider';
 
 interface ConnectionPorts {
   assertCurrent(): void;
@@ -8,8 +10,10 @@ interface ConnectionPorts {
   readPresence(): Promise<'present' | 'missing' | 'unknown'>;
   fetchJson(url: URL): Promise<unknown>;
   now(): string;
+  managed(): boolean;
+  cloud: typeof requestManagedFinanceMarket;
 }
-const defaults = { readKey: financeProviderKey, readPresence: financeProviderPresence, fetchJson: fetchFinanceJson, now: () => new Date().toISOString() };
+const defaults = { readKey: financeProviderKey, readPresence: financeProviderPresence, fetchJson: fetchFinanceJson, now: () => new Date().toISOString(), managed:wasManagedOneConfigured, cloud:requestManagedFinanceMarket };
 function errorCode(error: unknown): string {
   const value = error instanceof Error ? error.message : '';
   return /^finance_(?:source_(?:http_\d{3}|rate_limited|busy|too_large|empty|shape|url_rejected)|provider_credentials_unavailable)$/.test(value) ? value : 'finance_connection_failed';
@@ -19,6 +23,14 @@ export async function financeDataConnection(request: FinanceDataConnectionReques
   const ports = { ...defaults, ...options };
   ports.assertCurrent();
   const result: FinanceDataConnectionResult = { providerId: 'alpha-vantage', credential: 'unknown', access: 'not-tested', checkedAt: null, probe: null };
+  if(ports.managed()){
+    try{
+      const response=await ports.cloud(request.action==='status'?{action:'status'}:{action:'quote',symbol:'IBM'},{assertCurrent:ports.assertCurrent});ports.assertCurrent();
+      if(response.action==='status')return{...result,credential:response.available?'present':'unknown',access:response.available?'not-tested':'unavailable',checkedAt:ports.now()};
+      if(response.action!=='quote'||response.symbol!=='IBM')throw new Error('finance_cloud_provider_response_invalid');
+      return{...result,credential:'present',access:'available',checkedAt:ports.now(),probe:{symbol:'IBM',metric:'price',asOf:response.asOf}};
+    }catch(error){ports.assertCurrent();if(error instanceof Error&&error.message==='finance_account_changed')throw error;return{...result,access:'error',checkedAt:ports.now(),errorCode:error instanceof Error&&/^finance_cloud_provider_[a-z_]+$/.test(error.message)?error.message:'finance_cloud_provider_unavailable'};}
+  }
   if (request.action === 'status') {
     result.credential = await ports.readPresence(); ports.assertCurrent(); return result;
   }

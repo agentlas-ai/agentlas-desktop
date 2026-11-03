@@ -1,5 +1,6 @@
 import path from "node:path";
 import { BUILTIN_MCP_LAUNCH_ARGV_MAX_CHARS, defineBuiltinMcpLaunch } from "../mcp-tools/builtin-mcp-launch";
+import { COMPUTER_USE_REQUEST_BUDGET_SOURCE } from "./request-lifetime";
 
 export const AGENTLAS_COMPUTER_USE_CATALOG_ID = "cua-driver";
 export const AGENTLAS_COMPUTER_USE_TOOL_NAMES = [
@@ -28,6 +29,7 @@ const MAX_REQUEST_BYTES = 128 * 1024;
 const MAX_RESPONSE_BYTES = 6 * 1024 * 1024;
 let activeSourceId = null;
 const nativeSources = new Map();
+${COMPUTER_USE_REQUEST_BUDGET_SOURCE}
 
 const point = {
   x: { type: "number", minimum: 0, maximum: 8192 },
@@ -210,7 +212,7 @@ function controlRequest(route, body, timeoutMs = 8000) {
         "content-type": "application/json",
         "content-length": String(bytes.length),
       },
-      timeout: Math.max(500, Math.min(timeoutMs, 12000)),
+      timeout: computerUseRequestBudget(route, body, timeoutMs),
     }, (res) => {
       res.on("data", (chunk) => {
         total += chunk.length;

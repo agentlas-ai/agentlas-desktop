@@ -303,6 +303,45 @@ function readOrCreateRawProfile(): { raw: string; profile: OneProfile; key: stri
   return { raw: row.value, profile: parseProfile(row.value), key };
 }
 
+// Main-owned avatar version: the profile row and immutable portrait pointer
+// commit together. A failed compare never changes the currently shown portrait.
+export interface OneAvatarOwnerSnapshot {
+  slotKey: string;
+  segment: string | null;
+  oneId: string;
+  version: number;
+}
+const ONE_AVATAR_FILENAME = /^one-avatar-[a-f0-9-]{36}\.(?:png|jpg|webp)$/;
+export function captureOneAvatarOwner(): OneAvatarOwnerSnapshot {
+  const current = readOrCreateRawProfile();
+  return { slotKey: current.key, segment: oneProfileAvatarSegment(), oneId: current.profile.oneId, version: current.profile.version };
+}
+export function readOneAvatarPointer(): string | null {
+  const slot = resolveSlot();
+  const row = getDb().prepare("SELECT value FROM meta WHERE key = ? LIMIT 1").get(`${slot.key}#avatar-pointer.v1`) as { value: string } | undefined;
+  if (!row) return null;
+  if (!ONE_AVATAR_FILENAME.test(row.value)) throw new Error("Invalid One avatar pointer");
+  return row.value;
+}
+export function commitOneAvatarPointer(owner: OneAvatarOwnerSnapshot, filename: string): OneProfile {
+  if (!ONE_AVATAR_FILENAME.test(filename)) throw new TypeError("Invalid One avatar filename");
+  const db = getDb();
+  const result = db.transaction(() => {
+    const current = readOrCreateRawProfile();
+    if (current.key !== owner.slotKey || oneProfileAvatarSegment() !== owner.segment || current.profile.oneId !== owner.oneId || current.profile.version !== owner.version) throw Object.assign(new Error("One profile changed; reload and try again"), { code: "one_profile_version_conflict" });
+    const stamp = nextTimestamp(current.profile.version);
+    const next: OneProfile = { ...current.profile, avatarIcon: "one-avatar:self", version: stamp.version, updatedAt: stamp.iso };
+    if (!isOneProfile(next)) throw new Error("One profile mutation violated the storage contract");
+    const changed = db.prepare("UPDATE meta SET value = ? WHERE key = ? AND value = ?").run(JSON.stringify(next), current.key, current.raw);
+    if (changed.changes !== 1) throw Object.assign(new Error("One profile changed concurrently; reload and try again"), { code: "one_profile_version_conflict" });
+    db.prepare("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(`${current.key}#avatar-pointer.v1`, filename);
+    return next;
+  }).immediate();
+  emitDesktopStoreChange({ entity: "one-profile", id: result.oneId });
+  recordProfileUpdated(result, ["avatarIcon"], "profile");
+  return result;
+}
+
 function mutateProfile(
   expectedVersion: number,
   update: (current: OneProfile, timestamp: { version: number; iso: string }) => OneProfile,
@@ -389,7 +428,7 @@ export function onOneDisplayNameChanged(listener: (next: string, previous: strin
 
 export function updateOneProfile(input: OneProfileUpdateInput): OneProfile {
   if (!isRecord(input)) throw new TypeError("Invalid One profile update");
-  assertOnlyKeys(input, ["expectedVersion", "patch"], "One profile update");
+  assertOnlyKeys(input, ["oneId", "expectedVersion", "patch"], "One profile update");
   assertExpectedVersion(input.expectedVersion);
   if (!isRecord(input.patch)) throw new TypeError("One profile patch must be an object");
   assertOnlyKeys(input.patch, PROFILE_PATCH_KEYS, "One profile patch");
@@ -398,6 +437,9 @@ export function updateOneProfile(input: OneProfileUpdateInput): OneProfile {
   const changedFields: string[] = [];
   let previousDisplayName = "";
   const updated = mutateProfile(input.expectedVersion, (current, timestamp) => {
+    if (input.oneId !== undefined && (typeof input.oneId !== "string" || input.oneId !== current.oneId)) {
+      throw Object.assign(new Error("One identity changed; reload and try again"), { code: "one_profile_identity_conflict" });
+    }
     previousDisplayName = current.displayName;
     const next: OneProfile = { ...current };
     if ("displayName" in input.patch) next.displayName = cleanText(input.patch.displayName, "displayName", 1, 64);

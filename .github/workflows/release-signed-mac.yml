@@ -96,10 +96,10 @@ jobs:
       AGENTLAS_MAC_UPDATE_HISTORY_COUNT: "2"
       AGENTLAS_MAC_UPDATE_REQUIRED_HISTORY_TAGS: "v0.8.58,v0.8.65"
       AGENTLAS_MAC_UPDATE_HISTORY_CACHE_DIR: ${{ github.workspace }}/.release-cache/agentlas-mac-update-history
-      HEPHAESTUS_REF: v1.2.72
-      HEPHAESTUS_COMMIT: ac497f990d8b7274fae6b927e08fd24779807571
-      HEPHAESTUS_ASSET_NAME: hephaestus-runtime-v1.2.72.tar.gz
-      HEPHAESTUS_ASSET_SHA256: 54c7f8e4f4a923e6a58ff84fb89f1aa474aa67d3dd9cc7f48efdaae24f7dffc7
+      HEPHAESTUS_REF: os-v1.2.73
+      HEPHAESTUS_COMMIT: fa8d4d820bf952f88628ea7c0a4ea32ded9e96e5
+      HEPHAESTUS_ASSET_NAME: agentlas-os-runtime-v1.2.73.tar.gz
+      HEPHAESTUS_ASSET_SHA256: b4d717bdd370cd6d59e52f2b79b1beb9a2287fa595baf664277ff99ec114fc74
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -300,7 +300,7 @@ jobs:
           const cp = require('node:child_process');
           const manifestBytes = cp.execFileSync('git', ['-C', '.release-private-verification', 'show', `${process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_REF}:release-verification/desktop/manifest.json`]);
           const manifestDigest = crypto.createHash('sha256').update(manifestBytes).digest('hex');
-          if (manifestDigest !== process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_MANIFEST_SHA256 || manifestDigest !== '5a4aee110c67571885adddff9ec30c4a205194d749a6db7e836933774729dbe3') throw new Error('Private Mac verification manifest digest mismatch');
+          if (manifestDigest !== process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_MANIFEST_SHA256 || manifestDigest !== '7836de3ee4e406081f6ed21f8587d2ca94d9bf83ac98e99c17c78302ce9b8d98') throw new Error('Private Mac verification manifest digest mismatch');
           const manifest = JSON.parse(manifestBytes);
           const approvedPins = new Map(Object.entries({
             "scripts/composer-event-sync-contract.mjs": "f13850e468e55431cb071b8f9ce83f707d5d00b05697e72bf9debdab00793857",
@@ -353,8 +353,8 @@ jobs:
             "scripts/lib/owned-workspace-fixture.cjs": "f10d24a73d9145125acc0abf3ef5a90236fcff82747a4c8ed6647afd11b1707a",
             "scripts/lib/owned-main-fixture.cjs": "2731c493fb154d6f3f38d2fd59e20483741fc5642c399d733d68bfe0d2644927",
             "scripts/lib/owned-node-fixture.cjs": "c05cdcc8ce5c3bb3591e51e865579cb563de997a93cfb14e97c4e0a7f92cc3fa",
-            "scripts/lib/owned-core-fixture.cjs": "be3ef2957f67b21ae9fe20e8de68da77d87d600f86ea477b8991fa032c511262",
-            "scripts/lib/owned-core-bootstrap.py": "f1673de5477328e5234c9006be7a260686adb9b752b9cf7b3c7e972dc08c1c9f",
+            "scripts/lib/owned-core-fixture.cjs": "dd13005f666cf41650dda5731af7925271ac287ecb240533ef3c266e6b09cf93",
+            "scripts/lib/owned-core-bootstrap.py": "487b33baa760907911c800bf784d7eb890b4e1a26f98b9cef5c48e2cdac90ca9",
             "scripts/run-owned-release-gates.cjs": "e2f77e084287e14afb18800fca901a05bcb05d6f24349a4666e369904ed3d944"
           }));
           if (manifest.files?.length !== 53 || approvedPins.size !== 53) throw new Error('All original private Mac verification entries and owned fixture lifecycles are required');
@@ -508,10 +508,10 @@ jobs:
       AGENTLAS_MAC_UPDATE_HISTORY_COUNT: "2"
       AGENTLAS_MAC_UPDATE_REQUIRED_HISTORY_TAGS: "v0.8.58,v0.8.65"
       AGENTLAS_MAC_UPDATE_HISTORY_CACHE_DIR: ${{ github.workspace }}/.release-cache/agentlas-mac-update-history
-      HEPHAESTUS_REF: v1.2.72
-      HEPHAESTUS_COMMIT: ac497f990d8b7274fae6b927e08fd24779807571
-      HEPHAESTUS_ASSET_NAME: hephaestus-runtime-v1.2.72.tar.gz
-      HEPHAESTUS_ASSET_SHA256: 54c7f8e4f4a923e6a58ff84fb89f1aa474aa67d3dd9cc7f48efdaae24f7dffc7
+      HEPHAESTUS_REF: os-v1.2.73
+      HEPHAESTUS_COMMIT: fa8d4d820bf952f88628ea7c0a4ea32ded9e96e5
+      HEPHAESTUS_ASSET_NAME: agentlas-os-runtime-v1.2.73.tar.gz
+      HEPHAESTUS_ASSET_SHA256: b4d717bdd370cd6d59e52f2b79b1beb9a2287fa595baf664277ff99ec114fc74
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -659,7 +659,7 @@ jobs:
           const cp = require('node:child_process');
           const manifestBytes = cp.execFileSync('git', ['-C', '.release-private-verification', 'show', `${process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_REF}:release-verification/desktop/manifest.json`]);
           const manifestDigest = crypto.createHash('sha256').update(manifestBytes).digest('hex');
-          if (manifestDigest !== process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_MANIFEST_SHA256 || manifestDigest !== '5a4aee110c67571885adddff9ec30c4a205194d749a6db7e836933774729dbe3') throw new Error('Private Mac verification manifest digest mismatch');
+          if (manifestDigest !== process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_MANIFEST_SHA256 || manifestDigest !== '7836de3ee4e406081f6ed21f8587d2ca94d9bf83ac98e99c17c78302ce9b8d98') throw new Error('Private Mac verification manifest digest mismatch');
           const manifest = JSON.parse(manifestBytes);
           const approvedPins = new Map(Object.entries({
             "scripts/composer-event-sync-contract.mjs": "f13850e468e55431cb071b8f9ce83f707d5d00b05697e72bf9debdab00793857",
@@ -712,8 +712,8 @@ jobs:
             "scripts/lib/owned-workspace-fixture.cjs": "f10d24a73d9145125acc0abf3ef5a90236fcff82747a4c8ed6647afd11b1707a",
             "scripts/lib/owned-main-fixture.cjs": "2731c493fb154d6f3f38d2fd59e20483741fc5642c399d733d68bfe0d2644927",
             "scripts/lib/owned-node-fixture.cjs": "c05cdcc8ce5c3bb3591e51e865579cb563de997a93cfb14e97c4e0a7f92cc3fa",
-            "scripts/lib/owned-core-fixture.cjs": "be3ef2957f67b21ae9fe20e8de68da77d87d600f86ea477b8991fa032c511262",
-            "scripts/lib/owned-core-bootstrap.py": "f1673de5477328e5234c9006be7a260686adb9b752b9cf7b3c7e972dc08c1c9f",
+            "scripts/lib/owned-core-fixture.cjs": "dd13005f666cf41650dda5731af7925271ac287ecb240533ef3c266e6b09cf93",
+            "scripts/lib/owned-core-bootstrap.py": "487b33baa760907911c800bf784d7eb890b4e1a26f98b9cef5c48e2cdac90ca9",
             "scripts/run-owned-release-gates.cjs": "e2f77e084287e14afb18800fca901a05bcb05d6f24349a4666e369904ed3d944"
           }));
           if (manifest.files?.length !== 53 || approvedPins.size !== 53) throw new Error('All original private Mac verification entries and owned fixture lifecycles are required');
@@ -951,10 +951,10 @@ jobs:
       AGENTLAS_MAC_UPDATE_HISTORY_COUNT: "2"
       AGENTLAS_MAC_UPDATE_REQUIRED_HISTORY_TAGS: "v0.8.58,v0.8.65"
       AGENTLAS_MAC_UPDATE_HISTORY_CACHE_DIR: ${{ github.workspace }}/.release-cache/agentlas-mac-update-history
-      HEPHAESTUS_REF: v1.2.72
-      HEPHAESTUS_COMMIT: ac497f990d8b7274fae6b927e08fd24779807571
-      HEPHAESTUS_ASSET_NAME: hephaestus-runtime-v1.2.72.tar.gz
-      HEPHAESTUS_ASSET_SHA256: 54c7f8e4f4a923e6a58ff84fb89f1aa474aa67d3dd9cc7f48efdaae24f7dffc7
+      HEPHAESTUS_REF: os-v1.2.73
+      HEPHAESTUS_COMMIT: fa8d4d820bf952f88628ea7c0a4ea32ded9e96e5
+      HEPHAESTUS_ASSET_NAME: agentlas-os-runtime-v1.2.73.tar.gz
+      HEPHAESTUS_ASSET_SHA256: b4d717bdd370cd6d59e52f2b79b1beb9a2287fa595baf664277ff99ec114fc74
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1064,7 +1064,7 @@ jobs:
           const cp = require('node:child_process');
           const manifestBytes = cp.execFileSync('git', ['-C', '.release-private-verification', 'show', `${process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_REF}:release-verification/desktop/manifest.json`]);
           const manifestDigest = crypto.createHash('sha256').update(manifestBytes).digest('hex');
-          if (manifestDigest !== process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_MANIFEST_SHA256 || manifestDigest !== '5a4aee110c67571885adddff9ec30c4a205194d749a6db7e836933774729dbe3') throw new Error('Private Mac verification manifest digest mismatch');
+          if (manifestDigest !== process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_MANIFEST_SHA256 || manifestDigest !== '7836de3ee4e406081f6ed21f8587d2ca94d9bf83ac98e99c17c78302ce9b8d98') throw new Error('Private Mac verification manifest digest mismatch');
           const manifest = JSON.parse(manifestBytes);
           const approvedPins = new Map(Object.entries({
             "scripts/composer-event-sync-contract.mjs": "f13850e468e55431cb071b8f9ce83f707d5d00b05697e72bf9debdab00793857",
@@ -1117,8 +1117,8 @@ jobs:
             "scripts/lib/owned-workspace-fixture.cjs": "f10d24a73d9145125acc0abf3ef5a90236fcff82747a4c8ed6647afd11b1707a",
             "scripts/lib/owned-main-fixture.cjs": "2731c493fb154d6f3f38d2fd59e20483741fc5642c399d733d68bfe0d2644927",
             "scripts/lib/owned-node-fixture.cjs": "c05cdcc8ce5c3bb3591e51e865579cb563de997a93cfb14e97c4e0a7f92cc3fa",
-            "scripts/lib/owned-core-fixture.cjs": "be3ef2957f67b21ae9fe20e8de68da77d87d600f86ea477b8991fa032c511262",
-            "scripts/lib/owned-core-bootstrap.py": "f1673de5477328e5234c9006be7a260686adb9b752b9cf7b3c7e972dc08c1c9f",
+            "scripts/lib/owned-core-fixture.cjs": "dd13005f666cf41650dda5731af7925271ac287ecb240533ef3c266e6b09cf93",
+            "scripts/lib/owned-core-bootstrap.py": "487b33baa760907911c800bf784d7eb890b4e1a26f98b9cef5c48e2cdac90ca9",
             "scripts/run-owned-release-gates.cjs": "e2f77e084287e14afb18800fca901a05bcb05d6f24349a4666e369904ed3d944"
           }));
           if (manifest.files?.length !== 53 || approvedPins.size !== 53) throw new Error('All original private Mac verification entries and owned fixture lifecycles are required');

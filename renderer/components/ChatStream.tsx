@@ -1,4 +1,6 @@
 "use client";
+import { useAgentAppearance } from "@/lib/agent-appearance";
+import type { AgentAppearance } from "@shared/agent-appearance";
 import { shortenLocalPaths } from "@/lib/local-path-redact";
 import { MessageActions } from "./MessageActions";
 import { displayMessageReply, type MessageReply } from "@/lib/message-reply";
@@ -20,7 +22,8 @@ import { hubBookmarksWithoutLocalDuplicates } from "@/lib/hub-bookmark-events";
 import { AgentAvatar } from "./AgentAvatar";
 import { Markdown, MarkdownSegment, StreamingMarkdown, type CodeArtifact, type LinkedFileArtifact, type MediaArtifact } from "./Markdown";
 import { useT } from "@/lib/i18n";
-import { ipc } from "@/lib/ipc";
+import { ipc, ipcEvents } from "@/lib/ipc";
+import { isOneArtifactPreviewCapabilityV1, type OneArtifactPreviewCapabilityV1 } from "@shared/one-artifacts";
 import {
   buildToolCallDisplay,
   formatToolRunSummary,
@@ -37,6 +40,7 @@ import {
 import { McpResultPreview } from "./McpResultPreview";
 import { LiveOutputViewer } from "./LiveOutputViewer";
 import { ChatFileCards } from "./ChatFileExperience";
+import { MessageAttachments } from "./media/MessageAttachments";
 import { IconAlertTriangle, IconChevronDown, IconClose } from "./Icon";
 import { InlineUiInstances } from "./UiInstances";
 import type { ChatFileItem } from "@/lib/chat-files";
@@ -328,6 +332,7 @@ const CHAT_OUTLINE_PAGE_SIZE = 24;
 export function ChatStream({
   messages: sourceMessages,
   agentName,
+  agentId,
   agentTone,
   emptyDirectory,
   onOpenArtifact,
@@ -351,6 +356,7 @@ export function ChatStream({
   onUiFollowup?: IntellectUiFollowup;
   messages: StreamMessage[];
   agentName: string;
+  agentId?: string;
   agentTone: InstalledAgent["tone"];
   emptyDirectory?: ChatEmptyDirectory;
   /** 실행 폴더 — 도구 행의 파일 경로를 이 기준 상대경로로 줄인다. */
@@ -375,6 +381,7 @@ export function ChatStream({
   focusMessageId?: string | null;
 }) {
   const { t, locale } = useT();
+  const agentAppearance = useAgentAppearance(agentId);
   const continuationProjectorRef = useRef<ChatContinuationProjector | null>(null);
   if (!continuationProjectorRef.current) continuationProjectorRef.current = new ChatContinuationProjector();
   const messages = useMemo(() => continuationProjectorRef.current!.project(
@@ -745,6 +752,7 @@ export function ChatStream({
             <Bubble
               message={m}
               agentName={agentName}
+              agentAppearance={agentAppearance}
               agentTone={agentTone}
               onOpenArtifact={onOpenArtifact}
               onOpenMedia={onOpenMedia}
@@ -1136,10 +1144,27 @@ function EmptyChatState({
   );
 }
 
+/** Capabilities are minted by Main for this persisted message; model text never supplies a path. */
+function GeneratedMessageVideos({chatId,messageId,busy}:{chatId?:string;messageId:string;busy:boolean}) {
+  const [videos,setVideos]=useState<OneArtifactPreviewCapabilityV1[]>([]);
+  useEffect(()=>{
+    if(!chatId||!messageId||busy){setVideos([]);return;}
+    const bridge=ipc()?.oneArtifacts;if(!bridge?.listMessageVideos){setVideos([]);return;}
+    let alive=true,sequence=0,current:OneArtifactPreviewCapabilityV1[]=[];
+    const revoke=(items:OneArtifactPreviewCapabilityV1[])=>{for(const item of items)void bridge.revokeMessageVideo?.({chatId,messageId,capabilityUrl:item.capabilityUrl}).catch(()=>undefined)};
+    const read=()=>{const n=++sequence;revoke(current);current=[];setVideos([]);void bridge.listMessageVideos!({chatId,messageId}).then(raw=>{const next=Array.isArray(raw)?raw.filter((x):x is OneArtifactPreviewCapabilityV1=>isOneArtifactPreviewCapabilityV1(x)&&x.kind==='video'):[];if(!alive||n!==sequence){revoke(next);return}current=next;setVideos(next)}).catch(()=>undefined)};
+    const offStore=ipcEvents()?.onStoreChanged?.(event=>{if(event.entity==='chat'&&(!event.id||event.id===chatId))read()});
+    const offAuth=ipc()?.auth.onSessionChanged?.(read);read();return()=>{alive=false;sequence++;offStore?.();offAuth?.();revoke(current)};
+  },[chatId,messageId,busy]);
+  if(!videos.length)return null;
+  return <div data-testid="generated-message-videos" style={{display:'grid',gap:8,maxWidth:620,marginTop:10}}>{videos.map(item=><video key={item.capabilityUrl} controls preload="metadata" src={item.capabilityUrl} style={{width:'100%',maxHeight:420}} />)}</div>;
+}
+
 // React.memo: props 동일 시 리렌더 스킵(스트리밍 중 무관 버블 재렌더 비용 제거). 표시명 유지.
 const Bubble = memo(function Bubble({
   message,
   agentName,
+  agentAppearance,
   agentTone,
   onOpenArtifact,
   onOpenMedia,
@@ -1154,6 +1179,7 @@ const Bubble = memo(function Bubble({
 }: {
   message: StreamMessage;
   agentName: string;
+  agentAppearance: AgentAppearance | null;
   agentTone: InstalledAgent["tone"];
   onOpenArtifact?: (a: CodeArtifact) => void;
   onOpenMedia?: (a: MediaArtifact) => void;
@@ -1212,28 +1238,8 @@ const Bubble = memo(function Bubble({
     }
     return (
       <div style={{ alignSelf: "flex-end", maxWidth: "75%" }}>
-        {message.chatFiles && message.chatFiles.length > 0 && onOpenChatFile && (
-          <ChatFileCards files={message.chatFiles} locale={locale === "ko" ? "ko" : "en"} onOpen={onOpenChatFile} />
-        )}
-        {message.imageDataUrls && message.imageDataUrls.length > 0 && (
-          <div style={{ display: "flex", gap: 6, marginBottom: 6, flexWrap: "wrap", justifyContent: "flex-end" }}>
-            {message.imageDataUrls.map((url, i) => (
-              // eslint-disable-next-line @next/next/no-img-element
-              <img
-                key={i}
-                src={url}
-                alt=""
-                style={{
-                  maxWidth: 220,
-                  maxHeight: 160,
-                  borderRadius: 10,
-                  border: "1px solid var(--paper-edge)",
-                  objectFit: "cover",
-                }}
-              />
-            ))}
-          </div>
-        )}
+        {/* media-carousel: pictures and videos as one swipeable strip, other files as cards (components/media). */}
+        <MessageAttachments files={message.chatFiles} imageUrls={message.imageDataUrls} locale={locale === "ko" ? "ko" : "en"} onOpenFile={onOpenChatFile} />
         {message.text && (
           <div
             style={{
@@ -1254,7 +1260,7 @@ const Bubble = memo(function Bubble({
   }
   if (message.role === "system") {
     if (normalizeChatHostNotice(message.role, message.hostNotice)) {
-      const notice = <HostContinuationNotice text={message.text} locale={locale === "ko" ? "ko" : "en"} notice={message.hostNotice} />;
+      const notice = <HostContinuationNotice text={message.text} locale={locale === "ko" ? "ko" : "en"} notice={message.hostNotice} chatId={artifactChatId} />;
       // 자동화 보고 = 원장이 센 행동 요약 + 로고, 원문은 펼침 안에(오너 2026-09-28, One 과 같은 표면).
       return message.hostNotice?.purpose === "automation-report"
         ? <AutomationReportSummary runId={message.hostNotice.runId} text={message.text} locale={locale === "ko" ? "ko" : "en"} fallback={notice} />
@@ -1317,7 +1323,7 @@ const Bubble = memo(function Bubble({
   return (
     <div className="agentlas-chat-turn" data-work-run-unbound={message.unboundRun ? "true" : undefined} style={{ display: "flex", gap: 0, alignSelf: "stretch", width: "100%", maxWidth: 740, minWidth: 0 }}>
       <div className="agentlas-chat-avatar" style={{ position: "relative", flexShrink: 0 }}>
-        <AgentAvatar name={agentName} tone={agentTone} size={28} />
+        <AgentAvatar name={agentName} appearance={agentAppearance} tone={agentTone} size={28} />
       </div>
       <div
         className="agentlas-chat-answer"
@@ -1395,6 +1401,7 @@ const Bubble = memo(function Bubble({
           />
         )}
         </GoalResultReport>
+        <GeneratedMessageVideos chatId={artifactChatId} messageId={message.durableMessageId ?? message.id} busy={Boolean(message.busy)} />
         {message.continuationOwnsMetadata !== false && <InlineUiInstances chatId={artifactChatId} locale={locale === "ko" ? "ko" : "en"}
           turnIds={[message.runId, ...(message.activityRuns ?? []).map((run) => run.runId)].filter((id): id is string => Boolean(id))} />}
         {message.imageDataUrls && message.imageDataUrls.length > 0 && (

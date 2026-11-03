@@ -11,9 +11,9 @@ import type { AuthSession } from "@/lib/types";
 import { useT } from "@/lib/i18n";
 import { useDismissibleLayer } from "@/lib/use-dismissible-layer";
 import { loadViewData, readViewData, writeViewData } from "@/lib/view-data-cache";
-import { IconChevronDown, IconArrowLeft } from "./Icon";
+import { IconChevronDown, IconArrowLeft, IconExternalLink } from "./Icon";
 
-export function AccountChip() {
+export function AccountChip({ collapsed = false }: { collapsed?: boolean }) {
   const { t, locale } = useT();
   const [session, setSession] = useState<AuthSession>(() => (
     readViewData<AuthSession>("shell.auth-session")?.value ?? { signedIn: false }
@@ -142,9 +142,12 @@ export function AccountChip() {
           <button
             onClick={() => void signIn()}
             disabled={busy}
+            aria-label={busy ? t("account.signing_in") : t("account.sign_in")}
+            title={collapsed ? t("account.sign_in") : undefined}
             style={{
               display: "flex",
               alignItems: "center",
+              justifyContent: collapsed ? "center" : undefined,
               gap: 8,
               width: "100%",
               padding: "8px 10px",
@@ -159,15 +162,20 @@ export function AccountChip() {
             }}
           >
             <GoogleGlyph />
-            <span style={{ flex: 1, minWidth: 0 }}>
+            {!collapsed && <span style={{ flex: 1, minWidth: 0 }}>
               {busy ? t("account.signing_in") : t("account.sign_in")}
-            </span>
+            </span>}
           </button>
           <button
             onClick={() => void signInBrowser()}
             disabled={busy}
             title={t("account.sign_in_browser_hint")}
+            aria-label={t("account.sign_in_browser")}
             style={{
+              display: "flex",
+              justifyContent: collapsed ? "center" : "flex-start",
+              alignItems: "center",
+              width: "100%",
               background: "transparent",
               border: "none",
               color: "var(--muted-deep)",
@@ -178,16 +186,20 @@ export function AccountChip() {
               padding: "0 4px",
             }}
           >
-            {t("account.sign_in_browser")}
+            {collapsed ? <IconExternalLink size={15} /> : t("account.sign_in_browser")}
           </button>
         </div>
       ) : (
         <button
           ref={triggerRef}
           onClick={() => setPopoverOpen((v) => !v)}
+          aria-label={display}
+          aria-expanded={popoverOpen}
+          title={collapsed ? display : undefined}
           style={{
             display: "flex",
             alignItems: "center",
+            justifyContent: collapsed ? "center" : undefined,
             gap: 8,
             width: "100%",
             padding: "6px 8px",
@@ -215,7 +227,7 @@ export function AccountChip() {
           >
             {initial}
           </span>
-          <span
+          {!collapsed && <span
             style={{
               flex: 1,
               minWidth: 0,
@@ -229,8 +241,8 @@ export function AccountChip() {
             title={display}
           >
             {display}
-          </span>
-          <IconChevronDown size={12} style={{ color: "var(--muted-deep)" }} />
+          </span>}
+          {!collapsed && <IconChevronDown size={12} style={{ color: "var(--muted-deep)" }} />}
         </button>
       )}
 

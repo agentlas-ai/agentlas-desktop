@@ -1,4 +1,4 @@
-import { BrowserWindow, dialog, type IpcMain, type IpcMainInvokeEvent } from 'electron';
+import { app, BrowserWindow, dialog, type IpcMain, type IpcMainInvokeEvent } from 'electron';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
@@ -26,6 +26,7 @@ import { financeBuiltinPlugin } from './builtin-plugin';
 import { FINANCE_NOTICE_VERSION } from '../../shared/finance-experience';
 import type { FinancePlanningResult } from '../../shared/finance-planning';
 import { FinancePlanningReviews } from './planning-review';
+import { transferFinanceWatchlist } from './cloud-sync';
 
 const boundedId = z.string().min(1).max(200);
 function captureScope(): FinanceScope {
@@ -45,6 +46,25 @@ export function registerFinanceIpc(input: { ipc: Pick<IpcMain, 'handle'>; assert
   const load = (scope: FinanceScope) => service.load(scope);
   const handle = (name: string, fn: (event: IpcMainInvokeEvent, raw: unknown, scope: FinanceScope) => unknown) => input.ipc.handle(`finance:${name}`, (event, raw) => { input.assertTrustedSender(event); return fn(event, raw, captureScope()); });
   handle('load', (_event, _raw, scope) => load(scope));
+  handle('experience', async (event, raw, scope) => {
+    const cloud = z.object({action:z.literal('cloud.watchlist'),direction:z.enum(['upload','download'])}).strict().safeParse(raw);
+    if (!cloud.success) return financeExperience(scope, raw as import('../../shared/finance-experience').FinanceExperienceRequest);
+    const {direction} = cloud.data;
+    const snapshot = await financeExperience(scope, {action:'read'}); scope.assertCurrent();
+    const window = BrowserWindow.fromWebContents(event.sender);
+    const ko = app.getLocale().toLowerCase().startsWith('ko');
+    const options = { type:'question' as const, buttons:ko?['취소', '계속']:['Cancel', 'Continue'], defaultId:0, cancelId:0,
+      message: direction === 'upload' ? (ko?'이 기기의 관심종목으로 클라우드 목록을 바꿀까요?':'Replace the cloud watchlist with this device’s watchlist?')
+        : (ko?'클라우드 관심종목으로 이 기기의 목록을 바꿀까요?':'Replace this device’s watchlist with the cloud watchlist?'),
+      detail: ko?'관심종목만 전송합니다. 보유 수량, 보고서와 다른 Finance 데이터는 동기화되지 않습니다.'
+        :'Only the watchlist is transferred. Holdings, reports and other Finance data are not synchronized.' };
+    const choice = window ? await dialog.showMessageBox(window, options) : await dialog.showMessageBox(options);
+    scope.assertCurrent();
+    if (choice.response !== 1) return {...snapshot,cloudWatchlistTransfer:{transferred:false}};
+    await transferFinanceWatchlist(scope, store, direction);
+    scope.assertCurrent();
+    return {...snapshot,cloudWatchlistTransfer:{transferred:true}};
+  });
   handle('workProject', async(_event, raw, originalScope) => {
     z.union([z.undefined(), z.object({}).strict()]).parse(raw);
     originalScope.assertCurrent();
@@ -65,7 +85,6 @@ export function registerFinanceIpc(input: { ipc: Pick<IpcMain, 'handle'>; assert
     try{await requireFinanceConsent(scope);scope.assertCurrent();controller.signal.throwIfAborted();const workflow=await financeBuiltinPlugin().workflow(scope,FINANCE_NOTICE_VERSION,'portfolio');scope.assertCurrent();controller.signal.throwIfAborted();return await extractFinancePortfolio(request,controller.signal,()=>scope.assertCurrent(),undefined,workflow);}
     finally{event.sender.removeListener('destroyed',onDestroyed);running.delete(key);}
   });
-  handle('experience', (_event, raw, scope) => financeExperience(scope, raw as import('../../shared/finance-experience').FinanceExperienceRequest));
   handle('worldMarkets', async (_event, _raw, scope) => {
     const selection = await requireFinanceConsent(scope); scope.assertCurrent();
     const sourceId=resolveFinanceDataSource(selection,'market');

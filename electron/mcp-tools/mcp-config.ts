@@ -68,7 +68,7 @@ import { COMPUTER_USE_CONTROL_FILE_ENV, computerUseControlInfoPath } from "../co
 import {ONE_OS_EXECUTION_ENV} from "../one/context-lease";
 import {prepareSupervisorOsExecutionAsync,type SupervisorOsExecutionOutcome} from "../one/supervisor-os-execution";
 import {OS_EXECUTION_UNAVAILABLE_VERSION} from "../daemon/device-bridge";
-import { resolveHephaestusStdioLaunch } from "../hephaestus/engine";
+import { resolveHephaestusStdioLaunch, isDesktopEnginePolicyKey } from "../hephaestus/engine";
 import {
   MCP_PROXY_CONTROL_FILE_ENV,
   MCP_PROXY_LAUNCH_ENV,
@@ -197,6 +197,8 @@ export interface McpConfigResult {
 }
 
 export interface McpConfigBuildOptions {
+  /** Host-only, never part of a delegated reconstruction. */
+  hostVideoCustody?: import("../invocation/host-video-custody").HostVideoCustody;
   /** Native exact-run object; stripped from delegated reconstruction intent. */
   osMemoryCuratorRun?: import("../runtime/os-memory-curator-binding").NativeOsCuratorRun;
   /** Main-only explicit personal source preparation: no seed, login, refresh or browser credential sync. */
@@ -460,9 +462,12 @@ const PROXY_KEYS = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"];
 // HEPHAESTUS_RUNTIME_ROOT. Without these the child died with KeyError before initialize
 // (isolated live run 2026-09-25: every hephaestus-network bridge "upstream_transport_closed",
 // so host-loop runtimes never had Workforce tools). Forwarded only for that launch.
+const HEPHAESTUS_POLICY_KEYS = ["AGENTLAS_PROJECT_BOOTSTRAP_AUTO", "AGENTLAS_MCP_PROJECT_BOOTSTRAP_AUTO",
+  "HEPHAESTUS_AUTO_UPDATE", "HEPHAESTUS_UPDATE_CHECK", "DO_NOT_TRACK", "AGENTLAS_TELEMETRY"];
 const HEPHAESTUS_LAUNCH_KEYS = ["HEPHAESTUS_RUNTIME_ROOT", "PYTHONPATH", "PYTHONUTF8", "PYTHONIOENCODING",
   "PYTHONDONTWRITEBYTECODE", "PYTHONPYCACHEPREFIX", "AGENTLAS_JUDGE_RUNTIME", "HEPHAESTUS_AUTO_AUTH",
-  "AGENTLAS_MEMORY_ROOT", "AGENTLAS_MEMORY_OWNER_NAMESPACE", "AGENTLAS_MEMORY_BINDING_FILE", "AGENTLAS_MEMORY_BINDING_REVISION"];
+  "AGENTLAS_MEMORY_ROOT", "AGENTLAS_MEMORY_OWNER_NAMESPACE", "AGENTLAS_MEMORY_BINDING_FILE", "AGENTLAS_MEMORY_BINDING_REVISION",
+  "AGENTLAS_HOST_RUNTIME", ...HEPHAESTUS_POLICY_KEYS];
 let mapping;
 try {
   mapping = JSON.parse(process.argv[3] || "{}");
@@ -486,8 +491,9 @@ for (const key of OPERATIONAL_KEYS) {
 if (typeof process.env.HEPHAESTUS_RUNTIME_ROOT === "string" && process.env.HEPHAESTUS_RUNTIME_ROOT.length > 0
   && process.env.PYTHONPATH === process.env.HEPHAESTUS_RUNTIME_ROOT) {
   for (const key of HEPHAESTUS_LAUNCH_KEYS) {
-    const value = process.env[key];
-    if (typeof value === "string" && value.length > 0) env[key] = value;
+    const actual = Object.keys(process.env).find((candidate) => candidate.toUpperCase() === key);
+    const value = actual ? process.env[actual] : undefined;
+    if (typeof value === "string" && (value.length > 0 || HEPHAESTUS_POLICY_KEYS.includes(key))) env[key] = value;
   }
 }
 for (const key of PROXY_KEYS) {
@@ -520,11 +526,36 @@ for (const [targetKey, alias] of Object.entries(mapping)) {
     process.exit(78);
   }
   const value = process.env[alias];
-  if (typeof value !== "string" || value.length === 0) {
+  const policyMapping = process.env.AGENTLAS_HOST_RUNTIME === "desktop"
+    && typeof process.env.HEPHAESTUS_RUNTIME_ROOT === "string"
+    && process.env.PYTHONPATH === process.env.HEPHAESTUS_RUNTIME_ROOT
+    && HEPHAESTUS_POLICY_KEYS.includes(targetKey.toUpperCase());
+  if (typeof value !== "string" || (value.length === 0 && !policyMapping)) {
     process.stderr.write("Agentlas MCP secret wrapper is missing a required vault value.\\n");
     process.exit(78);
   }
   env[targetKey] = value;
+}
+
+// Preserve a Desktop-owned engine identity and every explicit opt-out across secret mappings.
+if (process.env.AGENTLAS_HOST_RUNTIME === "desktop" && typeof process.env.HEPHAESTUS_RUNTIME_ROOT === "string"
+  && process.env.PYTHONPATH === process.env.HEPHAESTUS_RUNTIME_ROOT) {
+  for (const name of Object.keys(env)) if (name.toUpperCase() === "AGENTLAS_HOST_RUNTIME") delete env[name];
+  env.AGENTLAS_HOST_RUNTIME = "desktop";
+  for (const key of HEPHAESTUS_POLICY_KEYS) {
+    const inheritedValues = Object.keys(process.env).filter((candidate) => candidate.toUpperCase() === key)
+      .map((name) => process.env[name]).filter((value) => typeof value === "string");
+    const names = Object.keys(env).filter((candidate) => candidate.toUpperCase() === key);
+    const values = names.map((name) => env[name]).filter((value) => typeof value === "string");
+    const veto = (value) => {
+      const normalized = value.trim().toLowerCase();
+      return key === "DO_NOT_TRACK" ? !["0", "false", "no", "off"].includes(normalized)
+        : !["1", "true", "yes", "on"].includes(normalized);
+    };
+    const chosen = inheritedValues.find(veto) ?? values.find(veto) ?? values[values.length - 1] ?? inheritedValues[0];
+    for (const name of names) delete env[name];
+    if (typeof chosen === "string") env[key] = chosen;
+  }
 }
 
 // windowsHide: this wrapper runs under the GUI Agentlas executable, which has no console, so a console MCP
@@ -1095,7 +1126,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
         // A host tool server's credentials come from the minting domain for this turn, never from the Vault.
         // A connection-owned credential reads its own Vault key; the server still receives it as `envKey` (NH29).
         const value = hostServer ? hostServer.secretEnv[envKey] ?? hostServer.publicEnv[envKey] ?? null : await readEnvVar(credentialVaultKey(s, envKey));
-        if (!value) {
+        if (!value && !(value === "" && s.catalogId === HEPHAESTUS_NETWORK_CATALOG_ID && isDesktopEnginePolicyKey(envKey))) {
           missingRequiredValue = true;
           continue;
         }
@@ -1242,6 +1273,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
               ...(opts.turnGoalWaitOnly ? { goalWaitResolver: opts.turnGoalWaitOnly.resolveGoalWait } : {}), dryRun: opts?.toolGate?.simulation === true || opts?.toolGate?.planMode === true,
               permission: opts?.toolGate?.permission ?? "read",
               admissionCurrent: opts?.admissionCurrent,
+              ...(opts?.hostVideoCustody ? { hostVideoCustody: opts.hostVideoCustody } : {}),
               graphAuthoring: serializedServers.some((server) => server.catalogId === "one-team") && !toolchainConsumer && !roomMember && !graphTeamGrant,
               // Harness tool ports reach this run's host-channel built-ins only through this sealed file.
               mcpConfigPath: configPath,
@@ -1331,7 +1363,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
       for (const rawKey of s.envKeys) {
         const envKey = validateEnvKey(rawKey);
         const value = resolvedEnv.get(envKey);
-        if (!value) continue;
+        if (value === undefined || (!value && !(s.catalogId === HEPHAESTUS_NETWORK_CATALOG_ID && isDesktopEnginePolicyKey(envKey)))) continue;
         const alias = mcpRuntimeSecretAlias(key, envKey);
         secretAliases[envKey] = alias;
         runtimeEnv[alias] = value;
@@ -1640,7 +1672,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
     .map(({ server }) => [server.id, mcpServerConfigurationDigest(server)] as const);
   const includedHostServers = hostServers.filter((host) => preparedRows.some((row) => row.server.id === host.configKey));
   // graphTeamGrant is an object identity: a delegated host never inherits it (it would not be current there anyway).
-  const { turnGoalWaitOnly: _turnGoalWaitOnly, osMemoryCuratorRun: _osMemoryCuratorRun, admissionCurrent: _admissionCurrent, nativeScopedSelection: _nativeScopedSelection,
+  const { hostVideoCustody: _hostVideoCustody, turnGoalWaitOnly: _turnGoalWaitOnly, osMemoryCuratorRun: _osMemoryCuratorRun, admissionCurrent: _admissionCurrent, nativeScopedSelection: _nativeScopedSelection,
     nativeScopedSelectionForServer: _nativeScopedSelectionForServer, graphTeamGrant: _graphTeamGrant, hostToolServers: _hostToolServers, ...delegationBuildOptions } = opts ?? {};
   for (const row of preparedRows) {
     const entry = mcpServers[row.configKey] as { env?: Record<string, string> };

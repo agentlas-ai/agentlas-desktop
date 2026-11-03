@@ -3,7 +3,7 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import { verifyActivatedFolderIdentity } from "../architecture/activation";
-import { resolveHephaestusStdioLaunch } from "../hephaestus/engine";
+import { resolveHephaestusStdioLaunch, withDesktopEngineHost } from "../hephaestus/engine";
 import { hephaestusContextRoot } from "../hephaestus/root";
 
 const MAX_TASK_CHARS = 12_000;
@@ -365,7 +365,7 @@ async function contextLaunch(args: string[], signal?: AbortSignal): Promise<{
       return {
         command: explicitBin,
         args: ["context", ...args],
-        env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
+        env: withDesktopEngineHost({ ...process.env, ELECTRON_RUN_AS_NODE: "1" }),
       };
     } catch {
       // Invalid explicit shell bridge falls through to the canonical runtime.

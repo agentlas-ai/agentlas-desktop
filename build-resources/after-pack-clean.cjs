@@ -2,9 +2,11 @@ const { access, chmod, lstat, readFile, readdir, readlink, realpath, rm, writeFi
 const { createHash } = require("node:crypto");
 const path = require("node:path");
 const asar = require("@electron/asar");
+const pythonPublicTrust = require("./python-public-trust.cjs");
 const { execFile } = require("node:child_process");
 const { promisify } = require("node:util");
 const embeddedCoreContract = require("./embedded-core-contract.cjs");
+const runtimeReleasePin = require("./runtime-release-pin.cjs");
 const { verifyStudioRuntime } = require("./studio-runtime-contract.cjs");
 const { verifyScienceRuntimePackage } = require("./science-runtime-package.cjs");
 const { verifyPackagedVerificationBoundary } = require("./runtime-verification-boundary.cjs");
@@ -364,6 +366,8 @@ async function verifyBundledPython(projectDir, resourcesDir, platform, builderAr
   const sourceRoot = path.join(projectDir, "build-resources", "python-runtime");
   const packagedRoot = path.join(resourcesDir, "python-runtime");
   const manifestName = "agentlas-python-runtime.json";
+  pythonPublicTrust.assertNoForbiddenPublicPaths(sourceRoot);
+  pythonPublicTrust.assertNoForbiddenPublicPaths(packagedRoot);
   const [sourceManifestText, packagedManifestText] = await Promise.all([
     readFile(path.join(sourceRoot, manifestName), "utf8"),
     readFile(path.join(packagedRoot, manifestName), "utf8"),
@@ -411,6 +415,8 @@ async function verifyBundledPython(projectDir, resourcesDir, platform, builderAr
   ) {
     throw new Error("[afterPack] Python runtime does not match the pinned platform asset");
   }
+  pythonPublicTrust.verifyPublicPython(sourceRoot, platform, locked.archiveSha256);
+  pythonPublicTrust.verifyPublicPython(packagedRoot, platform, locked.archiveSha256);
   const sourceExecutable = path.join(sourceRoot, ...manifest.executableRelativePath.split("/"));
   const packagedExecutable = path.join(packagedRoot, ...manifest.executableRelativePath.split("/"));
   const [sourceReal, packagedReal] = await Promise.all([
@@ -660,12 +666,9 @@ async function verifyEmbeddedAgentlasOs(context) {
   }
   if (process.env.HEPHAESTUS_REF) {
     const requestedRef = process.env.HEPHAESTUS_REF.trim();
-    const refMatch = requestedRef.match(/^v?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$/);
-    const commitMatch = /^[0-9a-f]{40}$/i.test(requestedRef);
-    const refMatchesVersion = refMatch && refMatch[1] === sourceManifest.version;
-    const refMatchesCommit = commitMatch
-      && String(preparationReceipt.sourceCommit || "").toLowerCase() === requestedRef.toLowerCase();
-    if (!refMatchesVersion && !refMatchesCommit) {
+    const refMatch = runtimeReleasePin.allowedRef(requestedRef, sourceManifest.version);
+    const refMatchesVersion = refMatch;
+    if (!refMatchesVersion) {
       throw new Error(
         `[afterPack] HEPHAESTUS_REF mismatch: expected v${sourceManifest.version}, got ${process.env.HEPHAESTUS_REF}`,
       );
@@ -977,6 +980,7 @@ exports.prepareMacRuntimeResourcesForInstall = prepareMacRuntimeResourcesForInst
 // 만들어진 .app 을 따로 재는 게이트가 이 검사를 그대로 쓸 수 있어야 한다 — 검사를 베껴
 // 쓰면 그 사본이 낡아 조용히 눈이 먼다.
 exports.verifyBundledNode = verifyBundledNode;
+exports.verifyBundledPython = verifyBundledPython;
 
 function verifyBundledProductExtensionSigningPolicy(context) {
   const resourcesDir = context.electronPlatformName === "darwin"
@@ -1008,6 +1012,11 @@ exports.default = async function afterPackClean(context) {
   const studioResources = context.electronPlatformName === "darwin"
     ? path.join(context.appOutDir, `${context.packager.appInfo.productFilename}.app`, "Contents", "Resources")
     : path.join(context.appOutDir, "resources");
+  // Check metadata before any verifier reads packaged contents.
+  pythonPublicTrust.assertNoForbiddenPublicPaths(studioResources);
+  if (asar.listPackage(path.join(studioResources, "app.asar")).some((name) => name.split(/[\\/]+/).some(pythonPublicTrust.forbiddenPublicName))) {
+    throw new Error("[afterPack] prohibited public archive path detected");
+  }
   verifyNoPackagedSourceMaps(path.join(studioResources, "app.asar"));
   const sciencePackage = verifyScienceRuntimePackage(
     path.join(studioResources, "app.asar"),

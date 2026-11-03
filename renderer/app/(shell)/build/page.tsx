@@ -14,7 +14,11 @@ import {
   IconStore,
   IconCheck,
 } from "@/components/Icon";
-import { grantForDroppedFile, ipc } from "@/lib/ipc";
+import { BuildLaunch, BuildResources } from "@/components/build/BuildLaunch";
+import styles from "@/components/build/BuildWorkbench.module.css";
+import { IconArrowLeft } from "@/components/Icon";
+import { grantForDroppedFile, grantForPastedAttachment, ipc } from "@/lib/ipc";
+import { MediaStrip, mediaKindOf, type MediaStripItem } from "@/components/media/MediaStrip";
 import { navigate } from "@/lib/navigation";
 import { useT } from "@/lib/i18n";
 import { announceAgentRosterChange } from "@/lib/agent-roster-events";
@@ -31,16 +35,20 @@ import {
   setRequest as setBuildRequest,
   setMode as setBuildMode,
   setWorkspace as setBuildWorkspace,
+  reauthorizeRestoredBuildWorkspace,
   setRuntime as setBuildRuntime,
   startBuild,
   approveBuildMcpPlan,
   describeAllocationRuntime,
   resolveRuntimeEscalation,
   answerBuild,
+  canContinueCompletedBuild,
+  continueCompletedBuild,
+  restoredCompletionNeedsReview,
   cancelBuild,
   resumeBuild,
   resetBuild,
-  startFreshBuild,
+  startFreshBuild as startFreshBuildStore,
   addAttachments,
   removeAttachment,
   updateBuildSecurityScan,
@@ -68,28 +76,6 @@ const MODES: { id: Mode; label: string; labelEn: string; desc: string; descEn: s
   { id: "single", label: "단일 에이전트", labelEn: "Single agent", desc: "혼자 일하는 에이전트 하나 — 기억·기술·스스로 개선", descEn: "A single agent that works on its own — memory, skills, self-improvement", icon: IconWand },
   { id: "team", label: "멀티 에이전트 팀", labelEn: "Multi-agent team", desc: "여러 역할이 함께 일하는 에이전트 팀 (기획·실행·검수)", descEn: "A team of agents that plan, run, and review together", icon: IconUsers },
   { id: "package", label: "기존 에이전트 패키징", labelEn: "Package existing agent", desc: "외부/로컬 에이전트를 Agentlas 아키텍처로 변환·복구", descEn: "Convert/repair an external or local agent into Agentlas", icon: IconBuilding },
-];
-
-// 빌드 첫 진입 빈 화면을 없애는 스타터(value-first). 클릭하면 요청 입력을 채운다.
-const STARTERS: { ko: string; en: string; promptKo: string; promptEn: string }[] = [
-  {
-    ko: "인스타 마케팅 운영팀",
-    en: "Instagram marketing team",
-    promptKo: "인스타그램 마케팅을 운영하는 에이전트 팀 — 콘텐츠 기획, 카피, 해시태그, 게시 일정 관리",
-    promptEn: "An agent team that runs Instagram marketing — content planning, copy, hashtags, and publishing schedules",
-  },
-  {
-    ko: "경리 자동화 에이전트",
-    en: "Bookkeeping automation agent",
-    promptKo: "영수증·세금계산서를 분류하고 월 정산표를 만드는 경리 자동화 에이전트",
-    promptEn: "A bookkeeping automation agent that classifies receipts and invoices, then prepares a monthly reconciliation sheet",
-  },
-  {
-    ko: "리서치 애널리스트",
-    en: "Research analyst",
-    promptKo: "주제를 받아 출처를 모으고 사실검증한 뒤 요약 리포트를 쓰는 리서치 애널리스트 에이전트",
-    promptEn: "A research analyst agent that gathers sources for a topic, verifies the facts, and writes a concise report",
-  },
 ];
 
 // 사용자에게 보이는 실제 순서 — 요구사항을 먼저 확인한 뒤 엔진/MCP를 준비하고,
@@ -261,10 +247,50 @@ function friendlyHephaestusMessage(raw: string, ko: boolean): string {
   return text.length > 220 ? `${text.slice(0, 220)}...` : text;
 }
 
+// UI-owned start lock survives client route changes. The legacy store has no
+// cancellable preflight state, so do not invent Stop before it exposes a phase.
+let uiStartOwner: object | null = null;
+let uiStartRevision = 0;
+const uiStartListeners = new Set<() => void>();
+function subscribeUiStart(listener: () => void) {
+  uiStartListeners.add(listener);
+  return () => { uiStartListeners.delete(listener); };
+}
+function getUiStartPending() { return uiStartOwner !== null; }
+function startFreshBuild() {
+  if (getUiStartPending()) return false;
+  const started = startFreshBuildStore();
+  if (started) uiStartRevision += 1;
+  return started;
+}
+function canEditBuildDraft(revision = uiStartRevision) {
+  return !getUiStartPending() && revision === uiStartRevision
+    && !["running", "interview", "mcp-review", "runtime-approval"].includes(getBuildSnapshot().phase);
+}
+async function startBuildWithUiLock(runtime?: RuntimeSelection) {
+  if (uiStartOwner) return;
+  const owner = {};
+  uiStartOwner = owner;
+  uiStartRevision += 1;
+  uiStartListeners.forEach(listener => listener());
+  try { await startBuild(runtime); }
+  finally {
+    if (uiStartOwner === owner) {
+      uiStartOwner = null;
+      uiStartListeners.forEach(listener => listener());
+    }
+  }
+}
+
 export default function BuildPage() {
   const { locale } = useT();
   const ko = locale === "ko";
   const uiOs = useUiPlatform();
+  const startPending = useSyncExternalStore(subscribeUiStart, getUiStartPending, getUiStartPending);
+  const [reattaching, setReattaching] = useState(() => getBuildSnapshot().phase === "idle" && !getBuildSnapshot().request);
+  const [reattachProblem, setReattachProblem] = useState(false);
+  const [screen, setScreen] = useState<"home" | "intro" | "editor">(() => getBuildSnapshot().phase === "idle" && !getBuildSnapshot().request ? "home" : "editor");
+  const [inspectorTab, setInspectorTab] = useState<"settings" | "preview">("settings");
   const [status, setStatus] = useState<HephaestusStatus | null>(null);
   const [runtimes, setRuntimes] = useState<RuntimeStatus[]>([]);
   const [usage, setUsage] = useState<UsageSnapshot | null>(null);
@@ -272,6 +298,7 @@ export default function BuildPage() {
   const [publicSourceConsent, setPublicSourceConsent] = useState(false);
   const [folderMsg, setFolderMsg] = useState<string | null>(null);
   const [reply, setReply] = useState("");
+  const [followUp, setFollowUp] = useState("");
   const [selectedOptions, setSelectedOptions] = useState<Record<string, string[]>>({});
   const [questionNotes, setQuestionNotes] = useState<Record<string, string>>({});
   const [cloudChoiceError, setCloudChoiceError] = useState<string | null>(null);
@@ -282,18 +309,54 @@ export default function BuildPage() {
 
   // 모듈 레벨 빌드 스토어 구독 — 다른 메뉴로 이동했다 돌아와도 진행 상태(로그·단계·결과·인터뷰)가 유지된다.
   const s = useSyncExternalStore(buildSubscribe, getBuildSnapshot, getBuildSnapshot);
+  useEffect(() => ipc()?.hephaestus.onBuilderOwnerChanged?.(() => {
+    setReply("");
+    setFollowUp("");
+    setSelectedOptions({});
+    setQuestionNotes({});
+  }), []);
 
   // 앱을 다시 켜거나 새로고침해도 Main에서 돌고 있는 빌드에 다시 붙는다.
   // (메뉴 이동은 모듈 스토어가 이미 지키므로 여기 대상이 아니다.)
-  useEffect(() => { void reattachRunningBuild(); }, []);
+  useEffect(() => {
+    const known = getBuildSnapshot();
+    if (known.phase !== "idle" || known.request || known.runId) { setReattaching(false); return; }
+    let alive = true;
+    void (async () => {
+      try {
+        const restored = await reattachRunningBuild();
+        if (!alive) return;
+        // Legacy reattach treats IPC errors as null. A false return alone does
+        // not establish that Main has no build; confirm it before opening input.
+        if (!restored) {
+          const check = ipc()?.hephaestus?.activeBuild;
+          if (!check) throw new Error("build status unavailable");
+          const active = await check();
+          if (!alive) return;
+          const age = active ? Date.now() - Date.parse(active.startedAt || "") : Number.POSITIVE_INFINITY;
+          if (active && (active.running || (Number.isFinite(age) && age < 2 * 60_000))) {
+            const reconnected = await reattachRunningBuild();
+            if (!alive) return;
+            const current = getBuildSnapshot();
+            if (!reconnected && current.phase === "idle" && !current.request && !current.runId) throw new Error("build status unconfirmed");
+          }
+        }
+        if (!alive) return;
+        setReattaching(false);
+        if (getBuildSnapshot().phase !== "idle") setScreen("editor");
+      } catch { if (alive) setReattachProblem(true); }
+    })();
+    return () => { alive = false; };
+  }, []);
   const { request, mode, workspace, workspaceGrant, runtime, phase, log, reached, errored, recoverable, error: buildError, result, registered, registeredEntity, pendingQuestions, pendingAllocation, awaitingReply, turn, attachments, mcpPlan, mcpReceipt, cloudSaveChoice, liveness } = s;
   // Source disclosure belongs to one completed Build, not the next package.
   useEffect(() => { setPublicSourceConsent(false); }, [result]);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const requestInputRef = useRef<HTMLTextAreaElement | null>(null);
 
   const applyOneReviewSeed = useCallback((seed: OneSuggestionReviewSeed): OneReviewSeedApplyResult => {
     if (seed.kind !== "agent_build" || seed.targetSurface !== "build" || seed.buildMode !== "single") return "blocked";
-    if (status === null) return "defer";
+    if (reattaching || startPending || status === null) return "defer";
     if (!status.available) return "blocked";
     const current = getBuildSnapshot();
     if (
@@ -314,23 +377,38 @@ export default function BuildPage() {
     setBuildRequest(ko
       ? "반복해서 완료한 작업 패턴을 맡을 단일 에이전트 하나를 새로 설계해줘. 역할·입력·출력·권한 경계를 먼저 인터뷰하고, 기존 에이전트의 시스템 프롬프트·파일·메모리·로컬 경로·자격 증명은 복사하지 마."
       : "Design one new single agent for the repeated completed-work pattern. Interview me first about its role, inputs, outputs, and permission boundaries; do not copy any existing system prompt, files, memory, local paths, or credentials.");
+    setScreen("editor");
     return "applied";
-  }, [ko, status]);
+  }, [ko, status, reattaching, startPending]);
 
-  // 드롭/파일 인풋 → 실제 디스크 경로(webUtils) → 스토어 첨부. 경로를 못 얻으면(브라우저 등) 스킵.
-  const addDroppedFiles = async (files: FileList) => {
+  // 드롭/파일 인풋/붙여넣기 → 실제 디스크 경로(webUtils), 경로가 없으면(브라우저·붙여넣기) Main이 바이트를 고정한 파일 → 스토어 첨부.
+  // 사진·영상·파일·폴더 모두, 개수·크기 제한 없이(오너). 끝내 못 넣은 것은 이름과 함께 알린다(조용히 빼지 않는다).
+  const addDroppedFiles = async (files: FileList | File[]) => {
+    if (!canEditBuildDraft()) return;
+    const revision = uiStartRevision;
     const items: BuildAttachment[] = [];
+    const previews: Array<[string, string]> = [];
+    const skipped: string[] = [];
     for (const f of Array.from(files)) {
-      const grant = await grantForDroppedFile(f);
-      if (!grant) continue;
+      const grant = await grantForDroppedFile(f) ?? await grantForPastedAttachment(f);
+      if (!canEditBuildDraft(revision)) return;
+      if (!grant) { skipped.push(f.name || (ko ? "이름 없는 파일" : "unnamed file")); continue; }
       const p = grant.path;
       items.push({ path: p, grant, name: f.name || p.split(/[\\/]/).pop() || p, kind: grant.kind === "directory" ? "dir" : "file" });
+      if (grant.kind !== "directory" && (f.type.startsWith("image/") || f.type.startsWith("video/"))) previews.push([p, URL.createObjectURL(f)]);
     }
     if (items.length > 0) addAttachments(items);
+    if (previews.length > 0) setAttachmentPreviews((current) => new Map([...current, ...previews]));
+    setAttachmentSkipped(skipped);
   };
+  const [attachmentPreviews, setAttachmentPreviews] = useState<ReadonlyMap<string, string>>(() => new Map());
+  const [attachmentSkipped, setAttachmentSkipped] = useState<string[]>([]);
 
   const attachFolder = async () => {
+    if (!canEditBuildDraft()) return;
+    const revision = uiStartRevision;
     const dir = await ipc()?.fs.pickDirectory();
+    if (!canEditBuildDraft(revision)) return;
     if (dir) addAttachments([{ path: dir.path, grant: dir, name: dir.path.split(/[\\/]/).pop() || dir.path, kind: "dir" }]);
   };
   const pendingQuestionKey = pendingQuestions.map((q) => q.id).join("|");
@@ -447,6 +525,8 @@ export default function BuildPage() {
   }, [phase]);
 
   const pickWorkspace = async () => {
+    if (!canEditBuildDraft()) return;
+    const revision = uiStartRevision;
     const api = ipc();
     if (!api) {
       setFolderMsg(ko ? "폴더 선택을 사용할 수 없습니다." : "Folder picker is not available.");
@@ -455,6 +535,7 @@ export default function BuildPage() {
     setFolderMsg(ko ? "폴더 선택 창을 여는 중..." : "Opening folder picker...");
     try {
       const dir = await api.fs.pickDirectory();
+      if (!canEditBuildDraft(revision)) return;
       if (dir) {
         setBuildWorkspace(dir);
         setFolderMsg(ko ? "생성 폴더가 선택되었습니다." : "Output folder selected.");
@@ -467,11 +548,14 @@ export default function BuildPage() {
   };
 
   const reauthorizeWorkspace = async () => {
+    if (!canEditBuildDraft()) return;
+    const revision = uiStartRevision;
     const api = ipc();
     if (!api) return;
     setFolderMsg(ko ? "생성 폴더 권한을 다시 요청하는 중..." : "Requesting output-folder access again...");
     try {
       const dir = await api.fs.pickDirectory();
+      if (!canEditBuildDraft(revision)) return;
       if (!dir) {
         setFolderMsg(ko ? "폴더 다시 선택을 취소했습니다." : "Folder re-selection was cancelled.");
         return;
@@ -481,6 +565,19 @@ export default function BuildPage() {
       setFolderMsg(ko ? "폴더 권한을 갱신했습니다. 요청과 설정은 유지됐습니다. 다시 시작을 눌러 확인하세요." : "Folder access was refreshed. Your request and settings were kept. Start again when ready.");
     } catch {
       setFolderMsg(ko ? `폴더 권한을 갱신하지 못했습니다. ${fileManagerName(true, uiOs)}에서 폴더가 실제로 있는지 확인하세요.` : `Could not refresh folder access. Check that the folder still exists in ${fileManagerName(false, uiOs)}.`);
+    }
+  };
+
+  const reauthorizeConversationWorkspace = async () => {
+    try {
+      const dir = await ipc()?.fs.pickDirectory();
+      if (!dir || !reauthorizeRestoredBuildWorkspace(dir)) {
+        setFolderMsg(ko ? "이전 작업 폴더를 선택해 주세요." : "Select the previous workspace.");
+      } else {
+        setFolderMsg(ko ? "작업 폴더 권한을 다시 확인했습니다." : "Workspace access was renewed.");
+      }
+    } catch {
+      setFolderMsg(ko ? "작업 폴더 권한을 확인하지 못했습니다." : "Could not renew workspace access.");
     }
   };
 
@@ -502,6 +599,7 @@ export default function BuildPage() {
   }, [runtimes]);
 
   const onSelectRuntime = (key: string) => {
+    if (!canEditBuildDraft()) return;
     if (!key) {
       setBuildRuntime(null);
       return;
@@ -629,6 +727,7 @@ export default function BuildPage() {
   const running = phase === "running";
   // 대화형 빌드가 진행 중(엔진 실행 중이거나 인터뷰 답변 대기 중)이면 컴포저 입력을 잠근다.
   const busy = phase === "running" || phase === "mcp-review" || phase === "runtime-approval" || phase === "interview";
+  const editingLocked = busy || startPending;
   const startBlocker = !request.trim()
     ? (ko ? "요청을 먼저 입력하세요." : "Enter a request first.")
     : !workspace
@@ -638,40 +737,51 @@ export default function BuildPage() {
         : selectedRuntimeBlocked
           ? (ko ? "선택된 AI 엔진의 사용량이 소진됐습니다. 위에서 사용 가능한 다른 엔진을 선택하세요." : "The selected AI engine has no usage remaining. Choose another available engine above.")
         : null;
+  const openBuildDraft = (text: string) => {
+    if (getUiStartPending()) { setScreen("editor"); return; }
+    // A template is a NEW build, never permission to overwrite an active one.
+    if (screen === "home" || getBuildSnapshot().phase !== "idle") {
+      if (!startFreshBuild()) { setScreen("editor"); return; }
+    }
+    uiStartRevision += 1;
+    setBuildRequest(text);
+    setScreen("editor");
+    setInspectorTab("settings");
+  };
   // 파이프라인은 항상 표시 — idle 에선 딤된 프리뷰로 무엇을 할지 보여준다.
   const showPipeline = true;
+  useEffect(() => { if (phase === "done") setInspectorTab("preview"); }, [phase]);
   const resultScanDisposition = result ? buildScanDisposition(result.securityScan) : "unverified";
   const resultHasSecurityAdvisory = resultScanDisposition !== "passed";
 
   return (
-    <div className="rd build-root">
+    <div className={`rd build-root ${styles.root}`} data-build-screen={screen}>
       <div className="titlebar-drag build-window-drag" />
       <main className="build-scroll">
-        <div className="build-shell">
-          <header className="build-header">
-            <div className="build-title-group">
-              <Link href="/workspace" className="titlebar-nodrag build-back-link">
-                <IconChevronRight size={14} />
-                {locale === "ko" ? "작업공간" : "Workspace"}
-              </Link>
-              <div className="build-title-mark"><IconBuilding size={18} /></div>
-              <div>
-                <h1>{ko ? "빌드" : "Build"}</h1>
-                <div className="build-subtitle">{ko ? "에이전트 제작 도우미" : "Agent creation assistant"}</div>
-              </div>
-            </div>
-            <div className="build-header-status titlebar-nodrag">
-              <KeyStatusBanner
-                mode="pill"
-                relevantProvider={selectedRuntimeProviderLabel}
-                relevantRuntime={selectedRuntimeBannerRuntime}
-                problemsInBanner
-              />
+          <Suspense fallback={null}>
+            <OneSuggestionReviewHandoffBanner surface="build" locale={locale} onReviewSeed={applyOneReviewSeed} />
+          </Suspense>
+
+        {reattaching ? <div className={styles.empty} role="status"><strong>{reattachProblem ? (ko ? "제작 상태를 확인하지 못했습니다" : "Build status could not be confirmed") : (ko ? "진행 중인 제작을 확인하고 있습니다…" : "Checking for an ongoing build…")}</strong><p>{ko ? "이전 빌드와 겹치지 않도록 확인이 끝날 때까지 새 제작을 기다립니다. 응답이 지연되면 작업공간으로 돌아갈 수 있습니다." : "New builds wait until this check finishes to avoid overlapping an earlier build. You can return to the workspace while the response is delayed."}</p><Link className={styles.quietButton} href="/workspace">{ko ? "작업공간으로 돌아가기" : "Return to workspace"}</Link></div> : screen !== "editor" ? <BuildLaunch ko={ko} screen={screen} request={request} onRequest={(text) => { if (canEditBuildDraft()) setBuildRequest(text); else setScreen("editor"); }}
+          hasBuild={phase !== "idle" || Boolean(request)} onResume={() => setScreen("editor")}
+          onHome={() => { if (!getUiStartPending()) setScreen("home"); }} onNew={() => { if (getUiStartPending()) { setScreen("editor"); return; } if (startFreshBuild()) setScreen("intro"); else setScreen("editor"); }}
+          onBlank={() => openBuildDraft("")}
+          onCompose={openBuildDraft} onAttachFiles={(files) => void addDroppedFiles(files)} attachmentCount={attachments.length} /> : <div className={`build-shell ${styles.workbench}`}>
+          <header className={styles.toolbar}>
+            <button type="button" className={styles.quietButton} disabled={startPending} onClick={() => { if (!getUiStartPending()) setScreen("home"); }}><IconArrowLeft size={16} />{ko ? "에이전트" : "Agents"}</button>
+            <div className={styles.toolbarActions}>
+              <span className={styles.phase}>{startPending && !busy ? (ko ? "생성 폴더 확인 중" : "Checking output folder") : busy ? (ko ? "제작 중" : "Building") : phase === "done" ? (ko ? "생성 완료" : "Created") : phase === "error" ? (ko ? "확인 필요" : "Needs attention") : (ko ? "초안" : "Draft")}</span>
+              {busy && <button type="button" className={styles.stopButton} onClick={cancelBuild}>{ko ? "중지" : "Stop"}</button>}
+              <button type="button" className={styles.quietButton} onClick={() => setInspectorTab(inspectorTab === "preview" ? "settings" : "preview")} aria-pressed={inspectorTab === "preview"}>{ko ? "미리보기" : "Preview"}</button>
             </div>
           </header>
-
-          <KeyStatusBanner mode="banner" relevantProvider={selectedRuntimeProviderLabel} relevantRuntime={selectedRuntimeBannerRuntime} />
-
+          <div className={styles.editorLayout}>
+            <section className={styles.conversation} aria-label={ko ? "에이전트 제작 대화" : "Agent build conversation"}>
+              <div className={styles.conversationHeading}><img src="/brand/agentlas-mark.png" alt="" /><span>Agentlas</span></div>
+              {phase !== "idle" && request ? <div className={styles.requestBubble}>{request}</div> : <div className={styles.conversationEmpty}>
+                <h2>{ko ? "무엇을 만들고 싶으신가요?" : "What would you like to build?"}</h2>
+                <p>{ko ? "아래에 에이전트가 할 일을 적고 제작을 시작하세요. 빌더가 필요한 내용을 질문합니다." : "Describe the agent below and start building. The builder will ask what it needs."}</p>
+              </div>}
           {/* Ambient status layer — pinned so it is on screen no matter how far
               the log has scrolled. This is the one element that must never go
               quiet: the pipeline card scrolls away, and the Build Log genuinely
@@ -713,9 +823,6 @@ export default function BuildPage() {
             </div>
           )}
 
-          <Suspense fallback={null}>
-            <OneSuggestionReviewHandoffBanner surface="build" locale={locale} onReviewSeed={applyOneReviewSeed} />
-          </Suspense>
 
           {engineMissing && (
             <div className="build-alert">
@@ -734,205 +841,10 @@ export default function BuildPage() {
             </div>
           )}
 
-          <section className="build-grid">
-            <div className="build-card build-composer" data-tour-id="build.request">
-              <div className="build-card-head">
-                <span>{ko ? "요청" : "Request"}</span>
-                <span>{mode || "auto"}</span>
-              </div>
 
-              <div className="build-mode-grid">
-                {MODES.map((m) => {
-                  const active = mode === m.id;
-                  const Icon = m.icon;
-                  return (
-                    <button
-                      key={m.id}
-                      onClick={() => setBuildMode(active ? "" : m.id)}
-                      disabled={busy}
-                      className="build-mode-card titlebar-nodrag"
-                      data-active={active ? "true" : "false"}
-                      data-mode={m.id}
-                      aria-pressed={active}
-                    >
-                      <span className="build-mode-icon" aria-hidden="true">
-                        <Icon size={16} />
-                      </span>
-                      <strong>{ko ? m.label : m.labelEn}</strong>
-                      <span className="build-mode-desc">{ko ? m.desc : m.descEn}</span>
-                      <span className="build-mode-check" aria-hidden="true">
-                        <IconCheck size={12} />
-                      </span>
-                    </button>
-                  );
-                })}
-              </div>
-
-              {!busy && (
-                <div className="build-starters">
-                  <span className="build-starters-label">{ko ? "스타터" : "Starters"}</span>
-                  {STARTERS.map((s) => (
-                    <button
-                      key={s.en}
-                      type="button"
-                      className="build-starter-chip titlebar-nodrag"
-                      onClick={() => setBuildRequest(ko ? s.promptKo : s.promptEn)}
-                    >
-                      {ko ? s.ko : s.en}
-                    </button>
-                  ))}
-                </div>
-              )}
-
-              <div
-                className="build-request-drop"
-                onDragOver={(e) => {
-                  e.preventDefault();
-                  e.dataTransfer.dropEffect = "copy";
-                }}
-                onDrop={(e) => {
-                  e.preventDefault();
-                  if (busy) return;
-                  addDroppedFiles(e.dataTransfer.files);
-                }}
-              >
-                <textarea
-                  value={request}
-                  onChange={(e) => setBuildRequest(e.target.value)}
-                  disabled={busy}
-                  placeholder={ko ? "무엇을 시킬까요? 예) 인스타그램 마케팅 운영 에이전트 — 참고할 파일·폴더는 아래 첨부나 드래그로" : "What should it do? e.g. an Instagram marketing agent — drop reference files/folders below"}
-                  rows={5}
-                  className="build-request-input titlebar-nodrag"
-                />
-                <div className="build-attach-row">
-                  <button type="button" className="build-attach-button titlebar-nodrag" disabled={busy} onClick={() => fileInputRef.current?.click()}>
-                    📎 {ko ? "파일 첨부" : "Attach files"}
-                  </button>
-                  <button type="button" className="build-attach-button titlebar-nodrag" disabled={busy} onClick={() => void attachFolder()}>
-                    <IconFolder size={12} /> {ko ? "폴더 첨부" : "Attach folder"}
-                  </button>
-                  <span className="build-attach-hint">
-                    {ko ? "기존 에이전트·스킬 폴더, 이미지, 문서 등 — 빌더가 읽고 반영합니다" : "Existing agent/skill folders, images, docs — the builder reads them"}
-                  </span>
-                  <input
-                    ref={fileInputRef}
-                    type="file"
-                    multiple
-                    style={{ display: "none" }}
-                    onChange={(e) => {
-                      if (e.target.files) addDroppedFiles(e.target.files);
-                      e.target.value = "";
-                    }}
-                  />
-                </div>
-                {attachments.length > 0 && (
-                  <div className="build-attach-chips">
-                    {attachments.map((a, i) => (
-                      <span key={a.path} className="build-attach-chip" title={a.path}>
-                        {a.kind === "dir" ? <IconFolder size={11} /> : <span className="build-artifact-filedot" />}
-                        <span className="build-attach-chip-name">{a.name}</span>
-                        {!busy && (
-                          <button type="button" className="build-attach-chip-x titlebar-nodrag" aria-label={ko ? "첨부 제거" : "Remove attachment"} onClick={() => removeAttachment(i)}>
-                            ✕
-                          </button>
-                        )}
-                      </span>
-                    ))}
-                  </div>
-                )}
-              </div>
-
-              <div className="build-model-row">
-                <label className="build-model-label" htmlFor="build-model-select">
-                  {ko ? "빌드 모델" : "Build model"}
-                </label>
-                <Select
-                  id="build-model-select"
-                  className="build-model-select titlebar-nodrag"
-                  value={runtimeKey(runtime)}
-                  onChange={(e) => onSelectRuntime(e.target.value)}
-                  disabled={busy}
-                >
-                  <option value="">{ko ? "자동 선택 (활성 엔진)" : "Auto (active engine)"}</option>
-                  {runtimes.flatMap((r) => {
-                    const key = `${r.kind}:${r.source}`;
-                    const blocked = runtimeUsageBlocked(r, usage);
-                    const suffix = `${r.active ? (ko ? " · 활성" : " · active") : ""}${blocked ? (ko ? " · 사용량 소진" : " · usage exhausted") : ""}`;
-                    const models = modelsByRuntime[key] ?? [];
-                    // 모델을 아는 런타임은 모델까지 고르게 한다. 모르는 런타임은
-                    // 종전처럼 런타임 한 줄로 남긴다(없는 선택지를 지어내지 않는다).
-                    if (models.length === 0) {
-                      return [(
-                        <option key={key} value={key} disabled={blocked}>
-                          {engineLabel(r, ko)}{r.model ? ` · ${r.model}` : ""}{suffix}
-                        </option>
-                      )];
-                    }
-                    return models.map((m) => {
-                      const modelBlocked = runtimeUsageBlocked(r, usage, m.id);
-                      const modelSuffix = `${r.active ? (ko ? " · 활성" : " · active") : ""}${modelBlocked ? (ko ? " · 사용량 소진" : " · usage exhausted") : ""}`;
-                      return (
-                        <option key={`${key}::${m.id}`} value={`${key}::${m.id}`} disabled={modelBlocked}>
-                          {engineLabel(r, ko)} · {m.label}{modelSuffix}
-                        </option>
-                      );
-                    });
-                  })}
-                </Select>
-              </div>
-
-              <div className="build-action-row" data-tour-id="build.interview">
-                <button onClick={pickWorkspace} disabled={busy} className="build-folder-button titlebar-nodrag">
-                  <IconFolder size={15} />
-                  <span>{workspace ? workspace.split(/[\\/]/).slice(-2).join("/") : ko ? "생성 폴더 선택" : "Choose output folder"}</span>
-                </button>
-                {running ? (
-                  <button onClick={cancelBuild} className="build-secondary-button titlebar-nodrag">{ko ? "중지" : "Stop"}</button>
-                ) : phase === "mcp-review" ? (
-                  <button onClick={cancelBuild} className="build-secondary-button titlebar-nodrag">{ko ? "MCP 검토 취소" : "Cancel MCP review"}</button>
-                ) : phase === "runtime-approval" ? (
-                  <button onClick={cancelBuild} className="build-secondary-button titlebar-nodrag">{ko ? "모델 선택 취소" : "Cancel model review"}</button>
-                ) : phase === "interview" ? (
-                  <button onClick={resetBuild} className="build-secondary-button titlebar-nodrag">{ko ? "인터뷰 취소" : "Cancel interview"}</button>
-                ) : phase === "error" && recoverable && buildError?.kind !== "workspace-unavailable" ? (
-                  <>
-                    <button onClick={() => void resumeBuild()} className="build-primary-button titlebar-nodrag">
-                      {ko ? "보존된 파일에서 이어서 빌드" : "Resume from saved files"}
-                    </button>
-                    <button onClick={startFreshBuild} className="build-secondary-button titlebar-nodrag">
-                      {ko ? "새 빌드" : "New build"}
-                    </button>
-                  </>
-                ) : phase === "done" || phase === "error" ? (
-                  <button onClick={startFreshBuild} className="build-secondary-button titlebar-nodrag">{ko ? "새 빌드" : "New build"}</button>
-                ) : (
-                  <button
-                    onClick={() => {
-                      const active = runtimes.find((item) => item.active) ?? runtimes[0];
-                      void startBuild(active ? selectionForRuntime(active, { longContext: active.longContextEnabled ?? undefined }) : undefined);
-                    }}
-                    disabled={Boolean(startBlocker)}
-                    /* 막는 사유 문장이 아래에 있는데 단추에는 없었다 — 같은 문장을 붙인다. */
-                    title={startBlocker || undefined}
-                    className="build-primary-button titlebar-nodrag"
-                  >
-                    <IconWand size={15} /> {ko ? "딥인터뷰로 빌드 시작" : "Start build (deep interview)"}
-                  </button>
-                )}
-              </div>
-              {(startBlocker || folderMsg) && !running && phase !== "interview" && (
-                <div role="status" className="build-inline-hint">
-                  {startBlocker || folderMsg}
-                </div>
-              )}
-              <p className="build-autoadd-hint">
-                {ko
-                  ? "데스크톱 Build와 공개 Hub 에이전트 사용은 무료입니다. 모델 실행은 이 컴퓨터의 Claude Code/Codex/Antigravity/BYOK/Agentlas Local을 사용합니다."
-                  : "Desktop Build and public Hub agent use are free. Model execution uses Claude Code/Codex/Antigravity/BYOK/Agentlas Local on this computer."}
-              </p>
-            </div>
-
-            {showPipeline && (
+              <details className={styles.progress} open={busy}>
+                <summary>{ko ? "제작 진행" : "Build progress"}</summary>
+{showPipeline && (
               <div className="build-card build-pipeline-card" data-tour-id="build.pipeline">
                 <div className="build-card-head">
                   <span>{ko ? "파이프라인" : "Pipeline"}</span>
@@ -978,7 +890,8 @@ export default function BuildPage() {
                 </div>
               </div>
             )}
-          </section>
+              </details>
+
 
           {phase === "mcp-review" && mcpPlan && (
             <McpBuildInterviewCard
@@ -1024,7 +937,7 @@ export default function BuildPage() {
           {phase === "error" && buildError && (
             <section className="build-card" role="alert">
               <div className="build-card-head">
-                <strong>{ko ? "빌드가 멈춘 이유" : "Why the build stopped"}</strong>
+                <strong>{restoredCompletionNeedsReview() ? (ko ? "이전 결과 확인 필요" : "Previous result needs review") : (ko ? "빌드가 멈춘 이유" : "Why the build stopped")}</strong>
               </div>
               <p className="build-card-note">{buildError.message}</p>
               <div className="build-card-actions">
@@ -1046,6 +959,7 @@ export default function BuildPage() {
 
           {awaitingReply && pendingQuestions.length > 0 && (
             <section className="build-card build-interview-card">
+              {!workspaceGrant && <button type="button" onClick={() => void reauthorizeConversationWorkspace()}>{ko ? "이전 작업 폴더 다시 선택" : "Select previous workspace"}</button>}
               <div className="build-card-head build-interview-head">
                 <span>{ko ? `빌드 요구사항 · 질문 묶음 ${turn}` : `Build brief · question batch ${turn}`}</span>
                 <div className="build-interview-head-actions">
@@ -1120,6 +1034,304 @@ export default function BuildPage() {
             </section>
           )}
 
+          {canContinueCompletedBuild() && (
+            <section className="build-card">
+              {!workspaceGrant && <button type="button" onClick={() => void reauthorizeConversationWorkspace()}>{ko ? "이전 작업 폴더 다시 선택" : "Select previous workspace"}</button>}
+              <label htmlFor="build-follow-up">{ko ? "이 작업 이어가기" : "Continue this work"}</label>
+              <textarea id="build-follow-up" className="build-interview-input titlebar-nodrag" rows={2}
+                value={followUp} onChange={(event) => setFollowUp(event.target.value)}
+                placeholder={ko ? "수정하거나 추가할 내용을 입력하세요" : "Describe what to change or add"} />
+              <button type="button" className="build-primary-button" disabled={!followUp.trim()}
+                onClick={() => void continueCompletedBuild(followUp)}>{ko ? "이어서 요청" : "Continue"}</button>
+            </section>
+          )}
+
+          {/* 실행 중과 실패 직후에는 펼쳐 둔다. 접힌 채로 두면 "작업 중"이라는 글자만
+              보이고 그 아래가 비어 있어, 아무 일도 안 일어나는 것처럼 읽힌다
+              (오너 제보). 완료된 빌드만 접어 둔다. */}
+          {log.length > 0 && (
+            <details
+              className="build-card build-log-card"
+              data-tour-id="build.log"
+              open={running || phase === "error"}
+            >
+              <summary className="build-card-head">
+                <span>{ko ? "진행 세부사항" : "Activity details"}</span>
+                {running
+                  ? <span className="build-live"><span className="forge-pulse" />{ko ? "작업 중" : "working"}</span>
+                  : phase === "done" && <span>{ko ? "완료" : "complete"}</span>}
+              </summary>
+              <div className="build-log-body">
+                <BuildLogRows log={log} ko={ko} />
+                {/* One replaceable tail row, never appended history. It is the
+                    only thing in this box while a runtime streams nothing. */}
+                {liveness && (
+                  <div data-kind="heartbeat" className="build-log-tail">
+                    <span className="build-log-time">{fmtLogTime(liveness.at)}</span>
+                    <span className="build-log-tail-dot" />
+                    <span>
+                      {liveness.activity}
+                      {liveness.silentMs >= 45_000
+                        ? ko ? " · 시간이 더 필요한 단계지만 계속 작업 중입니다." : " · This step is taking longer, but work is continuing."
+                        : ""}
+                    </span>
+                  </div>
+                )}
+                <div ref={logEndRef} />
+              </div>
+            </details>
+          )}
+              {phase === "idle" && <div className={styles.draftComposer}>
+                <label htmlFor="build-conversation-request">{ko ? "에이전트 제작 요청" : "Agent build request"}</label>
+                <textarea id="build-conversation-request" value={request} disabled={editingLocked} onChange={event => { if (canEditBuildDraft()) setBuildRequest(event.target.value); }} placeholder={ko ? "어떤 에이전트를 만들까요?" : "What agent would you like to build?"} rows={3} />
+                <div><span>{ko ? "제작 요청을 설정에서 검토한 뒤 시작하세요." : "Review this brief in Configure, then start building."}</span><button type="button" className={styles.primary} disabled={startPending} onClick={() => { setInspectorTab("settings"); requestAnimationFrame(() => requestInputRef.current?.focus()); }}>{ko ? "설정에서 계속" : "Continue in Configure"}</button></div>
+              </div>}
+            </section>
+            <aside className={styles.inspector} aria-label={ko ? "에이전트 설정과 미리보기" : "Agent settings and preview"}>
+              <div className={styles.inspectorTabs} role="tablist" aria-label={ko ? "제작 패널" : "Build panel"} onKeyDown={(event) => {
+                if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+                event.preventDefault();
+                const next = event.key === "Home" ? "settings" : event.key === "End" ? "preview" : inspectorTab === "settings" ? "preview" : "settings";
+                setInspectorTab(next);
+                document.getElementById(`build-${next}-tab`)?.focus();
+              }}>
+                <button type="button" id="build-settings-tab" role="tab" tabIndex={inspectorTab === "settings" ? 0 : -1} aria-selected={inspectorTab === "settings"} aria-controls="build-settings-panel" onClick={() => setInspectorTab("settings")}>{ko ? "설정" : "Configure"}</button>
+                <button type="button" id="build-preview-tab" role="tab" tabIndex={inspectorTab === "preview" ? 0 : -1} aria-selected={inspectorTab === "preview"} aria-controls="build-preview-panel" onClick={() => setInspectorTab("preview")}>{ko ? "미리보기" : "Preview"}</button>
+              </div>
+              <div id="build-settings-panel" role="tabpanel" aria-labelledby="build-settings-tab" hidden={inspectorTab !== "settings"}>
+          <header className="build-header">
+            <div className="build-title-group">
+              <Link href="/workspace" className="titlebar-nodrag build-back-link">
+                <IconChevronRight size={14} />
+                {locale === "ko" ? "작업공간" : "Workspace"}
+              </Link>
+              <div className="build-title-mark"><IconBuilding size={18} /></div>
+              <div>
+                <h1>{registeredEntity?.name || (ko ? "새 에이전트" : "New agent")}</h1>
+                <div className="build-subtitle">{ko ? "에이전트 제작 도우미" : "Agent creation assistant"}</div>
+              </div>
+            </div>
+            <div className="build-header-status titlebar-nodrag">
+              <KeyStatusBanner
+                mode="pill"
+                relevantProvider={selectedRuntimeProviderLabel}
+                relevantRuntime={selectedRuntimeBannerRuntime}
+                problemsInBanner
+              />
+            </div>
+          </header>
+
+          <KeyStatusBanner mode="banner" relevantProvider={selectedRuntimeProviderLabel} relevantRuntime={selectedRuntimeBannerRuntime} />
+          <BuildResources ko={ko} canAttach={phase === "idle" && !editingLocked} canConfigure={!editingLocked && !reattaching} onStop={busy ? cancelBuild : undefined} onAttachFolder={() => void attachFolder()} registered={result && registered ? registeredEntity : null} />
+
+
+            <div className="build-card build-composer" data-tour-id="build.request">
+              <div className="build-card-head">
+                <span>{ko ? "요청" : "Request"}</span>
+                <span>{mode || "auto"}</span>
+              </div>
+
+              <div className="build-mode-grid">
+                {MODES.map((m) => {
+                  const active = mode === m.id;
+                  const Icon = m.icon;
+                  return (
+                    <button
+                      key={m.id}
+                      onClick={() => { if (canEditBuildDraft()) setBuildMode(active ? "" : m.id); }}
+                      disabled={editingLocked}
+                      className="build-mode-card titlebar-nodrag"
+                      data-active={active ? "true" : "false"}
+                      data-mode={m.id}
+                      aria-pressed={active}
+                    >
+                      <span className="build-mode-icon" aria-hidden="true">
+                        <Icon size={16} />
+                      </span>
+                      <strong>{ko ? m.label : m.labelEn}</strong>
+                      <span className="build-mode-desc">{ko ? m.desc : m.descEn}</span>
+                      <span className="build-mode-check" aria-hidden="true">
+                        <IconCheck size={12} />
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+
+              <div
+                className="build-request-drop"
+                onDragOver={(e) => {
+                  e.preventDefault();
+                  e.dataTransfer.dropEffect = "copy";
+                }}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  if (editingLocked) return;
+                  addDroppedFiles(e.dataTransfer.files);
+                }}
+              >
+                <textarea
+                  ref={requestInputRef}
+                  aria-label={ko ? "에이전트 지침과 요청" : "Agent instructions and request"}
+                  onPaste={(e) => {
+                    // 붙여넣은 사진·영상·파일도 첨부가 된다(글만 붙여넣으면 글 그대로).
+                    const pasted = Array.from(e.clipboardData?.files ?? []);
+                    if (!pasted.length || editingLocked) return;
+                    e.preventDefault();
+                    void addDroppedFiles(pasted);
+                  }}
+                  value={request}
+                  onChange={(e) => { if (canEditBuildDraft()) setBuildRequest(e.target.value); }}
+                  disabled={editingLocked}
+                  placeholder={ko ? "에이전트가 할 일과 원하는 결과를 적어 주세요. 참고할 파일과 폴더는 아래에 첨부하세요." : "Describe what the agent should do and the result you want. Attach reference files or folders below."}
+                  rows={5}
+                  className="build-request-input titlebar-nodrag"
+                />
+                <div className="build-attach-row">
+                  <button type="button" className="build-attach-button titlebar-nodrag" disabled={editingLocked} onClick={() => fileInputRef.current?.click()}>
+                    📎 {ko ? "파일 첨부" : "Attach files"}
+                  </button>
+                  <button type="button" className="build-attach-button titlebar-nodrag" disabled={editingLocked} onClick={() => void attachFolder()}>
+                    <IconFolder size={12} /> {ko ? "폴더 첨부" : "Attach folder"}
+                  </button>
+                  <span className="build-attach-hint">
+                    {ko ? "사진·영상·문서·기존 에이전트/스킬 폴더 — 빌더가 읽고 반영합니다" : "Photos, videos, documents, agent/skill folders — the builder reads them"}
+                  </span>
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    multiple
+                    style={{ display: "none" }}
+                    onChange={(e) => {
+                      if (e.target.files) addDroppedFiles(e.target.files);
+                      e.target.value = "";
+                    }}
+                  />
+                </div>
+                {attachments.length > 0 && (
+                  <div className="build-attach-chips titlebar-nodrag" data-build-attachments="true">
+                    {/* 사진·영상은 썸네일, 그 밖의 파일·폴더는 아이콘+이름 타일 — 한 줄 가로 띠, 각각 × (media-carousel) */}
+                    <MediaStrip
+                      variant="composer"
+                      locale={ko ? "ko" : "en"}
+                      items={attachments.map((a, i): MediaStripItem => {
+                        const preview = attachmentPreviews.get(a.path);
+                        return {
+                          key: a.path,
+                          kind: a.kind === "dir" ? "folder" : preview ? mediaKindOf(undefined, a.name) : "file",
+                          name: a.name,
+                          src: preview,
+                          thumbSrc: preview && mediaKindOf(undefined, a.name) === "image" ? preview : undefined,
+                          ...(!busy ? { onRemove: () => { if (canEditBuildDraft()) removeAttachment(i); } } : {}),
+                        };
+                      })}
+                    />
+                  </div>
+                )}
+                {attachmentSkipped.length > 0 && (
+                  <p className="build-attach-hint" role="alert">
+                    {ko ? `첨부하지 못했습니다: ${attachmentSkipped.join(", ")}` : `Could not attach: ${attachmentSkipped.join(", ")}`}
+                  </p>
+                )}
+              </div>
+
+              <div className="build-model-row">
+                <label className="build-model-label" htmlFor="build-model-select">
+                  {ko ? "빌드 모델" : "Build model"}
+                </label>
+                <Select
+                  id="build-model-select"
+                  className="build-model-select titlebar-nodrag"
+                  value={runtimeKey(runtime)}
+                  onChange={(e) => onSelectRuntime(e.target.value)}
+                  disabled={editingLocked}
+                >
+                  <option value="">{ko ? "자동 선택 (활성 엔진)" : "Auto (active engine)"}</option>
+                  {runtimes.flatMap((r) => {
+                    const key = `${r.kind}:${r.source}`;
+                    const blocked = runtimeUsageBlocked(r, usage);
+                    const suffix = `${r.active ? (ko ? " · 활성" : " · active") : ""}${blocked ? (ko ? " · 사용량 소진" : " · usage exhausted") : ""}`;
+                    const models = modelsByRuntime[key] ?? [];
+                    // 모델을 아는 런타임은 모델까지 고르게 한다. 모르는 런타임은
+                    // 종전처럼 런타임 한 줄로 남긴다(없는 선택지를 지어내지 않는다).
+                    if (models.length === 0) {
+                      return [(
+                        <option key={key} value={key} disabled={blocked}>
+                          {engineLabel(r, ko)}{r.model ? ` · ${r.model}` : ""}{suffix}
+                        </option>
+                      )];
+                    }
+                    return models.map((m) => {
+                      const modelBlocked = runtimeUsageBlocked(r, usage, m.id);
+                      const modelSuffix = `${r.active ? (ko ? " · 활성" : " · active") : ""}${modelBlocked ? (ko ? " · 사용량 소진" : " · usage exhausted") : ""}`;
+                      return (
+                        <option key={`${key}::${m.id}`} value={`${key}::${m.id}`} disabled={modelBlocked}>
+                          {engineLabel(r, ko)} · {m.label}{modelSuffix}
+                        </option>
+                      );
+                    });
+                  })}
+                </Select>
+              </div>
+
+              <div className="build-action-row" data-tour-id="build.interview">
+                <button onClick={pickWorkspace} disabled={editingLocked} className="build-folder-button titlebar-nodrag">
+                  <IconFolder size={15} />
+                  <span>{workspace ? workspace.split(/[\\/]/).slice(-2).join("/") : ko ? "생성 폴더 선택" : "Choose output folder"}</span>
+                </button>
+                {startPending && !busy ? (
+                  <span role="status">{ko ? "생성 폴더를 확인하고 있습니다. 확인이 끝날 때까지 요청을 보존합니다. 응답이 없으면 작업공간으로 이동할 수 있습니다." : "Checking the output folder and preserving your brief until it finishes. You can return to the workspace if the response stalls."}</span>
+                ) : running ? (
+                  <button onClick={cancelBuild} className="build-secondary-button titlebar-nodrag">{ko ? "중지" : "Stop"}</button>
+                ) : phase === "mcp-review" ? (
+                  <button onClick={cancelBuild} className="build-secondary-button titlebar-nodrag">{ko ? "MCP 검토 취소" : "Cancel MCP review"}</button>
+                ) : phase === "runtime-approval" ? (
+                  <button onClick={cancelBuild} className="build-secondary-button titlebar-nodrag">{ko ? "모델 선택 취소" : "Cancel model review"}</button>
+                ) : phase === "interview" ? (
+                  <button onClick={resetBuild} className="build-secondary-button titlebar-nodrag">{ko ? "인터뷰 취소" : "Cancel interview"}</button>
+                ) : phase === "error" && recoverable && buildError?.kind !== "workspace-unavailable" ? (
+                  <>
+                    <button onClick={() => void resumeBuild()} className="build-primary-button titlebar-nodrag">
+                      {ko ? "보존된 파일에서 이어서 빌드" : "Resume from saved files"}
+                    </button>
+                    <button onClick={startFreshBuild} className="build-secondary-button titlebar-nodrag">
+                      {ko ? "새 빌드" : "New build"}
+                    </button>
+                  </>
+                ) : phase === "done" || phase === "error" ? (
+                  <button onClick={startFreshBuild} className="build-secondary-button titlebar-nodrag">{ko ? "새 빌드" : "New build"}</button>
+                ) : (
+                  <button
+                    onClick={() => {
+                      const active = runtimes.find((item) => item.active) ?? runtimes[0];
+                      void startBuildWithUiLock(active ? selectionForRuntime(active, { longContext: active.longContextEnabled ?? undefined }) : undefined);
+                    }}
+                    disabled={startPending || Boolean(startBlocker)}
+                    /* 막는 사유 문장이 아래에 있는데 단추에는 없었다 — 같은 문장을 붙인다. */
+                    title={startBlocker || undefined}
+                    className="build-primary-button titlebar-nodrag"
+                  >
+                    <IconWand size={15} /> {ko ? "딥인터뷰로 빌드 시작" : "Start build (deep interview)"}
+                  </button>
+                )}
+              </div>
+              {(startBlocker || folderMsg) && !running && phase !== "interview" && (
+                <div role="status" className="build-inline-hint">
+                  {startBlocker || folderMsg}
+                </div>
+              )}
+              <p className="build-autoadd-hint">
+                {ko
+                  ? "데스크톱 Build와 공개 Hub 에이전트 사용은 무료입니다. 모델 실행은 이 컴퓨터의 Claude Code/Codex/Antigravity/BYOK/Agentlas Local을 사용합니다."
+                  : "Desktop Build and public Hub agent use are free. Model execution uses Claude Code/Codex/Antigravity/BYOK/Agentlas Local on this computer."}
+              </p>
+            </div>
+              </div>
+              <div id="build-preview-panel" role="tabpanel" aria-labelledby="build-preview-tab" hidden={inspectorTab !== "preview"} className={styles.previewPanel}>
+                <img src="/brand/one-characters/blue-wave.png" className={styles.previewAvatar} alt="" />
+                <h2>{registeredEntity?.name || (ko ? "새 에이전트" : "New agent")}</h2>
+                <p>{request || (ko ? "아직 요청을 입력하지 않았습니다." : "No request entered yet.")}</p>
+                {!result && <div className={styles.previewEmpty}><IconFolder size={24} /><strong>{ko ? "실제 결과물이 여기에 표시됩니다" : "Your real deliverable appears here"}</strong><span>{ko ? "제작 완료 후 생성된 로컬 파일과 검증 결과를 확인할 수 있습니다." : "After building, inspect the generated local files and verification results."}</span></div>}
           {phase === "done" && result && (
             <section className="build-card build-artifact-card">
               <div className="build-card-head">
@@ -1171,42 +1383,11 @@ export default function BuildPage() {
             </section>
           )}
 
-          {/* 실행 중과 실패 직후에는 펼쳐 둔다. 접힌 채로 두면 "작업 중"이라는 글자만
-              보이고 그 아래가 비어 있어, 아무 일도 안 일어나는 것처럼 읽힌다
-              (2026-08-16 오너 제보). 완료된 빌드만 접어 둔다. */}
-          {log.length > 0 && (
-            <details
-              className="build-card build-log-card"
-              data-tour-id="build.log"
-              open={running || phase === "error"}
-            >
-              <summary className="build-card-head">
-                <span>{ko ? "진행 세부사항" : "Activity details"}</span>
-                {running
-                  ? <span className="build-live"><span className="forge-pulse" />{ko ? "작업 중" : "working"}</span>
-                  : phase === "done" && <span>{ko ? "완료" : "complete"}</span>}
-              </summary>
-              <div className="build-log-body">
-                <BuildLogRows log={log} ko={ko} />
-                {/* One replaceable tail row, never appended history. It is the
-                    only thing in this box while a runtime streams nothing. */}
-                {liveness && (
-                  <div data-kind="heartbeat" className="build-log-tail">
-                    <span className="build-log-time">{fmtLogTime(liveness.at)}</span>
-                    <span className="build-log-tail-dot" />
-                    <span>
-                      {liveness.activity}
-                      {liveness.silentMs >= 45_000
-                        ? ko ? " · 시간이 더 필요한 단계지만 계속 작업 중입니다." : " · This step is taking longer, but work is continuing."
-                        : ""}
-                    </span>
-                  </div>
-                )}
-                <div ref={logEndRef} />
+
               </div>
-            </details>
-          )}
-        </div>
+            </aside>
+          </div>
+        </div>}
       </main>
       <CloudSaveChoiceDialog
         open={Boolean(cloudSaveChoice && (cloudSaveChoice.status === "pending" || cloudSaveChoice.status === "presented" || cloudSaveChoice.status === "uploading"))}

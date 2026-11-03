@@ -1,4 +1,6 @@
 import { scienceQuestionHost } from "../science-host/question-continuation";
+import { ScienceVideoTransfers, type ScienceVideoPrincipal, type ScienceVideoScope } from "./science-video";
+import { VideoCancelFence } from "../mobile-bridge/video-cancel-fence";
 import type { ScienceQuestionReadInput, ScienceQuestionAnswerInput } from "../science-host/question-ipc";
 /**
  * One daemon owns the complete Science execution graph. The caller must publish
@@ -107,6 +109,12 @@ export type DaemonScienceCommand = (
   | { op: "composer.steering"; input: Scope & { requestId?: string } }
   | { op: "composer.steeringCapability"; input: Scope }
   | { op: "composer.attach" | "questions.list" | "messages.list"; input: Scope }
+  | { op: "video.has"; input: Scope & { messageIds: string[] } }
+  | { op: "video.list"; input: ScienceVideoScope & { cursor?: { runId: string; outputId: string } } }
+  | { op: "video.open"; input: ScienceVideoScope & { runId: string; outputId: string; transferId: string; principal: ScienceVideoPrincipal } }
+  | { op: "video.prepare" | "video.close"; input: { transferId: string; principal: ScienceVideoPrincipal } }
+  | { op: "video.chunk"; input: { transferId: string; offset: number; principal: ScienceVideoPrincipal } }
+  | { op: "video.closeConnection"; input: { principal: ScienceVideoPrincipal } }
   | { op: "questions.register" }
   | { op: "questions.answer"; input: Omit<Parameters<Questions["answer"]>[0], "source"> }
   | { op: "toolApprovals.state"; input: { projectId: string; chatId: string } }
@@ -199,6 +207,8 @@ export function createDaemonScienceService(options: {
   let terminalStore: Store | null = null;
   let terminalConversations: Conversations | null = null;
   let activeToolCount: (() => number) | null = null;
+  let scienceVideos: ScienceVideoTransfers | null = null;
+  const scienceVideoCancelFence = new VideoCancelFence();
   const commands = new Set<Promise<unknown>>();
   const unsubscribe: Array<() => void> = [];
   let approvals: typeof import("../runtime/tool-approval") | null = null;
@@ -431,6 +441,9 @@ export function createDaemonScienceService(options: {
         return row.has_work === 1;
       } finally { db.close(); }
     }
+    // Withdrawal releases only an owned transient token, even while admission is closing.
+    if (command.op === "video.close") { scienceVideoCancelFence.cancel(command.input.principal, command.input.transferId); await scienceVideos?.close(command.input.principal, command.input.transferId); return { closed: true }; }
+    if (command.op === "video.closeConnection") { scienceVideoCancelFence.cancelConnection(command.input.principal); scienceVideos?.closeConnection(command.input.principal); return { closed: true }; }
     const terminal = command.op === "composer.cancel" || command.op === "composer.steer" && command.input.intent === "stop";
     const { api, store, conversations, host: activeHost } = ready(terminal);
     const ownerIntent = command.nativeOwnerIntent === true;
@@ -930,6 +943,19 @@ export function createDaemonScienceService(options: {
         const events = rows.slice(0, limit);
         return { events, nextSequence: events.at(-1)?.sequence ?? after, hasMore: rows.length > limit };
       }
+      case "video.has":
+      case "video.list":
+      case "video.open":
+      case "video.prepare":
+      case "video.chunk": {
+        const videos = scienceVideos ??= new ScienceVideoTransfers(store as unknown as ConstructorParameters<typeof ScienceVideoTransfers>[0], assertExecution, scienceVideoCancelFence);
+        if (command.op === "video.has") return { messageIds: videos.hasVideos(command.input.projectId, command.input.conversationId, command.input.messageIds) };
+        if (command.op === "video.list") return videos.list(command.input, command.input.cursor);
+        if (command.op === "video.open") return videos.open(command.input.principal, command.input, command.input.runId, command.input.outputId, command.input.transferId);
+        if (command.op === "video.prepare") return videos.prepare(command.input.principal, command.input.transferId);
+        if (command.op === "video.chunk") return videos.read(command.input.principal, command.input.transferId, command.input.offset);
+        throw new Error("science_video_operation_invalid");
+      }
       case "projects.list": return store.listProjects();
       case "conversations.list": return store.listConversations(command.input.projectId);
       case "messages.list": return store.listMessagesForProject(command.input.projectId, command.input.conversationId);
@@ -948,6 +974,7 @@ export function createDaemonScienceService(options: {
     if (closePromise) return closePromise;
     if (state === "closed") return Promise.resolve();
     state = "closing";
+    scienceVideos?.dispose();
     host?.stopClock();
     adapter?.closeAdmission();
     const deadline = Date.now() + (options.shutdownTimeoutMs ?? 8_000);

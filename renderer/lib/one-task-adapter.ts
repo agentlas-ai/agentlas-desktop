@@ -84,6 +84,8 @@ export interface OneTaskProjection {
   pendingOperations: unknown[];
   /** Transitional local binding. It is not part of the public projection contract. */
   canonicalStatus: CanonicalTask["status"] | null;
+  /** Set when the `failed` canonical Task was cut off by the app closing or restarting (CanonicalTask.interruption). */
+  canonicalInterruption?: "app_closed";
   chatId: string | null;
   chat: Chat | null;
   latestReceipt: InvocationRunReceipt | null;
@@ -265,6 +267,7 @@ function canonicalProjection(
     ],
     pendingOperations: [],
     canonicalStatus: task.status,
+    ...(task.interruption ? { canonicalInterruption: task.interruption } : {}),
     chatId,
     chat,
     latestReceipt: null,
@@ -331,6 +334,7 @@ export async function listOneTaskProjections(
           return reconcileDormantProjection({
             ...projection,
             canonicalStatus: task.status,
+            ...(task.interruption ? { canonicalInterruption: task.interruption } : {}),
             chatId: task.originChatId,
             chat,
             latestReceipt: latestReceipt && projection.references.receiptIds.includes(latestReceipt.runId)
@@ -418,6 +422,7 @@ export async function getOneTaskProjection(
         return reconcileDormantProjection({
           ...normalized,
           canonicalStatus: task.status,
+          ...(task.interruption ? { canonicalInterruption: task.interruption } : {}),
           chatId: task.originChatId,
           chat,
           latestReceipt: latestReceipt && normalized.references.receiptIds.includes(latestReceipt.runId)

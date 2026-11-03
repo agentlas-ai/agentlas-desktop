@@ -134,6 +134,7 @@ const DEFAULT_READ_NOT_READY_WAIT_MS = 20_000;
 // A refused-because-signed-out upgrade is retried by every open phone; log it at most this often.
 const SIGNED_OUT_REFUSAL_LOG_INTERVAL_MS = 60_000;
 const MAX_REQUESTS_PER_MINUTE = 300;
+const MOBILE_ATTACHMENT_CHUNK_REQUEST_BUDGET = 240;
 const MAX_PAIR_ATTEMPTS_PER_MINUTE = 10;
 const MAX_INITIAL_EVENT_QUEUE = 512;
 const MAX_INITIAL_EVENT_QUEUE_BYTES = 4 * MOBILE_BRIDGE_MAX_MESSAGE_BYTES;
@@ -1029,6 +1030,17 @@ export class AgentlasMobileBridgeServer {
     const parsed = parseMobileBridgeRequest(decoded);
     if (!parsed.ok) {
       this.send(state, parsed.error);
+      return;
+    }
+    // Reserve this connection's request budget for cancellation and control.
+    if ((parsed.value.method === "legacy.video.chunk" || parsed.value.method === "one.video.chunk" || parsed.value.method === "chat.video.chunk" || parsed.value.method === "science.video.chunk") && state.requestCount > 160) {
+      this.send(state, mobileBridgeFailure(parsed.value.id, "too_many_requests", "Video transfer is paused to reserve control capacity", true));
+      return;
+    }
+    // chat-attachments-v2: an upload of any size is many 1 MiB chunks. Past 240 requests in this minute a chunk waits (retryable),
+    // so the connection never reaches the 300/minute close and keeps room for Stop and other control requests.
+    if (parsed.value.method === "chat.attachments.chunk" && state.requestCount > MOBILE_ATTACHMENT_CHUNK_REQUEST_BUDGET) {
+      this.send(state, mobileBridgeFailure(parsed.value.id, "too_many_requests", "Attachment upload is paused to reserve control capacity", true));
       return;
     }
     if (state.inflight.has(parsed.value.id)) {

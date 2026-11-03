@@ -2,6 +2,7 @@ import "./runtime/host-session-env-boot";
 import {createNativeHistoryWorkOwner,type HistoryWorkOwner} from './one/history-work-owner';
 import { startOrgSeatSync } from "./org-seat/org-seat-main";
 import { initializeOneContext } from "./one/context-platform";
+import { assertOneContextTask } from "./one/context-task-scope";
 import { getOneProfile } from "./store/one-profile";
 import { configureOneSupervisorScience } from "./one/supervisor";
 import { configureMobileScienceChatClient } from "./mobile-bridge/science-chat";
@@ -183,8 +184,10 @@ import { startBrowserApprovalServer, stopBrowserApprovalServer } from "./browser
 import { startMcpProxyApprovalServer, stopMcpProxyApprovalServer } from "./mcp-tools/proxy-server";
 import { startComputerUseControlServer, stopComputerUseControlServer } from "./computer-use/control-server";
 import { authorizeLocalMediaPath } from "./fs/access";
+import { serveLocalMediaRange } from "./fs/local-media-range";
 import { serveLocalThumbnail } from "./fs/local-thumbnail";
 import { readChatMessageAttachment } from "./store/chat-message-attachments";
+import { serveChatAttachmentRequest } from "./media/chat-attachment-response";
 import { backfillDurableOneArtifactChatImages, serveOneArtifactProtocolRequest } from "./one/artifact-preview";
 import { resolveOneTeamAvatarProtocolPath } from "./one/avatar";
 import { servePluginIconRequest } from "./mcp-tools/plugin-brand";
@@ -1336,19 +1339,9 @@ function registerRendererProtocol(): void {
       }
       if (url.hostname === "chat-attachment") {
         const id = url.pathname.replace(/^\//, "");
-        const attachment = readChatMessageAttachment(id);
-        if (!attachment) return new Response("not found", { status: 404 });
-        const body = Uint8Array.from(attachment.bytes);
-        return new Response(body, {
-          status: 200,
-          headers: {
-            "Content-Type": attachment.mediaType,
-            "Content-Length": String(attachment.size),
-            "Cache-Control": "private, max-age=31536000, immutable",
-            "ETag": `\"sha256-${attachment.sha256}\"`,
-            "X-Content-Type-Options": "nosniff",
-          },
-        });
+        // media-carousel: ?w=<px> is a transcript thumbnail (a picture resized, a video's first frame), and a video is
+        // served by byte range so it plays and seeks (electron/media/chat-attachment-response.ts).
+        return serveChatAttachmentRequest(id, url.searchParams.get("w"), request.headers.get("range"), readChatMessageAttachment);
       }
       // First page or slide of a local document for its tile in the chat; same authorization as the file itself.
       if (url.hostname === "localthumb") return serveLocalThumbnail(url);
@@ -1359,6 +1352,8 @@ function registerRendererProtocol(): void {
           if (approved) {
             // 비디오 재생을 위해 Range 요청을 전달(seek 지원); 이미지엔 무해.
             const range = request.headers.get("range");
+            const mediaRange = serveLocalMediaRange(approved, range, request.signal);
+            if (mediaRange) return mediaRange;
             return net.fetch(pathToFileURL(approved).toString(), range ? { headers: { range } } : undefined);
           }
         }
@@ -2848,12 +2843,12 @@ app.whenReady().then(async () => {
     }
   }
   initializeOneContext({activeOneId:()=>getOneProfile().oneId,assertTask:scope=>{
-    const task=getCanonicalTask(scope.taskId),chat=task?.originChatId?getChat(task.originChatId):null;
-    if(scope.oneId!==getOneProfile().oneId || !task || task.archivedAt || !chat || chat.archivedAt || chat.projectId!==task.projectId || chat.firmId!==task.firmId)throw new Error("one-context-task-unavailable");
     const db=getDb();
-    const personal=db.prepare("SELECT 1 FROM sqlite_master WHERE name='one_supervisor_conversations'").get() && db.prepare("SELECT 1 FROM one_supervisor_conversations WHERE one_id=? AND chat_id=?").get(scope.oneId,chat.id);
-    const requested=db.prepare("SELECT 1 FROM sqlite_master WHERE name='one_supervisor_requests'").get() && db.prepare(`SELECT 1 FROM one_supervisor_requests r JOIN one_supervisor_conversations c ON c.one_id=r.one_id AND c.chat_id=r.origin_chat_id WHERE r.one_id=? AND r.task_id=? AND json_extract(r.payload_json,'$.workerChatId')=?`).get(scope.oneId,task.id,chat.id);
-    if(!personal&&!requested)throw new Error("one-context-task-source-unavailable");
+    const table=(name:string)=>Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE name=?").get(name));
+    // A reply turn in One's own conversation is scoped `one:<chatId>`, not a Task (one/context-task-scope.ts).
+    assertOneContextTask(scope,{activeOneId:()=>getOneProfile().oneId,task:getCanonicalTask,chat:getChat,
+      personalConversation:(oneId,chatId)=>table("one_supervisor_conversations") && Boolean(db.prepare("SELECT 1 FROM one_supervisor_conversations WHERE one_id=? AND chat_id=?").get(oneId,chatId)),
+      requestedWorkerChat:(oneId,taskId,chatId)=>table("one_supervisor_requests") && Boolean(db.prepare(`SELECT 1 FROM one_supervisor_requests r JOIN one_supervisor_conversations c ON c.one_id=r.one_id AND c.chat_id=r.origin_chat_id WHERE r.one_id=? AND r.task_id=? AND json_extract(r.payload_json,'$.workerChatId')=?`).get(oneId,taskId,chatId))});
   }});
   nativeGmailSourceOwner=await createNativeGmailPersonalSourceOwner({locale:()=>currentUiLocale()==='ko'?'ko':'en'});
   if(nativePersonalShutdown.signal.aborted||nativePersonalCleanupUnknown){nativeGmailSourceOwner.close();throw Error('gmail_personal_source_owner_unavailable')}

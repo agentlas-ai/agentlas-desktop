@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.3.117 — 2026-11-03
+
+- One can see and act on the screen in its own conversation again. Screen and app actions from One's replies were refused since 1.2.83; they now work, and One's own turns carry the in-app browser.
+- The in-app browser no longer reports "window closed" when a delegated session's first screenshot could not be saved; the browser stays available.
+- A Work card stays "working" while the sessions it delegated are still running, keeps its Stop, and One hears the result when the reports come back.
+- Results another session made open from One's conversation: their markdown files, relative links and pictures, and on the phone the videos an answer names.
+- A failed lookup One made for itself no longer shows a retry card; the last line of a run says what actually happens (the app retrying by itself, the host's cause, an app restart).
+- Only teammates who can join a group are offered; a builder security scan is tied to the files it checked; a retry that never reached the provider is not counted.
+- Hope's name and photo can be edited; agents' appearance, the agent builder conversation and Cloud/Hub refresh were improved.
+
+This release binds Agentlas OS v1.2.73 at fa8d4d820bf952f88628ea7c0a4ea32ded9e96e5; public runtime asset `agentlas-os-runtime-v1.2.73.tar.gz` is pinned at SHA-256 `b4d717bdd370cd6d59e52f2b79b1beb9a2287fa595baf664277ff99ec114fc74`. Source readiness does not prove a public installer or update feed; the Releases page stays the authority.
+
 ## 1.3.116 — 2026-11-01
 
 - One can use the computer tools in any app when an app command fails. When an app refuses or fails a command, One now tries what the refusal suggests and then works on the app's screen with the computer tools, if the run has them, instead of asking you to do it by hand. An app that is off limits still stops it, and an app that is not running is opened for you.

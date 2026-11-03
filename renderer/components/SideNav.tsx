@@ -599,7 +599,7 @@ export function SideNav({
         </Link>
         <div className="sidenav-account">
           <CreditBalanceWidget collapsed={collapsed} />
-          <AccountChip />
+          <AccountChip collapsed={collapsed} />
         </div>
       </div>
       {resizable && <SidebarResizeHandle sidebar={sidebar} />}

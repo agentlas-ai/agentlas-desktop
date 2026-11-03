@@ -11,6 +11,7 @@ import { isReadOnlyGraphBrowserObservation } from "../../shared/graph-browser-ob
 import { READ_ONLY_BROWSER_TOOLS } from "../../shared/read-only-browser-tools";
 import type { WorkflowGraph } from "../../shared/types";
 import { loadMainToolInventory, runMainToolDispatch } from "../runtime/local-tool-loop";
+import { transferEffectRefs } from "../runtime/effect-delivery";
 import { agentRunCwd } from "../runtime/exec";
 import { getChat, getChatWorkingFolder } from "../store/chats";
 import { getAutomation } from "../store/automations";
@@ -300,7 +301,7 @@ async function runGraphMcpCallOnce(input: GraphMcpCallOptions, mayEscalate = tru
               ...(resultText !== undefined ? { done: true } : {}) });
           },
         }, { runtimeKind: "graph-mcp", sessionKey, permission, cwd, chatId,
-          unattended: true, signal: input.signal, assertCurrent, retainMcpToolResult: true });
+          unattended: true, signal: input.signal, assertCurrent, retainMcpToolResult: true, deferEffectDelivery: true });
     };
     let result = await dispatchOnce();
     // A read-only call that was sent and never answered (its time limit ran out, or the transport dropped: `callEnd`, read from the
@@ -330,7 +331,9 @@ async function runGraphMcpCallOnce(input: GraphMcpCallOptions, mayEscalate = tru
       ? result.rawMcpResult.structuredContent : result.content;
     const value = result.artifactPaths?.length
       ? { data, artifacts: [...result.artifactPaths] } : data;
-    return { stormbreakerContinueRequested: false, output: value,
+    const handoff = { stormbreakerContinueRequested: false, output: value,
       finalText: typeof value === "string" ? value : JSON.stringify(value) };
+    transferEffectRefs(result, handoff);
+    return handoff;
   } finally { config.cleanup?.(); }
 }

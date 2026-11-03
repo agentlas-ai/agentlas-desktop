@@ -13,6 +13,7 @@ import type { AgentWorkspaceSnapshot } from "@shared/agent-workspace";
 import { useWorkspaceDialog } from "./use-workspace-dialog";
 import styles from "./AgentWorkspace.module.css";
 import { Select } from "@/components/Select";
+import { AgentAppearanceEditor } from "./AgentAppearancePicker";
 
 function canAssignRuntime(runtime: RuntimeStatus): boolean {
   return runtimeSupportsAgentOverride(runtime);
@@ -91,6 +92,7 @@ export function AgentWorkspaceInspector({ agent, name, locale, snapshot, firm, o
     <div className={styles.paneHeader}><IconShield size={14} /><strong>{ko ? "속성" : "Inspector"}</strong><button className={styles.iconButton} onClick={onClose} title={ko ? "속성 닫기" : "Close inspector"} aria-label={ko ? "속성 닫기" : "Close inspector"}><IconClose size={15} /></button></div>
     {error && <div className={`${styles.banner} ${styles.error}`} role="alert">{error}</div>}
     <div className={styles.inspectorBody}>
+      <AgentAppearanceEditor agentId={agent.id} ko={ko} />
       <h3>{ko ? "표시 이름" : "Display name"}</h3>
       <label className={styles.field}><input value={alias} maxLength={160} placeholder={name} aria-label={ko ? "로컬 표시 이름" : "Local display name"} onChange={(event) => setAlias(event.target.value)} /></label>
       <button className={styles.button} disabled={busy || alias === (agent.localDisplayName ?? "")} onClick={() => void action(() => onRename(alias))}><IconEdit size={12} />{ko ? "저장" : "Save"}</button>

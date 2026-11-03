@@ -13,7 +13,7 @@ import { getChatGoalRevision } from "../store/chat-goals";
 import { invocationRunOwners } from "../store/invocation-run-owners";
 import {
   appendLongRunEvent, bindCurrentGoalRevisionToLongRun, getLongRun, liveLongRunAttemptCount, nextBlockedGoalRetrySlot,
-  pendingBlockedGoalRetry, reopenDueBlockedGoalRetry, scheduleBlockedGoalRetry, transitionLongRun,
+  pendingBlockedGoalRetry, reopenDueBlockedGoalRetry, scheduleBlockedGoalRetry, transitionLongRun, goalProviderRetryNotBefore,
   BLOCKED_GOAL_SWEEP_EVENT_KIND, BLOCKED_GOAL_SWEEP_SCHEMA, type LongRunRecord,
   type BlockedGoalRetry,
   longRunOwnerHold, LONG_RUN_OWNER_HOLD_CODE,
@@ -202,6 +202,13 @@ function resume(run: LongRunRecord, dispatcher: EffectObservationDispatcher, tri
   let leased = false;
   try { leased = invocationRunOwners.getActiveOwner(chatId) !== null; } catch { /* an unreadable lease is not a reason to hold the Goal */ }
   if (leased) return { runId: run.id, fromReason: run.blockedReason, action: "deferred", detail: "chat_busy" };
+  const providerAt = goalProviderRetryNotBefore(run.id);
+  if (providerAt !== null) {
+    scheduleBlockedGoalRetry({ runId: run.id, expectedVersion: run.version, kind: "resume", fromReason: "provider_retry_not_due",
+      retryIndex: pendingBlockedGoalRetry(run.id)?.retryIndex ?? 0, nextAt: new Date(providerAt).toISOString(),
+      detail: "provider_retry_not_due", trigger, appInstanceId: desktopAppInstanceId() });
+    return { runId: run.id, fromReason: run.blockedReason, action: "deferred", detail: "provider_retry_not_due" };
+  }
   // Every resume path (sweep, Alive's continue, a released project) asks the one wake policy: the owner first,
   // then the daily barrier. A reached barrier parks the Goal until its window frees, visibly.
   const source: GoalWakeSource = trigger === "alive" ? "alive" : trigger === "project-released" ? "project-released"
@@ -486,8 +493,10 @@ function sweepOne(input: LongRunRecord, dispatcher: EffectObservationDispatcher,
     if (retry) {
       // A retry that a previous launch put in the future stood on that launch's failure (runtime, login, update).
       // The first sweep of a new launch owes one prompt look; a repeat failure then backs off from index 0.
-      const restartedRetryDue = trigger === "startup" && run.status === "paused" && Date.parse(retry.nextAt) > Date.now();
-      if (Date.parse(retry.nextAt) > Date.now() && !restartedRetryDue && !receiptOnlyRetry(run.id, retry)) {
+      const restartedRetryDue = trigger === "startup" && run.status === "paused" && Date.parse(retry.nextAt) > Date.now()
+        && goalProviderRetryNotBefore(run.id) === null;
+      if (goalProviderRetryNotBefore(run.id) !== null
+        || (Date.parse(retry.nextAt) > Date.now() && !restartedRetryDue && !receiptOnlyRetry(run.id, retry))) {
         // The host pause at shutdown/startup does not cancel a scheduled retry: keep the app visibly waiting.
         if (run.status === "paused") {
           scheduleBlockedGoalRetry({ runId: run.id, expectedVersion: run.version, kind: retry.kind, fromReason: retry.fromReason,

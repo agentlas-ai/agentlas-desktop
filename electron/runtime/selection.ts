@@ -1,6 +1,8 @@
 import { isRuntimeCredentialUnavailable, RUNTIME_CREDENTIAL_UNAVAILABLE_CODE } from "./credential-access";
 import { invocationBreaker, invocationBreakerKey } from "./invocation-breaker";
 import { runtimeCooldown } from "./runtime-cooldown";
+import { withDurableRuntimeRetry } from "./durable-retry";
+import { withModelImageBudget } from "./model-image-budget";
 import type {
   AgentRuntimeOverride,
   RuntimeRole,
@@ -331,17 +333,22 @@ export function pickRunner(active: RuntimeStatus): { runner: Runner; label: stri
     const current = resolveAcpAgentSpec(active.acpAgentId);
     return configurationIdentity === JSON.stringify(current ? [current.id,current.command,current.args,current.registryId??null] : null);
   };
-  const selected = pickRunnerWithoutHostGuidance(active, spec);
+  const unfitted = pickRunnerWithoutHostGuidance(active, spec);
+  // Pictures are fitted to this runtime's provider limits right at the adapter (runtime/model-image-budget.ts, owner).
+  const selected = unfitted ? { ...unfitted, runner: withModelImageBudget(unfitted.runner, active.kind) } : null;
   // 모든 제품 경로가 여기를 지난다 — 어느 루프에 버그가 있어도 실패하는 런타임을 분당 수만 번 띄우지 못한다(invocation-breaker).
   // The kind tag lets an inheriting caller (the memory curator) read this runtime's declared request limits.
-  return selected
+  const picked = selected
     ? { ...selected, runner: tagPickedRunnerKind(invocationBreaker.wrap(withNativeBrowserGuidance(withDaemonAgentContext(withAgentContext(
       // Innermost: the ledger sees the request after every host wrapper, exactly as the adapter does (context-reduction C01).
-      withMemorySourceRunner(withRemoteCurationRuntime(withModelCallLedger(async(req,events)=>{if(!configurationCurrent())throw markRefusedBeforeDispatch(Object.assign(new Error("runtime_selected_configuration_changed"),{code:"runtime_selected_configuration_changed"}));return selected.runner(req,events);}, { kind: active.kind, backend: active.backend ?? null, model: active.model ?? null, effort: null }), active, configurationCurrent)),
+      withMemorySourceRunner(withRemoteCurationRuntime(withModelCallLedger(withDurableRuntimeRetry(async(req,events)=>{if(!configurationCurrent())throw markRefusedBeforeDispatch(Object.assign(new Error("runtime_selected_configuration_changed"),{code:"runtime_selected_configuration_changed"}));return selected.runner(req,events);}, active), { kind: active.kind, backend: active.backend ?? null, model: active.model ?? null, effort: null }), active, configurationCurrent)),
       { kind: active.kind, ...(active.backend ? { backend: active.backend } : {}) },
       { configurationSource:active.source,configurationIdentity }),
       { kind: active.kind,configurationIdentity,...(active.backend ? { backend: active.backend } : {}) }), active.kind), invocationBreakerKey(active), selected.label), active.kind) }
     : null;
+  // Outer pass: pictures are resized before the agent context journals the turn or the daemon receives it (sizes only; the
+  // inner pass above also fits the count, once earlier turns' pictures are added).
+  return picked ? { ...picked, runner: tagPickedRunnerKind(withModelImageBudget(picked.runner, active.kind, { combine: false }), active.kind) } : null;
 }
 
 function pickRunnerWithoutHostGuidance(active: RuntimeStatus, acpSpec: AcpAgentSpec | null): { runner: Runner; label: string } | null {

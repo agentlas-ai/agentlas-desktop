@@ -62,9 +62,11 @@ export function chooseWorkAttachmentsToStage<T extends { groupId: string; size: 
   });
   const kept = new Set<string>();
   let total = 0;
-  for (const id of newestFirst) {
+  for (const [rank, id] of newestFirst.entries()) {
     const size = bytesOf.get(id)!;
-    if (kept.size >= WORK_ATTACHMENT_MAX_GROUPS || total + size > WORK_ATTACHMENT_MAX_BYTES) continue;
+    // The newest group is what the owner just attached: it is always copied whole, whatever its size (media-carousel
+    //: a 200 MB video or twenty full-size photos). The bound only chooses among the older groups.
+    if (rank > 0 && (kept.size >= WORK_ATTACHMENT_MAX_GROUPS || total + size > WORK_ATTACHMENT_MAX_BYTES)) continue;
     kept.add(id); total += size;
   }
   return { staged: items.filter((item) => kept.has(item.groupId)), omitted: items.filter((item) => !kept.has(item.groupId)) };

@@ -100,7 +100,7 @@ export function installSupervisorDock(): void {
   const ports: DockPorts = {
     platform: process.platform,
     selfPid: process.pid,
-    driver: (request) => invokeNativeInputDriver(request),
+    driver: (request, signal) => invokeNativeInputDriver(request, undefined, signal),
     workAreaFor: (rect) => {
       const x = Math.round(rect.x), y = Math.round(rect.y), width = Math.max(1, Math.round(rect.width)), height = Math.max(1, Math.round(rect.height));
       return screen.getDisplayMatching({ x, y, width, height }).workArea;

@@ -20,7 +20,7 @@
 //   - 사용자 메타(email, name) 조회 endpoint: /api/account/me (없으면 cookie payload만 표시)
  import { app, BrowserWindow, safeStorage, session as electronSession, shell } from "electron";
  import { createHash } from "node:crypto";
-import { managedOneAuthentication, managedOneConfigured } from "./managed-one/auth";
+import { managedOneAuthentication, onManagedOneOwnershipChanged, wasManagedOneConfigured } from "./managed-one/auth";
 import fs from "node:fs/promises";
 import http from "node:http";
 import path from "node:path";
@@ -67,7 +67,7 @@ function rendererAccountFingerprint(userId: string | undefined): string | undefi
 
 export function webBaseUrl(): string {
   const managed = managedOneAuthentication(); if (managed) return managed.webBaseUrl;
-  if (managedOneConfigured()) throw new Error("managed_one_credential_expired");
+  if (wasManagedOneConfigured()) throw new Error("managed_one_credential_expired");
   const fromEnv = process.env.AGENTLAS_WEB_BASE_URL?.trim();
   if (fromEnv) return fromEnv.replace(/\/$/, "");
   return "https://agentlas.cloud";
@@ -109,6 +109,19 @@ function emitAuthSessionOwnershipChanged(): void {
   for (const listener of ownershipChangeListeners) {
     try { listener(); } catch { /* One observer cannot block sign-out or auth. */ }
   }
+}
+
+/** A managed host never inherits a Desktop cookie, even after its bootstrap is
+ * cleared. Invalidate pending native restore/renew work and notify the existing
+ * memory and host custody listeners at the managed authority transition. */
+onManagedOneOwnershipChanged(() => {
+  _sessionGeneration += 1;
+  _cache = null;
+  emitAuthSessionOwnershipChanged();
+});
+
+function assertDesktopCookieAuthority(): void {
+  if (wasManagedOneConfigured()) throw new Error("managed_one_cookie_authority_unavailable");
 }
 
 function queueCookieMutation<T>(mutation: () => Promise<T>): Promise<T> {
@@ -599,25 +612,30 @@ function decodeSessionCookie(value: string): DecodedSessionCookieResult {
  *   계정 칩이 "?"로 표시되는 버그가 있었다.)
  *  반환: meta | "invalid"(서버가 미인증이라고 답함 — 세션 폐기 대상) | null(네트워크/기타 실패). */
 async function fetchAccountMeta(cookieValue: string): Promise<{ email?: string; name?: string } | "invalid" | null> {
+  if (wasManagedOneConfigured()) return null;
   try {
     const url = `${webBaseUrl()}/api/auth/session`;
     const ctrl = new AbortController();
+    const removeManagedListener = onManagedOneOwnershipChanged(() => ctrl.abort());
     const timer = setTimeout(() => ctrl.abort(), 8000);
     try {
       const res = await fetch(url, {
         headers: { cookie: `${COOKIE_NAME}=${cookieValue}` },
         signal: ctrl.signal,
       });
+      if (wasManagedOneConfigured()) return null;
       if (!res.ok) return null; // 429/5xx 등은 판단 보류 — 다음 시도에서 재확인
       const json = (await res.json()) as {
         authenticated?: boolean;
         user?: { email?: string };
         workspace?: { name?: string };
       };
+      if (wasManagedOneConfigured()) return null;
       if (json.authenticated === false) return "invalid";
       return { email: json.user?.email, name: json.workspace?.name };
     } finally {
       clearTimeout(timer);
+      removeManagedListener();
     }
   } catch {
     return null;
@@ -670,10 +688,12 @@ export async function fetchWithHubSession(
   init: RequestInit = {},
   timeoutMs = 8000,
 ): Promise<Response> {
+  assertDesktopCookieAuthority();
   assertDevelopmentEffectAllowed("auth.fetch-hub-session");
   const ctrl = new AbortController();
   // One deadline for headers and body: clearing it once headers arrived left the caller's res.json() unbounded.
-  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  const removeManagedListener = onManagedOneOwnershipChanged(() => ctrl.abort());
+  const timer = setTimeout(() => { ctrl.abort(); removeManagedListener(); }, timeoutMs);
   timer.unref?.();
   try {
     const res = await fetch(url, {
@@ -681,10 +701,13 @@ export async function fetchWithHubSession(
       headers: { ...(init.headers as Record<string, string> | undefined), cookie: cookieHeader },
       signal: ctrl.signal,
     });
+    assertDesktopCookieAuthority();
     if (res.status === 401) invalidateAuthSessionFromServer(cookieHeader);
     return res;
   } catch (error) {
     clearTimeout(timer);
+    removeManagedListener();
+    assertDesktopCookieAuthority();
     throw error;
   }
 }
@@ -706,7 +729,7 @@ function reissuedSessionCookie(res: Response): string | null {
   return null;
 }
 export async function renewAgingSession(): Promise<boolean> {
-  if (developmentEffectsSuppressed() || managedOneConfigured()) return false;
+  if (developmentEffectsSuppressed() || wasManagedOneConfigured()) return false;
   const current = _cache;
   if (!current?.expiresAt || current.expiresAt - Date.now() > SESSION_RENEW_WITHIN_MS) return false;
   const generation = _sessionGeneration;
@@ -732,6 +755,7 @@ export async function renewAgingSession(): Promise<boolean> {
 }
 
 function scheduleMetaRefresh(): void {
+  if (wasManagedOneConfigured()) return;
   const cache = _cache;
   if (!cache || cache.email) return;
   const now = Date.now();
@@ -750,6 +774,7 @@ function scheduleMetaRefresh(): void {
 /** 부팅 시 로컬 암호화 저장소에서 cookie를 복원하고 결과를 구조적으로 반환한다.
  *  함수명은 기존 호출부 호환을 위해 유지한다. */
 export async function bootAuthFromKeychain(): Promise<AuthRestoreResult> {
+  assertDesktopCookieAuthority();
   if (developmentEffectsSuppressed()) return { status: "suppressed", signedIn: false, reason: "development_effect_policy_disabled" };
   // This read/decrypt crosses asynchronous OS storage. A sign-in/sign-out can
   // legitimately happen while it is pending; that newer intent must win over
@@ -762,6 +787,7 @@ export async function bootAuthFromKeychain(): Promise<AuthRestoreResult> {
   );
   try {
     const stored = await readStoredSessionCookie(restoreGeneration);
+    assertDesktopCookieAuthority();
     if (restoreGeneration !== _sessionGeneration) return currentGenerationResult();
     if (stored.status !== "restored") return { status: stored.status, signedIn: false };
     const decoded = decodeSessionCookie(stored.value);
@@ -785,6 +811,7 @@ export async function bootAuthFromKeychain(): Promise<AuthRestoreResult> {
     scheduleMetaRefresh();
     return { status: "restored", signedIn: true };
   } catch (err) {
+    assertDesktopCookieAuthority();
     console.warn("[auth] boot from keychain failed", err);
     // Only the file-read allowlist or an existing native operation in flight
     // may request recovery. An unclassified failure must not re-prompt users.
@@ -796,6 +823,7 @@ const DEFERRED_AUTH_RESTORE_DELAYS_MS = [0, 1_000, 2_000, 5_000, 10_000, 20_000,
 
 /** Explicit user action only; never call from polling or startup retry loops. */
 export function retryAuthRestoreFromUser(): Promise<AuthRestoreResult> {
+  if (wasManagedOneConfigured()) return Promise.reject(new Error("managed_one_cookie_authority_unavailable"));
   if (developmentEffectsSuppressed()) return Promise.resolve({ status: "suppressed", signedIn: false, reason: "development_effect_policy_disabled" });
   if (userAuthRestoreInFlight) return userAuthRestoreInFlight;
   const started = (async (): Promise<AuthRestoreResult> => {
@@ -817,6 +845,7 @@ export function retryAuthRestoreFromUser(): Promise<AuthRestoreResult> {
         signedIn: false,
       };
     }
+    assertDesktopCookieAuthority();
     if (generation !== _sessionGeneration) {
       return getAuthSession().signedIn
         ? { status: "restored", signedIn: true }
@@ -857,6 +886,7 @@ export async function retryTemporaryAuthRestore(options: {
   wait?: (delayMs: number) => Promise<void>;
   delaysMs?: readonly number[];
 } = {}): Promise<AuthRestoreResult> {
+  assertDesktopCookieAuthority();
   if (developmentEffectsSuppressed()) return { status: "suppressed", signedIn: false, reason: "development_effect_policy_disabled" };
   const restore = options.restore ?? bootAuthFromKeychain;
   const wait = options.wait ?? ((delayMs: number) => new Promise<void>((resolve) => {
@@ -867,7 +897,9 @@ export async function retryTemporaryAuthRestore(options: {
   let result: AuthRestoreResult = { status: "temporarily-unavailable", signedIn: false };
   for (const delayMs of delays) {
     if (delayMs > 0) await wait(delayMs);
+    assertDesktopCookieAuthority();
     result = await restore();
+    assertDesktopCookieAuthority();
     if (result.status !== "temporarily-unavailable") return result;
   }
   return result;
@@ -876,7 +908,7 @@ export async function retryTemporaryAuthRestore(options: {
 export function getAuthSession(): AuthSession {
   const managed = managedOneAuthentication();
   if (managed) return { signedIn: true, workspaceId: managed.workspaceId, expiresAt: managed.expiresAt, accountFingerprint: rendererAccountFingerprint(managed.userId) };
-  if (managedOneConfigured()) return { signedIn: false };
+  if (wasManagedOneConfigured()) return { signedIn: false };
   if (developmentEffectsSuppressed()) return { signedIn: false };
   if (USE_E2E_SESSION && !_cache) {
     return {
@@ -905,6 +937,7 @@ export function getAuthSession(): AuthSession {
 
 /** cookie value를 로컬 암호화 저장소 + 메모리 캐시에 영구화하고 메타를 채운다. 두 로그인 경로(창/브라우저)가 공유. */
 async function persistSession(value: string): Promise<AuthSession> {
+  assertDesktopCookieAuthority();
   assertDevelopmentEffectAllowed("auth.persist-session");
   const decoded = decodeSessionCookie(value);
   if (decoded.status !== "valid") {
@@ -915,10 +948,12 @@ async function persistSession(value: string): Promise<AuthSession> {
   }
   const generation = ++_sessionGeneration;
   try {
-    await queueCookieMutation(() => writeStoredSessionCookie(value));
+    await queueCookieMutation(() => { assertDesktopCookieAuthority(); return writeStoredSessionCookie(value); });
   } catch (err) {
+    assertDesktopCookieAuthority();
     console.warn("[auth] local session save failed — keeping session in memory only", err);
   }
+  assertDesktopCookieAuthority();
   // A newer login or logout owns both memory and durable state. Because cookie
   // writes are serialized, its queued mutation will also be the final disk one.
   if (generation !== _sessionGeneration) return getAuthSession();
@@ -967,6 +1002,7 @@ export function adoptHostSessionHandoff(session: HostSessionHandoff | null): boo
     return false;
   };
   if (session === null) return clearSession();
+  if (wasManagedOneConfigured()) return false;
   if (!session || typeof session !== "object" || Array.isArray(session)
     || typeof session.cookieValue !== "string" || !session.cookieValue || session.cookieValue.length > 16_384 || /[\s;]/.test(session.cookieValue)
     || [session.userId, session.workspaceId].some(value => value !== undefined && (typeof value !== "string" || value.length > 16_384))
@@ -986,7 +1022,7 @@ export function adoptHostSessionHandoff(session: HostSessionHandoff | null): boo
 }
 
 export function getSessionCookieHeader(): string | null {
-  if (developmentEffectsSuppressed()) return null;
+  if (developmentEffectsSuppressed() || wasManagedOneConfigured()) return null;
   if (!_cache) return null;
   if (_cache.expiresAt && _cache.expiresAt < Date.now()) {
     invalidateCachedSession("expired");
@@ -999,7 +1035,7 @@ export function getSessionCookieHeader(): string | null {
 export function getAuthenticatedActorIds(): { workspaceId: string; userId: string } | null {
   const managed = managedOneAuthentication();
   if (managed) return { userId: managed.userId, workspaceId: managed.workspaceId };
-  if (managedOneConfigured()) return null;
+  if (wasManagedOneConfigured()) return null;
   if (developmentEffectsSuppressed()) return null;
   if (USE_E2E_SESSION && !_cache) return { workspaceId: "e2e", userId: "e2e-user" };
   if (!getSessionCookieHeader() || !_cache?.workspaceId || !_cache.userId) return null;
@@ -1016,6 +1052,7 @@ export function getAuthenticatedSessionBinding(): { workspaceId: string; userId:
 }
 
 export async function signInWithGoogle(parent: BrowserWindow | null): Promise<AuthSession> {
+  assertDesktopCookieAuthority();
   assertDevelopmentEffectAllowed("auth.sign-in-google");
   const { BrowserWindow, session: electronSession } = electronApi();
   const ses = electronSession.fromPartition(AUTH_PARTITION);
@@ -1058,47 +1095,64 @@ export async function signInWithGoogle(parent: BrowserWindow | null): Promise<Au
 
   return new Promise<AuthSession>((resolve, reject) => {
     let settled = false;
+    const removeManagedListener = onManagedOneOwnershipChanged(() => {
+      if (settled) return;
+      settled = true;
+      removeManagedListener();
+      try { win.close(); } catch { /* ignore */ }
+      resolve({ signedIn: false });
+    });
 
     async function maybeFinish() {
       if (settled) return;
       // cookie를 partition session에서 추출
       const cookies = await ses.cookies.get({ name: COOKIE_NAME });
+      if (settled) return;
       if (cookies.length === 0) return;
       // 가장 fresh한 cookie 선택 — expirationDate가 큰 것
       cookies.sort((a, b) => (b.expirationDate ?? 0) - (a.expirationDate ?? 0));
       const cookie = cookies[0];
       const value = cookie.value;
       settled = true;
-      const session = await persistSession(value);
       try {
-        win.close();
-      } catch {
-        // ignore
+        const session = await persistSession(value);
+        try { win.close(); } catch { /* ignore */ }
+        resolve(session);
+      } catch (error) {
+        try { win.close(); } catch { /* ignore */ }
+        reject(error);
+      } finally {
+        removeManagedListener();
       }
-      resolve(session);
+    }
+
+    function handleNavigation() {
+      void maybeFinish().catch((error) => {
+        if (settled) return;
+        settled = true;
+        removeManagedListener();
+        try { win.close(); } catch { /* ignore */ }
+        reject(error);
+      });
     }
 
     // 사용자가 그냥 창을 닫으면 reject
     win.on("closed", () => {
       if (!settled) {
         settled = true;
+        removeManagedListener();
         resolve({ signedIn: false });
       }
     });
 
-    win.webContents.on("did-finish-load", () => {
-      void maybeFinish();
-    });
-    win.webContents.on("did-navigate", () => {
-      void maybeFinish();
-    });
-    win.webContents.on("did-navigate-in-page", () => {
-      void maybeFinish();
-    });
+    win.webContents.on("did-finish-load", handleNavigation);
+    win.webContents.on("did-navigate", handleNavigation);
+    win.webContents.on("did-navigate-in-page", handleNavigation);
 
     win.loadURL(loginUrl).catch((err) => {
       if (settled) return;
       settled = true;
+      removeManagedListener();
       try {
         win.close();
       } catch {
@@ -1124,13 +1178,18 @@ export async function signInWithGoogle(parent: BrowserWindow | null): Promise<Au
  *       그렇지 않으면 타임아웃 후 폴백된다 — 안전(기존 동작 비파괴).
  */
 export async function signInWithBrowser(): Promise<AuthSession> {
+  assertDesktopCookieAuthority();
   assertDevelopmentEffectAllowed("auth.sign-in-browser");
   return new Promise<AuthSession>((resolve) => {
     let settled = false;
     let acceptingCallback = true;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    let removeManagedListener = () => {};
     const finish = (session: AuthSession, server?: http.Server) => {
       if (settled) return;
       settled = true;
+      if (timeout) clearTimeout(timeout);
+      removeManagedListener();
       try {
         server?.close();
       } catch {
@@ -1179,8 +1238,10 @@ export async function signInWithBrowser(): Promise<AuthSession> {
     });
 
     server.on("error", () => finish({ signedIn: false }));
+    removeManagedListener = onManagedOneOwnershipChanged(() => finish({ signedIn: false }, server));
 
     server.listen(0, "127.0.0.1", () => {
+      if (settled) return;
       const addr = server.address();
       const port = typeof addr === "object" && addr ? addr.port : 0;
       if (!port) {
@@ -1190,7 +1251,7 @@ export async function signInWithBrowser(): Promise<AuthSession> {
       const callback = `http://127.0.0.1:${port}/callback`;
       const loginUrl = `${webBaseUrl()}/account?desktop=1&callback=${encodeURIComponent(callback)}`;
       void electronApi().shell.openExternal(loginUrl);
-      setTimeout(() => finish({ signedIn: false }, server), 180000);
+      timeout = setTimeout(() => finish({ signedIn: false }, server), 180000);
     });
   });
 }

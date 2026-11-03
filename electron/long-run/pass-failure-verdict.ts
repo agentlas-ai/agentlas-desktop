@@ -57,10 +57,19 @@ export function modelContextFailureReason(failure: FailureBoundary): "context_ca
 /** Stop/steering must interrupt even the longest retry backoff immediately. */
 export function waitForPassRetry(delayMs: number, signal?: AbortSignal): Promise<void> {
   if (signal?.aborted) return Promise.resolve();
+  if (Number.isNaN(delayMs)) return Promise.reject(new TypeError("pass_retry_delay_invalid"));
   return new Promise((resolve) => {
-    const finish = () => { clearTimeout(timer); signal?.removeEventListener("abort", finish); resolve(); };
-    const timer = setTimeout(finish, delayMs);
+    // Node clamps an overflowing timeout to 1ms. Split long server waits without
+    // rounding their deadline down, while preserving immediate Stop.
+    const deadline = Math.min(8_640_000_000_000_000, Date.now() + Math.max(0, delayMs));
+    let timer: ReturnType<typeof setTimeout>;
+    let settled = false;
+    const finish = () => { if (settled) return; settled = true; clearTimeout(timer); signal?.removeEventListener("abort", finish); resolve(); };
+    const tick = () => { if (settled) return; const left = deadline - Date.now(); if (left <= 0 || signal?.aborted) finish();
+      else timer = setTimeout(tick, Math.min(left, 2_147_483_647)); };
+    timer = setTimeout(tick, Math.min(Math.max(0, deadline - Date.now()), 2_147_483_647));
     signal?.addEventListener("abort", finish, { once: true });
+    if (signal?.aborted) finish();
   });
 }
 
@@ -111,11 +120,18 @@ export function passFailureVerdict(
         ? {
           action: "retry",
           reason: "transient",
-          retryAfterMs: transientRetryDelayMs(transientAttemptsSoFar + 1),
+          retryAfterMs: Math.max(transientRetryDelayMs(transientAttemptsSoFar + 1),
+            (parseRetryHint(failure.retryAfterHint, Date.now()) ?? Date.now()) - Date.now()),
           ...hint,
         }
         : { action: "pause", reason: "transient", retryAfterMs: 0, ...hint };
     default:
       return { action: "pause", reason: "unknown", retryAfterMs: 0, ...hint };
   }
+}
+
+/** A first-pass failure leaves through the client's error-result boundary.
+ * It must stop that invocation and hand the same classification to persistence. */
+export function exhaustedPassFailureVerdict(failure: Parameters<typeof passFailureVerdict>[0]): PassFailureVerdict {
+  return passFailureVerdict(failure, MAX_TRANSIENT_RETRIES);
 }

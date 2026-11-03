@@ -33,6 +33,8 @@ export interface OneSeatRecord {
   dissolvedAt: string | null;
   /** 현재 점유(열린 행)만. 이력 전체는 listSeatOccupantHistory. */
   occupants: OneSeatOccupant[];
+  /** This chat's division uses its parent's seat, not its own direct seat. */
+  inheritedFromParent?: true;
 }
 
 export interface SeatParticipantSnapshot {
@@ -116,11 +118,16 @@ export function getSeat(seatId: string): OneSeatRecord | null {
 }
 
 export function getSeatForChat(chatId: string): OneSeatRecord | null {
-  const row = getDb().prepare("SELECT seat_id AS seatId FROM chats WHERE id = ?").get(chatId) as
-    | { seatId: string | null }
+  const row = getDb().prepare(`SELECT child.seat_id AS seatId,
+      CASE WHEN child.kind = 'division' AND parent.id IS NOT NULL
+        AND child.seat_id = parent.seat_id THEN 1 ELSE 0 END AS inheritedFromParent
+    FROM chats child LEFT JOIN chats parent ON parent.id = child.parent_chat_id
+    WHERE child.id = ?`).get(chatId) as
+    | { seatId: string | null; inheritedFromParent: number }
     | undefined;
   if (!row?.seatId) return null;
-  return getSeat(row.seatId);
+  const seat = getSeat(row.seatId);
+  return seat && row.inheritedFromParent === 1 ? { ...seat, inheritedFromParent: true } : seat;
 }
 
 export function listSeats(): OneSeatRecord[] {

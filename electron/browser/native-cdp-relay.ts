@@ -609,7 +609,10 @@ export async function createNativeBrowserRelayGrant(input: CanonicalNativeBrowse
     else {
       // After a rebind the replacement tab opens on the site the run was on (once); an ordinary reconnect opens a blank tab as before.
       const site = resumeUrl; resumeUrl = null;
-      await createGuest(lease, site ?? "about:blank");
+      const guest = await createGuest(lease, site ?? "about:blank");
+      // The replacement is the same foreground run's last page. Let the bound
+      // renderer show it again; background runs remain hidden in presentAction.
+      if (site) presentAction(guest);
     }
   };
   const presentAction = (guest: Pick<Guest, "wc" | "viewId" | "lastPresentationAt">) => {
@@ -829,9 +832,15 @@ export async function createNativeBrowserRelayGrant(input: CanonicalNativeBrowse
       if (!current() || nativeBrowserGuest(owner.ownerId, input.chatId, guest.viewId) !== guest.wc
         || guest.wc.getURL() !== url || image.isEmpty()) throw new Error("native-browser-screenshot-stale");
       const png = image.toPNG();
-      await input.onScreenshot?.({ png, isCurrent: () => current() && leases.get(lease.id) === lease
-        && lease.guests.get(guest.targetId) === guest && nativeBrowserGuest(owner.ownerId, input.chatId, guest.viewId) === guest.wc
-        && guest.wc.getURL() === url });
+      // The capture's record in the run (native-capture-artifacts.ts) is not the screenshot: a capture that cannot be published
+      // leaves the model's pixels and the grant as they are, in this process and in the daemon's channel alike.
+      try {
+        await input.onScreenshot?.({ png, isCurrent: () => current() && leases.get(lease.id) === lease
+          && lease.guests.get(guest.targetId) === guest && nativeBrowserGuest(owner.ownerId, input.chatId, guest.viewId) === guest.wc
+          && guest.wc.getURL() === url });
+      } catch (error) {
+        console.warn(`[native-browser] capture not published: ${error instanceof Error ? error.message.slice(0, 120) : "unknown"}`);
+      }
       if (!current() || nativeBrowserGuest(owner.ownerId, input.chatId, guest.viewId) !== guest.wc || guest.wc.getURL() !== url) {
         throw new Error("native-browser-capture-stale");
       }
@@ -1207,7 +1216,8 @@ export async function createNativeBrowserRelayGrant(input: CanonicalNativeBrowse
   const rebindTask = (): boolean => {
     if (!anchorLost || closed || input.signal.aborted) return false;
     let fresh: NativeBrowserTaskLease;
-    try { fresh = acquireNativeBrowserTask({ taskScopeId: input.chatId, runId: input.runId, permission: input.permission, signal: input.signal }); }
+    try { fresh = acquireNativeBrowserTask({ taskScopeId: input.chatId, runId: input.runId, permission: input.permission,
+      signal: input.signal, restorePresentationFrom: taskLease }); }
     catch { return false; }
     offTaskRevoke();
     taskLease = fresh;

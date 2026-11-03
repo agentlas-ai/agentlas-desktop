@@ -25,6 +25,38 @@ export const MOBILE_BRIDGE_SPECIFIC_REFUSAL_CODES = [
   "chat_still_running",
   /** Stop was asked for a run that has already ended. */
   "run_no_longer_active",
+  /** Paired owner Finance actions; only specific-refusal-capable phones receive these codes. */
+  "finance_consent_required",
+  "finance_plugin_activation_required",
+  "finance_revision_conflict",
+  "finance_asset_has_holdings",
+  "finance_asset_is_referenced",
+  "finance_work_project_not_prepared",
+  "finance_account_unproven",
+  "finance_account_changed",
+  "finance_pairing_changed",
+  "finance_mobile_payload_too_large",
+  "finance_report_not_found",
+  "finance_asset_selection_required",
+  "finance_portfolio_review_required",
+  "finance_portfolio_identity_ambiguous",
+  "finance_portfolio_position_ambiguous",
+  "finance_report_page_invalid",
+  "finance_analyst_not_found",
+  "finance_analyst_revision_conflict",
+  "finance_arguments_invalid",
+  "account_mismatch",
+  "sign_in_required",
+  "finance_sign_in_required",
+  /** media-carousel (chat-attachments-v2): Desktop's disk has no room for the attachments; the message names needed and free MB. */
+  "attachment_disk_full",
+  /** One attachment is larger than one conversation-store value (1,000,000,000 bytes); the message names the file. */
+  "attachment_file_too_large_for_store",
+  /** Four transfers from this phone are still arriving; send again when one finishes. */
+  "attachment_upload_busy",
+  /** remote-build-attachments-v1: the build's uploaded files are gone, unfinished, already used, or another phone's. Attach again. */
+  "build_attachments_unavailable",
+
 ] as const;
 export type MobileBridgeSpecificRefusalCode = (typeof MOBILE_BRIDGE_SPECIFIC_REFUSAL_CODES)[number];
 

@@ -1010,6 +1010,16 @@ export function getGraphLoginWaitCheckpoint(automationId: string, runId?: string
       checkpoint, nodeStates: JSON.parse(row.node_states_json ?? "{}"), simulation: row.dry_run === 1 };
   } catch { return null; }
 }
+/** Fail closed if a durable owner Stop applies to this scheduled occurrence. */
+export function isStoppedScheduledOccurrence(automationId: string, occurrenceId: string, nextRunAt: string | null): boolean {
+  const row = getDb().prepare(`SELECT 1 AS stopped FROM run_events WHERE automation_id = ? AND kind = 'automation_retry_stopped'
+    AND (NOT json_valid(payload_json) OR (json_extract(payload_json, '$.reasonCode') = 'automation_stopped_by_user'
+      AND (json_extract(payload_json, '$.occurrenceId') = ?
+        OR (json_extract(payload_json, '$.scheduleStopOutcome') = 'unverified' AND
+          (json_extract(payload_json, '$.blockUnknownSchedule') = 1 OR json_extract(payload_json, '$.blockedNextRunAt') = ?))))) LIMIT 1`)
+    .get(automationId, occurrenceId, nextRunAt) as { stopped?: number } | undefined;
+  return row?.stopped === 1;
+}
 /** Generation/ref and exact sealed source are re-read within one writer transaction. */
 export function restoreGraphLoginPrerequisite(automationId: string, runId: string, nodeId: string, ref: LoginPrerequisiteRef): boolean {
   const db = getDb();
@@ -1033,6 +1043,47 @@ export function cancelGraphLoginWait(automationId: string, runId: string): void 
   db.transaction(() => {
     const source = getGraphLoginWaitCheckpoint(automationId, runId);
     if (!source) return;
+    // A scheduled login wait kept its due slot. Revoke that exact occurrence
+    // before clearing needs_input, or the next poll can replay the stopped run.
+    const prefix = `schedule:${automationId}:`;
+    let scheduleStopOutcome: "preserved" | "advanced" | "unverified" = "preserved";
+    let blockedNextRunAt: string | null = null;
+    if (source.occurrenceId?.startsWith(prefix)) {
+      try {
+        const row = db.prepare("SELECT schedule, schedule_json, timezone, next_run_at, enabled FROM automations WHERE id = ?")
+          .get(automationId) as Pick<AutomationRow, "schedule" | "schedule_json" | "timezone" | "next_run_at" | "enabled"> | undefined;
+        if (!row) throw new Error("automation_login_stop_parent_missing");
+        blockedNextRunAt = row.next_run_at;
+        if (row.enabled !== 0 && row.next_run_at) {
+          const original = Date.parse(source.occurrenceId.slice(prefix.length));
+          const due = Date.parse(row.next_run_at);
+          const now = new Date();
+          if (!Number.isFinite(original) || !Number.isFinite(due)) throw new Error("automation_login_stop_schedule_unverified");
+          const tz = row.timezone || defaultTz();
+          const spec = specFromStored(row.schedule_json ?? row.schedule, tz);
+          const nextAfterOriginal = computeNextRun(row.schedule, new Date(original), { scheduleJson: row.schedule_json, timezone: tz });
+          const sameOccurrence = due === original || (due > original && ((!nextAfterOriginal && spec?.kind === "once")
+            || (nextAfterOriginal !== null && due < Date.parse(nextAfterOriginal))));
+          if (sameOccurrence) {
+            // The wall clock may move backwards after dispatch. Never leave the
+            // stopped original slot due again when it catches up.
+            const nextFrom = new Date(Math.max(now.getTime(), original + 1));
+            const next = computeNextRun(row.schedule, nextFrom, { scheduleJson: row.schedule_json, timezone: tz });
+            const updated = db.prepare("UPDATE automations SET next_run_at = ?, enabled = ? WHERE id = ? AND next_run_at = ?")
+              .run(next, next === null ? 0 : row.enabled, automationId, row.next_run_at);
+            if (updated.changes !== 1) throw new Error("automation_login_stop_schedule_changed");
+            scheduleStopOutcome = "advanced";
+          } else if (due <= now.getTime()) {
+            throw new Error("automation_login_stop_occurrence_unverified");
+          }
+        }
+      } catch {
+        // Never roll back Stop because the schedule could not be identified.
+        // Its durable marker blocks this exact observed due slot; if none was
+        // readable, the due guard fails closed until the owner resolves it.
+        scheduleStopOutcome = "unverified";
+      }
+    }
     const checkpoint = source.checkpoint as { loginWaits: Record<string, GraphLoginWaitEntry>; ambiguousNodeIds: string[]; updatedAt: string; checkpointDigest: string };
     const nodeStates = { ...source.nodeStates };
     for (const entry of Object.values(checkpoint.loginWaits)) for (const p of entry.prerequisites) {
@@ -1047,8 +1098,16 @@ export function cancelGraphLoginWait(automationId: string, runId: string): void 
     checkpoint.updatedAt = new Date().toISOString();
     const payload = { ...checkpoint }; delete (payload as Partial<typeof checkpoint>).checkpointDigest;
     checkpoint.checkpointDigest = sha256Value(payload);
-    db.prepare("UPDATE automation_runs SET status = 'error', checkpoint_json = ?, node_states_json = ?, last_activity_at = ? WHERE id = ? AND automation_id = ? AND status = 'needs_input'")
+    const stopped = db.prepare("UPDATE automation_runs SET status = 'error', checkpoint_json = ?, node_states_json = ?, last_activity_at = ? WHERE id = ? AND automation_id = ? AND status = 'needs_input'")
       .run(JSON.stringify(checkpoint), JSON.stringify(nodeStates), checkpoint.updatedAt, runId, automationId);
+    if (stopped.changes !== 1) throw new Error("automation_login_stop_changed");
+    const seq = Number((db.prepare("SELECT COALESCE(MAX(seq) + 1, 0) AS seq FROM run_events WHERE run_id = ?")
+      .get(runId) as { seq?: number } | undefined)?.seq ?? 0);
+    db.prepare(`INSERT INTO run_events (id, run_id, seq, ts, kind, automation_id, payload_json)
+      VALUES (?, ?, ?, ?, ?, ?, ?)`)
+      .run(`evt_${randomUUID()}`, runId, seq, checkpoint.updatedAt, "automation_retry_stopped", automationId,
+        JSON.stringify({ schemaVersion: "agentlas.automation-retry-stop.v1", reasonCode: "automation_stopped_by_user", occurrenceId: source.occurrenceId,
+          scheduleStopOutcome, ...(scheduleStopOutcome === "unverified" ? { blockedNextRunAt, blockUnknownSchedule: blockedNextRunAt === null } : {}) }));
   }).immediate();
   emitDesktopStoreChange({ entity: "automation", id: automationId });
 }
@@ -2002,9 +2061,10 @@ export function markAutomationRun(
     deferredRetryMs?: number;
     /** Settlement clock; retry delays and future slots must not start at dispatch. */
     finishedAt?: Date;
-    /** For successful consumed occurrences, false preserves the next natural slot.
-     * Internal diagnostics always retain a bounded retry. */
+    /** False ends the deferred retry for this occurrence. */
     deferRetry?: boolean;
+    /** A scheduled occurrence used its retry budget; recorded atomically with settlement. */
+    retryStopReason?: "automation_retry_budget_exhausted";
     /** Durable scheduler run receipt used for exactly-once chain fan-out. */
     sourceRunId?: string | null;
     /** Final source output carried into chain trigger variables. */
@@ -2027,76 +2087,77 @@ export function markAutomationRun(
   },
 ): void {
   const db = getDb();
-  const row = db.prepare("SELECT * FROM automations WHERE id = ?").get(id) as AutomationRow | undefined;
-  if (!row) return;
-
-  const settledAt = new Date(Math.max(at.getTime(), opts?.finishedAt?.getTime() ?? at.getTime()));
-  const tz = row.timezone || defaultTz();
-  const spec = specFromStored(row.schedule_json ?? row.schedule, tz);
-  const triggerType = (row.trigger_type as TriggerKind) || "schedule";
-  // 시계(next_run_at) 전진은 시간 트리거의 "실제 예약 발사"일 때만. 이벤트 트리거(fs/chain/poll/
-  // webhook)나 run-now는 advanceSchedule=false로 와서 next_run_at을 건드리지 않는다 —
-  // 그러지 않으면 이벤트 자동화가 daily 시계로 승격되거나, run-now가 다음 예약 슬롯을 잡아먹는다.
-  const advance = (opts?.advanceSchedule ?? true) && triggerType === "schedule";
-
-  // coalesce: 놓친 발생 수 세기(가시화용) — 시계 전진 시에만, 그리고 cron만(interval은
-  // 상대 드리프트라 "놓친 슬롯" 개념이 무의미해 가짜 카운트가 나온다).
-  let skipped = 0;
-  if (advance && spec && spec.kind === "cron") {
-    let cursor = row.next_run_at ? new Date(row.next_run_at) : row.last_run_at ? new Date(row.last_run_at) : at;
-    // 최대 500개까지만 센다(긴 다운타임 폭주 방지).
-    for (let guard = 0; guard < 500; guard += 1) {
-      const nextIso = nextRun(spec, cursor);
-      if (!nextIso) break;
-      const nextDate = new Date(nextIso);
-      if (nextDate.getTime() > settledAt.getTime()) break;
-      skipped += 1;
-      cursor = nextDate;
-    }
-    if (skipped > 0) skipped -= 1; // 이번 발사 1회는 스킵이 아니라 실제 실행
-  }
-
-  const executionConsumed = opts?.executionConsumed ?? true;
-  const runCount = (row.run_count ?? 0) + (executionConsumed ? 1 : 0);
-  // 전진하지 않으면 next_run_at은 그대로 둔다(이벤트=null 유지, 시계=다음 예약 슬롯 유지).
-  const computedNextRunAt = advance
-    ? computeNextRun(row.schedule, settledAt, { scheduleJson: row.schedule_json, timezone: tz })
-    : row.next_run_at;
-
-  // 종료 조건 판정. reachedMax/pastEnd는 트리거 종류 무관하게 적용(N회/기한 후 자동 비활성).
-  const reachedMax = executionConsumed && row.max_runs != null && runCount >= row.max_runs;
-  const pastEnd = row.end_at != null && Date.parse(row.end_at) <= settledAt.getTime();
-  const noFuture = advance && computedNextRunAt == null;
-  const deferredRetryMs = Math.max(60_000, Math.min(opts?.deferredRetryMs ?? 15 * 60_000, 24 * 60 * 60_000));
-  const deferredRetryAt = new Date(settledAt.getTime() + deferredRetryMs).toISOString();
-  // Internal diagnostics cannot remove the next wake. Keep retries bounded and
-  // leave the uncertain node's receipt quarantine to the graph kernel.
-  const internalDiagnostic = ["error", "partial", "blocked", "needs_input"].includes(opts?.status ?? "ok")
-    || ["blocked", "needs_input", "rejected"].includes(opts?.outcome ?? "")
-    || opts?.suspendForReconciliation === true;
-  const deferRetry = internalDiagnostic || !executionConsumed || opts?.deferRetry !== false;
-  const retryNeeded = (!executionConsumed || internalDiagnostic) && opts?.automaticRetry !== false;
-  const nextRunAt = retryNeeded && !pastEnd && triggerType === "schedule" && (advance || internalDiagnostic)
-    ? !deferRetry
-      ? computedNextRunAt
-      : computedNextRunAt == null || Date.parse(computedNextRunAt) > Date.parse(deferredRetryAt)
-        ? deferredRetryAt
-        : computedNextRunAt
-    : computedNextRunAt;
-  // Only completed one-shots and explicit owner schedule policies disable.
-  // An unresolved one-shot keeps a retry even after its old retry cap.
-  const shouldDisable = reachedMax || pastEnd || (noFuture && executionConsumed && !internalDiagnostic);
-
-  const atIso = at.toISOString();
-  const terminalStatus = opts?.status ?? "ok";
-  const sourceRunId = opts?.sourceRunId?.trim() || null;
-  if (sourceRunId && (sourceRunId.length > 512 || sourceRunId.includes("\0"))) {
-    throw new Error("automation_terminal_run_id_invalid");
-  }
-  // Source history, its immutable scheduler receipt, and every downstream
-  // chain occurrence are one commit. A crash can expose all of them or none of
-  // them, never a successful source receipt without its fan-out.
   const commit = db.transaction(() => {
+    const row = db.prepare("SELECT * FROM automations WHERE id = ?").get(id) as AutomationRow | undefined;
+    if (!row) return false;
+
+    const settledAt = new Date(Math.max(at.getTime(), opts?.finishedAt?.getTime() ?? at.getTime()));
+    const tz = row.timezone || defaultTz();
+    const spec = specFromStored(row.schedule_json ?? row.schedule, tz);
+    const triggerType = (row.trigger_type as TriggerKind) || "schedule";
+    // 시계(next_run_at) 전진은 시간 트리거의 "실제 예약 발사"일 때만. 이벤트 트리거(fs/chain/poll/
+    // webhook)나 run-now는 advanceSchedule=false로 와서 next_run_at을 건드리지 않는다 —
+    // 그러지 않으면 이벤트 자동화가 daily 시계로 승격되거나, run-now가 다음 예약 슬롯을 잡아먹는다.
+    const advance = (opts?.advanceSchedule ?? true) && triggerType === "schedule";
+
+    // coalesce: 놓친 발생 수 세기(가시화용) — 시계 전진 시에만, 그리고 cron만(interval은
+    // 상대 드리프트라 "놓친 슬롯" 개념이 무의미해 가짜 카운트가 나온다).
+    let skipped = 0;
+    if (advance && spec && spec.kind === "cron") {
+      let cursor = row.next_run_at ? new Date(row.next_run_at) : row.last_run_at ? new Date(row.last_run_at) : at;
+      // 최대 500개까지만 센다(긴 다운타임 폭주 방지).
+      for (let guard = 0; guard < 500; guard += 1) {
+        const nextIso = nextRun(spec, cursor);
+        if (!nextIso) break;
+        const nextDate = new Date(nextIso);
+        if (nextDate.getTime() > settledAt.getTime()) break;
+        skipped += 1;
+        cursor = nextDate;
+      }
+      if (skipped > 0) skipped -= 1; // 이번 발사 1회는 스킵이 아니라 실제 실행
+    }
+
+    const executionConsumed = opts?.executionConsumed ?? true;
+    const runCount = (row.run_count ?? 0) + (executionConsumed ? 1 : 0);
+    // 전진하지 않으면 next_run_at은 그대로 둔다(이벤트=null 유지, 시계=다음 예약 슬롯 유지).
+    const computedNextRunAt = advance
+      ? computeNextRun(row.schedule, settledAt, { scheduleJson: row.schedule_json, timezone: tz })
+      : row.next_run_at;
+
+    // 종료 조건 판정. reachedMax/pastEnd는 트리거 종류 무관하게 적용(N회/기한 후 자동 비활성).
+    const reachedMax = executionConsumed && row.max_runs != null && runCount >= row.max_runs;
+    const pastEnd = row.end_at != null && Date.parse(row.end_at) <= settledAt.getTime();
+    const noFuture = advance && computedNextRunAt == null;
+    const deferredRetryMs = Math.max(60_000, Math.min(opts?.deferredRetryMs ?? 15 * 60_000, 24 * 60 * 60_000));
+    const deferredRetryAt = new Date(settledAt.getTime() + deferredRetryMs).toISOString();
+    // The scheduler bounds this occurrence; the graph kernel still owns the
+    // uncertain node's receipt quarantine.
+    const internalDiagnostic = ["error", "partial", "blocked", "needs_input"].includes(opts?.status ?? "ok")
+      || ["blocked", "needs_input", "rejected"].includes(opts?.outcome ?? "")
+      || opts?.suspendForReconciliation === true;
+    const deferRetry = opts?.deferRetry !== false;
+    const retryNeeded = (!executionConsumed || internalDiagnostic) && opts?.automaticRetry !== false;
+    const nextRunAt = !advance ? computedNextRunAt : retryNeeded && !pastEnd && triggerType === "schedule"
+      ? !deferRetry
+        ? computedNextRunAt
+        : computedNextRunAt == null || Date.parse(computedNextRunAt) > Date.parse(deferredRetryAt)
+          ? deferredRetryAt
+          : computedNextRunAt
+      : computedNextRunAt;
+    // An exhausted one-shot has no next automatic occurrence; Run now remains available.
+    const shouldDisable = reachedMax || pastEnd || (noFuture && ((executionConsumed && !internalDiagnostic)
+      || opts?.retryStopReason === "automation_retry_budget_exhausted"));
+
+    const atIso = at.toISOString();
+    const terminalStatus = opts?.status ?? "ok";
+    const sourceRunId = opts?.sourceRunId?.trim() || null;
+    if (sourceRunId && (sourceRunId.length > 512 || sourceRunId.includes("\0"))) {
+      throw new Error("automation_terminal_run_id_invalid");
+    }
+    const historyRunId = sourceRunId ?? randomUUID();
+    // Source history, its immutable scheduler receipt, and every downstream
+    // chain occurrence are one commit. A crash can expose all of them or none of
+    // them, never a successful source receipt without its fan-out.
     const persistedNextRunAt = shouldDisable || row.enabled === 0
         ? null
         : nextRunAt;
@@ -2109,16 +2170,24 @@ export function markAutomationRun(
          (id, automation_id, scheduled_for, ran_at, status, skipped_count, error, outcome, outcome_reason)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
-      sourceRunId ?? randomUUID(), id, row.next_run_at, atIso, terminalStatus,
+      historyRunId, id, row.next_run_at, atIso, terminalStatus,
       skipped > 0 ? skipped : 0, opts?.error == null ? null : redactOperationalSecrets(opts.error),
       opts?.outcome ?? null, opts?.outcomeReason == null ? null : redactOperationalSecrets(plainRunReason(opts.outcomeReason, currentUiLocale() === "ko" ? "ko" : "en") ?? opts.outcomeReason),
     );
     if (sourceRunId) {
       recordAutomationTerminalReceipt(id, sourceRunId, terminalStatus, opts?.output, atIso);
     }
+    if (opts?.retryStopReason === "automation_retry_budget_exhausted") {
+      const seq = Number((db.prepare("SELECT COALESCE(MAX(seq) + 1, 0) AS seq FROM run_events WHERE run_id = ?")
+        .get(historyRunId) as { seq?: number } | undefined)?.seq ?? 0);
+      db.prepare(`INSERT INTO run_events (id, run_id, seq, ts, kind, automation_id, payload_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?)`)
+        .run(`evt_${randomUUID()}`, historyRunId, seq, atIso, "automation_retry_stopped", id,
+          JSON.stringify({ schemaVersion: "agentlas.automation-retry-stop.v1", reasonCode: opts.retryStopReason }));
+    }
+    return true;
   });
-  commit.immediate();
-  emitDesktopStoreChange({ entity: "automation", id });
+  if (commit.immediate()) emitDesktopStoreChange({ entity: "automation", id });
 }
 
 // enabled이고 next_run_at이 지난(due) 자동화들. 시계는 시간 트리거(schedule)만 가진다: 이벤트 행(fs/chain/webhook/poll/command)에

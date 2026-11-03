@@ -7,6 +7,7 @@ import type { PreparedMcpBinding } from "../mcp-tools/prepared-transport";
 import { redactSecrets } from "../../shared/secret-patterns";
 import { redactToolJson, redactToolText } from "./tool-result-store";
 import { didYouMean } from "../../shared/did-you-mean";
+import { waitForAbort } from "../runtime/abortable-wait";
 
 /*
  * Harness tool dispatch ports (docs/2026-10-13-native-harness/15 §7-8):
@@ -266,19 +267,22 @@ export async function describeConnectorTools(providerRef: string, ctx?: Pick<Har
   | { ok: true; server: InstalledMcpServer; prepared?: PreparedMcpBinding; tools: Array<{ name: string; description: string; schemaDigest: string; inputSchema: unknown }> }
   | { ok: false; code: string; next?: string }
 > {
-  const installed = await findServer(providerRef);
+  ctx?.signal?.throwIfAborted();
+  const installed = await waitForAbort(ctx?.signal, findServer(providerRef));
   // A host tool server (Science) is no installed row: it exists for this call only as the calling run's sealed binding.
-  const hosted = installed ? null : await hostServerBinding(providerRef, ctx);
+  const hosted = installed ? null : await waitForAbort(ctx?.signal, hostServerBinding(providerRef, ctx));
   if (hosted && !hosted.ok) return { ok: false, code: hosted.code, next: hosted.next };
   if (!installed && !hosted) return { ok: false, code: "not-installed", next: "connector.search finds installed connectors" };
   if (installed && !installed.enabled) return { ok: false, code: "disabled", next: "connector.connect switches it on" };
-  const bound = hosted ?? await runScopedBinding(installed!, ctx);
+  const bound = hosted ?? await waitForAbort(ctx?.signal, runScopedBinding(installed!, ctx));
   if (!bound.ok) return { ok: false, code: bound.code, next: bound.next };
   const { server, prepared } = bound;
-  const { testServerConnection } = await import("../mcp-tools/client");
-  const { mcpToolSchemaDigest } = await import("../mcp-tools/tool-schema");
+  const { testServerConnection } = await waitForAbort(ctx?.signal, import("../mcp-tools/client"));
+  const { mcpToolSchemaDigest } = await waitForAbort(ctx?.signal, import("../mcp-tools/tool-schema"));
+  ctx?.signal?.throwIfAborted();
   // The run's stop signal reaches the inventory probe too: a stopped run does not keep a connector process starting for 20 s.
-  const status = await testServerConnection(server, { timeoutMs: 20_000, ...(ctx?.signal ? { signal: ctx.signal } : {}), ...(prepared ? { prepared } : {}) });
+  const status = await waitForAbort(ctx?.signal, testServerConnection(server, { timeoutMs: 20_000, ...(ctx?.signal ? { signal: ctx.signal } : {}), ...(prepared ? { prepared } : {}) }));
+  ctx?.signal?.throwIfAborted();
   if (status.failureCode === "connection_cancelled") return { ok: false, code: "cancelled", next: "the run was stopped before the connector answered; nothing was dispatched" };
   if (status.missingEnv.length > 0 || status.failureCode === "authentication_required") return { ok: false, code: "auth-required", next: "auth.status then auth.ensure/auth.login" };
   if (!status.connected) return { ok: false, code: "offline", next: "connector.status; retry when the server answers" };
@@ -576,28 +580,31 @@ export function setMcpResourceReaderForTest(reader: McpResourceReader | null): v
 
 const MAX_APP_HTML_BYTES = 5 * 1024 * 1024;
 
-export async function mcpAppResourceRead(args: Args, _ctx: HarnessCallContext): Promise<PortOutcome> {
+export async function mcpAppResourceRead(args: Args, ctx: HarnessCallContext): Promise<PortOutcome> {
   const connectorId = str(args.connectorId);
   const uri = str(args.uri);
   if (!connectorId || !uri) return refused("invalid-input", "required: connectorId, uri");
   let parsed: URL;
   try { parsed = new URL(uri); } catch { return refused("invalid-input", "uri must be a ui:// resource URI"); }
   if (parsed.protocol !== "ui:") return refused("invalid-input", "only ui:// resources are served to MCP Apps views");
-  const server = await findServer(connectorId);
+  ctx.signal?.throwIfAborted();
+  const server = await waitForAbort(ctx.signal, findServer(connectorId));
   if (!server) return refused("not-installed", "connector.search finds installed connectors");
   if (!server.enabled) return refused("disabled", "connector.connect switches it on");
 
   let reader: McpResourceReader | null = resourceReaderOverride;
   if (!reader) {
-    const client = (await import("../mcp-tools/client")) as unknown as { readServerResource?: McpResourceReader };
+    const client = (await waitForAbort(ctx.signal, import("../mcp-tools/client"))) as unknown as { readServerResource?: McpResourceReader };
     reader = client.readServerResource ?? null;
   }
   if (!reader) return { status: "unavailable", reason: "missing-port", next: "mcp-tools/client.ts must export readServerResource(server, uri, { signal, timeoutMs }) -> resources/read result" };
 
   let read: McpResourceContents;
   try {
-    read = await reader(server, uri, { timeoutMs: 20_000 });
+    ctx.signal?.throwIfAborted();
+    read = await waitForAbort(ctx.signal, reader(server, uri, { timeoutMs: 20_000, ...(ctx.signal ? { signal: ctx.signal } : {}) }));
   } catch (error) {
+    ctx.signal?.throwIfAborted();
     const message = error instanceof Error ? error.message.slice(0, 300) : "unknown error";
     return refused(/401|unauthor|credential/i.test(message) ? "auth-required" : "provider-failure", message);
   }

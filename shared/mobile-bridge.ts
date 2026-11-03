@@ -1,3 +1,4 @@
+import { splitMobileMediaParams } from "./mobile-bridge-media";
 import { MOBILE_CANONICAL_QUESTION_CONTRACT, validateMobileCanonicalQuestionAnswer, type MobileCanonicalQuestionDecisionDto } from "./mobile-question-decision";
 import type {OneVaultErrorCode} from "./one-vault";
 import type {OneProviderRemoteErrorCode} from "./one-provider-remote";
@@ -122,6 +123,7 @@ export const MOBILE_BRIDGE_METHODS = [
   "one.supervisor.stopReply",
   "one.supervisor.appearance",
   "one.avatar.get",
+  "one.avatar.set",
   "one.org.add",
   "one.org.openMember",
   "one.org.markRead",
@@ -164,6 +166,27 @@ export const MOBILE_BRIDGE_METHODS = [
   "one.artifacts.recent",
   "one.artifact.imagePreview",
   "chat.attachment.imagePreview",
+  "one.dispatch.resultPage",
+  "science.video.has",
+  "science.video.list",
+  "science.video.open",
+  "science.video.prepare",
+  "science.video.chunk",
+  "science.video.close",
+  "one.video.open",
+  "one.video.prepare",
+  "one.video.chunk",
+  "one.video.close",
+  "chat.video.open",
+  "chat.video.prepare",
+  "chat.video.chunk",
+  "chat.video.close",
+  "legacy.video.list",
+  "legacy.video.releaseList",
+  "legacy.video.open",
+  "legacy.video.prepare",
+  "legacy.video.chunk",
+  "legacy.video.close",
   "chat.attachments.begin",
   "chat.attachments.chunk",
   "chat.attachments.finish",
@@ -180,6 +203,8 @@ export const MOBILE_BRIDGE_METHODS = [
   // Harness thread/turn projection (docs/2026-10-13-native-harness/12 F3/F5). Appended: older apps never call them.
   "harness.read",
   "harness.command",
+  "finance.read",
+  "finance.command",
   "request.status",
   "one.invoke.start",
   "invoke.start",
@@ -456,7 +481,7 @@ export const MOBILE_BRIDGE_WRITE_METHODS: ReadonlySet<MobileBridgeMethod> = new 
   "notifications.register", "notifications.unregister",
   "chat.attachments.begin", "chat.attachments.chunk", "chat.attachments.finish",
   "one.supervisor.send", "one.supervisor.startWork", "one.supervisor.startScience",
-  "one.supervisor.control", "one.supervisor.stopReply", "one.supervisor.appearance",
+  "one.supervisor.control", "one.supervisor.stopReply", "one.supervisor.appearance", "one.avatar.set",
   "science.chat.send", "science.chat.cancel",
   ...MOBILE_GOAL_CONTROL_WRITE_METHODS,
   "device.revokeSelf",
@@ -464,6 +489,7 @@ export const MOBILE_BRIDGE_WRITE_METHODS: ReadonlySet<MobileBridgeMethod> = new 
   "connectors.install",
   "hub.invoke",
   "harness.command",
+  "finance.command",
   "hub.install",
   "chats.rename",
   "chats.archive",
@@ -1556,6 +1582,18 @@ export interface MobileBridgeChatHistoryPageDto {
  * replay protection. Advertised by bridge.ready capability `harnessThreadV1` = { read, command }; older Desktops refuse
  * the methods, older apps never call them.
  */
+/** Additive owner Finance surface; status reconciliation and every write use the replay-protected command. */
+export const MOBILE_FINANCE_READ_OPERATIONS = ["workspace", "analysts", "analyst.read", "report.read", "dashboard.widget.read", "search", "query", "worldMarkets", "dashboardFeeds", "workProject.chats"] as const;
+export const MOBILE_FINANCE_COMMAND_OPERATIONS = ["status", "experience", "workProject", "asset.add", "asset.remove", "portfolio.save", "query.save", "quotes.refresh"] as const;
+export const MOBILE_FINANCE_CAPABILITY = { schemaVersion: 1, read: [...MOBILE_FINANCE_READ_OPERATIONS], command: [...MOBILE_FINANCE_COMMAND_OPERATIONS] } as const;
+export function validateMobileFinanceParams(method: "finance.read" | "finance.command", params: Record<string, unknown>): string | null {
+  const allowed: readonly string[] = method === "finance.read" ? MOBILE_FINANCE_READ_OPERATIONS : MOBILE_FINANCE_COMMAND_OPERATIONS;
+  if (!hasOnlyKeys(params, ["operation", "args"]) || typeof params.operation !== "string" || !allowed.includes(params.operation)) return "finance_operation_invalid";
+  if (params.args !== undefined && (!params.args || typeof params.args !== "object" || Array.isArray(params.args))) return "finance_arguments_invalid";
+  if (params.args !== undefined && JSON.stringify(params.args).length > 210_000) return "finance_arguments_too_large";
+  return null;
+}
+
 export const MOBILE_HARNESS_READ_OPERATIONS = ["thread.list", "thread.read", "turn.status", "effects.uncertain", "media.routes"] as const;
 export const MOBILE_HARNESS_COMMAND_OPERATIONS = ["turn.interrupt", "turn.start"] as const;
 
@@ -3415,6 +3453,8 @@ function validateVisualInputAction(value: unknown): string | null {
 function validateParams(method: MobileBridgeMethod, params: Record<string, unknown>): string | null {
   if (method === "notifications.register" || method === "notifications.unregister") return validateMobilePushParams(method, params);
   if (!isMobileBridgeJsonValue(params)) return "params must contain only bounded JSON values";
+  const media = splitMobileMediaParams(method, params); // media-carousel optional keys (shared/mobile-bridge-media.ts)
+  if (media) return media.error ?? validateParams(method, media.rest);
   if (isMobileGoalControlMethod(method)) return validateMobileGoalControlParams(method, params);
   // One owns signature, exact nested DTO, current native origin and nonce checks.
   // These methods never enter the generic write replay ledger or request.status.
@@ -3535,6 +3575,13 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
             optionalString(params, "displayName", 80),
           )
         : "one.org.add accepts only installedAgentId and displayName";
+    case "one.avatar.set":
+      return hasOnlyKeys(params, ["oneId", "expectedVersion", "dataUrl"])
+        && typeof params.oneId === "string" && /^one_[a-f0-9]{32}$/.test(params.oneId)
+        && Number.isSafeInteger(params.expectedVersion) && Number(params.expectedVersion) > 0
+        && typeof params.dataUrl === "string" && params.dataUrl.length <= 2796230
+        && /^data:image\/(?:png|jpeg|webp);base64,[A-Za-z0-9+/]+={0,2}$/.test(params.dataUrl)
+        ? null : "one.avatar.set has invalid parameters";
     case "one.avatar.get":
       return hasOnlyKeys(params, ["icon"])
         ? (typeof params.icon === "string" && /^one-avatar:(?:self|[a-f0-9-]{16,80})$/i.test(params.icon)
@@ -3682,15 +3729,68 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
     case "chat.attachments.begin":
       if (!hasOnlyKeys(params, ["chatId", "files"])) return "attachment_begin_fields_invalid";
       if (params.chatId !== undefined && params.chatId !== null && requiredString(params,"chatId")) return "attachment_chat_invalid";
-      if (!Array.isArray(params.files) || params.files.length < 1 || params.files.length > 8) return "attachment_count_invalid";
-      return params.files.every(file => isRecord(file) && hasOnlyKeys(file,["name","size"]) && typeof file.name === "string" && file.name.length > 0 && file.name.length <= 180 && Number.isSafeInteger(file.size) && Number(file.size) >= 0 && Number(file.size) <= 64 * 1024 * 1024) ? null : "attachment_metadata_invalid";
+      // chat-attachments-v2: any number of files of any size; the store bound and the free disk are checked by the upload itself.
+      if (!Array.isArray(params.files) || params.files.length < 1) return "attachment_count_invalid";
+      return params.files.every(file => isRecord(file) && hasOnlyKeys(file,["name","size"]) && typeof file.name === "string" && file.name.length > 0 && file.name.length <= 180 && Number.isSafeInteger(file.size) && Number(file.size) >= 0) ? null : "attachment_metadata_invalid";
     case "chat.attachments.chunk":
       return hasOnlyKeys(params,["uploadId","fileIndex","offset","data"])
         ? firstError(requiredString(params,"uploadId",36),requiredString(params,"data",1398104),
-            Number.isSafeInteger(params.fileIndex) && Number(params.fileIndex) >= 0 && Number(params.fileIndex) < 8 && Number.isSafeInteger(params.offset) && Number(params.offset) >= 0 ? null : "attachment_offset_invalid")
+            Number.isSafeInteger(params.fileIndex) && Number(params.fileIndex) >= 0 && Number.isSafeInteger(params.offset) && Number(params.offset) >= 0 ? null : "attachment_offset_invalid")
         : "attachment_chunk_fields_invalid";
     case "chat.attachments.finish":
       return hasOnlyKeys(params,["uploadId"]) ? requiredString(params,"uploadId",36) : "attachment_finish_fields_invalid";
+    case "science.video.has":
+      return hasOnlyKeys(params, ["projectId", "conversationId", "messageIds"])
+        && typeof params.projectId === "string" && /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(params.projectId)
+        && typeof params.conversationId === "string" && /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(params.conversationId)
+        && Array.isArray(params.messageIds) && params.messageIds.length <= 200
+        && params.messageIds.every(id => typeof id === "string" && /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(id))
+        && new Set(params.messageIds).size === params.messageIds.length ? null : "science_video_scope_invalid";
+    case "science.video.list":
+    case "science.video.open": {
+      const fields = method === "science.video.list" ? ["projectId", "conversationId", "messageId", "cursor"] : ["projectId", "conversationId", "messageId", "runId", "outputId", "transferId"];
+      const isUuid = (value: unknown): boolean => typeof value === "string" && /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(value);
+      if (!hasOnlyKeys(params, fields) || !isUuid(params.projectId) || !isUuid(params.conversationId) || !isUuid(params.messageId)) return "science_video_scope_invalid";
+      if (method === "science.video.open") return isUuid(params.runId) && isUuid(params.outputId)
+        && typeof params.transferId === "string" && /^[0-9a-f]{64}$/.test(params.transferId) ? null : "science_video_output_invalid";
+      return params.cursor === undefined || isRecord(params.cursor) && hasOnlyKeys(params.cursor, ["runId", "outputId"])
+        && isUuid(params.cursor.runId) && isUuid(params.cursor.outputId) ? null : "science_video_cursor_invalid";
+    }
+    case "science.video.prepare":
+    case "science.video.close":
+      return hasOnlyKeys(params, ["transferId"]) && typeof params.transferId === "string" && /^[0-9a-f]{64}$/.test(params.transferId)
+        ? null : "science_video_transfer_invalid";
+    case "science.video.chunk":
+      return hasOnlyKeys(params, ["transferId", "offset"]) && typeof params.transferId === "string" && /^[0-9a-f]{64}$/.test(params.transferId)
+        && Number.isSafeInteger(params.offset) && Number(params.offset) >= 0 && Number(params.offset) < 64 * 1024 * 1024
+        && Number(params.offset) % (1024 * 1024) === 0 ? null : "science_video_range_invalid";
+    case "one.video.open":
+      return hasOnlyKeys(params, ["taskId", "taskVersion", "chatId", "runId", "manifestId", "artifactRef", "transferId"])
+        ? firstError(typeof params.transferId === "string" && /^[0-9a-f]{64}$/.test(params.transferId) ? null : "video_transfer_invalid", requiredString(params, "taskId", 160), optionalInteger(params, "taskVersion", 1, Number.MAX_SAFE_INTEGER),
+            params.taskVersion === undefined ? "taskVersion is required" : null, requiredString(params, "chatId", 256),
+            requiredString(params, "runId", 160), requiredString(params, "manifestId", 160), requiredString(params, "artifactRef", 256))
+        : "artifact_video_open_fields_invalid";
+    case "one.video.prepare":
+    case "one.video.close":
+      return hasOnlyKeys(params, ["transferId"]) && typeof params.transferId === "string" && /^[0-9a-f]{64}$/.test(params.transferId)
+        ? null : "artifact_video_transfer_invalid";
+    case "one.video.chunk":
+      return hasOnlyKeys(params, ["transferId", "offset"]) && typeof params.transferId === "string" && /^[0-9a-f]{64}$/.test(params.transferId)
+        && Number.isSafeInteger(params.offset) && Number(params.offset) >= 0 && Number(params.offset) < 192 * 1024 * 1024
+        && Number(params.offset) % (1024 * 1024) === 0 ? null : "artifact_video_range_invalid";
+    case "chat.video.open":
+      return hasOnlyKeys(params, ["chatId", "messageId", "groupId", "fileId", "transferId"])
+        ? firstError(typeof params.transferId === "string" && /^[0-9a-f]{64}$/.test(params.transferId) ? null : "video_transfer_invalid", requiredString(params, "chatId", 256), requiredString(params, "messageId", 36),
+            requiredString(params, "groupId", 36), requiredString(params, "fileId", 36))
+        : "chat_video_open_fields_invalid";
+    case "chat.video.prepare":
+    case "chat.video.close":
+      return hasOnlyKeys(params, ["transferId"]) && typeof params.transferId === "string" && /^[0-9a-f]{64}$/.test(params.transferId)
+        ? null : "chat_video_transfer_invalid";
+    case "chat.video.chunk":
+      return hasOnlyKeys(params, ["transferId", "offset"]) && typeof params.transferId === "string" && /^[0-9a-f]{64}$/.test(params.transferId)
+        && Number.isSafeInteger(params.offset) && Number(params.offset) >= 0 && Number(params.offset) < 64 * 1024 * 1024
+        && Number(params.offset) % (1024 * 1024) === 0 ? null : "chat_video_range_invalid";
     case "chat.attachment.imagePreview":
       return hasOnlyKeys(params, ["chatId", "messageId", "attachmentId"])
         ? firstError(
@@ -3748,6 +3848,9 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
       return hasOnlyKeys(params, ["chatId"])
         ? requiredString(params, "chatId")
         : "context.inspect accepts only chatId";
+    case "finance.read":
+    case "finance.command":
+      return validateMobileFinanceParams(method, params);
     case "harness.read":
     case "harness.command": {
       const allowed: readonly string[] = method === "harness.read" ? MOBILE_HARNESS_READ_OPERATIONS : MOBILE_HARNESS_COMMAND_OPERATIONS;
@@ -3890,6 +3993,21 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
             params.note === undefined ? null : requiredText(params, "note", 2_000),
           )
         : "browser.resolveApproval accepts only requestId, decision and note";
+    case "legacy.video.list":
+      return hasOnlyKeys(params,["chatId","messageId","listId","cursor","parentChatId","dispatchId","runId"])
+        ? firstError(requiredString(params,"chatId",256),requiredString(params,"messageId",256),typeof params.listId==='string' && /^[0-9a-f]{64}$/.test(params.listId) ? null : "legacy_video_list_invalid",optionalInteger(params,"cursor",0,10000),
+          [params.parentChatId,params.dispatchId,params.runId].every(v=>v===undefined) ? null : firstError(requiredString(params,"parentChatId",128),requiredString(params,"dispatchId",128),requiredString(params,"runId",128))) : "legacy_video_scope_invalid";
+    case "legacy.video.releaseList":
+      return hasOnlyKeys(params,["listId"]) && typeof params.listId==='string' && /^[0-9a-f]{64}$/.test(params.listId) ? null : "legacy_video_list_invalid";
+    case "legacy.video.open":
+      return hasOnlyKeys(params,["candidateId","transferId"]) && typeof params.candidateId==='string' && /^[0-9a-f]{64}$/.test(params.candidateId)
+        && typeof params.transferId==='string' && /^[0-9a-f]{64}$/.test(params.transferId) ? null : "legacy_video_open_invalid";
+    case "legacy.video.prepare":
+    case "legacy.video.close":
+      return hasOnlyKeys(params,["transferId"]) && typeof params.transferId==='string' && /^[0-9a-f]{64}$/.test(params.transferId) ? null : "legacy_video_transfer_invalid";
+    case "legacy.video.chunk":
+      return hasOnlyKeys(params,["transferId","offset"]) && typeof params.transferId==='string' && /^[0-9a-f]{64}$/.test(params.transferId)
+        && Number.isSafeInteger(params.offset) && Number(params.offset)>=0 && Number(params.offset)<192*1024*1024 && Number(params.offset)%(1024*1024)===0 ? null : "legacy_video_range_invalid";
     case "runtime.resolveToolApproval":
       // 결정 4종은 데스크탑 ToolApprovalDecision 과 **같은 값**이다(shared/types.ts).
       // allow_always 는 능력 규칙을 영구 기록하므로 폰에서도 같은 무게를 갖는다.
@@ -3900,6 +4018,15 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
             params.note === undefined ? null : requiredText(params, "note", 2_000),
           )
         : "runtime.resolveToolApproval accepts only id, decision and note";
+    case "one.dispatch.resultPage":
+      return hasOnlyKeys(params, ["parentChatId", "dispatchId", "chatId", "runId", "offset", "messageId", "projectionId", "locale"])
+        ? firstError(requiredString(params, "parentChatId", 128), requiredString(params, "dispatchId", 128),
+            requiredString(params, "chatId", 128), requiredString(params, "runId", 128),
+            Number.isSafeInteger(params.offset) && Number(params.offset) >= 0 ? null : "result_offset_invalid",
+            params.messageId === undefined && params.offset === 0 ? null : requiredString(params, "messageId", 128),
+            params.projectionId === undefined && params.offset === 0 ? null : typeof params.projectionId === "string" && /^[0-9a-f]{64}$/.test(params.projectionId) ? null : "result_projection_invalid",
+            validateEnum(params, "locale", ["ko", "en"], true))
+        : "one_dispatch_result_page_fields_invalid";
     case "one.dispatch.answerQuestion":
       return hasOnlyKeys(params, ["parentChatId","dispatchId","chatId","runId","sourceMessageId","reply","locale","retryCommitted"])
         ? firstError(requiredString(params,"parentChatId",128), requiredString(params,"dispatchId",128),

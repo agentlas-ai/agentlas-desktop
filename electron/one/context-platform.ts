@@ -147,11 +147,11 @@ export function initializeOneContext(input:{activeOneId():string;assertTask(scop
   powerMonitor.on("unlock-screen",()=>{session="awake";});powerMonitor.on("resume",()=>{session="awake";});
 }
 
-export async function captureOneContextExecution(binding:Readonly<OneOsExecutionBinding>):Promise<import("../../shared/types").ComputerUsePreview> {
+export async function captureOneContextExecution(binding:Readonly<OneOsExecutionBinding>, signal?: AbortSignal):Promise<import("../../shared/types").ComputerUsePreview> {
   if(!binding.contextGrantId)throw new OneContextError("one-context-grant-unavailable");
   const {oneContextService}=await import("./context-service");const service=oneContextService();
   const authority=service.authorize({...binding,grantId:binding.contextGrantId});
-  const snapshot=await service.capture({oneId:binding.oneId,taskId:binding.taskId,grantId:binding.contextGrantId});authority.assertCurrent();
+  const snapshot=await service.capture({oneId:binding.oneId,taskId:binding.taskId,grantId:binding.contextGrantId}, signal);authority.assertCurrent();
   const latest=snapshot.latest;if(!latest)throw new OneContextError("one-context-capture-unavailable");
   const size=nativeImage.createFromDataURL(latest.dataUrl).getSize(),target=authority.target,ready=snapshot.readiness;
   return {platform:process.platform,captureMode:target.kind==="display"?"screen":"window",screenPermission:ready.screenPermission,accessibility:ready.accessibility==="granted",

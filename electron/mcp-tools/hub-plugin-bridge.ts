@@ -516,9 +516,13 @@ export async function installHubPlugin(input: {
   slug: string;
   manifestUrl: string;
   approveLocalExecution: boolean;
+  signal?: AbortSignal;
 }, deps: { fetchManifest?: typeof fetchHubPluginManifest } = {}): Promise<HubPluginBridgeResult> {
+  input.signal?.throwIfAborted();
   const fetchManifest = deps.fetchManifest ?? fetchHubPluginManifest;
   const manifest = await fetchManifest(input.manifestUrl);
+  // Fetch may finish after the caller stopped. Do not install its result.
+  input.signal?.throwIfAborted();
   const rows = manifest?.mcp ?? [];
   const installableSkills = (manifest?.skills ?? []).filter((skill) => skill.files.length > 0);
   const receipts: HubPluginBridgeReceipt[] = [];
@@ -580,6 +584,7 @@ export async function installHubPlugin(input: {
     installed = [];
   }
   for (const row of rows) {
+    input.signal?.throwIfAborted();
     try {
       const existing = findEquivalentServer(installed, row);
       if (existing) {

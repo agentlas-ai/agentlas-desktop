@@ -14,6 +14,14 @@ export type QuickJsHostInvoke = (
   signal: AbortSignal,
 ) => Promise<unknown>;
 
+// Host-only, per-invocation wrapper. The token is never exposed to guest JSON.
+const deliveryTokens = new WeakMap<object, { value: unknown; delivered: () => void | Promise<void> }>();
+export function quickJsResultWithDelivery(value: unknown, delivered: () => void | Promise<void>): object {
+  const token = Object.freeze(Object.create(null)) as object;
+  deliveryTokens.set(token, { value, delivered });
+  return token;
+}
+
 export interface QuickJsEngineOptions {
   invoke: QuickJsHostInvoke;
   memoryLimitBytes?: number;
@@ -151,12 +159,19 @@ export class QuickJsEngine {
       };
       signal.addEventListener("abort", rejectOnAbort, { once: true });
       void this.invokeHost(target, method, args, signal).then(
-        (value) => {
+        (result) => {
           if (!deferred.alive || this.disposed || signal.aborted) return;
+          const delivery = result !== null && typeof result === "object" ? deliveryTokens.get(result) : undefined;
+          if (delivery && result !== null && typeof result === "object") deliveryTokens.delete(result);
+          const value = delivery ? delivery.value : result;
           try {
             const encoded = JSON.stringify(jsonRoundTrip(value, "host-result-not-json"));
             const handle = this.context.newString(encoded);
+            if (!deferred.alive || this.disposed || signal.aborted) { handle.dispose(); return; }
             deferred.resolve(handle);
+            if (delivery && !this.disposed && !signal.aborted) {
+              try { void Promise.resolve(delivery.delivered()).catch(() => {}); } catch { /* guest already received the result */ }
+            }
             handle.dispose();
             this.runPendingJobs();
           } catch (error) {

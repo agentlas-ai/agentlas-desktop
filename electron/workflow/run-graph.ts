@@ -51,6 +51,7 @@ import {
 import { runMcpInvocation } from "../mcp/client";
 import { mintGraphTeamGrant, revokeGraphTeamGrant, type GraphTeamGrant } from "../one/graph-team-grant";
 import { graphTeamStepHold, runGraphTeamStep } from "../one/graph-team-step";
+import { latestGraphRetryStop, noteGraphRetryStop, selectGraphRetryStop, type GraphRetryStopLedger } from "./graph-retry-diagnostic";
 import { claimRoomWhenFree, graphRoomWaitHold } from "./graph-room-wait";
 import { createNodeLiveness, type NodeLiveness } from "./node-liveness";
 import { createDegenerateOutputDetector, degenerateOutputReceipt, WORKER_OUTPUT_DEGENERATE_CODE, WorkerOutputDegenerateError } from "../runtime/degenerate-output";
@@ -2687,7 +2688,8 @@ export async function runGraph(
   const evalReworkScope = new Map<string, Set<string>>();
   // An interrupted step is not a retry stop (decided): the run that resumes it fails or succeeds like any other, and the
   // scheduler's attempt cap and the outbox's unknown-outcome cap bound the repeats.
-  let automaticRetryDiagnostic: { nodeId: string; reasonCode: GraphRetryStopReason; fingerprint: string | null } | null = null;
+  // One entry per check, the newest stop of that check winning (graph-retry-diagnostic.ts): a second stop used to be lost to `??=`.
+  const automaticRetryStops: GraphRetryStopLedger<GraphRetryStopReason> = new Map();
   // A check that failed in the run this one resumes: rework what it judges, or stop once. The same
   // output is never judged again (see planEvalRework).
   if (resumedFromCheckpoint && latestFailed) {
@@ -2758,7 +2760,7 @@ export async function runGraph(
           nextAction: evalReworkNextAction(decision, labelsOf, plan, 0),
         };
         admissionDiagnostics.set(node.id, stopFailure);
-        automaticRetryDiagnostic ??= { nodeId: node.id, reasonCode: decision.reasonCode, fingerprint: priorFingerprint };
+        noteGraphRetryStop(automaticRetryStops, { nodeId: node.id, reasonCode: decision.reasonCode, fingerprint: priorFingerprint });
         // The check still runs (a stop is a diagnostic, never a hold on requested work), but it runs with the memory the stop was made
         // from: the rework budget already used and the output already judged. The same output is not judged again, and a different
         // output that fails again stops at the budget instead of starting another rework cycle (before the budget reset
@@ -3877,7 +3879,7 @@ export async function runGraph(
       // Without the receipt the next attempt cannot count this rework or see an identical result.
       if (decision.disposition === "rework") decision = { disposition: "stop", reasonCode: "eval_rework_unrecorded" };
     }
-    if (decision.disposition === "stop") automaticRetryDiagnostic ??= { nodeId: node.id, reasonCode: decision.reasonCode, fingerprint };
+    if (decision.disposition === "stop") noteGraphRetryStop(automaticRetryStops, { nodeId: node.id, reasonCode: decision.reasonCode, fingerprint });
     const labelsOf = (ids: string[]): string =>
       ids.map((id) => graph.nodes.find((candidate) => candidate.id === id)?.label || id).join(", ");
     return { decision, nextAction: evalReworkNextAction(decision, labelsOf, plan, Math.max(0, MAX_EVAL_REWORKS - reworksDone)) };
@@ -5182,6 +5184,7 @@ export async function runGraph(
         let nativeReadOnly = false;
         let nativeResponseReceived = false;
         let nativeOutput: unknown;
+        const nativeDelivery: { value: { result: object; expectedText: string } | null } = { value: null };
         let restoredCommonOutput = false;
         const readOnlyToolCallIds = new Map<string, string>();
         const refreshUnsafeToolObservation = (): void => {
@@ -5337,6 +5340,8 @@ export async function runGraph(
                   }
                 } });
               nativeOutput = nativeResult.output;
+              const expectedText = typeof nativeOutput === "string" ? nativeOutput : JSON.stringify(nativeOutput, null, 2);
+              nativeDelivery.value = typeof expectedText === "string" ? { result: nativeResult, expectedText } : null;
               return nativeResult;
             }
             : runMcpInvocation;
@@ -5829,6 +5834,11 @@ export async function runGraph(
           }
           completeNode(node.id);
           status.set(node.id, "done");
+          // The graph consumer's exact text reached its durable checkpoint. No wire DTO carries effect refs.
+          if (nativeDelivery.value && !runSignal.aborted && outputs[node.id] === nativeDelivery.value.expectedText) {
+            const delivered = nativeDelivery.value.result;
+            void import("../runtime/local-tool-loop").then(({ acknowledgeConsumedResult }) => runSignal.aborted ? undefined : acknowledgeConsumedResult(delivered)).catch(() => {});
+          }
           workerFallbackState.delete(node.id);
           quotaRuntimeOverrides.delete(node.id);
           // The note and the one extra ask belonged to this attempt chain; a later loop turn of the step starts clean.
@@ -6827,8 +6837,9 @@ export async function runGraph(
   // A failed check that a retry cannot change (its output is the one already judged, its rework budget is used, or a judged step may
   // have acted outside) ends the automatic retries of this occurrence: no deferred retry, no redelivery. The owner's explicit resume
   // still runs. Only when that check is what failed now: an unrelated failure of the same run keeps its retries.
-  const retryStop = !ok && !needsInput && automaticRetryDiagnostic
-    && EVAL_FAILURE_CODES.has(nodeFailures[automaticRetryDiagnostic.nodeId]?.code ?? "")
+  const automaticRetryDiagnostic = !ok && !needsInput
+    ? selectGraphRetryStop(automaticRetryStops, (nodeId) => nodeFailures[nodeId]?.code, (code) => EVAL_FAILURE_CODES.has(code)) : null;
+  const retryStop = automaticRetryDiagnostic
     ? { automaticRetry: { allowed: false as const, ...automaticRetryDiagnostic } } : {};
   const result: RunGraphResult = needsInput
     ? { ok: false, needsInput: true, outputs, vars, error: "browser_login_required", loginWaits,
@@ -6836,8 +6847,9 @@ export async function runGraph(
     : ok
     ? { ok: true, outputs, vars, ...failures, ...simulation, ...budget, ...brokerage, ...notesField }
     : { ok: false, outputs, vars, error, ...failures, ...simulation, ...budget, ...brokerage, ...notesField, ...retryStop };
-  if (automaticRetryDiagnostic) tryRecordRunEvent({ runId, automationId: automation.id,
-    kind: "workflow_recovery_diagnostic", payload: { disposition: "continue", ...automaticRetryDiagnostic } });
+  const recoveryDiagnostic = latestGraphRetryStop(automaticRetryStops);
+  if (recoveryDiagnostic) tryRecordRunEvent({ runId, automationId: automation.id,
+    kind: "workflow_recovery_diagnostic", payload: { disposition: "continue", ...recoveryDiagnostic } });
   // A late advisory check must not mutate the result already delivered to the
   // scheduler. Its child events carry the eventual checked outcome instead.
   result.outputs = { ...outputs };

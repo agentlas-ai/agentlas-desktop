@@ -331,6 +331,8 @@ let lastAcc = "";
 // 대화 history(이번 턴 입력 이전까지).
 let history: ChatMsg[] = [];
 let runtimeSessionId: string | null = null;
+let runtimeBindingPending = false;
+let activeUserInput: { text: string; hostAuthored: boolean } | null = null;
 let resolvedBuildRuntime: RuntimeSelection | null = null;
 let resolvedBuildRuntimePinned = false;
 let runtimeEscalationAccepted: boolean | undefined;
@@ -372,6 +374,11 @@ function commit() {
  * Route changes do NOT need this — the module singleton already survives them.
  */
 let reattachInFlight: Promise<boolean> | null = null;
+let restoredAuthUnsubscribe: (() => void) | null = null;
+let restoredConversationWorkspace: string | null = null;
+let restoredRuntimeUnverified = false;
+let restoredConversationStatus: "completed" | "stopped" | "unknown" | null = null;
+let continuationPending = false;
 /** How often a reattached view re-reads Main's transcript while the build runs. */
 const REATTACH_POLL_MS = 4_000;
 
@@ -391,15 +398,34 @@ const REATTACH_FINISHED_GRACE_MS = 2 * 60_000;
 
 async function reattachOnce(): Promise<boolean> {
   const api = ipc();
+  let ownerChanged = false;
+  let attached = false;
+  const unsubscribe = api?.hephaestus.onBuilderOwnerChanged?.(() => {
+    ownerChanged = true;
+    if (!attached) return;
+    if (state.phase === "running") cancelBuild();
+    resetBuild();
+    state.request = "";
+    state.workspace = null;
+    state.workspaceGrant = null;
+    try { window.localStorage.removeItem(WS_KEY); } catch { /* no retained renderer grant */ }
+    commit();
+  });
   const active = await api?.hephaestus?.activeBuild?.().catch(() => null);
-  if (!active) return false;
+  if (ownerChanged) { unsubscribe?.(); return false; }
+  if (!active) { unsubscribe?.(); return restoreStoredConversation(); }
   // 아직 돌고 있거나 방금 끝난 빌드만 복원한다. 이 조건이 없으면 한 시간 전에 끝난
   // 빌드가 새 빌드를 시작하려는 빈 화면을 점거하고, 옛 인터뷰 질문까지 되살려
   // 사용자가 새 요청을 넣을 수 없게 된다(2026-08-17 실측: 녹화 실행이 이것 때문에 멈췄다).
   const finishedAgoMs = Date.now() - Date.parse(active.startedAt || "");
   if (!active.running && !(Number.isFinite(finishedAgoMs) && finishedAgoMs < REATTACH_FINISHED_GRACE_MS)) {
+    unsubscribe?.();
     return false;
   }
+
+  restoredAuthUnsubscribe?.();
+  restoredAuthUnsubscribe = unsubscribe ?? null;
+  attached = true;
 
   state.request = active.request;
   state.workspace = active.workspace;
@@ -453,6 +479,122 @@ async function reattachOnce(): Promise<boolean> {
   // 렌더러 인스턴스에 묶여 있다). 전사를 주기적으로 다시 읽어 새 이벤트만 잇는다.
   if (active.running) pollReattached(active.runId, (active.firstSeq ?? 0) + active.events.length);
   return true;
+}
+
+async function restoreStoredConversation(): Promise<boolean> {
+  const api = ipc();
+  if (!api?.hephaestus.readLatestBuilderConversation || !api.hephaestus.onBuilderOwnerChanged) return false;
+  let changed = false;
+  let applied = false;
+  const unsubscribe = api.hephaestus.onBuilderOwnerChanged(() => {
+    changed = true;
+    if (!applied) return;
+    if (state.phase === "running") cancelBuild();
+    resetBuild();
+    state.request = "";
+    state.workspace = null;
+    state.workspaceGrant = null;
+    try { window.localStorage.removeItem(WS_KEY); } catch { /* no retained renderer grant */ }
+    commit();
+  });
+  const saved = await api.hephaestus.readLatestBuilderConversation().catch(() => null);
+  if (changed || !saved || state.runId || state.log.length || state.request.trim()) {
+    unsubscribe();
+    return false;
+  }
+  restoredAuthUnsubscribe?.();
+  restoredAuthUnsubscribe = unsubscribe;
+  applied = true;
+  state.request = saved.history.find((message) => message.role === "user")?.text ?? saved.request;
+  state.workspace = saved.workspace;
+  restoredConversationWorkspace = saved.workspace;
+  if (state.workspaceGrant?.path !== saved.workspace) state.workspaceGrant = null;
+  state.mode = saved.mode ?? "";
+  state.runtime = saved.runtime;
+  resolvedBuildRuntime = saved.runtime;
+  resolvedBuildRuntimePinned = saved.runtimePinned;
+  runtimeSessionId = saved.runtimeSessionId;
+  restoredRuntimeUnverified = Boolean((saved.runtimeSessionId && (!saved.runtimePinned || !saved.runtime))
+    || (saved.conversationTurn === null && saved.supplementalQuestion != null));
+  history = saved.history.map((message) => ({ ...message }));
+  if (saved.terminalText !== null) {
+    const supplemental = saved.conversationTurn === 0 ? mainOwnedOpenCrabQuestion(saved.supplementalQuestion) : null;
+    if (!saved.hostAuthoredContinuation) history.push({ role: "user", text: saved.request });
+    history.push({ role: "assistant", text: saved.terminalText + questionHistorySuffix(supplemental) });
+  } else if (!saved.hostAuthoredContinuation) {
+    history.push({ role: "user", text: saved.request });
+  }
+  for (const message of history) pushLog("log", message.text);
+  const parsed = saved.terminalText === null ? null : extractQuestions(saved.terminalText, "reattach");
+  const supplemental = saved.conversationTurn === 0 ? mainOwnedOpenCrabQuestion(saved.supplementalQuestion) : null;
+  const questions = [...(parsed?.questions ?? []), ...(supplemental ? [supplemental] : [])];
+  state.registered = false;
+  state.registeredEntity = null;
+  state.result = null;
+  state.runId = null;
+  state.turn = saved.conversationTurn === null ? 1 : saved.conversationTurn + (saved.status === "completed" ? 0 : 1);
+  state.mcpPlan = null;
+  const restoredInterview = saved.status === "waiting-user" && saved.conversationTurn === 0 && questions.length > 0;
+  restoredConversationStatus = saved.status === "waiting-user" && !restoredInterview
+    ? "unknown"
+    : saved.status === "completed" || saved.status === "stopped" || saved.status === "unknown" ? saved.status : null;
+  if (restoredInterview) {
+    state.pendingQuestions = questions;
+    state.awaitingReply = true;
+    state.phase = "interview";
+  } else {
+    state.pendingQuestions = [];
+    state.awaitingReply = false;
+    state.phase = "error";
+    state.errored = true;
+    state.recoverable = false;
+    state.error = {
+      kind: "build-failed",
+      message: saved.status === "completed"
+        ? (currentLocale() === "ko" ? "이전 완료 내용은 복원했지만 패키지 등록 상태는 다시 확인해야 합니다." : "The previous completion was restored; package registration still needs verification.")
+        : (currentLocale() === "ko" ? "이전 실행의 결과를 확인해 주세요. 자동으로 다시 실행하지 않습니다." : "Review the previous run. It will not be replayed automatically."),
+    };
+  }
+  commit();
+  return true;
+}
+
+export function canContinueCompletedBuild(): boolean {
+  return state.phase === "done" || (state.phase === "error" && restoredConversationStatus !== null);
+}
+
+export function restoredCompletionNeedsReview(): boolean {
+  return state.phase === "error" && restoredConversationStatus === "completed";
+}
+
+export async function continueCompletedBuild(input: string): Promise<void> {
+  if (!input.trim() || !canContinueCompletedBuild()) return;
+  if (runtimeBindingPending || (restoredRuntimeUnverified && restoredConversationStatus !== "stopped" && restoredConversationStatus !== "unknown")) {
+    pushLog("error", currentLocale() === "ko" ? "이전 실행기 연결을 확인할 수 없어 이어서 실행하지 않았습니다." : "The previous runtime connection could not be verified; the request was not started.");
+    commit();
+    return;
+  }
+  if (!state.workspaceGrant || !state.workspace || state.workspaceGrant.path !== state.workspace
+    || (restoredConversationWorkspace && state.workspace !== restoredConversationWorkspace)) {
+    pushLog("error", currentLocale() === "ko" ? "이전 작업 폴더를 다시 선택해 주세요." : "Select the previous workspace again.");
+    commit();
+    return;
+  }
+  if (restoredConversationStatus === "stopped" || restoredConversationStatus === "unknown") { runtimeSessionId = null; restoredRuntimeUnverified = false; }
+  restoredConversationStatus = null;
+  continuationPending = true;
+  const generation = ++buildGeneration;
+  state.errored = false;
+  state.error = null;
+  state.recoverable = false;
+  if (!state.mcpPlan) {
+    pendingBuildBriefReply = input.trim();
+    state.phase = "running";
+    commit();
+    await prepareBuildRuntimeAndMcp(generation);
+  } else {
+    await runTurn(input.trim(), generation);
+  }
 }
 
 /**
@@ -534,6 +676,14 @@ export function setWorkspace(v: FsPathGrant | null) {
     /* ignore */
   }
   commit();
+}
+
+export function reauthorizeRestoredBuildWorkspace(grant: FsPathGrant): boolean {
+  if (!restoredConversationWorkspace || grant.path !== restoredConversationWorkspace || state.workspace !== restoredConversationWorkspace) return false;
+  state.workspaceGrant = grant;
+  try { window.localStorage.setItem(WS_KEY, JSON.stringify(grant)); } catch { /* grant stays in memory */ }
+  commit();
+  return true;
 }
 
 /**
@@ -737,6 +887,7 @@ async function performAutoRegister(workspace: string, readScope: FsReadScope, ge
   const api = ipc();
   if (!api) return;
   const ko = currentLocale() === "ko";
+
   try {
     if (isCurrentRegistration(generation, workspace)) {
       pushLog("stage", ko ? "조직도에 등록 중 — 라이브러리에 추가" : "Registering to org chart — adding to library");
@@ -1188,8 +1339,20 @@ async function runTurn(
   const api = ipc();
   const ev = ipcEvents();
   if (!api || !ev || !state.workspace || !state.workspaceGrant || !state.mcpPlan || !isCurrentBuild(generation)) return;
+  if (!restoredAuthUnsubscribe && api.hephaestus.onBuilderOwnerChanged) {
+    restoredAuthUnsubscribe = api.hephaestus.onBuilderOwnerChanged(() => {
+      if (state.phase === "running") cancelBuild();
+      resetBuild();
+      state.request = "";
+      state.workspace = null;
+      state.workspaceGrant = null;
+      try { window.localStorage.removeItem(WS_KEY); } catch { /* no retained renderer grant */ }
+      commit();
+    });
+  }
   const ko = currentLocale() === "ko";
 
+  activeUserInput = { text: input, hostAuthored: hostAuthoredContinuation };
   detach();
   lastAcc = "";
   state.phase = "running";
@@ -1209,8 +1372,13 @@ async function runTurn(
   let runId: string;
   const openCrabOntologyForTurn = openCrabOntologyChoice;
   try {
+    const reservationId = globalThis.crypto.randomUUID();
+    state.runId = reservationId;
+    commit();
     const started = await api.hephaestus.build({
       request: input,
+      conversationTurn: state.turn,
+      clientRunId: reservationId,
       mode: state.mode || undefined,
       workspaceGrant: state.workspaceGrant,
       runtime: resolvedBuildRuntime || undefined,
@@ -1235,6 +1403,10 @@ async function runTurn(
     });
     if (!isCurrentBuild(generation)) return;
     if (!started?.runId) throw new Error(ko ? "빌드 실행 ID를 받지 못했습니다." : "Build did not return a run ID.");
+    if (started.runId !== reservationId) {
+      void api.hephaestus.cancelBuild(started.runId);
+      throw new Error("Build reservation mismatch.");
+    }
     state.mcpReceipt = started.mcpReceipt;
     if (state.attachments.length > 0) attachmentsSentForBuild = true;
     if (openCrabOntologyChoice === openCrabOntologyForTurn) {
@@ -1243,6 +1415,8 @@ async function runTurn(
     runId = started.runId;
   } catch (error) {
     if (!isCurrentBuild(generation)) return;
+    activeUserInput = null;
+    if (continuationPending) { restoredConversationStatus = "unknown"; continuationPending = false; }
     const classified = classifyBuildError(error instanceof Error ? error.message : String(error), ko);
     state.errored = true;
     state.phase = "error";
@@ -1254,6 +1428,7 @@ async function runTurn(
     return;
   }
   state.runId = runId;
+  continuationPending = false;
   commit();
 
   const channel = api.hephaestus.buildEventChannel(runId);
@@ -1303,12 +1478,34 @@ async function runTurn(
         ? mainOwnedOpenCrabQuestion(result?.supplementalQuestion)
         : null;
       if (e.sessionId) runtimeSessionId = e.sessionId;
+      if (e.sessionId && api.hephaestus.readBuilderConversation) {
+        runtimeBindingPending = true;
+        void api.hephaestus.readBuilderConversation(runId).then((record) => {
+          if (!isCurrentBuild(generation) || state.runId !== runId) return;
+          if (record && record.runtimeSessionId === e.sessionId && record.runtime && record.runtimePinned) {
+            const runtimeChanged = JSON.stringify(resolvedBuildRuntime) !== JSON.stringify(record.runtime);
+            resolvedBuildRuntime = record.runtime;
+            resolvedBuildRuntimePinned = true;
+            state.runtime = record.runtime;
+            if (runtimeChanged) {
+              state.mcpPlan = null;
+              state.mcpSelectedCandidateIds = [];
+            }
+            commit();
+          } else {
+            restoredRuntimeUnverified = true;
+          }
+        }).catch(() => { if (isCurrentBuild(generation)) restoredRuntimeUnverified = true; }).finally(() => {
+          if (isCurrentBuild(generation)) runtimeBindingPending = false;
+        });
+      }
       // 호스트가 자기에게 보낸 진행 지시는 대화 기록에 사람의 말로 남기지 않는다.
       // 남기면 다음 턴의 인터뷰 영수증이 그것을 답변 한 건으로 세고, work-brief의
       // assumptions에 Agentlas가 스스로 쓴 문장이 source:"user"로 실린다.
       // 모델은 이번 턴에 이미 그 지시를 받았고, 런타임 세션이 대화를 이어 간다.
       if (!hostAuthoredContinuation) history.push({ role: "user", text: input });
       history.push({ role: "assistant", text: assistantText + questionHistorySuffix(supplementalQuestion) });
+      activeUserInput = null;
       detach();
 
       const complete = isCompletedBuildTurn(assistantText);
@@ -1660,6 +1857,21 @@ export async function answerBuild(
   openCrabOntology?: "use" | "skip",
 ): Promise<void> {
   if (!state.awaitingReply || !reply.trim()) return;
+  if (runtimeBindingPending) {
+    pushLog("log", currentLocale() === "ko" ? "이전 실행기 연결을 확인하고 있습니다." : "Checking the previous runtime connection.");
+    commit();
+    return;
+  }
+  if (restoredRuntimeUnverified) {
+    pushLog("error", currentLocale() === "ko" ? "이전 실행기의 정확한 선택을 확인할 수 없어 이어서 실행할 수 없습니다." : "The previous runtime selection could not be verified for continuation.");
+    commit();
+    return;
+  }
+  if (restoredConversationWorkspace && (!state.workspaceGrant || state.workspace !== restoredConversationWorkspace || state.workspaceGrant.path !== restoredConversationWorkspace)) {
+    pushLog("error", currentLocale() === "ko" ? "이전 작업 폴더를 다시 선택해 주세요." : "Select the previous workspace again.");
+    commit();
+    return;
+  }
   if (openCrabOntology) openCrabOntologyChoice = openCrabOntology;
   const ko = currentLocale() === "ko";
   const normalizedReply = reply.trim();
@@ -1681,9 +1893,13 @@ export async function answerBuild(
 
 export function cancelBuild() {
   const cancelledRunId = state.runId;
+  const stoppingContinuation = continuationPending;
+  continuationPending = false;
   buildGeneration += 1;
   if (cancelledRunId) ipc()?.hephaestus.cancelBuild(cancelledRunId);
-  if (cancelledRunId) {
+  if (cancelledRunId || stoppingContinuation) {
+    if (activeUserInput && !activeUserInput.hostAuthored) history.push({ role: "user", text: activeUserInput.text });
+    restoredConversationStatus = "stopped";
     state.phase = "error";
     state.errored = true;
     state.recoverable = true;
@@ -1707,6 +1923,8 @@ export function cancelBuild() {
     state.error = null;
   }
   state.awaitingReply = false;
+  activeUserInput = null;
+  runtimeBindingPending = false;
   state.pendingQuestions = [];
   state.pendingAllocation = null;
   state.runId = null;
@@ -1765,6 +1983,14 @@ export async function resumeBuild(): Promise<void> {
 }
 
 export function resetBuild() {
+  restoredAuthUnsubscribe?.();
+  restoredAuthUnsubscribe = null;
+  restoredConversationWorkspace = null;
+  restoredRuntimeUnverified = false;
+  restoredConversationStatus = null;
+  activeUserInput = null;
+  continuationPending = false;
+  runtimeBindingPending = false;
   buildGeneration += 1;
   state.phase = "idle";
   state.reached = 0;

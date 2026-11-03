@@ -2,6 +2,7 @@
 
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
@@ -11,7 +12,14 @@ const contract = require("../build-resources/embedded-core-contract.cjs");
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const pkg = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
 const sourceRoot = path.resolve(process.env.HEPHAESTUS_DIR || path.join(root, "Hephaestus"));
-const stageRoot = path.resolve(process.env.AGENTLAS_EMBEDDED_CORE_DIR || path.join(root, contract.EMBEDDED_CORE_STAGE_RELATIVE));
+const managedArchive = (process.env.AGENTLAS_MANAGED_ONE_CORE_ARCHIVE || "").trim();
+if (managedArchive && process.env.AGENTLAS_EMBEDDED_CORE_DIR) throw new Error("managed_one_archive_output_override_forbidden");
+// Archive preparation is deliberately separate from the Desktop Git checkout
+// path and can never overwrite the ordinary dist/embedded-core staging root.
+const managedPrivateRoot = managedArchive ? fs.mkdtempSync(path.join(os.tmpdir(), "agentlas-managed-one-core-")) : null;
+const stageRoot = managedPrivateRoot
+  ? path.join(managedPrivateRoot, "embedded-core")
+  : path.resolve(process.env.AGENTLAS_EMBEDDED_CORE_DIR || path.join(root, contract.EMBEDDED_CORE_STAGE_RELATIVE));
 const temporaryRoot = `${stageRoot}.tmp-${process.pid}`;
 
 function replaceExactly(source, before, after, label) {
@@ -169,9 +177,6 @@ function transformRuntimeInstructions(files) {
     const file = path.join(temporaryRoot, relative);
     let source = fs.readFileSync(file, "utf8");
     const digest = require("node:crypto").createHash("sha256").update(source).digest("hex");
-    if (digest !== "940e3dfae6c9d10c10526c7b7aa69c421dcef7a7605230532c12bfa464600a72") {
-      throw new Error(`embedded Core runtime instruction source checksum mismatch: ${relative}`);
-    }
     function replaceSpan(startText, endText, replacement) {
       const start = source.indexOf(startText);
       const end = source.indexOf(endText, start + startText.length);
@@ -180,6 +185,19 @@ function transformRuntimeInstructions(files) {
         throw new Error("embedded Core nonruntime paragraph boundary mismatch");
       }
       source = source.slice(0, start) + replacement + source.slice(end);
+    }
+    // Agentlas OS 1.2.73 ships the runtime form of this file itself (the contributor constitution, release allowlist and
+    // commit-language paragraphs are gone upstream). Only its maintainer-only ontology source gate (item 18) is omitted here,
+    // the same span the 1.2.72 branch below removes. Any other upstream text is a new review, not a silent pass.
+    if (digest === "0918ab63d97d94e36df9533d5be23c94c1ef571660330b305d56decf236da763") {
+      replaceSpan("18. For development changes to the engine ontology runtime, run\n", "19. For long-running or multi-file execution work", "");
+      const outputDigest73 = require("node:crypto").createHash("sha256").update(source).digest("hex");
+      if (outputDigest73 !== "80e5fd45f87cb327cc6b74b21926cd0068f42d50559b8f413deb8e6f862f7f72") throw new Error("embedded Core projected instruction checksum mismatch");
+      fs.writeFileSync(file, source);
+      continue;
+    }
+    if (digest !== "940e3dfae6c9d10c10526c7b7aa69c421dcef7a7605230532c12bfa464600a72") {
+      throw new Error(`embedded Core runtime instruction source checksum mismatch: ${relative}`);
     }
     source = replaceExactly(source,
       "> **Asked to install this repo, not to work on it?** This file is the\n> contributor constitution and will not help you. Read the install block at the",
@@ -243,17 +261,32 @@ function transformPreparedTree() {
 }
 
 try {
-  copyPinnedTrackedTree();
+  let archiveReceipt;
+  if (managedPrivateRoot) {
+    fs.chmodSync(managedPrivateRoot, 0o700);
+    fs.writeFileSync(path.join(managedPrivateRoot, "owner.json"), JSON.stringify({
+      schemaVersion: "agentlas.managed-one-core-owner.v1", purpose: "managed-one-build-input",
+      pid: process.pid, createdAt: new Date().toISOString(), stageRoot,
+    }), { mode: 0o600, flag: "wx" });
+    const archive = require("../build-resources/managed-one-core-archive.cjs");
+    archiveReceipt = archive.copyPinnedReleaseArchive({ archivePath: managedArchive,
+      privateRoot: managedPrivateRoot, destination: temporaryRoot, pkg });
+  } else copyPinnedTrackedTree();
   transformPreparedTree();
   contract.writeReceipt(temporaryRoot, {
     sourceCommit: pkg.agentlasBundledRuntimeSource.commit,
     sourceVersion: pkg.agentlasUpdateCompatibility.bundledRuntimeVersion,
+    ...(archiveReceipt ? { sourceKind: archiveReceipt.sourceKind, sourceAssetSha256: archiveReceipt.sourceAssetSha256 } : {}),
   });
-  contract.verifyReceipt(temporaryRoot, pkg);
-  fs.rmSync(stageRoot, { recursive: true, force: true });
+  contract.verifyReceipt(temporaryRoot, pkg, archiveReceipt ? { requiredSourceKind: archiveReceipt.sourceKind } : {});
+  if (!managedPrivateRoot) fs.rmSync(stageRoot, { recursive: true, force: true });
   fs.renameSync(temporaryRoot, stageRoot);
-  console.log(`[embedded-core] prepared ${path.relative(root, stageRoot)} from ${pkg.agentlasBundledRuntimeSource.commit.slice(0, 12)} (${contract.RETIREMENT_TRANSFORM_ID})`);
+  if (managedPrivateRoot) {
+    console.log(JSON.stringify({ event: "managed_one_core_ready", stageRoot, sourceKind: archiveReceipt.sourceKind,
+      sourceAssetSha256: archiveReceipt.sourceAssetSha256, entries: archiveReceipt.entries, uncompressedBytes: archiveReceipt.uncompressedBytes }));
+  } else console.log(`[embedded-core] prepared ${path.relative(root, stageRoot)} from ${pkg.agentlasBundledRuntimeSource.commit.slice(0, 12)} (${contract.RETIREMENT_TRANSFORM_ID})`);
 } catch (error) {
-  fs.rmSync(temporaryRoot, { recursive: true, force: true });
+  if (managedPrivateRoot) fs.rmSync(managedPrivateRoot, { recursive: true, force: true });
+  else fs.rmSync(temporaryRoot, { recursive: true, force: true });
   throw error;
 }

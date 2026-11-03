@@ -678,7 +678,9 @@ export async function applyMcpBuildConsent(input: {
   consent: McpBuildConsent;
   resolverDeps?: McpAttachmentResolverDependencies;
   receiptPersistence?: (receipt: ResolvedMcpBuildAttachment["receipt"]) => string;
+  signal?: AbortSignal;
 }): Promise<{ runtime: RuntimeSelection | null; attachment: ResolvedMcpBuildAttachment }> {
+  input.signal?.throwIfAborted();
   const now = new Date();
   cleanupExpired(now);
   let plan = plans.get(input.consent.planId);
@@ -727,7 +729,9 @@ export async function applyMcpBuildConsent(input: {
     if (plan.application.selectedKey !== selectedKey) {
       throw new Error("An applied MCP plan cannot be changed. Review a new plan instead.");
     }
-    return { runtime: plan.runtime, attachment: await plan.application.promise };
+    const attachment = await plan.application.promise;
+    input.signal?.throwIfAborted();
+    return { runtime: plan.runtime, attachment };
   }
 
   // Promise.resolve().then(...) is deliberate: it gives us a synchronous point
@@ -739,14 +743,27 @@ export async function applyMcpBuildConsent(input: {
       selectedCandidateIds: selected,
       runtime: plan!.runtime,
       deps: input.resolverDeps,
+      signal: input.signal,
     });
+    if (input.signal?.aborted) {
+      attachment.config?.cleanup?.();
+      input.signal.throwIfAborted();
+    }
     persistAttachmentBestEffort(attachment, input.receiptPersistence);
     plan!.publicPlan.expiresAt = new Date(now.getTime() + APPLIED_PLAN_TTL_MS).toISOString();
     return attachment;
   });
   plan.application = { selectedKey, promise: application };
-  const attachment = await application;
-  return { runtime: plan.runtime, attachment };
+  try {
+    const attachment = await application;
+    input.signal?.throwIfAborted();
+    return { runtime: plan.runtime, attachment };
+  } catch (error) {
+    // An interrupted application must not poison a later, separately
+    // authorized attempt with a cached rejected promise.
+    if (input.signal?.aborted && plan.application?.promise === application) delete plan.application;
+    throw error;
+  }
 }
 
 function persistAttachmentBestEffort(

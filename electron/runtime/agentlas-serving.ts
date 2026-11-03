@@ -1,3 +1,5 @@
+import { waitForAbort } from "./abortable-wait";
+import { snapshotEffectDelivery, confirmEffectDelivery } from "./effect-delivery";
 import { portableServingStrictSchemaOrNull } from "./serving-output-schema";
 import { registerDeclaredPromptModule } from "./prompt-order";
 import { OUTPUT_LIMIT_CONTINUATION_MAX_ROUNDS, outputLimitContinuationTurn, type OutputLimitCut } from "./output-limit-continuation";
@@ -245,6 +247,7 @@ function servingToolCalls(value: unknown): ServingToolCall[] {
  * 크레딧 부족·로그아웃이 "exit" 로 분류돼 한도 폴백·재로그인 안내가 돌지 않았다.
  */
 async function servingHttpFailure(response: Response, locale: RunnerRequest["locale"]): Promise<RunnerFailure> {
+  (require("./retry-observation") as typeof import("./retry-observation")).observeRuntimeRetryAfter(response.status, response.headers.get("retry-after"));
   let code = "";
   try { code = String(((await response.json()) as { code?: unknown }).code ?? ""); } catch { /* empty body */ }
   const providerCode = /^[a-z0-9_]{1,64}$/.test(code) ? code : `http_${response.status}`;
@@ -269,7 +272,9 @@ async function servingHttpFailure(response: Response, locale: RunnerRequest["loc
         : "The Agentlas model service is rate limited. Try again shortly.",
       ...(retryAfterHint ? { retryAfterHint } : {}) };
   }
-  return { kind: "exit", runtime: "agentlas", source: "marker", providerCode,
+  const retryAfterHint = httpRetryAfterHint(response.headers.get("retry-after"));
+  return { kind: response.status >= 500 && response.status <= 599 ? "unavailable" : "exit", runtime: "agentlas", source: "marker", providerCode,
+    ...(retryAfterHint ? { retryAfterHint } : {}),
     message: locale === "ko" ? "Agentlas 모델에 연결하지 못했습니다. 잠시 뒤 다시 시도해 주세요."
       : "Could not reach the Agentlas model service. Try again shortly." };
 }
@@ -414,6 +419,8 @@ async function runAgentlasServingWithTools(
 ): Promise<RunnerResult | null> {
   // Tool inventory preparation precedes every request to the service: its refusals are refusals before dispatch.
   const { tools, byName, broker, approval } = await prepareMainToolLoop(req, "agentlas").catch((error: unknown) => { throw markRefusedBeforeDispatch(error); });
+  approval.deferEffectDelivery = true;
+  const effectDeliveries: Array<{result: object; projection: {id: string; text: string; isError: boolean}; wireEntry: object}> = [];
   if (tools.length < 1) {
     // A granted MCP config that yields nothing is a broken grant, not a chat turn.
     if (req.mcpConfigPath) throw markRefusedBeforeDispatch(new Error("science_tool_inventory_unavailable"));
@@ -491,6 +498,20 @@ async function runAgentlasServingWithTools(
     const sentImageCount = (req.images?.length ?? 0) + toolImageCount;
     if (sentImageCount > 8) throw new Error("serving_tool_image_capacity_exceeded");
     const requestBody = JSON.stringify({ ...textPayload, ...servingRequestFields(req) });
+    const deliveryEntries = effectDeliveries.flatMap(entry => {
+      for (let i = 0; i < wireExchanges.length; i++) {
+        const j = wireExchanges[i].results.indexOf(entry.wireEntry as ServingToolExchange["results"][number]);
+        if (j >= 0) return [{result: entry.result, projection: entry.projection, path: ["toolExchanges", i, "results", j]}];
+      }
+      return [];
+    });
+    const deliveryProof = snapshotEffectDelivery(requestBody, deliveryEntries);
+    const confirmDelivery = async () => {
+      await waitForAbort(req.signal, confirmEffectDelivery(deliveryProof, requestBody, true, req.signal, async ref => {
+        const ledger = await import("../harness/effect-ledger");
+        await ledger.acknowledgeEffect(ref);
+      }));
+    };
     // Image bytes have a visual admission estimate, not a text-token estimate.
     const admissionPayload = { ...textPayload, toolExchanges: wireExchanges.map(({ images: _images, ...exchange }) => exchange) };
     lastRequestTokens = servingAdmissionTokens(JSON.stringify(admissionPayload));
@@ -573,6 +594,7 @@ async function runAgentlasServingWithTools(
       if (done.stopReason !== "end_turn" && done.stopReason !== "stop_sequence")
         throw new Error("invalid_serving_stop_reason");
       if (Array.isArray(done.toolUses) && done.toolUses.length > 0) throw new Error("invalid_serving_tool_frame");
+      if (!req.signal?.aborted && (done.toolUses === undefined || Array.isArray(done.toolUses))) await confirmDelivery();
       accumulatedText += text;
       // The model's own end_turn is a normal end, settled by the shared rule (R-065): a tool-only turn completed with an
       // empty text; one with neither text nor a tool call is the typed "empty" failure (it used to throw after dispatch,
@@ -596,6 +618,7 @@ async function runAgentlasServingWithTools(
       seenCallIds.add(call.id);
     }
     // A complete tool_use frame whose calls all validated: the request used the generation; its input is the next measure.
+    if (!req.signal?.aborted) await confirmDelivery();
     generations?.completed(round, observedInput);
     lastObservedInput = observedInput;
     const results: ServingToolExchange["results"] = [];
@@ -605,8 +628,10 @@ async function runAgentlasServingWithTools(
         { providerCallId: call.id, toolName: originalByAlias.get(call.name) ?? call.name, arguments: JSON.stringify(call.input) },
         progress.events, approval, broker);
       progress.assertProgress();
-      results.push({ id: call.id, text: result.content, isError: result.isError });
+      const wireEntry = { id: call.id, text: result.content, isError: result.isError };
+      results.push(wireEntry);
       const toolImages = result.isError ? [] : servingToolImages(result.visionMessage);
+      if (toolImages.length === 0) effectDeliveries.push({result, projection: {...wireEntry}, wireEntry});
       // A harness capture is an observation whose path is in the result: it is left out rather than end the turn on capacity.
       if (!result.visionFromHarness || images.length + toolImages.length + (req.images?.length ?? 0) <= 8) images.push(...toolImages);
       if (images.length + (req.images?.length ?? 0) > 8) throw new Error("serving_tool_image_capacity_exceeded");

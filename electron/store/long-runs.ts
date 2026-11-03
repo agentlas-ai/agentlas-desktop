@@ -33,6 +33,7 @@ import {
 import { GOAL_OWNER_ANSWER_REQUIRED, GOAL_OWNER_HOLD_BLOCKED_REASONS, goalHeldForOwnerAnswer, goalHeldForOwnerGrant } from "../../shared/goal-display-state";
 import { desktopStoreTransaction, emitDesktopStoreChange } from "./change-bus";
 import { getDb } from "./db";
+import { createRuntimeRetryStore } from "./runtime-retry";
 import { invocationProcessOwner } from "./invocation-run-owners";
 import { getChatGoalContract, getChatGoalRevision } from "./chat-goals";
 import { agentRunCwd } from "../runtime/exec";
@@ -1093,6 +1094,11 @@ export function scheduleBlockedGoalRetry(input: {
     if (!current || current.surface === "science" || current.version !== input.expectedVersion
       || !(["blocked", "queued", "running", "waiting_tool"].includes(current.status) || hostDispatchPause || pendingBlockedGoalRetry(current.id))) throw new Error("blocked_goal_retry_state_changed");
     if (liveLongRunAttemptCount(input.runId)) throw new Error("blocked_goal_retry_controller_live");
+    const requestedAt = Date.parse(input.nextAt);
+    if (!Number.isFinite(requestedAt)) throw new Error("blocked_goal_retry_time_invalid");
+    const dueAt = Math.max(requestedAt, goalProviderRetryNotBefore(input.runId) ?? 0);
+    if (dueAt > Date.UTC(9999, 11, 31, 23, 59, 59, 999)) throw new Error("runtime_retry_time_unrepresentable");
+    const nextAt = new Date(dueAt).toISOString();
     const now = new Date().toISOString();
     if (current.status !== "waiting_tool") {
       const changed = db.prepare(`UPDATE long_runs SET status='waiting_tool', pause_reason=NULL, blocked_reason=NULL,
@@ -1105,7 +1111,7 @@ export function scheduleBlockedGoalRetry(input: {
     }
     appendEventInDb({ runId: input.runId, kind: BLOCKED_GOAL_SWEEP_EVENT_KIND, actorKind: "host",
       payload: { schemaVersion: BLOCKED_GOAL_SWEEP_SCHEMA, action: "retry_scheduled", kind: input.kind,
-        fromReason: input.fromReason, retryIndex: input.retryIndex, nextAt: input.nextAt,
+        fromReason: input.fromReason, retryIndex: input.retryIndex, nextAt,
         detail: input.detail.slice(0, 120), trigger: input.trigger.slice(0, 80),
         appInstanceId: input.appInstanceId ?? null,
         ...(input.requestedBy === "model" ? { requestedBy: "model" } : {}) }, at: now });
@@ -1293,6 +1299,7 @@ export function reopenDueBlockedGoalRetry(runId: string, expectedVersion: number
     const current = getLongRun(runId);
     const retry = current ? pendingBlockedGoalRetry(runId) : null;
     if (!current || !retry || current.version !== expectedVersion) throw new Error("blocked_goal_retry_state_changed");
+    if ((goalProviderRetryNotBefore(runId) ?? 0) > Date.now()) throw new Error("goal_provider_retry_not_due");
     const now = new Date().toISOString();
     const reason = retry.fromReason ?? "blocked_goal_retry_due";
     const changed = db.prepare(`UPDATE long_runs SET status='queued', pause_reason=NULL, blocked_reason=NULL,
@@ -1306,6 +1313,35 @@ export function reopenDueBlockedGoalRetry(runId: string, expectedVersion: number
   const next = getLongRun(runId);
   if (!next) throw new Error("blocked_goal_retry_readback_failed");
   return next;
+}
+
+/** A provider floor is durable across retry consumption, host pauses and restart. */
+export function goalProviderRetryNotBefore(runId: string, now = Date.now()): number | null {
+  const current = getLongRun(runId);
+  if (!current || current.surface === "science") return null;
+  const revision = getChatGoalRevision(current.goalId);
+  return revision ? createRuntimeRetryStore(getDb).goalFloor({ goalId: current.goalId, revision: revision.revision }, now)?.until ?? null : null;
+}
+
+/** The owner-mandated finite automatic retry account ends here. This is the
+ * existing budget pause wire value, not a user Stop or a claim of completion. */
+export function closeGoalRuntimeRetryBudget(runId: string, invocationRunId: string): boolean {
+  const db = getDb();
+  const closed = db.transaction(() => {
+    const current = getLongRun(runId);
+    if (!current || current.surface === "science" || !["running", "queued", "waiting_tool", "blocked"].includes(current.status)
+      || longRunOwnerHold(runId) || liveLongRunAttemptCount(runId)) return false;
+    const now = new Date().toISOString();
+    const changed = db.prepare(`UPDATE long_runs SET status='paused',pause_reason='budget',blocked_reason=NULL,
+      paused_at=?,updated_at=?,version=version+1 WHERE id=? AND version=? AND status=?`)
+      .run(now,now,runId,current.version,current.status);
+    if (changed.changes !== 1) throw new Error("runtime_retry_budget_close_conflict");
+    appendEventInDb({runId,kind:"run.status_changed",actorKind:"host",payload:{from:current.status,to:"paused",
+      reason:"runtime_retry_budget_exhausted",invocationRunId},at:now});
+    return true;
+  }).immediate();
+  if (closed) emitDesktopStoreChange({entity:"long-run",id:runId});
+  return closed;
 }
 
 /**

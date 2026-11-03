@@ -11,6 +11,7 @@ import type { FinanceNativePresentation } from "../../shared/finance-native-ui";
 import { composeDeclaredPrompt, registerDeclaredPromptModule } from "../runtime/prompt-order";
 import { didYouMean, missingArgumentsMessage } from "../../shared/did-you-mean";
 import { classifyAppControlPolicy } from "../app-control/policy";
+import { waitForAbort } from "../runtime/abortable-wait";
 
 /*
  * Agentlas harness capability ports (docs/2026-10-13-native-harness/15 §8, contracts/harness-capability-ports.json).
@@ -28,6 +29,8 @@ export type HarnessPortKind = "query" | "command" | "job" | "subscription";
 export type HarnessPortStatus = "implemented" | "unavailable";
 
 export interface HarnessCallContext {
+  /** Main-only custody; never model or bridge input. */
+  hostVideoCustody?: import("../invocation/host-video-custody").HostVideoCustody;
   /** Host-only lifetime of the calling turn; never supplied by tool arguments or serialized to a child. */
   signal?: AbortSignal;
   /** Main-owned capability snapshot, absent on callers without authenticated Finance authority. */
@@ -976,7 +979,8 @@ const PORTS: PortDefinition[] = [
     operationId: "tool.describe", kind: "query", purpose: "Read exact schema, provider, availability and result/UI contract.", required: ["toolId"],
     handler: async (args, ctx) => {
       const id = str(args.toolId).replace(/^tool:/, "").replace(/^mcp__/, "");
-      const rows = await toolRows();
+      ctx.signal?.throwIfAborted();
+      const rows = await waitForAbort(ctx.signal, toolRows());
       let row = rows.find((item) => item.providerRef === id);
       // A tool named the way its MCP name reads (one-team.one_supervisor_steer, one-team__one_supervisor_steer): its connector.
       let requestedTool: string | null = null;
@@ -986,10 +990,10 @@ const PORTS: PortDefinition[] = [
         requestedTool = row && named ? named[2] : null;
       }
       if (!row) return refused("tool_not_in_catalog");
-      const dispatch = await import("./tool-dispatch");
+      const dispatch = await waitForAbort(ctx.signal, import("./tool-dispatch"));
       // A host-channel built-in exists for this call only through the calling run's sealed binding (no launch here).
-      const installed = row.enabled ? await dispatch.findServer(row.providerRef) : null;
-      const bound = installed ? await dispatch.runScopedBinding(installed, ctx) : null;
+      const installed = row.enabled ? await waitForAbort(ctx.signal, dispatch.findServer(row.providerRef)) : null;
+      const bound = installed ? await waitForAbort(ctx.signal, dispatch.runScopedBinding(installed, ctx)) : null;
       // Describing is an inert read. A host-channel tool this run does not carry is still a tool with a description: the answer says what
       // it is and that THIS run cannot call it (availability + next), not a refusal that reads as a failed call (12 in 7 days).
       // live: true asks for the callable inventory (the server's current tools and digests), which only the run's own sealed binding
@@ -1000,7 +1004,8 @@ const PORTS: PortDefinition[] = [
       }
       // Live tool names and schema digests (tool.call requires the digest it was described with).
       // Opt-in (live: true): it starts the server once; plain describe stays inert.
-      const live = row.enabled && args.live === true ? await dispatch.describeConnectorTools(row.providerRef, ctx) : null;
+      const live = row.enabled && args.live === true ? await waitForAbort(ctx.signal, dispatch.describeConnectorTools(row.providerRef, ctx)) : null;
+      ctx.signal?.throwIfAborted();
       return ok({ ...row, ...(requestedTool ? { requestedTool } : {}), availability: bound?.ok && bound.prepared ? "attached_to_this_run" : row.enabled ? "attached_when_the_run_needs_it" : row.installed ? "installed_off" : "not_installed",
         ...(live?.ok ? { tools: live.tools.map(({ name, description, schemaDigest, inputSchema }) => ({ name, description, schemaDigest, inputSchema })) }
           : live ? { liveState: live.code } : {}),
@@ -1504,6 +1509,12 @@ export async function callHarnessPort(operationId: string, rawArgs: Record<strin
     outcome = await port.handler(args, ctx);
   } catch (error) {
     outcome = refused("operation_failed", error instanceof Error ? error.message.slice(0, 200) : "unknown error");
+  }
+  // Observe only exact IDs returned by this host operation. Failed custody never retries the media effect.
+  if (!ctx.dryRun && ctx.hostVideoCustody && outcome.status === "ok") {
+    const data = outcome.data && typeof outcome.data === "object" && !Array.isArray(outcome.data) ? outcome.data as Record<string, unknown> : {};
+    if (["media.video.animate-image", "media.video.generate", "media.video.extend"].includes(operationId) && typeof data.jobId === "string") ctx.hostVideoCustody.started(data.jobId);
+    if (operationId === "media.job.status" && data.status === "succeeded" && typeof data.id === "string") await ctx.hostVideoCustody.ready(data.id);
   }
   const receiptId = port.kind === "query" ? `hr_${randomUUID()}` : await appendReceipt({ operationId, status: outcome.status, chatId: ctx.chatId, runId: ctx.runId });
   // A file this call wrote waits for the run's invocation, which seals it into One Outputs at its next tool completion

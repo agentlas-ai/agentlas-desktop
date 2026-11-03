@@ -8,11 +8,11 @@ import { ONE_SUPERVISOR_JOURNAL_SCHEMA, ONE_SUPERVISOR_RUNTIME_PROTOCOL, ONE_SUP
 import { importNativeJsonValue } from "../daemon/native-json-transfer";
 import { NATIVE_MAIN_PREPARATION_POLICY } from "../daemon/native-invocation-policy";
 import type { OneSupervisorService } from "./supervisor-service";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { createFreshReservationFrontier } from "../runtime/fresh-reservation-frontier";
 import type { InvocationRunReceipt, McpInvocationRequest } from "../../shared/types";
 import type { SupervisorHostNoticePurpose } from "../../shared/one-supervisor";
-import { canonicalInvocationRequestJson, createInvocationAdmission, decideInvocationAdmission, getInvocationAdmission } from "../store/invocation-admissions";
+import { canonicalInvocationRequestJson, createInvocationAdmission, decideInvocationAdmission, getInvocationAdmission, rearmRejectedInvocationAdmission, INVOCATION_ADMISSION_DIGEST_VERSION } from "../store/invocation-admissions";
 import { invocationRunOwners } from "../store/invocation-run-owners";
 import { nativeGuiChannelIdentity } from "../daemon/native-auth-channel";
 import type { createNativeGuiOwnerClient } from "../invocation/native-gui-owner";
@@ -62,6 +62,7 @@ export function createSupervisorNativeOrigin(store: OneSupervisorStore, owner: O
   if (row.source_reply_run_id && !store.db.prepare("SELECT 1 FROM one_supervisor_requests WHERE one_id=? AND run_id=? AND kind='reply'").get(oneId, row.source_reply_run_id)) {
     fail("supervisor_native_source_occurrence_missing");
   }
+  assertSupervisorStartNotStopped(store,row);
   const source = Object.freeze({});
   origins.set(source, { request: canonicalInvocationRequestJson(request), purpose, assert() {
     assertOriginal?.();
@@ -74,6 +75,17 @@ export function createSupervisorNativeOrigin(store: OneSupervisorStore, owner: O
   } });
   retainHistoryWorkOrigin(source,request);
   return source;
+}
+
+/** A fresh producer capability cannot revive an exact occurrence the owner stopped.
+ * Failed, rejected controls did not apply a Stop; a settled terminal race did. */
+function assertSupervisorStartNotStopped(store:OneSupervisorStore,row:SupervisorRequestRow):void {
+  const stopped=store.db.prepare(`SELECT 1 FROM one_supervisor_requests WHERE one_id=? AND run_id=?
+    AND (kind='stop-reply' OR (kind='cancel' AND task_id=?
+      AND (state<>'failed' OR json_extract(receipt_json,'$.control.phase')='settled'
+        OR json_extract(receipt_json,'$.reason') IN ('cancel_raced_terminal_outcome','interrupted_requires_review')))) LIMIT 1`)
+    .get(row.one_id,row.run_id,row.task_id);
+  if(stopped)fail('supervisor_native_original_start_cancelled');
 }
 
 export interface SupervisorNativeRuntimeBootstrap { owner: NativeOwner; getChannel(): Channel | undefined; onHandoff?():void }
@@ -139,7 +151,8 @@ export function createSupervisorNativeRuntime(options: {
 }) {
   const pending = new Map<string, string>(), observed = new Map<string, InvocationRunReceipt>();
   const listeners = new Set<(event: { runId: string; chatId: string; receipt: InvocationRunReceipt }) => void>();
-  const starts = new Set<string>();
+  const starts = new Map<string,{digest:string;refused:boolean}>();
+  const stops = new Map<string,Promise<string>>();
   const terminal = (receipt: InvocationRunReceipt) => ["completed", "cancelled", "interrupted", "failed"].includes(receipt.status);
   function current() {
     const value = bootstrap, channel = value?.getChannel(), identity = channel && nativeGuiChannelIdentity(channel);
@@ -157,10 +170,16 @@ export function createSupervisorNativeRuntime(options: {
    * entry must go, or attach() reports a run that does not exist and drain() never starts another owner message. An admission
    * that is pending/admitted stays: the original attempt may be live and is reconciled from its receipt and custody. */
   function releaseIfNeverStarted(runId: string): void {
-    let admission: ReturnType<typeof getInvocationAdmission>;
-    try { admission = getInvocationAdmission(runId); } catch { return; /* Unreadable ledger: keep the entry, the next poll asks again. */ }
-    if (!admission || admission.status === "rejected") pending.delete(runId);
+    try {
+      const admission=getInvocationAdmission(runId);
+      if ((!admission || admission.status === "rejected") && !options.receipt(runId)
+        && !getDb().prepare("SELECT 1 FROM run_events WHERE run_id=? AND kind='invoke_started' LIMIT 1").get(runId)) {
+        const owner=invocationRunOwners.getOwnerByRunId(runId);
+        if(!owner || owner.state==='released')pending.delete(runId);
+      }
+    } catch { /* Unknown proof/receipt/custody keeps the pending barrier. */ }
   }
+
   function poll(): void {
     if(!bootstrap)return;
     for (const runId of [...pending.keys()]) releaseIfNeverStarted(runId);
@@ -177,6 +196,39 @@ export function createSupervisorNativeRuntime(options: {
       for (const listener of listeners) listener({ runId: receipt.runId, chatId: receipt.chatId, receipt });
     }
   }
+  async function cancelExact(runId:string):Promise<string> {
+    // Local original cancellation is unconditional on viewer connectivity.
+    // A disconnected original caches its failed ACK; retry that exact Stop via
+    // the re-enrolled source capture, never by issuing another native start.
+    const original=bootstrap?.owner,retained=original?.inspect(runId).retained;
+    let originalError:unknown,originalFailed=false;
+    if(retained)try { return await original!.cancel(runId); }
+    catch(error) {
+      originalError=error;originalFailed=true;
+      if(!original!.inspect(runId).unavailable)throw error;
+    }
+    const {channel,identity}=current(),receipt=options.receipt(runId);
+    const admission=retained ? getInvocationAdmission(runId) : null;
+    const chatId=receipt?.chatId ?? admission?.chatId;
+    const custody=chatId && invocationRunOwners.getRunOwner(chatId,runId);
+    const received=receipt?.runId===runId && custody && custody.ownerKind==='daemon' && custody.ownerId===identity.bootId;
+    // Before invoke_started/lease, only this retained original and its exact
+    // pending same-boot reservation may use the daemon's captured Stop path.
+    const preparing=retained && starts.has(runId) && chatId && pending.get(runId)===chatId
+      && admission?.status==='pending' && admission.ownerProcessEpoch===identity.bootId
+      && admission.digestVersion===INVOCATION_ADMISSION_DIGEST_VERSION && admission.inputDigest===starts.get(runId)?.digest
+      && (!custody || custody.ownerKind==='daemon' && custody.ownerId===identity.bootId);
+    if(!chatId || (!received && !preparing)) {
+      if(originalFailed)throw originalError;
+      return 'not-found';
+    }
+    const response=await channel.dispatch("invoke.cancel",{version:"agentlas.native-owner-stop.v1",chatId,runId}) as {version?:string;chatId?:string;runId?:string;status?:string};
+    if(bootstrap?.getChannel()!==channel || nativeGuiChannelIdentity(channel)!==identity
+      || response?.version!=="agentlas.native-owner-stop.v1" || response.chatId!==chatId || response.runId!==runId
+      || !["requested","already-requested","not-found"].includes(response.status ?? ""))fail("supervisor_native_stop_ack_invalid");
+    return response.status!;
+  }
+
   const timer = setInterval(() => { try { poll(); } catch { /* Keep durable uncertain state until the next observation. */ } }, 750);
   timer.unref?.();
   return {
@@ -189,28 +241,45 @@ export function createSupervisorNativeRuntime(options: {
     },
     start(request: McpInvocationRequest, purpose?: SupervisorHostNoticePurpose): Promise<{ runId: string }> {
       const { value } = current();
-      if (!request.runId || starts.has(request.runId)) fail("supervisor_native_start_replayed");
+      if (!request.runId) fail("supervisor_native_start_replayed");
+      const digest=createHash("sha256").update(INVOCATION_ADMISSION_DIGEST_VERSION+"\0").update(canonicalInvocationRequestJson(request)).digest("hex"),prior=starts.get(request.runId);
+      if(prior) {
+        // A rejected promise alone is not proof. Lost ACK, live preparation and
+        // admitted/retained custody never authorize a second start.
+        if(!prior.refused || prior.digest!==digest)fail("supervisor_native_start_replayed");
+        releaseIfNeverStarted(request.runId);
+        if(pending.has(request.runId))fail("supervisor_native_start_replayed");
+        const admission=getInvocationAdmission(request.runId);
+        if(admission && admission.status!=="rejected")fail("supervisor_native_start_replayed");
+        if(options.receipt(request.runId)
+          || getDb().prepare("SELECT 1 FROM run_events WHERE run_id=? AND kind='invoke_started' LIMIT 1").get(request.runId))fail("supervisor_native_start_replayed");
+        const custody=invocationRunOwners.getOwnerByRunId(request.runId);
+        if(custody && custody.state!=="released")fail("supervisor_native_start_replayed");
+      }
       const origin = createSupervisorNativeOrigin(options.store, options.owner, options.identity(), request, purpose);
-      starts.add(request.runId); pending.set(request.runId, request.chatId);
+      const attempt={digest,refused:false};
+      starts.set(request.runId,attempt); pending.set(request.runId, request.chatId);
       // Original owner has one admission and one actual start. A lost response
       // stays uncertain and is reconciled using exact durable custody/receipts.
       let actual: Promise<{ runId: string }>;
       // startHost refuses synchronously before it reserves anything (channel not ready, capacity, fenced command); only a
       // returned promise can describe an attempt, so a throw here must not leave the entry behind.
       try { actual = withOnePersonalNativeOriginal(origin,request,()=>value.owner.startHost(origin, request)); }
-      catch (error) { releaseIfNeverStarted(request.runId); throw error; }
-      void actual.then(() => { pending.delete(request.runId!); poll(); }, () => releaseIfNeverStarted(request.runId!));
+      catch (error) { attempt.refused=true;releaseIfNeverStarted(request.runId); throw error; }
+      void actual.then(() => { if(starts.get(request.runId!)===attempt)pending.delete(request.runId!); poll(); }, () => {
+        if(starts.get(request.runId!)!==attempt)return;
+        attempt.refused=true;releaseIfNeverStarted(request.runId!);
+      });
       return actual;
     },
-    async cancel(runId: string): Promise<string> {
-      const { value, channel, identity } = current();
-      if (value.owner.inspect(runId).retained) return value.owner.cancel(runId);
-      const receipt = options.receipt(runId), owner = receipt && invocationRunOwners.getRunOwner(receipt.chatId, runId);
-      if (!receipt || owner?.ownerKind !== "daemon" || owner.ownerId !== identity.bootId) return "not-found";
-      const response = await channel.dispatch("invoke.cancel", { version: "agentlas.native-owner-stop.v1", chatId: receipt.chatId, runId }) as { version?: string; chatId?: string; runId?: string; status?: string };
-      if (nativeGuiChannelIdentity(channel) !== identity || response?.version !== "agentlas.native-owner-stop.v1" || response.chatId !== receipt.chatId
-        || response.runId !== runId || !["requested", "already-requested", "not-found"].includes(response.status ?? "")) fail("supervisor_native_stop_ack_invalid");
-      return response.status!;
+    cancel(runId: string): Promise<string> {
+      const prior=stops.get(runId);if(prior)return prior;
+      let resolve!:(value:string)=>void,reject!:(error:unknown)=>void;
+      const attempt=new Promise<string>((yes,no)=>{resolve=yes;reject=no;});
+      stops.set(runId,attempt); // Before local revoke or a reentrant transport callback.
+      const clear=()=>{if(stops.get(runId)===attempt)stops.delete(runId);};
+      void cancelExact(runId).then(value=>{clear();resolve(value);},error=>{clear();reject(error);});
+      return attempt;
     },
     async steer(request: McpInvocationRequest, runId: string) {
       const { channel, identity } = current(), admission = getInvocationAdmission(runId);
@@ -237,7 +306,14 @@ export async function startSupervisorPreparedInvocation(input:{store:OneSupervis
     import('../invocation/renderer-preparation'),import('../invocation/native-start-checkpoints'),import('../runtime/scheduled-root-context'),import('../invocation/service')]);
   authorizeSupervisorNativeOrigin(origin,request);
   const admission={chatId:request.chatId,runId:request.runId!,canonicalRequestJson:canonicalInvocationRequestJson(request),ownerProcessEpoch:input.epoch};
-  if(createInvocationAdmission(admission).kind!=='created')fail('supervisor_native_admission_not_fresh');
+  const row=input.store.db.prepare("SELECT * FROM one_supervisor_requests WHERE one_id=? AND run_id=? AND state='dispatching'").get(input.oneId,request.runId) as SupervisorRequestRow|undefined;
+  if(!row)fail('supervisor_native_exact_command_required');
+  assertSupervisorStartNotStopped(input.store,row);
+  // Fresh issuer authorization above and the store CAS preserve the exact
+  // canonical input, no-start receipt and released-lease requirements.
+  if(getInvocationAdmission(admission.runId)?.status==='rejected') {
+    if(rearmRejectedInvocationAdmission(admission).kind!=='created')fail('supervisor_native_admission_not_fresh');
+  } else if(createInvocationAdmission(admission).kind!=='created')fail('supervisor_native_admission_not_fresh');
   const frontier=createFreshReservationFrontier({
     tryReject:()=>getDb().transaction(()=>{
       if(invocationRunOwners.getOwnerByRunId(admission.runId))return false;

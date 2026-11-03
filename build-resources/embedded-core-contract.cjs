@@ -36,6 +36,7 @@ function policySha256() {
   for (const policyPath of [
     __filename,
     path.join(__dirname, "..", "scripts", "prepare-embedded-core.mjs"),
+    path.join(__dirname, "managed-one-core-archive.cjs"),
   ]) {
     digest.update(path.basename(policyPath)).update("\0").update(fs.readFileSync(policyPath)).update("\n");
   }
@@ -168,7 +169,12 @@ function readReceipt(root) {
   return { receipt, receiptPath };
 }
 
-function writeReceipt(root, { sourceCommit, sourceVersion }) {
+function writeReceipt(root, { sourceCommit, sourceVersion, sourceKind, sourceAssetSha256 }) {
+  if ((sourceKind !== undefined && sourceKind !== "managed-one-release-archive")
+      || (sourceKind === "managed-one-release-archive" && !/^[a-f0-9]{64}$/.test(sourceAssetSha256 || ""))
+      || (sourceKind === undefined && sourceAssetSha256 !== undefined)) {
+    throw new Error("invalid embedded Core source provenance");
+  }
   const receipt = {
     schemaVersion: "agentlas.desktop.embedded-core.v1",
     sourceCommit,
@@ -178,18 +184,27 @@ function writeReceipt(root, { sourceCommit, sourceVersion }) {
     stagedTreeSha256: treeSha256(root),
     packageProjection: packageProjection(root),
     retainedCapabilities: [...RETAINED_CAPABILITIES],
+    ...(sourceKind ? { sourceKind, sourceAssetSha256 } : {}),
   };
   fs.writeFileSync(path.join(root, EMBEDDED_CORE_RECEIPT), `${JSON.stringify(receipt, null, 2)}\n`, "utf8");
   return receipt;
 }
 
-function verifyReceipt(root, pkg) {
+function verifyReceipt(root, pkg, { requiredSourceKind } = {}) {
   const { receipt } = readReceipt(root);
   const source = pkg.agentlasBundledRuntimeSource || {};
   const version = pkg.agentlasUpdateCompatibility?.bundledRuntimeVersion;
   if (receipt.schemaVersion !== "agentlas.desktop.embedded-core.v1") throw new Error("invalid embedded Core receipt schema");
   if (receipt.sourceCommit !== source.commit) throw new Error("embedded Core receipt commit does not match immutable package pin");
   if (receipt.sourceVersion !== version) throw new Error("embedded Core receipt version does not match compatibility contract");
+  const sourceKind = receipt.sourceKind ?? "git-checkout";
+  if (sourceKind !== "git-checkout" && sourceKind !== "managed-one-release-archive") throw new Error("invalid embedded Core source kind");
+  if (requiredSourceKind && sourceKind !== requiredSourceKind) throw new Error("embedded Core source kind does not match required input");
+  if (sourceKind === "managed-one-release-archive") {
+    if (!/^[a-f0-9]{64}$/.test(source.assetSha256 || "") || receipt.sourceAssetSha256 !== source.assetSha256) {
+      throw new Error("embedded Core release archive digest does not match immutable package pin");
+    }
+  } else if (receipt.sourceAssetSha256 !== undefined) throw new Error("unexpected embedded Core release archive digest");
   if (receipt.transformId !== RETIREMENT_TRANSFORM_ID) throw new Error("embedded Core retirement transform ID mismatch");
   if (receipt.transformPolicySha256 !== policySha256()) throw new Error("embedded Core retirement policy checksum mismatch");
   if (receipt.stagedTreeSha256 !== treeSha256(root)) throw new Error("prepared embedded Core tree checksum mismatch");

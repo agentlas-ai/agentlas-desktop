@@ -1,10 +1,12 @@
-import type { FinanceAIResult, FinanceAsset, FinanceDataRequest, FinanceDataResult, FinanceOperation, FinanceSearchResult, FinanceWorkspace } from '../../../shared/finance';
+import type { FinanceAsset, FinanceDataRequest, FinanceDataResult, FinanceOperation, FinanceSearchResult, FinanceWorkspace } from '../../../shared/finance';
+import type { FinanceQuoteCoverage, FinanceQuoteRefreshResult } from '../quote-coverage';
 import { findIsharesFund } from './ishares-catalog';
 
 export interface YahooMarketOptions {
   signal?: AbortSignal;
   /** How many selected assets one quote refresh reads. Five unless a caller that needs every position priced (portfolio valuation) asks for more; capped. */
   limit?: number;
+  includeQuoteCoverage?: boolean;
 }
 const DOC='https://ranaroussi.github.io/yfinance/';
 const RIGHTS='Yahoo public market data is intended for personal use. Public access and the open-source adapter do not grant exchange real-time entitlements or redistribution rights.';
@@ -101,7 +103,7 @@ export async function searchYahooFinanceAssets(query:string,options:YahooMarketO
 }
 export async function queryYahooFinanceData(input:FinanceDataRequest,assets:FinanceAsset[],options:YahooMarketOptions={}):Promise<FinanceDataResult>{
   const result=base();abort(options.signal);
-  try{if(input.metrics.length!==1||!['price','price_history'].includes(input.metrics[0]))return provenance({...result,warnings:['finance_yahoo_metric_unsupported']});if(input.assetIds.length!==1)throw new Error('finance_yahoo_asset_selection_invalid');const asset=assets.find(row=>row.id===input.assetIds[0]);if(!asset)throw new Error('finance_yahoo_asset_not_found');
+  try{if(input.metrics.length!==1||!['price','price_history'].includes(input.metrics[0]))return provenance({...result,warnings:['finance_yahoo_metric_unsupported']});if(input.assetIds.length!==1)throw new Error('finance_yahoo_asset_selection_invalid');const asset=assets.find(row=>row.id===input.assetIds[0]);if(!asset)throw new Error('finance_yahoo_asset_not_found');if(asset.id.startsWith('manual:v1:'))throw new Error('finance_yahoo_identity_unverified');
     const history=input.metrics[0]==='price_history',range=history?(Object.prototype.hasOwnProperty.call(RANGES,input.period)?RANGES[input.period]:undefined):'5d';if(!range)throw new Error('finance_yahoo_period_unsupported');const url=chartUrl(asset.symbol,range);result.sourceUrls=[url.href,`https://finance.yahoo.com/quote/${encodeURIComponent(asset.symbol)}`,DOC];
     const {meta,quotes,timestamps}=parseChart(await fetchJson(url,options),asset.symbol);validateAsset(asset,meta);const code=currency(meta.currency);
     if(!history){const price=numeric(meta.regularMarketPrice),asOf=instant(meta.regularMarketTime);result.columns=['Symbol','Price','Currency','Observed at','Price basis'];result.rows=[[asset.symbol,price,code,asOf,'Provider regular-market snapshot']];result.asOf=asOf;result.warnings=['Provider-reported regular-market snapshot and timestamp, not guaranteed real-time or executable. No total return or historical point-in-time availability is implied.'];if(price===null||asOf===null)result.warnings.push('Missing price or market timestamp remains null; no last daily close or zero was substituted.');}
@@ -109,11 +111,14 @@ export async function queryYahooFinanceData(input:FinanceDataRequest,assets:Fina
     if(!code)result.warnings.push('Currency/unit metadata is unknown or unsupported; no country-based currency guess or cent-unit conversion.');result.warnings.push(RIGHTS);result.status='partial';return provenance(result);
   }catch(error){abort(options.signal);return provenance({...result,status:'error',rows:[],asOf:null,warnings:[...result.warnings,failure(error)]});}
 }
-export async function refreshYahooFinanceQuotes(workspace:FinanceWorkspace,options:YahooMarketOptions={}):Promise<FinanceAIResult>{
+export async function refreshYahooFinanceQuotes(workspace:FinanceWorkspace,options:YahooMarketOptions={}):Promise<FinanceQuoteRefreshResult>{
   const limit=yahooRefreshLimit(options.limit),operations:FinanceOperation[]=[],warnings:string[]=[];for(const asset of workspace.watchlist.slice(0,limit)){abort(options.signal);const result=await queryYahooFinanceData({query:asset.symbol,assetIds:[asset.id],metrics:['price'],period:'1M'},workspace.watchlist,options),row=result.rows[0];if(!row||typeof row[1]!=='number'||typeof row[2]!=='string'||row[2]!==asset.currency||typeof row[3]!=='string'){const why=result.warnings.find(warning=>/^finance_yahoo_[a-z_]+$/.test(warning));warnings.push(`${asset.symbol}: verified price, currency or observation timestamp unavailable${why?` (${why})`:''}.`);continue;}
     if(row[1]<0){warnings.push(`${asset.symbol}: negative provider price is preserved in query results; the nonnegative quote ledger cannot import this instrument observation.`);continue;}
     const sourceId=`yahoo-chart:${encodeURIComponent(asset.symbol)}`;operations.push({type:'source.upsert',source:{id:sourceId,name:`Yahoo chart · ${asset.symbol}`,kind:'provider',status:'connected',asOf:row[3],retrievedAt:result.retrievedAt,url:result.sourceUrls[0]??null,note:[...result.warnings,COVERAGE].join('\n')}},{type:'quotes.import',quotes:[{assetId:asset.id,price:row[1],currency:row[2],asOf:row[3],sourceId,priceBasis:'price'}]});
-  }abort(options.signal);if(workspace.watchlist.length>limit)warnings.push(`Refresh is bounded to the first ${limit===5?'five':limit} selected assets.`);return{baseRevision:workspace.revision,status:operations.length?'ok':'unavailable',operations,message:`${operations.length/2} provider market snapshots retrieved. ${warnings.join(' ')}`.trim()};
+  }abort(options.signal);if(workspace.watchlist.length>limit)warnings.push(`Refresh is bounded to the first ${limit===5?'five':limit} selected assets.`);
+  const attempted=Math.min(workspace.watchlist.length,limit),succeeded=operations.length/2;
+  const quoteCoverage:FinanceQuoteCoverage={version:1,total:workspace.watchlist.length,attempted,succeeded,failed:attempted-succeeded,unattempted:workspace.watchlist.length-attempted};
+  return{baseRevision:workspace.revision,status:operations.length?'ok':'unavailable',operations,message:`${operations.length/2} provider market snapshots retrieved. ${warnings.join(' ')}`.trim(),...(options.includeQuoteCoverage?{quoteCoverage}:{})};
 }
 
 function yahooArticleUrl(value:unknown):string|null{if(typeof value!=='string'||value.length>2000)return null;try{const url=new URL(value);return url.protocol==='https:'&&!url.username&&!url.password&&!url.port&&url.hostname.includes('.')&&!url.hostname.endsWith('.local')&&!/^[\d.]+$/.test(url.hostname)?url.href:null;}catch{return null;}}

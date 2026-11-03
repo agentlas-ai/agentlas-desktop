@@ -10,6 +10,7 @@ export interface SupervisorRequestRow {
   origin_chat_id: string; receipt_json: string; created_at: string; updated_at: string;
   user_message_id: string | null;
   source_reply_run_id: string | null;
+  dispatch_retry_json?: string | null;
 }
 export const supervisorHash = (value: unknown): string => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
@@ -95,6 +96,9 @@ export class OneSupervisorStore {
     }
     if (!(db.prepare("PRAGMA table_info(one_supervisor_requests)").all() as Array<{name:string}>).some(column=>column.name === "source_reply_run_id")) {
       db.exec("ALTER TABLE one_supervisor_requests ADD COLUMN source_reply_run_id TEXT");
+    }
+    if (!(db.prepare("PRAGMA table_info(one_supervisor_requests)").all() as Array<{name:string}>).some(column=>column.name === "dispatch_retry_json")) {
+      db.exec("ALTER TABLE one_supervisor_requests ADD COLUMN dispatch_retry_json TEXT");
     }
     if (!(db.prepare("PRAGMA table_info(one_supervisor_notices)").all() as Array<{name:string}>).some(column=>column.name === "review_state")) {
       db.transaction(() => {
@@ -215,6 +219,14 @@ export class OneSupervisorStore {
     if (!row.task_id || !row.run_id) return false;
     return this.db.prepare(`INSERT OR IGNORE INTO one_supervisor_notices(id,one_id,task_id,origin_chat_id,run_id,state,created_at,review_state,review_reason)
       VALUES(?,?,?,?,?,?,?,?,?)`).run(supervisorHash([row.one_id,row.task_id,row.run_id]),row.one_id,row.task_id,row.origin_chat_id,row.run_id,state,new Date().toISOString(),
+      state === "cancelled" ? "skipped" : "pending", state === "cancelled" ? "owner_cancelled" : null).changes === 1;
+  }
+  /** A hand-off's outcome carried by a later run of the same worker conversation: the turn that brought the reports of sessions the
+   * worker delegated back, after the hand-off's own turn ended with them still running (supervisor-service noticeDelegatedOutcome). */
+  noticeRun(row: SupervisorRequestRow, runId: string, state: string): boolean {
+    if (!row.task_id || !runId) return false;
+    return this.db.prepare(`INSERT OR IGNORE INTO one_supervisor_notices(id,one_id,task_id,origin_chat_id,run_id,state,created_at,review_state,review_reason)
+      VALUES(?,?,?,?,?,?,?,?,?)`).run(supervisorHash([row.one_id,row.task_id,runId]),row.one_id,row.task_id,row.origin_chat_id,runId,state,new Date().toISOString(),
       state === "cancelled" ? "skipped" : "pending", state === "cancelled" ? "owner_cancelled" : null).changes === 1;
   }
   /** A teammate result linked to the exact one_chat_send run that started it (22 O1). Once per teammate run. */

@@ -9,6 +9,7 @@ import { useFinanceStore } from "@/lib/finance-store";
 import { FINANCE_WORKSPACE_LIMITS, financeEvidenceMetric, parseFinanceEvidenceMetric, createFinanceDashboard, createFinanceReport, createFinanceWidget, importFinanceCsv, projectFinanceWidget, effectiveFinanceWidget, financeId, type FinanceArchiveRequest, type FinanceArchiveResult, type FinanceArchiveItem, type FinanceMonitorRunsResult, type FinanceAsset, type FinanceReport, type FinanceReportSection, type FinanceSource, type FinanceOperation, type FinanceWidget, type FinanceMonitor, type FinanceMonitorRun, type FinanceSearchResult, type FinanceDataRequest, type FinanceDataResult, type FinanceWidgetProjection, type FinanceWorkspace as Workspace, } from "@shared/finance";
 import styles from "./FinanceWorkspace.module.css";
 import { financeReportCompositionSpec, financeReportCompositionTitle } from "@shared/finance-report-presentation";
+import { financeDashboardChartPresentation } from "@shared/finance-dashboard-presentation";
 import { FinanceAssetResults } from "./FinanceAssetResults";
 import { FinanceDataResultView, financeDataVisual, financeMetricForColumns, financeCompactTreasuryTitle } from "./FinanceDataResultView";
 import { FinanceDataConnections } from "./FinanceDataConnections";
@@ -180,19 +181,8 @@ function Projection({ widget, projection, ko, compact=false, inspect=false }: {
     compact?: boolean;
     inspect?: boolean;
 }) {
-    const composition=widget.chartType!=="table"?financeReportCompositionSpec({id:widget.id,title:widget.title,kind:"widget",narrative:"",widget,projection},ko?"ko":"en"):null;
-    const numeric = projection.columns.indexOf(widget.type === "allocation" ? "Market value" : "Price");
-    const timeIndex = projection.columns.indexOf("Observed at");
-    const symbolIndex = Math.max(0, projection.columns.indexOf("Symbol"));
-    const currencyIndex = projection.columns.indexOf("Currency");
-    const currencyCount = new Set(projection.rows.map(row => row[currencyIndex]).filter(Boolean)).size;
-    const temporal = widget.type === "chart" && timeIndex === 0 && projection.rows.length > 1;
-    const chartable = widget.chartType !== "table" && ["chart", "comparison", "allocation"].includes(widget.type) && numeric >= 0 && currencyCount === 1 && !projection.rows.some(row=>row[currencyIndex] === "XXX") && (temporal || widget.chartType === "bar");
-    const spec = useMemo(() => ({
-        data: { values: projection.rows.slice(0, 5000).filter(row => typeof row[numeric] === "number").map(row => ({ x: row[temporal ? timeIndex : symbolIndex], y: row[numeric], series: row[symbolIndex] })) },
-        mark: { type: widget.chartType === "bar" || !temporal ? "bar" : "line", tooltip: true },
-        encoding: { x: { field: "x", type: temporal ? "temporal" : "nominal", title: projection.columns[temporal ? timeIndex : symbolIndex] }, y: { field: "y", type: "quantitative", title: projection.columns[numeric] }, color: { field: "series", type: "nominal", title: projection.columns[symbolIndex] } },
-    }), [projection, numeric, temporal, timeIndex, symbolIndex, widget.chartType, widget.type]);
+    const {composition,chartable,spec}=useMemo(
+        ()=>financeDashboardChartPresentation(widget,projection,ko?"ko":"en"),[widget,projection,ko]);
     if (widget.type === "notes")
         return <p className={styles.narrative}>{widget.notes || (ko ? "블록 설정에서 조사 메모를 작성하세요." : "Add a research note in block settings.")}</p>;
     return <>
@@ -281,14 +271,14 @@ export function FinanceWorkspace({ onSearch, onExport, onOpenResearch, onRefresh
     const experienceRefreshSeen=useRef(experienceRefreshVersion);
     const setTab=(next:Tab)=>{if(next!=="watchlist"&&next!=="sources")setArtifactTab(next);if(next==="dashboard")setView("dashboard");else if(next==="monitors"){setSettingsCategory("monitoring");setSettingsOpen(true);}else if(next==="watchlist"||next==="sources"){setChatTool(next);}else{setArtifactDetail(true);setView("artifacts");}};
     const readExperience=async(background=false)=>{const epoch=++experienceEpoch.current;if(!background)setExperienceLoading(true);setExperienceError("");
-        try{if(!onExperience)throw new Error("unavailable");const next=await onExperience({action:"read"});if(epoch===experienceEpoch.current)setExperience(next);}
+        try{if(!onExperience)throw new Error("unavailable");const next=await onExperience({action:"read",includeUnconfirmedReview:true});if(epoch===experienceEpoch.current)setExperience(next);}
         catch{if(epoch===experienceEpoch.current)setExperienceError(l("이용 설정을 불러오지 못했습니다. 연결을 확인하고 다시 시도하세요.","Could not load usage settings. Check the connection and try again."));}
         finally{if(epoch===experienceEpoch.current)setExperienceLoading(false);}};
     useEffect(()=>{void readExperience();return()=>{experienceEpoch.current++;};},[onExperience]);
-    const updateExperience=async(request:FinanceExperienceRequest)=>{if(!onExperience)return;const epoch=++experienceEpoch.current;setExperiencePending(true);setExperiencePreparing(request.action==="accept"||request.action==="plugins.prepare");setExperienceError("");
-        try{const next=await onExperience(request);if(epoch===experienceEpoch.current)setExperience(previous=>request.action==="monitoring"&&!request.enabled&&next.builtins===undefined&&previous?.builtins?{...next,builtins:previous.builtins}:next);}
+    const updateExperience=async(request:FinanceExperienceRequest)=>{if(!onExperience)return;const epoch=++experienceEpoch.current;let refresh=false;setExperiencePending(true);setExperiencePreparing(request.action==="accept"||request.action==="plugins.prepare");setExperienceError("");
+        try{const next=await onExperience(request);if(epoch===experienceEpoch.current){setExperience(previous=>request.action==="monitoring"&&!request.enabled&&next.builtins===undefined&&previous?.builtins?{...next,builtins:previous.builtins}:next);refresh=!(request.action==="monitoring"&&!request.enabled);}}
         catch{if(epoch===experienceEpoch.current)setExperienceError(l("설정을 저장하지 못했습니다. 계정·이용 권한과 연결을 확인하세요.","Could not save settings. Check account access and the connection."));}
-        finally{if(epoch===experienceEpoch.current){setExperiencePending(false);setExperiencePreparing(false);}}};
+        finally{if(epoch===experienceEpoch.current){setExperiencePending(false);setExperiencePreparing(false);}}if(refresh&&epoch===experienceEpoch.current)void readExperience(true);};
     useEffect(()=>{
         if(experiencePending||experienceRefreshSeen.current===experienceRefreshVersion)return;
         experienceRefreshSeen.current=experienceRefreshVersion;

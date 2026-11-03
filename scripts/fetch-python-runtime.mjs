@@ -19,6 +19,8 @@
 //                  build-resources/python-runtime/python.exe (win)
 import { execFileSync } from "node:child_process";
 import verificationBoundary from "../build-resources/runtime-verification-boundary.cjs";
+import publicTrust from "../build-resources/python-public-trust.cjs";
+import * as tar from "tar";
 import { createHash } from "node:crypto";
 import {
   createReadStream,
@@ -27,6 +29,8 @@ import {
   existsSync,
   lstatSync,
   mkdirSync,
+  mkdtempSync,
+  renameSync,
   readlinkSync,
   readFileSync,
   readdirSync,
@@ -40,7 +44,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const outDir = path.join(repoRoot, "build-resources", "python-runtime");
+const finalDir = path.resolve(process.env.AGENTLAS_PYTHON_RUNTIME_OUTPUT || path.join(repoRoot, "build-resources", "python-runtime"));
+let outDir;
 const pyver = "3.12.13";
 const tag = "20260510";
 
@@ -124,9 +129,41 @@ if (process.env.PYBS_PYVER && process.env.PYBS_PYVER !== pyver) fail(`PYBS_PYVER
 const asset = LOCKED_ASSETS[triple];
 if (!asset) fail(`잠긴 Python 자산 없음: ${triple}`);
 
+// Verify an existing cache before reuse or replacement. Legacy caches may contain
+// exactly the known public certifi bundle, but no private/protected entries.
+async function inspectExisting() {
+  if (!existsSync(finalDir)) return null;
+  const root = lstatSync(finalDir);
+  if (!root.isDirectory() || root.isSymbolicLink()) throw new Error("[fetch-python] invalid existing cache root");
+  publicTrust.assertNoForbiddenPublicPaths(finalDir, { legacyCa: ["Lib/site-packages/pip/_vendor/certifi/cacert.pem", "lib/python3.12/site-packages/pip/_vendor/certifi/cacert.pem"] });
+  publicTrust.assertNoUntrackedBytecode(finalDir);
+  const entries = readdirSync(finalDir).filter((name) => name !== ".gitkeep");
+  if (!entries.length) return { dev: root.dev, ino: root.ino, empty: true };
+  const manifestPath = path.join(finalDir, "agentlas-python-runtime.json");
+  const manifestStat = lstatSync(manifestPath);
+  if (!manifestStat.isFile() || manifestStat.isSymbolicLink() || manifestStat.nlink !== 1) throw new Error("[fetch-python] existing cache manifest invalid");
+  const old = JSON.parse(readFileSync(manifestPath, "utf8"));
+  const oldAsset = LOCKED_ASSETS[old.triple];
+  const oldPlatform = old.triple?.includes("apple-darwin") ? "darwin" : old.triple?.includes("windows") ? "win32" : old.triple?.includes("linux") ? "linux" : null;
+  const oldBin = oldPlatform === "win32" ? "python.exe" : "bin/python3";
+  const exactKeys = ["schemaVersion","pythonVersion","releaseTag","triple","archiveName","archiveSha256","executableRelativePath","executableSha256","runtimeTreeSha256"].sort();
+  if (JSON.stringify(Object.keys(old).sort()) !== JSON.stringify(exactKeys) || old.schemaVersion !== "agentlas.python-runtime.v1" || old.pythonVersion !== pyver || old.releaseTag !== tag || !oldAsset || old.archiveName !== oldAsset.name || old.archiveSha256 !== oldAsset.sha256 || old.executableRelativePath !== oldBin || !/^[a-f0-9]{64}$/.test(old.executableSha256) || !/^[a-f0-9]{64}$/.test(old.runtimeTreeSha256)) throw new Error("[fetch-python] existing cache provenance invalid");
+  const legacyCa = oldPlatform === "win32" ? "Lib/site-packages/pip/_vendor/certifi/cacert.pem" : "lib/python3.12/site-packages/pip/_vendor/certifi/cacert.pem";
+  publicTrust.assertNoForbiddenPublicPaths(finalDir, { legacyCa });
+  const modern = existsSync(path.join(finalDir, publicTrust.RECEIPT));
+  if (modern) publicTrust.verifyPublicPython(finalDir, oldPlatform, oldAsset.sha256);
+  if (await sha256File(path.join(finalDir, oldBin)) !== old.executableSha256 || await runtimeTreeSha256(finalDir) !== old.runtimeTreeSha256) throw new Error("[fetch-python] existing cache tree changed");
+  return { dev: root.dev, ino: root.ino, empty: false, triple: old.triple, tree: old.runtimeTreeSha256, modern };
+}
+const previous = await inspectExisting();
+if (previous && !previous.empty && previous.modern && previous.triple === triple) {
+  console.log("[fetch-python] verified existing pinned runtime; reuse");
+  process.exit(0);
+}
 console.log(`[fetch-python] pinned ${asset.name}`);
-const tmp = path.join(os.tmpdir(), `pybs-${Date.now()}`);
-mkdirSync(tmp, { recursive: true });
+const tmp = mkdtempSync(path.join(os.tmpdir(), "agentlas-python-stage-"));
+const ownerStat = lstatSync(tmp);
+writeFileSync(path.join(tmp, "OWNER.json"), JSON.stringify({ schemaVersion: "agentlas.python-stage.v1", dev: ownerStat.dev, ino: ownerStat.ino, asset: asset.name }), { flag: "wx", mode: 0o600 });
 const tarPath = path.join(tmp, asset.name);
 
 const assetUrl = `https://github.com/astral-sh/python-build-standalone/releases/download/${tag}/${encodeURIComponent(asset.name)}`;
@@ -165,31 +202,32 @@ const systemTar = process.platform === "win32"
   ? path.join(process.env.SystemRoot || "C:\\Windows", "System32", "tar.exe")
   : null;
 const tarBin = systemTar && existsSync(systemTar) ? systemTar : "tar";
-execFileSync(tarBin, ["-xzf", tarPath, "-C", tmp], { stdio: "inherit" });
+// Inspect names and link metadata before extraction; never open certificate bodies.
+const excludedCa = process.platform === "win32" ? "python/Lib/site-packages/pip/_vendor/certifi/cacert.pem" : "python/lib/python3.12/site-packages/pip/_vendor/certifi/cacert.pem";
+let excludedCount = 0;
+await tar.t({ file: tarPath, onentry(entry) {
+  const name = entry.path.replace(/\\/g, "/").replace(/\/$/, "");
+  if (!name || name.startsWith("/") || name.split("/").some((part) => part === ".." || part === ".") || !name.startsWith("python/") && name !== "python" || /[\r\n\0]/.test(name)) throw new Error("[fetch-python] unsafe archive path");
+  if (name === excludedCa) { if (entry.type !== "File") throw new Error("[fetch-python] invalid CA archive entry"); excludedCount++; return; }
+  if (name.split("/").some(publicTrust.forbiddenPublicName)) throw new Error("[fetch-python] prohibited archive entry");
+  if (!["File", "Directory", "SymbolicLink"].includes(entry.type)) throw new Error("[fetch-python] unsupported archive entry");
+  if (entry.type === "SymbolicLink") {
+    const target = entry.linkpath.replace(/\\/g, "/");
+    const resolved = path.posix.normalize(path.posix.join(path.posix.dirname(name), target));
+    if (target.startsWith("/") || !resolved.startsWith("python/") || resolved.split("/").some(publicTrust.forbiddenPublicName)) throw new Error("[fetch-python] unsafe archive link");
+  }
+} });
+if (excludedCount !== 1) fail("pinned archive CA entry mismatch");
+execFileSync(tarBin, ["--exclude", excludedCa, "--exclude", "*/__pycache__", "--exclude", "*.pyc", "--exclude", "*.pyo", "-xzf", tarPath, "-C", tmp], { stdio: "inherit" });
 // 아카이브는 최상위 python/ 디렉터리를 가진다.
 const extractedPython = path.join(tmp, "python");
 if (!existsSync(extractedPython)) fail("추출물에 python/ 디렉터리가 없습니다.");
 
-// 기존 내용 비우고(.gitkeep 보존 위해 디렉터리는 유지) 새로 채운다.
-if (existsSync(outDir)) {
-  for (const e of readdirSync(outDir)) {
-    if (e === ".gitkeep") continue;
-    rmSync(path.join(outDir, e), { recursive: true, force: true });
-  }
-} else {
-  mkdirSync(outDir, { recursive: true });
-}
-for (const e of readdirSync(extractedPython)) {
-  // The workspace may live on an external disk while os.tmpdir() lives on the
-  // system volume. copy avoids EXDEV failures that rename would cause there.
-  cpSync(path.join(extractedPython, e), path.join(outDir, e), {
-    recursive: true,
-    force: true,
-    preserveTimestamps: true,
-    verbatimSymlinks: true,
-  });
-}
-rmSync(tmp, { recursive: true, force: true });
+// Transform only the newly extracted, owned stage, before pip performs network I/O.
+outDir = path.join(tmp, "python-runtime");
+renameSync(extractedPython, outDir);
+publicTrust.assertNoForbiddenPublicPaths(outDir);
+publicTrust.transformPublicPython(outDir, process.platform, asset.sha256);
 
 const bin = process.platform === "win32" ? path.join(outDir, "python.exe") : path.join(outDir, "bin", "python3");
 if (!existsSync(bin)) fail(`설치 후 python 바이너리를 찾지 못함: ${bin}`);
@@ -254,6 +292,8 @@ console.log(`[fetch-python] bundling ${BUNDLED_PYTHON_PACKAGES.length} engine pa
     env: { ...process.env, PYTHONNOUSERSITE: "1", PYTHONDONTWRITEBYTECODE: "1", PIP_DISABLE_PIP_VERSION_CHECK: "1" },
   });
 }
+// Reject forbidden filenames before pruning, imports, or tree hashing.
+publicTrust.assertNoForbiddenPublicPaths(outDir);
 // pip --target emits absolute build-interpreter shebangs. A shell/Python
 // polyglot launcher binds to this bundled interpreter after the app is moved.
 if (process.platform !== "win32") {
@@ -286,6 +326,7 @@ console.log("[fetch-python] engine packages import cleanly from the bundled inte
 
 const executableRelativePath = path.relative(outDir, bin).split(path.sep).join("/");
 const executableSha256 = await sha256File(bin);
+publicTrust.assertNoForbiddenPublicPaths(outDir);
 const runtimeTreeDigest = await runtimeTreeSha256(outDir);
 writeFileSync(
   path.join(outDir, "agentlas-python-runtime.json"),
@@ -314,5 +355,31 @@ if (targetArch === process.arch) {
   const expectedArch = targetArch === "x64" ? "x86_64" : "arm64";
   if (!arches.includes(expectedArch)) fail(`Python Mach-O architecture mismatch: expected ${expectedArch}`);
 }
-console.log(`[fetch-python] ready → ${bin} (${versionEvidence})`);
+publicTrust.assertNoUntrackedBytecode(outDir);
+publicTrust.verifyPublicPython(outDir, process.platform, asset.sha256);
+// Prepare the replacement on the destination filesystem. The old cache is kept
+// intact as a sibling; the two renames are recoverable but not an atomic swap.
+const parentDir = path.dirname(finalDir);
+mkdirSync(parentDir, { recursive: true });
+const transaction = mkdtempSync(path.join(parentDir, ".agentlas-python-cache-"));
+const next = path.join(transaction, "next"), backup = path.join(transaction, "previous");
+mkdirSync(next);
+for (const name of readdirSync(outDir)) cpSync(path.join(outDir, name), path.join(next, name), { recursive: true, force: true, preserveTimestamps: true, verbatimSymlinks: true });
+if (previous && existsSync(path.join(finalDir, ".gitkeep"))) cpSync(path.join(finalDir, ".gitkeep"), path.join(next, ".gitkeep"), { errorOnExist: true, force: false });
+publicTrust.verifyPublicPython(next, process.platform, asset.sha256);
+if (await runtimeTreeSha256(next) !== runtimeTreeDigest) fail("copied runtime tree differs from stage");
+const checked = await inspectExisting();
+if (JSON.stringify(checked) !== JSON.stringify(previous)) fail("existing runtime changed before replacement");
+const transactionRecord = path.join(transaction, "OWNER.json");
+writeFileSync(transactionRecord, JSON.stringify({ schemaVersion: "agentlas.python-cache-transaction.v1", state: "prepared", previous, targetTriple: triple }), { flag: "wx", mode: 0o600 });
+let movedPrevious = false;
+try {
+  if (previous) { renameSync(finalDir, backup); movedPrevious = true; }
+  renameSync(next, finalDir);
+} catch (error) {
+  if (movedPrevious && !existsSync(finalDir)) renameSync(backup, finalDir);
+  throw error;
+}
+writeFileSync(transactionRecord, JSON.stringify({ schemaVersion: "agentlas.python-cache-transaction.v1", state: "installed", previous, targetTriple: triple, installed: { dev: lstatSync(finalDir).dev, ino: lstatSync(finalDir).ino } }), { mode: 0o600 });
+console.log(`[fetch-python] ready (${versionEvidence})`);
 console.log("[fetch-python] 이제 빌드하면 이 Python 이 앱에 동봉됩니다.");

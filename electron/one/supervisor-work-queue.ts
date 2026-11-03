@@ -138,14 +138,15 @@ export class OneSupervisorWorkQueue {
     // hint: heartbeat still fences the write by phase, owner and generation.
     return lease.lease_until - this.now() <= Math.ceil(leaseMs * 2 / 3);
   }
-  recoverUnstarted(): number {
+  recoverUnstarted(oneId?: string): number {
     // A stale starter must successfully begin() before invoking a runtime. The
     // phase/generation CAS fences it after this provably pre-dispatch recovery.
     // Nothing expired: answer from a read, so an idle tick takes no write lock (perf MP-03).
-    if (!this.db.prepare("SELECT 1 FROM one_supervisor_work_jobs WHERE phase='claimed' AND lease_until<=? LIMIT 1").get(this.now())) return 0;
+    const scope=oneId ? " AND one_id=?" : "",args=oneId ? [oneId] : [];
+    if (!this.db.prepare(`SELECT 1 FROM one_supervisor_work_jobs WHERE phase='claimed' AND lease_until<=?${scope} LIMIT 1`).get(this.now(),...args)) return 0;
     return Number(this.db.prepare(`UPDATE one_supervisor_work_jobs SET phase='queued',owner_epoch=NULL,owner_kind=NULL,
-      lease_until=0,reason='unstarted_claim_recovered',updated_at=? WHERE phase='claimed' AND lease_until<=?`)
-      .run(this.now(), this.now()).changes);
+      lease_until=0,reason='unstarted_claim_recovered',updated_at=? WHERE phase='claimed' AND lease_until<=?${scope}`)
+      .run(this.now(), this.now(),...args).changes);
   }
   /**
    * A start refused before anything reached a model (shared/transient-send-refusal.ts) crossed no effect boundary. The job
@@ -158,6 +159,15 @@ export class OneSupervisorWorkQueue {
       WHERE command_id=? AND phase IN ('claimed','starting','held') AND owner_epoch IS ? AND generation=?`)
       .run(now + Math.max(100, Math.floor(delayMs)), reason.slice(0, 240), now, lease.command_id, lease.owner_epoch, lease.generation);
     return changed.changes === 1 ? this.get(lease.command_id) : null;
+  }
+  /** A different run owns a bounded uncertain replay. Exact old run/phase/epoch/generation fence every late starter. */
+  retryUnconfirmed(lease: SupervisorWorkLease, nextRunId: string, delayMs: number): SupervisorWorkLease | null {
+    if (!nextRunId || nextRunId === lease.run_id || !["starting","running","held"].includes(lease.phase)) return null;
+    const now=this.now();
+    const changed=this.db.prepare(`UPDATE one_supervisor_work_jobs SET run_id=?,phase='claimed',lease_until=?,
+      reason='resent_unconfirmed',updated_at=? WHERE command_id=? AND run_id=? AND phase=? AND owner_epoch IS ? AND generation=?`)
+      .run(nextRunId,now+Math.max(100,Math.floor(delayMs)),now,lease.command_id,lease.run_id,lease.phase,lease.owner_epoch,lease.generation);
+    return changed.changes===1 ? this.get(lease.command_id) : null;
   }
   cancelUnstarted(lease: SupervisorWorkLease): boolean {
     return this.db.prepare(`UPDATE one_supervisor_work_jobs SET phase='cancelled',lease_until=0,

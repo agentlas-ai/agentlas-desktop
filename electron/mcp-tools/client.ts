@@ -42,6 +42,9 @@ import {
   resetHephaestusCache,
   readHephaestusVersion,
   resolveHephaestusStdioLaunch,
+  mergeEnginePolicyEnv,
+  isDesktopEnginePolicyKey,
+  withDesktopEngineHost,
   startHephaestusRuntimeAutoUpdate,
 } from "../hephaestus/engine";
 import { rejectHephaestusRuntimeRoot } from "../hephaestus/root";
@@ -401,12 +404,12 @@ function expandHome(arg: string): string {
 }
 
 /** 서버가 요구하는 env 키를 vault에서 채워 { resolved, missing } 반환. A connection-owned key reads its own Vault key (NH29). */
-async function resolveEnv(envKeys: string[], server?: Pick<InstalledMcpServer, "credentialRefs">): Promise<{ resolved: Record<string, string>; missing: string[] }> {
+async function resolveEnv(envKeys: string[], server?: Pick<InstalledMcpServer, "credentialRefs" | "catalogId">): Promise<{ resolved: Record<string, string>; missing: string[] }> {
   const resolved: Record<string, string> = {};
   const missing: string[] = [];
   for (const k of envKeys) {
     const v = await readEnvVar(server ? credentialVaultKey(server, k) : k);
-    if (v) resolved[k] = v;
+    if (v || (v === "" && server?.catalogId === HEPHAESTUS_NETWORK_CATALOG_ID && isDesktopEnginePolicyKey(k))) resolved[k] = v;
     else missing.push(k);
   }
   return { resolved, missing };
@@ -569,8 +572,10 @@ export async function readServerResource(
       if (environment.missing.length > 0) throw new Error(`configuration_missing: ${environment.missing.join(", ")}`);
       controller.signal.throwIfAborted();
       transport = (await createTransport(server, environment.resolved, undefined, controller.signal)).transport;
+      closeLateTransport(controller.signal, transport);
       configureProtocolNegotiation(client, transport);
       await client.connect(transport);
+      closeLateTransport(controller.signal, transport);
       controller.signal.throwIfAborted();
       return await client.readResource({ uri }) as Awaited<ReturnType<typeof readServerResource>>;
     })(), timeoutMs, stop, controller.signal), options?.signal, stop);
@@ -655,6 +660,7 @@ async function createTransport(
       : null;
     if (browserRuntime) { command = browserRuntime.command; args = browserRuntime.args; }
     let runtimeRoot: string | null = null;
+    let corePolicyEnv: NodeJS.ProcessEnv | null = null;
     if (server.catalogId === HEPHAESTUS_NETWORK_CATALOG_ID) {
       // Workforce is the one caller that acts on its own rejections: when a
       // preflight finds an engine missing required Workforce tools, its retry
@@ -670,11 +676,15 @@ async function createTransport(
       command = launch.command;
       args = launch.args;
       runtimeRoot = launch.runtimeRoot;
+      corePolicyEnv = launch.env;
       for (const [key, value] of Object.entries(launch.env)) {
         if (typeof value === "string") stdioEnv[key] = value;
       }
     }
     signal?.throwIfAborted();
+    const mergedStdioEnv = { ...stdioEnv, ...resolved, ...browserRuntime?.env };
+    const effectiveStdioEnv = corePolicyEnv ? withDesktopEngineHost({ ...mergedStdioEnv,
+      ...mergeEnginePolicyEnv(process.env, mergeEnginePolicyEnv(corePolicyEnv, resolved)) }) : mergedStdioEnv;
     const transport = new OwnedStdioClientTransport({
       command,
       args,
@@ -682,7 +692,7 @@ async function createTransport(
       // Any stdio server using this executable must run as Node, including
       // workspace-preview and future built-ins. Enforce after resolved env so
       // a missing/overridden flag cannot start another Desktop application.
-      env: stdioEnvironmentForCommand(command, { ...stdioEnv, ...resolved, ...browserRuntime?.env }),
+      env: stdioEnvironmentForCommand(command, effectiveStdioEnv),
       stderr: "ignore",
       // The Core child's trusted memory owner binding stays renewed from its spawn until it closes.
       ...(server.catalogId === HEPHAESTUS_NETWORK_CATALOG_ID ? { environmentLease: retainTrustedMemoryOwnerEnvironment } : {}),
@@ -722,6 +732,13 @@ async function withTimeout<T>(p: Promise<T>, ms: number, onTimeout: () => void, 
     if (timer) clearTimeout(timer);
     detach();
   }
+}
+
+/** A transport may be created after an outer abort race has already returned and run its cleanup. */
+function closeLateTransport(signal: AbortSignal, transport: Transport): void {
+  if (!signal.aborted) return;
+  void Promise.resolve().then(() => transport.close()).catch(() => {});
+  signal.throwIfAborted();
 }
 
 async function withAbortSignal<T>(
@@ -825,9 +842,11 @@ export async function testServerConnection(
       controller.signal.throwIfAborted();
       if (missing.length > 0) return [];
       transport = (await createTransport(server, resolved, undefined, controller.signal, options?.prepared)).transport;
+      closeLateTransport(controller.signal, transport);
       controller.signal.throwIfAborted();
       configureProtocolNegotiation(client, transport);
       await client.connect(transport);
+      closeLateTransport(controller.signal, transport);
       controller.signal.throwIfAborted();
       const result = await listCompleteToolInventory(client, controller.signal);
       controller.signal.throwIfAborted();
@@ -1118,11 +1137,13 @@ async function callServerToolContentInternal(
             );
             client = activeClient;
             created = await createTransport(server, resolved, options?.runtimePin?.runtimeRoot, preparation.signal, options?.prepared);
+            closeLateTransport(preparation.signal, created.transport);
             preparation.signal.throwIfAborted();
             transport = created.transport;
             instrumentMcpToolCallTransport(transport, boundaryState);
             configureProtocolNegotiation(activeClient, transport);
             await activeClient.connect(transport);
+            closeLateTransport(preparation.signal, transport);
             preparation.signal.throwIfAborted();
             if (session) {
               sessionEntry = { client: activeClient, transport, boundary: boundaryState, server, prepared: options?.prepared, credentialDigest };

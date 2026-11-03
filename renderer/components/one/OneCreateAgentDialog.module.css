@@ -480,3 +480,18 @@
 .layout { grid-template-columns: minmax(0, .9fr) minmax(0, 1.1fr); gap: 20px; }
 .heroPreview { min-height: 180px; }
 @media(max-width: 680px) { .layout { grid-template-columns: 1fr; } }
+
+.dialog.oneEdit.identityOnly { width: min(560px, calc(100vw - 32px)); }
+.identityOnly .layout { grid-template-columns: minmax(0, 1fr); gap: 16px; }
+.identityOnly .fields { grid-row: 1; }
+.identityOnly .avatarPanel { grid-row: 2; }
+.identityOnly .heroPreview { height: 136px; min-height: 136px; }
+.identityOnly .heroPreview img { width: 120px; height: 120px; }
+.identityOnly .tabs { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.identityOnly .characterLibrary { max-height: 180px; overflow-y: auto; }
+.identityOnly .characterGrid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.identityOnly .characterGrid button { min-height: 76px; }
+.identityOnly .characterGrid img { width: 48px; height: 48px; }
+@media (max-width: 700px) {
+  .oneEdit { --one-sheet-horizontal-padding: 20px; }
+}

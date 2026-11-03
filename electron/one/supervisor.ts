@@ -3,7 +3,7 @@ import { readOrdinaryOneTurn, type OrdinaryOneTurnSource } from "../invocation/o
 import { oneGoalRoomTurnOnDesktop } from "../invocation/goal-owner-route";
 import { supervisorError } from "../../shared/one-supervisor";
 import { createHash } from 'node:crypto';
-import { chatFilePrompt, chatFileImages, validateChatAttachmentSelection } from "../store/chat-message-attachments";
+import { chatFilePrompt, chatFileDisplayImages, validateChatAttachmentSelection } from "../store/chat-message-attachments";
 import { getDb, openedStoreMigrationRole } from "../store/db";
 import { readRunTurnPlacement } from "../invocation/turn-placement";
 import { getOneProfile, getOneProfileOrigin, updateOneProfile } from "../store/one-profile";
@@ -21,6 +21,7 @@ import { admitMainInvocation } from "../runtime/scheduled-root-context";
 import { canonicalInvocationRequestJson, getInvocationAdmission, INVOCATION_ADMISSION_DIGEST_VERSION } from '../store/invocation-admissions';
 import { currentUiLocale } from "../ui-locale";
 import { OneSupervisorStore, supervisorHash, personalSupervisorConversationInDb, supervisorStoppedGoalForTask, type SupervisorRequestRow } from "./supervisor-store";
+import { ownerStoppedChatSince } from "../invocation/earlier-attempt";
 import { OneSupervisorService, SupervisorStartDeferred, type SupervisorRuntime } from "./supervisor-service";
 import { SupervisorScienceAdapter } from "./supervisor-science";
 import { supervisorExactResult, supervisorQuietRun, supervisorReplyTurns } from "./supervisor-presentation";
@@ -108,13 +109,22 @@ function discoveredDesktopTasks() {
   for(const chatId of invocationService.activeChatIds()) {const task=getCanonicalTaskForChat(chatId);if(task) discovered.set(task.id,task);}
   return discovered;
 }
+/** Whether a Work conversation's turn that ended still owns delegated sessions (or their undelivered reports). A read failure keeps
+ * the old reading (the turn's own outcome) rather than holding every card at "running". */
+function delegatedWorkPending(chatId:string,runId:string):boolean {
+  try { return (require("../work/session-dispatch") as typeof import("../work/session-dispatch")).workSessionParentHasPendingChildren(chatId,runId); }
+  catch (error) { console.warn("[one-supervisor] delegated work unreadable",error instanceof Error?error.message.slice(0,120):"unknown"); return false; }
+}
 function desktopTaskProjection(task:ReturnType<typeof listCanonicalTasks>[number]):SupervisorTask[] {
     const chat=task.originChatId ? getChat(task.originChatId) : null;
     if (!chat || chat.kind==="division") return [];
     const receipt=invocationService.latestReceipt(chat.id);
     const goalId=chat.goalId ?? supervisorStoppedGoalForTask(getDb(),task.id,receipt?.runId ?? null);
     const goal=goalId ? getLongRunByGoalId(goalId) : null;
-    const state=goal?.status ?? receipt?.status ?? task.status;
+    // A Work turn that ended while sessions it delegated still run is not finished work (observed in use: the card said
+    // "Work · Completed" while Sweet Designer was still running under it, and One told the owner the work had stopped at intake).
+    const delegatedOpen=!goal && receipt?.status==="completed" && delegatedWorkPending(chat.id,receipt.runId);
+    const state=delegatedOpen ? "running" : goal?.status ?? receipt?.status ?? task.status;
     const nativeOwner=invocationRunOwners.getActiveOwner(chat.id);
     const active=!!invocationService.attach(chat.id,{includeEvents:false}) || !!nativeRuntime?.attach(chat.id);
     const result=supervisorExactResult(getDb(),chat.id,receipt?.runId ?? null)?.text ?? null;
@@ -122,8 +132,8 @@ function desktopTaskProjection(task:ReturnType<typeof listCanonicalTasks>[number
       chatId:chat.id,projectId:chat.projectId,goalId:goal?.goalId ?? null,runId:receipt?.runId ?? null,state,
       controlVersion:supervisorHash([task.id,state,receipt?.runId,goal?.goalId,goal?.status,goal?.version]),observedAt:goal?.updatedAt ?? receipt?.updatedAt ?? task.updatedAt,
       owner:nativeOwner?.ownerKind==="daemon" ? "work-daemon" as const : "desktop-main" as const,controls:!["cancelling","cancelled","completed","paused","pausing","failed"].includes(state)
-        ? active ? ["steer" as const,"cancel" as const] : goal ? ["cancel" as const] : [] : [],
-      result,resultVerified:!!result && task.status==="completed" && receipt?.status==="completed" && hasPassedTaskForceExecutionVerification(receipt.runId)}];
+        ? active ? ["steer" as const,"cancel" as const] : goal || delegatedOpen ? ["cancel" as const] : [] : [],
+      result,resultVerified:!delegatedOpen && !!result && task.status==="completed" && receipt?.status==="completed" && hasPassedTaskForceExecutionVerification(receipt.runId)}];
 }
 function desktopTasks():SupervisorTask[] {
   return [...discoveredDesktopTasks().values()].flatMap(desktopTaskProjection);
@@ -183,6 +193,12 @@ export function oneSupervisor():OneSupervisorService {
   if(!hostOptions)nativeRuntime=createSupervisorNativeRuntime({store,owner,identity:()=>getOneProfile().oneId,receipt:runId=>invocationService.receipt(runId)});
   const attach=(chatId:string)=>nativeRuntime?.attach(chatId) ?? invocationService.attach(chatId,{includeEvents:false});
   const receipt=(runId:string)=>nativeRuntime?.receipt(runId) ?? invocationService.receipt(runId);
+  const cancelNative=(runId:string)=>!hostOptions && (invocationRunOwners.getOwnerByRunId(runId)?.ownerKind==='daemon' || nativeRuntime?.ownsPending(runId)) ? nativeRuntime!.cancel(runId) : invocationService.cancel(runId);
+  const unconfirmedRetryAllowed=(chatId:string,sinceMs?:number)=>{
+    try {const chat=getChat(chatId);return !!chat && chat.originSurface==="work" && !chat.goalId
+      && sinceMs!==undefined && Number.isFinite(sinceMs) && !ownerStoppedChatSince(getDb(),chatId,sinceMs);}
+    catch {return false;}
+  };
   const onSettled:SupervisorRuntime["onSettled"]=listener=>{const local=invocationService.onSettled(listener),native=nativeRuntime?.onSettled(listener);return ()=>{local();native?.();};};
   // Schema migration role does not confer execution authority. The fenced
   // Supervisor domain owner alone may run the durable queue in either host.
@@ -265,11 +281,12 @@ export function oneSupervisor():OneSupervisorService {
   supervisor=new OneSupervisorService({
     store,owner,budget,executor:hostOptions?.executor,identity:getOneProfile,assertAuthority:()=>hostOptions?.assertAuthority(),workQueue,workIdentityMutable:hostsWork,wakeWorkQueue:()=>queueMicrotask(()=>workExecutor?.kick()),
     createConversation:()=>{const id=createChat({originSurface:"one",taskMode:"conversation",title:getOneProfile().displayName}).id;bindPersonalFolder(id);return id;},
-    history:chatId=>listChatMessages(chatId,100),appendUser:(chatId,text,images)=>{
-      const groupId=/<!-- agentlas-chat-files:v1:([0-9a-f-]{36}) -->/i.exec(text)?.[1];
+    history:chatId=>listChatMessages(chatId,100),appendUser:(chatId,text,images,selectedGroupId)=>{
+      // Legacy rows may still display their images, but only the typed selection creates new file authority.
+      const groupId=selectedGroupId ?? /<!-- agentlas-chat-files:v1:([0-9a-f-]{36}) -->/i.exec(text)?.[1];
       validateChatAttachmentSelection(chatId,groupId,images);
-      const allImages=[...(images ?? []),...chatFileImages(chatId,groupId)];
-      return appendChatMessage(chatId,"user",text,allImages.length ? {images:allImages} : undefined).id;
+      const allImages=[...(images ?? []),...chatFileDisplayImages(chatId,groupId,images)]; // legacy display copy only within the old bounds
+      return appendChatMessage(chatId,"user",text,{...(allImages.length ? {images:allImages} : {}),...(selectedGroupId ? {fileGroupId:selectedGroupId} : {})}).id;
     },attachmentPrompt:chatFilePrompt,
     createWork:input=>{
       // A project id that names no project starts the brief without one: Hope passed its own conversation id and the owner's
@@ -286,6 +303,9 @@ export function oneSupervisor():OneSupervisorService {
     },graphTasks:oneId=>personalGraphTasks(getDb(),oneId,{automations:listAutomations,
       liveRunId:id=>getAutomationLiveRunState(id)==="running" ? getAutomationLiveRunId(id) : null}),
     alwaysApprove:chatId=>grantChatAlwaysApproval(chatId,"one-delegation"),quietRun:runId=>supervisorQuietRun(getDb(),runId),
+    delegatedWorkPending,
+    latestRun:chatId=>{const latest=invocationService.latestReceipt(chatId);return latest ? {runId:latest.runId,status:latest.status} : null;},
+    stopDelegatedWork:chatId=>(require("../work/session-dispatch") as typeof import("../work/session-dispatch")).stopWorkSessionChatIfLoaded(chatId).cancelled.length,
     // The question card a settled worker run left for the owner (D4): the same durable reader the cards use, whichever host ran it.
     questionWait:(chatId,runId)=>{const view=(require("../confirm") as typeof import("../confirm")).readQuestionDecision(chatId);
       return view && view.sourceRunId===runId && view.awaitingOwner && !view.committed ? {sourceMessageId:view.sourceMessageId,
@@ -294,8 +314,8 @@ export function oneSupervisor():OneSupervisorService {
     appearance:input=>{updateOneProfile({expectedVersion:input.expectedVersion,patch:{displayName:input.displayName,bubbleColor:input.bubbleColor}});},
     legacyHistory:(oneId,chatId)=>legacy.inventory(oneId,chatId,new Set(invocationService.activeChatIds()),['inherited','machine'].includes(getOneProfileOrigin())),
     runtime:{
-      start:startNative,attach,receipt,noStartProof,placement:readRunTurnPlacement,
-      cancel:runId=>!hostOptions && (invocationRunOwners.getOwnerByRunId(runId)?.ownerKind==='daemon' || nativeRuntime?.ownsPending(runId)) ? nativeRuntime!.cancel(runId) : invocationService.cancel(runId),pauseGoal:(chatId,goalId)=>stopInvocationGoal(chatId,goalId,"pause"),
+      start:startNative,attach,receipt,noStartProof,placement:readRunTurnPlacement,unconfirmedRetryAllowed,
+      cancel:cancelNative,pauseGoal:(chatId,goalId)=>stopInvocationGoal(chatId,goalId,"pause"),
       cancelGoal:(chatId,goalId)=>stopInvocationGoal(chatId,goalId,"delete"),
       steer:(req,runId)=>!hostOptions && invocationRunOwners.getOwnerByRunId(runId)?.ownerKind==='daemon' ? nativeRuntime!.steer(req,runId) : invocationService.steerFromSupervisor(req,runId,admitMainInvocation(req.chatId)),
       steerState:id=>queuedSteerState(id),
@@ -329,7 +349,7 @@ export function oneSupervisor():OneSupervisorService {
       assertOneHistoryCommandCurrent(job.command_id, 'claim');
       const chat=getChat(job.chat_id),task=getCanonicalTaskForChat(job.chat_id);
       if (!chat || chat.originSurface!=="work" || chat.kind!=="user" || task?.id!==job.task_id) throw supervisorError('supervisor_work_native_binding_changed');
-    },runtime:{start:startNative,attach,receipt,onSettled,noStartProof},
+    },runtime:{start:startNative,attach,receipt,onSettled,noStartProof,placement:readRunTurnPlacement,unconfirmedRetryAllowed,cancel:cancelNative},
     onFailure:error=>console.warn("[one-supervisor] worker admission deferred",error instanceof Error ? error.message : "unknown"),
   });
   // Dots parity (owner 2026-10-04): One speaks first on a check-in it was asked to run, or when a worker it

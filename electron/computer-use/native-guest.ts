@@ -4,13 +4,14 @@ import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import type { WebContents } from "electron";
 import { awaitNativeBrowserGuestReady, captureNativeBrowserGuest, dispatchNativeBrowserGuestInput, releaseNativeBrowserGuestPressedInput, nativeBrowserGuestInputFrame, type NativeGuestDirectInput } from "../work-live-view";
 import { saveScreenCaptureArtifact } from "../media/capture-artifacts";
+import { linkedAbortSignals } from "./request-lifetime";
 
 export interface NativeGuestComputerUseCapability { endpoint: string; token: string; scopeId: string }
 type Page = { id: string; wc: WebContents };
 type Frame = NonNullable<ReturnType<typeof nativeBrowserGuestInputFrame>>;
 type Capture = { id: string; pageId: string; frame: Frame; width: number; height: number };
 type Scope = { id: string; token: string; ownerId: number; chatId: string; runId: string; permission: "read" | "write" | "full";
-  signal: AbortSignal; current: () => boolean; pages: () => Page[]; capture: Capture | null; order: Promise<void>; queued: number; dispose: () => void };
+  signal: AbortSignal; controller: AbortController; current: () => boolean; pages: () => Page[]; capture: Capture | null; order: Promise<void>; queued: number; dispose: () => void };
 const scopes = new Map<string, Scope>();
 export function revokeNativeGuestComputerUseScopes(): void { for (const scope of [...scopes.values()]) scope.dispose(); }
 const UUID = /^[a-f0-9-]{36}$/i;
@@ -31,18 +32,18 @@ export function registerNativeGuestComputerUseScope(input: {
 }): { scopeId: string; token: string; release: () => void; rebind: (ownerId: number) => void } {
   if (!input.runId || !input.chatId || input.signal.aborted || !input.current() || scopes.size >= 128) throw new Error("native-guest-scope-unavailable");
   const id = randomUUID(), token = randomBytes(32).toString("hex");
-  const release = () => { scopes.delete(id); scope.capture = null; input.signal.removeEventListener("abort", release); };
-  const scope: Scope = { ...input, id, token, capture: null, order: Promise.resolve(), queued: 0, dispose: release };
+  const release = () => { scope.controller.abort(); scopes.delete(id); scope.capture = null; input.signal.removeEventListener("abort", release); };
+  const scope: Scope = { ...input, id, token, controller: new AbortController(), capture: null, order: Promise.resolve(), queued: 0, dispose: release };
   scopes.set(id, scope);
   input.signal.addEventListener("abort", release, { once: true });
   // The run's browser grant was given a fresh task lease (its hidden window was destroyed and replaced, native-cdp-relay.ts rebindTask): the
   // scope keeps its run, chat, permission and token, and reads the new owner's tabs. The capture it holds belonged to a tab that is gone.
-  const rebind = (ownerId: number) => { scope.ownerId = ownerId; scope.capture = null; };
+  const rebind = (ownerId: number) => { scope.controller.abort(); scope.controller = new AbortController(); scope.ownerId = ownerId; scope.capture = null; };
   return { scopeId: id, token, release, rebind };
 }
 
 /** Only this separate Main control route accepts the run-scoped token. */
-export async function handleNativeGuestComputerUse(route: string, authorization: string | undefined, body: Record<string, unknown>): Promise<unknown> {
+export async function handleNativeGuestComputerUse(route: string, authorization: string | undefined, body: Record<string, unknown>, requestSignal?: AbortSignal): Promise<unknown> {
   const scopeId = typeof body.scopeId === "string" && UUID.test(body.scopeId) ? body.scopeId : "";
   const scope = scopes.get(scopeId);
   const expected = scope ? `Bearer ${scope.token}` : "";
@@ -53,7 +54,9 @@ export async function handleNativeGuestComputerUse(route: string, authorization:
     .map(page => ({ name: pageApp(scope, page.id), id: pageApp(scope, page.id), kind: "native-guest" })) };
   const page = exactPage(scope, body.app);
   if (!page) return failure("native-guest-target-denied");
-  const valid = () => live(scope) && exactPage(scope, body.app)?.wc === page.wc;
+  const lifetime = linkedAbortSignals([requestSignal, scope.signal, scope.controller.signal]);
+  try {
+  const valid = () => !lifetime.signal.aborted && live(scope) && exactPage(scope, body.app)?.wc === page.wc;
   const frame = () => nativeBrowserGuestInputFrame(scope.ownerId, scope.chatId, page.id);
   if (route === "observe") return { ok: true, app: { name: body.app, kind: "native-guest" }, elements: [],
     observationAvailable: false, message: "Use get_screen and guest coordinates; OS accessibility element actions are unavailable for this native guest." };
@@ -63,10 +66,11 @@ export async function handleNativeGuestComputerUse(route: string, authorization:
     if (!valid()) return failure("native-guest-scope-denied");
     if (route === "capture") {
       // A tab that is still opening has no frame yet: wait for it, bounded, before reading its measured frame.
-      await awaitNativeBrowserGuestReady(scope.ownerId, scope.chatId, page.id, scope.signal);
+      await awaitNativeBrowserGuestReady(scope.ownerId, scope.chatId, page.id, lifetime.signal);
+      if (!valid()) return failure("native-guest-scope-denied");
       const before = frame();
       if (!before || before.width < 1 || before.height < 1) return failure("native-guest-capture-unavailable");
-      const image = await captureNativeBrowserGuest(scope.ownerId, scope.chatId, page.id, undefined, scope.signal);
+      const image = await captureNativeBrowserGuest(scope.ownerId, scope.chatId, page.id, undefined, lifetime.signal);
       if (!valid() || !sameFrame(frame(), before) || image.isEmpty()) return failure("native-guest-capture-stale");
       const size = image.getSize();
       const capture: Capture = { id: randomUUID(), pageId: page.id, frame: before, width: size.width, height: size.height };
@@ -78,6 +82,7 @@ export async function handleNativeGuestComputerUse(route: string, authorization:
         scope.capture = null; return failure("native-guest-capture-geometry-mismatch");
       }
       let savedPath: string | null = null;
+      if (!valid()) { scope.capture = null; return failure("native-guest-scope-denied"); }
       try { savedPath = saveScreenCaptureArtifact(dataUrl); } catch { /* The measured image remains available. */ }
       const sourceId = `native-guest:${scope.id}:${capture.id}`;
       return { ok: true, preview: { dataUrl, capturedAt: new Date().toISOString(), selectedSourceId: sourceId, captureMode: "native-guest",
@@ -156,5 +161,6 @@ export async function handleNativeGuestComputerUse(route: string, authorization:
   };
   const next = scope.order.then(orderedOperation, orderedOperation);
   scope.order = next.then(() => undefined, () => undefined);
-  return next;
+  return await next;
+  } finally { lifetime.dispose(); }
 }

@@ -21,7 +21,7 @@ import { restoreExactDesktopRuntimeSelection } from "./exact-runtime-binding";
 import { listAgentSurfaces } from "../store/agent-surfaces";
 import { appendLongRunEvent, getLongRun, getLongRunAttemptGoalRevision, getLongRunGoalRevisionBinding, transitionLongRun,
   listLongRunTasks, pendingBlockedGoalRetry, recordLongRunCycle, scheduleBlockedGoalRetry, nextBlockedGoalRetrySlot, longRunOwnerHold,
-  goalOwnerAnswerHold } from "../store/long-runs";
+  goalOwnerAnswerHold, goalProviderRetryNotBefore } from "../store/long-runs";
 import { desktopAppInstanceId, assertDesktopLongRunAdmissionOpen } from "./app-runtime-coordinator";
 import { latestTaskCheckpoint, recordTaskCheckpoint } from "./checkpoint";
 import { reconcileHostPausedLongRuns } from "./startup-reconciler";
@@ -380,6 +380,7 @@ export async function resumeLegacyOngoingBlockedGoals(dispatcher: CheckpointStar
       try {
         const candidate = getLongRun(id);
         if (!candidate || candidate.status !== "blocked" || candidate.blockedReason !== "goal_wait_ongoing_authority_required") continue;
+        if (goalProviderRetryNotBefore(id) !== null) { refuse("provider_retry_not_due"); continue; }
         const already = getDb().prepare(`SELECT 1 FROM long_run_events WHERE run_id = ?
           AND kind = 'run.legacy_lifecycle_startup' AND json_extract(payload_json, '$.appInstanceId') = ? LIMIT 1`)
           .get(id, appInstanceId);
@@ -526,6 +527,11 @@ export async function resumeSettledGoalCheckpoints(dispatcher: CheckpointStartup
   // Include clean-shutdown pauses: they were already paused before boot and
   // therefore are absent from recoverInterruptedDesktopLongRunsAtStartup().
   for (const candidate of startupCheckpointCandidates()) {
+    if (goalProviderRetryNotBefore(candidate.id) !== null) {
+      const scheduled = scheduleStartupContinuation(candidate.id, "provider_retry_not_due");
+      results.push({ runId: candidate.id, status: scheduled ? "scheduled" : "skipped", reason: "provider_retry_not_due" });
+      continue;
+    }
     const failedBeforeContinuation = candidate.status === "blocked"
       && candidate.blockedReason === "checkpoint_continuation_failed";
     if (candidate.surface === "science" || candidate.hostOwnerKind !== "desktop"

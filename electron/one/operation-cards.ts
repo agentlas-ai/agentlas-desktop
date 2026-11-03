@@ -13,6 +13,7 @@
  */
 import type { InlineUiPresentationContent } from "../../shared/inline-ui-presentation";
 import type { IntellectUiNode } from "../../shared/intellect-ui";
+import { classifyAppControlPolicy } from "../app-control/policy";
 
 export type OperationCardLocale = "ko" | "en";
 export type OperationCardKind =
@@ -146,6 +147,12 @@ function card(kind: OperationCardKind, ko: boolean, title: string, children: Int
   };
 }
 
+/** The effect the app-control policy declares for an operation, whether or not the model may call it. */
+function declaredOperationEffect(operation: string): string | undefined {
+  const classified = classifyAppControlPolicy({ path: operation });
+  return classified.policy.allowed ? classified.policy.effect : classified.effect;
+}
+
 /** The card for a finished tool event, or null when this event is not one the owner should see as a card. */
 export function operationCardFor(event: OperationToolEvent, locale: OperationCardLocale): OperationCard | null {
   if (event.result === undefined) return null;
@@ -158,10 +165,14 @@ export function operationCardFor(event: OperationToolEvent, locale: OperationCar
   const failure = failureOf(body, event.isError);
   const operation = clip(tool.args.operation, 80);
 
-  // A change the owner asked for shows its outcome. Reads are not changes and never draw a card.
+  // A change the owner asked for shows its outcome. Reads are not changes and never draw a card, failed or not: a lookup the
+  // model made for itself is the model's to retry or route around, not a decision handed to the owner. observed in use:
+  // a failed `workLiveView.listTabs` lookup reached the owner's phone as "Could not apply it: operation-failed: …" with a retry
+  // button, although the model went on to repeat the lookup itself.
   if (kind === "app.change") {
     if (!failure && (body?.effect === "read" || body?.effect === undefined)) return null;
     if (!operation) return null;
+    if (body?.effect === "read" || declaredOperationEffect(operation) === "read") return null;
     const done = !failure;
     return card(kind, ko, done ? (ko ? `${operation} 완료` : `${operation} done`) : (ko ? `${operation} 실패` : `${operation} failed`), [
       text(done ? (ko ? "앱에서 바로 적용했어요." : "Applied in the app.") : (ko ? `적용하지 못했어요: ${failure}` : `Could not apply it: ${failure}`), done ? "success" : "warning"),

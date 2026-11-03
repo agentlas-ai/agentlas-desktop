@@ -981,6 +981,8 @@ export class McpSource implements MarketplaceSource {
   private publicAgentCache: { fetchedAt: number; listings: MarketplaceListing[] } | null = null;
   private publicPluginCache: { fetchedAt: number; listings: MarketplaceListing[] } | null = null;
   private publicAgentInFlight: Promise<MarketplaceListing[]> | null = null;
+  private freshPublicAgentInFlight: Promise<MarketplaceListing[]> | null = null;
+  private publicAgentGeneration = 0;
   private publicPluginInFlight: Promise<MarketplaceListing[]> | null = null;
 
   constructor(private opts: McpSourceOptions) {}
@@ -1023,14 +1025,25 @@ export class McpSource implements MarketplaceSource {
     if (this.publicAgentInFlight) return this.publicAgentInFlight;
 
     let request!: Promise<MarketplaceListing[]>;
-    request = this.fetchPublicHubAgents(now).finally(() => {
+    request = this.fetchPublicHubAgents(now, this.publicAgentGeneration).finally(() => {
       if (this.publicAgentInFlight === request) this.publicAgentInFlight = null;
     });
     this.publicAgentInFlight = request;
     return request;
   }
 
-  private async fetchPublicHubAgents(fetchedAt: number): Promise<MarketplaceListing[]> {
+  async listFreshBuilderAgents(): Promise<MarketplaceListing[]> {
+    if (this.freshPublicAgentInFlight) return this.freshPublicAgentInFlight;
+    const generation = ++this.publicAgentGeneration;
+    let request!: Promise<MarketplaceListing[]>;
+    request = this.fetchPublicHubAgents(Date.now(), generation).finally(() => {
+      if (this.freshPublicAgentInFlight === request) this.freshPublicAgentInFlight = null;
+    });
+    this.freshPublicAgentInFlight = request;
+    return request;
+  }
+
+  private async fetchPublicHubAgents(fetchedAt: number, generation: number): Promise<MarketplaceListing[]> {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), this.opts.timeoutMs ?? 15000);
     const url = this.opts.publicAgentsUrl || publicAgentsUrlFor(this.opts.baseUrl);
@@ -1042,7 +1055,7 @@ export class McpSource implements MarketplaceSource {
       if (!resp.ok) {
         if (resp.status === 404 && !this.opts.publicAgentsUrl) {
           const listings = await this.listMarketplacePageAgents(ctrl.signal);
-          this.publicAgentCache = { fetchedAt, listings };
+          if (generation === this.publicAgentGeneration) this.publicAgentCache = { fetchedAt, listings };
           return listings;
         }
         throw new Error(`public marketplace agents ${resp.status}`);
@@ -1050,7 +1063,7 @@ export class McpSource implements MarketplaceSource {
       const json = (await resp.json()) as unknown;
       const rawAgents = asArray<Record<string, unknown>>(json, "agents", "listings");
       const listings = liveHubListings(rawAgents.map(marketPublicAgentToListing).filter((item): item is MarketplaceListing => Boolean(item)));
-      this.publicAgentCache = { fetchedAt, listings };
+      if (generation === this.publicAgentGeneration) this.publicAgentCache = { fetchedAt, listings };
       return listings;
     } finally {
       clearTimeout(timer);
@@ -1120,12 +1133,12 @@ export class McpSource implements MarketplaceSource {
     return liveHubTeams(asArray<TeamBundle>(await this.call<unknown>("marketplace.list_bundles", {}), "bundles"));
   }
 
-  async searchAgents(q: string): Promise<MarketplaceListing[]> {
+  async searchAgents(q: string, force = false): Promise<MarketplaceListing[]> {
     // 에이전트: 작동하는 MCP marketplace.search_agents 사용.
     //   공개 REST /api/marketplace/agents 가 없는 배포에선 실제 웹 /marketplace 렌더 데이터를 같이 긁어온다.
     // 플러그인: 공개 /api/plugins (정상 동작).
     const sources: Array<Promise<MarketplaceListing[]>> = [
-      this.listPublicHubAgents(),
+      force ? this.listFreshBuilderAgents() : this.listPublicHubAgents(),
       this.listPublicHubPlugins(),
     ];
     if (q.trim()) sources.push(this.searchHubAgents(q));

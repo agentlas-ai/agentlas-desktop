@@ -290,6 +290,8 @@ const ONE_COMPOSER_WIDTH_PX = 720;
 /** One 의 작성창은 양옆 여백을 빼지 않는다(Work 는 32px 를 뺀다). */
 const ONE_COMPOSER_INSET_PX = 0;
 import { ChatFileCards } from "@/components/ChatFileExperience";
+import { MessageAttachments } from "@/components/media/MessageAttachments";
+import { MediaStrip, mediaKindOf, type MediaStripItem } from "@/components/media/MediaStrip";
 import {
   appendChatFileMarker,
   chatFileItem,
@@ -1298,8 +1300,10 @@ function statusLabel(
   status: OneTaskProjection["status"]["value"],
   locale: "ko" | "en",
   canonicalStatus?: OneTaskProjection["canonicalStatus"],
+  canonicalInterruption?: OneTaskProjection["canonicalInterruption"],
 ): string {
   if (canonicalStatus === "partial") return tFor(locale, "one.shell.status.partial");
+  if (status === "failed" && canonicalStatus === "failed" && canonicalInterruption === "app_closed") return tFor(locale, "one.shell.status.interrupted");
   const labelKeys = {
     waiting: "one.shell.status.waiting",
     working: "one.shell.status.working",
@@ -4980,7 +4984,8 @@ function OneSessionsShell() {
    * 삭제된 팀원의 방에 보낸 말에 One 이 조용히 답했다). 빈 자리는 빈 자리로 말하고,
    * 앉힐 사람을 그 자리에서 고르게 한다. 전송 자체는 막지 않는다(기획 §4-3).
    */
-  const activeSeatEmpty = Boolean(activeSeat && !activeSeat.dissolvedAt && activeSeat.occupants.length === 0);
+  const activeSeatEmpty = Boolean(activeSeat && !activeSeat.dissolvedAt
+    && activeSeat.inheritedFromParent !== true && activeSeat.occupants.length === 0);
   const activeChatRecord = useMemo(
     () => conversations.find((chat) => chat.id === activeThreadChatId) ?? conversation ?? null,
     [activeThreadChatId, conversation, conversations],
@@ -4993,6 +4998,9 @@ function OneSessionsShell() {
     return Boolean(
       activeSeat
       && activeSeat.kind === "solo"
+      // A delegated child inherits its parent's seat; that seat's occupant is
+      // not evidence that the child's own teammate has left or been replaced.
+      && activeSeat.inheritedFromParent !== true
       && (
         activeSeat.occupants.length === 0
         || !activeSeat.occupants.some((occupant) => occupant.agentId === sessionAgentId)
@@ -9726,7 +9734,7 @@ function OneSessionsShell() {
         }
         kind = "directory";
       }
-      const previewUrl = kind === "image" ? URL.createObjectURL(file) : null;
+      const previewUrl = kind === "image" || (kind === "file" && file.type.startsWith("video/")) ? URL.createObjectURL(file) : null;
       next.push({
         id: uid(),
         grant,
@@ -10110,6 +10118,7 @@ function OneSessionsShell() {
                 // One 도 팀원과 같은 창에서 고친다. "지킬 것" 목록만 기존 프로필 창에 남는다.
                 setMemoryOpen(false);
                 setEditOneTarget({
+                  oneId: oneProfile?.oneId,
                   displayName: oneProfile?.displayName ?? "One",
                   role: oneProfile?.role ?? "Agentlas One",
                   profileContext: oneProfile?.profileContext ?? "",
@@ -10598,8 +10607,8 @@ function OneSessionsShell() {
                           ? (message.hostNotice?.purpose === "automation-report" && !agiActionNoticeLine(message.hostNotice, message.text)
                             // 자동화 보고 = 원장이 센 행동 요약 + 로고, 원문은 펼침 안에(오너 2026-09-28).
                             ? <AutomationReportSummary runId={message.hostNotice.runId} text={message.text} locale={appLocale === "ko" ? "ko" : "en"}
-                                fallback={<HostContinuationNotice text={message.text} locale={appLocale === "ko" ? "ko" : "en"} notice={message.hostNotice} onOpenChat={openDispatchedSession} />} />
-                            : <HostContinuationNotice text={message.text} locale={appLocale === "ko" ? "ko" : "en"} notice={message.hostNotice} onOpenChat={openDispatchedSession} />)
+                                fallback={<HostContinuationNotice text={message.text} locale={appLocale === "ko" ? "ko" : "en"} notice={message.hostNotice} onOpenChat={openDispatchedSession} chatId={activeThreadChatId} />} />
+                            : <HostContinuationNotice text={message.text} locale={appLocale === "ko" ? "ko" : "en"} notice={message.hostNotice} onOpenChat={openDispatchedSession} chatId={activeThreadChatId} />)
                           : systemLabel
                           ? (
                             // A prompt One sent on the person's behalf ("One
@@ -10661,6 +10670,12 @@ function OneSessionsShell() {
                                     || element.dataset.oneMessageId === replyParentMeta.id)?.scrollIntoView({ block: "center", behavior: "smooth" })}
                               />
                             )}
+                            {message.role === "user" ? (
+                              // media-carousel: the owner's pictures and videos as one swipeable strip (components/media).
+                              <div data-one-message-media={message.images?.length || message.chatFiles?.length ? "true" : undefined}>
+                                <MessageAttachments files={message.chatFiles} imageUrls={message.images} locale={appLocale === "ko" ? "ko" : "en"} onOpenFile={openOneChatFile} />
+                              </div>
+                            ) : (<>
                             {message.images && message.images.length > 0 && (
                               <div className={styles.messageImages} data-one-message-media="true">
                                 {message.images.map((src, i) => (
@@ -10672,6 +10687,7 @@ function OneSessionsShell() {
                             {message.chatFiles && message.chatFiles.length > 0 && (
                               <ChatFileCards files={message.chatFiles} locale={appLocale} onOpen={openOneChatFile} />
                             )}
+                            </>)}
                             {(hasVisibleContent || (message.files?.some((file) => file.kind !== "image") ?? false)) && (
                             <div className={styles.messageBody} data-doc={message.role === "assistant" && !message.streaming && !hasIntellectUiFence(markdownText) && isDocumentLikeText(markdownText) ? "true" : undefined}
                               data-one-visual-answer={message.role === "assistant" && (hasInlineVisualBlock(markdownText) || hasIntellectUiFence(markdownText)) ? "true" : undefined}>
@@ -11498,19 +11514,20 @@ function OneSessionsShell() {
               />
               {attachmentDrafts.length > 0 && (
                 <div className={styles.attachmentTray} aria-label={tFor(appLocale, "one.shell.composer.selected_attachments_aria")}>
-                  {/* Square tiles inside the composer, above the text (owner 2026-10-14, the Codex composer). */}
-                  {attachmentDrafts.map((item) => (
-                    <div key={item.id} className={styles.attachmentChip} data-kind={item.kind} title={item.name}>
-                      {item.previewUrl
-                        ? <img src={item.previewUrl} alt="" aria-hidden="true" />
-                        : <span className={styles.attachmentCopy}>
-                            <span className={styles.attachmentFileIcon} aria-hidden="true">{item.kind === "directory" ? <IconFolder size={18} /> : <IconFileUp size={18} />}</span>
-                            <strong>{item.name}</strong>
-                            <small>{attachmentTypeLabel(item.mediaType, item.name)} · {attachmentSize(item.size)}</small>
-                          </span>}
-                      <button type="button" onClick={() => removeAttachmentDraft(item.id)} aria-label={tFor(appLocale, "one.shell.composer.remove_attachment", { name: item.name })}><IconClose size={11} /></button>
-                    </div>
-                  ))}
+                  {/* One horizontal strip of thumbnails and file tiles, each with × (media-carousel). */}
+                  <MediaStrip
+                    variant="composer"
+                    locale={appLocale === "ko" ? "ko" : "en"}
+                    items={attachmentDrafts.map((item): MediaStripItem => ({
+                      key: item.id,
+                      kind: item.kind === "directory" ? "folder" : item.previewUrl ? mediaKindOf(item.mediaType, item.name) : "file",
+                      name: item.name,
+                      src: item.previewUrl ?? undefined,
+                      thumbSrc: item.kind === "image" ? item.previewUrl ?? undefined : undefined,
+                      meta: `${attachmentTypeLabel(item.mediaType, item.name)} · ${attachmentSize(item.size)}`,
+                      onRemove: () => removeAttachmentDraft(item.id),
+                    }))}
+                  />
                 </div>
               )}
               <OneComposerInput
@@ -12200,7 +12217,7 @@ function TaskListButton({ item, active, locale, onOpen }: { item: OneTaskProject
   return (
     <button type="button" className={styles.taskButton} data-active={active ? "true" : "false"} onClick={() => onOpen(item.taskId)} aria-current={active ? "page" : undefined}>
       <strong>{briefingSourceName(item.display.title, locale)}</strong>
-      <small>{statusLabel(item.status.value, locale, item.canonicalStatus)} · {formatTimestamp(item.status.asOf, locale)}</small>
+      <small>{statusLabel(item.status.value, locale, item.canonicalStatus, item.canonicalInterruption)} · {formatTimestamp(item.status.asOf, locale)}</small>
       <span className={styles.statusDot} data-status={item.status.value} aria-hidden="true" />
     </button>
   );

@@ -11,10 +11,13 @@ export interface FinanceExperienceState {
   dashboardCustomized:boolean;
   sources:FinanceDataSourceOption[];
   enabledFeedIds?:import('./finance-feeds').FinanceFeedId[];
-  monitoring:{enabled:boolean;localTime:string;timezone:string;lastSentAt:string|null;nextRunAt:string|null};
+  monitoring:{enabled:boolean;localTime:string;timezone:string;lastSentAt:string|null;nextRunAt:string|null;unconfirmedReview?:boolean};
   access:{plan:string|null;monitoringAllowed:boolean;status:'verified'|'unavailable'|'signed-out'};
+  /** Transient receipt returned only for an owner-confirmed settings action. */
+  cloudWatchlistTransfer?:{transferred:boolean};
 }
-export type FinanceExperienceRequest = {action:'read'}
+export type FinanceExperienceRequest = {action:'read';includeUnconfirmedReview?:true}
+  | {action:'cloud.watchlist';direction:'upload'|'download'}
   | {action:'plugins.prepare'}
   | {action:'accept';version:string;dataNotice:true;aiNotice:true}
   | {action:'source';sourceId:string}

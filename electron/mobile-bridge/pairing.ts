@@ -1002,6 +1002,14 @@ export class MobileBridgePairingManager {
     return record?.workspaceId ?? null;
   }
 
+  /** Internal admission binding only. No bearer, token hash or stable subject enters a mobile DTO. */
+  deviceAccountBinding(deviceId: string): { workspaceId: string | null; accountSubject: string; accountAuthorityOrigin: string } | null {
+    const record = readDevices(this.userDataPath).devices.find(device => device.deviceId === deviceId && device.revokedAt === null);
+    return record?.accountSubject && record.accountAuthorityOrigin
+      ? { workspaceId: record.workspaceId ?? null, accountSubject: record.accountSubject, accountAuthorityOrigin: record.accountAuthorityOrigin }
+      : null;
+  }
+
   listDevices(): MobileBridgeDeviceMetadata[] {
     return readDevices(this.userDataPath).devices.map((record) => this.publicMetadata(record));
   }

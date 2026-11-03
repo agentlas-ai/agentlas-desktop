@@ -264,7 +264,44 @@ function personalAgentTaskRooms(chatIds: Array<string | null>): Set<string> {
   try { return personalAgentRoomIdsAmong(chatIds.filter((id): id is string => Boolean(id)), getDb()); } catch { return new Set(); }
 }
 
-function toTask(row: TaskRow, participantsByTask?: Map<string, ParticipantRow[]>, supervisedRooms?: ReadonlySet<string>): CanonicalTask {
+/** The ledger run id main.ts records when the boot settlement ends a Task the app's close or restart cut off (settleInterruptedTasksOnBoot). */
+const BOOT_SETTLE_RUN_PREFIX = "boot-settle:";
+/** The ledger row is written a moment after the status change; a later change of the Task moves updated_at past it by more than this. */
+const BOOT_SETTLE_TOLERANCE_MS = 2_000;
+
+/**
+ * Which of these `failed` Tasks are failed only because the app closed or restarted while they ran: the boot settlement's ledger row
+ * (kind invoke_interrupted, hostStopCause app_closed) written for the same Task and not older than the Task's current state. A failure that
+ * happened after the restart (the Task ran again and failed) moves updated_at past that row, so it reads as the failure it is. A missing or
+ * pruned row reads as the plain failed status the Task had before. Machine facts only (a run id, a kind, a typed payload field).
+ */
+function bootSettledInterruptions(rows: ReadonlyArray<Pick<TaskRow, "id" | "status" | "updated_at">>): Map<string, "app_closed"> {
+  const found = new Map<string, "app_closed">();
+  try {
+    const failed = rows.filter((row) => normalizeStatus(row.status) === "failed");
+    if (failed.length === 0 || !tableExists("run_events")) return found;
+    const db = getDb();
+    for (let i = 0; i < failed.length; i += 200) {
+      const chunk = failed.slice(i, i + 200);
+      const events = db.prepare(
+        `SELECT run_id, ts, payload_json FROM run_events
+         WHERE kind = 'invoke_interrupted' AND run_id IN (${chunk.map(() => "?").join(",")})`,
+      ).all(...chunk.map((row) => `${BOOT_SETTLE_RUN_PREFIX}${row.id}`)) as Array<{ run_id: string; ts: string; payload_json: string }>;
+      for (const row of chunk) {
+        for (const event of events) {
+          if (event.run_id !== `${BOOT_SETTLE_RUN_PREFIX}${row.id}`) continue;
+          let payload: { hostStopCause?: unknown } = {};
+          try { payload = JSON.parse(event.payload_json) as { hostStopCause?: unknown }; } catch { continue; }
+          if (payload.hostStopCause !== "app_closed") continue;
+          if (Date.parse(event.ts) + BOOT_SETTLE_TOLERANCE_MS >= Date.parse(row.updated_at)) found.set(row.id, "app_closed");
+        }
+      }
+    }
+  } catch { /* An unreadable ledger leaves the Task as the failed status it has. */ }
+  return found;
+}
+
+function toTask(row: TaskRow, participantsByTask?: Map<string, ParticipantRow[]>, supervisedRooms?: ReadonlySet<string>, interruptions?: ReadonlyMap<string, "app_closed">): CanonicalTask {
   // Lists join this once for all rows. Single-task readers use the same source
   // without promoting a conversation or changing its project ownership.
   const surface = row.origin_surface !== undefined ? row.origin_surface : row.origin_chat_id && tableExists("chats")
@@ -285,6 +322,7 @@ function toTask(row: TaskRow, participantsByTask?: Map<string, ParticipantRow[]>
     updatedAt: row.updated_at,
     archivedAt: row.archived_at,
     participants: (participantsByTask ? participantsByTask.get(row.id) ?? [] : participantRows(row.id)).map(toParticipant),
+    ...((interruptions ?? bootSettledInterruptions([row])).get(row.id) === "app_closed" ? { interruption: "app_closed" as const } : {}),
   };
 }
 
@@ -606,7 +644,8 @@ export function listCanonicalTasks(input: {
     }
   }
   const supervised = personalAgentTaskRooms(rows.map((row) => row.origin_chat_id));
-  return rows.map((row) => toTask(row, participantsByTask, supervised));
+  const interruptions = bootSettledInterruptions(rows);
+  return rows.map((row) => toTask(row, participantsByTask, supervised, interruptions));
 }
 
 /**

@@ -20,7 +20,7 @@ import { withPythonCacheBoundary, withPythonRuntimeBoundary } from "../runtime/p
 import { systemNetworkChildEnv } from "../net/system-network-core";
 import { optionalElectronAppPath } from "../runtime-paths";
 import { currentUiLocale } from "../ui-locale";
-import { hephaestusRoot, hephaestusRootDetail, readHephaestusVersion, resetHephaestusRootCache } from "./root";
+import { compareHephaestusVersions, hephaestusRoot, hephaestusRootDetail, hephaestusRuntimeBases, readHephaestusVersion, resetHephaestusRootCache } from "./root";
 import type { HephaestusStatus, HephaestusUpdateJournal } from "../../shared/types";
 import { classifyHephaestusUpdateJournal, parseHephaestusUpdateJournal } from "../../shared/hephaestus-update-contract";
 import { retainTrustedMemoryOwnerEnvironment, trustedMemoryOwnerEnvironment } from "../memory/trusted-owner-binding";
@@ -214,6 +214,52 @@ export interface HephaestusStdioLaunch {
   releaseMemoryBinding?: () => void;
 }
 
+const DESKTOP_ENGINE_USER_ENV_KEYS = [
+  "AGENTLAS_PROJECT_BOOTSTRAP_AUTO", "AGENTLAS_MCP_PROJECT_BOOTSTRAP_AUTO",
+  "HEPHAESTUS_AUTO_UPDATE", "HEPHAESTUS_UPDATE_CHECK", "DO_NOT_TRACK", "AGENTLAS_TELEMETRY",
+] as const;
+
+export function isDesktopEnginePolicyKey(key: string): boolean {
+  return DESKTOP_ENGINE_USER_ENV_KEYS.some((candidate) => candidate === key.toUpperCase());
+}
+
+function enginePolicyVeto(key: string, value: string): boolean {
+  const normalized = value.trim().toLowerCase();
+  return key === "DO_NOT_TRACK" ? !["0", "false", "no", "off"].includes(normalized)
+    : !["1", "true", "yes", "on"].includes(normalized);
+}
+
+/** An explicit opt-out from either source wins, including the empty string. */
+export function mergeEnginePolicyEnv(base: NodeJS.ProcessEnv, overlay: NodeJS.ProcessEnv): Record<string, string> {
+  const result: Record<string, string> = {};
+  const read = (env: NodeJS.ProcessEnv, key: string) => {
+    const values = Object.keys(env).filter((name) => name.toUpperCase() === key)
+      .map((name) => env[name]).filter((value): value is string => typeof value === "string");
+    return values.find((value) => enginePolicyVeto(key, value)) ?? values[0];
+  };
+  for (const key of DESKTOP_ENGINE_USER_ENV_KEYS) {
+    const first = read(base, key), second = read(overlay, key);
+    if (typeof first === "string" && enginePolicyVeto(key, first)) result[key] = first;
+    else if (typeof second === "string") result[key] = second;
+    else if (typeof first === "string") result[key] = first;
+  }
+  return result;
+}
+
+function desktopEngineUserEnvironment(env: NodeJS.ProcessEnv): Record<string, string> {
+  return mergeEnginePolicyEnv(env, {});
+}
+
+/** Normalize case variants before spawning, then assert the Desktop-owned identity. */
+export function withDesktopEngineHost(env: NodeJS.ProcessEnv): Record<string, string> {
+  const sanitized: Record<string, string> = {};
+  for (const [key, value] of Object.entries(env)) {
+    if (key.toUpperCase() === "AGENTLAS_HOST_RUNTIME" || isDesktopEnginePolicyKey(key)) continue;
+    if (typeof value === "string") sanitized[key] = value;
+  }
+  return { ...sanitized, ...desktopEngineUserEnvironment(env), AGENTLAS_HOST_RUNTIME: "desktop" };
+}
+
 function pythonInvocation(candidate: string): { command: string; prefix: string[] } {
   const base = path.basename(candidate).toLowerCase();
   return {
@@ -243,14 +289,16 @@ export function resolveHephaestusSyncLaunch(
     return null;
   }
 
-  const env = withPythonCacheBoundary(withCliPath({
+  const env = withDesktopEngineHost(withPythonCacheBoundary(withCliPath({
     ...process.env,
     ...systemNetworkChildEnv(process.env),
+    ...desktopEngineUserEnvironment(process.env),
+    AGENTLAS_HOST_RUNTIME: "desktop",
     HEPHAESTUS_RUNTIME_ROOT: runtimeRoot,
     PYTHONPATH: runtimeRoot,
     PYTHONUTF8: "1",
     PYTHONIOENCODING: "utf-8",
-  }));
+  })));
   const probe = "import sys; raise SystemExit(0 if sys.version_info >= (3,9) else 1)";
   for (const candidate of pythonCandidates(runtimeRoot)) {
     if (path.isAbsolute(candidate)) {
@@ -358,7 +406,7 @@ export async function resolveHephaestusStdioLaunch(
       command: py.python,
       args: pythonArgs,
       runtimeRoot,
-      env: withPythonCacheBoundary({
+      env: withDesktopEngineHost(withPythonCacheBoundary({
         HEPHAESTUS_RUNTIME_ROOT: runtimeRoot,
         PYTHONPATH: runtimeRoot,
         PYTHONUTF8: "1",
@@ -369,7 +417,9 @@ export async function resolveHephaestusStdioLaunch(
         ...systemNetworkChildEnv(process.env),
         ...(judgeRuntime ? { AGENTLAS_JUDGE_RUNTIME: judgeRuntime } : {}),
         ...(memoryBinding?.env ?? {}),
-      }),
+        ...desktopEngineUserEnvironment(process.env),
+        AGENTLAS_HOST_RUNTIME: "desktop",
+      })),
       ...(memoryBinding && "release" in memoryBinding ? { releaseMemoryBinding: memoryBinding.release } : {}),
     };
   } catch (error) {
@@ -396,7 +446,7 @@ export async function startHephaestusRuntimeAutoUpdate(options: { signal?: Abort
     process.env.HEPHAESTUS_UPDATE_CHECK === "0"
   ) return false;
   const runtimeRoot = hephaestusRoot();
-  if (!runtimeRoot) return false;
+  if (!runtimeRoot || !hephaestusRuntimeBase(runtimeRoot)) return false;
   const launch = await resolveHephaestusStdioLaunch(
     "agentlas_cloud.update",
     ["--auto-update-worker", runtimeRoot],
@@ -442,8 +492,7 @@ export async function startHephaestusRuntimeAutoUpdate(options: { signal?: Abort
  * journal anywhere else would report on a different installation than the one
  * that actually runs.
  */
-export function readHephaestusUpdateJournal(): HephaestusUpdateJournal | null {
-  const base = process.env.HEPHAESTUS_RUNTIME_BASE?.trim() || path.join(os.homedir(), ".agentlas", "runtime");
+function readHephaestusUpdateJournalAt(base: string): HephaestusUpdateJournal | null {
   try {
     const raw = fs.readFileSync(path.join(base, "auto-update.json"), "utf8");
     return parseHephaestusUpdateJournal(JSON.parse(raw));
@@ -455,14 +504,22 @@ export function readHephaestusUpdateJournal(): HephaestusUpdateJournal | null {
   }
 }
 
-function hephaestusRuntimeBase(): string {
-  return process.env.HEPHAESTUS_RUNTIME_BASE?.trim() || path.join(os.homedir(), ".agentlas", "runtime");
+function hephaestusRuntimeBase(runtimeRoot: string | null = hephaestusRoot()): string | null {
+  const bases = hephaestusRuntimeBases();
+  const compared = compareHephaestusVersions(readHephaestusVersion(runtimeRoot), "1.2.73");
+  if (compared !== null && compared >= 0) return bases.error ? null : bases.newBase;
+  return "legacyBase" in bases ? bases.legacyBase : null;
+}
+
+export function readHephaestusUpdateJournal(): HephaestusUpdateJournal | null {
+  const base = hephaestusRuntimeBase();
+  return base ? readHephaestusUpdateJournalAt(base) : null;
 }
 
 /** Journal file mtime in ms, or null when it does not exist yet. */
-function updateJournalStamp(): number | null {
+function updateJournalStamp(base: string): number | null {
   try {
-    return fs.statSync(path.join(hephaestusRuntimeBase(), "auto-update.json")).mtimeMs;
+    return fs.statSync(path.join(base, "auto-update.json")).mtimeMs;
   } catch {
     return null;
   }
@@ -478,9 +535,9 @@ function updateJournalStamp(): number | null {
  * the lock (never write it) so that case can be named instead of being folded
  * into "no connection" — which was wrong precisely when an update did exist.
  */
-function updaterLockHeld(): boolean {
+function updaterLockHeld(base: string): boolean {
   try {
-    return fs.existsSync(path.join(hephaestusRuntimeBase(), ".update.lock"));
+    return fs.existsSync(path.join(base, ".update.lock"));
   } catch {
     return false;
   }
@@ -517,7 +574,7 @@ export async function runHephaestusRuntimeUpdate(
   waitMs = 600_000,
 ): Promise<{
   ok: boolean;
-  outcome: "applied" | "current" | "unknown" | "working" | "busy" | "offline" | "no_engine" | "no_python";
+  outcome: "applied" | "current" | "failed" | "unknown" | "working" | "busy" | "offline" | "no_engine" | "no_python";
   error?: string;
   journal: HephaestusUpdateJournal | null;
 }> {
@@ -528,6 +585,8 @@ export async function runHephaestusRuntimeUpdate(
   // moment would have sent the user to fetch the same rejected bundle again.
   const runtimeRoot = hephaestusRoot();
   if (!runtimeRoot) return { ok: false, outcome: "no_engine", error: "engine_not_attached", journal: null };
+  const runtimeBase = hephaestusRuntimeBase(runtimeRoot);
+  if (!runtimeBase) return { ok: false, outcome: "unknown", error: hephaestusRuntimeBases().error ?? "engine_runtime_namespace_unavailable", journal: null };
   // Pass the resolved root explicitly: the launcher would otherwise call
   // hephaestusRoot() again, hit the same rejection, and undo the repair path.
   const launch = await resolveHephaestusStdioLaunch(
@@ -538,7 +597,7 @@ export async function runHephaestusRuntimeUpdate(
   );
   if (!launch) {
     // Reinstalling does not install a Python interpreter. Keep this distinct.
-    return { ok: false, outcome: "no_python", error: "python_not_found", journal: readHephaestusUpdateJournal() };
+    return { ok: false, outcome: "no_python", error: "python_not_found", journal: readHephaestusUpdateJournalAt(runtimeBase) };
   }
 
   // Waiting stops after `waitMs`; the worker is never killed. `finished` tells
@@ -567,6 +626,9 @@ export async function runHephaestusRuntimeUpdate(
     });
 
   const verdict = (journal: HephaestusUpdateJournal | null) => {
+    if (journal?.status === "failed") {
+      return { ok: false, outcome: "failed" as const, error: journal.errorCode || "update_failed", journal };
+    }
     const disposition = classifyHephaestusUpdateJournal(journal);
     // "not applied" is not the same as "already newest". Core also reports
     // `skipped` (e.g. a non-SemVer RELEASE it cannot compare) and statuses this
@@ -588,22 +650,22 @@ export async function runHephaestusRuntimeUpdate(
   };
 
   for (let attempt = 0; attempt < 2; attempt += 1) {
-    const before = updateJournalStamp();
+    const before = updateJournalStamp(runtimeBase);
     const run = await spawnOnce();
     if (!run.finished) {
-      return { ok: true, outcome: "working", journal: readHephaestusUpdateJournal() };
+      return { ok: true, outcome: "working", journal: readHephaestusUpdateJournalAt(runtimeBase) };
     }
-    const after = updateJournalStamp();
-    if (after !== null && after !== before) return verdict(readHephaestusUpdateJournal());
+    const after = updateJournalStamp(runtimeBase);
+    if (after !== null && after !== before) return verdict(readHephaestusUpdateJournalAt(runtimeBase));
     // Core writes the journal on every branch it completes, so an untouched
     // file means it threw before getting there. That has three causes and Core
     // reports none of them: lock contention, a failed install, or no network.
     // The lock is observable, so check it rather than guessing.
-    if (updaterLockHeld()) return { ok: true, outcome: "busy", journal: readHephaestusUpdateJournal() };
+    if (updaterLockHeld(runtimeBase)) return { ok: true, outcome: "busy", journal: readHephaestusUpdateJournalAt(runtimeBase) };
     // Retry once: a transient blip is far more common than a real outage.
     if (attempt === 0) await new Promise((resolve) => setTimeout(resolve, 1_500));
   }
-  return { ok: false, outcome: "offline", journal: readHephaestusUpdateJournal() };
+  return { ok: false, outcome: "offline", journal: readHephaestusUpdateJournalAt(runtimeBase) };
 }
 
 function safeCwd(cwd?: string): string {
@@ -724,16 +786,18 @@ export async function runHephaestus<T = unknown>(
     // An unreadable link is not a reason to refuse to run — fall back to the
     // path as given, which is what this code did before.
   }
-  const env = withPythonRuntimeBoundary(py.python, withCliPath({
+  const env = withDesktopEngineHost(withPythonRuntimeBoundary(py.python, withCliPath({
     ...process.env,
     // Same proxy Desktop uses, loopback bypassed (see engineSpawnSpec).
     ...systemNetworkChildEnv(process.env),
     ...opts.env,
+    ...mergeEnginePolicyEnv(process.env, opts.env ?? {}),
+    AGENTLAS_HOST_RUNTIME: "desktop",
     HEPHAESTUS_RUNTIME_ROOT: pinnedRoot,
     PYTHONPATH: pinnedRoot + (process.env.PYTHONPATH ? path.delimiter + process.env.PYTHONPATH : ""),
     PYTHONUTF8: "1",
     PYTHONIOENCODING: "utf-8",
-  }));
+  })));
 
   const fullArgs = py.python === "py" ? ["-3", "-c", PY_BOOTSTRAP, module, ...args] : ["-c", PY_BOOTSTRAP, module, ...args];
 

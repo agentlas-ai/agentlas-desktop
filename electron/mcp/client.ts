@@ -62,7 +62,7 @@ import type { ChatHostNotice } from "../../shared/types";
 // PRD §3.1 6단계 BYOC: 사용자 머신에서 사용자의 구독/키로 직접 호출.
 // chatId 기반 — chat에서 agent + project 컨텍스트 lookup.
 import fs from "node:fs";
-import { modelContextFailureReason, passFailureVerdict, waitForPassRetry } from "../long-run/pass-failure-verdict";
+import { exhaustedPassFailureVerdict, modelContextFailureReason, passFailureVerdict, waitForPassRetry } from "../long-run/pass-failure-verdict";
 import type { GoalPassStop } from "../long-run/goal-pass-stop";
 import { parseHubReleasePin, assertHubReleasePin } from "../../shared/hub-release-pin";
 import { isCallOnlyHubAgent } from "../../shared/call-only-agent";
@@ -290,6 +290,7 @@ import { runMcpKeyElicitationGate } from "./run-key-elicitation";
 import { getEnvConfigurationRevision } from "../secrets/vault";
 import { bridgeHubPluginCandidates } from "../mcp-tools/hub-plugin-bridge";
 import { noteRuntimeFailure, noteRuntimeSucceeded, runtimeCooldown, clearRuntimeCooldown, parseRetryHint } from "../runtime/runtime-cooldown";
+import { durableGoalFailureAttempts } from "../runtime/durable-retry";
 import { RUNTIME_CREDENTIAL_UNAVAILABLE_CODE } from "../runtime/credential-access";
 import { recordResolvedAlias } from "../runtime/model-discovery-store";
 import { setResolvedCliModelAlias } from "../../shared/models";
@@ -959,6 +960,19 @@ function invocationRuntimeFailure(error: unknown, now = Date.now()): InvocationR
   return cause ? { ...facts, cause } : facts;
 }
 
+/** Host-only projection for a failed FIRST pass (which never reaches the continuation loop).
+ * The exception's private provider brand is required; no renderer/error prose can mint a retry. */
+export function goalPassStopForInvocationError(error: unknown, goalId: string): GoalPassStop | null {
+  const failure = InvocationRunnerFailureError.providerFailure(error);
+  if (!failure || !["quota", "rate_limit", "unavailable", "timeout", "empty", "exit"].includes(failure.kind)) return null;
+  const verdict = exhaustedPassFailureVerdict(failure);
+  const at = parseRetryHint(failure.retryAfterHint, Date.now());
+  return { goalId, reason: verdict.reason, action: "pause", failureKind: failure.kind, runtime: failure.runtime,
+    ...(failure.retryBudgetExhausted ? {retryBudgetExhausted:true as const} : {}),
+    ...(failure.retryAfterHint ? { retryAfterHint: failure.retryAfterHint } : {}),
+    ...(at !== null ? { retryAfterAt: new Date(at).toISOString() } : {}) };
+}
+
 /**
  * The bounded, redacted cause of an exception whose own words are not shown to the owner (invoke_error_diagnostic, run record only).
  * `ownerCause`: the exception is the owner's or an outside change (a working folder that is gone), not the app's own fault, so the run is not
@@ -1009,8 +1023,8 @@ export function invocationFailure(
   }
   const projectResidencyFailure = InvocationRunnerFailureError.projectResidencyBusyFailure(error);
   if (projectResidencyFailure) {
-    const ko = "이 Work 프로젝트의 다른 채팅에서 에이전트가 아직 실행 중이라 새 CLI를 시작하지 않았습니다. 현재 실행이 끝난 뒤 다시 보내 주세요. 기존 대화와 입력은 보존됩니다.";
-    const en = "Another chat in this Work project is still using its provider. The new CLI was not started; send again after the current turn finishes. Your existing transcript and input are preserved.";
+    const ko = "이 Work 프로젝트의 다른 채팅에서 에이전트가 아직 실행 중이라 새 CLI를 시작하지 않았습니다. 다시 보내기 전에 요청의 현재 상태를 확인해 주세요. 기존 대화와 입력은 보존됩니다.";
+    const en = "Another chat in this Work project is still using its provider. The new CLI was not started. Check the request's current status before sending it again. Your existing transcript and input are preserved.";
     return { code: projectResidencyFailure.code, message: pickLocale(req) === "ko" ? ko : en,
       ...(runtimeFailure ? { runtimeFailure } : {}) };
   }
@@ -2132,6 +2146,7 @@ export function runMcpInvocation(
   /** Main-only native controller; never carried in model or renderer input. */
   onNativeTurnController?: RunnerEvents["onNativeTurnController"],
   ownerControlInbox?: RunnerRequest["ownerControlInbox"],
+  hostVideoCustody?: import("../invocation/host-video-custody").HostVideoCustody,
 ): Promise<McpInvocationResult> {
   if (!req.runId) req = { ...req, runId: `direct-${randomUUID()}` };
   const graphAttempt = executionContext?.graphWorkerAttempt;
@@ -2219,7 +2234,7 @@ export function runMcpInvocation(
   const runOwnedInvocation = () => withModelCallScope({ runId: req.runId, chatId: req.chatId, userTurnId: req.runId, role: "main" }, runOwnedInvocationScoped);
   const runOwnedInvocationScoped = () => withOneHistoryNativeInvocation({runId:req.runId!,chatId:req.chatId},()=>withAttemptChildren(children, () => withInvocationUsage(() => withInvocationJudgmentContext(req.runtimeSelection, invocationSignal, () => runMcpInvocationInContext(
     req, guardedSink, invocationSignal, workspaceBinding, executionContext, onDurableUserMessage, hostNoticePurpose, browserPresentation, bindDispatchedGoal, login, () => progressAdvisory, onBeforeGoalWorkDispatch, workRecovery,
-    () => directWorkOwnerCurrent && !ownerSignal.aborted, onNativeTurnController, ownerControlInbox,
+    () => directWorkOwnerCurrent && !ownerSignal.aborted, onNativeTurnController, ownerControlInbox, hostVideoCustody,
   )).then(async result => {
     if (login.waiting && !ownerSignal.aborted) {
       const browserLoginWait = login.seal(await drainAttemptChildren(children));
@@ -2274,6 +2289,7 @@ async function runMcpInvocationInContext(
   invocationCurrent?: () => boolean,
   onNativeTurnController?: RunnerEvents["onNativeTurnController"],
   ownerControlInbox?: RunnerRequest["ownerControlInbox"],
+  hostVideoCustody?: import("../invocation/host-video-custody").HostVideoCustody,
 ): Promise<McpInvocationResult> {
   assertInvocationWorkspaceSourceContext(workspaceBinding, executionContext?.source);
   const projectDomainBinding = assertProjectDomainOwner(req.chatId, getAuthenticatedActorIds());
@@ -2756,7 +2772,7 @@ async function runMcpInvocationInContext(
        * 데스크탑 경로에서 이 인자를 넘기지 않아, 실제로 그것을 쓰는 곳은 모바일
        * 브리지 하나뿐이었다.
        */
-      persistedUserMessageId = appendChatMessage(chat.id, "user", ownerVisiblePrompt(req), { ...(req.images?.length ? { images: req.images } : {}), ...runtimeInputScope }).id;
+      persistedUserMessageId = appendChatMessage(chat.id, "user", ownerVisiblePrompt(req), { ...(req.images?.length ? { images: req.images } : {}), ...(req.fileGroupId ? { fileGroupId: req.fileGroupId } : {}), ...runtimeInputScope }).id;
       if (priorHistory.length === 0) autoTitleFromFirstMessage(chat.id, ownerVisiblePrompt(req));
     }
     userMessagePersisted = true;
@@ -4437,6 +4453,7 @@ async function runMcpInvocationInContext(
         // A Science formal loop's canonical wait reaches agentlas-turn goal_wait here, as it did through the old bridge.
         ...(scienceGoalWaitResolver ? { turnGoalWaitOnly: { resolveGoalWait: scienceGoalWaitResolver, alongside: true as const } } : {}),
         admissionCurrent: isMcpConfigCurrent,
+        ...(hostVideoCustody ? { hostVideoCustody } : {}),
         ...(nativeBrowserGrant ? { nativeBrowser: nativeBrowserGrant } : {}),
         ...(workspacePreviewOwnerGrant ? { workspacePreviewOwnerGrant } : {}),
         ...(req.mcpBrowserProfileKey ? { browserProfileKey: req.mcpBrowserProfileKey } : {}),
@@ -4672,18 +4689,19 @@ async function runMcpInvocationInContext(
       // The cause (stage + reason code) is in the mcp_config_failure run event above, not in the owner's sentence: a code such as
       // mcp_proxy_gate_unavailable or supervisor_os_host_unavailable means nothing to act on, and "check the tool connection"
       // is wrong for a cause inside the app (production: those two codes and a Goal ledger mismatch ended 20 runs with it).
-      // Nothing reached the model, so the request can simply be sent again.
+      // Nothing reached the model. Whether the owner sends it again is not said here: the send queue starts it again by itself while it has tries
+      // left (shared/transient-send-refusal.ts HOST_NOT_READY_RUN_FAILURE_CODES) and the transcript line says which (run-failure-notice.ts).
       sink({ kind: "error", error: {
         code,
         message: thrownCode === AGENTLAS_BROWSER_HOST_UNAVAILABLE && err instanceof Error
           ? err.message
           : scopeChanged
             ? locale === "ko"
-              ? "실행을 준비하는 동안 목표 상태가 바뀌어 시작하지 않았습니다. 같은 요청을 다시 보내 주세요."
-              : "The goal changed while this run was being prepared, so it did not start. Please send the same request again."
+              ? "실행을 준비하는 동안 목표 상태가 바뀌어 시작하지 않았습니다. 요청은 저장되어 있습니다."
+              : "The goal changed while this run was being prepared, so it did not start. Your request is saved."
             : locale === "ko"
-              ? "이번 실행에 필요한 도구 연결이 준비되지 않아 시작하지 않았습니다. 요청은 저장되어 있으니 같은 요청을 다시 보내 주세요."
-              : "The tool connections this run needs were not ready, so it did not start. Your request is saved; please send it again.",
+              ? "이번 실행에 필요한 도구 연결이 준비되지 않아 시작하지 않았습니다. 요청은 저장되어 있습니다."
+              : "The tool connections this run needs were not ready, so it did not start. Your request is saved.",
         turnDelivery: "not-dispatched",
       } });
       return earlyResult();
@@ -8290,6 +8308,8 @@ async function runMcpInvocationInContext(
          * The next move comes from the typed failure marker, never the wording, because vendor
          * notices change on every release and a run must not start dying because a sentence moved.
          */
+        const durableAttempts = durableGoalFailureAttempts(activeRunnerReq, active, activeGoalId);
+        passFailureTransientAttempts = Math.max(passFailureTransientAttempts, Math.max(0, durableAttempts - 1));
         const verdict = passFailureVerdict(result.failure, passFailureTransientAttempts);
         tryRecordRunEvent({
           runId: req.runId ?? "",
@@ -8304,7 +8324,7 @@ async function runMcpInvocationInContext(
             ...(verdict.retryAfterHint ? { retryAfterHint: verdict.retryAfterHint } : {}),
           },
         });
-        if (verdict.action === "retry") {
+        if (verdict.action === "retry" && !result.failure.retryBudgetExhausted) {
           passFailureTransientAttempts += 1;
           sink({
             kind: "tool-use",
@@ -8319,13 +8339,14 @@ async function runMcpInvocationInContext(
           continue;
         }
         if (activeGoalId) {
-          const resetMs = result.failure.kind === "quota" ? parseRetryHint(verdict.retryAfterHint, Date.now()) : null;
+          const resetMs = parseRetryHint(verdict.retryAfterHint, Date.now());
           goalPassStop = {
             goalId: activeGoalId,
             reason: verdict.reason,
             action: verdict.action,
             failureKind: result.failure.kind,
             runtime: result.failure.runtime,
+            ...(result.failure.retryBudgetExhausted ? {retryBudgetExhausted:true as const} : {}),
             ...(verdict.retryAfterHint ? { retryAfterHint: verdict.retryAfterHint } : {}),
             ...(resetMs !== null ? { retryAfterAt: new Date(resetMs).toISOString() } : {}),
           };
@@ -9567,9 +9588,13 @@ async function runMcpInvocationInContext(
     // The typed delivery fact rides on the event: run-graph reads it to tell a refusal before dispatch from an unknown effect.
     sink({ kind: "error", error: { ...invocationFailure(req, "runner-failed", err, executionContext),
       ...(runnerRefusedBeforeDispatch(err) ? { turnDelivery: "not-dispatched" as const } : {}) } });
-    return InvocationRunnerFailureError.isMarkedQuota(err)
-      ? { ...earlyResult(), markedQuotaFailure: true }
-      : earlyResult();
+    // Most first-pass failures are sealed here, rather than thrown to the
+    // service's completion catch. Carry the private typed stop through this
+    // ordinary result too; otherwise a fresh Goal invocation loses its cap.
+    const failedGoalId = !signal?.aborted ? getChat(chat.id)?.goalId : null;
+    const firstPassStop = failedGoalId ? goalPassStopForInvocationError(err,failedGoalId) : null;
+    return { ...earlyResult(), ...(InvocationRunnerFailureError.isMarkedQuota(err) ? {markedQuotaFailure:true} : {}),
+      ...(firstPassStop ? {goalPassStop:firstPassStop} : {}) };
   }
   } catch (err) {
     // A store lock refused while the invocation was being prepared, before it sent anything anywhere: typed

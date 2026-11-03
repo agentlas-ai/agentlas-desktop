@@ -73,6 +73,29 @@ let nextNativeTaskOwnerId = 1_000_000_000;
 const nativeTaskOwners = new Map<string, NativeTaskOwner>();
 const ownerCleanup = new Map<number, { window: BrowserWindow; listener: () => void }>();
 const MAX_NATIVE_TASK_BINDINGS_PER_OWNER = 64;
+// A destroyed execution anchor may be replaced while its run is still alive.
+// Keep only the old lease's already-authorized presentation; it is never an IPC
+// input and is discarded on release, replacement, or deletion of the chat.
+type PendingNativeTaskRecovery = { presentation?: NativeTaskPresentation; signal: AbortSignal;
+  callbacks: Set<(reason: NativeBrowserRevokeReason) => void> };
+const pendingNativeTaskRecoveries = new Map<string, Map<NativeBrowserTaskLease, PendingNativeTaskRecovery>>();
+
+function forgetNativeTaskRecovery(lease: NativeBrowserTaskLease): PendingNativeTaskRecovery | undefined {
+  const pending = pendingNativeTaskRecoveries.get(lease.taskScopeId);
+  const recovery = pending?.get(lease);
+  pending?.delete(lease);
+  if (pending && !pending.size) pendingNativeTaskRecoveries.delete(lease.taskScopeId);
+  return recovery;
+}
+
+function cancelNativeTaskRecoveries(taskScopeId: string): void {
+  const pending = pendingNativeTaskRecoveries.get(taskScopeId);
+  if (!pending) return;
+  pendingNativeTaskRecoveries.delete(taskScopeId);
+  for (const recovery of pending.values()) {
+    for (const callback of recovery.callbacks) { try { callback("task-ended"); } catch { /* Terminal cleanup remains unconditional. */ } }
+  }
+}
 
 /*
  * ★Agents close what they open (owner 2026-09-28: "일하고 끄는 게 기본인데").
@@ -332,17 +355,31 @@ export function registerNativeBrowserTask(presentation: NativeTaskPresentation):
 /** Main-only: execution lifetime is independent of renderer/window presentation. */
 export function acquireNativeBrowserTask(input: {
   taskScopeId: string; runId: string; permission: "read" | "write" | "full"; signal: AbortSignal;
+  /** A revoked Main-only lease, never supplied by a renderer. */
+  restorePresentationFrom?: NativeBrowserTaskLease;
 }): NativeBrowserTaskLease {
   if (!input.runId || input.signal.aborted || !["read", "write", "full"].includes(input.permission)) {
     throw new Error("native-browser-task-unbound");
   }
-  const task = ensureNativeTask(input.taskScopeId);
+  const previousLease = input.restorePresentationFrom;
+  const candidate = previousLease && previousLease.taskScopeId === input.taskScopeId && previousLease.runId === input.runId
+    && previousLease.permission === input.permission ? pendingNativeTaskRecoveries.get(input.taskScopeId)?.get(previousLease) : undefined;
+  const recovery = candidate?.signal === input.signal ? candidate : undefined;
+  const saved = recovery?.presentation;
+  const presentation = saved && !saved.window.isDestroyed() && ownerCleanup.get(saved.ownerId)?.window === saved.window ? saved : undefined;
+  const task = ensureNativeTask(input.taskScopeId, presentation?.ownerId);
+  // A renderer may have rebound the chat already. Preserve its newer binding
+  // and never replace a different owner's active presentation with an old one.
+  if (presentation && !task.presentation) {
+    try { registerNativeBrowserTask(presentation); } catch { /* The execution lease remains usable without presentation. */ }
+  }
+  if (previousLease && recovery) forgetNativeTaskRecovery(previousLease);
   const taskScopeId = input.taskScopeId, runId = input.runId, permission = input.permission;
   const listeners = new Set<(reason: NativeBrowserRevokeReason) => void>();
   let released = false;
   const onAbort = () => revoke("aborted");
   const release = () => {
-    if (released) return;
+    if (released) { forgetNativeTaskRecovery(lease); return; }
     released = true;
     input.signal.removeEventListener("abort", onAbort);
     task.leases.delete(lease);
@@ -352,14 +389,24 @@ export function acquireNativeBrowserTask(input: {
   const revoke = (reason: NativeBrowserRevokeReason = "task-ended") => {
     const callbacks = [...listeners];
     release();
+    if (reason === "anchor-closed" && !input.signal.aborted && callbacks.length) {
+      const pending = pendingNativeTaskRecoveries.get(taskScopeId) ?? new Map<NativeBrowserTaskLease, PendingNativeTaskRecovery>();
+      pending.set(lease, { presentation: task.presentation, signal: input.signal, callbacks: new Set(callbacks) });
+      pendingNativeTaskRecoveries.set(taskScopeId, pending);
+    }
     for (const callback of callbacks) { try { callback(reason); } catch { /* Terminal cleanup remains unconditional. */ } }
   };
   const lease: NativeBrowserTaskLease = { ownerId: task.ownerId, taskScopeId, runId, permission,
     current: () => !released && !input.signal.aborted && nativeTaskOwners.get(taskScopeId) === task
       && task.leases.has(lease) && !task.window.isDestroyed(), release, revoke,
-    onRevoke: (listener) => { if (released) { listener("task-ended"); return () => {}; } listeners.add(listener); return () => { listeners.delete(listener); }; } };
+    onRevoke: (listener) => { if (released) { listener("task-ended"); return () => {}; } listeners.add(listener); return () => {
+      listeners.delete(listener); pendingNativeTaskRecoveries.get(taskScopeId)?.get(lease)?.callbacks.delete(listener);
+    }; } };
   task.leases.add(lease);
   input.signal.addEventListener("abort", onAbort, { once: true });
+  // A synchronous host/window callback can abort while the anchor is being
+  // created, before the listener exists. It must not leave a live lease.
+  if (input.signal.aborted) { revoke("aborted"); throw new Error("native-browser-task-unbound"); }
   return lease;
 }
 
@@ -703,6 +750,7 @@ export function closeWorkLiveViewsForOwner(ownerId: number): void {
  */
 export function closeWorkLiveViewsForTaskScope(taskScopeId: string): void {
   if (!taskScopeId) return;
+  cancelNativeTaskRecoveries(taskScopeId);
   const task = nativeTaskOwners.get(taskScopeId);
   if (task) removeNativeTask(task);
 }

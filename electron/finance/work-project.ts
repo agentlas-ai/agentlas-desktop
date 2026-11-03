@@ -64,6 +64,15 @@ export function financeWorkProject(scope: FinanceScope, injected?: WorkProjectDe
   const dependencies = injected ?? { db: getDb(), createProject, getProject, managedProjectsRoot: userDataPath('finance', 'work-projects') };
   const ownerScope = createHash('sha256').update(JSON.stringify([scope.workspaceId, scope.userId])).digest('hex');
   const key = `${PREFIX}owner:${ownerScope}`;
+  if (scope.readOnly) {
+    const row = dependencies.db.prepare('SELECT value FROM meta WHERE key = ?').get(key) as { value: string } | undefined;
+    if (!row) throw new Error('finance_work_project_not_prepared');
+    const binding = Binding.parse(JSON.parse(row.value));
+    const reverse = dependencies.db.prepare('SELECT value FROM meta WHERE key = ?').get(`${PREFIX}project:${binding.projectId}`) as { value: string } | undefined;
+    if (binding.ownerScope !== ownerScope || reverse?.value !== ownerScope) failure();
+    verify(binding, dependencies); scope.assertCurrent();
+    return { ownerScope, projectId: binding.projectId };
+  }
   let created: Binding | null = null;
   let createdIdentity: { dev: number; ino: number } | null = null;
   try {

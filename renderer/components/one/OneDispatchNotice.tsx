@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { ChatHostNotice } from "@shared/types";
 import { stripAgentControlBlocks } from "@shared/agent-control-blocks";
 import { flattenAskFences } from "@shared/ask-fence-flatten";
@@ -10,16 +10,18 @@ import { ipcErrorCode } from "@shared/ipc-error-code";
 import { createDirtyGate } from "@/lib/store-change-policy";
 import { readOneChatHistory } from "@/lib/one-chat-history";
 import { markChatVisible } from "@/lib/tool-approvals";
-import { Markdown } from "../Markdown";
+import { Markdown, type LinkedFileArtifact } from "../Markdown";
 import { OneAgentPortrait } from "./OneAgentPortrait";
 import { ToolApprovalInline } from "../ToolApprovalInline";
 import { BrowserActionApprovalSheet } from "../BrowserActionApprovalSheet";
 import { ChatQuestionSheet } from "../ChatQuestionSheet";
 
 type Notice = Extract<ChatHostNotice, { purpose: "one-dispatch-link" | "one-dispatch-result" }>;
+type ReportPage = { key: string; messageId: string; text: string; nextOffset: number | null };
+type ReportReply = { available: false } | { available: true; messageId: string; text: string; nextOffset: number | null };
 
 /** Displays the member's observed work on an existing room receipt, without creating messages. */
-export function OneDispatchNotice({ notice, locale, onOpenChat }: { notice: Notice; locale: "ko" | "en";
+export function OneDispatchNotice({ notice, locale, onOpenChat, onOpenLinkedFile }: { notice: Notice; locale: "ko" | "en"; onOpenLinkedFile?: (file: LinkedFileArtifact) => void;
   /** Opens the teammate's own session (read-only when the personal agent opened it). Absent: no link is drawn. */
   onOpenChat?: (chatId: string) => void }) {
   const [current, setCurrent] = useState(notice);
@@ -28,8 +30,19 @@ export function OneDispatchNotice({ notice, locale, onOpenChat }: { notice: Noti
   const [answeredSource, setAnsweredSource] = useState<string | null>(null);
   const [stopBusy, setStopBusy] = useState(false);
   const [stopNote, setStopNote] = useState<"saved" | "failed" | null>(null);
+  const [report, setReport] = useState<ReportPage | null>(null);
+  const [reportBusy, setReportBusy] = useState(false);
+  const [reportError, setReportError] = useState(false);
   useEffect(() => setCurrent(notice), [notice]);
   const dispatch = current.dispatch;
+  const reportKey = JSON.stringify([dispatch?.dispatchId, dispatch?.parentChatId, current.chatId, current.runId]);
+  const reportKeyRef = useRef(reportKey);
+  reportKeyRef.current = reportKey;
+  const reportMounted = useRef(true);
+  const reportRequest = useRef<string | null>(null);
+  useEffect(() => { reportMounted.current = true; return () => { reportMounted.current = false; }; }, []);
+  useEffect(() => { setReport(null); setReportBusy(false); setReportError(false); }, [reportKey]);
+  const currentReport = report?.key === reportKey ? report : null;
   // The teammate wrote its report from its own folder: `./clip/preview.gif` means that folder, not this conversation's.
   const [memberFolders, setMemberFolders] = useState<string[]>([]);
   useEffect(() => {
@@ -114,6 +127,34 @@ export function OneDispatchNotice({ notice, locale, onOpenChat }: { notice: Noti
   };
   const status = dispatch?.status;
   const question = dispatch?.pendingQuestion;
+  const loadReportPage = async () => {
+    const api = ipc();
+    const oneOrg = api?.oneOrg as (NonNullable<ReturnType<typeof ipc>>["oneOrg"] & {
+      readDispatchResult?: (input: unknown) => Promise<ReportReply>;
+    }) | undefined;
+    if (!dispatch || reportBusy || reportRequest.current === reportKey || currentReport?.nextOffset === null || !oneOrg?.readDispatchResult) return;
+    const offset = currentReport?.nextOffset ?? 0;
+    const key = reportKey;
+    reportRequest.current = key;
+    setReportBusy(true); setReportError(false);
+    try {
+      const page = await oneOrg.readDispatchResult({ parentChatId: dispatch.parentChatId,
+        dispatchId: dispatch.dispatchId, chatId: current.chatId, runId: current.runId, offset,
+        ...(currentReport ? { messageId: currentReport.messageId } : {}) });
+      if (!reportMounted.current || reportKeyRef.current !== key) return;
+      if (!page?.available || typeof page.text !== "string" || typeof page.messageId !== "string"
+        || (currentReport && page.messageId !== currentReport.messageId)
+        || (page.nextOffset !== null && (!Number.isSafeInteger(page.nextOffset) || page.nextOffset <= offset))) {
+        throw new Error("report-page-unavailable");
+      }
+      setReport({ key, messageId: page.messageId, text: (currentReport?.text ?? "") + page.text, nextOffset: page.nextOffset });
+    } catch {
+      if (reportMounted.current && reportKeyRef.current === key) setReportError(true);
+    } finally {
+      if (reportRequest.current === key) reportRequest.current = null;
+      if (reportMounted.current && reportKeyRef.current === key) setReportBusy(false);
+    }
+  };
   const answer = async (reply: string) => {
     const api = ipc();
     if (!dispatch || !question || answerBusy || !api?.confirm?.answerDelegatedQuestion) return;
@@ -157,7 +198,17 @@ export function OneDispatchNotice({ notice, locale, onOpenChat }: { notice: Noti
         <span style={{ opacity: .65 }}>{item.kind === "tool" ? (ko ? "도구 · " : "Tool · ") : ""}</span>{item.text}
       </div>)}
     </details>}
-    {dispatch?.resultText && <Markdown text={withoutCutLink(stripAgentControlBlocks(flattenAskFences(dispatch.resultText, locale)))} messageId={`one-dispatch-result:${dispatch.dispatchId}:${current.runId}`} mediaBasePaths={memberFolders} />}
+    {dispatch?.resultText && <>
+      <Markdown text={withoutCutLink(stripAgentControlBlocks(flattenAskFences(currentReport?.text ?? dispatch.resultText, locale)))} messageId={`one-dispatch-result:${dispatch.dispatchId}:${current.runId}`} mediaBasePaths={memberFolders} onOpenLinkedFile={onOpenLinkedFile} />
+      {currentReport?.nextOffset !== null && <button type="button" disabled={reportBusy} onClick={() => { void loadReportPage(); }}
+        style={{ border: 0, background: "transparent", padding: "6px 0", color: "var(--accent)", font: "inherit", fontSize: 12, cursor: "pointer" }}>
+        {reportBusy ? (ko ? "보고서를 불러오는 중…" : "Loading report…")
+          : currentReport ? (ko ? "다음 부분 보기" : "Show next part") : (ko ? "전체 보고 보기" : "Show full report")}
+      </button>}
+      {reportError && <p role="status" style={{ fontSize: 12, color: "var(--muted-deep)" }}>
+        {ko ? "이 보고서의 원문을 불러오지 못했습니다. 팀원 세션에서 확인할 수 있어요." : "The full report could not be loaded. You can check the teammate's session."}
+      </p>}
+    </>}
     {question && answeredSource !== question.sourceMessageId && <ChatQuestionSheet
       questions={(question.questionBank?.questions ?? question.questions).map((item,index) => ({...item,id:`${question.sourceMessageId}-q${index}`}))}
       initialReply={question.committedReply}

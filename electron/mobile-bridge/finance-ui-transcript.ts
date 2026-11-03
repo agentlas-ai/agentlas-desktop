@@ -1,8 +1,8 @@
 import { createHash } from 'node:crypto';
 import { nativePortOwnerScope, resultRead } from '../harness/tool-dispatch';
 import type { HarnessCallContext } from '../harness/capability-ports';
-import { FINANCE_NATIVE_VIEW, FinanceNativeResultSchema } from '../../shared/finance-native-ui';
-import { financeNativeTranscriptContents } from '../../shared/finance-native-transcript';
+import { FINANCE_NATIVE_VIEW, FinanceNativeResultSchema, financeNativeTranscriptContents, mobileDomainPorts } from '../finance/mobile-bridge';
+export { mobileDomainPorts };
 import { mergeInlineUiTranscript } from '../../shared/inline-ui-transcript';
 import type { InlineUiPresentationContent } from '../../shared/inline-ui-presentation';
 import type { ChatHistoryEntry } from '../../shared/types';

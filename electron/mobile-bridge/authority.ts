@@ -4,7 +4,7 @@ import { createMobileBuildInterviewWitnessSource } from "../hephaestus/mobile-in
 import { purposePrompt } from "../runtime/purpose-prompts";
 import type { ToolApprovalDecision, ToolApprovalRequestEvent, ToolApprovalResolutionReceipt } from "../../shared/types";
 import { listUiInstances } from "../harness/ui-instances";
-import { mergeMobileInlineUiTranscript } from "./finance-ui-transcript";
+import { mergeMobileInlineUiTranscript, mobileDomainPorts } from "./finance-ui-transcript";
 import {isOneMobileSecureMethod, type OneMobileSecureAdapter} from "../secrets/one-mobile-secure";
 import { answerOneDispatchQuestion } from "../one/team-dispatch";
 import type { MobilePushService, MobilePushNotice } from "./push";
@@ -81,7 +81,9 @@ import { tryProduceAcceptedResultSuggestion } from "../one/completion-suggestion
 import { tryProduceOneImprovementProofForTask } from "../one/improvement-proof-producer";
 import { latestOneArtifactBindingOfPath, readOneArtifactImagePreview } from "../one/artifact-preview";
 import { MobileChatAttachmentUploads } from "./chat-attachment-upload";
-import { chatFilePrompt, chatFileImages, validateChatAttachmentSelection, readBoundChatMessageAttachment } from "../store/chat-message-attachments";
+import { chatFilePrompt, chatFileDisplayImages, validateChatAttachmentSelection, readBoundChatMessageAttachment } from "../store/chat-message-attachments";
+import { splitMobileMediaParams, type MobileMediaParams } from "../../shared/mobile-bridge-media";
+import { chatAttachmentPreview } from "../media/attachment-preview";
 import { performOneMobileSuggestionAction } from "../one/mobile-suggestions";
 import { invocationService, invocationEventRequestsDecision } from "../invocation/service";
 import { onOwnerAsk } from "../owner-ask-alerts";
@@ -134,6 +136,7 @@ import { releaseIdleAgentResidencyForChat } from "../runtime/agent-residency";
 import { installPublicHubRelease, listInstalledAgents } from "../mcp/registry";
 import { addOneOrgMember, getOneOrgState, markOneOrgMemberRead, openOneOrgMember } from "../one/org";
 import { readMobileOneAvatar } from "./one-avatar-preview";
+import { setOneSelfAvatarImage } from "../one/avatar";
 import { MCP_TOOL_CATALOG } from "../mcp-tools/catalog";
 import { listInstalledServers } from "../mcp-tools/registry";
 import { installMobileConnector, listMobileConnectors, setMobileConnectorEnabled, testMobileConnector } from "./connectors";
@@ -308,6 +311,10 @@ import {
   stripMobileBridgeControlFences,
 } from "./sanitize";
 import { MobileScienceChat } from "./science-chat";
+import { LegacyChatVideoTransfers } from "./legacy-chat-video";
+import { ArtifactVideoTransfers } from "./artifact-video-transfers";
+import { ChatVideoTransfers, type ChatVideoPrincipal } from "./chat-video-transfers";
+import { parseMobileBridgeRequest } from "../../shared/mobile-bridge";
 import { inferOwnerLocale, isMachineAgentLabel, ownerActivityText, ownerAgentLabelOrNull } from "../../shared/owner-visible-activity-text";
 import { withMobileRequestTiming } from "./request-timing";
 import { MobileBridgeRefusal } from "../../shared/mobile-bridge-refusal";
@@ -392,6 +399,7 @@ export interface MobileNativeToolApprovalPort {
 
 export interface AgentlasDesktopMobileBridgeAuthorityOptions {
   nativeToolApprovals?: MobileNativeToolApprovalPort;
+  domainAccountAdmission?: (deviceId: string) => Promise<{ assertCurrent(): void }>;
   /** Main-installed independent sender/original-command service; absent stays unavailable. */
   oneSecure?: () => OneMobileSecureAdapter | null;
   mobilePush?: MobilePushService;
@@ -2404,6 +2412,9 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
    * takeover intact), but only while it can still come back; see armTerminalLeaseTimer.
    */
   private readonly deviceConnectionIds = new Map<string, Set<string>>();
+  private legacyChatVideoTransfers: LegacyChatVideoTransfers | null = null;
+  private artifactVideoTransfers: ArtifactVideoTransfers | null = null;
+  private chatVideoTransfers: ChatVideoTransfers | null = null;
   /** One pending hand-back per device: the grace after its last connection closed, or a retry after the controller refused. */
   private readonly terminalLeaseTimers = new Map<string, NodeJS.Timeout>();
   private readonly buildRuns = new Map<string, {
@@ -2542,6 +2553,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
       personalAgentRoomsV1: { chatField: "supervisedByPersonalAgent", refusalCode: PERSONAL_AGENT_ROOM_READ_ONLY },
       // Additive: apps that do not know the key ignore it; they keep the existing token summary.
       contextInspectV1: true,
+      ...mobileDomainPorts.capabilities,
       // Additive: the phone may report its decoder with device.capabilities (MOBILE_CLIENT_CAPABILITIES).
       clientCapabilitiesV1: true,
       // Read-only question representation; not permission to answer or start a child.
@@ -2585,6 +2597,10 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
 
   connectionClosed(context: MobileBridgeConnectionContext): void {
     // First, so a sink below that throws cannot leave a closed connection counted as live.
+    this.legacyChatVideoTransfers?.closeConnection({deviceId:context.deviceId,connectionId:context.connectionId});
+    this.artifactVideoTransfers?.closeConnection({deviceId:context.deviceId,connectionId:context.connectionId});
+    this.chatVideoTransfers?.closeConnection({deviceId:context.deviceId,connectionId:context.connectionId});
+    this.scienceChat.closeVideoConnection({deviceId:context.deviceId,connectionId:context.connectionId});
     const connections = this.deviceConnectionIds.get(context.deviceId);
     connections?.delete(context.connectionId);
     if (connections && connections.size === 0) this.deviceConnectionIds.delete(context.deviceId);
@@ -3011,6 +3027,13 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
       throw new TypeError("Invalid Mobile Bridge authority request envelope");
     }
 
+    // media-carousel: the optional chat-attachments-v2 / remote-build-* keys come off the request here, so each
+    // existing exact-key check below reads the request it always read (shared/mobile-bridge-media.ts).
+    const mediaSplit = splitMobileMediaParams(request.method, request.params);
+    if (mediaSplit?.error) throw new TypeError(`${request.method} ${mediaSplit.error}`);
+    const media: MobileMediaParams = mediaSplit?.media ?? {};
+    if (mediaSplit) request = { ...request, params: mediaSplit.rest as MobileBridgeRpcRequest["params"] };
+
     if (isOneMobileSecureMethod(request.method)) {
       const secure = this.options.oneSecure?.();
       if (!secure) throw new Error("secure_route_unavailable");
@@ -3025,6 +3048,22 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
     if (mailRefusal) return mailRefusal;
 
     switch (request.method) {
+      case "science.video.has":
+      case "science.video.list":
+      case "science.video.open":
+      case "science.video.prepare":
+      case "science.video.chunk":
+      case "science.video.close": {
+        // Validate the exact wire shape even when this authority is invoked directly in-process.
+        const parsed = parseMobileBridgeRequest(request);
+        if (!parsed.ok) throw new TypeError("science_video_params_invalid");
+        const principal = { deviceId: context.deviceId, connectionId: context.connectionId };
+        return asJsonValue(await this.scienceChat.videoRequest(request.method, parsed.value.params, principal, () => {
+          this.assertAvailable();
+          if (!this.deviceConnectionIds.get(context.deviceId)?.has(context.connectionId)
+            || this.options.mailAccountGuard?.(context.deviceId) !== "ok") throw new Error("science_video_unavailable");
+        }), request.method);
+      }
       case "science.chat.list":
       case "science.chat.read":
       case "science.chat.send":
@@ -3177,6 +3216,23 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
       case "one.org.get": {
         noParams(request);
         return asJsonValue(getOneOrgState(), request.method);
+      }
+      case "one.avatar.set": {
+        assertMobileOneDeviceAuthority(context);
+        if (!request.idempotencyKey) throw new TypeError("one.avatar.set requires an idempotencyKey");
+        if (!this.deviceConnectionIds.get(context.deviceId)?.has(context.connectionId)) throw new Error("account_mismatch");
+        let verdict: string | undefined;
+        try { verdict = this.options.mailAccountGuard?.(context.deviceId); } catch { verdict = "mismatch"; }
+        if (verdict !== "ok") throw Object.assign(new Error(verdict === "signed-out" ? "sign_in_required" : "account_mismatch"), { code: verdict === "signed-out" ? "sign_in_required" : "account_mismatch" });
+        const params = guardedParams(request, ["oneId", "expectedVersion", "dataUrl"]);
+        try {
+          const profile = setOneSelfAvatarImage({ oneId: String(params.oneId), expectedVersion: Number(params.expectedVersion), dataUrl: String(params.dataUrl) });
+          this.scheduleSnapshotUpdated();
+          return asJsonValue({ oneId: profile.oneId, version: profile.version, avatarIcon: profile.avatarIcon }, request.method);
+        } catch (error) {
+          if ((error as { code?: unknown })?.code === "one_profile_version_conflict") return { ok: false, code: "one_profile_version_conflict" };
+          throw error;
+        }
       }
       case "one.avatar.get": {
         const params = guardedParams(request, ["icon"]);
@@ -3779,26 +3835,155 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         const params=guardedParams(request,["chatId","files"]);
         const chatId=params.chatId == null ? undefined : requiredIdentifier(params,"chatId");
         if(chatId) requireChat(chatId);
-        return asJsonValue(this.attachmentUploads.begin(context.deviceId,chatId,params.files as Array<{name:string;size:number}>),request.method);
+        return asJsonValue(this.attachmentUploads.begin(context.deviceId,chatId,params.files as Array<{name:string;size:number}>,media.scope ?? "chat"),request.method);
       }
       case "chat.attachments.chunk": {
         const params=guardedParams(request,["uploadId","fileIndex","offset","data"]);
         return asJsonValue(this.attachmentUploads.chunk(context.deviceId,params as unknown as Parameters<MobileChatAttachmentUploads["chunk"]>[1]),request.method);
       }
+      case "one.video.open":
+      case "one.video.prepare":
+      case "one.video.chunk":
+      case "one.video.close": {
+        const principal = { deviceId: context.deviceId, connectionId: context.connectionId };
+        const assertCurrent = (subject: {deviceId:string;connectionId:string}): void => {
+          this.assertAvailable();
+          if (!this.deviceConnectionIds.get(subject.deviceId)?.has(subject.connectionId)
+            || this.options.mailAccountGuard?.(subject.deviceId) !== "ok") throw new Error("artifact_video_unavailable");
+        };
+        const captureChat = (chatId:string): (()=>void) => {
+          const {assertProjectDomainOwner}=require('../invocation/project-domain-binding') as typeof import('../invocation/project-domain-binding');
+          const {getAuthenticatedActorIds}=require('../auth') as typeof import('../auth');
+          const actor=getAuthenticatedActorIds(), binding=assertProjectDomainOwner(chatId,actor);
+          const actorKey=JSON.stringify(actor), bindingKey=JSON.stringify(binding);
+          return ()=>{const current=getAuthenticatedActorIds();if(JSON.stringify(current)!==actorKey || JSON.stringify(assertProjectDomainOwner(chatId,current,binding))!==bindingKey)throw new Error('artifact_video_owner_changed');};
+        };
+        if (request.method === "one.video.close") {
+          const params = guardedParams(request, ["transferId"]);
+          const transfers = this.artifactVideoTransfers ??= new ArtifactVideoTransfers(assertCurrent, undefined, Date.now, captureChat);
+          await transfers.close(principal, requiredIdentifier(params, "transferId", /^[0-9a-f]{64}$/));
+          return asJsonValue({ closed: true }, request.method);
+        }
+        const transfers = this.artifactVideoTransfers ??= new ArtifactVideoTransfers(assertCurrent, undefined, Date.now, captureChat);
+        if (request.method === "one.video.open") {
+          const params = guardedParams(request, ["taskId", "taskVersion", "chatId", "runId", "manifestId", "artifactRef", "transferId"]);
+          const taskVersion = optionalInteger(params, "taskVersion", 1, Number.MAX_SAFE_INTEGER);
+          if (taskVersion === undefined) throw new TypeError("taskVersion is required");
+          return asJsonValue(transfers.open(principal, {
+            taskId: requiredIdentifier(params, "taskId"), taskVersion, chatId: requiredIdentifier(params, "chatId"),
+            runId: requiredIdentifier(params, "runId", RUN_ID_RE), manifestId: requiredIdentifier(params, "manifestId"),
+            artifactRef: requiredIdentifier(params, "artifactRef"),
+          }, requiredIdentifier(params, "transferId", /^[0-9a-f]{64}$/)), request.method);
+        }
+        const params = guardedParams(request, request.method === "one.video.chunk" ? ["transferId", "offset"] : ["transferId"]);
+        const id = requiredIdentifier(params, "transferId", /^[0-9a-f]{64}$/);
+        if (request.method === "one.video.prepare") return asJsonValue(await transfers.prepare(principal, id), request.method);
+        return asJsonValue(await transfers.read(principal, id, Number(params.offset)), request.method);
+      }
+      case "legacy.video.list":
+      case "legacy.video.releaseList":
+      case "legacy.video.open":
+      case "legacy.video.prepare":
+      case "legacy.video.chunk":
+      case "legacy.video.close": {
+        const principal={deviceId:context.deviceId,connectionId:context.connectionId};
+        const assertCurrent=(subject:{deviceId:string;connectionId:string}):void=>{
+          this.assertAvailable();
+          if(!this.deviceConnectionIds.get(subject.deviceId)?.has(subject.connectionId) || this.options.mailAccountGuard?.(subject.deviceId)!=='ok')throw new Error('legacy_video_unavailable');
+        };
+        const transfers=this.legacyChatVideoTransfers ??= new LegacyChatVideoTransfers(()=>getDb(),assertCurrent,Date.now,(scope,chatId,messageId)=>{
+          const {readOneDispatchResultPage}=require('../one/dispatch-presentation') as typeof import('../one/dispatch-presentation');
+          const result=readOneDispatchResultPage({...scope,chatId,messageId,offset:0});
+          if(!result.available || result.messageId!==messageId)throw new Error('legacy_video_unavailable');
+        },chatId=>{
+          const {assertProjectDomainOwner}=require('../invocation/project-domain-binding') as typeof import('../invocation/project-domain-binding');
+          const {getAuthenticatedActorIds}=require('../auth') as typeof import('../auth');
+          const actor=getAuthenticatedActorIds(),binding=assertProjectDomainOwner(chatId,actor);
+          const actorKey=JSON.stringify(actor),bindingKey=JSON.stringify(binding);
+          return ()=>{
+            const currentActor=getAuthenticatedActorIds();
+            if(JSON.stringify(currentActor)!==actorKey || JSON.stringify(assertProjectDomainOwner(chatId,currentActor,binding))!==bindingKey)throw new Error('legacy_video_owner_changed');
+          };
+        },chatId=>(require('../fs/access') as typeof import('../fs/access')).chatAssetRoots(chatId));
+        if(request.method==='legacy.video.releaseList'){
+          const params=guardedParams(request,['listId']);
+          transfers.releaseList(principal,requiredIdentifier(params,'listId',/^[0-9a-f]{64}$/));
+          return asJsonValue({released:true},request.method);
+        }
+        if(request.method==='legacy.video.list'){
+          const params=guardedParams(request,['chatId','messageId','listId','cursor','parentChatId','dispatchId','runId']);
+          const hasDispatch=['parentChatId','dispatchId','runId'].some(key=>params[key]!==undefined);
+          const dispatch=hasDispatch?{parentChatId:requiredIdentifier(params,'parentChatId'),dispatchId:requiredIdentifier(params,'dispatchId'),runId:requiredIdentifier(params,'runId')}:undefined;
+          return asJsonValue(transfers.list(principal,requiredIdentifier(params,'chatId'),requiredIdentifier(params,'messageId'),requiredIdentifier(params,'listId',/^[0-9a-f]{64}$/),optionalInteger(params,'cursor',0,10000) ?? 0,dispatch),request.method);
+        }
+        if(request.method==='legacy.video.open'){
+          const params=guardedParams(request,['candidateId','transferId']);
+          return asJsonValue(transfers.open(principal,requiredIdentifier(params,'candidateId',/^[0-9a-f]{64}$/),requiredIdentifier(params,'transferId',/^[0-9a-f]{64}$/)),request.method);
+        }
+        const params=guardedParams(request,request.method==='legacy.video.chunk'?['transferId','offset']:['transferId']);
+        const id=requiredIdentifier(params,'transferId',/^[0-9a-f]{64}$/);
+        if(request.method==='legacy.video.close'){await transfers.close(principal,id);return asJsonValue({closed:true},request.method)}
+        if(request.method==='legacy.video.prepare')return asJsonValue(await transfers.prepare(principal,id),request.method);
+        return asJsonValue(await transfers.read(principal,id,Number(params.offset)),request.method);
+      }
       case "chat.attachments.finish": {
         const params=guardedParams(request,["uploadId"]);
         return asJsonValue(this.attachmentUploads.finish(context.deviceId,requiredIdentifier(params,"uploadId")),request.method);
       }
+      case "chat.video.open":
+      case "chat.video.prepare":
+      case "chat.video.chunk":
+      case "chat.video.close": {
+        const principal: ChatVideoPrincipal = { deviceId: context.deviceId, connectionId: context.connectionId };
+        const assertCurrent = (subject: ChatVideoPrincipal): void => {
+          this.assertAvailable();
+          if (!this.deviceConnectionIds.get(subject.deviceId)?.has(subject.connectionId)
+            || this.options.mailAccountGuard?.(subject.deviceId) !== "ok") throw new Error("chat_video_unavailable");
+        };
+        const captureChat = (chatId:string): (()=>void) => {
+          const {assertProjectDomainOwner}=require('../invocation/project-domain-binding') as typeof import('../invocation/project-domain-binding');
+          const {getAuthenticatedActorIds}=require('../auth') as typeof import('../auth');
+          const actor=getAuthenticatedActorIds(), binding=assertProjectDomainOwner(chatId,actor);
+          const actorKey=JSON.stringify(actor), bindingKey=JSON.stringify(binding);
+          return ()=>{const current=getAuthenticatedActorIds();if(JSON.stringify(current)!==actorKey || JSON.stringify(assertProjectDomainOwner(chatId,current,binding))!==bindingKey)throw new Error('chat_video_owner_changed');};
+        };
+        // Closing only releases this connection's token, so it remains available
+        // after an account change and must never depend on an authorization check.
+        if (request.method === "chat.video.close") {
+          const params = guardedParams(request, ["transferId"]);
+          const transfers = this.chatVideoTransfers ??= new ChatVideoTransfers(() => getDb(), assertCurrent, Date.now, captureChat);
+          transfers.close(principal, requiredIdentifier(params, "transferId", /^[0-9a-f]{64}$/));
+          return asJsonValue({ closed: true }, request.method);
+        }
+        const transfers = this.chatVideoTransfers ??= new ChatVideoTransfers(() => getDb(), assertCurrent, Date.now, captureChat);
+        if (request.method === "chat.video.open") {
+          const params = guardedParams(request, ["chatId", "messageId", "groupId", "fileId", "transferId"]);
+          return asJsonValue(transfers.open(principal, {
+            chatId: requiredIdentifier(params, "chatId"), messageId: requiredIdentifier(params, "messageId"),
+            groupId: requiredIdentifier(params, "groupId"), fileId: requiredIdentifier(params, "fileId"),
+          }, requiredIdentifier(params, "transferId", /^[0-9a-f]{64}$/)), request.method);
+        }
+        const params = guardedParams(request, request.method === "chat.video.chunk" ? ["transferId", "offset"] : ["transferId"]);
+        const id = requiredIdentifier(params, "transferId", /^[0-9a-f]{64}$/);
+        if (request.method === "chat.video.prepare") {
+          await transfers.prepare(principal, id);
+          return asJsonValue({ prepared: true }, request.method);
+        }
+        return asJsonValue(transfers.read(principal, id, Number(params.offset)), request.method);
+      }
       case "chat.attachment.imagePreview": {
         const params = guardedParams(request, ["chatId", "messageId", "attachmentId"]);
-        const attachment = readBoundChatMessageAttachment({
+        const binding = {
           chatId: requiredIdentifier(params, "chatId"),
           messageId: requiredIdentifier(params, "messageId"),
           attachmentId: requiredIdentifier(params, "attachmentId"),
-        });
-        return attachment
-          ? asJsonValue({ mimeType: attachment.mediaType, base64: attachment.bytes.toString("base64") }, request.method)
-          : null;
+        };
+        // chat-attachments-v2: an inline picture keeps its original answer unless the phone asks for maxEdge; a file of the
+        // message's group (photo, video poster) answers with a preview sized for the phone (electron/media/attachment-preview.ts).
+        const inline = media.maxEdge === undefined ? readBoundChatMessageAttachment(binding) : null;
+        if (inline) return asJsonValue({ mimeType: inline.mediaType, base64: inline.bytes.toString("base64") }, request.method);
+        const preview = await chatAttachmentPreview(binding, media.maxEdge);
+        return preview ? asJsonValue({ mimeType: preview.mediaType, base64: preview.bytes.toString("base64") }, request.method) : null;
       }
       case "one.suggestions.act": {
         const params = guardedParams(request, [
@@ -3995,7 +4180,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
           // restart recovery, and One memory all retain the same conversation.
           if(input.fileGroupId) this.attachmentUploads.bind(context.deviceId,input.fileGroupId,chat.id);
           validateChatAttachmentSelection(chat.id,input.fileGroupId,input.images);
-          input.images=[...(input.images ?? []),...chatFileImages(chat.id,input.fileGroupId)];
+          input.images=[...(input.images ?? []),...chatFileDisplayImages(chat.id,input.fileGroupId,input.images)];
           input.userPrompt=chatFilePrompt(chat.id,input.userPrompt,input.fileGroupId);
           appendChatMessage(chat.id, "user", input.userPrompt,input.images?.length ? {images:input.images} : undefined);
           if (input.liveMode) setChatContinuousMode(chat.id, true);
@@ -4516,6 +4701,61 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         }, request.method);
       }
 
+      case "one.dispatch.resultPage": {
+        assertMobileOneDeviceAuthority(context);
+        const guard = this.options.mailAccountGuard;
+        const assertAccount = () => {
+          this.assertAvailable();
+          if (!this.deviceConnectionIds.get(context.deviceId)?.has(context.connectionId)) throw new Error("one_dispatch_result_unavailable");
+          if (context.devBootstrap) return; // assertMobileOneDeviceAuthority already restricted the explicit dev-only bootstrap.
+          let verdict: string | undefined;
+          try { verdict = guard?.(context.deviceId); } catch { verdict = "mismatch"; }
+          if (verdict !== "ok") {
+            const code = verdict === "signed-out" ? "sign_in_required" : "account_mismatch";
+            throw Object.assign(new Error(code), { code });
+          }
+        };
+        assertAccount();
+        const params = guardedParams(request, ["parentChatId", "dispatchId", "chatId", "runId", "offset", "messageId", "projectionId", "locale"]);
+        const { readOneDispatchResultPage } = require("../one/dispatch-presentation") as typeof import("../one/dispatch-presentation");
+        const scope = {
+          parentChatId: requiredIdentifier(params, "parentChatId"), dispatchId: requiredIdentifier(params, "dispatchId"),
+          chatId: requiredIdentifier(params, "chatId"), runId: requiredIdentifier(params, "runId"),
+        };
+        // Redaction and control fences can cross arbitrary page boundaries. Project the complete bounded message
+        // before slicing; cursors bind both the durable message and the exact sanitized projection.
+        const bound = readOneDispatchResultPage({ ...scope, offset: 0 });
+        if (!bound.available) return asJsonValue({ available: false }, request.method);
+        if (params.messageId !== undefined && params.messageId !== bound.messageId) throw new Error("one-dispatch-result-changed");
+        const maxSourceBytes = 4 * 1024 * 1024;
+        const row = getDb().prepare(`SELECT length(CAST(text AS BLOB)) AS size,
+          CASE WHEN length(CAST(text AS BLOB))<=? THEN CAST(text AS BLOB) ELSE NULL END AS body
+          FROM chat_messages WHERE id=? AND chat_id=? AND role='assistant'`).get(maxSourceBytes, bound.messageId, scope.chatId) as {body:Uint8Array|null;size:number} | undefined;
+        if (!row) return asJsonValue({ available:false }, request.method);
+        if (row.size > maxSourceBytes) {
+          assertAccount();
+          const current = readOneDispatchResultPage({ ...scope, offset: 0 });
+          if (!current.available || current.messageId !== bound.messageId) throw new Error("one-dispatch-result-changed");
+          return asJsonValue({ available:false, reason:"too_large" }, request.method);
+        }
+        if (!(row.body instanceof Uint8Array)) return asJsonValue({ available:false }, request.method);
+        const original = new TextDecoder("utf-8", {fatal:true}).decode(row.body);
+        const safe = sanitizeMobileBridgeText(stripMobileBridgeControlFences(original, params.locale === "en" ? "en" : "ko"), 64 * 1024 * 1024);
+        const bytes = Buffer.from(safe, "utf8"), projectionId = createHash("sha256").update(bytes).digest("hex");
+        const offset = Number(params.offset);
+        if (offset > bytes.length || (offset > 0 && (params.messageId !== bound.messageId || params.projectionId !== projectionId))) {
+          throw new Error("one-dispatch-result-changed");
+        }
+        let end = Math.min(offset + 16_000, bytes.length), text: string | undefined;
+        for (let attempt = 0; attempt <= 3 && end >= offset; attempt++, end--) {
+          try { text = new TextDecoder("utf-8", {fatal:true}).decode(bytes.subarray(offset,end)); break; } catch { /* split code point */ }
+        }
+        if (text === undefined || (end === offset && offset < bytes.length)) throw new Error("one-dispatch-result-page-invalid");
+        const stillBound = readOneDispatchResultPage({ ...scope, offset: 0 });
+        if (!stillBound.available || stillBound.messageId !== bound.messageId) throw new Error("one-dispatch-result-changed");
+        assertAccount();
+        return asJsonValue({ available:true, messageId:bound.messageId, projectionId, text, nextOffset:end < bytes.length ? end : null }, request.method);
+      }
       case "one.dispatch.answerQuestion": {
         const params = guardedParams(request,["parentChatId","dispatchId","chatId","runId","sourceMessageId","reply","locale","retryCommitted"]);
         const receipt = await answerOneDispatchQuestion({
@@ -5090,6 +5330,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
           throw new Error("A Mobile build is already running on this Desktop");
         }
         const runId = randomUUID();
+        const buildFiles = this.claimMobileBuildFiles(context.deviceId, media.fileGroupId, runId);
         const controller = new AbortController();
         const locale: "ko" | "en" = HANGUL_RE.test(goal) ? "ko" : "en";
         this.buildRuns.set(runId, {
@@ -5112,6 +5353,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         const approval = await this.awaitBuildApproval({ runId, goal, locale, controller });
         const reserved = this.buildRuns.get(runId);
         if (!approval.approved || !reserved || controller.signal.aborted || this.disposed) {
+          this.attachmentUploads.releaseBuild(runId);
           this.buildRuns.delete(runId);
           const refusal = this.buildApprovalRefusal(
             approval.approved ? "desktop_approval_unavailable" : approval.code,
@@ -5125,6 +5367,8 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
           locale,
           sink: (event) => this.handleBuildEvent(runId, event),
           signal: controller.signal,
+          ...(buildFiles.length ? { attachments: buildFiles } : {}),
+          ...(media.mode ? { mode: media.mode } : {}),
         }));
         void completion.then(
           () => this.finalizeBuildRun(runId, null),
@@ -5170,6 +5414,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
               deferredQuestionIds: run.questions.filter((question) => !answers.some((answer) => answer.questionId === question.questionId)).map((question) => question.questionId),
             }) }])
           : this.buildAnswerPrompt(offeredQuestions, answers);
+        const answerFiles = this.claimMobileBuildFiles(context.deviceId, media.fileGroupId, runId);
         run.answerInFlight = true;
         run.active = true;
         run.status = "running";
@@ -5194,6 +5439,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
           history: run.history.slice(-BUILD_HISTORY_MAX_ENTRIES),
           sink: (event: HephaestusBuildEvent) => this.handleBuildEvent(runId, event),
           signal: run.controller.signal,
+          ...(answerFiles.length ? { attachments: answerFiles } : {}),
         };
         this.buildInterviewWitnessSource.capture(input, run, {
           questionSetId,
@@ -5469,6 +5715,18 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         // dispatch so a missing receipt can never execute a command.
         throw new TypeError("request.status must be handled by Mobile Bridge server");
       default: {
+        if (mobileDomainPorts.handles(request.method)) {
+          return asJsonValue(await mobileDomainPorts.request(request.method, guardedParams(request, ["operation", "args"]), {
+            assertAccount: () => {
+              const verdict = this.options.mailAccountGuard?.(context.deviceId);
+              if (verdict === "signed-out") throw Object.assign(new Error("sign_in_required"), { code: "sign_in_required" });
+              if (verdict !== "ok") throw Object.assign(new Error("account_mismatch"), { code: "account_mismatch" });
+            },
+            admitAccount: () => { if (!this.options.domainAccountAdmission) throw new Error("account_admission_unavailable"); return this.options.domainAccountAdmission(context.deviceId); },
+            projectChat: mobileChatDto,
+            projectProject: async id => { const project = getProject(id); if (!project) throw new Error("project_unavailable"); return projectMobileBridgeProjectAsync(project); },
+          }), request.method);
+        }
         const unsupported: never = request.method;
         throw new TypeError(`Unsupported Mobile Bridge method: ${String(unsupported)}`);
       }
@@ -5607,6 +5865,10 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
     this.detachDesktopSubscriptions();
     this.listeners.clear();
     this.visualSessions.dispose();
+    this.legacyChatVideoTransfers?.dispose();
+    this.artifactVideoTransfers?.dispose();
+    this.chatVideoTransfers?.dispose();
+    this.scienceChat.disposeVideos();
     this.projectFilePreviews.clear();
     this.terminalLeases.clear();
     for (const timer of this.terminalLeaseTimers.values()) clearTimeout(timer);
@@ -5926,8 +6188,18 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
     this.emit({ event: "build.event", payload: asJsonValue(payload, "build.event") });
   }
 
+  /**
+   * remote-build-attachments-v1: the files a phone uploaded with `scope: "build"`, claimed once for this run. A group that is
+   * gone, unfinished, already used or another phone's refuses the request (build_attachments_unavailable) before anything starts.
+   */
+  private claimMobileBuildFiles(deviceId: string, fileGroupId: string | undefined, runId: string): Array<{ path: string; name: string }> {
+    if (!fileGroupId) return [];
+    return this.attachmentUploads.claimBuild(deviceId, fileGroupId, runId).map((file) => ({ path: file.path, name: file.name }));
+  }
+
   private finalizeBuildRun(runId: string, failure: Error | null): void {
     if (failure) this.onError(failure);
+    this.attachmentUploads.releaseBuild(runId); // remote-build-attachments-v1: the turn copied them into the workspace, or ended
     const run = this.buildRuns.get(runId);
     if (!run) return;
     run.active = false;

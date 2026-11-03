@@ -1,4 +1,7 @@
 import { assertCurrentHistoryRunnerResult } from "./observed-runner";
+import { ByokEffectDelivery } from "./byok-effect-delivery";
+import { confirmEffectDelivery } from "./effect-delivery";
+import { waitForAbort } from "./abortable-wait";
 import { openStatelessGeneration, statelessHistoryTokens, type StatelessWindowSource } from "./stateless-generation";
 import { reportModelPayload, reportCachePlan, reportModelEndpoint, reportModelEffort, ledgerFromApiBody, type ModelEffortApplication } from "./model-call-ledger";
 import { GENERATION_CONTEXT_RATIO } from "./session-generation";
@@ -527,6 +530,8 @@ async function runAnthropicMessagesInner(
    */
   // Tool inventory preparation precedes every provider request: its refusal is a refusal before dispatch (docs 31 W1).
   const { tools, byName, broker, approval } = await prepareMainToolLoop(req, "byok").catch((error: unknown) => { throw markRefusedBeforeDispatch(error); });
+  approval.deferEffectDelivery = true;
+  const delivery = new ByokEffectDelivery();
   const toolsEnabled = tools.length > 0;
   const anthropicTools = tools.map((tool) => ({
     name: tool.function.name,
@@ -655,11 +660,13 @@ async function runAnthropicMessagesInner(
     const usageAttempt = measuredUsage.start();
     if (req.signal?.aborted) throw abortReasonError(req);
     const endpoint = `${baseUrl}/v1/messages`;
+    const sentEffectBody = JSON.stringify(outgoingBody());
+    const sentEffectProof = delivery.anthropicProof(sentEffectBody, messages);
     const originalRequest: RequestInit = {
       method: "POST",
       headers,
       signal: req.signal,
-      body: JSON.stringify(outgoingBody()),
+      body: sentEffectBody,
     };
     const preparedRequest = await prepareCompressedJsonRequest(endpoint, originalRequest, { network: requestCompressionNetworkState() });
     if (req.signal?.aborted) throw abortReasonError(req);
@@ -690,11 +697,12 @@ async function runAnthropicMessagesInner(
       // G24: 5xx / 529 is a typed failure; overloaded earns one resend while nothing streamed and no tool ran.
       const serverCode = serverFailureCodeForStatus(resp.status);
       if (serverCode) {
+        const resendDelayMs = serverFailureResendDelayMs(resp.headers.get("retry-after"));
         if (serverFailureResendable(serverCode) && serverResends < SERVER_FAILURE_RESENDS && turn === 0 && toolTurnsTaken === 0
-          && !acc && !ownerControl.hasPending() && !req.signal?.aborted) {
+          && !acc && !ownerControl.hasPending() && !req.signal?.aborted && resendDelayMs !== null) {
           serverResends += 1;
           events.onStatus(req.locale === "ko" ? "모델 서버가 바빠 잠시 뒤 같은 요청을 한 번 더 보냅니다…" : "The model server is busy; sending the same request once more shortly…");
-          await waitForServerResend(serverFailureResendDelayMs(resp.headers.get("retry-after")), req.signal);
+          await waitForServerResend(resendDelayMs, req.signal);
           if (req.signal?.aborted) throw abortReasonError(req);
           turn -= 1; // the same request again, not a new tool turn
           continue;
@@ -846,6 +854,9 @@ async function runAnthropicMessagesInner(
         workforcePermissionEnforcement: broker?.finish(false) });
     }
     if (req.signal?.aborted) throw abortReasonError(req);
+    await waitForAbort(req.signal, confirmEffectDelivery(sentEffectProof, sentEffectBody, true, req.signal,
+      async ref => (await import("../harness/effect-ledger")).acknowledgeEffect(ref)));
+    if (req.signal?.aborted) throw abortReasonError(req);
     ownerControl.applied();
     generations.completed(turn, turnInput !== null && turnInput > 0 ? turnInput : null);
     lastObservedInput = turnInput !== null && turnInput > 0 ? turnInput : null;
@@ -909,7 +920,7 @@ async function runAnthropicMessagesInner(
       // A host screenshot goes back inside its own tool_result as Anthropic image blocks (A4 C7.3); compatible
       // third-party endpoints keep the text form they document.
       const images = backend === "anthropic" ? toolResultImages(outcome) : [];
-      resultContent.push({
+      const resultBlock: Extract<AnthropicContent, {type: "tool_result"}> = {
         type: "tool_result",
         tool_use_id: entry.id,
         content: images.length
@@ -917,7 +928,9 @@ async function runAnthropicMessagesInner(
             ...images.map((image) => ({ type: "image" as const, source: { type: "base64" as const, media_type: image.mediaType, data: image.data } }))]
           : outcome.toolMessage.content,
         ...(outcome.isError ? { is_error: true } : {}),
-      });
+      };
+      resultContent.push(resultBlock);
+      delivery.addAnthropic(outcome, resultContent, resultBlock);
     }
     messages.push({ role: "assistant", content: assistantContent });
     messages.push({ role: "user", content: resultContent });
@@ -1257,6 +1270,8 @@ export const runGoogleByok: Runner = async (
 
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse&key=${encodeURIComponent(key)}`;
   const { tools, byName, broker, approval } = await prepareMainToolLoop(req, "byok").catch((error: unknown) => { throw markRefusedBeforeDispatch(error); });
+  approval.deferEffectDelivery = true;
+  const delivery = new ByokEffectDelivery();
   const functionDeclarations = tools.map((tool) => ({
     name: tool.function.name,
     ...(tool.function.description ? { description: tool.function.description } : {}),
@@ -1396,11 +1411,18 @@ export const runGoogleByok: Runner = async (
     let usageAttempt = measuredUsage.start();
     if (req.signal?.aborted) throw abortReasonError(req);
     ownerControl.dispatched();
+    let sentEffectBody = "";
+    let sentEffectProof: object;
+    const captureEffectBody = (value: unknown): string => {
+      sentEffectBody = JSON.stringify(value);
+      sentEffectProof = delivery.googleProof(sentEffectBody, contents);
+      return sentEffectBody;
+    };
     let resp = await withCurrentHistoryProvider(()=>fetch(url, {
       method: "POST",
       headers: { "content-type": "application/json" },
       signal: req.signal,
-      body: JSON.stringify(cachedContentName ? geminiBodyWithCache(requestBody, cachedContentName) : requestBody),
+      body: captureEffectBody(cachedContentName ? geminiBodyWithCache(requestBody, cachedContentName) : requestBody),
     }));
     if (!resp.ok && cachedContentName && isGeminiCacheMissing(resp.status, await resp.clone().text().catch(() => ""))) {
       // The cache expired or vanished between creation and use: drop it and send this request once without it.
@@ -1411,7 +1433,7 @@ export const runGoogleByok: Runner = async (
         method: "POST",
         headers: { "content-type": "application/json" },
         signal: req.signal,
-        body: JSON.stringify(requestBody),
+        body: captureEffectBody(requestBody),
       }));
     }
     if (!resp.ok) {
@@ -1445,7 +1467,7 @@ export const runGoogleByok: Runner = async (
         method: "POST",
         headers: { "content-type": "application/json" },
         signal: req.signal,
-        body: JSON.stringify(outgoingBody()),
+        body: captureEffectBody(outgoingBody()),
       }));
     }
     // Retry without tools only when Gemini says, in its structured BadRequest field paths, that a tool declaration is
@@ -1467,7 +1489,7 @@ export const runGoogleByok: Runner = async (
         method: "POST",
         headers: { "content-type": "application/json" },
         signal: req.signal,
-        body: JSON.stringify(outgoingBody()),
+        body: captureEffectBody(outgoingBody()),
       }));
     }
     if (!resp.ok) {
@@ -1477,11 +1499,12 @@ export const runGoogleByok: Runner = async (
       // G24: 5xx / 529 is a typed failure; overloaded earns one resend while nothing streamed and no tool ran.
       const serverCode = serverFailureCodeForStatus(resp.status);
       if (serverCode) {
+        const resendDelayMs = serverFailureResendDelayMs(resp.headers.get("retry-after"));
         if (serverFailureResendable(serverCode) && serverResends < SERVER_FAILURE_RESENDS && turn === 0
-          && !acc && !ownerControl.hasPending() && !req.signal?.aborted) {
+          && !acc && !ownerControl.hasPending() && !req.signal?.aborted && resendDelayMs !== null) {
           serverResends += 1;
           events.onStatus(req.locale === "ko" ? "모델 서버가 바빠 잠시 뒤 같은 요청을 한 번 더 보냅니다…" : "The model server is busy; sending the same request once more shortly…");
-          await waitForServerResend(serverFailureResendDelayMs(resp.headers.get("retry-after")), req.signal);
+          await waitForServerResend(resendDelayMs, req.signal);
           if (req.signal?.aborted) throw abortReasonError(req);
           turn -= 1; // the same request again, not a new tool turn
           continue;
@@ -1600,6 +1623,9 @@ export const runGoogleByok: Runner = async (
         workforcePermissionEnforcement: broker?.finish(false) });
     }
     if (req.signal?.aborted) throw abortReasonError(req);
+    await waitForAbort(req.signal, confirmEffectDelivery(sentEffectProof!, sentEffectBody, true, req.signal,
+      async ref => (await import("../harness/effect-ledger")).acknowledgeEffect(ref)));
+    if (req.signal?.aborted) throw abortReasonError(req);
     ownerControl.applied();
     const observedInput = terminalUsage && terminalUsage.inputTokens > 0 ? terminalUsage.inputTokens : null;
     generations.completed(turn, observedInput);
@@ -1630,7 +1656,7 @@ export const runGoogleByok: Runner = async (
       progress.assertProgress();
       // A host screenshot rides in FunctionResponse.parts as inlineData (API reference; multimodal function responses).
       const images = functionResponsePartsRejected ? [] : toolResultImages(outcome);
-      resultParts.push({
+      const resultPart: GooglePart = {
         functionResponse: {
           ...(call.providerCallId ? { id: call.providerCallId } : {}),
           name: call.name,
@@ -1639,7 +1665,9 @@ export const runGoogleByok: Runner = async (
             : { output: outcome.content },
           ...(images.length ? { parts: images.map((image) => ({ inlineData: { mimeType: image.mediaType, data: image.data } })) } : {}),
         },
-      });
+      };
+      resultParts.push(resultPart);
+      delivery.addGoogle(outcome, resultParts, resultPart);
     }
     contents.push({ role: "user", parts: resultParts });
     acc = "";

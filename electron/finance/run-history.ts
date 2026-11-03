@@ -1,11 +1,13 @@
 import fs from 'node:fs/promises';
+import { chmodSync } from 'node:fs';
 import type { Dir } from 'node:fs';
 import path from 'node:path';
 import Database from 'better-sqlite3';
 import { z } from 'zod';
 import type { FinanceMonitorRun, FinanceMonitorRunsResult } from '../../shared/finance';
 import type { FinanceScope } from './store';
-import { financeHash, financePrivateDirectory, readFinanceJsonFile, writeFinanceJsonFile } from './archive';
+import { financeHash, financePrivateDirectory, readFinanceJsonFile } from './archive';
+import { writeMonitorOwnedJson } from './monitor-coverage';
 
 const uuid=z.string().regex(/^[a-f0-9-]{36}$/),time=z.string().datetime({offset:true});
 const runSchema=z.object({id:uuid,monitorId:z.string().min(1).max(200),status:z.enum(['running','succeeded','partial','failed','cancelled']),startedAt:time,finishedAt:time.nullable(),reportId:z.string().min(1).max(200).nullable(),summary:z.string().max(20000),warnings:z.array(z.string().max(20000)).max(100),error:z.string().max(20000).nullable(),sourceRevision:z.number().int().nonnegative()}).strict();
@@ -18,11 +20,11 @@ export class FinanceRunHistory {
   private iterator:Dir|undefined;
   private stepping:Promise<boolean>|undefined;
   constructor(private readonly directory:string,private readonly monitorId:string){}
-  private async open():Promise<Database.Database>{
-    await financePrivateDirectory(this.directory);const directory=path.join(this.directory,'_index');await financePrivateDirectory(directory);
+  private async open(scope:FinanceScope):Promise<Database.Database>{
+    scope.assertCurrent();await financePrivateDirectory(this.directory);scope.assertCurrent();const directory=path.join(this.directory,'_index');await financePrivateDirectory(directory);scope.assertCurrent();
     const file=path.join(directory,'runs.sqlite');
     for(const suffix of ['','-wal','-shm','-journal'])try{const stat=await fs.lstat(file+suffix);if(!stat.isFile()||stat.isSymbolicLink())throw new Error('finance_history_index_invalid');}catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;}
-    let db:Database.Database;try{db=new Database(file,{timeout:1000});}catch(error){throw historyError(error);}try{await fs.chmod(file,0o600);
+    let db:Database.Database;scope.assertCurrent();try{db=new Database(file,{timeout:1000});}catch(error){throw historyError(error);}try{scope.assertCurrent();chmodSync(file,0o600);
     db.pragma('busy_timeout = 1000');db.pragma('journal_mode = DELETE');
     db.exec('CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY,value TEXT NOT NULL); CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY,sequence INTEGER NOT NULL UNIQUE,started_at TEXT NOT NULL,status TEXT NOT NULL); CREATE INDEX IF NOT EXISTS runs_order ON runs(started_at DESC,id DESC); CREATE INDEX IF NOT EXISTS runs_status ON runs(status);');
     db.transaction(()=>{if(this.get(db,'count')===undefined)this.set(db,'count',String((db.prepare('SELECT COUNT(*) AS value FROM runs').get() as {value:number}).value));})();
@@ -36,54 +38,63 @@ export class FinanceRunHistory {
       db.prepare('INSERT INTO runs(id,sequence,started_at,status) VALUES(?,?,?,?)').run(run.id,max+1,new Date(run.startedAt).toISOString(),run.status);this.set(db,'count',String(Number(this.get(db,'count')??0)+1));})();
   }
   private async read(id:string):Promise<FinanceMonitorRun>{const run=runSchema.parse(await readFinanceJsonFile(path.join(this.directory,`${uuid.parse(id)}.json`),MAX_RUN_BYTES));if(run.id!==id||run.monitorId!==this.monitorId)throw new Error('finance_monitor_run_invalid');return run;}
-  private async step(db:Database.Database):Promise<boolean>{
+  private async step(db:Database.Database,scope:FinanceScope):Promise<boolean>{
     if(this.get(db,'ready')==='1')return true;
     if(this.stepping)return this.stepping;
     this.stepping=(async()=>{
       this.iterator??=await fs.opendir(this.directory);let visited=0,records=0;
-      while(visited<400&&records<MIGRATION_BATCH){const entry=await this.iterator.read();if(!entry){await this.iterator.close();this.iterator=undefined;this.set(db,'ready','1');return true;}visited++;
+      while(visited<400&&records<MIGRATION_BATCH){const entry=await this.iterator.read();scope.assertCurrent();if(!entry){await this.iterator.close();scope.assertCurrent();this.iterator=undefined;this.set(db,'ready','1');return true;}visited++;
         if(!/^[a-f0-9-]{36}\.json$/.test(entry.name))continue;
-        const run=await this.read(entry.name.slice(0,-5));this.indexed(db,run);records++;
+        const run=await this.read(entry.name.slice(0,-5));scope.assertCurrent();this.indexed(db,run);records++;
         if(records%20===0)await new Promise<void>(resolve=>setImmediate(resolve));
       }return false;
     })();
     try{return await this.stepping;}catch(error){await this.iterator?.close().catch(()=>undefined);this.iterator=undefined;throw error;}finally{this.stepping=undefined;}
   }
-  async prepare(scope:FinanceScope):Promise<{ready:boolean;indexedCount:number}>{scope.assertCurrent();const db=await this.open();try{const ready=await this.step(db);scope.assertCurrent();return {ready,indexedCount:Number(this.get(db,'count')??0)};}catch(error){throw historyError(error);}finally{db.close();}}
+  async prepare(scope:FinanceScope):Promise<{ready:boolean;indexedCount:number}>{scope.assertCurrent();const db=await this.open(scope);try{const ready=await this.step(db,scope);scope.assertCurrent();return {ready,indexedCount:Number(this.get(db,'count')??0)};}catch(error){throw historyError(error);}finally{db.close();}}
   /** Only called while the service holds the monitor execution lease. */
   async recover(scope:FinanceScope):Promise<boolean>{
-    const db=await this.open();try{
+    const db=await this.open(scope);try{
       const pending=this.get(db,'pending');if(pending){scope.assertCurrent();if(Buffer.byteLength(pending)>MAX_RUN_BYTES)throw new Error('finance_monitor_run_invalid');const run=runSchema.parse(JSON.parse(pending));if(run.monitorId!==this.monitorId)throw new Error('finance_monitor_run_invalid');
         // A terminal canonical fallback is newer than an abandoned running journal.
         let canonical:FinanceMonitorRun|undefined;
         try{canonical=await this.read(run.id);}catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;}
         scope.assertCurrent();
         if(run.status==='running'&&canonical&&canonical.status!=='running')this.indexed(db,canonical);
-        else{await writeFinanceJsonFile(path.join(this.directory,`${run.id}.json`),run);this.indexed(db,run);}
-        this.set(db,'pending','');}
+        else{await writeMonitorOwnedJson(path.join(this.directory,`${run.id}.json`),run,()=>scope.assertCurrent());scope.assertCurrent();this.indexed(db,run);}
+        scope.assertCurrent();this.set(db,'pending','');}
       const live=db.prepare("SELECT id FROM runs WHERE status='running' LIMIT 101").all() as {id:string}[];
       for(const item of live.slice(0,100)){scope.assertCurrent();const current=await this.read(item.id);if(current.status==='running'){
         const interrupted:FinanceMonitorRun={...current,status:'failed',finishedAt:new Date().toISOString(),error:'finance_monitor_interrupted',summary:'이전 실행의 잠금이 유지되지 않아 완료 여부를 확인할 수 없습니다. 자료를 다시 조회하세요.'};
-        this.set(db,'pending',JSON.stringify(interrupted));await writeFinanceJsonFile(path.join(this.directory,`${item.id}.json`),interrupted);this.indexed(db,interrupted);this.set(db,'pending','');
-      }else this.indexed(db,current);}
+        scope.assertCurrent();this.set(db,'pending',JSON.stringify(interrupted));await writeMonitorOwnedJson(path.join(this.directory,`${item.id}.json`),interrupted,()=>scope.assertCurrent());scope.assertCurrent();this.indexed(db,interrupted);this.set(db,'pending','');
+      }else{scope.assertCurrent();this.indexed(db,current);}}
       return live.length<=100;
     }catch(error){throw historyError(error);}finally{db.close();}
   }
   /** Caller holds the monitor lease; journal -> canonical record -> index, so crash gaps are recoverable. */
-  async write(run:FinanceMonitorRun):Promise<void>{
+  async write(scope:FinanceScope,run:FinanceMonitorRun):Promise<void>{
     runSchema.parse(run);if(run.monitorId!==this.monitorId)throw new Error('finance_monitor_run_invalid');const json=JSON.stringify(run);if(Buffer.byteLength(json)>MAX_RUN_BYTES)throw new Error('finance_monitor_run_invalid');
-    const db=await this.open();try{this.set(db,'pending',json);await writeFinanceJsonFile(path.join(this.directory,`${run.id}.json`),run);this.indexed(db,run);this.set(db,'pending','');}catch(error){throw historyError(error);}finally{db.close();}
+    const db=await this.open(scope);try{scope.assertCurrent();this.set(db,'pending',json);await writeMonitorOwnedJson(path.join(this.directory,`${run.id}.json`),run,()=>scope.assertCurrent());scope.assertCurrent();this.indexed(db,run);this.set(db,'pending','');}catch(error){throw historyError(error);}finally{db.close();}
+  }
+  /** Replaying a completed checkpoint must not replace an existing terminal record's full warnings. */
+  async ensureTerminal(scope:FinanceScope,run:FinanceMonitorRun):Promise<void>{
+    scope.assertCurrent();runSchema.parse(run);if(run.monitorId!==this.monitorId||run.status==='running')throw new Error('finance_monitor_run_invalid');
+    let existing:FinanceMonitorRun|undefined;
+    try{existing=await this.read(run.id);}catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;}
+    scope.assertCurrent();
+    if(existing&&existing.status!=='running'&&!(existing.status==='failed'&&existing.error==='finance_monitor_interrupted'))return;
+    await this.write(scope,run);
   }
   /** Caller holds the monitor lease. Preserve a saved report even when the derived index is unavailable. */
   async writeTerminalFallback(scope:FinanceScope,run:FinanceMonitorRun):Promise<void>{
     scope.assertCurrent();runSchema.parse(run);
     if(run.monitorId!==this.monitorId||run.status==='running'||!run.finishedAt||!run.reportId||Buffer.byteLength(JSON.stringify(run))>MAX_RUN_BYTES)throw new Error('finance_monitor_run_invalid');
-    await writeFinanceJsonFile(path.join(this.directory,`${run.id}.json`),run);scope.assertCurrent();
+    await writeMonitorOwnedJson(path.join(this.directory,`${run.id}.json`),run,()=>scope.assertCurrent());scope.assertCurrent();
   }
-  async hasRunning():Promise<boolean>{const db=await this.open();try{return !!this.get(db,'pending')||!!db.prepare("SELECT id FROM runs WHERE status='running' LIMIT 1").get();}catch(error){throw historyError(error);}finally{db.close();}}
+  async hasRunning(scope:FinanceScope):Promise<boolean>{const db=await this.open(scope);try{scope.assertCurrent();return !!this.get(db,'pending')||!!db.prepare("SELECT id FROM runs WHERE status='running' LIMIT 1").get();}catch(error){throw historyError(error);}finally{db.close();}}
   async page(scope:FinanceScope,input:{cursor?:string;limit?:number}):Promise<FinanceMonitorRunsResult>{
-    scope.assertCurrent();const db=await this.open();try{
-      const ready=await this.step(db),indexedCount=Number(this.get(db,'count')??0);
+    scope.assertCurrent();const db=await this.open(scope);try{
+      const ready=await this.step(db,scope);scope.assertCurrent();const indexedCount=Number(this.get(db,'count')??0);
       if(!ready)return {runs:[],nextCursor:null,indexStatus:'building',indexedCount};
       const limit=input.limit??50;if(!Number.isInteger(limit)||limit<1||limit>50)throw new Error('finance_history_cursor_invalid');
       const context=financeHash(path.resolve(this.directory)),max=(db.prepare('SELECT COALESCE(MAX(sequence),0) AS value FROM runs').get() as {value:number}).value;

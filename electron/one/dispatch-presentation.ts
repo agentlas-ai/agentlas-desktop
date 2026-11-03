@@ -3,6 +3,60 @@ import { redactRunEventSensitiveText } from "../store/run-events";
 import type { ChatHostNotice } from "../../shared/types";
 import { normalizeOneDispatchPresentation } from "../../shared/one-dispatch-presentation";
 import { extractAskFences } from "../../shared/ask-fence-flatten";
+import { teamDispatchReceiverCurrent } from "./session-handoff";
+
+type DispatchResultPageInput = {
+  parentChatId: string; dispatchId: string; chatId: string; runId: string;
+  offset: number; messageId?: string;
+};
+
+/** Read an exact teammate result for the owner, without sending it to a model. */
+export function readOneDispatchResultPage(input: DispatchResultPageInput) {
+  const validId = (value: unknown): value is string => typeof value === "string"
+    && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value);
+  if (!input || typeof input !== "object" || Object.keys(input).some((key) =>
+    !["parentChatId", "dispatchId", "chatId", "runId", "offset", "messageId"].includes(key))
+    || ![input.parentChatId, input.dispatchId, input.chatId, input.runId].every(validId)
+    || !Number.isSafeInteger(input.offset) || input.offset < 0
+    || (input.offset > 0 && !validId(input.messageId))
+    || (input.messageId !== undefined && !validId(input.messageId))) {
+    throw new Error("one-dispatch-result-input-invalid");
+  }
+  const db = getDb();
+  type Owner = { owner_scope: string | null; parent_run_id: string | null; status: string };
+  const tables = new Set((db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('one_team_dispatches','one_team_dispatch_results')")
+    .all() as Array<{name:string}>).map((row) => row.name));
+  const findOwner = (table: string) => db.prepare(`SELECT owner_scope,parent_run_id,status FROM ${table}
+    WHERE id=? AND parent_chat_id=? AND child_chat_id=? AND child_run_id=? LIMIT 1`)
+    .get(input.dispatchId, input.parentChatId, input.chatId, input.runId) as Owner | undefined;
+  const owner = (tables.has("one_team_dispatches") ? findOwner("one_team_dispatches") : undefined)
+    ?? (tables.has("one_team_dispatch_results") ? findOwner("one_team_dispatch_results") : undefined);
+  const receiver = owner && { roomChatId: input.parentChatId, parentRunId: owner.parent_run_id, ownerScope: owner.owner_scope };
+  if (!owner || !receiver || ["running", "queued"].includes(owner.status) || !teamDispatchReceiverCurrent(receiver)) {
+    throw new Error("one-dispatch-result-owner-unbound");
+  }
+  // Read bounded bytes from the exact durable final message. BLOB length also
+  // preserves text after NUL; trim only an incomplete UTF-8 tail at page edges.
+  const limit = 16_000;
+  const message = db.prepare(`SELECT m.id,length(CAST(m.text AS BLOB)) AS total,substr(CAST(m.text AS BLOB),?,?) AS bytes
+    FROM run_events e JOIN chat_messages m ON m.id=CASE WHEN json_valid(e.payload_json)
+      THEN json_extract(e.payload_json,'$.durableMessageId') END AND m.chat_id=e.chat_id AND m.role='assistant'
+    WHERE e.chat_id=? AND e.run_id=? AND e.kind='mcp_final' ORDER BY e.seq DESC LIMIT 1`)
+    .get(input.offset + 1, limit, input.chatId, input.runId) as {id:string;total:number;bytes:Uint8Array} | undefined;
+  if (!message) return { available: false as const };
+  if ((input.messageId && input.messageId !== message.id) || input.offset > message.total
+    || !teamDispatchReceiverCurrent(receiver)) throw new Error("one-dispatch-result-changed");
+  let consumed = message.bytes.length;
+  let text: string | null = null;
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  for (let retry = 0; retry <= 3 && consumed >= 0; retry += 1, consumed -= 1) {
+    try { text = decoder.decode(message.bytes.subarray(0, consumed)); break; } catch { /* incomplete code point */ }
+  }
+  if (text === null || (consumed === 0 && input.offset < message.total)) throw new Error("one-dispatch-result-page-invalid");
+  const nextOffset = input.offset + consumed;
+  return { available: true as const, messageId: message.id, text,
+    nextOffset: nextOffset < message.total ? nextOffset : null };
+}
 
 /** Only a durable final-message binding can identify a member's question; timestamps are insufficient. */
 export function oneDispatchPendingQuestion(childChatId: string, childRunId: string) {

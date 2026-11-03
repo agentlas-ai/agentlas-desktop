@@ -7,7 +7,7 @@
 //
 // 환경변수:
 //   HEPHAESTUS_REPO   기본 https://github.com/agentlas-ai/Agentlas-OS.git
-//   HEPHAESTUS_REF    기본 package.json의 bundledRuntimeVersion 태그 (브랜치/태그/커밋 override 가능)
+//   HEPHAESTUS_REF    기본 package.json의 bundledRuntimeVersion 태그 (정본은 package pin, 사용자 지정 저장소는 별도 개발용)
 //   HEPHAESTUS_COMMIT release workflow가 재확인하는 immutable commit (custom repo/ref 테스트도 지원)
 //   HEPHAESTUS_DIR    기본 <repo>/Hephaestus
 import { execFileSync } from "node:child_process";
@@ -15,6 +15,7 @@ import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import runtimeReleasePin from "../build-resources/runtime-release-pin.cjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const dir = process.env.HEPHAESTUS_DIR
@@ -35,15 +36,17 @@ const canonicalAssetName = String(runtimeSource.assetName ?? "").trim();
 const canonicalAssetSha256 = String(runtimeSource.assetSha256 ?? "").trim().toLowerCase();
 if (
   !canonicalRepository
-  || canonicalRef !== `v${bundledRuntimeVersion}`
+  || !runtimeReleasePin.allowedRef(canonicalRef, bundledRuntimeVersion)
   || !/^[0-9a-f]{40}$/.test(canonicalCommit)
-  || canonicalAssetName !== `hephaestus-runtime-v${bundledRuntimeVersion}.tar.gz`
+  || !runtimeReleasePin.allowedAsset(canonicalRef, bundledRuntimeVersion, canonicalAssetName)
   || !/^[0-9a-f]{64}$/.test(canonicalAssetSha256)
 ) {
   throw new Error("package.json has an invalid agentlasBundledRuntimeSource immutable pin");
 }
 const repo = process.env.HEPHAESTUS_REPO || canonicalRepository;
 const ref = process.env.HEPHAESTUS_REF || canonicalRef;
+if (repo === canonicalRepository && ref !== canonicalRef) throw new Error("canonical runtime must use the exact pinned ref");
+if (repo.startsWith("-") || !/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(ref) || ref.includes("..") || ref.includes("//") || ref.endsWith("/") || ref.endsWith(".")) throw new Error("unsafe custom repository or ref");
 const requestedCommit = String(process.env.HEPHAESTUS_COMMIT ?? "").trim().toLowerCase();
 if (requestedCommit && !/^[0-9a-f]{40}$/.test(requestedCommit)) {
   throw new Error("HEPHAESTUS_COMMIT must be a full 40-character lowercase Git commit");
@@ -112,7 +115,7 @@ function fail(message) {
 }
 
 function verifyPinnedVersion() {
-  const match = /^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?$/.exec(ref);
+  const match = /^(?:os-)?v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?$/.exec(ref);
   if (!match) return;
   let manifest;
   try {
@@ -120,7 +123,7 @@ function verifyPinnedVersion() {
   } catch (error) {
     fail(`could not read the pinned runtime manifest: ${error instanceof Error ? error.message : String(error)}`);
   }
-  if (`v${manifest?.version ?? ""}` !== ref) {
+  if (!runtimeReleasePin.allowedRef(ref, manifest?.version)) {
     fail(`HEPHAESTUS_REF=${ref} does not match ${dir}/manifest.json version=${manifest?.version ?? "missing"}`);
   }
 }

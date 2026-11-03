@@ -27,7 +27,7 @@ import type { Automation, AutomationRunRecord, McpInvocationEvent, RuntimeSelect
 import { quotaRetryAfterAt } from "../shared/runtime-quota";
 import {
   dueAutomations,
-  hasGraphLoginWait, getGraphLoginWaitCheckpoint, restoreGraphLoginPrerequisite, graphLoginWaitReady, cancelGraphLoginWait,
+  hasGraphLoginWait, isStoppedScheduledOccurrence, getGraphLoginWaitCheckpoint, restoreGraphLoginPrerequisite, graphLoginWaitReady, cancelGraphLoginWait,
   type GraphLoginWaitEntry, graphLoginPrerequisiteKey,
   getAutomation,
   markAutomationRun,
@@ -1260,6 +1260,18 @@ async function runOne(
       return { accepted: false };
     }
   }
+  // A due poll must not start a second run while the latest graph awaits owner
+  // input. Recheck under the acquired lease; the explicit login-wake and Run now
+  // paths do not carry expectedNextRunAt and retain their existing authority.
+  if (opts?.claim && !opts.preclaimed && opts.expectedNextRunAt !== undefined) {
+    let waiting = true;
+    try { waiting = hasGraphLoginWait(a.id) || !opts.occurrenceId || isStoppedScheduledOccurrence(a.id, opts.occurrenceId, opts.expectedNextRunAt); }
+    catch { /* unknown is not authority to run */ }
+    if (waiting) {
+      try { releaseAutomationRun(a.id, LEASE_OWNER); } catch { /* peer lease */ }
+      return { accepted: false };
+    }
+  }
   try {
     opts?.triggerDelivery?.onAccepted();
   } catch (error) {
@@ -1981,16 +1993,23 @@ async function runOne(
         const ownerStopped = stoppedByOwner(controller);
         if (ownerStopped && currentRunId) {
           tryRecordRunEvent({ runId: currentRunId, automationId: a.id, kind: "automation_retry_stopped",
-            payload: { schemaVersion: "agentlas.automation-retry-stop.v1", reasonCode: "automation_stopped_by_user" } });
+            payload: { schemaVersion: "agentlas.automation-retry-stop.v1", reasonCode: "automation_stopped_by_user",
+              ...(scheduledOccurrenceId ? { occurrenceId: scheduledOccurrenceId } : {}) } });
         }
         for (let attempt = 0; attempt < 3; attempt += 1) {
           try {
+            // A Stop can arrive during a store-busy retry wait; sample it at
+            // every synchronous settlement attempt, not only before the loop.
+            const stoppedNow = stoppedByOwner(controller);
+            const budgetExhausted = Boolean(scheduledOccurrenceId && !graphLoginWait && !stoppedNow
+              && !automaticRetryStopped && occurrenceAttempt >= MAX_SCHEDULE_OCCURRENCE_ATTEMPTS
+              && !((runStatus === "ok" || runStatus === "skipped") && runOutcome !== "needs_input"));
             markAutomationRun(a.id, opts?.fireTime ?? new Date(), {
               status: runStatus,
               // An ok run that skipped a step for an internal reason keeps its result and shows one plain line per step in the run history
               // (no failure, no notification: runError itself stays null).
               error: runError ?? (runStatus === "ok" ? graphStepNotes : null),
-              advanceSchedule: graphLoginWait ? false : opts?.advanceSchedule ?? true,
+              advanceSchedule: graphLoginWait && !stoppedNow ? false : opts?.advanceSchedule ?? true,
               // 판정이 "사람 손이 필요하다"고 본 실행은 지금까지처럼 발생을 소진하지 않는다
               // (max_runs 보존). status가 ok로 남아도 이 정책은 그대로다 — 정책은 판정을 본다.
               executionConsumed: (runStatus === "ok" || runStatus === "skipped")
@@ -1998,7 +2017,8 @@ async function runOne(
               finishedAt: new Date(),
               deferredRetryMs: SCHEDULE_RETRY_BASE_MS * 2 ** Math.max(0, occurrenceAttempt - 1),
               deferRetry: !graphLoginWait && occurrenceAttempt < MAX_SCHEDULE_OCCURRENCE_ATTEMPTS,
-              ...(automaticRetryStopped || ownerStopped ? { automaticRetry: false } : {}),
+              ...(automaticRetryStopped || stoppedNow || budgetExhausted ? { automaticRetry: false } : {}),
+              ...(budgetExhausted ? { retryStopReason: "automation_retry_budget_exhausted" as const } : {}),
               outcome: runOutcome,
               outcomeReason: runOutcomeReason,
               suspendForReconciliation: false,
@@ -2006,6 +2026,11 @@ async function runOne(
               output,
             });
             runLedgerRecorded = true;
+            if (stoppedNow && !ownerStopped && currentRunId) {
+              tryRecordRunEvent({ runId: currentRunId, automationId: a.id, kind: "automation_retry_stopped",
+                payload: { schemaVersion: "agentlas.automation-retry-stop.v1", reasonCode: "automation_stopped_by_user",
+              ...(scheduledOccurrenceId ? { occurrenceId: scheduledOccurrenceId } : {}) } });
+            }
             break;
           } catch (err) {
             // Every lock result code (SQLITE_BUSY_SNAPSHOT included) is the shared typed store_busy.

@@ -2,7 +2,7 @@ import { captureGoalExecutionObligations, prepareGoalObligationContinuation } fr
 import { channelPublishReceiptsPromptBlockFor } from "../publish-receipts";
 import { resumeDesktopLongRunManually } from "../long-run/app-runtime-coordinator";
 import { getChatGoalRevision } from "../store/chat-goals";
-import { appendLongRunEvent, getLongRun, getLongRunByGoalId, liveLongRunAttemptCount } from "../store/long-runs";
+import { appendLongRunEvent, getLongRun, getLongRunByGoalId, goalProviderRetryNotBefore, liveLongRunAttemptCount } from "../store/long-runs";
 import { getDb } from "../store/db";
 import { tryRecordRunEvent } from "../store/run-events";
 import { admitJudgedAutomaticGoal } from "../long-run/auto-goal-controller";
@@ -329,6 +329,7 @@ export function automaticGoalResumeRequest(chatId: string, expectedVersion: numb
   if (!["paused", "blocked", "queued", "running", "waiting_tool", "waiting_user", "verifying"].includes(run.status)) throw new Error("auto_goal_resume_not_stopped");
   if (liveLongRunAttemptCount(run.id)) throw new Error("auto_goal_resume_attempt_live");
   if (actor === "host") {
+    if (goalProviderRetryNotBefore(run.id) !== null) throw new Error("goal_provider_retry_not_due");
     const blocker = automaticGoalReplayBlockerCode(run.id);
     if (blocker) throw new Error(blocker);
   }

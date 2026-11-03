@@ -31,7 +31,7 @@ import { scienceLocalEmbeddingHost } from "./local-embedding";
 import { ScienceQuestionRecoveryPresenter } from "./work-recovery";
 import { inspectScienceRuntimeSelectionAvailability } from "./runtime-selection-availability";
 import { scienceCriterionReviewHost } from "./criterion-review";
-import { scienceAliveDesktopTools, scienceDesktopTools } from "./desktop-tool-bridge";
+import { scienceAliveDesktopTools, scienceDesktopTools, scienceDesktopToolDelivered, scienceHttpDeliverySupported } from "./desktop-tool-bridge";
 import { mintForwardSteeringRecoveryCapability } from "./recovery-mint";
 import { assertScienceRecoveryRuntimeAdmitted } from "./recovery-runtime-admission";
 import { projectResearchState } from "./research-state-projection";
@@ -323,10 +323,12 @@ export function installScienceHostFor(input: ScienceHostInstallInput): ScienceHo
         start: (...args: Parameters<typeof scienceCriterionReviewHost.start>) => { fence.assertExecution(); return scienceCriterionReviewHost.start(...args); },
       },
       ...{ desktopTools: {
+        ...(scienceHttpDeliverySupported ? { deliveryCapability: "http-finish-v1" as const, onDelivered: scienceDesktopToolDelivered } : {}),
         list: (...args: Parameters<typeof scienceDesktopTools.list>) => { fence.assertExecution(); return scienceDesktopTools.list(...args); },
         call: (...args: Parameters<typeof scienceDesktopTools.call>) => { fence.assertExecution(); return scienceDesktopTools.call(...args); },
       } },
       ...{ aliveDesktopTools: {
+        ...(scienceHttpDeliverySupported ? { deliveryCapability: "http-finish-v1" as const, onDelivered: scienceDesktopToolDelivered } : {}),
         list: (...args: Parameters<typeof scienceAliveDesktopTools.list>) => { fence.assertExecution(); return scienceAliveDesktopTools.list(...args); },
         call: (...args: Parameters<typeof scienceAliveDesktopTools.call>) => { fence.assertExecution(); return scienceAliveDesktopTools.call(...args); },
       } },

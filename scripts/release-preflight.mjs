@@ -22,6 +22,7 @@ import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import runtimeReleasePin from "../build-resources/runtime-release-pin.cjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
@@ -251,7 +252,7 @@ if (
   !source?.repository
   || !source?.ref
   || !/^[0-9a-f]{40}$/.test(source.commit ?? "")
-  || source.assetName !== `hephaestus-runtime-${source.ref}.tar.gz`
+  || !runtimeReleasePin.allowedAsset(source.ref, pkg.agentlasUpdateCompatibility?.bundledRuntimeVersion, source.assetName)
   || !/^[0-9a-f]{64}$/.test(source.assetSha256 ?? "")
 ) {
   fail("package.json agentlasBundledRuntimeSource must pin repository, ref, full commit, release asset, and SHA-256.");
@@ -470,7 +471,7 @@ console.log(`[release-preflight] runtime ${manifestVersion} (${source.commit.sli
 const expectedRuntimeVersion = pkg.agentlasUpdateCompatibility?.bundledRuntimeVersion;
 if (
   typeof expectedRuntimeVersion !== "string" ||
-  source.ref !== `v${expectedRuntimeVersion}` ||
+  !runtimeReleasePin.allowedRef(source.ref, expectedRuntimeVersion) ||
   manifestVersion !== expectedRuntimeVersion
 ) {
   fail(`runtime version pin mismatch: package=${String(expectedRuntimeVersion)}, ref=${source.ref}, manifest=${manifestVersion}`);

@@ -16,20 +16,23 @@ export function CloudAgentsPanel({
   locale,
   signedIn,
   installedSlugs,
+  initialQuery = "",
   onSignIn,
   onInstalled,
 }: {
   locale: Locale;
   signedIn: boolean | null;
   installedSlugs: Set<string>;
+  initialQuery?: string;
   onSignIn: () => Promise<boolean>;
   onInstalled: () => void;
 }) {
   const ko = locale === "ko";
   const [rows, setRows] = useState<MarketplaceListing[] | null>(null);
   const [loadFailed, setLoadFailed] = useState(false);
-  const [query, setQuery] = useState("");
+  const [query, setQuery] = useState(initialQuery);
   const [state, setState] = useState<Record<string, Phase>>({});
+  useEffect(() => { setQuery(initialQuery); }, [initialQuery]);
 
   const load = useCallback(async () => {
     const api = ipc();

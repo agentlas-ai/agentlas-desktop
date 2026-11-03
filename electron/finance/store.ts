@@ -4,7 +4,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { createFinanceWorkspace, normalizeFinanceDashboard, validateFinanceWorkspace, type FinanceWorkspace } from '../../shared/finance';
 import { publishFinanceWorkspaceChange } from './events';
 
-export interface FinanceScope { workspaceId: string; userId: string; assertCurrent(): void }
+export interface FinanceScope { workspaceId: string; userId: string; assertCurrent(): void; readOnly?: boolean }
 const lockfile = require('proper-lockfile') as { lock(path: string, options: unknown): Promise<() => Promise<void>> };
 const MAX_BYTES = 24 * 1024 * 1024;
 /** Host account authority only; renderer cannot select a filesystem partition. */
@@ -32,6 +32,7 @@ export class FinanceStore {
       const result=this.read(directory);scope.assertCurrent();
       if(result.ownerScope&&result.ownerScope!==ownerScope)throw new Error('finance_owner_scope_mismatch');
       const normalized=normalizeFinanceDashboard({...result,ownerScope});
+      if(scope.readOnly)return normalized;
       if(result.dashboards.length===1&&result.activeDashboardId===normalized.activeDashboardId)return normalized;
       try{return await this.transaction(scope,result.revision,current=>normalizeFinanceDashboard(current));}
       catch(error){if((error as Error).message!=='finance_revision_conflict'||attempt===2)throw error;}
@@ -45,6 +46,7 @@ export class FinanceStore {
   }
   /** Archive verification and active membership changes share the canonical workspace lease and CAS. */
   async transaction(scope:FinanceScope,expectedRevision:number,update:(current:FinanceWorkspace)=>Promise<FinanceWorkspace>|FinanceWorkspace):Promise<FinanceWorkspace> {
+    if (scope.readOnly) throw new Error('finance_read_only');
     if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) throw new Error('finance_revision_invalid');
     const directory = this.directory(scope);
     fs.mkdirSync(directory, { recursive: true, mode: 0o700 });

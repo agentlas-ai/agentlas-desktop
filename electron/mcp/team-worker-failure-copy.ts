@@ -13,7 +13,7 @@
  *
  * Pure: no Electron, no store. Main, the daemon and a re-vendored copy word the same sentence.
  */
-import { boundedFailureDetail, runFailureNoticeCause, type RunFailureNoticeCause } from "../../shared/run-failure-notice";
+import { HOST_FAILURE_CODE_CLASSES, boundedFailureDetail, runFailureNoticeCause, type RunFailureNoticeCause } from "../../shared/run-failure-notice";
 
 export type TeamWorkerFailureLocale = "ko" | "en";
 
@@ -105,6 +105,25 @@ const PROVIDER_SENTENCE: Partial<Record<RunFailureNoticeCause, { ko: (name: stri
   subscription_credits_off: { ko: (name) => `${name}이(가) 쓰는 구독의 사용 한도에 도달했고 크레딧 자동 사용이 꺼져 있어 이 단계를 시작하지 않았습니다.`,
     en: (name) => `The subscription limit of the model ${name} uses is reached and automatic credit use is off, so this step was not started.` },
   unsettled: { ko: () => "응답이 끝나기 전에 멈춰 이 단계를 마치지 못했습니다.", en: () => "This step stopped before its reply finished." },
+  // The host-owned classes of the run-level notice that had no worker sentence, so a teammate that ended with one read the neutral line
+  // below instead of the cause (E22). The tool and Goal-state classes reuse the host sentences above: one wording per cause.
+  tool_missing: { ko: (name) => `${name}에게 필요한 도구(이미지 생성)가 이 앱에 연결돼 있지 않아 이 단계를 마치지 못했습니다. 설정에서 이미지 모델을 연결해 주세요.`,
+    en: (name) => `A tool ${name} needs (image generation) is not connected in this app, so this step could not finish. Connect an image model in Settings.` },
+  tool_failed: { ko: (name) => `${name}이(가) 쓴 이미지 생성 도구가 결과를 만들지 못해 이 단계를 마치지 못했습니다.`,
+    en: (name) => `The image generation tool ${name} used produced no result, so this step could not finish.` },
+  tools_unprepared: { ko: (name) => HOST_SENTENCE.tools_not_ready.ko(name), en: (name) => HOST_SENTENCE.tools_not_ready.en(name) },
+  browser_host_unavailable: { ko: (name) => HOST_SENTENCE.browser_unavailable.ko(name), en: (name) => HOST_SENTENCE.browser_unavailable.en(name) },
+  goal_changed: { ko: (name) => HOST_SENTENCE.settings_changed.ko(name), en: (name) => HOST_SENTENCE.settings_changed.en(name) },
+  runtime_changed: { ko: (name) => `${name}이(가) 쓸 모델이 확인한 모델과 달라 이 단계를 실행하지 않았습니다.`,
+    en: (name) => `The model ${name} would use differs from the one you confirmed, so this step was not run.` },
+  store_busy: { ko: (name) => `Agentlas 저장소가 다른 기록으로 잠겨 있어 ${name}의 이 단계를 끝까지 기록하지 못했습니다.`,
+    en: (name) => `The Agentlas store was locked by another write, so ${name}'s step could not be fully recorded.` },
+  project_busy: { ko: (name) => `이 Work 프로젝트의 다른 채팅에서 에이전트가 아직 실행 중이라 ${name}의 이 단계를 시작하지 않았습니다.`,
+    en: (name) => `An agent is still running in another chat of this Work project, so ${name}'s step was not started.` },
+  session_reopen: { ko: (name) => `${name}의 이전 실행 세션을 다시 열지 못해 이 단계를 시작하지 못했습니다.`,
+    en: (name) => `${name}'s previous run session could not be reopened, so this step was not started.` },
+  working_folder: { ko: (name) => `${name}의 작업 폴더를 쓸 수 없어(없거나, 폴더가 아니거나, 열 수 없습니다) 이 단계를 시작하지 못했습니다.`,
+    en: (name) => `${name}'s working folder cannot be used (it is missing, is not a folder, or cannot be opened), so this step was not started.` },
 };
 /** Reasons the provider states in its own words (reset time, plan, policy) stay visible after the app-language sentence. */
 const QUOTES_PROVIDER_REASON: ReadonlySet<RunFailureNoticeCause> = new Set<RunFailureNoticeCause>(["quota", "rate_limit", "auth", "refused"]);
@@ -118,6 +137,10 @@ const CODE_RE = /^[A-Za-z][A-Za-z0-9]*(?:[_.:-][A-Za-z0-9]+)*$/;
 
 /** The first host code in the failure and its cause chain that the closed table names (own `code`, or a message that is itself a code). */
 export function teamWorkerHostFailureCode(error: unknown): string | null {
+  return firstCodeInChain(error, TEAM_WORKER_HOST_FAILURE_CLASSES);
+}
+
+function firstCodeInChain(error: unknown, table: ReadonlyMap<string, unknown>): string | null {
   const seen = new Set<object>();
   const queue: unknown[] = [error];
   for (let count = 0; queue.length && count < 8; count += 1) {
@@ -126,7 +149,7 @@ export function teamWorkerHostFailureCode(error: unknown): string | null {
     seen.add(value);
     const row = value as { code?: unknown; message?: unknown; cause?: unknown };
     for (const candidate of [row.code, typeof row.message === "string" ? row.message.trim() : undefined]) {
-      if (typeof candidate === "string" && candidate.length <= 96 && CODE_RE.test(candidate) && TEAM_WORKER_HOST_FAILURE_CLASSES.has(candidate)) return candidate;
+      if (typeof candidate === "string" && candidate.length <= 96 && CODE_RE.test(candidate) && table.has(candidate)) return candidate;
     }
     queue.push(row.cause);
   }
@@ -165,6 +188,12 @@ export function teamWorkerFailureText(facts: TeamWorkerFailureFacts): string {
       return detail ? `${sentence} ${locale === "ko" ? "보고된 사유" : "Reported reason"}: “${detail}”` : sentence;
     }
   }
+  // No typed provider failure carried the cause, but the error chain itself holds a host-owned code the run-level notice names (the same
+  // closed table, shared/run-failure-notice.ts HOST_FAILURE_CODE_CLASSES): the same cause, worded for one worker.
+  const sharedCode = firstCodeInChain(facts.error, HOST_FAILURE_CODE_CLASSES);
+  const sharedCause = sharedCode ? runFailureNoticeCause({ errorCode: sharedCode }) : null;
+  const sharedSentence = sharedCause ? PROVIDER_SENTENCE[sharedCause]?.[locale](name) : undefined;
+  if (sharedSentence) return sharedSentence;
   return GENERIC[locale](name);
 }
 

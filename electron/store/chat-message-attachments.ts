@@ -3,7 +3,7 @@ import { portableFileName } from "../../shared/portable-file-name";
 import fs from "node:fs";
 import path from "node:path";
 import type { FsPathGrant, ImageAttachment } from "../../shared/types";
-import { ONE_ATTACHMENT_LIMITS } from "../../shared/one-attachments";
+import { CHAT_FILE_STORE_MAX_BYTES, ONE_ATTACHMENT_LEGACY_LIMITS, ONE_ATTACHMENT_LIMITS } from "../../shared/one-attachments";
 import { pathFromGrant, resolveMainOwnedReadPath } from "../fs/access";
 import { getDb } from "./db";
 
@@ -57,6 +57,8 @@ const EXTERNALLY_OPENABLE_CHAT_FILE_EXTENSIONS = new Set([
   ".zip", ".gz", ".tgz", ".tar", ".bz2", ".7z", ".rar",
   ".mp3", ".mpeg", ".wav", ".m4a", ".aac", ".flac", ".ogg", ".oga", ".opus", ".weba", ".mid", ".midi",
   ".mp4", ".mov", ".webm", ".m4v", ".ogv",
+  // media-carousel: phone photo and camera formats open in the system viewer like the rest.
+  ".heic", ".heif", ".bmp", ".tif", ".tiff", ".3gp", ".3g2", ".mkv", ".avi",
 ]);
 const MAX_DIRECTORY_ENTRIES = 512;
 const MAX_RELATIVE_PATH_BYTES = 768;
@@ -80,6 +82,9 @@ export const CHAT_FILE_MEDIA_BY_EXTENSION: Readonly<Record<string, string>> = Ob
   ".zip": "application/zip", ".gz": "application/gzip", ".tgz": "application/gzip", ".tar": "application/x-tar", ".bz2": "application/x-bzip2", ".7z": "application/x-7z-compressed", ".rar": "application/vnd.rar",
   ".mp3": "audio/mpeg", ".mpeg": "audio/mpeg", ".wav": "audio/wav", ".m4a": "audio/mp4", ".aac": "audio/aac", ".flac": "audio/flac", ".ogg": "audio/ogg", ".oga": "audio/ogg", ".opus": "audio/opus", ".weba": "audio/webm", ".mid": "audio/midi", ".midi": "audio/midi",
   ".mp4": "video/mp4", ".mov": "video/quicktime", ".webm": "video/webm", ".m4v": "video/x-m4v", ".ogv": "video/ogg",
+  // media-carousel: what a phone camera or gallery hands over (iPhone HEIC, Android 3GP, screen recorders' MKV/AVI).
+  ".heic": "image/heic", ".heif": "image/heif", ".bmp": "image/bmp", ".tif": "image/tiff", ".tiff": "image/tiff",
+  ".3gp": "video/3gpp", ".3g2": "video/3gpp2", ".mkv": "video/x-matroska", ".avi": "video/x-msvideo",
   ".js": "text/javascript", ".jsx": "text/jsx", ".ts": "text/typescript", ".tsx": "text/tsx", ".css": "text/css", ".py": "text/x-python", ".rb": "text/x-ruby", ".go": "text/x-go", ".rs": "text/x-rust", ".java": "text/x-java-source", ".c": "text/x-c", ".h": "text/x-c", ".cpp": "text/x-c++", ".hpp": "text/x-c++", ".sql": "application/sql",
 });
 
@@ -199,6 +204,15 @@ export function chatImageAttachmentFromTrustedFile(input: {
   };
 }
 
+/**
+ * The stored time of the index-th item of one write: the write's time plus index milliseconds. Readers order by
+ * created_at, so a group of many pictures comes back in the order the owner picked them (media-carousel).
+ */
+function orderedCreatedAt(createdAt: string, index: number): string {
+  const at = Date.parse(createdAt);
+  return index === 0 || !Number.isFinite(at) ? createdAt : new Date(at + index).toISOString();
+}
+
 function safeName(value: string | undefined, index: number): string {
   const leaf = (value ?? "").replaceAll("\\", "/").split("/").pop()?.trim() ?? "";
   const cleaned = leaf.replace(/[\u0000-\u001f\u007f]/g, "").slice(0, 255);
@@ -253,7 +267,7 @@ export function persistChatMessageImages(input: {
       (id, message_id, chat_id, name, media_type, size_bytes, sha256, data, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   );
-  for (const item of decoded) {
+  for (const [index, item] of decoded.entries()) {
     insert.run(
       item.id,
       input.messageId,
@@ -263,7 +277,7 @@ export function persistChatMessageImages(input: {
       item.bytes.length,
       item.sha256,
       item.bytes,
-      input.createdAt,
+      orderedCreatedAt(input.createdAt, index),
     );
   }
   return decoded.map((item) => ({ id: item.id, url: `agentlas://chat-attachment/${item.id}` }));
@@ -329,10 +343,23 @@ function ensureChatFileSnapshotTables(): void {
   `);
 }
 
+/**
+ * Every file may be attached ("사진 영상 파일도 다 넣을 수 있게"). A known extension keeps its type; any other
+ * file is stored as application/octet-stream and shows as a file tile. Opening it outside the app still needs a known type
+ * (EXTERNALLY_OPENABLE_CHAT_FILE_EXTENSIONS); storing and handing it to a run does not.
+ */
+export function chatFileMediaType(fileName: string): string {
+  return CHAT_FILE_MEDIA_BY_EXTENSION[path.extname(fileName).toLowerCase()] ?? "application/octet-stream";
+}
+
 function canonicalChatFileType(filePath: string): string {
-  const mediaType = CHAT_FILE_MEDIA_BY_EXTENSION[path.extname(filePath).toLowerCase()];
-  if (!mediaType) throw new ChatFileSnapshotError("unsupported", `Unsupported file type: ${path.basename(filePath)}`);
-  return mediaType;
+  return chatFileMediaType(filePath);
+}
+
+/** One chat file is one SQLite value; above that the store cannot hold it. The reason names the file and the bound. */
+export function assertChatFileStorable(name: string, size: number): void {
+  if (Number.isSafeInteger(size) && size >= 0 && size <= CHAT_FILE_STORE_MAX_BYTES) return;
+  throw new ChatFileSnapshotError("too_large", `${name} is ${Math.round(size / 1_000_000)} MB; one attachment can be at most ${CHAT_FILE_STORE_MAX_BYTES / 1_000_000} MB (the conversation store's largest value).`);
 }
 
 function safeChatFileName(value: string, fallback: string): string {
@@ -348,7 +375,7 @@ function readStableChatFile(sourcePath: string, expectedSize: number): { bytes: 
     const before = fs.fstatSync(fd, { bigint: true });
     if (!before.isFile() || before.nlink < 1n) throw new ChatFileSnapshotError("missing", "The attachment is no longer a regular file.");
     if (Number(before.size) !== expectedSize) throw new ChatFileSnapshotError("changed", "The attachment changed after it was selected.");
-    if (before.size > BigInt(ONE_ATTACHMENT_LIMITS.maxFileBytes)) throw new ChatFileSnapshotError("too_large", "An attachment exceeds the per-file size limit.");
+    assertChatFileStorable(path.basename(sourcePath), Number(before.size));
     const bytes = Buffer.alloc(Number(before.size));
     let offset = 0;
     while (offset < bytes.length) {
@@ -418,8 +445,8 @@ export function persistChatFileSnapshot(input: ChatFileSnapshotInput): { groupId
   if (!input || typeof input !== "object" || typeof input.chatId !== "string" || !input.chatId || input.chatId.length > 256 || !Array.isArray(input.files)) {
     throw new ChatFileSnapshotError("invalid", "Invalid chat file snapshot request.");
   }
-  if (input.files.length < 1 || input.files.length > ONE_ATTACHMENT_LIMITS.maxCount) {
-    throw new ChatFileSnapshotError("too_many", `Attach between 1 and ${ONE_ATTACHMENT_LIMITS.maxCount} items.`);
+  if (input.files.length < 1) {
+    throw new ChatFileSnapshotError("too_many", "Attach at least one item.");
   }
   ensureChatFileSnapshotTables();
   const chat = getDb().prepare("SELECT id FROM chats WHERE id = ?").get(input.chatId) as { id: string } | undefined;
@@ -464,8 +491,9 @@ export function persistChatFileSnapshot(input: ChatFileSnapshotInput): { groupId
     const insert = db.prepare(`INSERT INTO chat_file_items
       (id, group_id, chat_id, name, kind, media_type, size_bytes, sha256, data, manifest_json, created_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
-    for (const item of prepared) {
-      insert.run(item.id, groupId, input.chatId, item.name, item.kind, item.mediaType, item.size, item.sha256, item.data, item.manifest ? JSON.stringify(item.manifest) : null, createdAt);
+    for (const [index, item] of prepared.entries()) {
+      // Each item keeps the owner's order: items used to share one created_at and so sorted by their random id.
+      insert.run(item.id, groupId, input.chatId, item.name, item.kind, item.mediaType, item.size, item.sha256, item.data, item.manifest ? JSON.stringify(item.manifest) : null, orderedCreatedAt(createdAt, index));
       db.prepare("INSERT INTO chat_file_execution_sources(item_id, schema_version, source_grant_json) VALUES (?, 'snapshot-bytes-v1', ?)")
         .run(item.id, JSON.stringify(item.sourceGrant));
       const insertChild = db.prepare("INSERT INTO chat_file_directory_bytes(item_id, relative_path, size_bytes, sha256, data) VALUES (?, ?, ?, ?, ?)");
@@ -491,35 +519,54 @@ export function persistChatFileSnapshot(input: ChatFileSnapshotInput): { groupId
 
 /** Main-only authenticated Mobile bytes; same durable snapshot and execution reader as Desktop. */
 export function persistChatFileBytes(input: { chatId: string; groupId?: string; files: Array<{ name: string; bytes: Buffer }> }): { groupId: string; files: StoredChatFile[] } {
-  if (!input.chatId || !Array.isArray(input.files) || !input.files.length || input.files.length > ONE_ATTACHMENT_LIMITS.maxCount) throw new ChatFileSnapshotError("invalid", "Invalid mobile attachment set.");
+  return persistChatFileUploads({ chatId: input.chatId, groupId: input.groupId, files: input.files.map(file => ({ name: file.name, read: () => file.bytes })) });
+}
+
+/**
+ * Main-only authenticated Mobile files staged on disk by the chunked upload (media-carousel). Bytes are read one
+ * file at a time inside the write, so a group of many photos and a long video never sit in memory together.
+ */
+export function persistChatFileStagedFiles(input: { chatId: string; groupId?: string; files: Array<{ name: string; path: string; size: number }> }): { groupId: string; files: StoredChatFile[] } {
+  return persistChatFileUploads({ chatId: input.chatId, groupId: input.groupId, files: input.files.map(file => ({ name: file.name, size: file.size, read: () => {
+    const bytes = fs.readFileSync(file.path);
+    if (bytes.length !== file.size) throw new ChatFileSnapshotError("changed", "A received attachment changed before it was stored.");
+    return bytes;
+  } })) });
+}
+
+function persistChatFileUploads(input: { chatId: string; groupId?: string; files: Array<{ name: string; size?: number; read: () => Buffer }> }): { groupId: string; files: StoredChatFile[] } {
+  if (!input.chatId || !Array.isArray(input.files) || !input.files.length) throw new ChatFileSnapshotError("invalid", "Invalid mobile attachment set.");
   ensureChatFileSnapshotTables();
   const db = getDb();
   if (!db.prepare("SELECT id FROM chats WHERE id = ?").get(input.chatId)) throw new ChatFileSnapshotError("missing", "The attachment conversation no longer exists.");
-  const names = new Set<string>(); let total = 0;
-  const prepared = input.files.map(file => {
-    if (typeof file.name !== "string" || safeChatFileName(file.name, "attachment") !== file.name || !Buffer.isBuffer(file.bytes)) throw new ChatFileSnapshotError("invalid", "Invalid mobile attachment metadata.");
+  const names = new Set<string>();
+  const declared = input.files.map(file => {
+    if (typeof file.name !== "string" || safeChatFileName(file.name, "attachment") !== file.name || typeof file.read !== "function") throw new ChatFileSnapshotError("invalid", "Invalid mobile attachment metadata.");
     const folded = file.name.normalize("NFKC").toLocaleLowerCase("en-US");
     if (names.has(folded)) throw new ChatFileSnapshotError("collision", "Two attachments have the same displayed name.");
     names.add(folded);
-    const mediaType = canonicalChatFileType(file.name);
-    const limit = ALLOWED_IMAGE_TYPES.has(mediaType) ? ONE_ATTACHMENT_LIMITS.maxImageBytes : ONE_ATTACHMENT_LIMITS.maxFileBytes;
-    if (file.bytes.length > limit) throw new ChatFileSnapshotError("too_large", "The attachment exceeds the Desktop per-file limit.");
-    if (ALLOWED_IMAGE_TYPES.has(mediaType) && !hasExpectedImageSignature(file.bytes, mediaType)) throw new ChatFileSnapshotError("invalid", "Image content does not match its filename.");
-    total += file.bytes.length;
-    if (total > ONE_ATTACHMENT_LIMITS.maxTotalBytes) throw new ChatFileSnapshotError("too_large", "The selected attachments exceed the Desktop total limit.");
-    return { id: randomUUID(), name: file.name, mediaType, size: file.bytes.length, sha256: createHash("sha256").update(file.bytes).digest("hex"), data: file.bytes };
+    if (file.size !== undefined) assertChatFileStorable(file.name, file.size);
+    return { id: randomUUID(), name: file.name, mediaType: canonicalChatFileType(file.name), read: file.read };
   });
   const groupId = input.groupId ?? randomUUID(), createdAt = new Date().toISOString();
   if (!CHAT_FILE_ID_RE.test(groupId)) throw new ChatFileSnapshotError("invalid", "Invalid attachment group identity.");
+  const stored: Array<Omit<StoredChatFile, "groupId" | "chatId" | "kind" | "fileUrl">> = [];
   db.transaction(() => {
     db.prepare("INSERT INTO chat_file_groups (id, chat_id, created_at) VALUES (?, ?, ?)").run(groupId, input.chatId, createdAt);
     const insert = db.prepare(`INSERT INTO chat_file_items (id, group_id, chat_id, name, kind, media_type, size_bytes, sha256, data, manifest_json, created_at) VALUES (?, ?, ?, ?, 'file', ?, ?, ?, ?, NULL, ?)`);
-    for (const item of prepared) {
-      insert.run(item.id, groupId, input.chatId, item.name, item.mediaType, item.size, item.sha256, item.data, createdAt);
-      db.prepare("INSERT INTO chat_file_execution_sources(item_id, schema_version, source_grant_json) VALUES (?, 'snapshot-bytes-v1', '{}')").run(item.id);
+    const source = db.prepare("INSERT INTO chat_file_execution_sources(item_id, schema_version, source_grant_json) VALUES (?, 'snapshot-bytes-v1', '{}')");
+    for (const [index, item] of declared.entries()) {
+      const bytes = item.read();
+      if (!Buffer.isBuffer(bytes)) throw new ChatFileSnapshotError("invalid", "Invalid mobile attachment metadata.");
+      assertChatFileStorable(item.name, bytes.length);
+      if (ALLOWED_IMAGE_TYPES.has(item.mediaType) && !hasExpectedImageSignature(bytes, item.mediaType)) throw new ChatFileSnapshotError("invalid", "Image content does not match its filename.");
+      const sha256 = createHash("sha256").update(bytes).digest("hex");
+      insert.run(item.id, groupId, input.chatId, item.name, item.mediaType, bytes.length, sha256, bytes, orderedCreatedAt(createdAt, index));
+      source.run(item.id);
+      stored.push({ id: item.id, name: item.name, mediaType: item.mediaType, size: bytes.length, sha256 });
     }
   })();
-  return { groupId, files: prepared.map(({ data: _bytes, ...item }) => ({ ...item, groupId, chatId: input.chatId, kind: "file" as const, fileUrl: `agentlas://chat-attachment/${item.id}` })) };
+  return { groupId, files: stored.map(item => ({ ...item, groupId, chatId: input.chatId, kind: "file" as const, fileUrl: `agentlas://chat-attachment/${item.id}` })) };
 }
 
 /** Bind a newly selected group into a transcript without accepting a raw filesystem path. */
@@ -538,6 +585,73 @@ export function chatFileImages(chatId:string,groupId?:string):ImageAttachment[] 
     const source=inputs.find(input=>input.id===item.id)!;
     return {name:item.name,mediaType:item.mediaType as ImageAttachment["mediaType"],data:readWorkChatFileEntry(source,source.entries[0]).toString("base64")};
   });
+}
+
+/**
+ * The inline picture copies a file group's message has always carried, so a transcript and an old phone keep showing the
+ * pictures as pictures. Only a group inside the old bounds (8 items, 5 MB pictures, 96 MB in all) is copied, exactly as
+ * before; a larger group is shown from its files alone (no second copy of hundreds of megabytes, and nothing is refused).
+ */
+export function chatFileDisplayImages(chatId:string,groupId?:string,inlineImages:readonly ImageAttachment[]=[]):ImageAttachment[] {
+  if (!groupId) return [];
+  const files=listChatFileSnapshot({chatId,groupId});
+  const pictures=files.filter(item=>ALLOWED_IMAGE_TYPES.has(item.mediaType));
+  const inlineBytes=inlineImages.reduce((sum,image)=>sum+Math.floor(image.data.length*3/4),0);
+  if (files.length+inlineImages.length>ONE_ATTACHMENT_LEGACY_LIMITS.maxCount
+    || pictures.some(item=>item.size>ONE_ATTACHMENT_LEGACY_LIMITS.maxImageBytes)
+    || pictures.reduce((sum,item)=>sum+item.size,0)+inlineBytes>ONE_ATTACHMENT_LEGACY_LIMITS.maxTotalBytes) return [];
+  return chatFileImages(chatId,groupId);
+}
+
+/**
+ * The bytes behind one picture or video a phone shows for a transcript message: an inline picture bound to the message,
+ * or a file of a group the message names (its agentlas-chat-files marker). Chat, message and file must all agree, so a
+ * file id is never an ambient capability. Main-only; the caller sizes a preview from these bytes.
+ */
+export function readChatAttachmentForPreview(input: { chatId: string; messageId: string; attachmentId: string }): { name: string; mediaType: string; bytes: Buffer; sha256: string } | null {
+  const meta = chatAttachmentPreviewSource(input);
+  const bytes = meta?.readBytes() ?? null;
+  return meta && bytes ? { name: meta.name, mediaType: meta.mediaType, bytes, sha256: meta.sha256 } : null;
+}
+
+/**
+ * The same binding as readChatAttachmentForPreview, without reading the stored bytes: a preview already made for this
+ * sha256 is answered from its cache, so a long video is not loaded into Main and hashed again on every phone request
+ * (D-1). `readBytes` reads and verifies the bytes once, only when a preview has to be made.
+ */
+export function chatAttachmentPreviewSource(input: { chatId: string; messageId: string; attachmentId: string }): { name: string; mediaType: string; sha256: string; size: number; readBytes(): Buffer | null } | null {
+  const inline = readBoundChatMessageAttachment(input);
+  if (inline) return { name: "image", mediaType: inline.mediaType, sha256: inline.sha256, size: inline.bytes.length, readBytes: () => inline.bytes };
+  if (!ATTACHMENT_ID_RE.test(input.attachmentId) || !ATTACHMENT_ID_RE.test(input.messageId) || !input.chatId || input.chatId.length > 256) return null;
+  ensureChatFileSnapshotTables();
+  const row = getDb().prepare(`SELECT i.id, i.name, i.media_type, i.size_bytes, i.sha256
+      FROM chat_file_items i JOIN chat_messages m ON m.chat_id = i.chat_id
+     WHERE i.id = ? AND i.chat_id = ? AND i.kind = 'file' AND m.id = ? AND m.role = 'user'
+       AND instr(m.text, 'agentlas-chat-files:v1:' || i.group_id) > 0`)
+    .get(input.attachmentId, input.chatId, input.messageId) as { id: string; name: string; media_type: string; size_bytes: number; sha256: string } | undefined;
+  if (!row) return null;
+  return {
+    name: row.name, mediaType: row.media_type, sha256: row.sha256, size: row.size_bytes,
+    readBytes: () => {
+      const data = (getDb().prepare("SELECT data FROM chat_file_items WHERE id = ? AND kind = 'file'").get(row.id) as { data: Buffer | null } | undefined)?.data;
+      if (!Buffer.isBuffer(data) || data.length !== row.size_bytes) return null;
+      return createHash("sha256").update(data).digest("hex") === row.sha256 ? data : null;
+    },
+  };
+}
+
+/** readChatMessageAttachment's identity (type, size, sha256) without the bytes, for the transcript thumbnail cache. */
+export function chatMessageAttachmentIdentity(id: string): { mediaType: string; size: number; sha256: string } | null {
+  if (!ATTACHMENT_ID_RE.test(id)) return null;
+  const inline = getDb().prepare(
+    `SELECT a.media_type, a.size_bytes, a.sha256 FROM chat_message_attachments a
+       JOIN chat_messages m ON m.id = a.message_id AND m.chat_id = a.chat_id WHERE a.id = ?`,
+  ).get(id) as { media_type: string; size_bytes: number; sha256: string } | undefined;
+  if (inline) return { mediaType: inline.media_type, size: inline.size_bytes, sha256: inline.sha256 };
+  ensureChatFileSnapshotTables();
+  const file = getDb().prepare("SELECT media_type, size_bytes, sha256 FROM chat_file_items WHERE id = ? AND kind = 'file'")
+    .get(id) as { media_type: string; size_bytes: number; sha256: string } | undefined;
+  return file ? { mediaType: file.media_type, size: file.size_bytes, sha256: file.sha256 } : null;
 }
 
 export function validateChatAttachmentSelection(chatId:string,groupId?:string,images?:ImageAttachment[]):void {

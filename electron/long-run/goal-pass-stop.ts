@@ -16,11 +16,16 @@
  * 그대로 쓴다. 시각이 되면 스윕이 원래 사유로 되돌려 관찰/재개를 한다(blocked-goal-sweep.ts).
  */
 import { appendChatMessage } from "../store/chats";
+import { getChatGoalRevision } from "../store/chat-goals";
+import { getDb } from "../store/db";
+import { createRuntimeRetryStore } from "../store/runtime-retry";
 import {
   appendLongRunEvent,
   getLongRun,
   getLongRunByGoalId,
   nextBlockedGoalRetrySlot,
+  pendingBlockedGoalRetry,
+  closeGoalRuntimeRetryBudget,
   scheduleBlockedGoalRetry,
   transitionLongRun,
 } from "../store/long-runs";
@@ -51,6 +56,7 @@ export interface GoalPassStop {
   retryAfterHint?: string;
   /** 힌트를 호스트가 해석한 리셋 시각(ISO). 못 읽었으면 없음. */
   retryAfterAt?: string;
+  retryBudgetExhausted?: true;
 }
 
 /** 멈춘 사유 → 지속 정책의 원인 어휘. 러너가 쓴 타입과 판정 사유만 본다. */
@@ -77,7 +83,7 @@ function goalDecisionHistory(chatId: string, nowMs: number) {
 }
 
 export interface ParkGoalResult {
-  status: "scheduled" | "escalated" | "skipped";
+  status: "scheduled" | "escalated" | "skipped" | "closed";
   detail: string;
   decision?: PersistenceDecision;
   nextAt?: string;
@@ -100,6 +106,10 @@ export function parkGoalAfterPassStop(input: {
   const run = getLongRunByGoalId(input.stop.goalId);
   if (!run || run.surface === "science") return { status: "skipped", detail: "goal_run_missing" };
   if (run.status !== "running") return { status: "skipped", detail: `goal_run_${run.status}` };
+  if (input.stop.retryBudgetExhausted) {
+    return closeGoalRuntimeRetryBudget(run.id,input.invocationRunId)
+      ? {status:"closed",detail:"runtime_retry_budget_exhausted"} : {status:"skipped",detail:"budget_close_state_changed"};
+  }
   const cause = goalPassStopCause(input.stop);
   const history = goalDecisionHistory(input.chatId, nowMs).map(persistenceAttemptOf);
   const deadline = run.budget.wallclockDeadline ?? null;
@@ -125,7 +135,15 @@ export function parkGoalAfterPassStop(input: {
       ? nowMs + jitteredDelayMs(6 * 60 * 60_000, input.random)
       // 런타임 전환·재계획·관찰은 곧바로 — 30초 지터(같은 정각 충돌 방지).
       : nowMs + jitteredDelayMs(30_000, input.random);
-  const nextAt = new Date(nextAtMs).toISOString();
+  const providerAt = input.stop.retryAfterAt ? Date.parse(input.stop.retryAfterAt) : Number.NaN;
+  const revision = getChatGoalRevision(run.goalId);
+  if (revision && Number.isFinite(providerAt) && providerAt > nowMs) {
+    createRuntimeRetryStore(getDb).holdGoal({ goalId: run.goalId, revision: revision.revision }, providerAt,
+      input.stop.failureKind, input.invocationRunId);
+  }
+  const dueAt = Math.max(nextAtMs, Number.isFinite(providerAt) ? providerAt : 0);
+  if (dueAt > Date.UTC(9999, 11, 31, 23, 59, 59, 999)) throw new Error("runtime_retry_time_unrepresentable");
+  const nextAt = new Date(dueAt).toISOString();
   const blockedRun = transitionLongRun({ runId: run.id, to: "blocked", actorKind: "host", reason: blockedReason });
   appendStop(blockedRun.id, input, decision, nextAt);
   const blocked = getLongRun(blockedRun.id) ?? blockedRun;
@@ -141,8 +159,9 @@ export function parkGoalAfterPassStop(input: {
     trigger: "goal-pass-stop",
     appInstanceId: desktopAppInstanceId(),
   });
-  notifyOnce(input, blocked.id, decision, nextAtMs, nowMs);
-  return { status: move.kind === "escalate_boundary" ? "escalated" : "scheduled", detail: move.kind, decision, nextAt };
+  const scheduledAt = pendingBlockedGoalRetry(blocked.id)?.nextAt ?? nextAt;
+  notifyOnce(input, blocked.id, decision, Date.parse(scheduledAt), nowMs);
+  return { status: move.kind === "escalate_boundary" ? "escalated" : "scheduled", detail: move.kind, decision, nextAt: scheduledAt };
 }
 
 function appendStop(runId: string, input: { stop: GoalPassStop; invocationRunId: string }, decision: PersistenceDecision, nextAt: string | null): void {

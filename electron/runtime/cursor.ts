@@ -17,7 +17,7 @@ import path from "node:path";
 import { RuntimeJudgmentRefusal } from "./judgment-refusal";
 import { StringDecoder } from "node:string_decoder";
 import os from "node:os";
-import type { Runner, RunnerEvents, RunnerRequest, RunnerResult } from "./runner";
+import type { Runner, RunnerEvents, RunnerFailure, RunnerRequest, RunnerResult } from "./runner";
 import { ensureChildCloseAfterExit, startCliHeartbeat, startCliSilenceGuard, runtimeSilentTimeoutFailure, runtimeProtocolUnrecognizedFailure, cliToolSilenceWindowMs, markRefusedBeforeDispatch, preDispatchRefusal, runnerRefusedBeforeDispatch } from "./runner";
 import { cumulativeSurfaceGateText, wrapSystemPrompt } from "./runner";
 import { schemaFallbackPromptPart } from "../../shared/runtime-capabilities";
@@ -227,6 +227,22 @@ export function cursorEventRecognized(event: unknown): boolean {
   }
 }
 
+export const CURSOR_LEGACY_MCP_UNSUPPORTED_CODE = "cursor_legacy_mcp_unsupported";
+
+/**
+ * A tool config (req.mcpConfigPath) handed to the legacy Cursor driver, which cannot deliver it: the typed pre-dispatch refusal
+ * (RunnerFailure kind "refused", a host-owned code), never a run without the tools. undefined = nothing to refuse.
+ */
+export function cursorLegacyMcpFailure(req: Pick<RunnerRequest, "mcpConfigPath" | "locale">): RunnerFailure | undefined {
+  if (!req.mcpConfigPath) return undefined;
+  return {
+    kind: "refused", runtime: "cursor", source: "marker", providerCode: CURSOR_LEGACY_MCP_UNSUPPORTED_CODE,
+    message: req.locale === "ko"
+      ? "Cursor Agent CLI의 예전 실행 방식(AGENTLAS_DISABLE_ACP)은 도구(MCP) 설정을 전달하지 못해 도구 없이 실행하지 않고 멈췄습니다. 기본 ACP 실행으로 돌아가거나 다른 런타임을 선택하세요."
+      : "The legacy Cursor Agent CLI driver (AGENTLAS_DISABLE_ACP) cannot pass the tool (MCP) configuration, so the run was stopped instead of running without tools. Use the default ACP path or select another runtime.",
+  };
+}
+
 /**
  * Every throw before the Cursor process is started is a refusal before dispatch (RuntimeTurnDelivery "not-dispatched",
  * runner.ts preDispatchRefusal keeps the innermost machine code): the no-tools refusal (RuntimeJudgmentRefusal), the
@@ -266,6 +282,11 @@ async function runCursorTurn(req: RunnerRequest, events: RunnerEvents, dispatch:
         : "Cursor Agent CLI does not currently support verified tool-less isolation. Select Claude Code, Ollama, or an API runtime.",
     );
   }
+  // This legacy driver has no MCP channel: its argv carries no config and the product-home mirror (cli-product-homes.ts) holds no
+  // mcp.json, so a run that was handed a tool config would silently run with zero tools. Only the ACP path (session/new.mcpServers,
+  // shared/runtime-mcp.ts) delivers it. A built config always holds at least one server (buildMcpConfigFile returns null for none).
+  const noMcpChannel = cursorLegacyMcpFailure(req);
+  if (noMcpChannel) return { text: "", ownerControlTerminal: "uncertain", turnDelivery: "not-dispatched", failure: noMcpChannel };
   const bin = await resolveCursorBinary();
   if (!bin) throw markRefusedBeforeDispatch(new Error(req.locale === "ko" ? "Cursor Agent CLI를 찾지 못했습니다." : "Cursor Agent CLI is not installed."));
   events.onStatus(tStatus(req.locale, "callingBackend", { backend: req.backendLabel }));

@@ -4,6 +4,7 @@ import { MANAGED_ONE_BOOTSTRAP_SCHEMA, type ManagedOneBootstrap, type ManagedOne
 
 const PURPOSES = ["serving", "relay", "pairing", "control"] as const;
 let current: Readonly<ManagedOneBootstrap> | undefined;
+let managedHostProcess = false;
 const ownershipListeners = new Set<() => void>();
 /** Invalidates in-flight work when a managed host owner disappears or becomes active. */
 export function onManagedOneOwnershipChanged(listener: () => void): () => void {
@@ -43,10 +44,19 @@ export function configureManagedOneAuthentication(value: unknown): Readonly<Mana
   if (current && ["hostId", "generation", "userId", "workspaceId", "webBaseUrl", "userDataDir", "controlBearer"].some(key => current![key as keyof ManagedOneBootstrap] !== next[key as keyof ManagedOneBootstrap])) throw new Error("managed_one_host_identity_changed");
   const wasActive = Boolean(current && current.expiresAt > Date.now());
   current = next;
+  managedHostProcess = true;
   if (!wasActive) notifyOwnershipChanged();
   return next;
 }
 export function managedOneConfigured(): boolean { return !!current; }
+/** A cleared or expired managed host must never acquire Desktop cookie authority. */
+export function wasManagedOneConfigured(): boolean { return managedHostProcess; }
+/** Team execution is not an available Cloud One capability. This is a host
+ * identity, not a credential check: expiration or clearing cannot grant it. */
+export function managedOneTeamAvailable(): boolean { return !managedHostProcess; }
+export function assertManagedOneTeamAvailable(): void {
+  if (!managedOneTeamAvailable()) throw new Error("managed_one_team_unavailable");
+}
 export function managedOneAuthentication(): Readonly<ManagedOneBootstrap> | null { return current && current.expiresAt > Date.now() ? current : null; }
 export function managedOneHeaders(purpose: ManagedOnePurpose): Record<string, string> | null {
   const value = managedOneAuthentication();

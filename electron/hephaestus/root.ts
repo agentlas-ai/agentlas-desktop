@@ -168,6 +168,123 @@ export function hephaestusContextRoot(): string | null {
   return hephaestusRootDetail({ requiredMarkers: CONTEXT_MAP_V3_RUNTIME_MARKERS })?.root ?? null;
 }
 
+type RuntimeNamespaceError = "engine_runtime_namespace_symlink" | "engine_runtime_namespace_unavailable"
+  | "engine_runtime_namespace_unowned" | "engine_runtime_namespace_current_invalid";
+
+type RuntimeBases = {
+  legacyBase: string;
+  newBase: string;
+  newCurrentRoot: string | null;
+  error?: RuntimeNamespaceError;
+} | { error: "engine_runtime_namespace_collision" | "engine_runtime_namespace_unavailable" | "standalone_runtime_base_not_absolute" };
+
+const OS_NAMESPACE_MARKER = ".agentlas-os-namespace-v1";
+const OS_NAMESPACE_CONTENT = "agentlas-os-namespace-v1\n";
+
+function hasNamespaceOwner(base: string): boolean {
+  let fd: number | undefined;
+  try {
+    const marker = path.join(base, OS_NAMESPACE_MARKER);
+    const before = fs.lstatSync(marker);
+    if (!before.isFile() || before.isSymbolicLink() || before.size !== Buffer.byteLength(OS_NAMESPACE_CONTENT)) return false;
+    fd = fs.openSync(marker, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
+    const opened = fs.fstatSync(fd);
+    if (!opened.isFile() || opened.dev !== before.dev || opened.ino !== before.ino) return false;
+    const valid = fs.readFileSync(fd, "utf8") === OS_NAMESPACE_CONTENT;
+    const after = fs.lstatSync(marker);
+    return valid && after.isFile() && !after.isSymbolicLink() && after.dev === opened.dev && after.ino === opened.ino;
+  } catch { return false; }
+  finally { if (fd !== undefined) fs.closeSync(fd); }
+}
+
+/** Like realpath with a missing tail: resolve existing links before consuming `..`. */
+function resolveRuntimePathAllowMissing(value: string): string {
+  try { return fs.realpathSync(value); }
+  catch (error) {
+    if (!["ENOENT", "ENOTDIR"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error;
+  }
+  const split = (input: string) => input.split(path.sep === "\\" ? /[\\/]/ : /\//);
+  const absolute = path.isAbsolute(value) ? value : path.join(process.cwd(), value);
+  let root = path.parse(absolute).root;
+  let resolved = fs.realpathSync(root);
+  let remaining = split(absolute.slice(root.length));
+  let links = 0;
+  while (remaining.length) {
+    const segment = remaining.shift()!;
+    if (!segment || segment === ".") continue;
+    if (segment === "..") { resolved = path.dirname(resolved); continue; }
+    const next = path.join(resolved, segment);
+    let stat: fs.Stats;
+    try { stat = fs.lstatSync(next); }
+    catch (error) {
+      if (!["ENOENT", "ENOTDIR"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error;
+      resolved = next;
+      continue;
+    }
+    if (!stat.isSymbolicLink()) { resolved = fs.realpathSync(next); continue; }
+    if (++links > 40) throw new Error("engine_runtime_namespace_current_invalid");
+    const target = fs.readlinkSync(next);
+    if (path.isAbsolute(target)) {
+      root = path.parse(target).root;
+      resolved = fs.realpathSync(root);
+      remaining = [...split(target.slice(root.length)), ...remaining];
+    } else remaining = [...split(target), ...remaining];
+  }
+  return resolved;
+}
+
+/** Resolve both updater namespaces without consulting or changing user data. */
+export function hephaestusRuntimeBases(): RuntimeBases {
+  const configuredBase = process.env.HEPHAESTUS_RUNTIME_BASE?.trim();
+  const defaultNew = path.join(os.homedir(), ".agentlas", "os-runtime");
+  if (configuredBase && !path.isAbsolute(configuredBase)) return { error: "standalone_runtime_base_not_absolute" };
+  const isDefault = !configuredBase || path.resolve(configuredBase) === path.resolve(defaultNew);
+  const legacyBase = isDefault ? path.join(os.homedir(), ".agentlas", "runtime") : configuredBase!;
+  const newBase = isDefault ? defaultNew : path.join(configuredBase!, "os-runtime");
+  const unavailable = (error: RuntimeNamespaceError): RuntimeBases => ({ legacyBase, newBase, newCurrentRoot: null, error });
+  let newCurrentRoot: string | null = null;
+  try {
+    // A custom legacy link must not bypass ownership checks by aliasing the new namespace.
+    if (!isDefault) {
+      let currentTarget: string | null = null;
+      try {
+        fs.lstatSync(path.join(legacyBase, "current"));
+        currentTarget = resolveRuntimePathAllowMissing(path.join(legacyBase, "current"));
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") return { error: "engine_runtime_namespace_unavailable" };
+      }
+      if (currentTarget) {
+        const relative = path.relative(resolveRuntimePathAllowMissing(newBase), currentTarget);
+        if (!relative || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative))) return { error: "engine_runtime_namespace_collision" };
+      }
+    }
+    try {
+      const stat = fs.lstatSync(newBase);
+      if (stat.isSymbolicLink()) return unavailable("engine_runtime_namespace_symlink");
+      if (!stat.isDirectory()) return unavailable("engine_runtime_namespace_unavailable");
+      if (!hasNamespaceOwner(newBase)) return unavailable("engine_runtime_namespace_unowned");
+      const current = path.join(newBase, "current");
+      let currentStat: fs.Stats | null = null;
+      try { currentStat = fs.lstatSync(current); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") return unavailable("engine_runtime_namespace_current_invalid"); }
+      if (currentStat) {
+        if (!currentStat.isSymbolicLink()) return unavailable("engine_runtime_namespace_current_invalid");
+        let target: string;
+        try { target = resolveRuntimePathAllowMissing(current); }
+        catch { return unavailable("engine_runtime_namespace_current_invalid"); }
+        const relative = path.relative(fs.realpathSync(newBase), target);
+        if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) return unavailable("engine_runtime_namespace_current_invalid");
+        // A dangling internal link is safe for the updater to repair, but cannot be selected.
+        try { newCurrentRoot = fs.realpathSync(current); }
+        catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") return unavailable("engine_runtime_namespace_current_invalid"); }
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") return unavailable("engine_runtime_namespace_unavailable");
+    }
+  } catch { return unavailable("engine_runtime_namespace_unavailable"); }
+  return { legacyBase, newBase, newCurrentRoot };
+}
+
 /**
  * Same selection as `hephaestusRoot`, but keeps **where the engine came from**.
  *
@@ -210,9 +327,12 @@ export function hephaestusRootDetail(
     return { root: path.resolve(explicit), kind: "override" };
   }
 
-  const paths: Array<{ root: string; kind: RuntimeCandidate["kind"] }> = [
-    { root: path.join(os.homedir(), ".agentlas", "runtime", "current"), kind: "managed" },
-  ];
+  const bases = hephaestusRuntimeBases();
+  const paths: Array<{ root: string; kind: RuntimeCandidate["kind"] }> = [];
+  if ("legacyBase" in bases) {
+    if (!bases.error && bases.newCurrentRoot) paths.push({ root: bases.newCurrentRoot, kind: "managed" });
+    paths.push({ root: path.join(bases.legacyBase, "current"), kind: "managed" });
+  }
   if (process.resourcesPath) paths.push({ root: path.join(process.resourcesPath, "Hephaestus"), kind: "bundled" });
   const appPath = optionalElectronAppPath();
   if (appPath) paths.push({ root: path.join(appPath, "Hephaestus"), kind: "bundled" });
@@ -228,22 +348,29 @@ export function hephaestusRootDetail(
     .map((candidate, order): RuntimeCandidate | null => {
       if (!isRuntimeRoot(candidate.root, requiredMarkers) || isRejected(candidate.root)) return null;
       const root = path.resolve(candidate.root);
-      return { ...candidate, root, order, version: readHephaestusVersion(root) };
+      const rawVersion = readHephaestusVersion(root);
+      const version = compareHephaestusVersions(rawVersion, rawVersion) === null ? null : rawVersion;
+      return { ...candidate, root, order, version };
     })
     .filter((candidate): candidate is RuntimeCandidate => candidate !== null);
   if (candidates.length === 0) return null;
-  const managed = candidates.find((candidate) => candidate.kind === "managed") ?? null;
+  const managedCandidates = candidates.filter((candidate) => candidate.kind === "managed");
+  const managed = managedCandidates.reduce<RuntimeCandidate | null>(
+    (best, candidate) => best ? preferCandidate(best, candidate) : candidate,
+    null,
+  );
   // Preserve the old trust order among immutable/dev fallbacks. In particular,
   // a caller-controlled cwd/Hephaestus directory must never outrank packaged
   // process.resourcesPath merely by claiming a larger version.
   const bundled = candidates.find((candidate) => candidate.kind === "bundled") ?? null;
-  const winner = managed && bundled ? preferCandidate(managed, bundled) : (bundled ?? managed)!;
+  const compared = managed && bundled ? compareHephaestusVersions(managed.version, bundled.version) : null;
+  const winner = managed && bundled ? (compared !== null && compared > 0 ? managed : bundled) : (bundled ?? managed)!;
   return { root: winner.root, kind: winner.kind };
 }
 
 export function resetHephaestusRootCache(): void {
   // Root selection is intentionally live so an atomic `runtime/current`
-  // switch is observed without restarting Desktop. Kept for API compatibility.
+  // or `os-runtime/current` switch is observed without restarting Desktop. Kept for API compatibility.
 }
 
 /** Reject one concrete runtime target after a failed MCP capability preflight. */

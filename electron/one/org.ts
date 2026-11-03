@@ -31,6 +31,7 @@ import { closeAgentOccupancies, replaceSeatOccupant } from "../store/seats";
 import { seatEventText } from "../../shared/one-seat-events";
 import { invocationHostStopCause, invocationHostStopCopy } from "../../shared/invocation-host-stop";
 import { currentUiLocale } from "../ui-locale";
+import { assertManagedOneTeamAvailable } from "../managed-one/auth";
 import {
   decodeOneTeamAvatarDataUrl,
   removeOneTeamAvatarDirectory,
@@ -174,6 +175,38 @@ export class OneGroupMemberUnavailableError extends Error {
 export function oneAgentUnavailableCode(agent: InstalledAgent | undefined): OneMemberUnavailableCode | null {
   if (!agent) return "agent_not_installed";
   if (agent.sourceMissingSince) return "source_missing";
+  return null;
+}
+
+/**
+ * Why a seat cannot be called into a group conversation, as one machine code (null = it can join).
+ * A pure read (no writes): the join guard `ensureOneGroupLocalStaff`, the member rows the Organisation and the Taskforce
+ * picker read, and `one_team_list` all ask this one function, so a teammate is offered exactly when joining would be accepted.
+ * `seat` is null when the agent has no standing seat yet. `group_requires_local` is a seat-less non-local agent
+ * (the join guard's `one_group_member_seating_required`), or, with `requireLocalSource`, any Hub or cloud seat (the model-facing
+ * list and `one_team_compose_group` never put those into a group; the join guard itself accepts an existing seat).
+ */
+export type OneGroupJoinRefusalCode = OneMemberUnavailableCode | "group_requires_local";
+export type OneGroupJoinSeat = Pick<Row, "installed_agent_id" | "archived_at" | "status_kind" | "source" | "lease_expires_at" | "last_activity_at">;
+
+export function oneGroupJoinRefusal(
+  seat: OneGroupJoinSeat | null | undefined,
+  installed: InstalledAgent | undefined,
+  options: { allowPriorTaskFailure?: boolean; requireLocalSource?: boolean } = {},
+): OneGroupJoinRefusalCode | null {
+  if (!installed) return "agent_not_installed";
+  if (installed.sourceMissingSince) return "source_missing";
+  if (installed.visibility === "private" || installed.visibility === "background") return "hidden_agent";
+  if (seat) {
+    // Explicit room composition can reuse a valid identity after a failed task;
+    // it does not clear the failure or relax package, lock or lease checks.
+    if (seat.archived_at) return "seat_archived";
+    if (seat.status_kind === "failed" && !options.allowPriorTaskFailure && seatFailureStands(seat)) return "seat_task_failed";
+    if (seat.status_kind === "locked" && seat.source !== "hub") return "seat_locked";
+    if (seat.source !== "hub" && (isExpired(seat.lease_expires_at)
+      || (seat.lease_expires_at !== null && !Number.isFinite(Date.parse(seat.lease_expires_at))))) return "seat_lease_invalid";
+  }
+  if ((!seat || options.requireLocalSource) && sourceFor(installed) !== "local") return "group_requires_local";
   return null;
 }
 
@@ -420,6 +453,7 @@ function resolveOneTeamAvatar(
 }
 
 export function createOneTeamAgent(input: CreateOneTeamAgentInput): CreateOneTeamAgentResult {
+  assertManagedOneTeamAvailable();
   if (!input || typeof input !== "object") throw new Error("Agent input is required.");
   const name = assertText(input.name, "name", 80);
   const title = optionalText(input.title, "title", 100);
@@ -665,6 +699,8 @@ function toMember(row: Row, now: number, installedById: ReadonlyMap<string, Inst
     ...editableIdentityOf(installed),
     runtimeSelection: getAgentRuntimeOverride("agent", row.installed_agent_id)?.selection ?? null,
     revision: row.revision,
+    // Same answer the join guard gives (a failed earlier task does not block a room the owner composes), so a picker never offers a seat the guard would refuse.
+    ...(!row.archived_at ? groupJoinRefusalField(oneGroupJoinRefusal(row, installed, { allowPriorTaskFailure: true })) : {}),
     ...(unavailableCode && !row.archived_at ? {
       unavailable: {
         code: unavailableCode,
@@ -673,6 +709,10 @@ function toMember(row: Row, now: number, installedById: ReadonlyMap<string, Inst
       },
     } : {}),
   };
+}
+
+function groupJoinRefusalField(code: OneGroupJoinRefusalCode | null): { groupJoinRefusal?: OneGroupJoinRefusalCode } {
+  return code ? { groupJoinRefusal: code } : {};
 }
 
 function activeRows(): Row[] {
@@ -766,6 +806,7 @@ function handoverNote(value: string | null | undefined, row: Row): string | null
  * renews a remote asset and never restores an archived identity implicitly.
  */
 export function ensureOneGroupLocalStaff(agentIds: string[], seatMissing = true, options: { allowPriorTaskFailure?: boolean } = {}): void {
+  assertManagedOneTeamAvailable();
   const db = getDb();
   if (!db.inTransaction) throw new Error("one_group_transaction_required");
   for (const id of [...new Set(agentIds)]) {
@@ -777,24 +818,16 @@ export function ensureOneGroupLocalStaff(agentIds: string[], seatMissing = true,
         reason, id, prior?.display_name?.trim() || installed?.localDisplayName || installed?.name || prior?.agent_slug || id,
       );
     };
-    if (!installed) refuse("agent_not_installed");
-    const agent = ensureAvailableAgent(id);
-    if (agent.sourceMissingSince) refuse("source_missing");
-    if (agent.visibility === "private" || agent.visibility === "background") refuse("hidden_agent");
+    const refusal = oneGroupJoinRefusal(prior, installed, { allowPriorTaskFailure: options.allowPriorTaskFailure });
+    if (refusal === "group_requires_local") throw new Error("one_group_member_seating_required");
+    if (refusal) refuse(refusal);
+    const agent = installed!;
     if (prior) {
-      // Explicit room composition can reuse a valid identity after a failed task;
-      // it does not clear the failure or relax package, lock or lease checks.
-      if (prior.archived_at) refuse("seat_archived");
-      if (prior.status_kind === "failed" && !options.allowPriorTaskFailure && seatFailureStands(prior)) refuse("seat_task_failed");
-      if (prior.status_kind === "locked" && prior.source !== "hub") refuse("seat_locked");
-      if (prior.source !== "hub" && (isExpired(prior.lease_expires_at)
-        || (prior.lease_expires_at !== null && !Number.isFinite(Date.parse(prior.lease_expires_at))))) refuse("seat_lease_invalid");
       // Bring a seat made before an installed copy counted as local up to date, so the stored source agrees with what is shown.
       const current = sourceFor(agent);
       if (prior.source !== current) db.prepare("UPDATE one_org_members SET source = ?, updated_at = ? WHERE id = ?").run(current, new Date().toISOString(), prior.id);
       continue;
     }
-    if (sourceFor(agent) !== "local") throw new Error("one_group_member_seating_required");
     if (!seatMissing) continue;
     const now = new Date().toISOString();
     const sortOrder = activeRows().reduce((max, row) => Math.max(max, row.sort_order), -1) + 1;
@@ -821,8 +854,10 @@ async function verifiedStandingLease(agent: InstalledAgent): Promise<string | nu
 }
 
 export async function addOneOrgMember(input: AddOneOrgMemberInput): Promise<OneOrgState> {
+  assertManagedOneTeamAvailable();
   const agent = ensureSeatableAgent(input.installedAgentId);
   const verifiedLeaseExpiresAt = await verifiedStandingLease(agent);
+  assertManagedOneTeamAvailable();
   const duplicate = getDb().prepare(
     "SELECT 1 FROM one_org_members WHERE installed_agent_id = ? AND archived_at IS NULL LIMIT 1",
   ).get(agent.id);
@@ -857,6 +892,7 @@ export async function addOneOrgMember(input: AddOneOrgMemberInput): Promise<OneO
 }
 
 export function renameOneOrgMember(input: RenameOneOrgMemberInput): OneOrgState {
+  assertManagedOneTeamAvailable();
   const id = assertText(input.id, "id", 80);
   const name = assertText(input.displayName, "displayName", 80);
   const row = getDb().prepare("SELECT * FROM one_org_members WHERE id = ?").get(id) as Row | undefined;
@@ -869,6 +905,7 @@ export function renameOneOrgMember(input: RenameOneOrgMemberInput): OneOrgState 
 }
 
 export function updateOneOrgMember(input: UpdateOneOrgMemberInput): OneOrgState {
+  assertManagedOneTeamAvailable();
   const id = assertText(input.id, "id", 80);
   const displayName = assertText(input.displayName, "displayName", 80);
   if (!COLLABORATION_STYLES.has(input.collaborationStyle)) {
@@ -987,12 +1024,14 @@ export function oneOrgExecutionGuidance(installedAgentIds: string[]): string {
 }
 
 export async function replaceOneOrgMember(input: ReplaceOneOrgMemberInput): Promise<OneOrgState> {
+  assertManagedOneTeamAvailable();
   const id = assertText(input.id, "id", 80);
   const row = getDb().prepare("SELECT * FROM one_org_members WHERE id = ?").get(id) as Row | undefined;
   if (!row) throw new Error("One Team member not found.");
   assertExpectedRevision(row, input.expectedRevision);
   const agent = ensureSeatableAgent(input.installedAgentId);
   const verifiedLeaseExpiresAt = await verifiedStandingLease(agent);
+  assertManagedOneTeamAvailable();
   const current = getDb().prepare("SELECT * FROM one_org_members WHERE id = ?").get(id) as Row | undefined;
   if (!current) throw new Error("One Team member not found.");
   assertExpectedRevision(current, row.revision);
@@ -1089,6 +1128,7 @@ export function archiveOneOrgMember(input: ArchiveOneOrgMemberInput): OneOrgStat
 }
 
 export function restoreOneOrgMember(input: ArchiveOneOrgMemberInput): OneOrgState {
+  assertManagedOneTeamAvailable();
   const id = assertText(input.id, "id", 80);
   const row = getDb().prepare("SELECT * FROM one_org_members WHERE id = ?").get(id) as Row | undefined;
   if (!row) throw new Error("One Team member not found.");
@@ -1122,6 +1162,7 @@ export function markOneOrgMemberRead(input: MarkOneOrgMemberReadInput): OneOrgSt
 }
 
 export function openOneOrgMember(input: { id: string; expectedRevision?: number }) {
+  assertManagedOneTeamAvailable();
   const id = assertText(input.id, "id", 80);
   const row = getDb().prepare("SELECT * FROM one_org_members WHERE id = ? AND archived_at IS NULL").get(id) as Row | undefined;
   if (!row) throw new Error("One Team member not found.");
@@ -1136,6 +1177,7 @@ export function openOneOrgMember(input: { id: string; expectedRevision?: number 
 }
 
 export function setOneOrgMemberTools(input: SetOneOrgMemberToolsInput): OneOrgState {
+  assertManagedOneTeamAvailable();
   const id = assertText(input.id, "id", 80);
   const row = getDb().prepare("SELECT * FROM one_org_members WHERE id = ? AND archived_at IS NULL").get(id) as Row | undefined;
   if (!row) throw new Error("One Team member not found.");
@@ -1148,6 +1190,7 @@ export function setOneOrgMemberTools(input: SetOneOrgMemberToolsInput): OneOrgSt
 }
 
 export function reorderOneOrgMembers(input: ReorderOneOrgMembersInput): OneOrgState {
+  assertManagedOneTeamAvailable();
   if (!Array.isArray(input.orderedIds) || input.orderedIds.length > 80) {
     throw new Error("orderedIds must be a bounded list.");
   }

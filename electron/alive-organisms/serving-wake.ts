@@ -11,6 +11,8 @@
 import { getSessionCookieHeader, webBaseUrl } from "../auth";
 import { isAgentlasServingModel } from "../../shared/agentlas-serving";
 import type { Runner, RunnerResult } from "../runtime/runner";
+import { httpRetryAfterHint } from "../runtime/runner";
+import { withDurableRuntimeRetry } from "../runtime/durable-retry";
 
 /** Controller wakes are classification-sized; light is the default tier unless the pool member names another. */
 export const ALIVE_SERVING_DEFAULT_TIER = "agentlas-light";
@@ -46,7 +48,7 @@ async function* frames(response: Response): AsyncGenerator<{ event: string; data
 
 const measured = (value: unknown): value is number => Number.isSafeInteger(value) && Number(value) >= 0;
 
-export const runAliveServingDecision: Runner = async (req, _events): Promise<RunnerResult> => {
+const runAliveServingDecisionBody: Runner = async (req, _events): Promise<RunnerResult> => {
   const cookie = getSessionCookieHeader();
   if (!cookie) return { text: "", failure: { kind: "auth", runtime: "agentlas", source: "marker", providerCode: "sign_in_required", message: "Sign in to use Agentlas models." } };
   const model = isAgentlasServingModel(req.model) ? String(req.model).trim() : ALIVE_SERVING_DEFAULT_TIER;
@@ -62,11 +64,15 @@ export const runAliveServingDecision: Runner = async (req, _events): Promise<Run
     ...(req.signal ? { signal: req.signal } : {}),
   });
   if (!response.ok) {
+    (require("../runtime/retry-observation") as typeof import("../runtime/retry-observation")).observeRuntimeRetryAfter(response.status, response.headers.get("retry-after"));
     let code = "";
     try { code = String(((await response.json()) as { code?: unknown }).code ?? ""); } catch { /* no body */ }
     // Refused at the gate (auth/credits/unknown tier): nothing was generated.
-    const kind = response.status === 401 ? "auth" : response.status === 402 || code === "insufficient_credits" ? "quota" : "unsupported";
-    return { text: "", failure: { kind, runtime: "agentlas", source: "marker", providerCode: code || `http_${response.status}`, message: `serving ${response.status}` } };
+    const kind = response.status === 401 ? "auth" : response.status === 402 || code === "insufficient_credits" ? "quota"
+      : response.status === 429 ? "rate_limit" : response.status >= 500 && response.status <= 599 ? "unavailable" : "unsupported";
+    const retryAfterHint = httpRetryAfterHint(response.headers.get("retry-after"));
+    return { text: "", failure: { kind, runtime: "agentlas", source: "marker", providerCode: code || `http_${response.status}`,
+      message: `serving ${response.status}`, ...(retryAfterHint ? { retryAfterHint } : {}) } };
   }
   let text = "";
   let usage: { inputTokens: number; outputTokens: number } | undefined;
@@ -94,3 +100,8 @@ export const runAliveServingDecision: Runner = async (req, _events): Promise<Run
       && (done?.toolUses === undefined || Array.isArray(done.toolUses) && done.toolUses.length === 0)
       ? "completed" : "uncertain" };
 };
+
+// Main Alive, AGI and daemon all use this direct entry, outside selection.pickRunner.
+export const runAliveServingDecision = withDurableRuntimeRetry(runAliveServingDecisionBody,
+  { kind: "agentlas", backend: "agentlas", source: "agentlas:serving", model: ALIVE_SERVING_DEFAULT_TIER },
+  req => isAgentlasServingModel(req.model) ? String(req.model).trim() : ALIVE_SERVING_DEFAULT_TIER);

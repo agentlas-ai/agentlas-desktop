@@ -101,8 +101,10 @@ export async function runBuildRunnerWithMcpRecovery(input: {
   };
 
   try {
+    input.signal.throwIfAborted();
     const initialRequest = input.makeRequest(input.attachment);
     const result = await input.runner(initialRequest, trackedEvents);
+    input.signal.throwIfAborted();
     return { result, attachment: input.attachment, retryReceipt: null, prompt: { systemPrompt: initialRequest.systemPrompt, systemPromptComposition: initialRequest.systemPromptComposition } };
   } catch (error) {
     if (input.signal.aborted || executionObserved) throw error;
@@ -110,11 +112,16 @@ export async function runBuildRunnerWithMcpRecovery(input: {
     if (!failedCandidateId || !input.attachment?.recoverRuntimeFailure) throw error;
     let recovered: ResolvedMcpBuildAttachment | null = null;
     try {
-      recovered = await input.attachment.recoverRuntimeFailure(failedCandidateId);
+      recovered = await input.attachment.recoverRuntimeFailure(failedCandidateId, input.signal);
     } catch {
+      input.signal.throwIfAborted();
       // Recovery is a fail-closed eligibility check. Preserve the original
       // runner failure instead of replacing it with resolver diagnostics.
       throw error;
+    }
+    if (input.signal.aborted) {
+      recovered?.config?.cleanup?.();
+      input.signal.throwIfAborted();
     }
     if (!recovered) throw error;
     const failed = input.attachment.receipt.attached.find((item) => item.candidateId === failedCandidateId);
@@ -130,6 +137,7 @@ export async function runBuildRunnerWithMcpRecovery(input: {
       emptyMcpMode: recovered.receipt.emptyMode,
       retryCount: 1,
     };
+    input.signal.throwIfAborted();
     input.onRetry?.(retryReceipt);
     const retryRequest = input.makeRequest(recovered);
     const capability = failed.capability.replace(/[^a-zA-Z0-9._-]+/g, "-").slice(0, 80) || "unknown";
@@ -163,7 +171,9 @@ export async function runBuildRunnerWithMcpRecovery(input: {
     if (retryPrompt.length > MAX_BUILD_SYSTEM_PROMPT_CHARS) throw error;
     retryRequest.systemPromptComposition = retryComposition.composition;
     retryRequest.systemPrompt = retryPrompt;
+    input.signal.throwIfAborted();
     const result = await input.runner(retryRequest, input.events);
+    input.signal.throwIfAborted();
     return { result, attachment: recovered, retryReceipt, prompt: { systemPrompt: retryRequest.systemPrompt, systemPromptComposition: retryRequest.systemPromptComposition } };
   }
 }

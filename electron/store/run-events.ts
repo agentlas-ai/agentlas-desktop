@@ -12,6 +12,7 @@ import { externalToolNames } from "../../shared/tool-activity";
 import { invocationHostStopCause, isOwnerGoalStopCause } from "../../shared/invocation-host-stop";
 import { normalizeToolCall } from "../../shared/tool-call-detail";
 import { getDb } from "./db";
+import { createRuntimeRetryStore } from "./runtime-retry";
 import { attachedDaemonBootId } from "../invocation/attached-daemon-boot";
 import { recordChannelPublishReceipts } from "../publish-receipts";
 import {
@@ -697,6 +698,99 @@ export function canonicalGoalWaitSnapshot(value:unknown):CanonicalGoalWaitRecord
   }:null});
 }
 
+/** The diagnostic object fallback truncates JSON. This one closed machine contract must remain readable.
+ * Keep its existing string representation: changing it to an object would also change daemon retry admission.
+ * This does not repair old rows, promote a verifier verdict, or authorize an effect/retry. */
+const TASK_FORCE_FAILURE_REPORT_MAX_BYTES = 64 * 1024;
+function canonicalTaskForceFailureReportJson(value: unknown): string {
+  type InvalidReason = "invalid-shape" | "size-limit" | "sensitive-field";
+  let reason: InvalidReason = "invalid-shape";
+  const unreadable = () => JSON.stringify({ schemaVersion: "agentlas.execution-failure-unreadable.v1", reason });
+  const reject = (why: InvalidReason = "invalid-shape"): never => { reason = why; throw new Error(why); };
+  const record = (item: unknown, keys: readonly string[]): Record<string, unknown> => {
+    if (!item || typeof item !== "object" || Array.isArray(item)
+      || ![Object.prototype, null].includes(Object.getPrototypeOf(item))) return reject();
+    const row = item as Record<string, unknown>;
+    if (Object.keys(row).some(key => !keys.includes(key))) return reject();
+    return row;
+  };
+  const member = (item: unknown, values: readonly unknown[]): unknown => values.includes(item) ? item : reject();
+  // No messages, prose, arguments, URLs, paths, artifacts, or arbitrary nested objects enter this exception.
+  const token = (item: unknown): string => {
+    if (typeof item !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$/.test(item)) return reject();
+    if (redactRunEventSensitiveText(item) !== item) return reject("sensitive-field");
+    return item;
+  };
+  const list = (item: unknown): unknown[] => {
+    if (!Array.isArray(item)) return reject();
+    if (item.length > TASK_FORCE_FAILURE_REPORT_MAX_BYTES / 2) return reject("size-limit");
+    return Array.from(item);
+  };
+  try {
+    if (typeof value === "string") {
+      if (Buffer.byteLength(value, "utf8") > TASK_FORCE_FAILURE_REPORT_MAX_BYTES) return reject("size-limit");
+      value = JSON.parse(value);
+    }
+    const row = record(value, ["schemaVersion", "outcome", "causes", "effects", "reason"]);
+    if (row.schemaVersion === "agentlas.execution-failure-unreadable.v1") {
+      record(row, ["schemaVersion", "reason"]);
+      reason = member(row.reason, ["invalid-shape", "size-limit", "sensitive-field"]) as InvalidReason;
+      return unreadable();
+    }
+    record(row, ["schemaVersion", "outcome", "causes", "effects"]);
+    member(row.schemaVersion, ["agentlas.execution-failure.v1"]);
+    member(row.outcome, ["failed", "partial", "blocked"]);
+    let bytes = Buffer.byteLength(JSON.stringify({ schemaVersion: row.schemaVersion, outcome: row.outcome, causes: [], effects: [] }), "utf8");
+    const bounded = (item: Record<string, unknown>, index: number): Record<string, unknown> => {
+      bytes += Buffer.byteLength(JSON.stringify(item), "utf8") + (index > 0 ? 1 : 0);
+      if (bytes > TASK_FORCE_FAILURE_REPORT_MAX_BYTES) return reject("size-limit");
+      return item;
+    };
+    const causes = list(row.causes).map((item, index) => {
+      const cause = record(item, ["phase", "code", "stepId", "providerCode", "httpStatus", "retryAfterMs", "retryAfterHint",
+        "causeCodes", "delivery", "requiredPermission", "actualPermission", "blockedBy", "providerKind", "providerSource", "internal", "recovery"]);
+      const result: Record<string, unknown> = {
+        phase: member(cause.phase, ["admission", "preparation", "execution", "effect", "verification"]), code: token(cause.code),
+        recovery: member(cause.recovery, ["continue-work", "request-authority", "inspect-effect", "reconcile-effect", "retry-preparation", "wait-capacity", "repair-contract", "none"]),
+      };
+      for (const key of ["stepId", "providerCode"] as const) if (cause[key] !== undefined) result[key] = token(cause[key]);
+      for (const key of ["causeCodes", "blockedBy"] as const) if (cause[key] !== undefined) result[key] = list(cause[key]).map(token);
+      if (cause.httpStatus !== undefined) result.httpStatus = typeof cause.httpStatus === "number" && Number.isInteger(cause.httpStatus)
+        && cause.httpStatus >= 100 && cause.httpStatus <= 599 ? cause.httpStatus : reject();
+      if (cause.retryAfterMs !== undefined) result.retryAfterMs = typeof cause.retryAfterMs === "number" && Number.isFinite(cause.retryAfterMs)
+        && cause.retryAfterMs >= 0 ? cause.retryAfterMs : reject();
+      if (cause.retryAfterHint !== undefined) {
+        const hint = cause.retryAfterHint;
+        if (typeof hint !== "string" || hint.length > 256 || !(/^[0-9]+$/.test(hint)
+          || /^[+-]?[0-9]{4,6}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z$/.test(hint)
+          || /^[A-Z][a-z]{2}, [0-9]{2} [A-Z][a-z]{2} [0-9]{4} [0-9]{2}:[0-9]{2}:[0-9]{2} GMT$/.test(hint)
+          || /^[A-Z][a-z]{5,8}, [0-9]{2}-[A-Z][a-z]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} GMT$/.test(hint)
+          || /^[A-Z][a-z]{2} [A-Z][a-z]{2} [ 0-9][0-9] [0-9]{2}:[0-9]{2}:[0-9]{2} [0-9]{4}$/.test(hint))) return reject();
+        result.retryAfterHint = hint;
+      }
+      if (cause.delivery !== undefined) result.delivery = member(cause.delivery, ["not-dispatched", "dispatched", "unknown"]);
+      for (const key of ["requiredPermission", "actualPermission"] as const) if (cause[key] !== undefined) result[key] = member(cause[key], ["read", "write", "full"]);
+      if (cause.providerKind !== undefined) result.providerKind = member(cause.providerKind, ["quota", "rate_limit", "auth", "refused", "empty", "exit", "timeout", "unavailable", "unsupported"]);
+      if (cause.providerSource !== undefined) result.providerSource = member(cause.providerSource, ["marker", "exit", "heuristic"]);
+      if (cause.internal !== undefined) result.internal = member(cause.internal, [true]);
+      return bounded(result, index);
+    });
+    const effects = list(row.effects).map((item, index) => {
+      const effect = record(item, ["requirement", "state", "satisfied", "requiresFollowup", "code", "recovery"]);
+      return bounded({ requirement: member(effect.requirement, ["required", "not-required", "unspecified"]),
+        state: member(effect.state, ["not-attempted", "withheld", "attempted", "uncertain", "verified"]),
+        satisfied: member(effect.satisfied, [true, false]), requiresFollowup: member(effect.requiresFollowup, [true, false]),
+        code: member(effect.code, ["effect_not_required", "effect_verified", "effect_required_not_attempted", "effect_authority_withheld",
+          "effect_requirement_unspecified", "effect_outcome_uncertain", "effect_witness_missing", "effect_authority_unverified"]),
+        recovery: member(effect.recovery, ["continue-work", "request-authority", "inspect-effect", "reconcile-effect", "retry-preparation", "wait-capacity", "repair-contract", "none"]),
+      }, index);
+    });
+    const json = JSON.stringify({ schemaVersion: row.schemaVersion, outcome: row.outcome, causes, effects });
+    if (Buffer.byteLength(json, "utf8") > TASK_FORCE_FAILURE_REPORT_MAX_BYTES) return reject("size-limit");
+    return json;
+  } catch { return unreadable(); }
+}
+
 function safePayload(
   input: Record<string, unknown> | undefined,
   context?: SafePayloadContext,
@@ -716,6 +810,10 @@ function safePayload(
   const exactIds = input ? exactHostIdentityFields(input, context) : {};
   const out: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(input ?? {})) {
+    if (key === "failureReport" && context?.kind === "task_force_execution_receipt") {
+      out[key] = canonicalTaskForceFailureReportJson(value);
+      continue;
+    }
     if (value == null) continue;
     if (key === "canonicalGoalWait") {
       const wait=context?.kind==="goal_wait_subscription"?canonicalGoalWaitSnapshot(value):null;
@@ -1957,6 +2055,11 @@ export function recordRunEvent(input: RecordRunEventInput): RunEventUi {
       // An exact source identity is immutable: repeat deliveries return the
       // original committed payload, even if a retried producer changed its copy.
       return runRowToUi(existing);
+    }
+    // Preserve only closed machine timing privately. The existing public payload
+    // stays byte-compatible, including legacy failureReport diagnostic strings.
+    if (input.kind === "task_force_execution_receipt" && input.payload?.failureReport) {
+      createRuntimeRetryStore(getDb).recordTeamWait(input.runId, input.payload.failureReport);
     }
     const seq = nextSeq(input.runId);
     // Link only an actual attempt binding, never infer identity from chat titles.

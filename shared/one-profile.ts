@@ -48,6 +48,8 @@ export interface OneProfile {
 }
 
 export interface OneProfileUpdateInput {
+  /** Bind an edit opened for a specific One; omitted by older clients. */
+  oneId?: string;
   expectedVersion: number;
   patch: Partial<Pick<OneProfile, "displayName" | "role" | "profileContext" | "preferredLocale" | "timeZone" | "avatarIcon" | "bubbleColor">>;
 }

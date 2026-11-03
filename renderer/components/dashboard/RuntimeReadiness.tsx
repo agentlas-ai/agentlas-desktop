@@ -308,6 +308,8 @@ export function RuntimeReadiness() {
           ? (engineRecovery?.presentation?.summary ?? "")
           : deep && !doctor?.ok
             ? (ko ? "엔진은 있지만 자가진단을 통과하지 못했습니다." : "The engine exists but did not pass its self-check.")
+            : engineJournal?.status === "failed"
+              ? (ko ? "엔진 업데이트에 실패했습니다. 다시 시도해 주세요." : "The engine update failed. Please try again.")
             : engineUpdate.reloadRequired
               ? engineUpdate.state === "applied"
                 ? (ko

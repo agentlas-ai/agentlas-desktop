@@ -252,6 +252,20 @@ function ensureNetworkWatcher(): void {
   networkWatchTimer.unref?.();
 }
 
+/** Share one deferred domain-admission factory per bridge lifecycle. A failed load may be retried by the next request. */
+export function createLazyDomainAccountAdmission(load: () => Promise<(deviceId: string) => Promise<{ assertCurrent(): void }>>): (deviceId: string) => Promise<{ assertCurrent(): void }> {
+  let current: ((deviceId: string) => Promise<{ assertCurrent(): void }>) | undefined;
+  let pending: Promise<(deviceId: string) => Promise<{ assertCurrent(): void }>> | undefined;
+  return async deviceId => {
+    if (!current) {
+      const attempt = pending ?? (pending = load());
+      try { current = await attempt; }
+      catch (error) { if (pending === attempt) pending = undefined; throw error; }
+    }
+    return current(deviceId);
+  };
+}
+
 async function startBridgeInternal(
   options: MobileBridgeRuntimeOptions,
   overrides: { host?: string; port?: number } = {},
@@ -313,6 +327,14 @@ async function startBridgeInternal(
     actor: getAuthenticatedSessionBinding,
     pairedWorkspace: deviceId => pairing.deviceWorkspaceId(deviceId),
   }) : undefined;
+  const domainAccountAdmission = createLazyDomainAccountAdmission(async () => {
+    const { mobileDomainPorts } = await import("./finance-ui-transcript");
+    return mobileDomainPorts.createAccountAdmission({
+      actor: getAuthenticatedSessionBinding,
+      device: deviceId => pairing.deviceAccountBinding(deviceId),
+      proof: () => accountPairing.issueDesktopProof({ hostId: identity.hostId, pairingAttemptId: `pair_${randomBytes(24).toString("base64url")}` }),
+    });
+  });
   const authority = createMobileBridgeAuthority({
     ...(nativeToolApprovals ? { nativeToolApprovals } : {}),
     oneSecure: currentOneMobileSecureAdapter,
@@ -320,6 +342,7 @@ async function startBridgeInternal(
     cancelInvocationRun: stopInvocationRunByOwner,
     ...(push ? { mobilePush: push } : {}),
     goalControl: options.hostAuthority?.goalControl === false ? undefined : desktopGoalControlServices(),
+    domainAccountAdmission,
     hostIdentity: identity,
     displayName,
     appVersion: options.appVersion,

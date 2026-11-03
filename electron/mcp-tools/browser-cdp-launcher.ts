@@ -19,6 +19,7 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import { execFile, spawn } from "node:child_process";
 import { createOwnedChildDrain, OWNED_CHILD_DRAIN_SOURCE } from "../runtime/owned-child-drain";
+import { COMPUTER_USE_REQUEST_BUDGET_SOURCE } from "../computer-use/request-lifetime";
 import { BROWSER_SITE_LEARNING_CORE_SOURCE, BROWSER_SITE_LEARNING_GLUE_SOURCE } from "./site-learning-core";
 import { BROWSER_APPROVAL_FILE_ENV } from "../browser/approval-channel";
 import { AUTOMATION_PROFILE_CACHE_BYTES, AUTOMATION_PROFILE_DISPOSABLE, AUTOMATION_PROFILE_FLAGS } from "../browser/automation-profile-flags";
@@ -3881,7 +3882,9 @@ async function main() {
   const unifiedEvaluations = new Map();
   const unifiedTabTargets = new Map();
   const unifiedAppTargets = new Map();
+  ${COMPUTER_USE_REQUEST_BUDGET_SOURCE}
   const nativeControlRequest = (route, body, signal) => new Promise((resolve, reject) => {
+    if (signal?.aborted) { reject(new Error('unified-cua-cancelled')); return; }
     const file = process.env.AGENTLAS_COMPUTER_USE_CONTROL_FILE || '';
     const nativeTarget = typeof body.app === 'string' && body.app.startsWith('native-guest:');
     const nativeSource = typeof body.sourceId === 'string' && body.sourceId.startsWith('native-guest:');
@@ -3908,7 +3911,7 @@ async function main() {
     let response = null;
     const req = http.request({ host: '127.0.0.1', port: info.port, path: route, method: 'POST', headers: {
       authorization: 'Bearer ' + info.token, 'content-type': 'application/json', 'content-length': String(bytes.length),
-    }, timeout: 12000 }, (res) => {
+    }, timeout: computerUseRequestBudget(route, body, 12000) }, (res) => {
       response = res; let data = '';
       res.on('data', (chunk) => { data += chunk; if (data.length > 6 * 1024 * 1024) req.destroy(new Error('unified-cua-native-response-limit')); });
       res.on('end', () => { try { const value = JSON.parse(data); if (nativeTarget && route === '/native-guest/action' && !['focusApp', 'listApps'].includes(body.action)) nativeGuestCaptureSources.delete(body.app); value && value.ok ? resolve(value) : reject(new Error(String(value && (value.message || value.error) || 'unified-cua-native-failed'))); } catch { reject(new Error('unified-cua-native-response-invalid')); } });

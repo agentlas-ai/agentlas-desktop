@@ -247,7 +247,7 @@ export function GoalRailPanel({ view, locale, onView, nowMs: fixedNow }: {
   })() : (ko ? "마감 없음" : "No deadline");
   const budgetParts = [
     view.budget.maxCycles !== null ? (ko ? `실행 ${view.budget.cycleCount}/${view.budget.maxCycles}회` : `${view.budget.cycleCount}/${view.budget.maxCycles} runs`) : "",
-    view.budget.maxCostUsd !== null ? (ko ? `비용 $${view.budget.costUsedUsd.toFixed(2)}/$${view.budget.maxCostUsd}` : `$${view.budget.costUsedUsd.toFixed(2)} of $${view.budget.maxCostUsd}`) : "",
+    view.budget.maxCostUsd !== null ? (ko ? `기록 비용 $${view.budget.costUsedUsd.toFixed(2)} / 참고 금액 $${view.budget.maxCostUsd} (자동 중단 없음)` : `Recorded cost $${view.budget.costUsedUsd.toFixed(2)} / guide $${view.budget.maxCostUsd} (does not stop automatically)`) : "",
     view.budget.wallclockDeadline ? (ko ? `시간 한도 ${new Date(view.budget.wallclockDeadline).toLocaleDateString("ko-KR", { month: "numeric", day: "numeric" })}` : `Time limit ${new Date(view.budget.wallclockDeadline).toLocaleDateString("en-US", { month: "short", day: "numeric" })}`) : "",
   ].filter(Boolean);
   const budget = budgetParts.length ? budgetParts.join(" · ") : (ko ? "예산 한도 없음" : "No budget limit");

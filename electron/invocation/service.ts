@@ -1,3 +1,5 @@
+import { generatedVideoAccountKey } from "./generated-video-receipts";
+import { createHostVideoCustody } from "./host-video-custody";
 import { goalObligationContinuationPrompt, releaseGoalObligationContinuation, abandonGoalObligationContinuation } from "../long-run/goal-obligation-context";
 import { startPreparedHostQuestionInvocation } from "./host-admission";
 import type { PreparedHostQuestionContinuation } from "./host-question-continuation";
@@ -84,6 +86,7 @@ import { readRunTurnPlacement } from "./turn-placement";
 import { runFailureNoticeText } from "../../shared/run-failure-notice";
 import { hostInternalFailureMessage, isHostInternalException, isMissingWorkingFolderError, workingFolderMissingMessage } from "./host-internal-failure";
 import { forecastAppResend } from "./resend-forecast";
+import { queueWillStartRunAgain } from "./queue-retry-fact";
 import { OWNER_ACTION_FAILURE_CODES, RUN_FAILURE_UNSETTLED_CODE } from "../../shared/run-failure-notice";
 import {
   appendLongRunEvent,
@@ -116,7 +119,7 @@ import { stripEffectObservationMarker, type ParsedEffectObservation } from "../.
 import { DesktopLongRunInvocationProjection } from "../long-run/invocation-projection";
 import { resolveDesktopRuntimeAdapter } from "../long-run/runtime-adapters";
 import { claimCheckpointContinuation, latestTaskCheckpoint } from "../long-run/checkpoint";
-import { inferWorkingFolderFromPrompt, runMcpInvocation, type InvocationExecutionContext } from "../mcp/client";
+import { goalPassStopForInvocationError, inferWorkingFolderFromPrompt, runMcpInvocation, type InvocationExecutionContext } from "../mcp/client";
 import { applyFinalDisplayBackstop } from "../mcp/final-display-backstop";
 import { canonicalAskFenceText, extractAskFences } from "../../shared/ask-fence-flatten";
 import {
@@ -1543,6 +1546,7 @@ function beforeDispatch<T>(write: () => T): T {
 }
 
 export class InvocationService {
+  private generatedVideoAuthEpoch = 0;
   private readonly deliveryJournal = new RunEventDeliveryJournal();
   private readonly activeRuns = new InvocationLifecycleRegistry<RunRecord>();
   private readonly currentTurnSteerDispatches = new Set<string>();
@@ -2502,6 +2506,7 @@ export class InvocationService {
     // missing answer.
     onAgentResidencyChange((change) => this.publishAgentResidencyChange(change));
     onAuthSessionOwnershipChanged(()=>{
+      this.generatedVideoAuthEpoch++;
       for(const [runId,record] of new Map([...this.activeRuns.entries(),...this.settlingRuns,
         ...this.pendingGoalVerifications,...this.browserLoginWaitingRuns])) {
         if(record.oneTeamReportCustody && !queuedTeamReportCurrent(record.oneTeamReportCustody,record.oneTeamReportOriginalRequest!)) {
@@ -3969,8 +3974,20 @@ export class InvocationService {
           && (errorCode === RUN_FAILURE_UNSETTLED_CODE || storeLockAfterDispatch)
           ? forecastAppResend(getDb(), runId, { errorCode, runtimeFailure: failure?.runtimeFailure,
               ...(storeLockAfterDispatch && runFailedByHostInternalException(runId) ? { hostInternalFailure: true as const } : {}) }) : undefined;
+        // The queue's own rule, for ANY cause (not one code): a run that provably sent nothing and whose message the queue starts again by
+        // itself must not tell the owner to send it again (E20: only work_project_residency_busy was covered, so the same
+        // queue-owned retry of every other typed cause still said "send it again" while the app was sending it).
+        let queuedRetry = false;
+        if (!hostCause && terminalKind !== "invoke_interrupted" && (delivery ?? failure?.turnDelivery) === "not-dispatched") {
+          try {
+            queuedRetry = queueWillStartRunAgain(getDb(), { runId, status: "failed", errorCode: errorCode ?? undefined, runtimeFailure: failure?.runtimeFailure }, "not-dispatched");
+          } catch { /* An unreadable queue does not prove a retry. */ }
+        }
+        if (queuedRetry) failure = { code: failure?.code ?? errorCode ?? "", message: failure?.message ?? "",
+          ...failure, turnDelivery: "not-dispatched" };
         const typedFailureText = hostCause || terminalKind === "invoke_interrupted" ? null : runFailureNoticeText({
           locale, errorCode, runtimeFailure: failure?.runtimeFailure, turnDelivery: failure?.turnDelivery, resend,
+          queuedRetry,
           detail: failure?.message ? redactWorkAttachmentText(runReq, redactOneAttachmentText(runReq, failure.message)) : undefined,
         });
         // A failure no table names, with the host's proof that nothing reached a model: the app's own state (shared/run-failure-cause.ts
@@ -3997,7 +4014,7 @@ export class InvocationService {
                 : "The run failed before it could finish a reply. Your request is saved; run history shows the failure and recovery status.");
         // Each sweep retry of the waiting Goal tells it once: not again while the same notice is still the chat's latest reply
         // (host-written continuation rows between them do not count; the owner's own turn is not "system" and is always told).
-        const latest = runReq.promptOrigin === "system" || queueRetriesBySelf || internalUndispatched
+        const latest = runReq.promptOrigin === "system" || queueRetriesBySelf || internalUndispatched || (queuedRetry && typedFailureText !== null)
           ? listChatMessages(chat.id, 20).filter((entry) => entry.role === "assistant").at(-1) : undefined;
         if (latest?.text === message) { emptyFailureNoticePersisted = true; return; }
         appendChatMessage(chat.id, "assistant", message,
@@ -4357,6 +4374,17 @@ export class InvocationService {
     recordMcpInvocationEvent(runId, runReq, lifecycleStartEvent);
     this.publishRunEvent(record, { runId, chatId: runReq.chatId, event: lifecycleStartEvent });
 
+    const videoActor = generatedVideoAccountKey(getAuthenticatedActorIds());
+    const videoEpoch = this.generatedVideoAuthEpoch;
+    let videoMessageId: string | null = null;
+    let videoDrained = false;
+    const videoCustody = record.ownerLease && !record.background ? createHostVideoCustody({
+      db: getDb(), scope: { chatId: runReq.chatId, runId, ownerId: record.ownerLease.ownerId, leaseId: record.ownerLease.leaseId, account: videoActor },
+      signal: controller.signal,
+      currentAccount: () => this.generatedVideoAuthEpoch === videoEpoch ? generatedVideoAccountKey(getAuthenticatedActorIds()) : null,
+      isLive: () => !controller.signal.aborted && this.generatedVideoAuthEpoch === videoEpoch,
+      ownsSettledAssistantMessage: (_scope, messageId) => videoDrained && messageId === videoMessageId,
+    }) : undefined;
     const effectBoundary = new InvocationEffectBoundaryTracker(runId, runReq.chatId);
     let terminalObserved = false;
     /** The runner's own typed proof that this turn's terminal failure sent nothing to a model (turnDelivery "not-dispatched"). */
@@ -5302,6 +5330,8 @@ export class InvocationService {
               payload: { via: confirmedResult.via, messageId: confirmedResult.messageId } });
           }
           if (confirmedResult) finalAnswerConfirmedDurable = true;
+          // Only the producer's own re-read ID, never a body search or renderer input.
+          if (confirmedResult?.via === "message-id" && durableMessageId === confirmedResult.messageId) videoMessageId = confirmedResult.messageId;
         }
         if (
           event.kind === "final"
@@ -5977,6 +6007,7 @@ export class InvocationService {
         }
       },
       this.ownerControlInbox(runId, record),
+      videoCustody,
     )));
         };
         // The owner's own message takes the owner slot lane (NH20); anything this turn starts for others does not inherit it.
@@ -6543,6 +6574,13 @@ export class InvocationService {
         if (diagnostic) tryRecordRunEvent({ runId, chatId: runReq.chatId, agentId: record.actualAgentId,
           kind: "invoke_error_diagnostic", payload: diagnostic });
         settleGoalControllerAttempt(false);
+        // First-pass provider failures throw before the client's Goal continuation loop.
+        // Preserve the same durable provider floor and persistence policy after releasing
+        // this controller attempt; owner Pause/Stop is re-read by the parking boundary.
+        if (!executionContext && goalLongRun && !controller.signal.aborted) {
+          const stop = goalPassStopForInvocationError(error, goalLongRun.goalId);
+          if (stop) lifetime.retain(parkGoalAfterPassStopWithPool({ stop, invocationRunId: runId, chatId: chat.id }).then(() => undefined));
+        }
         effectObservationFailed = true;
         if (runnerRefusedBeforeDispatch(error)) turnProvedNotDispatched = true;
         const failedGoalId = record.automaticGoalId ??
@@ -6720,6 +6758,11 @@ export class InvocationService {
         // publish here or the chat stays "running" and refuses every later start (independent review 2026-10-04).
         if (this.activeRuns.has(runId)) this.releaseUndispatchedStart(runId, runReq.chatId, error, startBoundary.cleanups ?? [], record);
       }).finally(() => lifetime.afterSettled(async () => {
+        videoDrained = true;
+        if (videoCustody) {
+          const videoResult = videoCustody.settled(videoMessageId ?? "");
+          if (videoResult.sealed.length) try { emitDesktopStoreChange({entity:"chat",id:runReq.chatId}); } catch { /* persisted receipt is authoritative */ }
+        }
         if (record.ownerLease) this.releaseOwnerLease(record.ownerLease, "settled");
         if (nativePreparation) {
           // A missing cleanup ACK cannot retain an already drained execution slot.
@@ -8059,7 +8102,7 @@ export class InvocationService {
   /** The waiting owner message is in the transcript now; a received line follows if it is still waiting a moment later. */
   private keepOwnerIntakeMessage(row: DurableQueuedSteer, request: McpInvocationRequest, receivedLine = true): void {
     try {
-      appendChatMessage(row.chatId, "user", ownerVisiblePrompt(request), request.images?.length ? { images: request.images } : undefined);
+      appendChatMessage(row.chatId, "user", ownerVisiblePrompt(request), { ...(request.images?.length ? { images: request.images } : {}), ...(request.fileGroupId ? { fileGroupId: request.fileGroupId } : {}) });
     } catch (error) {
       console.warn("[owner-intake] waiting message could not be shown yet; it still runs:", error instanceof Error ? error.message : String(error));
       return;
@@ -8752,7 +8795,7 @@ export class InvocationService {
           "SELECT 1 FROM chat_messages WHERE chat_id = ? AND role = 'user' AND text = ? AND created_at >= ? LIMIT 1",
         ).get(chatId, text, next.queuedAt);
         if (!delivered) {
-          const kept = appendChatMessage(chatId, "user", text, request.images?.length ? { images: request.images } : undefined);
+          const kept = appendChatMessage(chatId, "user", text, { ...(request.images?.length ? { images: request.images } : {}), ...(request.fileGroupId ? { fileGroupId: request.fileGroupId } : {}) });
           // No synthetic "could not hand over" reply: the message is shown once, the cause is in the log above.
           // The kept message is the owner's: the chat's Goal reviews it like any owner message (D2).
           const goalId = reviewableChatGoalId(chatId);

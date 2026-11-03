@@ -636,6 +636,9 @@ const api: AgentlasIpc = {
   },
   agentWorkspace: {
     getWorkspace: (agentId) => ipcRenderer.invoke("agentWorkspace:get", agentId),
+    readAppearance: (agentId) => ipcRenderer.invoke("agentWorkspace:readAppearance", agentId),
+    getAppearance: (agentId) => ipcRenderer.invoke("agentWorkspace:getAppearance", agentId),
+    setAppearance: (input) => ipcRenderer.invoke("agentWorkspace:setAppearance", input),
     memoryCounts: (agentIds) => ipcRenderer.invoke("agentWorkspace:memoryCounts", agentIds),
     listFiles: (agentId, relativeDir) => ipcRenderer.invoke("agentWorkspace:listFiles", agentId, relativeDir),
     readFile: (agentId, relativePath) => ipcRenderer.invoke("agentWorkspace:readFile", agentId, relativePath),
@@ -729,6 +732,7 @@ const api: AgentlasIpc = {
   },
   marketplace: {
     listBundles: () => ipcRenderer.invoke("marketplace:listBundles"),
+    ...{ builderCatalogFresh: true as const, searchBuilderFresh: () => ipcRenderer.invoke("marketplace:builderSearchFresh"), listMineFresh: () => ipcRenderer.invoke("marketplace:builderListMineFresh") },
     search: (q: string) => ipcRenderer.invoke("marketplace:search", q),
     listFirms: () => ipcRenderer.invoke("marketplace:listFirms"),
     status: (force?: boolean) => ipcRenderer.invoke("marketplace:status", force === true),
@@ -978,6 +982,8 @@ const api: AgentlasIpc = {
     discard: (input) => ipcRenderer.invoke("oneAttachments:discard", input),
   },
   oneArtifacts: {
+    listMessageVideos: (input) => ipcRenderer.invoke("oneArtifacts:listMessageVideos", input),
+    revokeMessageVideo: (input) => ipcRenderer.invoke("oneArtifacts:revokeMessageVideo", input),
     issuePreview: (input) => ipcRenderer.invoke("oneArtifacts:issuePreview", input),
     revokePreview: (input) => ipcRenderer.invoke("oneArtifacts:revokePreview", input),
     listEarlier: (input) => ipcRenderer.invoke("oneArtifacts:listEarlier", input),
@@ -1564,11 +1570,27 @@ const api: AgentlasIpc = {
     buildReady: (runId: string) => ipcRenderer.invoke("hephaestus:buildReady", runId),
     contractVerify: (input) => ipcRenderer.invoke("hephaestus:contractVerify", input),
     activeBuild: () => ipcRenderer.invoke("hephaestus:activeBuild"),
+    readBuilderConversation: (buildId: string) => ipcRenderer.invoke("hephaestus:readBuilderConversation", buildId),
+    readLatestBuilderConversation: () => ipcRenderer.invoke("hephaestus:readLatestBuilderConversation"),
+    onBuilderOwnerChanged: (callback: () => void) => {
+      const listener = () => callback();
+      ipcRenderer.on("hephaestus:builderOwnerChanged", listener);
+      return () => ipcRenderer.removeListener("hephaestus:builderOwnerChanged", listener);
+    },
     cancelBuild: (runId: string) => ipcRenderer.invoke("hephaestus:cancelBuild", runId),
     startStudio: (input) => ipcRenderer.invoke("hephaestus:startStudio", input),
     stopStudio: () => ipcRenderer.invoke("hephaestus:stopStudio"),
   },
 };
+
+// Renderer-only recovery carries previously approved path capabilities. Keep
+// it out of the app-control catalog; Main independently checks the sender.
+Object.assign(api.hephaestus, {
+  recoverBuildTurn: (runId: string) => ipcRenderer.invoke("hephaestus:recoverBuildTurn", runId),
+});
+Object.assign(api.oneOrg, {
+  readDispatchResult: (input: unknown) => ipcRenderer.invoke("oneDispatch:resultPage", input),
+});
 
 // The sandbox cannot import a relative preload module. Keep this role projection
 // inline and retain the original full API for the existing Desktop renderer.

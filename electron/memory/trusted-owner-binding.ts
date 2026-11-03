@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { getAuthenticatedSessionBinding, onAuthSessionOwnershipChanged } from "../auth";
+import { managedOneAuthentication, wasManagedOneConfigured } from "../managed-one/auth";
 import { fetchAccountContext } from "../account-context";
 import { onHostShutdown } from "../host-lifecycle";
 import { userDataPath } from "../runtime-paths";
@@ -113,8 +114,13 @@ export function revokeTrustedMemoryOwnerBinding(): void {
 }
 
 function snapshot(): Omit<Binding, "binding_revision" | "expires_at"> {
+  // Once this process has held a managed identity, missing or expired managed
+  // credentials must not look like an account-free local Desktop installation.
+  if (wasManagedOneConfigured() && !managedOneAuthentication()) throw new Error("memory_account_binding_unavailable");
   const root = memoryRoot();
   const session = getAuthenticatedSessionBinding();
+  // The credential can expire between the first check and the session read.
+  if (wasManagedOneConfigured() && (!session || !managedOneAuthentication())) throw new Error("memory_account_binding_unavailable");
   // A stored credential awaiting restoration is not a credential-free local
   // install. Do not open its inherited device memory while auth is unknown.
   if (!session && fs.existsSync(userDataPath("auth", "session-cookie.v1.json"))) throw new Error("memory_account_binding_unavailable");
@@ -124,6 +130,15 @@ function snapshot(): Omit<Binding, "binding_revision" | "expires_at"> {
     device_custody_id: deviceMemoryCustodyId(), revocation_epoch: info.revocationEpoch,
     auth_binding_id: session?.sessionId ?? null, user_id: session?.userId ?? null,
     workspace_id: session?.workspaceId ?? null };
+}
+
+function activeBindingExpiry(now: number): number {
+  if (!wasManagedOneConfigured()) return now + TTL;
+  const managed = managedOneAuthentication();
+  if (!managed) throw new Error("memory_account_binding_unavailable");
+  // Core reads this lease independently. It must expire no later than the
+  // managed credential even if its renewal timer has not run yet.
+  return Math.min(now + TTL, managed.expiresAt);
 }
 function same(left: Binding, right: ReturnType<typeof snapshot>): boolean {
   const { binding_revision: _revision, expires_at: _expires, account_subject: _subject, ...identity } = left;
@@ -137,7 +152,8 @@ function renew(): void {
     if (current.value.expires_at <= now || !same(current.value, snapshot())) {
       revokeTrustedMemoryOwnerBinding(); return;
     }
-    current.value = { ...current.value, account_subject: accountSubjectFor(current.value.auth_binding_id), expires_at: now + TTL };
+    current.value = { ...current.value, account_subject: accountSubjectFor(current.value.auth_binding_id),
+      expires_at: current.value.state === "active" ? activeBindingExpiry(now) : now + TTL };
     atomic(current.file, current.value);
   } catch { revokeTrustedMemoryOwnerBinding(); }
 }
@@ -278,8 +294,9 @@ function currentEnvironment(): Record<string, string> {
     // One file per revision: a revoked or expired binding's name is never written again, so a leftover is provably dead.
     const revision = randomUUID();
     const file = path.join(identity.memory_root, "runtime-bindings", `desktop-${revision}.json`);
+    const now = Date.now();
     const value: Binding = { ...identity, account_subject: accountSubjectFor(identity.auth_binding_id),
-      binding_revision: revision, expires_at: Date.now() + TTL };
+      binding_revision: revision, expires_at: identity.state === "active" ? activeBindingExpiry(now) : now + TTL };
     atomic(file, value); current = { file, value };
     scheduleSweep(path.dirname(file));
   }

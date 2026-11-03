@@ -125,7 +125,64 @@ function ownerRequest(value: Row, messages: Row[], scope: Scope, requestId: stri
 
 /** Bounded presentation adapter over the native Science conversation service. No raw event/tool/provider payloads cross. */
 export class MobileScienceChat {
+  private readonly videoConnections = new Set<string>();
   constructor(private readonly hostId: string, private readonly services: MobileScienceChatServices = desktopServices()) {}
+
+  /** Best-effort withdrawal never starts an unavailable Science daemon. */
+  closeVideoConnection(principal: { deviceId: string; connectionId: string }): void {
+    const key = `${principal.deviceId}\0${principal.connectionId}`;
+    if (!this.videoConnections.delete(key)) return;
+    const client = this.services.client();
+    if (client) void client.commandObserved({ op: "video.closeConnection", input: { principal } },
+      { timeoutMs: 3_000, observationDeadlineMs: performance.now() + 3_000 }).catch(() => undefined);
+  }
+
+  disposeVideos(): void {
+    for (const key of [...this.videoConnections]) {
+      const [deviceId, connectionId] = key.split("\0");
+      if (deviceId && connectionId) this.closeVideoConnection({ deviceId, connectionId });
+    }
+  }
+
+  async videoRequest(method: "science.video.has" | "science.video.list" | "science.video.open" | "science.video.prepare" | "science.video.chunk" | "science.video.close",
+    params: Row, principal: { deviceId: string; connectionId: string }, assertAccount: () => void): Promise<unknown> {
+    const client = this.services.client();
+    if (!client) throw new Error("science_video_unavailable");
+    const closing = method === "science.video.close";
+    const key = `${principal.deviceId}\0${principal.connectionId}`;
+    const admit = () => { assertAccount(); this.services.assertPermission("science:projects"); };
+    const release = async (transferId: unknown) => {
+      if (typeof transferId !== "string") return;
+      await client.commandObserved({ op: "video.close", input: { transferId, principal } },
+        { timeoutMs: 3_000, observationDeadlineMs: performance.now() + 3_000 }).catch(() => undefined);
+      this.videoConnections.delete(key);
+    };
+    if (!closing) {
+      try { admit(); } catch (error) { await release(params.transferId); throw error; }
+    }
+    let command: DaemonScienceCommand;
+    switch (method) {
+      case "science.video.has": command = { op: "video.has", input: { projectId: String(params.projectId), conversationId: String(params.conversationId), messageIds: params.messageIds as string[] } }; break;
+      case "science.video.list": command = { op: "video.list", input: { projectId: String(params.projectId), conversationId: String(params.conversationId), messageId: String(params.messageId), ...(params.cursor === undefined ? {} : { cursor: params.cursor as { runId: string; outputId: string } }) } }; break;
+      case "science.video.open": command = { op: "video.open", input: { projectId: String(params.projectId), conversationId: String(params.conversationId), messageId: String(params.messageId), runId: String(params.runId), outputId: String(params.outputId), transferId: String(params.transferId), principal } }; break;
+      case "science.video.prepare": command = { op: "video.prepare", input: { transferId: String(params.transferId), principal } }; break;
+      case "science.video.chunk": command = { op: "video.chunk", input: { transferId: String(params.transferId), offset: Number(params.offset), principal } }; break;
+      case "science.video.close": command = { op: "video.close", input: { transferId: String(params.transferId), principal } }; break;
+    }
+    if (method === "science.video.open") this.videoConnections.add(key);
+    const result = await client.commandObserved(command, { timeoutMs: 20_000, observationDeadlineMs: performance.now() + 22_000 });
+    if (!closing) {
+      try { admit(); }
+      catch (error) {
+        const transferId = method === "science.video.open" && result && typeof result === "object" ? (result as Row).transferId : params.transferId;
+        await release(transferId);
+        throw error;
+      }
+    }
+    if (method === "science.video.open") this.videoConnections.add(key);
+    if (closing) this.videoConnections.delete(key);
+    return result;
+  }
 
   async request(method: MobileScienceChatMethod, params: Row, input: {
     idempotencyKey?: string;

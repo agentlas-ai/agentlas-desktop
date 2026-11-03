@@ -1,3 +1,4 @@
+import { desktopStoreTransaction } from "../store/change-bus";
 import { currentGoalExecutionObligations, currentGoalObligationsSatisfied } from "./goal-obligation-context";
 /** An automatic Goal admitted for a turn the background service ran follows that turn.
  *
@@ -42,14 +43,15 @@ import { currentGoalExecutionObligations, currentGoalObligationsSatisfied } from
  *
  * No electron import: the background service loads this without Electron (test-daemon-loads-without-electron). */
 import { goalHeldForOwnerAnswer } from "../../shared/goal-display-state";
-import { LONG_RUN_TERMINAL_STATUSES } from "../../shared/long-run";
+import { LONG_RUN_TERMINAL_STATUSES, isLongRunStatus } from "../../shared/long-run";
 import { completeChatGoalContract, getChatGoalRevision } from "../store/chat-goals";
 import { desktopAppInstanceId } from "./app-runtime-coordinator";
 import { getChat, setChatGoalBinding } from "../store/chats";
 import { getDb } from "../store/db";
+import { createRuntimeRetryStore } from "../store/runtime-retry";
 import {
   appendLongRunEvent, getLongRunByGoalId, holdGoalForOwnerAnswer, liveLongRunAttemptCount, longRunOwnerHold, pendingBlockedGoalRetry,
-  scheduleBlockedGoalRetry, transitionLongRun, type LongRunRecord,
+  scheduleBlockedGoalRetry, transitionLongRun, closeGoalRuntimeRetryBudget, type LongRunRecord,
 } from "../store/long-runs";
 
 export const DAEMON_TURN_GOAL_SETTLED_EVENT = "run.daemon_turn_settled";
@@ -69,17 +71,25 @@ export interface DaemonTurnGoalResult { goalId: string; action: DaemonTurnGoalAc
 const result = (goalId: string, action: DaemonTurnGoalAction, detail: string): DaemonTurnGoalResult => ({ goalId, action, detail });
 
 /** The service run Main admitted this Goal for: the run named by the admitted intake marker, owned by a daemon lease. */
-function sourceDaemonRun(run: LongRunRecord): { runId: string; ended: boolean; ownerId: string } | null {
+function sourceDaemonRun(run: Pick<LongRunRecord,"goalId"|"rootChatId">): { runId: string; ended: boolean; ownerId: string } | null {
   if (!run.rootChatId) return null;
   const db = getDb();
   const marker = db.prepare(`SELECT run_id FROM run_events WHERE kind = 'automatic_goal_intake_completed' AND chat_id = ?
       AND json_extract(payload_json, '$.goalId') = ? AND json_extract(payload_json, '$.outcome') = 'admitted'
       ORDER BY ts ASC LIMIT 1`).get(run.rootChatId, run.goalId) as { run_id: string } | undefined;
   if (!marker) return null;
-  const owner = db.prepare("SELECT owner_kind, owner_id, chat_id, state FROM invocation_run_owners WHERE run_id = ?").get(marker.run_id) as
-    { owner_kind: string; owner_id: string; chat_id: string; state: string } | undefined;
+  // A recovered daemon invocation for the same owner message is a new run, not the old intake run.
+  const owner = db.prepare(`SELECT o.run_id, o.owner_kind, o.owner_id, o.chat_id, o.state FROM invocation_run_owners o
+    WHERE o.chat_id=? AND o.owner_kind='daemon' AND (o.run_id=? OR EXISTS (
+      SELECT 1 FROM run_events e WHERE e.run_id=o.run_id AND e.chat_id=o.chat_id AND (
+        (e.kind='invoke_prompt_bound' AND json_extract(e.payload_json,'$.promptMessageId')=?) OR
+        (e.kind='invoke_started' AND json_extract(e.payload_json,'$.latestUserMessageRowId')=
+          (SELECT rowid FROM chat_messages WHERE id=? AND chat_id=o.chat_id AND role='user')))))
+    ORDER BY o.created_at DESC, o.rowid DESC LIMIT 1`).get(run.rootChatId, marker.run_id,
+      run.goalId.slice(AUTO_GOAL_PREFIX.length), run.goalId.slice(AUTO_GOAL_PREFIX.length)) as
+    { run_id: string; owner_kind: string; owner_id: string; chat_id: string; state: string } | undefined;
   if (!owner || owner.owner_kind !== "daemon" || owner.chat_id !== run.rootChatId) return null;
-  return { runId: marker.run_id, ended: owner.state === "released", ownerId: owner.owner_id };
+  return { runId: owner.run_id, ended: owner.state === "released", ownerId: owner.owner_id };
 }
 
 /** Pause reasons the host itself writes when its process ends (app quit, restart recovery). A Goal parked there is the host's to
@@ -134,6 +144,7 @@ interface DaemonTurnTerminal {
   /** A team run that left work only for a reason nobody has to answer (see selfRecoverableTeamFailure), and how long to wait first. */
   selfRecoverable: boolean;
   retryAfterMs: number | null;
+  budgetClosed: boolean;
 }
 
 /** A team run that left work for a reason nobody has to answer: every root cause (one not merely blocked by another) is a wait for
@@ -183,7 +194,12 @@ function terminalOf(runId: string): DaemonTurnTerminal | null {
       recoverable = selfRecoverableTeamFailure(payload.failureReport);
     } catch { /* no verdict */ }
   }
-  return { kind: terminal.kind, errorCode, verifier, at: typeof terminal.ts === "string" ? terminal.ts : null, decisionRequested, ...recoverable };
+  const retryStore = createRuntimeRetryStore(getDb);
+  const facts = retryStore.teamWait(runId);
+  if (facts) recoverable = { selfRecoverable: facts.selfRecoverable, retryAfterMs: facts.notBefore ? Math.max(0, facts.notBefore - Date.now()) : null };
+  const wait = retryStore.runWait(runId);
+  if (wait?.until && wait.until > Date.now()) recoverable.retryAfterMs = Math.max(recoverable.retryAfterMs ?? 0, wait.until - Date.now());
+  return { kind: terminal.kind, errorCode, verifier, at: typeof terminal.ts === "string" ? terminal.ts : null, decisionRequested, budgetClosed: retryStore.runBudgetClosed(runId), ...recoverable };
 }
 
 /** A team run that ended with work left: the typed unverified-team code, or a turn that returned with a failed team verifier. */
@@ -203,9 +219,9 @@ function recordSettlement(run: LongRunRecord, sourceRunId: string, outcome: stri
 
 /** The Goal and the service run it follows, or the reason it is not this follower's to move. One definition for the follower and for
  * the Desktop startup recovery, so the two never disagree about which Goals are the follower's. */
-function followTarget(goalId: string): { run: LongRunRecord; chatId: string; source: { runId: string; ended: boolean; ownerId: string } } | DaemonTurnGoalResult {
+type FollowerRunState=Pick<LongRunRecord,"id"|"goalId"|"status"|"surface"|"hostOwnerKind"|"rootChatId"|"pauseReason"|"cycleCount">;
+function followerEligibility(goalId:string,run:FollowerRunState|null): { chatId:string;source:{runId:string;ended:boolean;ownerId:string} } | DaemonTurnGoalResult {
   if (!goalId.startsWith(AUTO_GOAL_PREFIX)) return result(goalId, "skipped", "not_automatic_goal");
-  const run = getLongRunByGoalId(goalId);
   if (!run || LONG_RUN_TERMINAL_STATUSES.has(run.status)) return result(goalId, "skipped", "goal_terminal_or_missing");
   if (run.surface === "science" || run.hostOwnerKind !== "desktop" || !run.rootChatId) return result(goalId, "skipped", "not_desktop_room_goal");
   // A Goal the host parked because Desktop quit or restarted (an older release paused it on every startup, the quit path still does)
@@ -216,11 +232,22 @@ function followTarget(goalId: string): { run: LongRunRecord; chatId: string; sou
   if (getChatGoalRevision(goalId)?.lifecycle !== "finite") return result(goalId, "skipped", "not_finite");
   const source = sourceDaemonRun(run);
   if (!source) return result(goalId, "skipped", "not_daemon_turn_goal");
+  // The original source has already handed this Goal to its next episode. A consumed
+  // retry does not restore that source's settlement authority, including legacy markers.
+  if(getDb().prepare(`SELECT 1 FROM long_run_events WHERE run_id=? AND kind=? AND json_valid(payload_json)
+    AND json_extract(payload_json,'$.invocationRunId')=? LIMIT 1`)
+    .get(run.id,DAEMON_TURN_GOAL_SETTLED_EVENT,source.runId))return result(goalId,"skipped","daemon_source_already_settled");
   // Something else already works this Goal (a Desktop controller turn, the owner's pause): it is theirs to settle.
   if (run.cycleCount > 0 || liveLongRunAttemptCount(run.id) > 0 || longRunOwnerHold(run.id)) return result(goalId, "skipped", "goal_has_other_owner");
   if (getDb().prepare("SELECT 1 FROM long_run_worker_attempts WHERE run_id = ? LIMIT 1").get(run.id)) return result(goalId, "skipped", "goal_has_controller_attempt");
   if (newerLiveTurn(run.rootChatId, source.runId)) return result(goalId, "skipped", "newer_turn_live");
-  return { run, chatId: run.rootChatId, source };
+  return { chatId: run.rootChatId, source };
+}
+
+function followTarget(goalId:string): {run:LongRunRecord;chatId:string;source:{runId:string;ended:boolean;ownerId:string}} | DaemonTurnGoalResult {
+  if(!goalId.startsWith(AUTO_GOAL_PREFIX))return result(goalId,"skipped","not_automatic_goal");
+  const run=getLongRunByGoalId(goalId),eligible=followerEligibility(goalId,run);
+  return "action" in eligible ? eligible : {run:run!,...eligible};
 }
 
 /** True when the follower will close this Goal on its next pass: its only run was a service turn that has already ended with a
@@ -243,6 +270,25 @@ export function serviceTurnGoalAwaitsFollower(goalId: string, options: { liveDae
 
 /** Move one Goal along its service turn. Safe to call at any time and from any process that shares the store. */
 export function followDaemonTurnGoal(goalId: string): DaemonTurnGoalResult {
+  if(!goalId.startsWith(AUTO_GOAL_PREFIX))return result(goalId,"skipped","not_automatic_goal");
+  // A read-only eligibility view avoids locking writers for live/skip outcomes.
+  // It grants no mutation authority: the original full source/Goal lookup and
+  // every guard run again under IMMEDIATE before a transition or settlement.
+  const preview=getDb().prepare(`SELECT id,goal_id AS goalId,status,surface,host_owner_kind AS hostOwnerKind,
+    root_chat_id AS rootChatId,pause_reason AS pauseReason,cycle_count AS cycleCount FROM long_runs WHERE goal_id=? LIMIT 1`)
+    .get(goalId.trim()) as FollowerRunState|undefined;
+  const initial=followerEligibility(goalId,preview && isLongRunStatus(preview.status) ? preview : null);
+  if("action" in initial)return initial;
+  if(!initial.source.ended && preview!.status!=="queued")return result(goalId,"unchanged","turn_live");
+  if(initial.source.ended) {
+    const terminal=terminalOf(initial.source.runId);
+    if(!terminal)return result(goalId,"skipped","no_terminal_event");
+    if(preview!.status==="paused" && terminal.kind==="invoke_interrupted")return result(goalId,"skipped","host_pause_stands");
+  }
+  return desktopStoreTransaction(getDb(),()=>followDaemonTurnGoalInTransaction(goalId)).immediate();
+}
+
+function followDaemonTurnGoalInTransaction(goalId: string): DaemonTurnGoalResult {
   const target = followTarget(goalId);
   if ("action" in target) return target;
   let run = target.run;
@@ -296,6 +342,17 @@ export function followDaemonTurnGoal(goalId: string): DaemonTurnGoalResult {
   }
   const terminal = terminalOf(source.runId);
   if (!terminal) return result(goalId, "skipped", "no_terminal_event");
+  if (terminal.budgetClosed) {
+    if (!closeGoalRuntimeRetryBudget(run.id, source.runId)) return result(goalId, "skipped", "budget_close_state_changed");
+    recordSettlement(run, source.runId, "runtime_retry_budget_exhausted");
+    return result(goalId, "paused", "runtime_retry_budget_exhausted");
+  }
+  if (terminal.retryAfterMs && terminal.retryAfterMs > 0) {
+    const revision = getChatGoalRevision(goalId);
+    const until = Math.min(8_640_000_000_000_000, Date.now() + terminal.retryAfterMs);
+    if (!Number.isSafeInteger(until) || !revision) return result(goalId, "unchanged", "retry_after_unrepresentable");
+    createRuntimeRetryStore(getDb).holdGoal({ goalId, revision: revision.revision }, until, "unavailable", source.runId);
+  }
 
   // A Goal the host parked (paused app_closed / crash_recovery) while its service turn ran on: an interrupted turn is exactly what
   // that pause says and its ordinary resume redoes the interrupted work, so it stands. Any other end settles it like a live Goal,
@@ -367,9 +424,11 @@ export function followDaemonTurnGoal(goalId: string): DaemonTurnGoalResult {
       return result(goalId, "held", source.runId);
     }
     // A wait for capacity keeps its own hint; other work left continues after a short pause.
-    const waitMs = terminal.selfRecoverable ? Math.min(Math.max(terminal.retryAfterMs ?? 60_000, 15_000), 15 * 60_000) : 60_000;
+    const waitMs = terminal.selfRecoverable ? Math.max(terminal.retryAfterMs ?? 60_000, 15_000) : Math.max(terminal.retryAfterMs ?? 0, 60_000);
     const fromReason = terminal.selfRecoverable ? "task_force_capacity_wait" : "task_force_work_left";
-    const nextAt = new Date(Date.now() + waitMs).toISOString();
+    const dueAt = Date.now() + waitMs;
+    if (!Number.isFinite(dueAt) || dueAt > Date.UTC(9999, 11, 31, 23, 59, 59, 999)) return result(goalId, "unchanged", "retry_after_unrepresentable");
+    const nextAt = new Date(dueAt).toISOString();
     if (!scheduleNextRun(nextAt, { fromReason, detail: fromReason, trigger: "daemon-turn-goal" })) return result(goalId, "unchanged", "scheduled_by_another_process");
     recordSettlement(run, source.runId, "auto_retry_scheduled", { nextAt, reason: fromReason, errorCode: terminal.errorCode, verifier: terminal.verifier });
     return result(goalId, "scheduled", nextAt);
@@ -426,6 +485,11 @@ export function settleDaemonTurnGoals(limit = 50): DaemonTurnGoalResult[] {
             WHERE m.kind = 'automatic_goal_intake_completed' AND m.chat_id = long_runs.root_chat_id
               AND json_extract(m.payload_json, '$.goalId') = long_runs.goal_id AND json_extract(m.payload_json, '$.outcome') = 'admitted')))
       AND surface IN ('one','work') AND host_owner_kind = 'desktop' AND cycle_count = 0
+      AND NOT EXISTS (SELECT 1 FROM long_run_events s WHERE s.run_id=long_runs.id AND s.kind='run.daemon_turn_settled' AND json_valid(s.payload_json)
+        AND json_extract(s.payload_json,'$.invocationRunId')=(SELECT m.run_id FROM run_events m
+          WHERE m.kind='automatic_goal_intake_completed' AND m.chat_id=long_runs.root_chat_id
+            AND json_extract(m.payload_json,'$.goalId')=long_runs.goal_id AND json_extract(m.payload_json,'$.outcome')='admitted'
+          ORDER BY m.ts ASC LIMIT 1))
       ORDER BY CASE WHEN status = 'paused' THEN 1 ELSE 0 END, updated_at ASC LIMIT ?`).all(limit) as Array<{ goal_id: string }>;
   const out: DaemonTurnGoalResult[] = [];
   for (const row of rows) {

@@ -27,6 +27,8 @@ import { GRAPH_CHECKPOINT_SCHEMA, PREVIOUS_GRAPH_CHECKPOINT_SCHEMA, sha256Value 
 import { tagSurfacePackChatsInDb } from "./surface-conversation-schema";
 import { createChatRuntimeSelectionTicketSchema } from "./chat-runtime-selection-ticket";
 import { createFollowupCustodySchema } from "./followup-custody-schema";
+import { createChatFileMessageBindings } from "./chat-file-message-bindings";
+import { createGeneratedVideoReceiptSchema } from "../invocation/generated-video-receipt-schema";
 import { settleDeadHostTriggerEvent } from "./unconfirmed-occurrence";
 
 // Picks the Korean or English human-readable string for the current UI locale.
@@ -36,7 +38,7 @@ let _db: Database.Database | null = null;
 let _postContinuityRepairsDeferred = false;
 let _openedStoreMigrationRole: StoreMigrationRole | null = null;
 
-const SCHEMA_VERSION = 138;
+const SCHEMA_VERSION = 139;
 
 /**
  * The schema version this binary's migration ladder produces.
@@ -7275,6 +7277,11 @@ export function initStore(options: StoreInitOptions = {}): void {
   // v138: immutable renderer follow-up capture and exact next-turn provenance.
   if (userVersion < 138) {
     _db.transaction(() => { createFollowupCustodySchema(_db!); })();
+  }
+
+  // v139: exact host-recorded message/group associations; legacy marker text is not authority.
+  if (userVersion < 139) {
+    _db.transaction(() => { createChatFileMessageBindings(_db!); createGeneratedVideoReceiptSchema(_db!); })();
   }
 
   } catch (error) {

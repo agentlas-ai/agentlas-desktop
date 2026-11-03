@@ -4,7 +4,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type { McpInvocationEvent } from "../../shared/types";
 import { userDataPath } from "../runtime-paths";
 import { bindOneRuntimeToolArtifacts } from "../one/artifact-preview";
-import { findCanonicalTaskForChat, getCanonicalTask } from "../store/tasks";
+import { canonicalTaskOwnsChat, findCanonicalTaskForChat, getCanonicalTask } from "../store/tasks";
 import { currentUiLocale } from "../ui-locale";
 
 /** Only the Main-owned relay calls this with pixels from its authorized guest. */
@@ -31,11 +31,15 @@ export function createNativeCapturePublisher(input: {
       ? getCanonicalTask(pinnedTaskId)
       : findCanonicalTaskForChat(input.chatId);
     const captureTask = resolveTask();
+    // The chat belongs to the Task the same way the artifact binder below decides it (canonicalTaskOwnsChat): its origin chat, or a
+    // registered working session under it. A Work session's delegated child chat is the second kind. Requiring the origin chat
+    // here refused every capture of such a child (observed in use, Sweet Designer's first screenshot), and the daemon then
+    // released the run's whole browser grant.
     const taskBindingCurrent = () => {
       const task = resolveTask();
       return !!task && !!captureTask && task.id === captureTask.id
         && captureTask.version >= minimumTaskVersion
-        && task.originChatId === input.chatId && task.version === captureTask.version && task.status !== "archived";
+        && canonicalTaskOwnsChat(task, input.chatId) && task.version === captureTask.version && task.status !== "archived";
     };
     const current = () => {
       return !input.signal?.aborted && capture.isCurrent() && !!input.runId && taskBindingCurrent();

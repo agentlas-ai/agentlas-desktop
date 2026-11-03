@@ -187,6 +187,9 @@ export interface AgentWorkspaceMemoryCounts {
   unavailableAgentIds: string[];
 }
 export interface AgentWorkspaceIpc {
+  readAppearance?(agentId: string): Promise<Omit<import("./agent-appearance").AgentAppearanceView, "editToken">>; // Optional for compatibility with older Desktop preloads.
+  getAppearance?(agentId: string): Promise<import("./agent-appearance").AgentAppearanceView>;
+  setAppearance?(input: import("./agent-appearance").AgentAppearanceUpdate): Promise<import("./agent-appearance").AgentAppearanceView>;
   /** An installed agent's folder: files, proposals, history, and whether a run holds it. */
   getWorkspace(agentId: string): Promise<AgentWorkspaceSnapshot>;
   memoryCounts(agentIds: string[]): Promise<AgentWorkspaceMemoryCounts>;

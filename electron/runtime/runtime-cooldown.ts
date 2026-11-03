@@ -99,7 +99,7 @@ export function parseRetryHint(hint: string | undefined, now: number): number | 
   const relative = text.match(/\bin\s+(?:(\d+)\s*h)?\s*(?:(\d+)\s*m)?\s*(?:(\d+)\s*s)?/i);
   if (relative && (relative[1] || relative[2] || relative[3])) {
     const ms = (Number(relative[1] ?? 0) * 3_600 + Number(relative[2] ?? 0) * 60 + Number(relative[3] ?? 0)) * 1_000;
-    if (ms > 0) return now + ms;
+    if (ms > 0) return Math.min(8_640_000_000_000_000, now + ms);
   }
   return null;
 }
@@ -161,16 +161,25 @@ export function noteRuntimeSucceeded(runtime: RuntimeIdentity): void {
 
 /** 지금 이 런타임이 시한부로 막혀 있나. 만료된 기록은 그 자리에서 지운다(스스로 돌아온다). */
 export function runtimeCooldown(runtime: RuntimeIdentity, now = Date.now()): RuntimeCooldown | null {
+  let durable: RuntimeCooldown | null = null;
+  try {
+    const wait = (require("./durable-retry") as typeof import("./durable-retry")).durableRuntimeWindow(runtime, now);
+    if (wait) durable = { ...wait, message: "" };
+  } catch {
+    // Candidate enumeration also runs before store bootstrap. It grants no dispatch:
+    // withDurableRuntimeRetry re-reads strictly, including corrupt/unavailable metadata.
+  }
   const keys = candidateKeys(cooldowns, runtime);
   for (const key of keys) {
     const entry = cooldowns.get(key);
     if (entry && entry.until <= now) cooldowns.delete(key);
   }
   const picked = pickRecord(cooldowns, runtime, keys);
-  if (!picked || seatOf(runtime) === NO_SEAT) return picked;
+  if (!picked || seatOf(runtime) === NO_SEAT) return durable && (!picked || durable.until > picked.until) ? durable : picked;
   // A named seat can have its own record and a record made without a seat: the one that holds longer answers, so a short throttle never hides a quota.
   const shared = cooldowns.get(entryKey(runtime, NO_SEAT));
-  return shared && shared.until > picked.until ? shared : picked;
+  const memory = shared && shared.until > picked.until ? shared : picked;
+  return durable && durable.until > memory.until ? durable : memory;
 }
 
 /** Exact checkpoint selections from older runs may lack backend. Match their

@@ -1049,10 +1049,13 @@ export async function autoSelectMcpTools(input: {
   // answered not_available_in_this_run in 5 runs, so it told the owner the browser was not connected and the plugin
   // was only attached from the next turn.
   const oneOwnRun = input.oneOwnConversation === true;
+  // The supervisor starts every reply turn of One's own conversation in Computer Use mode (supervisor-service.ts: full access and
+  // Computer Use), so the "auto" clause never matched it: Hope's own turns ran without the Agentlas browser (observed in use:
+  // Hope connected agentlas-browser mid-turn, was told its tools attach on the next turn, and stopped). Computer Use does not exclude
+  // the browser (blockedByHostBinding only drops Playwright), so One's own conversation carries it in that mode as well.
+  const oneOwnComputerUse = oneOwnRun && effectiveToolMode === "computer-use";
   if (
-    automaticHostDecision
-    && effectiveToolMode === "auto"
-    && (writableGoalRun || oneTeamMemberRun || oneOwnRun)
+    ((automaticHostDecision && effectiveToolMode === "auto" && (writableGoalRun || oneTeamMemberRun || oneOwnRun)) || oneOwnComputerUse)
     && canonicalBrowserAvailable
     && !blockedByHostBinding("agentlas-browser")
     && !neededIds.has("agentlas-browser")

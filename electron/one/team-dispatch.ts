@@ -6,11 +6,13 @@ import { createHash, randomUUID } from "node:crypto";
 import { getDb } from "../store/db";
 import { emitDesktopStoreChange } from "../store/change-bus";
 import { currentUiLocale } from "../ui-locale";
+import { assertManagedOneTeamAvailable, managedOneTeamAvailable } from "../managed-one/auth";
 import type { OneOrgMember } from "../../shared/one-org";
 import type { OneDispatchQuestionAnswer } from "../../shared/one-dispatch-presentation";
 
 /** User-clicked answer only. Reuse Main's durable, idempotent question continuation authority. */
 export async function answerOneDispatchQuestion(input: OneDispatchQuestionAnswer) {
+  assertManagedOneTeamAvailable();
   if (!input || typeof input !== "object" || Object.keys(input).some(key => !["parentChatId","dispatchId","chatId","runId","sourceMessageId","reply","locale","retryCommitted"].includes(key))
     || [input.parentChatId,input.dispatchId,input.chatId,input.runId,input.sourceMessageId].some(id => typeof id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(id))
     || (input.reply !== undefined && (typeof input.reply !== "string" || input.reply.length > 12000))
@@ -416,6 +418,7 @@ let recovered = false;
  * run never ended becomes "interrupted", reported through the retry ledger.
  */
 export function recoverOneTeamDispatches(): void {
+  if (!managedOneTeamAvailable()) return;
   if (recovered) return;
   recovered = true;
   try {
@@ -1458,6 +1461,12 @@ function teammateIdentity(member: OneOrgMember): { package_name?: string; descri
   return out;
 }
 
+/** `can_join_group` + the machine reason when false (`group_unavailable`, the same codes the join guard refuses with). */
+export function oneTeamGroupJoinFields(member: Pick<OneOrgMember, "groupJoinRefusal" | "source">): { can_join_group: boolean; group_unavailable?: string } {
+  const code = member.groupJoinRefusal ?? (member.source !== "local" ? "group_requires_local" : null);
+  return code ? { can_join_group: false, group_unavailable: code } : { can_join_group: true };
+}
+
 export function oneTeamList(caller: OneTeamCaller) {
   const ownerChatId = assertCaller(caller.chatId);
   const group = groupOf(ownerChatId);
@@ -1487,6 +1496,9 @@ export function oneTeamList(caller: OneTeamCaller) {
       last_activity_at: member.lastActivityAt,
       can_start: !member.unavailable && member.statusKind !== "locked",
       ...(member.unavailable ? { unavailable: member.unavailable.code } : {}),
+      // Joining a group is a different test from starting a session (hidden agents, expired leases and Hub/cloud seats can start
+      // but cannot join), so the list says so with the host's own machine code; the model never has to find out by being refused.
+      ...oneTeamGroupJoinFields(member),
       installed_agent_id: member.installedAgentId,
       source: member.source,
       in_current_group: group?.memberAgentIds.includes(member.installedAgentId) ?? false,
@@ -1545,6 +1557,7 @@ export function teamDelegationPermission(cap: unknown): "write" | typeof ONE_DEL
 
 export function oneTeamStartSession(caller: OneTeamCaller, input: { member?: unknown; brief?: unknown; newSession?: unknown },
   host?: { delegationPermission?: "write" }) {
+  assertManagedOneTeamAvailable();
   const parentChatId = assertCaller(caller.chatId);
   const viaContinuation = parentChatId !== caller.chatId;
   const brief = typeof input.brief === "string" ? input.brief.trim() : "";
@@ -1676,6 +1689,7 @@ function launchDispatch(input: { parentChatId: string; member: OneOrgMember; bri
   parentRunId?: string | null; delegationPermission?: string | null;
   /** new_session: the child keeps its own journal and never joins the member's shared roster session (session-scope.ts isolatedChild). */
   isolated?: boolean }): { created: OneDispatchRow; createdHere: boolean } {
+  assertManagedOneTeamAvailable();
   const { parentChatId, member, brief, hash, title, continuing } = input;
   (require("../runtime/session-scope") as typeof import("../runtime/session-scope")).bindOneTaskforceSessionScope(getDb(),parentChatId);
   const delegation = teamDelegationPermission(input.delegationPermission);
@@ -1842,6 +1856,7 @@ function enqueueDispatch(input: { fresh?: boolean; parentChatId: string; member:
  * typed cause) when it can never start, or it is cancelled (the room is gone, or by one_team_cancel_queued).
  */
 export function startQueuedDispatches(): void {
+  if (!managedOneTeamAvailable()) return;
   try {
     ensureTable();
     const queued = getDb().prepare("SELECT * FROM one_team_dispatches WHERE status = 'queued' ORDER BY created_at, rowid").all() as OneDispatchRow[];
@@ -2028,6 +2043,7 @@ export function oneTeamCancelQueued(caller: OneTeamCaller, input: { sessionId?: 
 }
 
 export function oneTeamSteer(caller: OneTeamCaller, input: { sessionId?: unknown; message?: unknown }) {
+  assertManagedOneTeamAvailable();
   const parentChatId = assertCaller(caller.chatId);
   const message = typeof input.message === "string" ? input.message.trim() : "";
   if (!message) throw new Error("one-team-message-required");
@@ -2303,6 +2319,7 @@ function memberView(member: OneOrgMember) {
 }
 
 export function oneTeamInvite(caller: OneTeamCaller, input: { member?: unknown }) {
+  assertManagedOneTeamAvailable();
   const chatId = assertCaller(caller.chatId);
   assertGroupMutationAllowed(chatId);
   assertRosterPermission(caller);
@@ -2339,6 +2356,7 @@ const GROUP_NOT_LOCAL_REASON = {
 } as const;
 
 export function oneTeamComposeGroup(caller: OneTeamCaller, input: unknown) {
+  assertManagedOneTeamAvailable();
   const chatId = assertCaller(caller.chatId);
   assertGroupMutationAllowed(chatId);
   assertRosterPermission(caller);
@@ -2358,6 +2376,10 @@ export function oneTeamComposeGroup(caller: OneTeamCaller, input: unknown) {
       // A Hub or cloud teammate runs as its own session, never inside a group conversation. Say what works instead, in both
       // languages: with only "local members only" the model stops and asks the owner instead of staffing the group.
       throw new Error(`one-team-group-member-unavailable: "${member.displayName}" cannot join this group. ${GROUP_NOT_LOCAL_REASON.en} / ${GROUP_NOT_LOCAL_REASON.ko} The group is unchanged.`);
+    }
+    if (member?.groupJoinRefusal) {
+      // The join guard's own refusal, found before any write (hidden agent, expired lease, ...): same code one_team_list shows as group_unavailable.
+      throw new Error(`one-team-group-member-unavailable: "${member.displayName}" cannot join this group [${member.groupJoinRefusal}]. The group is unchanged.`);
     }
     if (!member || member.statusKind === "locked") {
       throw new Error("one-team-group-member-unavailable: only existing active local One members can compose this group; the group is unchanged.");
@@ -2386,6 +2408,7 @@ export function oneTeamComposeGroup(caller: OneTeamCaller, input: unknown) {
 }
 
 export function oneTeamCreateMember(caller: OneTeamCaller, input: { name?: unknown; role?: unknown; personality?: unknown; invite?: unknown }) {
+  assertManagedOneTeamAvailable();
   const chatId = assertCaller(caller.chatId);
   assertRosterPermission(caller);
   const name = clip(input.name, 80);

@@ -27,6 +27,8 @@ export function parseHephaestusUpdateJournal(value: unknown): HephaestusUpdateJo
     : null;
   return {
     status: str("status"),
+    ...(typeof parsed.errorCode === "string" && /^[a-z][a-z0-9_]{0,79}$/.test(parsed.errorCode)
+      ? { errorCode: parsed.errorCode } : {}),
     reason: str("reason"),
     current: str("current"),
     latest: str("latest"),

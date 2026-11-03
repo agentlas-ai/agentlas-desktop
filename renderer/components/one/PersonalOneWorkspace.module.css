@@ -62,7 +62,7 @@
 .headerIdentity{display:flex;flex-direction:column;align-items:center;min-width:0;max-width:100%}
 .headerAvatar{display:grid;place-items:center;width:46px;height:46px;border-radius:50%;overflow:hidden;background:color-mix(in srgb,var(--personal-bubble) 16%,var(--im-bg));box-shadow:0 0 0 .5px var(--im-glass-edge)}
 .headerAvatar>span{transform:scale(1)}
-.header h1{position:relative;margin:-9px 0 0;padding:3px 12px;max-width:min(240px,100%);border-radius:999px;background:var(--im-glass);-webkit-backdrop-filter:blur(14px) saturate(1.8);backdrop-filter:blur(14px) saturate(1.8);box-shadow:var(--im-lift),0 0 0 .5px var(--im-glass-edge);font-size:13px;font-weight:600;line-height:20px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.headerIdentityName{position:relative;margin:-9px 0 0;padding:3px 12px;max-width:min(240px,100%);border-radius:999px;background:var(--im-glass);-webkit-backdrop-filter:blur(14px) saturate(1.8);backdrop-filter:blur(14px) saturate(1.8);box-shadow:var(--im-lift),0 0 0 .5px var(--im-glass-edge);font-size:13px;font-weight:600;line-height:20px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .headerIdentity small{margin-top:3px;max-width:100%;font-size:10.5px;line-height:13px;color:var(--im-sub);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .header button{min-height:32px;line-height:16px;border:0;background:transparent;font-size:12px;justify-content:center;padding:6px 8px}
 .root .iconButton{display:inline-flex;align-items:center;justify-content:center;border:0;background:transparent;width:32px;height:32px;padding:6px;flex:0 0 32px}
@@ -318,3 +318,7 @@
 @media (max-width:520px){.composerFoot .trail [data-one-composer-trigger=effort] span,.composerFoot .trail [data-one-composer-trigger=effort]>svg:last-child{display:none}.composerFoot .trail [data-one-composer-trigger=effort]{padding:0 8px}.composerFoot .trail [data-one-composer-trigger] span{max-width:84px}}
 /* When the row under the pill is short of room, the model name gives way, ending in an ellipsis. */
 .composerFoot .trail [data-one-composer-trigger=model]{flex:0 1 auto}.composer .voice{flex:0 0 auto}
+
+.root .header .headerIdentityButton{display:flex;flex-direction:column;align-items:center;padding:0;background:transparent;border:0;cursor:pointer;color:inherit;min-width:46px;max-width:240px}
+.headerIdentityButton:focus-visible{outline:2px solid var(--personal-bubble);outline-offset:4px;border-radius:12px}
+.headerIdentityButton:disabled{opacity:.65;cursor:wait}

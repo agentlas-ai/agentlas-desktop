@@ -1193,6 +1193,37 @@ export function workSessionParentHasPendingChildren(chatId: string, runId: strin
     AND (s.status IN ('queued','draining') OR (s.status='started' AND d.parent_run_id=? AND s.drained_run_id<>?)) LIMIT 1`)
     .get(chatId, owner, runId, runId);
 }
+/** One delegated session of a Work conversation, as the personal One reads it (one_supervisor_status). Bounded, no request text. */
+export interface WorkSessionChildSummary {
+  session_id: string; target: string; status: string; child_chat_id: string; child_run_id: string;
+  result_available: boolean; result_excerpt: string | null; report: "accepted" | "held" | "pending";
+  cancel_requested: boolean; effect_reconciliation_required: boolean; updated_at: string;
+}
+/** What a Work conversation delegated, read-only, newest first, with the dispatcher's own owner scope and parent check. Never
+ * initializes the dispatcher. observed in use: One had started this Work but could not see the Sweet Designer session under
+ * it, so it told the owner the work had stopped at intake and later relayed "in progress" from the Work AI's words alone. */
+export function workSessionChildrenOf(parentChatId: string, limit = 8, ports?: WorkSessionChildReadPorts): WorkSessionChildSummary[] {
+  try {
+    const read = ports ?? productionChildReadPorts();
+    if (!currentWorkParent(read, parentChatId)) return [];
+    const db = read.db();
+    if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='work_session_dispatches'").get()) return [];
+    const rows = db.prepare(`SELECT id,state,child_chat_id,child_run_id,cancel_requested,reported_at,report_error,effect_uncertain,updated_at,result_summary_json,
+      (result_json IS NOT NULL) AS result_available,json_extract(target_json,'$.key') AS target_key FROM work_session_dispatches
+      WHERE parent_chat_id=? AND owner_scope=? ORDER BY rowid DESC LIMIT ?`).all(parentChatId, read.ownerScope(), Math.max(1, Math.min(32, Math.trunc(limit)))) as Array<{
+        id: string; state: string; child_chat_id: string; child_run_id: string; cancel_requested: number; reported_at: string | null; report_error: string | null;
+        effect_uncertain: number; updated_at: string; result_summary_json: string | null; result_available: number; target_key: string | null }>;
+    return rows.map((row) => {
+      let excerpt: string | null = null;
+      try { const text = row.result_summary_json ? (JSON.parse(row.result_summary_json) as { text?: unknown }).text : null; excerpt = typeof text === "string" && text ? shortText(text, 768) : null; }
+      catch { excerpt = null; }
+      return { session_id: row.id, target: shortText(row.target_key ?? "", 256), status: row.state, child_chat_id: row.child_chat_id, child_run_id: row.child_run_id,
+        result_available: !!row.result_available || excerpt !== null, result_excerpt: excerpt,
+        report: row.reported_at ? "accepted" as const : row.report_error ? "held" as const : "pending" as const,
+        cancel_requested: row.cancel_requested === 1, effect_reconciliation_required: row.effect_uncertain === 1, updated_at: row.updated_at };
+    });
+  } catch { return []; }
+}
 export const workSessionDispatchAllowedFor = (chatId: string): boolean => production().allowed(chatId);
 export const dispatchWorkSessionTool = (caller: WorkSessionCaller, name: string, input: unknown): Promise<unknown> => production().dispatch(caller, name, input);
 export const recoverWorkSessionDispatches = (parentChatId?: string): Promise<void> => production().recover(parentChatId);

@@ -1,5 +1,6 @@
 import { reportSystemPermissionIssue } from "../os-permission-guidance";
 import { randomUUID } from "node:crypto";
+import { assertRequestCurrent, linkedAbortSignals } from "../computer-use/request-lifetime";
 import type { OneContextCapture, OneContextGrant, OneContextGrantInput, OneContextLeaseState, OneContextReadiness, OneContextScope, OneContextSnapshot, OneContextTarget, OneContextTargetSelection } from "../../shared/one-context";
 
 export class OneContextError extends Error { constructor(readonly code: string) { super(code); this.name = "OneContextError"; } }
@@ -152,14 +153,20 @@ export class OneContextService {
     };
     assertCurrent(); return { grant: held!.grant, target: held!.target, signal: held!.controller.signal, assertCurrent };
   }
-  async capture(value: unknown): Promise<OneContextSnapshot> {
+  async capture(value: unknown, requestSignal?: AbortSignal): Promise<OneContextSnapshot> {
     const input = object(value, ["oneId", "taskId", "grantId"]), scope = this.scope(input), permission = this.authorize({ ...scope, grantId: id(input.grantId) });
+    const lifetime = linkedAbortSignals([requestSignal, permission.signal]);
+    try {
+    assertRequestCurrent(lifetime.signal);
     if (!await this.ports.current(permission.target)) throw new OneContextError("one-context-target-stale");
+    assertRequestCurrent(lifetime.signal);
     permission.assertCurrent();
     const held=this.grants.get(permission.grant.grantId)!;const generation=++held.captureGeneration;
-    const captured = await this.ports.capture(permission.target, permission.signal);
+    const captured = await this.ports.capture(permission.target, lifetime.signal);
+    assertRequestCurrent(lifetime.signal);
     permission.assertCurrent();
     if (!await this.ports.current(permission.target)) throw new OneContextError("one-context-target-stale");
+    assertRequestCurrent(lifetime.signal);
     permission.assertCurrent();
     if (!/^data:image\/(png|jpeg);base64,[A-Za-z0-9+/=]+$/.test(captured.dataUrl) || captured.dataUrl.length > 8_000_000) throw new OneContextError("one-context-capture-invalid");
     if(generation!==held.captureGeneration)throw new OneContextError("one-context-capture-superseded");
@@ -167,6 +174,7 @@ export class OneContextService {
     this.latest.set(permission.grant.grantId, { grantId: permission.grant.grantId, target: publicTarget(permission.target), capturedAt,
       staleAt: new Date(this.now() + 30_000).toISOString(), state: "fresh", dataUrl: captured.dataUrl });
     this.ports.changed?.(scope.oneId); return this.view(scope.oneId, scope.taskId);
+    } finally { lifetime.dispose(); }
   }
   blockSession(reason: string): void { for(const oneId of new Set([...this.epochs.keys(),...this.grants.values()].map(value=>typeof value==="string"?value:value.grant.oneId)))this.epochs.set(oneId,(this.epochs.get(oneId)??0)+1); for (const held of this.grants.values()) this.stop(held, reason); this.selections.clear(); }
   dispose(): void { this.blockSession("one-context-host-closed"); this.grants.clear(); this.latest.clear(); }

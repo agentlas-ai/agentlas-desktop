@@ -141,7 +141,7 @@ const EXPLICIT_WRITE_PATHS: ReadonlySet<string> = new Set([
   "agentMail.saveContact", "agentMail.saveDirectoryMe", "agentMail.saveDraft", "agentMail.setDomainAddress", "agentMail.updateMailbox",
   // agents/workspace-ipc.ts
   "agentWorkspace.acknowledgeRecovery", "agentWorkspace.compare", "agentWorkspace.prepareFileChange", "agentWorkspace.prepareFileOperation",
-  "agentWorkspace.prepareFromMemory", "agentWorkspace.prepareRollback", "agentWorkspace.sync",
+  "agentWorkspace.prepareFromMemory", "agentWorkspace.prepareRollback", "agentWorkspace.setAppearance", "agentWorkspace.sync",
   // alive-organisms/index.ts
   "alive.setEnabled",
   // archive/archive-ipc.ts

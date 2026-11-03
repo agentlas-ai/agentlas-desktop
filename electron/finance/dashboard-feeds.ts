@@ -260,10 +260,11 @@ export async function getFinanceDashboardFeeds(input:{scope:FinanceScope;watchli
   if(!Array.isArray(input.watchlist)||input.watchlist.length>10000||input.watchlist.some(a=>!a||typeof a.id!=='string'||a.id.length>200||typeof a.symbol!=='string'||a.symbol.length>80))throw new Error('finance_feed_watchlist_invalid');
   const enabled=input.enabledFeedIds===undefined?[...FINANCE_FEED_IDS]:[...input.enabledFeedIds];if(enabled.length>4||new Set(enabled).size!==enabled.length||enabled.some(id=>!FINANCE_FEED_IDS.includes(id)))throw new Error('finance_feed_selection_invalid');
   const sourceId=input.sourceId??'finance-yfinance',selection:FinanceDataSelection={sourceId,sourceBindings:input.sourceBindings};
-  const validSource=(value:string)=>typeof value==='string'&&(value==='finance-yfinance'||/^toolchain:[A-Za-z0-9_-]{1,100}:[1-9]\d*:[a-f0-9]{64}$/.test(value));
+  const validSource=(value:string)=>typeof value==='string'&&(value==='finance-yfinance'||value==='alpha-vantage'||/^toolchain:[A-Za-z0-9_-]{1,100}:[1-9]\d*:[a-f0-9]{64}$/.test(value));
   if(!validSource(sourceId)||input.sourceBindings&&Object.keys(input.sourceBindings).some(category=>!FINANCE_DATA_CATEGORIES.includes(category as typeof FINANCE_DATA_CATEGORIES[number])))throw new Error('finance_feed_source_invalid');
   const effective=Object.fromEntries(FINANCE_DATA_CATEGORIES.map(category=>[category,resolveFinanceDataSource(selection,category)]));if(Object.values(effective).some(value=>!validSource(value)))throw new Error('finance_feed_source_invalid');
-  const assets=input.watchlist.map(asset=>({...asset}));
+  // Unverified manual symbols must not be attributed to a provider's issuer or security.
+  const assets=input.watchlist.filter(asset=>!asset.id.startsWith('manual:v1:')).map(asset=>({...asset}));
   const id=owner(scope),key=JSON.stringify([sourceId,effective,assets.map(a=>[a.id,a.symbol,a.name,a.exchange,a.currency,a.kind]),[...enabled].sort()]),saved=cache.get(id);
   if(saved&&saved.key===key&&Date.parse(saved.result.expiresAt)>Date.now()){scope.assertCurrent();return clone(saved.result);}
   if(pending.has(id)||pending.size>=MAX_OWNERS)throw new Error('finance_feed_busy');
@@ -272,6 +273,7 @@ export async function getFinanceDashboardFeeds(input:{scope:FinanceScope;watchli
   try {const sections=await Promise.all(FINANCE_FEED_IDS.map(async feedId=>{
     if(!enabled.includes(feedId))return{...section(feedId),status:'disabled' as const};
     try{const selectedSource=feedId==='finance-news'?effective.news:feedId==='finance-sec'?effective.filings:effective.calendar;
+      if(selectedSource==='alpha-vantage')return{...section(feedId),status:'unavailable' as const,errorCode:'finance_feed_source_unsupported',warnings:['The selected Cloud market source does not supply this feed. No other source was substituted.']};
       return await(feedId==='finance-earnings'?earnings(assets,selectedSource,scope,controller.signal):selectedSource!=='finance-yfinance'?selectedToolFeed(feedId,assets,selectedSource,scope,controller.signal):feedId==='finance-news'?news(assets,controller.signal):feedId==='finance-sec'?filings(assets,controller.signal):economy(controller.signal));}
     catch(e){check(controller.signal);return{...section(feedId),status:'error' as const,errorCode:errorCode(e)};}
   }));if(expired)throw new Error('finance_feed_timeout');check(controller.signal);scope.assertCurrent();const result={fetchedAt,expiresAt:new Date(Date.now()+TTL).toISOString(),sections};cache.delete(id);cache.set(id,{key,result:clone(result)});while(cache.size>MAX_OWNERS)cache.delete(cache.keys().next().value!);return result;

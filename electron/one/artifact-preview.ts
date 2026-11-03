@@ -1,3 +1,4 @@
+import { generatedVideoAccountKey, generatedVideoWorkspaceStamp } from "../invocation/generated-video-receipts";
 import { resolveInvocationArtifactReadPath } from "../fs/invocation-workspace";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import fs from "node:fs";
@@ -166,7 +167,7 @@ interface BindingRow {
   created_at: string;
 }
 
-interface TokenRecord {
+interface TaskTokenRecord {
   token: string;
   /** The binding the renderer asked for; revoking and the logs name it. */
   request: OneArtifactBindingRequestV1;
@@ -174,6 +175,9 @@ interface TokenRecord {
   target: OneArtifactBindingRequestV1;
   expiresAtMs: number;
 }
+
+interface GeneratedTokenRecord { token: string; generated: { chatId:string; messageId:string; runId:string; operationId:string; account:string; leaseId:string; ownerId:string }; expiresAtMs:number; }
+type TokenRecord = TaskTokenRecord | GeneratedTokenRecord;
 
 interface VerifiedFile {
   fd: number;
@@ -995,6 +999,40 @@ export function verifyOneAcceptedSurfaceArtifactSet(input: {
   };
 }
 
+/** A generated video's authority is a Main-sealed run and exact assistant message, never a model path. */
+function generatedFileVerdict(record: GeneratedTokenRecord): Verdict<VerifiedFile> {
+  let fd:number|null=null;
+  try {
+    const {getAuthenticatedActorIds}=require('../auth') as typeof import('../auth');
+    const {assertProjectDomainOwner}=require('../invocation/project-domain-binding') as typeof import('../invocation/project-domain-binding');
+    const actor=getAuthenticatedActorIds(),g=record.generated,db=getDb();if(generatedVideoAccountKey(actor)!==g.account)return refuse('binding_missing');assertProjectDomainOwner(g.chatId,actor);
+    const receipt=db.prepare("SELECT * FROM generated_video_receipts WHERE operation_id=? AND chat_id=? AND message_id=? AND state='sealed'").get(g.operationId,g.chatId,g.messageId) as {account_key:string;workspace_hash:string;origin_run_id:string;origin_seq:number;observer_run_id:string;observer_owner_id:string;observer_lease_id:string;observed_seq:number;witness_json:string}|undefined;
+    if(!receipt||receipt.account_key!==g.account||receipt.observer_run_id!==g.runId||receipt.observer_owner_id!==g.ownerId||receipt.observer_lease_id!==g.leaseId||receipt.workspace_hash!==generatedVideoWorkspaceStamp(db,g.chatId))return refuse('binding_missing');
+    if(!db.prepare("SELECT 1 FROM chat_messages WHERE id=? AND chat_id=? AND role='assistant'").get(g.messageId,g.chatId))return refuse('binding_missing');
+    const bad="('invoke_cancel_requested','invoke_cancelled','invoke_failed','invoke_interrupted','invoke_threw','mcp_error','invoke_waiting')";
+    if(receipt.origin_run_id!==g.runId&&(!db.prepare("SELECT 1 FROM run_events WHERE chat_id=? AND run_id=? AND seq>? AND kind='invoke_completed' LIMIT 1").get(g.chatId,receipt.origin_run_id,receipt.origin_seq)||db.prepare(`SELECT 1 FROM run_events WHERE chat_id=? AND run_id=? AND seq>? AND kind IN ${bad} LIMIT 1`).get(g.chatId,receipt.origin_run_id,receipt.origin_seq)))return refuse('binding_missing');
+    const started=(db.prepare("SELECT COALESCE(MAX(seq),-1) n FROM run_events WHERE run_id=? AND chat_id=? AND kind='invoke_started' AND seq<=?").get(g.runId,g.chatId,receipt.observed_seq) as {n:number}).n;
+    if(db.prepare(`SELECT 1 FROM run_events WHERE chat_id=? AND run_id=? AND seq>? AND kind IN ${bad} LIMIT 1`).get(g.chatId,g.runId,started)||!db.prepare("SELECT 1 FROM run_events WHERE chat_id=? AND run_id=? AND seq>? AND kind='invoke_completed' LIMIT 1").get(g.chatId,g.runId,receipt.observed_seq))return refuse('binding_missing');
+    const w=JSON.parse(receipt.witness_json),op=db.prepare("SELECT result_path,result_sha256,lifecycle FROM media_operations WHERE id=? AND modality='video'").get(g.operationId) as {result_path:string;result_sha256:string;lifecycle:string}|undefined;
+    if(!w||!op||op.lifecycle!=='succeeded'||op.result_sha256!==w.sha256||!path.isAbsolute(op.result_path)||path.extname(op.result_path).toLowerCase()!=='.mp4')return refuse('binding_missing');
+    const before=fs.lstatSync(op.result_path,{bigint:true});if(!before.isFile()||before.isSymbolicLink()||before.nlink!==1n||fs.realpathSync.native(op.result_path)!==op.result_path)return refuse('path_changed');
+    const opened=safeOpen(op.result_path,ARTIFACT_BY_EXTENSION['.mp4']);fd=opened.fd;const after=fs.lstatSync(op.result_path,{bigint:true}),desc=fs.fstatSync(fd,{bigint:true});
+    if(!after.isFile()||after.isSymbolicLink()||after.nlink!==1n||fs.realpathSync.native(op.result_path)!==op.result_path||String(before.dev)!==opened.dev||String(before.ino)!==opened.ino||String(after.dev)!==opened.dev||String(after.ino)!==opened.ino||String(desc.dev)!==opened.dev||String(desc.ino)!==opened.ino||opened.dev!==w.dev||opened.ino!==w.ino||opened.size!==w.size||opened.mtimeNs!==w.mtimeNs||opened.ctimeNs!==w.ctimeNs||opened.sha256!==w.sha256||String(after.mtimeNs)!==opened.mtimeNs||String(after.ctimeNs)!==opened.ctimeNs||String(desc.size)!==String(opened.size)||String(desc.mtimeNs)!==opened.mtimeNs||String(desc.ctimeNs)!==opened.ctimeNs){fs.closeSync(fd);fd=null;return refuse('identity_changed');}
+    const still=db.prepare("SELECT witness_json FROM generated_video_receipts WHERE operation_id=? AND chat_id=? AND message_id=? AND account_key=? AND state='sealed'").get(g.operationId,g.chatId,g.messageId,g.account) as {witness_json:string}|undefined;
+    if(!still||still.witness_json!==receipt.witness_json||generatedVideoAccountKey(getAuthenticatedActorIds())!==g.account||!db.prepare("SELECT 1 FROM chat_messages WHERE id=? AND chat_id=? AND role='assistant'").get(g.messageId,g.chatId)){fs.closeSync(fd);fd=null;return refuse('binding_missing');}
+    assertProjectDomainOwner(g.chatId,getAuthenticatedActorIds());const row={source_path:op.result_path,mime_type:'video/mp4',size_bytes:opened.size,sha256:opened.sha256} as BindingRow;const result={fd,row};fd=null;return {ok:true,value:result};
+  }catch{if(fd!==null)try{fs.closeSync(fd)}catch{};return refuse('binding_missing');}
+}
+export function issueGeneratedMessageVideos(input:unknown):OneArtifactPreviewCapabilityV1[]{
+  if(!input||typeof input!=='object'||Array.isArray(input))return [];const q=input as Record<string,unknown>;if(Object.keys(q).sort().join(',')!=='chatId,messageId'||typeof q.chatId!=='string'||typeof q.messageId!=='string'||q.chatId.length>256||q.messageId.length>256)return [];
+  try{const {getAuthenticatedActorIds}=require('../auth') as typeof import('../auth'),actor=getAuthenticatedActorIds();const {assertProjectDomainOwner}=require('../invocation/project-domain-binding') as typeof import('../invocation/project-domain-binding');assertProjectDomainOwner(q.chatId,actor);const account=generatedVideoAccountKey(actor),rows=getDb().prepare("SELECT operation_id,observer_run_id,observer_owner_id,observer_lease_id FROM generated_video_receipts WHERE chat_id=? AND message_id=? AND account_key=? AND state='sealed' ORDER BY rowid DESC LIMIT 64").all(q.chatId,q.messageId,account) as Array<{operation_id:string;observer_run_id:string;observer_owner_id:string;observer_lease_id:string}>;const output:OneArtifactPreviewCapabilityV1[]=[];
+    for(const row of rows){const generated={chatId:q.chatId,messageId:q.messageId,runId:row.observer_run_id,operationId:row.operation_id,account,leaseId:row.observer_lease_id,ownerId:row.observer_owner_id},now=Date.now(),candidate:GeneratedTokenRecord={token:'',generated,expiresAtMs:now+ONE_ARTIFACT_PREVIEW_TTL_MS},verdict=generatedFileVerdict(candidate);if(!verdict.ok)continue;fs.closeSync(verdict.value.fd);pruneTokens(now);let token='';do token=randomBytes(32).toString('hex');while(tokens.has(token));candidate.token=token;tokens.set(token,candidate);output.push({capabilityUrl:`agentlas://one-artifact/${token}`,mimeType:'video/mp4',kind:'video',sizeBytes:verdict.value.row.size_bytes,expiresAt:new Date(candidate.expiresAtMs).toISOString(),sha256:verdict.value.row.sha256});}return output;
+  }catch{return []}
+}
+export function revokeGeneratedMessageVideo(input:unknown):boolean {
+  if(!input||typeof input!=='object'||Array.isArray(input))return false;const q=input as Record<string,unknown>;if(Object.keys(q).sort().join(',')!=='capabilityUrl,chatId,messageId'||typeof q.capabilityUrl!=='string')return false;const token=tokenFromUrl(q.capabilityUrl),record=token?tokens.get(token):undefined;if(!record||!('generated' in record)||record.generated.chatId!==q.chatId||record.generated.messageId!==q.messageId)return false;return tokens.delete(token!);
+}
+
 function pruneTokens(nowMs: number): void {
   for (const [token, record] of tokens) if (record.expiresAtMs <= nowMs) tokens.delete(token);
   for (const [token, at] of evictedTokens) if (at + ONE_ARTIFACT_PREVIEW_TTL_MS <= nowMs) evictedTokens.delete(token);
@@ -1177,6 +1215,7 @@ export function revokeOneArtifactPreview(input: unknown): boolean {
   if (!token) return false;
   const record = tokens.get(token);
   if (!record) return false;
+  if ("generated" in record) return false;
   if (record.request.taskId !== input.taskId
     || record.request.taskVersion !== input.taskVersion
     || record.request.chatId !== input.chatId
@@ -1264,6 +1303,63 @@ export async function verifyOneArtifactReviewDraft(
     return { sourcePath: resolved, sha256: row.sha256 };
   } catch { return null; }
   finally { await handle?.close().catch(() => undefined); }
+}
+
+/** Main-only bounded video reader; no filesystem identity or path crosses the bridge. */
+export async function openBoundOneArtifactVideo(
+  input: OneArtifactBindingRequestV1,
+  signal?: AbortSignal,
+): Promise<{ size: number; mimeType: string; sha256: string; read(offset: number, length: number): Promise<Buffer>; close(): Promise<void> } | null> {
+  const binding = bindingVerdict(input);
+  if (!binding.ok || binding.value.kind !== "video") return null;
+  const row = binding.value;
+  const proof = await verifyOneArtifactReviewDraft(input, signal);
+  if (!proof || signal?.aborted || proof.sourcePath !== row.source_path || proof.sha256 !== row.sha256) return null;
+  let handle: fs.promises.FileHandle;
+  try { handle = await fs.promises.open(proof.sourcePath, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0)); }
+  catch { return null; }
+  let closed = false;
+  let reading = false;
+  const close = async (): Promise<void> => { if (!closed) { closed = true; await handle.close(); } };
+  const sameRow = (next: BindingRow): boolean => (Object.keys(row) as Array<keyof BindingRow>).every((key) => next[key] === row[key]);
+  const assertCurrent = async (): Promise<void> => {
+    if (closed || signal?.aborted || pathIsArchived(row.source_path)) throw new Error("artifact_video_unavailable");
+    const current = bindingVerdict(input);
+    if (!current.ok || !sameRow(current.value)) throw new Error("artifact_video_unavailable");
+    const descriptor = await handle.stat({ bigint: true });
+    const named = await fs.promises.lstat(row.source_path, { bigint: true });
+    if (!descriptor.isFile() || named.isSymbolicLink() || !named.isFile()
+      || descriptor.dev !== named.dev || descriptor.ino !== named.ino
+      || descriptor.size !== BigInt(row.size_bytes) || descriptor.size !== named.size
+      || String(descriptor.ino) !== row.file_ino || String(descriptor.mtimeNs) !== row.file_mtime_ns
+      || String(descriptor.ctimeNs) !== row.file_ctime_ns
+      || descriptor.mtimeNs !== named.mtimeNs || descriptor.ctimeNs !== named.ctimeNs) throw new Error("artifact_video_source_changed");
+    let resolved: string;
+    try { resolved = resolveFsReadPath(row.source_path, { kind: "chat-assets", chatId: row.chat_id }); }
+    catch { resolved = resolveInvocationArtifactReadPath(row.source_path, { chatId: row.chat_id, runId: row.run_id }); }
+    if (resolved !== row.source_path || pathIsArchived(resolved) || signal?.aborted || closed) throw new Error("artifact_video_unavailable");
+    const after = bindingVerdict(input);
+    if (!after.ok || !sameRow(after.value)) throw new Error("artifact_video_unavailable");
+  };
+  try { await assertCurrent(); }
+  catch { await close().catch(() => undefined); return null; }
+  return {
+    size: row.size_bytes, mimeType: row.mime_type, sha256: row.sha256, close,
+    async read(offset, length) {
+      if (reading || !Number.isSafeInteger(offset) || !Number.isSafeInteger(length) || offset < 0
+        || length < 1 || length > 1024 * 1024 || offset + length > row.size_bytes) throw new Error("artifact_video_range_invalid");
+      reading = true;
+      try {
+        await assertCurrent();
+        const bytes = Buffer.allocUnsafe(length);
+        const { bytesRead } = await handle.read(bytes, 0, length, offset);
+        if (bytesRead !== length) throw new Error("artifact_video_source_changed");
+        await assertCurrent();
+        return bytes;
+      } catch (error) { await close().catch(() => undefined); throw error; }
+      finally { reading = false; }
+    },
+  };
 }
 
 /**
@@ -1437,20 +1533,20 @@ export function serveOneArtifactProtocolRequest(
   pruneTokens(nowMs);
   if (!record || record.expiresAtMs <= nowMs) {
     const code = record ? "capability_expired" : evictedTokens.has(token) ? "capability_evicted" : "capability_unknown";
-    logPreviewRefusal("serve", code, record ? bindingLogRef(record.request) : "token", nowMs);
+    logPreviewRefusal("serve", code, record && !("generated" in record) ? bindingLogRef(record.request) : "token", nowMs);
     return safeError(404, code);
   }
-  const verdict = fileVerdict(record.target);
+  const verdict = "generated" in record ? generatedFileVerdict(record) : fileVerdict(record.target);
   if (!verdict.ok) {
     tokens.delete(token);
-    logPreviewRefusal("serve", verdict.code, bindingLogRef(record.request), nowMs);
+    logPreviewRefusal("serve", verdict.code, "generated" in record ? "generated" : bindingLogRef(record.request), nowMs);
     return safeError(404, verdict.code);
   }
   const verified = verdict.value;
   const range = parseRange(rangeHeader, verified.row.size_bytes);
   if (!range) {
     fs.closeSync(verified.fd);
-    logPreviewRefusal("serve", "range_invalid", bindingLogRef(record.request), nowMs);
+    logPreviewRefusal("serve", "range_invalid", "generated" in record ? "generated" : bindingLogRef(record.request), nowMs);
     return safeError(416, "range_invalid", verified.row.size_bytes);
   }
   const stream = fs.createReadStream(verified.row.source_path, {

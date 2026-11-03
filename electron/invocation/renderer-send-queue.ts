@@ -353,7 +353,7 @@ export function createRendererSendQueue(startNow: RendererStartNow, options: Ren
     saveUserRow: (request) => {
       if (request.promptOrigin === "system") return null;
       const row = options.custody?.savedUserRow(request)
-        ?? appendChatMessage(request.chatId, "user", request.userPrompt, request.images?.length ? { images: request.images } : undefined);
+        ?? appendChatMessage(request.chatId, "user", request.userPrompt, { ...(request.images?.length ? { images: request.images } : {}), ...(request.fileGroupId ? { fileGroupId: request.fileGroupId } : {}) });
       try { autoTitleFromFirstMessage(request.chatId, request.userPrompt); } catch { /* a title is cosmetic */ }
       return row;
     },

@@ -1,4 +1,6 @@
 import { cachedTokensFromOpenAiUsage } from "./prompt-cache";
+import { waitForAbort } from "./abortable-wait";
+import { bindEffectRefs, transferEffectRefs, consumeEffectRefs, snapshotEffectDelivery, confirmEffectDelivery } from "./effect-delivery";
 import { cacheCapabilityFor, planCache, planRequestFields, segmentOf, type CachePlan, type CacheSegment } from "./cache-planner";
 import { reportModelPayload, reportCachePlan, reportModelEffort, ledgerFromApiBody, type ModelEffortApplication } from "./model-call-ledger";
 import { openAiChatWireFamily, openAiReasoningEffort, outputLimitField, rejectsOptionalParameter, requestOutputLimit } from "./openai-wire-family";
@@ -36,7 +38,6 @@ import { installLazyToolMenu, invalidateToolMenu, isDirectEntryTool, isToolMenuD
 import { CODE_MODE_TOOL, installMainCodeMode, runMainCodeMode } from "./code-mode";
 import { TOOL_RESULT_READ, foldRetainedToolResult, hasToolResultContext, installToolResultContext, projectToolResult, readToolResult, toolResultReadRequest } from "./tool-result-context";
 import { createHash, randomUUID } from "node:crypto";
-import { AsyncLocalStorage } from "node:async_hooks";
 import { createRuntimeUsageCollector, type ObservedTokenUsage } from "../../shared/observed-usage";
 import { createNoProgressGuard, noteNoProgressEvent } from "../automation-progress-guard";
 import type { RunnerEvents, RunnerFailure, RunnerRequest, RunnerResult } from "./runner";
@@ -452,6 +453,7 @@ export interface LocalToolApprovalContext {
   canonicalWorkRecovery?: MainWorkRecoveryPort;
   /** Science bridge only: project the exact response envelope after this approved dispatch. */
   retainMcpToolResult?: true;
+  deferEffectDelivery?: true;
   beforeMcpToolResult?: RunnerRequest["beforeMcpToolResult"];
   /** Shared by nested code-mode approval clones; a delivery rejection is terminal. */
   mcpResultDeliveryState?: { blocked: boolean; reason?: unknown; pending: Set<Promise<void>> };
@@ -701,21 +703,25 @@ export async function runMainToolDispatch(
   approval: LocalToolApprovalContext,
   broker?: MainWorkforceBroker,
 ): Promise<MainToolDispatchResult> {
-  const acks: string[] = [];
-  const result = await effectAckScope.run(acks, () => dispatchMainToolRaw(byName, call, events, approval, broker));
+  const result = await dispatchMainToolRaw(byName, call, events, approval, broker);
+  approval.signal?.throwIfAborted();
   if(result.canonicalWorkAction) result.content += `\nHost work reference: ${JSON.stringify(result.canonicalWorkAction)}`;
   // Pages already have their own bounded, exact range protocol. Do not replace
   // a page with another reference or duplicate the screenshot channel.
   const handedBack: MainToolDispatchResult = call.toolName === TOOL_RESULT_READ || approval.retainMcpToolResult ? result : {
     ...result, content: projectToolResult(byName, approval, result.content, call.providerCallId, result.isError),
   };
-  // The result is now being handed back to the model: settled effects stored for crash replay are acknowledged (G12).
-  await acknowledgeMainEffects(acks);
+  // Hold effect refs until an opted-in consumer proves its own handoff; older hosts retain their legacy boundary.
+  transferEffectRefs(result, handedBack);
+  if (!approval.deferEffectDelivery) await acknowledgeConsumedResult(handedBack);
   return handedBack;
 }
 
-/** Refs of effects settled during one model-visible dispatch (a code-mode call nests several). Acknowledged when that dispatch returns. */
-const effectAckScope = new AsyncLocalStorage<string[]>();
+/** An internal consumer calls this only after its own exact delivery boundary succeeds. */
+export async function acknowledgeConsumedResult(result: object): Promise<void> {
+  const refs = consumeEffectRefs(result);
+  if (refs) await acknowledgeMainEffects(refs);
+}
 async function acknowledgeMainEffects(refs: readonly string[]): Promise<void> {
   if (!refs.length) return;
   try { const ledger = await import("../harness/effect-ledger"); for (const ref of refs) await ledger.acknowledgeEffect(ref); } catch { /* never fails a tool result */ }
@@ -726,6 +732,7 @@ async function dispatchMainToolRaw(
   byName: Map<string, ResolvedTool>, call: MainToolDispatchCall, events: RunnerEvents,
   approval: LocalToolApprovalContext, broker?: MainWorkforceBroker,
 ): Promise<MainToolDispatchResult> {
+  approval.signal?.throwIfAborted();
   if (approval.beforeMcpToolResult) approval.mcpResultDeliveryState ??= { blocked: false, pending: new Set() };
   assertMcpResultDelivery(approval);
   // A name copied from another runtime's history ("codex_apps.google_calendar.search_events") resolves to the one
@@ -755,25 +762,23 @@ async function dispatchMainToolRaw(
       if (ended instanceof Promise) await ended.catch(() => {});
     }
   }
+  const effectRefs: string[] = [];
   if (effectSlot.ref) {
     await settleMainEffect(effectSlot.ref, result.isError ? "failed" : "settled", result.content);
-    const acks = effectAckScope.getStore();
-    if (acks) acks.push(effectSlot.ref); else await acknowledgeMainEffects([effectSlot.ref]);
+    effectRefs.push(effectSlot.ref);
   }
-  if (effectSlot.replayedRef) {
-    const acks = effectAckScope.getStore();
-    if (acks) acks.push(effectSlot.replayedRef); else await acknowledgeMainEffects([effectSlot.replayedRef]);
-  }
+  if (effectSlot.replayedRef) effectRefs.push(effectSlot.replayedRef);
   // A timed-out code guest can return while its detached host calls are still
   // awaiting Main. Its bounded cleanup must not release a provider response.
   while (approval.mcpResultDeliveryState?.pending.size) {
-    await Promise.all([...approval.mcpResultDeliveryState.pending]);
+    await waitForAbort(approval.signal, Promise.all([...approval.mcpResultDeliveryState.pending]));
   }
   // Code mode may catch a nested rejection as guest data. It cannot turn that
   // host decision into a provider-visible error or dispatch another host tool.
   assertMcpResultDelivery(approval);
   approval.signal?.throwIfAborted();
   approval.assertCurrent?.();
+  bindEffectRefs(result, effectRefs);
   return result;
 }
 
@@ -788,15 +793,27 @@ async function awaitMcpResultDelivery(
   const state = approval.mcpResultDeliveryState;
   let delivery: Promise<void> | undefined;
   try {
+    approval.signal?.throwIfAborted();
     delivery = approval.beforeMcpToolResult?.(input);
-    if (delivery) state?.pending.add(delivery);
-    await delivery;
+    if (delivery) {
+      const tracked = delivery;
+      state?.pending.add(tracked);
+      void tracked.then(
+        () => state?.pending.delete(tracked),
+        (reason) => {
+          state?.pending.delete(tracked);
+          const blocked = approval.mcpResultDeliveryState ??= { blocked: false, pending: new Set() };
+          blocked.blocked = true; blocked.reason = reason;
+        },
+      );
+      await waitForAbort(approval.signal, tracked);
+    }
   } catch (reason) {
-    const blocked = approval.mcpResultDeliveryState ??= { blocked: false, pending: new Set() };
-    blocked.blocked = true; blocked.reason = reason;
+    if (!approval.signal?.aborted) {
+      const blocked = approval.mcpResultDeliveryState ??= { blocked: false, pending: new Set() };
+      blocked.blocked = true; blocked.reason = reason;
+    }
     throw reason;
-  } finally {
-    if (delivery) state?.pending.delete(delivery);
   }
   assertMcpResultDelivery(approval);
   approval.signal?.throwIfAborted();
@@ -1072,6 +1089,8 @@ async function dispatchMainToolRawUnchecked(
     }
     effectSlot.ref = begun.ref;
   }
+  approval.signal?.throwIfAborted();
+  approval.assertCurrent?.();
   withDurableMainToolStart(() => (currentHistoryRuntimeFence()?.assertCurrent(), events.onTool?.(call.toolName, call.arguments, undefined, eventCallId, false, undefined, undefined, agentlasDispatchedOrigin(call.toolName))));
   if (resolved.kind === "builtin") {
     const [{ runBuiltinTool, BUILTIN_TOOL_KINDS }, { askUser }, { multimodalImageSlot }, { generateImage }] = await Promise.all([
@@ -1307,12 +1326,14 @@ export async function runOneToolCall(
     approval,
     broker,
   );
-  return {
-    toolMessage: { role: "tool", tool_call_id: call.id, content: outcome.content },
+  const envelope = {
+    toolMessage: { role: "tool" as const, tool_call_id: call.id, content: outcome.content },
     visionMessage: outcome.visionMessage,
     isError: outcome.isError,
     ...(outcome.visionFromHarness ? { visionFromHarness: true as const } : {}),
   };
+  transferEffectRefs(outcome, envelope);
+  return envelope;
 }
 
 async function* iterSseLines(resp: Response): AsyncGenerator<string, void, unknown> {
@@ -1699,6 +1720,8 @@ async function runLocalOpenAiChatInner(
   // discovery and a later tool-call dispatch path alive.
   const prepared = await prepareMainToolLoop(req, runtimeKind);
   const { byName, broker, approval: approvalContext } = prepared;
+  approvalContext.deferEffectDelivery = true;
+  const effectDeliveries: Array<{ result: object; projection: unknown }> = [];
   let tools = prepared.tools;
   if (opts.acceptsImageResults === false) {
     // 화면을 볼 수 없는 모델에게 컴퓨터 유즈를 주면 스크린샷 JSON 을 해석 못 해 같은 호출만 반복한다
@@ -1905,8 +1928,8 @@ async function runLocalOpenAiChatInner(
     }
     return null;
   };
-  const httpFailureResult = (status: number): RunnerResult | null => {
-    const failure = runtimeHttpFailure(status, runtimeKind, providerLabel);
+  const httpFailureResult = (response: Response): RunnerResult | null => {
+    const failure = runtimeHttpFailure(response.status, runtimeKind, providerLabel, response.headers.get("retry-after"));
     if (!failure) return null;
     const observedUsage = usage.total();
     return assertCurrentHistoryRunnerResult({ text: finalText.trim(), failure, ...(observedUsage ? { observedUsage } : {}),
@@ -1922,13 +1945,14 @@ async function runLocalOpenAiChatInner(
     const resident = plain === RUNTIME_SERVER_ERROR_CODE ? await localModelResident({ runtimeKind, host, model, signal: req.signal }) : null;
     const code = refineServerFailureCode(plain, resident);
     const retryAfter = response.headers.get("retry-after");
+    const resendDelayMs = serverFailureResendDelayMs(retryAfter);
     if (allowResend && serverFailureResendable(code) && serverResends < SERVER_FAILURE_RESENDS && !sawAnyToolCall
-      && !finalText.trim() && !continuedText && !ownerControlPending && !req.signal?.aborted) {
+      && !finalText.trim() && !continuedText && !ownerControlPending && !req.signal?.aborted && resendDelayMs !== null) {
       serverResends += 1;
       events.onStatus(code === LOCAL_MODEL_UNLOADED_CODE
         ? req.locale === "ko" ? "모델 서버가 오류 뒤 모델을 내렸습니다. 잠시 뒤 같은 요청을 한 번 더 보냅니다…" : "The model server dropped the model after an error; sending the same request once more shortly…"
         : req.locale === "ko" ? "모델 서버가 바빠 잠시 뒤 같은 요청을 한 번 더 보냅니다…" : "The model server is busy; sending the same request once more shortly…");
-      await waitForServerResend(serverFailureResendDelayMs(retryAfter), req.signal);
+      await waitForServerResend(resendDelayMs, req.signal);
       if (req.signal?.aborted) throw abortReasonError(req);
       return "resend";
     }
@@ -2047,8 +2071,22 @@ async function runLocalOpenAiChatInner(
       if (rotation.action === "rotated") installGeneration(rotation.digest, rotation.rows);
     }
     if (opts.responsesWire === "deepseek") {
-      const { deepseekResponsesFetch } = await import("./deepseek-responses");
-      turnFetch = deepseekResponsesFetch(host, { thinkingByCallId });
+      const { deepseekResponsesFetch, chatToResponsesBody } = await import("./deepseek-responses");
+      turnFetch = deepseekResponsesFetch(host, { thinkingByCallId, onRequest: (wireBody) => {
+        const bodyMessages = Array.isArray(requestBody.messages) ? requestBody.messages : [];
+        const entries = effectDeliveries.flatMap((entry) => {
+          const at = bodyMessages.indexOf(entry.projection);
+          if (at < 0) return [];
+          const message = entry.projection as Extract<ChatMessage, { role: "tool" }>;
+          const prefix = chatToResponsesBody({ messages: bodyMessages.slice(0, at) }, thinkingByCallId);
+          const position = Array.isArray(prefix.input) ? prefix.input.length : -1;
+          return position < 0 ? [] : [{ result: entry.result,
+            projection: { type: "function_call_output", call_id: message.tool_call_id, output: message.content },
+            path: ["input", position] }];
+        });
+        deliveryBody = JSON.stringify(wireBody);
+        deliveryProof = snapshotEffectDelivery(deliveryBody, entries);
+      } });
     }
     if (turnWindow !== undefined) {
       const window = turnWindow;
@@ -2152,14 +2190,30 @@ async function runLocalOpenAiChatInner(
     sentRequestTokens = estimateTransportTokens(JSON.stringify(requestBody));
     reportCachePlan(cachePlan);
     let usageAttempt = usage.start();
+    let deliveryBody = "";
+    let deliveryProof: ReturnType<typeof snapshotEffectDelivery> | undefined;
+    const snapshotDeliveryRequest = (): string => {
+      const body = JSON.stringify(requestBody);
+      deliveryProof = undefined;
+      if (opts.responsesWire !== "deepseek" && Array.isArray(requestBody.messages)) {
+        const bodyMessages = requestBody.messages as unknown[];
+        const entries = effectDeliveries.flatMap((entry) => {
+          const index = bodyMessages.indexOf(entry.projection);
+          return index < 0 ? [] : [{ ...entry, path: ["messages", index] }];
+        });
+        deliveryProof = snapshotEffectDelivery(body, entries);
+      }
+      return body;
+    };
     try {
       if (req.signal?.aborted) throw abortReasonError(req);
+      deliveryBody = snapshotDeliveryRequest();
       ownerControlDispatched = ownerControlPending !== null;
       resp = await withCurrentHistoryProvider(()=>turnFetch(chatEndpoint, {
         method: "POST",
         headers: { "content-type": "application/json", ...opts.headers },
         signal: req.signal,
-          body: JSON.stringify(requestBody),
+          body: deliveryBody,
       }));
     } catch (err) {
       // The first request of the turn never reached the server (connection refused, no such host): nothing was sent, so this
@@ -2178,7 +2232,7 @@ async function runLocalOpenAiChatInner(
       throw new Error(opts.unreachableMessage);
     }
     if (!resp.ok) {
-      const terminal = httpFailureResult(resp.status);
+      const terminal = httpFailureResult(resp);
       if (terminal) return terminal;
       let errText = await resp.text().catch(() => "");
       // A structured validation refusal of one OPTIONAL field precedes generation: resend the identical request once
@@ -2198,18 +2252,20 @@ async function runLocalOpenAiChatInner(
         usageAttempt = usage.start();
         if (opts.beforeProviderCall) await opts.beforeProviderCall();
         try {
+          if (req.signal?.aborted) throw abortReasonError(req);
+          deliveryBody = snapshotDeliveryRequest();
           resp = await withCurrentHistoryProvider(()=>turnFetch(chatEndpoint, {
             method: "POST",
             headers: { "content-type": "application/json", ...opts.headers },
             signal: req.signal,
-            body: JSON.stringify(requestBody),
+            body: deliveryBody,
           }));
         } catch {
           if (req.signal?.aborted) throw abortReasonError(req);
           throw new Error(opts.unreachableMessage);
         }
         if (!resp.ok) {
-          const terminal = httpFailureResult(resp.status);
+          const terminal = httpFailureResult(resp);
           if (terminal) return terminal;
           errText = await resp.text().catch(() => "");
         }
@@ -2265,7 +2321,7 @@ async function runLocalOpenAiChatInner(
               body: JSON.stringify(Object.fromEntries(Object.entries(requestBody).filter(([key])=>key!=="tools"))),
           }));
           if (!fallback.ok) {
-            const terminal = httpFailureResult(fallback.status);
+            const terminal = httpFailureResult(fallback);
             if (terminal) return terminal;
             const fallbackErrText = await fallback.text().catch(() => "");
             const server = await serverFailureOutcome(fallback, fallbackErrText, false);
@@ -2375,6 +2431,12 @@ async function runLocalOpenAiChatInner(
         }
       }
     }
+    if (deliveryProof && !req.signal?.aborted) {
+      await waitForAbort(req.signal, confirmEffectDelivery(deliveryProof, deliveryBody, true, req.signal, async (ref) => {
+        const ledger = await import("../harness/effect-ledger");
+        await ledger.acknowledgeEffect(ref);
+      }));
+    }
     // A provider is allowed to hallucinate a tool_calls block even though it
     // received no tools. In the untrusted boundary, treat that response as a
     // terminal text response; never hand it to the local dispatcher.
@@ -2407,6 +2469,7 @@ async function runLocalOpenAiChatInner(
         result.synthesizedCallIds?.has(call.id) ? { responseIndex: turn, partIndex } : undefined);
       progress.assertProgress();
       messages.push(outcome.toolMessage);
+      if (!outcome.visionMessage) effectDeliveries.push({ result: outcome, projection: outcome.toolMessage });
       // A harness capture goes only where reading images is declared: an OpenAI-compatible BYOK provider, Ollama, LM Studio
       // and MLX may serve a text-only model, which can refuse the whole request; its path stays in the tool JSON.
       if (outcome.visionMessage && opts.acceptsImageResults !== false && (!outcome.visionFromHarness || opts.acceptsImageResults === true)) {

@@ -42,7 +42,8 @@ import { ipc, grantForDroppedFile, grantForPastedAttachment } from "@/lib/ipc";
 import { fitImageUnder } from "@/lib/attachment-image-fit";
 import { useComposerMenuExtensions, type ComposerMenuExtension, type ComposerMenuItem } from "@/lib/composer-menu-extensions";
 import { useChatAlwaysApproval, type ChatAlwaysApprovalControl } from "@/lib/use-chat-always-approval";
-import type { ChatFileDraft } from "@/lib/chat-files";
+import { formatChatFileSize, type ChatFileDraft } from "@/lib/chat-files";
+import { MediaStrip, mediaKindOf, type MediaStripItem } from "./media/MediaStrip";
 import { useComposerEnter } from "@/lib/use-composer-enter";
 import { useToolbarFit } from "@/lib/use-toolbar-fit";
 
@@ -472,6 +473,15 @@ function ChatInputComponent({
   const [images, setImages] = useState<PreviewedImage[]>([]);
   // 비이미지 첨부 — 내용 업로드가 아니라 경로 참조(capability). 파일·폴더·영상 공통.
   const [fileGrants, setFileGrants] = useState<ChatFileDraft[]>([]);
+  // Thumbnails of picked pictures/videos, keyed by grant token (never sent; the draft itself goes to Main as before).
+  const [filePreviews, setFilePreviews] = useState<ReadonlyMap<string, string>>(() => new Map());
+  useEffect(() => {
+    const live = new Set(fileGrants.map((item) => item.grant.scope.token));
+    const stale = [...filePreviews.entries()].filter(([token]) => !live.has(token));
+    if (!stale.length) return;
+    for (const [, url] of stale) URL.revokeObjectURL(url);
+    setFilePreviews((current) => new Map([...current].filter(([token]) => live.has(token))));
+  }, [fileGrants, filePreviews]);
   // 붙여넣은 긴 텍스트 — 입력창을 채우지 않고 에셋 칩으로 접어 동봉.
   const [pastedTexts, setPastedTexts] = useState<Array<{ name: string; text: string }>>([]);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
@@ -667,17 +677,16 @@ function ChatInputComponent({
 
   // ── 파일 첨부 ──────────────────────────────────────────
   async function addFiles(files: FileList | File[]) {
+    // No count or size limit: every picture, video and file keeps its original bytes as a file of the
+    // conversation (Main's exact-file grant); a model gets a fitted copy (electron/runtime/model-image-budget.ts).
     const accepted: PreviewedImage[] = [];
     const grantedFiles: ChatFileDraft[] = [];
+    const previews: Array<[string, string]> = [];
     const rejected: string[] = [];
     const errors: string[] = [];
-    for (const original of Array.from(files)) {
-      // A large screenshot or photo is shrunk to fit the image limit instead of refused (the One composers' rule, attachment-image-fit.ts).
-      const file = await fitImageUnder(original, 5 * 1024 * 1024);
-      // A file with no path on disk (dragged from a browser, mail or chat, or pasted) gets the exact-file grant Main pins from its bytes,
-      // as the One composers do; only an image may stay a bare multimodal payload.
-      const grant = await grantForDroppedFile(file)
-        ?? (file.type.startsWith("image/") ? null : await grantForPastedAttachment(file));
+    for (const file of Array.from(files)) {
+      // A file with no path on disk (dragged from a browser, mail or chat, or pasted) gets the exact-file grant Main pins from its bytes.
+      const grant = await grantForDroppedFile(file) ?? await grantForPastedAttachment(file);
       if (grant?.path) {
         grantedFiles.push({
           grant,
@@ -686,24 +695,22 @@ function ChatInputComponent({
           size: file.size,
           kind: grant.kind,
         });
-      } else if (!file.type.startsWith("image/")) {
+        if (grant.kind === "file" && (file.type.startsWith("image/") || file.type.startsWith("video/"))) previews.push([grant.scope.token, URL.createObjectURL(file)]);
+        continue;
+      }
+      if (!file.type.startsWith("image/")) {
         rejected.push(file.name);
         continue;
       }
-      // Images keep the existing multimodal payload while also receiving the
-      // same durable file-card binding as every other attachment.
-      if (!file.type.startsWith("image/")) continue;
-      if (file.size > 5 * 1024 * 1024) {
-        errors.push(t("chatinput.image_too_large", { name: file.name }));
-        continue;
-      }
+      // A picture Main could not pin (an unusual type) still goes, as the inline picture payload it always was.
+      const fitted = await fitImageUnder(file, 5 * 1024 * 1024);
       try {
-        const data = await fileToBase64(file);
+        const data = await fileToBase64(fitted);
         accepted.push({
-          mediaType: file.type,
+          mediaType: fitted.type,
           data,
-          dataUrl: `data:${file.type};base64,${data}`,
-          name: file.name,
+          dataUrl: `data:${fitted.type};base64,${data}`,
+          name: fitted.name,
         });
       } catch {
         errors.push(t("chatinput.image_read_failed", { name: file.name }));
@@ -711,6 +718,7 @@ function ChatInputComponent({
     }
     if (accepted.length > 0) setImages((arr) => [...arr, ...accepted]);
     if (grantedFiles.length > 0) setFileGrants((arr) => [...arr, ...grantedFiles]);
+    if (previews.length > 0) setFilePreviews((current) => new Map([...current, ...previews]));
     if (rejected.length > 0) {
       errors.push(`${rejected.join(", ")} — ${locale === "ko" ? "첨부하지 못했습니다" : "could not attach"}`);
     }
@@ -1604,62 +1612,31 @@ function ChatInputComponent({
           </div>
         )}
 
-        {/* 이미지 미리보기 */}
-        {images.length > 0 && (
-          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-            {images.map((img, i) => (
-              <div
-                key={i}
-                style={{
-                  position: "relative",
-                  width: 56,
-                  height: 56,
-                  borderRadius: 10,
-                  overflow: "hidden",
-                  border: "1px solid var(--paper-edge)",
-                }}
-                title={img.name}
-              >
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img
-                  src={img.dataUrl}
-                  alt={img.name}
-                  style={{ width: "100%", height: "100%", objectFit: "cover" }}
-                />
-                <button
-                  onClick={() => removeImage(i)}
-                  aria-label={t("chatinput.remove_image")}
-                  style={{
-                    position: "absolute",
-                    top: -1,
-                    right: -1,
-                    // 24px 단추 안에 18px 원을 그대로 그린다.
-                    width: 24,
-                    height: 24,
-                    padding: 0,
-                    background: "radial-gradient(circle closest-side, rgba(0,0,0,0.7) 0 9px, transparent 9.5px)",
-                    color: "white",
-                    border: "none",
-                    fontSize: 10,
-                    fontWeight: 700,
-                  }}
-                >
-                  ×
-                </button>
-              </div>
-            ))}
-          </div>
+        {/* 첨부: 사진·영상은 썸네일, 그 밖의 파일은 아이콘+이름 타일 — 한 줄 가로 띠, 각각 × (media-carousel) */}
+        {(images.length > 0 || fileGrants.length > 0) && (
+          <MediaStrip
+            variant="composer"
+            locale={locale === "ko" ? "ko" : "en"}
+            items={[
+              ...images.map((img, i): MediaStripItem => ({
+                key: `inline:${i}:${img.name ?? ""}`, kind: "image", name: img.name || (locale === "ko" ? "사진" : "Picture"),
+                src: img.dataUrl, thumbSrc: img.dataUrl, onRemove: () => removeImage(i),
+              })),
+              ...fileGrants.map((g, i): MediaStripItem => {
+                const preview = filePreviews.get(g.grant.scope.token);
+                const kind = g.kind === "directory" ? "folder" : mediaKindOf(g.mediaType, g.name);
+                return {
+                  key: `file:${g.grant.scope.token}:${i}`, kind: preview ? kind : kind === "folder" ? "folder" : "file", name: g.name,
+                  src: preview, thumbSrc: kind === "image" ? preview : undefined, meta: g.kind === "directory" ? undefined : formatChatFileSize(g.size),
+                  onRemove: () => setFileGrants((a) => a.filter((_, j) => j !== i)),
+                };
+              }),
+            ]}
+          />
         )}
 
-        {(fileGrants.length > 0 || pastedTexts.length > 0) && (
+        {pastedTexts.length > 0 && (
           <div style={{ display: "flex", flexWrap: "wrap", gap: 6, padding: 0 }}>
-            {fileGrants.map((g, i) => (
-              <span key={`${g.grant.scope.token}:${i}`} title={g.grant.path} style={{ display: "inline-flex", alignItems: "center", gap: 6, maxWidth: 240, padding: "4px 9px", borderRadius: 999, border: "1px solid var(--paper-edge, var(--paper-edge-strong))", background: "var(--paper-2, var(--paper-2))", fontSize: 12 }}>
-                <span aria-hidden="true">{g.kind === "directory" ? "📁" : "📎"}</span>
-                <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{g.name}</span>
-                <button type="button" aria-label={locale === "ko" ? "첨부 제거" : "Remove attachment"} onClick={() => setFileGrants((a) => a.filter((_, j) => j !== i))} style={{ border: 0, background: "transparent", cursor: "pointer", padding: 0, lineHeight: 1, opacity: 0.6 }}>×</button>
-              </span>
-            ))}
             {pastedTexts.map((p, i) => (
               <span key={`t${i}`} title={p.text.slice(0, 300)} style={{ display: "inline-flex", alignItems: "center", gap: 6, maxWidth: 240, padding: "4px 9px", borderRadius: 999, border: "1px solid var(--paper-edge, var(--paper-edge-strong))", background: "var(--paper-2, var(--paper-2))", fontSize: 12 }}>
                 <span aria-hidden="true">📝</span>

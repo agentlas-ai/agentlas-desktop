@@ -78,7 +78,7 @@ export async function runMainCodeMode(byName: Map<string, ResolvedTool>, input: 
   let engine: import("../computer-use/unified/quickjs-engine").QuickJsEngine | null = null;
   let value: unknown = null, failure: string | null = null;
   try {
-    const { QuickJsEngine } = await import("../computer-use/unified/quickjs-engine");
+    const { QuickJsEngine, quickJsResultWithDelivery } = await import("../computer-use/unified/quickjs-engine");
     engine = await QuickJsEngine.create({invoke: (target, method, rawArgs, signal) => {
       const operation = (async () => {
         controller.signal.throwIfAborted(); signal.throwIfAborted();
@@ -102,9 +102,12 @@ export async function runMainCodeMode(byName: Map<string, ResolvedTool>, input: 
           // Tool output remains data. JSON results (including prepared tokens)
           // can be composed directly; ordinary text remains an ordinary string.
           let parsed: unknown;
-          try { parsed = JSON.parse(outcome.content) as unknown; } catch { return outcome.content; }
+          try { parsed = JSON.parse(outcome.content) as unknown; } catch { parsed = outcome.content; }
           if (resultWasTruncated(parsed)) truncatedResults++;
-          return parsed;
+          return quickJsResultWithDelivery(parsed, async () => {
+            const { acknowledgeConsumedResult } = await import("./local-tool-loop");
+            await acknowledgeConsumedResult(outcome);
+          });
         } catch (error) {
           if (!resultObserved) events.onTool?.(callArgs.name, encoded, error instanceof Error ? error.message : String(error), operationId, true);
           throw error;

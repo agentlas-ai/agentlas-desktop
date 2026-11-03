@@ -5,7 +5,8 @@ import { buildNativeBrowserMcpConfig } from "../browser/native-mcp-config";
 import { listInstalledServers } from "../mcp-tools/registry";
 import { getCatalogEntry } from "../mcp-tools/catalog";
 import { mcpServerConfigurationDigest } from "../mcp-tools/prepared-transport";
-import { loadMainToolInventory, runMainToolDispatch, type ResolvedTool, type MainToolDispatchResult } from "../runtime/local-tool-loop";
+import { loadMainToolInventory, runMainToolDispatch, acknowledgeConsumedResult, type ResolvedTool, type MainToolDispatchResult } from "../runtime/local-tool-loop";
+import { transferEffectRefs } from "../runtime/effect-delivery";
 import { toolApprovalSessionKey } from "../runtime/tool-approval";
 import type { TurnScopedGoalWaitResolver } from "../turn-tools/control-server";
 import { TOOL_RESULT_READ, installToolResultContext, projectToolResult, clearToolResultContext } from "../runtime/tool-result-context";
@@ -326,6 +327,27 @@ export function bindScienceAliveDesktopToolWake(scope: ScienceAliveDesktopToolSc
   return bindDesktopToolScope(scope, options);
 }
 
+/** Only the SDK explicitly declaring this wire-finish callback may defer legacy acknowledgement. */
+export const scienceHttpDeliverySupported = (require("agentlas-science") as { SCIENCE_DESKTOP_HTTP_FINISH_DELIVERY_V1?: string }).SCIENCE_DESKTOP_HTTP_FINISH_DELIVERY_V1 === "http-finish-v1";
+const scienceDeliveryBindings = new WeakMap<object, { scope: DesktopToolScope; binding: Binding; inventory: Inventory }>();
+/** Called only by the SDK after the corresponding HTTP response finished. */
+export async function scienceDesktopToolDelivered(raw: unknown, wire: unknown): Promise<void> {
+  if (!raw || typeof raw !== "object" || !wire || typeof wire !== "object") return;
+  const bound = scienceDeliveryBindings.get(raw); if (!bound) return;
+  try {
+    if (bound.binding.signal?.aborted || current(bound.scope) !== bound.binding) return;
+    assertInventoryCurrent(bound.scope, bound.inventory);
+    const original = raw as ScienceDesktopResult;
+    const sent = wire as Record<string, unknown>;
+    if (sent.ok !== !original.isError || JSON.stringify(sent.content) !== JSON.stringify(original.content)) return;
+    for (const key of ["visualProjection", "visualResults"] as const) {
+      if (JSON.stringify(sent[key]) !== JSON.stringify(original[key])) return;
+    }
+    scienceDeliveryBindings.delete(raw);
+    await acknowledgeConsumedResult(raw);
+  } catch { /* Scope ended or handoff could not be verified; leave the effect unacknowledged. */ }
+}
+
 export const scienceDesktopTools = {
   async list(scope: DesktopToolScope, query?: { serverId?: string; page?: string }): Promise<{
     inventoryId: string;
@@ -471,7 +493,7 @@ export const scienceDesktopTools = {
   },
 
   async call(scope: DesktopToolScope, input: {
-    inventoryId: string; name: string; arguments: Record<string, unknown>; toolCallId: string;
+    inventoryId: string; name: string; arguments: Record<string, unknown>; toolCallId: string; deliveryToken?: object;
   }): Promise<ScienceDesktopResult> {
     try {
     const binding = current(scope);
@@ -490,6 +512,9 @@ export const scienceDesktopTools = {
       throw new DesktopToolAdmissionGuard("science_desktop_tool_arguments_invalid");
     if (!input.toolCallId || input.toolCallId.length > 256)
       throw new DesktopToolAdmissionGuard("science_desktop_tool_call_id_invalid");
+    const sdk = require("agentlas-science") as { consumeScienceHttpDeliveryToken?: (token: unknown, scope: unknown, input: unknown) => boolean };
+    const deferDelivery = scienceHttpDeliverySupported && typeof sdk.consumeScienceHttpDeliveryToken === "function"
+      && sdk.consumeScienceHttpDeliveryToken(input.deliveryToken, scope, input) === true;
     const argumentsJson = JSON.stringify(input.arguments);
     if (argumentsJson.length > 131_072) throw new DesktopToolAdmissionGuard("science_desktop_tool_arguments_too_large");
     if (reader) {
@@ -545,6 +570,7 @@ export const scienceDesktopTools = {
           { runtimeKind: binding.runtimeKind, sessionKey: toolApprovalSessionKey(binding.runtimeKind, binding.chatId),
             permission: binding.permission, cwd: binding.cwd, chatId: binding.chatId,
             agentId: binding.agentId, unattended: unattendedScope(binding), signal: binding.signal, retainMcpToolResult: true,
+            ...(deferDelivery ? { deferEffectDelivery: true as const } : {}),
             assertCurrent: () => { assertInventoryCurrent(scope, inventory); } });
       // Paths originate in the shared Main dispatch result, never parsed model
       // JSON. The outer invocation uses the ordinary Task/run/90-day binding.
@@ -553,6 +579,10 @@ export const scienceDesktopTools = {
       if (!dispatched.isError && couldHaveChangedTheOutsideWorld(effectName) && dispatched.artifactPaths?.length)
         recordRunProducedFiles(runId(scope), `science-desktop-tool:${input.toolCallId}`, dispatched.artifactPaths);
       const projected = projectDesktopResult(binding, inventory, dispatched, input.toolCallId);
+      if (deferDelivery) {
+        transferEffectRefs(dispatched, projected);
+        scienceDeliveryBindings.set(projected, { scope: { ...scope }, binding, inventory });
+      }
       recordRunEvent({ runId: runId(scope), chatId: binding.chatId,
         kind: "science_desktop_tool_result_received", sourceEventId: `science-desktop-tool:${input.toolCallId}:result`,
         payload: { toolCallId: input.toolCallId, signatureSha256, producerIsError: dispatched.isError,

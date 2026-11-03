@@ -573,6 +573,7 @@ function MarketplacePage() {
               locale={locale}
               signedIn={signedIn}
               installedSlugs={installedAgentSlugs}
+              initialQuery={searchParams.get("q") ?? ""}
               onSignIn={ensureSignedIn}
               onInstalled={() => void refresh()}
             />

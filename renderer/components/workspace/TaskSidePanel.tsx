@@ -383,6 +383,14 @@ function ActivityRow({
   );
 }
 
+const NO_MARKDOWN_BASE: string[] = [];
+/** The folder of an absolute file path (POSIX or Windows), as the base its markdown's relative links resolve against. */
+function markdownFolderOf(path: string | undefined): string[] {
+  if (!path || !(path.startsWith("/") || /^[A-Za-z]:[\\/]/.test(path))) return NO_MARKDOWN_BASE;
+  const cut = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+  return cut > 0 ? [path.slice(0, cut)] : NO_MARKDOWN_BASE;
+}
+
 function basename(path: string): string {
   return path.replace(/[\\/]+$/, "").split(/[\\/]/).filter(Boolean).at(-1) || path;
 }
@@ -679,6 +687,9 @@ function ChatFileOpenViewer({ file, locale, chatId = null, onClose, onExpand, on
   onOfficeEditIntent?: (intent: OfficeEditIntent) => Promise<void>;
 }) {
   const preview = file.viewer;
+  // A rendered markdown file resolves its own relative links and images (`](WORK.md)`, `![](shots/a.png)`) against its folder; without
+  // a base they were dead text (observed in use, a Work report's README/WORK.md opened from One).
+  const markdownBasePaths = useMemo(() => markdownFolderOf(preview.path), [preview.path]);
   const liveKinds = new Set<LiveOutputKind>(["image", "video", "audio", "pdf", "document", "spreadsheet", "presentation", "archive"]);
   const liveKind = liveKinds.has(preview.viewerKind as LiveOutputKind) ? preview.viewerKind as LiveOutputKind : null;
   const kindLabel = file.kind === "directory"
@@ -697,7 +708,7 @@ function ChatFileOpenViewer({ file, locale, chatId = null, onClose, onExpand, on
         </p>
       ) : preview.viewerKind === "markdown" && preview.content ? (
         <div style={{ padding: 16, lineHeight: 1.65, overflowWrap: "anywhere" }}>
-          <Markdown text={preview.content} chatId={file.chatId} messageId={`file-preview:${file.tabId}`} />
+          <Markdown text={preview.content} chatId={file.chatId} messageId={`file-preview:${file.tabId}`} mediaBasePaths={markdownBasePaths} />
         </div>
       ) : file.kind === "directory" || ["markdown", "json", "text"].includes(preview.viewerKind) ? (
         <pre style={{ margin: 0, padding: 12, fontFamily: "var(--font-mono)", fontSize: 11.5, lineHeight: 1.55, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{preview.content || filePreviewEmptyMessage(preview.reason, locale, preview.name, preview.path)}</pre>

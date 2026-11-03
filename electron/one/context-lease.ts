@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import type { OneContextLeaseState, OneContextReadiness } from "../../shared/one-context";
+import { abortableDelay, assertRequestCurrent } from "../computer-use/request-lifetime";
 
 export const ONE_OS_EXECUTION_ENV = "AGENTLAS_ONE_OS_EXECUTION";
 export interface OneOsExecutionBinding {
@@ -15,7 +16,7 @@ export interface OneOsExecutionBinding {
 }
 export interface OneOsExecutionCapability { version: "agentlas.one-os-execution.v1"; executionId: string; token: string }
 export interface OneOsActionTarget { appTarget: string; allowFocus?:boolean; resolvedPid?:number; resolvedProcessStartMs?:number; resolvedWindowId?:number; sourceId?: string; points?: ReadonlyArray<{ x: number; y: number }>; elementFrame?: { x: number; y: number; width: number; height: number } }
-interface Execution { binding: Readonly<OneOsExecutionBinding>; token: string; assertCurrent(): void; signal?: AbortSignal; dispose(): void; revoked: boolean }
+interface Execution { binding: Readonly<OneOsExecutionBinding>; token: string; assertCurrent(): void; signal?: AbortSignal; controller: AbortController; dispose(): void; revoked: boolean }
 export interface OneOsLeasePorts {
   readiness(): OneContextReadiness;
   validateTarget(binding: Readonly<OneOsExecutionBinding>, target: OneOsActionTarget): Promise<void>;
@@ -31,6 +32,14 @@ const fail = (code: string): never => { throw new OneOsLeaseError(code); };
 function identifier(value: unknown): value is string { return typeof value === "string" && value.length > 0 && value.length <= 256 && value.trim() === value && !/[\u0000-\u001f]/.test(value); }
 /** Private execution authority is registered only by the original prepared native source, never by renderer IPC. */
 const HUMAN_INPUT_SETTLE_MS = 8_000;
+/**
+ * How long an action or a window arrangement waits for the owner's keyboard and mouse to go quiet, inside the computer-use request
+ * budget (request-lifetime.ts: 40 s per action, 20 s per observation). Eight seconds handed Hope's Finder step back to the owner as
+ * "finish using the computer and ask again" during an ordinary pause in their typing (one-os-human-active, 1.3.116). The
+ * safety rule is unchanged: input during the action still stops it, and an owner who stays busy past the wait is still refused.
+ */
+export const HUMAN_INPUT_ACTION_WAIT_MS = 25_000;
+export const HUMAN_INPUT_ARRANGE_WAIT_MS = 10_000;
 
 export class OneOsResourceLeaseBroker {
   private executions = new Map<string, Execution>();
@@ -71,14 +80,16 @@ export class OneOsResourceLeaseBroker {
     assertExecutionCurrent(); if (signal?.aborted) fail("one-os-execution-revoked");
     if (this.executions.size >= 128) fail("one-os-execution-capacity");
     const executionId = randomUUID(), token = randomBytes(32).toString("hex");
+    const controller = new AbortController();
     const dispose = () => {
       const record = this.executions.get(executionId); if (!record || record.revoked) return;
       record.revoked = true; signal?.removeEventListener("abort", dispose);
+      controller.abort();
       if (this.holder?.executionId === executionId) { this.holder.reason = "one-os-execution-revoked"; this.holder.controller.abort(); }
       this.executions.delete(executionId); this.ports.changed?.();
       try { this.ports.executionEnded?.(record.binding); } catch { /* a listener never blocks revocation */ }
     };
-    this.executions.set(executionId, { binding: Object.freeze({ ...binding }), token, assertCurrent: assertExecutionCurrent, signal, dispose, revoked: false });
+    this.executions.set(executionId, { binding: Object.freeze({ ...binding }), token, assertCurrent: assertExecutionCurrent, signal, controller, dispose, revoked: false });
     signal?.addEventListener("abort", dispose, { once: true });
     return { capability: { version: "agentlas.one-os-execution.v1", executionId, token }, dispose };
   }
@@ -92,6 +103,8 @@ export class OneOsResourceLeaseBroker {
     return { id: cap.executionId!, record };
   }
   assertExecutionCurrent(capability:unknown):void {this.execution(capability);if(this.ports.readiness().session!=="awake")fail("one-os-session-unavailable");}
+  /** Includes explicit disposal even when the original source supplied no signal. */
+  executionSignal(capability: unknown): AbortSignal { return this.execution(capability).record.controller.signal; }
   /** The authorized binding of a live capability (throws like every other capability check). */
   executionBinding(capability:unknown):Readonly<OneOsExecutionBinding> {return this.execution(capability).record.binding;}
   hasContextGrant(capability:unknown):boolean {return Boolean(this.execution(capability).record.binding.contextGrantId);}
@@ -113,9 +126,24 @@ export class OneOsResourceLeaseBroker {
    * (context-platform.ts), so an agent's second click inside two seconds of its first read as "the owner is active" and came back
    * refused, as did a click during a pause in the owner's typing. The lease's own check is unchanged.
    */
-  async settleHumanInput(timeoutMs = HUMAN_INPUT_SETTLE_MS): Promise<void> {
+  async settleHumanInput(timeoutMs = HUMAN_INPUT_SETTLE_MS, signal?: AbortSignal): Promise<void> {
+    assertRequestCurrent(signal);
     const deadline = this.now() + timeoutMs;
-    while (this.ports.readiness().humanBusy && this.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 200));
+    while (true) {
+      const ready = this.ports.readiness();
+      if (ready.session !== "awake") fail("one-os-session-unavailable");
+      if (!ready.humanBusy || this.now() >= deadline) break;
+      await abortableDelay(200, signal);
+    }
+    assertRequestCurrent(signal);
+  }
+  /** Bind cancellation to this request without changing the shared broker or
+   * another caller's default signal. Authority remains in the original methods. */
+  forRequest(signal: AbortSignal) {
+    return {
+      settleHumanInput: (timeoutMs?: number) => this.settleHumanInput(timeoutMs, signal),
+      acquireLegacyAction: () => { assertRequestCurrent(signal); return this.acquireLegacyAction(); },
+    };
   }
   async acquireForAction(capability: unknown, target: OneOsActionTarget): Promise<{ leaseId: string; signal: AbortSignal; checkpoint(): Promise<void>; release(): void }> {
     const execution = this.execution(capability), binding = execution.record.binding;
@@ -147,6 +175,11 @@ export class OneOsResourceLeaseBroker {
       await this.ports.validateTarget(binding, target);
       this.execution(capability);
       if (released || holder.controller.signal.aborted || holder.until <= this.now()) fail(holder.reason ?? "one-os-lease-unavailable");
+      // Target validation is asynchronous. Human input or screen lock that
+      // arrived during it must win before the caller dispatches native work.
+      const latest = this.ports.readiness();
+      if (latest.session !== "awake" || !latest.driverAvailable || latest.accessibility !== "granted") fail("one-os-input-unavailable");
+      if (latest.humanBusy) fail("one-os-human-active");
     };
     try { await checkpoint(); } catch (error) { release(); throw error; }
     return { leaseId: holder.leaseId, signal: holder.controller.signal, checkpoint, release };
@@ -160,12 +193,12 @@ export class OneOsResourceLeaseBroker {
     this.lastWaiting = { state: "waiting", reasonCode: reason }; this.ports.changed?.();
   }
   /** Existing bearer-authorized Computer Use retains its authority, but shares the OS resource. */
-  acquireLegacyAction(): { checkpoint():Promise<void>; release():void } {
+  acquireLegacyAction(): { signal: AbortSignal; checkpoint():Promise<void>; release():void } {
     if(this.holder)fail("one-os-resource-busy");
     const check=()=>{const ready=this.ports.readiness();if(ready.session!=="awake")fail("one-os-session-unavailable");if(ready.humanBusy)fail("one-os-human-active");};check();
     const unlock=this.processLock(),holder={leaseId:randomUUID(),executionId:"legacy",target:{appTarget:"legacy-authorized"},until:this.now()+30_000,controller:new AbortController(),reason:undefined as string|undefined};this.holder=holder;
     let released=false;
-    return {checkpoint:async()=>{if(released||holder.controller.signal.aborted||holder.until<=this.now())fail("one-os-lease-unavailable");check();},release:()=>{if(released)return;released=true;unlock();if(this.holder===holder)this.holder=null;}};
+    return {signal:holder.controller.signal,checkpoint:async()=>{if(released||holder.controller.signal.aborted||holder.until<=this.now())fail("one-os-lease-unavailable");check();},release:()=>{if(released)return;released=true;unlock();if(this.holder===holder)this.holder=null;}};
   }
   dispose(): void { for (const record of [...this.executions.values()]) record.dispose(); this.suspend("one-os-host-closed"); }
 }

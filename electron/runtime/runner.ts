@@ -1,4 +1,6 @@
 import { carryRunnerTurnContext, deliverUnboundTurnContext, extendRunnerTurnContext } from "./runner-turn-context-binding";
+import { httpRetryAfterIso } from "./http-retry-after";
+import { observeRuntimeRetryAfter } from "./retry-observation";
 import { composeTracedPrompt, restoreTracedPrompt, type PromptCompositionTrace } from "./prompt-composition-trace";
 import { composeDeclaredPrompt, type DeclaredPromptPart } from "./prompt-order";
 import type { HistoryRuntimeFence } from "../one/history-runtime-fences";
@@ -790,6 +792,8 @@ export interface RunnerFailure {
   exitCode?: number;
   /** 한도 리셋 시각 등 — 표식에 실려 오면 그대로. For "rate_limit", the provider's Retry-After (ISO time or "in 30s"). */
   retryAfterHint?: string;
+  /** Host-private admission fact; mobile failure projection keeps its existing keys. */
+  retryBudgetExhausted?: true;
 }
 
 export interface RunnerResult {
@@ -1074,6 +1078,7 @@ export function childExitReason(code: number | null | undefined, stderr: string 
 /** Terminal HTTP status is machine evidence; prose/network errors do not grant replay. */
 const runtimeHttpRefusals = new WeakMap<RunnerFailure, number>();
 export function runtimeHttpFailure(status: number, runtime: string, provider: string, retryAfter?: string | null): RunnerFailure | null {
+  observeRuntimeRetryAfter(status, retryAfter);
   // 429 is request throttling, not an exhausted plan: "rate_limit" (a plan verdict arrives as its own typed code).
   const kind = status === 401 ? "auth" : status === 429 ? "rate_limit" : status === 403 ? "refused" : null;
   if (!kind) return null;
@@ -1089,11 +1094,7 @@ export function runtimeHttpFailure(status: number, runtime: string, provider: st
  * Anything else is dropped (the provider's header, never prose).
  */
 export function httpRetryAfterHint(value: string | null | undefined, now = Date.now()): string | undefined {
-  const text = String(value ?? "").trim();
-  if (!text) return undefined;
-  if (/^\d{1,7}$/.test(text)) return new Date(now + Number(text) * 1_000).toISOString();
-  const at = Date.parse(text);
-  return Number.isFinite(at) ? new Date(at).toISOString() : undefined;
+  return httpRetryAfterIso(value, now);
 }
 
 /** Only this process's actual HTTP rejection factory can prove no model work. */

@@ -1,9 +1,10 @@
 import fs from "node:fs";
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { getDb } from "../store/db";
 import { agentFolderPath } from "../agents/files";
 import { userDataPath } from "../runtime-paths";
-import { oneProfileAvatarSegment } from "../store/one-profile";
+import { oneProfileAvatarSegment, captureOneAvatarOwner, commitOneAvatarPointer, readOneAvatarPointer } from "../store/one-profile";
 
 const IMAGE_DATA_URL_RE = /^data:image\/(png|jpeg|webp);base64,([A-Za-z0-9+/]+={0,2})$/;
 const MAX_AVATAR_BYTES = 2 * 1024 * 1024;
@@ -57,6 +58,34 @@ function oneSelfAvatarDir(): string {
   return segment ? userDataPath("one-profile", "accounts", segment) : userDataPath("one-profile");
 }
 
+/** Main only: write an immutable image before atomically publishing its pointer. */
+export function setOneSelfAvatarImage(input: { dataUrl: string; expectedVersion: number; oneId?: string }) {
+  const owner = captureOneAvatarOwner();
+  if (owner.version !== input.expectedVersion || (input.oneId !== undefined && input.oneId !== owner.oneId)) throw Object.assign(new Error("One profile changed; reload and try again"), { code: "one_profile_version_conflict" });
+  const decoded = decodeOneTeamAvatarDataUrl(input.dataUrl);
+  const b = decoded.bytes;
+  const valid = decoded.extension === "png" ? b.subarray(0,8).equals(Buffer.from([137,80,78,71,13,10,26,10]))
+    : decoded.extension === "jpg" ? b.length >= 3 && b[0] === 255 && b[1] === 216 && b[2] === 255
+    : b.length >= 12 && b.toString("ascii",0,4) === "RIFF" && b.toString("ascii",8,12) === "WEBP";
+  if (!valid) throw new Error("The character image has an invalid signature.");
+  if (oneProfileAvatarSegment() !== owner.segment) throw Object.assign(new Error("One profile changed; reload and try again"), { code: "one_profile_version_conflict" });
+  const dir = oneSelfAvatarDir();
+  fs.mkdirSync(dir, { recursive: true });
+  const filename = `one-avatar-${randomUUID()}.${decoded.extension}`;
+  const fd = fs.openSync(path.join(dir, filename), "wx", 0o600);
+  try { fs.writeFileSync(fd, decoded.bytes); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+  // On POSIX make the directory entry durable before publishing its pointer.
+  // Windows does not support opening directories this way; the file is still flushed.
+  if (process.platform !== "win32") {
+    const dirFd = fs.openSync(dir, "r");
+    try { fs.fsyncSync(dirFd); }
+    catch (error) {
+      if (!["EINVAL", "ENOTSUP", "EOPNOTSUPP"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error;
+    } finally { fs.closeSync(dirFd); }
+  }
+  return commitOneAvatarPointer(owner, filename);
+}
+
 export function writeOneSelfAvatar(input: { bytes: Buffer; extension: "png" | "jpg" | "webp" }): string {
   const dir = oneSelfAvatarDir();
   fs.mkdirSync(dir, { recursive: true });
@@ -78,8 +107,10 @@ export function writeOneSelfAvatar(input: { bytes: Buffer; extension: "png" | "j
 
 function resolveOneSelfAvatarPath(): string | null {
   const dir = oneSelfAvatarDir();
-  for (const extension of ["png", "jpg", "webp"] as const) {
-    const candidate = path.join(dir, `one-avatar.${extension}`);
+  const pointer = readOneAvatarPointer();
+  const candidates = pointer ? [pointer] : ["one-avatar.png", "one-avatar.jpg", "one-avatar.webp"];
+  for (const name of candidates) {
+    const candidate = path.join(dir, name);
     try {
       if (!fs.statSync(candidate).isFile() || fs.lstatSync(candidate).isSymbolicLink()) continue;
       const realDir = fs.realpathSync.native(dir);
@@ -98,8 +129,9 @@ export function resolveOneTeamAvatarProtocolPath(rawUrl: string): string | null 
   let agentId = "";
   try {
     const url = new URL(rawUrl);
-    if (url.protocol !== "agentlas:" || url.hostname !== "one-avatar" || url.search || url.hash) return null;
+    if (url.protocol !== "agentlas:" || url.hostname !== "one-avatar" || url.hash) return null;
     agentId = decodeURIComponent(url.pathname.replace(/^\//, ""));
+    if (url.search && (agentId !== "self" || !/^\?v=[1-9][0-9]*$/.test(url.search) || !Number.isSafeInteger(Number(url.search.slice(3))))) return null;
   } catch {
     return null;
   }

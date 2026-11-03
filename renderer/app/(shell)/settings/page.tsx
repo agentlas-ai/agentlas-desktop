@@ -2307,7 +2307,9 @@ function CoreEngineLine({
       // matters, keep waiting on. None of them is a dead end: a long download
       // continues on its own, and no network resolves itself once there is one.
       setOutcome(
-        updateDisposition.reloadRequired
+        result.outcome === "failed" || result.journal?.status === "failed"
+          ? t("settings.update.core_update_failed")
+        : updateDisposition.reloadRequired
           ? pendingReloadMessage(updateDisposition.state, pendingHostLabel)
         : result.outcome === "applied" ? t("settings.update.core_update_applied")
           : result.outcome === "current" ? t("settings.update.core_update_already_current")
@@ -2332,9 +2334,11 @@ function CoreEngineLine({
   const journalDisposition = classifyHephaestusUpdateJournal(journal);
   const journalPendingHostLabel = hephaestusPendingHostLabels(journal).join("/")
     || (locale === "ko" ? "호스트 앱" : "host apps");
-  const journalPendingOutcome = journalDisposition.reloadRequired
-    ? pendingReloadMessage(journalDisposition.state, journalPendingHostLabel)
-    : null;
+  const journalPendingOutcome = journal?.status === "failed"
+    ? t("settings.update.core_update_failed")
+    : journalDisposition.reloadRequired
+      ? pendingReloadMessage(journalDisposition.state, journalPendingHostLabel)
+      : null;
 
   return (
     <div style={{ marginTop: 4 }}>

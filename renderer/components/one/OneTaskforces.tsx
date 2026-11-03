@@ -213,6 +213,7 @@ export function OneTaskforceDialog({
         identityEditable: false,
         runtimeSelection: null,
         revision: 1,
+        groupJoinRefusal: undefined,
       })),
     ];
   }, [locale, org?.members, selected]);
@@ -257,17 +258,20 @@ export function OneTaskforceDialog({
           <span className={styles.fixedBadge}><IconCheck size={12} />{locale === "ko" ? "고정" : "Pinned"}</span>
         </div>
         {rows.map((member) => {
+          // A seat the host's join guard would refuse (hidden agent, expired lease, ...) is not offered; one already in the group stays removable.
           const unavailable = memberUnavailable(member);
           const checked = selected.includes(member.installedAgentId);
+          const joinRefused = Boolean(member.groupJoinRefusal) && !checked;
           return <Fragment key={member.id}><button
             type="button"
             className={styles.memberRow}
-            data-unavailable={unavailable ? "true" : "false"}
+            data-unavailable={unavailable || joinRefused ? "true" : "false"}
+            data-group-join-refusal={member.groupJoinRefusal ?? undefined}
             aria-pressed={checked}
-            onClick={() => toggle(member.installedAgentId, unavailable)}
-            disabled={unavailable && !checked}
+            onClick={() => toggle(member.installedAgentId, unavailable || joinRefused)}
+            disabled={(unavailable || joinRefused) && !checked}
           >
-            <OneAgentPortrait status={unavailable ? "locked" : member.statusKind} label={member.displayName} size="small" tone={member.icon} />
+            <OneAgentPortrait status={unavailable || joinRefused ? "locked" : member.statusKind} label={member.displayName} size="small" tone={member.icon} />
             <span><strong>{member.displayName}</strong><small>{memberStatus(member, locale)}</small></span>
             <span className={styles.checkbox} data-checked={checked ? "true" : "false"}>{checked ? <IconCheck size={12} /> : null}</span>
           </button>
@@ -275,11 +279,11 @@ export function OneTaskforceDialog({
               <span>{locale === "ko" ? `${selected.indexOf(member.installedAgentId) + 1}번 자리 재선택` : `Reselect place ${selected.indexOf(member.installedAgentId) + 1}`}</span>
               <Select value="" disabled={busy} onChange={(event) => {
                 const replacement = event.target.value;
-                if (!replacement || !rows.some(row => row.installedAgentId === replacement && !memberUnavailable(row))) return;
+                if (!replacement || !rows.some(row => row.installedAgentId === replacement && !memberUnavailable(row) && !row.groupJoinRefusal)) return;
                 setSelected(current => current.includes(replacement) ? current : current.map(id => id === member.installedAgentId ? replacement : id));
               }}>
                 <option value="">{locale === "ko" ? "사용 가능한 동료 선택" : "Choose available staff"}</option>
-                {rows.filter(row => !memberUnavailable(row) && !selected.includes(row.installedAgentId)).map(row => <option key={row.id} value={row.installedAgentId}>{row.displayName}</option>)}
+                {rows.filter(row => !memberUnavailable(row) && !row.groupJoinRefusal && !selected.includes(row.installedAgentId)).map(row => <option key={row.id} value={row.installedAgentId}>{row.displayName}</option>)}
               </Select>
             </label>}
           </Fragment>;
