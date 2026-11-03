@@ -63,6 +63,7 @@ import type {
 } from "../../shared/types";
 import { TELEGRAM_ONE_TARGET_ID } from "../../shared/types";
 import { telegramPairingCommand, telegramPairingLink } from "../../shared/telegram-pairing";
+import { sameFileIdentity } from "../../shared/file-identity";
 
 export interface TelegramBindingRow {
   id: string;
@@ -641,8 +642,7 @@ export async function readTerminalTelegramTokenFile(
     const opened = await handle.stat();
     if (
       !opened.isFile() ||
-      opened.dev !== before.dev ||
-      opened.ino !== before.ino ||
+      !sameFileIdentity(opened, before) ||
       opened.size !== before.size
     ) {
       throw new Error(tg("error.terminal_import_unsafe"));

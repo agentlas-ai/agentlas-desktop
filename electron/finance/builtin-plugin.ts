@@ -6,6 +6,7 @@ import { z } from 'zod';
 import type { FinanceScope } from './store';
 import { userDataPath } from '../runtime-paths';
 import { bundledPluginRelease, installedPluginsRoot, materializePluginRelease, verifiedInstalledPluginRelease, verifiedPinnedPluginRelease, type VerifiedInstalledPluginRelease } from '../plugins/materialize';
+import { sameFileIdentity } from "../../shared/file-identity";
 
 const SLUG = 'finance', VERSION = '0.2.0', ENTRY = 'runtime/index.cjs';
 const ACTIONS = ['planning', 'valuation', 'planning.artifact', 'portfolio.artifact', 'compute', 'compute.artifact'] as const;
@@ -39,7 +40,7 @@ function readBytes(file: string, max: number): Buffer {
   const info = fs.lstatSync(file);
   if (!info.isFile() || info.isSymbolicLink() || info.size > max) throw new Error('finance_plugin_file_invalid');
   const fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
-  try { const stat = fs.fstatSync(fd); if (!stat.isFile() || stat.size > max || stat.ino !== info.ino || stat.dev !== info.dev) throw new Error('finance_plugin_file_invalid'); const bytes = fs.readFileSync(fd); if (bytes.length > max) throw new Error('finance_plugin_file_invalid'); return bytes; }
+  try { const stat = fs.fstatSync(fd); if (!stat.isFile() || stat.size > max || !sameFileIdentity(stat, info)) throw new Error('finance_plugin_file_invalid'); const bytes = fs.readFileSync(fd); if (bytes.length > max) throw new Error('finance_plugin_file_invalid'); return bytes; }
   finally { fs.closeSync(fd); }
 }
 /** JSON-only boundary: no accessors, custom prototypes, nonfinite numbers, cycles or unbounded data. */

@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.3.120 — 2026-11-03
+
+- Windows: attachments, media previews, Work attachments, receipts, skills and other files that Windows reported with a different device number on each read are opened again. 52 identity checks now compare the file index on Windows; macOS and Linux keep the strict check.
+- The phone link's stall diagnostics now record the measured CPU use and no longer say the computer did not run the app when the app was only waiting.
+- A failed tool call now records where the failure came from (Agentlas, setup, the target, or the call itself), so diagnostics can tell them apart.
+- Agentlas OS 1.2.78: an agent reads the project folder only when the request is about the project.
+
+This release binds Agentlas OS v1.2.78 at e13ae0df5ca866888bfff69ae7b69cfdb330e267; public runtime asset `agentlas-os-runtime-v1.2.78.tar.gz` is pinned at SHA-256 `8f7bf3cc0f5c686887e5b207d5f191645aab0eddd992ff1d2783611a9f79fbb1`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.119 — 2026-11-03
 
 - One can see and act on the screen in its own conversation again. Screen and app actions from One's replies were refused since 1.2.83; they now work, and One's own turns carry the in-app browser.

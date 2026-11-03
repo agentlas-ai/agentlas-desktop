@@ -3,6 +3,7 @@ import path from 'node:path';
 import {createHash, randomUUID} from 'node:crypto';
 import {employeeAgentChangePath} from '../../shared/business/employee-agent-change';
 import type {WorkspaceTree} from './workspace-snapshot';
+import { sameFileIdentity } from "../../shared/file-identity";
 
 export class DedicatedWorkspaceMaterializationError extends Error {
   readonly code = 'dedicated_workspace_materialization_error';
@@ -42,7 +43,7 @@ function readExact(root: string, relative: string): Buffer {
   try {
     const a = fs.fstatSync(fd); if (!a.isFile() || a.nlink !== 1 || a.size > 200000) fail('unsafe_file');
     const bytes = fs.readFileSync(fd), z = fs.fstatSync(fd), live = fs.lstatSync(current);
-    if (bytes.length !== a.size || [z, live].some(v => v.dev !== a.dev || v.ino !== a.ino || v.size !== a.size
+    if (bytes.length !== a.size || [z, live].some(v => !sameFileIdentity(v, a) || v.size !== a.size
       || v.mtimeMs !== a.mtimeMs || v.ctimeMs !== a.ctimeMs || v.nlink !== 1)) fail('readback_changed');
     return bytes;
   } finally { fs.closeSync(fd); }

@@ -14,6 +14,7 @@ import type {
   RuntimeBackend,
 } from "../../shared/types";
 import { userDataDir } from "../runtime-paths";
+import { sameFileIdentity } from "../../shared/file-identity";
 
 const JOURNAL_SCHEMA_VERSION = 1;
 
@@ -954,8 +955,7 @@ function readStableFile(
       before.mtimeMs !== after.mtimeMs ||
       before.ctimeMs !== after.ctimeMs ||
       before.mode !== after.mode ||
-      after.dev !== pathStat.dev ||
-      after.ino !== pathStat.ino ||
+      !sameFileIdentity(after, pathStat) ||
       after.mode !== pathStat.mode ||
       actualBytes !== after.size ||
       (exactBytes !== undefined && actualBytes !== exactBytes)

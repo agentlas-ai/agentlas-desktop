@@ -62,10 +62,10 @@ jobs:
     env:
       # Public verification keys only; absence blocks packaging before release.
       AGENTLAS_PRODUCT_EXTENSION_TRUSTED_KEYS_JSON: ${{ vars.AGENTLAS_PRODUCT_EXTENSION_TRUSTED_KEYS_JSON }}
-      HEPHAESTUS_REF: os-v1.2.73
-      HEPHAESTUS_COMMIT: fa8d4d820bf952f88628ea7c0a4ea32ded9e96e5
-      HEPHAESTUS_ASSET_NAME: agentlas-os-runtime-v1.2.73.tar.gz
-      HEPHAESTUS_ASSET_SHA256: b4d717bdd370cd6d59e52f2b79b1beb9a2287fa595baf664277ff99ec114fc74
+      HEPHAESTUS_REF: os-v1.2.78
+      HEPHAESTUS_COMMIT: e13ae0df5ca866888bfff69ae7b69cfdb330e267
+      HEPHAESTUS_ASSET_NAME: agentlas-os-runtime-v1.2.78.tar.gz
+      HEPHAESTUS_ASSET_SHA256: 8f7bf3cc0f5c686887e5b207d5f191645aab0eddd992ff1d2783611a9f79fbb1
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

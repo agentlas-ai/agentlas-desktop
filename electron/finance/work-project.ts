@@ -7,6 +7,7 @@ import { createProject, getProject } from '../store/projects';
 import { getChat } from '../store/chats';
 import { userDataPath } from '../runtime-paths';
 import type { FinanceScope } from './store';
+import { sameFileIdentity } from "../../shared/file-identity";
 
 const PREFIX = 'finance.work-project.v1:';
 const MARKER = '.agentlas-finance-owner.json';
@@ -51,7 +52,7 @@ function verify(binding: Binding, dependencies: WorkProjectDependencies): void {
   const fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
   try {
     const opened = fs.fstatSync(fd);
-    if (!opened.isFile() || opened.ino !== stat.ino || opened.dev !== stat.dev || opened.size > 12000) failure();
+    if (!opened.isFile() || !sameFileIdentity(opened, stat) || opened.size > 12000) failure();
     const parsed = Binding.parse(JSON.parse(fs.readFileSync(fd, 'utf8')));
     if (JSON.stringify(parsed) !== JSON.stringify(binding)) failure();
   } finally { fs.closeSync(fd); }

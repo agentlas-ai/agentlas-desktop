@@ -4,6 +4,7 @@ import path from "node:path";
 import { TextDecoder } from "node:util";
 import { runHephaestus } from "../hephaestus/engine";
 import type { HephaestusResult } from "../hephaestus/engine";
+import { sameFileIdentity } from "../../shared/file-identity";
 
 export interface ProjectBootstrapAccess {
   permission: string | null | undefined;
@@ -150,7 +151,7 @@ function readRegularUtf8FileNoFollow(filePath: string): RegularFileSnapshot {
     if (opened.size > MAX_GITIGNORE_READ_BYTES) {
       throw new Error(`.gitignore exceeds the ${MAX_GITIGNORE_READ_BYTES}-byte safe bootstrap limit.`);
     }
-    if (before.dev !== opened.dev || before.ino !== opened.ino) {
+    if (!sameFileIdentity(before, opened)) {
       throw new Error(".gitignore changed during bootstrap.");
     }
     const chunks: Buffer[] = [];
@@ -211,7 +212,7 @@ function installWholeAgentlasIgnore(root: string, testHooks?: ProjectBootstrapTe
       if (snapshot.exists) {
         const original = snapshot.stat;
         if (
-          !original || opened.dev !== original.dev || opened.ino !== original.ino ||
+          !original || !sameFileIdentity(opened, original) ||
           opened.size !== original.size || opened.mtimeMs !== original.mtimeMs
         ) retry = true;
       } else if (opened.size !== 0) {

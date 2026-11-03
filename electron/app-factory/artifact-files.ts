@@ -3,6 +3,7 @@ import { constants } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { ArtifactFileDigest } from "../../shared/artifact-build";
+import { sameFileIdentity } from "../../shared/file-identity";
 
 const MAX_FILES = 2_000;
 const MAX_BYTES = 128 * 1024 * 1024;
@@ -67,7 +68,7 @@ export async function snapshotArtifactSource(declaredRoot: string, signal?: Abor
         const after = await handle.stat();
         const current = await fs.lstat(filename);
         if (before.size !== bytes.length || before.size !== after.size || before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs
-          || current.dev !== after.dev || current.ino !== after.ino || current.size !== after.size
+          || !sameFileIdentity(current, after) || current.size !== after.size
           || current.mtimeMs !== after.mtimeMs || current.ctimeMs !== after.ctimeMs || current.isSymbolicLink()
           || await fs.realpath(filename) !== canonical) {
           throw new Error("artifact_source_changed_during_read");

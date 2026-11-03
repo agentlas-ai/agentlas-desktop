@@ -4,6 +4,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { userDataPath } from '../runtime-paths';
 import type { FinanceScope } from './store';
+import { sameFileIdentity } from "../../shared/file-identity";
 
 export const FINANCE_RECEIPT_GROUPS = ['summary', 'dashboard', 'report', 'monitor', 'source', 'warnings', 'narrative', 'asset'] as const;
 type Group = typeof FINANCE_RECEIPT_GROUPS[number];
@@ -110,7 +111,7 @@ export class FinanceReceiptStore {
     let receipt: Receipt;
     try {
       const opened = fs.fstatSync(fd);
-      if (opened.ino !== stat.ino || opened.dev !== stat.dev || !opened.isFile() || opened.size > MAX_BYTES) throw new Error('finance_receipt_invalid');
+      if (!sameFileIdentity(opened, stat) || !opened.isFile() || opened.size > MAX_BYTES) throw new Error('finance_receipt_invalid');
       receipt = Receipt.parse(JSON.parse(fs.readFileSync(fd, 'utf8')));
     } finally { fs.closeSync(fd); }
     scope.assertCurrent();

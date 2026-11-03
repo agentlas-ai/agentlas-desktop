@@ -6,6 +6,7 @@ import type Database from "better-sqlite3";
 import { VideoCancelFence } from "./video-cancel-fence";
 import { repairMobileBridgeUtf16, sanitizeMobileBridgeText, stripMobileBridgeControlFences, truncateMobileBridgeUtf8 } from "./sanitize";
 import { isHousekeepingHostNotice, parseChatHostNotice } from "../../shared/chat-host-notice";
+import { sameFileIdentity } from "../../shared/file-identity";
 
 const MAX_BYTES = 192 * 1024 * 1024, MAX_MESSAGE_BYTES = 4 * 1024 * 1024, TTL = 10 * 60_000;
 const CHAT_VIDEO_CHUNK_BYTES = 1024 * 1024;
@@ -22,7 +23,7 @@ type Transfer = { id:string; candidate:Candidate; closed:boolean; preparing:bool
   timer:NodeJS.Timeout; digest?:string; reading:boolean };
 
 function identity(stat:fs.BigIntStats):Identity { return {dev:String(stat.dev),ino:String(stat.ino),size:String(stat.size),mtime:String(stat.mtimeNs),ctime:String(stat.ctimeNs),links:String(stat.nlink)}; }
-function same(a:Identity,b:Identity):boolean { return Object.keys(a).every(key => a[key as keyof Identity] === b[key as keyof Identity]); }
+function same(a:Identity,b:Identity):boolean { return sameFileIdentity(a,b) && Object.keys(a).every(key => key === 'dev' || key === 'ino' || a[key as keyof Identity] === b[key as keyof Identity]); }
 function samePrincipal(a:ChatVideoPrincipal,b:ChatVideoPrincipal):boolean { return a.deviceId===b.deviceId && a.connectionId===b.connectionId; }
 /** A markdown link target: `<…>` (how agents write a path with spaces) is unwrapped. */
 function linkTarget(raw:string):string { const angle=/^<([^<>\r\n]+)>$/.exec(raw.trim()); return angle ? angle[1]! : raw; }

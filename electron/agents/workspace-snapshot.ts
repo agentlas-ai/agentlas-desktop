@@ -4,6 +4,7 @@ import path from "node:path";
 import { TextDecoder } from "node:util";
 import { readCanonicalPromptFromDirectory } from "./prompt-authority";
 import type { AgentWorkspaceFile, AgentWorkspaceFileRole } from "../../shared/agent-workspace";
+import { sameFileIdentity } from "../../shared/file-identity";
 
 export const AGENT_TREE_SCHEMA = "agentlas.agent-tree.v1" as const;
 export const AGENT_ASSET_POLICY = "agentlas.runtime-assets.v1" as const;
@@ -102,7 +103,7 @@ function stableBytes(root: string, relativePath: string): { bytes: Buffer; execu
     if (!before.isFile() || before.nlink !== 1 || before.size > MAX_WORKSPACE_FILE_BYTES) throw new AgentWorkspaceError("file_limit", "A file is too large or cannot be read safely.");
     const bytes = fs.readFileSync(fd); const after = fs.fstatSync(fd); const live = fs.lstatSync(target);
     if (before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size || before.mtimeMs !== after.mtimeMs
-      || before.ctimeMs !== after.ctimeMs || live.dev !== after.dev || live.ino !== after.ino || bytes.length !== before.size) {
+      || before.ctimeMs !== after.ctimeMs || !sameFileIdentity(live, after) || bytes.length !== before.size) {
       throw new AgentWorkspaceError("source_changed", "The file changed while it was being read. Refresh and review again.");
     }
     return { bytes, executable: Boolean(before.mode & 0o111) };

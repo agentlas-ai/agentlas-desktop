@@ -26,6 +26,7 @@ import { getInvocationRunReceipt } from "../store/run-events";
 import { getCanonicalTask, canonicalTaskOwnsChat } from "../store/tasks";
 import { chatImageAttachmentFromTrustedFile, persistChatMessageImages } from "../store/chat-message-attachments";
 import { ONE_ATTACHMENT_LIMITS } from "../../shared/one-attachments";
+import { sameFileIdentity } from "../../shared/file-identity";
 
 export const ONE_ARTIFACT_PREVIEW_TTL_MS = 5 * 60 * 1_000;
 export const ONE_ARTIFACT_MAX_BINDINGS_PER_SURFACE = 24;
@@ -1017,7 +1018,7 @@ function generatedFileVerdict(record: GeneratedTokenRecord): Verdict<VerifiedFil
     if(!w||!op||op.lifecycle!=='succeeded'||op.result_sha256!==w.sha256||!path.isAbsolute(op.result_path)||path.extname(op.result_path).toLowerCase()!=='.mp4')return refuse('binding_missing');
     const before=fs.lstatSync(op.result_path,{bigint:true});if(!before.isFile()||before.isSymbolicLink()||before.nlink!==1n||fs.realpathSync.native(op.result_path)!==op.result_path)return refuse('path_changed');
     const opened=safeOpen(op.result_path,ARTIFACT_BY_EXTENSION['.mp4']);fd=opened.fd;const after=fs.lstatSync(op.result_path,{bigint:true}),desc=fs.fstatSync(fd,{bigint:true});
-    if(!after.isFile()||after.isSymbolicLink()||after.nlink!==1n||fs.realpathSync.native(op.result_path)!==op.result_path||String(before.dev)!==opened.dev||String(before.ino)!==opened.ino||String(after.dev)!==opened.dev||String(after.ino)!==opened.ino||String(desc.dev)!==opened.dev||String(desc.ino)!==opened.ino||opened.dev!==w.dev||opened.ino!==w.ino||opened.size!==w.size||opened.mtimeNs!==w.mtimeNs||opened.ctimeNs!==w.ctimeNs||opened.sha256!==w.sha256||String(after.mtimeNs)!==opened.mtimeNs||String(after.ctimeNs)!==opened.ctimeNs||String(desc.size)!==String(opened.size)||String(desc.mtimeNs)!==opened.mtimeNs||String(desc.ctimeNs)!==opened.ctimeNs){fs.closeSync(fd);fd=null;return refuse('identity_changed');}
+    if(!after.isFile()||after.isSymbolicLink()||after.nlink!==1n||fs.realpathSync.native(op.result_path)!==op.result_path||!sameFileIdentity(before,opened)||!sameFileIdentity(after,opened)||String(desc.dev)!==opened.dev||String(desc.ino)!==opened.ino||opened.dev!==w.dev||opened.ino!==w.ino||opened.size!==w.size||opened.mtimeNs!==w.mtimeNs||opened.ctimeNs!==w.ctimeNs||opened.sha256!==w.sha256||String(after.mtimeNs)!==opened.mtimeNs||String(after.ctimeNs)!==opened.ctimeNs||String(desc.size)!==String(opened.size)||String(desc.mtimeNs)!==opened.mtimeNs||String(desc.ctimeNs)!==opened.ctimeNs){fs.closeSync(fd);fd=null;return refuse('identity_changed');}
     const still=db.prepare("SELECT witness_json FROM generated_video_receipts WHERE operation_id=? AND chat_id=? AND message_id=? AND account_key=? AND state='sealed'").get(g.operationId,g.chatId,g.messageId,g.account) as {witness_json:string}|undefined;
     if(!still||still.witness_json!==receipt.witness_json||generatedVideoAccountKey(getAuthenticatedActorIds())!==g.account||!db.prepare("SELECT 1 FROM chat_messages WHERE id=? AND chat_id=? AND role='assistant'").get(g.messageId,g.chatId)){fs.closeSync(fd);fd=null;return refuse('binding_missing');}
     assertProjectDomainOwner(g.chatId,getAuthenticatedActorIds());const row={source_path:op.result_path,mime_type:'video/mp4',size_bytes:opened.size,sha256:opened.sha256} as BindingRow;const result={fd,row};fd=null;return {ok:true,value:result};
@@ -1281,7 +1282,7 @@ export async function verifyOneArtifactReviewDraft(
     // asynchronous read and reject a symlink, replacement, or parent-directory swap before returning the path.
     const named = await fs.promises.lstat(resolved, { bigint: true });
     if (signal?.aborted || named.isSymbolicLink() || !sameIdentity(named)
-      || named.dev !== before.dev || named.ino !== before.ino
+      || !sameFileIdentity(named, before)
       || named.size !== before.size || named.mtimeNs !== before.mtimeNs || named.ctimeNs !== before.ctimeNs) return null;
     try {
       const currentPath = invocationWorkspace
@@ -1329,7 +1330,7 @@ export async function openBoundOneArtifactVideo(
     const descriptor = await handle.stat({ bigint: true });
     const named = await fs.promises.lstat(row.source_path, { bigint: true });
     if (!descriptor.isFile() || named.isSymbolicLink() || !named.isFile()
-      || descriptor.dev !== named.dev || descriptor.ino !== named.ino
+      || !sameFileIdentity(descriptor, named)
       || descriptor.size !== BigInt(row.size_bytes) || descriptor.size !== named.size
       || String(descriptor.ino) !== row.file_ino || String(descriptor.mtimeNs) !== row.file_mtime_ns
       || String(descriptor.ctimeNs) !== row.file_ctime_ns

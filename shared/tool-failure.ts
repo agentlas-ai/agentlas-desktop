@@ -128,3 +128,108 @@ export function isPredispatchApprovalRefusal(input: { failureCode: unknown; resu
     || (marker === "MCP_PROXY_USER_DECLINED" && input.failureCode === "approval_declined")
     || ((marker === "MCP_PROXY_APPROVAL_EXPIRED" || marker === "APPROVAL_EXPIRED") && input.failureCode === "approval_expired");
 }
+
+/**
+ * Where a failed tool call's failure came from, read from typed evidence in the result (E14: every production tool failure was
+ * recorded as the generic `tool_failed`, so a failure inside Agentlas could not be told from the tool's own outcome).
+ * This does not change ToolFailureCode or any copy; it is a separate diagnostic field. Families, in the order they are tried:
+ *   harness           agentlas.harness-result.v1 JSON: `${operationId}:${reason}`
+ *   mcp_proxy         MCP_PROXY_<CODE>: lines from the Desktop MCP proxy (Agentlas policy or bridge)
+ *   one_os            one-os-<code> from the computer-use authority
+ *   app_operation     operation-failed: <code> from an app command
+ *   mcp_transport     the CLI's MCP client could not reach or start a server
+ *   browser_closed    the page, context or browser was gone
+ *   connection_refused / browser_timeout   the target did not answer
+ *   browser_ref_stale / invalid_arguments   the call used a stale ref, a key or app name the driver does not accept
+ *   permission        an approval not given or declined (origin setup)
+ *   agentlas_code / tool_json / response_too_large   a typed code from our own tools, or a JSON result's error field
+ *   file_not_found / engine_unavailable
+ *   exit_code         a command ran and exited non-zero (the command's own result)
+ *   command_output    a shell tool failed and printed no exit marker (still the command's own output)
+ * Origin: agentlas (our host, policy or bridge), setup (a missing key, connector or route the owner can add), external (a target or
+ * provider answered with an error), model (the call itself was malformed), unknown.
+ */
+export type ToolFailureOrigin = "agentlas" | "setup" | "external" | "model" | "unknown";
+export interface ToolFailureCause { family: string; reason: string; origin: ToolFailureOrigin }
+
+const SETUP_REASONS = new Set(["provider_key_missing", "connector_not_installed", "no_transcribe_route", "login_required", "auth_required"]);
+const MODEL_REASONS = new Set(["arguments_missing", "arguments_invalid", "operation_unknown", "invalid_arguments"]);
+const token = (value: unknown, fallback = "unknown"): string => {
+  const text = typeof value === "string" ? value.trim().toLowerCase().replace(/[^a-z0-9_.:-]+/g, "_").replace(/^_+|_+$/g, "") : "";
+  return text ? text.slice(0, 80) : fallback;
+};
+function resultTexts(result: unknown): string[] {
+  if (typeof result !== "string") return [];
+  const texts = [result];
+  try {
+    const parsed = JSON.parse(result) as { content?: Array<{ type?: string; text?: unknown }>; message?: unknown };
+    if (Array.isArray(parsed?.content)) for (const part of parsed.content) if (typeof part?.text === "string") texts.unshift(part.text);
+    if (typeof parsed?.message === "string") texts.unshift(parsed.message);
+  } catch { /* not JSON */ }
+  return texts;
+}
+
+export function toolFailureCause(result: unknown, status?: unknown, toolName?: unknown): ToolFailureCause {
+  const texts = [...resultTexts(result), ...(typeof status === "string" ? [status] : [])];
+  for (const text of texts) {
+    if (!text.includes("agentlas.harness-result.v1")) continue;
+    try {
+      const harness = JSON.parse(text) as { schemaVersion?: unknown; operationId?: unknown; status?: unknown; reason?: unknown };
+      if (harness?.schemaVersion !== "agentlas.harness-result.v1") continue;
+      const reason = token(harness.reason, token(harness.status));
+      const origin: ToolFailureOrigin = SETUP_REASONS.has(reason) ? "setup"
+        : MODEL_REASONS.has(reason) ? "model"
+          : /^provider_request_rejected/.test(reason) ? "external" : "agentlas";
+      return { family: "harness", reason: `${token(harness.operationId)}:${reason}`, origin };
+    } catch { /* not the harness result */ }
+  }
+  const raw = texts.join("\n");
+  // An approval the owner has not given or declined: a permission state, not a failure of the tool or of Agentlas.
+  if (/requested permissions? to\b|\bDENIED: The user declined\b|\buser rejected MCP tool call\b|\brejected due to unacceptable risk\b/i.test(raw)) {
+    return { family: "permission", reason: /declined|rejected/i.test(raw) ? "declined" : "not_granted", origin: "setup" };
+  }
+  if (/^Turn tool response is too large\./m.test(raw)) return { family: "response_too_large", reason: "turn_tool_response", origin: "agentlas" };
+  let match = /^MCP_PROXY_([A-Z_]+):/m.exec(raw);
+  if (match) return { family: "mcp_proxy", reason: token(match[1]), origin: "agentlas" };
+  match = /\b(one-os-[a-z0-9-]+)\b/.exec(raw);
+  if (match) return { family: "one_os", reason: token(match[1]), origin: "agentlas" };
+  match = /\boperation-failed:\s*([A-Za-z0-9_.-]+)/.exec(raw);
+  if (match) return { family: "app_operation", reason: token(match[1]), origin: "agentlas" };
+  if (/\bMCP startup failed\b|\bhandshaking with MCP server failed\b|\btool call failed for `[^`]+`[\s\S]*Mcp error\b/.test(raw)) {
+    return { family: "mcp_transport", reason: /handshak/i.test(raw) ? "handshake" : "call", origin: "agentlas" };
+  }
+  // Our own tools answer with a bare machine code (one_graph_target_not_in_context, goal_wait_request_invalid: ...).
+  match = /^([a-z][a-z0-9]*(?:[_-][a-z0-9]+){2,})(?::|\s*$)/m.exec(texts[0] ?? "");
+  if (match) return { family: "agentlas_code", reason: token(match[1]), origin: "agentlas" };
+  for (const text of texts) {
+    if (!/^\s*\{/.test(text)) continue;
+    try {
+      const body = JSON.parse(text) as Record<string, unknown>;
+      const code = [body.error_code, body.errorCode, body.code, body.reason, body.error, body.status].find((v) => typeof v === "string" && /^[A-Za-z][A-Za-z0-9_.:-]{1,79}$/.test(v));
+      if (typeof code === "string") return { family: "tool_json", reason: `${token(body.action ?? body.operation, "result")}:${token(code)}`, origin: "unknown" };
+    } catch { /* not a JSON object */ }
+  }
+  if (/^Provide either "text" or "regex"|\bmaxDepth must be\b/m.test(raw)) return { family: "invalid_arguments", reason: "argument_range", origin: "model" };
+  if (/\bENOENT\b|No such file or directory/.test(raw)) return { family: "file_not_found", reason: "enoent", origin: "model" };
+  if (/\bInputValidationError\b/.test(raw)) return { family: "invalid_arguments", reason: "input_validation", origin: "model" };
+  if (/\ball-engines-unavailable\b/.test(raw)) return { family: "engine_unavailable", reason: "all_engines_unavailable", origin: "setup" };
+  if (/Target page, context or browser has been closed/.test(raw)) return { family: "browser_closed", reason: "target_closed", origin: "agentlas" };
+  if (/\bECONNREFUSED\b|ERR_CONNECTION_REFUSED|Failed to connect to [^\s]+ port \d+/.test(raw)) {
+    return { family: "connection_refused", reason: "connection_refused", origin: "external" };
+  }
+  if (/\bTimeoutError\b|Timeout \d+ms exceeded/.test(raw)) return { family: "browser_timeout", reason: "timeout", origin: "external" };
+  // A ref from an earlier snapshot, a key name or app name the driver does not accept: the call itself was wrong.
+  if (/\bRef [A-Za-z0-9]+ not found in the current page\b/.test(raw)) return { family: "browser_ref_stale", reason: "ref_not_found", origin: "model" };
+  if (/Use a supported key name\b/.test(raw)) return { family: "invalid_arguments", reason: "key_name", origin: "model" };
+  if (/No running application matched the requested app name/.test(raw)) return { family: "invalid_arguments", reason: "app_not_running", origin: "model" };
+  // The browser tool's own error report for a page action ("### Error\nTypeError: ...", "Error: locator.waitFor: ...").
+  match = /^### Error\n(?:Error: )?([A-Za-z]*Error|[a-z]+\.[A-Za-z]+)\b/m.exec(raw);
+  if (match) return { family: "browser_error", reason: token(match[1]), origin: "external" };
+  match = /\[exited with code (\d+)\]|(?:^|\n)\s*exit (\d+)\s*$|\bexit(?:ed)? (?:status|code) (\d+)\b/i.exec(raw);
+  if (match) return { family: "exit_code", reason: `exit_${match[1] ?? match[2] ?? match[3]}`, origin: "external" };
+  // A shell tool's failure without an exit marker is still the command's own output (stderr of the program it ran).
+  if (/^(?:bash|shell|exec_command|local_shell|run_shell_command)$/i.test(typeof toolName === "string" ? toolName.trim() : "")) {
+    return { family: "command_output", reason: "nonzero_without_marker", origin: "external" };
+  }
+  return { family: "unclassified", reason: "unknown", origin: "unknown" };
+}

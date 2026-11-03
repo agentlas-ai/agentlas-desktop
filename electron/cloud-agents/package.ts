@@ -48,6 +48,7 @@ import {
   PACKAGE_MAX_UNCOMPRESSED_FILE_BYTES,
   PACKAGE_MAX_FILES,
 } from "../../shared/upload-scan-catalog.generated";
+import { sameFileIdentity } from "../../shared/file-identity";
 
 // 상한은 정본 하나(upload-scan-catalog.json)에서 생성돼 내려온다. 여기서 다시
 // 적으면 서버·엔진·터미널과 어긋나고, 어긋난 쪽은 파일 이름도 없는 코드로 거절한다.
@@ -1348,8 +1349,7 @@ function scanAgentFolder(rootPath: string, restoredExecutablePaths: ReadonlySet<
         before.mtimeMs !== after.mtimeMs ||
         before.ctimeMs !== after.ctimeMs ||
         before.mode !== after.mode ||
-        after.dev !== pathStat.dev ||
-        after.ino !== pathStat.ino ||
+        !sameFileIdentity(after, pathStat) ||
         after.mode !== pathStat.mode ||
         actualBytes !== after.size
       ) {

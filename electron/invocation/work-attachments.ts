@@ -5,6 +5,7 @@ import path from "node:path";
 import type { McpInvocationRequest, McpInvocationEvent } from "../../shared/types";
 import { workChatFileInputs, readWorkChatFileEntry, chatFileGroupCreatedAt, type WorkChatFileInput } from "../store/chat-message-attachments";
 import { ownProcessStartToken, processState } from "../store/terminal-owner-liveness";
+import { sameFileIdentity } from "../../shared/file-identity";
 
 interface WorkInputRun {
   chatId: string;
@@ -286,7 +287,7 @@ export async function prepareWorkAttachmentContext(req: McpInvocationRequest, cw
           if (digest.digest("hex") !== entry.sha256 || before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size || before.mtimeNs !== after.mtimeNs || before.ctimeNs !== after.ctimeNs) fail("work_attachment_copy_hash_changed");
           const stat = await fd.stat();
           const live = fs.lstatSync(target);
-          if (!stat.isFile() || stat.size !== entry.size || stat.dev !== live.dev || stat.ino !== live.ino || fs.realpathSync(target) !== target) fail("work_attachment_copy_changed");
+          if (!stat.isFile() || stat.size !== entry.size || !sameFileIdentity(stat, live) || fs.realpathSync(target) !== target) fail("work_attachment_copy_changed");
           record.inputs.set(target, { dev: stat.dev, ino: stat.ino });
         } finally { await fd.close(); }
         const relative = path.relative(canonical, target).split(path.sep).join("/");
@@ -343,7 +344,7 @@ export async function prepareWorkAttachmentContext(req: McpInvocationRequest, cw
           await manifestFd.sync(); check();
           const stat = await manifestFd.stat();
           const live = fs.lstatSync(manifestTarget);
-          if (!stat.isFile() || stat.dev !== live.dev || stat.ino !== live.ino || fs.realpathSync(manifestTarget) !== manifestTarget) fail("work_attachment_copy_changed");
+          if (!stat.isFile() || !sameFileIdentity(stat, live) || fs.realpathSync(manifestTarget) !== manifestTarget) fail("work_attachment_copy_changed");
           record.inputs.set(manifestTarget, { dev: stat.dev, ino: stat.ino });
         } finally { await manifestFd.close(); }
         record.aliases.push({ path: manifestTarget, replacement: "[Input attachment list]" }, { path: manifestRelative, replacement: "[Input attachment list]" });
@@ -369,7 +370,7 @@ export function isWorkAttachmentInput(runId: string, chatId: string, cwd: string
   const identity = record.inputs.get(target);
   if (!identity) return false;
   const stat = fs.lstatSync(target);
-  if (!stat.isFile() || stat.isSymbolicLink() || fs.realpathSync(target) !== target || stat.dev !== identity.dev || stat.ino !== identity.ino) fail("work_attachment_input_identity_changed");
+  if (!stat.isFile() || stat.isSymbolicLink() || fs.realpathSync(target) !== target || !sameFileIdentity(stat, identity)) fail("work_attachment_input_identity_changed");
   return true;
 }
 

@@ -36,7 +36,7 @@ import {
   parsePersistenceDecisionPayload,
   type PersistenceDecisionPayload,
 } from "../../shared/persistence-policy";
-import { classifyToolFailure } from "../../shared/tool-failure";
+import { classifyToolFailure, toolFailureCause } from "../../shared/tool-failure";
 import { appSideRunFailure, undispatchedInternalFailure } from "../../shared/run-failure-cause";
 import { readRunTurnPlacement } from "../invocation/turn-placement";
 import { boundInvocationPlan } from "../../shared/invocation-plan";
@@ -2385,6 +2385,8 @@ export function recordMcpInvocationEvent(runId: string, req: McpInvocationReques
     toolIsError: ev.tool?.isError,
     toolCompleted: isCompletedToolEvent(ev),
     toolFailureCode,
+    // E14: the typed cause of a failed tool call (family, reason, origin), beside the routing code above.
+    ...(ev.tool?.isError ? { toolFailureCause: toolFailureCause(ev.tool.result, ev.status, ev.tool.name) } : {}),
     // 재방문 시에도 "무엇을 어디에" 했는지 남는다 — 이름만 남기면 과거 턴의 행이
     // "Bash"·"Read"로만 보인다(2026-08-15 실측). 상한·마스킹은 safePayload가 건다.
     toolArgs: ev.tool?.args,

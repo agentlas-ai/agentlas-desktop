@@ -28,6 +28,7 @@ import { isWorkspaceAsset } from "./workspace-snapshot";
 import { capturePackageSourceOwner, assertOriginalPackageDeclaration, observeAdmittedPackageSources,
   isGeneratedMemoryDeclaration, type AdmittedPackageAsset } from "../memory/package-sources";
 import type { MemorySourceRef } from "../memory/source-catalogue";
+import { sameFileIdentity } from "../../shared/file-identity";
 
 interface AgentRow {
   id: string;
@@ -271,7 +272,7 @@ export interface AgentFileTextSnapshot {
 const declarationIdentities = new WeakMap<object, { path: string; stat: fs.Stats }>();
 function unchangedDeclarationFile(file: string, expected: fs.Stats): void {
   const live = fs.lstatSync(file);
-  if (live.isSymbolicLink() || !live.isFile() || live.dev !== expected.dev || live.ino !== expected.ino
+  if (live.isSymbolicLink() || !live.isFile() || !sameFileIdentity(live, expected)
     || live.size !== expected.size || live.mtimeMs !== expected.mtimeMs || live.ctimeMs !== expected.ctimeMs
     || live.mode !== expected.mode || live.nlink !== expected.nlink) throw new Error("agent_package_source_changed");
 }
@@ -653,7 +654,7 @@ export function agentSkillCatalogLine(dir: string, observedAssets?: AdmittedPack
       const bytes = fs.readFileSync(fd), after = fs.fstatSync(fd), live = fs.lstatSync(skillPath);
       if (bytes.byteLength !== stat.size || bytes.byteLength > maxSkillBytes || live.isSymbolicLink()
         || stat.dev !== after.dev || stat.ino !== after.ino || stat.size !== after.size || stat.mtimeMs !== after.mtimeMs || stat.ctimeMs !== after.ctimeMs || stat.mode !== after.mode || stat.nlink !== after.nlink
-        || after.dev !== live.dev || after.ino !== live.ino || after.size !== live.size || after.mtimeMs !== live.mtimeMs || after.ctimeMs !== live.ctimeMs || after.mode !== live.mode || after.nlink !== live.nlink)
+        || !sameFileIdentity(after, live) || after.size !== live.size || after.mtimeMs !== live.mtimeMs || after.ctimeMs !== live.ctimeMs || after.mode !== live.mode || after.nlink !== live.nlink)
         throw new Error("agent_package_source_changed");
       const text = bytes.toString("utf8");
       if (!Buffer.from(text, "utf8").equals(bytes)) throw new Error("Agent runtime skill is not valid UTF-8");

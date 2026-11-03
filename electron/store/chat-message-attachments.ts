@@ -6,6 +6,7 @@ import type { FsPathGrant, ImageAttachment } from "../../shared/types";
 import { CHAT_FILE_STORE_MAX_BYTES, ONE_ATTACHMENT_LEGACY_LIMITS, ONE_ATTACHMENT_LIMITS } from "../../shared/one-attachments";
 import { pathFromGrant, resolveMainOwnedReadPath } from "../fs/access";
 import { getDb } from "./db";
+import { sameFileIdentity } from "../../shared/file-identity";
 
 const ATTACHMENT_ID_RE = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
 const ALLOWED_IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
@@ -157,8 +158,7 @@ export function chatImageAttachmentFromTrustedFile(input: {
     if (
       !fdStat.isFile()
       || fdStat.nlink !== 1n
-      || fdStat.dev !== pathStatBefore.dev
-      || fdStat.ino !== pathStatBefore.ino
+      || !sameFileIdentity(fdStat, pathStatBefore)
       || fdStat.size !== pathStatBefore.size
     ) throw new TypeError("Trusted chat image changed before read");
     bytes = Buffer.alloc(Number(fdStat.size));
@@ -385,7 +385,7 @@ function readStableChatFile(sourcePath: string, expectedSize: number): { bytes: 
     }
     const after = fs.fstatSync(fd, { bigint: true });
     const live = fs.lstatSync(sourcePath, { bigint: true });
-    if (!live.isFile() || live.dev !== before.dev || live.ino !== before.ino) throw new ChatFileSnapshotError("changed", "The attachment path was replaced while read.");
+    if (!live.isFile() || !sameFileIdentity(live, before)) throw new ChatFileSnapshotError("changed", "The attachment path was replaced while read.");
     if (before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size || before.mtimeNs !== after.mtimeNs || before.ctimeNs !== after.ctimeNs) {
       throw new ChatFileSnapshotError("changed", "The attachment changed while it was being read.");
     }

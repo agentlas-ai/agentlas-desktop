@@ -14,6 +14,7 @@ import {
   isCanonicalSystemTimeMcpServer,
 } from "../mcp-tools/system-time-server";
 import { isSiteAgentAppMcpCatalogId } from "./agent-app-tool-policy";
+import { sameDevice } from "../../shared/file-identity";
 
 const SECRET_ALIAS_RE = /^AGENTLAS_MCP_SECRET_[A-F0-9]{32}$/;
 export const SITE_AGENT_APP_MCP_CONFIG_MAX_BYTES = 256 * 1024;
@@ -35,7 +36,7 @@ type StableFileIdentity = Pick<fs.BigIntStats,
   "dev" | "ino" | "mode" | "size" | "mtimeNs" | "ctimeNs" | "birthtimeNs">;
 
 export function sameStablePathAndFdIdentity(pathStat: StableFileIdentity, fdStat: StableFileIdentity): boolean {
-  if (pathStat.dev !== fdStat.dev || pathStat.mode !== fdStat.mode || pathStat.size !== fdStat.size) return false;
+  if (!sameDevice(pathStat, fdStat) || pathStat.mode !== fdStat.mode || pathStat.size !== fdStat.size) return false;
   if (pathStat.ino !== 0n || fdStat.ino !== 0n) return pathStat.ino === fdStat.ino;
   return pathStat.birthtimeNs === fdStat.birthtimeNs && pathStat.mtimeNs === fdStat.mtimeNs &&
     pathStat.ctimeNs === fdStat.ctimeNs;

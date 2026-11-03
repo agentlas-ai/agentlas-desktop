@@ -5,6 +5,7 @@ import net from "node:net";
 import { configuredIdentity, requireConfiguredInstallIdentity } from "../install-identity";
 import { userDataDir } from "../runtime-paths";
 import { assertDedicatedBrowserProfilePath } from "./profile-path-boundary";
+import { sameFileIdentity } from "../../shared/file-identity";
 
 export type InstallBrowserBoundary = Readonly<{ root: string; canonicalRoot: string; profile: string; launcher: string; port: number }>;
 type PendingBoundary = Omit<InstallBrowserBoundary, "port"> & { port: number | null; requestedPort: number | null };
@@ -99,7 +100,7 @@ function readPort(): number | null {
   const fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
   try {
     const opened = fs.fstatSync(fd);
-    if (opened.dev !== entry.dev || opened.ino !== entry.ino || opened.nlink !== 1) throw new Error("browser-install-port-refused");
+    if (!sameFileIdentity(opened, entry) || opened.nlink !== 1) throw new Error("browser-install-port-refused");
     let record: { schemaVersion?: unknown; port?: unknown };
     try { record = JSON.parse(fs.readFileSync(fd, "utf8")); }
     catch { throw new Error("browser-install-port-refused"); }

@@ -25,6 +25,7 @@ import { readCloudAgentRestoreMarker } from "../cloud-agents/restore";
 import { getAgentById } from "../mcp/registry";
 import { getDb } from "../store/db";
 import { userDataDir } from "../runtime-paths";
+import { sameFileIdentity } from "../../shared/file-identity";
 
 export const ONE_HUB_DERIVATIVE_META_KEY = "agentlas.one.hub-derivative-drafts.v1";
 
@@ -569,7 +570,7 @@ function readFileNoFollow(file: string, maximum: number, rootReal: string): Buff
     const pathStat = fs.statSync(file);
     if (!before.isFile() || before.dev !== after.dev || before.ino !== after.ino
       || before.size !== after.size || before.mtimeMs !== after.mtimeMs || bytes.length !== after.size
-      || beforeReal !== afterReal || before.dev !== pathStat.dev || before.ino !== pathStat.ino) {
+      || beforeReal !== afterReal || !sameFileIdentity(before, pathStat)) {
       throw new Error("Hub derivative draft file changed while it was read");
     }
     return bytes;

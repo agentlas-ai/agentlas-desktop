@@ -7,6 +7,7 @@ import { requireConfiguredInstallIdentity, serializeInstallIdentity } from "../i
 import { userDataDir } from "../runtime-paths";
 import { keychainGet, keychainSet } from "../secrets/keychain-host";
 import { canonicalDaemonPath, resolveDaemonServiceIdentity } from "./service-identity";
+import { sameFileIdentity } from "../../shared/file-identity";
 
 /** Encoded native frame bytes, excluding its newline. */
 export const NATIVE_AUTH_MAX_FRAME_BYTES = 1048576;
@@ -81,7 +82,7 @@ function lock(binding: NativeAuthBinding): () => void {
   let fd: number;
   try { fd = fs.openSync(target, "wx", 0o600); } catch (error) { if ((error as NodeJS.ErrnoException).code === "EEXIST") deny("native_auth_provision_busy"); throw error; }
   const identity = fs.fstatSync(fd);
-  return () => { try { const current = fs.lstatSync(target); if (current.dev === identity.dev && current.ino === identity.ino) fs.unlinkSync(target); } finally { fs.closeSync(fd); } };
+  return () => { try { const current = fs.lstatSync(target); if (sameFileIdentity(current, identity)) fs.unlinkSync(target); } finally { fs.closeSync(fd); } };
 }
 /** Native GUI startup only. Registry-last; no destructive repair/rotation,
  * expiry lock, generic secret namespace, or automatic keychain retry. */

@@ -33,6 +33,7 @@ import { estimateLocalModelFit, observeLocalHardware } from "./hardware";
 import { parseEngineLoadLog } from "./acceleration";
 import { registerApprovalLineageIfLive } from "../runtime/linked-abort";
 import { LocalEngineExitedError, isLocalEngineExited } from "./engine-exit";
+import { sameFileIdentity } from "../../shared/file-identity";
 
 interface PersistedHubState {
   schemaVersion: 1;
@@ -573,7 +574,7 @@ export class LocalModelHubManager {
         | (fsConstants.O_NONBLOCK ?? 0) | (fsConstants.O_NOFOLLOW ?? 0));
       try {
         const opened = fstatSync(descriptor);
-        if (!opened.isFile() || opened.dev !== before.dev || opened.ino !== before.ino
+        if (!opened.isFile() || !sameFileIdentity(opened, before)
           || opened.size < 1 || opened.size > maximumLeaseBytes) return pending("local_model_hub_owner_lease_lost");
         const bytes = Buffer.alloc(opened.size);
         let offset = 0;
@@ -584,8 +585,7 @@ export class LocalModelHubManager {
         }
         const after = fstatSync(descriptor);
         const currentPath = lstatSync(this.ownerLeasePath);
-        if (after.size !== opened.size || !currentPath.isFile() || currentPath.dev !== opened.dev
-          || currentPath.ino !== opened.ino || currentPath.size !== opened.size) return pending("local_model_hub_owner_lease_lost");
+        if (after.size !== opened.size || !currentPath.isFile() || !sameFileIdentity(currentPath, opened) || currentPath.size !== opened.size) return pending("local_model_hub_owner_lease_lost");
         const lease = JSON.parse(bytes.toString("utf8")) as OwnerLease;
         if (!lease || lease.schemaVersion !== 1 || lease.instanceId !== this.instanceId || lease.pid !== process.pid) {
           return pending("local_model_hub_owner_lease_lost");

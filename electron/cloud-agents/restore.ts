@@ -16,6 +16,7 @@ import type {
   CloudAgentForkOrigin,
   CloudAgentRevisionIdentity,
 } from "../../shared/types";
+import { sameFileIdentity } from "../../shared/file-identity";
 
 // 상한은 정본 하나에서 생성된다 — 복원 한도가 발행 한도보다 낮으면 방금 받아준
 // 패키지를 다시 설치할 수 없게 된다.
@@ -861,8 +862,7 @@ function readStableRegularFile(
       before.mtimeMs !== after.mtimeMs ||
       before.ctimeMs !== after.ctimeMs ||
       before.mode !== after.mode ||
-      after.dev !== pathStat.dev ||
-      after.ino !== pathStat.ino ||
+      !sameFileIdentity(after, pathStat) ||
       after.mode !== pathStat.mode ||
       actualBytes !== after.size
     ) {

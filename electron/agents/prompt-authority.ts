@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { sameFileIdentity } from "../../shared/file-identity";
 
 export const CANONICAL_AGENT_PROMPT_FILES = [
   "system-prompt.md",
@@ -60,8 +61,7 @@ function readStableRegularFile(file: string, rootReal: string): Buffer {
       before.mtimeMs !== after.mtimeMs ||
       before.ctimeMs !== after.ctimeMs ||
       before.mode !== after.mode ||
-      after.dev !== pathStat.dev ||
-      after.ino !== pathStat.ino ||
+      !sameFileIdentity(after, pathStat) ||
       after.mode !== pathStat.mode ||
       bytes.byteLength !== after.size
     ) {

@@ -19,6 +19,7 @@ import {
   type PreparedOneAttachments,
 } from "../../shared/one-attachments";
 import { userDataPath } from "../runtime-paths";
+import { sameFileIdentity } from "../../shared/file-identity";
 
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
 const SHA256_RE = /^sha256:[0-9a-f]{64}$/;
@@ -158,8 +159,7 @@ function statIdentity(stat: fs.BigIntStats): SourceIdentity {
 }
 
 function identitiesEqual(left: SourceIdentity, right: SourceIdentity): boolean {
-  return left.dev === right.dev
-    && left.ino === right.ino
+  return sameFileIdentity(left, right)
     && left.size === right.size
     && left.mode === right.mode
     && left.mtimeNs === right.mtimeNs
@@ -584,7 +584,7 @@ function revalidatePreparedItem(item: PreparedItemRecord): void {
     // Metadata timestamps may change without changing the selected object or
     // its contents. Keep the object binding and verify the bytes instead of
     // treating a timestamp-only change as a different attachment.
-    if (opened.identity.dev !== item.identity.dev || opened.identity.ino !== item.identity.ino
+    if (!sameFileIdentity(opened.identity, item.identity)
       || opened.identity.size !== item.identity.size || opened.identity.mode !== item.identity.mode) {
       throw new OneAttachmentError("changed_source", "An attachment changed after it was selected.");
     }

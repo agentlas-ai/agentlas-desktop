@@ -14,6 +14,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { userDataPath } from "../runtime-paths";
+import { sameFileIdentity } from "../../shared/file-identity";
 
 /** Ledger blocks whose original is retained (host-authored). */
 export const RETAINED_CONTEXT_BLOCKS: readonly string[] = ["instructions", "tools", "hostContext"];
@@ -44,7 +45,7 @@ export function retainContextOriginal(digest: string | undefined, text: string |
 }
 
 interface OpenOriginal { fd: number; file: string; parents: Array<[string, fs.BigIntStats]>; stat: fs.BigIntStats }
-const sameObject = (a: fs.BigIntStats, b: fs.BigIntStats): boolean => a.dev === b.dev && a.ino === b.ino;
+const sameObject = (a: fs.BigIntStats, b: fs.BigIntStats): boolean => sameFileIdentity(a, b);
 
 /** Resolve the owned root once, then reject symlinked store/shard/leaf paths before any content read. */
 function openOriginal(digest: string | undefined): OpenOriginal | null {

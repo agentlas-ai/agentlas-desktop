@@ -3,6 +3,7 @@ import path from "node:path";
 import { createHash, randomBytes } from "node:crypto";
 import Database from "better-sqlite3";
 import { VideoCancelFence } from "../mobile-bridge/video-cancel-fence";
+import { sameFileIdentity } from "../../shared/file-identity";
 
 const UUID = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
 const HASH = /^[0-9a-f]{64}$/;
@@ -110,7 +111,7 @@ export class ScienceVideoTransfers {
     if (!t.handle || !t.stat || !t.filename) throw new Error("science_video_not_prepared");
     const fd = await t.handle.stat({ bigint: true }), named = await fs.promises.lstat(t.filename, { bigint: true });
     if (await fs.promises.realpath(t.filename) !== t.filename) throw new Error("science_video_source_changed");
-    if (!fd.isFile() || !named.isFile() || named.isSymbolicLink() || fd.dev !== named.dev || fd.ino !== named.ino
+    if (!fd.isFile() || !named.isFile() || named.isSymbolicLink() || !sameFileIdentity(fd, named)
       || fd.dev !== t.stat.dev || fd.ino !== t.stat.ino || fd.size !== t.stat.size || fd.mtimeNs !== t.stat.mtimeNs || fd.ctimeNs !== t.stat.ctimeNs
       || named.size !== fd.size || named.mtimeNs !== fd.mtimeNs || named.ctimeNs !== fd.ctimeNs) throw new Error("science_video_source_changed");
     this.current(t);

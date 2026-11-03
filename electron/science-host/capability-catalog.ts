@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import type { IpcMainInvokeEvent } from "electron";
 import type { ScienceCapabilityCatalogInput, ScienceCapabilityCatalogItem, ScienceCapabilityCatalogKind,
   ScienceCapabilityCatalogResult, ScienceCapabilityManagerInput } from "../../shared/science-capability-catalog";
+import { sameFileIdentity } from "../../shared/file-identity";
 
 type Row = Record<string, unknown>;
 const SHA = /^[a-f0-9]{64}$/u;
@@ -46,11 +47,16 @@ export function readScientificSkillCatalogMetadata(root: string): { releaseSha25
         throw new Error("science-capability-library-file-invalid");
       return `${s.dev}:${s.ino}:${s.size}:${s.mtimeMs}:${s.ctimeMs}`;
     });
+    // The snapshot tokens come from lstat; the fd stat must match them (dev 0 from a path stat is accepted on win32 only).
+    const sameSnapshot = (fdStat: fs.Stats, token: string | undefined): boolean => {
+      const [dev, ino, ...rest] = (token ?? "").split(":");
+      return sameFileIdentity({ dev, ino }, fdStat) && rest.join(":") === `${fdStat.size}:${fdStat.mtimeMs}:${fdStat.ctimeMs}`;
+    };
     const before = snapshot();
     const fd = fs.openSync(location, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
     try {
       const s = fs.fstatSync(fd);
-      if (!s.isFile() || s.size < 1 || s.size > maximum || `${s.dev}:${s.ino}:${s.size}:${s.mtimeMs}:${s.ctimeMs}` !== before.at(-1))
+      if (!s.isFile() || s.size < 1 || s.size > maximum || !sameSnapshot(s, before.at(-1)))
         throw new Error("science-capability-library-file-invalid");
       const bytes = Buffer.alloc(s.size);
       let offset = 0;
@@ -60,7 +66,7 @@ export function readScientificSkillCatalogMetadata(root: string): { releaseSha25
         offset += count;
       }
       const after = fs.fstatSync(fd);
-      if (`${after.dev}:${after.ino}:${after.size}:${after.mtimeMs}:${after.ctimeMs}` !== before.at(-1)
+      if (!sameSnapshot(after, before.at(-1))
         || JSON.stringify(snapshot()) !== JSON.stringify(before) || generation() !== initialGeneration)
         throw new Error("science-capability-library-changed");
       return bytes;

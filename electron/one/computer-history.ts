@@ -14,6 +14,7 @@ import { redactSecrets } from "../../shared/secret-patterns";
 import { getMeta, setMeta } from "../store/meta";
 import { HISTORY_METADATA_POLICY, type HistorySourceFence, type HistorySourceScope, type HistoryMetadataSnapshot } from "../../shared/one-history-source";
 import { currentUiLocale } from "../ui-locale";
+import { sameFileIdentity } from "../../shared/file-identity";
 
 const ROOT = process.env.AGENTLAS_COMPUTER_HISTORY_ROOT?.trim()
   || path.join(os.homedir(), ".agentlas", "history");
@@ -467,13 +468,13 @@ function metadataHeader(root:string,file:string,check:()=>void){
  check();const directory=path.dirname(file),parent=sourceDirectory(root,directory),before=fs.lstatSync(file);
  if(!before.isFile()||before.isSymbolicLink()||before.nlink!==1||before.size>512000||!isInside(fs.realpathSync(root),fs.realpathSync(file)))metadataFail();
  const fd=fs.openSync(file,fs.constants.O_RDONLY|(fs.constants.O_NOFOLLOW??0));try{
-  const opened=fs.fstatSync(fd);if(opened.ino!==before.ino||opened.dev!==before.dev||opened.nlink!==1)metadataFail();
+  const opened=fs.fstatSync(fd);if(!sameFileIdentity(opened,before)||opened.nlink!==1)metadataFail();
   // Read exactly through the closing frontmatter delimiter. A bulk read could include private body bytes.
   const bytes:number[]=[],one=Buffer.alloc(1);let line='',closed=false,lines=0;
   for(let offset=0;offset<8192;offset++){if(fs.readSync(fd,one,0,1,offset)!==1)break;bytes.push(one[0]);if(one[0]===10){lines++;if(line.replace(/\r$/,'')==='---'){if(lines===1){}else{closed=true;break}}else if(lines===1)metadataFail();line=''}else line+=String.fromCharCode(one[0]);}
   if(!closed)metadataFail();const buffer=Buffer.from(bytes),raw=buffer.toString('utf8');if(!Buffer.from(raw,'utf8').equals(buffer))metadataFail();
   const after=fs.fstatSync(fd),last=fs.lstatSync(file);check();
-  if(sourceDirectory(root,directory)!==parent||after.dev!==opened.dev||after.ino!==opened.ino||after.size!==opened.size||after.mtimeMs!==opened.mtimeMs||after.ctimeMs!==opened.ctimeMs||after.nlink!==1||last.isSymbolicLink()||last.dev!==opened.dev||last.ino!==opened.ino||last.size!==after.size||last.mtimeMs!==after.mtimeMs)metadataFail();
+  if(sourceDirectory(root,directory)!==parent||after.dev!==opened.dev||after.ino!==opened.ino||after.size!==opened.size||after.mtimeMs!==opened.mtimeMs||after.ctimeMs!==opened.ctimeMs||after.nlink!==1||last.isSymbolicLink()||!sameFileIdentity(last,opened)||last.size!==after.size||last.mtimeMs!==after.mtimeMs)metadataFail();
   const values=frontmatter(raw).values,fingerprint=createHash('sha256').update(JSON.stringify([parent,after.dev,after.ino,after.size,after.mtimeMs,after.ctimeMs,raw])).digest('hex');
   return{values,fingerprint};
  }finally{fs.closeSync(fd)}

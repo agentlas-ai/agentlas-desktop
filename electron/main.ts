@@ -387,6 +387,7 @@ import {
   type ScienceMolstarCommitInput,
 } from "agentlas-science/dist/contracts/science-renderer-runtime";
 import { installMainSystemNetwork } from "./net/system-network";
+import { sameFileIdentity } from "../shared/file-identity";
 
 // Node fetch/https/ws in Main follow the system proxy (WinINET/PAC) and the OS
 // trust store, like the app's own browser windows (Windows company networks).
@@ -3630,7 +3631,7 @@ app.whenReady().then(async () => {
       const bytes = fs.readFileSync(fd), after = fs.fstatSync(fd), named = fs.lstatSync(real);
       if (bytes.length !== before.size || after.size !== before.size || after.mtimeMs !== before.mtimeMs
         || after.ino !== before.ino || after.dev !== before.dev || named.isSymbolicLink()
-        || named.ino !== after.ino || named.dev !== after.dev || named.size !== after.size || named.mtimeMs !== after.mtimeMs
+        || !sameFileIdentity(named, after) || named.size !== after.size || named.mtimeMs !== after.mtimeMs
         || fs.realpathSync(proof.path) !== real || createHash("sha256").update(bytes).digest("hex") !== proof.mirrorSha256
         || (proof.kind === "pdf" && !bytes.subarray(0, 5).equals(Buffer.from("%PDF-")))) return { ok: false };
     } catch { return { ok: false }; }

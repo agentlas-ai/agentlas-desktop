@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { optionalElectronAppPath } from "../runtime-paths";
+import { sameFileIdentity } from "../../shared/file-identity";
 
 type RuntimeCandidate = {
   root: string;
@@ -189,10 +190,10 @@ function hasNamespaceOwner(base: string): boolean {
     if (!before.isFile() || before.isSymbolicLink() || before.size !== Buffer.byteLength(OS_NAMESPACE_CONTENT)) return false;
     fd = fs.openSync(marker, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
     const opened = fs.fstatSync(fd);
-    if (!opened.isFile() || opened.dev !== before.dev || opened.ino !== before.ino) return false;
+    if (!opened.isFile() || !sameFileIdentity(opened, before)) return false;
     const valid = fs.readFileSync(fd, "utf8") === OS_NAMESPACE_CONTENT;
     const after = fs.lstatSync(marker);
-    return valid && after.isFile() && !after.isSymbolicLink() && after.dev === opened.dev && after.ino === opened.ino;
+    return valid && after.isFile() && !after.isSymbolicLink() && sameFileIdentity(after, opened);
   } catch { return false; }
   finally { if (fd !== undefined) fs.closeSync(fd); }
 }

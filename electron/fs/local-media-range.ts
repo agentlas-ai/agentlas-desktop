@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { Readable } from "node:stream";
+import { sameFileIdentity } from "../../shared/file-identity";
 
 const RANGE_TYPES: Record<string, string> = {
   ".mp4": "video/mp4", ".m4v": "video/x-m4v", ".mov": "video/quicktime",
@@ -20,7 +21,7 @@ export function serveLocalMediaRange(file: string, rangeHeader: string | null, s
     fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
     const stat = fs.fstatSync(fd);
     const named = fs.lstatSync(file);
-    if (!stat.isFile() || named.isSymbolicLink() || stat.dev !== named.dev || stat.ino !== named.ino || fs.realpathSync.native(file) !== file) throw new Error("changed file");
+    if (!stat.isFile() || named.isSymbolicLink() || !sameFileIdentity(stat, named) || fs.realpathSync.native(file) !== file) throw new Error("changed file");
     const match = /^bytes=(\d*)-(\d*)$/i.exec(rangeHeader.trim());
     let start = 0;
     let end = stat.size - 1;

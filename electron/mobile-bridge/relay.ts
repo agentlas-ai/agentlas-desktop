@@ -448,7 +448,10 @@ export class MobileBridgeCloudRelay {
   private lastRenewAt = -Infinity;
   private unexplainedTunnelRefusals: number[] = [];
   private lastStallLogAt = -Infinity;
-  private readonly stallMonitor = new MainLoopStallMonitor(Date.now, (ms) => this.noteStall(ms));
+  // The monitor's CPU reading has to reach the log line: dropping it made every stall read "app CPU 0%" (E28, observed in use).
+  private readonly stallMonitor = new MainLoopStallMonitor(Date.now, (ms, facts) => this.noteStall(ms, facts));
+  private lastSystemResumeAt = -Infinity;
+  private powerWatch: (() => void) | null = null;
   // 한 번에 몰려 온 relay.device 를 기기 토큰별로 모은다(가장 새 것만 연다).
   private readonly pendingDevices = new Map<string, { channelId: string; deviceToken: string; superseded: number }>();
   private deviceFlush: NodeJS.Immediate | null = null;
@@ -509,27 +512,49 @@ export class MobileBridgeCloudRelay {
     if (!this.stopped) return;
     this.stopped = false;
     this.stallMonitor.start();
+    this.watchSystemResume();
     this.scheduleConnect(0);
+  }
+
+  /** Records system resumes so a stall that spanned sleep says so. Electron's powerMonitor exists only after app ready in an Electron
+   *  process; anywhere else (a plain-Node host, a gate) this is a no-op. */
+  private watchSystemResume(): void {
+    if (this.powerWatch) return;
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const monitor = (require("electron") as { powerMonitor?: { on?: (e: string, f: () => void) => void; removeListener?: (e: string, f: () => void) => void } }).powerMonitor;
+      if (!monitor?.on) return;
+      const onResume = () => { this.lastSystemResumeAt = Date.now(); };
+      monitor.on("resume", onResume);
+      this.powerWatch = () => { try { monitor.removeListener?.("resume", onResume); } catch { /* already gone */ } };
+    } catch { /* powerMonitor is not available in this process */ }
   }
 
   private noteStall(ms: number, facts: { cpuMs: number } = { cpuMs: 0 }): void {
     if (ms < MAIN_LOOP_STALL_LOG_MS || Date.now() - this.lastStallLogAt < 60_000) return;
     this.lastStallLogAt = Date.now();
-    // The cause is told by the process's own CPU use over the stall (round 4, hourly stalls): near all of it = this app's synchronous work; near none =
-    // the machine did not run the app (disk, sleep, throttling), and the load average says how busy the machine was.
+    // The process's own CPU use over the stall tells computing from waiting: near all of it = this app's synchronous work. Near none is a wait
+    // that this line cannot name by itself: a lock on the shared store held by the other Agentlas process (busy_timeout 15 s), a synchronous
+    // child process or disk, or the machine not running the app. A system resume inside the stall says the computer was asleep.
     const busyPercent = Math.min(100, Math.round((facts.cpuMs / Math.max(1, ms)) * 100));
+    const asleep = this.lastSystemResumeAt >= Date.now() - ms - 2_000;
+    const cause = busyPercent >= 60 ? "the app's own work"
+      : asleep ? "the computer was asleep"
+        : "the app was waiting, not computing: a store lock held by the other Agentlas process, a synchronous child process or disk, or the machine not running it";
     let load = "n/a";
     try { load = os.loadavg()[0].toFixed(1); } catch { /* not available */ }
     console.warn(
       `[mobile-bridge-relay] this Desktop's main thread was blocked ${Math.round(ms / 1000)}s; ` +
         "phone tunnel requests and pings waiting during it were answered late " +
-        `(app CPU ${busyPercent}% of the stall, system load ${load}: ${busyPercent >= 60 ? "the app's own work" : "the machine did not run the app"})`,
+        `(app CPU ${busyPercent}% of the stall, system load ${load}: ${cause})`,
     );
   }
 
   stop(): void {
     this.stopped = true;
     this.stallMonitor.stop();
+    this.powerWatch?.();
+    this.powerWatch = null;
     if (this.deviceFlush) clearImmediate(this.deviceFlush);
     this.deviceFlush = null;
     this.pendingDevices.clear();

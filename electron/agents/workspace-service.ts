@@ -31,6 +31,7 @@ import { AgentWorkspaceError, snapshotAgentWorkspace, snapshotAgentWorkspaceForR
   MAX_WORKSPACE_TOTAL_BYTES, type WorkspaceTree, type WorkspaceAsset, type WorkspaceUnverifiedEntry } from "./workspace-snapshot";
 import type { AgentWorkspaceSnapshot, AgentWorkspaceProposal, AgentWorkspaceRevision, AgentWorkspaceDiff,
   AgentWorkspaceMemoryCandidate, AgentWorkspaceMemoryCounts, AgentWorkspaceReadFile, AgentWorkspaceFile, AgentWorkspaceLearningCard, AgentWorkspaceChangeSummary, AgentWorkspaceExperience } from "../../shared/agent-workspace";
+import { sameFileIdentity } from "../../shared/file-identity";
 
 export const AGENT_WORKSPACE_CAPABILITY_VERSION = 2;
 interface StoredRevision extends AgentWorkspaceRevision { agentId: string; tree: WorkspaceTree; }
@@ -88,7 +89,7 @@ function acquireWriteLock(agentId: string): WorkspaceWriteLock {
     if (!processAlive(previous.pid) && fs.lstatSync(lock).ino === stat.ino) fs.unlinkSync(lock);
   }
   function sameFile(): boolean {
-    try { const live = fs.lstatSync(lock); return !!original && !live.isSymbolicLink() && live.dev === original.dev && live.ino === original.ino; }
+    try { const live = fs.lstatSync(lock); return !!original && !live.isSymbolicLink() && sameFileIdentity(live, original); }
     catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return false; throw error; }
   }
   function release(): void {
@@ -266,7 +267,7 @@ function readHeldAppliedSnapshot(agentId: string,
     try {
       const a = fs.fstatSync(fd); if (!a.isFile() || a.nlink !== 1 || a.size > 96 * 1024 * 1024) fail();
       const bytes = fs.readFileSync(fd), b = fs.fstatSync(fd), live = fs.lstatSync(file);
-      if ([b, live].some(s => s.dev !== a.dev || s.ino !== a.ino || s.size !== a.size || s.mtimeMs !== a.mtimeMs
+      if ([b, live].some(s => !sameFileIdentity(s, a) || s.size !== a.size || s.mtimeMs !== a.mtimeMs
         || s.ctimeMs !== a.ctimeMs || s.mode !== a.mode || s.nlink !== 1) || bytes.length !== a.size) fail();
       return bytes;
     } finally { fs.closeSync(fd); }

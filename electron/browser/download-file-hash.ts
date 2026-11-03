@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
+import { sameFileIdentity } from "../../shared/file-identity";
 
 export const DOWNLOAD_HASH_CHUNK_BYTES = 256 * 1024;
 export interface DownloadFileIdentity {
@@ -12,7 +13,7 @@ function identity(stat: fs.BigIntStats): DownloadFileIdentity {
   return {dev:String(stat.dev),ino:String(stat.ino),bytes,mtimeNs:String(stat.mtimeNs),ctimeNs:String(stat.ctimeNs)};
 }
 const same = (a: DownloadFileIdentity, b: DownloadFileIdentity) =>
-  a.dev === b.dev && a.ino === b.ino && a.bytes === b.bytes && a.mtimeNs === b.mtimeNs && a.ctimeNs === b.ctimeNs;
+  sameFileIdentity(a, b) && a.bytes === b.bytes && a.mtimeNs === b.mtimeNs && a.ctimeNs === b.ctimeNs;
 
 /** Metadata only. Reject every symlink component before opening any bytes. */
 export function captureDownloadFile(root: string, relativePath: string) {

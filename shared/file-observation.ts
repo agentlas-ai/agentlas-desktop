@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
+import { sameFileIdentity } from "./file-identity";
 
 export const FILE_OBSERVATION_MAX_BYTES = 16 * 1024 * 1024;
 export type FileObservationAction = "read" | "write" | "edit";
@@ -40,7 +41,7 @@ export function observeWorkspaceFile(root: string, relativePath: string, action:
     if (!before.isFile() || before.size > FILE_OBSERVATION_MAX_BYTES) return null;
     fd = fs.openSync(target, fs.constants.O_RDONLY | (process.platform === "win32" ? 0 : (fs.constants.O_NOFOLLOW ?? 0) | (fs.constants.O_NONBLOCK ?? 0)));
     const opened = fs.fstatSync(fd), current = inspect();
-    if (!opened.isFile() || opened.dev !== current.dev || opened.ino !== current.ino || opened.size !== before.size) return null;
+    if (!opened.isFile() || !sameFileIdentity(opened, current) || opened.size !== before.size) return null;
     const bytes = Buffer.alloc(opened.size);
     let count = 0;
     while (count < bytes.length) {
@@ -51,7 +52,7 @@ export function observeWorkspaceFile(root: string, relativePath: string, action:
     if (fs.readSync(fd, Buffer.alloc(1), 0, 1, count)) return null;
     const after = fs.fstatSync(fd), linked = inspect();
     if (after.dev !== opened.dev || after.ino !== opened.ino || after.size !== opened.size || after.mtimeMs !== opened.mtimeMs
-      || after.ctimeMs !== opened.ctimeMs || linked.dev !== after.dev || linked.ino !== after.ino
+      || after.ctimeMs !== opened.ctimeMs || !sameFileIdentity(linked, after)
       || linked.size !== after.size || linked.mtimeMs !== after.mtimeMs || linked.ctimeMs !== after.ctimeMs) return null;
     if (expectedContent !== undefined && !bytes.equals(typeof expectedContent === "string"
       ? Buffer.from(expectedContent, "utf8") : Buffer.from(expectedContent))) return null;
