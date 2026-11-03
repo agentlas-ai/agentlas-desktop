@@ -7,6 +7,8 @@ import { findMenuWindow } from "../reach/menu-probe";
 import { withForeground } from "../reach/foreground";
 import { repairDialogCapability } from "../reach/repair";
 import { runSteps } from "../reach/steps-runner";
+import { isLearned, learnFromTrace, recordRun, runLearned, type LearnTrace, type TraceStep } from "../reach/learn";
+import { actuatorLearnDriver } from "../reach/learn-actuator";
 import type { AppRecord, Capability, CapabilityParameter } from "../reach/types";
 import { getReachRuntime, type ReachRuntime } from "./runtime";
 
@@ -103,7 +105,10 @@ function publishedOffLimits(capability: Capability, context: CapabilityPolicyCon
 }
 
 function usableNow(capability: Capability, context: CapabilityPolicyContext = {}): boolean {
-  if (capability.generic || capability.status === "degraded" || publishedOffLimits(capability, context)) return false;
+  if (capability.generic || publishedOffLimits(capability, context)) return false;
+  // learned work stays callable after an update (its replay finds the controls again, or hands the caller back to the screen); only a candidate is not callable
+  if (isLearned(capability)) return capability.status === "verified" || capability.status === "degraded";
+  if (capability.status === "degraded") return false;
   if (capability.tier === "structure") return isDirectMenuCommand(capability, context); // the live menu confirms each command
   if (capability.tier === "explored" && !isCurrentDialogCapability(capability, context)) return false;
   if (capability.tier === "published" && capability.status === undefined) return true;
@@ -307,7 +312,7 @@ export async function reachInvoke(args: Record<string, unknown>, ctx: Ctx): Prom
   // A menu command stored by an older, looser rule is asked again at the moment of the call - with what is known about this app (a camera, a microphone, a location
   // makes the rule stricter) - and withdrawn when it no longer passes (independent review 7, V1): nothing is pressed.
   if ((capability.tier === "structure" && capability.traits?.includes("menu-command") && !isDirectMenuCommand(capability, context))
-    || (capability.tier === "explored" && !isCurrentDialogCapability(capability, context))) {
+    || (capability.tier === "explored" && !isLearned(capability) && !isCurrentDialogCapability(capability, context))) {
     if (rt.service) await rt.service.onInvokeOutcome(resolved.app.key, resolved.app.fingerprint, capability.id, { ok: false, code: "rule_tightened" });
     else await rt.registry.recordOutcome(resolved.app.key, resolved.app.fingerprint, capability.id, { ok: false, code: "rule_tightened" }, rt.day());
     return refused("capability_not_usable", "the current exploration rule no longer allows this stored capability");
@@ -319,6 +324,32 @@ export async function reachInvoke(args: Record<string, unknown>, ctx: Ctx): Prom
   const parameters = args.parameters && typeof args.parameters === "object" && !Array.isArray(args.parameters) ? (args.parameters as Record<string, unknown>) : {};
   const reason = runnableReason(capability, rt, context);
   if (reason) return unavailable("not_runnable", reason);
+
+  // Work Reach learned from an agent's own screen use (learn.ts): replayed with the controls found again by role, caption and neighbours. When the screen no
+  // longer matches and the replay cannot go on, the caller is handed back to the screen (not given an error) and what it then does is learned over the old steps.
+  if (isLearned(capability) && capability.body?.kind === "steps") {
+    const gui = rt.gui;
+    if (!gui) return unavailable("no_driver_in_this_host", "run this from the desktop app");
+    const outcome = await gui.use(async (actuator) => {
+      if (stopped(ctx)) return { guiError: "aborted" } as const;
+      const target = await liveTarget(rt, resolved.app, actuator, ctx.signal);
+      if ("error" in target) return { guiError: target.error } as const;
+      const where = { pid: target.pid, windowId: target.windowId };
+      const front = await withForeground(actuator, where, () => runLearned(actuatorLearnDriver(actuator, where, ctx.signal), capability, parameters, { ...(ctx.signal ? { signal: ctx.signal } : {}) }));
+      return front.ok ? ({ run: front.value } as const) : ({ guiError: front.code } as const);
+    });
+    if (!outcome.ok) return stopped(ctx) ? aborted() : guiRefusal(outcome.error);
+    if ("guiError" in outcome.value) return stopped(ctx) ? aborted() : guiRefusal(outcome.value.guiError as string);
+    const run = outcome.value.run;
+    if (!run.ok && stopped(ctx)) return aborted();
+    await recordRun(rt.registry, resolved.app.key, resolved.app.fingerprint, capability, run, rt.day());
+    if (run.ok) return { status: "ok", data: { ok: true, stepsRun: run.stepsRun, outcome: run.outcome, healed: run.healed.length, ...(run.updated ? { revision: run.updated.revision } : {}) } };
+    if (run.handoff) {
+      const left = run.handoff.remaining.map((step) => (step.target ? `${step.op} "${step.target}"` : step.op)).join(", ").slice(0, 400);
+      return refused("handoff_to_screen", `the learned steps no longer match this app's screen at step ${run.handoff.atStep + 1} (${run.handoff.reason}); do the rest on the app's screen with the computer tools (get_app_state, click, type_text), then call reach.learn with the same name so this port is updated. Steps not reached: ${left}`, { stepsRun: run.stepsRun, atStep: run.handoff.atStep, reason: run.handoff.reason });
+    }
+    return refused(run.code ?? "step_failed", run.code === "bad_parameters" ? "reach.describe lists the parameters this capability takes" : "the call did not complete", { stepsRun: run.stepsRun, outcome: run.outcome });
+  }
 
   if (capability.body?.kind === "steps") {
     const gui = rt.gui;
@@ -395,6 +426,7 @@ export async function reachVerify(args: Record<string, unknown>, ctx: Ctx): Prom
   const found = findCapability(await allCapabilities(rt, resolved.app), str(args.capability));
   if (!found.ok) return found.outcome;
   const capability = found.capability;
+  if (isLearned(capability)) return refused("not_verifiable_here", "learned work is proven by running it: call reach.invoke, which checks the outcome and re-learns what the app moved");
   if (capability.tier !== "explored" || capability.body?.kind !== "steps") return refused("not_verifiable_here", "only explored capabilities are re-read; a published one is stated by the app itself");
   const outcome = await rt.gui.use(async (actuator) => {
     if (stopped(ctx)) return { guiError: "aborted" } as const;
@@ -432,6 +464,52 @@ export function boundedOutcome(outcome: Outcome): Outcome {
   return { status: "ok", data: { truncated: true, text: text.slice(0, MAX_RESULT_CHARS) } };
 }
 
+// reach.learn: the caller did work on an app's screen and says what it did; Reach keeps the shape of it (roles, captions, neighbours, which text slots) as a
+// capability. Nothing the caller typed or read is stored. A second matching success, or the outcome check holding on a replay, makes it a port.
+const TRACE_OPS = new Set(["click", "type", "set_value", "key"]);
+export async function reachLearn(args: Record<string, unknown>, ctx: Ctx): Promise<Outcome> {
+  if (ctx.dryRun) return refused("dry_run", "nothing was learned");
+  if (stopped(ctx)) return aborted();
+  if (!writable(ctx)) return refused("permission_required", "learning writes to Reach's registry; the run needs write permission");
+  const rt = await getReachRuntime();
+  const resolved = await resolveApp(rt, str(args.app));
+  if (!resolved.ok) return resolved.outcome;
+  const rawSteps = Array.isArray(args.steps) ? (args.steps as unknown[]) : [];
+  const steps: TraceStep[] = [];
+  for (const raw of rawSteps.slice(0, 120)) {
+    const item = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+    const op = str(item.op);
+    if (!TRACE_OPS.has(op)) return refused("bad_step", "each step is {op: click|type|set_value|key, role, label} (key: {op:'key', key})");
+    const label = str(item.label).slice(0, 60);
+    const list = (value: unknown): string[] | undefined => Array.isArray(value) ? value.map((entry) => str(entry).slice(0, 60)).filter(Boolean).slice(0, 6) : undefined;
+    const path = list(item.path); const nearby = list(item.nearby);
+    steps.push({
+      op: op as TraceStep["op"], ok: item.ok !== false,
+      ...(op === "key" ? { key: str(item.key).slice(0, 20) } : { target: { role: str(item.role).slice(0, 40), ...(label ? { label } : {}), ...(path?.length ? { path } : {}), ...(nearby?.length ? { nearby } : {}), ...(typeof item.nth === "number" && item.nth > 0 ? { nth: Math.floor(item.nth) } : {}) } }),
+    });
+  }
+  const check = args.check && typeof args.check === "object" ? (args.check as Record<string, unknown>) : undefined;
+  const trace: LearnTrace = {
+    app: { key: resolved.app.key, name: resolved.app.name, ...(bundleOf(resolved.app.key) ? { bundleId: bundleOf(resolved.app.key) as string } : {}), fingerprint: resolved.app.fingerprint },
+    name: str(args.name), ...(str(args.description) ? { description: str(args.description) } : {}),
+    steps, succeeded: args.succeeded === true,
+    ...(check ? { check: { kind: str(check.kind) === "element-value-changed" ? "element-value-changed" : "element-present", role: str(check.role).slice(0, 40), label: str(check.label).slice(0, 60) } } : {}),
+    day: rt.day(),
+  };
+  const outcome = await learnFromTrace(rt.registry, trace);
+  if (outcome.action === "refused") {
+    const next: Record<string, string> = {
+      bad_name: "name the work with a short phrase (3 to 60 characters), like a function name",
+      no_steps: "pass the steps you took", too_many_steps: "that is too long to be one piece of work; split it",
+      not_succeeded: "only work that succeeded is learned: pass succeeded:true when it did", no_outcome_check: "pass check:{kind,role,label}: a control that shows the work is done (element-present) or whose value changed (element-value-changed)", vacuous_check: "that control looked the same before the work: name one that only shows afterwards, or whose value changes",
+      sensitive_app: "Reach never learns on apps that hold secrets, messages, money or settings", secret_field: "a step touches a password or card field; that work is not learned",
+      bad_step: "every click and typing step needs the control's role",
+    };
+    return refused(outcome.reason, next[outcome.reason]);
+  }
+  return { status: "ok", data: { action: outcome.action, id: outcome.capability.id, status: outcome.capability.status, revision: outcome.capability.revision, observations: outcome.capability.evidence?.observations, parameters: outcome.capability.parameters.map((parameter) => parameter.name) } };
+}
+
 const bounded = (run: (args: Record<string, unknown>, ctx: Ctx) => Promise<Outcome>) => async (args: Record<string, unknown>, ctx: Ctx): Promise<Outcome> => boundedOutcome(await run(args, ctx));
 
 export const REACH_HANDLERS = {
@@ -442,4 +520,5 @@ export const REACH_HANDLERS = {
   "reach.invoke": bounded(reachInvoke),
   "reach.explore": bounded(reachExplore),
   "reach.verify": bounded(reachVerify),
+  "reach.learn": bounded(reachLearn),
 } as const;

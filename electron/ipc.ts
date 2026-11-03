@@ -406,7 +406,8 @@ import {
   signOut,
 } from "./auth";
 import { reconcileMobileBridgeDevicesForAccount } from "./mobile-bridge/runtime";
-import { getBillingCheckoutReadiness, getBillingCredits, getBillingPlans, getFreshProjectAgentLimitGrant, transferEarnings } from "./billing";
+import { getBillingCredits, getBillingPlans, getFreshProjectAgentLimitGrant, transferEarnings } from "./billing";
+import { getBillingCheckoutReadinessForPaywall } from "./billing-trial";
 import {
   addHubPromptBookmark,
   getHubPrompt,
@@ -3036,7 +3037,7 @@ export function registerIpcHandlers(): void {
   // ── AI 사용 잔액 조회. 과거 Hub 수익 전송 IPC는 refusal-only. ─────────
   registerAppControlDomainIpc(ipcMain, "billing:getCredits", () => getBillingCredits());
   registerAppControlDomainIpc(ipcMain, "billing:getPlans", () => getBillingPlans());
-  registerAppControlDomainIpc(ipcMain, "billing:checkoutReadiness", (input: { plan?: unknown; cycle?: unknown }) => getBillingCheckoutReadiness(input ?? {}));
+  registerAppControlDomainIpc(ipcMain, "billing:checkoutReadiness", (input: { plan?: unknown; cycle?: unknown }) => getBillingCheckoutReadinessForPaywall(input ?? {}));
   registerAppControlDomainIpc(ipcMain, "billing:transferEarnings", (credits: number) => transferEarnings(credits));
 
   // ── 프롬프트 저장소 — 웹 /api/prompts 프록시(쿠키+Origin, billing 패턴) ──────

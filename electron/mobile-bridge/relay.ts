@@ -412,6 +412,40 @@ function pinnedCertificateIdentity(certificateDer: string) {
   };
 }
 
+/** Epoch ms of the last state-changing request (message, approval, control) a phone sent through a relay tunnel in this
+ * process; 0 = none. A Cloud computer reports it so the server can let an idle computer pause. Reads, polling and
+ * keepalives do not count. */
+let lastPhoneActivityAt = 0;
+export function mobileBridgePhoneActivityAt(): number { return lastPhoneActivityAt; }
+let writeMethods: ReadonlySet<string> | null | undefined;
+function stateChangingMethods(): ReadonlySet<string> | null {
+  if (writeMethods !== undefined) return writeMethods;
+  // Loaded on first use so this transport module keeps no load-time dependency on the protocol tables. If the table is
+  // unavailable every request counts, which keeps a computer awake rather than pausing it mid-answer.
+  try { writeMethods = (require("../../shared/mobile-bridge") as typeof import("../../shared/mobile-bridge")).MOBILE_BRIDGE_WRITE_METHODS; }
+  catch { writeMethods = null; }
+  return writeMethods;
+}
+let trackedHost: boolean | undefined;
+/** Only a Cloud computer reports phone activity. Desktop Main and the terminal engine never read it, so they skip the work. */
+function reportsPhoneActivity(): boolean {
+  if (trackedHost !== undefined) return trackedHost;
+  try { trackedHost = (require("../managed-one/auth") as typeof import("../managed-one/auth")).wasManagedOneConfigured(); }
+  catch { trackedHost = false; }
+  return trackedHost;
+}
+function notePhoneFrame(data: unknown, binary: boolean, now: () => number = Date.now): void {
+  if (binary || rawBytes(data) > 256 * 1024 || !reportsPhoneActivity()) return;
+  try {
+    const text = Buffer.isBuffer(data) ? data.toString("utf8") : typeof data === "string" ? data : null;
+    if (!text || !text.includes('"request"')) return;
+    const frame = JSON.parse(text) as { type?: unknown; method?: unknown };
+    if (frame.type !== "request" || typeof frame.method !== "string") return;
+    const methods = stateChangingMethods();
+    if (!methods || methods.has(frame.method)) lastPhoneActivityAt = now();
+  } catch { /* An unreadable frame is not activity; the local hop still judges it. */ }
+}
+
 function rawBytes(data: unknown): number {
   if (Buffer.isBuffer(data)) return data.byteLength;
   if (data instanceof ArrayBuffer) return data.byteLength;
@@ -470,12 +504,23 @@ export class MobileBridgeCloudRelay {
   private authenticationEpoch(): string | null { return this.authentication()?.epoch ?? null; }
   ready(): boolean { return !this.stopped && this.control?.readyState === WS_OPEN && this.controlCookie === this.authenticationEpoch(); }
 
-  /** Host-only credential rotation. Pairing records/TLS pins are unchanged. */
+  /**
+   * Host-only credential rotation (a Cloud computer renews its token about every 8 minutes). Pairing records and TLS pins
+   * are unchanged. An open control channel is re-authenticated in place, the same make-before-break path a Desktop sign-in
+   * change takes (renewControl), so phones that are connected stay connected. Only when there is no live control channel
+   * does this reconnect, and then at once instead of after the retry timer.
+   * Desktop Main never calls this: its credential is the sign-in cookie, and a changed cookie goes through renewControl
+   * from the heartbeat.
+   */
   refreshAuthentication(): void {
     if (this.stopped) return;
-    this.stop();
     this.clearAuthRefusal();
-    this.start();
+    if (this.control?.readyState === WS_OPEN) {
+      this.renewControl("credential_changed");
+      return;
+    }
+    if (this.retryTimer) { clearTimeout(this.retryTimer); this.retryTimer = null; }
+    this.scheduleConnect(0);
   }
 
   pairingInfo(): { endpoint: string; secret: string } {
@@ -1021,6 +1066,7 @@ export class MobileBridgeCloudRelay {
       else if (local?.readyState === WS_CONNECTING) local.terminate();
     };
     cloud.on("message", (data, isBinary) => {
+      notePhoneFrame(data, isBinary);
       if (local?.readyState === WS_OPEN) {
         local.send(data, { binary: isBinary });
         return;

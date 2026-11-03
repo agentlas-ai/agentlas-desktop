@@ -1290,6 +1290,8 @@ const PORTS: PortDefinition[] = [
     inputSchema: REACH_PORT_SCHEMAS.explore, handler: async (args, ctx) => (await import("../reach-host/ports")).REACH_HANDLERS["reach.explore"](args, ctx) },
   { operationId: "reach.verify", kind: "command", purpose: "Check that an explored capability still works in the running app; re-read it if the app moved it.", required: ["app", "capability"],
     inputSchema: REACH_PORT_SCHEMAS.verify, handler: async (args, ctx) => (await import("../reach-host/ports")).REACH_HANDLERS["reach.verify"](args, ctx) },
+  { operationId: "reach.learn", kind: "command", purpose: "After you did something on an app's screen with the computer tools and it worked, teach Reach the steps (roles and captions, never what you typed or read) so the next call is reach.invoke instead of doing it on screen again. Needs an outcome check that was false before and true after.", required: ["app", "name", "steps", "succeeded", "check"],
+    inputSchema: REACH_PORT_SCHEMAS.learn, handler: async (args, ctx) => (await import("../reach-host/ports")).REACH_HANDLERS["reach.learn"](args, ctx) },
 ];
 
 const PORT_BY_ID = new Map(PORTS.map((port) => [port.operationId, port]));

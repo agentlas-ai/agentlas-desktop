@@ -13,6 +13,13 @@ export interface ManagedOneBootstrap {
   userDataDir: string;
   credentials: Readonly<Record<ManagedOnePurpose, string>>;
   controlBearer: string;
+  /** Feature switches, e.g. ["team"] or "team,goal". Absent = AGENTLAS_MANAGED_ONE_FEATURES, then the defaults. */
+  features?: string | readonly string[];
+  /** Absolute path of a snapshot made by POST /control/snapshot. Needs restoreSha256. Restored only into an empty data folder. */
+  restoreFrom?: string;
+  restoreSha256?: string;
+  /** IANA zone of the owner. Sets the process TZ so a daily HH:MM check-in means the owner's local time. */
+  timeZone?: string;
 }
 export interface ManagedOneHealth {
   hostId: string;
@@ -21,5 +28,5 @@ export interface ManagedOneHealth {
   executor: "agentlas-cloud";
   supervisorReady: boolean;
   relayReady: boolean;
-  capabilities: { one: boolean; work: boolean; goal: false; computerUse: false };
+  capabilities: { one: boolean; work: boolean; goal: false; computerUse: false; team: boolean; browser: boolean };
 }

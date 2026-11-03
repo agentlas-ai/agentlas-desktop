@@ -24,6 +24,7 @@ import { checkComputerUseWindowScope } from "./window-scope";
 import { supervisorDock } from "./supervisor-dock";
 import { invalidValueMessage } from "../../shared/did-you-mean";
 import { assertRequestCurrent, linkedAbortSignals } from "./request-lifetime";
+import { learnTap } from "./learn-tap";
 
 const MAX_REQUEST_BYTES = 64 * 1024;
 const MAX_AUDIT_ROWS = 200;
@@ -83,6 +84,17 @@ function serializeObservation(app: string, observation: NativeAppObservation): R
   makeObservationCapacity();
   const observationId = randomUUID();
   const elementIndexByPath = new Map(observation.elements.map((element, index) => [element.ref.path.join("/"), index]));
+  // Reach's learning (reach/learn-recorder.ts) sees the observed controls' roles and captions, never more; a no-op unless the owner's Reach switch is on.
+  if (learnTap.active()) {
+    learnTap.observed({
+      app, observationId, at: Date.now(),
+      elements: observation.elements.map((element, index) => {
+        const parent = element.ref.path.length > 0 ? elementIndexByPath.get(element.ref.path.slice(0, -1).join("/")) : undefined;
+        const label = element.title ?? element.description;
+        return { index, role: element.role, ...(label ? { label } : {}), ...(element.value !== undefined ? { value: element.value } : {}), ...(parent !== undefined ? { parent } : {}) };
+      }),
+    });
+  }
   observations.set(observationId, {
     app,
     expiresAt: Date.now() + OBSERVATION_TTL_MS,
@@ -550,6 +562,10 @@ async function runActionWithin(body: Record<string, unknown>, requestSignal: Abo
     // Revocation cannot persist audit/history after native work returns.
     if(body.oneOsExecution!==undefined)oneOsLeaseBroker().assertExecutionCurrent(body.oneOsExecution);
     recordAudit(action,result,action==="typeText"&&typeof body.text==="string"?body.text.length:undefined);
+    // What was done, not what was typed: no text, no pixel. A no-op unless the owner's Reach switch is on.
+    if (learnTap.active() && action!=="status" && action!=="listApps") {
+      learnTap.acted({ app: appName, action, ...(observedElement ? { observationId: observedElement.observationId, elementIndex: Number(body.element_index) } : {}), ...(typeof body.operation==="string" ? { operation: body.operation } : {}), ...(action==="key" && typeof body.key==="string" ? { key: body.key } : {}), ok: result.ok === true, at: Date.now() });
+    }
     return result;
   } catch(error) {return osFailure(error);} finally {nativeLifetime?.dispose();lease?.release();}
 

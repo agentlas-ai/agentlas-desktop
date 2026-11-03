@@ -38,7 +38,7 @@ let _db: Database.Database | null = null;
 let _postContinuityRepairsDeferred = false;
 let _openedStoreMigrationRole: StoreMigrationRole | null = null;
 
-const SCHEMA_VERSION = 139;
+const SCHEMA_VERSION = 140;
 
 /**
  * The schema version this binary's migration ladder produces.
@@ -7282,6 +7282,17 @@ export function initStore(options: StoreInitOptions = {}): void {
   // v139: exact host-recorded message/group associations; legacy marker text is not authority.
   if (userVersion < 139) {
     _db.transaction(() => { createChatFileMessageBindings(_db!); createGeneratedVideoReceiptSchema(_db!); })();
+  }
+
+  // v140 (Science S7): a long run may carry a segment budget (shared/segment-budget.ts) beside its fixed cycle/cost/deadline limits.
+  // `budget_segment_json` is the whole versioned state, `budget_segment_epoch` its generation (the next segment is epoch + 1) so
+  // sweeps can find segmented runs without parsing. NULL on both = no segment budget = every row that existed before and every
+  // surface that has not opted in. Additive columns only; nothing is rewritten.
+  if (userVersion < 140) {
+    _db.transaction(() => {
+      addColumnIfMissing(_db!, "long_runs", "budget_segment_epoch", "budget_segment_epoch INTEGER CHECK(budget_segment_epoch IS NULL OR budget_segment_epoch >= 1)");
+      addColumnIfMissing(_db!, "long_runs", "budget_segment_json", "budget_segment_json TEXT CHECK(budget_segment_json IS NULL OR json_valid(budget_segment_json))");
+    })();
   }
 
   } catch (error) {

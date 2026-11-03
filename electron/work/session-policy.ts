@@ -11,7 +11,7 @@ export function workMainOwnsRouting(input: {
   // A chat bound to an installed team keeps its team routing (regression since 674c0754e: a firm-bound Work chat skipped
   // the firm orchestrator, so its stage workers never ran; gate test-harness-port-outputs-bound, 7c236e74b passed).
   return input.originSurface === "work" && (input.kind === "user" || input.kind == null) && !input.firmId
-    && !input.agentAppMode && input.source !== "science" && input.source !== "automation"
+    && !input.agentAppMode && input.source !== "automation"
     && input.explicitExecution !== true;
 }
 

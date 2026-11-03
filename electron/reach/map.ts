@@ -85,6 +85,9 @@ export function isCurrentDialogCapability(capability: Capability, context: Capab
 // menu confirms at every call. A capability that was only seen (candidate) or has since failed (degraded) does not count.
 export function isUsable(capability: Capability, context: CapabilityPolicyContext = {}): boolean {
   if (capability.generic) return false;
+  // A learned capability (learn.ts) is callable once proven, and stays callable after an app update: its replay finds the controls again, checks the outcome and,
+  // when it cannot go on, hands the caller back to the screen instead of refusing.
+  if (capability.traits?.includes("learned")) return capability.status === "verified" || capability.status === "degraded";
   if (capability.status === "degraded") return false;
   if (capability.tier === "structure") return isDirectMenuCommand(capability, context);
   if (capability.tier === "explored" && !isCurrentDialogCapability(capability, context)) return false;

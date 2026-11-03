@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.3.121 — 2026-11-04
+
+- Reach learns from an agent's own screen work. After an agent does something on an app's screen with the computer tools and it works, Reach keeps the steps (control roles and captions, never what was typed) as a candidate, turns it into a callable port after a second matching success, heals the port after the app updates, and hands back to the screen instead of failing when it cannot. A check that already held before the work is refused as proof of the work. Learning runs only while Reach's switch is on.
+- A first-run plan screen follows sign-in, once per account: Pro is preselected, Free is shown at the same size, and a trial is named only when the server says the account can start one. Settings has a plan row to come back to the plans.
+- Long runs can park when their segment allowance (time, tokens, cost, tool calls or cycles) is spent and continue after you extend it; a Science research loop paused that way shows "budget". The local database moves to schema 140 for this, with a backup taken before the upgrade.
+- The browser approval sheet reads Science's differences from one table, and Science is bound at its current main.
+- The Build intro keeps its layout on a narrow window, and its send button reads as enabled or disabled.
+- Agentlas cloud computer host (used only when the app runs on an Agentlas cloud computer; a normal install never reads it): it renews only on real activity, saves and restores a snapshot of what you would miss on a new computer, and logs a non-secret cause when it fails to boot.
+
+This release binds Agentlas OS v1.2.78 at e13ae0df5ca866888bfff69ae7b69cfdb330e267; public runtime asset `agentlas-os-runtime-v1.2.78.tar.gz` is pinned at SHA-256 `8f7bf3cc0f5c686887e5b207d5f191645aab0eddd992ff1d2783611a9f79fbb1`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.120 — 2026-11-03
 
 - Windows: attachments, media previews, Work attachments, receipts, skills and other files that Windows reported with a different device number on each read are opened again. 52 identity checks now compare the file index on Windows; macOS and Linux keep the strict check.

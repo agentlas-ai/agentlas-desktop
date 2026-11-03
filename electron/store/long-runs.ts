@@ -30,6 +30,18 @@ import {
   type LongRunWorkerState,
   type LongRunWorkspaceBinding,
 } from "../../shared/long-run";
+import {
+  evaluateSegmentBudget,
+  parseSegmentBudgetState,
+  startSegmentBudget,
+  observeSegmentUsage,
+  resumeSegmentHostWait,
+  suspendSegmentHostWait,
+  type SegmentBudgetExhaustReason,
+  type SegmentBudgetLimits,
+  type SegmentBudgetState,
+  type SegmentBudgetUsage,
+} from "../../shared/segment-budget";
 import { GOAL_OWNER_ANSWER_REQUIRED, GOAL_OWNER_HOLD_BLOCKED_REASONS, goalHeldForOwnerAnswer, goalHeldForOwnerGrant } from "../../shared/goal-display-state";
 import { desktopStoreTransaction, emitDesktopStoreChange } from "./change-bus";
 import { getDb } from "./db";
@@ -211,6 +223,8 @@ type LongRunRow = {
   max_cost_usd: number | null;
   wallclock_deadline: string | null;
   max_workers: number | null;
+  budget_segment_epoch?: number | null;
+  budget_segment_json?: string | null;
   cycle_count: number;
   cost_used_usd: number;
   last_progress_key: string | null;
@@ -268,6 +282,17 @@ function integerArray(raw: string): number[] {
   ))).sort((left, right) => left - right);
 }
 
+/** A stored segment budget, or null for every run that never had one (and for a value that is not exactly the versioned shape). */
+function readSegmentColumn(raw: string | null | undefined): SegmentBudgetState | null {
+  if (!raw) return null;
+  try { return parseSegmentBudgetState(JSON.parse(raw)); } catch { return null; }
+}
+
+function segmentField(raw: string | null | undefined): { segment?: SegmentBudgetState } {
+  const segment = readSegmentColumn(raw);
+  return segment ? { segment } : {};
+}
+
 function rowToLongRun(row: LongRunRow | undefined): LongRunRecord | null {
   if (!row || !isLongRunStatus(row.status)) return null;
   return {
@@ -289,6 +314,8 @@ function rowToLongRun(row: LongRunRow | undefined): LongRunRecord | null {
       maxCostUsd: row.max_cost_usd,
       wallclockDeadline: row.wallclock_deadline,
       maxWorkers: row.max_workers,
+      // Absent (not null) for every run without one, so the budget a run without a segment reports is byte-identical to before.
+      ...segmentField(row.budget_segment_json),
     },
     cycleCount: row.cycle_count,
     costUsedUsd: row.cost_used_usd,
@@ -907,7 +934,7 @@ export function transitionLongRun(input: {
     ).run(
       input.to,
       input.to === "paused"
-        ? isLongRunPauseReason(input.reason) ? input.reason : current.surface === "science" ? "agent_paused" : "user"
+        ? isLongRunPauseReason(input.reason) ? input.reason : "user"
         : null,
       input.to === "blocked" ? input.reason?.slice(0, 500) ?? "blocked" : null,
       input.appInstanceId ?? null,
@@ -1366,6 +1393,12 @@ export function resumeLongRunByUser(runId: string, appInstanceId: string, expect
     throw new Error(`long_run_resume_not_allowed:${current.status}`);
   }
   if (liveLongRunAttemptCount(runId)) throw new Error("auto_goal_resume_attempt_live");
+  // A run parked on its segment budget has nothing to resume into until the owner extends it; Resume is that extension.
+  if (current.budget.segment && (current.budget.segment.status === "exhausted" || current.pauseReason === "budget")) {
+    const extended = extendLongRunSegment({ runId, requestId: `resume:${expectedVersion}`, appInstanceId });
+    if (extended.status !== "paused") return extended;
+    return transitionLongRun({ runId, to: "queued", actorKind: "user", reason: "user-resume", appInstanceId, expectedVersion: extended.version });
+  }
   return transitionLongRun({
     runId,
     to: ["running", "waiting_tool", "verifying", "waiting_user"].includes(current.status) ? "running" : "queued",
@@ -1374,6 +1407,169 @@ export function resumeLongRunByUser(runId: string, appInstanceId: string, expect
     appInstanceId,
     expectedVersion,
   });
+}
+
+// ── Segment budget (PLAN S7-3) ────────────────────────────────────────────────────────────────────────────────────────────
+// A run that opted in carries a segment allowance (shared/segment-budget.ts). When an allowance is spent the run parks `paused`
+// with pause reason `budget`; the owner extends it (explicit extend, or the ordinary Resume, which extends first) and the next
+// segment starts. A run without a segment is not touched by any of this. Science rows are mirrors of the research loop: the
+// loop's own execution budget decides there, and the projection copies its state in (mirrorScienceSegmentBudget).
+
+export const LONG_RUN_SEGMENT_EXHAUSTED_CODE = "long_run_segment_budget_exhausted";
+
+const SEGMENT_PARKABLE_STATUSES = new Set<LongRunStatus>(["queued", "running", "waiting_worker", "waiting_tool", "waiting_user", "verifying", "pausing"]);
+
+function putSegmentInDb(runId: string, state: SegmentBudgetState | null, now: string): void {
+  getDb().prepare("UPDATE long_runs SET budget_segment_epoch = ?, budget_segment_json = ?, updated_at = ?, version = version + 1 WHERE id = ?")
+    .run(state?.epoch ?? null, state ? JSON.stringify(state) : null, now, runId);
+}
+
+/** The segment's cycle and cost figures are run-wide totals minus the totals when the segment began. */
+function segmentWithRunCounters(state: SegmentBudgetState, run: LongRunRecord): SegmentBudgetState {
+  if (!state.baseline) return state;
+  return { ...state, usage: { ...state.usage,
+    cycles: Math.max(0, run.cycleCount - state.baseline.cycles),
+    costUsd: Math.max(0, run.costUsedUsd - state.baseline.costUsd) } };
+}
+
+/** Opts a run into segment budgeting: segment 1 starts now. A run that has one is extended, never re-begun. */
+export function beginLongRunSegment(input: { runId: string; limits?: Partial<SegmentBudgetLimits>; nowMs?: number }): LongRunRecord {
+  const nowMs = input.nowMs ?? Date.now();
+  const db = getDb();
+  db.transaction(() => {
+    const run = getLongRun(input.runId);
+    if (!run) throw new Error(`long_run_not_found:${input.runId}`);
+    if (!ownsHostGoalLoop(run.surface)) throw new Error("science_projection_read_only");
+    if (LONG_RUN_TERMINAL_STATUSES.has(run.status)) throw new Error(`long_run_segment_terminal:${run.status}`);
+    if (run.budget.segment) throw new Error("long_run_segment_already_begun");
+    const state = startSegmentBudget(null, { nowMs, limits: input.limits, baseline: { cycles: run.cycleCount, costUsd: run.costUsedUsd } });
+    const now = new Date(nowMs).toISOString();
+    putSegmentInDb(run.id, state, now);
+    appendEventInDb({ runId: run.id, kind: "run.segment_budget_started", actorKind: "host", payload: { epoch: state.epoch, limits: state.limits,
+      deadlineAt: state.deadlineAt }, at: now });
+  }).immediate();
+  emitDesktopStoreChange({ entity: "long-run", id: input.runId });
+  return getLongRun(input.runId)!;
+}
+
+/**
+ * Re-reads the segment against the clock and the run's counters, records the usage given, and parks the run when an allowance
+ * is spent. Parking waits for the live attempt (if any) to end: the run then reads `segment.status === "exhausted"` and
+ * `longRunContinueDecision` refuses to continue, and the next call parks it. Nothing happens for a run without a segment.
+ */
+export function evaluateLongRunSegment(runId: string, input: { nowMs?: number; usage?: Partial<SegmentBudgetUsage> } = {}):
+  { run: LongRunRecord | null; exhausted: SegmentBudgetExhaustReason | null; parked: boolean } {
+  const nowMs = input.nowMs ?? Date.now();
+  const db = getDb();
+  let changed = false;
+  let parked = false;
+  db.transaction(() => {
+    const run = getLongRun(runId);
+    const segment = run?.budget.segment;
+    if (!run || !segment || !ownsHostGoalLoop(run.surface)) return;
+    const now = new Date(nowMs).toISOString();
+    let next = segmentWithRunCounters(segment, run);
+    if (input.usage) next = observeSegmentUsage(next, input.usage, nowMs);
+    next = evaluateSegmentBudget(next, nowMs);
+    if (JSON.stringify(next) !== JSON.stringify(segment)) {
+      putSegmentInDb(run.id, next, now);
+      changed = true;
+      if (next.status === "exhausted" && segment.status !== "exhausted") {
+        appendEventInDb({ runId: run.id, kind: "run.segment_budget_exhausted", actorKind: "host", payload: { epoch: next.epoch,
+          reason: next.exhaustedReason, usage: next.usage, limits: next.limits }, at: now });
+      }
+    }
+    if (next.status !== "exhausted") return;
+    const fresh = getLongRun(run.id)!;
+    if (!SEGMENT_PARKABLE_STATUSES.has(fresh.status) || liveLongRunAttemptCount(run.id) > 0) return;
+    // No live attempt, so there is no turn to wind down: the run rests between turns and goes straight to paused, as the
+    // app-quit pause does (the pausing step exists to let a running turn stop first).
+    db.prepare("UPDATE long_runs SET status = 'paused', pause_reason = 'budget', paused_at = ?, updated_at = ?, version = version + 1 WHERE id = ? AND version = ?")
+      .run(now, now, run.id, fresh.version);
+    appendEventInDb({ runId: run.id, kind: "run.status_changed", actorKind: "host",
+      payload: { from: fresh.status, to: "paused", reason: "budget", segmentEpoch: next.epoch, segmentReason: next.exhaustedReason }, at: now });
+    parked = true;
+    changed = true;
+  }).immediate();
+  if (changed) emitDesktopStoreChange({ entity: "long-run", id: runId });
+  const run = getLongRun(runId);
+  return { run, exhausted: run?.budget.segment?.status === "exhausted" ? run.budget.segment.exhaustedReason : null, parked };
+}
+
+/** A host scheduling hold is not work: the segment clock stops while it is open and the deadline moves out when it closes. */
+export function setLongRunSegmentHostWait(runId: string, open: boolean, nowMs = Date.now()): LongRunRecord | null {
+  const db = getDb();
+  db.transaction(() => {
+    const run = getLongRun(runId);
+    const segment = run?.budget.segment;
+    if (!run || !segment || !ownsHostGoalLoop(run.surface)) return;
+    const next = open ? suspendSegmentHostWait(segment, nowMs) : resumeSegmentHostWait(segment, nowMs);
+    if (JSON.stringify(next) !== JSON.stringify(segment)) putSegmentInDb(run.id, next, new Date(nowMs).toISOString());
+  }).immediate();
+  emitDesktopStoreChange({ entity: "long-run", id: runId });
+  return getLongRun(runId);
+}
+
+/**
+ * The owner extends a spent segment: epoch + 1, fresh clock and usage, and a run parked on the budget goes back to queued. Idempotent
+ * per `requestId` (a retried click or message is not a second extension).
+ */
+export function extendLongRunSegment(input: { runId: string; requestId: string; limits?: Partial<SegmentBudgetLimits>; nowMs?: number;
+  appInstanceId?: string | null }): LongRunRecord {
+  const requestId = requiredText(input.requestId, "long_run_segment_request_id_required", 200);
+  const nowMs = input.nowMs ?? Date.now();
+  const sourceEventId = `segment-extend:${input.runId}:${requestId}`;
+  const db = getDb();
+  db.transaction(() => {
+    const run = getLongRun(input.runId);
+    if (!run) throw new Error(`long_run_not_found:${input.runId}`);
+    if (!ownsHostGoalLoop(run.surface)) throw new Error("science_projection_read_only");
+    const replay = db.prepare("SELECT 1 FROM long_run_events WHERE run_id = ? AND json_extract(payload_json, '$.runtimeEvidence.sourceEventId') = ? LIMIT 1")
+      .get(run.id, sourceEventId);
+    if (replay) return;
+    if (LONG_RUN_TERMINAL_STATUSES.has(run.status)) throw new Error(`long_run_segment_terminal:${run.status}`);
+    const segment = run.budget.segment;
+    if (!segment) throw new Error("long_run_segment_missing");
+    // A spent clock is not yet written when nobody evaluated since: read it the way the evaluator would.
+    const current = evaluateSegmentBudget(segmentWithRunCounters(segment, run), nowMs);
+    if (current.status !== "exhausted") throw new Error("long_run_segment_not_exhausted");
+    if (liveLongRunAttemptCount(run.id) > 0) throw new Error("long_run_segment_attempt_live");
+    const next = startSegmentBudget(current, { nowMs, limits: input.limits, baseline: { cycles: run.cycleCount, costUsd: run.costUsedUsd } });
+    const now = new Date(nowMs).toISOString();
+    putSegmentInDb(run.id, next, now);
+    appendEventInDb({ runId: run.id, kind: "run.segment_budget_extended", actorKind: "user", sourceEventId,
+      payload: { previousEpoch: current.epoch, epoch: next.epoch, limits: next.limits, deadlineAt: next.deadlineAt }, at: now });
+    if (run.status === "paused" && run.pauseReason === "budget") {
+      assertLongRunTransition("paused", "queued");
+      const fresh = getLongRun(run.id)!;
+      db.prepare(`UPDATE long_runs SET status = 'queued', pause_reason = NULL, paused_at = NULL, app_instance_id = COALESCE(?, app_instance_id),
+        updated_at = ?, version = version + 1 WHERE id = ? AND version = ?`).run(input.appInstanceId ?? null, now, run.id, fresh.version);
+      appendEventInDb({ runId: run.id, kind: "run.status_changed", actorKind: "user",
+        payload: { from: "paused", to: "queued", reason: "segment-extended", segmentEpoch: next.epoch }, at: now });
+    }
+  }).immediate();
+  emitDesktopStoreChange({ entity: "long-run", id: input.runId });
+  return getLongRun(input.runId)!;
+}
+
+/**
+ * Projection-only: the Science loop's own execution budget decided; this copies its state onto the mirror row so Work, One and
+ * the phone read the same segment shape for every surface. Never evaluates, never parks, never starts anything.
+ */
+export function mirrorScienceSegmentBudget(runId: string, state: SegmentBudgetState | null): boolean {
+  let wrote = false;
+  const db = getDb();
+  db.transaction(() => {
+    const run = getLongRun(runId);
+    if (!run || ownsHostGoalLoop(run.surface)) throw new Error("science_projection_binding_scope_invalid");
+    const parsed = state ? parseSegmentBudgetState(state) : null;
+    if (state && !parsed) throw new Error("science_projection_segment_budget_invalid");
+    if (JSON.stringify(parsed) === JSON.stringify(run.budget.segment ?? null)) return;
+    putSegmentInDb(run.id, parsed, new Date().toISOString());
+    wrote = true;
+  }).immediate();
+  if (wrote) emitDesktopStoreChange({ entity: "long-run", id: runId });
+  return wrote;
 }
 
 export function addLongRunTask(input: {
@@ -2253,7 +2449,27 @@ export function applyScienceLongRunProjectionStatus(input: {
   // Science owns execution and pause policy. This read-only projection must
   // preserve its canonical state, including approval waits and failures; the
   // host-owned Goal's nonblocking policy must not relabel them as runnable.
-  if (current.status === input.to) return current;
+  if (current.status === input.to) {
+    // Same status, new cause: a loop already resting for the host's sake (app closed, restart, a generic agent pause) that is then
+    // checkpointed by its budget is still paused, but resuming it now needs the owner's extension, so the row says "budget". Only
+    // that one upgrade: an owner pause or an approval wait is never relabelled, and no other cause is downgraded by a later snapshot
+    // (a truncated event window reports the generic cause).
+    if (input.to === "paused" && input.pauseReason === "budget"
+      && ["app_closed", "crash_recovery", "agent_paused"].includes(current.pauseReason ?? "")) {
+      const at = new Date().toISOString();
+      getDb().transaction(() => {
+        const changed = getDb().prepare("UPDATE long_runs SET pause_reason = ?, updated_at = ?, version = version + 1 WHERE id = ? AND status = 'paused' AND version = ?")
+          .run(input.pauseReason, at, current.id, current.version);
+        if (changed.changes !== 1) throw new Error("science_projection_status_conflict");
+        appendEventInDb({ runId: current.id, kind: "science.projection_status_changed", actorKind: "system", actorId: "science-projection",
+          payload: { from: "paused", to: "paused", pauseReason: input.pauseReason, previousPauseReason: current.pauseReason,
+            sourceVersion: input.sourceVersion, sourceStateSha256: input.sourceStateSha256 }, at });
+      }).immediate();
+      emitDesktopStoreChange({ entity: "long-run", id: current.id });
+      return getLongRun(current.id) ?? current;
+    }
+    return current;
+  }
   if (LONG_RUN_TERMINAL_STATUSES.has(current.status)) {
     throw new Error(`science_projection_terminal_conflict:${current.status}->${input.to}`);
   }
@@ -2450,6 +2666,8 @@ export function longRunContinueDecision(goalId: string, now: Date = new Date()):
     return decision(false, "goal_paused");
   }
   if (run.status === "draft") return decision(false, "goal_draft");
+  // Only a run that opted in has a segment. Its spent allowance ends the turn loop at the next decision, never mid-turn.
+  if (run.budget.segment?.status === "exhausted") return decision(false, "segment_budget_exhausted");
   // A pending receipt, revision, wait, exhausted allowance or empty task list is
   // context for the next planning turn, never proof the user's Goal is finished.
   return decision(true, openTaskCount > 0 ? "open_tasks_remain" : "goal_continue_planning");

@@ -4,7 +4,6 @@ import { getAuthenticatedSessionBinding } from '../auth';
 import { managedOneAuthentication, managedOneAuthenticationEpoch, managedOneHeaders, wasManagedOneConfigured } from '../managed-one/auth';
 import type { FinanceDataRequest, FinanceDataResult, FinanceSearchResult, FinanceWorkspace } from '../../shared/finance';
 import type { FinanceDataSourceOption } from '../../shared/finance-experience';
-import type { FinanceQuoteRefreshResult } from './quote-coverage';
 
 const symbol = z.string().regex(/^[A-Za-z0-9.^_-]{1,80}$/);
 const text = (max:number,min=0) => z.string().min(min).max(max).refine(value=>!/[\u0000-\u001f\u007f]/.test(value));
@@ -113,7 +112,6 @@ export async function queryManagedFinanceData(input:FinanceDataRequest,assets:Fi
     return{status:'partial',sourceUrls:[DOC],asOf:result.asOf,retrievedAt:new Date().toISOString(),columns:['Provider symbol','Price','Quote limitations','Volume'],rows:[[result.symbol,result.price,'Provider trading-day quote; currency and venue unverified; not verified real-time.',result.volume]],warnings:[CLOUD_FINANCE_LIMITS,'finance_cloud_provider_identity_unverified'],providers:[{id:'alpha-vantage',label:'Alpha Vantage via Agentlas Cloud',status:'partial',coverage:CLOUD_FINANCE_LIMITS,rights:'Provider account entitlement and redistribution rights are not established by public API access.',sourceUrls:[DOC]}]};
   }catch(error){return empty(boundary(error,context));}
 }
-/** Symbol-only quotes cannot be attached to a saved currency/listing identity. No paid requests are made. */
-export function managedFinanceQuoteRefresh(workspace:FinanceWorkspace,includeCoverage=false):FinanceQuoteRefreshResult {
-  return{baseRevision:workspace.revision,status:'unavailable',operations:[],message:'finance_cloud_provider_identity_unverified: quote currency and listing venue are unverified; no watchlist quotes were imported.',...(includeCoverage?{quoteCoverage:{version:1 as const,total:workspace.watchlist.length,attempted:0,succeeded:0,failed:0,unattempted:workspace.watchlist.length}}:{})};
-}
+// Watchlist quote refresh no longer lives here. A server-relayed quote is one symbol with no verified currency or listing
+// venue, so it cannot be imported as a quote. A Cloud computer refreshes through the direct Yahoo path in data.ts
+// (refreshFinanceQuotes -> managedDirectMarket); this module stays for asset search, status, and the single-price fallback.

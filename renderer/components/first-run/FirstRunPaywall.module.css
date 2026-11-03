@@ -1,0 +1,410 @@
+/*
+* Desktop first-run paywall. Same window, drag bar, brand mark and tokens as the other
+ * first-run screens (FirstRun.module.css supplies .root/.drag/.brand); only the paywall's own parts live here.
+ * Values come from the existing Desktop tokens in app/globals.css — no new colour, face or radius.
+ *
+ * Rules carried from the design review:
+ *  - "Continue with Free" and the buy button are the same size (one grid, two equal columns); only the
+ *    fill differs.
+ *  - The chosen plan is shown by a thicker outline AND a filled radio AND a label, never by colour alone.
+ *  - Korean never breaks inside a word; money, plan names and buttons stay on one line.
+ */
+
+.stage {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 8px 32px 24px;
+}
+
+.frame {
+  position: relative;
+  width: min(560px, 100%);
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.close {
+  position: absolute;
+  top: -4px;
+  right: -8px;
+  width: 36px;
+  height: 36px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--ink-soft);
+  font-size: 22px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.close:hover {
+  background: var(--fill-1);
+  color: var(--black);
+}
+
+.head {
+  text-align: center;
+  padding: 8px 40px 0;
+}
+
+.head h1 {
+  margin: 0;
+  font-family: var(--rd-f-display);
+  font-size: clamp(22px, 2.3vw + 6px, 28px);
+  line-height: 1.25;
+  font-weight: 700;
+  letter-spacing: -0.04em;
+}
+
+.head h1:focus {
+  outline: none;
+}
+
+.head p {
+  margin: 10px auto 0;
+  color: var(--ink-soft);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-width: 0;
+}
+
+.sectionTitle {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+/* ── plan rows ─────────────────────────────── */
+.plans {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.plan {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 12px;
+  width: 100%;
+  min-height: 56px;
+  padding: 14px 16px;
+  border: 0;
+  border-radius: 14px;
+  background: var(--paper-2);
+  box-shadow: inset 0 0 0 1px var(--paper-edge);
+  color: var(--ink);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.plan:hover {
+  background: var(--paper-3);
+}
+
+.plan[aria-checked="true"] {
+  background: var(--white);
+  box-shadow: inset 0 0 0 2px var(--black), var(--shadow-1);
+}
+
+.radio {
+  box-sizing: border-box;
+  width: 18px;
+  height: 18px;
+  margin-top: 2px;
+  border-radius: 999px;
+  box-shadow: inset 0 0 0 1.5px var(--ink-soft);
+  background: var(--white);
+}
+
+.plan[aria-checked="true"] .radio {
+  box-shadow: inset 0 0 0 5px var(--black);
+}
+
+.planBody {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.planName {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.tag {
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--black);
+  color: var(--white);
+  font-size: 11px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.tagSoft {
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--info-soft);
+  color: var(--ink);
+  font-size: 11px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.planLine {
+  color: var(--ink-soft);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.price {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.price strong {
+  font-size: 16px;
+  font-weight: 750;
+  letter-spacing: -0.02em;
+}
+
+.price span {
+  color: var(--ink-soft);
+  font-size: 12px;
+}
+
+.note {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+/* ── trial schedule ─────────────────────────────── */
+.card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  border-radius: 14px;
+  background: var(--paper-2);
+  box-shadow: inset 0 0 0 1px var(--paper-edge);
+}
+
+.card h2 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.schedule {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.schedule li {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr);
+  gap: 12px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.schedule b {
+  font-weight: 700;
+}
+
+.schedule span {
+  color: var(--ink-soft);
+}
+
+.legalBody {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+
+.links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+}
+
+.link {
+  min-height: 32px;
+  display: inline-flex;
+  align-items: center;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.linkButton {
+  min-height: 32px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+
+.status {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 16px;
+  border-radius: 14px;
+  background: var(--paper-2);
+  box-shadow: inset 0 0 0 1px var(--paper-edge);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.status[data-tone="warn"] {
+  background: var(--warn-soft);
+}
+
+.spinner {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  border-radius: 999px;
+  border: 2px solid var(--paper-edge-strong);
+  border-top-color: var(--black);
+  animation: spin 0.9s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spinner {
+    animation: none;
+    border-top-color: var(--paper-edge-strong);
+    border-style: dashed;
+  }
+}
+
+/* ── dock: summary + two equal buttons ─────────────────────────────── */
+.dock {
+  flex: 0 0 auto;
+  width: min(560px, calc(100% - 64px));
+  margin: 0 auto;
+  padding: 12px 0 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  border-top: 1px solid var(--paper-edge);
+  background: var(--rd-bg);
+}
+
+.summary {
+  margin: 0;
+  color: var(--ink);
+  font-size: 14px;
+  line-height: 1.5;
+  text-align: center;
+}
+
+.buttons {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.buy,
+.free {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 48px;
+  padding: 0 16px;
+  border: 0;
+  border-radius: 999px;
+  font: inherit;
+  font-size: 16px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.buy {
+  background: var(--black);
+  color: var(--white);
+  box-shadow: var(--shadow-1);
+}
+
+.buy:hover:not(:disabled) {
+  background: var(--black-soft);
+}
+
+.free {
+  background: var(--white);
+  color: var(--ink);
+  box-shadow: inset 0 0 0 1.5px var(--ink-soft);
+}
+
+.free:hover:not(:disabled) {
+  background: var(--paper-3);
+}
+
+.buy:disabled {
+  opacity: 0.6;
+  cursor: progress;
+}
+
+.root :focus-visible {
+  outline: 2px solid var(--info);
+  outline-offset: 2px;
+}
+
+@media (max-width: 640px) {
+  .stage {
+    padding: 8px 16px 16px;
+  }
+
+  .dock {
+    width: calc(100% - 32px);
+  }
+
+  .buttons {
+    grid-template-columns: 1fr;
+  }
+}

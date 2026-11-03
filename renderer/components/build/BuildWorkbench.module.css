@@ -51,20 +51,22 @@
 .empty { text-align: center; padding: 65px 20px; border: 1px dashed var(--builder-line); border-radius: 16px; font-size: 14px; color: var(--rd-ink-2); }
 .empty p { color: var(--rd-ink-3); font-size: 13px; }
 .intro { min-width: 0; overflow-x: hidden; min-height: 100%; padding: 18px 24px 0; }
-.introHeader { display: flex; justify-content: space-between; }
-.introBody { min-width: 0; max-width: 100%; width: min(784px,100%); margin: 95px auto 0; text-align: center; }
+.introHeader { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
+.introBody { min-width: 0; max-width: 100%; width: min(784px,100%); margin: clamp(24px,9vh,95px) auto 0; padding-bottom: 32px; text-align: center; }
 .introAvatar { width: 68px; height: 68px; object-fit: contain; }
 .intro h1 { font-size: 29px; line-height: 1.4; font-weight: 500; letter-spacing: -.9px; margin: 15px 0 40px; }
 .introComposer { display: flex; align-items: center; gap: 12px; min-height: 58px; padding: 8px 12px; border: 1px solid var(--builder-line); border-radius: 29px; background: var(--rd-surface); box-shadow: 0 3px 8px #00000006; }
 .introComposer textarea { flex: 1; min-width: 0; min-height: 24px; max-height: 130px; resize: vertical; border: 0; background: transparent; color: var(--rd-ink); line-height: 1.6; font-size: 15px; padding: 3px 0; }
 .introComposer textarea::placeholder { color: var(--rd-ink-3); }
-.iconButton, .sendButton { width: 34px; height: 34px; flex-shrink: 0; display: grid; place-items: center; border: 0; border-radius: 50%; background: transparent; color: var(--rd-ink); }
-.sendButton { background: var(--rd-ink); color: var(--rd-bg); }
-.suggestions { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 18px; margin: 22px 0 65px; }
-.suggestions button { padding: 18px 16px; min-height: 140px; border: 1px solid var(--builder-line); border-radius: 23px; text-align: left; background: var(--rd-surface); color: var(--rd-ink); box-shadow: 0 3px 6px #00000004; display: flex; flex-direction: column; align-items: flex-start; gap: 10px; }
+.iconButton, .sendButton { width: 36px; height: 36px; flex-shrink: 0; display: grid; place-items: center; border: 0; border-radius: 50%; background: transparent; color: var(--rd-ink); }
+.iconButton svg, .sendButton svg { display: block; }
+.sendButton { background: var(--rd-ink); color: #fff; transition: background-color .15s ease, color .15s ease; }
+.sendButton:disabled { background: var(--rd-hair); color: var(--rd-ink-4); cursor: default; }
+.suggestions { display: grid; grid-template-columns: repeat(auto-fit,minmax(min(100%,210px),1fr)); align-items: stretch; gap: 14px; margin: 22px 0 40px; }
+.suggestions button { min-width: 0; padding: 18px 16px; min-height: 0; border: 1px solid var(--builder-line); border-radius: 23px; text-align: left; background: var(--rd-surface); color: var(--rd-ink); box-shadow: 0 3px 6px #00000004; display: flex; flex-direction: column; align-items: flex-start; gap: 10px; }
 .suggestions img { width: 25px; height: 25px; object-fit: contain; }
-.suggestions strong { font-size: 14px; font-weight: 550; }
-.suggestions span { font-size: 12px; color: var(--rd-ink-3); line-height: 1.65; }
+.suggestions strong { font-size: 14px; font-weight: 550; line-height: 1.4; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; overflow-wrap: anywhere; }
+.suggestions span { font-size: 12px; color: var(--rd-ink-3); line-height: 1.65; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; overflow-wrap: anywhere; }
 .templateLabel { color: var(--rd-ink-3); background: transparent; border: 0; font-size: 14px; padding: 10px; }
 .templateFan { display: flex; justify-content: center; margin: 35px auto 0; height: 210px; overflow: hidden; padding-top: 8px; }
 .templateFan button { display: flex; flex-direction: column; gap: 14px; align-items: flex-start; width: 230px; flex-shrink: 0; padding: 23px; border: 1px solid var(--builder-line); border-radius: 24px; background: var(--rd-surface); color: var(--rd-ink); text-align: left; box-shadow: 0 2px 6px #00000006; }

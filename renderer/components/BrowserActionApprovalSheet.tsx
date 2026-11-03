@@ -30,6 +30,20 @@ const ACTION_LABEL: Record<string, { ko: string; en: string }> = {
   action: { ko: "브라우저 작업", en: "Browser action" },
 };
 
+/**
+ * How a screen pack's browser approvals differ (PLAN S9). Science lists every chat's request because its screen has one
+ * conversation per project, answers in its own composer-less sheet, labels the sheet, and has no per-room deny line;
+ * every other surface behaves like Work. One place instead of four string comparisons.
+ */
+const SURFACE_APPROVAL = {
+  science: { listsEveryChat: true, composerInPlace: false, kicker: "Science" as string | null, denyNote: false },
+  one: { listsEveryChat: false, composerInPlace: true, kicker: null as string | null, denyNote: true },
+  work: { listsEveryChat: false, composerInPlace: true, kicker: null as string | null, denyNote: true },
+} as const;
+function approvalPolicy(surface: string | undefined) {
+  return SURFACE_APPROVAL[(surface === "science" || surface === "one" ? surface : "work")];
+}
+
 export function BrowserActionApprovalSheet({ chatId, onStandaloneHeightChange, supervisedRoom = false, pinRequestId, deck: deckOverride }: {
   // Kept temporarily for call-site compatibility only. Main owns authority;
   // the renderer must never auto-resolve from the currently visible setting.
@@ -77,7 +91,7 @@ export function BrowserActionApprovalSheet({ chatId, onStandaloneHeightChange, s
       return owner.surface === "work" && owner.chatId === null && owner.context === "build";
     }
     if (owner.context === "build" || owner.surface !== surface) return false;
-    if (surface === "science") return true;
+    if (approvalPolicy(surface).listsEveryChat) return true;
     // 대화가 없는 요청은 오너가 전환기 점 목록에서 열었을 때만(아래 orphansRevealed).
     return owner.chatId === null ? orphansRevealed : owner.chatId === currentChatId;
   });
@@ -98,7 +112,7 @@ export function BrowserActionApprovalSheet({ chatId, onStandaloneHeightChange, s
   const usesConversationComposer = !supervisedRoom && Boolean(
     req?.owner
     && req.owner.context !== "build"
-    && req.owner.surface !== "science"
+    && approvalPolicy(req.owner.surface).composerInPlace
     && currentChatId !== null
     && req.owner.chatId === currentChatId,
   );
@@ -279,9 +293,7 @@ export function BrowserActionApprovalSheet({ chatId, onStandaloneHeightChange, s
   const remainingSeconds = Math.max(0, Math.ceil((req.expiresAt - now) / 1_000));
   const approvalKicker = req.owner?.context === "build"
     ? "Build"
-    : req.owner?.surface === "science"
-      ? "Science"
-      : null;
+    : approvalPolicy(req.owner?.surface).kicker;
   const summaryLine = isUnsafeCode ? (unsafeCodeDetail || req.summary) : req.summary;
   const codeText = [summaryLine || (ko ? "실행 전에 확인하세요." : "Confirm before running."), req.target ? `→ ${req.target}` : ""]
     .filter(Boolean).join("\n");
@@ -316,7 +328,7 @@ export function BrowserActionApprovalSheet({ chatId, onStandaloneHeightChange, s
         locked={submittingId === req.requestId}
         onChoose={(id, note) => resolve(id as BrowserApprovalDecision, note)}
         // The line goes to the room the action runs in; a build or Science action (or one with no room) has none to tell.
-        denyNote={req.owner?.chatId && req.owner.context !== "build" && req.owner.surface !== "science" ? { draftKey: req.requestId } : null}
+        denyNote={req.owner?.chatId && req.owner.context !== "build" && approvalPolicy(req.owner.surface).denyNote ? { draftKey: req.requestId } : null}
         footer={feedbackNode}
         deck={deck}
         trailing={<span className="baa-timer" title={ko ? "남은 시간 — 지나면 실행되지 않습니다" : "Time left — the action is not run after it ends"}>{ko ? `${remainingSeconds}초` : `${remainingSeconds}s`}</span>}

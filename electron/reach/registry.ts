@@ -65,7 +65,8 @@ export class CapabilityRegistry {
     if (!existing || existing.fingerprint === fingerprint) return 0;
     await this.mutate(key, fingerprint, (file) => {
       for (const capability of file.capabilities) {
-        if (capability.status === "verified" && capability.boundFingerprint !== fingerprint) { capability.status = "candidate"; stale += 1; }
+        // A learned capability stays callable across an update: its replay finds the controls again (learn.ts locate) and checks the outcome.
+        if (capability.status === "verified" && capability.boundFingerprint !== fingerprint && capability.traits?.includes("learned") !== true) { capability.status = "candidate"; stale += 1; }
       }
       file.attempts = {};
     });
@@ -136,6 +137,14 @@ export class CapabilityRegistry {
       }
     });
     return { added, updated };
+  }
+
+  // A learned capability (learn.ts) is written whole: the learner decides what the new steps, revision and status are. Replaces the entry with the same id.
+  async put(key: string, fingerprint: string, capability: Capability): Promise<void> {
+    await this.mutate(key, fingerprint, (file) => {
+      const at = file.capabilities.findIndex((item) => item.id === capability.id);
+      if (at >= 0) file.capabilities[at] = capability; else file.capabilities.push(capability);
+    });
   }
 
   async recordAttempt(key: string, fingerprint: string, capabilityId: string, ok: boolean, code: string, day: string): Promise<number> {

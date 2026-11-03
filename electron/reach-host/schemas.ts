@@ -48,4 +48,38 @@ export const REACH_PORT_SCHEMAS = {
     properties: { app: { type: "string" }, capability: { type: "string" } },
   },
   status: { type: "object", properties: {} },
+  learn: {
+    type: "object",
+    required: ["app", "name", "steps", "succeeded", "check"],
+    properties: {
+      app: { type: "string", description: "an app key from reach.map or its name" },
+      name: { type: "string", description: "a short phrase naming the work, like a function name (3 to 60 characters)" },
+      description: { type: "string" },
+      succeeded: { type: "boolean", description: "true only if the work really succeeded" },
+      check: {
+        type: "object",
+        required: ["kind", "role"],
+        description: "how a later run can tell the work is done: a control that is present, or whose value changed. label may be empty for a control with no caption",
+        properties: { kind: { type: "string", enum: ["element-present", "element-value-changed"] }, role: { type: "string" }, label: { type: "string" } },
+      },
+      steps: {
+        type: "array",
+        description: "what was done on the screen, in order. Typed text is not stored: it becomes a parameter. Never include a password or card field.",
+        items: {
+          type: "object",
+          required: ["op"],
+          properties: {
+            op: { type: "string", enum: ["click", "type", "set_value", "key"] },
+            role: { type: "string", description: "the control's role from get_app_state" },
+            label: { type: "string", description: "the control's caption" },
+            key: { type: "string", description: "for op key" },
+            path: { type: "array", items: { type: "string" }, description: "captions of the parents, innermost first (optional)" },
+            nearby: { type: "array", items: { type: "string" }, description: "captions of neighbouring controls (optional)" },
+            nth: { type: "integer", minimum: 0 },
+            ok: { type: "boolean" },
+          },
+        },
+      },
+    },
+  },
 } as const;

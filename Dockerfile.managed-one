@@ -39,18 +39,34 @@ FROM node:22-bookworm-slim AS managed-one
 WORKDIR /opt/agentlas
 ENV NODE_ENV=production
 ENV PATH="/usr/local/bin:/usr/bin:/bin"
+# Chromium sits at one fixed path while it is installed and while the app looks for it
+# (electron/browser/runtime.ts resolves Playwright's Chromium through this variable).
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates python3 python3-pip libsecret-1-0 fonts-noto-cjk \
     && pip3 install --no-cache-dir --break-system-packages pandas openpyxl python-docx python-pptx matplotlib pillow reportlab \
     && rm -rf /var/lib/apt/lists/* /root/.cache \
     && /usr/sbin/useradd --create-home --uid 1001 --shell /bin/bash user
+# Tools a work computer is expected to have: git, a compiler toolchain, and the usual command line helpers.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git openssh-client build-essential pkg-config python3-dev python3-venv curl unzip zip jq ripgrep procps less \
+    && rm -rf /var/lib/apt/lists/*
 COPY --from=build /opt/agentlas/package.json ./package.json
 COPY --from=build /opt/agentlas/node_modules ./node_modules
 COPY --from=build /opt/agentlas/dist ./dist
 COPY --from=build /opt/agentlas/Hephaestus-package ./Hephaestus
+# Chromium for browser tasks. The browser version is the one this Playwright release pins, and --with-deps installs the
+# system libraries that version needs. Run as root here; the host itself runs as `user` below, and the browser is started
+# by that user with its sandbox on (nothing in the app passes --no-sandbox). If the sandbox cannot start on the target
+# kernel, fix it there (user namespaces) rather than turning the sandbox off for pages the agent opens.
+RUN node node_modules/playwright/cli.js install --with-deps --no-shell chromium \
+    && rm -rf /var/lib/apt/lists/* /root/.cache \
+    && chmod -R a+rX /opt/ms-playwright
 RUN test -f dist/electron/managed-one/main.js \
     && test -f Hephaestus/agentlas-embedded-core.json \
-    && node -e "require('better-sqlite3')(':memory:').close()"
+    && node -e "require('better-sqlite3')(':memory:').close()" \
+    && git --version && gcc --version | head -1 && make --version | head -1 \
+    && node -e "const p=require('playwright').chromium.executablePath();require('node:fs').accessSync(p,require('node:fs').constants.X_OK);console.log(p)"
 USER user
 # A provisioner writes a one-use, private bootstrap file before starting the host.
 CMD ["node", "/opt/agentlas/dist/electron/managed-one/main.js", "--bootstrap", "/home/user/.agentlas-managed/bootstrap.json"]

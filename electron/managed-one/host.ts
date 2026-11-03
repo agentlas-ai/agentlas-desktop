@@ -3,9 +3,13 @@
 import fs from "node:fs";
 import path from "node:path";
 import http from "node:http";
+import os from "node:os";
 import { timingSafeEqual, randomUUID } from "node:crypto";
 import type { ManagedOneBootstrap, ManagedOneHealth } from "../../shared/managed-one";
-import { configureManagedOneAuthentication, managedOneAuthentication, managedOneHeaders, managedOneAuthenticationEpoch } from "./auth";
+import { configureManagedOneAuthentication, managedOneAuthentication, managedOneHeaders, managedOneAuthenticationEpoch, managedOneFeatures } from "./auth";
+import { createManagedOneActivityMonitor, oneScheduledWork, shouldPushManagedOneRenewal, isManagedOneActivityOnlyRenewal } from "./activity";
+import { adoptLegacyMemoryRoot, createManagedOneSnapshot, managedMemoryRoot, restoreManagedOneSnapshot } from "./snapshot";
+import { sameFileIdentity } from "../../shared/file-identity";
 
 export interface ManagedOneHostOptions { port?: number; fetch?: typeof globalThis.fetch; onDrained?(): void }
 export async function startManagedOneHost(raw: unknown, options: ManagedOneHostOptions = {}) {
@@ -42,17 +46,29 @@ export async function startManagedOneHost(raw: unknown, options: ManagedOneHostO
   const ownerTemporary = `${ownerFile}.${process.pid}.tmp`;
   fs.writeFileSync(ownerTemporary, JSON.stringify({ binding, generation: config.generation }), { mode: 0o600, flag: "wx" });
   fs.renameSync(ownerTemporary, ownerFile);
+  // A new computer made from a snapshot gets its databases back before anything opens them. Never over existing data.
+  if (config.restoreFrom) await restoreManagedOneSnapshot({ root, file: config.restoreFrom, sha256: config.restoreSha256! });
   let accepting = true, stopped = false, supervisorReady = false;
   const assertOwner = () => {
     if (!accepting || !managedOneAuthentication()) throw new Error("managed_one_host_admission_closed");
     const actual = fs.lstatSync(lockFile);
-    if (actual.dev !== stat.dev || actual.ino !== stat.ino) throw new Error("managed_one_process_fenced");
+    if (!sameFileIdentity(actual, stat)) throw new Error("managed_one_process_fenced");
   };
   // Bootstrap credentials never enter process.env or a model-visible file.
   for (const key of Object.keys(process.env)) if (/^AGENTLAS_MANAGED_ONE_.*(?:TOKEN|SECRET|BOOTSTRAP|CREDENTIAL|BEARER)/.test(key)) delete process.env[key];
   process.env.AGENTLAS_USER_DATA = root;
   process.env.AGENTLAS_MOBILE_BRIDGE_HOST = "127.0.0.1";
   process.env.AGENTLAS_STORE_PATH = path.join(root, "agentlas.sqlite");
+  // The memory database lives inside the data folder, so a snapshot of the folder holds it. It used to be created under the
+  // sandbox user's home. A computer that already has memory there keeps it: it is copied in once, before the first open.
+  const dataMemoryRoot = managedMemoryRoot(root);
+  const legacyMemoryRoot = path.join(process.env.AGENTLAS_HOME?.trim() || path.join(os.homedir(), ".agentlas"), "memory");
+  process.env.AGENTLAS_MEMORY_ROOT = dataMemoryRoot;
+  const adoptedLegacyMemory = adoptLegacyMemoryRoot(root, legacyMemoryRoot);
+  // The image installs Chromium under /opt/ms-playwright. A sandbox command may not inherit the image's ENV, so name the folder here.
+  if (!process.env.PLAYWRIGHT_BROWSERS_PATH && fs.existsSync("/opt/ms-playwright")) process.env.PLAYWRIGHT_BROWSERS_PATH = "/opt/ms-playwright";
+  // A daily HH:MM check-in is evaluated in the process time zone; the owner's zone, when given, makes it the owner's local time.
+  if (config.timeZone) process.env.TZ = config.timeZone;
   const packageRoot = [path.resolve(__dirname,"../../.."),path.resolve(__dirname,"../..")].find(candidate => {
     try { return JSON.parse(fs.readFileSync(path.join(candidate,"package.json"),"utf8")).name === "agentlas-desktop"; } catch { return false; }
   });
@@ -69,6 +85,11 @@ export async function startManagedOneHost(raw: unknown, options: ManagedOneHostO
   (await import("../one/supervisor-os-execution")).configureSupervisorScreenPolicy(Object.freeze({computerUse:false,reason:"managed_one_computer_use_unavailable"}));
   // Explicit writer authority is restricted to this fenced, isolated service store.
   store.initStore({ migrationRole: "owner" });
+  if (adoptedLegacyMemory) {
+    // The store remembers where the memory file moved from; point that record at the copy.
+    try { store.getDb().prepare("UPDATE main.meta SET value=? || substr(value,?) WHERE key LIKE 'memory-store-cutover:%' AND substr(value,1,?)=?").run(dataMemoryRoot, adoptedLegacyMemory.length + 1, adoptedLegacyMemory.length, adoptedLegacyMemory); }
+    catch { console.warn("[managed-one] memory cutover record not updated"); }
+  }
   owners.configureInvocationProcessOwner("daemon", `managed-one:${config.hostId}:${config.generation}:${randomUUID()}`);
   owners.invocationRunOwners.releaseAbandoned("daemon", owners.invocationProcessOwner().ownerId);
   (await import("../architecture/seed")).seedBuiltinAgents();
@@ -106,6 +127,13 @@ export async function startManagedOneHost(raw: unknown, options: ManagedOneHostO
   const { invocationService } = await import("../invocation/service");
   const { drainInvocationService } = await import("../runtime/invocation-lifecycle");
   const { drainRunChildrenForHostShutdown, liveRunChildCount } = await import("../runtime/exec");
+  const { mobileBridgePhoneActivityAt } = await import("../mobile-bridge/relay");
+  // What the server needs to let an idle computer pause: a live run or a scheduled review, or a recent phone request.
+  const activity = createManagedOneActivityMonitor({
+    now: Date.now, phoneActivityAt: mobileBridgePhoneActivityAt,
+    liveWork: () => invocationService.activeRunIds().length + liveRunChildCount(),
+    scheduledWork: lookaheadMs => oneScheduledWork(store.getDb(), Date.now(), lookaheadMs),
+  });
   let drainPromise: Promise<boolean> | undefined;
   const drain = (): Promise<boolean> => drainPromise ??= (async () => {
     accepting = false; supervisorReady = false;
@@ -121,31 +149,46 @@ export async function startManagedOneHost(raw: unknown, options: ManagedOneHostO
     fs.closeSync(lock); fs.unlinkSync(lockFile);
     stopped = true; return true;
   })().catch(() => false).then(confirmed => { if (!confirmed) drainPromise = undefined; return confirmed; });
-  let renewalBusy = false;
+  let renewalBusy = false, lastRenewalAt = 0, lastExtended = true;
   const renew = async () => {
     if (!accepting || renewalBusy) return;
     const active = managedOneAuthentication();
     if (!active) { void drain(); return; }
-    if (active.expiresAt - Date.now() > 2 * 60_000) return;
+    // A renewal is also the activity report: the server extends the sandbox timeout only for a busy or recently used
+    // computer. So it is sent when the token is near expiry, and about once a minute while the computer is in use.
+    const sample = activity.sample();
+    if (!shouldPushManagedOneRenewal({ now: Date.now(), expiresAt: active.expiresAt, lastRenewalAt, activity: sample })) return;
+    lastRenewalAt = Date.now();
+    // With more than 2 minutes of token left, this call only reports activity: the server answers credentials:null and keeps
+    // the credentials we hold, so nothing is re-authenticated and phone connections are not touched.
+    const activityOnly = isManagedOneActivityOnlyRenewal(lastRenewalAt, active.expiresAt);
     renewalBusy = true;
     try {
       const response = await (options.fetch ?? globalThis.fetch)(`${config.webBaseUrl}/api/managed-one/host/renew`, {
         method: "POST", headers: { ...managedOneHeaders("control"), "content-type": "application/json" },
-        body: JSON.stringify({ hostId: config.hostId, generation: config.generation }), signal: AbortSignal.timeout(10_000), redirect: "error",
+        body: JSON.stringify({ hostId: config.hostId, generation: config.generation, activity: sample, ...(activityOnly ? { activityOnly: true } : {}) }), signal: AbortSignal.timeout(10_000), redirect: "error",
       });
       if (response.status === 401 || response.status === 403 || response.status === 409 || response.status === 410) { void drain(); return; }
       if (!response.ok) return;
-      const value = await response.json() as { credentials: ManagedOneBootstrap["credentials"]; expiresAt: number };
-      configureManagedOneAuthentication({ ...config, credentials: value.credentials, expiresAt: value.expiresAt });
-      bridge.refreshMobileBridgeRelayAuthentication();
+      const value = await response.json() as { credentials: ManagedOneBootstrap["credentials"] | null; expiresAt: number; extended?: boolean; reason?: string };
+      // The server decides whether the sandbox timeout was extended (a maximum continuous time, a usage cap). The host keeps working
+      // either way and only leaves a trace when the answer changes; what to do about it is the server's call.
+      if (value.extended === false && lastExtended) console.warn(`[managed-one] the server did not extend this computer's time (${typeof value.reason === "string" ? value.reason.slice(0, 80) : "no reason given"})`);
+      lastExtended = value.extended !== false;
+      if (value.credentials) {
+        configureManagedOneAuthentication({ ...config, credentials: value.credentials, expiresAt: value.expiresAt });
+        bridge.refreshMobileBridgeRelayAuthentication();
+      }
     } catch { /* A transient failure never invents a new generation; expiry closes admission. */ }
     finally { renewalBusy = false; }
   };
   const renewTimer = setInterval(() => { void renew(); }, 30_000); renewTimer.unref();
+  const features = managedOneFeatures();
   const health = (): ManagedOneHealth => {
     const ready = accepting && supervisorReady && !!managedOneAuthentication();
     return { hostId: config.hostId, generation: config.generation, supervisorSchema: "agentlas.one-supervisor.v1", executor: "agentlas-cloud", supervisorReady: ready,
-      relayReady: ready && bridge.mobileBridgeRelayReady(), capabilities: { one: ready, work: ready, goal: false, computerUse: false } };
+      relayReady: ready && bridge.mobileBridgeRelayReady(),
+      capabilities: { one: ready && features.one, work: ready && features.work, goal: false, computerUse: false, team: ready && features.team, browser: ready && features.browser } };
   };
   const expected = Buffer.from(`Bearer ${config.controlBearer}`);
   const server = http.createServer((request, response) => {
@@ -155,14 +198,19 @@ export async function startManagedOneHost(raw: unknown, options: ManagedOneHostO
     if (supplied.length !== expected.length || !timingSafeEqual(supplied, expected)) { send(401, { error: "managed_one_control_unauthenticated" }); return; }
     const run = async () => {
       if (request.method === "GET" && request.url === "/health") return send(200, health());
-      if (request.method === "POST" && ["/drain","/pair"].includes(request.url ?? "")) {
+      if (request.method === "POST" && ["/drain","/pair","/control/snapshot"].includes(request.url ?? "")) {
         let body = "";
         for await (const chunk of request) { body += chunk.toString(); if (Buffer.byteLength(body) > 2048) return send(400, { error: "managed_one_control_body_invalid" }); }
         let input: unknown; try { input = body ? JSON.parse(body) : {}; } catch { return send(400, { error: "managed_one_control_body_invalid" }); }
-        const keys = request.url === "/drain" ? ["hostId","generation","exit"] : ["hostId","generation","requestId"];
+        const keys = request.url === "/drain" ? ["hostId","generation","exit"] : request.url === "/control/snapshot" ? ["hostId","generation"] : ["hostId","generation","requestId"];
         if (!input || typeof input !== "object" || Array.isArray(input) || Object.keys(input).some(key => !keys.includes(key))) return send(400, { error: "managed_one_control_body_invalid" });
         const command=input as {hostId?:unknown;generation?:unknown;exit?:unknown;requestId?:unknown};
         if (command.hostId !== config.hostId || command.generation !== config.generation) return send(409, { error: "managed_one_control_generation_changed" });
+        if (request.url === "/control/snapshot") {
+          // Works in any host state (also after /drain): it reads the files through its own connections and never blocks the host's writes.
+          try { return send(200, await createManagedOneSnapshot(root)); }
+          catch (error) { const code = error instanceof Error && /^managed_one_snapshot_[a-z_]+$/.test(error.message) ? error.message : "managed_one_snapshot_failed"; return send(503, { error: code }); }
+        }
         if (request.url === "/drain") {
           if (Object.hasOwn(command,"exit") && command.exit !== true) return send(400, { error: "managed_one_control_body_invalid" });
           const confirmed = stopped || await drain();

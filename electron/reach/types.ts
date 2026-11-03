@@ -50,7 +50,7 @@ export type CapabilityBody =
   | { kind: "steps"; steps: Array<{ tool: string; args: Record<string, unknown> }> };
 
 // Three-valued on purpose: "unknown" is never read as success.
-export type PostconditionKind = "dialog-closed" | "dialog-open" | "window-count-unchanged" | "element-present" | "element-value-equals";
+export type PostconditionKind = "dialog-closed" | "dialog-open" | "window-count-unchanged" | "element-present" | "element-value-equals" | "element-value-changed";
 export interface Postcondition { kind: PostconditionKind; detail?: Record<string, string | number | boolean> }
 
 // Local provenance only: never projected to the upload wire format. Increment when the explorer's admission policy tightens.

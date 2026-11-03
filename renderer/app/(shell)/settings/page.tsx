@@ -5,6 +5,7 @@ import { PopupFrame, PopupSteps } from "@/components/Popup";
 
 import { confirmPopup } from "@/lib/popup";
 import { FIRST_RUN_OPEN_EVENT } from "@/lib/first-run-state";
+import { SettingsPlanRow } from "@/components/billing/SettingsPlanRow";
 import { coreAccountState, type CoreAccountState } from "@/lib/core-account-state";
 import { requestWhatsNewReplay } from "@/lib/whats-new";
 import { updaterCanUseOfficialInstaller } from "@shared/types";
@@ -584,6 +585,8 @@ export default function SettingsPage() {
             );
           })}
         </div>
+
+        <SettingsPlanRow />
 
         {/* 첫 설정 다시 열기 — 새 설치에서만 스스로 뜨는 첫 설정(이름·Chrome·AI·말투·메일)을
             기존 사용자와 건너뛴 사람이 여기서 연다(Raycast "Show Onboarding" 과 같은 자리). */}

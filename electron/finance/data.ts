@@ -9,7 +9,7 @@ import { ISHARES_FUNDS, findIsharesFund, searchIsharesCatalog } from './provider
 import { financeProviderKey as providerKey } from './provider-credentials';
 import { getAuthenticatedSessionBinding, onAuthSessionOwnershipChanged } from '../auth';
 import { wasManagedOneConfigured } from '../managed-one/auth';
-import { managedFinanceQuoteRefresh, queryManagedFinanceData, searchManagedFinanceAssets } from './cloud-provider';
+import { queryManagedFinanceData, searchManagedFinanceAssets } from './cloud-provider';
 import { queryFinanceNews } from './dashboard-feeds';
 import { searchYahooFinanceAssets, queryYahooFinanceData, refreshYahooFinanceQuotes, queryYahooFinanceNews, yahooRefreshLimit } from './providers/yahoo-market';
 import { resolveFinanceDataSource, type FinanceDataSelection } from '../../shared/finance-data-routing';
@@ -247,6 +247,16 @@ async function queryFinanceDataRaw(input: FinanceDataRequest, assets: FinanceAss
   } catch (error) { return { ...result, status: 'error', rows: [], warnings: [...result.warnings, safeError(error)] }; }
 }
 
+/**
+ * A Cloud computer prices from the same direct Yahoo path as Desktop (several assets per refresh, five by default, 100 at most).
+ * That path is used when the host has no route or the route still names the server-relayed source ('alpha-vantage', one
+ * symbol per request). The server path stays for asset search and as the fallback for a single price the direct path
+ * could not read. An owner who picked another engine or a data tool ('toolchain:…') keeps that choice.
+ */
+function managedDirectMarket(route?: FinanceDataRoute): boolean {
+  return wasManagedOneConfigured() && (!route || route.sourceId === 'alpha-vantage');
+}
+
 /** Every result carries an explicit provider/coverage/rights status, including failures. */
 export async function queryFinanceData(input: FinanceDataRequest, assets: FinanceAsset[], route?: FinanceDataRoute): Promise<FinanceDataResult> {
   route?.assertCurrent?.();
@@ -263,6 +273,12 @@ export async function queryFinanceData(input: FinanceDataRequest, assets: Financ
   if(route?.signal?.aborted)throw new Error('finance_yahoo_cancelled');
   if(route?.sourceId==='finance-yfinance'&&['price','price_history'].includes(input.metrics[0])){const result=await queryYahooFinanceData(input,assets,{signal:route.signal});route.assertCurrent?.();return result;}
   if(route&& !['finance-yfinance','alpha-vantage'].includes(route.sourceId))return{status:'unconnected',sourceUrls:[],asOf:null,retrievedAt:new Date().toISOString(),columns:[],rows:[],warnings:['finance_data_source_unsupported']};
+  if(managedDirectMarket(route)&&['price','price_history'].includes(input.metrics[0])){
+    const direct=await queryYahooFinanceData(input,assets,{signal:route?.signal});route?.assertCurrent?.();
+    // A read the direct path could not make falls back to the server for one price; history has no server path.
+    if(input.metrics[0]!=='price'||typeof direct.rows[0]?.[1]==='number')return direct;
+    return queryManagedFinanceData(input,assets,route??{});
+  }
   if(wasManagedOneConfigured()&&route?.sourceId!=='finance-yfinance'&&input.metrics[0]==='price')return queryManagedFinanceData(input,assets,route??{});
   const result = await queryFinanceDataRaw(input, assets, route), metric = input.metrics[0];route?.assertCurrent?.();
   if(route?.signal?.aborted)throw new Error('finance_yahoo_cancelled');
@@ -319,8 +335,8 @@ export async function refreshFinanceQuotes(workspace: FinanceWorkspace, route?: 
     }
     return{baseRevision:workspace.revision,status:operations.length?'ok':'unavailable',operations,message:`${operations.length/2}개 시세를 조회했습니다. ${warnings.join(' ')}`.trim(),...(route.includeQuoteCoverage?{quoteCoverage:coverage(Math.min(workspace.watchlist.length,limit),operations.length/2)}:{})};
   }
+  if(managedDirectMarket(route))return refreshYahooFinanceQuotes(workspace,{signal:route?.signal,limit:options.limit,...(route?.includeQuoteCoverage?{includeQuoteCoverage:true}:{})});
   if(route&&route.sourceId!=='alpha-vantage')return{baseRevision:workspace.revision,status:'unavailable',operations:[],message:'finance_data_source_unsupported',...(route.includeQuoteCoverage?{quoteCoverage:coverage(0,0)}:{})};
-  if(wasManagedOneConfigured())return managedFinanceQuoteRefresh(workspace,route?.includeQuoteCoverage);
   const base = { baseRevision: workspace.revision };
   try {
     if (!await providerKey()) return { ...base, status: 'unavailable', message: 'Alpha Vantage connection is not configured. Connect your data provider. No quotes were imported.', operations: [], ...(route?.includeQuoteCoverage?{quoteCoverage:coverage(0,0)}:{}) };

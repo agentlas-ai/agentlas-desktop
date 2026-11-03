@@ -57,6 +57,7 @@ import {
 import { setOnePersonaName } from "@/lib/one-persona-name";
 import { AgentMailOfferCard } from "@/components/one/mail/AgentMailOfferCard";
 import styles from "./FirstRun.module.css";
+import { FirstRunPaywallLayer } from "./FirstRunPaywall";
 import { Select } from "@/components/Select";
 
 const LEGACY_WORK_TOUR_KEY = "agentlas.work.firstRunOnboarding.v3";
@@ -143,18 +144,20 @@ export function FirstRunGate({ session, children }: { session: AuthSession; chil
   }, [fingerprint]);
 
   if (!checked) return null;
-  if (open && record) {
-    return (
-      <FirstRunOnboarding
-        key={fingerprint ?? "anonymous"}
-        fingerprint={fingerprint}
-        record={record}
-        onRecord={setRecord}
-        onClose={(target) => { if (target) setLeavingTo(target); else setOpen(false); }}
-      />
-    );
-  }
-  return <>{children}</>;
+  // The paywall sits in front of the flow, once per account; everything else is unchanged.
+  return (
+    <FirstRunPaywallLayer key={fingerprint ?? "anonymous"} fingerprint={fingerprint} flowOpen={open && Boolean(record)}>
+      {open && record ? (
+        <FirstRunOnboarding
+          key={fingerprint ?? "anonymous"}
+          fingerprint={fingerprint}
+          record={record}
+          onRecord={setRecord}
+          onClose={(target) => { if (target) setLeavingTo(target); else setOpen(false); }}
+        />
+      ) : children}
+    </FirstRunPaywallLayer>
+  );
 }
 
 type Copy = ReturnType<typeof makeCopy>;

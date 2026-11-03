@@ -1,5 +1,6 @@
 import type { CheckpointArtifactVersion, RuntimePlanSnapshot } from "./runtime-plan";
 import type { InstructionSnapshot } from "./runtime-instructions";
+import type { SegmentBudgetState } from "./segment-budget";
 /**
  * Provider-neutral long-running work contracts.
  *
@@ -308,6 +309,11 @@ export interface LongRunBudget {
   maxCostUsd: number | null;
   wallclockDeadline: string | null;
   maxWorkers: number | null;
+  /**
+   * Segment allowance (shared/segment-budget.ts). Absent/null = the run has none, which is every run that did not opt in.
+   * Present: the run parks `paused`/`budget` when a segment allowance is spent and the owner extends it.
+   */
+  segment?: SegmentBudgetState | null;
 }
 
 export interface ContinuityCapsule {

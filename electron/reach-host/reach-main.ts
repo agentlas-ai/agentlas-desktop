@@ -19,6 +19,7 @@ import { getMeta, setMeta } from "../store/meta";
 import { getReachExploreEnabled, REACH_STATUS_KEY, setReachExploreEnabled } from "../store/reach-explore";
 import { setReachExploreListener } from "./reach-hooks";
 import { buildRuntime, reachStateDir, setReachRuntime } from "./runtime";
+import { installReachLearning, type ReachLearning } from "./learn-sink";
 
 // The desktop's Main process owns the Reach background service: it builds the app map after install and after every update of this
 // feature (whatever the Settings switch says, silently), and with the switch on turns what it finds into capabilities. Everything
@@ -31,6 +32,7 @@ const UPLOAD_ENDPOINT = "https://agentlas.cloud/api/desktop/capabilities";
 
 let service: ReachService | null = null;
 let manager: ActuatorManager<CuaInstall> | null = null;
+let learning: ReachLearning | null = null;
 // The background exploration holds the driver for a whole pass; an agent's own call queues behind it (or the other way round).
 let passLease: Extract<Lease, { ok: true }> | null = null;
 let locked = false;
@@ -234,6 +236,7 @@ export async function startReach(options: { busy: () => boolean; service?: Reach
     exploreEnabled: getReachExploreEnabled,
   }));
   setReachExploreListener((enabled) => next.notifyExploreChanged(enabled));
+  learning = installReachLearning({ log: (line) => { if (debug) console.log(line); } });
   next.start();
 }
 
@@ -241,6 +244,9 @@ export async function startReach(options: { busy: () => boolean; service?: Reach
 export async function stopReach(): Promise<void> {
   const running = service;
   service = null;
+  const learningNow = learning;
+  learning = null;
+  await learningNow?.stop();
   setReachExploreListener(null);
   setReachRuntime(null);
   await running?.stop();

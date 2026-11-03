@@ -4,6 +4,7 @@ import {
   scienceLongRunId,
 } from "agentlas-science/dist/contracts/science-long-run";
 import { getDb } from "../store/db";
+import { parseSegmentBudgetState } from "../../shared/segment-budget";
 import {
   applyScienceLongRunProjectionStatus,
   applyScienceAuthorCompletionProjection,
@@ -13,6 +14,7 @@ import {
   createLongRun,
   getLongRun,
   listLongRunTasks,
+  mirrorScienceSegmentBudget,
   recordLongRunVerification,
   upsertLongRunDomainBinding,
   type LongRunRecord,
@@ -168,6 +170,16 @@ function projectScienceLoopLongRunInTransaction(input: ScienceLoopLongRunProject
     });
     return getLongRun(run.id)!;
   };
+
+  // The research loop's execution budget, already in the common segment-budget shape, onto the mirror row. Science decided it (its own
+  // clock, its own caps); the host copies and never evaluates. Absent = a Science build that does not send it: the row stays as it
+  // is. null = the conversation has none. Anything else that is not exactly the shape is this snapshot's error, never a guess.
+  const rawExecutionBudget = (input as { executionBudget?: unknown }).executionBudget;
+  if (rawExecutionBudget !== undefined) {
+    const executionBudget = rawExecutionBudget === null ? null : parseSegmentBudgetState(rawExecutionBudget);
+    if (rawExecutionBudget !== null && !executionBudget) return markProjectionError("science_projection_segment_budget_invalid");
+    mirrorScienceSegmentBudget(run.id, executionBudget);
+  }
 
   if (input.authorCompletion !== undefined) {
     if (legacyProjection || !scienceAuthorCompletionProjectionValid(input)) return markProjectionError("science_projection_author_completion_invalid");
