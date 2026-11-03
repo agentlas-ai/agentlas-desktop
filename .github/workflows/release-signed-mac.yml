@@ -206,7 +206,7 @@ jobs:
             echo "::error::Tag $tag requires package.json/package-lock root version=$version (got package=$pkgver lock=$lockver root=$lockrootver)."
             exit 1
           fi
-          if [ "${HEPHAESTUS_REF#v}" != "$runtimever" ]; then
+          if { [ "$HEPHAESTUS_REF" != "v$runtimever" ] && [ "$HEPHAESTUS_REF" != "os-v$runtimever" ]; }; then
             echo "::error::HEPHAESTUS_REF=$HEPHAESTUS_REF does not match bundledRuntimeVersion=$runtimever."
             exit 1
           fi
@@ -596,7 +596,7 @@ jobs:
             echo "::error::Release source commit/package identity mismatch."
             exit 1
           fi
-          if [ "${HEPHAESTUS_REF#v}" != "$runtimever" ] || [ "$HEPHAESTUS_COMMIT" != "$runtimecommit" ]; then
+          if { [ "$HEPHAESTUS_REF" != "v$runtimever" ] && [ "$HEPHAESTUS_REF" != "os-v$runtimever" ]; } || [ "$HEPHAESTUS_COMMIT" != "$runtimecommit" ]; then
             echo "::error::Bundled runtime source pin mismatch."
             exit 1
           fi
