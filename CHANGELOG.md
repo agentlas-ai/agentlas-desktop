@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.3.118 — 2026-11-03
+## 1.3.119 — 2026-11-03
 
 - One can see and act on the screen in its own conversation again. Screen and app actions from One's replies were refused since 1.2.83; they now work, and One's own turns carry the in-app browser.
 - The in-app browser no longer reports "window closed" when a delegated session's first screenshot could not be saved; the browser stays available.

@@ -24,6 +24,12 @@ function replaceOnce(text, before, after) {
   if (at < 0 || text.indexOf(before, at + before.length) !== -1) throw new Error("[python-public-trust] source pattern mismatch");
   return text.slice(0, at) + after + text.slice(at + before.length);
 }
+// Windows reports dev 0 from a path-based stat on some volumes while the handle-based fstat of the same file reports the
+// volume serial (measured on windows-2025: lstat/stat dev 0, fstat dev 3568005255, ino equal). There the file index (ino)
+// is the identity; every other platform still compares both.
+function sameOpenedFile(opened, pathStat) {
+  return opened.ino === pathStat.ino && (opened.dev === pathStat.dev || (process.platform === "win32" && pathStat.dev === 0));
+}
 function checkedRead(root, relative, expected) {
   const file = path.join(root, ...relative.split("/"));
   const realRoot = fs.realpathSync(root), parent = fs.realpathSync(path.dirname(file));
@@ -33,7 +39,7 @@ function checkedRead(root, relative, expected) {
   const fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
   try {
     const opened = fs.fstatSync(fd);
-    if (opened.dev !== before.dev || opened.ino !== before.ino || !opened.isFile()) throw new Error("[python-public-trust] source changed");
+    if (!sameOpenedFile(opened, before) || !opened.isFile()) throw new Error("[python-public-trust] source changed");
     const bytes = fs.readFileSync(fd);
     if (digest(bytes) !== expected) throw new Error("[python-public-trust] pinned pip source mismatch");
     return { file, before, text: bytes.toString("utf8") };
