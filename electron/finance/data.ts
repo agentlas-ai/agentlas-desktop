@@ -1,8 +1,10 @@
 import type { FinanceAsset, FinanceDataRequest, FinanceDataResult, FinanceOperation, FinanceSearchResult, FinanceWorkspace } from '../../shared/finance';
 import type { FinanceQuoteCoverage, FinanceQuoteRefreshResult } from './quote-coverage';
 
-import { fetchFinanceJson } from './providers/http';
+import { fetchFinanceJson, fetchFinanceText } from './providers/http';
 export { fetchFinanceJson } from './providers/http';
+import { queryFreeSource, FREE_SOURCE_METRICS, type FreeSourceMetric } from './providers/free-sources';
+import { readSecDirectory, readSecSubmissionsText, readSecCompanyFactsText, SEC_DIRECTORY_URL, type SecDirectory } from './providers/sec-reads';
 import { queryPublicCommunity, queryFedNews, queryIsharesHoldings, queryIsharesNav, queryTreasury, parseCompanyFacts } from './providers/public-data';
 
 import { ISHARES_FUNDS, findIsharesFund, searchIsharesCatalog } from './providers/ishares-catalog';
@@ -19,7 +21,7 @@ import type { FinanceFeedId } from '../../shared/finance-feeds';
 export interface FinanceDataRoute extends FinanceDataSelection { signal?: AbortSignal; assertCurrent?:()=>void; includeQuoteCoverage?:boolean }
 
 const AV_DOC = 'https://www.alphavantage.co/documentation/';
-const SEC_INDEX = 'https://www.sec.gov/files/company_tickers_exchange.json';
+const SEC_INDEX = SEC_DIRECTORY_URL;
 type ObjectValue = Record<string, unknown>;
 function object(value: unknown): ObjectValue { if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('finance_source_shape'); return value as ObjectValue; }
 function string(value: unknown): string { return typeof value === 'string' ? value.slice(0, 20000) : ''; }
@@ -66,7 +68,6 @@ function safeError(error: unknown): string {
   const message = error instanceof Error ? error.message : '';
   return /^finance_[a-z0-9_]+$/.test(message) ? message : 'finance_source_unavailable';
 }
-let secCache: { at: number; assets: FinanceAsset[] } | null = null;
 // Transient AV region evidence stays outside the persisted asset's venue field.
 const avUsRegionHints=new Map<string,{currency:string;expiresAt:number}>();
 type HintBinding=ReturnType<typeof getAuthenticatedSessionBinding>;
@@ -86,21 +87,15 @@ function refreshAvHintBinding(ownershipEvent=false):number {
 onAuthSessionOwnershipChanged(()=>{
   try{refreshAvHintBinding(true);}catch{avUsRegionHints.clear();avHintEpoch++;avHintBinding=undefined;}
 });
-async function secAssets(): Promise<FinanceAsset[]> {
-  if (secCache && Date.now() - secCache.at < 3600000) return secCache.assets;
-  const response = object(await fetchFinanceJson(new URL(SEC_INDEX)));
-  if (!Array.isArray(response.fields) || !Array.isArray(response.data)) throw new Error('finance_source_shape');
-  const fields = response.fields;
-  const index = (name: string) => { const result = fields.indexOf(name); if (result < 0) throw new Error('finance_source_shape'); return result; };
-  const cik = index('cik'), ticker = index('ticker'), name = index('name'), exchange = index('exchange');
-  const assets: FinanceAsset[] = [];
-  for (const row of response.data.slice(0, 50000)) {
-    if (!Array.isArray(row) || !/^\d{1,10}$/.test(String(row[cik])) || !string(row[ticker]) || !string(row[name])) continue;
-    // SEC registration identifies an issuer; it does not establish a security's fund classification.
-    assets.push({ id: `sec:${String(row[cik]).padStart(10, '0')}:${string(row[ticker])}`, symbol: string(row[ticker]).slice(0, 80), name: string(row[name]).slice(0, 300), exchange: string(row[exchange]).slice(0, 80), currency: 'XXX', kind: 'other' });
-  }
-  secCache = { at: Date.now(), assets }; return assets;
+/** The SEC ticker directory, indexed: one download per hour shared with the dashboard filings feed (providers/sec-reads.ts). */
+function secDirectory(route?: FinanceDataRoute): Promise<SecDirectory> { return readSecDirectory(() => fetchFinanceJson(new URL(SEC_INDEX)), { signal: route?.signal }); }
+/** One SEC document (an issuer's submissions or company facts): the last answer within its lifetime, otherwise one request. The kept copy is text that already parsed. */
+async function secDocument(read: typeof readSecSubmissionsText, url: URL, route?: FinanceDataRoute): Promise<{ value: unknown; at: string }> {
+  const document = await read(url.href, async () => { const text = await fetchFinanceText(url); try { JSON.parse(text); } catch { throw new Error('finance_source_shape'); } return text; }, { signal: route?.signal });
+  try { return { value: JSON.parse(document.body), at: document.at }; } catch { throw new Error('finance_source_shape'); }
 }
+/** When a result's source was actually read, where that is earlier than the moment the result was assembled (a SEC document reused within its lifetime). */
+const readAt = new WeakMap<object, string>();
 /** Join only an exact US listing and a sole SEC ticker/venue record; names never participate. */
 async function enrichSearchIssuers(result:FinanceSearchResult,route?:FinanceDataRoute):Promise<FinanceSearchResult>{
   const venues:Record<string,string>={NMS:'nasdaq',NGM:'nasdaq',NCM:'nasdaq',NYQ:'nyse',ASE:'nyse american',PCX:'nyse arca'};
@@ -108,11 +103,11 @@ async function enrichSearchIssuers(result:FinanceSearchResult,route?:FinanceData
   if(!candidates.length)return result;
   route?.signal?.throwIfAborted();route?.assertCurrent?.();
   try{
-    const directory=await secAssets();route?.signal?.throwIfAborted();route?.assertCurrent?.();
+    const directory=await secDirectory(route);route?.signal?.throwIfAborted();route?.assertCurrent?.();
     const identities=candidates.flatMap(asset=>{
-      const matches=directory.filter(item=>item.symbol===asset.symbol);
+      const matches=directory.byTicker.get(asset.symbol)??[];
       if(matches.length!==1||matches[0].exchange.toLowerCase()!==venues[asset.exchange])return [];
-      const cik=/^sec:(\d{10}):/.exec(matches[0].id)?.[1];if(!cik)return [];
+      const cik=matches[0].cik;
       return [{assetId:asset.id,issuer:{id:`sec:cik:${cik}`,name:matches[0].name,authority:'SEC EDGAR issuer directory',sourceUrl:SEC_INDEX},securityType:null,sourceUrls:[SEC_INDEX],warnings:['Exact ticker and compatible US listing venue match in the SEC issuer directory; security class and legal instrument type remain unknown.']}];
     });
     return identities.length?{...result,identities}:result;
@@ -159,7 +154,7 @@ export async function searchFinanceAssets(query: string, route?: FinanceDataRout
     } catch (error) { route?.assertCurrent?.();warnings.push(safeError(error)); }
   }
   try {
-    const q = normalized.toLocaleLowerCase(); const assets = [...catalog, ...(await secAssets()).filter(asset => asset.symbol.toLowerCase().includes(q) || asset.name.toLowerCase().includes(q)).sort((a, b) => Number(b.symbol.toLowerCase() === q) - Number(a.symbol.toLowerCase() === q)).slice(0, 30)].slice(0, 30);
+    const q = normalized.toLocaleLowerCase(); const directory = await secDirectory(route); const assets = [...catalog, ...directory.search(q, 30).map(issuer => directory.asset(issuer))].slice(0, 30);
     return { assets, provider: catalog.length ? 'iShares official product catalog + SEC EDGAR issuer directory' : 'SEC EDGAR issuer directory', asOf: null, warnings: [...warnings,...catalogWarnings, 'SEC records identify US issuers; their security type and currency (XXX) are unknown. Separate issuer catalog entries are verified against issuer pages. No price data or ETF completeness is implied.'] };
   } catch (error) { return { assets: catalog, provider: catalog.length?'iShares official product catalog':'SEC EDGAR', asOf: null, warnings: [...warnings,...catalogWarnings,safeError(error)] }; }
 }
@@ -172,7 +167,9 @@ async function queryFinanceDataRaw(input: FinanceDataRequest, assets: FinanceAss
     if (metric === 'social' || metric === 'social_search') return await queryPublicCommunity(input.query, metric === 'social_search', input.period, route?.signal);
     if (metric === 'macro_news') {if(input.query.trim())return route?.sourceId==='finance-yfinance'?await queryYahooFinanceNews(input.query,{signal:route.signal}):{...result,warnings:['finance_global_news_source_unsupported']};return await queryFedNews();}
     if (metric === 'treasury_yields') return await queryTreasury(input.period);
-    if (input.assetIds.length !== 1) return { ...result, warnings: ['Select exactly one asset for this source query. Global social, macro_news and treasury_yields do not require an asset.'] };
+    // Free sources with no key: global like Treasury yields, each a literal read of a public host, each failing alone as a data result.
+    if ((FREE_SOURCE_METRICS as readonly string[]).includes(metric)) { const free = await queryFreeSource(metric as FreeSourceMetric, input.query, input.period, route?.signal); readAt.set(free, free.retrievedAt); return free; }
+    if (input.assetIds.length !== 1) return { ...result, warnings: ['Select exactly one asset for this source query. Global social, macro_news, treasury_yields, macro_series, fx_rates and news_search do not require an asset.'] };
     const asset = assets.find(item => item.id === input.assetIds[0]);
     if (!asset) throw new Error('finance_asset_not_found');
     const fund=findIsharesFund(asset.id);
@@ -187,15 +184,15 @@ async function queryFinanceDataRaw(input: FinanceDataRequest, assets: FinanceAss
       const regionHint=avUsRegionHints.get(asset.symbol);
       const avUsIssuerLookup=asset.id===`av:${asset.symbol}`&&(asset.exchange==='United States'||asset.exchange===''&&regionHint?.currency===asset.currency&&regionHint.expiresAt>Date.now());
       if (!cik && (avUsIssuerLookup || asset.id === `yahoo:${encodeURIComponent(asset.symbol)}`)) {
-        const matches = (await secAssets()).filter(item => item.symbol === asset.symbol);
-        if (matches.length === 1) cik = /^sec:(\d{10}):/.exec(matches[0].id)?.[1];
+        const matches = (await secDirectory(route)).byTicker.get(asset.symbol) ?? [];
+        if (matches.length === 1) cik = matches[0].cik;
         else return {...result,warnings:['No sole exact SEC directory ticker match is available. No issuer CIK was inferred from country, currency, name or a similar ticker.']};
       }
       if (!cik) return { ...result, warnings: ['No unambiguous SEC issuer mapping is available.'] };
-      if (metric === 'company_facts') return parseCompanyFacts(await fetchFinanceJson(new URL(`https://data.sec.gov/api/xbrl/companyfacts/CIK${cik}.json`)), cik, input.facts);
+      if (metric === 'company_facts') { const facts = await secDocument(readSecCompanyFactsText, new URL(`https://data.sec.gov/api/xbrl/companyfacts/CIK${cik}.json`), route), parsed = parseCompanyFacts(facts.value, cik, input.facts); readAt.set(parsed, facts.at); return parsed; }
       const url = `https://data.sec.gov/submissions/CIK${cik}.json`;
       result.sourceUrls = [url];
-      const submission=object(await fetchFinanceJson(new URL(url)));
+      const stored=await secDocument(readSecSubmissionsText, new URL(url), route),submission=object(stored.value);readAt.set(result, stored.at);
       if(String(submission.cik).padStart(10,'0')!==cik)throw new Error('finance_source_identity_mismatch');
       const recent = object(object(submission.filings).recent);
       if (!Array.isArray(recent.accessionNumber) || !Array.isArray(recent.form) || !Array.isArray(recent.filingDate)) throw new Error('finance_source_shape');
@@ -211,7 +208,7 @@ async function queryFinanceDataRaw(input: FinanceDataRequest, assets: FinanceAss
     // Managed hosts keep the keyless public paths above; unsupported provider metrics never read a local key.
     if(wasManagedOneConfigured())return {...result,warnings:['finance_cloud_provider_metric_unsupported']};
     const functions: Record<string, string> = { price: 'GLOBAL_QUOTE', price_history: 'TIME_SERIES_DAILY', news: 'NEWS_SENTIMENT', etf_holdings: 'ETF_PROFILE' };
-    if (!functions[metric] || input.metrics.length !== 1) return { ...result, warnings: ['Supported source metrics: price, price_history, nav, news, filings, company_facts, etf_holdings, social, social_search, macro_news, treasury_yields. Unsupported data is never synthesized.'] };
+    if (!functions[metric] || input.metrics.length !== 1) return { ...result, warnings: ['Supported source metrics: price, price_history, nav, news, filings, company_facts, etf_holdings, social, social_search, macro_news, treasury_yields, macro_series, fx_rates, news_search. Unsupported data is never synthesized.'] };
     if (!/^[A-Za-z0-9.^_-]{1,80}$/.test(asset.symbol)) throw new Error('finance_symbol_invalid');
     let url: URL | null = null;
     try { url = await avUrl(functions[metric], metric === 'news' ? { tickers: asset.symbol, limit: '30' } : metric === 'price_history' ? { symbol: asset.symbol, outputsize: 'compact' } : { symbol: asset.symbol }); } catch (error) { if (metric !== 'news') throw error; }
@@ -312,7 +309,7 @@ export async function queryFinanceData(input: FinanceDataRequest, assets: Financ
     rights = 'A configured key does not establish entitlement to every endpoint or external redistribution. Provider terms and account license apply.';
   }
   if (id && !result.providers?.length) result.providers = [{ id, label, status: result.status === 'unconnected' ? 'unavailable' : result.status, coverage, rights, sourceUrls: [...result.sourceUrls] }];
-  result.retrievedAt = new Date().toISOString();
+  result.retrievedAt = readAt.get(result) ?? new Date().toISOString();
   return result;
 }
 

@@ -24,7 +24,9 @@ export async function mergeMobileInlineUiTranscript(chatId: string, history: rea
   try {
     const ownerScope = await nativePortOwnerScope(ctx);
     let remaining = 1024 * 1024;
-    const notLoaded = (instance: UiInstanceView): readonly InlineUiPresentationContent[] => [{ kind: 'native', document: {
+    // A result this view did not read is left out unless it waits for the owner: an older search or query card was one
+    // "not loaded" line each, dozens in a long Finance chat . A proposal that waits keeps its line.
+    const notLoaded = (instance: UiInstanceView): readonly InlineUiPresentationContent[] => instance.state !== 'awaiting-input' ? [] : [{ kind: 'native', document: {
       version: 1, id: `finance_${createHash('sha256').update(instance.instanceId).digest('hex').slice(0, 24)}`,
       children: [{ type: 'text', text: 'This Finance result was not loaded in this view.' }],
     } }];

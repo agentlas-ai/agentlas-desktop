@@ -140,7 +140,17 @@ export async function requestMobileFinance(method:Method,params:Record<string,un
       }
       return projected;
     }
-    if(Buffer.byteLength(JSON.stringify(projected),'utf8')>4*1024*1024)throw new Error('finance_mobile_payload_too_large');return projected;
+    const wireBytes=(value:unknown)=>Buffer.byteLength(JSON.stringify(value),'utf8');
+    if(wireBytes(projected)>4*1024*1024){
+      // A page that does not fit is made smaller until it does; the page block names where the next one starts. Only one row that alone exceeds the budget is refused.
+      for(let limit=Math.floor((page?.limit??200)/2);limit>=1;limit=Math.floor(limit/2)){
+        const smaller=projectResult(result,{...page,limit}) as Record<string,unknown>;
+        if(wireBytes(smaller)<=4*1024*1024)return smaller;
+        if(limit===1)break;
+      }
+      throw new Error('finance_mobile_payload_too_large');
+    }
+    return projected;
   };
   // Reconciliation can update monitoring settings. It is intentionally a replay-protected command, never finance.read.
   if(operation==='status'){
@@ -244,7 +254,16 @@ export async function requestMobileFinance(method:Method,params:Record<string,un
     case 'quotes.refresh':{
       const result=await ports.service.refreshQuotes(scope);scope.assertCurrent();
       const hasOperations=!!result.operations?.length;
-      const workspace=hasOperations?await ports.service.apply(scope,{expectedRevision:result.baseRevision,operations:result.operations!}):await ports.service.load(scope);
+      // Quotes are added, not edited: if a save landed while they loaded (a scheduled briefing), they are added on top of it instead of failing the refresh.
+      const addQuotes=async():Promise<FinanceWorkspace>=>{
+        try{return await ports.service.apply(scope,{expectedRevision:result.baseRevision,operations:result.operations!});}
+        catch(error){
+          if(!(error instanceof Error)||error.message!=='finance_revision_conflict')throw error;
+          const latest=await ports.service.load(scope);scope.assertCurrent();
+          return ports.service.apply(scope,{expectedRevision:latest.revision,operations:result.operations!});
+        }
+      };
+      const workspace=hasOperations?await addQuotes():await ports.service.load(scope);
       const expectedRevision=result.baseRevision+(hasOperations?1:0);
       const boundCoverage=result.quoteCoverage?{quoteCoverage:Number.isSafeInteger(expectedRevision)&&workspace.revision===expectedRevision?result.quoteCoverage:null}:{};
       return finish({workspace,status:result.status??'ok',message:result.message,...boundCoverage});

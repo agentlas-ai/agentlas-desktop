@@ -72,7 +72,15 @@ export class FinanceExperience {
   private read(scope:FinanceScope,directory:string,sources:FinanceDataSourceOption[]):Preferences {
     scope.assertCurrent();try{const file=path.join(directory,'settings.json'),stat=fs.lstatSync(file);if(!stat.isFile()||stat.isSymbolicLink()||stat.size>65536)throw new Error('finance_settings_invalid');
       const value=storedSchema.parse(JSON.parse(fs.readFileSync(file,'utf8')));if(value.ownerScope!==financeScopeHash(scope))throw new Error('finance_owner_scope_mismatch');return value;
-    }catch(error){if((error as NodeJS.ErrnoException).code==='ENOENT')return this.initial(scope,sources);throw error;}
+    }catch(error){
+      if((error as NodeJS.ErrnoException).code==='ENOENT')return this.initial(scope,sources);
+      // Settings this app cannot read (an older or damaged file) are set aside, not kept as a permanent failure: the owner starts from the defaults and consents again. A file that belongs to another owner is never touched.
+      if(error instanceof Error&&error.message!=='finance_owner_scope_mismatch'&&error.message!=='finance_sign_in_required'&&(error.message==='finance_settings_invalid'||error instanceof SyntaxError||error.name==='ZodError')){
+        try{fs.renameSync(path.join(directory,'settings.json'),path.join(directory,`settings.unreadable-${Date.now()}.json`));scope.assertCurrent();return this.initial(scope,sources);}
+        catch(renameError){scope.assertCurrent();if((renameError as NodeJS.ErrnoException).code==='ENOENT')return this.initial(scope,sources);}
+      }
+      throw error;
+    }
   }
   private write(scope:FinanceScope,directory:string,value:Preferences):void {
     scope.assertCurrent();const checked=storedSchema.parse({...value,revision:value.revision+1});if(checked.ownerScope!==financeScopeHash(scope))throw new Error('finance_owner_scope_mismatch');
@@ -101,6 +109,17 @@ export class FinanceExperience {
     const builtins=inspectBuiltins?await financeBuiltinPlugin().status(scope,FINANCE_NOTICE_VERSION):undefined;scope.assertCurrent();
     return {consent:value.consent,...(builtins?{builtins}:{}),...selection,sourceRoutingStatus,dashboardCustomized:value.dashboardCustomized,sources,enabledFeedIds:[...value.enabledFeedIds],
       monitoring:{enabled:value.monitoring.enabled,localTime:value.monitoring.localTime,timezone:value.monitoring.timezone,lastSentAt:value.monitoring.lastSentAt,nextRunAt:value.monitoring.enabled?value.monitoring.nextRunAt:null,...(unconfirmedReview?{unconfirmedReview:true}:{})},access};
+  }
+  /**
+   * The built-in Finance tools are ready for an owner who accepted the current notice. After an app update the saved activation names the
+   * previous release; that is this app's own change, not something the owner has to repeat, so the activation is renewed from the bundled
+   * release (prepare is idempotent and only runs for an owner whose consent is current). A real failure of the bundle stays a failure.
+   */
+  private async pluginReady(scope:FinanceScope):Promise<boolean>{
+    const status=await financeBuiltinPlugin().status(scope,FINANCE_NOTICE_VERSION);scope.assertCurrent();
+    if(status.ready)return true;
+    if(!['finance_plugin_activation_required','finance_plugin_release_mismatch','finance_plugin_installed_release_invalid','finance_plugin_activation_invalid'].includes(status.errorCode??'finance_plugin_activation_required'))return false;
+    const prepared=await financeBuiltinPlugin().prepare(scope,FINANCE_NOTICE_VERSION);scope.assertCurrent();return prepared.ready;
   }
   private async stop(scope:FinanceScope,value:Preferences,save:()=>void):Promise<void>{value.monitoring.enabled=false;value.monitoring.nextRunAt=null;try{save();}finally{await this.ports.revoke(scope,value.monitoring);}scope.assertCurrent();}
   async request(scope:FinanceScope,raw:FinanceExperienceRequest):Promise<FinanceExperienceState>{
@@ -132,7 +151,7 @@ export class FinanceExperience {
       if(request.action==='monitoring'){
         if(!request.enabled){await this.stop(scope,value,save);return this.projection(scope,value,sources,access,false);}
         if(value.consent?.version!==FINANCE_NOTICE_VERSION)throw new Error('finance_consent_required');
-        if(!(await financeBuiltinPlugin().status(scope,FINANCE_NOTICE_VERSION)).ready)throw new Error('finance_plugin_activation_required');scope.assertCurrent();
+        if(!(await this.pluginReady(scope)))throw new Error('finance_plugin_activation_required');scope.assertCurrent();
         if(!access.monitoringAllowed)throw new Error(access.status==='verified'?'finance_monitoring_pro_required':'finance_monitoring_access_unavailable');
         if(!this.dailySourcesAvailable(scope,value,sources))throw new Error('finance_source_unavailable');
         const localTime=request.localTime??value.monitoring.localTime,observed=await this.ports.observe(scope,value.monitoring);scope.assertCurrent();
@@ -157,7 +176,7 @@ export class FinanceExperience {
       const current=value.monitoring;
       if(!current.enabled||current.oneId!==binding.oneId||current.checkinId!==binding.checkinId||current.commandId!==binding.commandId)throw new Error('finance_daily_registration_inactive');
       if(value.consent?.version!==FINANCE_NOTICE_VERSION)throw new Error('finance_consent_required');
-      if(!(await financeBuiltinPlugin().status(scope,FINANCE_NOTICE_VERSION)).ready)throw new Error('finance_plugin_activation_required');scope.assertCurrent();
+      if(!(await this.pluginReady(scope)))throw new Error('finance_plugin_activation_required');scope.assertCurrent();
       if(!this.dailySourcesAvailable(scope,value,sources))throw new Error('finance_source_unavailable');
       const access=await this.ports.access(scope);scope.assertCurrent();
       if(!access.monitoringAllowed)throw new Error(access.status==='verified'?'finance_monitoring_pro_required':access.status==='signed-out'?'finance_monitoring_sign_in_required':'finance_monitoring_access_unavailable');
@@ -174,10 +193,10 @@ export class FinanceExperience {
     return this.locked(scope,async(value)=>this.selection(scope,value),false);
   }
   async feeds(scope:FinanceScope):Promise<import('../../shared/finance-feeds').FinanceFeedId[]>{
-    return this.locked(scope,async(value)=>{if(value.consent?.version!==FINANCE_NOTICE_VERSION)throw new Error('finance_consent_required');if(!(await financeBuiltinPlugin().status(scope,FINANCE_NOTICE_VERSION)).ready)throw new Error('finance_plugin_activation_required');scope.assertCurrent();return [...value.enabledFeedIds];},false);
+    return this.locked(scope,async(value)=>{if(value.consent?.version!==FINANCE_NOTICE_VERSION)throw new Error('finance_consent_required');if(!(await this.pluginReady(scope)))throw new Error('finance_plugin_activation_required');scope.assertCurrent();return [...value.enabledFeedIds];},false);
   }
   async consent(scope:FinanceScope):Promise<FinanceDataSelection>{
-    return this.locked(scope,async(value)=>{if(value.consent?.version!==FINANCE_NOTICE_VERSION)throw new Error('finance_consent_required');if(!(await financeBuiltinPlugin().status(scope,FINANCE_NOTICE_VERSION)).ready)throw new Error('finance_plugin_activation_required');scope.assertCurrent();return this.selection(scope,value);},false);
+    return this.locked(scope,async(value)=>{if(value.consent?.version!==FINANCE_NOTICE_VERSION)throw new Error('finance_consent_required');if(!(await this.pluginReady(scope)))throw new Error('finance_plugin_activation_required');scope.assertCurrent();return this.selection(scope,value);},false);
   }
   private monitorSnapshot(scope:FinanceScope,value:Preferences):FinanceMonitoringSnapshot {
     scope.assertCurrent();if(value.consent?.version!==FINANCE_NOTICE_VERSION)throw new Error('finance_consent_required');
@@ -190,7 +209,7 @@ export class FinanceExperience {
   }
   /** Both the routing selection and the actual consent edition are account-bound. */
   async monitoringSnapshot(scope:FinanceScope):Promise<FinanceMonitoringSnapshot>{
-    return this.locked(scope,async value=>{if(value.consent?.version!==FINANCE_NOTICE_VERSION)throw new Error('finance_consent_required');if(!(await financeBuiltinPlugin().status(scope,FINANCE_NOTICE_VERSION)).ready)throw new Error('finance_plugin_activation_required');scope.assertCurrent();return this.monitorSnapshot(scope,value);},false);
+    return this.locked(scope,async value=>{if(value.consent?.version!==FINANCE_NOTICE_VERSION)throw new Error('finance_consent_required');if(!(await this.pluginReady(scope)))throw new Error('finance_plugin_activation_required');scope.assertCurrent();return this.monitorSnapshot(scope,value);},false);
   }
   /** Synchronous fence runs immediately before the workspace's atomic rename. */
   assertMonitoringSnapshot(scope:FinanceScope,expected:FinanceMonitoringSnapshot):void {
@@ -212,7 +231,7 @@ export class FinanceExperience {
       if(due){const access=await this.ports.access(scope);scope.assertCurrent();
         // Unreachable billing is "cannot tell": keep the schedule and let the next sweep ask again (wakeFinanceDailyBriefing holds it).
         if(access.status==='unavailable')throw new Error('finance_monitoring_access_unavailable');
-        if(!access.monitoringAllowed||value.consent?.version!==FINANCE_NOTICE_VERSION||!this.dailySourcesAvailable(scope,value,sources)||!(await financeBuiltinPlugin().status(scope,FINANCE_NOTICE_VERSION)).ready){await this.stop(scope,value,save);return null;}}
+        if(!access.monitoringAllowed||value.consent?.version!==FINANCE_NOTICE_VERSION||!this.dailySourcesAvailable(scope,value,sources)||!(await this.pluginReady(scope))){await this.stop(scope,value,save);return null;}}
       const last=observed.lastSentAt??value.monitoring.lastSentAt;
       if(observed.nextRunAt!==value.monitoring.nextRunAt||last!==value.monitoring.lastSentAt){value.monitoring.nextRunAt=observed.nextRunAt;value.monitoring.lastSentAt=last;save();}
       return {oneId:value.monitoring.oneId,checkinId:value.monitoring.checkinId,commandId:value.monitoring.commandId};

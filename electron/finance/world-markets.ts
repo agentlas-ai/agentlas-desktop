@@ -104,7 +104,22 @@ async function yahooObservations(signal:AbortSignal):Promise<Observation[]>{
   }catch(error){if(signal.aborted)throw abortError(signal);if(error instanceof Error&&error.message==='finance_world_rate_limited')limited=true;}}}));if(!rows.length&&limited)throw new Error('finance_world_rate_limited');return rows;
 }
 async function usRates(signal:AbortSignal):Promise<FinanceWorldMarket['rates']>{try{const month=new Date().toISOString().slice(0,7).replace('-',''),url=new URL('https://home.treasury.gov/resource-center/data-chart-center/interest-rates/pages/xml');url.searchParams.set('data','daily_treasury_yield_curve');url.searchParams.set('field_tdr_date_value_month',month);const result=parseTreasury(await readPublic(url,signal),url.href);const row=result.rows.filter(row=>row[1]==='10YEAR'&&typeof row[2]==='number'&&row[3]==='% per annum').sort((a,b)=>String(b[0]).localeCompare(String(a[0])))[0];return row?[{symbol:'US-TREASURY:BC_10YEAR',name:'US Treasury 10-year par yield',value:row[2] as number,unit:'% per annum',asOf:String(row[0])}]:[];}catch(error){if(signal.aborted)throw abortError(signal);return[];}}
-export async function getFinanceWorldMarkets({scope,sourceId,signal}:{scope:FinanceScope;sourceId:string;signal?:AbortSignal}):Promise<WorldResult>{
+const worldFlights=new Map<string,Promise<unknown>>();
+/** One read per owner at a time: a second ask waits for the one under way and reads its answer rather than being refused as busy. */
+export async function getFinanceWorldMarkets(input:{scope:FinanceScope;sourceId:string;signal?:AbortSignal}):Promise<WorldResult>{
+  const key=partition(input.scope);
+  for(let attempt=0;attempt<4;attempt++){
+    const flight=worldFlights.get(key);
+    if(!flight){
+      const run=getFinanceWorldMarketsOnce(input);worldFlights.set(key,run);
+      try{return await run;}finally{if(worldFlights.get(key)===run)worldFlights.delete(key);}
+    }
+    try{await flight;}catch{/* its own caller sees that outcome */}
+    if(input.signal?.aborted)throw new Error('finance_world_cancelled');input.scope.assertCurrent();
+  }
+  return getFinanceWorldMarketsOnce(input);
+}
+async function getFinanceWorldMarketsOnce({scope,sourceId,signal}:{scope:FinanceScope;sourceId:string;signal?:AbortSignal}):Promise<WorldResult>{
   scope.assertCurrent();if(!scope.workspaceId||!scope.userId)throw new Error('finance_sign_in_required');if(sourceId!==FINANCE_WORLD_SOURCE_ID)throw new Error('finance_world_source_invalid');if(signal?.aborted)throw new Error('finance_world_cancelled');
   const key=partition(scope),prior=cache.get(key);if(prior&&Date.parse(prior.expiresAt)>Date.now())return structuredClone(prior);if(pending.has(key))throw new Error('finance_world_busy');
   const controller=new AbortController(),cancel=()=>controller.abort(new Error('finance_world_cancelled'));signal?.addEventListener('abort',cancel,{once:true});if(signal?.aborted)cancel();pending.set(key,controller);const timer=setTimeout(()=>controller.abort(new Error('finance_world_timeout')),90_000);timer.unref?.();

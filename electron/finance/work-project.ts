@@ -1,3 +1,4 @@
+import { SHARED_MENU_PLUGINS } from '../mcp-tools/domain-tool-menu';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
@@ -157,10 +158,12 @@ export function assertFinanceWorkChatOwner(chatId: string, actor: FinanceWorkAct
 
 /** Finance's entry in the shared project-domain contract (invocation/project-domain-binding.ts). */
 export const FINANCE_WORK_PROJECT_PLUGINS = [{ slug: 'finance', reason: 'baseline capability: Agentlas Finance conversation' }] as const;
+/** The plugins a Finance conversation lists in the tool menu: its own plus the shared ones (mcp-tools/domain-tool-menu.ts). */
+export const FINANCE_WORK_PROJECT_TOOL_MENU: readonly string[] = ['finance', ...SHARED_MENU_PLUGINS];
 export function financeWorkProjectDomain(chatId: string, actor: FinanceWorkActor | null,
   expected?: { domain: string; ownerScope: string; projectId: string } | null) {
   // A binding read for another domain is not Finance's to check; Finance's own fence then applies to this chat as at a turn start.
   const own = expected && expected.domain === 'finance' ? { ownerScope: expected.ownerScope, projectId: expected.projectId } : expected === null ? null : undefined;
   const binding = assertFinanceWorkChatOwner(chatId, actor, own);
-  return binding ? { domain: 'finance', ownerScope: binding.ownerScope, projectId: binding.projectId, baselinePlugins: FINANCE_WORK_PROJECT_PLUGINS } : null;
+  return binding ? { domain: 'finance', ownerScope: binding.ownerScope, projectId: binding.projectId, baselinePlugins: FINANCE_WORK_PROJECT_PLUGINS, toolMenu: FINANCE_WORK_PROJECT_TOOL_MENU } : null;
 }

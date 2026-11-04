@@ -1,3 +1,4 @@
+import { pluginInToolMenu, type ToolMenu } from "../mcp-tools/domain-tool-menu";
 import { composeDeclaredPrompt } from "../runtime/prompt-order";
 // 설치된 플러그인의 라우터를 실행의 시스템 프롬프트에 잇는다.
 //
@@ -170,9 +171,10 @@ function mentioned(userPrompt: string, plugin: InstalledPlugin): boolean {
 }
 
 /** Versioned installed inventory. Explicit-only plugins never enter the standing system catalog. */
-export function installedPluginCatalog(_userPrompt?: string): PluginCatalog | null {
+export function installedPluginCatalog(_userPrompt?: string, menu?: ToolMenu | null): PluginCatalog | null {
   const plugins = listInstalledPlugins();
-  const listed = plugins.filter((p) => p.implicit !== "never");
+  // The conversation's tool menu (mcp-tools/domain-tool-menu.ts) decides which plugins the prompt names.
+  const listed = plugins.filter((p) => p.implicit !== "never" && (!menu || pluginInToolMenu(menu, p.slug)));
   if (!listed.length) return null;
   return {
     mentions: listed.map((p) => p.mention),

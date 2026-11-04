@@ -36,7 +36,6 @@ import type { Runner, RunnerEvents, RunnerRequest, RunnerResult , RunnerFailure 
 import { WORK_PROJECT_RESIDENCY_BUSY_CODE } from "./project-residency";
 import { codexShellEnvironmentArgs } from "./env-key-reach";
 import { ensureSandboxNpmCacheDir, ensureSandboxRunTmpDir, sandboxNpmCacheDir, sandboxTmpEnvConfigArgs, sandboxTmpRoot, sandboxTmpScope } from "./sandbox-tool-cache";
-import { imageOutputContract } from "./prompt-sections";
 import { cumulativeSurfaceGateText, ensureChildCloseAfterExit, startCliHeartbeat, startCliSilenceGuard, runtimeSilentTimeoutFailure, cliSilenceWindowMs, cliToolSilenceWindowMs, type CliSilenceGuard, childExitReason, RUNTIME_SILENT_TIMEOUT_CODE, runtimeProtocolUnrecognizedFailure, wrapSystemPrompt, workforceObservedHostAuthorityEnforcement, RuntimeTurnUnsettledError, unsettledTurnError, markRefusedBeforeDispatch, preDispatchRefusal, spawnStartFailureRefusal } from "./runner";
 import { decideTurnSettlement, normalEndToolEvidence, settleNormalEnd, trackReportedToolCalls } from "../../shared/turn-settlement";
 import { detectRuntimeRefusal } from "./runtime-refusal";
@@ -266,15 +265,6 @@ function codexImageToolCapability(req: RunnerRequest): string {
   return slot ? `${CODEX_IMAGE_TOOL_VERSION}:${slot.runtimeKind}:${slot.model}` : "unavailable";
 }
 
-export function codexImageToolInstructions(enabled: boolean): string {
-  // ★Codex's own image_gen is a native ability (feature `image_generation`, stable).
-  // The old contract told the model generation was "unavailable" whenever the
-  // host slot was empty, and forbade its own image workflow when the slot was
-  // ready — contradicting the runtime. Both routes are now allowed; the host
-  // copies every result into the working folder so later steps have a path.
-  return imageOutputContract(enabled ? CODEX_IMAGE_TOOL_NAME : undefined);
-}
-
 const CANDIDATES = [
   // Windows: `.cmd`/`.exe`를 bare `codex`보다 먼저(bare는 PATHEXT 해석 시 `.ps1`을 잡아
   // PowerShell 실행정책에 막힐 수 있음 — .cmd는 cmd.exe로 실행돼 무관).
@@ -379,7 +369,7 @@ function buildPrompt(req: RunnerRequest): string {
  * reopened. Keep the exec fallback above unchanged, but never seed a resident
  * app-server thread with a fake user message.
  */
-function buildDeveloperInstructions(req: RunnerRequest, imageContractLine?: string): string {
+function buildDeveloperInstructions(req: RunnerRequest): string {
   // Composition order: fixed → variable (docs/PROMPT-COMPOSITION-POLICY.md, ledger desktop.main.codex.app-server.developer-instructions).
   return wrapSystemPrompt(
     req.systemPrompt,
@@ -397,7 +387,6 @@ function buildDeveloperInstructions(req: RunnerRequest, imageContractLine?: stri
     req.sciencePromptProfile,
     req.judgmentOnly === true ? "host-judgment" : undefined,
     [
-      ...(imageContractLine ? [{ id: "transport.codex.image-contract", revision: 1, stability: "configuration", changeTriggers: ["runtime", "attachments"], text: imageContractLine } as DeclaredPromptPart] : []),
       ...(codexSchemaFallbackBlock(req) ? [{ id: "transport.codex.output-schema", revision: 1, stability: "task-context", changeTriggers: ["release", "task", "plan-revision"], order: 90, text: codexSchemaFallbackBlock(req) } as DeclaredPromptPart] : []),
     ],
       req.systemPromptComposition,
@@ -2804,10 +2793,9 @@ async function runCodexResidentTurn(input: {
         approvalsReviewer,
         sandbox: policy.sandbox,
         ...(Object.keys(threadConfig).length > 0 ? { config: threadConfig } : {}),
-        // The one-line image contract rides every ordinary thread (no media-intent word list, owner 2026-10-13).
-        developerInstructions: codexImageToolCapability(req) !== "disabled" && req.sciencePromptProfile !== true
-          ? buildDeveloperInstructions(req, codexImageToolInstructions(Boolean(imageToolSlot)))
-          : buildDeveloperInstructions(req),
+        // Image generation is a tool the model picks when the task needs it (the dynamic tool below carries its own
+        // description); no image line rides the thread .
+        developerInstructions: buildDeveloperInstructions(req),
         ...(imageToolSlot ? { dynamicTools: [CODEX_IMAGE_DYNAMIC_TOOL] } : {}),
       };
       developerInstructionsSent = String(commonThreadParams.developerInstructions ?? "");

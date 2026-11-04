@@ -9,6 +9,7 @@ import {
   type MemoryScope,
 } from "../architecture/manifest";
 import { didYouMean, invalidValueMessage } from "../../shared/did-you-mean";
+import { widenOverEnclosingHtmlComment } from "../../shared/agent-control-blocks";
 import type { RequestContext } from "./store";
 import type { MemoryEmitterStatus } from "./tickets";
 
@@ -172,7 +173,8 @@ export function parseMemoryEvents(text: string): ParsedMemory {
     // 2026-09-25) ended a Korean reply with "```Memory Events\n{…envelope…}" and never
     // closed the fence, so the whole ticket was shown to the user. Accept any info string
     // and a fence left open at the very end; the closed schema check below still decides.
-    const tailFence = text.match(/(?:^|\n)```[^\n`]*\n\s*(\{[\s\S]*?\})\s*(?:```)?\s*$/);
+    // A ticket hidden in an HTML comment ("<!--\n```json\n{…}\n```\n-->") goes with its comment (observed in use).
+    const tailFence = text.match(/(?:^|\n)(?:[ \t]*<!--\s*)?```[^\n`]*\n\s*(\{[\s\S]*?\})\s*(?:```)?\s*(?:-->\s*)?$/);
     if (tailFence && tailFence.index != null) {
       try {
         const data = JSON.parse(tailFence[1].trim()) as Record<string, unknown>;
@@ -245,7 +247,8 @@ export function parseMemoryEvents(text: string): ParsedMemory {
   } else {
     cut = text.length; // no fence found — drop the dangling heading and tail too
   }
-  const cleaned = (text.slice(0, headingIdx) + text.slice(cut)).trim();
+  const [start, end] = widenOverEnclosingHtmlComment(text, headingIdx, cut);
+  const cleaned = (text.slice(0, start) + text.slice(end)).trim();
   return { events, candidateCount, turnSummary, emitterStatus, cleanedText: cleaned };
 }
 

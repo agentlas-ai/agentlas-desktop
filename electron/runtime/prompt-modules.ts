@@ -123,7 +123,6 @@ export const DECK_LINE =
 export const CONNECTIONS_LINE =
   [
     "connections: connector, browser or API, never \"no API\"; keys = env vars by tool name, never printed; logged-in browser/Vault first; auth.ensure before auth.login (missing or reauth only)",
-    "media: exact selected route; keyless native ≠ paid API; current personal always-allow permits payment; READY=\"0\" → <<agentlas-multimodal-setup>>, hold that provider step only; continue local/procedural work",
     "auth handoff: password/CAPTCHA/2FA → owner secure UI; save/resume same point; bounded wait/yield; paid/uncertain outcome → reconcile receipt before resend",
   ].join("\n");
 
@@ -209,7 +208,7 @@ registerPromptModule({
 });
 
 registerPromptModule({
-  id: "capability.connections", revision: 4, kind: "capability", layer: "S1", profiles: ["ordinary"],
+  id: "capability.connections", revision: 5, kind: "capability", layer: "S1", profiles: ["ordinary"],
   stability: "configuration", changeTriggers: ["release", "profile", "managed-local"], order: 0,
   render: (ctx) => ctx.managedLocal
     ? "connections: granted tools only; missing → identify setup, continue independent work"

@@ -33,6 +33,7 @@ import {
   type InstalledPluginCandidate,
 } from "../plugins/plugin-candidates";
 import { hasExplicitMention, selectedPluginRouterPrompt } from "../plugins/router-prompt";
+import { pluginInToolMenu, toolIdInMenu, toolMenuFor, type ToolMenu } from "./domain-tool-menu";
 import type {
   AutomationHubMode,
   AutomationToolMode,
@@ -623,6 +624,12 @@ export async function autoSelectMcpTools(input: {
    * capability there, so its router rides every turn without an @finance mention (an ordinary question otherwise never reaches
    * the finance.* operations). Main-derived from the stored project binding (assertFinanceWorkChatOwner), never from renderer input.
    */
+  /**
+   * What decides the tool menu (mcp-tools/domain-tool-menu.ts), both Main-derived: the chat's surface pack (Science) and the menu the
+   * stored project binding declares. Science and a domain project list only theirs; an ordinary One/Work conversation does not list Science's.
+   */
+  surfacePack?: string | null;
+  projectToolMenu?: readonly string[];
   /** Plugins the conversation's project binding attaches on every turn, with their routing reason (Main-derived). */
   projectBaselinePlugins?: readonly { readonly slug: string; readonly reason: string }[];
   /**
@@ -687,6 +694,11 @@ export async function autoSelectMcpTools(input: {
   const installedFingerprint = registryFingerprint(initialInstalledServers);
   let pluginCandidates: InstalledPluginCandidate[] = [];
   try { pluginCandidates = deps.listPluginCandidates(); } catch { pluginCandidates = []; }
+  // The menu is the domain's (domain-tool-menu.ts). An explicit @mention still names a plugin the domain does not list.
+  const toolMenu: ToolMenu = toolMenuFor({ surfacePack: input.surfacePack ?? null, projectToolMenu: input.projectToolMenu ?? null });
+  const restrictedMenu = toolMenu.restricted;
+  const unfilteredPluginCandidates = pluginCandidates;
+  pluginCandidates = pluginCandidates.filter((plugin) => pluginInToolMenu(toolMenu, plugin.slug) || hasExplicitMention(input.userPrompt, plugin.mention));
   const pluginBySlug = new Map(pluginCandidates.map((plugin) => [plugin.slug, plugin]));
   const pluginFingerprint = shortHash(pluginCandidates.map((plugin) => `${plugin.slug}:${plugin.toolIds.join(",")}`).join("|"));
   let expectedInstalledFingerprint = installedFingerprint;
@@ -694,7 +706,7 @@ export async function autoSelectMcpTools(input: {
   const conversationId = typeof input.conversationId === "string" ? input.conversationId.trim() : "";
   const structuralKeyFor = (fingerprint: string): string => conversationId
     ? [conversationId, input.toolMode ?? "auto", input.hubMode ?? "auto", runtimeCapabilities.nativeBrowser,
-      input.runtimeOutsideBrowser === true ? "outside-browser" : "", input.groupRoom === true ? "group-room" : "", input.oneOwnConversation === true ? "one-own" : "", (input.projectBaselinePlugins ?? []).map((plugin) => `project-baseline:${plugin.slug}`).sort().join("+"), input.roomMember === true ? "room-member" : "", fingerprint, [...(input.requiredToolCatalogIds ?? [])].sort().join(","), pluginFingerprint].join("\u0000")
+      input.runtimeOutsideBrowser === true ? "outside-browser" : "", input.groupRoom === true ? "group-room" : "", `menu:${toolMenu.restricted ? toolMenu.plugins.join("+") : "all"}`, input.oneOwnConversation === true ? "one-own" : "", (input.projectBaselinePlugins ?? []).map((plugin) => `project-baseline:${plugin.slug}`).sort().join("+"), input.roomMember === true ? "room-member" : "", fingerprint, [...(input.requiredToolCatalogIds ?? [])].sort().join(","), pluginFingerprint].join("\u0000")
     : "";
   const structuralKey = structuralKeyFor(installedFingerprint);
   const goalScopeKeyFor = (fingerprint: string): string => activeGoalScope && structuralKey
@@ -775,7 +787,7 @@ export async function autoSelectMcpTools(input: {
   // ★Owner 2026-09-23: plugin search is routing too. A project turn still sees a
   // capped Hub shelf (suggestions only — nothing from the Hub is installed without
   // the owner's approval); local plugins and installed tools stay first.
-  const offerHubToJudge = hubAllowed;
+  const offerHubToJudge = hubAllowed && !restrictedMenu;
   const hubInventory = await fetchHubPluginInventory(offerHubToJudge);
 
   // ── Pins: settings and explicit user choices. These are the ONLY tools that may be
@@ -827,6 +839,7 @@ export async function autoSelectMcpTools(input: {
   // hundred catalog entries must not attach a hundred servers to every turn.
 
   const pluginToolIds = new Set(pluginCandidates.flatMap((plugin) => plugin.toolIds));
+  const menuPlugins = unfilteredPluginCandidates.map((plugin) => ({ slug: plugin.slug, toolIds: plugin.toolIds, listed: pluginCandidates.includes(plugin) }));
   // Capability priority (owner 2026-09-24): built-in and Agentlas-published providers
   // are marked so the judge and the dedupe prefer them over an outside equivalent.
   const agentlasToolIds = new Set(pluginCandidates.filter((plugin) => plugin.agentlas).flatMap((plugin) => plugin.toolIds));
@@ -834,6 +847,8 @@ export async function autoSelectMcpTools(input: {
   const localCandidates: McpNeedCandidate[] = MCP_TOOL_CATALOG.filter((entry) => {
     if (pinnedReasons.has(entry.id) || blockedByHostBinding(entry.id)) return false;
     if (entry.id === "lazyweb") return false;
+    // A tool of a plugin this domain does not list stays out of the menu; a restricted domain offers its plugins' tools and the browser.
+    if (!toolIdInMenu(toolMenu, entry.id, menuPlugins)) return false;
     // Codex/Claude/Antigravity already expose a native web-search tool. Keep
     // Brave available only when the user explicitly pins that exact MCP; an
     // optional catalog judge must never turn an ordinary research prompt into
@@ -883,7 +898,7 @@ export async function autoSelectMcpTools(input: {
   // User-registered custom servers are inventory too, so an unconfigured one can be named by
   // the judge instead of prompting for its key on every unrelated run.
   const customCandidates: McpNeedCandidate[] = initialInstalledServers
-    .filter((server) => !server.catalogId && !optionalBrowserDuplicates.has(server.id))
+    .filter((server) => !restrictedMenu && !server.catalogId && !optionalBrowserDuplicates.has(server.id))
     .map((server) => ({
       id: server.id,
       name: server.nameEn || server.name,

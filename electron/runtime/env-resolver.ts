@@ -4,13 +4,11 @@ import os from "node:os";
 import { app } from "electron";
 import type { InstalledAgent } from "../../shared/types";
 import { agentFolderPath } from "../agents/files";
-import { resolveActiveProvider } from "../multimodal/availability";
-import { getMultimodalSettings } from "../multimodal/settings";
 import { listEnvKeys, readEnvVar } from "../secrets/vault";
 import { userDataPath } from "../runtime-paths";
 import { MCP_TOOL_CATALOG } from "../mcp-tools/catalog";
 import type { EnvKeyRenameSuggestion } from "../../shared/env-key-rename";
-import { RUNTIME_AUTH_ENV_KEYS, isPlainMisnaming, mediaToolEnvKeys, planEnvKeyRenames } from "./env-key-reach";
+import { RUNTIME_AUTH_ENV_KEYS, isPlainMisnaming, planEnvKeyRenames } from "./env-key-reach";
 
 const DOTENV_FILES = [".env", ".env.local"];
 
@@ -256,35 +254,12 @@ export async function buildRunnerEnv(
     }
   }
 
-  // 멀티모달 엔진을 실행 전에 결정적으로 확정한다(런타임 LLM이 사다리를 되짚지 않게).
-  // auto면 키리스 우선 순서로 첫 가용 엔진을 고르고, 그 엔진의 키만 주입한다.
-  const settings = getMultimodalSettings();
-  const [image, video, audio] = await Promise.all([
-    resolveActiveProvider("image", settings),
-    resolveActiveProvider("video", settings),
-    resolveActiveProvider("audio", settings),
-  ]);
-  for (const resolved of [image, video, audio]) {
-    if (resolved.provider) {
-      for (const key of resolved.provider.envKeys) vaultKeys.add(key);
-    }
-  }
-
-  // A key the user saved for a media or speech tool (ElevenLabs, Runway, ...) must reach whichever process runs the
-  // tool, not only the one engine "auto" happened to pick: a group-room worker has no declared requirements, and an
-  // OpenAI audio key used to hide a saved ElevenLabs key. Only names the user actually saved are read. The list is one
-  // keychain call; the per-name reads below hit the vault only for saved names.
-  let storedNames: string[] | null = null;
-  try {
-    storedNames = await listEnvKeys();
-  } catch {
-    // A locked or unavailable vault narrows the run's tools; it never aborts a text-only turn.
-  }
+  // Only what this run's agent (or a team member) declared reaches the run's shell. A key saved for a media tool
+  // (ElevenLabs, Runway, OpenAI audio, ...) is not carried into every run because it exists: a tool the model selects for
+  // the task gets its key through its own server env (mcp-config.ts) or through the host (harness keyed-provider reads it
+  // in Main), and a missing or misnamed key is asked about on the run-key sheet at that moment (run-key-elicitation.ts).
+  // "tool use picks the MCP for the task; it is not on by default".
   const declaredKeys = new Set(vaultKeys);
-  if (storedNames) {
-    const saved = new Set(storedNames);
-    for (const key of mediaToolEnvKeys()) if (saved.has(key)) vaultKeys.add(key);
-  }
 
   for (const key of vaultKeys) {
     if (isProtectedRunnerEnvKey(key) || env[key]) continue;
@@ -303,40 +278,38 @@ export async function buildRunnerEnv(
     }
   }
 
-  // 확정된 엔진 id + 준비 여부를 env로 넘긴다. 에이전트는 이 값을 "그대로 써라"만 하면 된다.
-  env.AGENTLAS_MULTIMODAL_IMAGE_PROVIDER = image.provider?.id ?? "none";
-  env.AGENTLAS_MULTIMODAL_IMAGE_READY = image.ready ? "1" : "0";
-  env.AGENTLAS_MULTIMODAL_VIDEO_PROVIDER = video.provider?.id ?? "none";
-  env.AGENTLAS_MULTIMODAL_VIDEO_READY = video.ready ? "1" : "0";
-  env.AGENTLAS_MULTIMODAL_AUDIO_PROVIDER = audio.provider?.id ?? "none";
-  env.AGENTLAS_MULTIMODAL_AUDIO_READY = audio.ready ? "1" : "0";
-
-  let renameSuggestions: EnvKeyRenameSuggestion[] = [];
+  // A misnamed saved key is not announced at spawn: when a tool the run selected really lacks its key, the run-key sheet
+  // offers the saved name and a yes renames it in the vault (run-key-elicitation.ts, owner). This list stays
+  // empty; the field remains for callers that still read it.
+  const renameSuggestions: EnvKeyRenameSuggestion[] = [];
   const aliasedKeys: EnvKeyRenameSuggestion[] = [];
-  if (storedNames) {
-    const wanted = [...declaredKeys, ...mediaToolEnvKeys()].filter((key) => !isProtectedRunnerEnvKey(key));
+  // The saved-name list is one keychain call, made only when this run declared a key that could be saved under another name.
+  let storedNames: string[] | null = null;
+  if (declaredKeys.size) {
+    try {
+      storedNames = await listEnvKeys();
+    } catch {
+      // A locked or unavailable vault narrows the run's tools; it never aborts a text-only turn.
+    }
+  }
+  if (storedNames && declaredKeys.size) {
+    const wanted = [...declaredKeys].filter((key) => !isProtectedRunnerEnvKey(key));
     const knownRead = [
-      ...wanted, ...vaultKeys,
+      ...wanted,
       ...MCP_TOOL_CATALOG.flatMap((entry) => entry.envRequirements.map((req) => req.key)),
     ];
-    // Owner 2026-10-12: a saved key that is only misnamed (ELEVENLABS_1 for ELEVENLABS_API_KEY) must just work, without
-    // asking. The vault entry keeps its own name; this run's tool processes also see it under the name the tool reads.
-    // A runtime login key is never aliased: a CLI that finds one can switch to metered API billing.
+    // a declared key saved under a plainly misnamed name (ELEVENLABS_1 for ELEVENLABS_API_KEY) reaches the
+    // declaring agent under the name it reads. The vault entry keeps its own name. A runtime login key is never aliased:
+    // a CLI that finds one can switch to metered API billing.
     for (const suggestion of planEnvKeyRenames(storedNames, wanted, knownRead)) {
-      if (RUNTIME_AUTH_ENV_KEYS.has(suggestion.to) || env[suggestion.to] || !isPlainMisnaming(suggestion.from, suggestion.to)) {
-        renameSuggestions.push(suggestion);
-        continue;
-      }
+      if (RUNTIME_AUTH_ENV_KEYS.has(suggestion.to) || env[suggestion.to] || !isPlainMisnaming(suggestion.from, suggestion.to)) continue;
       let value: string | null = null;
       try {
         value = await readEnvVar(suggestion.from);
       } catch {
-        // Same as above: an unavailable keychain narrows the run's tools.
+        // An unavailable keychain narrows the run's tools.
       }
-      if (!value) {
-        renameSuggestions.push(suggestion);
-        continue;
-      }
+      if (!value) continue;
       env[suggestion.to] = value;
       injected.add(suggestion.to);
       aliasedKeys.push(suggestion);

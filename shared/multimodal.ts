@@ -319,7 +319,8 @@ export const DEFAULT_MULTIMODAL_SETTINGS: MultimodalSettings = {
   imageProvider: AUTO_PROVIDER,
   // 영상도 auto — 실제 키/자격 증명이 확인된 provider만 선택한다.
   videoProvider: AUTO_PROVIDER,
-  audioProvider: "openai-audio",
+  // Audio is auto too: a default engine would make every owner look like they need an OpenAI key.
+  audioProvider: AUTO_PROVIDER,
 };
 
 /**
@@ -352,10 +353,6 @@ export function providerLadder(modality: MultimodalModality): MultimodalProvider
   return PROVIDER_LADDERS[modality]
     .map((id) => getMultimodalProvider(id))
     .filter((p): p is MultimodalProvider => Boolean(p));
-}
-
-export function providersForModality(modality: MultimodalModality): MultimodalProvider[] {
-  return MULTIMODAL_PROVIDERS.filter((provider) => provider.modality === modality);
 }
 
 export function getMultimodalProvider(id: string): MultimodalProvider | null {

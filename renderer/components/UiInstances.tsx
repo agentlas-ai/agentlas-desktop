@@ -13,7 +13,7 @@ import {
   wrapAppHtml, MCP_APP_SANDBOX, type BridgeEffect, type BridgeState,
 } from "@/lib/mcp-app-bridge";
 import { McpResultPreview } from "./McpResultPreview";
-import { FinanceNativeResult } from "./finance/FinanceNativeResult";
+import { FinanceNativeResult, financeReadSourceRows } from "./finance/FinanceNativeResult";
 import { IntellectUI } from "./IntellectUI";
 import { ChartBlock } from "./ChartBlock";
 import { HtmlVisualBlock } from "./HtmlVisualBlock";
@@ -164,7 +164,7 @@ function UiInstanceCard({ instance, locale }: { instance: UiInstanceView; locale
     ? instance.presentation.title : locale === "ko" ? "인터랙티브 응답" : "Interactive response";
   const fallback = <p className={styles.text}>{instance.presentation.fallbackText || displayTitle}</p>;
 
-  return (
+  const card = (
     <section className={styles.card} data-ui-instance={instance.instanceId} data-ui-revision={instance.revision} aria-label={displayTitle}>
       <div className={styles.head}>
         <span className={styles.title} title={displayTitle}>{displayTitle}</span>
@@ -201,6 +201,16 @@ function UiInstanceCard({ instance, locale }: { instance: UiInstanceView; locale
         </div>
       )}
     </section>
+  );
+  // What the model read to answer a Finance question (ticker candidates, news, filing and price rows, an empty or failed read)
+  // is not a result the owner asked for: it folds into one closed line, as the phone leaves it out .
+  const readRows = finance ? financeReadSourceRows(finance) : null;
+  if (readRows === null) return card;
+  return (
+    <details className={styles.sources} data-ui-sources={instance.instanceId}>
+      <summary>{locale === "ko" ? `읽은 자료 ${readRows}건` : `Sources read · ${readRows}`}</summary>
+      {card}
+    </details>
   );
 }
 

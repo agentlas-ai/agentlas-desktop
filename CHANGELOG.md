@@ -1,5 +1,24 @@
 # Changelog
 
+## 1.3.123 — 2026-11-04
+
+- Reach learning no longer records Cmd+Q or Cmd+W as a plain "q" or "w" step, and it drops a learned session that contains a printable or modified key it could not replay. A value check on a control the replay screen never listed is now "unknown" and no longer fails the replay, and a learned outcome check is chosen among controls the replay screen can show, with value checks limited to editable value controls, so a learned port stays usable.
+- Media is a tool the model picks. The prompt no longer carries a media line, and Agentlas no longer matches words in a request to generate an image first, take a screen capture, or add a correction afterward; the "requested image missing" and "requested screen capture missing" notices are gone.
+- A model that finds a key missing can now list the saved key names, check one, and ask to use it through built-in vault tools. The tools never return a value, and using a key goes through the approval sheet.
+- A run's shell now holds only the keys that the run's agent or its team members declared. Media-engine keys are no longer added to every run, an unrelated chat no longer shows a key-rename line for them, and a run no longer resolves the image, video and audio engines.
+- A model can no longer start paid media, rewrite the media settings, press the stored-key button, take a whole-screen capture, or save an automation graph through the screen's own handlers (`app.call`); each is refused with the tool to use instead, and an automation a model makes is recorded as the agent's. The screen's own buttons are unchanged. An `app.call` harness call now runs with its own chat scope and the caller's permission.
+- Science turns can teach Reach through `reach_learn`.
+- Finance: monitoring is its own tab, Settings say which switch wins, destructive actions confirm inline, and empty states show one first step. A Finance error now reports only a cause from outside: writes by the app's own agent no longer conflict with an older revision, a full workspace archives its oldest unpinned reports instead of refusing, tool arguments accept the forms a model sends, and source limits queue instead of answering busy.
+- The plugin and connector name lists in a prompt, the model's `harness_search` lookups, and the tool judge follow one tool-menu rule for the conversation, so a Finance conversation no longer lists design, reach, every connector or Science tools. Setup refusals tell the owner in words where to save a key, because the phone drops the setup marker, and the image-generation word is gone from the Codex and Antigravity abilities line (the capability stays for graphs).
+- Finance and Science projects list their own plugins. The eleven Science plugins stay out of general One and Work chats, and an @mention still reaches them.
+- Finance reads public sources once per short window and reads three assets at a time, and it validates a workspace once per file version instead of on every tool call. Three more public sources need no key: FRED series, ECB reference rates, and GDELT news in any language.
+- Finance has 15 analysis guides by asset type and situation. The model asks for one by topic through `finance.guide`; no word in a request selects one.
+- A saved Finance report can leave the conversation as one HTML file through `finance.report.export`. Daily series (prices, Treasury, FRED, exchange rates) are drawn as line charts with their key figures, in chat, in the report reader, in the HTML file and on the phone, and the report page carries a Finance header and a notice that it is research and not investment advice.
+- Finance answers: the ticker candidates, news and filing rows, and price rows the model read to answer are left out of the phone chat and fold into one closed line in the desktop chat. A long search or query result reaches the phone as four cards and one count line.
+- When a model wraps its Memory Events block in an HTML comment, the empty comment no longer stays in the answer, and answers saved earlier hide it too. The chat ticker search starts with four candidates and "더 보기" adds more.
+
+This release binds Agentlas OS v1.2.78 at e13ae0df5ca866888bfff69ae7b69cfdb330e267; public runtime asset `agentlas-os-runtime-v1.2.78.tar.gz` is pinned at SHA-256 `8f7bf3cc0f5c686887e5b207d5f191645aab0eddd992ff1d2783611a9f79fbb1`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.122 — 2026-11-04
 
 - Reach learning now matches the app an agent worked in by its bundle id first and by name second. Apps whose displayed name depends on the system language (Calculator shows as 계산기 on a Korean Mac) were observed but never kept; they are kept now.

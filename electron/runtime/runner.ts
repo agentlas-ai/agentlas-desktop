@@ -19,6 +19,8 @@ import type { InvocationPlan } from "../../shared/invocation-plan";
 import { tStatus, type RuntimeLocale } from "./status-i18n";
 import { composePrompt, ASK_LINE_CHOICE, type PluginCatalog } from "./prompt-modules";
 import { installedPluginCatalog, explicitPluginRouterPrompt } from "../plugins/router-prompt";
+import { currentRunToolMenu } from "../mcp-tools/chat-tool-menu";
+import { toolIdInMenu } from "../mcp-tools/domain-tool-menu";
 import { installedAgentlasCapabilityProviders } from "../plugins/plugin-candidates";
 import { preferredProviderPairs } from "../../shared/capability-priority";
 import { validSiteAgentAppMcpGrantTools } from "../site/agent-app-tool-policy";
@@ -1704,12 +1706,16 @@ export function wrapSystemPrompt(
   let preferredProviders: string[] = [];
   try { preferredProviders = preferredProviderPairs(installedAgentlasCapabilityProviders()); } catch { preferredProviders = []; }
   let plugins: PluginCatalog | null = null;
-  try { plugins = installedPluginCatalog(userPrompt); } catch { plugins = null; }
+  const runMenu = currentRunToolMenu();
+  try { plugins = installedPluginCatalog(userPrompt, runMenu); } catch { plugins = null; }
   // Installed connectors as a list (owner 2026-10-13); the store is read lazily so a context without it lists none.
   let connectors: string[] = [];
   try {
     const registry = require("../mcp-tools/registry") as typeof import("../mcp-tools/registry");
-    connectors = registry.listInstalledServers().filter((server) => server.enabled).map((server) => server.catalogId ?? server.id).sort();
+    // The same menu rule as the judge and the lookups: a restricted menu names no owner-registered server and only its plugins' catalog servers.
+    const pluginTools = runMenu ? (require("../plugins/plugin-candidates") as typeof import("../plugins/plugin-candidates")).listInstalledPluginCandidates().map((plugin) => ({ slug: plugin.slug, toolIds: plugin.toolIds })) : [];
+    connectors = registry.listInstalledServers().filter((server) => server.enabled
+      && (!runMenu || (server.catalogId ? toolIdInMenu(runMenu, server.catalogId, pluginTools) : !runMenu.restricted))).map((server) => server.catalogId ?? server.id).sort();
   } catch { connectors = []; }
   return composePrompt({
     ...base,

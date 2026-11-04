@@ -15,6 +15,8 @@ interface FinanceAssetResultsProps {
   onSelect?: (asset: FinanceAsset) => void;
   onWatchlist?: (asset: FinanceAsset) => void;
   onResearch?: (asset: FinanceAsset) => void;
+  /** In a chat answer the list starts short, like the query cards beside it (4, then 8 more per press); the Finance search panel shows every candidate. */
+  initialVisible?: number;
 }
 
 function candidateLabel(asset: FinanceAsset, ko: boolean): string {
@@ -36,8 +38,8 @@ function AssetRow({ asset, identity, ko, selected, added, disabled, onSelect, on
   const Identity = onSelect ? "button" : "div";
   return <li className={`${styles.item} ${selected ? styles.selected : ""}`}>
     <div className={styles.row}>
-      <Identity type={onSelect ? "button" : undefined} className={styles.identity} aria-pressed={onSelect ? selected : undefined} disabled={onSelect ? disabled : undefined} onClick={onSelect}
-        aria-label={onSelect ? `${l("자산 선택", "Select asset")}: ${label}` : label} title={label} style={onSelect ? undefined : {cursor:"default"}}>
+      <Identity type={onSelect ? "button" : undefined} className={`${styles.identity} ${onSelect ? "" : styles.static}`} aria-pressed={onSelect ? selected : undefined} disabled={onSelect ? disabled : undefined} onClick={onSelect}
+        aria-label={onSelect ? `${l("자산 선택", "Select asset")}: ${label}` : label} title={label}>
         <span className={styles.primary}><strong title={asset.symbol}>{asset.symbol}</strong><span title={asset.name}>{asset.name}</span>{selected && <IconCheck size={14}/>}</span>
         <span className={styles.secondary} title={`${exchange} · ${currency}`}>{exchange} · {currency}</span>
       </Identity>
@@ -62,9 +64,11 @@ function AssetRow({ asset, identity, ko, selected, added, disabled, onSelect, on
 }
 
 /** Provider-returned candidates stay separate securities; selecting never mutates saved assets. */
-export function FinanceAssetResults({ result, ko, query, selectedAssetId, watchlistIds, disabled, onSelect, onWatchlist, onResearch }: FinanceAssetResultsProps) {
+export function FinanceAssetResults({ result, ko, query, selectedAssetId, watchlistIds, disabled, onSelect, onWatchlist, onResearch, initialVisible }: FinanceAssetResultsProps) {
+  const [visible, setVisible] = useState(initialVisible ?? Infinity), shown = result.assets.slice(0, visible);
   return <section className={styles.results} aria-label={query ? `${ko ? "자산 검색 결과" : "Asset search results"}: ${query}` : ko ? "자산 검색 결과" : "Asset search results"}>
     {query && <p className={styles.query}>{query}</p>}
-    {result.assets.length ? <ul className={styles.list}>{result.assets.map(asset => <AssetRow key={asset.id} asset={asset} identity={result.identities?.find(identity => identity.assetId === asset.id)} ko={ko} selected={selectedAssetId === asset.id} added={watchlistIds.has(asset.id)} disabled={disabled} onSelect={onSelect ? () => onSelect(asset) : undefined} onWatchlist={onWatchlist ? () => onWatchlist(asset) : undefined} onResearch={onResearch ? () => onResearch(asset) : undefined}/>)}</ul> : <p className={styles.empty}>{ko ? "검색 결과가 없습니다. 회사명이나 티커를 바꿔보세요." : "No results. Try another company name or symbol."}</p>}
+    {result.assets.length ? <><ul className={styles.list}>{shown.map(asset => <AssetRow key={asset.id} asset={asset} identity={result.identities?.find(identity => identity.assetId === asset.id)} ko={ko} selected={selectedAssetId === asset.id} added={watchlistIds.has(asset.id)} disabled={disabled} onSelect={onSelect ? () => onSelect(asset) : undefined} onWatchlist={onWatchlist ? () => onWatchlist(asset) : undefined} onResearch={onResearch ? () => onResearch(asset) : undefined}/>)}</ul>
+      {result.assets.length > shown.length && <button type="button" className={styles.more} onClick={() => setVisible(count => count + 8)}>{ko ? "더 보기" : "Show more"} · {shown.length}/{result.assets.length}</button>}</> : <p className={styles.empty}>{ko ? "검색 결과가 없습니다. 회사명이나 티커를 바꿔보세요." : "No results. Try another company name or symbol."}</p>}
   </section>;
 }

@@ -2,6 +2,18 @@ import { isVerifiedIsharesUrl } from './ishares-catalog';
 /** Fixed public/provider endpoints only. Never accepts a renderer-chosen host or follows redirects. */
 const LIMIT = 8 * 1024 * 1024;
 let active = 0;
+/** At most two provider requests run at once. Others wait their turn (a monitor, the dashboard feeds and a chat can all ask together); only a wait of a minute without a free slot is reported as busy. */
+const MAX_ACTIVE = 2, MAX_WAIT_MS = 60_000;
+const waiting: Array<() => void> = [];
+async function acquireSlot(): Promise<void> {
+  if (active < MAX_ACTIVE && !waiting.length) { active++; return; }
+  await new Promise<void>((resolve, reject) => {
+    const turn = () => { clearTimeout(timer); active++; resolve(); };
+    const timer = setTimeout(() => { const index = waiting.indexOf(turn); if (index >= 0) waiting.splice(index, 1); reject(new Error('finance_source_busy')); }, MAX_WAIT_MS);
+    waiting.push(turn);
+  });
+}
+function releaseSlot(): void { active--; while (active < MAX_ACTIVE && waiting.length) waiting.shift()!(); }
 const nextHostRequest = new Map<string, number>();
 const blockedUntil = new Map<string, number>();
 export function isFinanceSourceUrlAllowed(url: URL): boolean {
@@ -20,6 +32,14 @@ export function isFinanceSourceUrlAllowed(url: URL): boolean {
     if (url.pathname === '/xrpc/app.bsky.feed.getAuthorFeed') return keys.every(key => ['actor','limit','filter','includePins'].includes(key)) && /^(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,63}$/.test(url.searchParams.get('actor') || '') && /^([1-9]|[12]\d|30)$/.test(url.searchParams.get('limit') || '');
     return url.pathname === '/xrpc/app.bsky.feed.searchPosts' && keys.every(key => ['q','limit','sort'].includes(key)) && !!url.searchParams.get('q') && (url.searchParams.get('q') || '').length <= 300 && url.searchParams.get('limit') === '20' && url.searchParams.get('sort') === 'latest';
   }
+  // Free sources with no key (providers/free-sources.ts): fixed host, fixed path, closed query grammar.
+  if (url.hostname === 'fred.stlouisfed.org') return url.pathname === '/graph/fredgraph.csv' && keys.includes('id') && keys.every(key => ['id', 'cosd'].includes(key)) && /^[A-Z0-9]{1,25}$/.test(url.searchParams.get('id') || '') && (!url.searchParams.has('cosd') || /^\d{4}-\d{2}-\d{2}$/.test(url.searchParams.get('cosd') || ''));
+  if (url.hostname === 'api.frankfurter.dev') return (url.pathname === '/v1/latest' || /^\/v1\/(?:19|20)\d{2}-\d{2}-\d{2}\.\.$/.test(url.pathname)) && keys.length === 2 && keys.every(key => ['base', 'symbols'].includes(key)) && /^[A-Z]{3}$/.test(url.searchParams.get('base') || '') && /^[A-Z]{3}$/.test(url.searchParams.get('symbols') || '');
+  if (url.hostname === 'api.gdeltproject.org') {
+    const query = url.searchParams.get('query') || '';
+    return url.pathname === '/api/v2/doc/doc' && keys.length === 6 && keys.every(key => ['query', 'mode', 'format', 'maxrecords', 'sort', 'timespan'].includes(key)) && !!query.trim() && query.length <= 300 && !/[\u0000-\u001f\u007f]/.test(query)
+      && url.searchParams.get('mode') === 'artlist' && url.searchParams.get('format') === 'json' && url.searchParams.get('maxrecords') === '25' && url.searchParams.get('sort') === 'datedesc' && /^[1-9]\d?[dwm]$/.test(url.searchParams.get('timespan') || '');
+  }
   if (url.hostname === 'www.federalreserve.gov') return url.pathname === '/feeds/press_all.xml' && !url.search;
   if (url.hostname === 'home.treasury.gov') return url.pathname === '/resource-center/data-chart-center/interest-rates/pages/xml' && url.searchParams.get('data') === 'daily_treasury_yield_curve' && keys.length === 2 && keys.every(key => ['data','field_tdr_date_value','field_tdr_date_value_month'].includes(key)) && /^(?:19|20)\d{2}(?:0[1-9]|1[0-2])?$/.test(url.searchParams.get('field_tdr_date_value') || url.searchParams.get('field_tdr_date_value_month') || '');
   return isVerifiedIsharesUrl(url);
@@ -27,8 +47,7 @@ export function isFinanceSourceUrlAllowed(url: URL): boolean {
 export async function fetchFinanceText(url: URL, fetcher: typeof fetch = fetch): Promise<string> {
   if (!isFinanceSourceUrlAllowed(url)) throw new Error('finance_source_url_rejected');
   if (Date.now() < (blockedUntil.get(url.hostname) || 0)) throw new Error('finance_source_rate_limited');
-  if (active >= 2) throw new Error('finance_source_busy');
-  active++;
+  await acquireSlot();
   // Reserve slots synchronously. SEC stays well below its documented ten requests/second.
   const start = Math.max(Date.now(), nextHostRequest.get(url.hostname) || 0);
   nextHostRequest.set(url.hostname, start + (url.hostname.includes('sec.gov') ? 250 : 500));
@@ -48,7 +67,7 @@ export async function fetchFinanceText(url: URL, fetcher: typeof fetch = fetch):
     try { for (;;) { const part = await reader.read(); if (part.done) break; size += part.value.byteLength; if (size > LIMIT) throw new Error('finance_source_too_large'); chunks.push(part.value); } }
     finally { await reader.cancel().catch(() => undefined); }
     return Buffer.concat(chunks).toString('utf8');
-  } finally { clearTimeout(timer); active--; }
+  } finally { clearTimeout(timer); releaseSlot(); }
 }
 export async function fetchFinanceJson(url: URL, fetcher: typeof fetch = fetch): Promise<unknown> {
   const text = await fetchFinanceText(url, fetcher);

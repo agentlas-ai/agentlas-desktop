@@ -368,8 +368,9 @@ function checkOutcome(condition: Postcondition | undefined, before: readonly Lea
   const now = after.filter((element) => element.role === role && norm(element.label) === label);
   if (condition.kind === "element-present") return now.length > 0 ? "satisfied" : "unsatisfied";
   if (condition.kind === "element-value-changed") {
-    if (now.length === 0) return "unsatisfied";
     const was = before.find((element) => element.role === role && norm(element.label) === label);
+    // a control this screen never shows (the check was read from another view of the app) cannot be judged here; one that was there and is gone is unsatisfied
+    if (now.length === 0) return was ? "unsatisfied" : "unknown";
     return (was?.value ?? "") !== (now[0].value ?? "") ? "satisfied" : "unsatisfied";
   }
   return "unknown";

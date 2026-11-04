@@ -24,6 +24,7 @@ import { absoluteFileRefsWithSpaces, maskSpans } from "@/lib/local-file-refs";
 import { IntellectUI } from "./IntellectUI";
 import { IntellectUiActions, type IntellectUiFollowup } from "@/lib/intellect-ui-actions";
 import { INTELLECT_UI_LIMITS } from "@shared/intellect-ui";
+import { withoutEmptyCommentShells } from "@/lib/empty-comment-shell";
 
 export interface CodeArtifact {
   /** 채팅 내 안정적 id — 메시지id + 블록 인덱스 조합 */
@@ -105,7 +106,7 @@ export const Markdown = memo(function Markdown({
     () => mediaBasePathsWithTextHints(text, mediaBasePaths),
     [text, mediaBasePaths],
   );
-  const blocks = useMemo(() => parseBlocks(text, messageId), [text, messageId]);
+  const blocks = useMemo(() => parseBlocks(withoutEmptyCommentShells(text), messageId), [text, messageId]);
   const uiActions = useMemo(() => ({ prepareFollowup: onUiFollowup, disabled: uiActionsDisabled }), [onUiFollowup, uiActionsDisabled]);
   const body = (
     <div
@@ -190,7 +191,7 @@ export function StreamingMarkdown({
   // Main batches delivery at the frame boundary. Artificial per-character reveal
   // adds unbounded visible lag after receipt; segmentation below already limits
   // parsing work to the changing tail and keeps completed segments memoized.
-  const shownText = text;
+  const shownText = withoutEmptyCommentShells(text);
 
   const cacheRef = useRef<{ msgId: string; cache: SegmentCache | null }>({ msgId: messageId, cache: null });
   if (cacheRef.current.msgId !== messageId) cacheRef.current = { msgId: messageId, cache: null };

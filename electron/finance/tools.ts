@@ -12,8 +12,9 @@ import { FinanceAnalystDraftSchema, FinanceAnalystIdSchema, FinanceAnalystRefSch
 import { FINANCE_NATIVE_VIEW, FinanceNativeResultSchema, type FinanceNativeResult, type FinanceNativePresentation } from '../../shared/finance-native-ui';
 import { financeReportSourceRecords, type FinanceReportSourceRecord } from '../../shared/finance-report-presentation';
 import type { UiInstanceView } from '../../shared/ui-instances';
+import { FINANCE_GUIDES_REVISION, FINANCE_GUIDE_TOPICS, financeGuide, financeGuideMenu } from '../../shared/finance-guides';
 
-type Outcome = { status: 'ok'; financeReceipt?: FinanceReceiptReference; nativeUi?: FinanceNativePresentation; data: unknown } | { status: 'refused' | 'unavailable'; reason: string; next?: string; data?: unknown };
+type Outcome = { status: 'ok'; financeReceipt?: FinanceReceiptReference; nativeUi?: FinanceNativePresentation; /** Absolute paths of files this call wrote: host-only, handed to the run's outputs (harness/run-produced-files.ts), never in the result. */ produced?: readonly string[]; data: unknown } | { status: 'refused' | 'unavailable'; reason: string; next?: string; data?: unknown };
 type ToolContext = Pick<HarnessCallContext, 'chatId' | 'runId' | 'permission' | 'dryRun' | 'hostAccountBinding' | 'signal' | 'commandId'>;
 const id = z.string().min(1).max(200);
 const revision = z.number().int().nonnegative();
@@ -31,6 +32,7 @@ const inputSchemas = {
   'receipt.read': FinanceReceiptReadSchema,
   search: z.object({ query: z.string().min(1).max(200) }).strict(),
   'dashboard.feeds':z.object({}).strict(),
+  guide: z.object({ topic: z.enum(FINANCE_GUIDE_TOPICS as [string, ...string[]]).optional() }).strict(),
   'portfolio.value':z.object({expectedRevision:revision.optional(),title:z.string().min(1).max(300).optional(),language:FinanceReportLanguageSchema.optional(),narrative:z.string().max(6000).optional()}).strict(),
   calculate:z.object({request:FinanceComputeRequestSchema,period:z.enum(['1M','3M','1Y','5Y','all']).optional(),title:z.string().min(1).max(300).optional(),language:FinanceReportLanguageSchema.optional(),narrative:z.string().max(6000).optional(),chartTitle:z.string().min(1).max(300).optional(),metricsTitle:z.string().min(1).max(300).optional(),metricLabels:z.record(z.string().max(80),z.string().min(1).max(120)).refine(value=>Object.keys(value).length<=16).optional(),highlightMetricIds:z.array(z.string().min(1).max(80)).max(8).optional()}).strict(),
   'asset.add': z.object({ query: z.string().min(1).max(200), symbol: z.string().min(1).max(80).optional() }).strict(),
@@ -40,6 +42,7 @@ const inputSchemas = {
   'portfolio.propose': z.object({ rows: z.array(z.unknown()).min(1).max(100), warnings: z.array(z.string().max(500)).max(20).optional() }).strict(),
   'report.create': z.object({ dashboardId: id.optional(), title: z.string().min(1).max(300).optional(), language: FinanceReportLanguageSchema.optional() }).strict(),
   'report.read': z.object({ reportId: id }).strict(),
+  'report.export': z.object({ reportId: id }).strict(),
   'archives.create': z.object({ expectedRevision: revision, reportIds: z.array(id).max(200) }).strict(),
   'archives.list': z.object({ cursor: z.string().max(2000).optional(), limit: z.number().int().min(1).max(50).optional() }).strict(),
   'archives.read': z.union([z.object({ archiveId: z.string().regex(/^[a-f0-9]{64}$/) }).strict(), z.object({ reportId: id }).strict()]),
@@ -54,7 +57,7 @@ const inputSchemas = {
 type Action = keyof typeof inputSchemas;
 /** Pure reads (main-work recovery may repeat one that lost its answer). Managed provider reads are excluded below. */
 const effectFreeReads = new Set<Action>(['load', 'search', 'query', 'analyst.list', 'analyst.read', 'receipt.read', 'report.read', 'archives.list', 'archives.read', 'monitor.runs']);
-const writes = new Set<Action>(['analyst.save','portfolio.value','calculate','asset.add', 'query.save', 'apply', 'report.create', 'archives.create', 'archives.restore', 'monitor.create', 'monitor.update', 'monitor.run', 'monitor.schedule', 'monitor.pause']);
+const writes = new Set<Action>(['report.export','analyst.save','portfolio.value','calculate','asset.add', 'query.save', 'apply', 'report.create', 'archives.create', 'archives.restore', 'monitor.create', 'monitor.update', 'monitor.run', 'monitor.schedule', 'monitor.pause']);
 const editTypes = new Set<FinanceOperation['type']>(['watchlist.remove', 'dashboard.add', 'dashboard.rename', 'dashboard.update', 'dashboard.remove', 'dashboard.select', 'widget.add', 'widget.update', 'widget.remove', 'widget.move', 'report.update', 'report.remove', 'report.refresh', 'report.section.add', 'report.section.update', 'report.section.remove', 'report.section.move']);
 
 /** Models edit presentation and draft prose; data import and source provenance stay with the provider service. */
@@ -168,11 +171,61 @@ export function financeDataFailure(data: unknown): { reason: string; next: strin
 /** The owner's screen language for the confirmation card's own words (title, button); the draft itself is shown as written. */
 async function financeOwnerKorean(): Promise<boolean> { try { return (await import('../ui-locale')).currentUiLocale() === 'ko'; } catch { return false; } }
 
+/**
+ * Argument variations a model sends as a matter of course are accepted, so a call is never refused for form alone: a number written as text, a
+ * different letter case for a fixed word, an optional field sent as null, and a field the operation does not have (dropped; the operation never
+ * saw it). A value that is genuinely missing or wrong still fails the schema.
+ */
+const NUMERIC_ARGUMENTS = new Set(['expectedRevision', 'limit', 'minWeight', 'maxWeight', 'shrinkage', 'periodsPerYear', 'horizon', 'paths', 'seed', 'spot', 'strike', 'rate', 'dividendYield', 'volatility', 'years']);
+const LOWERCASE_ARGUMENTS = new Set(['kind', 'method', 'optionType', 'scheduleHuman']);
+const PERIOD_WORDS = ['1D', '1W', '7d', '1M', '3M', '1Y', '5Y', 'all', 'current'];
+/** A period the way the sources spell it: "1y" and "1 Y" are 1Y, "ALL" and "max" are all; a word no source knows is returned as sent so that the source says so. */
+export function canonicalFinancePeriod(value: string): string {
+  const text = value.trim();
+  if (PERIOD_WORDS.includes(text)) return text;
+  const lower = text.toLowerCase().replace(/\s+/g, '');
+  if (lower === 'max') return 'all';
+  const found = PERIOD_WORDS.find(word => word.toLowerCase() === lower);
+  if (found) return found;
+  const months = /^(\d{1,2})(?:mo|month|months)$/.exec(lower); if (months) return `${Number(months[1])}M`;
+  const years = /^(\d{1,2})(?:yr|year|years)$/.exec(lower); if (years) return `${Number(years[1])}Y`;
+  return text;
+}
+export function tidyFinanceArguments(raw: Record<string, unknown>, action: string, top = true): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(raw)) {
+    if (top && value === null) continue;
+    if (NUMERIC_ARGUMENTS.has(key) && typeof value === 'string' && /^\s*-?\d+(\.\d+)?\s*$/.test(value)) out[key] = Number(value);
+    else if (LOWERCASE_ARGUMENTS.has(key) && typeof value === 'string') out[key] = value.trim().toLowerCase();
+    else if (key === 'currency' && typeof value === 'string') out[key] = value.trim().toUpperCase();
+    else if (key === 'period' && ['calculate', 'query', 'query.save'].includes(action) && typeof value === 'string') out[key] = canonicalFinancePeriod(value);
+    else if (key === 'request' && top && value && typeof value === 'object' && !Array.isArray(value)) out[key] = tidyFinanceArguments(value as Record<string, unknown>, action, false);
+    else out[key] = value;
+  }
+  return out;
+}
+export function parseArguments<T extends z.ZodTypeAny>(schema: T, raw: Record<string, unknown>, action: string): z.output<T> {
+  const tidy = tidyFinanceArguments(raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {}, action);
+  let result = schema.safeParse(tidy);
+  // Only a read drops a field it does not have: on a write, a stray field may mean the model meant something this call would then silently not do.
+  if (!result.success && effectFreeReads.has(action as Action) && result.error.issues.length && result.error.issues.every(issue => issue.code === 'unrecognized_keys' && issue.path.length === 0)) {
+    const extra = new Set(result.error.issues.flatMap(issue => (issue as unknown as { keys: string[] }).keys));
+    result = schema.safeParse(Object.fromEntries(Object.entries(tidy).filter(([key]) => !extra.has(key))));
+  }
+  if (!result.success) throw result.error;
+  return result.data;
+}
+
 /** No Electron import or provider-specific runner: the sealed host context and shared service own every effect. */
 export async function callFinanceTool(action: Action, raw: Record<string, unknown>, ctx: ToolContext): Promise<Outcome> {
   if ((writes.has(action) || action === 'portfolio.propose' || action === 'analyst.draft') && ctx.dryRun) return { status: 'refused', reason: 'dry_run' };
   if (writes.has(action) && action !== 'monitor.pause' && ctx.permission !== 'write' && ctx.permission !== 'full') return { status: 'refused', reason: 'permission_read_only' };
   // An Analyst is saved only by the owner's press of the confirmation card finance.analyst.draft showed (harness/owner-confirm.ts), never by a model call.
+  // A method guide is fixed host content: no account, no source, no receipt.
+  if (action === 'guide') {
+    try { const { topic } = parseArguments(inputSchemas.guide,raw,action); return { status: 'ok', data: topic ? { revision: FINANCE_GUIDES_REVISION, guide: financeGuide(topic) } : { revision: FINANCE_GUIDES_REVISION, topics: financeGuideMenu(), next: 'Call finance.guide again with one topic for its ordered tool steps, how to read the results, what the sources cannot tell and the shape of the answer.' } }; }
+    catch (error) { if (error instanceof z.ZodError) return { status: 'refused', reason: 'finance_arguments_invalid', next: `Pass no argument for the topic list, or topic as one of: ${FINANCE_GUIDE_TOPICS.join(', ')}.` }; throw error; }
+  }
   let ownerCard: { instanceId: string; chatId: string } | null = null;
   if (action === 'analyst.save') {
     const { ownerConfirmedAction } = await import('../harness/owner-confirm');
@@ -186,16 +239,18 @@ export async function callFinanceTool(action: Action, raw: Record<string, unknow
     const service = await import('./service');
     const finance = service.getFinanceService();
     const scope = await service.captureFinanceScope(ctx.hostAccountBinding);
+    // Writes made through a tool call are this app's own: a later call holding the revision from before them is not an owner's conflicting edit.
+    scope.origin = 'agent';
     scope.assertCurrent();
     if(action!=='monitor.pause')await (await import('./experience')).requireFinanceConsent(scope);scope.assertCurrent();
-    if (action === 'receipt.read') return { status: 'ok', data: financeReceiptStore().read(scope, ctx, FinanceReceiptReadSchema.parse(raw)) };
-    let data: unknown;
+    if (action === 'receipt.read') return { status: 'ok', data: financeReceiptStore().read(scope, ctx, parseArguments(FinanceReceiptReadSchema,raw,action)) };
+    let data: unknown, produced: readonly string[] | undefined;
     switch (action) {
-      case 'load': inputSchemas.load.parse(raw); data = await finance.load(scope); break;
-      case 'analyst.list': {inputSchemas['analyst.list'].parse(raw);const result=await finance.analysts(scope,{action:'list'});data={items:result.items.map(({instructions:_,...item})=>item)};break;}
-      case 'analyst.read': data=await finance.readAnalyst(scope,inputSchemas['analyst.read'].parse(raw));break;
+      case 'load': parseArguments(inputSchemas.load,raw,action); data = await finance.load(scope); break;
+      case 'analyst.list': {parseArguments(inputSchemas['analyst.list'],raw,action);const result=await finance.analysts(scope,{action:'list'});data={items:result.items.map(({instructions:_,...item})=>item)};break;}
+      case 'analyst.read': data=await finance.readAnalyst(scope,parseArguments(inputSchemas['analyst.read'],raw,action));break;
       case 'analyst.draft': {
-        const {id:analystId,expectedRevision,...draft}=inputSchemas['analyst.draft'].parse(raw);
+        const {id:analystId,expectedRevision,...draft}=parseArguments(inputSchemas['analyst.draft'],raw,action);
         // A replacement names the owner's Analyst at its current revision; a stale or unknown one is refused before anything is shown.
         if(analystId){const current=(await finance.analysts(scope,{action:'list'})).items.find(item=>item.id===analystId);if(!current||current.origin!=='custom')throw new Error('finance_analyst_not_found');if(current.revision!==expectedRevision)throw new Error('finance_analyst_revision_conflict');}
         scope.assertCurrent();
@@ -209,7 +264,7 @@ export async function callFinanceTool(action: Action, raw: Record<string, unknow
         data={saved:false,awaitingOwner:true,instanceId:shown.instanceId,name:draft.name,...(analystId?{replaces:analystId}:{})};break;
       }
       case 'analyst.save': {
-        const args=inputSchemas['analyst.save'].parse(raw);
+        const args=parseArguments(inputSchemas['analyst.save'],raw,action);
         const {nativePortOwnerScope}=await import('../harness/tool-dispatch');
         if(await nativePortOwnerScope(ctx as HarnessCallContext)!==args.ownerScope)throw new Error('finance_analyst_owner_mismatch');
         const before=new Set((await finance.analysts(scope,{action:'list'})).items.map(item=>`${item.id}:${item.revision}`));
@@ -220,42 +275,52 @@ export async function callFinanceTool(action: Action, raw: Record<string, unknow
         await settleOwnerConfirmation(ownerCard!,(await financeOwnerKorean())?`Analyst 「${args.draft.name}」을(를) 저장했습니다.`:`Saved Analyst "${args.draft.name}".`);
         break;
       }
-      case 'search': data = await finance.search(scope, inputSchemas.search.parse(raw), ctx.signal); break;
-      case 'dashboard.feeds':inputSchemas['dashboard.feeds'].parse(raw);data=await finance.dashboardFeeds(scope,ctx.signal);break;
-      case 'portfolio.value':data=await finance.valuePortfolio(scope,inputSchemas['portfolio.value'].parse(raw),ctx.signal);break;
-      case 'calculate':data=await finance.calculate(scope,inputSchemas.calculate.parse(raw),ctx.signal);break;
-      case 'asset.add': data = await finance.addAsset(scope, inputSchemas['asset.add'].parse(raw), ctx.signal); break;
-      case 'query': data = await finance.query(scope, inputSchemas.query.parse(raw), ctx.signal); break;
-      case 'portfolio.propose': data = { ...await finance.proposePortfolio(scope, inputSchemas['portfolio.propose'].parse(raw)), note: PORTFOLIO_PROPOSAL_NOTE }; break;
-      case 'query.save': data = await finance.queryAndSave(scope, inputSchemas['query.save'].parse(raw), ctx.signal); break;
+      case 'search': data = await finance.search(scope, parseArguments(inputSchemas.search,raw,action), ctx.signal); break;
+      case 'dashboard.feeds':parseArguments(inputSchemas['dashboard.feeds'],raw,action);data=await finance.dashboardFeeds(scope,ctx.signal);break;
+      case 'portfolio.value':data=await finance.valuePortfolio(scope,parseArguments(inputSchemas['portfolio.value'],raw,action),ctx.signal);break;
+      case 'calculate':data=await finance.calculate(scope,parseArguments(inputSchemas.calculate,raw,action),ctx.signal);break;
+      case 'asset.add': data = await finance.addAsset(scope, parseArguments(inputSchemas['asset.add'],raw,action), ctx.signal); break;
+      case 'query': data = await finance.query(scope, parseArguments(inputSchemas.query,raw,action), ctx.signal); break;
+      case 'portfolio.propose': data = { ...await finance.proposePortfolio(scope, parseArguments(inputSchemas['portfolio.propose'],raw,action)), note: PORTFOLIO_PROPOSAL_NOTE }; break;
+      case 'query.save': data = await finance.queryAndSave(scope, parseArguments(inputSchemas['query.save'],raw,action), ctx.signal); break;
       case 'apply': {
-        const args = inputSchemas.apply.parse(raw);
+        const args = parseArguments(inputSchemas.apply,raw,action);
         data = await finance.apply(scope, { operations: financePluginOperations(args.operations), expectedRevision: args.expectedRevision }); break;
       }
-      case 'report.create': data = await finance.createReport(scope, inputSchemas['report.create'].parse(raw)); break;
+      case 'report.create': data = await finance.createReport(scope, parseArguments(inputSchemas['report.create'],raw,action)); break;
+      case 'report.export': {
+        // The report is read as it is saved; the file is written to the app's generated-assets folder and handed to this run's outputs. The workspace is not changed.
+        const args = parseArguments(inputSchemas['report.export'],raw,action);
+        const read = await finance.readReport(scope, args); scope.assertCurrent();
+        const { exportFinanceReportFile } = await import('./report-export'), { financeScopeHash } = await import('./archive');
+        const file = exportFinanceReportFile(financeScopeHash(scope), read.report);
+        produced = [file.path];
+        data = { reportId: args.reportId, file: { name: file.name, format: 'html', bytes: file.bytes, sha256: file.sha256, sections: file.sections, charts: file.charts, language: file.language }, note: 'The HTML report was written and is listed in this conversation\'s outputs. Tell the owner it is there; do not quote a file path. A chart the Finance screen draws with Vega appears in the file as the table of its saved rows.' };
+        break;
+      }
       case 'report.read': {
-        const args = inputSchemas['report.read'].parse(raw);
+        const args = parseArguments(inputSchemas['report.read'],raw,action);
         data = await finance.readReport(scope, args); break;
       }
-      case 'archives.create': data = await finance.archives(scope, { action: 'create', ...inputSchemas['archives.create'].parse(raw) }); break;
-      case 'archives.list': data = await finance.archives(scope, { action: 'list', ...inputSchemas['archives.list'].parse(raw) }); break;
-      case 'archives.read': data = await finance.archives(scope, { action: 'read', ...inputSchemas['archives.read'].parse(raw) }); break;
-      case 'archives.restore': data = await finance.archives(scope, { action: 'restore', ...inputSchemas['archives.restore'].parse(raw) }); break;
+      case 'archives.create': data = await finance.archives(scope, { action: 'create', ...parseArguments(inputSchemas['archives.create'],raw,action) }); break;
+      case 'archives.list': data = await finance.archives(scope, { action: 'list', ...parseArguments(inputSchemas['archives.list'],raw,action) }); break;
+      case 'archives.read': data = await finance.archives(scope, { action: 'read', ...parseArguments(inputSchemas['archives.read'],raw,action) }); break;
+      case 'archives.restore': data = await finance.archives(scope, { action: 'restore', ...parseArguments(inputSchemas['archives.restore'],raw,action) }); break;
       case 'monitor.create': {
-        const args = inputSchemas['monitor.create'].parse(raw);
+        const args = parseArguments(inputSchemas['monitor.create'],raw,action);
         data = await finance.apply(scope, { expectedRevision: args.expectedRevision, operations: [{ type: 'monitor.upsert', monitor: { id: financeId('monitor'), name: args.name, query: args.query, assetIds: args.assetIds, status: 'draft', lastCheckedAt: null, nextCheckAt: null, note: '' } }] }); break;
       }
-      case 'monitor.update': data = await finance.updateMonitor(scope, inputSchemas['monitor.update'].parse(raw), ctx.signal); break;
+      case 'monitor.update': data = await finance.updateMonitor(scope, parseArguments(inputSchemas['monitor.update'],raw,action), ctx.signal); break;
       case 'monitor.run': {
-        const run = await finance.runMonitor(scope, { ...inputSchemas['monitor.run'].parse(raw), callerRunId: ctx.runId, callerChatId: ctx.chatId }, ctx.signal ? AbortSignal.any([ctx.signal, AbortSignal.timeout(FINANCE_MONITOR_RUN_TIMEOUT_MS)]) : undefined);
+        const run = await finance.runMonitor(scope, { ...parseArguments(inputSchemas['monitor.run'],raw,action), callerRunId: ctx.runId, callerChatId: ctx.chatId }, ctx.signal ? AbortSignal.any([ctx.signal, AbortSignal.timeout(FINANCE_MONITOR_RUN_TIMEOUT_MS)]) : undefined);
         scope.assertCurrent();
         if (run.status === 'failed' || run.status === 'cancelled') return { status: 'refused', reason: run.status === 'cancelled' ? 'finance_monitor_cancelled' : 'finance_monitor_failed', data: run, next: 'Inspect the saved run and source connection status before starting another run.' };
         if (run.status === 'running') return { status: 'unavailable', reason: 'finance_monitor_running', data: run };
         data = run; break;
       }
-      case 'monitor.runs': data = await finance.monitorRuns(scope, inputSchemas['monitor.runs'].parse(raw)); break;
-      case 'monitor.schedule': data = await finance.schedule(scope, inputSchemas['monitor.schedule'].parse(raw)); break;
-      case 'monitor.pause': data = await finance.pause(scope, inputSchemas['monitor.pause'].parse(raw)); break;
+      case 'monitor.runs': data = await finance.monitorRuns(scope, parseArguments(inputSchemas['monitor.runs'],raw,action)); break;
+      case 'monitor.schedule': data = await finance.schedule(scope, parseArguments(inputSchemas['monitor.schedule'],raw,action)); break;
+      case 'monitor.pause': data = await finance.pause(scope, parseArguments(inputSchemas['monitor.pause'],raw,action)); break;
     }
     scope.assertCurrent();
     if(action==='query'&&data&&typeof data==='object'&&'warnings'in data&&Array.isArray(data.warnings)&&data.warnings.includes('finance_social_period_invalid'))data={...data,supportedPeriods:[...FINANCE_SOCIAL_SUPPORTED_PERIODS]};
@@ -268,7 +333,7 @@ export async function callFinanceTool(action: Action, raw: Record<string, unknow
     const nativeUi=await presentFinanceResult(action,raw,data,ctx,scope);
     // The card is the whole effect of a proposal: without it nothing reached the owner.
     if(action==='portfolio.propose'&&nativeUi?.status!=='presented')return { status: 'unavailable', reason: 'finance_ui_not_presented', next: 'No review card could be shown, so nothing was proposed. The owner can add holdings from the Finance screen (photo or manual entry).' };
-    return { status: 'ok', financeReceipt, ...(nativeUi?{nativeUi}:{}), data };
+    return { status: 'ok', financeReceipt, ...(nativeUi?{nativeUi}:{}), ...(produced?{produced}:{}), data };
   } catch (error) {
     if (error instanceof z.ZodError) return { status: 'refused', reason: 'finance_arguments_invalid', next: 'Read the operation schema and supply its exact fields.', ...(action === 'analyst.draft' ? { data: { issues: error.issues.slice(0, 8).map(issue => ({ path: issue.path.join('.'), message: issue.message })) } } : {}) };
     if (action === 'portfolio.propose' && error instanceof Error && error.message === 'finance_portfolio_rows_invalid') return { status: 'refused', reason: 'finance_portfolio_rows_invalid', data: { issues: (error as Error & { issues?: unknown }).issues ?? [] }, next: 'Fix the listed fields (null for anything not visible; unrecognized keys are refused) and call finance.portfolio.propose again. Nothing was shown to the owner.' };
@@ -281,9 +346,9 @@ const text = { type: 'string' };
 const key = { type: 'string', minLength: 1, maxLength: 200 };
 const rev = { type: 'integer', minimum: 0 };
 const list = { type: 'array', items: key, maxItems: 10 };
-const queryMetrics = ['price', 'price_history', 'news', 'filings', 'company_facts', 'social', 'social_search', 'macro_news', 'treasury_yields', 'etf_holdings', 'nav'];
+const queryMetrics = ['price', 'price_history', 'news', 'filings', 'company_facts', 'social', 'social_search', 'macro_news', 'treasury_yields', 'macro_series', 'fx_rates', 'news_search', 'etf_holdings', 'nav'];
 const factsProperty = { type: 'object', additionalProperties: false, description: 'company_facts only. view summary: one observation per period, newest 3 years, 5 quarters, 4 year-to-date periods and 3 balance-sheet dates; full (default): up to 16 latest filings per concept. concepts: only these; revenue is the revenue series whichever US-GAAP revenue concept the filer used, dividends the dividend concepts.', properties: { view: { enum: ['summary', 'full'] }, concepts: { type: 'array', minItems: 1, uniqueItems: true, items: { enum: [...FINANCE_COMPANY_FACT_CONCEPTS] } } } };
-const queryProperties = { query: text, assetIds: list, metrics: { type: 'array', items: { enum: queryMetrics }, minItems: 1, maxItems: 1 }, period: { ...text, examples: [...FINANCE_SOCIAL_SUPPORTED_PERIODS] }, facts: factsProperty };
+const queryProperties = { query: { ...text, description: 'Search words or a ticker. macro_series: one FRED series id (a wrong id answers with the supported list). fx_rates: BASE/QUOTE, for example USD/KRW. news_search: keywords in any language.' }, assetIds: list, metrics: { type: 'array', items: { enum: queryMetrics }, minItems: 1, maxItems: 1 }, period: { ...text, examples: [...FINANCE_SOCIAL_SUPPORTED_PERIODS] }, facts: factsProperty };
 const schema = (required: string[], properties: Record<string, unknown>) => ({ type: 'object', additionalProperties: false, required, properties });
 const period = { enum: ['1M', '3M', '1Y', '5Y', 'all'] };
 const reportLanguage = {type:'string',minLength:2,maxLength:80,pattern:'^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$'};
@@ -337,12 +402,14 @@ const descriptors: { action: Action; purpose: string; required: string[]; inputS
   { action: 'load', purpose: 'Read the authenticated Finance workspace, revision, dashboards, reports, sources and monitor state.', required: [], inputSchema: schema([], {}) },
   { action: 'portfolio.value', purpose: 'Refresh actual saved holdings prices and freeze complete per-currency portfolio values as a chart report. Missing or incompatible prices remain explicit; currencies are never converted or aggregated.', required: [], inputSchema: schema([], { expectedRevision: rev, title: text, language: reportLanguage, narrative: {type:'string',maxLength:6000} }) },
   { action: 'portfolio.propose', purpose: 'Show the owner an editable review of holdings you read from their photo or pasted text: one row per position, unknown fields null and never guessed. Nothing is saved: only the owner\'s Save in that card stores them in Finance, replacing (not adding to) the quantity of an asset already held. Tell the owner to review and save, and check finance.load before treating them as saved.', required: ['rows'], inputSchema: schema(['rows'], { rows: { type: 'array', minItems: 1, maxItems: 100, items: holdingRow }, warnings: { type: 'array', maxItems: 20, items: { type: 'string', maxLength: 500 } } }) },
+  { action: 'guide', purpose: 'Method guides for Finance research by asset type and situation (a U.S. or Korean stock, an ETF, rates, crypto, FX and commodities, the macro backdrop, an earnings event, dividends, a portfolio review, risk, a comparison, a theme, a claim to check, the finished report). No topic lists them; a topic returns the ordered tool steps with metric and period, how to read the results, what the sources cannot tell, and the shape of the answer. Fixed host content, no account data.', required: [], inputSchema: schema([], { topic: { enum: FINANCE_GUIDE_TOPICS } }) },
   { action: 'search', purpose: 'Search actual provider asset metadata; returns coverage and connection warnings.', required: ['query'], inputSchema: schema(['query'], { query: text }) },
   { action: 'asset.add', purpose: 'Resolve one asset against the provider and persist it in the Finance watchlist.', required: ['query'], inputSchema: schema(['query'], { query: text, symbol: text }) },
-  { action: 'query', purpose: 'Retrieve source data for one asset (an ID finance.search returned, or a saved one) and one metric per call, with observation times, provenance and coverage gaps.', required: ['query', 'assetIds', 'metrics', 'period'], inputSchema: schema(['query', 'assetIds', 'metrics', 'period'], queryProperties) },
+  { action: 'query', purpose: 'Retrieve source data for one asset (an ID finance.search returned, or a saved one) and one metric per call, with observation times, provenance and coverage gaps. No asset is needed for social_search, macro_news, treasury_yields, macro_series (FRED series), fx_rates (ECB reference rates) and news_search (news in any language); none of these needs a key. For the method of a kind of analysis, call finance.guide first.', required: ['query', 'assetIds', 'metrics', 'period'], inputSchema: schema(['query', 'assetIds', 'metrics', 'period'], queryProperties) },
   { action: 'query.save', purpose: 'Retrieve source data and save evidence or a frozen report in Finance. With reportId, append host-retrieved supporting evidence to that active report while preserving its existing prose and data; report mode and the current expectedRevision are required.', required: ['query', 'assetIds', 'metrics', 'period', 'mode'], inputSchema: { ...schema(['query', 'assetIds', 'metrics', 'period', 'mode'], { ...queryProperties, mode: { enum: ['sources', 'report'] }, title: text, expectedRevision: rev, reportId: { ...key, pattern: '\\S' } }), allOf: [{ if: { required: ['reportId'] }, then: { required: ['expectedRevision'], properties: { mode: { const: 'report' } } } }] } },
   { action: 'apply', purpose: 'Apply canonical dashboard/widget edits or draft report text at an expected Finance revision; provider data and reviewed status are host-owned.', required: ['operations', 'expectedRevision'], inputSchema: schema(['operations', 'expectedRevision'], { expectedRevision: rev, operations: { type: 'array', minItems: 1, maxItems: 40, items: editSchema } }) },
   { action: 'report.create', purpose: 'Freeze an existing Finance dashboard into a host-generated report snapshot.', required: [], inputSchema: schema([], { dashboardId: key, title: text, language:reportLanguage }) },
+  { action: 'report.export', purpose: 'Write a saved Finance report (active or archived) as one self-contained HTML file in this conversation\'s outputs: the report\'s own text, charts drawn from its saved dated series, key figures, a notice. It changes nothing in the Finance workspace. Read the report (finance.report.read) and write its summary (finance.apply) first.', required: ['reportId'], inputSchema: schema(['reportId'], { reportId: key }) },
   { action: 'report.read', purpose: 'Read a saved Finance report and its evidence without refreshing its snapshot.', required: ['reportId'], inputSchema: schema(['reportId'], { reportId: key }) },
   { action: 'archives.create', purpose: 'Preserve a verified full edition, then remove selected active reports and unreferenced sources at an expected revision. An empty selection archives only unused sources.', required: ['expectedRevision', 'reportIds'], inputSchema: schema(['expectedRevision', 'reportIds'], { expectedRevision: rev, reportIds: { type: 'array', items: key, maxItems: 200, uniqueItems: true } }) },
   { action: 'archives.list', purpose: 'Read a bounded page of preserved Finance editions without changing active material.', required: [], inputSchema: schema([], { cursor: text, limit: { type: 'integer', minimum: 1, maximum: 50 } }) },
@@ -357,19 +424,20 @@ const descriptors: { action: Action; purpose: string; required: string[]; inputS
 ];
 const managedFinanceHostAtImport=wasManagedOneConfigured();
 export const FINANCE_PORTS = descriptors.map(({ action, purpose, required, inputSchema }) => {
-  composeDeclaredPrompt([{ id: `tool.finance.${action}.schema`, revision: action==='query.save'?6:action==='query'?5:action==='apply'?3:['calculate','report.create','portfolio.propose'].includes(action)?2:1, stability: 'versioned-content', changeTriggers: ['release', 'output-schema'], text: JSON.stringify(inputSchema) }]);
+  composeDeclaredPrompt([{ id: `tool.finance.${action}.schema`, revision: action==='query.save'?7:action==='query'?6:action==='apply'?3:['calculate','report.create','portfolio.propose'].includes(action)?2:1, stability: 'versioned-content', changeTriggers: ['release', 'output-schema'], text: JSON.stringify(inputSchema) }]);
   return { operationId: `finance.${action}`, kind: writes.has(action) ? 'command' as const : 'query' as const, required, inputSchema,
     ...(action === 'monitor.pause' ? { terminalTargetKeys: ['monitorId'] as const, terminalUnderReadPermission: true as const } : {}),
     ...(action === 'monitor.run' ? { callTimeoutMs: FINANCE_MONITOR_RUN_TIMEOUT_MS } : {}),
     // The provider client accepts requests only after these actual Managed metadata are latched below.
     ...(managedFinanceHostAtImport&&['search','query','asset.add','query.save'].includes(action)?{callTimeoutMs:60000}:{}),
     ...(effectFreeReads.has(action)&&!(managedFinanceHostAtImport&&['search','query'].includes(action)) ? { effectFreeRead: true as const } : {}),
-    purpose: composeDeclaredPrompt([{ id: `tool.finance.${action}.description`, revision: action === 'query.save' ? 2 : action === 'query' ? 2 : 1, stability: 'fixed-policy', changeTriggers: ['release'], text: purpose }]),
+    purpose: composeDeclaredPrompt([{ id: `tool.finance.${action}.description`, revision: action === 'query.save' ? 2 : action === 'query' ? 4 : 1, stability: 'fixed-policy', changeTriggers: ['release'], text: purpose }]),
     handler: (args: Record<string, unknown>, ctx: HarnessCallContext) => callFinanceTool(action, args, ctx) };
 });
 installManagedFinanceHostPolicy(FINANCE_PORTS);
 // analyst r2 (2026-10-28): the retired analyst_draft name corrected to the declared finance.analyst.draft; first registered here (its bytes reached the model through skill.read unregistered).
 const FINANCE_SKILL_REVISION: Record<string, number> = { index: 5, research: 5, workspace: 3, monitor: 3, analyst: 2 };
+registerDeclaredPromptModule({ id: 'tool.finance.guide.content', revision: FINANCE_GUIDES_REVISION, stability: 'versioned-content', changeTriggers: ['release'] });
 for (const workflow of ['index', 'research', 'workspace', 'monitor', 'analyst']) registerDeclaredPromptModule({ id: `plugin.finance.skill.${workflow}`, revision: FINANCE_SKILL_REVISION[workflow], stability: 'versioned-content', changeTriggers: ['release', 'skill-package'] });
 
 /** Preserve the installed bytes and their hash while declaring the actual skill tool-result channel. */

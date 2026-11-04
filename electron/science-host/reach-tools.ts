@@ -4,7 +4,7 @@ import { REACH_PORT_SCHEMAS } from "../reach-host/schemas";
 /*
  * Agentlas Reach (the harness reach.* ports) for Science turns.
  *
- * Science turns carry no harness_call, so, like the office-document ports (document-tools.ts), the seven Reach ports are one more server of the
+ * A Science turn on the old path carries no harness_call (a shared-chain turn does, through agentlas-turn in mcp/client.ts), so, like the office-document ports (document-tools.ts), the eight Reach ports are one more server of the
  * lazy Desktop catalogue (list_desktop_tools -> call_desktop_tool). Nothing is reimplemented: each tool is the harness port itself, called
  * through the same dispatcher One, Work, Finance and the personal agent use (harness/capability-ports.ts callHarnessPort), with the turn's own
  * authority:
@@ -43,6 +43,7 @@ const TOOLS: ReadonlyArray<ScienceReachToolDescriptor & { operation: string }> =
   { name: "reach_invoke", operation: "reach.invoke", description: "Carry out one ready capability of an installed app (AppleScript command, or the app's own menu and dialog driven on screen); read-only runs may only use capabilities the app declares as reads.", inputSchema: REACH_PORT_SCHEMAS.invoke },
   { name: "reach_explore", operation: "reach.explore", description: "Look at one running app now: open its dialogs one by one, read them, close them again, and turn what works into ready capabilities.", inputSchema: REACH_PORT_SCHEMAS.explore },
   { name: "reach_verify", operation: "reach.verify", description: "Check that an explored capability still works in the running app; re-read it if the app moved it.", inputSchema: REACH_PORT_SCHEMAS.verify },
+  { name: "reach_learn", operation: "reach.learn", description: "After you did something on an app's screen with the computer tools and it worked, teach Reach the steps (roles and captions, never what you typed or read) so the next call is reach.invoke instead of doing it on screen again. Needs an outcome check that was false before and true after.", inputSchema: REACH_PORT_SCHEMAS.learn },
 ];
 
 export function scienceReachToolDescriptors(): ScienceReachToolDescriptor[] {

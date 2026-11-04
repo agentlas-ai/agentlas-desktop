@@ -98,6 +98,16 @@ function apiBase(adapter: KeyedAdapter): string {
   return override && /^http:\/\/127\.0\.0\.1:\d{2,5}$/.test(override) ? override : adapter.base;
 }
 
+/**
+ * A keyed call that finds no key. The model decides what to do, with the built-in vault tools ("볼트 확인하는 내장 MCP를
+ * 만들어 모델이 판단시켜"): it reads the saved key names (vault.keys: names only), and if a saved name is this service's key it proposes
+ * vault.use {saved, as}, which the owner approves on screen (the vault renames it, the value never leaves Main); if none is, vault.use {as}
+ * asks the owner to paste one. No media line rides a run, so this refusal is where the model learns the way.
+ */
+function keyMissing(adapter: KeyedAdapter): Outcome {
+  return refused("provider_key_missing", `no key saved as ${adapter.envKey} for ${adapter.label}; read the saved names with vault.keys: if one is this service's key, call vault.use {saved, as: "${adapter.envKey}"} (the owner approves on screen), otherwise vault.use {as: "${adapter.envKey}"} asks the owner for it; hold this step only, continue the rest, and call again once the owner answers`);
+}
+
 async function providerKey(adapter: KeyedAdapter): Promise<string | null> {
   try {
     const { readEnvVarAliased } = await import("../secrets/env-alias");
@@ -244,7 +254,7 @@ export async function transcribeFile(routeId: string, audioFile: string, ctx: Ke
   if (!("adapter" in admitted)) return { ok: false, outcome: admitted };
   const { adapter } = admitted;
   const key = await providerKey(adapter);
-  if (!key) return { ok: false, outcome: refused("provider_key_missing", `the owner saves ${adapter.envKey} for ${adapter.label} in Settings`) };
+  if (!key) return { ok: false, outcome: keyMissing(adapter) };
   const bytes = fs.readFileSync(audioFile);
   let res: SendResult | { networkError: string }; let modelId: string;
   if (routeId === "deepgram-audio") {
@@ -341,7 +351,7 @@ export async function keyedProviderRequest(args: Record<string, unknown>, ctx: K
     if (!outputFile) return refused("output_path_invalid", "absolute outputDir and a plain fileName");
   }
   const key = await providerKey(adapter);
-  if (!key) return refused("provider_key_missing", `the owner saves ${adapter.envKey} for ${adapter.label} in Settings`);
+  if (!key) return keyMissing(adapter);
   const requestKey = sha(JSON.stringify({ op: "provider.request", routeId, method, apiPath, json: args.json ?? null, outputFile, chatId: ctx.chatId }));
   // Only a POST spends something: it is answered once per request. A GET/DELETE reads a state that moves (a job's status), so a
   // finished read is never replayed to a later identical one — it only joins a read still in flight.
@@ -414,7 +424,7 @@ export async function speechSynthesize(args: Record<string, unknown>, ctx: Keyed
   let voiceId = str(args.voiceId);
   const voiceName = str(args.voiceName);
   const key = await providerKey(adapter);
-  if (!key) return refused("provider_key_missing", `the owner saves ${adapter.envKey} for ${adapter.label} in Settings`);
+  if (!key) return keyMissing(adapter);
   if (routeId === "elevenlabs-audio" && !voiceId && voiceName) {
     const listed = await send(adapter, key, { method: "GET", pathAndQuery: "/v1/voices", timeoutMs: 30_000 });
     if ("networkError" in listed) return refused("provider_unreachable", listed.networkError);

@@ -37,7 +37,8 @@ export function runtimeCapabilitiesFor(kinds: readonly string[]): string[] {
 const ABILITY_WORDS: Record<string, string> = {
   "web.search": "web search",
   "web.fetch": "web fetch",
-  "image.generate": "image generation (save to assets/, cite the path)",
+  // No "image.generate" word: the model picks an image tool when the task needs one, and the host copies what the CLI saved;
+  // the capability stays in RUNTIME_NATIVE_CAPABILITIES for graph requirements.
   shell: "shell",
   "file.edit": "file edit",
 };

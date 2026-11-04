@@ -21,7 +21,13 @@ export interface FinanceStoreSnapshot {
   canUndo: boolean;
   canRedo: boolean;
 }
-function errorMessage(error: unknown): string { return error instanceof Error ? error.message : "finance_storage_failed"; }
+/** The stable code of a failure. A schema error is never passed on as its raw JSON: too many reports or sources is the capacity code, any other is the generic one. */
+function errorMessage(error: unknown): string {
+  if (!(error instanceof Error)) return "finance_storage_failed";
+  const issues = (error as { issues?: Array<{ code?: string; path?: unknown[] }> }).issues;
+  if (error.name === "ZodError" && Array.isArray(issues)) return issues.some(issue => issue.code === "too_big" && (issue.path?.[0] === "reports" || issue.path?.[0] === "sources")) ? "finance_workspace_capacity_reached" : "finance_operation_failed";
+  return error.message;
+}
 function freeze<T>(value: T): T {
   if (value && typeof value === "object" && !Object.isFrozen(value)) {
     Object.freeze(value); for (const item of Object.values(value as Record<string, unknown>)) freeze(item);
@@ -99,7 +105,8 @@ export function createFinanceStore(providedPersistence?: FinancePersistence) {
       const storage = persistence();
       const saved = validateFinanceWorkspace(await storage.save({ workspace: next, expectedRevision: current.revision }));
       if (epoch !== generation) throw new Error("finance_scope_changed");
-      if (saved.revision !== next.revision || JSON.stringify(saved) !== JSON.stringify(next)) throw new Error("finance_save_receipt_mismatch");
+      // The host is the source of truth and may normalise what it stores (dashboard selection, field order): the receipt is accepted when it is the very next revision of this owner's workspace, and what the host kept is what is shown.
+      if (saved.revision !== next.revision || saved.ownerScope !== next.ownerScope) throw new Error("finance_save_receipt_mismatch");
       publish({ workspace: saved, saving: false, persistence: storage.kind, savedAt: new Date().toISOString(), error: null });
       return saved;
     } catch (error) { if (epoch === generation) publish({ saving: false, error: errorMessage(error) }); throw error; }
@@ -112,11 +119,21 @@ export function createFinanceStore(providedPersistence?: FinancePersistence) {
       if (expectedRevision !== undefined && expectedRevision !== state.workspace.revision) {
         publish({ error: "finance_revision_conflict" }); throw new Error("finance_revision_conflict");
       }
-      const before = state.workspace;
-      let next: FinanceWorkspace;
-      try { next = applyFinanceOperations(before, Array.isArray(operation) ? operation : [operation as FinanceOperation]); }
-      catch (error) { publish({ error: errorMessage(error) }); throw error; }
-      const saved = await commit(next);
+      let before = state.workspace;
+      let saved: FinanceWorkspace | undefined;
+      // An edit is a set of operations, not a snapshot: if the host saved something else first (a scheduled briefing, a chat tool, the phone), the same operations are applied again to the latest saved state. A caller that named the revision it edited keeps the conflict.
+      for (let attempt = 0; !saved; attempt++) {
+        let next: FinanceWorkspace;
+        try { next = applyFinanceOperations(before, Array.isArray(operation) ? operation : [operation as FinanceOperation]); }
+        catch (error) { publish({ error: errorMessage(error) }); throw error; }
+        try { saved = await commit(next); }
+        catch (error) {
+          if (expectedRevision !== undefined || attempt >= 3 || errorMessage(error) !== "finance_revision_conflict") throw error;
+          await load(true);
+          if (epoch !== generation) throw new Error("finance_scope_changed");
+          before = state.workspace;
+        }
+      }
       if (epoch !== generation) throw new Error("finance_scope_changed");
       undoStack = [...undoStack.slice(-(MAX_HISTORY - 1)), before]; redoStack = []; publish({}); return saved;
     });

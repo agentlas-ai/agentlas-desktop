@@ -15,7 +15,7 @@
 }
 .table tbody tr[data-invalid="true"] { border-color: color-mix(in srgb, var(--danger) 45%, var(--paper-edge)); }
 .table td { display: block; min-width: 0; padding: 0; border: 0; }
-.table td[data-label]::before { content: attr(data-label); display: block; margin-bottom: 4px; font-size: 11px; line-height: 1.2; color: var(--ink-soft); letter-spacing: .01em; }
+.table td[data-label]::before { content: attr(data-label); display: block; margin-bottom: 4px; font-size: 12px; line-height: 1.2; color: var(--ink-soft); letter-spacing: .01em; }
 
 /* row card: line 1 symbol + name (+ remove), line 2 the numbers, line 3 currency, exchange, date; then what is saved now and what needs a fix */
 .table td[data-field="symbol"] { grid-area: 1 / 1 / 2 / 6; }
@@ -51,10 +51,10 @@
 .editor input[type=number]::-webkit-outer-spin-button, .editor input[type=number]::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
 
 .held { display: inline-flex; align-items: baseline; gap: 6px; font-variant-numeric: tabular-nums; color: var(--ink); }
-.held small { font-size: 11px; color: var(--ink-soft); }
+.held small { font-size: 12px; color: var(--ink-soft); }
 .none { color: var(--ink-soft); }
 .table td[data-field="held"]:has(.none) { display: none; }
-.issues { display: flex !important; align-items: center; gap: 6px; font-size: 12px; line-height: 1.4; color: var(--danger); }
+.table td.issues { display: flex; align-items: center; gap: 6px; font-size: 12px; line-height: 1.4; color: var(--danger); }
 .issues svg { flex: none; }
 
 .remove, .add {
@@ -97,7 +97,7 @@
   .table th[data-field="held"], .table td[data-field="held"], .table td[data-field="held"]:has(.none) { display: table-cell; text-align: right; white-space: nowrap; }
   .table tbody tr .remove { position: static; width: 34px; height: auto; min-height: 34px; border: 1px solid transparent; border-radius: var(--radius-sm); box-shadow: none; background: transparent; }
   .table tbody tr .remove svg { width: 16px; height: 16px; }
-  .table td[data-field="issues"] { display: none !important; }
+  .table td[data-field="issues"] { display: none; }
   .table td[data-field="name"] input { min-width: 140px; }
   .table td[data-field="symbol"] input { min-width: 108px; }
   .table td[data-field="exchange"] input { min-width: 76px; }

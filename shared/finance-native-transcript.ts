@@ -1,6 +1,6 @@
 import { FinanceNativeResultSchema } from './finance-native-ui';
-import { financeQueryScope } from './finance-query-scope';
 import { financePortfolioLineText } from './finance-portfolio';
+import { financeDatedSeries } from './finance-data-visual';
 import { financeReportCompositionSpec, financeReportComputeMetrics, financeReportLocale, financeReportProseBlocks, financeReportWarnings, selectFinanceReportSections } from './finance-report-presentation';
 import { validateInlineUiPresentationContent, type InlineUiPresentationContent } from './inline-ui-presentation';
 import { INTELLECT_UI_LIMITS, type IntellectUiNode } from './intellect-ui';
@@ -8,16 +8,18 @@ import { INTELLECT_UI_LIMITS, type IntellectUiNode } from './intellect-ui';
 const text = (value: string): IntellectUiNode => ({ type: 'text', text: value });
 const native = (children: IntellectUiNode[], title?: string): InlineUiPresentationContent => ({ kind: 'native', document: { version: 1, ...(title ? { title } : {}), children } });
 const unavailable = () => [native([text('This Finance result cannot be displayed here.')])];
-const number = (value: number) => new Intl.NumberFormat('en', { maximumFractionDigits: 2, ...(value !== 0 && Math.abs(value) < .01 ? { maximumSignificantDigits: 3 } : {}) }).format(value);
 /** A table cell on the phone is plain text: links keep their label, emphasis and code marks go. */
 const plainCell = (value: string) => value.replace(/\[([^\]\n]{1,1000})\]\(([^\s)]+)\)/g, '$1').replace(/\*\*([^*\n]+)\*\*|__([^_\n]+)__/g, '$1$2').replace(/`([^`\n]+)`/g, '$1').trim();
-const hidden = new Set(['url', 'source', 'source id', 'source url', 'retrieved at', 'accession', 'document', 'original filing', 'original post']);
-/** A price row on the phone, as on the desktop card, is the price and its currency: the time it was observed is not drawn (owner 2026-10-27). */
-const priceTimes = new Set(['observed at', 'latest trading day']);
 
 /** A literal daily price or Treasury series as the phone's chart: provider observations only, points never imply interpolation across missing days.
  *  `null` is "not a chart"; `empty` is a series with no numeric observation at all. The same series is drawn for a query result and for a saved report section. */
 function seriesChart(columns: readonly string[], rows: readonly (string | number | null)[][], metric: string | undefined): { spec: Record<string, unknown> } | { empty: true } | null {
+  // A FRED series or an ECB pair (macro_series, fx_rates): one label, one unit, the same literal points, titled with its own unit.
+  if (metric === 'series') {
+    const dated = rows.length <= 2000 ? financeDatedSeries({ columns: [...columns], rows: rows.map(row => [...row]) }) : null;
+    return dated ? { spec: { data: { values: dated.points.map(point => ({ date: point.date, series: dated.label, value: point.value })) }, mark: { type: 'point', tooltip: true }, encoding: {
+      x: { field: 'date', type: 'temporal', title: null }, y: { field: 'value', type: 'quantitative', title: dated.unit, scale: { zero: false } }, color: { field: 'series', type: 'nominal', title: null } } } } : null;
+  }
   const series = metric === 'treasury_yields' ? 'Maturity' : metric === 'price_history' ? 'Symbol' : null;
   const amount = metric === 'treasury_yields' ? 'Par curve yield' : 'Close (raw)';
   const at = (name: string) => columns.indexOf(name);
@@ -54,25 +56,18 @@ export function financeNativeTranscriptContents(value: unknown, options: { state
   if (!checked.success) return [];
   const { view } = checked.data;
   const blocks: InlineUiPresentationContent[] = [];
-  if (view.kind === 'search') {
-    if (view.result.assets.length > 50) return unavailable();
-    blocks.push(native(view.result.assets.length ? view.result.assets.map(asset => ({ type: 'card', title: asset.symbol, children: [text([asset.name, asset.exchange, asset.currency !== 'XXX' ? asset.currency : null].filter(Boolean).join(' · '))] })) : [text('No candidates returned.')], clipText(view.query, INTELLECT_UI_LIMITS.labelChars)));
-  } else if (view.kind === 'query') {
+  // Ticker candidates and the news, filings and price rows a query returned are what the model read to answer, not something
+  // the owner asked to see: they stay out of the phone chat . A drawn series, a report and a holdings
+  // proposal are results and stay.
+  if (view.kind === 'search') return [];
+  else if (view.kind === 'query') {
     const { result } = view;
-    if (result.status === 'error' || result.status === 'unconnected') return [native([text('Data could not be retrieved.')])];
-    if (!result.rows.length) return [native([text('No results returned.')])];
+    if (result.status === 'error' || result.status === 'unconnected' || !result.rows.length) return [];
     // Literal provider observations only. Points never imply interpolation across missing observations.
     const metric = view.request.metrics.length === 1 ? view.request.metrics[0] : undefined;
-    const columns = result.columns;
-    const built = seriesChart(columns, result.rows, metric);
-    if (built && 'empty' in built) return [native([text('No verified numeric observations.')])];
-    if (built) blocks.push({ kind: 'chart', spec: built.spec });
-    if (!blocks.length) {
-      if (result.rows.length > 50) return unavailable();
-      const visible = columns.map((name, index) => ({ name, index })).filter(column => !hidden.has(column.name.toLowerCase()) && !(metric === 'price' && priceTimes.has(column.name.toLowerCase())));
-      if (!visible.length || visible.length > 8) return unavailable();
-      blocks.push(native(result.rows.map(row => ({ type: 'card', children: [text(visible.map(column => `${column.name}: ${row[column.index] === null ? '—' : typeof row[column.index] === 'number' ? number(row[column.index] as number) : row[column.index] ?? '—'}`).join('\n'))] })), clipText(financeQueryScope(view.request), INTELLECT_UI_LIMITS.labelChars)));
-    }
+    const built = seriesChart(result.columns, result.rows, metric === 'macro_series' || metric === 'fx_rates' ? 'series' : metric);
+    if (!built || 'empty' in built) return [];
+    blocks.push({ kind: 'chart', spec: built.spec });
   } else if (view.kind === 'holdings') {
     // The phone shows the open proposal and where the decision is made; it cannot save. Once the owner has acted the table is dropped:
     // its rows are no longer what is saved. Cells stay inside the contract's text limits.
@@ -93,7 +88,7 @@ export function financeNativeTranscriptContents(value: unknown, options: { state
       // A saved price or Treasury series is drawn on the phone as it is in the desktop reader, from the same literal rows.
       const projection = section.projection, columns = projection?.columns ?? [];
       const series = drawn && projection && (projection.status === 'ready' || projection.status === 'partial') && projection.rows.length
-        ? seriesChart(columns, projection.rows, columns.includes('Par curve yield') ? 'treasury_yields' : columns.includes('Close (raw)') ? 'price_history' : undefined) : null;
+        ? seriesChart(columns, projection.rows, columns.includes('Par curve yield') ? 'treasury_yields' : columns.includes('Close (raw)') ? 'price_history' : (columns.includes('Series') || columns.includes('Pair')) && columns.includes('Unit') ? 'series' : undefined) : null;
       // A chart the analysis supplied is already the common chart contract; the phone draws it as the desktop does.
       const chart = drawn ? section.chart ?? financeReportCompositionSpec(section, locale, 'legend') ?? (series && 'spec' in series ? series.spec : null) : null;
       const metrics = financeReportComputeMetrics(section, locale);
@@ -108,7 +103,9 @@ export function financeNativeTranscriptContents(value: unknown, options: { state
     const warnings = blocks.length && blocks.length < 16 ? financeReportWarnings(view.report, locale) : [];
     const card = warnings.length ? validateInlineUiPresentationContent(native(warnings.map(line => text(clipText(line, INTELLECT_UI_LIMITS.inputChars))))) : null;
     if (card?.ok) blocks.push(card.content);
-  } else blocks.push(native([text('A complete priced currency group is not available for an allocation chart.')]));
+  // A valuation with no saved report is what the model read to answer; its one line was a negative sentence even when the
+  // holdings were priced . The answer says what it found.
+  } else return [];
   if (!blocks.length || blocks.length > 16) return unavailable();
   const validated = blocks.map(block => validateInlineUiPresentationContent(block));
   return validated.every(block => block.ok) ? validated.map(block => block.ok ? block.content : native([])) : unavailable();

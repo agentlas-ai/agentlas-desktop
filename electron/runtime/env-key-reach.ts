@@ -75,23 +75,3 @@ export function isPlainMisnaming(from: string, to: string): boolean {
   if (rest.shift() !== service) return false;
   return rest.every((word) => /^\d+$/.test(word) || ["API", "APIKEY", "KEY", "TOKEN", "SECRET"].includes(word));
 }
-
-const ANNOUNCE_TTL_MS = 30 * 60_000;
-const announced = new Map<string, number>();
-
-/** True the first time this rename is offered in the window, so a long room does not repeat the same line each turn. */
-export function claimRenameAnnouncement(suggestion: EnvKeyRenameSuggestion, now = Date.now()): boolean {
-  for (const [key, at] of announced) if (now - at > ANNOUNCE_TTL_MS) announced.delete(key);
-  const id = `${suggestion.from}\0${suggestion.to}`;
-  if (announced.has(id)) return false;
-  announced.set(id, now);
-  while (announced.size > 64) announced.delete(announced.keys().next().value!);
-  return true;
-}
-
-/** Plain, value-free sentence for the owner. The only action is the existing one-click rename on the env screen. */
-export function renameSuggestionNotice(suggestion: EnvKeyRenameSuggestion, locale: "ko" | "en"): { message: string; i18n: { ko: string; en: string } } {
-  const ko = `저장된 키 ${suggestion.from} 가 ${suggestion.to} 로 보입니다. 라이브러리 > 환경 변수에서 '이름 바꾸기'를 한 번 누르면 이 키를 씁니다. 동의 없이는 바꾸지 않습니다.`;
-  const en = `The saved key ${suggestion.from} looks like ${suggestion.to}. Press Rename once in Library > Environment variables to use it. Nothing is renamed without your approval.`;
-  return { message: locale === "ko" ? ko : en, i18n: { ko, en } };
-}

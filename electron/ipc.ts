@@ -3510,13 +3510,26 @@ export function registerIpcHandlers(): void {
   registerAppControlDomainIpc(ipcMain, "env:remove", (key: string) => deleteEnvVar(key));
   // One may rename a stored key after the owner says yes (owner 2026-10-11: "볼트 입력이나 저장된 것 중 있는지 AI가
   // 찾고 물어보면 되지"); the value stays in Main. The inventory is value-free (no masked preview) for the same search.
-  registerAppControlDomainIpc(ipcMain, "env:rename", (from: string, to: string) => renameEnvVar(from, to));
+  registerAppControlDomainIpc(ipcMain, "env:rename", async (from: string, to: string) => {
+    // A model may rename a saved key on the owner's say-so, but never onto a runtime login name: a CLI that finds
+    // OPENAI_API_KEY or ANTHROPIC_API_KEY switches the owner's subscription to metered billing (same rule as vault.use).
+    if (appControlInvocationPermission() && (await import("./runtime/env-key-reach")).RUNTIME_AUTH_ENV_KEYS.has(to)) {
+      throw new Error(`env_rename_runtime_login_key: ${to} is a runtime login name; the owner saves it in Settings`);
+    }
+    return renameEnvVar(from, to);
+  });
   registerAppControlDomainIpc(ipcMain, "env:inventory", async () => (await collectEnvStatus(envKnownRequirements(),
     { listKeys: listEnvKeys, hasValue: hasEnvVar, preview: async () => null },
   )).map(({ key, requiredBy, hasValue }) => ({ key, requiredBy, hasValue })));
 
   // ── harness capability ports: UI / SDK / One app control use the same dispatcher as the model's harness_call ──
-  const harnessUiContext = () => ({ chatId: "ui", runId: "ui", permission: appControlInvocationPermission() ?? "full" as const });
+  // The owner's screen calls these with chat "ui", which the owner-only ports trust (cache billing, pricing, wire format, ui.action).
+  // A model reaching the same handler through app.call is not the owner's screen: it gets its own scope and its own permission, so an
+  // owner-only port refuses it as it refuses harness_call (audit ; no production call has come this way).
+  const harnessUiContext = () => {
+    const viaAppControl = appControlInvocationPermission();
+    return viaAppControl ? { chatId: "app-control", runId: "app-control", permission: viaAppControl } : { chatId: "ui", runId: "ui", permission: "full" as const };
+  };
   registerAppControlDomainIpc(ipcMain, "harness:search", async (query: unknown, kind?: unknown) =>
     (await import("./harness/capability-ports")).searchHarness(typeof query === "string" ? query.slice(0, 500) : "", typeof kind === "string" ? kind as never : undefined));
   registerAppControlDomainIpc(ipcMain, "harness:describe", async (id: unknown) =>
@@ -5497,6 +5510,10 @@ export function registerIpcHandlers(): void {
       /* 매니저 미기동(헤드리스 등)이면 무시 */
     }
   };
+  // A model saves a graph through one_graph_save, which checks the work comes back and is not a tool or a copy (policy.ts refuses
+  // createFromBlueprint/updateGraph for the same reason); automations.create/update must not be the way around it. A model-made
+  // automation is the agent's, as the ## Automation block path records it, not the owner's (audit).
+  const GRAPH_THROUGH_ONE_GRAPH_SAVE = "save a graph through one_graph_save, which checks that the work comes back and is not a tool or a copy; send automations.create/update without graph";
   // goalId is the owner's link between an automation and a Goal; an agent cannot set it, so retrying with it changes nothing.
   const GOAL_ASSOCIATION_OWNER_ONLY = "goalId is the host's own link between an automation and a Goal and cannot be set from here; send the call without goalId. To follow a Goal, use workspaceMode follow_goal with workspaceGoalId (a Goal this automation is already tied to); if it is refused, tell the owner which link is missing.";
   registerAppControlDomainIpc(ipcMain, "automations:list", () => listAutomations().map(automationWorkspaceView));
@@ -5504,6 +5521,8 @@ export function registerIpcHandlers(): void {
     ipcMain, "automations:create",
     async (input: AutomationCreateInput) => {
       if (Object.hasOwn(input, "goalId")) throw new AutomationWorkspaceError("automation_workspace_goal_association_untrusted", GOAL_ASSOCIATION_OWNER_ONLY);
+      const byModel = appControlInvocationPermission() !== null;
+      if (byModel && Object.hasOwn(input, "graph")) throw new AutomationWorkspaceError("automation_graph_through_one_graph_save", GRAPH_THROUGH_ONE_GRAPH_SAVE);
       // The connected model decides the tool mode at creation; warm it before the
       // synchronous store write peeks the verdict (see prejudgeAutomationComputerUse).
       await prejudgeAutomationComputerUse(
@@ -5512,7 +5531,7 @@ export function registerIpcHandlers(): void {
       );
       const { workspaceMode, ...storedInput } = input;
       const created = withOwnerAutomationWorkspaceIntent(workspaceMode, null,
-        () => createAutomation({ ...storedInput, createdBy: "user" }));
+        () => createAutomation({ ...storedInput, createdBy: byModel ? "agent" : "user" }));
       await resyncTriggers();
       return automationWorkspaceView(created);
     },
@@ -5547,6 +5566,7 @@ export function registerIpcHandlers(): void {
   });
   registerAppControlDomainIpc(ipcMain, "automations:update", async (id: string, patch: AutomationUpdatePatch) => {
     if (Object.hasOwn(patch, "goalId")) throw new AutomationWorkspaceError("automation_workspace_goal_association_untrusted", GOAL_ASSOCIATION_OWNER_ONLY);
+    if (appControlInvocationPermission() !== null && Object.hasOwn(patch, "graph")) throw new AutomationWorkspaceError("automation_graph_through_one_graph_save", GRAPH_THROUGH_ONE_GRAPH_SAVE);
     await prejudgeAutomationComputerUse(
       { toolMode: patch.toolMode, name: patch.name, promptTemplate: patch.promptTemplate, targetLabel: patch.targetType },
       { timeoutMs: 6_000 },

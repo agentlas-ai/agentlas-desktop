@@ -67,6 +67,13 @@ const DENIED: Array<[RegExp, string, AppControlEffect]> = [
   [/^chats\.appendOneUserMessage$/, "never write a message as the owner", "write"],
   // A model saves a graph through one_graph_save, which checks that the work comes back and is not a tool or a copy.
   [/^automations\.(createFromBlueprint|updateGraph)$/, "save graphs through one_graph_save, which checks the work comes back and is not a tool", "write"],
+  // Media and run keys have harness ports that check readiness, receipts and the owner's route (audit): the screen's own
+  // buttons stay the screen's. No production call has come this way.
+  [/^multimodal\.(startVideo|generateImage|saveSettings)$/, "make media with harness_call media.image.generate / media.video.generate (they check the route and keep a receipt); media settings are the owner's screen", "write"],
+  [/^mcpTools\.useStoredRunKey$/, "using a stored key under another name is the owner's click on the run-key sheet; propose it with vault.use", "consent"],
+  // A whole-screen photograph was a "read" by its Preview suffix, so any run (read-only, no Computer Use) could take one past the
+  // computer-use grant and window scope. The screen is seen through the run's own computer-use tools; a document through document.render.
+  [/^computerUse\.capturePreview$/, "a screen capture needs this run's Computer Use grant: use the run's computer-use screenshot tool, or document.render for a document", "read"],
   [/^oneDiscussion\.(post|stop|setEnabled)$/, "the owner's own room screen opens, stops and configures a group discussion; never speak as the owner", "write"],
   [/^science\.composer\./, "use one_supervisor_start_science / one_supervisor_control to work in Science", "write"],
   // Views, live frames, watchers and leases belong to a screen that opened them.
@@ -170,8 +177,7 @@ const EXPLICIT_WRITE_PATHS: ReadonlySet<string> = new Set([
   "hephaestus.coreAuthStatus", "hephaestus.localGui", "hephaestus.package", "hephaestus.recover", "hephaestus.runUpdate", "hephaestus.securityScan",
   "hephaestus.setEngineToggle", "hephaestus.setSupervisor", "hephaestus.startStudio", "hephaestus.stormbreaker", "interview.setMode", "judgment.judge",
   "judgment.judgeSubset", "launchd.enable", "marketplace.bookmarkAdd", "marketplace.syncBookmarks", "mcpTools.setEnabled", "mcpTools.test",
-  "mcpTools.useStoredRunKey", "media.copyImage", "media.saveImage", "memoryDreaming.setEnabled", "migration.import", "multimodal.generateImage",
-  "multimodal.openVideoOutput", "multimodal.saveSettings", "multimodal.startVideo", "oneActivation.resolveConcern", "oneActivation.resolveMobile",
+  "media.copyImage", "media.saveImage", "memoryDreaming.setEnabled", "migration.import", "multimodal.openVideoOutput", "oneActivation.resolveConcern", "oneActivation.resolveMobile",
   "oneActivation.resolveWork", "oneActivation.skip", "oneAttachments.bindToTeam", "oneAttachments.prepare", "oneAutoRecovery.judge",
   "oneAutoRecovery.verify", "oneBriefing.feedback", "oneBriefing.openTask", "oneBriefing.prepareAction", "oneBriefing.setPreferences",
   "oneBriefing.startAction", "oneFeatureIntro.acknowledge", "oneFeatureIntro.defer", "oneMemory.setAssetEnabled", "oneOrg.add", "oneOrg.createAgent", "oneOrg.markRead", "oneOrg.rename",
@@ -235,7 +241,7 @@ const EXPLICIT_WRITE_PATHS: ReadonlySet<string> = new Set([
 // strongest effect its rule implies. Browser/credential scans that copy a profile (browser.scanCredentials,
 // browserProfileImport.scan) and oneToolReadiness-style probes that test a server are not read.
 const DENIED_READ_PATHS: ReadonlySet<string> = new Set([
-  "oneMemory.inspector.query", "oneMemory.inspector.detail",
+  "oneMemory.inspector.query", "oneMemory.inspector.detail", "computerUse.capturePreview",
   "billing.checkoutReadiness", "billing.getCredits", "billing.getPlans", "browser.credentialConsent", "browserAutofill.snapshot",
   "confirm.committedAnswers", "confirm.listPending",
   "credentialRecovery.list", "env.has", "env.list", "env.preview", "invoke.currentTurn", "invoke.currentTurnSteerReceipt", "invoke.steerReceipt",

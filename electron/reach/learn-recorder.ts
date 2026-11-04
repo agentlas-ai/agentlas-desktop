@@ -16,9 +16,9 @@ import { describeElement, norm, type LearnElement, type OutcomeCheck, type Trace
 
 export interface TapElement { index: number; role?: string; label?: string; value?: string; parent?: number }
 export interface TapObservation { app: string; bundleId?: string; observationId: string; elements: TapElement[]; at: number }
-export interface TapAction { app: string | null; action: string; observationId?: string; elementIndex?: number; operation?: string; key?: string; ok: boolean; at: number }
+export interface TapAction { app: string | null; action: string; observationId?: string; elementIndex?: number; operation?: string; key?: string; modifiers?: readonly string[]; ok: boolean; at: number }
 
-export type RecorderDrop = "pixel_step" | "failed_step" | "no_observation" | "no_change" | "too_short" | "unnameable" | "secret" | "sink_off";
+export type RecorderDrop = "pixel_step" | "failed_step" | "no_observation" | "no_change" | "too_short" | "unnameable" | "secret" | "unreplayable_key" | "sink_off";
 
 export interface RecordedSession {
   app: string;
@@ -39,7 +39,10 @@ export interface LearnSink {
 
 const SECRET_LABEL = /pass(word|code|phrase)|secret|cvv|cvc|security code|card number|ssn|social security|비밀번호|암호|카드 ?번호|인증번호|보안 ?코드|パスワード|密码/i;
 const SECRET_ROLE = /secure|password/i;
-const VALUE_BEARING_ROLE = /text|field|area|combo|value|static|label|cell|row/i;
+// Editable value controls only. The check is read again by a replay on the Reach driver's own view of the app, and that view lists fields, text areas and
+// combo boxes with their values but not a display label (measured on the real Calculator: its result display is a static text the driver tree does not list).
+// A changed static text still shows up through the element-present fallback below when a control appears with it.
+const VALUE_BEARING_ROLE = /textfield|textarea|searchfield|combobox|slider|stepper|incrementor/i;
 
 interface Session {
   app: string;
@@ -118,7 +121,17 @@ export class LearnRecorder {
       session.steps.push({ op: "type", ok: true, target: field, text: "" });
       return;
     }
-    if (action.action === "key") { session.steps.push({ op: "key", ok: true, key: (action.key ?? "").slice(0, 20) }); return; }
+    if (action.action === "key") {
+      const key = (action.key ?? "").slice(0, 20);
+      const modifiers = (action.modifiers ?? []).map((value) => value.toLowerCase());
+      // Quitting or closing the app ends the work; it is not part of it (a replay that quit the app would also lose the screen the outcome is read from).
+      if (modifiers.some((value) => /^(cmd|command|meta|super)$/.test(value)) && /^[qw]$/i.test(key)) return;
+      // A replayed key step carries the key name only. A named key (return, tab, escape) replays as seen; a printable key may be typed text (it must not be kept)
+      // and a key with a modifier would replay without it, so the work cannot be replayed faithfully.
+      if (modifiers.length > 0 || key.length < 2) { session.droppedFor = "unreplayable_key"; return; }
+      session.steps.push({ op: "key", ok: true, key });
+      return;
+    }
     // a click, drag or scroll on a pixel: the work cannot be told apart from different work on the same pixels
     session.droppedFor = "pixel_step";
   }

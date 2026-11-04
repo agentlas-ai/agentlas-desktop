@@ -131,7 +131,8 @@ export class FinanceAnalystLibrary {
     const release = await lockfile.lock(directory, { realpath: false, stale: 15000, retries: { retries: 40, minTimeout: 20, maxTimeout: 250 } });
     try {
       scope.assertCurrent(); const catalog = await this.catalog(scope, directory, owner);
-      await this.items(scope, directory, catalog); // Fail closed on any corrupt active skill.
+      // Fail closed on any corrupt active skill, except to remove: a damaged Analyst must stay removable by the owner.
+      if (request.action !== 'remove') await this.items(scope, directory, catalog);
       const current = request.id ? catalog.items.find(item => item.id === request.id) : undefined;
       if (request.id && !current) throw new Error('finance_analyst_not_found');
       if (current && current.revision !== request.expectedRevision) throw new Error('finance_analyst_revision_conflict');

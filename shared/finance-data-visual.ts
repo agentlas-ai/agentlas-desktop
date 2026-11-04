@@ -2,7 +2,7 @@ import type { FinanceDataResult, FinanceWidget } from "./finance";
 
 type Observation = { date: string; value: number };
 export interface FinanceDataVisual {
-  kind: "history" | "treasury" | "nav" | "table";
+  kind: "history" | "treasury" | "series" | "nav" | "table";
   reason?: "shape" | "mixed" | "duplicates" | "missing" | "limit";
   series: string[];
   points: Observation[];
@@ -19,6 +19,7 @@ function day(value: unknown): value is string {
 const finite=(value:unknown):value is number=>typeof value==="number"&&Number.isFinite(value);
 /** Exact provider column contracts only. Multiple matches and duplicate names are ambiguous. */
 export function financeMetricForColumns(columns:readonly string[]):"price_history"|"treasury_yields"|"nav"|undefined {
+  // FRED series and ECB pairs (macro_series, fx_rates) are read by financeDatedSeries below; they are not one of the three provider contracts here.
   if(new Set(columns).size!==columns.length)return undefined;
   const contracts={price_history:["Observation date","Symbol","Close (raw)"],treasury_yields:["Observation date","Maturity","Par curve yield","Unit"],nav:["Fund","NAV per share","Currency","NAV date","Price basis"]} as const;
   const matches=(Object.keys(contracts) as (keyof typeof contracts)[]).filter(metric=>contracts[metric].every(name=>columns.includes(name)));
@@ -35,6 +36,20 @@ export function financeCompactTreasuryTitle(title:string,projection:{columns:str
   const tenor=selected&&series.includes(selected)?selected:series[0];
   return tenor?`${match[1]} ${financeTenorLabel(tenor)}`:title;
 }
+/** One dated series from the keyless sources: columns Observation date, Series|Pair, Value|Rate, Unit; one label, one unit, unique valid days, finite values. Anything else is not a series. */
+export function financeDatedSeries(result:Pick<FinanceDataResult,"columns"|"rows">):{label:string;unit:string;points:Observation[]}|null {
+  const columns=result.columns;if(!result.rows.length||result.rows.length>5000||new Set(columns).size!==columns.length)return null;
+  const at=(names:string[])=>names.map(name=>columns.indexOf(name)).find(index=>index>=0)??-1;
+  const date=columns.indexOf("Observation date"),label=at(["Series","Pair"]),value=at(["Value","Rate"]),unit=columns.indexOf("Unit");
+  if(date<0||label<0||value<0||unit<0)return null;
+  const labels=new Set(result.rows.map(row=>row[label])),units=new Set(result.rows.map(row=>row[unit]));
+  if(labels.size!==1||units.size!==1)return null;const name=[...labels][0],measure=[...units][0];
+  if(typeof name!=="string"||!name.trim()||typeof measure!=="string"||!measure.trim())return null;
+  const seen=new Set<string>(),points:Observation[]=[];
+  for(const row of result.rows){const day=row[date],number=row[value];if(!(typeof day==="string"&&/^\d{4}-\d{2}-\d{2}$/.test(day)&&Number.isFinite(Date.parse(`${day}T00:00:00Z`))&&new Date(`${day}T00:00:00Z`).toISOString().slice(0,10)===day)||!finite(number)||seen.has(day))return null;seen.add(day);points.push({date:day,value:number});}
+  points.sort((a,b)=>a.date.localeCompare(b.date));
+  return points.length>=2?{label:name,unit:measure,points}:null;
+}
 /** Charts use named provider columns and literal observations only; no FX, return or gap inference. */
 export function financeDataVisual(result:FinanceDataResult, metric?:string, selectedSeries?:string):FinanceDataVisual {
   const fallback=(reason?:FinanceDataVisual["reason"]):FinanceDataVisual=>({kind:"table",reason,series:[],points:[],unit:null,label:"",missing:0});
@@ -48,6 +63,7 @@ export function financeDataVisual(result:FinanceDataResult, metric?:string, sele
     const row=result.rows[0];if(!finite(row[value])||row[value]<0||!day(row[date]))return fallback("missing");
     const code=row[currency];return {kind:"nav",series:[],points:[],unit:null,label:String(row[fund]??""),missing:0,nav:{value:row[value],date:row[date],currency:typeof code==="string"&&/^[A-Z]{3}$/.test(code)&&code!=="XXX"?code:null,fund:String(row[fund]??""),basis:String(row[basis]??"")}};
   }
+  if(metric==="macro_series"||metric==="fx_rates"){const dated=financeDatedSeries(result);return dated?{kind:"series",series:[dated.label],points:dated.points,unit:dated.unit,label:dated.label,missing:0}:fallback("shape");}
   if(metric!=="price_history"&&metric!=="treasury_yields")return fallback();
   const treasury=metric==="treasury_yields";
   const [date,value,seriesIndex]=["Observation date",treasury?"Par curve yield":"Close (raw)",treasury?"Maturity":"Symbol"].map(index);
@@ -71,6 +87,6 @@ export function financeDataVisual(result:FinanceDataResult, metric?:string, sele
 export function financeDataChartSpec(visual:FinanceDataVisual,chartType:FinanceWidget["chartType"]|undefined,ko:boolean):Record<string,unknown> {
   const t=(a:string,b:string)=>ko?a:b;
   const chartPoints=visual.points.slice(0,2000);
-  const chartSpec={data:{values:chartPoints},mark:{type:chartType==="line"||chartType==="bar"?chartType:"point",filled:chartType!=="line",...(chartType==="line"?{interpolate:"linear"}:{})},encoding:{...(chartType==="line"?{order:{field:"date",type:"ordinal",sort:"ascending"}}:{}),tooltip:[{field:"date",type:"ordinal",title:t("날짜","Date")},{field:"value",type:"quantitative",title:visual.unit??t("값","Value"),format:chartPoints.some(point=>point.value!==0&&Math.abs(point.value)<.01)?".3~g":",.2f"}],x:{field:"date",type:"ordinal",sort:"ascending",title:t("관측일","Observation date"),axis:{labelOverlap:true}},y:{field:"value",type:"quantitative",scale:{zero:false},title:visual.kind==="treasury"?t("연율 수익률 (%)","Yield (% per annum)"):`${t("종가","Close")} · ${visual.unit??t("통화 미확인","currency unverified")}`}}};
+  const chartSpec={data:{values:chartPoints},mark:{type:chartType==="line"||chartType==="bar"?chartType:"point",filled:chartType!=="line",...(chartType==="line"?{interpolate:"linear"}:{})},encoding:{...(chartType==="line"?{order:{field:"date",type:"ordinal",sort:"ascending"}}:{}),tooltip:[{field:"date",type:"ordinal",title:t("날짜","Date")},{field:"value",type:"quantitative",title:visual.unit??t("값","Value"),format:chartPoints.some(point=>point.value!==0&&Math.abs(point.value)<.01)?".3~g":",.2f"}],x:{field:"date",type:"ordinal",sort:"ascending",title:t("관측일","Observation date"),axis:{labelOverlap:true}},y:{field:"value",type:"quantitative",scale:{zero:false},title:visual.kind==="series"?`${visual.label} · ${visual.unit??""}`:visual.kind==="treasury"?t("연율 수익률 (%)","Yield (% per annum)"):`${t("종가","Close")} · ${visual.unit??t("통화 미확인","currency unverified")}`}}};
   return chartSpec;
 }

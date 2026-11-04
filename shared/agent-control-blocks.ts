@@ -233,7 +233,36 @@ const DANGLING_HEADING_DROPS_TAIL: ReadonlySet<string> = new Set([
 const REVERSED_JSON_FENCE_BEFORE_HEADING_RE = /(?:^|\n)[ \t]*```json[ \t]*\r?\n(?:[ \t]*\r?\n)*[ \t]*$/i;
 const CLOSING_JSON_FENCE_AFTER_HEADING_RE = /^[ \t]*```[ \t]*\r?$/m;
 
+/**
+ * A model that hides a control block inside an HTML comment (`<!--\n## Memory Events …\n-->`, or the heading before the
+ * `<!--`) leaves the empty shell `<!--\n\n-->` in the answer when only the block is cut (observed in use, 30+ answers).
+ * The comment goes with the block only when nothing but whitespace sits between them; a comment holding anything else is
+ * the model's own text and stays. Shared by the persisted-answer parser (electron/memory/events.ts) and the display strip.
+ */
+export function widenOverEnclosingHtmlComment(text: string, start: number, end: number): [number, number] {
+  const open = /<!--\s*$/.exec(text.slice(0, start));
+  const removed = text.slice(start, end);
+  const openedInside = removed.lastIndexOf("<!--") > removed.lastIndexOf("-->");
+  if (!open && !openedInside) return [start, end];
+  const from = open ? open.index : start;
+  const close = /^\s*-->/.exec(text.slice(end));
+  if (close) return [from, end + close[0].length];
+  return end >= text.length ? [from, end] : [start, end];
+}
+
+/** While an answer streams, a lone `<!--` at the tail is the opener of a block that has not arrived yet. */
+const STREAMING_COMMENT_OPENER_TAIL_RE = /(?:^|\n)[ \t]*<!--[ \t-]*\s*$/;
+
 function headingHit(value: string, heading: string): Hit | null {
+  const hit = bareHeadingHit(value, heading);
+  // Only Memory Events widens over its comment, as its canonical parser does (electron/memory/events.ts); the mirror never
+  // cuts more than the parser it mirrors.
+  if (!hit || heading !== "## Memory Events") return hit;
+  const [index, cutTo] = widenOverEnclosingHtmlComment(value, hit.index, hit.cutTo);
+  return { index, cutTo };
+}
+
+function bareHeadingHit(value: string, heading: string): Hit | null {
   const start = value.indexOf(heading);
   if (start < 0) return null;
   // A reversed envelope is "```json\n## Memory Events\n{...}\n```".
@@ -321,7 +350,7 @@ function stripProseControlBlocks(value: string, options?: { streaming?: boolean 
   // (measured 2026-08-16, cancelled gemini run) — a `<<…` marker prefix at the
   // very end is never content, so it goes too. Headings are left alone here.
   visible = options?.streaming
-    ? trimIncompleteControlTail(trimPartialReversedHeadingFence(visible))
+    ? trimIncompleteControlTail(trimPartialReversedHeadingFence(visible)).replace(STREAMING_COMMENT_OPENER_TAIL_RE, "")
     : trimIncompleteMarkerTail(visible);
   visible = stripRunawayJsonFenceTail(visible, options?.streaming === true);
   visible = stripOrphanCodeFences(visible);

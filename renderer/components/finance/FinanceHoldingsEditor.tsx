@@ -109,7 +109,8 @@ export function FinanceHoldingsEditor({ rows, ko, disabled, canAdd, layout = "au
         </tbody>
       </table>
       {rows.length === 0 && <p className={styles.empty}>{l("남은 행이 없습니다. 행을 추가하거나 어시스턴트에게 다시 제안해 달라고 하세요.", "No rows left. Add a row, or ask the assistant to propose again.")}</p>}
-      <button type="button" className={styles.add} disabled={disabled || !canAdd} onClick={onAdd}><IconPlus size={16} />{l("행 추가", "Add row")}</button>
+      <button type="button" className={styles.add} disabled={disabled || !canAdd} title={!disabled && !canAdd ? l("더 이상 행을 추가할 수 없습니다", "No more rows can be added") : undefined} onClick={onAdd}><IconPlus size={16} />{l("행 추가", "Add row")}</button>
+      {!disabled && !canAdd && <p className={styles.empty}>{l("행 수 한도에 도달해 더 추가할 수 없습니다. 필요 없는 행을 지워 주세요.", "The row limit is reached. Remove a row you don't need to add another.")}</p>}
     </div>
   );
 }

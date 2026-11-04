@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
-import { applyFinanceOperations, FinanceDataSaveRequestSchema, createFinanceReport, createFinanceWorkspace, financeId, FINANCE_WORKSPACE_LIMITS, validateFinanceOperation, validateFinanceWorkspace, type FinanceAIResult, type FinanceDataRequest, type FinanceDataResult, type FinanceDataSaveRequest, type FinanceDataSaveResult, type FinanceMonitor, type FinanceMonitorRun, type FinanceOperation, type FinanceReport, type FinanceSource, type FinanceWorkspace, type FinanceArchiveRequest, type FinanceArchiveResult, type FinanceArchiveItem, type FinanceMonitorRunsRequest, type FinanceMonitorRunsResult } from "../../shared/finance";
+import { parseFinanceEvidenceMetric, applyFinanceOperations, FinanceDataSaveRequestSchema, createFinanceReport, createFinanceWorkspace, financeId, FINANCE_WORKSPACE_LIMITS, validateFinanceOperation, validateFinanceWorkspace, type FinanceAIResult, type FinanceDataRequest, type FinanceDataResult, type FinanceDataSaveRequest, type FinanceDataSaveResult, type FinanceMonitor, type FinanceMonitorRun, type FinanceOperation, type FinanceReport, type FinanceSource, type FinanceWorkspace, type FinanceArchiveRequest, type FinanceArchiveResult, type FinanceArchiveItem, type FinanceMonitorRunsRequest, type FinanceMonitorRunsResult } from "../../shared/finance";
 import { userDataPath } from "../runtime-paths";
 import { FinanceStore, type FinanceScope } from "./store";
 import { queryFinanceData, refreshFinanceQuotes, searchFinanceAssets } from "./data";
@@ -37,7 +37,8 @@ function monitorDefinition(monitor: FinanceMonitor, workspace: FinanceWorkspace)
   return JSON.stringify({ name: monitor.name, query: monitor.query, assetIds: monitor.assetIds,
     assets: selected.map(id => assets.get(id) ?? null) });
 }
-function assertWorkspaceCapacity(workspace:FinanceWorkspace,operations:FinanceOperation[]):void {
+/** How far the saved reports and sources would exceed their limits once `operations` (plus `headroom` for work about to be done) are applied. */
+function capacityExcess(workspace:FinanceWorkspace,operations:FinanceOperation[],headroom={reports:0,sources:0}):{reports:number;sources:number} {
   const reports=new Map(workspace.reports.map(report=>[report.id,report]));
   const sources=new Set(workspace.sources.map(source=>source.id));let refreshed=0;
   for(const raw of operations){const op=validateFinanceOperation(raw);
@@ -47,7 +48,34 @@ function assertWorkspaceCapacity(workspace:FinanceWorkspace,operations:FinanceOp
     else if(op.type==="source.upsert")sources.add(op.source.id);
     else if(op.type==="holdings.import")op.sources?.forEach(source=>sources.add(source.id));
   }
-  if(reports.size+refreshed>FINANCE_WORKSPACE_LIMITS.reports||sources.size>FINANCE_WORKSPACE_LIMITS.sources)throw new Error("finance_workspace_capacity_reached");
+  return {reports:Math.max(0,reports.size+refreshed+headroom.reports-FINANCE_WORKSPACE_LIMITS.reports),sources:Math.max(0,sources.size+headroom.sources-FINANCE_WORKSPACE_LIMITS.sources)};
+}
+function assertWorkspaceCapacity(workspace:FinanceWorkspace,operations:FinanceOperation[]):void {
+  const excess=capacityExcess(workspace,operations);
+  if(excess.reports||excess.sources)throw new Error("finance_workspace_capacity_reached");
+}
+/** Past this size the saved workspace file is nearing the store's own ceiling (24 MB): the oldest unpinned reports are archived before it is reached. */
+const WORKSPACE_SOFT_BYTES=16*1024*1024;
+/** Reports a dashboard block is pinned to are never archived on the owner's behalf. */
+function pinnedReportIds(workspace:FinanceWorkspace):Set<string>{
+  const pinned=new Set<string>();
+  for(const dashboard of workspace.dashboards)for(const widget of dashboard.widgets){const ref=parseFinanceEvidenceMetric(widget.metric);if(ref)pinned.add(ref.reportId);}
+  return pinned;
+}
+/** The oldest unpinned reports whose archiving (with the sources only they use) removes at least `need`, plus a margin so the next write does not archive again. Null when nothing can be archived. */
+export function financeReclaimSelection(workspace:FinanceWorkspace,need:{reports:number;sources:number},touched:ReadonlySet<string>=new Set(),minimum=0):string[]|null {
+  const pinned=pinnedReportIds(workspace);
+  const candidates=[...workspace.reports].filter(report=>!pinned.has(report.id)&&!touched.has(report.id)).sort((a,b)=>a.createdAt.localeCompare(b.createdAt)).map(report=>report.id);
+  const margin=Math.max(need.reports,minimum,need.reports||need.sources?Math.ceil(FINANCE_WORKSPACE_LIMITS.reports/10):0);
+  const chosen:string[]=[];
+  for(const id of candidates){
+    chosen.push(id);
+    if(chosen.length<margin)continue;
+    if(!need.sources||financeArchivePlan(workspace,chosen).reclaimed.sources>=need.sources)return chosen;
+  }
+  // Sources only reports used may still be freed by archiving everything unpinned; sources nothing uses are freed even by an empty selection.
+  if(!chosen.length)return financeArchivePlan(workspace,[]).reclaimed.sources>=Math.max(1,need.sources)?[]:null;
+  return financeArchivePlan(workspace,chosen).reclaimed.sources>=need.sources&&chosen.length>=need.reports?chosen:null;
 }
 export interface FinanceAccountBinding { workspaceId: string; userId: string; sessionId: string; expiresAt: number | null }
 /** Captured in the host capability, never accepted from a model or renderer argument. */
@@ -100,22 +128,23 @@ export class FinanceService {
   async readAnalyst(scope:FinanceScope,ref:FinanceAnalystRef) {
     const [analyst]=await this.analystLibrary.resolve(scope,[ref]);scope.assertCurrent();return analyst;
   }
-  async archives(scope:FinanceScope,raw:FinanceArchiveRequest):Promise<FinanceArchiveResult>{
+  async archives(scope:FinanceScope,raw:FinanceArchiveRequest,internal=false):Promise<FinanceArchiveResult>{
     const input=FinanceArchiveRequestSchema.parse(raw);
     if(input.action==='list')return {action:'list',...await this.archiveStore.list(scope,input)};
     if(input.action==='read')return {action:'read',...await this.archiveStore.read(scope,input)};
     if(input.action==='create'){
       let item:FinanceArchiveItem|undefined,reclaimed={reports:0,sources:0};
-      const workspace=await this.store.transaction(scope,input.expectedRevision,async current=>{
+      const expectedRevision=await this.rebasedRevision(scope,input.expectedRevision);
+      const workspace=await this.store.transaction(scope,expectedRevision,async current=>{
         const plan=financeArchivePlan(current,input.reportIds);reclaimed=plan.reclaimed;
         if(!reclaimed.reports&&!reclaimed.sources)throw new Error('finance_archive_nothing_to_reclaim');
         item=await this.archiveStore.create(scope,current,input.reportIds);return plan.workspace;
-      });
+      },internal);
       if(!item)throw new Error('finance_archive_not_found');
       return {action:'create',archiveId:item.archiveId,sha256:item.sha256,workspace,reclaimed,warnings:reclaimed.sources?[]:['finance_archive_sources_still_referenced']};
     }
     const archived=await this.archiveStore.read(scope,{archiveId:input.archiveId});let restored={reports:0,sources:0};
-    const workspace=await this.store.transaction(scope,input.expectedRevision,current=>{
+    const workspace=await this.store.transaction(scope,await this.rebasedRevision(scope,input.expectedRevision),current=>{
       const selected=input.reportIds??archived.reportIds;
       const remaining=new Set(financeArchivePlan(archived.workspaceSnapshot,archived.reportIds).workspace.sources.map(source=>source.id));
       const additional=input.reportIds===undefined?archived.workspaceSnapshot.sources.filter(source=>!remaining.has(source.id)).map(source=>source.id):[];
@@ -160,10 +189,53 @@ export class FinanceService {
     }
     return workspace;
   }
+  /**
+   * The revision to write against. A caller's `expected` revision that is older than the saved one is accepted when every revision since was
+   * written by this app's own agent or scheduled automation (a monitor run, an earlier tool call): that is not the owner's conflicting edit, and
+   * the caller could not have known. An owner's edit in between keeps the conflict explicit.
+   */
+  private async rebasedRevision(scope:FinanceScope,expected:number):Promise<number> {
+    const current=await this.store.load(scope);scope.assertCurrent();
+    if(current.revision===expected)return expected;
+    if(expected<current.revision&&this.store.selfOnlyGap(scope,expected,current.revision))return current.revision;
+    return expected;
+  }
+  /** Makes room for `operations` in the saved workspace by archiving (never deleting) the oldest unpinned reports and the sources only they used. */
+  private async ensureRoom(scope:FinanceScope,start:FinanceWorkspace,operations:FinanceOperation[],headroom={reports:0,sources:0}):Promise<FinanceWorkspace> {
+    let current=start;
+    for(let attempt=0;attempt<3;attempt++){
+      const excess=capacityExcess(current,operations,headroom),crowded=this.store.sizeBytes(scope)>WORKSPACE_SOFT_BYTES&&current.reports.length>0;
+      if(!excess.reports&&!excess.sources&&!crowded)return current;
+      const touched=new Set(operations.flatMap(operation=>"reportId" in operation&&typeof operation.reportId==="string"?[operation.reportId]:[]));
+      const selection=financeReclaimSelection(current,excess,touched,crowded?Math.max(1,Math.ceil(current.reports.length/4)):0);
+      if(!selection||(!selection.length&&!excess.sources))return current;
+      try{await this.archives(scope,{action:"create",expectedRevision:current.revision,reportIds:selection},true);}
+      catch(error){if(!(error instanceof Error)||!["finance_revision_conflict","finance_archive_nothing_to_reclaim"].includes(error.message))throw error;}
+      current=await this.store.load(scope);scope.assertCurrent();
+    }
+    return current;
+  }
   async apply(scope: FinanceScope, input: { operations: FinanceOperation[]; expectedRevision: number }): Promise<FinanceWorkspace> {
-    const current = await this.store.load(scope); if(current.revision !== input.expectedRevision) throw new Error("finance_revision_conflict");
-    assertWorkspaceCapacity(current,input.operations);
-    return this.save(scope,{workspace:applyFinanceOperations(current,input.operations),expectedRevision:current.revision});
+    for(let attempt=0;;attempt++){
+      let current = await this.store.load(scope); scope.assertCurrent();
+      if(current.revision !== input.expectedRevision && !(input.expectedRevision < current.revision && this.store.selfOnlyGap(scope,input.expectedRevision,current.revision))) throw new Error("finance_revision_conflict");
+      current=await this.ensureRoom(scope,current,input.operations);
+      assertWorkspaceCapacity(current,input.operations);
+      try{return await this.save(scope,{workspace:applyFinanceOperations(current,input.operations),expectedRevision:current.revision});}
+      catch(error){
+        // The write lost a race with another writer between the read above and the save: the next pass applies again on top of it if that writer was this app's own, otherwise it reports the conflict.
+        if(attempt>=4||!(error instanceof Error)||error.message!=="finance_revision_conflict")throw error;
+      }
+    }
+  }
+  /** Operations that do not depend on any revision the caller saw (adding an asset, a new report, quotes): applied to the latest saved state, repeated if another write lands first. */
+  async applyLatest(scope:FinanceScope,build:(current:FinanceWorkspace)=>FinanceOperation[]|null):Promise<FinanceWorkspace> {
+    for(let attempt=0;;attempt++){
+      const current=await this.store.load(scope);scope.assertCurrent();
+      const operations=build(current);if(!operations)return current;
+      try{return await this.apply(scope,{operations,expectedRevision:current.revision});}
+      catch(error){if(attempt>=4||!(error instanceof Error)||error.message!=="finance_revision_conflict")throw error;}
+    }
   }
   async search(scope: FinanceScope,input:{query:string},signal?:AbortSignal) {
     signal?.throwIfAborted();scope.assertCurrent();
@@ -174,37 +246,45 @@ export class FinanceService {
     this.searchCatalog.register(scope,lease,result);return result;
   }
   /** Saved assets and this owner's live search results (host memory, 15 minutes): looking an asset up never has to save it. */
+  /** A ticker written where an asset id belongs (a model often does) names the saved asset with that symbol, when exactly one has it. */
+  private resolveAssetIds(watchlist:FinanceAsset[],ids:readonly string[]):string[]{
+    return ids.map(id=>{
+      if(id.includes(":")||watchlist.some(asset=>asset.id===id))return id;
+      const named=watchlist.filter(asset=>asset.symbol.toLowerCase()===id.trim().toLowerCase());
+      return named.length===1?named[0].id:id;
+    });
+  }
   private queryAssets(scope:FinanceScope,route:FinanceDataSelection,watchlist:FinanceAsset[],ids:readonly string[]):FinanceAsset[]{
     return [...watchlist,...this.searchCatalog.liveAssets(scope,this.searchCatalog.begin(scope,route),ids,watchlist)];
   }
-  async query(scope: FinanceScope,input:FinanceDataRequest,signal?:AbortSignal) { signal?.throwIfAborted();scope.assertCurrent();const workspace=await this.store.load(scope);const route={...await this.experience.consent(scope),signal,assertCurrent:()=>{scope.assertCurrent();signal?.throwIfAborted();}};route.assertCurrent();const result=await queryFinanceData(input,this.queryAssets(scope,route,workspace.watchlist,input.assetIds),route);route.assertCurrent();return result; }
+  async query(scope: FinanceScope,input:FinanceDataRequest,signal?:AbortSignal) { signal?.throwIfAborted();scope.assertCurrent();const workspace=await this.store.load(scope);input={...input,assetIds:this.resolveAssetIds(workspace.watchlist,input.assetIds)};const route={...await this.experience.consent(scope),signal,assertCurrent:()=>{scope.assertCurrent();signal?.throwIfAborted();}};route.assertCurrent();const result=await queryFinanceData(input,this.queryAssets(scope,route,workspace.watchlist,input.assetIds),route);route.assertCurrent();return result; }
   async queryAndSave(scope:FinanceScope,input:FinanceDataSaveRequest,signal?:AbortSignal):Promise<FinanceDataSaveResult> {
     const parsed=FinanceDataSaveRequestSchema.safeParse(input);if(!parsed.success)throw new Error("finance_arguments_invalid");input=parsed.data;
     const savingScope:FinanceScope={...scope,assertCurrent(){scope.assertCurrent();if(signal?.aborted)throw new Error("finance_query_cancelled");}};
     savingScope.assertCurrent();const before=await this.store.load(savingScope);savingScope.assertCurrent();
-    if(input.expectedRevision!==undefined&&before.revision!==input.expectedRevision)throw new Error("finance_revision_conflict");
+    if(input.expectedRevision!==undefined&&before.revision!==input.expectedRevision&&!(input.expectedRevision<before.revision&&this.store.selfOnlyGap(savingScope,input.expectedRevision,before.revision)))throw new Error("finance_revision_conflict");
     const target=input.reportId===undefined?undefined:before.reports.find(report=>report.id===input.reportId);
     if(input.reportId!==undefined&&!target)throw new Error("finance_report_not_found");
     const route={...await this.experience.consent(savingScope),signal,assertCurrent:()=>savingScope.assertCurrent()};savingScope.assertCurrent();
-    const request:FinanceDataRequest={query:input.query,assetIds:input.assetIds,metrics:input.metrics,period:input.period,...(input.facts?{facts:input.facts}:{})};
+    const request:FinanceDataRequest={query:input.query,assetIds:this.resolveAssetIds(before.watchlist,input.assetIds),metrics:input.metrics,period:input.period,...(input.facts?{facts:input.facts}:{})};
     const result=await queryFinanceData(request,this.queryAssets(savingScope,route,before.watchlist,request.assetIds),route);savingScope.assertCurrent();
     const batch=dataOperations(result,before,target?.title||input.title||input.query||"Finance 자료",input.mode==="report");
     if(target){
       const observed=batch.operations.find(operation=>operation.type==="report.add");if(observed?.type!=="report.add")throw new Error("finance_data_not_available");
       const sections=structuredClone(observed.report.sections).map(section=>({...section,presentation:"supporting" as const}));
       const operations=batch.operations.filter(operation=>operation.type!=="report.add");
-      const workspace=await this.store.transaction(savingScope,before.revision,current=>{
+      const workspace=await this.rebaseOnOwn(savingScope,before.revision,current=>{
         savingScope.assertCurrent();const report=current.reports.find(item=>item.id===target.id);if(!report)throw new Error("finance_report_not_found");
         assertWorkspaceCapacity(current,operations);
         const next=applyFinanceOperations(current,operations),updated=next.reports.find(item=>item.id===target.id)!;
         updated.sections.push(...sections);updated.reviewPending=true;
         return validateFinanceWorkspace(next);
-      });
+      },true);
       // The evidence is committed; a subsequent abort must not invite a duplicate append.
       scope.assertCurrent();return {dashboardActions:financeReportDashboardActions(workspace,target.id),workspace,sourceIds:batch.sourceIds,reportId:target.id,message:`조회 자료와 출처를 기존 보고서의 판본 ${workspace.revision}에 추가했습니다. 본문은 유지되며 새 근거 검토가 필요합니다.`};
     }
     if(batch.reportId){const added=batch.operations.find(operation=>operation.type==="report.add");if(added?.type==="report.add")added.report.sections.unshift({id:financeId("section"),title:added.report.title,kind:"summary",presentation:"narrative",narrative:"",widget:null,projection:null});}
-    const workspace=await this.apply(savingScope,{operations:batch.operations,expectedRevision:before.revision});
+    const workspace=await this.applyLatest(savingScope,()=>batch.operations);
     scope.assertCurrent();
     return {...(batch.reportId?{dashboardActions:financeReportDashboardActions(workspace,batch.reportId)}:{}),workspace,sourceIds:batch.sourceIds,...(batch.reportId?{reportId:batch.reportId}:{}),message:batch.reportId?`조회 자료와 출처를 판본 ${workspace.revision}의 보고서 초안에 저장했습니다. 요약은 아직 작성되지 않았습니다.`:`조회 자료와 출처를 판본 ${workspace.revision}에 저장했습니다.`};
   }
@@ -214,23 +294,24 @@ export class FinanceService {
     if(matches.length!==1)throw new Error("finance_asset_selection_required");
     const current=await this.store.load(scope);const asset=matches[0];
     if(current.watchlist.some(item=>item.id===asset.id))return {workspace:current,asset,warnings:found.warnings};
-    return {workspace:await this.apply(scope,{operations:[{type:"watchlist.add",asset}],expectedRevision:current.revision}),asset,warnings:found.warnings};
+    return {workspace:await this.applyLatest(scope,latest=>latest.watchlist.some(item=>item.id===asset.id)?null:[{type:"watchlist.add",asset}]),asset,warnings:found.warnings};
   }
   async createReport(scope:FinanceScope,input:{dashboardId?:string;title?:string;language?:string}) {
     const workspace=await this.store.load(scope);const dashboard=workspace.dashboards.find(item=>item.id===(input.dashboardId??workspace.activeDashboardId));
     if(!dashboard)throw new Error("finance_dashboard_not_found");
     const report=createFinanceReport(workspace,dashboard,input.title||dashboard.name);
     if(input.language!==undefined)report.language=input.language;
-    return {workspace:await this.apply(scope,{operations:[{type:"report.add",report}],expectedRevision:workspace.revision}),reportId:report.id};
+    return {workspace:await this.applyLatest(scope,latest=>latest.dashboards.some(item=>item.id===dashboard.id)?[{type:"report.add",report}]:null),reportId:report.id};
   }
   async calculate(scope:FinanceScope,input:{request:import('../../shared/finance-compute').FinanceComputeRequest;period?:string;title?:string} & FinanceArtifactPresentation,signal:AbortSignal=AbortSignal.timeout(180000)){
     const route={...await this.experience.consent(scope),signal,assertCurrent:()=>scope.assertCurrent()};scope.assertCurrent();
     const before=await this.store.load(scope);scope.assertCurrent();
     const period=input.period??'1Y';if(!['1M','3M','1Y','5Y','all'].includes(period))throw new Error('finance_compute_period_invalid');
+    if("assetIds" in input.request)input={...input,request:{...input.request,assetIds:this.resolveAssetIds(before.watchlist,input.request.assetIds)}};
     const plugin=await financeBuiltinPlugin().runtime(scope,FINANCE_NOTICE_VERSION);scope.assertCurrent();
     const artifact=await calculateFromFinanceSources(input.request,before.watchlist,asset=>queryFinanceData({query:asset.symbol,assetIds:[asset.id],metrics:['price_history'],period},before.watchlist,route),signal,(request,input)=>plugin.callPureTool('compute',{request,input}) as import('../../shared/finance-compute').FinanceComputeArtifact);scope.assertCurrent();signal.throwIfAborted();
     const draft=plugin.callPureTool('compute.artifact',{result:artifact,workspace:before,title:input.title,presentation:Object.fromEntries(Object.entries(input).filter(([key])=>!['request','period','title'].includes(key)))}) as import('./artifacts').FinanceArtifactDraft;
-    const workspace=await this.apply({...scope,assertCurrent(){scope.assertCurrent();signal.throwIfAborted();}},{operations:draft.operations,expectedRevision:before.revision});
+    const workspace=await this.applyLatest({...scope,assertCurrent(){scope.assertCurrent();signal.throwIfAborted();}},()=>draft.operations);
     return {workspace,reportId:draft.reportId,artifact};
   }
   private async observedPortfolio(scope:FinanceScope,workspace:FinanceWorkspace,route:FinanceDataSelection & {signal?:AbortSignal;assertCurrent:()=>void},signal:AbortSignal,value:(payload:{workspace:FinanceWorkspace;refreshResult:FinanceAIResult})=>FinancePortfolioValuation):Promise<FinancePortfolioValuation>{
@@ -244,14 +325,14 @@ export class FinanceService {
   async valuePortfolio(scope:FinanceScope,input:FinancePortfolioValuationPresentation & {expectedRevision?:number},signal:AbortSignal=AbortSignal.timeout(180000)){
     const guarded:FinanceScope={...scope,assertCurrent(){scope.assertCurrent();signal.throwIfAborted();}};
     guarded.assertCurrent();const before=await this.store.load(guarded);guarded.assertCurrent();
-    if(input.expectedRevision!==undefined&&input.expectedRevision!==before.revision)throw new Error('finance_revision_conflict');
+    if(input.expectedRevision!==undefined&&input.expectedRevision!==before.revision&&!(input.expectedRevision<before.revision&&this.store.selfOnlyGap(guarded,input.expectedRevision,before.revision)))throw new Error('finance_revision_conflict');
     const route={...await this.experience.consent(guarded),signal,assertCurrent:()=>guarded.assertCurrent()};guarded.assertCurrent();
     const plugin=await financeBuiltinPlugin().runtime(guarded,FINANCE_NOTICE_VERSION);guarded.assertCurrent();
     const computed=await this.observedPortfolio(guarded,before,route,signal,payload=>plugin.callPureTool('valuation',payload) as FinancePortfolioValuation);
     if(!computed.groups.some(group=>group.complete&&group.totalValue!==null&&group.totalValue>0))return {computed,workspace:before};
     const {expectedRevision:_,...presentation}=input;
     const draft=plugin.callPureTool('portfolio.artifact',{result:computed,workspace:before,presentation}) as import('./artifacts').FinanceArtifactDraft;
-    guarded.assertCurrent();const workspace=await this.apply(guarded,{operations:draft.operations,expectedRevision:before.revision});guarded.assertCurrent();
+    guarded.assertCurrent();const workspace=await this.applyLatest(guarded,()=>draft.operations);guarded.assertCurrent();
     return {computed,workspace,reportId:draft.reportId};
   }
   /** Check holdings the assistant read for the owner's review against the saved portfolio. Reads only; the owner's Save is the single write. */
@@ -282,14 +363,14 @@ export class FinanceService {
     patch={...patch,...(patch.assetIds?{assetIds:[...patch.assetIds]}:{})};input={...input,patch};
     const savingScope:FinanceScope={...scope,assertCurrent(){scope.assertCurrent();if(signal?.aborted)throw new Error("finance_monitor_cancelled");}};
     savingScope.assertCurrent();const before=await this.store.load(savingScope);savingScope.assertCurrent();
-    if(before.revision!==input.expectedRevision)throw new Error("finance_revision_conflict");
+    if(before.revision!==input.expectedRevision&&!(input.expectedRevision<before.revision&&this.store.selfOnlyGap(savingScope,input.expectedRevision,before.revision)))throw new Error("finance_revision_conflict");
     if(!before.monitors.some(monitor=>monitor.id===input.monitorId))throw new Error("finance_monitor_not_found");
     let release:()=>Promise<void>;
     try{release=await lockfile.lock(this.runDirectory(savingScope,input.monitorId),MONITOR_LOCK_OPTIONS);}
     catch(error){savingScope.assertCurrent();if((error as NodeJS.ErrnoException).code==="ELOCKED")throw new Error("finance_monitor_running");throw error;}
     try{
       savingScope.assertCurrent();
-      const workspace=await this.store.transaction(savingScope,input.expectedRevision,current=>{
+      const workspace=await this.rebaseOnOwn(savingScope,before.revision,current=>{
         savingScope.assertCurrent();const previous=current.monitors.find(monitor=>monitor.id===input.monitorId);if(!previous)throw new Error("finance_monitor_not_found");
         if(previous.status==="active"||(previous.automationId&&readFinanceMonitor({scope:savingScope,monitor:previous}).status!=="paused"))throw new Error("finance_monitor_pause_before_edit");
         const assetIds=patch.assetIds??previous.assetIds;
@@ -301,17 +382,36 @@ export class FinanceService {
       scope.assertCurrent();return workspace;
     }finally{await release();scope.assertCurrent();}
   }
+  /** Runs a workspace transaction written against `revision`; if this app's own agent or automation saved in between, the same update is applied on top of that save. */
+  private async rebaseOnOwn(scope:FinanceScope,revision:number,update:(current:FinanceWorkspace)=>FinanceWorkspace|Promise<FinanceWorkspace>,anyWriter=false):Promise<FinanceWorkspace> {
+    let expected=revision;
+    for(let attempt=0;;attempt++){
+      try{return await this.store.transaction(scope,expected,update);}
+      catch(error){
+        if(attempt>=5||!(error instanceof Error)||error.message!=="finance_revision_conflict")throw error;
+        const latest=await this.store.load(scope);scope.assertCurrent();
+        if(latest.revision===expected||(!anyWriter&&!this.store.selfOnlyGap(scope,expected,latest.revision)))throw error;
+        expected=latest.revision;
+      }
+    }
+  }
+  /** Scheduler fields come from the host's automation, never from the saved copy this call read earlier: they are written onto the monitor as it is now. */
+  private withHostFields(current:FinanceWorkspace,updated:FinanceMonitor):FinanceWorkspace {
+    if(!current.monitors.some(item=>item.id===updated.id))throw new Error("finance_monitor_not_found");
+    const {automationId,executionAvailability,scheduleHuman,status,lastCheckedAt,nextCheckAt,note}=updated;
+    return {...current,monitors:current.monitors.map(item=>item.id===updated.id?{...item,automationId,executionAvailability,scheduleHuman,status,lastCheckedAt,nextCheckAt,note}:item)};
+  }
   async schedule(scope:FinanceScope,input:{monitorId:string;scheduleHuman:string}) {
     const workspace=await this.store.load(scope);const monitor=workspace.monitors.find(item=>item.id===input.monitorId);if(!monitor)throw new Error("finance_monitor_not_found");
     const updated=await scheduleFinanceMonitor({scope,monitor,assets:workspace.watchlist,scheduleHuman:input.scheduleHuman});
-    try {await this.store.save(scope,{workspace:{...workspace,monitors:workspace.monitors.map(item=>item.id===updated.id?updated:item)},expectedRevision:workspace.revision});}
+    try {await this.rebaseOnOwn(scope,workspace.revision,current=>this.withHostFields(current,updated),true);}
     catch(error){await rollbackFinanceMonitor({scope,monitor:updated});throw error;}
     return {automationId:updated.automationId!,executionAvailability:"app-running" as const,status:updated.status as "active"|"paused"};
   }
   async pause(scope:FinanceScope,input:{monitorId:string}) {
     const workspace=await this.store.load(scope);const monitor=workspace.monitors.find(item=>item.id===input.monitorId);if(!monitor)throw new Error("finance_monitor_not_found");
     const updated=await pauseFinanceMonitor({scope,monitor});
-    try{await this.store.save(scope,{workspace:{...workspace,monitors:workspace.monitors.map(item=>item.id===updated.id?updated:item)},expectedRevision:workspace.revision});}catch(error){if(!(error instanceof Error)||error.message!=="finance_revision_conflict")throw error;}
+    try{await this.rebaseOnOwn(scope,workspace.revision,current=>this.withHostFields(current,updated),true);}catch(error){if(!(error instanceof Error)||!["finance_revision_conflict","finance_monitor_not_found"].includes(error.message))throw error;}
     scope.assertCurrent();return {automationId:updated.automationId!,executionAvailability:"app-running" as const,status:updated.status as "active"|"paused"};
   }
   private runDirectory(scope:FinanceScope,monitorId:string):string {
@@ -357,7 +457,8 @@ export class FinanceService {
     const definition=monitorDefinition(monitor,before);
     const history=this.history(scope,monitor.id),prepared=await history.prepare(scope);
     if(!prepared.ready)throw new Error('finance_history_index_building');
-    const directory=this.runDirectory(scope,monitor.id);const release=await lockfile.lock(directory,MONITOR_LOCK_OPTIONS);
+    const directory=this.runDirectory(scope,monitor.id);let release:()=>Promise<void>;
+    try{release=await lockfile.lock(directory,MONITOR_LOCK_OPTIONS);}catch(error){scope.assertCurrent();if((error as NodeJS.ErrnoException).code==="ELOCKED")throw new Error("finance_monitor_running");throw error;}
     let run:FinanceMonitorRun={id:randomUUID(),monitorId:monitor.id,status:"running",startedAt:new Date().toISOString(),finishedAt:null,reportId:null,summary:"자료 조회 중",warnings:[],error:null,sourceRevision:before.revision};
     const write=()=>history.write(scope,run);
     let reportSaved=false,cachedReplay=false;
@@ -409,7 +510,9 @@ export class FinanceService {
           const liveWorkspace=await this.store.load(scope),liveMonitor=liveWorkspace.monitors.find(item=>item.id===monitor.id);
           scope.assertCurrent();signal.throwIfAborted();
           if(!liveMonitor||monitorDefinition(liveMonitor,liveWorkspace)!==definition)throw new Error("finance_monitor_definition_changed");
-          if(liveWorkspace.reports.length>=FINANCE_WORKSPACE_LIMITS.reports||liveWorkspace.sources.length>=FINANCE_WORKSPACE_LIMITS.sources)throw new Error("finance_workspace_capacity_reached");
+          // A scheduled briefing adds a report and its sources every run: the oldest unpinned ones are archived (kept, not deleted) to make room instead of stopping the schedule.
+          const roomy=await this.ensureRoom({...scope,origin:"automation" as const},liveWorkspace,[],{reports:1,sources:FINANCE_MONITOR_ASSET_BATCH*7});scope.assertCurrent();
+          if(roomy.reports.length>=FINANCE_WORKSPACE_LIMITS.reports||roomy.sources.length+FINANCE_MONITOR_ASSET_BATCH*7>FINANCE_WORKSPACE_LIMITS.sources)throw new Error("finance_workspace_capacity_reached");
           const batchStart:number=progress.nextOffset,batchIds=assets.slice(batchStart,batchStart+FINANCE_MONITOR_ASSET_BATCH);
           const requests:{request:FinanceDataRequest;assetId:string|null}[]=[...batchIds.flatMap(assetId=>{
             const asset=assetsById.get(assetId)!,fund=findIsharesFund(assetId);
@@ -456,7 +559,7 @@ export class FinanceService {
           const normalizedReport=validateFinanceWorkspace({...createFinanceWorkspace(),reports:[report]}).reports[0];
           operations.push({type:"report.add",report:normalizedReport});
           const experience=this.experience;
-          const savingScope:FinanceScope={...scope,assertCurrent(){scope.assertCurrent();batchSignal.throwIfAborted();experience.assertMonitoringSnapshot(scope,authority);}};
+          const savingScope:FinanceScope={...scope,origin:"automation",assertCurrent(){scope.assertCurrent();batchSignal.throwIfAborted();experience.assertMonitoringSnapshot(scope,authority);}};
           let saved=false;
           for(let attempt=0;attempt<4;attempt++){
             savingScope.assertCurrent();const current=await this.store.load(savingScope);savingScope.assertCurrent();

@@ -79,7 +79,12 @@ export function registerFinanceIpc(input: { ipc: Pick<IpcMain, 'handle'>; assert
     const request=FinancePortfolioRequestSchema.parse(raw);
     if(request.action==='save'){await requireFinanceConsent(scope);scope.assertCurrent();return saveFinancePortfolio(store,scope,request);}
     const key=`${event.sender.id}:${request.requestId}`;
-    if(running.has(key)||[...running.values()].filter(item=>item.senderId===event.sender.id).length>=2)throw new Error('finance_request_busy');
+    if(running.has(key))throw new Error('finance_request_busy');
+    // Two extractions run at a time per window; a third waits for a free place rather than being refused.
+    for(const deadline=Date.now()+120_000;[...running.values()].filter(item=>item.senderId===event.sender.id).length>=2;){
+      if(event.sender.isDestroyed()||Date.now()>deadline)throw new Error('finance_request_busy');
+      await new Promise(resolve=>setTimeout(resolve,250));scope.assertCurrent();
+    }
     const controller=new AbortController();running.set(key,{controller,senderId:event.sender.id});
     const onDestroyed=()=>controller.abort();event.sender.once('destroyed',onDestroyed);
     try{await requireFinanceConsent(scope);scope.assertCurrent();controller.signal.throwIfAborted();const workflow=await financeBuiltinPlugin().workflow(scope,FINANCE_NOTICE_VERSION,'portfolio');scope.assertCurrent();controller.signal.throwIfAborted();return await extractFinancePortfolio(request,controller.signal,()=>scope.assertCurrent(),undefined,workflow);}
@@ -114,8 +119,9 @@ export function registerFinanceIpc(input: { ipc: Pick<IpcMain, 'handle'>; assert
     const route={...await requireFinanceConsent(scope),assertCurrent:()=>scope.assertCurrent()};
     const workspace = await store.load(scope); scope.assertCurrent();
     const result = await refreshFinanceQuotes(workspace,route); scope.assertCurrent();
-    if ((await store.load(scope)).revision !== workspace.revision) return { baseRevision: workspace.revision, status: 'conflict', message: 'The workspace changed while quotes were loading. Refresh again.', operations: [] };
-    return result;
+    // Quotes are added, not edited: a save made while they loaded (a scheduled briefing, a chat) does not invalidate them, so they are offered against the latest revision.
+    const latest = await store.load(scope); scope.assertCurrent();
+    return latest.revision !== workspace.revision ? { ...result, baseRevision: latest.revision } : result;
   });
   // The Finance conversation is a Work chat in the owner's Finance Work project (FinanceWorkChat, finance:workProject): it runs
   // through the shared invocation service and runner like every Work turn. There is no second Finance-only model loop here.

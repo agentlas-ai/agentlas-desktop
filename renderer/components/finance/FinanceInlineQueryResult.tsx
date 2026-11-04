@@ -29,14 +29,14 @@ export function financeQueryPresentation(entry: FinanceConversationDataResult): 
   const metadata = (row: QueryItem["row"], names: string[]) => names.map(column => ({ column, value: text(row, column) })).filter(item => item.value && !(item.column === "Symbol" && entry.assets.length === 1 && item.value === entry.assets[0].symbol));
   const records = (): FinanceQueryPresentation => { const titleColumn = result.columns.findIndex(name => !ADMIN_FIELDS.has(name)); return { kind: "records", items: result.rows.map(row => ({ title: titleColumn < 0 || row[titleColumn] === null ? "—" : String(row[titleColumn] ?? ""), titleColumn, meta: [], href: null, row })) }; };
   if (new Set(result.columns).size !== result.columns.length) return records();
-  if (entry.kind !== "discovery" && ["price_history", "treasury_yields", "nav"].includes(metric ?? "")) {
+  if (entry.kind !== "discovery" && ["price_history", "treasury_yields", "macro_series", "fx_rates", "nav"].includes(metric ?? "")) {
     const visual = financeDataVisual(result, metric);
     if (visual.kind !== "table" && result.rows.length <= 2000) return { kind: "visual", items: [], metric };
     if (result.rows.length > 2000) return { ...records(), tooManyPoints: true };
   }
   let kind: FinanceQueryPresentation["kind"] = "records", title = "", meta: string[] = [], url = "";
   if (entry.kind === "feeds" && has(["Title", "Published", "Event date", "Symbol", "URL", "Source"])) { kind = "feeds"; title = "Title"; meta = ["Published", "Event date", "Symbol"]; url = "URL"; }
-  else if (["news", "macro_news"].includes(metric ?? "")) {
+  else if (["news", "macro_news", "news_search"].includes(metric ?? "")) {
     if (has(["Title", "Publisher", "Published", "URL"])) { kind = "news"; title = "Title"; meta = ["Publisher", "Published", "Symbol"]; url = "URL"; }
     else if (has(["Headline", "Publisher", "URL", "Published at"])) { kind = "news"; title = "Headline"; meta = ["Publisher", "Published at"]; url = "URL"; }
   } else if (metric === "filings" && has(["Form", "Filed", "Accession", "Document"])) { kind = "filings"; title = "Form"; meta = ["Filed"]; url = "Document"; }
@@ -48,7 +48,7 @@ export function financeQueryPresentation(entry: FinanceConversationDataResult): 
   }
   return kind === "records" ? records() : { kind, items: result.rows.map(row => ({ title: text(row, title) || "—", meta: metadata(row, meta), href: financeFeedLink(text(row, url)), row })) };
 }
-const metricLabels: Record<string, [string, string]> = { price: ["가격", "Price"], price_history: ["가격 이력", "Price history"], treasury_yields: ["국채 수익률", "Treasury yields"], nav: ["펀드 NAV", "Fund NAV"], news: ["뉴스", "News"], macro_news: ["거시 뉴스", "Macro news"], filings: ["공시", "Filings"], social: ["계정 글", "Author posts"], social_search: ["SNS 검색", "Social search"], company_facts: ["기업 재무", "Company facts"], etf_holdings: ["ETF 편입", "ETF holdings"] };
+const metricLabels: Record<string, [string, string]> = { price: ["가격", "Price"], price_history: ["가격 이력", "Price history"], treasury_yields: ["국채 수익률", "Treasury yields"], nav: ["펀드 NAV", "Fund NAV"], news: ["뉴스", "News"], macro_news: ["거시 뉴스", "Macro news"], filings: ["공시", "Filings"], social: ["계정 글", "Author posts"], social_search: ["SNS 검색", "Social search"], company_facts: ["기업 재무", "Company facts"], macro_series: ["거시 지표", "Macro series"], fx_rates: ["환율", "Exchange rates"], news_search: ["뉴스 검색", "News search"], etf_holdings: ["ETF 편입", "ETF holdings"] };
 export function financeQueryNumber(value: number, ko: boolean): string {
   if (!Number.isFinite(value)) return "—";
   const tiny = value !== 0 && Math.abs(value) < .01;

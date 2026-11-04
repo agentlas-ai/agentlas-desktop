@@ -103,3 +103,15 @@
   background: var(--paper-edge);
   color: var(--ink);
 }
+
+.sources {
+  margin: 4px 0;
+  color: var(--muted-deep);
+  font-size: 12px;
+}
+
+.sources > summary {
+  width: fit-content;
+  cursor: pointer;
+  user-select: none;
+}

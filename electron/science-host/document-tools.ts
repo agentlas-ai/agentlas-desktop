@@ -10,7 +10,7 @@ import {
 /*
  * Live office documents (live-document/ports.ts, the harness document.* ports) for Science turns.
  *
- * Science turns carry no harness_call, so the six ports are offered as one more server of the lazy Desktop catalogue
+ * A Science turn on the old path carries no harness_call (a shared-chain turn does, through agentlas-turn in mcp/client.ts), so the six ports are offered as one more server of the lazy Desktop catalogue
  * (list_desktop_tools -> call_desktop_tool). Nothing is reimplemented: each tool is the port itself, called with the
  * turn's own authority:
  *   chatId     the Science runtime chat (ensureScienceRuntimeChat), so sessions are that conversation's and no other chat's

@@ -4,6 +4,7 @@ import { FINANCE_DATA_CATEGORIES, resolveFinanceDataSource, type FinanceDataSele
 import { FINANCE_FEED_IDS, type FinanceFeedId, type FinanceDashboardFeedItem, type FinanceDashboardFeedSection, type FinanceDashboardFeedsResult } from '../../shared/finance-feeds';
 import type { FinanceScope } from './store';
 import { queryFinanceAdapter } from './source-adapters';
+import { readSecDirectory, readSecSubmissionsText, type SecDirectory } from './providers/sec-reads';
 
 const TTL = 5 * 60 * 1000, MAX_OWNERS = 8, MAX_ASSETS = 5;
 const SEC_DIRECTORY = 'https://www.sec.gov/files/company_tickers_exchange.json';
@@ -100,18 +101,17 @@ export async function queryFinanceNews(asset:FinanceAsset,signal?:AbortSignal):P
 async function filings(assets:FinanceAsset[],signal:AbortSignal):Promise<FinanceDashboardFeedSection> {
   const out=section('finance-sec');out.warnings=['SEC recent-submissions metadata only; first five watchlist assets, up to eight recent filings each. Historical submission files are not traversed. Exact ticker-to-CIK mapping identifies an issuer, not guaranteed security lineage. Fair-access rules apply; no blanket redistribution right to filing exhibits is implied.'];
   if(!assets.length){out.errorCode='finance_feed_watchlist_required';return out;}out.sourceUrls.push(SEC_DIRECTORY);
-  let directory:Record<string,unknown>;try {directory=object(JSON.parse(await fetchText(SEC_DIRECTORY,signal)));}catch(e){check(signal);out.status='error';out.errorCode=errorCode(e);return out;}
-  if(!Array.isArray(directory.fields)||!Array.isArray(directory.data))throw new Error('finance_feed_source_shape');
-  const fields=directory.fields,ci=fields.indexOf('cik'),ti=fields.indexOf('ticker');if(ci<0||ti<0)throw new Error('finance_feed_source_shape');
+  // The directory is the one the asset search already downloaded (providers/sec-reads.ts): one download per hour for the whole app, indexed by ticker.
+  let directory:SecDirectory;try {directory=await readSecDirectory(async readSignal=>JSON.parse(await fetchText(SEC_DIRECTORY,readSignal)),{signal});}catch(e){check(signal);out.status='error';out.errorCode=errorCode(e);return out;}
   let failures=0;
   // Sequential SEC requests stay comfortably below the published ten requests/second limit.
   for(const asset of assets.slice(0,MAX_ASSETS)){
     check(signal);const direct=asset.id.match(/^sec:(\d{10}):(.+)$/),canonical=asset.id===`yahoo:${encodeURIComponent(asset.symbol)}`||asset.id===`av:${asset.symbol}`&&asset.exchange==='United States'||asset.id===`ishares:${asset.symbol}`||direct?.[2]===asset.symbol;
-    const matches=canonical?directory.data.filter(row=>Array.isArray(row)&&row[ti]===asset.symbol&&/^\d{1,10}$/.test(String(row[ci]))):[];
+    const matches=canonical?directory.byTicker.get(asset.symbol)??[]:[];
     if(matches.length!==1){failures++;out.warnings.push(asset.symbol+': finance_feed_issuer_unresolved');continue;}
-    const cik=String(matches[0][ci]).padStart(10,'0');if(direct&&direct[1]!==cik){failures++;out.warnings.push(asset.symbol+': finance_feed_identity_mismatch');continue;}
+    const cik=matches[0].cik;if(direct&&direct[1]!==cik){failures++;out.warnings.push(asset.symbol+': finance_feed_identity_mismatch');continue;}
     const url=`https://data.sec.gov/submissions/CIK${cik}.json`;out.sourceUrls.push(url);
-    try {const data=object(JSON.parse(await fetchText(url,signal)));if(String(data.cik).padStart(10,'0')!==cik)throw new Error('finance_feed_identity_mismatch');
+    try {const data=object(JSON.parse((await readSecSubmissionsText(url,async readSignal=>{const body=await fetchText(url,readSignal);JSON.parse(body);return body;},{signal})).body));if(String(data.cik).padStart(10,'0')!==cik)throw new Error('finance_feed_identity_mismatch');
       const recent=object(object(data.filings).recent),forms=recent.form,accessions=recent.accessionNumber,documents=recent.primaryDocument,dates=recent.filingDate,accepted=recent.acceptanceDateTime;
       if(!Array.isArray(forms)||!Array.isArray(accessions)||!Array.isArray(documents)||!Array.isArray(dates))throw new Error('finance_feed_source_shape');
       for(let i=0;i<Math.min(forms.length,8);i++){
@@ -255,7 +255,23 @@ async function earnings(assets:FinanceAsset[],sourceId:string,scope:FinanceScope
 /** Clear is unconditional: a previous account authority may clear its cache after logout. */
 export function clearFinanceDashboardFeedCache(scope?:Pick<FinanceScope,'workspaceId'|'userId'>):void {if(scope){const id=owner(scope);cache.delete(id);pending.get(id)?.abort();pending.delete(id);}else{cache.clear();for(const controller of pending.values())controller.abort();pending.clear();}}
 /** Host consent and feed enable settings are enforced by the caller before entering this network-only adapter. */
-export async function getFinanceDashboardFeeds(input:{scope:FinanceScope;watchlist:readonly FinanceAsset[];enabledFeedIds?:readonly FinanceFeedId[];sourceId?:string;sourceBindings?:FinanceDataSelection['sourceBindings'];signal?:AbortSignal}):Promise<FinanceDashboardFeedsResult> {
+type FeedsInput={scope:FinanceScope;watchlist:readonly FinanceAsset[];enabledFeedIds?:readonly FinanceFeedId[];sourceId?:string;sourceBindings?:FinanceDataSelection['sourceBindings'];signal?:AbortSignal};
+const flights=new Map<string,Promise<unknown>>();
+/** One read per owner at a time. A second ask (a re-render, the phone, a chat) waits for the one under way and then reads the answer it left, instead of being refused as busy. */
+export async function getFinanceDashboardFeeds(input:FeedsInput):Promise<FinanceDashboardFeedsResult> {
+  const id=owner(input.scope);
+  for(let attempt=0;attempt<4;attempt++){
+    const flight=flights.get(id);
+    if(!flight){
+      const run=getFinanceDashboardFeedsOnce(input);flights.set(id,run);
+      try{return await run;}finally{if(flights.get(id)===run)flights.delete(id);}
+    }
+    try{await flight;}catch{/* its own caller sees that outcome; this ask reads again */}
+    check(input.signal??new AbortController().signal);input.scope.assertCurrent();
+  }
+  return getFinanceDashboardFeedsOnce(input);
+}
+async function getFinanceDashboardFeedsOnce(input:FeedsInput):Promise<FinanceDashboardFeedsResult> {
   const {scope}=input;scope.assertCurrent();if(!scope.workspaceId||!scope.userId)throw new Error('finance_sign_in_required');if(input.signal?.aborted)throw new Error('finance_feed_cancelled');
   if(!Array.isArray(input.watchlist)||input.watchlist.length>10000||input.watchlist.some(a=>!a||typeof a.id!=='string'||a.id.length>200||typeof a.symbol!=='string'||a.symbol.length>80))throw new Error('finance_feed_watchlist_invalid');
   const enabled=input.enabledFeedIds===undefined?[...FINANCE_FEED_IDS]:[...input.enabledFeedIds];if(enabled.length>4||new Set(enabled).size!==enabled.length||enabled.some(id=>!FINANCE_FEED_IDS.includes(id)))throw new Error('finance_feed_selection_invalid');

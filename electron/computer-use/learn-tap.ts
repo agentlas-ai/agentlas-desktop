@@ -6,7 +6,7 @@
 
 export interface LearnTapElement { index: number; role?: string; label?: string; value?: string; parent?: number }
 export interface LearnTapObservation { app: string; observationId: string; elements: LearnTapElement[]; at: number }
-export interface LearnTapAction { app: string | null; action: string; observationId?: string; elementIndex?: number; operation?: string; key?: string; ok: boolean; at: number }
+export interface LearnTapAction { app: string | null; action: string; observationId?: string; elementIndex?: number; operation?: string; key?: string; modifiers?: readonly string[]; ok: boolean; at: number }
 export interface LearnTapSink { active(): boolean; observed(observation: LearnTapObservation): void; acted(action: LearnTapAction): void }
 
 let sink: LearnTapSink | null = null;

@@ -9,7 +9,7 @@ export interface FinanceDataSelection {
 }
 const categories: Readonly<Record<string, FinanceDataCategory>> = Object.freeze({
   search:'market',price:'market',price_history:'market',news:'news',filings:'filings',company_facts:'filings',
-  social:'social',social_search:'social',nav:'funds',etf_holdings:'funds',macro_news:'macro',treasury_yields:'macro',
+  social:'social',social_search:'social',nav:'funds',etf_holdings:'funds',macro_news:'macro',treasury_yields:'macro',macro_series:'macro',fx_rates:'macro',news_search:'news',
   earnings:'calendar',economic_calendar:'calendar',
 });
 export function financeDataCategory(metric:string):FinanceDataCategory|undefined {

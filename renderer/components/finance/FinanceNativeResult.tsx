@@ -4,7 +4,22 @@ import type { FinanceNativeResult as NativeResult } from "@shared/finance-native
 import { FinanceAssetResults } from "./FinanceAssetResults";
 import { FinanceHoldingsReview, type FinanceHoldingsSettlement } from "./FinanceHoldingsReview";
 import { FinanceInlineArtifact } from "./FinanceInlineArtifact";
-import { FinanceInlineQueryResult } from "./FinanceInlineQueryResult";
+import { FinanceInlineQueryResult, financeQueryPresentation } from "./FinanceInlineQueryResult";
+
+/** Rows of a view that only records what the model read to answer (ticker candidates, news, filing and price rows, an empty or
+ *  failed read, a valuation with no saved report); `null` for a result the owner asked for (a drawn series, a report, a
+ *  holdings proposal). Same rule as the phone
+ * projection in shared/finance-native-transcript.ts . */
+export function financeReadSourceRows(result: NativeResult): number | null {
+  const { view } = result;
+  if (view.kind === "search") return view.result.assets.length;
+  // A valuation with no saved report draws only a coverage or "no complete currency group" line; the answer says what it found.
+  if (view.kind === "portfolio") return view.coverage?.positions ?? 0;
+  if (view.kind !== "query") return null;
+  const rows = view.result.rows.length;
+  if (view.result.status === "error" || view.result.status === "unconnected" || !rows) return rows;
+  return financeQueryPresentation({ datasetId: "", kind: "query", request: view.request, assets: [], result: view.result }).kind === "visual" ? null : rows;
+}
 
 /** Pure retained-result presentation inside Work's existing UiInstance, never a second transcript or model loop. */
 export function FinanceNativeResult({ result, instanceId, revision, resultRef, locale, instanceState = "ready", fallbackText = "", onSettle }: {
@@ -15,7 +30,7 @@ export function FinanceNativeResult({ result, instanceId, revision, resultRef, l
   const { view } = result, ko = locale === "ko";
   // A review waits for the owner's Save; the card owns that decision, the model has no write operation.
   if (view.kind === "holdings") return <FinanceHoldingsReview draft={view.draft} instanceState={instanceState} fallbackText={fallbackText} locale={locale} onSettle={onSettle}/>;
-  if (view.kind === "search") return <FinanceAssetResults result={view.result} query={view.query} ko={ko} watchlistIds={new Set()}/>;
+  if (view.kind === "search") return <FinanceAssetResults result={view.result} query={view.query} ko={ko} watchlistIds={new Set()} initialVisible={4}/>;
   if (view.kind === "query") return <FinanceInlineQueryResult messageId={`${instanceId}-${revision}`} locale={locale}
     snapshot={{ ownerScope: result.ownerScope, revision, entry: { datasetId: resultRef, kind: "query", request: view.request, assets: [], result: view.result } }}/>;
   const coverage = view.coverage;

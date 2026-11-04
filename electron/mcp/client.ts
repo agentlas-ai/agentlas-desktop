@@ -267,7 +267,6 @@ import { buildOneSurfaceFromMarkdown, chooseOneSurfaceForDisplay, resolveOneMark
 import { bindOneRuntimeToolArtifacts, oneArtifactAlreadyBoundInChat, promoteBoundOneMarkdownImages, verifyOneArtifactReviewDraft } from "../one/artifact-preview";
 import { hasRunProducedFiles, openRunProducedFiles, takeRunProducedFiles } from "../harness/run-produced-files";
 import { missingRequestedFiles, requestedFileCorrection } from "./requested-file-check";
-import { requestedMediaCorrection, requestedMediaNotice, type MissingRequestedMedia } from "./requested-media-check";
 import { runWithStoreBusyPatience, runWithStoreBusyRetry } from "../store/store-busy-retry";
 import { classifyToolFailure, toolFailureCopy } from "../../shared/tool-failure";
 import { resolveToolInvocationOrigin } from "../invocation/tool-origin";
@@ -285,6 +284,9 @@ import {
 } from "../site/agent-app-mcp-config-policy";
 import { listInstalledServers as listInstalledMcpServers } from "../mcp-tools/registry";
 import { getAgentApp } from "../store/agent-apps";
+import { bindRunKeyChallengeSink } from "./run-key-challenge";
+import { enterRunToolMenu } from "../mcp-tools/chat-tool-menu";
+import { toolMenuFor } from "../mcp-tools/domain-tool-menu";
 import { autoSelectMcpTools, buildMcpAutoSelectionPrompt, describeScopedMcpOutcome, selectionKeepsTools, selectUntilGoalScopeSettled, type GoalToolSelectionReceipt } from "../mcp-tools/auto-select";
 import { runMcpKeyElicitationGate } from "./run-key-elicitation";
 import { getEnvConfigurationRevision } from "../secrets/vault";
@@ -317,12 +319,8 @@ import {
   type BrowserCredentialRefreshReport,
 } from "../browser/credential-sync";
 import { buildAgentAppRunnerEnv, buildRunnerEnv, restrictedRunnerEnv } from "../runtime/env-resolver";
-import { claimRenameAnnouncement, renameSuggestionNotice } from "../runtime/env-key-reach";
 import { agentRunCwd } from "../runtime/exec";
 import { codexUserConfigOutsideBrowser } from "../runtime/codex-desktop-surface";
-import { generateImage, removeGeneratedImageArtifact } from "../multimodal/image";
-import { copyGeneratedImageIntoWorkspace } from "../multimodal/workspace-image-copy";
-import { multimodalImageSlot } from "../multimodal/slot";
 import { chatImageAttachmentFromTrustedFile } from "../store/chat-message-attachments";
 import { ownerVisiblePrompt, stripStaffGuidance } from "../one/owner-prompt";
 import { browserCaptureDir, savedBrowserCaptureDir, screenCaptureDir } from "../media/capture-artifacts";
@@ -755,70 +753,6 @@ function createOneToolFailureTracker(): {
       return true;
     },
   };
-}
-
-/**
- * Positive image-generation intent is a host capability contract, not a
- * renderer hint. Keep it conservative so opening or inspecting an existing
- * image never causes a new image to be generated behind the user's back.
- */
-export function naturalLanguageRequiresImageGeneration(prompt: unknown): boolean {
-  if (typeof prompt !== "string") return false;
-  const text = prompt
-    .normalize("NFKC")
-    .replace(/\b(?:do\s+not|don't|never)\s+(?:create|generate|draw|illustrate|design|make|render|compose|produce)\b/giu, " ")
-    .replace(/(?:만들|생성|그리|그려|제작|디자인)(?:지\s*(?:마|말|않)|하지\s*(?:마|말|않))/gu, " ")
-    .toLowerCase();
-  const clauses = text
-    .split(/(?:[.!?\n;:。！？；：]+|\s+(?:그리고|하지만|또는|및|and|but|or|then)\s+)/iu)
-    .map((clause) => clause.trim())
-    .filter(Boolean);
-  const visual = /(?:이미지|사진|그림|포스터|일러스트(?:레이션)?|도표|다이어그램|아이콘|로고|배너|삽화|작품|image|photo|picture|poster|illustration|drawing|diagram|icon|logo|banner|artwork|graphic|visual)/iu;
-  const generation = /(?:만들|생성|그리|그려|제작|디자인|create|generate|draw|illustrate|design|make|render|compose|produce|generation|creation|production)/iu;
-  return clauses.some((clause) => visual.test(clause) && generation.test(clause));
-}
-
-/**
- * 사용자가 **화면을 찍어 보여 달라**고 했는가.
- *
- * `naturalLanguageRequiresImageGeneration` 과 일부러 나눠 둔다. 그쪽 깃발은 멀티모달
- * 엔진으로 그림을 **생성**까지 하므로, 스크린샷 요청에 그 깃발을 켜면 python.org 를
- * 찍는 대신 python.org 를 그려 버린다. 여기서 필요한 것은 생성이 아니라 **증거 요구**다.
- *
- * 배경(2026-09-04 실측): "파이썬 공식 사이트 화면 한 장 찍어서 보여줘" 에 모델이
- * "캡처해 위에 표시했습니다" 라고 답했는데 채팅에 이미지가 없고 새 파일도 없었다.
- * 그리기 요청에는 이미 증거 관문이 있었지만 어휘가 이미지·사진·그림뿐이라
- * 화면·스크린샷·캡처는 통과했다.
- */
-export function naturalLanguageRequiresScreenCapture(prompt: unknown): boolean {
-  if (typeof prompt !== "string") return false;
-  const text = prompt
-    .normalize("NFKC")
-    .replace(/\b(?:do\s+not|don't|never)\s+(?:capture|screenshot|screengrab)\b/giu, " ")
-    .replace(/(?:찍|캡처|캡쳐)(?:지\s*(?:마|말|않)|하지\s*(?:마|말|않))/gu, " ")
-    .toLowerCase();
-  const clauses = text
-    .split(/(?:[.!?\n;:。！？；：]+|\s+(?:그리고|하지만|또는|및|and|but|or|then)\s+)/iu)
-    .map((clause) => clause.trim())
-    .filter(Boolean);
-  const surface = /(?:화면|스크린샷|스크린\s*샷|캡처|캡쳐|screenshot|screen\s*shot|screen\s*capture|screengrab)/iu;
-  /*
-   * 명사를 지운 **뒤에** 동사가 남아야 한다.
-   *
-   * 캡처·screenshot 은 명사이자 동사라, 둘을 각각 찾으면 한 단어가 두 조건을 혼자
-   * 만족시킨다. 그래서 "캡처가 안 된 이유를 알려줘" 같은 **질문**이 캡처 요청으로
-   * 읽혔다(2026-09-04 게이트가 잡음). 오탐은 정상 대화를 오류로 끝내므로 값이 크다.
-   */
-  const capture = /(?:찍|담아|떠\s*(?:줘|주|서)|take|grab|get|make)/iu;
-  // 명사에 곧바로 붙은 동사형(캡처해줘 · 스크린샷 찍어)은 위 규칙으로는 명사만 남으므로
-  // 따로 받는다. 일반 "해줘" 를 동사 목록에 넣으면 "설명해줘" 까지 잡힌다.
-  const attached = /(?:캡처|캡쳐)\s*(?:해|하)|스크린샷\s*(?:떠|찍|해)/iu;
-  return clauses.some((clause) => {
-    if (!surface.test(clause)) return false;
-    if (attached.test(clause)) return true;
-    const withoutNoun = clause.replace(surface, " ");
-    return capture.test(withoutNoun);
-  });
 }
 
 function wrapOneRecoveryProposal(text: string, locale: "ko" | "en"): string {
@@ -4021,6 +3955,7 @@ async function runMcpInvocationInContext(
   // Science has one signed, turn-scoped tool catalog supplied by its execution
   // owner below. A second generic One/Work MCP config is both redundant and
   // can fail before the Science grant is even attempted in a headless daemon.
+  let unbindRunKeyChallenge: () => void = () => {};
   if (runtimeCanUseMcp && (executionContext?.source !== "science" || scienceToolServer) && !isAliveControllerRun
     && !workforceOwnsCapabilityChoice && !explicitWorkforceGoal && !scienceReview) {
     // Which preparation step was running when a failure escaped. A thrown plain Error used to
@@ -4126,13 +4061,18 @@ async function runMcpInvocationInContext(
         ...(req.oneMode && !req.agentAppMode && !oneMemberToolPolicy && oneTeamDispatchAllowedFor(chat.id) ? { oneOwnConversation: true as const } : {}),
         // A domain project's conversation (Agentlas Finance today) carries its domain's plugins on every turn: Main-derived from the
         // stored project binding (invocation/project-domain-binding.ts), never from renderer input.
-        ...(projectDomainBinding?.baselinePlugins.length ? { projectBaselinePlugins: projectDomainBinding.baselinePlugins } : {}),
+        ...(projectDomainBinding?.baselinePlugins.length ? { projectBaselinePlugins: projectDomainBinding.baselinePlugins, projectToolMenu: projectDomainBinding.toolMenu } : {}),
+        // The tool menu is the conversation's domain's (mcp-tools/domain-tool-menu.ts): the stored binding's declared menu above, or Science's by the
+        // chat's surface pack. Main-derived, never renderer input.
+        surfacePack: chat.surfacePack ?? null,
         // An installed plugin the agent looked up or opened mid-turn in this
         // conversation's previous run is attached now (never a Hub install).
         requestedPluginSlugs: readMidTurnPluginRequests(chat.id, req.runId),
         ...(ownerRequestedWorkflows.length ? { ownerRequestedWorkflows } : {}),
       };
       mcpPrepStage = "tool-selection";
+      // The run's own prompt name lists (plugins:, connectors:) follow the same menu as its tool selection (mcp-tools/chat-tool-menu.ts).
+      enterRunToolMenu(toolMenuFor({ surfacePack: autoSelectInput.surfacePack, projectToolMenu: autoSelectInput.projectToolMenu }));
       captureOnePersonalNativeOriginal();
       const scopedMcpPreflight = createOneScopedMcpPreflight({
         resolveSelection: resolveOnePersonalNativeMcpSelection, isCurrent: isMcpConfigCurrent, runId: req.runId,
@@ -4196,6 +4136,12 @@ async function runMcpInvocationInContext(
         }, scopedSelectionDeps),
       });
       selectedContext = keyGate.context;
+      // A keyed tool the model calls later in this turn finds its key missing: it opens the same sheet (mcp/run-key-challenge.ts).
+      // Only the runs that can show the sheet (the gate's own rule) bind; the run's end unbinds.
+      if (!executionContext && !req.agentAppMode && !workspaceBinding) {
+        const unbindKeyChallenge = bindRunKeyChallengeSink(req.runId, event => { if (event.kind === "mcp-key-request") captureOnePersonalNativePending(); sink(event); }, signal);
+        unbindRunKeyChallenge = unbindKeyChallenge;
+      }
       // The key sheet can wait for the owner far longer than a selection: the Goal may have ended meanwhile.
       if (selectedContext.goalSelectionIsCurrent?.() === false) selectedContext = await selectUnderCurrentGoal("key-gate");
       mcpGoalSelectionIsCurrent = selectedContext.goalSelectionIsCurrent;
@@ -4904,23 +4850,14 @@ async function runMcpInvocationInContext(
         memberAgents: (req.taskForceTargets ?? []).flatMap((target) =>
           target.source === "local" && target.entityKind === "agent" ? [getAgentById(target.agentId)] : []),
       });
-  // A saved key that is only misnamed (ELEVENLABS_1 for ELEVENLABS_API_KEY) already reaches the tools under the read
-  // name (owner 2026-10-12: don't ask), so it is only recorded. Only a key that could not be aliased is offered to the
-  // owner, once, as one plain line. Nothing is renamed here.
+  // A declared key saved under a plainly misnamed name (ELEVENLABS_1 for ELEVENLABS_API_KEY) already reaches the tools under
+  // the read name (don't ask), so it is only recorded. A key a tool really lacks is asked on the run-key sheet
+  // when the tool is selected ; nothing is announced at spawn and nothing is renamed here.
   if (!req.agentAppMode) {
     for (const alias of runnerEnv.aliasedKeys ?? []) {
       tryRecordRunEvent({
         runId: req.runId ?? `chat:${chat.id}`, kind: "env_key_aliased", chatId: chat.id, agentId: agent.id,
         payload: { from: alias.from, to: alias.to },
-      });
-    }
-    for (const suggestion of runnerEnv.renameSuggestions ?? []) {
-      if (!claimRenameAnnouncement(suggestion)) continue;
-      const notice = renameSuggestionNotice(suggestion, locale === "ko" ? "ko" : "en");
-      sink({ kind: "notice", notice: { level: "warning", code: "env-key-rename-suggested", message: notice.message, i18n: notice.i18n } });
-      tryRecordRunEvent({
-        runId: req.runId ?? `chat:${chat.id}`, kind: "env_key_rename_suggested", chatId: chat.id, agentId: agent.id,
-        payload: { from: suggestion.from, to: suggestion.to },
       });
     }
   }
@@ -4951,46 +4888,14 @@ async function runMcpInvocationInContext(
   // asking a conversational turn must not manufacture one. The chat id is the
   // durable fallback goal key until an authoritative promotion occurs.
   const canonicalTask = findCanonicalTaskForChat(chat.id);
-  let nativeCaptureBound = false;
-  let blindVisionRuntime = false;
   let collectDurableToolImages: ((paths: readonly string[], allowResultFolder?: boolean) => boolean) | null = null;
   const publishNativeCapture = createNativeCapturePublisher({
     task: canonicalTask, chatId: chat.id, runId: req.runId ?? "", signal,
-    emit: (event) => { sink(event); nativeCaptureBound = true; },
+    emit: (event) => { sink(event); },
     onCommittedImage: (filePath) => { collectDurableToolImages?.([filePath]); },
   });
 
-  // Host pre-turn image generation is for runtimes that cannot draw by
-  // themselves. Codex/Antigravity request images through their own image
-  // generation (or the host generate_image tool) and the host copies each
-  // result into the working folder. One and Work now share the same rule —
-  // the old One exclusion predates the unified One/Work image binding.
-  const runtimeDrawsItself = (RUNTIME_NATIVE_CAPABILITIES[active.kind] ?? []).includes("image.generate");
-  /*
-   * The two gates below read what the owner asked, not the host's prompt. A Goal resume / wait wake restates the objective word
-   * for word, so its vocabulary is true on every episode: each resume generated a new paid image (the image engine was handed
-   * the resume boilerplate), a read-only reconciliation handoff failed before the model ran, and "take a screenshot" goals
-   * failed after the work for want of a new capture. The only owner-written text inside a host prompt is the owner's latest
-   * unanswered message; a worker brief One wrote (one-dispatch-brief) is a real task and is read whole.
-   */
-  const ownerRequestText = !hostWrotePrompt()
-    ? req.userPrompt
-    : await import("../invocation/automatic-goal").then((goal) => goal.unansweredOwnerMessage(chat.id) ?? "").catch(() => "");
-  const imageGenerationRequired = !req.agentAppMode
-    && chat.kind !== "division"
-    && !runtimeDrawsItself
-    && naturalLanguageRequiresImageGeneration(ownerRequestText);
-  /*
-   * ★찍어 달라고 했으면 찍은 것이 있어야 한다 — 그리라고는 하지 않았으므로 생성은 하지 않고
-   * 결과만 요구한다(위 판정기 주석의 실측 참고).
-   */
-  const screenCaptureRequired = !req.agentAppMode
-    && chat.kind !== "division"
-    && !naturalLanguageRequiresImageGeneration(ownerRequestText)
-    && naturalLanguageRequiresScreenCapture(ownerRequestText);
-  let observedImageArtifactEvidence = false;
   const pendingWorkToolImages: Array<{ sourcePath: string; image: ImageAttachment }> = [];
-  const generatedImageSourcePaths = new Set<string>();
   // One seal for both sources of this run's outputs: the paths a runtime adapter structured for a tool event, and the
   // files a harness port wrote for this run (harness/run-produced-files.ts). A/B 2026-10-18 (Haiku, GPT): document.save
   // and media.image.generate answered a path, Outputs stayed empty and both answers said no file was linked. A port's
@@ -7022,7 +6927,7 @@ async function runMcpInvocationInContext(
     const collectToolImages = (paths: readonly string[], allowResultFolder = false): boolean => {
       if (req.agentAppMode || !paths.length) return false;
       let added = false;
-      const maxImages = imageGenerationRequired ? 1 : ONE_ATTACHMENT_LIMITS.maxCount;
+      const maxImages = ONE_ATTACHMENT_LIMITS.maxCount;
       let retainedBytes = pendingWorkToolImages.reduce(
         (total, item) => total + Buffer.byteLength(item.image.data, "base64"),
         0,
@@ -7066,7 +6971,6 @@ async function runMcpInvocationInContext(
           pendingWorkToolImages.push({ sourcePath, image });
           retainedBytes += imageBytes;
           added = true;
-          if (imageGenerationRequired) observedImageArtifactEvidence = true;
         } catch {
           // Main sealing is fail-closed. An untrusted or malformed file is not
           // image evidence and must not cross into chat history.
@@ -7205,10 +7109,6 @@ async function runMcpInvocationInContext(
       // 러너가 사용자에게 남겨야 하는 사실(첫 소비자: 컨텍스트 압축).
       // 상태줄과 달리 대화에 남는다.
       onNotice: (notice: NonNullable<McpInvocationEvent["notice"]>) => {
-        // 러너가 "이 모델은 화면을 볼 수 없어 컴퓨터 유즈·스크린샷 도구를 뺐다" 고 알렸으면, 그 실행에
-        // 캡처 산출을 요구하는 것은 성립하지 않는다 — 안내를 남기고도 끝에서 screen_capture_unavailable 로
-        // 실패시키던 것(3회 반복 실측 2026-09-13: 컴퓨터 유즈 과제 3/3 실패). 답은 정직한 텍스트로 끝난다.
-        if (notice.code === "computer-use-needs-vision-model") blindVisionRuntime = true;
         sink({ kind: "notice", notice });
       },
     };
@@ -7875,47 +7775,6 @@ async function runMcpInvocationInContext(
       restrictedDiscardedMemoryEvents += parsed.events.length;
       return { ...passResult, text: parsed.cleanedText };
     };
-    let hostGeneratedImageAttachment: ImageAttachment | undefined;
-    let hostGeneratedImageContext = "";
-    if (imageGenerationRequired && !signal?.aborted) {
-      const imageSlot = multimodalImageSlot();
-      if (!imageSlot) {
-        // Typed: the run's outward code names the missing tool (shared/run-failure-notice.ts tool_missing), not "runner-failed".
-        throw Object.assign(new Error("image_tool_unavailable: no configured multimodal image runtime"), { code: "image_tool_unavailable" });
-      }
-      sink({
-        kind: "tool-use",
-        status: locale === "ko"
-          ? "요청한 이미지를 전용 멀티모달 엔진으로 생성하는 중…"
-          : "Generating the requested image with the configured multimodal engine…",
-      });
-      // The run's permission reaches the image route's own CLI (multimodal/image.ts ImageAdmission, R-078).
-      const generated = await generateImage(imageSlot.model, ownerRequestText, { permission: req.permissions });
-      if (!generated.ok || !generated.artifactPath || !generated.src) {
-        throw Object.assign(new Error(`image_tool_unavailable: ${generated.reason ?? "no image was produced"}`), { code: "image_generation_failed" });
-      }
-      generatedImageSourcePaths.add(generated.artifactPath);
-      collectToolImages([generated.artifactPath]);
-      if (!pendingWorkToolImages.length) {
-        throw Object.assign(new Error("image_tool_unavailable: generated bytes failed Main sealing"), { code: "image_generation_failed" });
-      }
-      hostGeneratedImageAttachment = pendingWorkToolImages[0].image;
-      runnerEvents.onTool(
-        "generate_image",
-        JSON.stringify({ prompt: ownerRequestText }),
-        JSON.stringify({ ok: true, engine: generated.engine ?? imageSlot.runtimeKind }),
-        `host-image-${randomUUID()}`,
-        false,
-        [generated.artifactPath],
-      );
-      const workspaceImageCopy = copyGeneratedImageIntoWorkspace({ cwd: resolvedResultFolder ?? workingFolder,
-        permission: normalizedPermission, sourcePath: generated.artifactPath, label: "image" });
-      hostGeneratedImageContext = `\n\n[Agentlas image result]\nimage: the host generated and attached exactly one real image; it is the result, claim no other${workspaceImageCopy ? `\ncopy: ${workspaceImageCopy} (use for uploads, documents, later steps)` : ""}`;
-      sink({
-        kind: "tool-use",
-        status: locale === "ko" ? "실제 이미지 결과를 채팅과 결과 탭에 연결했습니다." : "The real image result is attached to the chat and Results rail.",
-      });
-    }
     // Only the first call carries the host-authored purpose; an owner steer the pump delivers after it is the owner's words.
     const runCurrentRuntimeOnce = (request: RunnerRequest, hostAuthored?: string, continuationHandle?: string): Promise<Awaited<ReturnType<Runner>>> => {
       const first: RunnerRequest = carryRunnerTurnContext(request, { ...request, ownerControlInbox });
@@ -7971,11 +7830,6 @@ async function runMcpInvocationInContext(
       }, request, hostAuthored);
     };
     let activeRunnerReq = runnerRequestForRuntime(active, picked);
-    if (hostGeneratedImageAttachment) {
-      activeRunnerReq = replaceRunnerUserPrompt(activeRunnerReq,
-        `${runnerTurnContextSource(activeRunnerReq)?.userPrompt ?? activeRunnerReq.userPrompt}${hostGeneratedImageContext}`,
-        { images: [...(req.images ?? []), hostGeneratedImageAttachment] });
-    }
     modelTurnStarted = true;
     const nativeGoalEpisode = activeGoalId && req.runId && !executionContext && continuousMode
       ? captureNativeGoalEpisode(activeGoalId, chat.id, req.runId) : null;
@@ -8441,7 +8295,7 @@ async function runMcpInvocationInContext(
     if (endedWithoutAnswerAfterUnusableTools({ text: result.text, reportedToolCalls: result.toolCalls, outcomes: modelToolOutcomes.summary() })
       && !executionContext && !hostNoticePurpose && !promptIsSystemAuthored && !activeGoalId && !continuousMode && !roomMemberTurn
       && !scienceRecovery && !effectObservationRun && !req.agentAppMode && chat.kind !== "division"
-      && !imageGenerationRequired && !screenCaptureRequired && !signal?.aborted) {
+      && !signal?.aborted) {
       const failure: RunnerFailure = { kind: "empty", source: "marker", runtime: active.kind, providerCode: EMPTY_AFTER_UNUSABLE_TOOLS_CODE,
         message: "The model ended the turn without a reply after every tool call it made failed or came back empty." };
       throw unsettledTurnError({ runtimeKind: active.kind, locale, cause: { ...result, ownerControlTerminal: "uncertain", failure },
@@ -8473,14 +8327,9 @@ async function runMcpInvocationInContext(
     const finalClaim = stripGoalCompleteMarker(finalContinuation.text);
     // 중간 패스에서 이미 선언했으면 그 사실은 마지막 본문에 남아 있지 않다 —
     // 루프가 그 패스에서 마커를 떼어 냈기 때문이다. 선언은 OR로 합친다.
-    // A Goal cannot close on a turn whose requested image or screen capture does not exist (the answer gets a host correction
-    // below, and a completion claim made without the deliverable is not a completion). Read here, before the ledger closes
-    // any task on the claim: the images collected so far are exactly the ones the final answer will carry.
-    const requestedMediaUnproven = !signal?.aborted && !effectObservationRun && pendingWorkToolImages.length === 0
-      && (imageGenerationRequired || (screenCaptureRequired && !blindVisionRuntime && !nativeCaptureBound));
     const goalCompletion = {
       text: finalClaim.text,
-      claimed: !goalWaitRequest && !requestedMediaUnproven && (finalClaim.claimed || goalClaimSeen),
+      claimed: !goalWaitRequest && (finalClaim.claimed || goalClaimSeen),
       evidence: finalClaim.evidence ?? goalClaimEvidence,
     };
     const finalAsksOwner = turnAsksOwner(finalContinuation.text);
@@ -9314,28 +9163,6 @@ async function runMcpInvocationInContext(
     let persistedDisplay = stripStrayProtocolTokens(stripPermissionEscalationMarker(
       effectObservationRun ? stripEffectObservationMarker(finalDisplay.durableText) : finalDisplay.durableText));
     const finalWorkImages = promotedImages.images;
-    /*
-     * 그려 달라/찍어 달라고 한 실행이 이미지 하나 없이 끝나면, 답이 무슨 말을 했든 사실이 아니다. 예전에는 이 자리에서 던져
-     * 이미 쓴 답을 통째로 버리고 실행을 실패로 끝냈다(screen_capture_unavailable → runner-failed, 2026-10-05). 모델이 캡처를
-     * 안 한 것은 앱 내부 오류도 아니고 사용자가 고칠 것도 없다 — 요청한 파일이 없을 때와 같이(requested-file-check.ts) 답은
-     * 두고, 사실 정정을 답과 함께 저장하고, 경고 알림을 내고, 완료 선언은 하지 않는다. 호스트가 사전 생성한 이미지는
-     * 위에서 이미 봉인돼 finalWorkImages 에 들어 있으므로(없으면 사전 단계가 던졌다) 여기 오는 것은 모델이 낸 약속뿐이다.
-     */
-    // A host-started read-only effect check is not an owner deliverable: its final text is the observation the host parses, so no
-    // correction line is ever appended to it.
-    const requestedMediaMissing: MissingRequestedMedia | null = signal?.aborted || effectObservationRun ? null
-      : imageGenerationRequired && (!observedImageArtifactEvidence || finalWorkImages.length === 0) ? "image"
-        : screenCaptureRequired && !blindVisionRuntime && !nativeCaptureBound && finalWorkImages.length === 0 ? "screen-capture"
-          : null;
-    if (requestedMediaMissing) {
-      const correction = requestedMediaCorrection(requestedMediaMissing, locale);
-      persistedDisplay = persistedDisplay.trim() ? `${persistedDisplay}\n\n${correction}` : correction;
-      boundImageDisplayWithFloor = boundImageDisplayWithFloor.trim() ? `${boundImageDisplayWithFloor}\n\n${correction}` : correction;
-      const mediaNotice = requestedMediaNotice(requestedMediaMissing);
-      sink({ kind: "notice", notice: { level: "warning", code: mediaNotice.code, message: mediaNotice.i18n[locale], i18n: mediaNotice.i18n } });
-      tryRecordRunEvent({ runId: req.runId ?? `chat:${chat.id}`, kind: "requested_media_missing", chatId: chat.id, agentId: agent.id,
-        payload: { media: requestedMediaMissing, runtime: active.kind } });
-    }
     // A file the owner asked for and the answer names must exist before the answer stands (requested-file-check.ts). The
     // correction is saved with the answer, so neither the owner nor the next turn builds on a file that is not there.
     const missingFiles = !effectObservationRun && !req.agentAppMode && !hostWrotePrompt() && !signal?.aborted
@@ -9401,8 +9228,7 @@ async function runMcpInvocationInContext(
           payload: { phase: "chat", emptyDisplayText: true, runtime: active.kind },
         });
       }
-      for (const sourcePath of generatedImageSourcePaths) removeGeneratedImageArtifact(sourcePath);
-      generatedImageSourcePaths.clear();
+      unbindRunKeyChallenge();
       // 세션 워터마크 전진 — 이 kind의 세션은 방금 답변까지 봤다. 다음 resume 턴의
       // gap-replay가 자기 답변을 중복 주입하지 않고, 스웜/다른 러너 턴만 메우게 된다.
       if (sessionCapableRuntime) touchRuntimeSession(chat.id, active.kind, agent.id);
@@ -9559,8 +9385,7 @@ async function runMcpInvocationInContext(
         : {}),
     };
   } catch (err) {
-    for (const sourcePath of generatedImageSourcePaths) removeGeneratedImageArtifact(sourcePath);
-    generatedImageSourcePaths.clear();
+    unbindRunKeyChallenge();
     if (login?.waiting) return earlyResult();
     if (modelTurnStarted) {
       try {

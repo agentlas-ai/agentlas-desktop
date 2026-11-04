@@ -54,23 +54,31 @@ export async function transferFinanceWatchlist(scope: FinanceScope, store: Finan
     // cannot be mistaken for the state the owner agreed to replace.
     const before = direction === 'download' ? await store.load(scope) : null;
     assertCurrent();
-    const beforeDigest = before ? createHash('sha256').update(JSON.stringify(before)).digest('hex') : null;
-    const remote = await request('GET');
+        const remote = await request('GET');
     if (remote && 'status' in remote) throw new Error('finance_cloud_response_invalid');
     if (direction === 'download') {
       if (!remote || remote.deleted) throw new Error('finance_cloud_watchlist_unavailable');
       // Existing holdings, quotes and widgets must remain valid; transaction's
       // full workspace validation refuses a destructive replacement otherwise.
-      if (!before || !beforeDigest) throw new Error('finance_cloud_response_invalid');
+      if (!before) throw new Error('finance_cloud_response_invalid');
       // The full auth check also runs immediately before the store's rename,
       // including managed credential replacement within the same host epoch.
-      await store.transaction({ ...scope, assertCurrent }, before.revision, current => {
-        assertCurrent();
-        if (current.ownerScope !== before.ownerScope || createHash('sha256').update(JSON.stringify(current)).digest('hex') !== beforeDigest) {
-          throw new Error('finance_revision_conflict');
-        }
-        return validateFinanceWorkspace({...current, watchlist:remote.assets});
-      });
+      // The owner agreed to replace the watchlist as it was: a change to the watchlist while the request ran is a conflict. A save that left it alone (a scheduled briefing, a report) is not.
+      const listDigest = (list: unknown) => createHash('sha256').update(JSON.stringify(list)).digest('hex');
+      const agreed = listDigest(before.watchlist);
+      for (let attempt = 0; ; attempt++) {
+        const latest = await store.load(scope); assertCurrent();
+        if (latest.ownerScope !== before.ownerScope || listDigest(latest.watchlist) !== agreed) throw new Error('finance_revision_conflict');
+        try {
+          await store.transaction({ ...scope, assertCurrent }, latest.revision, current => {
+            assertCurrent();
+            if (current.ownerScope !== before.ownerScope || listDigest(current.watchlist) !== agreed) throw new Error('finance_revision_conflict');
+            try { return validateFinanceWorkspace({...current, watchlist:remote.assets}); }
+            catch { throw new Error('finance_cloud_watchlist_in_use'); }
+          });
+          break;
+        } catch (error) { if (attempt >= 3 || !(error instanceof Error) || error.message !== 'finance_revision_conflict') throw error; }
+      }
       assertCurrent();
       return;
     }

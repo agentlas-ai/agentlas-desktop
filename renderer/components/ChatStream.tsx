@@ -1,5 +1,6 @@
 "use client";
 import { useAgentAppearance } from "@/lib/agent-appearance";
+import { withoutEmptyCommentShells } from "@/lib/empty-comment-shell";
 import type { AgentAppearance } from "@shared/agent-appearance";
 import { shortenLocalPaths } from "@/lib/local-path-redact";
 import { MessageActions } from "./MessageActions";
@@ -1463,9 +1464,9 @@ const Bubble = memo(function Bubble({
         )}
         {displayText && !message.busy && (
           <div className="agentlas-msg-actions" style={{ display: "flex", gap: 4, marginTop: 6 }}>
-            <CopyMessageButton text={displayText} />
-            <SpeakMessageButton text={displayText} />
-            <OpenAsDocumentButton text={displayText} />
+            <CopyMessageButton text={withoutEmptyCommentShells(displayText)} />
+            <SpeakMessageButton text={withoutEmptyCommentShells(displayText)} />
+            <OpenAsDocumentButton text={withoutEmptyCommentShells(displayText)} />
           </div>
         )}
       </div>

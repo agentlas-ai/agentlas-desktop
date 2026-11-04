@@ -94,6 +94,8 @@ type PortOutcome =
 
 const ok = (data: unknown): PortOutcome => ({ status: "ok", data });
 const refused = (reason: string, next?: string): PortOutcome => ({ status: "refused", reason, ...(next ? { next } : {}) });
+/** Said only when a media port failed (the media line no longer rides every run): the owner gets the setup button, the run goes on. */
+const MEDIA_SETUP_NEXT = "if no route is set up, tell the owner in words where to set one up (Settings, Environment variables) and end your reply with <<agentlas-multimodal-setup>> (a setup button on the desktop; the phone ignores it), hold this media step only and continue the rest";
 const str = (value: unknown): string => (typeof value === "string" ? value.trim() : "");
 const strList = (value: unknown): string[] => (Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && item.trim().length > 0).map((item) => item.trim()) : []);
 const sha = (value: string | Buffer): string => createHash("sha256").update(value).digest("hex");
@@ -160,10 +162,32 @@ async function mediaJobStartedInChat(jobId: string, chatId: string): Promise<boo
 
 // ── plugins ───────────────────────────────────────────────────────────────────────────────────────────────────────
 
-async function pluginRows() {
+/** The plugins this conversation's menu lists (mcp-tools/domain-tool-menu.ts, read for this chat by mcp-tools/chat-tool-menu.ts). */
+async function menuPluginFilter(chatId?: string): Promise<(slug: string) => boolean> {
+  const { pluginInToolMenu } = await import("../mcp-tools/domain-tool-menu");
+  const { toolMenuOfChat } = await import("../mcp-tools/chat-tool-menu");
+  const menu = toolMenuOfChat(chatId);
+  return (slug) => pluginInToolMenu(menu, slug);
+}
+
+/** The catalog tool ids / installed catalog ids this conversation's menu lists: the same rule the judge applies. */
+async function menuToolFilter(chatId?: string): Promise<(toolId: string) => boolean> {
+  const { toolIdInMenu } = await import("../mcp-tools/domain-tool-menu");
+  const { toolMenuOfChat } = await import("../mcp-tools/chat-tool-menu");
+  const { listInstalledPluginCandidates, pluginCandidatesRoot } = await import("../plugins/plugin-candidates");
+  const menu = toolMenuOfChat(chatId);
+  if (!menu.restricted) {
+    // An ordinary conversation only drops what a domain owns; no plugin scan is needed when nothing is hidden for it.
+  }
+  const plugins = listInstalledPluginCandidates(pluginCandidatesRoot()).map((plugin) => ({ slug: plugin.slug, toolIds: plugin.toolIds }));
+  return (toolId) => toolIdInMenu(menu, toolId, plugins);
+}
+
+async function pluginRows(chatId?: string) {
   const { listInstalledPluginCandidates, pluginCandidatesRoot } = await import("../plugins/plugin-candidates");
   const root = pluginCandidatesRoot();
-  return listInstalledPluginCandidates(root).map((plugin) => ({
+  const listed = await menuPluginFilter(chatId);
+  return listInstalledPluginCandidates(root).filter((plugin) => listed(plugin.slug)).map((plugin) => ({
     id: `plugin:${plugin.slug}`,
     slug: plugin.slug,
     name: plugin.name,
@@ -230,13 +254,13 @@ function frontMatter(text: string): { name: string; description: string } {
   return { name: pick("name"), description: pick("description") };
 }
 
-async function skillRows(): Promise<SkillRow[]> {
+async function skillRows(chatId?: string): Promise<SkillRow[]> {
   const rows: SkillRow[] = [];
   try {
     const { listSkillCatalog } = await import("../hephaestus/skill-catalog");
     for (const entry of listSkillCatalog()) rows.push({ id: `catalog:${entry.slug}`, name: entry.name, description: entry.description.slice(0, 280), path: "" });
   } catch { /* no Hephaestus root: no catalog skills */ }
-  for (const plugin of await pluginRows()) {
+  for (const plugin of await pluginRows(chatId)) {
     const skillsDir = path.dirname(path.dirname(plugin.router));
     for (const name of pluginSkills(plugin.router)) {
       const file = path.join(skillsDir, name, "SKILL.md");
@@ -287,12 +311,15 @@ async function readSkill(skillId: string): Promise<{ content: string; revision: 
 
 // ── connectors / auth ─────────────────────────────────────────────────────────────────────────────────────────────
 
-async function connectorRows() {
+async function connectorRows(chatId?: string) {
   const { listInstalledServers } = await import("../mcp-tools/registry");
   let servers: ReturnType<typeof listInstalledServers>;
   // A host without the store (a headless probe) has no installed connectors to list; it does not fail discovery.
   try { servers = listInstalledServers(); } catch { return []; }
-  return servers.map((server) => ({
+  // A restricted menu lists no owner-registered server and only the catalog servers of its plugins; an ordinary one hides a domain's own.
+  const menu = (await import("../mcp-tools/chat-tool-menu")).toolMenuOfChat(chatId);
+  const allowed = await menuToolFilter(chatId);
+  return servers.filter((server) => (server.catalogId ? allowed(server.catalogId) : !menu.restricted)).map((server) => ({
     id: `connector:${server.id}`,
     serverId: server.id,
     catalogId: server.catalogId,
@@ -453,10 +480,11 @@ async function findConnectorBySite(site: string) {
 
 // ── tools ─────────────────────────────────────────────────────────────────────────────────────────────────────────
 
-async function toolRows() {
+async function toolRows(chatId?: string) {
   const { MCP_TOOL_CATALOG } = await import("../mcp-tools/catalog");
-  const installed = new Map((await connectorRows()).map((row) => [row.catalogId ?? row.serverId, row]));
-  return MCP_TOOL_CATALOG.map((entry) => ({
+  const installed = new Map((await connectorRows(chatId)).map((row) => [row.catalogId ?? row.serverId, row]));
+  const allowed = await menuToolFilter(chatId);
+  return MCP_TOOL_CATALOG.filter((entry) => allowed(entry.id)).map((entry) => ({
     id: `tool:${entry.id}`,
     providerRef: entry.id,
     name: entry.nameEn || entry.name,
@@ -498,8 +526,56 @@ const graphDraftOp = (op: string) => (args: Record<string, unknown>, ctx: Harnes
 
 const PORTS: PortDefinition[] = [
   {
+    // The Vault as the model sees it: names only. A value never leaves Main (a built-in tool, the model judges).
+    operationId: "vault.keys", kind: "query", purpose: "List the names of the keys saved in the Vault (names only, never values); an optional query filters by name.", required: [],
+    handler: async (args) => {
+      const { listEnvKeys } = await import("../secrets/vault");
+      const { isConnectionVaultKey } = await import("../mcp-tools/credential-refs");
+      const query = str(args.query).toLowerCase();
+      const names = (await listEnvKeys()).filter((name) => !isConnectionVaultKey(name) && (!query || name.toLowerCase().includes(query))).sort().slice(0, 200);
+      return ok({ names, values: "never returned" });
+    },
+  },
+  {
+    operationId: "vault.has", kind: "query", purpose: "Whether a key with exactly this name is saved in the Vault (yes or no, never the value).", required: ["name"],
+    handler: async (args) => {
+      const { hasEnvVar } = await import("../secrets/vault");
+      const { isValidEnvName } = await import("../../shared/env-key-rename");
+      const name = str(args.name);
+      if (!isValidEnvName(name)) return refused("name_invalid", "an environment variable name like ELEVENLABS_API_KEY");
+      return ok({ name, saved: await hasEnvVar(name) });
+    },
+  },
+  {
+    operationId: "vault.use", kind: "command", purpose: "Get a key saved under the name a tool reads: {saved, as} proposes using the saved key `saved` as `as` (the owner approves on screen and the Vault renames it); {as} alone asks the owner for the key. Never returns a value.", required: ["as"],
+    handler: async (args, ctx) => {
+      const { listEnvKeys } = await import("../secrets/vault");
+      const { isValidEnvName } = await import("../../shared/env-key-rename");
+      const { RUNTIME_AUTH_ENV_KEYS } = await import("../runtime/env-key-reach");
+      const { isConnectionVaultKey } = await import("../mcp-tools/credential-refs");
+      const as = str(args.as);
+      const saved = str(args.saved);
+      if (!isValidEnvName(as) || isConnectionVaultKey(as)) return refused("name_invalid", "as: the environment variable name the tool reads, like ELEVENLABS_API_KEY");
+      if (ctx.dryRun) return refused("dry_run");
+      const names = await listEnvKeys();
+      if (names.includes(as)) return ok({ state: "already_saved", name: as });
+      if (saved) {
+        // Never a rename into a model runtime's login key, and never out of one or out of a connection's key.
+        if (RUNTIME_AUTH_ENV_KEYS.has(as) || !isValidEnvName(saved) || !names.includes(saved) || isConnectionVaultKey(saved) || RUNTIME_AUTH_ENV_KEYS.has(saved)) {
+          return refused("saved_name_not_usable", "saved must be a name vault.keys lists; a model runtime's login key is only ever entered by the owner (call vault.use with only as)");
+        }
+      }
+      const { raiseRunKeyChallenge } = await import("../mcp/run-key-challenge");
+      const asked = await raiseRunKeyChallenge(ctx.runId, { id: `vault:${as}`, name: str(args.label) || as, envKey: as, ...(saved ? { proposedFrom: saved } : {}) });
+      if (asked === "unavailable") {
+        return refused("no_screen_for_the_sheet", `this run has no screen for the key sheet: tell the owner in words to save the key as ${as} in Settings, Environment variables, and end your reply with <<agentlas-multimodal-setup>> (a setup button on the desktop; the phone ignores it), hold this step only and continue the rest`);
+      }
+      return ok({ state: asked === "asked" ? "owner_asked" : "owner_already_asked", name: as, next: "the owner answers on screen and the key is then saved under this name; continue the rest and call the tool again later" });
+    },
+  },
+  {
     operationId: "plugin.search", kind: "query", purpose: "Read package metadata and stored installation state.", required: ["query"],
-    handler: async (args) => ok((await pluginRows()).filter((row) => matches(str(args.query), row.slug, row.name, row.description)).map(({ id, mention, name, description }) => ({ id, mention, name, description }))),
+    handler: async (args, ctx) => ok((await pluginRows(ctx.chatId)).filter((row) => matches(str(args.query), row.slug, row.name, row.description)).map(({ id, mention, name, description }) => ({ id, mention, name, description }))),
   },
   {
     operationId: "plugin.describe", kind: "query", purpose: "Read package metadata and stored installation state.", required: ["packageId"],
@@ -516,7 +592,7 @@ const PORTS: PortDefinition[] = [
   { operationId: "plugin.uninstall", kind: "command", purpose: "Change exact package installation lifecycle; preserve results.", required: ["installId"], handler: async (args, ctx) => (await import("./plugin-lifecycle")).PLUGIN_LIFECYCLE_HANDLERS["plugin.uninstall"](args, ctx) },
   {
     operationId: "skill.search", kind: "query", purpose: "Find skill metadata; do not activate or execute.", required: ["query"],
-    handler: async (args) => ok((await skillRows()).filter((row) => matches(str(args.query), row.id, row.name, row.description)).map(({ id, name, description }) => ({ id, name, description }))),
+    handler: async (args, ctx) => ok((await skillRows(ctx.chatId)).filter((row) => matches(str(args.query), row.id, row.name, row.description)).map(({ id, name, description }) => ({ id, name, description }))),
   },
   {
     operationId: "skill.read", kind: "query", purpose: "Read the exact instruction revision and linked resources.", required: ["skillId"],
@@ -558,7 +634,7 @@ const PORTS: PortDefinition[] = [
   },
   {
     operationId: "connector.search", kind: "query", purpose: "Read MCP definition or stored connection observation; no live probe.", required: ["query"],
-    handler: async (args) => ok(await Promise.all((await connectorRows()).filter((row) => matches(str(args.query), row.serverId, row.name, row.catalogId ?? ""))
+    handler: async (args, ctx) => ok(await Promise.all((await connectorRows(ctx.chatId)).filter((row) => matches(str(args.query), row.serverId, row.name, row.catalogId ?? ""))
       .map(async (row) => ({ id: row.id, name: row.name, transport: row.transport, enabled: row.enabled, readiness: (await storedConnectionReadiness(row)).state })))),
   },
   {
@@ -718,7 +794,7 @@ const PORTS: PortDefinition[] = [
       const { recordReadinessObservation } = await import("./readiness-observations");
       const observedRoute = (result.engine && IMAGE_ENGINE_ROUTE[result.engine]) || (route !== "auto" ? route : null);
       if (observedRoute) await recordReadinessObservation({ subject: "media-route", id: observedRoute, outcome: result.ok && result.artifactPath ? "ok" : "unavailable", via: "media.image.generate" });
-      if (!result.ok || !result.artifactPath) return refused("image_generation_failed", result.reason ?? "no engine produced an image");
+      if (!result.ok || !result.artifactPath) return refused("image_generation_failed", `${result.reason ?? "no engine produced an image"}; ${MEDIA_SETUP_NEXT}`);
       let copied: string | null = null;
       const outputDir = str(args.outputDir);
       if (outputDir) {
@@ -790,7 +866,7 @@ const PORTS: PortDefinition[] = [
       const { recordReadinessObservation } = await import("./readiness-observations");
       const observedRoute = (result.engine && IMAGE_ENGINE_ROUTE[result.engine]) || (route !== "auto" ? route : null);
       if (observedRoute) await recordReadinessObservation({ subject: "media-route", id: `${observedRoute}#edit`, outcome: result.ok ? "ok" : "unavailable", via: "media.image.edit" });
-      if (!result.ok || !result.artifactPath || !result.lineage) return refused("image_edit_failed", result.reason ?? "no route produced an edited image");
+      if (!result.ok || !result.artifactPath || !result.lineage) return refused("image_edit_failed", `${result.reason ?? "no route produced an edited image"}; ${MEDIA_SETUP_NEXT}`);
       let copied: string | null = null;
       if (str(args.outputDir)) {
         const { copyGeneratedImageIntoWorkspace } = await import("../multimodal/workspace-image-copy");
@@ -924,7 +1000,7 @@ const PORTS: PortDefinition[] = [
     operationId: "capability.resolve", kind: "job", purpose: "Retrieve candidates; record explicit user/model selection and validate binding.", required: ["taskRef"],
     handler: async (args, ctx) => {
       const query = str(args.taskRef);
-      const [plugins, skills, connectors] = await Promise.all([pluginRows(), skillRows(), connectorRows()]);
+      const [plugins, skills, connectors] = await Promise.all([pluginRows(ctx.chatId), skillRows(ctx.chatId), connectorRows(ctx.chatId)]);
       // Candidates only: the model chooses. A selection given back is recorded as the model's choice.
       const candidates = {
         plugins: plugins.filter((row) => matches(query, row.slug, row.name, row.description)).map((row) => row.id),
@@ -972,7 +1048,7 @@ const PORTS: PortDefinition[] = [
   },
   {
     operationId: "tool.search", kind: "query", purpose: "Search actual tool metadata plus explicitly unready candidates.", required: ["query"],
-    handler: async (args) => ok((await toolRows()).filter((row) => matches(str(args.query), row.providerRef, row.name, row.description))
+    handler: async (args, ctx) => ok((await toolRows(ctx.chatId)).filter((row) => matches(str(args.query), row.providerRef, row.name, row.description))
       .filter((row) => args.includeUnready === true || row.installed).map(({ id, name, description, installed, enabled }) => ({ id, name, description, installed, enabled }))),
   },
   {
@@ -1558,15 +1634,15 @@ async function meaningEmbedder(): Promise<import("./search-rank").MeaningEmbedde
   try { return await import("../memory/local-embedding"); } catch { return null; }
 }
 
-export async function searchHarness(query: string, kind?: HarnessItemKind, ctx?: Pick<HarnessCallContext, "mcpConfigPath">): Promise<Array<{ id: string; kind: HarnessItemKind; name: string; description: string }>> {
+export async function searchHarness(query: string, kind?: HarnessItemKind, ctx?: Pick<HarnessCallContext, "mcpConfigPath" | "chatId">): Promise<Array<{ id: string; kind: HarnessItemKind; name: string; description: string }>> {
   const out: Array<{ id: string; kind: HarnessItemKind; name: string; description: string; rankTerms?: string[]; meaningTerms?: string[] }> = [];
   const want = (k: HarnessItemKind) => !kind || kind === k;
   // The run's own host tool servers lead: their tools are callable in this run now (tool.call), unlike catalog entries.
   if (want("tool")) for (const row of await hostToolRows(ctx)) out.push({ id: row.id, kind: "tool", name: row.name, description: row.description, rankTerms: row.rankTerms, meaningTerms: row.meaningTerms });
-  if (want("plugin")) for (const row of await pluginRows()) if (matches(query, row.slug, row.name, row.description)) out.push({ id: row.id, kind: "plugin", name: row.mention, description: row.description });
-  if (want("skill")) for (const row of await skillRows()) if (matches(query, row.id, row.name, row.description)) out.push({ id: row.id, kind: "skill", name: row.name, description: row.description });
-  if (want("connector")) for (const row of await connectorRows()) if (matches(query, row.serverId, row.name)) out.push({ id: row.id, kind: "connector", name: row.name, description: `${row.transport}${row.enabled ? "" : ", off"}` });
-  if (want("tool")) for (const row of await toolRows()) if (matches(query, row.providerRef, row.name, row.description)) out.push({ id: row.id, kind: "tool", name: row.name, description: `${row.description}${row.installed ? "" : " (not installed)"}` });
+  if (want("plugin")) for (const row of await pluginRows(ctx?.chatId)) if (matches(query, row.slug, row.name, row.description)) out.push({ id: row.id, kind: "plugin", name: row.mention, description: row.description });
+  if (want("skill")) for (const row of await skillRows(ctx?.chatId)) if (matches(query, row.id, row.name, row.description)) out.push({ id: row.id, kind: "skill", name: row.name, description: row.description });
+  if (want("connector")) for (const row of await connectorRows(ctx?.chatId)) if (matches(query, row.serverId, row.name)) out.push({ id: row.id, kind: "connector", name: row.name, description: `${row.transport}${row.enabled ? "" : ", off"}` });
+  if (want("tool")) for (const row of await toolRows(ctx?.chatId)) if (matches(query, row.providerRef, row.name, row.description)) out.push({ id: row.id, kind: "tool", name: row.name, description: `${row.description}${row.installed ? "" : " (not installed)"}` });
   if (want("feature")) {
     const { FEATURE_MODULES } = await import("./feature-registry");
     for (const feature of FEATURE_MODULES) if (matches(query, feature.featureId, ...feature.surfaces)) out.push({ id: `feature:${feature.featureId}`, kind: "feature", name: feature.featureId, description: `surfaces: ${feature.surfaces.join(", ") || "-"}` });

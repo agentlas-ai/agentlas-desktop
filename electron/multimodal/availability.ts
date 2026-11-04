@@ -93,10 +93,6 @@ export async function grokAuthSource(): Promise<GrokAuthSource> {
   return "unavailable";
 }
 
-export async function grokAuthReady(): Promise<boolean> {
-  return (await grokAuthSource()) !== "unavailable";
-}
-
 /** ~/.grok/auth.json 에 유효한 OIDC 로그인이 있나? (access 미만료 또는 refresh_token 보유) */
 export function grokOAuthReady(
   authPath = process.env.AGENTLAS_GROK_AUTH_FILE || path.join(os.homedir(), ".grok/auth.json"),

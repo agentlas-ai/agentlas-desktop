@@ -86,9 +86,6 @@ const TEXT_MODELS: Partial<Record<MultimodalVideoProvider, string>> = {
 const XAI_BASE = "https://api.x.ai/v1";
 /** Grok text-to-video is the xAI API (metered), never the subscription CLI. */
 const XAI_KEYS = ["XAI_API_KEY", "GROK_API_KEY"];
-/** Providers with a documented public text-only video API. */
-export const TEXT_TO_VIDEO_PROVIDERS = Object.keys(TEXT_MODELS) as MultimodalVideoProvider[];
-
 /** A request with no input image. Carried inside the durable intent so restart recovery keeps the mode. */
 export type MultimodalTextVideoRequest = MultimodalVideoRequest & { textOnly?: true };
 function isTextOnly(request: MultimodalVideoRequest): boolean {

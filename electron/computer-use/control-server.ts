@@ -564,7 +564,7 @@ async function runActionWithin(body: Record<string, unknown>, requestSignal: Abo
     recordAudit(action,result,action==="typeText"&&typeof body.text==="string"?body.text.length:undefined);
     // What was done, not what was typed: no text, no pixel. A no-op unless the owner's Reach switch is on.
     if (learnTap.active() && action!=="status" && action!=="listApps") {
-      learnTap.acted({ app: appName, action, ...(observedElement ? { observationId: observedElement.observationId, elementIndex: Number(body.element_index) } : {}), ...(typeof body.operation==="string" ? { operation: body.operation } : {}), ...(action==="key" && typeof body.key==="string" ? { key: body.key } : {}), ok: result.ok === true, at: Date.now() });
+      learnTap.acted({ app: appName, action, ...(observedElement ? { observationId: observedElement.observationId, elementIndex: Number(body.element_index) } : {}), ...(typeof body.operation==="string" ? { operation: body.operation } : {}), ...(action==="key" && typeof body.key==="string" ? { key: body.key, modifiers: Array.isArray(body.modifiers) ? body.modifiers.filter((value): value is string => typeof value === "string").slice(0, 5) : [] } : {}), ok: result.ok === true, at: Date.now() });
     }
     return result;
   } catch(error) {return osFailure(error);} finally {nativeLifetime?.dispose();lease?.release();}

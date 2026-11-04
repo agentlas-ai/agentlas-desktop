@@ -18,6 +18,14 @@ export interface FinanceBuiltinRuntime { apiVersion: 1; callPureTool(action: Fin
 export interface FinanceBuiltinWorkflowResult { id: string; version: string; digest: string; instructions: string }
 const PinSchema = z.object({ schemaVersion: z.literal(1), ownerScope: z.string().regex(/^[a-f0-9]{64}$/), noticeVersion: z.string().min(1).max(200), slug: z.literal(SLUG), version: z.literal(VERSION), digest: z.string().regex(/^sha256:[a-f0-9]{64}$/), revision: z.number().int().positive(), activatedAt: z.string().datetime({ offset: true }) }).strict();
 type Pin = z.infer<typeof PinSchema>;
+/** A pin written by an earlier app release (other plugin version) is well formed but out of date: it asks for re-preparation instead of being reported as damaged. */
+const OutdatedPinSchema = z.object({ schemaVersion: z.literal(1), ownerScope: z.string().regex(/^[a-f0-9]{64}$/), slug: z.literal(SLUG), version: z.string().min(1).max(100) }).passthrough();
+function parsePin(raw: Buffer): Pin | 'outdated' {
+  let json: unknown; try { json = JSON.parse(raw.toString('utf8')); } catch { throw new Error('finance_plugin_activation_invalid'); }
+  const strict = PinSchema.safeParse(json); if (strict.success) return strict.data;
+  const old = OutdatedPinSchema.safeParse(json); if (old.success && old.data.version !== VERSION) return 'outdated';
+  throw new Error('finance_plugin_activation_invalid');
+}
 const lockfile = require('proper-lockfile') as { lock(directory: string, options: unknown): Promise<() => Promise<void>> };
 const digest = (value: Buffer | string): string => `sha256:${createHash('sha256').update(value).digest('hex')}`;
 const errorCode = (error: unknown): string => error instanceof Error && /^finance_plugin_[a-z_]+$/.test(error.message) ? error.message : 'finance_plugin_release_unavailable';
@@ -80,7 +88,8 @@ export class FinanceBuiltinPlugin {
     z.string().min(1).max(200).parse(noticeVersion); const { directory, owner } = this.location(scope);
     let raw: Buffer; try { raw = readBytes(path.join(directory, 'activation.json'), 16384); }
     catch (error) { scope.assertCurrent(); if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null; throw error; }
-    let pin: Pin; try { pin = PinSchema.parse(JSON.parse(raw.toString('utf8'))); } catch { throw new Error('finance_plugin_activation_invalid'); }
+    const parsed = parsePin(raw); if (parsed === 'outdated') { scope.assertCurrent(); throw new Error('finance_plugin_activation_required'); }
+    const pin = parsed;
     scope.assertCurrent(); if (pin.ownerScope !== owner) throw new Error('finance_plugin_owner_mismatch');
     if (pin.noticeVersion !== noticeVersion) throw new Error('finance_plugin_activation_required'); return pin;
   }
@@ -135,8 +144,9 @@ export class FinanceBuiltinPlugin {
     finally { await unlock(); scope.assertCurrent(); }
   }
   private readPriorPin(scope: FinanceScope, directory: string, owner: string): Pin | null {
-    let value: Pin; try { value = PinSchema.parse(JSON.parse(readBytes(path.join(directory, 'activation.json'), 16384).toString('utf8'))); }
+    let value: Pin | 'outdated'; try { value = parsePin(readBytes(path.join(directory, 'activation.json'), 16384)); }
     catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null; throw new Error('finance_plugin_activation_invalid'); }
+    if (value === 'outdated') return null;
     scope.assertCurrent(); if (value.ownerScope !== owner) throw new Error('finance_plugin_owner_mismatch'); return value;
   }
   private clearRuntime(directory: string): void {

@@ -11,6 +11,8 @@ export interface ProjectDomainBinding {
   readonly projectId: string;
   /** Plugins this conversation carries on every turn, with the routing reason shown in the turn's routed-plugin pointer. */
   readonly baselinePlugins: readonly { readonly slug: string; readonly reason: string }[];
+  /** The plugins this domain's conversations list in the tool menu (mcp-tools/domain-tool-menu.ts); absent = the ordinary menu. */
+  readonly toolMenu?: readonly string[];
 }
 type Actor = { workspaceId: string; userId: string } | null;
 type DomainResolver = (chatId: string, actor: Actor, expected?: ProjectDomainBinding | null) => ProjectDomainBinding | null;
