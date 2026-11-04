@@ -23,5 +23,5 @@ export function installDaemonScienceHost(input: {
     // only for an actual workbook read, not when loading the headless runtime.
     workbook: () => require("../science-host/workbook-intake-ipc") as typeof import("../science-host/workbook-intake-ipc"),
   });
-  return { project: host.project, registerQuestionUi: host.registerQuestionUi, stopClock: host.stop };
+  return { project: host.project, registerQuestionUi: host.registerQuestionUi, stopClock: host.stop, driveRestartResumes: host.driveRestartResumes };
 }

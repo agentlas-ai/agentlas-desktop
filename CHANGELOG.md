@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.3.122 — 2026-11-04
+
+- Reach learning now matches the app an agent worked in by its bundle id first and by name second. Apps whose displayed name depends on the system language (Calculator shows as 계산기 on a Korean Mac) were observed but never kept; they are kept now.
+- Science research loops: the shared Goal engine now keeps Science's budget deadline clock and resumes the loops a restart parked, through one lifecycle interface. A restart still resumes them without an owner step, and Work and One keep the store functions they already used.
+
+This release binds Agentlas OS v1.2.78 at e13ae0df5ca866888bfff69ae7b69cfdb330e267; public runtime asset `agentlas-os-runtime-v1.2.78.tar.gz` is pinned at SHA-256 `8f7bf3cc0f5c686887e5b207d5f191645aab0eddd992ff1d2783611a9f79fbb1`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.121 — 2026-11-04
 
 - Reach learns from an agent's own screen work. After an agent does something on an app's screen with the computer tools and it works, Reach keeps the steps (control roles and captions, never what was typed) as a candidate, turns it into a callable port after a second matching success, heals the port after the app updates, and hands back to the screen instead of failing when it cannot. A check that already held before the work is refused as proof of the work. Learning runs only while Reach's switch is on.

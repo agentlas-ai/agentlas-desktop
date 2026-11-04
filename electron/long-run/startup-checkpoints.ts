@@ -28,6 +28,7 @@ import { reconcileHostPausedLongRuns } from "./startup-reconciler";
 import { agentRunCwd } from "../runtime/exec";
 import { readInvocationEffectBoundary } from "../invocation/effect-boundary-reader";
 import { maybeDispatchEffectObservation } from "./effect-observation";
+import { goalLifecyclePortFor } from "./goal-lifecycle-port";
 
 export interface CheckpointStartupDispatcher {
   activeChatIds(): string[];
@@ -534,7 +535,8 @@ export async function resumeSettledGoalCheckpoints(dispatcher: CheckpointStartup
     }
     const failedBeforeContinuation = candidate.status === "blocked"
       && candidate.blockedReason === "checkpoint_continuation_failed";
-    if (candidate.surface === "science" || candidate.hostOwnerKind !== "desktop"
+    // A domain run (Science) is resumed by its own port at restart (science-host/goal-lifecycle.ts), never by a settled checkpoint.
+    if (goalLifecyclePortFor(candidate)?.kind !== "host" || candidate.hostOwnerKind !== "desktop"
       || !(failedBeforeContinuation || (candidate.status === "paused"
         && ["app_closed", "crash_recovery"].includes(candidate.pauseReason ?? "")))) continue;
     // Pending subscriptions restore observation, not ordinary inference.

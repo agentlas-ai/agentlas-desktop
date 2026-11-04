@@ -87,7 +87,7 @@ function serializeObservation(app: string, observation: NativeAppObservation): R
   // Reach's learning (reach/learn-recorder.ts) sees the observed controls' roles and captions, never more; a no-op unless the owner's Reach switch is on.
   if (learnTap.active()) {
     learnTap.observed({
-      app, observationId, at: Date.now(),
+      app, ...(observation.app.bundleIdentifier ? { bundleId: observation.app.bundleIdentifier } : {}), observationId, at: Date.now(),
       elements: observation.elements.map((element, index) => {
         const parent = element.ref.path.length > 0 ? elementIndexByPath.get(element.ref.path.slice(0, -1).join("/")) : undefined;
         const label = element.title ?? element.description;

@@ -10,7 +10,14 @@ import { getReachRuntime, type ReachRuntime } from "./runtime";
 //
 // Electron-free except for the tap it installs (also Electron-free).
 
-export function resolveMappedApp(apps: readonly AppRecord[], ref: string): AppRecord | null {
+export function resolveMappedApp(apps: readonly AppRecord[], ref: string, bundleId?: string): AppRecord | null {
+  // the bundle id is exact and survives the app's localized name; the name is the fallback
+  // (a key can carry an "@..." suffix for a second install of the same bundle: see reach/app-match.ts; two installs cannot be told apart, so none is chosen)
+  if (bundleId) {
+    const byBundle = apps.filter((app) => app.key.startsWith("bundle:") && app.key.slice("bundle:".length).split("@")[0] === bundleId);
+    if (byBundle.length === 1) return byBundle[0];
+    if (byBundle.length > 1) return null;
+  }
   const wanted = norm(ref);
   if (!wanted || wanted.startsWith("pid:")) return null;
   const exact = apps.filter((app) => norm(app.name) === wanted || norm(app.key) === wanted || norm(app.key.replace(/^bundle:/, "")) === wanted);
@@ -33,7 +40,7 @@ export function installReachLearning(options: { quietMs?: number; log?: (line: s
     async submit(session: RecordedSession): Promise<void> {
       const rt = runtime ?? await runtimeOf();
       const map = await rt.readMap();
-      const app = map ? resolveMappedApp(map.apps, session.app) : null;
+      const app = map ? resolveMappedApp(map.apps, session.app, session.bundleId) : null;
       if (!app) { log(`[reach-learn] ${session.app} is not in Reach's map; nothing kept`); return; }
       const bundleId = app.key.startsWith("bundle:") ? app.key.slice(7) : undefined;
       const trace: LearnTrace = {

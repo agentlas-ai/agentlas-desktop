@@ -15,13 +15,15 @@ import { describeElement, norm, type LearnElement, type OutcomeCheck, type Trace
 // Whether the work is worth keeping is not decided here: learnFromTrace keeps it as a candidate and a second matching success makes it a port.
 
 export interface TapElement { index: number; role?: string; label?: string; value?: string; parent?: number }
-export interface TapObservation { app: string; observationId: string; elements: TapElement[]; at: number }
+export interface TapObservation { app: string; bundleId?: string; observationId: string; elements: TapElement[]; at: number }
 export interface TapAction { app: string | null; action: string; observationId?: string; elementIndex?: number; operation?: string; key?: string; ok: boolean; at: number }
 
 export type RecorderDrop = "pixel_step" | "failed_step" | "no_observation" | "no_change" | "too_short" | "unnameable" | "secret" | "sink_off";
 
 export interface RecordedSession {
   app: string;
+  // The bundle id the native helper reported for the observed app: the app's name is localized ("계산기"), Reach's map is keyed by the bundle id.
+  bundleId?: string;
   steps: TraceStep[];
   check: OutcomeCheck;
   checkHeldBefore: boolean;
@@ -41,6 +43,7 @@ const VALUE_BEARING_ROLE = /text|field|area|combo|value|static|label|cell|row/i;
 
 interface Session {
   app: string;
+  bundleId?: string;
   firstObservation: TapObservation | null;
   lastObservation: TapObservation | null;
   steps: TraceStep[];
@@ -76,7 +79,7 @@ export class LearnRecorder {
     const max = this.options.maxObservations ?? 8;
     while (this.seen.size > max) { const oldest = this.seen.keys().next().value as string | undefined; if (oldest === undefined) break; this.seen.delete(oldest); }
     if (this.session && this.session.app !== observation.app) void this.flush();
-    this.session ??= { app: observation.app, firstObservation: null, lastObservation: null, steps: [], droppedFor: null, lastTapAt: observation.at };
+    this.session ??= { app: observation.app, ...(observation.bundleId ? { bundleId: observation.bundleId } : {}), firstObservation: null, lastObservation: null, steps: [], droppedFor: null, lastTapAt: observation.at };
     this.session.firstObservation ??= observation;
     this.session.lastObservation = observation;
     this.session.lastTapAt = observation.at;
@@ -141,7 +144,7 @@ export class LearnRecorder {
     if (!check) return finish("no_change");
     const name = nameOf(session);
     if (!name) return finish("unnameable");
-    await this.sink.submit({ app: session.app, steps: session.steps, check: check.check, checkHeldBefore: check.heldBefore, name });
+    await this.sink.submit({ app: session.app, ...(session.bundleId ? { bundleId: session.bundleId } : {}), steps: session.steps, check: check.check, checkHeldBefore: check.heldBefore, name });
     return "submitted";
   }
 }

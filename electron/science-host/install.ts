@@ -41,6 +41,7 @@ import { scienceHostGoalWake, readScienceHostGoalWake, cancelScienceHostGoalWake
 import { recordSciencePublicationHostOutputs } from "./publication-outputs";
 import { recordScienceArtifactHostOutputs } from "./artifact-outputs";
 import { createScienceCanonicalGoalWaitOwner, installScienceCanonicalGoalWaitOwner } from "./goal-wait";
+import { installScienceGoalLifecycle, type ScienceDeferredLoopResumeInput } from "./goal-lifecycle";
 import { probePdfLatexProfile } from "./pdflatex";
 import { configureScienceMathPython } from "./math-python";
 import { listScienceTypesetProfileCatalog } from "./typeset-profile-catalog";
@@ -105,6 +106,11 @@ export interface ScienceHostHandle {
   readonly hostKind: ScienceHostKind;
   project(snapshot: Parameters<typeof projectScienceLoopLongRun>[0]): void;
   registerQuestionUi(): { releaseSha256: string };
+  /**
+   * After the package's startup recovery: resumes each paused loop it handed over (the host drives restart resumes) and writes the
+   * outcome into the common ledger. Empty on a host that does not drive them.
+   */
+  driveRestartResumes(deferred: readonly ScienceDeferredLoopResumeInput[]): Array<{ loopSessionId: string; outcome: "resumed" | "left-paused"; reason?: string }>;
   /** Stops reminders only (Main's before-quit). */
   stopQuestionPresenter(): void;
   /** Closes goal waits, reminders and every alive clock this host scheduled. Safe to call more than once. */
@@ -222,6 +228,10 @@ export function installScienceHostFor(input: ScienceHostInstallInput): ScienceHo
     },
   };
   fence.assertOwner();
+  // PLAN S7-4: the common Goal engine holds the research loop's budget clock and its restart resumes (the daemon is the one host
+  // that executes Science; Main reads it and advertises nothing). The domain port is registered once the contract is accepted so
+  // every common controller can ask it about a Science row.
+  const lifecycle = installScienceGoalLifecycle({ hostKind: input.hostKind, fence });
   const compatibility = installScienceHost({
     ...{ aliveCore: scienceAliveCoreHost },
     aliveRuntime, aliveClock,
@@ -333,6 +343,8 @@ export function installScienceHostFor(input: ScienceHostInstallInput): ScienceHo
         call: (...args: Parameters<typeof scienceAliveDesktopTools.call>) => { fence.assertExecution(); return scienceAliveDesktopTools.call(...args); },
       } },
       registerMcpPreparedConfig: registerPrepared,
+      // PLAN S7-4: see installScienceGoalLifecycle (science-host/goal-lifecycle.ts). Absent on Main, which never runs the loop.
+      ...(lifecycle.sdkHost ? { goalLifecycle: lifecycle.sdkHost } : {}),
       // PLAN S2: this host takes Science as one server of its shared tool chain (science-host/tool-server.ts). A Science
       // build that knows the member mints that server and names no Science-only discovery tool in its prompts.
       ...{ commonToolServer: { version: 1 as const } },
@@ -416,7 +428,8 @@ export function installScienceHostFor(input: ScienceHostInstallInput): ScienceHo
     },
     projection: { project },
   });
-  if (compatibility.status !== "compatible") throw new Error(compatibility.code);
+  if (compatibility.status !== "compatible") { lifecycle.stop(); throw new Error(compatibility.code); }
+  lifecycle.register();
   installedHostKind = input.hostKind;
   // Science turns can run in either host, so both read the pre-dispatch schema-rejection proof.
   installScienceStoreSchemaRejectionReader(scienceStore);
@@ -432,8 +445,10 @@ export function installScienceHostFor(input: ScienceHostInstallInput): ScienceHo
       questionRecovery.restore();
       return { releaseSha256: questionUiRelease };
     },
+    driveRestartResumes: (deferred) => lifecycle.driveRestartResumes(deferred),
     stopQuestionPresenter() { questionRecovery.stop(); },
     stop() {
+      lifecycle.stop();
       if (!closed) {
         closed = true;
         installScienceCanonicalGoalWaitOwner(null);

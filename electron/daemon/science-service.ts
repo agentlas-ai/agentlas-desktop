@@ -326,7 +326,11 @@ export function createDaemonScienceService(options: {
       unsubscribe.push(terminalConversations.onEvent(event => emit("turn", event)));
       unsubscribe.push(science.scienceStore().onResearchLifecycleChanged(event => emit("lifecycle", event)));
       assertExecution();
-      await adapter.recoverAndProjectAtStartup();
+      const recovery = await adapter.recoverAndProjectAtStartup();
+      assertExecution();
+      // PLAN S7-4: loops the restart parked and the package would once have resumed itself are resumed here, by the common Goal
+      // engine through the Science port (decision D3: still no owner step). A package that does not hand any over leaves [].
+      host.driveRestartResumes((recovery as { deferredResumes?: Parameters<typeof host.driveRestartResumes>[0] }).deferredResumes ?? []);
       assertExecution();
       lastError = null;
       state = "ready";

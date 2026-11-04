@@ -32,6 +32,7 @@ import { currentUiLocale } from "../ui-locale";
 import { decideGoalContinuationWake, ownerRequestWaiting, recordGoalWake, SAME_CAUSE_WAKE_REASON, type GoalWakeSource } from "./wake-arbiter";
 import { GOAL_OWNER_ANSWER_REQUIRED, GOAL_OWNER_GRANT_REQUIRED } from "../../shared/goal-display-state";
 import { WORK_PROJECT_RESIDENCY_BUSY_CODE } from "../runtime/project-residency";
+import { goalLifecyclePortFor } from "./goal-lifecycle-port";
 
 export type BlockedGoalSweepAction = "observation_dispatched" | "resumed" | "retry_scheduled" | "cancelled" | "deferred";
 
@@ -371,7 +372,8 @@ function receiptOnlyRetry(runId: string, retry: BlockedGoalRetry): boolean {
  * No chat holds the Goal any more, so the only honest end is closing it.
  */
 function goalOfDeletedChat(run: LongRunRecord): boolean {
-  if (run.rootChatId || run.surface === "science") return false;
+  // Only a run the common ledger drives can be "a Goal whose chat was deleted"; a domain run (Science) has no root chat by design.
+  if (run.rootChatId || goalLifecyclePortFor(run)?.kind !== "host") return false;
   const held = getDb().prepare("SELECT 1 FROM chats WHERE goal_id = ? LIMIT 1").get(run.goalId);
   return !held;
 }
