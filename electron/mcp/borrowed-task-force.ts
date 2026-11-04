@@ -8562,9 +8562,18 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
           final = { text: hostReport, tokens: 0 } as Awaited<ReturnType<typeof runSynthesisOn>>;
           break;
         }
-        throw new TaskForceRuntimeFailureError({ kind: "refused", runtime: typed.runtime.kind,
-          source: "marker", providerCode: "synthesis_runtime_pool_exhausted",
-          message: "No permitted untried synthesis runtime remains." }, typed.runtime);
+        // Nothing to assemble (a fixed contract, or no teammate delivered a word) and no permitted model left. The turn ends with the
+        // cause that really stopped the model, not with a host-invented "pool exhausted" refusal: that code replaced a provider's
+        // quota / rate limit / sign-in / outage with a `refused` that no reader could tell from the app's own fault (production
+        // Z: the Goal wake treated an outside cause as ours, and the owner read "The run failed"). The typed
+        // failure keeps its kind, source and Retry-After, so the notice names the real reason and the Goal waits for it.
+        tryRecordRunEvent({
+          runId: p.req.runId ?? `task-force:${p.chat.id}`, kind: "task_force_synthesis_pool_exhausted", chatId: p.chat.id, nodeId: orchestratorId,
+          agentId: p.orchestratorAgent.id,
+          payload: { schemaVersion: 1, runtimeKind: typed.runtime.kind, failureKind: typed.failure.kind,
+            providerCode: typed.failure.providerCode ?? null, triedRuntimes: failedSynthesisRuntimes.length },
+        });
+        throw typed;
       }
       if (oneControllerRuntimePreferred(p)) {
         p.onControllerRuntimeFallback?.(recovery, typed.failure);

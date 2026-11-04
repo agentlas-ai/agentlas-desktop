@@ -56,6 +56,31 @@ function neighbouringOperation(path: string): AppControlCatalogEntry | null {
   return same.length === 1 && readsOnly(same[0]) ? same[0] : null;
 }
 
+/**
+ * The browser / live-view operations name the conversation they act in `taskScopeId`, and that is the chat's id. A run reads a task's id
+ * in its own evidence (`task_<chatId>`), so workLiveView.listTabs {taskScopeId:"task_39ff5b23-..."} was refused "native-browser-chat-missing"
+ * twice (observed in use) while that chat was the one the run was in. The prefix is the only difference, so it is read off; a read
+ * that names no scope is asked in the conversation it comes from. Writes keep exactly what they were given (beyond the prefix).
+ */
+const VIEW_OPERATION = /^(workLiveView|browserUi|browserAnnotation)\./;
+function scopeOfView(entry: AppControlCatalogEntry, args: Record<string, unknown>, chatId: string | null | undefined, resolved: Array<Record<string, string>>): void {
+  if (!VIEW_OPERATION.test(entry.path)) return;
+  const schema = APP_CONTROL_ARGUMENT_SCHEMAS[entry.path] as { properties?: Record<string, { properties?: Record<string, unknown> }> } | undefined;
+  const inInput = entry.params.includes("input");
+  const takesScope = inInput ? Object.prototype.hasOwnProperty.call(schema?.properties?.input?.properties ?? {}, "taskScopeId") : entry.params.includes("taskScopeId");
+  if (!takesScope) return;
+  const holder = inInput ? (isObject(args.input) ? (args.input = { ...args.input }) as Record<string, unknown> : args.input === undefined ? null : undefined) : args;
+  if (holder === undefined) return;
+  const value = holder?.taskScopeId;
+  if (typeof value === "string" && /^task_[A-Za-z0-9][A-Za-z0-9_-]*$/.test(value) && holder) {
+    holder.taskScopeId = value.slice("task_".length);
+    resolved.push({ kind: "argument", from: "taskScopeId (a task id)", to: "the conversation's id" });
+  } else if (value === undefined && readsOnly(entry) && chatId && chatId !== "ui" && (holder === null || Object.keys(holder).length === 0)) {
+    if (holder) holder.taskScopeId = chatId; else args.input = { taskScopeId: chatId };
+    resolved.push({ kind: "default", from: "taskScopeId", to: "this conversation" });
+  }
+}
+
 /** `args` as the object the dispatcher takes: an empty array is no arguments, one bare value is the operation's single argument. */
 function argumentObject(entry: AppControlCatalogEntry, raw: unknown): unknown {
   if (raw === undefined || raw === null) return {};
@@ -173,6 +198,7 @@ export function resolveAppCallRequest(
     resolved.push({ kind: "argument", from: key, to: target });
   }
   gatherIntoInput(entry, args, resolved);
+  scopeOfView(entry, args, options.chatId, resolved);
   // The conversation a read is asked from, when it asks for one and the call named none (invoke.latestReceipt {}, goalPanel.view {}).
   if (required.includes("chatId") && args.chatId === undefined && readsOnly(entry) && options.chatId && options.chatId !== "ui") {
     args.chatId = options.chatId;

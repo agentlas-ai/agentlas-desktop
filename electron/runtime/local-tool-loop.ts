@@ -41,7 +41,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { createRuntimeUsageCollector, type ObservedTokenUsage } from "../../shared/observed-usage";
 import { createNoProgressGuard, noteNoProgressEvent } from "../automation-progress-guard";
 import type { RunnerEvents, RunnerFailure, RunnerRequest, RunnerResult } from "./runner";
-import { RuntimeNoProgressError, RuntimeTurnUnsettledError, runtimeHttpFailure, workforceNativeToolEnforcement, workforceZeroToolsEnforcement } from "./runner";
+import { PreDispatchRefusalError, RuntimeNoProgressError, RuntimeTurnUnsettledError, markRefusedBeforeDispatch, preDispatchRefusal, refusalCode, runtimeHttpFailure, workforceNativeToolEnforcement, workforceZeroToolsEnforcement } from "./runner";
 import {
   MainWorkforceBroker,
   workforceBrokerDigest,
@@ -545,16 +545,17 @@ export async function prepareMainToolLoop(
   if (collection) {
     assertScienceCollectionCapability(collection, req.mcpConfigPath);
     if (!["byok", "ollama", "lmstudio", "mlx", "agentlas-local", "agentlas"].includes(runtimeKind)) {
-      throw new Error("science_collection_transport_unsupported");
+      //: host checks before the tool inventory and any request: typed "not-dispatched" (its own code kept).
+      throw markRefusedBeforeDispatch(new Error("science_collection_transport_unsupported"));
     }
     if (req.history.length || req.planMode || req.workforceRuntimeToolGrant || req.untrustedNoTools) {
-      throw new Error("science_collection_isolated_request_required");
+      throw markRefusedBeforeDispatch(new Error("science_collection_isolated_request_required"));
     }
   }
-  const { tools: eagerTools, byName } = req.untrustedNoTools
+  const inventoryLoad = req.untrustedNoTools
     ? { tools: [] as OpenAiToolDef[], byName: new Map<string, ResolvedTool>() }
-    : collection ? await loadMainToolInventory(req.mcpConfigPath, undefined, "read", false, false, req.signal, false, false, collection)
-    : await (async () => {
+    : collection ? loadMainToolInventory(req.mcpConfigPath, undefined, "read", false, false, req.signal, false, false, collection)
+    : (async () => {
         // Tool-surface discovery lives inside this branch so the Main-authored
         // untrusted boundary cannot initialize tool implementations or MCP.
         const { multimodalImageSlotDiagnosis } = await import("../multimodal/slot");
@@ -570,6 +571,13 @@ export async function prepareMainToolLoop(
           catalogMcpOnly ? false : await browserDownloadAvailable(req.approvalChatId ?? req.chatId, req.agentId),
         );
       })();
+  //: the inventory is built before the first request, so a throw from it (mcp_tool_inventory_duplicate_name, a
+  // name collision, a changed collection server) sent nothing: typed "not-dispatched", its message-as-code kept. Untyped,
+  // mcp/client.ts read it as a dispatched turn with no receipt. A Stop keeps its own abort.
+  const { signal: stopSignal } = req;
+  const { tools: eagerTools, byName } = await Promise.resolve(inventoryLoad).catch((error: unknown) => {
+    throw stopSignal?.aborted ? error : preDispatchRefusal(error, "tool_inventory", "tool_inventory_failed");
+  });
   // ★ 로컬 소형 모델(agentlas-local)에는 도구를 그대로 준다. 코드 모드(agentlas_code)와 지연 메뉴
 
   //   agentlas_code 만 5번 부르다 브라우저에 닿지 못하고 사용자에게 되물었다. 같은 모델에 도구를
@@ -2205,16 +2213,18 @@ async function runLocalOpenAiChatInner(
       }
       return body;
     };
+    //: set at the moment turnFetch is handed the request; a throw before it (the delivery snapshot, the history fence) sent nothing.
+    let requestHandedToFetch = false;
     try {
       if (req.signal?.aborted) throw abortReasonError(req);
       deliveryBody = snapshotDeliveryRequest();
       ownerControlDispatched = ownerControlPending !== null;
-      resp = await withCurrentHistoryProvider(()=>turnFetch(chatEndpoint, {
+      resp = await withCurrentHistoryProvider(()=>{ requestHandedToFetch = true; return turnFetch(chatEndpoint, {
         method: "POST",
         headers: { "content-type": "application/json", ...opts.headers },
         signal: req.signal,
           body: deliveryBody,
-      }));
+      }); });
     } catch (err) {
       // The first request of the turn never reached the server (connection refused, no such host): nothing was sent, so this
       // is a typed pre-dispatch refusal, not an unsettled turn. A later request follows dispatched tool work and stays a throw.
@@ -2229,6 +2239,9 @@ async function runLocalOpenAiChatInner(
       // 그렇다고 "사용자가 중지했습니다"로 덮어도 안 된다 — 워치독·시간 초과가
       // 끊은 것까지 사람이 누른 것으로 만든다. 끊은 쪽이 실은 이유를 먼저 읽는다.
       if (req.signal?.aborted) throw abortReasonError(req);
+      // The first request of the turn never left Main (turnFetch was not called): typed "not-dispatched" with the cause's own
+      // code, the owner-facing sentence unchanged. Once the request was handed to the transport, delivery is unknown: plain throw.
+      if (!requestHandedToFetch && turn === 0 && !sawAnyToolCall) throw new PreDispatchRefusalError(refusalCode(err) ?? "endpoint_unreachable", opts.unreachableMessage, err, "local_request");
       throw new Error(opts.unreachableMessage);
     }
     if (!resp.ok) {

@@ -5159,6 +5159,18 @@ export function initStore(options: StoreInitOptions = {}): void {
           ON run_events(kind, ts DESC);
       `);
     }
+    // invocationSupersedingRunId (run-events.ts) asks "which prompt row did this run bind" with run_id + kind =
+    // 'invoke_prompt_bound'. The only run_id index is (run_id, seq), so the kind test ran on every row of the run's ledger:
+    // measured on an 871k-row, 3.3 GB store, 139 ms for the 30 largest chat runs (up to 4 s cold for a
+    // 77k-row run) and the largest CPU line of Main's 30 s profile. Only the bound rows are indexed (~475 of 871k): the
+    // build took 0.6 s and added no size, against 5.4 s and +20 MB for a full (run_id, kind, seq) index, and the query
+    // fell to 0.17 ms. SQLite uses it only for the literal kind below, so keep that literal in the statement.
+    if (["run_id", "kind", "seq"].every((column) => runEventColumns.has(column))) {
+      _db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_run_events_prompt_bound_run
+          ON run_events(run_id, seq) WHERE kind = 'invoke_prompt_bound';
+      `);
+    }
   }
 
   // Codex `exec resume` reports a session-cumulative output counter. Persist

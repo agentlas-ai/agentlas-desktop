@@ -26,6 +26,7 @@ import path from "node:path";
 import { BUILTIN_ONE_AGENT_ID } from "../../shared/builtin-agent-ids";
 import { userDataPath } from "../runtime-paths";
 import { cliUserHome } from "../runtime/product-home-identity";
+import { ORDINARY_MENU, pluginInToolMenu } from "../mcp-tools/domain-tool-menu";
 
 export type CapabilityKind = "skill" | "plugin" | "hook" | "memory" | "connector";
 export type CapabilitySource = "codex" | "claude" | "cursor" | "grok" | "gemini" | "copilot" | "agentlas";
@@ -560,6 +561,11 @@ function copilotItems(roots: CapabilityRoots): Draft[] {
   return out;
 }
 
+function providesSomething(manifest: Record<string, unknown>): boolean {
+  const provides = manifest.provides && typeof manifest.provides === "object" ? manifest.provides as Record<string, unknown> : {};
+  return Boolean(provides.skills) || (Array.isArray(provides.tools) && provides.tools.length > 0);
+}
+
 function agentlasItems(r: CapabilityRoots): Draft[] {
   const out: Draft[] = [];
   const bundled = bundledAgentlasPluginSlugs(r.bundledPluginsDir ?? BUNDLED_PLUGINS_DIR);
@@ -569,7 +575,12 @@ function agentlasItems(r: CapabilityRoots): Draft[] {
     const dir = path.join(plugins, name);
     if (!isDir(dir) || isScratchPath(dir)) continue;
     const manifest = readJson(path.join(dir, "plugin.json")) as Record<string, unknown> | null;
-    if (!manifest || typeof manifest !== "object" || !/^agentlas\.plugin\//.test(str(manifest.schema)) || str(manifest.slug) !== name) continue;
+    if (!manifest || typeof manifest !== "object" || str(manifest.slug) !== name) continue;
+    // The router (plugins/plugin-candidates.ts) offers any installed folder whose manifest names its slug and provides skills or
+    // tools, with or without the `schema` line. The screen listed only the ones carrying it, so a plugin Hope's runs mounted
+    // (p1a-router) was missing from the list. Same rule here: a schema line, when present, must still be an Agentlas one.
+    const manifestSchema = str(manifest.schema);
+    if (manifestSchema ? !/^agentlas\.plugin\//.test(manifestSchema) : !providesSomething(manifest)) continue;
     const surface = (manifest.surface && typeof manifest.surface === "object" ? manifest.surface : {}) as Record<string, unknown>;
     const title = str(surface.displayName) || str(manifest.name) || name;
     // The Korean screen showed the English text although the package carries its own Korean (displayNameKo,
@@ -616,13 +627,22 @@ const publicItem = ({ builtin: _builtin, ...item }: InventoryEntry): CapabilityI
 
 /**
  * The inventory the person sees and switches, with each item's on/off for One. Value-free: no file content.
- * Agentlas built-ins are not part of it (always on, owner 2026-10-12), so lists, counts, search and detail never
- * show them.
+ * Agentlas built-ins are not part of it by default (always on, owner), so counts, search and the lookups
+ * that read it never see them. The Capabilities screen asks for `bundledPlugins` (owner screenshot: the
+ * Plugins list held one stray plugin and the owner concluded that nothing worked): the plugin packages the app ships
+ * are then listed as read-only rows that are on, because they are what Hope's runs actually mount. A plugin a product
+ * domain owns (Science's) stays out: Hope's ordinary conversation does not offer it either (domain-tool-menu.ts).
  */
-export function listCapabilities(roots: CapabilityRoots = defaultCapabilityRoots(), options: { fresh?: boolean } = {}): CapabilityItem[] {
+export function listCapabilities(roots: CapabilityRoots = defaultCapabilityRoots(), options: { fresh?: boolean; bundledPlugins?: boolean } = {}): CapabilityItem[] {
   // Personal runtime items are never used by a product run (capabilityEnabled), so they are not listed or counted
   // either: the screen showed 187 Codex/Claude/Cursor skills, all off, including Agentlas's own CLI copies (owner 2026-10-14).
-  return inventory(roots, options.fresh === true).filter((item) => !item.builtin && !isPersonalSource(item.source)).map(publicItem);
+  const pluginsDir = path.join(roots.agentlasDir, "plugins") + path.sep;
+  const shownBuiltin = (item: InventoryEntry): boolean => options.bundledPlugins === true && item.builtin && item.kind === "plugin" && item.source === "agentlas"
+    && item.path.startsWith(pluginsDir) && pluginInToolMenu(ORDINARY_MENU, path.basename(item.path));
+  return inventory(roots, options.fresh === true)
+    .filter((item) => (!item.builtin || shownBuiltin(item)) && !isPersonalSource(item.source))
+    .map((item) => (item.builtin ? { ...item, limit: "agentlas_managed" as const } : item))
+    .map(publicItem);
 }
 
 /** Refusal for a switch no run can enforce: built-ins (always on, unlisted) and items whose runtime loads them itself. */
@@ -747,7 +767,7 @@ function memoryFolderListing(item: CapabilityItem): string {
 }
 
 export function capabilityDetail(id: string, roots: CapabilityRoots = defaultCapabilityRoots()): CapabilityDetail | null {
-  const item = listCapabilities(roots, { fresh: true }).find((candidate) => candidate.id === id);
+  const item = listCapabilities(roots, { fresh: true, bundledPlugins: true }).find((candidate) => candidate.id === id);
   if (!item) return null;
   const head = { id: item.id, kind: item.kind, source: item.source, name: item.name, path: item.path };
   let raw: Buffer;

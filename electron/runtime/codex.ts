@@ -2870,10 +2870,12 @@ async function runCodexResidentTurn(input: {
           ...commonThreadParams,
           ...(req.model ? { model: req.model } : {}),
         }, { timeoutMs: 120_000, signal: req.signal });
+        //: turn/start has not been sent (turnDispatchAttempted is set below it), so a model-selection refusal here sent
+        // nothing: typed "not-dispatched" like the resume path above, its own code kept.
         const modelAcknowledgement = await acknowledgeCodexThreadModel({
           request: session.conn.request.bind(session.conn), response: started,
           requestedModel: req.model, signal: req.signal,
-        });
+        }).catch((err: unknown) => { throw err instanceof CodexModelSelectionError ? markRefusedBeforeDispatch(err) : err; });
         const id = started.thread.id as string;
         workforceObservation?.acknowledgeThread(started, modelAcknowledgement, policy, cwd, approvalsReviewer);
         session.threadId = id;

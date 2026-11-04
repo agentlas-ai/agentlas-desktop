@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execFile } from "node:child_process";
+import { CREDENTIAL_STORE_NEXT, CREDENTIAL_STORE_UNAVAILABLE, isCredentialStoreFailure } from "./credential-store-failure";
 
 /*
  * Keyed providers through the host: the owner's saved key is read in Main and sent only to that provider's own API host;
@@ -108,15 +109,38 @@ function keyMissing(adapter: KeyedAdapter): Outcome {
   return refused("provider_key_missing", `no key saved as ${adapter.envKey} for ${adapter.label}; read the saved names with vault.keys: if one is this service's key, call vault.use {saved, as: "${adapter.envKey}"} (the owner approves on screen), otherwise vault.use {as: "${adapter.envKey}"} asks the owner for it; hold this step only, continue the rest, and call again once the owner answers`);
 }
 
+/** The credential store could not be read (as opposed to: no key is saved). Carries no key name or value. */
+class CredentialStoreUnreadable extends Error { constructor() { super(CREDENTIAL_STORE_UNAVAILABLE); } }
+
 async function providerKey(adapter: KeyedAdapter): Promise<string | null> {
+  let unreadable = false;
   try {
     const { readEnvVarAliased } = await import("../secrets/env-alias");
     const saved = await readEnvVarAliased(adapter.envKey);
     if (saved) return saved;
-  } catch { /* no vault in this host: fall back to Main's environment */ }
+  } catch (error) {
+    // A store that did not answer is not a store without the key (observed in use: an hour of "key missing" for a saved
+    // key while the Keychain was locked). Only a host with no vault module at all falls through to Main's environment as before.
+    if (isCredentialStoreFailure(error)) unreadable = true;
+  }
   const env = process.env[adapter.envKey];
-  return typeof env === "string" && env.trim() ? env.trim() : null;
+  if (typeof env === "string" && env.trim()) return env.trim();
+  if (unreadable) throw new CredentialStoreUnreadable();
+  return null;
 }
+
+/** The key for an adapter, or the typed answer for why there is none: not saved (vault tools show the way) or the store is not answering. */
+async function keyOrOutcome(adapter: KeyedAdapter): Promise<{ key: string } | { outcome: Outcome }> {
+  try {
+    const key = await providerKey(adapter);
+    return key ? { key } : { outcome: keyMissing(adapter) };
+  } catch (error) {
+    if (error instanceof CredentialStoreUnreadable) return { outcome: credentialStoreUnavailable() };
+    throw error;
+  }
+}
+
+function credentialStoreUnavailable(): Outcome { return refused(CREDENTIAL_STORE_UNAVAILABLE, CREDENTIAL_STORE_NEXT); }
 
 function admit(ctx: KeyedCallContext, routeId: string): { adapter: KeyedAdapter } | Outcome {
   const adapter = KEYED_ADAPTERS[routeId];
@@ -253,8 +277,9 @@ export async function transcribeFile(routeId: string, audioFile: string, ctx: Ke
   const admitted = admit(ctx, routeId);
   if (!("adapter" in admitted)) return { ok: false, outcome: admitted };
   const { adapter } = admitted;
-  const key = await providerKey(adapter);
-  if (!key) return { ok: false, outcome: keyMissing(adapter) };
+  const keyed = await keyOrOutcome(adapter);
+  if (!("key" in keyed)) return { ok: false, outcome: keyed.outcome };
+  const key = keyed.key;
   const bytes = fs.readFileSync(audioFile);
   let res: SendResult | { networkError: string }; let modelId: string;
   if (routeId === "deepgram-audio") {
@@ -304,8 +329,22 @@ export async function transcribeFile(routeId: string, audioFile: string, ctx: Ke
 
 /** The first transcribe route whose key is saved (ElevenLabs first: the YouTube team's voice account), or null. */
 export async function firstTranscribeRoute(): Promise<string | null> {
-  for (const routeId of TRANSCRIBE_ROUTES) if (await providerKey(KEYED_ADAPTERS[routeId]!)) return routeId;
-  return null;
+  const found = await transcribeRouteOrCause();
+  return "routeId" in found ? found.routeId : null;
+}
+
+/**
+ * The route media.listen / speech.transcribe use, or the true reason there is none: the credential store did not answer
+ * (the keys may well be saved), or no transcribe key is saved, in which case the model is shown the vault tools that get one.
+ */
+export async function transcribeRouteOrCause(): Promise<{ routeId: string } | { outcome: Outcome }> {
+  let unreadable = false;
+  for (const routeId of TRANSCRIBE_ROUTES) {
+    try { if (await providerKey(KEYED_ADAPTERS[routeId]!)) return { routeId }; }
+    catch (error) { if (error instanceof CredentialStoreUnreadable) unreadable = true; else throw error; }
+  }
+  if (unreadable) return { outcome: credentialStoreUnavailable() };
+  return { outcome: refused("no_transcribe_route", `no key saved for ElevenLabs, OpenAI or Deepgram; read the saved names with vault.keys: if one is a key of these services, call vault.use {saved, as: "ELEVENLABS_API_KEY"} (the owner approves on screen), otherwise vault.use {as: "ELEVENLABS_API_KEY"} asks the owner for it; hold this step only, continue the rest, and call again once the owner answers`) };
 }
 
 /** Shared answer window for host jobs built on this seam (media.listen). */
@@ -350,8 +389,9 @@ export async function keyedProviderRequest(args: Record<string, unknown>, ctx: K
     outputFile = safeOutputFile(str(args.outputDir), str(args.fileName));
     if (!outputFile) return refused("output_path_invalid", "absolute outputDir and a plain fileName");
   }
-  const key = await providerKey(adapter);
-  if (!key) return keyMissing(adapter);
+  const keyed = await keyOrOutcome(adapter);
+  if (!("key" in keyed)) return keyed.outcome;
+  const key = keyed.key;
   const requestKey = sha(JSON.stringify({ op: "provider.request", routeId, method, apiPath, json: args.json ?? null, outputFile, chatId: ctx.chatId }));
   // Only a POST spends something: it is answered once per request. A GET/DELETE reads a state that moves (a job's status), so a
   // finished read is never replayed to a later identical one — it only joins a read still in flight.
@@ -419,12 +459,21 @@ export async function speechSynthesize(args: Record<string, unknown>, ctx: Keyed
   if (!text) return refused("text_required", "text or an absolute textPath");
   const limit = routeId === "openai-audio" ? 4_096 : 10_000;
   if (text.length > limit) return refused("text_too_long", `at most ${limit} characters per call; split by scene and call once per part`);
-  const outputDir = str(args.outputDir);
+  // No outputDir (observed in use: a first call with no arguments was refused arguments_missing): the narration goes to the app's own
+  // media folder, like a generated image, and is handed to the run as its output; a given outputDir wins.
+  let outputDir = str(args.outputDir);
+  if (!outputDir) {
+    try {
+      const { userDataPath } = await import("../runtime-paths");
+      outputDir = userDataPath("multimodal-audio", (ctx.chatId || "chat").replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 80));
+    } catch { /* no data folder in this host: refused below with the path rule */ }
+  }
   const modelId = str(args.modelId) || (routeId === "openai-audio" ? "gpt-4o-mini-tts" : "eleven_multilingual_v2");
   let voiceId = str(args.voiceId);
   const voiceName = str(args.voiceName);
-  const key = await providerKey(adapter);
-  if (!key) return keyMissing(adapter);
+  const keyed = await keyOrOutcome(adapter);
+  if (!("key" in keyed)) return keyed.outcome;
+  const key = keyed.key;
   if (routeId === "elevenlabs-audio" && !voiceId && voiceName) {
     const listed = await send(adapter, key, { method: "GET", pathAndQuery: "/v1/voices", timeoutMs: 30_000 });
     if ("networkError" in listed) return refused("provider_unreachable", listed.networkError);

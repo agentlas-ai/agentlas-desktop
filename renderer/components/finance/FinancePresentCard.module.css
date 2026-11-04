@@ -1,0 +1,6 @@
+/* finance.present: the card's own styles live with its HTML (shared/finance-canvas.ts FINANCE_CANVAS_CSS); this file only places the lead. */
+.lead{margin:2px 0 10px}
+/* The answer's own text right after the lead reads as the headline of the result. */
+.lead + *{font-size:21px!important;line-height:31px!important;font-weight:600;letter-spacing:-.2px;color:#14232b}
+.lead + * strong,.lead + * b{font-weight:750}
+.lead + * p,.lead + * li{margin:0 0 8px;font-size:21px;line-height:31px}

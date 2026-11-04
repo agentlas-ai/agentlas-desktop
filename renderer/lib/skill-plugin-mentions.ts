@@ -18,3 +18,16 @@ export async function loadSkillPluginMentions(reader:Reader):Promise<SkillPlugin
 }
 export function matchingSkillPluginMentions(rows:readonly SkillPluginMention[],query:string):SkillPluginMention[]{const q=query.toLowerCase();return rows.filter(row=>!q||[row.slug,row.mention,row.name].some(value=>value.toLowerCase().includes(q))).slice(0,8);}
 export function appendSkillPluginMention(text:string,mention:string):string{return `${text}${text&&!/\s$/.test(text)?' ':''}${mention} `;}
+
+declare global { interface Window { agentlasComposerMentions?: { plugins: (chatId: string | null) => Promise<SkillPluginMention[]> } } }
+/**
+ * The "@" menu's plugins for one conversation. Main answers by the conversation's own domain tool menu (the one the model's lookups follow):
+ * Finance lists Finance's plugins, Science lists Science's, an ordinary One/Work chat hides what a domain owns. Without that bridge
+ * (an old Main) the renderer-side discovery below is the fallback.
+ */
+export async function loadChatSkillPluginMentions(chatId: string | null | undefined, fallback: Reader): Promise<SkillPluginMention[]> {
+ const bridge = typeof window === 'undefined' ? undefined : window.agentlasComposerMentions;
+ if (!bridge) return loadSkillPluginMentions(fallback);
+ const rows = await bridge.plugins(chatId ?? null);
+ return Array.isArray(rows) ? rows.filter(row => !!row && typeof row.id === 'string' && typeof row.mention === 'string' && typeof row.name === 'string').slice(0, 100) : [];
+}

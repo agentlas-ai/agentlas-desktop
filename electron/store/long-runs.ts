@@ -2927,7 +2927,11 @@ function pauseDesktopRuns(reason: "app-quit" | "startup-recovery", appInstanceId
       // behind, and a quit or update right after it turned the owner's Goal into `cancelled`
       // (2026-09-28 "업데이트하면 골이 사라짐"): quit, update and pause-then-quit end paused.
       const userDelete = row.status === "cancelling" && action === "delete";
-      const userPause = (row.status === "pausing" && action === "pause") || (row.status === "cancelling" && !userDelete);
+      // The owner's pause counts only while it is still held (longRunOwnerHold reads the ledger: a later owner resume or a
+      // user transition back to queued/running lifts it). Reading only the latest pause event stamped a pause the owner had
+      // lifted days before as "user" at quit, and the room stayed stopped until a manual Resume (Z, Thread
+      // Marketing room: pause on 10-26, released, then frozen paused/user by an app quit).
+      const userPause = (row.status === "pausing" && action === "pause" && longRunOwnerHold(row.id)) || (row.status === "cancelling" && !userDelete);
       db.prepare(
         `UPDATE long_run_worker_attempts
          SET state = 'interrupted',

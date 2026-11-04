@@ -3,9 +3,25 @@
 .selector{flex:1;min-width:0;max-width:400px}.selector select{display:block;width:100%;min-width:0;min-height:40px;padding:8px 30px 8px 12px;border:1px solid var(--paper-edge);border-radius:8px;color:var(--ink);background:var(--paper);font:inherit;font-size:13px;text-overflow:ellipsis}
 .icon,.newChat{display:inline-flex;align-items:center;justify-content:center;gap:6px;min-height:40px;flex-shrink:0;border:1px solid var(--paper-edge);border-radius:8px;background:var(--paper);color:var(--ink);cursor:pointer;font:inherit;font-size:12px}.icon{width:40px;padding:8px}.newChat{padding:8px 12px;white-space:nowrap}
 .root button:disabled,.selector select:disabled{opacity:.5;cursor:default}.root :focus-visible{outline:2px solid var(--attention,var(--accent));outline-offset:2px}
-.surface{display:flex;min-width:0;min-height:460px;height:min(900px,calc(100dvh - 220px));overflow:hidden;border:1px solid var(--paper-edge);border-radius:12px;background:var(--paper)}
+.surface{display:flex;min-width:0;min-height:460px;height:min(900px,calc(100dvh - 220px));overflow:hidden;border:0;border-radius:0;background:transparent}
 .surface :global(.task-cockpit-header-danger){display:none}.surface :global(.task-cockpit-project-eyebrow){display:none}.surface :global(.task-cockpit-header [data-work-dashboard-return]){display:none}
 .status{padding:32px 16px;margin:0;font-size:13px;color:var(--ink-soft)}.error{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin:0 0 12px;padding:12px;border:1px solid var(--paper-edge);border-radius:8px;color:var(--ink-soft);font-size:12px;line-height:1.6}.error button{padding:5px 9px;border:1px solid var(--paper-edge);border-radius:6px;background:var(--paper);color:var(--ink);font:inherit;cursor:pointer}
 .srOnly{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
 @media(max-width:480px){.toolbar{gap:6px}.newChat{padding:8px}.surface{min-height:500px;height:calc(100dvh - 215px);border-radius:8px}.selector{max-width:none}}
 @media(pointer:coarse){.icon,.newChat,.selector select{min-height:44px}.icon{width:44px}}
+/* Finance answers carry wide result cards (finance.present): the reading column is 1280px and the composer 1000px, as in the Finance demo. */
+.surface :global(.agentlas-chat-message-anchor){width:min(1280px,100%)}
+.surface :global(.chat-input-shell){max-width:min(1000px,calc(100vw - 32px))}
+.surface :global(.chat-composer-progress),.surface :global(.chat-composer-goal-stack),.surface :global(.chat-steering-draft),.surface :global(.composer-decision-stack){width:min(100%,1000px)}
+/* A turn that ends in its own result card (finance.present): the card's lead line takes the place of the activity header,
+   and the lookups' cards of that turn stay out of the answer (their data is in the card). */
+.surface :global(.agentlas-chat-message-anchor):has([data-finance-lead]) :global([data-one-turn-work]),
+.surface :global(.agentlas-chat-message-anchor):has([data-finance-lead]) :global(section[data-ui-instance]),
+.surface :global(.agentlas-chat-message-anchor):has([data-finance-lead]) :global(details[data-ui-sources]){display:none}
+.surface :global(.agentlas-chat-turn){max-width:1280px!important}
+/* The Finance conversation reads as the page itself (the selector above names it): no frame, no second title, the question as a compact bubble on the right. */
+.surface :global(.task-cockpit-header){border-bottom:0!important;background:transparent!important}
+.surface :global(.task-cockpit-title){visibility:hidden}
+.surface :global(.chat-input-shell){width:min(100%,1000px)!important}
+.surface :global([data-chat-user-message]){margin-left:auto;width:fit-content}
+.surface :global([data-chat-user-message]) > div:last-child{background:#e5e6e1!important;border-radius:18px 18px 6px 18px!important;padding:12px 18px!important;font-size:17px!important}

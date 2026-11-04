@@ -4,6 +4,8 @@ import type { ScienceDaemonClient } from "../science-host/daemon-client";
 import type { DaemonScienceCommand } from "../daemon/science-service";
 import type { SupervisorControlInput, SupervisorTask } from "../../shared/one-supervisor";
 import { supervisorHash } from "./supervisor-store";
+import { stableScienceRuntimeChatId } from "../runtime/science-transport-identity";
+import { scienceTurnRunsForChat } from "../store/science-turn-ledger";
 
 type Row=Record<string,unknown>;
 const row=(value:unknown):Row=>value && typeof value === "object" && !Array.isArray(value) ? value as Row : {};
@@ -13,16 +15,74 @@ const id=(value:unknown):string=>typeof value === "string" ? value : "";
 /** Observed native service only: discovery never boots Science or duplicates its executor. */
 const SCIENCE_OBSERVATION_IN_FLIGHT=4;
 
+type Target={projectId:string;conversationId?:string;turnId?:string;loop?:Row};
+
+/**
+ * PLAN S9 B1b. The newest stamped Science turn run of one conversation in the common ledger: its run id, null when the
+ * ledger has no stamped run for it (only runs from before the stamp existed), or "unknown" when the ledger cannot be read.
+ * The ledger is only a change signal ("did a new turn start?"); the Science service stays the authority for what a turn
+ * is and how it ended, so a turn is never reported from the ledger alone.
+ */
+export type ScienceTurnLedgerReader=(conversationId:string)=>string|null|"unknown";
+
+/** Production default: reads the real store lazily, and anything unreadable is "unknown" (never a reason to serve the cache). */
+export const readScienceNewestTurnRun:ScienceTurnLedgerReader=conversationId=>{
+  try {
+    const db=(require("../store/db") as typeof import("../store/db")).getDb(); // eslint-disable-line @typescript-eslint/no-require-imports
+    const newest=scienceTurnRunsForChat(db,stableScienceRuntimeChatId(conversationId),1)[0];
+    if (!newest) return null;
+    // A stamp that names another conversation is not this conversation's signal.
+    return newest.conversationId===conversationId && newest.invocationRunId ? newest.invocationRunId : "unknown";
+  } catch { return "unknown"; }
+};
+
+/** The SDK's own end states of a turn. "interrupted" can resume and is not among them. */
+const FINAL_TURN_STATES=["completed","failed","cancelled"];
+
+/** What one observed conversation keeps between snapshots. Only a final entry is ever served. */
+interface CachedTurn {
+  projectId:string;conversationId:string;turnId:string;runId:string;
+  /** The turn's invocationRunId exactly as the service sent it: the loop binding compares it with the loop's activeRunId. */
+  rawRunId:unknown;
+  task:SupervisorTask;
+  final:boolean;
+}
+
+/** One conversation of a project as this snapshot saw it: reused from the cache, or freshly read from the service. */
+type ObservedConversation={conversation:Row;conversationId:string}&({cached:CachedTurn}|{cached?:undefined;turn:Row;messages:Row[]});
+interface ProjectObservation {tasks:SupervisorTask[];targets:Array<[string,Target]>;turns:CachedTurn[]}
+
 export class SupervisorScienceAdapter {
-  private targets=new Map<string,{projectId:string;conversationId?:string;turnId?:string;loop?:Row}>();
+  private targets=new Map<string,Target>();
   private observedProjects:Array<{projectId:string;title:string}>=[];
   projects():Array<{projectId:string;title:string}> {return this.observedProjects.map(project=>({...project}));}
-  constructor(private readonly client:Pick<ScienceDaemonClient,"commandObserved">) {}
+  constructor(private readonly client:Pick<ScienceDaemonClient,"commandObserved">,private readonly ledger:ScienceTurnLedgerReader=readScienceNewestTurnRun) {}
+  private static cacheKey(projectId:string,conversationId:string):string {return `${projectId}\u0000${conversationId}`;}
+  /**
+   * The cached turn of a conversation when the service need not be asked again: the entry is final (completed, failed or
+   * cancelled by the SDK's own word) and the ledger shows no newer stamped run (its newest run is the entry's own run, or it has
+   * none at all). A newer run, an unreadable ledger or a ledger that throws all send the conversation back to the service.
+   * The cache is the `turns` of each project's last answered observation, so it holds only the conversations still listed
+   * (at most 4 per project, 20 projects) and a project the service stops listing takes its entries with it.
+   */
+  private reusable(projectId:string,conversationId:string):CachedTurn|undefined {
+    const entry=this.lastProjectObservation.get(projectId)?.turns.find(turn=>turn.conversationId===conversationId);
+    if (!entry || !entry.final || entry.projectId!==projectId) return undefined;
+    let newest:string|null;
+    try { newest=this.ledger(conversationId); } catch { return undefined; }
+    if (newest==="unknown") return undefined;
+    return newest===null || newest===entry.runId ? entry : undefined;
+  }
+  /** A turn this adapter just started is queued before its run is stamped in the ledger: the next snapshot asks the service. */
+  private forget(projectId:string,conversationId:string):void {
+    const observation=this.lastProjectObservation.get(projectId);
+    if (observation) observation.turns=observation.turns.filter(turn=>turn.conversationId!==conversationId);
+  }
   private command(command:DaemonScienceCommand):Promise<unknown> {
     return this.client.commandObserved(command,{timeoutMs:3_000});
   }
   /** The last observation that answered, per project: a project whose service call misses its slot keeps its rows. */
-  private lastProjectObservation=new Map<string,{tasks:SupervisorTask[];targets:Array<[string,{projectId:string;conversationId?:string;turnId?:string;loop?:Row}]>}>();
+  private lastProjectObservation=new Map<string,ProjectObservation>();
   /*
    * One observation of every project, inside one deadline. Each project's chain (loop, conversations, the open turn
    * and its messages) runs side by side with the others; before, up to 20 projects x (inspect + list + 4 x (attach +
@@ -56,7 +116,7 @@ export class SupervisorScienceAdapter {
     const observeProject=async(project:Row)=>{
       const projectId=id(project.id);
       const tasks:SupervisorTask[]=[];
-      const targets:Array<[string,{projectId:string;conversationId?:string;turnId?:string;loop?:Row}]>=[];
+      const targets:Array<[string,Target]>=[];
       const [inspection,conversations]=await Promise.all([
         observe({op:"loops.inspect",input:{projectId}}).then(row),
         observe({op:"conversations.list",input:{projectId}}).then(rows),
@@ -69,32 +129,47 @@ export class SupervisorScienceAdapter {
           runId:id(loop.activeRunId)||null,state:id(loop.status),controlVersion:supervisorHash([loop.id,loop.version,loop.stateSha256]),
           observedAt:id(loop.updatedAt)||new Date().toISOString(),owner:"science-daemon",controls:["queued","running","pausing","paused"].includes(id(loop.status)) ? ["cancel"] : [],result:null,resultVerified:false});
       }
-      const turns=await Promise.all(conversations.slice(0,4).filter(conversation=>id(conversation.id)).map(async conversation=>{
+      // A final turn the ledger shows no newer run for is not asked about again (zero service calls for that conversation);
+      // every other conversation goes through the service exactly as before (composer.attach, then messages.list).
+      const turns=await Promise.all(conversations.slice(0,4).filter(conversation=>id(conversation.id)).map(async (conversation):Promise<ObservedConversation|null>=>{
         const conversationId=id(conversation.id);
+        const cached=this.reusable(projectId,conversationId);
+        if (cached) return {conversation,conversationId,cached};
         const attached=row(await observe({op:"composer.attach",input:{projectId,conversationId}}));
         const turn=row(attached.turn); if (!id(turn.id)) return null;
         const messages=rows(await observe({op:"messages.list",input:{projectId,conversationId}}));
         return {conversation,conversationId,turn,messages};
       }));
+      const entries:CachedTurn[]=[];
       for (const observed of turns) {
         if (!observed) continue;
-        const {conversation,conversationId,turn,messages}=observed;
-        const taskId=`science-turn:${id(turn.id)}`;
-        const active=["queued","running","cancelling"].includes(id(turn.status));
-        const result=messages.find(message=>message.role==="assistant" && message.visibility==="visible" && message.id===turn.assistantMessageId);
-        targets.push([taskId,{projectId,conversationId,turnId:id(turn.id),...(loop.activeRunId===turn.invocationRunId ? {loop} : {})}]);
-        tasks.push({taskId,surface:"science",title:id(conversation.title)||id(project.title)||id(project.name)||"Science",
-          chatId:null,projectId,runId:id(turn.invocationRunId)||null,state:id(turn.status),controlVersion:supervisorHash([turn.id,turn.status,turn.updatedAt]),
-          observedAt:id(turn.updatedAt)||new Date().toISOString(),owner:"science-daemon",controls:active ? (turn.status==="cancelling" ? [] : ["steer","cancel"]) : [],
-          result:id(result?.content)||null,resultVerified:false,sourceCommandId:id(turn.requestId)||null});
+        const {conversation,conversationId}=observed;
+        // The title is the conversation list's, read this snapshot: a rename of a settled turn's conversation still shows.
+        const title=id(conversation.title)||id(project.title)||id(project.name)||"Science";
+        let entry:CachedTurn;
+        if (observed.cached) entry=observed.cached;
+        else {
+          const {turn,messages}=observed;
+          const active=["queued","running","cancelling"].includes(id(turn.status));
+          const result=messages.find(message=>message.role==="assistant" && message.visibility==="visible" && message.id===turn.assistantMessageId);
+          entry={projectId,conversationId,turnId:id(turn.id),runId:id(turn.invocationRunId),rawRunId:turn.invocationRunId,final:FINAL_TURN_STATES.includes(id(turn.status)),
+            task:{taskId:`science-turn:${id(turn.id)}`,surface:"science",title,
+              chatId:null,projectId,runId:id(turn.invocationRunId)||null,state:id(turn.status),controlVersion:supervisorHash([turn.id,turn.status,turn.updatedAt]),
+              observedAt:id(turn.updatedAt)||new Date().toISOString(),owner:"science-daemon",controls:active ? (turn.status==="cancelling" ? [] : ["steer","cancel"]) : [],
+              result:id(result?.content)||null,resultVerified:false,sourceCommandId:id(turn.requestId)||null}};
+        }
+        entries.push(entry);
+        // A cached turn still registers its control target, bound to the loop of this snapshot exactly as a fresh one is.
+        targets.push([entry.task.taskId,{projectId,conversationId,turnId:entry.turnId,...(loop.activeRunId===entry.rawRunId ? {loop} : {})}]);
+        tasks.push({...entry.task,title,controls:[...entry.task.controls]});
       }
-      return {tasks,targets};
+      return {tasks,targets,turns:entries};
     };
     const listed=projects.filter(project=>id(project.id));
     const settled=await Promise.allSettled(listed.map(observeProject));
     const tasks:SupervisorTask[]=[];
-    const targets=new Map<string,{projectId:string;conversationId?:string;turnId?:string;loop?:Row}>();
-    const kept=new Map<string,{tasks:SupervisorTask[];targets:Array<[string,{projectId:string;conversationId?:string;turnId?:string;loop?:Row}]>}>();
+    const targets=new Map<string,Target>();
+    const kept=new Map<string,ProjectObservation>();
     settled.forEach((outcome,index)=>{
       const projectId=id(listed[index].id);
       const observation=outcome.status==="fulfilled" ? outcome.value : this.lastProjectObservation.get(projectId);
@@ -118,7 +193,13 @@ export class SupervisorScienceAdapter {
       : conversations.find(item=>!item.archivedAt);
     if (input.conversationId && !conversation) throw supervisorError('supervisor_science_conversation_missing');
     if (!id(conversation?.id)) throw supervisorError('supervisor_open_science_conversation_first');
-    const result=row(await this.command({op:"composer.start",input:{requestId:input.commandId,projectId:input.projectId,conversationId:id(conversation!.id),mode:"append-user-message",content:input.text}}));
+    let result:Row;
+    try {
+      result=row(await this.command({op:"composer.start",input:{requestId:input.commandId,projectId:input.projectId,conversationId:id(conversation!.id),mode:"append-user-message",content:input.text}}));
+    } finally {
+      // Settled or not (a timed-out start may still have queued a turn): the conversation's cached turn is no longer the newest.
+      this.forget(input.projectId,id(conversation!.id));
+    }
     const turn=row(result.turn);
     if (!id(turn.id) || !id(turn.invocationRunId)) throw supervisorError('supervisor_science_start_unconfirmed');
     return {taskId:`science-turn:${id(turn.id)}`,runId:id(turn.invocationRunId)};

@@ -123,6 +123,7 @@ import {
 // 코드가 읽는 값의 판별은 이 정본 하나뿐이다(`vars.get("x")` 눈먼 지점의 수리).
 import { codeReferencedVars as codeReferencedVarsSync } from "../../shared/graph-code-vars";
 import { currentUiLocale } from "../ui-locale";
+import { plainNodeFailureReason } from "../../shared/owner-visible-activity-text";
 
 const L = (ko: string, en: string): string => (currentUiLocale() === "ko" ? ko : en);
 
@@ -899,6 +900,8 @@ export async function rewriteFailedCodeStep(input: {
 function codeFailureHeadline(raw: string | null | undefined): string {
   const text = String(raw ?? "").trim();
   if (!text) return L("코드 단계가 실패했습니다.", "The code step failed.");
+  // A host recovery refusal (work_recovery_*) is a bare code, not the script's output: it is said as a sentence.
+  if (/^[a-z][a-z0-9]*(?:_[a-z0-9]+)+$/.test(text)) return plainNodeFailureReason(text, currentUiLocale() === "ko" ? "ko" : "en");
   const lines = text.split("\n").map((line) => line.trim()).filter(Boolean);
   const last = lines[lines.length - 1] ?? text;
   if (lines.length <= 3 || !/^traceback/i.test(lines[0])) return text;
@@ -4653,6 +4656,8 @@ export async function runGraph(
           catch (error) {
             if (!codeDispatchFailed && !(error instanceof Error && error.message.startsWith("work_recovery_"))) throw error;
             codeDispatchFailed = true;
+            tryRecordRunEvent({ runId, kind: "workflow_node_raw_failure", automationId: automation.id, nodeId: node.id,
+              payload: { message: (error instanceof Error ? error.message : String(error)).slice(0, 600) } });
             return { ok: false, isolation: previousCodeRun?.isolation ?? "process-isolated",
               reason: error instanceof Error ? error.message : String(error) } as Awaited<ReturnType<typeof runCodeStep>>;
           }
@@ -6196,8 +6201,8 @@ export async function runGraph(
             ? {
                 code: "MUTATION_UNVERIFIED",
                 reason: L(
-                  `노드 "${node.label || node.id}"이 외부에 무언가를 반영했는지 확인되지 않은 채로 멈췄습니다. 원문: ${rawMessage}`,
-                  `Node "${node.label || node.id}" stopped without confirming whether it applied anything externally. Original: ${rawMessage}`,
+                  `노드 "${node.label || node.id}"이 외부에 무언가를 반영했는지 확인되지 않은 채로 멈췄습니다. 원인: ${plainNodeFailureReason(rawMessage, "ko")}`,
+                  `Node "${node.label || node.id}" stopped without confirming whether it applied anything externally. Cause: ${plainNodeFailureReason(rawMessage, "en")}`,
                 ),
                 // Not a stop-and-ask: the next run resumes this step, and an AI step first checks
                 // whether the last attempt took effect. [Rerun from this node] and [Skip] stay available but are not required.
@@ -6208,7 +6213,8 @@ export async function runGraph(
               }
             : {
                 code: "NODE_FAILED",
-                reason: rawMessage,
+                // The stored reason is read by Hope, the phone and the run history: no internal code, a tool's own answer kept (the raw message stays in the failure event below).
+                reason: plainNodeFailureReason(rawMessage, currentUiLocale() === "ko" ? "ko" : "en"),
                 nextAction: L(
                   "사유를 확인하고 [이 노드부터 재실행]하거나, 노드 설정을 고친 뒤 다시 실행하세요.",
                   "Check the reason and [Rerun from this node], or fix the node's settings and run again.",
@@ -6297,8 +6303,10 @@ export async function runGraph(
           status.set(node.id, "done");
         } catch (error) {
           if (scopedSignal.aborted) throw error;
+          tryRecordRunEvent({ runId, kind: "workflow_node_raw_failure", automationId: automation.id, nodeId: node.id,
+            payload: { message: (error instanceof Error ? error.message : String(error)).slice(0, 600) } });
           failGraphNode(node, { code: "TOOLCHAIN_CALL_FAILED",
-            reason: error instanceof Error ? error.message : String(error),
+            reason: plainNodeFailureReason(error instanceof Error ? error.message : String(error), currentUiLocale() === "ko" ? "ko" : "en"),
             nextAction: L("이 단계의 도구 묶음 설정을 확인한 뒤 [이 노드부터 재실행]을 눌러 주세요.", "Check this step's toolchain settings, then choose [Rerun from this node].") });
         }
         return;
@@ -6671,8 +6679,11 @@ export async function runGraph(
         .catch((unexpected: unknown) => {
           const uncertain = timedOut && nodeEffect(node) === "mutation";
           if (uncertain && !checkpoint!.ambiguousNodeIds.includes(node.id)) checkpoint!.ambiguousNodeIds.push(node.id);
+          // The stored reason is plain; the thrown message stays in the run's events for diagnosis.
+          if (!graphFailureOf(unexpected)) tryRecordRunEvent({ runId, kind: "workflow_node_raw_failure", automationId: automation.id, nodeId: node.id,
+            payload: { message: (unexpected instanceof Error ? unexpected.message : String(unexpected)).slice(0, 600) } });
           failGraphNode(node, graphFailureOf(unexpected) ?? { code: uncertain ? "MUTATION_UNVERIFIED" : timedOut ? "NODE_TIMEOUT" : "NODE_FAILED",
-            reason: unexpected instanceof Error ? unexpected.message : String(unexpected),
+            reason: plainNodeFailureReason(unexpected instanceof Error ? unexpected.message : String(unexpected), currentUiLocale() === "ko" ? "ko" : "en"),
             nextAction: L("다른 단계는 계속 진행돼요. [이 노드부터 재실행]을 눌러 다시 시도해 보세요.", "Other branches continue. Try [Rerun from this node] again.") });
           if (timedOut) backgroundCheckNodes.add(node.id);
         }).finally(() => {

@@ -2,6 +2,7 @@ import type { InvocationRunReceipt } from "../../shared/types";
 import { undispatchedInternalFailure } from "../../shared/run-failure-cause";
 import { isNonFailureInvocationStop } from "../../shared/invocation-host-stop";
 import { UNDISPATCHED_START_MAX_ATTEMPTS, isHostNotReadyRunFailureCode, isOwnerFixableRunFailureCode, isTransientRunFailureCode } from "../../shared/transient-send-refusal";
+import { hostRecoveryRequested } from "./host-recovery";
 import { readRunTurnPlacement, type RunTurnPlacement } from "./turn-placement";
 
 /** pending-chat-sends.ts MAX_NOT_DISPATCHED_RETRIES: the one start-again the queue gives any run that provably sent nothing. A gate drives the real queue against this. */
@@ -41,6 +42,8 @@ export function queueWillStartRunAgain(
 ): boolean {
   try {
     if (receipt.status !== "failed" || isNonFailureInvocationStop(receipt)) return false;
+    // The host recovers this run itself (host-recovery.ts): not the end of the message, and not the queue's to start again.
+    if (hostRecoveryRequested(db as never, receipt.runId)) return true;
     const row = db.prepare("SELECT id, attempts, dispatch_retries, request_json FROM pending_chat_sends WHERE run_id = ? AND state = 'starting'")
       .get(receipt.runId) as { id: string; attempts: number; dispatch_retries: number | null; request_json: string } | undefined;
     if (!row) return false;

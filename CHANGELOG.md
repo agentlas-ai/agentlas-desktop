@@ -1,5 +1,29 @@
 # Changelog
 
+## 1.3.125 — 2026-11-04
+
+Versions 1.3.123 and 1.3.124 were not published as releases; this release carries their changes together with the ones below.
+
+- A quit no longer revives an owner pause that was already lifted. Before, a Goal the owner had never stopped could come back as paused by the owner after the app was closed and opened again. A Goal the owner stopped stays stopped after a quit.
+- A refusal at the runner boundary is typed as "not dispatched", and an ordinary turn in a room whose Goal is stopped passes that boundary instead of ending with "Desktop could not complete this run".
+- Main's lookup of the prompt bound to a run reads an index instead of scanning the run events, which was the largest CPU line of Main's profile. The index is created the first time the app starts on this version and needs no schema upgrade. On a very large store (about 3 GB) that first start takes longer than usual, about 17 seconds in a measurement; later starts are not affected.
+
+- The "@" menu opens above the composer at the caret, hides what a domain owns from the general One and Work menus (the agents' own lookups are unchanged), and a Finance chat offers its Analysts instead of Science plugins.
+- The local embedding slices pieces by offset and the usage scan cuts lines as bytes, which lowers memory use and CPU on large stores.
+
+- The local embedding now segments text the way the model's own tokenizer file does (ASCII punctuation is spaced out and a character no piece covers no longer empties the whole text, which had left about 3% of real memory chunks without a semantic vector). Vectors stored earlier are recomputed once the first time they are read, and semantic scores shift slightly because the earlier vectors were approximate.
+
+- No internal code reaches the owner from the runner boundary, team synthesis, provider outages or the in-app browser. An internal failure of the owner's turn is recovered once with the same request instead of being shown; when nothing ran and there is no evidence, one plain sentence appears without a code. Raw exception text no longer leaves Main, on the desktop or the phone.
+- A provider outage continues once in the same session, and a slow browser grant lets the run continue without the browser. Team members start when only some of their tools attach, a short reset of the in-app browser no longer gives up the grant, a Keychain that does not answer is reported as that, the bare codes of `app.call` and the failure reasons of graph nodes are plain sentences, failure card headers are sentences, and Hope's message bubbles no longer overlap.
+- Reach and computer use open an app that is closed or has no window, wait up to three times when the screen is busy, find a stale element again, turn an OS refusal into plain words, and answer a revoked capability with a code instead of a server error. Asking for the tabs of a task continues that task's chat.
+
+- Finance results are drawn on a general block canvas: `finance.present` now builds blocks that the desktop and the phone draw from the same HTML. The Finance skill and the method guides were revised for it.
+
+- Reach: the exploration round and the daily revisit no longer mark a port the agent learned from its own screen work as degraded, so a port that has just been promoted can run. A menu-bar item is no longer chosen as the outcome check of a learned port, which had made a replay of all five steps end as "outcome not satisfied".
+- Finance: each method guide's result card is one fixed composition, so the same kind of question gets the same kind of card, and every source uses the same icon instead of one chosen from words in its title.
+
+This release binds Agentlas OS v1.2.78 at e13ae0df5ca866888bfff69ae7b69cfdb330e267; public runtime asset `agentlas-os-runtime-v1.2.78.tar.gz` is pinned at SHA-256 `8f7bf3cc0f5c686887e5b207d5f191645aab0eddd992ff1d2783611a9f79fbb1`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.124 — 2026-11-04
 
 - A Goal that is waiting for the owner's answer now reopens when the owner answers from the phone, exactly like an answer typed in the desktop composer. Before, every phone answer showed "Desktop could not complete this run" and the Goal continued only after about 40 seconds. A read-only turn is no longer refused by that wait, and a turn that may act is still refused. The same boundary serves every runtime, so this is not specific to one.

@@ -26,6 +26,7 @@ import { isOneQuietReply } from "../../shared/one-supervisor";
 import { decideOneExecutionLane, ONE_LANE_REFUSAL_MESSAGE } from "./one-execution-lane";
 import { bindWorkAttachmentRun, goalSourceAttachmentGroupIds, workAttachmentGroupIds, releaseWorkAttachmentRun, redactWorkAttachmentEvent, redactWorkAttachmentText } from "./work-attachments";
 import { stoppedGoalMessageReopens } from "../../shared/goal-display-state";
+import { markOrdinaryGoalTurn } from "../runtime/goal-ordinary-turns";
 import { pendingSendRetriesAfterInternalFailure } from "./pending-chat-sends";
 import { TRANSIENT_SEND_DEADLINE_MS, UNDISPATCHED_START_MAX_ATTEMPTS, isHostNotReadyRunFailureCode, isStoreBusyError, isTransientSendRefusalCode, transientSendBackoffMs } from "../../shared/transient-send-refusal";
 import { withBrowserDownloadProofContext } from "../long-run/download-proof";
@@ -84,6 +85,12 @@ import { invocationHostStopCause, invocationHostStopCopy, isOwnerGoalStopCause, 
 import { isAppSideRunFailureCode, undispatchedInternalFailure } from "../../shared/run-failure-cause";
 import { readRunTurnPlacement } from "./turn-placement";
 import { runFailureNoticeText } from "../../shared/run-failure-notice";
+import { internalFailureOwnerLine, type InternalFailurePlan } from "../../shared/owner-failure-class";
+import {
+  HOST_RECOVERY_LINK, decideOwnerFailure, hostRecoveryOf, hostRecoveryOriginalOf, isOwnerTurnRequest, claimHostRecovery,
+  recordHarnessDefect, recordHostRecoveryOutcome, requestIsReplayable, scheduleHostRecovery, sweepOrphanedHostRecoveries,
+  type OwnerFailureDecision,
+} from "./host-recovery";
 import { hostInternalFailureMessage, isHostInternalException, isMissingWorkingFolderError, workingFolderMissingMessage } from "./host-internal-failure";
 import { forecastAppResend } from "./resend-forecast";
 import { queueWillStartRunAgain } from "./queue-retry-fact";
@@ -164,6 +171,7 @@ import { validatedRunnerNativeControlState, markRefusedBeforeDispatch, outwardFa
 import { innermostTypedCode, STORE_BUSY_CODE } from "../../shared/turn-settlement";
 import { canonicalFinalBody, confirmDurableAssistantResult } from "./durable-result";
 import { runWithStoreBusyRetry } from "../store/store-busy-retry";
+import { scienceTurnPayload } from "../store/science-turn-ledger";
 import {
   getInvocationRunReceipt,
   getLatestInvocationRunReceipt,
@@ -3135,6 +3143,7 @@ export class InvocationService {
       if(!queuedTeamReportCurrent(oneTeamReportCustody,req))throw new Error("one_team_report_owner_unbound");
     }
     const startBoundary: StartBoundary = { crossed: false };
+    this.sweepHostRecoveriesOnce();
     try {
       const started = this.startPrepared(req, workspaceBinding, executionContext, questionContinuation,
         hostNoticePurpose, mainAdmission, durableAdmission, startBoundary, queuedRoomInheritance, oneTeamReportCustody);
@@ -3843,7 +3852,7 @@ export class InvocationService {
     const phoneOwnerAnswer = reopen.ownerAnswer && req.promptOrigin !== "system" && req.agentAppMode !== true
       && (ownerSurface === "mobile" || ownerSurface === "mobile-one");
     if (boundGoal && (boundGoal.status === "blocked" || boundGoal.status === "paused" || boundGoal.status === "waiting_tool"
-      || boundGoal.status === "queued") && (localUserTurn || phoneOwnerAnswer) && (reopen.reopens || queuedGoalTakeover)) {
+      || boundGoal.status === "queued") && (localUserTurn || phoneOwnerAnswer) && (reopen.reopens || queuedGoalTakeover) && hostRecoveryOf(req) === null) {
       // A new task message must not silently reactivate a claimed wait whose
       // successor may already have reached an external runtime before crash.
       if (boundGoal.surface === "science" || boundGoal.rootChatId !== chat.id) {
@@ -3851,6 +3860,8 @@ export class InvocationService {
         // not reactivate it from here. It was refused for that (goal_control_scope_mismatch, shown as "the goal state
         // changed"), although the owner only wrote to the room. It runs as an ordinary turn and the Goal keeps its state;
         // Science and the Goal's own room stay the places that resume it.
+        // The runner boundary must see the same decision, or it refuses this turn for the Goal's state (goal-ordinary-turns.ts).
+        markOrdinaryGoalTurn(runId);
         tryRecordRunEvent({ runId, chatId: chat.id, kind: "goal_dispatch_ordinary_turn", payload: {
           goalId: boundGoal.goalId, goalStatus: boundGoal.status,
           cause: boundGoal.surface === "science" ? "goal_owned_by_science" : "goal_rooted_in_another_room" } });
@@ -3929,6 +3940,66 @@ export class InvocationService {
     // append a second, false "failed before it could finish a reply" notice under it
     // (2026-10-04, verify-one-improvement-proof-producer failed-worker scenario).
     let durableAssistantReplyBound = false;
+    /*
+     * Host-level safety net (owner rule): one decision for the failure of an owner turn, taken at the one place the failure
+     * becomes visible (the three terminal sites below). External causes keep their honest message; an INTERNAL failure never reaches the
+     * owner as a code or an exception text: when nothing acted the host starts one ordinary retry of the same request, otherwise it says
+     * in plain words what happened. shared/owner-failure-class.ts, invocation/host-recovery.ts.
+     */
+    let boundPromptMessageId: string | null = null;
+    let ownerFailure: OwnerFailureDecision | null = null;
+    let hostRecoveryJob: { originalRunId: string; chatId: string; request: McpInvocationRequest; userMessageId: string | null; startedAtIso: string;
+      locale: "ko" | "en"; workspaceBinding?: InvocationWorkspaceBinding; executionContext?: InvocationExecutionContext } | null = null;
+    const decideHostFailure = (input: { terminalKind: string; code?: string | null; failure?: McpInvocationEvent["error"]; delivery?: "not-dispatched"; thrown?: unknown }): OwnerFailureDecision => {
+      if (ownerFailure) return ownerFailure;
+      const abortReason = controller.signal.reason instanceof Error ? controller.signal.reason.message : null;
+      const stopped = input.terminalKind === "invoke_cancelled" || input.terminalKind === "invoke_interrupted"
+        || record.steeringInterruptRequested || isOwnerGoalStopCause(abortReason);
+      const delivery = input.delivery ?? input.failure?.turnDelivery ?? (turnProvedNotDispatched ? "not-dispatched" : undefined);
+      let placement: string = "unconfirmed";
+      try { placement = readRunTurnPlacement(runId); } catch { placement = "unconfirmed"; }
+      const nothingActed = placement !== "placed" && (delivery === "not-dispatched" || placement === "not-dispatched")
+        ? true : effectBoundary.provesNoOutsideEffect();
+      let goalCarries = false;
+      try {
+        const carried = chat.goalId ? getLongRunByGoalId(chat.goalId) : null;
+        goalCarries = Boolean(carried && ["queued", "running", "waiting_tool", "waiting_worker"].includes(carried.status));
+      } catch { goalCarries = false; }
+      let queueResends = false;
+      try { queueResends = forecastAppResend(getDb(), runId, { errorCode: input.code ?? undefined, runtimeFailure: input.failure?.runtimeFailure }) === "now"; }
+      catch { queueResends = false; }
+      let queueOwnsRetry = false;
+      try { queueOwnsRetry = queueWillStartRunAgain(getDb(), { runId, status: "failed", errorCode: input.code ?? undefined, runtimeFailure: input.failure?.runtimeFailure }, delivery === "not-dispatched" ? "not-dispatched" : undefined); }
+      catch { queueOwnsRetry = false; }
+      const locale = runReq.promptOrigin === "system" ? pickLocale(runReq)
+        : inferOwnerLocale(runReq.oneUserAuthoredPrompt ?? runReq.userPrompt, pickLocale(runReq));
+      const decision = decideOwnerFailure({
+        db: getDb(), runId, chatId: chat.id, locale,
+        facts: { code: input.code ?? null, runtimeFailure: input.failure?.runtimeFailure ?? null,
+          hostStopCause: invocationHostStopCause(abortReason) ?? null, ownerStopped: stopped,
+          ownerWait: record.pendingQuestion || Boolean(record.browserLoginWait) },
+        ownerTurn: isOwnerTurnRequest(runReq, { background: record.background, executionSource: record.executionSource,
+          scienceTurn: Boolean(record.executionContext?.science || record.executionContext?.graphWorkerAttempt || record.executionContext?.scienceRecovery) }),
+        hostRecovery: hostRecoveryOf(runReq) !== null,
+        nothingActed, replayable: requestIsReplayable(req), userMessageId: boundPromptMessageId, startedAtIso: startedAt,
+        goalCarries, queueResends, queueOwnsRetry,
+      });
+      if (decision.action === "recover" && !claimHostRecovery(runId, chat.id, boundPromptMessageId)) {
+        ownerFailure = { ...decision, action: "say", plan: "exhausted", line: internalFailureOwnerLine(locale, "exhausted"), reason: "recovery_already_claimed" };
+      } else ownerFailure = decision;
+      if (ownerFailure.defect) {
+        const thrown = input.thrown as { name?: unknown } | undefined;
+        recordHarnessDefect({ runId, chatId: chat.id, code: input.code ?? null, reason: ownerFailure.reason, plan: ownerFailure.plan ?? "none",
+          terminalKind: input.terminalKind, delivery: delivery ?? placement, hostRecovery: hostRecoveryOf(runReq) !== null,
+          ...(thrown && typeof thrown.name === "string" ? { exceptionClass: thrown.name.slice(0, 40) } : {}),
+          ...(input.failure?.message ? { detail: redactWorkAttachmentText(runReq, redactOneAttachmentText(runReq, input.failure.message)).slice(0, 300) } : {}) });
+      }
+      if (ownerFailure.action === "recover") {
+        hostRecoveryJob = { originalRunId: runId, chatId: chat.id, request: { ...req }, userMessageId: boundPromptMessageId, startedAtIso: startedAt, locale,
+          ...(record.workspaceBinding ? { workspaceBinding: record.workspaceBinding } : {}), ...(record.executionContext ? { executionContext: record.executionContext } : {}) };
+      }
+      return ownerFailure;
+    };
     // `errorCode` is the run's own terminal code. A cause inside the app (shared/run-failure-cause.ts) is reported as
     // "app-failed", never as a needs-owner ask: the owner has nothing to do (Yotube 2026-10-17, goal_episode_admission_missing).
     // `failure` is the run's error event when it has one: its typed provider failure (quota, rate limit, sign-in, refusal, an
@@ -3945,6 +4016,16 @@ export class InvocationService {
         || (runReq.promptOrigin === "system" && !ownerActionCause) || terminalKind === "invoke_cancelled"
         || record.steeringInterruptRequested || isOwnerGoalStopCause(abortReason)) return;
       try {
+        // An internal failure is never worded from its code or its exception (shared/owner-failure-class.ts): the host's decision
+        // carries the one plain line (recovering / uncertain / exhausted ...). External failures take the existing wording below.
+        if (ownerFailure && (ownerFailure.action === "recover" || ownerFailure.action === "say") && ownerFailure.line && ownerFailure.plan !== "background") {
+          const latestLine = listChatMessages(chat.id, 20).filter((entry) => entry.role === "assistant").at(-1);
+          if (latestLine?.text !== ownerFailure.line) {
+            appendChatMessage(chat.id, "assistant", ownerFailure.line, { hostNotice: { purpose: "host-status", runId, status: "app-failed" } });
+          }
+          emptyFailureNoticePersisted = true;
+          return;
+        }
         // The notice is a reply bubble under the owner's own message, so it is written in the language that message was
         // written in; the app language is the fallback (a host-started turn has no owner words). The phone and the
         // desktop sent locale "en" for every turn of the Korean-speaking owner while the room spoke Korean (YouTube
@@ -4106,6 +4187,9 @@ export class InvocationService {
             // reconstruct it later from human-readable Activity text.
             taskIntent: runReq.taskIntent,
             invocationSource: executionContext?.source === "science" ? "science" : runWorkspaceBinding?.source,
+            // PLAN S9 B1a: the Science turn this run executes. The SDK's turn ledger is the only other place that knows it;
+            // readers pair a turn with its run here (store/science-turn-ledger.ts). Absent on runs from before these fields.
+            ...scienceTurnPayload(executionContext, runId),
             synchronousAskSurface: executionContext?.source === "mobile"
               ? "durable-decision"
               : undefined,
@@ -4400,7 +4484,7 @@ export class InvocationService {
     const desktopProducerAdmission = !record.background && !executionContext && !runReq.agentAppMode && !effectObservation;
     let projectionGoalId = effectObservation ? null : chat.goalId;
     /** This owner turn does not run the chat's stopped Goal (a conversational message, or a resume that could not apply). */
-    let ordinaryTurnOnStoppedGoal = false;
+    let ordinaryTurnOnStoppedGoal = hostRecoveryOf(req) !== null;
     // A goal-mode turn in a chat still bound to an ENDED Goal starts a new Goal instead of attaching to the ended one.
     if (projectionGoalId && runReq.goalMode && !executionContext && boundGoalIsTerminal(projectionGoalId)) {
       setChatGoalBinding(chat.id, null);
@@ -4558,6 +4642,8 @@ export class InvocationService {
         try {
           record.goalStopOwner = captureNativeGoalStopOwner({ goalId: goalLongRun.goalId, rootChatId: chat.id, longRunId: goalLongRun.id });
         } catch (error) {
+          // The runner boundary must see the same decision, or it refuses this turn for the Goal's state (goal-ordinary-turns.ts).
+          markOrdinaryGoalTurn(runId);
           tryRecordRunEvent({ runId, chatId: chat.id, kind: "goal_dispatch_ordinary_turn", payload: { goalId: goalLongRun.goalId,
             goalStatus: goalLongRun.status, cause: "goal_stop_owner_unavailable",
             code: (error as { code?: unknown })?.code ?? (error instanceof Error ? error.message.slice(0, 80) : null) } });
@@ -5380,6 +5466,15 @@ export class InvocationService {
         if (event.kind === "error" && event.error && terminalDisposition?.errorCode) {
           event = { ...event, error: { ...event.error, code: terminalDisposition.errorCode } };
         }
+        // The one place an owner turn's failure is worded (shared/owner-failure-class.ts): an INTERNAL failure's text is the host's plain
+        // line, never the runner's message (an exception text, a path, a code in prose). The machine code stays in `error.code` and in the
+        // ledger for the machines; the raw text goes to the harness_defect row.
+        if (event.kind === "error" && event.error && !event.agentId && terminalDisposition) {
+          const hostDecision = decideHostFailure({ terminalKind: terminalDisposition.terminalKind, code: event.error.code, failure: event.error });
+          if ((hostDecision.action === "recover" || hostDecision.action === "say" || hostDecision.action === "queue") && hostDecision.line) {
+            event = { ...event, error: { ...event.error, message: hostDecision.line, hostWorded: hostDecision.action === "say" ? "stopped" : "recovering" } };
+          }
+        }
         recordObservableRunStep(canonicalTask, runId, event, observableStepSequence, record.semanticSteps);
 
         const wireEvent = liveWirePartial(record, event);
@@ -5565,6 +5660,7 @@ export class InvocationService {
       runWorkspaceBinding,
       executionContext,
       async (sourceMessageId) => {
+        boundPromptMessageId = sourceMessageId;
         // The user row is persisted inside runMcpInvocation immediately before
         // this hook. Keep the exact row id in the append-only run ledger so a
         // failed run without an assistant row can be placed after its own
@@ -5792,7 +5888,8 @@ export class InvocationService {
         // Only ordinary local, user-authored root-chat work enters automatic
         // Goal. Science and remote/automation authority keep their own adapters.
         if (projectionGoalId || ownerCardStoppedGoalId || runReq.agentAppMode || runWorkspaceBinding || executionContext ||
-            runReq.promptOrigin === "system" || runReq.planMode || chat.kind === "division" || controller.signal.aborted) return;
+            // The host's own recovery turn answers a message whose intake the failed attempt already ran: no second Goal judgment or admission.
+            runReq.promptOrigin === "system" || runReq.planMode || chat.kind === "division" || controller.signal.aborted || hostRecoveryOf(runReq) !== null) return;
         // Goal custody is Desktop-only: this process cannot admit a Goal controller (producerAdmission stays
         // null), so a Goal admitted mid-turn would have its first dispatch refused with goal_episode_admission_missing.
         // The turn stays ordinary and finishes here, but its intake must not be dropped: production 2026-10-11 10:08Z (run
@@ -5938,6 +6035,8 @@ export class InvocationService {
             const serviceHosted = record.ownerLease?.ownerKind === "daemon";
             if (ordinaryTurnOnStoppedGoal || serviceHosted || !named || named.status !== "running") {
               if (projectionGoalId === goalId) { projectionGoalId = null; record.automaticGoalId = undefined; record.longRunProjection = undefined; }
+              // The runner boundary must see the same decision, or it refuses this turn for the Goal's state (goal-ordinary-turns.ts).
+              markOrdinaryGoalTurn(runId);
               tryRecordRunEvent({ runId, chatId: chat.id, kind: "goal_dispatch_ordinary_turn", payload: {
                 goalId, goalStatus: named?.status ?? null,
                 cause: ordinaryTurnOnStoppedGoal ? "owner_turn_not_goal_episode" : serviceHosted && named?.status === "running" ? "service_hosted_turn" : "goal_not_running" } });
@@ -5969,6 +6068,8 @@ export class InvocationService {
                 if (projectionGoalId === goalId) { projectionGoalId = null; record.automaticGoalId = undefined; record.longRunProjection = undefined; }
                 // Which of the three states it was (none captured / capture failed / captured but no controller bound), so the next
                 // occurrence names its own root cause instead of one code for all three.
+                // The runner boundary must see the same decision, or it refuses this turn for the Goal's state (goal-ordinary-turns.ts).
+                markOrdinaryGoalTurn(runId);
                 tryRecordRunEvent({ runId, chatId: chat.id, kind: "goal_dispatch_ordinary_turn", payload: {
                   goalId, goalStatus: getLongRunByGoalId(goalId)?.status ?? null, cause: "goal_admission_unavailable", code,
                   admissionCaptured: producerAdmission === undefined ? "none" : producerAdmission === null ? "failed" : "held",
@@ -6620,7 +6721,17 @@ export class InvocationService {
               message: !terminalDisposition.errorCode && isHostInternalException(error)
                 ? folderGone ? workingFolderMissingMessage(pickLocale(runReq))
                   : hostInternalFailureMessage(pickLocale(runReq), forecastAppResend(getDb(), runId, { hostInternalFailure: true })) : rawMessage };
-        const message = safeFailure.message;
+        let message = safeFailure.message;
+        // Same safety net as the sink: the catch-all is where an untyped throw (TypeError ...) becomes the owner's failure text.
+        if (!record.background && !runReq.agentAppMode) {
+          const hostDecision = decideHostFailure({ terminalKind: terminalDisposition.terminalKind, code: safeFailure.code, delivery: turnProvedNotDispatched ? "not-dispatched" : undefined,
+            failure: { code: safeFailure.code, message: rawMessage }, thrown: error });
+          if ((hostDecision.action === "recover" || hostDecision.action === "say" || hostDecision.action === "queue") && hostDecision.line) {
+            message = hostDecision.line;
+            safeFailure.message = hostDecision.line;
+            (safeFailure as { hostWorded?: "recovering" | "stopped" }).hostWorded = hostDecision.action === "say" ? "stopped" : "recovering";
+          }
+        }
         tryRecordRunEvent({
           runId,
           kind: "invoke_threw",
@@ -6717,6 +6828,7 @@ export class InvocationService {
           );
           taskMaterialized = Boolean(canonicalTask);
           const terminalKind = terminalDisposition.terminalKind;
+          if (!record.background && !runReq.agentAppMode) decideHostFailure({ terminalKind, code: terminalDisposition.errorCode });
           persistEmptyFailureNotice(terminalKind, terminalDisposition.errorCode);
           tryRecordRunEvent({
             runId,
@@ -6778,6 +6890,8 @@ export class InvocationService {
         if (nativePreparation) this.finishOrdinaryOneTurn(nativePreparation, "execution");
         // Actual execution authority is closed; original resource cleanup remains separate.
         this.publishSettled(runId, record);
+        // The one automatic retry of an owner turn that failed inside the app with nothing acted (invocation/host-recovery.ts).
+        if (hostRecoveryJob) this.startHostRecovery(hostRecoveryJob);
         this.carryUndeliveredOwnerFollowups(runId, record);
         this.recoverOrphanedQueuedSteers(runReq.chatId);
         const hasQueuedSteer = Boolean(this.steerQueues.get(record.chatId)?.length);
@@ -8572,12 +8686,69 @@ export class InvocationService {
     }
   }
 
+  /**
+   * The one automatic retry of an owner turn that failed inside the app with nothing acted (invocation/host-recovery.ts). Started in the
+   * host that ran the failed turn (Desktop Main or the background service), with that turn's own workspace binding and execution
+   * context; the request carries the Main-only `hostRecovery` marker, so it runs as an ordinary turn (no Goal episode binding) and can
+   * never schedule another. A newer owner message, the owner's Stop, or a chat that stays busy ends it with the plain line.
+   */
+  private startHostRecovery(job: { originalRunId: string; chatId: string; request: McpInvocationRequest; userMessageId: string | null;
+    startedAtIso: string; locale: "ko" | "en"; workspaceBinding?: InvocationWorkspaceBinding; executionContext?: InvocationExecutionContext }): void {
+    scheduleHostRecovery({
+      start: (request) => this.start(request, job.workspaceBinding, job.executionContext),
+      chatBusy: (chatId) => this.activeChatIds().includes(chatId),
+      ownerPending: (chatId) => this.hasQueuedOwnerRequest(chatId),
+      setTimer: (fn, ms) => { const timer = setTimeout(fn, ms); timer.unref?.(); return timer; },
+      say: (chatId, plan) => this.sayHostFailurePlan(chatId, job.originalRunId, plan, job.locale),
+      log: (message, detail) => console.warn(`[host-recovery] ${message}`, detail),
+    }, job);
+  }
+
+  /** Boot sweep, once per process, on the first start (the store is open by then): a claim whose retry never started gets its plain line. */
+  private hostRecoverySwept = false;
+  private sweepHostRecoveriesOnce(): void {
+    if (this.hostRecoverySwept) return;
+    this.hostRecoverySwept = true;
+    try { sweepOrphanedHostRecoveries(getDb(), (chatId, plan, runId) => {
+        const lastOwnerText = listChatMessages(chatId, 40).filter((entry) => entry.role === "user").at(-1)?.text;
+        this.sayHostFailurePlan(chatId, runId, plan, inferOwnerLocale(lastOwnerText, "en"));
+      }); } catch { /* swept at the next boot */ }
+  }
+
+  private sayHostFailurePlan(chatId: string, originalRunId: string, plan: InternalFailurePlan, locale: "ko" | "en"): void {
+    try {
+      const line = internalFailureOwnerLine(locale, plan);
+      if (listChatMessages(chatId, 20).filter((entry) => entry.role === "assistant").at(-1)?.text === line) return;
+      appendChatMessage(chatId, "assistant", line, { hostNotice: { purpose: "host-status", runId: originalRunId, status: "app-failed" } });
+      emitDesktopStoreChange({ entity: "chat", id: chatId });
+    } catch { /* the defect row and the outcome row remain */ }
+  }
+
+  /** A recovery turn settled: say so once, quietly, under its answer. A failed recovery already wrote its own plain line. */
+  private settleHostRecoveryOutcome(runId: string, record: RunRecord, status: string): void {
+    const original = hostRecoveryOriginalOf(getDb(), runId) ?? hostRecoveryOf(record.request)?.ofRunId ?? null;
+    if (!original) return;
+    if (status === "completed") {
+      const already = getDb().prepare("SELECT 1 FROM run_events WHERE run_id = ? AND kind = 'host_recovery_outcome' LIMIT 1").get(original);
+      if (already) return;
+      recordHostRecoveryOutcome(original, record.chatId, "completed", "retry_completed");
+      try {
+        const locale = inferOwnerLocale(record.request.oneUserAuthoredPrompt ?? record.request.userPrompt, pickLocale(record.request));
+        appendChatMessage(record.chatId, "assistant", internalFailureOwnerLine(locale, "recovered"));
+        emitDesktopStoreChange({ entity: "chat", id: record.chatId });
+      } catch { /* the outcome row remains */ }
+    } else if (status === "failed" || status === "cancelled" || status === "interrupted") {
+      recordHostRecoveryOutcome(original, record.chatId, status === "failed" ? "failed" : "skipped", `retry_${status}`);
+    }
+  }
+
   private publishSettled(runId: string, record: RunRecord): void {
     if (record.settlementPublished) return;
     const receipt = getInvocationRunReceipt(runId);
     if (!receipt || receipt.status === "running" || receipt.status === "cancelling") return;
     record.settlementPublished = true;
     if (record.background) return;
+    try { this.settleHostRecoveryOutcome(runId, record, receipt.status); } catch { /* the ledger keeps the retry's own terminal */ }
     const envelope: InvocationSettledEnvelope = {
       runId,
       chatId: record.chatId,

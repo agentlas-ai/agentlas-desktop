@@ -43,6 +43,7 @@ const SECRET_ROLE = /secure|password/i;
 // combo boxes with their values but not a display label (measured on the real Calculator: its result display is a static text the driver tree does not list).
 // A changed static text still shows up through the element-present fallback below when a control appears with it.
 const VALUE_BEARING_ROLE = /textfield|textarea|searchfield|combobox|slider|stepper|incrementor/i;
+const MENU_FRAME_ROLE = /^(AX)?(Menu|MenuBar|MenuBarItem|MenuItem)$/i;
 
 interface Session {
   app: string;
@@ -178,7 +179,11 @@ export function deriveCheck(first: readonly TapElement[], last: readonly TapElem
   for (const element of last) {
     // the check is only ever LOOKED AT, never pressed, so a caption like "Clear" or "Delete" is fine here; a secret caption is not
     if (!element.role || !element.label || SECRET_LABEL.test(element.label)) continue;
-    if (!/button|checkbox|radio|tab|menuitem|link|text/i.test(element.role)) continue;
+    if (!/button|checkbox|radio|tab|link|text/i.test(element.role)) continue;
+    // The menu bar and its items are the app's own frame, not an effect of pressing a window control. An agent reads the app twice at different depths
+    // (dev-app run: depth 9 / 160 nodes, then depth 12 / 500), so a menu item only the deeper read reaches looked "new" and became the check
+    // ("신용카드…"); no replay can ever see it again and every replay answered outcome_unsatisfied.
+    if (MENU_FRAME_ROLE.test(element.role)) continue;
     if (!firstByKey.has(key(element))) return { check: { kind: "element-present", role: element.role, label: element.label }, heldBefore: false };
   }
   return null;

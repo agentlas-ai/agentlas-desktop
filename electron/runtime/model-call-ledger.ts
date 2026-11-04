@@ -30,6 +30,7 @@ import type { Runner, RunnerEvents, RunnerRequest, RunnerResult } from "./runner
 import { withMemorySourceScope } from "../memory/source-custody";
 import { RETAINED_CONTEXT_BLOCKS, retainContextOriginal } from "./context-originals";
 import { looksSecret } from "../../shared/secret-patterns";
+import { innermostTypedCode, isTypedCode } from "../../shared/turn-settlement";
 import { currentAccountedRun } from "../long-run/accounting-context";
 
 export const MODEL_CALL_LEDGER_SCHEMA = "agentlas.model-call-ledger.v1";
@@ -698,6 +699,18 @@ function ledgerFailureCode(value: unknown): string | undefined {
   return typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,95}$/.test(value) && !looksSecret(value) ? value : undefined;
 }
 
+/**
+ * A thrown error's machine code for the row: its own `code`, else the innermost typed code of its cause chain, else
+ * a message that is itself a code (`new Error("mcp_tool_inventory_duplicate_name")`). Production read "failed" with no code for
+ * every such plain throw, so the first throw of an unsettled turn left no trace in the ledger.
+ */
+function thrownFailureCode(thrown: unknown): string | undefined {
+  const own = ledgerFailureCode((thrown as { code?: unknown } | null)?.code);
+  if (own) return own;
+  const message = thrown instanceof Error ? thrown.message.trim() : "";
+  return ledgerFailureCode(innermostTypedCode(thrown) ?? (isTypedCode(message) ? message : undefined));
+}
+
 function emit(collector: Collector, input: {
   req: RunnerRequest; identity: ModelCallIdentity; scope: ModelCallScope | undefined; callRef: string;
   startedAt: number; result: RunnerResult | undefined; threw: boolean; thrown: unknown;
@@ -710,7 +723,7 @@ function emit(collector: Collector, input: {
   const aborted = req.signal?.aborted === true;
   const status = input.threw ? (aborted ? "cancelled" : "failed") : result?.failure ? "failed" : "completed";
   const failureKind = result?.failure?.kind;
-  const failureCode = ledgerFailureCode(input.threw ? (input.thrown as { code?: unknown } | null)?.code : result?.failure?.providerCode);
+  const failureCode = input.threw ? thrownFailureCode(input.thrown) : ledgerFailureCode(result?.failure?.providerCode);
   // The applied effort, never the requested one presented as applied (A4 C6.3): the adapter's wire report first, then a
   // runner-returned appliedEffort; only a runner that reports neither keeps the legacy requested value, marked unconfirmed.
   const reportedEffort = collector.effort;

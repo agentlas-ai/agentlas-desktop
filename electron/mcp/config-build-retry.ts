@@ -25,6 +25,9 @@ export const MCP_CONFIG_HOST_NOT_READY_CODES: ReadonlySet<string> = new Set([
   "one-os-lease-host-unavailable",
   // A Goal's usage ledger caught between two writes (system-agents/accounting-best-effort.ts).
   "long_run_usage_start_source_mismatch",
+  // Main's browser broker answering late or not yet listening (the run's native browser grant; native-browser-broker-timeout).
+  "native-browser-broker-timeout",
+  "native-browser-host-unavailable",
   "store_busy",
 ]);
 

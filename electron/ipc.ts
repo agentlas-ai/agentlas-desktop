@@ -1558,12 +1558,15 @@ function rendererInvocationRequest(req: McpInvocationRequest): McpInvocationRequ
     preflightSubmissionId: _preflightSubmissionId,
     forceBrowserCredentialRefresh: _forceBrowserCredentialRefresh,
     oneTeamReportTurn: _oneTeamReportTurn,
+    // Main-only marker of the host's own recovery turn (invocation/host-recovery.ts): a window can never send it.
+    hostRecovery: _hostRecovery,
     ...rendererFields
   } = req as McpInvocationRequest & {
     oneTeamExecutionPolicy?: unknown;
     oneTeamRuntimeBinding?: unknown;
     oneAttachmentContext?: unknown;
     oneAttachmentRedactions?: unknown;
+    hostRecovery?: unknown;
   };
   return {
     ...rendererFields,
@@ -3540,6 +3543,11 @@ export function registerIpcHandlers(): void {
 
   // UI instances (inline result views): the renderer lists a chat's instances and hears every change; actions go
   // through harness:call "ui.action" (chat "ui" + args.chatId), i.e. the same dispatcher as everything else.
+  // The composer's "@" menu: plugins of one conversation, by the same domain tool menu the model's lookups follow (harness/composer-mentions.ts).
+  ipcMain.handle("composer:mentionPlugins", async (event, chatId: unknown) => {
+    assertTrustedSitePublishIpcSender(event);
+    return (await import("./harness/composer-mentions")).composerPluginMentions(typeof chatId === "string" && chatId.length <= 200 ? chatId : null);
+  });
   registerAppControlDomainIpc(ipcMain, "harness:uiList", async (chatId: unknown) =>
     (await import("./harness/ui-instances")).listUiInstances(typeof chatId === "string" ? chatId : ""));
   void import("./harness/ui-instances").then(({ onUiInstanceEvent, watchUiInstanceStore }) => {
@@ -6843,6 +6851,12 @@ export function registerIpcHandlers(): void {
     return taskScopeId;
   };
   ipcMain.handle("workLiveView:listTabs", (event, input: { taskScopeId: string }) => {
+    // A read of the tabs of a conversation that does not exist (a stale or mistyped id from an agent, a chat deleted meanwhile) has no
+    // tabs; it is answered as an empty list instead of "native-browser-chat-missing" (observed in use, two Work runs).
+    if (typeof input?.taskScopeId === "string" && !getChat(input.taskScopeId)) {
+      assertTrustedSitePublishIpcSender(event);
+      return { ok: true, tabs: [] };
+    }
     const scope = bindNativeBrowserChat(event, input?.taskScopeId);
     return { ok: true, tabs: listWorkBrowserTabs(event.sender.id, scope) };
   });

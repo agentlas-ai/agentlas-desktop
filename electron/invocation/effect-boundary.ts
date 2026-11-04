@@ -159,6 +159,22 @@ export class InvocationEffectBoundaryTracker {
     if (event.kind === "tool-use" && event.tool && !isEffectStatusOnlyTool(event.tool)) this.durableTools++;
   }
   recordingFailed(): void { this.ledgerComplete = false; }
+  /**
+   * Evidence, from what this tracker has seen so far, that no tool of this turn acted on the outside: a covered adapter, a complete
+   * ledger, no tool event of any kind (status-only tools excepted), no host control, no open adapter scope. Conservative on purpose:
+   * anything unknown is "not proven" (host recovery then never re-runs the turn). The failure itself is not a reason (the turn
+   * is the one that failed).
+   */
+  provesNoOutsideEffect(): boolean {
+    if (!this.ledgerComplete || this.observedTools !== 0 || this.operations.size !== 0 || this.hostControls.size !== 0) return false;
+    // The same coverage rule as persist(): a result-reporting adapter, or a completed root-bound scope of the CLI's own receipt protocol.
+    const covered = (kind: string): boolean => RESULT_COVERAGE.has(kind) || [...this.adapterScopes.values()].some(scope =>
+      (scope.adapterKind === kind || scope.adapterKind === receiptScopeKind(kind)) && scope.rootBound && scope.chatId === this.chatId
+      && scope.report?.complete === true && scope.report.protocol !== MAIN_TOOL_PREDISPATCH_PROTOCOL);
+    if (this.adapters.size === 0 || [...this.adapters].some(kind => !covered(kind))) return false;
+    for (const reason of this.uncertainties) if (reason !== "runtime_reported_failure") return false;
+    return [...this.adapterScopes.values()].every(scope => scope.report?.complete === true && scope.report.operationIds.length === 0);
+  }
   /** Called only after the whole runtime promise settles, not on model final. */
   persist(): RuntimeEffectBoundaryReceipt | null {
     const db=getDb();

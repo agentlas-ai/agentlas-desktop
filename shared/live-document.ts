@@ -307,7 +307,7 @@ export interface LiveDocumentDelta {
 }
 
 export type LiveDocumentApplyResult =
-  | { ok: true; revision: number; created: string[] }
+  | { ok: true; revision: number; created: string[]; adjusted?: Array<{ op: number; kind: string; requestedAfter: string; placed: "end" }> }
   | { ok: false; reason: string; detail?: string; revision?: number };
 
 /**

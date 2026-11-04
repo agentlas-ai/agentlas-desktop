@@ -30,6 +30,18 @@ export function remoteNativeBrowserGrantForEndpoint(endpoint: string | null | un
 }
 const MAX_RESPONSE = 8 * 1024 * 1024;
 export const NATIVE_BROWSER_HOST_UNAVAILABLE = "native-browser-host-unavailable";
+/**
+ * The broker is a loopback server that closes an idle connection after 5 s. Node's shared agent keeps connections alive and reuses
+ * them, so a request sent just as the server closed its end died with ECONNRESET although nothing was wrong with Main or the grant
+ * (observed in use-13:23Z, Hope: browser_resize / browser_snapshot ECONNRESET, 4 times in 14 days). A loopback connection
+ * costs nothing: every broker request opens its own, so there is no stale socket to race.
+ */
+const brokerAgent = new http.Agent({ keepAlive: false });
+const CONNECTION_RESET_CODES = new Set(["ECONNRESET", "EPIPE", "ECONNABORTED"]);
+const connectionReset = (error: unknown): boolean => {
+  const code = (error as { code?: unknown } | null)?.code;
+  return typeof code === "string" && CONNECTION_RESET_CODES.has(code);
+};
 
 function alive(pid: number): boolean { try { process.kill(pid, 0); return true; } catch { return false; } }
 export function validateNativeBrowserMainCapability(value: unknown, daemonPid = process.pid, mainPid?: number): NativeBrowserMainCapability {
@@ -69,7 +81,7 @@ export function configureCanonicalNativeBrowserCapability(value: unknown, expect
   void ready.catch(() => {});
   const watch = http.request(`${capability.endpoint}/watch`, { method: "GET", headers: {
     Authorization: `Bearer ${capability.token}`, "X-Agentlas-Generation": capability.generation,
-  } });
+  }, agent: brokerAgent });
   const state: RemoteState = { capability, watch, ready, closed: false, releases: new Set(), captures: new Map(), recoveries: new Map(), restorations: new Map() };
   remote = state;
   const failed = () => {
@@ -114,7 +126,20 @@ export function configureCanonicalNativeBrowserCapability(value: unknown, expect
   watch.end();
 }
 
+/**
+ * One broker request. A connection reset is retried once for every operation that is safe to ask twice (everything but the grant
+ * acquisition, whose reply, if lost, is cancelled by its id): the reset says the connection broke, not that Main or the grant is gone.
+ */
 async function request<T>(state: RemoteState, operation: string, payload: unknown, timeoutMs = 25_000): Promise<T> {
+  try { return await requestOnce<T>(state, operation, payload, timeoutMs); }
+  catch (error) {
+    if (operation === "grant" || !connectionReset(error) || state.closed) throw error;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    return requestOnce<T>(state, operation, payload, timeoutMs);
+  }
+}
+
+async function requestOnce<T>(state: RemoteState, operation: string, payload: unknown, timeoutMs: number): Promise<T> {
   if (state.closed || !alive(state.capability.mainPid)) throw new Error(NATIVE_BROWSER_HOST_UNAVAILABLE);
   await state.ready;
   const body = JSON.stringify(payload);
@@ -123,7 +148,7 @@ async function request<T>(state: RemoteState, operation: string, payload: unknow
     const req = http.request(`${state.capability.endpoint}/${operation}`, { method: "POST", headers: {
       Authorization: `Bearer ${state.capability.token}`, "X-Agentlas-Generation": state.capability.generation,
       "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body),
-    } }, res => {
+    }, agent: brokerAgent }, res => {
       let size = 0;
       const parts: Buffer[] = [];
       res.on("data", (part: Buffer) => { size += part.length; if (size > MAX_RESPONSE) req.destroy(new Error("native-browser-broker-response-invalid")); else parts.push(part); });
@@ -243,6 +268,9 @@ export async function createCanonicalNativeBrowserGrant(input: CanonicalNativeBr
       }
     }
   };
+  const grantEnded = (error: unknown): boolean => state.closed || input.signal.aborted
+    || (error instanceof Error && error.message === "native-browser-grant-revoked")
+    || !alive(state.capability.mainPid);
   let refreshing: Promise<void> | null = null;
   let admitted = false;
   let capturePending = false;
@@ -251,7 +279,14 @@ export async function createCanonicalNativeBrowserGrant(input: CanonicalNativeBr
     if (refreshing) return refreshing;
     capturePending = false;
     return refreshing = request<Snapshot>(state, "snapshot", { id, screenshotAfter: screenshotSequence })
-      .then(update).catch(error => { release(); throw error; }).finally(() => {
+      .then(update).catch(error => {
+        // Only an answer that says the grant is over (Main no longer has it, or the channel itself is gone) ends it here. A reset
+        // connection, a slow Main or a snapshot that did not parse is one failed look at it: the run keeps its browser and the next
+        // look reads it again. Releasing here sent "release" to Main, which closed the relay under a run that was still using it
+        // (observed in useZ: every later browser call ECONNREFUSED, the ladder "reestablish: grant-not-current").
+        if (grantEnded(error)) release();
+        throw error;
+      }).finally(() => {
         refreshing = null;
         if (capturePending && !released) void refresh().catch(() => {});
       });

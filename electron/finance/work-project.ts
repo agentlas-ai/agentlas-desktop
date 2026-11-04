@@ -160,6 +160,8 @@ export function assertFinanceWorkChatOwner(chatId: string, actor: FinanceWorkAct
 export const FINANCE_WORK_PROJECT_PLUGINS = [{ slug: 'finance', reason: 'baseline capability: Agentlas Finance conversation' }] as const;
 /** The plugins a Finance conversation lists in the tool menu: its own plus the shared ones (mcp-tools/domain-tool-menu.ts). */
 export const FINANCE_WORK_PROJECT_TOOL_MENU: readonly string[] = ['finance', ...SHARED_MENU_PLUGINS];
+/** The plugins this domain owns: an ordinary One/Work conversation does not list them in its "@" menu (mcp-tools/user-menu.ts); the agents' own lookups still reach them. */
+export const FINANCE_OWNED_PLUGINS: readonly string[] = ['finance'];
 export function financeWorkProjectDomain(chatId: string, actor: FinanceWorkActor | null,
   expected?: { domain: string; ownerScope: string; projectId: string } | null) {
   // A binding read for another domain is not Finance's to check; Finance's own fence then applies to this chat as at a turn start.
@@ -167,3 +169,4 @@ export function financeWorkProjectDomain(chatId: string, actor: FinanceWorkActor
   const binding = assertFinanceWorkChatOwner(chatId, actor, own);
   return binding ? { domain: 'finance', ownerScope: binding.ownerScope, projectId: binding.projectId, baselinePlugins: FINANCE_WORK_PROJECT_PLUGINS, toolMenu: FINANCE_WORK_PROJECT_TOOL_MENU } : null;
 }
+financeWorkProjectDomain.ownedPlugins = FINANCE_OWNED_PLUGINS;

@@ -6,6 +6,7 @@ import type { IpcMain, IpcMainInvokeEvent } from "electron";
 import { recordAppControlHandler } from "./app-control/ipc-registry";
 import { normalizeIpcArgsInPlace } from "./ipc-args-normalize";
 import { encodeIpcErrorMessage, isIpcErrorCode } from "../shared/ipc-error-code";
+import { HOST_EXCEPTION_IPC_CODE, HOST_EXCEPTION_OWNER_LINE, isHostExceptionClass } from "../shared/owner-failure-class";
 
 // Capture only the launch request. The environment cannot grant admission:
 // Main must supply the actual package state and validated install identity.
@@ -189,7 +190,17 @@ export function assertDevelopmentIpcAllowed(channel: string, args: readonly unkn
 function codedIpcError(channel: string, error: unknown): unknown {
   if (!error || typeof error !== "object") return error;
   const code = (error as { code?: unknown }).code;
-  if (!isIpcErrorCode(code)) return error;
+  if (!isIpcErrorCode(code)) {
+    // The app's own exception (a TypeError, a ReferenceError ...) never reaches a window as its text, its stack or a path
+    // (owner rule). The class and the channel stay in the log; the window gets one plain line and a stable code.
+    if (isHostExceptionClass(error)) {
+      console.warn(`[ipc] host exception channel=${channel.slice(0, 96)} class=${(error as Error).name} message=${String((error as Error).message).slice(0, 200)}`);
+      const plain = new Error(encodeIpcErrorMessage(HOST_EXCEPTION_IPC_CODE, HOST_EXCEPTION_OWNER_LINE));
+      Object.defineProperty(plain, "code", { value: HOST_EXCEPTION_IPC_CODE, enumerable: true });
+      return plain;
+    }
+    return error;
+  }
   const message = error instanceof Error ? error.message : String((error as { message?: unknown }).message ?? "");
   const encoded = encodeIpcErrorMessage(code, message);
   const detail = (error as { detail?: unknown }).detail;

@@ -176,6 +176,7 @@ import {
 } from "../../shared/project-agent-pool";
 import { readCloudFilesForDevice } from "./cloud-files";
 import { OwnerCloudActionError } from "../marketplace/mcp-source";
+import { hostRecoveryRequested } from "../invocation/host-recovery";
 import { resumeMobileOneAutoRecovery } from "../one/mobile-auto-recovery";
 import { autoResolveOneTeamPreflight, prepareOneTeamPreflight } from "../one/team-preflight";
 import {
@@ -1947,6 +1948,8 @@ export function observeMobilePushNotices(hostId: string, listener: (notice: Mobi
     { runId: string; chatId: string; agentId?: string; receipt: { status: string }; pendingQuestion?: boolean; browserLoginWaiting?: boolean; userDecisionRequest?: unknown }) => {
     if (agentId || receipt.status !== "failed" || pendingQuestion || browserLoginWaiting || userDecisionRequest ||
         isPersonalOneConversation(chatId) || !getChat(chatId)) return;
+    // The host recovers this failure itself (invocation/host-recovery.ts): the phone hears nothing unless the retry fails too.
+    if (hostRecoveryRequested(getDb(), runId)) return;
     // A failure of a supervised room still rings (owner 2026-10-27): the personal agent's own review may end quietly, and
     // a failed hand-off must never be silent. The tap opens the room's read-only notice, which leads to the personal agent.
     listener({ category: "failure", destination: "thread", hostId,
@@ -2162,7 +2165,12 @@ export function projectMobileBridgeInvocationEvent(
         : {}),
     };
   }
-  if (event.error) {
+  if (event.error?.hostWorded) {
+    // The host worded this internal failure itself (invocation/host-recovery.ts): the phone shows it as a notice, never as "Run failed".
+    projected.kind = "notice";
+    projected.noticeLevel = event.error.hostWorded === "recovering" ? "info" : "warning";
+    projected.status = boundedRedactedText(event.error.message, 1_000);
+  } else if (event.error) {
     projected.error = {
       code: boundedRedactedText(event.error.code, 160),
       message: boundedRedactedText(event.error.message, 4_000),

@@ -111,24 +111,30 @@ function filesForRoot(root: string, source: ComputerHistorySource): string[] {
   return files;
 }
 
+/** Newest first, ties in input order. Each file is stat'ed once: the comparator used to stat both files on every comparison. A file that vanished sorts as oldest. */
+function newestFirst(files: readonly string[]): string[] {
+  return files
+    .map((file) => {
+      let modifiedAt = 0;
+      try { modifiedAt = fs.statSync(file).mtimeMs; } catch { /* vanished between listing and stat */ }
+      return { file, modifiedAt };
+    })
+    .sort((a, b) => b.modifiedAt - a.modifiedAt)
+    .map((row) => row.file);
+}
+
 function filesFor(source: ComputerHistorySource): string[] {
   const roots = [...new Set([ROOT, ...COMPATIBLE_READ_ROOTS])];
-  return [...new Set(roots.flatMap((root) => filesForRoot(root, source)))]
-    .sort((a, b) => {
-      try { return fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs; } catch { return 0; }
-    })
+  return newestFirst([...new Set(roots.flatMap((root) => filesForRoot(root, source)))])
     .slice(0, MAX_FILES_PER_BUCKET);
 }
 
 function captureFiles(): string[] {
   const dir = path.join(ROOT, CAPTURE_DIR);
   if (!fs.existsSync(dir)) return [];
-  return fs.readdirSync(dir, { withFileTypes: true })
+  return newestFirst(fs.readdirSync(dir, { withFileTypes: true })
     .filter((entry) => entry.isFile() && /\.(png|jpg)$/.test(entry.name))
-    .map((entry) => path.join(dir, entry.name))
-    .sort((a, b) => {
-      try { return fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs; } catch { return 0; }
-    });
+    .map((entry) => path.join(dir, entry.name)));
 }
 
 /**

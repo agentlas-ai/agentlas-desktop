@@ -7,7 +7,7 @@
 //   oneCapabilities:setSourceEnabled ({ source, enabled, kind? })             -> { source, changed }
 //   oneCapabilities:setRole       ({ id, role: both|personal|ceo })            -> CapabilityItem | null
 //
-// Agentlas built-ins are not listed and cannot be switched; neither can an item whose runtime loads it on its own.
+// Agentlas built-in plugins are listed as read-only rows (on); no other built-in is listed. None can be switched; neither can an item whose runtime loads it on its own.
 // Both setters throw `capability_not_switchable` for those instead of storing a state no run would honor.
 import type { IpcMain } from "electron";
 import { registerAppControlDomainIpc } from "../app-control/ipc-registry";
@@ -39,7 +39,7 @@ export function registerOneCapabilitiesIpc(ipc: Pick<IpcMain, "handle">): void {
   registerAppControlDomainIpc(ipc, "oneCapabilities:list", (input?: unknown) => {
     const filter = record(input);
     const s = source(filter.source), k = kind(filter.kind);
-    const all = listCapabilities();
+    const all = listCapabilities(undefined, { bundledPlugins: true });
     const items = all.filter((item) => (!s || item.source === s) && (!k || item.kind === k));
     const counts: Record<string, { total: number; enabled: number }> = {};
     for (const item of all) {

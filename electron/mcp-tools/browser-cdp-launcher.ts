@@ -3599,7 +3599,17 @@ async function main() {
   // 스크린샷 정본을 os.tmpdir() 기본 출력(리핑됨 + 앱이 서빙 불가) 대신
   // ~/.agentlas/captures/browser 에 남긴다 — 채팅 마크다운 이미지가 렌더되는 경로.
   if (NATIVE_ENDPOINT) {
-    const lease = await nativeRequest(NATIVE_ENDPOINT + '/session', 'POST');
+    // The relay lives in the app's main process: a busy moment there (a 2.5 s answer budget) or a connection reset must not end the
+    // browser's first call. Three asks, spaced; a relay that ANSWERS no (the grant is over) is not asked again.
+    let lease = null;
+    for (let attempt = 0; ; attempt++) {
+      try { lease = await nativeRequest(NATIVE_ENDPOINT + '/session', 'POST'); break; }
+      catch (error) {
+        const message = String(error && error.message || error);
+        if (attempt >= 2 || (message !== 'native-browser-transport-unavailable' && message !== 'native-browser-request-timeout' && message !== 'native-browser-response-aborted')) throw error;
+        await new Promise((resolve) => setTimeout(resolve, 400 * (attempt + 1)));
+      }
+    }
     if (!lease || typeof lease.endpoint !== 'string' || !lease.endpoint.startsWith(NATIVE_ENDPOINT + '/session/')) throw new Error('native-browser-lease-invalid');
     nativeLeaseEndpoint = lease.endpoint;
   }

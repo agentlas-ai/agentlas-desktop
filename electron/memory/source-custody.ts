@@ -86,7 +86,12 @@ export function withMemorySourceRunner(runner: Runner): Runner {
     state.sourceStarted = true;
     // A scope may wait for admission/slots before actual inference. Rotation
     // during that wait must not expose the original source to the new owner.
-    if (memorySourceSnapshot(token)) assertMemorySourceCustody(token);
+    if (memorySourceSnapshot(token)) {
+      //: this check precedes the runner call, so a refusal sent nothing: typed "not-dispatched" (its own code kept).
+      // Untyped, mcp/client.ts read it as a dispatched turn with no receipt and replayed it once.
+      try { assertMemorySourceCustody(token); }
+      catch (error) { throw (require("../runtime/runner") as typeof import("../runtime/runner")).markRefusedBeforeDispatch(error); }
+    }
     const result = await scopes.run(token, () => runner(request, events));
     // Keep the original token in the enclosing host scope on this failure; a
     // policy/terminal fallback cannot recapture the new account at registration.

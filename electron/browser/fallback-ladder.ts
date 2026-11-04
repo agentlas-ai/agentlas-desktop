@@ -271,6 +271,9 @@ export function classifyBrowserFailure(facts: BrowserFailureFacts): BrowserFailu
     if (facts.native.lastRefusal === "session-ended" || marks.has("native-session-ended")) return "native-session-ended";
     if (facts.native.lastRefusal === "tab-limit" || marks.has("native-tab-limit")) return "native-tab-limit";
     if (facts.native.lastRefusal === "session-unavailable" || marks.has("native-session-unavailable")) return "native-session-ended";
+    // The launcher could not lease a session from a grant that is still current (the relay was busy, a reset, a child that did not start):
+    // reconnecting the same browser is the repair, and the call, which never ran, is asked again.
+    if (marks.has("start-failed")) return "native-session-ended";
   }
   if (facts.surface === "dedicated" || facts.native?.failedOver) {
     const d = facts.dedicated;
@@ -353,12 +356,21 @@ const FAILURE_LABEL: Record<BrowserFailureCode, { ko: string; en: string }> = {
   "port-foreign": { ko: "브라우저 포트를 다른 프로그램이 쓰고 있습니다", en: "Another program holds the browser port" },
   "native-session-ended": { ko: "앱 안 브라우저 연결이 끝났습니다", en: "The in-app browser session ended" },
   "native-tab-limit": { ko: "앱 안 브라우저 탭이 가득 찼습니다", en: "The in-app browser has no free tab" },
-  "native-guest-destroyed": { ko: "앱 안 브라우저 창이 닫혔습니다", en: "The in-app browser window closed" },
+  // Not "the window closed": a destroyed window is brought back by the first rung, so a stop here means the run's browser could not be
+  // re-established (its grant ended, or the app that held it restarted). The sentence says only that.
+  "native-guest-destroyed": { ko: "앱 안 브라우저를 다시 연결하지 못했습니다", en: "The in-app browser could not be reconnected" },
   "login-wall": { ko: "사이트 로그인이 필요합니다", en: "The site needs a sign-in" },
   "human-check-required": { ko: "사람 확인이 필요해요", en: "A human check is needed" },
   "page-load-failed": { ko: "페이지가 열리지 않았습니다", en: "The page did not load" },
   "browser-mcp-not-attached": { ko: "이 실행에 브라우저 도구가 붙지 않았습니다", en: "The browser tool was not attached to this run" },
 };
+
+/** The failure and the rungs tried in plain words for the model that reads the tool result (the machine fields stay in _meta). */
+export function ladderStopPlainSentence(code: BrowserFailureCode, tried: readonly LadderTried[], language: "ko" | "en" = "en"): string {
+  const failure = FAILURE_LABEL[code][language];
+  const rungs = [...new Set(tried.filter((t) => t.rung !== "stop").map((t) => t.rung))].map((rung) => RUNG_LABEL[rung][language]);
+  return rungs.length ? `${failure}. ${language === "ko" ? "시도" : "Tried"}: ${rungs.join(" → ")}.` : `${failure}.`;
+}
 
 export function ladderStopReasonCode(code: BrowserFailureCode): string {
   return code === "human-check-required" ? HUMAN_CHECK_REASON : `browser_ladder_exhausted:${code}`;

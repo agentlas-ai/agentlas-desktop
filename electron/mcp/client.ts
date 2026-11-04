@@ -71,6 +71,9 @@ import { createHash, randomUUID } from "node:crypto";
 import { createToolObservationNovelty } from "./tool-observation-novelty";
 import { bindInvocationAgentContext, conversationSharesSession } from "../runtime/agent-context-admission";
 import { deriveSessionChannel } from "../runtime/session-scope";
+import { nativeBrowserGrantFailureDegrades } from "./native-browser-grant-degrade";
+import { hostRecoveryOf } from "../invocation/host-recovery";
+import { mayRunWithoutToolTable } from "./config-build-degrade";
 import { invokeWithUnsettledContinuation, unsettledContinuationCarriesRequest, unsettledContinuationPrompt } from "../runtime/unsettled-continuation";
 import { agentContextHostBinding, agentContextUnsettledTurn, markAgentContextContinuationHandle, type AgentContextCapability } from "../runtime/agent-context";
 import { createMainHostControlSink, createMainHostOperationBridge, withAdapterEffectChildDispatch } from "../invocation/adapter-effect-context";
@@ -2682,7 +2685,9 @@ async function runMcpInvocationInContext(
   // Personal ingress already committed this exact human message with its ACK.
   // Reuse that binding instead of appending a second copy during dispatch.
   let persistedUserMessageId: string | null = supervisorIngressMessage(getDb(), chat.id, req.runId)
-    ?? carriedFollowupMessages.at(-1) ?? null;
+    ?? carriedFollowupMessages.at(-1)
+    // A host recovery turn answers the owner's message that is already in the transcript (invocation/host-recovery.ts): no second copy.
+    ?? hostRecoveryOf(req)?.userMessageId ?? null;
   let userMessagePersisted = persistedUserMessageId !== null;
   // A product-authored continuation is not the person's turn. It stays durable
   // so the next turn keeps the context, but it is written as a system turn:
@@ -3962,6 +3967,8 @@ async function runMcpInvocationInContext(
     // log {stage:"unknown",code:"unknown"} (13x in production 2026-09-23) with no way to tell
     // tool selection from the browser grant from config materialization. Fixed vocabulary only.
     let mcpPrepStage = "prepare";
+    /** The native browser grant could not be made for a run that did not need the browser: it goes on without it (see the grant below). */
+    let browserGrantDegraded = false;
     try {
       if (req.forceBrowserCredentialRefresh) {
         mcpPrepStage = "browser-credential-refresh";
@@ -4366,10 +4373,47 @@ async function runMcpInvocationInContext(
         (installedTools.some((tool) => tool.id === "agentlas-browser") || req.requiredToolCatalogIds?.includes("agentlas-browser"))) {
         mcpPrepStage = "native-browser-grant";
         const { createCanonicalNativeBrowserGrant } = await import("../browser/main-browser-channel");
-        nativeBrowserGrant = await createCanonicalNativeBrowserGrant({ chatId: chat.id, runId: req.runId!,
+        const grantSignal = login?.ownerSignal ?? signal ?? new AbortController().signal;
+        const grantBrowser = () => createCanonicalNativeBrowserGrant({ chatId: chat.id, runId: req.runId!,
           presentation: executionContext ? "background" : browserPresentation,
           onScreenshot: (capture) => publishNativeCapture(capture),
-          permission: normalizedPermission, signal: login?.ownerSignal ?? signal ?? new AbortController().signal });
+          permission: normalizedPermission, signal: grantSignal });
+        const browserNeeded = !nativeBrowserGrantFailureDegrades({ aborted: false, browserToolMode: browserOnly || selectedContext.effectiveToolMode === "browser",
+          requiredToolCatalogIds: req.requiredToolCatalogIds });
+        try {
+          // A run that needs the browser waits for Main's broker a few seconds (three more asks) before it is refused; a run that does not
+          // need it goes on without the browser at the first failure, below.
+          nativeBrowserGrant = browserNeeded
+            ? await retryMcpConfigBuild(grantBrowser, { code: mcpConfigFailureCode, signal: grantSignal, current: isMcpConfigCurrent,
+              delaysMs: [500, 2_000, 5_000],
+              onRetry: ({ attempt, delayMs, code }) => console.info("[mcp] browser grant not ready, asking again", { runId: req.runId, attempt, delayMs, code }) })
+            : await grantBrowser();
+        } catch (grantError) {
+          /*
+           * The browser grant is the app's own broker answering (observed in useZ, One conversation: the broker did not answer
+           * in 25 s, "native-browser-broker-timeout", and the owner's message ended "the tool connections were not ready" before any
+           * model ran). A run that did not ask for the browser (the baseline capability of One, or a selection's pick) goes on without
+           * it, exactly like a browser whose host is not ready (hostBindingWithdrawn above); a run that needs the browser (owner tool
+           * mode, a declared required tool) and the owner's own stop keep the refusal.
+           */
+          if (!nativeBrowserGrantFailureDegrades({ aborted: grantSignal.aborted, browserToolMode: browserOnly || selectedContext.effectiveToolMode === "browser",
+            requiredToolCatalogIds: req.requiredToolCatalogIds })) {
+            // The browser the owner bound is not reachable: the typed cause the owner can act on and the blocked-Goal sweep resumes,
+            // never the generic "tool connections were not ready".
+            if (grantSignal.aborted || !isMcpConfigCurrent() || mcpConfigFailureCode(grantError) === "native-browser-grant-revoked") throw grantError;
+            throw Object.assign(new Error(locale === "ko"
+              ? "로그인된 Agentlas Browser 호스트를 지금 연결할 수 없어 이번 작업을 시작하지 않았습니다. Agentlas Browser를 다시 연결하면 이어서 진행합니다."
+              : "The authenticated Agentlas Browser host is not reachable right now, so this step did not start. Reconnect Agentlas Browser and it continues."),
+              { code: AGENTLAS_BROWSER_HOST_UNAVAILABLE });
+          }
+          browserGrantDegraded = true;
+          const degradedCode = mcpConfigFailureCode(grantError) ?? "native-browser-grant-unavailable";
+          tryRecordRunEvent({ runId: req.runId ?? `chat:${chat.id}`, chatId: chat.id, kind: "mcp_native_browser_degraded",
+            payload: { schemaVersion: 1, code: degradedCode, stage: "native-browser-grant" } });
+          const ko = "Agentlas Browser 연결을 지금 준비하지 못해 이번 작업은 브라우저 없이 진행합니다.";
+          const en = "Agentlas Browser could not be prepared right now, so this run continues without the browser.";
+          sink({ kind: "notice", notice: { level: "info", code: "native-browser-unavailable", message: locale === "ko" ? ko : en, i18n: { ko, en } } });
+        }
       }
       mcpPrepStage = "config-build";
       // Owner decision 2026-10-16: this exact graph step (run, chat, node) of a room-saved graph carries the room's
@@ -4407,7 +4451,8 @@ async function runMcpInvocationInContext(
         // 선언은 사용자가 화면에 그려 넣은 것이라, 선택기가 안 골랐다고 빠지면
         // "붙였는데 안 쓰인다"가 된다(커넥터 C06).
         catalogIds: [...new Set([
-          ...installedTools.map((tool) => tool.id),
+          // A browser whose grant could not be made is left out: bound without the grant it would be another browser, never the owner's signed-in one.
+          ...installedTools.filter((tool) => !(browserGrantDegraded && tool.id === "agentlas-browser")).map((tool) => tool.id),
           ...hubBridgedServerIds,
           ...(req.requiredToolCatalogIds ?? []),
           // The room's One Team for a room-saved graph step (graphTeamGrant above); no grant, no row.
@@ -4457,9 +4502,28 @@ async function runMcpInvocationInContext(
       });
       // The app's own host not being ready (tool gate not listening, OS host restarting, store lock) is waited out here, a few seconds
       // at most, before the run is given up; nothing has reached the model either way (turnDelivery "not-dispatched" below).
+      // The waits are used up and the app's tool host is still not ready. A plain conversation turn (nothing in it depends on a tool:
+      // no Goal, team, automation, required tool or One) runs as an ordinary turn without tools and says so, instead of ending in an
+      // error card; every run whose protocol needs its tools keeps the not-dispatched refusal that the send queue and the blocked-Goal
+      // sweep start again (shared/transient-send-refusal.ts). Only ever removes tools.
       const cfg = await retryMcpConfigBuild(buildConfig, {
         code: mcpConfigFailureCode, signal, current: isMcpConfigCurrent,
         onRetry: ({ attempt, delayMs, code }) => console.info("[mcp] tool table not ready, building again", { runId: req.runId, attempt, delayMs, code }),
+      }).catch((buildError: unknown): undefined => {
+        const buildCode = mcpConfigFailureCode(buildError);
+        if (!mayRunWithoutToolTable({ aborted: signal?.aborted === true, current: isMcpConfigCurrent(), code: buildCode,
+          requiredToolCatalogIds: req.requiredToolCatalogIds?.length ?? 0, scienceToolServer: Boolean(scienceToolServer), workSessionMain,
+          executionContext: Boolean(executionContext), goalToolsOffered: turnGoalToolsOffered, agentAppMode: Boolean(req.agentAppMode),
+          oneMode: Boolean(req.oneMode), toolModeBrowser: browserOnly || selectedContext.effectiveToolMode === "browser" })) throw buildError;
+        tryRecordRunEvent({ runId: req.runId ?? `chat:${chat.id}`, chatId: chat.id, kind: "mcp_tool_table_degraded",
+          payload: { schemaVersion: 1, code: buildCode ?? "mcp-runtime-config-unavailable", stage: mcpPrepStage } });
+        try { nativeBrowserGrant?.release(); } catch { /* the run goes on without it */ }
+        nativeBrowserGrant = undefined;
+        mcpAutoSelectionPrompt = "";
+        const ko = "도구 연결을 지금 준비하지 못해 이번 답변은 도구 없이 진행합니다.";
+        const en = "The tools could not be connected right now, so this reply is made without them.";
+        sink({ kind: "notice", notice: { level: "info", code: "tools-unavailable-continued", message: locale === "ko" ? ko : en, i18n: { ko, en } } });
+        return undefined;
       });
       mcpConfigCleanup = cfg?.cleanup;
       if (!isMcpConfigCurrent()) {
@@ -4561,17 +4625,27 @@ async function runMcpInvocationInContext(
               if (ids.includes("agentlas-browser") && !req.agentAppMode) {
                 const { createCanonicalNativeBrowserGrant } = await import("../browser/main-browser-channel");
                 const grantSignal = input.signal ?? signal ?? new AbortController().signal;
-                grant = await createCanonicalNativeBrowserGrant({ chatId: chat.id, runId: req.runId!,
-                  permission: input.permission!, signal: grantSignal,
-                  presentation: executionContext ? "background" : browserPresentation,
-                  onScreenshot: (capture) => publishNativeCapture(capture) });
+                try {
+                  grant = await createCanonicalNativeBrowserGrant({ chatId: chat.id, runId: req.runId!,
+                    permission: input.permission!, signal: grantSignal,
+                    presentation: executionContext ? "background" : browserPresentation,
+                    onScreenshot: (capture) => publishNativeCapture(capture) });
+                } catch (grantError) {
+                  // The browser is one tool of the worker's set: Main's broker not answering (native-browser-broker-timeout) takes only the
+                  // browser from it. The preparer runs the worker with the tools that did attach and tells the owner which one is missing.
+                  if (grantSignal.aborted || !isMcpConfigCurrent()) throw grantError;
+                  tryRecordRunEvent({ runId: req.runId!, chatId: chat.id, kind: "mcp_native_browser_degraded",
+                    payload: { schemaVersion: 1, code: mcpConfigFailureCode(grantError) ?? "native-browser-grant-unavailable", stage: "worker-browser-grant" } });
+                  throw new WorkerCapabilityMaterializationError(["agentlas-browser"]);
+                }
               }
               // agentlas-turn (harness_search/describe/call) binds to a chat and a run: without the run it is never written
               // into the worker's config, and a worker whose selection includes it fails before it starts. Production
               // 2026-10-18 05:48-05:57Z, Yotube room run ea52dcd9: 14 of 14 task-force and firm workers refused
               // materialization-unavailable ["agentlas-turn"] on the first production run of this path. The worker's turn
               // tools belong to the run that started it.
-              childConfig = await buildMcpConfigFile({ configKey: `worker-${generation}-${randomUUID()}`,
+              // The tool gate / proxy child may not be listening yet (a daemon restart, an update): wait for it like the run's own build does.
+              childConfig = await retryMcpConfigBuild(() => buildMcpConfigFile({ configKey: `worker-${generation}-${randomUUID()}`,
                 ...(req.runId ? { turnRunId: req.runId } : {}),
                 ...(input.attemptId.startsWith("task-force-child:") ? { taskForceMailEffectWitness: true } : {}),
                 skipDefaultSeed: true, catalogIds: ids, ...(grant ? { nativeBrowser: grant } : {}),
@@ -4580,7 +4654,10 @@ async function runMcpInvocationInContext(
                   permission: input.permission!, ...(input.cwd ? { cwd: input.cwd } : {}), chatId: chat.id,
                   ...(browserApprovalScope ? { approvalScope: browserApprovalScope } : {}),
                   ...(readOnlyObservationRun ? { readOnlyObservation: true as const } : {}),
-                  ...(req.simulation === true ? { simulation: true as const } : {}) } });
+                  ...(req.simulation === true ? { simulation: true as const } : {}) } }), {
+                code: mcpConfigFailureCode, ...(input.signal ? { signal: input.signal } : {}), current: isMcpConfigCurrent,
+                onRetry: ({ attempt, delayMs, code }) => console.info("[mcp] worker tool table not ready, building again", { runId: req.runId, attempt, delayMs, code }),
+              });
               const boundIds = new Set(childConfig?.includedServers?.flatMap((row) => [row.serverId, row.catalogId].filter(Boolean)));
               if (!childConfig || ids.some((id) => !boundIds.has(id)) || (grant && !childConfig.nativeBrowserBound)) {
                 const unavailableIds = ids.filter((id) => !boundIds.has(id)
@@ -7518,7 +7595,11 @@ async function runMcpInvocationInContext(
           const boundRequest = bindAssignedTargetMemoryRequest(bindAppMemoryRequest(bindSurfaceMemoryRequest(persistentRunnerRequest(requestForRuntime),scienceAliveRecall),
             {runId:req.runId,chatId:chat.id,actorId:memoryScope.agentId}), memoryScope.boundary);
           runnerInvoked = true;
-          result = await withCurrentHistoryProvider(async()=>{assertAppMemory();assertScienceAliveMemory();const returned=await selected.runner(boundRequest, attemptEvents.events);historyReturnedUsage=returned.observedUsage;assertAppMemory();assertScienceAliveMemory();return assertCurrentHistoryRunnerResult(returned);});
+          result = await withCurrentHistoryProvider(async()=>{
+            //: these guards run before the runner is called (runnerInvoked is already set): a refusal sent nothing, so it is
+            // typed "not-dispatched", never an unsettled turn. The same guards after the runner returned stay untyped.
+            try{assertAppMemory();assertScienceAliveMemory();}catch(refused){throw markRefusedBeforeDispatch(refused);}
+            const returned=await selected.runner(boundRequest, attemptEvents.events);historyReturnedUsage=returned.observedUsage;assertAppMemory();assertScienceAliveMemory();return assertCurrentHistoryRunnerResult(returned);});
           runtimeTerminalEvidence.closedHttpRefusal = runtimeFailureIsClosedHttpRefusal(result.failure, {
             text: result.text, nativeActivity: attemptEvents.nativeActivity(), aborted: signal?.aborted === true,
             observedUsage: result.observedUsage,
@@ -7558,6 +7639,9 @@ async function runMcpInvocationInContext(
             if (runtimeFailureBlocksReplay(runnerFailureFromError(error, selectedRuntime.kind))) throw error;
             // Unknown effect after dispatch, but never an anonymous one: the thrown error stays the standard cause (its
             // innermost code is still readable) with the delivery it carried (docs 31 W1, audit A7 M4).
+            //: the wrapper below keeps the thrown error as `cause`, but the error event reports only the wrapper's code;
+            // the first throw is recorded as a run-record-only diagnostic (no host-internal mark: it is not read as the app's own fault).
+            try { recordInternalFailureCause(req, error, true); } catch { /* evidence only; the unsettled outcome below stands */ }
             throw unsettledTurnError({ runtimeKind: selectedRuntime.kind, locale, cause: error });
           }
           if (attemptRefusedBeforeDispatch && await retryStoreBusyBeforeDispatch(error)) continue;
@@ -7823,9 +7907,22 @@ async function runMcpInvocationInContext(
         aborted: () => signal?.aborted === true,
         noModelWork: () => runtimeTerminalEvidence.closedHttpRefusal || runtimeTerminalEvidence.locallyRejected,
         leftBehind: () => (lastJournalTurnId ? agentContextUnsettledTurn(lastJournalTurnId) : null),
-        record(phase, delivery) {
+        record(phase, delivery, cause) {
           if (req.runId) tryRecordRunEvent({ runId: req.runId, chatId: chat.id, kind: "runtime_unsettled_continuation",
-            payload: { runtime: active.kind, phase, ...(delivery ? { turnDelivery: delivery } : {}) } });
+            payload: { runtime: active.kind, phase, ...(delivery ? { turnDelivery: delivery } : {}), ...(cause ? { cause } : {}) } });
+        },
+        // A transient cause outside the app (the provider at capacity, a lost stream): wait a little, say so, then continue in the same
+        // session. The wait ends at once on the owner's stop (the continuation then never starts).
+        wait(ms) {
+          const seconds = Math.max(1, Math.round(ms / 1000));
+          sink({ kind: "tool-use", activity: { code: "recovery_retry" }, status: locale === "ko"
+            ? `모델 공급자가 잠시 요청을 받지 못해 ${seconds}초 뒤 같은 대화에서 이어서 진행합니다.`
+            : `The model provider could not take the request for a moment; continuing in the same conversation in ${seconds}s.` });
+          return new Promise<void>((resolve) => {
+            const done = (): void => { clearTimeout(timer); signal?.removeEventListener("abort", done); resolve(); };
+            const timer = setTimeout(done, ms);
+            if (signal?.aborted) done(); else signal?.addEventListener("abort", done, { once: true });
+          });
         },
       }, request, hostAuthored);
     };

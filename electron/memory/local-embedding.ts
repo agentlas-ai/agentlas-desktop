@@ -101,6 +101,8 @@ type ModelDescriptor = {
   tokenizer: "WordPiece" | "Unigram";
   /** Unigram only: log-probability per token, indexed by token id. */
   unigramScores: Float64Array | null;
+  /** Unigram only: score of the unknown token for one uncovered character (lowest piece score minus 10, as SentencePiece). */
+  unigramUnknownScore: number;
   dimensions: number;
   vocabSize: number;
   vocab: Map<string, number>;
@@ -363,6 +365,7 @@ function verifyModelDirectory(directory: string): ModelDescriptor | null {
     if (tokenizerType !== "WordPiece" && tokenizerType !== "Unigram") return null;
     const vocab = new Map<string, number>();
     let unigramScores: Float64Array | null = null;
+    let unigramUnknownScore = Infinity;
     if (tokenizerType === "WordPiece") {
       const vocabObject = tokenizer?.model?.vocab as Record<string, unknown> | undefined;
       if (!vocabObject || Object.keys(vocabObject).length !== vocabSize) return null;
@@ -391,6 +394,8 @@ function verifyModelDirectory(directory: string): ModelDescriptor | null {
         if (!vocab.has(token)) vocab.set(token, id);
         unigramScores[id] = score;
       }
+      for (const score of unigramScores) if (score < unigramUnknownScore) unigramUnknownScore = score;
+      unigramUnknownScore -= UNIGRAM_UNKNOWN_PENALTY;
     }
     const unknownTokenId = vocab.get("[UNK]") ?? vocab.get("<unk>");
     if (unknownTokenId === undefined) return null;
@@ -408,10 +413,14 @@ function verifyModelDirectory(directory: string): ModelDescriptor | null {
     return {
       modelPath: root,
       modelSha256,
-      adapter: `${assetIdentity}:semantic-v1:${MODEL2VEC_HYBRID_DIMENSIONS}`,
+      // v2: the Unigram normalizer now pads ASCII punctuation and an uncovered character is one unknown token instead of
+      // emptying the text. Vectors stored under v1 no longer match this identity, so parseLocalEmbedding() rejects them and
+      // each reader re-embeds (memory entries are rewritten on read, see memory/store.ts toEntry).
+      adapter: `${assetIdentity}:semantic-v2:${MODEL2VEC_HYBRID_DIMENSIONS}`,
       supportsHangul,
       tokenizer: tokenizerType,
       unigramScores,
+      unigramUnknownScore,
       dimensions,
       vocabSize,
       vocab,
@@ -530,9 +539,16 @@ function bertPretokens(text: string): string[] {
 // ("배포 실패" → ▁ / 배포 / ▁실패) instead of collapsing into Jamo.
 const METASPACE = "\u2581";
 const UNIGRAM_MAX_PIECE_CHARS = 24;
+const UNIGRAM_UNKNOWN_PENALTY = 10;
+
+// tokenizer.json's normalizer pads each of the 32 ASCII punctuation marks with spaces ("Hello,World" -> "Hello , World")
+// before the whitespace collapse. Without it a real sentence segments into other pieces than the model was trained on:
+// on 1,090 chunks of this product's memory text, none matched the reference token ids and the vector's median cosine to the
+// reference vector was 0.916 (p5 0.80); with it 1,089 match and the cosine is 1.
+const UNIGRAM_PUNCTUATION = /[!-/:-@[-`{-~]/gu;
 
 function unigramNormalize(text: string): string {
-  const normalized = text.normalize("NFKC").split(/\s+/).filter(Boolean).join(" ");
+  const normalized = text.normalize("NFKC").replace(UNIGRAM_PUNCTUATION, " $& ").split(/\s+/).filter(Boolean).join(" ");
   if (!normalized) return "";
   return METASPACE + normalized.split(" ").join(METASPACE);
 }
@@ -540,9 +556,15 @@ function unigramNormalize(text: string): string {
 function unigramTokenIds(text: string, descriptor: ModelDescriptor): number[] {
   const scores = descriptor.unigramScores;
   if (!scores) return [];
-  const characters = Array.from(unigramNormalize(text));
-  const length = characters.length;
+  const normalized = unigramNormalize(text);
+  // Code point `i` spans normalized[offsets[i], offsets[i + 1]). A candidate piece is one slice of the normalized
+  // string, not a join of up to 24 freshly allocated one-character strings per start position (that allocation was
+  // ~80% of this function's time). A lone surrogate is its own code point, exactly as Array.from iterates it.
+  const offsets: number[] = [];
+  for (let at = 0; at < normalized.length; at += (normalized.codePointAt(at) ?? 0) > 0xffff ? 2 : 1) offsets.push(at);
+  const length = offsets.length;
   if (length === 0) return [];
+  offsets.push(normalized.length);
   const bestScore = new Float64Array(length + 1).fill(-Infinity);
   const bestStart = new Int32Array(length + 1).fill(-1);
   const bestId = new Int32Array(length + 1).fill(-1);
@@ -550,9 +572,11 @@ function unigramTokenIds(text: string, descriptor: ModelDescriptor): number[] {
   for (let start = 0; start < length; start += 1) {
     if (bestScore[start] === -Infinity) continue;
     const limit = Math.min(length, start + UNIGRAM_MAX_PIECE_CHARS);
+    let coversOneCharacter = false;
     for (let end = start + 1; end <= limit; end += 1) {
-      const id = descriptor.vocab.get(characters.slice(start, end).join(""));
+      const id = descriptor.vocab.get(normalized.slice(offsets[start], offsets[end]));
       if (id === undefined) continue;
+      if (end === start + 1) coversOneCharacter = true;
       const candidate = bestScore[start] + scores[id];
       if (candidate > bestScore[end]) {
         bestScore[end] = candidate;
@@ -560,10 +584,19 @@ function unigramTokenIds(text: string, descriptor: ModelDescriptor): number[] {
         bestId[end] = id;
       }
     }
+    // A character no piece covers becomes the unknown token for that character alone, scored below every real piece
+    // (SentencePiece and tokenizers do the same), and the rest of the text is segmented as usual. The unknown token is
+    // dropped from the result below. Before, one such character (a rare Hangul syllable, U+27E6) emptied the whole text's
+    // vector: 37 of 1,090 real memory chunks lost their semantic vector.
+    if (!coversOneCharacter) {
+      const candidate = bestScore[start] + descriptor.unigramUnknownScore;
+      if (candidate > bestScore[start + 1]) {
+        bestScore[start + 1] = candidate;
+        bestStart[start + 1] = start;
+        bestId[start + 1] = descriptor.unknownTokenId;
+      }
+    }
   }
-  // A character no piece covers leaves the path broken. Rather than emit an
-  // arbitrary partial segmentation, report nothing and let the caller fall back
-  // to lexical evidence.
   if (bestScore[length] === -Infinity) return [];
   const ids: number[] = [];
   for (let at = length; at > 0; at = bestStart[at]) {

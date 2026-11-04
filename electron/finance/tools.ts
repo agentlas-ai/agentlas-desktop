@@ -12,6 +12,8 @@ import { FinanceAnalystDraftSchema, FinanceAnalystIdSchema, FinanceAnalystRefSch
 import { FINANCE_NATIVE_VIEW, FinanceNativeResultSchema, type FinanceNativeResult, type FinanceNativePresentation } from '../../shared/finance-native-ui';
 import { financeReportSourceRecords, type FinanceReportSourceRecord } from '../../shared/finance-report-presentation';
 import type { UiInstanceView } from '../../shared/ui-instances';
+import { financeQueryDrawsSeries } from '../../shared/finance-native-transcript';
+import { FinanceCanvasInputSchema, financeCanvasLine, type FinanceCanvasBlock, type FinanceCanvasChart } from '../../shared/finance-canvas';
 import { FINANCE_GUIDES_REVISION, FINANCE_GUIDE_TOPICS, financeGuide, financeGuideMenu } from '../../shared/finance-guides';
 
 type Outcome = { status: 'ok'; financeReceipt?: FinanceReceiptReference; nativeUi?: FinanceNativePresentation; /** Absolute paths of files this call wrote: host-only, handed to the run's outputs (harness/run-produced-files.ts), never in the result. */ produced?: readonly string[]; data: unknown } | { status: 'refused' | 'unavailable'; reason: string; next?: string; data?: unknown };
@@ -23,6 +25,15 @@ const factsOnlyForCompanyFacts = (value: { metrics: string[]; facts?: unknown })
 /** An Analyst the model proposes: the stored skill's own fields, plus the exact current revision when it replaces an owner Analyst. */
 const analystDraftInput = FinanceAnalystDraftSchema.extend({ id: FinanceAnalystIdSchema.refine(value => value.startsWith('custom-')).optional(), expectedRevision: FinanceAnalystRevisionSchema.optional() }).strict()
   .refine(value => (value.id === undefined) === (value.expectedRevision === undefined));
+/** A guide topic the way a model writes it ("Earnings", "macro_regime", "risk") is the guide it names; a word that names no guide asks for the menu. */
+const GUIDE_WORDS: Record<string, string> = { earnings: 'earnings-event', earning: 'earnings-event', results: 'earnings-event', filing: 'earnings-event', macro: 'macro-regime', economy: 'macro-regime', election: 'macro-regime', policy: 'macro-regime', fed: 'macro-regime', etf: 'etf-fund', fund: 'etf-fund', bonds: 'bond-rates', bond: 'bond-rates', rates: 'bond-rates', yields: 'bond-rates', fx: 'fx-commodity', currency: 'fx-commodity', currencies: 'fx-commodity', commodity: 'fx-commodity', commodities: 'fx-commodity', gold: 'fx-commodity', oil: 'fx-commodity', dividend: 'dividend-income', dividends: 'dividend-income', income: 'dividend-income', portfolio: 'portfolio-review', holdings: 'portfolio-review', risk: 'risk-drawdown', drawdown: 'risk-drawdown', volatility: 'risk-drawdown', compare: 'compare-assets', comparison: 'compare-assets', versus: 'compare-assets', theme: 'thematic-research', thematic: 'thematic-research', sector: 'thematic-research', screen: 'thematic-research', claim: 'thesis-check', thesis: 'thesis-check', rumor: 'thesis-check', report: 'report-structure', stock: 'us-stock', company: 'us-stock', us: 'us-stock', korea: 'kr-stock', korean: 'kr-stock', kr: 'kr-stock', kospi: 'kr-stock', crypto: 'crypto', bitcoin: 'crypto', btc: 'crypto' };
+export function financeGuideTopic(value: unknown): unknown {
+  if (typeof value !== 'string') return value;
+  const key = value.trim().toLowerCase().replace(/[\s_]+/g, '-');
+  if ((FINANCE_GUIDE_TOPICS as readonly string[]).includes(key)) return key;
+  const word = key.split('-').find(part => GUIDE_WORDS[part]);
+  return word ? GUIDE_WORDS[word] : undefined;
+}
 const inputSchemas = {
   load: z.object({}).strict(),
   'analyst.list': z.object({}).strict(),
@@ -32,7 +43,7 @@ const inputSchemas = {
   'receipt.read': FinanceReceiptReadSchema,
   search: z.object({ query: z.string().min(1).max(200) }).strict(),
   'dashboard.feeds':z.object({}).strict(),
-  guide: z.object({ topic: z.enum(FINANCE_GUIDE_TOPICS as [string, ...string[]]).optional() }).strict(),
+  guide: z.object({ topic: z.preprocess(financeGuideTopic, z.enum(FINANCE_GUIDE_TOPICS as [string, ...string[]]).optional()) }).strip(),
   'portfolio.value':z.object({expectedRevision:revision.optional(),title:z.string().min(1).max(300).optional(),language:FinanceReportLanguageSchema.optional(),narrative:z.string().max(6000).optional()}).strict(),
   calculate:z.object({request:FinanceComputeRequestSchema,period:z.enum(['1M','3M','1Y','5Y','all']).optional(),title:z.string().min(1).max(300).optional(),language:FinanceReportLanguageSchema.optional(),narrative:z.string().max(6000).optional(),chartTitle:z.string().min(1).max(300).optional(),metricsTitle:z.string().min(1).max(300).optional(),metricLabels:z.record(z.string().max(80),z.string().min(1).max(120)).refine(value=>Object.keys(value).length<=16).optional(),highlightMetricIds:z.array(z.string().min(1).max(80)).max(8).optional()}).strict(),
   'asset.add': z.object({ query: z.string().min(1).max(200), symbol: z.string().min(1).max(80).optional() }).strict(),
@@ -53,6 +64,7 @@ const inputSchemas = {
   'monitor.runs': z.object({ monitorId: id, cursor: z.string().min(1).max(2000).optional(), limit: z.number().int().min(1).max(50).optional() }).strict(),
   'monitor.schedule': z.object({ monitorId: id, scheduleHuman: z.enum(['daily-09:00', 'weekday-09:00', 'hourly', 'every-5m']) }).strict(),
   'monitor.pause': z.object({ monitorId: id }).strict(),
+  present: FinanceCanvasInputSchema,
 };
 type Action = keyof typeof inputSchemas;
 /** Pure reads (main-work recovery may repeat one that lost its answer). Managed provider reads are excluded below. */
@@ -77,7 +89,10 @@ export function financePluginOperations(values: unknown[]): FinanceOperation[] {
 export function financeNativeView(action:string,raw:Record<string,unknown>,data:unknown,sources?:readonly FinanceReportSourceRecord[]):FinanceNativeResult['view']|null {
   const value=data&&typeof data==='object'&&!Array.isArray(data)?data as Record<string,unknown>:{};
   // A card shows something to read: an empty search or a query that returned no rows (failure, unconnected source) stays a tool result the model reports.
-  if(action==='search')return (data as import('../../shared/finance').FinanceSearchResult).assets?.length?{kind:'search',query:String(raw.query??''),result:data as import('../../shared/finance').FinanceSearchResult}:null;
+  // Ticker candidates are what the model read to pick an asset, not an outcome for the owner; the phone never draws them either (shared/finance-native-transcript.ts).
+  if(action==='search')return null;
+  // The answer's own result card: drawn exactly as the model's checked figures and the host's own price reads made it.
+  if(action==='present')return (value.view as FinanceNativeResult['view']|undefined)??null;
   // Holdings the assistant read are shown for the owner to edit and save; the card is the only place a save can happen.
   if(action==='portfolio.propose'){const proposal=data as import('./portfolio-proposal').FinancePortfolioProposal;return {kind:'holdings',draft:proposal.draft,baseRevision:proposal.baseRevision};}
   const workspace=value.workspace as import('../../shared/finance').FinanceWorkspace|undefined;
@@ -94,6 +109,8 @@ export function financeNativeView(action:string,raw:Record<string,unknown>,data:
   }
   const queried=(action==='query'?data:value.result) as import('../../shared/finance').FinanceDataResult|undefined;
   if((action==='query'||action==='query.save'&&value.result)&&!queried?.rows?.length)return null;
+  // A read (filings, news, company facts, keyword search, price rows) stays a tool result the model reports; only a series the owner can see drawn is a card.
+  if(action==='query'&&!financeQueryDrawsSeries({metrics:Array.isArray(raw.metrics)?raw.metrics.map(String):[]},queried as import('../../shared/finance').FinanceDataResult))return null;
   if(action==='query'||action==='query.save'&&value.result)return {kind:'query',request:z.object(queryShape).omit({facts:true}).strict().parse({query:raw.query,assetIds:raw.assetIds,metrics:raw.metrics,period:raw.period}),result:(action==='query'?data:value.result) as import('../../shared/finance').FinanceDataResult};
   return null;
 }
@@ -126,7 +143,7 @@ async function reportReadSources(scope:import('./store').FinanceScope,data:unkno
 
 async function presentFinanceResult(action:Action,raw:Record<string,unknown>,data:unknown,ctx:ToolContext,scope:import('./store').FinanceScope):Promise<FinanceNativePresentation|undefined>{
   if(ctx.dryRun||ctx.chatId==='ui'||!ctx.runId)return undefined;
-  if(!['search','query','query.save','calculate','portfolio.value','report.create','report.read','portfolio.propose'].includes(action))return undefined;
+  if(!['search','query','query.save','calculate','portfolio.value','report.create','report.read','portfolio.propose','present'].includes(action))return undefined;
   try {
     scope.assertCurrent();ctx.signal?.throwIfAborted();
     const {nativePortOwnerScope,retainNativePortResult}=await import('../harness/tool-dispatch');
@@ -139,7 +156,7 @@ async function presentFinanceResult(action:Action,raw:Record<string,unknown>,dat
     const {uiPresent,uiUpdate}=await import('../harness/ui-instances');
     const awaitingOwner=view.kind==='holdings';
     const presentation={...retained,structuredResultRef:retained.resultRef,viewId:FINANCE_NATIVE_VIEW,title:'Finance',
-      fallbackText:awaitingOwner?'Finance holdings review: nothing is saved until the owner confirms':'Finance',
+      fallbackText:awaitingOwner?'Finance holdings review: nothing is saved until the owner confirms':view.kind==='canvas'||view.kind==='earnings'||view.kind==='impact'?`Finance ${view.kind}`:'Finance',
       state:awaitingOwner?'awaiting-input':'ready',display:'inline',reason:awaitingOwner?'decision':'result'};
     // A report is built over several calls of one run; the owner sees one card that follows it, not a copy per call.
     const reportInstance=view.kind==='report'?`ui_finance_${createHash('sha256').update(JSON.stringify([ctx.chatId,ctx.runId,view.report.id])).digest('hex').slice(0,32)}`:null;
@@ -321,6 +338,29 @@ export async function callFinanceTool(action: Action, raw: Record<string, unknow
       case 'monitor.runs': data = await finance.monitorRuns(scope, parseArguments(inputSchemas['monitor.runs'],raw,action)); break;
       case 'monitor.schedule': data = await finance.schedule(scope, parseArguments(inputSchemas['monitor.schedule'],raw,action)); break;
       case 'monitor.pause': data = await finance.pause(scope, parseArguments(inputSchemas['monitor.pause'],raw,action)); break;
+      case 'present': {
+        const args = parseArguments(inputSchemas.present,raw,action);
+        const warnings: string[] = [];
+        // A chart's series are never the model's: the host reads each one (finance.query) and draws those, or names what it could not read.
+        const blocks: FinanceCanvasBlock[] = [];
+        for (const block of args.blocks) {
+          if (block.type !== 'chart') { blocks.push(block); continue; }
+          const period = block.from && Date.now() - Date.parse(`${block.from}T00:00:00Z`) > 25 * 864e5 && block.period === '1M' ? '3M' : block.period;
+          const lines: FinanceCanvasChart['lines'] = [], missing: string[] = [];
+          for (const series of block.series) {
+            const label = series.label ?? series.query ?? series.assetId ?? series.metric;
+            try {
+              const read = await finance.query(scope, { query: series.query ?? label, assetIds: series.metric === 'price_history' ? [series.assetId!] : [], metrics: [series.metric], period }, ctx.signal);
+              const line = read.status === 'ok' || read.status === 'partial' ? financeCanvasLine(read, label) : null;
+              if (line) lines.push(block.from ? { ...line, points: line.points.filter((point, i, all) => point.date >= block.from! || all[i + 1]?.date >= block.from!) } : line); else missing.push(label);
+            } catch { ctx.signal?.throwIfAborted(); missing.push(label); }
+          }
+          if (missing.length) warnings.push(`finance_chart_series_unavailable: ${missing.join(', ')}`);
+          blocks.push({ type: 'chart', ...(block.title ? { title: block.title } : {}), ...(block.width ? { width: block.width as FinanceCanvasChart['width'] } : {}), mode: (block.mode as 'level' | 'change' | undefined) ?? (lines.length > 1 ? 'change' : 'level'), lines, annotations: block.annotations, missing });
+        }
+        data = { view: { kind: 'canvas', ...args, blocks }, warnings };
+        break;
+      }
     }
     scope.assertCurrent();
     if(action==='query'&&data&&typeof data==='object'&&'warnings'in data&&Array.isArray(data.warnings)&&data.warnings.includes('finance_social_period_invalid'))data={...data,supportedPeriods:[...FINANCE_SOCIAL_SUPPORTED_PERIODS]};
@@ -331,11 +371,16 @@ export async function callFinanceTool(action: Action, raw: Record<string, unknow
     const dataFailure=action==='query'?financeDataFailure(data):null;
     if(dataFailure)return { status: 'unavailable', reason: dataFailure.reason, next: dataFailure.next, data };
     const nativeUi=await presentFinanceResult(action,raw,data,ctx,scope);
+    if(action==='present'){
+      const shown=(data as {view:{kind:string};warnings:string[]});
+      if(nativeUi?.status!=='presented')return { status: 'unavailable', reason: 'finance_ui_not_presented', next: 'The card could not be shown. Give the same findings in the answer text.' };
+      return { status: 'ok', financeReceipt, nativeUi, data: { shown: true, warnings: shown.warnings, next: 'The card is shown under your answer. The answer text is the conclusion in one or two sentences; the card carries the figures and sources.' } };
+    }
     // The card is the whole effect of a proposal: without it nothing reached the owner.
     if(action==='portfolio.propose'&&nativeUi?.status!=='presented')return { status: 'unavailable', reason: 'finance_ui_not_presented', next: 'No review card could be shown, so nothing was proposed. The owner can add holdings from the Finance screen (photo or manual entry).' };
     return { status: 'ok', financeReceipt, ...(nativeUi?{nativeUi}:{}), ...(produced?{produced}:{}), data };
   } catch (error) {
-    if (error instanceof z.ZodError) return { status: 'refused', reason: 'finance_arguments_invalid', next: 'Read the operation schema and supply its exact fields.', ...(action === 'analyst.draft' ? { data: { issues: error.issues.slice(0, 8).map(issue => ({ path: issue.path.join('.'), message: issue.message })) } } : {}) };
+    if (error instanceof z.ZodError) return { status: 'refused', reason: 'finance_arguments_invalid', next: 'Read the operation schema and supply its exact fields.', ...(action === 'analyst.draft' || action === 'present' ? { data: { issues: error.issues.slice(0, 8).map(issue => ({ path: issue.path.join('.'), message: issue.message })) } } : {}) };
     if (action === 'portfolio.propose' && error instanceof Error && error.message === 'finance_portfolio_rows_invalid') return { status: 'refused', reason: 'finance_portfolio_rows_invalid', data: { issues: (error as Error & { issues?: unknown }).issues ?? [] }, next: 'Fix the listed fields (null for anything not visible; unrecognized keys are refused) and call finance.portfolio.propose again. Nothing was shown to the owner.' };
     const message = error instanceof Error ? error.message : '';
     return { status: 'refused', reason: /^finance_[a-z0-9_]+$/.test(message) ? message : 'finance_operation_failed', ...(message==='finance_social_period_invalid'?{data:{supportedPeriods:[...FINANCE_SOCIAL_SUPPORTED_PERIODS]}}:{}), next: 'Read the current Finance workspace and source status before retrying.' };
@@ -421,22 +466,47 @@ const descriptors: { action: Action; purpose: string; required: string[]; inputS
   { action: 'monitor.runs', purpose: 'Read a bounded snapshot page of actual Finance monitor runs and their report references, or explicit index-building progress.', required: ['monitorId'], inputSchema: schema(['monitorId'], { monitorId: key, cursor: text, limit: { type: 'integer', minimum: 1, maximum: 50 } }) },
   { action: 'monitor.schedule', purpose: 'Enable an existing Finance monitor through the host scheduler.', required: ['monitorId', 'scheduleHuman'], inputSchema: schema(['monitorId', 'scheduleHuman'], { monitorId: key, scheduleHuman: { enum: ['daily-09:00', 'weekday-09:00', 'hourly', 'every-5m'] } }) },
   { action: 'monitor.pause', purpose: 'Pause future executions of the bound Finance monitor without requiring a view revision.', required: ['monitorId'], inputSchema: schema(['monitorId'], { monitorId: key }) },
+  { action: 'present', purpose: 'Show the owner a result card under your answer text; an answer that reports figures, from Finance or the web, ends with one call after your reads. Compose it from blocks: kpis (headline figures with prior values), bars (one or two series per row), ranges (low–high bands), chart (the host reads and draws the series), leans (direction rows with a reason), table, heatmap, allocation, timeline, checklist, gauge, note. Use only what you read this turn and give its sources. Amounts are in full units (481000000, not 481) or text like "481.0M". A 12-column grid: widths full, two_thirds, half, third.', required: ['title', 'blocks', 'sources'], inputSchema: (() => {
+    const s = (maxLength: number) => ({ type: 'string', maxLength }), amount = { type: ['number', 'string'] }, units = { enum: ['usd', 'usd_per_share', 'percent', 'count', 'x', 'bp', 'krw', 'eur', 'jpy', 'gbp', 'cny', 'text'] }, tones = { enum: ['up', 'down', 'warn', 'info', 'neutral'] };
+    const common = { title: s(80), width: { enum: ['full', 'two_thirds', 'half', 'third'] } }, day = { type: 'string', format: 'date' };
+    const blockOf = (type: string, required: string[], properties: Record<string, unknown>) => ({ type: 'object', additionalProperties: false, required: ['type', ...required], properties: { type: { const: type }, ...common, ...properties } });
+    return { type: 'object', additionalProperties: false, required: ['title', 'blocks', 'sources'], properties: {
+      title: s(80), badge: { ...s(12), description: 'A ticker or region.' }, meta: s(120),
+      chips: { type: 'array', maxItems: 4, items: schema(['text'], { text: s(60), tone: tones, icon: { enum: ['up', 'down', 'clock', 'alert', 'target', 'check', 'none'] } }) },
+      lead: { ...schema([], { asked: { ...s(60), description: 'The owner\'s word for the entity, when it differs (Halo).' }, matched: { ...s(120), examples: ['Halozyme Therapeutics · HALO'] } }), description: 'What the owner\'s words were matched to; omit when nothing was resolved.' },
+      blocks: { type: 'array', minItems: 1, maxItems: 12, items: { oneOf: [
+        blockOf('kpis', ['items'], { items: { type: 'array', minItems: 1, maxItems: 6, items: schema(['label', 'value'], { label: s(40), value: amount, unit: units, prior: amount, change: { type: 'number', description: 'Percent; computed from prior when omitted.' }, note: s(60), tone: tones }) } }),
+        blockOf('bars', ['rows'], { unit: units, series: { type: 'array', maxItems: 2, items: s(30) }, rows: { type: 'array', minItems: 1, maxItems: 12, items: schema(['label', 'values'], { label: s(40), values: { type: 'array', minItems: 1, maxItems: 2, items: amount }, note: s(40) }) } }),
+        blockOf('ranges', ['items'], { unit: units, change: { enum: ['raised', 'maintained', 'lowered', 'new', null] }, items: { type: 'array', minItems: 1, maxItems: 5, items: schema(['label', 'low', 'high'], { label: s(40), low: amount, high: amount, unit: units, marker: amount, markerLabel: s(24) }) } }),
+        blockOf('chart', ['series'], { series: { type: 'array', minItems: 1, maxItems: 4, items: schema([], { assetId: { ...key, description: 'price_history: an asset finance.search returned or a saved one.' }, metric: { enum: ['price_history', 'macro_series', 'fx_rates'] }, query: { ...s(80), description: 'macro_series: a FRED id; fx_rates: BASE/QUOTE.' }, label: s(40) }) }, period: { enum: ['1M', '3M', '1Y', '5Y', 'all'] }, mode: { enum: ['level', 'change'] }, from: day, annotations: { type: 'array', maxItems: 4, items: schema(['date', 'label'], { date: day, label: s(36) }) } }),
+        blockOf('leans', ['rows'], { rows: { type: 'array', minItems: 1, maxItems: 10, items: schema(['name', 'direction', 'low', 'high', 'reason'], { name: s(48), direction: { enum: ['supportive', 'pressure', 'mixed', 'unclear', 'depends'] }, low: { type: 'number', minimum: -2, maximum: 2 }, high: { type: 'number', minimum: -2, maximum: 2 }, reason: s(160) }) } }),
+        blockOf('table', ['columns', 'rows'], { columns: { type: 'array', minItems: 1, maxItems: 8, items: schema(['label'], { label: s(30), format: { enum: ['text', 'number', 'usd', 'percent', 'change', 'multiple'] } }) }, rows: { type: 'array', minItems: 1, maxItems: 20, items: { type: 'array', maxItems: 8, items: { type: ['string', 'number', 'null'] } } } }),
+        blockOf('heatmap', ['rows', 'columns', 'values'], { rows: { type: 'array', maxItems: 12, items: s(30) }, columns: { type: 'array', maxItems: 12, items: s(16) }, values: { type: 'array', maxItems: 12, items: { type: 'array', maxItems: 12, items: { type: ['number', 'null'] } } }, format: { enum: ['percent', 'change', 'number', 'correlation'] } }),
+        blockOf('allocation', ['items'], { items: { type: 'array', minItems: 1, maxItems: 12, items: schema(['label', 'weight'], { label: s(30), weight: { type: 'number' }, target: { type: 'number' }, note: s(30) }) } }),
+        blockOf('timeline', ['items'], { items: { type: 'array', minItems: 1, maxItems: 10, items: schema(['date', 'label'], { date: day, label: s(48), detail: s(120), tone: tones }) } }),
+        blockOf('checklist', ['items'], { items: { type: 'array', minItems: 1, maxItems: 10, items: schema(['text', 'state'], { text: s(90), state: { enum: ['pass', 'fail', 'watch', 'unknown'] }, detail: s(140) }) } }),
+        blockOf('gauge', ['label', 'value', 'min', 'max'], { label: s(40), value: amount, min: amount, max: amount, unit: units, low: s(20), high: s(20), note: s(120) }),
+        blockOf('note', ['text'], { badge: s(12), verdict: schema(['text'], { text: s(30), tone: tones }), text: { ...s(400), description: '**bold** marks a key phrase.' } }),
+      ] } },
+      sources: { type: 'array', minItems: 1, maxItems: 8, items: schema(['title', 'url'], { title: s(160), url: { type: 'string', format: 'uri' } }) },
+    } };
+  })() },
 ];
 const managedFinanceHostAtImport=wasManagedOneConfigured();
 export const FINANCE_PORTS = descriptors.map(({ action, purpose, required, inputSchema }) => {
-  composeDeclaredPrompt([{ id: `tool.finance.${action}.schema`, revision: action==='query.save'?7:action==='query'?6:action==='apply'?3:['calculate','report.create','portfolio.propose'].includes(action)?2:1, stability: 'versioned-content', changeTriggers: ['release', 'output-schema'], text: JSON.stringify(inputSchema) }]);
+  composeDeclaredPrompt([{ id: `tool.finance.${action}.schema`, revision: action==='query.save'?7:action==='query'?6:action==='apply'?3:['calculate','report.create','portfolio.propose','present'].includes(action)?2:1, stability: 'versioned-content', changeTriggers: ['release', 'output-schema'], text: JSON.stringify(inputSchema) }]);
   return { operationId: `finance.${action}`, kind: writes.has(action) ? 'command' as const : 'query' as const, required, inputSchema,
     ...(action === 'monitor.pause' ? { terminalTargetKeys: ['monitorId'] as const, terminalUnderReadPermission: true as const } : {}),
     ...(action === 'monitor.run' ? { callTimeoutMs: FINANCE_MONITOR_RUN_TIMEOUT_MS } : {}),
     // The provider client accepts requests only after these actual Managed metadata are latched below.
     ...(managedFinanceHostAtImport&&['search','query','asset.add','query.save'].includes(action)?{callTimeoutMs:60000}:{}),
     ...(effectFreeReads.has(action)&&!(managedFinanceHostAtImport&&['search','query'].includes(action)) ? { effectFreeRead: true as const } : {}),
-    purpose: composeDeclaredPrompt([{ id: `tool.finance.${action}.description`, revision: action === 'query.save' ? 2 : action === 'query' ? 4 : 1, stability: 'fixed-policy', changeTriggers: ['release'], text: purpose }]),
+    purpose: composeDeclaredPrompt([{ id: `tool.finance.${action}.description`, revision: action === 'query.save' ? 2 : action === 'present' ? 4 : action === 'query' ? 4 : 1, stability: 'fixed-policy', changeTriggers: ['release'], text: purpose }]),
     handler: (args: Record<string, unknown>, ctx: HarnessCallContext) => callFinanceTool(action, args, ctx) };
 });
 installManagedFinanceHostPolicy(FINANCE_PORTS);
 // analyst r2 (2026-10-28): the retired analyst_draft name corrected to the declared finance.analyst.draft; first registered here (its bytes reached the model through skill.read unregistered).
-const FINANCE_SKILL_REVISION: Record<string, number> = { index: 5, research: 5, workspace: 3, monitor: 3, analyst: 2 };
+const FINANCE_SKILL_REVISION: Record<string, number> = { index: 13, research: 6, workspace: 3, monitor: 3, analyst: 2 };
 registerDeclaredPromptModule({ id: 'tool.finance.guide.content', revision: FINANCE_GUIDES_REVISION, stability: 'versioned-content', changeTriggers: ['release'] });
 for (const workflow of ['index', 'research', 'workspace', 'monitor', 'analyst']) registerDeclaredPromptModule({ id: `plugin.finance.skill.${workflow}`, revision: FINANCE_SKILL_REVISION[workflow], stability: 'versioned-content', changeTriggers: ['release', 'skill-package'] });
 

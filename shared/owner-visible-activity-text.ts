@@ -267,6 +267,30 @@ const KNOWN_FAILURES: readonly KnownFailure[] = [
     },
   },
   {
+    // The owner changed (edited, paused, replaced) this automation while a run of it was executing, or a second start met the first.
+    match: /automation_goal_execution_owner_changed|automation_stop_handle_already_bound|graph_occurrence_custody_changed/i,
+    reason: {
+      ko: "이 자동화가 실행되는 동안 설정이 바뀌었거나 다른 실행이 시작돼, 이 실행은 멈췄어요.",
+      en: "This automation was changed or started again while this run was executing, so this run stopped.",
+    },
+    action: {
+      ko: "바뀐 설정으로 다음 실행이 이어서 진행돼요. 지금 하려면 [다시 실행]을 눌러 주세요.",
+      en: "The next run continues with the changed settings. To go now, choose [Run again].",
+    },
+  },
+  {
+    // The app was closed or restarted, or another copy of it took over the run's lease, while the step ran (observed in use/10-30).
+    match: /\bapp_closed\b|lease ownership lost|automation_lease_lost/i,
+    reason: {
+      ko: "앱이 종료되거나 다시 시작되면서 이 단계가 멈췄어요.",
+      en: "The app closed or restarted while this step was running.",
+    },
+    action: {
+      ko: "앱이 켜져 있는 동안 다음 실행이 이 단계부터 이어서 진행돼요.",
+      en: "The next run, while the app is open, continues from this step.",
+    },
+  },
+  {
     match: /\bstore_busy\b|database is locked/i,
     reason: {
       ko: "앱 저장소가 잠시 바빴어요.",
@@ -385,4 +409,32 @@ export function ownerFailureText(
     reason: ownerFailureReason(failure.reason || failure.code, locale, failure.code),
     nextAction: ownerFailureNextAction(failure.nextAction, locale, { reason: failure.reason, code: failure.code }),
   };
+}
+
+/**
+ * A step's failure reason as it is stored on the run (run_automation node_failures_json), read by Hope, the phone and the run history as
+ * well as the flow page. Run-graph used to store the thrown message as is: `graph_mcp_call_failed:### Error\nError: browserBackend.callTool: ...`
+ * or a bare `work_recovery_*` code (observed in use: 13 failures on one automation). A tool's own error answer keeps what the
+ * tool said (that is the external cause: the page, the server) behind one plain lead; any other machine-only message becomes the known
+ * sentence or the generic one; a sentence stays untouched. The raw message stays in the run's failure event.
+ */
+export function plainNodeFailureReason(raw: string | null | undefined, locale: OwnerActivityLocale): string {
+  const text = String(raw ?? "").trim();
+  const tool = /^graph_mcp_call_failed:\s*([\s\S]*)$/.exec(text);
+  if (tool) {
+    const said = tool[1]
+      .replace(/^###\s*Error\s*/i, "")
+      .split(/\n\s*(?:Call log:|-\s)/)[0]
+      .replace(/^(?:\w*Error:\s*)+/, "")
+      .replace(/^browserBackend\.callTool:\s*/, "")
+      .replace(/\s+/g, " ").trim().slice(0, 200);
+    const lead = locale === "ko" ? "이 단계가 쓴 도구가 오류로 답했어요" : "The tool this step used answered with an error";
+    return said ? `${lead}: ${said}` : `${lead}.`;
+  }
+  if (!text) return localized(FAILURE_GENERIC_REASON, locale);
+  const recognised = ownerFailureReasonOrNull(text, locale);
+  if (recognised) return recognised;
+  // No sentence and no known code, but a machine token inside: the generic sentence, never the token.
+  if (new RegExp(MACHINE_TOKEN_RE.source).test(text)) return localized(FAILURE_GENERIC_REASON, locale);
+  return text;
 }

@@ -29,9 +29,11 @@ export interface FinanceGuide {
   pitfalls: readonly string[];
   /** The shape of the written answer or saved report. */
   report: readonly string[];
+  /** The finance.present card for this kind of answer: these blocks, in this order and these widths; leave a block out only when its data could not be read. */
+  card: readonly string[];
   related: readonly string[];
 }
-export const FINANCE_GUIDES_REVISION = 1;
+export const FINANCE_GUIDES_REVISION = 5;
 const step = (tool: FinanceGuideTool, use: string, metric?: string, period?: string): FinanceGuideStep => ({ tool, ...(metric ? { metric } : {}), ...(period ? { period } : {}), use });
 
 const COMMON_REPORT = ['Start with the answer in one or two sentences, then the two or three facts that carry it, each with its date.', 'Name the main uncertainty and what would change the view.', 'Say which parts came from a tool result and which are your own reading; keep an assumption visibly an assumption.'] as const;
@@ -52,7 +54,7 @@ export const FINANCE_GUIDES: readonly FinanceGuide[] = Object.freeze([
       'Debt, share count, valuation multiples, analyst estimates and segment data are not in the tool results: say "not available here" rather than estimate. A trailing P/E is computable only from a price and four consecutive quarterly diluted EPS values you actually have, and must be labelled derived with its dates.',
     ],
     pitfalls: ['A restated figure appears under a later filing; use the newest filed value for a period and say so.', 'Price history is raw close, not total return.', 'A similar ticker or an ADR is another security.'],
-    report: COMMON_REPORT, related: ['earnings-event', 'dividend-income', 'compare-assets'],
+    report: COMMON_REPORT, card: ["Use exactly these blocks in this order, and no others: kpis (full) — revenue, the main reported line, net income, diluted EPS (adjusted as its note), each with its prior-year value; bars (two_thirds) — the dollar lines, prior vs current period, series named by period; ranges (third) — guidance, with its change. Without guidance read, use timeline (third) of the report dates instead.", "Chips: guidance direction, next report date (clock). Lead: the company and ticker the owner's word was matched to."], related: ['earnings-event', 'dividend-income', 'compare-assets'],
   },
   {
     id: 'kr-stock', title: 'Korea-listed company (KOSPI, KOSDAQ)', kind: 'asset', when: 'A Korean company or a KRW-priced listing.',
@@ -69,7 +71,7 @@ export const FINANCE_GUIDES: readonly FinanceGuide[] = Object.freeze([
       'Never convert KRW prices into USD or the reverse. Show each currency on its own; an FX series is context, not a conversion.',
     ],
     pitfalls: ['Ticker without the suffix may resolve to a different listing.', 'Dividend, foreign-ownership and short-selling data are not available from these sources.', 'The provider\'s timestamps are exchange-local; quote the date it returns.'],
-    report: COMMON_REPORT, related: ['fx-commodity', 'thesis-check', 'compare-assets'],
+    report: COMMON_REPORT, card: ["Use exactly these blocks in this order, and no others, unit krw, written in Korean when the owner wrote Korean: kpis (full) — 매출, 영업이익, 순이익, the segment that drives it, each with its prior value; bars (two_thirds) — segments, prior vs current; ranges (third) — guidance or consensus; without them, timeline (third) of the report dates."], related: ['fx-commodity', 'thesis-check', 'compare-assets'],
   },
   {
     id: 'etf-fund', title: 'ETF or fund', kind: 'asset', when: 'What an ETF holds, what it costs to hold, and how it behaved.',
@@ -85,7 +87,7 @@ export const FINANCE_GUIDES: readonly FinanceGuide[] = Object.freeze([
       'Fees, tracking error, distribution yield and securities lending are not in the sources: say they are not available here and point to the issuer\'s fact sheet instead of quoting numbers from memory.',
     ],
     pitfalls: ['A fund the catalog does not support has price history only; do not infer holdings from its name or a similar fund.', 'A gold trust is not a registered 1940 Act ETF and holds no securities to look through.', 'Price-only history excludes distributions.'],
-    report: COMMON_REPORT, related: ['compare-assets', 'portfolio-review', 'risk-drawdown'],
+    report: COMMON_REPORT, card: ["Use exactly these blocks in this order, and no others: kpis (full) — expense ratio, holdings count, top-10 weight or overlap; bars (half) — the largest holdings' weights (one series per fund); chart (half) — the funds' closes, mode change; note (full) — what holding it, or both, means."], related: ['compare-assets', 'portfolio-review', 'risk-drawdown'],
   },
   {
     id: 'bond-rates', title: 'Bonds and interest rates', kind: 'asset', when: 'Where yields are, what the curve says, real versus nominal rates.',
@@ -101,7 +103,7 @@ export const FINANCE_GUIDES: readonly FinanceGuide[] = Object.freeze([
       'Duration arithmetic is allowed as a labelled approximation: price change is about minus modified duration times the yield change; state the duration you assumed.',
     ],
     pitfalls: ['The par curve is a government curve, not an individual bond price or yield to maturity.', 'Credit spreads and corporate bond prices are not available here.', 'Yields are % per annum; spreads are percentage points.'],
-    report: COMMON_REPORT, related: ['macro-regime', 'fx-commodity'],
+    report: COMMON_REPORT, card: ["Use exactly these blocks in this order, and no others: chart (half) — the yields (FRED DGS2, DGS10) or the fund's closes; bars (half) — estimated price change by fund or duration, one series; gauge (third) — duration; note (two_thirds) — what would change the view."], related: ['macro-regime', 'fx-commodity'],
   },
   {
     id: 'crypto', title: 'Crypto assets', kind: 'asset', when: 'A coin or crypto ETF price, trend and risk.',
@@ -113,7 +115,7 @@ export const FINANCE_GUIDES: readonly FinanceGuide[] = Object.freeze([
     ],
     read: ['Crypto trades around the clock; the daily bar is the provider\'s, so quote its date and do not describe it as a closing price of a session.', 'Describe the range as high and low closes from the rows; do not state a volatility figure unless you computed it from rows you hold, and then label it.'],
     pitfalls: ['No filings, earnings or fundamentals exist for a coin; do not borrow stock vocabulary.', 'On-chain data, exchange order books and derivatives are not available here.', 'A crypto ETF is a fund: use the etf-fund guide for its holdings and NAV where supported.'],
-    report: COMMON_REPORT, related: ['risk-drawdown', 'thesis-check'],
+    report: COMMON_REPORT, card: ["Use exactly these blocks in this order, and no others: kpis (full) — price, change over the period, drawdown from the peak; chart (half) — the coin against QQQ and GLD, mode change; heatmap (half, correlation); note (full) — the risk in one sentence."], related: ['risk-drawdown', 'thesis-check'],
   },
   {
     id: 'fx-commodity', title: 'Currencies and commodities', kind: 'asset', when: 'An exchange rate, the dollar, oil, gold, or how they affect a holding.',
@@ -125,7 +127,7 @@ export const FINANCE_GUIDES: readonly FinanceGuide[] = Object.freeze([
     ],
     read: ['ECB reference rates are published once a working day; they are not a bank or a tradable quote.', 'Two sources can disagree by a small amount (ECB reference versus the Fed\'s noon rate); when two sources differ, say which one each number is.', 'The effect on a holding is described in words from currency and revenue facts you have; the tools never convert a holding.'],
     pitfalls: ['Never convert a position or price from one currency to another with a rate from here; show each currency separately.', 'Gold and oil futures are contracts with expiries; their path is not the spot price.'],
-    report: COMMON_REPORT, related: ['macro-regime', 'kr-stock', 'bond-rates'],
+    report: COMMON_REPORT, card: ["Use exactly these blocks in this order, and no others: chart (half) — the pair (fx_rates BASE/QUOTE) or the commodity fund, annotated at the event; ranges (half) — the 12-month range with a marker at today; note (full) — what to do with a conversion or a holding."], related: ['macro-regime', 'kr-stock', 'bond-rates'],
   },
   {
     id: 'macro-regime', title: 'Macro backdrop', kind: 'situation', when: 'Inflation, jobs, growth, rates and the dollar: where the economy stands and what has changed.',
@@ -142,7 +144,7 @@ export const FINANCE_GUIDES: readonly FinanceGuide[] = Object.freeze([
       'Releases differ in lag: weekly claims and daily yields are current, monthly series are a month old, GDP a quarter old. Say the lag next to the figure.',
     ],
     pitfalls: ['Published values are revised; a later release can change a past value.', 'The list of series is closed to U.S. agency data; other countries\' macro data are not available here.', 'A single indicator is not a regime call.'],
-    report: COMMON_REPORT, related: ['bond-rates', 'fx-commodity'],
+    report: COMMON_REPORT, card: ["For an event or policy (an election, a Fed move, tariffs), use exactly these blocks in this order, and no others: leans (half) — sectors or assets with one-line reasons; chart (half) — an S&P 500 fund's closes, mode change, annotated at the event; note (half) — the saved or discussed holding it touches. Chip: possible effects, not predictions.", "For a reading of the economy: kpis (full) — the latest readings with their prior; chart (two_thirds) — the key FRED series; timeline (third) — the next releases."], related: ['bond-rates', 'fx-commodity'],
   },
   {
     id: 'earnings-event', title: 'Earnings or a filing event', kind: 'situation', when: 'A company just reported, filed an 8-K, or has an earnings date coming.',
@@ -155,7 +157,7 @@ export const FINANCE_GUIDES: readonly FinanceGuide[] = Object.freeze([
     ],
     read: ['Build the comparison from rows: revenue, operating income, net income and diluted EPS for the new quarter and the year-earlier quarter, each with its period end.', 'The price reaction is the close before and the close after the filing date in the rows; say the dates. Do not attribute the move to a cause the sources do not state.', 'Analyst consensus, guidance and the call transcript are not available here: say so and do not describe a beat or a miss.'],
     pitfalls: ['An 8-K can be unrelated to earnings.', 'A filing date is a day, not a time: intraday ordering is unknown.'],
-    report: COMMON_REPORT, related: ['us-stock', 'thesis-check'],
+    report: COMMON_REPORT, card: ["Use exactly these blocks in this order, and no others: kpis (full) — revenue, the main reported line, net income, diluted EPS (adjusted as its note), each with its prior-year value; bars (two_thirds) — the dollar lines, prior vs current period; ranges (third) — guidance with its change; without guidance read, timeline (third) of the report dates.", "Chips: beat or miss, next report date (clock)."], related: ['us-stock', 'thesis-check'],
   },
   {
     id: 'dividend-income', title: 'Dividends and income', kind: 'situation', when: 'Is a dividend safe, has it grown, what does a holding pay.',
@@ -167,7 +169,7 @@ export const FINANCE_GUIDES: readonly FinanceGuide[] = Object.freeze([
     ],
     read: ['Streak: count consecutive fiscal years in which the per-share dividend did not fall, from the annual rows only.', 'Coverage: dividends paid divided by operating cash flow minus capital expenditure for the same year; below 1 means the payout is covered by free cash flow. Show the inputs.', 'Yield = latest annual (or trailing four quarters\') dividend per share over the price you hold, with both dates.'],
     pitfalls: ['A special dividend is not a growth step.', 'Funds and REITs report distributions differently; use the etf-fund guide for funds.', 'Tax treatment is not covered by any source.'],
-    report: COMMON_REPORT, related: ['us-stock', 'etf-fund'],
+    report: COMMON_REPORT, card: ["Use exactly these blocks in this order, and no others: table (full) — yield, payout ratio, years of growth per name; bars (two_thirds) — payout ratio by name; gauge (third) — payout safety; note (full) — what to watch."], related: ['us-stock', 'etf-fund'],
   },
   {
     id: 'portfolio-review', title: 'Review saved holdings', kind: 'situation', when: 'How the owner\'s saved positions are doing, where the concentration is, what is missing.',
@@ -178,7 +180,7 @@ export const FINANCE_GUIDES: readonly FinanceGuide[] = Object.freeze([
     ],
     read: ['Weights and totals exist per currency only. Report the largest positions and the share of the top three within each currency.', 'A position with no verified price is a gap in the review, never zero. Say how many positions were priced of how many.', 'Computed volatility and scenarios describe past price behaviour under stated assumptions; they are not forecasts of returns.'],
     pitfalls: ['The photo of an account is an unverified input.', 'Cost basis, taxes and fees are not covered.', 'No trade is proposed or placed from here.'],
-    report: ['Open with the one finding the owner should act on or know (concentration, an unpriced position, a currency).', ...COMMON_REPORT.slice(1)], related: ['risk-drawdown', 'compare-assets', 'etf-fund'],
+    report: ['Open with the one finding the owner should act on or know (concentration, an unpriced position, a currency).', ...COMMON_REPORT.slice(1)], card: ["Use exactly these blocks in this order, and no others: allocation (half) — weights, with targets when set; kpis (half) — value, return, top-5 share; table (full) — the positions that matter; gauge (third) — concentration; note (two_thirds) — the one change that matters most."], related: ['risk-drawdown', 'compare-assets', 'etf-fund'],
   },
   {
     id: 'risk-drawdown', title: 'Risk and drawdown', kind: 'situation', when: 'How bad has it been, how volatile is it, what range of outcomes is plausible.',
@@ -189,7 +191,7 @@ export const FINANCE_GUIDES: readonly FinanceGuide[] = Object.freeze([
     ],
     read: ['Maximum drawdown: take the highest close and the lowest close after it from the rows, and quote both dates and values. Do not estimate it.', 'Scenario percentiles come from the calculate result; describe them as a range under the bootstrap assumption.', 'A 1Y window and a 5Y window can tell different stories: say which window each number comes from.'],
     pitfalls: ['Price history excludes dividends.', 'The bootstrap repeats the past; it cannot show a regime the history does not contain.', 'A short history (under about 31 daily points) cannot be computed on.'],
-    report: COMMON_REPORT, related: ['portfolio-review', 'compare-assets'],
+    report: COMMON_REPORT, card: ["Use exactly these blocks in this order, and no others: kpis (full) — max drawdown, volatility, value at risk; chart (two_thirds) — the closes over the period, annotated at the worst point; ranges (third) — a plausible range of outcomes; note (full) — what the numbers do not capture."], related: ['portfolio-review', 'compare-assets'],
   },
   {
     id: 'compare-assets', title: 'Compare assets', kind: 'situation', when: 'A versus B: performance, risk, fundamentals.',
@@ -201,7 +203,7 @@ export const FINANCE_GUIDES: readonly FinanceGuide[] = Object.freeze([
     ],
     read: ['Compare only same-currency series, over the same dates; normalise both to 100 at the first common date from the rows you hold.', 'State the common period explicitly. If one asset has a shorter history, cut the comparison to it.', 'Fundamentals only when both have the same fiscal periods available.'],
     pitfalls: ['A ranking from two numbers is thin; say what is not compared.', 'Different currencies are shown side by side, never converted.'],
-    report: COMMON_REPORT, related: ['risk-drawdown', 'us-stock', 'etf-fund'],
+    report: COMMON_REPORT, card: ["Use exactly these blocks in this order, and no others: table (full) — one column per asset, returns as change; chart (half) — both, mode change; bars (half) — the deciding metric by asset; note (full) — which fits which owner, without picking for them."], related: ['risk-drawdown', 'us-stock', 'etf-fund'],
   },
   {
     id: 'thematic-research', title: 'Theme or sector research', kind: 'situation', when: 'Which companies are exposed to a theme; there is no list yet.',
@@ -213,7 +215,7 @@ export const FINANCE_GUIDES: readonly FinanceGuide[] = Object.freeze([
     ],
     read: ['There is no market-wide screener in these tools: say the list is what the sources surfaced, not the whole universe.', 'Separate "named in headlines" from "has the theme in its financials". Keep both groups.', 'Cap the discussion at the candidates you verified, and say how many you looked up.'],
     pitfalls: ['A ticker lookup is not an exhaustive screen.', 'Headlines mention many companies in passing.'],
-    report: COMMON_REPORT, related: ['thesis-check', 'us-stock'],
+    report: COMMON_REPORT, card: ["Use exactly these blocks in this order, and no others: table (full) — the candidates with the metrics that define the theme; heatmap (two_thirds) — factor scores; note (third) — candidates, not answers."], related: ['thesis-check', 'us-stock'],
   },
   {
     id: 'thesis-check', title: 'Check a claim or rumor', kind: 'situation', when: 'Is it true that ...? A post, a headline or a tip the owner saw.',
@@ -224,7 +226,7 @@ export const FINANCE_GUIDES: readonly FinanceGuide[] = Object.freeze([
     ],
     read: ['Sort what you found into: official record, publisher report, anonymous or social claim. Quote which one each statement comes from.', 'If the primary record does not mention it, say that no record was found in these sources, not that it is false.', 'Say what evidence would settle it and where the owner could look.'],
     pitfalls: ['A repeated claim is not independent confirmation.', 'Social posts are unverified.'],
-    report: ['Verdict in plain words: confirmed by a primary record / reported but unconfirmed / no record found.', ...COMMON_REPORT.slice(1)], related: ['earnings-event', 'thematic-research'],
+    report: ['Verdict in plain words: confirmed by a primary record / reported but unconfirmed / no record found.', ...COMMON_REPORT.slice(1)], card: ["Use exactly these blocks in this order, and no others: checklist (two_thirds) — each part of the claim with its evidence; note (third) — the verdict as its chip; timeline (full) — what happened when."], related: ['earnings-event', 'thematic-research'],
   },
   {
     id: 'report-structure', title: 'Write the finished report', kind: 'situation', when: 'The research is done and the owner wants a document to read or share.',
@@ -241,7 +243,7 @@ export const FINANCE_GUIDES: readonly FinanceGuide[] = Object.freeze([
       'Say what was not available (a metric with no source, a market not covered). A gap stated is part of the answer.',
     ],
     pitfalls: ['Do not put raw rows or tool names in the prose.', 'Do not call a scenario a forecast.', 'A report is research, not advice to trade.'],
-    report: ['Verdict line first.', 'Then why: two or three drivers with numbers and the date each is for.', 'Then risks and what would change the view.', 'Then what was not available.'], related: [],
+    report: ['Verdict line first.', 'Then why: two or three drivers with numbers and the date each is for.', 'Then risks and what would change the view.', 'Then what was not available.'], card: ["The saved report is the document; end the chat answer with a card only when it reports figures."], related: [],
   },
 ]);
 

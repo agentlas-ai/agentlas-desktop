@@ -118,6 +118,13 @@ export const HOST_FAILURE_CODE_CLASSES: ReadonlyMap<string, HostFailureClass> = 
   ["one-runtime-unavailable", "runtime_unavailable"], ["no-runtime", "runtime_unavailable"],
   ["one-team-runtime-selection-changed", "runtime_changed"], ["one-team-runtime-changed", "runtime_changed"],
   ["automatic-goal-resume-state-changed", "goal_changed"],
+  // electron/mcp/team-goal-context.ts: the room's Goal moved under a running team (replaced, amended, paused, finished) or the chat's
+  // owner changed. A team turn normally ends these as a calm report (borrowed-task-force.ts deliverGoalChangedReport); this line is
+  // for the paths that cannot write one (a nested seat, a reply that could not be written), so the code is never what the owner reads.
+  ["team_goal_context_changed", "goal_changed"], ["team_goal_revision_mismatch", "goal_changed"], ["team_goal_checkpoint_mismatch", "goal_changed"],
+  ["team_goal_owner_changed", "goal_changed"], ["team_goal_owner_mismatch", "goal_changed"], ["team_goal_context_unconfirmed", "goal_changed"],
+  // mcp/client.ts: the engine, executable, model or seat that selection resolved is not the one the Goal was pinned to. Nothing ran.
+  ["goal-runtime-binding-mismatch", "runtime_changed"],
   ["store_busy", "store_busy"],
   ["work_project_residency_busy", "project_busy"], ["codex_http_connection_failed", "provider_connection"],
   // mcp/client.ts: the run is bound to the Agentlas Browser (the owner's toolMode / assignment / mention, or an active Goal

@@ -131,6 +131,10 @@ function browserFailureNeedsRecovery(frame: Frame, toolName: string): boolean {
   }
   return true;
 }
+/** The launcher's typed mark: the browser did not start, so no page was reached and no call ran (never read from words). */
+function browserStartFailed(frame: Frame): boolean {
+  return frame?.result?._meta?.["agentlas/browserStartFailed"] === true;
+}
 function browserFailureText(frame: Frame): string {
   const parts: string[] = [];
   if (typeof frame.error?.message === "string") parts.push(frame.error.message);
@@ -672,7 +676,7 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
         if (closed || native.get(wireId) !== pending || pending.resultFinishing) return;
         // Cancellation ends replay eligibility; retain the upstream result for the sent call.
         if (pending.controller?.signal.aborted) { finishNow(wireId, frame); return; }
-        const replaySafe = !browserCall.mutating && browserRequestReplaySafe(browserCall.frame);
+        const replaySafe = (!browserCall.mutating && browserRequestReplaySafe(browserCall.frame)) || browserStartFailed(frame);
         if (!replaySafe && answer?.replay) {
           // The browser came back but this call is not safe to repeat for the model: hand it the original failure WITH the
           // ladder's line ("Call the browser tool again"), so the model repeats it deliberately instead of reading a bare error.
@@ -706,7 +710,7 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
     const bounded = new Promise<null>((resolve) => { const t = setTimeout(() => resolve(null), BROWSER_LADDER_WAIT_MS); t.unref?.(); });
     return Promise.race([onAgentlasBrowserToolFailure({ chatId: gate.chatId ?? null, nativeEndpoint,
       toolName: `agentlas-browser.${String(call.frame.params?.name ?? "")}`, mutating: call.mutating,
-      resultText: browserFailureText(frame) }), bounded]);
+      resultText: browserFailureText(frame), ...(browserStartFailed(frame) ? { neverRan: true } : {}) }), bounded]);
   };
   const finishNow = (wireId: string, frame: Frame) => {
     const pending = native.get(wireId); if (!pending || pending.resultFinishing) return;

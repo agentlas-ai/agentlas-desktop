@@ -100,8 +100,12 @@ export async function mediaListen(args: Record<string, unknown>, ctx: { chatId: 
   const subtitlePath = str(args.subtitlePath);
   if (subtitlePath && (!path.isAbsolute(subtitlePath) || !fs.existsSync(subtitlePath))) return refused("subtitle_path_invalid");
   const kp = await import("./keyed-provider");
-  const routeId = str(args.routeId) || await kp.firstTranscribeRoute();
-  if (!routeId) return refused("no_transcribe_route", "the owner saves a key for ElevenLabs, OpenAI or Deepgram in Settings");
+  let routeId = str(args.routeId);
+  if (!routeId) {
+    const found = await kp.transcribeRouteOrCause();
+    if (!("routeId" in found)) return found.outcome;
+    routeId = found.routeId;
+  }
   const fileSha = createHash("sha256").update(fs.readFileSync(file)).digest("hex");
   const outputDir = str(args.outputDir);
   if (outputDir && (!path.isAbsolute(outputDir) || outputDir.split(path.sep).includes(".."))) return refused("output_path_invalid");
@@ -174,8 +178,12 @@ export async function speechTranscribePort(args: Record<string, unknown>, ctx: {
   const file = str(args.path);
   if (!file || !path.isAbsolute(file) || !fs.existsSync(file) || !fs.statSync(file).isFile()) return refused("path_invalid", "an absolute path to a local audio or video file");
   const kp = await import("./keyed-provider");
-  const routeId = str(args.routeId) || await kp.firstTranscribeRoute();
-  if (!routeId) return refused("no_transcribe_route", "the owner saves a key for ElevenLabs, OpenAI or Deepgram in Settings");
+  let routeId = str(args.routeId);
+  if (!routeId) {
+    const found = await kp.transcribeRouteOrCause();
+    if (!("routeId" in found)) return found.outcome;
+    routeId = found.routeId;
+  }
   const fileSha = createHash("sha256").update(fs.readFileSync(file)).digest("hex");
   return kp.answerWithinWindow(`transcribe:${fileSha}:${routeId}`, async () => {
     const work = fs.mkdtempSync(path.join(os.tmpdir(), "agentlas-transcribe-"));

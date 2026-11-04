@@ -36,32 +36,35 @@ export function durableRetryResource(selection: Selection, req?: RunnerRequest):
   return { owner, kind: selection.kind, backend: selection.backend, source: selection.source, model, acpAgentId: selection.acpAgentId, configuration };
 }
 
-/** Only the original host capability can bind a provider call to a Goal episode. */
+/**
+ * The Goal episode this provider call is counted against, or undefined: the call then runs uncounted. This boundary only keeps the
+ * Goal's retry budget; it never refuses a call. Whether a turn may run at all for its Goal's state (an owner pause, a hold for the
+ * owner's answer, a stop) is decided once, where the turn is admitted (invocation/service.ts, the blocked-goal sweep, startup
+ * checkpoints, wait subscriptions). Refusing here as well stopped calls that admission had let through, each with an internal code
+ * the owner saw as a failure: a phone answer (not_runnable, Thread Marketing), a team's planning call that carries no
+ * agent-context binding (binding_missing, X Marketing), and the same for any Goal state no rule here had foreseen.
+ */
 function goal(req: RunnerRequest): RetryGoal | undefined {
-  if (req.agentContext) {
+  try {
+    if (!req.agentContext || !req.chatId) return undefined;
     const { agentContextHostBinding } = require("./agent-context") as typeof import("./agent-context");
     agentContextHostBinding(req.agentContext).assertCurrent();
+    const row = getDb().prepare(`SELECT c.goal_id, l.id AS run_id, l.status FROM chats c LEFT JOIN long_runs l
+      ON l.goal_id=c.goal_id AND l.root_chat_id=c.id WHERE c.id=?`).get(req.chatId) as
+      { goal_id: string | null; run_id: string | null; status: string | null } | undefined;
+    if (!row?.goal_id || !row.run_id || !["queued", "running", "waiting_tool"].includes(row.status ?? "")) return undefined;
+    // The host decided this run is not the Goal's episode (an owner message to a stopped Goal's room).
+    const { isOrdinaryGoalTurn } = require("./goal-ordinary-turns") as typeof import("./goal-ordinary-turns");
+    if (isOrdinaryGoalTurn(invocationId(req))) return undefined;
+    const { longRunOwnerHold, goalOwnerAnswerHold } = require("../store/long-runs") as typeof import("../store/long-runs");
+    if (longRunOwnerHold(row.run_id) || goalOwnerAnswerHold(row.run_id)) return undefined;
+    const { getChatGoalRevision } = require("../store/chat-goals") as typeof import("../store/chat-goals");
+    const revision = getChatGoalRevision(row.goal_id);
+    return revision ? { goalId: row.goal_id, revision: revision.revision } : undefined;
+  } catch {
+    // A binding or ledger that cannot be read leaves the call uncounted; it is never the reason the call fails.
+    return undefined;
   }
-  if (!req.chatId) return undefined;
-  const row = getDb().prepare(`SELECT c.goal_id, l.id AS run_id, l.status FROM chats c LEFT JOIN long_runs l
-    ON l.goal_id=c.goal_id AND l.root_chat_id=c.id WHERE c.id=?`).get(req.chatId) as
-    { goal_id: string | null; run_id: string | null; status: string | null } | undefined;
-  if (!row?.goal_id) return undefined;
-  if (!req.agentContext) throw new Error("runtime_retry_goal_binding_missing");
-  if (!row.run_id || !["queued", "running", "waiting_tool"].includes(row.status ?? "")) throw new Error("runtime_retry_goal_not_runnable");
-  const { longRunOwnerHold, goalOwnerAnswerHold } = require("../store/long-runs") as typeof import("../store/long-runs");
-  if (longRunOwnerHold(row.run_id)) throw new Error("runtime_retry_goal_not_runnable");
-  if (goalOwnerAnswerHold(row.run_id)) {
-    // A Goal held for the owner's answer stops the Goal's own progress, not the owner. A read-only turn in its chat (the phone's
-    // clarification of a pending decision) changes nothing, so it runs unbound to the Goal episode: it was thrown here as an
-    // untyped error before any runtime started and shown as "the runtime returned no receipt" (Thread Marketing room).
-    if (req.permission === "read") return undefined;
-    throw new Error("runtime_retry_goal_not_runnable");
-  }
-  const { getChatGoalRevision } = require("../store/chat-goals") as typeof import("../store/chat-goals");
-  const revision = getChatGoalRevision(row.goal_id);
-  if (!revision) throw new Error("runtime_retry_goal_revision_missing");
-  return { goalId: row.goal_id, revision: revision.revision };
 }
 
 function invocationId(req: RunnerRequest): string | null {
@@ -99,7 +102,11 @@ export function withDurableRuntimeRetry(runner: Runner, selected: Selection,
   return async (req, events) => {
     req.signal?.throwIfAborted();
     const identityRequest = modelForRequest ? { ...req, model: modelForRequest(req) } : req;
-    const target = durableRetryResource(selection, identityRequest), bound = goal(req), runId = invocationId(req);
+    const target = durableRetryResource(selection, identityRequest);
+    // The run id only names where a wait or a closed budget is recorded; an unreadable binding leaves it unnamed, never a failure.
+    let runId: string | null = null;
+    try { runId = invocationId(req); } catch { runId = null; }
+    let bound = goal(req);
     if (bound && store.budgetExhausted(target,bound)) {
       if (runId) store.closeRunBudget(runId);
       return { text: "", turnDelivery: "not-dispatched", failure: {
@@ -120,12 +127,19 @@ export function withDurableRuntimeRetry(runner: Runner, selected: Selection,
       } };
     }
     const callId = randomUUID();
+    // The Goal changed between counting and the call (a revision, a stop): the call is no longer this episode's, so its
+    // reservation is given back and it runs uncounted. Never a refusal (see goal()).
+    const GOAL_CHANGED = Symbol("goal-changed");
     const assertBound = () => {
       req.signal?.throwIfAborted();
       const current = goal(req);
-      if (!bound || !current || current.goalId !== bound.goalId || current.revision !== bound.revision) throw new Error("runtime_retry_goal_changed");
+      if (!bound || !current || current.goalId !== bound.goalId || current.revision !== bound.revision) throw GOAL_CHANGED;
     };
-    const generation = bound ? store.admit(target,bound,callId,MAX_TRANSIENT_RETRIES+1,assertBound) : 0;
+    let generation: number | null = 0;
+    if (bound) {
+      try { generation = store.admit(target,bound,callId,MAX_TRANSIENT_RETRIES+1,assertBound); }
+      catch (error) { if (error !== GOAL_CHANGED) throw error; bound = undefined; generation = 0; }
+    }
     if (generation === null) {
       if (runId) store.closeRunBudget(runId);
       return {text:"",turnDelivery:"not-dispatched",failure:{kind:"unavailable",runtime:selection.kind,
@@ -144,7 +158,8 @@ export function withDurableRuntimeRetry(runner: Runner, selected: Selection,
     } catch (error) {
       // Aborted, or the Goal changed, between the reservation and entering the runner: nothing was sent.
       refundReservation();
-      throw error;
+      if (error !== GOAL_CHANGED) throw error;
+      bound = undefined;
     }
     let observedGeneration: number | undefined;
     let result: RunnerResult;

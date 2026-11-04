@@ -5114,7 +5114,10 @@ export interface McpInvocationEvent {
     /** A team turn that did not verify (code `task-force-verification-failed`, kept as the compatibility label): the class of the cause
      *  read from its typed failure report. "login" and "capacity" are outside causes; "execution" is the app's own side until shown
      *  otherwise. Optional; older readers ignore it. */
-    causeClass?: "login" | "capacity" | "execution" };
+    causeClass?: "login" | "capacity" | "execution";
+    /** Set by the host (invocation/host-recovery.ts) when `message` is its own plain line for an INTERNAL failure: "recovering" = the app
+     *  retries by itself, "stopped" = it does not. The phone shows such an event as a notice, never as "Run failed". Optional; older readers ignore it. */
+    hostWorded?: "recovering" | "stopped" };
   /** kind:"notice" 전용 — 호스트 고지. 답변 본문과 절대 합치지 않는다. */
   notice?: {
     level: "info" | "success" | "warning" | "error";

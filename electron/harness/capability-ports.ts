@@ -6,12 +6,14 @@ import { DECK_PORT_SCHEMAS } from "../live-document/deck-ports";
 import { REACH_PORT_SCHEMAS } from "../reach-host/schemas";
 import { recordRunProducedFiles } from "./run-produced-files";
 import { composeFinanceSkillContent, FINANCE_PORTS } from "../finance/tools";
+import { SCIENCE_LITERATURE_PORTS } from "../science-host/literature-ports";
 import type { FinanceReceiptReference } from "../finance/receipts";
 import type { FinanceNativePresentation } from "../../shared/finance-native-ui";
 import { composeDeclaredPrompt, registerDeclaredPromptModule } from "../runtime/prompt-order";
 import { didYouMean, missingArgumentsMessage } from "../../shared/did-you-mean";
 import { classifyAppControlPolicy } from "../app-control/policy";
 import { waitForAbort } from "../runtime/abortable-wait";
+import { CREDENTIAL_STORE_NEXT, CREDENTIAL_STORE_UNAVAILABLE, isCredentialStoreFailure } from "./credential-store-failure";
 
 /*
  * Agentlas harness capability ports (docs/2026-10-13-native-harness/15 §8, contracts/harness-capability-ports.json).
@@ -352,14 +354,16 @@ async function connectorAuth(row: Awaited<ReturnType<typeof connectorRows>>[numb
     const { hasEnvVar } = await import("../secrets/vault");
     const { credentialVaultKey } = await import("../mcp-tools/credential-refs");
     missingEnv = [];
-    for (const key of row.envKeys) if (!(await hasEnvVar(credentialVaultKey(row, key)).catch(() => false))) missingEnv.push(key);
+    // A credential store that does not answer is raised, not read as "key not saved" (credential-store-failure.ts).
+    for (const key of row.envKeys) if (!(await hasEnvVar(credentialVaultKey(row, key)).catch((error) => { if (isCredentialStoreFailure(error)) throw error; return false; }))) missingEnv.push(key);
     if (row.transport !== "stdio") {
       try {
         const { listInstalledServers } = await import("../mcp-tools/registry");
         const server = listInstalledServers().find((item) => item.id === row.serverId);
         const { hasUsableMcpOAuthCredential } = await import("../mcp-tools/oauth");
         oauth = server?.url && (await hasUsableMcpOAuthCredential(server.id, server.url)) ? "usable" : "absent";
-      } catch {
+      } catch (error) {
+        if (isCredentialStoreFailure(error)) throw error;
         oauth = "absent";
       }
     }
@@ -385,7 +389,7 @@ async function keyedRouteForConnector(row: Awaited<ReturnType<typeof connectorRo
   const server = listInstalledServers().find((item) => item.id === row.serverId);
   const { keyedRouteForConnectorUrl } = await import("./connector-keyed-route");
   const { hasEnvVarAliased } = await import("../secrets/env-alias");
-  return keyedRouteForConnectorUrl(server?.url, hasEnvVarAliased).catch(() => null);
+  return keyedRouteForConnectorUrl(server?.url, hasEnvVarAliased).catch((error) => { if (isCredentialStoreFailure(error)) throw error; return null; });
 }
 
 /** Readiness from the stored observation only (no probe): configuration, credential and the last exact handshake (C05). */
@@ -763,8 +767,8 @@ const PORTS: PortDefinition[] = [
   },
   {
     operationId: "speech.synthesize", kind: "job",
-    purpose: "Narration with the owner's saved speech connection (elevenlabs-audio with timing, or openai-audio); the key never reaches you. text or an absolute textPath → an mp3 in outputDir, with digest, duration and a receipt; the same request again returns the same file.",
-    required: ["outputDir"],
+    purpose: "Narration with the owner's saved speech connection (elevenlabs-audio with timing, or openai-audio); the key never reaches you. text or an absolute textPath → an mp3 in outputDir (default: the app's own media folder), with digest, duration and a receipt; the same request again returns the same file.",
+    required: [],
     handler: async (args, ctx) => (await import("./keyed-provider")).speechSynthesize(args, ctx),
   },
   {
@@ -1331,6 +1335,8 @@ const PORTS: PortDefinition[] = [
     },
   },
   ...FINANCE_PORTS,
+  // Science's literature tools for a conversation with no Science project (PLAN S9 C1): the agents of an ordinary Work or One turn use them.
+  ...SCIENCE_LITERATURE_PORTS,
   // Live documents (live-document/ports.ts): the owner watches these edits typed into the Document tab.
   { operationId: "document.list", kind: "query", effectFreeRead: true, purpose: "Office documents (xlsx docx pptx hwpx hwp) open for live editing in this conversation.", required: [],
     handler: async (args, ctx) => (await import("../live-document/ports")).documentList(args, ctx) },
@@ -1586,7 +1592,9 @@ export async function callHarnessPort(operationId: string, rawArgs: Record<strin
   try {
     outcome = await port.handler(args, ctx);
   } catch (error) {
-    outcome = refused("operation_failed", error instanceof Error ? error.message.slice(0, 200) : "unknown error");
+    // The credential store not answering has its own plain cause; its raw text ("keychain_unavailable: ... automatic retry suppressed") is internal.
+    outcome = isCredentialStoreFailure(error) ? refused(CREDENTIAL_STORE_UNAVAILABLE, CREDENTIAL_STORE_NEXT)
+      : refused("operation_failed", error instanceof Error ? error.message.slice(0, 200) : "unknown error");
   }
   // Observe only exact IDs returned by this host operation. Failed custody never retries the media effect.
   if (!ctx.dryRun && ctx.hostVideoCustody && outcome.status === "ok") {

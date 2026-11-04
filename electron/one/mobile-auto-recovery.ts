@@ -4,6 +4,7 @@ import { getInvocationRunReceipt, getLatestInvocationRunReceipt, getRunEventBySo
 import { getDb } from "../store/db";
 import { captureMobileOneInvocationBinding } from "../invocation/workspace-binding";
 import type { InvocationService, InvocationSettledEnvelope } from "../invocation/service";
+import { hostRecoveryOriginalOf, hostRecoveryRequested } from "../invocation/host-recovery";
 import { judgeOneAutoRecovery } from "./auto-recovery";
 import { verifyOneRecoveryOutcome } from "./recovery-verification";
 import { getMeta } from "../store/meta";
@@ -159,6 +160,8 @@ async function handleSettled(
   envelope: InvocationSettledEnvelope,
 ): Promise<void> {
   if (!envelope.oneMode || envelope.workspaceBinding?.source !== "mobile-one") return;
+  // The host's own recovery (invocation/host-recovery.ts) owns this failure, or this IS that recovery run: one recovery, not two.
+  if (hostRecoveryRequested(getDb(), envelope.runId) || hostRecoveryOriginalOf(getDb(), envelope.runId)) return;
   const terminalStop = oneAutoRecoveryTerminalStop(envelope.receipt);
   if (terminalStop) {
     states.delete(envelope.chatId);

@@ -32,6 +32,7 @@ import {
   isBrowserDomToolError,
   isSelfHealingBrowserFailure,
   ladderOwnerCard,
+  ladderStopPlainSentence,
   runBrowserLadder,
   type BrowserFailureCode,
   type BrowserFailureFacts,
@@ -382,14 +383,18 @@ export interface BrowserLadderAnswer {
   text: string;
 }
 
+/** Markers only the in-app relay writes when it refuses a CONNECTION: the call behind them never reached a page. */
+const RELAY_REFUSAL_MARKERS: ReadonlySet<string> = new Set(["native-session-ended", "native-session-unavailable", "native-grant-revoked"]);
 const REPLAY_RUNGS: ReadonlySet<LadderRung> = new Set(["reestablish", "switch-surface", "login-recovery"]);
 
-function answerFor(result: LadderRunResult, input: { mutating: boolean }, scope: LadderScope, again: { mendInMs: number | null; repeats: number } = { mendInMs: null, repeats: 0 }): BrowserLadderAnswer {
+function answerFor(result: LadderRunResult, input: { mutating: boolean; neverRan?: boolean }, scope: LadderScope, again: { mendInMs: number | null; repeats: number } = { mendInMs: null, repeats: 0 }): BrowserLadderAnswer {
   const state = result.state;
   const meta = { schema: BROWSER_LADDER_SCHEMA, code: state.code, final: state.final, rung: state.finalRung, surface: state.surface,
     tried: state.tried.map((t) => `${t.rung}:${t.result}`), ...(result.card ? { reasonCode: result.card.reasonCode } : {}),
     ...(scope.handoff ? { handoff: scope.handoff } : {}) };
-  const replay = state.final === "recovered" && !input.mutating && state.finalRung !== null && REPLAY_RUNGS.has(state.finalRung);
+  // A call that provably never ran (the launcher could not start the browser, or the relay refused the connection with its own marker)
+  // is asked again once even when it changes the page: nothing happened, so there is nothing to repeat.
+  const replay = state.final === "recovered" && (!input.mutating || input.neverRan === true) && state.finalRung !== null && REPLAY_RUNGS.has(state.finalRung);
   let text: string;
   if (state.final === "recovered") {
     text = state.finalRung === "switch-surface"
@@ -407,8 +412,8 @@ function answerFor(result: LadderRunResult, input: { mutating: boolean }, scope:
       : "Agentlas browser ladder: the site needs the owner's sign-in; one card is open and the run resumes when the session appears. Continue other work.";
   } else {
     const suggestion = scope.suggestions.length ? ` Try the tool resolver: agentlas_resolve_plugins with need "${scope.suggestions[0].replace(/ \(agentlas_resolve_plugins\)$/, "")}"; installing stays the owner's decision.` : "";
-    const tried = `Tried: ${state.tried.map((t) => `${t.rung}=${t.result}`).join(", ")}.`;
-    const head = `Agentlas browser ladder stopped: ${result.card?.reasonCode ?? state.code}. ${tried}${suggestion}`;
+    // Plain words: this text is what the model repeats to the owner. The machine code and the per-rung results stay in meta (above).
+    const head = `Agentlas browser ladder stopped. ${ladderStopPlainSentence(state.code, state.tried)}${suggestion}`;
     if (!isSelfHealingBrowserFailure(state.code)) text = `${head} The owner has one card; continue with work that does not need this browser.`;
     else if (again.mendInMs === null) text = `${head} The app tried to re-establish this browser and could not; continue with work that does not need it.`;
     else {
@@ -557,6 +562,8 @@ export async function onAgentlasBrowserToolFailure(input: {
   toolName: string;
   mutating: boolean;
   resultText: string;
+  /** Typed by the caller from the launcher's own start-failure mark; the relay's refusal markers are read from resultText below. */
+  neverRan?: boolean;
 }): Promise<BrowserLadderAnswer | null> {
   const binding = input.chatId ? runs.get(input.chatId) : undefined;
   const grant = await localNativeGrant(input.nativeEndpoint ?? null) ?? binding?.nativeGrant ?? null;
@@ -568,6 +575,8 @@ export async function onAgentlasBrowserToolFailure(input: {
     ? "native-tool-failed" : null);
   if (!code) return null;
   const key = ladderKey(grant, code);
+  const answerInput = { mutating: input.mutating,
+    neverRan: input.neverRan === true || (measured.facts.markers ?? []).some((marker) => RELAY_REFUSAL_MARKERS.has(marker)) };
   const pageUrl = measured.facts.page?.url ?? null;
   const wall = measured.facts.page?.loginWall ? detectLoginWall({ url: pageUrl }) : null;
   // A sign-in wall names the site it guards (youtube.com behind accounts.google.com), not the identity host.
@@ -578,7 +587,7 @@ export async function onAgentlasBrowserToolFailure(input: {
   // A browser that comes back sooner is noticed by the background mend, whose recovery clears this cache.
   if (cooled && Date.now() - cooled.at < LADDER_STOP_COOLDOWN_MS) {
     cooled.repeats += 1;
-    return answerFor(cooled.result, input, scope, { mendInMs: mendInMs(key), repeats: cooled.repeats });
+    return answerFor(cooled.result, answerInput, scope, { mendInMs: mendInMs(key), repeats: cooled.repeats });
   }
   let flight = flights.get(key);
   if (!flight) {
@@ -613,7 +622,7 @@ export async function onAgentlasBrowserToolFailure(input: {
    * (browser_unavailable:browser_ladder:native-tool-failed, 1.2.55 and 1.2.57). Now the agent gets its own error back.
    */
   if (isBrowserDomToolError(code) && result.state.final === "stopped") return null;
-  return answerFor(result, input, scope, { mendInMs: mendInMs(key), repeats: 0 });
+  return answerFor(result, answerInput, scope, { mendInMs: mendInMs(key), repeats: 0 });
 }
 
 const PAGE_CHANGING = new Set(["browser_navigate", "browser_navigate_back", "browser_click", "browser_snapshot", "browser_wait_for", "browser_tabs", "browser_press_key"]);

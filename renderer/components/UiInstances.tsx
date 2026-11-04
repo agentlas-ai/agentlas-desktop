@@ -13,7 +13,10 @@ import {
   wrapAppHtml, MCP_APP_SANDBOX, type BridgeEffect, type BridgeState,
 } from "@/lib/mcp-app-bridge";
 import { McpResultPreview } from "./McpResultPreview";
-import { FinanceNativeResult, financeReadSourceRows } from "./finance/FinanceNativeResult";
+import { FinanceNativeResult, financePresentView, financeReadSourceRows } from "./finance/FinanceNativeResult";
+
+/** A Finance answer's own result card (finance.present), known before its result is read. */
+const presentCard = (instance: UiInstanceView) => instance.presentation.viewId === FINANCE_NATIVE_VIEW && /^Finance (canvas|earnings|impact)$/.test(instance.presentation.fallbackText ?? "");
 import { IntellectUI } from "./IntellectUI";
 import { ChartBlock } from "./ChartBlock";
 import { HtmlVisualBlock } from "./HtmlVisualBlock";
@@ -63,13 +66,19 @@ export function inlineUiForReply(instances: readonly UiInstanceView[], turnId: s
 }
 
 /** Cards render inside the caller's owning assistant bubble, never in an output tab. */
-export function InlineUiInstances({ chatId, turnIds, locale, instances }: {
+export function InlineUiInstances({ chatId, turnIds, locale, instances, part }: {
   chatId?: string; turnIds?: readonly string[]; locale: "ko" | "en"; instances?: readonly UiInstanceView[];
+  /** "lead": only the line a Finance result card puts above the answer text (rendered before the text). */
+  part?: "lead";
 }) {
   const loaded = useInlineUiInstances(instances ? undefined : chatId);
   const [expanded, setExpanded] = useState(false);
   const visible = (instances ?? loaded).filter(instance => instance.chatId === chatId && instance.state !== "closed"
     && (!turnIds || turnIds.includes(instance.turnId)));
+  if (part === "lead") {
+    const leads = visible.filter(presentCard);
+    return leads.length ? <>{leads.map(instance => <UiInstanceCard key={`lead:${instance.instanceId}`} instance={instance} locale={locale} part="lead" />)}</> : null;
+  }
   if (visible.length === 0) return null;
   // A run can present dozens of cards under one answer: the newest settled ones stay, the older ones open from a button. A card that waits for the owner never folds.
   const { shown, folded } = foldUiInstances(visible);
@@ -84,7 +93,7 @@ export function InlineUiInstances({ chatId, turnIds, locale, instances }: {
 
 const INTENT_ICON = { "host-action": IconBolt, "open-artifact": IconExpand, "prepare-input": IconEdit, "model-followup": IconSend, "local-state": IconCheck } as const;
 
-function UiInstanceCard({ instance, locale }: { instance: UiInstanceView; locale: "ko" | "en" }) {
+function UiInstanceCard({ instance, locale, part }: { instance: UiInstanceView; locale: "ko" | "en"; part?: "lead" }) {
   const composer = useContext(IntellectUiActions);
   const [busy, setBusy] = useState<string | null>(null);
   const [failed, setFailed] = useState<string | null>(null);
@@ -162,6 +171,9 @@ function UiInstanceCard({ instance, locale }: { instance: UiInstanceView; locale
   const content = inline?.ok ? inline.content : null;
   const displayTitle = instance.presentation.title && (!content || instance.presentation.title !== instance.presentation.viewId)
     ? instance.presentation.title : locale === "ko" ? "인터랙티브 응답" : "Interactive response";
+  // A Finance answer's result card is the answer's own: no card frame, its lead above the text and its body here.
+  if (part === "lead") return finance && financePresentView(finance) ? <FinanceNativeResult result={finance} instanceId={instance.instanceId} revision={instance.revision} resultRef={instance.resultRef} locale={locale} part="lead"/> : null;
+  if (finance && financePresentView(finance)) return <div data-ui-instance={instance.instanceId} data-ui-revision={instance.revision}><FinanceNativeResult result={finance} instanceId={instance.instanceId} revision={instance.revision} resultRef={instance.resultRef} locale={locale}/></div>;
   const fallback = <p className={styles.text}>{instance.presentation.fallbackText || displayTitle}</p>;
 
   const card = (

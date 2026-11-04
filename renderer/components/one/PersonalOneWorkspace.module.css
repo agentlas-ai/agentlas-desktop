@@ -129,9 +129,14 @@
 .turn[data-role=user]:not(:has(+.turn[data-role=user]))>.bubble[data-role=user]::after{display:block;z-index:1;right:-11px;width:11px;height:20px;background:var(--im-bg);border-bottom-left-radius:10px}
 .turn[data-role=assistant]:not(:has(+.turn[data-role=assistant]))>.bubble[data-role=assistant]::before{display:block;z-index:0;left:-8px;width:20px;height:20px;background:var(--im-in);border-bottom-right-radius:16px 14px}
 .turn[data-role=assistant]:not(:has(+.turn[data-role=assistant]))>.bubble[data-role=assistant]::after{display:block;z-index:1;left:-11px;width:11px;height:20px;background:var(--im-bg);border-bottom-right-radius:10px}
-.bubble:has(>[data-design-surface]>[data-chat-media])::before,.bubble:has(>[data-design-surface]>[data-chat-media])::after,.bubble:has([data-intellect-ui])::before,.bubble:has([data-intellect-ui])::after{display:none!important}
+.bubble:has(>[data-design-surface]>[data-chat-media])::before,.bubble:has(>[data-design-surface]>[data-chat-media])::after,.bubble:has([data-intellect-ui])::before,.bubble:has([data-intellect-ui])::after,.bubble:has(~.typing)::before,.bubble:has(~.typing)::after{display:none!important}
 
 /* While Hope answers: the three typing dots, in an incoming bubble. */
+/* The typing bubble is the next bubble of Hope's run, drawn in the same row as the blocks Hope has already put there (a card, a hand-off, a
+   bubble of an open code block). It sits below them with a real gap, and the block before it gives up its tail: two tails 3px apart read as
+   one bubble drawn over the other (owner screenshot). Also when the typing row directly follows another reply row. */
+.turn>*+.typing{margin-top:6px}
+.turn[data-role=assistant]+.turn[data-role=assistant]:has(>.typing:first-child){margin-top:9px}
 .typing{position:relative;align-self:flex-start;display:inline-flex;gap:5px;padding:14px 16px;border-radius:19px;background:var(--im-in)}
 .typing::before,.typing::after{content:"";position:absolute;bottom:0}
 .typing::before{left:-8px;width:20px;height:20px;background:var(--im-in);border-bottom-right-radius:16px 14px}

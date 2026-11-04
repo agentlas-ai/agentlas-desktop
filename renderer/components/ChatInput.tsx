@@ -17,7 +17,7 @@ import { PopupSteps } from "./Popup";
 import { OneVoiceInputHelp } from "./one/OneVoiceInputHelp";
 import { AliveComposerButton } from "./alive/AliveComposerButton";
 import { ContextBreakdown } from "./ContextBreakdown";
-import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type {
   ImageAttachment,
   HubAgentBookmark,
@@ -37,7 +37,7 @@ import { buildAppRoutePrompt, parseAppSlashRoute, type AgentlasAppDefinition } f
 import { callableHubBookmarks } from "@/lib/hub-bookmark-events";
 import { installedAgentMentionTarget } from "@/lib/mention-orchestration-target";
 import { pickLocalized, useT, type Locale } from "@/lib/i18n";
-import { loadSkillPluginMentions, matchingSkillPluginMentions, type SkillPluginMention } from "@/lib/skill-plugin-mentions";
+import { loadChatSkillPluginMentions, matchingSkillPluginMentions, type SkillPluginMention } from "@/lib/skill-plugin-mentions";
 import { ipc, grantForDroppedFile, grantForPastedAttachment } from "@/lib/ipc";
 import { fitImageUnder } from "@/lib/attachment-image-fit";
 import { useComposerMenuExtensions, type ComposerMenuExtension, type ComposerMenuItem } from "@/lib/composer-menu-extensions";
@@ -241,7 +241,7 @@ interface AutocompleteOption {
   title: string;
   subtitle?: string;
   /** 아이콘은 popover에서 일괄 매핑 (group으로 결정) */
-  kind: "app" | "agent" | "hub" | "firm" | "project" | "env" | "plugin";
+  kind: "app" | "agent" | "hub" | "firm" | "project" | "env" | "plugin" | "extension";
   /** 선택 시 입력창에 치환할 토큰 */
   replacement: string;
   /** Explicit turn-only sub-agent target. It never changes the One/Task controller. */
@@ -558,6 +558,8 @@ function ChatInputComponent({
   const [activeIndex, setActiveIndex] = useState(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const shellRef = useRef<HTMLDivElement>(null);
+  const [mentionLeft, setMentionLeft] = useState<number | null>(null);
   // 하단 툴바는 늘 한 줄이다 — 넘치면 칩 글자를 우선순위대로 접는다(globals.css [data-fit]).
   const toolbarRef = useRef<HTMLDivElement>(null);
   useToolbarFit(toolbarRef);
@@ -750,13 +752,35 @@ function ChatInputComponent({
     }
   }
 
+  // Where the "@" sits inside the composer shell; recomputed only when the trigger opens or moves.
+  const mentionStart = trigger?.kind === "mention" ? trigger.startIndex : -1;
+  useLayoutEffect(() => {
+    const textarea = textareaRef.current, shell = shellRef.current;
+    if (mentionStart < 0 || !textarea || !shell) { setMentionLeft(null); return; }
+    setMentionLeft(mentionAnchorLeft(shell, textarea, mentionStart));
+  }, [mentionStart]);
   const [skillPluginMentions,setSkillPluginMentions]=useState<SkillPluginMention[]>([]);
-  useEffect(()=>{if(trigger?.kind!=="mention")return;let current=true;const api=ipc();setSkillPluginMentions([]);if(api)void loadSkillPluginMentions(api.harness).then(rows=>{if(current)setSkillPluginMentions(rows);}).catch(()=>{if(current)setSkillPluginMentions([]);});return()=>{current=false;};},[!!trigger,context]);
+  // The plugins of THIS conversation's domain menu (each domain lists its own plugins), answered by Main with the rule the model's lookups use.
+  useEffect(()=>{if(trigger?.kind!=="mention")return;let current=true;const api=ipc();setSkillPluginMentions([]);if(api)void loadChatSkillPluginMentions(activeChatId,api.harness).then(rows=>{if(current)setSkillPluginMentions(rows);}).catch(()=>{if(current)setSkillPluginMentions([]);});return()=>{current=false;};},[!!trigger,context,activeChatId]);
+  // Items a surface registered for the composer are also offered by "@": same list, same inserted text as the + menu.
+  const [extensionMentions,setExtensionMentions]=useState<Array<{extensionId:string;label:string;items:readonly ComposerMenuItem[]}>>([]);
+  useEffect(()=>{
+    if(trigger?.kind!=="mention"||menuExtensions.length===0){setExtensionMentions([]);return;}
+    let current=true;
+    void Promise.all(menuExtensions.map(async extension=>{try{return {extensionId:extension.id,label:extension.label,items:await extension.load()};}catch{return {extensionId:extension.id,label:extension.label,items:[] as readonly ComposerMenuItem[]};}}))
+      .then(rows=>{if(current)setExtensionMentions(rows);});
+    return()=>{current=false;};
+  },[!!trigger,menuExtensions]);
   // ── 자동완성 옵션 평탄화 — 키보드 네비용 ────────────────
   const autocompleteOptions = useMemo<AutocompleteOption[]>(() => {
     if (!trigger) return [];
-    return [...matchingSkillPluginMentions(skillPluginMentions,trigger.query).map(plugin=>({key:plugin.id,group:locale==="ko"?"스킬 플러그인":"Skill plugins",kind:"plugin" as const,title:plugin.name,subtitle:plugin.mention,replacement:plugin.mention})),...(context?buildAutocompleteOptions(trigger, context, locale, t):[])];
-  }, [trigger, context, locale, t,skillPluginMentions]);
+    const query = trigger.query.toLowerCase();
+    const extensionOptions = extensionMentions.flatMap(group => group.items
+      .filter(item => !query || [item.label, item.description ?? ""].some(value => value.toLowerCase().includes(query)))
+      .slice(0, 8)
+      .map((item): AutocompleteOption => ({ key: `ext:${group.extensionId}:${item.id}`, group: group.label, kind: "extension", title: item.label, subtitle: item.description, replacement: item.insert })));
+    return [...extensionOptions,...matchingSkillPluginMentions(skillPluginMentions,trigger.query).map(plugin=>({key:plugin.id,group:locale==="ko"?"스킬 플러그인":"Skill plugins",kind:"plugin" as const,title:plugin.name,subtitle:plugin.mention,replacement:plugin.mention})),...(context?buildAutocompleteOptions(trigger, context, locale, t):[])];
+  }, [trigger, context, locale, t,skillPluginMentions,extensionMentions]);
 
   const autocompleteOptionKey = useMemo(
     () => autocompleteOptions.map((opt) => opt.key).join("\u001f"),
@@ -1203,18 +1227,6 @@ function ChatInputComponent({
         </div>
       )}
 
-      {/* 슬래시/멘션 자동완성 popover */}
-      {trigger && context && (
-        <AutocompletePopover
-          trigger={trigger}
-          options={autocompleteOptions}
-          activeIndex={activeIndex}
-          onHover={setActiveIndex}
-          t={t}
-          onPick={applyAutocomplete}
-        />
-      )}
-
       {/* + 메뉴 popover */}
       {plusOpen && (
         <PlusMenu
@@ -1555,9 +1567,11 @@ function ChatInputComponent({
 
       <ComposerDecisionSlot className="composer-decision-stack" surface="work" />
       <div
+        ref={shellRef}
         className="chat-input-shell"
         data-has-progress={queuedCount > 0 || (effectiveGoalMode && goalBarPlacement === "composer") ? "true" : "false"}
         style={{
+          position: "relative",
           width: "min(100%, 740px)",
           margin: "0 auto",
           borderRadius: 20,
@@ -1570,6 +1584,19 @@ function ChatInputComponent({
           WebkitBackdropFilter: "none",
         }}
       >
+        {/* 멘션 자동완성: 입력창 바로 위, "@" 위치에 맞춰 열리고 작성창 폭 안에 머문다 */}
+        {trigger && context && (
+          <AutocompletePopover
+            trigger={trigger}
+            options={autocompleteOptions}
+            activeIndex={activeIndex}
+            onHover={setActiveIndex}
+            t={t}
+            onPick={applyAutocomplete}
+            anchorLeft={mentionLeft}
+          />
+        )}
+
         {attachmentError && (
           <div
             role="alert"
@@ -2922,7 +2949,9 @@ function AutocompletePopover({
   onHover,
   t,
   onPick,
+  anchorLeft,
 }: {
+  anchorLeft: number | null;
   trigger: { kind: "mention"; query: string; startIndex: number };
   options: AutocompleteOption[];
   activeIndex: number;
@@ -2944,7 +2973,7 @@ function AutocompletePopover({
 
   if (options.length === 0) {
     return (
-      <Popover title={title} dataKind="autocomplete" role="listbox">
+      <Popover title={title} dataKind="autocomplete" role="listbox" anchorLeft={anchorLeft ?? 12}>
         <EmptyHint>{t("chatinput.no_match")}</EmptyHint>
       </Popover>
     );
@@ -2952,7 +2981,7 @@ function AutocompletePopover({
   // 그룹 헤더는 같은 group이 처음 등장할 때만 그린다.
   const seenGroups = new Set<string>();
   return (
-    <Popover title={title} dataKind="autocomplete" role="listbox">
+    <Popover title={title} dataKind="autocomplete" role="listbox" anchorLeft={anchorLeft ?? 12}>
       <div ref={optionsRef}>
         {options.map((opt, i) => {
           const showHeader = opt.group && !seenGroups.has(opt.group);
@@ -2981,6 +3010,8 @@ function kindIcon(kind: AutocompleteOption["kind"]) {
   switch (kind) {
     case "plugin":
       return <IconLayers size={13} style={{color:"var(--accent)"}}/>;
+    case "extension":
+      return <IconSparkles size={13} style={{ color: "var(--accent)" }} />;
     case "app":
       return <IconApps size={13} style={{ color: "var(--accent)" }} />;
     case "agent":
@@ -3336,6 +3367,39 @@ function ModelMenu({
 }
 
 // ── popover primitives ──────────────────────────────────
+/**
+ * x (px, inside the composer shell) where the "@" menu opens: under the "@" of the draft, kept inside the shell so a wide chat pane never
+ * puts it at the pane's far left and a narrow one never pushes it out of the window.
+ */
+function mentionAnchorLeft(shell: HTMLElement, textarea: HTMLTextAreaElement, index: number): number {
+  const margin = 12;
+  const menuWidth = Math.min(320, Math.max(0, shell.clientWidth - margin * 2));
+  let caretX = 0;
+  try {
+    const style = window.getComputedStyle(textarea);
+    const mirror = document.createElement("div");
+    for (const property of ["boxSizing", "fontFamily", "fontSize", "fontWeight", "fontStyle", "letterSpacing", "wordSpacing", "textTransform", "textIndent", "lineHeight", "paddingLeft", "paddingRight", "borderLeftWidth", "borderRightWidth", "tabSize"] as const) {
+      (mirror.style as unknown as Record<string, string>)[property] = style[property];
+    }
+    mirror.style.position = "absolute";
+    mirror.style.visibility = "hidden";
+    mirror.style.top = "0";
+    mirror.style.left = "-9999px";
+    mirror.style.whiteSpace = "pre-wrap";
+    mirror.style.overflowWrap = "break-word";
+    mirror.style.width = `${textarea.clientWidth + parseFloat(style.borderLeftWidth || "0") + parseFloat(style.borderRightWidth || "0")}px`;
+    mirror.textContent = textarea.value.slice(0, index);
+    const marker = document.createElement("span");
+    marker.textContent = "@";
+    mirror.appendChild(marker);
+    document.body.appendChild(mirror);
+    caretX = marker.offsetLeft;
+    document.body.removeChild(mirror);
+  } catch { caretX = 0; }
+  const offset = textarea.getBoundingClientRect().left - shell.getBoundingClientRect().left - shell.clientLeft + caretX - textarea.scrollLeft;
+  return Math.round(Math.min(Math.max(margin, offset), Math.max(margin, shell.clientWidth - menuWidth - margin)));
+}
+
 function Popover({
   title,
   children,
@@ -3344,9 +3408,12 @@ function Popover({
   align = "left",
   compact = false,
   ariaLabel,
+  anchorLeft,
 }: {
   title?: string;
   children: React.ReactNode;
+  /** Opens directly above the composer shell at this x (px inside the shell) instead of at the footer's left edge. */
+  anchorLeft?: number;
   dataKind?: string;
   role?: React.AriaRole;
   compact?: boolean;
@@ -3388,11 +3455,11 @@ function Popover({
       } : undefined}
       style={{
         position: "absolute",
-        bottom: "calc(100% - 4px)",
-        ...(align === "right" ? { right: 16 } : { left: 16 }),
-        minWidth: compactMenu ? 0 : 240,
+        bottom: anchorLeft !== undefined ? "calc(100% + 6px)" : "calc(100% - 4px)",
+        ...(anchorLeft !== undefined ? { left: anchorLeft } : align === "right" ? { right: 16 } : { left: 16 }),
+        minWidth: compactMenu ? 0 : anchorLeft !== undefined ? "min(240px, calc(100% - 24px))" : 240,
         width: compactMenu ? "min(280px, calc(100vw - 32px))" : undefined,
-        maxWidth: 320,
+        maxWidth: anchorLeft !== undefined ? "min(320px, calc(100% - 24px))" : 320,
         maxHeight: "min(440px, 70dvh)",
         overflowY: "auto",
         borderRadius: "var(--popup-radius)",

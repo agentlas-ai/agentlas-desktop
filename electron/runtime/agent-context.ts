@@ -988,6 +988,11 @@ export function withAgentContext(runner: Runner, provider: Omit<AgentContextProv
   return async(req,events)=>{
     const capability=(req as RunnerRequest & {agentContext?:AgentContextCapability}).agentContext;
     if(!capability)return runner(req,events);
+    //: the runner is entered only inside the `try` further down, so a throw before it (a stale capability or
+    // binding, a boundary or transport refusal) sent nothing: typed "not-dispatched" at the one outer catch below, never an
+    // unsettled turn (client.ts treats an untyped throw after runnerInvoked as a dispatched turn with no receipt).
+    let preDispatch=true;
+    try{
     if(!isAgentContextCapability(capability))fail("agent_context_host_capability_required");
     req.signal?.throwIfAborted();const value=current(capability),turnId=value.binding.turnId;
     // A genuine restricted recall rotates the provider conversation when its
@@ -1150,6 +1155,7 @@ export function withAgentContext(runner: Runner, provider: Omit<AgentContextProv
         }
       }
     }};
+    preDispatch=false;
     try {
       const native=nativeKind,stateful=native || !!policy,resume=stateful && !!nativeHandle;
       let result: RunnerResult;
@@ -1393,6 +1399,11 @@ export function withAgentContext(runner: Runner, provider: Omit<AgentContextProv
         try { await pendingAliveAck.callbacks.onAbandon(); } catch { /* No retained chain after uncertain custody. */ }
       }
       activeDeliveries.delete(capability);activeTransports.delete(capability);activeBootstraps.delete(capability);referenceOrdinals.delete(capability);hostFactsSent.delete(capability);
+    }
+    }catch(error){
+      // The caller's own abort reason is shared with other turns of that signal: it is never stamped as this turn's delivery fact.
+      if(preDispatch && error!==req.signal?.reason)markRefusedBeforeDispatch(error);
+      throw error;
     }
   };
 }

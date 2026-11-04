@@ -186,6 +186,7 @@ import { runtimeSelectionReceiptMatches } from "@shared/runtime-selection-receip
 import { requestOneOperationalRecovery } from "@/lib/one-operational-recovery";
 import { OneSubmitPreflightError, oneSubmitPreflightNotice, prepareOneTeamPreflightForSubmit, type OneSubmitTaskBinding } from "@/lib/one-submit-binding";
 import { toolFailureCopy } from "@shared/tool-failure";
+import { ownerFailureTitle } from "@shared/owner-failure-title";
 import { useJudgedOneDecision } from "@/lib/one-decision-judged";
 import { visibleDecisionReceipt } from "@/lib/one-decision-receipt";
 import { mergeDurableChatCatchup } from "./durable-chat-catchup";
@@ -10475,7 +10476,7 @@ function OneSessionsShell() {
                   {failureFocus && (!failureFocus.chatId || failureFocus.chatId === (selected?.chatId ?? conversation?.id)) && (
                     <section className={styles.failureCard} role="alert" aria-label={appLocale === "ko" ? "실패 복구" : "Failure recovery"}>
                       <button type="button" className={styles.failureCardClose} aria-label={appLocale === "ko" ? "닫기" : "Close"} onClick={() => setFailureFocus(null)}><IconClose size={14} /></button>
-                      <div className={styles.failureCardHeader}><strong>{appLocale === "ko" ? "실패" : "Failed"}</strong><span>{(failureFocus.failureCode ?? failureFocus.errorCode) || (appLocale === "ko" ? "실행 오류" : "Runtime error")}</span></div>
+                      <div className={styles.failureCardHeader}><strong>{appLocale === "ko" ? "실패" : "Failed"}</strong><span>{ownerFailureTitle(failureFocus.failureCode ?? failureFocus.errorCode, appLocale === "ko" ? "ko" : "en")}</span></div>
                       <p>{toolFailureCopy(failureFocus.failureCode ?? failureFocus.errorCode, appLocale) ?? failureFocus.errorMessage}</p>
                       <div className={styles.failureCardActions}>
                         <button type="button" disabled={!failureFocus.chatId || busy} onClick={retryFocusedFailure}>{appLocale === "ko" ? "다시 시도" : "Retry"}</button>

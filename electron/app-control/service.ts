@@ -14,6 +14,7 @@ import { closestNames, invalidValueMessage, nameSimilarity, schemaArgumentHints,
 import { decodeAppControlArguments } from "./argument-codec";
 import { remoteAppControlCall, remoteAppControlOperations } from "./daemon-remote";
 import { daemonServesAppControlChannel } from "./daemon-reads";
+import { explainAppOperationFailure } from "./failure-copy";
 import { APP_CALL_ANSWER_WINDOW_MS, answerAppCallWithin, appCallKey, appCallPendingNotice } from "./pending-calls";
 import { saveObservationCaptureArtifact } from "../media/capture-artifacts";
 
@@ -569,6 +570,14 @@ function hostEnumRefusal(path: string, named: Record<string, unknown>): string |
   return null;
 }
 
+/** A handler that refused with nothing but an internal code says what it means and what to do next (failure-copy.ts). */
+function withPlainFailure(error: unknown): unknown {
+  if (!(error instanceof Error) || error instanceof AppControlError) return error;
+  const plain = explainAppOperationFailure(error.message);
+  if (plain) { try { error.message = plain; } catch { /* a frozen error keeps its own text */ } }
+  return error;
+}
+
 /** A handler that threw on an argument outside its declared schema also says which field and the closest declared value. */
 function withArgumentHints(error: unknown, path: string, args: unknown): unknown {
   if (!(error instanceof Error)) return error;
@@ -668,7 +677,7 @@ export async function appControlCallLocal(caller: AppControlCaller, input: AppCo
   const args = entry.invokeArgs.map((arg) => build(arg, decoded));
   let value: unknown;
   try { value = await invokeAppControlIpc({ window, channel: entry.channel, args, operation: path, ownerInteraction: caller.ownerTurn, permission: effectiveInvocationPermission(caller.permission, false) }); }
-  catch (error) { await recordAppCallReceipt({ operation: path, effect: operation.effect, named: decoded, status: "failed", code: errorCode(error), ownerTurn: caller.ownerTurn }); throw withArgumentHints(error, path, decoded); }
+  catch (error) { await recordAppCallReceipt({ operation: path, effect: operation.effect, named: decoded, status: "failed", code: errorCode(error), ownerTurn: caller.ownerTurn }); throw withArgumentHints(withPlainFailure(error), path, decoded); }
   // The experience maps carry owner-local titles for the owner's renderer; an agent's copy drops them (safeLabel stays).
   if (OWNER_LOCAL_MAP_OPERATIONS.has(path)) value = (await import("../experience/relation-index")).withoutOwnerLocalLabels(value);
   const record = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;

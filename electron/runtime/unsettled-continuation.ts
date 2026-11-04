@@ -4,6 +4,7 @@
 // no CLI, tool or cause. See the comment at its single call site, mcp/client.ts invokeCurrentRuntime.
 import { RuntimeTurnUnsettledError, RUNTIME_TURN_UNSETTLED_CODE, type RunnerResult, type RuntimeTurnDelivery } from "./runner";
 import { decideTurnSettlement } from "../../shared/turn-settlement";
+import { isTransientExternalFailure, TRANSIENT_CONTINUATION_DELAY_MS } from "../../shared/transient-provider-failure";
 import type { AgentContextUnsettledTurn } from "./agent-context";
 
 /** Host-authored (purpose "run-recovery", compacted on replay); names no tool, runtime or cause. */
@@ -51,7 +52,12 @@ export interface UnsettledContinuationPort<Req> {
   noModelWork(): boolean;
   /** What the LAST dispatch's journal turn left behind (null when it was not a journal turn). */
   leftBehind(): AgentContextUnsettledTurn | null;
-  record(phase: "dispatched" | "settled" | "unsettled" | "not_resumable", delivery?: RuntimeTurnDelivery): void;
+  record(phase: "dispatched" | "settled" | "unsettled" | "not_resumable", delivery?: RuntimeTurnDelivery, cause?: "provider_transient"): void;
+  /**
+   * Waits `ms` before a continuation that follows a transient cause outside the app (shared/transient-provider-failure.ts),
+   * telling the owner why. Resolves early on the owner's stop. Absent: the continuation goes at once.
+   */
+  wait?(ms: number): Promise<void>;
 }
 
 export async function invokeWithUnsettledContinuation<Req>(port: UnsettledContinuationPort<Req>, request: Req,
@@ -65,7 +71,17 @@ export async function invokeWithUnsettledContinuation<Req>(port: UnsettledContin
     if (!o.ok) return o.error instanceof RuntimeTurnUnsettledError;
     // A typed pre-dispatch refusal (RuntimeTurnDelivery "not-dispatched") is that failure: nothing to continue.
     if (o.result.ownerControlTerminal === "completed" || o.result.turnDelivery === "not-dispatched" || port.noModelWork()) return false;
-    return !o.result.failure || o.result.failure.providerCode === RUNTIME_TURN_UNSETTLED_CODE;
+    // A transient cause outside the app after dispatch (the provider at capacity, a lost stream, a stalled stream the host
+    // ended) leaves the turn's work in its session exactly as a missing receipt does: it continues there once. Every other
+    // typed failure (quota, sign-in, refusal, an unsupported request) is that failure and never a continuation.
+    return !o.result.failure || o.result.failure.providerCode === RUNTIME_TURN_UNSETTLED_CODE || isTransientExternalFailure(o.result.failure);
+  };
+  /** The first dispatch ended on a transient cause outside the app: returned as a typed failure, or the cause of the thrown unsettled turn. */
+  const transient = (o: UnsettledOutcome): boolean => {
+    if (o.ok) return isTransientExternalFailure(o.result.failure);
+    const cause = (o.error as { cause?: unknown } | null)?.cause;
+    const failure = cause && typeof cause === "object" && "failure" in cause ? (cause as { failure?: unknown }).failure : cause;
+    return Boolean(failure && typeof failure === "object" && isTransientExternalFailure(failure as { providerCode?: string; source?: string }));
   };
   const first = await run(request, hostAuthored);
   if (!unsettled(first)) return surface(first);
@@ -82,7 +98,13 @@ export async function invokeWithUnsettledContinuation<Req>(port: UnsettledContin
     port.record("not_resumable");
     return surface(first);
   }
-  port.record("dispatched", delivery);
+  const waitFirst = transient(first);
+  port.record("dispatched", delivery, waitFirst ? "provider_transient" : undefined);
+  if (waitFirst && port.wait) {
+    await port.wait(TRANSIENT_CONTINUATION_DELAY_MS);
+    // The owner stopped the turn while it waited: that stop is the outcome, nothing more is sent.
+    if (port.aborted()) return surface(first);
+  }
   const next = await run(port.continuationRequest(request, handle, delivery), "run-recovery", handle);
   // A definite refusal (owner stop, budget, custody) is that failure, not the first turn's unknown.
   if (!next.ok && !unsettled(next)) throw next.error;

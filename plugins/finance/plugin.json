@@ -126,8 +126,8 @@
       },
       {
         "path": "skills/index/SKILL.md",
-        "sha256": "898e4d0328014637b072744ff8e1051241d88f731d6576fc4d9f432786296012",
-        "bytes": 2836
+        "sha256": "0ff469f5a7ef4d47a0fa40b0b4202d402e0992223096f46423e800c59b9d6a16",
+        "bytes": 3399
       },
       {
         "path": "skills/monitor/SKILL.md",
@@ -151,8 +151,8 @@
       },
       {
         "path": "skills/research/SKILL.md",
-        "sha256": "fdb0b5d131c5e881a2b8b1667f1e8eca2730b39c7a2d8fe3ffbb27fda1720bc5",
-        "bytes": 5414
+        "sha256": "3bd7d51a8c920eb21956d89496bb4f418898ba44b0cb0fc577e6617f7e53de6c",
+        "bytes": 5427
       },
       {
         "path": "skills/workspace/SKILL.md",

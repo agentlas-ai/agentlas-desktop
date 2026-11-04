@@ -10,6 +10,7 @@ import { getInvocationAdmission, getPendingInvocationAdmissionForChat } from "..
 import { invocationRunOwners, invocationProcessOwner } from "../store/invocation-run-owners";
 import { releaseGoneTerminalOwners } from "../store/terminal-owner-liveness";
 import { userDataDir } from "../runtime-paths";
+import { hostRecoveryRequested } from "./host-recovery";
 import { withPreparedUserRow } from "../store/prepared-user-rows";
 import { pickLocale } from "../runtime/status-i18n";
 import { invocationService, type InvocationSettledEnvelope } from "./service";
@@ -340,14 +341,15 @@ export function createRendererSendQueue(startNow: RendererStartNow, options: Ren
     // interrupt, a host stop and a run the owner already saw fail are never sent again (earlier-attempt.ts reads the receipt).
     resendWhenUnconfirmed: (runId) => {
       if (!runId) return unconfirmedRunShouldBeSentAgain(null);
-      try { return unconfirmedRunShouldBeSentAgain(getInvocationRunReceipt(runId)); } catch { return false; }
+      try { return !hostRecoveryRequested(getDb(), runId) && unconfirmedRunShouldBeSentAgain(getInvocationRunReceipt(runId)); } catch { return false; }
     },
     ownerStoppedSince: (chatId, sinceMs) => ownerStoppedChatSince(getDb(), chatId, sinceMs),
     failureCode: (runId) => getInvocationRunReceipt(runId)?.errorCode ?? null,
     // The owner's Stop, a direction steered over the run, a Goal they paused or deleted: that run's message is never started again.
     endedByOwner: (runId) => {
       const receipt = getInvocationRunReceipt(runId);
-      return !!receipt && isOwnerEndedInvocation(receipt);
+      // A run the host recovers itself (host-recovery.ts) is not started a second time by the queue.
+      return !!receipt && (isOwnerEndedInvocation(receipt) || hostRecoveryRequested(getDb(), runId));
     },
     internalFailure: (runId) => queuedSendInternalFailure(getInvocationRunReceipt(runId)),
     saveUserRow: (request) => {
@@ -455,7 +457,7 @@ export function createRendererSendQueue(startNow: RendererStartNow, options: Ren
     forgetDirectStartKept(envelope.runId);
     const { event, request } = held;
     const chatId = request.chatId;
-    if (!unconfirmedRunShouldBeSentAgain(envelope.receipt)) return;
+    if (!unconfirmedRunShouldBeSentAgain(envelope.receipt) || hostRecoveryRequested(getDb(), envelope.runId)) return;
     // A turn proven in the conversation is not lost; only an unconfirmed placement is sent again.
     if (queuedSendPlacement(envelope.runId) !== "unconfirmed") return;
     if (queue.hasQueued(chatId)) return;
@@ -548,6 +550,7 @@ export function createRendererSendQueue(startNow: RendererStartNow, options: Ren
       req = options.sanitizeRequest ? options.sanitizeRequest(req) : { ...req };
       // Only this queue marks a second send (earlier-attempt.ts); a request coming in from a window never carries the marker.
       delete (req as { earlierAttemptUncertain?: unknown }).earlierAttemptUncertain;
+      delete (req as { hostRecovery?: unknown }).hostRecovery;
       if (rawSubmission !== undefined) req.preflightSubmissionId = rawSubmission;
       const previous = options.custody?.existing(req);
       const queuedAnswer = (record: PendingSendRecord): QueuedRunAnswer => ({ runId: req.runId ?? "", chatId: req.chatId, queued: true,

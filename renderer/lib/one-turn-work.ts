@@ -4,7 +4,7 @@ import { mergeConsecutiveThoughts } from "@shared/turn-activity-rows";
 import { parseShellCommand, stripShellWrapper } from "@shared/exploratory-shell";
 import { toolFailureCopy, type ToolFailureCode } from "@shared/tool-failure";
 import type { ToolInvocationOrigin } from "@shared/tool-invocation-origin";
-import { BUILTIN_ONE_AGENT_ID } from "@shared/builtin-agent-ids";
+import { BUILTIN_ONE_AGENT_ID, BUILTIN_ORCHESTRATOR_AGENT_ID } from "@shared/builtin-agent-ids";
 import type { InvocationPlanEntry } from "@shared/invocation-plan";
 import { toolObservationAction } from "./tool-observation";
 import {
@@ -308,6 +308,13 @@ function classifyTool(item: OneActivityItem, workspacePath: string | null): Clas
         const readable = server && named ? `${server} · ${named}` : named || server;
         return { cell: "call", label: readable ?? CONNECTED_TOOL_LABEL, connected: !readable };
       }
+      // Agentlas's own harness door: the row names the operation it ran ("finance.search"), not the transport
+      // ("agentlas-turn-harness_call"), which read as an internal id on the owner's screen.
+      if (/^(?:mcp__)?agentlas[-_]turn(?:__|[-_.])harness[_-](?:call|describe)$/i.test(tool.name.trim())) {
+        const parsed = parseJsonRecord(tool.args);
+        const operation = pickText(parsed, ["operation", "id"]);
+        return { cell: "call", label: operation ?? CONNECTED_TOOL_LABEL, connected: !operation };
+      }
       const server = mcpServerName(tool.name);
       const leaf = server ? tool.name.split("__").slice(2).join("__").replace(/[-_]+/g, " ").trim() : "";
       return { cell: "call", label: server ? (leaf ? `${server} · ${leaf}` : server) : tool.name };
@@ -356,8 +363,13 @@ export function isQuietHostNote(cell: OneWorkCell): cell is Extract<OneWorkCell,
  * (attributed), but a worker card for it only repeated the latest row and read
  * "실행 모델 미확인" beside a header that already names the executed model.
  */
-export function isOneOrchestratorGroup(group: Pick<OneWorkerWorkGroup, "agentId">): boolean {
-  return group.agentId === BUILTIN_ONE_AGENT_ID;
+export function isOneOrchestratorGroup(group: Pick<OneWorkerWorkGroup, "agentId" | "name" | "lifecycle">): boolean {
+  // The built-in orchestrator is the main agent of Work/Finance chats the way One is of One chats. A group that carries no
+  // name and no delegation row is that main agent's own tool calls, not a worker: the owner saw "Unnamed worker ·
+  // Execution model unconfirmed" on every Finance turn .
+  return group.agentId === BUILTIN_ONE_AGENT_ID
+    || group.agentId === BUILTIN_ORCHESTRATOR_AGENT_ID
+    || (!group.name?.trim() && !group.lifecycle);
 }
 
 export interface OneWorkerWorkGroup {

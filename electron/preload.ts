@@ -120,6 +120,11 @@ contextBridge.exposeInMainWorld("agentlasSystemPermissions", {
   },
 });
 
+// Optional dedicated bridge for the composer's "@" menu (plugins of one conversation's domain tool menu).
+contextBridge.exposeInMainWorld("agentlasComposerMentions", {
+  plugins: (chatId: string | null) => ipcRenderer.invoke("composer:mentionPlugins", chatId),
+});
+
 const api: AgentlasIpc = {
   finance: {
     planning: input => ipcRenderer.invoke("finance:planning", input),

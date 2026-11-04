@@ -2,6 +2,8 @@ import { z } from "zod";
 import { validateFinanceOperation, type FinanceAsset, type FinanceReport, type FinanceSearchResult } from "./finance";
 import { FinanceSecurityIdentitySchema } from "./finance-search";
 import { FinancePortfolioDraftSchema } from "./finance-portfolio";
+import { FinanceEarningsViewSchema, FinanceImpactViewSchema } from "./finance-present";
+import { FinanceCanvasViewSchema } from "./finance-canvas";
 
 export const FINANCE_NATIVE_VIEW = "finance.result.v1";
 const asset = z.unknown().transform((value, ctx): FinanceAsset => {
@@ -28,6 +30,9 @@ export const FinanceNativeResultSchema = z.object({
     z.object({ kind: z.literal("query"), request, result: dataResult }).strict(),
     z.object({ kind: z.literal("portfolio"), status: z.enum(["ok", "partial", "unavailable"]), coverage: z.object({ positions: z.number().int().nonnegative(), pricedPositions: z.number().int().nonnegative(), missingPositions: z.number().int().nonnegative() }).strict() }).strict(),
     /** Holdings the assistant read for the owner to edit and save. Nothing here is saved; the owner's Save in the card is the only write. */
+    FinanceEarningsViewSchema,
+    FinanceImpactViewSchema,
+    FinanceCanvasViewSchema,
     z.object({ kind: z.literal("holdings"), draft: FinancePortfolioDraftSchema, baseRevision: z.number().int().nonnegative() }).strict(),
     z.object({ kind: z.literal("report"), report, workspaceRevision: z.number().int().nonnegative(), coverage: z.object({ positions: z.number().int().nonnegative(), pricedPositions: z.number().int().nonnegative(), missingPositions: z.number().int().nonnegative() }).strict().optional(), sources: z.array(reportSource).max(50).optional() }).strict(),
   ]),

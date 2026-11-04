@@ -1,4 +1,5 @@
 import { FinanceNativeResultSchema } from './finance-native-ui';
+import { financeCanvasDocument, financeCanvasFromLegacy } from './finance-canvas';
 import { financePortfolioLineText } from './finance-portfolio';
 import { financeDatedSeries } from './finance-data-visual';
 import { financeReportCompositionSpec, financeReportComputeMetrics, financeReportLocale, financeReportProseBlocks, financeReportWarnings, selectFinanceReportSections } from './finance-report-presentation';
@@ -42,6 +43,16 @@ function seriesChart(columns: readonly string[], rows: readonly (string | number
   } } };
 }
 
+/** A query is a result the owner asked to see only when its rows draw as a series chart (the phone's rule); every other query (filings,
+ *  news, company facts, keyword search, price rows) is what the model read to answer. The desktop host uses this to not present a card
+ * for such a read at all (a Finance answer was preceded by Company facts, Form 4 and News cards). */
+export function financeQueryDrawsSeries(request: { metrics: readonly string[] }, result: { status: string; columns: readonly string[]; rows: readonly (string | number | null)[][] }): boolean {
+  if (result.status === 'error' || result.status === 'unconnected' || !result.rows.length) return false;
+  const metric = request.metrics.length === 1 ? request.metrics[0] : undefined;
+  const built = seriesChart(result.columns, result.rows, metric === 'macro_series' || metric === 'fx_rates' ? 'series' : metric);
+  return !!built && 'spec' in built;
+}
+
 /** One clean line cut at `limit` characters, never through a surrogate pair: the phone's table widget cannot draw half of one. */
 const clipText = (value: string, limit: number) => {
   const line = financePortfolioLineText(value);
@@ -80,6 +91,10 @@ export function financeNativeTranscriptContents(value: unknown, options: { state
       : options.state === 'ready' ? 'Reviewed and saved in the Agentlas desktop app.'
       : 'This proposal is no longer open for review.';
     blocks.push(native([...(open ? [{ type: 'table' as const, columns: ['Name', 'Symbol', 'Currency', 'Quantity', 'Average cost', 'Price', 'As of'], rows }] : []), text(status)], 'Holdings to review'));
+  } else if (view.kind === 'canvas' || view.kind === 'earnings' || view.kind === 'impact') {
+    // The answer's own result card: the phone draws the very HTML the desktop draws (sandboxed visual), so both show the same card.
+    const canvas = financeCanvasFromLegacy(view as { kind: string } & Record<string, unknown>);
+    if (canvas) blocks.push({ kind: 'visual', html: financeCanvasDocument(canvas) });
   } else if (view.kind === 'report') {
     const locale = financeReportLocale(view.report, 'en');
     if (view.coverage?.missingPositions) blocks.push(native([text(`${view.coverage.pricedPositions}/${view.coverage.positions} priced holdings · ${view.coverage.missingPositions} unavailable`)]));

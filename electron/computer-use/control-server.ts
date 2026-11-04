@@ -16,6 +16,7 @@ import {
   nativeInputDriverAvailable,
   type NativeAppObservation,
   type NativeElementReference,
+  type NativeObservedElement,
   type NativeInputAction,
   type NativeInputResult,
 } from "./native-driver";
@@ -23,8 +24,11 @@ import { currentUiLocale } from "../ui-locale";
 import { checkComputerUseWindowScope } from "./window-scope";
 import { supervisorDock } from "./supervisor-dock";
 import { invalidValueMessage } from "../../shared/did-you-mean";
-import { assertRequestCurrent, linkedAbortSignals } from "./request-lifetime";
+import { abortableDelay, assertRequestCurrent, linkedAbortSignals } from "./request-lifetime";
 import { learnTap } from "./learn-tap";
+import { launchApp, waitUntil } from "../reach/launch";
+import { nodeExec } from "../reach/host";
+import { isSensitiveApp } from "../reach/explore-policy";
 
 const MAX_REQUEST_BYTES = 64 * 1024;
 const MAX_AUDIT_ROWS = 200;
@@ -61,8 +65,50 @@ const observations = new Map<string, {
   app: string;
   expiresAt: number;
   refs: NativeElementReference[];
+  labels: ElementLabel[];
   frames: Array<{x:number;y:number;width:number;height:number}|undefined>;
 }>();
+/**
+ * What each observed element was (role and captions, never a value), kept after the observation itself is consumed or the screen moved.
+ * An element index from an earlier observation is then found again by what it is on the fresh tree, instead of ending the call with
+ * "stale-element-reference" / "invalid-observation" (observed in use: two clicks on the owner's own Agentlas window failed this way).
+ */
+interface ElementLabel { role: string; subrole?: string; title?: string; description?: string; lineage: string }
+const retiredObservations = new Map<string, { app: string; expiresAt: number; labels: ElementLabel[]; frames: Array<{x:number;y:number;width:number;height:number}|undefined> }>();
+function retireObservations(): void {
+  const now = Date.now();
+  for (const [id, observation] of observations) {
+    retiredObservations.delete(id);
+    retiredObservations.set(id, { app: observation.app, expiresAt: now + OBSERVATION_TTL_MS, labels: observation.labels, frames: observation.frames });
+  }
+  observations.clear();
+  for (const [id, retired] of retiredObservations) if (retired.expiresAt <= now) retiredObservations.delete(id);
+  while (retiredObservations.size > MAX_OBSERVATIONS) { const oldest = retiredObservations.keys().next().value as string | undefined; if (!oldest) break; retiredObservations.delete(oldest); }
+}
+/** What encloses an element, nearest three ancestors (role and caption): the same caption inside another window or panel is another control. */
+function lineages(elements: readonly NativeObservedElement[]): string[] {
+  const byPath = new Map(elements.map((element) => [element.ref.path.join("/"), element]));
+  return elements.map((element) => {
+    const chain: string[] = [];
+    for (let length = element.ref.path.length - 1; length >= 0 && chain.length < 3; length -= 1) {
+      const ancestor = byPath.get(element.ref.path.slice(0, length).join("/"));
+      if (ancestor) chain.push(`${ancestor.role}|${ancestor.title ?? ancestor.description ?? ""}`);
+    }
+    return `${element.ref.path.length}:${chain.join("/")}`;
+  });
+}
+const labelsOf = (elements: readonly NativeObservedElement[]): ElementLabel[] => {
+  const lineage = lineages(elements);
+  return elements.map((element, index) => ({ role: element.role, ...(element.subrole ? { subrole: element.subrole } : {}), ...(element.title ? { title: element.title } : {}), ...(element.description ? { description: element.description } : {}), lineage: lineage[index] }));
+};
+/** The one element of a fresh observation that is what the label says; null when none or several fit (a wrong press is worse than a refusal). */
+function findByLabel(observation: NativeAppObservation, label: ElementLabel): NativeElementReference | null {
+  if (!label.title && !label.description) return null;
+  const fresh = labelsOf(observation.elements);
+  const same = observation.elements.filter((element, index) => fresh[index].role === label.role && (fresh[index].subrole ?? "") === (label.subrole ?? "")
+    && (fresh[index].title ?? "") === (label.title ?? "") && (fresh[index].description ?? "") === (label.description ?? "") && fresh[index].lineage === label.lineage);
+  return same.length === 1 ? same[0].ref : null;
+}
 const pendingRequests = new Set<AbortController>();
 
 function pruneObservations(now = Date.now()): void {
@@ -99,6 +145,7 @@ function serializeObservation(app: string, observation: NativeAppObservation): R
     app,
     expiresAt: Date.now() + OBSERVATION_TTL_MS,
     refs: observation.elements.map((element) => element.ref),
+    labels: labelsOf(observation.elements),
     frames: observation.elements.map((element) => element.frame),
   });
   return {
@@ -203,7 +250,90 @@ function typedOsRefusal(error: unknown): boolean {
   const code = error && typeof error === "object" && "code" in error ? String((error as { code: unknown }).code) : "";
   return /^(?:one-os-|one-context-|computer-use-request-aborted$)/.test(code);
 }
-function osFailure(error: unknown): NativeInputResult { return {ok:false,error:error && typeof error === "object" && "code" in error ? String(error.code) : "one-os-authority-unavailable"}; }
+/**
+ * What a typed refusal means and what to do next, in words. The code alone ("one-os-human-active") reached the owner's chat verbatim
+ * (observed in use: Hope told the owner to "finish using the computer and ask again"). The code stays last, for diagnostics.
+ */
+const OS_REFUSAL_TEXT: Readonly<Record<string, string>> = {
+  "one-os-human-active": "The owner is typing or moving the mouse right now, so this step was held back (nothing was pressed). Wait about ten seconds and repeat the same call; only if it is still refused after a minute, say the owner is using the computer.",
+  "one-os-resource-busy": "Another run is using the screen at this moment. Wait a few seconds and repeat the same call.",
+  "one-os-session-unavailable": "The screen is locked or asleep, so nothing can be pressed now. Do the parts that need no screen and continue when it is unlocked.",
+  "one-os-lease-expired": "The screen turn ended before this step ran (nothing was pressed). Repeat the call.",
+  "one-os-lease-unavailable": "The screen turn ended before this step ran (nothing was pressed). Repeat the call.",
+  "one-os-target-not-foreground": "That app is not in front. Call focus_app with the app name, then repeat the call.",
+  "one-os-target-unavailable": "That app has no window on screen. Call focus_app with the app name (it opens the app when it is not running), then repeat the call.",
+  "one-os-target-identity-changed": "The app restarted since it was looked at. Call get_app_state again and use the new element indices.",
+  "one-os-window-changed": "The app's front window changed. Call get_app_state again and use the new element indices.",
+  "one-os-window-not-foreground": "That window is not in front. Call focus_app with the app name, then repeat the call.",
+  "one-os-input-unavailable": "Screen control is not ready on this computer (a macOS permission is missing). Say so plainly: the owner enables Accessibility for Agentlas in System Settings > Privacy & Security.",
+  "one-os-input-permission-denied": "This run may only look at the screen, not press anything. Say that pressing needs the run's write permission.",
+  "one-os-element-frame-unavailable": "That element's position is not known. Call get_app_state again and use the new element indices.",
+  "one-os-action-target-required": "Name the app to act on (the app argument).",
+  "one-os-execution-capability-unavailable": "This screen turn has ended (the run was stopped, finished or restarted), so nothing was pressed. Continue without the screen, or start the step again from a new turn.",
+  "one-os-execution-revoked": "This screen turn has ended (the run was stopped, finished or restarted), so nothing was pressed. Continue without the screen, or start the step again from a new turn.",
+  "one-os-execution-capability-invalid": "This screen turn could not be confirmed, so nothing was pressed. Repeat the call once; if it fails again, continue without the screen.",
+  "one-os-authority-unavailable": "Screen control could not be confirmed for this run. Repeat the call once; if it fails again, continue without the screen.",
+};
+function osFailure(error: unknown): NativeInputResult {
+  const code = error && typeof error === "object" && "code" in error ? String(error.code) : "one-os-authority-unavailable";
+  const text = OS_REFUSAL_TEXT[code];
+  return { ok: false, error: code, ...(text ? { message: `${text} [${code}]` } : {}) };
+}
+const NOT_RUNNING_HINT = " If you meant to open it, call focus_app with the same app name: it opens an app that is not running.";
+/** A native answer "no such running app" with the one step that fixes it (the sentence the classifier keys on stays first). */
+function withOpenHint<T extends { ok?: unknown; error?: unknown; message?: unknown }>(result: T): T {
+  return result.ok === false && result.error === "app-not-found" && typeof result.message === "string" && !result.message.includes("focus_app")
+    ? { ...result, message: `${result.message}${NOT_RUNNING_HINT}` } : result;
+}
+const BUNDLE_LIKE = /^[A-Za-z0-9][A-Za-z0-9-]*(?:\.[A-Za-z0-9][A-Za-z0-9_-]*)+$/;
+const APP_OPEN_WAIT_MS = 6_000;
+/**
+ * focus_app on an app that is not running opens it first (macOS). An app the owner asked to "open" had no tool that could open it:
+ * "No running application matched" (14 times in 14 days, Calculator) and the run fell back to typing into Spotlight. Only focus_app does
+ * this, never an observation: get_app_state on an app that is gone stays an honest answer ("check that it closed"). Not for a read-only
+ * run, a window-scoped grant, a pid target, an app Reach treats as sensitive, or a machine with too many apps to prove "not running".
+ * Returns whether an app was opened.
+ */
+async function openAppIfNotRunning(appName: string, body: Record<string, unknown>, signal: AbortSignal, deps: { listApps?: () => Promise<NativeInputResult>; windows?: () => Promise<NativeInputResult>; exec?: typeof nodeExec; sleep?: (ms: number) => Promise<void> } = {}): Promise<boolean> {
+  if (process.platform !== "darwin" || /^pid:/i.test(appName) || appName.startsWith("native-guest:")) return false;
+  if (body.oneOsExecution !== undefined) {
+    const binding = oneOsLeaseBroker().executionBinding(body.oneOsExecution);
+    if (binding.permissions === "read" || binding.contextGrantId) return false;
+  }
+  const listApps = deps.listApps ?? (() => invokeNativeInputDriver({ action: "listApps" }, undefined, signal));
+  const windows = deps.windows ?? (() => invokeNativeInputDriver({ action: "listCaptureTargets" }, undefined, signal));
+  const wanted = appName.normalize("NFC").toLowerCase().replace(/\.app$/, "");
+  type Row = { name?: unknown; appName?: unknown; bundleIdentifier?: unknown; pid?: unknown };
+  const sameApp = (row: Row) =>
+    [row.name, row.appName, row.bundleIdentifier].some((value) => typeof value === "string" && value.normalize("NFC").toLowerCase().replace(/\.app$/, "") === wanted);
+  const first = await listApps();
+  const apps = Array.isArray(first.apps) ? first.apps as Row[] : null;
+  if (!first.ok || !apps || apps.length >= 100 || apps.some(sameApp)) return false;
+  // The owner types "Calculator" and the helper reports the localized name (계산기): the app that appears after the open is the one that was asked for.
+  const before = new Set(apps.map((row) => row.pid));
+  const ours = (row: Row) => sameApp(row) || (typeof row.pid === "number" && !before.has(row.pid));
+  const bundleId = BUNDLE_LIKE.test(appName) && !/\.app$/i.test(appName) ? appName : undefined;
+  if (isSensitiveApp({ name: appName, ...(bundleId ? { bundleId } : {}) })) return false;
+  const opened = await launchApp(deps.exec ?? nodeExec, { name: appName.replace(/\.app$/i, ""), ...(bundleId ? { bundleId } : {}) }, "darwin");
+  if (!opened) return false;
+  const sleep = deps.sleep;
+  const running = async () => { const now = await listApps(); return Array.isArray(now.apps) && (now.apps as Row[]).some(ours); };
+  if (!await waitUntil(running, { withinMs: APP_OPEN_WAIT_MS, signal, ...(sleep ? { sleep } : {}) })) return false;
+  // a window to act on: most apps draw theirs within a second; a menu-bar app has none and is acted on as it is
+  await waitUntil(async () => { const now = await windows(); return Array.isArray(now.targets) && (now.targets as Row[]).some(ours); }, { withinMs: 3_000, signal, ...(sleep ? { sleep } : {}) });
+  return true;
+}
+/** Waits (bounded) for another run's screen turn to end instead of refusing; the owner's own input is judged by settleHumanInput, not here. */
+async function whileBusy<T>(attempt: () => Promise<T> | T, signal: AbortSignal, withinMs = 10_000): Promise<T> {
+  for (let waited = 0; ; waited += 250) {
+    try { return await attempt(); }
+    catch (error) {
+      const code = error && typeof error === "object" && "code" in error ? String((error as { code: unknown }).code) : "";
+      if (code !== "one-os-resource-busy" || waited >= withinMs) throw error;
+      await abortableDelay(250, signal);
+    }
+  }
+}
 function executionLifetime(body: Record<string, unknown>, signal?: AbortSignal) {
   assertRequestCurrent(signal);
   return linkedAbortSignals([signal, body.oneOsExecution === undefined ? undefined : oneOsLeaseBroker().executionSignal(body.oneOsExecution)]);
@@ -237,7 +367,9 @@ function clampedInteger(value: unknown, min: number, max: number, fallback: numb
 }
 
 async function observeApp(body: Record<string, unknown>, requestSignal?: AbortSignal): Promise<Record<string, unknown>> {
-  const lifetime = executionLifetime(body, requestSignal);
+  // A capability that was revoked (the run ended, was stopped or restarted) is a typed refusal here, not a thrown 500 "observe-failed".
+  let lifetime: ReturnType<typeof executionLifetime>;
+  try { lifetime = executionLifetime(body, requestSignal); } catch (error) { return osFailure(error) as unknown as Record<string, unknown>; }
   try { return await observeAppWithin(body, lifetime.signal); } finally { lifetime.dispose(); }
 }
 async function observeAppWithin(body: Record<string, unknown>, requestSignal: AbortSignal): Promise<Record<string, unknown>> {
@@ -280,7 +412,7 @@ async function observeAppWithin(body: Record<string, unknown>, requestSignal: Ab
     const result = await invokeNativeInputDriver({ action: "observeApp", app, maxDepth, maxNodes }, undefined, nativeLifetime.signal);
     await checkpoint();
     recordAudit("observeApp", result);
-    if (!result.ok || !result.observation) return result as unknown as Record<string, unknown>;
+    if (!result.ok || !result.observation) return withOpenHint(result) as unknown as Record<string, unknown>;
     return serializeObservation(app, result.observation);
   } catch (error) {
     // A typed refusal (the owner started typing, the lease ended, the request was stopped) is answered with its code, not a 500.
@@ -330,7 +462,9 @@ function mapPoint(body: Record<string, unknown>, prefix = ""): Point | null {
 }
 
 async function runAction(body: Record<string, unknown>, requestSignal?: AbortSignal): Promise<NativeInputResult> {
-  const lifetime = executionLifetime(body, requestSignal);
+  // See observeApp: a revoked capability answers with its code and words, not "action-failed".
+  let lifetime: ReturnType<typeof executionLifetime>;
+  try { lifetime = executionLifetime(body, requestSignal); } catch (error) { return osFailure(error); }
   try { return await runActionWithin(body, lifetime.signal); } finally { lifetime.dispose(); }
 }
 async function runActionWithin(body: Record<string, unknown>, requestSignal: AbortSignal): Promise<NativeInputResult> {
@@ -349,26 +483,30 @@ async function runActionWithin(body: Record<string, unknown>, requestSignal: Abo
     const denied = await checkComputerUseWindowScope({ route: "action", action, app: body.app, points });
     if (denied) { recordAudit(action, denied as NativeInputResult); return denied; }
   }
-  let observedElement: { observationId: string; ref: NativeElementReference } | null = null;
+  let observedElement: { observationId: string; ref: NativeElementReference | null; label: ElementLabel } | null = null;
   if (action === "elementAction") {
     const observationId = safeString(body.observationId, 64);
     const elementIndex = boundedInteger(body.element_index, 0, 299, -1);
     pruneObservations();
     const observation = observationId ? observations.get(observationId) : undefined;
-    if (!observationId || elementIndex === null || elementIndex < 0 || !observation) {
-      return { ok: false, error: "invalid-observation", message: "Observe the app again and use an element index from that observation." };
+    // An observation used up by an earlier action (or past its time) still says what its elements were: the element is found again below.
+    const retired = observationId && !observation ? retiredObservations.get(observationId) : undefined;
+    if (retired && retired.expiresAt <= Date.now()) retiredObservations.delete(observationId!);
+    const known = observation ?? (retired && retired.expiresAt > Date.now() ? retired : undefined);
+    if (!observationId || elementIndex === null || elementIndex < 0 || !known) {
+      return { ok: false, error: "invalid-observation", message: "That observation is too old to reuse. Call get_app_state again and use an element index from the new observation." };
     }
-    if (observation.app !== appName) {
+    if (known.app !== appName) {
       return { ok: false, error: "observation-app-mismatch", message: "The observation belongs to a different app." };
     }
-    const ref = observation.refs[elementIndex];
-    if (!ref) return { ok: false, error: "invalid-element-index", message: "The element index is not present in this observation." };
-    observedElement = { observationId, ref };
+    const label = known.labels[elementIndex];
+    if (!label) return { ok: false, error: "invalid-element-index", message: "The element index is not present in this observation." };
+    observedElement = { observationId, ref: observation ? observation.refs[elementIndex] : null, label };
   }
   let targetPid: number | undefined;
   const dockRun = dockRunOf(body.oneOsExecution);
   const dockElementFrame = dockRun && action === "elementAction" && observedElement
-    ? observations.get(observedElement.observationId)?.frames[Number(body.element_index)] : undefined;
+    ? (observations.get(observedElement.observationId) ?? retiredObservations.get(observedElement.observationId))?.frames[Number(body.element_index)] : undefined;
 
   let request: NativeInputAction | null = null;
   switch (action) {
@@ -449,7 +587,7 @@ async function runActionWithin(body: Record<string, unknown>, requestSignal: Abo
       request = {
         action: "elementAction",
         operation,
-        ref: observedElement.ref,
+        ref: observedElement.ref ?? ({} as NativeElementReference),
         ...(actionName ? { actionName } : {}),
         ...(value !== undefined ? { value } : {}),
         ...(selectedText ? { text: selectedText } : {}),
@@ -482,7 +620,16 @@ async function runActionWithin(body: Record<string, unknown>, requestSignal: Abo
      */
     const wantsPoint = finiteNumber(body.x) !== null && finiteNumber(body.y) !== null;
     const sourceId = typeof body.sourceId === "string" ? body.sourceId : null;
-    if (wantsPoint && !sourceGeometry(sourceId)) {
+    const geometry = sourceGeometry(sourceId);
+    if (geometry) {
+      for (const prefix of ["", "from_", "to_"]) {
+        const px = finiteNumber(body[`${prefix}x`]), py = finiteNumber(body[`${prefix}y`]);
+        if (px !== null && py !== null && (px < 0 || py < 0 || px > geometry.frameWidth || py > geometry.frameHeight)) {
+          return { ok: false, error: "point-outside-frame", message: `The point (${Math.round(px)}, ${Math.round(py)}) is outside the captured screen image, which is ${geometry.frameWidth} x ${geometry.frameHeight}. Coordinates are pixels of the latest get_screen image; use a point inside it, or prefer an element from get_app_state.` };
+        }
+      }
+    }
+    if (wantsPoint && !geometry) {
       return {
         ok: false,
         error: "screen-not-measured",
@@ -506,6 +653,8 @@ async function runActionWithin(body: Record<string, unknown>, requestSignal: Abo
   const nativeSignal = () => (nativeLifetime ??= linkedAbortSignals([requestSignal, lease?.signal])).signal;
   try {
     assertRequestCurrent(requestSignal);
+    // focus_app on an app that is not open: open it first (see openAppIfNotRunning).
+    if (action === "focusApp" && appName) { await openAppIfNotRunning(appName, body, requestSignal); assertRequestCurrent(requestSignal); }
     if(action!=="status" && action!=="listApps") {
       const broker=configuredOneOsLeaseBroker()?.forRequest(requestSignal);
       await broker?.settleHumanInput(HUMAN_INPUT_ACTION_WAIT_MS);
@@ -513,17 +662,18 @@ async function runActionWithin(body: Record<string, unknown>, requestSignal: Abo
       if(body.oneOsExecution!==undefined) {
         if(!appName)return {ok:false,error:"one-os-action-target-required"};
         const points=[mapPoint(body),mapPoint(body,"from_"),mapPoint(body,"to_")].filter((point):point is Point=>point!==null);
-        const frame=action==="elementAction" && observedElement ? observations.get(observedElement.observationId)?.frames[Number(body.element_index)] : undefined;
+        const frame=action==="elementAction" && observedElement ? (observations.get(observedElement.observationId) ?? retiredObservations.get(observedElement.observationId))?.frames[Number(body.element_index)] : undefined;
         if(action==="elementAction"&&oneOsLeaseBroker().hasContextGrant(body.oneOsExecution)&&!frame)return {ok:false,error:"one-os-element-frame-unavailable"};
         // Explicit focus tool or an owner-selected interaction scope may activate its exact target.
         actionTarget={appTarget:appName,allowFocus:action==="focusApp" || oneOsLeaseBroker().hasContextGrant(body.oneOsExecution),sourceId:typeof body.sourceId==="string"?body.sourceId:undefined,points,...(frame?{elementFrame:frame}:{})};
-        lease=await oneOsLeaseBroker().acquireForAction(body.oneOsExecution,actionTarget);
-      } else if(broker)lease=broker.acquireLegacyAction();
+        const target=actionTarget;
+        lease=await whileBusy(()=>oneOsLeaseBroker().acquireForAction(body.oneOsExecution,target),requestSignal);
+      } else if(broker)lease=await whileBusy(()=>broker.acquireLegacyAction(),requestSignal);
       await checkpoint();
       if(appName && action!=="focusApp" && (body.oneOsExecution===undefined || actionTarget?.allowFocus)) {
         const focused=await invokeNativeInputDriver({action:"focusApp",app:actionTarget?.resolvedPid?`pid:${actionTarget.resolvedPid}`:appName,...(actionTarget?{windowId:actionTarget.resolvedWindowId,processStartMs:actionTarget.resolvedProcessStartMs}:{})},undefined,nativeSignal());
         if(actionTarget)actionTarget.allowFocus=false;
-        await checkpoint();recordAudit("focusApp",focused);if(!focused.ok)return focused;
+        await checkpoint();recordAudit("focusApp",focused);if(!focused.ok)return withOpenHint(focused);
         if(typeof focused.pid==="number"&&Number.isInteger(focused.pid)&&focused.pid>0)targetPid=focused.pid;
         if(request.action==="typeText"||request.action==="selectText")request={...request,...(targetPid?{targetPid}:{})};
         if(action!=="elementAction")await new Promise(resolve=>setTimeout(resolve,280));
@@ -540,7 +690,7 @@ async function runActionWithin(body: Record<string, unknown>, requestSignal: Abo
       }
     } else if(body.oneOsExecution!==undefined) { const authority=await observationAuthority(body);authority.assertCurrent(); }
     await checkpoint();
-    if(action!=="status"&&action!=="listApps"&&action!=="move")observations.clear();
+    if(action!=="status"&&action!=="listApps"&&action!=="move")retireObservations();
     if(request.action==="focusApp" && actionTarget)request={...request,app:`pid:${actionTarget.resolvedPid}`,windowId:actionTarget.resolvedWindowId,processStartMs:actionTarget.resolvedProcessStartMs};
     if(dockRun){
       const dock=supervisorDock();
@@ -548,7 +698,26 @@ async function runActionWithin(body: Record<string, unknown>, requestSignal: Abo
       else if(request.action==="drag")dock?.pointer({x:request.toX,y:request.toY});
       else if(dockElementFrame)dock?.pointer({x:dockElementFrame.x+dockElementFrame.width/2,y:dockElementFrame.y+dockElementFrame.height/2});
     }
+    // An element from an observation the screen has since moved on from is found again by what it is (role and captions) on a fresh
+    // read of the same app; one that cannot be told from another is refused as before. Reading does not need the owner's screen turn.
+    const reresolve=async():Promise<NativeElementReference|null>=>{
+      if(!observedElement||!appName)return null;
+      const fresh=await invokeNativeInputDriver({action:"observeApp",app:appName,maxDepth:32,maxNodes:300},undefined,nativeSignal());
+      return fresh.ok&&fresh.observation?findByLabel(fresh.observation,observedElement.label):null;
+    };
+    if(request.action==="elementAction"&&observedElement&&!observedElement.ref){
+      const found=await reresolve();assertRequestCurrent(requestSignal);
+      if(!found)return {ok:false,error:"stale-element-reference",message:"That element could not be found again on the app's current screen. Call get_app_state again and use the new element indices."};
+      observedElement.ref=found;request={...request,ref:found};
+    }
     const result=await invokeNativeInputDriver(request,undefined,nativeSignal());
+    if(request.action==="elementAction"&&observedElement&&result.error==="stale-element-reference"){
+      const found=await reresolve();assertRequestCurrent(requestSignal);
+      const again:NativeInputResult=found?(request={...request,ref:found},await invokeNativeInputDriver(request,undefined,nativeSignal()))
+        :{...result,message:"That element could not be found again on the app's current screen. Call get_app_state again and use the new element indices."};
+      for(const key of Object.keys(result))delete result[key];Object.assign(result,again);
+    }
+    if(action==="focusApp"&&result.error==="app-not-found"&&typeof result.message==="string")result.message+=" It is not running and could not be opened under that name; use the exact name of an installed app (list_apps shows the running ones).";
     assertRequestCurrent(requestSignal);
     if(dockRun){
       const dock=supervisorDock();
@@ -769,5 +938,8 @@ export function stopComputerUseControlServer(): void {
   auditRows.length = 0;
   sourceGeometries.clear();
   observations.clear();
+  retiredObservations.clear();
   try { fs.rmSync(computerUseControlInfoPath(), { force: true }); } catch { /* ignore */ }
 }
+
+export const __computerUseTestHooks = { openAppIfNotRunning, findByLabel, withOpenHint, osFailure, whileBusy };

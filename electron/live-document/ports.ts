@@ -170,8 +170,12 @@ export async function documentApply(args: Record<string, unknown>, ctx: Ctx): Pr
     ...(Number.isSafeInteger(args.baseRevision) ? { baseRevision: Number(args.baseRevision) } : {}),
     ops: args.ops, actor: { kind: "ai", label: "AI", runId: ctx.runId },
   });
-  if (!result.ok) return refused(result.reason, result.detail ?? (result.reason === "revision_conflict" ? "document.read, then apply against the new revision" : undefined), result.revision !== undefined ? { revision: result.revision } : undefined);
-  return { status: "ok", data: { revision: result.revision, created: result.created } };
+  if (!result.ok) {
+    const detail = result.reason === "target_unknown" && result.detail ? `${result.detail}: no element with this id in the document now; document.read lists the current ids (new elements get ids the host assigns)` : result.detail;
+    return refused(result.reason, detail ?? (result.reason === "revision_conflict" ? "document.read, then apply against the new revision" : undefined), result.revision !== undefined ? { revision: result.revision } : undefined);
+  }
+  return { status: "ok", data: { revision: result.revision, created: result.created,
+    ...(result.adjusted?.length ? { adjusted: result.adjusted, note: "an insert named an id this document does not have (an element the same batch or an earlier call was still creating): it was added at the end instead; document.read shows the ids, and an insert after one of them moves it" } : {}) } };
 }
 
 export async function documentSave(args: Record<string, unknown>, ctx: Ctx): Promise<Outcome> {

@@ -2,6 +2,7 @@ import { runAppleScript } from "../reach/applescript";
 import { isPublishedOffLimits, isSensitiveApp } from "../reach/explore-policy";
 import { isDirectMenuCommand, isCurrentDialogCapability, type CapabilityPolicyContext } from "../reach/map";
 import { findLiveCandidates, firstWithWindow } from "../reach/app-match";
+import { launchApp, waitUntil } from "../reach/launch";
 import { exploreApp } from "../reach/explorer";
 import { findMenuWindow } from "../reach/menu-probe";
 import { withForeground } from "../reach/foreground";
@@ -270,27 +271,72 @@ function bundleOf(key: string): string | null {
   return key.startsWith("bundle:") ? key.slice("bundle:".length).split("@")[0] : null;
 }
 
-async function liveTarget(rt: ReachRuntime, app: { key: string; name: string; path?: string }, actuator: import("../reach/actuator").Actuator, signal?: AbortSignal): Promise<{ pid: number; windowId: number; name: string } | { error: string }> {
-  const apps = await actuator.listApps({ signal });
-  const candidates = findLiveCandidates(app, apps);
+type KnownApp = { key: string; name: string; path?: string };
+const OPEN_WAIT_MS = 8_000;
+const WINDOW_WAIT_MS = 4_000;
+
+/**
+ * Opens the app when it is not running, for a run that may act (write permission). "Reach only drives an app that is already running" ended
+ * a Calculator job the owner had asked for whenever the app had been closed (observed in use). Never for an app Reach treats as
+ * sensitive, and only where the OS can be asked from what the map knows (a bundle id, an AppX id, a desktop entry).
+ */
+async function ensureOpen(rt: ReachRuntime, app: KnownApp, actuator: import("../reach/actuator").Actuator, signal?: AbortSignal): Promise<{ error: string } | null> {
+  const bundleId = bundleOf(app.key) ?? undefined;
+  if ((await actuator.listApps({ signal })).some((live) => findLiveCandidates(app, [live]).length > 0)) return null;
+  if (isSensitiveApp({ name: app.name, bundleId })) return { error: "app_off_limits" };
+  if (!await launchApp(rt.exec, { key: app.key, name: app.name, ...(bundleId ? { bundleId } : {}), ...(app.path ? { path: app.path } : {}) }, rt.platform)) return null;
+  await waitUntil(async () => findLiveCandidates(app, await actuator.listApps({ signal })).length > 0, { withinMs: OPEN_WAIT_MS, ...(rt.sleep ? { sleep: rt.sleep } : {}), ...(signal ? { signal } : {}) });
+  return null;
+}
+
+async function liveTarget(rt: ReachRuntime, app: KnownApp, actuator: import("../reach/actuator").Actuator, signal?: AbortSignal, mayOpen = false): Promise<{ pid: number; windowId: number; name: string } | { error: string }> {
+  if (mayOpen) { const refusal = await ensureOpen(rt, app, actuator, signal); if (refusal) return refusal; }
+  const candidates = findLiveCandidates(app, await actuator.listApps({ signal }));
   if (candidates.length === 0) return { error: "app_not_running" };
   // the process that was picked is not a sensitive app, whatever the map's record says (independent review 4, S2)
   if (candidates.some((candidate) => isSensitiveApp({ name: candidate.name, bundleId: candidate.bundleId }))) return { error: "app_off_limits" };
   // the window that carries the app's menu bar (an About box or a panel has none), looked for in each process of the program until one has it
-  const found = await firstWithWindow(candidates, (live) => findMenuWindow(actuator, live.pid, signal));
+  const windowOf = () => firstWithWindow(candidates, (live) => findMenuWindow(actuator, live.pid, signal));
+  let found = await windowOf();
+  // Running with every window closed (a Mac app that stays open after its last window): opening it again brings a window back.
+  if (!found && mayOpen && await launchApp(rt.exec, { key: app.key, name: app.name, ...(bundleOf(app.key) ? { bundleId: bundleOf(app.key) as string } : {}), ...(app.path ? { path: app.path } : {}) }, rt.platform)) {
+    await waitUntil(async () => (found = await windowOf()) !== null, { withinMs: WINDOW_WAIT_MS, ...(rt.sleep ? { sleep: rt.sleep } : {}), ...(signal ? { signal } : {}) });
+  }
   if (!found) return { error: "app_has_no_window" };
   return { pid: found.live.pid, windowId: found.window.windowId, name: found.live.name };
 }
 
+/**
+ * Brings the app forward and runs the work. An app opened a moment ago (or one coming back from a Space switch) is refused once or twice before it can take
+ * the front; the refusal comes before the work starts, so asking again cannot run anything twice.
+ */
+async function withForegroundAgain<T>(rt: ReachRuntime, actuator: import("../reach/actuator").Actuator, where: { pid: number; windowId: number }, work: () => Promise<T>, signal?: AbortSignal): ReturnType<typeof withForeground<T>> {
+  const wait = rt.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  let front = await withForeground(actuator, where, work, signal, rt.sleep);
+  for (let attempt = 0; attempt < 2 && !front.ok && signal?.aborted !== true; attempt += 1) {
+    await wait(700);
+    front = await withForeground(actuator, where, work, signal, rt.sleep);
+  }
+  return front;
+}
+
+/** Waits for the screen when another job holds it (an exploration keeps it up to two minutes): a refusal "try again" only after the wait was repeated. */
+async function useGui<T>(gui: NonNullable<ReachRuntime["gui"]>, ctx: Ctx, work: (actuator: import("../reach/actuator").Actuator) => Promise<T>): Promise<{ ok: true; value: T } | { ok: false; error: string }> {
+  for (let attempt = 0; ; attempt += 1) {
+    const outcome = await gui.use(work);
+    if (outcome.ok || outcome.error !== "gui_busy" || attempt >= 2 || stopped(ctx)) return outcome;
+  }
+}
+
 function guiRefusal(error: string): Outcome {
   const next: Record<string, string> = {
-    app_not_running: "open the app first; Reach only drives an app that is already running",
-    app_has_no_window: "bring one of the app's windows on screen first",
+    app_not_running: "the app is not open and Reach could not open it here (it opens an app only for a run that may act); open the app, then call again",
+    app_has_no_window: "the app is open but shows no window Reach could use; open one of its windows, then call again",
     app_off_limits: "Reach never drives this app (it holds secrets, messages or settings)",
     gui_not_supported_for_this_app: "only macOS apps are driven through their screen in this version",
     cua_download_failed: "the driver could not be downloaded; the owner can retry from Settings > Explore this desktop's apps",
     driver_unavailable: "the driver could not be started",
-    gui_busy: "another job is using the screen right now (Reach drives one app at a time); try again in a moment",
+    gui_busy: "another job kept the screen for over a minute (Reach drives one app at a time); try again in a moment",
     cannot_bring_forward: "the app would not come to the front (macOS refused); try again when it is not busy",
   };
   return unavailable(error, next[error] ?? "the app's screen could not be driven");
@@ -330,12 +376,12 @@ export async function reachInvoke(args: Record<string, unknown>, ctx: Ctx): Prom
   if (isLearned(capability) && capability.body?.kind === "steps") {
     const gui = rt.gui;
     if (!gui) return unavailable("no_driver_in_this_host", "run this from the desktop app");
-    const outcome = await gui.use(async (actuator) => {
+    const outcome = await useGui(gui, ctx, async (actuator) => {
       if (stopped(ctx)) return { guiError: "aborted" } as const;
-      const target = await liveTarget(rt, resolved.app, actuator, ctx.signal);
+      const target = await liveTarget(rt, resolved.app, actuator, ctx.signal, writable(ctx));
       if ("error" in target) return { guiError: target.error } as const;
       const where = { pid: target.pid, windowId: target.windowId };
-      const front = await withForeground(actuator, where, () => runLearned(actuatorLearnDriver(actuator, where, ctx.signal), capability, parameters, { ...(ctx.signal ? { signal: ctx.signal } : {}) }));
+      const front = await withForegroundAgain(rt, actuator, where, () => runLearned(actuatorLearnDriver(actuator, where, ctx.signal), capability, parameters, { ...(ctx.signal ? { signal: ctx.signal } : {}) }), ctx.signal);
       return front.ok ? ({ run: front.value } as const) : ({ guiError: front.code } as const);
     });
     if (!outcome.ok) return stopped(ctx) ? aborted() : guiRefusal(outcome.error);
@@ -354,12 +400,12 @@ export async function reachInvoke(args: Record<string, unknown>, ctx: Ctx): Prom
   if (capability.body?.kind === "steps") {
     const gui = rt.gui;
     if (!gui) return unavailable("no_driver_in_this_host", "run this from the desktop app");
-    const outcome = await gui.use(async (actuator) => {
+    const outcome = await useGui(gui, ctx, async (actuator) => {
       // Stop can arrive while this call waited for the screen lease: the app is not touched then.
       if (stopped(ctx)) return { guiError: "aborted" } as const;
-      const target = await liveTarget(rt, resolved.app, actuator, ctx.signal);
+      const target = await liveTarget(rt, resolved.app, actuator, ctx.signal, writable(ctx));
       if ("error" in target) return { guiError: target.error } as const;
-      const front = await withForeground(actuator, { pid: target.pid, windowId: target.windowId }, () => runSteps({ actuator, target: { pid: target.pid, windowId: target.windowId }, ...(ctx.signal ? { signal: ctx.signal } : {}), ...(rt.sleep ? { sleep: rt.sleep, settleMs: 1 } : {}) }, capability, parameters), ctx.signal, rt.sleep);
+      const front = await withForegroundAgain(rt, actuator, { pid: target.pid, windowId: target.windowId }, () => runSteps({ actuator, target: { pid: target.pid, windowId: target.windowId }, ...(ctx.signal ? { signal: ctx.signal } : {}), ...(rt.sleep ? { sleep: rt.sleep, settleMs: 1 } : {}) }, capability, parameters), ctx.signal);
       return front.ok ? ({ run: front.value } as const) : ({ guiError: front.code } as const);
     });
     // A driver call that failed because the run was stopped is a stop, not "the app's screen could not be driven".
@@ -407,7 +453,7 @@ export async function reachExplore(args: Record<string, unknown>, ctx: Ctx): Pro
   if (isSensitiveApp({ name: resolved.app.name, bundleId: bundleOf(resolved.app.key) ?? undefined })) return refused("app_off_limits", "Reach never explores apps that hold credentials, money, messages or the system");
   const bundleId = bundleOf(resolved.app.key) ?? undefined;
   // Stop ends the exploration after the dialog in hand is closed (exploreApp's shouldStop / signal), and a Stop that arrived while this waited for the screen lease means it never starts.
-  const outcome = await rt.gui.use((actuator) => stopped(ctx) ? Promise.resolve(null) : exploreApp({ actuator, registry: rt.registry, day: () => rt.day(), shouldStop: () => stopped(ctx), ...(ctx.signal ? { signal: ctx.signal } : {}), ...(rt.sleep ? { sleep: rt.sleep } : {}) }, { key: resolved.app.key, name: resolved.app.name, ...(bundleId ? { bundleId } : {}), sensors: resolved.app.signals.some((signal) => signal.startsWith("sensor:")), fingerprint: resolved.app.fingerprint }, { maxDialogs: 6, maxMillis: 120_000 }));
+  const outcome = await useGui(rt.gui, ctx, async (actuator) => { if (stopped(ctx)) return null; await ensureOpen(rt, resolved.app, actuator, ctx.signal); return exploreApp({ actuator, registry: rt.registry, day: () => rt.day(), shouldStop: () => stopped(ctx), ...(ctx.signal ? { signal: ctx.signal } : {}), ...(rt.sleep ? { sleep: rt.sleep } : {}) }, { key: resolved.app.key, name: resolved.app.name, ...(bundleId ? { bundleId } : {}), sensors: resolved.app.signals.some((signal) => signal.startsWith("sensor:")), fingerprint: resolved.app.fingerprint }, { maxDialogs: 6, maxMillis: 120_000 }); });
   if (!outcome.ok) return stopped(ctx) ? aborted() : guiRefusal(outcome.error);
   const report = outcome.value;
   if (!report) return aborted();
@@ -428,9 +474,9 @@ export async function reachVerify(args: Record<string, unknown>, ctx: Ctx): Prom
   const capability = found.capability;
   if (isLearned(capability)) return refused("not_verifiable_here", "learned work is proven by running it: call reach.invoke, which checks the outcome and re-learns what the app moved");
   if (capability.tier !== "explored" || capability.body?.kind !== "steps") return refused("not_verifiable_here", "only explored capabilities are re-read; a published one is stated by the app itself");
-  const outcome = await rt.gui.use(async (actuator) => {
+  const outcome = await useGui(rt.gui, ctx, async (actuator) => {
     if (stopped(ctx)) return { guiError: "aborted" } as const;
-    const target = await liveTarget(rt, resolved.app, actuator, ctx.signal);
+    const target = await liveTarget(rt, resolved.app, actuator, ctx.signal, writable(ctx));
     if ("error" in target) return { guiError: target.error } as const;
     return { result: await repairDialogCapability({ actuator, target: { pid: target.pid, windowId: target.windowId }, appKey: resolved.app.key, fingerprint: resolved.app.fingerprint, day: rt.day(), ...(ctx.signal ? { signal: ctx.signal } : {}), ...(rt.sleep ? { sleep: rt.sleep } : {}) }, capability) } as const;
   });

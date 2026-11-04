@@ -1,4 +1,5 @@
 import { KEYED_ADAPTERS } from "./keyed-provider";
+import { isCredentialStoreFailure } from "./credential-store-failure";
 
 /**
  * The keyed host route that serves the same provider as an installed connector.
@@ -24,7 +25,8 @@ export async function keyedRouteForConnectorUrl(
   for (const adapter of Object.values(KEYED_ADAPTERS)) {
     const domain = new URL(adapter.base).hostname.toLowerCase().split(".").slice(-2).join(".");
     if (host !== domain && !host.endsWith(`.${domain}`)) continue;
-    if (await hasKey(adapter.envKey).catch(() => false)) return adapter.routeId;
+    // A store that did not answer is raised (the caller says so); only a plain "no key" moves on to the next adapter.
+    if (await hasKey(adapter.envKey).catch((error) => { if (isCredentialStoreFailure(error)) throw error; return false; })) return adapter.routeId;
   }
   return null;
 }

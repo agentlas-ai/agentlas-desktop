@@ -27,7 +27,7 @@ export function financeQueryPresentation(entry: FinanceConversationDataResult): 
   const at = (name: string) => result.columns.indexOf(name), has = (names: string[]) => names.every(name => at(name) >= 0);
   const text = (row: QueryItem["row"], name: string) => typeof row[at(name)] === "string" ? row[at(name)] as string : "";
   const metadata = (row: QueryItem["row"], names: string[]) => names.map(column => ({ column, value: text(row, column) })).filter(item => item.value && !(item.column === "Symbol" && entry.assets.length === 1 && item.value === entry.assets[0].symbol));
-  const records = (): FinanceQueryPresentation => { const titleColumn = result.columns.findIndex(name => !ADMIN_FIELDS.has(name)); return { kind: "records", items: result.rows.map(row => ({ title: titleColumn < 0 || row[titleColumn] === null ? "—" : String(row[titleColumn] ?? ""), titleColumn, meta: [], href: null, row })) }; };
+  const records = (): FinanceQueryPresentation => { const titleColumn = result.columns.findIndex(name => !ADMIN_FIELDS.has(name)); return { kind: "records", items: result.rows.map(row => ({ title: titleColumn < 0 || row[titleColumn] === null ? "—" : result.columns[titleColumn] === "Taxonomy concept" ? String(row[titleColumn] ?? "").replace(/([a-z0-9])([A-Z])/g, "$1 $2").replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2") : String(row[titleColumn] ?? ""), titleColumn, meta: [], href: null, row })) }; };
   if (new Set(result.columns).size !== result.columns.length) return records();
   if (entry.kind !== "discovery" && ["price_history", "treasury_yields", "macro_series", "fx_rates", "nav"].includes(metric ?? "")) {
     const visual = financeDataVisual(result, metric);

@@ -1,6 +1,7 @@
 import type { Actuator } from "./actuator";
 import { exploreApp, type ExploreReport } from "./explorer";
 import { isSensitiveApp } from "./explore-policy";
+import { isLearned } from "./learn";
 import { levelOf, isUsable, type ReachScan } from "./map";
 import { findMenuWindow } from "./menu-probe";
 import { bundleIdOfKey, findLiveCandidates, findRecordOf, firstWithWindow } from "./app-match";
@@ -404,7 +405,8 @@ export class ReachService {
   private async revisit(actuator: Actuator, target: { app: AppRecord; bundleId?: string; name: string }, signal: AbortSignal, until: number): Promise<void> {
     const today = this.p.day();
     const stale = (await this.p.registry.capabilities(target.app.key))
-      .filter((capability) => capability.tier === "explored" && capability.status === "verified" && capability.body?.kind === "steps" && capability.evidence?.lastSeenDay !== today)
+      // A learned port is proven by being run (learn.ts), not by re-probing a dialog: the dialog repair cannot read it and would degrade it as not_repairable.
+      .filter((capability) => capability.tier === "explored" && !isLearned(capability) && capability.status === "verified" && capability.body?.kind === "steps" && capability.evidence?.lastSeenDay !== today)
       .slice(0, this.o.revisitsPerApp);
     if (stale.length === 0) return;
     const at = await this.liveWindow(actuator, target, signal);

@@ -15,7 +15,9 @@ export interface ProjectDomainBinding {
   readonly toolMenu?: readonly string[];
 }
 type Actor = { workspaceId: string; userId: string } | null;
-type DomainResolver = (chatId: string, actor: Actor, expected?: ProjectDomainBinding | null) => ProjectDomainBinding | null;
+type DomainResolver = ((chatId: string, actor: Actor, expected?: ProjectDomainBinding | null) => ProjectDomainBinding | null)
+  /** The plugins the domain owns (listed by name, never by a domain's name here): see mcp-tools/user-menu.ts. */
+  & { readonly ownedPlugins?: readonly string[] };
 
 /** Each domain that owns Work projects, in its own module. */
 const PROJECT_DOMAINS: readonly DomainResolver[] = [financeWorkProjectDomain];
@@ -34,4 +36,9 @@ export function assertProjectDomainOwner(chatId: string, actor: Actor, expected?
   }
   if (expected) throw new Error("project_domain_binding_changed");
   return null;
+}
+
+/** Every plugin a domain that owns Work projects declares as its own. */
+export function domainOwnedPlugins(): readonly string[] {
+  return PROJECT_DOMAINS.flatMap((domain) => domain.ownedPlugins ?? []);
 }

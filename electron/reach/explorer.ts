@@ -4,6 +4,7 @@ import { withForeground } from "./foreground";
 import { findLiveCandidates, firstWithWindow, isLiveApp } from "./app-match";
 import { isRiskyMenuPath, isSensitiveApp, opensFilePicker, startsWithPath } from "./explore-policy";
 import { enumerateMenus, readSystemMenuProof, menuCapabilities, menuLeaves, opensDialog, type MenuTarget, findMenuWindow } from "./menu-probe";
+import { isLearned } from "./learn";
 import { isCurrentDialogCapability, menuPathOf } from "./map";
 import type { CapabilityRegistry } from "./registry";
 import { DIALOG_POLICY_REVISION, type Capability } from "./types";
@@ -105,8 +106,10 @@ export async function exploreApp(ports: ExplorePorts, app: ExploreApp, options: 
     const candidates: string[][] = [];
     const systemInserted = safety.prefixes;
     // Withdraw old dialog grants before considering the known-verified shortcut.
+    // Work learned from an agent's own screen use is `explored` too but is not a dialog capability: this rule says nothing about it. Without the
+    // exclusion every round marked each learned port degraded (rule_tightened) and the replay answered "it failed when last used" (dev-app run).
     for (const capability of existing.values()) {
-      if (capability.tier !== "explored" || capability.status === "degraded") continue;
+      if (capability.tier !== "explored" || capability.status === "degraded" || isLearned(capability)) continue;
       const path = menuPathOf(capability);
       if (!isCurrentDialogCapability(capability, { ...app, platform: ports.actuator.platform ?? "darwin" }) || (path && systemInserted.some((prefix) => startsWithPath(path, prefix)))) {
         await ports.registry.recordOutcome(app.key, app.fingerprint, capability.id, { ok: false, code: "rule_tightened" }, day);

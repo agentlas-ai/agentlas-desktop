@@ -26,8 +26,9 @@ const SEVEN_DAY_MS = 7 * 24 * 60 * 60_000;
 // 파싱 대상: 최근 7일 이내 수정된 파일만(오래된 세션은 윈도우 밖이라 볼 필요 없음).
 const FILE_MTIME_WINDOW_MS = SEVEN_DAY_MS + 60 * 60_000;
 // usage를 담은 라인만 파싱하려는 프리필터(라인별 JSON.parse 비용 절감).
-const USAGE_HINT = '"usage"';
-const OUTPUT_HINT = '"output_tokens"';
+const USAGE_HINT = Buffer.from('"usage"');
+const OUTPUT_HINT = Buffer.from('"output_tokens"');
+const NEWLINE = 0x0a;
 
 const TTL_MS = 60_000;
 const cache = new Map<string, { value: LocalWindowTokens; at: number }>();
@@ -77,6 +78,15 @@ function recentJsonlFiles(root: string, now: number, limit = 400): string[] {
 
 type Extract = (line: Record<string, unknown>) => { ts: number; tokens: number } | null;
 
+/** Append [ts, tokens] when this JSONL line (raw bytes) carries a usage record. Screened as bytes; decoded and parsed only on a hit. */
+function pushUsageHit(flat: number[], line: Buffer, extract: Extract): void {
+  if (line.length === 0 || line.indexOf(USAGE_HINT) === -1 || line.indexOf(OUTPUT_HINT) === -1) return;
+  try {
+    const hit = extract(JSON.parse(line.toString("utf8")));
+    if (hit && Number.isFinite(hit.ts) && hit.tokens > 0) flat.push(hit.ts, hit.tokens);
+  } catch { /* malformed or partially written final line */ }
+}
+
 /*
  * 파일별 usage 기록 캐시 — (size, mtime)이 그대로인 파일은 다시 읽지 않는다. 성능 검토 MP-06(2026-10-17): 다시 계산할
  * 때마다 최근 JSONL 전부를 Main에서 동기로 다시 읽었다(오너 Mac: 401개·1억 5천만 자·1.66 s). 저장하는 것은 줄마다의
@@ -95,25 +105,20 @@ function fileUsageHits(key: string, file: string, extract: Extract): Float64Arra
   }
   const known = fileHits.get(key);
   if (known && known.size === st.size && known.mtimeMs === st.mtimeMs) return known.hits;
-  let raw: string;
+  let raw: Buffer;
   try {
-    raw = fs.readFileSync(file, "utf8");
+    raw = fs.readFileSync(file);
   } catch {
     return null;
   }
   const flat: number[] = [];
-  const lines = raw.split("\n");
-  for (const line of lines) {
-    if (!line || line.indexOf(USAGE_HINT) === -1 || line.indexOf(OUTPUT_HINT) === -1) continue;
-    let obj: Record<string, unknown>;
-    try {
-      obj = JSON.parse(line);
-    } catch {
-      continue;
-    }
-    const hit = extract(obj);
-    if (!hit || !Number.isFinite(hit.ts) || hit.tokens <= 0) continue;
-    flat.push(hit.ts, hit.tokens);
+  // Lines are cut and screened as bytes (0x0A never occurs inside a multi-byte UTF-8 sequence); only the few lines that
+  // carry usage are decoded. Decoding the whole file to a string first was ~40% of a cold scan.
+  for (let start = 0; start < raw.length;) {
+    let end = raw.indexOf(NEWLINE, start);
+    if (end === -1) end = raw.length;
+    pushUsageHit(flat, raw.subarray(start, end), extract);
+    start = end + 1;
   }
   const hits = Float64Array.from(flat);
   fileHits.set(key, { size: st.size, mtimeMs: st.mtimeMs, hits });
@@ -267,31 +272,28 @@ async function fileUsageHitsAsync(key: string, file: string, extract: Extract): 
   const known = fileHits.get(key);
   if (known && known.size === st.size && known.mtimeMs === st.mtimeMs) return known.hits;
   const flat: number[] = [];
-  const consume = (line: string) => {
-    if (!line || !line.includes(USAGE_HINT) || !line.includes(OUTPUT_HINT)) return;
-    try {
-      const hit = extract(JSON.parse(line));
-      if (hit && Number.isFinite(hit.ts) && hit.tokens > 0) flat.push(hit.ts, hit.tokens);
-    } catch { /* malformed or partially written final line */ }
-  };
-  const stream = fs.createReadStream(file, { encoding: "utf8", highWaterMark: 64 * 1024 });
-  let pending = "";
+  // Raw byte chunks: a line is decoded only if it carries usage, so a multi-byte character split across two chunks is
+  // never decoded in halves. `parts` holds the unfinished tail of a line that spans chunks; only the new chunk is
+  // searched for a newline, so a very long line costs one copy, not one per chunk.
+  const stream = fs.createReadStream(file, { highWaterMark: 64 * 1024 });
+  let parts: Buffer[] = [];
   let yieldAt = performance.now() + 4;
   try {
-    for await (const chunk of stream) {
-      pending += chunk;
+    for await (const chunk of stream as AsyncIterable<Buffer>) {
       let start = 0;
-      for (let end = pending.indexOf("\n", start); end !== -1; end = pending.indexOf("\n", start)) {
-        consume(pending.slice(start, end));
+      for (let end = chunk.indexOf(NEWLINE, start); end !== -1; end = chunk.indexOf(NEWLINE, start)) {
+        const head = chunk.subarray(start, end);
+        pushUsageHit(flat, parts.length ? Buffer.concat([...parts, head]) : head, extract);
+        parts = [];
         start = end + 1;
         if (performance.now() >= yieldAt) {
           await new Promise<void>((resolve) => setImmediate(resolve));
           yieldAt = performance.now() + 4;
         }
       }
-      pending = pending.slice(start);
+      if (start < chunk.length) parts.push(chunk.subarray(start));
     }
-    consume(pending);
+    if (parts.length) pushUsageHit(flat, Buffer.concat(parts), extract);
   } catch { return null; }
   finally { stream.destroy(); }
   const hits = Float64Array.from(flat);

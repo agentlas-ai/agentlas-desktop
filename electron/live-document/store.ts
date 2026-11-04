@@ -269,7 +269,8 @@ export async function applyLiveDocument(input: { sessionId: string; chatId?: str
       if (clash.length) return { ok: false, reason: "revision_conflict", detail: `changed since revision ${input.baseRevision}: ${[...new Set(clash)].slice(0, 10).join(", ")}`, revision };
     }
     const seq = revision + 1;
-    const assigned = assignLiveDocumentIds(ops, seq);
+    const placed = placeUnknownAfterAtEnd(state.model, ops);
+    const assigned = assignLiveDocumentIds(placed.ops, seq);
     let model: LiveDocumentModel;
     try { model = applyLiveDocumentOps(state.model, assigned.ops); } catch (error) {
       if (error instanceof LiveDocumentOpError) return { ok: false, reason: error.reason, ...(error.detail ? { detail: error.detail } : {}), revision };
@@ -280,8 +281,33 @@ export async function applyLiveDocument(input: { sessionId: string; chatId?: str
     state.entries.push(entry);
     state.model = model;
     state.journalBytes = fs.statSync(path.join(dir, "journal.jsonl")).size;
-    return { ok: true, revision: seq, created: assigned.created };
+    return { ok: true, revision: seq, created: assigned.created, ...(placed.adjusted.length ? { adjusted: placed.adjusted } : {}) };
   });
+}
+
+/*
+ * An insert that names an `after` id this document does not have goes to the end instead of failing.
+ *
+ * observed in use (hmg deck, 8 parallel document.apply add_slide calls): the model could not know the id the host gives a
+ * slide the previous call is still creating, so it wrote the ids it expected (s2 ... s8); 7 of the 8 calls were refused
+ * target_unknown "after s2" and the deck stood at 2 slides until a read and a second round. The intent of an insert after an
+ * element that does not exist (yet) is the next place in the sequence, which for calls that build a document in order is the end.
+ * The op is journalled WITHOUT the unknown `after`, so every reader of the journal (older app versions, the phone) folds it as a
+ * plain append; the result names each adjustment so the model can move the element if it meant a place in the middle. Ops that
+ * edit an existing element (set_text, set_format, delete_*) still refuse an unknown id: guessing a victim is not safe.
+ */
+function placeUnknownAfterAtEnd(model: LiveDocumentModel, ops: LiveDocumentOp[]): { ops: LiveDocumentOp[]; adjusted: Array<{ op: number; kind: string; requestedAfter: string; placed: "end" }> } {
+  const known = new Set<string>(model.kind === "slides" ? model.slides.map((slide) => slide.id) : model.kind === "flow" ? model.blocks.map((block) => block.id) : []);
+  const adjusted: Array<{ op: number; kind: string; requestedAfter: string; placed: "end" }> = [];
+  const out = ops.map((op, index) => {
+    const inserts = (op.op === "add_slide" && model.kind === "slides") || ((op.op === "insert_paragraph" || op.op === "insert_table") && model.kind === "flow");
+    const after = (op as { after?: unknown }).after;
+    if (!inserts || typeof after !== "string" || after === "start" || known.has(after)) return op;
+    adjusted.push({ op: index, kind: op.op, requestedAfter: after.slice(0, 60), placed: "end" });
+    const { after: _unknown, ...rest } = op as LiveDocumentOp & { after?: string };
+    return rest as LiveDocumentOp;
+  });
+  return { ops: out, adjusted };
 }
 
 /** Text fingerprint used to verify a save: the written file must read back as the model it was written from. */

@@ -42,6 +42,7 @@ interface AgentRow {
   env_requirements_json: string;
   trust_grade: string;
   tone: string;
+  builtin?: number;
 }
 
 function agentsRoot(): string {
@@ -99,7 +100,12 @@ export function materializeAgentFiles(agentId: string): string | null {
   const dir = agentFolderPath(row.slug);
   fs.mkdirSync(dir, { recursive: true });
 
-  writeIfMissing(path.join(dir, "system-prompt.md"), row.system_prompt || "");
+  // A built-in's prompt is owned by the manifest (installed_agents.system_prompt is re-synced on every architecture bump), so its
+  // folder copy follows the row. writeIfMissing kept a July copy of the Orchestrator ("Announce the route before doing the work:
+  // 사용 에이전트: …") alive after the manifest dropped that line, and the run read the file before the row: every Finance answer
+  // opened with "Using agent: Agentlas Orchestrator." Installed packages keep the owner's edits (writeIfMissing).
+  if (row.builtin) writeBuiltinPromptFile(path.join(dir, "system-prompt.md"), row.system_prompt || "");
+  else writeIfMissing(path.join(dir, "system-prompt.md"), row.system_prompt || "");
 
   writeIfMissing(
     path.join(dir, "AGENT.md"),
@@ -153,6 +159,14 @@ export function materializeAgentFiles(agentId: string): string | null {
   );
 
   return dir;
+}
+
+function writeBuiltinPromptFile(file: string, content: string): void {
+  const next = content.endsWith("\n") ? content : content + "\n";
+  try {
+    if (fs.readFileSync(file, "utf8") === next) return;
+  } catch { /* missing: written below */ }
+  fs.writeFileSync(file, next, "utf8");
 }
 
 function writeIfMissing(file: string, content: string): void {

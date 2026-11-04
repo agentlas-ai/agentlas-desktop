@@ -5,6 +5,10 @@ import { FinanceAssetResults } from "./FinanceAssetResults";
 import { FinanceHoldingsReview, type FinanceHoldingsSettlement } from "./FinanceHoldingsReview";
 import { FinanceInlineArtifact } from "./FinanceInlineArtifact";
 import { FinanceInlineQueryResult, financeQueryPresentation } from "./FinanceInlineQueryResult";
+import { FinancePresentBody, FinancePresentLead } from "./FinancePresentCard";
+
+/** An answer's own result card (finance.present): its lead sits above the answer text, its body under it. */
+export const financePresentView = (result: NativeResult) => result.view.kind === "canvas" || result.view.kind === "earnings" || result.view.kind === "impact";
 
 /** Rows of a view that only records what the model read to answer (ticker candidates, news, filing and price rows, an empty or
  *  failed read, a valuation with no saved report); `null` for a result the owner asked for (a drawn series, a report, a
@@ -22,12 +26,16 @@ export function financeReadSourceRows(result: NativeResult): number | null {
 }
 
 /** Pure retained-result presentation inside Work's existing UiInstance, never a second transcript or model loop. */
-export function FinanceNativeResult({ result, instanceId, revision, resultRef, locale, instanceState = "ready", fallbackText = "", onSettle }: {
+export function FinanceNativeResult({ result, instanceId, revision, resultRef, locale, instanceState = "ready", fallbackText = "", onSettle, part = "body" }: {
   result: NativeResult; instanceId: string; revision: number; resultRef: string; locale: "ko" | "en";
   /** The card's own lifetime, for views that wait for the owner (holdings review). */
   instanceState?: string; fallbackText?: string; onSettle?: (settlement: FinanceHoldingsSettlement) => Promise<unknown>;
+  /** "lead": only a result card's line above the answer text; "body": everything else. */
+  part?: "lead" | "body";
 }) {
   const { view } = result, ko = locale === "ko";
+  if (view.kind === "canvas" || view.kind === "earnings" || view.kind === "impact") return part === "lead" ? <FinancePresentLead view={view as { kind: string } & Record<string, unknown>} locale={locale}/> : <FinancePresentBody view={view as { kind: string } & Record<string, unknown>} locale={locale}/>;
+  if (part === "lead") return null;
   // A review waits for the owner's Save; the card owns that decision, the model has no write operation.
   if (view.kind === "holdings") return <FinanceHoldingsReview draft={view.draft} instanceState={instanceState} fallbackText={fallbackText} locale={locale} onSettle={onSettle}/>;
   if (view.kind === "search") return <FinanceAssetResults result={view.result} query={view.query} ko={ko} watchlistIds={new Set()} initialVisible={4}/>;

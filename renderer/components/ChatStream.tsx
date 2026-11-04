@@ -50,6 +50,7 @@ import type { OneWorkerWorkGroup } from "@/lib/one-turn-work";
 import type { OneActivityItem, OneActivityState } from "@/lib/one-activity";
 import { ChatContinuationProjector } from "@/lib/chat-continuations";
 import { inferOwnerLocale, ownerActivityText } from "@shared/owner-visible-activity-text";
+import { ownerFailureTitle } from "@shared/owner-failure-title";
 
 /**
  * Work keeps its transport projection in StreamMessage for compatibility with
@@ -1238,7 +1239,7 @@ const Bubble = memo(function Bubble({
       return null;
     }
     return (
-      <div style={{ alignSelf: "flex-end", maxWidth: "75%" }}>
+      <div data-chat-user-message="true" style={{ alignSelf: "flex-end", maxWidth: "75%" }}>
         {/* media-carousel: pictures and videos as one swipeable strip, other files as cards (components/media). */}
         <MessageAttachments files={message.chatFiles} imageUrls={message.imageDataUrls} locale={locale === "ko" ? "ko" : "en"} onOpenFile={onOpenChatFile} />
         {message.text && (
@@ -1276,7 +1277,7 @@ const Bubble = memo(function Bubble({
         <details data-chat-failure-code={message.failure.code} style={{ color: "var(--red-deep)", fontSize: 12.5 }}>
           <summary style={{ cursor: "pointer", listStyle: "none" }}>{label}</summary>
           <div style={{ padding: "6px 0 0 21px", color: "var(--muted-deep)", overflowWrap: "anywhere", whiteSpace: "pre-wrap" }}>
-            <code>{message.failure.code}</code>
+            <span>{ownerFailureTitle(message.failure.code, locale === "ko" ? "ko" : "en")}</span>
             {message.failure.message !== message.text && <div>{message.failure.message}</div>}
           </div>
         </details>
@@ -1307,7 +1308,7 @@ const Bubble = memo(function Bubble({
   // agent — Markdown 렌더링.
   // 단일 실행은 기본적으로 영상형 인터리브 본문을 쓰되, 런타임이 공개한 reasoning
   // summary가 있으면 One과 같은 투명 활동 타임라인으로 남긴다.
-  const displayText = message.continuationMarkdownText ?? userFacingAssistantMessageText(message);
+  const displayText = financePresentAnswerText(message.continuationMarkdownText ?? userFacingAssistantMessageText(message), message.steps);
   const hasInlineUi = hasIntellectUiFence(displayText);
   const displayMessage = displayText === message.text ? message : { ...message, text: displayText };
   const hasCanonicalActivity = workActivities.some(({ state }) => (
@@ -1356,6 +1357,9 @@ const Bubble = memo(function Bubble({
             ))}
           </div>
         )}
+        {/* A Finance result card's line (what was matched or read) heads the answer; the card itself follows the text below. */}
+        {message.continuationOwnsMetadata !== false && <InlineUiInstances part="lead" chatId={artifactChatId} locale={locale === "ko" ? "ko" : "en"}
+          turnIds={[message.runId, ...(message.activityRuns ?? []).map((run) => run.runId)].filter((id): id is string => Boolean(id))} />}
         <GoalResultReport result={message.goalResult} locale={locale}>
         {hasInlineUi && <StreamingMarkdown text={displayText} messageId={message.continuation ? message.id : message.intellectUiMessageId ?? message.id}
           onOpenArtifact={onOpenArtifact} onOpenMedia={onOpenMedia}
@@ -1800,6 +1804,19 @@ function buildToolGroups(
     else groups.push({ anchor, steps: [s] });
   }
   return groups;
+}
+
+/** A Finance turn that ended in its own result card (finance.present): the answer is what the model wrote after its last tool call.
+ * Sentences written while it was still looking things up ("Checking whether…") are not the answer . */
+export function financePresentAnswerText(text: string, steps: readonly StreamStep[] | undefined): string {
+  const tools = (steps ?? []).filter((step) => step.tool);
+  if (!tools.some((step) => /"finance\.present"/.test(step.args ?? ""))) return text;
+  const last = tools.reduce((max, step) => Math.max(max, step.anchorTextLen ?? 0), 0);
+  const tail = text.slice(snapMarkdownAnchor(text, last)).trim() || text.trim();
+  // The answer puts its key numbers in bold (Finance skill); a plain line ahead of it is a progress note written between lookups.
+  const lines = tail.split("\n");
+  while (lines.length > 1 && !lines[0].includes("**") && lines.slice(1).some((line) => line.includes("**"))) lines.shift();
+  return lines.join("\n").trim() || text;
 }
 
 /** 마크다운을 깨지 않는 분할 지점으로 스냅 — 줄 경계가 아니면 다음 줄 끝까지 전진하고

@@ -4489,7 +4489,8 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
         if (rightPanelPreference?.open && rightPanelPreference.tab !== "panel") {
           setRightPanelTab(rightPanelPreference.tab);
           setRightPanelOpen(true);
-        } else if (!rightPanelPreference && savedFolder) {
+        } else if (!rightPanelPreference && savedFolder && !embedded) {
+          // An embedded surface (the Finance chat) opens its rail only when the owner does: its answers carry their own result cards.
           setRightPanelTab("file");
           setRightPanelOpen(true);
         } else if (rightPanelPreference?.tab !== "panel") {

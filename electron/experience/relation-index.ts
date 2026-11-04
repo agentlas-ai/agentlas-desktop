@@ -15,8 +15,47 @@ import {
   autoLocalEmbedding,
   cosineSimilarity,
   parseLocalEmbedding,
+  type LocalMemoryEmbedding,
 } from "../memory/local-embedding";
 import { recordAgentNestExperienceGovernanceRelation } from "../memory/project-files";
+
+type CandidateEmbeddingRow = {
+  id: string;
+  summary: string;
+  embedding_model: string | null;
+  embedding_adapter: string | null;
+  embedding_model_sha256: string | null;
+  embedding_content_hash: string | null;
+  embedding_dimensions: number | null;
+  embedding_json: string | null;
+};
+
+// A candidate row is immutable, so a vector stored under an older adapter identity (the Unigram normalizer fix moved the
+// identity to semantic-v2) is rejected on every read and never rewritten. Re-embedding it per read would cost every candidate
+// again on each relation rebuild (2,183 rows on a real store, about 0.6 s). The text of a row never changes, so the
+// re-embedding is kept for the life of the process; a degraded (hash-96) fallback is never kept, because the real model may
+// appear later in the same process.
+const reembeddedCandidates = new Map<string, LocalMemoryEmbedding>();
+const REEMBEDDED_CANDIDATES_MAX = 20_000;
+
+function candidateEmbedding(row: CandidateEmbeddingRow): LocalMemoryEmbedding {
+  const stored = parseLocalEmbedding(row.embedding_model, row.embedding_dimensions, row.embedding_json, {
+    adapter: row.embedding_adapter,
+    modelSha256: row.embedding_model_sha256,
+    contentHash: row.embedding_content_hash,
+    text: row.summary,
+  });
+  if (stored) return stored;
+  const key = `${row.id}\0${row.embedding_content_hash ?? row.summary.length}`;
+  const kept = reembeddedCandidates.get(key);
+  if (kept) return kept;
+  const fresh = autoLocalEmbedding(row.summary);
+  if (!fresh.degraded) {
+    if (reembeddedCandidates.size >= REEMBEDDED_CANDIDATES_MAX) reembeddedCandidates.clear();
+    reembeddedCandidates.set(key, fresh);
+  }
+  return fresh;
+}
 
 const LINEAGE_SCHEMA_VERSION = "agentlas.experience-relation-lineage.v1";
 const LINEAGE_KIND = "agentlas-experience-relation-lineage";
@@ -572,17 +611,7 @@ export function experienceRelationSourceFingerprint(): string {
       sourceFingerprint: current.sourceFingerprint,
       localTaskBindings: current.localTaskBindings,
       semanticItems: semanticItems.map((item) => {
-        const embedding = parseLocalEmbedding(
-          item.embedding_model,
-          item.embedding_dimensions,
-          item.embedding_json,
-          {
-            adapter: item.embedding_adapter,
-            modelSha256: item.embedding_model_sha256,
-            contentHash: item.embedding_content_hash,
-            text: item.summary,
-          },
-        ) ?? autoLocalEmbedding(item.summary);
+        const embedding = candidateEmbedding(item);
         return {
           id: item.id,
           summaryHash: hashRef("experience-summary-v1", item.summary),
@@ -655,16 +684,8 @@ export function rebuildExperienceRelationIndex(): ExperienceRelationIndexStatus 
   }>;
   const candidateAdapters = new Map<string, string>();
   for (const row of candidateRows) {
-    let embedding = parseLocalEmbedding(row.embedding_model, row.embedding_dimensions, row.embedding_json, {
-      adapter: row.embedding_adapter,
-      modelSha256: row.embedding_model_sha256,
-      contentHash: row.embedding_content_hash,
-      text: row.summary,
-    });
-    if (!embedding) {
-      embedding = autoLocalEmbedding(row.summary);
-      // Derived caches may be rebuilt; historical candidate rows remain immutable.
-    }
+    // Derived caches may be rebuilt; historical candidate rows remain immutable (see candidateEmbedding).
+    const embedding = candidateEmbedding(row);
     candidateVectors.set(row.id, embedding.vector);
     candidateAdapters.set(row.id, embedding.adapter);
   }
