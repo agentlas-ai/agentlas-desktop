@@ -50,7 +50,14 @@ function goal(req: RunnerRequest): RetryGoal | undefined {
   if (!req.agentContext) throw new Error("runtime_retry_goal_binding_missing");
   if (!row.run_id || !["queued", "running", "waiting_tool"].includes(row.status ?? "")) throw new Error("runtime_retry_goal_not_runnable");
   const { longRunOwnerHold, goalOwnerAnswerHold } = require("../store/long-runs") as typeof import("../store/long-runs");
-  if (longRunOwnerHold(row.run_id) || goalOwnerAnswerHold(row.run_id)) throw new Error("runtime_retry_goal_not_runnable");
+  if (longRunOwnerHold(row.run_id)) throw new Error("runtime_retry_goal_not_runnable");
+  if (goalOwnerAnswerHold(row.run_id)) {
+    // A Goal held for the owner's answer stops the Goal's own progress, not the owner. A read-only turn in its chat (the phone's
+    // clarification of a pending decision) changes nothing, so it runs unbound to the Goal episode: it was thrown here as an
+    // untyped error before any runtime started and shown as "the runtime returned no receipt" (Thread Marketing room).
+    if (req.permission === "read") return undefined;
+    throw new Error("runtime_retry_goal_not_runnable");
+  }
   const { getChatGoalRevision } = require("../store/chat-goals") as typeof import("../store/chat-goals");
   const revision = getChatGoalRevision(row.goal_id);
   if (!revision) throw new Error("runtime_retry_goal_revision_missing");

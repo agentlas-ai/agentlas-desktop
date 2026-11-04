@@ -3837,8 +3837,13 @@ export class InvocationService {
      * finds the chat busy and schedules its next retry.
      */
     const queuedGoalTakeover = boundGoal?.status === "queued" && localUserTurn && runReq.taskIntent !== "conversation";
+    // The owner's phone answering the Goal's own question is the owner's answer, as the composer's is: it reopens the Goal here.
+    // It used to wait for the blocked-goal sweep while its own turn hit the held Goal and failed before any runtime ran, so every
+    // phone answer showed "Desktop could not complete this run" first (Thread Marketing room, twice).
+    const phoneOwnerAnswer = reopen.ownerAnswer && req.promptOrigin !== "system" && req.agentAppMode !== true
+      && (ownerSurface === "mobile" || ownerSurface === "mobile-one");
     if (boundGoal && (boundGoal.status === "blocked" || boundGoal.status === "paused" || boundGoal.status === "waiting_tool"
-      || boundGoal.status === "queued") && localUserTurn && (reopen.reopens || queuedGoalTakeover)) {
+      || boundGoal.status === "queued") && (localUserTurn || phoneOwnerAnswer) && (reopen.reopens || queuedGoalTakeover)) {
       // A new task message must not silently reactivate a claimed wait whose
       // successor may already have reached an external runtime before crash.
       if (boundGoal.surface === "science" || boundGoal.rootChatId !== chat.id) {

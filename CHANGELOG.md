@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.3.124 — 2026-11-04
+
+- A Goal that is waiting for the owner's answer now reopens when the owner answers from the phone, exactly like an answer typed in the desktop composer. Before, every phone answer showed "Desktop could not complete this run" and the Goal continued only after about 40 seconds. A read-only turn is no longer refused by that wait, and a turn that may act is still refused. The same boundary serves every runtime, so this is not specific to one.
+
+This release binds Agentlas OS v1.2.78 at e13ae0df5ca866888bfff69ae7b69cfdb330e267; public runtime asset `agentlas-os-runtime-v1.2.78.tar.gz` is pinned at SHA-256 `8f7bf3cc0f5c686887e5b207d5f191645aab0eddd992ff1d2783611a9f79fbb1`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.123 — 2026-11-04
 
 - Reach learning no longer records Cmd+Q or Cmd+W as a plain "q" or "w" step, and it drops a learned session that contains a printable or modified key it could not replay. A value check on a control the replay screen never listed is now "unknown" and no longer fails the replay, and a learned outcome check is chosen among controls the replay screen can show, with value checks limited to editable value controls, so a learned port stays usable.
