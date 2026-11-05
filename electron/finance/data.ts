@@ -1,4 +1,4 @@
-import type { FinanceAsset, FinanceDataRequest, FinanceDataResult, FinanceOperation, FinanceSearchResult, FinanceWorkspace } from '../../shared/finance';
+import { FINANCE_FREE_SOURCE_ID, canonicalFinanceSourceId, type FinanceAsset, type FinanceDataRequest, type FinanceDataResult, type FinanceOperation, type FinanceSearchResult, type FinanceWorkspace } from '../../shared/finance';
 import type { FinanceQuoteCoverage, FinanceQuoteRefreshResult } from './quote-coverage';
 
 import { fetchFinanceJson, fetchFinanceText } from './providers/http';
@@ -7,11 +7,7 @@ import { queryFreeSource, FREE_SOURCE_METRICS, type FreeSourceMetric } from './p
 import { readSecDirectory, readSecSubmissionsText, readSecCompanyFactsText, SEC_DIRECTORY_URL, type SecDirectory } from './providers/sec-reads';
 import { queryPublicCommunity, queryFedNews, queryIsharesHoldings, queryIsharesNav, queryTreasury, parseCompanyFacts } from './providers/public-data';
 
-import { ISHARES_FUNDS, findIsharesFund, searchIsharesCatalog } from './providers/ishares-catalog';
-import { financeProviderKey as providerKey } from './provider-credentials';
-import { getAuthenticatedSessionBinding, onAuthSessionOwnershipChanged } from '../auth';
-import { wasManagedOneConfigured } from '../managed-one/auth';
-import { queryManagedFinanceData, searchManagedFinanceAssets } from './cloud-provider';
+import { findIsharesFund, searchIsharesCatalog } from './providers/ishares-catalog';
 import { queryFinanceNews } from './dashboard-feeds';
 import { searchYahooFinanceAssets, queryYahooFinanceData, refreshYahooFinanceQuotes, queryYahooFinanceNews, yahooRefreshLimit } from './providers/yahoo-market';
 import { resolveFinanceDataSource, type FinanceDataSelection } from '../../shared/finance-data-routing';
@@ -20,13 +16,15 @@ import type { FinanceFeedId } from '../../shared/finance-feeds';
 /** Host-selected owner preference, not accepted as a caller URL, credential or executable. */
 export interface FinanceDataRoute extends FinanceDataSelection { signal?: AbortSignal; assertCurrent?:()=>void; includeQuoteCoverage?:boolean }
 
-const AV_DOC = 'https://www.alphavantage.co/documentation/';
 const SEC_INDEX = SEC_DIRECTORY_URL;
+/** Every Finance data path runs on the keyless free engine unless the owner picked a data tool. No route, or a saved route that still names the retired 'alpha-vantage' source, is the free engine. */
+function freeRoute(route?: FinanceDataRoute): FinanceDataRoute {
+  const base: FinanceDataRoute = route ?? { sourceId: FINANCE_FREE_SOURCE_ID };
+  return { ...base, sourceId: canonicalFinanceSourceId(base.sourceId), ...(base.sourceBindings ? { sourceBindings: Object.fromEntries(Object.entries(base.sourceBindings).map(([category, value]) => [category, canonicalFinanceSourceId(value)])) as FinanceDataRoute['sourceBindings'] } : {}) };
+}
 type ObjectValue = Record<string, unknown>;
 function object(value: unknown): ObjectValue { if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('finance_source_shape'); return value as ObjectValue; }
 function string(value: unknown): string { return typeof value === 'string' ? value.slice(0, 20000) : ''; }
-function numeric(value: unknown): number | null { const n = typeof value === 'number' || typeof value === 'string' && value.trim() ? Number(value) : NaN; return Number.isFinite(n) ? n : null; }
-function publicUrl(value: unknown): string | null { try { const url = new URL(string(value)); return url.protocol === 'https:' && !url.username && !url.password ? url.href : null; } catch { return null; } }
 export function financeSecDocumentUrl(cik: string, accession: string, primaryDocument: unknown): string | null {
   if (!/^\d{1,10}$/.test(cik) || !/^\d{10}-\d{2}-\d{6}$/.test(accession) || typeof primaryDocument !== 'string' || primaryDocument.length > 2000) return null;
   const segments = primaryDocument.split('/');
@@ -52,41 +50,10 @@ export function secNameHistory(submission: ObjectValue): string | null {
   const shown = sorted.slice(0, 5).map(item => `"${item.name}"${item.until ? ` (until ${item.until})` : ''}`), current = line(submission.name, 160);
   return `${current ? `SEC entity record: current name "${current}"; earlier names: ` : 'SEC entity record, earlier names: '}${shown.join(', ')}${sorted.length > 5 ? `, and ${sorted.length - 5} more` : ''}. These are EDGAR record dates, not legal effective dates.`;
 }
-async function avUrl(fn: string, params: Record<string, string>): Promise<URL | null> {
-  const key = await providerKey(); if (!key) return null;
-  const url = new URL('https://www.alphavantage.co/query');
-  url.searchParams.set('function', fn); url.searchParams.set('apikey', key);
-  for (const [name, value] of Object.entries(params)) url.searchParams.set(name, value);
-  return url;
-}
-function avResult(value: unknown): ObjectValue {
-  const data = object(value);
-  if (data.Note || data.Information || data['Error Message']) throw new Error('finance_provider_limit_or_entitlement');
-  return data;
-}
 function safeError(error: unknown): string {
   const message = error instanceof Error ? error.message : '';
   return /^finance_[a-z0-9_]+$/.test(message) ? message : 'finance_source_unavailable';
 }
-// Transient AV region evidence stays outside the persisted asset's venue field.
-const avUsRegionHints=new Map<string,{currency:string;expiresAt:number}>();
-type HintBinding=ReturnType<typeof getAuthenticatedSessionBinding>;
-let avHintBinding:HintBinding|undefined;
-let avHintEpoch=0;
-/** Keep transient issuer evidence within one live account session, including across async searches. */
-function refreshAvHintBinding(ownershipEvent=false):number {
-  const next=getAuthenticatedSessionBinding(),previous=avHintBinding;
-  const same=previous===null?next===null:!!previous&&!!next&&previous.workspaceId===next.workspaceId&&previous.userId===next.userId&&previous.sessionId===next.sessionId;
-  // A same-session renewal before expiry is not an ownership change. Reacquiring
-  // a managed lease after expiry is, even if its host and generation are unchanged.
-  if(previous!==undefined&&(!same||ownershipEvent&&!!previous&&previous.expiresAt!==null&&previous.expiresAt<=Date.now())){
-    avUsRegionHints.clear();avHintEpoch++;
-  }
-  avHintBinding=next;return avHintEpoch;
-}
-onAuthSessionOwnershipChanged(()=>{
-  try{refreshAvHintBinding(true);}catch{avUsRegionHints.clear();avHintEpoch++;avHintBinding=undefined;}
-});
 /** The SEC ticker directory, indexed: one download per hour shared with the dashboard filings feed (providers/sec-reads.ts). */
 function secDirectory(route?: FinanceDataRoute): Promise<SecDirectory> { return readSecDirectory(() => fetchFinanceJson(new URL(SEC_INDEX)), { signal: route?.signal }); }
 /** One SEC document (an issuer's submissions or company facts): the last answer within its lifetime, otherwise one request. The kept copy is text that already parsed. */
@@ -114,49 +81,12 @@ async function enrichSearchIssuers(result:FinanceSearchResult,route?:FinanceData
   }catch{route?.signal?.throwIfAborted();route?.assertCurrent?.();return {...result,warnings:[...result.warnings,'finance_issuer_identity_unavailable']};}
 }
 export async function searchFinanceAssets(query: string, route?: FinanceDataRoute): Promise<FinanceSearchResult> {
-  if(route)route={...route,sourceId:resolveFinanceDataSource(route,'market')};
-  route?.assertCurrent?.();const normalized = query.trim(); if (!normalized || normalized.length > 200) throw new Error('finance_query_invalid');
-  if(route?.sourceId.startsWith('toolchain:')){const {searchFinanceAdapter}=await import('./source-adapters');return searchFinanceAdapter(route.sourceId,normalized,route.signal,route.assertCurrent);}
-  if(route?.sourceId==='finance-yfinance'){
-    const result=await searchYahooFinanceAssets(normalized,{signal:route.signal});route.assertCurrent?.();const issuer=searchIsharesCatalog(normalized);
-    return enrichSearchIssuers(issuer.length?{...result,assets:[...issuer,...result.assets.filter(asset=>!issuer.some(fund=>fund.symbol===asset.symbol))].slice(0,30),provider:'Free market data · Yahoo chart + verified issuer catalog',warnings:[...result.warnings,'Issuer catalog entries identify supported iShares funds; their metadata is not a live quote or a complete ETF directory.']}:result,route);
-  }
-  if(route&&route.sourceId!=='alpha-vantage')return{assets:[],provider:'Selected data source',asOf:null,warnings:['finance_data_source_unsupported']};
-  if(wasManagedOneConfigured())return searchManagedFinanceAssets(normalized,route??{});
-  const catalog=searchIsharesCatalog(normalized),catalogWarnings=catalog.length?[
-    `Issuer catalog verified 2026-10-18: ${ISHARES_FUNDS.map(fund=>fund.asset.symbol).join(', ')} only. Fund identity, listing and currency metadata are not live quotes or a complete ETF directory.`,
-    ...catalog.map(asset=>{const fund=findIsharesFund(asset.id)!;return `${asset.symbol}: NAV supported; ${fund.holdingsUrl?'issuer holdings CSV supported':'no supported holdings CSV observed'}; source ${fund.pageUrl}`;}),
-    ...(catalog.some(asset=>asset.symbol==='IAU')?['IAU is a gold grantor trust and is cataloged as a fund, not a registered 1940 Act ETF or a direct gold position.']:[]),
-  ]:[];
-  const warnings: string[] = [];
-  const exact=catalog.find(asset=>asset.symbol===normalized.toUpperCase());
-  if(exact)return {assets:[exact],provider:'iShares official product catalog',asOf:null,warnings:catalogWarnings};
-  const hintEpoch=refreshAvHintBinding();
-  let url: URL | null = null;
-  try { url = await avUrl('SYMBOL_SEARCH', { keywords: normalized }); }
-  catch { warnings.push('Alpha Vantage credentials are unavailable. Searching the public SEC directory instead.'); }
-  if (url) {
-    try {
-      const result = avResult(await fetchFinanceJson(url));
-      if (!Array.isArray(result.bestMatches)) throw new Error('finance_source_shape');
-      route?.assertCurrent?.();
-      const currentHints=hintEpoch===refreshAvHintBinding();
-      const assets = result.bestMatches.slice(0, 30).map(raw => {
-        const row = object(raw), symbol = string(row['1. symbol']), currency = string(row['8. currency']);
-        if (!/^[A-Z]{3}$/.test(currency) || !/^[A-Za-z0-9.^_-]{1,80}$/.test(symbol)) throw new Error('finance_source_shape');
-        if(currentHints&&string(row['4. region'])==='United States'){
-          avUsRegionHints.delete(symbol);avUsRegionHints.set(symbol,{currency,expiresAt:Date.now()+15*60*1000});
-          while(avUsRegionHints.size>240)avUsRegionHints.delete(avUsRegionHints.keys().next().value!);
-        }else if(currentHints)avUsRegionHints.delete(symbol);
-        return { id: `av:${symbol}`, symbol, name: string(row['2. name']).slice(0, 300), currency, exchange: '', kind: /ETF/i.test(string(row['3. type'])) ? 'etf' as const : /Equity/i.test(string(row['3. type'])) ? 'stock' as const : 'other' as const };
-      });
-      return { assets: [...catalog,...assets.filter(asset=>!catalog.some(issuer=>issuer.symbol===asset.symbol))].slice(0,30), provider: catalog.length?'iShares official product catalog + Alpha Vantage':'Alpha Vantage', asOf: null, warnings: [...catalogWarnings,'Search metadata has no market-price timestamp. Region is provider metadata, not a verified listing venue.'] };
-    } catch (error) { route?.assertCurrent?.();warnings.push(safeError(error)); }
-  }
-  try {
-    const q = normalized.toLocaleLowerCase(); const directory = await secDirectory(route); const assets = [...catalog, ...directory.search(q, 30).map(issuer => directory.asset(issuer))].slice(0, 30);
-    return { assets, provider: catalog.length ? 'iShares official product catalog + SEC EDGAR issuer directory' : 'SEC EDGAR issuer directory', asOf: null, warnings: [...warnings,...catalogWarnings, 'SEC records identify US issuers; their security type and currency (XXX) are unknown. Separate issuer catalog entries are verified against issuer pages. No price data or ETF completeness is implied.'] };
-  } catch (error) { return { assets: catalog, provider: catalog.length?'iShares official product catalog':'SEC EDGAR', asOf: null, warnings: [...warnings,...catalogWarnings,safeError(error)] }; }
+  route=freeRoute(route);route={...route,sourceId:resolveFinanceDataSource(route,'market')};
+  route.assertCurrent?.();const normalized = query.trim(); if (!normalized || normalized.length > 200) throw new Error('finance_query_invalid');
+  if(route.sourceId.startsWith('toolchain:')){const {searchFinanceAdapter}=await import('./source-adapters');return searchFinanceAdapter(route.sourceId,normalized,route.signal,route.assertCurrent);}
+  if(route.sourceId!==FINANCE_FREE_SOURCE_ID)return{assets:[],provider:'Selected data source',asOf:null,warnings:['finance_data_source_unsupported']};
+  const result=await searchYahooFinanceAssets(normalized,{signal:route.signal});route.assertCurrent?.();const issuer=searchIsharesCatalog(normalized);
+  return enrichSearchIssuers(issuer.length?{...result,assets:[...issuer,...result.assets.filter(asset=>!issuer.some(fund=>fund.symbol===asset.symbol))].slice(0,30),provider:'Free market data · Yahoo chart + verified issuer catalog',warnings:[...result.warnings,'Issuer catalog entries identify supported iShares funds; their metadata is not a live quote or a complete ETF directory.']}:result,route);
 }
 async function queryFinanceDataRaw(input: FinanceDataRequest, assets: FinanceAsset[], route?: FinanceDataRoute): Promise<FinanceDataResult> {
   const result: FinanceDataResult = { status: 'unconnected', sourceUrls: [], asOf: null, retrievedAt: new Date().toISOString(), columns: [], rows: [], warnings: [] };
@@ -180,10 +110,8 @@ async function queryFinanceDataRaw(input: FinanceDataRequest, assets: FinanceAss
     if(metric==='nav')return {...result,warnings:['Keyless issuer NAV coverage is limited to issuer-resolved IVV, IEF, TLT, IWM and IAU catalog entries. No NAV was inferred from market price.']};
     if (metric === 'filings' || metric === 'company_facts') {
       let cik = /^sec:(\d{10}):/.exec(asset.id)?.[1];
-      if(asset.id===`av:${asset.symbol}`&&asset.exchange==='')refreshAvHintBinding();
-      const regionHint=avUsRegionHints.get(asset.symbol);
-      const avUsIssuerLookup=asset.id===`av:${asset.symbol}`&&(asset.exchange==='United States'||asset.exchange===''&&regionHint?.currency===asset.currency&&regionHint.expiresAt>Date.now());
-      if (!cik && (avUsIssuerLookup || asset.id === `yahoo:${encodeURIComponent(asset.symbol)}`)) {
+      // A legacy `av:SYMBOL` id (saved by the retired provider) is the same symbol on the free engine, so it is looked up like `yahoo:<symbol>`.
+      if (!cik && (asset.id === `av:${asset.symbol}` || asset.id === `yahoo:${encodeURIComponent(asset.symbol)}`)) {
         const matches = (await secDirectory(route)).byTicker.get(asset.symbol) ?? [];
         if (matches.length === 1) cik = matches[0].cik;
         else return {...result,warnings:['No sole exact SEC directory ticker match is available. No issuer CIK was inferred from country, currency, name or a similar ticker.']};
@@ -204,62 +132,17 @@ async function queryFinanceDataRaw(input: FinanceDataRequest, assets: FinanceAss
       });
       result.status = 'partial'; result.warnings = [`SEC issuer CIK ${cik}; exact directory ticker mapping where the selected listing was not already SEC-resolved. This is an issuer mapping, not a corporate-action or security-lineage guarantee.`, 'Latest 40 recent SEC filing records only; older filing archive pages are not exhausted. Filing date is day precision, not a market-price or availability timestamp. Current feed is not a historical point-in-time vintage.', 'SEC public API access is subject to fair-access policy. No blanket redistribution right to third-party filing exhibits is implied.'];const nameHistory=secNameHistory(submission);if(nameHistory)result.warnings.push(nameHistory);return result;
     }
-    if(route?.sourceId==='finance-yfinance')return{...result,warnings:['The selected free market engine does not supply this metric for this listing. No Alpha Vantage request or macro-news substitution was made.']};
-    // Managed hosts keep the keyless public paths above; unsupported provider metrics never read a local key.
-    if(wasManagedOneConfigured())return {...result,warnings:['finance_cloud_provider_metric_unsupported']};
-    const functions: Record<string, string> = { price: 'GLOBAL_QUOTE', price_history: 'TIME_SERIES_DAILY', news: 'NEWS_SENTIMENT', etf_holdings: 'ETF_PROFILE' };
-    if (!functions[metric] || input.metrics.length !== 1) return { ...result, warnings: ['Supported source metrics: price, price_history, nav, news, filings, company_facts, etf_holdings, social, social_search, macro_news, treasury_yields, macro_series, fx_rates, news_search. Unsupported data is never synthesized.'] };
-    if (!/^[A-Za-z0-9.^_-]{1,80}$/.test(asset.symbol)) throw new Error('finance_symbol_invalid');
-    let url: URL | null = null;
-    try { url = await avUrl(functions[metric], metric === 'news' ? { tickers: asset.symbol, limit: '30' } : metric === 'price_history' ? { symbol: asset.symbol, outputsize: 'compact' } : { symbol: asset.symbol }); } catch (error) { if (metric !== 'news') throw error; }
-    result.sourceUrls = [AV_DOC];
-    if (!url) {
-      if (metric === 'news') return { ...result, warnings: ['finance_provider_connection_unavailable', 'Alpha Vantage company news is not connected. No other publisher, macro feed, or invented company headlines were substituted.'] };
-      return { ...result, warnings: ['Alpha Vantage connection is not configured. Connect your licensed data provider. No quotes, history, or holdings were fabricated.'] };
-    }
-    const data = avResult(await fetchFinanceJson(url));
-    if (metric === 'price') {
-      const quote = object(data['Global Quote']); const price = numeric(quote['05. price']), day = string(quote['07. latest trading day']);
-      if (price === null || price < 0 || !/^\d{4}-\d{2}-\d{2}$/.test(day) || string(quote['01. symbol']) !== asset.symbol) throw new Error('finance_source_shape');
-      result.columns = ['Symbol', 'Price', 'Latest trading day', 'Volume']; result.rows = [[asset.symbol, price, day, numeric(quote['06. volume'])]];
-      result.asOf = day;
-      result.warnings.push('Provider trading-day quote; not asserted real-time. Currency, adjustment basis, and exact observation time are not supplied by this endpoint. No quote is imported automatically.');
-    } else if (metric === 'price_history') {
-      const series = object(data['Time Series (Daily)']);
-      result.columns = ['Observation date', 'Symbol', 'Open', 'High', 'Low', 'Close (raw)', 'Volume'];
-      result.rows = Object.entries(series).filter(([day]) => /^\d{4}-\d{2}-\d{2}$/.test(day)).sort(([a],[b]) => a.localeCompare(b)).slice(-100).map(([day, raw]) => { const row = object(raw); return [day, asset.symbol, numeric(row['1. open']), numeric(row['2. high']), numeric(row['3. low']), numeric(row['4. close']), numeric(row['5. volume'])]; });
-      if (!result.rows.length || string(object(data['Meta Data'])['2. Symbol']) !== asset.symbol) throw new Error('finance_source_shape');
-      result.asOf = String(result.rows.at(-1)![0]);
-      result.warnings.push('At most 100 raw daily OHLC observations from the compact endpoint. The requested display period is not an assurance of historical coverage. Raw closes are not dividend/split-adjusted total returns; do not infer performance across corporate actions. Currency is not reverified by this endpoint. Provider entitlements and redistribution terms apply.');
-    } else if (metric === 'news') {
-      if (!Array.isArray(data.feed)) throw new Error('finance_source_shape');
-      result.columns = ['Title', 'Publisher', 'Published', 'URL']; result.rows = data.feed.slice(0, 30).map(raw => { const row = object(raw); return [string(row.title), string(row.source), string(row.time_published), publicUrl(row.url)]; });
-      result.warnings.push('Provider-selected news metadata; coverage is incomplete and article redistribution rights are not granted.');
-    } else {
-      if (!Array.isArray(data.holdings)) throw new Error('finance_source_shape');
-      result.columns = ['Symbol', 'Description', 'Weight']; result.rows = data.holdings.slice(0, 1000).map(raw => { const row = object(raw); return [string(row.symbol), string(row.description), numeric(row.weight)]; });
-      result.warnings.push('Provider ETF holdings snapshot; composition effective date is unavailable. Weights are preserved as reported, not inferred to sum to 100%.');
-    }
-    result.status = 'partial'; return result;
+    return{...result,warnings:['The free market engine does not supply this metric for this listing. No other source or macro-news substitution was made.']};
   } catch (error) { return { ...result, status: 'error', rows: [], warnings: [...result.warnings, safeError(error)] }; }
 }
 
-/**
- * A Cloud computer prices from the same direct Yahoo path as Desktop (several assets per refresh, five by default, 100 at most).
- * That path is used when the host has no route or the route still names the server-relayed source ('alpha-vantage', one
- * symbol per request). The server path stays for asset search and as the fallback for a single price the direct path
- * could not read. An owner who picked another engine or a data tool ('toolchain:…') keeps that choice.
- */
-function managedDirectMarket(route?: FinanceDataRoute): boolean {
-  return wasManagedOneConfigured() && (!route || route.sourceId === 'alpha-vantage');
-}
-
 /** Every result carries an explicit provider/coverage/rights status, including failures. */
-export async function queryFinanceData(input: FinanceDataRequest, assets: FinanceAsset[], route?: FinanceDataRoute): Promise<FinanceDataResult> {
-  route?.assertCurrent?.();
+export async function queryFinanceData(input: FinanceDataRequest, assets: FinanceAsset[], routeIn?: FinanceDataRoute): Promise<FinanceDataResult> {
+  let route: FinanceDataRoute = freeRoute(routeIn);
+  route.assertCurrent?.();
   // A user-entered symbol is not a verified instrument identity for any source.
   if(input.assetIds.some(id=>id.startsWith('manual:v1:')))return {status:'unconnected',sourceUrls:[],asOf:null,retrievedAt:new Date().toISOString(),columns:[],rows:[],warnings:['finance_manual_asset_identity_unverified']};
-  if(route){
+  {
     const unavailable=(reason:string):FinanceDataResult=>({status:'unconnected',sourceUrls:[],asOf:null,retrievedAt:new Date().toISOString(),columns:[],rows:[],warnings:[reason]});
     const feeds:Record<string,FinanceFeedId>={news:'finance-news',filings:'finance-sec',company_facts:'finance-sec',economic_calendar:'finance-economy',earnings:'finance-earnings'},enabled=route.enabledFeedIds;
     if(enabled&&input.metrics.some(metric=>Object.hasOwn(feeds,metric)&&!enabled.includes(feeds[metric])))return unavailable('finance_data_source_disabled');
@@ -269,14 +152,7 @@ export async function queryFinanceData(input: FinanceDataRequest, assets: Financ
   if(route?.sourceId.startsWith('toolchain:')){const {queryFinanceAdapter}=await import('./source-adapters');return queryFinanceAdapter(route.sourceId,input,assets,route.signal,route.assertCurrent);}
   if(route?.signal?.aborted)throw new Error('finance_yahoo_cancelled');
   if(route?.sourceId==='finance-yfinance'&&['price','price_history'].includes(input.metrics[0])){const result=await queryYahooFinanceData(input,assets,{signal:route.signal});route.assertCurrent?.();return result;}
-  if(route&& !['finance-yfinance','alpha-vantage'].includes(route.sourceId))return{status:'unconnected',sourceUrls:[],asOf:null,retrievedAt:new Date().toISOString(),columns:[],rows:[],warnings:['finance_data_source_unsupported']};
-  if(managedDirectMarket(route)&&['price','price_history'].includes(input.metrics[0])){
-    const direct=await queryYahooFinanceData(input,assets,{signal:route?.signal});route?.assertCurrent?.();
-    // A read the direct path could not make falls back to the server for one price; history has no server path.
-    if(input.metrics[0]!=='price'||typeof direct.rows[0]?.[1]==='number')return direct;
-    return queryManagedFinanceData(input,assets,route??{});
-  }
-  if(wasManagedOneConfigured()&&route?.sourceId!=='finance-yfinance'&&input.metrics[0]==='price')return queryManagedFinanceData(input,assets,route??{});
+  if(route.sourceId!==FINANCE_FREE_SOURCE_ID)return{status:'unconnected',sourceUrls:[],asOf:null,retrievedAt:new Date().toISOString(),columns:[],rows:[],warnings:['finance_data_source_unsupported']};
   const result = await queryFinanceDataRaw(input, assets, route), metric = input.metrics[0];route?.assertCurrent?.();
   if(route?.signal?.aborted)throw new Error('finance_yahoo_cancelled');
   const issuer=input.assetIds.length===1?findIsharesFund(input.assetIds[0]):undefined;
@@ -304,9 +180,6 @@ export async function queryFinanceData(input: FinanceDataRequest, assets: Financ
     if (!result.sourceUrls.length) result.sourceUrls = ['https://home.treasury.gov/treasury-daily-interest-rate-xml-feed'];
   } else if(route?.sourceId==='finance-yfinance'){
     id='finance-yfinance';label='Free market data · Yahoo chart';coverage='Search, regular-market snapshots and bounded daily price history. Unsupported metrics remain unavailable for the selected source.';rights='Yahoo personal-use data terms apply; public access is not exchange real-time or redistribution entitlement.';
-  } else if (['price','price_history','news','etf_holdings'].includes(metric)) {
-    id = 'alpha-vantage'; label = 'Alpha Vantage'; coverage = 'Provider-resolved selected security only; daily quote, compact raw history, selected news, or reported ETF profile according to metric and entitlement.';
-    rights = 'A configured key does not establish entitlement to every endpoint or external redistribution. Provider terms and account license apply.';
   }
   if (id && !result.providers?.length) result.providers = [{ id, label, status: result.status === 'unconnected' ? 'unavailable' : result.status, coverage, rights, sourceUrls: [...result.sourceUrls] }];
   result.retrievedAt = readAt.get(result) ?? new Date().toISOString();
@@ -316,8 +189,8 @@ export async function queryFinanceData(input: FinanceDataRequest, assets: Financ
 /** Source-derived proposals share the same renderer CAS path; no AI supplies these numbers. */
 export async function refreshFinanceQuotes(workspace: FinanceWorkspace, route?: FinanceDataRoute, options: { limit?: number } = {}): Promise<FinanceQuoteRefreshResult> {
   const coverage=(attempted:number,succeeded:number):FinanceQuoteCoverage=>({version:1,total:workspace.watchlist.length,attempted,succeeded,failed:attempted-succeeded,unattempted:workspace.watchlist.length-attempted});
-  if(route)route={...route,sourceId:resolveFinanceDataSource(route,'market')};
-  if(route?.sourceId==='finance-yfinance'){
+  route=freeRoute(route);route={...route,sourceId:resolveFinanceDataSource(route,'market')};
+  if(route.sourceId===FINANCE_FREE_SOURCE_ID){
     if(route.includeQuoteCoverage)return refreshYahooFinanceQuotes(workspace,{signal:route.signal,limit:options.limit,includeQuoteCoverage:true});
     return refreshYahooFinanceQuotes(workspace,{signal:route.signal,limit:options.limit});
   }
@@ -332,31 +205,5 @@ export async function refreshFinanceQuotes(workspace: FinanceWorkspace, route?: 
     }
     return{baseRevision:workspace.revision,status:operations.length?'ok':'unavailable',operations,message:`${operations.length/2}개 시세를 조회했습니다. ${warnings.join(' ')}`.trim(),...(route.includeQuoteCoverage?{quoteCoverage:coverage(Math.min(workspace.watchlist.length,limit),operations.length/2)}:{})};
   }
-  if(managedDirectMarket(route))return refreshYahooFinanceQuotes(workspace,{signal:route?.signal,limit:options.limit,...(route?.includeQuoteCoverage?{includeQuoteCoverage:true}:{})});
-  if(route&&route.sourceId!=='alpha-vantage')return{baseRevision:workspace.revision,status:'unavailable',operations:[],message:'finance_data_source_unsupported',...(route.includeQuoteCoverage?{quoteCoverage:coverage(0,0)}:{})};
-  const base = { baseRevision: workspace.revision };
-  try {
-    if (!await providerKey()) return { ...base, status: 'unavailable', message: 'Alpha Vantage connection is not configured. Connect your data provider. No quotes were imported.', operations: [], ...(route?.includeQuoteCoverage?{quoteCoverage:coverage(0,0)}:{}) };
-  } catch { return { ...base, status: 'unavailable', message: 'Alpha Vantage credentials are unavailable. Check your data connection. No quotes were imported.', operations: [], ...(route?.includeQuoteCoverage?{quoteCoverage:coverage(0,0)}:{}) }; }
-  const operations: FinanceOperation[] = [], warnings: string[] = [];
-  // Bounded explicit refresh, never background polling or an unlimited provider bill.
-  const eligible = workspace.watchlist.filter(asset => asset.id === `av:${asset.symbol}`).slice(0, 5);
-  for (const asset of eligible) {
-    try {
-      const search = avResult(await fetchFinanceJson((await avUrl('SYMBOL_SEARCH', { keywords: asset.symbol }))!));
-      if (!Array.isArray(search.bestMatches)) throw new Error('finance_source_shape');
-      const matches = search.bestMatches.map(object).filter(row => row['1. symbol'] === asset.symbol && row['4. region'] === asset.exchange);
-      if (matches.length !== 1 || matches[0]['8. currency'] !== asset.currency || !/^[A-Z]{3}$/.test(asset.currency) || asset.currency === 'XXX') { warnings.push(`${asset.symbol}: currency or listing metadata could not be verified.`); continue; }
-      const data = avResult(await fetchFinanceJson((await avUrl('GLOBAL_QUOTE', { symbol: asset.symbol }))!));
-      const quote = object(data['Global Quote']), price = numeric(quote['05. price']), day = string(quote['07. latest trading day']);
-      if (string(quote['01. symbol']) !== asset.symbol || price === null || price < 0 || !/^\d{4}-\d{2}-\d{2}$/.test(day) || !Number.isFinite(Date.parse(day))) throw new Error('finance_source_shape');
-      const sourceId = `alpha-vantage:${asset.symbol}`;
-      operations.push({ type: 'source.upsert', source: { id: sourceId, name: `Alpha Vantage · ${asset.symbol}`, kind: 'provider', status: 'connected', asOf: day, retrievedAt: new Date().toISOString(), url: AV_DOC,
-        note: 'GLOBAL_QUOTE, day precision; currency verified by exact SYMBOL_SEARCH symbol and region. Not asserted real-time. Adjustment/split policy is not guaranteed; dividends are not included and this is not a total-return series.' } });
-      operations.push({ type: 'quotes.import', quotes: [{ assetId: asset.id, price, currency: asset.currency, asOf: day, sourceId, priceBasis: 'price' }] });
-    } catch (error) { warnings.push(`${asset.symbol}: ${safeError(error)}`); }
-  }
-  if (!eligible.length) warnings.push('No provider-resolved Alpha Vantage asset is selected. Search and add a provider result first.');
-  if (workspace.watchlist.length > eligible.length) warnings.push('Refresh is limited to five provider-resolved assets; unsupported or remaining assets were skipped.');
-  return { ...base, status: operations.length ? 'ok' : 'unavailable', message: `${operations.length / 2} daily quotes retrieved. ${warnings.join(' ')}`.trim(), operations, ...(route?.includeQuoteCoverage?{quoteCoverage:coverage(eligible.length,operations.length/2)}:{}) };
+  return{baseRevision:workspace.revision,status:'unavailable',operations:[],message:'finance_data_source_unsupported',...(route?.includeQuoteCoverage?{quoteCoverage:coverage(0,0)}:{})};
 }

@@ -23,6 +23,7 @@ import {
   IconUsers,
 } from "@/components/Icon";
 import { ipc } from "@/lib/ipc";
+import { multimodalProviderPatch } from "@/lib/edit-patch";
 import {
   AUTO_PROVIDER,
   DEFAULT_MULTIMODAL_SETTINGS,
@@ -238,7 +239,9 @@ function MultimodalSettingsPanel({ locale, active }: { locale: string; active: b
   }, [active, locale]);
   const selectedFor = (modality: MultimodalModality) => modality === "image" ? settings.imageProvider : modality === "video" ? settings.videoProvider : settings.audioProvider;
   const select = async (modality: MultimodalModality, providerId: string) => {
-    const patch = modality === "image" ? { imageProvider: providerId } : modality === "video" ? { videoProvider: providerId } : { audioProvider: providerId };
+    // Only this choice is sent; the store merges it. `settings` starts as the defaults (all "auto") until the read lands, and a
+    // failed read leaves it there, so sending the snapshot reset the other two modalities to auto.
+    const patch = multimodalProviderPatch(modality, providerId);
     const api = ipc();
     if (!api) {
       setNotice(locale === "ko" ? "Desktop에 연결되지 않아 저장하지 못했습니다. 이전 설정을 유지합니다." : "Could not save because Desktop is unavailable. The prior setting remains.");
@@ -246,7 +249,7 @@ function MultimodalSettingsPanel({ locale, active }: { locale: string; active: b
     }
     setBusy(true);
     try {
-      const next = await api.multimodal.saveSettings({ ...settings, ...patch });
+      const next = await api.multimodal.saveSettings(patch);
       const acknowledged = modality === "image" ? next?.imageProvider : modality === "video" ? next?.videoProvider : next?.audioProvider;
       if (acknowledged !== providerId) throw new Error("multimodal_settings_receipt_mismatch");
       setSettings(next);

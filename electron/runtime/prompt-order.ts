@@ -46,7 +46,72 @@ export function orderPromptParts<T extends PromptOrderingMetadata>(parts: readon
   ).map(({ part }) => part);
 }
 
-export interface DeclaredPromptPart extends PromptOrderingMetadata { text?: string | null }
+export interface DeclaredPromptPart extends PromptOrderingMetadata {
+  text?: string | null;
+  /**
+   * Identity of a canonical data payload (`goal-checkpoint:<goalId>:<revision>:<checkpointId>`,
+   * `runtime-catalog:<digest>`), set by the producer of the data, never derived from text. The compiler keeps the first
+   * part per key and drops the rest; the drop is recorded in the trace.
+   */
+  contentKey?: string;
+  /**
+   * Content keys whose payload this part's text already contains because a layer above composed it (typed data carried
+   * down with the request, never found by searching text). A part whose `contentKey` is embedded by any other part is dropped.
+   */
+  embeds?: readonly string[];
+}
+
+/** A part the compiler left out, with the reason. Plain data: no prompt text. */
+export interface DroppedPromptPart { id: string; contentKey: string; reason: "duplicate-content-key" | "embedded-in-other-part" }
+
+export interface ComposeDeclaredOptions {
+  /** Keys the caller's own text already carries (for example an upper layer's request). Typed, never inferred. */
+  carried?: readonly string[];
+}
+
+/**
+ * Order, then keep the first part per `contentKey`. A part is also dropped when another part (or `options.carried`)
+ * declares that it embeds the same key, so a lower layer cannot add a payload that already came down inside the
+ * upper layer's text. Pure: returns the ordered kept parts and the drops.
+ */
+export function dedupeDeclaredPromptParts<T extends DeclaredPromptPart>(parts: readonly T[], options?: ComposeDeclaredOptions): { parts: T[]; dropped: DroppedPromptPart[] } {
+  const ordered = orderPromptParts(parts);
+  const embedded = new Set<string>(options?.carried ?? []);
+  for (const part of ordered) for (const key of part.embeds ?? []) embedded.add(key);
+  const seen = new Set<string>();
+  const dropped: DroppedPromptPart[] = [];
+  const kept: T[] = [];
+  for (const part of ordered) {
+    const key = part.contentKey;
+    if (key && part.text?.trim()) {
+      if (embedded.has(key) && !(part.embeds ?? []).includes(key)) { dropped.push({ id: part.id, contentKey: key, reason: "embedded-in-other-part" }); continue; }
+      if (seen.has(key)) { dropped.push({ id: part.id, contentKey: key, reason: "duplicate-content-key" }); continue; }
+      seen.add(key);
+    }
+    kept.push(part);
+  }
+  return { parts: kept, dropped };
+}
+
+const MIN_DETECTABLE_PAYLOAD_CHARS = 64;
+
+/**
+ * Gate-time detector. A kept part that declares a `contentKey` must not have its exact text inside another kept part:
+ * that is the old pattern (a layer flattened the payload into text and a lower layer added its own copy) made visible.
+ */
+export function findEmbeddedContentKeyPayloads(parts: readonly DeclaredPromptPart[], options?: ComposeDeclaredOptions): Array<{ contentKey: string; payloadId: string; holderId: string }> {
+  const kept = dedupeDeclaredPromptParts(parts, options).parts;
+  const found: Array<{ contentKey: string; payloadId: string; holderId: string }> = [];
+  for (const payload of kept) {
+    const text = payload.text?.trim();
+    if (!payload.contentKey || !text || text.length < MIN_DETECTABLE_PAYLOAD_CHARS) continue;
+    for (const holder of kept) {
+      if (holder === payload || !holder.text) continue;
+      if (holder.text.includes(text)) found.push({ contentKey: payload.contentKey, payloadId: payload.id, holderId: holder.id });
+    }
+  }
+  return found;
+}
 
 const declaredModules = new Map<string, PromptOrderingMetadata>();
 
@@ -63,9 +128,17 @@ export function registerDeclaredPromptModule(part: PromptOrderingMetadata): void
 export function declaredPromptModules(): readonly PromptOrderingMetadata[] { return [...declaredModules.values()]; }
 
 /** Order only host-declared lifetimes within one authority channel; never reorder conversation messages. */
-export function composeDeclaredPrompt(parts: readonly DeclaredPromptPart[], separator = "\n\n"): string {
+export function composeDeclaredPrompt(parts: readonly DeclaredPromptPart[], separator = "\n\n", options?: ComposeDeclaredOptions): string {
+  return composeDeclaredPromptDetailed(parts, separator, options).text;
+}
+
+/** Same text as `composeDeclaredPrompt`, plus the content keys the text carries and the parts the compiler dropped. */
+export function composeDeclaredPromptDetailed(parts: readonly DeclaredPromptPart[], separator = "\n\n", options?: ComposeDeclaredOptions): { text: string; contentKeys: string[]; dropped: DroppedPromptPart[] } {
   for (const part of parts) registerDeclaredPromptModule(part);
-  return orderPromptParts(parts).map((part) => part.text).filter((text): text is string => Boolean(text?.trim())).join(separator);
+  const { parts: kept, dropped } = dedupeDeclaredPromptParts(parts, options);
+  const used = kept.filter((part) => Boolean(part.text?.trim()));
+  const contentKeys = [...new Set(used.flatMap((part) => [...(part.contentKey ? [part.contentKey] : []), ...(part.embeds ?? [])]))];
+  return { text: used.map((part) => part.text as string).join(separator), contentKeys, dropped };
 }
 
 /** Keep producer slots stable until dispatch refresh, then order only at serialization. */

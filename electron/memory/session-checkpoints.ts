@@ -8,6 +8,7 @@ import { estimateTransportTokens } from "../runtime/compact";
 import { redactSecrets } from "../../shared/secret-patterns";
 import { getMemoryDb } from "./database";
 import { callConnectedModelDetailed } from "../system-agents/judgment";
+import { SESSION_CHECKPOINTS_KEPT } from "../storage/db-retention-policy";
 
 export interface SessionTaskBoundary {
   id: string;
@@ -260,6 +261,10 @@ export function createSessionCheckpointStore(getDatabase: () => Database.Databas
         VALUES(?,?,?,?,?,?)`).run(id, key, JSON.stringify(cp), cp.sourceRevision, cp.throughSeq, cp.createdAt);
       db.prepare(`INSERT INTO memory_session_checkpoint_heads(namespace,checkpoint_id,revision) VALUES(?,?,?)
         ON CONFLICT(namespace) DO UPDATE SET checkpoint_id=excluded.checkpoint_id,revision=excluded.revision`).run(key, id, cp.headRevision);
+      // Only the head is ever read (read() joins the heads table). Every save used to leave its 122 KB snapshot behind: 17,184 rows,
+      // 2.1 GB on the owner's store. The head and the one it replaced stay (SESSION_CHECKPOINTS_KEPT); the rest go in this transaction.
+      db.prepare(`DELETE FROM memory_session_checkpoints WHERE rowid IN (SELECT rowid FROM memory_session_checkpoints
+        WHERE namespace=? AND checkpoint_id<>? ORDER BY through_seq DESC, rowid DESC LIMIT -1 OFFSET ?)`).run(key, id, SESSION_CHECKPOINTS_KEPT - 1);
       return cp;
     }).immediate();
   }

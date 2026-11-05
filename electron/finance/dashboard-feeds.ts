@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import type { FinanceAsset, FinanceDataResult } from '../../shared/finance';
+import { canonicalFinanceAssetId, canonicalFinanceSourceId, type FinanceAsset, type FinanceDataResult } from '../../shared/finance';
 import { FINANCE_DATA_CATEGORIES, resolveFinanceDataSource, type FinanceDataSelection } from '../../shared/finance-data-routing';
 import { FINANCE_FEED_IDS, type FinanceFeedId, type FinanceDashboardFeedItem, type FinanceDashboardFeedSection, type FinanceDashboardFeedsResult } from '../../shared/finance-feeds';
 import type { FinanceScope } from './store';
@@ -106,7 +106,7 @@ async function filings(assets:FinanceAsset[],signal:AbortSignal):Promise<Finance
   let failures=0;
   // Sequential SEC requests stay comfortably below the published ten requests/second limit.
   for(const asset of assets.slice(0,MAX_ASSETS)){
-    check(signal);const direct=asset.id.match(/^sec:(\d{10}):(.+)$/),canonical=asset.id===`yahoo:${encodeURIComponent(asset.symbol)}`||asset.id===`av:${asset.symbol}`&&asset.exchange==='United States'||asset.id===`ishares:${asset.symbol}`||direct?.[2]===asset.symbol;
+    check(signal);const direct=asset.id.match(/^sec:(\d{10}):(.+)$/),canonical=canonicalFinanceAssetId(asset.id)===`yahoo:${encodeURIComponent(asset.symbol)}`||asset.id===`ishares:${asset.symbol}`||direct?.[2]===asset.symbol;
     const matches=canonical?directory.byTicker.get(asset.symbol)??[]:[];
     if(matches.length!==1){failures++;out.warnings.push(asset.symbol+': finance_feed_issuer_unresolved');continue;}
     const cik=matches[0].cik;if(direct&&direct[1]!==cik){failures++;out.warnings.push(asset.symbol+': finance_feed_identity_mismatch');continue;}
@@ -275,9 +275,10 @@ async function getFinanceDashboardFeedsOnce(input:FeedsInput):Promise<FinanceDas
   const {scope}=input;scope.assertCurrent();if(!scope.workspaceId||!scope.userId)throw new Error('finance_sign_in_required');if(input.signal?.aborted)throw new Error('finance_feed_cancelled');
   if(!Array.isArray(input.watchlist)||input.watchlist.length>10000||input.watchlist.some(a=>!a||typeof a.id!=='string'||a.id.length>200||typeof a.symbol!=='string'||a.symbol.length>80))throw new Error('finance_feed_watchlist_invalid');
   const enabled=input.enabledFeedIds===undefined?[...FINANCE_FEED_IDS]:[...input.enabledFeedIds];if(enabled.length>4||new Set(enabled).size!==enabled.length||enabled.some(id=>!FINANCE_FEED_IDS.includes(id)))throw new Error('finance_feed_selection_invalid');
-  const sourceId=input.sourceId??'finance-yfinance',selection:FinanceDataSelection={sourceId,sourceBindings:input.sourceBindings};
-  const validSource=(value:string)=>typeof value==='string'&&(value==='finance-yfinance'||value==='alpha-vantage'||/^toolchain:[A-Za-z0-9_-]{1,100}:[1-9]\d*:[a-f0-9]{64}$/.test(value));
-  if(!validSource(sourceId)||input.sourceBindings&&Object.keys(input.sourceBindings).some(category=>!FINANCE_DATA_CATEGORIES.includes(category as typeof FINANCE_DATA_CATEGORIES[number])))throw new Error('finance_feed_source_invalid');
+  // A saved 'alpha-vantage' selection (retired provider) means the free engine.
+  const sourceId=canonicalFinanceSourceId(input.sourceId??'finance-yfinance'),sourceBindings=input.sourceBindings&&Object.fromEntries(Object.entries(input.sourceBindings).map(([category,value])=>[category,typeof value==='string'?canonicalFinanceSourceId(value):value])) as typeof input.sourceBindings,selection:FinanceDataSelection={sourceId,sourceBindings};
+  const validSource=(value:string)=>typeof value==='string'&&(value==='finance-yfinance'||/^toolchain:[A-Za-z0-9_-]{1,100}:[1-9]\d*:[a-f0-9]{64}$/.test(value));
+  if(!validSource(sourceId)||sourceBindings&&Object.keys(sourceBindings).some(category=>!FINANCE_DATA_CATEGORIES.includes(category as typeof FINANCE_DATA_CATEGORIES[number])))throw new Error('finance_feed_source_invalid');
   const effective=Object.fromEntries(FINANCE_DATA_CATEGORIES.map(category=>[category,resolveFinanceDataSource(selection,category)]));if(Object.values(effective).some(value=>!validSource(value)))throw new Error('finance_feed_source_invalid');
   // Unverified manual symbols must not be attributed to a provider's issuer or security.
   const assets=input.watchlist.filter(asset=>!asset.id.startsWith('manual:v1:')).map(asset=>({...asset}));
@@ -289,9 +290,8 @@ async function getFinanceDashboardFeedsOnce(input:FeedsInput):Promise<FinanceDas
   try {const sections=await Promise.all(FINANCE_FEED_IDS.map(async feedId=>{
     if(!enabled.includes(feedId))return{...section(feedId),status:'disabled' as const};
     try{const selectedSource=feedId==='finance-news'?effective.news:feedId==='finance-sec'?effective.filings:effective.calendar;
-      if(selectedSource==='alpha-vantage')return{...section(feedId),status:'unavailable' as const,errorCode:'finance_feed_source_unsupported',warnings:['The selected Cloud market source does not supply this feed. No other source was substituted.']};
       return await(feedId==='finance-earnings'?earnings(assets,selectedSource,scope,controller.signal):selectedSource!=='finance-yfinance'?selectedToolFeed(feedId,assets,selectedSource,scope,controller.signal):feedId==='finance-news'?news(assets,controller.signal):feedId==='finance-sec'?filings(assets,controller.signal):economy(controller.signal));}
     catch(e){check(controller.signal);return{...section(feedId),status:'error' as const,errorCode:errorCode(e)};}
-  }));if(expired)throw new Error('finance_feed_timeout');check(controller.signal);scope.assertCurrent();const result={fetchedAt,expiresAt:new Date(Date.now()+TTL).toISOString(),sections};cache.delete(id);cache.set(id,{key,result:clone(result)});while(cache.size>MAX_OWNERS)cache.delete(cache.keys().next().value!);return result;
+  }));if(expired)throw new Error('finance_feed_timeout');check(controller.signal);scope.assertCurrent();const result={fetchedAt,expiresAt:new Date(Date.now()+TTL).toISOString(),sections};cache.delete(id);if(!sections.some(item=>item.status==='error'))cache.set(id,{key,result:clone(result)});/* a failed source is never kept: Retry must ask again */while(cache.size>MAX_OWNERS)cache.delete(cache.keys().next().value!);return result;
   }catch(e){if(expired)throw new Error('finance_feed_timeout');throw e;}finally{clearTimeout(deadline);input.signal?.removeEventListener('abort',cancel);if(pending.get(id)===controller)pending.delete(id);}
 }

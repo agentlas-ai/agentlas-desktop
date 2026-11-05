@@ -11,6 +11,7 @@ import {
   resolveAutomaticGoalIntent,
   type AutomaticGoalIntentResolution,
 } from "../long-run/judged-auto-goal-intent";
+import { AUTOMATIC_GOAL_INTAKE_EVENT, intakeSourceDigest, recordedIntakeDecision } from "../long-run/recorded-intake-decision";
 import type { GoalIntakeDecision, GoalSourceMessage } from "../../shared/auto-goal";
 import { resolveGoalLifecycle } from "../../shared/auto-goal";
 import type { LongRunRecord } from "../store/long-runs";
@@ -113,6 +114,15 @@ export async function prepareInvocationAutomaticGoal(input: {
       throw new Error("auto_goal_source_mismatch");
     }
     const source: GoalSourceMessage = { chatId: input.chatId, messageId: input.sourceMessageId, role: "user", text: row.text };
+    // A domain whose conversations are answered turn by turn (its binding says automaticGoals: false) never admits a message as a Goal;
+    // its long-running work has its own place (Finance: monitors). An explicit Goal the owner starts is unaffected.
+    let domainAnswers = false;
+    try { const { assertProjectDomainOwner } = await import("./project-domain-binding"); const { getAuthenticatedActorIds } = await import("../auth"); domainAnswers = assertProjectDomainOwner(input.chatId, getAuthenticatedActorIds())?.automaticGoals === false; } catch { /* no binding: the ordinary path */ }
+    if (domainAnswers) {
+      const decision: GoalIntakeDecision = { messageId: source.messageId, intent: "unknown", commitment: "uncertain" };
+      tryRecordRunEvent({ runId: input.runId, chatId: input.chatId, kind: "automatic_goal_intake", payload: { sourceMessageId: source.messageId, intent: decision.intent, commitment: decision.commitment, classified: false, bypassReason: "domain_answers_turn_by_turn" } });
+      return { kind: "bypass", decision };
+    }
     // Attachment-only requests legitimately have no text for the auxiliary
     // Goal classifier. The selected execution runtime still receives the
     // attachments, so skip Goal intake without presenting this as an outage.
@@ -137,7 +147,10 @@ export async function prepareInvocationAutomaticGoal(input: {
       return { kind: "bypass", decision };
     }
     stage = "classification";
-    const decision = await (input.resolveIntent ?? resolveAutomaticGoalIntent)(source, {
+    // The background service classified this very message (classifyOnly) before it handed it to Main: Main reads that decision
+    // instead of asking the model the same question again (long-run/recorded-intake-decision.ts).
+    const recorded = recordedIntakeDecision({ runId: input.runId, messageId: source.messageId, text: source.text, needCadence: !input.classifyOnly });
+    const decision = (recorded ?? await (input.resolveIntent ?? resolveAutomaticGoalIntent)(source, {
       signal: input.signal,
       // Local classification can exceed a short network-style deadline. Keep a
       // finite bound while allowing the configured local runtime to answer.
@@ -145,7 +158,7 @@ export async function prepareInvocationAutomaticGoal(input: {
       // A bounded series' interval and run count are read only when the Goal is really admitted; the classification-only
       // pass of a background-service turn just decides whether to forward.
       extractCadence: !input.classifyOnly,
-    });
+    })) as GoalIntakeDecision | AutomaticGoalIntentResolution;
     if (input.signal.aborted) return { kind: "bypass", decision };
     if ("classification" in decision && decision.classification === "unavailable") {
       const unavailable: Extract<AutomaticGoalPreparation, { kind: "unavailable" }> = {
@@ -170,8 +183,9 @@ export async function prepareInvocationAutomaticGoal(input: {
       });
       return unavailable;
     }
-    tryRecordRunEvent({ runId: input.runId, chatId: input.chatId, kind: "automatic_goal_intake", payload: {
-      sourceMessageId: source.messageId, intent: decision.intent, commitment: decision.commitment,
+    tryRecordRunEvent({ runId: input.runId, chatId: input.chatId, kind: AUTOMATIC_GOAL_INTAKE_EVENT, payload: {
+      sourceMessageId: source.messageId, sourceDigest: intakeSourceDigest(source.text), ...(recorded ? { reused: true } : {}),
+      intent: decision.intent, commitment: decision.commitment,
       ...(decision.intent === "execute" ? { lifecycle: resolveGoalLifecycle(decision.lifecycle) } : {}),
       ...(decision.turnScope ? { turnScope: decision.turnScope } : {}),
       // Flat numbers: the run-event ledger keeps no nested payload objects.

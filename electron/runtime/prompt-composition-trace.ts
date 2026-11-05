@@ -1,4 +1,4 @@
-import { composeDeclaredPrompt, orderPromptParts, type DeclaredPromptPart } from "./prompt-order";
+import { composeDeclaredPrompt, dedupeDeclaredPromptParts, type ComposeDeclaredOptions, type DeclaredPromptPart, type DroppedPromptPart } from "./prompt-order";
 
 /** Plain composition metadata only. No prompt text, permissions, grants or executable callbacks. */
 export interface PromptCompositionTrace {
@@ -7,13 +7,16 @@ export interface PromptCompositionTrace {
   separator?: "\n" | "\n\n";
   kind?: "main-host" | "company-work";
   parts: readonly (Omit<DeclaredPromptPart, "text"> & { start: number; end: number })[];
+  /** Parts the compiler left out (duplicate `contentKey`, or payload already embedded by another part). Ids and keys only. */
+  dropped?: readonly DroppedPromptPart[];
 }
 
 /** Exact UTF-16 spans into the already transported string avoid duplicating large canonical sources. */
-export function composeTracedPrompt(parts: readonly DeclaredPromptPart[], options?: { separator: "\n" | "\n\n"; kind?: "main-host" | "company-work" }): { text: string; composition: PromptCompositionTrace } {
+export function composeTracedPrompt(parts: readonly DeclaredPromptPart[], options?: { separator: "\n" | "\n\n"; kind?: "main-host" | "company-work" } & ComposeDeclaredOptions): { text: string; composition: PromptCompositionTrace } {
   const separator = options?.separator ?? "\n";
-  const registeredText = composeDeclaredPrompt(parts, separator);
-  const ordered = orderPromptParts(parts).filter(part => options?.kind === "main-host" && part.id === "main.system.host.agent-definition"
+  const registeredText = composeDeclaredPrompt(parts, separator, options);
+  const deduped = dedupeDeclaredPromptParts(parts, options);
+  const ordered = deduped.parts.filter(part => options?.kind === "main-host" && part.id === "main.system.host.agent-definition"
     ? typeof part.text === "string" : part.text?.trim());
   // Retain even an empty/whitespace package definition exactly; it is a source value, never padding.
   const text = options?.kind === "main-host" ? ordered.map(part => part.text as string).join(separator) : registeredText;
@@ -27,7 +30,7 @@ export function composeTracedPrompt(parts: readonly DeclaredPromptPart[], option
     cursor += separator.length;
     return span;
   });
-  return { text, composition: Object.freeze({ revision: 1, ...(options ? { separator, ...(options.kind ? { kind: options.kind } : {}) } : {}), parts: Object.freeze(spans) }) };
+  return { text, composition: Object.freeze({ revision: 1, ...(options ? { separator, ...(options.kind ? { kind: options.kind } : {}) } : {}), parts: Object.freeze(spans), ...(deduped.dropped.length ? { dropped: Object.freeze(deduped.dropped.map(drop => Object.freeze({ ...drop }))) } : {}) }) };
 }
 
 /** A trace describes this exact host string; it never substitutes another string or authorizes an action. */

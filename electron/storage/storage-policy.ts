@@ -23,8 +23,10 @@
  * - durable judgment verdicts (a cache of model verdicts): removed 30 days
  *   after their last use; a removed one costs one model call at most
  * - managed DB-upgrade copies (agentlas.sqlite.migration-backup.v1.*): the
- *   newest three stay (store/db.ts MAX_MANAGED_MIGRATION_BACKUPS); older ones
- *   go after integrity checks of the live store and of the three that stay.
+ *   newest one stays (store/db.ts MAX_MANAGED_MIGRATION_BACKUPS; three copies
+ * held ~8.6 GB beside a 3.4 GB store); older ones go once their
+ *   target schema exists in the live store, after integrity checks of the live
+ *   store and of the copy that stays.
  *   Updater recovery copies and other ad-hoc DB copies are never touched.
  */
 export const STORAGE_POLICY = {

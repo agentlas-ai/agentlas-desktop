@@ -42,6 +42,8 @@ export interface PromptModuleContext {
   pluginTurnGuidance?: string;
   /** Installed, switched-on connector ids (MCP servers) — a name list; the harness_* tools describe each. */
   connectors?: readonly string[];
+  /** Model-picks mode on a runtime that does not read MCP server instructions (the local tool loop): the installed connectors' names. */
+  installedReach?: readonly string[];
   /** Update-variable agent definition and package skill catalog, before installed inventories. */
   agentPrompt: string;
   /** Separator line before the agent definition (tStatus sysAgentDef). */
@@ -225,6 +227,17 @@ registerPromptModule({
   id: "catalog.connectors", revision: 2, kind: "catalog", layer: "S1", profiles: ["ordinary"],
   stability: "versioned-content", changeTriggers: ["release", "profile", "connector-inventory"], order: 20,
   render: (ctx) => ctx.connectors?.length ? `connectors: ${ctx.connectors.join(", ")}` : null,
+});
+
+// The agentlas-turn instructions' installed-tools line (turn-tools/mcp-server.ts tool.agentlas-turn.server-instructions.installed),
+// for the runtimes whose tool loop never reads MCP server instructions (byok, ollama, lmstudio, mlx, agentlas, agentlas-local), in
+// model-picks mode only. Same text. Local-model A/B (THOUGHT-EXPERIMENTS.md F7): an unattached installed connector reached in the turn.
+registerPromptModule({
+  id: "catalog.connectors.installed-reach", revision: 1, kind: "catalog", layer: "S1", profiles: ["ordinary"],
+  stability: "configuration", changeTriggers: ["connector-inventory", "runtime"], order: 25,
+  render: (ctx) => ctx.installedReach?.length
+    ? `Tools installed on this computer that are not in your tool list are reached through harness_search (find one by its name or by what it does), then harness_describe and harness_call: ${ctx.installedReach.join(", ")}.`
+    : null,
 });
 
 

@@ -1,4 +1,5 @@
 import { supervisorError } from "../../shared/one-supervisor";
+import { scienceRequestId } from "./supervisor-science";
 import { readOrdinaryOneTurn, type OrdinaryOneTurnSource } from "../invocation/ordinary-one-turn";
 import { createSupervisorNativeOrigin } from "./supervisor-native-runtime";
 import { randomUUID } from "node:crypto";
@@ -1416,7 +1417,8 @@ export class OneSupervisorService {
   async startScience(raw: {commandId:string;text:string;projectId:string;conversationId?:string;oneId?:string}, originReplyRunId?:string): Promise<SupervisorCommandReceipt> {
     this.assertAutomaticWriteAllowed(originReplyRunId);
     const value=supervisorObject(raw,["commandId","text","projectId","conversationId","oneId"]);
-    const input={commandId:supervisorIdentifier(value.commandId),text:supervisorText(value.text),projectId:supervisorIdentifier(value.projectId),
+    // The journal key and the Science request id are one value (a UUID), so a retry of the same command id finds the same row.
+    const input={commandId:scienceRequestId(supervisorIdentifier(value.commandId)),text:supervisorText(value.text),projectId:supervisorIdentifier(value.projectId),
       ...(value.conversationId ? {conversationId:supervisorIdentifier(value.conversationId)} : {})};
     if (!this.deps.science) throw supervisorError('supervisor_science_unavailable');
     const {oneId,chatId}=this.binding(value.oneId);

@@ -24,8 +24,8 @@ export function FinanceSourceConnections({ko,state,pending,onChange}:{ko:boolean
     const missing=!!selected&&!state?.sources.some(source=>source.id===selected);
     return <label className={styles.field} key={category}>{categoryLabels[category][ko?0:1]}<select value={selected} disabled={pending||!state||state.sourceRoutingStatus==='unavailable'} onChange={event=>{void onChange({action:'source.binding',category,sourceId:event.target.value||null});}}>
      <option value="">{ko?'기본 소스 사용':'Use default source'}</option>
-     {missing&&<option value={selected} disabled>{ko?'선택한 도구 · 사용 불가':'Selected source · Unavailable'}</option>}
-     {state?.sources.map(source=><option key={source.id} value={source.id} disabled={!source.available}>{source.id==='finance-yfinance'?(ko?'무료 시장 데이터':'Free market data'):source.name}{source.version?` · ${source.version}`:''}{!source.available?` · ${ko?'사용 불가':'Unavailable'}`:''}</option>)}
+     {missing&&<option value={selected} disabled>{ko?'선택한 데이터 소스 · 사용 불가':'Selected data source · Unavailable'}</option>}
+     {state?.sources.map(source=><option key={source.id} value={source.id} disabled={!source.available}>{source.id==='finance-yfinance'?(ko?'무료 시장 데이터':'Free market data'):source.name}{!source.available?` · ${ko?'사용 불가':'Unavailable'}`:''}</option>)}
     </select></label>;
    })}
   </details>

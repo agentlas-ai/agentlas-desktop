@@ -1,4 +1,5 @@
-import { compileGoalObligationCheckpoint as compileLongRunCheckpoint, withGoalObligationContextText } from "../long-run/goal-obligation-context";
+import { composeUpstreamResults, declaredCut } from "./firm-upstream-context";
+import { compileGoalObligationCheckpoint as compileLongRunCheckpoint, goalCheckpointContentKey, withGoalObligationContextText } from "../long-run/goal-obligation-context";
 import { activeTeamGoalText, assertTeamGoalCheckpoint, assertTeamGoalContext, bindTeamGoalContext, TeamGoalContextError, type TeamGoalContext } from "./team-goal-context";
 import { composeDeclaredPrompt, registerDeclaredPromptModule, type DeclaredPromptPart } from "../runtime/prompt-order";
 import { toolObservationDigest } from "../automation-progress-guard";
@@ -194,6 +195,11 @@ export interface FirmRunParams {
   priorHistory?: ChatHistoryEntry[];
   /** Main-owned durable state, never accepted from the renderer request. */
   goalCheckpoint?: LongRunTaskCheckpoint;
+  /**
+   * Content keys the upper layer's `req.userPrompt` already carries (typed, from its own composition; never found by
+   * searching the text). A turn whose prompt embeds that request does not add the same payload again.
+   */
+  carriedContentKeys?: readonly string[];
   /** Parent room observation, shared unchanged with nested teams. */
   goalContext?: TeamGoalContext;
   active: RuntimeStatus;
@@ -413,7 +419,7 @@ function stageMatched(targets: MatchedWork[]) {
   };
 }
 
-function resultStatusContext(results: FirmStageResult[]): string {
+function resultStatusContext(results: FirmStageResult[], overflowPath?: (text: string) => string | null): string {
   if (results.length === 0) {
     return "- upstream: no production slot selected; inspect the current folder";
   }
@@ -421,23 +427,14 @@ function resultStatusContext(results: FirmStageResult[]): string {
   // Status-only context made the verifier search .agentlas logs and stale
   // memory for evidence that the host already had in the worker results. Pass
   // the bounded, actual upstream deliverables directly so QA can verify the
-  // same facts the CEO will synthesize. The cap prevents a large worker reply
-  // from turning the verification prompt into an unbounded transcript.
-  let remaining = 24_000;
-  return results.map((result) => {
-    const raw = result.result.trim();
-    const allowed = Math.max(0, Math.min(8_000, remaining));
-    const bounded = raw.length > allowed
-      ? `${raw.slice(0, Math.max(0, allowed - 1))}…`
-      : raw;
-    remaining -= Math.min(raw.length, allowed);
-    return [
-      `## ${result.node.name}`,
-      `status: ${result.ok ? "completed" : "failed"}`,
-      firmEvidencePromptSummary(result.evidence),
-      bounded || "(no deliverable returned)",
-    ].join("\n");
-  }).join("\n\n");
+  // same facts the CEO will synthesize. The bound keeps a large worker reply
+  // from turning the verification prompt into an unbounded transcript; a cut is
+  // declared with both lengths (and the full text's path), never silent: the
+  // old silent 8,000-character cut made 12 of 12 independent verifications
+  // answer FAIL on a report the host itself had cut (mcp/firm-upstream-context.ts).
+  return composeUpstreamResults(results.map((result) => ({
+    name: result.node.name, ok: result.ok, evidenceSummary: firmEvidencePromptSummary(result.evidence), text: result.result,
+  })), overflowPath);
 }
 
 /*
@@ -464,11 +461,13 @@ const FIRM_TEAM_REQUEST_DECLARATION = {
 } as const satisfies Omit<DeclaredPromptPart, "text">;
 
 /** The request a firm received, as one declared stage module. Empty text when there is nothing to carry. */
-export function firmTeamRequestPromptPart(request: string, overflow?: { path: string } | null): DeclaredPromptPart {
+export function firmTeamRequestPromptPart(request: string, overflow?: { path: string } | null, carriedContentKeys?: readonly string[]): DeclaredPromptPart {
   const text = request.trim();
   if (!text) return { ...FIRM_TEAM_REQUEST_DECLARATION, text: "" };
   if (text.length <= FIRM_TEAM_REQUEST_INLINE_MAX_CHARS) {
-    return { ...FIRM_TEAM_REQUEST_DECLARATION, text: `[Request this team received — your assignment is the brief that follows]\n${text}` };
+    // Whole request inline: every payload the upper layer composed into it (typed keys) is in this part. A cut request proves nothing, so it declares none.
+    return { ...FIRM_TEAM_REQUEST_DECLARATION, text: `[Request this team received — your assignment is the brief that follows]\n${text}`,
+      ...(carriedContentKeys?.length ? { embeds: carriedContentKeys } : {}) };
   }
   const head = text.slice(0, FIRM_TEAM_REQUEST_INLINE_MAX_CHARS);
   return { ...FIRM_TEAM_REQUEST_DECLARATION, text: overflow
@@ -481,6 +480,11 @@ export function firmTeamRequestPromptPart(request: string, overflow?: { path: st
  * readable by every runtime's file tools). Same content, same file. Null when there is no project folder or it fails.
  */
 export function materializeFirmTeamRequest(request: string, projectRoot: string | null | undefined, runId: string | undefined): string | null {
+  return materializeFirmStageText(request, projectRoot, runId, "team-request");
+}
+
+/** The same one-file-per-content write for any over-bound stage text (an upstream deliverable a stage could only be shown the head of). */
+export function materializeFirmStageText(text: string, projectRoot: string | null | undefined, runId: string | undefined, name: string): string | null {
   if (!projectRoot) return null;
   try {
     const root = realpathSync(projectRoot);
@@ -492,15 +496,15 @@ export function materializeFirmTeamRequest(request: string, projectRoot: string 
       const stat = lstatSync(dir);
       if (!stat.isDirectory() || stat.isSymbolicLink() || realpathSync(dir) !== dir) return null;
     }
-    const text = request.trim();
-    const file = path.join(dir, `team-request-${createHash("sha256").update(text).digest("hex").slice(0, 16)}.md`);
+    const body = text.trim();
+    const file = path.join(dir, `${name}-${createHash("sha256").update(body).digest("hex").slice(0, 16)}.md`);
     try {
-      if (readFileSync(file, "utf8") === text) return file;
+      if (readFileSync(file, "utf8") === body) return file;
     } catch { /* not written yet */ }
-    writeFileSync(file, text, { encoding: "utf8", mode: 0o600 });
+    writeFileSync(file, body, { encoding: "utf8", mode: 0o600 });
     return file;
   } catch (error) {
-    console.error("[firm] team request file failed:", error);
+    console.error("[firm] stage text file failed:", error);
     return null;
   }
 }
@@ -1002,6 +1006,8 @@ interface NodeTurn {
   userPrompt: string;
   /** Internal host composition only; never sent as runner authority or wire metadata. */
   userPromptParts?: readonly DeclaredPromptPart[];
+  /** Content keys whose payload this turn's `userPrompt` text already contains (the whole request is embedded). */
+  embeds?: readonly string[];
   history: ChatHistoryEntry[];
   /** 직속 보고자 (있으면 위임 프로토콜 주입) */
   reports?: ResolvedNode[];
@@ -1043,7 +1049,7 @@ interface NodeTurn {
  * userPrompt reaches both fresh and resumed native sessions. */
 export function firmRunnerConversation(
   p: Pick<FirmRunParams, "req" | "chat" | "goalCheckpoint" | "goalContext">,
-  turn: Pick<NodeTurn, "history" | "userPrompt" | "userPromptParts">,
+  turn: Pick<NodeTurn, "history" | "userPrompt" | "userPromptParts" | "embeds">,
   runtime: Pick<RuntimeStatus, "kind">,
 ): Pick<RunnerRequest, "history" | "userPrompt"> {
   const checkpoint = p.req.agentAppMode ? undefined : p.goalCheckpoint;
@@ -1056,15 +1062,20 @@ export function firmRunnerConversation(
   }
   const checkpointText = checkpoint ? compileLongRunCheckpoint(checkpoint, runtime.kind)
     : p.req.agentAppMode ? "" : withGoalObligationContextText(activeTeamGoalText(p.goalContext), p.goalContext?.goalId, p.goalContext?.goalRevision);
+  // Only a stored checkpoint has a declared identity. The Goal-text fallback below carries none and is always added.
+  const checkpointKey = checkpoint && checkpointText ? goalCheckpointContentKey(checkpoint) : undefined;
+  // The upper layer's request already holds this payload when the turn embeds that request: skip it, never add a second copy (E1).
+  const alreadyInPrompt = checkpointKey !== undefined && (turn.embeds ?? []).includes(checkpointKey);
+  const checkpointPart: DeclaredPromptPart = { id: "firm.user.goal-checkpoint", revision: 1, stability: "turn-context", changeTriggers: ["checkpoint", "goal-revision", "runtime"], order: 100,
+    text: checkpointText, ...(checkpointKey ? { contentKey: checkpointKey } : {}) };
   return {
     history: p.req.agentAppMode || p.chat.goalId ? [] : turn.history,
     userPrompt: turn.userPromptParts
       ? composeDeclaredPrompt([
           ...turn.userPromptParts,
-          { id: "firm.user.goal-checkpoint", revision: 1, stability: "turn-context", changeTriggers: ["checkpoint", "goal-revision", "runtime"], order: 100,
-            text: checkpointText },
-        ])
-      : [turn.userPrompt, checkpointText].filter(Boolean).join("\n\n"),
+          checkpointPart,
+        ], "\n\n", { carried: alreadyInPrompt ? [checkpointKey] : [] })
+      : alreadyInPrompt ? turn.userPrompt : [turn.userPrompt, checkpointText].filter(Boolean).join("\n\n"),
   };
 }
 
@@ -1178,6 +1189,11 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
   if (node.agentId && node.prompt?.trim() && !systemPrompt.includes(node.prompt.trim())) {
     systemPrompt += `\n\n## Firm role context\n${node.prompt.trim()}`;
   }
+  // Per-turn recall (curated memory, working-folder ontology, Work attachments) varies with every task text. It rides the
+  // turn-context channel (RunnerRequest.turnContext, placed per runtime by serving-prefix.ts / each adapter) and never joins
+  // the system prompt: there it sat above the stable permission, plugin, connector and locale lines, so the provider's prefix
+  // cache ended at the recall ( rollouts: same-agent worker calls diverged at "## Agentlas memory").
+  const recallParts: DeclaredPromptPart[] = [];
   if (!p.req.agentAppMode && !turn.runtimeToolsDisabled && !controlPlaneTurn) {
     const memorySignal = turn.signal ?? p.signal;
     try {
@@ -1187,12 +1203,12 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
         projectId: p.chat.projectId ?? null,
         signal: memorySignal,
       });
-      if (mem) systemPrompt += `\n\n${mem}`;
+      if (mem) recallParts.push({ id: "firm.turn.memory-recall", revision: 1, stability: "turn-context", changeTriggers: ["retrieval"], order: 0, text: mem });
       if (memoryReadPath) {
         const ontologyContext = await queryWorkingFolderOntologyContext(memoryReadPath, turn.userPrompt, {
           readOnly: firmProjectReadOnly(p, nodePermission),
         });
-        if (ontologyContext.used) systemPrompt += `\n\n${ontologyContext.context}`;
+        if (ontologyContext.used) recallParts.push({ id: "firm.turn.memory-ontology", revision: 1, stability: "turn-context", changeTriggers: ["retrieval"], order: 10, text: ontologyContext.context });
       }
     } catch {
       // ignore memory failures
@@ -1295,8 +1311,9 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
   }
   if (!p.req.agentAppMode && !turn.runtimeToolsDisabled && !controlPlaneTurn && workingFolder) {
     const inputContext = mainWorkAttachmentContext(p.req, workingFolder);
-    if (inputContext) systemPrompt += `\n\n${inputContext}`;
+    if (inputContext) recallParts.push({ id: "firm.turn.work-attachments", revision: 1, stability: "turn-context", changeTriggers: ["attachments", "task"], order: 20, text: inputContext });
   }
+  const recallTurnContext = composeDeclaredPrompt(recallParts, "\n\n");
   // 이 노드가 어떤 모델/런타임으로 도는지 — 오케스트레이션 트리에 "모델 사용 중" 표시용.
   const modelLabel =
     active.model ||
@@ -1401,6 +1418,7 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
       measuredResult = await workerRunner(
         {
           systemPrompt,
+          ...(recallTurnContext ? { turnContext: recallTurnContext } : {}),
           ...firmRunnerConversation(p, turn, runtime),
           images: p.req.agentAppMode ? undefined : turn.withImages ? p.req.images : undefined,
           backendLabel: runtimePicked.label,
@@ -1707,7 +1725,10 @@ async function runDivision(
     ? `site-agent-app:${p.req.runId ?? "run"}:division:${division.id}`
     : getOrCreateDivisionSession(p.chat.id, division.id, fkAgentId).id;
   const history = p.req.agentAppMode ? [] : listChatMessages(divChatId, 80);
-  if (!p.req.agentAppMode) appendChatMessage(divChatId, "user", brief);
+  const briefRow = p.req.agentAppMode ? undefined : appendChatMessage(divChatId, "user", brief);
+  // The turns before this one. The brief just stored is the current turn's own prompt (it is in userPrompt), so a later re-read of the
+  // session must not replay it as history: the QA stage of a recorded run held its whole stage prompt twice (history + userPrompt).
+  const priorTurns = () => p.req.agentAppMode ? [] : listChatMessages(divChatId, 80).filter((row) => row.id !== briefRow?.id);
 
   const specialists = division.specialists;
   const runDirectDivision = async () => {
@@ -1741,7 +1762,7 @@ async function runDivision(
         { id: "firm.direct-division.authority", revision: 1, stability: "final-boundary", changeTriggers: ["release"], order: 0,
           text: "no specialist assigned: do the stage work yourself in the project folder; verify before returning" },
       ], ""),
-      history: p.req.agentAppMode ? [] : listChatMessages(divChatId, 80),
+      history: priorTurns(),
       chatId: divChatId,
       divisionId: division.id,
       allocation,
@@ -1854,7 +1875,7 @@ async function runDivision(
       phase: "synthesize",
       userPrompt: synthPrompt,
       userPromptParts: synthParts,
-      history: p.req.agentAppMode ? [] : listChatMessages(divChatId, 80),
+      history: priorTurns(),
       chatId: divChatId,
       divisionId: division.id,
       allocation: plan.synthesisAllocation ?? defaultWorkloadAllocation("synthesize"),
@@ -1955,6 +1976,7 @@ async function runFirmInvocationInternal(p: FirmRunParams): Promise<FirmRunResul
       tier: 1,
       phase: "synthesize",
       userPrompt: req.userPrompt,
+      embeds: p.carriedContentKeys,
       history,
       chatId: chat.id,
       toMainBubble: true,
@@ -1977,6 +1999,7 @@ async function runFirmInvocationInternal(p: FirmRunParams): Promise<FirmRunResul
     tier: 1,
     phase: "plan",
     userPrompt: req.userPrompt,
+    embeds: p.carriedContentKeys,
     history,
     reports: ceoReports,
     chatId: chat.id,
@@ -1989,6 +2012,7 @@ async function runFirmInvocationInternal(p: FirmRunParams): Promise<FirmRunResul
       tier: 1,
       phase: "synthesize",
       userPrompt: req.userPrompt,
+      embeds: p.carriedContentKeys,
       history,
       chatId: chat.id,
       toMainBubble: true,
@@ -2112,8 +2136,17 @@ async function runFirmInvocationInternal(p: FirmRunParams): Promise<FirmRunResul
     const overflowPath = request.length > FIRM_TEAM_REQUEST_INLINE_MAX_CHARS && !req.agentAppMode
       ? materializeFirmTeamRequest(request, projectRoot, req.runId)
       : null;
-    teamRequestPart = request ? firmTeamRequestPromptPart(request, overflowPath ? { path: overflowPath } : null) : null;
+    teamRequestPart = request ? firmTeamRequestPromptPart(request, overflowPath ? { path: overflowPath } : null, p.carriedContentKeys) : null;
     return teamRequestPart;
+  };
+
+  // An upstream deliverable over the stage bound is written once to the run's folder and named in the stage prompt next to the declared cut.
+  const upstreamOverflowPath = (text: string): string | null => {
+    if (req.agentAppMode) return null;
+    try {
+      const root = p.workspaceBinding ? revalidateInvocationWorkspaceBinding(p.workspaceBinding) : p.workingFolder ?? getChatWorkingFolder(p.chat.id);
+      return materializeFirmStageText(text, root, req.runId, "upstream-result");
+    } catch { return null; }
   };
 
   // 2) DELEGATE — 구현/디자인은 병렬, 검증은 결과가 실제 폴더에 반영된 뒤 실행한다.
@@ -2135,7 +2168,7 @@ async function runFirmInvocationInternal(p: FirmRunParams): Promise<FirmRunResul
           ? [{ id: "firm.stage.user.integration-policy", revision: 1, stability: "fixed-policy" as const, changeTriggers: ["release"] as const, order: 0, text: `[Integration stage]\n${evidenceBoundary} Integrate every relevant result and verify.` }]
           : []),
       { id: "firm.stage.user.brief", revision: 1, stability: "task-context", changeTriggers: ["plan-revision"], order: 0, text: brief },
-      { id: "firm.stage.user.completed-outputs", revision: 1, stability: "turn-context", changeTriggers: ["plan-revision"], order: 0, text: stageKind === "production" ? "" : stageContext },
+      { id: "firm.stage.user.completed-outputs", revision: 2, stability: "turn-context", changeTriggers: ["plan-revision"], order: 0, text: stageKind === "production" ? "" : stageContext },
       { id: "firm.stage.user.verdict", revision: 1, stability: "final-boundary", changeTriggers: ["release", "profile"], order: 0, text: stageKind === "verification" ? "explain remaining blockers first; end with <verification_verdict>PASS</verification_verdict> only if every acceptance condition passes after fixes; otherwise end with <verification_verdict>FAIL</verification_verdict>" : "" },
     ];
     // F9: the request this team received reaches the members of these stages verbatim (firmTeamRequestPromptPart).
@@ -2224,7 +2257,7 @@ async function runFirmInvocationInternal(p: FirmRunParams): Promise<FirmRunResul
   let integrationResults: FirmStageResult[] = [];
   if (initialStages.integration.length > 0) {
     mainStatus(ko ? "제작 결과 준비 완료 — 통합 중…" : "Production ready — integration running…");
-    integrationResults = await runMatched(initialStages.integration, resultStatusContext(productionResults), "integration");
+    integrationResults = await runMatched(initialStages.integration, resultStatusContext(productionResults, upstreamOverflowPath), "integration");
   }
   let verificationResults: FirmStageResult[] = [];
   if (initialStages.verification.length > 0) {
@@ -2232,7 +2265,7 @@ async function runFirmInvocationInternal(p: FirmRunParams): Promise<FirmRunResul
     mainStatus(ko ? "제작 결과 준비 완료 — 독립 검증 중…" : "Production ready — independent verification running…");
     verificationResults = await runMatched(
       initialStages.verification,
-      resultStatusContext(upstream),
+      resultStatusContext(upstream, upstreamOverflowPath),
       "verification",
     );
   }
@@ -2256,7 +2289,7 @@ async function runFirmInvocationInternal(p: FirmRunParams): Promise<FirmRunResul
     .filter((item) => (divisionAttempts.get(item.node.id) ?? 0) < 2);
   if (failedVerifications.length > 0 && repairCandidates.length > 0 && !p.signal?.aborted
     && firmNodePermission(p, { tier: 2, phase: "delegate" }) !== "read") {
-    const findings = failedVerifications.map((result) => `## ${result.node.name}\n${result.result.slice(0, 4000)}`).join("\n\n");
+    const findings = failedVerifications.map((result) => `## ${result.node.name}\n${declaredCut(result.result, 4000)}`).join("\n\n");
     const repairItems = repairCandidates.map((item) => ({
       ...item,
       brief: composeDeclaredPrompt([
@@ -2273,7 +2306,7 @@ async function runFirmInvocationInternal(p: FirmRunParams): Promise<FirmRunResul
     }
     if (!emitDelegationMessages(p, org.ceo, 1, repairItems)) return handoffFailure(p);
     mainStatus(ko ? "독립 검수에서 나온 결함을 고치는 중…" : "Fixing the defects the independent check found…");
-    const repaired = await runMatched(repairItems, repairStage === "integration" ? resultStatusContext(productionResults) : "", repairStage);
+    const repaired = await runMatched(repairItems, repairStage === "integration" ? resultStatusContext(productionResults, upstreamOverflowPath) : "", repairStage);
     for (const result of repaired) {
       const index = teamResults.findIndex((prior) => prior.node.id === result.node.id);
       if (index >= 0) teamResults[index] = result;
@@ -2287,7 +2320,7 @@ async function runFirmInvocationInternal(p: FirmRunParams): Promise<FirmRunResul
       for (const item of rechecks) divisionAttempts.set(item.node.id, (divisionAttempts.get(item.node.id) ?? 0) + 1);
       if (!emitDelegationMessages(p, org.ceo, 1, rechecks)) return handoffFailure(p);
       mainStatus(ko ? "고친 결과만 다시 독립 검수 중…" : "Rechecking only the repaired result…");
-      const rechecked = await runMatched(rechecks, resultStatusContext(teamResults.filter((result) => !isVerificationResult(result))), "verification");
+      const rechecked = await runMatched(rechecks, resultStatusContext(teamResults.filter((result) => !isVerificationResult(result)), upstreamOverflowPath), "verification");
       for (const verification of rechecked) {
         const index = teamResults.findIndex((prior) => prior.node.id === verification.node.id);
         if (index >= 0) teamResults[index] = verification;
@@ -2328,6 +2361,7 @@ async function runFirmInvocationInternal(p: FirmRunParams): Promise<FirmRunResul
       tier: 1,
       phase: "synthesize",
       userPrompt,
+      embeds: p.carriedContentKeys,
       history,
       chatId: chat.id,
       reports: ceoReports,
@@ -2352,6 +2386,7 @@ async function runFirmInvocationInternal(p: FirmRunParams): Promise<FirmRunResul
         phase: "synthesize",
         userPrompt: composeDeclaredPrompt(recoveryParts),
         userPromptParts: recoveryParts,
+        embeds: p.carriedContentKeys,
         history,
         chatId: chat.id,
         reports: ceoReports,
@@ -2396,13 +2431,13 @@ async function runFirmInvocationInternal(p: FirmRunParams): Promise<FirmRunResul
     if (followupStages.integration.length > 0) {
       const upstream = [...teamResults, ...followupProductionResults];
       mainStatus(ko ? "제작 결과 준비 완료 — 통합 중…" : "Production ready — integration running…");
-      followupIntegrationResults = await runMatched(followupStages.integration, resultStatusContext(upstream), "integration");
+      followupIntegrationResults = await runMatched(followupStages.integration, resultStatusContext(upstream, upstreamOverflowPath), "integration");
     }
     let followupVerificationResults: FirmStageResult[] = [];
     if (followupStages.verification.length > 0) {
       const upstream = [...teamResults, ...followupProductionResults, ...followupIntegrationResults];
       mainStatus(ko ? "제작 결과 준비 완료 — 독립 검증 중…" : "Production ready — independent verification running…");
-      followupVerificationResults = await runMatched(followupStages.verification, resultStatusContext(upstream), "verification");
+      followupVerificationResults = await runMatched(followupStages.verification, resultStatusContext(upstream, upstreamOverflowPath), "verification");
     }
     // A verifier-directed correction is the new result for that exact role,
     // not a second independent answer beside the corrected one. Replace the
@@ -2442,7 +2477,7 @@ async function runFirmInvocationInternal(p: FirmRunParams): Promise<FirmRunResul
         if (!emitDelegationMessages(p, org.ceo, 1, verifierRechecks)) return handoffFailure(p);
         mainStatus(ko ? "수정된 결과만 독립 재검수 중…" : "Rechecking only the corrected result…");
         const upstream = teamResults.filter((result) => !isVerificationResult(result));
-        const rechecked = await runMatched(verifierRechecks, resultStatusContext(upstream), "verification");
+        const rechecked = await runMatched(verifierRechecks, resultStatusContext(upstream, upstreamOverflowPath), "verification");
         for (const verification of rechecked) {
           const index = teamResults.findIndex((result) => result.node.id === verification.node.id);
           if (index >= 0) teamResults[index] = verification;

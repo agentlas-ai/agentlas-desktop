@@ -298,7 +298,7 @@ async function ensureGoalShapeLocked(input: EnsureGoalShapeInput): Promise<LiveG
     trigger = "owner_requested";
     priorFacts = tacticFacts(existing);
   } else {
-    const promotion = listGoalPlanDecisions(input.goalId, { revision, planSeq: existing.planSeq, kind: "reshape_requested", limit: 5 })
+    const promotion = listGoalPlanDecisions(input.goalId, { revision, planSeq: existing.planSeq, kind: "reshape_requested", limit: 50 })
       .find((row) => row.payload.reason === "single_tactic_failed_twice");
     if (promotion) { trigger = "promotion_after_failures"; priorFacts = tacticFacts(existing); }
   }
@@ -626,7 +626,11 @@ function applyTacticMarker(plan: LiveGoalPlan, marker: TacticMarker, runId: stri
     payload: { tacticId: tactic.id, status: "blocked", cause: cause.kind, causeBoundary: cause.kind === "boundary" ? cause.boundary : null,
       move: move.kind, moveBoundary: move.kind === "escalate_boundary" ? move.boundary : null, moveAt: move.kind === "retry_backoff" ? move.at : null,
       reasonCode: decision.reasonCode, evidence: marker.evidence.slice(0, 600), runId } });
-  if (plan.shape === "single_tactic" && failures >= SINGLE_TACTIC_PROMOTION_FAILURES) {
+  // One request per plan: the receipt is a fact ("this plan asked to be reshaped"), not a per-failure counter. Writing it on
+  // every blocked report put 1,923 identical rows under one planSeq of one Goal (observed in use); `failures` is on the node.
+  if (plan.shape === "single_tactic" && failures >= SINGLE_TACTIC_PROMOTION_FAILURES
+    && !listGoalPlanDecisions(plan.goalId, { revision: plan.revision, planSeq: plan.planSeq, kind: "reshape_requested", limit: 50 })
+      .some((row) => row.payload.reason === "single_tactic_failed_twice")) {
     recordGoalPlanDecision({ goalId: plan.goalId, revision: plan.revision, planSeq: plan.planSeq, kind: "reshape_requested", createdAt: at,
       payload: { reason: "single_tactic_failed_twice", tacticId: tactic.id, failures } });
   }

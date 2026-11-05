@@ -528,12 +528,11 @@ export function materializePluginRelease(input: {
       throw new Error("installed plugin generation changed during swap");
     }
     if (releaseDigest(destinationDir) !== digest) throw new Error("installed plugin digest mismatch after swap");
-    // A directory that was once the public plugin path is never recursively
-    // deleted in this transaction. An old-path/open-directory writer can
-    // create its first `.state` after every possible lstat; retaining the old
-    // release is the only race-free choice without a writer-quiescence
-    // protocol. A later explicit recovery/GC flow may inspect these paths.
-    if (backup) recoveryPaths.add(backup);
+    // The old release was kept only so a failed swap could be rolled back. It is not removed inside this transaction:
+    // a plugin process started from the old tree may still be reading it, and an old-path writer can still create
+    // `.state` there. The next launch's sweep (retirePluginInstallerLeftovers) removes it once it is older than the
+    // grace period, unless it holds host state. Before that sweep existed every update left one full copy per changed
+    // plugin on every machine and nothing removed them (one machine,: 1,283 copies, 1.5 GB).
     return {
       slug,
       action: destinationStat ? "updated" : "installed",
@@ -595,6 +594,100 @@ export function materializePluginRelease(input: {
   } finally {
     if (lock) releaseMaterializeLock(lock);
   }
+}
+
+/**
+ * Trees this installer creates beside a release: the old release during a swap (`backup`), an owned failed generation
+ * (`recovery`), a tree being removed (`retiring`) and an unfinished copy (`stage`, mkdtemp's six-character suffix).
+ */
+const INSTALLER_TREE = /^\.([a-z0-9][a-z0-9_-]{0,127})\.(?:(?:backup|recovery|retiring)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|stage-[A-Za-z0-9]{6})$/u;
+
+/**
+ * Removes one tree this installer left beside a release, unless it holds host state (`.state`, the only user data in a
+ * plugin tree). The tree is first renamed to a private `retiring` name, so a writer that still resolves the old path can no
+ * longer add to it, and `.state` is checked after that rename. A tree holding state is kept under a `recovery` name.
+ */
+function retireInstallerTree(parent: string, name: string, slug: string): { removed: boolean; keptPath?: string } {
+  const current = path.join(parent, name);
+  try {
+    const stat = lstatIfPresent(current);
+    if (!stat || stat.isSymbolicLink() || !stat.isDirectory()) return { removed: false };
+    const retiring = name.includes(".retiring-") ? current : path.join(parent, `.${slug}.retiring-${randomUUID()}`);
+    // Windows: a scanner or a process still inside the old tree can hold it briefly (fs/retry.ts).
+    if (retiring !== current) renameSyncWithRetry(current, retiring);
+    if (lstatIfPresent(path.join(retiring, ".state"))) {
+      const kept = path.join(parent, `.${slug}.recovery-${randomUUID()}`);
+      renameSyncWithRetry(retiring, kept);
+      return { removed: false, keptPath: kept };
+    }
+    fs.rmSync(retiring, { recursive: true, force: true });
+    return { removed: !lstatIfPresent(retiring) };
+  } catch {
+    // A tree that cannot be retired now is found again by the next startup sweep.
+    return { removed: false };
+  }
+}
+
+export interface InstallerLeftoverSweep { removed: number; keptWithState: number; skippedRecent: number }
+
+let startupSweepGraceMs = 10 * 60_000;
+/** Gate hook: a gate cannot age a tree's ctime, so it shortens the startup sweep's grace instead. */
+export function setInstallerLeftoverGraceMsForTests(graceMs: number): void { startupSweepGraceMs = graceMs; }
+
+/**
+ * Startup sweep of the installed plugins root: removes every installer tree left by an earlier launch (backups kept by
+ * releases before this fix, a stage or recovery tree from a crash). Trees younger than `graceMs` may belong to a swap in
+ * progress in another process and are left for the next launch. A tree holding host state is kept, newest one per plugin;
+ * an older state-bearing tree of the same plugin was superseded by it and is removed.
+ */
+export function retirePluginInstallerLeftovers(root: string, options: { graceMs?: number; now?: number } = {}): InstallerLeftoverSweep {
+  const result: InstallerLeftoverSweep = { removed: 0, keptWithState: 0, skippedRecent: 0 };
+  const graceMs = options.graceMs ?? startupSweepGraceMs;
+  const now = options.now ?? Date.now();
+  let names: string[];
+  try {
+    const rootStat = lstatIfPresent(root);
+    if (!rootStat || rootStat.isSymbolicLink() || !rootStat.isDirectory()) return result;
+    names = fs.readdirSync(root);
+  } catch {
+    return result;
+  }
+  const bySlug = new Map<string, string[]>();
+  for (const name of names) {
+    const match = INSTALLER_TREE.exec(name);
+    if (match) bySlug.set(match[1]!, [...(bySlug.get(match[1]!) ?? []), name]);
+  }
+  for (const [slug, slugNames] of bySlug) {
+    // A swap of this plugin in another process holds the same lock, so its backup is never taken mid-transaction.
+    let lock: MaterializeLock | null = null;
+    try { lock = acquireMaterializeLock(root, slug); } catch { continue; }
+    try {
+      const kept: Array<{ path: string; at: number }> = [];
+      for (const name of slugNames) {
+        let stat: fs.Stats | null;
+        try { stat = lstatIfPresent(path.join(root, name)); } catch { continue; }
+        if (!stat || stat.isSymbolicLink() || !stat.isDirectory()) continue;
+        // A rename keeps a tree's mtime (an old release keeps its old one); ctime moves with the rename.
+        const at = Math.max(stat.mtimeMs, stat.ctimeMs, stat.birthtimeMs || 0);
+        // A filesystem time can sit a fraction of a millisecond past Date.now(); a zero grace still means "no wait".
+        if (graceMs > 0 && now - at < graceMs) { result.skippedRecent += 1; continue; }
+        const retired = retireInstallerTree(root, name, slug);
+        if (retired.removed) result.removed += 1;
+        if (retired.keptPath) kept.push({ path: retired.keptPath, at });
+      }
+      kept.sort((a, b) => b.at - a.at);
+      if (kept.length) result.keptWithState += 1;
+      for (const older of kept.slice(1)) {
+        try {
+          fs.rmSync(older.path, { recursive: true, force: true });
+          if (!lstatIfPresent(older.path)) result.removed += 1;
+        } catch { /* the next sweep tries again */ }
+      }
+    } finally {
+      releaseMaterializeLock(lock);
+    }
+  }
+  return result;
 }
 
 /**
@@ -673,6 +766,11 @@ export function materializeBuiltinPlugins(): MaterializeReceipt[] {
     const reason = error instanceof Error ? error.message : String(error);
     console.error("[plugins] bundled packages unreadable:", source, reason);
     return [{ slug: "*", action: "failed", reason }];
+  }
+
+  const sweep = retirePluginInstallerLeftovers(installedPluginsRoot());
+  if (sweep.removed || sweep.keptWithState) {
+    console.log(`[plugins] installer leftovers — removed ${sweep.removed}, kept with host state ${sweep.keptWithState}, recent ${sweep.skippedRecent}`);
   }
 
   const receipts = slugs.map((slug) => {

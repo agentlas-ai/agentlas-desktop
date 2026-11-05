@@ -86,9 +86,9 @@ export function financeNativeTranscriptContents(value: unknown, options: { state
     // One clean line (an older retained proposal may still hold breaks or half surrogate pairs), cut at the contract's length and never through a surrogate pair.
     const cell = (value: string | null, limit = 120) => value === null ? null : clipText(value, limit);
     const rows = view.draft.rows.map(row => [cell(row.name || row.symbol), cell(row.symbol, 40), cell(row.currency, 8), row.quantity, row.averageCost, row.price, cell(row.asOf, 40)]);
-    const status = open ? 'Proposed from your photo or text. Nothing is saved until you review and save it in the Agentlas desktop app.'
+    const status = open ? 'Proposed from your photo or text. Nothing is saved until you review and confirm it.'
       : options.state === 'cancelled' ? 'Replaced by a newer proposal.'
-      : options.state === 'ready' ? 'Reviewed and saved in the Agentlas desktop app.'
+      : options.state === 'ready' ? 'Reviewed and saved.'
       : 'This proposal is no longer open for review.';
     blocks.push(native([...(open ? [{ type: 'table' as const, columns: ['Name', 'Symbol', 'Currency', 'Quantity', 'Average cost', 'Price', 'As of'], rows }] : []), text(status)], 'Holdings to review'));
   } else if (view.kind === 'canvas' || view.kind === 'earnings' || view.kind === 'impact') {

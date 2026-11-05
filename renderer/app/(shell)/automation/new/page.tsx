@@ -28,6 +28,7 @@ import type {
   TriggerKind,
 } from "@/lib/types";
 import { ScheduleBuilder, type ScheduleBuilderValue } from "@/components/automation/ScheduleBuilder";
+import { automationEditPatch } from "@/lib/automation-edit-patch";
 import { IconBuilding, IconSparkles } from "@/components/Icon";
 import {
   RuntimeBrandIdentity,
@@ -132,6 +133,8 @@ function NewAutomationPage() {
   const [chainAfter, setChainAfter] = useState("");
   const [allAutomations, setAllAutomations] = useState<Automation[]>([]);
   const [loaded, setLoaded] = useState(!editId);
+  // The row as stored when the form opened. An edit sends only what differs from it (lib/automation-edit-patch).
+  const [storedRow, setStoredRow] = useState<Automation | null>(null);
   /* ★읽기 실패를 "고를 것이 없음" 으로 그리지 않기 위한 표식 (실측 2026-09-08). */
   const [loadFailed, setLoadFailed] = useState(false);
   const reviewUntouchedRef = useRef(true);
@@ -206,6 +209,7 @@ function NewAutomationPage() {
       if (editId) {
         const existing = autos.find((a) => a.id === editId);
         if (existing) {
+          setStoredRow(existing);
           setName(existing.name);
           setPrompt(existing.promptTemplate);
           setTargetType(existing.targetType);
@@ -286,17 +290,24 @@ function NewAutomationPage() {
   }
 
   const scheduleJson = useMemo(() => (sched ? JSON.stringify(sched.spec) : null), [sched]);
+  // Create defaults only. An edit never reads these: it sends a schedule only when the builder reported one (sched !== null).
   const scheduleHuman = sched?.legacyToken ?? "daily-09:00";
 
   async function submit(blankCanvas = false) {
     const api = ipc();
     if (!api || !name.trim() || busy) return;
-    const validTarget =
+    // An edit that leaves the target alone does not re-check it against today's catalog or re-pin it.
+    const targetDirty = !editId || !storedRow || storedRow.targetType !== targetType || storedRow.targetId !== targetId;
+    if (editId && !storedRow) {
+      setError(locale === "ko" ? "저장된 자동화를 읽지 못해 저장하지 않았습니다. 다시 열어 주세요." : "The stored automation could not be read, so nothing was saved. Reopen it.");
+      return;
+    }
+    const validTarget = !targetDirty || (
       targetType === "firm"
         ? firms.some((f) => f.id === targetId)
         : targetType === "hub"
           ? hubAgents.some((a) => a.slug === targetId && a.callable === true && Boolean(a.packageHash))
-          : agents.some((a) => a.id === targetId);
+          : agents.some((a) => a.id === targetId));
     if (!validTarget) {
       setError(locale === "ko" ? "선택한 대상이 없습니다. 다른 대상 탭을 선택하세요." : "No valid target is selected. Choose another target tab.");
       return;
@@ -304,7 +315,7 @@ function NewAutomationPage() {
     const selectedHubVersion = targetType === "hub"
       ? hubAgents.find((agent) => agent.slug === targetId && agent.callable === true)?.packageHash
       : undefined;
-    if (targetType === "hub" && !selectedHubVersion) {
+    if (targetDirty && targetType === "hub" && !selectedHubVersion) {
       setError(locale === "ko"
         ? "정확한 Hub 패키지 버전을 확인할 수 없어 자동화를 저장하지 않았습니다. Hub 목록을 새로고침한 뒤 다시 선택하세요."
         : "The exact Hub package version is unavailable. Refresh Hub and select the agent again.");
@@ -321,19 +332,23 @@ function NewAutomationPage() {
     setBusy(true);
     setError("");
     try {
-      const commonPatch = {
+      const promptFallback = locale === "ko" ? "오늘 할 일 요약해줘" : "Summarize today's tasks";
+      // Workspace choice travels only when the owner opened it (create always carries one).
+      const workspacePatch = !editId || projectContextTouched ? {
+        projectId: projectContextChoice === "__none__" || projectContextChoice === "__goal__" ? null : projectContextChoice,
+        ...(projectContextChoice === "__goal__" && workspaceGoalCandidate ? { workspaceGoalId: workspaceGoalCandidate.goalId } : {}),
+        workspaceMode: (projectContextChoice === "__goal__" ? "follow_goal"
+          : projectContextChoice === "__none__" ? "standalone" : "project") as AutomationWorkspaceMode,
+      } : {};
+      // Create: the full spec.
+      const createSpec = {
         name: name.trim(),
         scheduleHuman,
         targetType,
         targetId,
         targetVersion: targetType === "hub" ? selectedHubVersion : "",
-        ...(!editId || projectContextTouched ? {
-          projectId: projectContextChoice === "__none__" || projectContextChoice === "__goal__" ? null : projectContextChoice,
-          ...(projectContextChoice === "__goal__" && workspaceGoalCandidate ? { workspaceGoalId: workspaceGoalCandidate.goalId } : {}),
-          workspaceMode: (projectContextChoice === "__goal__" ? "follow_goal"
-            : projectContextChoice === "__none__" ? "standalone" : "project") as AutomationWorkspaceMode,
-        } : {}),
-        promptTemplate: prompt.trim() || (locale === "ko" ? "오늘 할 일 요약해줘" : "Summarize today's tasks"),
+        ...workspacePatch,
+        promptTemplate: prompt.trim() || promptFallback,
         toolMode,
         hubMode,
         scheduleJson: triggerType === "schedule" ? scheduleJson : null,
@@ -357,9 +372,25 @@ function NewAutomationPage() {
             })
           : pickedSelection
         : null;
-      if (editId) {
+      if (editId && storedRow) {
+        // Edit: only the fields that differ from the stored row (lib/automation-edit-patch).
         await api.automations.update(editId, {
-          ...commonPatch,
+          ...automationEditPatch(storedRow, {
+            name,
+            promptTemplate: prompt.trim(),
+            promptFallback,
+            targetType,
+            targetId,
+            ...(selectedHubVersion ? { hubVersion: selectedHubVersion } : {}),
+            toolMode,
+            hubMode,
+            triggerType,
+            fsPath,
+            fsOn,
+            chainAfter,
+            schedule: sched ? { human: sched.legacyToken, json: JSON.stringify(sched.spec) } : null,
+          }),
+          ...workspacePatch,
           ...(runtimeTouched
             ? {
                 runtimeSelection,
@@ -370,7 +401,7 @@ function NewAutomationPage() {
         return;
       }
       const created = await api.automations.create({
-        ...commonPatch,
+        ...createSpec,
         ...(runtimeTouched && runtimeSelection
           ? {
               runtimeSelection,

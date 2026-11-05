@@ -1083,7 +1083,17 @@ export function consolidateSplitAutoExperiencePacks(db: Database.Database): {
 }
 
 const MANAGED_MIGRATION_BACKUP_SCHEMA = "agentlas.managed-migration-backup.v1";
-const MAX_MANAGED_MIGRATION_BACKUPS = 3;
+/**
+ * How many managed DB-upgrade copies stay beside the live store. One: the newest, which is the rollback material of the
+ * last migration. Three copies held ~8.6 GB beside a 3.4 GB store on the owner's Mac ; every extra copy is a
+ * full VACUUM INTO image of the store.
+ *
+ * Kept safe at one because pruning is gated twice in pruneManagedMigrationBackups: an older copy goes only after its
+ * target schema exists in the live store (so a failed migration keeps its copy, and while any copy is still ahead of the
+ * live schema the whole set stays), and only after the integrity checks of the live store and of the copy that stays.
+ * Exported so the private gates read the number from the compiled dist instead of pinning it.
+ */
+export const MAX_MANAGED_MIGRATION_BACKUPS = 1;
 const MIGRATION_BACKUP_TAG_RE = /^(?:pre-upgrade-v[1-9]\d*|v102-seats|v103-seat-session)$/;
 
 function migrationBackupFingerprint(file: string): MigrationBackupFingerprint {
@@ -1131,7 +1141,7 @@ export interface ManagedMigrationBackupPruneOutcome { removed: number; bytes: nu
 /**
  * Cheap preflight for the storage pass: one readdir, no file opened. True when
  * more managed copies sit next to `source` than the cap keeps. The steady state
- * (three copies or fewer) therefore costs the pass nothing.
+ * (at most MAX_MANAGED_MIGRATION_BACKUPS copies) therefore costs the pass nothing.
  */
 export function managedMigrationBackupsOverCap(source: string): boolean {
   const prefix = `${path.basename(source)}.migration-backup.v1.`;
@@ -1150,9 +1160,9 @@ export function managedMigrationBackupsOverCap(source: string): boolean {
  * child process (migration-backup-check.ts, started by
  * migration-backup-retention.ts). It used to run inside initStore, where an
  * update launch's install journal or a follower open always stopped it, so the
- * cap of three never held (7 copies, 8.3 GB). The install journal is not a
+ * cap never held (7 copies, 8.3 GB). The install journal is not a
  * reason to keep these copies: the updater restores from updater/recovery and
- * never reads them, and the newest three always stay. */
+ * never reads them, and the newest MAX_MANAGED_MIGRATION_BACKUPS (one) always stays. */
 export function pruneManagedMigrationBackups(db: Database.Database, currentBackup: string | null): ManagedMigrationBackupPruneOutcome {
   const result: ManagedMigrationBackupPruneOutcome = { removed: 0, bytes: 0, skipped: "none" };
   const skip = (skipped: ManagedMigrationBackupSkip): ManagedMigrationBackupPruneOutcome => ({ ...result, skipped });

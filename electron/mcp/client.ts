@@ -4003,6 +4003,7 @@ async function runMcpInvocationInContext(
       const autoSelectInput = {
         userPrompt: [effectiveUserPrompt, req.attachmentCapabilitySummary].filter(Boolean).join("\n\n"),
         systemPrompt: buildEffectiveAgentSystemPrompt(agent.id, agent.systemPrompt),
+        runtimeKind: active.kind,
         // A CLI's name or inherited MCP configuration does not prove a native
         // browser is available to this invocation or visible in Desktop.
         runtimeCapabilities: {

@@ -5,12 +5,12 @@ import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { FINANCE_NOTICE_VERSION, type FinanceDataSourceOption, type FinanceExperienceRequest, type FinanceExperienceState } from '../../shared/finance-experience';
 import type { FinanceScope } from './store';
+import { canonicalFinanceSourceId } from '../../shared/finance';
 import { financeHash, financePrivateDirectory, financeScopeHash } from './archive';
 import { FINANCE_DATA_CATEGORIES, resolveFinanceDataSource, type FinanceDataSelection } from '../../shared/finance-data-routing';
 import { readFinanceSourceRouting, writeFinanceSourceRouting } from './source-routing';
 import { userDataPath } from '../runtime-paths';
 import { managedOneAuthentication, wasManagedOneConfigured } from '../managed-one/auth';
-import { managedFinanceProviderSources } from './cloud-provider';
 import { prepareFinanceDailyCheckin,registerFinanceDailyCheckin,revokeFinanceDailyCheckin,observeFinanceDailyCheckin,type FinanceDailyBinding } from './daily-briefing';
 
 const lockfile=require('proper-lockfile') as {lock(directory:string,options:unknown):Promise<()=>Promise<void>>};
@@ -61,7 +61,7 @@ export async function requireFinanceMonitoringAccess(scope:FinanceScope):Promise
   if(access.status!=="verified"||!access.monitoringAllowed)throw new Error(access.status==="verified"?"finance_monitoring_pro_required":"finance_monitoring_access_unavailable");
 }
 const defaultPorts:Ports={
-  sources:async()=>{const [{financeWorldDataSources},{financeToolchainSources}]=await Promise.all([import('./world-markets'),import('./source-adapters')]);return [...financeWorldDataSources(),...await managedFinanceProviderSources(),...await financeToolchainSources()];},access:financeMonitoringAccess,
+  sources:async()=>{const [{financeWorldDataSources},{financeToolchainSources}]=await Promise.all([import('./world-markets'),import('./source-adapters')]);return [...financeWorldDataSources(),...await financeToolchainSources()];},access:financeMonitoringAccess,
   prepare:prepareFinanceDailyCheckin,register:registerFinanceDailyCheckin,revoke:revokeFinanceDailyCheckin,observe:observeFinanceDailyCheckin,
   now:()=>new Date(),timezone:()=>Intl.DateTimeFormat().resolvedOptions().timeZone||'UTC',
 };
@@ -94,7 +94,9 @@ export class FinanceExperience {
     try{scope.assertCurrent();const value=this.read(scope,directory,sources);return await body(value,()=>this.write(scope,directory,value),sources);}finally{await release();scope.assertCurrent();}
   }
   private selection(scope:FinanceScope,value:Preferences):FinanceDataSelection {
-    return {...readFinanceSourceRouting(scope,path.join(this.root,financeScopeHash(scope)),value.sourceId),enabledFeedIds:[...value.enabledFeedIds]};
+    // A saved selection (or per-category binding) that still names the retired 'alpha-vantage' source means the free engine.
+    const saved=readFinanceSourceRouting(scope,path.join(this.root,financeScopeHash(scope)),value.sourceId);
+    return {...saved,sourceId:canonicalFinanceSourceId(saved.sourceId),...(saved.sourceBindings?{sourceBindings:Object.fromEntries(Object.entries(saved.sourceBindings).map(([category,source])=>[category,canonicalFinanceSourceId(source)])) as FinanceDataSelection['sourceBindings']}:{}),enabledFeedIds:[...value.enabledFeedIds]};
   }
   private publishSelection(scope:FinanceScope,value:Preferences,selection:FinanceDataSelection):void {
     value.sourceId=writeFinanceSourceRouting(scope,path.join(this.root,financeScopeHash(scope)),selection);

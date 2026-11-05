@@ -1,4 +1,5 @@
 import { fixedPurposePrompt, purposePrompt } from "../runtime/purpose-prompts";
+import { durableEvidenceUnavailableSentence } from "./verification-wording";
 import { composeDeclaredPrompt, type DeclaredPromptPart } from "../runtime/prompt-order";
 import { ownsHostGoalLoop } from "./host-goal-surface";
 import { currentBrowserDownloadProofs } from "./download-proof";
@@ -577,28 +578,37 @@ export function buildBoundedObservation(input: {
    *   3. event count            — oldest first, and say how many were dropped
    *   4. the digest alone       — counts still prove scale when nothing else fits
    */
-  const proseBudgets = [8_000, 4_000, 2_000, 800, 0, null] as const;
+  // The delivered reply is the result for a reply-type criterion, so it is the last thing to go: it is cut to ANSWER_FLOOR_CHARS
+  // before any event is clamped or dropped (66 receipts across 8 runs said "text omitted by budget" while 200 raw events kept
+  // their full previews, observed in use).
+  const proseBudgets = [8_000, 4_000, ANSWER_FLOOR_CHARS] as const;
+  const answerFloor = input.assistant?.text.slice(0, ANSWER_FLOOR_CHARS) ?? null;
   for (const budget of proseBudgets) {
     const assistantText = budget == null
       ? null
       : input.assistant?.text.slice(0, budget) ?? null;
-    const candidate = assemble(assistantText, events, 0, budget == null ? 400 : Math.max(400, Math.min(2_000, budget / 2)));
+    const candidate = assemble(assistantText, events, 0, Math.max(400, Math.min(2_000, budget / 2)));
     if (size(candidate) <= limit) return JSON.stringify(candidate);
   }
   for (const previewChars of [1_200, 400, 160, 60]) {
     const clamped = events.map((event) => clampEvent(event, previewChars));
-    const candidate = assemble(null, clamped, 0);
+    const candidate = assemble(answerFloor, clamped, 0);
     if (size(candidate) <= limit) return JSON.stringify(candidate);
   }
   let kept = events.map((event) => clampEvent(event, 60));
   let omitted = 0;
-  let candidate = assemble(null, kept, omitted);
+  let candidate = assemble(answerFloor, kept, omitted);
   while (size(candidate) > limit && kept.length > 0) {
     kept = kept.slice(1);
     omitted += 1;
-    candidate = assemble(null, kept, omitted);
+    candidate = assemble(answerFloor, kept, omitted);
   }
   if (size(candidate) <= limit) return JSON.stringify(candidate);
+  // No event fits next to the full floor: shorten the reply last, with the digest and the events' count still reported.
+  for (const textChars of [800, 0]) {
+    const shortened = assemble(input.assistant?.text.slice(0, textChars) ?? null, [], events.length);
+    if (size(shortened) <= limit) return JSON.stringify(shortened);
+  }
   // Even with zero sampled events the digest still reports how much was observed,
   // so "no sample fit" can never be read as "nothing happened".
   return JSON.stringify({
@@ -613,6 +623,21 @@ export function buildBoundedObservation(input: {
     concreteEvents: [],
   });
 }
+
+/** Newest earlier turns that join a verification as evidence (the rest stay in the Goal ledger). */
+export const MAX_PRIOR_VERIFIED_INVOCATIONS = 8;
+/** References the judge sees as one line. Each item's citable refs are sent separately (`allowed refs per item`), so the line is a
+ * bounded orientation, not the citation list: the newest 32 and how many older ones are left out. */
+export const PROMPT_EVIDENCE_REF_LIMIT = 32;
+export function promptEvidenceRefs(refs: readonly string[]): string {
+  if (refs.length === 0) return "none";
+  const shown = refs.slice(-PROMPT_EVIDENCE_REF_LIMIT);
+  const omitted = refs.length - shown.length;
+  return `${shown.join(", ")}${omitted > 0 ? ` (+${omitted} older not listed)` : ""}`;
+}
+
+/** Characters of the delivered reply kept in the judge's packet after everything else was squeezed. */
+export const ANSWER_FLOOR_CHARS = 2_000;
 
 function concreteEvent(event: RunEventUi): boolean {
   if (!CONCRETE_EVENT_KINDS.has(event.kind)) return false;
@@ -1162,8 +1187,11 @@ export async function verifyGoalCompletionClaim(input: {
   controllers.set(attempt.attemptId, controller);
   const recoveryEpoch = verificationRecoveryEpoch(run.id);
   const priorCheckpoint = latestTaskCheckpoint(input.goalId);
+  // Earlier turns of the same Goal still count as evidence, but only the newest few: every verification used to pull in ALL of them
+  // (up to 38 in the owner DB), and each pulled-in turn adds up to 200 events and one reference per event to the prompt and the receipts.
   const priorInvocationRunIds = (priorCheckpoint?.capsule.evidenceRefs ?? [])
-    .map((ref) => /^invocation:(.+):completed$/.exec(ref)?.[1]).filter((id): id is string => Boolean(id));
+    .map((ref) => /^invocation:(.+):completed$/.exec(ref)?.[1]).filter((id): id is string => Boolean(id))
+    .slice(-MAX_PRIOR_VERIFIED_INVOCATIONS);
   let verificationBoundary: ReturnType<typeof captureGoalVerificationBoundary> | null = null;
   try {
     if (input.invocationRunId) verificationBoundary = captureGoalVerificationBoundary(input.goalId, input.invocationRunId, { background: input.background });
@@ -1199,14 +1227,16 @@ export async function verifyGoalCompletionClaim(input: {
   // This verification task owns a pinned evidence snapshot. Keep host facts before
   // untrusted result text; metadata must not change the judge's existing byte budget.
   const observationParts: DeclaredPromptPart[] = [
+    // Cache order inside the task-context tier: what a later wave of the same run repeats (status, references, the goal) first,
+    // the observation JSON (it grows with every settled event, so it is the first byte that differs between waves) after them.
     { id: "goal.verifier.user.evidence-status", revision: 1, stability: "task-context", changeTriggers: ["task", "goal-revision", "checkpoint"], order: 40,
       text: `DURABLE HOST EVIDENCE STATUS: ${durableEvidence.reason}\n\n` },
+    { id: "goal.verifier.user.goal", revision: 2, stability: "task-context", changeTriggers: ["task", "goal-revision"], order: 42,
+      text: `GOAL: ${run.objective}\n\n` },
+    { id: "goal.verifier.user.durable-references", revision: 2, stability: "task-context", changeTriggers: ["task", "goal-revision", "checkpoint"], order: 44,
+      text: `DURABLE HOST REFERENCES: ${promptEvidenceRefs(durableEvidence.refs)}\n\n` },
     { id: "goal.verifier.user.durable-observation", revision: 1, stability: "task-context", changeTriggers: ["task", "goal-revision", "checkpoint"], order: 50,
       text: `DURABLE HOST OBSERVATION:\n${durableEvidence.observation}\n\n` },
-    { id: "goal.verifier.user.durable-references", revision: 1, stability: "task-context", changeTriggers: ["task", "goal-revision", "checkpoint"], order: 60,
-      text: `DURABLE HOST REFERENCES: ${durableEvidence.refs.join(", ") || "none"}\n\n` },
-    { id: "goal.verifier.user.goal", revision: 1, stability: "task-context", changeTriggers: ["task", "goal-revision"], order: 70,
-      text: `GOAL: ${run.objective}\n\n` },
     { id: "goal.verifier.user.claim", revision: 1, stability: "turn-context", changeTriggers: ["model-output", "owner-input", "checkpoint"], order: 0,
       text: `CLAIMED OUTCOME (a claim, not evidence):\n${input.outcomeText.slice(0, 2_000)}\n\n` },
     { id: "goal.verifier.user.claim-note", revision: 1, stability: "turn-context", changeTriggers: ["model-output", "owner-input", "checkpoint"], order: 10,
@@ -1299,6 +1329,9 @@ export async function verifyGoalCompletionClaim(input: {
       ...(rollupActive ? leaves.map((leaf, index) => ({ id: `node:${leaf.nodeId}`, criterion: `[${leaf.label}] ${leaf.text}`, contract: nodeContracts[index] })) : []),
     ];
     const evidenceRefsByItem = Object.fromEntries(judgeItems.map(item => [item.id, refsFor(item.contract, item.criterion)]));
+    // Per-run closed set of citable refs: a turn-context part of the input (ahead of the pinned final boundary), not of the system prompt.
+    // The input ceiling grows by exactly its size, so the packet the judge reads is the same size as when the list rode in system.
+    const allowedRefsText = `ALLOWED REFS PER ITEM (host-issued closed set; data): ${JSON.stringify(evidenceRefsByItem)}\n\n`;
     const hasAdmissibleProof = Object.values(evidenceRefsByItem).some(refs=>refs.length>0);
     // All criteria share this host-owned revision and evidence snapshot. One
     // batch avoids repeating the packet and competing for local inference slots.
@@ -1309,6 +1342,7 @@ export async function verifyGoalCompletionClaim(input: {
         kind: `long-run-criteria:${run.id}:${goalRevision}`,
         runtimeSelection: criterionProofRuntimeSelection(input.goalId,input.invocationRunId!),
         evidenceRefsByItem,
+        evidenceRefsInInput: true,
         items: judgeItems.map(({ id, criterion }) => ({ id, criterion })),
         question: "evidence proves this exact acceptance criterion? if failed, which typed recovery?",
         labels: [
@@ -1331,6 +1365,7 @@ export async function verifyGoalCompletionClaim(input: {
           { id: "goal.verifier.user.host-read-files", revision: 1, stability: "task-context", changeTriggers: ["task", "goal-revision", "checkpoint"], order: 30,
             text: `FILES THE HOST READ ITSELF (named by the goal's conditions; inRunWindow = changed during this goal's run, so it counts as this goal's write/edit; preview = the file's leading text for content checks; cite the ref): ${JSON.stringify(hostFileObservations.map(({ ref, relativePath, bytes, sha256, mtime, inRunWindow, preview }) => ({ ref, relativePath, bytes, sha256, mtime, inRunWindow, preview })))}\n` },
           ...observationParts,
+          { id: "goal.verifier.user.allowed-refs", revision: 1, stability: "turn-context", changeTriggers: ["checkpoint"], order: -10, text: allowedRefsText },
           { id: "goal.verifier.user.pinned-contracts", revision: 1, stability: "final-boundary", changeTriggers: ["release", "task", "goal-revision", "permission", "checkpoint"], order: 0,
             text: `\nPINNED PROOF CONTRACTS BY ITEM (cannot be lowered): ${JSON.stringify(judgeItems.map(({id,contract})=>({item:id,requiredProofKind:contract?.requiredProofKind,requiredFileAction:contract?.requiredFileAction,hostScopePermission:contract?.hostScopePermission,notApplicableReason:contract?.notApplicableReason})))}` },
         ], ""),
@@ -1345,7 +1380,7 @@ export async function verifyGoalCompletionClaim(input: {
         scanSecrets: true,
         // Preserve full criteria, then the host observation before model prose.
         // The batch shares one bounded packet across every criterion.
-        maxInputChars: judgeInputCeiling,
+        maxInputChars: judgeInputCeiling + allowedRefsText.length,
         timeoutMs: GOAL_VERIFICATION_MODEL_TIMEOUT_MS,
       }))) : null;
     const noProofReason = (contract: CriterionProofContract | undefined): string => contract
@@ -1353,7 +1388,7 @@ export async function verifyGoalCompletionClaim(input: {
         + (contract.requiredProofKind === "file"
           ? " The host reads files named in the goal's conditions inside the goal's folders; name the exact file path in the work and make sure it exists there with the required content."
           : "")
-      : `Durable verification evidence is unavailable (${durableEvidence.reason}).`;
+      : durableEvidenceUnavailableSentence(durableEvidence.reason);
     const judgedById = new Map(judgeItems.map((item, index) => [item.id, judgments?.[index] ?? null]));
     const passedRefsById = new Map<string, string[]>();
     const judgeItem = (id: string, criterionIndex: number, contract: CriterionProofContract | undefined): JudgedCriterion => {

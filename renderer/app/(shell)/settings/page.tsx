@@ -48,6 +48,7 @@ import { AgentMailPanel } from "@/components/settings/AgentMailPanel";
 import { ArchivePanel } from "@/components/settings/ArchivePanel";
 import { ReachPanel } from "@/components/settings/ReachPanel";
 import { PricingPanel } from "@/components/settings/PricingPanel";
+import { multimodalProviderPatch, wholeListWritable, type StoredListLoad } from "@/lib/edit-patch";
 import { ServiceConnectionsButton } from "@/components/connect/ServiceConnectionsButton";
 import { manualSetupFor, manualSetupShellLabel, manualSetupText, setupOsFromNavigator, type ManualSetupRuntime } from "@shared/runtime-manual-setup";
 import { ChipGrid, ConnectChip, RUNTIME_CHIPS, RuntimeChip, RuntimeConnectPopup, connectCopy, useRuntimeAuth, type RuntimeChipSpec } from "@/components/connect/RuntimeConnect";
@@ -482,14 +483,10 @@ export default function SettingsPage() {
   async function saveMultimodalProvider(modality: MultimodalModality, providerId: string) {
     const api = ipc();
     if (!api || !multimodalSettings) return;
-    const patch =
-      modality === "image"
-        ? { imageProvider: providerId }
-        : modality === "video"
-        ? { videoProvider: providerId }
-        : { audioProvider: providerId };
+    // Only this choice is sent. The store merges it into what is stored now; this screen's snapshot may be older than that.
+    const patch = multimodalProviderPatch(modality, providerId);
     try {
-      const next = await api.multimodal.saveSettings({ ...multimodalSettings, ...patch });
+      const next = await api.multimodal.saveSettings(patch);
       setMultimodalSettings(next);
       await refreshMultimodal();
       setRuntimeMessage("");
@@ -3041,23 +3038,31 @@ function TerminalProfilesPanel() {
   const { locale } = useT();
   const ko = locale === "ko";
   const [profiles, setProfiles] = useState<TerminalProfile[] | null>(null);
+  const [load, setLoad] = useState<StoredListLoad>("loading");
   const [editing, setEditing] = useState<TerminalProfile | null>(null);
   const [err, setErr] = useState("");
 
   useEffect(() => {
     const api = ipc();
     if (!api) return;
-    void api.config.getTerminalProfiles().then(setProfiles).catch(() => setProfiles([]));
+    // A failed read is not an empty list: every change below saves the whole list, so it must start from what is stored.
+    void api.config.getTerminalProfiles()
+      .then((rows) => { setProfiles(rows); setLoad("ready"); })
+      .catch(() => { setProfiles([]); setLoad("failed"); });
   }, []);
 
   const list = profiles ?? [];
 
-  async function persist(next: TerminalProfile[]) {
+  async function persist(next: TerminalProfile[]): Promise<boolean> {
     const api = ipc();
-    if (!api) return;
+    if (!api || !wholeListWritable(load)) {
+      setErr(ko ? "저장된 프로필을 읽지 못해 지금은 바꿀 수 없습니다. 설정을 다시 열어 주세요." : "The stored profiles could not be read, so they cannot be changed now. Reopen Settings.");
+      return false;
+    }
     // setter가 정제한 목록을 되돌려준다({{{prompt}}} 없는 항목은 서버가 제거) — 그걸 신뢰.
     const saved = await api.config.setTerminalProfiles(next);
     setProfiles(saved);
+    return true;
   }
 
   function startAdd() {
@@ -3086,7 +3091,7 @@ function TerminalProfilesPanel() {
       : { ...editing, name, template, mode: "template" };
     const exists = list.some((p) => p.id === cleaned.id);
     const next = exists ? list.map((p) => (p.id === cleaned.id ? cleaned : p)) : [...list, cleaned];
-    await persist(next);
+    if (!(await persist(next))) return;
     setEditing(null);
     setErr("");
   }
@@ -3128,6 +3133,11 @@ function TerminalProfilesPanel() {
           : "※ ACP-mode profiles become real execution runners as soon as they are saved (standard tool-call and thinking signals). Command-template mode is still save-only."}
       </p>
 
+      {load === "failed" && (
+        <p role="status" style={{ fontSize: 12, color: "var(--red-deep, var(--danger))", margin: "0 0 8px" }}>
+          {ko ? "저장된 프로필을 읽지 못했습니다. 저장된 것은 그대로이며, 다시 읽을 때까지 바꿀 수 없습니다. 설정을 다시 열어 주세요." : "The stored profiles could not be read. They are unchanged, and cannot be edited until they are read. Reopen Settings."}
+        </p>
+      )}
       <div style={{ border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", background: "var(--paper)", overflow: "hidden" }}>
         {list.length === 0 && !editing && (
           <div style={{ padding: 16, fontSize: 12, color: "var(--muted-deep)", textAlign: "center" }}>
@@ -3248,7 +3258,7 @@ function TerminalProfilesPanel() {
       </div>
 
       {!editing && (
-        <button type="button" onClick={startAdd}
+        <button type="button" onClick={startAdd} disabled={!wholeListWritable(load)}
           style={{
             marginTop: 10, padding: "8px 14px", borderRadius: "var(--radius-md)", fontSize: 12, fontWeight: 700,
             border: "1px dashed var(--paper-edge)", background: "var(--paper)", color: "var(--ink)", cursor: "pointer",

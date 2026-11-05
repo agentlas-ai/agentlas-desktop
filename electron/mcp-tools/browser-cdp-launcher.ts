@@ -3991,12 +3991,20 @@ async function main() {
     const [{ QuickJsEngine }, { createUnifiedComputerUse }, { createNativeCuaToolGate }] = await Promise.all([
       import(pathToFileURL(QUICKJS_ENGINE_MODULE).href), import(pathToFileURL(UNIFIED_CUA_ADAPTER_MODULE).href), import(pathToFileURL(UNIFIED_CUA_NATIVE_GATE_MODULE).href),
     ]);
+    // The screen part of the engine is offered only with its tool gate. A run whose gate session did not reach this process (a launcher
+    // started without the host's gate variables: only the control-file variable was inherited) used to fail the WHOLE engine here, so even a
+    // browser-only call (cua.getState) died with "unified-cua-native-gate-unavailable" (observed in use, 1 run). The browser half
+    // needs no screen gate, so it keeps working; a screen call then reads the adapter's own "no connection to the app window" sentence.
+    let nativeGateReady = false;
     if (process.env.AGENTLAS_NATIVE_GUEST_COMPUTER_USE || process.env.AGENTLAS_COMPUTER_USE_CONTROL_FILE) {
-      let session;
-      try { session = JSON.parse(process.env.AGENTLAS_UNIFIED_CUA_GATE_SESSION || ''); } catch { throw new Error('unified-cua-native-gate-unavailable: screen control is not connected to this run (the Agentlas app window is not attached). Do not call it again in this run: continue with the other tools, or tell the owner to open Agentlas and send the request again.'); }
-      unifiedNativeGate = createNativeCuaToolGate({ controlFile: process.env.AGENTLAS_UNIFIED_CUA_GATE_CONTROL || '',
-        serverKey: process.env.AGENTLAS_UNIFIED_CUA_GATE_SERVER_KEY || '', session,
-        ...(process.env.AGENTLAS_UNIFIED_CUA_GATE_PLAN ? { planPath: process.env.AGENTLAS_UNIFIED_CUA_GATE_PLAN } : {}) });
+      let session = null;
+      try { session = JSON.parse(process.env.AGENTLAS_UNIFIED_CUA_GATE_SESSION || ''); } catch { session = null; }
+      if (session && typeof session === 'object') {
+        unifiedNativeGate = createNativeCuaToolGate({ controlFile: process.env.AGENTLAS_UNIFIED_CUA_GATE_CONTROL || '',
+          serverKey: process.env.AGENTLAS_UNIFIED_CUA_GATE_SERVER_KEY || '', session,
+          ...(process.env.AGENTLAS_UNIFIED_CUA_GATE_PLAN ? { planPath: process.env.AGENTLAS_UNIFIED_CUA_GATE_PLAN } : {}) });
+        nativeGateReady = true;
+      }
     }
     unifiedCuaApi = createUnifiedComputerUse({
       browser: { browserId: 'iab', call: async (name, args, signal) => {
@@ -4015,7 +4023,7 @@ async function main() {
         }
         return response && response.result;
       } },
-      ...((process.env.AGENTLAS_NATIVE_GUEST_COMPUTER_USE || process.env.AGENTLAS_COMPUTER_USE_CONTROL_FILE) ? { native: { platform: process.platform, call: nativeToolCall } } : {}),
+      ...(nativeGateReady ? { native: { platform: process.platform, call: nativeToolCall } } : {}),
       signal: () => unifiedSignalContext.getStore()?.signal,
     });
     const invoke = async (target, method, args, signal) => {

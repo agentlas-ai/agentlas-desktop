@@ -169,6 +169,12 @@ function resultTexts(result: unknown): string[] {
   return texts;
 }
 
+/** The error class name the browser driver put at the head of its "### Error" section (`<error.name>: <message>`), else null. */
+function browserDriverErrorName(text: string): string | null {
+  const section = /^### Error\n([A-Za-z]+Error)(?=:|\s|$)/m.exec(text);
+  return section ? section[1]! : null;
+}
+
 export function toolFailureCause(result: unknown, status?: unknown, toolName?: unknown): ToolFailureCause {
   const texts = [...resultTexts(result), ...(typeof status === "string" ? [status] : [])];
   for (const text of texts) {
@@ -217,7 +223,11 @@ export function toolFailureCause(result: unknown, status?: unknown, toolName?: u
   if (/\bECONNREFUSED\b|ERR_CONNECTION_REFUSED|Failed to connect to [^\s]+ port \d+/.test(raw)) {
     return { family: "connection_refused", reason: "connection_refused", origin: "external" };
   }
-  if (/\bTimeoutError\b|Timeout \d+ms exceeded/.test(raw)) return { family: "browser_timeout", reason: "timeout", origin: "external" };
+  // The browser driver's own typed error: @playwright/mcp answers a failed call as an "### Error" section whose body is String(error), i.e.
+  // `<error.name>: <message>`, and a deadline is Playwright's TimeoutError class. The class name is the signal; no message wording
+  // ("Timeout 15000ms exceeded") and no "TimeoutError" elsewhere in the text (a shell's output, a log line) counts.
+  const driverError = browserDriverErrorName(raw);
+  if (driverError === "TimeoutError") return { family: "browser_timeout", reason: "timeout", origin: "external" };
   // A ref from an earlier snapshot, a key name or app name the driver does not accept: the call itself was wrong.
   if (/\bRef [A-Za-z0-9]+ not found in the current page\b/.test(raw)) return { family: "browser_ref_stale", reason: "ref_not_found", origin: "model" };
   if (/Use a supported key name\b/.test(raw)) return { family: "invalid_arguments", reason: "key_name", origin: "model" };

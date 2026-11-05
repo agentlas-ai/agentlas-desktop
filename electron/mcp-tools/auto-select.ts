@@ -14,6 +14,8 @@ import path from "node:path";
 import { pluginSlugForToolId, supersededByLivePeer } from "../plugins/builtin";
 import { MCP_TOOL_CATALOG, refreshDedicatedPluginToolCatalog } from "./catalog";
 import { installFromCatalog, listInstalledServers } from "./registry";
+import { toolSelectionMode } from "./tool-selection-mode";
+export { toolSelectionMode, DEFAULT_TOOL_SELECTION_MODE, type ToolSelectionMode } from "./tool-selection-mode";
 import { testServerConnection, requiredMcpManualEnvKeys } from "./client";
 import { resolveMcpOAuthAccessToken } from "./oauth";
 import { vaultUrlKey } from "../opencrab/constants";
@@ -580,6 +582,8 @@ export async function autoSelectMcpTools(input: {
   workingFolder?: string | null;
   /** Capabilities proven by Main for this exact invocation. Missing means unknown. */
   runtimeCapabilities?: McpRuntimeCapabilities;
+  /** The run's runtime kind; a local-model runtime keeps the judge in model-picks mode (tool-selection-mode.ts). */
+  runtimeKind?: string | null;
   /**
    * The runtime's own config would expose an outside browser (e.g. the owner's
    * Codex `playwright` server) to this run. Capability priority then attaches
@@ -787,7 +791,10 @@ export async function autoSelectMcpTools(input: {
   // ★Owner 2026-09-23: plugin search is routing too. A project turn still sees a
   // capped Hub shelf (suggestions only — nothing from the Hub is installed without
   // the owner's approval); local plugins and installed tools stay first.
-  const offerHubToJudge = hubAllowed && !restrictedMenu;
+  // the judge offers only what this machine has installed or connected. A Hub plugin is never a
+  // pre-run candidate any more; when nothing installed fits, the model asks agentlas_resolve_plugins and the owner decides
+  // on the install (hephaestus-network stays pinned for that). The Build flow still reads the Hub (build-plan.ts).
+  const offerHubToJudge = false;
   const hubInventory = await fetchHubPluginInventory(offerHubToJudge);
 
   // ── Pins: settings and explicit user choices. These are the ONLY tools that may be
@@ -844,6 +851,8 @@ export async function autoSelectMcpTools(input: {
   // are marked so the judge and the dedupe prefer them over an outside equivalent.
   const agentlasToolIds = new Set(pluginCandidates.filter((plugin) => plugin.agentlas).flatMap((plugin) => plugin.toolIds));
   const isAgentlasTool = (id: string): boolean => agentlasToolIds.has(id) || pluginSlugForToolId(id) !== null;
+  // Loaded here, not at module top: defaults.ts pulls every built-in server module, which Main has loaded by now anyway.
+  const appDefaultToolIds = new Set<string>((require("./defaults") as typeof import("./defaults")).DEFAULT_MCP_CATALOG_IDS);
   const localCandidates: McpNeedCandidate[] = MCP_TOOL_CATALOG.filter((entry) => {
     if (pinnedReasons.has(entry.id) || blockedByHostBinding(entry.id)) return false;
     if (entry.id === "lazyweb") return false;
@@ -857,6 +866,12 @@ export async function autoSelectMcpTools(input: {
       && runtimeCapabilities.nativeWebSearch === "available"
       && !(input.requiredToolCatalogIds ?? []).includes("brave-search")) return false;
     if (entry.id === "hephaestus-network") return hubAllowed;
+    // Installed or connected only: a catalog entry that is not installed was offered and, when picked,
+    // installed by this selector on its own (deps.installFromCatalog). An explicit assignment and a tool an installed
+    // plugin ships stay eligible: those are the owner's own choices.
+    // The app's own default tools (defaults.ts) count as installed: they are seeded at startup and ship with the app.
+    if (!installed.has(entry.id) && !appDefaultToolIds.has(entry.id) && !pluginToolIds.has(entry.id)
+      && !(input.requiredToolCatalogIds ?? []).includes(entry.id)) return false;
     return true;
   }).map((entry) => {
     const needsCredential = entry.envRequirements.some((requirement) => requirement.required);
@@ -928,7 +943,14 @@ export async function autoSelectMcpTools(input: {
   // ONE judgment call decides the whole optional tool set — Hub entries offered first.
   const needsCandidates = [...hubCandidates, ...localCandidates, ...customCandidates, ...skillCandidates];
   const needsCandidateCount = needsCandidates.length;
-  const needs = await deps.resolveNeeds({
+  // Model-picks mode (output/tool-search-at-scale-20261105/TOOL-ARCHITECTURE.md): no pre-run judgment call. An installed
+  // connector is reached in the turn itself (harness_search -> tool.describe live -> tool.call: tool-dispatch.ts runScopedBinding
+  // binds an ordinary installed connector at call time); a skill through skill.activate. Only tools that need the host channel
+  // must be attached before the run, and the browser is attached below as an ordinary selection (the host mode stays "auto").
+  const modelPicks = toolSelectionMode(process.env, input.runtimeKind) === "model";
+  const needs = modelPicks
+    ? { needed: [] as string[], decided: true, reason: "the model picks its tools in the turn (harness_search); no pre-run judgment", omitted: [] as string[] }
+    : await deps.resolveNeeds({
     // The judge reads this turn's request on its own; agent name, folder and the
     // standing system prompt travel as separate background (see McpTaskContext).
     task: input.userPrompt,
@@ -945,8 +967,11 @@ export async function autoSelectMcpTools(input: {
     runtimeCapabilities,
     signal: input.signal,
     timeoutMs: 15_000,
-  });
-  const neededIds = new Set(needs.needed);
+    });
+  // Only what the judge was offered: a name outside the menu (a guessed id, or a tool this machine has not installed)
+  // would otherwise be installed or raise a key sheet before the run (THOUGHT-EXPERIMENTS.md F5).
+  const offeredIds = new Set(needsCandidates.map((candidate) => candidate.id));
+  const neededIds = new Set(needs.needed.filter((id) => offeredIds.has(id)));
   const explicitlyAssignedIds = new Set<string>();
   for (const id of requiredServerIds) {
     const server = initialInstalledServers.find((candidate) => candidate.id === id || candidate.catalogId === id);
@@ -988,7 +1013,7 @@ export async function autoSelectMcpTools(input: {
   for (const row of ownerWorkflows) routePlugin(row.plugin, "requested", `requested by the owner: ${row.workflow}`, row.workflow);
   for (const id of needs.needed) {
     const slug = pluginSlugFromCandidateId(id);
-    if (slug) routePlugin(slug, "judge", `resident judgment: ${needs.reason || "the task is in this plugin's domain"}`);
+    if (slug && offeredIds.has(id)) routePlugin(slug, "judge", `resident judgment: ${needs.reason || "the task is in this plugin's domain"}`);
   }
   for (const id of fallbackIds) {
     const slug = pluginSlugFromCandidateId(id);
@@ -1035,6 +1060,12 @@ export async function autoSelectMcpTools(input: {
   ) {
     neededIds.add("agentlas-browser");
     pinnedReasons.set("agentlas-browser", "capability priority: replaces the runtime's outside browser (Playwright-style server in the owner's config)");
+  }
+  // Model-picks mode: the browser is the host-channel tool a turn reaches for most (34% of 30 days' tool calls), and a host-channel
+  // tool cannot be bound in the middle of a turn, so it stays at hand as an ordinary selection whenever it is available.
+  if (modelPicks && automaticHostDecision && effectiveToolMode === "auto" && canonicalBrowserAvailable && !neededIds.has("agentlas-browser")) {
+    neededIds.add("agentlas-browser");
+    pinnedReasons.set("agentlas-browser", "model-picks mode: the browser stays at hand (a host-channel tool cannot attach mid-turn)");
   }
   const cappedHub = Math.max(0, hubInventory.listings.length - hubOffered.length);
   const needsNote = [

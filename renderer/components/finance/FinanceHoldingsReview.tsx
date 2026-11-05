@@ -51,6 +51,19 @@ export function FinanceHoldingsReview({ draft, instanceState, fallbackText, loca
     return () => { alive = false; off?.(); };
   }, [reload]);
 
+  // A row that names a symbol the owner already saved gets that asset's currency and exchange once (an empty cell only; the owner still reviews and confirms every value).
+  const prefilled = useRef(false);
+  useEffect(() => {
+    if (!workspace || prefilled.current) return;
+    prefilled.current = true;
+    setRows(previous => previous.map(row => {
+      const symbol = (row.symbol ?? "").trim().toUpperCase(), exchange = (row.exchange ?? "").trim();
+      if (row.currency || !symbol) return row;
+      const matches = workspace.watchlist.filter(asset => asset.symbol.toUpperCase() === symbol && /^[A-Z]{3}$/.test(asset.currency) && asset.currency !== "XXX" && (!exchange || asset.exchange === exchange));
+      return matches.length === 1 ? { ...row, currency: matches[0].currency, exchange: exchange || matches[0].exchange || null } : row;
+    }));
+  }, [workspace]);
+
   const mode = financeHoldingsReviewMode(instanceState, saved !== "");
   const edit = (id: string, patch: Partial<Row>) => { setRows(previous => previous.map(row => row.id === id ? { ...row, ...patch } : row)); setReviewed(false); };
   const changed = workspace !== null && reviewBase !== null && workspace.revision !== reviewBase;

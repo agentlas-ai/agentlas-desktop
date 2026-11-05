@@ -105,8 +105,73 @@ export function goalObligationPlannerData(goalId: string, expectedRevision: numb
  * identity, registered module, instructions and composition order stay intact. */
 export function compileGoalObligationCheckpoint(...args: Parameters<typeof compileLongRunCheckpoint>): string {
   const text = compileLongRunCheckpoint(...args), checkpoint: LongRunTaskCheckpoint = args[0];
-  if (checkpoint.goalRevision == null) return text;
-  return JSON.stringify({ ...JSON.parse(text), ...goalObligationPlannerData(checkpoint.goalId, checkpoint.goalRevision) });
+  const packet = JSON.parse(text);
+  return JSON.stringify(settleCheckpointPacket(checkpoint.goalRevision == null
+    ? packet : { ...packet, ...goalObligationPlannerData(checkpoint.goalId, checkpoint.goalRevision) }));
+}
+
+/**
+ * Keys the model gets from the packet, most stable first. Bytes that change on every checkpoint (the checkpoint id, the event cursor,
+ * the chat's message count and last message, the evidence count) sit at the END, so the provider's prefix cache reuses everything
+ * before them: `checkpointRef` used to be the third key and invalidated the whole packet at each new checkpoint.
+ */
+const PACKET_KEY_ORDER = ["schemaVersion", "executionClass", "goalRef", "goalRevision", "instructions", "objective", "criteriaInContract",
+  "criteria", "originalConstraintsRef", "originalConstraints", "executionObligations", "cadence", "mission", "reviewEveryHours",
+  "lifecycle", "historicalRecords", "workspacePath", "plan", "hostEpisodeRoute", "openQuestions", "artifactVersions", "artifactObservation",
+  "completedTaskIds", "omittedCompletedTasks", "currentOperation", "sideEffects", "nextActions", "artifactRefs"] as const;
+const PACKET_VOLATILE_TAIL = ["evidenceRefCount", "checkpointRef", "eventCursor", "historyRangeRef"] as const;
+
+/**
+ * Typed facts only, deterministic bytes. Dropped because the model never used them (Codex rollouts 11-04..05, 149 Goal prompts):
+ * `evidenceRefs` (a list of opaque invocation/event ids: cited in 2 of 1,138 times, only as a count is it informative),
+ * `criteria[].fullCriterionRef` (0 of 294; it is `goalRef` + `:criterion:` + `criterionIndex`), `instructionRevision` (a hash only the
+ * host can resolve) and `historyRangeRef.firstMessageId` (0 of 149). The stored checkpoint keeps all of them.
+ */
+export function settleCheckpointPacket(packet: Record<string, unknown>): Record<string, unknown> {
+  const bag: Record<string, unknown> = { ...packet };
+  const refs = Array.isArray(bag.evidenceRefs) ? bag.evidenceRefs.length : 0;
+  delete bag.evidenceRefs;
+  delete bag.instructionRevision;
+  if (refs > 0) bag.evidenceRefCount = refs;
+  if (Array.isArray(bag.criteria)) {
+    bag.criteria = bag.criteria.map((item) => {
+      if (!item || typeof item !== "object") return item;
+      const { fullCriterionRef: _ref, ...rest } = item as Record<string, unknown>;
+      return rest;
+    });
+  }
+  const plan = bag.plan;
+  if (plan && typeof plan === "object" && !Array.isArray(plan)) {
+    // `createdAt` is a wall-clock stamp that differs on every plan revision; `requirementsRef` repeats `goalRef`.
+    const { createdAt: _at, ...rest } = plan as Record<string, unknown>;
+    if (rest.requirementsRef === bag.goalRef) delete rest.requirementsRef;
+    bag.plan = rest;
+  }
+  const records = bag.historicalRecords;
+  if (records && typeof records === "object" && !Array.isArray(records)) {
+    const { checkpointRef: _dup, ...rest } = records as Record<string, unknown>; // the same id is the packet's own `checkpointRef`
+    bag.historicalRecords = rest;
+  }
+  const range = bag.historyRangeRef;
+  if (range && typeof range === "object" && !Array.isArray(range)) {
+    const { firstMessageId: _first, ...rest } = range as Record<string, unknown>;
+    bag.historyRangeRef = rest;
+  }
+  const ordered: Record<string, unknown> = {};
+  const take = (key: string): void => { if (key in bag && bag[key] !== undefined) { ordered[key] = bag[key]; delete bag[key]; } };
+  for (const key of PACKET_KEY_ORDER) take(key);
+  const tail = PACKET_VOLATILE_TAIL.filter((key) => key in bag);
+  // A key this list does not know yet keeps its place in the middle, in the order the compiler produced it, never in the volatile tail.
+  for (const key of Object.keys(bag)) if (!(PACKET_VOLATILE_TAIL as readonly string[]).includes(key)) take(key);
+  for (const key of tail) take(key);
+  return ordered;
+}
+/**
+ * Identity of the checkpoint payload a prompt carries. Host-declared from the stored checkpoint, never read back from
+ * text. The checkpoint id is part of it: a refreshed checkpoint under the same Goal revision is a different payload.
+ */
+export function goalCheckpointContentKey(checkpoint: Pick<LongRunTaskCheckpoint, "goalId" | "goalRevision" | "checkpointId">): string {
+  return `goal-checkpoint:${checkpoint.goalId}:${checkpoint.goalRevision ?? "legacy"}:${checkpoint.checkpointId}`;
 }
 export function withGoalObligationContextText(text: string, goalId: string | null | undefined, revision: number | null | undefined): string {
   if (!text || !goalId || revision == null) return text;

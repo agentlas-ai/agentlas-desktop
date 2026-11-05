@@ -13,7 +13,7 @@
   position: relative; display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 10px 8px; align-items: end;
   padding: 12px 12px 12px; border: 1px solid var(--paper-edge); border-radius: var(--radius-md); background: var(--paper);
 }
-.table tbody tr[data-invalid="true"] { border-color: color-mix(in srgb, var(--danger) 45%, var(--paper-edge)); }
+.table tbody tr[data-invalid="true"] { border-color: var(--paper-edge-strong); }
 .table td { display: block; min-width: 0; padding: 0; border: 0; }
 .table td[data-label]::before { content: attr(data-label); display: block; margin-bottom: 4px; font-size: 12px; line-height: 1.2; color: var(--ink-soft); letter-spacing: .01em; }
 
@@ -41,7 +41,8 @@
 /* Owner decision 2026-10-04 (globals.css): a text input draws no ring or border on focus, the caret shows it. The cell only turns paper white. */
 .editor input:focus-visible { background: var(--paper); }
 .editor input:disabled { opacity: .55; }
-.editor input[aria-invalid="true"] { border-color: var(--danger); background: var(--danger-soft); }
+/* A value still to fill in or check is a to-do on the owner's way to Save, not a failure: a calm outline, not the error red. */
+.editor input[aria-invalid="true"] { border-color: var(--paper-edge-strong); background: var(--paper); box-shadow: inset 0 0 0 1px var(--attention); }
 .table td[data-field="symbol"] input { font-weight: 600; letter-spacing: .01em; }
 .table td[data-field="quantity"] input, .table td[data-field="averageCost"] input, .table td[data-field="price"] input,
 .table td[data-field="asOf"] input { text-align: right; font-variant-numeric: tabular-nums; }
@@ -54,7 +55,7 @@
 .held small { font-size: 12px; color: var(--ink-soft); }
 .none { color: var(--ink-soft); }
 .table td[data-field="held"]:has(.none) { display: none; }
-.table td.issues { display: flex; align-items: center; gap: 6px; font-size: 12px; line-height: 1.4; color: var(--danger); }
+.table td.issues { display: flex; align-items: center; gap: 6px; font-size: 12px; line-height: 1.4; color: var(--ink-soft); }
 .issues svg { flex: none; }
 
 .remove, .add {
@@ -74,7 +75,7 @@
 .empty { margin: 0; padding: 14px; border: 1px dashed var(--paper-edge-strong); border-radius: var(--radius-md); color: var(--ink-soft); line-height: 1.6; text-align: center; }
 
 /* what keeps Save closed, one banner above the rows */
-.summary { display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; border-radius: var(--radius-sm); font-size: 12px; line-height: 1.55; color: var(--danger); background: var(--danger-soft); }
+.summary { display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; border-radius: var(--radius-sm); font-size: 12px; line-height: 1.55; color: var(--ink); background: var(--paper-edge); }
 .summary svg { flex: none; margin-top: 2px; }
 .summary strong { display: block; font-size: 13px; font-weight: 600; }
 .summary ul { margin: 4px 0 0; padding: 0; list-style: none; display: grid; gap: 2px; }

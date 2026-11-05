@@ -233,6 +233,18 @@ export async function deviceBridgeMain(): Promise<ReturnType<typeof createDevice
     },
     aliveChanged: event => { try { return require("../alive-organisms").aliveChangedFromService(event) as boolean; } catch { return false; } },
     appControl: async input => {
+      // A Reach call handed over by the background service, which has no screen driver of its own (reach-host/forward.ts).
+      if (input.kind === "call") {
+        const { runForwardedReach } = await import("../reach-host/forward");
+        try {
+          const handedOver = await runForwardedReach({ ownerTurn: input.ownerTurn, permission: input.permission, input: input.input });
+          if (handedOver) return { outcome: "value", value: handedOver };
+        } catch (error) {
+          // Never the exception's own text: it goes to a model and may reach the owner. The code is the ledger's.
+          console.warn("[device-bridge] reach hand-over failed", (error as { code?: unknown } | null)?.code);
+          return { outcome: "error", code: "reach-handover-failed", message: "Agentlas could not carry this out in its app window just now. Try the same call once more." };
+        }
+      }
       const service = await import("../app-control/service");
       try {
         return { outcome: "value", value: input.kind === "operations" ? service.appControlOperationsLocal(input.input)

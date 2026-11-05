@@ -5,7 +5,7 @@ import { financeQueryScope } from "@shared/finance-query-scope";
 import { IconChevronDown, IconChevronRight, IconChevronLeft } from "@/components/Icon";
 import { FinanceDataResultView, financeDataVisual } from "./FinanceDataResultView";
 import { financeFeedLink } from "./FinanceDashboardFeed";
-import { financeCell, financeColumn } from "./FinanceMessage";
+import { financeCell, financeColumn, financeNote } from "./FinanceMessage";
 import styles from "./FinanceInlineQueryResult.module.css";
 
 export interface FinanceInlineQuerySnapshot { entry: FinanceConversationDataResult; ownerScope: string | null; revision: number }
@@ -111,6 +111,6 @@ export function FinanceInlineQueryResult({ snapshot, messageId, locale }: { snap
       {presentation.tooManyPoints && <p className={styles.note}>{ko ? "관측이 2,000개를 넘어 전체 자료는 상세에서 확인할 수 있습니다. 차트 일부만 표시하지 않았습니다." : "More than 2,000 observations. Open the full data below; a truncated chart is not shown."}</p>}
       {entry.kind !== "discovery" && more}
     </>}
-    <details className={styles.details}><summary>{ko ? "자료 상세" : "Data details"}</summary>{result.warnings.length > 0 && <ul className={styles.warnings}>{result.warnings.map((warning, index) => <li key={index}>{warning}</li>)}</ul>}<RawData result={result} ko={ko}/></details>
+    <details className={styles.details}><summary>{ko ? "자료 상세" : "Data details"}</summary>{result.warnings.length > 0 && <ul className={styles.warnings}>{result.warnings.map((warning, index) => <li key={index}>{financeNote(warning, ko)}</li>)}</ul>}<RawData result={result} ko={ko}/></details>
   </section>;
 }

@@ -17,6 +17,7 @@ import type { ChatHistoryEntry, RuntimeSelection } from "../../shared/types";
 import { redactOperationalSecrets } from "../invocation/event-secret-redaction";
 import { redactSecrets } from "../../shared/secret-patterns";
 import { composeResumeTurnPrompt, nativeStableTurnContextEpoch } from "./continuity";
+import { newestPartialSnapshot } from "./partial-snapshot";
 import { parseMemoryEvents, stripAllMemoryEventBlocks } from "../memory/events";
 import { decideGeneration, runtimeContextWindow, runtimeContextWindowProvenance } from "./session-generation";
 import { stripGoalWaitDisplayText } from "../long-run/wait-emitter";
@@ -1138,7 +1139,7 @@ export function withAgentContext(runner: Runner, provider: Omit<AgentContextProv
       } catch { /* Recording continuity never changes the original failure/Stop result. */ }
     };
     const wrapped:RunnerEvents={...events,onPartial(text) {
-      partialTail = `${partialTail}${text}`.slice(-4096); events.onPartial?.(text);
+      partialTail = newestPartialSnapshot(partialTail, text, 4096, "tail"); events.onPartial?.(text);
     },onTool(name,args,result,id,isError,artifactPaths,imageDataUrl,origin,toolKind){
       // Actual adapter emissions, retained as context data with canonical host
       // references when supplied. Tool effect authority remains in its ledger.

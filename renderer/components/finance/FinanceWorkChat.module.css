@@ -25,3 +25,24 @@
 .surface :global(.chat-input-shell){width:min(100%,1000px)!important}
 .surface :global([data-chat-user-message]){margin-left:auto;width:fit-content}
 .surface :global([data-chat-user-message]) > div:last-child{background:#e5e6e1!important;border-radius:18px 18px 6px 18px!important;padding:12px 18px!important;font-size:17px!important}
+/* A Finance conversation is not a One/Work project surface: no project question, no panel views, no AGI mode, no history meter.
+   The empty state asks a Finance question and offers Finance starters; the Work header's panel buttons and the composer's AGI and history chips stay out. */
+.surface{position:relative}
+.surface :global(.task-cockpit-header-actions),.surface :global([data-alive-trigger]),.surface :global(.chat-input-context-pill){display:none!important}
+.surface :global(#agentlas-chat-empty-title){font-size:0!important;line-height:0!important}
+.surface :global(#agentlas-chat-empty-title)::after{content:var(--finance-empty-title);font-size:30px;line-height:1.25;font-weight:700;display:block}
+.starters{display:none;position:absolute;left:50%;top:calc(50% + 48px);transform:translateX(-50%);z-index:2;flex-wrap:wrap;justify-content:center;gap:8px;width:min(760px,calc(100% - 32px))}
+.surface:has(:global(#agentlas-chat-empty-title)) .starters{display:flex}
+.starters button{padding:9px 14px;border:1px solid var(--paper-edge);border-radius:999px;background:var(--paper);color:var(--ink);font:inherit;font-size:13px;cursor:pointer}
+.starters button:hover{background:var(--paper-edge)}
+/* A tool call the model retried and recovered from is not a failure of the answer: the turn header's "N failed steps" badge stays out of a Finance conversation (the steps themselves still list their own status when opened). */
+.surface :global([data-one-turn-work]) :global([data-failed-steps]){display:none}
+/* A turn that ended on an empty credit balance reads as one plain sentence, not the Work failure rows (the cause is in the marker, data-terminal-error). */
+.surface :global(.agentlas-chat-message-anchor):has([data-terminal-error="insufficient_credits"]) :global(.agentlas-chat-answer) > *{display:none}
+.surface :global(.agentlas-chat-message-anchor):has([data-terminal-error="insufficient_credits"]) :global(.agentlas-chat-answer)::after{content:var(--finance-credits-out);display:block;font-size:15px;line-height:1.6;color:var(--ink)}
+.credits{display:flex;align-items:center;flex-wrap:wrap;gap:8px 10px;margin:0 0 12px;padding:10px 14px;border:1px solid var(--paper-edge);border-radius:8px;background:var(--paper);color:var(--ink);font-size:13px;line-height:1.5}
+.credits span{flex:1 1 280px;min-width:0}
+.credits button{padding:7px 12px;border:1px solid var(--paper-edge);border-radius:8px;background:var(--paper);color:var(--ink);font:inherit;font-size:12px;cursor:pointer}
+.credits .creditsPrimary{background:var(--ink);border-color:var(--ink);color:var(--paper)}
+.surface :global(.agentlas-chat-message-anchor):has([data-terminal-error="insufficient_credits"]) + :global(.agentlas-chat-message-anchor):has(:global(.agentlas-chat-answer)){display:none}
+.root[data-credits-out="true"] .surface{min-height:380px;height:min(840px,calc(100dvh - 300px))}

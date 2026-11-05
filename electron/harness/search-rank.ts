@@ -16,6 +16,8 @@ export interface RankableHarnessItem {
   /** Words that say what the entry IS (group, fields, artifact kinds), for meaning recall; removed from the result. Not the
    *  query-derived rankTerms of the app entries: those name what answered this query and would make any query look near. */
   meaningTerms?: readonly string[];
+  /** Leads the ranking (the caller knows it answers this query); removed from the result. */
+  pinned?: boolean;
 }
 
 /** True when the text contains Hangul: a Korean query, as opposed to any text that merely has accents or other non-ASCII letters. */
@@ -105,8 +107,8 @@ export function rankHarnessItems<T extends RankableHarnessItem>(query: string, i
 }
 
 function withoutRankTerms<T extends RankableHarnessItem>(item: T): T {
-  if (!item.rankTerms && !item.meaningTerms) return item;
-  const { rankTerms: _rankTerms, meaningTerms: _meaningTerms, ...shown } = item;
+  if (!item.rankTerms && !item.meaningTerms && item.pinned === undefined) return item;
+  const { rankTerms: _rankTerms, meaningTerms: _meaningTerms, pinned: _pinned, ...shown } = item;
   return shown as T;
 }
 
@@ -117,50 +119,99 @@ export interface MeaningEmbedder {
 }
 
 /*
- * Words find what shares a word with the query; meaning finds the rest. A Korean query shares no word with an English tool
- * description ("단백질 구조 3D" against "Create a durable source-bound Mol* artifact ... Molecular Structure Lab"), and a
- * paraphrase ("drug-likeness") shares none with the tool that answers it, so word ranking alone returned nothing or the
- * wrong tool (TOOL-EXPOSURE-3D §2.3). This keeps word ranking first and adds, after the word matches, the entries nearest
- * in meaning by the app's local Model2Vec (potion-multilingual, the same embedding memory recall and the tool-need
- * shortlist use: need-resolver.ts). Recall only: meaning never reorders word matches, it fills what words could not find.
- * No verified Model2Vec asset (the hashing fallback is not meaning) = word ranking exactly as before.
+ * Words and meaning, ranked together. A Korean query shares no word with an English tool description ("단백질 구조 3D"
+ * against "Create a durable source-bound Mol* artifact ... Molecular Structure Lab"), and a paraphrase ("drug-likeness")
+ * shares none with the tool that answers it (TOOL-EXPOSURE-3D §2.3), so the app's local Model2Vec (potion-multilingual, the
+ * same embedding memory recall uses) carries meaning.
+ *
+ * Until word matches always came first and meaning only filled the slots words left. With a catalogue of
+ * hundreds of entries a common word ("send", "file") filled every slot, so meaning never ran. Measured on 114 Hub plugins
+ * among 9,886 real MCP registry servers with 45 labelled tasks (output/tool-search-at-scale-20261105): word-first found
+ * the answer in the top 10 for 24/45 model-written queries; words and meaning fused by reciprocal rank (RRF, k = 60, the
+ * same fusion the engine's local agent routing uses: workforce/index.py) found 36/45, at 2.7 ms per query.
+ *
+ * Rules (each one a broken case from THOUGHT-EXPERIMENTS.md F1):
+ * - An entry whose id or name IS the query comes first (an exact name is never outranked by a near meaning).
+ * - An entry is a candidate only when a query word reaches it or its meaning clears the floor: a nonsense query returns
+ *   nothing rather than the eight nearest of everything.
+ * - No verified Model2Vec asset (the hashing fallback is not meaning) = word ranking exactly as before.
+ * - No diversity cap: a request about one area ("automation runs") should see that area's entries first.
+ * - An empty query keeps the original order (listing).
  */
 const MEANING_FLOOR = 0.15;
 const MEANING_FLOOR_HANGUL = 0.12;
-const meaningVectors = new Map<string, number[]>();
+const RRF_K = 60;
+/** Vectors of entry texts; an installed catalogue is a few thousand entries, so the cap only stops a runaway. */
+const MEANING_CACHE_MAX = 20_000;
+const meaningVectors = new Map<string, Float32Array>();
+
+function cosine(left: ArrayLike<number>, right: ArrayLike<number>): number {
+  let dot = 0, a = 0, b = 0;
+  const n = Math.min(left.length, right.length);
+  for (let i = 0; i < n; i += 1) { dot += left[i]! * right[i]!; a += left[i]! * left[i]!; b += right[i]! * right[i]!; }
+  return a > 0 && b > 0 ? dot / Math.sqrt(a * b) : 0;
+}
+
+function meaningText(item: RankableHarnessItem): string {
+  // What an entry IS (its name words, group, fields, artifact kinds) and the first sentence of what it does. A whole
+  // description dilutes the meaning with provenance and argument prose: measured on the Science catalogue (
+  // 7 Korean/English structure queries) whole descriptions put a structure tool in the top 5 for 5 of 7, this for 7 of 7.
+  const words = (value: string) => value.replace(/[_./:-]+/g, " ");
+  const first = item.description.split(/(?<=[.!?。])\s/u)[0]!.slice(0, 120);
+  return [words(item.name), ...(item.meaningTerms ?? []).map(words), first].join(". ").slice(0, 600);
+}
 
 export function rankHarnessItemsByMeaning<T extends RankableHarnessItem>(query: string, items: ReadonlyArray<T>, limit = 60,
   embedder?: MeaningEmbedder | null): T[] {
-  const byWords = rankHarnessItems(query, items, limit);
-  if (!embedder || byWords.length >= limit || !query.trim() || items.length === 0) return byWords;
-  let queryVector: { vector: number[]; degraded: boolean; modelSha256: string | null };
-  try { queryVector = embedder.autoLocalEmbedding(query.slice(0, 500)); } catch { return byWords; }
-  if (queryVector.degraded) return byWords;
-  const floor = hasHangul(query) ? MEANING_FLOOR_HANGUL : MEANING_FLOOR;
-  const wordMatched = new Set(rankHarnessItems(query, items, items.length).map((item) => item.id));
-  const near = items.map((item, index) => {
-    if (wordMatched.has(item.id)) return null;
-    // What an entry IS (its name words, group, fields, artifact kinds) and the first sentence of what it does. A whole
-    // description dilutes the meaning with provenance and argument prose: measured on the Science catalogue (2026-10-28,
-    // 7 Korean/English structure queries) whole descriptions put a structure tool in the top 5 for 5 of 7, this for 7 of 7.
-    const words = (value: string) => value.replace(/[_./:-]+/g, " ");
-    const first = item.description.split(/(?<=[.!?。])\s/u)[0]!.slice(0, 120);
-    const text = [words(item.name), ...(item.meaningTerms ?? []).map(words), first].join(". ").slice(0, 600);
-    const key = `${queryVector.modelSha256 ?? ""}\u0000${text}`;
-    let vector = meaningVectors.get(key);
-    if (!vector) {
-      try { vector = embedder.autoLocalEmbedding(text).vector; } catch { return null; }
-      meaningVectors.set(key, vector);
-      if (meaningVectors.size > 4_000) meaningVectors.delete(meaningVectors.keys().next().value!);
-    }
-    const score = embedder.cosineSimilarity(queryVector.vector, vector);
-    return score >= floor ? { item, index, score } : null;
-  }).filter((row): row is { item: T; index: number; score: number } => row !== null)
-    .sort((a, b) => b.score - a.score || a.index - b.index);
-  const out = [...byWords];
-  for (const row of near) {
-    if (out.length >= limit) break;
-    out.push(withoutRankTerms(row.item));
+  const trimmed = query.trim();
+  if (!trimmed || items.length === 0) return items.slice(0, limit).map(withoutRankTerms);
+  const exact = trimmed.toLowerCase();
+  // `pinned`: an entry the caller already knows answers this query (app.call / app.operations when the app catalogue
+  // matched it, capability-ports.ts) leads like an exact name; its order among pinned entries is the caller's.
+  const isExact = (item: T) => item.pinned === true || item.id.toLowerCase() === exact || item.name.toLowerCase() === exact
+    || item.id.toLowerCase().replace(/^[a-z]+:/, "") === exact;
+  const word = items.map((item) => harnessRelevance(query, [item.id, item.name, ...(item.rankTerms ?? [])], [item.description]));
+  let meaning: number[] | null = null;
+  if (embedder) {
+    try {
+      const q = embedder.autoLocalEmbedding(trimmed.slice(0, 500));
+      if (!q.degraded) {
+        const qv = Float32Array.from(q.vector);
+        meaning = items.map((item) => {
+          const text = meaningText(item);
+          const key = `${q.modelSha256 ?? ""}\u0000${text}`;
+          let vector = meaningVectors.get(key);
+          if (!vector) {
+            try { vector = Float32Array.from(embedder.autoLocalEmbedding(text).vector); } catch { return 0; }
+            meaningVectors.set(key, vector);
+            if (meaningVectors.size > MEANING_CACHE_MAX) meaningVectors.delete(meaningVectors.keys().next().value!);
+          }
+          return cosine(qv, vector);
+        });
+      }
+    } catch { meaning = null; }
   }
-  return out;
+  if (!meaning) {
+    // No meaning available: word ranking as before, an exact name first.
+    const ranked = rankHarnessItems(query, items, items.length);
+    const exactHits = items.filter(isExact).map(withoutRankTerms);
+    const exactIds = new Set(exactHits.map((item) => item.id));
+    return [...exactHits, ...ranked.filter((item) => !exactIds.has(item.id))].slice(0, limit);
+  }
+  const floor = hasHangul(query) ? MEANING_FLOOR_HANGUL : MEANING_FLOOR;
+  const rankBy = (scores: number[], eligible: (index: number) => boolean) => {
+    const order = scores.map((score, index) => ({ score, index })).filter(({ index }) => eligible(index))
+      .sort((a, b) => b.score - a.score || a.index - b.index);
+    const rank = new Map<number, number>();
+    order.forEach(({ index }, position) => rank.set(index, position + 1));
+    return rank;
+  };
+  const wordRank = rankBy(word, (index) => word[index]! > 0);
+  const meaningRank = rankBy(meaning, (index) => meaning![index]! >= floor);
+  const scored = items.map((item, index) => ({
+    item, index, exact: isExact(item),
+    score: (wordRank.has(index) ? 1 / (RRF_K + wordRank.get(index)!) : 0) + (meaningRank.has(index) ? 1 / (RRF_K + meaningRank.get(index)!) : 0),
+  })).filter((row) => row.exact || row.score > 0)
+    .sort((a, b) => Number(b.exact) - Number(a.exact) || b.score - a.score || a.index - b.index);
+  return scored.slice(0, limit).map((row) => withoutRankTerms(row.item));
 }

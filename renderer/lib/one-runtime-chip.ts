@@ -11,19 +11,37 @@ import { runtimeMatchesSelection } from "@shared/runtime-selection";
 import { runtimeSelectionReceiptMatches } from "@shared/runtime-selection-receipt";
 import type { ChatContinuitySnapshot, RuntimeSelection, RuntimeStatus } from "@shared/types";
 
-/** A model observation is display-only: it cannot reconstruct an exact runtime pin. */
-export function runningComposerModel(snapshot: ChatContinuitySnapshot | null, chatId: string): string | null {
-  return snapshot?.chatId === chatId && snapshot.hostActiveChat && snapshot.invocation?.state === "active"
-    ? snapshot.invocation.model?.model?.trim() || null : null;
+/** What a Main observation says the chat's latest turn ran on. Display-only: it cannot reconstruct an exact runtime pin. */
+export interface ObservedComposerRun { state: "running" | "ran"; kind: string; backend: string | null; model: string | null }
+
+/** The chat's latest turn as Main recorded it (runtime_selection event: the runtime after any fallback), running or finished. */
+export function observedComposerRun(snapshot: ChatContinuitySnapshot | null, chatId: string): ObservedComposerRun | null {
+  const invocation = snapshot?.chatId === chatId ? snapshot.invocation : null;
+  const model = invocation?.model;
+  if (!snapshot || !invocation || !model?.kind) return null;
+  const state = invocation.state === "active" && snapshot.hostActiveChat ? "running" : invocation.state === "terminal" ? "ran" : null;
+  return state ? { state, kind: model.kind, backend: model.backend, model: model.model?.trim() || null } : null;
 }
 
-export function composerModelLabel(requested: string, running: string | null, locale: "ko" | "en"): string {
-  return running ? locale === "ko" ? `현재 실행 ${running} · 다음 요청 ${requested}` : `Running ${running} · Next request ${requested}` : requested;
+export function runningComposerModel(snapshot: ChatContinuitySnapshot | null, chatId: string): string | null {
+  const run = observedComposerRun(snapshot, chatId);
+  return run?.state === "running" ? run.model : null;
+}
+
+/** True when the turn ran on another runtime/model than the chip's request (a fallback, or a pin that yielded to a Library assignment). */
+export function observedRunDiffersFromRequest(run: ObservedComposerRun, request: { kind: string; backend?: string | null; model?: string | null }): boolean {
+  return run.kind !== request.kind || (run.backend ?? "") !== (request.backend ?? "")
+    || Boolean(run.model && request.model && run.model !== request.model);
+}
+
+export function composerModelLabel(requested: string, running: string | null, locale: "ko" | "en", lastRan?: string | null): string {
+  if (running) return locale === "ko" ? `현재 실행 ${running} · 다음 요청 ${requested}` : `Running ${running} · Next request ${requested}`;
+  return lastRan ? locale === "ko" ? `직전 실행 ${lastRan} · 다음 요청 ${requested}` : `Last ran ${lastRan} · Next request ${requested}` : requested;
 }
 
 /** Bounded Main observations; stale responses never paint another session or claim a model is still running. */
-export function useRunningComposerModel(chatId: string | null): string | null {
-  const [observation, setObservation] = useState<{ chatId: string; model: string | null } | null>(null);
+export function useObservedComposerRun(chatId: string | null): ObservedComposerRun | null {
+  const [observation, setObservation] = useState<{ chatId: string; run: ObservedComposerRun | null } | null>(null);
   useEffect(() => {
     const api = ipc();
     if (!chatId || !api?.chats?.getContinuitySnapshot) { setObservation(null); return; }
@@ -34,7 +52,7 @@ export function useRunningComposerModel(chatId: string | null): string | null {
       reading = true;
       try {
         const snapshot = await api.chats.getContinuitySnapshot(chatId);
-        if (!disposed && request === generation) setObservation({ chatId, model: runningComposerModel(snapshot, chatId) });
+        if (!disposed && request === generation) setObservation({ chatId, run: observedComposerRun(snapshot, chatId) });
       } catch { if (!disposed && request === generation) setObservation(null); }
       finally { reading = false; if (!disposed && pending) { pending = false; void refresh(); } }
     };
@@ -49,7 +67,12 @@ export function useRunningComposerModel(chatId: string | null): string | null {
     void refresh();
     return () => { disposed = true; off?.(); update.cancel(); clearInterval(timer); document.removeEventListener("visibilitychange", visible); };
   }, [chatId]);
-  return observation?.chatId === chatId ? observation.model : null;
+  return observation?.chatId === chatId ? observation.run : null;
+}
+
+export function useRunningComposerModel(chatId: string | null): string | null {
+  const run = useObservedComposerRun(chatId);
+  return run?.state === "running" ? run.model : null;
 }
 
 export function oneEffortLabel(id: string): string {

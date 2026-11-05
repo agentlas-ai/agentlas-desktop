@@ -14,6 +14,7 @@ import { didYouMean, missingArgumentsMessage } from "../../shared/did-you-mean";
 import { classifyAppControlPolicy } from "../app-control/policy";
 import { waitForAbort } from "../runtime/abortable-wait";
 import { CREDENTIAL_STORE_NEXT, CREDENTIAL_STORE_UNAVAILABLE, isCredentialStoreFailure } from "./credential-store-failure";
+import { splitCodedFailure, withPlainSentence } from "./plain-outcome";
 
 /*
  * Agentlas harness capability ports (docs/2026-10-13-native-harness/15 §8, contracts/harness-capability-ports.json).
@@ -63,6 +64,9 @@ export interface HarnessPortResult {
   reason?: string;
   /** What the model can do next (one line). */
   next?: string;
+  /** One plain sentence the model can say to the owner: what happened and what happens or what to do next. Never a code. Added to every
+   *  refused/unavailable answer (harness/plain-outcome.ts); `reason` stays the machine code host logic reads. */
+  tellOwner?: string;
   receiptId: string;
 }
 
@@ -77,6 +81,8 @@ interface PortDefinition {
   terminalUnderReadPermission?: true;
   /** How long the agentlas-turn gateway waits for this port's reply when the port's work outlasts the gateway's 30 s default. */
   callTimeoutMs?: number;
+  /** A harness_search narrowed to kind "tool" also finds this operation: it stands in for a tool a model names (Science's literature tools). */
+  foundAsTool?: true;
   /** Only reads: the handler changes nothing the owner or the outside world sees, and shows nothing the owner must act on. Main-work
    *  recovery (mcp-tools/main-work-read-actions.ts) may close a call of this port that lost its answer as a failed read and run its
    *  identical repeat. Absent means an effect (fail closed). Approval does not read this (mcpToolIsMutating). */
@@ -101,12 +107,15 @@ const MEDIA_SETUP_NEXT = "if no route is set up, tell the owner in words where t
 const str = (value: unknown): string => (typeof value === "string" ? value.trim() : "");
 const strList = (value: unknown): string[] => (Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && item.trim().length > 0).map((item) => item.trim()) : []);
 const sha = (value: string | Buffer): string => createHash("sha256").update(value).digest("hex");
-const matches = (query: string, ...fields: string[]): boolean => {
-  const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
-  if (terms.length === 0) return true;
-  const text = fields.join(" ").toLowerCase();
-  return terms.some((term) => text.includes(term));
-};
+
+/** The ranking harness_search uses, applied to one kind's rows (plugin/skill/connector/tool search, capability.resolve): an
+ *  empty query keeps every row in order; a query keeps the best HARNESS_SEARCH_RESULTS that a word or the meaning reaches. */
+async function rankedRows<R>(query: string, rows: readonly R[], item: (row: R) => { id: string; name: string; description: string }): Promise<R[]> {
+  if (!query.trim()) return [...rows];
+  const { rankHarnessItemsByMeaning } = await import("./search-rank");
+  const items = rows.map((row) => ({ ...item(row), row }));
+  return rankHarnessItemsByMeaning(query, items, HARNESS_SEARCH_RESULTS, await meaningEmbedder()).map((ranked) => ranked.row);
+}
 
 // ── receipts ledger (durable; never auto-deleted) ─────────────────────────────────────────────────────────────────
 
@@ -579,7 +588,7 @@ const PORTS: PortDefinition[] = [
   },
   {
     operationId: "plugin.search", kind: "query", purpose: "Read package metadata and stored installation state.", required: ["query"],
-    handler: async (args, ctx) => ok((await pluginRows(ctx.chatId)).filter((row) => matches(str(args.query), row.slug, row.name, row.description)).map(({ id, mention, name, description }) => ({ id, mention, name, description }))),
+    handler: async (args, ctx) => ok((await rankedRows(str(args.query), await pluginRows(ctx.chatId), (row) => ({ id: row.id, name: `${row.slug} ${row.name}`, description: row.description }))).map(({ id, mention, name, description }) => ({ id, mention, name, description }))),
   },
   {
     operationId: "plugin.describe", kind: "query", purpose: "Read package metadata and stored installation state.", required: ["packageId"],
@@ -596,7 +605,7 @@ const PORTS: PortDefinition[] = [
   { operationId: "plugin.uninstall", kind: "command", purpose: "Change exact package installation lifecycle; preserve results.", required: ["installId"], handler: async (args, ctx) => (await import("./plugin-lifecycle")).PLUGIN_LIFECYCLE_HANDLERS["plugin.uninstall"](args, ctx) },
   {
     operationId: "skill.search", kind: "query", purpose: "Find skill metadata; do not activate or execute.", required: ["query"],
-    handler: async (args, ctx) => ok((await skillRows(ctx.chatId)).filter((row) => matches(str(args.query), row.id, row.name, row.description)).map(({ id, name, description }) => ({ id, name, description }))),
+    handler: async (args, ctx) => ok((await rankedRows(str(args.query), await skillRows(ctx.chatId), (row) => ({ id: row.id, name: row.name, description: row.description }))).map(({ id, name, description }) => ({ id, name, description }))),
   },
   {
     operationId: "skill.read", kind: "query", purpose: "Read the exact instruction revision and linked resources.", required: ["skillId"],
@@ -638,12 +647,15 @@ const PORTS: PortDefinition[] = [
   },
   {
     operationId: "connector.search", kind: "query", purpose: "Read MCP definition or stored connection observation; no live probe.", required: ["query"],
-    handler: async (args, ctx) => ok(await Promise.all((await connectorRows(ctx.chatId)).filter((row) => matches(str(args.query), row.serverId, row.name, row.catalogId ?? ""))
+    handler: async (args, ctx) => ok(await Promise.all((await rankedRows(str(args.query), await connectorRows(ctx.chatId), (row) => ({ id: row.serverId, name: `${row.name} ${row.catalogId ?? ""}`, description: row.transport })))
       .map(async (row) => ({ id: row.id, name: row.name, transport: row.transport, enabled: row.enabled, readiness: (await storedConnectionReadiness(row)).state })))),
   },
   {
     operationId: "connector.describe", kind: "query", purpose: "Read MCP definition or stored connection observation; no live probe.", required: ["connectorId"],
-    handler: async (args) => { const row = await findConnector(args); return row ? ok({ ...row, auth: await connectorAuth(row, "discovery") }) : refused("connector_not_installed", "tool.search lists catalog connectors"); },
+    // `next` names the one step that lists the connector's tools in this turn (tool.describe live), which tool.call then needs.
+    handler: async (args) => { const row = await findConnector(args); return row ? ok({ ...row, auth: await connectorAuth(row, "discovery"),
+      ...(row.enabled ? { next: `harness_call tool.describe with {"toolId":"${row.catalogId ?? row.serverId}","live":true} lists its tools; then tool.call` } : {}) })
+      : refused("connector_not_installed", "tool.search lists catalog connectors"); },
   },
   {
     operationId: "connector.status", kind: "query", purpose: "Read MCP definition or stored connection observation; no live probe.", required: ["connectionId"],
@@ -1007,9 +1019,9 @@ const PORTS: PortDefinition[] = [
       const [plugins, skills, connectors] = await Promise.all([pluginRows(ctx.chatId), skillRows(ctx.chatId), connectorRows(ctx.chatId)]);
       // Candidates only: the model chooses. A selection given back is recorded as the model's choice.
       const candidates = {
-        plugins: plugins.filter((row) => matches(query, row.slug, row.name, row.description)).map((row) => row.id),
-        skills: skills.filter((row) => matches(query, row.id, row.name, row.description)).map((row) => row.id),
-        connectors: connectors.filter((row) => matches(query, row.serverId, row.name)).map((row) => row.id),
+        plugins: (await rankedRows(query, plugins, (row) => ({ id: row.id, name: `${row.slug} ${row.name}`, description: row.description }))).map((row) => row.id),
+        skills: (await rankedRows(query, skills, (row) => ({ id: row.id, name: row.name, description: row.description }))).map((row) => row.id),
+        connectors: (await rankedRows(query, connectors, (row) => ({ id: row.serverId, name: row.name, description: row.transport }))).map((row) => row.id),
       };
       const selection = strList(args.selectionRef ? [args.selectionRef] : args.selection);
       const receiptId = selection.length && !ctx.dryRun
@@ -1052,7 +1064,7 @@ const PORTS: PortDefinition[] = [
   },
   {
     operationId: "tool.search", kind: "query", purpose: "Search actual tool metadata plus explicitly unready candidates.", required: ["query"],
-    handler: async (args, ctx) => ok((await toolRows(ctx.chatId)).filter((row) => matches(str(args.query), row.providerRef, row.name, row.description))
+    handler: async (args, ctx) => ok((await rankedRows(str(args.query), await toolRows(ctx.chatId), (row) => ({ id: row.providerRef, name: row.name, description: row.description })))
       .filter((row) => args.includeUnready === true || row.installed).map(({ id, name, description, installed, enabled }) => ({ id, name, description, installed, enabled }))),
   },
   {
@@ -1069,8 +1081,21 @@ const PORTS: PortDefinition[] = [
         row = named ? rows.find((item) => item.providerRef === named[1]) : undefined;
         requestedTool = row && named ? named[2] : null;
       }
-      if (!row) return refused("tool_not_in_catalog");
       const dispatch = await waitForAbort(ctx.signal, import("./tool-dispatch"));
+      if (!row) {
+        // A connector the owner registered by hand has no catalog entry, but it is installed: describe it by its connector id, so
+        // a turn that was not handed it before the run can still read its tools and call one (tool.call resolves it the same way).
+        const custom = await waitForAbort(ctx.signal, dispatch.findServer(id));
+        if (!custom || custom.catalogId) return refused("tool_not_in_catalog");
+        const live = custom.enabled && args.live === true ? await waitForAbort(ctx.signal, dispatch.describeConnectorTools(custom.id, ctx)) : null;
+        ctx.signal?.throwIfAborted();
+        return ok({ id: `tool:${custom.id}`, providerRef: custom.id, name: custom.name, installed: true, enabled: custom.enabled,
+          availability: custom.enabled ? "attached_when_the_run_needs_it" : "installed_off",
+          ...(live?.ok ? { tools: live.tools.map(({ name, description, schemaDigest, inputSchema }) => ({ name, description, schemaDigest, inputSchema,
+            call: { operation: "tool.call", args: { toolId: name, providerRef: custom.id, schemaDigest, arguments: {} } } })) }
+            : live ? { liveState: live.code } : {}),
+          next: custom.enabled ? (live?.ok ? "harness_call a tool's `call` with its arguments filled in" : "describe with live: true, then tool.call with providerRef + schemaDigest") : "connector.connect" });
+      }
       // A host-channel built-in exists for this call only through the calling run's sealed binding (no launch here).
       const installed = row.enabled ? await waitForAbort(ctx.signal, dispatch.findServer(row.providerRef)) : null;
       const bound = installed ? await waitForAbort(ctx.signal, dispatch.runScopedBinding(installed, ctx)) : null;
@@ -1087,7 +1112,8 @@ const PORTS: PortDefinition[] = [
       const live = row.enabled && args.live === true ? await waitForAbort(ctx.signal, dispatch.describeConnectorTools(row.providerRef, ctx)) : null;
       ctx.signal?.throwIfAborted();
       return ok({ ...row, ...(requestedTool ? { requestedTool } : {}), availability: bound?.ok && bound.prepared ? "attached_to_this_run" : row.enabled ? "attached_when_the_run_needs_it" : row.installed ? "installed_off" : "not_installed",
-        ...(live?.ok ? { tools: live.tools.map(({ name, description, schemaDigest, inputSchema }) => ({ name, description, schemaDigest, inputSchema })) }
+        ...(live?.ok ? { tools: live.tools.map(({ name, description, schemaDigest, inputSchema }) => ({ name, description, schemaDigest, inputSchema,
+          call: { operation: "tool.call", args: { toolId: name, providerRef: row.providerRef, schemaDigest, arguments: {} } } })) }
           : live ? { liveState: live.code } : {}),
         next: row.enabled ? "call it by its MCP tool name, or describe with live: true and tool.call with providerRef + schemaDigest" : "connector.connect" });
     },
@@ -1244,7 +1270,11 @@ const PORTS: PortDefinition[] = [
       } catch (error) {
         const code = error && typeof error === "object" && "code" in error ? String((error as { code: unknown }).code) : "operation_failed";
         // 600, not 300: the handler's own text can lead and the argument hint (service.ts withArgumentHints) follows it.
-        return refused(code, error instanceof Error ? error.message.slice(0, 600) : undefined);
+        const text = error instanceof Error ? error.message.slice(0, 600) : undefined;
+        // A handler that threw a bare code got "<code>: <what it means and what to do>" (app-control/failure-copy.ts). The code is the
+        // refusal's `reason`; `next` keeps the sentence alone, so the first words the model reads are not the code it would then quote.
+        const coded = code === "operation_failed" && text ? splitCodedFailure(text) : null;
+        return coded ? refused(coded.code, coded.sentence) : refused(code, text);
       }
     },
   },
@@ -1475,6 +1505,9 @@ async function harnessOwnerTurn(ctx: HarnessCallContext): Promise<boolean> {
  * when the real name is absent, only a non-empty string, an exact name always wins; nothing here widens what an operation may touch.
  */
 const HARNESS_ARGUMENT_ALIASES: Readonly<Record<string, Readonly<Record<string, readonly string[]>>>> = {
+  // The name a model writes for the tool of a tool.call (real-channel A/B, codex: toolName); tool-dispatch.ts also takes
+  // the named tool when toolId is only the connector itself.
+  "tool.call": { toolId: ["toolName", "name"] },
   "app.call": { operation: ["op", "name", "path", "method"] },
   "thread.read": { threadId: ["chatId", "conversationId"] },
   "turn.status": { threadId: ["chatId", "conversationId"] },
@@ -1567,7 +1600,16 @@ async function nearOperations(id: string): Promise<string> {
   return `${near ? `.${near}` : ""}${app}`;
 }
 
+/**
+ * Every answer a port gives, to the model (the agentlas-turn gateway of all seven CLI runtimes, the API and local tool loops, Science's
+ * Reach tools) and to the UI, SDK and phone, leaves through here, so a refusal is never a bare code: it carries `tellOwner`
+ * (plain-outcome.ts). The code stays in `reason` / `data.code` / `data.state` for host logic.
+ */
 export async function callHarnessPort(operationId: string, rawArgs: Record<string, unknown>, ctx: HarnessCallContext): Promise<HarnessPortResult> {
+  return withPlainSentence(await callHarnessPortUnworded(operationId, rawArgs, ctx));
+}
+
+async function callHarnessPortUnworded(operationId: string, rawArgs: Record<string, unknown>, ctx: HarnessCallContext): Promise<HarnessPortResult> {
   const port = PORT_BY_ID.get(operationId);
   // The value is often there under a neighbouring name (HARNESS_ARGUMENT_ALIASES); every later read of the arguments sees the real one.
   rawArgs = withHarnessArgumentAliases(operationId, rawArgs, ctx);
@@ -1620,7 +1662,9 @@ async function appOperationPaths(query: string): Promise<string[]> {
   try {
     // A Korean query also asks with the English catalog words for its nouns (search-rank.ts englishAppTerms).
     const english = (await import("./search-rank")).englishAppTerms(query);
-    const found = await (await import("../app-control/service")).appControlOperations({ query: english ? `${query} ${english}`.slice(0, 200) : query, limit: 8 }) as { operations?: Array<{ operation?: unknown }> };
+    // Words only: this decides whether the app entries join a harness search at all; a meaning neighbour would add them to
+    // unrelated requests ("안녕하세요 오늘 날씨 어때"). app.operations itself ranks a Hangul request by meaning too.
+    const found = await (await import("../app-control/service")).appControlOperations({ query: english ? `${query} ${english}`.slice(0, 200) : query, limit: 8, meaning: false }) as { operations?: Array<{ operation?: unknown }> };
     return (found.operations ?? []).flatMap((row) => typeof row.operation === "string" ? [row.operation] : []);
   } catch { return []; }
 }
@@ -1638,24 +1682,41 @@ async function hostToolRows(ctx?: Pick<HarnessCallContext, "mcpConfigPath">) {
 }
 
 /** The app's local multilingual embedding for search recall; null when it cannot load (word ranking then stands alone). */
+/** Results for a non-empty harness_search query: sixty one-line rows were about 8–12k characters per search. */
+export const HARNESS_SEARCH_RESULTS = 12;
+
 async function meaningEmbedder(): Promise<import("./search-rank").MeaningEmbedder | null> {
   try { return await import("../memory/local-embedding"); } catch { return null; }
 }
 
-export async function searchHarness(query: string, kind?: HarnessItemKind, ctx?: Pick<HarnessCallContext, "mcpConfigPath" | "chatId">): Promise<Array<{ id: string; kind: HarnessItemKind; name: string; description: string }>> {
-  const out: Array<{ id: string; kind: HarnessItemKind; name: string; description: string; rankTerms?: string[]; meaningTerms?: string[] }> = [];
+export async function searchHarness(query: string, kind?: HarnessItemKind, ctx?: Pick<HarnessCallContext, "mcpConfigPath" | "chatId">,
+  /** The model's own result-size ask (1-60); without one a query answers with HARNESS_SEARCH_RESULTS rows. */
+  limit?: number | null): Promise<Array<{ id: string; kind: HarnessItemKind; name: string; description: string }>> {
+  const out: Array<{ id: string; kind: HarnessItemKind; name: string; description: string; rankTerms?: string[]; meaningTerms?: string[]; pinned?: boolean }> = [];
   const want = (k: HarnessItemKind) => !kind || kind === k;
   // The run's own host tool servers lead: their tools are callable in this run now (tool.call), unlike catalog entries.
   if (want("tool")) for (const row of await hostToolRows(ctx)) out.push({ id: row.id, kind: "tool", name: row.name, description: row.description, rankTerms: row.rankTerms, meaningTerms: row.meaningTerms });
-  if (want("plugin")) for (const row of await pluginRows(ctx?.chatId)) if (matches(query, row.slug, row.name, row.description)) out.push({ id: row.id, kind: "plugin", name: row.mention, description: row.description });
-  if (want("skill")) for (const row of await skillRows(ctx?.chatId)) if (matches(query, row.id, row.name, row.description)) out.push({ id: row.id, kind: "skill", name: row.name, description: row.description });
-  if (want("connector")) for (const row of await connectorRows(ctx?.chatId)) if (matches(query, row.serverId, row.name)) out.push({ id: row.id, kind: "connector", name: row.name, description: `${row.transport}${row.enabled ? "" : ", off"}` });
-  if (want("tool")) for (const row of await toolRows(ctx?.chatId)) if (matches(query, row.providerRef, row.name, row.description)) out.push({ id: row.id, kind: "tool", name: row.name, description: `${row.description}${row.installed ? "" : " (not installed)"}` });
+  // Every row goes to the ranking: a word pre-filter here dropped whatever shared no word with the query before meaning
+  // could see it, so a Korean request never reached an English plugin or skill (THOUGHT-EXPERIMENTS.md F2-1).
+  if (want("plugin")) for (const row of await pluginRows(ctx?.chatId)) out.push({ id: row.id, kind: "plugin", name: row.mention, description: row.description });
+  if (want("skill")) for (const row of await skillRows(ctx?.chatId)) out.push({ id: row.id, kind: "skill", name: row.name, description: row.description });
+  // An installed connector is a tool to the model: a search narrowed to kind "tool" still finds it (real-channel A/B,
+  // codex searched {kind:"tool", query:"Weather Forecast"} first and got nothing for the connector of that exact name).
+  if (want("connector") || kind === "tool") for (const row of await connectorRows(ctx?.chatId)) out.push({ id: row.id, kind: "connector", name: row.name, description: `${row.transport}${row.enabled ? "" : ", off"}` });
+  // Only tools installed on this machine: a catalog entry that is not installed is offered through
+  // agentlas_resolve_plugins as an install proposal, never as a search result the model could try to use.
+  if (want("tool")) for (const row of await toolRows(ctx?.chatId)) if (row.installed) out.push({ id: row.id, kind: "tool", name: row.name, description: `${row.description}${row.enabled ? "" : " (off)"}` });
   if (want("feature")) {
     const { FEATURE_MODULES } = await import("./feature-registry");
-    for (const feature of FEATURE_MODULES) if (matches(query, feature.featureId, ...feature.surfaces)) out.push({ id: `feature:${feature.featureId}`, kind: "feature", name: feature.featureId, description: `surfaces: ${feature.surfaces.join(", ") || "-"}` });
+    for (const feature of FEATURE_MODULES) out.push({ id: `feature:${feature.featureId}`, kind: "feature", name: feature.featureId, description: `surfaces: ${feature.surfaces.join(", ") || "-"}` });
   }
-  if (want("operation")) for (const port of PORTS) if (matches(query, port.operationId, port.purpose)) out.push({ id: port.operationId, kind: "operation", name: port.operationId, description: `${port.purpose}${port.handler ? "" : " (unavailable)"}` });
+  // A search narrowed to kind "tool" also lists the operations that stand in for a tool a model asks for by name (Science's literature
+  // tools: a model looking for search_academic_literature narrows to "tool", and found nothing). They keep kind "operation":
+  // harness_call runs them by their operation id.
+  if (want("operation") || kind === "tool") for (const port of PORTS) if (want("operation") || port.foundAsTool === true) out.push({ id: port.operationId, kind: "operation", name: port.operationId, description: `${port.purpose}${port.handler ? "" : " (unavailable)"}` });
+  // No agent cards: a model looking for a tool that finds an agent hands the work to it instead of calling
+  // the tool, and the hand-off route (hephaestus-network) is not attached when the Hub is off or the tool menu is narrowed.
+  // Agents are staffed through Workforce routing, not this search.
   // The app's own operations answer through app.operations / app.call, whose purpose names no domain. The catalog paths
   // that answer the query rank those two entries, and they lead the candidates so a tie goes to the app (dev 2026-10-18 O6:
   // "automation run log schedule" returned skills and science tools, never automations.*, and the Light-lane worker gave up
@@ -1678,13 +1739,26 @@ export async function searchHarness(query: string, kind?: HarnessItemKind, ctx?:
     out.unshift({ id: port.operationId, kind: "operation", name: port.operationId, description: `${port.purpose}${port.handler ? "" : " (unavailable)"} Operations matching this search: ${appPaths.slice(0, 8).join(", ")}.`, rankTerms: hasHangul(query) ? [...appPaths, query.toLowerCase()] : appPaths });
   }
   // Best match first across every kind (search-rank.ts); the fixed kind order cut the answering operation off (r07).
-  // Entries no query word reaches are found by meaning after the word matches (Korean, paraphrase).
-  const { rankHarnessItemsByMeaning } = await import("./search-rank");
-  return rankHarnessItemsByMeaning(query, out, 60, await meaningEmbedder());
+  // Words and meaning are ranked together (search-rank.ts): a Korean or paraphrased request reaches English entries.
+  // The app entries keep leading when the catalogue answers this query at least as well as any other entry by words
+  // (O6/O17: a tie goes to the app); a meaning neighbour must not split them, and a better word match still beats them.
+  const { rankHarnessItemsByMeaning, harnessRelevance } = await import("./search-rank");
+  const wordOf = (item: (typeof out)[number]) => harnessRelevance(query, [item.id, item.name, ...(item.rankTerms ?? [])], [item.description]);
+  const appEntries = out.filter((item) => item.id === "app.call" || item.id === "app.operations");
+  const bestApp = Math.max(0, ...appEntries.map(wordOf));
+  const bestOther = Math.max(0, ...out.filter((item) => !appEntries.includes(item)).map(wordOf));
+  if (appPaths.length && bestApp >= bestOther) for (const item of appEntries) item.pinned = true;
+  // A query answers with the best HARNESS_SEARCH_RESULTS (one line each); an empty query still lists up to 60.
+  const cap = limit && limit >= 1 ? Math.min(60, Math.floor(limit)) : query.trim() ? HARNESS_SEARCH_RESULTS : 60;
+  return rankHarnessItemsByMeaning(query, out, cap, await meaningEmbedder());
 }
 
 /** Exact detail for one id from harness_search; an operation id returns its required fields and status. */
 export async function describeHarness(id: string, ctx: HarnessCallContext): Promise<HarnessPortResult> {
+  return withPlainSentence(await describeHarnessUnworded(id, ctx));
+}
+
+async function describeHarnessUnworded(id: string, ctx: HarnessCallContext): Promise<HarnessPortResult> {
   const ref = str(id);
   if (PORT_BY_ID.has(ref)) {
     const port = PORT_BY_ID.get(ref)!;

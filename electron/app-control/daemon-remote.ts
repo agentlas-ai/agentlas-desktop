@@ -1,5 +1,5 @@
 import type { AppControlCaller } from "./service";
-import { DEVICE_BRIDGE_UNAVAILABLE_MESSAGE, DeviceBridgeError, daemonDeviceBridge, type DaemonDeviceBridge } from "../daemon/device-bridge";
+import { DeviceBridgeError, daemonDeviceBridge, type DaemonDeviceBridge } from "../daemon/device-bridge";
 import { AppControlError } from "./ipc-registry";
 import { APP_CALL_ANSWER_WINDOW_MS, appCallPendingNotice, isAppCallPending } from "./pending-calls";
 
@@ -28,23 +28,48 @@ async function waitForMain(bridge: AppBridge, withinMs: number): Promise<void> {
   else if (waitMs >= MAIN_ATTACH_WAIT_MS) mainAbsentAt.set(bridge, Date.now()); // only a full wait proves the window is not coming
 }
 
-function unavailable(error: unknown): { code: string; message: string } {
+/**
+ * What the model reads (and may repeat to the owner) when the window process could not be asked. Plain words only: the machine code
+ * travels in `code`, never inside the sentence. The sentence also has to be true: "the window is not open" is said only when no window
+ * process is attached; a window that IS attached but did not answer is "did not answer" (observed in use: the same screen-control
+ * sentence, with the bridge's internal code in brackets, answered every failure, including a call that came from a run while the app
+ * window was open).
+ */
+export const APP_WINDOW_ABSENT_MESSAGE = "The Agentlas app window is not connected right now (the app is closed, restarting or updating), and this action can only run through it. Nothing was changed. Do not repeat the call in this run: continue with the other tools, or tell the owner to open Agentlas and send the request again.";
+export const APP_WINDOW_NO_ANSWER_MESSAGE = "The Agentlas app window is open but did not answer this request, so it may or may not have run. Read the state before repeating it.";
+export const APP_WINDOW_SCREEN_LOCKED_MESSAGE = "The screen is locked or asleep, so this action cannot run right now. Try again after the owner unlocks it.";
+
+function unavailable(error: unknown, bridge?: AppBridge): { code: string; message: string } {
   const code = error instanceof DeviceBridgeError ? error.code : "device_bridge_unavailable";
   if (code === "device_bridge_timeout") return { code: "app-call-timeout", message: "Agentlas did not answer in time; the operation may or may not have run, so read its state before repeating it." };
   // The request itself could not be carried (not plain JSON, or over the channel's size limit): the window is fine.
   if (code === "device_bridge_refused" && /^native_auth_(value|frame)_/.test((error as Error).message)) return { code: "invalid-arguments", message: `The arguments could not be sent to the app: plain JSON values within the size limit only (${(error as Error).message}).` };
-  return { code: "app-window-unavailable", message: `${DEVICE_BRIDGE_UNAVAILABLE_MESSAGE} (${code}).` };
+  if (code === "device_session_locked") return { code: "app-window-unavailable", message: APP_WINDOW_SCREEN_LOCKED_MESSAGE };
+  // A window process that is attached right now but failed this request (the channel dropped under it, or it could not answer, or it refused)
+  // is not "closed". A bridge that cannot say (a legacy fake) or has no window process attached is the absent case.
+  const windowAttached = bridge?.attached === true;
+  return { code: "app-window-unavailable", message: windowAttached ? APP_WINDOW_NO_ANSWER_MESSAGE : APP_WINDOW_ABSENT_MESSAGE };
+}
+
+/** A failure of the transport that proves nothing was sent or that a read can simply be asked again (the listing is a pure catalog read). */
+function listingRetryable(error: unknown): boolean {
+  return error instanceof DeviceBridgeError && (error.code === "device_bridge_disconnected" || error.code === "device_bridge_unavailable");
 }
 
 export async function remoteAppControlOperations<T extends object>(input: Record<string, unknown>, listLocally: (input: any) => T, bridge: AppBridge = daemonDeviceBridge()): Promise<T & { app_window?: { available: false; code: string; message: string } }> {
-  try {
-    await waitForMain(bridge, MAIN_ATTACH_WAIT_MS);
-    const answer = await bridge.appControl({ kind: "operations", ownerTurn: false, input });
-    if (answer.outcome === "value") return answer.value as T;
-    // Main refused or failed: say so, with the catalog this process can describe (nothing in it is runnable here).
-    return { ...listLocally(input), app_window: { available: false, code: answer.code, message: answer.message } };
-  } catch (error) {
-    return { ...listLocally(input), app_window: { available: false, ...unavailable(error) } };
+  // The listing only reads the catalog, so one more ask is always safe: a channel that dropped under the first ask (the window process
+  // re-attaching) is given the attach wait again and asked once more, instead of answering "unavailable" for a window that is coming back.
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await waitForMain(bridge, MAIN_ATTACH_WAIT_MS);
+      const answer = await bridge.appControl({ kind: "operations", ownerTurn: false, input });
+      if (answer.outcome === "value") return answer.value as T;
+      // Main refused or failed: say so, with the catalog this process can describe (nothing in it is runnable here).
+      return { ...listLocally(input), app_window: { available: false, code: answer.code, message: answer.message } };
+    } catch (error) {
+      if (attempt === 0 && listingRetryable(error) && bridge.whenAttached && await bridge.whenAttached(MAIN_ATTACH_WAIT_MS).catch(() => false)) continue;
+      return { ...listLocally(input), app_window: { available: false, ...unavailable(error, bridge) } };
+    }
   }
 }
 
@@ -67,7 +92,7 @@ export async function remoteAppControlCall(caller: AppControlCaller, input: { op
         if (deadline - Date.now() < 1500) return appCallPendingNotice(operation) as unknown as Record<string, unknown>;
         continue;
       }
-      const { code, message } = unavailable(error); throw new AppControlError(code, message);
+      const { code, message } = unavailable(error, bridge); throw new AppControlError(code, message);
     }
     if (answer.outcome === "value" && isAppCallPending(answer.value)) {
       // Another ask would outlive the window (Main holds one up to its own budget): say "running" now.

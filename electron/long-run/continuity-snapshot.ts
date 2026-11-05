@@ -3,6 +3,7 @@ import { decodeRuntimeEvidence } from "../../shared/runtime-evidence";
 import { getDb } from "../store/db";
 import { getChatGoalContract, getChatGoalRevision } from "../store/chat-goals";
 import { getLongRunByGoalId } from "../store/long-runs";
+import { isLongRunPauseReason } from "../../shared/long-run";
 import { getAutomation, getAutomationLiveRunId, getAutomationLiveRunState } from "../store/automations";
 import { latestGoalWaitSubscription } from "./wait-subscriptions";
 import { isGoalObserving } from "./effect-observation-tickets";
@@ -18,6 +19,13 @@ function code(value: string | null | undefined): string | null {
   if (!value) return null;
   return /^(?:verification|runtime|goal|checkpoint|budget|stall|effect|usage|approval|user|app|worker|model|provider|control)[_-][a-z0-9_-]{1,95}$/.test(value)
     ? value : "goal_blocked_unclassified";
+}
+
+/** The pause reason is a closed typed set (shared/long-run.ts), not free text: it passes as itself. The prefix rule above is for
+ * blocked reasons and sent "user", "agent_paused", "budget" and "crash_recovery" (4 of the 7 values) out as `goal_blocked_unclassified`,
+ * so the screen showed a Goal the owner had paused as blocked. */
+function pauseCode(value: string | null | undefined): string | null {
+  return isLongRunPauseReason(value) ? value : code(value);
 }
 
 function publicModel(value: RuntimeSelection | null): { kind: string; backend: string | null; model: string | null; effort: string | null } | null {
@@ -70,7 +78,7 @@ export function getChatContinuitySnapshot(chatId: string, hostActiveRunId: strin
     const goal: ChatContinuitySnapshot["goal"] = goalId ? {
       goalId, lifecycle: revision?.lifecycle ?? null, goalRevision: revision?.revision ?? null,
       contractStatus: contract?.status ?? null, runId: run?.id ?? null, runStatus: run?.status ?? null,
-      runVersion: run?.version ?? null, blockedReason: code(run?.blockedReason), pauseReason: code(run?.pauseReason),
+      runVersion: run?.version ?? null, blockedReason: code(run?.blockedReason), pauseReason: pauseCode(run?.pauseReason),
       eventSeq: run?.lastEventSeq ?? null,
       episodeStrategy: strategy && plan ? { planRevision: plan.revision, state: strategy.state,
         nextAction: strategy.nextAction, reasonCode: strategy.reasonCode, metrics: strategy.metrics,

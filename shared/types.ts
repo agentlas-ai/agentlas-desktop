@@ -1426,6 +1426,8 @@ export interface HarnessPortResultView {
   data?: unknown;
   reason?: string;
   next?: string;
+  /** One plain sentence for the owner (what happened, what happens next); never a code. */
+  tellOwner?: string;
   receiptId: string;
 }
 

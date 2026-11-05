@@ -125,6 +125,11 @@ contextBridge.exposeInMainWorld("agentlasComposerMentions", {
   plugins: (chatId: string | null) => ipcRenderer.invoke("composer:mentionPlugins", chatId),
 });
 
+// Optional dedicated bridge: the renderer reports its slow keystrokes (timings only) — renderer/lib/input-latency.ts.
+contextBridge.exposeInMainWorld("agentlasInputLatency", {
+  report: (report: unknown) => ipcRenderer.invoke("diagnostics:inputLatency", report),
+});
+
 const api: AgentlasIpc = {
   finance: {
     planning: input => ipcRenderer.invoke("finance:planning", input),

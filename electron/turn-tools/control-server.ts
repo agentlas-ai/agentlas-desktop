@@ -17,6 +17,7 @@ import { stripGoalCompleteMarker } from "../hephaestus/loop-engineering";
 import { goalCompleteMarkerText } from "./goal-signals";
 import { GOAL_PLAN_TOOL_MARKERS, TURN_TOOLS_BASE } from "./mcp-server";
 import { closestNames, didYouMean, invalidValueMessage, unknownArgumentMessage } from "../../shared/did-you-mean";
+import { withPlainSentence } from "../harness/plain-outcome";
 
 // Main-side handler for the inline agentlas-turn MCP child. Loopback only, one random server token, one capability per
 // run config. The capability pins the chat and run; the child can name neither, so a note can only land in the turn
@@ -31,6 +32,18 @@ const MAX_REQUEST_BYTES = 768 * 1024;
 // So listen from the module-load context, and handle each request outside any invocation's judgment context.
 const hostRootContext = AsyncLocalStorage.snapshot();
 
+
+/** The host refusals this server throws carry their code as data, so the wire can say them in words without reading message text. */
+const TURN_TOOLS_REFUSAL_CODES = new Set(["turn-tools-capability-invalid", "turn-tools-operation-invalid", "turn-tools-control-unavailable"] as const);
+type TurnToolsRefusalCode = typeof TURN_TOOLS_REFUSAL_CODES extends Set<infer C> ? C : never;
+function turnToolsRefusal(code: TurnToolsRefusalCode): Error & { code: TurnToolsRefusalCode; turnToolsRefusal: true } {
+  return Object.assign(new Error(code), { code, turnToolsRefusal: true as const });
+}
+function turnToolsRefusalCode(error: unknown): TurnToolsRefusalCode | null {
+  const typed = error as { code?: unknown; turnToolsRefusal?: unknown } | null;
+  return typed?.turnToolsRefusal === true && TURN_TOOLS_REFUSAL_CODES.has(typed.code as TurnToolsRefusalCode) ? typed.code as TurnToolsRefusalCode : null;
+}
+
 export interface TurnToolsCapabilityBinding {
   /** Main-only; omitted from the capability file. */
   hostVideoCustody?: import("../invocation/host-video-custody").HostVideoCustody;
@@ -44,6 +57,8 @@ export interface TurnToolsCapabilityBinding {
   capabilityId: string;
   chatId: string;
   runId: string;
+  /** The run's runtime kind: a runtime that keeps the judge writes no installed names. Not written to the file. */
+  runtimeKind?: string | null;
   /** Graph dry-run or plan mode: nothing is recorded. */
   dryRun?: boolean;
   /** Tools this run may call (the child lists only these; the host re-checks). Default: memory_note. */
@@ -236,7 +251,7 @@ function unreadableHarnessArgs(value: unknown): string | null {
 export function harnessArgumentsRefusal(tool: string, a: Record<string, unknown>): Record<string, unknown> | null {
   const keys = HARNESS_TOOL_KEYS.get(tool);
   if (!keys) return null;
-  const refuse = (reason: string, next: string): Record<string, unknown> => ({
+  const refuse = (reason: string, next: string): Record<string, unknown> => withPlainSentence({
     schemaVersion: "agentlas.harness-result.v1",
     operationId: tool === "harness_call" ? harnessId(a, keys.ids) : keys.operationId,
     status: "refused", reason, next, receiptId: `hr_${randomUUID()}`,
@@ -354,14 +369,14 @@ function loopbackHost(host: string | undefined, port: number): boolean {
 }
 
 export async function handleTurnToolsControlRequest(request: Record<string, unknown>, requestSignal?: AbortSignal): Promise<unknown> {
-  if (!tokenMatches(request.token, serverToken)) throw new Error("turn-tools-capability-invalid");
+  if (!tokenMatches(request.token, serverToken)) throw turnToolsRefusal("turn-tools-capability-invalid");
   const binding = typeof request.capabilityId === "string" ? capabilities.get(request.capabilityId) : undefined;
-  if (!binding) throw new Error("turn-tools-capability-invalid");
+  if (!binding) throw turnToolsRefusal("turn-tools-capability-invalid");
   const lifetime = capabilityAborters.get(binding.capabilityId);
-  if (!lifetime) throw new Error("turn-tools-capability-invalid");
+  if (!lifetime) throw turnToolsRefusal("turn-tools-capability-invalid");
   switch (request.operation) {
     case "goal_wait": {
-      if (!binding.tools?.includes("goal_wait")) throw new Error("turn-tools-operation-invalid");
+      if (!binding.tools?.includes("goal_wait")) throw turnToolsRefusal("turn-tools-operation-invalid");
       let a = request.args && typeof request.args === "object" && !Array.isArray(request.args) ? request.args as Record<string, unknown> : null;
       const refuse = (reason: string): never => { throw new Error(`${reason}: ${GOAL_WAIT_HINTS[reason] ?? "The wait was not registered."}`); };
       if (!a) return refuse("goal_wait_request_invalid");
@@ -415,7 +430,7 @@ export async function handleTurnToolsControlRequest(request: Record<string, unkn
         ...(ignoredFields.length ? { ignored_fields: ignoredFields.slice(0, 10) } : {}) };
     }
     case "goal_complete": {
-      if (!binding.tools?.includes("goal_complete")) throw new Error("turn-tools-operation-invalid");
+      if (!binding.tools?.includes("goal_complete")) throw turnToolsRefusal("turn-tools-operation-invalid");
       let a = request.args && typeof request.args === "object" && !Array.isArray(request.args) ? request.args as Record<string, unknown> : null;
       if (!a) throw new Error("goal_complete_invalid: arguments must be an object");
       // Only the evidence is the claim's content: another field (`status`, `confidence`) is left out, and evidence written as a list
@@ -436,7 +451,7 @@ export async function handleTurnToolsControlRequest(request: Record<string, unkn
     case "goal_plan_op":
     case "goal_kpi": {
       const operation = request.operation;
-      if (!binding.tools?.includes(operation)) throw new Error("turn-tools-operation-invalid");
+      if (!binding.tools?.includes(operation)) throw turnToolsRefusal("turn-tools-operation-invalid");
       const a = request.args && typeof request.args === "object" && !Array.isArray(request.args) ? request.args as Record<string, unknown> : null;
       if (!a) throw new Error(`${operation}_invalid: arguments must be an object`);
       // A KPI sample that names its KPI by display name is read as that KPI (or defines one): goal-signals.ts resolveKpiSampleId.
@@ -465,7 +480,7 @@ export async function handleTurnToolsControlRequest(request: Record<string, unkn
       return { recorded: "pending_host", note: "The host applies it when this turn ends and re-checks it against the plan." };
     }
     case "ask_form": {
-      if (!binding.tools?.includes("ask_form")) throw new Error("turn-tools-operation-invalid");
+      if (!binding.tools?.includes("ask_form")) throw turnToolsRefusal("turn-tools-operation-invalid");
       const a = request.args && typeof request.args === "object" && !Array.isArray(request.args) ? request.args as Record<string, unknown> : null;
       if (!a) throw new Error("ask_form_invalid: arguments must be an object");
       const unknownField = Object.keys(a).find((key) => key !== "questions");
@@ -483,7 +498,7 @@ export async function handleTurnToolsControlRequest(request: Record<string, unkn
       return { shown: "pending_host", note: "End your turn now; the person's answer arrives as the next message." };
     }
     case "memory_note": {
-      if (binding.tools && !binding.tools.includes("memory_note")) throw new Error("turn-tools-operation-invalid");
+      if (binding.tools && !binding.tools.includes("memory_note")) throw turnToolsRefusal("turn-tools-operation-invalid");
       const parsed = memoryNoteToEvent(request.args);
       if (!parsed.ok) throw new Error(parsed.error);
       if (binding.dryRun) return { recorded: false, reason: "dry_run" };
@@ -495,13 +510,13 @@ export async function handleTurnToolsControlRequest(request: Record<string, unkn
     case "harness_describe":
     case "harness_call": {
       const operation = request.operation;
-      if (!binding.tools?.includes(operation)) throw new Error("turn-tools-operation-invalid");
+      if (!binding.tools?.includes(operation)) throw turnToolsRefusal("turn-tools-operation-invalid");
       const a = request.args && typeof request.args === "object" && !Array.isArray(request.args) ? request.args as Record<string, unknown> : {};
       // A key the tool does not read (or arguments it cannot read) is refused before anything runs, never dropped silently.
       const misplaced = harnessArgumentsRefusal(operation, a);
       if (misplaced) return misplaced;
       const harness = await import("../harness/capability-ports");
-      if (capabilities.get(binding.capabilityId) !== binding) throw new Error("turn-tools-capability-invalid");
+      if (capabilities.get(binding.capabilityId) !== binding) throw turnToolsRefusal("turn-tools-capability-invalid");
       const ctx = { chatId: binding.chatId, runId: binding.runId, dryRun: binding.dryRun === true,
         signal: requestSignal ? AbortSignal.any([lifetime.signal, requestSignal]) : lifetime.signal,
         hostAccountBinding: binding.hostAccountBinding ?? null,
@@ -510,8 +525,8 @@ export async function handleTurnToolsControlRequest(request: Record<string, unkn
         ...(binding.mcpConfigPath ? { mcpConfigPath: binding.mcpConfigPath } : {}) };
       if (operation === "harness_search") {
         const kind = typeof a.kind === "string" ? a.kind as Parameters<typeof harness.searchHarness>[1] : undefined;
-        const found = await harness.searchHarness(typeof a.query === "string" ? a.query.slice(0, 500) : "", kind, ctx);
         const cap = harnessSearchLimit(a);
+        const found = await harness.searchHarness(typeof a.query === "string" ? a.query.slice(0, 500) : "", kind, ctx, cap);
         const items = cap === null ? found : found.slice(0, cap);
         // A kind outside the list matches nothing of that kind; say so and name the closest kind, and still answer as before
         // (the search is not re-run with a guessed kind).
@@ -540,7 +555,7 @@ export async function handleTurnToolsControlRequest(request: Record<string, unkn
       finally { if (timer) clearInterval(timer); }
     }
     default:
-      throw new Error("turn-tools-operation-invalid");
+      throw turnToolsRefusal("turn-tools-operation-invalid");
   }
 }
 
@@ -569,14 +584,27 @@ export function startTurnToolsControlServer(): Promise<number> {
       void readJsonBody(req).then(async (body) => {
         if (!body) return writeJson(res, 400, { ok: false, error: "invalid-request" });
         try {
-          const result = await outsideInvocationJudgmentContext(() => handleTurnToolsControlRequest(body, requestLifetime.signal));
+          // Whatever answers a harness call carries its plain sentence on the wire, also an answer built outside callHarnessPort (idempotent).
+          const answered = await outsideInvocationJudgmentContext(() => handleTurnToolsControlRequest(body, requestLifetime.signal));
+          const result = typeof body.operation === "string" && body.operation.startsWith("harness_") && answered && typeof answered === "object" ? withPlainSentence(answered) : answered;
           // A failed harness call reaches the model and every receipt as an MCP tool error with its typed code.
           const errorCode = harnessCallFailureCode(body.operation, result);
           const imageResults = typeof body.capabilityId === "string" && capabilities.get(body.capabilityId)?.imageResults === true;
           const wire = fitTurnResponse(errorCode || !imageResults ? result : harnessResultWithImages(body.operation, result), result);
           if (!res.destroyed) writeJson(res, 200, { ok: true, result: wire, ...(errorCode ? { isError: true, errorCode } : {}) });
         } catch (error) {
-          if (!res.destroyed) writeJson(res, 409, { ok: false, error: error instanceof Error ? error.message : "turn-tool-failed" });
+          const message = error instanceof Error ? error.message : "turn-tool-failed";
+          // A host refusal of this server ("turn-tools-operation-invalid") used to be the whole tool error. It leaves as the same typed refusal
+          // every harness answer is, with its sentence; the code stays in `reason` and in the MCP error code. Read from the typed code the
+          // refusal was thrown with (turnToolsRefusal), never from the message text.
+          const refusalCode = turnToolsRefusalCode(error);
+          // A capability that does not match (wrong token, foreign Host, a binding that is gone) is an authentication failure: it stays an
+          // HTTP error with no harness envelope, so nothing about the capability is answered to a caller that does not hold it.
+          if (refusalCode && refusalCode !== "turn-tools-capability-invalid" && !res.destroyed) {
+            const refusal = withPlainSentence({ schemaVersion: "agentlas.harness-result.v1", operationId: typeof body.operation === "string" ? body.operation : "turn-tools", status: "refused", reason: refusalCode, receiptId: `hr_${randomUUID()}` });
+            return writeJson(res, 200, { ok: true, result: refusal, isError: true, errorCode: refusalCode });
+          }
+          if (!res.destroyed) writeJson(res, 409, { ok: false, error: message });
         }
       });
     });
@@ -604,7 +632,7 @@ export async function createTurnToolsCapability(
   try { const auth = await import('../auth'); const current = auth.getAuthenticatedSessionBinding(); hostAccountBinding = current ? Object.freeze({ ...current }) : null; }
   catch { /* Other harness domains remain available; Finance refuses an unbound account. */ }
   const port = await startTurnToolsControlServer();
-  if (!port) throw new Error("turn-tools-control-unavailable");
+  if (!port) throw turnToolsRefusal("turn-tools-control-unavailable");
   const binding: TurnToolsCapabilityBinding = { ...input, hostAccountBinding, capabilityId: randomUUID() };
   capabilities.set(binding.capabilityId, binding);
   capabilityAborters.set(binding.capabilityId, new AbortController());
@@ -623,9 +651,28 @@ export async function createTurnToolsCapability(
   return { path: target, binding };
 }
 
+/**
+ * Names of the connectors installed and switched on here, for the agentlas-turn instructions' installed-tools line (mcp-server.ts):
+ * a runtime that keeps MCP tools behind its own tool search finds harness_search through them. Sorted, so the text only changes
+ * when the owner installs or removes one; bounded so the capability file stays far under the child's 8 KiB read limit.
+ */
+export function installedConnectorNames(runtimeKind?: string | null): string[] {
+  try {
+    // Only in model-picks mode (mcp-tools/auto-select.ts toolSelectionMode): there a connector is reached in the turn and the
+    // line is what lets a runtime's own tool search find harness_search; the judge mode's prompt stays exactly as it was.
+    const { toolSelectionMode } = require("../mcp-tools/tool-selection-mode") as typeof import("../mcp-tools/tool-selection-mode");
+    if (toolSelectionMode(process.env, runtimeKind) !== "model") return [];
+    const { listInstalledServers } = require("../mcp-tools/registry") as typeof import("../mcp-tools/registry");
+    const names = listInstalledServers().filter((server) => server.enabled && server.catalogId !== "agentlas-turn")
+      .map((server) => (server.nameEn || server.name || "").trim()).filter((name) => name && name.length <= 80);
+    return [...new Set(names)].sort((a, b) => a.localeCompare(b)).slice(0, 40);
+  } catch { return []; }
+}
+
 function writeCapabilityFile(target: string, port: number, binding: TurnToolsCapabilityBinding): void {
   const temp = `${target}.${process.pid}.${randomUUID()}.tmp`;
-  fs.writeFileSync(temp, JSON.stringify({ schemaVersion: 1, port, token: serverToken, capabilityId: binding.capabilityId, tools: binding.tools ?? TURN_TOOLS_BASE }), { flag: "wx", mode: 0o600 });
+  fs.writeFileSync(temp, JSON.stringify({ schemaVersion: 1, port, token: serverToken, capabilityId: binding.capabilityId, tools: binding.tools ?? TURN_TOOLS_BASE,
+    installed: installedConnectorNames(binding.runtimeKind) }), { flag: "wx", mode: 0o600 });
   if (process.platform !== "win32") fs.chmodSync(temp, 0o600);
   fs.renameSync(temp, target);
 }

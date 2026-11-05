@@ -17,6 +17,24 @@ type Draft = typeof EMPTY;
 const box = { padding: "8px 10px", borderRadius: "var(--radius-md)", border: "1px solid var(--paper-edge)", background: "var(--paper)" } as const;
 const field = { fontSize: 12, padding: "4px 6px", borderRadius: "var(--radius-sm)", border: "1px solid var(--paper-edge)", background: "var(--paper)", minWidth: 0 } as const;
 
+// pricing.set answers a refusal with a machine reason (runtime/model-pricing.ts validatePriceEntry). The owner reads what to fix,
+// never the reason itself (no internal code on screen); an unknown reason gets the plain retry line.
+const REFUSAL_LINES: Record<string, { ko: string; en: string }> = {
+  provider_and_model_required: { ko: "공급자와 모델 이름을 넣어 주세요.", en: "Enter the provider and the model." },
+  source_required: { ko: "가격의 출처를 넣어 주세요.", en: "Enter where the price comes from." },
+  currency_invalid: { ko: "통화는 USD처럼 영문 대문자 세 글자로 넣어 주세요.", en: "Enter the currency as three capital letters, like USD." },
+  effective_from_invalid: { ko: "가격이 적용되는 날짜를 골라 주세요.", en: "Choose the date this price starts." },
+  effective_from_required: { ko: "가격이 적용되는 날짜를 골라 주세요.", en: "Choose the date this price starts." },
+  input_and_output_price_required: { ko: "입력 가격과 출력 가격을 모두 넣어 주세요.", en: "Enter both the input and the output price." },
+};
+const RATE_LINE = { ko: "가격은 0 이상의 숫자로 넣어 주세요.", en: "Enter prices as numbers of 0 or more." };
+const RETRY_LINE = { ko: "가격을 저장하지 못했습니다. 다시 시도해 주세요.", en: "The price was not saved. Try again." };
+
+export function pricingRefusalLine(reason: string | null | undefined, ko: boolean): string {
+  const line = (reason && REFUSAL_LINES[reason]) || (reason && /PerM_invalid$/.test(reason) ? RATE_LINE : RETRY_LINE);
+  return ko ? line.ko : line.en;
+}
+
 export function PricingPanel({ locale }: { locale: string }) {
   const ko = locale !== "en";
   const [rows, setRows] = useState<PriceRow[] | null>(null);
@@ -38,8 +56,8 @@ export function PricingPanel({ locale }: { locale: string }) {
     setBusy(true); setRefusal(null);
     try {
       const result = await ipc()?.harness?.call("pricing.set", args) as { status?: string; reason?: string; data?: unknown } | undefined;
-      if (result?.status === "ok") { apply(result); onDone?.(); } else setRefusal(result?.reason ?? "failed");
-    } catch { setRefusal("failed"); } finally { setBusy(false); }
+      if (result?.status === "ok") { apply(result); onDone?.(); } else setRefusal(pricingRefusalLine(result?.reason, ko));
+    } catch { setRefusal(pricingRefusalLine(null, ko)); } finally { setBusy(false); }
   };
 
   if (!ipc()?.harness || rows === null) return null;

@@ -361,22 +361,79 @@ function safeModelProfile(runtime: RuntimeStatus, modelId: string) {
   };
 }
 
+function inventoryEntry(runtime: RuntimeStatus, index: number): WorkloadRuntimeInventoryEntry {
+  const models = liveModelInventory(runtime);
+  return {
+    runtimeId: `runtime-${index + 1}`,
+    kind: runtime.kind,
+    backend: runtime.backend,
+    models,
+    efforts: supportedEfforts(runtime),
+    modelProfiles: Object.fromEntries(models.flatMap((modelId) => {
+      const profile = safeModelProfile(runtime, modelId);
+      return profile ? [[modelId, profile]] : [];
+    })),
+  };
+}
+
+/**
+ * For each runtime, the index of the first runtime the parent LLM could not tell it from: same source and ACP agent, and
+ * an identical advertised kind, backend, models, efforts and model profiles. The host role pool lists one executable once
+ * per configured default model, and the default model is replaced by the model the parent picks, so the second entry
+ * offered nothing new (two `codex` entries identical but for the id, ~1.8k chars in every team CEO prompt).
+ */
+function inventoryRepresentatives(runtimes: RuntimeStatus[]): number[] {
+  const first = new Map<string, number>();
+  return runtimes.map((runtime, index) => {
+    const { runtimeId: _id, ...visible } = inventoryEntry(runtime, index);
+    const key = JSON.stringify([runtime.source ?? null, (runtime as { acpAgentId?: string | null }).acpAgentId ?? null, visible]);
+    const seen = first.get(key);
+    if (seen !== undefined) return seen;
+    first.set(key, index);
+    return index;
+  });
+}
+
 /** Value-safe inventory shown to the parent LLM. It intentionally has no paths, account IDs, prompts or secrets. */
 export function workloadRuntimeInventory(runtimes: RuntimeStatus[]): WorkloadRuntimeInventoryEntry[] {
-  return runtimes.map((runtime, index) => {
-    const models = liveModelInventory(runtime);
-    return {
-      runtimeId: `runtime-${index + 1}`,
-      kind: runtime.kind,
-      backend: runtime.backend,
-      models,
-      efforts: supportedEfforts(runtime),
-      modelProfiles: Object.fromEntries(models.flatMap((modelId) => {
-        const profile = safeModelProfile(runtime, modelId);
-        return profile ? [[modelId, profile]] : [];
-      })),
-    };
-  });
+  const representatives = inventoryRepresentatives(runtimes);
+  // Ids keep their position in the host list, so an id the parent never saw still resolves and an advertised one never moves.
+  return runtimes.flatMap((runtime, index) => representatives[index] === index ? [inventoryEntry(runtime, index)] : []);
+}
+
+/**
+ * The inventory as the parent LLM reads it. Same entries and ids as `workloadRuntimeInventory` (the host resolves allocations against
+ * that structure, never this text), without two restatements of one fact: a model's `capabilities` list when it only names what
+ * `supportsTools` / `supportsMultimodal` already say, and a model's `efforts` when they are its runtime's. Measured on the
+ * recorded team CEO prompts: eight models, each repeating the same `"capabilities":["tools","multimodal"],"supportsTools":true,
+ * "supportsMultimodal":true,"efforts":[...]` tail, ~1.3k of the 3.8k inventory. The catalog key still hashes the full structure.
+ */
+export type WorkloadPromptInventoryEntry = Omit<WorkloadRuntimeInventoryEntry, "modelProfiles"> & {
+  modelProfiles: Record<string, Partial<WorkloadRuntimeInventoryEntry["modelProfiles"][string]>>;
+};
+export function workloadRuntimeInventoryForPrompt(runtimes: RuntimeStatus[]): WorkloadPromptInventoryEntry[] {
+  return compactWorkloadInventoryForPrompt(workloadRuntimeInventory(runtimes));
+}
+/** The same projection for a caller that already holds the structure (it also needs it for its response schema). */
+export function compactWorkloadInventoryForPrompt(inventory: readonly WorkloadRuntimeInventoryEntry[]): WorkloadPromptInventoryEntry[] {
+  return inventory.map((entry) => ({
+    ...entry,
+    modelProfiles: Object.fromEntries(Object.entries(entry.modelProfiles).map(([modelId, profile]) => {
+      const { capabilities, efforts, ...rest } = profile;
+      const impliedByFlags = capabilities.every((name) =>
+        (name === "tools" && profile.supportsTools === true) || (name === "multimodal" && profile.supportsMultimodal === true));
+      return [modelId, {
+        ...rest,
+        ...(capabilities.length > 0 && !impliedByFlags ? { capabilities } : {}),
+        ...(efforts !== null && JSON.stringify(efforts) !== JSON.stringify(entry.efforts) ? { efforts } : {}),
+      }];
+    })),
+  }));
+}
+
+/** Identity of the catalog payload a prompt carries; the compiler keeps one part per key. */
+export function workloadRuntimeCatalogContentKey(runtimes: RuntimeStatus[]): string {
+  return `runtime-catalog:${createHash("sha256").update(JSON.stringify(workloadRuntimeInventory(runtimes))).digest("hex").slice(0, 16)}`;
 }
 
 function runtimeForInventoryId(
@@ -396,7 +453,8 @@ function inventoryIdForRuntime(runtimes: RuntimeStatus[], runtime: RuntimeStatus
       candidate.kind === runtime.kind && candidate.backend === runtime.backend && candidate.source === runtime.source,
     );
   }
-  return index >= 0 ? `runtime-${index + 1}` : null;
+  // Report the id the parent was shown for this entry, not a collapsed twin's.
+  return index >= 0 ? `runtime-${inventoryRepresentatives(runtimes)[index] + 1}` : null;
 }
 
 function resolvedTierForRuntime(runtime: RuntimeStatus): WorkloadModelTier | null {
@@ -882,10 +940,11 @@ export function workloadAllocationInventoryPromptParts(
 ): DeclaredPromptPart[] {
   const list = Array.isArray(runtimes) ? runtimes : [runtimes];
   return [
-    { id: "workload.runtime-inventory.policy", revision: 1, stability: "fixed-policy", changeTriggers: ["release"], order: 0,
-      text: "LIVE_RUNTIME_INVENTORY is authoritative. Copy runtimeId and modelId exactly from the same entry; never infer or invent a provider model ID from tier or modelClass." },
-    { id: "workload.runtime-inventory.data", revision: 1, stability: "configuration", changeTriggers: ["runtime", "capability-inventory"], order: 0,
-      text: `LIVE_RUNTIME_INVENTORY=${JSON.stringify(workloadRuntimeInventory(list))}` },
+    { id: "workload.runtime-inventory.policy", revision: 2, stability: "fixed-policy", changeTriggers: ["release"], order: 0,
+      text: "LIVE_RUNTIME_INVENTORY is authoritative. Copy runtimeId and modelId exactly from the same entry; never infer or invent a provider model ID from tier or modelClass. A model without its own efforts offers its runtime's efforts." },
+    { id: "workload.runtime-inventory.data", revision: 2, stability: "configuration", changeTriggers: ["runtime", "capability-inventory"], order: 0,
+      contentKey: workloadRuntimeCatalogContentKey(list),
+      text: `LIVE_RUNTIME_INVENTORY=${JSON.stringify(workloadRuntimeInventoryForPrompt(list))}` },
   ];
 }
 

@@ -22,7 +22,6 @@ export function isFinanceSourceUrlAllowed(url: URL): boolean {
   if (new Set(keys).size !== keys.length) return false;
   if (url.hostname === 'www.sec.gov') return url.pathname === '/files/company_tickers_exchange.json' && !url.search;
   if (url.hostname === 'data.sec.gov') return /^(?:\/submissions\/CIK\d{10}|\/api\/xbrl\/companyfacts\/CIK\d{10})\.json$/.test(url.pathname) && !url.search;
-  if (url.hostname === 'www.alphavantage.co') return url.pathname === '/query' && keys.every(key => ['function','apikey','keywords','symbol','tickers','limit','outputsize'].includes(key)) && ['SYMBOL_SEARCH','GLOBAL_QUOTE','NEWS_SENTIMENT','ETF_PROFILE','TIME_SERIES_DAILY'].includes(url.searchParams.get('function') || '');
   if (url.hostname === 'hn.algolia.com') {
     const query=url.searchParams.get('query')||'',filter=url.searchParams.get('numericFilters')||'';
     const range=/^(?:created_at_i>=(\d{1,10}),)?created_at_i<=(\d{1,10})$/.exec(filter);
@@ -51,12 +50,14 @@ export async function fetchFinanceText(url: URL, fetcher: typeof fetch = fetch):
   // Reserve slots synchronously. SEC stays well below its documented ten requests/second.
   const start = Math.max(Date.now(), nextHostRequest.get(url.hostname) || 0);
   nextHostRequest.set(url.hostname, start + (url.hostname.includes('sec.gov') ? 250 : 500));
-  const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), 20000);
+  // GDELT routinely takes 10-22 s to answer; other hosts keep the 20 s budget.
+  const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), url.hostname === 'api.gdeltproject.org' ? 35000 : 20000);
   try {
     await new Promise<void>(resolve => setTimeout(resolve, Math.max(0, start - Date.now())));
     const response = await fetcher(url, { redirect: 'error', signal: controller.signal, headers: { Accept: 'application/json, text/csv, application/xml, text/xml;q=0.9', 'User-Agent': 'Agentlas Finance (https://agentlas.cloud)' } });
     if (response.status === 429 || response.status === 503) {
-      const retry = response.headers.get('retry-after'); const seconds = retry && /^\d+$/.test(retry) ? Number(retry) : 60;
+      // GDELT's rule is one request per five seconds and it sends no Retry-After; a minute's block would fail every news read in the turn.
+      const retry = response.headers.get('retry-after'); const seconds = retry && /^\d+$/.test(retry) ? Number(retry) : url.hostname === 'api.gdeltproject.org' ? 6 : 60;
       blockedUntil.set(url.hostname, Date.now() + Math.max(1000, Math.min(seconds * 1000, 15 * 60000)));
       throw new Error('finance_source_rate_limited');
     }

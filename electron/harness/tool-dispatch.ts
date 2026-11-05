@@ -387,12 +387,16 @@ async function run(call: LiveCall, server: InstalledMcpServer, args: Args, prepa
 }
 
 export async function toolCall(args: Args, ctx: HarnessCallContext): Promise<PortOutcome> {
-  const toolRef = str(args.toolId);
   const providerRef = str(args.providerRef);
+  // The tool may arrive under the name a model writes for it (real-channel A/B, codex: `toolName` first, then the
+  // connector id as toolId, then the right call). A toolId that is only the connector itself defers to the named tool.
+  const named = str(args.toolName) || str(args.tool) || str(args.name);
+  const toolId = str(args.toolId);
+  const toolRef = toolId && toolId !== providerRef && toolId !== `connector:${providerRef}` ? toolId : named || toolId;
   const schemaDigest = str(args.schemaDigest);
   const callArgs = args.arguments;
   if (!toolRef || !providerRef || !schemaDigest || !callArgs || typeof callArgs !== "object" || Array.isArray(callArgs)) {
-    return refused("invalid-input", "required: toolId, providerRef, schemaDigest, arguments (object)");
+    return refused("invalid-input", "required: toolId (or toolName), providerRef, schemaDigest, arguments (object)");
   }
   if (ctx.dryRun) return refused("dry_run", "a dry run validates only; nothing was dispatched");
   // ctx.signal is the calling turn's lifetime plus its gateway request (Stop, a revoked admission, the 30 s gateway limit).

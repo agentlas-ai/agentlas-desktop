@@ -103,9 +103,15 @@ export const FinanceCompanyFactsOptionsSchema = z.object({
 }).strict();
 export type FinanceCompanyFactsOptions = z.infer<typeof FinanceCompanyFactsOptionsSchema>;
 export interface FinanceDataRequest { query: string; assetIds: string[]; metrics: string[]; period: string; facts?: FinanceCompanyFactsOptions }
+/** The keyless free market engine. Every Finance data path runs on it; no provider key exists. */
+export const FINANCE_FREE_SOURCE_ID = "finance-yfinance";
+/** Saved selections that named a retired server-relayed source mean the free engine. */
+export function canonicalFinanceSourceId(sourceId: string): string { return sourceId === "alpha-vantage" ? FINANCE_FREE_SOURCE_ID : sourceId; }
+/** Legacy `av:SYMBOL` watchlist ids (saved by the retired provider) are the same symbol on the free engine: `yahoo:<encoded symbol>`. */
+export function canonicalFinanceAssetId(assetId: string): string { return assetId.startsWith("av:") && assetId.length > 3 ? `yahoo:${encodeURIComponent(assetId.slice(3))}` : assetId; }
 export interface FinanceDataConnectionRequest { action: "status" | "test" }
 export interface FinanceDataConnectionResult {
-  providerId: "alpha-vantage";
+  providerId: "finance-yfinance";
   credential: "present" | "missing" | "unknown";
   access: "not-tested" | "available" | "unavailable" | "error";
   checkedAt: string | null;

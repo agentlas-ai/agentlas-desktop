@@ -10,6 +10,7 @@ import type { NewProjectSource, ProjectSettingsRequest, ProjectSettingsSection }
 import type { FsPathGrant, Project, ProjectAgentPoolMember } from "@/lib/types";
 import { IconArrowLeft, IconCheck, IconChevronRight, IconClose, IconFolder, IconGithub, IconPlus, IconUsers } from "./Icon";
 import { ProjectAgentPicker } from "./ProjectAgentPicker";
+import { projectSettingsPatch } from "@/lib/edit-patch";
 import styles from "./ProjectSettingsModal.module.css";
 
 export function ProjectSourceChoices({ onSelect }: { onSelect: (source: NewProjectSource) => void }) {
@@ -192,8 +193,10 @@ export function ProjectSettingsModal({ request, onClose, onSaved, onBackgroundEr
       const api = ipc();
       if (!api) throw new Error("bridge unavailable");
       const common = { name: name.trim(), description: goal.trim() || null, systemPrompt: instructions.trim() || null, agentPool };
+      // Create sends the whole spec. An edit sends only what differs from the project as it was read when the dialog opened,
+      // so a field the owner never touched (or one changed elsewhere since) is not written back from this screen's copy.
       const saved = project
-        ? await api.projects.update(project.id, { ...common, ...(folderGrant ? { folderGrant, ...(source === "github" ? { sourceRef: connectedGithub } : {}) } : {}) })
+        ? await api.projects.update(project.id, { ...projectSettingsPatch(project, { name, goal, instructions, agentPool }), ...(folderGrant ? { folderGrant, ...(source === "github" ? { sourceRef: connectedGithub } : {}) } : {}) })
         : await api.projects.create({ ...common, sourceType: source, sourceRef: source === "github" ? connectedGithub : null, folderGrant: managed ? null : folderGrant });
       invalidateViewData("dashboard.projects");
       window.dispatchEvent(new CustomEvent("agentlas:projects-changed", { detail: { projectId: saved.id } }));

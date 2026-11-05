@@ -1,12 +1,13 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import type { Chat } from "@shared/types";
 import { ipc, ipcEvents } from "@/lib/ipc";
 import { createTrailingDebounce } from "@/lib/store-change-policy";
 import { taskTitleForDisplay } from "@/lib/task-title";
 import { useT } from "@/lib/i18n";
 import { WorkChatSurface } from "@/components/TaskCockpit";
+import { openPricing } from "@/components/UpgradeCta";
 import { IconPlus, IconRefresh, IconSparkles } from "@/components/Icon";
 import { ComposerMenuExtensions, type ComposerMenuExtension } from "@/lib/composer-menu-extensions";
 import type { FinanceAnalystResult } from "@shared/finance-analysts";
@@ -19,6 +20,20 @@ export interface FinanceWorkChatProps {
   provisionProject: () => Promise<FinanceWorkProject>;
   /** The owner's Analysts, offered in the Work composer's + menu (a generic composer extension, not a Finance composer). */
   listAnalysts?: () => Promise<FinanceAnalystResult>;
+  /** Puts a starter prompt in the conversation's composer (the same draft hand-off the dashboard buttons use). */
+  onStarter?: (text: string) => void;
+}
+
+/** The one sentence a Finance conversation shows when the turn ended because the credit balance is empty. */
+export function creditsOutSentence(ko: boolean): string {
+  return ko ? "크레딧이 모두 소진되었습니다. 충전하거나 다른 모델을 선택해 계속하세요." : "You are out of credits. Top up, or choose another model, to keep going.";
+}
+
+/** Finance's own starter prompts for an empty conversation, in both languages. */
+export function financeStarterPrompts(ko: boolean): readonly string[] {
+  return ko
+    ? ["오늘 시장 흐름을 알려줘", "내 보유 종목을 점검해줘", "AAPL과 MSFT를 비교해줘", "관심 종목을 모니터링해줘"]
+    : ["How are the markets doing today?", "Review my holdings", "Compare AAPL and MSFT", "Monitor my watchlist for me"];
 }
 
 /** The text an Analyst pick puts in the message: its exact id and revision, which finance.analyst.read takes. */
@@ -65,7 +80,7 @@ export function financeInitialWorkChat(ownerScope: string, projectId: string, br
 }
 
 /** A project/session selector around the unchanged Work harness, not a second conversation store. */
-export function FinanceWorkChat({ ownerScope, provisionProject, listAnalysts }: FinanceWorkChatProps) {
+export function FinanceWorkChat({ ownerScope, provisionProject, listAnalysts, onStarter }: FinanceWorkChatProps) {
   const [project, setProject] = useState<FinanceWorkProject | null>(null);
   const [chats, setChats] = useState<Chat[]>([]);
   const [activeChatId, setActiveChatId] = useState("");
@@ -187,11 +202,36 @@ export function FinanceWorkChat({ ownerScope, provisionProject, listAnalysts }: 
   }, [project, ownerScope, refresh]);
 
   const validProject = project?.ownerScope === ownerScope;
+  // The Work turn that ended on an empty credit balance carries the machine marker data-terminal-error="insufficient_credits". The newest turn's marker puts one plain sentence and its two actions above the conversation (the stylesheet shows the same sentence in place of the Work failure rows).
+  const surfaceRef = useRef<HTMLDivElement>(null);
+  const [creditsOut, setCreditsOut] = useState(false);
+  useEffect(() => {
+    const surface = surfaceRef.current;
+    if (!surface) { setCreditsOut(false); return; }
+    let frame = 0;
+    const read = () => {
+      frame = 0;
+      // Walk back over the newest turn's assistant parts (the Work failure rows, then the host's own closing text); the owner's message ends the turn.
+      const anchors = Array.from(surface.querySelectorAll(".agentlas-chat-message-anchor"));
+      let out = false;
+      for (let index = anchors.length - 1; index >= 0; index -= 1) {
+        const anchor = anchors[index];
+        if (!anchor.querySelector(".agentlas-chat-answer")) break;
+        if (anchor.querySelector('[data-terminal-error="insufficient_credits"]')) { out = true; break; }
+      }
+      setCreditsOut(out);
+    };
+    const observer = new MutationObserver(() => { if (!frame) frame = requestAnimationFrame(read); });
+    observer.observe(surface, { childList: true, subtree: true, attributes: true, attributeFilter: ["data-terminal-error"] });
+    read();
+    return () => { observer.disconnect(); if (frame) cancelAnimationFrame(frame); };
+  }, [validProject, activeChatId, loading]);
+  const chooseAnotherModel = () => surfaceRef.current?.querySelector<HTMLElement>("[data-one-composer-trigger=model]")?.click();
   const selectConversation = (chatId: string) => {
     if (!project || project.ownerScope !== owner.current || !chats.some(chat => chat.id === chatId)) return;
     refreshSequence.current += 1; financeRememberWorkChat(project.ownerScope, project.projectId, chatId); activeChat.current = chatId; setActiveChatId(chatId);
   };
-  return <section className={styles.root} aria-label={l("Finance 대화", "Finance conversations")}>
+  return <section className={styles.root} data-credits-out={creditsOut ? "true" : undefined} aria-label={l("Finance 대화", "Finance conversations")}>
     <header className={styles.toolbar}>
       <label className={styles.selector}><span className={styles.srOnly}>{l("대화 선택", "Choose conversation")}</span><select value={validProject ? activeChatId : ""} disabled={loading || creating || !validProject || !chats.length} onChange={event => selectConversation(event.target.value)}>
         {!chats.length && <option value="">{l("대화", "Conversation")}</option>}
@@ -201,6 +241,7 @@ export function FinanceWorkChat({ ownerScope, provisionProject, listAnalysts }: 
       <button type="button" className={styles.newChat} onClick={() => void newConversation()} disabled={loading || creating || !validProject}><IconPlus size={17}/><span>{creating ? l("만드는 중…", "Creating…") : l("새 대화", "New conversation")}</span></button>
     </header>
     {error && <div className={styles.error} role="alert"><span>{error}</span>{!validProject && <button type="button" onClick={() => setAttempt(value => value + 1)}>{l("다시 시도", "Retry")}</button>}</div>}
-    {loading ? <p className={styles.status} role="status">{l("Finance 대화를 여는 중…", "Opening Finance conversations…")}</p> : validProject && activeChatId ? <div className={styles.surface}><ComposerMenuExtensions.Provider value={menuExtensions}><WorkChatSurface key={`${ownerScope}:${activeChatId}`} chatId={activeChatId} embedded onNewSession={newConversation}/></ComposerMenuExtensions.Provider></div> : !error && <p className={styles.status}>{l("새 대화로 시작하세요.", "Start a new conversation.")}</p>}
+    {creditsOut && <div className={styles.credits} role="status"><span>{creditsOutSentence(ko)}</span><button type="button" className={styles.creditsPrimary} onClick={() => openPricing("ai-credits")}>{l("크레딧 충전", "Top up credits")}</button><button type="button" onClick={chooseAnotherModel}>{l("다른 모델 선택", "Choose another model")}</button></div>}
+    {loading ? <p className={styles.status} role="status">{l("Finance 대화를 여는 중…", "Opening Finance conversations…")}</p> : validProject && activeChatId ? <div ref={surfaceRef} className={styles.surface} style={{ "--finance-empty-title": JSON.stringify(l("시장, 자산, 보유 종목에 대해 물어보세요", "Ask about markets, assets or your holdings")), "--finance-credits-out": JSON.stringify(creditsOutSentence(ko)) } as CSSProperties}><ComposerMenuExtensions.Provider value={menuExtensions}><WorkChatSurface key={`${ownerScope}:${activeChatId}`} chatId={activeChatId} embedded onNewSession={newConversation}/></ComposerMenuExtensions.Provider>{onStarter && <div className={styles.starters} role="group" aria-label={l("시작 질문", "Starter questions")}>{financeStarterPrompts(ko).map(text => <button key={text} type="button" onClick={() => onStarter(text)}>{text}</button>)}</div>}</div> : !error && <p className={styles.status}>{l("새 대화로 시작하세요.", "Start a new conversation.")}</p>}
   </section>;
 }

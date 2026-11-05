@@ -3,6 +3,7 @@
 import { useId, useState } from "react";
 import { IconCheck, IconChevronDown, IconChevronRight, IconPlus, IconSearch } from "@/components/Icon";
 import type { FinanceAsset, FinanceSearchResult, FinanceSecurityIdentity } from "@shared/finance";
+import { financeNote } from "./FinanceMessage";
 import styles from "./FinanceAssetResults.module.css";
 
 interface FinanceAssetResultsProps {
@@ -69,6 +70,6 @@ export function FinanceAssetResults({ result, ko, query, selectedAssetId, watchl
   return <section className={styles.results} aria-label={query ? `${ko ? "자산 검색 결과" : "Asset search results"}: ${query}` : ko ? "자산 검색 결과" : "Asset search results"}>
     {query && <p className={styles.query}>{query}</p>}
     {result.assets.length ? <><ul className={styles.list}>{shown.map(asset => <AssetRow key={asset.id} asset={asset} identity={result.identities?.find(identity => identity.assetId === asset.id)} ko={ko} selected={selectedAssetId === asset.id} added={watchlistIds.has(asset.id)} disabled={disabled} onSelect={onSelect ? () => onSelect(asset) : undefined} onWatchlist={onWatchlist ? () => onWatchlist(asset) : undefined} onResearch={onResearch ? () => onResearch(asset) : undefined}/>)}</ul>
-      {result.assets.length > shown.length && <button type="button" className={styles.more} onClick={() => setVisible(count => count + 8)}>{ko ? "더 보기" : "Show more"} · {shown.length}/{result.assets.length}</button>}</> : <p className={styles.empty}>{ko ? "검색 결과가 없습니다. 회사명이나 티커를 바꿔보세요." : "No results. Try another company name or symbol."}</p>}
+      {result.assets.length > shown.length && <button type="button" className={styles.more} onClick={() => setVisible(count => count + 8)}>{ko ? "더 보기" : "Show more"} · {shown.length}/{result.assets.length}</button>}</> : <p className={styles.empty} role="status">{result.warnings?.some(w => /finance_[a-z0-9_]+/.test(w) && !/latin_script|duplicate_dates/.test(w)) ? financeNote(result.warnings.find(w => /finance_[a-z0-9_]+/.test(w))!, ko) : ko ? "검색 결과가 없습니다. 회사명이나 티커를 바꿔보세요." : "No results. Try another company name or symbol."}</p>}
   </section>;
 }

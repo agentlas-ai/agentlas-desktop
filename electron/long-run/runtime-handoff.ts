@@ -217,6 +217,12 @@ export function reserveGoalRuntimeSelection(input: GoalRuntimeSelectionRequest):
 function fileGoalHandoff(target: NonNullable<ReturnType<typeof goalHandoffTarget>>, requested: RuntimeSelection,
   actorKind: "user" | "host"): { selectionRevision: number } {
   const previous = latest(target.run.id);
+  // Asking again for the choice that is already waiting is the same request (a retry or a double click), not a new revision:
+  // run a842df5f has two identical `requested` rows written in the same second.
+  if (previous?.state === "pending" && previous.goalId === target.run.goalId && previous.goalRevision === target.revision.revision
+    && previous.chatId === target.chat.id && !previous.origin && sameExactSelection(previous.requested, requested)) {
+    return { selectionRevision: previous.selectionRevision };
+  }
   const selectionRevision = (previous?.selectionRevision ?? 0) + 1;
   appendLongRunEvent({ runId: target.run.id, kind: "run.goal_runtime_selection", actorKind,
     payload: { goalId: target.run.goalId, goalRevision: target.revision.revision, chatId: target.chat.id,

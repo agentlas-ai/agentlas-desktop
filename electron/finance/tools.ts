@@ -13,7 +13,14 @@ import { FINANCE_NATIVE_VIEW, FinanceNativeResultSchema, type FinanceNativeResul
 import { financeReportSourceRecords, type FinanceReportSourceRecord } from '../../shared/finance-report-presentation';
 import type { UiInstanceView } from '../../shared/ui-instances';
 import { financeQueryDrawsSeries } from '../../shared/finance-native-transcript';
-import { FinanceCanvasInputSchema, financeCanvasLine, type FinanceCanvasBlock, type FinanceCanvasChart } from '../../shared/finance-canvas';
+import { FinanceCanvasInputSchema } from '../../shared/finance-canvas';
+import { canvasLine, type CanvasLine } from '../../shared/canvas';
+import { canvasInputJsonSchema } from './canvas-input-schema';
+import { buildCanvasCard } from '../canvas/present';
+import { presentCanvasCard } from './canvas-present';
+import { registerCanvasDomain, type CanvasSeriesRequest } from '../canvas/registry';
+import { CANVAS_PORTS } from './canvas-ports';
+import { canvasGuideReadInTurn, canvasSeriesReadInTurn, canvasTurnKey, type CanvasSeriesRead } from '../canvas/turn-state';
 import { FINANCE_GUIDES_REVISION, FINANCE_GUIDE_TOPICS, financeGuide, financeGuideMenu } from '../../shared/finance-guides';
 
 type Outcome = { status: 'ok'; financeReceipt?: FinanceReceiptReference; nativeUi?: FinanceNativePresentation; /** Absolute paths of files this call wrote: host-only, handed to the run's outputs (harness/run-produced-files.ts), never in the result. */ produced?: readonly string[]; data: unknown } | { status: 'refused' | 'unavailable'; reason: string; next?: string; data?: unknown };
@@ -26,7 +33,7 @@ const factsOnlyForCompanyFacts = (value: { metrics: string[]; facts?: unknown })
 const analystDraftInput = FinanceAnalystDraftSchema.extend({ id: FinanceAnalystIdSchema.refine(value => value.startsWith('custom-')).optional(), expectedRevision: FinanceAnalystRevisionSchema.optional() }).strict()
   .refine(value => (value.id === undefined) === (value.expectedRevision === undefined));
 /** A guide topic the way a model writes it ("Earnings", "macro_regime", "risk") is the guide it names; a word that names no guide asks for the menu. */
-const GUIDE_WORDS: Record<string, string> = { earnings: 'earnings-event', earning: 'earnings-event', results: 'earnings-event', filing: 'earnings-event', macro: 'macro-regime', economy: 'macro-regime', election: 'macro-regime', policy: 'macro-regime', fed: 'macro-regime', etf: 'etf-fund', fund: 'etf-fund', bonds: 'bond-rates', bond: 'bond-rates', rates: 'bond-rates', yields: 'bond-rates', fx: 'fx-commodity', currency: 'fx-commodity', currencies: 'fx-commodity', commodity: 'fx-commodity', commodities: 'fx-commodity', gold: 'fx-commodity', oil: 'fx-commodity', dividend: 'dividend-income', dividends: 'dividend-income', income: 'dividend-income', portfolio: 'portfolio-review', holdings: 'portfolio-review', risk: 'risk-drawdown', drawdown: 'risk-drawdown', volatility: 'risk-drawdown', compare: 'compare-assets', comparison: 'compare-assets', versus: 'compare-assets', theme: 'thematic-research', thematic: 'thematic-research', sector: 'thematic-research', screen: 'thematic-research', claim: 'thesis-check', thesis: 'thesis-check', rumor: 'thesis-check', report: 'report-structure', stock: 'us-stock', company: 'us-stock', us: 'us-stock', korea: 'kr-stock', korean: 'kr-stock', kr: 'kr-stock', kospi: 'kr-stock', crypto: 'crypto', bitcoin: 'crypto', btc: 'crypto' };
+const GUIDE_WORDS: Record<string, string> = { earnings: 'earnings-event', earning: 'earnings-event', results: 'earnings-event', filing: 'earnings-event', macro: 'macro-regime', economy: 'macro-regime', election: 'macro-regime', policy: 'macro-regime', fed: 'macro-regime', etf: 'etf-fund', fund: 'etf-fund', bonds: 'bond-rates', bond: 'bond-rates', rates: 'bond-rates', yields: 'bond-rates', fx: 'fx-commodity', currency: 'fx-commodity', currencies: 'fx-commodity', commodity: 'fx-commodity', commodities: 'fx-commodity', gold: 'fx-commodity', oil: 'fx-commodity', dividend: 'dividend-income', dividends: 'dividend-income', income: 'dividend-income', portfolio: 'portfolio-review', holdings: 'portfolio-review', risk: 'risk-drawdown', drawdown: 'risk-drawdown', volatility: 'risk-drawdown', compare: 'compare-assets', comparison: 'compare-assets', versus: 'compare-assets', theme: 'thematic-research', thematic: 'thematic-research', sector: 'thematic-research', screen: 'thematic-research', planning: 'planning-goal', plan: 'planning-goal', retirement: 'planning-goal', goal: 'planning-goal', savings: 'planning-goal', ownership: 'ownership-activity', insider: 'ownership-activity', insiders: 'ownership-activity', '13f': 'ownership-activity', holders: 'ownership-activity', activist: 'ownership-activity', claim: 'thesis-check', thesis: 'thesis-check', rumor: 'thesis-check', report: 'report-structure', stock: 'us-stock', company: 'us-stock', us: 'us-stock', korea: 'kr-stock', korean: 'kr-stock', kr: 'kr-stock', kospi: 'kr-stock', crypto: 'crypto', bitcoin: 'crypto', btc: 'crypto' };
 export function financeGuideTopic(value: unknown): unknown {
   if (typeof value !== 'string') return value;
   const key = value.trim().toLowerCase().replace(/[\s_]+/g, '-');
@@ -64,7 +71,7 @@ const inputSchemas = {
   'monitor.runs': z.object({ monitorId: id, cursor: z.string().min(1).max(2000).optional(), limit: z.number().int().min(1).max(50).optional() }).strict(),
   'monitor.schedule': z.object({ monitorId: id, scheduleHuman: z.enum(['daily-09:00', 'weekday-09:00', 'hourly', 'every-5m']) }).strict(),
   'monitor.pause': z.object({ monitorId: id }).strict(),
-  present: FinanceCanvasInputSchema,
+  present: FinanceCanvasInputSchema.extend({ guide: z.preprocess(financeGuideTopic, z.enum(FINANCE_GUIDE_TOPICS as [string, ...string[]]).optional()) }),
 };
 type Action = keyof typeof inputSchemas;
 /** Pure reads (main-work recovery may repeat one that lost its answer). Managed provider reads are excluded below. */
@@ -144,6 +151,8 @@ async function reportReadSources(scope:import('./store').FinanceScope,data:unkno
 async function presentFinanceResult(action:Action,raw:Record<string,unknown>,data:unknown,ctx:ToolContext,scope:import('./store').FinanceScope):Promise<FinanceNativePresentation|undefined>{
   if(ctx.dryRun||ctx.chatId==='ui'||!ctx.runId)return undefined;
   if(!['search','query','query.save','calculate','portfolio.value','report.create','report.read','portfolio.propose','present'].includes(action))return undefined;
+  // The answer's own result card is the canvas's presentation (electron/finance/canvas-present.ts), the same for ui.canvas.
+  if(action==='present')return presentCanvasCard(data as Parameters<typeof presentCanvasCard>[0],raw,ctx,()=>scope.assertCurrent());
   try {
     scope.assertCurrent();ctx.signal?.throwIfAborted();
     const {nativePortOwnerScope,retainNativePortResult}=await import('../harness/tool-dispatch');
@@ -234,13 +243,53 @@ export function parseArguments<T extends z.ZodTypeAny>(schema: T, raw: Record<st
 }
 
 /** No Electron import or provider-specific runner: the sealed host context and shared service own every effect. */
+// The guide a turn read first: finance.present is checked against it, so the layout does not depend on the model naming the
+// guide again or switching to another guide whose card fits what it wanted to draw (Codex). Keyed by chat and run; bounded.
+const guideReadInTurn = canvasGuideReadInTurn;
+// The series a turn read (price_history of an asset, a FRED series, an FX pair): a guide card whose chart the model left out is drawn
+// from these, the same reads the answer rests on. Keyed like the guide; bounded.
+type SeriesRead = CanvasSeriesRead & { metric: 'price_history' | 'macro_series' | 'fx_rates' };
+// Both live in electron/canvas/turn-state.ts, shared with ui.canvas, so the two ports check a card against the same reads.
+const seriesReadInTurn = canvasSeriesReadInTurn as Map<string, SeriesRead[]>;
+function rememberSeriesRead(ctx: Pick<ToolContext, 'chatId' | 'runId'>, input: { metrics: string[]; assetIds?: string[]; query?: string; period?: string }): void {
+  if (!ctx.runId) return;
+  const metric = input.metrics[0];
+  const reads: SeriesRead[] = metric === 'price_history' ? (input.assetIds ?? []).map(assetId => ({ assetId, metric, period: input.period }))
+    : (metric === 'macro_series' || metric === 'fx_rates') && input.query?.trim() ? [{ metric, query: input.query.trim(), period: input.period }] : [];
+  if (!reads.length) return;
+  const key = turnKey(ctx), known = seriesReadInTurn.get(key) ?? [];
+  for (const read of reads) if (!known.some(k => k.metric === read.metric && k.assetId === read.assetId && k.query === read.query)) known.push(read);
+  seriesReadInTurn.delete(key); seriesReadInTurn.set(key, known.slice(0, 4));
+  if (seriesReadInTurn.size > 200) seriesReadInTurn.delete(seriesReadInTurn.keys().next().value!);
+}
+const turnKey = canvasTurnKey;
+/** A chart series of a card as the dated line finance.query read for it (price_history closes, a FRED or ECB series, an FX pair); null when nothing came back. */
+async function readFinanceSeries(finance: ReturnType<typeof import('./service').getFinanceService>, scope: import('./store').FinanceScope, series: CanvasSeriesRequest, period: string, signal?: AbortSignal): Promise<CanvasLine | null> {
+  const read = await finance.query(scope, { query: series.query ?? series.label, assetIds: series.metric === 'price_history' ? [series.assetId!] : [], metrics: [series.metric as 'price_history'], period: period as '1Y' }, signal);
+  return read.status === 'ok' || read.status === 'partial' ? canvasLine(read, series.label) : null;
+}
+// Finance's part of the result-card canvas: its guides' layouts and its series reader. Drawing, checking and fitting are the canvas's.
+const financeCanvasScopes = new WeakMap<object, Promise<import('./store').FinanceScope>>();
+registerCanvasDomain({
+  id: 'finance', topics: FINANCE_GUIDE_TOPICS, guides: topic => financeGuide(topic)?.layouts,
+  readSeries: async (series, period, signal, ctx) => {
+    const binding = ctx.hostAccountBinding;
+    if (!binding) return null;
+    let scope = financeCanvasScopes.get(ctx);
+    if (!scope) {
+      scope = (async () => { const service = await import('./service'); const made = await service.captureFinanceScope(binding); made.origin = 'agent'; made.assertCurrent(); await (await import('./experience')).requireFinanceConsent(made); made.assertCurrent(); return made; })();
+      financeCanvasScopes.set(ctx, scope);
+    }
+    return readFinanceSeries((await import('./service')).getFinanceService(), await scope, series, period, signal);
+  },
+});
 export async function callFinanceTool(action: Action, raw: Record<string, unknown>, ctx: ToolContext): Promise<Outcome> {
   if ((writes.has(action) || action === 'portfolio.propose' || action === 'analyst.draft') && ctx.dryRun) return { status: 'refused', reason: 'dry_run' };
   if (writes.has(action) && action !== 'monitor.pause' && ctx.permission !== 'write' && ctx.permission !== 'full') return { status: 'refused', reason: 'permission_read_only' };
   // An Analyst is saved only by the owner's press of the confirmation card finance.analyst.draft showed (harness/owner-confirm.ts), never by a model call.
   // A method guide is fixed host content: no account, no source, no receipt.
   if (action === 'guide') {
-    try { const { topic } = parseArguments(inputSchemas.guide,raw,action); return { status: 'ok', data: topic ? { revision: FINANCE_GUIDES_REVISION, guide: financeGuide(topic) } : { revision: FINANCE_GUIDES_REVISION, topics: financeGuideMenu(), next: 'Call finance.guide again with one topic for its ordered tool steps, how to read the results, what the sources cannot tell and the shape of the answer.' } }; }
+    try { const { topic } = parseArguments(inputSchemas.guide,raw,action); if (topic && ctx.runId && !guideReadInTurn.has(turnKey(ctx))) { guideReadInTurn.set(turnKey(ctx), topic); if (guideReadInTurn.size > 200) guideReadInTurn.delete(guideReadInTurn.keys().next().value!); } return { status: 'ok', data: topic ? { revision: FINANCE_GUIDES_REVISION, guide: financeGuide(topic) } : { revision: FINANCE_GUIDES_REVISION, topics: financeGuideMenu(), next: 'Call finance.guide again with one topic for its ordered tool steps, how to read the results, what the sources cannot tell and the shape of the answer.' } }; }
     catch (error) { if (error instanceof z.ZodError) return { status: 'refused', reason: 'finance_arguments_invalid', next: `Pass no argument for the topic list, or topic as one of: ${FINANCE_GUIDE_TOPICS.join(', ')}.` }; throw error; }
   }
   let ownerCard: { instanceId: string; chatId: string } | null = null;
@@ -297,7 +346,7 @@ export async function callFinanceTool(action: Action, raw: Record<string, unknow
       case 'portfolio.value':data=await finance.valuePortfolio(scope,parseArguments(inputSchemas['portfolio.value'],raw,action),ctx.signal);break;
       case 'calculate':data=await finance.calculate(scope,parseArguments(inputSchemas.calculate,raw,action),ctx.signal);break;
       case 'asset.add': data = await finance.addAsset(scope, parseArguments(inputSchemas['asset.add'],raw,action), ctx.signal); break;
-      case 'query': data = await finance.query(scope, parseArguments(inputSchemas.query,raw,action), ctx.signal); break;
+      case 'query': { const input = parseArguments(inputSchemas.query,raw,action); data = await finance.query(scope, input, ctx.signal); if (data && typeof data === 'object' && ['ok','partial'].includes(String((data as { status?: unknown }).status))) rememberSeriesRead(ctx, input as { metrics: string[]; assetIds?: string[]; query?: string; period?: string }); break; }
       case 'portfolio.propose': data = { ...await finance.proposePortfolio(scope, parseArguments(inputSchemas['portfolio.propose'],raw,action)), note: PORTFOLIO_PROPOSAL_NOTE }; break;
       case 'query.save': data = await finance.queryAndSave(scope, parseArguments(inputSchemas['query.save'],raw,action), ctx.signal); break;
       case 'apply': {
@@ -339,26 +388,16 @@ export async function callFinanceTool(action: Action, raw: Record<string, unknow
       case 'monitor.schedule': data = await finance.schedule(scope, parseArguments(inputSchemas['monitor.schedule'],raw,action)); break;
       case 'monitor.pause': data = await finance.pause(scope, parseArguments(inputSchemas['monitor.pause'],raw,action)); break;
       case 'present': {
-        const args = parseArguments(inputSchemas.present,raw,action);
-        const warnings: string[] = [];
-        // A chart's series are never the model's: the host reads each one (finance.query) and draws those, or names what it could not read.
-        const blocks: FinanceCanvasBlock[] = [];
-        for (const block of args.blocks) {
-          if (block.type !== 'chart') { blocks.push(block); continue; }
-          const period = block.from && Date.now() - Date.parse(`${block.from}T00:00:00Z`) > 25 * 864e5 && block.period === '1M' ? '3M' : block.period;
-          const lines: FinanceCanvasChart['lines'] = [], missing: string[] = [];
-          for (const series of block.series) {
-            const label = series.label ?? series.query ?? series.assetId ?? series.metric;
-            try {
-              const read = await finance.query(scope, { query: series.query ?? label, assetIds: series.metric === 'price_history' ? [series.assetId!] : [], metrics: [series.metric], period }, ctx.signal);
-              const line = read.status === 'ok' || read.status === 'partial' ? financeCanvasLine(read, label) : null;
-              if (line) lines.push(block.from ? { ...line, points: line.points.filter((point, i, all) => point.date >= block.from! || all[i + 1]?.date >= block.from!) } : line); else missing.push(label);
-            } catch { ctx.signal?.throwIfAborted(); missing.push(label); }
-          }
-          if (missing.length) warnings.push(`finance_chart_series_unavailable: ${missing.join(', ')}`);
-          blocks.push({ type: 'chart', ...(block.title ? { title: block.title } : {}), ...(block.width ? { width: block.width as FinanceCanvasChart['width'] } : {}), mode: (block.mode as 'level' | 'change' | undefined) ?? (lines.length > 1 ? 'change' : 'level'), lines, annotations: block.annotations, missing });
-        }
-        data = { view: { kind: 'canvas', ...args, blocks }, warnings };
+        const { guide: named, ...args } = parseArguments(inputSchemas.present,raw,action);
+        // The turn's guide is the first one it read: later reads are related lookups, not a new answer type (Codex read the right guide,
+        // then a second one whose card fit the table it wanted, and named that).
+        const first = guideReadInTurn.get(turnKey(ctx)), guide = first ?? named;
+        // The check, the fit, the chart fill and the series reads are the canvas's (electron/canvas/present.ts), the same for ui.canvas.
+        // A card follows a method guide: with none named and none read in this turn there is no layout to hold it to.
+        const reads = seriesReadInTurn.get(turnKey(ctx));
+        data = await buildCanvasCard(args, { guide, named, first, layouts: guide ? financeGuide(guide)?.layouts : undefined, warningPrefix: 'finance', reads,
+          noGuideMessage: `Call finance.guide with the topic that fits this answer first, or pass guide; its card says which blocks to use. Topics: ${FINANCE_GUIDE_TOPICS.join(', ')}.`,
+          readSeries: (series, period) => readFinanceSeries(finance, scope, series, period, ctx.signal), signal: ctx.signal });
         break;
       }
     }
@@ -380,6 +419,9 @@ export async function callFinanceTool(action: Action, raw: Record<string, unknow
     if(action==='portfolio.propose'&&nativeUi?.status!=='presented')return { status: 'unavailable', reason: 'finance_ui_not_presented', next: 'No review card could be shown, so nothing was proposed. The owner can add holdings from the Finance screen (photo or manual entry).' };
     return { status: 'ok', financeReceipt, ...(nativeUi?{nativeUi}:{}), ...(produced?{produced}:{}), data };
   } catch (error) {
+    // A card refused for its layout says exactly what to send again: a refused card was often not sent again (Codex).
+    const cardLayout = action === 'present' && error instanceof z.ZodError ? error.issues.find(issue => issue.path.join('.') === 'blocks' || issue.path.join('.') === 'guide')?.message : undefined;
+    if (cardLayout) return { status: 'refused', reason: 'finance_arguments_invalid', next: `${cardLayout} Call finance.present again now with those blocks; a chart needs only its series named (metric macro_series with a FRED id, price_history with an asset id from finance.search, or fx_rates with BASE/QUOTE): the host reads the numbers.`, data: { issues: (error as z.ZodError).issues.slice(0, 8).map((issue: z.ZodIssue) => ({ path: issue.path.join('.'), message: issue.message })) } };
     if (error instanceof z.ZodError) return { status: 'refused', reason: 'finance_arguments_invalid', next: 'Read the operation schema and supply its exact fields.', ...(action === 'analyst.draft' || action === 'present' ? { data: { issues: error.issues.slice(0, 8).map(issue => ({ path: issue.path.join('.'), message: issue.message })) } } : {}) };
     if (action === 'portfolio.propose' && error instanceof Error && error.message === 'finance_portfolio_rows_invalid') return { status: 'refused', reason: 'finance_portfolio_rows_invalid', data: { issues: (error as Error & { issues?: unknown }).issues ?? [] }, next: 'Fix the listed fields (null for anything not visible; unrecognized keys are refused) and call finance.portfolio.propose again. Nothing was shown to the owner.' };
     const message = error instanceof Error ? error.message : '';
@@ -466,35 +508,11 @@ const descriptors: { action: Action; purpose: string; required: string[]; inputS
   { action: 'monitor.runs', purpose: 'Read a bounded snapshot page of actual Finance monitor runs and their report references, or explicit index-building progress.', required: ['monitorId'], inputSchema: schema(['monitorId'], { monitorId: key, cursor: text, limit: { type: 'integer', minimum: 1, maximum: 50 } }) },
   { action: 'monitor.schedule', purpose: 'Enable an existing Finance monitor through the host scheduler.', required: ['monitorId', 'scheduleHuman'], inputSchema: schema(['monitorId', 'scheduleHuman'], { monitorId: key, scheduleHuman: { enum: ['daily-09:00', 'weekday-09:00', 'hourly', 'every-5m'] } }) },
   { action: 'monitor.pause', purpose: 'Pause future executions of the bound Finance monitor without requiring a view revision.', required: ['monitorId'], inputSchema: schema(['monitorId'], { monitorId: key }) },
-  { action: 'present', purpose: 'Show the owner a result card under your answer text; an answer that reports figures, from Finance or the web, ends with one call after your reads. Compose it from blocks: kpis (headline figures with prior values), bars (one or two series per row), ranges (low–high bands), chart (the host reads and draws the series), leans (direction rows with a reason), table, heatmap, allocation, timeline, checklist, gauge, note. Use only what you read this turn and give its sources. Amounts are in full units (481000000, not 481) or text like "481.0M". A 12-column grid: widths full, two_thirds, half, third.', required: ['title', 'blocks', 'sources'], inputSchema: (() => {
-    const s = (maxLength: number) => ({ type: 'string', maxLength }), amount = { type: ['number', 'string'] }, units = { enum: ['usd', 'usd_per_share', 'percent', 'count', 'x', 'bp', 'krw', 'eur', 'jpy', 'gbp', 'cny', 'text'] }, tones = { enum: ['up', 'down', 'warn', 'info', 'neutral'] };
-    const common = { title: s(80), width: { enum: ['full', 'two_thirds', 'half', 'third'] } }, day = { type: 'string', format: 'date' };
-    const blockOf = (type: string, required: string[], properties: Record<string, unknown>) => ({ type: 'object', additionalProperties: false, required: ['type', ...required], properties: { type: { const: type }, ...common, ...properties } });
-    return { type: 'object', additionalProperties: false, required: ['title', 'blocks', 'sources'], properties: {
-      title: s(80), badge: { ...s(12), description: 'A ticker or region.' }, meta: s(120),
-      chips: { type: 'array', maxItems: 4, items: schema(['text'], { text: s(60), tone: tones, icon: { enum: ['up', 'down', 'clock', 'alert', 'target', 'check', 'none'] } }) },
-      lead: { ...schema([], { asked: { ...s(60), description: 'The owner\'s word for the entity, when it differs (Halo).' }, matched: { ...s(120), examples: ['Halozyme Therapeutics · HALO'] } }), description: 'What the owner\'s words were matched to; omit when nothing was resolved.' },
-      blocks: { type: 'array', minItems: 1, maxItems: 12, items: { oneOf: [
-        blockOf('kpis', ['items'], { items: { type: 'array', minItems: 1, maxItems: 6, items: schema(['label', 'value'], { label: s(40), value: amount, unit: units, prior: amount, change: { type: 'number', description: 'Percent; computed from prior when omitted.' }, note: s(60), tone: tones }) } }),
-        blockOf('bars', ['rows'], { unit: units, series: { type: 'array', maxItems: 2, items: s(30) }, rows: { type: 'array', minItems: 1, maxItems: 12, items: schema(['label', 'values'], { label: s(40), values: { type: 'array', minItems: 1, maxItems: 2, items: amount }, note: s(40) }) } }),
-        blockOf('ranges', ['items'], { unit: units, change: { enum: ['raised', 'maintained', 'lowered', 'new', null] }, items: { type: 'array', minItems: 1, maxItems: 5, items: schema(['label', 'low', 'high'], { label: s(40), low: amount, high: amount, unit: units, marker: amount, markerLabel: s(24) }) } }),
-        blockOf('chart', ['series'], { series: { type: 'array', minItems: 1, maxItems: 4, items: schema([], { assetId: { ...key, description: 'price_history: an asset finance.search returned or a saved one.' }, metric: { enum: ['price_history', 'macro_series', 'fx_rates'] }, query: { ...s(80), description: 'macro_series: a FRED id; fx_rates: BASE/QUOTE.' }, label: s(40) }) }, period: { enum: ['1M', '3M', '1Y', '5Y', 'all'] }, mode: { enum: ['level', 'change'] }, from: day, annotations: { type: 'array', maxItems: 4, items: schema(['date', 'label'], { date: day, label: s(36) }) } }),
-        blockOf('leans', ['rows'], { rows: { type: 'array', minItems: 1, maxItems: 10, items: schema(['name', 'direction', 'low', 'high', 'reason'], { name: s(48), direction: { enum: ['supportive', 'pressure', 'mixed', 'unclear', 'depends'] }, low: { type: 'number', minimum: -2, maximum: 2 }, high: { type: 'number', minimum: -2, maximum: 2 }, reason: s(160) }) } }),
-        blockOf('table', ['columns', 'rows'], { columns: { type: 'array', minItems: 1, maxItems: 8, items: schema(['label'], { label: s(30), format: { enum: ['text', 'number', 'usd', 'percent', 'change', 'multiple'] } }) }, rows: { type: 'array', minItems: 1, maxItems: 20, items: { type: 'array', maxItems: 8, items: { type: ['string', 'number', 'null'] } } } }),
-        blockOf('heatmap', ['rows', 'columns', 'values'], { rows: { type: 'array', maxItems: 12, items: s(30) }, columns: { type: 'array', maxItems: 12, items: s(16) }, values: { type: 'array', maxItems: 12, items: { type: 'array', maxItems: 12, items: { type: ['number', 'null'] } } }, format: { enum: ['percent', 'change', 'number', 'correlation'] } }),
-        blockOf('allocation', ['items'], { items: { type: 'array', minItems: 1, maxItems: 12, items: schema(['label', 'weight'], { label: s(30), weight: { type: 'number' }, target: { type: 'number' }, note: s(30) }) } }),
-        blockOf('timeline', ['items'], { items: { type: 'array', minItems: 1, maxItems: 10, items: schema(['date', 'label'], { date: day, label: s(48), detail: s(120), tone: tones }) } }),
-        blockOf('checklist', ['items'], { items: { type: 'array', minItems: 1, maxItems: 10, items: schema(['text', 'state'], { text: s(90), state: { enum: ['pass', 'fail', 'watch', 'unknown'] }, detail: s(140) }) } }),
-        blockOf('gauge', ['label', 'value', 'min', 'max'], { label: s(40), value: amount, min: amount, max: amount, unit: units, low: s(20), high: s(20), note: s(120) }),
-        blockOf('note', ['text'], { badge: s(12), verdict: schema(['text'], { text: s(30), tone: tones }), text: { ...s(400), description: '**bold** marks a key phrase.' } }),
-      ] } },
-      sources: { type: 'array', minItems: 1, maxItems: 8, items: schema(['title', 'url'], { title: s(160), url: { type: 'string', format: 'uri' } }) },
-    } };
-  })() },
+  { action: 'present', purpose: 'Show the owner a result card under your answer text; an answer that reports figures, from Finance or the web, ends with one call after your reads. Compose it from blocks: kpis (headline figures with prior values), bars (one or two series per row), ranges (low–high bands), chart (the host reads and draws the series), leans (direction rows with a reason), table, heatmap, allocation, timeline, checklist, gauge, note. Use only what you read this turn and give its sources. Amounts are in full units (481000000, not 481) or text like "481.0M". A 12-column grid: widths full, two_thirds, half, third.', required: ['title', 'blocks', 'sources'], inputSchema: canvasInputJsonSchema({ enum: FINANCE_GUIDE_TOPICS, description: 'The finance.guide topic whose card these blocks follow; the host checks them against its layouts and sets their widths.' }) },
 ];
 const managedFinanceHostAtImport=wasManagedOneConfigured();
-export const FINANCE_PORTS = descriptors.map(({ action, purpose, required, inputSchema }) => {
-  composeDeclaredPrompt([{ id: `tool.finance.${action}.schema`, revision: action==='query.save'?7:action==='query'?6:action==='apply'?3:['calculate','report.create','portfolio.propose','present'].includes(action)?2:1, stability: 'versioned-content', changeTriggers: ['release', 'output-schema'], text: JSON.stringify(inputSchema) }]);
+const FINANCE_ACTION_PORTS = descriptors.map(({ action, purpose, required, inputSchema }) => {
+  composeDeclaredPrompt([{ id: `tool.finance.${action}.schema`, revision: action==='query.save'?7:action==='query'?6:action==='apply'?3:action==='present'?3:['calculate','report.create','portfolio.propose'].includes(action)?2:1, stability: 'versioned-content', changeTriggers: ['release', 'output-schema'], text: JSON.stringify(inputSchema) }]);
   return { operationId: `finance.${action}`, kind: writes.has(action) ? 'command' as const : 'query' as const, required, inputSchema,
     ...(action === 'monitor.pause' ? { terminalTargetKeys: ['monitorId'] as const, terminalUnderReadPermission: true as const } : {}),
     ...(action === 'monitor.run' ? { callTimeoutMs: FINANCE_MONITOR_RUN_TIMEOUT_MS } : {}),
@@ -504,6 +522,8 @@ export const FINANCE_PORTS = descriptors.map(({ action, purpose, required, input
     purpose: composeDeclaredPrompt([{ id: `tool.finance.${action}.description`, revision: action === 'query.save' ? 2 : action === 'present' ? 4 : action === 'query' ? 4 : 1, stability: 'fixed-policy', changeTriggers: ['release'], text: purpose }]),
     handler: (args: Record<string, unknown>, ctx: HarnessCallContext) => callFinanceTool(action, args, ctx) };
 });
+// ui.canvas (electron/finance/canvas-ports.ts) is registered here until electron/harness/capability-ports.ts spreads CANVAS_PORTS itself (that file was being edited by another session).
+export const FINANCE_PORTS = [...FINANCE_ACTION_PORTS, ...CANVAS_PORTS];
 installManagedFinanceHostPolicy(FINANCE_PORTS);
 // analyst r2 (2026-10-28): the retired analyst_draft name corrected to the declared finance.analyst.draft; first registered here (its bytes reached the model through skill.read unregistered).
 const FINANCE_SKILL_REVISION: Record<string, number> = { index: 13, research: 6, workspace: 3, monitor: 3, analyst: 2 };

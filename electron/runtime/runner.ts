@@ -707,7 +707,7 @@ export function validatedRunnerNativeControlState(input: unknown): Readonly<Runn
 export interface RunnerEvents {
   /** Published after exact native turn ACK; null synchronously withdraws this run's handle. */
   onNativeTurnController?: (controller: RunnerNativeTurnController | null, state?: Readonly<RunnerNativeControlState>) => void;
-  /** 토큰 또는 줄 단위 partial 출력 */
+  /** 지금까지의 답변 전체(snapshot) — 조각(delta)이 아니다. 받는 쪽은 이어 붙이지 않고 최신 호출로 교체한다(partial-snapshot.ts). */
   onPartial: (chunk: string) => void;
   /** 사용자에게 보일 상태 줄 — locale 적용된 완성 문자열 */
   onStatus: (status: string, activity?: McpInvocationEvent["activity"]) => void;
@@ -1617,6 +1617,9 @@ export type HostJudgmentPromptProfile = "host-judgment";
 
 /** 표준 시스템 프롬프트 — 에이전트 프롬프트 앞에 붙는 안전 헤더.
  *  명시적으로 선택된 UI 언어를 모든 사용자 노출 텍스트의 기준으로 쓴다. */
+/** Runtimes whose tool loop is Agentlas's own (local-tool-loop.ts): MCP server instructions never reach the model there. */
+const LOCAL_LOOP_RUNTIME_KINDS: ReadonlySet<string> = new Set(["byok", "ollama", "lmstudio", "mlx", "agentlas", "agentlas-local"]);
+
 export function wrapSystemPrompt(
   agentSystemPrompt: string,
   locale: RuntimeLocale,
@@ -1717,6 +1720,11 @@ export function wrapSystemPrompt(
     connectors = registry.listInstalledServers().filter((server) => server.enabled
       && (!runMenu || (server.catalogId ? toolIdInMenu(runMenu, server.catalogId, pluginTools) : !runMenu.restricted))).map((server) => server.catalogId ?? server.id).sort();
   } catch { connectors = []; }
+  // Model-picks mode on a tool loop that does not read MCP server instructions: the installed-tools line goes into the prompt.
+  let installedReach: string[] = [];
+  if (nativeRuntimeKind && LOCAL_LOOP_RUNTIME_KINDS.has(nativeRuntimeKind)) {
+    try { installedReach = (require("../turn-tools/control-server") as typeof import("../turn-tools/control-server")).installedConnectorNames(nativeRuntimeKind); } catch { installedReach = []; }
+  }
   return composePrompt({
     ...base,
     profile: "ordinary",
@@ -1725,6 +1733,7 @@ export function wrapSystemPrompt(
     preferredProviders,
     plugins,
     connectors,
+    installedReach,
     managedLocal: contextProfile === "managed-local",
   }).text;
 }

@@ -67,10 +67,6 @@ export function FinanceConnectedWorkspace() {
     if(!api?.monitorRuns)throw new Error("finance_monitor_ledger_unavailable");
     return api.monitorRuns({monitorId,...page});
   },[api]);
-  const inspectData = useCallback(async (request: import('@shared/finance').FinanceDataConnectionRequest) => {
-    if (!api?.dataConnection) throw new Error('finance_connection_unavailable');
-    return api.dataConnection(request);
-  }, [api]);
   const experience = useCallback(async (request: FinanceExperienceRequest) => {
     if (!api?.experience) throw new Error('finance_experience_unavailable');
     return api.experience(request);
@@ -95,14 +91,15 @@ export function FinanceConnectedWorkspace() {
   if (!ready) return <main role="status" style={{ padding: 32 }}>{locale === "ko" ? "Agentlas Finance를 여는 중…" : "Opening Agentlas Finance…"}</main>;
 
   const currentOwnerScope = financeStore.getSnapshot().workspace.ownerScope;
+  const queueWorkDraft = (text: string, capability?: import("@/lib/work-chat-draft").WorkChatCapabilityRequest) => {
+    const ownerScope = financeStore.getSnapshot().workspace.ownerScope;
+    if (!ownerScope || !text.trim()) return;
+    const id = crypto.randomUUID();
+    setWorkDraft({ ownerScope, draft: { id, text, ...(capability ? { capability } : {}), onConsumed: () => setWorkDraft(current => current?.draft.id === id ? null : current) } });
+  };
   return <WorkChatDraftContext.Provider value={workDraft?.ownerScope === currentOwnerScope ? workDraft.draft : null}><FinanceWorkspace
-    onWorkDraft={(text,capability)=>{
-      const ownerScope = financeStore.getSnapshot().workspace.ownerScope;
-      if (!ownerScope || !text.trim()) return;
-      const id = crypto.randomUUID();
-      setWorkDraft({ ownerScope, draft: { id, text, ...(capability ? { capability } : {}), onConsumed: () => setWorkDraft(current => current?.draft.id === id ? null : current) } });
-    }}
-    workChat={<FinanceWorkChat key={financeStore.getSnapshot().workspace.ownerScope ?? "unbound"} ownerScope={financeStore.getSnapshot().workspace.ownerScope} provisionProject={workProject} listAnalysts={api?.analysts?listAnalysts:undefined}/>}
+    onWorkDraft={queueWorkDraft}
+    workChat={<FinanceWorkChat key={financeStore.getSnapshot().workspace.ownerScope ?? "unbound"} ownerScope={financeStore.getSnapshot().workspace.ownerScope} provisionProject={workProject} listAnalysts={api?.analysts?listAnalysts:undefined} onStarter={text=>queueWorkDraft(text)}/>}
     experienceRefreshVersion={experienceRefreshVersion}
     onPlanning={api?.planning?async(request,signal)=>{assertNotCancelled(signal);const result=await api.planning!(request);assertNotCancelled(signal);return result;}:undefined}
     onPortfolio={api?.portfolio?async(request,signal)=>{
@@ -118,7 +115,6 @@ export function FinanceConnectedWorkspace() {
     onExperience={api?.experience ? experience : undefined}
     onWorldMarkets={api?.worldMarkets ? worldMarkets : undefined}
     onDashboardFeeds={api?.dashboardFeeds ? dashboardFeeds : undefined}
-    onInspectData={api?.dataConnection ? inspectData : undefined}
     onRunMonitor={api?.runMonitor ? async monitor => {
       await financeStore.flush();
       const result = await api.runMonitor!({monitorId:monitor.id});
@@ -138,11 +134,6 @@ export function FinanceConnectedWorkspace() {
       await financeStore.reload();
       assertNotCancelled(signal);
       return result;
-    } : undefined}
-    onConnectData={api && ipc()?.env?.set ? async key => {
-      const value = key.trim();
-      if (!value || value.length > 512) throw new Error("finance_provider_key_invalid");
-      await ipc()!.env.set("ALPHAVANTAGE_API_KEY", value);
     } : undefined}
     onSearch={api?.search ? async (query, signal) => {
       assertNotCancelled(signal);

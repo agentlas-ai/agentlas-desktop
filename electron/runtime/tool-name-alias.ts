@@ -92,3 +92,29 @@ export function unknownToolMessage(requested: string, names: Iterable<string>): 
   const note = bare ? ` ("${bare}" is a tool by itself: call it without the "${requested.slice(0, requested.length - bare.length)}" prefix.)` : "";
   return `Error: unknown tool "${requested}"${near.length ? `. Exact names: ${near.join(", ")}` : ""}${note}`;
 }
+
+/**
+ * One name per tool for records and counts (the same tool was counted under several names). Each runtime
+ * names tools its own way; measured over 30 days of product runs:
+ * - built-ins: Claude Code `Bash` / `WebSearch` / `WebFetch`, Codex `bash` / `web_search`;
+ * - MCP tools: Claude Code, Antigravity and the Agentlas lanes `mcp__<server>__<tool>`, Codex `<server>.<tool>` (runtime/codex.ts).
+ * The canonical form is `<server>/<tool key>`: the server is never dropped (two servers can share a tool name), and the tool part
+ * is toolNameKey'd so a runtime that turns `workforce.goal_context` into `workforce_goal_context` still lands on the same name.
+ * A built-in maps only where the same function was measured under both names; anything else keeps its own name. The name sent
+ * to a runtime is never changed: this is for records, counts and search aliases.
+ */
+const BUILTIN_CANONICAL_TOOL_NAMES: Readonly<Record<string, string>> = {
+  Bash: "shell", bash: "shell",
+  WebSearch: "web.search", web_search: "web.search",
+  WebFetch: "web.fetch",
+};
+
+export function canonicalToolName(name: string): string {
+  const builtin = BUILTIN_CANONICAL_TOOL_NAMES[name];
+  if (builtin) return builtin;
+  const prefixed = /^mcp__(.+?)__(.+)$/u.exec(name);
+  if (prefixed) return `${prefixed[1]!.toLowerCase()}/${toolNameKey(prefixed[2]!)}`;
+  const dotted = /^([a-z0-9][a-z0-9_-]*)\.(.+)$/u.exec(name);
+  if (dotted) return `${dotted[1]}/${toolNameKey(dotted[2]!)}`;
+  return name;
+}

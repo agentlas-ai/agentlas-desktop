@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.3.126 — 2026-11-05
+
+- Reach: a replay now reads static text on macOS, so work that only shows in a display (the Calculator) can be proven satisfied, and a replay no longer fails a presence check on a kind of element its screen cannot show.
+- Tool search is one ranking by word and meaning for every tool, agents included. Hangul app queries are ranked by meaning with operation intents, and an accented word no longer matches a fragment of another word. A model-picks mode skips the pre-run judgment, installed connectors are reachable in the middle of a turn, and local-model runtimes keep the judge in that mode.
+- Every harness refusal carries a plain sentence. The app-window, Reach-in-daemon and CUA-gate paths no longer dead-end, failures are classified from types instead of text, a team packet's completion envelope never shows in an answer, Settings pricing says what to fix instead of a machine reason, and editing an automation keeps its schedule.
+- The prompt compiler sends each canonical block once, which removes 4 to 7 thousand characters from nested-team prompts, and edit forms send only what changed, so triggers, webhook tokens, hub pins, next-run times and other fields are not overwritten on save. Goal, team and host-judge calls stop repeating work and text, team verification reads whole reports instead of cutting them at 8,242 characters, a failed Goal wake says so, and a judgment whose evidence alone is over the packet size goes as one request.
+- Ordinary Work and One turns can search literature and read open-access full text through the Science functions that do not need a project.
+- Finance: a guide's card is checked by the host and drawn from the blocks that were sent, a Finance question is answered instead of becoming an automatic Goal, and there are more method guides (who bought or sold: 13F filings, insiders and activists; planning; screening and macro questions find their guide). Card figures read as models write them (percent, x, 배, 조·억·원, bp, ~, minus), a KPI may show a short word, charts keep their series and never cover each other, a long source name wraps inside its pill, and numbers in a table never break across lines. Alpha Vantage is removed and every Finance data path runs on the keyless free engine, every Finance screen uses plain words with a one-line consent, tools start by themselves, a recurring monitor runs on Agentlas Light when no subscription CLI is active, and prices refresh by themselves when Finance opens and when the window comes back.
+- Installer backups no longer pile up on every machine. Slow keystrokes are recorded as timings only, to tell which wait makes the chat composer lag.
+
+This release binds Agentlas OS v1.2.78 at e13ae0df5ca866888bfff69ae7b69cfdb330e267; public runtime asset `agentlas-os-runtime-v1.2.78.tar.gz` is pinned at SHA-256 `8f7bf3cc0f5c686887e5b207d5f191645aab0eddd992ff1d2783611a9f79fbb1`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.125 — 2026-11-04
 
 Versions 1.3.123 and 1.3.124 were not published as releases; this release carries their changes together with the ones below.

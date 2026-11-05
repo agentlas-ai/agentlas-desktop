@@ -31,6 +31,10 @@ import { appendLongRunEvent } from "../store/long-runs";
 import { agentRunCwd } from "../runtime/exec";
 
 const MAX_FILES = 24;
+/** Candidate names scanned from the conditions' prose. The 24-file cap counts files that EXIST, not names: the pattern also matches
+ * `Next.js`, `e.g`, `docs.google.com`, and 6 of 13 verification attempts in the owner DB stopped at exactly 24 mentions, so real
+ * files after the 24th were never looked at. */
+const MAX_NAMED_CANDIDATES = 256;
 const MAX_HASH_BYTES = 16 * 1024 * 1024;
 const PREVIEW_CHARS = 2_000;
 /** Clock slack between the ledger timestamp and filesystem mtimes. */
@@ -70,7 +74,7 @@ export function namedFiles(texts: readonly string[]): string[] {
       // An extension is letters (optionally with digits): "v1.2.3", "3.5" are versions and numbers, not files.
       if (!/\.[A-Za-z0-9]*[A-Za-z][A-Za-z0-9]*$/.test(name) || /^https?:/i.test(name) || name.includes("..")) continue;
       names.add(name);
-      if (names.size >= MAX_FILES) return [...names];
+      if (names.size >= MAX_NAMED_CANDIDATES) return [...names];
     }
   }
   return [...names];
@@ -131,11 +135,16 @@ export function recordHostFileObservations(input: { longRunId: string; chatId: s
   const observations: HostFileObservation[] = [];
   const seen = new Set<string>();
   for (const name of namedFiles(input.texts)) {
+    if (observations.length >= MAX_FILES) break;
     const observed = observeOne(roots, name, windowStartMs);
     if (!observed || seen.has(`${observed.root}:${observed.relativePath}`)) continue;
     seen.add(`${observed.root}:${observed.relativePath}`);
     const { preview, ...recorded } = observed;
-    const seq = appendLongRunEvent({ runId: input.longRunId, kind: "verification.host_file_observation", actorKind: "host",
+    // The same file with the same bytes and mtime is ONE observation: a verification that is retried (or the next one of the same
+    // Goal) cites the row already written instead of adding another (147 of 197 rows in the owner DB repeated a (run, file, sha256)).
+    const sourceEventId = `host-file:${createHash("sha256").update(JSON.stringify([input.longRunId, observed.root, observed.relativePath,
+      observed.sha256, observed.mtime])).digest("hex")}`;
+    const seq = appendLongRunEvent({ runId: input.longRunId, kind: "verification.host_file_observation", actorKind: "host", sourceEventId,
       payload: { schemaVersion: "agentlas.host-file-observation.v1", verifierAttemptId: input.verifierAttemptId, namedAs: name,
         ...recorded, previewSha256: preview === null ? null : createHash("sha256").update(preview).digest("hex") } });
     observations.push({ ref: `long-run-event:${input.longRunId}:${seq}`, exists: true, namedAs: name, ...observed });

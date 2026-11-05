@@ -3983,6 +3983,7 @@ export class InvocationService {
         hostRecovery: hostRecoveryOf(runReq) !== null,
         nothingActed, replayable: requestIsReplayable(req), userMessageId: boundPromptMessageId, startedAtIso: startedAt,
         goalCarries, queueResends, queueOwnsRetry,
+        goalWake: runReq.promptOrigin === "system" && Boolean(chat.goalId),
       });
       if (decision.action === "recover" && !claimHostRecovery(runId, chat.id, boundPromptMessageId)) {
         ownerFailure = { ...decision, action: "say", plan: "exhausted", line: internalFailureOwnerLine(locale, "exhausted"), reason: "recovery_already_claimed" };
@@ -4010,10 +4011,12 @@ export class InvocationService {
     const persistEmptyFailureNotice = (terminalKind: string, errorCode?: string | null, failure?: McpInvocationEvent["error"], delivery?: "not-dispatched"): void => {
       const abortReason = controller.signal.reason instanceof Error ? controller.signal.reason.message : null;
       // A host-started Goal continuation (promptOrigin "system") stays quiet, except for a cause only the owner can clear
-      // (shared/run-failure-notice.ts OWNER_ACTION_FAILURE_CODES): the waiting Goal says why and what to do (YouTube 2026-10-28).
+      // (shared/run-failure-notice.ts OWNER_ACTION_FAILURE_CODES): the waiting Goal says why and what to do (observed in use),
+      // and for the app's own failure of that wake (decideOwnerFailure plan "goal"): one plain line, never repeated while it is the
+      // chat's latest reply, so a Goal whose wake died inside the app does not look stuck.
       const ownerActionCause = typeof errorCode === "string" && OWNER_ACTION_FAILURE_CODES.has(errorCode);
       if (record.background || emptyFailureNoticePersisted || durableAssistantReplyBound || finalAnswerConfirmedDurable || record.partialText.trim() || runReq.agentAppMode || remoteWorkspaceBinding
-        || (runReq.promptOrigin === "system" && !ownerActionCause) || terminalKind === "invoke_cancelled"
+        || (runReq.promptOrigin === "system" && !ownerActionCause && ownerFailure?.plan !== "goal") || terminalKind === "invoke_cancelled"
         || record.steeringInterruptRequested || isOwnerGoalStopCause(abortReason)) return;
       try {
         // An internal failure is never worded from its code or its exception (shared/owner-failure-class.ts): the host's decision

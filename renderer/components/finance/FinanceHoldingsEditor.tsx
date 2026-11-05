@@ -1,6 +1,6 @@
 "use client";
 
-import { IconAlertTriangle, IconPlus, IconTrash } from "@/components/Icon";
+import { IconEdit, IconPlus, IconTrash } from "@/components/Icon";
 import { financePortfolioInvalidFields, financePortfolioProblems, financePortfolioRowUntouched, type FinancePortfolioDraft, type FinancePortfolioField } from "@shared/finance-portfolio";
 import styles from "./FinanceHoldingsEditor.module.css";
 
@@ -25,9 +25,9 @@ export function FinanceHoldingsProblems({ rows, ko, onFocus }: { rows: readonly 
   const count = problems.reduce((total, item) => total + item.fields.length, 0);
   return (
     <div className={styles.summary} role="status">
-      <IconAlertTriangle size={16} />
+      <IconEdit size={16} />
       <div>
-        <strong>{ko ? `고쳐야 할 값 ${count}개` : `${count} ${count === 1 ? "value needs" : "values need"} attention`}</strong>
+        <strong>{ko ? `확인할 값 ${count}개` : `${count} ${count === 1 ? "value" : "values"} to check`}</strong>
         <ul>{problems.map(item => <li key={item.index}><button type="button" onClick={() => onFocus(item.index + 1, item.fields[0])}>{ko ? `${item.index + 1}행` : `Row ${item.index + 1}`} · {item.fields.map(field => label[field]).join(", ")}</button></li>)}</ul>
       </div>
     </div>
@@ -99,8 +99,8 @@ export function FinanceHoldingsEditor({ rows, ko, disabled, canAdd, layout = "au
                 </td>
                 {invalid.size > 0 && (
                   <td data-field="issues" className={styles.issues} role="status">
-                    <IconAlertTriangle size={14} />
-                    <span>{l("고칠 값: ", "Needs a fix: ")}{[...invalid].map(field => label[field as FinancePortfolioField]).join(" · ")}</span>
+                    <IconEdit size={14} />
+                    <span>{l("확인할 값: ", "To check: ")}{[...invalid].map(field => label[field as FinancePortfolioField]).join(" · ")}</span>
                   </td>
                 )}
               </tr>

@@ -1267,7 +1267,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
         try {
           const capabilityConfigKey = opts?.configKey ?? key;
           const capability = await createTurnToolsCapability(
-            { chatId: callerChatId, runId: opts.turnRunId, tools: opts.turnGoalWaitOnly?.alongside
+            { chatId: callerChatId, runId: opts.turnRunId, runtimeKind: opts?.toolGate?.runtime ?? null, tools: opts.turnGoalWaitOnly?.alongside
               ? [...new Set([...turnToolsFor(opts.turnGoalTools === true, opts.turnAskTool === true), ...TURN_TOOLS_WAIT])]
               : turnToolsFor(opts.turnGoalTools === true, opts.turnAskTool === true, Boolean(opts.turnGoalWaitOnly)),
               ...(opts.turnGoalWaitOnly ? { goalWaitResolver: opts.turnGoalWaitOnly.resolveGoalWait } : {}), dryRun: opts?.toolGate?.simulation === true || opts?.toolGate?.planMode === true,

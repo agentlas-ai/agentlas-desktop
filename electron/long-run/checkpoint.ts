@@ -48,6 +48,19 @@ function materializeProducerInstructionSnapshot(invocationRunId: string | null |
   } catch { return null; }
 }
 
+/** Most evidence references a checkpoint keeps, per kind. Every verification used to hand over ALL of its refs (one `event:` id per tool
+ * event of every earlier invocation), and each wait wake appended one more `wait:` ref, so the list only grew: observed in use,
+ * 581 refs and a 36 KB checkpoint after 14 hours (max 644; 6% of all checkpoint bytes). The newest refs are the ones that matter. */
+export const CHECKPOINT_EVIDENCE_REF_LIMITS = { event: 32, other: 24 } as const;
+/** Newest-last unique refs, bounded per kind (`event:` ids vs invocation, message and wait refs). Order of the survivors is kept. */
+export function boundedCheckpointEvidenceRefs(refs: readonly string[]): string[] {
+  const unique = [...new Set(refs.filter((ref) => typeof ref === "string" && ref.trim()))];
+  const isEvent = (ref: string): boolean => ref.startsWith("event:");
+  const keepEvent = new Set(unique.filter(isEvent).slice(-CHECKPOINT_EVIDENCE_REF_LIMITS.event));
+  const keepOther = new Set(unique.filter((ref) => !isEvent(ref)).slice(-CHECKPOINT_EVIDENCE_REF_LIMITS.other));
+  return unique.filter((ref) => (isEvent(ref) ? keepEvent : keepOther).has(ref));
+}
+
 /** The existing append-only event ledger is the checkpoint store. No second
  * mutable goal record or provider transcript is introduced. */
 export function recordTaskCheckpoint(input: {
@@ -160,7 +173,7 @@ export function recordTaskCheckpoint(input: {
         taskId: tasks.find((task) => task.state !== "completed")?.id ?? null, attempt: input.attempt,
         goalContractRef: revision ? `goal:${run.goalId}:revision:${revision.revision}` : `goal:${run.goalId}`,
         compactedContextRef: null, openQuestions: [...plan.unresolvedQuestions, ...questions.map((question) => `message:${question.id}`)],
-        artifactRefs: artifactVersions.map((artifact) => `artifact:${artifact.artifactId}:revision:${artifact.artifactRevision ?? "unknown"}`), evidenceRefs: input.evidenceRefs,
+        artifactRefs: artifactVersions.map((artifact) => `artifact:${artifact.artifactId}:revision:${artifact.artifactRevision ?? "unknown"}`), evidenceRefs: boundedCheckpointEvidenceRefs(input.evidenceRefs),
         artifactVersions, plan, instructionSnapshot,
         originalConstraintsRef: revision ? `message:${revision.originalRequest.messageId}` : null,
         originalConstraints: revision?.originalRequest.text ?? null,

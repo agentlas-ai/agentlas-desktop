@@ -366,7 +366,14 @@ function checkOutcome(condition: Postcondition | undefined, before: readonly Lea
   if (!condition || !after) return "unknown";
   const role = String(condition.detail?.role ?? ""); const label = norm(String(condition.detail?.label ?? ""));
   const now = after.filter((element) => element.role === role && norm(element.label) === label);
-  if (condition.kind === "element-present") return now.length > 0 ? "satisfied" : "unsatisfied";
+  if (condition.kind === "element-present") {
+    if (now.length > 0) return "satisfied";
+    // A kind of element this screen never shows cannot be judged here: the replay reads the app through the driver's structured elements, which carry buttons
+    // but no static text (dev-app run: 33 elements, no AXStaticText before or after, while the check was the static text "최근 표현식"). That is
+    // "unknown", not a failed run: a failed one would degrade a port that worked. A kind it does show, without the caption, is unsatisfied as before.
+    const shown = after.some((element) => element.role === role) || before.some((element) => element.role === role);
+    return shown ? "unsatisfied" : "unknown";
+  }
   if (condition.kind === "element-value-changed") {
     const was = before.find((element) => element.role === role && norm(element.label) === label);
     // a control this screen never shows (the check was read from another view of the app) cannot be judged here; one that was there and is gone is unsatisfied

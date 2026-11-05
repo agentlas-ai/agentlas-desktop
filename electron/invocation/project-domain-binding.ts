@@ -13,6 +13,8 @@ export interface ProjectDomainBinding {
   readonly baselinePlugins: readonly { readonly slug: string; readonly reason: string }[];
   /** The plugins this domain's conversations list in the tool menu (mcp-tools/domain-tool-menu.ts); absent = the ordinary menu. */
   readonly toolMenu?: readonly string[];
+  /** False when the domain's conversations are answered turn by turn: a message there is never admitted as an automatic Goal. */
+  readonly automaticGoals?: boolean;
 }
 type Actor = { workspaceId: string; userId: string } | null;
 type DomainResolver = ((chatId: string, actor: Actor, expected?: ProjectDomainBinding | null) => ProjectDomainBinding | null)

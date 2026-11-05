@@ -12,7 +12,7 @@ import { llmLogoSrc } from "@/lib/llm-logo";
 import { beginChatSelection, useChatSelectionIntent, readChatSelectionIntent, reconcileChatSelectionIntent } from "@/lib/chat-selection-intent";
 import { readChatForRuntime } from "@/lib/chat-runtime-read";
 import { goalRuntimeRefusalNotice, isOvertakenSelectionCode } from "@/lib/goal-runtime-refusal";
-import { assertOneExplicitEffort, chipRuntimeFor, composerModelLabel, useRunningComposerModel, withOneRuntimeSelection } from "@/lib/one-runtime-chip";
+import { assertOneExplicitEffort, chipRuntimeFor, composerModelLabel, observedRunDiffersFromRequest, useObservedComposerRun, withOneRuntimeSelection } from "@/lib/one-runtime-chip";
 import { runtimeSelectionReceiptMatches } from "@shared/runtime-selection-receipt";
 import { ipcErrorCode } from "@shared/ipc-error-code";
 import { sameRuntimeIdentity, selectionForRuntime } from "@shared/runtime-selection";
@@ -39,7 +39,7 @@ export function OneRuntimeChips({
 }) {
   const draft = draftSelection !== undefined;
   const choice = useChatSelectionIntent(draft ? null : chatId);
-  const runningModel = useRunningComposerModel(draft ? null : chatId);
+  const observedRun = useObservedComposerRun(draft ? null : chatId);
   const [inventory, setInventory] = useState<RuntimeStatus[]>([]);
   const [models, setModels] = useState<OneComposerModelOption[]>([]);
   const [pin, setPin] = useState<{ chatId: string; selection: RuntimeSelection | null } | null>(null);
@@ -247,7 +247,14 @@ export function OneRuntimeChips({
     : draft
       ? shownPin?.model ?? (shownPin ? runtimeModelFallbackLabel(shownPin.kind, locale) : locale === "ko" ? "모델 확인 중…" : "Checking model…")
       : shownPin?.model ?? (shownPin ? runtimeModelFallbackLabel(shownPin.kind, locale) : locale === "ko" ? "모델 확인 중…" : "Checking model…");
-  const modelLabel = composerModelLabel(requestedModelLabel, runningModel, locale);
+  // What the turn is on, or last ran on, when that is not what the chip requests (a fallback): Main's record, named like the picker names it.
+  const observedLabel = observedRun
+    ? (models.find((model) => model.id === observedRun.model && model.runtime.kind === observedRun.kind)?.label
+      ?? observedRun.model ?? runtimeModelFallbackLabel(observedRun.kind as RuntimeStatus["kind"], locale))
+    : null;
+  const differs = Boolean(observedRun && (runtime ?? shownPin) && observedRunDiffersFromRequest(observedRun, (runtime ?? shownPin)!));
+  const modelLabel = composerModelLabel(requestedModelLabel, observedRun?.state === "running" ? observedLabel : null, locale,
+    observedRun?.state === "ran" && differs ? observedLabel : null);
   const effortLabel = runtime?.efforts?.find((effort) => effort.id === runtime.effort)?.label ?? (locale === "ko" ? "기본" : "Default");
   const waiting = choice?.status === "pending" || choice?.status === "unknown";
   const failedChoice = failed || choice?.status === "conflicted";

@@ -95,7 +95,11 @@ export async function scheduleFinanceMonitor(input: FinanceMonitorInput): Promis
       job = updateAutomationGraph(job.id,financeMonitorGraph(input.monitor));
     } else {
       const runtimes = await detectRuntimes(); input.scope.assertCurrent();
-      const runtime = runtimes.find(item => item.active && !item.signInRequired && item.credentialAccess?.status !== "unavailable");
+      // The owner's active runtime when it is usable; otherwise Agentlas serving on Light (a signed-in account, free included,
+      // runs on its weekly allowance and then credits: owner). A monitor never needs a subscription CLI.
+      const active = runtimes.find(item => item.active && !item.signInRequired && item.credentialAccess?.status !== "unavailable");
+      const serving = runtimes.find(item => item.kind === "agentlas");
+      const runtime = active ?? (serving ? { ...serving, model: "agentlas-light" } : undefined);
       const agent = listInstalledAgentsReadOnly().find(item => item.slug === "agentlas-orchestrator");
       if (!runtime || !agent) throw new Error("finance_monitor_runtime_unavailable");
       job = createAutomation({ name: input.monitor.name, scheduleHuman: schedule, timezone, targetType: "agent", targetId: agent.id,

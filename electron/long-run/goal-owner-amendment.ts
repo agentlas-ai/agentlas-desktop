@@ -145,11 +145,21 @@ export async function classifyOwnerGoalAmendment(input: {
   return (await classifyOwnerGoalAmendmentDetailed(input)).label;
 }
 
-function amendmentObjective(currentObjective: string, message: string, at: string): string {
+/**
+ * The objective carries the Goal's text plus one `[Owner update <time>]` block per amendment, capped at OBJECTIVE_MAX. When it is full
+ * the OLDEST WHOLE UPDATE goes first and the Goal's own text stays at the head; the old rule cut the front by characters, so the
+ * Goal's opening was lost first and the rest began mid-sentence (a 4,899-character objective after 6 updates in the owner DB).
+ * Every update's message also stays on the Goal revision (`sourceMessage`), so nothing is lost for good.
+ */
+export function amendmentObjective(currentObjective: string, message: string, at: string): string {
   const update = `[Owner update ${at}] ${message.replace(/\s+/g, " ").trim()}`;
   const room = OBJECTIVE_MAX - update.length - 2;
   if (room <= 0) return update.slice(0, OBJECTIVE_MAX);
-  const base = currentObjective.length > room ? currentObjective.slice(currentObjective.length - room) : currentObjective;
+  if (currentObjective.length <= room) return `${currentObjective}\n\n${update}`;
+  const [head, ...updates] = currentObjective.split(/\n\n(?=\[Owner update )/);
+  while (updates.length && head.length + updates.reduce((sum, item) => sum + item.length + 2, 0) > room) updates.shift();
+  const kept = [head, ...updates].join("\n\n");
+  const base = kept.length > room ? kept.slice(0, room) : kept;
   return `${base}\n\n${update}`;
 }
 

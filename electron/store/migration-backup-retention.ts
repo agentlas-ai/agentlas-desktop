@@ -1,16 +1,16 @@
 /**
- * Storage-pass step: keep at most three managed DB-upgrade copies
+ * Storage-pass step: keep at most MAX_MANAGED_MIGRATION_BACKUPS (one) managed DB-upgrade copies
  * (agentlas.sqlite.migration-backup.v1.*), checked off the main thread.
  *
  * Why here and not in initStore: copies are only made on an update launch,
  * where the install journal stopped the old in-store prune, and every other
  * launch opens the store as a follower (daemon alive), which never pruned. The
- * cap of three therefore never held (owner Mac 2026-10-17: 7 copies, 8.3 GB).
+ * cap therefore never held (owner Mac: 7 copies, 8.3 GB).
  * Dropping those guards would have put ~29 s of synchronous integrity checks
  * before store-ready instead.
  *
- * - Main does one readdir. Three copies or fewer (the steady state) cost
- *   nothing more and start no process.
+ * - Main does one readdir. At most the cap (the steady state) costs
+ *   nothing more and starts no process.
  * - Otherwise a short-lived child (migration-backup-check.ts, started like the
  *   daemon with ELECTRON_RUN_AS_NODE=1) runs pruneManagedMigrationBackups:
  *   the same identity rules, integrity checks only on the copies that stay,

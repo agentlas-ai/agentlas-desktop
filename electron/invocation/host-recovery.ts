@@ -115,6 +115,12 @@ export interface OwnerFailureInput {
   startedAtIso: string;
   /** An active Goal in this room carries the work on by itself (queued, running, waiting). */
   goalCarries: boolean;
+  /**
+   * The turn is the host's own wake of this room's Goal (promptOrigin "system", the chat is bound to a Goal). Its failure is the
+   * Goal's, and the owner reads one plain line for it (the Goal carries the work on), never silence: a Goal whose wake died inside
+   * the app otherwise looked stuck (the failure was logged as a defect row and nothing else).
+   */
+  goalWake?: boolean;
   /** The send queue will send this unconfirmed message once more by itself after telling the model so (earlier-attempt.ts). */
   queueResends: boolean;
   /**
@@ -145,7 +151,7 @@ export function decideOwnerFailure(input: OwnerFailureInput): OwnerFailureDecisi
     const worded: InternalFailurePlan = input.goalCarries && input.ownerTurn && (plan === "uncertain" || plan === "exhausted" || plan === "manual" || plan === "checking") ? "goal" : plan;
     return { verdict, action: "say", plan: worded, line: internalFailureOwnerLine(input.locale, worded), defect: true, reason };
   };
-  if (!input.ownerTurn) return say("background", "not_owner_turn");
+  if (!input.ownerTurn) return say(input.goalWake && input.goalCarries ? "goal" : "background", input.goalWake && input.goalCarries ? "goal_wake_failed" : "not_owner_turn");
   if (input.queueOwnsRetry && !input.hostRecovery) return { verdict, action: "queue", plan: "recovering", line: internalFailureOwnerLine(input.locale, "recovering"), defect: true, reason: "queue_retries" };
   if (input.hostRecovery) return say("exhausted", "recovery_failed");
   if (hostRecoveryRequested(input.db, input.runId)) return say("exhausted", "recovery_already_requested");

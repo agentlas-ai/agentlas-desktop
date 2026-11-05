@@ -186,21 +186,59 @@ function operations(): Operation[] {
   return [...HOST_OPERATIONS, ...fromCatalog];
 }
 
+// Any letter or digit is part of a word: an ASCII-only split cut "résumé" into "r" and "sum", which then matched "summary" .
 const words = (value: string) => value
-  .replace(/([a-z0-9])([A-Z])/g, "$1 $2").toLowerCase().split(/[^a-z0-9가-힣]+/).filter(Boolean);
+  .replace(/([a-z0-9])([A-Z])/g, "$1 $2").toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean);
 
 // Search is deterministic over the operation's own words (path, doc, signature, keywords). No translation table:
 // the model writes the query in English (owner rule 2026-10-13: the host does not judge meaning by word lists).
+/** Three short English requests per operation (generated: scripts/generate-app-operation-intents.cjs). Meaning recall only. */
+import operationIntents from "./operation-intents.generated.json";
+const OPERATION_INTENTS: Readonly<Record<string, readonly string[]>> = (operationIntents as { intents?: Record<string, string[]> }).intents ?? {};
+
+/** Operations nearest in meaning to a query no word matched (the app's local Model2Vec, as harness_search uses); none without it. */
+const NEAREST_BY_MEANING = 5;
+function nearestByMeaning<T extends { path: string; doc?: string; keywords?: readonly string[] }>(query: string, operations: readonly T[]): T[] {
+  let embedder: import("../harness/search-rank").MeaningEmbedder | null = null;
+  try { embedder = require("../memory/local-embedding") as import("../harness/search-rank").MeaningEmbedder; } catch { return []; }
+  const { rankHarnessItemsByMeaning } = require("../harness/search-rank") as typeof import("../harness/search-rank");
+  const items = operations.map((operation) => ({ id: operation.path, name: operation.path, description: operation.doc ?? "",
+    meaningTerms: [...(operation.keywords ?? []), ...(OPERATION_INTENTS[operation.path] ?? [])], operation }));
+  try { return rankHarnessItemsByMeaning(query, items, NEAREST_BY_MEANING, embedder).map((item) => item.operation); } catch { return []; }
+}
+
+/**
+ * A query with Hangul, ranked by words and meaning together (the intents carry the meaning). The catalogue is English, so a Korean
+ * request's word matches are accidental (30 short requests: the word top five held the answer for 3/30). English
+ * queries keep the word ranking alone: fusing meaning into them pushed exact answers down (THOUGHT-EXPERIMENTS.md F3).
+ */
+function rankedByMeaningForHangul<T extends { path: string; doc?: string; keywords?: readonly string[] }>(query: string, operations: readonly T[]): T[] | null {
+  let embedder: import("../harness/search-rank").MeaningEmbedder | null = null;
+  try { embedder = require("../memory/local-embedding") as import("../harness/search-rank").MeaningEmbedder; } catch { return null; }
+  const { rankHarnessItemsByMeaning } = require("../harness/search-rank") as typeof import("../harness/search-rank");
+  const items = operations.map((operation) => ({ id: operation.path, name: operation.path, description: operation.doc ?? "",
+    meaningTerms: [...(operation.keywords ?? []), ...(OPERATION_INTENTS[operation.path] ?? [])], operation }));
+  try {
+    const ranked = rankHarnessItemsByMeaning(query, items, items.length, embedder);
+    return ranked.map((item) => item.operation);
+  } catch { return null; }
+}
+
 function queryTerms(query: string): string[] {
   return [...new Set(words(query))];
 }
 
-type OperationsInput = { query?: unknown; area?: unknown; operation?: unknown; limit?: unknown; offset?: unknown; include_restricted?: unknown };
+type OperationsInput = { query?: unknown; area?: unknown; operation?: unknown; limit?: unknown; offset?: unknown; include_restricted?: unknown;
+  /** false: words only (harness_search deciding whether the app catalogue answers a query at all). */
+  meaning?: unknown };
 export type AppControlOperationsResult = {
   science_installed: boolean; areas?: Array<{ area: string; operations: number; available: number }>; operations?: Array<Record<string, unknown>>;
   total: number; offset?: number; next_offset?: number | null; restricted?: Array<Record<string, unknown>>;
   /** A query that matched nothing and was not English. */
   hint?: string;
+  /** A query no word matched: the operations nearest in meaning (labelled; never in place of a word match). */
+  nearest_by_meaning?: Array<Record<string, unknown>>;
+  nearest_note?: string;
   /** Present only when this process has no window and the window process could not be reached. */
   app_window?: { available: false; code: string; message: string };
 };
@@ -267,6 +305,17 @@ export function appControlOperationsLocal(input: OperationsInput): AppControlOpe
   const limit = typeof input.limit === "number" && Number.isInteger(input.limit) ? Math.min(Math.max(input.limit, 1), 80) : 40;
   let matched = exact ? all.filter(operation => operation.path === exact)
     : area ? all.filter((operation) => operation.path === area || operation.path.startsWith(`${area}.`)) : all;
+  const hangul = /[\u3131-\u318e\uac00-\ud7a3]/u.test(query);
+  const meaningRanked = query && !exact && hangul && input.meaning !== false ? rankedByMeaningForHangul(query, matched) : null;
+  if (meaningRanked?.length) {
+    // The owner rule's map and hint still come with it (the model searches in English).
+    const offset = typeof input.offset === "number" && Number.isInteger(input.offset) ? Math.min(Math.max(input.offset, 0), 10_000) : 0;
+    return { science_installed: science, total: meaningRanked.length, offset, next_offset: offset + limit < meaningRanked.length ? offset + limit : null,
+      areas: areaList(), hint: "operation names and docs are English: search with English words; these are ranked by meaning",
+      operations: meaningRanked.slice(offset, offset + limit).map((operation) => ({ operation: operation.path, args: operation.params, signature: operation.signature,
+        effect: operation.effect, available: available(operation),
+        argument_schema_available: !!(operation.inputSchema ?? HOST_ARGUMENT_SCHEMAS[operation.path] ?? APP_CONTROL_ARGUMENT_SCHEMAS[operation.path]) })) };
+  }
   if (query && !exact) {
     const terms = queryTerms(query);
     const scored = matched.map((operation) => {
@@ -283,9 +332,17 @@ export function appControlOperationsLocal(input: OperationsInput): AppControlOpe
       return { operation, score };
     }).filter((item) => item.score > 0).sort((a, b) => b.score - a.score || a.operation.path.localeCompare(b.operation.path));
     matched = scored.map((item) => item.operation);
-    // Nothing matched: hand back the map rather than an empty answer (and say the catalog is English).
-    if (!matched.length) return { science_installed: science, total: 0, areas: areaList(),
-      ...(/[^\x00-\x7f]/.test(query) ? { hint: "operation names and docs are English: search with English words" } : {}) };
+    // Nothing matched: hand back the map rather than an empty answer (and say the catalog is English). The owner rule
+    // stays: the model searches in English and a miss gets the map and the hint. Since the miss also
+    // carries the few operations nearest in MEANING, labelled as such, so a Korean or paraphrased request is not a dead end;
+    // they never replace a word match (adding meaning to word matches pushed exact English answers down: THOUGHT-EXPERIMENTS.md F3).
+    if (!matched.length) {
+      const nearest = input.meaning === false ? [] : nearestByMeaning(query, all);
+      return { science_installed: science, total: 0, areas: areaList(),
+        ...(/[^\x00-\x7f]/.test(query) ? { hint: "operation names and docs are English: search with English words" } : {}),
+        ...(nearest.length ? { nearest_by_meaning: nearest.map((operation) => ({ operation: operation.path, args: operation.params, effect: operation.effect,
+          available: available(operation) })), nearest_note: "no word matched: these are near in meaning only; read one before calling it" } : {}) };
+    }
   }
   const offset = typeof input.offset === "number" && Number.isInteger(input.offset) ? Math.min(Math.max(input.offset, 0), 10_000) : 0;
   return { science_installed: science, total: matched.length, offset, next_offset: offset + limit < matched.length ? offset + limit : null,

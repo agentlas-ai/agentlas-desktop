@@ -982,6 +982,7 @@ import type { ToolApprovalDecision } from "../shared/types";
 import { installHostToolPermissionPolicy } from "./runtime/host-tool-permission-policy";
 import { readBuilderConversation, readLatestBuilderConversation, writeBuilderConversation, type StoredBuilderConversation } from "./hephaestus/builder-conversation-store";
 import { isCompletedBuildTurn } from "../shared/build-turn";
+import { newestPartialSnapshot } from "./runtime/partial-snapshot";
 import {
   installApprovalOwnerNoteSender,
   resolveBrowserApprovalWithOwnerNote,
@@ -3548,6 +3549,11 @@ export function registerIpcHandlers(): void {
     assertTrustedSitePublishIpcSender(event);
     return (await import("./harness/composer-mentions")).composerPluginMentions(typeof chatId === "string" && chatId.length <= 200 ? chatId : null);
   });
+  // Slow keystrokes the renderer measured (timings only): written to <userData>/diagnostics/input-latency.jsonl.
+  ipcMain.handle("diagnostics:inputLatency", async (event, report: unknown) => {
+    assertTrustedSitePublishIpcSender(event);
+    return (await import("./diagnostics/input-latency")).recordInputLatency(path.join(userDataDir(), "diagnostics"), report);
+  });
   registerAppControlDomainIpc(ipcMain, "harness:uiList", async (chatId: unknown) =>
     (await import("./harness/ui-instances")).listUiInstances(typeof chatId === "string" ? chatId : ""));
   void import("./harness/ui-instances").then(({ onUiInstanceEvent, watchUiInstanceStore }) => {
@@ -5922,7 +5928,7 @@ export function registerIpcHandlers(): void {
           authoring: true,
           onPartial: (chunk) => {
             if (requestOwner.signal.aborted || Date.now() >= interviewDeadline || _e.sender.isDestroyed()) return;
-            partialBuf += chunk;
+            partialBuf = newestPartialSnapshot(partialBuf, chunk, Number.MAX_SAFE_INTEGER, "tail");
             for (const m of partialBuf.matchAll(/"title"\s*:\s*"([^"\\]{1,80})"/g)) {
               const title = m[1];
               if (seenTitles.includes(title)) continue;

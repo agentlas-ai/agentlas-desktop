@@ -295,6 +295,10 @@ export function OneCreateAgentDialog({
   const appliedSeedRef = useRef<number | null>(null);
   const skipNextDraftWriteRef = useRef(false);
   const [mode, setAvatarMode] = useState<AvatarMode>(EMPTY_DRAFT.mode);
+  // Editing a teammate: the avatar is sent only after the owner picks one. The edit effect fills the avatar controls only for a
+  // `character:` icon; a teammate whose face is an uploaded or generated image left them at the new-agent defaults, and a
+  // rename then replaced that image with the default character.
+  const avatarTouchedRef = useRef(false);
   // One edit: profile · mail · directory · domain as top tabs (owner design 2026-09-26 — no single long scroll).
   const [oneTab, setOneTab] = useState<OneEditTab>("profile");
   const [characterId, setCharacterId] = useState<OneCharacterId>(EMPTY_DRAFT.characterId);
@@ -513,6 +517,7 @@ export function OneCreateAgentDialog({
   };
 
   const chooseMode = (nextMode: AvatarMode) => {
+    avatarTouchedRef.current = true;
     setAvatarMode(nextMode);
     setError(null);
     if (nextMode === "original" || nextMode === "sketch") {
@@ -542,6 +547,7 @@ export function OneCreateAgentDialog({
       if (!result.ok || !result.src) throw new Error(result.message || "Image generation did not return an image.");
       const normalized = await normalizeImageSource(result.src);
       if (generationRequestRef.current !== requestId) return;
+      avatarTouchedRef.current = true;
       setGeneratedSrc(normalized);
       setAvatarMode("generated");
     } catch (cause) {
@@ -560,6 +566,7 @@ export function OneCreateAgentDialog({
     setError(null);
     try {
       const normalized = await normalizeImage(file);
+      avatarTouchedRef.current = true;
       setUploadedSrc(normalized);
       setUploadedName(file.name);
       setAvatarMode("upload");
@@ -600,6 +607,7 @@ export function OneCreateAgentDialog({
     const key = `${edit.memberId}:${edit.revision}`;
     if (editKeyRef.current === key) return;
     editKeyRef.current = key;
+    avatarTouchedRef.current = false;
     captureEditBaselineRef.current = true;
     bumpEditBaseline((tick) => tick + 1);
     skipNextDraftWriteRef.current = true;
@@ -728,9 +736,9 @@ export function OneCreateAgentDialog({
         id: edit.memberId,
         displayName: cleanName,
         collaborationStyle,
-        avatar: selectedStyle
-          ? { kind: "preset", characterId: selectedCharacter.id }
-          : { kind: "image", dataUrl: previewSrc! },
+        ...(avatarTouchedRef.current ? { avatar: selectedStyle
+          ? { kind: "preset" as const, characterId: selectedCharacter.id }
+          : { kind: "image" as const, dataUrl: previewSrc! } } : {}),
         // 역할·성격은 고칠 수 있는 팀원일 때만 보낸다. 보내더라도 실제 허용 여부는
         // 호스트가 다시 판정한다 — 화면의 말을 믿고 남의 패키지를 덮어쓰면 안 된다.
         ...(edit.identityEditable ? { title: title.trim(), description: description.trim() } : {}),
@@ -860,7 +868,7 @@ export function OneCreateAgentDialog({
 
         {selectedStyle && <div className={styles.characterLibrary} aria-label={selectedStyle === "original" ? "Original characters" : "2D Sketch characters"}>
           <div className={styles.characterGrid} role="list">
-            {visibleCharacters.map((character) => <button key={character.id} type="button" role="listitem" data-active={selectedCharacter.id === character.id ? "true" : "false"} onClick={() => setCharacterId(character.id)}>
+            {visibleCharacters.map((character) => <button key={character.id} type="button" role="listitem" data-active={selectedCharacter.id === character.id ? "true" : "false"} onClick={() => { avatarTouchedRef.current = true; setCharacterId(character.id); }}>
               {/* eslint-disable-next-line @next/next/no-img-element */}
               <img src={character.src} alt={character.label} />
               <span>{character.label}</span>

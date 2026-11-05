@@ -202,9 +202,14 @@ async function read(url: URL, ttlMs: number, signal: AbortSignal | undefined, ch
       if (!spaced) { const body = await fetchFinanceText(url); check(body); return { body, at: new Date().toISOString() }; }
       const release = await newsSlot.acquire(signal);
       try {
-        const wait = Math.max(0, nextNewsAt - Date.now()); if (wait) await new Promise<void>(resolve => setTimeout(resolve, wait));
-        nextNewsAt = Date.now() + 6000;
-        const body = await fetchFinanceText(url); check(body); return { body, at: new Date().toISOString() };
+        // GDELT refuses about half of well-spaced requests (measured); one retry six seconds later (a third try rarely succeeded and doubled the wait).
+        for (let attempt = 1; ; attempt++) {
+          const wait = Math.max(0, nextNewsAt - Date.now()); if (wait) await new Promise<void>(resolve => setTimeout(resolve, wait));
+          if (signal?.aborted) throw new Error('finance_source_cancelled');
+          nextNewsAt = Date.now() + 6000;
+          try { const body = await fetchFinanceText(url); check(body); return { body, at: new Date().toISOString() }; }
+          catch (error) { if (attempt >= 2 || !(error instanceof Error) || error.message !== 'finance_source_rate_limited') throw error; nextNewsAt = Date.now() + 6000; }
+        }
       } finally { release(); }
     }, { signal, ttlMs });
   } catch (error) { if (signal?.aborted) throw new Error('finance_source_cancelled'); throw error; }

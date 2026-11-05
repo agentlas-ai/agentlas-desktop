@@ -174,11 +174,11 @@ const FULL_TEXT_PURPOSE = "Read the open-access full text of one article by DOI 
 
 export const SCIENCE_LITERATURE_PORTS = [
   { operationId: "science.literature.search", kind: "query" as const, required: ["query"] as const, inputSchema: SEARCH_SCHEMA as Record<string, unknown>,
-    callTimeoutMs: 90_000, effectFreeRead: true as const,
+    callTimeoutMs: 90_000, effectFreeRead: true as const, foundAsTool: true as const,
     purpose: composeDeclaredPrompt([{ id: "tool.science.literature.search.description", revision: 1, stability: "fixed-policy", changeTriggers: ["release"], text: SEARCH_PURPOSE }]),
     handler: (args: Record<string, unknown>, ctx: HarnessCallContext) => searchHandler(args, ctx) },
   { operationId: "science.literature.fulltext", kind: "query" as const, required: [] as const, inputSchema: FULL_TEXT_SCHEMA as Record<string, unknown>,
-    callTimeoutMs: 90_000, effectFreeRead: true as const,
+    callTimeoutMs: 90_000, effectFreeRead: true as const, foundAsTool: true as const,
     purpose: composeDeclaredPrompt([{ id: "tool.science.literature.fulltext.description", revision: 1, stability: "fixed-policy", changeTriggers: ["release"], text: FULL_TEXT_PURPOSE }]),
     handler: (args: Record<string, unknown>, ctx: HarnessCallContext) => fullTextHandler(args, ctx) },
 ];

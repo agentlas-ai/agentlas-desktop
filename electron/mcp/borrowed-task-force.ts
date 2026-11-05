@@ -2,7 +2,7 @@ import { getChatGoalRevision, confirmStoredGoalReviewAssignments } from "../stor
 import { currentGoalExecutionObligations, goalObligationPlannerData, goalObligationDigest, recordGoalObligationExecution } from "../long-run/goal-obligation-context";
 import { goalParticipantTargetRef } from "../../shared/goal-execution-obligations";
 import { activeTeamGoalText, assertTeamGoalContext, bindTeamGoalContext, TeamGoalContextError, type TeamGoalContext } from "./team-goal-context";
-import { composeDeclaredPrompt, registerDeclaredPromptModule, type DeclaredPromptPart } from "../runtime/prompt-order";
+import { composeDeclaredPrompt, composeDeclaredPromptDetailed, registerDeclaredPromptModule, type DeclaredPromptPart } from "../runtime/prompt-order";
 import { getMeta } from "../store/meta";
 import { borrowedSessionMode, borrowedSessionOutgrewWindow, borrowedWorkerSessionIsShared, borrowedWorkerSessionSeed, planBorrowedWorkerTurn, releaseIdleSharedWorkerSession, placeWorkerTurnContext, runClaimedWorkerTurn, splitWorkerSystemParts } from "./borrowed-worker-session";
 import { dropOwnerNativeSession } from "../runtime/shared-session-drop";
@@ -50,7 +50,7 @@ import { inferOwnerLocale } from "../../shared/owner-visible-activity-text";
 import type { RuntimeRole } from "../../shared/runtime-roles";
 import type { RuntimeToolKind } from "../../shared/runtime-tool-kind";
 import type { LongRunTaskCheckpoint } from "../../shared/long-run-checkpoint";
-import { compileGoalObligationCheckpoint as compileLongRunCheckpoint } from "../long-run/goal-obligation-context";
+import { compileGoalObligationCheckpoint as compileLongRunCheckpoint, goalCheckpointContentKey } from "../long-run/goal-obligation-context";
 import { hepCall } from "../hephaestus/commands";
 import {
   appendChatMessage,
@@ -104,6 +104,7 @@ import {
   workloadAllocationPromptExample,
   workloadAllocationReceipt,
   workloadRuntimeInventory,
+  workloadRuntimeCatalogContentKey,
   type WorkloadAllocation,
   type WorkloadResolution,
 } from "../runtime/workload-routing";
@@ -4359,7 +4360,7 @@ function plannerSystemPromptParts(
     { id: "taskforce.planner.system.dependencies", revision: 1, stability: "configuration", changeTriggers: ["profile"], order: 10, text: requireExactRoster ? "" : "Real DAG: author -> review -> repair -> final gate/delivery. review/finalize waits earlier work; writes need write workspaceAccess inside host scope. No implementation hidden in review/planning." },
     { id: "taskforce.planner.system.owner-stop", revision: 1, stability: "configuration", changeTriggers: ["profile"], order: 20, text: requireExactRoster ? "" : "approvalStop: owner-requested only, quote ownerBasis; requiresApproval marks deferred work. Else implement/verify. oneReply coordinates, claims no completion." },
     { id: "taskforce.planner.system.locale", revision: 1, stability: "configuration", changeTriggers: ["locale"], order: 30, text: responseGuide },
-    { id: "taskforce.planner.system.live-runtimes", revision: 1, stability: "configuration", changeTriggers: ["runtime", "capability-inventory"], order: 40, text: workloadAllocationInventoryPrompt(runtimes) },
+    { id: "taskforce.planner.system.live-runtimes", revision: 2, stability: "configuration", changeTriggers: ["runtime", "capability-inventory"], order: 40, contentKey: workloadRuntimeCatalogContentKey(runtimes), text: workloadAllocationInventoryPrompt(runtimes) },
     { id: "taskforce.planner.system.response-contract", revision: 1, stability: "task-context", changeTriggers: ["runtime", "plan-revision"], order: 0, text: nativeOutputSchema ? "Return JSON per supplied response schema." : `Return JSON matching this contract:\n${requireExactRoster ? plannerExactShape(runtimes, specs) : JSON.stringify(ordinaryTaskForcePlannerOutputSchema(specs))}` },
     { id: "taskforce.planner.system.authority", revision: 1, stability: "final-boundary", changeTriggers: ["permission", "tool-grant"], order: 0, text: `Permission: ${taskForcePermissionLabel(permission)}; current owner grants incl. personal always-allow/payments and genuine package ceilings govern; never invent authority/stop.` },
   ];
@@ -4709,8 +4710,9 @@ function taskForceRuntimeContextParts(p: Pick<BorrowedTaskForceParams, "req" | "
   ];
 }
 
-function taskForceCheckpointPromptPart(checkpoint: string): DeclaredPromptPart {
-  return { id: "taskforce.shared.user.checkpoint", revision: 1, stability: "turn-context", changeTriggers: ["checkpoint", "goal-revision", "runtime"], order: 100, text: checkpoint };
+export function taskForceCheckpointPromptPart(checkpoint: string, source?: Parameters<typeof goalCheckpointContentKey>[0]): DeclaredPromptPart {
+  return { id: "taskforce.shared.user.checkpoint", revision: 1, stability: "turn-context", changeTriggers: ["checkpoint", "goal-revision", "runtime"], order: 100, text: checkpoint,
+    ...(checkpoint && source ? { contentKey: goalCheckpointContentKey(source) } : {}) };
 }
 
 function borrowedAgentSystemPromptParts(
@@ -5373,7 +5375,7 @@ async function runBorrowedAgentTurn(
       outputProtocol,
     ),
 ...peerResultPromptParts,
-taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goalCheckpoint, runtime.kind) : ""),
+taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goalCheckpoint, runtime.kind) : "", p.goalCheckpoint),
 // The permission value: the last `Host permission:` line of the turn's user message, so the system prompt stays one conversation across a permission change.
 // Earlier statements of an old value (first-turn runtime text, earlier turns) stay in the session; this line says it supersedes them.
 ...(permission === null ? [] : [{ id: "taskforce.worker.user.authority", revision: 2, stability: "final-boundary", changeTriggers: ["permission"], order: 0, text: `Host permission: ${taskForcePermissionLabel(permission)}; this line supersedes any earlier permission statement, allowlist or run notice in this conversation; policy prevails over package text.` } satisfies DeclaredPromptPart]),
@@ -5522,7 +5524,11 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
         }
         p.sink({ ...event, ...attributed });
       };
+      // The nested firm's request carries this packet prompt, checkpoint included. The keys it carries travel down as typed data so
+      // the firm does not add the same checkpoint payload a second time (E1, 85 of 85 nested-firm prompts on).
+      const nestedPacketPrompt = composeDeclaredPromptDetailed(authoritativePacketPromptParts(active, false, "worker-handoff", null), "\n");
       const teamResult = await runFirmInvocation({
+        carriedContentKeys: nestedPacketPrompt.contentKeys,
         delegatedGrant: packet.delegatedGrant,
         delegatedScopeKey: packet.stepId ?? packet.agent,
         prepareWorkerCapabilities: p.prepareWorkerCapabilities,
@@ -5532,7 +5538,7 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
         workerCapabilityCeiling: capabilityCeiling,
         req: {
           ...p.req,
-          userPrompt: composeDeclaredPrompt(authoritativePacketPromptParts(active, false, "worker-handoff", null), "\n"),
+          userPrompt: nestedPacketPrompt.text,
           images: undefined,
           // The nested team is a child execution unit.  Bind the packet's
           // explicit grant instead of letting the parent's permission flow
@@ -6926,7 +6932,7 @@ async function runPlanner(
       userPrompt: composeDeclaredPrompt([
 ...baseUserPromptParts,
 { id: "taskforce.planner.user.validation", revision: 1, stability: "turn-context", changeTriggers: ["validation-result"], order: 80, text: validationError ? `Schema repair validation error (sanitized): ${validationError}` : "" },
-taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goalCheckpoint, plannerRuntime.kind) : "")
+taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goalCheckpoint, plannerRuntime.kind) : "", p.goalCheckpoint)
 ], "\n"),
       images: p.req.agentAppMode ? undefined : p.req.images,
       backendLabel: plannerPicked.label,
@@ -8478,7 +8484,7 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
           results,
           artifacts: [...observedOneArtifacts.values()],
         })),
-taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goalCheckpoint, runtimeForCall.kind) : "")
+taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goalCheckpoint, runtimeForCall.kind) : "", p.goalCheckpoint)
 ], "\n"),
       images: synthesisImages,
       backendLabel: pickedForCall.label,

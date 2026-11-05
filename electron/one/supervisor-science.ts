@@ -1,5 +1,6 @@
 import { supervisorError } from "../../shared/one-supervisor";
 import { performance } from "node:perf_hooks";
+import { createHash } from "node:crypto";
 import type { ScienceDaemonClient } from "../science-host/daemon-client";
 import type { DaemonScienceCommand } from "../daemon/science-service";
 import type { SupervisorControlInput, SupervisorTask } from "../../shared/one-supervisor";
@@ -11,6 +12,21 @@ type Row=Record<string,unknown>;
 const row=(value:unknown):Row=>value && typeof value === "object" && !Array.isArray(value) ? value as Row : {};
 const rows=(value:unknown):Row[]=>Array.isArray(value) ? value.map(row) : [];
 const id=(value:unknown):string=>typeof value === "string" ? value : "";
+
+const SCIENCE_REQUEST_UUID=/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+/**
+ * The request id Science's composer.start accepts: a UUID (science-request-id-invalid otherwise). One's command ids are free-form
+ * (3-200 characters) and the model picks readable ones ("science-pdl1-binder-owner-20261105-01"), so the first Science start of a
+ * phone request was held as science-request-id-invalid (11-05 18:32 KST). A UUID passes through; any other id maps to the same
+ * name-based UUID every time, so a retry of the same command id is the same request.
+ */
+export function scienceRequestId(commandId:string):string {
+  if (SCIENCE_REQUEST_UUID.test(commandId)) return commandId;
+  const hash=createHash("sha256").update(`agentlas.one.science-request.v1:${commandId}`).digest();
+  hash[6]=(hash[6]&0x0f)|0x50; hash[8]=(hash[8]&0x3f)|0x80;
+  const hex=hash.subarray(0,16).toString("hex");
+  return `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20,32)}`;
+}
 
 /** Observed native service only: discovery never boots Science or duplicates its executor. */
 const SCIENCE_OBSERVATION_IN_FLIGHT=4;

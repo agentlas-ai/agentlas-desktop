@@ -615,6 +615,16 @@ const AGENTLAS_TURN_INSTRUCTIONS = purposePrompt([
     changeTriggers: ["release"], text: "When asked to do something in an app installed on this computer (export, print, read or change a value in it), use harness_call reach.map to find the app, then reach.app, reach.describe and reach.invoke. Do not write your own scripts for the app. If Reach cannot do it, do it on the app's screen with the computer tools when this run has them, unless Reach says the app is off limits." },
 ]);
 
+// Installed-tools line (THOUGHT-EXPERIMENTS.md F7): Codex keeps every MCP tool behind its own tool search and finds a
+// server by its name and these instructions. A request for a weather forecast never matched "agentlas-turn", so a turn whose
+// installed connector was not attached before the run never reached harness_search (real-channel A/B, codex: 0/6 without this
+// line). The child appends the names Main wrote into this run's capability file (installed, enabled connectors); the template is
+// fixed, the names change only when the owner installs or removes one.
+const AGENTLAS_TURN_INSTALLED_TEMPLATE = purposePrompt([
+  { id: "tool.agentlas-turn.server-instructions.installed", revision: 1, stability: "configuration",
+    changeTriggers: ["connector-inventory"], text: "Tools installed on this computer that are not in your tool list are reached through harness_search (find one by its name or by what it does), then harness_describe and harness_call: {names}." },
+]);
+
 const SOURCE_HEAD = String.raw`"use strict";
 const fs = require("node:fs");
 const http = require("node:http");
@@ -664,8 +674,17 @@ function request(operation, args) {
 }
 const text = (value) => ({ content: [{ type: "text", text: JSON.stringify(value) }] });
 const error = (message) => ({ content: [{ type: "text", text: message }], isError: true });
+// The installed connectors Main wrote for this run (names only), appended to the fixed instructions.
+function installedNames() {
+  try { const value = control(); return Array.isArray(value.installed) ? value.installed.filter((name) => typeof name === "string" && name.length <= 80).slice(0, 40) : []; }
+  catch { return []; }
+}
+function instructionsText() {
+  const names = installedNames();
+  return names.length ? baseInstructions + "\n" + installedTemplate.replace("{names}", names.join(", ")) : baseInstructions;
+}
 function handle(requestValue) {
-  if (requestValue.method === "initialize") return { protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "agentlas-turn", version: "1.0.0" }, ...(allowedTools().includes("harness_call") ? { instructions } : {}) };
+  if (requestValue.method === "initialize") return { protocolVersion: "", capabilities: { tools: {} }, serverInfo: { name: "agentlas-turn", version: "1.0.0" }, .(allowedTools.includes("harness_call") ? { instructions: instructionsText }: {}) };
   if (requestValue.method === "notifications/initialized") return undefined;
   if (requestValue.method === "ping") return {};
   if (requestValue.method === "tools/list") return { tools: tools.filter((tool) => allowedTools().includes(tool.name)) };
@@ -689,7 +708,7 @@ process.stdin.setEncoding("utf8");
 process.stdin.on("data", (chunk) => { input += chunk; if (Buffer.byteLength(input, "utf8") > MAX_REQUEST_BYTES) process.exit(78); let end; while ((end = input.indexOf("\n")) >= 0) { line(input.slice(0, end).replace(/\r$/, "")); input = input.slice(end + 1); } });
 `;
 
-const SOURCE = `${SOURCE_HEAD}const tools = ${JSON.stringify(AGENTLAS_TURN_TOOLS)};\nconst instructions = ${JSON.stringify(AGENTLAS_TURN_INSTRUCTIONS)};\n${SOURCE_TAIL}`;
+const SOURCE = `${SOURCE_HEAD}const tools = ${JSON.stringify(AGENTLAS_TURN_TOOLS)};\nconst baseInstructions = ${JSON.stringify(AGENTLAS_TURN_INSTRUCTIONS)};\nconst installedTemplate = ${JSON.stringify(AGENTLAS_TURN_INSTALLED_TEMPLATE)};\n${SOURCE_TAIL}`;
 // The source is a file the child verifies before running it (mcp-tools/builtin-mcp-launch.ts); argv stays short.
 const LAUNCH = defineBuiltinMcpLaunch("agentlas-turn", SOURCE);
 

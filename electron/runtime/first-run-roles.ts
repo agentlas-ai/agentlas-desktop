@@ -9,7 +9,7 @@
 // 명시적으로 선택한 API 모델 → 쓸 수 있는 Agentlas → 로컬 모델. CLI/API는 같은 풀이다.
 // 오케스트레이터와 워커는 같은 풀을 명시적으로 받는다. 사람이 역할을 한 번이라도 직접
 // 고른 뒤에는(origin "user") 온보딩이 다시 덮지 않는다.
-import { CONNECTABLE_RUNTIMES, agentlasServingReady, firstRunLocalModelReady, type ConnectableRuntime } from "../../shared/runtime-connect";
+import { CONNECTABLE_RUNTIMES, agentlasFirstRunModel, agentlasServingReady, firstRunLocalModelReady, type ConnectableRuntime } from "../../shared/runtime-connect";
 import { BYOK_BACKENDS_ALL, type ByokBackend } from "../../shared/models";
 import { rememberRuntimeSelection } from "./selection-memory";
 import type { RuntimeSelection, RuntimeStatus } from "../../shared/types";
@@ -42,6 +42,8 @@ export function firstRunRolePool(input: {
   list: RuntimeStatus[];
   signedIn: ReadonlySet<ConnectableRuntime>;
   agentlasReady: boolean;
+  /** The Agentlas model a first role gets when it is not the detected row's (a free account: Light). */
+  agentlasModel?: string;
 }): RuntimeSelection[] {
   const clis = CONNECTABLE_RUNTIMES.flatMap((kind) => {
     if (!input.signedIn.has(kind)) return [];
@@ -53,7 +55,7 @@ export function firstRunRolePool(input: {
     .map((runtime) => selectionOf({ ...runtime, model: runtime.model!.trim() }));
   if (clis.length > 0 || apis.length > 0) return [...clis, ...apis];
   const agentlas = input.list.find((row) => row.kind === "agentlas");
-  if (input.agentlasReady && agentlas) return [selectionOf(agentlas)];
+  if (input.agentlasReady && agentlas) return [selectionOf(input.agentlasModel ? { ...agentlas, model: input.agentlasModel } : agentlas)];
   const local = input.list.find(firstRunLocalModelReady);
   return local ? [selectionOf({ ...local, model: local.model ?? local.availableModels?.[0] ?? null })] : [];
 }
@@ -107,7 +109,7 @@ export async function seedFirstRunRoles(rawApiChoice?: unknown): Promise<FirstRu
     ? detected.map(runtime => runtime === chosenRuntime ? { ...runtime, model: apiChoice.model } : runtime)
     : detected;
   const signedIn = new Set(probes.filter((probe) => probe.state === "signed-in").map((probe) => probe.kind));
-  const pool = firstRunRolePool({ list, signedIn, agentlasReady: agentlasServingReady(credits) });
+  const pool = firstRunRolePool({ list, signedIn, agentlasReady: agentlasServingReady(credits), agentlasModel: agentlasFirstRunModel(credits) });
   if (pool.length === 0) return { seeded: false, reason: "nothing-connected", pool };
   // No await between the final owner check, the saved API choice and both role writes.
   // The provider-scoped memory keeps a manual choice allocatable after /models fails.

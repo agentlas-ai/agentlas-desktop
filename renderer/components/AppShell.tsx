@@ -14,6 +14,7 @@ import { SideNav } from "./SideNav";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { usePathname } from "next/navigation";
 import { registerRouter } from "@/lib/navigation";
+import { startInputLatencyRecorder } from "@/lib/input-latency";
 import { usePendingConfirmationCount } from "@/lib/attention";
 import { AttentionCoveredSwitcherDot } from "./AttentionDot";
 import { useT } from "@/lib/i18n";
@@ -108,6 +109,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     registerRouter(router);
     return () => registerRouter(null);
   }, [router]);
+
+  // Slow keystrokes of this window, as timings only (never the text), into Main's diagnostics folder — renderer/lib/input-latency.ts.
+  useEffect(() => startInputLatencyRecorder(), []);
 
   // Web↔Desktop Hub bookmark lifecycle sync. There is deliberately no polling:
   // startup, account changes, and returning focus/visibility are the only

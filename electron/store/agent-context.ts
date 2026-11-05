@@ -1,6 +1,7 @@
 import type Database from "better-sqlite3";
 import { createHash, randomUUID } from "node:crypto";
 import { observeProductSource, readOriginalMemorySource, type MemorySourceRef } from "../memory/source-catalogue";
+import { stableBlockHashesOf } from "./agent-context-compaction";
 
 /** Host-authored actor identity. Invocation, workspace and effect authority are
  * deliberately absent: a context journal never authorizes a tool operation. */
@@ -332,6 +333,9 @@ export function createAgentContextStore(getDb: () => Database.Database) {
         const payload:Record<string,unknown>=JSON.parse(row.payload_json);
         if(Array.isArray(payload.stableBlocks))for(const block of payload.stableBlocks)if(typeof block==="string"&&block)
           saveBlock.run(delivery.contextKey,delivery.bindingKey,delivery.generation,hash(block),through);
+        // A turn-context row compacted by db-retention (agent-context-compaction.ts) keeps the hashes of its blocks, not the blocks.
+        for(const blockHash of stableBlockHashesOf(payload))
+          saveBlock.run(delivery.contextKey,delivery.bindingKey,delivery.generation,blockHash,through);
       }
       db.prepare("UPDATE agent_context_deliveries SET status='acknowledged',receipt_id=? WHERE delivery_id=?").run(receipt.receiptId,delivery.deliveryId);
       db.prepare("UPDATE agent_context_heads SET open_delivery_id=NULL WHERE context_key=? AND open_delivery_id=?").run(delivery.contextKey,delivery.deliveryId);

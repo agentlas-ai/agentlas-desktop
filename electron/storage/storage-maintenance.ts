@@ -1,7 +1,8 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { getDb } from "../store/db";
+import { getDb, openedStoreMigrationRole } from "../store/db";
+import { getMemoryDb } from "../memory/database";
 import { pruneJudgmentVerdicts } from "../store/judgment-verdict-retention";
 import { getMeta, setMeta } from "../store/meta";
 import { retireManagedMigrationBackups, type MigrationBackupRetention } from "../store/migration-backup-retention";
@@ -14,6 +15,8 @@ import { retireNestedProductHomeMirrors } from "./product-home-retention";
 import { sweepAgentIntermediates } from "./intermediate-sweep";
 import { retireRunDetailSlice, type RunDetailWatermark } from "./run-detail-retention";
 import { DAY_MS, STORAGE_POLICY } from "./storage-policy";
+import { DB_RETENTION_HOST } from "./db-retention-policy";
+import { runDbRetentionPass, type DbRetentionReport } from "./db-retention";
 import { observationCaptureDir } from "../media/capture-artifacts";
 
 /**
@@ -56,10 +59,12 @@ export interface StorageMaintenanceReport {
   cloudPackages: { dirs: number; bytes: number };
   /** Product-home mirrors of another mirror, idle for the CLI-original window (product-home-retention.ts). */
   nestedProductHomes: { dirs: number; bytes: number };
-  /** Managed DB-upgrade copies above the cap of three (store/migration-backup-retention.ts). */
+  /** Managed DB-upgrade copies above the cap of one, MAX_MANAGED_MIGRATION_BACKUPS (store/migration-backup-retention.ts). */
   migrationBackups: MigrationBackupRetention;
   /** App-call image observations past the settled-run detail window (pruneObservationCaptures). */
   observationCaptures: { files: number; bytes: number };
+  /** The typed row-retention policy of the store (db-retention-policy.ts); null when this process is not the retention host. */
+  dbRetention: DbRetentionReport | null;
 }
 
 const LOCK_FILE = "storage-maintenance.lock";
@@ -204,7 +209,7 @@ function takeLock(): (() => void) | null {
   return () => { try { if (fs.readFileSync(file, "utf8").trim() === String(process.pid)) fs.unlinkSync(file); } catch { /* gone */ } };
 }
 
-export async function runStorageMaintenance(now = Date.now()): Promise<StorageMaintenanceReport | null> {
+export async function runStorageMaintenance(now = Date.now(), hooks: { busy?: () => boolean } = {}): Promise<StorageMaintenanceReport | null> {
   const release = takeLock();
   if (!release) return null;
   try {
@@ -256,6 +261,12 @@ export async function runStorageMaintenance(now = Date.now()): Promise<StorageMa
       judgmentVerdicts.deleted += removed;
       if (removed < JUDGMENT_VERDICT_BATCH) { judgmentVerdicts.complete = true; break; }
     }
+    // Row retention of the store itself (db-retention-policy.ts). This function runs only in the Desktop Main process, the
+    // retention host; db-retention.ts still refuses any other host or a non-owner store and takes a lease in `meta`.
+    const dbRetention = await runDbRetentionPass({
+      db, memoryDb: getMemoryDb, host: DB_RETENTION_HOST, role: openedStoreMigrationRole(), now,
+      ...(hooks.busy ? { busy: hooks.busy } : {}), yieldToLoop, shortBusy: (write) => withShortBusyWait(db, write),
+    });
     const telegramAttachments = await pruneTelegramAttachmentCopies(userDataPath("agent-cwd"), {
       keepDays: STORAGE_POLICY.telegramAttachmentDays,
       now,
@@ -282,6 +293,7 @@ export async function runStorageMaintenance(now = Date.now()): Promise<StorageMa
       nestedProductHomes,
       migrationBackups,
       observationCaptures,
+      dbRetention,
     };
   } finally {
     release();
@@ -306,13 +318,15 @@ export async function agentlasFootprintBytes(): Promise<number> {
 export function startStorageMaintenance(options: {
   notifyLowDisk: (input: { freeBytes: number; footprintBytes: number; freedBytes: number }) => void;
   firstDelayMs?: number;
+  /** True while the owner has an active run: the one-time file compaction waits for it. */
+  busy?: () => boolean;
 }): () => void {
   let running = false;
   const pass = async (): Promise<void> => {
     if (running) return;
     running = true;
     let report: StorageMaintenanceReport | null = null;
-    try { report = await runStorageMaintenance(); } catch (error) {
+    try { report = await runStorageMaintenance(Date.now(), options.busy ? { busy: options.busy } : {}); } catch (error) {
       console.warn("[storage] maintenance pass failed:", error instanceof Error ? error.message : String(error));
       return;
     } finally {
@@ -321,7 +335,7 @@ export function startStorageMaintenance(options: {
     if (!report) return;
     // A blocked backup cap is printed too, so "nothing freed" is never silent about why.
     if (report.freedBytes > 0 || report.runDetail.runs > 0 || report.triggerEvents.compacted > 0 || report.judgmentVerdicts.deleted > 0
-      || report.migrationBackups.skipped !== "none") {
+      || report.migrationBackups.skipped !== "none" || (report.dbRetention?.ran && report.dbRetention.workMs > 0)) {
       console.info(`[storage] freed ${report.freedBytes} bytes; intermediates ${report.intermediates.files} files; `
         + `transcripts ${report.transcripts.sessions}+${report.transcripts.orphans}; run detail ${report.runDetail.runs} runs `
         + `(deleted ${report.runDetail.deleted}, compacted ${report.runDetail.compacted}, complete ${report.runDetail.complete}, `
@@ -329,7 +343,8 @@ export function startStorageMaintenance(options: {
         + `trigger events compacted ${report.triggerEvents.compacted}; telegram copies ${report.telegramAttachments.folders}; `
         + `judgment verdicts deleted ${report.judgmentVerdicts.deleted}; cloud packages ${report.cloudPackages.dirs}; `
         + `nested product homes ${report.nestedProductHomes.dirs}; observation captures ${report.observationCaptures.files}; `
-        + `migration backups removed ${report.migrationBackups.removed} (${report.migrationBackups.bytes} bytes, skipped ${report.migrationBackups.skipped})`);
+        + `migration backups removed ${report.migrationBackups.removed} (${report.migrationBackups.bytes} bytes, skipped ${report.migrationBackups.skipped}); `
+        + (report.dbRetention ? `db retention ${JSON.stringify(report.dbRetention)}` : "db retention off"));
     }
     if (!report.lowDisk || report.freeBytes === null) return;
     const last = Number(getMeta(NOTICE_KEY) ?? 0);

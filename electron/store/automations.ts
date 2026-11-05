@@ -626,8 +626,13 @@ export function updateAutomation(id: string, patch: AutomationUpdatePatch): Auto
     ...(monitor ? { monitor } : { monitor: undefined }) }) : null;
 
   const timeDriven = triggerType === "schedule";
+  // An update that names no schedule input (a rename, a runtime pin from the phone, a prompt edit) keeps the stored next fire time.
+  // Recomputing it from "now" pushed a lastRun-anchored interval one whole period out on every unrelated edit, and moved an
+  // overdue run past its catch-up (measured in a temp store,: 25 minutes of slip, and a 2-minute-overdue run lost).
+  const scheduleInputsNamed = patch.scheduleHuman !== undefined || patch.scheduleJson !== undefined
+    || patch.timezone !== undefined || patch.triggerType !== undefined;
   const nextRunAt = timeDriven
-    ? computeNextRun(scheduleHuman, new Date(), { scheduleJson, timezone: tz })
+    ? (!scheduleInputsNamed && row.next_run_at ? row.next_run_at : computeNextRun(scheduleHuman, new Date(), { scheduleJson, timezone: tz }))
     : null;
 
   db.prepare(

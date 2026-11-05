@@ -136,6 +136,13 @@ export const AGENT_SURFACE_CLOSE = "<</agentlas-surface>>";
 export const AGENT_MULTIMODAL_MARKER = "<<agentlas-multimodal-setup>>";
 /** 값 없는 제어 마커(runtime/runner.ts SURFACE_INTENT_MARKER). 표시되면 안 된다. */
 export const AGENT_SURFACE_INTENT_MARKER = "<<surface-intent>>";
+/**
+ * A team packet's completion envelope (electron/mcp/borrowed-task-force.ts writes it onto a worker's text; Main parses it
+ * before the text is projected). An orchestrator that copies a worker's text into its own answer carried it into the owner's
+ * reply: 98 stored One answers in 30 days ended in the raw JSON, the last one on the installed 1.3.125 .
+ */
+export const AGENT_PACKET_OUTCOME_OPEN = "<<agentlas-packet-outcome>>";
+export const AGENT_PACKET_OUTCOME_CLOSE = "<</agentlas-packet-outcome>>";
 /** Host-only completion marker. It is control metadata, never answer content. */
 export const AGENT_GOAL_COMPLETE_PREFIX = "<<agentlas-goal-complete";
 /**
@@ -184,6 +191,7 @@ const PAIRED_BLOCKS = [
   { probe: "<<agentlas-one-followups", open: AGENT_FOLLOWUPS_OPEN, close: AGENT_FOLLOWUPS_CLOSE },
   { probe: "<<agentlas-ask", open: AGENT_ASK_OPEN, close: AGENT_ASK_CLOSE },
   { probe: "<<agentlas-surface", open: AGENT_SURFACE_OPEN, close: AGENT_SURFACE_CLOSE },
+  { probe: "<<agentlas-packet-outcome", open: AGENT_PACKET_OUTCOME_OPEN, close: AGENT_PACKET_OUTCOME_CLOSE },
 ] as const;
 
 /** 완료 마커는 paired fence가 아니라 `: message >>` 한 토큰으로 온다. */
@@ -198,6 +206,7 @@ const TAIL_TOKENS: readonly string[] = [
   AGENT_ASK_OPEN,
   AGENT_FOLLOWUPS_OPEN,
   AGENT_SURFACE_OPEN,
+  AGENT_PACKET_OUTCOME_OPEN,
   AGENT_MULTIMODAL_MARKER,
   AGENT_SURFACE_INTENT_MARKER,
   AGENT_GOAL_COMPLETE_PREFIX,

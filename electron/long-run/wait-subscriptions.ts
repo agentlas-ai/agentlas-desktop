@@ -121,6 +121,21 @@ export function goalWaitReplansSettled(): boolean { return replanInFlight.size =
 export function setGoalWaitHost(value: GoalWaitHost | null): void { host = value; }
 const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
+/** Host reasons a stall replan wait is retired with when the checkpoint it must read is not one it can read (interrupted producer,
+ * uncertain effects). Typed codes written by this module, never parsed from text. */
+const STALL_REPLAN_UNREAD_REASONS: ReadonlySet<string> = new Set(["stall_replan_checkpoint_unsettled", "goal_wait_checkpoint_not_settled"]);
+/**
+ * True when the previous wait for THIS stall (same progress key) was a replan the host retired because it could not read the
+ * checkpoint. Asking for the same replan again would end the same way after another paid episode: observed in use, one run
+ * registered one every ~11 minutes for 12 hours (16 waits, 0 judged), 70 of 77 stall_replan waits were retired unread. The first try
+ * still goes out as a replan (the verifier may not have written its checkpoint yet); a second try for the same stall backs off.
+ */
+export function stallReplanRefusedUnread(prior: Pick<GoalWaitSubscription, "recoveryMode" | "recoveryProgressKey" | "state" | "wakeReason"> | null | undefined,
+  progressKey: string | undefined): boolean {
+  return Boolean(prior && progressKey && prior.recoveryMode === "stall_replan" && prior.recoveryProgressKey === progressKey
+    && prior.state === "cancelled" && prior.wakeReason && STALL_REPLAN_UNREAD_REASONS.has(prior.wakeReason));
+}
+
 export function latestGoalWaitSubscription(goalId: string): GoalWaitSubscription | null {
   const run = getLongRunByGoalId(goalId);
   if (!run || run.surface === "science") return null;
@@ -339,6 +354,7 @@ export function registerOngoingGoalCycle(input: { goalId: string; invocationRunI
     const progressKey = stalled ? run.lastProgressKey ?? `one-host:unknown:revision:${revision!.revision}` : undefined;
     const recoveryMode = stalled
       ? plan?.stallReplan?.goalRevision === revision!.revision && plan.stallReplan.progressKey === progressKey
+        || stallReplanRefusedUnread(priorWait, progressKey)
         ? "stall_backoff" as const : "stall_replan" as const : undefined;
     const backoffMs = Math.min(24 * 60 * 60_000,
       30 * 60_000 * 2 ** Math.min(5, Math.max(0, (run?.stallStreak ?? 0) - (run?.stallWindow ?? 0))));

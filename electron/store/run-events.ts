@@ -1,4 +1,5 @@
 import {parseCanonicalGoalWaitRecord,type CanonicalGoalWaitRecord} from "../long-run/canonical-wait-record";
+import { canonicalToolName } from "../runtime/tool-name-alias";
 import { parseInstructionDelta } from "../../shared/runtime-instructions";
 import { parseGoalWaitProposal, type ParsedGoalWait } from "../long-run/wait-emitter";
 import { getLongRunAttemptGoalRevision } from "./long-runs";
@@ -2379,6 +2380,8 @@ export function recordMcpInvocationEvent(runId: string, req: McpInvocationReques
     surfaceId: ev.surfaceId,
     oneArtifacts: ev.oneArtifacts,
     toolName: ev.tool?.name,
+    // One name per tool across runtimes (runtime/tool-name-alias.ts canonicalToolName); toolName stays the runtime's own.
+    ...(ev.tool?.name ? { toolCanonical: canonicalToolName(ev.tool.name) } : {}),
     toolHostControl: options?.hostControl,
     toolOrigin: ev.tool?.origin,
     toolId: ev.tool?.id,

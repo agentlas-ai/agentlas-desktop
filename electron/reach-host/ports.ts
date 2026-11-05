@@ -11,6 +11,7 @@ import { runSteps } from "../reach/steps-runner";
 import { isLearned, learnFromTrace, recordRun, runLearned, type LearnTrace, type TraceStep } from "../reach/learn";
 import { actuatorLearnDriver } from "../reach/learn-actuator";
 import type { AppRecord, Capability, CapabilityParameter } from "../reach/types";
+import { desktopDriverReachable, forwardReachToDesktop, NO_DRIVER_NEXT, WINDOW_ONLY_NEXT } from "./forward";
 import { getReachRuntime, type ReachRuntime } from "./runtime";
 
 /*
@@ -218,7 +219,7 @@ function runnableReason(capability: Capability, rt: ReachRuntime, context: Capab
   if (publishedOffLimits(capability, context)) return "Reach does not script this app: it holds credentials, money, messages or the system";
   if (capability.status === "degraded") return "it failed when last used; Reach re-reads it when the owner is away";
   if (!usableNow(capability, context)) return "only seen so far: it becomes callable once an exploration has opened and closed its dialog";
-  if (capability.body?.kind === "steps") return rt.gui ? null : "this host has no driver for the app's screen";
+  if (capability.body?.kind === "steps") return rt.gui || desktopDriverReachable() ? null : "this process has no driver for the app's screen, and the Agentlas app window is not connected to hand it to";
   if (capability.source.kind === "sdef") return rt.platform === "darwin" ? null : "AppleScript runs only on macOS";
   return `${capability.source.kind} capabilities cannot be called yet`;
 }
@@ -263,7 +264,7 @@ export async function reachDescribe(args: Record<string, unknown>): Promise<Outc
 export async function reachStatus(): Promise<Outcome> {
   const rt = await getReachRuntime();
   const status = rt.service?.getStatus();
-  return { status: "ok", data: { ...(status ?? { enabled: false, mapAt: (await rt.readMap())?.generatedAt ?? null }), explorationSwitch: rt.exploreEnabled(), driver: rt.gui ? (rt.gui.running ? "running" : "idle") : "unavailable_in_this_host" } };
+  return { status: "ok", data: { ...(status ?? { enabled: false, mapAt: (await rt.readMap())?.generatedAt ?? null }), explorationSwitch: rt.exploreEnabled(), driver: rt.gui ? (rt.gui.running ? "running" : "idle") : desktopDriverReachable() ? "via_desktop_window" : "unavailable_in_this_host" } };
 }
 
 // ---- commands --------------------------------------------------------------------------------------------------------------------------
@@ -342,6 +343,13 @@ function guiRefusal(error: string): Outcome {
   return unavailable(error, next[error] ?? "the app's screen could not be driven");
 }
 
+/** A host without a screen driver (the background service) hands reach.invoke to the window process that has one (forward.ts); with no window attached the refusal says so plainly. */
+async function handOverOrRefuse(args: Record<string, unknown>, ctx: Ctx): Promise<Outcome> {
+  if (!desktopDriverReachable()) return unavailable("no_driver_in_this_host", NO_DRIVER_NEXT);
+  const handed = await forwardReachToDesktop("reach.invoke", args, { chatId: ctx.chatId, ...(ctx.permission ? { permission: ctx.permission } : {}) });
+  return handed ?? unavailable("no_driver_in_this_host", NO_DRIVER_NEXT);
+}
+
 export async function reachInvoke(args: Record<string, unknown>, ctx: Ctx): Promise<Outcome> {
   if (ctx.dryRun) return refused("dry_run", "nothing was run");
   if (stopped(ctx)) return aborted();
@@ -375,7 +383,7 @@ export async function reachInvoke(args: Record<string, unknown>, ctx: Ctx): Prom
   // longer matches and the replay cannot go on, the caller is handed back to the screen (not given an error) and what it then does is learned over the old steps.
   if (isLearned(capability) && capability.body?.kind === "steps") {
     const gui = rt.gui;
-    if (!gui) return unavailable("no_driver_in_this_host", "run this from the desktop app");
+    if (!gui) return handOverOrRefuse(args, ctx);
     const outcome = await useGui(gui, ctx, async (actuator) => {
       if (stopped(ctx)) return { guiError: "aborted" } as const;
       const target = await liveTarget(rt, resolved.app, actuator, ctx.signal, writable(ctx));
@@ -399,7 +407,7 @@ export async function reachInvoke(args: Record<string, unknown>, ctx: Ctx): Prom
 
   if (capability.body?.kind === "steps") {
     const gui = rt.gui;
-    if (!gui) return unavailable("no_driver_in_this_host", "run this from the desktop app");
+    if (!gui) return handOverOrRefuse(args, ctx);
     const outcome = await useGui(gui, ctx, async (actuator) => {
       // Stop can arrive while this call waited for the screen lease: the app is not touched then.
       if (stopped(ctx)) return { guiError: "aborted" } as const;
@@ -447,7 +455,7 @@ export async function reachExplore(args: Record<string, unknown>, ctx: Ctx): Pro
   if (!writable(ctx)) return refused("permission_required", "exploring brings the app to the front and opens its dialogs; the run needs write permission");
   if (stopped(ctx)) return aborted();
   const rt = await getReachRuntime();
-  if (!rt.gui) return unavailable("no_driver_in_this_host", "run this from the desktop app");
+  if (!rt.gui) return unavailable("no_driver_in_this_host", desktopDriverReachable() ? WINDOW_ONLY_NEXT : NO_DRIVER_NEXT);
   const resolved = await resolveApp(rt, str(args.app));
   if (!resolved.ok) return resolved.outcome;
   if (isSensitiveApp({ name: resolved.app.name, bundleId: bundleOf(resolved.app.key) ?? undefined })) return refused("app_off_limits", "Reach never explores apps that hold credentials, money, messages or the system");
@@ -466,7 +474,7 @@ export async function reachVerify(args: Record<string, unknown>, ctx: Ctx): Prom
   if (!writable(ctx)) return refused("permission_required", "verifying brings the app to the front and opens its dialog; the run needs write permission");
   if (stopped(ctx)) return aborted();
   const rt = await getReachRuntime();
-  if (!rt.gui) return unavailable("no_driver_in_this_host", "run this from the desktop app");
+  if (!rt.gui) return unavailable("no_driver_in_this_host", desktopDriverReachable() ? WINDOW_ONLY_NEXT : NO_DRIVER_NEXT);
   const resolved = await resolveApp(rt, str(args.app));
   if (!resolved.ok) return resolved.outcome;
   const found = findCapability(await allCapabilities(rt, resolved.app), str(args.capability));

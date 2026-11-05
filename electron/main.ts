@@ -2571,6 +2571,7 @@ app.whenReady().then(async () => {
     initializeVideoJobs();
     // Storage budget for every user (owner 2026-10-16): intermediates, run detail, CLI transcripts, low-disk notice.
     startStorageMaintenance({
+      busy: () => invocationService.activeChatIds().length > 0,
       notifyLowDisk: ({ freeBytes, footprintBytes, freedBytes }) => {
         if (!Notification.isSupported()) return;
         const gb = (bytes: number): string => (bytes / 1024 ** 3).toFixed(1);

@@ -59,7 +59,7 @@ export function buildDelegateProtocol(
     "",
     DELEGATE_HEADING,
     "```json",
-    `{ "delegations": [ { "target": "<report role or name from 'Your direct reports:'>", "brief": "<what they should do>", "stage": "production", "allocation": ${workloadAllocationPromptExample("delegate")} } ], "synthesis": ${workloadAllocationPromptExample("synthesize")} }`,
+    `{ "delegations": [ { "target": "<report role or name from 'Your direct reports:'>", "brief": "<what they should do>", "stage": "production", "allocation": ${workloadAllocationPromptExample("delegate")} } ], "synthesis": <your capacity for the final synthesis: the same fields as allocation, "phase": "synthesize"> }`,
     "```",
     "",
     options.allowFollowup

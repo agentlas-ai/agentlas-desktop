@@ -23,6 +23,7 @@ import { RuntimeTurnUnsettledError, outwardFailureCode, runnerFailureFromError, 
 import { runnerFailureKeepsOwnCode } from "../runtime/observed-runner";
 import { runtimeFailureBlocksReplay } from "../runtime/selection";
 import { isJudgmentRefusal } from "../runtime/judgment-refusal";
+import { newestPartialSnapshot } from "../runtime/partial-snapshot";
 import { createRuntimeUsageCollector } from "../../shared/observed-usage";
 import type { AliveDecisionBinding, AliveDecisionTransport } from "../daemon/alive-decision-port";
 
@@ -168,7 +169,7 @@ export class LightWakeRunner {
     };
     void Promise.resolve().then(() => runner(request, {
       onPartial: (text) => {
-        if (!settled && text) { nativeEvidence = true; partialText = (partialText + text).slice(0, 4_096); }
+        if (!settled && text) { nativeEvidence = true; partialText = newestPartialSnapshot(partialText, text, 4_096, "head"); }
       }, onStatus: () => {},
       onThinking: () => { if (!settled) nativeEvidence = true; },
       onUsage: () => { if (!settled) nativeEvidence = true; },

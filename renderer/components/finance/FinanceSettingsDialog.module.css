@@ -5,6 +5,6 @@
 .row input[type=checkbox]:checked { background:var(--one-primary);border-color:var(--one-primary); }:global([data-theme="dark"]) .row input[type=checkbox]:checked { background:var(--accent);border-color:var(--accent); }.row input[type=checkbox]:checked::before { transform:translateX(14px); }.row input[type=checkbox]:disabled { opacity:.45;cursor:default; }
 @media(prefers-reduced-motion:reduce) { .row input[type=checkbox],.row input[type=checkbox]::before { transition:none; } }
 
-.connections{margin-top:16px;border-top:1px solid var(--paper-edge);padding-top:20px}.connections h3{margin:0 0 8px;font-size:13px;font-weight:600}.connectionLabel{min-width:0;display:grid;gap:5px}.connectionLabel strong{font-size:13px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.connectionLabel small{font-size:12px;color:var(--ink-soft)}
+.connections{margin-top:8px;padding-top:0}.connections h3{margin:0 0 8px;font-size:13px;font-weight:600}.connectionLabel{min-width:0;display:grid;gap:5px}.connectionLabel strong{font-size:13px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.connectionLabel small{font-size:12px;color:var(--ink-soft)}
 
 .sourceHeading{margin:18px 0 0;font-size:13px;font-weight:600}

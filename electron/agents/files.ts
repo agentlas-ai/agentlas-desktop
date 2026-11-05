@@ -23,6 +23,7 @@ import {
 } from "../fs/workspace";
 import { FsAccessDeniedError } from "../fs/access";
 import { userDataPath } from "../runtime-paths";
+import { SCIENCE_RESEARCH_DIRECTOR_SLUG } from "../architecture/manifest";
 import { assertAgentWorkspaceActivationReady } from "./workspace-guard";
 import { isWorkspaceAsset } from "./workspace-snapshot";
 import { capturePackageSourceOwner, assertOriginalPackageDeclaration, observeAdmittedPackageSources,
@@ -104,7 +105,11 @@ export function materializeAgentFiles(agentId: string): string | null {
   // folder copy follows the row. writeIfMissing kept a July copy of the Orchestrator ("Announce the route before doing the work:
   // 사용 에이전트: …") alive after the manifest dropped that line, and the run read the file before the row: every Finance answer
   // opened with "Using agent: Agentlas Orchestrator." Installed packages keep the owner's edits (writeIfMissing).
-  if (row.builtin) writeBuiltinPromptFile(path.join(dir, "system-prompt.md"), row.system_prompt || "");
+  // A built-in whose own package writes its prompt file byte-exact keeps that file: the Science package writes the research director's
+  // prompt (research-director.ts writeExactBuiltinPrompt) and then requires buildEffectiveAgentSystemPrompt to return exactly those bytes,
+  // before and after it updates the row. Following the row restored the September copy and added a "\n", and every Science research
+  // turn failed with science-research-director-effective-prompt-mismatch (11-05, since 844f26ef3 in 1.3.125).
+  if (row.builtin && !PACKAGE_WRITTEN_BUILTIN_PROMPTS.has(row.slug)) writeBuiltinPromptFile(path.join(dir, "system-prompt.md"), row.system_prompt || "");
   else writeIfMissing(path.join(dir, "system-prompt.md"), row.system_prompt || "");
 
   writeIfMissing(
@@ -160,6 +165,9 @@ export function materializeAgentFiles(agentId: string): string | null {
 
   return dir;
 }
+
+/** Built-ins whose prompt file is written by their own package, not synced from the row (see materializeAgentFiles). */
+const PACKAGE_WRITTEN_BUILTIN_PROMPTS: ReadonlySet<string> = new Set([SCIENCE_RESEARCH_DIRECTOR_SLUG]);
 
 function writeBuiltinPromptFile(file: string, content: string): void {
   const next = content.endsWith("\n") ? content : content + "\n";

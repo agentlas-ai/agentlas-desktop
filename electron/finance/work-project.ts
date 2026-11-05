@@ -167,6 +167,6 @@ export function financeWorkProjectDomain(chatId: string, actor: FinanceWorkActor
   // A binding read for another domain is not Finance's to check; Finance's own fence then applies to this chat as at a turn start.
   const own = expected && expected.domain === 'finance' ? { ownerScope: expected.ownerScope, projectId: expected.projectId } : expected === null ? null : undefined;
   const binding = assertFinanceWorkChatOwner(chatId, actor, own);
-  return binding ? { domain: 'finance', ownerScope: binding.ownerScope, projectId: binding.projectId, baselinePlugins: FINANCE_WORK_PROJECT_PLUGINS, toolMenu: FINANCE_WORK_PROJECT_TOOL_MENU } : null;
+  return binding ? { domain: 'finance', ownerScope: binding.ownerScope, projectId: binding.projectId, baselinePlugins: FINANCE_WORK_PROJECT_PLUGINS, toolMenu: FINANCE_WORK_PROJECT_TOOL_MENU, automaticGoals: false } : null;
 }
 financeWorkProjectDomain.ownedPlugins = FINANCE_OWNED_PLUGINS;

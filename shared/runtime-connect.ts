@@ -43,10 +43,15 @@ export function firstRunLocalModelReady(row: {
     && Boolean(row.model || (row.availableModels?.length ?? 0) > 0);
 }
 
-/** 온보딩의 Agentlas 칸이 "사용 가능"을 켜는 조건(유료 플랜 + 남은 크레딧). 칸과 첫 역할 배정이 같이 읽는다. */
+/** 온보딩의 Agentlas 칸이 "사용 가능"을 켜는 조건: 로그인. 무료 계정도 매주 무료 사용분으로 Light 를 쓴다(오너: 무료도
+ *  Light, 크레딧은 똑같이 차감). 칸과 첫 역할 배정이 같이 읽는다. 다 쓰면 서빙이 크레딧 부족을 알린다. */
 export function agentlasServingReady(credits: { authenticated: boolean; plan?: string; remainingCredits?: number } | null | undefined): boolean {
-  const plan = credits?.authenticated && credits.plan && credits.plan.toLowerCase() !== "free" ? credits.plan : null;
-  return Boolean(plan && (credits?.remainingCredits ?? 0) > 0);
+  return Boolean(credits?.authenticated);
+}
+
+/** 무료 계정이 첫 역할로 받는 Agentlas 모델: Light(매주 무료 사용분이 Light 기준). 유료는 감지 행의 모델 그대로. */
+export function agentlasFirstRunModel(credits: { authenticated: boolean; plan?: string } | null | undefined): string | undefined {
+  return credits?.authenticated && (!credits.plan || credits.plan.toLowerCase() === "free") ? "agentlas-light" : undefined;
 }
 
 export type RuntimeAuthState = "signed-in" | "signed-out" | "not-installed" | "unknown";

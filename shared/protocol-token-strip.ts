@@ -13,12 +13,15 @@ const STRAY_TOKEN_RE = /[ \t]*<<(?:agentlas-(?:goal-wait|goal-complete|continue)
 // A memory ticket written as a tag block (`<<agentlas-memory>>…<</agentlas-memory>>`) instead of the `## Memory Events`
 // heading: no parser reads it, so its JSON reached the owner's chat whole (dev 2026-10-17 run8, room synthesis on Haiku).
 const MEMORY_TAG_BLOCK_RE = /[ \t]*<<agentlas-memory>>[\s\S]*?<<\/agentlas-memory>>[ \t]*/g;
+// A team packet's completion envelope is Main-only machine state (borrowed-task-force.ts parses it from the worker's raw text).
+// An orchestrator that quotes a worker's text kept it in the owner's answer (98 stored One replies).
+const PACKET_OUTCOME_BLOCK_RE = /[ \t]*<<agentlas-packet-outcome>>[\s\S]*?<<\/agentlas-packet-outcome>>[ \t]*/g;
 
 export function stripStrayProtocolTokens<T extends string | null | undefined>(text: T): T | string {
   if (typeof text !== "string" || !text.includes("<<")) return text;
   // 효과 관찰 표식(<<agentlas-effect-observation>>{…})은 JSON 을 달고 오지만 질문 카드가 아니라
   // Main 만 읽는 판정 줄이다 — 화면·기록 어디에도 남기지 않는다.
-  return stripEffectObservationMarker(text).replace(MEMORY_TAG_BLOCK_RE, "").replace(STRAY_TOKEN_RE, (match, offset: number, whole: string) => {
+  return stripEffectObservationMarker(text).replace(MEMORY_TAG_BLOCK_RE, "").replace(PACKET_OUTCOME_BLOCK_RE, "").replace(STRAY_TOKEN_RE, (match, offset: number, whole: string) => {
     // 줄 전체가 토큰뿐이면 줄까지 지운다.
     const lineStart = whole.lastIndexOf("\n", offset - 1) + 1;
     const lineEnd = whole.indexOf("\n", offset + match.length);
